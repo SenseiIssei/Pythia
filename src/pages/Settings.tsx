@@ -1,6 +1,8 @@
-import { useState } from "react";
-import { KeyRound, Lock, Link2, ShieldCheck } from "lucide-react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { KeyRound, Lock, Link2, ShieldCheck, Trash2 } from "lucide-react";
 import { Card, PageHeader, Badge, Button } from "../components/ui";
+import { isTauri } from "../engine";
 
 interface VenueCfg {
   id: string;
@@ -40,6 +42,23 @@ const VENUES: VenueCfg[] = [
 ];
 
 export function Settings() {
+  const native = isTauri();
+  const [status, setStatus] = useState<Record<string, boolean>>({});
+
+  async function refresh() {
+    if (!native) return;
+    try {
+      const rows = await invoke<[string, boolean][]>("venue_status");
+      setStatus(Object.fromEntries(rows));
+    } catch {
+      /* daemon not ready */
+    }
+  }
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="animate-fade-in">
       <PageHeader title="Settings" subtitle="Venue connections · keys stored in the OS keychain, never in code" />
@@ -49,31 +68,87 @@ export function Settings() {
           <Lock size={18} className="mt-0.5 text-warning" />
           <div className="text-sm text-cyber-text-dim">
             <div className="font-bold text-warning">Keys never leave your machine</div>
-            In the native build, these save to the OS keychain (Windows Credential Manager) and are
-            sent only to the venue they belong to. This paper build stores nothing and places no real
-            orders. Read <span className="text-accent">SAFETY.md</span> before arming anything live.
+            {native ? (
+              <>
+                Saved keys go into the <span className="text-accent">Windows Credential Manager</span> and
+                are read back only by the connector that owns them (Phase 2) — never shown here, never
+                logged. Storing keys does <span className="text-accent">not</span> enable live trading; that
+                still needs a per-strategy confirmation. Read <span className="text-accent">SAFETY.md</span> first.
+              </>
+            ) : (
+              <>
+                You're in the <span className="text-accent">browser build</span>, which has no OS keychain —
+                key storage is disabled here. Run the desktop app (<span className="text-accent">npm run tauri dev</span>)
+                to store keys securely. Read <span className="text-accent">SAFETY.md</span> before going live.
+              </>
+            )}
           </div>
         </div>
       </Card>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         {VENUES.map((v) => (
-          <VenueCard key={v.id} v={v} />
+          <VenueCard key={v.id} v={v} native={native} connected={!!status[v.id]} onChanged={refresh} />
         ))}
       </div>
     </div>
   );
 }
 
-function VenueCard({ v }: { v: VenueCfg }) {
+function VenueCard({
+  v,
+  native,
+  connected,
+  onChanged,
+}: {
+  v: VenueCfg;
+  native: boolean;
+  connected: boolean;
+  onChanged: () => Promise<void>;
+}) {
   const [vals, setVals] = useState<Record<string, string>>({});
-  const [saved, setSaved] = useState(false);
-  const filled = v.fields.every((f) => (vals[f.key] ?? "").length > 0);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const filled = v.fields.every((f) => (vals[f.key] ?? "").trim().length > 0);
+
+  async function save() {
+    setBusy(true);
+    setMsg("");
+    try {
+      if (native) {
+        await invoke("save_venue_keys", { venue: v.id, fields: vals });
+        setVals({}); // don't keep secrets in component memory
+        setMsg("saved to OS keychain");
+        await onChanged();
+      } else {
+        setMsg("desktop app only — no keychain in the browser");
+      }
+    } catch (e) {
+      setMsg(`error: ${String(e)}`);
+    }
+    setBusy(false);
+  }
+
+  async function clear() {
+    setBusy(true);
+    setMsg("");
+    try {
+      if (native) {
+        await invoke("clear_venue_keys", { venue: v.id });
+        setVals({});
+        setMsg("cleared from keychain");
+        await onChanged();
+      }
+    } catch (e) {
+      setMsg(`error: ${String(e)}`);
+    }
+    setBusy(false);
+  }
 
   return (
     <Card
       title={v.name}
-      right={<Badge tone={saved ? "green" : "neutral"}>{saved ? "saved" : "not connected"}</Badge>}
+      right={<Badge tone={connected ? "green" : "neutral"}>{connected ? "connected" : "not connected"}</Badge>}
     >
       <div className="space-y-2">
         {v.fields.map((f) => (
@@ -85,11 +160,12 @@ function VenueCard({ v }: { v: VenueCfg }) {
             <input
               type={f.secret ? "password" : "text"}
               value={vals[f.key] ?? ""}
+              autoComplete="off"
               onChange={(e) => {
                 setVals((s) => ({ ...s, [f.key]: e.target.value }));
-                setSaved(false);
+                setMsg("");
               }}
-              placeholder={f.secret ? "••••••••" : ""}
+              placeholder={connected ? "•••••••• (stored)" : f.secret ? "••••••••" : ""}
               className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
             />
           </div>
@@ -97,10 +173,15 @@ function VenueCard({ v }: { v: VenueCfg }) {
       </div>
       <div className="mt-2 text-[11px] leading-snug text-cyber-text-faint">{v.note}</div>
       <div className="mt-3 flex items-center gap-2">
-        <Button tone="cyan" icon={ShieldCheck} disabled={!filled} onClick={() => setSaved(true)}>
-          Save to vault
+        <Button tone="cyan" icon={ShieldCheck} disabled={!filled || busy} onClick={save}>
+          {connected ? "Update keys" : "Save to vault"}
         </Button>
-        {saved && <span className="text-xs text-success">stored locally (mock)</span>}
+        {native && connected && (
+          <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+            Clear
+          </Button>
+        )}
+        {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
       </div>
     </Card>
   );

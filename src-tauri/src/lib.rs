@@ -14,6 +14,7 @@ mod marketdata;
 mod persist;
 mod state;
 mod tray;
+mod vault;
 
 use state::AppState;
 use std::time::Duration;
@@ -39,6 +40,8 @@ pub fn run() {
             tray::build_tray(&app.handle().clone())?;
             // Resume any previously saved daemon state.
             persist::load(app.handle());
+            // Reflect which venues already have keys in the vault.
+            commands::refresh_connected(app.state::<AppState>().inner());
             let handle = app.handle().clone();
             // The engine daemon. Runs for the app's lifetime, independent of
             // whether any window is focused.
@@ -85,6 +88,9 @@ pub fn run() {
             commands::set_strategy_param,
             commands::manual_order,
             commands::flatten,
+            commands::save_venue_keys,
+            commands::clear_venue_keys,
+            commands::venue_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

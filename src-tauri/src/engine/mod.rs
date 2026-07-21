@@ -286,6 +286,7 @@ pub struct Engine {
     realized_pnl: f64,
     day_start_equity: f64,
     equity_curve: Vec<f64>,
+    connected: std::collections::HashSet<Venue>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -313,6 +314,7 @@ impl Engine {
             realized_pnl: 0.0,
             day_start_equity: STARTING_CASH,
             equity_curve: vec![STARTING_CASH],
+            connected: std::collections::HashSet::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -638,6 +640,10 @@ impl Engine {
             }
         }
     }
+    /// Which venues have API keys in the vault — drives the "connected" badges.
+    pub fn set_connected(&mut self, venues: std::collections::HashSet<Venue>) {
+        self.connected = venues;
+    }
 
     // ── derived / snapshot ──────────────────────────────────────────────────
     fn price_of(&self, id: &str) -> f64 {
@@ -732,7 +738,13 @@ impl Engine {
         let equity = self.equity();
         let balances = [Venue::Polymarket, Venue::Crypto, Venue::Alpaca]
             .iter()
-            .map(|&venue| VenueBalance { venue, connected: false, cash: self.cash / 3.0, equity: equity / 3.0, mode })
+            .map(|&venue| VenueBalance {
+                venue,
+                connected: self.connected.contains(&venue),
+                cash: self.cash / 3.0,
+                equity: equity / 3.0,
+                mode,
+            })
             .collect();
         let positions = self
             .positions

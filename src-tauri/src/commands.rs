@@ -2,9 +2,11 @@
 //! mutation applies to the engine and immediately pushes fresh state so the UI
 //! updates without waiting for the next tick.
 
-use crate::connectors::Side;
+use crate::connectors::{Side, Venue};
 use crate::engine::{EngineState, RiskLimits, StrategyState};
 use crate::state::AppState;
+use crate::vault;
+use std::collections::{BTreeMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 fn push_state(app: &AppHandle) {
@@ -12,6 +14,28 @@ fn push_state(app: &AppHandle) {
         let dto = state.engine.lock().unwrap().state();
         let _ = app.emit("engine://state", dto);
     }
+}
+
+fn venue_enum(name: &str) -> Option<Venue> {
+    match name {
+        "polymarket" => Some(Venue::Polymarket),
+        "crypto" => Some(Venue::Crypto),
+        "alpaca" => Some(Venue::Alpaca),
+        _ => None,
+    }
+}
+
+/// Recompute which venues have keys and push it into the engine.
+pub fn refresh_connected(st: &AppState) {
+    let mut set = HashSet::new();
+    for v in vault::VENUES {
+        if vault::has_keys(v) {
+            if let Some(e) = venue_enum(v) {
+                set.insert(e);
+            }
+        }
+    }
+    st.engine.lock().unwrap().set_connected(set);
 }
 
 #[tauri::command]
@@ -53,4 +77,40 @@ pub fn manual_order(app: AppHandle, app_state: State<AppState>, market_id: Strin
 pub fn flatten(app: AppHandle, app_state: State<AppState>, market_id: String) {
     app_state.engine.lock().unwrap().flatten(&market_id);
     push_state(&app);
+}
+
+// ── secrets vault ───────────────────────────────────────────────────────────
+// Keys go into the OS keychain and are never read back to the UI. `venue_status`
+// only reports whether each venue *has* keys, not what they are.
+
+#[tauri::command]
+pub fn save_venue_keys(
+    app: AppHandle,
+    app_state: State<AppState>,
+    venue: String,
+    fields: BTreeMap<String, String>,
+) -> Result<(), String> {
+    // ignore empty fields so a blank save can't "connect" a venue
+    let fields: BTreeMap<String, String> =
+        fields.into_iter().filter(|(_, v)| !v.trim().is_empty()).collect();
+    if fields.is_empty() {
+        return Err("no values provided".into());
+    }
+    vault::save(&venue, &fields)?;
+    refresh_connected(app_state.inner());
+    push_state(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_venue_keys(app: AppHandle, app_state: State<AppState>, venue: String) -> Result<(), String> {
+    vault::clear(&venue)?;
+    refresh_connected(app_state.inner());
+    push_state(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn venue_status() -> Vec<(String, bool)> {
+    vault::VENUES.iter().map(|v| (v.to_string(), vault::has_keys(v))).collect()
 }
