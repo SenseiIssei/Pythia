@@ -1,0 +1,13 @@
+# Normalize line endings: repo stores LF, Windows checkouts get CRLF where natural.
+* text=auto eol=lf
+
+# Binary assets — never touch.
+*.png binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.webp binary
+*.jpg binary
+*.jpeg binary
+*.gif binary

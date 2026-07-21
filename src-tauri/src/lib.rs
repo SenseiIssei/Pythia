@@ -12,6 +12,7 @@ mod connectors;
 mod engine;
 mod marketdata;
 mod state;
+mod tray;
 
 use state::AppState;
 use std::time::Duration;
@@ -24,7 +25,16 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .on_window_event(|window, event| {
+            // Closing the window hides it to the tray so the engine keeps
+            // running; the tray's Quit item is the real exit.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .setup(|app| {
+            tray::build_tray(&app.handle().clone())?;
             let handle = app.handle().clone();
             // The engine daemon. Runs for the app's lifetime, independent of
             // whether any window is focused.

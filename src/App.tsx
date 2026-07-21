@@ -5,6 +5,7 @@ import { NAV, type PageId } from "./nav";
 import { StoreProvider, useStore } from "./store";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Badge } from "./components/ui";
+import { minimizeWindow, hideWindow } from "./window";
 import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
@@ -88,10 +89,18 @@ function Chrome() {
           >
             <Power size={13} className="inline" /> KILL
           </button>
-          <button className="rounded p-1 text-cyber-text-dim hover:text-accent">
+          <button
+            onClick={() => void minimizeWindow()}
+            title="Minimize"
+            className="rounded p-1 text-cyber-text-dim hover:text-accent"
+          >
             <Minus size={16} />
           </button>
-          <button className="rounded p-1 text-cyber-text-dim hover:text-danger">
+          <button
+            onClick={() => void hideWindow()}
+            title="Close to tray"
+            className="rounded p-1 text-cyber-text-dim hover:text-danger"
+          >
             <X size={16} />
           </button>
         </div>
