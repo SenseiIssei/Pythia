@@ -1,0 +1,39 @@
+import {
+  LayoutDashboard,
+  LineChart,
+  Wallet,
+  Cpu,
+  ShieldAlert,
+  ScrollText,
+  Settings,
+  Info,
+  type LucideIcon,
+} from "lucide-react";
+
+export type PageId =
+  | "dashboard"
+  | "markets"
+  | "positions"
+  | "strategies"
+  | "risk"
+  | "journal"
+  | "settings"
+  | "about";
+
+export interface NavItem {
+  id: PageId;
+  label: string;
+  icon: LucideIcon;
+  section: string;
+}
+
+export const NAV: NavItem[] = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, section: "Overview" },
+  { id: "markets", label: "Markets", icon: LineChart, section: "Trading" },
+  { id: "positions", label: "Positions", icon: Wallet, section: "Trading" },
+  { id: "strategies", label: "Strategies", icon: Cpu, section: "Trading" },
+  { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control" },
+  { id: "journal", label: "Journal", icon: ScrollText, section: "Control" },
+  { id: "settings", label: "Settings", icon: Settings, section: "Config" },
+  { id: "about", label: "About", icon: Info, section: "Config" },
+];

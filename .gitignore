@@ -1,0 +1,22 @@
+# deps
+node_modules/
+dist/
+dist-ssr/
+
+# rust / tauri
+src-tauri/target/
+target/
+
+# secrets & local state — NEVER commit
+*.env
+.env*
+secrets.json
+pythia.db
+pythia.db-*
+*.log
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
