@@ -232,6 +232,31 @@ pub struct EngineState {
     pub limits: RiskLimits,
 }
 
+// ── persistence (survive restarts) ─────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedPosition {
+    pub venue: Venue,
+    pub symbol: String,
+    pub qty: f64,
+    pub avg_price: f64,
+}
+
+/// The raw engine state written to disk so the daemon resumes exactly where it
+/// left off. Markets/sim are re-seeded on load (prices refresh from the feed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Persisted {
+    pub cash: f64,
+    pub realized_pnl: f64,
+    pub day_start_equity: f64,
+    pub equity_curve: Vec<f64>,
+    pub positions: Vec<(String, PersistedPosition)>,
+    pub strategies: Vec<StrategyConfig>,
+    pub orders: Vec<Order>,
+    pub journal: Vec<JournalEntry>,
+    pub limits: RiskLimits,
+    pub real_ids: Vec<String>,
+}
+
 // ── internal engine state ──────────────────────────────────────────────────
 struct PositionInternal {
     venue: Venue,
@@ -660,6 +685,48 @@ impl Engine {
         }
     }
 
+    // ── persistence ─────────────────────────────────────────────────────────
+    pub fn to_persisted(&self) -> Persisted {
+        Persisted {
+            cash: self.cash,
+            realized_pnl: self.realized_pnl,
+            day_start_equity: self.day_start_equity,
+            equity_curve: self.equity_curve.clone(),
+            positions: self
+                .positions
+                .iter()
+                .map(|(id, p)| {
+                    (id.clone(), PersistedPosition { venue: p.venue, symbol: p.symbol.clone(), qty: p.qty, avg_price: p.avg_price })
+                })
+                .collect(),
+            strategies: self.strategies.clone(),
+            orders: self.orders.clone(),
+            journal: self.journal.clone(),
+            limits: self.limits.clone(),
+            real_ids: self.real_ids.iter().cloned().collect(),
+        }
+    }
+
+    pub fn apply_persisted(&mut self, p: Persisted) {
+        self.cash = p.cash;
+        self.realized_pnl = p.realized_pnl;
+        self.day_start_equity = p.day_start_equity;
+        self.equity_curve = p.equity_curve;
+        self.positions = p
+            .positions
+            .into_iter()
+            .map(|(id, pp)| (id, PositionInternal { venue: pp.venue, symbol: pp.symbol, qty: pp.qty, avg_price: pp.avg_price }))
+            .collect();
+        if !p.strategies.is_empty() {
+            self.strategies = p.strategies;
+        }
+        self.orders = p.orders;
+        self.journal = p.journal;
+        self.limits = p.limits;
+        self.real_ids = p.real_ids.into_iter().collect();
+        self.log(JournalKind::System, "Restored saved state from disk".into(), None, None);
+    }
+
     pub fn state(&self) -> EngineState {
         let mode = self.mode();
         let equity = self.equity();
@@ -774,4 +841,48 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
     sim.insert("polymarket:fed-cut-2026".into(), SimParam { drift: 0.0, vol: 0.004, base: 0.6 });
     sim.insert("polymarket:btc-100k-2026".into(), SimParam { drift: 0.0, vol: 0.005, base: 0.45 });
     (markets, sim)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persist_round_trip() {
+        let mut e = Engine::new();
+        e.cash = 42_000.0;
+        e.realized_pnl = 123.4;
+        e.limits.max_daily_loss_pct = 3.0;
+        e.positions.insert(
+            "crypto:BTC/USD".into(),
+            PositionInternal { venue: Venue::Crypto, symbol: "BTC/USD".into(), qty: 0.5, avg_price: 60_000.0 },
+        );
+
+        let json = serde_json::to_string(&e.to_persisted()).expect("serialize");
+        let restored: Persisted = serde_json::from_str(&json).expect("deserialize");
+
+        let mut e2 = Engine::new();
+        e2.apply_persisted(restored);
+
+        assert_eq!(e2.cash, 42_000.0);
+        assert!((e2.realized_pnl - 123.4).abs() < 1e-9);
+        assert_eq!(e2.limits.max_daily_loss_pct, 3.0);
+        assert_eq!(e2.positions.len(), 1);
+        let pos = e2.positions.get("crypto:BTC/USD").unwrap();
+        assert_eq!(pos.qty, 0.5);
+        assert_eq!(pos.avg_price, 60_000.0);
+        // markets are re-seeded, not persisted
+        assert!(!e2.markets.is_empty());
+    }
+
+    #[test]
+    fn risk_kill_switch_blocks_buys() {
+        let mut e = Engine::new();
+        e.limits.kill_switch = true;
+        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        // a buy under kill switch must not open a position
+        assert!(e.positions.get("crypto:BTC/USD").is_none());
+        // and it should be journaled as a rejection
+        assert!(e.orders.iter().any(|o| o.status == OrderStatus::Rejected));
+    }
 }

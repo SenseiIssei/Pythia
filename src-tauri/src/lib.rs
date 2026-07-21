@@ -11,6 +11,7 @@ mod commands;
 mod connectors;
 mod engine;
 mod marketdata;
+mod persist;
 mod state;
 mod tray;
 
@@ -29,12 +30,15 @@ pub fn run() {
             // Closing the window hides it to the tray so the engine keeps
             // running; the tray's Quit item is the real exit.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                persist::save(window.app_handle());
                 let _ = window.hide();
                 api.prevent_close();
             }
         })
         .setup(|app| {
             tray::build_tray(&app.handle().clone())?;
+            // Resume any previously saved daemon state.
+            persist::load(app.handle());
             let handle = app.handle().clone();
             // The engine daemon. Runs for the app's lifetime, independent of
             // whether any window is focused.
@@ -64,6 +68,11 @@ pub fn run() {
                         e.state()
                     };
                     let _ = handle.emit("engine://state", dto);
+
+                    // Checkpoint to disk periodically (~every 60s).
+                    if n % 40 == 0 {
+                        persist::save(&handle);
+                    }
                 }
             });
             Ok(())
