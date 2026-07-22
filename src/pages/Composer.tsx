@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Blocks, Play, Plus, Trash2, TrendingUp, Activity, ArrowDownWideNarrow, Percent } from "lucide-react";
+import { Blocks, Play, Plus, Trash2, Rocket, TrendingUp, Activity, ArrowDownWideNarrow, Percent } from "lucide-react";
 import { Button, Card, PageHeader, Badge, Sparkline, StatCard } from "../components/ui";
+import { useStore } from "../store";
 import {
   backtestComposed,
   IND_LABELS,
@@ -12,6 +13,7 @@ import {
   type Rule,
 } from "../engine/composer";
 import type { BacktestResult } from "../engine/backtest";
+import type { StrategyConfig } from "../types";
 
 const IND_KINDS: IndKind[] = ["price", "rsi", "ema", "sma", "zscore", "roc", "macdHist", "atr"];
 
@@ -20,11 +22,38 @@ function newRule(): Rule {
 }
 
 export function Composer() {
+  const { addStrategy } = useStore();
   const [composed, setComposed] = useState<Composed>({ direction: "long", rules: [newRule()] });
   const [bars, setBars] = useState(1500);
   const [seed, setSeed] = useState(12345);
   const [vol, setVol] = useState(0.02);
   const [result, setResult] = useState<BacktestResult | null>(null);
+  const [deployName, setDeployName] = useState("");
+  const [deployMsg, setDeployMsg] = useState("");
+
+  function deploy() {
+    const name = deployName.trim() || `Composed ${composed.direction}`;
+    const cfg: StrategyConfig = {
+      id: `composed-${Date.now().toString(36)}`,
+      name,
+      kind: "composed",
+      venueClass: "crypto",
+      state: "paper",
+      universe: ["crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD"],
+      params: [],
+      budgetPct: 10,
+      pnl: 0,
+      trades: 0,
+      winRate: 0,
+      maxDrawdown: 0,
+      profitFactor: 0,
+      equityCurve: [0],
+      rules: structuredClone(composed),
+    };
+    addStrategy(cfg);
+    setDeployMsg(`Deployed "${name}" to the engine (paper) — see the Strategies page.`);
+    setTimeout(() => setDeployMsg(""), 4000);
+  }
 
   function setRule(i: number, r: Rule) {
     setComposed((c) => ({ ...c, rules: c.rules.map((x, j) => (j === i ? r : x)) }));
@@ -96,7 +125,7 @@ export function Composer() {
           <NumField label="Seed" value={seed} onChange={setSeed} step={1} min={1} max={999999} />
           <NumField label="Volatility" value={vol} onChange={setVol} step={0.001} min={0.005} max={0.05} />
         </div>
-        <div className="mt-3 flex items-center gap-3">
+        <div className="mt-3 flex flex-wrap items-center gap-3">
           <Button tone="purple" icon={Play} onClick={run} disabled={composed.rules.length === 0}>
             Backtest this strategy
           </Button>
@@ -104,6 +133,22 @@ export function Composer() {
             <Blocks size={11} className="mr-1 inline" />
             exits use the standard ATR stop-loss / take-profit
           </span>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-cyber-border pt-3">
+          <input
+            value={deployName}
+            onChange={(e) => setDeployName(e.target.value)}
+            placeholder="Name it, then deploy to the live paper engine"
+            className="min-w-[240px] flex-1 rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+          />
+          <Button tone="green" icon={Rocket} onClick={deploy} disabled={composed.rules.length === 0}>
+            Deploy to engine (paper)
+          </Button>
+          {deployMsg && <span className="text-xs text-success">{deployMsg}</span>}
+        </div>
+        <div className="mt-1 text-[11px] text-cyber-text-faint">
+          Runs on BTC/ETH/SOL at 10% budget, paper mode — manage it from the Strategies page like any other.
         </div>
       </Card>
 

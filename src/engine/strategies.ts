@@ -1,5 +1,6 @@
 import type { Market, StrategyConfig, Side } from "../types";
 import * as ind from "./indicators";
+import { evalComposed } from "./composedRules";
 
 // A strategy emits Intents — a desired *target* exposure in a market. Mirrors
 // the Rust `engine::strategies` module so both runtimes behave identically.
@@ -216,9 +217,22 @@ export function runStrategy(
       return pairs(cfg, markets, history);
     case "prob-edge":
       return probEdge(cfg, markets);
+    case "composed":
+      return composed(cfg, markets, history);
     default:
       return [];
   }
+}
+
+// User-composed rule strategy: evaluate the rules on each market in the universe.
+function composed(cfg: StrategyConfig, markets: Map<string, Market>, history: Map<string, number[]>): Intent[] {
+  if (!cfg.rules) return [];
+  const out: Intent[] = [];
+  for (const [id, m, h] of series(cfg, markets, history)) {
+    const sig = evalComposed(cfg.rules, h, m.price);
+    if (sig) out.push({ marketId: id, side: sig.side, size: 0.8, confidence: 0.6, reason: `composed ${cfg.rules.direction} rules met` });
+  }
+  return out;
 }
 
 function mkParam(key: string, label: string, value: number, min: number, max: number, step: number) {

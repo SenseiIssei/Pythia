@@ -98,6 +98,7 @@ pub fn run() {
             commands::set_limits,
             commands::set_strategy_state,
             commands::set_strategy_param,
+            commands::add_strategy,
             commands::manual_order,
             commands::flatten,
             commands::save_venue_keys,

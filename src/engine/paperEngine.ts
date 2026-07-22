@@ -621,6 +621,12 @@ export class PaperEngine implements EngineClient {
       this.emit();
     }
   }
+  addStrategy(cfg: StrategyConfig) {
+    if (this.strategies.some((s) => s.id === cfg.id)) return;
+    this.strategies.push(cfg);
+    this.log("system", `Deployed strategy: ${cfg.name}`, cfg.id);
+    this.emit();
+  }
 
   private log(kind: JournalKind, message: string, strategyId?: string, marketId?: string) {
     this.journal.unshift({

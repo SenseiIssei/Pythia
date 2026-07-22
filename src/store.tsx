@@ -31,6 +31,7 @@ interface Store {
   setLimits: (l: Partial<RiskLimits>) => void;
   setStrategyState: (id: string, s: StrategyConfig["state"]) => void;
   setStrategyParam: (id: string, key: string, value: number) => void;
+  addStrategy: (cfg: StrategyConfig) => void;
   manualOrder: (marketId: string, side: "buy" | "sell", notional: number) => string;
   flatten: (marketId: string) => void;
 }
@@ -62,6 +63,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),
       setStrategyParam: (id, key, v) => engine.setStrategyParam(id, key, v),
+      addStrategy: (cfg) => engine.addStrategy(cfg),
       manualOrder: (m, side, n) => engine.manualOrder(m, side, n),
       flatten: (m) => engine.flatten(m),
     }),

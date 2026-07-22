@@ -41,8 +41,27 @@ pub fn run_strategy(
         StrategyKind::MultiTf => multi_tf(cfg, markets, history),
         StrategyKind::Pairs => pairs(cfg, markets, history),
         StrategyKind::ProbEdge => prob_edge(cfg, markets),
+        StrategyKind::Composed => composed_strategy(cfg, markets, history),
         StrategyKind::Arb | StrategyKind::Manual => vec![],
     }
+}
+
+/// User-composed rule strategy: evaluate the rules on each market in the universe.
+fn composed_strategy(cfg: &StrategyConfig, markets: &HashMap<String, Market>, history: &HashMap<String, Vec<f64>>) -> Vec<SignalIntent> {
+    let Some(rules) = &cfg.rules else { return vec![] };
+    let mut out = Vec::new();
+    for (id, m, h) in series(cfg, markets, history) {
+        if let Some(side) = super::composed::eval_composed(rules, h, m.price) {
+            out.push(SignalIntent {
+                market_id: id.clone(),
+                side,
+                size: 0.8,
+                confidence: 0.6,
+                reason: format!("composed {:?} rules met", rules.direction),
+            });
+        }
+    }
+    out
 }
 
 /// Multi-timeframe momentum: an EMA cross confirmed by a higher-timeframe trend
@@ -278,6 +297,7 @@ fn strat(id: &str, name: &str, kind: StrategyKind, venue: Venue, state: Strategy
         max_drawdown: 0.0,
         profit_factor: 0.0,
         equity_curve: vec![0.0],
+        rules: None,
     }
 }
 

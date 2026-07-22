@@ -34,6 +34,7 @@ export interface EngineClient {
   setLimits(l: Partial<RiskLimits>): void;
   setStrategyState(id: string, s: StrategyState): void;
   setStrategyParam(id: string, key: string, value: number): void;
+  addStrategy(cfg: StrategyConfig): void;
   manualOrder(marketId: string, side: Side, notional: number): string;
   flatten(marketId: string): void;
 }

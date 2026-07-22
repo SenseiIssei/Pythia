@@ -117,6 +117,9 @@ export class TauriEngineClient implements EngineClient {
   setStrategyParam(id: string, key: string, value: number) {
     void invoke("set_strategy_param", { id, key, value });
   }
+  addStrategy(cfg: StrategyConfig) {
+    void invoke("add_strategy", { cfg });
+  }
   manualOrder(marketId: string, side: Side, notional: number): string {
     void invoke("manual_order", { marketId, side, notional });
     return "ok"; // rejections surface in the journal pushed back from Rust

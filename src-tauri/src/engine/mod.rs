@@ -3,6 +3,7 @@
 //! [`EngineState`] snapshot to the UI each tick. This is the Rust owner of the
 //! same model the browser build runs in TypeScript.
 
+pub mod composed;
 pub mod indicators;
 pub mod risk;
 pub mod strategies;
@@ -64,6 +65,7 @@ pub enum StrategyKind {
     MultiTf,
     Pairs,
     ProbEdge,
+    Composed,
     Arb,
     Manual,
 }
@@ -202,6 +204,8 @@ pub struct StrategyConfig {
     pub max_drawdown: f64,
     pub profit_factor: f64,
     pub equity_curve: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rules: Option<composed::Composed>, // only for kind == Composed
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -954,8 +958,19 @@ impl Engine {
             max_drawdown: 0.0,
             profit_factor: 0.0,
             equity_curve: vec![0.0],
+            rules: None,
         });
         self.strategies.len() - 1
+    }
+
+    /// Add a strategy at runtime (e.g. a composed strategy deployed from the UI).
+    pub fn add_strategy(&mut self, cfg: StrategyConfig) {
+        if self.strategies.iter().any(|s| s.id == cfg.id) {
+            return;
+        }
+        let (name, id) = (cfg.name.clone(), cfg.id.clone());
+        self.strategies.push(cfg);
+        self.log(JournalKind::System, format!("Deployed strategy: {name}"), Some(id), None);
     }
 
     // ── mutations ───────────────────────────────────────────────────────────
@@ -1352,6 +1367,45 @@ mod tests {
         );
         // and nobody is fully starved (floor)
         assert!(e.strategies[lose].budget_pct >= 3.0);
+    }
+
+    #[test]
+    fn composed_strategy_evaluates_and_deploys() {
+        use super::composed::{Composed, Direction, IndKind, Op, Operand, RightMode, Rule};
+        let mut e = Engine::new();
+        // "enter LONG when RSI(14) < 30"
+        let rules = Composed {
+            direction: Direction::Long,
+            rules: vec![Rule {
+                left: Operand { kind: IndKind::Rsi, period: 14.0 },
+                op: Op::Lt,
+                right_mode: RightMode::Const,
+                right_const: 30.0,
+                right_operand: Operand { kind: IndKind::Price, period: 0.0 },
+            }],
+        };
+        let down: Vec<f64> = (0..40).map(|i| 100.0 - i as f64 * 0.5).collect();
+        assert_eq!(super::composed::eval_composed(&rules, &down, *down.last().unwrap()), Some(Side::Buy));
+
+        let n0 = e.strategies.len();
+        e.add_strategy(StrategyConfig {
+            id: "composed-test".into(),
+            name: "T".into(),
+            kind: StrategyKind::Composed,
+            venue_class: Venue::Crypto,
+            state: StrategyState::Paper,
+            universe: vec!["crypto:BTC/USD".into()],
+            params: vec![],
+            budget_pct: 10.0,
+            pnl: 0.0,
+            trades: 0,
+            win_rate: 0.0,
+            max_drawdown: 0.0,
+            profit_factor: 0.0,
+            equity_curve: vec![0.0],
+            rules: Some(rules),
+        });
+        assert_eq!(e.strategies.len(), n0 + 1);
     }
 
     #[test]

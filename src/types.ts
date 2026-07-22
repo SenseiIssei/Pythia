@@ -95,8 +95,30 @@ export type StrategyKind =
   | "multi-tf"
   | "pairs"
   | "prob-edge"
+  | "composed"
   | "arb"
   | "manual";
+
+// ── composed (user-built rule) strategies ──────────────────────────────────
+export type IndKind = "price" | "rsi" | "ema" | "sma" | "zscore" | "roc" | "macdHist" | "atr";
+
+export interface Operand {
+  kind: IndKind;
+  period: number;
+}
+
+export interface Rule {
+  left: Operand;
+  op: "<" | ">";
+  rightMode: "const" | "indicator";
+  rightConst: number;
+  rightOperand: Operand;
+}
+
+export interface Composed {
+  direction: "long" | "short";
+  rules: Rule[];
+}
 
 export interface StrategyConfig {
   id: string;
@@ -114,6 +136,7 @@ export interface StrategyConfig {
   maxDrawdown: number;
   profitFactor: number;
   equityCurve: number[];
+  rules?: Composed; // present only for kind === "composed"
 }
 
 export type JournalKind =

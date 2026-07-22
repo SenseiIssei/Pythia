@@ -3,7 +3,7 @@
 //! updates without waiting for the next tick.
 
 use crate::connectors::{Side, Venue};
-use crate::engine::{EngineState, RiskLimits, StrategyState};
+use crate::engine::{EngineState, RiskLimits, StrategyConfig, StrategyState};
 use crate::state::AppState;
 use crate::vault;
 use std::collections::{BTreeMap, HashSet};
@@ -69,6 +69,12 @@ pub fn set_strategy_state(app: AppHandle, app_state: State<AppState>, id: String
 #[tauri::command]
 pub fn set_strategy_param(app: AppHandle, app_state: State<AppState>, id: String, key: String, value: f64) {
     app_state.engine.lock().unwrap().set_strategy_param(&id, &key, value);
+    push_state(&app);
+}
+
+#[tauri::command]
+pub fn add_strategy(app: AppHandle, app_state: State<AppState>, cfg: StrategyConfig) {
+    app_state.engine.lock().unwrap().add_strategy(cfg);
     push_state(&app);
 }
 
