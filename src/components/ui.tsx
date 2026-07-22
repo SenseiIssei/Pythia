@@ -200,6 +200,55 @@ export function Sparkline({
   );
 }
 
+// Multi-series line chart with grid, shared y-scale and a legend.
+const CHART_PALETTE = ["#00f0ff", "#a855f7", "#22c55e", "#f59e0b", "#ef4444", "#38bdf8", "#e879f9", "#84cc16"];
+
+export function MultiLineChart({
+  series,
+  height = 200,
+}: {
+  series: { label: string; data: number[]; color?: string }[];
+  height?: number;
+}) {
+  const all = series.flatMap((s) => s.data);
+  if (all.length < 2) {
+    return <div style={{ height }} className="flex items-center text-xs text-cyber-text-faint">gathering data…</div>;
+  }
+  const min = Math.min(...all);
+  const max = Math.max(...all);
+  const range = max - min || 1;
+  const w = 100;
+  const maxLen = Math.max(...series.map((s) => s.data.length), 2);
+  const toPoints = (data: number[]) =>
+    data
+      .map((v, i) => {
+        const x = (i / (maxLen - 1)) * w;
+        const y = height - ((v - min) / range) * height;
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+      })
+      .join(" ");
+  return (
+    <div>
+      <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" className="w-full" style={{ height }}>
+        {[0.25, 0.5, 0.75].map((f) => (
+          <line key={f} x1="0" x2={w} y1={height * f} y2={height * f} stroke="#1e1e2a" strokeWidth="0.5" vectorEffect="non-scaling-stroke" />
+        ))}
+        {series.map((s, i) => (
+          <polyline key={i} points={toPoints(s.data)} fill="none" stroke={s.color ?? CHART_PALETTE[i % CHART_PALETTE.length]} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+        ))}
+      </svg>
+      <div className="mt-2 flex flex-wrap gap-3 text-xs text-cyber-text-dim">
+        {series.map((s, i) => (
+          <span key={i} className="flex items-center gap-1.5">
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: s.color ?? CHART_PALETTE[i % CHART_PALETTE.length] }} />
+            {s.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function fmtUsd(n: number, dp = 2): string {
   const sign = n < 0 ? "-" : "";
   return `${sign}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;

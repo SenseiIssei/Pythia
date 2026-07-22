@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { TrendingDown, Trophy } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Badge, Sparkline, fmtUsd } from "../components/ui";
+import { Card, PageHeader, Badge, Sparkline, MultiLineChart, fmtUsd } from "../components/ui";
 
 export function Analytics() {
   const { portfolio, strategies, orders } = useStore();
@@ -32,6 +32,16 @@ export function Analytics() {
         <div className="mt-1 flex items-center gap-1 text-xs text-cyber-text-faint">
           <TrendingDown size={11} /> peak-to-current equity drawdown over the session
         </div>
+      </Card>
+
+      <Card title="Strategy Equity Curves" className="mb-4">
+        {(() => {
+          const active = ranked.filter((s) => s.equityCurve.length > 1 && (s.pnl !== 0 || s.trades > 0));
+          if (active.length === 0) {
+            return <div className="py-4 text-center text-xs text-cyber-text-faint">Curves appear once strategies close trades.</div>;
+          }
+          return <MultiLineChart height={180} series={active.map((s) => ({ label: s.name.split(" · ")[0], data: s.equityCurve }))} />;
+        })()}
       </Card>
 
       <Card title="Strategy Leaderboard" className="mb-4" right={<Trophy size={14} className="text-warning" />}>
