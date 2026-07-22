@@ -68,6 +68,7 @@ export interface RiskLimits {
   trailingAtrMult: number; // trailing-stop distance in ATR units (0 = off)
   maxConsecutiveLosses: number; // per strategy before cooldown (0 = off)
   cooldownSec: number; // cooldown after the loss streak
+  volTargetPct: number; // volatility-targeted sizing: target per-bar vol % (0 = off)
 }
 
 export interface StrategyParam {
@@ -85,6 +86,8 @@ export type StrategyKind =
   | "rsi-reversal"
   | "macd-trend"
   | "breakout"
+  | "multi-tf"
+  | "pairs"
   | "prob-edge"
   | "arb"
   | "manual";

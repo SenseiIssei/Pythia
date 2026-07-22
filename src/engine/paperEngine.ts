@@ -106,6 +106,16 @@ export class PaperEngine implements EngineClient {
       if (h.length > 260) h.splice(0, h.length - 260);
     }
 
+    // probability model for prediction markets: an EWMA "fair value" heuristic
+    // (NOT a real forecast) so Prob-Edge has a live signal on real Polymarket odds
+    for (const m of markets) {
+      if (m.kind !== "prediction") continue;
+      const h = this.history.get(m.id);
+      if (!h) continue;
+      const fair = ind.ema(h, 20);
+      if (fair !== null) m.modelProb = Math.min(0.98, Math.max(0.02, fair));
+    }
+
     // daily reset of loss/streak counters
     const today = Math.floor(now / 86_400_000);
     if (today !== this.day) {
@@ -158,7 +168,14 @@ export class PaperEngine implements EngineClient {
     const price = m.price;
     const budget = (strat.budgetPct / 100) * this.equity();
     const kelly = kellySize(intent.confidence, price, budget, this.limits);
-    const qtyWanted = Math.max(0, kelly * intent.size);
+    let qtyWanted = Math.max(0, kelly * intent.size);
+    if (this.limits.volTargetPct > 0) {
+      const h = this.history.get(m.id);
+      const vol = h ? ind.retVol(h, 20) : null;
+      if (vol && vol > 0) {
+        qtyWanted *= Math.max(0.25, Math.min(3, this.limits.volTargetPct / 100 / vol));
+      }
+    }
     if (qtyWanted <= 0) return;
 
     const mode: Mode = strat.state === "live" ? "live" : "paper";

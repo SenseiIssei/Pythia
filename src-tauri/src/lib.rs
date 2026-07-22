@@ -7,6 +7,7 @@
 //! but is not yet driven, hence the crate-level dead_code allowance.
 #![allow(dead_code)]
 
+mod alerts;
 mod commands;
 mod connectors;
 mod engine;
@@ -42,6 +43,7 @@ pub fn run() {
             persist::load(app.handle());
             // Reflect which venues already have keys in the vault.
             commands::refresh_connected(app.state::<AppState>().inner());
+            commands::refresh_webhook(app.state::<AppState>().inner());
             let handle = app.handle().clone();
             // The engine daemon. Runs for the app's lifetime, independent of
             // whether any window is focused.
@@ -64,13 +66,23 @@ pub fn run() {
                         }
                     }
 
-                    let dto = {
+                    let (dto, queued) = {
                         let st = handle.state::<AppState>();
                         let mut e = st.engine.lock().unwrap();
                         e.tick();
-                        e.state()
+                        (e.state(), e.drain_alerts())
                     };
                     let _ = handle.emit("engine://state", dto);
+
+                    // Push any queued alerts to the webhook (batched, one POST).
+                    if !queued.is_empty() {
+                        let url = handle.state::<AppState>().webhook.lock().unwrap().clone();
+                        if let Some(url) = url {
+                            if !url.is_empty() {
+                                alerts::post(&url, &queued.join("\n")).await;
+                            }
+                        }
+                    }
 
                     // Checkpoint to disk periodically (~every 60s).
                     if n % 40 == 0 {
@@ -91,6 +103,7 @@ pub fn run() {
             commands::save_venue_keys,
             commands::clear_venue_keys,
             commands::venue_status,
+            commands::test_alert,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

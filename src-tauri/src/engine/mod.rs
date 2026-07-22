@@ -54,6 +54,8 @@ pub enum StrategyKind {
     RsiReversal,
     MacdTrend,
     Breakout,
+    MultiTf,
+    Pairs,
     ProbEdge,
     Arb,
     Manual,
@@ -209,6 +211,7 @@ pub struct RiskLimits {
     pub trailing_atr_mult: f64,      // trailing stop distance in ATR units (0 = off)
     pub max_consecutive_losses: u32, // per strategy before a cooldown (0 = off)
     pub cooldown_sec: u64,           // cooldown duration after the loss streak
+    pub vol_target_pct: f64,         // volatility-targeted sizing: target per-bar vol % (0 = off)
 }
 
 impl Default for RiskLimits {
@@ -228,6 +231,7 @@ impl Default for RiskLimits {
             trailing_atr_mult: 0.0,
             max_consecutive_losses: 4,
             cooldown_sec: 300,
+            vol_target_pct: 0.0,
         }
     }
 }
@@ -325,6 +329,7 @@ pub struct Engine {
     cooldown_until: HashMap<String, i64>, // per-strategy cooldown expiry (ms)
     gross_win: HashMap<String, f64>,     // per-strategy cumulative winning $ (for profit factor)
     gross_loss: HashMap<String, f64>,    // per-strategy cumulative losing $
+    pending_alerts: Vec<String>,         // notable events awaiting a webhook push
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -362,6 +367,7 @@ impl Engine {
             cooldown_until: HashMap::new(),
             gross_win: HashMap::new(),
             gross_loss: HashMap::new(),
+            pending_alerts: Vec::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -482,6 +488,24 @@ impl Engine {
             if h.len() > 260 {
                 let excess = h.len() - 260;
                 h.drain(0..excess);
+            }
+        }
+
+        // probability model for prediction markets: an EWMA "fair value"
+        // heuristic (NOT a real forecast) so Prob-Edge has a live signal to
+        // trade against on real Polymarket odds.
+        let pred_ids: Vec<String> = self
+            .markets
+            .iter()
+            .filter(|m| m.kind == MarketKind::Prediction)
+            .map(|m| m.id.clone())
+            .collect();
+        for id in pred_ids {
+            let fair = self.history.get(&id).and_then(|h| indicators::ema(h, 20));
+            if let Some(fair) = fair {
+                if let Some(m) = self.markets.iter_mut().find(|m| m.id == id) {
+                    m.model_prob = Some(fair.clamp(0.02, 0.98));
+                }
             }
         }
 
@@ -637,7 +661,16 @@ impl Engine {
         let sid = self.strategies[strat_idx].id.clone();
         let budget = (self.strategies[strat_idx].budget_pct / 100.0) * equity;
         let kelly = risk::kelly_size(intent.confidence, price, budget, &self.limits);
-        let qty_wanted = (kelly * intent.size).max(0.0);
+        let mut qty_wanted = (kelly * intent.size).max(0.0);
+        // volatility-targeted sizing: scale toward a target per-bar volatility
+        if self.limits.vol_target_pct > 0.0 {
+            if let Some(vol) = self.history.get(&m.id).and_then(|h| indicators::ret_vol(h, 20)) {
+                if vol > 0.0 {
+                    let scale = ((self.limits.vol_target_pct / 100.0) / vol).clamp(0.25, 3.0);
+                    qty_wanted *= scale;
+                }
+            }
+        }
         if qty_wanted <= 0.0 {
             return;
         }
@@ -1070,12 +1103,26 @@ impl Engine {
         o
     }
     fn log(&mut self, kind: JournalKind, message: String, strategy_id: Option<String>, market_id: Option<String>) {
+        // mirror notable events (fills, risk actions, position exits) to the alert queue
+        let alertable = matches!(kind, JournalKind::Fill | JournalKind::Risk)
+            || (matches!(kind, JournalKind::System) && message.starts_with("Exit"));
+        if alertable {
+            self.pending_alerts.push(format!("[{kind:?}] {message}"));
+            if self.pending_alerts.len() > 50 {
+                self.pending_alerts.remove(0);
+            }
+        }
         let id = self.next_id("j");
         let mode = self.mode();
         self.journal.insert(0, JournalEntry { id, ts: self.now(), kind, strategy_id, market_id, message, mode });
         if self.journal.len() > 1000 {
             self.journal.pop();
         }
+    }
+
+    /// Take and clear queued alert messages (drained by the webhook poster).
+    pub fn drain_alerts(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_alerts)
     }
 }
 

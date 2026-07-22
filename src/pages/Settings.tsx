@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Lock, Link2, ShieldCheck, Trash2 } from "lucide-react";
+import { KeyRound, Lock, Link2, ShieldCheck, Trash2, Bell, Send } from "lucide-react";
 import { Card, PageHeader, Badge, Button } from "../components/ui";
 import { isTauri } from "../engine";
 
@@ -91,7 +91,99 @@ export function Settings() {
           <VenueCard key={v.id} v={v} native={native} connected={!!status[v.id]} onChanged={refresh} />
         ))}
       </div>
+
+      <div className="mt-4">
+        <AlertsCard native={native} />
+      </div>
     </div>
+  );
+}
+
+function AlertsCard({ native }: { native: boolean }) {
+  const [url, setUrl] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  async function save() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await invoke("save_venue_keys", { venue: "alerts", fields: { webhook: url } });
+      setUrl("");
+      setSaved(true);
+      setMsg("webhook saved");
+    } catch (e) {
+      setMsg(`error: ${String(e)}`);
+    }
+    setBusy(false);
+  }
+  async function test() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await invoke("test_alert");
+      setMsg("test alert sent — check your channel");
+    } catch (e) {
+      setMsg(`error: ${String(e)}`);
+    }
+    setBusy(false);
+  }
+  async function clear() {
+    setBusy(true);
+    try {
+      await invoke("clear_venue_keys", { venue: "alerts" });
+      setSaved(false);
+      setUrl("");
+      setMsg("cleared");
+    } catch (e) {
+      setMsg(`error: ${String(e)}`);
+    }
+    setBusy(false);
+  }
+
+  return (
+    <Card title="Discord / Webhook Alerts" right={<Bell size={14} className="text-purple-neon" />}>
+      {!native ? (
+        <div className="text-sm text-cyber-text-dim">
+          Alerts are available in the <span className="text-accent">desktop app</span> only — a browser can't
+          POST to Discord (CORS). Run <span className="text-accent">npm run tauri dev</span> to enable them.
+        </div>
+      ) : (
+        <>
+          <div className="mb-2 text-sm text-cyber-text-dim">
+            Get a message on every fill, position exit and risk trip (kill switch, drawdown breaker, cooldown).
+            Paste a Discord webhook URL (or any endpoint that accepts <code className="text-accent">{"{ content }"}</code> JSON).
+          </div>
+          <input
+            type="password"
+            value={url}
+            autoComplete="off"
+            onChange={(e) => {
+              setUrl(e.target.value);
+              setSaved(false);
+            }}
+            placeholder={saved ? "•••••••• (stored)" : "https://discord.com/api/webhooks/…"}
+            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+          />
+          <div className="mt-3 flex items-center gap-2">
+            <Button tone="purple" icon={ShieldCheck} disabled={busy || url.trim().length === 0} onClick={save}>
+              Save webhook
+            </Button>
+            <Button tone="cyan" icon={Send} disabled={busy} onClick={test}>
+              Send test
+            </Button>
+            <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+              Clear
+            </Button>
+            {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
+          </div>
+          <div className="mt-2 text-[11px] text-cyber-text-faint">
+            The URL is stored in the OS keychain and only sent to the host you provide.
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

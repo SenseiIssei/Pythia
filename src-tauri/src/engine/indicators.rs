@@ -110,6 +110,20 @@ pub fn atr_proxy(s: &[f64], n: usize) -> Option<f64> {
     Some(sum / n as f64)
 }
 
+/// Standard deviation of the last `n` simple returns (per-bar volatility).
+pub fn ret_vol(s: &[f64], n: usize) -> Option<f64> {
+    if n < 2 || s.len() < n + 1 {
+        return None;
+    }
+    let w = &s[s.len() - n - 1..];
+    let rets: Vec<f64> = (1..w.len())
+        .map(|i| if w[i - 1] != 0.0 { w[i] / w[i - 1] - 1.0 } else { 0.0 })
+        .collect();
+    let m = rets.iter().sum::<f64>() / rets.len() as f64;
+    let var = rets.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / rets.len() as f64;
+    Some(var.sqrt())
+}
+
 /// MACD: returns (line, signal). Line = EMA(12) − EMA(26); signal = EMA(9) of
 /// the MACD line over the recent window.
 pub fn macd(s: &[f64]) -> Option<(f64, f64)> {
@@ -181,6 +195,15 @@ mod tests {
         let s = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0];
         assert!(approx(donchian_high(&s, 5).unwrap(), 9.0));
         assert!(approx(donchian_low(&s, 5).unwrap(), 1.0));
+    }
+
+    #[test]
+    fn ret_vol_basic() {
+        // constant series → zero volatility
+        assert!(approx(ret_vol(&[5.0; 30], 20).unwrap(), 0.0));
+        // a series with moves → positive volatility
+        let s: Vec<f64> = (0..30).map(|i| 100.0 + (i % 2) as f64 * 3.0).collect();
+        assert!(ret_vol(&s, 20).unwrap() > 0.0);
     }
 
     #[test]

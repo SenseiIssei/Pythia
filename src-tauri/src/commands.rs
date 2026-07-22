@@ -38,6 +38,11 @@ pub fn refresh_connected(st: &AppState) {
     st.engine.lock().unwrap().set_connected(set);
 }
 
+/// Reload the cached webhook URL from the vault.
+pub fn refresh_webhook(st: &AppState) {
+    *st.webhook.lock().unwrap() = vault::get("alerts").and_then(|m| m.get("webhook").cloned());
+}
+
 #[tauri::command]
 pub fn get_state(state: State<AppState>) -> EngineState {
     state.engine.lock().unwrap().state()
@@ -98,6 +103,9 @@ pub fn save_venue_keys(
     }
     vault::save(&venue, &fields)?;
     refresh_connected(app_state.inner());
+    if venue == "alerts" {
+        refresh_webhook(app_state.inner());
+    }
     push_state(&app);
     Ok(())
 }
@@ -106,8 +114,24 @@ pub fn save_venue_keys(
 pub fn clear_venue_keys(app: AppHandle, app_state: State<AppState>, venue: String) -> Result<(), String> {
     vault::clear(&venue)?;
     refresh_connected(app_state.inner());
+    if venue == "alerts" {
+        refresh_webhook(app_state.inner());
+    }
     push_state(&app);
     Ok(())
+}
+
+/// Send a test message to the configured webhook.
+#[tauri::command]
+pub async fn test_alert(app_state: State<'_, AppState>) -> Result<(), String> {
+    let url = app_state.webhook.lock().unwrap().clone();
+    match url {
+        Some(u) if !u.is_empty() => {
+            crate::alerts::post(&u, "Pythia test alert ✅ — webhook connected. You'll get fills, exits & risk trips here.").await;
+            Ok(())
+        }
+        _ => Err("no webhook configured".into()),
+    }
 }
 
 #[tauri::command]

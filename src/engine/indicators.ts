@@ -80,6 +80,16 @@ export function atrProxy(s: number[], n: number): number | null {
   return sum / n;
 }
 
+export function retVol(s: number[], n: number): number | null {
+  if (n < 2 || s.length < n + 1) return null;
+  const w = s.slice(s.length - n - 1);
+  const rets: number[] = [];
+  for (let i = 1; i < w.length; i++) rets.push(w[i - 1] !== 0 ? w[i] / w[i - 1] - 1 : 0);
+  const m = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const varr = rets.reduce((a, b) => a + (b - m) * (b - m), 0) / rets.length;
+  return Math.sqrt(varr);
+}
+
 export function macd(s: number[]): { line: number; signal: number } | null {
   const FAST = 12;
   const SLOW = 26;

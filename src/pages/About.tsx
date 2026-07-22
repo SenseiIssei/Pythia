@@ -11,7 +11,7 @@ export function About() {
           <div className="h-10 w-10 rounded-lg bg-gradient-to-br from-accent to-purple-neon glow-cyan" />
           <div>
             <div className="flex items-center gap-2 font-bold">
-              PYTHIA <Badge tone="cyan">v0.2 · Phase 1+</Badge>
+              PYTHIA <Badge tone="cyan">v0.3 · Phase 1+</Badge>
             </div>
             <div className="text-xs text-cyber-text-dim">
               Polymarket + crypto + equities, one strategy engine, one risk manager, one cockpit.
@@ -23,10 +23,11 @@ export function About() {
       <Card title="What works today" className="mb-4">
         <ul className="list-inside list-disc space-y-1 text-sm text-cyber-text-dim">
           <li>Runs two ways from one UI: <span className="text-accent">native desktop app</span> (Rust daemon) and <span className="text-accent">browser/web app</span> (TypeScript) — identical, verified indicator-for-indicator</li>
-          <li>6 indicator-based strategies: EMA cross, Bollinger revert, RSI, MACD, Donchian breakout, Prob-Edge</li>
+          <li>8 strategies: EMA cross, Bollinger, RSI, MACD, Donchian breakout, multi-timeframe momentum, BTC/ETH pairs, Prob-Edge (with an EWMA fair-value model on live odds)</li>
           <li>Position management: ATR stop-loss, take-profit & trailing stops (auto-exit)</li>
-          <li>Advanced risk: max-drawdown breaker, daily reset, per-strategy loss-streak cooldowns, fractional-Kelly sizing</li>
-          <li>Per-strategy stats: profit factor, max drawdown, win rate</li>
+          <li>Advanced risk: max-drawdown breaker, daily reset, loss-streak cooldowns, fractional-Kelly & volatility-targeted sizing</li>
+          <li>Backtester (Sharpe / max-DD / profit factor) + Analytics (drawdown chart, leaderboard, trade log)</li>
+          <li>Discord/webhook alerts on fills, exits & risk trips (native)</li>
           <li>Real read-only market data (native): live Kraken crypto + Polymarket odds</li>
           <li>Secure key storage (OS keychain), persistent state, system tray, first-run legal gate</li>
         </ul>

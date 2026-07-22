@@ -19,6 +19,7 @@ const ROWS: LimitRow[] = [
   { key: "maxGrossExposurePct", label: "Max gross exposure", min: 10, max: 100, step: 5, unit: "% equity" },
   { key: "perStrategyBudgetPct", label: "Per-strategy budget", min: 5, max: 60, step: 1, unit: "% equity" },
   { key: "kellyFraction", label: "Kelly fraction", min: 0.05, max: 1, step: 0.05, unit: "×" },
+  { key: "volTargetPct", label: "Vol-target sizing", min: 0, max: 5, step: 0.1, unit: "%/bar" },
   { key: "stopAtrMult", label: "Stop-loss (ATR)", min: 0, max: 10, step: 0.5, unit: "×ATR" },
   { key: "takeProfitAtrMult", label: "Take-profit (ATR)", min: 0, max: 15, step: 0.5, unit: "×ATR" },
   { key: "trailingAtrMult", label: "Trailing stop (ATR)", min: 0, max: 10, step: 0.5, unit: "×ATR" },

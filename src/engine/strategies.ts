@@ -145,6 +145,54 @@ function probEdge(cfg: StrategyConfig, markets: Map<string, Market>): Intent[] {
   return out;
 }
 
+function multiTf(cfg: StrategyConfig, markets: Map<string, Market>, history: Map<string, number[]>): Intent[] {
+  const fast = param(cfg, "fast", 9);
+  const slow = param(cfg, "slow", 21);
+  const htf = param(cfg, "htf", 50);
+  const out: Intent[] = [];
+  for (const [id, , h] of series(cfg, markets, history)) {
+    const f = ind.ema(h, fast);
+    const s = ind.ema(h, slow);
+    const trend = ind.roc(h, htf);
+    if (f === null || s === null || trend === null || s === 0) continue;
+    const spread = (f - s) / s;
+    const strength = clamp01(Math.abs(spread) / 0.02) * clamp01(Math.abs(trend) / 0.03);
+    if (strength < 0.1) continue;
+    if (f > s && trend > 0) {
+      out.push({ marketId: id, side: "buy", size: strength, confidence: strength, reason: `MTF up: EMA${fast}>${slow} & HTF ${(trend * 100).toFixed(1)}%` });
+    } else if (f < s && trend < 0) {
+      out.push({ marketId: id, side: "sell", size: strength, confidence: strength, reason: `MTF down: EMA${fast}<${slow} & HTF ${(trend * 100).toFixed(1)}%` });
+    }
+  }
+  return out;
+}
+
+function pairs(cfg: StrategyConfig, _markets: Map<string, Market>, history: Map<string, number[]>): Intent[] {
+  if (cfg.universe.length < 2) return [];
+  const period = param(cfg, "period", 30);
+  const k = param(cfg, "k", 2);
+  const a = cfg.universe[0];
+  const b = cfg.universe[1];
+  const ha = history.get(a);
+  const hb = history.get(b);
+  if (!ha || !hb) return [];
+  const n = Math.min(ha.length, hb.length);
+  if (n < period + 1) return [];
+  const ratio: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const eb = hb[hb.length - n + i];
+    ratio.push(eb === 0 ? 1 : ha[ha.length - n + i] / eb);
+  }
+  const z = ind.zscore(ratio, period);
+  if (z === null || Math.abs(z) <= k) return [];
+  const strength = clamp01((Math.abs(z) - k) / k);
+  const [sideA, sideB]: [Side, Side] = z > 0 ? ["sell", "buy"] : ["buy", "sell"];
+  return [
+    { marketId: a, side: sideA, size: strength, confidence: strength, reason: `pairs z=${z.toFixed(2)} — leg A` },
+    { marketId: b, side: sideB, size: strength, confidence: strength, reason: `pairs z=${z.toFixed(2)} — leg B` },
+  ];
+}
+
 export function runStrategy(
   cfg: StrategyConfig,
   markets: Map<string, Market>,
@@ -162,6 +210,10 @@ export function runStrategy(
       return macdTrend(cfg, markets, history);
     case "breakout":
       return breakout(cfg, markets, history);
+    case "multi-tf":
+      return multiTf(cfg, markets, history);
+    case "pairs":
+      return pairs(cfg, markets, history);
     case "prob-edge":
       return probEdge(cfg, markets);
     default:
@@ -188,6 +240,10 @@ export function defaultStrategies(): StrategyConfig[] {
       params: [], budgetPct: 15, ...base },
     { id: "breakout-1", name: "Donchian Breakout · Equities", kind: "breakout", venueClass: "alpaca", state: "paused", universe: equities,
       params: [mkParam("period", "Channel", 20, 5, 60, 1)], budgetPct: 12, ...base },
+    { id: "multi-tf-1", name: "Multi-TF Momentum · Crypto", kind: "multi-tf", venueClass: "crypto", state: "paused", universe: crypto,
+      params: [mkParam("fast", "Fast EMA", 9, 3, 30, 1), mkParam("slow", "Slow EMA", 21, 10, 100, 1), mkParam("htf", "HTF ROC", 50, 20, 150, 5)], budgetPct: 15, ...base },
+    { id: "pairs-1", name: "Pairs · BTC/ETH", kind: "pairs", venueClass: "crypto", state: "paused", universe: ["crypto:BTC/USD", "crypto:ETH/USD"],
+      params: [mkParam("period", "Z period", 30, 10, 90, 5), mkParam("k", "Z entry σ", 2, 1, 3.5, 0.1)], budgetPct: 12, ...base },
     { id: "prob-edge-1", name: "Prob-Edge · Polymarket", kind: "prob-edge", venueClass: "polymarket", state: "paper",
       universe: ["polymarket:fed-cut-2026", "polymarket:btc-100k-2026"],
       params: [mkParam("edgeThreshold", "Min edge (pp)", 0.05, 0.01, 0.3, 0.01)], budgetPct: 15, ...base },

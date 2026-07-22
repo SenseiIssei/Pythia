@@ -38,9 +38,71 @@ pub fn run_strategy(
         StrategyKind::RsiReversal => rsi_reversal(cfg, markets, history),
         StrategyKind::MacdTrend => macd_trend(cfg, markets, history),
         StrategyKind::Breakout => breakout(cfg, markets, history),
+        StrategyKind::MultiTf => multi_tf(cfg, markets, history),
+        StrategyKind::Pairs => pairs(cfg, markets, history),
         StrategyKind::ProbEdge => prob_edge(cfg, markets),
         StrategyKind::Arb | StrategyKind::Manual => vec![],
     }
+}
+
+/// Multi-timeframe momentum: an EMA cross confirmed by a higher-timeframe trend
+/// (long-horizon ROC). Only trades when both agree.
+fn multi_tf(cfg: &StrategyConfig, markets: &HashMap<String, Market>, history: &HashMap<String, Vec<f64>>) -> Vec<SignalIntent> {
+    let fast = param(cfg, "fast", 9.0) as usize;
+    let slow = param(cfg, "slow", 21.0) as usize;
+    let htf = param(cfg, "htf", 50.0) as usize;
+    let mut out = Vec::new();
+    for (id, _m, h) in series(cfg, markets, history) {
+        let (Some(f), Some(s), Some(trend)) = (ind::ema(h, fast), ind::ema(h, slow), ind::roc(h, htf)) else { continue };
+        if s == 0.0 {
+            continue;
+        }
+        let spread = (f - s) / s;
+        let strength = clamp01(spread.abs() / 0.02) * clamp01(trend.abs() / 0.03);
+        if strength < 0.1 {
+            continue;
+        }
+        if f > s && trend > 0.0 {
+            out.push(SignalIntent { market_id: id.clone(), side: Side::Buy, size: strength, confidence: strength, reason: format!("MTF up: EMA{fast}>{slow} & HTF {:+.1}%", trend * 100.0) });
+        } else if f < s && trend < 0.0 {
+            out.push(SignalIntent { market_id: id.clone(), side: Side::Sell, size: strength, confidence: strength, reason: format!("MTF down: EMA{fast}<{slow} & HTF {:+.1}%", trend * 100.0) });
+        }
+    }
+    out
+}
+
+/// Pairs / statistical arbitrage: trade the spread (price ratio) between two
+/// correlated assets when its z-score is stretched. Emits an intent on each leg.
+fn pairs(cfg: &StrategyConfig, _markets: &HashMap<String, Market>, history: &HashMap<String, Vec<f64>>) -> Vec<SignalIntent> {
+    if cfg.universe.len() < 2 {
+        return vec![];
+    }
+    let period = param(cfg, "period", 30.0) as usize;
+    let k = param(cfg, "k", 2.0);
+    let a = &cfg.universe[0];
+    let b = &cfg.universe[1];
+    let (Some(ha), Some(hb)) = (history.get(a), history.get(b)) else { return vec![] };
+    let n = ha.len().min(hb.len());
+    if n < period + 1 {
+        return vec![];
+    }
+    let ratio: Vec<f64> = (0..n)
+        .map(|i| {
+            let eb = hb[hb.len() - n + i];
+            if eb == 0.0 { 1.0 } else { ha[ha.len() - n + i] / eb }
+        })
+        .collect();
+    let Some(z) = ind::zscore(&ratio, period) else { return vec![] };
+    if z.abs() <= k {
+        return vec![];
+    }
+    let strength = clamp01((z.abs() - k) / k);
+    // ratio high (z>0) → A rich vs B → short A, long B
+    let (side_a, side_b) = if z > 0.0 { (Side::Sell, Side::Buy) } else { (Side::Buy, Side::Sell) };
+    vec![
+        SignalIntent { market_id: a.clone(), side: side_a, size: strength, confidence: strength, reason: format!("pairs z={z:+.2} — leg A") },
+        SignalIntent { market_id: b.clone(), side: side_b, size: strength, confidence: strength, reason: format!("pairs z={z:+.2} — leg B") },
+    ]
 }
 
 /// Only trade tradable (non-prediction) markets that have enough history.
@@ -233,6 +295,10 @@ pub fn default_strategies() -> Vec<StrategyConfig> {
             vec![], 15.0),
         strat("breakout-1", "Donchian Breakout · Equities", StrategyKind::Breakout, Venue::Alpaca, StrategyState::Paused, equities,
             vec![p("period", "Channel", 20.0, 5.0, 60.0, 1.0)], 12.0),
+        strat("multi-tf-1", "Multi-TF Momentum · Crypto", StrategyKind::MultiTf, Venue::Crypto, StrategyState::Paused, crypto,
+            vec![p("fast", "Fast EMA", 9.0, 3.0, 30.0, 1.0), p("slow", "Slow EMA", 21.0, 10.0, 100.0, 1.0), p("htf", "HTF ROC", 50.0, 20.0, 150.0, 5.0)], 15.0),
+        strat("pairs-1", "Pairs · BTC/ETH", StrategyKind::Pairs, Venue::Crypto, StrategyState::Paused, &["crypto:BTC/USD", "crypto:ETH/USD"],
+            vec![p("period", "Z period", 30.0, 10.0, 90.0, 5.0), p("k", "Z entry σ", 2.0, 1.0, 3.5, 0.1)], 12.0),
         strat("prob-edge-1", "Prob-Edge · Polymarket", StrategyKind::ProbEdge, Venue::Polymarket, StrategyState::Paper, &["polymarket:fed-cut-2026", "polymarket:btc-100k-2026"],
             vec![p("edgeThreshold", "Min edge (pp)", 0.05, 0.01, 0.3, 0.01)], 15.0),
     ]

@@ -7,6 +7,8 @@ import {
   ScrollText,
   Settings,
   Info,
+  FlaskConical,
+  BarChart3,
   type LucideIcon,
 } from "lucide-react";
 
@@ -15,6 +17,8 @@ export type PageId =
   | "markets"
   | "positions"
   | "strategies"
+  | "backtest"
+  | "analytics"
   | "risk"
   | "journal"
   | "settings"
@@ -32,6 +36,8 @@ export const NAV: NavItem[] = [
   { id: "markets", label: "Markets", icon: LineChart, section: "Trading" },
   { id: "positions", label: "Positions", icon: Wallet, section: "Trading" },
   { id: "strategies", label: "Strategies", icon: Cpu, section: "Trading" },
+  { id: "backtest", label: "Backtest", icon: FlaskConical, section: "Research" },
+  { id: "analytics", label: "Analytics", icon: BarChart3, section: "Research" },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control" },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control" },
   { id: "settings", label: "Settings", icon: Settings, section: "Config" },
