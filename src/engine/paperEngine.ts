@@ -6,8 +6,10 @@ import type {
   Order,
   PortfolioSnapshot,
   PositionView,
+  Regime,
   RiskLimits,
   StrategyConfig,
+  StrategyKind,
   VenueBalance,
   Venue,
 } from "../types";
@@ -32,6 +34,13 @@ interface PositionInternal {
 type Listener = () => void;
 
 const STARTING_CASH = 100_000;
+
+// Regime filter: mean-reversion blocked in trends; trend strategies blocked in chop.
+function strategyRegimeOk(kind: StrategyKind, regime?: Regime): boolean {
+  if (regime === "trending" && (kind === "bollinger" || kind === "rsi-reversal")) return false;
+  if (regime === "ranging" && (kind === "ema-cross" || kind === "macd-trend" || kind === "breakout" || kind === "multi-tf")) return false;
+  return true;
+}
 
 let seq = 0;
 const nextId = (p: string) => `${p}_${Date.now().toString(36)}_${(seq++).toString(36)}`;
@@ -116,6 +125,18 @@ export class PaperEngine implements EngineClient {
       if (fair !== null) m.modelProb = Math.min(0.98, Math.max(0.02, fair));
     }
 
+    // regime detection for tradable markets (Kaufman efficiency ratio)
+    for (const m of markets) {
+      if (m.kind === "prediction") continue;
+      const h = this.history.get(m.id);
+      if (!h) continue;
+      const er = ind.efficiencyRatio(h, 20);
+      if (er !== null) {
+        m.trendStrength = er;
+        m.regime = er >= 0.4 ? "trending" : "ranging";
+      }
+    }
+
     // daily reset of loss/streak counters
     const today = Math.floor(now / 86_400_000);
     if (today !== this.day) {
@@ -149,6 +170,7 @@ export class PaperEngine implements EngineClient {
         for (const intent of runStrategy(strat, byId, this.history)) {
           const m = byId.get(intent.marketId);
           if (!m) continue;
+          if (this.limits.regimeFilter && !strategyRegimeOk(strat.kind, m.regime)) continue;
           this.log("signal", `${strat.name}: ${intent.side.toUpperCase()} ${m.symbol} — ${intent.reason}`, strat.id, intent.marketId);
           this.placeFromIntent(strat, m, intent);
         }

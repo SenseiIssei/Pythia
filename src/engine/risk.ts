@@ -35,6 +35,7 @@ export const DEFAULT_LIMITS: RiskLimits = {
   maxConsecutiveLosses: 4,
   cooldownSec: 300,
   volTargetPct: 0,
+  regimeFilter: false,
 };
 
 // The risk manager is sovereign: this is the ONLY path from a strategy intent to

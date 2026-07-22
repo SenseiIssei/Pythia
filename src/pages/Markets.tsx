@@ -72,6 +72,11 @@ export function Markets() {
                   {m.venue.slice(0, 4)}
                 </Badge>
                 <span>{m.symbol}</span>
+                {m.regime && (
+                  <span title={`trend strength ${(m.trendStrength ?? 0).toFixed(2)}`}>
+                    <Badge tone={m.regime === "trending" ? "green" : "neutral"}>{m.regime}</Badge>
+                  </span>
+                )}
               </div>
               <div className="border-t border-cyber-border py-2 text-right font-mono">
                 {m.kind === "prediction" ? `${(m.price * 100).toFixed(1)}%` : m.price.toLocaleString()}

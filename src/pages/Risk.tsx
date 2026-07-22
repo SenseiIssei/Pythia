@@ -1,6 +1,6 @@
 import { Power, ShieldAlert } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Meter, Button } from "../components/ui";
+import { Card, PageHeader, Meter, Button, Toggle } from "../components/ui";
 import type { RiskLimits } from "../types";
 
 interface LimitRow {
@@ -61,6 +61,20 @@ export function Risk() {
           <Button tone={limits.killSwitch ? "green" : "red"} icon={Power} onClick={toggleKill}>
             {limits.killSwitch ? "Release" : "Engage kill switch"}
           </Button>
+        </div>
+      </Card>
+
+      {/* regime filter toggle */}
+      <Card className="mb-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-bold">Regime filter</div>
+            <div className="text-xs text-cyber-text-dim">
+              Block mean-reversion strategies in trending markets and trend strategies in choppy ones —
+              so strategies only fire in the conditions they suit.
+            </div>
+          </div>
+          <Toggle on={limits.regimeFilter} onChange={(v) => setLimits({ regimeFilter: v })} />
         </div>
       </Card>
 

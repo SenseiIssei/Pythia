@@ -90,6 +90,16 @@ export function retVol(s: number[], n: number): number | null {
   return Math.sqrt(varr);
 }
 
+export function efficiencyRatio(s: number[], n: number): number | null {
+  if (n === 0 || s.length < n + 1) return null;
+  const w = s.slice(s.length - n - 1);
+  const net = Math.abs(w[w.length - 1] - w[0]);
+  let vol = 0;
+  for (let i = 1; i < w.length; i++) vol += Math.abs(w[i] - w[i - 1]);
+  if (vol === 0) return 0;
+  return Math.max(0, Math.min(1, net / vol));
+}
+
 export function macd(s: number[]): { line: number; signal: number } | null {
   const FAST = 12;
   const SLOW = 26;

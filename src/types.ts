@@ -21,8 +21,12 @@ export interface Market {
   // Prediction-only: your current model probability estimate, if any.
   modelProb?: number;
   liquidity?: number;
+  regime?: Regime;
+  trendStrength?: number; // efficiency ratio 0..1
   updatedAt: number;
 }
+
+export type Regime = "trending" | "ranging";
 
 export interface PositionView {
   marketId: string;
@@ -69,6 +73,7 @@ export interface RiskLimits {
   maxConsecutiveLosses: number; // per strategy before cooldown (0 = off)
   cooldownSec: number; // cooldown after the loss streak
   volTargetPct: number; // volatility-targeted sizing: target per-bar vol % (0 = off)
+  regimeFilter: boolean; // block mean-reversion in trends & trend strategies in chop
 }
 
 export interface StrategyParam {

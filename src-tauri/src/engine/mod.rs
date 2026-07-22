@@ -30,6 +30,13 @@ pub enum MarketKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+pub enum Regime {
+    Trending,
+    Ranging,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum OrderStatus {
     Pending,
     Filled,
@@ -87,6 +94,10 @@ pub struct Market {
     pub model_prob: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liquidity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regime: Option<Regime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend_strength: Option<f64>, // efficiency ratio 0..1
     pub updated_at: i64,
 }
 
@@ -212,6 +223,7 @@ pub struct RiskLimits {
     pub max_consecutive_losses: u32, // per strategy before a cooldown (0 = off)
     pub cooldown_sec: u64,           // cooldown duration after the loss streak
     pub vol_target_pct: f64,         // volatility-targeted sizing: target per-bar vol % (0 = off)
+    pub regime_filter: bool,         // block mean-reversion in trends & trend strategies in chop
 }
 
 impl Default for RiskLimits {
@@ -232,6 +244,7 @@ impl Default for RiskLimits {
             max_consecutive_losses: 4,
             cooldown_sec: 300,
             vol_target_pct: 0.0,
+            regime_filter: false,
         }
     }
 }
@@ -443,6 +456,8 @@ impl Engine {
                     // until a SignalProvider is plugged in (Phase 3).
                     model_prob: None,
                     liquidity: Some(r.liquidity),
+                    regime: None,
+                    trend_strength: None,
                     updated_at: now,
                 });
             }
@@ -509,6 +524,23 @@ impl Engine {
             }
         }
 
+        // regime detection for tradable markets (Kaufman efficiency ratio)
+        let trade_ids: Vec<String> = self
+            .markets
+            .iter()
+            .filter(|m| m.kind != MarketKind::Prediction)
+            .map(|m| m.id.clone())
+            .collect();
+        for id in trade_ids {
+            let er = self.history.get(&id).and_then(|h| indicators::efficiency_ratio(h, 20));
+            if let Some(er) = er {
+                if let Some(m) = self.markets.iter_mut().find(|m| m.id == id) {
+                    m.trend_strength = Some(er);
+                    m.regime = Some(if er >= 0.4 { Regime::Trending } else { Regime::Ranging });
+                }
+            }
+        }
+
         // daily reset of loss/streak counters (new UTC day)
         let today = now / 86_400_000;
         if today != self.day {
@@ -553,6 +585,9 @@ impl Engine {
             }
             for (idx, intent) in fires {
                 if let Some(m) = snapshot.get(&intent.market_id).cloned() {
+                    if self.limits.regime_filter && !strategy_regime_ok(self.strategies[idx].kind, m.regime) {
+                        continue;
+                    }
                     let name = self.strategies[idx].name.clone();
                     let sid = self.strategies[idx].id.clone();
                     self.log(
@@ -1126,6 +1161,16 @@ impl Engine {
     }
 }
 
+/// Regime filter: mean-reversion strategies are blocked in trending markets,
+/// trend strategies are blocked in ranging (choppy) markets.
+fn strategy_regime_ok(kind: StrategyKind, regime: Option<Regime>) -> bool {
+    match (regime, kind) {
+        (Some(Regime::Trending), StrategyKind::Bollinger | StrategyKind::RsiReversal) => false,
+        (Some(Regime::Ranging), StrategyKind::EmaCross | StrategyKind::MacdTrend | StrategyKind::Breakout | StrategyKind::MultiTf) => false,
+        _ => true,
+    }
+}
+
 // ── seed universe (mirrors the TS MarketSim) ───────────────────────────────
 fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
     let now = chrono::Utc::now().timestamp_millis();
@@ -1138,6 +1183,8 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
         change24h: change,
         model_prob: model,
         liquidity: Some(liq),
+        regime: None,
+        trend_strength: None,
         updated_at: now,
     };
     let markets = vec![

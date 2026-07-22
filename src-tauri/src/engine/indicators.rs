@@ -124,6 +124,24 @@ pub fn ret_vol(s: &[f64], n: usize) -> Option<f64> {
     Some(var.sqrt())
 }
 
+/// Kaufman efficiency ratio over `n` bars: |net move| / (sum of |bar moves|).
+/// ~1.0 = clean trend, ~0.0 = choppy/mean-reverting. Used for regime detection.
+pub fn efficiency_ratio(s: &[f64], n: usize) -> Option<f64> {
+    if n == 0 || s.len() < n + 1 {
+        return None;
+    }
+    let w = &s[s.len() - n - 1..];
+    let net = (w[w.len() - 1] - w[0]).abs();
+    let mut vol = 0.0;
+    for i in 1..w.len() {
+        vol += (w[i] - w[i - 1]).abs();
+    }
+    if vol == 0.0 {
+        return Some(0.0);
+    }
+    Some((net / vol).clamp(0.0, 1.0))
+}
+
 /// MACD: returns (line, signal). Line = EMA(12) − EMA(26); signal = EMA(9) of
 /// the MACD line over the recent window.
 pub fn macd(s: &[f64]) -> Option<(f64, f64)> {
@@ -204,6 +222,16 @@ mod tests {
         // a series with moves → positive volatility
         let s: Vec<f64> = (0..30).map(|i| 100.0 + (i % 2) as f64 * 3.0).collect();
         assert!(ret_vol(&s, 20).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn efficiency_ratio_regime() {
+        // a clean uptrend → ER near 1
+        let trend: Vec<f64> = (0..30).map(|i| 100.0 + i as f64).collect();
+        assert!(efficiency_ratio(&trend, 20).unwrap() > 0.95);
+        // an oscillation → low ER
+        let chop: Vec<f64> = (0..30).map(|i| 100.0 + (i % 2) as f64).collect();
+        assert!(efficiency_ratio(&chop, 20).unwrap() < 0.2);
     }
 
     #[test]
