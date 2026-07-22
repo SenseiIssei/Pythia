@@ -226,7 +226,10 @@ function mkParam(key: string, label: string, value: number, min: number, max: nu
 }
 
 export function defaultStrategies(): StrategyConfig[] {
-  const crypto = ["crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD"];
+  const crypto = [
+    "crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD", "crypto:ADA/USD",
+    "crypto:DOT/USD", "crypto:LINK/USD", "crypto:AVAX/USD", "crypto:XRP/USD", "crypto:LTC/USD",
+  ];
   const equities = ["alpaca:AAPL", "alpaca:NVDA"];
   const base = { pnl: 0, trades: 0, winRate: 0, maxDrawdown: 0, profitFactor: 0, equityCurve: [0] };
   return [

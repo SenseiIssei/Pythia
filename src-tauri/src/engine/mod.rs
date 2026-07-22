@@ -1144,6 +1144,12 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
         mk("crypto:BTC/USD", Venue::Crypto, "BTC/USD", MarketKind::Crypto, 67250.0, 0.018, None, 4_200_000.0),
         mk("crypto:ETH/USD", Venue::Crypto, "ETH/USD", MarketKind::Crypto, 3520.0, -0.012, None, 2_100_000.0),
         mk("crypto:SOL/USD", Venue::Crypto, "SOL/USD", MarketKind::Crypto, 168.4, 0.043, None, 900_000.0),
+        mk("crypto:ADA/USD", Venue::Crypto, "ADA/USD", MarketKind::Crypto, 0.45, 0.01, None, 300_000.0),
+        mk("crypto:DOT/USD", Venue::Crypto, "DOT/USD", MarketKind::Crypto, 6.2, -0.008, None, 250_000.0),
+        mk("crypto:LINK/USD", Venue::Crypto, "LINK/USD", MarketKind::Crypto, 14.3, 0.02, None, 400_000.0),
+        mk("crypto:AVAX/USD", Venue::Crypto, "AVAX/USD", MarketKind::Crypto, 27.5, 0.03, None, 350_000.0),
+        mk("crypto:XRP/USD", Venue::Crypto, "XRP/USD", MarketKind::Crypto, 0.52, 0.005, None, 600_000.0),
+        mk("crypto:LTC/USD", Venue::Crypto, "LTC/USD", MarketKind::Crypto, 72.0, -0.005, None, 200_000.0),
         mk("alpaca:AAPL", Venue::Alpaca, "AAPL", MarketKind::Equity, 227.1, 0.006, None, 1_500_000.0),
         mk("alpaca:NVDA", Venue::Alpaca, "NVDA", MarketKind::Equity, 138.9, 0.021, None, 3_300_000.0),
         mk("polymarket:fed-cut-2026", Venue::Polymarket, "Fed cuts rates before Sep 2026?", MarketKind::Prediction, 0.62, 0.03, Some(0.71), 320_000.0),
@@ -1153,6 +1159,12 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
     sim.insert("crypto:BTC/USD".into(), SimParam { drift: 0.00002, vol: 0.0018, base: 66000.0 });
     sim.insert("crypto:ETH/USD".into(), SimParam { drift: 0.00001, vol: 0.0022, base: 3560.0 });
     sim.insert("crypto:SOL/USD".into(), SimParam { drift: 0.00004, vol: 0.0035, base: 161.0 });
+    sim.insert("crypto:ADA/USD".into(), SimParam { drift: 0.00002, vol: 0.004, base: 0.44 });
+    sim.insert("crypto:DOT/USD".into(), SimParam { drift: 0.00001, vol: 0.0038, base: 6.25 });
+    sim.insert("crypto:LINK/USD".into(), SimParam { drift: 0.00003, vol: 0.0042, base: 14.0 });
+    sim.insert("crypto:AVAX/USD".into(), SimParam { drift: 0.00003, vol: 0.0045, base: 26.7 });
+    sim.insert("crypto:XRP/USD".into(), SimParam { drift: 0.00001, vol: 0.0036, base: 0.517 });
+    sim.insert("crypto:LTC/USD".into(), SimParam { drift: 0.00001, vol: 0.003, base: 72.4 });
     sim.insert("alpaca:AAPL".into(), SimParam { drift: 0.000005, vol: 0.0009, base: 225.7 });
     sim.insert("alpaca:NVDA".into(), SimParam { drift: 0.00003, vol: 0.0016, base: 136.0 });
     sim.insert("polymarket:fed-cut-2026".into(), SimParam { drift: 0.0, vol: 0.004, base: 0.6 });

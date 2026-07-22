@@ -39,9 +39,9 @@ async fn get_json(url: &str) -> Option<Value> {
     tokio::time::timeout(Duration::from_secs(5), fut).await.ok().flatten()
 }
 
-/// Kraken public Ticker for BTC/ETH/SOL. `c[0]` = last trade, `o` = today's open.
+/// Kraken public Ticker for the crypto universe. `c[0]` = last trade, `o` = open.
 pub async fn fetch_kraken() -> Vec<RealCrypto> {
-    let url = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD,ETHUSD,SOLUSD";
+    let url = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD,ETHUSD,SOLUSD,ADAUSD,DOTUSD,LINKUSD,AVAXUSD,XRPUSD,LTCUSD";
     let Some(v) = get_json(url).await else { return vec![] };
     let Some(result) = v.get("result").and_then(Value::as_object) else { return vec![] };
 
@@ -58,19 +58,37 @@ pub async fn fetch_kraken() -> Vec<RealCrypto> {
             .and_then(|s| s.parse::<f64>().ok());
         let (Some(last), Some(open)) = (last, open) else { continue };
 
-        let (id, symbol) = if key.contains("XBT") || key.contains("BTC") {
-            ("crypto:BTC/USD", "BTC/USD")
-        } else if key.contains("ETH") {
-            ("crypto:ETH/USD", "ETH/USD")
-        } else if key.contains("SOL") {
-            ("crypto:SOL/USD", "SOL/USD")
-        } else {
-            continue;
-        };
+        let sym = kraken_symbol(key);
+        let Some(sym) = sym else { continue };
         let change = if open != 0.0 { (last - open) / open } else { 0.0 };
-        out.push(RealCrypto { id: id.into(), symbol: symbol.into(), price: last, change24h: change });
+        out.push(RealCrypto { id: format!("crypto:{sym}"), symbol: sym.into(), price: last, change24h: change });
     }
     out
+}
+
+/// Map a Kraken pair key (e.g. "XXBTZUSD", "AVAXUSD") to our symbol.
+fn kraken_symbol(key: &str) -> Option<&'static str> {
+    if key.contains("XBT") || key.contains("BTC") {
+        Some("BTC/USD")
+    } else if key.contains("ETH") {
+        Some("ETH/USD")
+    } else if key.contains("SOL") {
+        Some("SOL/USD")
+    } else if key.contains("ADA") {
+        Some("ADA/USD")
+    } else if key.contains("AVAX") {
+        Some("AVAX/USD")
+    } else if key.contains("DOT") {
+        Some("DOT/USD")
+    } else if key.contains("LINK") {
+        Some("LINK/USD")
+    } else if key.contains("LTC") {
+        Some("LTC/USD")
+    } else if key.contains("XRP") {
+        Some("XRP/USD")
+    } else {
+        None
+    }
 }
 
 /// Polymarket Gamma API — a handful of active markets, highest volume first.

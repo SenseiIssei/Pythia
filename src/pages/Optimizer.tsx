@@ -2,8 +2,8 @@ import { Fragment, useMemo, useState } from "react";
 import { Sparkles, Play, Trophy } from "lucide-react";
 import { useStore } from "../store";
 import { Button, Card, PageHeader, Badge, StatCard } from "../components/ui";
-import { autoGrid, monteCarlo, sweep, type SweepPoint, type MonteCarlo } from "../engine/optimize";
-import { Dice5, TrendingUp, ShieldCheck, Activity } from "lucide-react";
+import { autoGrid, monteCarlo, sweep, walkForward, type SweepPoint, type MonteCarlo, type WalkForward } from "../engine/optimize";
+import { Dice5, TrendingUp, ShieldCheck, Activity, GitBranch } from "lucide-react";
 
 export function Optimizer() {
   const { strategies } = useStore();
@@ -15,6 +15,7 @@ export function Optimizer() {
   const [running, setRunning] = useState(false);
   const [points, setPoints] = useState<SweepPoint[] | null>(null);
   const [mc, setMc] = useState<MonteCarlo | null>(null);
+  const [wf, setWf] = useState<WalkForward | null>(null);
 
   const strat = useMemo(() => strategies.find((s) => s.id === stratId), [strategies, stratId]);
   const paramKeys = useMemo(() => (strat ? Object.keys(autoGrid(strat)) : []), [strat]);
@@ -24,6 +25,7 @@ export function Optimizer() {
     setRunning(true);
     setPoints(null);
     setMc(null);
+    setWf(null);
     // yield so the spinner paints before the heavy synchronous sweep
     setTimeout(() => {
       const grid = autoGrid(strat);
@@ -35,6 +37,17 @@ export function Optimizer() {
       const dist = monteCarlo(bestCfg, seeds, { bars, vol });
       setPoints(pts);
       setMc(dist);
+      setRunning(false);
+    }, 30);
+  }
+
+  function runWalkForward() {
+    if (!strat) return;
+    setRunning(true);
+    setWf(null);
+    setTimeout(() => {
+      const grid = autoGrid(strat);
+      setWf(walkForward(strat, grid, seeds, { bars, vol }));
       setRunning(false);
     }, 30);
   }
@@ -65,12 +78,38 @@ export function Optimizer() {
           <Button tone="purple" icon={Play} onClick={run} disabled={!strat || running}>
             {running ? "Optimizing…" : "Run optimization"}
           </Button>
+          <Button tone="cyan" icon={GitBranch} onClick={runWalkForward} disabled={!strat || running}>
+            Walk-forward test
+          </Button>
           <span className="text-xs text-cyber-text-faint">
             <Sparkles size={11} className="mr-1 inline" />
             sweeps {paramKeys.join(", ") || "params"} · each combo Monte-Carlo'd across {seeds} seeds
           </span>
         </div>
       </Card>
+
+      {wf && (
+        <Card
+          className={`mb-4 ${wf.holdsUp ? "border-success/40 glow-green" : "border-danger/40 glow-red"}`}
+          title="Walk-forward validation"
+          right={<Badge tone={wf.holdsUp ? "green" : "red"}>{wf.holdsUp ? "holds up out-of-sample" : "likely overfit"}</Badge>}
+        >
+          <div className="mb-2 text-xs text-cyber-text-dim">
+            Best params <span className="font-mono text-accent">{JSON.stringify(wf.best)}</span> optimized on
+            in-sample histories, then tested on <span className="text-accent">disjoint</span> out-of-sample histories.
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <WfCol title="In-sample (train)" mc={wf.inSample} />
+            <WfCol title="Out-of-sample (test)" mc={wf.outOfSample} />
+          </div>
+          <div className="mt-3 text-xs text-cyber-text-faint">
+            Degradation IS→OOS: <span className={wf.degradationPct > 2 ? "text-danger" : "text-success"}>{wf.degradationPct >= 0 ? "" : "+"}{(-wf.degradationPct).toFixed(1)}pp</span>.
+            {wf.holdsUp
+              ? " The edge survived unseen data — a real (if modest) signal by this test."
+              : " The edge mostly vanished on unseen data — classic overfitting. Don't trust it."}
+          </div>
+        </Card>
+      )}
 
       {mc && (
         <div className="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -113,6 +152,28 @@ export function Optimizer() {
           </div>
         </Card>
       )}
+    </div>
+  );
+}
+
+function WfCol({ title, mc }: { title: string; mc: MonteCarlo }) {
+  return (
+    <div className="rounded-lg border border-cyber-border bg-cyber-surface-2 p-3">
+      <div className="mb-2 text-xs uppercase text-cyber-text-faint">{title}</div>
+      <div className="space-y-1 text-sm">
+        <Row label="Median return" value={`${mc.medianReturn >= 0 ? "+" : ""}${mc.medianReturn.toFixed(1)}%`} tone={mc.medianReturn >= 0 ? "text-success" : "text-danger"} />
+        <Row label="% profitable" value={`${(mc.pctProfitable * 100).toFixed(0)}%`} tone={mc.pctProfitable >= 0.5 ? "text-success" : "text-danger"} />
+        <Row label="Median Sharpe" value={mc.medianSharpe.toFixed(2)} tone="text-cyber-text" />
+        <Row label="Worst DD" value={`${mc.worstDD.toFixed(1)}%`} tone="text-danger" />
+      </div>
+    </div>
+  );
+}
+function Row({ label, value, tone }: { label: string; value: string; tone: string }) {
+  return (
+    <div className="flex justify-between">
+      <span className="text-cyber-text-dim">{label}</span>
+      <span className={`font-mono ${tone}`}>{value}</span>
     </div>
   );
 }

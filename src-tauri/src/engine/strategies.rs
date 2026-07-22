@@ -282,7 +282,10 @@ fn strat(id: &str, name: &str, kind: StrategyKind, venue: Venue, state: Strategy
 }
 
 pub fn default_strategies() -> Vec<StrategyConfig> {
-    let crypto = &["crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD"][..];
+    let crypto = &[
+        "crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD", "crypto:ADA/USD",
+        "crypto:DOT/USD", "crypto:LINK/USD", "crypto:AVAX/USD", "crypto:XRP/USD", "crypto:LTC/USD",
+    ][..];
     let equities = &["alpaca:AAPL", "alpaca:NVDA"][..];
     vec![
         strat("ema-cross-1", "EMA Cross · Crypto", StrategyKind::EmaCross, Venue::Crypto, StrategyState::Paper, crypto,

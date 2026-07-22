@@ -34,10 +34,11 @@ function median(xs: number[]): number {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-/** A fixed, deterministic set of seeds so runs are reproducible. */
-function seedList(n: number): number[] {
+/** A fixed, deterministic set of seeds so runs are reproducible. `base` lets
+ *  callers pick a disjoint range (e.g. out-of-sample) that never overlaps. */
+function seedList(n: number, base = 1000): number[] {
   const out: number[] = [];
-  for (let i = 0; i < n; i++) out.push(1000 + i * 97);
+  for (let i = 0; i < n; i++) out.push(base + i * 97);
   return out;
 }
 
@@ -49,11 +50,11 @@ function withParams(cfg: StrategyConfig, params: Record<string, number>): Strate
 }
 
 /** Run the backtest across `seeds` random histories and aggregate the spread. */
-export function monteCarlo(cfg: StrategyConfig, seeds: number, opts: BacktestOpts = {}): MonteCarlo {
+export function monteCarlo(cfg: StrategyConfig, seeds: number, opts: BacktestOpts = {}, seedBase = 1000): MonteCarlo {
   const returns: number[] = [];
   const sharpes: number[] = [];
   const dds: number[] = [];
-  for (const seed of seedList(seeds)) {
+  for (const seed of seedList(seeds, seedBase)) {
     const r = backtest(cfg, { ...opts, seed });
     if (!r.ok) continue;
     returns.push(r.totalReturnPct);
@@ -104,10 +105,10 @@ function combos(grid: Record<string, number[]>): Record<string, number>[] {
 }
 
 /** Sweep the grid; each combo is scored by its robustness across seeds. */
-export function sweep(cfg: StrategyConfig, grid: Record<string, number[]>, seeds: number, opts: BacktestOpts = {}): SweepPoint[] {
+export function sweep(cfg: StrategyConfig, grid: Record<string, number[]>, seeds: number, opts: BacktestOpts = {}, seedBase = 1000): SweepPoint[] {
   const points: SweepPoint[] = [];
   for (const params of combos(grid)) {
-    const mc = monteCarlo(withParams(cfg, params), seeds, opts);
+    const mc = monteCarlo(withParams(cfg, params), seeds, opts, seedBase);
     // robustness score: reward median return & consistency, punish deep drawdowns
     const score = mc.medianReturn * mc.pctProfitable - mc.worstDD * 0.25;
     points.push({
@@ -122,4 +123,27 @@ export function sweep(cfg: StrategyConfig, grid: Record<string, number[]>, seeds
   }
   points.sort((a, b) => b.score - a.score);
   return points;
+}
+
+export interface WalkForward {
+  best: Record<string, number>;
+  inSample: MonteCarlo;
+  outOfSample: MonteCarlo;
+  degradationPct: number; // IS median return − OOS median return (higher = more overfit)
+  holdsUp: boolean; // OOS still profitable and not far below IS
+}
+
+/**
+ * Optimize on one set of random histories (in-sample), then evaluate the winning
+ * params on a *disjoint* set (out-of-sample). A big drop OOS = overfitting.
+ */
+export function walkForward(cfg: StrategyConfig, grid: Record<string, number[]>, seeds: number, opts: BacktestOpts = {}): WalkForward {
+  const isPoints = sweep(cfg, grid, seeds, opts, 1000); // in-sample seed range
+  const best = isPoints[0]?.params ?? {};
+  const bestCfg = withParams(cfg, best);
+  const inSample = monteCarlo(bestCfg, seeds, opts, 1000);
+  const outOfSample = monteCarlo(bestCfg, seeds, opts, 900_000); // disjoint OOS seed range
+  const degradationPct = inSample.medianReturn - outOfSample.medianReturn;
+  const holdsUp = outOfSample.medianReturn > 0 && outOfSample.pctProfitable >= 0.5 && degradationPct < Math.max(2, Math.abs(inSample.medianReturn) * 0.6);
+  return { best, inSample, outOfSample, degradationPct, holdsUp };
 }
