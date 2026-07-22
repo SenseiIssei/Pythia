@@ -7,16 +7,12 @@
 //! but is not yet driven, hence the crate-level dead_code allowance.
 #![allow(dead_code)]
 
-mod alerts;
 mod commands;
-mod connectors;
-mod engine;
-mod marketdata;
 mod persist;
 mod state;
 mod tray;
-mod vault;
 
+use pythia_core::{alerts, marketdata};
 use state::AppState;
 use std::time::Duration;
 use tauri::{Emitter, Manager};

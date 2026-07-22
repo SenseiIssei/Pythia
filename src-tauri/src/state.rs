@@ -1,7 +1,7 @@
 //! App-wide shared state. The engine lives behind a Mutex; the tick task and
 //! the command handlers both lock it briefly (never across an await).
 
-use crate::engine::Engine;
+use pythia_core::engine::Engine;
 use std::sync::Mutex;
 
 pub struct AppState {

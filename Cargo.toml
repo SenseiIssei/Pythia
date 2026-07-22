@@ -1,0 +1,19 @@
+# Pythia Cargo workspace.
+#
+#   crates/pythia-core  — the shared engine brain (no UI, no Tauri, no server).
+#   src-tauri           — the desktop app; embeds pythia-core.
+#   server              — the standalone backend (HTTP + WebSocket); embeds pythia-core.
+#
+# Both front-ends consume the SAME engine, so the desktop app and the future
+# web/mobile dashboards trade against one authoritative implementation.
+[workspace]
+members = ["crates/pythia-core", "src-tauri", "server"]
+resolver = "2"
+
+# Profiles must live at the workspace root; per-member profiles are ignored with
+# a warning. This is the release profile the Tauri bundle expects.
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

@@ -2,10 +2,10 @@
 //! mutation applies to the engine and immediately pushes fresh state so the UI
 //! updates without waiting for the next tick.
 
-use crate::connectors::{Side, Venue};
-use crate::engine::{EngineState, RiskLimits, StrategyConfig, StrategyState};
 use crate::state::AppState;
-use crate::vault;
+use pythia_core::connectors::{Side, Venue};
+use pythia_core::engine::{EngineState, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::vault;
 use std::collections::{BTreeMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -133,7 +133,7 @@ pub async fn test_alert(app_state: State<'_, AppState>) -> Result<(), String> {
     let url = app_state.webhook.lock().unwrap().clone();
     match url {
         Some(u) if !u.is_empty() => {
-            crate::alerts::post(&u, "Pythia test alert ✅ — webhook connected. You'll get fills, exits & risk trips here.").await;
+            pythia_core::alerts::post(&u, "Pythia test alert ✅ — webhook connected. You'll get fills, exits & risk trips here.").await;
             Ok(())
         }
         _ => Err("no webhook configured".into()),

@@ -1,0 +1,18 @@
+[package]
+name = "pythia-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Pythia engine core: strategies, risk, connectors, market data, signals."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
