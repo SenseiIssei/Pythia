@@ -1,65 +1,205 @@
+<div align="center">
+
 # Pythia
 
-> Autonomous, multi-venue prediction & trading cockpit — Polymarket + crypto + equities, one neon control panel.
+### Autonomous multi-venue prediction &amp; trading cockpit — Polymarket · crypto · equities, one neon control panel
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge&logo=opensourceinitiative)](https://opensource.org/licenses/MIT)
+[![Tauri](https://img.shields.io/badge/Tauri-v2-orange?style=for-the-badge&logo=tauri&logoColor=white)](https://v2.tauri.app)
+[![React](https://img.shields.io/badge/React-19-61dafb?style=for-the-badge&logo=react&logoColor=white)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.82+-ce422b?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![axum](https://img.shields.io/badge/axum-server-000?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/tokio-rs/axum)
+[![TailwindCSS](https://img.shields.io/badge/Tailwind-cyber--neon-38bdf8?style=for-the-badge&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+
+<br>
+
+[![Tests](https://img.shields.io/badge/rust%20tests-20%20passing-brightgreen?style=flat-square&logo=rust)](#)
+[![Paper-first](https://img.shields.io/badge/mode-paper--first-brightgreen?style=flat-square)](SAFETY.md)
+[![AI providers](https://img.shields.io/badge/AI-10%20providers-a855f7?style=flat-square)](#-ai-signals--bring-any-model)
+[![Last commit](https://img.shields.io/github/last-commit/SenseiIssei/Pythia?style=flat-square&logo=git&label=last%20commit&color=blue)](https://github.com/SenseiIssei/Pythia)
+[![Repo size](https://img.shields.io/github/repo-size/SenseiIssei/Pythia?style=flat-square&logo=github&label=repo%20size&color=blue)](https://github.com/SenseiIssei/Pythia)
+[![Stars](https://img.shields.io/github/stars/SenseiIssei/Pythia?style=flat-square&logo=github&label=stars&color=yellow)](https://github.com/SenseiIssei/Pythia/stargazers)
+
+<br>
+
+<a href="https://ko-fi.com/senseiissei">
+  <img src="https://ko-fi.com/img/githubbutton_2.svg" alt="Support me on Ko-fi" height="40">
+</a>
+
+<br><br>
+
+<img src="docs/screenshots/dashboard.png" alt="Pythia dashboard" width="92%">
+
+</div>
+
+---
 
 Pythia forms an edge estimate for markets you choose, sizes a bet/trade with a disciplined risk
-model, and — only when you explicitly arm a strategy — routes real orders. **It ships in paper mode.**
+model, and — only when you explicitly arm a strategy — routes real orders. **It ships in paper
+mode.** One engine core drives three runtimes (native desktop, web + backend server, browser paper),
+and any large-language-model of your choice can weigh in on a market.
 
-**Before anything live, read [`SAFETY.md`](SAFETY.md) and the [`PLAN.md`](PLAN.md).** Automated
-trading and prediction betting can lose all your money. This is not financial advice.
+> ⚠️ **Before anything live, read [`SAFETY.md`](SAFETY.md) and the [`PLAN.md`](PLAN.md).** Automated
+> trading and prediction-market betting can lose all your money. This is **not** financial advice.
 
-## Stack
+---
 
-Tauri v2 · React 19 · TypeScript · Vite · Tailwind (cyber-neon) · framer-motion · Rust engine core.
+## ✨ Highlights
 
-## Run it
+- **One engine, three runtimes** — a shared Rust core (`crates/pythia-core`) runs as a native
+  desktop daemon, behind a standalone HTTP/WebSocket **backend server**, or as a pure-TypeScript
+  paper engine in the browser. All in lockstep, verified indicator-for-indicator.
+- **10 strategies** — EMA cross, Bollinger revert, RSI reversal, MACD trend, Donchian breakout,
+  multi-timeframe momentum, BTC/ETH pairs stat-arb, Prob-Edge (EWMA fair-value on live odds), plus a
+  visual **Strategy Composer** that compiles rule sets into live strategies.
+- **Sovereign risk manager** — global kill switch, max daily-loss &amp; drawdown breakers, per-strategy
+  budgets, fractional-Kelly &amp; volatility-targeted sizing, regime filter, adaptive capital
+  allocation, loss-streak cooldowns. Fails closed.
+- **Research suite** — backtester, Monte-Carlo optimizer, walk-forward validation, analytics, and a
+  return-correlation / concentration matrix.
+- **🧠 AI Signals — bring any model** — Anthropic (Claude), OpenAI (GPT), xAI (Grok), z.ai (GLM),
+  DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
+- **Real read-only market data** — live Kraken crypto prices and Polymarket odds (no keys needed).
+- **Secure by default** — API keys live in the OS keychain (desktop) or the server's environment,
+  never in code, never logged, never returned to the UI. Discord/webhook alerts, persistent state,
+  system tray, first-run legal gate.
 
-**One UI, two runtimes.** The same cockpit runs as a native desktop app (Rust engine daemon) or in
-the browser (TypeScript engine). It auto-detects which and wires itself up — you don't choose.
+---
 
-**Native desktop app** (recommended — this is where the *real read-only market data* lives):
+## 📸 Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/markets.png" alt="Markets"><br><sub><b>Markets</b> — live prices, odds &amp; regime badges</sub></td>
+    <td width="50%"><img src="docs/screenshots/strategies.png" alt="Strategies"><br><sub><b>Strategies</b> — deploy, pause, tune, arm</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/signals.png" alt="AI Signals"><br><sub><b>AI Signals</b> — any LLM reasons over a market</sub></td>
+    <td><img src="docs/screenshots/settings.png" alt="Settings"><br><sub><b>Settings</b> — venue &amp; AI-provider keys (keychain)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/analytics.png" alt="Analytics"><br><sub><b>Analytics</b> — drawdown, leaderboard, trade log</sub></td>
+    <td><img src="docs/screenshots/correlation.png" alt="Correlation"><br><sub><b>Correlation</b> — return matrix &amp; concentration</sub></td>
+  </tr>
+</table>
+
+---
+
+## 🧠 AI Signals — bring any model
+
+Pythia's engine core speaks to **any** of these providers over your own API key. Anthropic uses the
+Messages API; everything else speaks the OpenAI-compatible Chat Completions dialect, so one code path
+covers the rest. Every model is overridable — type any model id you like.
+
+| Provider | id | Env var | Default model | Notes |
+|---|---|---|---|---|
+| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-8` | Messages API + adaptive thinking |
+| OpenAI (GPT) | `openai` | `OPENAI_API_KEY` | `gpt-5.1` | |
+| xAI (Grok) | `xai` | `XAI_API_KEY` | `grok-4` | |
+| z.ai (GLM) | `zai` | `ZAI_API_KEY` | `glm-4.6` | |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` | |
+| Google (Gemini) | `google` | `GEMINI_API_KEY` | `gemini-2.5-pro` | OpenAI-compat endpoint |
+| Groq | `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-5.1` | any model on OpenRouter |
+| Mistral | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` | |
+| Ollama (local) | `ollama` | — | `llama3.1` | no key; runs on your box |
+
+Each request returns a structured signal — `{ probability, direction, confidence, rationale }` —
+clamped and stamped with the provider/model that answered.
+
+> 🔒 **AI signals are advisory only.** No model reliably predicts prices, and **none of them place
+> orders.** Treat a signal as one input among many.
+
+**Where keys live:** the **desktop app** stores provider keys in the OS keychain (manage them in
+*Settings → AI providers*). The **backend server** reads keys from its own environment. The browser
+paper build can't reach model APIs and shows the feature as unavailable.
+
+---
+
+## 🚀 Run it
+
+**One UI, three runtimes.** The cockpit auto-detects where it's running and wires itself up.
+
+### Native desktop app (recommended — real read-only market data)
 
 ```bash
 npm install
 npm run tauri dev     # dev window with hot-reload (needs the Rust toolchain)
-npm run tauri build   # produces a Windows installer + Pythia.exe
-                      #   → src-tauri/target/release/bundle/nsis/
+npm run tauri build   # Windows installer + Pythia.exe → src-tauri/target/release/bundle/nsis/
 ```
 
-The native build runs a persistent Rust engine that fetches **live Kraken crypto prices** and
-**Polymarket odds** (read-only, no keys) and paper-trades against them.
+Runs a persistent Rust engine that fetches **live Kraken crypto prices** and **Polymarket odds**
+(read-only, no keys) and paper-trades against them.
 
-**Browser / web app** (no Rust, no keys — great for exploring the UI):
+### Standalone backend server (for a web dashboard or phone app)
 
 ```bash
-npm run dev           # opens the cockpit at http://localhost:5174, paper mode
+cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 ```
 
-> Windows Rust build note: if `cargo` fails with `failed to find tool "C:\Program"`, unset the
-> machine `CC`/`CXX` env vars for the build: `unset CC CXX CFLAGS CXXFLAGS` (they contain spaces
-> that break `cc-rs`).
+| Route | Purpose |
+|---|---|
+| `GET /api/state` | current engine state (JSON) |
+| `GET /api/stream` | WebSocket — full state pushed every tick |
+| `POST /api/command` | mutate the engine (kill switch, limits, strategies, orders) |
+| `GET /api/llm/providers` | which providers have a key in the server env |
+| `POST /api/llm/signal` | ask a provider for a signal (`{provider, model, context}`) |
 
-## Modes
+Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, and any provider key
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …).
+
+### Browser / web app (no Rust, no keys — explore the UI)
+
+```bash
+npm run dev           # http://localhost:5174 — paper mode
+```
+
+To make the browser build a thin client of the backend server, set
+`VITE_PYTHIA_SERVER=http://localhost:8787` (e.g. in `.env.local`) before `npm run dev`.
+
+> **Windows Rust build note:** if `cargo` fails with `failed to find tool "C:\Program"`, unset the
+> machine `CC`/`CXX` env vars first: `unset CC CXX CFLAGS CXXFLAGS` (they contain spaces that break
+> `cc-rs`).
+
+---
+
+## 🗂 Layout
+
+```
+Pythia/                     # Cargo workspace
+├─ PLAN.md · SAFETY.md      # the master plan · read before going live
+├─ crates/pythia-core/      # the shared engine brain (no UI): strategies, indicators,
+│  └─ src/                  #   risk, connectors, market data, vault, alerts, llm (AI signals)
+├─ server/                  # standalone backend — axum HTTP + WebSocket over pythia-core
+├─ src-tauri/               # native desktop shell (Tauri v2) — thin layer over pythia-core
+└─ src/                     # React cockpit (also runs standalone via the TS paper engine)
+   ├─ engine/               #   TS mirror of the core + Tauri/Server/Paper clients
+   ├─ pages/                #   Dashboard, Markets, Positions, Strategies, Composer, Backtest,
+   │                        #   Optimizer, Analytics, Correlation, AI Signals, Risk, Journal, …
+   └─ components/           #   neon UI kit
+```
+
+---
+
+## 🛡 Modes &amp; safety
 
 - **Paper (default):** a simulated matching engine fills orders against live/replayed prices with a
   fake balance. Prove strategies here first.
-- **Live (gated):** requires your own API keys (stored in the OS keychain) and a per-strategy,
-  typed confirmation to arm. The global kill switch and risk limits always apply.
+- **Live (gated):** requires your own API keys (OS keychain) and a per-strategy, typed confirmation
+  to arm. The global kill switch and risk limits always apply. Polymarket is geoblocked for US
+  persons — confirm legality where you live.
 
-## Layout
+Read [`SAFETY.md`](SAFETY.md) in full before enabling anything live.
 
-```
-Pythia/
-├─ PLAN.md            # the master plan
-├─ SAFETY.md          # read before going live
-├─ src/               # React cockpit (runs in browser via the paper engine)
-│  ├─ engine/         # client-side paper engine + risk + strategies (TS mirror of the Rust core)
-│  ├─ pages/          # Dashboard, Markets, Positions, Strategies, Risk, Journal, Settings, About
-│  └─ components/     # neon UI kit
-└─ src-tauri/         # Rust engine core + Tauri shell (Phase 1)
-   └─ src/
-      ├─ engine/      # portfolio, risk, strategy runtime
-      └─ connectors/  # paper, polymarket, crypto, alpaca
-```
+---
 
-See [`PLAN.md`](PLAN.md) for the full architecture and roadmap.
+<div align="center">
+
+Built by **SenseiIssei**. If Pythia is useful to you:
+
+<a href="https://ko-fi.com/senseiissei">
+  <img src="https://ko-fi.com/img/githubbutton_2.svg" alt="Support me on Ko-fi" height="36">
+</a>
+
+</div>

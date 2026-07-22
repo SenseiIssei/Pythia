@@ -5,6 +5,7 @@
 use crate::state::AppState;
 use pythia_core::connectors::{Side, Venue};
 use pythia_core::engine::{EngineState, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::vault;
 use std::collections::{BTreeMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -143,4 +144,66 @@ pub async fn test_alert(app_state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn venue_status() -> Vec<(String, bool)> {
     vault::VENUES.iter().map(|v| (v.to_string(), vault::has_keys(v))).collect()
+}
+
+// ── LLM providers (multi-provider AI signals) ────────────────────────────────
+// Every provider's key lives in ONE vault blob under the "ai" pseudo-venue,
+// keyed by provider id. Keys are merged/removed individually and, like all
+// vault entries, never read back to the UI.
+
+fn ai_keys() -> BTreeMap<String, String> {
+    vault::get("ai").unwrap_or_default()
+}
+
+/// List providers with a `configured` flag reflecting which keys are in the vault.
+#[tauri::command]
+pub fn llm_providers() -> Vec<ProviderInfo> {
+    let keys = ai_keys();
+    llm::providers_with(|p| {
+        !p.needs_key() || keys.get(p.id()).map(|k| !k.trim().is_empty()).unwrap_or(false)
+    })
+}
+
+/// Store (or, on empty, remove) one provider's key, merging into the "ai" blob.
+#[tauri::command]
+pub fn save_llm_key(provider: String, key: String) -> Result<(), String> {
+    let p = Provider::parse(&provider).ok_or_else(|| format!("unknown provider: {provider}"))?;
+    let mut keys = ai_keys();
+    let k = key.trim();
+    if k.is_empty() {
+        keys.remove(p.id());
+    } else {
+        keys.insert(p.id().to_string(), k.to_string());
+    }
+    if keys.is_empty() {
+        vault::clear("ai")
+    } else {
+        vault::save("ai", &keys)
+    }
+}
+
+/// Forget one provider's key.
+#[tauri::command]
+pub fn clear_llm_key(provider: String) -> Result<(), String> {
+    let p = Provider::parse(&provider).ok_or_else(|| format!("unknown provider: {provider}"))?;
+    let mut keys = ai_keys();
+    keys.remove(p.id());
+    if keys.is_empty() {
+        vault::clear("ai")
+    } else {
+        vault::save("ai", &keys)
+    }
+}
+
+/// Ask a provider for a signal on one market. Key comes from the vault; the
+/// frontend only ever sends provider/model/context.
+#[tauri::command]
+pub async fn llm_signal(provider: String, model: String, context: String) -> Result<Signal, String> {
+    let p = Provider::parse(&provider).ok_or_else(|| format!("unknown provider: {provider}"))?;
+    let key = ai_keys().get(p.id()).cloned().unwrap_or_default();
+    if p.needs_key() && key.trim().is_empty() {
+        return Err(format!("{} not configured — add a key in Settings", p.id()));
+    }
+    let cfg = LlmConfig::new(p, model, key);
+    llm::signal(&cfg, &context).await.map_err(|e| e.to_string())
 }

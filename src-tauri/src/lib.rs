@@ -101,6 +101,10 @@ pub fn run() {
             commands::clear_venue_keys,
             commands::venue_status,
             commands::test_alert,
+            commands::llm_providers,
+            commands::save_llm_key,
+            commands::clear_llm_key,
+            commands::llm_signal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

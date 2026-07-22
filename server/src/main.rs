@@ -33,7 +33,8 @@ use tower_http::cors::CorsLayer;
 
 use pythia_core::connectors::Side;
 use pythia_core::engine::{Engine, EngineState, RiskLimits, StrategyConfig, StrategyState};
-use pythia_core::{alerts, claude, marketdata};
+use pythia_core::llm::{self, LlmConfig, Provider};
+use pythia_core::{alerts, marketdata};
 
 /// Shared server state. The engine lives behind a Mutex (locked only briefly,
 /// never across an await); `tx` fans out each tick's serialized state to every
@@ -69,7 +70,8 @@ async fn main() {
         .route("/api/state", get(get_state))
         .route("/api/stream", get(ws_stream))
         .route("/api/command", post(post_command))
-        .route("/api/claude/signal", post(post_claude_signal))
+        .route("/api/llm/providers", get(get_llm_providers))
+        .route("/api/llm/signal", post(post_llm_signal))
         // The dashboards are served from a different origin in dev; allow them.
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -79,10 +81,15 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("cannot bind {addr}: {e}"));
     tracing::info!("Pythia backend listening on http://{addr}");
-    if claude::is_configured() {
-        tracing::info!("Claude signal provider: ENABLED (ANTHROPIC_API_KEY present)");
+    let configured: Vec<&str> = Provider::ALL
+        .iter()
+        .filter(|p| p.needs_key() && p.configured_in_env())
+        .map(|p| p.id())
+        .collect();
+    if configured.is_empty() {
+        tracing::info!("LLM providers: none configured (set e.g. ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY / ZAI_API_KEY)");
     } else {
-        tracing::info!("Claude signal provider: disabled (set ANTHROPIC_API_KEY to enable)");
+        tracing::info!("LLM providers configured: {}", configured.join(", "));
     }
 
     axum::serve(listener, app).await.unwrap();
@@ -216,26 +223,64 @@ async fn post_command(
     Json(dto)
 }
 
+/// List every supported provider and whether the server has a key for it (from
+/// the environment). The frontend uses this to populate the model picker.
+async fn get_llm_providers() -> impl IntoResponse {
+    Json(llm::providers_from_env())
+}
+
 #[derive(Debug, Deserialize)]
-struct ClaudeReq {
+#[serde(rename_all = "camelCase")]
+struct LlmReq {
+    /// Provider id (e.g. "anthropic", "openai", "xai", "zai"). Default: the
+    /// first env-configured provider, else anthropic.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Model override; empty → the provider's default.
+    #[serde(default)]
+    model: Option<String>,
     /// Caller-built market context: question/symbol, price/odds, recent moves,
     /// any news. Kept opaque so the model can weigh whatever the caller surfaces.
     context: String,
 }
 
-/// Ask Claude for a structured signal. 503 when the key isn't configured, 502
-/// on any upstream/parse failure — the engine treats absence as "no opinion".
-async fn post_claude_signal(Json(req): Json<ClaudeReq>) -> impl IntoResponse {
-    match claude::signal(&req.context).await {
-        Ok(sig) => (StatusCode::OK, Json(sig)).into_response(),
-        Err(claude::ClaudeError::NotConfigured) => (
+/// Ask a provider for a structured signal. The server supplies the key from its
+/// environment; the client never sends secrets. 503 when no key is configured,
+/// 502 on any upstream/parse failure — the engine treats absence as "no opinion".
+async fn post_llm_signal(Json(req): Json<LlmReq>) -> impl IntoResponse {
+    // Resolve the provider: explicit request, else the first configured one.
+    let provider = match req.provider.as_deref() {
+        Some(p) => match Provider::parse(p) {
+            Some(p) => p,
+            None => {
+                return (StatusCode::BAD_REQUEST, format!("unknown provider: {p}")).into_response()
+            }
+        },
+        None => Provider::ALL
+            .into_iter()
+            .find(|p| p.needs_key() && p.configured_in_env())
+            .unwrap_or(Provider::Anthropic),
+    };
+
+    let key = std::env::var(provider.env_key()).unwrap_or_default();
+    if provider.needs_key() && key.trim().is_empty() {
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "Claude disabled — set ANTHROPIC_API_KEY on the server",
+            format!(
+                "{} not configured — set {} on the server",
+                provider.id(),
+                provider.env_key()
+            ),
         )
-            .into_response(),
+            .into_response();
+    }
+
+    let cfg = LlmConfig::new(provider, req.model.unwrap_or_default(), key);
+    match llm::signal(&cfg, &req.context).await {
+        Ok(sig) => (StatusCode::OK, Json(sig)).into_response(),
         Err(e) => {
-            tracing::warn!("claude signal failed: {e}");
-            (StatusCode::BAD_GATEWAY, format!("claude error: {e}")).into_response()
+            tracing::warn!("llm signal failed: {e}");
+            (StatusCode::BAD_GATEWAY, format!("llm error: {e}")).into_response()
         }
     }
 }

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Lock, Link2, ShieldCheck, Trash2, Bell, Send } from "lucide-react";
+import { KeyRound, Lock, Link2, ShieldCheck, Trash2, Bell, Send, BrainCircuit } from "lucide-react";
 import { Card, PageHeader, Badge, Button } from "../components/ui";
 import { isTauri } from "../engine";
+import { aiMode, aiProviders, saveAiKey, clearAiKey } from "../ai";
+import type { LlmProviderInfo } from "../types";
 
 interface VenueCfg {
   id: string;
@@ -93,8 +95,146 @@ export function Settings() {
       </div>
 
       <div className="mt-4">
+        <AiProvidersCard />
+      </div>
+
+      <div className="mt-4">
         <AlertsCard native={native} />
       </div>
+    </div>
+  );
+}
+
+function AiProvidersCard() {
+  const mode = aiMode();
+  const [providers, setProviders] = useState<LlmProviderInfo[]>([]);
+  const [err, setErr] = useState("");
+
+  async function refresh() {
+    if (mode === "none") return;
+    try {
+      setProviders(await aiProviders());
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <Card
+      title="AI providers"
+      right={<BrainCircuit size={14} className="text-purple-neon" />}
+    >
+      <div className="mb-3 text-sm text-cyber-text-dim">
+        Bring any API key — <span className="text-accent">Claude, GPT, Grok, GLM, Gemini, DeepSeek, Groq, Mistral,
+        OpenRouter</span> or a local <span className="text-accent">Ollama</span>. Used on the{" "}
+        <span className="text-accent">AI Signals</span> page to reason about markets. Keys are advisory only —
+        they never place orders.
+      </div>
+
+      {mode === "none" ? (
+        <div className="rounded border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-cyber-text-dim">
+          The browser paper build can't reach model APIs. Run the <span className="text-accent">desktop app</span>{" "}
+          (keys in the OS keychain) or a <span className="text-accent">backend server</span> (keys in its env).
+        </div>
+      ) : mode === "server" ? (
+        <div className="rounded border border-accent/20 bg-accent/5 px-3 py-2 text-xs text-cyber-text-dim">
+          Connected to a backend — provider keys live in the <span className="text-accent">server's environment</span>{" "}
+          (e.g. <code className="text-accent">ANTHROPIC_API_KEY</code>, <code className="text-accent">OPENAI_API_KEY</code>,{" "}
+          <code className="text-accent">XAI_API_KEY</code>). Configured providers show a green badge below.
+        </div>
+      ) : null}
+
+      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+        {providers.map((p) => (
+          <ProviderRow key={p.id} p={p} manageable={mode === "native"} onChanged={refresh} />
+        ))}
+      </div>
+      {err && <div className="mt-2 text-xs text-danger">{err}</div>}
+    </Card>
+  );
+}
+
+function ProviderRow({
+  p,
+  manageable,
+  onChanged,
+}: {
+  p: LlmProviderInfo;
+  manageable: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  async function save() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await saveAiKey(p.id, val);
+      setVal("");
+      setMsg("saved");
+      await onChanged();
+    } catch (e) {
+      setMsg(String(e instanceof Error ? e.message : e));
+    }
+    setBusy(false);
+  }
+  async function clear() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await clearAiKey(p.id);
+      setMsg("cleared");
+      await onChanged();
+    } catch (e) {
+      setMsg(String(e instanceof Error ? e.message : e));
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="rounded-lg border border-cyber-border bg-cyber-surface/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-medium">{p.label}</span>
+        <Badge tone={p.configured ? "green" : "neutral"}>{p.configured ? "configured" : p.needsKey ? "no key" : "local"}</Badge>
+      </div>
+      <div className="mb-2 text-[11px] text-cyber-text-faint">
+        default model <span className="text-cyber-text-dim">{p.defaultModel}</span>
+        {p.needsKey && <> · env <code className="text-cyber-text-dim">{p.envKey}</code></>}
+      </div>
+      {p.needsKey && manageable ? (
+        <>
+          <input
+            type="password"
+            value={val}
+            autoComplete="off"
+            onChange={(e) => {
+              setVal(e.target.value);
+              setMsg("");
+            }}
+            placeholder={p.configured ? "•••••••• (stored)" : "paste API key"}
+            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <Button tone="cyan" icon={ShieldCheck} disabled={busy || val.trim().length === 0} onClick={save}>
+              {p.configured ? "Update" : "Save"}
+            </Button>
+            {p.configured && (
+              <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+                Clear
+              </Button>
+            )}
+            {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
+          </div>
+        </>
+      ) : !p.needsKey ? (
+        <div className="text-[11px] text-cyber-text-dim">No key needed — runs against your local Ollama.</div>
+      ) : null}
     </div>
   );
 }

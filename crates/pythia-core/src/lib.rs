@@ -8,8 +8,8 @@
 #![allow(dead_code)]
 
 pub mod alerts;
-pub mod claude;
 pub mod connectors;
 pub mod engine;
+pub mod llm;
 pub mod marketdata;
 pub mod vault;

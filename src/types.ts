@@ -176,3 +176,26 @@ export interface PortfolioSnapshot {
   equityCurve: number[];
   balances: VenueBalance[];
 }
+
+// ── AI signal provider (multi-LLM) ───────────────────────────────────────────
+export type LlmDirection = "long" | "short" | "neutral";
+
+export interface LlmProviderInfo {
+  id: string;
+  label: string;
+  defaultModel: string;
+  suggestedModels: string[];
+  envKey: string;
+  needsKey: boolean;
+  /** whether a key is available in the current runtime (vault or env) */
+  configured: boolean;
+}
+
+export interface LlmSignal {
+  probability: number;
+  direction: LlmDirection;
+  confidence: number;
+  rationale: string;
+  provider: string;
+  model: string;
+}
