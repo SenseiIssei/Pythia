@@ -50,7 +50,7 @@ const nextId = (p: string) => `${p}_${Date.now().toString(36)}_${(seq++).toStrin
 // the identical Rust daemon answers instead.
 export class PaperEngine implements EngineClient {
   private sim = new MarketSim();
-  private history = new Map<string, number[]>();
+  private priceHist = new Map<string, number[]>();
   private positions = new Map<string, PositionInternal>();
   private orders: Order[] = [];
   private journal: JournalEntry[] = [];
@@ -72,7 +72,7 @@ export class PaperEngine implements EngineClient {
   private version = 0;
 
   constructor() {
-    for (const m of this.sim.list()) this.history.set(m.id, [m.price]);
+    for (const m of this.sim.list()) this.priceHist.set(m.id, [m.price]);
     this.log("system", "Pythia paper engine initialized · balance $100,000 (simulated)");
   }
 
@@ -106,10 +106,10 @@ export class PaperEngine implements EngineClient {
 
     // append each new close to the rolling history
     for (const m of markets) {
-      let h = this.history.get(m.id);
+      let h = this.priceHist.get(m.id);
       if (!h) {
         h = [];
-        this.history.set(m.id, h);
+        this.priceHist.set(m.id, h);
       }
       h.push(m.price);
       if (h.length > 260) h.splice(0, h.length - 260);
@@ -119,7 +119,7 @@ export class PaperEngine implements EngineClient {
     // (NOT a real forecast) so Prob-Edge has a live signal on real Polymarket odds
     for (const m of markets) {
       if (m.kind !== "prediction") continue;
-      const h = this.history.get(m.id);
+      const h = this.priceHist.get(m.id);
       if (!h) continue;
       const fair = ind.ema(h, 20);
       if (fair !== null) m.modelProb = Math.min(0.98, Math.max(0.02, fair));
@@ -128,7 +128,7 @@ export class PaperEngine implements EngineClient {
     // regime detection for tradable markets (Kaufman efficiency ratio)
     for (const m of markets) {
       if (m.kind === "prediction") continue;
-      const h = this.history.get(m.id);
+      const h = this.priceHist.get(m.id);
       if (!h) continue;
       const er = ind.efficiencyRatio(h, 20);
       if (er !== null) {
@@ -167,7 +167,7 @@ export class PaperEngine implements EngineClient {
       for (const strat of this.strategies) {
         const until = this.cooldownUntil.get(strat.id);
         if (until && now < until) continue;
-        for (const intent of runStrategy(strat, byId, this.history)) {
+        for (const intent of runStrategy(strat, byId, this.priceHist)) {
           const m = byId.get(intent.marketId);
           if (!m) continue;
           if (this.limits.regimeFilter && !strategyRegimeOk(strat.kind, m.regime)) continue;
@@ -216,7 +216,7 @@ export class PaperEngine implements EngineClient {
     const kelly = kellySize(intent.confidence, price, budget, this.limits);
     let qtyWanted = Math.max(0, kelly * intent.size);
     if (this.limits.volTargetPct > 0) {
-      const h = this.history.get(m.id);
+      const h = this.priceHist.get(m.id);
       const vol = h ? ind.retVol(h, 20) : null;
       if (vol && vol > 0) {
         qtyWanted *= Math.max(0.25, Math.min(3, this.limits.volTargetPct / 100 / vol));
@@ -254,7 +254,7 @@ export class PaperEngine implements EngineClient {
 
   private computeStops(m: Market, side: "buy" | "sell", entry: number): { stop: number; target: number } {
     if (m.kind === "prediction") return { stop: 0, target: 0 };
-    const atr = ind.atrProxy(this.history.get(m.id) ?? [], 14);
+    const atr = ind.atrProxy(this.priceHist.get(m.id) ?? [], 14);
     if (atr === null || atr <= 0) return { stop: 0, target: 0 };
     const { stopAtrMult: sl, takeProfitAtrMult: tp } = this.limits;
     const long = side === "buy";
@@ -584,6 +584,15 @@ export class PaperEngine implements EngineClient {
   }
   getLimits(): RiskLimits {
     return { ...this.limits };
+  }
+  history(): Record<string, number[]> {
+    const out: Record<string, number[]> = {};
+    for (const [id, h] of this.priceHist) {
+      const m = this.sim.get(id);
+      if (!m || m.kind === "prediction") continue;
+      out[id] = h.slice(-60);
+    }
+    return out;
   }
 
   // ── mutations from the UI ──────────────────────────────────────────────────

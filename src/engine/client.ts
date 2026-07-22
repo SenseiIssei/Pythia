@@ -27,6 +27,8 @@ export interface EngineClient {
   journalList(): JournalEntry[];
   strategyList(): StrategyConfig[];
   getLimits(): RiskLimits;
+  /** Recent close-price history per tradable market (for correlation analysis). */
+  history(): Record<string, number[]>;
 
   toggleKill(): void;
   setLimits(l: Partial<RiskLimits>): void;
@@ -46,6 +48,7 @@ export interface EngineState {
   journal: JournalEntry[];
   strategies: StrategyConfig[];
   limits: RiskLimits;
+  history: Record<string, number[]>;
 }
 
 export function isTauri(): boolean {

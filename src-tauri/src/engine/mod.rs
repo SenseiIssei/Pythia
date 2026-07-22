@@ -268,6 +268,7 @@ pub struct EngineState {
     pub journal: Vec<JournalEntry>,
     pub strategies: Vec<StrategyConfig>,
     pub limits: RiskLimits,
+    pub history: HashMap<String, Vec<f64>>, // recent closes per tradable market
 }
 
 // ── persistence (survive restarts) ─────────────────────────────────────────
@@ -1149,6 +1150,17 @@ impl Engine {
             journal: self.journal.iter().take(400).cloned().collect(),
             strategies: self.strategies.clone(),
             limits: self.limits.clone(),
+            history: self
+                .markets
+                .iter()
+                .filter(|m| m.kind != MarketKind::Prediction)
+                .filter_map(|m| {
+                    self.history.get(&m.id).map(|h| {
+                        let recent: Vec<f64> = h.iter().skip(h.len().saturating_sub(60)).cloned().collect();
+                        (m.id.clone(), recent)
+                    })
+                })
+                .collect(),
         }
     }
 

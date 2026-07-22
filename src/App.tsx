@@ -15,6 +15,7 @@ import { Composer } from "./pages/Composer";
 import { Backtest } from "./pages/Backtest";
 import { Optimizer } from "./pages/Optimizer";
 import { Analytics } from "./pages/Analytics";
+import { Correlation } from "./pages/Correlation";
 import { Risk } from "./pages/Risk";
 import { Journal } from "./pages/Journal";
 import { Settings } from "./pages/Settings";
@@ -29,6 +30,7 @@ const PAGES: Record<PageId, () => ReactNode> = {
   backtest: Backtest,
   optimizer: Optimizer,
   analytics: Analytics,
+  correlation: Correlation,
   risk: Risk,
   journal: Journal,
   settings: Settings,

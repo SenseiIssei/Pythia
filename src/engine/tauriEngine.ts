@@ -32,6 +32,7 @@ const EMPTY: EngineState = {
   journal: [],
   strategies: [],
   limits: DEFAULT_LIMITS,
+  history: {},
 };
 
 // Thin proxy to the Rust engine daemon. It caches the last EngineState pushed
@@ -99,6 +100,9 @@ export class TauriEngineClient implements EngineClient {
   }
   getLimits(): RiskLimits {
     return this.state.limits;
+  }
+  history(): Record<string, number[]> {
+    return this.state.history ?? {};
   }
 
   toggleKill() {

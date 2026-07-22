@@ -25,6 +25,7 @@ interface Store {
   journal: JournalEntry[];
   strategies: StrategyConfig[];
   limits: RiskLimits;
+  history: Record<string, number[]>;
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
@@ -56,6 +57,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       journal: engine.journalList(),
       strategies: engine.strategyList(),
       limits: engine.getLimits(),
+      history: engine.history(),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),
