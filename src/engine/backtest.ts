@@ -63,14 +63,18 @@ export function syntheticSeries(bars: number, start: number, drift: number, vol:
   return s;
 }
 
-export function backtest(cfg: StrategyConfig, opts: BacktestOpts = {}): BacktestResult {
-  const empty = { bars: 0, trades: 0, totalReturnPct: 0, sharpe: 0, maxDrawdownPct: 0, winRate: 0, profitFactor: 0, equityCurve: [] };
-  if (cfg.kind === "pairs" || cfg.kind === "prob-edge" || cfg.kind === "manual" || cfg.kind === "arb") {
-    return { ok: false, message: `${cfg.kind} needs multi-asset/model inputs — not in the single-asset backtester`, ...empty };
-  }
-  const bars = opts.bars ?? 1500;
-  const marketId = cfg.universe[0] ?? "crypto:BTC/USD";
-  const series = syntheticSeries(bars, opts.startPrice ?? 100, opts.drift ?? 0.0002, opts.vol ?? 0.015, opts.seed ?? 12345);
+export interface Signal {
+  side: "buy" | "sell";
+  size: number; // 0..1 fraction of the 20%-of-equity slug
+}
+
+/**
+ * Core walk-forward simulation shared by the strategy backtester and the
+ * composer. `signalAt` returns a new-position signal (only consulted when flat);
+ * exits are handled by ATR stop-loss / take-profit.
+ */
+export function simulate(series: number[], signalAt: (hist: number[], price: number) => Signal | null, opts: BacktestOpts = {}): BacktestResult {
+  const bars = series.length;
   const fee = (opts.feeBps ?? 6) / 10000;
   const stopAtr = opts.stopAtr ?? 3;
   const tpAtr = opts.tpAtr ?? 5;
@@ -116,18 +120,16 @@ export function backtest(cfg: StrategyConfig, opts: BacktestOpts = {}): Backtest
     }
 
     if (pos === 0) {
-      const m: Market = { id: marketId, venue: cfg.venueClass, symbol: marketId, kind: "crypto", price, change24h: 0, updatedAt: 0 };
-      const intents = runStrategy(cfg, new Map([[marketId, m]]), new Map([[marketId, hist]]));
-      const intent = intents.find((x) => x.marketId === marketId);
-      if (intent) {
+      const sig = signalAt(hist, price);
+      if (sig) {
         const atr = ind.atrProxy(hist, 14) ?? 0;
-        const notional = equity * 0.2 * intent.size;
-        pos = (intent.side === "buy" ? 1 : -1) * (notional / price);
+        const notional = equity * 0.2 * sig.size;
+        pos = (sig.side === "buy" ? 1 : -1) * (notional / price);
         entry = price;
         cash -= Math.abs(pos * price) * fee;
         if (atr > 0) {
-          stop = intent.side === "buy" ? price - stopAtr * atr : price + stopAtr * atr;
-          target = intent.side === "buy" ? price + tpAtr * atr : price - tpAtr * atr;
+          stop = sig.side === "buy" ? price - stopAtr * atr : price + stopAtr * atr;
+          target = sig.side === "buy" ? price + tpAtr * atr : price - tpAtr * atr;
         } else {
           stop = 0;
           target = 0;
@@ -155,4 +157,24 @@ export function backtest(cfg: StrategyConfig, opts: BacktestOpts = {}): Backtest
   const winRate = trades > 0 ? wins / trades : 0;
 
   return { ok: true, bars, trades, totalReturnPct, sharpe, maxDrawdownPct: maxDD, winRate, profitFactor, equityCurve };
+}
+
+export function backtest(cfg: StrategyConfig, opts: BacktestOpts = {}): BacktestResult {
+  const empty = { bars: 0, trades: 0, totalReturnPct: 0, sharpe: 0, maxDrawdownPct: 0, winRate: 0, profitFactor: 0, equityCurve: [] };
+  if (cfg.kind === "pairs" || cfg.kind === "prob-edge" || cfg.kind === "manual" || cfg.kind === "arb") {
+    return { ok: false, message: `${cfg.kind} needs multi-asset/model inputs — not in the single-asset backtester`, ...empty };
+  }
+  const bars = opts.bars ?? 1500;
+  const marketId = cfg.universe[0] ?? "crypto:BTC/USD";
+  const series = syntheticSeries(bars, opts.startPrice ?? 100, opts.drift ?? 0.0002, opts.vol ?? 0.015, opts.seed ?? 12345);
+  return simulate(
+    series,
+    (hist, price) => {
+      const m: Market = { id: marketId, venue: cfg.venueClass, symbol: marketId, kind: "crypto", price, change24h: 0, updatedAt: 0 };
+      const intents = runStrategy(cfg, new Map([[marketId, m]]), new Map([[marketId, hist]]));
+      const intent = intents.find((x) => x.marketId === marketId);
+      return intent ? { side: intent.side, size: intent.size } : null;
+    },
+    opts
+  );
 }

@@ -10,6 +10,7 @@ import {
   FlaskConical,
   BarChart3,
   Sparkles,
+  Blocks,
   type LucideIcon,
 } from "lucide-react";
 
@@ -18,6 +19,7 @@ export type PageId =
   | "markets"
   | "positions"
   | "strategies"
+  | "composer"
   | "backtest"
   | "optimizer"
   | "analytics"
@@ -38,6 +40,7 @@ export const NAV: NavItem[] = [
   { id: "markets", label: "Markets", icon: LineChart, section: "Trading" },
   { id: "positions", label: "Positions", icon: Wallet, section: "Trading" },
   { id: "strategies", label: "Strategies", icon: Cpu, section: "Trading" },
+  { id: "composer", label: "Composer", icon: Blocks, section: "Research" },
   { id: "backtest", label: "Backtest", icon: FlaskConical, section: "Research" },
   { id: "optimizer", label: "Optimizer", icon: Sparkles, section: "Research" },
   { id: "analytics", label: "Analytics", icon: BarChart3, section: "Research" },

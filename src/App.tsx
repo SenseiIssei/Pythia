@@ -11,6 +11,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
 import { Strategies } from "./pages/Strategies";
+import { Composer } from "./pages/Composer";
 import { Backtest } from "./pages/Backtest";
 import { Optimizer } from "./pages/Optimizer";
 import { Analytics } from "./pages/Analytics";
@@ -24,6 +25,7 @@ const PAGES: Record<PageId, () => ReactNode> = {
   markets: Markets,
   positions: Positions,
   strategies: Strategies,
+  composer: Composer,
   backtest: Backtest,
   optimizer: Optimizer,
   analytics: Analytics,
