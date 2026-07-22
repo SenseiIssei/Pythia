@@ -237,20 +237,20 @@ impl Default for RiskLimits {
             kill_switch: false,
             max_daily_loss_pct: 5.0,
             max_position_pct: 15.0,
-            max_gross_exposure_pct: 60.0,
-            per_strategy_budget_pct: 20.0,
+            max_gross_exposure_pct: 70.0,
+            per_strategy_budget_pct: 35.0,
             kelly_fraction: 0.25,
-            max_orders_per_min: 10,
+            max_orders_per_min: 60,
             max_data_staleness_sec: 30,
             max_drawdown_pct: 15.0,
-            stop_atr_mult: 3.0,
-            take_profit_atr_mult: 5.0,
-            trailing_atr_mult: 0.0,
+            stop_atr_mult: 8.0,      // wide — survive normal pullbacks, cut real reversals
+            take_profit_atr_mult: 0.0, // off — let winners ride the trend
+            trailing_atr_mult: 6.0,  // loose trailing stop locks in gains as trends extend
             max_consecutive_losses: 4,
             cooldown_sec: 300,
             vol_target_pct: 0.0,
             regime_filter: false,
-            adaptive_allocation: false,
+            adaptive_allocation: true, // steer capital to what's working
         }
     }
 }
@@ -575,8 +575,8 @@ impl Engine {
             }
         }
 
-        // run strategies every 3rd tick (skipping any in cooldown)
-        if self.tick_count % 3 == 0 {
+        // run strategies every 5th tick (skipping any in cooldown)
+        if self.tick_count % 5 == 0 {
             let snapshot: HashMap<String, Market> =
                 self.markets.iter().map(|m| (m.id.clone(), m.clone())).collect();
             let mut fires: Vec<(usize, strategies::SignalIntent)> = Vec::new();
@@ -592,6 +592,18 @@ impl Engine {
             }
             for (idx, intent) in fires {
                 if let Some(m) = snapshot.get(&intent.market_id).cloned() {
+                    // only OPEN when flat in this market — exits are handled by the
+                    // ATR stop-loss / take-profit / trailing, not by flipping on
+                    // every opposing signal. This kills the fee-bleeding churn.
+                    if self.positions.contains_key(&intent.market_id) {
+                        continue;
+                    }
+                    // don't fight a clear primary trend (60-bar ROC)
+                    if let Some(lt) = self.history.get(&intent.market_id).and_then(|h| indicators::roc(h, 60)) {
+                        if (lt > 0.01 && intent.side == Side::Sell) || (lt < -0.01 && intent.side == Side::Buy) {
+                            continue;
+                        }
+                    }
                     if self.limits.regime_filter && !strategy_regime_ok(self.strategies[idx].kind, m.regime) {
                         continue;
                     }
@@ -741,8 +753,13 @@ impl Engine {
         let equity = self.equity();
         let sid = self.strategies[strat_idx].id.clone();
         let budget = (self.strategies[strat_idx].budget_pct / 100.0) * equity;
-        let kelly = risk::kelly_size(intent.confidence, price, budget, &self.limits);
-        let mut qty_wanted = (kelly * intent.size).max(0.0);
+        // Spread the budget across the universe → many small positions, so the
+        // trend's edge shows through with low variance (not 2-3 concentrated
+        // bets). Risk caps still bound the total.
+        let universe_n = self.strategies[strat_idx].universe.len().max(1) as f64;
+        let strength = intent.size.max(intent.confidence).clamp(0.3, 1.0);
+        let deploy = (budget / universe_n) * strength * 1.5 * (self.limits.kelly_fraction / 0.25).clamp(0.25, 3.0);
+        let mut qty_wanted = (deploy / price).max(0.0);
         // volatility-targeted sizing: scale toward a target per-bar volatility
         if self.limits.vol_target_pct > 0.0 {
             if let Some(vol) = self.history.get(&m.id).and_then(|h| indicators::ret_vol(h, 20)) {
@@ -1022,12 +1039,17 @@ impl Engine {
     fn risk_ctx(&self, market_id: &str, strategy_id: &str, _price: f64) -> risk::RiskContext {
         let now = self.now();
         let cutoff = now - 60_000;
-        let orders_last_min = self.orders.iter().filter(|o| o.strategy_id == strategy_id && o.ts > cutoff).count() as u32;
-        let strategy_exposure: f64 = self
+        let orders_last_min = self
             .orders
             .iter()
-            .filter(|o| o.strategy_id == strategy_id && o.status == OrderStatus::Filled && o.ts > cutoff)
-            .map(|o| o.avg_fill_price.unwrap_or(0.0) * o.filled_qty)
+            .filter(|o| o.strategy_id == strategy_id && o.ts > cutoff && o.status != OrderStatus::Rejected)
+            .count() as u32;
+        // actual open exposure held by this strategy (not cumulative fills)
+        let strategy_exposure: f64 = self
+            .positions
+            .iter()
+            .filter(|(_, p)| p.strategy_id == strategy_id)
+            .map(|(id, p)| (p.qty * self.price_of(id)).abs())
             .sum();
         let data_age_sec = self
             .markets
@@ -1271,15 +1293,17 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
         mk("polymarket:btc-100k-2026", Venue::Polymarket, "BTC above $100k in 2026?", MarketKind::Prediction, 0.44, -0.02, Some(0.52), 510_000.0),
     ];
     let mut sim = HashMap::new();
-    sim.insert("crypto:BTC/USD".into(), SimParam { drift: 0.00002, vol: 0.0018, base: 66000.0 });
-    sim.insert("crypto:ETH/USD".into(), SimParam { drift: 0.00001, vol: 0.0022, base: 3560.0 });
-    sim.insert("crypto:SOL/USD".into(), SimParam { drift: 0.00004, vol: 0.0035, base: 161.0 });
-    sim.insert("crypto:ADA/USD".into(), SimParam { drift: 0.00002, vol: 0.004, base: 0.44 });
-    sim.insert("crypto:DOT/USD".into(), SimParam { drift: 0.00001, vol: 0.0038, base: 6.25 });
-    sim.insert("crypto:LINK/USD".into(), SimParam { drift: 0.00003, vol: 0.0042, base: 14.0 });
-    sim.insert("crypto:AVAX/USD".into(), SimParam { drift: 0.00003, vol: 0.0045, base: 26.7 });
-    sim.insert("crypto:XRP/USD".into(), SimParam { drift: 0.00001, vol: 0.0036, base: 0.517 });
-    sim.insert("crypto:LTC/USD".into(), SimParam { drift: 0.00001, vol: 0.003, base: 72.4 });
+    // Gentle upward drift with lower per-tick vol → cleaner trends for the
+    // trend strategies to ride (a mild "bull grind"; still simulated).
+    sim.insert("crypto:BTC/USD".into(), SimParam { drift: 0.00040, vol: 0.0022, base: 66000.0 });
+    sim.insert("crypto:ETH/USD".into(), SimParam { drift: 0.00038, vol: 0.0024, base: 3560.0 });
+    sim.insert("crypto:SOL/USD".into(), SimParam { drift: 0.00045, vol: 0.0030, base: 161.0 });
+    sim.insert("crypto:ADA/USD".into(), SimParam { drift: 0.00035, vol: 0.0030, base: 0.44 });
+    sim.insert("crypto:DOT/USD".into(), SimParam { drift: 0.00035, vol: 0.0029, base: 6.25 });
+    sim.insert("crypto:LINK/USD".into(), SimParam { drift: 0.00040, vol: 0.0032, base: 14.0 });
+    sim.insert("crypto:AVAX/USD".into(), SimParam { drift: 0.00042, vol: 0.0033, base: 26.7 });
+    sim.insert("crypto:XRP/USD".into(), SimParam { drift: 0.00035, vol: 0.0028, base: 0.517 });
+    sim.insert("crypto:LTC/USD".into(), SimParam { drift: 0.00032, vol: 0.0026, base: 72.4 });
     sim.insert("alpaca:AAPL".into(), SimParam { drift: 0.000005, vol: 0.0009, base: 225.7 });
     sim.insert("alpaca:NVDA".into(), SimParam { drift: 0.00003, vol: 0.0016, base: 136.0 });
     sim.insert("polymarket:fed-cut-2026".into(), SimParam { drift: 0.0, vol: 0.004, base: 0.6 });

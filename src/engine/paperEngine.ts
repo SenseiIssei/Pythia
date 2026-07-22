@@ -14,7 +14,7 @@ import type {
   Venue,
 } from "../types";
 import { MarketSim } from "./marketSim";
-import { DEFAULT_LIMITS, evaluate, kellySize, type RiskContext } from "./risk";
+import { DEFAULT_LIMITS, evaluate, type RiskContext } from "./risk";
 import { defaultStrategies, runStrategy } from "./strategies";
 import * as ind from "./indicators";
 import type { EngineClient } from "./client";
@@ -162,14 +162,20 @@ export class PaperEngine implements EngineClient {
       }
     }
 
-    // run strategies every 3rd tick (skip any in cooldown)
-    if (this.tickCount % 3 === 0) {
+    // run strategies every 5th tick (skip any in cooldown)
+    if (this.tickCount % 5 === 0) {
       for (const strat of this.strategies) {
         const until = this.cooldownUntil.get(strat.id);
         if (until && now < until) continue;
         for (const intent of runStrategy(strat, byId, this.priceHist)) {
           const m = byId.get(intent.marketId);
           if (!m) continue;
+          // only OPEN when flat in this market — exits are handled by ATR
+          // stop/target/trailing, not by flipping on every signal (kills churn).
+          if (this.positions.has(intent.marketId)) continue;
+          // don't fight a clear primary trend (60-bar ROC)
+          const lt = ind.roc(this.priceHist.get(intent.marketId) ?? [], 60);
+          if (lt !== null && ((lt > 0.01 && intent.side === "sell") || (lt < -0.01 && intent.side === "buy"))) continue;
           if (this.limits.regimeFilter && !strategyRegimeOk(strat.kind, m.regime)) continue;
           this.log("signal", `${strat.name}: ${intent.side.toUpperCase()} ${m.symbol} — ${intent.reason}`, strat.id, intent.marketId);
           this.placeFromIntent(strat, m, intent);
@@ -213,8 +219,11 @@ export class PaperEngine implements EngineClient {
   ) {
     const price = m.price;
     const budget = (strat.budgetPct / 100) * this.equity();
-    const kelly = kellySize(intent.confidence, price, budget, this.limits);
-    let qtyWanted = Math.max(0, kelly * intent.size);
+    // Spread the budget across the universe → many small diversified positions.
+    const universeN = Math.max(1, strat.universe.length);
+    const strength = Math.min(1, Math.max(0.3, Math.max(intent.size, intent.confidence)));
+    const deploy = (budget / universeN) * strength * 1.5 * Math.min(3, Math.max(0.25, this.limits.kellyFraction / 0.25));
+    let qtyWanted = Math.max(0, deploy / price);
     if (this.limits.volTargetPct > 0) {
       const h = this.priceHist.get(m.id);
       const vol = h ? ind.retVol(h, 20) : null;
@@ -483,13 +492,16 @@ export class PaperEngine implements EngineClient {
       },
       ordersLastMin: (sid) => {
         const cutoff = Date.now() - 60_000;
-        return this.orders.filter((o) => o.strategyId === sid && o.ts > cutoff).length;
+        return this.orders.filter((o) => o.strategyId === sid && o.ts > cutoff && o.status !== "rejected").length;
       },
       strategyExposure: (sid) => {
-        const cutoff = Date.now() - 60_000;
-        return this.orders
-          .filter((o) => o.strategyId === sid && o.status === "filled" && o.ts > cutoff)
-          .reduce((acc, o) => acc + (o.avgFillPrice ?? 0) * o.filledQty, 0);
+        let sum = 0;
+        for (const p of this.positions.values()) {
+          if (p.strategyId !== sid) continue;
+          const m = this.sim.get(p.marketId);
+          if (m) sum += Math.abs(p.qty * m.price);
+        }
+        return sum;
       },
       dataAgeSec: (id) => {
         const m = this.sim.get(id);

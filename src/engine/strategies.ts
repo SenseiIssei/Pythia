@@ -42,7 +42,7 @@ function emaCross(cfg: StrategyConfig, markets: Map<string, Market>, history: Ma
     if (f === null || s === null || s === 0) continue;
     const spread = (f - s) / s;
     const strength = clamp01(Math.abs(spread) / 0.02);
-    if (strength < 0.15) continue;
+    if (strength < 0.05) continue;
     out.push({
       marketId: id,
       side: f > s ? "buy" : "sell",
@@ -99,7 +99,7 @@ function macdTrend(cfg: StrategyConfig, markets: Map<string, Market>, history: M
     if (!r) continue;
     const hist = r.line - r.signal;
     const strength = clamp01(Math.abs(hist) / m.price / 0.001);
-    if (strength < 0.2) continue;
+    if (strength < 0.1) continue;
     if (r.line > r.signal && r.line > 0) {
       out.push({ marketId: id, side: "buy", size: strength, confidence: strength, reason: `MACD ${r.line.toFixed(4)} > signal ${r.signal.toFixed(4)}` });
     } else if (r.line < r.signal && r.line < 0) {
@@ -157,8 +157,8 @@ function multiTf(cfg: StrategyConfig, markets: Map<string, Market>, history: Map
     const trend = ind.roc(h, htf);
     if (f === null || s === null || trend === null || s === 0) continue;
     const spread = (f - s) / s;
-    const strength = clamp01(Math.abs(spread) / 0.02) * clamp01(Math.abs(trend) / 0.03);
-    if (strength < 0.1) continue;
+    const strength = Math.sqrt(clamp01(Math.abs(spread) / 0.02) * clamp01(Math.abs(trend) / 0.03));
+    if (strength < 0.05) continue;
     if (f > s && trend > 0) {
       out.push({ marketId: id, side: "buy", size: strength, confidence: strength, reason: `MTF up: EMA${fast}>${slow} & HTF ${(trend * 100).toFixed(1)}%` });
     } else if (f < s && trend < 0) {
@@ -249,16 +249,16 @@ export function defaultStrategies(): StrategyConfig[] {
   return [
     { id: "ema-cross-1", name: "EMA Cross · Crypto", kind: "ema-cross", venueClass: "crypto", state: "paper", universe: crypto,
       params: [mkParam("fast", "Fast EMA", 9, 3, 30, 1), mkParam("slow", "Slow EMA", 21, 10, 100, 1)], budgetPct: 18, ...base },
-    { id: "bollinger-1", name: "Bollinger Revert · Crypto", kind: "bollinger", venueClass: "crypto", state: "paper", universe: crypto,
-      params: [mkParam("period", "Period", 20, 5, 60, 1), mkParam("k", "Band σ", 2, 1, 3.5, 0.1)], budgetPct: 15, ...base },
-    { id: "rsi-1", name: "RSI Reversal · Crypto", kind: "rsi-reversal", venueClass: "crypto", state: "paper", universe: crypto,
-      params: [mkParam("period", "Period", 14, 5, 30, 1), mkParam("oversold", "Oversold", 30, 10, 45, 1), mkParam("overbought", "Overbought", 70, 55, 90, 1)], budgetPct: 15, ...base },
-    { id: "macd-1", name: "MACD Trend · Crypto", kind: "macd-trend", venueClass: "crypto", state: "paused", universe: crypto,
+    { id: "multi-tf-1", name: "Multi-TF Momentum · Crypto", kind: "multi-tf", venueClass: "crypto", state: "paper", universe: crypto,
+      params: [mkParam("fast", "Fast EMA", 9, 3, 30, 1), mkParam("slow", "Slow EMA", 21, 10, 100, 1), mkParam("htf", "HTF ROC", 50, 20, 150, 5)], budgetPct: 15, ...base },
+    { id: "macd-1", name: "MACD Trend · Crypto", kind: "macd-trend", venueClass: "crypto", state: "paper", universe: crypto,
       params: [], budgetPct: 15, ...base },
+    { id: "bollinger-1", name: "Bollinger Revert · Crypto", kind: "bollinger", venueClass: "crypto", state: "paused", universe: crypto,
+      params: [mkParam("period", "Period", 20, 5, 60, 1), mkParam("k", "Band σ", 2, 1, 3.5, 0.1)], budgetPct: 15, ...base },
+    { id: "rsi-1", name: "RSI Reversal · Crypto", kind: "rsi-reversal", venueClass: "crypto", state: "paused", universe: crypto,
+      params: [mkParam("period", "Period", 14, 5, 30, 1), mkParam("oversold", "Oversold", 30, 10, 45, 1), mkParam("overbought", "Overbought", 70, 55, 90, 1)], budgetPct: 15, ...base },
     { id: "breakout-1", name: "Donchian Breakout · Equities", kind: "breakout", venueClass: "alpaca", state: "paused", universe: equities,
       params: [mkParam("period", "Channel", 20, 5, 60, 1)], budgetPct: 12, ...base },
-    { id: "multi-tf-1", name: "Multi-TF Momentum · Crypto", kind: "multi-tf", venueClass: "crypto", state: "paused", universe: crypto,
-      params: [mkParam("fast", "Fast EMA", 9, 3, 30, 1), mkParam("slow", "Slow EMA", 21, 10, 100, 1), mkParam("htf", "HTF ROC", 50, 20, 150, 5)], budgetPct: 15, ...base },
     { id: "pairs-1", name: "Pairs · BTC/ETH", kind: "pairs", venueClass: "crypto", state: "paused", universe: ["crypto:BTC/USD", "crypto:ETH/USD"],
       params: [mkParam("period", "Z period", 30, 10, 90, 5), mkParam("k", "Z entry σ", 2, 1, 3.5, 0.1)], budgetPct: 12, ...base },
     { id: "prob-edge-1", name: "Prob-Edge · Polymarket", kind: "prob-edge", venueClass: "polymarket", state: "paper",

@@ -77,8 +77,8 @@ fn multi_tf(cfg: &StrategyConfig, markets: &HashMap<String, Market>, history: &H
             continue;
         }
         let spread = (f - s) / s;
-        let strength = clamp01(spread.abs() / 0.02) * clamp01(trend.abs() / 0.03);
-        if strength < 0.1 {
+        let strength = (clamp01(spread.abs() / 0.02) * clamp01(trend.abs() / 0.03)).sqrt();
+        if strength < 0.05 {
             continue;
         }
         if f > s && trend > 0.0 {
@@ -151,7 +151,7 @@ fn ema_cross(cfg: &StrategyConfig, markets: &HashMap<String, Market>, history: &
         }
         let spread = (f - s) / s;
         let strength = clamp01(spread.abs() / 0.02);
-        if strength < 0.15 {
+        if strength < 0.05 {
             continue;
         }
         out.push(SignalIntent {
@@ -221,7 +221,7 @@ fn macd_trend(cfg: &StrategyConfig, markets: &HashMap<String, Market>, history: 
         let Some((line, signal)) = ind::macd(h) else { continue };
         let hist = line - signal;
         let strength = clamp01((hist.abs() / m.price) / 0.001);
-        if strength < 0.2 {
+        if strength < 0.1 {
             continue;
         }
         if line > signal && line > 0.0 {
@@ -310,16 +310,16 @@ pub fn default_strategies() -> Vec<StrategyConfig> {
     vec![
         strat("ema-cross-1", "EMA Cross · Crypto", StrategyKind::EmaCross, Venue::Crypto, StrategyState::Paper, crypto,
             vec![p("fast", "Fast EMA", 9.0, 3.0, 30.0, 1.0), p("slow", "Slow EMA", 21.0, 10.0, 100.0, 1.0)], 18.0),
-        strat("bollinger-1", "Bollinger Revert · Crypto", StrategyKind::Bollinger, Venue::Crypto, StrategyState::Paper, crypto,
-            vec![p("period", "Period", 20.0, 5.0, 60.0, 1.0), p("k", "Band σ", 2.0, 1.0, 3.5, 0.1)], 15.0),
-        strat("rsi-1", "RSI Reversal · Crypto", StrategyKind::RsiReversal, Venue::Crypto, StrategyState::Paper, crypto,
-            vec![p("period", "Period", 14.0, 5.0, 30.0, 1.0), p("oversold", "Oversold", 30.0, 10.0, 45.0, 1.0), p("overbought", "Overbought", 70.0, 55.0, 90.0, 1.0)], 15.0),
-        strat("macd-1", "MACD Trend · Crypto", StrategyKind::MacdTrend, Venue::Crypto, StrategyState::Paused, crypto,
+        strat("multi-tf-1", "Multi-TF Momentum · Crypto", StrategyKind::MultiTf, Venue::Crypto, StrategyState::Paper, crypto,
+            vec![p("fast", "Fast EMA", 9.0, 3.0, 30.0, 1.0), p("slow", "Slow EMA", 21.0, 10.0, 100.0, 1.0), p("htf", "HTF ROC", 50.0, 20.0, 150.0, 5.0)], 15.0),
+        strat("macd-1", "MACD Trend · Crypto", StrategyKind::MacdTrend, Venue::Crypto, StrategyState::Paper, crypto,
             vec![], 15.0),
+        strat("bollinger-1", "Bollinger Revert · Crypto", StrategyKind::Bollinger, Venue::Crypto, StrategyState::Paused, crypto,
+            vec![p("period", "Period", 20.0, 5.0, 60.0, 1.0), p("k", "Band σ", 2.0, 1.0, 3.5, 0.1)], 15.0),
+        strat("rsi-1", "RSI Reversal · Crypto", StrategyKind::RsiReversal, Venue::Crypto, StrategyState::Paused, crypto,
+            vec![p("period", "Period", 14.0, 5.0, 30.0, 1.0), p("oversold", "Oversold", 30.0, 10.0, 45.0, 1.0), p("overbought", "Overbought", 70.0, 55.0, 90.0, 1.0)], 15.0),
         strat("breakout-1", "Donchian Breakout · Equities", StrategyKind::Breakout, Venue::Alpaca, StrategyState::Paused, equities,
             vec![p("period", "Channel", 20.0, 5.0, 60.0, 1.0)], 12.0),
-        strat("multi-tf-1", "Multi-TF Momentum · Crypto", StrategyKind::MultiTf, Venue::Crypto, StrategyState::Paused, crypto,
-            vec![p("fast", "Fast EMA", 9.0, 3.0, 30.0, 1.0), p("slow", "Slow EMA", 21.0, 10.0, 100.0, 1.0), p("htf", "HTF ROC", 50.0, 20.0, 150.0, 5.0)], 15.0),
         strat("pairs-1", "Pairs · BTC/ETH", StrategyKind::Pairs, Venue::Crypto, StrategyState::Paused, &["crypto:BTC/USD", "crypto:ETH/USD"],
             vec![p("period", "Z period", 30.0, 10.0, 90.0, 5.0), p("k", "Z entry σ", 2.0, 1.0, 3.5, 0.1)], 12.0),
         strat("prob-edge-1", "Prob-Edge · Polymarket", StrategyKind::ProbEdge, Venue::Polymarket, StrategyState::Paper, &["polymarket:fed-cut-2026", "polymarket:btc-100k-2026"],
