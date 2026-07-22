@@ -224,6 +224,7 @@ pub struct RiskLimits {
     pub cooldown_sec: u64,           // cooldown duration after the loss streak
     pub vol_target_pct: f64,         // volatility-targeted sizing: target per-bar vol % (0 = off)
     pub regime_filter: bool,         // block mean-reversion in trends & trend strategies in chop
+    pub adaptive_allocation: bool,   // auto-weight strategy budgets by recent performance
 }
 
 impl Default for RiskLimits {
@@ -245,6 +246,7 @@ impl Default for RiskLimits {
             cooldown_sec: 300,
             vol_target_pct: 0.0,
             regime_filter: false,
+            adaptive_allocation: false,
         }
     }
 }
@@ -601,10 +603,49 @@ impl Engine {
             }
         }
 
+        // adaptive capital allocation: re-weight budgets ~every 60s
+        if self.limits.adaptive_allocation && self.tick_count % 40 == 0 {
+            self.rebalance_allocations();
+        }
+
         self.equity_curve.push(self.equity());
         if self.equity_curve.len() > 300 {
             self.equity_curve.remove(0);
         }
+    }
+
+    /// Re-weight active strategies' budgets toward recent equity-curve
+    /// performance: shift-normalize recent P&L over an 80% pool, clamped so no
+    /// strategy is starved or dominant.
+    fn rebalance_allocations(&mut self) {
+        const POOL: f64 = 80.0;
+        let idxs: Vec<usize> = self
+            .strategies
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.state != StrategyState::Paused && s.id != "manual")
+            .map(|(i, _)| i)
+            .collect();
+        if idxs.len() < 2 {
+            return;
+        }
+        let recent: Vec<f64> = idxs
+            .iter()
+            .map(|&i| {
+                let ec = &self.strategies[i].equity_curve;
+                ec[ec.len() - 1] - ec[ec.len().saturating_sub(31)]
+            })
+            .collect();
+        let min = recent.iter().cloned().fold(f64::INFINITY, f64::min);
+        let shifted: Vec<f64> = recent.iter().map(|r| r - min + 1.0).collect(); // +1 floor
+        let sum: f64 = shifted.iter().sum();
+        if sum <= 0.0 {
+            return;
+        }
+        for (j, &i) in idxs.iter().enumerate() {
+            self.strategies[i].budget_pct = ((shifted[j] / sum) * POOL).clamp(3.0, 35.0);
+        }
+        self.log(JournalKind::System, "Adaptive allocation rebalanced by recent performance".into(), None, None);
     }
 
     /// Auto-exit positions whose stop-loss/take-profit/trailing level is hit.
@@ -1280,6 +1321,25 @@ mod tests {
         e.check_position_exits();
         assert!(e.positions.get("crypto:BTC/USD").is_none(), "stop-loss should close the long");
         assert!(e.journal.iter().any(|j| j.message.contains("stop-loss")));
+    }
+
+    #[test]
+    fn adaptive_allocation_favors_winners() {
+        let mut e = Engine::new();
+        // find two active crypto strategies and give one a much better recent curve
+        let win = e.strategies.iter().position(|s| s.id == "ema-cross-1").unwrap();
+        let lose = e.strategies.iter().position(|s| s.id == "bollinger-1").unwrap();
+        e.strategies[win].equity_curve = vec![0.0, 500.0, 1000.0];
+        e.strategies[lose].equity_curve = vec![0.0, -300.0, -600.0];
+        e.rebalance_allocations();
+        assert!(
+            e.strategies[win].budget_pct > e.strategies[lose].budget_pct,
+            "winner should get more budget ({} vs {})",
+            e.strategies[win].budget_pct,
+            e.strategies[lose].budget_pct
+        );
+        // and nobody is fully starved (floor)
+        assert!(e.strategies[lose].budget_pct >= 3.0);
     }
 
     #[test]

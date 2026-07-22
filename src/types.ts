@@ -74,6 +74,7 @@ export interface RiskLimits {
   cooldownSec: number; // cooldown after the loss streak
   volTargetPct: number; // volatility-targeted sizing: target per-bar vol % (0 = off)
   regimeFilter: boolean; // block mean-reversion in trends & trend strategies in chop
+  adaptiveAllocation: boolean; // auto-weight strategy budgets by recent performance
 }
 
 export interface StrategyParam {

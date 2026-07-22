@@ -177,9 +177,33 @@ export class PaperEngine implements EngineClient {
       }
     }
 
+    // adaptive capital allocation: re-weight budgets ~every 60s
+    if (this.limits.adaptiveAllocation && this.tickCount % 40 === 0) {
+      this.rebalanceAllocations();
+    }
+
     this.equityCurve.push(this.equity());
     if (this.equityCurve.length > 300) this.equityCurve.shift();
     this.emit();
+  }
+
+  // Re-weight active strategies' budgets toward recent equity-curve performance.
+  private rebalanceAllocations() {
+    const POOL = 80;
+    const active = this.strategies.filter((s) => s.state !== "paused" && s.id !== "manual");
+    if (active.length < 2) return;
+    const recent = active.map((s) => {
+      const ec = s.equityCurve;
+      return ec[ec.length - 1] - ec[Math.max(0, ec.length - 31)];
+    });
+    const min = Math.min(...recent);
+    const shifted = recent.map((r) => r - min + 1); // +1 floor
+    const sum = shifted.reduce((a, b) => a + b, 0);
+    if (sum <= 0) return;
+    active.forEach((s, i) => {
+      s.budgetPct = Math.max(3, Math.min(35, (shifted[i] / sum) * POOL));
+    });
+    this.log("system", "Adaptive allocation rebalanced by recent performance");
   }
 
   private placeFromIntent(

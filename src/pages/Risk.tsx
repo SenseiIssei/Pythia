@@ -64,10 +64,10 @@ export function Risk() {
         </div>
       </Card>
 
-      {/* regime filter toggle */}
-      <Card className="mb-4">
-        <div className="flex items-center justify-between">
-          <div>
+      {/* adaptive controls */}
+      <Card title="Adaptive controls" className="mb-4">
+        <div className="flex items-center justify-between border-b border-cyber-border pb-3">
+          <div className="pr-4">
             <div className="font-bold">Regime filter</div>
             <div className="text-xs text-cyber-text-dim">
               Block mean-reversion strategies in trending markets and trend strategies in choppy ones —
@@ -75,6 +75,16 @@ export function Risk() {
             </div>
           </div>
           <Toggle on={limits.regimeFilter} onChange={(v) => setLimits({ regimeFilter: v })} />
+        </div>
+        <div className="flex items-center justify-between pt-3">
+          <div className="pr-4">
+            <div className="font-bold">Adaptive capital allocation</div>
+            <div className="text-xs text-cyber-text-dim">
+              Auto-weight each strategy's budget toward its recent performance (rebalanced ~every 60s).
+              Winners get more capital; laggards get throttled — but none is fully starved.
+            </div>
+          </div>
+          <Toggle on={limits.adaptiveAllocation} onChange={(v) => setLimits({ adaptiveAllocation: v })} />
         </div>
       </Card>
 

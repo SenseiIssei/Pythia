@@ -36,6 +36,7 @@ export const DEFAULT_LIMITS: RiskLimits = {
   cooldownSec: 300,
   volTargetPct: 0,
   regimeFilter: false,
+  adaptiveAllocation: false,
 };
 
 // The risk manager is sovereign: this is the ONLY path from a strategy intent to
