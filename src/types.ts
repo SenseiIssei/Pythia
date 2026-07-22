@@ -61,6 +61,13 @@ export interface RiskLimits {
   kellyFraction: number; // 0..1, default 0.25
   maxOrdersPerMin: number;
   maxDataStalenessSec: number;
+  // advanced controls
+  maxDrawdownPct: number; // peak-to-trough; breach trips the kill switch
+  stopAtrMult: number; // per-position stop-loss in ATR units (0 = off)
+  takeProfitAtrMult: number; // per-position take-profit in ATR units (0 = off)
+  trailingAtrMult: number; // trailing-stop distance in ATR units (0 = off)
+  maxConsecutiveLosses: number; // per strategy before cooldown (0 = off)
+  cooldownSec: number; // cooldown after the loss streak
 }
 
 export interface StrategyParam {
@@ -72,10 +79,20 @@ export interface StrategyParam {
   step: number;
 }
 
+export type StrategyKind =
+  | "ema-cross"
+  | "bollinger"
+  | "rsi-reversal"
+  | "macd-trend"
+  | "breakout"
+  | "prob-edge"
+  | "arb"
+  | "manual";
+
 export interface StrategyConfig {
   id: string;
   name: string;
-  kind: "prob-edge" | "momentum" | "mean-revert" | "arb" | "manual";
+  kind: StrategyKind;
   venueClass: Venue;
   state: StrategyState;
   universe: string[]; // market ids
@@ -85,6 +102,8 @@ export interface StrategyConfig {
   pnl: number;
   trades: number;
   winRate: number;
+  maxDrawdown: number;
+  profitFactor: number;
   equityCurve: number[];
 }
 

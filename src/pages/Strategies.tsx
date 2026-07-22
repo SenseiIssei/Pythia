@@ -53,6 +53,9 @@ function StrategyCard({ s }: { s: StrategyConfig }) {
           <div className="text-xs font-normal text-cyber-text-faint">
             {s.trades} trades · {(s.winRate * 100).toFixed(0)}% win
           </div>
+          <div className="text-xs font-normal text-cyber-text-faint">
+            PF {s.profitFactor.toFixed(2)} · maxDD {fmtUsd(s.maxDrawdown)}
+          </div>
         </div>
       </div>
 

@@ -28,6 +28,12 @@ export const DEFAULT_LIMITS: RiskLimits = {
   kellyFraction: 0.25,
   maxOrdersPerMin: 10,
   maxDataStalenessSec: 30,
+  maxDrawdownPct: 15,
+  stopAtrMult: 3,
+  takeProfitAtrMult: 5,
+  trailingAtrMult: 0,
+  maxConsecutiveLosses: 4,
+  cooldownSec: 300,
 };
 
 // The risk manager is sovereign: this is the ONLY path from a strategy intent to

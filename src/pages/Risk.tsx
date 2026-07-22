@@ -14,10 +14,16 @@ interface LimitRow {
 
 const ROWS: LimitRow[] = [
   { key: "maxDailyLossPct", label: "Max daily loss", min: 1, max: 25, step: 0.5, unit: "%" },
+  { key: "maxDrawdownPct", label: "Max drawdown (breaker)", min: 2, max: 50, step: 1, unit: "%" },
   { key: "maxPositionPct", label: "Max position size", min: 1, max: 50, step: 1, unit: "% equity" },
   { key: "maxGrossExposurePct", label: "Max gross exposure", min: 10, max: 100, step: 5, unit: "% equity" },
   { key: "perStrategyBudgetPct", label: "Per-strategy budget", min: 5, max: 60, step: 1, unit: "% equity" },
   { key: "kellyFraction", label: "Kelly fraction", min: 0.05, max: 1, step: 0.05, unit: "×" },
+  { key: "stopAtrMult", label: "Stop-loss (ATR)", min: 0, max: 10, step: 0.5, unit: "×ATR" },
+  { key: "takeProfitAtrMult", label: "Take-profit (ATR)", min: 0, max: 15, step: 0.5, unit: "×ATR" },
+  { key: "trailingAtrMult", label: "Trailing stop (ATR)", min: 0, max: 10, step: 0.5, unit: "×ATR" },
+  { key: "maxConsecutiveLosses", label: "Loss streak → cooldown", min: 0, max: 12, step: 1, unit: "losses" },
+  { key: "cooldownSec", label: "Cooldown duration", min: 30, max: 1800, step: 30, unit: "s" },
   { key: "maxOrdersPerMin", label: "Max orders / min", min: 1, max: 60, step: 1, unit: "" },
   { key: "maxDataStalenessSec", label: "Max data staleness", min: 5, max: 120, step: 5, unit: "s" },
 ];

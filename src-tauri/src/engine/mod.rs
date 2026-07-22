@@ -3,6 +3,7 @@
 //! [`EngineState`] snapshot to the UI each tick. This is the Rust owner of the
 //! same model the browser build runs in TypeScript.
 
+pub mod indicators;
 pub mod risk;
 pub mod strategies;
 
@@ -48,9 +49,12 @@ pub enum StrategyState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum StrategyKind {
+    EmaCross,
+    Bollinger,
+    RsiReversal,
+    MacdTrend,
+    Breakout,
     ProbEdge,
-    Momentum,
-    MeanRevert,
     Arb,
     Manual,
 }
@@ -182,6 +186,8 @@ pub struct StrategyConfig {
     pub pnl: f64,
     pub trades: u32,
     pub win_rate: f64,
+    pub max_drawdown: f64,
+    pub profit_factor: f64,
     pub equity_curve: Vec<f64>,
 }
 
@@ -196,6 +202,13 @@ pub struct RiskLimits {
     pub kelly_fraction: f64,
     pub max_orders_per_min: u32,
     pub max_data_staleness_sec: u64,
+    // ── advanced controls ──
+    pub max_drawdown_pct: f64,       // peak-to-trough equity; breach trips the kill switch
+    pub stop_atr_mult: f64,          // per-position stop-loss, in ATR units (0 = off)
+    pub take_profit_atr_mult: f64,   // per-position take-profit, in ATR units (0 = off)
+    pub trailing_atr_mult: f64,      // trailing stop distance in ATR units (0 = off)
+    pub max_consecutive_losses: u32, // per strategy before a cooldown (0 = off)
+    pub cooldown_sec: u64,           // cooldown duration after the loss streak
 }
 
 impl Default for RiskLimits {
@@ -209,6 +222,12 @@ impl Default for RiskLimits {
             kelly_fraction: 0.25,
             max_orders_per_min: 10,
             max_data_staleness_sec: 30,
+            max_drawdown_pct: 15.0,
+            stop_atr_mult: 3.0,
+            take_profit_atr_mult: 5.0,
+            trailing_atr_mult: 0.0,
+            max_consecutive_losses: 4,
+            cooldown_sec: 300,
         }
     }
 }
@@ -239,6 +258,14 @@ pub struct PersistedPosition {
     pub symbol: String,
     pub qty: f64,
     pub avg_price: f64,
+    #[serde(default)]
+    pub strategy_id: String,
+    #[serde(default)]
+    pub stop: f64,
+    #[serde(default)]
+    pub target: f64,
+    #[serde(default)]
+    pub trail_ref: f64,
 }
 
 /// The raw engine state written to disk so the daemon resumes exactly where it
@@ -263,6 +290,10 @@ struct PositionInternal {
     symbol: String,
     qty: f64,
     avg_price: f64,
+    strategy_id: String,
+    stop: f64,      // 0 = none
+    target: f64,    // 0 = none
+    trail_ref: f64, // best favorable price seen, for trailing stops
 }
 
 struct SimParam {
@@ -276,6 +307,7 @@ const STARTING_CASH: f64 = 100_000.0;
 pub struct Engine {
     markets: Vec<Market>,
     sim: HashMap<String, SimParam>,
+    history: HashMap<String, Vec<f64>>, // rolling close-price history per market
     real_ids: std::collections::HashSet<String>, // markets whose price came from a live feed
     positions: HashMap<String, PositionInternal>,
     orders: Vec<Order>,
@@ -285,8 +317,14 @@ pub struct Engine {
     cash: f64,
     realized_pnl: f64,
     day_start_equity: f64,
+    peak_equity: f64,
+    day: i64, // UTC day number, for the daily reset
     equity_curve: Vec<f64>,
     connected: std::collections::HashSet<Venue>,
+    consec_losses: HashMap<String, u32>, // per-strategy losing streak
+    cooldown_until: HashMap<String, i64>, // per-strategy cooldown expiry (ms)
+    gross_win: HashMap<String, f64>,     // per-strategy cumulative winning $ (for profit factor)
+    gross_loss: HashMap<String, f64>,    // per-strategy cumulative losing $
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -301,9 +339,12 @@ impl Default for Engine {
 impl Engine {
     pub fn new() -> Self {
         let (markets, sim) = seed_markets();
+        let history = markets.iter().map(|m| (m.id.clone(), vec![m.price])).collect();
+        let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
         let mut e = Engine {
             markets,
             sim,
+            history,
             real_ids: Default::default(),
             positions: HashMap::new(),
             orders: Vec::new(),
@@ -313,8 +354,14 @@ impl Engine {
             cash: STARTING_CASH,
             realized_pnl: 0.0,
             day_start_equity: STARTING_CASH,
+            peak_equity: STARTING_CASH,
+            day,
             equity_curve: vec![STARTING_CASH],
             connected: std::collections::HashSet::new(),
+            consec_losses: HashMap::new(),
+            cooldown_until: HashMap::new(),
+            gross_win: HashMap::new(),
+            gross_loss: HashMap::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -428,13 +475,55 @@ impl Engine {
             }
         }
 
-        // run strategies every 3rd tick
+        // append the new close to each market's rolling history
+        for m in &self.markets {
+            let h = self.history.entry(m.id.clone()).or_default();
+            h.push(m.price);
+            if h.len() > 260 {
+                let excess = h.len() - 260;
+                h.drain(0..excess);
+            }
+        }
+
+        // daily reset of loss/streak counters (new UTC day)
+        let today = now / 86_400_000;
+        if today != self.day {
+            self.day = today;
+            self.day_start_equity = self.equity();
+            self.peak_equity = self.day_start_equity;
+            self.consec_losses.clear();
+            self.cooldown_until.clear();
+            self.log(JournalKind::System, "New UTC day — daily loss & streak counters reset".into(), None, None);
+        }
+
+        // position management: stop-loss / take-profit / trailing exits
+        self.check_position_exits();
+
+        // max-drawdown circuit breaker
+        let eq = self.equity();
+        if eq > self.peak_equity {
+            self.peak_equity = eq;
+        }
+        if self.limits.max_drawdown_pct > 0.0 && !self.limits.kill_switch && self.peak_equity > 0.0 {
+            let dd = (self.peak_equity - eq) / self.peak_equity * 100.0;
+            if dd >= self.limits.max_drawdown_pct {
+                self.limits.kill_switch = true;
+                self.log(JournalKind::Risk, format!("Max drawdown {dd:.1}% ≥ {:.1}% — KILL SWITCH tripped", self.limits.max_drawdown_pct), None, None);
+            }
+        }
+
+        // run strategies every 3rd tick (skipping any in cooldown)
         if self.tick_count % 3 == 0 {
             let snapshot: HashMap<String, Market> =
                 self.markets.iter().map(|m| (m.id.clone(), m.clone())).collect();
             let mut fires: Vec<(usize, strategies::SignalIntent)> = Vec::new();
             for (idx, strat) in self.strategies.iter().enumerate() {
-                for intent in strategies::run_strategy(strat, &snapshot) {
+                if let Some(until) = self.cooldown_until.get(&strat.id) {
+                    if now < *until {
+                        continue;
+                    }
+                }
+                for intent in strategies::run_strategy(strat, &snapshot, &self.history) {
                     fires.push((idx, intent));
                 }
             }
@@ -453,11 +542,93 @@ impl Engine {
             }
         }
 
-        let eq = self.equity();
-        self.equity_curve.push(eq);
+        self.equity_curve.push(self.equity());
         if self.equity_curve.len() > 300 {
             self.equity_curve.remove(0);
         }
+    }
+
+    /// Auto-exit positions whose stop-loss/take-profit/trailing level is hit.
+    fn check_position_exits(&mut self) {
+        let prices: HashMap<String, f64> =
+            self.markets.iter().map(|m| (m.id.clone(), m.price)).collect();
+        let trail_mult = self.limits.trailing_atr_mult;
+        let mut to_close: Vec<(String, String)> = Vec::new();
+
+        for (id, pos) in self.positions.iter_mut() {
+            let price = *prices.get(id).unwrap_or(&0.0);
+            if price <= 0.0 || pos.qty == 0.0 || pos.stop <= 0.0 && pos.target <= 0.0 {
+                continue;
+            }
+            let long = pos.qty > 0.0;
+
+            // trailing: ratchet the stop toward price on favorable moves
+            if trail_mult > 0.0 && pos.stop > 0.0 {
+                if long && price > pos.trail_ref {
+                    let d = pos.trail_ref - pos.stop;
+                    pos.trail_ref = price;
+                    pos.stop = price - d;
+                } else if !long && price < pos.trail_ref {
+                    let d = pos.stop - pos.trail_ref;
+                    pos.trail_ref = price;
+                    pos.stop = price + d;
+                }
+            }
+
+            if pos.stop > 0.0 && ((long && price <= pos.stop) || (!long && price >= pos.stop)) {
+                to_close.push((id.clone(), "stop-loss".into()));
+            } else if pos.target > 0.0 && ((long && price >= pos.target) || (!long && price <= pos.target)) {
+                to_close.push((id.clone(), "take-profit".into()));
+            }
+        }
+
+        for (id, reason) in to_close {
+            self.close_position(&id, &reason);
+        }
+    }
+
+    /// Close a position attributing the fill to its owning strategy.
+    fn close_position(&mut self, id: &str, reason: &str) {
+        let (qty, side, sid) = match self.positions.get(id) {
+            Some(p) if p.qty != 0.0 => (
+                p.qty.abs(),
+                if p.qty > 0.0 { Side::Sell } else { Side::Buy },
+                p.strategy_id.clone(),
+            ),
+            _ => return,
+        };
+        let Some(m) = self.markets.iter().find(|m| m.id == id).cloned() else { return };
+        let idx = self
+            .strategies
+            .iter()
+            .position(|s| s.id == sid)
+            .unwrap_or_else(|| self.ensure_manual_strategy());
+        self.fill(idx, &m, side, qty, m.price);
+        self.log(JournalKind::System, format!("Exit {id}: {reason}"), Some(sid), Some(id.to_string()));
+    }
+
+    /// Volatility-based stop-loss / take-profit for a new position (price units).
+    fn compute_stops(&self, m: &Market, side: Side, entry: f64) -> (f64, f64) {
+        if m.kind == MarketKind::Prediction {
+            return (0.0, 0.0); // ATR stops don't apply to 0..1 probabilities
+        }
+        let atr = self.history.get(&m.id).and_then(|h| indicators::atr_proxy(h, 14)).unwrap_or(0.0);
+        if atr <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let (sl, tp) = (self.limits.stop_atr_mult, self.limits.take_profit_atr_mult);
+        let long = side == Side::Buy;
+        let stop = if sl > 0.0 {
+            if long { entry - sl * atr } else { entry + sl * atr }
+        } else {
+            0.0
+        };
+        let target = if tp > 0.0 {
+            if long { entry + tp * atr } else { entry - tp * atr }
+        } else {
+            0.0
+        };
+        (stop, target)
     }
 
     fn place_from_intent(&mut self, strat_idx: usize, m: &Market, intent: &strategies::SignalIntent) {
@@ -497,6 +668,7 @@ impl Engine {
         let fill_price = price * slip;
         let fee = fill_price * qty * 0.0006;
         let signed = if side == Side::Buy { qty } else { -qty };
+        let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
 
         // update / open position, realizing P&L on reductions
         let key = m.id.clone();
@@ -505,7 +677,16 @@ impl Engine {
             None => {
                 self.positions.insert(
                     key.clone(),
-                    PositionInternal { venue: m.venue, symbol: m.symbol.clone(), qty: signed, avg_price: fill_price },
+                    PositionInternal {
+                        venue: m.venue,
+                        symbol: m.symbol.clone(),
+                        qty: signed,
+                        avg_price: fill_price,
+                        strategy_id: sid.clone(),
+                        stop: new_stop,
+                        target: new_target,
+                        trail_ref: fill_price,
+                    },
                 );
             }
             Some(pos) => {
@@ -531,15 +712,64 @@ impl Engine {
         }
         self.cash -= signed * fill_price + fee;
 
-        // strategy stats
-        {
-            let s = &mut self.strategies[strat_idx];
-            if realized != 0.0 {
+        // strategy stats + risk streak tracking
+        if realized != 0.0 {
+            {
+                let s = &mut self.strategies[strat_idx];
                 s.pnl += realized;
                 s.trades += 1;
                 let wins = s.win_rate * (s.trades - 1) as f64 + if realized >= 0.0 { 1.0 } else { 0.0 };
                 s.win_rate = wins / s.trades as f64;
             }
+            // profit factor
+            if realized >= 0.0 {
+                *self.gross_win.entry(sid.clone()).or_insert(0.0) += realized;
+            } else {
+                *self.gross_loss.entry(sid.clone()).or_insert(0.0) += -realized;
+            }
+            let gw = *self.gross_win.get(&sid).unwrap_or(&0.0);
+            let gl = *self.gross_loss.get(&sid).unwrap_or(&0.0);
+            let pf = if gl > 0.0 { gw / gl } else if gw > 0.0 { 99.0 } else { 0.0 };
+            // consecutive-loss streak → cooldown
+            let streak = {
+                let c = self.consec_losses.entry(sid.clone()).or_insert(0);
+                if realized < 0.0 { *c += 1 } else { *c = 0 }
+                *c
+            };
+            let mut cooled = false;
+            if self.limits.max_consecutive_losses > 0 && streak >= self.limits.max_consecutive_losses {
+                let until = self.now() + (self.limits.cooldown_sec as i64) * 1000;
+                self.cooldown_until.insert(sid.clone(), until);
+                self.consec_losses.insert(sid.clone(), 0);
+                cooled = true;
+            }
+            {
+                let s = &mut self.strategies[strat_idx];
+                s.profit_factor = pf;
+                s.equity_curve.push(s.pnl);
+                if s.equity_curve.len() > 200 {
+                    s.equity_curve.remove(0);
+                }
+                let mut peak = f64::MIN;
+                let mut dd: f64 = 0.0;
+                for &v in &s.equity_curve {
+                    if v > peak {
+                        peak = v;
+                    }
+                    dd = dd.max(peak - v);
+                }
+                s.max_drawdown = dd;
+            }
+            if cooled {
+                self.log(
+                    JournalKind::Risk,
+                    format!("{sid}: {} consecutive losses — cooling down {}s", self.limits.max_consecutive_losses, self.limits.cooldown_sec),
+                    Some(sid.clone()),
+                    None,
+                );
+            }
+        } else {
+            let s = &mut self.strategies[strat_idx];
             s.equity_curve.push(s.pnl);
             if s.equity_curve.len() > 200 {
                 s.equity_curve.remove(0);
@@ -611,6 +841,8 @@ impl Engine {
             pnl: 0.0,
             trades: 0,
             win_rate: 0.0,
+            max_drawdown: 0.0,
+            profit_factor: 0.0,
             equity_curve: vec![0.0],
         });
         self.strategies.len() - 1
@@ -702,7 +934,19 @@ impl Engine {
                 .positions
                 .iter()
                 .map(|(id, p)| {
-                    (id.clone(), PersistedPosition { venue: p.venue, symbol: p.symbol.clone(), qty: p.qty, avg_price: p.avg_price })
+                    (
+                        id.clone(),
+                        PersistedPosition {
+                            venue: p.venue,
+                            symbol: p.symbol.clone(),
+                            qty: p.qty,
+                            avg_price: p.avg_price,
+                            strategy_id: p.strategy_id.clone(),
+                            stop: p.stop,
+                            target: p.target,
+                            trail_ref: p.trail_ref,
+                        },
+                    )
                 })
                 .collect(),
             strategies: self.strategies.clone(),
@@ -721,7 +965,21 @@ impl Engine {
         self.positions = p
             .positions
             .into_iter()
-            .map(|(id, pp)| (id, PositionInternal { venue: pp.venue, symbol: pp.symbol, qty: pp.qty, avg_price: pp.avg_price }))
+            .map(|(id, pp)| {
+                (
+                    id,
+                    PositionInternal {
+                        venue: pp.venue,
+                        symbol: pp.symbol,
+                        qty: pp.qty,
+                        avg_price: pp.avg_price,
+                        strategy_id: pp.strategy_id,
+                        stop: pp.stop,
+                        target: pp.target,
+                        trail_ref: pp.trail_ref,
+                    },
+                )
+            })
             .collect();
         if !p.strategies.is_empty() {
             self.strategies = p.strategies;
@@ -867,7 +1125,16 @@ mod tests {
         e.limits.max_daily_loss_pct = 3.0;
         e.positions.insert(
             "crypto:BTC/USD".into(),
-            PositionInternal { venue: Venue::Crypto, symbol: "BTC/USD".into(), qty: 0.5, avg_price: 60_000.0 },
+            PositionInternal {
+                venue: Venue::Crypto,
+                symbol: "BTC/USD".into(),
+                qty: 0.5,
+                avg_price: 60_000.0,
+                strategy_id: "ema-cross-1".into(),
+                stop: 58_000.0,
+                target: 65_000.0,
+                trail_ref: 60_000.0,
+            },
         );
 
         let json = serde_json::to_string(&e.to_persisted()).expect("serialize");
@@ -885,6 +1152,28 @@ mod tests {
         assert_eq!(pos.avg_price, 60_000.0);
         // markets are re-seeded, not persisted
         assert!(!e2.markets.is_empty());
+    }
+
+    #[test]
+    fn stop_loss_closes_position() {
+        let mut e = Engine::new();
+        // long BTC with a stop above the seed price (67_250) → should trigger
+        e.positions.insert(
+            "crypto:BTC/USD".into(),
+            PositionInternal {
+                venue: Venue::Crypto,
+                symbol: "BTC/USD".into(),
+                qty: 0.1,
+                avg_price: 67_000.0,
+                strategy_id: "ema-cross-1".into(),
+                stop: 68_000.0,
+                target: 0.0,
+                trail_ref: 67_000.0,
+            },
+        );
+        e.check_position_exits();
+        assert!(e.positions.get("crypto:BTC/USD").is_none(), "stop-loss should close the long");
+        assert!(e.journal.iter().any(|j| j.message.contains("stop-loss")));
     }
 
     #[test]

@@ -14,6 +14,7 @@ import type {
 import { MarketSim } from "./marketSim";
 import { DEFAULT_LIMITS, evaluate, kellySize, type RiskContext } from "./risk";
 import { defaultStrategies, runStrategy } from "./strategies";
+import * as ind from "./indicators";
 import type { EngineClient } from "./client";
 
 interface PositionInternal {
@@ -22,6 +23,10 @@ interface PositionInternal {
   symbol: string;
   qty: number;
   avgPrice: number;
+  strategyId: string;
+  stop: number; // 0 = none
+  target: number; // 0 = none
+  trailRef: number;
 }
 
 type Listener = () => void;
@@ -31,11 +36,12 @@ const STARTING_CASH = 100_000;
 let seq = 0;
 const nextId = (p: string) => `${p}_${Date.now().toString(36)}_${(seq++).toString(36)}`;
 
-// The client-side paper engine. It is the reference implementation of Pythia's
-// core; the Rust backend mirrors it. Everything here is SIMULATED — no real
-// money, no network. Real venues arrive in Phase 1 behind the connector trait.
+// The client-side paper engine — a 1:1 mirror of the Rust engine core. Every
+// number here is SIMULATED (no real money, no network). Under the Tauri shell
+// the identical Rust daemon answers instead.
 export class PaperEngine implements EngineClient {
   private sim = new MarketSim();
+  private history = new Map<string, number[]>();
   private positions = new Map<string, PositionInternal>();
   private orders: Order[] = [];
   private journal: JournalEntry[] = [];
@@ -44,14 +50,20 @@ export class PaperEngine implements EngineClient {
   private cash = STARTING_CASH;
   private realizedPnl = 0;
   private dayStartEquity = STARTING_CASH;
+  private peakEquity = STARTING_CASH;
+  private day = Math.floor(Date.now() / 86_400_000);
   private equityCurve: number[] = [STARTING_CASH];
-  private orderTimestamps: number[] = [];
+  private consecLosses = new Map<string, number>();
+  private cooldownUntil = new Map<string, number>();
+  private grossWin = new Map<string, number>();
+  private grossLoss = new Map<string, number>();
   private listeners = new Set<Listener>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private tickCount = 0;
   private version = 0;
 
   constructor() {
+    for (const m of this.sim.list()) this.history.set(m.id, [m.price]);
     this.log("system", "Pythia paper engine initialized · balance $100,000 (simulated)");
   }
 
@@ -72,7 +84,6 @@ export class PaperEngine implements EngineClient {
     this.version++;
     for (const l of this.listeners) l();
   }
-  /** Monotonic counter — bumps on every state change so the UI always re-renders. */
   getVersion(): number {
     return this.version;
   }
@@ -80,24 +91,55 @@ export class PaperEngine implements EngineClient {
   // ── main loop ─────────────────────────────────────────────────────────────
   private tick() {
     this.tickCount++;
+    const now = Date.now();
     const markets = this.sim.tick();
     const byId = new Map(markets.map((m) => [m.id, m]));
-    // position marks are read live from the sim in the views, so nothing to
-    // recompute here beyond advancing prices (done above).
 
-    // run active strategies every few ticks to avoid churn
+    // append each new close to the rolling history
+    for (const m of markets) {
+      let h = this.history.get(m.id);
+      if (!h) {
+        h = [];
+        this.history.set(m.id, h);
+      }
+      h.push(m.price);
+      if (h.length > 260) h.splice(0, h.length - 260);
+    }
+
+    // daily reset of loss/streak counters
+    const today = Math.floor(now / 86_400_000);
+    if (today !== this.day) {
+      this.day = today;
+      this.dayStartEquity = this.equity();
+      this.peakEquity = this.dayStartEquity;
+      this.consecLosses.clear();
+      this.cooldownUntil.clear();
+      this.log("system", "New UTC day — daily loss & streak counters reset");
+    }
+
+    // stop-loss / take-profit / trailing exits
+    this.checkPositionExits();
+
+    // max-drawdown circuit breaker
+    const eq = this.equity();
+    if (eq > this.peakEquity) this.peakEquity = eq;
+    if (this.limits.maxDrawdownPct > 0 && !this.limits.killSwitch && this.peakEquity > 0) {
+      const dd = ((this.peakEquity - eq) / this.peakEquity) * 100;
+      if (dd >= this.limits.maxDrawdownPct) {
+        this.limits.killSwitch = true;
+        this.log("risk", `Max drawdown ${dd.toFixed(1)}% ≥ ${this.limits.maxDrawdownPct.toFixed(1)}% — KILL SWITCH tripped`);
+      }
+    }
+
+    // run strategies every 3rd tick (skip any in cooldown)
     if (this.tickCount % 3 === 0) {
       for (const strat of this.strategies) {
-        const intents = runStrategy(strat, byId);
-        for (const intent of intents) {
+        const until = this.cooldownUntil.get(strat.id);
+        if (until && now < until) continue;
+        for (const intent of runStrategy(strat, byId, this.history)) {
           const m = byId.get(intent.marketId);
           if (!m) continue;
-          this.log(
-            "signal",
-            `${strat.name}: ${intent.side.toUpperCase()} ${m.symbol} — ${intent.reason}`,
-            strat.id,
-            intent.marketId
-          );
+          this.log("signal", `${strat.name}: ${intent.side.toUpperCase()} ${m.symbol} — ${intent.reason}`, strat.id, intent.marketId);
           this.placeFromIntent(strat, m, intent);
         }
       }
@@ -147,8 +189,18 @@ export class PaperEngine implements EngineClient {
     this.fill(order, price, strat);
   }
 
+  private computeStops(m: Market, side: "buy" | "sell", entry: number): { stop: number; target: number } {
+    if (m.kind === "prediction") return { stop: 0, target: 0 };
+    const atr = ind.atrProxy(this.history.get(m.id) ?? [], 14);
+    if (atr === null || atr <= 0) return { stop: 0, target: 0 };
+    const { stopAtrMult: sl, takeProfitAtrMult: tp } = this.limits;
+    const long = side === "buy";
+    const stop = sl > 0 ? (long ? entry - sl * atr : entry + sl * atr) : 0;
+    const target = tp > 0 ? (long ? entry + tp * atr : entry - tp * atr) : 0;
+    return { stop, target };
+  }
+
   private fill(order: Order, price: number, strat: StrategyConfig) {
-    // simulated slippage + fee
     const slip = order.side === "buy" ? 1.0008 : 0.9992;
     const fillPrice = Number((price * slip).toFixed(order.venue === "polymarket" ? 4 : 2));
     const fee = fillPrice * order.qty * 0.0006;
@@ -157,44 +209,77 @@ export class PaperEngine implements EngineClient {
     order.filledQty = order.qty;
     order.avgFillPrice = fillPrice;
     this.orders.unshift(order);
-    this.orderTimestamps.push(Date.now());
 
     const signed = order.side === "buy" ? order.qty : -order.qty;
     const key = order.marketId;
     const existing = this.positions.get(key);
+    let realized = 0;
 
     if (!existing) {
+      const m = this.sim.get(key);
+      const { stop, target } = m ? this.computeStops(m, order.side, fillPrice) : { stop: 0, target: 0 };
       this.positions.set(key, {
         marketId: order.marketId,
         venue: order.venue,
-        symbol: order.marketId.split(":").slice(1).join(":") || order.marketId,
+        symbol: m?.symbol ?? order.marketId,
         qty: signed,
         avgPrice: fillPrice,
+        strategyId: strat.id,
+        stop,
+        target,
+        trailRef: fillPrice,
       });
     } else {
       const newQty = existing.qty + signed;
       if (Math.sign(newQty) === Math.sign(existing.qty) || existing.qty === 0) {
-        // adding to / opening same side: weighted avg
         const totalCost = existing.avgPrice * Math.abs(existing.qty) + fillPrice * Math.abs(signed);
         existing.avgPrice = Math.abs(newQty) > 0 ? totalCost / Math.abs(newQty) : fillPrice;
       } else {
-        // reducing/closing: realize P&L on the closed portion
         const closedQty = Math.min(Math.abs(signed), Math.abs(existing.qty));
         const dir = existing.qty > 0 ? 1 : -1;
-        const realized = (fillPrice - existing.avgPrice) * closedQty * dir;
+        realized = (fillPrice - existing.avgPrice) * closedQty * dir;
         this.realizedPnl += realized;
-        strat.pnl += realized;
-        strat.trades++;
-        strat.winRate =
-          (strat.winRate * (strat.trades - 1) + (realized >= 0 ? 1 : 0)) / strat.trades;
       }
       if (Math.abs(newQty) < 1e-9) this.positions.delete(key);
       else existing.qty = newQty;
     }
 
     this.cash -= signed * fillPrice + fee;
-    strat.equityCurve.push(strat.pnl);
-    if (strat.equityCurve.length > 200) strat.equityCurve.shift();
+
+    // strategy stats + streak/cooldown tracking
+    if (realized !== 0) {
+      strat.pnl += realized;
+      strat.trades++;
+      strat.winRate = (strat.winRate * (strat.trades - 1) + (realized >= 0 ? 1 : 0)) / strat.trades;
+
+      if (realized >= 0) this.grossWin.set(strat.id, (this.grossWin.get(strat.id) ?? 0) + realized);
+      else this.grossLoss.set(strat.id, (this.grossLoss.get(strat.id) ?? 0) - realized);
+      const gw = this.grossWin.get(strat.id) ?? 0;
+      const gl = this.grossLoss.get(strat.id) ?? 0;
+      strat.profitFactor = gl > 0 ? gw / gl : gw > 0 ? 99 : 0;
+
+      let streak = this.consecLosses.get(strat.id) ?? 0;
+      streak = realized < 0 ? streak + 1 : 0;
+      this.consecLosses.set(strat.id, streak);
+      if (this.limits.maxConsecutiveLosses > 0 && streak >= this.limits.maxConsecutiveLosses) {
+        this.cooldownUntil.set(strat.id, Date.now() + this.limits.cooldownSec * 1000);
+        this.consecLosses.set(strat.id, 0);
+        this.log("risk", `${strat.id}: ${this.limits.maxConsecutiveLosses} consecutive losses — cooling down ${this.limits.cooldownSec}s`, strat.id);
+      }
+
+      strat.equityCurve.push(strat.pnl);
+      if (strat.equityCurve.length > 200) strat.equityCurve.shift();
+      let peak = -Infinity;
+      let dd = 0;
+      for (const v of strat.equityCurve) {
+        if (v > peak) peak = v;
+        dd = Math.max(dd, peak - v);
+      }
+      strat.maxDrawdown = dd;
+    } else {
+      strat.equityCurve.push(strat.pnl);
+      if (strat.equityCurve.length > 200) strat.equityCurve.shift();
+    }
 
     this.log(
       "fill",
@@ -204,7 +289,68 @@ export class PaperEngine implements EngineClient {
     );
   }
 
-  // ── manual order (from the UI) ────────────────────────────────────────────
+  // ── position exits ──────────────────────────────────────────────────────────
+  private checkPositionExits() {
+    const trail = this.limits.trailingAtrMult;
+    const toClose: Array<[string, string]> = [];
+    for (const p of this.positions.values()) {
+      const m = this.sim.get(p.marketId);
+      if (!m || p.qty === 0 || (p.stop <= 0 && p.target <= 0)) continue;
+      const price = m.price;
+      const long = p.qty > 0;
+
+      if (trail > 0 && p.stop > 0) {
+        if (long && price > p.trailRef) {
+          const d = p.trailRef - p.stop;
+          p.trailRef = price;
+          p.stop = price - d;
+        } else if (!long && price < p.trailRef) {
+          const d = p.stop - p.trailRef;
+          p.trailRef = price;
+          p.stop = price + d;
+        }
+      }
+
+      if (p.stop > 0 && ((long && price <= p.stop) || (!long && price >= p.stop))) {
+        toClose.push([p.marketId, "stop-loss"]);
+      } else if (p.target > 0 && ((long && price >= p.target) || (!long && price <= p.target))) {
+        toClose.push([p.marketId, "take-profit"]);
+      }
+    }
+    for (const [id, reason] of toClose) this.closePosition(id, reason);
+  }
+
+  private closePosition(marketId: string, reason: string) {
+    const p = this.positions.get(marketId);
+    const m = this.sim.get(marketId);
+    if (!p || !m || p.qty === 0) return;
+    const strat = this.strategies.find((s) => s.id === p.strategyId) ?? this.manualStrat(m.venue);
+    const order: Order = {
+      id: nextId("ord"),
+      ts: Date.now(),
+      strategyId: strat.id,
+      marketId,
+      venue: p.venue,
+      side: p.qty > 0 ? "sell" : "buy",
+      type: "market",
+      qty: Math.abs(p.qty),
+      status: "pending",
+      filledQty: 0,
+      mode: strat.state === "live" ? "live" : "paper",
+    };
+    this.fill(order, m.price, strat);
+    this.log("system", `Exit ${marketId}: ${reason}`, strat.id, marketId);
+  }
+
+  private manualStrat(venue: Venue): StrategyConfig {
+    return {
+      id: "manual", name: "Manual", kind: "manual", venueClass: venue, state: "paper",
+      universe: [], params: [], budgetPct: 100, pnl: 0, trades: 0, winRate: 0,
+      maxDrawdown: 0, profitFactor: 0, equityCurve: [0],
+    };
+  }
+
+  // ── manual actions (from the UI) ────────────────────────────────────────────
   manualOrder(marketId: string, side: "buy" | "sell", notional: number): string {
     const m = this.sim.get(marketId);
     if (!m) return "unknown market";
@@ -232,50 +378,29 @@ export class PaperEngine implements EngineClient {
       return decision.reason ?? "rejected";
     }
     order.qty = decision.qty;
-    const manualStrat: StrategyConfig = {
-      id: "manual",
-      name: "Manual",
-      kind: "manual",
-      venueClass: m.venue,
-      state: "paper",
-      universe: [],
-      params: [],
-      budgetPct: 100,
-      pnl: 0,
-      trades: 0,
-      winRate: 0,
-      equityCurve: [0],
-    };
-    this.fill(order, m.price, manualStrat);
+    this.fill(order, m.price, this.manualStrat(m.venue));
     this.emit();
     return "ok";
   }
 
   flatten(marketId: string) {
     const p = this.positions.get(marketId);
-    if (!p) return;
     const m = this.sim.get(marketId);
-    if (!m) return;
-    const side = p.qty > 0 ? "sell" : "buy";
+    if (!p || !m) return;
     const order: Order = {
       id: nextId("ord"),
       ts: Date.now(),
       strategyId: "manual",
       marketId,
       venue: p.venue,
-      side,
+      side: p.qty > 0 ? "sell" : "buy",
       type: "market",
       qty: Math.abs(p.qty),
       status: "pending",
       filledQty: 0,
       mode: "paper",
     };
-    const strat: StrategyConfig = {
-      id: "manual", name: "Manual", kind: "manual", venueClass: p.venue,
-      state: "paper", universe: [], params: [], budgetPct: 100,
-      pnl: 0, trades: 0, winRate: 0, equityCurve: [0],
-    };
-    this.fill(order, m.price, strat);
+    this.fill(order, m.price, this.manualStrat(p.venue));
     this.log("system", `Flattened ${marketId}`, "manual", marketId);
     this.emit();
   }
@@ -298,9 +423,6 @@ export class PaperEngine implements EngineClient {
         return this.orders.filter((o) => o.strategyId === sid && o.ts > cutoff).length;
       },
       strategyExposure: (sid) => {
-        // Approximate a strategy's deployed capital from its fills in the last
-        // minute (a full engine tracks lot ownership per strategy; the Rust
-        // core does exactly that).
         const cutoff = Date.now() - 60_000;
         return this.orders
           .filter((o) => o.strategyId === sid && o.status === "filled" && o.ts > cutoff)
@@ -342,17 +464,15 @@ export class PaperEngine implements EngineClient {
     return v;
   }
 
-  // ── public read API (consumed by the store) ────────────────────────────────
+  // ── public read API ─────────────────────────────────────────────────────────
   snapshot(): PortfolioSnapshot {
-    const balances: VenueBalance[] = (["polymarket", "crypto", "alpaca"] as Venue[]).map(
-      (venue) => ({
-        venue,
-        connected: false, // no live keys in paper mode
-        cash: this.cash / 3,
-        equity: this.equity() / 3,
-        mode: "paper" as Mode,
-      })
-    );
+    const balances: VenueBalance[] = (["polymarket", "crypto", "alpaca"] as Venue[]).map((venue) => ({
+      venue,
+      connected: false,
+      cash: this.cash / 3,
+      equity: this.equity() / 3,
+      mode: "paper" as Mode,
+    }));
     return {
       mode: this.anyLive() ? "live" : "paper",
       cash: this.cash,
@@ -369,7 +489,6 @@ export class PaperEngine implements EngineClient {
   anyLive(): boolean {
     return this.strategies.some((s) => s.state === "live");
   }
-
   markets(): Market[] {
     return this.sim.list();
   }

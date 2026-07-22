@@ -11,7 +11,7 @@ export function About() {
           <div className="h-10 w-10 rounded-lg bg-gradient-to-br from-accent to-purple-neon glow-cyan" />
           <div>
             <div className="flex items-center gap-2 font-bold">
-              PYTHIA <Badge tone="cyan">v0.1 · Phase 1</Badge>
+              PYTHIA <Badge tone="cyan">v0.2 · Phase 1+</Badge>
             </div>
             <div className="text-xs text-cyber-text-dim">
               Polymarket + crypto + equities, one strategy engine, one risk manager, one cockpit.
@@ -22,15 +22,17 @@ export function About() {
 
       <Card title="What works today" className="mb-4">
         <ul className="list-inside list-disc space-y-1 text-sm text-cyber-text-dim">
-          <li>Runs two ways from one UI: <span className="text-accent">native desktop app</span> (Rust engine daemon) and <span className="text-accent">browser/web app</span> (TypeScript engine)</li>
-          <li>Real read-only market data in the native build: live Kraken crypto prices + Polymarket odds</li>
-          <li>Persistent engine: strategies, fractional-Kelly sizing, paper fills, live P&L</li>
-          <li>Sovereign risk manager: kill switch, daily-loss cap, position & exposure caps</li>
-          <li>Append-only journal of every signal / order / fill / rejection</li>
+          <li>Runs two ways from one UI: <span className="text-accent">native desktop app</span> (Rust daemon) and <span className="text-accent">browser/web app</span> (TypeScript) — identical, verified indicator-for-indicator</li>
+          <li>6 indicator-based strategies: EMA cross, Bollinger revert, RSI, MACD, Donchian breakout, Prob-Edge</li>
+          <li>Position management: ATR stop-loss, take-profit & trailing stops (auto-exit)</li>
+          <li>Advanced risk: max-drawdown breaker, daily reset, per-strategy loss-streak cooldowns, fractional-Kelly sizing</li>
+          <li>Per-strategy stats: profit factor, max drawdown, win rate</li>
+          <li>Real read-only market data (native): live Kraken crypto + Polymarket odds</li>
+          <li>Secure key storage (OS keychain), persistent state, system tray, first-run legal gate</li>
         </ul>
         <div className="mt-3 text-xs text-cyber-text-faint">
-          Next (Phase 2): gated live execution per venue, SQLite-persisted journal, OS-keychain
-          secrets vault, and a probability-model plug-in for Prob-Edge. See PLAN.md.
+          Next (Phase 2): gated live execution per venue, a backtester, and a probability-model
+          plug-in for Prob-Edge. See PLAN.md.
         </div>
       </Card>
 
