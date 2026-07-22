@@ -1,6 +1,6 @@
 [package]
 name = "pythia"
-version = "0.1.0"
+version = "0.4.0"
 description = "Autonomous multi-venue prediction & trading cockpit"
 authors = ["SenseiIssei"]
 edition = "2021"

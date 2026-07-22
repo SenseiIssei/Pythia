@@ -84,7 +84,7 @@ function Chrome() {
           <div className="flex items-center gap-2">
             <div className="h-3 w-3 rounded-full bg-gradient-to-br from-accent to-purple-neon glow-cyan" />
             <span className="font-bold tracking-widest text-glow-cyan">PYTHIA</span>
-            <span className="text-xs text-cyber-text-faint">v0.1</span>
+            <span className="text-xs text-cyber-text-faint">v0.4</span>
           </div>
         </div>
         <div className="flex items-center gap-3">

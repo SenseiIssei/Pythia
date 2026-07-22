@@ -2814,7 +2814,7 @@ dependencies = [
 
 [[package]]
 name = "pythia"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "pythia-core",
  "serde",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "pythia-core"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2845,7 +2845,7 @@ dependencies = [
 
 [[package]]
 name = "pythia-server"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "pythia-core",
