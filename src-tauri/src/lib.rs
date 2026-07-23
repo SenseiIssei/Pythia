@@ -80,6 +80,16 @@ pub fn run() {
                         }
                     }
 
+                    // Submit any armed live orders (Alpaca). Keys from the vault.
+                    let live_orders = {
+                        let st = handle.state::<AppState>();
+                        let mut e = st.engine.lock().unwrap();
+                        e.drain_live_orders()
+                    };
+                    for o in live_orders {
+                        commands::submit_live_order(&handle, o).await;
+                    }
+
                     // Checkpoint to disk periodically (~every 60s).
                     if n % 40 == 0 {
                         persist::save(&handle);
@@ -105,6 +115,8 @@ pub fn run() {
             commands::save_llm_key,
             commands::clear_llm_key,
             commands::llm_signal,
+            commands::set_live,
+            commands::alpaca_account,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

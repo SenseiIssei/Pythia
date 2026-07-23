@@ -9,6 +9,7 @@ import {
 import { getEngine } from "./engine";
 import type {
   JournalEntry,
+  LiveStatus,
   Market,
   Order,
   PortfolioSnapshot,
@@ -26,6 +27,7 @@ interface Store {
   strategies: StrategyConfig[];
   limits: RiskLimits;
   history: Record<string, number[]>;
+  live: LiveStatus;
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
@@ -59,6 +61,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       strategies: engine.strategyList(),
       limits: engine.getLimits(),
       history: engine.history(),
+      live: engine.liveStatus(),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),

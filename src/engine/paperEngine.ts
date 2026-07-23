@@ -607,6 +607,11 @@ export class PaperEngine implements EngineClient {
     return out;
   }
 
+  // The browser paper engine never trades live — it can't reach a broker.
+  liveStatus() {
+    return { armed: false, paper: true, dryRun: false, alpacaConnected: false, pending: 0 };
+  }
+
   // ── mutations from the UI ──────────────────────────────────────────────────
   setLimits(next: Partial<RiskLimits>) {
     this.limits = { ...this.limits, ...next };

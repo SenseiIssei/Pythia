@@ -24,6 +24,7 @@ const PAGES = [
   ["analytics", "Analytics"],
   ["correlation", "Correlation"],
   ["signals", "AI Signals"],
+  ["live", "Live"],
   ["risk", "Risk"],
   ["settings", "Settings"],
   ["about", "About"],

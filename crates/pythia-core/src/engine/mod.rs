@@ -262,6 +262,42 @@ pub struct RiskDecision {
     pub reason: Option<String>,
 }
 
+/// Live-execution status surfaced to the UI. Live routing is OFF until the user
+/// explicitly arms it (typed confirmation), and only Alpaca orders from a Live
+/// strategy are ever sent to a real venue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveStatus {
+    /// Master arm. When false, everything simulates — no order leaves the machine.
+    pub armed: bool,
+    /// Route to the broker's PAPER endpoint (real API, no real money).
+    pub paper: bool,
+    /// Log intended orders but don't submit them anywhere.
+    pub dry_run: bool,
+    /// Alpaca has keys in the vault / env.
+    pub alpaca_connected: bool,
+    /// Live orders currently awaiting a broker response.
+    pub pending: usize,
+}
+
+/// One live order handed to the async daemon to submit. The daemon is the only
+/// place that touches the network; the engine stays synchronous.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveOrderOut {
+    pub order_id: String,
+    pub market_id: String,
+    /// Venue ticker (e.g. "AAPL") — what the broker expects.
+    pub symbol: String,
+    pub side: Side,
+    pub qty: f64,
+    pub ref_price: f64,
+    pub strategy_id: String,
+    /// Snapshot of the arm config at enqueue time.
+    pub paper: bool,
+    pub dry_run: bool,
+}
+
 /// The full state pushed to the UI every tick.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineState {
@@ -273,6 +309,7 @@ pub struct EngineState {
     pub strategies: Vec<StrategyConfig>,
     pub limits: RiskLimits,
     pub history: HashMap<String, Vec<f64>>, // recent closes per tradable market
+    pub live: LiveStatus,
 }
 
 // ── persistence (survive restarts) ─────────────────────────────────────────
@@ -318,6 +355,7 @@ struct PositionInternal {
     stop: f64,      // 0 = none
     target: f64,    // 0 = none
     trail_ref: f64, // best favorable price seen, for trailing stops
+    live: bool,     // opened via a real (live) fill — its exits must also route live
 }
 
 struct SimParam {
@@ -350,6 +388,12 @@ pub struct Engine {
     gross_win: HashMap<String, f64>,     // per-strategy cumulative winning $ (for profit factor)
     gross_loss: HashMap<String, f64>,    // per-strategy cumulative losing $
     pending_alerts: Vec<String>,         // notable events awaiting a webhook push
+    // ── live execution (Phase 2, OFF by default) ──
+    live_armed: bool,
+    live_paper: bool,   // route to the broker's paper endpoint (real API, no real money)
+    live_dry_run: bool, // log intended orders but never submit
+    pending_live: Vec<LiveOrderOut>,     // outbox drained by the async daemon
+    in_flight: std::collections::HashSet<String>, // market_ids with a live order awaiting a broker response
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -388,6 +432,11 @@ impl Engine {
             gross_win: HashMap::new(),
             gross_loss: HashMap::new(),
             pending_alerts: Vec::new(),
+            live_armed: false,
+            live_paper: true,
+            live_dry_run: false,
+            pending_live: Vec::new(),
+            in_flight: std::collections::HashSet::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -706,11 +755,12 @@ impl Engine {
 
     /// Close a position attributing the fill to its owning strategy.
     fn close_position(&mut self, id: &str, reason: &str) {
-        let (qty, side, sid) = match self.positions.get(id) {
+        let (qty, side, sid, live) = match self.positions.get(id) {
             Some(p) if p.qty != 0.0 => (
                 p.qty.abs(),
                 if p.qty > 0.0 { Side::Sell } else { Side::Buy },
                 p.strategy_id.clone(),
+                p.live,
             ),
             _ => return,
         };
@@ -720,7 +770,7 @@ impl Engine {
             .iter()
             .position(|s| s.id == sid)
             .unwrap_or_else(|| self.ensure_manual_strategy());
-        self.fill(idx, &m, side, qty, m.price);
+        self.route_fill(idx, &m, side, qty, m.price, live);
         self.log(JournalKind::System, format!("Exit {id}: {reason}"), Some(sid), Some(id.to_string()));
     }
 
@@ -790,14 +840,25 @@ impl Engine {
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return;
         }
-        self.fill(strat_idx, m, intent.side, decision.qty, price);
+        let live_intent = self.strategies[strat_idx].state == StrategyState::Live;
+        self.route_fill(strat_idx, m, intent.side, decision.qty, price, live_intent);
     }
 
+    /// Paper fill: simulate slippage + fee against `price`, then settle.
     fn fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
-        let sid = self.strategies[strat_idx].id.clone();
         let slip = if side == Side::Buy { 1.0008 } else { 0.9992 };
         let fill_price = price * slip;
         let fee = fill_price * qty * 0.0006;
+        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, false, true);
+    }
+
+    /// Apply a fill (paper or live) to positions, cash, P&L and strategy stats.
+    /// `live` marks a real fill — its position's exits must also route live.
+    /// `emit_order` inserts a fresh Filled order (the paper path); live fills
+    /// instead update their existing pending order in [`Engine::apply_live_fill`].
+    #[allow(clippy::too_many_arguments)]
+    fn settle_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, fill_price: f64, fee: f64, live: bool, emit_order: bool) {
+        let sid = self.strategies[strat_idx].id.clone();
         let signed = if side == Side::Buy { qty } else { -qty };
         let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
 
@@ -817,6 +878,7 @@ impl Engine {
                         stop: new_stop,
                         target: new_target,
                         trail_ref: fill_price,
+                        live,
                     },
                 );
             }
@@ -907,18 +969,145 @@ impl Engine {
             }
         }
 
-        let order = self.build_order_filled(&sid, m, side, qty, fill_price);
-        self.orders.insert(0, order);
-        if self.orders.len() > 400 {
-            self.orders.pop();
+        if emit_order {
+            let order = self.build_order_filled(&sid, m, side, qty, fill_price);
+            self.orders.insert(0, order);
+            if self.orders.len() > 400 {
+                self.orders.pop();
+            }
+            let mode = self.mode();
+            self.log(
+                JournalKind::Fill,
+                format!("{mode:?} FILL {side:?} {qty:.4} {} @ {fill_price:.4}", m.id),
+                Some(sid),
+                Some(m.id.clone()),
+            );
         }
-        let mode = self.mode();
+    }
+
+    /// Decide whether an approved order simulates (paper) or routes to a real
+    /// venue. Live routing requires the master arm, an Alpaca venue, and a live
+    /// intent (a Live strategy for entries/manual, or a live-opened position for
+    /// exits). Everything else stays paper — fail safe.
+    fn route_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64, live_intent: bool) {
+        let go_live = self.live_armed && m.venue == Venue::Alpaca && live_intent;
+        if !go_live {
+            self.fill(strat_idx, m, side, qty, price);
+            return;
+        }
+        // One live order per market at a time — never double-send while a prior
+        // order is still awaiting a broker response.
+        if self.in_flight.contains(&m.id) {
+            return;
+        }
+        let sid = self.strategies[strat_idx].id.clone();
+        let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
+        let order_id = order.id.clone();
+        self.orders.insert(0, order);
+        self.in_flight.insert(m.id.clone());
+        self.pending_live.push(LiveOrderOut {
+            order_id,
+            market_id: m.id.clone(),
+            symbol: m.symbol.clone(),
+            side,
+            qty,
+            ref_price: price,
+            strategy_id: sid.clone(),
+            paper: self.live_paper,
+            dry_run: self.live_dry_run,
+        });
+        let dest = if self.live_dry_run {
+            "DRY-RUN"
+        } else if self.live_paper {
+            "PAPER-LIVE"
+        } else {
+            "REAL-LIVE"
+        };
         self.log(
-            JournalKind::Fill,
-            format!("{mode:?} FILL {side:?} {qty:.4} {} @ {fill_price:.4}", m.id),
+            JournalKind::Order,
+            format!("{dest} submit {side:?} {qty:.4} {} @ ~{price:.2}", m.symbol),
             Some(sid),
             Some(m.id.clone()),
         );
+    }
+
+    // ── live execution control (Phase 2) ────────────────────────────────────
+    /// Arm/disarm real order routing. Arming is a deliberate, logged, alerted
+    /// action; disarming stops new live orders (in-flight ones still reconcile).
+    pub fn set_live(&mut self, armed: bool, paper: bool, dry_run: bool) {
+        let was = self.live_armed;
+        self.live_armed = armed;
+        self.live_paper = paper;
+        self.live_dry_run = dry_run;
+        let dest = if dry_run {
+            "dry-run (nothing sent)"
+        } else if paper {
+            "the PAPER endpoint (no real money)"
+        } else {
+            "REAL MONEY"
+        };
+        if armed {
+            self.log(JournalKind::Risk, format!("LIVE ARMED — Alpaca orders route to {dest}"), None, None);
+            self.pending_alerts.push(format!("⚠ Pythia LIVE ARMED → {dest}"));
+        } else if was {
+            self.log(JournalKind::Risk, "LIVE DISARMED — back to paper simulation".into(), None, None);
+            self.pending_alerts.push("Pythia live disarmed".into());
+        }
+    }
+
+    /// Hand the async daemon every live order awaiting submission.
+    pub fn drain_live_orders(&mut self) -> Vec<LiveOrderOut> {
+        std::mem::take(&mut self.pending_live)
+    }
+
+    /// Apply a confirmed broker fill to an in-flight live order.
+    pub fn apply_live_fill(&mut self, order_id: &str, filled_qty: f64, fill_price: f64) {
+        let Some(o) = self.orders.iter().find(|o| o.id == order_id).cloned() else { return };
+        self.in_flight.remove(&o.market_id);
+        let Some(m) = self.markets.iter().find(|mm| mm.id == o.market_id).cloned() else { return };
+        let idx = self
+            .strategies
+            .iter()
+            .position(|s| s.id == o.strategy_id)
+            .unwrap_or_else(|| self.ensure_manual_strategy());
+        // Real fill: broker's price/qty, no simulated fee (Alpaca equities are
+        // commission-free). emit_order=false → we update the existing order below.
+        self.settle_fill(idx, &m, o.side, filled_qty, fill_price, 0.0, true, false);
+        if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
+            ord.status = OrderStatus::Filled;
+            ord.filled_qty = filled_qty;
+            ord.avg_fill_price = Some(fill_price);
+            ord.mode = Mode::Live;
+        }
+        self.log(
+            JournalKind::Fill,
+            format!("LIVE FILL {:?} {filled_qty:.4} {} @ {fill_price:.4}", o.side, m.symbol),
+            Some(o.strategy_id.clone()),
+            Some(o.market_id.clone()),
+        );
+    }
+
+    /// Mark an in-flight live order rejected/failed (also used for dry-run).
+    pub fn apply_live_reject(&mut self, order_id: &str, reason: &str) {
+        let mkt = self.orders.iter().find(|o| o.id == order_id).map(|o| o.market_id.clone());
+        if let Some(mid) = mkt {
+            self.in_flight.remove(&mid);
+        }
+        if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
+            ord.status = OrderStatus::Rejected;
+            ord.reject_reason = Some(reason.to_string());
+        }
+        self.log(JournalKind::Reject, format!("LIVE order not filled: {reason}"), None, None);
+    }
+
+    fn live_status(&self) -> LiveStatus {
+        LiveStatus {
+            armed: self.live_armed,
+            paper: self.live_paper,
+            dry_run: self.live_dry_run,
+            alpaca_connected: self.connected.contains(&Venue::Alpaca),
+            pending: self.in_flight.len(),
+        }
     }
 
     // ── manual actions (from the UI) ────────────────────────────────────────
@@ -943,16 +1132,18 @@ impl Engine {
         }
         // manual uses a synthetic strategy slot (index found or fall back to first)
         let idx = self.ensure_manual_strategy();
-        self.fill(idx, &m, side, decision.qty, m.price);
+        // A manual click on an Alpaca market while armed is an intentional live order.
+        self.route_fill(idx, &m, side, decision.qty, m.price, true);
     }
 
     pub fn flatten(&mut self, market_id: &str) {
         let Some(pos) = self.positions.get(market_id) else { return };
         let qty = pos.qty.abs();
         let side = if pos.qty > 0.0 { Side::Sell } else { Side::Buy };
+        let live = pos.live; // a live-opened position must be closed live too
         let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
         let idx = self.ensure_manual_strategy();
-        self.fill(idx, &m, side, qty, m.price);
+        self.route_fill(idx, &m, side, qty, m.price, live);
         self.log(JournalKind::System, format!("Flattened {market_id}"), Some("manual".into()), Some(market_id.to_string()));
     }
 
@@ -1124,6 +1315,7 @@ impl Engine {
                         stop: pp.stop,
                         target: pp.target,
                         trail_ref: pp.trail_ref,
+                        live: false, // restored positions are treated as paper until re-armed
                     },
                 )
             })
@@ -1198,6 +1390,7 @@ impl Engine {
                     })
                 })
                 .collect(),
+            live: self.live_status(),
         }
     }
 
@@ -1332,6 +1525,7 @@ mod tests {
                 stop: 58_000.0,
                 target: 65_000.0,
                 trail_ref: 60_000.0,
+                live: false,
             },
         );
 
@@ -1367,6 +1561,7 @@ mod tests {
                 stop: 68_000.0,
                 target: 0.0,
                 trail_ref: 67_000.0,
+                live: false,
             },
         );
         e.check_position_exits();
@@ -1441,5 +1636,38 @@ mod tests {
         assert!(e.positions.get("crypto:BTC/USD").is_none());
         // and it should be journaled as a rejection
         assert!(e.orders.iter().any(|o| o.status == OrderStatus::Rejected));
+    }
+
+    #[test]
+    fn live_routing_only_alpaca_when_armed() {
+        let mut e = Engine::new();
+
+        // Disarmed: a manual Alpaca order fills as paper immediately, nothing queued.
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty());
+        assert!(e.positions.contains_key("alpaca:AAPL"));
+        e.flatten("alpaca:AAPL");
+        assert!(e.drain_live_orders().is_empty(), "paper position flattens paper even later");
+
+        // Arm live (paper endpoint). A manual Alpaca order now routes to the outbox
+        // and does NOT open a position until the broker confirms.
+        e.set_live(true, true, false);
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let out = e.drain_live_orders();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol, "AAPL");
+        assert!(out[0].paper, "should target the paper endpoint");
+        assert!(e.in_flight.contains("alpaca:AAPL"));
+        assert!(!e.positions.contains_key("alpaca:AAPL"), "no position until fill confirmed");
+
+        // Broker confirms → position opens and is marked live.
+        e.apply_live_fill(&out[0].order_id, out[0].qty, 228.0);
+        assert!(e.positions.get("alpaca:AAPL").map(|p| p.live).unwrap_or(false));
+        assert!(!e.in_flight.contains("alpaca:AAPL"));
+
+        // Crypto is never routed live, even when armed.
+        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty());
+        assert!(e.positions.contains_key("crypto:BTC/USD"));
     }
 }

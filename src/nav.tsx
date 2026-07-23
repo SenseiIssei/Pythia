@@ -13,6 +13,7 @@ import {
   Blocks,
   Grid3x3,
   BrainCircuit,
+  Radio,
   type LucideIcon,
 } from "lucide-react";
 
@@ -27,6 +28,7 @@ export type PageId =
   | "analytics"
   | "correlation"
   | "signals"
+  | "live"
   | "risk"
   | "journal"
   | "settings"
@@ -50,6 +52,7 @@ export const NAV: NavItem[] = [
   { id: "analytics", label: "Analytics", icon: BarChart3, section: "Research" },
   { id: "correlation", label: "Correlation", icon: Grid3x3, section: "Research" },
   { id: "signals", label: "AI Signals", icon: BrainCircuit, section: "AI" },
+  { id: "live", label: "Live", icon: Radio, section: "Control" },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control" },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control" },
   { id: "settings", label: "Settings", icon: Settings, section: "Config" },
