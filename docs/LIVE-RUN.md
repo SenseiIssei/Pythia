@@ -35,6 +35,13 @@ Fill in `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`, then start it:
 ```bash
 npm run server
 ```
+
+> **Windows build note.** If a native crate (`ring`) ever fails with
+> `failed to find tool "C:\Program"`, that's machine-scope `CC`/`CXX` env vars whose value contains
+> a space — `cc-rs` splits on it. The npm scripts run through `scripts/clean-env.mjs`, which strips
+> `CC`/`CXX`/`CFLAGS`/`CXXFLAGS` for the child process, so `npm run server` and `npm run tauri` are
+> immune. Raw `cargo` in your own shell is not — prefix it with
+> `unset CC CXX CFLAGS CXXFLAGS` (bash) if you hit it.
 `.env` is gitignored. On boot the log tells you what it found:
 ```
 Alpaca: keys present → real equity quotes (iex feed) + live execution available

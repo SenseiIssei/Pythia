@@ -82,9 +82,17 @@ async fn main() {
         .with_state(state);
 
     let addr = std::env::var("PYTHIA_BIND").unwrap_or_else(|_| "0.0.0.0:8787".into());
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("cannot bind {addr}: {e}"));
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(
+                "cannot bind {addr}: {e}\n\
+                 → is another Pythia server already running? Stop it, or set \
+                 PYTHIA_BIND to a free port in .env"
+            );
+            std::process::exit(1);
+        }
+    };
     tracing::info!("Pythia backend listening on http://{addr}");
     let configured: Vec<&str> = Provider::ALL
         .iter()
