@@ -99,7 +99,11 @@ impl AlpacaConnector {
         if !resp.status().is_success() {
             let code = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(ConnectorError::Rejected(format!("account {code}: {body}")));
+            return Err(if code == 401 || code == 403 {
+                ConnectorError::Auth(format!("HTTP {code}"))
+            } else {
+                ConnectorError::Rejected(format!("account {code}: {body}"))
+            });
         }
         let mut acct: AlpacaAccount =
             resp.json().await.map_err(|e| ConnectorError::Network(e.to_string()))?;
@@ -185,7 +189,11 @@ impl MarketConnector for AlpacaConnector {
         if !resp.status().is_success() {
             let code = resp.status().as_u16();
             let msg = resp.text().await.unwrap_or_default();
-            return Err(ConnectorError::Rejected(format!("submit {code}: {msg}")));
+            return Err(if code == 401 || code == 403 {
+                ConnectorError::Auth(format!("HTTP {code}"))
+            } else {
+                ConnectorError::Rejected(format!("submit {code}: {msg}"))
+            });
         }
         let submitted: AlpacaOrderResp =
             resp.json().await.map_err(|e| ConnectorError::Network(e.to_string()))?;
