@@ -3,8 +3,9 @@
 //! updates without waiting for the next tick.
 
 use crate::state::AppState;
-use pythia_core::connectors::{Side, Venue};
-use pythia_core::engine::{EngineState, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
+use pythia_core::connectors::{MarketConnector, OrderRequest, OrderType, Side, Venue};
+use pythia_core::engine::{EngineState, LiveOrderOut, RiskLimits, StrategyConfig, StrategyState};
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::vault;
 use std::collections::{BTreeMap, HashSet};
@@ -193,6 +194,65 @@ pub fn clear_llm_key(provider: String) -> Result<(), String> {
     } else {
         vault::save("ai", &keys)
     }
+}
+
+// ── live execution (Alpaca) ──────────────────────────────────────────────────
+
+/// Arm/disarm real order routing. Guarded on the frontend by a typed
+/// confirmation; the risk manager + kill switch still gate every order.
+#[tauri::command]
+pub fn set_live(app: AppHandle, app_state: State<AppState>, armed: bool, paper: bool, dry_run: bool) {
+    app_state.engine.lock().unwrap().set_live(armed, paper, dry_run);
+    push_state(&app);
+}
+
+/// Read-only Alpaca account check (buying power, status) for the connection test.
+#[tauri::command]
+pub async fn alpaca_account(paper: bool) -> Result<AlpacaAccount, String> {
+    let keys = vault::get("alpaca").unwrap_or_default();
+    let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), paper);
+    if !conn.is_live_ready() {
+        return Err("Alpaca keys not in vault — add them in Settings".into());
+    }
+    conn.account().await.map_err(|e| e.to_string())
+}
+
+/// Submit one drained live order to Alpaca (keys from the vault) and apply the
+/// result. Called from the daemon tick loop; not a Tauri command.
+pub async fn submit_live_order(app: &AppHandle, o: LiveOrderOut) {
+    if o.dry_run {
+        if let Some(st) = app.try_state::<AppState>() {
+            st.engine.lock().unwrap().apply_live_reject(&o.order_id, "dry-run: not submitted");
+        }
+    } else {
+        let keys = vault::get("alpaca").unwrap_or_default();
+        let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), o.paper);
+        if !conn.is_live_ready() {
+            if let Some(st) = app.try_state::<AppState>() {
+                st.engine
+                    .lock()
+                    .unwrap()
+                    .apply_live_reject(&o.order_id, "Alpaca keys not in vault — add them in Settings");
+            }
+        } else {
+            let req = OrderRequest {
+                market_id: o.symbol.clone(),
+                side: o.side,
+                order_type: OrderType::Market,
+                qty: o.qty,
+                limit_price: None,
+            };
+            let res = conn.place_order(req).await;
+            if let Some(st) = app.try_state::<AppState>() {
+                let mut e = st.engine.lock().unwrap();
+                match res {
+                    Ok(fill) => e.apply_live_fill(&o.order_id, fill.qty, fill.price),
+                    Err(err) => e.apply_live_reject(&o.order_id, &err.to_string()),
+                }
+            }
+        }
+    }
+    push_state(app);
 }
 
 /// Ask a provider for a signal on one market. Key comes from the vault; the

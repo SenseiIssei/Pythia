@@ -60,6 +60,10 @@ and any large-language-model of your choice can weigh in on a market.
   return-correlation / concentration matrix.
 - **🧠 AI Signals — bring any model** — Anthropic (Claude), OpenAI (GPT), xAI (Grok), z.ai (GLM),
   DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
+- **📡 Gated live execution (Alpaca)** — a real order path that ships **disarmed**. Arming needs a
+  typed `ARM LIVE` confirmation; only Alpaca markets from a *Live* strategy route to the broker, and
+  the kill switch + every risk limit gate each order. Start on the **paper endpoint** (real API, no
+  real money), test the connection, then flip to real money once you trust it.
 - **Real read-only market data** — live Kraken crypto prices and Polymarket odds (no keys needed).
 - **Secure by default** — API keys live in the OS keychain (desktop) or the server's environment,
   never in code, never logged, never returned to the UI. Discord/webhook alerts, persistent state,
@@ -79,8 +83,12 @@ and any large-language-model of your choice can weigh in on a market.
     <td><img src="docs/screenshots/settings.png" alt="Settings"><br><sub><b>Settings</b> — venue &amp; AI-provider keys (keychain)</sub></td>
   </tr>
   <tr>
+    <td><img src="docs/screenshots/live.png" alt="Live Execution"><br><sub><b>Live</b> — gated arm flow, paper-first</sub></td>
     <td><img src="docs/screenshots/analytics.png" alt="Analytics"><br><sub><b>Analytics</b> — drawdown, leaderboard, trade log</sub></td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/correlation.png" alt="Correlation"><br><sub><b>Correlation</b> — return matrix &amp; concentration</sub></td>
+    <td><img src="docs/screenshots/optimizer.png" alt="Optimizer"><br><sub><b>Optimizer</b> — Monte-Carlo robustness sweep</sub></td>
   </tr>
 </table>
 
@@ -147,6 +155,8 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `POST /api/command` | mutate the engine (kill switch, limits, strategies, orders) |
 | `GET /api/llm/providers` | which providers have a key in the server env |
 | `POST /api/llm/signal` | ask a provider for a signal (`{provider, model, context}`) |
+| `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun}`) |
+| `GET /api/live/account` | Alpaca account check (buying power/status) |
 
 Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, and any provider key
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …).
@@ -193,6 +203,21 @@ Pythia/                     # Cargo workspace
   persons — confirm legality where you live.
 
 Read [`SAFETY.md`](SAFETY.md) in full before enabling anything live.
+
+### Going live (Alpaca, paper-first)
+
+Live execution is wired for **Alpaca equities** and ships **disarmed**. The recommended path:
+
+1. Add your Alpaca keys — desktop: *Settings → Alpaca* (OS keychain); server: `APCA_API_KEY_ID` /
+   `APCA_API_SECRET_KEY` env vars.
+2. Open **Live** → *Test paper connection* (read-only; shows account status + buying power).
+3. Keep the endpoint on **Paper**, type `ARM LIVE`, and arm. Set a strategy to **Live** on the
+   Strategies page — its Alpaca orders now hit `paper-api.alpaca.markets` (real order lifecycle, no
+   real money). Use **Dry-run** to log intended orders without sending them anywhere.
+4. Only once you trust it, flip the endpoint to **Live** and re-arm for real money.
+
+Only Alpaca markets from a Live strategy ever route to the broker; crypto and Polymarket stay paper.
+The kill switch and every risk limit gate each order first.
 
 ---
 

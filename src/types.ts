@@ -199,3 +199,12 @@ export interface LlmSignal {
   provider: string;
   model: string;
 }
+
+// ── live execution status ────────────────────────────────────────────────────
+export interface LiveStatus {
+  armed: boolean;
+  paper: boolean;
+  dryRun: boolean;
+  alpacaConnected: boolean;
+  pending: number;
+}

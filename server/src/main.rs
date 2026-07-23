@@ -31,8 +31,9 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
-use pythia_core::connectors::Side;
-use pythia_core::engine::{Engine, EngineState, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
+use pythia_core::connectors::{MarketConnector, OrderRequest, OrderType, Side};
+use pythia_core::engine::{Engine, EngineState, LiveOrderOut, RiskLimits, StrategyConfig, StrategyState};
 use pythia_core::llm::{self, LlmConfig, Provider};
 use pythia_core::{alerts, marketdata};
 
@@ -72,6 +73,8 @@ async fn main() {
         .route("/api/command", post(post_command))
         .route("/api/llm/providers", get(get_llm_providers))
         .route("/api/llm/signal", post(post_llm_signal))
+        .route("/api/live/config", post(post_live_config))
+        .route("/api/live/account", get(get_live_account))
         // The dashboards are served from a different origin in dev; allow them.
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -129,7 +132,44 @@ async fn tick_loop(state: AppState) {
                 alerts::post(&url, &queued.join("\n")).await;
             }
         }
+
+        // Submit any armed live orders (Alpaca). Keys come from the server env.
+        let live_orders = { state.engine.lock().unwrap().drain_live_orders() };
+        for o in live_orders {
+            submit_live_order(&state, o).await;
+        }
     }
+}
+
+/// Submit one live order to Alpaca (keys from env) and apply the result back to
+/// the engine. Dry-run and missing-key cases resolve without any network call.
+async fn submit_live_order(state: &AppState, o: LiveOrderOut) {
+    if o.dry_run {
+        state.engine.lock().unwrap().apply_live_reject(&o.order_id, "dry-run: not submitted");
+    } else {
+        let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), o.paper);
+        if !conn.is_live_ready() {
+            state.engine.lock().unwrap().apply_live_reject(
+                &o.order_id,
+                "Alpaca keys not set (APCA_API_KEY_ID / APCA_API_SECRET_KEY)",
+            );
+        } else {
+            let req = OrderRequest {
+                market_id: o.symbol.clone(),
+                side: o.side,
+                order_type: OrderType::Market,
+                qty: o.qty,
+                limit_price: None,
+            };
+            match conn.place_order(req).await {
+                Ok(fill) => state.engine.lock().unwrap().apply_live_fill(&o.order_id, fill.qty, fill.price),
+                Err(e) => state.engine.lock().unwrap().apply_live_reject(&o.order_id, &e.to_string()),
+            }
+        }
+    }
+    // Push the updated state so listeners see the fill/rejection promptly.
+    let s = serde_json::to_string(&state.engine.lock().unwrap().state()).unwrap_or_default();
+    let _ = state.tx.send(s);
 }
 
 async fn health() -> &'static str {
@@ -227,6 +267,57 @@ async fn post_command(
 /// the environment). The frontend uses this to populate the model picker.
 async fn get_llm_providers() -> impl IntoResponse {
     Json(llm::providers_from_env())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveConfigReq {
+    armed: bool,
+    #[serde(default = "default_true")]
+    paper: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+fn default_true() -> bool {
+    true
+}
+
+/// Arm/disarm live execution. Returns fresh state so the UI reflects it at once.
+async fn post_live_config(
+    State(st): State<AppState>,
+    Json(req): Json<LiveConfigReq>,
+) -> Json<EngineState> {
+    let dto = {
+        let mut e = st.engine.lock().unwrap();
+        e.set_live(req.armed, req.paper, req.dry_run);
+        let s = e.state();
+        let _ = st.tx.send(serde_json::to_string(&s).unwrap_or_default());
+        s
+    };
+    Json(dto)
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountQuery {
+    #[serde(default = "default_true")]
+    paper: bool,
+}
+
+/// Read-only Alpaca account check (buying power, status) for the "test
+/// connection" button. Keys come from the server env.
+async fn get_live_account(axum::extract::Query(q): axum::extract::Query<AccountQuery>) -> impl IntoResponse {
+    let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), q.paper);
+    if !conn.is_live_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Alpaca keys not set (APCA_API_KEY_ID / APCA_API_SECRET_KEY)",
+        )
+            .into_response();
+    }
+    match conn.account().await {
+        Ok(acct) => (StatusCode::OK, Json::<AlpacaAccount>(acct)).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("alpaca: {e}")).into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]

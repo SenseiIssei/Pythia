@@ -9,7 +9,7 @@ import type {
   StrategyConfig,
   StrategyState,
 } from "../types";
-import type { EngineClient, EngineState } from "./client";
+import { DISARMED, type EngineClient, type EngineState } from "./client";
 import { DEFAULT_LIMITS } from "./risk";
 
 const EMPTY: EngineState = {
@@ -31,6 +31,7 @@ const EMPTY: EngineState = {
   strategies: [],
   limits: DEFAULT_LIMITS,
   history: {},
+  live: DISARMED,
 };
 
 /**
@@ -144,6 +145,9 @@ export class ServerEngineClient implements EngineClient {
   }
   history(): Record<string, number[]> {
     return this.state.history ?? {};
+  }
+  liveStatus() {
+    return this.state.live ?? DISARMED;
   }
 
   /** POST a command; the response carries fresh state so the UI updates now. */

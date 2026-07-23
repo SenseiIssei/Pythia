@@ -1,5 +1,6 @@
 import type {
   JournalEntry,
+  LiveStatus,
   Market,
   Order,
   PortfolioSnapshot,
@@ -9,6 +10,8 @@ import type {
   StrategyConfig,
   StrategyState,
 } from "../types";
+
+const DISARMED: LiveStatus = { armed: false, paper: true, dryRun: false, alpacaConnected: false, pending: 0 };
 
 // The one interface the UI depends on. Two implementations satisfy it:
 //   · PaperEngine        — pure TypeScript, runs in the browser (dev / web app)
@@ -29,6 +32,8 @@ export interface EngineClient {
   getLimits(): RiskLimits;
   /** Recent close-price history per tradable market (for correlation analysis). */
   history(): Record<string, number[]>;
+  /** Live-execution status (arm state, endpoint, pending live orders). */
+  liveStatus(): LiveStatus;
 
   toggleKill(): void;
   setLimits(l: Partial<RiskLimits>): void;
@@ -50,7 +55,10 @@ export interface EngineState {
   strategies: StrategyConfig[];
   limits: RiskLimits;
   history: Record<string, number[]>;
+  live: LiveStatus;
 }
+
+export { DISARMED };
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
