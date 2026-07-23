@@ -95,15 +95,17 @@ covers the rest. Every model is overridable — type any model id you like.
 | Provider | id | Env var | Default model | Notes |
 |---|---|---|---|---|
 | Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-8` | Messages API + adaptive thinking |
-| OpenAI (GPT) | `openai` | `OPENAI_API_KEY` | `gpt-5.1` | |
-| xAI (Grok) | `xai` | `XAI_API_KEY` | `grok-4` | |
-| z.ai (GLM) | `zai` | `ZAI_API_KEY` | `glm-4.6` | |
-| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` | |
-| Google (Gemini) | `google` | `GEMINI_API_KEY` | `gemini-2.5-pro` | OpenAI-compat endpoint |
-| Groq | `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | |
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-5.1` | any model on OpenRouter |
-| Mistral | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` | |
-| Ollama (local) | `ollama` | — | `llama3.1` | no key; runs on your box |
+| OpenAI (GPT) | `openai` | `OPENAI_API_KEY` | `gpt-5.6` | Sol; `-terra` / `-luna` tiers |
+| xAI (Grok) | `xai` | `XAI_API_KEY` | `grok-4.5` | |
+| z.ai (GLM) | `zai` | `ZAI_API_KEY` | `glm-5.2` | |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` | also `-flash` |
+| Google (Gemini) | `google` | `GEMINI_API_KEY` | `gemini-3-pro` | OpenAI-compat endpoint |
+| Groq | `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Kimi K2, DeepSeek-R1 too |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-5.6` | any model on OpenRouter |
+| Mistral | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` | Mistral Large 3 |
+| Ollama (local) | `ollama` | — | `llama3.3` | no key; runs on your box |
+
+<sub>Defaults track the current flagships (July 2026); every model is overridable — type any model id in the picker.</sub>
 
 Each request returns a structured signal — `{ probability, direction, confidence, rationale }` —
 clamped and stamped with the provider/model that answered.

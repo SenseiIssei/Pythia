@@ -84,8 +84,8 @@ impl Provider {
                 wire: Wire::OpenAi,
                 base_url: "https://api.openai.com/v1",
                 env_key: "OPENAI_API_KEY",
-                default_model: "gpt-5.1",
-                suggested: &["gpt-5.1", "gpt-5", "gpt-5-mini", "o4-mini"],
+                default_model: "gpt-5.6", // Sol (alias of gpt-5.6-sol)
+                suggested: &["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna"],
                 needs_key: true,
             },
             Provider::XAI => Spec {
@@ -94,8 +94,8 @@ impl Provider {
                 wire: Wire::OpenAi,
                 base_url: "https://api.x.ai/v1",
                 env_key: "XAI_API_KEY",
-                default_model: "grok-4",
-                suggested: &["grok-4", "grok-4-fast", "grok-3", "grok-3-mini"],
+                default_model: "grok-4.5",
+                suggested: &["grok-4.5", "grok-4.3", "grok-4"],
                 needs_key: true,
             },
             Provider::ZAI => Spec {
@@ -104,8 +104,8 @@ impl Provider {
                 wire: Wire::OpenAi,
                 base_url: "https://api.z.ai/api/paas/v4",
                 env_key: "ZAI_API_KEY",
-                default_model: "glm-4.6",
-                suggested: &["glm-4.6", "glm-4.5", "glm-4.5-air"],
+                default_model: "glm-5.2",
+                suggested: &["glm-5.2", "glm-5.1", "glm-4.6"],
                 needs_key: true,
             },
             Provider::DeepSeek => Spec {
@@ -114,8 +114,8 @@ impl Provider {
                 wire: Wire::OpenAi,
                 base_url: "https://api.deepseek.com",
                 env_key: "DEEPSEEK_API_KEY",
-                default_model: "deepseek-chat",
-                suggested: &["deepseek-chat", "deepseek-reasoner"],
+                default_model: "deepseek-v4-pro", // deepseek-chat/reasoner retire 2026-07-24
+                suggested: &["deepseek-v4-pro", "deepseek-v4-flash"],
                 needs_key: true,
             },
             Provider::Google => Spec {
@@ -124,8 +124,8 @@ impl Provider {
                 wire: Wire::OpenAi, // Gemini's OpenAI-compatible endpoint
                 base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
                 env_key: "GEMINI_API_KEY",
-                default_model: "gemini-2.5-pro",
-                suggested: &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+                default_model: "gemini-3-pro",
+                suggested: &["gemini-3-pro", "gemini-3.1-pro", "gemini-3.6-flash", "gemini-flash-latest"],
                 needs_key: true,
             },
             Provider::Groq => Spec {
@@ -135,7 +135,7 @@ impl Provider {
                 base_url: "https://api.groq.com/openai/v1",
                 env_key: "GROQ_API_KEY",
                 default_model: "llama-3.3-70b-versatile",
-                suggested: &["llama-3.3-70b-versatile", "deepseek-r1-distill-llama-70b", "moonshotai/kimi-k2-instruct"],
+                suggested: &["llama-3.3-70b-versatile", "moonshotai/kimi-k2-instruct", "deepseek-r1-distill-llama-70b"],
                 needs_key: true,
             },
             Provider::OpenRouter => Spec {
@@ -144,8 +144,15 @@ impl Provider {
                 wire: Wire::OpenAi,
                 base_url: "https://openrouter.ai/api/v1",
                 env_key: "OPENROUTER_API_KEY",
-                default_model: "openai/gpt-5.1",
-                suggested: &["openai/gpt-5.1", "anthropic/claude-opus-4-8", "x-ai/grok-4", "z-ai/glm-4.6"],
+                default_model: "openai/gpt-5.6",
+                suggested: &[
+                    "openai/gpt-5.6",
+                    "anthropic/claude-opus-4-8",
+                    "x-ai/grok-4.5",
+                    "z-ai/glm-5.2",
+                    "deepseek/deepseek-v4-pro",
+                    "google/gemini-3-pro",
+                ],
                 needs_key: true,
             },
             Provider::Mistral => Spec {
@@ -154,7 +161,7 @@ impl Provider {
                 wire: Wire::OpenAi,
                 base_url: "https://api.mistral.ai/v1",
                 env_key: "MISTRAL_API_KEY",
-                default_model: "mistral-large-latest",
+                default_model: "mistral-large-latest", // resolves to Mistral Large 3
                 suggested: &["mistral-large-latest", "mistral-medium-latest"],
                 needs_key: true,
             },
@@ -164,8 +171,8 @@ impl Provider {
                 wire: Wire::OpenAi,
                 base_url: "http://localhost:11434/v1",
                 env_key: "", // no key
-                default_model: "llama3.1",
-                suggested: &["llama3.1", "qwen2.5", "deepseek-r1"],
+                default_model: "llama3.3",
+                suggested: &["llama3.3", "qwen3", "deepseek-r1"],
                 needs_key: false,
             },
         }
@@ -525,7 +532,7 @@ mod tests {
             direction: raw.direction,
             rationale: raw.rationale,
             provider: "openai".into(),
-            model: "gpt-5.1".into(),
+            model: "gpt-5.6".into(),
         };
         assert_eq!(out.probability, 1.0);
         assert_eq!(out.confidence, 0.0);
