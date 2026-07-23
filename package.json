@@ -8,9 +8,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "server": "cargo run -p pythia-server",
-    "server:release": "cargo run --release -p pythia-server",
+    "tauri": "node scripts/clean-env.mjs tauri",
+    "server": "node scripts/clean-env.mjs cargo run -p pythia-server",
+    "server:release": "node scripts/clean-env.mjs cargo run --release -p pythia-server",
     "shots": "node scripts/shots.mjs"
   },
   "dependencies": {

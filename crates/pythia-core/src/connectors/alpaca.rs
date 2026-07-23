@@ -22,8 +22,13 @@ pub struct AlpacaConnector {
 
 /// A snapshot of the Alpaca account — used by the UI's connection test. Safe,
 /// read-only; never used to place an order.
+///
+/// Alpaca sends snake_case (`buying_power`); the frontend expects camelCase. A
+/// single `rename_all` would break one side — notably the `*_blocked` flags
+/// would silently default to `false`, hiding a restricted account — so the two
+/// directions are configured independently.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 pub struct AlpacaAccount {
     pub status: String,
     #[serde(default)]
