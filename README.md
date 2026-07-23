@@ -210,7 +210,10 @@ Read [`SAFETY.md`](SAFETY.md) in full before enabling anything live.
 
 ### Going live (Alpaca, paper-first)
 
-Live execution is wired for **Alpaca equities** and ships **disarmed**. The recommended path:
+📖 **Full step-by-step runbook: [`docs/LIVE-RUN.md`](docs/LIVE-RUN.md)** — keys, verification,
+arming, what the journal looks like, market hours, and how to stop.
+
+Live execution is wired for **Alpaca equities** and ships **disarmed**. The short version:
 
 1. Add your Alpaca keys — desktop: *Settings → Alpaca* (OS keychain); server: `APCA_API_KEY_ID` /
    `APCA_API_SECRET_KEY` env vars. The equity markets immediately switch from the simulator to

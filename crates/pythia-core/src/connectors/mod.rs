@@ -68,6 +68,11 @@ pub struct Fill {
 pub enum ConnectorError {
     #[error("connector not configured: {0}")]
     NotConfigured(String),
+    /// Credentials refused (401/403) — wrong keys, or paper keys against the
+    /// live endpoint (or vice-versa). Distinct from a rejected order so the UI
+    /// can say something useful.
+    #[error("authentication failed — check your keys and the paper/live endpoint ({0})")]
+    Auth(String),
     #[error("venue rejected order: {0}")]
     Rejected(String),
     #[error("network error: {0}")]

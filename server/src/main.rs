@@ -49,6 +49,8 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Load a local .env (gitignored) so keys never touch shell history.
+    let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -93,6 +95,17 @@ async fn main() {
         tracing::info!("LLM providers: none configured (set e.g. ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY / ZAI_API_KEY)");
     } else {
         tracing::info!("LLM providers configured: {}", configured.join(", "));
+    }
+    // Alpaca preflight — the one thing a live run depends on.
+    let has_alpaca = std::env::var("APCA_API_KEY_ID").map(|k| !k.trim().is_empty()).unwrap_or(false)
+        && std::env::var("APCA_API_SECRET_KEY").map(|k| !k.trim().is_empty()).unwrap_or(false);
+    if has_alpaca {
+        tracing::info!(
+            "Alpaca: keys present → real equity quotes ({} feed) + live execution available",
+            std::env::var("APCA_FEED").unwrap_or_else(|_| "iex".into())
+        );
+    } else {
+        tracing::info!("Alpaca: no keys (APCA_API_KEY_ID / APCA_API_SECRET_KEY) — equities stay simulated, live orders will be rejected");
     }
 
     axum::serve(listener, app).await.unwrap();

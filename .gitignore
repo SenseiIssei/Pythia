@@ -10,6 +10,7 @@ target/
 # secrets & local state — NEVER commit
 *.env
 .env*
+!.env.example
 secrets.json
 pythia.db
 pythia.db-*
