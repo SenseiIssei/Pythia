@@ -306,7 +306,7 @@ pub fn default_strategies() -> Vec<StrategyConfig> {
         "crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD", "crypto:ADA/USD",
         "crypto:DOT/USD", "crypto:LINK/USD", "crypto:AVAX/USD", "crypto:XRP/USD", "crypto:LTC/USD",
     ][..];
-    let equities = &["alpaca:AAPL", "alpaca:NVDA"][..];
+    let equities = &["alpaca:AAPL", "alpaca:NVDA", "alpaca:MSFT", "alpaca:AMZN", "alpaca:TSLA"][..];
     vec![
         strat("ema-cross-1", "EMA Cross · Crypto", StrategyKind::EmaCross, Venue::Crypto, StrategyState::Paper, crypto,
             vec![p("fast", "Fast EMA", 9.0, 3.0, 30.0, 1.0), p("slow", "Slow EMA", 21.0, 10.0, 100.0, 1.0)], 18.0),

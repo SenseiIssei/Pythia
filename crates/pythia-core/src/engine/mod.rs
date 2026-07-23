@@ -9,7 +9,7 @@ pub mod risk;
 pub mod strategies;
 
 use crate::connectors::{OrderType, Side, Venue};
-use crate::marketdata::{RealCrypto, RealPrediction};
+use crate::marketdata::{RealCrypto, RealEquity, RealPrediction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -487,6 +487,24 @@ impl Engine {
         }
         if !feed.is_empty() {
             self.log(JournalKind::System, format!("Kraken feed · {} live crypto prices", feed.len()), None, None);
+        }
+    }
+
+    /// Overlay real Alpaca equity quotes onto the seeded equity markets. Same
+    /// shape as [`Engine::apply_kraken`] — prices become real, so a Live
+    /// equities strategy trades on genuine quotes instead of the simulator.
+    pub fn apply_alpaca(&mut self, feed: &[RealEquity]) {
+        let now = self.now();
+        for r in feed {
+            if let Some(m) = self.markets.iter_mut().find(|m| m.id == r.id) {
+                m.price = r.price;
+                m.change24h = r.change24h;
+                m.updated_at = now;
+                self.real_ids.insert(r.id.clone());
+            }
+        }
+        if !feed.is_empty() {
+            self.log(JournalKind::System, format!("Alpaca feed · {} live equity quotes", feed.len()), None, None);
         }
     }
 
@@ -1482,6 +1500,9 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
         mk("crypto:LTC/USD", Venue::Crypto, "LTC/USD", MarketKind::Crypto, 72.0, -0.005, None, 200_000.0),
         mk("alpaca:AAPL", Venue::Alpaca, "AAPL", MarketKind::Equity, 227.1, 0.006, None, 1_500_000.0),
         mk("alpaca:NVDA", Venue::Alpaca, "NVDA", MarketKind::Equity, 138.9, 0.021, None, 3_300_000.0),
+        mk("alpaca:MSFT", Venue::Alpaca, "MSFT", MarketKind::Equity, 428.0, 0.004, None, 1_200_000.0),
+        mk("alpaca:AMZN", Venue::Alpaca, "AMZN", MarketKind::Equity, 186.4, 0.009, None, 1_800_000.0),
+        mk("alpaca:TSLA", Venue::Alpaca, "TSLA", MarketKind::Equity, 248.5, -0.012, None, 2_600_000.0),
         mk("polymarket:fed-cut-2026", Venue::Polymarket, "Fed cuts rates before Sep 2026?", MarketKind::Prediction, 0.62, 0.03, Some(0.71), 320_000.0),
         mk("polymarket:btc-100k-2026", Venue::Polymarket, "BTC above $100k in 2026?", MarketKind::Prediction, 0.44, -0.02, Some(0.52), 510_000.0),
     ];
@@ -1499,6 +1520,9 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
     sim.insert("crypto:LTC/USD".into(), SimParam { drift: 0.00032, vol: 0.0026, base: 72.4 });
     sim.insert("alpaca:AAPL".into(), SimParam { drift: 0.000005, vol: 0.0009, base: 225.7 });
     sim.insert("alpaca:NVDA".into(), SimParam { drift: 0.00003, vol: 0.0016, base: 136.0 });
+    sim.insert("alpaca:MSFT".into(), SimParam { drift: 0.000006, vol: 0.0008, base: 426.0 });
+    sim.insert("alpaca:AMZN".into(), SimParam { drift: 0.00001, vol: 0.0011, base: 185.0 });
+    sim.insert("alpaca:TSLA".into(), SimParam { drift: 0.000004, vol: 0.0022, base: 250.0 });
     sim.insert("polymarket:fed-cut-2026".into(), SimParam { drift: 0.0, vol: 0.004, base: 0.6 });
     sim.insert("polymarket:btc-100k-2026".into(), SimParam { drift: 0.0, vol: 0.005, base: 0.45 });
     (markets, sim)

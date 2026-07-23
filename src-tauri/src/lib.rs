@@ -55,10 +55,19 @@ pub fn run() {
                     if n % 8 == 1 {
                         let kraken = marketdata::fetch_kraken().await;
                         let poly = marketdata::fetch_polymarket().await;
+                        // Real equity quotes when Alpaca keys are in the vault
+                        // (otherwise those markets stay on the simulator).
+                        let alpaca = {
+                            let keys = pythia_core::vault::get("alpaca").unwrap_or_default();
+                            let id = keys.get("keyId").cloned().unwrap_or_default();
+                            let secret = keys.get("secret").cloned().unwrap_or_default();
+                            marketdata::fetch_alpaca(&id, &secret, "iex").await
+                        };
                         if let Some(st) = handle.try_state::<AppState>() {
                             let mut e = st.engine.lock().unwrap();
                             e.apply_kraken(&kraken);
                             e.apply_polymarket(&poly);
+                            e.apply_alpaca(&alpaca);
                         }
                     }
 

@@ -64,7 +64,9 @@ and any large-language-model of your choice can weigh in on a market.
   typed `ARM LIVE` confirmation; only Alpaca markets from a *Live* strategy route to the broker, and
   the kill switch + every risk limit gate each order. Start on the **paper endpoint** (real API, no
   real money), test the connection, then flip to real money once you trust it.
-- **Real read-only market data** — live Kraken crypto prices and Polymarket odds (no keys needed).
+- **Real market data** — live Kraken crypto prices and Polymarket odds (no keys needed), plus real
+  **Alpaca equity quotes** (AAPL, NVDA, MSFT, AMZN, TSLA) once your Alpaca keys are set, so live
+  equities strategies trade on genuine prices rather than the simulator.
 - **Secure by default** — API keys live in the OS keychain (desktop) or the server's environment,
   never in code, never logged, never returned to the UI. Discord/webhook alerts, persistent state,
   system tray, first-run legal gate.
@@ -158,8 +160,10 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun}`) |
 | `GET /api/live/account` | Alpaca account check (buying power/status) |
 
-Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, and any provider key
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …).
+Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, any provider key
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), and Alpaca for real equity quotes +
+live execution: `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `APCA_FEED` (default `iex`, the free tier;
+paid plans can use `sip`).
 
 ### Browser / web app (no Rust, no keys — explore the UI)
 
@@ -209,7 +213,8 @@ Read [`SAFETY.md`](SAFETY.md) in full before enabling anything live.
 Live execution is wired for **Alpaca equities** and ships **disarmed**. The recommended path:
 
 1. Add your Alpaca keys — desktop: *Settings → Alpaca* (OS keychain); server: `APCA_API_KEY_ID` /
-   `APCA_API_SECRET_KEY` env vars.
+   `APCA_API_SECRET_KEY` env vars. The equity markets immediately switch from the simulator to
+   **real Alpaca quotes**, so signals are computed on genuine prices.
 2. Open **Live** → *Test paper connection* (read-only; shows account status + buying power).
 3. Keep the endpoint on **Paper**, type `ARM LIVE`, and arm. Set a strategy to **Live** on the
    Strategies page — its Alpaca orders now hit `paper-api.alpaca.markets` (real order lifecycle, no
