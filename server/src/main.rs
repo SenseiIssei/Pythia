@@ -113,9 +113,17 @@ async fn tick_loop(state: AppState) {
         if n % 8 == 1 {
             let kraken = marketdata::fetch_kraken().await;
             let poly = marketdata::fetch_polymarket().await;
+            // Real equity quotes when Alpaca keys are in the env (else stays simulated).
+            let alpaca = marketdata::fetch_alpaca(
+                &std::env::var("APCA_API_KEY_ID").unwrap_or_default(),
+                &std::env::var("APCA_API_SECRET_KEY").unwrap_or_default(),
+                &std::env::var("APCA_FEED").unwrap_or_else(|_| "iex".into()),
+            )
+            .await;
             let mut e = state.engine.lock().unwrap();
             e.apply_kraken(&kraken);
             e.apply_polymarket(&poly);
+            e.apply_alpaca(&alpaca);
         }
 
         let (json, queued) = {

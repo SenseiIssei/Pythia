@@ -244,7 +244,7 @@ export function defaultStrategies(): StrategyConfig[] {
     "crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD", "crypto:ADA/USD",
     "crypto:DOT/USD", "crypto:LINK/USD", "crypto:AVAX/USD", "crypto:XRP/USD", "crypto:LTC/USD",
   ];
-  const equities = ["alpaca:AAPL", "alpaca:NVDA"];
+  const equities = ["alpaca:AAPL", "alpaca:NVDA", "alpaca:MSFT", "alpaca:AMZN", "alpaca:TSLA"];
   const base = { pnl: 0, trades: 0, winRate: 0, maxDrawdown: 0, profitFactor: 0, equityCurve: [0] };
   return [
     { id: "ema-cross-1", name: "EMA Cross · Crypto", kind: "ema-cross", venueClass: "crypto", state: "paper", universe: crypto,
