@@ -1,9 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Lock, Link2, ShieldCheck, Trash2, Bell, Send, BrainCircuit } from "lucide-react";
+import {
+  KeyRound,
+  Lock,
+  Link2,
+  ShieldCheck,
+  Trash2,
+  Bell,
+  Send,
+  BrainCircuit,
+  PlugZap,
+  SlidersHorizontal,
+} from "lucide-react";
 import { Card, PageHeader, Badge, Button } from "../components/ui";
 import { isTauri } from "../engine";
 import { aiMode, aiProviders, saveAiKey, clearAiKey } from "../ai";
+import { alpacaAccount } from "../live";
+import { DEFAULT_PREFS, EFFORTS, TIMEFRAMES, getPrefs, savePrefs, testLlmKey, type Prefs } from "../prefs";
 import type { LlmProviderInfo } from "../types";
 
 interface VenueCfg {
@@ -98,10 +111,153 @@ export function Settings() {
         <AiProvidersCard />
       </div>
 
+      {native && (
+        <div className="mt-4">
+          <PreferencesCard />
+        </div>
+      )}
+
       <div className="mt-4">
         <AlertsCard native={native} />
       </div>
     </div>
+  );
+}
+
+/**
+ * Data-feed and AI-overlay settings.
+ *
+ * Desktop only, and deliberately so: the backend-server build reads the same
+ * settings from its environment, and having two competing sources of truth for
+ * "which feed am I on" is how you end up debugging the wrong one.
+ */
+function PreferencesCard() {
+  const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    getPrefs()
+      .then((p) => {
+        setPrefs(p);
+        setLoaded(true);
+      })
+      .catch((e) => setMsg(String(e)));
+  }, []);
+
+  function set<K extends keyof Prefs>(key: K, value: Prefs[K]) {
+    setPrefs((p) => ({ ...p, [key]: value }));
+    setMsg("");
+  }
+
+  async function save() {
+    setBusy(true);
+    setMsg("");
+    try {
+      // The daemon sanitizes on the way in, so adopt what it actually stored —
+      // otherwise the form can keep showing a value that was corrected.
+      setPrefs(await savePrefs(prefs));
+      setMsg("saved — the daemon picks these up on its next pass, no restart");
+    } catch (e) {
+      setMsg(`error: ${String(e instanceof Error ? e.message : e)}`);
+    }
+    setBusy(false);
+  }
+
+  return (
+    <Card title="Data & AI overlay" right={<SlidersHorizontal size={14} className="text-accent" />}>
+      <div className="mb-3 text-sm text-cyber-text-dim">
+        Stored beside your keys and loaded automatically on every start. Nothing here is secret.
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <Field label="Alpaca data feed" hint="iex is the free tier; sip needs a paid subscription">
+          <Select value={prefs.alpacaFeed} onChange={(v) => set("alpacaFeed", v)} options={["iex", "sip"]} />
+        </Field>
+
+        <Field label="Candle size" hint="the bars every indicator runs on">
+          <Select value={prefs.barTimeframe} onChange={(v) => set("barTimeframe", v)} options={TIMEFRAMES} />
+        </Field>
+
+        <Field label="AI provider" hint="which model the background overlay polls">
+          <Select
+            value={prefs.aiProvider}
+            onChange={(v) => set("aiProvider", v)}
+            options={["anthropic", "openai", "xai", "zai", "deepseek", "google", "groq", "openrouter", "mistral", "ollama"]}
+          />
+        </Field>
+
+        <Field label="AI model" hint="blank = that provider's default">
+          <input
+            value={prefs.aiModel}
+            onChange={(e) => set("aiModel", e.target.value)}
+            placeholder="claude-opus-5"
+            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+          />
+        </Field>
+
+        <Field label="Thinking effort" hint="low keeps the answer inside its bar">
+          <Select value={prefs.aiEffort} onChange={(v) => set("aiEffort", v)} options={EFFORTS} />
+        </Field>
+
+        <Field label="Poll interval (s)" hint="one market per pass — this is the cost dial">
+          <input
+            type="number"
+            min={30}
+            max={86400}
+            value={prefs.aiIntervalSec}
+            onChange={(e) => set("aiIntervalSec", Number(e.target.value))}
+            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+          />
+        </Field>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <Button tone="cyan" icon={ShieldCheck} disabled={busy || !loaded} onClick={save}>
+          Save preferences
+        </Button>
+        {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
+      </div>
+      <div className="mt-2 text-[11px] text-cyber-text-faint">
+        The overlay itself stays off until you enable it on the AI Signals page — these settings only
+        decide how it behaves once you do.
+      </div>
+    </Card>
+  );
+}
+
+function Field({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs text-cyber-text-dim">{label}</label>
+      {children}
+      <div className="mt-1 text-[10px] text-cyber-text-faint">{hint}</div>
+    </div>
+  );
+}
+
+function Select({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+    >
+      {options.map((o) => (
+        <option key={o} value={o}>
+          {o}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -170,10 +326,13 @@ function ProviderRow({
   const [val, setVal] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  // null while nothing has been asserted; true/false colours the result.
+  const [ok, setOk] = useState<boolean | null>(null);
 
   async function save() {
     setBusy(true);
     setMsg("");
+    setOk(null);
     try {
       await saveAiKey(p.id, val);
       setVal("");
@@ -181,18 +340,34 @@ function ProviderRow({
       await onChanged();
     } catch (e) {
       setMsg(String(e instanceof Error ? e.message : e));
+      setOk(false);
+    }
+    setBusy(false);
+  }
+  async function test() {
+    setBusy(true);
+    setMsg("testing…");
+    setOk(null);
+    try {
+      setMsg(await testLlmKey(p.id));
+      setOk(true);
+    } catch (e) {
+      setMsg(String(e instanceof Error ? e.message : e));
+      setOk(false);
     }
     setBusy(false);
   }
   async function clear() {
     setBusy(true);
     setMsg("");
+    setOk(null);
     try {
       await clearAiKey(p.id);
       setMsg("cleared");
       await onChanged();
     } catch (e) {
       setMsg(String(e instanceof Error ? e.message : e));
+      setOk(false);
     }
     setBusy(false);
   }
@@ -220,17 +395,26 @@ function ProviderRow({
             placeholder={p.configured ? "•••••••• (stored)" : "paste API key"}
             className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
           />
-          <div className="mt-2 flex items-center gap-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <Button tone="cyan" icon={ShieldCheck} disabled={busy || val.trim().length === 0} onClick={save}>
               {p.configured ? "Update" : "Save"}
             </Button>
+            {p.configured && (
+              <Button tone="purple" icon={PlugZap} disabled={busy} onClick={test}>
+                Test
+              </Button>
+            )}
             {p.configured && (
               <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
                 Clear
               </Button>
             )}
-            {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
           </div>
+          {msg && (
+            <div className={`mt-2 text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
+              {msg}
+            </div>
+          )}
         </>
       ) : !p.needsKey ? (
         <div className="text-[11px] text-cyber-text-dim">No key needed — runs against your local Ollama.</div>
@@ -341,7 +525,30 @@ function VenueCard({
   const [vals, setVals] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
   const filled = v.fields.every((f) => (vals[f.key] ?? "").trim().length > 0);
+
+  /**
+   * Read-only account check against the paper endpoint.
+   *
+   * Only Alpaca has one, because it's the only venue here that routes real
+   * orders — and a key that saved fine but is rejected at the broker is
+   * indistinguishable from a working one until the first trade doesn't happen.
+   */
+  async function test() {
+    setBusy(true);
+    setMsg("testing…");
+    setOk(null);
+    try {
+      const a = await alpacaAccount(true);
+      setMsg(`${a.status} · buying power $${Number(a.buyingPower).toLocaleString()} · ${a.paper ? "paper" : "live"} endpoint`);
+      setOk(a.status === "ACTIVE");
+    } catch (e) {
+      setMsg(`${String(e instanceof Error ? e.message : e)} — note paper and live accounts have SEPARATE keys`);
+      setOk(false);
+    }
+    setBusy(false);
+  }
 
   async function save() {
     setBusy(true);
@@ -404,17 +611,26 @@ function VenueCard({
         ))}
       </div>
       <div className="mt-2 text-[11px] leading-snug text-cyber-text-faint">{v.note}</div>
-      <div className="mt-3 flex items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button tone="cyan" icon={ShieldCheck} disabled={!filled || busy} onClick={save}>
           {connected ? "Update keys" : "Save to vault"}
         </Button>
+        {native && connected && v.id === "alpaca" && (
+          <Button tone="purple" icon={PlugZap} disabled={busy} onClick={test}>
+            Test
+          </Button>
+        )}
         {native && connected && (
           <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
             Clear
           </Button>
         )}
-        {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
       </div>
+      {msg && (
+        <div className={`mt-2 text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
+          {msg}
+        </div>
+      )}
     </Card>
   );
 }

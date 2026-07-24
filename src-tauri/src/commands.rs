@@ -6,9 +6,11 @@ use crate::state::AppState;
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector, AlpacaOrder, Sizing};
 use pythia_core::connectors::{MarketConnector, Side, Venue};
 use pythia_core::engine::{
-    AiPolicy, BrokerStatus, EngineState, LiveOrderOut, RiskLimits, StrategyConfig, StrategyState,
+    AiPolicy, AiView, BrokerStatus, EngineState, LiveOrderOut, RiskLimits, StrategyConfig,
+    StrategyState,
 };
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
+use pythia_core::prefs::{self, Prefs};
 use pythia_core::vault;
 use std::collections::{BTreeMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -320,6 +322,66 @@ pub async fn refresh_broker_status(app: &AppHandle) {
     }
 }
 
+/// One pass of the AI overlay: pick the next market, ask the configured model,
+/// feed the view back into the engine. Daemon-driven; not a Tauri command.
+///
+/// Runs on its own timer rather than inside the tick loop — a model call takes
+/// seconds, and nothing about price updates, stop checks or order routing
+/// should ever wait on one.
+pub async fn ai_overlay_pass(app: &AppHandle, cursor: usize) -> bool {
+    let Some(st) = app.try_state::<AppState>() else { return false };
+    let (enabled, candidates) = {
+        let e = st.engine.lock().unwrap();
+        (e.ai_enabled(), e.ai_candidates())
+    };
+    if !enabled || candidates.is_empty() {
+        return false;
+    }
+
+    let market_id = candidates[cursor % candidates.len()].clone();
+    let Some(context) = ({
+        let e = st.engine.lock().unwrap();
+        e.ai_context(&market_id)
+    }) else {
+        return false;
+    };
+
+    let saved = get_prefs();
+    let provider = saved.provider();
+    let key = ai_keys().get(provider.id()).cloned().unwrap_or_default();
+    if provider.needs_key() && key.trim().is_empty() {
+        st.engine
+            .lock()
+            .unwrap()
+            .record_ai_error(&format!("{} has no key — add one in Settings", provider.id()));
+        return true;
+    }
+
+    let cfg = LlmConfig::new(provider, saved.ai_model.clone(), key)
+        .with_effort(saved.effort())
+        .with_timeout(std::time::Duration::from_secs(45));
+
+    match llm::signal(&cfg, &context).await {
+        Ok(sig) => {
+            let view = AiView {
+                market_id,
+                direction: format!("{:?}", sig.direction).to_lowercase(),
+                probability: sig.probability,
+                confidence: sig.confidence,
+                rationale: sig.rationale,
+                model: if sig.served_by.is_empty() { sig.model } else { sig.served_by },
+                ts: chrono::Utc::now().timestamp_millis(),
+                latency_ms: sig.latency_ms,
+            };
+            st.engine.lock().unwrap().apply_ai_view(view, sig.input_tokens, sig.output_tokens);
+        }
+        // A failed call is "no opinion" — never a reason to stop trading.
+        Err(e) => st.engine.lock().unwrap().record_ai_error(&e.to_string()),
+    }
+    push_state(app);
+    true
+}
+
 /// Make the engine's position ledger match the broker's. Daemon-driven.
 pub async fn reconcile_alpaca(app: &AppHandle) {
     let keys = vault::get("alpaca").unwrap_or_default();
@@ -338,6 +400,62 @@ pub async fn reconcile_alpaca(app: &AppHandle) {
         st.engine.lock().unwrap().reconcile_alpaca(&rows);
     }
     push_state(app);
+}
+
+// ── preferences ─────────────────────────────────────────────────────────────
+// Non-secret settings, stored beside the keys. Unlike credentials these ARE
+// returned to the UI — that's the point of a settings page.
+
+/// Load saved preferences, falling back to defaults on a first run.
+#[tauri::command]
+pub fn get_prefs() -> Prefs {
+    vault::get(prefs::VAULT_KEY).map(|m| Prefs::from_map(&m)).unwrap_or_default()
+}
+
+/// Persist preferences. Values are sanitized before storage, so a bad entry is
+/// corrected once here rather than re-validated everywhere it's read.
+#[tauri::command]
+pub fn save_prefs(app: AppHandle, next: Prefs) -> Result<Prefs, String> {
+    let clean = next.sanitized();
+    vault::save(prefs::VAULT_KEY, &clean.to_map())?;
+    push_state(&app);
+    Ok(clean)
+}
+
+/// Verify a stored provider key by asking for one throwaway signal.
+///
+/// "Saved" and "works" are different claims, and the gap between them is where
+/// a typo'd key hides: the Settings page shows a green badge, the overlay logs
+/// a 401 nobody reads, and the model silently never has an opinion. This closes
+/// it by actually spending one cheap call.
+#[tauri::command]
+pub async fn test_llm_key(provider: String) -> Result<String, String> {
+    let p = Provider::parse(&provider).ok_or_else(|| format!("unknown provider: {provider}"))?;
+    let key = ai_keys().get(p.id()).cloned().unwrap_or_default();
+    if p.needs_key() && key.trim().is_empty() {
+        return Err("no key saved for this provider".into());
+    }
+    let saved = get_prefs();
+    let model = if p == saved.provider() { saved.ai_model.clone() } else { String::new() };
+    let cfg = LlmConfig::new(p, model, key)
+        .with_effort(pythia_core::llm::Effort::Low)
+        .with_timeout(std::time::Duration::from_secs(30));
+
+    let sig = llm::signal(
+        &cfg,
+        "Connectivity check only. Market: TEST. No data provided. \
+         Reply with a neutral, zero-confidence signal.",
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(format!(
+        "{} answered in {}ms ({} in / {} out tokens)",
+        if sig.served_by.is_empty() { sig.model } else { sig.served_by },
+        sig.latency_ms,
+        sig.input_tokens,
+        sig.output_tokens
+    ))
 }
 
 /// Ask a provider for a signal on one market. Key comes from the vault; the

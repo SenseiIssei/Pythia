@@ -68,7 +68,8 @@ pub fn run() {
                         // Real equity quotes when Alpaca keys are in the vault
                         // (otherwise those markets stay on the simulator).
                         let (id, secret) = alpaca_keys();
-                        let alpaca = marketdata::fetch_alpaca(&id, &secret, "iex").await;
+                        let feed = commands::get_prefs().alpaca_feed;
+                        let alpaca = marketdata::fetch_alpaca(&id, &secret, &feed).await;
                         if let Some(st) = handle.try_state::<AppState>() {
                             let mut e = st.engine.lock().unwrap();
                             e.apply_kraken(&kraken);
@@ -82,9 +83,18 @@ pub fn run() {
                     // loop's own random walk rather than the market.
                     if n % 40 == 1 {
                         let (id, secret) = alpaca_keys();
-                        let mut series = marketdata::fetch_kraken_bars(5).await;
+                        let p = commands::get_prefs();
+                        let mut series =
+                            marketdata::fetch_kraken_bars(p.kraken_interval()).await;
                         series.extend(
-                            marketdata::fetch_alpaca_bars(&id, &secret, "iex", "5Min", 10).await,
+                            marketdata::fetch_alpaca_bars(
+                                &id,
+                                &secret,
+                                &p.alpaca_feed,
+                                &p.bar_timeframe,
+                                10,
+                            )
+                            .await,
                         );
                         if !series.is_empty() {
                             if let Some(st) = handle.try_state::<AppState>() {
@@ -145,6 +155,23 @@ pub fn run() {
                     }
                 }
             });
+
+            // The AI overlay, on its own clock so a slow model call can never
+            // delay a tick, a stop check, or an order. Idle and free until the
+            // overlay is switched on from the AI Signals page.
+            let ai_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut cursor: usize = 0;
+                loop {
+                    // Re-read each pass so a changed interval takes effect
+                    // without a restart.
+                    let secs = commands::get_prefs().ai_interval_sec;
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    if commands::ai_overlay_pass(&ai_handle, cursor).await {
+                        cursor = cursor.wrapping_add(1);
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -167,6 +194,9 @@ pub fn run() {
             commands::set_live,
             commands::set_ai_policy,
             commands::alpaca_account,
+            commands::get_prefs,
+            commands::save_prefs,
+            commands::test_llm_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");
