@@ -192,6 +192,8 @@ pub fn run() {
             commands::get_prefs,
             commands::save_prefs,
             commands::test_llm_key,
+            commands::live_diagnostics,
+            commands::send_test_order,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

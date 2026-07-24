@@ -6,8 +6,8 @@ use crate::state::AppState;
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector, AlpacaOrder, Sizing};
 use pythia_core::connectors::{MarketConnector, Side, Venue};
 use pythia_core::engine::{
-    AiPolicy, AiView, BrokerStatus, EngineState, LiveOrderOut, RiskLimits, StrategyConfig,
-    StrategyState,
+    AiPolicy, AiView, BrokerStatus, EngineState, LiveOrderOut, MarketDiag, RiskLimits,
+    StrategyConfig, StrategyState,
 };
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::prefs::{self, Prefs};
@@ -26,7 +26,10 @@ fn venue_enum(name: &str) -> Option<Venue> {
     match name {
         "polymarket" => Some(Venue::Polymarket),
         "crypto" => Some(Venue::Crypto),
-        "alpaca" => Some(Venue::Alpaca),
+        // Either key slot means Alpaca is connected — otherwise someone who
+        // saved only live keys would see "not connected" and a readiness
+        // checklist stuck on step one.
+        "alpaca" | "alpaca-live" => Some(Venue::Alpaca),
         _ => None,
     }
 }
@@ -262,6 +265,50 @@ fn current_endpoint_is_paper(app: &AppHandle) -> bool {
     app.try_state::<AppState>()
         .map(|st| st.engine.lock().unwrap().state().live.paper)
         .unwrap_or(true)
+}
+
+/// Per-market answer to "why hasn't this traded?".
+#[tauri::command]
+pub fn live_diagnostics(state: State<AppState>) -> Vec<MarketDiag> {
+    state.engine.lock().unwrap().live_diagnostics()
+}
+
+/// Send one small, deliberate order to Alpaca through the real path.
+///
+/// Exists because every other route to a first live order runs through a
+/// strategy signal that may not fire for hours. This proves the pipeline —
+/// risk manager, connector, broker, fill, reconciliation — with a single click
+/// and a known outcome, and it is the fastest way to find out that a key or an
+/// endpoint is wrong. Still fully gated: the kill switch, every risk limit and
+/// the session check all apply, exactly as they would to a strategy order.
+#[tauri::command]
+pub fn send_test_order(
+    app: AppHandle,
+    app_state: State<AppState>,
+    market_id: String,
+    notional: f64,
+) -> Result<String, String> {
+    let notional = notional.clamp(1.0, 5_000.0);
+    let mut e = app_state.engine.lock().unwrap();
+    if !e.state().live.armed {
+        return Err("live execution is disarmed — arm it first, or this only paper-fills".into());
+    }
+    if let Some(why) = e.live_block_reason() {
+        return Err(why);
+    }
+    e.manual_order(&market_id, Side::Buy, notional);
+    // The engine journals what happened synchronously; surface the newest entry
+    // for this market so the caller sees submit-or-reject rather than silence.
+    let msg = e
+        .state()
+        .journal
+        .iter()
+        .find(|j| j.market_id.as_deref() == Some(market_id.as_str()))
+        .map(|j| j.message.clone())
+        .unwrap_or_else(|| "order queued".into());
+    drop(e);
+    push_state(&app);
+    Ok(msg)
 }
 
 /// Read-only Alpaca account check (buying power, status) for the connection test.
