@@ -12,5 +12,6 @@ pub mod connectors;
 pub mod engine;
 pub mod llm;
 pub mod marketdata;
+pub mod prefs;
 pub mod research;
 pub mod vault;
