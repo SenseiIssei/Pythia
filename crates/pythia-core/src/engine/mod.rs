@@ -1986,7 +1986,7 @@ impl Engine {
 
 /// Regime filter: mean-reversion strategies are blocked in trending markets,
 /// trend strategies are blocked in ranging (choppy) markets.
-fn strategy_regime_ok(kind: StrategyKind, regime: Option<Regime>) -> bool {
+pub(crate) fn strategy_regime_ok(kind: StrategyKind, regime: Option<Regime>) -> bool {
     match (regime, kind) {
         (Some(Regime::Trending), StrategyKind::Bollinger | StrategyKind::RsiReversal) => false,
         (Some(Regime::Ranging), StrategyKind::EmaCross | StrategyKind::MacdTrend | StrategyKind::Breakout | StrategyKind::MultiTf) => false,

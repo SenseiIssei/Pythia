@@ -12,6 +12,7 @@
     "server": "node scripts/clean-env.mjs cargo run -p pythia-server",
     "server:release": "node scripts/clean-env.mjs cargo run --release -p pythia-server",
     "preflight": "node scripts/preflight.mjs",
+    "validate": "node scripts/validate.mjs",
     "shots": "node scripts/shots.mjs"
   },
   "dependencies": {

@@ -56,8 +56,13 @@ and any large-language-model of your choice can weigh in on a market.
 - **Sovereign risk manager** — global kill switch, max daily-loss &amp; drawdown breakers, per-strategy
   budgets, fractional-Kelly &amp; volatility-targeted sizing, regime filter, adaptive capital
   allocation, loss-streak cooldowns. Fails closed.
-- **Research suite** — backtester, Monte-Carlo optimizer, walk-forward validation, analytics, and a
-  return-correlation / concentration matrix.
+- **🔬 `npm run validate`** — walk-forward validation on real daily candles, with a **deflated
+  Sharpe ratio** so a strategy that merely survived a parameter search is labelled as such. The
+  backtester fills on the *next* bar's open, checks stops against the bar's high/low, assumes the
+  stop beat the target when a bar contained both, and charges costs on both sides. Most strategies
+  fail; that's the point. Results and caveats: [`docs/VALIDATION.md`](docs/VALIDATION.md).
+- **Research suite** — backtester, Monte-Carlo optimizer, analytics, and a return-correlation /
+  concentration matrix.
 - **🧠 AI Signals — bring any model** — Anthropic (Claude), OpenAI (GPT), xAI (Grok), z.ai (GLM),
   DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
 - **📡 Gated live execution (Alpaca)** — a real order path that ships **disarmed**. Arming needs a
@@ -190,6 +195,7 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun}`) |
 | `GET /api/live/account` | Alpaca account check (buying power/status) |
 | `GET /api/preflight` | every go-live check in one response (`npm run preflight`) |
+| `GET /api/research/validate` | walk-forward validate every strategy (`npm run validate`) |
 
 Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, any provider key
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), and Alpaca for real equity quotes +
