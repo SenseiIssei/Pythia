@@ -9,7 +9,23 @@ use std::collections::BTreeMap;
 
 const SERVICE: &str = "com.senseiissei.pythia";
 
-pub const VENUES: [&str; 3] = ["polymarket", "crypto", "alpaca"];
+/// Alpaca issues **separate** keys for the paper and live accounts, and each
+/// pair only authenticates against its own endpoint. Storing one pair and
+/// flipping the endpoint just produces a 401, so both live here side by side and
+/// the connector picks by which endpoint is selected.
+pub const ALPACA_PAPER: &str = "alpaca";
+pub const ALPACA_LIVE: &str = "alpaca-live";
+
+pub const VENUES: [&str; 4] = ["polymarket", "crypto", ALPACA_PAPER, ALPACA_LIVE];
+
+/// The vault slot holding the credentials for one Alpaca endpoint.
+pub fn alpaca_slot(paper: bool) -> &'static str {
+    if paper {
+        ALPACA_PAPER
+    } else {
+        ALPACA_LIVE
+    }
+}
 
 fn entry(venue: &str) -> Result<Entry, String> {
     Entry::new(SERVICE, &format!("venue:{venue}")).map_err(|e| e.to_string())
@@ -68,5 +84,15 @@ mod tests {
 
         clear(venue).expect("clear");
         assert!(!has_keys(venue), "should be empty after clear");
+    }
+
+    #[test]
+    fn paper_and_live_alpaca_keys_are_separate_slots() {
+        // The failure this prevents: save paper keys, flip the Live page to the
+        // live endpoint, and every request 401s because Alpaca issues a
+        // different pair per account. One shared slot cannot represent both.
+        assert_ne!(alpaca_slot(true), alpaca_slot(false));
+        assert!(VENUES.contains(&alpaca_slot(true)));
+        assert!(VENUES.contains(&alpaca_slot(false)));
     }
 }

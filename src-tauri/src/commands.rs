@@ -31,6 +31,26 @@ fn venue_enum(name: &str) -> Option<Venue> {
     }
 }
 
+/// Market-data credentials: the key pair for whichever endpoint is selected,
+/// falling back to the other if that slot is empty.
+///
+/// The fallback is safe *here* and only here — `data.alpaca.markets` is
+/// read-only and shared by both accounts, so borrowing the other pair fetches
+/// quotes rather than touching an account. The order path deliberately has no
+/// such fallback.
+pub fn alpaca_data_keys(app: &AppHandle) -> (String, String) {
+    let paper = current_endpoint_is_paper(app);
+    for slot in [vault::alpaca_slot(paper), vault::alpaca_slot(!paper)] {
+        let keys = vault::get(slot).unwrap_or_default();
+        let id = keys.get("keyId").cloned().unwrap_or_default();
+        let secret = keys.get("secret").cloned().unwrap_or_default();
+        if !id.trim().is_empty() && !secret.trim().is_empty() {
+            return (id, secret);
+        }
+    }
+    (String::new(), String::new())
+}
+
 /// Recompute which venues have keys and push it into the engine.
 pub fn refresh_connected(st: &AppState) {
     let mut set = HashSet::new();
@@ -210,13 +230,38 @@ pub fn set_live(app: AppHandle, app_state: State<AppState>, armed: bool, paper: 
     push_state(&app);
 }
 
+/// Credentials for one Alpaca endpoint.
+///
+/// No cross-endpoint fallback: sending live keys to the paper endpoint (or the
+/// reverse) is a 401 at best, and at worst it would mean a request the user
+/// believed was paper reaching the real account. An empty slot must fail as
+/// "not configured", not quietly borrow the other one's keys.
+fn alpaca_keys(paper: bool) -> BTreeMap<String, String> {
+    vault::get(vault::alpaca_slot(paper)).unwrap_or_default()
+}
+
+/// A connector bound to the endpoint the engine currently has selected.
+fn alpaca_connector(paper: bool) -> AlpacaConnector {
+    let keys = alpaca_keys(paper);
+    AlpacaConnector::from_fields(move |k| keys.get(k).cloned(), paper)
+}
+
+/// Which endpoint the engine is set to right now.
+fn current_endpoint_is_paper(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .map(|st| st.engine.lock().unwrap().state().live.paper)
+        .unwrap_or(true)
+}
+
 /// Read-only Alpaca account check (buying power, status) for the connection test.
 #[tauri::command]
 pub async fn alpaca_account(paper: bool) -> Result<AlpacaAccount, String> {
-    let keys = vault::get("alpaca").unwrap_or_default();
-    let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), paper);
+    let conn = alpaca_connector(paper);
     if !conn.is_live_ready() {
-        return Err("Alpaca keys not in vault — add them in Settings".into());
+        return Err(format!(
+            "no {} keys saved — add them in Settings (paper and live accounts have separate keys)",
+            if paper { "paper" } else { "live" }
+        ));
     }
     conn.account().await.map_err(|e| e.to_string())
 }
@@ -229,14 +274,18 @@ pub async fn submit_live_order(app: &AppHandle, o: LiveOrderOut) {
             st.engine.lock().unwrap().apply_live_reject(&o.order_id, "dry-run: not submitted");
         }
     } else {
-        let keys = vault::get("alpaca").unwrap_or_default();
-        let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), o.paper);
+        // `o.paper` is the endpoint snapshotted when the order was armed, so a
+        // mid-flight endpoint change can never redirect an order.
+        let conn = alpaca_connector(o.paper);
         if !conn.is_live_ready() {
             if let Some(st) = app.try_state::<AppState>() {
-                st.engine
-                    .lock()
-                    .unwrap()
-                    .apply_live_reject(&o.order_id, "Alpaca keys not in vault — add them in Settings");
+                st.engine.lock().unwrap().apply_live_reject(
+                    &o.order_id,
+                    &format!(
+                        "no {} Alpaca keys saved — add them in Settings",
+                        if o.paper { "paper" } else { "live" }
+                    ),
+                );
             }
         } else {
             // Entries in dollars (no share rounding, no over-spend), exits in
@@ -294,15 +343,11 @@ pub fn set_ai_policy(
 /// Refresh the broker session/account snapshot the engine gates live entries on.
 /// Called from the daemon loop; not a Tauri command.
 pub async fn refresh_broker_status(app: &AppHandle) {
-    let keys = vault::get("alpaca").unwrap_or_default();
-    if keys.is_empty() {
+    let paper = current_endpoint_is_paper(app);
+    let conn = alpaca_connector(paper);
+    if !conn.is_live_ready() {
         return;
     }
-    let paper = app
-        .try_state::<AppState>()
-        .map(|st| st.engine.lock().unwrap().state().live.paper)
-        .unwrap_or(true);
-    let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), paper);
     let (clock, account) = tokio::join!(conn.clock(), conn.account());
     let (Ok(clock), Ok(account)) = (clock, account) else {
         // Deliberately leave the old status to age out — an unreachable broker
@@ -384,15 +429,10 @@ pub async fn ai_overlay_pass(app: &AppHandle, cursor: usize) -> bool {
 
 /// Make the engine's position ledger match the broker's. Daemon-driven.
 pub async fn reconcile_alpaca(app: &AppHandle) {
-    let keys = vault::get("alpaca").unwrap_or_default();
-    if keys.is_empty() {
+    let conn = alpaca_connector(current_endpoint_is_paper(app));
+    if !conn.is_live_ready() {
         return;
     }
-    let paper = app
-        .try_state::<AppState>()
-        .map(|st| st.engine.lock().unwrap().state().live.paper)
-        .unwrap_or(true);
-    let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), paper);
     let Ok(positions) = conn.positions().await else { return };
     let rows: Vec<(String, f64, f64)> =
         positions.iter().map(|p| (p.symbol.clone(), p.qty_f64(), p.avg_price_f64())).collect();

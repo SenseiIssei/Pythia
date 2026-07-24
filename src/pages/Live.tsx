@@ -182,7 +182,10 @@ export function Live() {
       >
         <div className="mb-3 text-sm text-cyber-text-dim">
           Verify your Alpaca keys reach the {paper ? "paper" : "live"} endpoint before arming. Read-only — places no
-          order. {mode === "native" ? "Keys come from the OS keychain (Settings → Alpaca)." : "Keys come from the server env (APCA_API_KEY_ID / APCA_API_SECRET_KEY)."}
+          order.{" "}
+          {mode === "native"
+            ? `Uses the ${paper ? "Alpaca — Paper" : "Alpaca — Live"} keys from Settings; the two accounts have separate key pairs.`
+            : "Keys come from the server env (APCA_API_KEY_ID / APCA_API_SECRET_KEY, or APCA_LIVE_* for the live endpoint)."}
         </div>
         <Button tone="cyan" icon={PlugZap} disabled={busy} onClick={testConn}>
           Test {paper ? "paper" : "live"} connection
@@ -201,24 +204,60 @@ export function Live() {
       {/* arm */}
       <Card title="2 · Arm" right={<DollarSign size={14} className="text-danger" />}>
         <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="flex items-center justify-between rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2">
+          {/*
+            Both toggles are inert while armed, and are shown that way.
+            `setLiveConfig` is only sent by arm(), so flipping these mid-flight
+            changed a local value and nothing else — the switch moved, the label
+            said "Paper", and orders kept going to the live endpoint. Requiring a
+            disarm to change endpoint is also the right safety behaviour: moving
+            between fake and real money should be a deliberate re-arm, not a tap.
+          */}
+          <div
+            className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+              live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
+            }`}
+          >
             <div>
               <div className="text-sm font-medium">Endpoint</div>
-              <div className="text-[11px] text-cyber-text-faint">{paper ? "paper — no real money" : "LIVE — real money"}</div>
+              <div className="text-[11px] text-cyber-text-faint">
+                {live.armed
+                  ? "locked while armed — disarm to change"
+                  : paper
+                    ? "paper — no real money"
+                    : "LIVE — real money"}
+              </div>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span className={paper ? "text-accent" : "text-danger"}>{paper ? "Paper" : "Live"}</span>
-              <Toggle on={!paper} onChange={(v) => setPaper(!v)} />
+              <Toggle on={!paper} onChange={(v) => !live.armed && setPaper(!v)} />
             </div>
           </div>
-          <div className="flex items-center justify-between rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2">
+          <div
+            className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+              live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
+            }`}
+          >
             <div>
               <div className="text-sm font-medium">Dry-run</div>
-              <div className="text-[11px] text-cyber-text-faint">log intended orders, submit nothing</div>
+              <div className="text-[11px] text-cyber-text-faint">
+                {live.armed ? "locked while armed — disarm to change" : "log intended orders, submit nothing"}
+              </div>
             </div>
-            <Toggle on={dryRun} onChange={setDryRun} />
+            <Toggle on={dryRun} onChange={(v) => !live.armed && setDryRun(v)} />
           </div>
         </div>
+
+        {/* Switching to real money is a different decision from arming at all. */}
+        {!live.armed && !paper && !dryRun && (
+          <div className="mb-3 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+            <TriangleAlert size={15} className="mt-0.5 shrink-0 text-danger" />
+            <div className="text-cyber-text-dim">
+              <span className="font-bold text-danger">Real money.</span> Arming now routes orders to your live
+              Alpaca account. This uses the <span className="text-accent">Alpaca — Live</span> keys from Settings,
+              not the paper ones — test them there first if you haven't.
+            </div>
+          </div>
+        )}
 
         {!live.armed ? (
           <>
