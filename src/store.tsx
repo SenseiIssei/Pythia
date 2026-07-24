@@ -8,6 +8,9 @@ import {
 } from "react";
 import { getEngine } from "./engine";
 import type {
+  AiPolicy,
+  AiSpend,
+  AiView,
   JournalEntry,
   LiveStatus,
   Market,
@@ -28,6 +31,11 @@ interface Store {
   limits: RiskLimits;
   history: Record<string, number[]>;
   live: LiveStatus;
+  /** Market ids running on real exchange candles rather than the simulator. */
+  barBacked: Set<string>;
+  aiViews: AiView[];
+  aiPolicy: AiPolicy;
+  aiSpend: AiSpend;
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
@@ -62,6 +70,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       limits: engine.getLimits(),
       history: engine.history(),
       live: engine.liveStatus(),
+      barBacked: new Set(engine.barBacked()),
+      aiViews: engine.aiViews(),
+      aiPolicy: engine.aiPolicy(),
+      aiSpend: engine.aiSpend(),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),

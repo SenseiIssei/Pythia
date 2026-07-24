@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { BrainCircuit, Sparkles, TriangleAlert, ArrowUp, ArrowDown, Minus } from "lucide-react";
-import { Card, PageHeader, Badge, Button, Meter, fmtPct } from "../components/ui";
+import { Card, PageHeader, Badge, Button, Meter, Toggle, fmtPct } from "../components/ui";
 import { useStore } from "../store";
 import { aiMode, aiProviders, aiSignal } from "../ai";
+import { setAiPolicy } from "../live";
 import type { LlmProviderInfo, LlmSignal, Market } from "../types";
 
 // Build a compact, model-friendly description of one market from live state.
@@ -29,6 +30,103 @@ function DirIcon({ d }: { d: LlmSignal["direction"] }) {
   if (d === "long") return <ArrowUp size={14} className="text-success" />;
   if (d === "short") return <ArrowDown size={14} className="text-danger" />;
   return <Minus size={14} className="text-cyber-text-dim" />;
+}
+
+/**
+ * The always-on overlay, as opposed to the one-off "ask a model" panel below.
+ *
+ * The bounded authority is the whole design. An LLM cannot be walk-forward
+ * validated, its behaviour shifts between model versions, and it will answer
+ * confidently about a market it has no edge on — so it is wired as a multiplier
+ * on trades the rules already produced, never as a trigger. Worst case it
+ * shrinks a good trade; it cannot invent a bad one.
+ */
+function AiOverlayPanel() {
+  const { aiPolicy, aiViews, aiSpend, markets } = useStore();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function toggle(on: boolean) {
+    setBusy(true);
+    setErr("");
+    try {
+      await setAiPolicy({ enabled: on });
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+    }
+    setBusy(false);
+  }
+
+  const symbolOf = (id: string) => markets.find((m) => m.id === id)?.symbol ?? id;
+  const recent = [...aiViews].sort((a, b) => b.ts - a.ts).slice(0, 6);
+
+  return (
+    <Card
+      className="mb-4"
+      title="Live AI overlay"
+      right={
+        <Badge tone={aiPolicy.enabled ? "green" : "neutral"}>{aiPolicy.enabled ? "active" : "off"}</Badge>
+      }
+    >
+      <div className="mb-3 flex items-start justify-between gap-4">
+        <div className="text-sm text-cyber-text-dim">
+          Polls your markets in the background and attaches a view to each one. A view can{" "}
+          <b className="text-warning">shrink</b> or <b className="text-danger">veto</b> an entry a strategy already
+          decided to make, or nudge its size up by at most{" "}
+          <b className="text-accent">{aiPolicy.maxBoost.toFixed(2)}×</b>.{" "}
+          <b className="text-cyber-text">It can never open a trade on its own</b>, and it never touches exits.
+        </div>
+        <Toggle on={aiPolicy.enabled} onChange={(v) => !busy && void toggle(v)} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+        <Stat label="Calls" value={aiSpend.calls.toLocaleString()} />
+        <Stat label="Input tokens" value={aiSpend.inputTokens.toLocaleString()} />
+        <Stat label="Output tokens" value={aiSpend.outputTokens.toLocaleString()} />
+        <Stat label="Errors" value={aiSpend.errors.toLocaleString()} bad={aiSpend.errors > 0} />
+      </div>
+
+      {recent.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {recent.map((v) => {
+            const ageSec = Math.round((Date.now() - v.ts) / 1000);
+            const stale = ageSec > aiPolicy.ttlSec;
+            return (
+              <div
+                key={v.marketId}
+                className={`flex items-start gap-2 rounded border border-cyber-border bg-cyber-surface/40 px-2 py-1.5 text-xs ${
+                  stale ? "opacity-50" : ""
+                }`}
+              >
+                <DirIcon d={v.direction} />
+                <span className="font-mono text-cyber-text">{symbolOf(v.marketId)}</span>
+                <span className="text-cyber-text-faint">conf {v.confidence.toFixed(2)}</span>
+                <span className="flex-1 truncate text-cyber-text-dim">{v.rationale}</span>
+                <span className="shrink-0 text-cyber-text-faint">
+                  {stale ? "expired" : `${ageSec}s`} · {v.latencyMs}ms
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {err && <div className="mt-2 text-xs text-danger">{err}</div>}
+      <div className="mt-3 text-[11px] leading-snug text-cyber-text-faint">
+        Views older than {aiPolicy.ttlSec}s are ignored entirely. Every call, veto and size change is written to the
+        Journal, so any trade the overlay influenced can be reconstructed afterwards.
+      </div>
+    </Card>
+  );
+}
+
+function Stat({ label, value, bad }: { label: string; value: string; bad?: boolean }) {
+  return (
+    <div className="rounded border border-cyber-border bg-cyber-surface/40 px-2 py-1.5">
+      <div className="text-[10px] uppercase tracking-widest text-cyber-text-faint">{label}</div>
+      <div className={`font-mono text-sm ${bad ? "text-danger" : "text-cyber-text"}`}>{value}</div>
+    </div>
+  );
 }
 
 export function Signals() {
@@ -113,6 +211,8 @@ export function Signals() {
         title="AI Signals"
         subtitle="Bring any API key — Claude, GPT, Grok, GLM, Gemini, DeepSeek & more reason over your markets"
       />
+
+      <AiOverlayPanel />
 
       <Card
         className="mb-4"

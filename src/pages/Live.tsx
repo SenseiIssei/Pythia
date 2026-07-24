@@ -108,6 +108,58 @@ export function Live() {
         </div>
       )}
 
+      {/*
+        The most confusing state to be in is "armed, and nothing is happening".
+        Almost always it is one of: the market is closed, the account is
+        restricted, the day-trade ceiling is reached, or the broker check has
+        not landed yet. The engine already knows which — so say it plainly here
+        rather than leaving the user to guess from an empty order book.
+      */}
+      {live.armed && live.blockedReason && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning">
+          <TriangleAlert size={15} className="mt-0.5 shrink-0" />
+          <div>
+            <div className="font-bold">New entries are on hold</div>
+            <div className="text-cyber-text-dim">{live.blockedReason}</div>
+            <div className="mt-1 text-[11px] text-cyber-text-faint">
+              Exits are never blocked — an open position can always be closed.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {live.broker && (
+        <Card title="Broker session" className="mb-4">
+          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <Field
+              label="US market"
+              value={live.broker.marketOpen ? "open" : "closed"}
+              good={live.broker.marketOpen}
+            />
+            <Field label="Equity" value={`$${live.broker.equity.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} />
+            <Field
+              label="Buying power"
+              value={`$${live.broker.buyingPower.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+            />
+            <Field
+              label="Day-trade cap"
+              value={live.broker.dayTradeLimitReached ? "reached" : "clear"}
+              good={!live.broker.dayTradeLimitReached}
+            />
+          </div>
+          {!live.broker.marketOpen && live.broker.nextOpen && (
+            <div className="mt-2 text-xs text-cyber-text-faint">Next open: {live.broker.nextOpen}</div>
+          )}
+          {live.broker.restricted && (
+            <div className="mt-2 text-xs text-danger">Account restricted: {live.broker.restricted}</div>
+          )}
+          <div className="mt-2 text-[11px] text-cyber-text-faint">
+            Checked {Math.max(0, Math.round((Date.now() - live.broker.checkedAt) / 1000))}s ago · live entries block
+            once this is over 5 minutes old.
+          </div>
+        </Card>
+      )}
+
       <Card className="mb-4 border-danger/30 bg-danger/5">
         <div className="flex items-start gap-3">
           <ShieldAlert size={18} className="mt-0.5 shrink-0 text-danger" />
@@ -200,7 +252,10 @@ export function Live() {
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Only <b>Alpaca</b> markets route live — crypto &amp; Polymarket always paper here.</div>
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Only strategies set to <b>Live</b> (Strategies page) send entries; a position opened live also exits live.</div>
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> The kill switch, daily-loss, drawdown &amp; position caps gate every order first.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Market orders fill during US market hours; off-hours orders time out and log a rejection.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Entries are refused while the market is closed, the account is restricted, or the broker check is stale — exits never are.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Orders go out as marketable limits, so a thin or gapped book can't fill you at any price.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> An order that doesn't fill is cancelled, then re-read — nothing is ever left working after Pythia gives up on it.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Positions are reconciled against Alpaca every few minutes; the broker is always treated as the source of truth.</div>
         </div>
       </Card>
     </div>

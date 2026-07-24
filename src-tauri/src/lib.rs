@@ -50,6 +50,16 @@ pub fn run() {
                     interval.tick().await;
                     n += 1;
 
+                    // Alpaca credentials, re-read each pass so keys added in
+                    // Settings take effect without a restart.
+                    let alpaca_keys = || {
+                        let keys = pythia_core::vault::get("alpaca").unwrap_or_default();
+                        (
+                            keys.get("keyId").cloned().unwrap_or_default(),
+                            keys.get("secret").cloned().unwrap_or_default(),
+                        )
+                    };
+
                     // Refresh real read-only feeds periodically (and on first tick).
                     // Awaits happen here, with no engine lock held.
                     if n % 8 == 1 {
@@ -57,18 +67,42 @@ pub fn run() {
                         let poly = marketdata::fetch_polymarket().await;
                         // Real equity quotes when Alpaca keys are in the vault
                         // (otherwise those markets stay on the simulator).
-                        let alpaca = {
-                            let keys = pythia_core::vault::get("alpaca").unwrap_or_default();
-                            let id = keys.get("keyId").cloned().unwrap_or_default();
-                            let secret = keys.get("secret").cloned().unwrap_or_default();
-                            marketdata::fetch_alpaca(&id, &secret, "iex").await
-                        };
+                        let (id, secret) = alpaca_keys();
+                        let alpaca = marketdata::fetch_alpaca(&id, &secret, "iex").await;
                         if let Some(st) = handle.try_state::<AppState>() {
                             let mut e = st.engine.lock().unwrap();
                             e.apply_kraken(&kraken);
                             e.apply_polymarket(&poly);
                             e.apply_alpaca(&alpaca);
                         }
+                    }
+
+                    // Candle history — the series indicators actually run on.
+                    // Without this every EMA and RSI is measuring the tick
+                    // loop's own random walk rather than the market.
+                    if n % 40 == 1 {
+                        let (id, secret) = alpaca_keys();
+                        let mut series = marketdata::fetch_kraken_bars(5).await;
+                        series.extend(
+                            marketdata::fetch_alpaca_bars(&id, &secret, "iex", "5Min", 10).await,
+                        );
+                        if !series.is_empty() {
+                            if let Some(st) = handle.try_state::<AppState>() {
+                                st.engine.lock().unwrap().apply_bars(&series);
+                            }
+                        }
+                    }
+
+                    // Session + account state. Live equity entries are blocked
+                    // until this is fresh, so it must beat the engine's
+                    // five-minute staleness window comfortably.
+                    if n % 40 == 1 {
+                        commands::refresh_broker_status(&handle).await;
+                    }
+
+                    // Make the ledger match the broker's position book.
+                    if n % 200 == 1 {
+                        commands::reconcile_alpaca(&handle).await;
                     }
 
                     let (dto, queued) = {
@@ -95,8 +129,14 @@ pub fn run() {
                         let mut e = st.engine.lock().unwrap();
                         e.drain_live_orders()
                     };
+                    // Off the tick loop: resolving one order can take ten
+                    // seconds of polling, and freezing price updates and stop
+                    // checks behind it is exactly the wrong trade-off.
                     for o in live_orders {
-                        commands::submit_live_order(&handle, o).await;
+                        let h = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            commands::submit_live_order(&h, o).await;
+                        });
                     }
 
                     // Checkpoint to disk periodically (~every 60s).
@@ -125,6 +165,7 @@ pub fn run() {
             commands::clear_llm_key,
             commands::llm_signal,
             commands::set_live,
+            commands::set_ai_policy,
             commands::alpaca_account,
         ])
         .run(tauri::generate_context!())

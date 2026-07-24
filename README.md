@@ -62,11 +62,19 @@ and any large-language-model of your choice can weigh in on a market.
   DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
 - **📡 Gated live execution (Alpaca)** — a real order path that ships **disarmed**. Arming needs a
   typed `ARM LIVE` confirmation; only Alpaca markets from a *Live* strategy route to the broker, and
-  the kill switch + every risk limit gate each order. Start on the **paper endpoint** (real API, no
-  real money), test the connection, then flip to real money once you trust it.
-- **Real market data** — live Kraken crypto prices and Polymarket odds (no keys needed), plus real
-  **Alpaca equity quotes** (AAPL, NVDA, MSFT, AMZN, TSLA) once your Alpaca keys are set, so live
-  equities strategies trade on genuine prices rather than the simulator.
+  the kill switch + every risk limit gate each order. Entries are refused while the market is
+  closed, the account is restricted, the PDT ceiling is reached, or the broker check has gone stale
+  — **exits never are**. Orders go out as marketable limits with idempotent ids, unfilled orders are
+  cancelled rather than abandoned, partial fills are booked, and positions are reconciled against
+  Alpaca on a schedule with the broker treated as truth.
+- **🩺 `npm run preflight`** — one command that names the actual problem, because every live-run
+  failure looks identical from the dashboard: keys, account, session, feed, candle depth, model
+  provider and the live gate, each checked and explained.
+- **Real market data, and it says which is which** — indicators run on genuine **OHLC candles**
+  (Kraken, no keys; Alpaca once yours are set), not on the tick loop's own random walk. Real quotes
+  don't drift between refreshes, strategies fire once per *closed* bar, stops use true ATR so an
+  overnight gap doesn't sweep them, and every market carries a `real bars` / `sim` badge so a
+  simulated equity curve can never be mistaken for a real one.
 - **Secure by default** — API keys live in the OS keychain (desktop) or the server's environment,
   never in code, never logged, never returned to the UI. Discord/webhook alerts, persistent state,
   system tray, first-run legal gate.
@@ -104,7 +112,7 @@ covers the rest. Every model is overridable — type any model id you like.
 
 | Provider | id | Env var | Default model | Notes |
 |---|---|---|---|---|
-| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-8` | Messages API + adaptive thinking |
+| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5` | Messages API · adaptive thinking · structured output · server-side refusal fallback |
 | OpenAI (GPT) | `openai` | `OPENAI_API_KEY` | `gpt-5.6` | Sol; `-terra` / `-luna` tiers |
 | xAI (Grok) | `xai` | `XAI_API_KEY` | `grok-4.5` | |
 | z.ai (GLM) | `zai` | `ZAI_API_KEY` | `glm-5.2` | |
@@ -118,10 +126,31 @@ covers the rest. Every model is overridable — type any model id you like.
 <sub>Defaults track the current flagships (July 2026); every model is overridable — type any model id in the picker.</sub>
 
 Each request returns a structured signal — `{ probability, direction, confidence, rationale }` —
-clamped and stamped with the provider/model that answered.
+clamped and stamped with the provider, the model that answered, the round-trip latency and the
+tokens it cost.
 
-> 🔒 **AI signals are advisory only.** No model reliably predicts prices, and **none of them place
-> orders.** Treat a signal as one input among many.
+### The live overlay — what a model is actually allowed to do
+
+Beyond the one-off *ask a model* panel, Pythia can run a **background overlay** (off by default)
+that polls your markets and attaches a current view to each one. Its authority is deliberately
+bounded:
+
+| A model view can… | …and cannot |
+|---|---|
+| **Veto** an entry it confidently disagrees with | **Open** a position — ever |
+| **Shrink** an entry it mildly disagrees with | Touch an **exit**, stop or target |
+| **Boost** an agreeing entry, capped at ×1.25 | Bypass the risk manager or the kill switch |
+
+Every order still originates from a rule you can backtest, and still passes the sovereign risk
+manager. That constraint isn't timidity — an LLM can't be walk-forward validated, its behaviour
+shifts between model versions, and it will answer confidently about a market it has no edge on.
+As a multiplier the worst case is a good trade made smaller. As a trigger the worst case is
+unbounded.
+
+Views expire (15 min by default), every call and veto is journaled, and token spend is on screen.
+
+> 🔒 **AI signals are advisory.** No model reliably predicts prices. Treat a signal as one input
+> among many.
 
 **Where keys live:** the **desktop app** stores provider keys in the OS keychain (manage them in
 *Settings → AI providers*). The **backend server** reads keys from its own environment. The browser
@@ -157,13 +186,17 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `POST /api/command` | mutate the engine (kill switch, limits, strategies, orders) |
 | `GET /api/llm/providers` | which providers have a key in the server env |
 | `POST /api/llm/signal` | ask a provider for a signal (`{provider, model, context}`) |
+| `POST /api/ai/config` | enable/tune the background AI overlay |
 | `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun}`) |
 | `GET /api/live/account` | Alpaca account check (buying power/status) |
+| `GET /api/preflight` | every go-live check in one response (`npm run preflight`) |
 
 Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, any provider key
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), and Alpaca for real equity quotes +
 live execution: `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `APCA_FEED` (default `iex`, the free tier;
-paid plans can use `sip`).
+paid plans can use `sip`). Tuning: `PYTHIA_BAR_TIMEFRAME` (default `5Min`), `PYTHIA_SLIPPAGE_BPS`
+(default `25`), and the overlay's `PYTHIA_AI_PROVIDER` / `PYTHIA_AI_MODEL` / `PYTHIA_AI_EFFORT` /
+`PYTHIA_AI_INTERVAL_SEC`. See [`.env.example`](.env.example) for all of them with commentary.
 
 ### Browser / web app (no Rust, no keys — explore the UI)
 

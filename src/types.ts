@@ -201,10 +201,60 @@ export interface LlmSignal {
 }
 
 // ── live execution status ────────────────────────────────────────────────────
+/** What the broker says about the session and the account. */
+export interface BrokerStatus {
+  marketOpen: boolean;
+  nextOpen?: string;
+  /** FINRA pattern-day-trader ceiling reached (3 day trades / 5 sessions under $25k). */
+  dayTradeLimitReached: boolean;
+  /** Set when the account itself refuses orders (blocked, not yet active…). */
+  restricted?: string;
+  equity: number;
+  buyingPower: number;
+  checkedAt: number;
+}
+
 export interface LiveStatus {
   armed: boolean;
   paper: boolean;
   dryRun: boolean;
   alpacaConnected: boolean;
   pending: number;
+  broker?: BrokerStatus;
+  /**
+   * Why a live equity *entry* would be refused right now. `undefined` means the
+   * path is clear. Surfaced so an armed engine placing no trades explains itself
+   * instead of looking broken.
+   */
+  blockedReason?: string;
+}
+
+/** One model's view of one market. Advisory only — see `AiPolicy`. */
+export interface AiView {
+  marketId: string;
+  direction: "long" | "short" | "neutral";
+  probability: number;
+  confidence: number;
+  rationale: string;
+  model: string;
+  ts: number;
+  latencyMs: number;
+}
+
+/**
+ * How much authority the AI overlay has. A model may shrink or veto a trade the
+ * rules already decided to make; it can never originate one.
+ */
+export interface AiPolicy {
+  enabled: boolean;
+  ttlSec: number;
+  vetoConfidence: number;
+  maxBoost: number;
+}
+
+export interface AiSpend {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  errors: number;
 }
