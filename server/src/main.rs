@@ -38,6 +38,7 @@ use pythia_core::engine::{
     StrategyState,
 };
 use pythia_core::llm::{self, Effort, LlmConfig, Provider};
+use pythia_core::research::{self, backtest::BacktestConfig, backtest::CostModel};
 use pythia_core::{alerts, marketdata};
 
 /// Shared server state. The engine lives behind a Mutex (locked only briefly,
@@ -108,6 +109,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/preflight", get(get_preflight))
+        .route("/api/research/validate", get(get_validate))
         .route("/api/state", get(get_state))
         .route("/api/stream", get(ws_stream))
         .route("/api/command", post(post_command))
@@ -411,6 +413,136 @@ async fn ai_loop(state: AppState) {
             }
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidateQuery {
+    /// Out-of-sample windows. More folds means more, shorter tests.
+    #[serde(default)]
+    folds: Option<usize>,
+    /// Include the equity universe (needs Alpaca keys). Crypto always runs.
+    #[serde(default)]
+    equities: Option<bool>,
+    /// Set 0 to measure the same strategies with no fees or slippage, which
+    /// shows how much of a result the cost model is eating.
+    #[serde(default)]
+    slippage_bps: Option<f64>,
+    #[serde(default)]
+    fee_bps: Option<f64>,
+}
+
+/// Walk-forward validate every shipped strategy on real daily candles.
+///
+/// Daily bars because the venues cap a single history request: Kraken returns
+/// 720 candles whatever the interval, which is 2.5 days at 5-minute resolution
+/// and roughly two years at daily. Two years supports four folds; two days
+/// supports nothing, and a validation run on a sample that small would be
+/// theatre.
+async fn get_validate(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ValidateQuery>,
+) -> impl IntoResponse {
+    let folds = q.folds.unwrap_or(4).clamp(2, 8);
+    let mut costs = CostModel::default();
+    if let Some(v) = q.slippage_bps {
+        costs.slippage_bps = v.max(0.0);
+    }
+    if let Some(v) = q.fee_bps {
+        costs.fee_bps = v.max(0.0);
+    }
+
+    // Daily crypto candles (no keys required).
+    let crypto: Vec<(String, String, Vec<pythia_core::marketdata::Ohlc>)> =
+        marketdata::fetch_kraken_bars(1440)
+            .await
+            .into_iter()
+            .map(|s| {
+                let symbol = s.id.trim_start_matches("crypto:").to_string();
+                (s.id, symbol, s.bars)
+            })
+            .collect();
+
+    let mut equities: Vec<(String, String, Vec<pythia_core::marketdata::Ohlc>)> = Vec::new();
+    if q.equities.unwrap_or(true) && has_alpaca_keys() {
+        let (key, secret, feed) = alpaca_env();
+        // ~4 years of sessions; Alpaca will return what the plan covers.
+        equities = marketdata::fetch_alpaca_bars(&key, &secret, &feed, "1Day", 1460)
+            .await
+            .into_iter()
+            .map(|s| {
+                let symbol = s.id.trim_start_matches("alpaca:").to_string();
+                (s.id, symbol, s.bars)
+            })
+            .collect();
+    }
+
+    let strategies = { st.engine.lock().unwrap().state().strategies };
+    let mut reports = Vec::new();
+    let mut skipped = Vec::new();
+
+    for cfg in &strategies {
+        if !research::is_validatable(cfg.kind) {
+            skipped.push(serde_json::json!({
+                "id": cfg.id,
+                "name": cfg.name,
+                "reason": "not a single-market technical rule — this harness can't score it honestly",
+            }));
+            continue;
+        }
+        // Score each strategy on the universe it actually trades.
+        let is_equity = cfg.venue_class == pythia_core::connectors::Venue::Alpaca;
+        let universe: Vec<_> = if is_equity { equities.clone() } else { crypto.clone() };
+        let universe: Vec<_> =
+            universe.into_iter().filter(|(id, _, _)| cfg.universe.contains(id)).collect();
+        if universe.is_empty() {
+            skipped.push(serde_json::json!({
+                "id": cfg.id,
+                "name": cfg.name,
+                "reason": if is_equity {
+                    "no equity candles — set Alpaca keys to include this one"
+                } else {
+                    "no candles for this universe"
+                },
+            }));
+            continue;
+        }
+
+        let wf = research::WalkForwardConfig {
+            folds,
+            min_trades: 20,
+            min_is_trades: 3,
+            bt: BacktestConfig {
+                costs,
+                // Daily bars: 365 for crypto (always open), 252 sessions for equities.
+                bars_per_year: if is_equity { 252.0 } else { 365.0 },
+                ..BacktestConfig::default()
+            },
+        };
+        // Backtesting is CPU-bound; keep it off the async executor's threads so
+        // the tick loop and websocket pushes stay responsive while it runs.
+        let cfg = cfg.clone();
+        let report = tokio::task::spawn_blocking(move || research::walk_forward(&cfg, &universe, &wf))
+            .await
+            .expect("validation task");
+        reports.push(report);
+    }
+
+    reports.sort_by(|a, b| {
+        b.deflated_sharpe.partial_cmp(&a.deflated_sharpe).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Json(serde_json::json!({
+        "timeframe": "1Day",
+        "folds": folds,
+        "costs": costs,
+        "cryptoMarkets": crypto.len(),
+        "equityMarkets": equities.len(),
+        "cryptoBars": crypto.first().map(|(_, _, b)| b.len()).unwrap_or(0),
+        "equityBars": equities.first().map(|(_, _, b)| b.len()).unwrap_or(0),
+        "reports": reports,
+        "skipped": skipped,
+    }))
 }
 
 async fn health() -> &'static str {

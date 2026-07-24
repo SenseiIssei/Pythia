@@ -312,7 +312,13 @@ pub fn default_strategies() -> Vec<StrategyConfig> {
             vec![p("fast", "Fast EMA", 9.0, 3.0, 30.0, 1.0), p("slow", "Slow EMA", 21.0, 10.0, 100.0, 1.0)], 18.0),
         strat("multi-tf-1", "Multi-TF Momentum · Crypto", StrategyKind::MultiTf, Venue::Crypto, StrategyState::Paper, crypto,
             vec![p("fast", "Fast EMA", 9.0, 3.0, 30.0, 1.0), p("slow", "Slow EMA", 21.0, 10.0, 100.0, 1.0), p("htf", "HTF ROC", 50.0, 20.0, 150.0, 5.0)], 15.0),
-        strat("macd-1", "MACD Trend · Crypto", StrategyKind::MacdTrend, Venue::Crypto, StrategyState::Paper, crypto,
+        // Ships PAUSED on the evidence. Walk-forward validation on two years of
+        // daily Kraken candles (9 markets, 4 out-of-sample folds, 6bps fee +
+        // 8bps slippage per side) returned −10.0% out-of-sample over 56 trades
+        // with a 44.6% win rate — and a 98% deflated Sharpe, meaning that loss
+        // is not a fluke of the search either. It has no parameters to tune, so
+        // there is nothing to re-fit. Re-run `npm run validate` before enabling.
+        strat("macd-1", "MACD Trend · Crypto", StrategyKind::MacdTrend, Venue::Crypto, StrategyState::Paused, crypto,
             vec![], 15.0),
         strat("bollinger-1", "Bollinger Revert · Crypto", StrategyKind::Bollinger, Venue::Crypto, StrategyState::Paused, crypto,
             vec![p("period", "Period", 20.0, 5.0, 60.0, 1.0), p("k", "Band σ", 2.0, 1.0, 3.5, 0.1)], 15.0),
