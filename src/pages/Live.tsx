@@ -2,7 +2,15 @@ import { useEffect, useState } from "react";
 import { Radio, ShieldAlert, Power, PlugZap, TriangleAlert, CheckCircle2, Circle, DollarSign } from "lucide-react";
 import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
 import { useStore } from "../store";
-import { liveMode, alpacaAccount, setLiveConfig, type AlpacaAccount } from "../live";
+import {
+  liveMode,
+  alpacaAccount,
+  setLiveConfig,
+  liveDiagnostics,
+  sendTestOrder,
+  type AlpacaAccount,
+  type MarketDiag,
+} from "../live";
 
 const ARM_PHRASE = "ARM LIVE";
 
@@ -131,6 +139,7 @@ export function Live() {
       )}
 
       <ReadinessCard />
+      <DiagnosticsCard />
 
       {live.broker && (
         <Card title="Broker session" className="mb-4">
@@ -421,6 +430,94 @@ function ReadinessCard() {
           Every gate is clear — the next signal on an Alpaca market routes to the broker.
         </div>
       )}
+    </Card>
+  );
+}
+
+/**
+ * Per-market trace of the routing chain, straight from the engine.
+ *
+ * The readiness card above covers the global gates; this covers the per-market
+ * ones the checklist can't see — no candles, already holding, already acted on
+ * this bar, signal fighting the trend, or simply no signal yet. Between them
+ * there is no state where "nothing is happening" has no explanation.
+ */
+function DiagnosticsCard() {
+  const [rows, setRows] = useState<MarketDiag[]>([]);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testMsg, setTestMsg] = useState("");
+
+  async function refresh() {
+    setBusy(true);
+    setErr("");
+    try {
+      setRows(await liveDiagnostics());
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+    }
+    setBusy(false);
+  }
+
+  useEffect(() => {
+    void refresh();
+    const t = setInterval(() => void refresh(), 10_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function test(marketId: string) {
+    setTestMsg("sending…");
+    try {
+      setTestMsg(await sendTestOrder(marketId, 250));
+    } catch (e) {
+      setTestMsg(String(e instanceof Error ? e.message : e));
+    }
+    void refresh();
+  }
+
+  const clear = rows.filter((r) => !r.suppressed);
+
+  return (
+    <Card
+      className="mb-4"
+      title="Per-market trace"
+      right={
+        <Button tone="cyan" className="!px-2 !py-1" disabled={busy} onClick={() => void refresh()}>
+          Refresh
+        </Button>
+      }
+    >
+      {err && <div className="mb-2 text-xs text-danger">{err}</div>}
+      <div className="space-y-1.5">
+        {rows.map((r) => (
+          <div key={r.marketId} className="rounded border border-cyber-border bg-cyber-surface/40 px-2 py-1.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-cyber-text">{r.symbol}</span>
+              <span className="text-cyber-text-faint">{r.price.toFixed(2)}</span>
+              <Badge tone={r.barBacked ? "green" : "neutral"}>{r.bars} bars</Badge>
+              {r.quoteAgeSec > 30 && <Badge tone="red">quote {r.quoteAgeSec}s old</Badge>}
+              {r.hasPosition && <Badge tone="purple">holding</Badge>}
+              <span className="flex-1" />
+              <Button tone="purple" className="!px-2 !py-0.5" onClick={() => void test(r.marketId)}>
+                Test $250
+              </Button>
+            </div>
+            {r.signal && <div className="mt-1 text-success">signal · {r.signal}</div>}
+            <div className={`mt-0.5 ${r.suppressed ? "text-warning" : "text-success"}`}>
+              {r.suppressed ?? "clear — the next signal routes to the broker"}
+            </div>
+          </div>
+        ))}
+        {rows.length === 0 && !err && (
+          <div className="text-xs text-cyber-text-faint">No Alpaca markets in the engine yet.</div>
+        )}
+      </div>
+      {testMsg && <div className="mt-2 text-xs text-cyber-text-dim">{testMsg}</div>}
+      <div className="mt-2 text-[11px] text-cyber-text-faint">
+        {clear.length} of {rows.length} markets are clear to route. <b>Test $250</b> sends one real order through the
+        full path — risk manager, broker, fill — so a wrong key or a closed session surfaces immediately.
+      </div>
     </Card>
   );
 }

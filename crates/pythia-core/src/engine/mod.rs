@@ -394,6 +394,32 @@ impl Default for AiPolicy {
     }
 }
 
+/// Per-market answer to "why hasn't this traded?".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketDiag {
+    pub market_id: String,
+    pub symbol: String,
+    pub price: f64,
+    /// Candles available to the indicators.
+    pub bars: usize,
+    pub bar_backed: bool,
+    /// Seconds since the last real quote. The risk manager rejects orders on
+    /// data older than `max_data_staleness_sec`.
+    pub quote_age_sec: u64,
+    pub has_position: bool,
+    /// Strategies whose universe includes this market.
+    pub watchers: Vec<String>,
+    /// How many of those are actually in the Live state.
+    pub live_watchers: usize,
+    /// What a live strategy would do right now, if anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    /// The first gate that would stop an order. `None` means the path is clear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppressed: Option<String>,
+}
+
 /// Running cost of the overlay, so the bill is visible in the cockpit rather
 /// than discovered on an invoice.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1449,6 +1475,97 @@ impl Engine {
         );
     }
 
+    /// Walk the live-routing chain for every Alpaca market and report where it
+    /// stops.
+    ///
+    /// The engine already knows why it isn't trading — the information was just
+    /// scattered across a rejection in the journal, a strategy's state field, a
+    /// bar timestamp and a risk check that runs too late to see. This assembles
+    /// the same answer up front, per market, so "nothing is happening" becomes
+    /// a specific sentence instead of a guess.
+    pub fn live_diagnostics(&self) -> Vec<MarketDiag> {
+        let now = self.now();
+        let snapshot: HashMap<String, Market> =
+            self.markets.iter().map(|m| (m.id.clone(), m.clone())).collect();
+
+        self.markets
+            .iter()
+            .filter(|m| m.venue == Venue::Alpaca)
+            .map(|m| {
+                let watchers: Vec<&StrategyConfig> =
+                    self.strategies.iter().filter(|s| s.universe.contains(&m.id)).collect();
+                let live_watchers: Vec<&StrategyConfig> =
+                    watchers.iter().copied().filter(|s| s.state == StrategyState::Live).collect();
+                let bars = self.history.get(&m.id).map(|h| h.len()).unwrap_or(0);
+
+                // Ask the live strategies what they'd do right now.
+                let mut signal = None;
+                for s in &live_watchers {
+                    if let Some(i) = strategies::run_strategy(s, &snapshot, &self.history).into_iter().next() {
+                        signal = Some(format!("{}: {:?} — {}", s.name, i.side, i.reason));
+                        break;
+                    }
+                }
+
+                // Walk the same gates `tick` applies, in the same order.
+                let suppressed = if watchers.is_empty() {
+                    Some("no strategy watches this market".into())
+                } else if live_watchers.is_empty() {
+                    Some(format!(
+                        "{} — set it Live to route entries",
+                        watchers
+                            .iter()
+                            .map(|s| format!("{} is {:?}", s.name, s.state).to_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                } else if !self.bar_backed.contains(&m.id) {
+                    Some("no real candles yet — signals need a live bar feed".into())
+                } else if bars < 30 {
+                    Some(format!("only {bars} candles; strategies need at least 30"))
+                } else if self.positions.contains_key(&m.id) {
+                    Some("already holding — entries only open when flat".into())
+                } else if self
+                    .last_bar_ts
+                    .get(&m.id)
+                    .is_some_and(|t| self.signalled_bar.get(&m.id) == Some(t))
+                {
+                    Some("already acted on this candle — waits for the next one".into())
+                } else if signal.is_none() {
+                    Some("no strategy signal right now (conditions not met)".into())
+                } else if let Some(lt) = self.history.get(&m.id).and_then(|h| indicators::roc(h, 60)) {
+                    // The trend filter only blocks a signal that fights it.
+                    let side = if signal.as_deref().is_some_and(|s| s.contains("Buy")) {
+                        Side::Buy
+                    } else {
+                        Side::Sell
+                    };
+                    if (lt > 0.01 && side == Side::Sell) || (lt < -0.01 && side == Side::Buy) {
+                        Some(format!("signal fights the 60-bar trend ({:+.1}%)", lt * 100.0))
+                    } else {
+                        self.live_block_reason()
+                    }
+                } else {
+                    self.live_block_reason()
+                };
+
+                MarketDiag {
+                    market_id: m.id.clone(),
+                    symbol: m.symbol.clone(),
+                    price: m.price,
+                    bars,
+                    bar_backed: self.bar_backed.contains(&m.id),
+                    quote_age_sec: ((now - m.updated_at) / 1000).max(0) as u64,
+                    has_position: self.positions.contains_key(&m.id),
+                    watchers: watchers.iter().map(|s| s.name.clone()).collect(),
+                    live_watchers: live_watchers.len(),
+                    signal,
+                    suppressed,
+                }
+            })
+            .collect()
+    }
+
     // ── AI overlay ──────────────────────────────────────────────────────────
 
     pub fn set_ai_policy(&mut self, policy: AiPolicy) {
@@ -2382,6 +2499,55 @@ mod tests {
         let out2 = e2.drain_live_orders();
         assert_eq!(out2.len(), 1);
         assert!(!out2[0].extended_hours);
+    }
+
+    /// End-to-end reproduction of a fully configured live setup: keys in, real
+    /// equity candles loaded, armed on the paper endpoint, the equities
+    /// strategy set Live, market open. An order must reach the outbox.
+    #[test]
+    fn a_fully_configured_setup_actually_emits_an_alpaca_order() {
+        let mut e = Engine::new();
+
+        // Real candles for the equity universe, ending on a fresh 20-bar high
+        // so Donchian Breakout has something to fire on.
+        let bars: Vec<Ohlc> = (0..120)
+            .map(|i| {
+                let c = 200.0 + i as f64 * 0.25;
+                Ohlc { ts: i as i64 * 300_000, open: c, high: c + 0.5, low: c - 0.5, close: c, volume: 1000.0 }
+            })
+            .collect();
+        e.apply_bars(&[BarSeries { id: "alpaca:AAPL".into(), bars }]);
+
+        // A live quote above the channel high.
+        e.apply_alpaca(&[RealEquity {
+            id: "alpaca:AAPL".into(),
+            symbol: "AAPL".into(),
+            price: 260.0,
+            change24h: 0.01,
+        }]);
+
+        e.set_strategy_state("breakout-1", StrategyState::Live);
+        e.set_live(true, true, false, false);
+        let status = open_market(&e);
+        e.set_broker_status(status);
+
+        // Tick past the strategy cadence.
+        for _ in 0..12 {
+            e.tick();
+        }
+
+        let out = e.drain_live_orders();
+        assert!(
+            !out.is_empty(),
+            "a fully configured setup produced no live order. Journal:\n{}",
+            e.journal
+                .iter()
+                .take(15)
+                .map(|j| format!("  [{:?}] {}", j.kind, j.message))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(out[0].symbol, "AAPL");
     }
 
     #[test]

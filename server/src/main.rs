@@ -156,6 +156,8 @@ async fn main() {
         .route("/api/ai/config", post(post_ai_config))
         .route("/api/live/config", post(post_live_config))
         .route("/api/live/account", get(get_live_account))
+        .route("/api/live/diagnostics", get(get_live_diagnostics))
+        .route("/api/live/test-order", post(post_test_order))
         // The dashboards are served from a different origin in dev; allow them.
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -874,6 +876,47 @@ async fn post_ai_config(State(st): State<AppState>, Json(req): Json<AiConfigReq>
         s
     };
     Json(dto)
+}
+
+/// Per-market answer to "why hasn't this traded?".
+async fn get_live_diagnostics(State(st): State<AppState>) -> impl IntoResponse {
+    Json(st.engine.lock().unwrap().live_diagnostics())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestOrderReq {
+    market_id: String,
+    notional: f64,
+}
+
+/// Send one small order through the real path, to prove the pipeline.
+async fn post_test_order(
+    State(st): State<AppState>,
+    Json(req): Json<TestOrderReq>,
+) -> impl IntoResponse {
+    let notional = req.notional.clamp(1.0, 5_000.0);
+    let (status, body) = {
+        let mut e = st.engine.lock().unwrap();
+        if !e.state().live.armed {
+            (StatusCode::CONFLICT, "live execution is disarmed — arm it first".to_string())
+        } else if let Some(why) = e.live_block_reason() {
+            (StatusCode::CONFLICT, why)
+        } else {
+            e.manual_order(&req.market_id, Side::Buy, notional);
+            let msg = e
+                .state()
+                .journal
+                .iter()
+                .find(|j| j.market_id.as_deref() == Some(req.market_id.as_str()))
+                .map(|j| j.message.clone())
+                .unwrap_or_else(|| "order queued".into());
+            let s = e.state();
+            let _ = st.tx.send(serde_json::to_string(&s).unwrap_or_default());
+            (StatusCode::OK, msg)
+        }
+    };
+    (status, body)
 }
 
 #[derive(Debug, Deserialize)]

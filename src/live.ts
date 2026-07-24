@@ -38,6 +38,63 @@ export interface Preflight {
   checks: PreflightCheck[];
 }
 
+/** Per-market answer to "why hasn't this traded?". */
+export interface MarketDiag {
+  marketId: string;
+  symbol: string;
+  price: number;
+  bars: number;
+  barBacked: boolean;
+  quoteAgeSec: number;
+  hasPosition: boolean;
+  watchers: string[];
+  liveWatchers: number;
+  signal?: string;
+  /** First gate that would stop an order; absent means the path is clear. */
+  suppressed?: string;
+}
+
+/** Walk the live-routing chain for every Alpaca market. */
+export async function liveDiagnostics(): Promise<MarketDiag[]> {
+  switch (liveMode()) {
+    case "native":
+      return invoke<MarketDiag[]>("live_diagnostics");
+    case "server": {
+      const r = await fetch(`${serverUrl()}/api/live/diagnostics`);
+      if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      return (await r.json()) as MarketDiag[];
+    }
+    default:
+      throw new Error("Diagnostics need the desktop app or a connected backend.");
+  }
+}
+
+/**
+ * Send one small order to Alpaca through the real path.
+ *
+ * Every other route to a first live order waits on a strategy signal that may
+ * not fire for hours. This proves the whole pipeline with one click and a known
+ * outcome — and is the fastest way to discover a wrong key or endpoint. Still
+ * fully gated: kill switch, risk limits and the session check all apply.
+ */
+export async function sendTestOrder(marketId: string, notional: number): Promise<string> {
+  switch (liveMode()) {
+    case "native":
+      return invoke<string>("send_test_order", { marketId, notional });
+    case "server": {
+      const r = await fetch(`${serverUrl()}/api/live/test-order`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ marketId, notional }),
+      });
+      if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      return await r.text();
+    }
+    default:
+      throw new Error("Test orders need the desktop app or a connected backend.");
+  }
+}
+
 export function liveMode(): LiveMode {
   if (isTauri()) return "native";
   if (serverUrl()) return "server";
