@@ -609,7 +609,7 @@ export class PaperEngine implements EngineClient {
 
   // The browser paper engine never trades live — it can't reach a broker.
   liveStatus() {
-    return { armed: false, paper: true, dryRun: false, alpacaConnected: false, pending: 0 };
+    return { armed: false, paper: true, dryRun: false, extendedHours: false, alpacaConnected: false, pending: 0 };
   }
   /**
    * Nothing here is bar-backed: this build runs entirely on the in-browser

@@ -282,9 +282,9 @@ async fn tick_loop(state: AppState) {
 async fn refresh_broker_status(state: &AppState) {
     let paper = { state.engine.lock().unwrap().state().live.paper };
     let conn = alpaca_conn(paper);
-    let (clock, account) = tokio::join!(conn.clock(), conn.account());
+    let (session, account) = tokio::join!(conn.session(), conn.account());
 
-    let (Ok(clock), Ok(account)) = (clock, account) else {
+    let (Ok((clock, extended_open, session_end)), Ok(account)) = (session, account) else {
         // Leave the previous status in place; it ages out on its own and the
         // engine blocks live entries once it does. Failing to reach the broker
         // must never look like "the market is open".
@@ -294,6 +294,8 @@ async fn refresh_broker_status(state: &AppState) {
 
     let status = BrokerStatus {
         market_open: clock.is_open,
+        extended_open,
+        session_end,
         next_open: Some(clock.next_open.clone()),
         day_trade_limit_reached: account.day_trade_limit_reached(),
         restricted: account.is_restricted(),
@@ -332,7 +334,9 @@ async fn submit_live_order(state: &AppState, o: LiveOrderOut) {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(25.0);
-        let conn = alpaca_conn(o.paper).with_slippage_bps(slippage_bps);
+        let conn = alpaca_conn(o.paper)
+            .with_slippage_bps(slippage_bps)
+            .with_extended_hours(o.extended_hours);
         if !conn.is_live_ready() {
             state.engine.lock().unwrap().apply_live_reject(
                 &o.order_id,
@@ -816,6 +820,9 @@ struct LiveConfigReq {
     paper: bool,
     #[serde(default)]
     dry_run: bool,
+    /// Allow entries in the pre-market / after-hours session. Off unless asked.
+    #[serde(default)]
+    extended_hours: bool,
 }
 fn default_true() -> bool {
     true
@@ -828,7 +835,7 @@ async fn post_live_config(
 ) -> Json<EngineState> {
     let dto = {
         let mut e = st.engine.lock().unwrap();
-        e.set_live(req.armed, req.paper, req.dry_run);
+        e.set_live(req.armed, req.paper, req.dry_run, req.extended_hours);
         let s = e.state();
         let _ = st.tx.send(serde_json::to_string(&s).unwrap_or_default());
         s

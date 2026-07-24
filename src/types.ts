@@ -204,6 +204,10 @@ export interface LlmSignal {
 /** What the broker says about the session and the account. */
 export interface BrokerStatus {
   marketOpen: boolean;
+  /** Inside the pre-market / after-hours session (~04:00–20:00 ET). */
+  extendedOpen: boolean;
+  /** Exchange-local end of today's extended session, when one is running. */
+  sessionEnd?: string;
   nextOpen?: string;
   /** FINRA pattern-day-trader ceiling reached (3 day trades / 5 sessions under $25k). */
   dayTradeLimitReached: boolean;
@@ -218,6 +222,8 @@ export interface LiveStatus {
   armed: boolean;
   paper: boolean;
   dryRun: boolean;
+  /** Entries allowed during the pre-market / after-hours session. */
+  extendedHours: boolean;
   alpacaConnected: boolean;
   pending: number;
   broker?: BrokerStatus;

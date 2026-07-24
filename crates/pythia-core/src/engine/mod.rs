@@ -270,6 +270,13 @@ pub struct RiskDecision {
 #[serde(rename_all = "camelCase")]
 pub struct BrokerStatus {
     pub market_open: bool,
+    /// Inside the pre-market / after-hours session (typically 04:00–20:00 ET).
+    /// Always true during regular hours.
+    #[serde(default)]
+    pub extended_open: bool,
+    /// Exchange-local end of today's extended session, when one is running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_end: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_open: Option<String>,
     /// FINRA pattern-day-trader ceiling reached (3 day trades in 5 sessions
@@ -299,6 +306,10 @@ pub struct LiveStatus {
     pub paper: bool,
     /// Log intended orders but don't submit them anywhere.
     pub dry_run: bool,
+    /// Allow entries during the pre-market / after-hours session. Off by
+    /// default: those sessions are thin, spreads are wide, and a strategy
+    /// validated on regular-hours candles has no evidence behind it there.
+    pub extended_hours: bool,
     /// Alpaca has keys in the vault / env.
     pub alpaca_connected: bool,
     /// Live orders currently awaiting a broker response.
@@ -332,6 +343,9 @@ pub struct LiveOrderOut {
     /// it to tell a legitimate fractional *exit* from an illegal fractional
     /// *short entry*, which Alpaca refuses.
     pub reduce_only: bool,
+    /// Submit into the pre-market / after-hours session. Forces a whole-share
+    /// limit order — the only shape Alpaca accepts outside regular hours.
+    pub extended_hours: bool,
 }
 
 // ── AI overlay ──────────────────────────────────────────────────────────────
@@ -517,6 +531,7 @@ pub struct Engine {
     live_armed: bool,
     live_paper: bool,   // route to the broker's paper endpoint (real API, no real money)
     live_dry_run: bool, // log intended orders but never submit
+    live_extended_hours: bool, // allow entries in the pre/post-market session
     broker: Option<BrokerStatus>,        // session/account snapshot from the daemon
     ai: HashMap<String, AiView>,         // latest model view per market
     ai_policy: AiPolicy,
@@ -568,6 +583,7 @@ impl Engine {
             live_armed: false,
             live_paper: true,
             live_dry_run: false,
+            live_extended_hours: false,
             broker: None,
             ai: HashMap::new(),
             ai_policy: AiPolicy::default(),
@@ -716,10 +732,20 @@ impl Engine {
             return Some(format!("Alpaca account restricted: {why}"));
         }
         if !b.market_open {
-            return Some(match &b.next_open {
-                Some(t) => format!("US equity market closed (next open {t})"),
-                None => "US equity market closed".into(),
-            });
+            // Extended hours are a deliberate opt-in, not a fallback.
+            if self.live_extended_hours && b.extended_open {
+                // Trading the thin session — allowed, and journaled as such.
+            } else {
+                let hint = if b.extended_open && !self.live_extended_hours {
+                    " — extended-hours session is open; enable it on the Live page to trade it"
+                } else {
+                    ""
+                };
+                return Some(match &b.next_open {
+                    Some(t) => format!("US equity market closed (next open {t}){hint}"),
+                    None => format!("US equity market closed{hint}"),
+                });
+            }
         }
         if b.day_trade_limit_reached {
             return Some(
@@ -1403,6 +1429,10 @@ impl Engine {
             paper: self.live_paper,
             dry_run: self.live_dry_run,
             reduce_only: reduces,
+            // Only when the broker actually reports an extended session running
+            // — never inferred from the local clock.
+            extended_hours: self.live_extended_hours
+                && self.broker.as_ref().map(|b| !b.market_open && b.extended_open).unwrap_or(false),
         });
         let dest = if self.live_dry_run {
             "DRY-RUN"
@@ -1563,11 +1593,12 @@ impl Engine {
     // ── live execution control (Phase 2) ────────────────────────────────────
     /// Arm/disarm real order routing. Arming is a deliberate, logged, alerted
     /// action; disarming stops new live orders (in-flight ones still reconcile).
-    pub fn set_live(&mut self, armed: bool, paper: bool, dry_run: bool) {
+    pub fn set_live(&mut self, armed: bool, paper: bool, dry_run: bool, extended_hours: bool) {
         let was = self.live_armed;
         self.live_armed = armed;
         self.live_paper = paper;
         self.live_dry_run = dry_run;
+        self.live_extended_hours = extended_hours;
         let dest = if dry_run {
             "dry-run (nothing sent)"
         } else if paper {
@@ -1575,8 +1606,9 @@ impl Engine {
         } else {
             "REAL MONEY"
         };
+        let session = if extended_hours { " · extended hours enabled" } else { "" };
         if armed {
-            self.log(JournalKind::Risk, format!("LIVE ARMED — Alpaca orders route to {dest}"), None, None);
+            self.log(JournalKind::Risk, format!("LIVE ARMED — Alpaca orders route to {dest}{session}"), None, None);
             self.pending_alerts.push(format!("⚠ Pythia LIVE ARMED → {dest}"));
         } else if was {
             self.log(JournalKind::Risk, "LIVE DISARMED — back to paper simulation".into(), None, None);
@@ -1634,6 +1666,7 @@ impl Engine {
             armed: self.live_armed,
             paper: self.live_paper,
             dry_run: self.live_dry_run,
+            extended_hours: self.live_extended_hours,
             alpaca_connected: self.connected.contains(&Venue::Alpaca),
             pending: self.in_flight.len(),
             broker: self.broker.clone(),
@@ -2188,6 +2221,8 @@ mod tests {
     fn open_market(e: &Engine) -> BrokerStatus {
         BrokerStatus {
             market_open: true,
+            extended_open: true,
+            session_end: None,
             next_open: None,
             day_trade_limit_reached: false,
             restricted: None,
@@ -2210,7 +2245,7 @@ mod tests {
 
         // Arm live (paper endpoint). A manual Alpaca order now routes to the outbox
         // and does NOT open a position until the broker confirms.
-        e.set_live(true, true, false);
+        e.set_live(true, true, false, false);
         let status = open_market(&e);
         e.set_broker_status(status);
         e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
@@ -2235,7 +2270,7 @@ mod tests {
     #[test]
     fn live_entries_need_a_fresh_broker_status() {
         let mut e = Engine::new();
-        e.set_live(true, true, false);
+        e.set_live(true, true, false, false);
 
         // Never checked → refuse. "Probably open" is not a risk control.
         assert!(e.live_block_reason().is_some());
@@ -2260,7 +2295,7 @@ mod tests {
     #[test]
     fn a_closed_market_blocks_entries_but_never_exits() {
         let mut e = Engine::new();
-        e.set_live(true, true, false);
+        e.set_live(true, true, false, false);
         let mut closed = open_market(&e);
         closed.market_open = false;
         closed.next_open = Some("2026-07-27T13:30:00Z".into());
@@ -2295,9 +2330,64 @@ mod tests {
     }
 
     #[test]
+    fn extended_hours_is_opt_in_and_only_on_a_real_session() {
+        let mut e = Engine::new();
+        e.set_live(true, true, false, false); // armed, extended hours OFF
+        let mut after_hours = open_market(&e);
+        after_hours.market_open = false;
+        after_hours.extended_open = true;
+        after_hours.session_end = Some("20:00".into());
+        e.set_broker_status(after_hours.clone());
+
+        // Off by default — and the block says the session is available.
+        let why = e.live_block_reason().expect("blocked");
+        assert!(why.contains("closed"), "got: {why}");
+        assert!(why.contains("extended-hours session is open"), "got: {why}");
+
+        // Opted in → the same session is tradable.
+        e.set_live(true, true, false, true);
+        assert!(e.live_block_reason().is_none());
+
+        // Opted in, but the broker says no session is running → still blocked.
+        let mut overnight = after_hours;
+        overnight.extended_open = false;
+        e.set_broker_status(overnight);
+        assert!(
+            e.live_block_reason().is_some(),
+            "opting in must not override the broker saying the market is shut"
+        );
+    }
+
+    #[test]
+    fn extended_hours_orders_are_flagged_for_the_connector() {
+        let mut e = Engine::new();
+        e.set_live(true, true, false, true);
+        let mut after_hours = open_market(&e);
+        after_hours.market_open = false;
+        after_hours.extended_open = true;
+        e.set_broker_status(after_hours);
+
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let out = e.drain_live_orders();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].extended_hours, "the connector needs this to send a limit order");
+
+        // During regular hours the flag comes off, so entries go back to the
+        // cheaper notional path.
+        let mut e2 = Engine::new();
+        e2.set_live(true, true, false, true);
+        let status = open_market(&e2);
+        e2.set_broker_status(status);
+        e2.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let out2 = e2.drain_live_orders();
+        assert_eq!(out2.len(), 1);
+        assert!(!out2[0].extended_hours);
+    }
+
+    #[test]
     fn pdt_ceiling_blocks_new_entries() {
         let mut e = Engine::new();
-        e.set_live(true, true, false);
+        e.set_live(true, true, false, false);
         let mut pdt = open_market(&e);
         pdt.day_trade_limit_reached = true;
         e.set_broker_status(pdt);
