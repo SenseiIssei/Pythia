@@ -1,4 +1,7 @@
 import type {
+  AiPolicy,
+  AiSpend,
+  AiView,
   JournalEntry,
   LiveStatus,
   Market,
@@ -12,6 +15,10 @@ import type {
 } from "../types";
 
 const DISARMED: LiveStatus = { armed: false, paper: true, dryRun: false, alpacaConnected: false, pending: 0 };
+
+/** Overlay off, matching the Rust default — nothing AI-driven without opt-in. */
+const AI_OFF: AiPolicy = { enabled: false, ttlSec: 900, vetoConfidence: 0.7, maxBoost: 1.25 };
+const NO_SPEND: AiSpend = { calls: 0, inputTokens: 0, outputTokens: 0, errors: 0 };
 
 // The one interface the UI depends on. Two implementations satisfy it:
 //   · PaperEngine        — pure TypeScript, runs in the browser (dev / web app)
@@ -32,8 +39,17 @@ export interface EngineClient {
   getLimits(): RiskLimits;
   /** Recent close-price history per tradable market (for correlation analysis). */
   history(): Record<string, number[]>;
-  /** Live-execution status (arm state, endpoint, pending live orders). */
+  /** Live-execution status (arm state, endpoint, pending live orders, session gate). */
   liveStatus(): LiveStatus;
+  /**
+   * Market ids whose indicators run on real exchange candles rather than the
+   * simulator. Anything not in here is a demo, and the UI says so.
+   */
+  barBacked(): string[];
+  /** Latest model view per market (advisory). */
+  aiViews(): AiView[];
+  aiPolicy(): AiPolicy;
+  aiSpend(): AiSpend;
 
   toggleKill(): void;
   setLimits(l: Partial<RiskLimits>): void;
@@ -56,9 +72,13 @@ export interface EngineState {
   limits: RiskLimits;
   history: Record<string, number[]>;
   live: LiveStatus;
+  barBacked?: string[];
+  aiViews?: AiView[];
+  aiPolicy?: AiPolicy;
+  aiSpend?: AiSpend;
 }
 
-export { DISARMED };
+export { AI_OFF, DISARMED, NO_SPEND };
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

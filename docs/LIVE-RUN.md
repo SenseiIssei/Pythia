@@ -50,6 +50,35 @@ If it says *no keys*, the `.env` wasn't picked up (check you're in the repo root
 
 ---
 
+## 1b · Run the preflight (the fastest way to find a problem)
+
+With the server running, in a second terminal:
+
+```bash
+npm run preflight
+```
+
+Every way a live run fails silently produces the *same* symptom — an armed engine that places no
+trades. This tells you which one you actually have:
+
+```
+  ok   alpaca_keys        APCA_API_KEY_ID set (…J4XQ)
+  ok   alpaca_account     paper-api.alpaca.markets: ACTIVE · equity $100000.00 · buying power $200000.00
+  ok   pattern_day_trader 0 day trade(s) used; equity $100000.00
+  ok   market_session     open until 2026-07-24T20:00:00Z
+  ok   equity_quotes      5 symbol(s) on the 'iex' feed
+  ok   equity_candles     5 series, 1840 5Min bars — indicators need ≥30 per market
+  ok   crypto_candles     9 Kraken series (no keys needed)
+  ok   ai_provider        configured: anthropic
+  ok   live_gate          disarmed (paper only)
+```
+
+`equity_candles` is the one people miss. Strategies signal off **completed candles**, not the live
+quote — a market with fewer than 30 bars is skipped entirely, so a fresh start with a market-data
+plan that doesn't cover your feed will look armed and idle forever.
+
+---
+
 ## 2 · Verify the connection (read-only)
 
 **Live** page → **Test paper connection**. Expect:
@@ -93,10 +122,31 @@ That's the one strategy whose universe is the Alpaca tickers. From here:
 - crypto and Polymarket strategies keep simulating — they never touch a broker.
 
 ### Timing matters
-Market orders only fill during **US regular hours, 9:30–16:00 ET** (= **15:30–22:00 CEST**).
-Outside that window an order sits and then logs
-`LIVE order not filled: not filled within timeout (market closed, or still working)`.
-That's expected, not a bug.
+US regular hours are **9:30–16:00 ET** (= **15:30–22:00 CEST**). Pythia asks Alpaca's own clock
+rather than guessing, so holidays and half-days are handled.
+
+Outside that window, **new entries are refused up front** with a readable reason
+(`Live entry blocked for AAPL: US equity market closed (next open …)`) instead of being submitted
+and left to time out. The Live page shows the same reason in an amber banner.
+
+**Exits are never blocked.** Being unable to open a position is an inconvenience; being unable to
+close one is a real risk, so the session, day-trade and account checks apply to entries only.
+
+### What the order path actually does
+
+| | |
+|---|---|
+| **Entries** are sent as **dollar notional** | No client-side share rounding, and it cannot over-spend the sizing decision. |
+| **Exits** are sent as **shares** | "Sell exactly what I hold" can't be expressed in dollars. |
+| Whole-share orders go out as **marketable limits** (`PYTHIA_SLIPPAGE_BPS`, default 25bps) | A market order into a thin or gapped book fills at whatever is there. Set `0` for plain market orders. |
+| An order that doesn't fill in ~10s is **cancelled, then re-read** | The dangerous version is giving up while the order is still working: the broker fills it later and you hold an untracked position with no stop on it. |
+| **Partial fills are booked** | A cancel can lose the race to a partial fill. Those shares are real. |
+| Every submission carries a deterministic `client_order_id` | If the connection drops mid-POST, the retry resolves to the *same* broker order instead of opening a second one. |
+
+### Pattern Day Trader
+Under **$25,000** of equity, FINRA allows three day trades per five business days; a fourth flags
+the account and restricts it for 90 days. Pythia reads `daytrade_count` from Alpaca and blocks new
+entries at three. Above $25k the rule doesn't apply and the check goes quiet.
 
 ---
 
@@ -110,7 +160,13 @@ That's expected, not a bug.
 | **Alpaca dashboard** | the same order under *Recent Orders* — the ground truth |
 | Discord webhook | the arm event and every fill, if you configured one |
 
-If the two disagree, **Alpaca is right** — tell me and we'll reconcile.
+If the two disagree, **Alpaca is right** — and Pythia now acts on that. Every ~5 minutes (and at
+startup) it pulls `/v2/positions` and makes its own ledger match: quantities are corrected, positions
+the broker doesn't have are dropped, and positions it didn't know about are adopted. Each difference
+is written to the Journal as a `Reconciled — …` entry and pushed to your webhook.
+
+Stops are deliberately **cleared** on a corrected position and recomputed on the next tick — a stop
+sized for 10 shares means nothing once you hold 4.
 
 ---
 
@@ -131,5 +187,6 @@ Only after the paper run behaves for a while: put **live** Alpaca keys in, flip 
 endpoint to **Live**, and re-arm (the banner turns red and pulses). Everything else is identical —
 same risk manager, same kill switch, same gates.
 
-Known limitation: an order that's in flight during a restart isn't re-reconciled — it still executes
-at Alpaca, but Pythia won't record that one fill. Check the dashboard after any restart mid-session.
+An order in flight during a restart still executes at Alpaca. Pythia won't see that individual fill
+event, but the startup reconciliation picks the resulting position up within a few minutes and
+journals it — so you end up in the right state, just without that one order's history.

@@ -3,9 +3,11 @@
 //! updates without waiting for the next tick.
 
 use crate::state::AppState;
-use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
-use pythia_core::connectors::{MarketConnector, OrderRequest, OrderType, Side, Venue};
-use pythia_core::engine::{EngineState, LiveOrderOut, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector, AlpacaOrder, Sizing};
+use pythia_core::connectors::{MarketConnector, Side, Venue};
+use pythia_core::engine::{
+    AiPolicy, BrokerStatus, EngineState, LiveOrderOut, RiskLimits, StrategyConfig, StrategyState,
+};
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::vault;
 use std::collections::{BTreeMap, HashSet};
@@ -235,14 +237,24 @@ pub async fn submit_live_order(app: &AppHandle, o: LiveOrderOut) {
                     .apply_live_reject(&o.order_id, "Alpaca keys not in vault — add them in Settings");
             }
         } else {
-            let req = OrderRequest {
-                market_id: o.symbol.clone(),
-                side: o.side,
-                order_type: OrderType::Market,
-                qty: o.qty,
-                limit_price: None,
+            // Entries in dollars (no share rounding, no over-spend), exits in
+            // shares (only shares can say "close exactly what I hold").
+            let sizing = if o.reduce_only {
+                Sizing::Shares(o.qty)
+            } else {
+                Sizing::Notional((o.qty * o.ref_price * 100.0).round() / 100.0)
             };
-            let res = conn.place_order(req).await;
+            let order = AlpacaOrder {
+                symbol: o.symbol.clone(),
+                side: o.side,
+                sizing,
+                ref_price: o.ref_price,
+                // Deterministic, so a resubmission after a dropped connection
+                // resolves to the same broker order instead of a second one.
+                client_order_id: format!("pythia-{}", o.order_id),
+                reduce_only: o.reduce_only,
+            };
+            let res = conn.submit(&order).await;
             if let Some(st) = app.try_state::<AppState>() {
                 let mut e = st.engine.lock().unwrap();
                 match res {
@@ -251,6 +263,79 @@ pub async fn submit_live_order(app: &AppHandle, o: LiveOrderOut) {
                 }
             }
         }
+    }
+    push_state(app);
+}
+
+/// Turn the AI overlay on/off from the cockpit.
+#[tauri::command]
+pub fn set_ai_policy(
+    app: AppHandle,
+    app_state: State<AppState>,
+    enabled: bool,
+    ttl_sec: Option<u64>,
+    veto_confidence: Option<f64>,
+    max_boost: Option<f64>,
+) {
+    let d = AiPolicy::default();
+    let policy = AiPolicy {
+        enabled,
+        ttl_sec: ttl_sec.unwrap_or(d.ttl_sec).clamp(30, 86_400),
+        veto_confidence: veto_confidence.unwrap_or(d.veto_confidence).clamp(0.0, 1.0),
+        // Hard ceiling: an agreeing model may nudge size, never multiply it.
+        max_boost: max_boost.unwrap_or(d.max_boost).clamp(1.0, 1.5),
+    };
+    app_state.engine.lock().unwrap().set_ai_policy(policy);
+    push_state(&app);
+}
+
+/// Refresh the broker session/account snapshot the engine gates live entries on.
+/// Called from the daemon loop; not a Tauri command.
+pub async fn refresh_broker_status(app: &AppHandle) {
+    let keys = vault::get("alpaca").unwrap_or_default();
+    if keys.is_empty() {
+        return;
+    }
+    let paper = app
+        .try_state::<AppState>()
+        .map(|st| st.engine.lock().unwrap().state().live.paper)
+        .unwrap_or(true);
+    let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), paper);
+    let (clock, account) = tokio::join!(conn.clock(), conn.account());
+    let (Ok(clock), Ok(account)) = (clock, account) else {
+        // Deliberately leave the old status to age out — an unreachable broker
+        // must never be read as "the market is open".
+        return;
+    };
+    if let Some(st) = app.try_state::<AppState>() {
+        st.engine.lock().unwrap().set_broker_status(BrokerStatus {
+            market_open: clock.is_open,
+            next_open: Some(clock.next_open.clone()),
+            day_trade_limit_reached: account.day_trade_limit_reached(),
+            restricted: account.is_restricted(),
+            equity: account.equity_f64(),
+            buying_power: account.buying_power_f64(),
+            checked_at: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+}
+
+/// Make the engine's position ledger match the broker's. Daemon-driven.
+pub async fn reconcile_alpaca(app: &AppHandle) {
+    let keys = vault::get("alpaca").unwrap_or_default();
+    if keys.is_empty() {
+        return;
+    }
+    let paper = app
+        .try_state::<AppState>()
+        .map(|st| st.engine.lock().unwrap().state().live.paper)
+        .unwrap_or(true);
+    let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), paper);
+    let Ok(positions) = conn.positions().await else { return };
+    let rows: Vec<(String, f64, f64)> =
+        positions.iter().map(|p| (p.symbol.clone(), p.qty_f64(), p.avg_price_f64())).collect();
+    if let Some(st) = app.try_state::<AppState>() {
+        st.engine.lock().unwrap().reconcile_alpaca(&rows);
     }
     push_state(app);
 }

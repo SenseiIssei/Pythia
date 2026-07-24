@@ -9,7 +9,7 @@ pub mod risk;
 pub mod strategies;
 
 use crate::connectors::{OrderType, Side, Venue};
-use crate::marketdata::{RealCrypto, RealEquity, RealPrediction};
+use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -262,6 +262,31 @@ pub struct RiskDecision {
     pub reason: Option<String>,
 }
 
+/// What the broker says about the session and the account, refreshed by the
+/// daemon. The engine is synchronous and does no I/O, so it cannot ask — but it
+/// must not route a live order without an answer, so a stale or absent status
+/// blocks live routing rather than defaulting to "probably fine".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerStatus {
+    pub market_open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_open: Option<String>,
+    /// FINRA pattern-day-trader ceiling reached (3 day trades in 5 sessions
+    /// under $25k of equity). A 4th flags the account and locks it for 90 days.
+    pub day_trade_limit_reached: bool,
+    /// Set when the account itself refuses orders (blocked, not yet active…).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restricted: Option<String>,
+    pub equity: f64,
+    pub buying_power: f64,
+    /// Epoch millis of the last successful refresh.
+    pub checked_at: i64,
+}
+
+/// How old a [`BrokerStatus`] may be before live routing refuses to trust it.
+const BROKER_STATUS_MAX_AGE_MS: i64 = 5 * 60 * 1000;
+
 /// Live-execution status surfaced to the UI. Live routing is OFF until the user
 /// explicitly arms it (typed confirmation), and only Alpaca orders from a Live
 /// strategy are ever sent to a real venue.
@@ -278,6 +303,13 @@ pub struct LiveStatus {
     pub alpaca_connected: bool,
     /// Live orders currently awaiting a broker response.
     pub pending: usize,
+    /// Last broker session/account snapshot, if one has been fetched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker: Option<BrokerStatus>,
+    /// Why live routing would refuse an equity order right now — `None` when
+    /// the path is clear. Surfaced so the UI can explain an idle armed engine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 
 /// One live order handed to the async daemon to submit. The daemon is the only
@@ -296,10 +328,77 @@ pub struct LiveOrderOut {
     /// Snapshot of the arm config at enqueue time.
     pub paper: bool,
     pub dry_run: bool,
+    /// This order reduces or closes an existing position. The connector needs
+    /// it to tell a legitimate fractional *exit* from an illegal fractional
+    /// *short entry*, which Alpaca refuses.
+    pub reduce_only: bool,
+}
+
+// ── AI overlay ──────────────────────────────────────────────────────────────
+//
+// The hard rule, and the reason this is a multiplier rather than a strategy:
+// **a model may shrink or veto a trade, never create one.** Every order still
+// originates from a rule that can be backtested, and still passes the risk
+// manager. An LLM cannot be walk-forward validated, its output is not
+// stationary across model versions, and it will produce a confident answer to a
+// question it has no edge on. Letting one pull the trigger would mean trading
+// an unmeasurable, unreproducible signal with real money.
+
+/// One model's view of one market, with the timestamp that decides its decay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiView {
+    pub market_id: String,
+    /// "long" | "short" | "neutral"
+    pub direction: String,
+    pub probability: f64,
+    pub confidence: f64,
+    pub rationale: String,
+    pub model: String,
+    pub ts: i64,
+    pub latency_ms: u64,
+}
+
+/// How much authority the overlay is granted. Off by default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPolicy {
+    pub enabled: bool,
+    /// A view older than this is ignored outright. Opinions about a market go
+    /// stale faster than most people expect.
+    pub ttl_sec: u64,
+    /// Confidence at or above which active disagreement blocks the entry.
+    pub veto_confidence: f64,
+    /// Ceiling on the size multiplier when the model agrees. Deliberately
+    /// modest — an agreeing model is weak evidence, not a green light.
+    pub max_boost: f64,
+}
+
+impl Default for AiPolicy {
+    fn default() -> Self {
+        Self { enabled: false, ttl_sec: 900, veto_confidence: 0.7, max_boost: 1.25 }
+    }
+}
+
+/// Running cost of the overlay, so the bill is visible in the cockpit rather
+/// than discovered on an invoice.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSpend {
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub errors: u64,
 }
 
 /// The full state pushed to the UI every tick.
+///
+/// `camelCase` on the wire, like every other DTO here. The pre-existing fields
+/// are all single lowercase words, so this is a no-op for them — it exists for
+/// the multi-word additions below, which the TypeScript client reads by their
+/// camelCase names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineState {
     pub portfolio: PortfolioSnapshot,
     pub markets: Vec<Market>,
@@ -310,6 +409,15 @@ pub struct EngineState {
     pub limits: RiskLimits,
     pub history: HashMap<String, Vec<f64>>, // recent closes per tradable market
     pub live: LiveStatus,
+    /// Market ids whose indicators run on real candles rather than the simulator.
+    #[serde(default)]
+    pub bar_backed: Vec<String>,
+    #[serde(default)]
+    pub ai_views: Vec<AiView>,
+    #[serde(default)]
+    pub ai_policy: AiPolicy,
+    #[serde(default)]
+    pub ai_spend: AiSpend,
 }
 
 // ── persistence (survive restarts) ─────────────────────────────────────────
@@ -327,6 +435,11 @@ pub struct PersistedPosition {
     pub target: f64,
     #[serde(default)]
     pub trail_ref: f64,
+    /// Opened through the broker with real shares behind it. Must survive a
+    /// restart: forgetting it would make the engine close a *live* position with
+    /// a simulated fill, leaving the real shares sitting at Alpaca unmanaged.
+    #[serde(default)]
+    pub live: bool,
 }
 
 /// The raw engine state written to disk so the daemon resumes exactly where it
@@ -370,6 +483,18 @@ pub struct Engine {
     markets: Vec<Market>,
     sim: HashMap<String, SimParam>,
     history: HashMap<String, Vec<f64>>, // rolling close-price history per market
+    /// Real candles per market, oldest first. Present only for markets fed by a
+    /// live bar feed; the source of truth for indicators on those markets.
+    ohlc: HashMap<String, Vec<Ohlc>>,
+    /// Markets whose `history` is real candles rather than the tick simulator.
+    /// The tick loop must never append to these — mixing a 1.5s random walk into
+    /// a 5-minute candle series produces indicators that measure nothing.
+    bar_backed: std::collections::HashSet<String>,
+    /// Open time of the newest *closed* bar per market, for new-bar detection.
+    last_bar_ts: HashMap<String, i64>,
+    /// Bar we last emitted a signal on, per market — throttles bar-backed
+    /// strategies to at most one entry per candle.
+    signalled_bar: HashMap<String, i64>,
     real_ids: std::collections::HashSet<String>, // markets whose price came from a live feed
     positions: HashMap<String, PositionInternal>,
     orders: Vec<Order>,
@@ -392,6 +517,10 @@ pub struct Engine {
     live_armed: bool,
     live_paper: bool,   // route to the broker's paper endpoint (real API, no real money)
     live_dry_run: bool, // log intended orders but never submit
+    broker: Option<BrokerStatus>,        // session/account snapshot from the daemon
+    ai: HashMap<String, AiView>,         // latest model view per market
+    ai_policy: AiPolicy,
+    ai_spend: AiSpend,
     pending_live: Vec<LiveOrderOut>,     // outbox drained by the async daemon
     in_flight: std::collections::HashSet<String>, // market_ids with a live order awaiting a broker response
     tick_count: u64,
@@ -414,6 +543,10 @@ impl Engine {
             markets,
             sim,
             history,
+            ohlc: HashMap::new(),
+            bar_backed: Default::default(),
+            last_bar_ts: HashMap::new(),
+            signalled_bar: HashMap::new(),
             real_ids: Default::default(),
             positions: HashMap::new(),
             orders: Vec::new(),
@@ -435,6 +568,10 @@ impl Engine {
             live_armed: false,
             live_paper: true,
             live_dry_run: false,
+            broker: None,
+            ai: HashMap::new(),
+            ai_policy: AiPolicy::default(),
+            ai_spend: AiSpend::default(),
             pending_live: Vec::new(),
             in_flight: std::collections::HashSet::new(),
             tick_count: 0,
@@ -508,6 +645,163 @@ impl Engine {
         }
     }
 
+    /// Install real candle history for a set of markets.
+    ///
+    /// **The final bar is dropped.** Both Alpaca and Kraken include the current,
+    /// still-forming candle at the end of the series. Signalling on it means
+    /// acting on a partial bar whose high, low and close all still move — the
+    /// classic way to build a backtest that cannot be reproduced live. Only
+    /// completed candles reach the indicators.
+    pub fn apply_bars(&mut self, series: &[BarSeries]) {
+        let mut fresh = 0usize;
+        for s in series {
+            if s.bars.len() < 2 {
+                continue; // nothing usable once the forming bar is dropped
+            }
+            let closed = &s.bars[..s.bars.len() - 1];
+            let Some(newest) = closed.last().map(|b| b.ts) else { continue };
+
+            if self.last_bar_ts.get(&s.id) != Some(&newest) {
+                fresh += 1;
+            }
+            self.last_bar_ts.insert(s.id.clone(), newest);
+            self.history.insert(s.id.clone(), closed.iter().map(|b| b.close).collect());
+            self.ohlc.insert(s.id.clone(), closed.to_vec());
+            self.bar_backed.insert(s.id.clone());
+        }
+        if fresh > 0 {
+            self.log(
+                JournalKind::System,
+                format!("Candle feed · {fresh} market(s) advanced to a new bar"),
+                None,
+                None,
+            );
+        }
+    }
+
+    /// True once a market's indicators are computed from real candles rather
+    /// than the simulator. The UI badges this so nobody mistakes a simulated
+    /// equity curve for a real one.
+    pub fn is_bar_backed(&self, market_id: &str) -> bool {
+        self.bar_backed.contains(market_id)
+    }
+
+    /// Record the broker's session/account snapshot. Live equity routing is
+    /// blocked while this is absent or stale — see [`Engine::live_block_reason`].
+    pub fn set_broker_status(&mut self, status: BrokerStatus) {
+        let was_open = self.broker.as_ref().map(|b| b.market_open);
+        if was_open == Some(false) && status.market_open {
+            self.log(JournalKind::System, "US equity market OPEN".into(), None, None);
+        } else if was_open == Some(true) && !status.market_open {
+            self.log(JournalKind::System, "US equity market CLOSED".into(), None, None);
+        }
+        if let Some(why) = &status.restricted {
+            self.log(JournalKind::Risk, format!("Alpaca account restricted: {why}"), None, None);
+        }
+        self.broker = Some(status);
+    }
+
+    /// Why a live *equity entry* would be refused right now, or `None` when the
+    /// path is clear. Exits are deliberately exempt from the day-trade and
+    /// session checks below — being unable to close a position you already hold
+    /// is far more dangerous than being unable to open one.
+    pub fn live_block_reason(&self) -> Option<String> {
+        let Some(b) = &self.broker else {
+            return Some("broker status unknown — waiting for the first account check".into());
+        };
+        if self.now() - b.checked_at > BROKER_STATUS_MAX_AGE_MS {
+            return Some("broker status is stale — cannot confirm the market is open".into());
+        }
+        if let Some(why) = &b.restricted {
+            return Some(format!("Alpaca account restricted: {why}"));
+        }
+        if !b.market_open {
+            return Some(match &b.next_open {
+                Some(t) => format!("US equity market closed (next open {t})"),
+                None => "US equity market closed".into(),
+            });
+        }
+        if b.day_trade_limit_reached {
+            return Some(
+                "pattern-day-trader limit reached (3 day trades / 5 sessions under $25k) — new entries blocked".into(),
+            );
+        }
+        None
+    }
+
+    /// Adopt the broker's position book as truth.
+    ///
+    /// The broker is authoritative, always: it holds the shares. Any divergence
+    /// means our ledger is wrong — after a crash, a fill we never saw, or a
+    /// manual trade in Alpaca's own UI. Silently trading on a stale local view
+    /// is how a "flat" bot ends up doubling a position. Returns a
+    /// human-readable diff for the journal and alerts.
+    pub fn reconcile_alpaca(&mut self, broker: &[(String, f64, f64)]) -> Vec<String> {
+        let mut diffs = Vec::new();
+        let mut seen: std::collections::HashSet<String> = Default::default();
+
+        for (symbol, qty, avg) in broker {
+            let id = format!("alpaca:{symbol}");
+            seen.insert(id.clone());
+            match self.positions.get_mut(&id) {
+                Some(p) => {
+                    if (p.qty - qty).abs() > 1e-6 {
+                        diffs.push(format!("{symbol}: ledger {:.4} → broker {qty:.4}", p.qty));
+                        p.qty = *qty;
+                        p.avg_price = *avg;
+                        // Stops were sized for the old quantity; recompute on the
+                        // next tick rather than trusting stale levels.
+                        p.stop = 0.0;
+                        p.target = 0.0;
+                        p.trail_ref = *avg;
+                    }
+                    p.live = true;
+                }
+                None => {
+                    diffs.push(format!("{symbol}: broker holds {qty:.4} the engine did not know about"));
+                    let venue_symbol = symbol.clone();
+                    self.positions.insert(
+                        id,
+                        PositionInternal {
+                            venue: Venue::Alpaca,
+                            symbol: venue_symbol,
+                            qty: *qty,
+                            avg_price: *avg,
+                            strategy_id: "manual".into(),
+                            stop: 0.0,
+                            target: 0.0,
+                            trail_ref: *avg,
+                            live: true,
+                        },
+                    );
+                }
+            }
+        }
+
+        // Anything we think we hold at Alpaca that the broker does not.
+        let ghosts: Vec<String> = self
+            .positions
+            .iter()
+            .filter(|(id, p)| p.venue == Venue::Alpaca && p.qty.abs() > 1e-9 && !seen.contains(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ghosts {
+            if let Some(p) = self.positions.remove(&id) {
+                diffs.push(format!("{}: engine held {:.4}, broker holds none — dropped", p.symbol, p.qty));
+            }
+        }
+
+        if diffs.is_empty() {
+            self.log(JournalKind::System, "Alpaca reconciliation: ledger matches the broker".into(), None, None);
+        } else {
+            for d in &diffs {
+                self.log(JournalKind::Risk, format!("Reconciled — {d}"), None, None);
+            }
+            self.pending_alerts.push(format!("⚠ Pythia reconciled {} position difference(s) with Alpaca", diffs.len()));
+        }
+        diffs
+    }
+
     pub fn apply_polymarket(&mut self, feed: &[RealPrediction]) {
         if feed.is_empty() {
             return;
@@ -544,8 +838,19 @@ impl Engine {
         self.tick_count += 1;
         let now = self.now();
 
-        // advance simulated markets (real-fed markets random-walk gently between fetches)
-        let ids: Vec<String> = self.markets.iter().map(|m| m.id.clone()).collect();
+        // Advance the simulator — and ONLY the simulator.
+        //
+        // Real-fed markets used to random-walk between fetches to keep the UI
+        // lively. That invents price action: it drifts the mark away from the
+        // real quote, prints P&L that never happened, and trips ATR stops on
+        // moves the market did not make. A real feed that looks frozen between
+        // refreshes is telling the truth.
+        let ids: Vec<String> = self
+            .markets
+            .iter()
+            .filter(|m| !self.real_ids.contains(&m.id))
+            .map(|m| m.id.clone())
+            .collect();
         for id in ids {
             let shock = {
                 let (drift, vol) = self
@@ -570,10 +875,19 @@ impl Engine {
             }
         }
 
-        // append the new close to each market's rolling history
-        for m in &self.markets {
-            let h = self.history.entry(m.id.clone()).or_default();
-            h.push(m.price);
+        // Append the new close to each SIMULATED market's rolling history.
+        // Bar-backed markets own their series outright (see `apply_bars`) —
+        // appending a tick to a 5-minute candle series would make every
+        // indicator measure the tick loop instead of the market.
+        let sim_ids: Vec<(String, f64)> = self
+            .markets
+            .iter()
+            .filter(|m| !self.bar_backed.contains(&m.id))
+            .map(|m| (m.id.clone(), m.price))
+            .collect();
+        for (id, price) in sim_ids {
+            let h = self.history.entry(id).or_default();
+            h.push(price);
             if h.len() > 260 {
                 let excess = h.len() - 260;
                 h.drain(0..excess);
@@ -664,6 +978,16 @@ impl Engine {
                     // every opposing signal. This kills the fee-bleeding churn.
                     if self.positions.contains_key(&intent.market_id) {
                         continue;
+                    }
+                    // On a bar-backed market, act at most once per closed candle.
+                    // The tick loop runs every 1.5s but the data only changes when
+                    // a bar closes — re-firing in between is the same signal
+                    // resubmitted, and it is how a "signal" turns into a fee bill.
+                    if let Some(bar_ts) = self.last_bar_ts.get(&intent.market_id).copied() {
+                        if self.signalled_bar.get(&intent.market_id) == Some(&bar_ts) {
+                            continue;
+                        }
+                        self.signalled_bar.insert(intent.market_id.clone(), bar_ts);
                     }
                     // don't fight a clear primary trend (60-bar ROC)
                     if let Some(lt) = self.history.get(&intent.market_id).and_then(|h| indicators::roc(h, 60)) {
@@ -797,7 +1121,15 @@ impl Engine {
         if m.kind == MarketKind::Prediction {
             return (0.0, 0.0); // ATR stops don't apply to 0..1 probabilities
         }
-        let atr = self.history.get(&m.id).and_then(|h| indicators::atr_proxy(h, 14)).unwrap_or(0.0);
+        // Prefer true ATR from real candles — it accounts for overnight gaps,
+        // which a close-to-close proxy cannot see and which are exactly what
+        // sweeps an equity stop that looked comfortable at yesterday's close.
+        let atr = self
+            .ohlc
+            .get(&m.id)
+            .and_then(|bars| indicators::atr(bars, 14))
+            .or_else(|| self.history.get(&m.id).and_then(|h| indicators::atr_proxy(h, 14)))
+            .unwrap_or(0.0);
         if atr <= 0.0 {
             return (0.0, 0.0);
         }
@@ -827,6 +1159,17 @@ impl Engine {
         let universe_n = self.strategies[strat_idx].universe.len().max(1) as f64;
         let strength = intent.size.max(intent.confidence).clamp(0.3, 1.0);
         let deploy = (budget / universe_n) * strength * 1.5 * (self.limits.kelly_fraction / 0.25).clamp(0.25, 3.0);
+        // AI overlay: shrink, boost slightly, or veto — applied to a trade the
+        // rules already decided to make.
+        let (ai_mult, ai_note) = self.ai_multiplier(&m.id, intent.side);
+        if let Some(note) = ai_note {
+            self.log(JournalKind::Signal, note, Some(sid.clone()), Some(m.id.clone()));
+        }
+        if ai_mult <= 0.0 {
+            return;
+        }
+        let deploy = deploy * ai_mult;
+
         let mut qty_wanted = (deploy / price).max(0.0);
         // volatility-targeted sizing: scale toward a target per-bar volatility
         if self.limits.vol_target_pct > 0.0 {
@@ -1018,6 +1361,32 @@ impl Engine {
         if self.in_flight.contains(&m.id) {
             return;
         }
+
+        // Session / account gate. An *entry* into a closed or restricted market
+        // is refused outright; a reduction of an existing position is always
+        // allowed through, because refusing to let a position close is the more
+        // dangerous failure. `dry_run` bypasses the gate — nothing is sent, and
+        // being able to rehearse outside market hours is the point of dry-run.
+        let reduces = self
+            .positions
+            .get(&m.id)
+            .map(|p| p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell))
+            .unwrap_or(false);
+        if !self.live_dry_run && !reduces {
+            if let Some(reason) = self.live_block_reason() {
+                let sid = self.strategies[strat_idx].id.clone();
+                let order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+                self.orders.insert(0, order);
+                self.log(
+                    JournalKind::Reject,
+                    format!("Live entry blocked for {}: {reason}", m.symbol),
+                    Some(sid),
+                    Some(m.id.clone()),
+                );
+                return;
+            }
+        }
+
         let sid = self.strategies[strat_idx].id.clone();
         let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
         let order_id = order.id.clone();
@@ -1033,6 +1402,7 @@ impl Engine {
             strategy_id: sid.clone(),
             paper: self.live_paper,
             dry_run: self.live_dry_run,
+            reduce_only: reduces,
         });
         let dest = if self.live_dry_run {
             "DRY-RUN"
@@ -1047,6 +1417,147 @@ impl Engine {
             Some(sid),
             Some(m.id.clone()),
         );
+    }
+
+    // ── AI overlay ──────────────────────────────────────────────────────────
+
+    pub fn set_ai_policy(&mut self, policy: AiPolicy) {
+        let on = policy.enabled;
+        self.ai_policy = policy;
+        self.log(
+            JournalKind::System,
+            if on {
+                "AI overlay ENABLED — model views may shrink or veto entries (never create them)".into()
+            } else {
+                "AI overlay disabled".to_string()
+            },
+            None,
+            None,
+        );
+    }
+
+    /// Record a fresh model view and its cost.
+    pub fn apply_ai_view(&mut self, view: AiView, input_tokens: u64, output_tokens: u64) {
+        self.ai_spend.calls += 1;
+        self.ai_spend.input_tokens += input_tokens;
+        self.ai_spend.output_tokens += output_tokens;
+        let msg = format!(
+            "AI {} · {} p={:.2} conf={:.2} ({}ms): {}",
+            view.model,
+            view.direction,
+            view.probability,
+            view.confidence,
+            view.latency_ms,
+            view.rationale.chars().take(160).collect::<String>()
+        );
+        let mid = view.market_id.clone();
+        self.ai.insert(mid.clone(), view);
+        self.log(JournalKind::Signal, msg, None, Some(mid));
+    }
+
+    /// Note a failed model call so a silently broken overlay is visible.
+    pub fn record_ai_error(&mut self, why: &str) {
+        self.ai_spend.errors += 1;
+        self.log(JournalKind::System, format!("AI overlay error: {why}"), None, None);
+    }
+
+    /// The size multiplier the overlay applies to an entry, plus a reason to
+    /// journal when it is not 1.0. Returns 0.0 for a veto.
+    fn ai_multiplier(&self, market_id: &str, side: Side) -> (f64, Option<String>) {
+        if !self.ai_policy.enabled {
+            return (1.0, None);
+        }
+        let Some(v) = self.ai.get(market_id) else { return (1.0, None) };
+        if self.now() - v.ts > (self.ai_policy.ttl_sec as i64) * 1000 {
+            return (1.0, None); // an opinion past its shelf life is not an opinion
+        }
+        let agrees = match (v.direction.as_str(), side) {
+            ("long", Side::Buy) | ("short", Side::Sell) => Some(true),
+            ("long", Side::Sell) | ("short", Side::Buy) => Some(false),
+            _ => None, // neutral — no view worth acting on either way
+        };
+        match agrees {
+            None => (1.0, None),
+            Some(true) => {
+                let boost = 1.0 + (self.ai_policy.max_boost - 1.0) * v.confidence.clamp(0.0, 1.0);
+                (boost, Some(format!("AI agrees (conf {:.2}) — size ×{boost:.2}", v.confidence)))
+            }
+            Some(false) if v.confidence >= self.ai_policy.veto_confidence => (
+                0.0,
+                Some(format!("AI vetoes: {} at conf {:.2} — {}", v.direction, v.confidence, v.rationale)),
+            ),
+            Some(false) => {
+                let cut = (1.0 - 0.5 * v.confidence.clamp(0.0, 1.0)).max(0.1);
+                (cut, Some(format!("AI disagrees (conf {:.2}) — size ×{cut:.2}", v.confidence)))
+            }
+        }
+    }
+
+    /// Build the compact market brief handed to a model. Lives here so the
+    /// desktop and server ask identical questions, and so the model only ever
+    /// sees real candle-derived numbers — never simulator noise.
+    pub fn ai_context(&self, market_id: &str) -> Option<String> {
+        let m = self.markets.iter().find(|m| m.id == market_id)?;
+        let h = self.history.get(market_id)?;
+        if h.len() < 30 {
+            return None;
+        }
+        let mut out = String::new();
+        out.push_str(&format!("Market: {} ({:?} on {:?})\n", m.symbol, m.kind, m.venue));
+        out.push_str(&format!("Last price: {:.4}\n", m.price));
+        out.push_str(&format!("24h change: {:+.2}%\n", m.change24h * 100.0));
+        if let Some(r) = m.regime {
+            out.push_str(&format!(
+                "Regime: {:?} (efficiency ratio {:.2})\n",
+                r,
+                m.trend_strength.unwrap_or(0.0)
+            ));
+        }
+        out.push_str(&format!(
+            "Data source: {}\n",
+            if self.bar_backed.contains(market_id) { "real exchange candles" } else { "SIMULATED — treat with suspicion" }
+        ));
+        for (label, v) in [
+            ("RSI(14)", indicators::rsi(h, 14)),
+            ("EMA(9)", indicators::ema(h, 9)),
+            ("EMA(21)", indicators::ema(h, 21)),
+            ("ROC(20)", indicators::roc(h, 20).map(|r| r * 100.0)),
+            ("Z-score(20)", indicators::zscore(h, 20)),
+        ] {
+            if let Some(v) = v {
+                out.push_str(&format!("{label}: {v:.4}\n"));
+            }
+        }
+        let recent: Vec<String> =
+            h.iter().rev().take(20).rev().map(|c| format!("{c:.4}")).collect();
+        out.push_str(&format!("Last 20 closes (oldest→newest): {}\n", recent.join(", ")));
+        if let Some(p) = self.positions.get(market_id) {
+            out.push_str(&format!(
+                "Current position: {:+.4} @ {:.4} (unrealized {:+.2})\n",
+                p.qty,
+                p.avg_price,
+                (m.price - p.avg_price) * p.qty
+            ));
+        } else {
+            out.push_str("Current position: flat\n");
+        }
+        Some(out)
+    }
+
+    /// Markets worth spending a model call on: tradable, bar-backed, and with
+    /// enough history to describe. Ordered so the daemon can round-robin.
+    pub fn ai_candidates(&self) -> Vec<String> {
+        self.markets
+            .iter()
+            .filter(|m| m.kind != MarketKind::Prediction)
+            .filter(|m| self.bar_backed.contains(&m.id))
+            .filter(|m| self.history.get(&m.id).map(|h| h.len() >= 30).unwrap_or(false))
+            .map(|m| m.id.clone())
+            .collect()
+    }
+
+    pub fn ai_enabled(&self) -> bool {
+        self.ai_policy.enabled
     }
 
     // ── live execution control (Phase 2) ────────────────────────────────────
@@ -1125,6 +1636,10 @@ impl Engine {
             dry_run: self.live_dry_run,
             alpaca_connected: self.connected.contains(&Venue::Alpaca),
             pending: self.in_flight.len(),
+            broker: self.broker.clone(),
+            // Only meaningful once armed; before that the answer is always
+            // "nothing is going live anyway".
+            blocked_reason: if self.live_armed { self.live_block_reason() } else { None },
         }
     }
 
@@ -1301,6 +1816,7 @@ impl Engine {
                             stop: p.stop,
                             target: p.target,
                             trail_ref: p.trail_ref,
+                            live: p.live,
                         },
                     )
                 })
@@ -1333,7 +1849,9 @@ impl Engine {
                         stop: pp.stop,
                         target: pp.target,
                         trail_ref: pp.trail_ref,
-                        live: false, // restored positions are treated as paper until re-armed
+                        // Restored as-saved; startup reconciliation against the
+                        // broker is what confirms or corrects it.
+                        live: pp.live,
                     },
                 )
             })
@@ -1409,6 +1927,10 @@ impl Engine {
                 })
                 .collect(),
             live: self.live_status(),
+            bar_backed: self.bar_backed.iter().cloned().collect(),
+            ai_views: self.ai.values().cloned().collect(),
+            ai_policy: self.ai_policy.clone(),
+            ai_spend: self.ai_spend.clone(),
         }
     }
 
@@ -1662,6 +2184,19 @@ mod tests {
         assert!(e.orders.iter().any(|o| o.status == OrderStatus::Rejected));
     }
 
+    /// A permissive broker snapshot: market open, account healthy, just checked.
+    fn open_market(e: &Engine) -> BrokerStatus {
+        BrokerStatus {
+            market_open: true,
+            next_open: None,
+            day_trade_limit_reached: false,
+            restricted: None,
+            equity: 100_000.0,
+            buying_power: 200_000.0,
+            checked_at: e.now(),
+        }
+    }
+
     #[test]
     fn live_routing_only_alpaca_when_armed() {
         let mut e = Engine::new();
@@ -1676,6 +2211,8 @@ mod tests {
         // Arm live (paper endpoint). A manual Alpaca order now routes to the outbox
         // and does NOT open a position until the broker confirms.
         e.set_live(true, true, false);
+        let status = open_market(&e);
+        e.set_broker_status(status);
         e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
         let out = e.drain_live_orders();
         assert_eq!(out.len(), 1);
@@ -1693,5 +2230,304 @@ mod tests {
         e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty());
         assert!(e.positions.contains_key("crypto:BTC/USD"));
+    }
+
+    #[test]
+    fn live_entries_need_a_fresh_broker_status() {
+        let mut e = Engine::new();
+        e.set_live(true, true, false);
+
+        // Never checked → refuse. "Probably open" is not a risk control.
+        assert!(e.live_block_reason().is_some());
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty(), "no order may leave without a session check");
+        assert!(e.orders.iter().any(|o| o.status == OrderStatus::Rejected));
+
+        // Checked, but hours ago → still refuse.
+        let mut stale = open_market(&e);
+        stale.checked_at = e.now() - 30 * 60 * 1000;
+        e.set_broker_status(stale);
+        assert!(e.live_block_reason().unwrap().contains("stale"));
+
+        // Fresh and open → through.
+        let ok = open_market(&e);
+        e.set_broker_status(ok);
+        assert!(e.live_block_reason().is_none());
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert_eq!(e.drain_live_orders().len(), 1);
+    }
+
+    #[test]
+    fn a_closed_market_blocks_entries_but_never_exits() {
+        let mut e = Engine::new();
+        e.set_live(true, true, false);
+        let mut closed = open_market(&e);
+        closed.market_open = false;
+        closed.next_open = Some("2026-07-27T13:30:00Z".into());
+        e.set_broker_status(closed);
+
+        // Entry refused, with a reason a human can act on.
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty());
+        assert!(e
+            .journal
+            .iter()
+            .any(|j| j.message.contains("market closed") && j.message.contains("2026-07-27")));
+
+        // But an existing live position can still be closed — being stuck long
+        // through a halt is worse than the order being late.
+        e.positions.insert(
+            "alpaca:AAPL".into(),
+            PositionInternal {
+                venue: Venue::Alpaca,
+                symbol: "AAPL".into(),
+                qty: 5.0,
+                avg_price: 220.0,
+                strategy_id: "manual".into(),
+                stop: 0.0,
+                target: 0.0,
+                trail_ref: 220.0,
+                live: true,
+            },
+        );
+        e.flatten("alpaca:AAPL");
+        assert_eq!(e.drain_live_orders().len(), 1, "exits must not be gated by the session check");
+    }
+
+    #[test]
+    fn pdt_ceiling_blocks_new_entries() {
+        let mut e = Engine::new();
+        e.set_live(true, true, false);
+        let mut pdt = open_market(&e);
+        pdt.day_trade_limit_reached = true;
+        e.set_broker_status(pdt);
+        assert!(e.live_block_reason().unwrap().contains("pattern-day-trader"));
+    }
+
+    #[test]
+    fn bars_replace_tick_history_and_drop_the_forming_candle() {
+        let mut e = Engine::new();
+        let bars: Vec<Ohlc> = (0..30)
+            .map(|i| {
+                let c = 100.0 + i as f64;
+                Ohlc { ts: i as i64 * 300_000, open: c - 0.5, high: c + 1.0, low: c - 1.0, close: c, volume: 10.0 }
+            })
+            .collect();
+        e.apply_bars(&[BarSeries { id: "crypto:BTC/USD".into(), bars: bars.clone() }]);
+
+        let h = e.history.get("crypto:BTC/USD").unwrap();
+        assert_eq!(h.len(), 29, "the still-forming final candle is not tradable data");
+        assert_eq!(*h.last().unwrap(), 128.0);
+        assert!(e.is_bar_backed("crypto:BTC/USD"));
+
+        // Ticking must not contaminate the candle series.
+        e.tick();
+        let after = e.history.get("crypto:BTC/USD").unwrap();
+        assert_eq!(after.len(), 29, "the tick loop must never append to a bar-backed series");
+        assert_eq!(*after.last().unwrap(), 128.0);
+    }
+
+    #[test]
+    fn real_fed_prices_do_not_drift_between_refreshes() {
+        let mut e = Engine::new();
+        e.apply_kraken(&[RealCrypto {
+            id: "crypto:BTC/USD".into(),
+            symbol: "BTC/USD".into(),
+            price: 67_000.0,
+            change24h: 0.01,
+        }]);
+        for _ in 0..20 {
+            e.tick();
+        }
+        let px = e.markets.iter().find(|m| m.id == "crypto:BTC/USD").unwrap().price;
+        assert_eq!(px, 67_000.0, "a real quote must stay put until the feed says otherwise");
+
+        // A market with no real feed still simulates, so the demo build works.
+        let sim = e.markets.iter().find(|m| m.id == "crypto:SOL/USD").unwrap().price;
+        assert_ne!(sim, 168.4);
+    }
+
+    #[test]
+    fn reconciliation_treats_the_broker_as_truth() {
+        let mut e = Engine::new();
+        // Engine thinks it holds 10 AAPL and 3 MSFT.
+        for (sym, qty) in [("AAPL", 10.0), ("MSFT", 3.0)] {
+            e.positions.insert(
+                format!("alpaca:{sym}"),
+                PositionInternal {
+                    venue: Venue::Alpaca,
+                    symbol: sym.into(),
+                    qty,
+                    avg_price: 100.0,
+                    strategy_id: "manual".into(),
+                    stop: 90.0,
+                    target: 0.0,
+                    trail_ref: 100.0,
+                    live: true,
+                },
+            );
+        }
+
+        // Broker: 4 AAPL (partial fill we missed), no MSFT, plus a surprise NVDA.
+        let diffs = e.reconcile_alpaca(&[("AAPL".into(), 4.0, 101.0), ("NVDA".into(), 2.0, 130.0)]);
+
+        assert_eq!(e.positions.get("alpaca:AAPL").unwrap().qty, 4.0);
+        assert_eq!(
+            e.positions.get("alpaca:AAPL").unwrap().stop,
+            0.0,
+            "a stop sized for 10 shares is meaningless on 4 — recompute rather than trust it"
+        );
+        assert!(e.positions.get("alpaca:MSFT").is_none(), "a position the broker denies is not ours");
+        assert_eq!(e.positions.get("alpaca:NVDA").unwrap().qty, 2.0);
+        assert!(e.positions.get("alpaca:NVDA").unwrap().live);
+        assert_eq!(diffs.len(), 3);
+        // Crypto positions are untouched by an equities reconciliation.
+        assert!(e.journal.iter().any(|j| j.message.contains("Reconciled")));
+    }
+
+    fn view(e: &Engine, market: &str, direction: &str, confidence: f64) -> AiView {
+        AiView {
+            market_id: market.into(),
+            direction: direction.into(),
+            probability: 0.6,
+            confidence,
+            rationale: "test".into(),
+            model: "claude-opus-5".into(),
+            ts: e.now(),
+            latency_ms: 900,
+        }
+    }
+
+    #[test]
+    fn ai_overlay_is_inert_until_enabled() {
+        let mut e = Engine::new();
+        let v = view(&e, "crypto:BTC/USD", "short", 0.99);
+        e.apply_ai_view(v, 100, 50);
+        // Disabled by default: even a maximally confident contrary view changes nothing.
+        assert_eq!(e.ai_multiplier("crypto:BTC/USD", Side::Buy).0, 1.0);
+        assert_eq!(e.ai_spend.calls, 1, "cost is still tracked while disabled");
+    }
+
+    #[test]
+    fn ai_vetoes_only_on_confident_disagreement() {
+        let mut e = Engine::new();
+        e.set_ai_policy(AiPolicy { enabled: true, ..AiPolicy::default() });
+
+        // Confident disagreement → veto.
+        let v = view(&e, "crypto:BTC/USD", "short", 0.9);
+        e.apply_ai_view(v, 0, 0);
+        assert_eq!(e.ai_multiplier("crypto:BTC/USD", Side::Buy).0, 0.0);
+
+        // Mild disagreement → shrink, not block.
+        let v = view(&e, "crypto:BTC/USD", "short", 0.4);
+        e.apply_ai_view(v, 0, 0);
+        let (m, note) = e.ai_multiplier("crypto:BTC/USD", Side::Buy);
+        assert!(m > 0.0 && m < 1.0, "got {m}");
+        assert!(note.unwrap().contains("disagrees"));
+
+        // Agreement → a bounded boost, never a blank cheque.
+        let v = view(&e, "crypto:BTC/USD", "long", 1.0);
+        e.apply_ai_view(v, 0, 0);
+        assert_eq!(e.ai_multiplier("crypto:BTC/USD", Side::Buy).0, e.ai_policy.max_boost);
+
+        // Neutral → no opinion, no effect.
+        let v = view(&e, "crypto:BTC/USD", "neutral", 1.0);
+        e.apply_ai_view(v, 0, 0);
+        assert_eq!(e.ai_multiplier("crypto:BTC/USD", Side::Buy).0, 1.0);
+    }
+
+    #[test]
+    fn stale_ai_views_are_ignored() {
+        let mut e = Engine::new();
+        e.set_ai_policy(AiPolicy { enabled: true, ttl_sec: 60, ..AiPolicy::default() });
+        let mut v = view(&e, "crypto:BTC/USD", "short", 0.95);
+        v.ts = e.now() - 10 * 60 * 1000; // ten minutes old
+        e.apply_ai_view(v, 0, 0);
+        assert_eq!(
+            e.ai_multiplier("crypto:BTC/USD", Side::Buy).0,
+            1.0,
+            "an opinion past its TTL must not veto"
+        );
+    }
+
+    #[test]
+    fn ai_cannot_open_a_trade_on_its_own() {
+        // The overlay is a multiplier on an existing intent. With every strategy
+        // paused there is no intent to multiply, so no amount of model
+        // conviction can produce an order.
+        let mut e = Engine::new();
+        e.set_ai_policy(AiPolicy { enabled: true, ..AiPolicy::default() });
+        for s in &mut e.strategies {
+            s.state = StrategyState::Paused;
+        }
+        let v = view(&e, "crypto:BTC/USD", "long", 1.0);
+        e.apply_ai_view(v, 0, 0);
+        for _ in 0..30 {
+            e.tick();
+        }
+        assert!(e.positions.is_empty(), "the overlay must never originate a position");
+    }
+
+    #[test]
+    fn ai_context_only_offers_markets_with_real_bars() {
+        let mut e = Engine::new();
+        assert!(e.ai_candidates().is_empty(), "the simulator is not worth a model call");
+
+        let bars: Vec<Ohlc> = (0..40)
+            .map(|i| {
+                let c = 100.0 + i as f64;
+                Ohlc { ts: i as i64 * 300_000, open: c, high: c + 1.0, low: c - 1.0, close: c, volume: 1.0 }
+            })
+            .collect();
+        e.apply_bars(&[BarSeries { id: "crypto:BTC/USD".into(), bars }]);
+
+        assert_eq!(e.ai_candidates(), vec!["crypto:BTC/USD".to_string()]);
+        let ctx = e.ai_context("crypto:BTC/USD").expect("context");
+        assert!(ctx.contains("real exchange candles"));
+        assert!(ctx.contains("RSI(14)"));
+        assert!(ctx.contains("Current position: flat"));
+    }
+
+    #[test]
+    fn engine_state_serializes_camel_case_for_the_ui() {
+        // The TypeScript client reads these by camelCase name. A snake_case key
+        // here does not fail loudly — the UI silently falls back to its default
+        // and every market renders as "simulated" while real bars are loaded.
+        let e = Engine::new();
+        let json = serde_json::to_value(e.state()).unwrap();
+        let keys: Vec<&str> = json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        for expected in ["barBacked", "aiViews", "aiPolicy", "aiSpend"] {
+            assert!(keys.contains(&expected), "missing {expected} in {keys:?}");
+        }
+        // Pre-existing single-word keys are untouched by the rename.
+        for expected in ["portfolio", "markets", "positions", "orders", "journal", "history", "live"] {
+            assert!(keys.contains(&expected), "renamed an existing key: {expected}");
+        }
+    }
+
+    #[test]
+    fn live_flag_survives_a_restart() {
+        let mut e = Engine::new();
+        e.positions.insert(
+            "alpaca:AAPL".into(),
+            PositionInternal {
+                venue: Venue::Alpaca,
+                symbol: "AAPL".into(),
+                qty: 5.0,
+                avg_price: 220.0,
+                strategy_id: "manual".into(),
+                stop: 200.0,
+                target: 0.0,
+                trail_ref: 220.0,
+                live: true,
+            },
+        );
+        let json = serde_json::to_string(&e.to_persisted()).unwrap();
+        let mut e2 = Engine::new();
+        e2.apply_persisted(serde_json::from_str(&json).unwrap());
+        assert!(
+            e2.positions.get("alpaca:AAPL").unwrap().live,
+            "a restart must not downgrade real shares to a paper position"
+        );
     }
 }
