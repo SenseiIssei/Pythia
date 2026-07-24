@@ -50,15 +50,10 @@ pub fn run() {
                     interval.tick().await;
                     n += 1;
 
-                    // Alpaca credentials, re-read each pass so keys added in
-                    // Settings take effect without a restart.
-                    let alpaca_keys = || {
-                        let keys = pythia_core::vault::get("alpaca").unwrap_or_default();
-                        (
-                            keys.get("keyId").cloned().unwrap_or_default(),
-                            keys.get("secret").cloned().unwrap_or_default(),
-                        )
-                    };
+                    // Market-data credentials for the selected endpoint, re-read
+                    // each pass so keys added in Settings take effect without a
+                    // restart.
+                    let alpaca_keys = || commands::alpaca_data_keys(&handle);
 
                     // Refresh real read-only feeds periodically (and on first tick).
                     // Awaits happen here, with no engine lock held.

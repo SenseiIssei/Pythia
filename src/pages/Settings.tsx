@@ -11,6 +11,7 @@ import {
   BrainCircuit,
   PlugZap,
   SlidersHorizontal,
+  TriangleAlert,
 } from "lucide-react";
 import { Card, PageHeader, Badge, Button } from "../components/ui";
 import { isTauri } from "../engine";
@@ -47,12 +48,21 @@ const VENUES: VenueCfg[] = [
   },
   {
     id: "alpaca",
-    name: "Alpaca (equities)",
+    name: "Alpaca — Paper",
     fields: [
       { key: "keyId", label: "API key id" },
       { key: "secret", label: "API secret", secret: true },
     ],
-    note: "Start with the paper endpoint (paper-api.alpaca.markets). PDT rules enforced by the risk manager.",
+    note: "Keys from the Paper Trading account (paper-api.alpaca.markets). Real API, real order lifecycle, fake money.",
+  },
+  {
+    id: "alpaca-live",
+    name: "Alpaca — Live 💵",
+    fields: [
+      { key: "keyId", label: "API key id" },
+      { key: "secret", label: "API secret", secret: true },
+    ],
+    note: "⚠ REAL MONEY. Keys from the Live account — a different pair to the paper ones. Storing them changes nothing on its own: routing still needs a typed ARM LIVE on the Live page.",
   },
 ];
 
@@ -101,11 +111,25 @@ export function Settings() {
         </div>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {VENUES.map((v) => (
           <VenueCard key={v.id} v={v} native={native} connected={!!status[v.id]} onChanged={refresh} />
         ))}
       </div>
+
+      {native && status["alpaca-live"] && (
+        <Card className="mt-4 border-danger/30 bg-danger/5">
+          <div className="flex items-start gap-3">
+            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-danger" />
+            <div className="text-sm text-cyber-text-dim">
+              <div className="font-bold text-danger text-glow-red">Live keys are stored</div>
+              Switch endpoints on the <span className="text-accent">Live</span> page — it needs a typed{" "}
+              <span className="text-danger font-bold">ARM LIVE</span> for real money, and the endpoint can only be
+              changed while disarmed. Storing keys here does not route a single order.
+            </div>
+          </div>
+        </Card>
+      )}
 
       <div className="mt-4">
         <AiProvidersCard />
@@ -528,8 +552,11 @@ function VenueCard({
   const [ok, setOk] = useState<boolean | null>(null);
   const filled = v.fields.every((f) => (vals[f.key] ?? "").trim().length > 0);
 
+  const isAlpaca = v.id === "alpaca" || v.id === "alpaca-live";
+  const isPaperSlot = v.id === "alpaca";
+
   /**
-   * Read-only account check against the paper endpoint.
+   * Read-only account check against **this card's own endpoint**.
    *
    * Only Alpaca has one, because it's the only venue here that routes real
    * orders — and a key that saved fine but is rejected at the broker is
@@ -540,11 +567,19 @@ function VenueCard({
     setMsg("testing…");
     setOk(null);
     try {
-      const a = await alpacaAccount(true);
-      setMsg(`${a.status} · buying power $${Number(a.buyingPower).toLocaleString()} · ${a.paper ? "paper" : "live"} endpoint`);
+      const a = await alpacaAccount(isPaperSlot);
+      setMsg(
+        `${a.status} · equity $${Number(a.equity || a.portfolioValue).toLocaleString()} · buying power $${Number(
+          a.buyingPower
+        ).toLocaleString()} · ${a.paper ? "paper" : "LIVE"} endpoint`
+      );
       setOk(a.status === "ACTIVE");
     } catch (e) {
-      setMsg(`${String(e instanceof Error ? e.message : e)} — note paper and live accounts have SEPARATE keys`);
+      setMsg(
+        `${String(e instanceof Error ? e.message : e)} — a 401 here usually means ${
+          isPaperSlot ? "live keys pasted into the paper slot" : "paper keys pasted into the live slot"
+        }`
+      );
       setOk(false);
     }
     setBusy(false);
@@ -615,7 +650,7 @@ function VenueCard({
         <Button tone="cyan" icon={ShieldCheck} disabled={!filled || busy} onClick={save}>
           {connected ? "Update keys" : "Save to vault"}
         </Button>
-        {native && connected && v.id === "alpaca" && (
+        {native && connected && isAlpaca && (
           <Button tone="purple" icon={PlugZap} disabled={busy} onClick={test}>
             Test
           </Button>

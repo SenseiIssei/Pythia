@@ -51,19 +51,57 @@ struct AppState {
     webhook: Arc<Mutex<Option<String>>>,
 }
 
-/// Alpaca credentials from the process environment. Read fresh each time so a
-/// key added to `.env` mid-session is picked up on the next refresh.
-fn alpaca_env() -> (String, String, String) {
-    (
-        std::env::var("APCA_API_KEY_ID").unwrap_or_default(),
-        std::env::var("APCA_API_SECRET_KEY").unwrap_or_default(),
-        std::env::var("APCA_FEED").unwrap_or_else(|_| "iex".into()),
-    )
+/// Alpaca credentials for one endpoint, from the process environment.
+///
+/// Alpaca issues **separate** key pairs for the paper and live accounts, and
+/// each only authenticates against its own endpoint. `APCA_LIVE_*` holds the
+/// live pair; when it's unset the base pair is used for both, which is correct
+/// for the common case of only ever running on paper.
+fn alpaca_env_for(paper: bool) -> (String, String, String) {
+    let feed = std::env::var("APCA_FEED").unwrap_or_else(|_| "iex".into());
+    let (id, secret) = if paper {
+        (
+            std::env::var("APCA_API_KEY_ID").unwrap_or_default(),
+            std::env::var("APCA_API_SECRET_KEY").unwrap_or_default(),
+        )
+    } else {
+        (
+            std::env::var("APCA_LIVE_API_KEY_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| std::env::var("APCA_API_KEY_ID").unwrap_or_default()),
+            std::env::var("APCA_LIVE_API_SECRET_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| std::env::var("APCA_API_SECRET_KEY").unwrap_or_default()),
+        )
+    };
+    (id, secret, feed)
 }
 
+/// Credentials for read-only market data. `data.alpaca.markets` is shared by
+/// both accounts, so either pair works.
+fn alpaca_env() -> (String, String, String) {
+    alpaca_env_for(true)
+}
+
+/// Build a connector for one endpoint using that endpoint's own keys.
+fn alpaca_conn(paper: bool) -> AlpacaConnector {
+    let (id, secret, _) = alpaca_env_for(paper);
+    AlpacaConnector::new(Some(id), Some(secret), paper)
+}
+
+/// Whether *either* endpoint has usable credentials.
+///
+/// Checks both pairs deliberately: someone who configured only `APCA_LIVE_*`
+/// still needs the broker-status and reconciliation loops to run, and gating
+/// those on the paper pair alone would leave a live run with a permanently
+/// stale session check — which the engine then blocks entries on.
 fn has_alpaca_keys() -> bool {
-    let (k, s, _) = alpaca_env();
-    !k.trim().is_empty() && !s.trim().is_empty()
+    [true, false].iter().any(|&paper| {
+        let (k, s, _) = alpaca_env_for(paper);
+        !k.trim().is_empty() && !s.trim().is_empty()
+    })
 }
 
 /// Candle interval for the indicator series. 5-minute bars are the default
@@ -243,7 +281,7 @@ async fn tick_loop(state: AppState) {
 /// Ask Alpaca whether the market is open and whether the account may trade.
 async fn refresh_broker_status(state: &AppState) {
     let paper = { state.engine.lock().unwrap().state().live.paper };
-    let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), paper);
+    let conn = alpaca_conn(paper);
     let (clock, account) = tokio::join!(conn.clock(), conn.account());
 
     let (Ok(clock), Ok(account)) = (clock, account) else {
@@ -269,7 +307,7 @@ async fn refresh_broker_status(state: &AppState) {
 /// Pull the broker's positions and make the engine's ledger match.
 async fn reconcile(state: &AppState) {
     let paper = { state.engine.lock().unwrap().state().live.paper };
-    let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), paper);
+    let conn = alpaca_conn(paper);
     let Ok(positions) = conn.positions().await else {
         tracing::warn!("could not fetch Alpaca positions — skipping reconciliation");
         return;
@@ -294,8 +332,7 @@ async fn submit_live_order(state: &AppState, o: LiveOrderOut) {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(25.0);
-        let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), o.paper)
-            .with_slippage_bps(slippage_bps);
+        let conn = alpaca_conn(o.paper).with_slippage_bps(slippage_bps);
         if !conn.is_live_ready() {
             state.engine.lock().unwrap().apply_live_reject(
                 &o.order_id,
@@ -576,7 +613,7 @@ async fn get_preflight(State(st): State<AppState>) -> impl IntoResponse {
 
     let paper = { st.engine.lock().unwrap().state().live.paper };
     if keys_set {
-        let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), paper);
+        let conn = alpaca_conn(paper);
         let endpoint = if paper { "paper-api.alpaca.markets" } else { "api.alpaca.markets" };
 
         match conn.account().await {
@@ -841,7 +878,7 @@ struct AccountQuery {
 /// Read-only Alpaca account check (buying power, status) for the "test
 /// connection" button. Keys come from the server env.
 async fn get_live_account(axum::extract::Query(q): axum::extract::Query<AccountQuery>) -> impl IntoResponse {
-    let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), q.paper);
+    let conn = alpaca_conn(q.paper);
     if !conn.is_live_ready() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
