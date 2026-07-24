@@ -225,8 +225,19 @@ pub fn clear_llm_key(provider: String) -> Result<(), String> {
 /// Arm/disarm real order routing. Guarded on the frontend by a typed
 /// confirmation; the risk manager + kill switch still gate every order.
 #[tauri::command]
-pub fn set_live(app: AppHandle, app_state: State<AppState>, armed: bool, paper: bool, dry_run: bool) {
-    app_state.engine.lock().unwrap().set_live(armed, paper, dry_run);
+pub fn set_live(
+    app: AppHandle,
+    app_state: State<AppState>,
+    armed: bool,
+    paper: bool,
+    dry_run: bool,
+    extended_hours: Option<bool>,
+) {
+    app_state
+        .engine
+        .lock()
+        .unwrap()
+        .set_live(armed, paper, dry_run, extended_hours.unwrap_or(false));
     push_state(&app);
 }
 
@@ -276,7 +287,7 @@ pub async fn submit_live_order(app: &AppHandle, o: LiveOrderOut) {
     } else {
         // `o.paper` is the endpoint snapshotted when the order was armed, so a
         // mid-flight endpoint change can never redirect an order.
-        let conn = alpaca_connector(o.paper);
+        let conn = alpaca_connector(o.paper).with_extended_hours(o.extended_hours);
         if !conn.is_live_ready() {
             if let Some(st) = app.try_state::<AppState>() {
                 st.engine.lock().unwrap().apply_live_reject(
@@ -348,8 +359,8 @@ pub async fn refresh_broker_status(app: &AppHandle) {
     if !conn.is_live_ready() {
         return;
     }
-    let (clock, account) = tokio::join!(conn.clock(), conn.account());
-    let (Ok(clock), Ok(account)) = (clock, account) else {
+    let (session, account) = tokio::join!(conn.session(), conn.account());
+    let (Ok((clock, extended_open, session_end)), Ok(account)) = (session, account) else {
         // Deliberately leave the old status to age out — an unreachable broker
         // must never be read as "the market is open".
         return;
@@ -357,6 +368,8 @@ pub async fn refresh_broker_status(app: &AppHandle) {
     if let Some(st) = app.try_state::<AppState>() {
         st.engine.lock().unwrap().set_broker_status(BrokerStatus {
             market_open: clock.is_open,
+            extended_open,
+            session_end,
             next_open: Some(clock.next_open.clone()),
             day_trade_limit_reached: account.day_trade_limit_reached(),
             restricted: account.is_restricted(),

@@ -14,7 +14,14 @@ import type {
   StrategyState,
 } from "../types";
 
-const DISARMED: LiveStatus = { armed: false, paper: true, dryRun: false, alpacaConnected: false, pending: 0 };
+const DISARMED: LiveStatus = {
+  armed: false,
+  paper: true,
+  dryRun: false,
+  extendedHours: false,
+  alpacaConnected: false,
+  pending: 0,
+};
 
 /** Overlay off, matching the Rust default — nothing AI-driven without opt-in. */
 const AI_OFF: AiPolicy = { enabled: false, ttlSec: 900, vetoConfidence: 0.7, maxBoost: 1.25 };

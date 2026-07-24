@@ -60,16 +60,21 @@ export async function alpacaAccount(paper: boolean): Promise<AlpacaAccount> {
 }
 
 /** Arm/disarm live routing. */
-export async function setLiveConfig(armed: boolean, paper: boolean, dryRun: boolean): Promise<void> {
+export async function setLiveConfig(
+  armed: boolean,
+  paper: boolean,
+  dryRun: boolean,
+  extendedHours = false
+): Promise<void> {
   switch (liveMode()) {
     case "native":
-      await invoke("set_live", { armed, paper, dryRun });
+      await invoke("set_live", { armed, paper, dryRun, extendedHours });
       return;
     case "server": {
       const r = await fetch(`${serverUrl()}/api/live/config`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ armed, paper, dryRun }),
+        body: JSON.stringify({ armed, paper, dryRun, extendedHours }),
       });
       if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
       return;
