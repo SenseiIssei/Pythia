@@ -189,6 +189,15 @@ impl Recalibration {
 /// this the fit is noise and the identity map is the honest answer.
 const MIN_FIT_SAMPLES: usize = 30;
 
+/// Most recent samples the fit will look at.
+///
+/// Two reasons, and the second is the real one. The fit is O(iterations × n),
+/// so an unbounded ledger makes it unboundedly slow. More importantly a
+/// source's calibration *drifts* — a model that was overconfident a year ago may
+/// not be now — so a fit dominated by ancient history is answering the wrong
+/// question. Recency is both cheaper and more correct.
+const MAX_FIT_SAMPLES: usize = 2_000;
+
 /// Fit [`Recalibration`] by gradient descent on log-loss (logistic regression of
 /// the outcome on the forecast's log-odds).
 ///
@@ -198,8 +207,10 @@ pub fn fit_recalibration(samples: &[(f64, bool)]) -> Recalibration {
     if samples.len() < MIN_FIT_SAMPLES {
         return Recalibration { n: samples.len(), ..Default::default() };
     }
-    let xs: Vec<f64> = samples.iter().map(|(p, _)| logit(*p)).collect();
-    let ys: Vec<f64> = samples.iter().map(|(_, y)| if *y { 1.0 } else { 0.0 }).collect();
+    // Newest last, so the tail is the recent window.
+    let window = &samples[samples.len().saturating_sub(MAX_FIT_SAMPLES)..];
+    let xs: Vec<f64> = window.iter().map(|(p, _)| logit(*p)).collect();
+    let ys: Vec<f64> = window.iter().map(|(_, y)| if *y { 1.0 } else { 0.0 }).collect();
     let n = xs.len() as f64;
 
     let (mut a, mut b) = (1.0f64, 0.0f64);

@@ -80,11 +80,52 @@ const SETTLED_EPS: f64 = 0.005;
 /// so a long-running daemon cannot grow without limit.
 const MAX_RECORDS: usize = 20_000;
 
+/// What one source has earned, precomputed.
+///
+/// Deriving this is the expensive part of the whole forecasting layer — a
+/// logistic fit over the source's entire history — and it only changes when a
+/// forecast *resolves*. Recording a new one cannot move any score, so callers
+/// hold a [`SourceStats`] and rebuild it only when
+/// [`ForecastStore::resolution_version`] changes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SourceStat {
+    /// How far this source may pull the forecast from the market price, 0..1.
+    pub trust: f64,
+    pub recalibration: super::calibration::Recalibration,
+    /// Resolved forecasts behind those numbers.
+    pub n: usize,
+}
+
+/// Precomputed [`SourceStat`] for every (source, question type) seen.
+#[derive(Debug, Clone, Default)]
+pub struct SourceStats {
+    map: HashMap<(String, ForecastKind), SourceStat>,
+}
+
+impl SourceStats {
+    /// An unseen source is unproven: no trust, no recalibration, no history.
+    pub fn get(&self, source: &str, kind: ForecastKind) -> SourceStat {
+        self.map.get(&(source.to_string(), kind)).copied().unwrap_or_default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ForecastStore {
     records: Vec<ForecastRecord>,
     #[serde(default)]
     seq: u64,
+    /// Bumped once per resolved forecast. The only thing that can change a
+    /// score, and therefore the only thing that invalidates a cached
+    /// [`SourceStats`].
+    #[serde(default)]
+    resolutions: u64,
 }
 
 impl ForecastStore {
@@ -96,6 +137,13 @@ impl ForecastStore {
     }
     pub fn records(&self) -> &[ForecastRecord] {
         &self.records
+    }
+    /// Mutable access, for tests that need to age the ledger. Not part of the
+    /// normal flow — resolutions go through `auto_resolve`/`resolve_market` so
+    /// the version counter stays honest.
+    #[cfg(test)]
+    pub fn records_mut(&mut self) -> &mut [ForecastRecord] {
+        &mut self.records
     }
     pub fn resolved_count(&self) -> usize {
         self.records.iter().filter(|r| r.is_resolved()).count()
@@ -159,6 +207,7 @@ impl ForecastStore {
             r.resolved_at = Some(now);
             n += 1;
         }
+        self.resolutions += n as u64;
         n
     }
 
@@ -174,6 +223,7 @@ impl ForecastStore {
             r.resolved_at = Some(now);
             n += 1;
         }
+        self.resolutions += n as u64;
         n
     }
 
@@ -189,6 +239,77 @@ impl ForecastStore {
             .into_iter()
             .map(|(id, outcome)| self.resolve_market(now, &id, outcome))
             .sum()
+    }
+
+    /// Increments once per resolved forecast. Cache key for [`SourceStats`].
+    pub fn resolution_version(&self) -> u64 {
+        self.resolutions
+    }
+
+    /// Score every source in **one pass** and return the result.
+    ///
+    /// The naive version — ask each source for its trust, then its
+    /// recalibration, then its track — walks the whole ledger once per question
+    /// and refits a logistic regression each time. Doing that per source per
+    /// market per tick is how a forecasting layer eats a CPU core to produce
+    /// numbers that did not change.
+    pub fn source_stats(&self) -> SourceStats {
+        let mut map = HashMap::new();
+        for (key, (mine, market)) in self.grouped_samples() {
+            let score = Score::of(&mine);
+            let market_score = Score::of(&market);
+            map.insert(
+                key,
+                SourceStat {
+                    trust: trust(&score, &market_score),
+                    recalibration: fit_recalibration(&mine),
+                    n: score.n,
+                },
+            );
+        }
+        SourceStats { map }
+    }
+
+    /// Full scorecards, one per (source, kind). Same single pass as
+    /// [`ForecastStore::source_stats`], plus the reliability diagram.
+    pub fn tracks(&self) -> Vec<Track> {
+        let mut out: Vec<Track> = self
+            .grouped_samples()
+            .into_iter()
+            .map(|((source, kind), (mine, market))| {
+                let score = Score::of(&mine);
+                let market_score = Score::of(&market);
+                Track {
+                    source,
+                    kind: kind.as_str().to_string(),
+                    brier_skill: super::calibration::brier_skill(&score, &market_score),
+                    trust: trust(&score, &market_score),
+                    recalibration: fit_recalibration(&mine),
+                    reliability: reliability(&mine, 10),
+                    score,
+                    market_score,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.source.cmp(&b.source).then(a.kind.cmp(&b.kind)));
+        out
+    }
+
+    /// Group every *resolved* record by (source, kind) into the source's own
+    /// samples and the market's samples on the very same questions.
+    #[allow(clippy::type_complexity)]
+    fn grouped_samples(
+        &self,
+    ) -> HashMap<(String, ForecastKind), (Vec<(f64, bool)>, Vec<(f64, bool)>)> {
+        let mut grouped: HashMap<(String, ForecastKind), (Vec<(f64, bool)>, Vec<(f64, bool)>)> =
+            HashMap::new();
+        for r in &self.records {
+            let Some(y) = r.outcome else { continue };
+            let e = grouped.entry((r.source.clone(), r.kind)).or_default();
+            e.0.push((r.p, y));
+            e.1.push((r.market_p, y));
+        }
+        grouped
     }
 
     /// (forecast, outcome) pairs for one source and question type.
@@ -399,6 +520,67 @@ mod tests {
         let sk = s.source_kinds();
         assert_eq!(sk.len(), 2);
         assert_eq!(sk[0].0, "a");
+    }
+
+    #[test]
+    fn the_batch_scorer_agrees_with_the_per_source_accessors() {
+        // `source_stats` is the fast path; if it ever disagrees with the slow
+        // one, every weight in the app is quietly wrong.
+        let s = store_with_direction_history("src", 0.9, 180, 200);
+        let stats = s.source_stats();
+        let stat = stats.get("src", ForecastKind::Direction);
+
+        assert_eq!(stat.trust, s.trust_of("src", ForecastKind::Direction));
+        assert_eq!(stat.n, s.track("src", ForecastKind::Direction).score.n);
+        let slow = s.recalibration_of("src", ForecastKind::Direction);
+        assert!((stat.recalibration.slope - slow.slope).abs() < 1e-12);
+        assert!((stat.recalibration.intercept - slow.intercept).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_unseen_source_is_unproven_rather_than_missing() {
+        let stats = ForecastStore::default().source_stats();
+        let stat = stats.get("llm:nobody", ForecastKind::Outcome);
+        assert_eq!(stat.trust, 0.0);
+        assert_eq!(stat.n, 0);
+        assert!(stat.recalibration.is_identity(), "no evidence means no correction");
+    }
+
+    #[test]
+    fn recording_does_not_bump_the_resolution_version_but_resolving_does() {
+        // This is the cache key. If recording moved it, the scoreboard would be
+        // refitted on every tick and the optimisation would be undone silently.
+        let mut s = ForecastStore::default();
+        let v0 = s.resolution_version();
+        for _ in 0..50 {
+            s.record(0, "m", "src", ForecastKind::Direction, 0.7, 0.5, 100.0, HOUR);
+        }
+        assert_eq!(s.resolution_version(), v0, "recording changes no score");
+
+        let prices = HashMap::from([("m".to_string(), 101.0)]);
+        let n = s.auto_resolve(HOUR + 1, &prices);
+        assert_eq!(n, 50);
+        assert_eq!(s.resolution_version(), v0 + 50);
+
+        // Settling an outcome market counts too.
+        s.record(0, "poly", "src", ForecastKind::Outcome, 0.7, 0.5, 0.5, HOUR);
+        let before = s.resolution_version();
+        s.resolve_market(1, "poly", true);
+        assert_eq!(s.resolution_version(), before + 1);
+    }
+
+    #[test]
+    fn tracks_are_sorted_and_cover_every_scored_source() {
+        let mut s = store_with_direction_history("zeta", 0.8, 30, 40);
+        for i in 0..40 {
+            s.record(0, "m", "alpha", ForecastKind::Direction, 0.6, 0.5, 100.0, HOUR);
+            let prices = HashMap::from([("m".to_string(), if i < 25 { 101.0 } else { 99.0 })]);
+            s.auto_resolve(HOUR + 1, &prices);
+        }
+        let tracks = s.tracks();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].source, "alpha", "stable ordering for the UI");
+        assert!(tracks.iter().all(|t| t.score.n > 0 && t.kind == "direction"));
     }
 
     #[test]

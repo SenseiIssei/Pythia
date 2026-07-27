@@ -33,7 +33,7 @@ pub mod track;
 
 use aggregate::{disagreement, effective_n, kelly_binary, logistic, logit, pool, shrink_toward};
 use serde::{Deserialize, Serialize};
-use track::{ForecastKind, ForecastStore};
+use track::{ForecastKind, SourceStats};
 
 /// Tunables for the whole forecasting stack. Every default here is deliberately
 /// timid — the failure mode of a forecasting bot is confidence, not caution.
@@ -172,8 +172,12 @@ pub fn direction_from_edge(model_p: f64, market_p: f64) -> f64 {
     logistic(logit(model_p) - logit(market_p))
 }
 
-/// Build the forecast for one market. Pure and synchronous.
-pub fn build(input: &ForecastInput, store: &ForecastStore, cfg: &ForecastConfig) -> MarketForecast {
+/// Build the forecast for one market. Pure, synchronous, and cheap.
+///
+/// `stats` is precomputed by [`track::ForecastStore::source_stats`] — scoring
+/// the ledger here, per source, per market, per tick, was the one genuinely
+/// expensive thing in this layer.
+pub fn build(input: &ForecastInput, stats: &SourceStats, cfg: &ForecastConfig) -> MarketForecast {
     let kind = if input.is_prediction { ForecastKind::Outcome } else { ForecastKind::Direction };
     // A price market's "market forecast" for *will this be higher* is 0.5: under
     // a random walk that is the correct answer, and it is what a source has to beat.
@@ -214,15 +218,13 @@ pub fn build(input: &ForecastInput, store: &ForecastStore, cfg: &ForecastConfig)
     // its track record has earned.
     let mut sources: Vec<SourceView> = Vec::new();
     for (name, raw_p, rationale) in raw {
-        let recal = store.recalibration_of(&name, kind);
-        let trust = store.trust_of(&name, kind);
-        let n = store.track(&name, kind).score.n;
+        let stat = stats.get(&name, kind);
         sources.push(SourceView {
-            p: recal.apply(raw_p),
+            p: stat.recalibration.apply(raw_p),
             raw_p,
-            weight: trust.max(cfg.bootstrap_trust),
-            trust,
-            n,
+            weight: stat.trust.max(cfg.bootstrap_trust),
+            trust: stat.trust,
+            n: stat.n,
             source: name,
             rationale,
         });
@@ -351,10 +353,10 @@ mod tests {
     /// forecasts, because nothing has earned the right to disagree with the price.
     #[test]
     fn with_strict_mode_an_untested_ensemble_cannot_move_the_forecast_or_trade() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 0.0, ..Default::default() };
         let llm = vec![signal("anthropic", 0.9), signal("openai", 0.88)];
-        let f = build(&prediction_input(0.5, &llm, &[]), &store, &cfg);
+        let f = build(&prediction_input(0.5, &llm, &[]), &stats, &cfg);
 
         assert!((f.ensemble_p - f.market_p).abs() < 1e-9, "must equal the market price");
         assert_eq!(f.action, Action::Hold);
@@ -367,10 +369,10 @@ mod tests {
 
     #[test]
     fn the_bootstrap_weight_lets_an_unproven_source_nudge_but_not_shout() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 0.10, longshot_k: 1.0, ..Default::default() };
         let llm = vec![signal("anthropic", 0.95)];
-        let f = build(&prediction_input(0.50, &llm, &[]), &store, &cfg);
+        let f = build(&prediction_input(0.50, &llm, &[]), &stats, &cfg);
 
         assert!(f.ensemble_p > f.market_p, "an opinion should move something");
         assert!(
@@ -385,7 +387,7 @@ mod tests {
     fn a_proven_source_is_allowed_to_disagree_with_the_market() {
         // Give llm:anthropic a real Direction track record, then check it earns
         // weight on that question type.
-        let mut store = ForecastStore::default();
+        let mut store = track::ForecastStore::default();
         for i in 0..300 {
             store.record(0, "m", "llm:anthropic", ForecastKind::Direction, 0.9, 0.5, 100.0, 1000);
             let prices = std::collections::HashMap::from([(
@@ -394,7 +396,8 @@ mod tests {
             )]);
             store.auto_resolve(2000, &prices);
         }
-        let trust = store.trust_of("llm:anthropic", ForecastKind::Direction);
+        let stats = store.source_stats();
+        let trust = stats.get("llm:anthropic", ForecastKind::Direction).trust;
         assert!(trust > 0.4, "a 300-question record of skill, got {trust}");
 
         let cfg = ForecastConfig { bootstrap_trust: 0.0, drift_trust: 0.0, ..Default::default() };
@@ -411,14 +414,14 @@ mod tests {
             llm: &llm,
             now: 0,
         };
-        let f = build(&input, &store, &cfg);
+        let f = build(&input, &stats, &cfg);
         assert!(f.trust > 0.2, "proven sources get room, got {}", f.trust);
         assert!(f.ensemble_p > 0.55, "and can actually move the number, got {}", f.ensemble_p);
     }
 
     #[test]
     fn a_price_market_is_measured_against_a_coin_flip_not_against_its_price() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig::default();
         let history: Vec<f64> = (0..200).map(|i| 30_000.0 * 1.001_f64.powi(i)).collect();
         let input = ForecastInput {
@@ -432,7 +435,7 @@ mod tests {
             llm: &[],
             now: 0,
         };
-        let f = build(&input, &store, &cfg);
+        let f = build(&input, &stats, &cfg);
         assert_eq!(f.market_p, 0.5, "the baseline for 'will it be higher' is a coin flip");
         assert_eq!(f.kind, ForecastKind::Direction);
         assert!(f.sources.iter().any(|s| s.source == "stat:drift"));
@@ -440,7 +443,7 @@ mod tests {
 
     #[test]
     fn an_edge_that_does_not_clear_the_spread_is_not_a_trade() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         // Wide market: 400bps round trip. A 2-point edge is 200bps.
         let cfg = ForecastConfig {
             bootstrap_trust: 1.0,
@@ -450,7 +453,7 @@ mod tests {
             ..Default::default()
         };
         let llm = vec![signal("anthropic", 0.52)];
-        let f = build(&prediction_input(0.50, &llm, &[]), &store, &cfg);
+        let f = build(&prediction_input(0.50, &llm, &[]), &stats, &cfg);
         assert_eq!(f.action, Action::Hold);
         assert!(f.reason.contains("cost"), "{}", f.reason);
         assert!(f.net_edge_bps < 0.0);
@@ -458,7 +461,7 @@ mod tests {
 
     #[test]
     fn a_large_edge_from_a_trusted_pool_produces_a_sized_trade() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig {
             bootstrap_trust: 1.0, // pretend everything is proven
             longshot_k: 1.0,
@@ -467,7 +470,7 @@ mod tests {
             ..Default::default()
         };
         let llm = vec![signal("a", 0.90), signal("b", 0.88), signal("c", 0.92)];
-        let f = build(&prediction_input(0.40, &llm, &[]), &store, &cfg);
+        let f = build(&prediction_input(0.40, &llm, &[]), &stats, &cfg);
         assert_eq!(f.action, Action::Buy);
         assert!(f.kelly > 0.0);
         assert!(f.net_edge_bps > 100.0);
@@ -476,23 +479,23 @@ mod tests {
 
     #[test]
     fn the_short_side_is_identified_when_the_market_is_too_rich() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 1.0, longshot_k: 1.0, cost_bps: 50.0, min_edge_bps: 50.0, ..Default::default() };
         let llm = vec![signal("a", 0.20), signal("b", 0.18)];
-        let f = build(&prediction_input(0.70, &llm, &[]), &store, &cfg);
+        let f = build(&prediction_input(0.70, &llm, &[]), &stats, &cfg);
         assert_eq!(f.action, Action::Sell);
         assert!(f.kelly < 0.0, "a negative Kelly is the short side");
     }
 
     #[test]
     fn disagreement_and_effective_count_expose_a_fake_consensus() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 1.0, longshot_k: 1.0, ..Default::default() };
 
         let agree = vec![signal("a", 0.7), signal("b", 0.7), signal("c", 0.7)];
         let split = vec![signal("a", 0.2), signal("b", 0.5), signal("c", 0.9)];
-        let f_agree = build(&prediction_input(0.5, &agree, &[]), &store, &cfg);
-        let f_split = build(&prediction_input(0.5, &split, &[]), &store, &cfg);
+        let f_agree = build(&prediction_input(0.5, &agree, &[]), &stats, &cfg);
+        let f_split = build(&prediction_input(0.5, &split, &[]), &stats, &cfg);
 
         assert!(f_agree.disagreement < 0.01);
         assert!(f_split.disagreement > 1.0, "a real split must be visible");
@@ -502,9 +505,9 @@ mod tests {
 
     #[test]
     fn with_no_sources_at_all_the_forecast_is_the_market_and_the_reason_says_so() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig { longshot_k: 1.0, ..Default::default() };
-        let f = build(&prediction_input(0.42, &[], &[]), &store, &cfg);
+        let f = build(&prediction_input(0.42, &[], &[]), &stats, &cfg);
         assert!(f.sources.is_empty());
         assert!((f.ensemble_p - 0.42).abs() < 1e-9);
         assert_eq!(f.action, Action::Hold);
@@ -523,11 +526,11 @@ mod tests {
 
     #[test]
     fn extreme_market_prices_do_not_produce_infinities() {
-        let store = ForecastStore::default();
+        let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 1.0, ..Default::default() };
         for price in [0.0, 0.0001, 0.9999, 1.0] {
             let llm = vec![signal("a", 0.5)];
-            let f = build(&prediction_input(price, &llm, &[]), &store, &cfg);
+            let f = build(&prediction_input(price, &llm, &[]), &stats, &cfg);
             assert!(f.ensemble_p.is_finite() && (0.0..=1.0).contains(&f.ensemble_p), "price {price}");
             assert!(f.kelly.is_finite(), "price {price}");
         }
