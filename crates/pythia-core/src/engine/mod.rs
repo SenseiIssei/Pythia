@@ -602,6 +602,9 @@ pub struct Engine {
     /// they are cached against `forecast_store.resolution_version()` rather
     /// than refitted every tick.
     source_stats: track::SourceStats,
+    /// Pairwise error correlation between sources. Same cache key — it can only
+    /// change when something resolves.
+    correlations: track::ErrorCorrelations,
     track_cache: Vec<calibration::Track>,
     scored_version: Option<u64>,
     /// Latest forecast per market, rebuilt on a schedule.
@@ -662,6 +665,7 @@ impl Engine {
             forecast_cfg: forecast::ForecastConfig::default(),
             forecast_store: track::ForecastStore::default(),
             source_stats: track::SourceStats::default(),
+            correlations: track::ErrorCorrelations::default(),
             track_cache: Vec::new(),
             scored_version: None,
             forecasts: Vec::new(),
@@ -1002,6 +1006,7 @@ impl Engine {
             return;
         }
         self.source_stats = self.forecast_store.source_stats();
+        self.correlations = self.forecast_store.error_correlations();
         self.track_cache = self.forecast_store.tracks();
         self.scored_version = Some(version);
     }
@@ -1046,6 +1051,7 @@ impl Engine {
 
         for m in &snapshot {
             let is_prediction = m.kind == MarketKind::Prediction;
+            let category = market_category(m.kind);
             let history = self.history.get(&m.id).cloned().unwrap_or_default();
             let llm: Vec<crate::llm::Signal> = self
                 .llm_opinions
@@ -1064,6 +1070,7 @@ impl Engine {
                     symbol: &m.symbol,
                     price: m.price,
                     is_prediction,
+                    category,
                     history: &history,
                     liquidity: m.liquidity,
                     days_to_resolution: days,
@@ -1071,6 +1078,7 @@ impl Engine {
                     now,
                 },
                 &self.source_stats,
+                &self.correlations,
                 &cfg,
             );
             if f.action != forecast::Action::Hold {
@@ -1082,21 +1090,18 @@ impl Engine {
         // 3 · Write down what was predicted, so it can be scored later.
         for f in &out {
             let market_id = f.market_id.clone();
-            let ref_price = snapshot
-                .iter()
-                .find(|m| m.id == market_id)
-                .map(|m| m.price)
-                .unwrap_or(0.0);
+            let Some(market) = snapshot.iter().find(|m| m.id == market_id) else { continue };
+            let (ref_price, category) = (market.price, market_category(market.kind));
 
             if f.kind == track::ForecastKind::Outcome {
                 // The level view, which settles when the event does...
                 self.forecast_store.record(
-                    now, &market_id, "ensemble", track::ForecastKind::Outcome,
+                    now, &market_id, "ensemble", track::ForecastKind::Outcome, category,
                     f.ensemble_p, f.market_p, ref_price, cfg.horizon_ms,
                 );
                 for s in &f.sources {
                     self.forecast_store.record(
-                        now, &market_id, &s.source, track::ForecastKind::Outcome,
+                        now, &market_id, &s.source, track::ForecastKind::Outcome, category,
                         s.p, f.market_p, ref_price, cfg.horizon_ms,
                     );
                 }
@@ -1104,25 +1109,25 @@ impl Engine {
                 // Without this, an election market yields no calibration data
                 // for months, and every source stays unweighted forever.
                 self.forecast_store.record(
-                    now, &market_id, "ensemble", track::ForecastKind::Direction,
+                    now, &market_id, "ensemble", track::ForecastKind::Direction, category,
                     forecast::direction_from_edge(f.ensemble_p, f.market_p),
                     0.5, ref_price, cfg.horizon_ms,
                 );
                 for s in &f.sources {
                     self.forecast_store.record(
-                        now, &market_id, &s.source, track::ForecastKind::Direction,
+                        now, &market_id, &s.source, track::ForecastKind::Direction, category,
                         forecast::direction_from_edge(s.p, f.market_p),
                         0.5, ref_price, cfg.horizon_ms,
                     );
                 }
             } else {
                 self.forecast_store.record(
-                    now, &market_id, "ensemble", track::ForecastKind::Direction,
+                    now, &market_id, "ensemble", track::ForecastKind::Direction, category,
                     f.ensemble_p, f.market_p, ref_price, cfg.horizon_ms,
                 );
                 for s in &f.sources {
                     self.forecast_store.record(
-                        now, &market_id, &s.source, track::ForecastKind::Direction,
+                        now, &market_id, &s.source, track::ForecastKind::Direction, category,
                         s.p, f.market_p, ref_price, cfg.horizon_ms,
                     );
                 }
@@ -2208,12 +2213,9 @@ impl Engine {
                 recorded: self.forecast_store.len(),
                 resolved: self.forecast_store.resolved_count(),
                 pending: self.forecast_store.pending_count(),
-                trusted_sources: self
-                    .forecast_store
-                    .source_kinds()
-                    .into_iter()
-                    .filter(|(s, k)| self.forecast_store.trust_of(s, *k) > 0.0)
-                    .count(),
+                // Counted off the cached scoreboard rather than re-scoring the
+                // ledger — `state()` runs on every tick.
+                trusted_sources: self.track_cache.iter().filter(|t| t.trust > 0.0).count(),
             },
         }
     }
@@ -2265,6 +2267,17 @@ impl Engine {
     /// Take and clear queued alert messages (drained by the webhook poster).
     pub fn drain_alerts(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_alerts)
+    }
+}
+
+/// Market class for the calibration hierarchy. Deliberately coarse: these are
+/// the three groups where a forecaster's competence genuinely differs, and
+/// splitting further would starve every bucket of evidence.
+fn market_category(kind: MarketKind) -> &'static str {
+    match kind {
+        MarketKind::Prediction => "prediction",
+        MarketKind::Crypto => "crypto",
+        MarketKind::Equity => "equity",
     }
 }
 
