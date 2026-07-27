@@ -4,11 +4,15 @@
 
 use crate::state::AppState;
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
-use pythia_core::connectors::{MarketConnector, OrderRequest, OrderType, Side, Venue};
-use pythia_core::engine::{EngineState, LiveOrderOut, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::connectors::cex::{self, Exchange, ExchangeInfo};
+use pythia_core::connectors::{Side, Venue};
+use pythia_core::engine::{EngineState, LiveConfig, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::execution::{self, Credentials};
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::vault;
-use std::collections::{BTreeMap, HashSet};
+use pythia_core::wallets::{self, WalletSources, WalletsSnapshot, WatchedAddress};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 fn push_state(app: &AppHandle) {
@@ -18,26 +22,68 @@ fn push_state(app: &AppHandle) {
     }
 }
 
-fn venue_enum(name: &str) -> Option<Venue> {
-    match name {
-        "polymarket" => Some(Venue::Polymarket),
-        "crypto" => Some(Venue::Crypto),
-        "alpaca" => Some(Venue::Alpaca),
-        _ => None,
+/// Assemble venue credentials from the OS keychain.
+///
+/// Alpaca lives under the `alpaca` slot; the crypto exchange's *choice* lives
+/// under `crypto` (field `exchange`) while its keys live in a per-exchange slot,
+/// so switching exchanges cannot send one venue's key to another.
+fn credentials_from_vault() -> Credentials {
+    let alpaca = vault::get("alpaca").and_then(|f| {
+        let k = f.get("keyId")?.trim().to_string();
+        let s = f.get("secret")?.trim().to_string();
+        (!k.is_empty() && !s.is_empty()).then_some((k, s))
+    });
+
+    let crypto = vault::get("crypto").unwrap_or_default();
+    let exchange = crypto
+        .get("exchange")
+        .and_then(|id| Exchange::parse(id))
+        .and_then(|ex| {
+            let f = vault::get(&vault::exchange_slot(ex.id()))?;
+            let k = f.get("key")?.trim().to_string();
+            let s = f.get("secret")?.trim().to_string();
+            (!k.is_empty() && !s.is_empty())
+                .then(|| (ex, k, s, f.get("passphrase").cloned().unwrap_or_default()))
+        });
+
+    let flag = |m: &BTreeMap<String, String>, k: &str| {
+        matches!(m.get(k).map(String::as_str), Some("1" | "true" | "on"))
+    };
+    let alpaca_fields = vault::get("alpaca").unwrap_or_default();
+    Credentials {
+        alpaca,
+        exchange,
+        alpaca_extended_hours: flag(&alpaca_fields, "extendedHours"),
+        alpaca_allow_shorts: flag(&alpaca_fields, "allowShorts"),
     }
 }
 
-/// Recompute which venues have keys and push it into the engine.
+/// Watch-only on-chain addresses, stored as a JSON array under the `wallets`
+/// slot. Never contains a private key — see `pythia_core::wallets`.
+fn watched_addresses() -> Vec<WatchedAddress> {
+    vault::get(vault::WALLETS)
+        .and_then(|f| f.get("addresses").cloned())
+        .and_then(|raw| serde_json::from_str::<Vec<WatchedAddress>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Re-read credentials from the keychain, cache them, and tell the engine which
+/// venues are actually reachable. Call after any key change.
 pub fn refresh_connected(st: &AppState) {
-    let mut set = HashSet::new();
-    for v in vault::VENUES {
-        if vault::has_keys(v) {
-            if let Some(e) = venue_enum(v) {
-                set.insert(e);
-            }
-        }
+    let creds = Arc::new(credentials_from_vault());
+    let mut connected = creds.connected_venues();
+    // Polymarket has no order path, but its odds are keyless — show the badge
+    // if the user stored something there.
+    if vault::has_keys("polymarket") {
+        connected.insert(Venue::Polymarket);
     }
-    st.engine.lock().unwrap().set_connected(set);
+    st.engine.lock().unwrap().set_connected(connected);
+    *st.creds.lock().unwrap() = creds;
+}
+
+/// The cached credential set, for the daemon.
+pub fn credentials(st: &AppState) -> Arc<Credentials> {
+    st.creds.lock().unwrap().clone()
 }
 
 /// Reload the cached webhook URL from the vault.
@@ -142,9 +188,12 @@ pub async fn test_alert(app_state: State<'_, AppState>) -> Result<(), String> {
     }
 }
 
+/// Which credential slots are populated — venues, exchanges and the wallet
+/// address list. Values are never returned, only presence.
 #[tauri::command]
 pub fn venue_status() -> Vec<(String, bool)> {
-    vault::VENUES.iter().map(|v| (v.to_string(), vault::has_keys(v))).collect()
+    let ids: Vec<&str> = Exchange::ALL.iter().map(|e| e.id()).collect();
+    vault::status(&ids)
 }
 
 // ── LLM providers (multi-provider AI signals) ────────────────────────────────
@@ -196,63 +245,146 @@ pub fn clear_llm_key(provider: String) -> Result<(), String> {
     }
 }
 
-// ── live execution (Alpaca) ──────────────────────────────────────────────────
+// ── live execution ───────────────────────────────────────────────────────────
 
 /// Arm/disarm real order routing. Guarded on the frontend by a typed
 /// confirmation; the risk manager + kill switch still gate every order.
+///
+/// Arming refuses unless every requested venue passes a read-only credential
+/// check. Finding out a key is wrong when the first signal fires — with the
+/// order already gone — is the failure this exists to prevent.
 #[tauri::command]
-pub fn set_live(app: AppHandle, app_state: State<AppState>, armed: bool, paper: bool, dry_run: bool) {
-    app_state.engine.lock().unwrap().set_live(armed, paper, dry_run);
+pub async fn set_live(app: AppHandle, cfg: LiveConfig) -> Result<(), String> {
+    let (engine, creds) = {
+        let st = app.state::<AppState>();
+        (st.engine.clone(), credentials(st.inner()))
+    };
+
+    if cfg.armed && !cfg.dry_run {
+        for venue in &cfg.venues {
+            execution::verify(&creds, *venue, cfg.paper)
+                .await
+                .map_err(|e| format!("cannot arm {venue:?}: {e}"))?;
+        }
+    }
+
+    engine.lock().unwrap().set_live(cfg);
     push_state(&app);
+    // Pick up anything that filled while we were disarmed.
+    execution::reconcile(&engine, &creds).await;
+    push_state(&app);
+    Ok(())
+}
+
+/// Read-only credential check for any venue. Places no order.
+#[tauri::command]
+pub async fn live_verify(app: AppHandle, venue: Venue, paper: bool) -> Result<String, String> {
+    let creds = credentials(app.state::<AppState>().inner());
+    execution::verify(&creds, venue, paper).await
 }
 
 /// Read-only Alpaca account check (buying power, status) for the connection test.
 #[tauri::command]
-pub async fn alpaca_account(paper: bool) -> Result<AlpacaAccount, String> {
-    let keys = vault::get("alpaca").unwrap_or_default();
-    let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), paper);
-    if !conn.is_live_ready() {
-        return Err("Alpaca keys not in vault — add them in Settings".into());
-    }
-    conn.account().await.map_err(|e| e.to_string())
+pub async fn alpaca_account(app: AppHandle, paper: bool) -> Result<AlpacaAccount, String> {
+    let creds = credentials(app.state::<AppState>().inner());
+    let (key, secret) = creds
+        .alpaca
+        .clone()
+        .ok_or("Alpaca keys not in vault — add them in Settings")?;
+    AlpacaConnector::new(Some(key), Some(secret), paper)
+        .account()
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// Submit one drained live order to Alpaca (keys from the vault) and apply the
-/// result. Called from the daemon tick loop; not a Tauri command.
-pub async fn submit_live_order(app: &AppHandle, o: LiveOrderOut) {
-    if o.dry_run {
-        if let Some(st) = app.try_state::<AppState>() {
-            st.engine.lock().unwrap().apply_live_reject(&o.order_id, "dry-run: not submitted");
-        }
-    } else {
-        let keys = vault::get("alpaca").unwrap_or_default();
-        let conn = AlpacaConnector::from_fields(|k| keys.get(k).cloned(), o.paper);
-        if !conn.is_live_ready() {
-            if let Some(st) = app.try_state::<AppState>() {
-                st.engine
-                    .lock()
-                    .unwrap()
-                    .apply_live_reject(&o.order_id, "Alpaca keys not in vault — add them in Settings");
-            }
-        } else {
-            let req = OrderRequest {
-                market_id: o.symbol.clone(),
-                side: o.side,
-                order_type: OrderType::Market,
-                qty: o.qty,
-                limit_price: None,
-            };
-            let res = conn.place_order(req).await;
-            if let Some(st) = app.try_state::<AppState>() {
-                let mut e = st.engine.lock().unwrap();
-                match res {
-                    Ok(fill) => e.apply_live_fill(&o.order_id, fill.qty, fill.price),
-                    Err(err) => e.apply_live_reject(&o.order_id, &err.to_string()),
-                }
-            }
-        }
+// ── exchanges & wallets ──────────────────────────────────────────────────────
+
+/// Every exchange Pythia can route to, with a `configured` flag from the vault.
+#[tauri::command]
+pub fn exchanges() -> Vec<ExchangeInfo> {
+    cex::exchanges_with(|e| vault::has_keys(&vault::exchange_slot(e.id())))
+}
+
+/// Store one exchange's credentials and make it the active crypto venue.
+#[tauri::command]
+pub fn save_exchange_keys(
+    app: AppHandle,
+    app_state: State<AppState>,
+    exchange: String,
+    fields: BTreeMap<String, String>,
+) -> Result<(), String> {
+    let ex = Exchange::parse(&exchange).ok_or_else(|| format!("unknown exchange: {exchange}"))?;
+    let fields: BTreeMap<String, String> =
+        fields.into_iter().filter(|(_, v)| !v.trim().is_empty()).collect();
+    if !fields.contains_key("key") || !fields.contains_key("secret") {
+        return Err("both an API key and a secret are required".into());
     }
-    push_state(app);
+    if ex.needs_passphrase() && !fields.contains_key("passphrase") {
+        return Err(format!("{} also needs the API passphrase you chose", ex.label()));
+    }
+    vault::save(&vault::exchange_slot(ex.id()), &fields)?;
+
+    // Selecting an exchange is a separate slot so the choice survives a key wipe.
+    let mut crypto = vault::get("crypto").unwrap_or_default();
+    crypto.insert("exchange".into(), ex.id().into());
+    vault::save("crypto", &crypto)?;
+
+    refresh_connected(app_state.inner());
+    push_state(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_exchange_keys(app: AppHandle, app_state: State<AppState>, exchange: String) -> Result<(), String> {
+    let ex = Exchange::parse(&exchange).ok_or_else(|| format!("unknown exchange: {exchange}"))?;
+    vault::clear(&vault::exchange_slot(ex.id()))?;
+    refresh_connected(app_state.inner());
+    push_state(&app);
+    Ok(())
+}
+
+/// Read the watch-only address list back (addresses are public data).
+#[tauri::command]
+pub fn wallet_addresses() -> Vec<WatchedAddress> {
+    watched_addresses()
+}
+
+/// Replace the watch-only address list. Rejects anything that is not a
+/// plausible address, and never accepts a key or seed phrase.
+#[tauri::command]
+pub fn save_wallet_addresses(list: Vec<WatchedAddress>) -> Result<(), String> {
+    for w in &list {
+        w.validate().map_err(|e| format!("{}: {e}", w.address))?;
+    }
+    if list.is_empty() {
+        return vault::clear(vault::WALLETS);
+    }
+    let json = serde_json::to_string(&list).map_err(|e| e.to_string())?;
+    let mut fields = BTreeMap::new();
+    fields.insert("addresses".to_string(), json);
+    vault::save(vault::WALLETS, &fields)
+}
+
+/// The unified balance sheet across broker, exchange and watched addresses.
+/// Read-only: this command cannot move anything.
+#[tauri::command]
+pub async fn wallet_snapshot(app: AppHandle) -> WalletsSnapshot {
+    let (creds, paper) = {
+        let st = app.state::<AppState>();
+        let creds = credentials(st.inner());
+        let paper = st.engine.lock().unwrap().live_config().paper;
+        (creds, paper)
+    };
+    let sources = WalletSources {
+        alpaca: creds.alpaca.clone().map(|(k, s)| (k, s, paper)),
+        exchanges: creds
+            .exchange
+            .clone()
+            .map(|(ex, k, s, p)| vec![(ex, k, s, p)])
+            .unwrap_or_default(),
+        addresses: watched_addresses(),
+    };
+    wallets::snapshot(&sources).await
 }
 
 /// Ask a provider for a signal on one market. Key comes from the vault; the

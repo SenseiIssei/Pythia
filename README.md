@@ -2,7 +2,7 @@
 
 # Pythia
 
-### Autonomous multi-venue prediction &amp; trading cockpit — Polymarket · crypto · equities, one neon control panel
+### Autonomous multi-venue prediction &amp; trading cockpit — equities · 4 crypto exchanges · prediction markets, one neon control panel
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge&logo=opensourceinitiative)](https://opensource.org/licenses/MIT)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-orange?style=for-the-badge&logo=tauri&logoColor=white)](https://v2.tauri.app)
@@ -14,7 +14,7 @@
 
 <br>
 
-[![Tests](https://img.shields.io/badge/rust%20tests-20%20passing-brightgreen?style=flat-square&logo=rust)](#)
+[![Tests](https://img.shields.io/badge/rust%20tests-97%20passing-brightgreen?style=flat-square&logo=rust)](#)
 [![Paper-first](https://img.shields.io/badge/mode-paper--first-brightgreen?style=flat-square)](SAFETY.md)
 [![AI providers](https://img.shields.io/badge/AI-10%20providers-a855f7?style=flat-square)](#-ai-signals--bring-any-model)
 [![Last commit](https://img.shields.io/github/last-commit/SenseiIssei/Pythia?style=flat-square&logo=git&label=last%20commit&color=blue)](https://github.com/SenseiIssei/Pythia)
@@ -40,8 +40,10 @@ model, and — only when you explicitly arm a strategy — routes real orders. *
 mode.** One engine core drives three runtimes (native desktop, web + backend server, browser paper),
 and any large-language-model of your choice can weigh in on a market.
 
-> ⚠️ **Before anything live, read [`SAFETY.md`](SAFETY.md) and the [`PLAN.md`](PLAN.md).** Automated
-> trading and prediction-market betting can lose all your money. This is **not** financial advice.
+> ⚠️ **Before anything live, read [`SAFETY.md`](SAFETY.md) and [`PROFIT-PLAN.md`](PROFIT-PLAN.md).**
+> Automated trading and prediction-market betting can lose all your money. This is **not** financial
+> advice, and no strategy shipped here is known to be profitable — `PROFIT-PLAN.md` says exactly why,
+> and what a strategy has to prove before it deserves real capital.
 
 ---
 
@@ -60,15 +62,24 @@ and any large-language-model of your choice can weigh in on a market.
   return-correlation / concentration matrix.
 - **🧠 AI Signals — bring any model** — Anthropic (Claude), OpenAI (GPT), xAI (Grok), z.ai (GLM),
   DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
-- **📡 Gated live execution (Alpaca)** — a real order path that ships **disarmed**. Arming needs a
-  typed `ARM LIVE` confirmation; only Alpaca markets from a *Live* strategy route to the broker, and
-  the kill switch + every risk limit gate each order. Start on the **paper endpoint** (real API, no
-  real money), test the connection, then flip to real money once you trust it.
+- **📡 Gated live execution — 5 venues** — Alpaca equities plus **Kraken · Binance · Bybit · OKX**
+  spot. Ships **disarmed**; each venue is armed *separately* behind a typed `ARM LIVE`, and arming
+  runs a read-only credential check that refuses if a venue doesn't answer. Orders that cannot fill
+  (market closed, no buying power, would open a short) are refused **before** submission, with the
+  reason in the journal.
+- **An order lifecycle that can't desync** — submit → poll → *cancel at the venue* on timeout.
+  Partial fills book as they happen; a repeated poll can't double-book; the daemon reconciles
+  against the broker's own position list and **the broker always wins**. A position opened with real
+  money is tagged `REAL`, survives restarts, and the simulator will never close it.
+- **👛 Wallets — every account, one balance sheet** — broker cash, spot balances across all four
+  exchanges, and **watch-only** on-chain addresses on Ethereum, Polygon, Arbitrum, Optimism, Base,
+  BNB Chain, Solana and Bitcoin. Read-only by design: Pythia has no field that accepts a private key.
 - **Real market data** — live Kraken crypto prices and Polymarket odds (no keys needed), plus real
   **Alpaca equity quotes** (AAPL, NVDA, MSFT, AMZN, TSLA) once your Alpaca keys are set, so live
   equities strategies trade on genuine prices rather than the simulator.
 - **Secure by default** — API keys live in the OS keychain (desktop) or the server's environment,
-  never in code, never logged, never returned to the UI. Discord/webhook alerts, persistent state,
+  never in code, never logged, never returned to the UI. Grant them *trade* and not withdrawal, and
+  a leaked key costs you a rotation, not your coins. Discord/webhook alerts, persistent state,
   system tray, first-run legal gate.
 
 ---
@@ -157,13 +168,18 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `POST /api/command` | mutate the engine (kill switch, limits, strategies, orders) |
 | `GET /api/llm/providers` | which providers have a key in the server env |
 | `POST /api/llm/signal` | ask a provider for a signal (`{provider, model, context}`) |
-| `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun}`) |
+| `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun, venues, timeoutSec}`) |
 | `GET /api/live/account` | Alpaca account check (buying power/status) |
+| `GET /api/live/verify` | read-only credential check for any venue (`?venue=&paper=`) |
+| `GET /api/exchanges` | supported crypto exchanges + which have keys |
+| `GET /api/wallets` | unified balance sheet (broker · exchanges · watched addresses) |
 
 Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, any provider key
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), and Alpaca for real equity quotes +
-live execution: `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `APCA_FEED` (default `iex`, the free tier;
-paid plans can use `sip`).
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), Alpaca for real equity quotes +
+live execution (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `APCA_FEED` — default `iex`, the free
+tier; paid plans can use `sip`), a crypto exchange (`PYTHIA_EXCHANGE` = `kraken|binance|bybit|okx`
+plus `PYTHIA_EXCHANGE_KEY` / `_SECRET` / `_PASSPHRASE`), and optional watch-only addresses in
+`PYTHIA_WALLETS`. See [`.env.example`](.env.example) for the annotated list.
 
 ### Browser / web app (no Rust, no keys — explore the UI)
 
@@ -185,14 +201,20 @@ To make the browser build a thin client of the backend server, set
 ```
 Pythia/                     # Cargo workspace
 ├─ PLAN.md · SAFETY.md      # the master plan · read before going live
-├─ crates/pythia-core/      # the shared engine brain (no UI): strategies, indicators,
-│  └─ src/                  #   risk, connectors, market data, vault, alerts, llm (AI signals)
+├─ PROFIT-PLAN.md           # where an edge could come from, and what it must prove first
+├─ crates/pythia-core/      # the shared engine brain (no UI)
+│  └─ src/
+│     ├─ engine/            #   strategies, indicators, risk, live order state machine
+│     ├─ connectors/        #   alpaca · cex/{kraken,binance,bybit,okx} · polymarket · paper
+│     ├─ execution.rs       #   the one place that sends an order (shared by both hosts)
+│     ├─ wallets.rs         #   unified balances incl. watch-only on-chain addresses
+│     └─ …                  #   market data, vault, alerts, llm (AI signals)
 ├─ server/                  # standalone backend — axum HTTP + WebSocket over pythia-core
 ├─ src-tauri/               # native desktop shell (Tauri v2) — thin layer over pythia-core
 └─ src/                     # React cockpit (also runs standalone via the TS paper engine)
    ├─ engine/               #   TS mirror of the core + Tauri/Server/Paper clients
-   ├─ pages/                #   Dashboard, Markets, Positions, Strategies, Composer, Backtest,
-   │                        #   Optimizer, Analytics, Correlation, AI Signals, Risk, Journal, …
+   ├─ pages/                #   Dashboard, Markets, Positions, Wallets, Strategies, Composer,
+   │                        #   Backtest, Optimizer, Analytics, Correlation, AI Signals, Live, …
    └─ components/           #   neon UI kit
 ```
 
@@ -202,30 +224,33 @@ Pythia/                     # Cargo workspace
 
 - **Paper (default):** a simulated matching engine fills orders against live/replayed prices with a
   fake balance. Prove strategies here first.
-- **Live (gated):** requires your own API keys (OS keychain) and a per-strategy, typed confirmation
-  to arm. The global kill switch and risk limits always apply. Polymarket is geoblocked for US
-  persons — confirm legality where you live.
+- **Live (gated):** requires your own API keys (OS keychain), a typed confirmation, and a venue you
+  enabled explicitly. The global kill switch and risk limits always apply. Polymarket is geoblocked
+  for US persons — confirm legality where you live.
+- **Real ≠ paper.** A position opened with a real fill is tagged `REAL`. Disarming does **not** close
+  it, and the simulator will never pretend to: Pythia refuses the fake exit and tells you the
+  position is still open at the venue.
 
 Read [`SAFETY.md`](SAFETY.md) in full before enabling anything live.
 
-### Going live (Alpaca, paper-first)
+### Going live (paper-first)
 
 📖 **Full step-by-step runbook: [`docs/LIVE-RUN.md`](docs/LIVE-RUN.md)** — keys, verification,
-arming, what the journal looks like, market hours, and how to stop.
+arming, what the journal looks like, market hours, restarts, and how to stop.
 
-Live execution is wired for **Alpaca equities** and ships **disarmed**. The short version:
+Live execution ships **disarmed**. The short version:
 
-1. Add your Alpaca keys — desktop: *Settings → Alpaca* (OS keychain); server: `APCA_API_KEY_ID` /
-   `APCA_API_SECRET_KEY` env vars. The equity markets immediately switch from the simulator to
-   **real Alpaca quotes**, so signals are computed on genuine prices.
-2. Open **Live** → *Test paper connection* (read-only; shows account status + buying power).
+1. Add keys — desktop: *Settings → Alpaca* and *Settings → Crypto exchanges* (OS keychain); server:
+   env vars. Equity markets immediately switch from the simulator to **real Alpaca quotes**.
+2. Open **Live** → enable the venues you want → *Test paper connection* (read-only).
 3. Keep the endpoint on **Paper**, type `ARM LIVE`, and arm. Set a strategy to **Live** on the
-   Strategies page — its Alpaca orders now hit `paper-api.alpaca.markets` (real order lifecycle, no
-   real money). Use **Dry-run** to log intended orders without sending them anywhere.
+   Strategies page. Use **Dry-run** for a rehearsal that submits nothing.
 4. Only once you trust it, flip the endpoint to **Live** and re-arm for real money.
 
-Only Alpaca markets from a Live strategy ever route to the broker; crypto and Polymarket stay paper.
-The kill switch and every risk limit gate each order first.
+Each venue is armed separately — one left off keeps simulating while the others are live. Polymarket
+never routes an order at all: its CLOB signs with a wallet key rather than a revocable API key, which
+is a different risk category ([`PROFIT-PLAN.md`](PROFIT-PLAN.md) §7.3). The kill switch and every
+risk limit gate each order first, and the venue connector refuses the ones that cannot fill.
 
 ---
 

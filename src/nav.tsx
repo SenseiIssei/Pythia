@@ -2,6 +2,7 @@ import {
   LayoutDashboard,
   LineChart,
   Wallet,
+  Coins,
   Cpu,
   ShieldAlert,
   ScrollText,
@@ -21,6 +22,7 @@ export type PageId =
   | "dashboard"
   | "markets"
   | "positions"
+  | "wallets"
   | "strategies"
   | "composer"
   | "backtest"
@@ -45,6 +47,7 @@ export const NAV: NavItem[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, section: "Overview" },
   { id: "markets", label: "Markets", icon: LineChart, section: "Trading" },
   { id: "positions", label: "Positions", icon: Wallet, section: "Trading" },
+  { id: "wallets", label: "Wallets", icon: Coins, section: "Trading" },
   { id: "strategies", label: "Strategies", icon: Cpu, section: "Trading" },
   { id: "composer", label: "Composer", icon: Blocks, section: "Research" },
   { id: "backtest", label: "Backtest", icon: FlaskConical, section: "Research" },

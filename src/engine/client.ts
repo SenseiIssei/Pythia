@@ -11,7 +11,18 @@ import type {
   StrategyState,
 } from "../types";
 
-const DISARMED: LiveStatus = { armed: false, paper: true, dryRun: false, alpacaConnected: false, pending: 0 };
+/** The safe default every runtime starts from: nothing armed, nothing routing. */
+const DISARMED: LiveStatus = {
+  armed: false,
+  paper: true,
+  dryRun: false,
+  venues: [],
+  timeoutSec: 120,
+  connected: [],
+  alpacaConnected: false,
+  pending: 0,
+  livePositions: 0,
+};
 
 // The one interface the UI depends on. Two implementations satisfy it:
 //   · PaperEngine        — pure TypeScript, runs in the browser (dev / web app)

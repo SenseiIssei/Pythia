@@ -2,12 +2,23 @@ import { useStore } from "../store";
 import { Button, Card, PageHeader, Badge, fmtUsd } from "../components/ui";
 
 export function Positions() {
-  const { positions, orders, flatten } = useStore();
+  const { positions, orders, flatten, live } = useStore();
   const recent = orders.slice(0, 25);
+  const stuck = positions.some((p) => p.live) && !live.armed;
 
   return (
     <div className="animate-fade-in">
       <PageHeader title="Positions" subtitle="Open positions & recent orders across all venues" />
+
+      {stuck && (
+        <Card className="mb-4 border-danger/40 bg-danger/5">
+          <div className="text-sm text-cyber-text-dim">
+            <span className="font-bold text-danger">REAL positions cannot be flattened while disarmed.</span>{" "}
+            Those shares exist at the venue — the simulator will not pretend to close them. Arm live execution
+            again, or close them in the venue's own dashboard.
+          </div>
+        </Card>
+      )}
 
       <Card title="Open Positions" className="mb-4">
         {positions.length === 0 ? (
@@ -27,6 +38,9 @@ export function Positions() {
                 <div className="flex items-center gap-2 py-2">
                   <Badge tone={p.qty >= 0 ? "green" : "red"}>{p.qty >= 0 ? "LONG" : "SHORT"}</Badge>
                   <span>{p.symbol}</span>
+                  {/* Real shares behave differently from simulated ones: they
+                      can only be closed while live routing is armed. */}
+                  {p.live && <Badge tone="red">REAL</Badge>}
                 </div>
                 <Cell>{p.qty.toFixed(4)}</Cell>
                 <Cell>{p.avgPrice.toLocaleString()}</Cell>

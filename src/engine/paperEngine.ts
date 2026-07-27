@@ -1,6 +1,7 @@
 import type {
   JournalEntry,
   JournalKind,
+  LiveStatus,
   Market,
   Mode,
   Order,
@@ -17,7 +18,7 @@ import { MarketSim } from "./marketSim";
 import { DEFAULT_LIMITS, evaluate, type RiskContext } from "./risk";
 import { defaultStrategies, runStrategy } from "./strategies";
 import * as ind from "./indicators";
-import type { EngineClient } from "./client";
+import { DISARMED, type EngineClient } from "./client";
 
 interface PositionInternal {
   marketId: string;
@@ -581,6 +582,7 @@ export class PaperEngine implements EngineClient {
         lastPrice: m.price,
         unrealized: (m.price - p.avgPrice) * p.qty,
         mode: "paper",
+        live: false, // the browser engine cannot reach a venue
       });
     }
     return out;
@@ -607,9 +609,9 @@ export class PaperEngine implements EngineClient {
     return out;
   }
 
-  // The browser paper engine never trades live — it can't reach a broker.
-  liveStatus() {
-    return { armed: false, paper: true, dryRun: false, alpacaConnected: false, pending: 0 };
+  // The browser paper engine never trades live — it can't reach a venue.
+  liveStatus(): LiveStatus {
+    return DISARMED;
   }
 
   // ── mutations from the UI ──────────────────────────────────────────────────
