@@ -10,6 +10,7 @@ import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
+import { Wallets } from "./pages/Wallets";
 import { Strategies } from "./pages/Strategies";
 import { Composer } from "./pages/Composer";
 import { Backtest } from "./pages/Backtest";
@@ -27,6 +28,7 @@ const PAGES: Record<PageId, () => ReactNode> = {
   dashboard: Dashboard,
   markets: Markets,
   positions: Positions,
+  wallets: Wallets,
   strategies: Strategies,
   composer: Composer,
   backtest: Backtest,

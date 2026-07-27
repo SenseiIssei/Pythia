@@ -10,6 +10,8 @@
 pub mod alerts;
 pub mod connectors;
 pub mod engine;
+pub mod execution;
 pub mod llm;
 pub mod marketdata;
 pub mod vault;
+pub mod wallets;

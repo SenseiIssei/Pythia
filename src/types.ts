@@ -37,6 +37,8 @@ export interface PositionView {
   lastPrice: number;
   unrealized: number;
   mode: Mode;
+  /** Opened with a real venue fill — closing it needs live routing. */
+  live: boolean;
 }
 
 export interface Order {
@@ -200,11 +202,87 @@ export interface LlmSignal {
   model: string;
 }
 
-// ── live execution status ────────────────────────────────────────────────────
+// ── live execution ───────────────────────────────────────────────────────────
 export interface LiveStatus {
   armed: boolean;
   paper: boolean;
   dryRun: boolean;
+  /** Venues allowed to route live. Empty ⇒ nothing routes, whatever `armed` says. */
+  venues: Venue[];
+  /** Seconds a working order may sit before it is cancelled at the venue. */
+  timeoutSec: number;
+  /** Venues with usable credentials in this runtime. */
+  connected: Venue[];
   alpacaConnected: boolean;
   pending: number;
+  /** Positions held via a real venue fill — these cannot be closed by the simulator. */
+  livePositions: number;
+}
+
+/** What the arm flow sends. Mirrors the Rust `LiveConfig`. */
+export interface LiveConfig {
+  armed: boolean;
+  paper: boolean;
+  dryRun: boolean;
+  venues: Venue[];
+  timeoutSec: number;
+}
+
+// ── exchanges & wallets ──────────────────────────────────────────────────────
+export type ExchangeId = "kraken" | "binance" | "bybit" | "okx" | "coinbase";
+
+export interface ExchangeInfo {
+  id: ExchangeId;
+  label: string;
+  /** OKX and Coinbase need an API passphrase alongside key + secret. */
+  needsPassphrase: boolean;
+  /** Whether order routing is implemented for this venue. */
+  canTrade: boolean;
+  configured: boolean;
+}
+
+export type Chain =
+  | "ethereum"
+  | "polygon"
+  | "arbitrum"
+  | "optimism"
+  | "base"
+  | "bsc"
+  | "solana"
+  | "bitcoin";
+
+/** A watch-only address. Pythia never holds a key for these. */
+export interface WatchedAddress {
+  chain: Chain;
+  address: string;
+  label: string;
+}
+
+export interface Balance {
+  asset: string;
+  free: number;
+  total: number;
+  usdValue?: number;
+}
+
+export type WalletKind = "broker" | "exchange" | "onchain";
+
+export interface WalletAccount {
+  id: string;
+  kind: WalletKind;
+  provider: string;
+  label: string;
+  connected: boolean;
+  canTrade: boolean;
+  balances: Balance[];
+  usdTotal: number;
+  error?: string;
+}
+
+export interface WalletsSnapshot {
+  accounts: WalletAccount[];
+  usdTotal: number;
+  /** Assets held but not priced — excluded from `usdTotal` rather than counted as 0. */
+  unpriced: string[];
+  updatedAt: number;
 }

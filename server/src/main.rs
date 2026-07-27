@@ -32,9 +32,12 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
-use pythia_core::connectors::{MarketConnector, OrderRequest, OrderType, Side};
-use pythia_core::engine::{Engine, EngineState, LiveOrderOut, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::connectors::cex::{self, Exchange};
+use pythia_core::connectors::{Side, Venue};
+use pythia_core::engine::{Engine, EngineState, LiveConfig, RiskLimits, StrategyConfig, StrategyState};
+use pythia_core::execution::{self, Credentials};
 use pythia_core::llm::{self, LlmConfig, Provider};
+use pythia_core::wallets::{self, WalletSources, WatchedAddress};
 use pythia_core::{alerts, marketdata};
 
 /// Shared server state. The engine lives behind a Mutex (locked only briefly,
@@ -45,6 +48,54 @@ struct AppState {
     engine: Arc<Mutex<Engine>>,
     tx: broadcast::Sender<String>,
     webhook: Arc<Mutex<Option<String>>>,
+    /// Venue credentials, read once from the environment at boot. Restart the
+    /// server to pick up an edited `.env` — keys are not hot-reloaded, so a
+    /// half-saved file can never arm a venue mid-session.
+    creds: Arc<Credentials>,
+}
+
+fn env_str(key: &str) -> Option<String> {
+    std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+fn env_flag(key: &str) -> bool {
+    matches!(env_str(key).as_deref(), Some("1" | "true" | "TRUE" | "yes" | "on"))
+}
+
+/// Assemble venue credentials from the process environment.
+fn credentials_from_env() -> Credentials {
+    let alpaca = match (env_str("APCA_API_KEY_ID"), env_str("APCA_API_SECRET_KEY")) {
+        (Some(k), Some(s)) => Some((k, s)),
+        _ => None,
+    };
+    // One exchange at a time — `PYTHIA_EXCHANGE` picks which.
+    let exchange = env_str("PYTHIA_EXCHANGE")
+        .as_deref()
+        .and_then(Exchange::parse)
+        .and_then(|ex| {
+            let k = env_str("PYTHIA_EXCHANGE_KEY")?;
+            let s = env_str("PYTHIA_EXCHANGE_SECRET")?;
+            Some((ex, k, s, env_str("PYTHIA_EXCHANGE_PASSPHRASE").unwrap_or_default()))
+        });
+    Credentials {
+        alpaca,
+        exchange,
+        alpaca_extended_hours: env_flag("PYTHIA_EXTENDED_HOURS"),
+        alpaca_allow_shorts: env_flag("PYTHIA_ALLOW_SHORTS"),
+    }
+}
+
+/// Watch-only on-chain addresses, as a JSON array in `PYTHIA_WALLETS`:
+/// `[{"chain":"ethereum","address":"0x…","label":"cold"}]`
+fn watched_addresses() -> Vec<WatchedAddress> {
+    let Some(raw) = env_str("PYTHIA_WALLETS") else { return vec![] };
+    match serde_json::from_str::<Vec<WatchedAddress>>(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("PYTHIA_WALLETS is not a valid address array: {e}");
+            vec![]
+        }
+    }
 }
 
 #[tokio::main]
@@ -59,10 +110,16 @@ async fn main() {
         .init();
 
     let (tx, _rx) = broadcast::channel::<String>(64);
+    let creds = Arc::new(credentials_from_env());
+    let engine = Arc::new(Mutex::new(Engine::new()));
+    // Reflect which venues actually have usable keys before the first tick, so
+    // the UI never shows a venue as armable that cannot route.
+    engine.lock().unwrap().set_connected(creds.connected_venues());
     let state = AppState {
-        engine: Arc::new(Mutex::new(Engine::new())),
+        engine,
         tx: tx.clone(),
         webhook: Arc::new(Mutex::new(std::env::var("PYTHIA_WEBHOOK_URL").ok())),
+        creds,
     };
 
     // The engine daemon — the network analog of the desktop tick loop.
@@ -77,9 +134,12 @@ async fn main() {
         .route("/api/llm/signal", post(post_llm_signal))
         .route("/api/live/config", post(post_live_config))
         .route("/api/live/account", get(get_live_account))
+        .route("/api/live/verify", get(get_live_verify))
+        .route("/api/exchanges", get(get_exchanges))
+        .route("/api/wallets", get(get_wallets))
         // The dashboards are served from a different origin in dev; allow them.
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = std::env::var("PYTHIA_BIND").unwrap_or_else(|_| "0.0.0.0:8787".into());
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -104,16 +164,25 @@ async fn main() {
     } else {
         tracing::info!("LLM providers configured: {}", configured.join(", "));
     }
-    // Alpaca preflight — the one thing a live run depends on.
-    let has_alpaca = std::env::var("APCA_API_KEY_ID").map(|k| !k.trim().is_empty()).unwrap_or(false)
-        && std::env::var("APCA_API_SECRET_KEY").map(|k| !k.trim().is_empty()).unwrap_or(false);
-    if has_alpaca {
+    // Venue preflight — what a live run actually depends on.
+    if state.creds.alpaca.is_some() {
         tracing::info!(
-            "Alpaca: keys present → real equity quotes ({} feed) + live execution available",
-            std::env::var("APCA_FEED").unwrap_or_else(|_| "iex".into())
+            "Alpaca: keys present → real equity quotes ({} feed) + live execution available{}",
+            std::env::var("APCA_FEED").unwrap_or_else(|_| "iex".into()),
+            if state.creds.alpaca_extended_hours { " (extended hours ON)" } else { "" }
         );
     } else {
         tracing::info!("Alpaca: no keys (APCA_API_KEY_ID / APCA_API_SECRET_KEY) — equities stay simulated, live orders will be rejected");
+    }
+    match &state.creds.exchange {
+        Some((ex, ..)) => tracing::info!("Crypto exchange: {} configured → live crypto execution available", ex.label()),
+        None => tracing::info!(
+            "Crypto exchange: none (set PYTHIA_EXCHANGE + PYTHIA_EXCHANGE_KEY/SECRET) — crypto stays simulated"
+        ),
+    }
+    let watched = watched_addresses().len();
+    if watched > 0 {
+        tracing::info!("Wallets: watching {watched} on-chain address(es), read-only");
     }
 
     axum::serve(listener, app).await.unwrap();
@@ -162,43 +231,21 @@ async fn tick_loop(state: AppState) {
             }
         }
 
-        // Submit any armed live orders (Alpaca). Keys come from the server env.
-        let live_orders = { state.engine.lock().unwrap().drain_live_orders() };
-        for o in live_orders {
-            submit_live_order(&state, o).await;
-        }
-    }
-}
+        // Submit new live orders and poll the ones already out. Both are
+        // network calls, so they happen with no engine lock held.
+        execution::cycle(&state.engine, &state.creds).await;
 
-/// Submit one live order to Alpaca (keys from env) and apply the result back to
-/// the engine. Dry-run and missing-key cases resolve without any network call.
-async fn submit_live_order(state: &AppState, o: LiveOrderOut) {
-    if o.dry_run {
-        state.engine.lock().unwrap().apply_live_reject(&o.order_id, "dry-run: not submitted");
-    } else {
-        let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), o.paper);
-        if !conn.is_live_ready() {
-            state.engine.lock().unwrap().apply_live_reject(
-                &o.order_id,
-                "Alpaca keys not set (APCA_API_KEY_ID / APCA_API_SECRET_KEY)",
-            );
-        } else {
-            let req = OrderRequest {
-                market_id: o.symbol.clone(),
-                side: o.side,
-                order_type: OrderType::Market,
-                qty: o.qty,
-                limit_price: None,
-            };
-            match conn.place_order(req).await {
-                Ok(fill) => state.engine.lock().unwrap().apply_live_fill(&o.order_id, fill.qty, fill.price),
-                Err(e) => state.engine.lock().unwrap().apply_live_reject(&o.order_id, &e.to_string()),
-            }
+        // Reconcile against the broker every ~2 minutes: it is the only way to
+        // notice a fill that happened while we were restarting.
+        if n % 80 == 1 {
+            execution::reconcile(&state.engine, &state.creds).await;
         }
+
+        // Push the post-execution state so listeners see fills promptly rather
+        // than a tick later.
+        let s = serde_json::to_string(&state.engine.lock().unwrap().state()).unwrap_or_default();
+        let _ = state.tx.send(s);
     }
-    // Push the updated state so listeners see the fill/rejection promptly.
-    let s = serde_json::to_string(&state.engine.lock().unwrap().state()).unwrap_or_default();
-    let _ = state.tx.send(s);
 }
 
 async fn health() -> &'static str {
@@ -306,24 +353,58 @@ struct LiveConfigReq {
     paper: bool,
     #[serde(default)]
     dry_run: bool,
+    /// Which venues may route. Omitted means Alpaca only — the historical
+    /// behaviour, and the conservative one.
+    #[serde(default)]
+    venues: Option<Vec<Venue>>,
+    #[serde(default)]
+    timeout_sec: Option<u64>,
 }
 fn default_true() -> bool {
     true
 }
 
 /// Arm/disarm live execution. Returns fresh state so the UI reflects it at once.
+///
+/// Arming is refused unless every requested venue answers a read-only account
+/// check first. Discovering a bad key when the first signal fires — with the
+/// order already gone — is exactly the failure this prevents.
 async fn post_live_config(
     State(st): State<AppState>,
     Json(req): Json<LiveConfigReq>,
-) -> Json<EngineState> {
+) -> impl IntoResponse {
+    let defaults = LiveConfig::default();
+    let cfg = LiveConfig {
+        armed: req.armed,
+        paper: req.paper,
+        dry_run: req.dry_run,
+        venues: req.venues.unwrap_or(defaults.venues),
+        timeout_sec: req.timeout_sec.unwrap_or(defaults.timeout_sec),
+    };
+
+    if cfg.armed && !cfg.dry_run {
+        for venue in &cfg.venues {
+            if let Err(e) = execution::verify(&st.creds, *venue, cfg.paper).await {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("cannot arm {venue:?}: {e}"),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let dto = {
         let mut e = st.engine.lock().unwrap();
-        e.set_live(req.armed, req.paper, req.dry_run);
+        e.set_connected(st.creds.connected_venues());
+        e.set_live(cfg);
         let s = e.state();
         let _ = st.tx.send(serde_json::to_string(&s).unwrap_or_default());
         s
     };
-    Json(dto)
+    // Pick up anything that filled while we were disarmed.
+    execution::reconcile(&st.engine, &st.creds).await;
+    Json(dto).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,19 +415,65 @@ struct AccountQuery {
 
 /// Read-only Alpaca account check (buying power, status) for the "test
 /// connection" button. Keys come from the server env.
-async fn get_live_account(axum::extract::Query(q): axum::extract::Query<AccountQuery>) -> impl IntoResponse {
-    let conn = AlpacaConnector::from_fields(|k| std::env::var(k).ok(), q.paper);
-    if !conn.is_live_ready() {
+async fn get_live_account(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<AccountQuery>,
+) -> impl IntoResponse {
+    let Some((key, secret)) = st.creds.alpaca.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Alpaca keys not set (APCA_API_KEY_ID / APCA_API_SECRET_KEY)",
         )
             .into_response();
-    }
+    };
+    let conn = AlpacaConnector::new(Some(key), Some(secret), q.paper);
     match conn.account().await {
         Ok(acct) => (StatusCode::OK, Json::<AlpacaAccount>(acct)).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, format!("alpaca: {e}")).into_response(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyQuery {
+    venue: Venue,
+    #[serde(default = "default_true")]
+    paper: bool,
+}
+
+/// Read-only credential check for any venue. Never places an order.
+async fn get_live_verify(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<VerifyQuery>,
+) -> impl IntoResponse {
+    match execution::verify(&st.creds, q.venue, q.paper).await {
+        Ok(summary) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "summary": summary }))).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+
+/// Every exchange Pythia can route to, and whether this server has keys for it.
+async fn get_exchanges(State(st): State<AppState>) -> impl IntoResponse {
+    let selected = st.creds.exchange.as_ref().map(|(e, ..)| *e);
+    Json(cex::exchanges_with(|e| selected == Some(e)))
+}
+
+/// The unified balance sheet: broker, exchange and watch-only on-chain
+/// addresses. Read-only — this endpoint cannot move anything.
+async fn get_wallets(State(st): State<AppState>) -> impl IntoResponse {
+    let sources = WalletSources {
+        alpaca: st.creds.alpaca.clone().map(|(k, s)| {
+            let paper = st.engine.lock().unwrap().live_config().paper;
+            (k, s, paper)
+        }),
+        exchanges: st
+            .creds
+            .exchange
+            .clone()
+            .map(|(ex, k, s, p)| vec![(ex, k, s, p)])
+            .unwrap_or_default(),
+        addresses: watched_addresses(),
+    };
+    Json(wallets::snapshot(&sources).await)
 }
 
 #[derive(Debug, Deserialize)]

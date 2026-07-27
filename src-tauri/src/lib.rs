@@ -12,7 +12,7 @@ mod persist;
 mod state;
 mod tray;
 
-use pythia_core::{alerts, marketdata};
+use pythia_core::{alerts, execution, marketdata};
 use state::AppState;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -50,30 +50,35 @@ pub fn run() {
                     interval.tick().await;
                     n += 1;
 
+                    // Clone the shared handles out and drop the Tauri state
+                    // guard immediately: nothing below may hold it across an
+                    // await.
+                    let (engine, creds, webhook) = {
+                        let Some(st) = handle.try_state::<AppState>() else { continue };
+                        let engine = st.engine.clone();
+                        let creds = commands::credentials(st.inner());
+                        let webhook = st.webhook.lock().unwrap().clone();
+                        (engine, creds, webhook)
+                    };
+
                     // Refresh real read-only feeds periodically (and on first tick).
-                    // Awaits happen here, with no engine lock held.
                     if n % 8 == 1 {
                         let kraken = marketdata::fetch_kraken().await;
                         let poly = marketdata::fetch_polymarket().await;
                         // Real equity quotes when Alpaca keys are in the vault
                         // (otherwise those markets stay on the simulator).
-                        let alpaca = {
-                            let keys = pythia_core::vault::get("alpaca").unwrap_or_default();
-                            let id = keys.get("keyId").cloned().unwrap_or_default();
-                            let secret = keys.get("secret").cloned().unwrap_or_default();
-                            marketdata::fetch_alpaca(&id, &secret, "iex").await
+                        let alpaca = match &creds.alpaca {
+                            Some((id, secret)) => marketdata::fetch_alpaca(id, secret, "iex").await,
+                            None => vec![],
                         };
-                        if let Some(st) = handle.try_state::<AppState>() {
-                            let mut e = st.engine.lock().unwrap();
-                            e.apply_kraken(&kraken);
-                            e.apply_polymarket(&poly);
-                            e.apply_alpaca(&alpaca);
-                        }
+                        let mut e = engine.lock().unwrap();
+                        e.apply_kraken(&kraken);
+                        e.apply_polymarket(&poly);
+                        e.apply_alpaca(&alpaca);
                     }
 
                     let (dto, queued) = {
-                        let st = handle.state::<AppState>();
-                        let mut e = st.engine.lock().unwrap();
+                        let mut e = engine.lock().unwrap();
                         e.tick();
                         (e.state(), e.drain_alerts())
                     };
@@ -81,23 +86,20 @@ pub fn run() {
 
                     // Push any queued alerts to the webhook (batched, one POST).
                     if !queued.is_empty() {
-                        let url = handle.state::<AppState>().webhook.lock().unwrap().clone();
-                        if let Some(url) = url {
-                            if !url.is_empty() {
-                                alerts::post(&url, &queued.join("\n")).await;
-                            }
+                        if let Some(url) = webhook.filter(|u| !u.is_empty()) {
+                            alerts::post(&url, &queued.join("\n")).await;
                         }
                     }
 
-                    // Submit any armed live orders (Alpaca). Keys from the vault.
-                    let live_orders = {
-                        let st = handle.state::<AppState>();
-                        let mut e = st.engine.lock().unwrap();
-                        e.drain_live_orders()
-                    };
-                    for o in live_orders {
-                        commands::submit_live_order(&handle, o).await;
+                    // Submit new live orders and poll the ones already out.
+                    execution::cycle(&engine, &creds).await;
+
+                    // Reconcile against the broker every ~2 minutes — the only
+                    // way to notice a fill that landed while we were restarting.
+                    if n % 80 == 1 {
+                        execution::reconcile(&engine, &creds).await;
                     }
+                    let _ = handle.emit("engine://state", engine.lock().unwrap().state());
 
                     // Checkpoint to disk periodically (~every 60s).
                     if n % 40 == 0 {
@@ -125,7 +127,14 @@ pub fn run() {
             commands::clear_llm_key,
             commands::llm_signal,
             commands::set_live,
+            commands::live_verify,
             commands::alpaca_account,
+            commands::exchanges,
+            commands::save_exchange_keys,
+            commands::clear_exchange_keys,
+            commands::wallet_addresses,
+            commands::save_wallet_addresses,
+            commands::wallet_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

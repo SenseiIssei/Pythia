@@ -8,10 +8,10 @@ pub mod indicators;
 pub mod risk;
 pub mod strategies;
 
-use crate::connectors::{OrderType, Side, Venue};
+use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
 use crate::marketdata::{RealCrypto, RealEquity, RealPrediction};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── serialized enums (match the TypeScript unions) ─────────────────────────
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +138,8 @@ pub struct PositionView {
     pub last_price: f64,
     pub unrealized: f64,
     pub mode: Mode,
+    /// Held via a real venue fill — closing it needs live routing.
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,22 +264,86 @@ pub struct RiskDecision {
     pub reason: Option<String>,
 }
 
-/// Live-execution status surfaced to the UI. Live routing is OFF until the user
-/// explicitly arms it (typed confirmation), and only Alpaca orders from a Live
-/// strategy are ever sent to a real venue.
+/// Live-execution configuration. Everything here is off until the user arms it
+/// with a typed confirmation, and each venue must be enabled individually — one
+/// arm action can never light up a venue the user did not choose.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LiveStatus {
+pub struct LiveConfig {
     /// Master arm. When false, everything simulates — no order leaves the machine.
     pub armed: bool,
     /// Route to the broker's PAPER endpoint (real API, no real money).
     pub paper: bool,
     /// Log intended orders but don't submit them anywhere.
     pub dry_run: bool,
-    /// Alpaca has keys in the vault / env.
+    /// Venues allowed to route live. Empty means nothing routes, whatever
+    /// `armed` says.
+    pub venues: Vec<Venue>,
+    /// How long a working order may sit before the engine cancels it at the
+    /// venue and reconciles whatever filled. Never 0 — see [`LiveConfig::clamped`].
+    pub timeout_sec: u64,
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        Self {
+            armed: false,
+            paper: true,
+            dry_run: false,
+            venues: vec![Venue::Alpaca],
+            // Two minutes: long enough for a market order to work through a thin
+            // open, short enough that a stuck order does not tie up the market
+            // for a whole session.
+            timeout_sec: 120,
+        }
+    }
+}
+
+impl LiveConfig {
+    /// Reject nonsense before it becomes a stuck order. A 0s timeout would
+    /// cancel every order before it could fill; a 1h one would hide a problem
+    /// for an hour.
+    fn clamped(mut self) -> Self {
+        self.timeout_sec = self.timeout_sec.clamp(15, 900);
+        self.venues.sort_by_key(|v| format!("{v:?}"));
+        self.venues.dedup();
+        self
+    }
+}
+
+/// Live-execution status surfaced to the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveStatus {
+    pub armed: bool,
+    pub paper: bool,
+    pub dry_run: bool,
+    pub venues: Vec<Venue>,
+    pub timeout_sec: u64,
+    /// Venues that have credentials available (vault or env).
+    pub connected: Vec<Venue>,
+    /// Kept for the existing UI: Alpaca specifically has keys.
     pub alpaca_connected: bool,
     /// Live orders currently awaiting a broker response.
     pub pending: usize,
+    /// Positions currently held via a real venue fill. These cannot be closed
+    /// by the simulator, so the UI has to make them obvious.
+    pub live_positions: usize,
+}
+
+/// Why an order is being routed — and therefore what is allowed to happen to it
+/// if live routing is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteIntent {
+    /// A paper strategy. Always simulates.
+    Paper,
+    /// A live strategy opening or adding. Simulates when disarmed — no harm, the
+    /// engine simply keeps paper-trading until the user arms.
+    Live,
+    /// Closing a position that was opened with a *real* fill. This must reach the
+    /// venue or not happen at all: simulating it would tell the user they are
+    /// flat while real shares sit at the broker.
+    LiveExit,
 }
 
 /// One live order handed to the async daemon to submit. The daemon is the only
@@ -286,16 +352,86 @@ pub struct LiveStatus {
 #[serde(rename_all = "camelCase")]
 pub struct LiveOrderOut {
     pub order_id: String,
+    /// Stable id echoed to the venue so a lost response can be recovered.
+    pub client_order_id: String,
+    pub venue: Venue,
     pub market_id: String,
-    /// Venue ticker (e.g. "AAPL") — what the broker expects.
+    /// Venue ticker (e.g. "AAPL", "BTC/USD") — what the broker expects.
     pub symbol: String,
     pub side: Side,
     pub qty: f64,
     pub ref_price: f64,
     pub strategy_id: String,
+    /// This order closes an existing position; it must not flip it.
+    pub reduce_only: bool,
     /// Snapshot of the arm config at enqueue time.
     pub paper: bool,
     pub dry_run: bool,
+}
+
+/// An in-flight order the daemon should poll. Produced by
+/// [`Engine::live_polls`]; the daemon fetches each one's status and feeds the
+/// answer back through [`Engine::apply_live_update`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePoll {
+    pub order_id: String,
+    pub broker_id: String,
+    pub venue: Venue,
+    pub market_id: String,
+    pub symbol: String,
+    pub paper: bool,
+    pub age_ms: i64,
+    /// This order has outlived the timeout: cancel it at the venue first, then
+    /// report whatever ended up filled.
+    pub cancel: bool,
+}
+
+/// What a venue says about one of our orders, normalised.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveUpdate {
+    pub status: BrokerOrderStatus,
+    /// Cumulative filled quantity, as the venue reports it.
+    pub filled_qty: f64,
+    pub avg_price: Option<f64>,
+    /// Cumulative fees so far.
+    pub fee: f64,
+    /// The venue's own status word, for the journal.
+    pub raw_status: String,
+}
+
+impl LiveUpdate {
+    fn status_word(&self) -> &'static str {
+        match self.status {
+            BrokerOrderStatus::Filled => "filled",
+            BrokerOrderStatus::PartiallyFilled => "partially filled",
+            BrokerOrderStatus::Working => "working",
+            BrokerOrderStatus::Canceled => "cancelled",
+            BrokerOrderStatus::Rejected => "rejected by the venue",
+            BrokerOrderStatus::Expired => "expired",
+        }
+    }
+}
+
+/// An order the engine has sent to a venue and not yet finished with.
+#[derive(Debug, Clone)]
+struct InFlight {
+    market_id: String,
+    symbol: String,
+    venue: Venue,
+    side: Side,
+    strategy_id: String,
+    /// `None` until the venue acknowledges the submission.
+    broker_id: Option<String>,
+    submitted_at: i64,
+    /// How much of the venue's cumulative fill we have already booked. The
+    /// difference against a fresh report is exactly what still needs settling,
+    /// which is what makes partial fills safe to apply repeatedly.
+    booked_qty: f64,
+    booked_fee: f64,
+    paper: bool,
+    cancel_sent: bool,
 }
 
 /// The full state pushed to the UI every tick.
@@ -327,6 +463,10 @@ pub struct PersistedPosition {
     pub target: f64,
     #[serde(default)]
     pub trail_ref: f64,
+    /// Opened with a real venue fill. This MUST survive a restart: forgetting it
+    /// would let the simulator "close" shares that are really sitting at a broker.
+    #[serde(default)]
+    pub live: bool,
 }
 
 /// The raw engine state written to disk so the daemon resumes exactly where it
@@ -366,6 +506,12 @@ struct SimParam {
 
 const STARTING_CASH: f64 = 100_000.0;
 
+/// How long a market is skipped for live routing after the venue refused an
+/// order. Long enough to stop a per-tick retry storm, short enough that the
+/// engine reacts within a minute of the condition clearing (a market opening,
+/// cash settling).
+const LIVE_REJECT_BACKOFF_MS: i64 = 60_000;
+
 pub struct Engine {
     markets: Vec<Market>,
     sim: HashMap<String, SimParam>,
@@ -388,12 +534,21 @@ pub struct Engine {
     gross_win: HashMap<String, f64>,     // per-strategy cumulative winning $ (for profit factor)
     gross_loss: HashMap<String, f64>,    // per-strategy cumulative losing $
     pending_alerts: Vec<String>,         // notable events awaiting a webhook push
-    // ── live execution (Phase 2, OFF by default) ──
-    live_armed: bool,
-    live_paper: bool,   // route to the broker's paper endpoint (real API, no real money)
-    live_dry_run: bool, // log intended orders but never submit
+    // ── live execution (OFF by default) ──
+    live: LiveConfig,
     pending_live: Vec<LiveOrderOut>,     // outbox drained by the async daemon
-    in_flight: std::collections::HashSet<String>, // market_ids with a live order awaiting a broker response
+    inflight: HashMap<String, InFlight>, // engine order id → its state at the venue
+    in_flight_markets: HashSet<String>,  // one live order per market at a time
+    /// Last time we complained that a live position cannot be closed, per market.
+    /// Stops a stop-loss that keeps re-triggering from flooding the journal.
+    live_warned_at: HashMap<String, i64>,
+    /// Per-market backoff after a live order was refused. A breakout signal fires
+    /// every few seconds while the condition holds; without this, a closed market
+    /// produces one identical rejection per tick until it opens.
+    live_backoff_until: HashMap<String, i64>,
+    /// Feeds we have already announced, so the journal is not a 12-second
+    /// heartbeat with the occasional fill hidden in it.
+    feeds_logged: HashSet<&'static str>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -432,11 +587,13 @@ impl Engine {
             gross_win: HashMap::new(),
             gross_loss: HashMap::new(),
             pending_alerts: Vec::new(),
-            live_armed: false,
-            live_paper: true,
-            live_dry_run: false,
+            live: LiveConfig::default(),
             pending_live: Vec::new(),
-            in_flight: std::collections::HashSet::new(),
+            inflight: HashMap::new(),
+            in_flight_markets: HashSet::new(),
+            live_warned_at: HashMap::new(),
+            live_backoff_until: HashMap::new(),
+            feeds_logged: HashSet::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -485,7 +642,9 @@ impl Engine {
                 self.real_ids.insert(r.id.clone());
             }
         }
-        if !feed.is_empty() {
+        // Logged once, not every refresh: during a live run the journal is how
+        // you watch orders, and a heartbeat every 12s buries them.
+        if !feed.is_empty() && self.feeds_logged.insert("kraken") {
             self.log(JournalKind::System, format!("Kraken feed · {} live crypto prices", feed.len()), None, None);
         }
     }
@@ -503,7 +662,7 @@ impl Engine {
                 self.real_ids.insert(r.id.clone());
             }
         }
-        if !feed.is_empty() {
+        if !feed.is_empty() && self.feeds_logged.insert("alpaca") {
             self.log(JournalKind::System, format!("Alpaca feed · {} live equity quotes", feed.len()), None, None);
         }
     }
@@ -536,7 +695,9 @@ impl Engine {
                 });
             }
         }
-        self.log(JournalKind::System, format!("Polymarket feed · {} live markets", feed.len()), None, None);
+        if self.feeds_logged.insert("polymarket") {
+            self.log(JournalKind::System, format!("Polymarket feed · {} live markets", feed.len()), None, None);
+        }
     }
 
     // ── main tick ───────────────────────────────────────────────────────────
@@ -788,8 +949,14 @@ impl Engine {
             .iter()
             .position(|s| s.id == sid)
             .unwrap_or_else(|| self.ensure_manual_strategy());
-        self.route_fill(idx, &m, side, qty, m.price, live);
-        self.log(JournalKind::System, format!("Exit {id}: {reason}"), Some(sid), Some(id.to_string()));
+        let intent = if live { RouteIntent::LiveExit } else { RouteIntent::Paper };
+        self.route_fill(idx, &m, side, qty, m.price, intent);
+        // Only claim the exit happened if it actually did. A live exit that
+        // could not route leaves the position open, and `route_fill` has
+        // already explained why.
+        if !live || self.live_routable(m.venue) {
+            self.log(JournalKind::System, format!("Exit {id}: {reason}"), Some(sid), Some(id.to_string()));
+        }
     }
 
     /// Volatility-based stop-loss / take-profit for a new position (price units).
@@ -842,11 +1009,14 @@ impl Engine {
         }
 
         let req = crate::connectors::OrderRequest {
-            market_id: m.id.clone(),
+            symbol: m.symbol.clone(),
             side: intent.side,
             order_type: OrderType::Market,
             qty: qty_wanted,
             limit_price: None,
+            ref_price: Some(price),
+            client_order_id: None,
+            reduce_only: false,
         };
         let ctx = self.risk_ctx(&m.id, &sid, price);
         let decision = risk::evaluate(&req, price, &self.limits, &ctx);
@@ -858,8 +1028,12 @@ impl Engine {
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return;
         }
-        let live_intent = self.strategies[strat_idx].state == StrategyState::Live;
-        self.route_fill(strat_idx, m, intent.side, decision.qty, price, live_intent);
+        let route = if self.strategies[strat_idx].state == StrategyState::Live {
+            RouteIntent::Live
+        } else {
+            RouteIntent::Paper
+        };
+        self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
     }
 
     /// Paper fill: simulate slippage + fee against `price`, then settle.
@@ -1003,74 +1177,161 @@ impl Engine {
         }
     }
 
+    /// True when this venue may currently send orders to a real market.
+    fn live_routable(&self, venue: Venue) -> bool {
+        self.live.armed && self.live.venues.contains(&venue)
+    }
+
     /// Decide whether an approved order simulates (paper) or routes to a real
-    /// venue. Live routing requires the master arm, an Alpaca venue, and a live
-    /// intent (a Live strategy for entries/manual, or a live-opened position for
-    /// exits). Everything else stays paper — fail safe.
-    fn route_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64, live_intent: bool) {
-        let go_live = self.live_armed && m.venue == Venue::Alpaca && live_intent;
-        if !go_live {
-            self.fill(strat_idx, m, side, qty, price);
-            return;
+    /// venue.
+    ///
+    /// The one case that must never silently fall back to simulation is
+    /// [`RouteIntent::LiveExit`]: those shares exist at a broker, and booking a
+    /// fake exit would leave Pythia showing flat while the real position runs
+    /// unmanaged. When it cannot route, it refuses and says so.
+    fn route_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64, intent: RouteIntent) {
+        let routable = self.live_routable(m.venue);
+        match intent {
+            RouteIntent::Paper => return self.fill(strat_idx, m, side, qty, price),
+            RouteIntent::Live if !routable => return self.fill(strat_idx, m, side, qty, price),
+            RouteIntent::LiveExit if !routable => {
+                self.warn_stuck_live_position(m);
+                return;
+            }
+            _ => {}
         }
+
         // One live order per market at a time — never double-send while a prior
         // order is still awaiting a broker response.
-        if self.in_flight.contains(&m.id) {
+        if self.in_flight_markets.contains(&m.id) {
+            return;
+        }
+        // Still backing off from a refusal (market closed, no buying power).
+        // Re-sending the identical order every tick would achieve nothing except
+        // an unreadable journal.
+        if self.live_backoff_until.get(&m.id).is_some_and(|&until| self.now() < until) {
             return;
         }
         let sid = self.strategies[strat_idx].id.clone();
         let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
         let order_id = order.id.clone();
         self.orders.insert(0, order);
-        self.in_flight.insert(m.id.clone());
+        self.in_flight_markets.insert(m.id.clone());
+        self.inflight.insert(
+            order_id.clone(),
+            InFlight {
+                market_id: m.id.clone(),
+                symbol: m.symbol.clone(),
+                venue: m.venue,
+                side,
+                strategy_id: sid.clone(),
+                broker_id: None,
+                submitted_at: self.now(),
+                booked_qty: 0.0,
+                booked_fee: 0.0,
+                paper: self.live.paper,
+                cancel_sent: false,
+            },
+        );
         self.pending_live.push(LiveOrderOut {
+            client_order_id: format!("pythia-{order_id}"),
             order_id,
+            venue: m.venue,
             market_id: m.id.clone(),
             symbol: m.symbol.clone(),
             side,
             qty,
             ref_price: price,
             strategy_id: sid.clone(),
-            paper: self.live_paper,
-            dry_run: self.live_dry_run,
+            reduce_only: intent == RouteIntent::LiveExit,
+            paper: self.live.paper,
+            dry_run: self.live.dry_run,
         });
-        let dest = if self.live_dry_run {
-            "DRY-RUN"
-        } else if self.live_paper {
-            "PAPER-LIVE"
-        } else {
-            "REAL-LIVE"
-        };
         self.log(
             JournalKind::Order,
-            format!("{dest} submit {side:?} {qty:.4} {} @ ~{price:.2}", m.symbol),
+            format!("{} submit {side:?} {qty:.4} {} @ ~{price:.2}", self.live_dest(), m.symbol),
             Some(sid),
             Some(m.id.clone()),
         );
     }
 
-    // ── live execution control (Phase 2) ────────────────────────────────────
+    fn live_dest(&self) -> &'static str {
+        if self.live.dry_run {
+            "DRY-RUN"
+        } else if self.live.paper {
+            "PAPER-LIVE"
+        } else {
+            "REAL-LIVE"
+        }
+    }
+
+    /// A live-opened position wanted to close but live routing is unavailable.
+    /// Say so loudly — but only once a minute per market, because the stop-loss
+    /// that triggered it will keep triggering every tick.
+    fn warn_stuck_live_position(&mut self, m: &Market) {
+        let now = self.now();
+        if let Some(&last) = self.live_warned_at.get(&m.id) {
+            if now - last < 60_000 {
+                return;
+            }
+        }
+        self.live_warned_at.insert(m.id.clone(), now);
+        let msg = format!(
+            "{} holds a REAL position that wants to close, but live routing is off for {:?}. \
+             It is NOT closed. Re-arm to exit, or flatten it in the broker's own dashboard.",
+            m.symbol, m.venue
+        );
+        self.log(JournalKind::Risk, msg.clone(), None, Some(m.id.clone()));
+        self.pending_alerts.push(format!("⚠ {msg}"));
+    }
+
+    // ── live execution control ──────────────────────────────────────────────
     /// Arm/disarm real order routing. Arming is a deliberate, logged, alerted
     /// action; disarming stops new live orders (in-flight ones still reconcile).
-    pub fn set_live(&mut self, armed: bool, paper: bool, dry_run: bool) {
-        let was = self.live_armed;
-        self.live_armed = armed;
-        self.live_paper = paper;
-        self.live_dry_run = dry_run;
-        let dest = if dry_run {
-            "dry-run (nothing sent)"
-        } else if paper {
-            "the PAPER endpoint (no real money)"
+    pub fn set_live(&mut self, cfg: LiveConfig) {
+        let was = self.live.armed;
+        let cfg = cfg.clamped();
+        let dest = if cfg.dry_run {
+            "dry-run (nothing sent)".to_string()
+        } else if cfg.paper {
+            "the PAPER endpoint (no real money)".to_string()
         } else {
-            "REAL MONEY"
+            "REAL MONEY".to_string()
         };
+        let venues = if cfg.venues.is_empty() {
+            "no venues (nothing will route)".to_string()
+        } else {
+            cfg.venues.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join(", ")
+        };
+        let armed = cfg.armed;
+        let live_open = self.live_position_count();
+        self.live = cfg;
+
         if armed {
-            self.log(JournalKind::Risk, format!("LIVE ARMED — Alpaca orders route to {dest}"), None, None);
-            self.pending_alerts.push(format!("⚠ Pythia LIVE ARMED → {dest}"));
+            self.log(JournalKind::Risk, format!("LIVE ARMED — {venues} route to {dest}"), None, None);
+            self.pending_alerts.push(format!("⚠ Pythia LIVE ARMED → {venues} → {dest}"));
         } else if was {
-            self.log(JournalKind::Risk, "LIVE DISARMED — back to paper simulation".into(), None, None);
+            self.log(JournalKind::Risk, "LIVE DISARMED — new orders simulate again".into(), None, None);
             self.pending_alerts.push("Pythia live disarmed".into());
+            if live_open > 0 {
+                // Disarming does not flatten anything. Saying so here is the
+                // difference between "I stopped it" and an unmanaged position.
+                let msg = format!(
+                    "{live_open} real position(s) are still open at their venue — disarming does not close them. \
+                     Flatten from Positions while armed, or in the broker's dashboard."
+                );
+                self.log(JournalKind::Risk, msg.clone(), None, None);
+                self.pending_alerts.push(format!("⚠ {msg}"));
+            }
         }
+    }
+
+    pub fn live_config(&self) -> LiveConfig {
+        self.live.clone()
+    }
+
+    fn live_position_count(&self) -> usize {
+        self.positions.values().filter(|p| p.live && p.qty.abs() > 1e-9).count()
     }
 
     /// Hand the async daemon every live order awaiting submission.
@@ -1078,53 +1339,242 @@ impl Engine {
         std::mem::take(&mut self.pending_live)
     }
 
-    /// Apply a confirmed broker fill to an in-flight live order.
-    pub fn apply_live_fill(&mut self, order_id: &str, filled_qty: f64, fill_price: f64) {
-        let Some(o) = self.orders.iter().find(|o| o.id == order_id).cloned() else { return };
-        self.in_flight.remove(&o.market_id);
-        let Some(m) = self.markets.iter().find(|mm| mm.id == o.market_id).cloned() else { return };
-        let idx = self
-            .strategies
-            .iter()
-            .position(|s| s.id == o.strategy_id)
-            .unwrap_or_else(|| self.ensure_manual_strategy());
-        // Real fill: broker's price/qty, no simulated fee (Alpaca equities are
-        // commission-free). emit_order=false → we update the existing order below.
-        self.settle_fill(idx, &m, o.side, filled_qty, fill_price, 0.0, true, false);
-        if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
-            ord.status = OrderStatus::Filled;
-            ord.filled_qty = filled_qty;
-            ord.avg_fill_price = Some(fill_price);
-            ord.mode = Mode::Live;
+    /// The venue accepted our submission. From here the order has a life of its
+    /// own at the broker, and the only safe thing to do is keep asking about it.
+    pub fn apply_live_ack(&mut self, order_id: &str, broker_id: &str) {
+        if let Some(f) = self.inflight.get_mut(order_id) {
+            f.broker_id = Some(broker_id.to_string());
+            f.submitted_at = chrono::Utc::now().timestamp_millis();
         }
-        self.log(
-            JournalKind::Fill,
-            format!("LIVE FILL {:?} {filled_qty:.4} {} @ {fill_price:.4}", o.side, m.symbol),
-            Some(o.strategy_id.clone()),
-            Some(o.market_id.clone()),
-        );
     }
 
-    /// Mark an in-flight live order rejected/failed (also used for dry-run).
+    /// Every in-flight order the daemon should ask the venue about this tick.
+    pub fn live_polls(&self) -> Vec<LivePoll> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let timeout_ms = (self.live.timeout_sec as i64) * 1000;
+        self.inflight
+            .iter()
+            .filter_map(|(order_id, f)| {
+                let broker_id = f.broker_id.clone()?;
+                let age = now - f.submitted_at;
+                Some(LivePoll {
+                    order_id: order_id.clone(),
+                    broker_id,
+                    venue: f.venue,
+                    market_id: f.market_id.clone(),
+                    symbol: f.symbol.clone(),
+                    paper: f.paper,
+                    age_ms: age,
+                    cancel: age > timeout_ms && !f.cancel_sent,
+                })
+            })
+            .collect()
+    }
+
+    /// Note that a cancel has been sent, so we do not send it every tick while
+    /// the venue works through it.
+    pub fn mark_cancel_sent(&mut self, order_id: &str) {
+        if let Some(f) = self.inflight.get_mut(order_id) {
+            f.cancel_sent = true;
+        }
+    }
+
+    /// Apply the venue's view of one of our orders.
+    ///
+    /// `update.filled_qty` is cumulative, so the amount that still needs
+    /// booking is the difference against what we already settled. That makes
+    /// this safe to call repeatedly with the same numbers — a partial fill
+    /// reported three times books once.
+    pub fn apply_live_update(&mut self, order_id: &str, update: LiveUpdate) {
+        let Some(f) = self.inflight.get(order_id).cloned() else { return };
+        let delta = update.filled_qty - f.booked_qty;
+
+        if delta > 1e-9 {
+            if let Some(price) = update.avg_price.filter(|p| *p > 0.0) {
+                if let Some(m) = self.markets.iter().find(|mm| mm.id == f.market_id).cloned() {
+                    let idx = self
+                        .strategies
+                        .iter()
+                        .position(|s| s.id == f.strategy_id)
+                        .unwrap_or_else(|| self.ensure_manual_strategy());
+                    let fee_delta = (update.fee - f.booked_fee).max(0.0);
+                    // emit_order = false: the pending order row already exists
+                    // and is updated below rather than duplicated.
+                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, true, false);
+                    self.log(
+                        JournalKind::Fill,
+                        format!("LIVE FILL {:?} {delta:.6} {} @ {price:.4}", f.side, m.symbol),
+                        Some(f.strategy_id.clone()),
+                        Some(f.market_id.clone()),
+                    );
+                    if let Some(g) = self.inflight.get_mut(order_id) {
+                        g.booked_qty = update.filled_qty;
+                        g.booked_fee = update.fee;
+                    }
+                }
+            }
+        }
+
+        // Reflect the venue's state on the order row.
+        if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
+            ord.filled_qty = update.filled_qty;
+            ord.avg_fill_price = update.avg_price;
+            ord.mode = Mode::Live;
+            ord.status = match update.status {
+                BrokerOrderStatus::Filled => OrderStatus::Filled,
+                BrokerOrderStatus::PartiallyFilled => OrderStatus::Partial,
+                BrokerOrderStatus::Working => OrderStatus::Pending,
+                BrokerOrderStatus::Rejected => OrderStatus::Rejected,
+                BrokerOrderStatus::Canceled | BrokerOrderStatus::Expired => {
+                    // A cancel that caught a partial fill is a partial, not a
+                    // cancel: something real happened and the ledger must say so.
+                    if update.filled_qty > 0.0 { OrderStatus::Partial } else { OrderStatus::Cancelled }
+                }
+            };
+        }
+
+        if update.status.is_terminal() {
+            self.finish_live_order(order_id, &update);
+        }
+    }
+
+    fn finish_live_order(&mut self, order_id: &str, update: &LiveUpdate) {
+        let Some(f) = self.inflight.remove(order_id) else { return };
+        self.in_flight_markets.remove(&f.market_id);
+        if update.filled_qty <= 0.0 {
+            let reason = format!("{} ({})", update.status_word(), update.raw_status);
+            if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
+                ord.reject_reason = Some(reason.clone());
+            }
+            self.log(
+                JournalKind::Reject,
+                format!("LIVE order {} {} — nothing filled", f.symbol, reason),
+                Some(f.strategy_id),
+                Some(f.market_id),
+            );
+        }
+    }
+
+    /// The order never reached the venue (dry-run, missing keys, preflight
+    /// refusal, network failure). Nothing is resting anywhere, so we can drop it.
     pub fn apply_live_reject(&mut self, order_id: &str, reason: &str) {
-        let mkt = self.orders.iter().find(|o| o.id == order_id).map(|o| o.market_id.clone());
-        if let Some(mid) = mkt {
-            self.in_flight.remove(&mid);
+        let f = self.inflight.remove(order_id);
+        if let Some(f) = &f {
+            self.in_flight_markets.remove(&f.market_id);
+            self.live_backoff_until.insert(f.market_id.clone(), self.now() + LIVE_REJECT_BACKOFF_MS);
         }
         if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
             ord.status = OrderStatus::Rejected;
             ord.reject_reason = Some(reason.to_string());
         }
-        self.log(JournalKind::Reject, format!("LIVE order not filled: {reason}"), None, None);
+        let symbol = f.as_ref().map(|f| f.symbol.clone()).unwrap_or_default();
+        self.log(
+            JournalKind::Reject,
+            format!("LIVE order not sent{}: {reason}", if symbol.is_empty() { String::new() } else { format!(" ({symbol})") }),
+            f.as_ref().map(|f| f.strategy_id.clone()),
+            f.as_ref().map(|f| f.market_id.clone()),
+        );
+    }
+
+    /// Reconcile against what the venue actually holds. The broker is always
+    /// right: if the two disagree, Pythia's book is what changes.
+    ///
+    /// Only *live* positions in markets the engine knows about are touched —
+    /// paper positions and unrelated venue holdings are left alone.
+    ///
+    /// `adopt_unknown` decides what happens to a venue position Pythia has no
+    /// record of. The daemon passes `false`: a user's own long-held AAPL is not
+    /// Pythia's to manage, and adopting it would put a stop-loss under someone's
+    /// retirement account. Set it only when the caller knows the account is
+    /// dedicated to the bot.
+    pub fn reconcile_positions(&mut self, venue: Venue, broker: &[BrokerPosition], adopt_unknown: bool) {
+        let known: HashMap<String, (String, f64)> = self
+            .markets
+            .iter()
+            .filter(|m| m.venue == venue)
+            .map(|m| (m.symbol.clone(), (m.id.clone(), m.price)))
+            .collect();
+
+        let mut seen: HashSet<String> = HashSet::new();
+        for bp in broker {
+            let Some((market_id, price)) = known.get(&bp.symbol).cloned() else { continue };
+            seen.insert(market_id.clone());
+            let avg = if bp.avg_price > 0.0 { bp.avg_price } else { price };
+            match self.positions.get_mut(&market_id) {
+                Some(p) if (p.qty - bp.qty).abs() < 1e-6 => {
+                    p.live = true; // agrees — just make sure it is flagged live
+                }
+                Some(p) => {
+                    let was = p.qty;
+                    p.qty = bp.qty;
+                    p.avg_price = avg;
+                    p.live = true;
+                    self.log(
+                        JournalKind::Risk,
+                        format!("Reconciled {}: book had {was:.6}, {venue:?} has {:.6} — broker wins", bp.symbol, bp.qty),
+                        None,
+                        Some(market_id),
+                    );
+                }
+                None if adopt_unknown => {
+                    self.positions.insert(
+                        market_id.clone(),
+                        PositionInternal {
+                            venue,
+                            symbol: bp.symbol.clone(),
+                            qty: bp.qty,
+                            avg_price: avg,
+                            strategy_id: "manual".into(),
+                            stop: 0.0,
+                            target: 0.0,
+                            trail_ref: avg,
+                            live: true,
+                        },
+                    );
+                    self.log(
+                        JournalKind::Risk,
+                        format!("Adopted untracked {venue:?} position: {:.6} {}", bp.qty, bp.symbol),
+                        None,
+                        Some(market_id),
+                    );
+                }
+                // Someone else's position in a market we happen to watch. Not
+                // ours to manage — leave it entirely alone.
+                None => {}
+            }
+        }
+
+        // A live position the venue does not report was closed elsewhere.
+        let vanished: Vec<String> = self
+            .positions
+            .iter()
+            .filter(|(id, p)| p.venue == venue && p.live && !seen.contains(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in vanished {
+            self.positions.remove(&id);
+            self.log(
+                JournalKind::Risk,
+                format!("{id} is no longer held at {venue:?} — dropped from the book"),
+                None,
+                Some(id.clone()),
+            );
+        }
     }
 
     fn live_status(&self) -> LiveStatus {
+        let mut connected: Vec<Venue> = self.connected.iter().copied().collect();
+        connected.sort_by_key(|v| format!("{v:?}"));
         LiveStatus {
-            armed: self.live_armed,
-            paper: self.live_paper,
-            dry_run: self.live_dry_run,
+            armed: self.live.armed,
+            paper: self.live.paper,
+            dry_run: self.live.dry_run,
+            venues: self.live.venues.clone(),
+            timeout_sec: self.live.timeout_sec,
             alpaca_connected: self.connected.contains(&Venue::Alpaca),
-            pending: self.in_flight.len(),
+            connected,
+            pending: self.inflight.len(),
+            live_positions: self.live_position_count(),
         }
     }
 
@@ -1133,11 +1583,14 @@ impl Engine {
         let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
         let qty = notional / m.price;
         let req = crate::connectors::OrderRequest {
-            market_id: m.id.clone(),
+            symbol: m.symbol.clone(),
             side,
             order_type: OrderType::Market,
             qty,
             limit_price: None,
+            ref_price: Some(m.price),
+            client_order_id: None,
+            reduce_only: false,
         };
         let ctx = self.risk_ctx(&m.id, "manual", m.price);
         let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
@@ -1150,8 +1603,9 @@ impl Engine {
         }
         // manual uses a synthetic strategy slot (index found or fall back to first)
         let idx = self.ensure_manual_strategy();
-        // A manual click on an Alpaca market while armed is an intentional live order.
-        self.route_fill(idx, &m, side, decision.qty, m.price, true);
+        // A manual click on a live-enabled venue while armed is an intentional
+        // live order — that is the whole point of the button.
+        self.route_fill(idx, &m, side, decision.qty, m.price, RouteIntent::Live);
     }
 
     pub fn flatten(&mut self, market_id: &str) {
@@ -1161,8 +1615,11 @@ impl Engine {
         let live = pos.live; // a live-opened position must be closed live too
         let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
         let idx = self.ensure_manual_strategy();
-        self.route_fill(idx, &m, side, qty, m.price, live);
-        self.log(JournalKind::System, format!("Flattened {market_id}"), Some("manual".into()), Some(market_id.to_string()));
+        let intent = if live { RouteIntent::LiveExit } else { RouteIntent::Paper };
+        self.route_fill(idx, &m, side, qty, m.price, intent);
+        if !live || self.live_routable(m.venue) {
+            self.log(JournalKind::System, format!("Flattened {market_id}"), Some("manual".into()), Some(market_id.to_string()));
+        }
     }
 
     fn ensure_manual_strategy(&mut self) -> usize {
@@ -1301,6 +1758,7 @@ impl Engine {
                             stop: p.stop,
                             target: p.target,
                             trail_ref: p.trail_ref,
+                            live: p.live,
                         },
                     )
                 })
@@ -1333,7 +1791,9 @@ impl Engine {
                         stop: pp.stop,
                         target: pp.target,
                         trail_ref: pp.trail_ref,
-                        live: false, // restored positions are treated as paper until re-armed
+                        // Restored exactly as saved: a real position stays real.
+                        // The daemon reconciles it against the venue on boot.
+                        live: pp.live,
                     },
                 )
             })
@@ -1374,7 +1834,10 @@ impl Engine {
                     avg_price: p.avg_price,
                     last_price: last,
                     unrealized: (last - p.avg_price) * p.qty,
-                    mode: Mode::Paper,
+                    // Per-position truth, not the global mode: a paper position
+                    // and a real one can coexist and must look different.
+                    mode: if p.live { Mode::Live } else { Mode::Paper },
+                    live: p.live,
                 }
             })
             .collect();
@@ -1662,8 +2125,17 @@ mod tests {
         assert!(e.orders.iter().any(|o| o.status == OrderStatus::Rejected));
     }
 
+    /// Arm helper: Alpaca only, paper endpoint, real submission.
+    fn armed_alpaca() -> LiveConfig {
+        LiveConfig { armed: true, paper: true, dry_run: false, venues: vec![Venue::Alpaca], timeout_sec: 120 }
+    }
+
+    fn update(status: BrokerOrderStatus, filled: f64, price: f64) -> LiveUpdate {
+        LiveUpdate { status, filled_qty: filled, avg_price: Some(price), fee: 0.0, raw_status: format!("{status:?}") }
+    }
+
     #[test]
-    fn live_routing_only_alpaca_when_armed() {
+    fn live_routing_needs_both_the_arm_and_the_venue() {
         let mut e = Engine::new();
 
         // Disarmed: a manual Alpaca order fills as paper immediately, nothing queued.
@@ -1675,23 +2147,312 @@ mod tests {
 
         // Arm live (paper endpoint). A manual Alpaca order now routes to the outbox
         // and does NOT open a position until the broker confirms.
-        e.set_live(true, true, false);
+        e.set_live(armed_alpaca());
         e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
         let out = e.drain_live_orders();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].symbol, "AAPL");
+        assert_eq!(out[0].venue, Venue::Alpaca);
         assert!(out[0].paper, "should target the paper endpoint");
-        assert!(e.in_flight.contains("alpaca:AAPL"));
+        assert!(e.in_flight_markets.contains("alpaca:AAPL"));
         assert!(!e.positions.contains_key("alpaca:AAPL"), "no position until fill confirmed");
 
-        // Broker confirms → position opens and is marked live.
-        e.apply_live_fill(&out[0].order_id, out[0].qty, 228.0);
+        // Broker acknowledges, then fills → position opens and is marked live.
+        e.apply_live_ack(&out[0].order_id, "broker-1");
+        e.apply_live_update(&out[0].order_id, update(BrokerOrderStatus::Filled, out[0].qty, 228.0));
         assert!(e.positions.get("alpaca:AAPL").map(|p| p.live).unwrap_or(false));
-        assert!(!e.in_flight.contains("alpaca:AAPL"));
+        assert!(!e.in_flight_markets.contains("alpaca:AAPL"));
 
-        // Crypto is never routed live, even when armed.
+        // Crypto is not in the armed venue list, so it still simulates.
         e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty());
         assert!(e.positions.contains_key("crypto:BTC/USD"));
+    }
+
+    #[test]
+    fn crypto_routes_live_once_its_venue_is_armed() {
+        let mut e = Engine::new();
+        e.set_live(LiveConfig { armed: true, paper: false, dry_run: false, venues: vec![Venue::Crypto], timeout_sec: 60 });
+        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        let out = e.drain_live_orders();
+        assert_eq!(out.len(), 1, "crypto must route when Crypto is armed");
+        assert_eq!(out[0].venue, Venue::Crypto);
+        assert_eq!(out[0].symbol, "BTC/USD");
+        // ...and Alpaca must not, because it is not in the list.
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty());
+    }
+
+    #[test]
+    fn partial_fills_book_once_each_not_once_per_poll() {
+        let mut e = Engine::new();
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:AAPL", Side::Buy, 10_000.0);
+        let o = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&o.order_id, "b1");
+
+        // 40% fills.
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::PartiallyFilled, o.qty * 0.4, 100.0));
+        let after_first = e.positions.get("alpaca:AAPL").map(|p| p.qty).unwrap_or(0.0);
+        assert!((after_first - o.qty * 0.4).abs() < 1e-9);
+
+        // The same report arrives again (polling is repeated on purpose).
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::PartiallyFilled, o.qty * 0.4, 100.0));
+        assert!(
+            (e.positions.get("alpaca:AAPL").unwrap().qty - after_first).abs() < 1e-9,
+            "a repeated cumulative report must not double-book"
+        );
+
+        // The rest fills; only the delta is settled.
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, 100.0));
+        assert!((e.positions.get("alpaca:AAPL").unwrap().qty - o.qty).abs() < 1e-9);
+        assert!(!e.in_flight_markets.contains("alpaca:AAPL"), "terminal order frees the market");
+    }
+
+    #[test]
+    fn a_cancelled_order_that_partially_filled_keeps_what_filled() {
+        let mut e = Engine::new();
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:NVDA", Side::Buy, 5_000.0);
+        let o = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&o.order_id, "b2");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::PartiallyFilled, o.qty * 0.3, 140.0));
+        // Timed out → cancelled at the venue, but 30% is real.
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Canceled, o.qty * 0.3, 140.0));
+
+        let pos = e.positions.get("alpaca:NVDA").expect("the filled 30% is a real position");
+        assert!((pos.qty - o.qty * 0.3).abs() < 1e-9);
+        let ord = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+        assert_eq!(ord.status, OrderStatus::Partial, "not 'cancelled' — something did fill");
+    }
+
+    #[test]
+    fn a_live_position_is_never_closed_by_the_simulator() {
+        let mut e = Engine::new();
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&o.order_id, "b3");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, 228.0));
+        assert!(e.positions.contains_key("alpaca:AAPL"));
+
+        // Disarm — the shares are still at the broker.
+        e.set_live(LiveConfig { armed: false, ..armed_alpaca() });
+        e.flatten("alpaca:AAPL");
+        assert!(
+            e.positions.contains_key("alpaca:AAPL"),
+            "flattening a real position while disarmed must NOT book a fake exit"
+        );
+        assert!(e.drain_live_orders().is_empty(), "and must not send anything either");
+        assert!(
+            e.journal.iter().any(|j| j.kind == JournalKind::Risk && j.message.contains("REAL position")),
+            "the user has to be told why nothing happened"
+        );
+
+        // Re-arm and it exits for real.
+        e.set_live(armed_alpaca());
+        e.flatten("alpaca:AAPL");
+        let out = e.drain_live_orders();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].side, Side::Sell);
+        assert!(out[0].reduce_only, "an exit must be marked reduce-only");
+    }
+
+    #[test]
+    fn a_live_stop_loss_does_not_spam_the_journal_while_disarmed() {
+        let mut e = Engine::new();
+        e.positions.insert(
+            "alpaca:AAPL".into(),
+            PositionInternal {
+                venue: Venue::Alpaca,
+                symbol: "AAPL".into(),
+                qty: 5.0,
+                avg_price: 227.0,
+                strategy_id: "breakout-1".into(),
+                stop: 999_999.0, // always triggering
+                target: 0.0,
+                trail_ref: 227.0,
+                live: true,
+            },
+        );
+        for _ in 0..5 {
+            e.check_position_exits();
+        }
+        let warnings = e
+            .journal
+            .iter()
+            .filter(|j| j.message.contains("REAL position"))
+            .count();
+        assert_eq!(warnings, 1, "one warning per minute, not one per tick");
+        assert!(e.positions.contains_key("alpaca:AAPL"), "and the position stays open");
+    }
+
+    #[test]
+    fn poll_list_asks_for_a_cancel_once_the_timeout_passes() {
+        let mut e = Engine::new();
+        e.set_live(LiveConfig { timeout_sec: 15, ..armed_alpaca() });
+        e.manual_order("alpaca:MSFT", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+
+        // Nothing to poll until the venue acknowledges it.
+        assert!(e.live_polls().is_empty());
+        e.apply_live_ack(&o.order_id, "b4");
+
+        let polls = e.live_polls();
+        assert_eq!(polls.len(), 1);
+        assert!(!polls[0].cancel, "a fresh order is not overdue");
+        assert_eq!(polls[0].broker_id, "b4");
+
+        // Age it past the timeout.
+        e.inflight.get_mut(&o.order_id).unwrap().submitted_at -= 20_000;
+        assert!(e.live_polls()[0].cancel, "an overdue order must be cancelled at the venue");
+
+        // Once the cancel is out we stop re-sending it.
+        e.mark_cancel_sent(&o.order_id);
+        assert!(!e.live_polls()[0].cancel);
+    }
+
+    #[test]
+    fn a_rejected_submission_frees_the_market_for_the_next_signal() {
+        let mut e = Engine::new();
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+        assert!(e.in_flight_markets.contains("alpaca:TSLA"));
+
+        e.apply_live_reject(&o.order_id, "US market closed — next open 2026-07-27T13:30:00Z");
+        assert!(!e.in_flight_markets.contains("alpaca:TSLA"));
+        assert!(e.live_polls().is_empty());
+        assert!(!e.positions.contains_key("alpaca:TSLA"), "a refused order is not a position");
+        let ord = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+        assert_eq!(ord.status, OrderStatus::Rejected);
+        assert!(ord.reject_reason.as_deref().unwrap().contains("market closed"));
+    }
+
+    #[test]
+    fn a_refused_market_backs_off_instead_of_retrying_every_tick() {
+        let mut e = Engine::new();
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+        e.apply_live_reject(&o.order_id, "US market closed");
+
+        // The same signal fires again immediately — it must not resend.
+        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty(), "a closed market must not get one order per tick");
+
+        // A different market is unaffected.
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert_eq!(e.drain_live_orders().len(), 1);
+
+        // Once the backoff expires it tries again — the market may have opened.
+        e.live_backoff_until.insert("alpaca:TSLA".into(), 0);
+        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        assert_eq!(e.drain_live_orders().len(), 1, "backoff must expire, not latch");
+    }
+
+    #[test]
+    fn a_repeated_feed_refresh_is_announced_once() {
+        let mut e = Engine::new();
+        let feed = [crate::marketdata::RealCrypto {
+            id: "crypto:BTC/USD".into(),
+            symbol: "BTC/USD".into(),
+            price: 67_000.0,
+            change24h: 0.01,
+        }];
+        for _ in 0..5 {
+            e.apply_kraken(&feed);
+        }
+        let notices = e.journal.iter().filter(|j| j.message.contains("Kraken feed")).count();
+        assert_eq!(notices, 1, "a 12-second heartbeat would bury the fills");
+    }
+
+    #[test]
+    fn reconciliation_lets_the_broker_win() {
+        let mut e = Engine::new();
+        // Book says 10 AAPL live; broker says 4.
+        e.positions.insert(
+            "alpaca:AAPL".into(),
+            PositionInternal {
+                venue: Venue::Alpaca, symbol: "AAPL".into(), qty: 10.0, avg_price: 220.0,
+                strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 220.0, live: true,
+            },
+        );
+        e.reconcile_positions(
+            Venue::Alpaca,
+            &[BrokerPosition { symbol: "AAPL".into(), qty: 4.0, avg_price: 225.0, market_value: 900.0 }],
+            false,
+        );
+        let p = e.positions.get("alpaca:AAPL").unwrap();
+        assert_eq!(p.qty, 4.0);
+        assert_eq!(p.avg_price, 225.0);
+
+        // And one the broker no longer has is dropped.
+        e.reconcile_positions(Venue::Alpaca, &[], false);
+        assert!(e.positions.is_empty());
+    }
+
+    #[test]
+    fn reconciliation_does_not_adopt_someone_elses_position_by_default() {
+        let mut e = Engine::new();
+        let held = [BrokerPosition { symbol: "NVDA".into(), qty: 500.0, avg_price: 90.0, market_value: 69_000.0 }];
+
+        // The user's own long-term NVDA is not Pythia's to put a stop under.
+        e.reconcile_positions(Venue::Alpaca, &held, false);
+        assert!(e.positions.is_empty(), "untracked broker positions stay untracked");
+
+        // Opt in explicitly and it is taken over.
+        e.reconcile_positions(Venue::Alpaca, &held, true);
+        assert_eq!(e.positions.get("alpaca:NVDA").map(|p| p.qty), Some(500.0));
+    }
+
+    #[test]
+    fn reconciliation_leaves_paper_positions_alone() {
+        let mut e = Engine::new();
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0); // paper fill
+        assert!(e.positions.contains_key("alpaca:AAPL"));
+        // The broker reports nothing — which is correct, this was never real.
+        e.reconcile_positions(Venue::Alpaca, &[], false);
+        assert!(
+            e.positions.contains_key("alpaca:AAPL"),
+            "a simulated position must not be wiped by broker reconciliation"
+        );
+    }
+
+    #[test]
+    fn arming_with_no_venues_routes_nothing() {
+        let mut e = Engine::new();
+        e.set_live(LiveConfig { armed: true, paper: true, dry_run: false, venues: vec![], timeout_sec: 60 });
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty(), "armed but with no venue enabled is still safe");
+        assert!(e.positions.contains_key("alpaca:AAPL"), "it simulates instead");
+    }
+
+    #[test]
+    fn the_order_timeout_is_clamped_to_something_workable() {
+        let mut e = Engine::new();
+        e.set_live(LiveConfig { timeout_sec: 0, ..armed_alpaca() });
+        assert!(e.live_config().timeout_sec >= 15, "0s would cancel every order before it could fill");
+        e.set_live(LiveConfig { timeout_sec: 99_999, ..armed_alpaca() });
+        assert!(e.live_config().timeout_sec <= 900);
+    }
+
+    #[test]
+    fn the_live_flag_survives_a_save_and_reload() {
+        let mut e = Engine::new();
+        e.positions.insert(
+            "alpaca:AAPL".into(),
+            PositionInternal {
+                venue: Venue::Alpaca, symbol: "AAPL".into(), qty: 3.0, avg_price: 227.0,
+                strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 227.0, live: true,
+            },
+        );
+        let json = serde_json::to_string(&e.to_persisted()).unwrap();
+        let mut e2 = Engine::new();
+        e2.apply_persisted(serde_json::from_str(&json).unwrap());
+        assert!(
+            e2.positions.get("alpaca:AAPL").map(|p| p.live).unwrap_or(false),
+            "forgetting this across a restart would let the simulator close real shares"
+        );
     }
 }

@@ -9,7 +9,37 @@ use std::collections::BTreeMap;
 
 const SERVICE: &str = "com.senseiissei.pythia";
 
+/// Venue-level credential slots (one per `connectors::Venue`).
 pub const VENUES: [&str; 3] = ["polymarket", "crypto", "alpaca"];
+
+/// Where a crypto exchange's key/secret/passphrase lives. One slot per venue
+/// so switching exchanges never sends a Kraken key to Binance.
+pub fn exchange_slot(exchange_id: &str) -> String {
+    format!("exchange:{exchange_id}")
+}
+
+/// The slot holding watch-only on-chain addresses (a JSON array under
+/// `addresses`). Deliberately never holds a private key — see `wallets.rs`.
+pub const WALLETS: &str = "wallets";
+
+/// Which crypto exchange `Venue::Crypto` routes through, stored under the
+/// `crypto` venue slot as the field `exchange`.
+pub fn selected_exchange() -> Option<String> {
+    get("crypto")?.get("exchange").cloned()
+}
+
+/// Every slot that currently holds something, for the settings UI. Values are
+/// never included — only whether a slot is populated.
+pub fn status(exchange_ids: &[&str]) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = VENUES.iter().map(|v| (v.to_string(), has_keys(v))).collect();
+    for id in exchange_ids {
+        let slot = exchange_slot(id);
+        let present = has_keys(&slot);
+        out.push((slot, present));
+    }
+    out.push((WALLETS.to_string(), has_keys(WALLETS)));
+    out
+}
 
 fn entry(venue: &str) -> Result<Entry, String> {
     Entry::new(SERVICE, &format!("venue:{venue}")).map_err(|e| e.to_string())

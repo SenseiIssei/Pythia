@@ -1,10 +1,21 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, Lock, Link2, ShieldCheck, Trash2, Bell, Send, BrainCircuit } from "lucide-react";
+import {
+  KeyRound,
+  Lock,
+  Link2,
+  ShieldCheck,
+  Trash2,
+  Bell,
+  Send,
+  BrainCircuit,
+  Building2,
+} from "lucide-react";
 import { Card, PageHeader, Badge, Button } from "../components/ui";
 import { isTauri } from "../engine";
 import { aiMode, aiProviders, saveAiKey, clearAiKey } from "../ai";
-import type { LlmProviderInfo } from "../types";
+import { listExchanges, saveExchangeKeys, clearExchangeKeys } from "../live";
+import type { ExchangeInfo, LlmProviderInfo } from "../types";
 
 interface VenueCfg {
   id: string;
@@ -15,31 +26,13 @@ interface VenueCfg {
 
 const VENUES: VenueCfg[] = [
   {
-    id: "polymarket",
-    name: "Polymarket",
-    fields: [
-      { key: "pk", label: "Polygon private key", secret: true },
-      { key: "funder", label: "Funder / proxy address" },
-    ],
-    note: "⚠ Geoblocked for US persons. You are responsible for legal use where you live. See SAFETY.md.",
-  },
-  {
-    id: "crypto",
-    name: "Crypto exchange (Kraken)",
-    fields: [
-      { key: "key", label: "API key" },
-      { key: "secret", label: "API secret", secret: true },
-    ],
-    note: "Spot only in v1. Grant the key trade permission but NOT withdrawal.",
-  },
-  {
     id: "alpaca",
     name: "Alpaca (equities)",
     fields: [
       { key: "keyId", label: "API key id" },
       { key: "secret", label: "API secret", secret: true },
     ],
-    note: "Start with the paper endpoint (paper-api.alpaca.markets). PDT rules enforced by the risk manager.",
+    note: "Start with the paper endpoint (paper-api.alpaca.markets). Paper and live accounts have separate keys.",
   },
 ];
 
@@ -95,12 +88,169 @@ export function Settings() {
       </div>
 
       <div className="mt-4">
+        <ExchangesCard native={native} onChanged={refresh} />
+      </div>
+
+      <div className="mt-4">
         <AiProvidersCard />
       </div>
 
       <div className="mt-4">
         <AlertsCard native={native} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Crypto exchanges. One is active at a time — whichever was saved last — because
+ * `Venue::Crypto` routes to exactly one book, and quietly splitting orders
+ * across venues would make position sizing a lie.
+ */
+function ExchangesCard({ native, onChanged }: { native: boolean; onChanged: () => Promise<void> }) {
+  const [list, setList] = useState<ExchangeInfo[]>([]);
+  const [err, setErr] = useState("");
+
+  const refresh = useCallback(async () => {
+    try {
+      setList(await listExchanges());
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return (
+    <Card title="Crypto exchanges" right={<Building2 size={14} className="text-accent" />}>
+      <div className="mb-3 text-sm text-cyber-text-dim">
+        Pick where <span className="text-accent">Venue::Crypto</span> executes. Saving keys selects that exchange;
+        the markets and strategies stay identical, so a strategy proven on one book can be pointed at another.
+        Grant the key <span className="text-accent">trade</span> permission and <b>not</b> withdrawal — then a
+        leaked key costs you trades, not coins.
+      </div>
+
+      {!native && (
+        <div className="mb-3 rounded border border-accent/20 bg-accent/5 px-3 py-2 text-xs text-cyber-text-dim">
+          On a backend, exchange keys come from its environment:{" "}
+          <code className="text-accent">PYTHIA_EXCHANGE</code>,{" "}
+          <code className="text-accent">PYTHIA_EXCHANGE_KEY</code>,{" "}
+          <code className="text-accent">PYTHIA_EXCHANGE_SECRET</code>
+          {" "}(plus <code className="text-accent">PYTHIA_EXCHANGE_PASSPHRASE</code> for OKX).
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+        {list.map((ex) => (
+          <ExchangeRow
+            key={ex.id}
+            ex={ex}
+            manageable={native}
+            onChanged={async () => {
+              await refresh();
+              await onChanged();
+            }}
+          />
+        ))}
+      </div>
+      {err && <div className="mt-2 text-xs text-danger">{err}</div>}
+    </Card>
+  );
+}
+
+function ExchangeRow({
+  ex,
+  manageable,
+  onChanged,
+}: {
+  ex: ExchangeInfo;
+  manageable: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const needed = ["key", "secret", ...(ex.needsPassphrase ? ["passphrase"] : [])];
+  const filled = needed.every((k) => (vals[k] ?? "").trim().length > 0);
+
+  async function save() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await saveExchangeKeys(ex.id, vals);
+      setVals({}); // don't keep secrets in component memory
+      setMsg("saved — this is now the active crypto venue");
+      await onChanged();
+    } catch (e) {
+      setMsg(`error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setBusy(false);
+  }
+
+  async function clear() {
+    setBusy(true);
+    setMsg("");
+    try {
+      await clearExchangeKeys(ex.id);
+      setVals({});
+      setMsg("cleared");
+      await onChanged();
+    } catch (e) {
+      setMsg(`error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="rounded-lg border border-cyber-border bg-cyber-surface/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-medium">{ex.label}</span>
+        <Badge tone={ex.configured ? "green" : "neutral"}>
+          {ex.configured ? "configured" : ex.canTrade ? "no key" : "not wired"}
+        </Badge>
+      </div>
+
+      {!ex.canTrade ? (
+        <div className="text-[11px] leading-snug text-cyber-text-faint">
+          Coinbase Advanced Trade signs with ES256 JWTs rather than an HMAC, so it is listed but cannot route
+          orders yet. See PROFIT-PLAN.md.
+        </div>
+      ) : !manageable ? (
+        <div className="text-[11px] text-cyber-text-faint">Managed by the server's environment.</div>
+      ) : (
+        <>
+          {needed.map((k) => (
+            <input
+              key={k}
+              type={k === "key" ? "text" : "password"}
+              value={vals[k] ?? ""}
+              autoComplete="off"
+              onChange={(e) => {
+                setVals((s) => ({ ...s, [k]: e.target.value }));
+                setMsg("");
+              }}
+              placeholder={
+                ex.configured && !vals[k] ? `•••••••• (${k} stored)` : k === "key" ? "API key" : `API ${k}`
+              }
+              className="mb-1.5 w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+            />
+          ))}
+          <div className="mt-1 flex items-center gap-2">
+            <Button tone="cyan" icon={ShieldCheck} disabled={!filled || busy} onClick={save}>
+              {ex.configured ? "Update" : "Save & select"}
+            </Button>
+            {ex.configured && (
+              <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+                Clear
+              </Button>
+            )}
+          </div>
+          {msg && <div className="mt-1.5 text-[11px] text-cyber-text-dim">{msg}</div>}
+        </>
+      )}
     </div>
   );
 }

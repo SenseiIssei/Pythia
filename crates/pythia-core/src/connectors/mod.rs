@@ -2,11 +2,30 @@
 //! implements the same [`MarketConnector`] trait so the strategy engine and
 //! order router are venue-agnostic. The [`paper::PaperConnector`] is the
 //! reference implementation and the default in paper mode.
+//!
+//! ## The order lifecycle contract
+//!
+//! An earlier version of this trait had a single `place_order` that submitted an
+//! order and then *blocked* until it filled. That is wrong for a real broker:
+//! a market order outside regular trading hours does not fill for hours, so the
+//! caller either blocks the whole engine or gives up — and giving up while the
+//! order is still working at the venue is how a bot ends up with a position it
+//! does not know about.
+//!
+//! So the contract is split into three fast, non-blocking calls:
+//!
+//! 1. [`MarketConnector::submit_order`] — POST and return the broker's order id.
+//! 2. [`MarketConnector::order_status`] — poll it, as often as you like.
+//! 3. [`MarketConnector::cancel_order`] — give up *at the venue*, not just locally.
+//!
+//! The engine drives that state machine across ticks and only ever books a fill
+//! the broker has actually reported. Positions can no longer drift.
 
+pub mod alpaca;
+pub mod cex;
 pub mod paper;
 pub mod polymarket;
-pub mod crypto;
-pub mod alpaca;
+pub mod sign;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -19,11 +38,38 @@ pub enum Venue {
     Alpaca,
 }
 
+impl Venue {
+    /// The vault / settings key this venue's credentials live under.
+    pub fn key(self) -> &'static str {
+        match self {
+            Venue::Polymarket => "polymarket",
+            Venue::Crypto => "crypto",
+            Venue::Alpaca => "alpaca",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
     Buy,
     Sell,
+}
+
+impl Side {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Side::Buy => "buy",
+            Side::Sell => "sell",
+        }
+    }
+    /// +1 for a buy, -1 for a sell — handy for signed quantities.
+    pub fn sign(self) -> f64 {
+        match self {
+            Side::Buy => 1.0,
+            Side::Sell => -1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,24 +90,115 @@ pub struct Market {
     pub updated_at: i64,
 }
 
+/// One order as the engine wants it placed. `symbol` is the *venue's* symbol
+/// (e.g. `AAPL`, `XBTUSD`), not Pythia's market id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderRequest {
-    pub market_id: String,
+    pub symbol: String,
     pub side: Side,
     pub order_type: OrderType,
     pub qty: f64,
     pub limit_price: Option<f64>,
+    /// Last known price, for preflight maths (buying power, notional minimums).
+    /// Not sent to the venue — a market order carries no price.
+    pub ref_price: Option<f64>,
+    /// Our own id, echoed back by the venue. Makes submission idempotent: if a
+    /// response is lost in flight we can look the order up instead of resending.
+    pub client_order_id: Option<String>,
+    /// This order closes an existing position and must never flip it long/short.
+    pub reduce_only: bool,
 }
 
+impl OrderRequest {
+    pub fn market(symbol: impl Into<String>, side: Side, qty: f64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            side,
+            order_type: OrderType::Market,
+            qty,
+            limit_price: None,
+            ref_price: None,
+            client_order_id: None,
+            reduce_only: false,
+        }
+    }
+
+    /// Notional value this order commits, as far as we can tell before it fills.
+    pub fn notional(&self) -> Option<f64> {
+        self.limit_price.or(self.ref_price).map(|p| p * self.qty)
+    }
+}
+
+/// Where a submitted order stands at the venue. Every connector maps its own
+/// vocabulary onto this so the engine has one state machine, not five.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BrokerOrderStatus {
+    /// Accepted, resting, nothing filled yet (new / accepted / pending_new / open).
+    Working,
+    PartiallyFilled,
+    Filled,
+    Canceled,
+    Rejected,
+    Expired,
+}
+
+impl BrokerOrderStatus {
+    /// True once the venue will never fill any more of this order.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            BrokerOrderStatus::Filled
+                | BrokerOrderStatus::Canceled
+                | BrokerOrderStatus::Rejected
+                | BrokerOrderStatus::Expired
+        )
+    }
+}
+
+/// A venue's view of one order. `filled_qty`/`avg_price` are cumulative, which
+/// is what every venue reports and what makes partial fills easy to book: the
+/// engine settles the delta against what it has already recorded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Fill {
-    pub order_id: String,
-    pub market_id: String,
-    pub side: Side,
-    pub qty: f64,
-    pub price: f64,
+#[serde(rename_all = "camelCase")]
+pub struct BrokerOrder {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
+    pub status: BrokerOrderStatus,
+    pub filled_qty: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_price: Option<f64>,
+    /// Cumulative fees/commission charged so far, in quote currency.
     pub fee: f64,
-    pub ts: i64,
+    /// The venue's own status string, kept for the journal so a surprising
+    /// rejection is debuggable without reading our mapping code.
+    pub raw_status: String,
+}
+
+/// A position as the *venue* sees it — the ground truth for reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerPosition {
+    pub symbol: String,
+    /// Signed: positive long, negative short.
+    pub qty: f64,
+    pub avg_price: f64,
+    pub market_value: f64,
+}
+
+/// One asset balance at a venue (or on-chain address).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Balance {
+    pub asset: String,
+    /// Available to trade / spend right now.
+    pub free: f64,
+    /// Free + locked in open orders.
+    pub total: f64,
+    /// Best-effort USD valuation; `None` when we cannot price the asset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_value: Option<f64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,29 +212,132 @@ pub enum ConnectorError {
     Auth(String),
     #[error("venue rejected order: {0}")]
     Rejected(String),
+    /// The venue would certainly reject this order right now (market closed,
+    /// asset not tradable, not enough buying power). Caught *before* submitting
+    /// so the journal says why instead of echoing an opaque broker error.
+    #[error("{0}")]
+    Preflight(String),
     #[error("network error: {0}")]
     Network(String),
     #[error("not yet implemented: {0}")]
     Unimplemented(&'static str),
 }
 
+impl ConnectorError {
+    /// Whether retrying the same call in a few seconds could plausibly work.
+    /// Auth failures and rejections cannot; a dropped connection can.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, ConnectorError::Network(_))
+    }
+}
+
 /// The one interface every venue implements. Live connectors talk to real APIs;
 /// the paper connector simulates fills against live/replayed prices.
+///
+/// Implementations must be *fast*: no method may block waiting for a fill. See
+/// the module docs for the submit → poll → cancel contract.
 #[async_trait]
 pub trait MarketConnector: Send + Sync {
     fn venue(&self) -> Venue;
 
-    /// True only when real API keys are present and validated. Until this is
-    /// true, the order router refuses to route live orders here — fail closed.
+    /// True only when real API keys are present. Until this is true, the order
+    /// router refuses to route live orders here — fail closed. Note this is a
+    /// *cheap* check: it says keys exist, not that the venue accepted them. Use
+    /// [`MarketConnector::verify`] for that.
     fn is_live_ready(&self) -> bool;
 
+    /// Human-readable name for journals and the UI ("Alpaca (paper)", "Kraken").
+    fn label(&self) -> String {
+        format!("{:?}", self.venue())
+    }
+
+    /// Round a quantity to something the venue will accept (lot size, share
+    /// precision). Returning 0 means "too small to trade here".
+    fn round_qty(&self, qty: f64, _symbol: &str) -> f64 {
+        qty
+    }
+
+    /// Read-only credential check. Hits the venue's account endpoint, so it also
+    /// proves the key/endpoint pairing is right. Called before arming.
+    async fn verify(&self) -> Result<String, ConnectorError>;
+
     /// Read-only market data (safe in any mode).
-    async fn list_markets(&self) -> Result<Vec<Market>, ConnectorError>;
+    async fn list_markets(&self) -> Result<Vec<Market>, ConnectorError> {
+        Err(ConnectorError::Unimplemented("list_markets"))
+    }
 
-    /// Place an order. In paper mode this simulates a fill; in live mode it
-    /// hits the venue. The risk manager has already approved by this point.
-    async fn place_order(&self, req: OrderRequest) -> Result<Fill, ConnectorError>;
+    /// Refuse orders the venue would certainly reject. Cheap and cached where
+    /// possible; `Ok(())` means "worth submitting", not "will fill".
+    async fn preflight(&self, _req: &OrderRequest) -> Result<(), ConnectorError> {
+        Ok(())
+    }
 
-    /// Cancel a resting order by id.
-    async fn cancel_order(&self, order_id: &str) -> Result<(), ConnectorError>;
+    /// Submit an order and return as soon as the venue acknowledges it. MUST NOT
+    /// wait for a fill.
+    async fn submit_order(&self, req: OrderRequest) -> Result<BrokerOrder, ConnectorError>;
+
+    /// Current state of a previously submitted order. `symbol` is passed back
+    /// because most exchanges key their order lookups on (symbol, id) rather
+    /// than on the id alone.
+    async fn order_status(&self, broker_id: &str, symbol: &str) -> Result<BrokerOrder, ConnectorError>;
+
+    /// Cancel a resting order at the venue. Cancelling an already-terminal order
+    /// is not an error.
+    async fn cancel_order(&self, broker_id: &str, symbol: &str) -> Result<(), ConnectorError>;
+
+    /// Open positions as the venue sees them — used to reconcile on startup and
+    /// after any restart.
+    async fn positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
+        Ok(vec![])
+    }
+
+    /// Cash / asset balances, for the wallet view.
+    async fn balances(&self) -> Result<Vec<Balance>, ConnectorError> {
+        Ok(vec![])
+    }
+}
+
+/// Parse a numeric field that a venue may send as a JSON number *or* a string
+/// (Alpaca, Kraken and Binance all do the latter for money amounts).
+pub(crate) fn num(v: Option<&serde_json::Value>) -> Option<f64> {
+    match v? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Same, defaulting to 0.0 — for cumulative counters where absent means none.
+pub(crate) fn num_or0(v: Option<&serde_json::Value>) -> f64 {
+    num(v).unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_statuses_stop_the_state_machine() {
+        assert!(!BrokerOrderStatus::Working.is_terminal());
+        assert!(!BrokerOrderStatus::PartiallyFilled.is_terminal());
+        for s in [
+            BrokerOrderStatus::Filled,
+            BrokerOrderStatus::Canceled,
+            BrokerOrderStatus::Rejected,
+            BrokerOrderStatus::Expired,
+        ] {
+            assert!(s.is_terminal(), "{s:?} must be terminal");
+        }
+    }
+
+    #[test]
+    fn numbers_parse_from_json_numbers_and_strings() {
+        let v: serde_json::Value = serde_json::json!({"a": 1.5, "b": "2.25", "c": "oops", "d": null});
+        assert_eq!(num(v.get("a")), Some(1.5));
+        assert_eq!(num(v.get("b")), Some(2.25), "venues quote money as strings");
+        assert_eq!(num(v.get("c")), None);
+        assert_eq!(num(v.get("d")), None);
+        assert_eq!(num(v.get("missing")), None);
+        assert_eq!(num_or0(v.get("missing")), 0.0);
+    }
 }
