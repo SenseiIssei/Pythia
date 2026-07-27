@@ -215,6 +215,7 @@ To make the browser build a thin client of the backend server, set
 ```
 Pythia/                     # Cargo workspace
 ├─ PLAN.md · SAFETY.md      # the master plan · read before going live
+├─ NEXT-STEPS.md            # handover: what to do next, in order
 ├─ PROFIT-PLAN.md           # where an edge could come from, and what it must prove first
 ├─ docs/BREAKTHROUGH.md     # the next algorithms · and the case for a simple default view
 ├─ docs/FORECASTING.md      # how predictions are pooled, scored and gated
