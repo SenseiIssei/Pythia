@@ -597,6 +597,13 @@ pub struct Engine {
     /// Every prediction ever made, and how it turned out. This is what turns
     /// opinions into weights — see [`forecast::calibration`].
     forecast_store: track::ForecastStore,
+    /// Per-source trust and recalibration, and the full scorecards. Both are
+    /// derived from the ledger and only change when a forecast *resolves*, so
+    /// they are cached against `forecast_store.resolution_version()` rather
+    /// than refitted every tick.
+    source_stats: track::SourceStats,
+    track_cache: Vec<calibration::Track>,
+    scored_version: Option<u64>,
     /// Latest forecast per market, rebuilt on a schedule.
     forecasts: Vec<forecast::MarketForecast>,
     coherence: Vec<coherence::CoherenceBreak>,
@@ -654,6 +661,9 @@ impl Engine {
             feeds_logged: HashSet::new(),
             forecast_cfg: forecast::ForecastConfig::default(),
             forecast_store: track::ForecastStore::default(),
+            source_stats: track::SourceStats::default(),
+            track_cache: Vec::new(),
+            scored_version: None,
             forecasts: Vec::new(),
             coherence: Vec::new(),
             llm_opinions: HashMap::new(),
@@ -773,30 +783,41 @@ impl Engine {
         self.tick_count += 1;
         let now = self.now();
 
-        // advance simulated markets (real-fed markets random-walk gently between fetches)
-        let ids: Vec<String> = self.markets.iter().map(|m| m.id.clone()).collect();
-        for id in ids {
-            let shock = {
-                let (drift, vol) = self
-                    .sim
-                    .get(&id)
-                    .map(|p| (p.drift, p.vol))
-                    .unwrap_or((0.0, 0.0015));
-                drift + vol * self.gaussian()
-            };
-            if let Some(m) = self.markets.iter_mut().find(|m| m.id == id) {
-                if m.kind == MarketKind::Prediction {
-                    m.price = (m.price + shock).clamp(0.02, 0.98);
-                } else {
-                    m.price *= 1.0 + shock;
-                }
-                if let Some(p) = self.sim.get(&id) {
-                    if !self.real_ids.contains(&id) {
-                        m.change24h = (m.price - p.base) / p.base;
-                    }
-                }
-                m.updated_at = now;
+        // Advance simulated markets (real-fed markets random-walk gently between
+        // fetches). Done in three passes rather than one loop with a lookup:
+        // the old version cloned every market id and then linear-searched the
+        // market list for each one, which is quadratic and allocates a String
+        // per market per tick.
+        //
+        // Pass 1 reads the sim parameters (immutable borrow of markets + sim),
+        // pass 2 draws the shocks (needs `&mut self` for the PRNG), pass 3
+        // applies them by index (mutable borrow of markets alone).
+        let plan: Vec<(f64, f64, Option<f64>)> = (0..self.markets.len())
+            .map(|i| {
+                let id = &self.markets[i].id;
+                let p = self.sim.get(id);
+                let (drift, vol) = p.map(|p| (p.drift, p.vol)).unwrap_or((0.0, 0.0015));
+                // A market fed by a real price feed keeps the venue's own 24h
+                // change; only simulated ones derive it from the sim base.
+                let base = p.map(|p| p.base).filter(|_| !self.real_ids.contains(id));
+                (drift, vol, base)
+            })
+            .collect();
+        let plan: Vec<(f64, Option<f64>)> = plan
+            .into_iter()
+            .map(|(drift, vol, base)| (drift + vol * self.gaussian(), base))
+            .collect();
+
+        for (m, (shock, base)) in self.markets.iter_mut().zip(plan) {
+            if m.kind == MarketKind::Prediction {
+                m.price = (m.price + shock).clamp(0.02, 0.98);
+            } else {
+                m.price *= 1.0 + shock;
             }
+            if let Some(base) = base.filter(|b| *b != 0.0) {
+                m.change24h = (m.price - base) / base;
+            }
+            m.updated_at = now;
         }
 
         // append the new close to each market's rolling history
@@ -962,13 +983,27 @@ impl Engine {
         self.update_forecasts();
     }
 
-    /// Every scored source, for the calibration view.
+    /// Every scored source, for the calibration view. Served from the cache —
+    /// see [`Engine::rescore_if_needed`].
     pub fn forecast_tracks(&self) -> Vec<calibration::Track> {
-        self.forecast_store
-            .source_kinds()
-            .into_iter()
-            .map(|(src, kind)| self.forecast_store.track(&src, kind))
-            .collect()
+        self.track_cache.clone()
+    }
+
+    /// Refit per-source trust and recalibration, but only when a forecast has
+    /// actually resolved since the last fit.
+    ///
+    /// Recording a forecast cannot change any score, and forecasts are recorded
+    /// constantly while resolutions arrive on the order of hours. Keying the
+    /// cache on the resolution counter turns a per-tick logistic regression per
+    /// source per market into one pass, occasionally.
+    fn rescore_if_needed(&mut self) {
+        let version = self.forecast_store.resolution_version();
+        if self.scored_version == Some(version) {
+            return;
+        }
+        self.source_stats = self.forecast_store.source_stats();
+        self.track_cache = self.forecast_store.tracks();
+        self.scored_version = Some(version);
     }
 
     /// Score, resolve and rebuild every market's forecast.
@@ -1001,7 +1036,9 @@ impl Engine {
         }
         let _ = resolved; // scored silently; the journal would be noise
 
-        // 2 · Rebuild each market's forecast from the sources available now.
+        // 2 · Refit the scoreboard if anything resolved, then rebuild each
+        // market's forecast from the sources available now.
+        self.rescore_if_needed();
         let cfg = self.forecast_cfg.clone();
         let snapshot: Vec<Market> = self.markets.clone();
         let mut out: Vec<forecast::MarketForecast> = Vec::new();
@@ -1033,7 +1070,7 @@ impl Engine {
                     llm: &llm,
                     now,
                 },
-                &self.forecast_store,
+                &self.source_stats,
                 &cfg,
             );
             if f.action != forecast::Action::Hold {
@@ -2080,6 +2117,10 @@ impl Engine {
         self.real_ids = p.real_ids.into_iter().collect();
         let resolved = p.forecast_store.resolved_count();
         self.forecast_store = p.forecast_store;
+        // A restored ledger has a resolution counter of its own; force a refit
+        // rather than trusting a version number from a different process.
+        self.scored_version = None;
+        self.rescore_if_needed();
         if let Some(cfg) = p.forecast_cfg {
             self.forecast_cfg = cfg;
         }
@@ -2159,12 +2200,9 @@ impl Engine {
                 .collect(),
             live: self.live_status(),
             forecasts: self.forecasts.clone(),
-            tracks: {
-                let tracks = self.forecast_tracks();
-                // Only scored sources are worth showing; an all-zero row for
-                // something that has never resolved is noise.
-                tracks.into_iter().filter(|t| t.score.n > 0).collect()
-            },
+            // Only scored sources are worth showing; an all-zero row for
+            // something that has never resolved is noise.
+            tracks: self.track_cache.iter().filter(|t| t.score.n > 0).cloned().collect(),
             coherence: self.coherence.clone(),
             forecast_stats: ForecastStats {
                 recorded: self.forecast_store.len(),
@@ -2682,6 +2720,73 @@ mod tests {
         assert!(st.forecast_stats.recorded > 0, "nothing recorded means nothing can be learned");
         assert_eq!(st.forecast_stats.resolved, 0, "nothing has had time to resolve");
         assert_eq!(st.forecast_stats.trusted_sources, 0, "and nothing is trusted yet");
+    }
+
+    /// Not a correctness test — a stopwatch on the hot path, kept so the cost of
+    /// a forecast sweep stays visible. Run it with:
+    /// `cargo test --release -p pythia-core -- --ignored --nocapture bench_`
+    #[test]
+    #[ignore]
+    fn bench_forecast_sweep() {
+        let mut e = Engine::new();
+        // Build a realistic ledger: a few thousand resolved forecasts.
+        for _ in 0..40 {
+            e.update_forecasts();
+            let horizon = e.forecast_cfg.horizon_ms;
+            for r in e.forecast_store.records_mut() {
+                r.resolve_at -= horizon * 2;
+            }
+        }
+        e.update_forecasts();
+        println!(
+            "ledger: {} records, {} resolved, {} scored sources",
+            e.forecast_store.len(),
+            e.forecast_store.resolved_count(),
+            e.track_cache.len()
+        );
+
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            e.update_forecasts();
+        }
+        println!("20 sweeps, nothing resolving: {:?}", t.elapsed());
+
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            e.scored_version = None; // force the refit the cache normally avoids
+            e.update_forecasts();
+        }
+        println!("20 sweeps, refitting every time: {:?}", t.elapsed());
+
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            let _ = e.state();
+        }
+        println!("100 state() snapshots: {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn the_scoreboard_is_not_refitted_when_nothing_has_resolved() {
+        // Forecasts are recorded on every sweep; resolutions arrive on the order
+        // of hours. Refitting a logistic regression per source per market per
+        // tick for numbers that cannot have changed was the one real hotspot.
+        let mut e = Engine::new();
+        e.update_forecasts();
+        let v = e.scored_version;
+        assert!(v.is_some(), "the first pass must score");
+
+        for _ in 0..5 {
+            e.update_forecasts();
+        }
+        assert_eq!(e.scored_version, v, "no resolutions → no refit");
+
+        // Age the ledger past the horizon so something actually resolves.
+        let horizon = e.forecast_cfg.horizon_ms;
+        for r in e.forecast_store.records_mut() {
+            r.resolve_at -= horizon * 2;
+        }
+        e.update_forecasts();
+        assert_ne!(e.scored_version, v, "a resolution must trigger a refit");
     }
 
     /// The wire contract the whole frontend depends on. A field that serialises
