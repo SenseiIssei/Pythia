@@ -233,18 +233,35 @@ export interface LiveConfig {
 export type ForecastKind = "outcome" | "direction";
 export type ForecastAction = "buy" | "sell" | "hold";
 
+/** Three-level skill estimate: global → source → source × market class. */
+export interface HierarchicalSkill {
+  /** Every source pooled, on this question type — what a newcomer inherits. */
+  global: number;
+  /** This source across all market classes, shrunk toward `global`. */
+  source: number;
+  /** This source on this market class, shrunk toward `source`. Used for trust. */
+  pooled: number;
+  /** Unpooled skill at the finest level, so the shrinkage is visible. */
+  raw: number;
+  n: number;
+  nSource: number;
+}
+
 export interface SourceView {
   source: string;
   /** What the source said. */
   rawP: number;
   /** After its learned recalibration. */
   p: number;
-  /** Weight in the pool — measured trust, floored at the bootstrap value. */
+  /** Weight actually pooled: `rawWeight` after the redundancy adjustment. */
   weight: number;
+  /** Trust floored at the bootstrap value, before redundancy. */
+  rawWeight: number;
   /** Measured trust from the track record. 0 = unproven. */
   trust: number;
   /** Resolved forecasts behind that number. */
   n: number;
+  skill: HierarchicalSkill;
   rationale: string;
 }
 
@@ -297,6 +314,9 @@ export interface ReliabilityBin {
 export interface Track {
   source: string;
   kind: ForecastKind;
+  /** Market class this row scores — `prediction`, `crypto`, `equity`. */
+  category: string;
+  skill: HierarchicalSkill;
   score: Score;
   /** The market's score on the same questions — the only fair comparison. */
   marketScore: Score;
@@ -341,6 +361,8 @@ export interface ForecastConfig {
   kellyFraction: number;
   costBps: number;
   minEdgeBps: number;
+  /** Error correlation assumed for a pair with no shared history. */
+  assumedCorrelation: number;
 }
 
 export interface EnsembleRun {

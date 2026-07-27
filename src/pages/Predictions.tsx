@@ -422,6 +422,9 @@ function plainReason(reason: string): string {
 
 function SourceRow({ s }: { s: SourceView }) {
   const silenced = s.weight <= 0;
+  // Redundancy cut: how much of this source's weight another source was already
+  // providing. Only worth showing when it actually bit.
+  const redundancy = s.rawWeight > 0 ? 1 - s.weight / s.rawWeight : 0;
   return (
     <div className="rounded border border-cyber-border/60 bg-cyber-bg/30 px-3 py-1.5">
       <div className="flex items-center gap-2 text-sm">
@@ -432,11 +435,28 @@ function SourceRow({ s }: { s: SourceView }) {
           <span className="text-[10px] text-cyber-text-faint">(said {pct(s.rawP)}, recalibrated)</span>
         )}
         <span className="flex-1" />
+        {redundancy > 0.05 && (
+          <span
+            className="text-[10px] text-warning"
+            title="Its errors look like another source's, so the pool counts it less"
+          >
+            −{(redundancy * 100).toFixed(0)}% redundant
+          </span>
+        )}
         <Badge tone={s.trust > 0 ? "green" : silenced ? "red" : "neutral"}>
           {s.trust > 0 ? `trust ${s.trust.toFixed(2)}` : silenced ? "silenced" : "unproven"}
         </Badge>
         <span className="w-16 text-right text-[10px] text-cyber-text-faint">n={s.n}</span>
       </div>
+      {/* The shrinkage chain, when it differs from the raw number — otherwise
+          "trust 0.31" on 4 samples looks like it came from nowhere. */}
+      {s.skill && Math.abs(s.skill.pooled - s.skill.raw) > 0.01 && (
+        <div className="mt-0.5 pl-5 text-[10px] text-cyber-text-faint">
+          skill {(s.skill.raw * 100).toFixed(0)}% raw on {s.skill.n} →{" "}
+          {(s.skill.pooled * 100).toFixed(0)}% pooled (source {(s.skill.source * 100).toFixed(0)}% on{" "}
+          {s.skill.nSource}, pool {(s.skill.global * 100).toFixed(0)}%)
+        </div>
+      )}
       {s.rationale && (
         <div className="mt-0.5 pl-5 text-[11px] leading-snug text-cyber-text-faint">{s.rationale}</div>
       )}
@@ -459,10 +479,12 @@ function Scoreboard({ tracks }: { tracks: Track[] }) {
             <tr className="text-[10px] uppercase tracking-widest text-cyber-text-faint">
               <th className="py-1 text-left font-normal">Source</th>
               <th className="py-1 text-left font-normal">Question</th>
+              <th className="py-1 text-left font-normal">Class</th>
               <th className="py-1 text-right font-normal">n</th>
               <th className="py-1 text-right font-normal">Brier</th>
               <th className="py-1 text-right font-normal">Market</th>
               <th className="py-1 text-right font-normal">Skill</th>
+              <th className="py-1 text-right font-normal">Pooled</th>
               <th className="py-1 text-right font-normal">Bias</th>
               <th className="py-1 text-right font-normal">Trust</th>
             </tr>
@@ -471,9 +493,10 @@ function Scoreboard({ tracks }: { tracks: Track[] }) {
             {sorted.map((t) => {
               const bias = t.score.meanForecast - t.score.meanOutcome;
               return (
-                <tr key={`${t.source}-${t.kind}`} className="border-t border-cyber-border/50">
+                <tr key={`${t.source}-${t.kind}-${t.category}`} className="border-t border-cyber-border/50">
                   <td className="py-1 font-mono text-xs">{t.source}</td>
                   <td className="py-1 text-xs text-cyber-text-faint">{t.kind}</td>
+                  <td className="py-1 text-xs text-cyber-text-faint">{t.category}</td>
                   <td className="py-1 text-right font-mono text-xs">{t.score.n}</td>
                   <td className="py-1 text-right font-mono text-xs">{t.score.brier.toFixed(4)}</td>
                   <td className="py-1 text-right font-mono text-xs text-cyber-text-faint">
@@ -485,6 +508,12 @@ function Scoreboard({ tracks }: { tracks: Track[] }) {
                     }`}
                   >
                     {(t.brierSkill * 100).toFixed(1)}%
+                  </td>
+                  <td
+                    className="py-1 text-right font-mono text-xs text-cyber-text-dim"
+                    title="After partial pooling toward this source's overall record and the pool's"
+                  >
+                    {t.skill ? `${(t.skill.pooled * 100).toFixed(1)}%` : "—"}
                   </td>
                   <td className="py-1 text-right font-mono text-xs text-cyber-text-dim">
                     {bias > 0 ? "+" : ""}
@@ -501,8 +530,10 @@ function Scoreboard({ tracks }: { tracks: Track[] }) {
       </div>
       <div className="mt-2 text-[11px] leading-snug text-cyber-text-faint">
         <b>Brier</b>: mean squared error against the 0/1 outcome — 0.25 is what always saying 50% scores.{" "}
-        <b>Skill</b>: how much better than the market on the same questions. <b>Bias</b>: systematic
-        over- or under-forecasting. <b>Trust</b>: skill discounted by how little evidence there is for it.
+        <b>Skill</b>: how much better than the market on the same questions. <b>Pooled</b>: that skill
+        after partial pooling toward the source's overall record and the pool's, so a thin record on one
+        market class is carried by a deep one elsewhere. <b>Bias</b>: systematic over- or
+        under-forecasting. <b>Trust</b>: pooled skill discounted by how little evidence there is for it.
       </div>
     </Card>
   );

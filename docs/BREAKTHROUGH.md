@@ -26,7 +26,7 @@ worth more than one more indicator.
 Five, ordered by expected value per week of work. Each has a falsification test,
 because an algorithm without one is a belief.
 
-### 1 · Hierarchical calibration with partial pooling — *highest value, ~1 week*
+### 1 · Hierarchical calibration with partial pooling — ✅ **shipped**
 
 **The problem this solves.** The current [`trust`](../crates/pythia-core/src/forecast/calibration.rs)
 needs ~50 resolved forecasts before a source counts for anything. That is
@@ -56,7 +56,7 @@ sentence with a number behind it.
 estimator does not beat the current flat one in out-of-sample log loss,
 especially for sources with n < 50, it is complexity for nothing.
 
-### 2 · Copula-aware ensemble weighting — *~1 week*
+### 2 · Correlation-aware ensemble weighting — ✅ **shipped**
 
 **The problem.** [`effective_n`](../crates/pythia-core/src/forecast/aggregate.rs)
 already reports that five agreeing models are not five pieces of evidence — but
@@ -152,10 +152,21 @@ model at all.
 
 ### Sequencing
 
-Weeks 1–2 (1, 2) improve every forecast already being made and need no new
-infrastructure. Weeks 3–4 (3) is the surest money. Week 5 (4, observation only)
-is a cheap lottery ticket on a real structural advantage. Weeks 6–7 (5) is the
-highest ceiling and the highest variance.
+~~Weeks 1–2 (1, 2)~~ — **done.** Both are live in
+[`forecast/calibration.rs`](../crates/pythia-core/src/forecast/calibration.rs) and
+[`forecast/track.rs`](../crates/pythia-core/src/forecast/track.rs); see
+[`FORECASTING.md`](FORECASTING.md) §2 for how they read in the app.
+
+One thing implementing them taught, worth recording because it is easy to get
+backwards: **two sources can disagree loudly on every question and still have
+perfectly correlated errors.** If both are constant forecasters, each one's error
+moves only with the outcome, so they move together. Independence is not
+disagreement about the level — it is being wrong at *different times*. The first
+version of the test for this asserted the opposite and was wrong.
+
+Next: weeks 3–4 (3) is the surest money. Week 5 (4, observation only) is a cheap
+lottery ticket on a real structural advantage. Weeks 6–7 (5) is the highest
+ceiling and the highest variance.
 
 ---
 

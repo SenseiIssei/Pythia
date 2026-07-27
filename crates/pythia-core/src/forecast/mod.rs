@@ -33,7 +33,7 @@ pub mod track;
 
 use aggregate::{disagreement, effective_n, kelly_binary, logistic, logit, pool, shrink_toward};
 use serde::{Deserialize, Serialize};
-use track::{ForecastKind, SourceStats};
+use track::{ErrorCorrelations, ForecastKind, SourceStats};
 
 /// Tunables for the whole forecasting stack. Every default here is deliberately
 /// timid — the failure mode of a forecasting bot is confidence, not caution.
@@ -64,6 +64,14 @@ pub struct ForecastConfig {
     pub cost_bps: f64,
     /// Edge below this (after costs) is not worth acting on.
     pub min_edge_bps: f64,
+    /// Error correlation assumed between two sources with no shared history.
+    ///
+    /// 0.6 is deliberately high. Two language models that have never been
+    /// compared are far more likely to be redundant than independent, and the
+    /// failure mode of guessing "independent" is overconfidence — the exact
+    /// thing this layer exists to prevent. Real measurements replace this the
+    /// moment a pair has answered 20 of the same questions.
+    pub assumed_correlation: f64,
 }
 
 impl Default for ForecastConfig {
@@ -79,6 +87,7 @@ impl Default for ForecastConfig {
             kelly_fraction: 0.25,
             cost_bps: 150.0, // 1.5% round trip — realistic for a prediction market
             min_edge_bps: 100.0,
+            assumed_correlation: 0.6,
         }
     }
 }
@@ -92,12 +101,18 @@ pub struct SourceView {
     pub raw_p: f64,
     /// After its learned recalibration is applied.
     pub p: f64,
-    /// Weight in the pool — this is `trust`, floored at the bootstrap value.
+    /// Weight actually used in the pool: `raw_weight` after the redundancy
+    /// adjustment. Lower than `raw_weight` means another source was already
+    /// saying this.
     pub weight: f64,
+    /// Trust floored at the bootstrap value, before redundancy is accounted for.
+    pub raw_weight: f64,
     /// Measured trust from the track record. 0 means "unproven".
     pub trust: f64,
     /// Resolved forecasts behind that number.
     pub n: usize,
+    /// The three-level skill estimate, so the shrinkage is inspectable.
+    pub skill: calibration::HierarchicalSkill,
     pub rationale: String,
 }
 
@@ -152,6 +167,11 @@ pub struct ForecastInput<'a> {
     /// Prediction markets: the implied probability. Price markets: the last price.
     pub price: f64,
     pub is_prediction: bool,
+    /// Market class — `prediction`, `crypto`, `equity`. The third level of the
+    /// calibration hierarchy: a source good at macro questions may be no better
+    /// than the market at guessing the next BTC tick, and one averaged number
+    /// describes neither.
+    pub category: &'a str,
     /// Recent closes (price markets) or recent implied probabilities (event markets).
     pub history: &'a [f64],
     pub liquidity: Option<f64>,
@@ -177,7 +197,12 @@ pub fn direction_from_edge(model_p: f64, market_p: f64) -> f64 {
 /// `stats` is precomputed by [`track::ForecastStore::source_stats`] — scoring
 /// the ledger here, per source, per market, per tick, was the one genuinely
 /// expensive thing in this layer.
-pub fn build(input: &ForecastInput, stats: &SourceStats, cfg: &ForecastConfig) -> MarketForecast {
+pub fn build(
+    input: &ForecastInput,
+    stats: &SourceStats,
+    correlations: &ErrorCorrelations,
+    cfg: &ForecastConfig,
+) -> MarketForecast {
     let kind = if input.is_prediction { ForecastKind::Outcome } else { ForecastKind::Direction };
     // A price market's "market forecast" for *will this be higher* is 0.5: under
     // a random walk that is the correct answer, and it is what a source has to beat.
@@ -218,16 +243,27 @@ pub fn build(input: &ForecastInput, stats: &SourceStats, cfg: &ForecastConfig) -
     // its track record has earned.
     let mut sources: Vec<SourceView> = Vec::new();
     for (name, raw_p, rationale) in raw {
-        let stat = stats.get(&name, kind);
+        let stat = stats.get(&name, kind, input.category);
         sources.push(SourceView {
             p: stat.recalibration.apply(raw_p),
             raw_p,
             weight: stat.trust.max(cfg.bootstrap_trust),
+            raw_weight: stat.trust.max(cfg.bootstrap_trust),
             trust: stat.trust,
             n: stat.n,
+            skill: stat.skill,
             source: name,
             rationale,
         });
+    }
+
+    // Down-weight sources whose errors already say the same thing. Five models
+    // agreeing is not five pieces of evidence, and this is where that stops
+    // being a caveat in the UI and starts affecting the number.
+    let named: Vec<(String, f64)> = sources.iter().map(|s| (s.source.clone(), s.weight)).collect();
+    let adjusted = correlations.adjust(&named, cfg.assumed_correlation);
+    for (s, w) in sources.iter_mut().zip(&adjusted) {
+        s.weight = *w;
     }
 
     let components: Vec<(f64, f64)> = sources.iter().map(|s| (s.p, s.weight)).collect();
@@ -341,6 +377,7 @@ mod tests {
             symbol: "Will X happen?",
             price,
             is_prediction: true,
+            category: "prediction",
             history,
             liquidity: Some(100_000.0),
             days_to_resolution: Some(30.0),
@@ -356,7 +393,7 @@ mod tests {
         let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 0.0, ..Default::default() };
         let llm = vec![signal("anthropic", 0.9), signal("openai", 0.88)];
-        let f = build(&prediction_input(0.5, &llm, &[]), &stats, &cfg);
+        let f = build(&prediction_input(0.5, &llm, &[]), &stats, &ErrorCorrelations::default(), &cfg);
 
         assert!((f.ensemble_p - f.market_p).abs() < 1e-9, "must equal the market price");
         assert_eq!(f.action, Action::Hold);
@@ -372,7 +409,7 @@ mod tests {
         let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 0.10, longshot_k: 1.0, ..Default::default() };
         let llm = vec![signal("anthropic", 0.95)];
-        let f = build(&prediction_input(0.50, &llm, &[]), &stats, &cfg);
+        let f = build(&prediction_input(0.50, &llm, &[]), &stats, &ErrorCorrelations::default(), &cfg);
 
         assert!(f.ensemble_p > f.market_p, "an opinion should move something");
         assert!(
@@ -389,7 +426,7 @@ mod tests {
         // weight on that question type.
         let mut store = track::ForecastStore::default();
         for i in 0..300 {
-            store.record(0, "m", "llm:anthropic", ForecastKind::Direction, 0.9, 0.5, 100.0, 1000);
+            store.record(0, "m", "llm:anthropic", ForecastKind::Direction, "crypto", 0.9, 0.5, 100.0, 1000);
             let prices = std::collections::HashMap::from([(
                 "m".to_string(),
                 if i < 270 { 101.0 } else { 99.0 },
@@ -397,7 +434,7 @@ mod tests {
             store.auto_resolve(2000, &prices);
         }
         let stats = store.source_stats();
-        let trust = stats.get("llm:anthropic", ForecastKind::Direction).trust;
+        let trust = stats.get("llm:anthropic", ForecastKind::Direction, "crypto").trust;
         assert!(trust > 0.4, "a 300-question record of skill, got {trust}");
 
         let cfg = ForecastConfig { bootstrap_trust: 0.0, drift_trust: 0.0, ..Default::default() };
@@ -408,13 +445,14 @@ mod tests {
             symbol: "BTC/USD",
             price: 100.0,
             is_prediction: false,
+            category: "crypto",
             history: &history,
             liquidity: None,
             days_to_resolution: None,
             llm: &llm,
             now: 0,
         };
-        let f = build(&input, &stats, &cfg);
+        let f = build(&input, &stats, &ErrorCorrelations::default(), &cfg);
         assert!(f.trust > 0.2, "proven sources get room, got {}", f.trust);
         assert!(f.ensemble_p > 0.55, "and can actually move the number, got {}", f.ensemble_p);
     }
@@ -429,13 +467,14 @@ mod tests {
             symbol: "BTC/USD",
             price: 36_000.0,
             is_prediction: false,
+            category: "crypto",
             history: &history,
             liquidity: None,
             days_to_resolution: None,
             llm: &[],
             now: 0,
         };
-        let f = build(&input, &stats, &cfg);
+        let f = build(&input, &stats, &ErrorCorrelations::default(), &cfg);
         assert_eq!(f.market_p, 0.5, "the baseline for 'will it be higher' is a coin flip");
         assert_eq!(f.kind, ForecastKind::Direction);
         assert!(f.sources.iter().any(|s| s.source == "stat:drift"));
@@ -453,7 +492,7 @@ mod tests {
             ..Default::default()
         };
         let llm = vec![signal("anthropic", 0.52)];
-        let f = build(&prediction_input(0.50, &llm, &[]), &stats, &cfg);
+        let f = build(&prediction_input(0.50, &llm, &[]), &stats, &ErrorCorrelations::default(), &cfg);
         assert_eq!(f.action, Action::Hold);
         assert!(f.reason.contains("cost"), "{}", f.reason);
         assert!(f.net_edge_bps < 0.0);
@@ -470,7 +509,7 @@ mod tests {
             ..Default::default()
         };
         let llm = vec![signal("a", 0.90), signal("b", 0.88), signal("c", 0.92)];
-        let f = build(&prediction_input(0.40, &llm, &[]), &stats, &cfg);
+        let f = build(&prediction_input(0.40, &llm, &[]), &stats, &ErrorCorrelations::default(), &cfg);
         assert_eq!(f.action, Action::Buy);
         assert!(f.kelly > 0.0);
         assert!(f.net_edge_bps > 100.0);
@@ -482,7 +521,7 @@ mod tests {
         let stats = SourceStats::default();
         let cfg = ForecastConfig { bootstrap_trust: 1.0, longshot_k: 1.0, cost_bps: 50.0, min_edge_bps: 50.0, ..Default::default() };
         let llm = vec![signal("a", 0.20), signal("b", 0.18)];
-        let f = build(&prediction_input(0.70, &llm, &[]), &stats, &cfg);
+        let f = build(&prediction_input(0.70, &llm, &[]), &stats, &ErrorCorrelations::default(), &cfg);
         assert_eq!(f.action, Action::Sell);
         assert!(f.kelly < 0.0, "a negative Kelly is the short side");
     }
@@ -494,8 +533,8 @@ mod tests {
 
         let agree = vec![signal("a", 0.7), signal("b", 0.7), signal("c", 0.7)];
         let split = vec![signal("a", 0.2), signal("b", 0.5), signal("c", 0.9)];
-        let f_agree = build(&prediction_input(0.5, &agree, &[]), &stats, &cfg);
-        let f_split = build(&prediction_input(0.5, &split, &[]), &stats, &cfg);
+        let f_agree = build(&prediction_input(0.5, &agree, &[]), &stats, &ErrorCorrelations::default(), &cfg);
+        let f_split = build(&prediction_input(0.5, &split, &[]), &stats, &ErrorCorrelations::default(), &cfg);
 
         assert!(f_agree.disagreement < 0.01);
         assert!(f_split.disagreement > 1.0, "a real split must be visible");
@@ -507,7 +546,7 @@ mod tests {
     fn with_no_sources_at_all_the_forecast_is_the_market_and_the_reason_says_so() {
         let stats = SourceStats::default();
         let cfg = ForecastConfig { longshot_k: 1.0, ..Default::default() };
-        let f = build(&prediction_input(0.42, &[], &[]), &stats, &cfg);
+        let f = build(&prediction_input(0.42, &[], &[]), &stats, &ErrorCorrelations::default(), &cfg);
         assert!(f.sources.is_empty());
         assert!((f.ensemble_p - 0.42).abs() < 1e-9);
         assert_eq!(f.action, Action::Hold);
@@ -530,7 +569,7 @@ mod tests {
         let cfg = ForecastConfig { bootstrap_trust: 1.0, ..Default::default() };
         for price in [0.0, 0.0001, 0.9999, 1.0] {
             let llm = vec![signal("a", 0.5)];
-            let f = build(&prediction_input(price, &llm, &[]), &stats, &cfg);
+            let f = build(&prediction_input(price, &llm, &[]), &stats, &ErrorCorrelations::default(), &cfg);
             assert!(f.ensemble_p.is_finite() && (0.0..=1.0).contains(&f.ensemble_p), "price {price}");
             assert!(f.kelly.is_finite(), "price {price}");
         }

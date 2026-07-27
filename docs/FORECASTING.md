@@ -69,7 +69,7 @@ never all the way.
 
 ```
 BSS = 1 − brier(source) / brier(market)      # skill, on the same questions
-trust = clamp(BSS, 0, 1) × n / (n + 50)      # discounted by how little evidence there is
+trust = clamp(pooled BSS, 0, 1) × n / (n + 50)
 ```
 
 Both factors have to be present:
@@ -82,6 +82,67 @@ Both factors have to be present:
 
 A source that cannot beat the market gets **exactly zero**, and zero weight
 means it cannot move a single order no matter what it says.
+
+### Skill is estimated hierarchically
+
+A single flat number per source needs ~50 resolved forecasts before it means
+anything, and it averages away the difference between a source that is excellent
+at macro questions and useless at guessing the next BTC tick. So skill is
+estimated at three levels and each is shrunk toward its parent by its own sample
+size:
+
+```
+global            how well do forecasters do here at all?
+  └─ source       how well does this one do, across everything?
+       └─ ×class  how well does it do on prediction / crypto / equity?
+```
+
+```
+pooled = w·own + (1−w)·parent      w = n / (n + 30)
+```
+
+A source with 400 crypto forecasts is judged on its crypto record. The same
+source with 3 equity forecasts is judged mostly on its overall record. A source
+with nothing at all is described by the global prior.
+
+**This is not a free lunch.** If forecasters in general have no skill, the global
+prior is ≤ 0 and a newcomer inherits *that* — correctly. The cold start only
+becomes a ramp once something in the pool has actually proven itself, which is
+exactly the condition under which it should.
+
+The scoreboard shows both `Skill` (raw, at the finest level) and `Pooled`, so the
+shrinkage is visible rather than mysterious.
+
+### Redundant sources are down-weighted
+
+`effective_n` reports that five agreeing models are not five pieces of evidence.
+This is what acts on it. Pairwise **error** correlation — not forecast
+correlation — is measured from the resolved history on questions both sources
+answered:
+
+```
+wᵢ' = wᵢ / (1 + Σⱼ≠ᵢ max(ρᵢⱼ, 0) · wⱼ)
+```
+
+Two sources correlated at 0.9 together count for barely more than one. A source
+*uncorrelated* with the rest keeps its full weight — it is adding a dimension,
+which is the entire reason to run an ensemble.
+
+The distinction that matters: two sources can disagree loudly on every question
+and still have perfectly correlated errors. If both are constant forecasters,
+each one's error moves only with the outcome, so they move together. What makes a
+source independently useful is not disagreeing about the level — it is being
+wrong at *different times*.
+
+A pair with fewer than 20 common questions has no measurement, and is **assumed
+correlated** (`assumedCorrelation`, default 0.6) rather than independent. Two
+language models that have never been compared are far more likely to be redundant
+than not, and the failure mode of guessing "independent" is overconfidence.
+
+Practical consequence: this changes what is worth paying for. If two models have
+0.85 error correlation, the second subscription buys almost nothing — and the
+scoreboard says so. If a cheap statistical source decorrelates the pool, it is
+worth more than a frontier model.
 
 Each source also gets a learned **recalibration** — `p' = logistic(a·logit(p) + b)`
 fitted on its own record once it has 30+ resolved forecasts. A model that says

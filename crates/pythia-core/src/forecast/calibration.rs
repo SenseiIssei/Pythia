@@ -108,6 +108,108 @@ pub fn trust(model: &Score, market: &Score) -> f64 {
     skill * evidence
 }
 
+/// Shrinkage constant for the partial-pooling chain. A level with this many
+/// observations is trusted halfway on its own; below it, it leans on its parent.
+const POOL_K: f64 = 30.0;
+
+/// Partial pooling: blend an estimate with the estimate one level up, weighted
+/// by how much evidence the lower level actually has.
+///
+/// ```text
+/// pooled = w·own + (1−w)·parent      where w = n / (n + K)
+/// ```
+///
+/// With n = 0 this returns the parent unchanged, which is the whole point: a
+/// brand-new source is described by what is known about sources in general
+/// rather than by a number nobody has measured.
+pub fn partial_pool(own: f64, n: usize, parent: f64) -> f64 {
+    let w = n as f64 / (n as f64 + POOL_K);
+    w * own + (1.0 - w) * parent
+}
+
+/// A skill estimate built from three levels of evidence.
+///
+/// The flat estimator asks one question — "has *this source* beaten the market
+/// on *this question type*?" — and needs ~50 resolved forecasts before the
+/// answer means anything. That is correct and brutal: a new provider is mute for
+/// weeks, and a source excellent at crypto but useless at politics gets one
+/// averaged number describing neither.
+///
+/// The hierarchy asks three questions instead and lets the well-evidenced ones
+/// carry the poorly-evidenced ones:
+///
+/// ```text
+/// global            how well do forecasters do here at all?
+///   └─ source       how well does this one do, across everything?
+///        └─ ×class  how well does it do on this kind of market?
+/// ```
+///
+/// Each level is shrunk toward its parent by its own sample size. A source with
+/// 400 forecasts on crypto is judged on its crypto record; the same source with
+/// 3 forecasts on equities is judged mostly on its overall record; a source with
+/// nothing at all is judged on the global prior.
+///
+/// **This is not a free lunch.** If forecasters in general have no skill, the
+/// global prior is ≤ 0 and a newcomer inherits *that* — correctly. The cold
+/// start only becomes a ramp once something in the pool has actually proven
+/// itself, which is exactly the condition under which it should.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HierarchicalSkill {
+    /// Skill of every source pooled together, on this question type.
+    pub global: f64,
+    /// This source across all market classes, shrunk toward `global`.
+    pub source: f64,
+    /// This source on this market class, shrunk toward `source`. The estimate
+    /// actually used.
+    pub pooled: f64,
+    /// Raw, unpooled skill at the finest level — shown next to `pooled` so the
+    /// shrinkage is visible rather than mysterious.
+    pub raw: f64,
+    /// Resolved forecasts at the finest level.
+    pub n: usize,
+    /// Resolved forecasts for this source across all classes.
+    pub n_source: usize,
+}
+
+impl HierarchicalSkill {
+    /// Build the chain from the three levels' scores.
+    pub fn build(
+        global: (&Score, &Score),
+        source: (&Score, &Score),
+        finest: (&Score, &Score),
+    ) -> Self {
+        let g = brier_skill(global.0, global.1);
+        let raw_s = brier_skill(source.0, source.1);
+        let s = partial_pool(raw_s, source.0.n, g);
+        let raw = brier_skill(finest.0, finest.1);
+        let pooled = partial_pool(raw, finest.0.n, s);
+        HierarchicalSkill {
+            global: g,
+            source: s,
+            pooled,
+            raw,
+            n: finest.0.n,
+            n_source: source.0.n,
+        }
+    }
+
+    /// Trust from the pooled estimate.
+    ///
+    /// The evidence discount uses the source's **total** record, not just this
+    /// market class: having proven itself somewhere is real evidence that it is
+    /// not noise, even on a class where it has answered twice. That is the
+    /// mechanism that turns the cold start into a ramp.
+    pub fn trust(&self) -> f64 {
+        let skill = self.pooled.clamp(0.0, 1.0);
+        if skill <= 0.0 {
+            return 0.0;
+        }
+        let n = self.n_source.max(self.n) as f64;
+        skill * (n / (n + TRUST_HALF_LIFE))
+    }
+}
+
 /// One bucket of a reliability diagram: of the forecasts in `[lo, hi)`, what
 /// fraction actually happened?
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +345,12 @@ pub struct Track {
     /// each, because being right about an hourly tick is not being right about
     /// an election.
     pub kind: String,
+    /// Market class this row is scored on — `prediction`, `crypto`, `equity`.
+    #[serde(default)]
+    pub category: String,
+    /// The three-level estimate behind `trust`, so the shrinkage is inspectable.
+    #[serde(default)]
+    pub skill: HierarchicalSkill,
     pub score: Score,
     /// The market's score on the *same* questions — the only fair comparison.
     pub market_score: Score,
@@ -336,6 +444,100 @@ mod tests {
         assert_eq!(trust(&Score::default(), &Score::default()), 0.0);
         assert_eq!(brier_skill(&Score::default(), &Score::default()), 0.0);
         assert_eq!(Score::of(&[]).n, 0);
+    }
+
+    // ── hierarchical calibration ────────────────────────────────────────────
+
+    fn score(n: usize, brier: f64) -> Score {
+        Score { n, brier, ..Default::default() }
+    }
+
+    #[test]
+    fn partial_pooling_returns_the_parent_when_there_is_no_evidence() {
+        assert!((partial_pool(0.9, 0, 0.1) - 0.1).abs() < 1e-12, "n=0 must defer entirely");
+        // ...and converges on the level's own estimate as evidence accumulates.
+        assert!(partial_pool(0.9, 30, 0.1) > 0.4);
+        assert!(partial_pool(0.9, 30, 0.1) < 0.6, "n=K is halfway");
+        assert!(partial_pool(0.9, 100_000, 0.1) > 0.89);
+    }
+
+    #[test]
+    fn a_source_with_no_record_inherits_the_global_prior() {
+        // Forecasters in general are doing well here (global BSS 0.20), but this
+        // particular source has answered nothing.
+        let market = score(1000, 0.25);
+        let global = score(1000, 0.20);
+        let empty = Score::default();
+
+        let h = HierarchicalSkill::build(
+            (&global, &market),
+            (&empty, &Score::default()),
+            (&empty, &Score::default()),
+        );
+        assert!((h.pooled - h.global).abs() < 1e-12, "with nothing of its own it is the prior");
+        assert!(h.global > 0.15);
+        // Trust is still zero, because trust needs evidence *about this source*.
+        assert_eq!(h.trust(), 0.0, "inheriting a prior is not the same as being proven");
+    }
+
+    #[test]
+    fn a_source_proven_elsewhere_is_given_the_benefit_of_the_doubt_on_a_new_class() {
+        // 400 forecasts of real skill overall; only 3 on this market class.
+        let market = score(1000, 0.25);
+        let global = score(1000, 0.24);
+        let src = score(400, 0.18);
+        let src_market = score(400, 0.25);
+        let thin = score(3, 0.24);
+        let thin_market = score(3, 0.25);
+
+        let h = HierarchicalSkill::build(
+            (&global, &market),
+            (&src, &src_market),
+            (&thin, &thin_market),
+        );
+        // Its raw skill on 3 questions is near nothing; the pooled estimate
+        // leans on the 400 it does have.
+        assert!(h.pooled > h.raw, "pooled {} should exceed raw {}", h.pooled, h.raw);
+        assert!(h.pooled > 0.15, "it should not be treated as a stranger, got {}", h.pooled);
+        assert!(h.trust() > 0.2, "and that record should count, got {}", h.trust());
+    }
+
+    #[test]
+    fn a_source_with_a_deep_record_on_this_class_is_judged_on_that_record() {
+        let market = score(1000, 0.25);
+        let global = score(1000, 0.245);
+        let src = score(500, 0.245);
+        let src_market = score(500, 0.25);
+        // Excellent, specifically here, over 500 questions.
+        let deep = score(500, 0.15);
+        let deep_market = score(500, 0.25);
+
+        let h = HierarchicalSkill::build((&global, &market), (&src, &src_market), (&deep, &deep_market));
+        assert!((h.pooled - h.raw).abs() < 0.03, "500 samples should barely shrink: {} vs {}", h.pooled, h.raw);
+        assert!(h.trust() > 0.3);
+    }
+
+    #[test]
+    fn a_useless_pool_does_not_launder_a_newcomer_into_being_trusted() {
+        // The honest half of the design: if forecasters in general are no better
+        // than the market, a new one inherits exactly that.
+        let market = score(2000, 0.25);
+        let global = score(2000, 0.26); // slightly worse than the market
+        let empty = Score::default();
+
+        let h = HierarchicalSkill::build((&global, &market), (&empty, &Score::default()), (&empty, &Score::default()));
+        assert!(h.global < 0.0);
+        assert_eq!(h.trust(), 0.0, "a negative prior must not become positive trust");
+    }
+
+    #[test]
+    fn hierarchical_trust_stays_in_range_and_beats_nothing_into_something() {
+        let market = score(1000, 0.25);
+        let perfect = score(5000, 0.0);
+        let h = HierarchicalSkill::build((&perfect, &market), (&perfect, &market), (&perfect, &market));
+        let t = h.trust();
+        assert!((0.0..=1.0).contains(&t), "got {t}");
+        assert!(t > 0.9, "a perfect, deep record should be trusted, got {t}");
     }
 
     #[test]
