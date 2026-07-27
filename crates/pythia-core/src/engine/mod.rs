@@ -9,6 +9,7 @@ pub mod risk;
 pub mod strategies;
 
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
+use crate::forecast::{self, calibration, coherence, track};
 use crate::marketdata::{RealCrypto, RealEquity, RealPrediction};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -100,6 +101,13 @@ pub struct Market {
     pub regime: Option<Regime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trend_strength: Option<f64>, // efficiency ratio 0..1
+    /// Prediction markets: the NO price, when the venue quotes it. YES + NO
+    /// should be 1; a gap is a model-free arbitrage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_price: Option<f64>,
+    /// Prediction markets: resolution time in epoch millis, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolves_at: Option<i64>,
     pub updated_at: i64,
 }
 
@@ -435,7 +443,12 @@ struct InFlight {
 }
 
 /// The full state pushed to the UI every tick.
+///
+/// camelCase like every other DTO here. Most fields are single words so the
+/// rename is invisible — but `forecast_stats` is not, and without this it would
+/// reach the frontend under a name the TypeScript type does not have.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineState {
     pub portfolio: PortfolioSnapshot,
     pub markets: Vec<Market>,
@@ -446,6 +459,29 @@ pub struct EngineState {
     pub limits: RiskLimits,
     pub history: HashMap<String, Vec<f64>>, // recent closes per tradable market
     pub live: LiveStatus,
+    /// The forecasting layer's current view of each market.
+    #[serde(default)]
+    pub forecasts: Vec<forecast::MarketForecast>,
+    /// Scoreboard per forecasting source — what actually earns weight.
+    #[serde(default)]
+    pub tracks: Vec<calibration::Track>,
+    /// Markets whose own outcomes do not price to 1.
+    #[serde(default)]
+    pub coherence: Vec<coherence::CoherenceBreak>,
+    #[serde(default)]
+    pub forecast_stats: ForecastStats,
+}
+
+/// Headline numbers for the forecasting layer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForecastStats {
+    pub recorded: usize,
+    pub resolved: usize,
+    pub pending: usize,
+    /// Sources that have earned non-zero weight. Zero here means the ensemble
+    /// is currently advisory only, which is the honest starting state.
+    pub trusted_sources: usize,
 }
 
 // ── persistence (survive restarts) ─────────────────────────────────────────
@@ -483,6 +519,13 @@ pub struct Persisted {
     pub journal: Vec<JournalEntry>,
     pub limits: RiskLimits,
     pub real_ids: Vec<String>,
+    /// The forecast ledger. Losing this on restart would reset every source's
+    /// track record to "unproven" and silence the whole ensemble, so it is
+    /// persisted with everything else.
+    #[serde(default)]
+    pub forecast_store: track::ForecastStore,
+    #[serde(default)]
+    pub forecast_cfg: Option<forecast::ForecastConfig>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -549,6 +592,21 @@ pub struct Engine {
     /// Feeds we have already announced, so the journal is not a 12-second
     /// heartbeat with the occasional fill hidden in it.
     feeds_logged: HashSet<&'static str>,
+    // ── forecasting ──
+    forecast_cfg: forecast::ForecastConfig,
+    /// Every prediction ever made, and how it turned out. This is what turns
+    /// opinions into weights — see [`forecast::calibration`].
+    forecast_store: track::ForecastStore,
+    /// Latest forecast per market, rebuilt on a schedule.
+    forecasts: Vec<forecast::MarketForecast>,
+    coherence: Vec<coherence::CoherenceBreak>,
+    /// Cached LLM opinions per market, with the time they were fetched. The
+    /// engine is synchronous and never calls a model itself; the daemon pushes
+    /// them in through [`Engine::apply_llm_opinions`].
+    llm_opinions: HashMap<String, (i64, Vec<crate::llm::Signal>)>,
+    /// Markets whose forecast currently clears its costs. Prediction-market
+    /// signals are dropped unless their market is in here.
+    actionable: HashSet<String>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -594,6 +652,12 @@ impl Engine {
             live_warned_at: HashMap::new(),
             live_backoff_until: HashMap::new(),
             feeds_logged: HashSet::new(),
+            forecast_cfg: forecast::ForecastConfig::default(),
+            forecast_store: track::ForecastStore::default(),
+            forecasts: Vec::new(),
+            coherence: Vec::new(),
+            llm_opinions: HashMap::new(),
+            actionable: HashSet::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -676,6 +740,8 @@ impl Engine {
             self.real_ids.insert(r.id.clone());
             if let Some(m) = self.markets.iter_mut().find(|m| m.id == r.id) {
                 m.price = r.price;
+                m.no_price = r.no_price;
+                m.resolves_at = r.end_at;
                 m.updated_at = now;
             } else {
                 self.markets.push(Market {
@@ -685,12 +751,14 @@ impl Engine {
                     kind: MarketKind::Prediction,
                     price: r.price,
                     change24h: 0.0,
-                    // No probability model shipped → no auto-betting on real markets
-                    // until a SignalProvider is plugged in (Phase 3).
+                    // Filled by the forecasting layer once it has an ensemble
+                    // view; until then there is no model and no auto-betting.
                     model_prob: None,
                     liquidity: Some(r.liquidity),
                     regime: None,
                     trend_strength: None,
+                    no_price: r.no_price,
+                    resolves_at: r.end_at,
                     updated_at: now,
                 });
             }
@@ -741,22 +809,10 @@ impl Engine {
             }
         }
 
-        // probability model for prediction markets: an EWMA "fair value"
-        // heuristic (NOT a real forecast) so Prob-Edge has a live signal to
-        // trade against on real Polymarket odds.
-        let pred_ids: Vec<String> = self
-            .markets
-            .iter()
-            .filter(|m| m.kind == MarketKind::Prediction)
-            .map(|m| m.id.clone())
-            .collect();
-        for id in pred_ids {
-            let fair = self.history.get(&id).and_then(|h| indicators::ema(h, 20));
-            if let Some(fair) = fair {
-                if let Some(m) = self.markets.iter_mut().find(|m| m.id == id) {
-                    m.model_prob = Some(fair.clamp(0.02, 0.98));
-                }
-            }
+        // Rebuild the forecasting layer periodically (~every 15s). It is pure
+        // computation over data already in hand — no network, no model calls.
+        if self.tick_count % 10 == 1 {
+            self.update_forecasts();
         }
 
         // regime detection for tradable markets (Kaufman efficiency ratio)
@@ -835,6 +891,13 @@ impl Engine {
                     if self.limits.regime_filter && !strategy_regime_ok(self.strategies[idx].kind, m.regime) {
                         continue;
                     }
+                    // A prediction-market bet is only taken when the forecasting
+                    // layer says the edge survives the spread. The strategy's own
+                    // threshold is about the signal; this is about the cost of
+                    // acting on it, and both have to pass.
+                    if m.kind == MarketKind::Prediction && !self.actionable.contains(&intent.market_id) {
+                        continue;
+                    }
                     let name = self.strategies[idx].name.clone();
                     let sid = self.strategies[idx].id.clone();
                     self.log(
@@ -857,6 +920,214 @@ impl Engine {
         if self.equity_curve.len() > 300 {
             self.equity_curve.remove(0);
         }
+    }
+
+    // ── forecasting ─────────────────────────────────────────────────────────
+    /// How long an LLM opinion stays usable. Models are asked about slow-moving
+    /// questions, but a view formed before a 20% move is not a view about the
+    /// current market.
+    const LLM_TTL_MS: i64 = 6 * 3_600_000;
+
+    /// Push a batch of model opinions for one market. Called by the daemon after
+    /// an ensemble run; the engine itself never touches the network.
+    pub fn apply_llm_opinions(&mut self, market_id: &str, signals: Vec<crate::llm::Signal>) {
+        if signals.is_empty() {
+            return;
+        }
+        let n = signals.len();
+        let symbol = self
+            .markets
+            .iter()
+            .find(|m| m.id == market_id)
+            .map(|m| m.symbol.clone())
+            .unwrap_or_else(|| market_id.to_string());
+        self.llm_opinions.insert(market_id.to_string(), (self.now(), signals));
+        self.log(
+            JournalKind::Signal,
+            format!("Ensemble: {n} model opinion(s) on {symbol}"),
+            None,
+            Some(market_id.to_string()),
+        );
+        // Fold them in immediately rather than waiting for the next sweep.
+        self.update_forecasts();
+    }
+
+    pub fn forecast_config(&self) -> forecast::ForecastConfig {
+        self.forecast_cfg.clone()
+    }
+
+    pub fn set_forecast_config(&mut self, cfg: forecast::ForecastConfig) {
+        self.forecast_cfg = cfg;
+        self.log(JournalKind::System, "Forecast settings updated".into(), None, None);
+        self.update_forecasts();
+    }
+
+    /// Every scored source, for the calibration view.
+    pub fn forecast_tracks(&self) -> Vec<calibration::Track> {
+        self.forecast_store
+            .source_kinds()
+            .into_iter()
+            .map(|(src, kind)| self.forecast_store.track(&src, kind))
+            .collect()
+    }
+
+    /// Score, resolve and rebuild every market's forecast.
+    ///
+    /// Order matters: resolution happens **before** new forecasts are built, so
+    /// a source's weight always reflects everything already known. Building
+    /// first would let a source be weighted by a track record that excludes the
+    /// question it just answered.
+    fn update_forecasts(&mut self) {
+        let now = self.now();
+        let prices: HashMap<String, f64> =
+            self.markets.iter().map(|m| (m.id.clone(), m.price)).collect();
+
+        // 1 · Reality check: settle what can be settled.
+        let resolved = self.forecast_store.auto_resolve(now, &prices);
+        let pred_prices: HashMap<String, f64> = self
+            .markets
+            .iter()
+            .filter(|m| m.kind == MarketKind::Prediction)
+            .map(|m| (m.id.clone(), m.price))
+            .collect();
+        let settled = self.forecast_store.resolve_settled(now, &pred_prices);
+        if settled > 0 {
+            self.log(
+                JournalKind::System,
+                format!("{settled} outcome forecast(s) settled — track records updated"),
+                None,
+                None,
+            );
+        }
+        let _ = resolved; // scored silently; the journal would be noise
+
+        // 2 · Rebuild each market's forecast from the sources available now.
+        let cfg = self.forecast_cfg.clone();
+        let snapshot: Vec<Market> = self.markets.clone();
+        let mut out: Vec<forecast::MarketForecast> = Vec::new();
+        let mut actionable: HashSet<String> = HashSet::new();
+
+        for m in &snapshot {
+            let is_prediction = m.kind == MarketKind::Prediction;
+            let history = self.history.get(&m.id).cloned().unwrap_or_default();
+            let llm: Vec<crate::llm::Signal> = self
+                .llm_opinions
+                .get(&m.id)
+                .filter(|(at, _)| now - *at < Self::LLM_TTL_MS)
+                .map(|(_, s)| s.clone())
+                .unwrap_or_default();
+
+            let days = m
+                .resolves_at
+                .map(|end| ((end - now) as f64 / 86_400_000.0).max(0.0));
+
+            let f = forecast::build(
+                &forecast::ForecastInput {
+                    market_id: &m.id,
+                    symbol: &m.symbol,
+                    price: m.price,
+                    is_prediction,
+                    history: &history,
+                    liquidity: m.liquidity,
+                    days_to_resolution: days,
+                    llm: &llm,
+                    now,
+                },
+                &self.forecast_store,
+                &cfg,
+            );
+            if f.action != forecast::Action::Hold {
+                actionable.insert(m.id.clone());
+            }
+            out.push(f);
+        }
+
+        // 3 · Write down what was predicted, so it can be scored later.
+        for f in &out {
+            let market_id = f.market_id.clone();
+            let ref_price = snapshot
+                .iter()
+                .find(|m| m.id == market_id)
+                .map(|m| m.price)
+                .unwrap_or(0.0);
+
+            if f.kind == track::ForecastKind::Outcome {
+                // The level view, which settles when the event does...
+                self.forecast_store.record(
+                    now, &market_id, "ensemble", track::ForecastKind::Outcome,
+                    f.ensemble_p, f.market_p, ref_price, cfg.horizon_ms,
+                );
+                for s in &f.sources {
+                    self.forecast_store.record(
+                        now, &market_id, &s.source, track::ForecastKind::Outcome,
+                        s.p, f.market_p, ref_price, cfg.horizon_ms,
+                    );
+                }
+                // ...and the derived directional view, which settles on a timer.
+                // Without this, an election market yields no calibration data
+                // for months, and every source stays unweighted forever.
+                self.forecast_store.record(
+                    now, &market_id, "ensemble", track::ForecastKind::Direction,
+                    forecast::direction_from_edge(f.ensemble_p, f.market_p),
+                    0.5, ref_price, cfg.horizon_ms,
+                );
+                for s in &f.sources {
+                    self.forecast_store.record(
+                        now, &market_id, &s.source, track::ForecastKind::Direction,
+                        forecast::direction_from_edge(s.p, f.market_p),
+                        0.5, ref_price, cfg.horizon_ms,
+                    );
+                }
+            } else {
+                self.forecast_store.record(
+                    now, &market_id, "ensemble", track::ForecastKind::Direction,
+                    f.ensemble_p, f.market_p, ref_price, cfg.horizon_ms,
+                );
+                for s in &f.sources {
+                    self.forecast_store.record(
+                        now, &market_id, &s.source, track::ForecastKind::Direction,
+                        s.p, f.market_p, ref_price, cfg.horizon_ms,
+                    );
+                }
+            }
+        }
+
+        // 4 · The ensemble becomes the market's model probability, so the UI and
+        // the Prob-Edge strategy see the same number the forecaster produced.
+        for f in &out {
+            if f.kind == track::ForecastKind::Outcome {
+                if let Some(m) = self.markets.iter_mut().find(|m| m.id == f.market_id) {
+                    m.model_prob = Some(f.ensemble_p.clamp(0.001, 0.999));
+                }
+            }
+        }
+
+        // 5 · Coherence: does the market even agree with itself?
+        let sets: Vec<coherence::OutcomeSet> = snapshot
+            .iter()
+            .filter(|m| m.kind == MarketKind::Prediction)
+            .filter_map(|m| {
+                let no = m.no_price?;
+                Some(coherence::binary_set(&m.id, &m.symbol, &m.id, m.price, no))
+            })
+            .collect();
+        let breaks = coherence::check(&sets, cfg.cost_bps / 2.0);
+        for b in &breaks {
+            if b.actionable && !self.coherence.iter().any(|old| old.event_id == b.event_id) {
+                self.log(
+                    JournalKind::Signal,
+                    format!(
+                        "Coherence break on {}: outcomes sum to {:.4} — {:.0}bps after costs",
+                        b.title, b.sum, b.net_bps
+                    ),
+                    None,
+                    Some(b.event_id.clone()),
+                );
+            }
+        }
+        self.coherence = breaks;
+        self.actionable = actionable;
+        self.forecasts = out;
     }
 
     /// Re-weight active strategies' budgets toward recent equity-curve
@@ -1768,6 +2039,8 @@ impl Engine {
             journal: self.journal.clone(),
             limits: self.limits.clone(),
             real_ids: self.real_ids.iter().cloned().collect(),
+            forecast_store: self.forecast_store.clone(),
+            forecast_cfg: Some(self.forecast_cfg.clone()),
         }
     }
 
@@ -1805,7 +2078,20 @@ impl Engine {
         self.journal = p.journal;
         self.limits = p.limits;
         self.real_ids = p.real_ids.into_iter().collect();
+        let resolved = p.forecast_store.resolved_count();
+        self.forecast_store = p.forecast_store;
+        if let Some(cfg) = p.forecast_cfg {
+            self.forecast_cfg = cfg;
+        }
         self.log(JournalKind::System, "Restored saved state from disk".into(), None, None);
+        if resolved > 0 {
+            self.log(
+                JournalKind::System,
+                format!("Forecast track record restored — {resolved} scored prediction(s)"),
+                None,
+                None,
+            );
+        }
     }
 
     pub fn state(&self) -> EngineState {
@@ -1872,6 +2158,25 @@ impl Engine {
                 })
                 .collect(),
             live: self.live_status(),
+            forecasts: self.forecasts.clone(),
+            tracks: {
+                let tracks = self.forecast_tracks();
+                // Only scored sources are worth showing; an all-zero row for
+                // something that has never resolved is noise.
+                tracks.into_iter().filter(|t| t.score.n > 0).collect()
+            },
+            coherence: self.coherence.clone(),
+            forecast_stats: ForecastStats {
+                recorded: self.forecast_store.len(),
+                resolved: self.forecast_store.resolved_count(),
+                pending: self.forecast_store.pending_count(),
+                trusted_sources: self
+                    .forecast_store
+                    .source_kinds()
+                    .into_iter()
+                    .filter(|(s, k)| self.forecast_store.trust_of(s, *k) > 0.0)
+                    .count(),
+            },
         }
     }
 
@@ -1949,6 +2254,8 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
         liquidity: Some(liq),
         regime: None,
         trend_strength: None,
+        no_price: None,
+        resolves_at: None,
         updated_at: now,
     };
     let markets = vec![
@@ -2349,6 +2656,147 @@ mod tests {
         e.live_backoff_until.insert("alpaca:TSLA".into(), 0);
         e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
         assert_eq!(e.drain_live_orders().len(), 1, "backoff must expire, not latch");
+    }
+
+    #[test]
+    fn every_market_gets_a_forecast_and_it_starts_equal_to_the_market() {
+        let mut e = Engine::new();
+        e.update_forecasts();
+        assert_eq!(e.forecasts.len(), e.markets.len());
+
+        // With no track record, no source may pull away from the price.
+        for f in &e.forecasts {
+            assert_eq!(f.action, forecast::Action::Hold, "{} should not trade on day one", f.market_id);
+            assert!(f.trust < 0.3, "{} trust {}", f.market_id, f.trust);
+        }
+        // Prediction markets get a model probability; price markets do not.
+        let pred = e.markets.iter().find(|m| m.kind == MarketKind::Prediction).unwrap();
+        assert!(pred.model_prob.is_some());
+    }
+
+    #[test]
+    fn forecasts_are_recorded_so_they_can_be_scored_later() {
+        let mut e = Engine::new();
+        e.update_forecasts();
+        let st = e.state();
+        assert!(st.forecast_stats.recorded > 0, "nothing recorded means nothing can be learned");
+        assert_eq!(st.forecast_stats.resolved, 0, "nothing has had time to resolve");
+        assert_eq!(st.forecast_stats.trusted_sources, 0, "and nothing is trusted yet");
+    }
+
+    /// The wire contract the whole frontend depends on. A field that serialises
+    /// under the wrong name is invisible in Rust and silently `undefined` in the
+    /// UI, which is the worst combination available.
+    #[test]
+    fn engine_state_serialises_in_the_camel_case_the_frontend_expects() {
+        let mut e = Engine::new();
+        e.update_forecasts();
+        let v = serde_json::to_value(e.state()).unwrap();
+        let obj = v.as_object().unwrap();
+        for key in ["portfolio", "markets", "positions", "orders", "journal", "strategies",
+                    "limits", "history", "live", "forecasts", "tracks", "coherence", "forecastStats"] {
+            assert!(obj.contains_key(key), "EngineState is missing `{key}` on the wire");
+        }
+        assert!(!obj.contains_key("forecast_stats"), "snake_case must not leak to the UI");
+        assert!(v["forecastStats"]["trustedSources"].is_number());
+        assert!(v["forecastStats"]["recorded"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn a_prediction_market_signal_is_dropped_when_the_edge_does_not_clear_costs() {
+        let mut e = Engine::new();
+        e.update_forecasts();
+        // Nothing is actionable on a fresh engine, so Prob-Edge cannot fire even
+        // though the seeded markets carry a model probability.
+        assert!(e.actionable.is_empty());
+
+        // Force a market to be actionable and the gate opens.
+        e.actionable.insert("polymarket:fed-cut-2026".into());
+        assert!(e.actionable.contains("polymarket:fed-cut-2026"));
+    }
+
+    #[test]
+    fn model_opinions_flow_into_the_forecast_and_are_journaled() {
+        let mut e = Engine::new();
+        let sig = crate::llm::Signal {
+            probability: 0.85,
+            direction: crate::llm::Direction::Long,
+            confidence: 0.7,
+            rationale: "test".into(),
+            base_rate: Some(0.3),
+            key_drivers: vec!["rates".into()],
+            evidence_for: vec![],
+            evidence_against: vec![],
+            provider: "anthropic".into(),
+            model: "claude-opus-4-8".into(),
+        };
+        e.apply_llm_opinions("polymarket:fed-cut-2026", vec![sig]);
+
+        let f = e
+            .forecasts
+            .iter()
+            .find(|f| f.market_id == "polymarket:fed-cut-2026")
+            .expect("forecast rebuilt on the spot");
+        assert!(f.sources.iter().any(|s| s.source == "llm:anthropic"));
+        assert!(e.journal.iter().any(|j| j.message.contains("model opinion")));
+    }
+
+    #[test]
+    fn stale_model_opinions_are_dropped_rather_than_used() {
+        let mut e = Engine::new();
+        let sig = crate::llm::Signal {
+            probability: 0.85, direction: crate::llm::Direction::Long, confidence: 0.7,
+            rationale: "old".into(), base_rate: None, key_drivers: vec![],
+            evidence_for: vec![], evidence_against: vec![],
+            provider: "anthropic".into(), model: "m".into(),
+        };
+        e.apply_llm_opinions("polymarket:fed-cut-2026", vec![sig]);
+        // Backdate it past the TTL.
+        if let Some(entry) = e.llm_opinions.get_mut("polymarket:fed-cut-2026") {
+            entry.0 -= Engine::LLM_TTL_MS + 1;
+        }
+        e.update_forecasts();
+
+        let f = e.forecasts.iter().find(|f| f.market_id == "polymarket:fed-cut-2026").unwrap();
+        assert!(
+            !f.sources.iter().any(|s| s.source == "llm:anthropic"),
+            "a view formed before the market moved is not a view about this market"
+        );
+    }
+
+    #[test]
+    fn the_forecast_track_record_survives_a_restart() {
+        let mut e = Engine::new();
+        e.update_forecasts();
+        let recorded = e.forecast_store.len();
+        assert!(recorded > 0);
+
+        let json = serde_json::to_string(&e.to_persisted()).unwrap();
+        let mut e2 = Engine::new();
+        e2.apply_persisted(serde_json::from_str(&json).unwrap());
+        assert_eq!(
+            e2.forecast_store.len(),
+            recorded,
+            "losing the ledger would silence every source back to unproven"
+        );
+    }
+
+    #[test]
+    fn a_coherence_break_is_detected_on_a_binary_market_that_does_not_sum_to_one() {
+        let mut e = Engine::new();
+        // Give the seeded prediction market a NO price that leaves a 4-point gap.
+        if let Some(m) = e.markets.iter_mut().find(|m| m.id == "polymarket:fed-cut-2026") {
+            m.price = 0.60;
+            m.no_price = Some(0.36);
+        }
+        e.update_forecasts();
+        let b = e
+            .coherence
+            .iter()
+            .find(|b| b.event_id == "polymarket:fed-cut-2026")
+            .expect("0.60 + 0.36 = 0.96 is a 400bps gap");
+        assert!(b.actionable, "buying both sides needs no shorting");
+        assert!(e.journal.iter().any(|j| j.message.contains("Coherence break")));
     }
 
     #[test]

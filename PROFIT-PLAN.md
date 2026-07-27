@@ -160,20 +160,43 @@ earnings calendar and reaction measurement. The trap is that the naive version i
 against people with better infrastructure; the durable version trades the multi-day *drift*, not the
 first second.
 
-### 3.6 LLM-derived signals — **unproven; treat as a research input, not a strategy**
+### 3.6 Forecast ensembles on event markets — **built; unproven by construction**
 
-Pythia can already ask ten different models about a market. That is a nice feature and a terrible
-strategy generator: an LLM asked "will BTC go up" produces a plausible sentence, not a calibrated
-probability.
+**Status: implemented.** See [`docs/FORECASTING.md`](docs/FORECASTING.md) and the Predictions page.
 
-There is a narrow version worth testing: use the model for **structured extraction** — parsing
-filings, classifying news as material/immaterial, resolving prediction-market question semantics —
-and feed the *extracted facts* into a statistical model. The LLM does language; the statistics do
-probability. Each is being asked what it is good at.
+An LLM asked "will BTC go up" produces a plausible sentence, not a calibrated probability. So the
+implementation does not trust one, and does not trust ten either. Every source — the statistical
+hypotheses and each model — is pooled in log-odds, weighted by a **measured Brier skill score against
+the market on the same questions**, and shrunk back toward the market price by how little evidence
+there is for it. A source that has not beaten the market gets exactly zero weight and cannot move an
+order.
 
-**Falsification test:** log LLM directional calls for 90 days without trading, then measure the Brier
-score against a naive baseline. If it does not beat the baseline, the feature stays advisory forever
-and the UI keeps saying so.
+Two design choices carry most of the value:
+
+- **Scoring data arrives in hours, not months.** Every event forecast also produces a derived
+  directional forecast — `logistic(logit(model) − logit(market))` — which resolves on a timer. So the
+  calibration machinery has data long before any election settles, and every source is scored
+  continuously without a cent at risk.
+- **The falsification test is the product.** The scoreboard is a page in the app, not a research
+  note. Within a few hundred resolved forecasts it will say, with a number, whether any of this has
+  skill.
+
+The narrow version still worth adding is **structured extraction**: use the model to parse filings
+and classify news as material/immaterial, and feed the extracted *facts* into a statistical model.
+Language to the language model, probability to the statistics.
+
+**The honest expectation:** most likely every source lands at zero skill on liquid markets, because
+those markets are efficient. That is a real result, it costs nothing to establish, and it is worth
+far more than a backtest that says otherwise.
+
+### 3.7 Prediction-market coherence — **built; the only model-free edge here**
+
+**Status: implemented.** The outcomes of one event must price to 1. When they sum to 0.96, buying
+every leg costs 96 cents and pays a dollar, whatever happens — arithmetic, not a forecast. Breaks are
+reported net of costs, with cost scaling by leg count, and near-misses stay visible so the question
+"does this exist at my size?" gets a real answer.
+
+Capturing them needs Polymarket order routing, which is gated for the reasons in §7.3.
 
 ---
 

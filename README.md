@@ -14,7 +14,7 @@
 
 <br>
 
-[![Tests](https://img.shields.io/badge/rust%20tests-97%20passing-brightgreen?style=flat-square&logo=rust)](#)
+[![Tests](https://img.shields.io/badge/rust%20tests-189%20passing-brightgreen?style=flat-square&logo=rust)](#)
 [![Paper-first](https://img.shields.io/badge/mode-paper--first-brightgreen?style=flat-square)](SAFETY.md)
 [![AI providers](https://img.shields.io/badge/AI-10%20providers-a855f7?style=flat-square)](#-ai-signals--bring-any-model)
 [![Last commit](https://img.shields.io/github/last-commit/SenseiIssei/Pythia?style=flat-square&logo=git&label=last%20commit&color=blue)](https://github.com/SenseiIssei/Pythia)
@@ -62,6 +62,11 @@ and any large-language-model of your choice can weigh in on a market.
   return-correlation / concentration matrix.
 - **🧠 AI Signals — bring any model** — Anthropic (Claude), OpenAI (GPT), xAI (Grok), z.ai (GLM),
   DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
+- **🎯 Scored prediction ensembles** — statistical hypotheses *and* every model you configure, asked
+  independently, pooled in log-odds, and weighted by a **measured Brier skill score against the
+  market on the same questions**. A source that hasn't beaten the market gets zero weight and cannot
+  move an order. Learned per-source recalibration, a live scoreboard, and coherence checks that catch
+  a market whose own outcomes don't price to 1. See [`docs/FORECASTING.md`](docs/FORECASTING.md).
 - **📡 Gated live execution — 5 venues** — Alpaca equities plus **Kraken · Binance · Bybit · OKX**
   spot. Ships **disarmed**; each venue is armed *separately* behind a typed `ARM LIVE`, and arming
   runs a read-only credential check that refuses if a venue doesn't answer. Orders that cannot fill
@@ -131,8 +136,10 @@ covers the rest. Every model is overridable — type any model id you like.
 Each request returns a structured signal — `{ probability, direction, confidence, rationale }` —
 clamped and stamped with the provider/model that answered.
 
-> 🔒 **AI signals are advisory only.** No model reliably predicts prices, and **none of them place
-> orders.** Treat a signal as one input among many.
+> 🔒 **A model's opinion is advisory until it has earned otherwise.** No model reliably predicts
+> prices. On the Predictions page every source starts at *zero* weight and stays there until its
+> scored track record beats the market's — so on a fresh install the ensemble sits on the market
+> price and nothing trades. That is the design working, not a bug.
 
 **Where keys live:** the **desktop app** stores provider keys in the OS keychain (manage them in
 *Settings → AI providers*). The **backend server** reads keys from its own environment. The browser
@@ -173,6 +180,8 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `GET /api/live/verify` | read-only credential check for any venue (`?venue=&paper=`) |
 | `GET /api/exchanges` | supported crypto exchanges + which have keys |
 | `GET /api/wallets` | unified balance sheet (broker · exchanges · watched addresses) |
+| `POST /api/forecast/ensemble` | ask every configured model about one market (`{marketId, notes}`) |
+| `POST /api/forecast/config` | forecasting tunables (horizon, costs, bootstrap trust, …) |
 
 Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, any provider key
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), Alpaca for real equity quotes +
@@ -206,6 +215,8 @@ Pythia/                     # Cargo workspace
 │  └─ src/
 │     ├─ engine/            #   strategies, indicators, risk, live order state machine
 │     ├─ connectors/        #   alpaca · cex/{kraken,binance,bybit,okx} · polymarket · paper
+│     ├─ forecast/          #   pooling, calibration, scoring, coherence, statistical sources
+│     ├─ predict.rs         #   the async side: model ensembles, fed back into the forecast
 │     ├─ execution.rs       #   the one place that sends an order (shared by both hosts)
 │     ├─ wallets.rs         #   unified balances incl. watch-only on-chain addresses
 │     └─ …                  #   market data, vault, alerts, llm (AI signals)

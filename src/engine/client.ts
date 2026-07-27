@@ -1,7 +1,10 @@
 import type {
+  CoherenceBreak,
+  ForecastStats,
   JournalEntry,
   LiveStatus,
   Market,
+  MarketForecast,
   Order,
   PortfolioSnapshot,
   PositionView,
@@ -9,7 +12,11 @@ import type {
   Side,
   StrategyConfig,
   StrategyState,
+  Track,
 } from "../types";
+
+/** Nothing forecast yet — what the browser paper build reports. */
+export const NO_FORECASTS: ForecastStats = { recorded: 0, resolved: 0, pending: 0, trustedSources: 0 };
 
 /** The safe default every runtime starts from: nothing armed, nothing routing. */
 const DISARMED: LiveStatus = {
@@ -45,6 +52,12 @@ export interface EngineClient {
   history(): Record<string, number[]>;
   /** Live-execution status (arm state, endpoint, pending live orders). */
   liveStatus(): LiveStatus;
+  /** The forecasting layer's view: per-market ensembles, source scoreboard,
+   *  and any market whose own outcomes fail to price to 1. */
+  forecasts(): MarketForecast[];
+  tracks(): Track[];
+  coherence(): CoherenceBreak[];
+  forecastStats(): ForecastStats;
 
   toggleKill(): void;
   setLimits(l: Partial<RiskLimits>): void;
@@ -67,6 +80,10 @@ export interface EngineState {
   limits: RiskLimits;
   history: Record<string, number[]>;
   live: LiveStatus;
+  forecasts: MarketForecast[];
+  tracks: Track[];
+  coherence: CoherenceBreak[];
+  forecastStats: ForecastStats;
 }
 
 export { DISARMED };

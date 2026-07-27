@@ -8,14 +8,18 @@ import {
 } from "react";
 import { getEngine } from "./engine";
 import type {
+  CoherenceBreak,
+  ForecastStats,
   JournalEntry,
   LiveStatus,
   Market,
+  MarketForecast,
   Order,
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
   StrategyConfig,
+  Track,
 } from "./types";
 
 interface Store {
@@ -28,6 +32,10 @@ interface Store {
   limits: RiskLimits;
   history: Record<string, number[]>;
   live: LiveStatus;
+  forecasts: MarketForecast[];
+  tracks: Track[];
+  coherence: CoherenceBreak[];
+  forecastStats: ForecastStats;
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
@@ -62,6 +70,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       limits: engine.getLimits(),
       history: engine.history(),
       live: engine.liveStatus(),
+      forecasts: engine.forecasts(),
+      tracks: engine.tracks(),
+      coherence: engine.coherence(),
+      forecastStats: engine.forecastStats(),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),

@@ -21,7 +21,14 @@ pub struct RealPrediction {
     pub id: String,
     pub symbol: String,
     pub price: f64, // YES outcome implied probability, 0..1
+    /// NO outcome price. YES + NO should be 1; when it is not, that gap is a
+    /// model-free arbitrage (see `forecast::coherence`), so it is worth carrying.
+    pub no_price: Option<f64>,
     pub liquidity: f64,
+    /// Resolution time in epoch millis, when the venue states one. Drives the
+    /// time-decay damping in the forecasters — a market resolving tomorrow has
+    /// far less left to learn than one resolving in a year.
+    pub end_at: Option<i64>,
 }
 
 pub struct RealEquity {
@@ -184,27 +191,45 @@ pub async fn fetch_polymarket() -> Vec<RealPrediction> {
         if question.is_empty() || slug.is_empty() {
             continue;
         }
-        let price = m
+        // `outcomePrices` is a JSON-encoded string array: ["0.62","0.38"].
+        let prices: Vec<f64> = m
             .get("outcomePrices")
             .and_then(Value::as_str)
             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-            .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()));
-        let Some(price) = price else { continue };
+            .map(|v| v.iter().filter_map(|p| p.parse::<f64>().ok()).collect())
+            .unwrap_or_default();
+        let Some(&price) = prices.first() else { continue };
         if !(0.0..=1.0).contains(&price) {
             continue;
         }
+        let no_price = prices.get(1).copied().filter(|p| (0.0..=1.0).contains(p));
         let liquidity = m.get("liquidityNum").and_then(Value::as_f64).unwrap_or(0.0);
         out.push(RealPrediction {
             id: format!("polymarket:{slug}"),
             symbol: question.to_string(),
             price,
+            no_price,
             liquidity,
+            end_at: parse_end_date(m),
         });
-        if out.len() >= 5 {
+        if out.len() >= 8 {
             break;
         }
     }
     out
+}
+
+/// Gamma reports resolution as an ISO-8601 timestamp under `endDate` (older
+/// payloads use `end_date_iso`). Absent or unparseable is fine — the forecasters
+/// fall back to a neutral damping rather than guessing a date.
+fn parse_end_date(m: &Value) -> Option<i64> {
+    let raw = m
+        .get("endDate")
+        .or_else(|| m.get("end_date_iso"))
+        .and_then(Value::as_str)?;
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|d| d.timestamp_millis())
 }
 
 #[cfg(test)]
@@ -249,5 +274,17 @@ mod tests {
     #[tokio::test]
     async fn alpaca_without_keys_is_a_no_op() {
         assert!(fetch_alpaca("", "", "iex").await.is_empty());
+    }
+
+    #[test]
+    fn resolution_dates_parse_from_both_field_spellings() {
+        let a: Value = serde_json::json!({"endDate": "2026-09-01T12:00:00Z"});
+        let b: Value = serde_json::json!({"end_date_iso": "2026-09-01T12:00:00Z"});
+        assert_eq!(parse_end_date(&a), parse_end_date(&b));
+        assert!(parse_end_date(&a).unwrap() > 0);
+
+        // A missing or malformed date is not fatal — the forecasters cope.
+        assert_eq!(parse_end_date(&serde_json::json!({})), None);
+        assert_eq!(parse_end_date(&serde_json::json!({"endDate": "soon"})), None);
     }
 }

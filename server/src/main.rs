@@ -36,7 +36,9 @@ use pythia_core::connectors::cex::{self, Exchange};
 use pythia_core::connectors::{Side, Venue};
 use pythia_core::engine::{Engine, EngineState, LiveConfig, RiskLimits, StrategyConfig, StrategyState};
 use pythia_core::execution::{self, Credentials};
+use pythia_core::forecast::ForecastConfig;
 use pythia_core::llm::{self, LlmConfig, Provider};
+use pythia_core::predict::{self, EnsembleKeys};
 use pythia_core::wallets::{self, WalletSources, WatchedAddress};
 use pythia_core::{alerts, marketdata};
 
@@ -83,6 +85,21 @@ fn credentials_from_env() -> Credentials {
         alpaca_extended_hours: env_flag("PYTHIA_EXTENDED_HOURS"),
         alpaca_allow_shorts: env_flag("PYTHIA_ALLOW_SHORTS"),
     }
+}
+
+/// How often to run an automatic ensemble sweep, in ticks (~1.5s each).
+/// `None` disables it, which is the default — model calls cost money and should
+/// be an explicit choice, not something a server does quietly overnight.
+fn sweep_ticks() -> Option<u64> {
+    let minutes: u64 = env_str("PYTHIA_FORECAST_SWEEP_MIN")?.parse().ok()?;
+    (minutes > 0).then(|| (minutes * 40).max(40)) // 40 ticks ≈ 1 minute
+}
+
+/// How many markets one sweep covers. Bounds the spend per sweep.
+fn sweep_markets() -> usize {
+    env_str("PYTHIA_FORECAST_SWEEP_MARKETS")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
 }
 
 /// Watch-only on-chain addresses, as a JSON array in `PYTHIA_WALLETS`:
@@ -137,6 +154,8 @@ async fn main() {
         .route("/api/live/verify", get(get_live_verify))
         .route("/api/exchanges", get(get_exchanges))
         .route("/api/wallets", get(get_wallets))
+        .route("/api/forecast/ensemble", post(post_ensemble))
+        .route("/api/forecast/config", post(post_forecast_config))
         // The dashboards are served from a different origin in dev; allow them.
         .layer(CorsLayer::permissive())
         .with_state(state.clone());
@@ -239,6 +258,18 @@ async fn tick_loop(state: AppState) {
         // notice a fill that happened while we were restarting.
         if n % 80 == 1 {
             execution::reconcile(&state.engine, &state.creds).await;
+        }
+
+        // Optional ensemble sweep. Off by default: every sweep is one API call
+        // per provider per market, and that is the operator's money.
+        if let Some(period) = sweep_ticks() {
+            if n % period == 1 {
+                let runs = predict::sweep(&state.engine, &EnsembleKeys::from_env(), sweep_markets()).await;
+                let answered: usize = runs.iter().map(|r| r.answered).sum();
+                if answered > 0 {
+                    tracing::info!("ensemble sweep: {answered} opinion(s) across {} market(s)", runs.len());
+                }
+            }
         }
 
         // Push the post-execution state so listeners see fills promptly rather
@@ -455,6 +486,41 @@ async fn get_live_verify(
 async fn get_exchanges(State(st): State<AppState>) -> impl IntoResponse {
     let selected = st.creds.exchange.as_ref().map(|(e, ..)| *e);
     Json(cex::exchanges_with(|e| selected == Some(e)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnsembleReq {
+    market_id: String,
+    /// Anything the operator wants every model to weigh.
+    #[serde(default)]
+    notes: String,
+}
+
+/// Ask every configured provider about one market, independently, and fold the
+/// answers into that market's forecast. Costs one API call per provider.
+async fn post_ensemble(State(st): State<AppState>, Json(req): Json<EnsembleReq>) -> impl IntoResponse {
+    match predict::ensemble_for_market(&st.engine, &EnsembleKeys::from_env(), &req.market_id, &req.notes).await
+    {
+        Ok(run) => {
+            let s = serde_json::to_string(&st.engine.lock().unwrap().state()).unwrap_or_default();
+            let _ = st.tx.send(s);
+            (StatusCode::OK, Json(run)).into_response()
+        }
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+
+/// Update the forecasting tunables (horizon, costs, bootstrap trust, …).
+async fn post_forecast_config(
+    State(st): State<AppState>,
+    Json(cfg): Json<ForecastConfig>,
+) -> Json<EngineState> {
+    let mut e = st.engine.lock().unwrap();
+    e.set_forecast_config(cfg);
+    let s = e.state();
+    let _ = st.tx.send(serde_json::to_string(&s).unwrap_or_default());
+    Json(s)
 }
 
 /// The unified balance sheet: broker, exchange and watch-only on-chain
