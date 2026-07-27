@@ -11,8 +11,9 @@ import {
   BrainCircuit,
   Building2,
 } from "lucide-react";
-import { Card, PageHeader, Badge, Button } from "../components/ui";
+import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
 import { isTauri } from "../engine";
+import { setUiMode, useAdvanced } from "../uiMode";
 import { aiMode, aiProviders, saveAiKey, clearAiKey } from "../ai";
 import { listExchanges, saveExchangeKeys, clearExchangeKeys } from "../live";
 import type { ExchangeInfo, LlmProviderInfo } from "../types";
@@ -38,6 +39,7 @@ const VENUES: VenueCfg[] = [
 
 export function Settings() {
   const native = isTauri();
+  const advanced = useAdvanced();
   const [status, setStatus] = useState<Record<string, boolean>>({});
 
   async function refresh() {
@@ -57,6 +59,8 @@ export function Settings() {
   return (
     <div className="animate-fade-in">
       <PageHeader title="Settings" subtitle="Venue connections · keys stored in the OS keychain, never in code" />
+
+      <ViewModeCard advanced={advanced} />
 
       <Card className="mb-4 border-warning/30 bg-warning/5">
         <div className="flex items-start gap-3">
@@ -95,10 +99,53 @@ export function Settings() {
         <AiProvidersCard />
       </div>
 
-      <div className="mt-4">
-        <AlertsCard native={native} />
-      </div>
+      {/* Webhooks are an integration, not a setting — nothing a first-time user
+          needs in order to understand or use the app. */}
+      {advanced && (
+        <div className="mt-4">
+          <AlertsCard native={native} />
+        </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * The view switch. First card on the page on purpose: it is the setting that
+ * changes the most about how the app reads, and someone who feels lost needs to
+ * find it without knowing what to look for.
+ */
+function ViewModeCard({ advanced }: { advanced: boolean }) {
+  return (
+    <Card
+      className="mb-4"
+      title="View"
+      right={<Badge tone={advanced ? "purple" : "green"}>{advanced ? "advanced" : "simple"}</Badge>}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="max-w-xl text-sm text-cyber-text-dim">
+          {advanced ? (
+            <>
+              <b className="text-cyber-text">Advanced view.</b> Everything is shown: markets,
+              positions, strategies, the composer, backtests, the optimizer, correlation, risk limits
+              and the full journal.
+            </>
+          ) : (
+            <>
+              <b className="text-cyber-text">Simple view.</b> Only what you need to understand what
+              the app is doing with your money. Turning on advanced adds charts, strategies,
+              backtests and risk controls — it changes nothing about how the app behaves, only what
+              you can see and adjust.
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className={advanced ? "text-cyber-text-faint" : "text-success"}>Simple</span>
+          <Toggle on={advanced} onChange={(v) => setUiMode(v ? "advanced" : "simple")} />
+          <span className={advanced ? "text-purple-neon" : "text-cyber-text-faint"}>Advanced</span>
+        </div>
+      </div>
+    </Card>
   );
 }
 
