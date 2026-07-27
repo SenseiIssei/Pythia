@@ -12,10 +12,12 @@ import {
 import { Card, PageHeader, Badge, Button, Meter } from "../components/ui";
 import { useStore } from "../store";
 import { runEnsemble, canRunEnsemble } from "../predict";
+import { useAdvanced } from "../uiMode";
 import type { MarketForecast, SourceView, Track } from "../types";
 
 export function Predictions() {
   const { forecasts, tracks, coherence, forecastStats } = useStore();
+  const advanced = useAdvanced();
   const [open, setOpen] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<Record<string, string>>({});
@@ -76,7 +78,9 @@ export function Predictions() {
         </div>
       </Card>
 
-      {coherence.length > 0 && (
+      {/* Coherence is an arbitrage table. Real, but meaningless without knowing
+          what a leg and a basis point are. */}
+      {advanced && coherence.length > 0 && (
         <Card title="Coherence breaks" className="mb-4" right={<Scale size={14} className="text-purple-neon" />}>
           <div className="mb-2 text-sm text-cyber-text-dim">
             A market's own outcomes must price to 1. When they do not, the gap is arithmetic, not a
@@ -120,27 +124,39 @@ export function Predictions() {
       )}
 
       <Section
-        title="Event markets"
-        subtitle="P(YES) — the question a model can actually reason about"
+        title={advanced ? "Event markets" : "Will this happen?"}
+        subtitle={
+          advanced
+            ? "P(YES) — the question a model can actually reason about"
+            : "How likely each thing is, according to everyone else and according to Pythia"
+        }
         forecasts={events}
         open={open}
         setOpen={setOpen}
         onAsk={ask}
         busy={busy}
         msg={msg}
+        advanced={advanced}
       />
       <Section
-        title="Directional markets"
-        subtitle="P(price higher over the forecast horizon) — resolves on a timer, which is where the calibration data comes from"
+        title={advanced ? "Directional markets" : "Will this go up?"}
+        subtitle={
+          advanced
+            ? "P(price higher over the forecast horizon) — resolves on a timer, which is where the calibration data comes from"
+            : "Chance the price is higher a while from now. 50% means it has no idea, which is usually the honest answer."
+        }
         forecasts={prices}
         open={open}
         setOpen={setOpen}
         onAsk={ask}
         busy={busy}
         msg={msg}
+        advanced={advanced}
       />
 
-      {tracks.length > 0 && <Scoreboard tracks={tracks} />}
+      {/* The scoreboard is the most important thing on this page and the least
+          readable without the vocabulary. Advanced only. */}
+      {advanced && tracks.length > 0 && <Scoreboard tracks={tracks} />}
     </div>
   );
 }
@@ -154,6 +170,7 @@ function Section({
   onAsk,
   busy,
   msg,
+  advanced,
 }: {
   title: string;
   subtitle: string;
@@ -163,6 +180,7 @@ function Section({
   onAsk: (id: string) => Promise<void>;
   busy: string | null;
   msg: Record<string, string>;
+  advanced: boolean;
 }) {
   if (forecasts.length === 0) return null;
   // Biggest net edge first — that is the only ordering that matters here.
@@ -184,27 +202,33 @@ function Section({
               />
               <span className="min-w-0 flex-1 truncate">{f.symbol}</span>
               <span className="hidden font-mono text-xs text-cyber-text-faint sm:inline">
-                mkt {pct(f.marketP)}
+                {advanced ? "mkt " : "others "}
+                {pct(f.marketP)}
               </span>
               <span className="font-mono text-xs">
                 → <span className="font-bold">{pct(f.ensembleP)}</span>
               </span>
-              <span
-                className={`w-20 text-right font-mono text-xs ${
-                  f.netEdgeBps > 0 ? "text-success" : "text-cyber-text-faint"
-                }`}
-              >
-                {f.netEdgeBps > 0 ? "+" : ""}
-                {f.netEdgeBps.toFixed(0)}bps
-              </span>
+              {advanced && (
+                <span
+                  className={`w-20 text-right font-mono text-xs ${
+                    f.netEdgeBps > 0 ? "text-success" : "text-cyber-text-faint"
+                  }`}
+                >
+                  {f.netEdgeBps > 0 ? "+" : ""}
+                  {f.netEdgeBps.toFixed(0)}bps
+                </span>
+              )}
               <Badge tone={f.action === "buy" ? "green" : f.action === "sell" ? "red" : "neutral"}>
-                {f.action}
+                {advanced ? f.action : f.action === "hold" ? "not acting" : `would ${f.action}`}
               </Badge>
             </button>
 
-            {open === f.marketId && (
-              <Detail f={f} onAsk={onAsk} busy={busy === f.marketId} msg={msg[f.marketId]} />
-            )}
+            {open === f.marketId &&
+              (advanced ? (
+                <Detail f={f} onAsk={onAsk} busy={busy === f.marketId} msg={msg[f.marketId]} />
+              ) : (
+                <SimpleDetail f={f} onAsk={onAsk} busy={busy === f.marketId} msg={msg[f.marketId]} />
+              ))}
           </div>
         ))}
       </div>
@@ -278,6 +302,122 @@ function Detail({
       )}
     </div>
   );
+}
+
+/**
+ * The same forecast, in sentences. No basis points, no Kelly, no log-odds — the
+ * three questions a beginner actually has: what does it think, why is it not
+ * acting, and who told it that.
+ */
+function SimpleDetail({
+  f,
+  onAsk,
+  busy,
+  msg,
+}: {
+  f: MarketForecast;
+  onAsk: (id: string) => Promise<void>;
+  busy: boolean;
+  msg?: string;
+}) {
+  const mine = Math.round(f.ensembleP * 100);
+  const mkt = Math.round(f.marketP * 100);
+  const diff = mine - mkt;
+  const proven = f.sources.filter((s) => s.trust > 0).length;
+
+  return (
+    <div className="space-y-3 border-t border-cyber-border px-3 py-3 text-sm">
+      <p className="text-cyber-text-dim">
+        Everyone trading this market prices it at <b className="text-cyber-text">{mkt}%</b>. Pythia's
+        best guess is <b className="text-accent">{mine}%</b>.{" "}
+        {Math.abs(diff) < 1
+          ? "It agrees with the market."
+          : `It thinks that is ${Math.abs(diff)} point${Math.abs(diff) === 1 ? "" : "s"} too ${diff > 0 ? "low" : "high"}.`}
+      </p>
+
+      <div className="rounded border border-cyber-border/60 bg-cyber-bg/40 px-3 py-2 text-cyber-text-dim">
+        <b className="text-cyber-text">
+          {f.action === "hold" ? "It is not acting on this." : `It would ${f.action}.`}
+        </b>{" "}
+        {plainReason(f.reason)}
+      </div>
+
+      {f.sources.length > 0 && (
+        <div className="text-cyber-text-dim">
+          <div className="mb-1 text-[11px] uppercase tracking-widest text-cyber-text-faint">
+            Who contributed
+          </div>
+          <ul className="space-y-0.5">
+            {f.sources.map((s) => (
+              <li key={s.source} className="text-[13px]">
+                <span className="text-cyber-text">{friendlySource(s.source)}</span> said{" "}
+                {Math.round(s.p * 100)}% —{" "}
+                {s.trust > 0 ? (
+                  <span className="text-success">has a proven record ({s.n} checked)</span>
+                ) : (
+                  <span className="text-cyber-text-faint">
+                    unproven so far{s.n > 0 ? `, ${s.n} checked` : ""}, so it barely counts
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {proven === 0 && (
+            <div className="mt-1.5 text-[11px] text-cyber-text-faint">
+              None of them has beaten the market yet, so Pythia mostly sticks with the market price.
+            </div>
+          )}
+        </div>
+      )}
+
+      {canRunEnsemble() && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button tone="purple" icon={Sparkles} disabled={busy} onClick={() => void onAsk(f.marketId)}>
+            {busy ? "Asking…" : "Ask the AI models"}
+          </Button>
+          <span className="text-[11px] text-cyber-text-faint">uses your API credit</span>
+          {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** `llm:anthropic` → `Claude`, `stat:longshot` → a description of the idea. */
+function friendlySource(source: string): string {
+  const map: Record<string, string> = {
+    "llm:anthropic": "Claude",
+    "llm:openai": "GPT",
+    "llm:xai": "Grok",
+    "llm:zai": "GLM",
+    "llm:deepseek": "DeepSeek",
+    "llm:google": "Gemini",
+    "llm:groq": "Groq",
+    "llm:openrouter": "OpenRouter",
+    "llm:mistral": "Mistral",
+    "llm:ollama": "Your local model",
+    "stat:longshot": "The long-shot rule",
+    "stat:momentum": "Recent drift",
+    "stat:drift": "The trend",
+  };
+  return map[source] ?? source;
+}
+
+/** Translate the engine's reason string out of trading vocabulary. */
+function plainReason(reason: string): string {
+  if (reason.includes("track record")) {
+    return "Nothing has proven itself against the market yet, so it will not bet on its own opinion.";
+  }
+  if (reason.includes("round-trip cost")) {
+    return "The difference is smaller than the fees it would pay to trade it.";
+  }
+  if (reason.includes("below the")) {
+    return "The difference is real but too small to be worth trading.";
+  }
+  if (reason.includes("no forecaster")) {
+    return "Nothing has an opinion on this one.";
+  }
+  return reason;
 }
 
 function SourceRow({ s }: { s: SourceView }) {

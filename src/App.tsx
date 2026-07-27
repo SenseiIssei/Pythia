@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Activity, Menu, Minus, X, Power } from "lucide-react";
-import { NAV, type PageId } from "./nav";
+import { navFor, isVisible, type PageId } from "./nav";
+import { useUiMode } from "./uiMode";
+import { Home as HomePage } from "./pages/Home";
 import { StoreProvider, useStore } from "./store";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Badge } from "./components/ui";
@@ -26,6 +28,7 @@ import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 
 const PAGES: Record<PageId, () => ReactNode> = {
+  home: HomePage,
   dashboard: Dashboard,
   markets: Markets,
   positions: Positions,
@@ -45,13 +48,22 @@ const PAGES: Record<PageId, () => ReactNode> = {
   about: About,
 };
 
+/**
+ * Always visible, in both modes. Simple mode changes the *words*, never the
+ * warning: hiding whether real money is in play would be the one thing a
+ * beginner-friendly view must never do.
+ */
 function ModeBanner() {
   const { portfolio, limits } = useStore();
+  const mode = useUiMode();
+  const simple = mode === "simple";
   const live = portfolio.mode === "live";
+
   if (limits.killSwitch) {
     return (
       <div className="flex items-center justify-center gap-2 border-b border-danger/40 bg-danger/10 py-1 text-xs font-bold text-danger text-glow-red animate-pulse-red">
-        <Power size={13} /> KILL SWITCH ENGAGED — live buys halted
+        <Power size={13} />
+        {simple ? "STOPPED — it will not open anything new" : "KILL SWITCH ENGAGED — live buys halted"}
       </div>
     );
   }
@@ -64,17 +76,28 @@ function ModeBanner() {
       }`}
     >
       <Activity size={12} />
-      {live ? "LIVE — real orders may be placed" : "PAPER MODE — simulated money, no orders leave this machine"}
+      {live
+        ? simple
+          ? "REAL MONEY — this can place real orders"
+          : "LIVE — real orders may be placed"
+        : simple
+          ? "PRACTICE MODE — fake money, nothing can be lost"
+          : "PAPER MODE — simulated money, no orders leave this machine"}
     </div>
   );
 }
 
 function Chrome() {
-  const [page, setPage] = useState<PageId>("dashboard");
+  const [page, setPage] = useState<PageId>("home");
   const [sidebar, setSidebar] = useState(true);
   const { portfolio, toggleKill, limits } = useStore();
+  const mode = useUiMode();
 
-  const sections = [...new Set(NAV.map((n) => n.section))];
+  const nav = navFor(mode);
+  const sections = [...new Set(nav.map((n) => n.section))];
+  // Leaving advanced mode while on an advanced page would strand the user on a
+  // screen with no way back to it in the sidebar.
+  const current = isVisible(page, mode) ? page : "home";
 
   return (
     <div className="app-window grid-bg">
@@ -143,8 +166,8 @@ function Chrome() {
                     <div className="mb-1 px-2 text-[10px] uppercase tracking-widest text-cyber-text-faint">
                       {section}
                     </div>
-                    {NAV.filter((n) => n.section === section).map((item) => {
-                      const active = page === item.id;
+                    {nav.filter((n) => n.section === section).map((item) => {
+                      const active = current === item.id;
                       const Icon = item.icon;
                       return (
                         <button
@@ -179,7 +202,7 @@ function Chrome() {
           {(Object.keys(PAGES) as PageId[]).map((id) => {
             const Page = PAGES[id];
             return (
-              <div key={id} style={{ display: page === id ? "block" : "none" }} className="p-6">
+              <div key={id} style={{ display: current === id ? "block" : "none" }} className="p-6">
                 <ErrorBoundary>
                   <Page />
                 </ErrorBoundary>

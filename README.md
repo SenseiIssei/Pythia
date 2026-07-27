@@ -60,6 +60,11 @@ and any large-language-model of your choice can weigh in on a market.
   allocation, loss-streak cooldowns. Fails closed.
 - **Research suite** — backtester, Monte-Carlo optimizer, walk-forward validation, analytics, and a
   return-correlation / concentration matrix.
+- **👋 Simple by default** — the app opens on a plain-language view built for
+  someone who has never traded: is real money at risk, am I up or down, what is it
+  doing, what does it think, and a big stop button. One switch in Settings reveals
+  the full instrument panel — markets, strategies, composer, backtests, optimizer,
+  correlation, risk limits. Simple mode hides jargon, **never** risk.
 - **🧠 AI Signals — bring any model** — Anthropic (Claude), OpenAI (GPT), xAI (Grok), z.ai (GLM),
   DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
 - **🎯 Scored prediction ensembles** — statistical hypotheses *and* every model you configure, asked
@@ -211,6 +216,8 @@ To make the browser build a thin client of the backend server, set
 Pythia/                     # Cargo workspace
 ├─ PLAN.md · SAFETY.md      # the master plan · read before going live
 ├─ PROFIT-PLAN.md           # where an edge could come from, and what it must prove first
+├─ docs/BREAKTHROUGH.md     # the next algorithms · and the case for a simple default view
+├─ docs/FORECASTING.md      # how predictions are pooled, scored and gated
 ├─ crates/pythia-core/      # the shared engine brain (no UI)
 │  └─ src/
 │     ├─ engine/            #   strategies, indicators, risk, live order state machine
