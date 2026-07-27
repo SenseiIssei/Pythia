@@ -84,7 +84,7 @@ Nobody in this space measures that.
 **Falsification:** compare pooled Brier with and without the correlation
 adjustment on held-out data.
 
-### 3 · Adaptive execution as a bandit — *~2 weeks, the surest payoff*
+### 3 · Adaptive execution as a bandit — ✅ **shipped** (engine); UI surface pending
 
 **The problem.** `PROFIT-PLAN.md` §4 established that execution is the only
 guaranteed alpha. The engine still emits market orders exclusively.
@@ -104,9 +104,29 @@ year, and unlike a forecast it does not depend on anyone's opinion. The
 live-execution work — submit → poll → cancel — is exactly the substrate this
 needs, and it already exists.
 
+**As built** ([`execution/bandit.rs`](../crates/pythia-core/src/execution/bandit.rs)):
+three arms, Thompson sampling over a Gaussian posterior per (context, arm),
+context = venue × urgency. Reward is realised slippage against the **arrival
+price** — the price when the decision was made, not the fill, or every order
+looks perfectly executed. A non-fill is charged 40 bps, because a limit that
+rests forever is not free: the signal was acted on late or not at all.
+
+Two decisions worth defending:
+
+- **Off by default.** Enabling it means orders may not fill. That trade-off is
+  the operator's, so `set_adaptive_execution` is an explicit call and the
+  disabled path is byte-for-byte the old market-order behaviour.
+- **The policy is fed even while disabled.** Every crossed order still reports
+  what it cost, so switching it on starts with real data rather than blind.
+
 **Falsification:** A/B against always-cross for 200 fills. Median realised
 slippage must drop. This one is nearly certain to work; the risk is only in
 magnitude.
+
+**Still to do:** a panel showing the learned table, and the richer context
+(spread, top-of-book depth, hour of session) that would make it genuinely sharp —
+that needs quote data the market feed does not yet carry. Adding it is a change
+to `ExecContext` and nothing else.
 
 ### 4 · Cross-venue statistical arbitrage with inventory control — *~3 weeks*
 

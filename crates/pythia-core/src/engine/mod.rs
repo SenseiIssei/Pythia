@@ -9,6 +9,7 @@ pub mod risk;
 pub mod strategies;
 
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
+use crate::execution::bandit;
 use crate::forecast::{self, calibration, coherence, track};
 use crate::marketdata::{RealCrypto, RealEquity, RealPrediction};
 use serde::{Deserialize, Serialize};
@@ -372,6 +373,10 @@ pub struct LiveOrderOut {
     pub strategy_id: String,
     /// This order closes an existing position; it must not flip it.
     pub reduce_only: bool,
+    /// How hard to push, chosen by the execution policy.
+    pub style: bandit::ExecStyle,
+    /// How far inside the arrival price a passive order rests.
+    pub patience_bps: f64,
     /// Snapshot of the arm config at enqueue time.
     pub paper: bool,
     pub dry_run: bool,
@@ -440,6 +445,12 @@ struct InFlight {
     booked_fee: f64,
     paper: bool,
     cancel_sent: bool,
+    /// Price at the moment the execution style was chosen. Realised slippage is
+    /// measured against this, not against the fill — otherwise every order looks
+    /// perfectly executed.
+    arrival: f64,
+    style: bandit::ExecStyle,
+    exec_ctx: bandit::ExecContext,
 }
 
 /// The full state pushed to the UI every tick.
@@ -470,6 +481,11 @@ pub struct EngineState {
     pub coherence: Vec<coherence::CoherenceBreak>,
     #[serde(default)]
     pub forecast_stats: ForecastStats,
+    /// What adaptive execution has learned, per (venue+urgency, style).
+    #[serde(default)]
+    pub execution: Vec<bandit::PolicyRow>,
+    #[serde(default)]
+    pub adaptive_execution: bool,
 }
 
 /// Headline numbers for the forecasting layer.
@@ -526,6 +542,10 @@ pub struct Persisted {
     pub forecast_store: track::ForecastStore,
     #[serde(default)]
     pub forecast_cfg: Option<forecast::ForecastConfig>,
+    /// What the execution policy has learned. A bandit that forgets on restart
+    /// never gets past exploring.
+    #[serde(default)]
+    pub exec_policy: bandit::ExecPolicy,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -617,6 +637,9 @@ pub struct Engine {
     /// Markets whose forecast currently clears its costs. Prediction-market
     /// signals are dropped unless their market is in here.
     actionable: HashSet<String>,
+    /// Learns how hard to push on each order from its own realised slippage.
+    /// Ships disabled — every order crosses until the operator turns it on.
+    exec_policy: bandit::ExecPolicy,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -672,6 +695,7 @@ impl Engine {
             coherence: Vec::new(),
             llm_opinions: HashMap::new(),
             actionable: HashSet::new(),
+            exec_policy: bandit::ExecPolicy::default(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -1526,6 +1550,15 @@ impl Engine {
             return;
         }
         let sid = self.strategies[strat_idx].id.clone();
+        // How hard to push. An exit is urgent by definition: not filling leaves
+        // a real position exposed, which is a cost the policy has to weigh.
+        let exec_ctx = bandit::ExecContext {
+            venue: m.venue,
+            urgent: intent == RouteIntent::LiveExit,
+        };
+        let style = self.exec_policy.choose(&exec_ctx);
+        let patience_bps = self.exec_policy.patience_bps();
+
         let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
         let order_id = order.id.clone();
         self.orders.insert(0, order);
@@ -1544,6 +1577,9 @@ impl Engine {
                 booked_fee: 0.0,
                 paper: self.live.paper,
                 cancel_sent: false,
+                arrival: price,
+                style,
+                exec_ctx,
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -1557,6 +1593,8 @@ impl Engine {
             ref_price: price,
             strategy_id: sid.clone(),
             reduce_only: intent == RouteIntent::LiveExit,
+            style,
+            patience_bps,
             paper: self.live.paper,
             dry_run: self.live.dry_run,
         });
@@ -1641,6 +1679,38 @@ impl Engine {
 
     pub fn live_config(&self) -> LiveConfig {
         self.live.clone()
+    }
+
+    /// Turn adaptive execution on or off.
+    ///
+    /// Off (the default) means every order crosses the spread, exactly as
+    /// before. On, the policy may rest orders inside the spread — cheaper when
+    /// they fill, and a signal acted on late or not at all when they do not.
+    /// That trade-off is the operator's to make, so it is never on by default.
+    pub fn set_adaptive_execution(&mut self, on: bool) {
+        if self.exec_policy.enabled == on {
+            return;
+        }
+        self.exec_policy.enabled = on;
+        self.log(
+            JournalKind::System,
+            if on {
+                "Adaptive execution ON — orders may rest inside the spread and learn from what they cost".into()
+            } else {
+                "Adaptive execution OFF — every order crosses".to_string()
+            },
+            None,
+            None,
+        );
+    }
+
+    pub fn adaptive_execution(&self) -> bool {
+        self.exec_policy.enabled
+    }
+
+    /// What the execution policy has learned so far.
+    pub fn execution_report(&self) -> Vec<bandit::PolicyRow> {
+        self.exec_policy.report()
     }
 
     fn live_position_count(&self) -> usize {
@@ -1754,6 +1824,14 @@ impl Engine {
     fn finish_live_order(&mut self, order_id: &str, update: &LiveUpdate) {
         let Some(f) = self.inflight.remove(order_id) else { return };
         self.in_flight_markets.remove(&f.market_id);
+
+        // Tell the execution policy what that choice actually cost. This is the
+        // only feedback it gets, and it is the reason the whole thing works:
+        // realised slippage against the price at decision time, or a penalty
+        // when nothing filled.
+        let realised = update.avg_price.filter(|p| *p > 0.0 && update.filled_qty > 0.0);
+        self.exec_policy.observe(&f.exec_ctx, f.style, f.side, f.arrival, realised);
+
         if update.filled_qty <= 0.0 {
             let reason = format!("{} ({})", update.status_word(), update.raw_status);
             if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
@@ -2083,6 +2161,7 @@ impl Engine {
             real_ids: self.real_ids.iter().cloned().collect(),
             forecast_store: self.forecast_store.clone(),
             forecast_cfg: Some(self.forecast_cfg.clone()),
+            exec_policy: self.exec_policy.clone(),
         }
     }
 
@@ -2129,6 +2208,7 @@ impl Engine {
         if let Some(cfg) = p.forecast_cfg {
             self.forecast_cfg = cfg;
         }
+        self.exec_policy = p.exec_policy;
         self.log(JournalKind::System, "Restored saved state from disk".into(), None, None);
         if resolved > 0 {
             self.log(
@@ -2217,6 +2297,8 @@ impl Engine {
                 // ledger — `state()` runs on every tick.
                 trusted_sources: self.track_cache.iter().filter(|t| t.trust > 0.0).count(),
             },
+            execution: self.exec_policy.report(),
+            adaptive_execution: self.exec_policy.enabled,
         }
     }
 
@@ -2685,6 +2767,70 @@ mod tests {
         let ord = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
         assert_eq!(ord.status, OrderStatus::Rejected);
         assert!(ord.reject_reason.as_deref().unwrap().contains("market closed"));
+    }
+
+    #[test]
+    fn adaptive_execution_is_off_until_asked_and_then_learns_from_its_own_fills() {
+        let mut e = Engine::new();
+        assert!(!e.adaptive_execution(), "resting orders inside the spread is opt-in");
+
+        // Off: every order crosses, exactly as before.
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+        assert_eq!(o.style, bandit::ExecStyle::Cross);
+
+        // Complete it worse than arrival — that is a cost, and the policy must
+        // be told even while it is disabled, or turning it on starts blind.
+        e.apply_live_ack(&o.order_id, "b1");
+        let filled = o.ref_price * 1.002; // 20bps of slippage
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, filled));
+
+        let rows = e.execution_report();
+        let cross = rows.iter().find(|r| r.style == "cross").expect("the fill should be recorded");
+        assert_eq!(cross.fills, 1);
+        assert!(cross.mean_cost_bps > 8.0, "20bps of slippage should raise the estimate: {}", cross.mean_cost_bps);
+    }
+
+    #[test]
+    fn an_order_that_never_fills_teaches_the_policy_that_waiting_is_not_free() {
+        let mut e = Engine::new();
+        e.set_adaptive_execution(true);
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:NVDA", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&o.order_id, "b2");
+        // Timed out and cancelled with nothing done.
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Canceled, 0.0, 0.0));
+
+        let row = e
+            .execution_report()
+            .into_iter()
+            .find(|r| r.misses > 0)
+            .expect("a miss must be recorded, not silently ignored");
+        assert!(row.mean_cost_bps > 8.0, "missing a trade is a real cost: {}", row.mean_cost_bps);
+        assert!(e.journal.iter().any(|j| j.message.contains("Adaptive execution ON")));
+    }
+
+    #[test]
+    fn what_the_execution_policy_learned_survives_a_restart() {
+        let mut e = Engine::new();
+        e.set_adaptive_execution(true);
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&o.order_id, "b3");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, o.ref_price));
+
+        let json = serde_json::to_string(&e.to_persisted()).unwrap();
+        let mut e2 = Engine::new();
+        e2.apply_persisted(serde_json::from_str(&json).unwrap());
+        assert!(e2.adaptive_execution());
+        assert_eq!(
+            e2.execution_report().len(),
+            e.execution_report().len(),
+            "a bandit that forgets on restart never gets past exploring"
+        );
     }
 
     #[test]

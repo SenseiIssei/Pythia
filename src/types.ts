@@ -365,6 +365,21 @@ export interface ForecastConfig {
   assumedCorrelation: number;
 }
 
+// ── adaptive execution ───────────────────────────────────────────────────────
+/** How hard one order pushed: rest inside the spread, sit at the touch, or take. */
+export type ExecStyle = "passive" | "join" | "cross";
+
+export interface PolicyRow {
+  /** Venue plus urgency, e.g. `Alpaca:normal`. */
+  context: string;
+  style: ExecStyle;
+  /** Mean realised cost against the arrival price. Lower is better; negative is
+   *  better than arrival. Non-fills are charged a penalty. */
+  meanCostBps: number;
+  fills: number;
+  misses: number;
+}
+
 export interface EnsembleRun {
   marketId: string;
   asked: number;

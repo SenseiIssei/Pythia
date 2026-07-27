@@ -21,6 +21,8 @@
 //! 2. **Nothing is booked that the venue did not confirm.** A failed submission
 //!    is a rejection; an unanswered poll is retried, never assumed.
 
+pub mod bandit;
+
 use crate::connectors::cex::{CexConnector, Exchange};
 use crate::connectors::{
     alpaca::AlpacaConnector, ConnectorError, MarketConnector, OrderRequest, OrderType, Venue,
@@ -132,12 +134,15 @@ async fn submit_one(engine: &Mutex<Engine>, creds: &Credentials, o: LiveOrderOut
         );
     }
 
+    // The execution policy picked a style when the order was created; this is
+    // where it becomes a price. `Cross` stays a market order, exactly as before.
+    let limit_price = o.style.limit_price(o.side, o.ref_price, o.patience_bps);
     let req = OrderRequest {
         symbol: o.symbol.clone(),
         side: o.side,
-        order_type: OrderType::Market,
+        order_type: if limit_price.is_some() { OrderType::Limit } else { OrderType::Market },
         qty,
-        limit_price: None,
+        limit_price,
         ref_price: Some(o.ref_price),
         client_order_id: Some(o.client_order_id.clone()),
         reduce_only: o.reduce_only,

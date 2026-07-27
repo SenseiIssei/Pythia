@@ -140,6 +140,15 @@ pub fn flatten(app: AppHandle, app_state: State<AppState>, market_id: String) {
     push_state(&app);
 }
 
+/// Let the execution policy rest orders inside the spread and learn from what
+/// they cost. Off by default — a passive order that does not fill is a signal
+/// acted on late or not at all, and that trade-off is the operator's to make.
+#[tauri::command]
+pub fn set_adaptive_execution(app: AppHandle, app_state: State<AppState>, on: bool) {
+    app_state.engine.lock().unwrap().set_adaptive_execution(on);
+    push_state(&app);
+}
+
 // ── secrets vault ───────────────────────────────────────────────────────────
 // Keys go into the OS keychain and are never read back to the UI. `venue_status`
 // only reports whether each venue *has* keys, not what they are.

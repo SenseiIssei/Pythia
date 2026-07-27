@@ -118,6 +118,7 @@ pub fn run() {
             commands::add_strategy,
             commands::manual_order,
             commands::flatten,
+            commands::set_adaptive_execution,
             commands::save_venue_keys,
             commands::clear_venue_keys,
             commands::venue_status,
