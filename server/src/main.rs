@@ -341,6 +341,9 @@ enum Command {
     AddStrategy { cfg: StrategyConfig },
     ManualOrder { market_id: String, side: Side, notional: f64 },
     Flatten { market_id: String },
+    /// Let the execution policy rest orders inside the spread and learn from
+    /// what they cost. Off by default.
+    SetAdaptiveExecution { on: bool },
 }
 
 /// Apply a command and return the fresh state so the caller updates instantly
@@ -361,6 +364,7 @@ async fn post_command(
                 e.manual_order(&market_id, side, notional)
             }
             Command::Flatten { market_id } => e.flatten(&market_id),
+            Command::SetAdaptiveExecution { on } => e.set_adaptive_execution(on),
         }
         // Push the mutated state to every stream listener too.
         let s = e.state();
