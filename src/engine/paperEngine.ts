@@ -626,6 +626,15 @@ export class PaperEngine implements EngineClient {
   forecastStats() {
     return NO_FORECASTS;
   }
+  execution() {
+    return [];
+  }
+  adaptiveExecution() {
+    return false;
+  }
+  setAdaptiveExecution(_on: boolean) {
+    // The browser engine has no venue to route to, so there is nothing to tune.
+  }
 
   // ── mutations from the UI ──────────────────────────────────────────────────
   setLimits(next: Partial<RiskLimits>) {

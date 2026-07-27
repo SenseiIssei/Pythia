@@ -38,6 +38,8 @@ const EMPTY: EngineState = {
   tracks: [],
   coherence: [],
   forecastStats: NO_FORECASTS,
+  execution: [],
+  adaptiveExecution: false,
 };
 
 // Thin proxy to the Rust engine daemon. It caches the last EngineState pushed
@@ -123,6 +125,15 @@ export class TauriEngineClient implements EngineClient {
   }
   forecastStats() {
     return this.state.forecastStats ?? NO_FORECASTS;
+  }
+  execution() {
+    return this.state.execution ?? [];
+  }
+  adaptiveExecution() {
+    return this.state.adaptiveExecution ?? false;
+  }
+  setAdaptiveExecution(on: boolean) {
+    void invoke("set_adaptive_execution", { on });
   }
 
   toggleKill() {

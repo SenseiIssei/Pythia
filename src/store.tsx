@@ -15,6 +15,7 @@ import type {
   Market,
   MarketForecast,
   Order,
+  PolicyRow,
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
@@ -36,6 +37,8 @@ interface Store {
   tracks: Track[];
   coherence: CoherenceBreak[];
   forecastStats: ForecastStats;
+  execution: PolicyRow[];
+  adaptiveExecution: boolean;
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
@@ -44,6 +47,7 @@ interface Store {
   addStrategy: (cfg: StrategyConfig) => void;
   manualOrder: (marketId: string, side: "buy" | "sell", notional: number) => string;
   flatten: (marketId: string) => void;
+  setAdaptiveExecution: (on: boolean) => void;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -74,6 +78,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       tracks: engine.tracks(),
       coherence: engine.coherence(),
       forecastStats: engine.forecastStats(),
+      execution: engine.execution(),
+      adaptiveExecution: engine.adaptiveExecution(),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),
@@ -81,6 +87,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       addStrategy: (cfg) => engine.addStrategy(cfg),
       manualOrder: (m, side, n) => engine.manualOrder(m, side, n),
       flatten: (m) => engine.flatten(m),
+      setAdaptiveExecution: (on) => engine.setAdaptiveExecution(on),
     }),
     // rebuild views whenever the engine emits (version changes)
     [engine, version]

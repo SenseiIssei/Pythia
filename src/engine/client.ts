@@ -6,6 +6,7 @@ import type {
   Market,
   MarketForecast,
   Order,
+  PolicyRow,
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
@@ -58,6 +59,9 @@ export interface EngineClient {
   tracks(): Track[];
   coherence(): CoherenceBreak[];
   forecastStats(): ForecastStats;
+  /** What adaptive execution has learned, per (venue+urgency, style). */
+  execution(): PolicyRow[];
+  adaptiveExecution(): boolean;
 
   toggleKill(): void;
   setLimits(l: Partial<RiskLimits>): void;
@@ -66,6 +70,7 @@ export interface EngineClient {
   addStrategy(cfg: StrategyConfig): void;
   manualOrder(marketId: string, side: Side, notional: number): string;
   flatten(marketId: string): void;
+  setAdaptiveExecution(on: boolean): void;
 }
 
 // The full engine state the Rust daemon pushes to the UI each tick, and the
@@ -84,6 +89,8 @@ export interface EngineState {
   tracks: Track[];
   coherence: CoherenceBreak[];
   forecastStats: ForecastStats;
+  execution: PolicyRow[];
+  adaptiveExecution: boolean;
 }
 
 export { DISARMED };

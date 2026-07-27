@@ -84,7 +84,7 @@ Nobody in this space measures that.
 **Falsification:** compare pooled Brier with and without the correlation
 adjustment on held-out data.
 
-### 3 · Adaptive execution as a bandit — ✅ **shipped** (engine); UI surface pending
+### 3 · Adaptive execution as a bandit — ✅ **shipped**
 
 **The problem.** `PROFIT-PLAN.md` §4 established that execution is the only
 guaranteed alpha. The engine still emits market orders exclusively.
@@ -123,10 +123,12 @@ Two decisions worth defending:
 slippage must drop. This one is nearly certain to work; the risk is only in
 magnitude.
 
-**Still to do:** a panel showing the learned table, and the richer context
-(spread, top-of-book depth, hour of session) that would make it genuinely sharp —
-that needs quote data the market feed does not yet carry. Adding it is a change
-to `ExecContext` and nothing else.
+The Live page shows the learned table — situation, style, mean cost against the
+arrival price, fills and misses — with the switch above it.
+
+**Still to do:** the richer context (spread, top-of-book depth, hour of session)
+that would make it genuinely sharp. That needs quote data the market feed does
+not yet carry; adding it is a change to `ExecContext` and nothing else.
 
 ### 4 · Cross-venue statistical arbitrage with inventory control — *~3 weeks*
 
