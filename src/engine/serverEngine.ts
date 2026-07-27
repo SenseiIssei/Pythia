@@ -36,6 +36,8 @@ const EMPTY: EngineState = {
   tracks: [],
   coherence: [],
   forecastStats: NO_FORECASTS,
+  execution: [],
+  adaptiveExecution: false,
 };
 
 /**
@@ -164,6 +166,15 @@ export class ServerEngineClient implements EngineClient {
   }
   forecastStats() {
     return this.state.forecastStats ?? NO_FORECASTS;
+  }
+  execution() {
+    return this.state.execution ?? [];
+  }
+  adaptiveExecution() {
+    return this.state.adaptiveExecution ?? false;
+  }
+  setAdaptiveExecution(on: boolean) {
+    this.send({ cmd: "setAdaptiveExecution", on });
   }
 
   /** POST a command; the response carries fresh state so the UI updates now. */

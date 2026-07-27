@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   DollarSign,
   Timer,
+  Gauge,
 } from "lucide-react";
 import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
 import { useStore } from "../store";
@@ -324,6 +325,8 @@ export function Live() {
         )}
         {err && <div className="mt-2 text-xs text-danger">{err}</div>}
 
+        <ExecutionPolicyCard />
+
         <div className="mt-4 space-y-1 text-[11px] leading-snug text-cyber-text-faint">
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Arming runs a read-only key check first and refuses if a venue does not answer.</div>
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Only strategies set to <b>Live</b> (Strategies page) send entries; a position opened live also exits live.</div>
@@ -331,6 +334,92 @@ export function Live() {
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Orders that cannot fill (market closed, no buying power) are refused before submission, not left hanging.</div>
         </div>
       </Card>
+    </div>
+  );
+}
+
+/**
+ * Adaptive execution — the learned table, and the switch.
+ *
+ * Execution is the only alpha here that does not require being right about the
+ * market, so this shows the one number that matters: what each style actually
+ * cost, measured against the price at the moment the decision was made.
+ */
+function ExecutionPolicyCard() {
+  const { execution, adaptiveExecution, setAdaptiveExecution } = useStore();
+
+  const STYLE_LABEL: Record<string, string> = {
+    passive: "Rest inside the spread",
+    join: "Sit at the touch",
+    cross: "Take the offer",
+  };
+
+  return (
+    <div className="mt-4 rounded-lg border border-cyber-border bg-cyber-surface/40 p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <Gauge size={14} className="text-purple-neon" /> Adaptive execution
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className={adaptiveExecution ? "text-purple-neon" : "text-cyber-text-faint"}>
+            {adaptiveExecution ? "learning" : "always cross"}
+          </span>
+          <Toggle on={adaptiveExecution} onChange={setAdaptiveExecution} />
+        </div>
+      </div>
+
+      <div className="mb-3 text-[11px] leading-snug text-cyber-text-faint">
+        Crossing the spread on a signal that stays valid for hours is pure waste. With this on,
+        orders may rest inside the spread instead, and the policy learns from what each choice
+        actually cost — against the price at decision time, not the fill. An order that never fills
+        is charged a penalty, because the signal was acted on late or not at all.
+        {!adaptiveExecution && " While off, every order crosses — but costs are still recorded, so turning it on starts with real data."}
+      </div>
+
+      {execution.length === 0 ? (
+        <div className="text-xs text-cyber-text-faint">
+          Nothing measured yet. Rows appear once live orders have completed.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-widest text-cyber-text-faint">
+                <th className="py-1 text-left font-normal">Situation</th>
+                <th className="py-1 text-left font-normal">Style</th>
+                <th className="py-1 text-right font-normal">Cost</th>
+                <th className="py-1 text-right font-normal">Filled</th>
+                <th className="py-1 text-right font-normal">Missed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {execution.map((r) => (
+                <tr key={`${r.context}-${r.style}`} className="border-t border-cyber-border/50">
+                  <td className="py-1 font-mono text-cyber-text-dim">{r.context}</td>
+                  <td className="py-1">{STYLE_LABEL[r.style] ?? r.style}</td>
+                  <td
+                    className={`py-1 text-right font-mono ${
+                      r.meanCostBps <= 0 ? "text-success" : "text-cyber-text"
+                    }`}
+                  >
+                    {r.meanCostBps > 0 ? "+" : ""}
+                    {r.meanCostBps.toFixed(1)}bps
+                  </td>
+                  <td className="py-1 text-right font-mono">{r.fills}</td>
+                  <td className={`py-1 text-right font-mono ${r.misses > 0 ? "text-warning" : ""}`}>
+                    {r.misses}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="mt-1.5 text-[10px] text-cyber-text-faint">
+            Cost is measured against the price when the order was created — negative means it beat
+            that price. Missed orders are charged a penalty, so a style that never fills does not
+            look cheap.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
