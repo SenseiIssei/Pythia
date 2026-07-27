@@ -228,6 +228,128 @@ export interface LiveConfig {
   timeoutSec: number;
 }
 
+// ── forecasting ──────────────────────────────────────────────────────────────
+/** `outcome` = will the event happen. `direction` = will this price be higher. */
+export type ForecastKind = "outcome" | "direction";
+export type ForecastAction = "buy" | "sell" | "hold";
+
+export interface SourceView {
+  source: string;
+  /** What the source said. */
+  rawP: number;
+  /** After its learned recalibration. */
+  p: number;
+  /** Weight in the pool — measured trust, floored at the bootstrap value. */
+  weight: number;
+  /** Measured trust from the track record. 0 = unproven. */
+  trust: number;
+  /** Resolved forecasts behind that number. */
+  n: number;
+  rationale: string;
+}
+
+export interface MarketForecast {
+  marketId: string;
+  symbol: string;
+  kind: ForecastKind;
+  /** The market's own view. 0.5 for a price market — a random walk's answer. */
+  marketP: number;
+  sources: SourceView[];
+  /** Pooled sources, before shrinking toward the market. */
+  modelP: number;
+  /** The number Pythia actually uses. */
+  ensembleP: number;
+  trust: number;
+  disagreement: number;
+  effectiveSources: number;
+  edge: number;
+  edgeBps: number;
+  costBps: number;
+  netEdgeBps: number;
+  kelly: number;
+  action: ForecastAction;
+  reason: string;
+  ts: number;
+}
+
+export interface Score {
+  n: number;
+  brier: number;
+  logLoss: number;
+  meanForecast: number;
+  meanOutcome: number;
+}
+
+export interface Recalibration {
+  slope: number;
+  intercept: number;
+  n: number;
+}
+
+export interface ReliabilityBin {
+  lo: number;
+  hi: number;
+  n: number;
+  meanForecast: number;
+  observed: number;
+}
+
+export interface Track {
+  source: string;
+  kind: ForecastKind;
+  score: Score;
+  /** The market's score on the same questions — the only fair comparison. */
+  marketScore: Score;
+  brierSkill: number;
+  trust: number;
+  recalibration: Recalibration;
+  reliability: ReliabilityBin[];
+}
+
+export interface CoherenceLeg {
+  marketId: string;
+  outcome: string;
+  price: number;
+}
+
+export interface CoherenceBreak {
+  eventId: string;
+  title: string;
+  kind: "underpriced" | "overpriced";
+  sum: number;
+  gapBps: number;
+  netBps: number;
+  actionable: boolean;
+  legs: CoherenceLeg[];
+}
+
+export interface ForecastStats {
+  recorded: number;
+  resolved: number;
+  pending: number;
+  trustedSources: number;
+}
+
+export interface ForecastConfig {
+  horizonBars: number;
+  horizonMs: number;
+  longshotK: number;
+  momentumBeta: number;
+  driftTrust: number;
+  sharpen: number;
+  bootstrapTrust: number;
+  kellyFraction: number;
+  costBps: number;
+  minEdgeBps: number;
+}
+
+export interface EnsembleRun {
+  marketId: string;
+  asked: number;
+  answered: number;
+  errors: string[];
+}
+
 // ── exchanges & wallets ──────────────────────────────────────────────────────
 export type ExchangeId = "kraken" | "binance" | "bybit" | "okx" | "coinbase";
 

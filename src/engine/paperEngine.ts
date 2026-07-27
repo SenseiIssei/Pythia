@@ -18,7 +18,7 @@ import { MarketSim } from "./marketSim";
 import { DEFAULT_LIMITS, evaluate, type RiskContext } from "./risk";
 import { defaultStrategies, runStrategy } from "./strategies";
 import * as ind from "./indicators";
-import { DISARMED, type EngineClient } from "./client";
+import { DISARMED, NO_FORECASTS, type EngineClient } from "./client";
 
 interface PositionInternal {
   marketId: string;
@@ -609,9 +609,22 @@ export class PaperEngine implements EngineClient {
     return out;
   }
 
-  // The browser paper engine never trades live — it can't reach a venue.
+  // The browser paper engine never trades live — it can't reach a venue, and it
+  // has no forecasting layer (that lives in the Rust core).
   liveStatus(): LiveStatus {
     return DISARMED;
+  }
+  forecasts() {
+    return [];
+  }
+  tracks() {
+    return [];
+  }
+  coherence() {
+    return [];
+  }
+  forecastStats() {
+    return NO_FORECASTS;
   }
 
   // ── mutations from the UI ──────────────────────────────────────────────────

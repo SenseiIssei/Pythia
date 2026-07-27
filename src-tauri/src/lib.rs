@@ -135,6 +135,9 @@ pub fn run() {
             commands::wallet_addresses,
             commands::save_wallet_addresses,
             commands::wallet_snapshot,
+            commands::run_ensemble,
+            commands::forecast_config,
+            commands::set_forecast_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

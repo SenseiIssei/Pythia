@@ -8,7 +8,9 @@ use pythia_core::connectors::cex::{self, Exchange, ExchangeInfo};
 use pythia_core::connectors::{Side, Venue};
 use pythia_core::engine::{EngineState, LiveConfig, RiskLimits, StrategyConfig, StrategyState};
 use pythia_core::execution::{self, Credentials};
+use pythia_core::forecast::ForecastConfig;
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
+use pythia_core::predict::{self, EnsembleKeys, EnsembleRun};
 use pythia_core::vault;
 use pythia_core::wallets::{self, WalletSources, WalletsSnapshot, WatchedAddress};
 use std::collections::BTreeMap;
@@ -385,6 +387,37 @@ pub async fn wallet_snapshot(app: AppHandle) -> WalletsSnapshot {
         addresses: watched_addresses(),
     };
     wallets::snapshot(&sources).await
+}
+
+// ── forecasting ──────────────────────────────────────────────────────────────
+
+/// Every provider with a key in the vault, ready for an ensemble run.
+fn ensemble_keys() -> EnsembleKeys {
+    let keys = ai_keys();
+    EnsembleKeys::from_map(|k| keys.get(k).cloned())
+}
+
+/// Ask every configured provider about one market, independently, and fold the
+/// answers into that market's forecast. One API call per provider — this is the
+/// expensive operation in the whole app, so it is always explicit.
+#[tauri::command]
+pub async fn run_ensemble(app: AppHandle, market_id: String, notes: String) -> Result<EnsembleRun, String> {
+    let engine = app.state::<AppState>().engine.clone();
+    let run = predict::ensemble_for_market(&engine, &ensemble_keys(), &market_id, &notes).await?;
+    push_state(&app);
+    Ok(run)
+}
+
+/// Update the forecasting tunables (horizon, costs, bootstrap trust, …).
+#[tauri::command]
+pub fn set_forecast_config(app: AppHandle, app_state: State<AppState>, cfg: ForecastConfig) {
+    app_state.engine.lock().unwrap().set_forecast_config(cfg);
+    push_state(&app);
+}
+
+#[tauri::command]
+pub fn forecast_config(app_state: State<AppState>) -> ForecastConfig {
+    app_state.engine.lock().unwrap().forecast_config()
 }
 
 /// Ask a provider for a signal on one market. Key comes from the vault; the

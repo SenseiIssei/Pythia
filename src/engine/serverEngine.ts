@@ -9,7 +9,7 @@ import type {
   StrategyConfig,
   StrategyState,
 } from "../types";
-import { DISARMED, type EngineClient, type EngineState } from "./client";
+import { DISARMED, NO_FORECASTS, type EngineClient, type EngineState } from "./client";
 import { DEFAULT_LIMITS } from "./risk";
 
 const EMPTY: EngineState = {
@@ -32,6 +32,10 @@ const EMPTY: EngineState = {
   limits: DEFAULT_LIMITS,
   history: {},
   live: DISARMED,
+  forecasts: [],
+  tracks: [],
+  coherence: [],
+  forecastStats: NO_FORECASTS,
 };
 
 /**
@@ -148,6 +152,18 @@ export class ServerEngineClient implements EngineClient {
   }
   liveStatus() {
     return this.state.live ?? DISARMED;
+  }
+  forecasts() {
+    return this.state.forecasts ?? [];
+  }
+  tracks() {
+    return this.state.tracks ?? [];
+  }
+  coherence() {
+    return this.state.coherence ?? [];
+  }
+  forecastStats() {
+    return this.state.forecastStats ?? NO_FORECASTS;
   }
 
   /** POST a command; the response carries fresh state so the UI updates now. */
