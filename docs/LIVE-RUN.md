@@ -64,6 +64,35 @@ crypto exchange: **Kraken**, **Binance**, **Bybit** or **OKX**.
 
 ---
 
+## 1b · Run the preflight (the fastest way to find a problem)
+
+With the server running, in a second terminal:
+
+```bash
+npm run preflight
+```
+
+Every way a live run fails silently produces the *same* symptom — an armed engine that places no
+trades. This tells you which one you actually have:
+
+```
+  ok   alpaca_keys        APCA_API_KEY_ID set (…J4XQ)
+  ok   alpaca_account     paper-api.alpaca.markets: ACTIVE · equity $100000.00 · buying power $200000.00
+  ok   pattern_day_trader 0 day trade(s) used; equity $100000.00
+  ok   market_session     open until 2026-07-24T20:00:00Z
+  ok   equity_quotes      5 symbol(s) on the 'iex' feed
+  ok   equity_candles     5 series, 1840 5Min bars — indicators need ≥30 per market
+  ok   crypto_candles     9 Kraken series (no keys needed)
+  ok   ai_provider        configured: anthropic
+  ok   live_gate          disarmed (paper only)
+```
+
+`equity_candles` is the one people miss. Strategies signal off **completed candles**, not the live
+quote — a market with fewer than 30 bars is skipped entirely, so a fresh start with a market-data
+plan that doesn't cover your feed will look armed and idle forever.
+
+---
+
 ## 2 · Verify the connection (read-only)
 
 **Live** page → pick your venues under *1 · Venues* → **Test paper connection**. Expect:
@@ -118,9 +147,18 @@ That's the one strategy whose universe is the Alpaca tickers. From here:
 - crypto and Polymarket strategies keep simulating — they never touch a broker.
 
 ### Timing matters
-Equity market orders only fill during **US regular hours, 9:30–16:00 ET** (= **15:30–22:00 CEST**).
+US regular hours are **9:30–16:00 ET** (= **15:30–22:00 CEST**). Pythia asks Alpaca's own clock
+rather than guessing, so holidays and half-days are handled.
 
-Outside that window Pythia **refuses the order before sending it**:
+Outside that window, **new Alpaca entries are refused up front** with a readable reason
+(`Live entry blocked for AAPL: US equity market closed (next open …)`) instead of being submitted
+and left to time out. The Live page shows the same reason in an amber banner, and a readiness
+checklist plus a per-market trace say which gate is holding each market back.
+
+**Exits are never blocked** by that session check. Being unable to open a position is an
+inconvenience; being unable to close one is a real risk, so the session, day-trade and account
+checks apply to entries only. The connector's own preflight still refuses a *market* order into a
+closed session:
 
 ```
 LIVE order not sent (AAPL): US market closed — next open 2026-07-27T13:30:00Z.
@@ -128,9 +166,14 @@ Enable extended hours to trade the pre/post session.
 ```
 
 That is deliberate. Alpaca would happily accept a market order at 03:00 and fill it at tomorrow's
-open, across an unknown overnight gap — which is a bet nobody asked for. If you *do* want the
-pre/post sessions, set `PYTHIA_EXTENDED_HOURS=true` (server) and Pythia sends marketable **limit**
-orders instead, which is what Alpaca accepts there.
+open, across an unknown overnight gap, which is a bet nobody asked for.
+
+**Extended hours** (04:00 to 20:00 ET) is an opt-in toggle on the Live page, locked while armed. It
+only takes effect while Alpaca's calendar reports a pre/post session running; opting in cannot
+override the broker. In that session orders go out as whole-share DAY **limit** orders (dollar
+entries are converted to whole shares) with the band widened to at least 75bps, because that is
+the only shape Alpaca accepts there. On the server, `PYTHIA_EXTENDED_HOURS=true` sets the default
+for arm requests that do not say.
 
 Crypto has no such window: an armed crypto venue trades 24/7.
 
@@ -142,6 +185,23 @@ Crypto has no such window: an armed crypto venue trades 24/7.
 | `selling 3.0 AAPL would open a short (held 0.0); shorts are disabled` | Set `PYTHIA_ALLOW_SHORTS=true` if you have a margin account and mean it |
 | `spot sell of 0.5 BTC but only 0.0 free on Kraken — spot cannot short` | Spot is long-only, everywhere |
 | `0.00003 AAPL is below Alpaca's minimum order size` | Dust, dropped rather than rejected |
+
+### What the Alpaca order path actually does
+
+| | |
+|---|---|
+| **Entries** are sent as **dollar notional** | No client-side share rounding, and it cannot over-spend the sizing decision. |
+| **Exits** are sent as **shares** | "Sell exactly what I hold" can't be expressed in dollars. |
+| Whole-share market orders go out as **marketable limits** (`PYTHIA_SLIPPAGE_BPS`, default 25bps) | A market order into a thin or gapped book fills at whatever is there. Set `0` for plain market orders. |
+| An order still working at the **order timeout** is **cancelled at the venue, then re-read** | The dangerous version is giving up while the order is still working: the broker fills it later and you hold an untracked position with no stop on it. |
+| **Partial fills are booked** | A cancel can lose the race to a partial fill. Those shares are real. |
+| Every submission carries a deterministic `client_order_id` | If the connection drops mid-POST, or Alpaca answers "duplicate id", the order is looked up instead of sent twice. |
+| Paper and live use **separate key slots** | Each pair only authenticates against its own endpoint. An empty slot fails as "not configured"; the order path never borrows the other account's keys. |
+
+### Pattern Day Trader
+Under **$25,000** of equity, FINRA allows three day trades per five business days; a fourth flags
+the account and restricts it for 90 days. Pythia reads `daytrade_count` from Alpaca and blocks new
+entries at three. Above $25k the rule doesn't apply and the check goes quiet.
 
 ---
 
@@ -168,7 +228,9 @@ Reconciled AAPL: book had 10.000000, Alpaca has 4.000000 — broker wins
 ```
 
 It will not, however, *adopt* a position it never opened. Your own long-held NVDA is not Pythia's to
-put a stop-loss under.
+put a stop-loss under. Every correction is also pushed to your webhook, and stops are deliberately
+**cleared** on a corrected position and recomputed on the next tick: a stop sized for 10 shares means
+nothing once you hold 4.
 
 ---
 
@@ -197,6 +259,10 @@ put a stop-loss under.
 Only after the paper run behaves for a while: put **live** Alpaca keys in, flip the Live page
 endpoint to **Live**, and re-arm (the banner turns red and pulses). Everything else is identical —
 same risk manager, same kill switch, same gates.
+
+Live keys go in their own slot: *Settings → Alpaca — Live* on the desktop, or
+`APCA_LIVE_API_KEY_ID` / `APCA_LIVE_API_SECRET_KEY` on the server. Test them from the Live page with
+the endpoint set to **Live** before arming.
 
 Before you do, read [`../PROFIT-PLAN.md`](../PROFIT-PLAN.md). The shipped strategies are textbook
 indicators, and the arithmetic in §1 of that document explains why a high-turnover bot loses to costs

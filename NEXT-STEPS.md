@@ -59,7 +59,7 @@ For the web build to talk to the backend, put
 cargo test --workspace && npm run build
 ```
 
-225 Rust tests should pass. The Tauri shell is a separate workspace:
+306 Rust tests should pass (one benchmark is `#[ignore]`d). The Tauri shell is a separate workspace:
 
 ```bash
 cd src-tauri && cargo build
@@ -99,9 +99,21 @@ Until this is done, treat every venue connector as unproven code.
 
 ## 2 · PROFIT-PLAN Phase A — make the numbers honest
 
-**Not started, and it outranks every algorithm below.** A backtest that ignores
+**Partly started, and it outranks every algorithm below.** A backtest that ignores
 costs is a random-number generator with a nice chart, and the app currently
 applies a flat 8 bps slippage + 6 bps fee to every paper fill.
+
+> **Update after merging `feat/real-bars-and-opus5`:** the deflated Sharpe item
+> below is partly done, just not on the Optimizer page. `crates/pythia-core/src/research/`
+> has a walk-forward harness on real daily candles (anchored folds, parameters
+> fitted in-sample, scored only out-of-sample) and computes the deflated Sharpe
+> ratio against the number of parameter sets tried. Its backtester fills on the
+> next bar's open and charges fee + slippage on both sides via a flat
+> `CostModel`. It runs as `GET /api/research/validate` / `npm run validate`, and
+> `docs/VALIDATION.md` records the first run. Still open: the Optimizer page
+> does not use it, there is no out-of-sample/in-sample ratio yet (the per-fold
+> in-sample Sharpe is recorded, not compared), costs are one flat model rather
+> than the per-venue `costs.rs`, and gross/cost/net are not reported separately.
 
 - [ ] `crates/pythia-core/src/costs.rs` — per-venue `CostModel { taker_bps,
       maker_bps, half_spread_bps, impact_coeff, borrow_bps_yr, min_notional }`,
@@ -110,7 +122,8 @@ applies a flat 8 bps slippage + 6 bps fee to every paper fill.
 - [ ] Record realised slippage on every live fill and compare against the model
       (the execution bandit already stores the raw material — see
       `ExecPolicy::report`)
-- [ ] Deflated Sharpe + out-of-sample/in-sample ratio on the Optimizer page.
+- [ ] Deflated Sharpe + out-of-sample/in-sample ratio on the Optimizer page
+      (deflated Sharpe exists in the walk-forward validator, see the note above).
       Without this, testing 500 parameter sets and keeping the best manufactures
       a Sharpe of ~2 from pure noise, and the page is actively harmful
 - [ ] The eight validation gates (`PROFIT-PLAN.md` §2) as a
@@ -224,7 +237,7 @@ regardless of the algorithms underneath.
 ## 7 · Housekeeping
 
 - [ ] **There is no JavaScript test runner.** No vitest, no jest. The Rust side
-      has 225 tests; the TypeScript side has none. `src/uiMode.ts`,
+      has 306 tests; the TypeScript side has none. `src/uiMode.ts`,
       `navFor`/`isVisible` and the paper engine are the obvious first targets
 - [ ] **Open a PR** for `feat/live-execution-and-wallets` and squash-merge when
       §1 is done. It is a large branch — five commits, all self-contained

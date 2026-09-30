@@ -67,15 +67,21 @@ impl Provider {
 
     fn spec(self) -> Spec {
         match self {
-            // Anthropic — the one non-OpenAI dialect. claude-opus-4-8 is current.
+            // Anthropic — the one non-OpenAI dialect. claude-opus-5 is current.
             Provider::Anthropic => Spec {
                 id: "anthropic",
                 label: "Anthropic (Claude)",
                 wire: Wire::Anthropic,
                 base_url: "https://api.anthropic.com",
                 env_key: "ANTHROPIC_API_KEY",
-                default_model: "claude-opus-4-8",
-                suggested: &["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5"],
+                default_model: "claude-opus-5",
+                suggested: &[
+                    "claude-opus-5",
+                    "claude-sonnet-5",
+                    "claude-haiku-4-5",
+                    "claude-fable-5",
+                    "claude-opus-4-8",
+                ],
                 needs_key: true,
             },
             Provider::OpenAI => Spec {
@@ -260,6 +266,41 @@ pub fn providers_with(configured: impl Fn(Provider) -> bool) -> Vec<ProviderInfo
     Provider::ALL.iter().map(|&p| ProviderInfo::from(p, configured(p))).collect()
 }
 
+/// How hard the model should think before answering. Maps to Anthropic's
+/// `output_config.effort`; ignored by the OpenAI-dialect providers.
+///
+/// For a trading signal `Low` is usually the right default: the answer is
+/// wanted inside a bar, and on the current Opus generation low effort is
+/// genuinely strong. Raise it for slow, high-stakes event markets where a few
+/// extra seconds cost nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+}
+
+impl Default for Effort {
+    fn default() -> Self {
+        Effort::Low
+    }
+}
+
 /// A request for a signal: which provider/model, the key, and the context.
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -269,11 +310,45 @@ pub struct LlmConfig {
     pub api_key: String,
     /// Empty → the provider's default endpoint.
     pub base_url: String,
+    pub effort: Effort,
+    /// Wall-clock ceiling. A signal that arrives after the bar it was about is
+    /// worse than no signal, and the caller is on a tick loop that must not
+    /// stall — so this is a hard cap, not a suggestion.
+    pub timeout: std::time::Duration,
 }
 
 impl LlmConfig {
     pub fn new(provider: Provider, model: impl Into<String>, api_key: impl Into<String>) -> Self {
-        LlmConfig { provider, model: model.into(), api_key: api_key.into(), base_url: String::new() }
+        LlmConfig {
+            provider,
+            model: model.into(),
+            api_key: api_key.into(),
+            base_url: String::new(),
+            effort: Effort::default(),
+            timeout: std::time::Duration::from_secs(45),
+        }
+    }
+
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// True for the Claude generations where thinking runs by default and the
+    /// safety classifiers can decline a request outright.
+    fn is_modern_claude(&self) -> bool {
+        let m = self.resolved_model();
+        m.starts_with("claude-opus-5")
+            || m.starts_with("claude-fable-5")
+            || m.starts_with("claude-mythos-5")
+            || m.starts_with("claude-sonnet-5")
+            || m.starts_with("claude-opus-4-8")
+            || m.starts_with("claude-opus-4-7")
     }
     fn resolved_model(&self) -> String {
         if self.model.trim().is_empty() {
@@ -303,6 +378,13 @@ pub enum LlmError {
     NoContent(String),
     #[error("could not parse signal json: {0}")]
     Parse(String),
+    /// A safety classifier declined the request. This is a normal HTTP 200 with
+    /// `stop_reason: "refusal"` and an empty (or partial) content array — read
+    /// `stop_reason` before `content` or this looks like a malformed response.
+    #[error("model declined the request ({0})")]
+    Refused(String),
+    #[error("timed out after {0:?} — treated as no opinion")]
+    Timeout(std::time::Duration),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -345,6 +427,19 @@ pub struct Signal {
     pub provider: String,
     #[serde(default)]
     pub model: String,
+    /// Round-trip latency in milliseconds — surfaced so a signal that arrived
+    /// after its bar closed is visibly late rather than silently trusted.
+    #[serde(default)]
+    pub latency_ms: u64,
+    /// Billed tokens, when the provider reports them. Drives the cost meter.
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Which model actually answered. Differs from `model` when a server-side
+    /// fallback took over after a refusal.
+    #[serde(default)]
+    pub served_by: String,
 }
 
 /// Only the model-produced fields; `provider`/`model` are stamped on afterward.
@@ -438,10 +533,16 @@ async fn ask(
         return Err(LlmError::NoKey(cfg.provider.id().to_string()));
     }
 
-    let raw = match cfg.provider.spec().wire {
-        Wire::Anthropic => call_anthropic(cfg, context, system, schema).await?,
-        Wire::OpenAi => call_openai(cfg, context, system).await?,
+    let started = std::time::Instant::now();
+    let call = async {
+        match cfg.provider.spec().wire {
+            Wire::Anthropic => call_anthropic(cfg, context, system, schema).await,
+            Wire::OpenAi => call_openai(cfg, context, system).await,
+        }
     };
+    let (raw, meta) = tokio::time::timeout(cfg.timeout, call)
+        .await
+        .map_err(|_| LlmError::Timeout(cfg.timeout))??;
 
     Ok(Signal {
         probability: raw.probability.clamp(0.0, 1.0),
@@ -454,6 +555,10 @@ async fn ask(
         evidence_against: raw.evidence_against,
         provider: cfg.provider.id().to_string(),
         model: cfg.resolved_model(),
+        latency_ms: started.elapsed().as_millis() as u64,
+        input_tokens: meta.input_tokens,
+        output_tokens: meta.output_tokens,
+        served_by: meta.served_by,
     })
 }
 
@@ -493,18 +598,38 @@ pub async fn ensemble(cfgs: Vec<LlmConfig>, context: &str) -> Vec<EnsembleResult
     out
 }
 
+/// Non-signal facts about a completed call: what it cost and who answered.
+#[derive(Debug, Default, Clone)]
+struct CallMeta {
+    input_tokens: u64,
+    output_tokens: u64,
+    served_by: String,
+}
+
+fn http_client(cfg: &LlmConfig) -> Result<reqwest::Client, LlmError> {
+    reqwest::Client::builder()
+        .timeout(cfg.timeout)
+        .build()
+        .map_err(LlmError::Http)
+}
+
 async fn call_anthropic(
     cfg: &LlmConfig,
     context: &str,
     system: &str,
     schema: serde_json::Value,
-) -> Result<RawSignal, LlmError> {
-    let body = serde_json::json!({
+) -> Result<(RawSignal, CallMeta), LlmError> {
+    let modern = cfg.is_modern_claude();
+    let mut body = serde_json::json!({
         "model": cfg.resolved_model(),
-        "max_tokens": 2048,
+        // Thinking and the answer share this budget. On Claude Opus 5 thinking
+        // is ON unless disabled, so a small ceiling can be spent entirely on
+        // reasoning and truncate the JSON we actually need, and the forecast
+        // protocol's answer is longer than a quick signal's.
+        "max_tokens": 8192,
         "thinking": { "type": "adaptive" },
         "output_config": {
-            "effort": "medium",
+            "effort": cfg.effort.as_str(),
             "format": {
                 "type": "json_schema",
                 "schema": schema
@@ -514,14 +639,23 @@ async fn call_anthropic(
         "messages": [{ "role": "user", "content": format!("Analyze this market.\n\n{context}") }]
     });
 
-    let resp = reqwest::Client::new()
+    let mut req = http_client(cfg)?
         .post(format!("{}/v1/messages", cfg.resolved_base()))
         .header("x-api-key", cfg.api_key.trim())
         .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
+        .header("content-type", "application/json");
+
+    if modern {
+        // Safety classifiers on the current generation can decline a request
+        // outright. Financial-market analysis is not a targeted category, but a
+        // false positive would silently blind the overlay — so opt into the
+        // server-side fallback, which re-runs the same request on Anthropic's
+        // recommended substitute inside the same call.
+        req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
+        body["fallbacks"] = serde_json::json!("default");
+    }
+
+    let resp = req.json(&body).send().await?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -533,6 +667,28 @@ async fn call_anthropic(
     }
 
     let json: serde_json::Value = resp.json().await?;
+
+    // Check `stop_reason` BEFORE reading content: a refusal is a 200 whose
+    // content array is empty or partial, and indexing it first turns a clear
+    // "declined" into a confusing "no text content".
+    if json.get("stop_reason").and_then(|s| s.as_str()) == Some("refusal") {
+        let why = json
+            .get("stop_details")
+            .and_then(|d| d.get("category"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("no category given");
+        return Err(LlmError::Refused(why.to_string()));
+    }
+
+    let usage = json.get("usage");
+    let meta = CallMeta {
+        input_tokens: usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
+        output_tokens: usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
+        // Top-level `model` names whoever produced the message — which is the
+        // fallback model when one took over.
+        served_by: json.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+    };
+
     let text = json
         .get("content")
         .and_then(|c| c.as_array())
@@ -540,10 +696,10 @@ async fn call_anthropic(
         .and_then(|b| b.get("text"))
         .and_then(|t| t.as_str())
         .ok_or_else(|| LlmError::NoContent("anthropic".into()))?;
-    parse_raw(text)
+    Ok((parse_raw(text)?, meta))
 }
 
-async fn call_openai(cfg: &LlmConfig, context: &str, system: &str) -> Result<RawSignal, LlmError> {
+async fn call_openai(cfg: &LlmConfig, context: &str, system: &str) -> Result<(RawSignal, CallMeta), LlmError> {
     let body = serde_json::json!({
         "model": cfg.resolved_model(),
         // Widely supported across OpenAI-compatible providers; parsing is still
@@ -555,7 +711,7 @@ async fn call_openai(cfg: &LlmConfig, context: &str, system: &str) -> Result<Raw
         ]
     });
 
-    let mut req = reqwest::Client::new()
+    let mut req = http_client(cfg)?
         .post(format!("{}/chat/completions", cfg.resolved_base()))
         .header("content-type", "application/json");
     if cfg.provider.needs_key() {
@@ -573,6 +729,12 @@ async fn call_openai(cfg: &LlmConfig, context: &str, system: &str) -> Result<Raw
     }
 
     let json: serde_json::Value = resp.json().await?;
+    let usage = json.get("usage");
+    let meta = CallMeta {
+        input_tokens: usage.and_then(|u| u.get("prompt_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
+        output_tokens: usage.and_then(|u| u.get("completion_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
+        served_by: json.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+    };
     let text = json
         .get("choices")
         .and_then(|c| c.as_array())
@@ -581,7 +743,7 @@ async fn call_openai(cfg: &LlmConfig, context: &str, system: &str) -> Result<Raw
         .and_then(|m| m.get("content"))
         .and_then(|t| t.as_str())
         .ok_or_else(|| LlmError::NoContent(cfg.provider.id().to_string()))?;
-    parse_raw(text)
+    Ok((parse_raw(text)?, meta))
 }
 
 fn signal_schema() -> serde_json::Value {
@@ -841,6 +1003,31 @@ mod tests {
         // Sorted, so the UI does not reshuffle between refreshes.
         assert_eq!(out[0].0, "anthropic");
         assert_eq!(out[1].0, "openai");
+    }
+
+    #[test]
+    fn opus_5_is_the_claude_default() {
+        assert_eq!(Provider::Anthropic.default_model(), "claude-opus-5");
+    }
+
+    #[test]
+    fn modern_claude_detection_drives_the_fallback_opt_in() {
+        let modern = |m: &str| LlmConfig::new(Provider::Anthropic, m, "k").is_modern_claude();
+        assert!(modern("claude-opus-5"));
+        assert!(modern("claude-fable-5"));
+        assert!(modern("claude-sonnet-5"));
+        assert!(modern("")); // empty → the provider default, which is Opus 5
+        assert!(!modern("claude-haiku-4-5"));
+        assert!(!modern("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn effort_defaults_to_low_for_latency() {
+        // A signal that misses its bar is worthless, so the default trades
+        // depth for speed; callers raise it explicitly for slow event markets.
+        let cfg = LlmConfig::new(Provider::Anthropic, "", "k");
+        assert_eq!(cfg.effort, Effort::Low);
+        assert_eq!(cfg.with_effort(Effort::Xhigh).effort.as_str(), "xhigh");
     }
 
     #[test]

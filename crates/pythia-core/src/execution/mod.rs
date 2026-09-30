@@ -35,33 +35,72 @@ use std::sync::Mutex;
 /// never logged; `Debug` is deliberately not derived.
 #[derive(Clone, Default)]
 pub struct Credentials {
-    /// Alpaca key id + secret.
+    /// Alpaca PAPER-account key id + secret (paper-api.alpaca.markets).
     pub alpaca: Option<(String, String)>,
+    /// Alpaca LIVE-account key id + secret (api.alpaca.markets). Alpaca issues
+    /// a separate pair per account and each only authenticates against its own
+    /// endpoint, so the order path never borrows the other account's keys.
+    pub alpaca_live: Option<(String, String)>,
     /// The selected crypto exchange and its (key, secret, passphrase).
     pub exchange: Option<(Exchange, String, String, String)>,
-    /// Trade the pre/post-market equity sessions with marketable limit orders.
-    pub alpaca_extended_hours: bool,
+    /// Cap on the marketable-limit band for Alpaca market orders, in basis
+    /// points. `None` keeps the connector default; 0 sends plain market orders
+    /// during regular hours.
+    pub alpaca_slippage_bps: Option<f64>,
     /// Allow opening short equity positions (needs a margin account).
     pub alpaca_allow_shorts: bool,
 }
 
 impl Credentials {
+    /// The Alpaca key pair for one endpoint, if configured.
+    pub fn alpaca_keys(&self, paper: bool) -> Option<&(String, String)> {
+        if paper {
+            self.alpaca.as_ref()
+        } else {
+            self.alpaca_live.as_ref()
+        }
+    }
+
+    /// The concrete Alpaca connector for one endpoint, using that endpoint's
+    /// own keys. `extended_hours` is per order: the engine only sets it when
+    /// the operator opted in AND the broker reported an extended session.
+    pub fn alpaca_connector(&self, paper: bool, extended_hours: bool) -> Result<AlpacaConnector, String> {
+        let (k, s) = self.alpaca_keys(paper).cloned().ok_or_else(|| {
+            if paper {
+                "Alpaca paper keys are not set (APCA_API_KEY_ID / APCA_API_SECRET_KEY, or Settings → Alpaca paper)"
+                    .to_string()
+            } else {
+                "Alpaca live keys are not set (APCA_LIVE_API_KEY_ID / APCA_LIVE_API_SECRET_KEY, or Settings → \
+                 Alpaca live). Paper and live accounts have separate key pairs."
+                    .to_string()
+            }
+        })?;
+        let mut c = AlpacaConnector::new(Some(k), Some(s), paper)
+            .with_extended_hours(extended_hours)
+            .with_shorts(self.alpaca_allow_shorts);
+        if let Some(bps) = self.alpaca_slippage_bps {
+            c = c.with_slippage_bps(bps);
+        }
+        if !c.is_live_ready() {
+            return Err("Alpaca keys are present but empty".into());
+        }
+        Ok(c)
+    }
+
     /// Build the connector for one venue, or explain why we cannot.
     pub fn connector(&self, venue: Venue, paper: bool) -> Result<Box<dyn MarketConnector>, String> {
+        self.connector_with(venue, paper, false)
+    }
+
+    /// Same, for submitting one order that may target the extended session.
+    pub fn connector_with(
+        &self,
+        venue: Venue,
+        paper: bool,
+        extended_hours: bool,
+    ) -> Result<Box<dyn MarketConnector>, String> {
         match venue {
-            Venue::Alpaca => {
-                let (k, s) = self
-                    .alpaca
-                    .clone()
-                    .ok_or("Alpaca keys are not set (APCA_API_KEY_ID / APCA_API_SECRET_KEY, or Settings → Alpaca)")?;
-                let c = AlpacaConnector::new(Some(k), Some(s), paper)
-                    .with_extended_hours(self.alpaca_extended_hours)
-                    .with_shorts(self.alpaca_allow_shorts);
-                if !c.is_live_ready() {
-                    return Err("Alpaca keys are present but empty".into());
-                }
-                Ok(Box::new(c))
-            }
+            Venue::Alpaca => Ok(Box::new(self.alpaca_connector(paper, extended_hours)?)),
             Venue::Crypto => {
                 let (ex, k, s, p) = self
                     .exchange
@@ -82,7 +121,9 @@ impl Credentials {
     /// Venues with usable credentials, for the "connected" badges.
     pub fn connected_venues(&self) -> HashSet<Venue> {
         let mut set = HashSet::new();
-        if self.connector(Venue::Alpaca, true).is_ok() {
+        // Either account counts: someone who configured only live keys still
+        // needs the broker-status loop and the connected badge.
+        if self.connector(Venue::Alpaca, true).is_ok() || self.connector(Venue::Alpaca, false).is_ok() {
             set.insert(Venue::Alpaca);
         }
         if self.connector(Venue::Crypto, true).is_ok() {
@@ -118,7 +159,7 @@ async fn submit_one(engine: &Mutex<Engine>, creds: &Credentials, o: LiveOrderOut
         return reject(engine, &o.order_id, "dry-run: not submitted");
     }
 
-    let conn = match creds.connector(o.venue, o.paper) {
+    let conn = match creds.connector_with(o.venue, o.paper, o.extended_hours) {
         Ok(c) => c,
         Err(e) => return reject(engine, &o.order_id, &e),
     };
@@ -285,10 +326,42 @@ impl TransientExt for ConnectorError {
 mod tests {
     use super::*;
     use crate::connectors::Side;
-    use crate::engine::LiveConfig;
+    use crate::engine::{BrokerStatus, LiveConfig};
 
     fn armed(venues: Vec<Venue>) -> LiveConfig {
-        LiveConfig { armed: true, paper: true, dry_run: false, venues, timeout_sec: 60 }
+        LiveConfig { armed: true, paper: true, dry_run: false, venues, timeout_sec: 60, extended_hours: false }
+    }
+
+    /// A fresh "market open, account healthy" snapshot. Live Alpaca entries
+    /// are refused by the engine until one arrives.
+    fn open_market() -> BrokerStatus {
+        BrokerStatus {
+            market_open: true,
+            extended_open: true,
+            session_end: None,
+            next_open: None,
+            day_trade_limit_reached: false,
+            restricted: None,
+            equity: 100_000.0,
+            buying_power: 200_000.0,
+            checked_at: chrono::Utc::now().timestamp_millis(),
+        }
+    }
+
+    #[test]
+    fn paper_and_live_alpaca_keys_never_stand_in_for_each_other() {
+        // Only paper keys: the live endpoint must fail as "not configured"
+        // rather than quietly sending the paper pair to api.alpaca.markets.
+        let paper_only = Credentials { alpaca: Some(("pk".into(), "ps".into())), ..Default::default() };
+        assert!(paper_only.connector(Venue::Alpaca, true).is_ok());
+        let err = paper_only.connector(Venue::Alpaca, false).err().expect("no live keys → no live connector");
+        assert!(err.contains("APCA_LIVE_API_KEY_ID"), "{err}");
+
+        // Only live keys: still counts as connected, and paper is refused.
+        let live_only = Credentials { alpaca_live: Some(("lk".into(), "ls".into())), ..Default::default() };
+        assert!(live_only.connector(Venue::Alpaca, false).is_ok());
+        assert!(live_only.connector(Venue::Alpaca, true).is_err());
+        assert!(live_only.connected_venues().contains(&Venue::Alpaca));
     }
 
     #[test]
@@ -344,6 +417,7 @@ mod tests {
         {
             let mut e = engine.lock().unwrap();
             e.set_live(armed(vec![Venue::Alpaca]));
+            e.set_broker_status(open_market());
             e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
         }
         submit_pending(&engine, &Credentials::default()).await;

@@ -2832,6 +2832,7 @@ dependencies = [
 name = "pythia"
 version = "0.4.0"
 dependencies = [
+ "chrono",
  "pythia-core",
  "serde",
  "serde_json",
@@ -2868,6 +2869,7 @@ name = "pythia-server"
 version = "0.4.0"
 dependencies = [
  "axum",
+ "chrono",
  "dotenvy",
  "pythia-core",
  "serde",

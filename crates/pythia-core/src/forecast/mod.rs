@@ -368,6 +368,10 @@ mod tests {
             evidence_against: vec![],
             provider: provider.into(),
             model: "m".into(),
+            latency_ms: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            served_by: String::new(),
         }
     }
 

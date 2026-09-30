@@ -7,6 +7,7 @@
 //! so the engine keeps running on its simulator if the network is down or a
 //! venue is unreachable.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -15,6 +16,27 @@ pub struct RealCrypto {
     pub symbol: String,
     pub price: f64,
     pub change24h: f64,
+}
+
+/// One completed candle. `ts` is the bar's OPEN time in epoch millis, which is
+/// what both venues stamp, so a bar is only ever appended once its successor
+/// appears — we never signal on a half-formed bar.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Ohlc {
+    pub ts: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+}
+
+/// A market's candle history, oldest first.
+#[derive(Debug, Clone)]
+pub struct BarSeries {
+    /// Engine market id (e.g. `alpaca:AAPL`, `crypto:BTC/USD`).
+    pub id: String,
+    pub bars: Vec<Ohlc>,
 }
 
 pub struct RealPrediction {
@@ -177,6 +199,172 @@ fn parse_snapshots(v: &Value) -> Vec<RealEquity> {
     out
 }
 
+// ── candle history ──────────────────────────────────────────────────────────
+//
+// Quotes tell you where a market IS; indicators need to know where it HAS BEEN.
+// Feeding a 1.5s tick loop's own random walk into an EMA produces a beautiful,
+// completely meaningless signal — so every tradable market's indicator series
+// comes from these real candle feeds instead, and the engine refuses to signal
+// on a market it has no bars for.
+
+/// Alpaca candles for the equity universe.
+///
+/// `GET /v2/stocks/bars?symbols=…&timeframe=…&start=…&feed=…`. `adjustment=split`
+/// keeps the series continuous across stock splits — without it a 4:1 split
+/// looks like a −75% crash and every trend strategy shorts into it.
+pub async fn fetch_alpaca_bars(
+    key_id: &str,
+    secret: &str,
+    feed: &str,
+    timeframe: &str,
+    lookback_days: i64,
+) -> Vec<BarSeries> {
+    if key_id.trim().is_empty() || secret.trim().is_empty() {
+        return vec![];
+    }
+    let start = (chrono::Utc::now() - chrono::Duration::days(lookback_days)).to_rfc3339();
+    let url = format!(
+        "https://data.alpaca.markets/v2/stocks/bars?symbols={}&timeframe={}&start={}&feed={}&adjustment=split&sort=asc&limit=10000",
+        ALPACA_SYMBOLS.join(","),
+        timeframe,
+        urlencode(&start),
+        feed
+    );
+    let fut = async {
+        reqwest::Client::new()
+            .get(&url)
+            .header("APCA-API-KEY-ID", key_id)
+            .header("APCA-API-SECRET-KEY", secret)
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+    };
+    let Some(v) = tokio::time::timeout(Duration::from_secs(12), fut).await.ok().flatten() else {
+        return vec![];
+    };
+    parse_alpaca_bars(&v)
+}
+
+/// Map an Alpaca `/v2/stocks/bars` payload to our series. Split out so the
+/// field mapping is unit-testable without keys or a network call.
+fn parse_alpaca_bars(v: &Value) -> Vec<BarSeries> {
+    let Some(map) = v.get("bars").and_then(Value::as_object) else { return vec![] };
+    let mut out = Vec::new();
+    for (symbol, arr) in map {
+        let Some(arr) = arr.as_array() else { continue };
+        let mut bars: Vec<Ohlc> = arr
+            .iter()
+            .filter_map(|b| {
+                Some(Ohlc {
+                    ts: chrono::DateTime::parse_from_rfc3339(b.get("t")?.as_str()?)
+                        .ok()?
+                        .timestamp_millis(),
+                    open: b.get("o")?.as_f64()?,
+                    high: b.get("h")?.as_f64()?,
+                    low: b.get("l")?.as_f64()?,
+                    close: b.get("c")?.as_f64()?,
+                    volume: b.get("v").and_then(Value::as_f64).unwrap_or(0.0),
+                })
+            })
+            .filter(|b| b.close > 0.0)
+            .collect();
+        if bars.is_empty() {
+            continue;
+        }
+        bars.sort_by_key(|b| b.ts);
+        out.push(BarSeries { id: format!("alpaca:{symbol}"), bars });
+    }
+    out
+}
+
+/// Kraken OHLC for the crypto universe. The endpoint is single-pair, so this
+/// fans out one request per pair and drops any that fail — a partial refresh is
+/// better than none, and the engine only trades markets whose bars it has.
+pub async fn fetch_kraken_bars(interval_min: u32) -> Vec<BarSeries> {
+    const PAIRS: [(&str, &str); 9] = [
+        ("XBTUSD", "BTC/USD"),
+        ("ETHUSD", "ETH/USD"),
+        ("SOLUSD", "SOL/USD"),
+        ("ADAUSD", "ADA/USD"),
+        ("DOTUSD", "DOT/USD"),
+        ("LINKUSD", "LINK/USD"),
+        ("AVAXUSD", "AVAX/USD"),
+        ("XRPUSD", "XRP/USD"),
+        ("LTCUSD", "LTC/USD"),
+    ];
+    // Fan out concurrently — nine sequential 5s timeouts would stall the tick
+    // loop for the better part of a minute on a bad network.
+    let handles: Vec<_> = PAIRS
+        .iter()
+        .map(|(pair, symbol)| {
+            let url =
+                format!("https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval_min}");
+            let id = format!("crypto:{symbol}");
+            tokio::spawn(async move {
+                let bars = parse_kraken_ohlc(&get_json(&url).await?)?;
+                Some(BarSeries { id, bars })
+            })
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for h in handles {
+        if let Ok(Some(s)) = h.await {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Kraken returns `{result: {<canonical pair>: [[time, o, h, l, c, vwap, vol, count], …], last: …}}`
+/// with numbers as strings. The canonical pair name differs from the requested
+/// one (`XBTUSD` → `XXBTZUSD`), so we take the first non-`last` key.
+fn parse_kraken_ohlc(v: &Value) -> Option<Vec<Ohlc>> {
+    let result = v.get("result")?.as_object()?;
+    let arr = result.iter().find(|(k, _)| k.as_str() != "last").map(|(_, v)| v)?.as_array()?;
+    let num = |x: Option<&Value>| -> Option<f64> {
+        match x? {
+            Value::String(s) => s.parse::<f64>().ok(),
+            other => other.as_f64(),
+        }
+    };
+    let mut bars: Vec<Ohlc> = arr
+        .iter()
+        .filter_map(|row| {
+            let r = row.as_array()?;
+            Some(Ohlc {
+                ts: num(r.first())? as i64 * 1000,
+                open: num(r.get(1))?,
+                high: num(r.get(2))?,
+                low: num(r.get(3))?,
+                close: num(r.get(4))?,
+                volume: num(r.get(6)).unwrap_or(0.0),
+            })
+        })
+        .filter(|b| b.close > 0.0)
+        .collect();
+    if bars.is_empty() {
+        return None;
+    }
+    bars.sort_by_key(|b| b.ts);
+    Some(bars)
+}
+
+/// Minimal percent-encoding for the RFC3339 timestamps we put in query strings
+/// (`:` and `+` are the only characters that actually matter here).
+fn urlencode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            ':' => "%3A".to_string(),
+            '+' => "%2B".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
+}
+
 /// Polymarket Gamma API — a handful of active markets, highest volume first.
 /// `outcomePrices` is a JSON-encoded string array; element 0 is the YES price.
 pub async fn fetch_polymarket() -> Vec<RealPrediction> {
@@ -274,6 +462,50 @@ mod tests {
     #[tokio::test]
     async fn alpaca_without_keys_is_a_no_op() {
         assert!(fetch_alpaca("", "", "iex").await.is_empty());
+        assert!(fetch_alpaca_bars("", "", "iex", "5Min", 5).await.is_empty());
+    }
+
+    #[test]
+    fn parses_alpaca_bars_payload() {
+        let v: Value = serde_json::from_str(
+            r#"{"bars": {"AAPL": [
+                 {"t":"2026-07-23T13:35:00Z","o":227.0,"h":228.0,"l":226.5,"c":227.8,"v":1200},
+                 {"t":"2026-07-23T13:30:00Z","o":226.0,"h":227.2,"l":225.8,"c":227.0,"v":900}
+               ]}, "next_page_token": null}"#,
+        )
+        .unwrap();
+
+        let series = parse_alpaca_bars(&v);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].id, "alpaca:AAPL");
+        // Out-of-order input is sorted oldest-first — indicators assume it.
+        assert_eq!(series[0].bars.len(), 2);
+        assert!(series[0].bars[0].ts < series[0].bars[1].ts);
+        assert_eq!(series[0].bars[1].close, 227.8);
+    }
+
+    #[test]
+    fn parses_kraken_ohlc_payload() {
+        // Kraken sends numbers as strings and renames the pair (XBTUSD → XXBTZUSD).
+        let v: Value = serde_json::from_str(
+            r#"{"error":[],"result":{"XXBTZUSD":[
+                 [1753000000,"67000.0","67200.0","66900.0","67100.0","67050.0","12.5",42],
+                 [1753000300,"67100.0","67400.0","67050.0","67350.0","67200.0","9.1",31]
+               ],"last":1753000300}}"#,
+        )
+        .unwrap();
+
+        let bars = parse_kraken_ohlc(&v).expect("bars");
+        assert_eq!(bars.len(), 2, "the `last` cursor key must not be read as a pair");
+        assert_eq!(bars[0].ts, 1_753_000_000_000, "seconds are promoted to millis");
+        assert_eq!(bars[1].close, 67_350.0);
+        assert_eq!(bars[1].high, 67_400.0);
+    }
+
+    #[test]
+    fn kraken_ohlc_rejects_an_empty_result() {
+        let v: Value = serde_json::from_str(r#"{"error":["EQuery:Unknown asset pair"],"result":{}}"#).unwrap();
+        assert!(parse_kraken_ohlc(&v).is_none());
     }
 
     #[test]

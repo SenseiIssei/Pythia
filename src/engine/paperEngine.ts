@@ -18,7 +18,7 @@ import { MarketSim } from "./marketSim";
 import { DEFAULT_LIMITS, evaluate, type RiskContext } from "./risk";
 import { defaultStrategies, runStrategy } from "./strategies";
 import * as ind from "./indicators";
-import { DISARMED, NO_FORECASTS, type EngineClient } from "./client";
+import { AI_OFF, DISARMED, NO_FORECASTS, NO_SPEND, type EngineClient } from "./client";
 
 interface PositionInternal {
   marketId: string;
@@ -634,6 +634,24 @@ export class PaperEngine implements EngineClient {
   }
   setAdaptiveExecution(_on: boolean) {
     // The browser engine has no venue to route to, so there is nothing to tune.
+  }
+  /**
+   * Nothing here is bar-backed: this build runs entirely on the in-browser
+   * simulator, with no exchange candles behind it. Reporting an empty list is
+   * what makes the UI label every market as simulated, which is the truth.
+   */
+  barBacked(): string[] {
+    return [];
+  }
+  // Model APIs need a key, and a browser build has nowhere safe to keep one.
+  aiViews() {
+    return [];
+  }
+  aiPolicy() {
+    return AI_OFF;
+  }
+  aiSpend() {
+    return NO_SPEND;
   }
 
   // ── mutations from the UI ──────────────────────────────────────────────────

@@ -11,7 +11,7 @@ import type {
   StrategyConfig,
   StrategyState,
 } from "../types";
-import { DISARMED, NO_FORECASTS, type EngineClient, type EngineState } from "./client";
+import { AI_OFF, DISARMED, NO_FORECASTS, NO_SPEND, type EngineClient, type EngineState } from "./client";
 import { DEFAULT_LIMITS } from "./risk";
 
 const EMPTY: EngineState = {
@@ -134,6 +134,18 @@ export class TauriEngineClient implements EngineClient {
   }
   setAdaptiveExecution(on: boolean) {
     void invoke("set_adaptive_execution", { on });
+  }
+  barBacked() {
+    return this.state.barBacked ?? [];
+  }
+  aiViews() {
+    return this.state.aiViews ?? [];
+  }
+  aiPolicy() {
+    return this.state.aiPolicy ?? AI_OFF;
+  }
+  aiSpend() {
+    return this.state.aiSpend ?? NO_SPEND;
   }
 
   toggleKill() {
