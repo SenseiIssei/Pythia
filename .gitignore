@@ -21,3 +21,8 @@ pythia.db-*
 Thumbs.db
 .vscode/
 .idea/
+
+# python
+__pycache__/
+*.pyc
+.venv/
