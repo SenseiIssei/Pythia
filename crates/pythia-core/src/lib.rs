@@ -15,5 +15,7 @@ pub mod forecast;
 pub mod llm;
 pub mod marketdata;
 pub mod predict;
+pub mod prefs;
+pub mod research;
 pub mod vault;
 pub mod wallets;

@@ -96,8 +96,34 @@ pub fn donchian_low(s: &[f64], n: usize) -> Option<f64> {
     Some(s[s.len() - n..].iter().cloned().fold(f64::MAX, f64::min))
 }
 
+/// Wilder's Average True Range over real candles, in price units.
+///
+/// True range counts the overnight gap (`|high − prev close|`, `|low − prev
+/// close|`), which [`atr_proxy`] cannot see from closes alone. On equities that
+/// difference is the whole ballgame: a stop sized off close-to-close moves is
+/// far too tight to survive a normal opening gap, and gets swept for a loss on
+/// days the position was never actually wrong.
+pub fn atr(bars: &[crate::marketdata::Ohlc], n: usize) -> Option<f64> {
+    if n == 0 || bars.len() < n + 1 {
+        return None;
+    }
+    let tr = |i: usize| -> f64 {
+        let prev_close = bars[i - 1].close;
+        (bars[i].high - bars[i].low)
+            .max((bars[i].high - prev_close).abs())
+            .max((bars[i].low - prev_close).abs())
+    };
+    // Seed with the simple average of the first n true ranges, then smooth.
+    let mut avg = (1..=n).map(tr).sum::<f64>() / n as f64;
+    for i in (n + 1)..bars.len() {
+        avg = (avg * (n as f64 - 1.0) + tr(i)) / n as f64;
+    }
+    Some(avg)
+}
+
 /// Average absolute close-to-close move over `n` bars — an ATR proxy in price
-/// units (used for volatility-scaled stops/targets and sizing).
+/// units, for series where only closes are available (the simulator, and
+/// prediction markets). Prefer [`atr`] whenever real candles exist.
 pub fn atr_proxy(s: &[f64], n: usize) -> Option<f64> {
     if n == 0 || s.len() < n + 1 {
         return None;
@@ -232,6 +258,34 @@ mod tests {
         // an oscillation → low ER
         let chop: Vec<f64> = (0..30).map(|i| 100.0 + (i % 2) as f64).collect();
         assert!(efficiency_ratio(&chop, 20).unwrap() < 0.2);
+    }
+
+    #[test]
+    fn atr_counts_the_gap_that_atr_proxy_misses() {
+        use crate::marketdata::Ohlc;
+        // Flat intraday ranges, but every bar opens with a $10 gap. Close-to-close
+        // sees the move; only true range sees both the gap and the intrabar range.
+        let bars: Vec<Ohlc> = (0..20)
+            .map(|i| {
+                let base = 100.0 + i as f64 * 10.0;
+                Ohlc { ts: i as i64 * 60_000, open: base, high: base + 1.0, low: base - 1.0, close: base, volume: 1.0 }
+            })
+            .collect();
+        let a = atr(&bars, 14).unwrap();
+        let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
+        let p = atr_proxy(&closes, 14).unwrap();
+        assert!(a > p, "true range ({a}) must exceed the close-to-close proxy ({p})");
+        // gap of 10 plus 1 of range above the previous close
+        assert!((a - 11.0).abs() < 0.5, "got {a}");
+    }
+
+    #[test]
+    fn atr_needs_more_bars_than_its_period() {
+        use crate::marketdata::Ohlc;
+        let few: Vec<Ohlc> = (0..5)
+            .map(|i| Ohlc { ts: i, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 0.0 })
+            .collect();
+        assert!(atr(&few, 14).is_none());
     }
 
     #[test]

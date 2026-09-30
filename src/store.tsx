@@ -8,6 +8,9 @@ import {
 } from "react";
 import { getEngine } from "./engine";
 import type {
+  AiPolicy,
+  AiSpend,
+  AiView,
   CoherenceBreak,
   ForecastStats,
   JournalEntry,
@@ -39,6 +42,11 @@ interface Store {
   forecastStats: ForecastStats;
   execution: PolicyRow[];
   adaptiveExecution: boolean;
+  /** Market ids running on real exchange candles rather than the simulator. */
+  barBacked: Set<string>;
+  aiViews: AiView[];
+  aiPolicy: AiPolicy;
+  aiSpend: AiSpend;
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
@@ -80,6 +88,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       forecastStats: engine.forecastStats(),
       execution: engine.execution(),
       adaptiveExecution: engine.adaptiveExecution(),
+      barBacked: new Set(engine.barBacked()),
+      aiViews: engine.aiViews(),
+      aiPolicy: engine.aiPolicy(),
+      aiSpend: engine.aiSpend(),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),

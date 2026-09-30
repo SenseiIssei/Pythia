@@ -6,13 +6,23 @@ import {
   PlugZap,
   TriangleAlert,
   CheckCircle2,
+  Circle,
   DollarSign,
   Timer,
   Gauge,
 } from "lucide-react";
 import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
 import { useStore } from "../store";
-import { liveMode, alpacaAccount, setLiveConfig, verifyVenue, type AlpacaAccount } from "../live";
+import {
+  liveMode,
+  alpacaAccount,
+  setLiveConfig,
+  verifyVenue,
+  liveDiagnostics,
+  sendTestOrder,
+  type AlpacaAccount,
+  type MarketDiag,
+} from "../live";
 import type { Venue } from "../types";
 
 const ARM_PHRASE = "ARM LIVE";
@@ -30,6 +40,7 @@ export function Live() {
   const [dryRun, setDryRun] = useState(false);
   const [venues, setVenues] = useState<Venue[]>(["alpaca"]);
   const [timeoutSec, setTimeoutSec] = useState(120);
+  const [extendedHours, setExtendedHours] = useState(false);
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -44,8 +55,9 @@ export function Live() {
       setDryRun(live.dryRun);
       setVenues(live.venues);
       setTimeoutSec(live.timeoutSec);
+      setExtendedHours(live.extendedHours);
     }
-  }, [live.armed, live.paper, live.dryRun, live.venues, live.timeoutSec]);
+  }, [live.armed, live.paper, live.dryRun, live.venues, live.timeoutSec, live.extendedHours]);
 
   function toggleVenue(v: Venue, on: boolean) {
     setVenues((prev) => (on ? [...new Set([...prev, v])] : prev.filter((x) => x !== v)));
@@ -79,7 +91,7 @@ export function Live() {
     setMsg("");
     setErr("");
     try {
-      await setLiveConfig({ armed: true, paper, dryRun, venues, timeoutSec });
+      await setLiveConfig({ armed: true, paper, dryRun, venues, timeoutSec, extendedHours });
       setConfirm("");
       setMsg("armed");
     } catch (e) {
@@ -93,7 +105,7 @@ export function Live() {
     setMsg("");
     setErr("");
     try {
-      await setLiveConfig({ armed: false, paper, dryRun, venues, timeoutSec });
+      await setLiveConfig({ armed: false, paper, dryRun, venues, timeoutSec, extendedHours });
       setMsg("disarmed");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -165,6 +177,61 @@ export function Live() {
         </div>
       )}
 
+      {/*
+        The most confusing state to be in is "armed, and nothing is happening".
+        Almost always it is one of: the market is closed, the account is
+        restricted, the day-trade ceiling is reached, or the broker check has
+        not landed yet. The engine already knows which — so say it plainly here
+        rather than leaving the user to guess from an empty order book.
+      */}
+      {live.armed && live.blockedReason && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning">
+          <TriangleAlert size={15} className="mt-0.5 shrink-0" />
+          <div>
+            <div className="font-bold">New entries are on hold</div>
+            <div className="text-cyber-text-dim">{live.blockedReason}</div>
+            <div className="mt-1 text-[11px] text-cyber-text-faint">
+              Exits are never blocked — an open position can always be closed.
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ReadinessCard />
+      <DiagnosticsCard />
+
+      {live.broker && (
+        <Card title="Broker session" className="mb-4">
+          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <Field
+              label="US market"
+              value={live.broker.marketOpen ? "open" : "closed"}
+              good={live.broker.marketOpen}
+            />
+            <Field label="Equity" value={`$${live.broker.equity.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} />
+            <Field
+              label="Buying power"
+              value={`$${live.broker.buyingPower.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+            />
+            <Field
+              label="Day-trade cap"
+              value={live.broker.dayTradeLimitReached ? "reached" : "clear"}
+              good={!live.broker.dayTradeLimitReached}
+            />
+          </div>
+          {!live.broker.marketOpen && live.broker.nextOpen && (
+            <div className="mt-2 text-xs text-cyber-text-faint">Next open: {live.broker.nextOpen}</div>
+          )}
+          {live.broker.restricted && (
+            <div className="mt-2 text-xs text-danger">Account restricted: {live.broker.restricted}</div>
+          )}
+          <div className="mt-2 text-[11px] text-cyber-text-faint">
+            Checked {Math.max(0, Math.round((Date.now() - live.broker.checkedAt) / 1000))}s ago · live entries block
+            once this is over 5 minutes old.
+          </div>
+        </Card>
+      )}
+
       <Card className="mb-4 border-danger/30 bg-danger/5">
         <div className="flex items-start gap-3">
           <ShieldAlert size={18} className="mt-0.5 shrink-0 text-danger" />
@@ -224,8 +291,8 @@ export function Live() {
         <div className="mb-3 text-sm text-cyber-text-dim">
           Verify your keys reach the {paper ? "paper" : "live"} endpoint before arming. Read-only — places no order.{" "}
           {mode === "native"
-            ? "Keys come from the OS keychain (Settings)."
-            : "Keys come from the server environment."}
+            ? `Keys come from the OS keychain (Settings). Alpaca uses the ${paper ? "Alpaca — Paper" : "Alpaca — Live"} slot; the two accounts have separate key pairs.`
+            : "Keys come from the server environment (Alpaca: APCA_API_KEY_ID / APCA_API_SECRET_KEY, or APCA_LIVE_* for the live endpoint)."}
         </div>
         <Button tone="cyan" icon={PlugZap} disabled={busy || venues.length === 0} onClick={testConn}>
           Test {paper ? "paper" : "live"} connection
@@ -252,22 +319,46 @@ export function Live() {
       {/* arm */}
       <Card title="3 · Arm" right={<DollarSign size={14} className="text-danger" />}>
         <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="flex items-center justify-between rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2">
+          {/*
+            Both toggles are inert while armed, and are shown that way.
+            `setLiveConfig` is only sent by arm(), so flipping these mid-flight
+            changed a local value and nothing else — the switch moved, the label
+            said "Paper", and orders kept going to the live endpoint. Requiring a
+            disarm to change endpoint is also the right safety behaviour: moving
+            between fake and real money should be a deliberate re-arm, not a tap.
+          */}
+          <div
+            className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+              live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
+            }`}
+          >
             <div>
               <div className="text-sm font-medium">Endpoint</div>
-              <div className="text-[11px] text-cyber-text-faint">{paper ? "paper — no real money" : "LIVE — real money"}</div>
+              <div className="text-[11px] text-cyber-text-faint">
+                {live.armed
+                  ? "locked while armed — disarm to change"
+                  : paper
+                    ? "paper — no real money"
+                    : "LIVE — real money"}
+              </div>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span className={paper ? "text-accent" : "text-danger"}>{paper ? "Paper" : "Live"}</span>
-              <Toggle on={!paper} onChange={(v) => setPaper(!v)} />
+              <Toggle on={!paper} onChange={(v) => !live.armed && setPaper(!v)} />
             </div>
           </div>
-          <div className="flex items-center justify-between rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2">
+          <div
+            className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+              live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
+            }`}
+          >
             <div>
               <div className="text-sm font-medium">Dry-run</div>
-              <div className="text-[11px] text-cyber-text-faint">log intended orders, submit nothing</div>
+              <div className="text-[11px] text-cyber-text-faint">
+                {live.armed ? "locked while armed — disarm to change" : "log intended orders, submit nothing"}
+              </div>
             </div>
-            <Toggle on={dryRun} onChange={setDryRun} />
+            <Toggle on={dryRun} onChange={(v) => !live.armed && setDryRun(v)} />
           </div>
           <div className="flex items-center justify-between rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2 sm:col-span-2">
             <div>
@@ -292,6 +383,41 @@ export function Live() {
             </div>
           </div>
         </div>
+
+        {/*
+          Extended hours is the difference between "it trades" and "it trades
+          only between 15:30 and 22:00 CEST". Off by default: the session is
+          thin, spreads are wide, and no strategy here was validated on it.
+        */}
+        <div
+          className={`mb-3 flex items-center justify-between rounded-lg border px-3 py-2 ${
+            live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
+          }`}
+        >
+          <div>
+            <div className="text-sm font-medium">Extended hours</div>
+            <div className="text-[11px] text-cyber-text-faint">
+              {live.armed
+                ? "locked while armed — disarm to change"
+                : live.broker?.extendedOpen && !live.broker?.marketOpen
+                  ? `pre/after-market is open right now${live.broker.sessionEnd ? ` until ${live.broker.sessionEnd} ET` : ""} — thin book, wide spreads`
+                  : "trade 04:00–20:00 ET instead of 09:30–16:00 · whole-share limit orders only"}
+            </div>
+          </div>
+          <Toggle on={extendedHours} onChange={(v) => !live.armed && setExtendedHours(v)} />
+        </div>
+
+        {/* Switching to real money is a different decision from arming at all. */}
+        {!live.armed && !paper && !dryRun && (
+          <div className="mb-3 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
+            <TriangleAlert size={15} className="mt-0.5 shrink-0 text-danger" />
+            <div className="text-cyber-text-dim">
+              <span className="font-bold text-danger">Real money.</span> Arming now routes orders to your live
+              Alpaca account. This uses the <span className="text-accent">Alpaca — Live</span> keys from Settings,
+              not the paper ones — test them there first if you haven't.
+            </div>
+          </div>
+        )}
 
         {!live.armed ? (
           <>
@@ -332,6 +458,10 @@ export function Live() {
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Only strategies set to <b>Live</b> (Strategies page) send entries; a position opened live also exits live.</div>
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> The kill switch, daily-loss, drawdown &amp; position caps gate every order first.</div>
           <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Orders that cannot fill (market closed, no buying power) are refused before submission, not left hanging.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Alpaca entries are refused while the market is closed, the account is restricted, or the broker check is stale. Exits never are.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Whole-share Alpaca orders go out as marketable limits, so a thin or gapped book can't fill them at any price.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> An order that doesn't fill is cancelled at the venue, then re-read, so nothing is ever left working after Pythia gives up on it.</div>
+          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Positions are reconciled against the broker every couple of minutes while armed; the broker is always treated as the source of truth.</div>
         </div>
       </Card>
     </div>
@@ -421,6 +551,195 @@ function ExecutionPolicyCard() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Why no order has reached the broker yet.
+ *
+ * Live routing is a chain of independent gates, every one of which fails
+ * silently: keys, arm, a strategy set Live, an Alpaca-market universe, real
+ * candles, an open session. Break any link and the symptom is identical — an
+ * armed cockpit and an empty Alpaca dashboard — so the chain is laid out here
+ * with the fix attached to whichever link is actually broken.
+ */
+function ReadinessCard() {
+  const { live, strategies, barBacked, setStrategyState } = useStore();
+
+  // Only this strategy trades Alpaca markets today.
+  const equityStrategies = strategies.filter((s) => s.venueClass === "alpaca");
+  const liveEquity = equityStrategies.filter((s) => s.state === "live");
+  const barsReady = equityStrategies.some((s) => s.universe.some((id) => barBacked.has(id)));
+
+  const steps = [
+    {
+      label: "Alpaca keys saved",
+      ok: live.alpacaConnected,
+      detail: live.alpacaConnected ? "in the OS keychain" : "Settings → Alpaca — Paper",
+    },
+    {
+      label: "Real equity candles loaded",
+      ok: barsReady,
+      detail: barsReady
+        ? "indicators are running on real bars"
+        : "waiting for Alpaca bars — strategies skip any market with under 30",
+    },
+    {
+      label: "Live execution armed for Alpaca",
+      ok: live.armed && live.venues.includes("alpaca"),
+      detail: !live.armed
+        ? "type ARM LIVE below"
+        : live.venues.includes("alpaca")
+          ? `routing to the ${live.paper ? "paper" : "LIVE"} endpoint`
+          : "armed, but Alpaca is not an enabled venue: disarm, switch it on under Venues, re-arm",
+    },
+    {
+      label: "A strategy set to Live",
+      ok: liveEquity.length > 0,
+      detail:
+        liveEquity.length > 0
+          ? liveEquity.map((s) => s.name).join(", ")
+          : equityStrategies.length > 0
+            ? `${equityStrategies[0].name} is ${equityStrategies[0].state} — only a Live strategy sends entries`
+            : "no strategy trades Alpaca markets",
+      fix:
+        liveEquity.length === 0 && equityStrategies.length > 0
+          ? { label: `Set ${equityStrategies[0].name} Live`, run: () => setStrategyState(equityStrategies[0].id, "live") }
+          : undefined,
+    },
+    {
+      label: "Market session open",
+      ok: !live.blockedReason,
+      detail: live.blockedReason ?? (live.armed ? "clear to trade" : "checked once armed"),
+    },
+  ];
+
+  const done = steps.filter((s) => s.ok).length;
+
+  return (
+    <Card
+      className="mb-4"
+      title="Why no orders yet?"
+      right={
+        <Badge tone={done === steps.length ? "green" : "neutral"}>
+          {done}/{steps.length} ready
+        </Badge>
+      }
+    >
+      <div className="space-y-1.5">
+        {steps.map((s) => (
+          <div key={s.label} className="flex items-start gap-2 text-sm">
+            {s.ok ? (
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-success" />
+            ) : (
+              <Circle size={14} className="mt-0.5 shrink-0 text-cyber-text-faint" />
+            )}
+            <div className="flex-1">
+              <span className={s.ok ? "text-cyber-text" : "text-cyber-text-dim"}>{s.label}</span>
+              <div className="text-[11px] text-cyber-text-faint">{s.detail}</div>
+            </div>
+            {s.fix && (
+              <Button tone="cyan" className="!px-2 !py-1" onClick={s.fix.run}>
+                {s.fix.label}
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+      {done === steps.length && (
+        <div className="mt-3 text-[11px] text-success">
+          Every gate is clear — the next signal on an Alpaca market routes to the broker.
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Per-market trace of the routing chain, straight from the engine.
+ *
+ * The readiness card above covers the global gates; this covers the per-market
+ * ones the checklist can't see — no candles, already holding, already acted on
+ * this bar, signal fighting the trend, or simply no signal yet. Between them
+ * there is no state where "nothing is happening" has no explanation.
+ */
+function DiagnosticsCard() {
+  const [rows, setRows] = useState<MarketDiag[]>([]);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testMsg, setTestMsg] = useState("");
+
+  async function refresh() {
+    setBusy(true);
+    setErr("");
+    try {
+      setRows(await liveDiagnostics());
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+    }
+    setBusy(false);
+  }
+
+  useEffect(() => {
+    void refresh();
+    const t = setInterval(() => void refresh(), 10_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function test(marketId: string) {
+    setTestMsg("sending…");
+    try {
+      setTestMsg(await sendTestOrder(marketId, 250));
+    } catch (e) {
+      setTestMsg(String(e instanceof Error ? e.message : e));
+    }
+    void refresh();
+  }
+
+  const clear = rows.filter((r) => !r.suppressed);
+
+  return (
+    <Card
+      className="mb-4"
+      title="Per-market trace"
+      right={
+        <Button tone="cyan" className="!px-2 !py-1" disabled={busy} onClick={() => void refresh()}>
+          Refresh
+        </Button>
+      }
+    >
+      {err && <div className="mb-2 text-xs text-danger">{err}</div>}
+      <div className="space-y-1.5">
+        {rows.map((r) => (
+          <div key={r.marketId} className="rounded border border-cyber-border bg-cyber-surface/40 px-2 py-1.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-cyber-text">{r.symbol}</span>
+              <span className="text-cyber-text-faint">{r.price.toFixed(2)}</span>
+              <Badge tone={r.barBacked ? "green" : "neutral"}>{r.bars} bars</Badge>
+              {r.quoteAgeSec > 30 && <Badge tone="red">quote {r.quoteAgeSec}s old</Badge>}
+              {r.hasPosition && <Badge tone="purple">holding</Badge>}
+              <span className="flex-1" />
+              <Button tone="purple" className="!px-2 !py-0.5" onClick={() => void test(r.marketId)}>
+                Test $250
+              </Button>
+            </div>
+            {r.signal && <div className="mt-1 text-success">signal · {r.signal}</div>}
+            <div className={`mt-0.5 ${r.suppressed ? "text-warning" : "text-success"}`}>
+              {r.suppressed ?? "clear — the next signal routes to the broker"}
+            </div>
+          </div>
+        ))}
+        {rows.length === 0 && !err && (
+          <div className="text-xs text-cyber-text-faint">No Alpaca markets in the engine yet.</div>
+        )}
+      </div>
+      {testMsg && <div className="mt-2 text-xs text-cyber-text-dim">{testMsg}</div>}
+      <div className="mt-2 text-[11px] text-cyber-text-faint">
+        {clear.length} of {rows.length} markets are clear to route. <b>Test $250</b> sends one real order through the
+        full path — risk manager, broker, fill — so a wrong key or a closed session surfaces immediately.
+      </div>
+    </Card>
   );
 }
 

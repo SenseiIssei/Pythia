@@ -58,6 +58,11 @@ and any large-language-model of your choice can weigh in on a market.
 - **Sovereign risk manager** — global kill switch, max daily-loss &amp; drawdown breakers, per-strategy
   budgets, fractional-Kelly &amp; volatility-targeted sizing, regime filter, adaptive capital
   allocation, loss-streak cooldowns. Fails closed.
+- **🔬 `npm run validate`** — walk-forward validation on real daily candles, with a **deflated
+  Sharpe ratio** so a strategy that merely survived a parameter search is labelled as such. The
+  backtester fills on the *next* bar's open, checks stops against the bar's high/low, assumes the
+  stop beat the target when a bar contained both, and charges costs on both sides. Most strategies
+  fail; that's the point. Results and caveats: [`docs/VALIDATION.md`](docs/VALIDATION.md).
 - **Research suite** — backtester, Monte-Carlo optimizer, walk-forward validation, analytics, and a
   return-correlation / concentration matrix.
 - **👋 Simple by default** — the app opens on a plain-language view built for
@@ -77,6 +82,18 @@ and any large-language-model of your choice can weigh in on a market.
   runs a read-only credential check that refuses if a venue doesn't answer. Orders that cannot fill
   (market closed, no buying power, would open a short) are refused **before** submission, with the
   reason in the journal.
+- **Alpaca, paper and live kept apart:** separate key slots for the paper and live accounts (each
+  pair only works against its own endpoint, and the order path never borrows the other one).
+  Entries are refused while the market is closed, the account is restricted, the PDT ceiling is
+  reached, or the broker check has gone stale, and **exits never are**. Opt-in **extended hours**
+  (04:00 to 20:00 ET, only while the broker reports the session open) sends whole-share limit
+  orders with a wider band. Entries go out in dollars, exits in shares, whole-share orders as
+  marketable limits, all with idempotent client order ids. A readiness checklist and a per-market
+  routing trace on the Live page say which gate is holding things up, and a one-click test order
+  proves the whole path.
+- **🩺 `npm run preflight`** — one command that names the actual problem, because every live-run
+  failure looks identical from the dashboard: keys, account, session, feed, candle depth, model
+  provider and the live gate, each checked and explained.
 - **An order lifecycle that can't desync** — submit → poll → *cancel at the venue* on timeout.
   Partial fills book as they happen; a repeated poll can't double-book; the daemon reconciles
   against the broker's own position list and **the broker always wins**. A position opened with real
@@ -84,9 +101,13 @@ and any large-language-model of your choice can weigh in on a market.
 - **👛 Wallets — every account, one balance sheet** — broker cash, spot balances across all four
   exchanges, and **watch-only** on-chain addresses on Ethereum, Polygon, Arbitrum, Optimism, Base,
   BNB Chain, Solana and Bitcoin. Read-only by design: Pythia has no field that accepts a private key.
-- **Real market data** — live Kraken crypto prices and Polymarket odds (no keys needed), plus real
-  **Alpaca equity quotes** (AAPL, NVDA, MSFT, AMZN, TSLA) once your Alpaca keys are set, so live
-  equities strategies trade on genuine prices rather than the simulator.
+- **Real market data, and it says which is which** — indicators run on genuine **OHLC candles**
+  (Kraken, no keys; Alpaca once yours are set), not on the tick loop's own random walk. Real quotes
+  don't drift between refreshes, strategies fire once per *closed* bar, stops use true ATR so an
+  overnight gap doesn't sweep them, and every market carries a `real bars` / `sim` badge so a
+  simulated equity curve can never be mistaken for a real one. Live Kraken crypto prices and
+  Polymarket odds need no keys; real **Alpaca equity quotes** (AAPL, NVDA, MSFT, AMZN, TSLA) arrive
+  once your Alpaca keys are set.
 - **Secure by default** — API keys live in the OS keychain (desktop) or the server's environment,
   never in code, never logged, never returned to the UI. Grant them *trade* and not withdrawal, and
   a leaked key costs you a rotation, not your coins. Discord/webhook alerts, persistent state,
@@ -125,7 +146,7 @@ covers the rest. Every model is overridable — type any model id you like.
 
 | Provider | id | Env var | Default model | Notes |
 |---|---|---|---|---|
-| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-8` | Messages API + adaptive thinking |
+| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5` | Messages API · adaptive thinking · structured output · server-side refusal fallback |
 | OpenAI (GPT) | `openai` | `OPENAI_API_KEY` | `gpt-5.6` | Sol; `-terra` / `-luna` tiers |
 | xAI (Grok) | `xai` | `XAI_API_KEY` | `grok-4.5` | |
 | z.ai (GLM) | `zai` | `ZAI_API_KEY` | `glm-5.2` | |
@@ -139,7 +160,28 @@ covers the rest. Every model is overridable — type any model id you like.
 <sub>Defaults track the current flagships (July 2026); every model is overridable — type any model id in the picker.</sub>
 
 Each request returns a structured signal — `{ probability, direction, confidence, rationale }` —
-clamped and stamped with the provider/model that answered.
+clamped and stamped with the provider, the model that answered, the round-trip latency and the
+tokens it cost.
+
+### The live overlay — what a model is actually allowed to do
+
+Beyond the one-off *ask a model* panel, Pythia can run a **background overlay** (off by default)
+that polls your markets and attaches a current view to each one. Its authority is deliberately
+bounded:
+
+| A model view can… | …and cannot |
+|---|---|
+| **Veto** an entry it confidently disagrees with | **Open** a position — ever |
+| **Shrink** an entry it mildly disagrees with | Touch an **exit**, stop or target |
+| **Boost** an agreeing entry, capped at ×1.25 | Bypass the risk manager or the kill switch |
+
+Every order still originates from a rule you can backtest, and still passes the sovereign risk
+manager. That constraint isn't timidity — an LLM can't be walk-forward validated, its behaviour
+shifts between model versions, and it will answer confidently about a market it has no edge on.
+As a multiplier the worst case is a good trade made smaller. As a trigger the worst case is
+unbounded.
+
+Views expire (15 min by default), every call and veto is journaled, and token spend is on screen.
 
 > 🔒 **A model's opinion is advisory until it has earned otherwise.** No model reliably predicts
 > prices. On the Predictions page every source starts at *zero* weight and stays there until its
@@ -180,20 +222,30 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `POST /api/command` | mutate the engine (kill switch, limits, strategies, orders) |
 | `GET /api/llm/providers` | which providers have a key in the server env |
 | `POST /api/llm/signal` | ask a provider for a signal (`{provider, model, context}`) |
-| `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun, venues, timeoutSec}`) |
+| `POST /api/ai/config` | enable/tune the background AI overlay |
+| `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun, venues, timeoutSec, extendedHours}`) |
 | `GET /api/live/account` | Alpaca account check (buying power/status) |
 | `GET /api/live/verify` | read-only credential check for any venue (`?venue=&paper=`) |
+| `GET /api/live/diagnostics` | per-market trace of which live-routing gate stops an Alpaca order |
+| `POST /api/live/test-order` | send one small order through the real path (`{marketId, notional}`) |
 | `GET /api/exchanges` | supported crypto exchanges + which have keys |
 | `GET /api/wallets` | unified balance sheet (broker · exchanges · watched addresses) |
 | `POST /api/forecast/ensemble` | ask every configured model about one market (`{marketId, notes}`) |
 | `POST /api/forecast/config` | forecasting tunables (horizon, costs, bootstrap trust, …) |
+| `GET /api/preflight` | every go-live check in one response (`npm run preflight`) |
+| `GET /api/research/validate` | walk-forward validate every strategy (`npm run validate`) |
 
 Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, any provider key
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), Alpaca for real equity quotes +
-live execution (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `APCA_FEED` — default `iex`, the free
-tier; paid plans can use `sip`), a crypto exchange (`PYTHIA_EXCHANGE` = `kraken|binance|bybit|okx`
-plus `PYTHIA_EXCHANGE_KEY` / `_SECRET` / `_PASSPHRASE`), and optional watch-only addresses in
-`PYTHIA_WALLETS`. See [`.env.example`](.env.example) for the annotated list.
+live execution (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY` for the paper account, `APCA_LIVE_API_KEY_ID`
+/ `APCA_LIVE_API_SECRET_KEY` for the live one, which fall back to the paper pair when unset, and
+`APCA_FEED`: default `iex`, the free tier; paid plans can use `sip`), a crypto exchange
+(`PYTHIA_EXCHANGE` = `kraken|binance|bybit|okx` plus `PYTHIA_EXCHANGE_KEY` / `_SECRET` /
+`_PASSPHRASE`), and optional watch-only addresses in `PYTHIA_WALLETS`. Tuning:
+`PYTHIA_BAR_TIMEFRAME` (default `5Min`), `PYTHIA_SLIPPAGE_BPS` (default `25`),
+`PYTHIA_EXTENDED_HOURS` (default for the extended-hours opt-in when an arm request omits it), and
+the overlay's `PYTHIA_AI_PROVIDER` / `PYTHIA_AI_MODEL` / `PYTHIA_AI_EFFORT` /
+`PYTHIA_AI_INTERVAL_SEC`. See [`.env.example`](.env.example) for the annotated list.
 
 ### Browser / web app (no Rust, no keys — explore the UI)
 

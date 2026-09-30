@@ -6,7 +6,7 @@ import type { Venue } from "../types";
 const venues: (Venue | "all")[] = ["all", "polymarket", "crypto", "alpaca"];
 
 export function Markets() {
-  const { markets, manualOrder } = useStore();
+  const { markets, manualOrder, barBacked } = useStore();
   const [filter, setFilter] = useState<Venue | "all">("all");
   const [notional, setNotional] = useState(500);
   const [flash, setFlash] = useState<string>("");
@@ -72,6 +72,24 @@ export function Markets() {
                   {m.venue.slice(0, 4)}
                 </Badge>
                 <span>{m.symbol}</span>
+                {/*
+                  Whether a price is real or invented is the single most
+                  important fact on this page. A simulated series produces
+                  perfectly plausible indicators and a perfectly meaningless
+                  equity curve, so it gets said out loud on every row rather
+                  than being inferred from whether keys happen to be set.
+                */}
+                <span
+                  title={
+                    barBacked.has(m.id)
+                      ? "Indicators run on real exchange candles"
+                      : "Simulated series — indicators here measure the simulator, not a market"
+                  }
+                >
+                  <Badge tone={barBacked.has(m.id) ? "green" : "neutral"}>
+                    {barBacked.has(m.id) ? "real bars" : "sim"}
+                  </Badge>
+                </span>
                 {m.regime && (
                   <span title={`trend strength ${(m.trendStrength ?? 0).toFixed(2)}`}>
                     <Badge tone={m.regime === "trending" ? "green" : "neutral"}>{m.regime}</Badge>

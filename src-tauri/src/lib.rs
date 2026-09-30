@@ -61,20 +61,55 @@ pub fn run() {
                         (engine, creds, webhook)
                     };
 
+                    // Market-data credentials for the selected endpoint, from
+                    // the cached set (refreshed whenever keys are saved), so
+                    // keys added in Settings take effect without a restart.
+                    let paper = engine.lock().unwrap().live_config().paper;
+                    let alpaca_keys = || commands::alpaca_data_keys(&creds, paper);
+
                     // Refresh real read-only feeds periodically (and on first tick).
                     if n % 8 == 1 {
                         let kraken = marketdata::fetch_kraken().await;
                         let poly = marketdata::fetch_polymarket().await;
                         // Real equity quotes when Alpaca keys are in the vault
                         // (otherwise those markets stay on the simulator).
-                        let alpaca = match &creds.alpaca {
-                            Some((id, secret)) => marketdata::fetch_alpaca(id, secret, "iex").await,
-                            None => vec![],
-                        };
+                        let (id, secret) = alpaca_keys();
+                        let feed = commands::get_prefs().alpaca_feed;
+                        let alpaca = marketdata::fetch_alpaca(&id, &secret, &feed).await;
                         let mut e = engine.lock().unwrap();
                         e.apply_kraken(&kraken);
                         e.apply_polymarket(&poly);
                         e.apply_alpaca(&alpaca);
+                    }
+
+                    // Candle history — the series indicators actually run on.
+                    // Without this every EMA and RSI is measuring the tick
+                    // loop's own random walk rather than the market.
+                    if n % 40 == 1 {
+                        let (id, secret) = alpaca_keys();
+                        let p = commands::get_prefs();
+                        let mut series =
+                            marketdata::fetch_kraken_bars(p.kraken_interval()).await;
+                        series.extend(
+                            marketdata::fetch_alpaca_bars(
+                                &id,
+                                &secret,
+                                &p.alpaca_feed,
+                                &p.bar_timeframe,
+                                10,
+                            )
+                            .await,
+                        );
+                        if !series.is_empty() {
+                            engine.lock().unwrap().apply_bars(&series);
+                        }
+                    }
+
+                    // Session + account state. Live equity entries are blocked
+                    // until this is fresh, so it must beat the engine's
+                    // five-minute staleness window comfortably.
+                    if n % 40 == 1 {
+                        commands::refresh_broker_status(&handle).await;
                     }
 
                     let (dto, queued) = {
@@ -92,6 +127,9 @@ pub fn run() {
                     }
 
                     // Submit new live orders and poll the ones already out.
+                    // Submission returns on the venue's acknowledgement and a
+                    // poll is one request per order, so this never stalls the
+                    // tick loop the way a blocking wait-for-fill would.
                     execution::cycle(&engine, &creds).await;
 
                     // Reconcile against the broker every ~2 minutes — the only
@@ -104,6 +142,23 @@ pub fn run() {
                     // Checkpoint to disk periodically (~every 60s).
                     if n % 40 == 0 {
                         persist::save(&handle);
+                    }
+                }
+            });
+
+            // The AI overlay, on its own clock so a slow model call can never
+            // delay a tick, a stop check, or an order. Idle and free until the
+            // overlay is switched on from the AI Signals page.
+            let ai_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut cursor: usize = 0;
+                loop {
+                    // Re-read each pass so a changed interval takes effect
+                    // without a restart.
+                    let secs = commands::get_prefs().ai_interval_sec;
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    if commands::ai_overlay_pass(&ai_handle, cursor).await {
+                        cursor = cursor.wrapping_add(1);
                     }
                 }
             });
@@ -129,7 +184,10 @@ pub fn run() {
             commands::llm_signal,
             commands::set_live,
             commands::live_verify,
+            commands::set_ai_policy,
             commands::alpaca_account,
+            commands::live_diagnostics,
+            commands::send_test_order,
             commands::exchanges,
             commands::save_exchange_keys,
             commands::clear_exchange_keys,
@@ -139,6 +197,9 @@ pub fn run() {
             commands::run_ensemble,
             commands::forecast_config,
             commands::set_forecast_config,
+            commands::get_prefs,
+            commands::save_prefs,
+            commands::test_llm_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pythia");

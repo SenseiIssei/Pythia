@@ -198,11 +198,39 @@ export interface LlmSignal {
   direction: LlmDirection;
   confidence: number;
   rationale: string;
+  /** Forecast protocol only: the reference-class rate, committed to first. */
+  baseRate?: number;
+  keyDrivers?: string[];
+  evidenceFor?: string[];
+  evidenceAgainst?: string[];
   provider: string;
   model: string;
+  /** Round-trip latency; a signal that arrives after its bar is visibly late. */
+  latencyMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  /** Which model actually answered (differs from `model` after a server-side fallback). */
+  servedBy?: string;
 }
 
 // ── live execution ───────────────────────────────────────────────────────────
+/** What the broker (Alpaca) says about the session and the account. */
+export interface BrokerStatus {
+  marketOpen: boolean;
+  /** Inside the pre-market / after-hours session (~04:00–20:00 ET). */
+  extendedOpen: boolean;
+  /** Exchange-local end of today's extended session, when one is running. */
+  sessionEnd?: string;
+  nextOpen?: string;
+  /** FINRA pattern-day-trader ceiling reached (3 day trades / 5 sessions under $25k). */
+  dayTradeLimitReached: boolean;
+  /** Set when the account itself refuses orders (blocked, not yet active…). */
+  restricted?: string;
+  equity: number;
+  buyingPower: number;
+  checkedAt: number;
+}
+
 export interface LiveStatus {
   armed: boolean;
   paper: boolean;
@@ -213,10 +241,19 @@ export interface LiveStatus {
   timeoutSec: number;
   /** Venues with usable credentials in this runtime. */
   connected: Venue[];
+  /** Alpaca entries allowed during the pre-market / after-hours session. */
+  extendedHours: boolean;
   alpacaConnected: boolean;
   pending: number;
   /** Positions held via a real venue fill — these cannot be closed by the simulator. */
   livePositions: number;
+  broker?: BrokerStatus;
+  /**
+   * Why a live Alpaca *entry* would be refused right now. `undefined` means the
+   * path is clear. Surfaced so an armed engine placing no trades explains itself
+   * instead of looking broken.
+   */
+  blockedReason?: string;
 }
 
 /** What the arm flow sends. Mirrors the Rust `LiveConfig`. */
@@ -226,6 +263,38 @@ export interface LiveConfig {
   dryRun: boolean;
   venues: Venue[];
   timeoutSec: number;
+  /** Opt-in for the pre/post-market session; used only when the broker reports one running. */
+  extendedHours: boolean;
+}
+
+/** One model's view of one market. Advisory only — see `AiPolicy`. */
+export interface AiView {
+  marketId: string;
+  direction: "long" | "short" | "neutral";
+  probability: number;
+  confidence: number;
+  rationale: string;
+  model: string;
+  ts: number;
+  latencyMs: number;
+}
+
+/**
+ * How much authority the AI overlay has. A model may shrink or veto a trade the
+ * rules already decided to make; it can never originate one.
+ */
+export interface AiPolicy {
+  enabled: boolean;
+  ttlSec: number;
+  vetoConfidence: number;
+  maxBoost: number;
+}
+
+export interface AiSpend {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  errors: number;
 }
 
 // ── forecasting ──────────────────────────────────────────────────────────────
