@@ -1,6 +1,7 @@
-import type { StrategyConfig, Market } from "../types";
+import type { CostVenue, Market, PnlBreakdown, StrategyConfig } from "../types";
 import { runStrategy } from "./strategies";
 import * as ind from "./indicators";
+import { breakdown, costVenueFor, modelFor, scaled, slippageBps } from "./costs";
 
 // A self-contained, deterministic walk-forward backtester. It reuses the exact
 // live strategy signal logic (`runStrategy`) over a synthetic price series, so a
@@ -20,6 +21,8 @@ export interface BacktestResult {
   winRate: number;
   profitFactor: number;
   equityCurve: number[];
+  /** Gross, costs and net in dollars on the $10,000 starting balance. */
+  pnl: PnlBreakdown;
 }
 
 export interface BacktestOpts {
@@ -30,8 +33,15 @@ export interface BacktestOpts {
   vol?: number;
   stopAtr?: number;
   tpAtr?: number;
-  feeBps?: number;
+  /** Whose costs to charge (config/costs.json). Defaults to Kraken. */
+  costVenue?: CostVenue;
+  /** Instrument for per-symbol cost overrides, e.g. "BTC/USD". */
+  symbol?: string;
+  /** Multiplier on every cost: 0 is frictionless, 2 and 3 are stress tests. */
+  costMult?: number;
 }
+
+const EMPTY_PNL: PnlBreakdown = { gross: 0, costs: 0, net: 0, costHeavy: false };
 
 // mulberry32 — a small deterministic PRNG (seed → reproducible series)
 function rng(seed: number): () => number {
@@ -75,7 +85,8 @@ export interface Signal {
  */
 export function simulate(series: number[], signalAt: (hist: number[], price: number) => Signal | null, opts: BacktestOpts = {}): BacktestResult {
   const bars = series.length;
-  const fee = (opts.feeBps ?? 6) / 10000;
+  const model = scaled(modelFor(opts.costVenue ?? "kraken", opts.symbol ?? "BTC/USD"), opts.costMult ?? 1);
+  const fee = model.takerBps / 10_000;
   const stopAtr = opts.stopAtr ?? 3;
   const tpAtr = opts.tpAtr ?? 5;
 
@@ -93,10 +104,26 @@ export function simulate(series: number[], signalAt: (hist: number[], price: num
   let grossWin = 0;
   let grossLoss = 0;
   let trades = 0;
+  // What the same trades would have made at reference prices, and what they paid.
+  let gross = 0;
+  let costs = 0;
 
-  const closePos = (price: number) => {
+  // Fill against `price` crossing the spread: buys pay up, sells receive less.
+  const fillAt = (price: number, side: "buy" | "sell", notional: number) => {
+    const slip = slippageBps(model, notional) / 10_000;
+    return side === "buy" ? price * (1 + slip) : price * (1 - slip);
+  };
+  let refEntry = 0;
+
+  const closePos = (ref: number) => {
+    const price = fillAt(ref, pos > 0 ? "sell" : "buy", Math.abs(pos * ref));
     const pnl = (price - entry) * pos;
-    cash += pnl - Math.abs(pos * price) * fee;
+    const exitFee = Math.abs(pos * price) * fee;
+    cash += pnl - exitFee;
+    const grossPnl = (ref - refEntry) * pos;
+    gross += grossPnl;
+    // Everything between the reference-price trade and the real one is cost.
+    costs += grossPnl - pnl + exitFee;
     if (pnl >= 0) {
       wins++;
       grossWin += pnl;
@@ -125,8 +152,11 @@ export function simulate(series: number[], signalAt: (hist: number[], price: num
         const atr = ind.atrProxy(hist, 14) ?? 0;
         const notional = equity * 0.2 * sig.size;
         pos = (sig.side === "buy" ? 1 : -1) * (notional / price);
-        entry = price;
-        cash -= Math.abs(pos * price) * fee;
+        refEntry = price;
+        entry = fillAt(price, sig.side, notional);
+        const entryFee = Math.abs(pos * entry) * fee;
+        cash -= entryFee;
+        costs += entryFee;
         if (atr > 0) {
           stop = sig.side === "buy" ? price - stopAtr * atr : price + stopAtr * atr;
           target = sig.side === "buy" ? price + tpAtr * atr : price - tpAtr * atr;
@@ -137,7 +167,10 @@ export function simulate(series: number[], signalAt: (hist: number[], price: num
       }
     }
 
-    equity = cash + pos * price;
+    // `cash` holds realised P&L, not the position's notional, so an open
+    // position adds only its unrealised P&L. Adding `pos * price` counted the
+    // whole notional as profit for as long as the position was open.
+    equity = cash + pos * (price - entry);
     equityCurve.push(equity);
     if (equity > peak) peak = equity;
     maxDD = Math.max(maxDD, ((peak - equity) / peak) * 100);
@@ -156,17 +189,41 @@ export function simulate(series: number[], signalAt: (hist: number[], price: num
   const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 99 : 0;
   const winRate = trades > 0 ? wins / trades : 0;
 
-  return { ok: true, bars, trades, totalReturnPct, sharpe, maxDrawdownPct: maxDD, winRate, profitFactor, equityCurve };
+  return {
+    ok: true,
+    bars,
+    trades,
+    totalReturnPct,
+    sharpe,
+    maxDrawdownPct: maxDD,
+    winRate,
+    profitFactor,
+    equityCurve,
+    pnl: breakdown(gross, costs),
+  };
 }
 
 export function backtest(cfg: StrategyConfig, opts: BacktestOpts = {}): BacktestResult {
-  const empty = { bars: 0, trades: 0, totalReturnPct: 0, sharpe: 0, maxDrawdownPct: 0, winRate: 0, profitFactor: 0, equityCurve: [] };
+  const empty = {
+    bars: 0,
+    trades: 0,
+    totalReturnPct: 0,
+    sharpe: 0,
+    maxDrawdownPct: 0,
+    winRate: 0,
+    profitFactor: 0,
+    equityCurve: [],
+    pnl: EMPTY_PNL,
+  };
   if (cfg.kind === "pairs" || cfg.kind === "prob-edge" || cfg.kind === "manual" || cfg.kind === "arb") {
     return { ok: false, message: `${cfg.kind} needs multi-asset/model inputs — not in the single-asset backtester`, ...empty };
   }
   const bars = opts.bars ?? 1500;
   const marketId = cfg.universe[0] ?? "crypto:BTC/USD";
   const series = syntheticSeries(bars, opts.startPrice ?? 100, opts.drift ?? 0.0002, opts.vol ?? 0.015, opts.seed ?? 12345);
+  // Charge the costs of the venue and instrument this strategy actually trades.
+  const symbol = marketId.split(":")[1] ?? marketId;
+  opts = { costVenue: costVenueFor(cfg.venueClass, opts.costVenue), symbol, ...opts };
   return simulate(
     series,
     (hist, price) => {

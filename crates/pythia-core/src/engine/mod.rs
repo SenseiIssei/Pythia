@@ -9,8 +9,10 @@ pub mod risk;
 pub mod strategies;
 
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
+use crate::costs::{self, CostModel, CostVenue};
 use crate::execution::bandit;
 use crate::forecast::{self, calibration, coherence, track};
+use crate::validation;
 use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -172,6 +174,13 @@ pub struct Order {
     pub mode: Mode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reject_reason: Option<String>,
+    /// Live fills only: fill price against the arrival price, in bps, signed so
+    /// positive means it cost us.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realised_slippage_bps: Option<f64>,
+    /// Live fills only: what the cost model expected that to be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modelled_slippage_bps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +226,57 @@ pub struct StrategyConfig {
     pub equity_curve: Vec<f64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub rules: Option<composed::Composed>, // only for kind == Composed
+    /// What this strategy has paid to trade, and the forward-test evidence the
+    /// Strategy Passport is judged on.
+    #[serde(default)]
+    pub ledger: StrategyLedger,
+}
+
+/// Costs and forward-test record for one strategy.
+///
+/// `StrategyConfig::pnl` is realised P&L at the actual fill prices, so it
+/// already has slippage in it and no fees taken out. The engine also tracks
+/// every position at reference prices (the quote before execution costs), so
+/// the strategy can be shown as gross, costs and net that describe the same
+/// closed trades (see [`StrategyLedger::breakdown`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyLedger {
+    /// Fees paid, in quote currency.
+    pub fees: f64,
+    /// Slippage paid against the reference price on every fill so far, open
+    /// positions included, in quote currency. Live fills can make this go
+    /// down: a fill better than arrival is negative slippage.
+    pub slippage: f64,
+    /// Realised P&L of the same trades at reference prices: what they would
+    /// have made with no fees, spread or impact.
+    #[serde(default)]
+    pub gross: f64,
+    /// Gross, costs and net in quote currency, kept in step with `fees`,
+    /// `slippage` and the strategy's realised P&L.
+    pub pnl: crate::costs::PnlBreakdown,
+    /// When the paper forward test started (epoch ms). Set the first time the
+    /// strategy runs in paper or live, never reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paper_since: Option<i64>,
+    /// Closed paper trades on markets with real prices. Trades on the demo
+    /// simulator are not evidence of anything and are not counted.
+    pub forward_trades: u32,
+    /// Closed trades filled for real at a venue (paper endpoint included).
+    pub live_trades: u32,
+}
+
+impl StrategyLedger {
+    /// Gross, costs and net for a realised P&L at fill prices.
+    ///
+    /// `gross` is the closed trades at reference prices, `net` is the realised
+    /// P&L at fill prices minus every fee paid, and costs are the difference:
+    /// the slippage on closed trades plus fees. Fees are booked when paid, so an
+    /// open position's entry fee shows up before its P&L does.
+    pub fn breakdown(&self, realised_pnl: f64) -> crate::costs::PnlBreakdown {
+        let net = realised_pnl - self.fees;
+        crate::costs::PnlBreakdown::new(self.gross, self.gross - net)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -588,6 +648,10 @@ struct InFlight {
     arrival: f64,
     style: bandit::ExecStyle,
     exec_ctx: bandit::ExecContext,
+    /// Whose costs apply, and what the cost model expected this order's
+    /// slippage to be. Compared against the realised number when it finishes.
+    cost_venue: CostVenue,
+    modelled_bps: f64,
 }
 
 /// The full state pushed to the UI every tick.
@@ -633,6 +697,19 @@ pub struct EngineState {
     pub execution: Vec<bandit::PolicyRow>,
     #[serde(default)]
     pub adaptive_execution: bool,
+    /// Realised against modelled slippage per venue, once there are live fills.
+    #[serde(default)]
+    pub slippage: Vec<bandit::SlippageRow>,
+    /// Whose costs `Venue::Crypto` is charged.
+    #[serde(default = "default_crypto_venue")]
+    pub crypto_cost_venue: CostVenue,
+    /// The Strategy Passport of every strategy: the eight validation gates.
+    #[serde(default)]
+    pub passports: Vec<validation::Passport>,
+}
+
+fn default_crypto_venue() -> CostVenue {
+    CostVenue::Kraken
 }
 
 /// Headline numbers for the forecasting layer.
@@ -693,6 +770,12 @@ pub struct Persisted {
     /// never gets past exploring.
     #[serde(default)]
     pub exec_policy: bandit::ExecPolicy,
+    /// Cached validation gates 1 to 6 per strategy.
+    #[serde(default)]
+    pub research: HashMap<String, validation::ResearchVerdict>,
+    /// Reference-price entry per open position, for the gross line.
+    #[serde(default)]
+    pub ref_prices: HashMap<String, f64>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -803,6 +886,15 @@ pub struct Engine {
     /// Learns how hard to push on each order from its own realised slippage.
     /// Ships disabled — every order crosses until the operator turns it on.
     exec_policy: bandit::ExecPolicy,
+    /// Which exchange's costs apply to `Venue::Crypto`. The engine is
+    /// exchange-agnostic; the host says which one executes.
+    crypto_venue: CostVenue,
+    /// Validation gates 1 to 6 per strategy, computed on request by the host
+    /// (they need candle history) and kept against the parameters they judged.
+    research: HashMap<String, validation::ResearchVerdict>,
+    /// Average entry per open position at reference prices (before execution
+    /// costs), for the gross line. Missing means "same as the fill price".
+    ref_prices: HashMap<String, f64>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -867,10 +959,19 @@ impl Engine {
             llm_opinions: HashMap::new(),
             actionable: HashSet::new(),
             exec_policy: bandit::ExecPolicy::default(),
+            crypto_venue: CostVenue::Kraken,
+            research: HashMap::new(),
+            ref_prices: HashMap::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
         };
+        let now = e.now();
+        for s in e.strategies.iter_mut() {
+            if s.state != StrategyState::Paused {
+                s.ledger.paper_since = Some(now);
+            }
+        }
         e.log(JournalKind::System, "Pythia engine started · balance $100,000 (paper)".into(), None, None);
         e
     }
@@ -1685,27 +1786,74 @@ impl Engine {
         self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
     }
 
-    /// Paper fill: simulate slippage + fee against `price`, then settle.
+    /// The cost venue for a market: its own venue, or for crypto the exchange
+    /// the host says executes.
+    fn cost_venue(&self, m: &Market) -> CostVenue {
+        CostVenue::for_venue(m.venue, Some(self.crypto_venue))
+    }
+
+    /// The cost model for one market, from `config/costs.json`.
+    pub fn cost_model(&self, m: &Market) -> CostModel {
+        costs::model_for(self.cost_venue(m), &m.symbol)
+    }
+
+    /// Paper fill: cross the spread and pay the taker fee the cost model says
+    /// this venue charges, then settle.
     fn fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
-        let slip = if side == Side::Buy { 1.0008 } else { 0.9992 };
-        let fill_price = price * slip;
-        let fee = fill_price * qty * 0.0006;
-        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, false, true);
+        let (fill_price, fee) = paper_fill(&self.cost_model(m), m.kind, side, qty, price);
+        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, price, false, true);
     }
 
     /// Apply a fill (paper or live) to positions, cash, P&L and strategy stats.
     /// `live` marks a real fill — its position's exits must also route live.
     /// `emit_order` inserts a fresh Filled order (the paper path); live fills
     /// instead update their existing pending order in [`Engine::apply_live_update`].
+    /// `reference` is the price before execution costs: the quote a paper fill
+    /// slipped from, or a live order's arrival price. The same position is
+    /// tracked at reference prices alongside the real one, which is what makes
+    /// the strategy's gross line (see [`StrategyLedger`]).
     #[allow(clippy::too_many_arguments)]
-    fn settle_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, fill_price: f64, fee: f64, live: bool, emit_order: bool) {
+    fn settle_fill(
+        &mut self,
+        strat_idx: usize,
+        m: &Market,
+        side: Side,
+        qty: f64,
+        fill_price: f64,
+        fee: f64,
+        reference: f64,
+        live: bool,
+        emit_order: bool,
+    ) {
         let sid = self.strategies[strat_idx].id.clone();
         let signed = if side == Side::Buy { qty } else { -qty };
+        {
+            // Positive when the fill was worse than the reference price.
+            let l = &mut self.strategies[strat_idx].ledger;
+            l.fees += fee.max(0.0);
+            l.slippage += signed * (fill_price - reference);
+        }
+        // A closed trade on a real price is forward-test evidence; one on the
+        // demo simulator is not evidence of anything.
+        let real_price = self.real_ids.contains(&m.id) || self.bar_backed.contains(&m.id);
         let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
 
         // update / open position, realizing P&L on reductions
         let key = m.id.clone();
         let mut realized = 0.0;
+        // The same position at reference prices, for the gross line.
+        let ref_avg = self.ref_prices.get(&key).copied();
+        if let Some(pos) = self.positions.get(&key) {
+            let (q, avg, gross) = apply_fill(pos.qty, ref_avg.unwrap_or(pos.avg_price), signed, reference);
+            self.strategies[strat_idx].ledger.gross += gross;
+            if q.abs() < 1e-9 {
+                self.ref_prices.remove(&key);
+            } else {
+                self.ref_prices.insert(key.clone(), avg);
+            }
+        } else {
+            self.ref_prices.insert(key.clone(), reference);
+        }
         match self.positions.get_mut(&key) {
             None => {
                 self.positions.insert(
@@ -1724,19 +1872,21 @@ impl Engine {
                 );
             }
             Some(pos) => {
-                let new_qty = pos.qty + signed;
-                if pos.qty == 0.0 || pos.qty.signum() == new_qty.signum() {
-                    let total = pos.avg_price * pos.qty.abs() + fill_price * signed.abs();
-                    pos.avg_price = if new_qty.abs() > 0.0 { total / new_qty.abs() } else { fill_price };
-                } else {
-                    let closed = signed.abs().min(pos.qty.abs());
-                    let dir = if pos.qty > 0.0 { 1.0 } else { -1.0 };
-                    realized = (fill_price - pos.avg_price) * closed * dir;
-                }
+                let was = pos.qty;
+                let (new_qty, new_avg, r) = apply_fill(pos.qty, pos.avg_price, signed, fill_price);
+                realized = r;
+                pos.avg_price = new_avg;
                 if new_qty.abs() < 1e-9 {
                     self.positions.remove(&key);
                 } else {
                     pos.qty = new_qty;
+                    // Flipped through zero: the remainder is a new position at
+                    // this fill, and the old stops belonged to the other side.
+                    if was != 0.0 && new_qty.signum() != was.signum() {
+                        pos.stop = new_stop;
+                        pos.target = new_target;
+                        pos.trail_ref = fill_price;
+                    }
                 }
             }
         }
@@ -1754,6 +1904,11 @@ impl Engine {
                 s.trades += 1;
                 let wins = s.win_rate * (s.trades - 1) as f64 + if realized >= 0.0 { 1.0 } else { 0.0 };
                 s.win_rate = wins / s.trades as f64;
+                if live {
+                    s.ledger.live_trades += 1;
+                } else if real_price {
+                    s.ledger.forward_trades += 1;
+                }
             }
             // profit factor
             if realized >= 0.0 {
@@ -1808,6 +1963,13 @@ impl Engine {
             if s.equity_curve.len() > 200 {
                 s.equity_curve.remove(0);
             }
+        }
+        {
+            let s = &mut self.strategies[strat_idx];
+            s.ledger.pnl = s.ledger.breakdown(s.pnl);
+        }
+        if !self.positions.contains_key(&key) {
+            self.ref_prices.remove(&key);
         }
 
         if emit_order {
@@ -1901,6 +2063,13 @@ impl Engine {
         };
         let style = self.exec_policy.choose(&exec_ctx);
         let patience_bps = self.exec_policy.patience_bps();
+        // What the cost model expects this order to lose against arrival. A
+        // resting order is not expected to pay the spread at all.
+        let cost_venue = self.cost_venue(m);
+        let modelled_bps = match style {
+            bandit::ExecStyle::Cross => self.cost_model(m).slippage_bps(qty * price, None),
+            bandit::ExecStyle::Join | bandit::ExecStyle::Passive => 0.0,
+        };
 
         let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
         let order_id = order.id.clone();
@@ -1923,6 +2092,8 @@ impl Engine {
                 arrival: price,
                 style,
                 exec_ctx,
+                cost_venue,
+                modelled_bps,
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -2079,6 +2250,18 @@ impl Engine {
     /// right now, or `None` when it would. Walks the same gates `route_fill`
     /// applies, so the button refuses with a reason instead of silently
     /// paper-filling.
+    /// Size of the one-click connection test: twice the venue's minimum order
+    /// from the cost model (so rounding cannot push it under), at least $5.
+    /// The test proves the pipeline, not a strategy, so it should risk as
+    /// little as the venue allows.
+    pub fn connection_test_notional(&self, market_id: &str) -> f64 {
+        self.markets
+            .iter()
+            .find(|m| m.id == market_id)
+            .map(|m| (self.cost_model(m).min_notional * 2.0).max(5.0))
+            .unwrap_or(5.0)
+    }
+
     pub fn test_order_block(&self, market_id: &str) -> Option<String> {
         let Some(m) = self.markets.iter().find(|m| m.id == market_id) else {
             return Some(format!("unknown market {market_id}"));
@@ -2312,6 +2495,64 @@ impl Engine {
         self.exec_policy.enabled
     }
 
+    /// Tell the engine which exchange executes `Venue::Crypto`, so paper fills
+    /// and the cost comparison use that exchange's fees. `None` keeps Kraken.
+    pub fn set_crypto_cost_venue(&mut self, venue: Option<CostVenue>) {
+        self.crypto_venue = venue.unwrap_or(CostVenue::Kraken);
+    }
+
+    pub fn crypto_cost_venue(&self) -> CostVenue {
+        self.crypto_venue
+    }
+
+    /// Realised against modelled slippage, per venue with live fills.
+    pub fn slippage_report(&self) -> Vec<bandit::SlippageRow> {
+        self.exec_policy.slippage_report()
+    }
+
+    /// One strategy's configuration, for research runs off the engine lock.
+    pub fn strategy_config(&self, id: &str) -> Option<StrategyConfig> {
+        self.strategies.iter().find(|s| s.id == id).cloned()
+    }
+
+    /// The backtest settings a strategy is researched with: its venue's costs,
+    /// its calendar, and the regime filter exactly as the engine applies it.
+    pub fn research_bt(&self, cfg: &StrategyConfig) -> crate::research::backtest::BacktestConfig {
+        crate::research::bt_for(cfg, self.crypto_venue, self.limits.regime_filter)
+    }
+
+    /// Keep freshly computed validation gates 1 to 6 for a strategy.
+    pub fn store_research(&mut self, verdict: validation::ResearchVerdict) {
+        let id = verdict.strategy_id.clone();
+        let passed = verdict.gates.iter().filter(|g| g.passed()).count();
+        self.research.insert(id.clone(), verdict);
+        self.log(
+            JournalKind::System,
+            format!("Validation checks for {id}: {passed} of 6 research gates passed"),
+            Some(id),
+            None,
+        );
+    }
+
+    /// The Strategy Passport for one strategy.
+    pub fn passport(&self, id: &str) -> Option<validation::Passport> {
+        self.strategies.iter().find(|s| s.id == id).map(|s| self.passport_for(s))
+    }
+
+    fn passport_for(&self, s: &StrategyConfig) -> validation::Passport {
+        let venue = CostVenue::for_venue(s.venue_class, Some(self.crypto_venue));
+        let slippage = self.exec_policy.slippage_for(venue.id());
+        let forward = validation::ForwardRecord {
+            paper_since: s.ledger.paper_since,
+            trades: s.ledger.forward_trades,
+            equities: s.venue_class == Venue::Alpaca,
+            now: self.now(),
+            slippage: slippage.clone(),
+        };
+        let live = validation::LiveRecord { trades: s.ledger.live_trades, slippage };
+        validation::passport(s, self.research.get(&s.id), &forward, &live)
+    }
+
     /// What the execution policy has learned so far.
     pub fn execution_report(&self) -> Vec<bandit::PolicyRow> {
         self.exec_policy.report()
@@ -2385,9 +2626,12 @@ impl Engine {
                         .position(|s| s.id == f.strategy_id)
                         .unwrap_or_else(|| self.ensure_manual_strategy());
                     let fee_delta = (update.fee - f.booked_fee).max(0.0);
+                    // Reference is the arrival price, so a fill better than
+                    // arrival books negative slippage.
                     // emit_order = false: the pending order row already exists
                     // and is updated below rather than duplicated.
-                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, true, false);
+                    let reference = if f.arrival > 0.0 { f.arrival } else { price };
+                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, reference, true, false);
                     self.log(
                         JournalKind::Fill,
                         format!("LIVE FILL {:?} {delta:.6} {} @ {price:.4}", f.side, m.symbol),
@@ -2434,7 +2678,23 @@ impl Engine {
         // realised slippage against the price at decision time, or a penalty
         // when nothing filled.
         let realised = update.avg_price.filter(|p| *p > 0.0 && update.filled_qty > 0.0);
-        self.exec_policy.observe(&f.exec_ctx, f.style, f.side, f.arrival, realised);
+        // The same observation also lands in the realised-versus-modelled
+        // slippage record, next to what the cost model expected.
+        let now = self.now();
+        let realised_bps = self.exec_policy.observe_against_model(
+            &f.exec_ctx,
+            f.style,
+            f.side,
+            f.arrival,
+            realised,
+            f.cost_venue.id(),
+            f.modelled_bps,
+            now,
+        );
+        if let (Some(bps), Some(ord)) = (realised_bps, self.orders.iter_mut().find(|x| x.id == order_id)) {
+            ord.realised_slippage_bps = Some(bps);
+            ord.modelled_slippage_bps = Some(f.modelled_bps);
+        }
 
         if update.filled_qty <= 0.0 {
             let reason = format!("{} ({})", update.status_word(), update.raw_status);
@@ -2512,6 +2772,8 @@ impl Engine {
                     p.stop = 0.0;
                     p.target = 0.0;
                     p.trail_ref = avg;
+                    // The broker's average is the only entry we know now.
+                    self.ref_prices.remove(&market_id);
                     changes += 1;
                     self.log(
                         JournalKind::Risk,
@@ -2558,6 +2820,7 @@ impl Engine {
             .collect();
         for id in vanished {
             self.positions.remove(&id);
+            self.ref_prices.remove(&id);
             changes += 1;
             self.log(
                 JournalKind::Risk,
@@ -2659,14 +2922,25 @@ impl Engine {
             profit_factor: 0.0,
             equity_curve: vec![0.0],
             rules: None,
+            ledger: StrategyLedger::default(),
         });
         self.strategies.len() - 1
     }
 
     /// Add a strategy at runtime (e.g. a composed strategy deployed from the UI).
-    pub fn add_strategy(&mut self, cfg: StrategyConfig) {
+    pub fn add_strategy(&mut self, mut cfg: StrategyConfig) {
         if self.strategies.iter().any(|s| s.id == cfg.id) {
             return;
+        }
+        // A deployed strategy starts with a clean record, whatever the caller
+        // sent: costs and forward-test evidence are earned here, not imported.
+        cfg.ledger = StrategyLedger::default();
+        // A new strategy has no passport, so it cannot arrive live.
+        if cfg.state == StrategyState::Live {
+            cfg.state = StrategyState::Paper;
+        }
+        if cfg.state != StrategyState::Paused {
+            cfg.ledger.paper_since = Some(self.now());
         }
         let (name, id) = (cfg.name.clone(), cfg.id.clone());
         self.strategies.push(cfg);
@@ -2683,9 +2957,37 @@ impl Engine {
         self.limits = next;
         self.log(JournalKind::Risk, "Risk limits updated".into(), None, None);
     }
-    pub fn set_strategy_state(&mut self, id: &str, state: StrategyState) {
+    /// Pause, paper-trade or arm a strategy.
+    ///
+    /// Live is refused until the strategy's passport shows gates 1 to 7 green
+    /// (`PROFIT-PLAN.md` §2), and the refusal says which gate and why. The
+    /// one-click connection test on the Live page is not a strategy and does
+    /// not go through here.
+    pub fn set_strategy_state(&mut self, id: &str, state: StrategyState) -> Result<(), String> {
+        if state == StrategyState::Live {
+            let Some(s) = self.strategies.iter().find(|s| s.id == id) else {
+                return Err(format!("unknown strategy {id}"));
+            };
+            let pp = self.passport_for(s);
+            if !pp.live_ready {
+                let why = pp.blocked_reason.unwrap_or_else(|| "the validation gates are not green".into());
+                let name = s.name.clone();
+                self.log(JournalKind::Reject, format!("{name} stays off live. {why}"), Some(id.to_string()), None);
+                return Err(why);
+            }
+        }
+        self.apply_strategy_state(id, state);
+        Ok(())
+    }
+
+    /// The state change itself, after any gate has been checked.
+    fn apply_strategy_state(&mut self, id: &str, state: StrategyState) {
+        let now = self.now();
         if let Some(s) = self.strategies.iter_mut().find(|s| s.id == id) {
             s.state = state;
+            if state != StrategyState::Paused && s.ledger.paper_since.is_none() {
+                s.ledger.paper_since = Some(now);
+            }
             let name = s.name.clone();
             self.log(JournalKind::System, format!("Strategy {name} → {state:?}"), Some(id.to_string()), None);
         }
@@ -2788,6 +3090,8 @@ impl Engine {
             forecast_store: self.forecast_store.clone(),
             forecast_cfg: Some(self.forecast_cfg.clone()),
             exec_policy: self.exec_policy.clone(),
+            research: self.research.clone(),
+            ref_prices: self.ref_prices.clone(),
         }
     }
 
@@ -2821,6 +3125,16 @@ impl Engine {
         if !p.strategies.is_empty() {
             self.strategies = p.strategies;
         }
+        // A save from before the forward-test clock existed starts it now:
+        // there is no record of how long it ran before, and guessing would be
+        // crediting time that was never observed.
+        let now = self.now();
+        for s in self.strategies.iter_mut() {
+            if s.state != StrategyState::Paused && s.ledger.paper_since.is_none() {
+                s.ledger.paper_since = Some(now);
+            }
+            s.ledger.pnl = s.ledger.breakdown(s.pnl);
+        }
         self.orders = p.orders;
         self.journal = p.journal;
         self.limits = p.limits;
@@ -2835,7 +3149,27 @@ impl Engine {
             self.forecast_cfg = cfg;
         }
         self.exec_policy = p.exec_policy;
+        self.research = p.research;
+        self.ref_prices = p.ref_prices;
         self.log(JournalKind::System, "Restored saved state from disk".into(), None, None);
+        // A strategy saved as Live keeps that switch only if its passport still
+        // allows it. Saves from before the gates existed, or a strategy whose
+        // parameters changed since its checks, go back to paper and say why.
+        let demote: Vec<(String, String)> = self
+            .strategies
+            .iter()
+            .filter(|s| s.state == StrategyState::Live)
+            .filter_map(|s| {
+                let pp = self.passport_for(s);
+                (!pp.live_ready).then(|| (s.id.clone(), pp.blocked_reason.unwrap_or_default()))
+            })
+            .collect();
+        for (id, why) in demote {
+            if let Some(s) = self.strategies.iter_mut().find(|s| s.id == id) {
+                s.state = StrategyState::Paper;
+            }
+            self.log(JournalKind::Risk, format!("{id} restored as PAPER, not live. {why}"), Some(id.clone()), None);
+        }
         if resolved > 0 {
             self.log(
                 JournalKind::System,
@@ -2929,6 +3263,9 @@ impl Engine {
             },
             execution: self.exec_policy.report(),
             adaptive_execution: self.exec_policy.enabled,
+            slippage: self.exec_policy.slippage_report(),
+            crypto_cost_venue: self.crypto_venue,
+            passports: self.strategies.iter().filter(|s| s.id != "manual").map(|s| self.passport_for(s)).collect(),
         }
     }
 
@@ -2950,6 +3287,8 @@ impl Engine {
             avg_fill_price: None,
             mode: self.mode(),
             reject_reason: reject,
+            realised_slippage_bps: None,
+            modelled_slippage_bps: None,
         }
     }
     fn build_order_filled(&mut self, strategy_id: &str, m: &Market, side: Side, qty: f64, fill_price: f64) -> Order {
@@ -2991,6 +3330,49 @@ fn market_category(kind: MarketKind) -> &'static str {
         MarketKind::Crypto => "crypto",
         MarketKind::Equity => "equity",
     }
+}
+
+/// Apply a signed fill to a position. Returns `(new_qty, new_avg_price,
+/// realised_pnl)`.
+///
+/// Whether a fill adds or reduces is decided by the fill's own sign against
+/// the position's, not by the sign of the result. The earlier test compared
+/// `pos.qty.signum()` with `new_qty.signum()`, and since `0.0_f64.signum()` is
+/// `1.0` a long closed to exactly zero looked like an add, booked no realised
+/// P&L, and never counted as a trade. A partial reduction looked like an add
+/// too, and dragged the average price toward the exit price.
+pub fn apply_fill(qty: f64, avg: f64, signed: f64, fill: f64) -> (f64, f64, f64) {
+    let new_qty = qty + signed;
+    if qty == 0.0 || qty.signum() == signed.signum() {
+        let total = avg * qty.abs() + fill * signed.abs();
+        let new_avg = if new_qty.abs() > 0.0 { total / new_qty.abs() } else { fill };
+        return (new_qty, new_avg, 0.0);
+    }
+    let closed = signed.abs().min(qty.abs());
+    let dir = qty.signum();
+    let realised = (fill - avg) * closed * dir;
+    // A reduction keeps the entry price of what is left; a flip starts the
+    // remainder fresh at this fill.
+    let flipped = new_qty.abs() > 1e-12 && new_qty.signum() != qty.signum();
+    (new_qty, if flipped { fill } else { avg }, realised)
+}
+
+/// A simulated fill: the price after crossing the half-spread and paying
+/// impact, and the taker fee in quote currency. Both come from the cost model,
+/// so a paper fill on Kraken pays Kraken's costs and one on Binance pays
+/// Binance's. Prediction-market prices are probabilities and stay inside (0, 1).
+pub fn paper_fill(model: &CostModel, kind: MarketKind, side: Side, qty: f64, price: f64) -> (f64, f64) {
+    let qty = qty.abs();
+    let slip = model.slippage_bps(qty * price, None) / 10_000.0;
+    let mut px = match side {
+        Side::Buy => price * (1.0 + slip),
+        Side::Sell => price * (1.0 - slip),
+    };
+    if kind == MarketKind::Prediction {
+        px = px.clamp(0.001, 0.999);
+    }
+    let fee = px * qty * model.taker_bps / 10_000.0;
+    (px, fee)
 }
 
 /// Regime filter: mean-reversion strategies are blocked in trending markets,
@@ -3180,8 +3562,125 @@ mod tests {
             profit_factor: 0.0,
             equity_curve: vec![0.0],
             rules: Some(rules),
+            ledger: StrategyLedger::default(),
         });
         assert_eq!(e.strategies.len(), n0 + 1);
+    }
+
+    #[test]
+    fn closing_a_long_to_exactly_zero_books_the_trade() {
+        // 0.0_f64.signum() is 1.0, so the old add/reduce test treated a full
+        // close of a long as an add: no realised P&L, no trade counted.
+        let (q, _, r) = apply_fill(2.0, 100.0, -2.0, 110.0);
+        assert_eq!(q, 0.0);
+        assert!((r - 20.0).abs() < 1e-12);
+        // Short side, for symmetry.
+        let (q, _, r) = apply_fill(-2.0, 100.0, 2.0, 90.0);
+        assert_eq!(q, 0.0);
+        assert!((r - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_partial_reduction_realises_and_keeps_the_entry_price() {
+        let (q, avg, r) = apply_fill(4.0, 100.0, -1.0, 120.0);
+        assert_eq!(q, 3.0);
+        assert_eq!(avg, 100.0, "what is left was still bought at 100");
+        assert!((r - 20.0).abs() < 1e-12);
+        // Adding averages in.
+        let (q, avg, r) = apply_fill(1.0, 100.0, 1.0, 110.0);
+        assert_eq!((q, r), (2.0, 0.0));
+        assert!((avg - 105.0).abs() < 1e-12);
+        // A flip realises the closed part and restarts at the fill.
+        let (q, avg, r) = apply_fill(1.0, 100.0, -3.0, 90.0);
+        assert_eq!(q, -2.0);
+        assert_eq!(avg, 90.0);
+        assert!((r + 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_closed_long_shows_up_in_the_strategy_stats() {
+        let mut e = Engine::new();
+        e.manual_order("alpaca:MSFT", Side::Buy, 2_000.0);
+        e.flatten("alpaca:MSFT");
+        let s = e.strategies.iter().find(|s| s.id == "manual").unwrap();
+        assert_eq!(s.trades, 1, "a round trip is a trade");
+        assert!(s.pnl < 0.0, "in and out at the same price loses the spread");
+    }
+
+    #[test]
+    fn a_paper_fill_pays_the_cost_model_not_a_flat_guess() {
+        let mut e = Engine::new();
+        let px = e.price_of("crypto:BTC/USD");
+        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        let (qty, avg) = {
+            let pos = e.positions.get("crypto:BTC/USD").expect("a paper buy fills");
+            (pos.qty, pos.avg_price)
+        };
+        let m = e.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
+        let model = e.cost_model(&m);
+        assert_eq!(model.taker_bps, 40.0, "crypto defaults to Kraken's costs");
+        let expected = px * (1.0 + model.slippage_bps(qty * px, None) / 10_000.0);
+        assert!((avg - expected).abs() < 1e-9 * px, "fill {avg} vs modelled {expected}");
+
+        let l = e.strategies.iter().find(|s| s.id == "manual").unwrap().ledger.clone();
+        assert!((l.fees - avg * qty * 0.004).abs() < 1e-6, "40 bps taker fee, got {}", l.fees);
+        assert!(l.slippage > 0.0);
+        // Nothing has closed yet: no gross, and the only cost so far is the fee.
+        assert_eq!(l.pnl.gross, 0.0);
+        assert!((l.pnl.net + l.fees).abs() < 1e-9);
+        assert!((l.pnl.costs - l.fees).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gross_is_the_same_trades_at_the_quoted_price() {
+        let mut e = Engine::new();
+        e.manual_order("crypto:BTC/USD", Side::Buy, 2_000.0);
+        // The market moves up 5 % before the exit.
+        let px = e.price_of("crypto:BTC/USD");
+        if let Some(m) = e.markets.iter_mut().find(|m| m.id == "crypto:BTC/USD") {
+            m.price = px * 1.05;
+            m.updated_at = chrono::Utc::now().timestamp_millis();
+        }
+        e.flatten("crypto:BTC/USD");
+        let s = e.strategy_config("manual").unwrap();
+        let qty = 2_000.0 / px;
+        let p = s.ledger.pnl;
+        assert!((p.gross - qty * px * 0.05).abs() < 1e-6, "gross {} is the 5 % move at quoted prices", p.gross);
+        assert!(p.net < p.gross, "costs are taken out");
+        assert!((p.gross - p.costs - p.net).abs() < 1e-9);
+        assert!((p.net - (s.pnl - s.ledger.fees)).abs() < 1e-9);
+        assert!(!p.cost_heavy, "a 5 % winner on Kraken BTC is not eaten by costs");
+    }
+
+    #[test]
+    fn the_configured_exchange_decides_what_crypto_costs() {
+        let mut kraken = Engine::new();
+        let mut binance = Engine::new();
+        binance.set_crypto_cost_venue(Some(CostVenue::Binance));
+        for e in [&mut kraken, &mut binance] {
+            e.manual_order("crypto:ETH/USD", Side::Buy, 2_000.0);
+        }
+        let fees = |e: &Engine| e.strategies.iter().find(|s| s.id == "manual").unwrap().ledger.fees;
+        assert!(fees(&kraken) > 3.0 * fees(&binance), "40 bps vs 10 bps taker");
+        assert_eq!(binance.state().crypto_cost_venue, CostVenue::Binance);
+    }
+
+    #[test]
+    fn a_round_trip_reports_gross_costs_and_net_that_add_up() {
+        let mut e = Engine::new();
+        e.manual_order("alpaca:AAPL", Side::Buy, 5_000.0);
+        assert!(e.positions.contains_key("alpaca:AAPL"));
+        e.flatten("alpaca:AAPL");
+        assert!(!e.positions.contains_key("alpaca:AAPL"));
+        let s = e.strategies.iter().find(|s| s.id == "manual").unwrap().clone();
+        let p = s.ledger.pnl;
+        assert!((p.gross - p.costs - p.net).abs() < 1e-9);
+        assert!((p.net - (s.pnl - s.ledger.fees)).abs() < 1e-9);
+        // Same price in and out: gross is roughly zero, the loss is all costs.
+        assert!(p.gross.abs() < 1e-6, "gross {}", p.gross);
+        assert!(p.costs > 0.0);
+        assert_eq!(s.ledger.fees, 0.0, "Alpaca charges no commission");
+        assert!(p.cost_heavy, "costs on no gross profit are flagged");
     }
 
     #[test]
@@ -3645,6 +4144,46 @@ mod tests {
         }
         assert!(v["forecastStats"]["trustedSources"].is_number());
         assert!(v["forecastStats"]["recorded"].as_u64().unwrap() > 0);
+
+        // Honest numbers: the cost ledger per strategy, the realised-slippage
+        // table and the crypto cost venue all reach the UI under these names.
+        for key in ["slippage", "cryptoCostVenue"] {
+            assert!(obj.contains_key(key), "EngineState is missing `{key}` on the wire");
+        }
+        assert_eq!(v["cryptoCostVenue"], "kraken");
+        let ledger = &v["strategies"][0]["ledger"];
+        for key in ["fees", "slippage", "gross", "pnl", "forwardTrades", "liveTrades", "paperSince"] {
+            assert!(ledger.get(key).is_some(), "StrategyLedger is missing `{key}` on the wire");
+        }
+        for key in ["gross", "costs", "net", "costHeavy"] {
+            assert!(ledger["pnl"].get(key).is_some(), "PnlBreakdown is missing `{key}` on the wire");
+        }
+        assert!(ledger.get("forward_trades").is_none(), "snake_case must not leak to the UI");
+    }
+
+    #[test]
+    fn a_live_fill_reaches_the_wire_with_its_realised_and_modelled_slippage() {
+        let mut e = engine_with_open_market();
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().pop().expect("an order went out");
+        e.apply_live_ack(&o.order_id, "b1");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, o.ref_price * 1.0005));
+
+        let v = serde_json::to_value(e.state()).unwrap();
+        let row = &v["slippage"][0];
+        assert_eq!(row["venue"], "alpaca");
+        assert_eq!(row["fills"], 1);
+        assert!((row["medianRealisedBps"].as_f64().unwrap() - 5.0).abs() < 1e-6);
+        assert!(row["medianModelledBps"].as_f64().unwrap() > 0.0);
+        assert!(row.get("ratio").is_some());
+        assert_eq!(row["enough"], false);
+        let ord = v["orders"].as_array().unwrap().iter().find(|x| x["id"] == o.order_id.as_str()).unwrap();
+        assert!((ord["realisedSlippageBps"].as_f64().unwrap() - 5.0).abs() < 1e-6);
+        assert!(ord["modelledSlippageBps"].is_number());
+        // The live fill's slippage is also in the strategy's cost ledger.
+        let manual = e.strategies.iter().find(|s| s.id == "manual").unwrap();
+        assert!(manual.ledger.slippage > 0.0);
     }
 
     #[test]
@@ -3971,6 +4510,96 @@ mod tests {
         assert!(!out2[0].extended_hours);
     }
 
+    /// Give a strategy what it needs to go live: research gates 1 to 6 green
+    /// for its current parameters and a finished paper forward test.
+    fn make_live_ready(e: &mut Engine, id: &str) {
+        let s = e.strategy_config(id).unwrap();
+        e.store_research(validation::ResearchVerdict {
+            strategy_id: id.into(),
+            params: s.params.iter().map(|p| (p.key.clone(), p.value)).collect(),
+            checked_at: e.now(),
+            markets: 1,
+            bars: 700,
+            cost_venue: CostVenue::Alpaca,
+            gates: (1..=6).map(|g| validation::Gate::new(g, validation::GateStatus::Pass, "test", Some(1.0))).collect(),
+        });
+        let now = e.now();
+        let s = e.strategies.iter_mut().find(|s| s.id == id).unwrap();
+        s.ledger.paper_since = Some(now - 60 * 86_400_000);
+        s.ledger.forward_trades = 40;
+    }
+
+    #[test]
+    fn live_is_refused_until_the_passport_is_green_and_says_why() {
+        let mut e = Engine::new();
+        let err = e.set_strategy_state("ema-cross-1", StrategyState::Live).unwrap_err();
+        assert!(err.contains("gate 1"), "names the first open gate: {err}");
+        assert_eq!(e.strategy_config("ema-cross-1").unwrap().state, StrategyState::Paper);
+        assert!(e.journal.iter().any(|j| j.kind == JournalKind::Reject && j.message.contains("stays off live")));
+        // Paper and pause are never gated.
+        e.set_strategy_state("ema-cross-1", StrategyState::Paused).unwrap();
+        e.set_strategy_state("ema-cross-1", StrategyState::Paper).unwrap();
+
+        make_live_ready(&mut e, "ema-cross-1");
+        e.set_strategy_state("ema-cross-1", StrategyState::Live).unwrap();
+        assert_eq!(e.strategy_config("ema-cross-1").unwrap().state, StrategyState::Live);
+    }
+
+    #[test]
+    fn changing_a_parameter_invalidates_the_checks() {
+        let mut e = Engine::new();
+        make_live_ready(&mut e, "ema-cross-1");
+        assert!(e.passport("ema-cross-1").unwrap().live_ready);
+        e.set_strategy_param("ema-cross-1", "fast", 13.0);
+        let pp = e.passport("ema-cross-1").unwrap();
+        assert!(pp.stale);
+        assert!(!pp.live_ready);
+        assert!(e.set_strategy_state("ema-cross-1", StrategyState::Live).is_err());
+    }
+
+    #[test]
+    fn a_saved_live_strategy_without_a_green_passport_restores_as_paper() {
+        let mut e = Engine::new();
+        make_live_ready(&mut e, "ema-cross-1");
+        e.set_strategy_state("ema-cross-1", StrategyState::Live).unwrap();
+        let mut saved = e.to_persisted();
+        // The checks survive the restart, so it stays live...
+        let mut back = Engine::new();
+        back.apply_persisted(saved.clone());
+        assert_eq!(back.strategy_config("ema-cross-1").unwrap().state, StrategyState::Live);
+        // ...but a save with no checks (or from before the gates) does not.
+        saved.research.clear();
+        let mut bare = Engine::new();
+        bare.apply_persisted(saved);
+        assert_eq!(bare.strategy_config("ema-cross-1").unwrap().state, StrategyState::Paper);
+        assert!(bare.journal.iter().any(|j| j.message.contains("restored as PAPER")));
+    }
+
+    #[test]
+    fn a_deployed_strategy_cannot_arrive_live() {
+        let mut e = Engine::new();
+        let mut cfg = e.strategy_config("ema-cross-1").unwrap();
+        cfg.id = "copy".into();
+        cfg.state = StrategyState::Live;
+        cfg.ledger.forward_trades = 999; // imported evidence is not evidence
+        e.add_strategy(cfg);
+        let s = e.strategy_config("copy").unwrap();
+        assert_eq!(s.state, StrategyState::Paper);
+        assert_eq!(s.ledger.forward_trades, 0);
+    }
+
+    #[test]
+    fn every_strategy_has_a_passport_on_the_wire() {
+        let e = Engine::new();
+        let v = serde_json::to_value(e.state()).unwrap();
+        let pps = v["passports"].as_array().unwrap();
+        assert_eq!(pps.len(), e.strategies.iter().filter(|s| s.id != "manual").count());
+        let pp = &pps[0];
+        assert_eq!(pp["gates"].as_array().unwrap().len(), 8);
+        assert_eq!(pp["liveReady"], false);
+        assert!(pp["blockedReason"].as_str().unwrap().contains("Not ready"));
+    }
+
     /// End-to-end reproduction of a fully configured live setup: keys in, real
     /// equity candles loaded, armed on the paper endpoint, the equities
     /// strategy set Live, market open. An order must reach the outbox.
@@ -3996,7 +4625,8 @@ mod tests {
             change24h: 0.01,
         }]);
 
-        e.set_strategy_state("breakout-1", StrategyState::Live);
+        make_live_ready(&mut e, "breakout-1");
+        e.set_strategy_state("breakout-1", StrategyState::Live).expect("a green passport may go live");
         e.set_live(armed_alpaca());
         let status = open_market(&e);
         e.set_broker_status(status);

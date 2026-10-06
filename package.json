@@ -8,6 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "check": "node scripts/clean-env.mjs cargo test --workspace && vitest run && npm run build",
     "tauri": "node scripts/clean-env.mjs tauri",
     "server": "node scripts/clean-env.mjs cargo run -p pythia-server",
     "server:release": "node scripts/clean-env.mjs cargo run --release -p pythia-server",
@@ -33,6 +35,7 @@
     "puppeteer-core": "^25.3.0",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^5.0.3"
   }
 }

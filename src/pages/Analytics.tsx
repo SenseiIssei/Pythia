@@ -1,10 +1,13 @@
 import { useMemo } from "react";
-import { TrendingDown, Trophy } from "lucide-react";
+import { AlertTriangle, TrendingDown, Trophy } from "lucide-react";
 import { useStore } from "../store";
 import { Card, PageHeader, Badge, Sparkline, MultiLineChart, fmtUsd } from "../components/ui";
+import { costWarning } from "../components/PnlBreakdown";
+import { breakdown } from "../engine/costs";
+import type { PnlBreakdown, SlippageRow, StrategyConfig } from "../types";
 
 export function Analytics() {
-  const { portfolio, strategies, orders } = useStore();
+  const { portfolio, strategies, orders, slippage } = useStore();
 
   // drawdown series (% below running peak) from the equity curve
   const drawdown = useMemo(() => {
@@ -45,31 +48,53 @@ export function Analytics() {
       </Card>
 
       <Card title="Strategy Leaderboard" className="mb-4" right={<Trophy size={14} className="text-warning" />}>
-        <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-x-4 text-sm">
-          <Head>Strategy</Head>
-          <Head right>P&L</Head>
-          <Head right>Trades</Head>
-          <Head right>Win</Head>
-          <Head right>PF</Head>
-          <Head right>maxDD</Head>
-          {ranked.map((s) => (
-            <RowGroup key={s.id}>
-              <div className="flex items-center gap-2 py-2">
-                <Badge tone={s.state === "live" ? "red" : s.state === "paused" ? "neutral" : "cyan"}>{s.state}</Badge>
-                <span className="truncate">{s.name}</span>
-              </div>
-              <Cell className={s.pnl >= 0 ? "text-success" : "text-danger"}>{fmtUsd(s.pnl)}</Cell>
-              <Cell>{s.trades}</Cell>
-              <Cell>{(s.winRate * 100).toFixed(0)}%</Cell>
-              <Cell className={s.profitFactor >= 1 ? "text-success" : "text-cyber-text-dim"}>{s.profitFactor.toFixed(2)}</Cell>
-              <Cell className="text-danger">{fmtUsd(s.maxDrawdown)}</Cell>
-            </RowGroup>
-          ))}
+        <div className="overflow-x-auto">
+          <div className="grid min-w-[640px] grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 text-sm">
+            <Head>Strategy</Head>
+            <Head right>Gross</Head>
+            <Head right>Costs</Head>
+            <Head right>Net</Head>
+            <Head right>Trades</Head>
+            <Head right>Win</Head>
+            <Head right>PF</Head>
+            <Head right>maxDD</Head>
+            {ranked.map((s) => {
+              const p = pnlOf(s);
+              const warn = costWarning(p);
+              return (
+                <RowGroup key={s.id}>
+                  <div className="flex items-center gap-2 py-2">
+                    <Badge tone={s.state === "live" ? "red" : s.state === "paused" ? "neutral" : "cyan"}>{s.state}</Badge>
+                    <span className="truncate">{s.name}</span>
+                    {warn && (
+                      <span title={warn} className="text-warning">
+                        <AlertTriangle size={13} />
+                      </span>
+                    )}
+                  </div>
+                  <Cell className={p.gross >= 0 ? "text-success" : "text-danger"}>{fmtUsd(p.gross)}</Cell>
+                  <Cell className={warn ? "text-warning" : "text-cyber-text-dim"}>{p.costs > 0 ? `-${fmtUsd(p.costs)}` : fmtUsd(0)}</Cell>
+                  <Cell className={p.net >= 0 ? "text-success" : "text-danger"}>{fmtUsd(p.net)}</Cell>
+                  <Cell>{s.trades}</Cell>
+                  <Cell>{(s.winRate * 100).toFixed(0)}%</Cell>
+                  <Cell className={s.profitFactor >= 1 ? "text-success" : "text-cyber-text-dim"}>{s.profitFactor.toFixed(2)}</Cell>
+                  <Cell className="text-danger">{fmtUsd(s.maxDrawdown)}</Cell>
+                </RowGroup>
+              );
+            })}
+          </div>
+        </div>
+        <div className="mt-2 text-xs text-cyber-text-faint">
+          Gross is the closed trades at the quoted price; costs are their slippage plus every fee paid (an open
+          position's entry fee shows before its P&amp;L does); net is what was kept. A warning sign marks a strategy
+          whose costs exceed 40% of its gross.
         </div>
         {ranked.every((s) => s.trades === 0) && (
           <div className="mt-2 text-xs text-cyber-text-faint">No closed trades yet — stats populate as positions close.</div>
         )}
       </Card>
+
+      <SlippageCard rows={slippage} />
 
       <Card title="Trade Log">
         <div className="space-y-1 font-mono text-xs">
@@ -81,6 +106,14 @@ export function Analytics() {
               <span className="flex-1 truncate text-cyber-text-dim">{o.marketId}</span>
               <span>{o.filledQty.toFixed(4)}</span>
               <span className="text-cyber-text-faint">@ {o.avgFillPrice}</span>
+              {o.realisedSlippageBps !== undefined && (
+                <span
+                  className={o.realisedSlippageBps > (o.modelledSlippageBps ?? 0) * 1.5 ? "text-warning" : "text-cyber-text-dim"}
+                  title="Realised slippage against the arrival price, next to what the cost model expected"
+                >
+                  {o.realisedSlippageBps.toFixed(1)} bps vs {(o.modelledSlippageBps ?? 0).toFixed(1)} modelled
+                </span>
+              )}
               <Badge tone="neutral">{o.strategyId}</Badge>
             </div>
           ))}
@@ -97,5 +130,57 @@ function Cell({ children, className = "" }: { children: React.ReactNode; classNa
   return <div className={`py-2 text-right font-mono ${className}`}>{children}</div>;
 }
 function RowGroup({ children }: { children: React.ReactNode }) {
-  return <div className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">{children}</div>;
+  return <div className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">{children}</div>;
+}
+
+/**
+ * Realised slippage against the cost model, per venue. This is the number that
+ * says whether the backtests were fiction: if real fills cost far more than the
+ * model assumed, every backtest built on the model was too optimistic.
+ */
+function SlippageCard({ rows }: { rows: SlippageRow[] }) {
+  return (
+    <Card title="Execution: realised vs modelled slippage" className="mb-4">
+      {rows.length === 0 ? (
+        <div className="text-xs text-cyber-text-faint">
+          No live fills yet. Every live or paper-live fill is measured against the price when the order was
+          decided, and compared with what the cost model expected. The comparison means something after 30
+          fills per venue. Simulated paper fills are not counted: they pay the model by construction.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 text-sm">
+            <Head>Venue</Head>
+            <Head right>Fills</Head>
+            <Head right>Median realised</Head>
+            <Head right>Median modelled</Head>
+            <Head right>Ratio</Head>
+            {rows.map((r) => (
+              <div key={r.venue} className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">
+                <div className="py-2 capitalize">{r.venue}</div>
+                <Cell>
+                  {r.fills}
+                  {!r.enough && <span className="ml-1 text-[10px] text-cyber-text-faint">(&lt;30)</span>}
+                </Cell>
+                <Cell>{r.medianRealisedBps.toFixed(1)} bps</Cell>
+                <Cell className="text-cyber-text-dim">{r.medianModelledBps.toFixed(1)} bps</Cell>
+                <Cell className={r.ratio === undefined ? "text-cyber-text-faint" : r.ratio <= 1.5 ? "text-success" : "text-danger"}>
+                  {r.ratio === undefined ? "n/a" : `${r.ratio.toFixed(2)}x`}
+                </Cell>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-xs text-cyber-text-faint">
+            Positive bps cost money. A ratio above 1.5x means real fills cost more than the model assumed, and
+            every backtest using the model is too optimistic for that venue until it is recalibrated.
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+/** A strategy's gross, costs and net. A config that never traded has no ledger yet. */
+function pnlOf(s: StrategyConfig): PnlBreakdown {
+  return s.ledger?.pnl ?? breakdown(s.pnl, 0);
 }

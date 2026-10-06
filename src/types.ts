@@ -56,6 +56,138 @@ export interface Order {
   avgFillPrice?: number;
   mode: Mode;
   rejectReason?: string;
+  /** Live fills only: fill against arrival price in bps, positive = it cost us. */
+  realisedSlippageBps?: number;
+  /** Live fills only: what the cost model expected. */
+  modelledSlippageBps?: number;
+}
+
+// ── costs ────────────────────────────────────────────────────────────────────
+/** A key in `config/costs.json`. Crypto is charged as the selected exchange. */
+export type CostVenue = "kraken" | "binance" | "bybit" | "okx" | "coinbase" | "alpaca" | "polymarket";
+
+/** Costs for one instrument on one venue. Mirrors Rust `costs::CostModel`. */
+export interface CostModel {
+  takerBps: number;
+  makerBps: number;
+  /** Per side: what a taker pays against the mid. */
+  halfSpreadBps: number;
+  /** Impact in bps when notional equals top-of-book depth; scaled by sqrt(notional / depth). */
+  impactCoeff: number;
+  borrowBpsYr: number;
+  minNotional: number;
+  /** Top-of-book depth assumed when no live book is known. */
+  defaultDepth: number;
+}
+
+/** Gross, costs and net as three figures that always add up. Mirrors Rust `PnlBreakdown`. */
+export interface PnlBreakdown {
+  gross: number;
+  costs: number;
+  net: number;
+  /** costs / gross, when gross is positive. */
+  costShare?: number;
+  /** Costs above 40 % of gross, or costs paid on no gross profit. */
+  costHeavy: boolean;
+}
+
+/** What a strategy has paid to trade, and its forward-test record. Mirrors Rust `StrategyLedger`. */
+export interface StrategyLedger {
+  fees: number;
+  /** Slippage against the reference price on every fill, open positions included. */
+  slippage: number;
+  /** Realised P&L of the closed trades at reference prices. */
+  gross: number;
+  pnl: PnlBreakdown;
+  paperSince?: number;
+  /** Closed paper trades on real prices (demo-simulator trades do not count). */
+  forwardTrades: number;
+  liveTrades: number;
+}
+
+/** Realised against modelled slippage for one venue. */
+export interface SlippageRow {
+  venue: string;
+  fills: number;
+  medianRealisedBps: number;
+  medianModelledBps: number;
+  ratio?: number;
+  /** At least 30 fills behind the medians. */
+  enough: boolean;
+}
+
+// ── research (real candles, Rust) ───────────────────────────────────────────
+/** One window of a sweep. Mirrors Rust `research::WindowSummary`. */
+export interface WindowSummary {
+  sharpe: number;
+  totalReturn: number;
+  maxDrawdown: number;
+  trades: number;
+  bars: number;
+  pnl: PnlBreakdown;
+}
+
+/** One configuration in the parameter sweep. Mirrors Rust `research::SweepRow`. */
+export interface SweepRow {
+  /** `[key, value]` pairs, as the Rust tuple serialises. */
+  params: [string, number][];
+  is: WindowSummary;
+  oos: WindowSummary;
+  /** Out-of-sample over in-sample Sharpe; absent when in-sample was not positive. */
+  oosIsRatio?: number;
+  /** Probability the in-sample Sharpe is edge rather than the best of `trials` tries. */
+  deflatedSharpe: number;
+  pValue: number;
+}
+
+export interface SweepReport {
+  strategyId: string;
+  name: string;
+  trials: number;
+  isFraction: number;
+  markets: number;
+  costVenue: CostVenue;
+  rows: SweepRow[];
+}
+
+// ── the Strategy Passport (PROFIT-PLAN §2) ──────────────────────────────────
+export type GateStatus = "pass" | "fail" | "pending";
+/** How to read a number: a signed return as %, a share as %, a plain number, or a count. */
+export type GateUnit = "pct" | "share" | "number" | "count";
+
+export interface GateFigure {
+  label: string;
+  value: number;
+  unit: GateUnit;
+}
+
+/** One validation gate. Mirrors Rust `validation::Gate`. */
+export interface Gate {
+  /** 1 to 8. */
+  id: number;
+  name: string;
+  status: GateStatus;
+  /** Plain language: why it passed, failed or is pending. */
+  reason: string;
+  /** The number it was judged on. */
+  value?: number;
+  measure: string;
+  unit: GateUnit;
+  figures?: GateFigure[];
+}
+
+/** The eight gates for one strategy. Mirrors Rust `validation::Passport`. */
+export interface Passport {
+  strategyId: string;
+  gates: Gate[];
+  /** Gates 1 to 7 pass: the strategy may be set to Live. */
+  liveReady: boolean;
+  /** Why it may not, in plain language. */
+  blockedReason?: string;
+  /** When gates 1 to 6 were last computed (epoch ms). */
+  checkedAt?: number;
+  /** The checks were run with other parameters than the strategy has now. */
+  stale: boolean;
 }
 
 export interface RiskLimits {
@@ -139,6 +271,8 @@ export interface StrategyConfig {
   profitFactor: number;
   equityCurve: number[];
   rules?: Composed; // present only for kind === "composed"
+  /** Costs paid and forward-test record. Absent on configs that never traded. */
+  ledger?: StrategyLedger;
 }
 
 export type JournalKind =
