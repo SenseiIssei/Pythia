@@ -49,14 +49,33 @@ FEATURES = ["r1", "r3", "r7", "r14", "r28", "r56", "vol7", "vol28", "vol_ratio",
             "dist_hi28", "dist_lo28", "skew7", "resid28", "age"]
 
 
-def daily_bars(symbol: str) -> pl.DataFrame:
+GAP_SPLIT_US = 3 * DAY_US       # a longer trading gap starts a new series
+JUMP_SPLIT = float(np.log(10))  # so does a tenfold price change within one hour
+
+
+def hourly_segments(symbol: str) -> list[pl.DataFrame]:
+    """A symbol's hourly bars, split where they stop being one continuous asset.
+
+    Binance reuses symbols (LUNA after the crash relaunched as a new token under
+    the same name) and redenominates tokens (QUICK, COCOS, SUN: the price jumps
+    a thousandfold overnight). Bridging those makes thousandfold returns out of
+    nothing. A gap of more than three days, or a tenfold move inside one hour,
+    starts a new segment that is treated as a different coin.
+    """
     d = ROOT / "hist" / "binance_spot" / "klines_1h" / f"symbol={symbol}"
     files = sorted(d.glob("*.parquet"))
     if not files:
-        return pl.DataFrame()
-    h = (pl.concat([pl.read_parquet(f) for f in files], how="vertical_relaxed")
-         .unique("open_time_us").sort("open_time_us")
-         .with_columns(r=(pl.col("close").log() - pl.col("close").shift(1).log()).fill_null(0.0)))
+        return []
+    h = pl.concat([pl.read_parquet(f) for f in files], how="vertical_relaxed").unique("open_time_us").sort("open_time_us")
+    h = h.with_columns(
+        brk=((pl.col("open_time_us").diff() > GAP_SPLIT_US)
+             | ((pl.col("close").log() - pl.col("close").shift(1).log()).abs() > JUMP_SPLIT)).fill_null(False)
+    ).with_columns(seg=pl.col("brk").cum_sum())
+    return [g.drop("brk", "seg") for _, g in h.group_by("seg", maintain_order=True)]
+
+
+def daily_from_hourly(h: pl.DataFrame, symbol: str) -> pl.DataFrame:
+    h = h.with_columns(r=(pl.col("close").log() - pl.col("close").shift(1).log()).fill_null(0.0))
     return (h.with_columns(day=(pl.col("open_time_us") // DAY_US) * DAY_US)
             .group_by("day", maintain_order=True)
             .agg(close=pl.col("close").last(), high=pl.col("high").max(), low=pl.col("low").min(),
@@ -64,6 +83,12 @@ def daily_bars(symbol: str) -> pl.DataFrame:
                  skew_num=(pl.col("r") ** 3).sum())
             .filter(pl.col("n") >= 20)
             .with_columns(symbol=pl.lit(symbol)))
+
+
+def daily_bars(symbol: str) -> pl.DataFrame:
+    """The latest continuous segment of a symbol, as daily bars."""
+    segs = hourly_segments(symbol)
+    return daily_from_hourly(segs[-1], symbol) if segs else pl.DataFrame()
 
 
 def features(d: pl.DataFrame, btc: pl.DataFrame) -> pl.DataFrame:
@@ -78,10 +103,12 @@ def features(d: pl.DataFrame, btc: pl.DataFrame) -> pl.DataFrame:
         dist_lo28=lc - pl.col("low").rolling_min(28).log(),
         skew7=pl.col("skew_num").rolling_sum(7) / (pl.col("rv").rolling_sum(7) ** 1.5 + 1e-12),
         age=pl.int_range(pl.len()).cast(pl.Float64),
-        fwd=lc.shift(-HORIZON) - lc,
         btc_r28=pl.col("btc_close").log() - pl.col("btc_close").log().shift(28),
     ).with_columns(vol_ratio=pl.col("vol7") / (pl.col("vol28") + 1e-12),
                    resid28=pl.col("r28") - pl.col("btc_r28"))
+    # The label: exactly HORIZON calendar days ahead, not HORIZON rows (rows can skip days).
+    ahead = d.select(day=pl.col("day") - HORIZON * DAY_US, close_ahead="close")
+    f = f.join(ahead, on="day", how="left").with_columns(fwd=pl.col("close_ahead").log() - lc).drop("close_ahead")
     # A coin delisted inside the horizon keeps the return to its last close
     # (usually near the bottom). Dropping it would hide exactly the losers.
     last_close = d["close"][-1]
@@ -100,10 +127,14 @@ def build() -> pl.DataFrame:
     btc = daily_bars("BTCUSDT")
     frames = []
     for i, s in enumerate(syms):
-        d = daily_bars(s)
-        if d.height < MIN_HISTORY_D + 10:
-            continue
-        frames.append(features(d, btc))
+        segs = hourly_segments(s)
+        for j, seg in enumerate(segs):
+            # Earlier segments of a reused or redenominated symbol become their own coin.
+            name = s if j == len(segs) - 1 else f"{s}~{j}"
+            d = daily_from_hourly(seg, name)
+            if d.height < MIN_HISTORY_D + 10:
+                continue
+            frames.append(features(d, btc))
         if i % 100 == 0:
             print(f"{i}/{len(syms)} symbols", flush=True)
     p = pl.concat(frames, how="vertical_relaxed")
