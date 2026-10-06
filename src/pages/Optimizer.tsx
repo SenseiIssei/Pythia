@@ -28,7 +28,12 @@ export function Optimizer() {
   const [realErr, setRealErr] = useState("");
   const canResearch = researchAvailable();
 
-  const strat = useMemo(() => strategies.find((s) => s.id === stratId), [strategies, stratId]);
+  // Strategies arrive with the first engine push, possibly after this page
+  // mounted, so an empty pick falls back to the first testable one.
+  const strat = useMemo(
+    () => strategies.find((s) => s.id === stratId) ?? (stratId ? undefined : testable[0]),
+    [strategies, stratId, testable]
+  );
   const paramKeys = useMemo(() => (strat ? Object.keys(autoGrid(strat)) : []), [strat]);
 
   async function runReal() {
@@ -84,7 +89,7 @@ export function Optimizer() {
         <label className="block max-w-sm text-xs text-cyber-text-dim">
           Strategy
           <select
-            value={stratId}
+            value={strat?.id ?? ""}
             onChange={(e) => {
               setStratId(e.target.value);
               setReal(null);

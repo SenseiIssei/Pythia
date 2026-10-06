@@ -83,6 +83,9 @@ export async function liveDiagnostics(): Promise<MarketDiag[]> {
  * not fire for hours. This proves the whole pipeline with one click and a known
  * outcome — and is the fastest way to discover a wrong key or endpoint. Still
  * fully gated: kill switch, risk limits and the session check all apply.
+ *
+ * It is a connection test, not a strategy, so it is the one order that needs
+ * no Strategy Passport. Pass `notional` 0 for the venue's minimum size.
  */
 export async function sendTestOrder(marketId: string, notional: number): Promise<string> {
   switch (liveMode()) {

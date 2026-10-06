@@ -21,11 +21,12 @@ import * as ind from "./indicators";
 import { AI_OFF, DISARMED, NO_FORECASTS, NO_SPEND, type EngineClient } from "./client";
 import { breakdown, costVenueFor, modelFor, paperFill } from "./costs";
 import { applyFill } from "./position";
+import { browserPassport } from "./passport";
 import type { StrategyLedger } from "../types";
 
 /** A fresh cost and forward-test record. */
 export function emptyLedger(): StrategyLedger {
-  return { fees: 0, slippage: 0, pnl: breakdown(0, 0), forwardTrades: 0, liveTrades: 0 };
+  return { fees: 0, slippage: 0, gross: 0, pnl: breakdown(0, 0), forwardTrades: 0, liveTrades: 0 };
 }
 
 interface PositionInternal {
@@ -38,6 +39,8 @@ interface PositionInternal {
   stop: number; // 0 = none
   target: number; // 0 = none
   trailRef: number;
+  /** Average entry at the quoted price before execution costs, for the gross line. */
+  refAvg: number;
 }
 
 type Listener = () => void;
@@ -316,8 +319,13 @@ export class PaperEngine implements EngineClient {
         stop,
         target,
         trailRef: fillPrice,
+        refAvg: price,
       });
     } else {
+      // The same position at the quoted price, for the gross line.
+      const g = applyFill(existing.qty, existing.refAvg, signed, price);
+      ledger.gross += g.realized;
+      existing.refAvg = g.avgPrice;
       const r = applyFill(existing.qty, existing.avgPrice, signed, fillPrice);
       realized = r.realized;
       this.realizedPnl += realized;
@@ -362,8 +370,10 @@ export class PaperEngine implements EngineClient {
       strat.equityCurve.push(strat.pnl);
       if (strat.equityCurve.length > 200) strat.equityCurve.shift();
     }
-    // gross = pnl + slippage, costs = fees + slippage, net = pnl - fees
-    ledger.pnl = breakdown(strat.pnl + ledger.slippage, ledger.fees + ledger.slippage);
+    // gross = closed trades at quoted prices, net = realised P&L minus fees,
+    // costs = the difference (closed-trade slippage plus fees). Mirrors Rust.
+    const net = strat.pnl - ledger.fees;
+    ledger.pnl = breakdown(ledger.gross, ledger.gross - net);
 
     this.log(
       "fill",
@@ -647,6 +657,9 @@ export class PaperEngine implements EngineClient {
   slippage() {
     return [];
   }
+  passports() {
+    return this.strategies.filter((s) => s.id !== "manual").map(browserPassport);
+  }
   setAdaptiveExecution(_on: boolean) {
     // The browser engine has no venue to route to, so there is nothing to tune.
   }
@@ -680,9 +693,17 @@ export class PaperEngine implements EngineClient {
     this.log("risk", `KILL SWITCH ${this.limits.killSwitch ? "ENGAGED — live buys halted" : "released"}`);
     this.emit();
   }
-  setStrategyState(id: string, state: StrategyConfig["state"]) {
+  async setStrategyState(id: string, state: StrategyConfig["state"]) {
     const s = this.strategies.find((x) => x.id === id);
     if (!s) return;
+    if (state === "live") {
+      // Same rule as the Rust engine: no green passport, no live. In this
+      // build nothing can earn one, so the answer is always no, with the reason.
+      const why = browserPassport(s).blockedReason ?? "the validation gates are not green";
+      this.log("reject", `${s.name} stays off live. ${why}`, id);
+      this.emit();
+      throw new Error(why);
+    }
     s.state = state;
     this.log("system", `Strategy ${s.name} → ${state.toUpperCase()}`, id);
     this.emit();
@@ -697,7 +718,8 @@ export class PaperEngine implements EngineClient {
   }
   addStrategy(cfg: StrategyConfig) {
     if (this.strategies.some((s) => s.id === cfg.id)) return;
-    this.strategies.push(cfg);
+    // A new strategy has no passport and no record: it starts in paper, clean.
+    this.strategies.push({ ...cfg, state: cfg.state === "live" ? "paper" : cfg.state, ledger: emptyLedger() });
     this.log("system", `Deployed strategy: ${cfg.name}`, cfg.id);
     this.emit();
   }

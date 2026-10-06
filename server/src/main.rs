@@ -1079,9 +1079,14 @@ async fn post_test_order(
     State(st): State<AppState>,
     Json(req): Json<TestOrderReq>,
 ) -> impl IntoResponse {
-    let notional = req.notional.clamp(1.0, 5_000.0);
     let (status, body) = {
         let mut e = st.engine.lock().unwrap();
+        // 0 means "the venue's minimum size": a connection test, not a strategy.
+        let notional = if req.notional > 0.0 {
+            req.notional.clamp(1.0, 5_000.0)
+        } else {
+            e.connection_test_notional(&req.market_id)
+        };
         if let Some(why) = e.test_order_block(&req.market_id) {
             (StatusCode::CONFLICT, why)
         } else {

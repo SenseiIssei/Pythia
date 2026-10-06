@@ -94,7 +94,10 @@ export interface PnlBreakdown {
 /** What a strategy has paid to trade, and its forward-test record. Mirrors Rust `StrategyLedger`. */
 export interface StrategyLedger {
   fees: number;
+  /** Slippage against the reference price on every fill, open positions included. */
   slippage: number;
+  /** Realised P&L of the closed trades at reference prices. */
+  gross: number;
   pnl: PnlBreakdown;
   paperSince?: number;
   /** Closed paper trades on real prices (demo-simulator trades do not count). */
@@ -145,6 +148,46 @@ export interface SweepReport {
   markets: number;
   costVenue: CostVenue;
   rows: SweepRow[];
+}
+
+// ── the Strategy Passport (PROFIT-PLAN §2) ──────────────────────────────────
+export type GateStatus = "pass" | "fail" | "pending";
+/** How to read a number: a signed return as %, a share as %, a plain number, or a count. */
+export type GateUnit = "pct" | "share" | "number" | "count";
+
+export interface GateFigure {
+  label: string;
+  value: number;
+  unit: GateUnit;
+}
+
+/** One validation gate. Mirrors Rust `validation::Gate`. */
+export interface Gate {
+  /** 1 to 8. */
+  id: number;
+  name: string;
+  status: GateStatus;
+  /** Plain language: why it passed, failed or is pending. */
+  reason: string;
+  /** The number it was judged on. */
+  value?: number;
+  measure: string;
+  unit: GateUnit;
+  figures?: GateFigure[];
+}
+
+/** The eight gates for one strategy. Mirrors Rust `validation::Passport`. */
+export interface Passport {
+  strategyId: string;
+  gates: Gate[];
+  /** Gates 1 to 7 pass: the strategy may be set to Live. */
+  liveReady: boolean;
+  /** Why it may not, in plain language. */
+  blockedReason?: string;
+  /** When gates 1 to 6 were last computed (epoch ms). */
+  checkedAt?: number;
+  /** The checks were run with other parameters than the strategy has now. */
+  stale: boolean;
 }
 
 export interface RiskLimits {

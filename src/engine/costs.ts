@@ -105,7 +105,9 @@ export function paperFill(
 
 /** Gross, costs and net that always add up, with the 40 % flag. Mirrors `PnlBreakdown::new`. */
 export function breakdown(gross: number, costs: number): PnlBreakdown {
-  const c = Math.max(0, costs);
+  // Never clamped: fills that beat their reference price make costs negative,
+  // and the three figures must still add up.
+  const c = Math.abs(costs) < 1e-12 ? 0 : costs;
   const costShare = gross > 0 ? c / gross : undefined;
   const costHeavy = costShare !== undefined ? costShare > COST_HEAVY_SHARE : c > 0;
   return { gross, costs: c, net: gross - c, costShare, costHeavy };

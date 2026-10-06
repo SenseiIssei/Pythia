@@ -18,7 +18,12 @@ export function Backtest() {
   const [drift, setDrift] = useState(0.0002);
   const [result, setResult] = useState<BacktestResult | null>(null);
 
-  const strat = useMemo(() => strategies.find((s) => s.id === stratId), [strategies, stratId]);
+  // Strategies arrive with the first engine push, possibly after this page
+  // mounted, so an empty pick falls back to the first testable one.
+  const strat = useMemo(
+    () => strategies.find((s) => s.id === stratId) ?? (stratId ? undefined : testable[0]),
+    [strategies, stratId, testable]
+  );
 
   function run() {
     if (!strat) return;
@@ -34,7 +39,7 @@ export function Backtest() {
           <label className="text-xs text-cyber-text-dim">
             Strategy
             <select
-              value={stratId}
+              value={strat?.id ?? ""}
               onChange={(e) => setStratId(e.target.value)}
               className="mt-1 w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm text-cyber-text focus:border-accent focus:outline-none"
             >

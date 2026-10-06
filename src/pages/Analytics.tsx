@@ -85,8 +85,8 @@ export function Analytics() {
           </div>
         </div>
         <div className="mt-2 text-xs text-cyber-text-faint">
-          Gross is realised P&amp;L at the quoted price; costs are fees plus slippage, booked when paid (so an open
-          position's entry costs show before its P&amp;L does); net is what was kept. A warning sign marks a strategy
+          Gross is the closed trades at the quoted price; costs are their slippage plus every fee paid (an open
+          position's entry fee shows before its P&amp;L does); net is what was kept. A warning sign marks a strategy
           whose costs exceed 40% of its gross.
         </div>
         {ranked.every((s) => s.trades === 0) && (

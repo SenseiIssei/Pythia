@@ -9,7 +9,25 @@
 import { invoke } from "@tauri-apps/api/core";
 import { liveMode } from "./live";
 import { serverUrl } from "./engine/serverEngine";
-import type { SweepReport } from "./types";
+import type { Passport, SweepReport } from "./types";
+
+/**
+ * Run validation gates 1 to 6 for one strategy on daily candles. The engine
+ * keeps the result, so the passport in the pushed state updates too.
+ */
+export async function runValidation(strategyId: string): Promise<Passport> {
+  switch (liveMode()) {
+    case "native":
+      return invoke<Passport>("run_validation", { strategyId });
+    case "server": {
+      const r = await fetch(`${serverUrl()}/api/research/passport?id=${encodeURIComponent(strategyId)}`, { method: "POST" });
+      if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      return (await r.json()) as Passport;
+    }
+    default:
+      throw new Error("The validation checks need the desktop app or a connected backend.");
+  }
+}
 
 /** Whether real-candle research is reachable from this build. */
 export function researchAvailable(): boolean {
