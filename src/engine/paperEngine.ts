@@ -668,6 +668,11 @@ export class PaperEngine implements EngineClient {
   passports() {
     return this.strategies.filter((s) => s.id !== "manual").map(browserPassport);
   }
+  // The portfolio risk layer (correlation cap, measured-edge Kelly, drawdown
+  // de-risking) lives in the Rust engine; this browser build does not run it.
+  riskStatus() {
+    return null;
+  }
   setAdaptiveExecution(_on: boolean) {
     // The browser engine has no venue to route to, so there is nothing to tune.
   }

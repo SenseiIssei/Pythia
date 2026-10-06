@@ -103,6 +103,18 @@ export interface StrategyLedger {
   /** Closed paper trades on real prices (demo-simulator trades do not count). */
   forwardTrades: number;
   liveTrades: number;
+  /** Closed-trade record in net returns on notional; sizes entries from 30 trades. */
+  edge?: EdgeRecord;
+}
+
+/** Mirrors Rust `risk::EdgeRecord`. A win is a trade with net return > 0. */
+export interface EdgeRecord {
+  wins: number;
+  losses: number;
+  /** Sum of winning net returns, fractions of notional. */
+  winReturnSum: number;
+  /** Sum of losing net returns as positive fractions of notional. */
+  lossReturnSum: number;
 }
 
 /** Realised against modelled slippage for one venue. */
@@ -209,6 +221,40 @@ export interface RiskLimits {
   volTargetPct: number; // volatility-targeted sizing: target per-bar vol % (0 = off)
   regimeFilter: boolean; // block mean-reversion in trends & trend strategies in chop
   adaptiveAllocation: boolean; // auto-weight strategy budgets by recent performance
+  /** Cap on correlation-adjusted exposure sqrt(w'Cw), % of equity (0 = off). */
+  maxCorrelatedExposurePct: number;
+}
+
+/** What the risk manager is doing right now. Mirrors Rust `risk::RiskStatus`. */
+export interface RiskStatus {
+  /** Correlation-adjusted exposure of the open book, sqrt(w'Cw), quote currency. */
+  correlatedExposure: number;
+  /** The same as % of equity, next to `maxCorrelatedExposurePct`. */
+  correlatedExposurePct: number;
+  /** How each strategy's entries are sized. */
+  sizing: StrategySizing[];
+  /** Peak-to-now equity drawdown, %, the one the breaker watches. */
+  drawdownPct: number;
+  /** New entries are multiplied by this: 1 - drawdown / maxDrawdownPct, clamped to 0..1. */
+  deriskFactor: number;
+}
+
+/** confidence: under 30 trades, sized off signal strength. measured: sized on
+ *  its own win rate and payoff. noEdge: the record shows no edge, size zero. */
+export type SizingMode = "confidence" | "measured" | "noEdge";
+
+/** Mirrors Rust `risk::StrategySizing`. */
+export interface StrategySizing {
+  strategyId: string;
+  mode: SizingMode;
+  trades: number;
+  winRate?: number;
+  /** Average win over average loss; absent while there has been no loss. */
+  payoff?: number;
+  /** Full Kelly, p - (1 - p) / b. */
+  kelly?: number;
+  /** kelly * n / (n + 30). */
+  kellyShrunk?: number;
 }
 
 export interface StrategyParam {

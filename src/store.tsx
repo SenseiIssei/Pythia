@@ -23,6 +23,7 @@ import type {
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
+  RiskStatus,
   SlippageRow,
   StrategyConfig,
   Track,
@@ -48,6 +49,8 @@ interface Store {
   slippage: SlippageRow[];
   /** Strategy Passport per strategy id. */
   passports: Map<string, Passport>;
+  /** The Rust risk manager's live numbers; null in the browser paper build. */
+  riskStatus: RiskStatus | null;
   /** Market ids running on real exchange candles rather than the simulator. */
   barBacked: Set<string>;
   aiViews: AiView[];
@@ -97,6 +100,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       adaptiveExecution: engine.adaptiveExecution(),
       slippage: engine.slippage(),
       passports: new Map(engine.passports().map((p) => [p.strategyId, p])),
+      riskStatus: engine.riskStatus(),
       barBacked: new Set(engine.barBacked()),
       aiViews: engine.aiViews(),
       aiPolicy: engine.aiPolicy(),

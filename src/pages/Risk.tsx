@@ -1,7 +1,7 @@
 import { Power, ShieldAlert } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Meter, Button, Toggle } from "../components/ui";
-import type { RiskLimits } from "../types";
+import { Card, PageHeader, Meter, Button, Toggle, Badge } from "../components/ui";
+import type { RiskLimits, RiskStatus, SizingMode, StrategySizing } from "../types";
 
 interface LimitRow {
   key: keyof RiskLimits;
@@ -17,6 +17,7 @@ const ROWS: LimitRow[] = [
   { key: "maxDrawdownPct", label: "Max drawdown (breaker)", min: 2, max: 50, step: 1, unit: "%" },
   { key: "maxPositionPct", label: "Max position size", min: 1, max: 50, step: 1, unit: "% equity" },
   { key: "maxGrossExposurePct", label: "Max gross exposure", min: 10, max: 100, step: 5, unit: "% equity" },
+  { key: "maxCorrelatedExposurePct", label: "Max correlated exposure", min: 0, max: 100, step: 5, unit: "% equity" },
   { key: "perStrategyBudgetPct", label: "Per-strategy budget", min: 5, max: 60, step: 1, unit: "% equity" },
   { key: "kellyFraction", label: "Kelly fraction", min: 0.05, max: 1, step: 0.05, unit: "×" },
   { key: "volTargetPct", label: "Vol-target sizing", min: 0, max: 5, step: 0.1, unit: "%/bar" },
@@ -30,13 +31,14 @@ const ROWS: LimitRow[] = [
 ];
 
 export function Risk() {
-  const { limits, setLimits, portfolio, toggleKill } = useStore();
+  const { limits, setLimits, portfolio, toggleKill, riskStatus, strategies } = useStore();
 
   const dayPnl = portfolio.realizedPnl + portfolio.unrealizedPnl;
   const dayLossPct = (-dayPnl / portfolio.dayStartEquity) * 100;
   const lossUtil = (dayLossPct / limits.maxDailyLossPct) * 100;
   const exposureUtil =
     (portfolio.grossExposure / ((limits.maxGrossExposurePct / 100) * portfolio.equity)) * 100;
+  const grossPct = portfolio.equity > 0 ? (portfolio.grossExposure / portfolio.equity) * 100 : 0;
 
   return (
     <div className="animate-fade-in">
@@ -107,7 +109,13 @@ export function Risk() {
           </div>
           <Meter pct={exposureUtil || 0} tone={exposureUtil >= 80 ? "red" : "cyan"} />
         </Card>
+        <CorrelatedExposureCard status={riskStatus} capPct={limits.maxCorrelatedExposurePct} grossPct={grossPct} />
+        <DrawdownCard status={riskStatus} limitPct={limits.maxDrawdownPct} />
       </div>
+
+      {riskStatus && riskStatus.sizing.length > 0 && (
+        <SizingCard sizing={riskStatus.sizing} nameOf={(id) => strategies.find((s) => s.id === id)?.name ?? id} />
+      )}
 
       {/* editable limits */}
       <Card title="Limits" right={<ShieldAlert size={14} className="text-warning" />}>
@@ -132,5 +140,126 @@ export function Risk() {
         </div>
       </Card>
     </div>
+  );
+}
+
+/** Correlation-adjusted exposure against its cap, next to the raw gross. */
+function CorrelatedExposureCard({
+  status,
+  capPct,
+  grossPct,
+}: {
+  status: RiskStatus | null;
+  capPct: number;
+  grossPct: number;
+}) {
+  if (!status) {
+    return (
+      <Card title="Correlated Exposure">
+        <div className="text-xs text-cyber-text-faint">Measured by the Rust engine. Not available in the browser build.</div>
+      </Card>
+    );
+  }
+  const off = capPct <= 0;
+  const util = off ? 0 : (status.correlatedExposurePct / capPct) * 100;
+  return (
+    <Card title="Correlated Exposure">
+      <div className="mb-2 flex justify-between text-sm">
+        <span className="text-cyber-text-dim">
+          {status.correlatedExposurePct.toFixed(0)}% of equity {off ? "(cap off)" : `of ${capPct}% cap`}
+        </span>
+        {!off && <span className={util >= 100 ? "text-danger" : "text-cyber-text-dim"}>{util.toFixed(0)}%</span>}
+      </div>
+      <Meter pct={util} tone={util >= 80 ? "red" : "cyan"} />
+      <div className="mt-2 text-xs text-cyber-text-faint">
+        Raw gross is {grossPct.toFixed(0)}%. Positions that move together count as one bet: sqrt(w&apos;Cw) over the
+        return correlations on the Correlation page.
+      </div>
+    </Card>
+  );
+}
+
+/** Drawdown against the breaker, and how much it is shrinking new entries. */
+function DrawdownCard({ status, limitPct }: { status: RiskStatus | null; limitPct: number }) {
+  if (!status) {
+    return (
+      <Card title="Drawdown De-risking">
+        <div className="text-xs text-cyber-text-faint">Measured by the Rust engine. Not available in the browser build.</div>
+      </Card>
+    );
+  }
+  const used = limitPct > 0 ? (status.drawdownPct / limitPct) * 100 : 0;
+  const factor = status.deriskFactor;
+  return (
+    <Card title="Drawdown De-risking">
+      <div className="mb-2 flex justify-between text-sm">
+        <span className="text-cyber-text-dim">
+          {status.drawdownPct.toFixed(2)}% of {limitPct}% breaker
+        </span>
+        <span className={factor < 1 ? "text-warning" : "text-cyber-text-dim"}>
+          entries at {(factor * 100).toFixed(0)}% size
+        </span>
+      </div>
+      <Meter pct={used} tone={used >= 50 ? "red" : "green"} />
+      <div className="mt-2 text-xs text-cyber-text-faint">
+        New entries shrink in a straight line as the drawdown eats into the limit: half size at half the limit, nothing
+        new at the breaker.
+      </div>
+    </Card>
+  );
+}
+
+const MODE_LABEL: Record<SizingMode, { text: string; tone: "neutral" | "cyan" | "red" }> = {
+  confidence: { text: "signal strength", tone: "neutral" },
+  measured: { text: "measured edge", tone: "cyan" },
+  noEdge: { text: "no edge, size 0", tone: "red" },
+};
+
+const pct = (x?: number) => (x === undefined ? "-" : `${(x * 100).toFixed(0)}%`);
+const num = (x?: number, d = 2) => (x === undefined ? "-" : x.toFixed(d));
+
+/** How each strategy's entries are sized: signal strength until 30 closed
+ *  trades, then its own win rate and payoff. */
+function SizingCard({ sizing, nameOf }: { sizing: StrategySizing[]; nameOf: (id: string) => string }) {
+  return (
+    <Card title="Position Sizing" className="mb-4">
+      <div className="mb-3 text-xs text-cyber-text-dim">
+        Under 30 closed trades a strategy is sized off its signal strength. From 30 on, off its own record: Kelly
+        f = p - (1 - p) / b, shrunk by n / (n + 30), at most a quarter of that, never above the full-strength size.
+        A negative Kelly means no measured edge and no new entries.
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs uppercase tracking-wide text-cyber-text-faint">
+              <th className="py-1.5 pr-3">Strategy</th>
+              <th className="py-1.5 pr-3 text-right">Trades</th>
+              <th className="py-1.5 pr-3 text-right">Won</th>
+              <th className="py-1.5 pr-3 text-right">Payoff</th>
+              <th className="py-1.5 pr-3 text-right">Kelly</th>
+              <th className="py-1.5 pr-3 text-right">Shrunk</th>
+              <th className="py-1.5">Sized on</th>
+            </tr>
+          </thead>
+          <tbody className="tabular-nums">
+            {sizing.map((s) => (
+              <tr key={s.strategyId} className="border-t border-cyber-border">
+                <td className="py-1.5 pr-3 font-medium text-cyber-text">{nameOf(s.strategyId)}</td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{s.trades}</td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{pct(s.winRate)}</td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">
+                  {s.trades > 0 && s.payoff === undefined ? "no losses" : num(s.payoff)}
+                </td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{num(s.kelly, 3)}</td>
+                <td className="py-1.5 pr-3 text-right text-accent">{num(s.kellyShrunk, 3)}</td>
+                <td className="py-1.5">
+                  <Badge tone={MODE_LABEL[s.mode].tone}>{MODE_LABEL[s.mode].text}</Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
