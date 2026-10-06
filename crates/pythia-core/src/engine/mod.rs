@@ -3128,7 +3128,10 @@ impl Engine {
                 .collect();
             let capital = self.strategies[idx].budget_pct / 100.0 * self.equity();
             let has_market = |coin: &str| -> Option<String> { Some(format!("crypto:{coin}/USD")) };
-            let (orders, untradable) = crate::lab::rebalance(&sig.weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+            let (orders, mut untradable) =
+                crate::lab::rebalance(&sig.weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+            // A coin held by another strategy is reported as that, not as missing.
+            untradable.retain(|c| !owned_elsewhere.iter().any(|s| s == &format!("{c}/USD")));
             let n = orders.len();
             for o in orders {
                 let Some(m) = crypto.iter().find(|m| m.id == o.market_id).cloned() else { continue };

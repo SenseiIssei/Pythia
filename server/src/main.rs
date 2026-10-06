@@ -251,6 +251,16 @@ async fn main() {
     {
         let mut e = engine.lock().unwrap();
         e.set_connected(creds.connected_venues());
+        // A headless instance that only runs lab books (the VPS) pauses the
+        // built-in indicator strategies, which would otherwise hold the same
+        // coins and block the lab book from running its portfolio.
+        if std::env::var("PYTHIA_LAB_ONLY").map(|v| v == "1").unwrap_or(false) {
+            let ids: Vec<String> = e.state().strategies.iter().map(|s| s.id.clone()).collect();
+            for id in ids {
+                let _ = e.set_strategy_state(&id, pythia_core::engine::StrategyState::Paused);
+            }
+            tracing::info!("PYTHIA_LAB_ONLY: built-in strategies paused, lab strategies only");
+        }
         // Costs follow the selected exchange even before its keys are set.
         e.set_crypto_cost_venue(
             env_str("PYTHIA_EXCHANGE").as_deref().and_then(Exchange::parse).map(CostVenue::for_exchange),
