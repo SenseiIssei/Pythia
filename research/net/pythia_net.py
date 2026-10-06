@@ -58,12 +58,39 @@ TOP_K = [5, 10, 20]
 
 # ── data ──────────────────────────────────────────────────────────────────────
 
-def load_hourly(root: Path, symbol: str) -> pl.DataFrame | None:
+GAP_SPLIT_US = 3 * DAY_US
+JUMP_SPLIT = math.log(10)
+
+
+def load_segments(root: Path, symbol: str) -> list[tuple[str, pl.DataFrame]]:
+    """A symbol's hourly bars split where they stop being one asset (same rule as
+    lab/experiments/picks.py): a gap over three days or a tenfold move inside an
+    hour (a reused symbol like LUNA, a redenomination like QUICK) starts a new
+    segment, named `SYMBOL~n` for all but the latest."""
     d = root / "hist" / "binance_spot" / "klines_1h" / f"symbol={symbol}"
     files = sorted(d.glob("*.parquet"))
     if not files:
-        return None
+        return []
     h = pl.concat([pl.read_parquet(f) for f in files], how="vertical_relaxed").unique("open_time_us").sort("open_time_us")
+    h = h.with_columns(
+        brk=((pl.col("open_time_us").diff() > GAP_SPLIT_US)
+             | ((pl.col("close").log() - pl.col("close").shift(1).log()).abs() > JUMP_SPLIT)).fill_null(False)
+    ).with_columns(seg=pl.col("brk").cum_sum())
+    segs = [g.drop("brk", "seg") for _, g in h.group_by("seg", maintain_order=True)]
+    out = []
+    for j, g in enumerate(segs):
+        prepared = prepare(g)
+        if prepared is not None:
+            out.append((symbol if j == len(segs) - 1 else f"{symbol}~{j}", prepared))
+    return out
+
+
+def load_hourly(root: Path, symbol: str) -> pl.DataFrame | None:
+    segs = load_segments(root, symbol)
+    return segs[-1][1] if segs else None
+
+
+def prepare(h: pl.DataFrame) -> pl.DataFrame | None:
     if h.height < (MIN_HISTORY_D + 20) * 24:
         return None
     # Regular hourly grid: gaps (exchange down, not yet listed) become zero
@@ -102,44 +129,42 @@ class Panel:
         self.times: list[np.ndarray] = []
         self.symbols: list[str] = []
         rows = []
-        for s in syms:
-            h = load_hourly(root, s)
-            if h is None:
-                continue
-            ts = h["open_time_us"].to_numpy()
-            btc_r = np.array([self.btc_ret.get(int(t), 0.0) for t in ts], dtype=np.float32)
-            x = np.stack([h["ret"].to_numpy(), h["rng"].to_numpy(), h["vol_z"].to_numpy(),
-                          h["taker"].to_numpy(), btc_r], axis=1).astype(np.float32)
-            x[:, 0] *= 100.0  # returns in percent: comparable scales across channels
-            x[:, 1] *= 100.0
-            x[:, 4] *= 100.0
-            ci = len(self.series)
-            self.series.append(x)
-            self.times.append(ts)
-            self.symbols.append(s)
-            close = h["close"].to_numpy()
-            qv = h["quote_volume"].to_numpy()
-            r = h["ret"].to_numpy()
-            # Daily anchors at 00:00 UTC: everything before the anchor is known.
-            first = int(np.ceil(ts[0] / DAY_US)) * DAY_US
-            for a in range(first + MIN_HISTORY_D * DAY_US, int(ts[-1]) + 1, DAY_US):
-                i = int((a - ts[0]) // HOUR_US)  # index of the first hour after the window
-                if i < WINDOW_H or i >= len(ts):
-                    continue
-                adv = qv[max(0, i - 28 * 24):i].sum() / 28.0
-                if adv < MIN_ADV_USD:
-                    continue
-                j = i + HORIZON_D * 24
-                delisted_inside = j >= len(ts) and ts[-1] < (time.time() * 1e6 - 3 * DAY_US)
-                if j < len(ts):
-                    fwd = math.log(close[j - 1] / close[i - 1])
-                    fvol = math.log(float((r[i:j] ** 2).sum()) + 1e-10)
-                elif delisted_inside:  # keep the losers: return to the last close
-                    fwd = math.log(close[-1] / close[i - 1])
-                    fvol = math.log(float((r[i:] ** 2).sum()) + 1e-10)
-                else:
-                    fwd, fvol = float("nan"), float("nan")
-                rows.append((ci, i, a, fwd, fvol))
+        for s0 in syms:
+            for s, h in load_segments(root, s0):
+                ts = h["open_time_us"].to_numpy()
+                btc_r = np.array([self.btc_ret.get(int(t), 0.0) for t in ts], dtype=np.float32)
+                x = np.stack([h["ret"].to_numpy(), h["rng"].to_numpy(), h["vol_z"].to_numpy(),
+                              h["taker"].to_numpy(), btc_r], axis=1).astype(np.float32)
+                x[:, 0] *= 100.0  # returns in percent: comparable scales across channels
+                x[:, 1] *= 100.0
+                x[:, 4] *= 100.0
+                ci = len(self.series)
+                self.series.append(x)
+                self.times.append(ts)
+                self.symbols.append(s)
+                close = h["close"].to_numpy()
+                qv = h["quote_volume"].to_numpy()
+                r = h["ret"].to_numpy()
+                ended = ts[-1] < (time.time() * 1e6 - 3 * DAY_US)
+                # Daily anchors at 00:00 UTC: everything before the anchor is known.
+                first = int(np.ceil(ts[0] / DAY_US)) * DAY_US
+                for a in range(first + MIN_HISTORY_D * DAY_US, int(ts[-1]) + 1, DAY_US):
+                    i = int((a - ts[0]) // HOUR_US)  # index of the first hour after the window
+                    if i < WINDOW_H or i >= len(ts):
+                        continue
+                    adv = qv[max(0, i - 28 * 24):i].sum() / 28.0
+                    if adv < MIN_ADV_USD:
+                        continue
+                    j = i + HORIZON_D * 24
+                    if j < len(ts):
+                        fwd = math.log(close[j - 1] / close[i - 1])
+                        fvol = math.log(float((r[i:j] ** 2).sum()) + 1e-10)
+                    elif ended:  # delisted or replaced inside the week: return to the last close
+                        fwd = math.log(close[-1] / close[i - 1])
+                        fvol = math.log(float((r[i:] ** 2).sum()) + 1e-10)
+                    else:
+                        fwd, fvol = float("nan"), float("nan")
+                    rows.append((ci, i, a, fwd, fvol))
         a = np.array(rows, dtype=np.float64)
         self.coin = a[:, 0].astype(np.int64)
         self.idx = a[:, 1].astype(np.int64)
