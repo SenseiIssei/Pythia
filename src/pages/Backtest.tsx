@@ -3,6 +3,9 @@ import { FlaskConical, Play } from "lucide-react";
 import { useStore } from "../store";
 import { Button, Card, PageHeader, Badge, Sparkline, StatCard } from "../components/ui";
 import { backtest, type BacktestResult } from "../engine/backtest";
+import { costVenueFor, modelFor } from "../engine/costs";
+import { PnlLines } from "../components/PnlBreakdown";
+import type { StrategyConfig } from "../types";
 import { TrendingUp, Activity, Percent, ArrowDownWideNarrow } from "lucide-react";
 
 export function Backtest() {
@@ -67,11 +70,22 @@ export function Backtest() {
       {result && result.ok && (
         <>
           <div className="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard label="Total Return" value={`${result.totalReturnPct >= 0 ? "+" : ""}${result.totalReturnPct.toFixed(1)}%`} icon={TrendingUp} tone={result.totalReturnPct >= 0 ? "green" : "red"} />
+            <StatCard label="Net Return" value={`${result.totalReturnPct >= 0 ? "+" : ""}${result.totalReturnPct.toFixed(1)}%`} icon={TrendingUp} tone={result.totalReturnPct >= 0 ? "green" : "red"} sub="after costs" />
             <StatCard label="Sharpe" value={result.sharpe.toFixed(2)} icon={Activity} tone={result.sharpe >= 1 ? "green" : result.sharpe >= 0 ? "cyan" : "red"} />
             <StatCard label="Max Drawdown" value={`${result.maxDrawdownPct.toFixed(1)}%`} icon={ArrowDownWideNarrow} tone="red" />
             <StatCard label="Win Rate" value={`${(result.winRate * 100).toFixed(0)}%`} sub={`${result.trades} trades`} icon={Percent} tone="purple" />
           </div>
+          <Card
+            className="mb-4"
+            title="Gross, costs, net"
+            right={<Badge tone={result.pnl.costHeavy ? "red" : "neutral"}>{costLabel(strat)}</Badge>}
+          >
+            <PnlLines pnl={result.pnl} />
+            <div className="mt-2 text-[11px] text-cyber-text-faint">
+              Gross is what the same trades would have made at the quoted price with no fees, spread or impact.
+              Costs come from <span className="font-mono">config/costs.json</span> for this venue and instrument.
+            </div>
+          </Card>
           <Card title="Backtest Equity Curve" right={<Badge tone={result.profitFactor >= 1 ? "green" : "red"}>PF {result.profitFactor.toFixed(2)}</Badge>}>
             <Sparkline data={result.equityCurve} height={200} tone={result.totalReturnPct >= 0 ? "green" : "red"} />
             <div className="mt-2 flex justify-between text-xs text-cyber-text-faint">
@@ -87,6 +101,15 @@ export function Backtest() {
       )}
     </div>
   );
+}
+
+/** "Kraken · 40 bps taker + 2 bps spread" for the strategy's first market. */
+function costLabel(s?: StrategyConfig): string {
+  if (!s) return "";
+  const venue = costVenueFor(s.venueClass);
+  const symbol = (s.universe[0] ?? "").split(":")[1] ?? "";
+  const m = modelFor(venue, symbol);
+  return `${venue} · ${m.takerBps} bps fee + ${m.halfSpreadBps} bps spread per side`;
 }
 
 function NumField({ label, value, onChange, step, min, max }: { label: string; value: number; onChange: (v: number) => void; step: number; min: number; max: number }) {
