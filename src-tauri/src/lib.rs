@@ -202,6 +202,7 @@ pub fn run() {
             commands::live_diagnostics,
             commands::send_test_order,
             commands::research_sweep,
+            commands::run_validation,
             commands::exchanges,
             commands::save_exchange_keys,
             commands::clear_exchange_keys,

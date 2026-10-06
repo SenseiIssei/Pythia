@@ -18,5 +18,6 @@ pub mod marketdata;
 pub mod predict;
 pub mod prefs;
 pub mod research;
+pub mod validation;
 pub mod vault;
 pub mod wallets;

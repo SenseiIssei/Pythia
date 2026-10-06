@@ -12,6 +12,7 @@ use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venu
 use crate::costs::{self, CostModel, CostVenue};
 use crate::execution::bandit;
 use crate::forecast::{self, calibration, coherence, track};
+use crate::validation;
 use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -695,6 +696,9 @@ pub struct EngineState {
     /// Whose costs `Venue::Crypto` is charged.
     #[serde(default = "default_crypto_venue")]
     pub crypto_cost_venue: CostVenue,
+    /// The Strategy Passport of every strategy: the eight validation gates.
+    #[serde(default)]
+    pub passports: Vec<validation::Passport>,
 }
 
 fn default_crypto_venue() -> CostVenue {
@@ -759,6 +763,9 @@ pub struct Persisted {
     /// never gets past exploring.
     #[serde(default)]
     pub exec_policy: bandit::ExecPolicy,
+    /// Cached validation gates 1 to 6 per strategy.
+    #[serde(default)]
+    pub research: HashMap<String, validation::ResearchVerdict>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -872,6 +879,9 @@ pub struct Engine {
     /// Which exchange's costs apply to `Venue::Crypto`. The engine is
     /// exchange-agnostic; the host says which one executes.
     crypto_venue: CostVenue,
+    /// Validation gates 1 to 6 per strategy, computed on request by the host
+    /// (they need candle history) and kept against the parameters they judged.
+    research: HashMap<String, validation::ResearchVerdict>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -937,6 +947,7 @@ impl Engine {
             actionable: HashSet::new(),
             exec_policy: bandit::ExecPolicy::default(),
             crypto_venue: CostVenue::Kraken,
+            research: HashMap::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -2466,6 +2477,38 @@ impl Engine {
         crate::research::bt_for(cfg, self.crypto_venue, self.limits.regime_filter)
     }
 
+    /// Keep freshly computed validation gates 1 to 6 for a strategy.
+    pub fn store_research(&mut self, verdict: validation::ResearchVerdict) {
+        let id = verdict.strategy_id.clone();
+        let passed = verdict.gates.iter().filter(|g| g.passed()).count();
+        self.research.insert(id.clone(), verdict);
+        self.log(
+            JournalKind::System,
+            format!("Validation checks for {id}: {passed} of 6 research gates passed"),
+            Some(id),
+            None,
+        );
+    }
+
+    /// The Strategy Passport for one strategy.
+    pub fn passport(&self, id: &str) -> Option<validation::Passport> {
+        self.strategies.iter().find(|s| s.id == id).map(|s| self.passport_for(s))
+    }
+
+    fn passport_for(&self, s: &StrategyConfig) -> validation::Passport {
+        let venue = CostVenue::for_venue(s.venue_class, Some(self.crypto_venue));
+        let slippage = self.exec_policy.slippage_for(venue.id());
+        let forward = validation::ForwardRecord {
+            paper_since: s.ledger.paper_since,
+            trades: s.ledger.forward_trades,
+            equities: s.venue_class == Venue::Alpaca,
+            now: self.now(),
+            slippage: slippage.clone(),
+        };
+        let live = validation::LiveRecord { trades: s.ledger.live_trades, slippage };
+        validation::passport(s, self.research.get(&s.id), &forward, &live)
+    }
+
     /// What the execution policy has learned so far.
     pub fn execution_report(&self) -> Vec<bandit::PolicyRow> {
         self.exec_policy.report()
@@ -2845,6 +2888,10 @@ impl Engine {
         // A deployed strategy starts with a clean record, whatever the caller
         // sent: costs and forward-test evidence are earned here, not imported.
         cfg.ledger = StrategyLedger::default();
+        // A new strategy has no passport, so it cannot arrive live.
+        if cfg.state == StrategyState::Live {
+            cfg.state = StrategyState::Paper;
+        }
         if cfg.state != StrategyState::Paused {
             cfg.ledger.paper_since = Some(self.now());
         }
@@ -2863,7 +2910,31 @@ impl Engine {
         self.limits = next;
         self.log(JournalKind::Risk, "Risk limits updated".into(), None, None);
     }
-    pub fn set_strategy_state(&mut self, id: &str, state: StrategyState) {
+    /// Pause, paper-trade or arm a strategy.
+    ///
+    /// Live is refused until the strategy's passport shows gates 1 to 7 green
+    /// (`PROFIT-PLAN.md` §2), and the refusal says which gate and why. The
+    /// one-click connection test on the Live page is not a strategy and does
+    /// not go through here.
+    pub fn set_strategy_state(&mut self, id: &str, state: StrategyState) -> Result<(), String> {
+        if state == StrategyState::Live {
+            let Some(s) = self.strategies.iter().find(|s| s.id == id) else {
+                return Err(format!("unknown strategy {id}"));
+            };
+            let pp = self.passport_for(s);
+            if !pp.live_ready {
+                let why = pp.blocked_reason.unwrap_or_else(|| "the validation gates are not green".into());
+                let name = s.name.clone();
+                self.log(JournalKind::Reject, format!("{name} stays off live. {why}"), Some(id.to_string()), None);
+                return Err(why);
+            }
+        }
+        self.apply_strategy_state(id, state);
+        Ok(())
+    }
+
+    /// The state change itself, after any gate has been checked.
+    fn apply_strategy_state(&mut self, id: &str, state: StrategyState) {
         let now = self.now();
         if let Some(s) = self.strategies.iter_mut().find(|s| s.id == id) {
             s.state = state;
@@ -2972,6 +3043,7 @@ impl Engine {
             forecast_store: self.forecast_store.clone(),
             forecast_cfg: Some(self.forecast_cfg.clone()),
             exec_policy: self.exec_policy.clone(),
+            research: self.research.clone(),
         }
     }
 
@@ -3029,7 +3101,26 @@ impl Engine {
             self.forecast_cfg = cfg;
         }
         self.exec_policy = p.exec_policy;
+        self.research = p.research;
         self.log(JournalKind::System, "Restored saved state from disk".into(), None, None);
+        // A strategy saved as Live keeps that switch only if its passport still
+        // allows it. Saves from before the gates existed, or a strategy whose
+        // parameters changed since its checks, go back to paper and say why.
+        let demote: Vec<(String, String)> = self
+            .strategies
+            .iter()
+            .filter(|s| s.state == StrategyState::Live)
+            .filter_map(|s| {
+                let pp = self.passport_for(s);
+                (!pp.live_ready).then(|| (s.id.clone(), pp.blocked_reason.unwrap_or_default()))
+            })
+            .collect();
+        for (id, why) in demote {
+            if let Some(s) = self.strategies.iter_mut().find(|s| s.id == id) {
+                s.state = StrategyState::Paper;
+            }
+            self.log(JournalKind::Risk, format!("{id} restored as PAPER, not live. {why}"), Some(id.clone()), None);
+        }
         if resolved > 0 {
             self.log(
                 JournalKind::System,
@@ -3125,6 +3216,7 @@ impl Engine {
             adaptive_execution: self.exec_policy.enabled,
             slippage: self.exec_policy.slippage_report(),
             crypto_cost_venue: self.crypto_venue,
+            passports: self.strategies.iter().filter(|s| s.id != "manual").map(|s| self.passport_for(s)).collect(),
         }
     }
 
@@ -4347,6 +4439,106 @@ mod tests {
         assert!(!out2[0].extended_hours);
     }
 
+    /// Give a strategy what it needs to go live: research gates 1 to 6 green
+    /// for its current parameters and a finished paper forward test.
+    fn make_live_ready(e: &mut Engine, id: &str) {
+        let s = e.strategy_config(id).unwrap();
+        e.store_research(validation::ResearchVerdict {
+            strategy_id: id.into(),
+            params: s.params.iter().map(|p| (p.key.clone(), p.value)).collect(),
+            checked_at: e.now(),
+            markets: 1,
+            bars: 700,
+            cost_venue: CostVenue::Alpaca,
+            gates: (1..=6)
+                .map(|g| validation::Gate {
+                    id: g,
+                    name: validation::GATE_NAMES[g as usize - 1].into(),
+                    status: validation::GateStatus::Pass,
+                    reason: "test".into(),
+                    value: Some(1.0),
+                    measure: String::new(),
+                    figures: vec![],
+                })
+                .collect(),
+        });
+        let now = e.now();
+        let s = e.strategies.iter_mut().find(|s| s.id == id).unwrap();
+        s.ledger.paper_since = Some(now - 60 * 86_400_000);
+        s.ledger.forward_trades = 40;
+    }
+
+    #[test]
+    fn live_is_refused_until_the_passport_is_green_and_says_why() {
+        let mut e = Engine::new();
+        let err = e.set_strategy_state("ema-cross-1", StrategyState::Live).unwrap_err();
+        assert!(err.contains("gate 1"), "names the first open gate: {err}");
+        assert_eq!(e.strategy_config("ema-cross-1").unwrap().state, StrategyState::Paper);
+        assert!(e.journal.iter().any(|j| j.kind == JournalKind::Reject && j.message.contains("stays off live")));
+        // Paper and pause are never gated.
+        e.set_strategy_state("ema-cross-1", StrategyState::Paused).unwrap();
+        e.set_strategy_state("ema-cross-1", StrategyState::Paper).unwrap();
+
+        make_live_ready(&mut e, "ema-cross-1");
+        e.set_strategy_state("ema-cross-1", StrategyState::Live).unwrap();
+        assert_eq!(e.strategy_config("ema-cross-1").unwrap().state, StrategyState::Live);
+    }
+
+    #[test]
+    fn changing_a_parameter_invalidates_the_checks() {
+        let mut e = Engine::new();
+        make_live_ready(&mut e, "ema-cross-1");
+        assert!(e.passport("ema-cross-1").unwrap().live_ready);
+        e.set_strategy_param("ema-cross-1", "fast", 13.0);
+        let pp = e.passport("ema-cross-1").unwrap();
+        assert!(pp.stale);
+        assert!(!pp.live_ready);
+        assert!(e.set_strategy_state("ema-cross-1", StrategyState::Live).is_err());
+    }
+
+    #[test]
+    fn a_saved_live_strategy_without_a_green_passport_restores_as_paper() {
+        let mut e = Engine::new();
+        make_live_ready(&mut e, "ema-cross-1");
+        e.set_strategy_state("ema-cross-1", StrategyState::Live).unwrap();
+        let mut saved = e.to_persisted();
+        // The checks survive the restart, so it stays live...
+        let mut back = Engine::new();
+        back.apply_persisted(saved.clone());
+        assert_eq!(back.strategy_config("ema-cross-1").unwrap().state, StrategyState::Live);
+        // ...but a save with no checks (or from before the gates) does not.
+        saved.research.clear();
+        let mut bare = Engine::new();
+        bare.apply_persisted(saved);
+        assert_eq!(bare.strategy_config("ema-cross-1").unwrap().state, StrategyState::Paper);
+        assert!(bare.journal.iter().any(|j| j.message.contains("restored as PAPER")));
+    }
+
+    #[test]
+    fn a_deployed_strategy_cannot_arrive_live() {
+        let mut e = Engine::new();
+        let mut cfg = e.strategy_config("ema-cross-1").unwrap();
+        cfg.id = "copy".into();
+        cfg.state = StrategyState::Live;
+        cfg.ledger.forward_trades = 999; // imported evidence is not evidence
+        e.add_strategy(cfg);
+        let s = e.strategy_config("copy").unwrap();
+        assert_eq!(s.state, StrategyState::Paper);
+        assert_eq!(s.ledger.forward_trades, 0);
+    }
+
+    #[test]
+    fn every_strategy_has_a_passport_on_the_wire() {
+        let e = Engine::new();
+        let v = serde_json::to_value(e.state()).unwrap();
+        let pps = v["passports"].as_array().unwrap();
+        assert_eq!(pps.len(), e.strategies.iter().filter(|s| s.id != "manual").count());
+        let pp = &pps[0];
+        assert_eq!(pp["gates"].as_array().unwrap().len(), 8);
+        assert_eq!(pp["liveReady"], false);
+        assert!(pp["blockedReason"].as_str().unwrap().contains("Not ready"));
+    }
+
     /// End-to-end reproduction of a fully configured live setup: keys in, real
     /// equity candles loaded, armed on the paper endpoint, the equities
     /// strategy set Live, market open. An order must reach the outbox.
@@ -4372,7 +4564,8 @@ mod tests {
             change24h: 0.01,
         }]);
 
-        e.set_strategy_state("breakout-1", StrategyState::Live);
+        make_live_ready(&mut e, "breakout-1");
+        e.set_strategy_state("breakout-1", StrategyState::Live).expect("a green passport may go live");
         e.set_live(armed_alpaca());
         let status = open_market(&e);
         e.set_broker_status(status);
