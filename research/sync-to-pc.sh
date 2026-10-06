@@ -17,6 +17,13 @@ main() {
   today="$(date -u +%Y-%m-%d)"
   mkdir -p "$local_root"
   local log="$local_root/sync.log"
+  # One run at a time: the first pull of several GB outlasts the 2-hour schedule.
+  local lock="$local_root/.sync.lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    echo "$(date -u +%FT%TZ) another sync is running, skipped" >> "$log"
+    return 0
+  fi
+  trap 'rmdir "$lock"' EXIT
 
   # path<TAB>size for every file the VPS has finished writing
   local remote_list local_list want
