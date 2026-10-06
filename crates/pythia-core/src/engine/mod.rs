@@ -2859,8 +2859,61 @@ impl Engine {
     }
 
     // ── manual actions (from the UI) ────────────────────────────────────────
+
+    /// A Buy/Sell click. Practice only: it never reaches a real venue.
+    ///
+    /// Real money moves for two reasons and no others: a strategy whose Strategy
+    /// Passport is green, or the one-click connection test. A hand-placed order
+    /// has no passport, so on a venue that is armed for live routing it is
+    /// refused with the reason in the journal. It is deliberately not turned
+    /// into a paper fill there: next to a red "real money" banner, a filled
+    /// order would read as a real one. Disarmed, it paper-trades as before.
+    /// Closing a position (`flatten`) is never blocked.
     pub fn manual_order(&mut self, market_id: &str, side: Side, notional: f64) {
         let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
+        if self.live_routable(m.venue) {
+            let reason = "manual orders never go live: only a strategy with a green Strategy Passport, \
+                          or the connection test, may send a real order. Disarm to practise by hand"
+                .to_string();
+            let qty = notional / m.price;
+            let order = self.build_order("manual", &m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+            self.orders.insert(0, order);
+            self.log(JournalKind::Reject, format!("Manual order refused: {reason}"), Some("manual".into()), Some(m.id.clone()));
+            return;
+        }
+        self.place_manual(&m, side, notional, RouteIntent::Paper);
+    }
+
+    /// The one-click connection test: the smallest order the venue accepts, sent
+    /// live to prove the pipeline. The only order without a passport that may
+    /// reach a real venue, and only when `test_order_block` has nothing against it.
+    pub fn connection_test_order(&mut self, market_id: &str, notional: f64) -> Result<(), String> {
+        if let Some(why) = self.test_order_block(market_id) {
+            return Err(why);
+        }
+        let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else {
+            return Err(format!("unknown market {market_id}"));
+        };
+        self.log(
+            JournalKind::System,
+            format!("Connection test: {} for ${notional:.2}, the venue minimum, not a strategy", m.symbol),
+            Some("manual".into()),
+            Some(m.id.clone()),
+        );
+        self.place_manual(&m, Side::Buy, notional, RouteIntent::Live);
+        Ok(())
+    }
+
+    /// Engine-internal tests drive the live-routing machinery through this, now
+    /// that a manual click no longer can.
+    #[cfg(test)]
+    pub(crate) fn live_order_for_test(&mut self, market_id: &str, side: Side, notional: f64) {
+        let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
+        self.place_manual(&m, side, notional, RouteIntent::Live);
+    }
+
+    fn place_manual(&mut self, m: &Market, side: Side, notional: f64, intent: RouteIntent) {
+        let m = m.clone();
         let qty = notional / m.price;
         let req = crate::connectors::OrderRequest {
             symbol: m.symbol.clone(),
@@ -2883,9 +2936,7 @@ impl Engine {
         }
         // manual uses a synthetic strategy slot (index found or fall back to first)
         let idx = self.ensure_manual_strategy();
-        // A manual click on a live-enabled venue while armed is an intentional
-        // live order — that is the whole point of the button.
-        self.route_fill(idx, &m, side, decision.qty, m.price, RouteIntent::Live);
+        self.route_fill(idx, &m, side, decision.qty, m.price, intent);
     }
 
     pub fn flatten(&mut self, market_id: &str) {
@@ -3600,7 +3651,7 @@ mod tests {
     #[test]
     fn a_closed_long_shows_up_in_the_strategy_stats() {
         let mut e = Engine::new();
-        e.manual_order("alpaca:MSFT", Side::Buy, 2_000.0);
+        e.live_order_for_test("alpaca:MSFT", Side::Buy, 2_000.0);
         e.flatten("alpaca:MSFT");
         let s = e.strategies.iter().find(|s| s.id == "manual").unwrap();
         assert_eq!(s.trades, 1, "a round trip is a trade");
@@ -3611,7 +3662,7 @@ mod tests {
     fn a_paper_fill_pays_the_cost_model_not_a_flat_guess() {
         let mut e = Engine::new();
         let px = e.price_of("crypto:BTC/USD");
-        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        e.live_order_for_test("crypto:BTC/USD", Side::Buy, 1_000.0);
         let (qty, avg) = {
             let pos = e.positions.get("crypto:BTC/USD").expect("a paper buy fills");
             (pos.qty, pos.avg_price)
@@ -3634,7 +3685,7 @@ mod tests {
     #[test]
     fn gross_is_the_same_trades_at_the_quoted_price() {
         let mut e = Engine::new();
-        e.manual_order("crypto:BTC/USD", Side::Buy, 2_000.0);
+        e.live_order_for_test("crypto:BTC/USD", Side::Buy, 2_000.0);
         // The market moves up 5 % before the exit.
         let px = e.price_of("crypto:BTC/USD");
         if let Some(m) = e.markets.iter_mut().find(|m| m.id == "crypto:BTC/USD") {
@@ -3658,7 +3709,7 @@ mod tests {
         let mut binance = Engine::new();
         binance.set_crypto_cost_venue(Some(CostVenue::Binance));
         for e in [&mut kraken, &mut binance] {
-            e.manual_order("crypto:ETH/USD", Side::Buy, 2_000.0);
+            e.live_order_for_test("crypto:ETH/USD", Side::Buy, 2_000.0);
         }
         let fees = |e: &Engine| e.strategies.iter().find(|s| s.id == "manual").unwrap().ledger.fees;
         assert!(fees(&kraken) > 3.0 * fees(&binance), "40 bps vs 10 bps taker");
@@ -3668,7 +3719,7 @@ mod tests {
     #[test]
     fn a_round_trip_reports_gross_costs_and_net_that_add_up() {
         let mut e = Engine::new();
-        e.manual_order("alpaca:AAPL", Side::Buy, 5_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 5_000.0);
         assert!(e.positions.contains_key("alpaca:AAPL"));
         e.flatten("alpaca:AAPL");
         assert!(!e.positions.contains_key("alpaca:AAPL"));
@@ -3687,7 +3738,7 @@ mod tests {
     fn risk_kill_switch_blocks_buys() {
         let mut e = Engine::new();
         e.limits.kill_switch = true;
-        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        e.live_order_for_test("crypto:BTC/USD", Side::Buy, 1_000.0);
         // a buy under kill switch must not open a position
         assert!(e.positions.get("crypto:BTC/USD").is_none());
         // and it should be journaled as a rejection
@@ -3745,7 +3796,7 @@ mod tests {
         let mut e = Engine::new();
 
         // Disarmed: a manual Alpaca order fills as paper immediately, nothing queued.
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty());
         assert!(e.positions.contains_key("alpaca:AAPL"));
         e.flatten("alpaca:AAPL");
@@ -3756,7 +3807,7 @@ mod tests {
         e.set_live(armed_alpaca());
         let status = open_market(&e);
         e.set_broker_status(status);
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         let out = e.drain_live_orders();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].symbol, "AAPL");
@@ -3772,7 +3823,7 @@ mod tests {
         assert!(!e.in_flight_markets.contains("alpaca:AAPL"));
 
         // Crypto is not in the armed venue list, so it still simulates.
-        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        e.live_order_for_test("crypto:BTC/USD", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty());
         assert!(e.positions.contains_key("crypto:BTC/USD"));
     }
@@ -3788,13 +3839,13 @@ mod tests {
             timeout_sec: 60,
             extended_hours: false,
         });
-        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        e.live_order_for_test("crypto:BTC/USD", Side::Buy, 1_000.0);
         let out = e.drain_live_orders();
         assert_eq!(out.len(), 1, "crypto must route when Crypto is armed");
         assert_eq!(out[0].venue, Venue::Crypto);
         assert_eq!(out[0].symbol, "BTC/USD");
         // ...and Alpaca must not, because it is not in the list.
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty());
     }
 
@@ -3802,7 +3853,7 @@ mod tests {
     fn partial_fills_book_once_each_not_once_per_poll() {
         let mut e = engine_with_open_market();
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:AAPL", Side::Buy, 10_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 10_000.0);
         let o = e.drain_live_orders().remove(0);
         e.apply_live_ack(&o.order_id, "b1");
 
@@ -3828,7 +3879,7 @@ mod tests {
     fn a_cancelled_order_that_partially_filled_keeps_what_filled() {
         let mut e = engine_with_open_market();
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:NVDA", Side::Buy, 5_000.0);
+        e.live_order_for_test("alpaca:NVDA", Side::Buy, 5_000.0);
         let o = e.drain_live_orders().remove(0);
         e.apply_live_ack(&o.order_id, "b2");
         e.apply_live_update(&o.order_id, update(BrokerOrderStatus::PartiallyFilled, o.qty * 0.3, 140.0));
@@ -3845,7 +3896,7 @@ mod tests {
     fn a_live_position_is_never_closed_by_the_simulator() {
         let mut e = engine_with_open_market();
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().remove(0);
         e.apply_live_ack(&o.order_id, "b3");
         e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, 228.0));
@@ -3906,7 +3957,7 @@ mod tests {
     fn poll_list_asks_for_a_cancel_once_the_timeout_passes() {
         let mut e = engine_with_open_market();
         e.set_live(LiveConfig { timeout_sec: 15, ..armed_alpaca() });
-        e.manual_order("alpaca:MSFT", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:MSFT", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().remove(0);
 
         // Nothing to poll until the venue acknowledges it.
@@ -3931,7 +3982,7 @@ mod tests {
     fn a_rejected_submission_frees_the_market_for_the_next_signal() {
         let mut e = engine_with_open_market();
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:TSLA", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().remove(0);
         assert!(e.in_flight_markets.contains("alpaca:TSLA"));
 
@@ -3951,7 +4002,7 @@ mod tests {
 
         // Off: every order crosses, exactly as before.
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().remove(0);
         assert_eq!(o.style, bandit::ExecStyle::Cross);
 
@@ -3972,7 +4023,7 @@ mod tests {
         let mut e = engine_with_open_market();
         e.set_adaptive_execution(true);
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:NVDA", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:NVDA", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().remove(0);
         e.apply_live_ack(&o.order_id, "b2");
         // Timed out and cancelled with nothing done.
@@ -3992,7 +4043,7 @@ mod tests {
         let mut e = engine_with_open_market();
         e.set_adaptive_execution(true);
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().remove(0);
         e.apply_live_ack(&o.order_id, "b3");
         e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, o.ref_price));
@@ -4012,21 +4063,21 @@ mod tests {
     fn a_refused_market_backs_off_instead_of_retrying_every_tick() {
         let mut e = engine_with_open_market();
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:TSLA", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().remove(0);
         e.apply_live_reject(&o.order_id, "US market closed");
 
         // The same signal fires again immediately — it must not resend.
-        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:TSLA", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty(), "a closed market must not get one order per tick");
 
         // A different market is unaffected.
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         assert_eq!(e.drain_live_orders().len(), 1);
 
         // Once the backoff expires it tries again — the market may have opened.
         e.live_backoff_until.insert("alpaca:TSLA".into(), 0);
-        e.manual_order("alpaca:TSLA", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:TSLA", Side::Buy, 1_000.0);
         assert_eq!(e.drain_live_orders().len(), 1, "backoff must expire, not latch");
     }
 
@@ -4165,7 +4216,7 @@ mod tests {
     fn a_live_fill_reaches_the_wire_with_its_realised_and_modelled_slippage() {
         let mut e = engine_with_open_market();
         e.set_live(armed_alpaca());
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         let o = e.drain_live_orders().pop().expect("an order went out");
         e.apply_live_ack(&o.order_id, "b1");
         e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, o.ref_price * 1.0005));
@@ -4346,7 +4397,7 @@ mod tests {
     #[test]
     fn reconciliation_leaves_paper_positions_alone() {
         let mut e = Engine::new();
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0); // paper fill
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0); // paper fill
         assert!(e.positions.contains_key("alpaca:AAPL"));
         // The broker reports nothing — which is correct, this was never real.
         e.reconcile_positions(Venue::Alpaca, &[], false);
@@ -4360,7 +4411,7 @@ mod tests {
     fn arming_with_no_venues_routes_nothing() {
         let mut e = Engine::new();
         e.set_live(LiveConfig { venues: vec![], timeout_sec: 60, ..armed_alpaca() });
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty(), "armed but with no venue enabled is still safe");
         assert!(e.positions.contains_key("alpaca:AAPL"), "it simulates instead");
     }
@@ -4400,7 +4451,7 @@ mod tests {
 
         // Never checked → refuse. "Probably open" is not a risk control.
         assert!(e.live_block_reason().is_some());
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty(), "no order may leave without a session check");
         assert!(e.orders.iter().any(|o| o.status == OrderStatus::Rejected));
 
@@ -4414,7 +4465,7 @@ mod tests {
         let ok = open_market(&e);
         e.set_broker_status(ok);
         assert!(e.live_block_reason().is_none());
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         assert_eq!(e.drain_live_orders().len(), 1);
     }
 
@@ -4428,7 +4479,7 @@ mod tests {
         e.set_broker_status(closed);
 
         // Entry refused, with a reason a human can act on.
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         assert!(e.drain_live_orders().is_empty());
         assert!(e
             .journal
@@ -4493,7 +4544,7 @@ mod tests {
         after_hours.extended_open = true;
         e.set_broker_status(after_hours);
 
-        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         let out = e.drain_live_orders();
         assert_eq!(out.len(), 1);
         assert!(out[0].extended_hours, "the connector needs this to send a limit order");
@@ -4504,7 +4555,7 @@ mod tests {
         e2.set_live(armed_alpaca_ext(true));
         let status = open_market(&e2);
         e2.set_broker_status(status);
-        e2.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        e2.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         let out2 = e2.drain_live_orders();
         assert_eq!(out2.len(), 1);
         assert!(!out2[0].extended_hours);
@@ -4893,5 +4944,65 @@ mod tests {
             e2.positions.get("alpaca:AAPL").unwrap().live,
             "a restart must not downgrade real shares to a paper position"
         );
+    }
+
+    #[test]
+    fn a_manual_click_never_reaches_a_real_venue() {
+        let mut e = Engine::new();
+
+        // Disarmed: practising by hand works as before.
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty());
+        assert!(e.positions.contains_key("alpaca:AAPL"));
+        e.flatten("alpaca:AAPL");
+
+        // Armed: refused with a reason. No outbox entry, and no paper fill
+        // either, which next to the real-money banner would read as a real order.
+        e.set_live(armed_alpaca());
+        let status = open_market(&e);
+        e.set_broker_status(status);
+        e.manual_order("alpaca:MSFT", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty());
+        assert!(!e.positions.contains_key("alpaca:MSFT"));
+        assert_eq!(e.orders[0].status, OrderStatus::Rejected);
+        assert!(e.state().journal.iter().any(|j| j.message.contains("never go live")));
+
+        // A venue that is not armed still practises.
+        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        assert!(e.drain_live_orders().is_empty());
+        assert!(e.positions.contains_key("crypto:BTC/USD"));
+    }
+
+    #[test]
+    fn the_connection_test_is_the_one_order_that_goes_live_without_a_passport() {
+        let mut e = Engine::new();
+        assert!(e.connection_test_order("alpaca:AAPL", 10.0).is_err(), "disarmed: nothing to test");
+
+        e.set_live(armed_alpaca());
+        let status = open_market(&e);
+        e.set_broker_status(status);
+        e.connection_test_order("alpaca:AAPL", 10.0).unwrap();
+        let out = e.drain_live_orders();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].venue, Venue::Alpaca);
+        assert!(e.connection_test_order("alpaca:AAPL", 10.0).is_err(), "one in flight is enough");
+    }
+
+    #[test]
+    fn closing_a_real_position_is_never_blocked() {
+        let mut e = Engine::new();
+        e.set_live(armed_alpaca());
+        let status = open_market(&e);
+        e.set_broker_status(status);
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
+        let out = e.drain_live_orders();
+        e.apply_live_ack(&out[0].order_id, "broker-1");
+        e.apply_live_update(&out[0].order_id, update(BrokerOrderStatus::Filled, out[0].qty, 228.0));
+        assert!(e.positions.get("alpaca:AAPL").map(|p| p.live).unwrap_or(false));
+
+        e.flatten("alpaca:AAPL");
+        let exit = e.drain_live_orders();
+        assert_eq!(exit.len(), 1, "the exit must go to the broker");
+        assert_eq!(exit[0].side, Side::Sell);
     }
 }

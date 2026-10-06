@@ -399,7 +399,7 @@ mod tests {
         {
             let mut e = engine.lock().unwrap();
             e.set_live(LiveConfig { dry_run: true, ..armed(vec![Venue::Alpaca]) });
-            e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+            e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         }
         // No credentials at all — a dry run must still resolve cleanly.
         submit_pending(&engine, &Credentials::default()).await;
@@ -418,7 +418,7 @@ mod tests {
             let mut e = engine.lock().unwrap();
             e.set_live(armed(vec![Venue::Alpaca]));
             e.set_broker_status(open_market());
-            e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+            e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
         }
         submit_pending(&engine, &Credentials::default()).await;
 
@@ -435,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_is_a_no_op_while_disarmed() {
         let engine = Mutex::new(Engine::new());
-        engine.lock().unwrap().manual_order("alpaca:AAPL", Side::Buy, 1_000.0); // paper
+        engine.lock().unwrap().live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0); // paper
         reconcile(&engine, &Credentials::default()).await;
         assert!(
             engine.lock().unwrap().state().positions.iter().any(|p| p.market_id == "alpaca:AAPL"),

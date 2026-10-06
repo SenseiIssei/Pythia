@@ -385,10 +385,7 @@ pub fn send_test_order(
     let notional = if notional > 0.0 { notional.clamp(1.0, 5_000.0) } else { e.connection_test_notional(&market_id) };
     // Armed, venue enabled, nothing in flight, and (for Alpaca) a fresh open
     // session. Otherwise this would only paper-fill, which proves nothing.
-    if let Some(why) = e.test_order_block(&market_id) {
-        return Err(why);
-    }
-    e.manual_order(&market_id, Side::Buy, notional);
+    e.connection_test_order(&market_id, notional)?;
     // The engine journals what happened synchronously; surface the newest entry
     // for this market so the caller sees submit-or-reject rather than silence.
     let msg = e
