@@ -173,6 +173,9 @@ export class ServerEngineClient implements EngineClient {
   adaptiveExecution() {
     return this.state.adaptiveExecution ?? false;
   }
+  slippage() {
+    return this.state.slippage ?? [];
+  }
   setAdaptiveExecution(on: boolean) {
     this.send({ cmd: "setAdaptiveExecution", on });
   }

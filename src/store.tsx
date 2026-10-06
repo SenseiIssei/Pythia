@@ -22,6 +22,7 @@ import type {
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
+  SlippageRow,
   StrategyConfig,
   Track,
 } from "./types";
@@ -42,6 +43,8 @@ interface Store {
   forecastStats: ForecastStats;
   execution: PolicyRow[];
   adaptiveExecution: boolean;
+  /** Realised against modelled slippage per venue (live fills only). */
+  slippage: SlippageRow[];
   /** Market ids running on real exchange candles rather than the simulator. */
   barBacked: Set<string>;
   aiViews: AiView[];
@@ -88,6 +91,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       forecastStats: engine.forecastStats(),
       execution: engine.execution(),
       adaptiveExecution: engine.adaptiveExecution(),
+      slippage: engine.slippage(),
       barBacked: new Set(engine.barBacked()),
       aiViews: engine.aiViews(),
       aiPolicy: engine.aiPolicy(),

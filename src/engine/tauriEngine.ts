@@ -132,6 +132,9 @@ export class TauriEngineClient implements EngineClient {
   adaptiveExecution() {
     return this.state.adaptiveExecution ?? false;
   }
+  slippage() {
+    return this.state.slippage ?? [];
+  }
   setAdaptiveExecution(on: boolean) {
     void invoke("set_adaptive_execution", { on });
   }
