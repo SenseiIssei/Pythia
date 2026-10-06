@@ -238,19 +238,26 @@ Alpaca equities are commission-free; the cost is entirely spread and timing. Cry
 
 ## 5. Capital allocation and risk — where the compounding actually happens
 
-The risk manager is the strongest part of the codebase and is largely done: kill switch, daily-loss
-cap, drawdown breaker, per-strategy budgets, fractional Kelly, volatility targeting, loss-streak
-cooldowns, adaptive allocation. What is missing:
+The risk manager is the strongest part of the codebase: kill switch, daily-loss cap, drawdown
+breaker, per-strategy budgets, fractional Kelly, volatility targeting, loss-streak cooldowns,
+adaptive allocation. Phase D added the three portfolio-level pieces below (formulas in
+`crates/pythia-core/src/engine/risk.rs`, live numbers on the Risk page):
 
-- **Correlation-aware exposure.** Ten crypto longs are one trade with ten names on it. The Correlation
-  page computes the matrix but the risk manager does not consume it. Gross exposure should be capped
-  on *correlation-adjusted* exposure, not the raw sum.
-- **Kelly on measured edge, not on signal strength.** `place_from_intent` currently sizes off
-  `intent.confidence`, which is an indicator reading, not a win probability. Once a strategy has 30+
-  trades, size from its *realised* win rate and payoff ratio, shrunk toward the prior.
+- **Correlation-aware exposure (built).** Ten crypto longs are one trade with ten names on it. The
+  book is measured as `E = sqrt(w' C w)`, signed notional per market against the return correlation
+  over the last 60 closes, the same matrix the Correlation page draws. New entries are capped on
+  `E` (`maxCorrelatedExposurePct`, default 40 % of equity) as well as on the raw sum, downsized to
+  fit or refused with the reason in the journal. An unmeasurable correlation counts as 1.
+- **Kelly on measured edge (built).** Under 30 closed trades a strategy is still sized off
+  `intent.confidence`. From 30 on it is sized off its *realised* record: `f = p - (1 - p) / b` on net
+  returns, shrunk toward no edge by `n / (n + 30)`, at most quarter Kelly, never above what full
+  confidence would deploy. A record with no edge sizes entries to zero.
+- **Drawdown-proportional de-risking (built).** Entries are multiplied by
+  `1 - drawdown / maxDrawdownPct`: half size at half the limit, nothing new at the breaker.
+
+Still missing:
+
 - **Volatility targeting at the portfolio level**, not per position.
-- **Drawdown-proportional de-risking**: halve size at 50% of the drawdown limit rather than trading
-  full size straight into the breaker.
 
 ---
 
@@ -327,9 +334,10 @@ and the project says so rather than shipping a losing default.
 
 ### Phase D — Correlation-aware risk and portfolio sizing (2–3 weeks)
 
-- [ ] Risk manager consumes the correlation matrix
-- [ ] Kelly from realised edge once a strategy has 30+ trades
-- [ ] Drawdown-proportional de-risking
+- [x] Risk manager consumes the correlation matrix
+- [x] Kelly from realised edge once a strategy has 30+ trades
+- [x] Drawdown-proportional de-risking
+- [ ] Volatility targeting at the portfolio level
 
 ### Phase E — Venue breadth
 
