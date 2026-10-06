@@ -16,6 +16,7 @@ use pythia_core::forecast::ForecastConfig;
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::predict::{self, EnsembleKeys, EnsembleRun};
 use pythia_core::prefs::{self, Prefs};
+use pythia_core::research::{self, backtest::BacktestConfig, SweepReport};
 use pythia_core::vault;
 use pythia_core::wallets::{self, WalletSources, WalletsSnapshot, WatchedAddress};
 use std::collections::BTreeMap;
@@ -389,6 +390,37 @@ pub fn send_test_order(
     drop(e);
     push_state(&app);
     Ok(msg)
+}
+
+/// A strategy's config, its research backtest settings and its daily candles,
+/// fetched without holding the engine lock across the network.
+async fn research_inputs(
+    app: &AppHandle,
+    strategy_id: &str,
+) -> Result<(StrategyConfig, BacktestConfig, research::Universe), String> {
+    let st = app.state::<AppState>();
+    let (cfg, bt, paper) = {
+        let e = st.engine.lock().unwrap();
+        let cfg = e.strategy_config(strategy_id).ok_or_else(|| format!("unknown strategy {strategy_id}"))?;
+        let bt = e.research_bt(&cfg);
+        (cfg, bt, e.live_config().paper)
+    };
+    let creds = credentials(st.inner());
+    let (key, secret) = alpaca_data_keys(&creds, paper);
+    let alpaca = (!key.is_empty()).then(|| (key, secret, get_prefs().alpaca_feed));
+    let universe = research::fetch_daily_universe(&cfg, alpaca).await?;
+    Ok((cfg, bt, universe))
+}
+
+/// Sweep a strategy's parameter grid on real daily candles, with every
+/// result's deflated Sharpe and out-of-sample/in-sample ratio. Backs the
+/// Optimizer page.
+#[tauri::command]
+pub async fn research_sweep(app: AppHandle, strategy_id: String) -> Result<SweepReport, String> {
+    let (cfg, bt, universe) = research_inputs(&app, &strategy_id).await?;
+    tauri::async_runtime::spawn_blocking(move || research::sweep(&cfg, &universe, &bt, 0.6))
+        .await
+        .map_err(|e| format!("sweep failed: {e}"))
 }
 
 /// Read-only Alpaca account check (buying power, status) for the connection test.

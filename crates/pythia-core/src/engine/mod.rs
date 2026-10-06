@@ -2455,6 +2455,17 @@ impl Engine {
         self.exec_policy.slippage_report()
     }
 
+    /// One strategy's configuration, for research runs off the engine lock.
+    pub fn strategy_config(&self, id: &str) -> Option<StrategyConfig> {
+        self.strategies.iter().find(|s| s.id == id).cloned()
+    }
+
+    /// The backtest settings a strategy is researched with: its venue's costs,
+    /// its calendar, and the regime filter exactly as the engine applies it.
+    pub fn research_bt(&self, cfg: &StrategyConfig) -> crate::research::backtest::BacktestConfig {
+        crate::research::bt_for(cfg, self.crypto_venue, self.limits.regime_filter)
+    }
+
     /// What the execution policy has learned so far.
     pub fn execution_report(&self) -> Vec<bandit::PolicyRow> {
         self.exec_policy.report()

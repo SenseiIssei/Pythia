@@ -240,6 +240,7 @@ async fn main() {
         .route("/api/health", get(health))
         .route("/api/preflight", get(get_preflight))
         .route("/api/research/validate", get(get_validate))
+        .route("/api/research/sweep", get(get_sweep))
         .route("/api/state", get(get_state))
         .route("/api/stream", get(ws_stream))
         .route("/api/command", post(post_command))
@@ -643,6 +644,48 @@ async fn get_validate(
         "reports": reports,
         "skipped": skipped,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct StrategyQuery {
+    id: String,
+}
+
+/// A strategy's config, research backtest settings and daily candles, with
+/// the engine lock released before the network calls.
+async fn research_inputs(
+    st: &AppState,
+    id: &str,
+) -> Result<(StrategyConfig, BacktestConfig, research::Universe), (StatusCode, String)> {
+    let (cfg, bt) = {
+        let e = st.engine.lock().unwrap();
+        let cfg = e
+            .strategy_config(id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown strategy {id}")))?;
+        let bt = e.research_bt(&cfg);
+        (cfg, bt)
+    };
+    let alpaca = has_alpaca_keys(&st.creds).then(|| alpaca_data_keys(&st.creds));
+    let universe = research::fetch_daily_universe(&cfg, alpaca)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+    Ok((cfg, bt, universe))
+}
+
+/// Sweep one strategy's parameter grid on real daily candles, with the
+/// deflated Sharpe and out-of-sample/in-sample ratio of every configuration.
+async fn get_sweep(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<StrategyQuery>,
+) -> impl IntoResponse {
+    let (cfg, bt, universe) = match research_inputs(&st, &q.id).await {
+        Ok(x) => x,
+        Err(e) => return e.into_response(),
+    };
+    match tokio::task::spawn_blocking(move || research::sweep(&cfg, &universe, &bt, 0.6)).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("sweep failed: {e}")).into_response(),
+    }
 }
 
 async fn health() -> &'static str {
