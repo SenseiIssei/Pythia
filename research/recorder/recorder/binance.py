@@ -14,6 +14,7 @@ import logging
 import aiohttp
 
 from . import config, schemas
+from .net import reconnecting as _reconnecting
 from .sink import Sinks, now_us
 from .state import Quote, State
 
@@ -40,24 +41,6 @@ async def load_symbols(http: aiohttp.ClientSession, bases: list[str]) -> tuple[d
         if missing:
             log.warning("not listed on Binance %s, skipped: %s", label, missing)
     return spot, perp
-
-
-async def _reconnecting(name: str, state: State, body) -> None:
-    st = state.stream(name)
-    backoff = 1.0
-    while True:
-        try:
-            await body()
-            backoff = 1.0
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            st.errors += 1
-            st.note = f"{type(e).__name__}: {e}"[:200]
-            log.warning("%s ended: %s", name, st.note)
-        st.reconnects += 1
-        await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, 60)
 
 
 class BinanceSpotBook:
