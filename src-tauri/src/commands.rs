@@ -16,7 +16,8 @@ use pythia_core::forecast::ForecastConfig;
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::predict::{self, EnsembleKeys, EnsembleRun};
 use pythia_core::prefs::{self, Prefs};
-use pythia_core::research::{self, backtest::BacktestConfig, SweepReport};
+use pythia_core::research::{self, backtest::BacktestConfig, SweepReport, WalkForwardConfig};
+use pythia_core::validation::{self, Passport};
 use pythia_core::vault;
 use pythia_core::wallets::{self, WalletSources, WalletsSnapshot, WatchedAddress};
 use std::collections::BTreeMap;
@@ -152,10 +153,18 @@ pub fn set_limits(app: AppHandle, app_state: State<AppState>, patch: RiskLimits)
     push_state(&app);
 }
 
+/// Live is refused until the strategy's passport shows gates 1 to 7 green; the
+/// error is the plain-language reason, for the UI to show.
 #[tauri::command]
-pub fn set_strategy_state(app: AppHandle, app_state: State<AppState>, id: String, state: StrategyState) {
-    app_state.engine.lock().unwrap().set_strategy_state(&id, state);
+pub fn set_strategy_state(
+    app: AppHandle,
+    app_state: State<AppState>,
+    id: String,
+    state: StrategyState,
+) -> Result<(), String> {
+    let result = app_state.engine.lock().unwrap().set_strategy_state(&id, state);
     push_state(&app);
+    result
 }
 
 #[tauri::command]
@@ -421,6 +430,27 @@ pub async fn research_sweep(app: AppHandle, strategy_id: String) -> Result<Sweep
     tauri::async_runtime::spawn_blocking(move || research::sweep(&cfg, &universe, &bt, 0.6))
         .await
         .map_err(|e| format!("sweep failed: {e}"))
+}
+
+/// Run validation gates 1 to 6 for one strategy on real daily candles, keep
+/// the result in the engine, and return the full Strategy Passport.
+#[tauri::command]
+pub async fn run_validation(app: AppHandle, strategy_id: String) -> Result<Passport, String> {
+    let (cfg, bt, universe) = research_inputs(&app, &strategy_id).await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let verdict = tauri::async_runtime::spawn_blocking(move || {
+        validation::research_gates(&cfg, &universe, &bt, &WalkForwardConfig { bt, ..Default::default() }, now)
+    })
+    .await
+    .map_err(|e| format!("validation failed: {e}"))?;
+    let passport = {
+        let st = app.state::<AppState>();
+        let mut e = st.engine.lock().unwrap();
+        e.store_research(verdict);
+        e.passport(&strategy_id).ok_or_else(|| format!("unknown strategy {strategy_id}"))?
+    };
+    push_state(&app);
+    Ok(passport)
 }
 
 /// Read-only Alpaca account check (buying power, status) for the connection test.
