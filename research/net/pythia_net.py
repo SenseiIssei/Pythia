@@ -383,6 +383,10 @@ def main() -> None:
 
     oos = np.isfinite(score) & np.isfinite(panel.fwd)
     coins = np.array(panel.symbols)[panel.coin]
+    # Out-of-sample scores, for combining with M2 (research/net/ensemble.py).
+    has = np.isfinite(score)
+    pl.DataFrame({"day": panel.day[has], "symbol": coins[has], "score": score[has], "fwd": panel.fwd[has]}).write_parquet(
+        out_dir / "scores.parquet")
     rows = []
     for k in TOP_K:
         rows.append({"strategy": f"Pythia-Net top {k}", **perf(topk(panel.day[oos], coins[oos], score[oos], panel.fwd[oos], k))})
