@@ -144,11 +144,18 @@ def evidence(cfg: dict) -> dict:
         return {"report": src, "oos_sharpe": chosen["oos_sharpe"], "oos_max_dd": chosen["oos_max_dd"],
                 "is_sharpe": chosen["is_sharpe"], "deflated_p": rep["deflated_p"],
                 "sharpe_2x_cost": next((c["sharpe"] for c in rep.get("cost_sensitivity", []) if c["costs"] == "2x"), None),
-                "variants_tried": len(rep["rows"])}
+                "variants_tried": len(rep["rows"]),
+                "plateau_share": sum(r["oos_sharpe"] > 0 for r in rep["rows"]) / len(rep["rows"]),
+                "regime_sharpes": {r["regime"]: r["strategy_sharpe"] for r in rep.get("regimes", [])},
+                "regime_filter": False}
     pick = next(d for d in rep["details"] if d["family"] == "A regime")
     return {"report": src, "oos_sharpe": pick["oos_sharpe"], "oos_max_dd": pick["oos_max_dd"],
             "is_sharpe": pick["is_sharpe"], "deflated_p": pick["deflated_p"],
-            "sharpe_2x_cost": pick["sharpe_2x_cost"], "variants_tried": len(rep["rows"])}
+            "sharpe_2x_cost": pick["sharpe_2x_cost"], "variants_tried": len(rep["rows"]),
+            "plateau_share": pick["family_positive_share"],
+            "regime_sharpes": {"BTC above 200d average": pick["sharpe_btc_above"],
+                               "BTC below 200d average": pick["sharpe_btc_below"]},
+            "regime_filter": True}
 
 
 def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_us: int, now_us: int,
