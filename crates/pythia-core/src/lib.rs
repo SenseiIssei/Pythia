@@ -14,6 +14,7 @@ pub mod execution;
 pub mod forecast;
 pub mod llm;
 pub mod marketdata;
+pub mod ml;
 pub mod predict;
 pub mod prefs;
 pub mod research;

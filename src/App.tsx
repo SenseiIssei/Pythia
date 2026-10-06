@@ -21,6 +21,7 @@ import { Analytics } from "./pages/Analytics";
 import { Correlation } from "./pages/Correlation";
 import { Signals } from "./pages/Signals";
 import { Predictions } from "./pages/Predictions";
+import { Models } from "./pages/Models";
 import { Live } from "./pages/Live";
 import { Risk } from "./pages/Risk";
 import { Journal } from "./pages/Journal";
@@ -41,6 +42,7 @@ const PAGES: Record<PageId, () => ReactNode> = {
   correlation: Correlation,
   signals: Signals,
   predictions: Predictions,
+  models: Models,
   live: Live,
   risk: Risk,
   journal: Journal,

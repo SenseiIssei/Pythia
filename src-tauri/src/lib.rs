@@ -24,6 +24,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(pythia_core::ml::new_shared())
         .on_window_event(|window, event| {
             // Closing the window hides it to the tray so the engine keeps
             // running; the tray's Quit item is the real exit.
@@ -146,6 +147,10 @@ pub fn run() {
                 }
             });
 
+            // Model forecasts in shadow mode: scored every hour, never traded.
+            let ml = app.state::<pythia_core::ml::SharedMl>().inner().clone();
+            tauri::async_runtime::spawn(pythia_core::ml::run(ml));
+
             // The AI overlay, on its own clock so a slow model call can never
             // delay a tick, a stop check, or an order. Idle and free until the
             // overlay is switched on from the AI Signals page.
@@ -194,6 +199,7 @@ pub fn run() {
             commands::wallet_addresses,
             commands::save_wallet_addresses,
             commands::wallet_snapshot,
+            commands::ml_status,
             commands::run_ensemble,
             commands::forecast_config,
             commands::set_forecast_config,

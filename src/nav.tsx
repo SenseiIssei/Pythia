@@ -17,6 +17,7 @@ import {
   BrainCircuit,
   Target,
   Radio,
+  Gauge,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -34,6 +35,7 @@ export type PageId =
   | "analytics"
   | "correlation"
   | "signals"
+  | "models"
   | "predictions"
   | "live"
   | "risk"
@@ -70,6 +72,7 @@ export const NAV: NavItem[] = [
   { id: "analytics", label: "Analytics", icon: BarChart3, section: "Research", advanced: true },
   { id: "correlation", label: "Correlation", icon: Grid3x3, section: "Research", advanced: true },
   { id: "signals", label: "AI Signals", icon: BrainCircuit, section: "AI", advanced: true },
+  { id: "models", label: "Models", icon: Gauge, section: "AI", advanced: true },
   { id: "live", label: "Live", icon: Radio, section: "Control", advanced: true },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control", advanced: true },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control", advanced: true },

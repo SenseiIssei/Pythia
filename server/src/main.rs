@@ -14,7 +14,7 @@
 //! same sovereign risk manager and vault. This process only ever runs the
 //! simulated matching engine.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::{
@@ -184,6 +184,16 @@ fn bar_timeframe() -> (String, u32) {
     (tf, kraken_min)
 }
 
+/// The model service's status handle, set once at startup.
+static ML: OnceLock<pythia_core::ml::SharedMl> = OnceLock::new();
+
+async fn get_ml_status() -> impl IntoResponse {
+    match ML.get() {
+        Some(ml) => Json(ml.read().map(|s| s.clone()).unwrap_or_default()).into_response(),
+        None => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "model service not started").into_response(),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Load a local .env (gitignored) so keys never touch shell history.
@@ -213,6 +223,9 @@ async fn main() {
     // The AI overlay runs on its own clock so a slow model call can never
     // delay a tick, a stop check, or an order.
     tokio::spawn(ai_loop(state.clone()));
+    // Model forecasts in shadow mode (scored, never traded). Idles with a
+    // status message when PYTHIA_MODELS is unset.
+    let _ = ML.set(pythia_core::ml::spawn());
 
     let app = Router::new()
         .route("/api/health", get(health))
@@ -231,6 +244,7 @@ async fn main() {
         .route("/api/live/test-order", post(post_test_order))
         .route("/api/exchanges", get(get_exchanges))
         .route("/api/wallets", get(get_wallets))
+        .route("/api/ml/status", get(get_ml_status))
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         // The dashboards are served from a different origin in dev; allow them.
