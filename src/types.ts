@@ -113,6 +113,40 @@ export interface SlippageRow {
   enough: boolean;
 }
 
+// ── research (real candles, Rust) ───────────────────────────────────────────
+/** One window of a sweep. Mirrors Rust `research::WindowSummary`. */
+export interface WindowSummary {
+  sharpe: number;
+  totalReturn: number;
+  maxDrawdown: number;
+  trades: number;
+  bars: number;
+  pnl: PnlBreakdown;
+}
+
+/** One configuration in the parameter sweep. Mirrors Rust `research::SweepRow`. */
+export interface SweepRow {
+  /** `[key, value]` pairs, as the Rust tuple serialises. */
+  params: [string, number][];
+  is: WindowSummary;
+  oos: WindowSummary;
+  /** Out-of-sample over in-sample Sharpe; absent when in-sample was not positive. */
+  oosIsRatio?: number;
+  /** Probability the in-sample Sharpe is edge rather than the best of `trials` tries. */
+  deflatedSharpe: number;
+  pValue: number;
+}
+
+export interface SweepReport {
+  strategyId: string;
+  name: string;
+  trials: number;
+  isFraction: number;
+  markets: number;
+  costVenue: CostVenue;
+  rows: SweepRow[];
+}
+
 export interface RiskLimits {
   killSwitch: boolean;
   maxDailyLossPct: number; // % of equity

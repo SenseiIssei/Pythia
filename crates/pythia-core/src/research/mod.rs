@@ -112,6 +112,14 @@ pub struct StrategyReport {
     pub portfolio: Stats,
     /// Parameter sets tried per fold. Feeds the deflation.
     pub trials: usize,
+    /// Mean in-sample Sharpe of the parameters each fitted fold chose: what
+    /// the fitting saw. Unfitted folds are left out, they chose nothing.
+    pub is_sharpe: f64,
+    /// Out-of-sample Sharpe over in-sample Sharpe. Below 0.5 the fitted
+    /// parameters are mostly noise (`PROFIT-PLAN.md` §2). `None` when the
+    /// in-sample Sharpe was not positive, which makes a ratio meaningless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oos_is_ratio: Option<f64>,
     /// Probability the out-of-sample Sharpe is real rather than the best draw
     /// from `trials` attempts. ≥0.95 is the usual bar.
     pub deflated_sharpe: f64,
@@ -200,7 +208,7 @@ pub fn is_validatable(kind: StrategyKind) -> bool {
     )
 }
 
-fn with_params(base: &StrategyConfig, params: &[(String, f64)]) -> StrategyConfig {
+pub fn with_params(base: &StrategyConfig, params: &[(String, f64)]) -> StrategyConfig {
     let mut cfg = base.clone();
     // `run_strategy` emits nothing for a paused strategy. Several ship paused,
     // and validating them as-is silently produced "0 trades across 36 folds" —
@@ -386,6 +394,7 @@ pub fn walk_forward(
     let mut portfolio_returns: Vec<f64> = Vec::new();
     let mut all_trade_returns: Vec<f64> = Vec::new();
     let mut selection_vars: Vec<f64> = Vec::new();
+    let mut fitted_is_sharpes: Vec<f64> = Vec::new();
     let mut folds_run = 0usize;
     let mut folds_unfitted = 0usize;
     // Per-market accumulators, in `aligned` order.
@@ -456,7 +465,9 @@ pub fn walk_forward(
             }
             portfolio_returns.extend(pool(&series));
             folds_run += 1;
-            if !fitted {
+            if fitted {
+                fitted_is_sharpes.push(is_sharpe);
+            } else {
                 folds_unfitted += 1;
             }
         }
@@ -481,14 +492,17 @@ pub fn walk_forward(
     // across folds — the same footing as `portfolio.sharpe`, since both are
     // pooled multi-market estimates over comparable windows.
     let trial_var = metrics::mean(&selection_vars);
-    let deflated = metrics::deflated_sharpe_ratio(
+    let deflated = metrics::deflated_sharpe_annualised(
         portfolio.sharpe,
+        wf.bt.bars_per_year,
         portfolio.bars,
         portfolio.skew,
         portfolio.kurtosis,
         trials.max(1),
         trial_var,
     );
+    let is_sharpe = metrics::mean(&fitted_is_sharpes);
+    let oos_is_ratio = (is_sharpe > 0.0 && !fitted_is_sharpes.is_empty()).then(|| portfolio.sharpe / is_sharpe);
 
     let (verdict, reason) = judge(&portfolio, deflated, wf.min_trades, folds_run);
 
@@ -499,11 +513,235 @@ pub fn walk_forward(
         markets: reports,
         portfolio,
         trials,
+        is_sharpe,
+        oos_is_ratio,
         deflated_sharpe: deflated,
         verdict,
         reason,
         folds_run,
         folds_unfitted,
+    }
+}
+
+/// A universe of daily candles, as `(market id, symbol, bars)`.
+pub type Universe = Vec<(String, String, Vec<Ohlc>)>;
+
+/// Align every market on its most recent `len` bars, `len` being the shortest
+/// series, so a portfolio is pooled over one common window.
+pub fn align(markets: &[(String, String, Vec<Ohlc>)]) -> Vec<(&str, &str, &[Ohlc])> {
+    let len = markets.iter().map(|(_, _, b)| b.len()).min().unwrap_or(0);
+    markets.iter().map(|(id, sym, bars)| (id.as_str(), sym.as_str(), &bars[bars.len() - len..])).collect()
+}
+
+/// One configuration run over a set of market windows, pooled equal-weight.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pooled {
+    pub stats: Stats,
+    pub pnl: crate::costs::PnlBreakdown,
+    /// Pooled per-bar net returns.
+    #[serde(skip)]
+    pub returns: Vec<f64>,
+    /// Pooled per-bar returns with no costs.
+    #[serde(skip)]
+    pub gross_returns: Vec<f64>,
+    /// Index into each input window of the decision bar behind `returns[0]`.
+    #[serde(skip)]
+    pub first_bar: usize,
+}
+
+/// Run one configuration over several windows and pool the results.
+pub fn run_pooled(cfg: &StrategyConfig, windows: &[(&str, &str, &[Ohlc])], bt: &BacktestConfig) -> Pooled {
+    let mut net = Vec::with_capacity(windows.len());
+    let mut gross = Vec::with_capacity(windows.len());
+    let mut trades: Vec<f64> = Vec::new();
+    let mut first_bar = 0;
+    for (id, sym, bars) in windows {
+        let r = backtest::run(cfg, id, sym, bars, bt);
+        trades.extend(r.trades.iter().map(|t| t.ret));
+        first_bar = r.first_bar;
+        net.push(r.bar_returns);
+        gross.push(r.gross_bar_returns);
+    }
+    let returns = pool(&net);
+    let gross_returns = pool(&gross);
+    let stats = stats_from_returns(&returns, &trades, bt.bars_per_year);
+    let compound = |xs: &[f64]| xs.iter().fold(1.0, |e, r| e * (1.0 + r)) - 1.0;
+    let (g, n) = (compound(&gross_returns), compound(&returns));
+    Pooled {
+        stats,
+        pnl: crate::costs::PnlBreakdown::new(g, g - n),
+        returns,
+        gross_returns,
+        first_bar,
+    }
+}
+
+/// The backtest settings a strategy is judged with: its venue's costs and its
+/// market's calendar.
+pub fn bt_for(cfg: &StrategyConfig, crypto: crate::costs::CostVenue, regime_filter: bool) -> BacktestConfig {
+    let equity = cfg.venue_class == crate::connectors::Venue::Alpaca;
+    BacktestConfig {
+        venue: crate::costs::CostVenue::for_venue(cfg.venue_class, Some(crypto)),
+        // Daily bars: 365 for crypto (always open), 252 sessions for equities.
+        bars_per_year: if equity { 252.0 } else { 365.0 },
+        regime_filter,
+        ..BacktestConfig::default()
+    }
+}
+
+/// Daily candles for a strategy's own universe: Kraken for crypto (no keys
+/// needed), Alpaca for equities (`alpaca` = key id, secret, feed).
+pub async fn fetch_daily_universe(
+    cfg: &StrategyConfig,
+    alpaca: Option<(String, String, String)>,
+) -> Result<Universe, String> {
+    let equity = cfg.venue_class == crate::connectors::Venue::Alpaca;
+    let (series, prefix) = if equity {
+        let Some((key, secret, feed)) = alpaca else {
+            return Err("no equity candles: Alpaca keys are needed to fetch daily history".into());
+        };
+        // About four years of sessions; Alpaca returns what the plan covers.
+        (crate::marketdata::fetch_alpaca_bars(&key, &secret, &feed, "1Day", 1460).await, "alpaca:")
+    } else {
+        (crate::marketdata::fetch_kraken_bars(1440).await, "crypto:")
+    };
+    let out: Universe = series
+        .into_iter()
+        .filter(|s| cfg.universe.contains(&s.id))
+        .map(|s| {
+            let symbol = s.id.trim_start_matches(prefix).to_string();
+            (s.id, symbol, s.bars)
+        })
+        .collect();
+    if out.is_empty() {
+        Err(format!("no daily candles for {}'s universe", cfg.name))
+    } else {
+        Ok(out)
+    }
+}
+
+// ── the parameter sweep behind the Optimizer page ───────────────────────────
+
+/// One window's headline numbers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowSummary {
+    pub sharpe: f64,
+    pub total_return: f64,
+    pub max_drawdown: f64,
+    pub trades: usize,
+    pub bars: usize,
+    pub pnl: crate::costs::PnlBreakdown,
+}
+
+impl From<&Pooled> for WindowSummary {
+    fn from(p: &Pooled) -> Self {
+        WindowSummary {
+            sharpe: p.stats.sharpe,
+            total_return: p.stats.total_return,
+            max_drawdown: p.stats.max_drawdown,
+            trades: p.stats.trades,
+            bars: p.stats.bars,
+            pnl: p.pnl,
+        }
+    }
+}
+
+/// One parameter set in the sweep.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepRow {
+    pub params: Vec<(String, f64)>,
+    /// The fitting window: the first part of the history.
+    pub is: WindowSummary,
+    /// The hold-out: everything after it, never seen by the ranking.
+    pub oos: WindowSummary,
+    /// Out-of-sample Sharpe over in-sample Sharpe; `None` when in-sample was
+    /// not positive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oos_is_ratio: Option<f64>,
+    /// Probability the in-sample Sharpe reflects edge rather than being the
+    /// best of `trials` attempts ([`metrics::deflated_sharpe_annualised`]).
+    pub deflated_sharpe: f64,
+    /// `1 - deflated_sharpe`: below 0.05 is the usual significance bar.
+    pub p_value: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepReport {
+    pub strategy_id: String,
+    pub name: String,
+    /// Configurations tried. Every one of them raises the bar for the others.
+    pub trials: usize,
+    /// Share of the history used for fitting.
+    pub is_fraction: f64,
+    pub markets: usize,
+    pub cost_venue: crate::costs::CostVenue,
+    /// Ranked by in-sample Sharpe, which is how a naive optimizer would pick.
+    pub rows: Vec<SweepRow>,
+}
+
+/// Sweep a strategy's parameter grid on real candles: fit on the first
+/// `is_fraction` of the history, hold out the rest, and deflate every
+/// in-sample Sharpe for the number of configurations tried.
+///
+/// The rows are ranked by in-sample Sharpe on purpose. That is the ranking an
+/// optimizer without deflation shows, and next to it the deflated Sharpe and
+/// the out-of-sample/in-sample ratio say how much of it to believe.
+pub fn sweep(base: &StrategyConfig, markets: &[(String, String, Vec<Ohlc>)], bt: &BacktestConfig, is_fraction: f64) -> SweepReport {
+    let aligned = align(markets);
+    let len = aligned.first().map(|(_, _, b)| b.len()).unwrap_or(0);
+    let split = ((len as f64) * is_fraction.clamp(0.2, 0.9)) as usize;
+    let lead = split.saturating_sub(WARMUP);
+    let is_windows: Vec<(&str, &str, &[Ohlc])> = aligned.iter().map(|(i, s, b)| (*i, *s, &b[..split])).collect();
+    let oos_windows: Vec<(&str, &str, &[Ohlc])> = aligned.iter().map(|(i, s, b)| (*i, *s, &b[lead..])).collect();
+
+    let grid = param_grid(base.kind);
+    let runs: Vec<(Vec<(String, f64)>, Pooled, Pooled)> = grid
+        .iter()
+        .map(|params| {
+            let cfg = with_params(base, params);
+            (params.clone(), run_pooled(&cfg, &is_windows, bt), run_pooled(&cfg, &oos_windows, bt))
+        })
+        .collect();
+
+    let trials = runs.len().max(1);
+    let is_sharpes: Vec<f64> = runs.iter().map(|(_, is, _)| is.stats.sharpe).collect();
+    let trial_var = metrics::stdev(&is_sharpes).powi(2);
+    let mut rows: Vec<SweepRow> = runs
+        .iter()
+        .map(|(params, is, oos)| {
+            let dsr = metrics::deflated_sharpe_annualised(
+                is.stats.sharpe,
+                bt.bars_per_year,
+                is.stats.bars,
+                is.stats.skew,
+                is.stats.kurtosis,
+                trials,
+                trial_var,
+            );
+            SweepRow {
+                params: params.clone(),
+                is: is.into(),
+                oos: oos.into(),
+                oos_is_ratio: (is.stats.sharpe > 0.0).then(|| oos.stats.sharpe / is.stats.sharpe),
+                deflated_sharpe: dsr,
+                p_value: 1.0 - dsr,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.is.sharpe.partial_cmp(&a.is.sharpe).unwrap_or(std::cmp::Ordering::Equal));
+
+    SweepReport {
+        strategy_id: base.id.clone(),
+        name: base.name.clone(),
+        trials,
+        is_fraction: is_fraction.clamp(0.2, 0.9),
+        markets: aligned.len(),
+        cost_venue: bt.venue,
+        rows,
     }
 }
 
@@ -772,6 +1010,81 @@ mod tests {
             r.verdict,
             r.reason
         );
+    }
+
+    fn universe(n: usize, seeds: &[u64], gen: fn(usize, u64) -> Vec<Ohlc>) -> Vec<(String, String, Vec<Ohlc>)> {
+        seeds.iter().map(|s| (format!("crypto:M{s}"), format!("M{s}"), gen(n, *s))).collect()
+    }
+
+    fn noise(n: usize, seed: u64) -> Vec<Ohlc> {
+        series(n, seed, 0.0, 0)
+    }
+
+    #[test]
+    fn the_sweep_ranks_by_in_sample_and_deflates_every_row() {
+        let markets = universe(900, &[3, 4, 5], regime_flipping);
+        let base = StrategyConfig {
+            universe: markets.iter().map(|(id, _, _)| id.clone()).collect(),
+            ..cfg(StrategyKind::EmaCross, &[])
+        };
+        let r = sweep(&base, &markets, &BacktestConfig::default(), 0.6);
+        assert_eq!(r.trials, param_grid(StrategyKind::EmaCross).len());
+        assert_eq!(r.rows.len(), r.trials);
+        assert_eq!(r.markets, 3);
+        for pair in r.rows.windows(2) {
+            assert!(pair[0].is.sharpe >= pair[1].is.sharpe, "ranked by in-sample Sharpe");
+        }
+        for row in &r.rows {
+            assert!((0.0..=1.0).contains(&row.deflated_sharpe));
+            assert!((row.p_value - (1.0 - row.deflated_sharpe)).abs() < 1e-12);
+            assert!(row.is.bars > 0 && row.oos.bars > 0);
+            assert!((row.is.pnl.gross - row.is.pnl.costs - row.is.pnl.net).abs() < 1e-9);
+            if row.is.sharpe <= 0.0 {
+                assert!(row.oos_is_ratio.is_none(), "no ratio against a non-positive in-sample Sharpe");
+            }
+        }
+        // Deflation can only lower confidence relative to an undeflated test.
+        let top = &r.rows[0];
+        let undeflated = metrics::deflated_sharpe_annualised(top.is.sharpe, 365.0, top.is.bars, 0.0, 3.0, 1, 0.0);
+        assert!(top.deflated_sharpe <= undeflated + 0.05);
+    }
+
+    #[test]
+    fn the_best_of_a_sweep_over_noise_is_not_significant() {
+        // Pure random walks: whatever ranks first in-sample got lucky.
+        for seed in [11u64, 23, 37] {
+            let markets = universe(900, &[seed, seed + 1, seed + 2], noise);
+            let base = StrategyConfig {
+                universe: markets.iter().map(|(id, _, _)| id.clone()).collect(),
+                ..cfg(StrategyKind::EmaCross, &[])
+            };
+            let r = sweep(&base, &markets, &BacktestConfig::default(), 0.6);
+            assert!(
+                r.rows[0].p_value > 0.05,
+                "seed {seed}: the luckiest of {} configurations on noise must not look significant (p = {:.3})",
+                r.trials,
+                r.rows[0].p_value
+            );
+        }
+    }
+
+    #[test]
+    fn walk_forward_reports_an_oos_to_is_ratio() {
+        let markets = universe(1500, &[31, 32], regime_flipping);
+        let base = StrategyConfig {
+            universe: markets.iter().map(|(id, _, _)| id.clone()).collect(),
+            ..cfg(StrategyKind::EmaCross, &[])
+        };
+        let r = walk_forward(&base, &markets, &WalkForwardConfig::default());
+        match r.oos_is_ratio {
+            Some(x) => {
+                assert!(r.is_sharpe > 0.0);
+                assert!((x - r.portfolio.sharpe / r.is_sharpe).abs() < 1e-9);
+            }
+            None => assert!(r.is_sharpe <= 0.0),
+        }
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("isSharpe").is_some(), "camelCase on the wire");
     }
 
     #[test]
