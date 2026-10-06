@@ -788,6 +788,10 @@ pub struct Persisted {
     /// persisted with everything else.
     #[serde(default)]
     pub forecast_store: track::ForecastStore,
+    /// Which lab signal each lab book was last rebalanced to, so a restart does
+    /// not trade the same decision twice.
+    #[serde(default)]
+    pub lab_done: HashMap<String, i64>,
     #[serde(default)]
     pub forecast_cfg: Option<forecast::ForecastConfig>,
     /// What the execution policy has learned. A bandit that forgets on restart
@@ -3426,6 +3430,7 @@ impl Engine {
             limits: self.limits.clone(),
             real_ids: self.real_ids.iter().cloned().collect(),
             forecast_store: self.forecast_store.clone(),
+            lab_done: self.lab_done.clone(),
             forecast_cfg: Some(self.forecast_cfg.clone()),
             exec_policy: self.exec_policy.clone(),
             research: self.research.clone(),
@@ -3479,6 +3484,7 @@ impl Engine {
         self.real_ids = p.real_ids.into_iter().collect();
         let resolved = p.forecast_store.resolved_count();
         self.forecast_store = p.forecast_store;
+        self.lab_done = p.lab_done;
         // A restored ledger has a resolution counter of its own; force a refit
         // rather than trusting a version number from a different process.
         self.scored_version = None;
