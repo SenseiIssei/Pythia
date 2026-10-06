@@ -173,6 +173,12 @@ export class ServerEngineClient implements EngineClient {
   adaptiveExecution() {
     return this.state.adaptiveExecution ?? false;
   }
+  slippage() {
+    return this.state.slippage ?? [];
+  }
+  passports() {
+    return this.state.passports ?? [];
+  }
   setAdaptiveExecution(on: boolean) {
     this.send({ cmd: "setAdaptiveExecution", on });
   }
@@ -214,8 +220,17 @@ export class ServerEngineClient implements EngineClient {
   setLimits(l: Partial<RiskLimits>) {
     this.send({ cmd: "setLimits", patch: { ...this.state.limits, ...l } });
   }
-  setStrategyState(id: string, s: StrategyState) {
-    this.send({ cmd: "setStrategyState", id, state: s });
+  async setStrategyState(id: string, s: StrategyState) {
+    // Awaited, unlike the other commands: a refused Live comes back as a 409
+    // with the passport's reason, and the caller needs to show it.
+    const r = await fetch(this.http + "/api/command", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cmd: "setStrategyState", id, state: s }),
+    });
+    if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+    this.state = (await r.json()) as EngineState;
+    this.bump();
   }
   setStrategyParam(id: string, key: string, value: number) {
     this.send({ cmd: "setStrategyParam", id, key, value });

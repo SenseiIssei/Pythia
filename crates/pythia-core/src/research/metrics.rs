@@ -264,6 +264,28 @@ pub fn deflated_sharpe_ratio(
     probabilistic_sharpe_ratio(observed_sr, sr0, n, skew, kurt)
 }
 
+/// [`deflated_sharpe_ratio`] for an **annualised** Sharpe and an annualised
+/// trial variance.
+///
+/// The PSR and DSR formulas are written for the per-period Sharpe: the
+/// `sqrt(n - 1)` in the z-score already scales a per-bar estimate by the
+/// sample length. Feeding them an annualised Sharpe multiplies the z-score by
+/// `sqrt(bars_per_year)` (about 19 for daily crypto), which turns almost any
+/// positive result into "99 % confident". Everything in this crate reports
+/// annualised Sharpes, so this is the entry point to use.
+pub fn deflated_sharpe_annualised(
+    observed_sr_ann: f64,
+    bars_per_year: f64,
+    n: usize,
+    skew: f64,
+    kurt: f64,
+    n_trials: usize,
+    trial_sr_variance_ann: f64,
+) -> f64 {
+    let k = bars_per_year.max(1.0);
+    deflated_sharpe_ratio(observed_sr_ann / k.sqrt(), n, skew, kurt, n_trials, trial_sr_variance_ann / k)
+}
+
 /// Full statistics for a per-bar return stream and its realised trades.
 pub fn summarize(
     bar_returns: &[f64],
@@ -412,6 +434,26 @@ mod tests {
         let searched = deflated_sharpe_ratio(1.5, 1000, 0.0, 3.0, 200, 0.5);
         assert!(honest > 0.99);
         assert!(searched < honest, "{searched} should be well below {honest}");
+    }
+
+    #[test]
+    fn an_annualised_sharpe_is_deflated_on_the_per_period_scale() {
+        // An annual Sharpe of 1.0 over two years of daily bars, best of nine
+        // tries whose Sharpes spread with variance 0.1. Fed annualised numbers
+        // directly, the z-score is inflated by sqrt(365) and the answer becomes
+        // a step function: anything above the bar scores ~100 %. On the
+        // per-period scale it is a real but unconvincing 70-80 %.
+        let naive = deflated_sharpe_ratio(1.0, 730, 0.0, 3.0, 9, 0.1);
+        let honest = deflated_sharpe_annualised(1.0, 365.0, 730, 0.0, 3.0, 9, 0.1);
+        assert!(naive > 0.99, "the old usage was overconfident: {naive}");
+        assert!(honest < 0.9 && honest > 0.5, "best of nine at Sharpe 1.0 is suggestive, not proof: {honest}");
+        // A genuinely strong, long result still clears the bar.
+        let strong = deflated_sharpe_annualised(2.5, 365.0, 3000, 0.0, 3.0, 9, 0.25);
+        assert!(strong > 0.95, "{strong}");
+        // With one trial and no spread it is the plain PSR against zero.
+        let one = deflated_sharpe_annualised(1.0, 252.0, 1000, 0.0, 3.0, 1, 0.0);
+        let psr = probabilistic_sharpe_ratio(1.0 / 252f64.sqrt(), 0.0, 1000, 0.0, 3.0);
+        assert!((one - psr).abs() < 1e-12);
     }
 
     #[test]

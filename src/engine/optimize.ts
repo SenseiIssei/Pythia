@@ -25,9 +25,21 @@ export interface SweepPoint {
   worstDD: number;
   pctProfitable: number;
   score: number; // robustness score used for ranking
+  /** Median Sharpe on disjoint out-of-sample seeds the ranking never saw. */
+  oosMedianSharpe: number;
+  /** Out-of-sample over in-sample median Sharpe; undefined when in-sample was not positive. */
+  oosIsRatio?: number;
 }
 
-function median(xs: number[]): number {
+/** Seed range for out-of-sample histories; never overlaps the in-sample range. */
+export const OOS_SEED_BASE = 900_000;
+
+/** Out-of-sample over in-sample Sharpe. Meaningless (undefined) when in-sample was not positive. */
+export function oosIsRatio(isSharpe: number, oosSharpe: number): number | undefined {
+  return isSharpe > 0 ? oosSharpe / isSharpe : undefined;
+}
+
+export function median(xs: number[]): number {
   if (xs.length === 0) return 0;
   const s = [...xs].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
@@ -109,6 +121,8 @@ export function sweep(cfg: StrategyConfig, grid: Record<string, number[]>, seeds
   const points: SweepPoint[] = [];
   for (const params of combos(grid)) {
     const mc = monteCarlo(withParams(cfg, params), seeds, opts, seedBase);
+    // The same configuration on histories the ranking never saw.
+    const oos = monteCarlo(withParams(cfg, params), seeds, opts, OOS_SEED_BASE);
     // robustness score: reward median return & consistency, punish deep drawdowns
     const score = mc.medianReturn * mc.pctProfitable - mc.worstDD * 0.25;
     points.push({
@@ -119,6 +133,8 @@ export function sweep(cfg: StrategyConfig, grid: Record<string, number[]>, seeds
       worstDD: mc.worstDD,
       pctProfitable: mc.pctProfitable,
       score,
+      oosMedianSharpe: oos.medianSharpe,
+      oosIsRatio: oosIsRatio(mc.medianSharpe, oos.medianSharpe),
     });
   }
   points.sort((a, b) => b.score - a.score);

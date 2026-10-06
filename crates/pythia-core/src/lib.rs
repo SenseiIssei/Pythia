@@ -9,6 +9,7 @@
 
 pub mod alerts;
 pub mod connectors;
+pub mod costs;
 pub mod engine;
 pub mod execution;
 pub mod forecast;
@@ -18,5 +19,6 @@ pub mod ml;
 pub mod predict;
 pub mod prefs;
 pub mod research;
+pub mod validation;
 pub mod vault;
 pub mod wallets;

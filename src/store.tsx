@@ -18,10 +18,12 @@ import type {
   Market,
   MarketForecast,
   Order,
+  Passport,
   PolicyRow,
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
+  SlippageRow,
   StrategyConfig,
   Track,
 } from "./types";
@@ -42,6 +44,10 @@ interface Store {
   forecastStats: ForecastStats;
   execution: PolicyRow[];
   adaptiveExecution: boolean;
+  /** Realised against modelled slippage per venue (live fills only). */
+  slippage: SlippageRow[];
+  /** Strategy Passport per strategy id. */
+  passports: Map<string, Passport>;
   /** Market ids running on real exchange candles rather than the simulator. */
   barBacked: Set<string>;
   aiViews: AiView[];
@@ -50,7 +56,8 @@ interface Store {
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
-  setStrategyState: (id: string, s: StrategyConfig["state"]) => void;
+  /** Rejects with a plain-language reason when Live is refused. */
+  setStrategyState: (id: string, s: StrategyConfig["state"]) => Promise<void>;
   setStrategyParam: (id: string, key: string, value: number) => void;
   addStrategy: (cfg: StrategyConfig) => void;
   manualOrder: (marketId: string, side: "buy" | "sell", notional: number) => string;
@@ -88,6 +95,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       forecastStats: engine.forecastStats(),
       execution: engine.execution(),
       adaptiveExecution: engine.adaptiveExecution(),
+      slippage: engine.slippage(),
+      passports: new Map(engine.passports().map((p) => [p.strategyId, p])),
       barBacked: new Set(engine.barBacked()),
       aiViews: engine.aiViews(),
       aiPolicy: engine.aiPolicy(),

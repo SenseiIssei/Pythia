@@ -3,17 +3,20 @@ import type {
   AiSpend,
   AiView,
   CoherenceBreak,
+  CostVenue,
   ForecastStats,
   JournalEntry,
   LiveStatus,
   Market,
   MarketForecast,
   Order,
+  Passport,
   PolicyRow,
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
   Side,
+  SlippageRow,
   StrategyConfig,
   StrategyState,
   Track,
@@ -70,6 +73,10 @@ export interface EngineClient {
   /** What adaptive execution has learned, per (venue+urgency, style). */
   execution(): PolicyRow[];
   adaptiveExecution(): boolean;
+  /** Realised against modelled slippage per venue, once there are live fills. */
+  slippage(): SlippageRow[];
+  /** The Strategy Passport (eight validation gates) of every strategy. */
+  passports(): Passport[];
   /**
    * Market ids whose indicators run on real exchange candles rather than the
    * simulator. Anything not in here is a demo, and the UI says so.
@@ -82,7 +89,8 @@ export interface EngineClient {
 
   toggleKill(): void;
   setLimits(l: Partial<RiskLimits>): void;
-  setStrategyState(id: string, s: StrategyState): void;
+  /** Rejects with a plain-language reason when Live is refused by the passport. */
+  setStrategyState(id: string, s: StrategyState): Promise<void>;
   setStrategyParam(id: string, key: string, value: number): void;
   addStrategy(cfg: StrategyConfig): void;
   manualOrder(marketId: string, side: Side, notional: number): string;
@@ -112,6 +120,9 @@ export interface EngineState {
   forecastStats: ForecastStats;
   execution: PolicyRow[];
   adaptiveExecution: boolean;
+  slippage?: SlippageRow[];
+  cryptoCostVenue?: CostVenue;
+  passports?: Passport[];
 }
 
 export { AI_OFF, DISARMED, NO_SPEND };

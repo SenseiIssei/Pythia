@@ -38,10 +38,14 @@ will fail. That asymmetry is the whole point: the machinery is what makes failur
 
 ## 1. The cost model — the bar every strategy has to clear
 
-**Status: not yet implemented. This is the highest-priority piece of work in this document.**
+**Status: built, not yet calibrated.** `crates/pythia-core/src/costs.rs` holds the per-venue model;
+the numbers live in `config/costs.json` (public fee schedules and typical spreads, shared with the
+TypeScript engine and the Python lab). Paper fills and both backtesters charge it, results are reported
+as gross, costs and net, and live fills are compared against it. What is missing is calibration from
+recorded spreads and real fills, and live top-of-book depth for the impact term.
 
-A backtest that ignores costs is a random-number generator with a nice chart. Pythia's current paper
-fill applies a flat 8 bps slippage and 6 bps fee and nothing else. Real costs, per venue:
+A backtest that ignores costs is a random-number generator with a nice chart. Until this was built,
+Pythia's paper fill applied a flat 8 bps slippage and 6 bps fee and nothing else. Real costs, per venue:
 
 | Component | Equities (Alpaca) | Crypto spot (Kraken/Binance/Bybit/OKX) | Prediction (Polymarket) |
 |---|---|---|---|
@@ -75,9 +79,16 @@ Almost nothing does. Which yields the first hard design rule:
 
 ## 2. The validation pipeline — how a strategy earns real money
 
-**Status: partially built.** Backtest, Monte-Carlo optimizer and walk-forward exist. The gates below
-do not, and the gates are what matter: an optimizer without gates is a machine for manufacturing
-overfit.
+**Status: built.** `crates/pythia-core/src/validation.rs` judges all eight gates (pass, fail or
+pending, with a reason and the number), the Strategies page shows them as a Strategy Passport, and the
+engine refuses to set a strategy Live until gates 1 to 7 pass. The Optimizer page shows deflated
+Sharpe and the OOS/IS ratio next to every result. No shipped strategy passes yet, which is the gates
+working: an optimizer without gates is a machine for manufacturing overfit.
+
+Concrete definitions the code uses: gate 1 judges the configured parameters on the first 60 % of
+history; gate 4's neighbourhood is one grid step either side per parameter (all combinations, 60 % must
+be net-positive in-sample); gate 5 splits bars by the 20-bar efficiency ratio (trending at 0.4 or more)
+and by 20-bar realised volatility against its median; gate 7 counts only trades on real prices.
 
 A strategy must pass, in order, and the UI must refuse to arm it live until it has:
 
@@ -253,15 +264,16 @@ Honest competitive read:
 | Multi-venue in one engine (equities + 4 crypto venues + prediction) | ✅ | crypto only | crypto only | ✅ | ⚠️ per-broker |
 | Native desktop app, no Docker, no Python env | ✅ | n/a (SaaS) | ❌ | n/a | n/a |
 | Risk manager above every order, kill switch | ✅ | ⚠️ per-bot | ⚠️ config | ✅ | ❌ |
-| Cost-aware validation gates before live | 🚧 §2 | ❌ | ⚠️ manual | ✅ | ❌ |
-| Realised-vs-modelled slippage tracking | 🚧 §1 | ❌ | ❌ | ⚠️ | ❌ |
+| Cost-aware validation gates before live | ✅ §2 | ❌ | ⚠️ manual | ✅ | ❌ |
+| Realised-vs-modelled slippage tracking | ✅ §1 (needs live fills) | ❌ | ❌ | ⚠️ | ❌ |
 | Order lifecycle that cannot desync from the venue | ✅ | ❓ | ✅ | ✅ | n/a |
 | Bring-your-own LLM | ✅ | ⚠️ marketing | ❌ | ❌ | ❌ |
 
 Three of those are already true and are the honest pitch today: **self-hosted multi-venue execution
-with a sovereign risk manager, in an app you double-click.** The two marked 🚧 are the differentiators
-worth building, because they attack the thing that actually loses users money — not "which indicator",
-but "my backtest said 40% a year and I lost 12%".
+with a sovereign risk manager, in an app you double-click.** The gates and the slippage tracking (built
+in October 2026, the slippage side still waiting for live fills) are the differentiators, because they
+attack the thing that actually loses users money. Not "which indicator", but "my backtest said 40% a
+year and I lost 12%".
 
 ### The product principle
 
@@ -285,11 +297,12 @@ Concretely, that means the features nobody else ships:
 
 ### Phase A — Make the numbers honest (4–6 weeks) · *do this first*
 
-- [ ] `costs.rs`: per-venue cost model calibrated from live spreads
-- [ ] Backtester reports gross / costs / net separately
-- [ ] Realised-slippage recording on every live fill, compared against the model
-- [ ] Deflated Sharpe + OOS/IS ratio in the optimizer
-- [ ] The eight validation gates, and the arm button that respects them
+- [x] `costs.rs`: per-venue cost model (defaults in `config/costs.json`)
+- [ ] ...calibrated from live spreads and recorded books
+- [x] Backtester reports gross / costs / net separately
+- [x] Realised-slippage recording on every live fill, compared against the model
+- [x] Deflated Sharpe + OOS/IS ratio in the optimizer
+- [x] The eight validation gates, and the arm button that respects them
 
 **Definition of done:** a user can see, for their own strategy, the gap between backtest and live, and
 what it is made of.

@@ -42,7 +42,9 @@ use pythia_core::execution::{self, Credentials};
 use pythia_core::forecast::ForecastConfig;
 use pythia_core::llm::{self, Effort, LlmConfig, Provider};
 use pythia_core::predict::{self, EnsembleKeys};
-use pythia_core::research::{self, backtest::BacktestConfig, backtest::CostModel};
+use pythia_core::costs::{self, CostVenue};
+use pythia_core::research::{self, backtest::BacktestConfig};
+use pythia_core::validation;
 use pythia_core::wallets::{self, WalletSources, WatchedAddress};
 use pythia_core::{alerts, marketdata};
 
@@ -205,12 +207,33 @@ async fn main() {
         )
         .init();
 
+    // Recalibrated costs: `PYTHIA_COSTS_FILE`, else the repo's own
+    // `config/costs.json` when running from a checkout, so an edit there takes
+    // effect on restart without a rebuild. The compiled-in copy is the fallback.
+    let costs_file = std::env::var("PYTHIA_COSTS_FILE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("config/costs.json"));
+    if costs_file.exists() {
+        match costs::load_file(&costs_file) {
+            Ok(()) => tracing::info!("cost model loaded from {}", costs_file.display()),
+            Err(e) => tracing::warn!("ignoring cost file: {e}"),
+        }
+    }
+
     let (tx, _rx) = broadcast::channel::<String>(64);
     let creds = Arc::new(credentials_from_env());
     let engine = Arc::new(Mutex::new(Engine::new()));
     // Reflect which venues actually have usable keys before the first tick, so
     // the UI never shows a venue as armable that cannot route.
-    engine.lock().unwrap().set_connected(creds.connected_venues());
+    {
+        let mut e = engine.lock().unwrap();
+        e.set_connected(creds.connected_venues());
+        // Costs follow the selected exchange even before its keys are set.
+        e.set_crypto_cost_venue(
+            env_str("PYTHIA_EXCHANGE").as_deref().and_then(Exchange::parse).map(CostVenue::for_exchange),
+        );
+    }
     let state = AppState {
         engine,
         tx: tx.clone(),
@@ -231,6 +254,8 @@ async fn main() {
         .route("/api/health", get(health))
         .route("/api/preflight", get(get_preflight))
         .route("/api/research/validate", get(get_validate))
+        .route("/api/research/sweep", get(get_sweep))
+        .route("/api/research/passport", post(post_validation))
         .route("/api/state", get(get_state))
         .route("/api/stream", get(ws_stream))
         .route("/api/command", post(post_command))
@@ -516,12 +541,11 @@ struct ValidateQuery {
     /// Include the equity universe (needs Alpaca keys). Crypto always runs.
     #[serde(default)]
     equities: Option<bool>,
-    /// Set 0 to measure the same strategies with no fees or slippage, which
-    /// shows how much of a result the cost model is eating.
+    /// Multiplier on the cost model (`config/costs.json`). Set 0 to measure the
+    /// same strategies with no fees or slippage, which shows how much of a
+    /// result the cost model is eating; 2 or 3 to stress it.
     #[serde(default)]
-    slippage_bps: Option<f64>,
-    #[serde(default)]
-    fee_bps: Option<f64>,
+    cost_mult: Option<f64>,
 }
 
 /// Walk-forward validate every shipped strategy on real daily candles.
@@ -536,13 +560,8 @@ async fn get_validate(
     axum::extract::Query(q): axum::extract::Query<ValidateQuery>,
 ) -> impl IntoResponse {
     let folds = q.folds.unwrap_or(4).clamp(2, 8);
-    let mut costs = CostModel::default();
-    if let Some(v) = q.slippage_bps {
-        costs.slippage_bps = v.max(0.0);
-    }
-    if let Some(v) = q.fee_bps {
-        costs.fee_bps = v.max(0.0);
-    }
+    let cost_mult = q.cost_mult.unwrap_or(1.0).clamp(0.0, 10.0);
+    let crypto_venue = st.engine.lock().unwrap().crypto_cost_venue();
 
     // Daily crypto candles (no keys required).
     let crypto: Vec<(String, String, Vec<pythia_core::marketdata::Ohlc>)> =
@@ -605,7 +624,8 @@ async fn get_validate(
             min_trades: 20,
             min_is_trades: 3,
             bt: BacktestConfig {
-                costs,
+                venue: if is_equity { CostVenue::Alpaca } else { crypto_venue },
+                cost_mult,
                 // Daily bars: 365 for crypto (always open), 252 sessions for equities.
                 bars_per_year: if is_equity { 252.0 } else { 365.0 },
                 ..BacktestConfig::default()
@@ -627,7 +647,12 @@ async fn get_validate(
     Json(serde_json::json!({
         "timeframe": "1Day",
         "folds": folds,
-        "costs": costs,
+        "costs": {
+            "cryptoVenue": crypto_venue,
+            "costMult": cost_mult,
+            "crypto": costs::table().venue_model(crypto_venue),
+            "equities": costs::table().venue_model(CostVenue::Alpaca),
+        },
         "cryptoMarkets": crypto.len(),
         "equityMarkets": equities.len(),
         "cryptoBars": crypto.first().map(|(_, _, b)| b.len()).unwrap_or(0),
@@ -635,6 +660,48 @@ async fn get_validate(
         "reports": reports,
         "skipped": skipped,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct StrategyQuery {
+    id: String,
+}
+
+/// A strategy's config, research backtest settings and daily candles, with
+/// the engine lock released before the network calls.
+async fn research_inputs(
+    st: &AppState,
+    id: &str,
+) -> Result<(StrategyConfig, BacktestConfig, research::Universe), (StatusCode, String)> {
+    let (cfg, bt) = {
+        let e = st.engine.lock().unwrap();
+        let cfg = e
+            .strategy_config(id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown strategy {id}")))?;
+        let bt = e.research_bt(&cfg);
+        (cfg, bt)
+    };
+    let alpaca = has_alpaca_keys(&st.creds).then(|| alpaca_data_keys(&st.creds));
+    let universe = research::fetch_daily_universe(&cfg, alpaca)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+    Ok((cfg, bt, universe))
+}
+
+/// Sweep one strategy's parameter grid on real daily candles, with the
+/// deflated Sharpe and out-of-sample/in-sample ratio of every configuration.
+async fn get_sweep(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<StrategyQuery>,
+) -> impl IntoResponse {
+    let (cfg, bt, universe) = match research_inputs(&st, &q.id).await {
+        Ok(x) => x,
+        Err(e) => return e.into_response(),
+    };
+    match tokio::task::spawn_blocking(move || research::sweep(&cfg, &universe, &bt, 0.6)).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("sweep failed: {e}")).into_response(),
+    }
 }
 
 async fn health() -> &'static str {
@@ -838,13 +905,16 @@ enum Command {
 async fn post_command(
     State(st): State<AppState>,
     Json(cmd): Json<Command>,
-) -> Json<EngineState> {
+) -> axum::response::Response {
+    let mut refused: Option<String> = None;
     let dto = {
         let mut e = st.engine.lock().unwrap();
         match cmd {
             Command::ToggleKill => e.toggle_kill(),
             Command::SetLimits { patch } => e.set_limits(patch),
-            Command::SetStrategyState { id, state } => e.set_strategy_state(&id, state),
+            // Live is refused until the passport is green; the reason goes
+            // back to the caller as a 409 rather than vanishing into a 200.
+            Command::SetStrategyState { id, state } => refused = e.set_strategy_state(&id, state).err(),
             Command::SetStrategyParam { id, key, value } => e.set_strategy_param(&id, &key, value),
             Command::AddStrategy { cfg } => e.add_strategy(cfg),
             Command::ManualOrder { market_id, side, notional } => {
@@ -858,7 +928,42 @@ async fn post_command(
         let _ = st.tx.send(serde_json::to_string(&s).unwrap_or_default());
         s
     };
-    Json(dto)
+    match refused {
+        Some(why) => (StatusCode::CONFLICT, why).into_response(),
+        None => Json(dto).into_response(),
+    }
+}
+
+/// Run validation gates 1 to 6 for one strategy on real daily candles, keep
+/// the result in the engine, and return the full Strategy Passport.
+async fn post_validation(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<StrategyQuery>,
+) -> impl IntoResponse {
+    let (cfg, bt, universe) = match research_inputs(&st, &q.id).await {
+        Ok(x) => x,
+        Err(e) => return e.into_response(),
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let verdict = match tokio::task::spawn_blocking(move || {
+        validation::research_gates(&cfg, &universe, &bt, &research::WalkForwardConfig { bt, ..Default::default() }, now)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("validation failed: {e}")).into_response(),
+    };
+    let passport = {
+        let mut e = st.engine.lock().unwrap();
+        e.store_research(verdict);
+        let s = e.state();
+        let _ = st.tx.send(serde_json::to_string(&s).unwrap_or_default());
+        e.passport(&q.id)
+    };
+    match passport {
+        Some(p) => Json(p).into_response(),
+        None => (StatusCode::NOT_FOUND, format!("unknown strategy {}", q.id)).into_response(),
+    }
 }
 
 /// List every supported provider and whether the server has a key for it (from
@@ -988,9 +1093,14 @@ async fn post_test_order(
     State(st): State<AppState>,
     Json(req): Json<TestOrderReq>,
 ) -> impl IntoResponse {
-    let notional = req.notional.clamp(1.0, 5_000.0);
     let (status, body) = {
         let mut e = st.engine.lock().unwrap();
+        // 0 means "the venue's minimum size": a connection test, not a strategy.
+        let notional = if req.notional > 0.0 {
+            req.notional.clamp(1.0, 5_000.0)
+        } else {
+            e.connection_test_notional(&req.market_id)
+        };
         if let Some(why) = e.test_order_block(&req.market_id) {
             (StatusCode::CONFLICT, why)
         } else {

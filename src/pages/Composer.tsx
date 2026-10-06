@@ -14,6 +14,7 @@ import {
 } from "../engine/composer";
 import type { BacktestResult } from "../engine/backtest";
 import type { StrategyConfig } from "../types";
+import { PnlLines } from "../components/PnlBreakdown";
 
 const IND_KINDS: IndKind[] = ["price", "rsi", "ema", "sma", "zscore", "roc", "macdHist", "atr"];
 
@@ -155,11 +156,14 @@ export function Composer() {
       {result && (
         <>
           <div className="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard label="Total Return" value={`${result.totalReturnPct >= 0 ? "+" : ""}${result.totalReturnPct.toFixed(1)}%`} icon={TrendingUp} tone={result.totalReturnPct >= 0 ? "green" : "red"} />
+            <StatCard label="Net Return" value={`${result.totalReturnPct >= 0 ? "+" : ""}${result.totalReturnPct.toFixed(1)}%`} icon={TrendingUp} tone={result.totalReturnPct >= 0 ? "green" : "red"} sub="after costs" />
             <StatCard label="Sharpe" value={result.sharpe.toFixed(2)} icon={Activity} tone={result.sharpe >= 1 ? "green" : result.sharpe >= 0 ? "cyan" : "red"} />
             <StatCard label="Max Drawdown" value={`${result.maxDrawdownPct.toFixed(1)}%`} icon={ArrowDownWideNarrow} tone="red" />
             <StatCard label="Win Rate" value={`${(result.winRate * 100).toFixed(0)}%`} sub={`${result.trades} trades`} icon={Percent} tone="purple" />
           </div>
+          <Card className="mb-4" title="Gross, costs, net">
+            <PnlLines pnl={result.pnl} />
+          </Card>
           <Card title="Composed Strategy Equity Curve" right={<Badge tone={result.profitFactor >= 1 ? "green" : "red"}>PF {result.profitFactor.toFixed(2)}</Badge>}>
             <Sparkline data={result.equityCurve.length > 1 ? result.equityCurve : [0, 0]} height={200} tone={result.totalReturnPct >= 0 ? "green" : "red"} />
             <div className="mt-2 text-xs text-cyber-text-faint">

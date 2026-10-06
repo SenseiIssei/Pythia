@@ -6,6 +6,7 @@ use crate::state::AppState;
 use pythia_core::connectors::cex::{self, Exchange, ExchangeInfo};
 use pythia_core::connectors::alpaca::AlpacaAccount;
 use pythia_core::connectors::{Side, Venue};
+use pythia_core::costs::CostVenue;
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, EngineState, LiveConfig, MarketDiag, RiskLimits, StrategyConfig,
     StrategyState,
@@ -15,6 +16,8 @@ use pythia_core::forecast::ForecastConfig;
 use pythia_core::llm::{self, LlmConfig, Provider, ProviderInfo, Signal};
 use pythia_core::predict::{self, EnsembleKeys, EnsembleRun};
 use pythia_core::prefs::{self, Prefs};
+use pythia_core::research::{self, backtest::BacktestConfig, SweepReport, WalkForwardConfig};
+use pythia_core::validation::{self, Passport};
 use pythia_core::vault;
 use pythia_core::wallets::{self, WalletSources, WalletsSnapshot, WatchedAddress};
 use std::collections::BTreeMap;
@@ -110,7 +113,16 @@ pub fn refresh_connected(st: &AppState) {
     if vault::has_keys("polymarket") {
         connected.insert(Venue::Polymarket);
     }
-    st.engine.lock().unwrap().set_connected(connected);
+    // Costs follow the exchange the user selected, keys or not: a paper fill
+    // should pay what that venue would charge.
+    let selected = vault::get("crypto")
+        .and_then(|f| f.get("exchange").and_then(|id| Exchange::parse(id)))
+        .map(CostVenue::for_exchange);
+    {
+        let mut e = st.engine.lock().unwrap();
+        e.set_connected(connected);
+        e.set_crypto_cost_venue(selected);
+    }
     *st.creds.lock().unwrap() = creds;
 }
 
@@ -141,10 +153,18 @@ pub fn set_limits(app: AppHandle, app_state: State<AppState>, patch: RiskLimits)
     push_state(&app);
 }
 
+/// Live is refused until the strategy's passport shows gates 1 to 7 green; the
+/// error is the plain-language reason, for the UI to show.
 #[tauri::command]
-pub fn set_strategy_state(app: AppHandle, app_state: State<AppState>, id: String, state: StrategyState) {
-    app_state.engine.lock().unwrap().set_strategy_state(&id, state);
+pub fn set_strategy_state(
+    app: AppHandle,
+    app_state: State<AppState>,
+    id: String,
+    state: StrategyState,
+) -> Result<(), String> {
+    let result = app_state.engine.lock().unwrap().set_strategy_state(&id, state);
     push_state(&app);
+    result
 }
 
 #[tauri::command]
@@ -359,8 +379,10 @@ pub fn send_test_order(
     market_id: String,
     notional: f64,
 ) -> Result<String, String> {
-    let notional = notional.clamp(1.0, 5_000.0);
     let mut e = app_state.engine.lock().unwrap();
+    // 0 (what the UI sends) means "the venue's minimum size": this is a
+    // connection test, not a strategy, and it should risk as little as it can.
+    let notional = if notional > 0.0 { notional.clamp(1.0, 5_000.0) } else { e.connection_test_notional(&market_id) };
     // Armed, venue enabled, nothing in flight, and (for Alpaca) a fresh open
     // session. Otherwise this would only paper-fill, which proves nothing.
     if let Some(why) = e.test_order_block(&market_id) {
@@ -379,6 +401,58 @@ pub fn send_test_order(
     drop(e);
     push_state(&app);
     Ok(msg)
+}
+
+/// A strategy's config, its research backtest settings and its daily candles,
+/// fetched without holding the engine lock across the network.
+async fn research_inputs(
+    app: &AppHandle,
+    strategy_id: &str,
+) -> Result<(StrategyConfig, BacktestConfig, research::Universe), String> {
+    let st = app.state::<AppState>();
+    let (cfg, bt, paper) = {
+        let e = st.engine.lock().unwrap();
+        let cfg = e.strategy_config(strategy_id).ok_or_else(|| format!("unknown strategy {strategy_id}"))?;
+        let bt = e.research_bt(&cfg);
+        (cfg, bt, e.live_config().paper)
+    };
+    let creds = credentials(st.inner());
+    let (key, secret) = alpaca_data_keys(&creds, paper);
+    let alpaca = (!key.is_empty()).then(|| (key, secret, get_prefs().alpaca_feed));
+    let universe = research::fetch_daily_universe(&cfg, alpaca).await?;
+    Ok((cfg, bt, universe))
+}
+
+/// Sweep a strategy's parameter grid on real daily candles, with every
+/// result's deflated Sharpe and out-of-sample/in-sample ratio. Backs the
+/// Optimizer page.
+#[tauri::command]
+pub async fn research_sweep(app: AppHandle, strategy_id: String) -> Result<SweepReport, String> {
+    let (cfg, bt, universe) = research_inputs(&app, &strategy_id).await?;
+    tauri::async_runtime::spawn_blocking(move || research::sweep(&cfg, &universe, &bt, 0.6))
+        .await
+        .map_err(|e| format!("sweep failed: {e}"))
+}
+
+/// Run validation gates 1 to 6 for one strategy on real daily candles, keep
+/// the result in the engine, and return the full Strategy Passport.
+#[tauri::command]
+pub async fn run_validation(app: AppHandle, strategy_id: String) -> Result<Passport, String> {
+    let (cfg, bt, universe) = research_inputs(&app, &strategy_id).await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let verdict = tauri::async_runtime::spawn_blocking(move || {
+        validation::research_gates(&cfg, &universe, &bt, &WalkForwardConfig { bt, ..Default::default() }, now)
+    })
+    .await
+    .map_err(|e| format!("validation failed: {e}"))?;
+    let passport = {
+        let st = app.state::<AppState>();
+        let mut e = st.engine.lock().unwrap();
+        e.store_research(verdict);
+        e.passport(&strategy_id).ok_or_else(|| format!("unknown strategy {strategy_id}"))?
+    };
+    push_state(&app);
+    Ok(passport)
 }
 
 /// Read-only Alpaca account check (buying power, status) for the connection test.
