@@ -1,7 +1,10 @@
 import { useMemo } from "react";
-import { TrendingDown, Trophy } from "lucide-react";
+import { AlertTriangle, TrendingDown, Trophy } from "lucide-react";
 import { useStore } from "../store";
 import { Card, PageHeader, Badge, Sparkline, MultiLineChart, fmtUsd } from "../components/ui";
+import { costWarning } from "../components/PnlBreakdown";
+import { breakdown } from "../engine/costs";
+import type { PnlBreakdown, StrategyConfig } from "../types";
 
 export function Analytics() {
   const { portfolio, strategies, orders } = useStore();
@@ -45,26 +48,46 @@ export function Analytics() {
       </Card>
 
       <Card title="Strategy Leaderboard" className="mb-4" right={<Trophy size={14} className="text-warning" />}>
-        <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-x-4 text-sm">
-          <Head>Strategy</Head>
-          <Head right>P&L</Head>
-          <Head right>Trades</Head>
-          <Head right>Win</Head>
-          <Head right>PF</Head>
-          <Head right>maxDD</Head>
-          {ranked.map((s) => (
-            <RowGroup key={s.id}>
-              <div className="flex items-center gap-2 py-2">
-                <Badge tone={s.state === "live" ? "red" : s.state === "paused" ? "neutral" : "cyan"}>{s.state}</Badge>
-                <span className="truncate">{s.name}</span>
-              </div>
-              <Cell className={s.pnl >= 0 ? "text-success" : "text-danger"}>{fmtUsd(s.pnl)}</Cell>
-              <Cell>{s.trades}</Cell>
-              <Cell>{(s.winRate * 100).toFixed(0)}%</Cell>
-              <Cell className={s.profitFactor >= 1 ? "text-success" : "text-cyber-text-dim"}>{s.profitFactor.toFixed(2)}</Cell>
-              <Cell className="text-danger">{fmtUsd(s.maxDrawdown)}</Cell>
-            </RowGroup>
-          ))}
+        <div className="overflow-x-auto">
+          <div className="grid min-w-[640px] grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 text-sm">
+            <Head>Strategy</Head>
+            <Head right>Gross</Head>
+            <Head right>Costs</Head>
+            <Head right>Net</Head>
+            <Head right>Trades</Head>
+            <Head right>Win</Head>
+            <Head right>PF</Head>
+            <Head right>maxDD</Head>
+            {ranked.map((s) => {
+              const p = pnlOf(s);
+              const warn = costWarning(p);
+              return (
+                <RowGroup key={s.id}>
+                  <div className="flex items-center gap-2 py-2">
+                    <Badge tone={s.state === "live" ? "red" : s.state === "paused" ? "neutral" : "cyan"}>{s.state}</Badge>
+                    <span className="truncate">{s.name}</span>
+                    {warn && (
+                      <span title={warn} className="text-warning">
+                        <AlertTriangle size={13} />
+                      </span>
+                    )}
+                  </div>
+                  <Cell className={p.gross >= 0 ? "text-success" : "text-danger"}>{fmtUsd(p.gross)}</Cell>
+                  <Cell className={warn ? "text-warning" : "text-cyber-text-dim"}>{p.costs > 0 ? `-${fmtUsd(p.costs)}` : fmtUsd(0)}</Cell>
+                  <Cell className={p.net >= 0 ? "text-success" : "text-danger"}>{fmtUsd(p.net)}</Cell>
+                  <Cell>{s.trades}</Cell>
+                  <Cell>{(s.winRate * 100).toFixed(0)}%</Cell>
+                  <Cell className={s.profitFactor >= 1 ? "text-success" : "text-cyber-text-dim"}>{s.profitFactor.toFixed(2)}</Cell>
+                  <Cell className="text-danger">{fmtUsd(s.maxDrawdown)}</Cell>
+                </RowGroup>
+              );
+            })}
+          </div>
+        </div>
+        <div className="mt-2 text-xs text-cyber-text-faint">
+          Gross is realised P&amp;L at the quoted price; costs are fees plus slippage, booked when paid (so an open
+          position's entry costs show before its P&amp;L does); net is what was kept. A warning sign marks a strategy
+          whose costs exceed 40% of its gross.
         </div>
         {ranked.every((s) => s.trades === 0) && (
           <div className="mt-2 text-xs text-cyber-text-faint">No closed trades yet — stats populate as positions close.</div>
@@ -97,5 +120,10 @@ function Cell({ children, className = "" }: { children: React.ReactNode; classNa
   return <div className={`py-2 text-right font-mono ${className}`}>{children}</div>;
 }
 function RowGroup({ children }: { children: React.ReactNode }) {
-  return <div className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">{children}</div>;
+  return <div className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">{children}</div>;
+}
+
+/** A strategy's gross, costs and net. A config that never traded has no ledger yet. */
+function pnlOf(s: StrategyConfig): PnlBreakdown {
+  return s.ledger?.pnl ?? breakdown(s.pnl, 0);
 }

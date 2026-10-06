@@ -3970,6 +3970,46 @@ mod tests {
         }
         assert!(v["forecastStats"]["trustedSources"].is_number());
         assert!(v["forecastStats"]["recorded"].as_u64().unwrap() > 0);
+
+        // Honest numbers: the cost ledger per strategy, the realised-slippage
+        // table and the crypto cost venue all reach the UI under these names.
+        for key in ["slippage", "cryptoCostVenue"] {
+            assert!(obj.contains_key(key), "EngineState is missing `{key}` on the wire");
+        }
+        assert_eq!(v["cryptoCostVenue"], "kraken");
+        let ledger = &v["strategies"][0]["ledger"];
+        for key in ["fees", "slippage", "pnl", "forwardTrades", "liveTrades", "paperSince"] {
+            assert!(ledger.get(key).is_some(), "StrategyLedger is missing `{key}` on the wire");
+        }
+        for key in ["gross", "costs", "net", "costHeavy"] {
+            assert!(ledger["pnl"].get(key).is_some(), "PnlBreakdown is missing `{key}` on the wire");
+        }
+        assert!(ledger.get("forward_trades").is_none(), "snake_case must not leak to the UI");
+    }
+
+    #[test]
+    fn a_live_fill_reaches_the_wire_with_its_realised_and_modelled_slippage() {
+        let mut e = engine_with_open_market();
+        e.set_live(armed_alpaca());
+        e.manual_order("alpaca:AAPL", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().pop().expect("an order went out");
+        e.apply_live_ack(&o.order_id, "b1");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, o.ref_price * 1.0005));
+
+        let v = serde_json::to_value(e.state()).unwrap();
+        let row = &v["slippage"][0];
+        assert_eq!(row["venue"], "alpaca");
+        assert_eq!(row["fills"], 1);
+        assert!((row["medianRealisedBps"].as_f64().unwrap() - 5.0).abs() < 1e-6);
+        assert!(row["medianModelledBps"].as_f64().unwrap() > 0.0);
+        assert!(row.get("ratio").is_some());
+        assert_eq!(row["enough"], false);
+        let ord = v["orders"].as_array().unwrap().iter().find(|x| x["id"] == o.order_id.as_str()).unwrap();
+        assert!((ord["realisedSlippageBps"].as_f64().unwrap() - 5.0).abs() < 1e-6);
+        assert!(ord["modelledSlippageBps"].is_number());
+        // The live fill's slippage is also in the strategy's cost ledger.
+        let manual = e.strategies.iter().find(|s| s.id == "manual").unwrap();
+        assert!(manual.ledger.slippage > 0.0);
     }
 
     #[test]
