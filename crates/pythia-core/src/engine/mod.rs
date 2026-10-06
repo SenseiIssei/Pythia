@@ -235,17 +235,23 @@ pub struct StrategyConfig {
 /// Costs and forward-test record for one strategy.
 ///
 /// `StrategyConfig::pnl` is realised P&L at the actual fill prices, so it
-/// already has slippage in it and fees taken out of nothing. This keeps the two
-/// cost components separately, so the strategy can be shown as gross, costs and
-/// net (see [`StrategyLedger::breakdown`]).
+/// already has slippage in it and no fees taken out. The engine also tracks
+/// every position at reference prices (the quote before execution costs), so
+/// the strategy can be shown as gross, costs and net that describe the same
+/// closed trades (see [`StrategyLedger::breakdown`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyLedger {
     /// Fees paid, in quote currency.
     pub fees: f64,
-    /// Slippage paid against the reference price, in quote currency. Live fills
-    /// can make this go down: a fill better than arrival is negative slippage.
+    /// Slippage paid against the reference price on every fill so far, open
+    /// positions included, in quote currency. Live fills can make this go
+    /// down: a fill better than arrival is negative slippage.
     pub slippage: f64,
+    /// Realised P&L of the same trades at reference prices: what they would
+    /// have made with no fees, spread or impact.
+    #[serde(default)]
+    pub gross: f64,
     /// Gross, costs and net in quote currency, kept in step with `fees`,
     /// `slippage` and the strategy's realised P&L.
     pub pnl: crate::costs::PnlBreakdown,
@@ -263,12 +269,13 @@ pub struct StrategyLedger {
 impl StrategyLedger {
     /// Gross, costs and net for a realised P&L at fill prices.
     ///
-    /// Fill prices already include slippage, so gross adds it back and net
-    /// takes the fees out: `gross = pnl + slippage`, `costs = fees + slippage`,
-    /// `net = pnl - fees`. Costs are booked when they are paid, so an open
-    /// position's entry costs show up before its P&L does.
+    /// `gross` is the closed trades at reference prices, `net` is the realised
+    /// P&L at fill prices minus every fee paid, and costs are the difference:
+    /// the slippage on closed trades plus fees. Fees are booked when paid, so an
+    /// open position's entry fee shows up before its P&L does.
     pub fn breakdown(&self, realised_pnl: f64) -> crate::costs::PnlBreakdown {
-        crate::costs::PnlBreakdown::new(realised_pnl + self.slippage, self.fees + self.slippage)
+        let net = realised_pnl - self.fees;
+        crate::costs::PnlBreakdown::new(self.gross, self.gross - net)
     }
 }
 
@@ -766,6 +773,9 @@ pub struct Persisted {
     /// Cached validation gates 1 to 6 per strategy.
     #[serde(default)]
     pub research: HashMap<String, validation::ResearchVerdict>,
+    /// Reference-price entry per open position, for the gross line.
+    #[serde(default)]
+    pub ref_prices: HashMap<String, f64>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -882,6 +892,9 @@ pub struct Engine {
     /// Validation gates 1 to 6 per strategy, computed on request by the host
     /// (they need candle history) and kept against the parameters they judged.
     research: HashMap<String, validation::ResearchVerdict>,
+    /// Average entry per open position at reference prices (before execution
+    /// costs), for the gross line. Missing means "same as the fill price".
+    ref_prices: HashMap<String, f64>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -948,6 +961,7 @@ impl Engine {
             exec_policy: bandit::ExecPolicy::default(),
             crypto_venue: CostVenue::Kraken,
             research: HashMap::new(),
+            ref_prices: HashMap::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -1787,16 +1801,17 @@ impl Engine {
     /// this venue charges, then settle.
     fn fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
         let (fill_price, fee) = paper_fill(&self.cost_model(m), m.kind, side, qty, price);
-        let slippage = (fill_price - price).abs() * qty;
-        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, slippage, false, true);
+        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, price, false, true);
     }
 
     /// Apply a fill (paper or live) to positions, cash, P&L and strategy stats.
     /// `live` marks a real fill — its position's exits must also route live.
     /// `emit_order` inserts a fresh Filled order (the paper path); live fills
     /// instead update their existing pending order in [`Engine::apply_live_update`].
-    /// `slippage` is what the fill cost against its reference price, in quote
-    /// currency (negative for a fill better than reference).
+    /// `reference` is the price before execution costs: the quote a paper fill
+    /// slipped from, or a live order's arrival price. The same position is
+    /// tracked at reference prices alongside the real one, which is what makes
+    /// the strategy's gross line (see [`StrategyLedger`]).
     #[allow(clippy::too_many_arguments)]
     fn settle_fill(
         &mut self,
@@ -1806,25 +1821,39 @@ impl Engine {
         qty: f64,
         fill_price: f64,
         fee: f64,
-        slippage: f64,
+        reference: f64,
         live: bool,
         emit_order: bool,
     ) {
         let sid = self.strategies[strat_idx].id.clone();
+        let signed = if side == Side::Buy { qty } else { -qty };
         {
+            // Positive when the fill was worse than the reference price.
             let l = &mut self.strategies[strat_idx].ledger;
             l.fees += fee.max(0.0);
-            l.slippage += slippage;
+            l.slippage += signed * (fill_price - reference);
         }
         // A closed trade on a real price is forward-test evidence; one on the
         // demo simulator is not evidence of anything.
         let real_price = self.real_ids.contains(&m.id) || self.bar_backed.contains(&m.id);
-        let signed = if side == Side::Buy { qty } else { -qty };
         let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
 
         // update / open position, realizing P&L on reductions
         let key = m.id.clone();
         let mut realized = 0.0;
+        // The same position at reference prices, for the gross line.
+        let ref_avg = self.ref_prices.get(&key).copied();
+        if let Some(pos) = self.positions.get(&key) {
+            let (q, avg, gross) = apply_fill(pos.qty, ref_avg.unwrap_or(pos.avg_price), signed, reference);
+            self.strategies[strat_idx].ledger.gross += gross;
+            if q.abs() < 1e-9 {
+                self.ref_prices.remove(&key);
+            } else {
+                self.ref_prices.insert(key.clone(), avg);
+            }
+        } else {
+            self.ref_prices.insert(key.clone(), reference);
+        }
         match self.positions.get_mut(&key) {
             None => {
                 self.positions.insert(
@@ -1938,6 +1967,9 @@ impl Engine {
         {
             let s = &mut self.strategies[strat_idx];
             s.ledger.pnl = s.ledger.breakdown(s.pnl);
+        }
+        if !self.positions.contains_key(&key) {
+            self.ref_prices.remove(&key);
         }
 
         if emit_order {
@@ -2218,6 +2250,18 @@ impl Engine {
     /// right now, or `None` when it would. Walks the same gates `route_fill`
     /// applies, so the button refuses with a reason instead of silently
     /// paper-filling.
+    /// Size of the one-click connection test: twice the venue's minimum order
+    /// from the cost model (so rounding cannot push it under), at least $5.
+    /// The test proves the pipeline, not a strategy, so it should risk as
+    /// little as the venue allows.
+    pub fn connection_test_notional(&self, market_id: &str) -> f64 {
+        self.markets
+            .iter()
+            .find(|m| m.id == market_id)
+            .map(|m| (self.cost_model(m).min_notional * 2.0).max(5.0))
+            .unwrap_or(5.0)
+    }
+
     pub fn test_order_block(&self, market_id: &str) -> Option<String> {
         let Some(m) = self.markets.iter().find(|m| m.id == market_id) else {
             return Some(format!("unknown market {market_id}"));
@@ -2582,12 +2626,12 @@ impl Engine {
                         .position(|s| s.id == f.strategy_id)
                         .unwrap_or_else(|| self.ensure_manual_strategy());
                     let fee_delta = (update.fee - f.booked_fee).max(0.0);
-                    // Against the arrival price, signed so a fill better than
-                    // arrival is negative slippage.
-                    let slippage = f.side.sign() * (price - f.arrival) * delta;
+                    // Reference is the arrival price, so a fill better than
+                    // arrival books negative slippage.
                     // emit_order = false: the pending order row already exists
                     // and is updated below rather than duplicated.
-                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, slippage, true, false);
+                    let reference = if f.arrival > 0.0 { f.arrival } else { price };
+                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, reference, true, false);
                     self.log(
                         JournalKind::Fill,
                         format!("LIVE FILL {:?} {delta:.6} {} @ {price:.4}", f.side, m.symbol),
@@ -2728,6 +2772,8 @@ impl Engine {
                     p.stop = 0.0;
                     p.target = 0.0;
                     p.trail_ref = avg;
+                    // The broker's average is the only entry we know now.
+                    self.ref_prices.remove(&market_id);
                     changes += 1;
                     self.log(
                         JournalKind::Risk,
@@ -2774,6 +2820,7 @@ impl Engine {
             .collect();
         for id in vanished {
             self.positions.remove(&id);
+            self.ref_prices.remove(&id);
             changes += 1;
             self.log(
                 JournalKind::Risk,
@@ -3044,6 +3091,7 @@ impl Engine {
             forecast_cfg: Some(self.forecast_cfg.clone()),
             exec_policy: self.exec_policy.clone(),
             research: self.research.clone(),
+            ref_prices: self.ref_prices.clone(),
         }
     }
 
@@ -3102,6 +3150,7 @@ impl Engine {
         }
         self.exec_policy = p.exec_policy;
         self.research = p.research;
+        self.ref_prices = p.ref_prices;
         self.log(JournalKind::System, "Restored saved state from disk".into(), None, None);
         // A strategy saved as Live keeps that switch only if its passport still
         // allows it. Saves from before the gates existed, or a strategy whose
@@ -3576,9 +3625,31 @@ mod tests {
         let l = e.strategies.iter().find(|s| s.id == "manual").unwrap().ledger.clone();
         assert!((l.fees - avg * qty * 0.004).abs() < 1e-6, "40 bps taker fee, got {}", l.fees);
         assert!(l.slippage > 0.0);
-        // Nothing has closed yet: gross gives the slippage back, net is the fee.
+        // Nothing has closed yet: no gross, and the only cost so far is the fee.
+        assert_eq!(l.pnl.gross, 0.0);
         assert!((l.pnl.net + l.fees).abs() < 1e-9);
-        assert!((l.pnl.gross - l.slippage).abs() < 1e-9);
+        assert!((l.pnl.costs - l.fees).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gross_is_the_same_trades_at_the_quoted_price() {
+        let mut e = Engine::new();
+        e.manual_order("crypto:BTC/USD", Side::Buy, 2_000.0);
+        // The market moves up 5 % before the exit.
+        let px = e.price_of("crypto:BTC/USD");
+        if let Some(m) = e.markets.iter_mut().find(|m| m.id == "crypto:BTC/USD") {
+            m.price = px * 1.05;
+            m.updated_at = chrono::Utc::now().timestamp_millis();
+        }
+        e.flatten("crypto:BTC/USD");
+        let s = e.strategy_config("manual").unwrap();
+        let qty = 2_000.0 / px;
+        let p = s.ledger.pnl;
+        assert!((p.gross - qty * px * 0.05).abs() < 1e-6, "gross {} is the 5 % move at quoted prices", p.gross);
+        assert!(p.net < p.gross, "costs are taken out");
+        assert!((p.gross - p.costs - p.net).abs() < 1e-9);
+        assert!((p.net - (s.pnl - s.ledger.fees)).abs() < 1e-9);
+        assert!(!p.cost_heavy, "a 5 % winner on Kraken BTC is not eaten by costs");
     }
 
     #[test]
@@ -4081,7 +4152,7 @@ mod tests {
         }
         assert_eq!(v["cryptoCostVenue"], "kraken");
         let ledger = &v["strategies"][0]["ledger"];
-        for key in ["fees", "slippage", "pnl", "forwardTrades", "liveTrades", "paperSince"] {
+        for key in ["fees", "slippage", "gross", "pnl", "forwardTrades", "liveTrades", "paperSince"] {
             assert!(ledger.get(key).is_some(), "StrategyLedger is missing `{key}` on the wire");
         }
         for key in ["gross", "costs", "net", "costHeavy"] {
@@ -4450,17 +4521,7 @@ mod tests {
             markets: 1,
             bars: 700,
             cost_venue: CostVenue::Alpaca,
-            gates: (1..=6)
-                .map(|g| validation::Gate {
-                    id: g,
-                    name: validation::GATE_NAMES[g as usize - 1].into(),
-                    status: validation::GateStatus::Pass,
-                    reason: "test".into(),
-                    value: Some(1.0),
-                    measure: String::new(),
-                    figures: vec![],
-                })
-                .collect(),
+            gates: (1..=6).map(|g| validation::Gate::new(g, validation::GateStatus::Pass, "test", Some(1.0))).collect(),
         });
         let now = e.now();
         let s = e.strategies.iter_mut().find(|s| s.id == id).unwrap();

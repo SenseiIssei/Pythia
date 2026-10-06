@@ -564,12 +564,15 @@ function ExecutionPolicyCard() {
  * with the fix attached to whichever link is actually broken.
  */
 function ReadinessCard() {
-  const { live, strategies, barBacked, setStrategyState } = useStore();
+  const { live, strategies, barBacked, setStrategyState, passports } = useStore();
 
   // Only this strategy trades Alpaca markets today.
   const equityStrategies = strategies.filter((s) => s.venueClass === "alpaca");
   const liveEquity = equityStrategies.filter((s) => s.state === "live");
   const barsReady = equityStrategies.some((s) => s.universe.some((id) => barBacked.has(id)));
+  // A strategy may only go live with a green Strategy Passport.
+  const firstPassport = equityStrategies[0] ? passports.get(equityStrategies[0].id) : undefined;
+  const canArmFirst = firstPassport?.liveReady ?? false;
 
   const steps = [
     {
@@ -600,11 +603,16 @@ function ReadinessCard() {
         liveEquity.length > 0
           ? liveEquity.map((s) => s.name).join(", ")
           : equityStrategies.length > 0
-            ? `${equityStrategies[0].name} is ${equityStrategies[0].state} — only a Live strategy sends entries`
+            ? canArmFirst
+              ? `${equityStrategies[0].name} is ${equityStrategies[0].state}; only a Live strategy sends entries`
+              : `${equityStrategies[0].name} has not earned live money yet (see its Strategy Passport on the Strategies page). To prove the pipeline without a strategy, use the connection test below.`
             : "no strategy trades Alpaca markets",
       fix:
-        liveEquity.length === 0 && equityStrategies.length > 0
-          ? { label: `Set ${equityStrategies[0].name} Live`, run: () => setStrategyState(equityStrategies[0].id, "live") }
+        liveEquity.length === 0 && equityStrategies.length > 0 && canArmFirst
+          ? {
+              label: `Set ${equityStrategies[0].name} Live`,
+              run: () => void setStrategyState(equityStrategies[0].id, "live").catch(() => undefined),
+            }
           : undefined,
     },
     {
@@ -690,7 +698,8 @@ function DiagnosticsCard() {
   async function test(marketId: string) {
     setTestMsg("sending…");
     try {
-      setTestMsg(await sendTestOrder(marketId, 250));
+      // 0 = the venue's minimum size: this proves the connection, not a strategy.
+      setTestMsg(await sendTestOrder(marketId, 0));
     } catch (e) {
       setTestMsg(String(e instanceof Error ? e.message : e));
     }
@@ -721,7 +730,7 @@ function DiagnosticsCard() {
               {r.hasPosition && <Badge tone="purple">holding</Badge>}
               <span className="flex-1" />
               <Button tone="purple" className="!px-2 !py-0.5" onClick={() => void test(r.marketId)}>
-                Test $250
+                Connection test
               </Button>
             </div>
             {r.signal && <div className="mt-1 text-success">signal · {r.signal}</div>}
@@ -736,8 +745,10 @@ function DiagnosticsCard() {
       </div>
       {testMsg && <div className="mt-2 text-xs text-cyber-text-dim">{testMsg}</div>}
       <div className="mt-2 text-[11px] text-cyber-text-faint">
-        {clear.length} of {rows.length} markets are clear to route. <b>Test $250</b> sends one real order through the
-        full path — risk manager, broker, fill — so a wrong key or a closed session surfaces immediately.
+        {clear.length} of {rows.length} markets are clear to route. <b>Connection test</b> sends one buy at the
+        venue's minimum size through the full path (risk manager, broker, fill), so a wrong key or a closed session
+        surfaces immediately. It is a connection test, not a strategy: it needs no Strategy Passport, it is the
+        only order that skips one, and no strategy is set live by it.
       </div>
     </Card>
   );

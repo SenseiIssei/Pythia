@@ -135,6 +135,9 @@ export class TauriEngineClient implements EngineClient {
   slippage() {
     return this.state.slippage ?? [];
   }
+  passports() {
+    return this.state.passports ?? [];
+  }
   setAdaptiveExecution(on: boolean) {
     void invoke("set_adaptive_execution", { on });
   }
@@ -157,8 +160,9 @@ export class TauriEngineClient implements EngineClient {
   setLimits(l: Partial<RiskLimits>) {
     void invoke("set_limits", { patch: { ...this.state.limits, ...l } });
   }
-  setStrategyState(id: string, s: StrategyState) {
-    void invoke("set_strategy_state", { id, state: s });
+  async setStrategyState(id: string, s: StrategyState) {
+    // Rejects with the engine's reason when the passport refuses Live.
+    await invoke("set_strategy_state", { id, state: s });
   }
   setStrategyParam(id: string, key: string, value: number) {
     void invoke("set_strategy_param", { id, key, value });

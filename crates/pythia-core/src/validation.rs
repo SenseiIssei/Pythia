@@ -87,16 +87,31 @@ pub enum GateStatus {
     Pending,
 }
 
+/// How a number should be read, so the UI can format it without guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Unit {
+    /// A signed return shown as a percentage (0.12 = +12 %).
+    Pct,
+    /// A share or probability shown as a percentage, unsigned (0.75 = 75 %).
+    Share,
+    /// A plain number such as a Sharpe, a ratio or a p-value.
+    Number,
+    /// A whole count.
+    Count,
+}
+
 /// A labelled number shown under a gate (e.g. "2x costs: -3.1 %").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Figure {
     pub label: String,
     pub value: f64,
+    pub unit: Unit,
 }
 
-fn fig(label: &str, value: f64) -> Figure {
-    Figure { label: label.to_string(), value }
+fn fig(label: &str, value: f64, unit: Unit) -> Figure {
+    Figure { label: label.to_string(), value, unit }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,6 +128,8 @@ pub struct Gate {
     pub value: Option<f64>,
     /// What `value` is, e.g. "net return" or "p-value".
     pub measure: String,
+    /// How to read `value`.
+    pub unit: Unit,
     /// Supporting numbers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub figures: Vec<Figure>,
@@ -140,15 +157,20 @@ const MEASURES: [&str; 8] = [
     "closed live trades",
 ];
 
+const UNITS: [Unit; 8] =
+    [Unit::Pct, Unit::Number, Unit::Pct, Unit::Share, Unit::Count, Unit::Number, Unit::Count, Unit::Count];
+
 impl Gate {
-    fn new(id: u8, status: GateStatus, reason: impl Into<String>, value: Option<f64>) -> Gate {
+    pub fn new(id: u8, status: GateStatus, reason: impl Into<String>, value: Option<f64>) -> Gate {
+        let i = (id.clamp(1, 8) - 1) as usize;
         Gate {
             id,
-            name: GATE_NAMES[(id - 1) as usize].to_string(),
+            name: GATE_NAMES[i].to_string(),
             status,
             reason: reason.into(),
             value,
-            measure: MEASURES[(id - 1) as usize].to_string(),
+            measure: MEASURES[i].to_string(),
+            unit: UNITS[i],
             figures: Vec::new(),
         }
     }
@@ -202,7 +224,10 @@ pub fn judge_walk_forward(r: &StrategyReport, min_trades: usize) -> Gate {
             r.oos_is_ratio,
         );
     }
-    let figures = vec![fig("in-sample Sharpe", r.is_sharpe), fig("out-of-sample Sharpe", r.portfolio.sharpe)];
+    let figures = vec![
+        fig("in-sample Sharpe", r.is_sharpe, Unit::Number),
+        fig("out-of-sample Sharpe", r.portfolio.sharpe, Unit::Number),
+    ];
     match r.oos_is_ratio {
         None => Gate::new(2, GateStatus::Fail, "the fitted parameters did not even have a positive Sharpe in-sample", None)
             .with(figures),
@@ -229,7 +254,11 @@ pub fn judge_walk_forward(r: &StrategyReport, min_trades: usize) -> Gate {
 
 /// Gate 3. `nets` is the net return at 1x, 2x and 3x the cost model.
 pub fn judge_costs(nets: [f64; 3], trades: usize) -> Gate {
-    let figures = vec![fig("1x costs", nets[0]), fig("2x costs", nets[1]), fig("3x costs", nets[2])];
+    let figures = vec![
+        fig("1x costs", nets[0], Unit::Pct),
+        fig("2x costs", nets[1], Unit::Pct),
+        fig("3x costs", nets[2], Unit::Pct),
+    ];
     if trades == 0 {
         return Gate::new(3, GateStatus::Fail, "made no trades, so there is nothing for costs to test", Some(0.0)).with(figures);
     }
@@ -265,7 +294,7 @@ pub fn judge_plateau(neighbour_nets: &[f64], tunable: usize) -> Gate {
     let n = neighbour_nets.len();
     let pos = neighbour_nets.iter().filter(|x| **x > 0.0).count();
     let share = pos as f64 / n as f64;
-    let figures = vec![fig("neighbours", n as f64), fig("net-positive", pos as f64)];
+    let figures = vec![fig("neighbours", n as f64, Unit::Count), fig("net-positive", pos as f64, Unit::Count)];
     if share >= MIN_PLATEAU_SHARE {
         Gate::new(4, GateStatus::Pass, format!("{pos} of {n} neighbouring parameter sets are also profitable: a plateau"), Some(share))
             .with(figures)
@@ -304,10 +333,10 @@ pub struct RegimeSplit {
 /// Gate 5.
 pub fn judge_regimes(s: &RegimeSplit, regime_filter: bool) -> Gate {
     let figures = vec![
-        fig("trending", s.trending.net),
-        fig("ranging", s.ranging.net),
-        fig("high volatility", s.high_vol.net),
-        fig("low volatility", s.low_vol.net),
+        fig("trending", s.trending.net, Unit::Pct),
+        fig("ranging", s.ranging.net, Unit::Pct),
+        fig("high volatility", s.high_vol.net, Unit::Pct),
+        fig("low volatility", s.low_vol.net, Unit::Pct),
     ];
     let all = [s.trending, s.ranging, s.high_vol, s.low_vol];
     let count = all.iter().filter(|r| r.net > 0.0).count() as f64;
@@ -363,7 +392,10 @@ pub fn judge_deflated(r: &StrategyReport, min_trades: usize) -> Gate {
         );
     }
     let p = (1.0 - r.deflated_sharpe).clamp(0.0, 1.0);
-    let figures = vec![fig("deflated Sharpe", r.deflated_sharpe), fig("configurations tried", r.trials as f64)];
+    let figures = vec![
+        fig("deflated Sharpe", r.deflated_sharpe, Unit::Share),
+        fig("configurations tried", r.trials as f64, Unit::Count),
+    ];
     if p < MAX_P_VALUE {
         Gate::new(
             6,
@@ -434,7 +466,7 @@ pub fn judge_forward(f: &ForwardRecord) -> Gate {
         return Gate::new(7, GateStatus::Pending, "not running in paper yet; the forward test starts when it does", Some(0.0));
     };
     let days = trading_days(since, f.now, f.equities);
-    let figures = vec![fig("trading days", days as f64), fig("trades", f.trades as f64)];
+    let figures = vec![fig("trading days", days as f64, Unit::Count), fig("trades", f.trades as f64, Unit::Count)];
     if let Some(why) = slippage_failure(&f.slippage) {
         return Gate::new(7, GateStatus::Fail, why, Some(f.trades as f64)).with(figures);
     }
@@ -465,7 +497,7 @@ pub struct LiveRecord {
 /// Gate 8. Pending until there is live data; it is the one gate a strategy
 /// earns while live, so it never blocks arming.
 pub fn judge_live(l: &LiveRecord) -> Gate {
-    let figures = vec![fig("live trades", l.trades as f64)];
+    let figures = vec![fig("live trades", l.trades as f64, Unit::Count)];
     if l.trades == 0 {
         return Gate::new(8, GateStatus::Pending, "no live trades yet; this gate is earned at minimum size after arming", Some(0.0));
     }
@@ -575,7 +607,7 @@ pub fn research_gates(
         .collect();
     let mut g4 = judge_plateau(&neighbour_nets, tunable);
     if g4.status != GateStatus::Pending && tunable > 0 {
-        g4.figures.push(fig("configured in-sample", is_run.pnl.net));
+        g4.figures.push(fig("configured in-sample", is_run.pnl.net, Unit::Pct));
     }
 
     // 5 · regime split on the whole history
@@ -739,12 +771,9 @@ pub fn passport(
             GateStatus::Pending => "is not done",
             GateStatus::Pass => "passed",
         };
-        format!(
-            "Not ready for real money: gate {} ({}) {state}. {}",
-            g.id,
-            g.name.to_lowercase(),
-            capitalise(&g.reason)
-        )
+        let reason = capitalise(&g.reason);
+        let stop = if reason.ends_with('.') { "" } else { "." };
+        format!("Not ready for real money: gate {} ({}) {state}. {reason}{stop}", g.id, g.name.to_lowercase())
     });
     Passport {
         strategy_id: cfg.id.clone(),
@@ -1189,6 +1218,8 @@ mod tests {
         assert!(v.get("strategyId").is_some());
         assert_eq!(v["gates"][0]["status"], "pass");
         assert!(v["gates"][6].get("figures").is_some());
+        assert_eq!(v["gates"][6]["figures"][0]["unit"], "count");
         assert!(v["gates"][0].get("measure").is_some());
+        assert_eq!(v["gates"][0]["unit"], "pct");
     }
 }

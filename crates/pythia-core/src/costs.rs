@@ -378,7 +378,8 @@ pub fn model_for(venue: CostVenue, symbol: &str) -> CostModel {
 pub struct PnlBreakdown {
     /// What the trades made at reference prices with no fees, spread or impact.
     pub gross: f64,
-    /// Fees plus slippage. Always reported as a positive number.
+    /// Fees plus slippage. Negative only when fills beat their reference
+    /// price by more than the fees, which live limit orders can do.
     pub costs: f64,
     /// `gross - costs`.
     pub net: f64,
@@ -396,7 +397,9 @@ pub const COST_HEAVY_SHARE: f64 = 0.40;
 
 impl PnlBreakdown {
     pub fn new(gross: f64, costs: f64) -> PnlBreakdown {
-        let costs = costs.max(0.0);
+        // Clean float noise to exactly zero, but never clamp a real negative:
+        // the three figures must add up.
+        let costs = if costs.abs() < 1e-12 { 0.0 } else { costs };
         let cost_share = (gross > 0.0).then(|| costs / gross);
         let cost_heavy = match cost_share {
             Some(s) => s > COST_HEAVY_SHARE,
@@ -538,6 +541,10 @@ mod tests {
         assert!(losing.cost_share.is_none());
         assert!(losing.cost_heavy, "paying costs on no gross profit is the worst case");
         assert!(!PnlBreakdown::new(0.0, 0.0).cost_heavy);
+        // Fills better than reference: negative costs, still adding up.
+        let improved = PnlBreakdown::new(10.0, -1.0);
+        assert_eq!(improved.net, 11.0);
+        assert!(!improved.cost_heavy);
     }
 
     #[test]

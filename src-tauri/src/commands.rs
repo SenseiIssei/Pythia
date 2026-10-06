@@ -379,8 +379,10 @@ pub fn send_test_order(
     market_id: String,
     notional: f64,
 ) -> Result<String, String> {
-    let notional = notional.clamp(1.0, 5_000.0);
     let mut e = app_state.engine.lock().unwrap();
+    // 0 (what the UI sends) means "the venue's minimum size": this is a
+    // connection test, not a strategy, and it should risk as little as it can.
+    let notional = if notional > 0.0 { notional.clamp(1.0, 5_000.0) } else { e.connection_test_notional(&market_id) };
     // Armed, venue enabled, nothing in flight, and (for Alpaca) a fresh open
     // session. Otherwise this would only paper-fill, which proves nothing.
     if let Some(why) = e.test_order_block(&market_id) {
