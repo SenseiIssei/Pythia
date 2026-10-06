@@ -208,6 +208,26 @@ async fn lab_loop(state: AppState) {
     }
 }
 
+/// Where the engine state is saved, if anywhere: `PYTHIA_STATE_FILE`.
+fn state_file() -> Option<std::path::PathBuf> {
+    std::env::var("PYTHIA_STATE_FILE").ok().map(Into::into)
+}
+
+/// Checkpoints the engine every minute (atomic replace), like the desktop app.
+async fn save_loop(state: AppState) {
+    let Some(path) = state_file() else { return };
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let json = serde_json::to_string(&state.engine.lock().unwrap().to_persisted());
+        if let Ok(json) = json {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+}
+
 /// The model service's status handle, set once at startup.
 static ML: OnceLock<pythia_core::ml::SharedMl> = OnceLock::new();
 
@@ -250,6 +270,18 @@ async fn main() {
     // the UI never shows a venue as armable that cannot route.
     {
         let mut e = engine.lock().unwrap();
+        // Resume where the last run left off: positions, strategies and their
+        // forward-test records. Without this every restart would reset gate 7.
+        if let Some(path) = state_file() {
+            match std::fs::read_to_string(&path).map(|t| serde_json::from_str::<pythia_core::engine::Persisted>(&t)) {
+                Ok(Ok(p)) => {
+                    e.apply_persisted(p);
+                    tracing::info!("state restored from {}", path.display());
+                }
+                Ok(Err(err)) => tracing::warn!("state file {} unreadable, starting fresh: {err}", path.display()),
+                Err(_) => tracing::info!("no state file at {} yet, starting fresh", path.display()),
+            }
+        }
         e.set_connected(creds.connected_venues());
         // A headless instance that only runs lab books (the VPS) pauses the
         // built-in indicator strategies, which would otherwise hold the same
@@ -283,6 +315,9 @@ async fn main() {
     let _ = ML.set(pythia_core::ml::spawn());
     // Lab strategies: pick up the research lab's daily target weights.
     tokio::spawn(lab_loop(state.clone()));
+    if state_file().is_some() {
+        tokio::spawn(save_loop(state.clone()));
+    }
 
     let app = Router::new()
         .route("/api/health", get(health))
