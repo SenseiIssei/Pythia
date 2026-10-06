@@ -185,23 +185,24 @@ pub async fn run(shared: SharedMl) {
     set(&shared, |s| {
         s.state = MlState::WarmingUp;
         s.message = "Fetching ten days of 1-minute klines".into();
-        s.model = Some(ModelInfo {
-            name: model.card.name.clone(),
-            version: version.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            trees: model.n_trees(),
-            train_from_ms: model.card.train_from_us / 1000,
-            train_to_ms: model.card.train_to_us / 1000,
-            lab_gain_vs_har_pct: model.card.qlike_gain_vs_har * 100.0,
-            lab_dm_p: model.card.dm_p_vs_har,
-        });
+        s.model = Some(model_info(&model, &version));
         s.shadow = shadow.summary();
     });
 
     let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
-    let mut svc = Service { model, shadow, shadow_file, minutes: HashMap::new(), drift_rows: VecDeque::new(), last_hour: 0 };
+    let mut svc = Service {
+        model,
+        version,
+        shadow,
+        shadow_file,
+        minutes: HashMap::new(),
+        drift_rows: VecDeque::new(),
+        last_hour: 0,
+    };
     loop {
         svc.refresh(&http).await;
         svc.process(&shared);
+        svc.maybe_upgrade(&shared).await;
         // Wake 20 s after the next hour closes, when Binance has the last minute.
         let now = now_ms();
         let next = (now.div_euclid(HOUR_MS) + 1) * HOUR_MS + 20_000;
@@ -210,8 +211,21 @@ pub async fn run(shared: SharedMl) {
     }
 }
 
+fn model_info(model: &VolModel, version: &Path) -> ModelInfo {
+    ModelInfo {
+        name: model.card.name.clone(),
+        version: version.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        trees: model.n_trees(),
+        train_from_ms: model.card.train_from_us / 1000,
+        train_to_ms: model.card.train_to_us / 1000,
+        lab_gain_vs_har_pct: model.card.qlike_gain_vs_har * 100.0,
+        lab_dm_p: model.card.dm_p_vs_har,
+    }
+}
+
 struct Service {
     model: VolModel,
+    version: PathBuf,
     shadow: ShadowBook,
     shadow_file: Option<PathBuf>,
     minutes: HashMap<&'static str, Vec<MinuteBar>>,
@@ -220,6 +234,33 @@ struct Service {
 }
 
 impl Service {
+    /// The weekly retrain publishes a new version directory. Switch to it once it
+    /// passes the same probe check as at startup; a version that fails keeps the
+    /// current model running and says so. The live score carries on across versions.
+    async fn maybe_upgrade(&mut self, shared: &SharedMl) {
+        let Ok(dir) = std::env::var("PYTHIA_MODELS") else { return };
+        let Some(newest) = pythia_ml::latest_version(Path::new(&dir), "vol_1h") else { return };
+        if newest == self.version {
+            return;
+        }
+        let candidate = newest.clone();
+        match tokio::task::spawn_blocking(move || VolModel::load(&candidate)).await {
+            Ok(Ok(model)) => {
+                let info = model_info(&model, &newest);
+                tracing::info!("volatility model upgraded to {}", newest.display());
+                self.model = model;
+                self.version = newest;
+                set(shared, |s| s.model = Some(info));
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("newer model {} refused: {e}", newest.display());
+                self.version = newest; // do not retry the same broken version every hour
+                set(shared, |s| s.message = format!("A newer model was refused and the current one kept: {e}"));
+            }
+            Err(_) => {}
+        }
+    }
+
     async fn refresh(&mut self, http: &reqwest::Client) {
         let now = now_ms();
         for coin in UNIVERSE {
