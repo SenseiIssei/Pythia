@@ -230,6 +230,26 @@ async def run(args) -> None:
                     lambda l, s=s: f"{BASE}/spot/daily/klines/{s}/1h/{s}-1h-{l}.zip",
                     KLINE_COLS, norm_klines, "open_time_us"))
 
+        if args.only == "um_all":
+            # Every USDT perpetual ever listed: daily bars (when it existed, what it
+            # cost, including the basis) and funding (what holding it paid or cost).
+            from .universe import list_um_usdt
+            perps = await list_um_usdt(http)
+            (root / "um_universe.json").write_text(json.dumps(perps))
+            log.info("perp universe: %d USDT perpetuals", len(perps))
+            since = date.fromisoformat(args.since or "2020-01-01")
+            for s in perps:
+                jobs.append(monthly_then_daily(
+                    f, root / "binance_um" / "klines_1d" / f"symbol={s}", since,
+                    lambda l, s=s: f"{BASE}/futures/um/monthly/klines/{s}/1d/{s}-1d-{l}.zip",
+                    lambda l, s=s: f"{BASE}/futures/um/daily/klines/{s}/1d/{s}-1d-{l}.zip",
+                    KLINE_COLS, norm_klines, "open_time_us"))
+                jobs.append(monthly_then_daily(
+                    f, root / "binance_um" / "funding" / f"symbol={s}", since,
+                    lambda l, s=s: f"{BASE}/futures/um/monthly/fundingRate/{s}/{s}-fundingRate-{l}.zip",
+                    lambda l, s=s: f"{BASE}/futures/um/daily/fundingRate/{s}/{s}-fundingRate-{l}.zip",
+                    None, norm_funding, "funding_time_us"))
+
         async def guarded(job):
             try:
                 await job
@@ -247,7 +267,7 @@ async def run(args) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", choices=["klines", "funding", "metrics", "klines_1h_all"],
+    ap.add_argument("--only", choices=["klines", "funding", "metrics", "klines_1h_all", "um_all"],
                     help="klines_1h_all: hourly bars of every USDT pair ever listed, run on its own")
     ap.add_argument("--since", help="YYYY-MM-DD")
     ap.add_argument("--parallel", type=int, default=16, help="concurrent downloads")

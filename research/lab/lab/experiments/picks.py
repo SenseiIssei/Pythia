@@ -172,6 +172,12 @@ def main() -> None:
         folds.append({"fold": fold.name, "days": len(ic), "rank_ic": float(np.mean(ic))})
         print(folds[-1], flush=True)
 
+    # Out-of-sample scores for the experiments built on M2 (picks_ls, the momentum filter).
+    has_score = np.isfinite(score)
+    pl.DataFrame({"day": days[has_score], "symbol": sym[has_score], "score": score[has_score],
+                  "fwd": fwd[has_score], "adv_rank": P["adv28"].to_numpy()[has_score]}).write_parquet(
+        ROOT / "reports" / "picks" / "scores.parquet")
+
     oos = np.isfinite(score) & np.isfinite(fwd)
     d_o, s_o, f_o, sy_o = days[oos], score[oos], fwd[oos], sym[oos]
     mom = P["r28"].to_numpy()[oos]  # cross-sectional rank of 28-day momentum: the no-model baseline
@@ -188,16 +194,47 @@ def main() -> None:
                     for d in uniq])
     rows += [{"strategy": "equal-weight universe", **perf(ew)}, {"strategy": "BTC", **perf(btc)}]
 
+    # Where does the skill sit? Mean next-week return per score decile, out of sample.
+    dec_rows = []
+    dfo = pl.DataFrame({"day": d_o, "score": s_o, "fwd": f_o, "sym": sy_o, "adv": P["adv28"].to_numpy()[oos]})
+    dfo = dfo.with_columns(dec=((pl.col("score").rank().over("day") - 1) * 10 / pl.len().over("day")).floor().cast(pl.Int32))
+    for row in dfo.group_by("dec").agg(mean_fwd=pl.col("fwd").mean(), n=pl.len()).sort("dec").iter_rows(named=True):
+        dec_rows.append({"decile": int(row["dec"]) + 1, "mean_week_return_pct": float(np.expm1(row["mean_fwd"]) * 100),
+                         "coin_days": row["n"]})
+    # Does it hold among the liquid coins, or only in the tiny ones? Rank-IC within
+    # the 50 most liquid coins of each day (adv28 is a cross-sectional rank here).
+    liquid = dfo.filter(pl.col("adv").rank(descending=True).over("day") <= 50)
+    ic_liquid = liquid.group_by("day").agg(ic=pl.corr("score", "fwd", method="spearman"))["ic"].drop_nans().mean()
+    # Long the top decile, short the bottom one: the pure ranking skill (needs shorting,
+    # which spot cannot do; shown to locate the edge, not as a strategy).
+    ls = dfo.group_by("day").agg(
+        top=pl.col("fwd").filter(pl.col("dec") == 9).mean(), bottom=pl.col("fwd").filter(pl.col("dec") == 0).mean()
+    ).sort("day")
+    ls_w = ls.with_columns(spread=pl.col("top").exp() - pl.col("bottom").exp())["spread"].drop_nulls().to_numpy()[::HORIZON]
+    rows.append({"strategy": "top decile minus bottom decile (gross, needs shorts)", **perf(ls_w)})
+    # Top-K held only while BTC is above its 200-day average (the momentum book's filter).
+    btc_daily = daily_bars("BTCUSDT").select("day", "close").sort("day")
+    btc_daily = btc_daily.with_columns(on=pl.col("close") > pl.col("close").rolling_mean(200))
+    on = dict(zip(btc_daily["day"].to_list(), btc_daily["on"].to_list()))
+    for k in TOP_K:
+        dd, r = topk_returns(d_o, sy_o, s_o, f_o, k)
+        r_reg = np.array([x if on.get(int(d)) else 0.0 for d, x in zip(dd, r)])
+        rets[f"M2 top {k} · regime"] = r_reg
+        rows.append({"strategy": f"M2 top {k} · regime", **perf(r_reg)})
+
     trial = [r for r in rows if r["strategy"].startswith(("M2", "28d"))]
     sr = np.array([r["sharpe"] for r in trial]) / np.sqrt(365 / HORIZON)
     for r in trial:
         r["deflated_p"] = deflated_sharpe(r["sharpe"] / np.sqrt(365 / HORIZON), r["periods"], len(trial), float(np.var(sr)))
-    ic_mean = float(np.mean([f["rank_ic"] for f in folds]))
-    ic_t = ic_mean / (np.std([f["rank_ic"] for f in folds]) / np.sqrt(len(folds)) + 1e-12)
+    ics = np.array([f["rank_ic"] for f in folds if np.isfinite(f["rank_ic"]) and f["days"] > 0])
+    ic_mean = float(ics.mean())
+    ic_t = ic_mean / (ics.std() / np.sqrt(len(ics)) + 1e-12)
     best = max((r for r in rows if r["strategy"].startswith("M2")), key=lambda r: r["sharpe"])
-    base = next(r for r in rows if r["strategy"] == best["strategy"].replace("M2", "28d momentum"))
+    base = next(r for r in rows
+                if r["strategy"] == best["strategy"].replace(" · regime", "").replace("M2", "28d momentum"))
     beats = best["sharpe"] > base["sharpe"] and best["deflated_p"] > 0.95
-    verdict = (f"Rank-IC {ic_mean:.3f} out of sample (t {ic_t:.1f} across {len(folds)} quarters). "
+    verdict = (f"Rank-IC {ic_mean:.3f} out of sample (t {ic_t:.1f} across {len(ics)} quarters), "
+               f"{ic_liquid:.3f} among the 50 most liquid coins of each day. "
                f"Best: {best['strategy']}, Sharpe {best['sharpe']:.2f}, drawdown {best['max_dd'] * 100:.0f} %, "
                f"deflated p {best['deflated_p']:.2f}; plain momentum with the same K: Sharpe {base['sharpe']:.2f}. "
                + ("M2 earns its place: better than the no-model baseline and survives deflation."
@@ -208,8 +245,11 @@ def main() -> None:
           f"{COST * 1e4:.0f} bps per unit turnover, out of sample from 2022. Took {(time.time() - t0) / 60:.0f} min.\n\n"
           f"**Verdict:** {verdict}\n\n"
           + report.table(rows, ["strategy", "periods", "cagr", "sharpe", "max_dd", "deflated_p"])
+          + "\n## Next-week return by score decile (10 = best score)\n\n"
+          + report.table(dec_rows, ["decile", "mean_week_return_pct", "coin_days"])
           + "\n## Rank-IC per quarter\n\n" + report.table(folds, ["fold", "days", "rank_ic"]))
-    report.write("picks", md, {"rows": rows, "folds": folds, "rank_ic": ic_mean, "rank_ic_t": ic_t, "verdict": verdict})
+    report.write("picks", md, {"rows": rows, "folds": folds, "rank_ic": ic_mean, "rank_ic_t": ic_t,
+                               "rank_ic_liquid50": ic_liquid, "deciles": dec_rows, "verdict": verdict})
 
 
 if __name__ == "__main__":
