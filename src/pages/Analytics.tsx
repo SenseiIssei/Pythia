@@ -4,10 +4,10 @@ import { useStore } from "../store";
 import { Card, PageHeader, Badge, Sparkline, MultiLineChart, fmtUsd } from "../components/ui";
 import { costWarning } from "../components/PnlBreakdown";
 import { breakdown } from "../engine/costs";
-import type { PnlBreakdown, StrategyConfig } from "../types";
+import type { PnlBreakdown, SlippageRow, StrategyConfig } from "../types";
 
 export function Analytics() {
-  const { portfolio, strategies, orders } = useStore();
+  const { portfolio, strategies, orders, slippage } = useStore();
 
   // drawdown series (% below running peak) from the equity curve
   const drawdown = useMemo(() => {
@@ -94,6 +94,8 @@ export function Analytics() {
         )}
       </Card>
 
+      <SlippageCard rows={slippage} />
+
       <Card title="Trade Log">
         <div className="space-y-1 font-mono text-xs">
           {fills.length === 0 && <div className="text-cyber-text-faint">No fills yet.</div>}
@@ -104,6 +106,14 @@ export function Analytics() {
               <span className="flex-1 truncate text-cyber-text-dim">{o.marketId}</span>
               <span>{o.filledQty.toFixed(4)}</span>
               <span className="text-cyber-text-faint">@ {o.avgFillPrice}</span>
+              {o.realisedSlippageBps !== undefined && (
+                <span
+                  className={o.realisedSlippageBps > (o.modelledSlippageBps ?? 0) * 1.5 ? "text-warning" : "text-cyber-text-dim"}
+                  title="Realised slippage against the arrival price, next to what the cost model expected"
+                >
+                  {o.realisedSlippageBps.toFixed(1)} bps vs {(o.modelledSlippageBps ?? 0).toFixed(1)} modelled
+                </span>
+              )}
               <Badge tone="neutral">{o.strategyId}</Badge>
             </div>
           ))}
@@ -121,6 +131,53 @@ function Cell({ children, className = "" }: { children: React.ReactNode; classNa
 }
 function RowGroup({ children }: { children: React.ReactNode }) {
   return <div className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">{children}</div>;
+}
+
+/**
+ * Realised slippage against the cost model, per venue. This is the number that
+ * says whether the backtests were fiction: if real fills cost far more than the
+ * model assumed, every backtest built on the model was too optimistic.
+ */
+function SlippageCard({ rows }: { rows: SlippageRow[] }) {
+  return (
+    <Card title="Execution: realised vs modelled slippage" className="mb-4">
+      {rows.length === 0 ? (
+        <div className="text-xs text-cyber-text-faint">
+          No live fills yet. Every live or paper-live fill is measured against the price when the order was
+          decided, and compared with what the cost model expected. The comparison means something after 30
+          fills per venue. Simulated paper fills are not counted: they pay the model by construction.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 text-sm">
+            <Head>Venue</Head>
+            <Head right>Fills</Head>
+            <Head right>Median realised</Head>
+            <Head right>Median modelled</Head>
+            <Head right>Ratio</Head>
+            {rows.map((r) => (
+              <div key={r.venue} className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">
+                <div className="py-2 capitalize">{r.venue}</div>
+                <Cell>
+                  {r.fills}
+                  {!r.enough && <span className="ml-1 text-[10px] text-cyber-text-faint">(&lt;30)</span>}
+                </Cell>
+                <Cell>{r.medianRealisedBps.toFixed(1)} bps</Cell>
+                <Cell className="text-cyber-text-dim">{r.medianModelledBps.toFixed(1)} bps</Cell>
+                <Cell className={r.ratio === undefined ? "text-cyber-text-faint" : r.ratio <= 1.5 ? "text-success" : "text-danger"}>
+                  {r.ratio === undefined ? "n/a" : `${r.ratio.toFixed(2)}x`}
+                </Cell>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-xs text-cyber-text-faint">
+            Positive bps cost money. A ratio above 1.5x means real fills cost more than the model assumed, and
+            every backtest using the model is too optimistic for that venue until it is recalibrated.
+          </div>
+        </>
+      )}
+    </Card>
+  );
 }
 
 /** A strategy's gross, costs and net. A config that never traded has no ledger yet. */

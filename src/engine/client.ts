@@ -3,6 +3,7 @@ import type {
   AiSpend,
   AiView,
   CoherenceBreak,
+  CostVenue,
   ForecastStats,
   JournalEntry,
   LiveStatus,
@@ -14,6 +15,7 @@ import type {
   PositionView,
   RiskLimits,
   Side,
+  SlippageRow,
   StrategyConfig,
   StrategyState,
   Track,
@@ -70,6 +72,8 @@ export interface EngineClient {
   /** What adaptive execution has learned, per (venue+urgency, style). */
   execution(): PolicyRow[];
   adaptiveExecution(): boolean;
+  /** Realised against modelled slippage per venue, once there are live fills. */
+  slippage(): SlippageRow[];
   /**
    * Market ids whose indicators run on real exchange candles rather than the
    * simulator. Anything not in here is a demo, and the UI says so.
@@ -112,6 +116,8 @@ export interface EngineState {
   forecastStats: ForecastStats;
   execution: PolicyRow[];
   adaptiveExecution: boolean;
+  slippage?: SlippageRow[];
+  cryptoCostVenue?: CostVenue;
 }
 
 export { AI_OFF, DISARMED, NO_SPEND };

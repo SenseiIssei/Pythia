@@ -643,6 +643,10 @@ export class PaperEngine implements EngineClient {
   adaptiveExecution() {
     return false;
   }
+  /** No live fills in the browser build, so nothing to compare against the model. */
+  slippage() {
+    return [];
+  }
   setAdaptiveExecution(_on: boolean) {
     // The browser engine has no venue to route to, so there is nothing to tune.
   }
