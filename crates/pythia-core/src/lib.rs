@@ -13,6 +13,7 @@ pub mod costs;
 pub mod engine;
 pub mod execution;
 pub mod forecast;
+pub mod lab;
 pub mod llm;
 pub mod marketdata;
 pub mod ml;
