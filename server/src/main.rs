@@ -208,6 +208,40 @@ async fn lab_loop(state: AppState) {
     }
 }
 
+/// The append-only record of real fills: `PYTHIA_FILLS_FILE`, else
+/// `fills.jsonl` next to the state file, else in the working directory.
+fn fills_file() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("PYTHIA_FILLS_FILE") {
+        return p.into();
+    }
+    state_file()
+        .and_then(|s| s.parent().map(|d| d.join("fills.jsonl")))
+        .unwrap_or_else(|| "fills.jsonl".into())
+}
+
+#[derive(Deserialize)]
+struct TaxQuery {
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// The tax record: `?format=cointracking` for the CSV import file, otherwise
+/// the FIFO preview as JSON.
+async fn get_tax(axum::extract::Query(q): axum::extract::Query<TaxQuery>) -> impl IntoResponse {
+    let (fills, bad) = pythia_core::tax::read_all(&fills_file());
+    if q.format.as_deref() == Some("cointracking") {
+        let exchange = std::env::var("PYTHIA_EXCHANGE").unwrap_or_else(|_| "Kraken".into());
+        return (
+            [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")],
+            pythia_core::tax::cointracking_csv(&fills, &exchange),
+        )
+            .into_response();
+    }
+    let mut v = serde_json::to_value(pythia_core::tax::fifo_summary(&fills)).unwrap_or_default();
+    v["damagedLines"] = bad.into();
+    Json(v).into_response()
+}
+
 /// Where the engine state is saved, if anywhere: `PYTHIA_STATE_FILE`.
 fn state_file() -> Option<std::path::PathBuf> {
     std::env::var("PYTHIA_STATE_FILE").ok().map(Into::into)
@@ -339,6 +373,7 @@ async fn main() {
         .route("/api/exchanges", get(get_exchanges))
         .route("/api/wallets", get(get_wallets))
         .route("/api/ml/status", get(get_ml_status))
+        .route("/api/tax", get(get_tax))
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         // The dashboards are served from a different origin in dev; allow them.
@@ -462,6 +497,8 @@ async fn tick_loop(state: AppState) {
         // order, so neither can stall the tick loop the way a blocking
         // wait-for-fill would.
         execution::cycle(&state.engine, &state.creds).await;
+        // Every real fill goes to the append-only tax record.
+        pythia_core::tax::flush(&state.engine, &fills_file());
 
         // Reconcile against the broker every ~2 minutes: it is the only way to
         // notice a fill that happened while we were restarting.

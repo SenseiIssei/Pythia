@@ -536,6 +536,38 @@ pub fn save_wallet_addresses(list: Vec<WatchedAddress>) -> Result<(), String> {
     vault::save(vault::WALLETS, &fields)
 }
 
+/// The append-only record of real fills, in the app's data folder.
+pub fn fills_file(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("fills.jsonl"))
+}
+
+/// The tax record. `cointracking: true` returns the CSV import file as text,
+/// otherwise the FIFO preview as JSON. Read-only.
+#[tauri::command]
+pub fn tax_export(app: AppHandle, cointracking: bool) -> Result<serde_json::Value, String> {
+    let path = fills_file(&app).ok_or("no app data folder")?;
+    let (fills, bad) = pythia_core::tax::read_all(&path);
+    if cointracking {
+        let exchange = std::env::var("PYTHIA_EXCHANGE").unwrap_or_else(|_| "Kraken".into());
+        return Ok(serde_json::Value::String(pythia_core::tax::cointracking_csv(&fills, &exchange)));
+    }
+    let mut v = serde_json::to_value(pythia_core::tax::fifo_summary(&fills)).map_err(|e| e.to_string())?;
+    v["damagedLines"] = bad.into();
+    Ok(v)
+}
+
+/// Write the CoinTracking CSV into the Downloads folder and return its path.
+#[tauri::command]
+pub fn tax_save_csv(app: AppHandle) -> Result<String, String> {
+    let src = fills_file(&app).ok_or("no app data folder")?;
+    let (fills, _) = pythia_core::tax::read_all(&src);
+    let exchange = std::env::var("PYTHIA_EXCHANGE").unwrap_or_else(|_| "Kraken".into());
+    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = dir.join(format!("pythia-cointracking-{}.csv", chrono::Utc::now().format("%Y-%m-%d")));
+    std::fs::write(&path, pythia_core::tax::cointracking_csv(&fills, &exchange)).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
 /// The volatility model in shadow mode: forecasts, live score, drift. Read-only.
 #[tauri::command]
 pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::MlStatus {

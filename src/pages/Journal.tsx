@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store";
 import { Card, PageHeader, Badge } from "../components/ui";
 import type { JournalKind } from "../types";
+import { TaxCard } from "../components/TaxCard";
 
 const KINDS: (JournalKind | "all")[] = ["all", "signal", "order", "fill", "reject", "risk", "system"];
 
@@ -25,6 +26,8 @@ export function Journal() {
         title="Journal"
         subtitle="Append-only audit log — every signal, order, fill & rejection"
       />
+
+      <TaxCard />
 
       <div className="mb-4 flex gap-2">
         {KINDS.map((k) => (

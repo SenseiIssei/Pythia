@@ -145,6 +145,10 @@ pub fn run() {
                     // poll is one request per order, so this never stalls the
                     // tick loop the way a blocking wait-for-fill would.
                     execution::cycle(&engine, &creds).await;
+                    // Every real fill goes to the append-only tax record.
+                    if let Some(path) = commands::fills_file(&handle) {
+                        pythia_core::tax::flush(&engine, &path);
+                    }
 
                     // Reconcile against the broker every ~2 minutes — the only
                     // way to notice a fill that landed while we were restarting.
@@ -232,6 +236,8 @@ pub fn run() {
             commands::save_wallet_addresses,
             commands::wallet_snapshot,
             commands::ml_status,
+            commands::tax_export,
+            commands::tax_save_csv,
             commands::run_ensemble,
             commands::forecast_config,
             commands::set_forecast_config,
