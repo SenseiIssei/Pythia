@@ -1768,6 +1768,8 @@ impl Engine {
             (risk::SizingMode::NoEdge, _) => return,
             _ => full * strength,
         };
+        // In a drawdown, smaller: half size at half the drawdown limit.
+        let deploy = deploy * risk::derisk_factor(self.drawdown_pct(), self.limits.max_drawdown_pct);
         // AI overlay: shrink, boost slightly, or veto — applied to a trade the
         // rules already decided to make.
         let (ai_mult, ai_note) = self.ai_multiplier(&m.id, intent.side);
@@ -3155,11 +3157,22 @@ impl Engine {
     fn exposure_book(&self) -> Vec<(String, f64)> {
         self.positions.iter().map(|(id, p)| (id.clone(), p.qty * self.price_of(id))).collect()
     }
+    /// Peak-to-now equity drawdown in %, against the same peak the breaker
+    /// in `tick` uses.
+    fn drawdown_pct(&self) -> f64 {
+        if self.peak_equity <= 0.0 {
+            return 0.0;
+        }
+        ((self.peak_equity - self.equity()) / self.peak_equity * 100.0).max(0.0)
+    }
     /// The risk manager's live numbers for the Risk page.
     fn risk_status(&self) -> risk::RiskStatus {
         let equity = self.equity();
         let corr = risk::correlated_exposure(&self.exposure_book(), &self.history);
+        let drawdown_pct = self.drawdown_pct();
         risk::RiskStatus {
+            drawdown_pct,
+            derisk_factor: risk::derisk_factor(drawdown_pct, self.limits.max_drawdown_pct),
             correlated_exposure: corr,
             correlated_exposure_pct: if equity > 0.0 { corr / equity * 100.0 } else { 0.0 },
             sizing: self
@@ -4316,7 +4329,7 @@ mod tests {
 
         // Portfolio risk layer: the new limit and the Risk page's live numbers.
         assert!(v["limits"]["maxCorrelatedExposurePct"].is_number(), "RiskLimits is missing maxCorrelatedExposurePct");
-        for key in ["correlatedExposure", "correlatedExposurePct", "sizing"] {
+        for key in ["correlatedExposure", "correlatedExposurePct", "sizing", "drawdownPct", "deriskFactor"] {
             assert!(v["risk"].get(key).is_some(), "RiskStatus is missing `{key}` on the wire");
         }
         for key in ["strategyId", "mode", "trades"] {

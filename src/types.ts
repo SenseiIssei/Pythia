@@ -233,6 +233,10 @@ export interface RiskStatus {
   correlatedExposurePct: number;
   /** How each strategy's entries are sized. */
   sizing: StrategySizing[];
+  /** Peak-to-now equity drawdown, %, the one the breaker watches. */
+  drawdownPct: number;
+  /** New entries are multiplied by this: 1 - drawdown / maxDrawdownPct, clamped to 0..1. */
+  deriskFactor: number;
 }
 
 /** confidence: under 30 trades, sized off signal strength. measured: sized on

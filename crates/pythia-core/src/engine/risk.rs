@@ -390,6 +390,27 @@ pub fn kelly_notional(est: &KellyEstimate, equity: f64, kelly_fraction: f64, slo
     frac * est.shrunk * equity / est.avg_loss / slots.max(1.0)
 }
 
+// ── drawdown de-risking ─────────────────────────────────────────────────────
+
+/// Size multiplier for new entries while the book is in a drawdown. Linear in
+/// how much of the drawdown limit is used up:
+///
+/// ```text
+/// factor = clamp(1 - drawdown / maxDrawdown, 0, 1)
+/// ```
+///
+/// Full size at the equity peak, half at 50 % of the limit, a quarter at 75 %,
+/// and nothing new at the breaker, which trips the kill switch there anyway.
+/// This is the proportional rule (exposure in proportion to the cushion left
+/// above the floor) rather than steps, so there is no cliff where the size
+/// halves between two ticks. `maxDrawdown <= 0` turns it off with the breaker.
+pub fn derisk_factor(drawdown_pct: f64, max_drawdown_pct: f64) -> f64 {
+    if max_drawdown_pct <= 0.0 || !drawdown_pct.is_finite() {
+        return 1.0;
+    }
+    (1.0 - drawdown_pct.max(0.0) / max_drawdown_pct).clamp(0.0, 1.0)
+}
+
 /// One strategy's sizing, for the Risk page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -437,11 +458,27 @@ pub struct RiskStatus {
     /// How each strategy's entries are sized.
     #[serde(default)]
     pub sizing: Vec<StrategySizing>,
+    /// Peak-to-now equity drawdown, % (the one the breaker watches).
+    #[serde(default)]
+    pub drawdown_pct: f64,
+    /// What new entries are multiplied by because of it, see [`derisk_factor`].
+    #[serde(default = "one")]
+    pub derisk_factor: f64,
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 impl Default for RiskStatus {
     fn default() -> Self {
-        Self { correlated_exposure: 0.0, correlated_exposure_pct: 0.0, sizing: Vec::new() }
+        Self {
+            correlated_exposure: 0.0,
+            correlated_exposure_pct: 0.0,
+            sizing: Vec::new(),
+            drawdown_pct: 0.0,
+            derisk_factor: 1.0,
+        }
     }
 }
 
@@ -701,6 +738,19 @@ mod tests {
         r.record(0.0);
         r.record(f64::NAN);
         assert_eq!((r.wins, r.losses), (0, 1));
+    }
+
+    #[test]
+    fn size_halves_at_half_the_drawdown_limit_and_reaches_zero_at_the_breaker() {
+        assert_eq!(derisk_factor(0.0, 15.0), 1.0);
+        assert!((derisk_factor(3.75, 15.0) - 0.75).abs() < 1e-12);
+        assert!((derisk_factor(7.5, 15.0) - 0.5).abs() < 1e-12);
+        assert!((derisk_factor(11.25, 15.0) - 0.25).abs() < 1e-12);
+        assert_eq!(derisk_factor(15.0, 15.0), 0.0);
+        assert_eq!(derisk_factor(20.0, 15.0), 0.0);
+        // a new high (negative drawdown) is full size, and no limit is no de-risking
+        assert_eq!(derisk_factor(-1.0, 15.0), 1.0);
+        assert_eq!(derisk_factor(10.0, 0.0), 1.0);
     }
 
     #[test]
