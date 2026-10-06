@@ -244,6 +244,39 @@ fn the_edge_record_survives_a_restart() {
     assert!((a.loss_return_sum - b.loss_return_sum).abs() < 1e-12);
 }
 
+// ── drawdown de-risking ─────────────────────────────────────────────────────
+
+#[test]
+fn half_way_to_the_drawdown_breaker_entries_are_half_size() {
+    // Both books hold 92.5k; one of them came down from a 100k peak, which is
+    // 7.5% drawdown, half of the 15% limit.
+    let mut flat = Engine::new();
+    let mut down = Engine::new();
+    for e in [&mut flat, &mut down] {
+        e.cash = 92_500.0;
+    }
+    flat.peak_equity = 92_500.0;
+    down.peak_equity = 100_000.0;
+
+    let st = down.state().risk;
+    assert!((st.drawdown_pct - 7.5).abs() < 1e-9);
+    assert!((st.derisk_factor - 0.5).abs() < 1e-9);
+    assert_eq!(flat.state().risk.derisk_factor, 1.0);
+
+    let (f, d) = (entry_notional(&mut flat, 1.0), entry_notional(&mut down, 1.0));
+    assert!(f > 0.0);
+    assert!((d / f - 0.5).abs() < 1e-9, "got {d} vs {f}");
+}
+
+#[test]
+fn at_the_breaker_no_new_entry_is_sized() {
+    let mut e = Engine::new();
+    e.cash = 85_000.0;
+    e.peak_equity = 100_000.0;
+    assert_eq!(e.state().risk.derisk_factor, 0.0);
+    assert_eq!(entry_notional(&mut e, 1.0), 0.0);
+}
+
 #[test]
 fn a_save_from_before_the_correlation_cap_loads_with_the_default() {
     let mut v = serde_json::to_value(RiskLimits::default()).unwrap();

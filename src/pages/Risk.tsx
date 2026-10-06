@@ -91,7 +91,7 @@ export function Risk() {
       </Card>
 
       {/* live utilization */}
-      <div className="mb-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mb-4 grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card title="Daily Loss Utilization">
           <div className="mb-2 flex justify-between text-sm">
             <span className="text-cyber-text-dim">{dayLossPct > 0 ? dayLossPct.toFixed(2) : "0.00"}% of {limits.maxDailyLossPct}%</span>
@@ -110,6 +110,7 @@ export function Risk() {
           <Meter pct={exposureUtil || 0} tone={exposureUtil >= 80 ? "red" : "cyan"} />
         </Card>
         <CorrelatedExposureCard status={riskStatus} capPct={limits.maxCorrelatedExposurePct} grossPct={grossPct} />
+        <DrawdownCard status={riskStatus} limitPct={limits.maxDrawdownPct} />
       </div>
 
       {riskStatus && riskStatus.sizing.length > 0 && (
@@ -173,6 +174,36 @@ function CorrelatedExposureCard({
       <div className="mt-2 text-xs text-cyber-text-faint">
         Raw gross is {grossPct.toFixed(0)}%. Positions that move together count as one bet: sqrt(w&apos;Cw) over the
         return correlations on the Correlation page.
+      </div>
+    </Card>
+  );
+}
+
+/** Drawdown against the breaker, and how much it is shrinking new entries. */
+function DrawdownCard({ status, limitPct }: { status: RiskStatus | null; limitPct: number }) {
+  if (!status) {
+    return (
+      <Card title="Drawdown De-risking">
+        <div className="text-xs text-cyber-text-faint">Measured by the Rust engine. Not available in the browser build.</div>
+      </Card>
+    );
+  }
+  const used = limitPct > 0 ? (status.drawdownPct / limitPct) * 100 : 0;
+  const factor = status.deriskFactor;
+  return (
+    <Card title="Drawdown De-risking">
+      <div className="mb-2 flex justify-between text-sm">
+        <span className="text-cyber-text-dim">
+          {status.drawdownPct.toFixed(2)}% of {limitPct}% breaker
+        </span>
+        <span className={factor < 1 ? "text-warning" : "text-cyber-text-dim"}>
+          entries at {(factor * 100).toFixed(0)}% size
+        </span>
+      </div>
+      <Meter pct={used} tone={used >= 50 ? "red" : "green"} />
+      <div className="mt-2 text-xs text-cyber-text-faint">
+        New entries shrink in a straight line as the drawdown eats into the limit: half size at half the limit, nothing
+        new at the breaker.
       </div>
     </Card>
   );
