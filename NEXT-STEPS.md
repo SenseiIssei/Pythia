@@ -56,10 +56,11 @@ For the web build to talk to the backend, put
 ### Check it still builds
 
 ```bash
-cargo test --workspace && npm run build
+npm run check
 ```
 
-306 Rust tests should pass (one benchmark is `#[ignore]`d). The Tauri shell is a separate workspace:
+That runs `cargo test --workspace` (361 Rust tests, one benchmark
+`#[ignore]`d), vitest (27 tests) and `npm run build`. The Tauri shell is a separate workspace:
 
 ```bash
 cd src-tauri && cargo build
@@ -84,8 +85,11 @@ Do this first, before any new features:
 - [ ] Live page → *Test paper connection* → expect `ACTIVE` + buying power
 - [ ] Arm with **Dry-run** on. Confirm the journal shows
       `DRY-RUN submit …` → `dry-run: not submitted`
-- [ ] Dry-run off, still paper endpoint, arm, set *Donchian Breakout · Equities*
-      to **Live**. Watch for `PAPER-LIVE submit` → `LIVE FILL`
+- [ ] Dry-run off, still paper endpoint, arm, and press **Connection test** on
+      an equity market (Live page, per-market trace). Watch for
+      `PAPER-LIVE submit` → `LIVE FILL`. Setting *Donchian Breakout · Equities*
+      to Live now needs a green Strategy Passport (§2), so the connection test
+      is the way to exercise the pipeline
 - [ ] Cross-check every fill against the Alpaca dashboard. **If they disagree,
       Alpaca is right** — that is a bug in Pythia, write it down
 - [ ] Restart mid-session with a position open. Confirm reconciliation picks it
@@ -99,39 +103,54 @@ Until this is done, treat every venue connector as unproven code.
 
 ## 2 · PROFIT-PLAN Phase A — make the numbers honest
 
-**Partly started, and it outranks every algorithm below.** A backtest that ignores
-costs is a random-number generator with a nice chart, and the app currently
-applies a flat 8 bps slippage + 6 bps fee to every paper fill.
+**Built on `feat/honest-numbers` (2026-10-06).** The machinery exists; what is
+left is calibration, which needs real fills and recorded books.
 
-> **Update after merging `feat/real-bars-and-opus5`:** the deflated Sharpe item
-> below is partly done, just not on the Optimizer page. `crates/pythia-core/src/research/`
-> has a walk-forward harness on real daily candles (anchored folds, parameters
-> fitted in-sample, scored only out-of-sample) and computes the deflated Sharpe
-> ratio against the number of parameter sets tried. Its backtester fills on the
-> next bar's open and charges fee + slippage on both sides via a flat
-> `CostModel`. It runs as `GET /api/research/validate` / `npm run validate`, and
-> `docs/VALIDATION.md` records the first run. Still open: the Optimizer page
-> does not use it, there is no out-of-sample/in-sample ratio yet (the per-fold
-> in-sample Sharpe is recorded, not compared), costs are one flat model rather
-> than the per-venue `costs.rs`, and gross/cost/net are not reported separately.
-
-- [ ] `crates/pythia-core/src/costs.rs` — per-venue `CostModel { taker_bps,
-      maker_bps, half_spread_bps, impact_coeff, borrow_bps_yr, min_notional }`,
-      calibrated from live quotes rather than guessed
-- [ ] Backtester reports **gross P&L, costs, net P&L** as three separate lines
-- [ ] Record realised slippage on every live fill and compare against the model
-      (the execution bandit already stores the raw material — see
-      `ExecPolicy::report`)
-- [ ] Deflated Sharpe + out-of-sample/in-sample ratio on the Optimizer page
-      (deflated Sharpe exists in the walk-forward validator, see the note above).
-      Without this, testing 500 parameter sets and keeping the best manufactures
-      a Sharpe of ~2 from pure noise, and the page is actively harmful
-- [ ] The eight validation gates (`PROFIT-PLAN.md` §2) as a
+- [x] `crates/pythia-core/src/costs.rs`: per-venue `CostModel { taker_bps,
+      maker_bps, half_spread_bps, impact_coeff, borrow_bps_yr, min_notional }`
+      with per-symbol overrides and square-root impact against top-of-book
+      depth. Defaults live in `config/costs.json` (embedded at build time,
+      overridable at runtime with `PYTHIA_COSTS_FILE`; the server also picks up
+      the repo file). Paper fills and both backtesters use it; the flat 8 bps +
+      6 bps is gone
+- [ ] **Calibrate `config/costs.json`** from recorded data. The shipped numbers
+      are public fee schedules and typical spreads, not measurements. Spread and
+      depth should come from the data recorder; fees from your actual tier
+- [x] Backtester reports **gross P&L, costs, net P&L** as three separate
+      figures (Rust `PnlBreakdown`, the Backtest, Composer and Analytics pages),
+      flagged when costs exceed 40 % of gross
+- [x] Realised slippage recorded on every live and paper-live fill next to the
+      model's expectation, in the execution policy's own fill record. The
+      Analytics page shows count, median realised, median modelled and their
+      ratio per venue
+- [x] Deflated Sharpe and out-of-sample/in-sample ratio next to every result on
+      the Optimizer page, from a real-candle sweep in the Rust core (fit on 60 %,
+      hold out 40 %). The walk-forward report carries the OOS/IS ratio too
+- [x] The eight validation gates (`PROFIT-PLAN.md` §2) in
       `crates/pythia-core/src/validation.rs`, and a **Strategy Passport** on the
-      Strategies page that disables *Live* until gates 1–7 are green
+      Strategies page. The engine refuses *Live* until gates 1 to 7 are green
+- [ ] Feed `ExecContext` real spread and depth, and pass live top-of-book depth
+      into `CostModel::impact_bps` instead of the per-instrument default
 
 **Done when:** you can see, for your own strategy, the gap between backtest and
-live, and what it is made of.
+live, and what it is made of. That is now true once a strategy has live fills;
+until then the realised-slippage table is empty by design.
+
+Things worth knowing from building it:
+
+- **The deflated Sharpe was mis-scaled before this branch.** It was fed
+  annualised Sharpes, which inflates the z-score by the square root of the bars
+  per year and turns the verdict into a step function. Fixed in
+  `metrics::deflated_sharpe_annualised`. The verdicts in `docs/VALIDATION.md`
+  predate the fix; re-run `npm run validate` before quoting them.
+- **The research backtester only exits on stops**, so several EMA parameter sets
+  hold the very same position out-of-sample and score identically. That is a
+  property of the backtest design, not of the sweep, and worth a look before
+  trusting any parameter surface.
+- **Nothing can go live today, on purpose.** Gate 7 needs 30 trading days and
+  30 closed trades on real prices. To prove keys and the broker work, use the
+  *Connection test* on the Live page: it sends one buy at the venue's minimum
+  size and is the only order that needs no passport.
 
 ---
 
@@ -236,9 +255,10 @@ regardless of the algorithms underneath.
 
 ## 7 · Housekeeping
 
-- [ ] **There is no JavaScript test runner.** No vitest, no jest. The Rust side
-      has 306 tests; the TypeScript side has none. `src/uiMode.ts`,
-      `navFor`/`isVisible` and the paper engine are the obvious first targets
+- [x] **JavaScript tests.** vitest covers `navFor`/`isVisible`, `uiMode`,
+      position accounting, the shared cost model and the browser paper engine.
+      `npm run check` runs `cargo test --workspace`, vitest and the build in one
+      go
 - [ ] **Open a PR** for `feat/live-execution-and-wallets` and squash-merge when
       §1 is done. It is a large branch — five commits, all self-contained
 - [ ] The `#[ignore]`d benchmark in `engine/mod.rs` is worth re-running after any
