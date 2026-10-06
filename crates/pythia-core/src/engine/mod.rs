@@ -72,6 +72,8 @@ pub enum StrategyKind {
     Composed,
     Arb,
     Manual,
+    /// Target weights decided in the research lab and executed here (see `crate::lab`).
+    LabTargets,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -892,6 +894,12 @@ pub struct Engine {
     /// Validation gates 1 to 6 per strategy, computed on request by the host
     /// (they need candle history) and kept against the parameters they judged.
     research: HashMap<String, validation::ResearchVerdict>,
+    /// The latest lab signal per lab strategy id, and which signal each book
+    /// has already been rebalanced to (by `generated_ms`).
+    lab_signals: HashMap<String, crate::lab::LabSignal>,
+    lab_done: HashMap<String, i64>,
+    /// Lab notes already journaled, so a stale signal is said once, not every tick.
+    lab_notes: HashSet<String>,
     /// Average entry per open position at reference prices (before execution
     /// costs), for the gross line. Missing means "same as the fill price".
     ref_prices: HashMap<String, f64>,
@@ -961,6 +969,9 @@ impl Engine {
             exec_policy: bandit::ExecPolicy::default(),
             crypto_venue: CostVenue::Kraken,
             research: HashMap::new(),
+            lab_signals: HashMap::new(),
+            lab_done: HashMap::new(),
+            lab_notes: HashSet::new(),
             ref_prices: HashMap::new(),
             tick_count: 0,
             seq: 0,
@@ -1290,6 +1301,11 @@ impl Engine {
                 self.limits.kill_switch = true;
                 self.log(JournalKind::Risk, format!("Max drawdown {dd:.1}% ≥ {:.1}% — KILL SWITCH tripped", self.limits.max_drawdown_pct), None, None);
             }
+        }
+
+        // Lab books rebalance once per new signal, on their own pass.
+        if self.tick_count % 5 == 0 {
+            self.run_lab_books();
         }
 
         // run strategies every 5th tick (skipping any in cooldown)
@@ -2939,6 +2955,159 @@ impl Engine {
         self.route_fill(idx, &m, side, decision.qty, m.price, intent);
     }
 
+    // ── lab strategies: Python decides, Rust executes (see crate::lab) ──────
+
+    /// Install the latest signal for a lab strategy. The first signal creates
+    /// the strategy in Paper; its gates 1 to 6 come from the lab's evidence,
+    /// gate 7 from its paper record here, like every other strategy.
+    pub fn apply_lab_signal(&mut self, sig: crate::lab::LabSignal) {
+        let id = format!("lab:{}", sig.strategy);
+        if !self.strategies.iter().any(|s| s.id == id) {
+            let universe = self.markets.iter().filter(|m| m.venue == Venue::Crypto).map(|m| m.id.clone()).collect();
+            self.strategies.push(StrategyConfig {
+                id: id.clone(),
+                name: format!("Lab · {}", sig.variant),
+                kind: StrategyKind::LabTargets,
+                venue_class: Venue::Crypto,
+                state: StrategyState::Paper,
+                universe,
+                params: vec![],
+                budget_pct: 30.0,
+                pnl: 0.0,
+                trades: 0,
+                win_rate: 0.0,
+                max_drawdown: 0.0,
+                profit_factor: 0.0,
+                equity_curve: vec![0.0],
+                rules: None,
+                ledger: StrategyLedger::default(),
+            });
+            self.log(
+                JournalKind::System,
+                format!("Lab strategy {} added in Paper: target weights from the research lab, executed here", sig.variant),
+                Some(id.clone()),
+                None,
+            );
+        }
+        let verdict = crate::lab::verdict(&id, vec![], &sig.evidence, self.now());
+        self.research.insert(id.clone(), verdict);
+        self.lab_signals.insert(id, sig);
+    }
+
+    /// Move every lab book to its latest targets, once per signal.
+    fn run_lab_books(&mut self) {
+        let now = self.now();
+        let ids: Vec<(usize, String)> = self
+            .strategies
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.kind == StrategyKind::LabTargets && s.state != StrategyState::Paused)
+            .map(|(i, s)| (i, s.id.clone()))
+            .collect();
+        for (idx, sid) in ids {
+            let Some(sig) = self.lab_signals.get(&sid).cloned() else { continue };
+            if self.lab_done.get(&sid) == Some(&sig.generated_ms) {
+                continue;
+            }
+            if !sig.is_fresh(now) {
+                if self.lab_notes.insert(format!("stale:{sid}:{}", sig.generated_ms)) {
+                    self.log(
+                        JournalKind::System,
+                        "Lab signal is past its validity window; holding positions as they are until a fresh one arrives".into(),
+                        Some(sid.clone()),
+                        None,
+                    );
+                }
+                continue;
+            }
+            // Only real prices: a rebalance against the simulator is no evidence of anything.
+            let crypto: Vec<Market> = self.markets.iter().filter(|m| m.venue == Venue::Crypto).cloned().collect();
+            if !crypto.iter().any(|m| self.real_ids.contains(&m.id)) {
+                if self.lab_notes.insert(format!("noprices:{sid}")) {
+                    self.log(JournalKind::System, "Lab book waits for real crypto prices".into(), Some(sid.clone()), None);
+                }
+                continue;
+            }
+            let mut owned_elsewhere = vec![];
+            let mut prices = HashMap::new();
+            for m in &crypto {
+                match self.positions.get(&m.id) {
+                    Some(p) if p.strategy_id != sid && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
+                    _ if self.real_ids.contains(&m.id) => {
+                        prices.insert(m.id.clone(), m.price);
+                    }
+                    _ => {}
+                }
+            }
+            let holdings: HashMap<String, (f64, f64)> = self
+                .positions
+                .iter()
+                .filter(|(_, p)| p.strategy_id == sid)
+                .map(|(k, p)| (k.clone(), (p.qty, p.avg_price)))
+                .collect();
+            let capital = self.strategies[idx].budget_pct / 100.0 * self.equity();
+            let has_market = |coin: &str| -> Option<String> { Some(format!("crypto:{coin}/USD")) };
+            let (orders, untradable) = crate::lab::rebalance(&sig.weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+            let n = orders.len();
+            for o in orders {
+                let Some(m) = crypto.iter().find(|m| m.id == o.market_id).cloned() else { continue };
+                self.place_lab_order(idx, &m, o.side, o.notional);
+            }
+            self.lab_done.insert(sid.clone(), sig.generated_ms);
+            let mut note = format!(
+                "Rebalanced toward the lab's weights of {}: {n} orders, {:.0} % of the book invested",
+                chrono::DateTime::from_timestamp_millis(sig.as_of_ms).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+                sig.weights.values().sum::<f64>() * 100.0
+            );
+            if !untradable.is_empty() {
+                note.push_str(&format!("; no market here for {}", untradable.join(", ")));
+            }
+            if !owned_elsewhere.is_empty() {
+                note.push_str(&format!("; left alone because another strategy holds them: {}", owned_elsewhere.join(", ")));
+            }
+            self.log(JournalKind::Signal, note, Some(sid), None);
+        }
+    }
+
+    /// One rebalance order for a lab book: the same risk check and routing as any
+    /// strategy (Live only if the strategy is Live, which needs its passport).
+    /// Lab positions carry no ATR stops: the backtest had none, and a stop the
+    /// lab never tested would make this a different strategy from the one judged.
+    fn place_lab_order(&mut self, idx: usize, m: &Market, side: Side, notional: f64) {
+        if m.price <= 0.0 {
+            return;
+        }
+        let sid = self.strategies[idx].id.clone();
+        let qty = notional / m.price;
+        let req = crate::connectors::OrderRequest {
+            symbol: m.symbol.clone(),
+            side,
+            order_type: OrderType::Market,
+            qty,
+            limit_price: None,
+            ref_price: Some(m.price),
+            client_order_id: None,
+            reduce_only: side == Side::Sell,
+        };
+        let ctx = self.risk_ctx(&m.id, &sid, m.price);
+        let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
+        if !decision.approved {
+            let reason = decision.reason.unwrap_or_default();
+            let order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+            self.orders.insert(0, order);
+            self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
+            return;
+        }
+        let route = if self.strategies[idx].state == StrategyState::Live { RouteIntent::Live } else { RouteIntent::Paper };
+        self.route_fill(idx, m, side, decision.qty, m.price, route);
+        if let Some(p) = self.positions.get_mut(&m.id) {
+            if p.strategy_id == sid {
+                p.stop = 0.0;
+                p.target = 0.0;
+            }
+        }
+    }
+
     pub fn flatten(&mut self, market_id: &str) {
         let Some(pos) = self.positions.get(market_id) else { return };
         let qty = pos.qty.abs();
@@ -3464,6 +3633,19 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
         mk("crypto:AVAX/USD", Venue::Crypto, "AVAX/USD", MarketKind::Crypto, 27.5, 0.03, None, 350_000.0),
         mk("crypto:XRP/USD", Venue::Crypto, "XRP/USD", MarketKind::Crypto, 0.52, 0.005, None, 600_000.0),
         mk("crypto:LTC/USD", Venue::Crypto, "LTC/USD", MarketKind::Crypto, 72.0, -0.005, None, 200_000.0),
+        // The rest of the research lab's 20-coin universe, so lab strategies can
+        // run the portfolio they were tested on. Seed prices from Kraken, Oct 2026.
+        mk("crypto:DOGE/USD", Venue::Crypto, "DOGE/USD", MarketKind::Crypto, 0.0934, 0.0, None, 300_000.0),
+        mk("crypto:BCH/USD", Venue::Crypto, "BCH/USD", MarketKind::Crypto, 310.4, 0.0, None, 150_000.0),
+        mk("crypto:TRX/USD", Venue::Crypto, "TRX/USD", MarketKind::Crypto, 0.3357, 0.0, None, 100_000.0),
+        mk("crypto:SUI/USD", Venue::Crypto, "SUI/USD", MarketKind::Crypto, 1.18, 0.0, None, 150_000.0),
+        mk("crypto:NEAR/USD", Venue::Crypto, "NEAR/USD", MarketKind::Crypto, 5.11, 0.0, None, 100_000.0),
+        mk("crypto:ATOM/USD", Venue::Crypto, "ATOM/USD", MarketKind::Crypto, 1.79, 0.0, None, 100_000.0),
+        mk("crypto:UNI/USD", Venue::Crypto, "UNI/USD", MarketKind::Crypto, 8.55, 0.0, None, 100_000.0),
+        mk("crypto:AAVE/USD", Venue::Crypto, "AAVE/USD", MarketKind::Crypto, 180.0, 0.0, None, 100_000.0),
+        mk("crypto:XLM/USD", Venue::Crypto, "XLM/USD", MarketKind::Crypto, 0.2126, 0.0, None, 100_000.0),
+        mk("crypto:PEPE/USD", Venue::Crypto, "PEPE/USD", MarketKind::Crypto, 0.000004266, 0.0, None, 100_000.0),
+        mk("crypto:FIL/USD", Venue::Crypto, "FIL/USD", MarketKind::Crypto, 1.159, 0.0, None, 100_000.0),
         mk("alpaca:AAPL", Venue::Alpaca, "AAPL", MarketKind::Equity, 227.1, 0.006, None, 1_500_000.0),
         mk("alpaca:NVDA", Venue::Alpaca, "NVDA", MarketKind::Equity, 138.9, 0.021, None, 3_300_000.0),
         mk("alpaca:MSFT", Venue::Alpaca, "MSFT", MarketKind::Equity, 428.0, 0.004, None, 1_200_000.0),
@@ -3484,6 +3666,21 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
     sim.insert("crypto:AVAX/USD".into(), SimParam { drift: 0.00042, vol: 0.0033, base: 26.7 });
     sim.insert("crypto:XRP/USD".into(), SimParam { drift: 0.00035, vol: 0.0028, base: 0.517 });
     sim.insert("crypto:LTC/USD".into(), SimParam { drift: 0.00032, vol: 0.0026, base: 72.4 });
+    for (id, base) in [
+        ("crypto:DOGE/USD", 0.0934),
+        ("crypto:BCH/USD", 310.4),
+        ("crypto:TRX/USD", 0.3357),
+        ("crypto:SUI/USD", 1.18),
+        ("crypto:NEAR/USD", 5.11),
+        ("crypto:ATOM/USD", 1.79),
+        ("crypto:UNI/USD", 8.55),
+        ("crypto:AAVE/USD", 180.0),
+        ("crypto:XLM/USD", 0.2126),
+        ("crypto:PEPE/USD", 0.000004266),
+        ("crypto:FIL/USD", 1.159),
+    ] {
+        sim.insert(id.into(), SimParam { drift: 0.00030, vol: 0.0032, base });
+    }
     sim.insert("alpaca:AAPL".into(), SimParam { drift: 0.000005, vol: 0.0009, base: 225.7 });
     sim.insert("alpaca:NVDA".into(), SimParam { drift: 0.00003, vol: 0.0016, base: 136.0 });
     sim.insert("alpaca:MSFT".into(), SimParam { drift: 0.000006, vol: 0.0008, base: 426.0 });
@@ -4944,6 +5141,80 @@ mod tests {
             e2.positions.get("alpaca:AAPL").unwrap().live,
             "a restart must not downgrade real shares to a paper position"
         );
+    }
+
+    fn lab_signal(generated_ms: i64, weights: &[(&str, f64)], deflated_p: f64) -> crate::lab::LabSignal {
+        crate::lab::LabSignal {
+            strategy: "tsmom_regime".into(),
+            variant: "28d daily vol 40% regime".into(),
+            as_of_ms: generated_ms - 4 * 3_600_000,
+            generated_ms,
+            valid_until_ms: generated_ms + 36 * 3_600_000,
+            quote: "USD".into(),
+            weights: weights.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            regime_on: Some(true),
+            evidence: crate::lab::LabEvidence {
+                report: "momentum2".into(),
+                is_sharpe: Some(1.97),
+                oos_sharpe: Some(1.05),
+                deflated_p: Some(deflated_p),
+                sharpe_2x_cost: Some(0.93),
+                variants_tried: Some(50),
+                plateau_share: Some(1.0),
+                regime_sharpes: [("BTC above 200d average".to_string(), 1.56)].into_iter().collect(),
+                regime_filter: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_lab_book_moves_to_its_targets_once_per_signal_and_stays_off_live_without_gate_6() {
+        let mut e = Engine::new();
+        let price = |e: &Engine, id: &str| e.markets.iter().find(|m| m.id == id).unwrap().price;
+        let feed: Vec<RealCrypto> = ["BTC", "ETH"]
+            .iter()
+            .map(|c| {
+                let id = format!("crypto:{c}/USD");
+                RealCrypto { price: price(&e, &id), id, symbol: format!("{c}/USD"), change24h: 0.0 }
+            })
+            .collect();
+        e.apply_kraken(&feed);
+        let now = e.now();
+
+        e.apply_lab_signal(lab_signal(now, &[("BTC", 0.10), ("ETH", 0.05), ("PEPE", 0.02)], 0.86));
+        e.run_lab_books();
+        let btc = e.positions.get("crypto:BTC/USD").expect("bought BTC");
+        assert_eq!(btc.strategy_id, "lab:tsmom_regime");
+        assert_eq!((btc.stop, btc.target), (0.0, 0.0), "no stops the lab never tested");
+        assert!(e.positions.contains_key("crypto:ETH/USD"));
+        assert!(!e.positions.contains_key("crypto:PEPE/USD"), "no real PEPE price here, so no trade");
+        assert!(e.journal.iter().any(|j| j.message.contains("no market here for PEPE")));
+
+        // The same signal again: nothing new.
+        let n_orders = e.orders.len();
+        e.run_lab_books();
+        assert_eq!(e.orders.len(), n_orders);
+
+        // A new day drops BTC from the targets: it is sold.
+        e.apply_lab_signal(lab_signal(now + 1, &[("ETH", 0.05)], 0.86));
+        e.run_lab_books();
+        assert!(e.positions.get("crypto:BTC/USD").map(|p| p.qty.abs() < 1e-9).unwrap_or(true));
+
+        // Gate 6 is red (deflated p 0.86): Live is refused.
+        assert!(e.set_strategy_state("lab:tsmom_regime", StrategyState::Live).is_err());
+    }
+
+    #[test]
+    fn a_stale_lab_signal_is_not_traded() {
+        let mut e = Engine::new();
+        let feed = [RealCrypto { id: "crypto:BTC/USD".into(), symbol: "BTC/USD".into(), price: 67_000.0, change24h: 0.0 }];
+        e.apply_kraken(&feed);
+        let old = e.now() - 48 * 3_600_000;
+        e.apply_lab_signal(lab_signal(old, &[("BTC", 0.10)], 0.86));
+        e.run_lab_books();
+        assert!(!e.positions.contains_key("crypto:BTC/USD"));
+        assert!(e.journal.iter().any(|j| j.message.contains("past its validity window")));
     }
 
     #[test]

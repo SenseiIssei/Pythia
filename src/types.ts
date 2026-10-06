@@ -231,7 +231,9 @@ export type StrategyKind =
   | "prob-edge"
   | "composed"
   | "arb"
-  | "manual";
+  | "manual"
+  /** Target weights decided in the research lab, executed by the engine. */
+  | "lab-targets";
 
 // ── composed (user-built rule) strategies ──────────────────────────────────
 export type IndKind = "price" | "rsi" | "ema" | "sma" | "zscore" | "roc" | "macdHist" | "atr";

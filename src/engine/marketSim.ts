@@ -10,6 +10,21 @@ interface SimState {
   base: number; // reference price for change24h
 }
 
+/** Coins beyond the original nine, with Kraken seed prices from Oct 2026. */
+const LAB_COINS: [string, number][] = [
+  ["DOGE", 0.0934],
+  ["BCH", 310.4],
+  ["TRX", 0.3357],
+  ["SUI", 1.18],
+  ["NEAR", 5.11],
+  ["ATOM", 1.79],
+  ["UNI", 8.55],
+  ["AAVE", 180.0],
+  ["XLM", 0.2126],
+  ["PEPE", 0.000004266],
+  ["FIL", 1.159],
+];
+
 const seedMarkets: Market[] = [
   {
     id: "crypto:BTC/USD",
@@ -47,6 +62,17 @@ const seedMarkets: Market[] = [
   { id: "crypto:AVAX/USD", venue: "crypto", symbol: "AVAX/USD", kind: "crypto", price: 27.5, change24h: 0.03, liquidity: 350_000, updatedAt: Date.now() },
   { id: "crypto:XRP/USD", venue: "crypto", symbol: "XRP/USD", kind: "crypto", price: 0.52, change24h: 0.005, liquidity: 600_000, updatedAt: Date.now() },
   { id: "crypto:LTC/USD", venue: "crypto", symbol: "LTC/USD", kind: "crypto", price: 72.0, change24h: -0.005, liquidity: 200_000, updatedAt: Date.now() },
+  // The rest of the research lab's 20-coin universe (mirrors seed_markets in Rust).
+  ...LAB_COINS.map(([sym, price]) => ({
+    id: `crypto:${sym}/USD`,
+    venue: "crypto" as const,
+    symbol: `${sym}/USD`,
+    kind: "crypto" as const,
+    price,
+    change24h: 0,
+    liquidity: 100_000,
+    updatedAt: Date.now(),
+  })),
   {
     id: "alpaca:AAPL",
     venue: "alpaca",
@@ -115,6 +141,7 @@ const simParams: Record<string, SimState> = {
   "crypto:AVAX/USD": { drift: 0.00042, vol: 0.0033, base: 26.7 },
   "crypto:XRP/USD": { drift: 0.00035, vol: 0.0028, base: 0.517 },
   "crypto:LTC/USD": { drift: 0.00032, vol: 0.0026, base: 72.4 },
+  ...Object.fromEntries(LAB_COINS.map(([sym, base]) => [`crypto:${sym}/USD`, { drift: 0.0003, vol: 0.0032, base }])),
   "alpaca:AAPL": { drift: 0.000005, vol: 0.0009, base: 225.7 },
   "alpaca:NVDA": { drift: 0.00003, vol: 0.0016, base: 136 },
   "alpaca:MSFT": { drift: 0.000006, vol: 0.0008, base: 426 },
