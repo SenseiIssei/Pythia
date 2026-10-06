@@ -30,9 +30,13 @@ from ..data import ROOT
 from ..experiments.tsmom import COST, DAY_US, daily_matrix, rolling_mean, target_weights
 
 BOOKS = {
-    "tsmom": {"variant": "28d · daily · vol 40%", "lookbacks": [28], "target": 0.40, "regime": False},
-    "tsmom_regime": {"variant": "28d · daily · vol 40% · regime", "lookbacks": [28], "target": 0.40, "regime": True},
+    "tsmom": {"variant": "28d · daily · vol 40%", "lookbacks": [28], "target": 0.40, "regime": False, "engine": False},
+    "tsmom_regime": {"variant": "28d · daily · vol 40% · regime", "lookbacks": [28], "target": 0.40, "regime": True,
+                     "engine": True},
 }
+# "engine": whether the book also gets a signal file for Pythia to execute. One
+# engine holds one position per market, so two books on the same coins cannot
+# both run there; the weaker candidate stays a lab-only paper book.
 TAKER = 0.0010
 START_EQUITY = 10_000.0
 
@@ -122,10 +126,15 @@ def main() -> int:
     bid = np.array([q.get(s, (np.nan, np.nan))[0] for s in symbols])
     ask = np.array([q.get(s, (np.nan, np.nan))[1] for s in symbols])
 
+    # --signals-only refreshes the engine's signal files without stepping the paper books.
+    signals_only = "--signals-only" in sys.argv
     for name, cfg in BOOKS.items():
         tgt = target_weights(close, sigma, history, t, cfg["lookbacks"], cfg["target"])
         if cfg["regime"] and not risk_on:
             tgt = np.zeros_like(tgt)
+        if signals_only:
+            write_signal(name, cfg, tgt, names, int(days[t]), now_us, risk_on)
+            continue
         row = step(name, cfg, tgt, names, bid, ask, close[t], now_us)
         write_signal(name, cfg, tgt, names, int(days[t]), now_us, risk_on)
         print(name, json.dumps(row))
@@ -165,6 +174,8 @@ def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_
     The engine treats a signal older than `valid_until_ms` as stale and holds
     still rather than trading on yesterday's decision.
     """
+    if not cfg.get("engine"):
+        return
     d = ROOT / "signals" / name
     d.mkdir(parents=True, exist_ok=True)
     sig = {
