@@ -1,14 +1,18 @@
-"""Paper forward test of the momentum variant picked in-sample (gate 7). No real money.
+"""Paper forward tests of the momentum candidates (gate 7). No real money.
 
 Runs once a day at 04:00 UTC, after the 03:30 backfill has fetched yesterday's
-klines. It computes the target weights with the SAME function the backtest
-uses, from the same files, marks the paper book to market at live Binance
-prices, and rebalances at the live touch: buys at the ask, sells at the bid,
-plus the 10 bps taker fee. The modelled cost (15 bps per unit of turnover,
-as in the backtest) is journaled next to it, so after 30 days we can see
-whether the backtest's cost assumption holds.
+klines. Each book computes its target weights with the SAME function the
+backtest uses, from the same files, marks to market at live Binance prices and
+rebalances at the live touch: buys at the ask, sells at the bid, plus the
+10 bps taker fee. The modelled cost (15 bps per unit of turnover, as in the
+backtest) is journaled next to it, so after 30 days we can see whether the
+backtest's cost assumption holds.
 
-State: <data>/paper/tsmom/state.json   Journal: <data>/paper/tsmom/journal.csv
+Books (picked in-sample, see reports/tsmom and reports/momentum2):
+  tsmom          28d · daily · vol 40%            since 2026-10-06
+  tsmom_regime   the same, flat while BTC < 200d  since 2026-10-07
+
+Per book: <data>/paper/<book>/state.json and journal.csv
 """
 
 from __future__ import annotations
@@ -25,11 +29,12 @@ import numpy as np
 from ..data import ROOT
 from ..experiments.tsmom import COST, DAY_US, daily_matrix, rolling_mean, target_weights
 
-VARIANT = "28d · daily · vol 40%"
-LOOKBACKS, TARGET = [28], 0.40
+BOOKS = {
+    "tsmom": {"variant": "28d · daily · vol 40%", "lookbacks": [28], "target": 0.40, "regime": False},
+    "tsmom_regime": {"variant": "28d · daily · vol 40% · regime", "lookbacks": [28], "target": 0.40, "regime": True},
+}
 TAKER = 0.0010
 START_EQUITY = 10_000.0
-DIR = ROOT / "paper" / "tsmom"
 
 
 def live_quotes(symbols: list[str]) -> dict[str, tuple[float, float]]:
@@ -38,31 +43,16 @@ def live_quotes(symbols: list[str]) -> dict[str, tuple[float, float]]:
     return {s: book[s] for s in symbols if s in book}
 
 
-def main() -> int:
-    DIR.mkdir(parents=True, exist_ok=True)
-    now_us = time.time_ns() // 1000
-    yesterday = (now_us // DAY_US - 1) * DAY_US
-    days, close, rv, names = daily_matrix()
-    if days[-1] < yesterday:
-        print(f"history ends {datetime.fromtimestamp(days[-1] / 1e6, timezone.utc):%Y-%m-%d}, "
-              "yesterday is missing; not rebalancing on stale data", file=sys.stderr)
-        return 1
-    t = int(np.flatnonzero(days == yesterday)[0])
-    sigma = np.sqrt(rolling_mean(rv, 30, 20))
-    history = np.cumsum(np.isfinite(close), axis=0)
-    tgt = target_weights(close, sigma, history, t, LOOKBACKS, TARGET)
-
-    symbols = [f"{n}USDT" for n in names]
-    q = live_quotes(symbols)
-    bid = np.array([q.get(s, (np.nan, np.nan))[0] for s in symbols])
-    ask = np.array([q.get(s, (np.nan, np.nan))[1] for s in symbols])
+def step(name: str, cfg: dict, tgt: np.ndarray, names: list[str], bid: np.ndarray, ask: np.ndarray,
+         close_t: np.ndarray, now_us: int) -> dict:
+    d = ROOT / "paper" / name
+    d.mkdir(parents=True, exist_ok=True)
     mid = (bid + ask) / 2
-
-    state_file = DIR / "state.json"
+    state_file = d / "state.json"
     if state_file.exists():
         st = json.loads(state_file.read_text())
     else:
-        st = {"variant": VARIANT, "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        st = {"variant": cfg["variant"], "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "equity": START_EQUITY, "weights": [0.0] * len(names), "mid": None, "names": names}
     w = np.array(st["weights"])
     equity = st["equity"]
@@ -84,7 +74,7 @@ def main() -> int:
     equity *= 1 - paper_cost
     # How far the live price had moved from the close the signal used (the backtest fills at that close)
     with np.errstate(invalid="ignore", divide="ignore"):
-        drift = np.nan_to_num(mid / close[t] - 1)
+        drift = np.nan_to_num(mid / close_t - 1)
     timing_bps = float(np.dot(np.abs(delta), drift) / max(np.abs(delta).sum(), 1e-12) * 1e4)
 
     row = {
@@ -99,7 +89,7 @@ def main() -> int:
         "timing_drift_bps": round(timing_bps, 2),
         "weights": json.dumps({n: round(float(x), 4) for n, x in zip(names, tgt) if x > 0}),
     }
-    journal = DIR / "journal.csv"
+    journal = d / "journal.csv"
     new = not journal.exists()
     with journal.open("a", newline="") as fh:
         wr = csv.DictWriter(fh, fieldnames=list(row))
@@ -107,10 +97,37 @@ def main() -> int:
             wr.writeheader()
         wr.writerow(row)
 
-    st.update(equity=equity, weights=tgt.tolist(), mid=[None if not np.isfinite(x) else float(x) for x in mid])
-    st["mid"] = [x if x is not None else np.nan for x in st["mid"]]
+    st.update(equity=equity, weights=tgt.tolist(), mid=[float(x) for x in mid])
     state_file.write_text(json.dumps(st, indent=2, allow_nan=True))
-    print(json.dumps(row))
+    return row
+
+
+def main() -> int:
+    now_us = time.time_ns() // 1000
+    yesterday = (now_us // DAY_US - 1) * DAY_US
+    days, close, rv, names = daily_matrix()
+    if days[-1] < yesterday:
+        print(f"history ends {datetime.fromtimestamp(days[-1] / 1e6, timezone.utc):%Y-%m-%d}, "
+              "yesterday is missing; not rebalancing on stale data", file=sys.stderr)
+        return 1
+    t = int(np.flatnonzero(days == yesterday)[0])
+    sigma = np.sqrt(rolling_mean(rv, 30, 20))
+    history = np.cumsum(np.isfinite(close), axis=0)
+    btc = close[:, names.index("BTC")]
+    ma200 = rolling_mean(btc[:, None], 200, 200)[:, 0]
+    risk_on = bool(btc[t] > ma200[t])
+
+    symbols = [f"{n}USDT" for n in names]
+    q = live_quotes(symbols)
+    bid = np.array([q.get(s, (np.nan, np.nan))[0] for s in symbols])
+    ask = np.array([q.get(s, (np.nan, np.nan))[1] for s in symbols])
+
+    for name, cfg in BOOKS.items():
+        tgt = target_weights(close, sigma, history, t, cfg["lookbacks"], cfg["target"])
+        if cfg["regime"] and not risk_on:
+            tgt = np.zeros_like(tgt)
+        row = step(name, cfg, tgt, names, bid, ask, close[t], now_us)
+        print(name, json.dumps(row))
     return 0
 
 
