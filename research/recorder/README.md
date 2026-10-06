@@ -46,8 +46,10 @@ pl.scan_parquet("/srv/pythia-data/spread/kraken_binance/**/*.parquet").collect()
 ## Operating it
 
 ```bash
-ssh root@82.165.118.241
+ssh pythia-vps
 ```
+
+(`pythia-vps` is an alias in `~/.ssh/config` for the server and its user.)
 
 ```bash
 cat /srv/pythia-data/_health/status.json
