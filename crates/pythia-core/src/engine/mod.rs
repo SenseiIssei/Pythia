@@ -6,6 +6,8 @@
 pub mod composed;
 pub mod indicators;
 pub mod risk;
+#[cfg(test)]
+mod risk_engine_tests;
 pub mod strategies;
 
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
@@ -266,6 +268,10 @@ pub struct StrategyLedger {
     pub forward_trades: u32,
     /// Closed trades filled for real at a venue (paper endpoint included).
     pub live_trades: u32,
+    /// Win rate and payoff in net returns on notional, which entries are
+    /// sized on once there are 30 trades (see [`risk::edge_sizing`]).
+    #[serde(default)]
+    pub edge: risk::EdgeRecord,
 }
 
 impl StrategyLedger {
@@ -302,6 +308,15 @@ pub struct RiskLimits {
     pub vol_target_pct: f64,         // volatility-targeted sizing: target per-bar vol % (0 = off)
     pub regime_filter: bool,         // block mean-reversion in trends & trend strategies in chop
     pub adaptive_allocation: bool,   // auto-weight strategy budgets by recent performance
+    /// Cap on correlation-adjusted exposure, `sqrt(w' C w)`, in % of equity
+    /// (0 = off). See [`risk::correlated_exposure`]. Defaulted so saves from
+    /// before it existed still load.
+    #[serde(default = "default_max_correlated_exposure_pct")]
+    pub max_correlated_exposure_pct: f64,
+}
+
+fn default_max_correlated_exposure_pct() -> f64 {
+    40.0
 }
 
 impl Default for RiskLimits {
@@ -324,6 +339,9 @@ impl Default for RiskLimits {
             vol_target_pct: 0.0,
             regime_filter: false,
             adaptive_allocation: true, // steer capital to what's working
+            // Below the 70% gross cap on purpose: a book that moves as one
+            // stops at 40%, an uncorrelated one is held by the gross cap.
+            max_correlated_exposure_pct: default_max_correlated_exposure_pct(),
         }
     }
 }
@@ -708,6 +726,10 @@ pub struct EngineState {
     /// The Strategy Passport of every strategy: the eight validation gates.
     #[serde(default)]
     pub passports: Vec<validation::Passport>,
+    /// Correlation-adjusted exposure, drawdown de-risking and how each
+    /// strategy is being sized, for the Risk page.
+    #[serde(default)]
+    pub risk: risk::RiskStatus,
 }
 
 fn default_crypto_venue() -> CostVenue {
@@ -903,6 +925,9 @@ pub struct Engine {
     /// Average entry per open position at reference prices (before execution
     /// costs), for the gross line. Missing means "same as the fill price".
     ref_prices: HashMap<String, f64>,
+    /// The sizing mode last announced per strategy, so a switch to measured
+    /// edge or to "no edge" is journaled once, not on every signal.
+    sizing_noted: HashMap<String, risk::SizingMode>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -973,6 +998,7 @@ impl Engine {
             lab_done: HashMap::new(),
             lab_notes: HashSet::new(),
             ref_prices: HashMap::new(),
+            sizing_noted: HashMap::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -1748,7 +1774,18 @@ impl Engine {
         // bets). Risk caps still bound the total.
         let universe_n = self.strategies[strat_idx].universe.len().max(1) as f64;
         let strength = intent.size.max(intent.confidence).clamp(0.3, 1.0);
-        let deploy = (budget / universe_n) * strength * 1.5 * (self.limits.kelly_fraction / 0.25).clamp(0.25, 3.0);
+        let full = (budget / universe_n) * 1.5 * (self.limits.kelly_fraction / 0.25).clamp(0.25, 3.0);
+        // Under 30 closed trades the signal strength sizes the entry. After
+        // that the strategy's own record does, never above full strength.
+        let deploy = match self.edge_sizing(strat_idx) {
+            (risk::SizingMode::Measured, Some(k)) => {
+                full.min(risk::kelly_notional(&k, equity, self.limits.kelly_fraction, universe_n))
+            }
+            (risk::SizingMode::NoEdge, _) => return,
+            _ => full * strength,
+        };
+        // In a drawdown, smaller: half size at half the drawdown limit.
+        let deploy = deploy * risk::derisk_factor(self.drawdown_pct(), self.limits.max_drawdown_pct);
         // AI overlay: shrink, boost slightly, or veto — applied to a trade the
         // rules already decided to make.
         let (ai_mult, ai_note) = self.ai_multiplier(&m.id, intent.side);
@@ -1800,6 +1837,37 @@ impl Engine {
             RouteIntent::Paper
         };
         self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
+    }
+
+    /// How this strategy's next entry is sized, journaling a change of mode
+    /// once: switching to its measured edge, or finding it has none.
+    fn edge_sizing(&mut self, strat_idx: usize) -> (risk::SizingMode, Option<risk::KellyEstimate>) {
+        let s = &self.strategies[strat_idx];
+        let (mode, est) = risk::edge_sizing(&s.ledger.edge);
+        if self.sizing_noted.get(&s.id) == Some(&mode) {
+            return (mode, est);
+        }
+        let (id, name) = (s.id.clone(), s.name.clone());
+        self.sizing_noted.insert(id.clone(), mode);
+        let Some(k) = est else { return (mode, est) };
+        let payoff = k.payoff.map_or("no losses yet".to_string(), |b| format!("payoff {b:.2}"));
+        let record = format!("{} trades, {:.0}% won, {payoff}, Kelly {:.3}", k.trades, k.win_rate * 100.0, k.raw);
+        match mode {
+            risk::SizingMode::Measured => self.log(
+                JournalKind::Risk,
+                format!("{name}: now sized on its measured edge ({record}, {:.3} after shrinking)", k.shrunk),
+                Some(id),
+                None,
+            ),
+            risk::SizingMode::NoEdge => self.log(
+                JournalKind::Risk,
+                format!("{name}: no measured edge ({record}). New entries are sized to zero"),
+                Some(id),
+                None,
+            ),
+            risk::SizingMode::Confidence => {}
+        }
+        (mode, est)
     }
 
     /// The cost venue for a market: its own venue, or for crypto the exchange
@@ -1857,6 +1925,8 @@ impl Engine {
         // update / open position, realizing P&L on reductions
         let key = m.id.clone();
         let mut realized = 0.0;
+        // (qty, entry notional) of the part of a position this fill closed.
+        let mut closed: Option<(f64, f64)> = None;
         // The same position at reference prices, for the gross line.
         let ref_avg = self.ref_prices.get(&key).copied();
         if let Some(pos) = self.positions.get(&key) {
@@ -1889,6 +1959,10 @@ impl Engine {
             }
             Some(pos) => {
                 let was = pos.qty;
+                if was != 0.0 && signed.signum() != was.signum() {
+                    let q = signed.abs().min(was.abs());
+                    closed = Some((q, q * pos.avg_price));
+                }
                 let (new_qty, new_avg, r) = apply_fill(pos.qty, pos.avg_price, signed, fill_price);
                 realized = r;
                 pos.avg_price = new_avg;
@@ -1911,6 +1985,13 @@ impl Engine {
             self.realized_pnl += realized;
         }
         self.cash -= signed * fill_price + fee;
+        // The measured edge: net return on the closed notional. The entry fee
+        // is not tracked per position, so the round trip is estimated as twice
+        // this fill's fee on the closed quantity.
+        if let Some((q, entry_notional)) = closed.filter(|c| c.1 > 0.0 && qty > 0.0) {
+            let round_trip_fee = 2.0 * fee.max(0.0) * q / qty;
+            self.strategies[strat_idx].ledger.edge.record((realized - round_trip_fee) / entry_notional);
+        }
 
         // strategy stats + risk streak tracking
         if realized != 0.0 {
@@ -3240,6 +3321,37 @@ impl Engine {
     fn equity(&self) -> f64 {
         self.cash + self.positions_value()
     }
+    /// Signed notional per open position (short is negative), for the
+    /// correlation-adjusted exposure.
+    fn exposure_book(&self) -> Vec<(String, f64)> {
+        self.positions.iter().map(|(id, p)| (id.clone(), p.qty * self.price_of(id))).collect()
+    }
+    /// Peak-to-now equity drawdown in %, against the same peak the breaker
+    /// in `tick` uses.
+    fn drawdown_pct(&self) -> f64 {
+        if self.peak_equity <= 0.0 {
+            return 0.0;
+        }
+        ((self.peak_equity - self.equity()) / self.peak_equity * 100.0).max(0.0)
+    }
+    /// The risk manager's live numbers for the Risk page.
+    fn risk_status(&self) -> risk::RiskStatus {
+        let equity = self.equity();
+        let corr = risk::correlated_exposure(&self.exposure_book(), &self.history);
+        let drawdown_pct = self.drawdown_pct();
+        risk::RiskStatus {
+            drawdown_pct,
+            derisk_factor: risk::derisk_factor(drawdown_pct, self.limits.max_drawdown_pct),
+            correlated_exposure: corr,
+            correlated_exposure_pct: if equity > 0.0 { corr / equity * 100.0 } else { 0.0 },
+            sizing: self
+                .strategies
+                .iter()
+                .filter(|s| s.id != "manual")
+                .map(|s| risk::StrategySizing::of(&s.id, &s.ledger.edge))
+                .collect(),
+        }
+    }
 
     fn risk_ctx(&self, market_id: &str, strategy_id: &str, _price: f64) -> risk::RiskContext {
         let now = self.now();
@@ -3262,7 +3374,10 @@ impl Engine {
             .find(|m| m.id == market_id)
             .map(|m| ((now - m.updated_at) / 1000).max(0) as u64)
             .unwrap_or(999);
+        let book = self.exposure_book();
         risk::RiskContext {
+            corr_exposure: risk::correlated_exposure(&book, &self.history),
+            corr_loading: risk::correlation_loading(&book, market_id, &self.history),
             equity: self.equity(),
             day_start_equity: self.day_start_equity,
             realized_pnl: self.realized_pnl,
@@ -3486,6 +3601,7 @@ impl Engine {
             slippage: self.exec_policy.slippage_report(),
             crypto_cost_venue: self.crypto_venue,
             passports: self.strategies.iter().filter(|s| s.id != "manual").map(|s| self.passport_for(s)).collect(),
+            risk: self.risk_status(),
         }
     }
 
@@ -4407,6 +4523,19 @@ mod tests {
             assert!(ledger["pnl"].get(key).is_some(), "PnlBreakdown is missing `{key}` on the wire");
         }
         assert!(ledger.get("forward_trades").is_none(), "snake_case must not leak to the UI");
+
+        // Portfolio risk layer: the new limit and the Risk page's live numbers.
+        assert!(v["limits"]["maxCorrelatedExposurePct"].is_number(), "RiskLimits is missing maxCorrelatedExposurePct");
+        for key in ["correlatedExposure", "correlatedExposurePct", "sizing", "drawdownPct", "deriskFactor"] {
+            assert!(v["risk"].get(key).is_some(), "RiskStatus is missing `{key}` on the wire");
+        }
+        for key in ["strategyId", "mode", "trades"] {
+            assert!(v["risk"]["sizing"][0].get(key).is_some(), "StrategySizing is missing `{key}` on the wire");
+        }
+        assert_eq!(v["risk"]["sizing"][0]["mode"], "confidence");
+        for key in ["wins", "losses", "winReturnSum", "lossReturnSum"] {
+            assert!(ledger["edge"].get(key).is_some(), "EdgeRecord is missing `{key}` on the wire");
+        }
     }
 
     #[test]

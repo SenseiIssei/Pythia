@@ -202,19 +202,38 @@ needs no model at all.
 
 ## 4 · Risk manager gaps (PROFIT-PLAN §5)
 
-The risk manager is the strongest part of the codebase, but three things are
-missing and all three are small:
+All three gaps are closed. The formulas live in
+`crates/pythia-core/src/engine/risk.rs`, the numbers are on the Risk page.
 
-- [ ] **Correlation-aware exposure.** Ten crypto longs are one trade with ten
-      names on it. The Correlation page computes the matrix; the risk manager
-      does not consume it. Cap gross exposure on *correlation-adjusted*
-      exposure, not the raw sum
-- [ ] **Kelly on measured edge.** `place_from_intent` sizes off
-      `intent.confidence`, which is an indicator reading, not a win probability.
-      Once a strategy has 30+ trades, size from its realised win rate and payoff
-      ratio, shrunk toward the prior
-- [ ] **Drawdown-proportional de-risking.** Halve size at 50 % of the drawdown
-      limit rather than trading full size straight into the breaker
+- [x] **Correlation-aware exposure.** The book is measured as
+      `E = sqrt(w' C w)`: signed notional per market against the return
+      correlation over the last 60 closes, the same numbers the Correlation
+      page draws. An entry that would push `E` over `maxCorrelatedExposurePct`
+      (default 40 % of equity, below the 70 % gross cap) is downsized to fit or
+      refused with the reason in the journal. A correlation that cannot be
+      measured counts as 1. Closing a position is never stopped by it
+- [x] **Kelly on measured edge.** Every closed trade lands on an edge record
+      (net return on notional, after an estimated round-trip fee). From 30
+      trades on, entries are sized on it: `f = p - (1 - p) / b`, shrunk by
+      `n / (n + 30)`, at most a quarter of that, divided by the average loss
+      and spread over the universe, never above the full-confidence size. Under
+      30 trades nothing changes. No edge means size zero, journaled once
+- [x] **Drawdown-proportional de-risking.** Entries are multiplied by
+      `1 - drawdown / maxDrawdownPct`: half size at half the limit, nothing new
+      at the breaker. Linear, not stepped
+
+Still open around it:
+
+- [ ] **Volatility targeting at the portfolio level** (PROFIT-PLAN §5). The
+      vol target still works per position
+- [ ] The correlation window mixes time scales when a bar-backed market (5
+      minute candles) is compared with a tick-fed one. The page has the same
+      flaw. Align on timestamps once every market has real bars
+- [ ] A strategy sized to zero for no edge stays there: it opens nothing, so
+      its record cannot improve. Changing its parameters does not reset the
+      record yet; decide whether it should, the same way it resets the passport
+- [ ] Saves from before the edge record start it empty, so a strategy that
+      already had 30+ trades sizes on confidence until 30 new ones close
 
 ---
 
