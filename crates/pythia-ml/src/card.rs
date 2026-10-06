@@ -26,6 +26,9 @@ pub struct Card {
     /// Deciles (10 % .. 90 %) of every feature in the training data, for drift checks.
     #[serde(default)]
     pub feature_deciles: HashMap<String, Vec<f64>>,
+    /// Drift reference per market-driven feature (calendar features have none).
+    #[serde(default)]
+    pub feature_bins: HashMap<String, crate::drift::Bins>,
     pub probe: Probe,
 }
 

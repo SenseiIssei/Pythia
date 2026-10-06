@@ -78,7 +78,10 @@ pub struct CoinForecast {
 #[serde(rename_all = "camelCase")]
 pub struct FeatureDrift {
     pub feature: String,
+    /// How differently the last week spreads over the training bins (informational).
     pub psi: f64,
+    /// Percent of the last week outside the range the model was trained on (the alarm).
+    pub outside_pct: f64,
     pub level: DriftLevel,
 }
 
@@ -298,10 +301,10 @@ impl Service {
             .iter()
             .enumerate()
             .filter_map(|(i, name)| {
-                let deciles = self.model.card.feature_deciles.get(*name)?;
+                let bins = self.model.card.feature_bins.get(*name)?;
                 let vals: Vec<f64> = self.drift_rows.iter().map(|r| r[i]).collect();
-                let psi = drift::psi(deciles, &vals)?;
-                Some(FeatureDrift { feature: name.to_string(), psi, level: drift::level(psi) })
+                let c = drift::check(bins, &vals)?;
+                Some(FeatureDrift { feature: name.to_string(), psi: c.psi, outside_pct: c.outside_pct, level: c.level })
             })
             .collect();
 

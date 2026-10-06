@@ -186,6 +186,21 @@ def main() -> None:
                                 "importance": [(f, float(g)) for f, g in importance], "model_dir": str(model_dir)})
 
 
+CALENDAR = {"hsin", "hcos", "dow"}  # set by the clock, not the market: nothing to drift
+
+
+def drift_bins(col: np.ndarray) -> dict:
+    """Reference for the engine's drift check: decile edges with ties collapsed, the
+    share of training rows in each bin under the same `value <= edge` rule the
+    engine uses, and the 0.5 % / 99.5 % range the trees have actually seen."""
+    v = col[np.isfinite(col)].astype(np.float64)
+    edges = np.unique(np.quantile(v, np.linspace(0.1, 0.9, 9)))
+    idx = np.searchsorted(edges, v, side="left")  # first edge >= value, i.e. value <= edge
+    expected = np.bincount(idx, minlength=len(edges) + 1) / len(v)
+    return {"edges": [float(e) for e in edges], "expected": [float(x) for x in expected],
+            "lo": float(np.quantile(v, 0.005)), "hi": float(np.quantile(v, 0.995))}
+
+
 def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_resid, folder="vol_1h"):
     """Writes model.json (LightGBM's own tree dump, what the Rust engine evaluates),
     model.onnx (for tools that speak ONNX), and card.json.
@@ -223,6 +238,7 @@ def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_res
         "har": {"features": HAR_COLS, "intercept": float(har_beta[0]),
                 "coef": [float(b) for b in har_beta[1:]], "residual_var": har_resid},
         "feature_deciles": {f: [float(q) for q in np.nanquantile(X[:, i], deciles)] for i, f in enumerate(FEATURES)},
+        "feature_bins": {f: drift_bins(X[:, i]) for i, f in enumerate(FEATURES) if f not in CALENDAR},
         "name": "vol_1h",
         "created": stamp,
         "target": "log realised variance of the next hour, sum of squared 1m log returns, Binance spot",
