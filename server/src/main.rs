@@ -186,6 +186,28 @@ fn bar_timeframe() -> (String, u32) {
     (tf, kraken_min)
 }
 
+/// Reads the lab's signal files every five minutes and hands them to the
+/// engine, which rebalances each lab book once per new signal.
+async fn lab_loop(state: AppState) {
+    let Some(dir) = pythia_core::lab::signals_dir() else {
+        tracing::info!("lab strategies: PYTHIA_SIGNALS / PYTHIA_MODELS not set, none loaded");
+        return;
+    };
+    loop {
+        let (signals, errors) = pythia_core::lab::read_all(&dir);
+        for e in errors {
+            tracing::warn!("lab signal skipped: {e}");
+        }
+        {
+            let mut e = state.engine.lock().unwrap();
+            for s in signals {
+                e.apply_lab_signal(s);
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(300)).await;
+    }
+}
+
 /// The model service's status handle, set once at startup.
 static ML: OnceLock<pythia_core::ml::SharedMl> = OnceLock::new();
 
@@ -249,6 +271,8 @@ async fn main() {
     // Model forecasts in shadow mode (scored, never traded). Idles with a
     // status message when PYTHIA_MODELS is unset.
     let _ = ML.set(pythia_core::ml::spawn());
+    // Lab strategies: pick up the research lab's daily target weights.
+    tokio::spawn(lab_loop(state.clone()));
 
     let app = Router::new()
         .route("/api/health", get(health))

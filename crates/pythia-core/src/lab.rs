@@ -58,6 +58,34 @@ pub struct LabEvidence {
     pub regime_filter: bool,
 }
 
+/// Where the lab's signals live: `PYTHIA_SIGNALS`, else `signals/` next to the
+/// `PYTHIA_MODELS` folder (the lab writes both under one data root).
+pub fn signals_dir() -> Option<std::path::PathBuf> {
+    if let Ok(d) = std::env::var("PYTHIA_SIGNALS") {
+        return Some(d.into());
+    }
+    let models = std::env::var("PYTHIA_MODELS").ok()?;
+    Some(Path::new(&models).parent()?.join("signals"))
+}
+
+/// Every `<dir>/<strategy>/latest.json` that parses. Broken files are skipped
+/// with their error, so one bad signal cannot stop the others.
+pub fn read_all(dir: &Path) -> (Vec<LabSignal>, Vec<String>) {
+    let mut ok = vec![];
+    let mut errors = vec![];
+    let Ok(entries) = std::fs::read_dir(dir) else { return (ok, errors) };
+    for e in entries.flatten() {
+        let p = e.path().join("latest.json");
+        if p.is_file() {
+            match read_signal(&p) {
+                Ok(s) => ok.push(s),
+                Err(e) => errors.push(e),
+            }
+        }
+    }
+    (ok, errors)
+}
+
 pub fn read_signal(path: &Path) -> Result<LabSignal, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))

@@ -75,10 +75,39 @@ async fn get_json(url: &str) -> Option<Value> {
     tokio::time::timeout(Duration::from_secs(5), fut).await.ok().flatten()
 }
 
+/// The crypto universe on Kraken: (pair to request, the key Kraken answers
+/// with, our symbol). Kraken renames some pairs in its replies (XBTUSD comes
+/// back as XXBTZUSD, DOGE trades as XDG), so the reply key is matched exactly
+/// rather than guessed from substrings. These are the 20 coins the research
+/// lab trains and backtests on, so a lab strategy can trade all of them here.
+pub const KRAKEN_PAIRS: [(&str, &str, &str); 20] = [
+    ("XBTUSD", "XXBTZUSD", "BTC/USD"),
+    ("ETHUSD", "XETHZUSD", "ETH/USD"),
+    ("SOLUSD", "SOLUSD", "SOL/USD"),
+    ("XRPUSD", "XXRPZUSD", "XRP/USD"),
+    ("XDGUSD", "XDGUSD", "DOGE/USD"),
+    ("ADAUSD", "ADAUSD", "ADA/USD"),
+    ("AVAXUSD", "AVAXUSD", "AVAX/USD"),
+    ("LINKUSD", "LINKUSD", "LINK/USD"),
+    ("LTCUSD", "XLTCZUSD", "LTC/USD"),
+    ("DOTUSD", "DOTUSD", "DOT/USD"),
+    ("BCHUSD", "BCHUSD", "BCH/USD"),
+    ("TRXUSD", "TRXUSD", "TRX/USD"),
+    ("SUIUSD", "SUIUSD", "SUI/USD"),
+    ("NEARUSD", "NEARUSD", "NEAR/USD"),
+    ("ATOMUSD", "ATOMUSD", "ATOM/USD"),
+    ("UNIUSD", "UNIUSD", "UNI/USD"),
+    ("AAVEUSD", "AAVEUSD", "AAVE/USD"),
+    ("XLMUSD", "XXLMZUSD", "XLM/USD"),
+    ("PEPEUSD", "PEPEUSD", "PEPE/USD"),
+    ("FILUSD", "FILUSD", "FIL/USD"),
+];
+
 /// Kraken public Ticker for the crypto universe. `c[0]` = last trade, `o` = open.
 pub async fn fetch_kraken() -> Vec<RealCrypto> {
-    let url = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD,ETHUSD,SOLUSD,ADAUSD,DOTUSD,LINKUSD,AVAXUSD,XRPUSD,LTCUSD";
-    let Some(v) = get_json(url).await else { return vec![] };
+    let pairs: Vec<&str> = KRAKEN_PAIRS.iter().map(|(p, _, _)| *p).collect();
+    let url = format!("https://api.kraken.com/0/public/Ticker?pair={}", pairs.join(","));
+    let Some(v) = get_json(&url).await else { return vec![] };
     let Some(result) = v.get("result").and_then(Value::as_object) else { return vec![] };
 
     let mut out = Vec::new();
@@ -102,29 +131,9 @@ pub async fn fetch_kraken() -> Vec<RealCrypto> {
     out
 }
 
-/// Map a Kraken pair key (e.g. "XXBTZUSD", "AVAXUSD") to our symbol.
+/// Map a Kraken reply key (e.g. "XXBTZUSD", "AVAXUSD") to our symbol.
 fn kraken_symbol(key: &str) -> Option<&'static str> {
-    if key.contains("XBT") || key.contains("BTC") {
-        Some("BTC/USD")
-    } else if key.contains("ETH") {
-        Some("ETH/USD")
-    } else if key.contains("SOL") {
-        Some("SOL/USD")
-    } else if key.contains("ADA") {
-        Some("ADA/USD")
-    } else if key.contains("AVAX") {
-        Some("AVAX/USD")
-    } else if key.contains("DOT") {
-        Some("DOT/USD")
-    } else if key.contains("LINK") {
-        Some("LINK/USD")
-    } else if key.contains("LTC") {
-        Some("LTC/USD")
-    } else if key.contains("XRP") {
-        Some("XRP/USD")
-    } else {
-        None
-    }
+    KRAKEN_PAIRS.iter().find(|(req, reply, _)| *reply == key || *req == key).map(|(_, _, sym)| *sym)
 }
 
 /// The equity universe we pull real quotes for (mirrors the engine's Alpaca seeds).
@@ -284,22 +293,11 @@ fn parse_alpaca_bars(v: &Value) -> Vec<BarSeries> {
 /// fans out one request per pair and drops any that fail — a partial refresh is
 /// better than none, and the engine only trades markets whose bars it has.
 pub async fn fetch_kraken_bars(interval_min: u32) -> Vec<BarSeries> {
-    const PAIRS: [(&str, &str); 9] = [
-        ("XBTUSD", "BTC/USD"),
-        ("ETHUSD", "ETH/USD"),
-        ("SOLUSD", "SOL/USD"),
-        ("ADAUSD", "ADA/USD"),
-        ("DOTUSD", "DOT/USD"),
-        ("LINKUSD", "LINK/USD"),
-        ("AVAXUSD", "AVAX/USD"),
-        ("XRPUSD", "XRP/USD"),
-        ("LTCUSD", "LTC/USD"),
-    ];
-    // Fan out concurrently — nine sequential 5s timeouts would stall the tick
-    // loop for the better part of a minute on a bad network.
-    let handles: Vec<_> = PAIRS
+    // Fan out concurrently: twenty sequential 5s timeouts would stall the tick
+    // loop for minutes on a bad network.
+    let handles: Vec<_> = KRAKEN_PAIRS
         .iter()
-        .map(|(pair, symbol)| {
+        .map(|(pair, _, symbol)| {
             let url =
                 format!("https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval_min}");
             let id = format!("crypto:{symbol}");
@@ -482,6 +480,21 @@ mod tests {
         assert_eq!(series[0].bars.len(), 2);
         assert!(series[0].bars[0].ts < series[0].bars[1].ts);
         assert_eq!(series[0].bars[1].close, 227.8);
+    }
+
+    #[test]
+    fn kraken_reply_keys_map_exactly() {
+        // The renamed ones, and ones a substring match used to confuse.
+        assert_eq!(kraken_symbol("XXBTZUSD"), Some("BTC/USD"));
+        assert_eq!(kraken_symbol("XDGUSD"), Some("DOGE/USD"));
+        assert_eq!(kraken_symbol("XXLMZUSD"), Some("XLM/USD"));
+        assert_eq!(kraken_symbol("XLTCZUSD"), Some("LTC/USD"));
+        assert_eq!(kraken_symbol("AAVEUSD"), Some("AAVE/USD"));
+        assert_eq!(kraken_symbol("SOLUSD"), Some("SOL/USD"));
+        assert_eq!(kraken_symbol("XETHZUSD"), Some("ETH/USD"));
+        assert_eq!(kraken_symbol("SOMETHINGUSD"), None);
+        let symbols: std::collections::HashSet<_> = KRAKEN_PAIRS.iter().map(|p| p.2).collect();
+        assert_eq!(symbols.len(), 20, "no two pairs may claim the same symbol");
     }
 
     #[test]

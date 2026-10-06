@@ -164,6 +164,23 @@ pub fn run() {
             let ml = app.state::<pythia_core::ml::SharedMl>().inner().clone();
             tauri::async_runtime::spawn(pythia_core::ml::run(ml));
 
+            // Lab strategies: the research lab's daily target weights, read every
+            // five minutes from the synced signals folder.
+            let lab_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let Some(dir) = pythia_core::lab::signals_dir() else { return };
+                loop {
+                    let (signals, _) = pythia_core::lab::read_all(&dir);
+                    if let Some(st) = lab_handle.try_state::<AppState>() {
+                        let mut e = st.engine.lock().unwrap();
+                        for s in signals {
+                            e.apply_lab_signal(s);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                }
+            });
+
             // The AI overlay, on its own clock so a slow model call can never
             // delay a tick, a stop check, or an order. Idle and free until the
             // overlay is switched on from the AI Signals page.

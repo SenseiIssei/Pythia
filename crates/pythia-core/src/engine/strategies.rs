@@ -42,7 +42,8 @@ pub fn run_strategy(
         StrategyKind::Pairs => pairs(cfg, markets, history),
         StrategyKind::ProbEdge => prob_edge(cfg, markets),
         StrategyKind::Composed => composed_strategy(cfg, markets, history),
-        StrategyKind::Arb | StrategyKind::Manual => vec![],
+        // Lab books trade on the engine's rebalance pass, not on per-tick signals.
+        StrategyKind::Arb | StrategyKind::Manual | StrategyKind::LabTargets => vec![],
     }
 }
 
