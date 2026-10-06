@@ -6,12 +6,18 @@ import type { Venue } from "../types";
 const venues: (Venue | "all")[] = ["all", "polymarket", "crypto", "alpaca"];
 
 export function Markets() {
-  const { markets, manualOrder, barBacked } = useStore();
+  const { markets, manualOrder, barBacked, live } = useStore();
   const [filter, setFilter] = useState<Venue | "all">("all");
   const [notional, setNotional] = useState(500);
   const [flash, setFlash] = useState<string>("");
 
   const shown = markets.filter((m) => filter === "all" || m.venue === filter);
+  // Hand orders are practice only. On a venue armed for live routing the engine
+  // refuses them, so the buttons say so up front instead of failing on click.
+  const lockedVenues = live.armed ? live.venues : [];
+  const locked = (v: Venue) => lockedVenues.includes(v);
+  const LOCK_REASON =
+    "Locked while this venue is armed: hand orders never go live. Only a strategy with a green Strategy Passport, or the connection test on the Live page, sends a real order.";
 
   function order(id: string, side: "buy" | "sell") {
     const res = manualOrder(id, side, notional);
@@ -50,6 +56,15 @@ export function Markets() {
           <span className="text-cyber-text-faint">paper $</span>
         </div>
       </div>
+
+      {lockedVenues.length > 0 && (
+        <div className="mb-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-cyber-text-dim">
+          <span className="font-bold text-warning">Buy and Sell are locked for {lockedVenues.join(", ")}.</span>{" "}
+          That venue is armed for real money, and hand orders never go live: only a strategy with a green Strategy
+          Passport, or the connection test on the Live page, sends a real order. Disarm to practise by hand. Closing a
+          position on the Positions page always works.
+        </div>
+      )}
 
       {flash && (
         <div className="mb-3 rounded-lg border border-accent/30 bg-accent/5 px-3 py-1.5 text-xs text-accent">
@@ -109,11 +124,14 @@ export function Markets() {
               <div className="border-t border-cyber-border py-2 text-right font-mono text-purple-neon">
                 {m.modelProb != null ? `${(m.modelProb * 100).toFixed(0)}%` : "—"}
               </div>
-              <div className="flex justify-end gap-1.5 border-t border-cyber-border py-1.5">
-                <Button tone="green" onClick={() => order(m.id, "buy")} className="!px-2 !py-1">
+              <div
+                className="flex justify-end gap-1.5 border-t border-cyber-border py-1.5"
+                title={locked(m.venue) ? LOCK_REASON : undefined}
+              >
+                <Button tone="green" disabled={locked(m.venue)} onClick={() => order(m.id, "buy")} className="!px-2 !py-1">
                   Buy
                 </Button>
-                <Button tone="red" onClick={() => order(m.id, "sell")} className="!px-2 !py-1">
+                <Button tone="red" disabled={locked(m.venue)} onClick={() => order(m.id, "sell")} className="!px-2 !py-1">
                   Sell
                 </Button>
               </div>

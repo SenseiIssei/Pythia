@@ -1101,10 +1101,9 @@ async fn post_test_order(
         } else {
             e.connection_test_notional(&req.market_id)
         };
-        if let Some(why) = e.test_order_block(&req.market_id) {
+        if let Err(why) = e.connection_test_order(&req.market_id, notional) {
             (StatusCode::CONFLICT, why)
         } else {
-            e.manual_order(&req.market_id, Side::Buy, notional);
             let msg = e
                 .state()
                 .journal
