@@ -50,7 +50,10 @@ export interface ScoredHour {
 
 export interface FeatureDrift {
   feature: string;
+  /** How differently the last week spreads over the training bins. Informational. */
   psi: number;
+  /** Percent of the last week outside the range the model was trained on. The alarm. */
+  outsidePct: number;
   level: DriftLevel;
 }
 

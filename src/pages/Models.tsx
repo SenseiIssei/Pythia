@@ -10,7 +10,11 @@ const fmtHour = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-d
 const fmtDate = (ms: number) => new Date(ms).toLocaleDateString();
 
 const DRIFT_TONE: Record<DriftLevel, "green" | "purple" | "red"> = { stable: "green", shift: "purple", drift: "red" };
-const DRIFT_WORD: Record<DriftLevel, string> = { stable: "like training", shift: "shifting", drift: "drifted" };
+const DRIFT_WORD: Record<DriftLevel, string> = {
+  stable: "like training",
+  shift: "different regime",
+  drift: "outside trained range",
+};
 
 export function Models() {
   const mode = liveMode();
@@ -58,6 +62,7 @@ export function Models() {
   const shadow = s?.shadow;
   const gain = shadow?.gainVsHarPct ?? null;
   const notStable = (s?.drift ?? []).filter((d) => d.level !== "stable");
+  const drifted = (s?.drift ?? []).filter((d) => d.level === "drift");
 
   return (
     <div className="animate-fade-in max-w-5xl space-y-4">
@@ -180,19 +185,25 @@ export function Models() {
 
       {s && s.drift.length > 0 && (
         <Card title="Are the inputs still like the training data?">
-          {notStable.length === 0 ? (
+          {drifted.length > 0 ? (
+            <p className="mb-3 text-sm text-danger">
+              {drifted.length} of {s.drift.length} inputs spent more than 5 % of the last week outside the range the
+              model was trained on. Trees cannot extrapolate, so forecasts may be off until the weekly retrain has
+              seen this market.
+            </p>
+          ) : notStable.length === 0 ? (
             <p className="text-sm text-success">
-              All {s.drift.length} inputs over the last week look like what the model was trained on.
+              All {s.drift.length} market inputs over the last week sit inside what the model was trained on.
             </p>
           ) : (
             <p className="mb-3 text-sm text-cyber-text-dim">
-              {notStable.length} of {s.drift.length} inputs have moved away from the training data. A drifted model
-              answers a question it was not trained for; the weekly retrain picks this up.
+              All inputs are inside the trained range. {notStable.length} of {s.drift.length} are spread differently
+              from the six-year average, which is normal: a single week is one market regime.
             </p>
           )}
           <div className="mt-2 flex flex-wrap gap-2">
             {s.drift.map((d) => (
-              <span key={d.feature} title={`PSI ${d.psi.toFixed(3)}`}>
+              <span key={d.feature} title={`${d.outsidePct.toFixed(1)} % outside the trained range, PSI ${d.psi.toFixed(2)}`}>
                 <Badge tone={DRIFT_TONE[d.level]}>
                   {d.feature} · {DRIFT_WORD[d.level]}
                 </Badge>
