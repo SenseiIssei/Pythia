@@ -10,7 +10,8 @@
 set -euo pipefail
 
 main() {
-  local host="${PYTHIA_VPS:-root@SERVER_IP}"
+  # An ssh alias from ~/.ssh/config, so no host or user lives in the repo
+  local host="${PYTHIA_VPS:-pythia-vps}"
   local remote="/srv/pythia-data"
   local local_root="${PYTHIA_LOCAL:-F:/PythiaData}"
   local today
