@@ -209,6 +209,16 @@ export interface RiskLimits {
   volTargetPct: number; // volatility-targeted sizing: target per-bar vol % (0 = off)
   regimeFilter: boolean; // block mean-reversion in trends & trend strategies in chop
   adaptiveAllocation: boolean; // auto-weight strategy budgets by recent performance
+  /** Cap on correlation-adjusted exposure sqrt(w'Cw), % of equity (0 = off). */
+  maxCorrelatedExposurePct: number;
+}
+
+/** What the risk manager is doing right now. Mirrors Rust `risk::RiskStatus`. */
+export interface RiskStatus {
+  /** Correlation-adjusted exposure of the open book, sqrt(w'Cw), quote currency. */
+  correlatedExposure: number;
+  /** The same as % of equity, next to `maxCorrelatedExposurePct`. */
+  correlatedExposurePct: number;
 }
 
 export interface StrategyParam {

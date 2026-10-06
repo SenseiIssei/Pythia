@@ -1,7 +1,7 @@
 import { Power, ShieldAlert } from "lucide-react";
 import { useStore } from "../store";
 import { Card, PageHeader, Meter, Button, Toggle } from "../components/ui";
-import type { RiskLimits } from "../types";
+import type { RiskLimits, RiskStatus } from "../types";
 
 interface LimitRow {
   key: keyof RiskLimits;
@@ -17,6 +17,7 @@ const ROWS: LimitRow[] = [
   { key: "maxDrawdownPct", label: "Max drawdown (breaker)", min: 2, max: 50, step: 1, unit: "%" },
   { key: "maxPositionPct", label: "Max position size", min: 1, max: 50, step: 1, unit: "% equity" },
   { key: "maxGrossExposurePct", label: "Max gross exposure", min: 10, max: 100, step: 5, unit: "% equity" },
+  { key: "maxCorrelatedExposurePct", label: "Max correlated exposure", min: 0, max: 100, step: 5, unit: "% equity" },
   { key: "perStrategyBudgetPct", label: "Per-strategy budget", min: 5, max: 60, step: 1, unit: "% equity" },
   { key: "kellyFraction", label: "Kelly fraction", min: 0.05, max: 1, step: 0.05, unit: "×" },
   { key: "volTargetPct", label: "Vol-target sizing", min: 0, max: 5, step: 0.1, unit: "%/bar" },
@@ -30,13 +31,14 @@ const ROWS: LimitRow[] = [
 ];
 
 export function Risk() {
-  const { limits, setLimits, portfolio, toggleKill } = useStore();
+  const { limits, setLimits, portfolio, toggleKill, riskStatus } = useStore();
 
   const dayPnl = portfolio.realizedPnl + portfolio.unrealizedPnl;
   const dayLossPct = (-dayPnl / portfolio.dayStartEquity) * 100;
   const lossUtil = (dayLossPct / limits.maxDailyLossPct) * 100;
   const exposureUtil =
     (portfolio.grossExposure / ((limits.maxGrossExposurePct / 100) * portfolio.equity)) * 100;
+  const grossPct = portfolio.equity > 0 ? (portfolio.grossExposure / portfolio.equity) * 100 : 0;
 
   return (
     <div className="animate-fade-in">
@@ -89,7 +91,7 @@ export function Risk() {
       </Card>
 
       {/* live utilization */}
-      <div className="mb-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div className="mb-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card title="Daily Loss Utilization">
           <div className="mb-2 flex justify-between text-sm">
             <span className="text-cyber-text-dim">{dayLossPct > 0 ? dayLossPct.toFixed(2) : "0.00"}% of {limits.maxDailyLossPct}%</span>
@@ -107,6 +109,7 @@ export function Risk() {
           </div>
           <Meter pct={exposureUtil || 0} tone={exposureUtil >= 80 ? "red" : "cyan"} />
         </Card>
+        <CorrelatedExposureCard status={riskStatus} capPct={limits.maxCorrelatedExposurePct} grossPct={grossPct} />
       </div>
 
       {/* editable limits */}
@@ -132,5 +135,41 @@ export function Risk() {
         </div>
       </Card>
     </div>
+  );
+}
+
+/** Correlation-adjusted exposure against its cap, next to the raw gross. */
+function CorrelatedExposureCard({
+  status,
+  capPct,
+  grossPct,
+}: {
+  status: RiskStatus | null;
+  capPct: number;
+  grossPct: number;
+}) {
+  if (!status) {
+    return (
+      <Card title="Correlated Exposure">
+        <div className="text-xs text-cyber-text-faint">Measured by the Rust engine. Not available in the browser build.</div>
+      </Card>
+    );
+  }
+  const off = capPct <= 0;
+  const util = off ? 0 : (status.correlatedExposurePct / capPct) * 100;
+  return (
+    <Card title="Correlated Exposure">
+      <div className="mb-2 flex justify-between text-sm">
+        <span className="text-cyber-text-dim">
+          {status.correlatedExposurePct.toFixed(0)}% of equity {off ? "(cap off)" : `of ${capPct}% cap`}
+        </span>
+        {!off && <span className={util >= 100 ? "text-danger" : "text-cyber-text-dim"}>{util.toFixed(0)}%</span>}
+      </div>
+      <Meter pct={util} tone={util >= 80 ? "red" : "cyan"} />
+      <div className="mt-2 text-xs text-cyber-text-faint">
+        Raw gross is {grossPct.toFixed(0)}%. Positions that move together count as one bet: sqrt(w&apos;Cw) over the
+        return correlations on the Correlation page.
+      </div>
+    </Card>
   );
 }

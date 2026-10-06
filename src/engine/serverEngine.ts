@@ -179,6 +179,9 @@ export class ServerEngineClient implements EngineClient {
   passports() {
     return this.state.passports ?? [];
   }
+  riskStatus() {
+    return this.state.risk ?? null;
+  }
   setAdaptiveExecution(on: boolean) {
     this.send({ cmd: "setAdaptiveExecution", on });
   }

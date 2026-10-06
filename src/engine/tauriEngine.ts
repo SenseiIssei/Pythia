@@ -138,6 +138,9 @@ export class TauriEngineClient implements EngineClient {
   passports() {
     return this.state.passports ?? [];
   }
+  riskStatus() {
+    return this.state.risk ?? null;
+  }
   setAdaptiveExecution(on: boolean) {
     void invoke("set_adaptive_execution", { on });
   }
