@@ -24,7 +24,8 @@ main() {
     echo "$(date -u +%FT%TZ) another sync is running, skipped" >> "$log"
     return 0
   fi
-  trap 'rmdir "$lock"' EXIT
+  # Expanded now: at EXIT the function's locals are gone (set -u would abort the cleanup)
+  trap "rmdir '$lock'" EXIT
 
   # path<TAB>size for every file the VPS has finished writing
   local remote_list local_list want
