@@ -155,7 +155,9 @@ def main() -> None:
     final = lgb.LGBMRegressor(**LGBM_PARAMS).fit(X, y)
     final_resid = float(np.var(y - final.predict(X)))
     importance = sorted(zip(FEATURES, final.booster_.feature_importance("gain")), key=lambda x: -x[1])
-    model_dir = export_onnx(final, X, final_resid, summary, gain, dm_p, ts)
+    har_beta = ols(Xh, y)
+    har_resid = float(np.var(y - ols_pred(har_beta, Xh)))
+    model_dir = export_model(final, X, final_resid, summary, gain, dm_p, ts, har_beta, har_resid)
 
     passed = gain > 0 and dm_p < 0.05 and all(r["qlike_lgbm"] <= r["qlike_har"] * 1.02 for r in fold_rows[-4:])
     verdict = (f"LGBM beats HAR by {gain * 100:.1f} % QLIKE out of sample (DM p = {dm_p:.2g}). "
@@ -182,7 +184,15 @@ def main() -> None:
                                 "importance": [(f, float(g)) for f, g in importance], "model_dir": str(model_dir)})
 
 
-def export_onnx(model, X, resid_var, summary, gain, dm_p, ts):
+def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_resid):
+    """Writes model.json (LightGBM's own tree dump, what the Rust engine evaluates),
+    model.onnx (for tools that speak ONNX), and card.json.
+
+    The card carries everything the engine needs to trust the file: the feature
+    order, the HAR baseline it is scored against live, per-feature deciles of
+    the training data for drift checks, and probe rows with the exact outputs
+    LightGBM produced. The engine refuses a model whose probes do not match.
+    """
     import onnxruntime as ort
     from onnxmltools import convert_lightgbm
     from onnxmltools.convert.common.data_types import FloatTensorType
@@ -199,7 +209,18 @@ def export_onnx(model, X, resid_var, summary, gain, dm_p, ts):
     max_err = float(np.max(np.abs(got - model.predict(probe))))
     if max_err > 1e-4:
         raise RuntimeError(f"ONNX output differs from LightGBM by {max_err}")
+    (d / "model.json").write_text(json.dumps(model.booster_.dump_model()))
+    rng = np.random.default_rng(11)
+    pick = rng.choice(len(X), size=64, replace=False)
+    probe_x = X[pick].astype(np.float64)
+    probe_x[:4, :5] = np.nan  # make sure the missing-value path is exercised too
+    deciles = np.linspace(0.1, 0.9, 9)
     card = {
+        "probe": {"x": [[None if np.isnan(v) else float(v) for v in row] for row in probe_x],
+                  "raw": [float(v) for v in model.predict(probe_x.astype(np.float32))]},
+        "har": {"features": HAR_COLS, "intercept": float(har_beta[0]),
+                "coef": [float(b) for b in har_beta[1:]], "residual_var": har_resid},
+        "feature_deciles": {f: [float(q) for q in np.nanquantile(X[:, i], deciles)] for i, f in enumerate(FEATURES)},
         "name": "vol_1h",
         "created": stamp,
         "target": "log realised variance of the next hour, sum of squared 1m log returns, Binance spot",

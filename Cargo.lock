@@ -2865,6 +2865,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pythia-ml"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "pythia-server"
 version = "0.4.0"
 dependencies = [
