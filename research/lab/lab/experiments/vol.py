@@ -157,9 +157,11 @@ def main() -> None:
     importance = sorted(zip(FEATURES, final.booster_.feature_importance("gain")), key=lambda x: -x[1])
     har_beta = ols(Xh, y)
     har_resid = float(np.var(y - ols_pred(har_beta, Xh)))
-    model_dir = export_model(final, X, final_resid, summary, gain, dm_p, ts, har_beta, har_resid)
-
     passed = gain > 0 and dm_p < 0.05 and all(r["qlike_lgbm"] <= r["qlike_har"] * 1.02 for r in fold_rows[-4:])
+    # Only a model that passes is published where the engine looks (models/vol_1h/<date>).
+    # A failing retrain goes to vol_1h_rejected and the engine keeps the last good one.
+    model_dir = export_model(final, X, final_resid, summary, gain, dm_p, ts, har_beta, har_resid,
+                             "vol_1h" if passed else "vol_1h_rejected")
     verdict = (f"LGBM beats HAR by {gain * 100:.1f} % QLIKE out of sample (DM p = {dm_p:.2g}). "
                + ("It passes: better overall, significant, and not worse than HAR in any of the last four quarters."
                   if passed else "It does not pass the bar yet: the gain is not significant or not stable in recent quarters."))
@@ -184,7 +186,7 @@ def main() -> None:
                                 "importance": [(f, float(g)) for f, g in importance], "model_dir": str(model_dir)})
 
 
-def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_resid):
+def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_resid, folder="vol_1h"):
     """Writes model.json (LightGBM's own tree dump, what the Rust engine evaluates),
     model.onnx (for tools that speak ONNX), and card.json.
 
@@ -198,7 +200,7 @@ def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_res
     from onnxmltools.convert.common.data_types import FloatTensorType
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    d = ROOT / "models" / "vol_1h" / stamp
+    d = ROOT / "models" / folder / stamp
     d.mkdir(parents=True, exist_ok=True)
     onx = convert_lightgbm(model, initial_types=[("features", FloatTensorType([None, X.shape[1]]))],
                            target_opset=15)

@@ -465,6 +465,12 @@ pub fn save_wallet_addresses(list: Vec<WatchedAddress>) -> Result<(), String> {
     vault::save(vault::WALLETS, &fields)
 }
 
+/// The volatility model in shadow mode: forecasts, live score, drift. Read-only.
+#[tauri::command]
+pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::MlStatus {
+    ml.read().map(|s| s.clone()).unwrap_or_default()
+}
+
 /// The unified balance sheet across broker, exchange and watched addresses.
 /// Read-only: this command cannot move anything.
 #[tauri::command]

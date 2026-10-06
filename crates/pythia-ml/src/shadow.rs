@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Scored hours kept, across all coins (30 days of 20 coins).
 const KEEP: usize = 30 * 24 * 20;
@@ -23,7 +23,7 @@ struct Pending {
     naive: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scored {
     pub symbol: String,
@@ -116,6 +116,20 @@ impl ShadowBook {
             },
             win_rate: Some(wins as f64 / n as f64),
         }
+    }
+
+    /// The scored history, for persisting across restarts. Pending forecasts are
+    /// not kept: an hour forecast before a restart is simply not scored.
+    pub fn history(&self) -> Vec<Scored> {
+        self.scored.iter().cloned().collect()
+    }
+
+    pub fn restore(history: Vec<Scored>) -> Self {
+        let mut scored: VecDeque<Scored> = history.into();
+        while scored.len() > KEEP {
+            scored.pop_front();
+        }
+        Self { pending: HashMap::new(), scored }
     }
 
     pub fn recent(&self, n: usize) -> Vec<Scored> {
