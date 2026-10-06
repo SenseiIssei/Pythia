@@ -926,6 +926,8 @@ pub struct Engine {
     lab_done: HashMap<String, i64>,
     /// Lab notes already journaled, so a stale signal is said once, not every tick.
     lab_notes: HashSet<String>,
+    /// Real fills not yet handed to the host for the tax record (see `crate::tax`).
+    fill_records: Vec<crate::tax::FillRecord>,
     /// Average entry per open position at reference prices (before execution
     /// costs), for the gross line. Missing means "same as the fill price".
     ref_prices: HashMap<String, f64>,
@@ -1001,6 +1003,7 @@ impl Engine {
             lab_signals: HashMap::new(),
             lab_done: HashMap::new(),
             lab_notes: HashSet::new(),
+            fill_records: Vec::new(),
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
             tick_count: 0,
@@ -2663,6 +2666,17 @@ impl Engine {
         self.positions.values().filter(|p| p.live && p.qty.abs() > 1e-9).count()
     }
 
+    /// Real fills since the last call, for the host to append to the tax record.
+    pub fn drain_fill_records(&mut self) -> Vec<crate::tax::FillRecord> {
+        std::mem::take(&mut self.fill_records)
+    }
+
+    /// Put back fills the host could not write, oldest first.
+    pub fn requeue_fill_records(&mut self, mut fills: Vec<crate::tax::FillRecord>) {
+        fills.append(&mut self.fill_records);
+        self.fill_records = fills;
+    }
+
     /// Hand the async daemon every live order awaiting submission.
     pub fn drain_live_orders(&mut self) -> Vec<LiveOrderOut> {
         std::mem::take(&mut self.pending_live)
@@ -2733,6 +2747,19 @@ impl Engine {
                     // and is updated below rather than duplicated.
                     let reference = if f.arrival > 0.0 { f.arrival } else { price };
                     self.settle_fill(idx, &m, f.side, delta, price, fee_delta, reference, true, false);
+                    // The tax record: every real fill, for the host to append to fills.jsonl.
+                    self.fill_records.push(crate::tax::FillRecord {
+                        ts: chrono::Utc::now().timestamp_millis(),
+                        venue: m.venue,
+                        market_id: m.id.clone(),
+                        symbol: m.symbol.clone(),
+                        side: f.side,
+                        qty: delta,
+                        price,
+                        fee: fee_delta,
+                        strategy_id: f.strategy_id.clone(),
+                        order_id: order_id.to_string(),
+                    });
                     self.log(
                         JournalKind::Fill,
                         format!("LIVE FILL {:?} {delta:.6} {} @ {price:.4}", f.side, m.symbol),

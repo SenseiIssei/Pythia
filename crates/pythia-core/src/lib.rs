@@ -20,6 +20,7 @@ pub mod ml;
 pub mod predict;
 pub mod prefs;
 pub mod research;
+pub mod tax;
 pub mod validation;
 pub mod vault;
 pub mod wallets;
