@@ -182,6 +182,74 @@ pub struct ExecPolicy {
     pub enabled: bool,
     #[serde(default = "default_seed")]
     rng: u64,
+    /// Realised slippage per filled live order, next to what the cost model
+    /// expected, keyed by cost venue (`kraken`, `alpaca`…). The arm statistics
+    /// above keep only running means; comparing realised against modelled
+    /// needs the individual fills, so the medians are robust to one bad print.
+    #[serde(default)]
+    fills: HashMap<String, Vec<FillRecord>>,
+}
+
+/// One live fill's execution cost: what it paid against the arrival price, and
+/// what the cost model said it would.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillRecord {
+    /// Signed bps against arrival; positive means it cost us.
+    pub realised_bps: f64,
+    /// The model's half-spread plus impact for this order, in bps.
+    pub modelled_bps: f64,
+    pub ts: i64,
+}
+
+/// Fills kept per venue. Old enough fills describe a market that has moved on.
+const MAX_FILLS_PER_VENUE: usize = 1000;
+
+/// Below this many fills the realised/modelled comparison is shown but not
+/// trusted (`PROFIT-PLAN.md` §1: "after 30 fills").
+pub const MIN_FILLS_FOR_VERDICT: usize = 30;
+
+/// Realised cost of a fill against the arrival price, in bps, signed so that
+/// positive always means it cost us. `None` for a price that cannot be priced.
+pub fn realised_cost_bps(side: Side, arrival: f64, filled: f64) -> Option<f64> {
+    if !(arrival > 0.0 && filled > 0.0) {
+        return None;
+    }
+    let raw = (filled - arrival) / arrival * 10_000.0;
+    Some(match side {
+        Side::Buy => raw,
+        Side::Sell => -raw,
+    })
+}
+
+fn median(xs: &mut [f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let m = xs.len() / 2;
+    if xs.len() % 2 == 1 {
+        xs[m]
+    } else {
+        (xs[m - 1] + xs[m]) / 2.0
+    }
+}
+
+/// Per-venue realised-versus-modelled slippage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlippageRow {
+    /// Cost venue key, e.g. `kraken` or `alpaca`.
+    pub venue: String,
+    pub fills: usize,
+    pub median_realised_bps: f64,
+    pub median_modelled_bps: f64,
+    /// Realised over modelled. `None` when the model expected nothing, which
+    /// makes a ratio meaningless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f64>,
+    /// At least [`MIN_FILLS_FOR_VERDICT`] fills behind the medians.
+    pub enough: bool,
 }
 
 fn default_patience() -> f64 {
@@ -258,16 +326,10 @@ impl ExecPolicy {
         arrival: f64,
         filled_price: Option<f64>,
     ) {
-        let cost = match filled_price {
-            Some(p) if arrival > 0.0 && p > 0.0 => {
-                let raw = (p - arrival) / arrival * 10_000.0;
-                match side {
-                    Side::Buy => raw,
-                    Side::Sell => -raw,
-                }
-            }
+        let cost = match filled_price.and_then(|p| realised_cost_bps(side, arrival, p)) {
+            Some(c) => c,
             // Never filled. The trade did not happen, and that is not free.
-            _ => NO_FILL_PENALTY_BPS,
+            None => NO_FILL_PENALTY_BPS,
         };
         self.stats
             .entry(ctx.key())
@@ -275,6 +337,63 @@ impl ExecPolicy {
             .entry(arm.as_str().to_string())
             .or_default()
             .observe(cost, filled_price.is_some());
+    }
+
+    /// [`ExecPolicy::observe`], plus keep the fill for the realised-versus-
+    /// modelled comparison. `venue` is the cost venue key and `modelled_bps`
+    /// the cost model's expected slippage for this order. Orders that never
+    /// filled teach the bandit but are not slippage: there was no fill price.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_against_model(
+        &mut self,
+        ctx: &ExecContext,
+        arm: ExecStyle,
+        side: Side,
+        arrival: f64,
+        filled_price: Option<f64>,
+        venue: &str,
+        modelled_bps: f64,
+        ts: i64,
+    ) -> Option<f64> {
+        self.observe(ctx, arm, side, arrival, filled_price);
+        let realised = filled_price.and_then(|p| realised_cost_bps(side, arrival, p))?;
+        let list = self.fills.entry(venue.to_string()).or_default();
+        list.push(FillRecord { realised_bps: realised, modelled_bps, ts });
+        if list.len() > MAX_FILLS_PER_VENUE {
+            let excess = list.len() - MAX_FILLS_PER_VENUE;
+            list.drain(..excess);
+        }
+        Some(realised)
+    }
+
+    /// Realised against modelled slippage, one row per venue with fills.
+    pub fn slippage_report(&self) -> Vec<SlippageRow> {
+        let mut out: Vec<SlippageRow> = self
+            .fills
+            .iter()
+            .filter(|(_, f)| !f.is_empty())
+            .map(|(venue, f)| {
+                let mut realised: Vec<f64> = f.iter().map(|r| r.realised_bps).collect();
+                let mut modelled: Vec<f64> = f.iter().map(|r| r.modelled_bps).collect();
+                let mr = median(&mut realised);
+                let mm = median(&mut modelled);
+                SlippageRow {
+                    venue: venue.clone(),
+                    fills: f.len(),
+                    median_realised_bps: mr,
+                    median_modelled_bps: mm,
+                    ratio: (mm > 1e-9).then(|| mr / mm),
+                    enough: f.len() >= MIN_FILLS_FOR_VERDICT,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.venue.cmp(&b.venue));
+        out
+    }
+
+    /// The row for one venue, if it has fills.
+    pub fn slippage_for(&self, venue: &str) -> Option<SlippageRow> {
+        self.slippage_report().into_iter().find(|r| r.venue == venue)
     }
 
     /// Everything learned so far, for the UI.
@@ -468,6 +587,52 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].style, "cross");
         assert_eq!(r[0].fills, 1);
+    }
+
+    #[test]
+    fn realised_slippage_is_kept_per_venue_next_to_the_model() {
+        let mut p = ExecPolicy::new(false);
+        assert!(p.slippage_report().is_empty(), "no fills, no row");
+        // Three Kraken buys at 5, 10 and 30 bps worse than arrival; the model
+        // expected 4 each time.
+        for (i, px) in [100.05, 100.10, 100.30].into_iter().enumerate() {
+            let got = p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Buy, 100.0, Some(px), "kraken", 4.0, i as i64);
+            assert!(got.is_some());
+        }
+        // A sell that received more than arrival is negative slippage.
+        p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Sell, 100.0, Some(100.02), "alpaca", 1.0, 9);
+        // A miss teaches the bandit but is not a slippage observation.
+        let miss = p.observe_against_model(&ctx(), ExecStyle::Passive, Side::Buy, 100.0, None, "kraken", 4.0, 10);
+        assert!(miss.is_none());
+
+        let r = p.slippage_report();
+        assert_eq!(r.len(), 2);
+        let k = r.iter().find(|x| x.venue == "kraken").unwrap();
+        assert_eq!(k.fills, 3);
+        assert!((k.median_realised_bps - 10.0).abs() < 1e-6, "median, not mean: {}", k.median_realised_bps);
+        assert!((k.median_modelled_bps - 4.0).abs() < 1e-12);
+        assert!((k.ratio.unwrap() - 2.5).abs() < 1e-6);
+        assert!(!k.enough, "three fills is not a verdict");
+        let a = r.iter().find(|x| x.venue == "alpaca").unwrap();
+        assert!(a.median_realised_bps < 0.0);
+        // The bandit itself still learned from all five.
+        assert_eq!(p.stat(&ctx(), ExecStyle::Cross).fills, 4);
+        assert_eq!(p.stat(&ctx(), ExecStyle::Passive).misses, 1);
+    }
+
+    #[test]
+    fn the_fill_record_survives_a_restart_and_stays_bounded() {
+        let mut p = ExecPolicy::new(false);
+        for i in 0..(MAX_FILLS_PER_VENUE + 50) {
+            p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Buy, 100.0, Some(100.01), "binance", 2.0, i as i64);
+        }
+        let back: ExecPolicy = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        let row = back.slippage_for("binance").unwrap();
+        assert_eq!(row.fills, MAX_FILLS_PER_VENUE);
+        assert!(row.enough);
+        // An old save with no fill record still loads.
+        let old: ExecPolicy = serde_json::from_str(r#"{"stats":{},"enabled":false}"#).unwrap();
+        assert!(old.slippage_report().is_empty());
     }
 
     #[test]

@@ -579,6 +579,7 @@ mod tests {
             profit_factor: 0.0,
             equity_curve: vec![0.0],
             rules: None,
+            ledger: Default::default(),
         }
     }
 

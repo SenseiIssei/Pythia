@@ -42,7 +42,8 @@ use pythia_core::execution::{self, Credentials};
 use pythia_core::forecast::ForecastConfig;
 use pythia_core::llm::{self, Effort, LlmConfig, Provider};
 use pythia_core::predict::{self, EnsembleKeys};
-use pythia_core::research::{self, backtest::BacktestConfig, backtest::CostModel};
+use pythia_core::costs::{self, CostVenue};
+use pythia_core::research::{self, backtest::BacktestConfig};
 use pythia_core::wallets::{self, WalletSources, WatchedAddress};
 use pythia_core::{alerts, marketdata};
 
@@ -195,12 +196,33 @@ async fn main() {
         )
         .init();
 
+    // Recalibrated costs: `PYTHIA_COSTS_FILE`, else the repo's own
+    // `config/costs.json` when running from a checkout, so an edit there takes
+    // effect on restart without a rebuild. The compiled-in copy is the fallback.
+    let costs_file = std::env::var("PYTHIA_COSTS_FILE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("config/costs.json"));
+    if costs_file.exists() {
+        match costs::load_file(&costs_file) {
+            Ok(()) => tracing::info!("cost model loaded from {}", costs_file.display()),
+            Err(e) => tracing::warn!("ignoring cost file: {e}"),
+        }
+    }
+
     let (tx, _rx) = broadcast::channel::<String>(64);
     let creds = Arc::new(credentials_from_env());
     let engine = Arc::new(Mutex::new(Engine::new()));
     // Reflect which venues actually have usable keys before the first tick, so
     // the UI never shows a venue as armable that cannot route.
-    engine.lock().unwrap().set_connected(creds.connected_venues());
+    {
+        let mut e = engine.lock().unwrap();
+        e.set_connected(creds.connected_venues());
+        // Costs follow the selected exchange even before its keys are set.
+        e.set_crypto_cost_venue(
+            env_str("PYTHIA_EXCHANGE").as_deref().and_then(Exchange::parse).map(CostVenue::for_exchange),
+        );
+    }
     let state = AppState {
         engine,
         tx: tx.clone(),
@@ -502,12 +524,11 @@ struct ValidateQuery {
     /// Include the equity universe (needs Alpaca keys). Crypto always runs.
     #[serde(default)]
     equities: Option<bool>,
-    /// Set 0 to measure the same strategies with no fees or slippage, which
-    /// shows how much of a result the cost model is eating.
+    /// Multiplier on the cost model (`config/costs.json`). Set 0 to measure the
+    /// same strategies with no fees or slippage, which shows how much of a
+    /// result the cost model is eating; 2 or 3 to stress it.
     #[serde(default)]
-    slippage_bps: Option<f64>,
-    #[serde(default)]
-    fee_bps: Option<f64>,
+    cost_mult: Option<f64>,
 }
 
 /// Walk-forward validate every shipped strategy on real daily candles.
@@ -522,13 +543,8 @@ async fn get_validate(
     axum::extract::Query(q): axum::extract::Query<ValidateQuery>,
 ) -> impl IntoResponse {
     let folds = q.folds.unwrap_or(4).clamp(2, 8);
-    let mut costs = CostModel::default();
-    if let Some(v) = q.slippage_bps {
-        costs.slippage_bps = v.max(0.0);
-    }
-    if let Some(v) = q.fee_bps {
-        costs.fee_bps = v.max(0.0);
-    }
+    let cost_mult = q.cost_mult.unwrap_or(1.0).clamp(0.0, 10.0);
+    let crypto_venue = st.engine.lock().unwrap().crypto_cost_venue();
 
     // Daily crypto candles (no keys required).
     let crypto: Vec<(String, String, Vec<pythia_core::marketdata::Ohlc>)> =
@@ -591,7 +607,8 @@ async fn get_validate(
             min_trades: 20,
             min_is_trades: 3,
             bt: BacktestConfig {
-                costs,
+                venue: if is_equity { CostVenue::Alpaca } else { crypto_venue },
+                cost_mult,
                 // Daily bars: 365 for crypto (always open), 252 sessions for equities.
                 bars_per_year: if is_equity { 252.0 } else { 365.0 },
                 ..BacktestConfig::default()
@@ -613,7 +630,12 @@ async fn get_validate(
     Json(serde_json::json!({
         "timeframe": "1Day",
         "folds": folds,
-        "costs": costs,
+        "costs": {
+            "cryptoVenue": crypto_venue,
+            "costMult": cost_mult,
+            "crypto": costs::table().venue_model(crypto_venue),
+            "equities": costs::table().venue_model(CostVenue::Alpaca),
+        },
         "cryptoMarkets": crypto.len(),
         "equityMarkets": equities.len(),
         "cryptoBars": crypto.first().map(|(_, _, b)| b.len()).unwrap_or(0),

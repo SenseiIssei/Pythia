@@ -298,6 +298,7 @@ fn strat(id: &str, name: &str, kind: StrategyKind, venue: Venue, state: Strategy
         profit_factor: 0.0,
         equity_curve: vec![0.0],
         rules: None,
+        ledger: Default::default(),
     }
 }
 

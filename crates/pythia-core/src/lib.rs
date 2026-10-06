@@ -9,6 +9,7 @@
 
 pub mod alerts;
 pub mod connectors;
+pub mod costs;
 pub mod engine;
 pub mod execution;
 pub mod forecast;

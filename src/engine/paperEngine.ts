@@ -19,6 +19,14 @@ import { DEFAULT_LIMITS, evaluate, type RiskContext } from "./risk";
 import { defaultStrategies, runStrategy } from "./strategies";
 import * as ind from "./indicators";
 import { AI_OFF, DISARMED, NO_FORECASTS, NO_SPEND, type EngineClient } from "./client";
+import { breakdown, costVenueFor, modelFor, paperFill } from "./costs";
+import { applyFill } from "./position";
+import type { StrategyLedger } from "../types";
+
+/** A fresh cost and forward-test record. */
+export function emptyLedger(): StrategyLedger {
+  return { fees: 0, slippage: 0, pnl: breakdown(0, 0), forwardTrades: 0, liveTrades: 0 };
+}
 
 interface PositionInternal {
   marketId: string;
@@ -37,7 +45,7 @@ type Listener = () => void;
 const STARTING_CASH = 100_000;
 
 // Regime filter: mean-reversion blocked in trends; trend strategies blocked in chop.
-function strategyRegimeOk(kind: StrategyKind, regime?: Regime): boolean {
+export function strategyRegimeOk(kind: StrategyKind, regime?: Regime): boolean {
   if (regime === "trending" && (kind === "bollinger" || kind === "rsi-reversal")) return false;
   if (regime === "ranging" && (kind === "ema-cross" || kind === "macd-trend" || kind === "breakout" || kind === "multi-tf")) return false;
   return true;
@@ -274,9 +282,16 @@ export class PaperEngine implements EngineClient {
   }
 
   private fill(order: Order, price: number, strat: StrategyConfig) {
-    const slip = order.side === "buy" ? 1.0008 : 0.9992;
-    const fillPrice = Number((price * slip).toFixed(order.venue === "polymarket" ? 4 : 2));
-    const fee = fillPrice * order.qty * 0.0006;
+    // Costs come from config/costs.json, the same file the Rust engine embeds:
+    // the venue's taker fee, half-spread and impact for this size.
+    const symbol = this.sim.get(order.marketId)?.symbol ?? order.marketId;
+    const model = modelFor(costVenueFor(order.venue), symbol);
+    const filled = paperFill(model, order.side, order.qty, price, order.venue === "polymarket");
+    const fillPrice = filled.price;
+    const fee = filled.fee;
+    const ledger = (strat.ledger ??= emptyLedger());
+    ledger.fees += fee;
+    ledger.slippage += filled.slippage;
 
     order.status = "filled";
     order.filledQty = order.qty;
@@ -303,18 +318,12 @@ export class PaperEngine implements EngineClient {
         trailRef: fillPrice,
       });
     } else {
-      const newQty = existing.qty + signed;
-      if (Math.sign(newQty) === Math.sign(existing.qty) || existing.qty === 0) {
-        const totalCost = existing.avgPrice * Math.abs(existing.qty) + fillPrice * Math.abs(signed);
-        existing.avgPrice = Math.abs(newQty) > 0 ? totalCost / Math.abs(newQty) : fillPrice;
-      } else {
-        const closedQty = Math.min(Math.abs(signed), Math.abs(existing.qty));
-        const dir = existing.qty > 0 ? 1 : -1;
-        realized = (fillPrice - existing.avgPrice) * closedQty * dir;
-        this.realizedPnl += realized;
-      }
-      if (Math.abs(newQty) < 1e-9) this.positions.delete(key);
-      else existing.qty = newQty;
+      const r = applyFill(existing.qty, existing.avgPrice, signed, fillPrice);
+      realized = r.realized;
+      this.realizedPnl += realized;
+      existing.avgPrice = r.avgPrice;
+      if (Math.abs(r.qty) < 1e-9) this.positions.delete(key);
+      else existing.qty = r.qty;
     }
 
     this.cash -= signed * fillPrice + fee;
@@ -353,6 +362,8 @@ export class PaperEngine implements EngineClient {
       strat.equityCurve.push(strat.pnl);
       if (strat.equityCurve.length > 200) strat.equityCurve.shift();
     }
+    // gross = pnl + slippage, costs = fees + slippage, net = pnl - fees
+    ledger.pnl = breakdown(strat.pnl + ledger.slippage, ledger.fees + ledger.slippage);
 
     this.log(
       "fill",
