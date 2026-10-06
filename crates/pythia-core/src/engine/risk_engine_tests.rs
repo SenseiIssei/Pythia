@@ -121,6 +121,129 @@ fn the_same_book_of_unrelated_markets_still_has_room() {
     assert!(e.positions.contains_key(CRYPTO[8]), "{:?}", e.orders.first().and_then(|o| o.reject_reason.clone()));
 }
 
+// ── Kelly on measured edge ──────────────────────────────────────────────────
+
+fn set_price(e: &mut Engine, id: &str, price: f64) {
+    e.markets.iter_mut().find(|m| m.id == id).unwrap().price = price;
+}
+
+fn ema_cross(e: &Engine) -> usize {
+    e.strategies.iter().position(|s| s.id == "ema-cross-1").unwrap()
+}
+
+fn edge(wins: u32, win: f64, losses: u32, loss: f64) -> risk::EdgeRecord {
+    let mut r = risk::EdgeRecord::default();
+    (0..wins).for_each(|_| r.record(win));
+    (0..losses).for_each(|_| r.record(-loss));
+    r
+}
+
+fn intent_with(market: &str, confidence: f64) -> strategies::SignalIntent {
+    strategies::SignalIntent { size: 0.0, confidence, ..buy_intent(market) }
+}
+
+/// Notional the strategy opened on BTC after one entry.
+fn entry_notional(e: &mut Engine, confidence: f64) -> f64 {
+    let idx = ema_cross(e);
+    let m = market(e, "crypto:BTC/USD");
+    e.place_from_intent(idx, &m, &intent_with("crypto:BTC/USD", confidence));
+    e.positions.get("crypto:BTC/USD").map(|p| p.qty * m.price).unwrap_or(0.0)
+}
+
+#[test]
+fn a_closed_round_trip_lands_on_the_edge_record_net_of_fees() {
+    let mut e = Engine::new();
+    let idx = ema_cross(&e);
+    let id = "crypto:BTC/USD";
+    let m = market(&e, id);
+    e.fill(idx, &m, Side::Buy, 0.1, 60_000.0);
+    set_price(&mut e, id, 66_000.0);
+    let m = market(&e, id);
+    e.fill(idx, &m, Side::Sell, 0.1, 66_000.0);
+    let r = &e.strategies[idx].ledger.edge;
+    assert_eq!((r.wins, r.losses), (1, 0));
+    // +10% on the quote, less spread and fees: positive but below 10%.
+    assert!(r.win_return_sum > 0.05 && r.win_return_sum < 0.10, "{}", r.win_return_sum);
+
+    let m = market(&e, id);
+    e.fill(idx, &m, Side::Buy, 0.1, 66_000.0);
+    set_price(&mut e, id, 60_000.0);
+    let m = market(&e, id);
+    e.fill(idx, &m, Side::Sell, 0.1, 60_000.0);
+    let r = &e.strategies[idx].ledger.edge;
+    assert_eq!((r.wins, r.losses), (1, 1));
+    assert!(r.loss_return_sum > 0.09, "a 9% drop plus costs, got {}", r.loss_return_sum);
+}
+
+#[test]
+fn under_thirty_trades_the_signal_strength_still_sizes() {
+    let mut weak = Engine::new();
+    let mut strong = Engine::new();
+    let idx = ema_cross(&weak);
+    weak.strategies[idx].ledger.edge = edge(17, 0.04, 12, 0.02);
+    strong.strategies[idx].ledger.edge = edge(17, 0.04, 12, 0.02);
+    let (w, s) = (entry_notional(&mut weak, 0.3), entry_notional(&mut strong, 1.0));
+    assert!(w > 0.0 && s > 0.0);
+    assert!((w / s - 0.3).abs() < 1e-6, "29 trades: confidence 0.3 vs 1.0 should size 0.3x, got {w} vs {s}");
+}
+
+#[test]
+fn from_thirty_trades_the_record_sizes_and_confidence_no_longer_matters() {
+    // Thin edge: 16 of 30 won, wins and losses both 5%. Kelly 1/15, shrunk
+    // to 1/30; a quarter of that on 100k is 833 at risk, / 5% / 9 markets =
+    // 1852, under the 3000 that full confidence would deploy.
+    let mut low = Engine::new();
+    let mut high = Engine::new();
+    let idx = ema_cross(&low);
+    low.strategies[idx].ledger.edge = edge(16, 0.05, 14, 0.05);
+    high.strategies[idx].ledger.edge = edge(16, 0.05, 14, 0.05);
+    let (l, h) = (entry_notional(&mut low, 0.3), entry_notional(&mut high, 1.0));
+    let want = 0.25 * (1.0 / 30.0) * 100_000.0 / 0.05 / 9.0;
+    assert!((h - want).abs() < want * 0.01, "got {h}, want about {want}");
+    assert!((l - h).abs() < 1e-6, "confidence must not matter once the record decides");
+    assert!(high.journal.iter().any(|j| j.message.contains("now sized on its measured edge")));
+}
+
+#[test]
+fn a_strong_record_is_never_sized_above_full_confidence() {
+    let mut plain = Engine::new();
+    let mut proven = Engine::new();
+    let idx = ema_cross(&plain);
+    proven.strategies[idx].ledger.edge = edge(25, 0.05, 5, 0.01);
+    let (p, q) = (entry_notional(&mut plain, 1.0), entry_notional(&mut proven, 1.0));
+    assert!((p - q).abs() < 1e-6, "full-confidence size is the ceiling: {p} vs {q}");
+}
+
+#[test]
+fn no_measured_edge_sizes_to_zero_and_says_so_once() {
+    let mut e = Engine::new();
+    let idx = ema_cross(&e);
+    e.strategies[idx].ledger.edge = edge(12, 0.02, 18, 0.02);
+    for _ in 0..3 {
+        assert_eq!(entry_notional(&mut e, 1.0), 0.0);
+    }
+    let said = e.journal.iter().filter(|j| j.message.contains("no measured edge")).count();
+    assert_eq!(said, 1, "journal once, not on every signal");
+    let sizing = e.state().risk.sizing;
+    let row = sizing.iter().find(|s| s.strategy_id == "ema-cross-1").unwrap();
+    assert_eq!(row.mode, risk::SizingMode::NoEdge);
+    assert!(row.kelly.unwrap() < 0.0);
+}
+
+#[test]
+fn the_edge_record_survives_a_restart() {
+    let mut e = Engine::new();
+    let idx = ema_cross(&e);
+    e.strategies[idx].ledger.edge = edge(20, 0.03, 10, 0.02);
+    let json = serde_json::to_string(&e.to_persisted()).unwrap();
+    let mut back = Engine::new();
+    back.apply_persisted(serde_json::from_str(&json).unwrap());
+    let (a, b) = (&back.strategies[idx].ledger.edge, &e.strategies[idx].ledger.edge);
+    assert_eq!((a.wins, a.losses), (b.wins, b.losses));
+    assert!((a.win_return_sum - b.win_return_sum).abs() < 1e-12);
+    assert!((a.loss_return_sum - b.loss_return_sum).abs() < 1e-12);
+}
+
 #[test]
 fn a_save_from_before_the_correlation_cap_loads_with_the_default() {
     let mut v = serde_json::to_value(RiskLimits::default()).unwrap();

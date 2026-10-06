@@ -1,7 +1,7 @@
 import { Power, ShieldAlert } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Meter, Button, Toggle } from "../components/ui";
-import type { RiskLimits, RiskStatus } from "../types";
+import { Card, PageHeader, Meter, Button, Toggle, Badge } from "../components/ui";
+import type { RiskLimits, RiskStatus, SizingMode, StrategySizing } from "../types";
 
 interface LimitRow {
   key: keyof RiskLimits;
@@ -31,7 +31,7 @@ const ROWS: LimitRow[] = [
 ];
 
 export function Risk() {
-  const { limits, setLimits, portfolio, toggleKill, riskStatus } = useStore();
+  const { limits, setLimits, portfolio, toggleKill, riskStatus, strategies } = useStore();
 
   const dayPnl = portfolio.realizedPnl + portfolio.unrealizedPnl;
   const dayLossPct = (-dayPnl / portfolio.dayStartEquity) * 100;
@@ -112,6 +112,10 @@ export function Risk() {
         <CorrelatedExposureCard status={riskStatus} capPct={limits.maxCorrelatedExposurePct} grossPct={grossPct} />
       </div>
 
+      {riskStatus && riskStatus.sizing.length > 0 && (
+        <SizingCard sizing={riskStatus.sizing} nameOf={(id) => strategies.find((s) => s.id === id)?.name ?? id} />
+      )}
+
       {/* editable limits */}
       <Card title="Limits" right={<ShieldAlert size={14} className="text-warning" />}>
         <div className="space-y-3">
@@ -169,6 +173,61 @@ function CorrelatedExposureCard({
       <div className="mt-2 text-xs text-cyber-text-faint">
         Raw gross is {grossPct.toFixed(0)}%. Positions that move together count as one bet: sqrt(w&apos;Cw) over the
         return correlations on the Correlation page.
+      </div>
+    </Card>
+  );
+}
+
+const MODE_LABEL: Record<SizingMode, { text: string; tone: "neutral" | "cyan" | "red" }> = {
+  confidence: { text: "signal strength", tone: "neutral" },
+  measured: { text: "measured edge", tone: "cyan" },
+  noEdge: { text: "no edge, size 0", tone: "red" },
+};
+
+const pct = (x?: number) => (x === undefined ? "-" : `${(x * 100).toFixed(0)}%`);
+const num = (x?: number, d = 2) => (x === undefined ? "-" : x.toFixed(d));
+
+/** How each strategy's entries are sized: signal strength until 30 closed
+ *  trades, then its own win rate and payoff. */
+function SizingCard({ sizing, nameOf }: { sizing: StrategySizing[]; nameOf: (id: string) => string }) {
+  return (
+    <Card title="Position Sizing" className="mb-4">
+      <div className="mb-3 text-xs text-cyber-text-dim">
+        Under 30 closed trades a strategy is sized off its signal strength. From 30 on, off its own record: Kelly
+        f = p - (1 - p) / b, shrunk by n / (n + 30), at most a quarter of that, never above the full-strength size.
+        A negative Kelly means no measured edge and no new entries.
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs uppercase tracking-wide text-cyber-text-faint">
+              <th className="py-1.5 pr-3">Strategy</th>
+              <th className="py-1.5 pr-3 text-right">Trades</th>
+              <th className="py-1.5 pr-3 text-right">Won</th>
+              <th className="py-1.5 pr-3 text-right">Payoff</th>
+              <th className="py-1.5 pr-3 text-right">Kelly</th>
+              <th className="py-1.5 pr-3 text-right">Shrunk</th>
+              <th className="py-1.5">Sized on</th>
+            </tr>
+          </thead>
+          <tbody className="tabular-nums">
+            {sizing.map((s) => (
+              <tr key={s.strategyId} className="border-t border-cyber-border">
+                <td className="py-1.5 pr-3 font-medium text-cyber-text">{nameOf(s.strategyId)}</td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{s.trades}</td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{pct(s.winRate)}</td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">
+                  {s.trades > 0 && s.payoff === undefined ? "no losses" : num(s.payoff)}
+                </td>
+                <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{num(s.kelly, 3)}</td>
+                <td className="py-1.5 pr-3 text-right text-accent">{num(s.kellyShrunk, 3)}</td>
+                <td className="py-1.5">
+                  <Badge tone={MODE_LABEL[s.mode].tone}>{MODE_LABEL[s.mode].text}</Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </Card>
   );

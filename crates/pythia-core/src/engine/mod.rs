@@ -266,6 +266,10 @@ pub struct StrategyLedger {
     pub forward_trades: u32,
     /// Closed trades filled for real at a venue (paper endpoint included).
     pub live_trades: u32,
+    /// Win rate and payoff in net returns on notional, which entries are
+    /// sized on once there are 30 trades (see [`risk::edge_sizing`]).
+    #[serde(default)]
+    pub edge: risk::EdgeRecord,
 }
 
 impl StrategyLedger {
@@ -913,6 +917,9 @@ pub struct Engine {
     /// Average entry per open position at reference prices (before execution
     /// costs), for the gross line. Missing means "same as the fill price".
     ref_prices: HashMap<String, f64>,
+    /// The sizing mode last announced per strategy, so a switch to measured
+    /// edge or to "no edge" is journaled once, not on every signal.
+    sizing_noted: HashMap<String, risk::SizingMode>,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -980,6 +987,7 @@ impl Engine {
             crypto_venue: CostVenue::Kraken,
             research: HashMap::new(),
             ref_prices: HashMap::new(),
+            sizing_noted: HashMap::new(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -1750,7 +1758,16 @@ impl Engine {
         // bets). Risk caps still bound the total.
         let universe_n = self.strategies[strat_idx].universe.len().max(1) as f64;
         let strength = intent.size.max(intent.confidence).clamp(0.3, 1.0);
-        let deploy = (budget / universe_n) * strength * 1.5 * (self.limits.kelly_fraction / 0.25).clamp(0.25, 3.0);
+        let full = (budget / universe_n) * 1.5 * (self.limits.kelly_fraction / 0.25).clamp(0.25, 3.0);
+        // Under 30 closed trades the signal strength sizes the entry. After
+        // that the strategy's own record does, never above full strength.
+        let deploy = match self.edge_sizing(strat_idx) {
+            (risk::SizingMode::Measured, Some(k)) => {
+                full.min(risk::kelly_notional(&k, equity, self.limits.kelly_fraction, universe_n))
+            }
+            (risk::SizingMode::NoEdge, _) => return,
+            _ => full * strength,
+        };
         // AI overlay: shrink, boost slightly, or veto — applied to a trade the
         // rules already decided to make.
         let (ai_mult, ai_note) = self.ai_multiplier(&m.id, intent.side);
@@ -1802,6 +1819,37 @@ impl Engine {
             RouteIntent::Paper
         };
         self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
+    }
+
+    /// How this strategy's next entry is sized, journaling a change of mode
+    /// once: switching to its measured edge, or finding it has none.
+    fn edge_sizing(&mut self, strat_idx: usize) -> (risk::SizingMode, Option<risk::KellyEstimate>) {
+        let s = &self.strategies[strat_idx];
+        let (mode, est) = risk::edge_sizing(&s.ledger.edge);
+        if self.sizing_noted.get(&s.id) == Some(&mode) {
+            return (mode, est);
+        }
+        let (id, name) = (s.id.clone(), s.name.clone());
+        self.sizing_noted.insert(id.clone(), mode);
+        let Some(k) = est else { return (mode, est) };
+        let payoff = k.payoff.map_or("no losses yet".to_string(), |b| format!("payoff {b:.2}"));
+        let record = format!("{} trades, {:.0}% won, {payoff}, Kelly {:.3}", k.trades, k.win_rate * 100.0, k.raw);
+        match mode {
+            risk::SizingMode::Measured => self.log(
+                JournalKind::Risk,
+                format!("{name}: now sized on its measured edge ({record}, {:.3} after shrinking)", k.shrunk),
+                Some(id),
+                None,
+            ),
+            risk::SizingMode::NoEdge => self.log(
+                JournalKind::Risk,
+                format!("{name}: no measured edge ({record}). New entries are sized to zero"),
+                Some(id),
+                None,
+            ),
+            risk::SizingMode::Confidence => {}
+        }
+        (mode, est)
     }
 
     /// The cost venue for a market: its own venue, or for crypto the exchange
@@ -1859,6 +1907,8 @@ impl Engine {
         // update / open position, realizing P&L on reductions
         let key = m.id.clone();
         let mut realized = 0.0;
+        // (qty, entry notional) of the part of a position this fill closed.
+        let mut closed: Option<(f64, f64)> = None;
         // The same position at reference prices, for the gross line.
         let ref_avg = self.ref_prices.get(&key).copied();
         if let Some(pos) = self.positions.get(&key) {
@@ -1891,6 +1941,10 @@ impl Engine {
             }
             Some(pos) => {
                 let was = pos.qty;
+                if was != 0.0 && signed.signum() != was.signum() {
+                    let q = signed.abs().min(was.abs());
+                    closed = Some((q, q * pos.avg_price));
+                }
                 let (new_qty, new_avg, r) = apply_fill(pos.qty, pos.avg_price, signed, fill_price);
                 realized = r;
                 pos.avg_price = new_avg;
@@ -1913,6 +1967,13 @@ impl Engine {
             self.realized_pnl += realized;
         }
         self.cash -= signed * fill_price + fee;
+        // The measured edge: net return on the closed notional. The entry fee
+        // is not tracked per position, so the round trip is estimated as twice
+        // this fill's fee on the closed quantity.
+        if let Some((q, entry_notional)) = closed.filter(|c| c.1 > 0.0 && qty > 0.0) {
+            let round_trip_fee = 2.0 * fee.max(0.0) * q / qty;
+            self.strategies[strat_idx].ledger.edge.record((realized - round_trip_fee) / entry_notional);
+        }
 
         // strategy stats + risk streak tracking
         if realized != 0.0 {
@@ -3101,6 +3162,12 @@ impl Engine {
         risk::RiskStatus {
             correlated_exposure: corr,
             correlated_exposure_pct: if equity > 0.0 { corr / equity * 100.0 } else { 0.0 },
+            sizing: self
+                .strategies
+                .iter()
+                .filter(|s| s.id != "manual")
+                .map(|s| risk::StrategySizing::of(&s.id, &s.ledger.edge))
+                .collect(),
         }
     }
 
@@ -4249,8 +4316,15 @@ mod tests {
 
         // Portfolio risk layer: the new limit and the Risk page's live numbers.
         assert!(v["limits"]["maxCorrelatedExposurePct"].is_number(), "RiskLimits is missing maxCorrelatedExposurePct");
-        for key in ["correlatedExposure", "correlatedExposurePct"] {
+        for key in ["correlatedExposure", "correlatedExposurePct", "sizing"] {
             assert!(v["risk"].get(key).is_some(), "RiskStatus is missing `{key}` on the wire");
+        }
+        for key in ["strategyId", "mode", "trades"] {
+            assert!(v["risk"]["sizing"][0].get(key).is_some(), "StrategySizing is missing `{key}` on the wire");
+        }
+        assert_eq!(v["risk"]["sizing"][0]["mode"], "confidence");
+        for key in ["wins", "losses", "winReturnSum", "lossReturnSum"] {
+            assert!(ledger["edge"].get(key).is_some(), "EdgeRecord is missing `{key}` on the wire");
         }
     }
 
