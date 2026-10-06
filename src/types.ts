@@ -103,6 +103,18 @@ export interface StrategyLedger {
   /** Closed paper trades on real prices (demo-simulator trades do not count). */
   forwardTrades: number;
   liveTrades: number;
+  /** Closed-trade record in net returns on notional; sizes entries from 30 trades. */
+  edge?: EdgeRecord;
+}
+
+/** Mirrors Rust `risk::EdgeRecord`. A win is a trade with net return > 0. */
+export interface EdgeRecord {
+  wins: number;
+  losses: number;
+  /** Sum of winning net returns, fractions of notional. */
+  winReturnSum: number;
+  /** Sum of losing net returns as positive fractions of notional. */
+  lossReturnSum: number;
 }
 
 /** Realised against modelled slippage for one venue. */
@@ -219,6 +231,26 @@ export interface RiskStatus {
   correlatedExposure: number;
   /** The same as % of equity, next to `maxCorrelatedExposurePct`. */
   correlatedExposurePct: number;
+  /** How each strategy's entries are sized. */
+  sizing: StrategySizing[];
+}
+
+/** confidence: under 30 trades, sized off signal strength. measured: sized on
+ *  its own win rate and payoff. noEdge: the record shows no edge, size zero. */
+export type SizingMode = "confidence" | "measured" | "noEdge";
+
+/** Mirrors Rust `risk::StrategySizing`. */
+export interface StrategySizing {
+  strategyId: string;
+  mode: SizingMode;
+  trades: number;
+  winRate?: number;
+  /** Average win over average loss; absent while there has been no loss. */
+  payoff?: number;
+  /** Full Kelly, p - (1 - p) / b. */
+  kelly?: number;
+  /** kelly * n / (n + 30). */
+  kellyShrunk?: number;
 }
 
 export interface StrategyParam {

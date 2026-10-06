@@ -242,6 +242,190 @@ fn max_added_notional(e0: f64, lean: f64, cap: f64) -> f64 {
     (-lean + (lean * lean + l * l - e0 * e0).max(0.0).sqrt()).max(0.0)
 }
 
+// ── Kelly on measured edge ──────────────────────────────────────────────────
+//
+// A strategy's signal strength (`SignalIntent::confidence`) is an indicator
+// reading, not a win probability. Once a strategy has a record, it is sized
+// on that record instead:
+//
+//   p      = wins / n                      (a win is a trade with net return > 0)
+//   b      = avg win / avg loss            (net returns on entry notional)
+//   f      = p - (1 - p) / b               (full Kelly, the share of equity an
+//                                           average loss may cost)
+//   f_s    = f * n / (n + 30)              (shrunk toward a prior of no edge;
+//                                           at 30 trades it is half the measured
+//                                           value, at 90 three quarters)
+//   stake  = min(kellyFraction, 0.25) * f_s * equity
+//   entry  = stake / avg loss / universe size
+//
+// The stake is what an average losing trade is allowed to cost, so the
+// notional is the stake divided by the average loss on notional. It is split
+// across the strategy's universe because those positions run at the same
+// time, the same way the budget is. The engine then takes the smaller of this
+// and what today's sizing would give at full confidence, so measured edge can
+// only keep or cut a position, never grow it past the per-strategy budget.
+//
+// Below 30 trades nothing changes: the confidence-based sizing runs as before.
+// `f_s <= 0` means the strategy has no measured edge and is sized to zero.
+
+/// Closed trades a strategy needs before it is sized on its own record.
+pub const MIN_EDGE_TRADES: u32 = 30;
+/// Weight of the no-edge prior, in trades: the measured Kelly is multiplied by
+/// `n / (n + EDGE_PRIOR_TRADES)`.
+pub const EDGE_PRIOR_TRADES: f64 = 30.0;
+/// The largest share of measured Kelly ever applied: quarter Kelly, whatever
+/// `kellyFraction` is set to.
+pub const MAX_KELLY_FRACTION: f64 = 0.25;
+
+/// A strategy's closed-trade record in the units Kelly needs: how often it
+/// won, and how much it made or lost per unit of notional when it did.
+///
+/// Returns are net: realised P&L at fill prices (slippage included) minus an
+/// estimated round-trip fee, over the entry notional of the part that closed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeRecord {
+    pub wins: u32,
+    pub losses: u32,
+    /// Sum of the winning trades' net returns (fractions of notional).
+    pub win_return_sum: f64,
+    /// Sum of the losing trades' net losses, as positive fractions of notional.
+    pub loss_return_sum: f64,
+}
+
+impl EdgeRecord {
+    /// Book one closed trade's net return on its entry notional.
+    pub fn record(&mut self, net_return: f64) {
+        if !net_return.is_finite() {
+            return;
+        }
+        if net_return > 0.0 {
+            self.wins += 1;
+            self.win_return_sum += net_return;
+        } else {
+            self.losses += 1;
+            self.loss_return_sum += -net_return;
+        }
+    }
+
+    pub fn trades(&self) -> u32 {
+        self.wins + self.losses
+    }
+
+    /// The Kelly numbers for this record, whatever its size. `edge_sizing`
+    /// decides whether there are enough trades to use them.
+    pub fn estimate(&self) -> Option<KellyEstimate> {
+        let n = self.trades();
+        if n == 0 {
+            return None;
+        }
+        let p = self.wins as f64 / n as f64;
+        let avg_win = if self.wins > 0 { self.win_return_sum / self.wins as f64 } else { 0.0 };
+        let avg_loss = if self.losses > 0 { self.loss_return_sum / self.losses as f64 } else { 0.0 };
+        let (payoff, raw) = if avg_loss <= 0.0 {
+            // Nothing lost yet: b is unbounded and f = p.
+            (None, p)
+        } else if avg_win <= 0.0 {
+            // Nothing won: every bet loses.
+            (Some(0.0), -1.0)
+        } else {
+            let b = avg_win / avg_loss;
+            (Some(b), (p - (1.0 - p) / b).max(-1.0))
+        };
+        let shrunk = raw * n as f64 / (n as f64 + EDGE_PRIOR_TRADES);
+        Some(KellyEstimate { trades: n, win_rate: p, payoff, avg_loss, raw, shrunk })
+    }
+}
+
+/// Kelly numbers for one strategy's record.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KellyEstimate {
+    pub trades: u32,
+    pub win_rate: f64,
+    /// Average win over average loss; `None` while there has been no loss.
+    pub payoff: Option<f64>,
+    /// Average net loss on notional, positive (0 while there has been none).
+    pub avg_loss: f64,
+    /// `p - (1 - p) / b`.
+    pub raw: f64,
+    /// `raw * n / (n + 30)`.
+    pub shrunk: f64,
+}
+
+/// How a strategy's entries are sized right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SizingMode {
+    /// Fewer than 30 closed trades: sized off signal strength, as before.
+    Confidence,
+    /// Sized on the measured win rate and payoff.
+    Measured,
+    /// A record that shows no edge: entries are sized to zero.
+    NoEdge,
+}
+
+/// Which sizing applies to a record, with the numbers behind it.
+pub fn edge_sizing(edge: &EdgeRecord) -> (SizingMode, Option<KellyEstimate>) {
+    let est = edge.estimate();
+    match est {
+        Some(k) if k.trades >= MIN_EDGE_TRADES => {
+            let mode = if k.shrunk > 0.0 { SizingMode::Measured } else { SizingMode::NoEdge };
+            (mode, est)
+        }
+        _ => (SizingMode::Confidence, est),
+    }
+}
+
+/// Entry notional a measured edge supports (see the comment above
+/// [`MIN_EDGE_TRADES`]). Zero without an edge, unbounded when the record has
+/// no losses to size against, in which case the engine's cap decides.
+pub fn kelly_notional(est: &KellyEstimate, equity: f64, kelly_fraction: f64, slots: f64) -> f64 {
+    if est.shrunk <= 0.0 || equity <= 0.0 {
+        return 0.0;
+    }
+    if est.avg_loss <= 0.0 {
+        return f64::INFINITY;
+    }
+    let frac = kelly_fraction.clamp(0.0, MAX_KELLY_FRACTION);
+    frac * est.shrunk * equity / est.avg_loss / slots.max(1.0)
+}
+
+/// One strategy's sizing, for the Risk page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategySizing {
+    pub strategy_id: String,
+    pub mode: SizingMode,
+    /// Closed trades on the edge record.
+    pub trades: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub win_rate: Option<f64>,
+    /// Average win over average loss; absent while there has been no loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payoff: Option<f64>,
+    /// Full Kelly from the record, `p - (1 - p) / b`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kelly: Option<f64>,
+    /// After shrinking toward no edge, `kelly * n / (n + 30)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kelly_shrunk: Option<f64>,
+}
+
+impl StrategySizing {
+    pub fn of(strategy_id: &str, edge: &EdgeRecord) -> Self {
+        let (mode, est) = edge_sizing(edge);
+        Self {
+            strategy_id: strategy_id.to_string(),
+            mode,
+            trades: edge.trades(),
+            win_rate: est.map(|k| k.win_rate),
+            payoff: est.and_then(|k| k.payoff),
+            kelly: est.map(|k| k.raw),
+            kelly_shrunk: est.map(|k| k.shrunk),
+        }
+    }
+}
+
 /// What the risk manager is doing right now, for the Risk page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -250,11 +434,14 @@ pub struct RiskStatus {
     pub correlated_exposure: f64,
     /// The same as a percentage of equity, next to `maxCorrelatedExposurePct`.
     pub correlated_exposure_pct: f64,
+    /// How each strategy's entries are sized.
+    #[serde(default)]
+    pub sizing: Vec<StrategySizing>,
 }
 
 impl Default for RiskStatus {
     fn default() -> Self {
-        Self { correlated_exposure: 0.0, correlated_exposure_pct: 0.0 }
+        Self { correlated_exposure: 0.0, correlated_exposure_pct: 0.0, sizing: Vec::new() }
     }
 }
 
@@ -442,6 +629,78 @@ mod tests {
         c.corr_loading = 90_000.0;
         let limits = RiskLimits { max_correlated_exposure_pct: 0.0, max_gross_exposure_pct: 100.0, ..RiskLimits::default() };
         assert!(evaluate(&buy(1_000.0), 1.0, &limits, &c).approved);
+    }
+
+    fn record(wins: u32, avg_win: f64, losses: u32, avg_loss: f64) -> EdgeRecord {
+        let mut r = EdgeRecord::default();
+        for _ in 0..wins {
+            r.record(avg_win);
+        }
+        for _ in 0..losses {
+            r.record(-avg_loss);
+        }
+        r
+    }
+
+    #[test]
+    fn kelly_is_p_minus_q_over_b_shrunk_by_n_over_n_plus_30() {
+        // 60% wins, wins twice the size of losses: f = 0.6 - 0.4 / 2 = 0.4.
+        let k = record(18, 0.04, 12, 0.02).estimate().unwrap();
+        assert_eq!(k.trades, 30);
+        assert!((k.win_rate - 0.6).abs() < 1e-12);
+        assert!((k.payoff.unwrap() - 2.0).abs() < 1e-9);
+        assert!((k.raw - 0.4).abs() < 1e-9);
+        assert!((k.shrunk - 0.2).abs() < 1e-9, "30 trades is half weight");
+        let k90 = record(54, 0.04, 36, 0.02).estimate().unwrap();
+        assert!((k90.shrunk - 0.3).abs() < 1e-9, "90 trades is three quarters weight");
+    }
+
+    #[test]
+    fn below_thirty_trades_sizing_stays_on_confidence() {
+        let (mode, est) = edge_sizing(&record(17, 0.04, 12, 0.02));
+        assert_eq!(mode, SizingMode::Confidence);
+        assert!(est.is_some(), "the numbers are still shown");
+        assert_eq!(edge_sizing(&EdgeRecord::default()).0, SizingMode::Confidence);
+    }
+
+    #[test]
+    fn a_negative_measured_kelly_is_no_edge_and_sizes_to_zero() {
+        // 40% wins at the same size as the losses: f = 0.4 - 0.6 = -0.2.
+        let r = record(12, 0.02, 18, 0.02);
+        let (mode, est) = edge_sizing(&r);
+        assert_eq!(mode, SizingMode::NoEdge);
+        let k = est.unwrap();
+        assert!((k.raw + 0.2).abs() < 1e-9);
+        assert_eq!(kelly_notional(&k, 100_000.0, 0.25, 1.0), 0.0);
+        // Never a winner at all is no edge either.
+        assert_eq!(edge_sizing(&record(0, 0.0, 30, 0.01)).0, SizingMode::NoEdge);
+    }
+
+    #[test]
+    fn kelly_notional_is_the_stake_over_the_average_loss_split_across_the_universe() {
+        let k = record(18, 0.04, 12, 0.02).estimate().unwrap(); // shrunk 0.2, avg loss 2%
+        // quarter Kelly: 0.25 * 0.2 * 100k = 5k at risk, / 2% = 250k, / 5 slots = 50k
+        assert!((kelly_notional(&k, 100_000.0, 0.25, 5.0) - 50_000.0).abs() < 1e-6);
+        // a lower fraction is honoured
+        assert!((kelly_notional(&k, 100_000.0, 0.1, 5.0) - 20_000.0).abs() < 1e-6);
+        // a higher one is not: quarter Kelly is the ceiling
+        assert!((kelly_notional(&k, 100_000.0, 1.0, 5.0) - 50_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_record_without_losses_leaves_the_size_to_the_cap() {
+        let k = record(30, 0.01, 0, 0.0).estimate().unwrap();
+        assert_eq!(k.payoff, None);
+        assert!((k.raw - 1.0).abs() < 1e-12);
+        assert!(kelly_notional(&k, 100_000.0, 0.25, 5.0).is_infinite());
+    }
+
+    #[test]
+    fn a_breakeven_trade_counts_as_a_loss() {
+        let mut r = EdgeRecord::default();
+        r.record(0.0);
+        r.record(f64::NAN);
+        assert_eq!((r.wins, r.losses), (0, 1));
     }
 
     #[test]
