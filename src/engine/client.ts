@@ -15,6 +15,7 @@ import type {
   PortfolioSnapshot,
   PositionView,
   RiskLimits,
+  RiskStatus,
   Side,
   SlippageRow,
   StrategyConfig,
@@ -78,6 +79,12 @@ export interface EngineClient {
   /** The Strategy Passport (eight validation gates) of every strategy. */
   passports(): Passport[];
   /**
+   * Correlation-adjusted exposure, drawdown de-risking and per-strategy
+   * sizing from the Rust risk manager. Null where no Rust engine answers
+   * (the browser paper build).
+   */
+  riskStatus(): RiskStatus | null;
+  /**
    * Market ids whose indicators run on real exchange candles rather than the
    * simulator. Anything not in here is a demo, and the UI says so.
    */
@@ -123,6 +130,7 @@ export interface EngineState {
   slippage?: SlippageRow[];
   cryptoCostVenue?: CostVenue;
   passports?: Passport[];
+  risk?: RiskStatus;
 }
 
 export { AI_OFF, DISARMED, NO_SPEND };

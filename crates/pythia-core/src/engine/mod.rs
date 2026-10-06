@@ -6,6 +6,8 @@
 pub mod composed;
 pub mod indicators;
 pub mod risk;
+#[cfg(test)]
+mod risk_engine_tests;
 pub mod strategies;
 
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
@@ -300,6 +302,15 @@ pub struct RiskLimits {
     pub vol_target_pct: f64,         // volatility-targeted sizing: target per-bar vol % (0 = off)
     pub regime_filter: bool,         // block mean-reversion in trends & trend strategies in chop
     pub adaptive_allocation: bool,   // auto-weight strategy budgets by recent performance
+    /// Cap on correlation-adjusted exposure, `sqrt(w' C w)`, in % of equity
+    /// (0 = off). See [`risk::correlated_exposure`]. Defaulted so saves from
+    /// before it existed still load.
+    #[serde(default = "default_max_correlated_exposure_pct")]
+    pub max_correlated_exposure_pct: f64,
+}
+
+fn default_max_correlated_exposure_pct() -> f64 {
+    40.0
 }
 
 impl Default for RiskLimits {
@@ -322,6 +333,9 @@ impl Default for RiskLimits {
             vol_target_pct: 0.0,
             regime_filter: false,
             adaptive_allocation: true, // steer capital to what's working
+            // Below the 70% gross cap on purpose: a book that moves as one
+            // stops at 40%, an uncorrelated one is held by the gross cap.
+            max_correlated_exposure_pct: default_max_correlated_exposure_pct(),
         }
     }
 }
@@ -706,6 +720,10 @@ pub struct EngineState {
     /// The Strategy Passport of every strategy: the eight validation gates.
     #[serde(default)]
     pub passports: Vec<validation::Passport>,
+    /// Correlation-adjusted exposure, drawdown de-risking and how each
+    /// strategy is being sized, for the Risk page.
+    #[serde(default)]
+    pub risk: risk::RiskStatus,
 }
 
 fn default_crypto_venue() -> CostVenue {
@@ -3071,6 +3089,20 @@ impl Engine {
     fn equity(&self) -> f64 {
         self.cash + self.positions_value()
     }
+    /// Signed notional per open position (short is negative), for the
+    /// correlation-adjusted exposure.
+    fn exposure_book(&self) -> Vec<(String, f64)> {
+        self.positions.iter().map(|(id, p)| (id.clone(), p.qty * self.price_of(id))).collect()
+    }
+    /// The risk manager's live numbers for the Risk page.
+    fn risk_status(&self) -> risk::RiskStatus {
+        let equity = self.equity();
+        let corr = risk::correlated_exposure(&self.exposure_book(), &self.history);
+        risk::RiskStatus {
+            correlated_exposure: corr,
+            correlated_exposure_pct: if equity > 0.0 { corr / equity * 100.0 } else { 0.0 },
+        }
+    }
 
     fn risk_ctx(&self, market_id: &str, strategy_id: &str, _price: f64) -> risk::RiskContext {
         let now = self.now();
@@ -3093,7 +3125,10 @@ impl Engine {
             .find(|m| m.id == market_id)
             .map(|m| ((now - m.updated_at) / 1000).max(0) as u64)
             .unwrap_or(999);
+        let book = self.exposure_book();
         risk::RiskContext {
+            corr_exposure: risk::correlated_exposure(&book, &self.history),
+            corr_loading: risk::correlation_loading(&book, market_id, &self.history),
             equity: self.equity(),
             day_start_equity: self.day_start_equity,
             realized_pnl: self.realized_pnl,
@@ -3317,6 +3352,7 @@ impl Engine {
             slippage: self.exec_policy.slippage_report(),
             crypto_cost_venue: self.crypto_venue,
             passports: self.strategies.iter().filter(|s| s.id != "manual").map(|s| self.passport_for(s)).collect(),
+            risk: self.risk_status(),
         }
     }
 
@@ -4210,6 +4246,12 @@ mod tests {
             assert!(ledger["pnl"].get(key).is_some(), "PnlBreakdown is missing `{key}` on the wire");
         }
         assert!(ledger.get("forward_trades").is_none(), "snake_case must not leak to the UI");
+
+        // Portfolio risk layer: the new limit and the Risk page's live numbers.
+        assert!(v["limits"]["maxCorrelatedExposurePct"].is_number(), "RiskLimits is missing maxCorrelatedExposurePct");
+        for key in ["correlatedExposure", "correlatedExposurePct"] {
+            assert!(v["risk"].get(key).is_some(), "RiskStatus is missing `{key}` on the wire");
+        }
     }
 
     #[test]
