@@ -161,18 +161,25 @@ Things worth knowing from building it:
 | 1 | Hierarchical calibration (partial pooling) | ✅ shipped |
 | 2 | Correlation-aware ensemble weighting | ✅ shipped |
 | 3 | Adaptive execution as a contextual bandit | ✅ shipped |
-| 4 | Cross-venue statistical arbitrage | ⬜ **next** |
+| 4 | Cross-venue statistical arbitrage | 🔍 being observed, looks dead (see below) |
 | 5 | LLM as extractor, statistics as forecaster | ⬜ |
+| 6 | Model inference in the engine (next-hour volatility) | ✅ in shadow mode, see [`docs/MODELS.md`](docs/MODELS.md) |
+
+Research results so far live in [`research/lab/README.md`](research/lab/README.md):
+the volatility model passes, hourly breakouts and funding carry do not, and
+long-only time-series momentum is in a paper forward test.
 
 ### 4 · Cross-venue spread — *do the cheap half first*
 
 A few hours of work for a real answer at zero risk. **Do not build the strategy
 yet.**
 
-- [ ] Log the BTC and ETH spread between two venues (Kraken USD vs Binance USDT
-      is the widest and most interesting) every 15 s to a CSV or the journal
-- [ ] Leave it for 30 days
+- [x] Log the spread between Kraken USD and Binance USDT for 20 coins every
+      15 s (`research/recorder`, running on the VPS since 2026-09-30)
+- [ ] Leave it for 30 days (until 2026-10-30)
 - [ ] Then look: does the spread ever exceed the round-trip cost of both legs?
+      After six days: the executable edge stays under 2 to 9 bps at the 99th
+      percentile against about 50 bps of fees (`lab.experiments.spread`).
 
 If it does not, the opportunity does not exist at retail size, and you have
 learned that for a few hours instead of a few months. If it does, *then* build
