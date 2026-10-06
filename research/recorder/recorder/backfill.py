@@ -141,7 +141,10 @@ async def monthly_then_daily(f: Fetcher, out_dir: Path, since: date, url_month, 
     for m in months(since, today):
         label = m.strftime("%Y-%m")
         month_file = out_dir / f"{label}.parquet"
-        if month_file.exists():
+        # A finished month with no archive at all (usually: before the listing)
+        # is remembered, or every nightly run asks for ~30 files that cannot exist.
+        absent = out_dir / f"{label}.absent"
+        if month_file.exists() or absent.exists():
             f.stats["skipped"] += 1
             continue
         if m < this_month:
@@ -154,6 +157,9 @@ async def monthly_then_daily(f: Fetcher, out_dir: Path, since: date, url_month, 
                 raws = await asyncio.gather(*(f.zip_csv(url_day(d.isoformat())) for d in days(m, last)))
                 parts = [norm(read_csv(r, names)) for r in raws if r is not None]
                 if not parts:
+                    if (this_month - m).days > 40:  # never for last month, it may still be published
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        absent.touch()
                     continue
                 write(pa.concat_tables(parts).sort_by(sort_col), month_file)
                 f.stats["ok"] += 1

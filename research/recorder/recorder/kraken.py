@@ -18,6 +18,7 @@ from decimal import Decimal
 import aiohttp
 
 from . import config, schemas
+from .net import reconnecting
 from .sink import Sinks, now_us
 from .state import Quote, State
 
@@ -103,23 +104,11 @@ class KrakenFeed:
         self.ws: aiohttp.ClientWebSocketResponse | None = None
 
     async def run(self) -> None:
-        st = self.state.stream("kraken")
-        backoff = 1.0
-        while True:
-            try:
-                await self._session()
-                backoff = 1.0
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                st.errors += 1
-                st.note = f"{type(e).__name__}: {e}"[:200]
-                log.warning("kraken session ended: %s", st.note)
-            st.reconnects += 1
-            for bk in self.books.values():
-                bk.live = False
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+        await reconnecting("kraken", self.state, self._session, on_drop=self._invalidate_books)
+
+    def _invalidate_books(self) -> None:
+        for bk in self.books.values():
+            bk.live = False
 
     async def _subscribe_book(self, symbols: list[str]) -> None:
         await self.ws.send_json({"method": "subscribe", "params": {
