@@ -35,6 +35,19 @@ pub fn run() {
         })
         .setup(|app| {
             tray::build_tray(&app.handle().clone())?;
+            // Recalibrated costs, if the user has any: `PYTHIA_COSTS_FILE`, or
+            // `costs.json` in the app's data directory. Otherwise the defaults
+            // compiled in from `config/costs.json` stand.
+            let costs_file = std::env::var("PYTHIA_COSTS_FILE")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .or_else(|| app.path().app_data_dir().ok().map(|d| d.join("costs.json")))
+                .filter(|p| p.exists());
+            if let Some(path) = costs_file {
+                if let Err(e) = pythia_core::costs::load_file(&path) {
+                    eprintln!("ignoring cost file: {e}");
+                }
+            }
             // Resume any previously saved daemon state.
             persist::load(app.handle());
             // Reflect which venues already have keys in the vault.

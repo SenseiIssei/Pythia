@@ -6,6 +6,7 @@ use crate::state::AppState;
 use pythia_core::connectors::cex::{self, Exchange, ExchangeInfo};
 use pythia_core::connectors::alpaca::AlpacaAccount;
 use pythia_core::connectors::{Side, Venue};
+use pythia_core::costs::CostVenue;
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, EngineState, LiveConfig, MarketDiag, RiskLimits, StrategyConfig,
     StrategyState,
@@ -110,7 +111,16 @@ pub fn refresh_connected(st: &AppState) {
     if vault::has_keys("polymarket") {
         connected.insert(Venue::Polymarket);
     }
-    st.engine.lock().unwrap().set_connected(connected);
+    // Costs follow the exchange the user selected, keys or not: a paper fill
+    // should pay what that venue would charge.
+    let selected = vault::get("crypto")
+        .and_then(|f| f.get("exchange").and_then(|id| Exchange::parse(id)))
+        .map(CostVenue::for_exchange);
+    {
+        let mut e = st.engine.lock().unwrap();
+        e.set_connected(connected);
+        e.set_crypto_cost_venue(selected);
+    }
     *st.creds.lock().unwrap() = creds;
 }
 

@@ -12,10 +12,12 @@
 //   PYTHIA_URL=http://host:port   target a different backend
 //   FOLDS=6                       more, shorter out-of-sample windows
 //   FRICTIONLESS=1                zero fees/slippage, to size the cost drag
+//   COST_MULT=2                   scale the cost model (config/costs.json)
 
 const base = (process.env.PYTHIA_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const folds = process.env.FOLDS ?? "4";
 const frictionless = process.env.FRICTIONLESS === "1";
+const costMult = frictionless ? "0" : process.env.COST_MULT ?? "1";
 
 const c = {
   reset: "\x1b[0m",
@@ -27,11 +29,7 @@ const c = {
   cyan: "\x1b[36m",
 };
 
-const params = new URLSearchParams({ folds });
-if (frictionless) {
-  params.set("feeBps", "0");
-  params.set("slippageBps", "0");
-}
+const params = new URLSearchParams({ folds, costMult });
 
 const url = `${base}/api/research/validate?${params}`;
 console.log(`${c.dim}Fetching candles and walking forward — this takes a minute…${c.reset}`);
@@ -55,7 +53,9 @@ console.log(`\n${c.bold}Walk-forward validation${c.reset} ${c.dim}· ${data.time
 console.log(
   `${c.dim}${data.cryptoMarkets} crypto markets (${data.cryptoBars} bars), ` +
     `${data.equityMarkets} equity markets (${data.equityBars} bars) · ` +
-    `costs ${data.costs.feeBps}bps fee + ${data.costs.slippageBps}bps slippage per side${c.reset}\n`
+    `costs: ${data.costs.cryptoVenue} ${data.costs.crypto.takerBps}bps taker + ` +
+    `${data.costs.crypto.halfSpreadBps}bps half-spread per side (majors are tighter), ` +
+    `equities ${data.costs.equities.halfSpreadBps}bps half-spread · x${data.costs.costMult}${c.reset}\n`
 );
 
 const badge = {

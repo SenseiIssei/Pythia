@@ -9,6 +9,7 @@ pub mod risk;
 pub mod strategies;
 
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
+use crate::costs::{self, CostModel, CostVenue};
 use crate::execution::bandit;
 use crate::forecast::{self, calibration, coherence, track};
 use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
@@ -172,6 +173,13 @@ pub struct Order {
     pub mode: Mode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reject_reason: Option<String>,
+    /// Live fills only: fill price against the arrival price, in bps, signed so
+    /// positive means it cost us.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realised_slippage_bps: Option<f64>,
+    /// Live fills only: what the cost model expected that to be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modelled_slippage_bps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +225,50 @@ pub struct StrategyConfig {
     pub equity_curve: Vec<f64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub rules: Option<composed::Composed>, // only for kind == Composed
+    /// What this strategy has paid to trade, and the forward-test evidence the
+    /// Strategy Passport is judged on.
+    #[serde(default)]
+    pub ledger: StrategyLedger,
+}
+
+/// Costs and forward-test record for one strategy.
+///
+/// `StrategyConfig::pnl` is realised P&L at the actual fill prices, so it
+/// already has slippage in it and fees taken out of nothing. This keeps the two
+/// cost components separately, so the strategy can be shown as gross, costs and
+/// net (see [`StrategyLedger::breakdown`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyLedger {
+    /// Fees paid, in quote currency.
+    pub fees: f64,
+    /// Slippage paid against the reference price, in quote currency. Live fills
+    /// can make this go down: a fill better than arrival is negative slippage.
+    pub slippage: f64,
+    /// Gross, costs and net in quote currency, kept in step with `fees`,
+    /// `slippage` and the strategy's realised P&L.
+    pub pnl: crate::costs::PnlBreakdown,
+    /// When the paper forward test started (epoch ms). Set the first time the
+    /// strategy runs in paper or live, never reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paper_since: Option<i64>,
+    /// Closed paper trades on markets with real prices. Trades on the demo
+    /// simulator are not evidence of anything and are not counted.
+    pub forward_trades: u32,
+    /// Closed trades filled for real at a venue (paper endpoint included).
+    pub live_trades: u32,
+}
+
+impl StrategyLedger {
+    /// Gross, costs and net for a realised P&L at fill prices.
+    ///
+    /// Fill prices already include slippage, so gross adds it back and net
+    /// takes the fees out: `gross = pnl + slippage`, `costs = fees + slippage`,
+    /// `net = pnl - fees`. Costs are booked when they are paid, so an open
+    /// position's entry costs show up before its P&L does.
+    pub fn breakdown(&self, realised_pnl: f64) -> crate::costs::PnlBreakdown {
+        crate::costs::PnlBreakdown::new(realised_pnl + self.slippage, self.fees + self.slippage)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -588,6 +640,10 @@ struct InFlight {
     arrival: f64,
     style: bandit::ExecStyle,
     exec_ctx: bandit::ExecContext,
+    /// Whose costs apply, and what the cost model expected this order's
+    /// slippage to be. Compared against the realised number when it finishes.
+    cost_venue: CostVenue,
+    modelled_bps: f64,
 }
 
 /// The full state pushed to the UI every tick.
@@ -633,6 +689,16 @@ pub struct EngineState {
     pub execution: Vec<bandit::PolicyRow>,
     #[serde(default)]
     pub adaptive_execution: bool,
+    /// Realised against modelled slippage per venue, once there are live fills.
+    #[serde(default)]
+    pub slippage: Vec<bandit::SlippageRow>,
+    /// Whose costs `Venue::Crypto` is charged.
+    #[serde(default = "default_crypto_venue")]
+    pub crypto_cost_venue: CostVenue,
+}
+
+fn default_crypto_venue() -> CostVenue {
+    CostVenue::Kraken
 }
 
 /// Headline numbers for the forecasting layer.
@@ -803,6 +869,9 @@ pub struct Engine {
     /// Learns how hard to push on each order from its own realised slippage.
     /// Ships disabled — every order crosses until the operator turns it on.
     exec_policy: bandit::ExecPolicy,
+    /// Which exchange's costs apply to `Venue::Crypto`. The engine is
+    /// exchange-agnostic; the host says which one executes.
+    crypto_venue: CostVenue,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -867,10 +936,17 @@ impl Engine {
             llm_opinions: HashMap::new(),
             actionable: HashSet::new(),
             exec_policy: bandit::ExecPolicy::default(),
+            crypto_venue: CostVenue::Kraken,
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
         };
+        let now = e.now();
+        for s in e.strategies.iter_mut() {
+            if s.state != StrategyState::Paused {
+                s.ledger.paper_since = Some(now);
+            }
+        }
         e.log(JournalKind::System, "Pythia engine started · balance $100,000 (paper)".into(), None, None);
         e
     }
@@ -1685,21 +1761,53 @@ impl Engine {
         self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
     }
 
-    /// Paper fill: simulate slippage + fee against `price`, then settle.
+    /// The cost venue for a market: its own venue, or for crypto the exchange
+    /// the host says executes.
+    fn cost_venue(&self, m: &Market) -> CostVenue {
+        CostVenue::for_venue(m.venue, Some(self.crypto_venue))
+    }
+
+    /// The cost model for one market, from `config/costs.json`.
+    pub fn cost_model(&self, m: &Market) -> CostModel {
+        costs::model_for(self.cost_venue(m), &m.symbol)
+    }
+
+    /// Paper fill: cross the spread and pay the taker fee the cost model says
+    /// this venue charges, then settle.
     fn fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
-        let slip = if side == Side::Buy { 1.0008 } else { 0.9992 };
-        let fill_price = price * slip;
-        let fee = fill_price * qty * 0.0006;
-        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, false, true);
+        let (fill_price, fee) = paper_fill(&self.cost_model(m), m.kind, side, qty, price);
+        let slippage = (fill_price - price).abs() * qty;
+        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, slippage, false, true);
     }
 
     /// Apply a fill (paper or live) to positions, cash, P&L and strategy stats.
     /// `live` marks a real fill — its position's exits must also route live.
     /// `emit_order` inserts a fresh Filled order (the paper path); live fills
     /// instead update their existing pending order in [`Engine::apply_live_update`].
+    /// `slippage` is what the fill cost against its reference price, in quote
+    /// currency (negative for a fill better than reference).
     #[allow(clippy::too_many_arguments)]
-    fn settle_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, fill_price: f64, fee: f64, live: bool, emit_order: bool) {
+    fn settle_fill(
+        &mut self,
+        strat_idx: usize,
+        m: &Market,
+        side: Side,
+        qty: f64,
+        fill_price: f64,
+        fee: f64,
+        slippage: f64,
+        live: bool,
+        emit_order: bool,
+    ) {
         let sid = self.strategies[strat_idx].id.clone();
+        {
+            let l = &mut self.strategies[strat_idx].ledger;
+            l.fees += fee.max(0.0);
+            l.slippage += slippage;
+        }
+        // A closed trade on a real price is forward-test evidence; one on the
+        // demo simulator is not evidence of anything.
+        let real_price = self.real_ids.contains(&m.id) || self.bar_backed.contains(&m.id);
         let signed = if side == Side::Buy { qty } else { -qty };
         let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
 
@@ -1724,19 +1832,21 @@ impl Engine {
                 );
             }
             Some(pos) => {
-                let new_qty = pos.qty + signed;
-                if pos.qty == 0.0 || pos.qty.signum() == new_qty.signum() {
-                    let total = pos.avg_price * pos.qty.abs() + fill_price * signed.abs();
-                    pos.avg_price = if new_qty.abs() > 0.0 { total / new_qty.abs() } else { fill_price };
-                } else {
-                    let closed = signed.abs().min(pos.qty.abs());
-                    let dir = if pos.qty > 0.0 { 1.0 } else { -1.0 };
-                    realized = (fill_price - pos.avg_price) * closed * dir;
-                }
+                let was = pos.qty;
+                let (new_qty, new_avg, r) = apply_fill(pos.qty, pos.avg_price, signed, fill_price);
+                realized = r;
+                pos.avg_price = new_avg;
                 if new_qty.abs() < 1e-9 {
                     self.positions.remove(&key);
                 } else {
                     pos.qty = new_qty;
+                    // Flipped through zero: the remainder is a new position at
+                    // this fill, and the old stops belonged to the other side.
+                    if was != 0.0 && new_qty.signum() != was.signum() {
+                        pos.stop = new_stop;
+                        pos.target = new_target;
+                        pos.trail_ref = fill_price;
+                    }
                 }
             }
         }
@@ -1754,6 +1864,11 @@ impl Engine {
                 s.trades += 1;
                 let wins = s.win_rate * (s.trades - 1) as f64 + if realized >= 0.0 { 1.0 } else { 0.0 };
                 s.win_rate = wins / s.trades as f64;
+                if live {
+                    s.ledger.live_trades += 1;
+                } else if real_price {
+                    s.ledger.forward_trades += 1;
+                }
             }
             // profit factor
             if realized >= 0.0 {
@@ -1808,6 +1923,10 @@ impl Engine {
             if s.equity_curve.len() > 200 {
                 s.equity_curve.remove(0);
             }
+        }
+        {
+            let s = &mut self.strategies[strat_idx];
+            s.ledger.pnl = s.ledger.breakdown(s.pnl);
         }
 
         if emit_order {
@@ -1901,6 +2020,13 @@ impl Engine {
         };
         let style = self.exec_policy.choose(&exec_ctx);
         let patience_bps = self.exec_policy.patience_bps();
+        // What the cost model expects this order to lose against arrival. A
+        // resting order is not expected to pay the spread at all.
+        let cost_venue = self.cost_venue(m);
+        let modelled_bps = match style {
+            bandit::ExecStyle::Cross => self.cost_model(m).slippage_bps(qty * price, None),
+            bandit::ExecStyle::Join | bandit::ExecStyle::Passive => 0.0,
+        };
 
         let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
         let order_id = order.id.clone();
@@ -1923,6 +2049,8 @@ impl Engine {
                 arrival: price,
                 style,
                 exec_ctx,
+                cost_venue,
+                modelled_bps,
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -2312,6 +2440,21 @@ impl Engine {
         self.exec_policy.enabled
     }
 
+    /// Tell the engine which exchange executes `Venue::Crypto`, so paper fills
+    /// and the cost comparison use that exchange's fees. `None` keeps Kraken.
+    pub fn set_crypto_cost_venue(&mut self, venue: Option<CostVenue>) {
+        self.crypto_venue = venue.unwrap_or(CostVenue::Kraken);
+    }
+
+    pub fn crypto_cost_venue(&self) -> CostVenue {
+        self.crypto_venue
+    }
+
+    /// Realised against modelled slippage, per venue with live fills.
+    pub fn slippage_report(&self) -> Vec<bandit::SlippageRow> {
+        self.exec_policy.slippage_report()
+    }
+
     /// What the execution policy has learned so far.
     pub fn execution_report(&self) -> Vec<bandit::PolicyRow> {
         self.exec_policy.report()
@@ -2385,9 +2528,12 @@ impl Engine {
                         .position(|s| s.id == f.strategy_id)
                         .unwrap_or_else(|| self.ensure_manual_strategy());
                     let fee_delta = (update.fee - f.booked_fee).max(0.0);
+                    // Against the arrival price, signed so a fill better than
+                    // arrival is negative slippage.
+                    let slippage = f.side.sign() * (price - f.arrival) * delta;
                     // emit_order = false: the pending order row already exists
                     // and is updated below rather than duplicated.
-                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, true, false);
+                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, slippage, true, false);
                     self.log(
                         JournalKind::Fill,
                         format!("LIVE FILL {:?} {delta:.6} {} @ {price:.4}", f.side, m.symbol),
@@ -2434,7 +2580,23 @@ impl Engine {
         // realised slippage against the price at decision time, or a penalty
         // when nothing filled.
         let realised = update.avg_price.filter(|p| *p > 0.0 && update.filled_qty > 0.0);
-        self.exec_policy.observe(&f.exec_ctx, f.style, f.side, f.arrival, realised);
+        // The same observation also lands in the realised-versus-modelled
+        // slippage record, next to what the cost model expected.
+        let now = self.now();
+        let realised_bps = self.exec_policy.observe_against_model(
+            &f.exec_ctx,
+            f.style,
+            f.side,
+            f.arrival,
+            realised,
+            f.cost_venue.id(),
+            f.modelled_bps,
+            now,
+        );
+        if let (Some(bps), Some(ord)) = (realised_bps, self.orders.iter_mut().find(|x| x.id == order_id)) {
+            ord.realised_slippage_bps = Some(bps);
+            ord.modelled_slippage_bps = Some(f.modelled_bps);
+        }
 
         if update.filled_qty <= 0.0 {
             let reason = format!("{} ({})", update.status_word(), update.raw_status);
@@ -2659,14 +2821,21 @@ impl Engine {
             profit_factor: 0.0,
             equity_curve: vec![0.0],
             rules: None,
+            ledger: StrategyLedger::default(),
         });
         self.strategies.len() - 1
     }
 
     /// Add a strategy at runtime (e.g. a composed strategy deployed from the UI).
-    pub fn add_strategy(&mut self, cfg: StrategyConfig) {
+    pub fn add_strategy(&mut self, mut cfg: StrategyConfig) {
         if self.strategies.iter().any(|s| s.id == cfg.id) {
             return;
+        }
+        // A deployed strategy starts with a clean record, whatever the caller
+        // sent: costs and forward-test evidence are earned here, not imported.
+        cfg.ledger = StrategyLedger::default();
+        if cfg.state != StrategyState::Paused {
+            cfg.ledger.paper_since = Some(self.now());
         }
         let (name, id) = (cfg.name.clone(), cfg.id.clone());
         self.strategies.push(cfg);
@@ -2684,8 +2853,12 @@ impl Engine {
         self.log(JournalKind::Risk, "Risk limits updated".into(), None, None);
     }
     pub fn set_strategy_state(&mut self, id: &str, state: StrategyState) {
+        let now = self.now();
         if let Some(s) = self.strategies.iter_mut().find(|s| s.id == id) {
             s.state = state;
+            if state != StrategyState::Paused && s.ledger.paper_since.is_none() {
+                s.ledger.paper_since = Some(now);
+            }
             let name = s.name.clone();
             self.log(JournalKind::System, format!("Strategy {name} → {state:?}"), Some(id.to_string()), None);
         }
@@ -2821,6 +2994,16 @@ impl Engine {
         if !p.strategies.is_empty() {
             self.strategies = p.strategies;
         }
+        // A save from before the forward-test clock existed starts it now:
+        // there is no record of how long it ran before, and guessing would be
+        // crediting time that was never observed.
+        let now = self.now();
+        for s in self.strategies.iter_mut() {
+            if s.state != StrategyState::Paused && s.ledger.paper_since.is_none() {
+                s.ledger.paper_since = Some(now);
+            }
+            s.ledger.pnl = s.ledger.breakdown(s.pnl);
+        }
         self.orders = p.orders;
         self.journal = p.journal;
         self.limits = p.limits;
@@ -2929,6 +3112,8 @@ impl Engine {
             },
             execution: self.exec_policy.report(),
             adaptive_execution: self.exec_policy.enabled,
+            slippage: self.exec_policy.slippage_report(),
+            crypto_cost_venue: self.crypto_venue,
         }
     }
 
@@ -2950,6 +3135,8 @@ impl Engine {
             avg_fill_price: None,
             mode: self.mode(),
             reject_reason: reject,
+            realised_slippage_bps: None,
+            modelled_slippage_bps: None,
         }
     }
     fn build_order_filled(&mut self, strategy_id: &str, m: &Market, side: Side, qty: f64, fill_price: f64) -> Order {
@@ -2991,6 +3178,49 @@ fn market_category(kind: MarketKind) -> &'static str {
         MarketKind::Crypto => "crypto",
         MarketKind::Equity => "equity",
     }
+}
+
+/// Apply a signed fill to a position. Returns `(new_qty, new_avg_price,
+/// realised_pnl)`.
+///
+/// Whether a fill adds or reduces is decided by the fill's own sign against
+/// the position's, not by the sign of the result. The earlier test compared
+/// `pos.qty.signum()` with `new_qty.signum()`, and since `0.0_f64.signum()` is
+/// `1.0` a long closed to exactly zero looked like an add, booked no realised
+/// P&L, and never counted as a trade. A partial reduction looked like an add
+/// too, and dragged the average price toward the exit price.
+pub fn apply_fill(qty: f64, avg: f64, signed: f64, fill: f64) -> (f64, f64, f64) {
+    let new_qty = qty + signed;
+    if qty == 0.0 || qty.signum() == signed.signum() {
+        let total = avg * qty.abs() + fill * signed.abs();
+        let new_avg = if new_qty.abs() > 0.0 { total / new_qty.abs() } else { fill };
+        return (new_qty, new_avg, 0.0);
+    }
+    let closed = signed.abs().min(qty.abs());
+    let dir = qty.signum();
+    let realised = (fill - avg) * closed * dir;
+    // A reduction keeps the entry price of what is left; a flip starts the
+    // remainder fresh at this fill.
+    let flipped = new_qty.abs() > 1e-12 && new_qty.signum() != qty.signum();
+    (new_qty, if flipped { fill } else { avg }, realised)
+}
+
+/// A simulated fill: the price after crossing the half-spread and paying
+/// impact, and the taker fee in quote currency. Both come from the cost model,
+/// so a paper fill on Kraken pays Kraken's costs and one on Binance pays
+/// Binance's. Prediction-market prices are probabilities and stay inside (0, 1).
+pub fn paper_fill(model: &CostModel, kind: MarketKind, side: Side, qty: f64, price: f64) -> (f64, f64) {
+    let qty = qty.abs();
+    let slip = model.slippage_bps(qty * price, None) / 10_000.0;
+    let mut px = match side {
+        Side::Buy => price * (1.0 + slip),
+        Side::Sell => price * (1.0 - slip),
+    };
+    if kind == MarketKind::Prediction {
+        px = px.clamp(0.001, 0.999);
+    }
+    let fee = px * qty * model.taker_bps / 10_000.0;
+    (px, fee)
 }
 
 /// Regime filter: mean-reversion strategies are blocked in trending markets,
@@ -3180,8 +3410,103 @@ mod tests {
             profit_factor: 0.0,
             equity_curve: vec![0.0],
             rules: Some(rules),
+            ledger: StrategyLedger::default(),
         });
         assert_eq!(e.strategies.len(), n0 + 1);
+    }
+
+    #[test]
+    fn closing_a_long_to_exactly_zero_books_the_trade() {
+        // 0.0_f64.signum() is 1.0, so the old add/reduce test treated a full
+        // close of a long as an add: no realised P&L, no trade counted.
+        let (q, _, r) = apply_fill(2.0, 100.0, -2.0, 110.0);
+        assert_eq!(q, 0.0);
+        assert!((r - 20.0).abs() < 1e-12);
+        // Short side, for symmetry.
+        let (q, _, r) = apply_fill(-2.0, 100.0, 2.0, 90.0);
+        assert_eq!(q, 0.0);
+        assert!((r - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_partial_reduction_realises_and_keeps_the_entry_price() {
+        let (q, avg, r) = apply_fill(4.0, 100.0, -1.0, 120.0);
+        assert_eq!(q, 3.0);
+        assert_eq!(avg, 100.0, "what is left was still bought at 100");
+        assert!((r - 20.0).abs() < 1e-12);
+        // Adding averages in.
+        let (q, avg, r) = apply_fill(1.0, 100.0, 1.0, 110.0);
+        assert_eq!((q, r), (2.0, 0.0));
+        assert!((avg - 105.0).abs() < 1e-12);
+        // A flip realises the closed part and restarts at the fill.
+        let (q, avg, r) = apply_fill(1.0, 100.0, -3.0, 90.0);
+        assert_eq!(q, -2.0);
+        assert_eq!(avg, 90.0);
+        assert!((r + 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_closed_long_shows_up_in_the_strategy_stats() {
+        let mut e = Engine::new();
+        e.manual_order("alpaca:MSFT", Side::Buy, 2_000.0);
+        e.flatten("alpaca:MSFT");
+        let s = e.strategies.iter().find(|s| s.id == "manual").unwrap();
+        assert_eq!(s.trades, 1, "a round trip is a trade");
+        assert!(s.pnl < 0.0, "in and out at the same price loses the spread");
+    }
+
+    #[test]
+    fn a_paper_fill_pays_the_cost_model_not_a_flat_guess() {
+        let mut e = Engine::new();
+        let px = e.price_of("crypto:BTC/USD");
+        e.manual_order("crypto:BTC/USD", Side::Buy, 1_000.0);
+        let (qty, avg) = {
+            let pos = e.positions.get("crypto:BTC/USD").expect("a paper buy fills");
+            (pos.qty, pos.avg_price)
+        };
+        let m = e.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
+        let model = e.cost_model(&m);
+        assert_eq!(model.taker_bps, 40.0, "crypto defaults to Kraken's costs");
+        let expected = px * (1.0 + model.slippage_bps(qty * px, None) / 10_000.0);
+        assert!((avg - expected).abs() < 1e-9 * px, "fill {avg} vs modelled {expected}");
+
+        let l = e.strategies.iter().find(|s| s.id == "manual").unwrap().ledger.clone();
+        assert!((l.fees - avg * qty * 0.004).abs() < 1e-6, "40 bps taker fee, got {}", l.fees);
+        assert!(l.slippage > 0.0);
+        // Nothing has closed yet: gross gives the slippage back, net is the fee.
+        assert!((l.pnl.net + l.fees).abs() < 1e-9);
+        assert!((l.pnl.gross - l.slippage).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_configured_exchange_decides_what_crypto_costs() {
+        let mut kraken = Engine::new();
+        let mut binance = Engine::new();
+        binance.set_crypto_cost_venue(Some(CostVenue::Binance));
+        for e in [&mut kraken, &mut binance] {
+            e.manual_order("crypto:ETH/USD", Side::Buy, 2_000.0);
+        }
+        let fees = |e: &Engine| e.strategies.iter().find(|s| s.id == "manual").unwrap().ledger.fees;
+        assert!(fees(&kraken) > 3.0 * fees(&binance), "40 bps vs 10 bps taker");
+        assert_eq!(binance.state().crypto_cost_venue, CostVenue::Binance);
+    }
+
+    #[test]
+    fn a_round_trip_reports_gross_costs_and_net_that_add_up() {
+        let mut e = Engine::new();
+        e.manual_order("alpaca:AAPL", Side::Buy, 5_000.0);
+        assert!(e.positions.contains_key("alpaca:AAPL"));
+        e.flatten("alpaca:AAPL");
+        assert!(!e.positions.contains_key("alpaca:AAPL"));
+        let s = e.strategies.iter().find(|s| s.id == "manual").unwrap().clone();
+        let p = s.ledger.pnl;
+        assert!((p.gross - p.costs - p.net).abs() < 1e-9);
+        assert!((p.net - (s.pnl - s.ledger.fees)).abs() < 1e-9);
+        // Same price in and out: gross is roughly zero, the loss is all costs.
+        assert!(p.gross.abs() < 1e-6, "gross {}", p.gross);
+        assert!(p.costs > 0.0);
+        assert_eq!(s.ledger.fees, 0.0, "Alpaca charges no commission");
+        assert!(p.cost_heavy, "costs on no gross profit are flagged");
     }
 
     #[test]
