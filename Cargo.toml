@@ -7,7 +7,7 @@
 # Both front-ends consume the SAME engine, so the desktop app and the future
 # web/mobile dashboards trade against one authoritative implementation.
 [workspace]
-members = ["crates/pythia-core", "src-tauri", "server"]
+members = ["crates/pythia-core", "crates/pythia-ml", "src-tauri", "server"]
 resolver = "2"
 
 # Profiles must live at the workspace root; per-member profiles are ignored with

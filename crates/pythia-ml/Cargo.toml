@@ -1,0 +1,13 @@
+[package]
+name = "pythia-ml"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Pythia model inference: LightGBM tree evaluation, feature parity with the research lab, shadow scoring and drift checks."
+
+# Pure computation on purpose: no network, no async, no native runtime. The
+# engine (pythia-core) feeds it data and decides what to do with the answers.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
