@@ -127,8 +127,54 @@ def main() -> int:
         if cfg["regime"] and not risk_on:
             tgt = np.zeros_like(tgt)
         row = step(name, cfg, tgt, names, bid, ask, close[t], now_us)
+        write_signal(name, cfg, tgt, names, int(days[t]), now_us, risk_on)
         print(name, json.dumps(row))
     return 0
+
+
+def evidence(cfg: dict) -> dict:
+    """What the lab measured for this variant, for the engine's Strategy Passport."""
+    src = "momentum2" if cfg["regime"] else "tsmom"
+    try:
+        rep = json.loads((ROOT / "reports" / src / "latest.json").read_text())
+    except (OSError, ValueError):
+        return {"report": src, "missing": True}
+    if src == "tsmom":
+        chosen = rep["chosen"]
+        return {"report": src, "oos_sharpe": chosen["oos_sharpe"], "oos_max_dd": chosen["oos_max_dd"],
+                "is_sharpe": chosen["is_sharpe"], "deflated_p": rep["deflated_p"],
+                "sharpe_2x_cost": next((c["sharpe"] for c in rep.get("cost_sensitivity", []) if c["costs"] == "2x"), None),
+                "variants_tried": len(rep["rows"])}
+    pick = next(d for d in rep["details"] if d["family"] == "A regime")
+    return {"report": src, "oos_sharpe": pick["oos_sharpe"], "oos_max_dd": pick["oos_max_dd"],
+            "is_sharpe": pick["is_sharpe"], "deflated_p": pick["deflated_p"],
+            "sharpe_2x_cost": pick["sharpe_2x_cost"], "variants_tried": len(rep["rows"])}
+
+
+def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_us: int, now_us: int,
+                 risk_on: bool) -> None:
+    """Target weights for the engine to execute: Python decides, Rust executes.
+
+    The engine treats a signal older than `valid_until_ms` as stale and holds
+    still rather than trading on yesterday's decision.
+    """
+    d = ROOT / "signals" / name
+    d.mkdir(parents=True, exist_ok=True)
+    sig = {
+        "strategy": name,
+        "variant": cfg["variant"],
+        "as_of_ms": as_of_us // 1000,            # the daily close the weights were computed from
+        "generated_ms": now_us // 1000,
+        "valid_until_ms": now_us // 1000 + 36 * 3600 * 1000,
+        "quote": "USD",
+        "weights": {n: round(float(x), 6) for n, x in zip(names, tgt) if x > 0},
+        "regime_on": risk_on if cfg["regime"] else None,
+        "evidence": evidence(cfg),
+    }
+    tmp = d / "latest.json.tmp"
+    tmp.write_text(json.dumps(sig, indent=2))
+    tmp.replace(d / "latest.json")
+    (d / f"{datetime.fromtimestamp(now_us / 1e6, timezone.utc):%Y-%m-%d}.json").write_text(json.dumps(sig, indent=2))
 
 
 if __name__ == "__main__":
