@@ -1,0 +1,118 @@
+"""Paper forward test of the momentum variant picked in-sample (gate 7). No real money.
+
+Runs once a day at 04:00 UTC, after the 03:30 backfill has fetched yesterday's
+klines. It computes the target weights with the SAME function the backtest
+uses, from the same files, marks the paper book to market at live Binance
+prices, and rebalances at the live touch: buys at the ask, sells at the bid,
+plus the 10 bps taker fee. The modelled cost (15 bps per unit of turnover,
+as in the backtest) is journaled next to it, so after 30 days we can see
+whether the backtest's cost assumption holds.
+
+State: <data>/paper/tsmom/state.json   Journal: <data>/paper/tsmom/journal.csv
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+
+import numpy as np
+
+from ..data import ROOT
+from ..experiments.tsmom import COST, DAY_US, daily_matrix, rolling_mean, target_weights
+
+VARIANT = "28d · daily · vol 40%"
+LOOKBACKS, TARGET = [28], 0.40
+TAKER = 0.0010
+START_EQUITY = 10_000.0
+DIR = ROOT / "paper" / "tsmom"
+
+
+def live_quotes(symbols: list[str]) -> dict[str, tuple[float, float]]:
+    with urllib.request.urlopen("https://api.binance.com/api/v3/ticker/bookTicker", timeout=20) as r:
+        book = {q["symbol"]: (float(q["bidPrice"]), float(q["askPrice"])) for q in json.load(r)}
+    return {s: book[s] for s in symbols if s in book}
+
+
+def main() -> int:
+    DIR.mkdir(parents=True, exist_ok=True)
+    now_us = time.time_ns() // 1000
+    yesterday = (now_us // DAY_US - 1) * DAY_US
+    days, close, rv, names = daily_matrix()
+    if days[-1] < yesterday:
+        print(f"history ends {datetime.fromtimestamp(days[-1] / 1e6, timezone.utc):%Y-%m-%d}, "
+              "yesterday is missing; not rebalancing on stale data", file=sys.stderr)
+        return 1
+    t = int(np.flatnonzero(days == yesterday)[0])
+    sigma = np.sqrt(rolling_mean(rv, 30, 20))
+    history = np.cumsum(np.isfinite(close), axis=0)
+    tgt = target_weights(close, sigma, history, t, LOOKBACKS, TARGET)
+
+    symbols = [f"{n}USDT" for n in names]
+    q = live_quotes(symbols)
+    bid = np.array([q.get(s, (np.nan, np.nan))[0] for s in symbols])
+    ask = np.array([q.get(s, (np.nan, np.nan))[1] for s in symbols])
+    mid = (bid + ask) / 2
+
+    state_file = DIR / "state.json"
+    if state_file.exists():
+        st = json.loads(state_file.read_text())
+    else:
+        st = {"variant": VARIANT, "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "equity": START_EQUITY, "weights": [0.0] * len(names), "mid": None, "names": names}
+    w = np.array(st["weights"])
+    equity = st["equity"]
+
+    gross = 0.0
+    if st["mid"] is not None:
+        prev = np.array(st["mid"], dtype=float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            r = np.nan_to_num(mid / prev - 1)
+        gross = float(np.dot(w, r))
+        equity *= 1 + gross
+        if 1 + gross > 0:
+            w = w * (1 + r) / (1 + gross)
+
+    delta = tgt - w
+    half_spread = np.nan_to_num((ask - bid) / mid / 2)
+    paper_cost = float(np.sum(np.abs(delta) * (TAKER + half_spread)))
+    model_cost = float(np.sum(np.abs(delta)) * COST)
+    equity *= 1 - paper_cost
+    # How far the live price had moved from the close the signal used (the backtest fills at that close)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        drift = np.nan_to_num(mid / close[t] - 1)
+    timing_bps = float(np.dot(np.abs(delta), drift) / max(np.abs(delta).sum(), 1e-12) * 1e4)
+
+    row = {
+        "date": datetime.fromtimestamp(now_us / 1e6, timezone.utc).strftime("%Y-%m-%d"),
+        "equity": round(equity, 2),
+        "gross_ret_pct": round(gross * 100, 4),
+        "paper_cost_bps": round(paper_cost * 1e4, 2),
+        "model_cost_bps": round(model_cost * 1e4, 2),
+        "turnover": round(float(np.abs(delta).sum()), 4),
+        "exposure": round(float(tgt.sum()), 4),
+        "held": int((tgt > 0).sum()),
+        "timing_drift_bps": round(timing_bps, 2),
+        "weights": json.dumps({n: round(float(x), 4) for n, x in zip(names, tgt) if x > 0}),
+    }
+    journal = DIR / "journal.csv"
+    new = not journal.exists()
+    with journal.open("a", newline="") as fh:
+        wr = csv.DictWriter(fh, fieldnames=list(row))
+        if new:
+            wr.writeheader()
+        wr.writerow(row)
+
+    st.update(equity=equity, weights=tgt.tolist(), mid=[None if not np.isfinite(x) else float(x) for x in mid])
+    st["mid"] = [x if x is not None else np.nan for x in st["mid"]]
+    state_file.write_text(json.dumps(st, indent=2, allow_nan=True))
+    print(json.dumps(row))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

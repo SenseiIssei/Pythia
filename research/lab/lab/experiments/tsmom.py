@@ -66,6 +66,25 @@ def rolling_mean(a: np.ndarray, w: int, min_obs: int) -> np.ndarray:
         return np.where(n >= min_obs, s / np.maximum(n, 1), np.nan)
 
 
+def target_weights(close: np.ndarray, sigma: np.ndarray, history: np.ndarray, t: int,
+                   lookbacks: list[int], target: float) -> np.ndarray:
+    """Weights to hold from the close of day t. Shared by the backtest and the paper trader."""
+    N = close.shape[1]
+    sig = np.zeros(N)
+    for L in lookbacks:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            past = close[t] / close[t - L] - 1
+        sig += np.where(np.isfinite(past) & (past > 0), 1.0, 0.0)
+    sig /= len(lookbacks)
+    ok = (history[t] >= MIN_HISTORY_D) & np.isfinite(sigma[t]) & (sigma[t] > 0) & np.isfinite(close[t])
+    n_ok = max(int(ok.sum()), 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        tgt = np.nan_to_num(np.where(ok, sig * (target / (sigma[t] * np.sqrt(365))) / n_ok, 0.0))
+    if tgt.sum() > 1.0:
+        tgt /= tgt.sum()
+    return tgt
+
+
 def backtest(close: np.ndarray, rv: np.ndarray, lookbacks: list[int], rebal: int, target: float):
     T, N = close.shape
     ret = np.full_like(close, np.nan)
@@ -78,17 +97,7 @@ def backtest(close: np.ndarray, rv: np.ndarray, lookbacks: list[int], rebal: int
     for t in range(max(lookbacks) + 1, T - 1):
         r_next = np.nan_to_num(ret[t + 1])
         if (t % rebal) == 0:
-            sig = np.zeros(N)
-            for L in lookbacks:
-                past = close[t] / close[t - L] - 1
-                sig += np.where(np.isfinite(past) & (past > 0), 1.0, 0.0)
-            sig /= len(lookbacks)
-            ok = (history[t] >= MIN_HISTORY_D) & np.isfinite(sigma[t]) & (sigma[t] > 0) & np.isfinite(close[t])
-            n_ok = max(int(ok.sum()), 1)
-            tgt = np.where(ok, sig * (target / (sigma[t] * np.sqrt(365))) / n_ok, 0.0)
-            tgt = np.nan_to_num(tgt)
-            if tgt.sum() > 1.0:
-                tgt /= tgt.sum()
+            tgt = target_weights(close, sigma, history, t, lookbacks, target)
             tv = np.abs(tgt - w).sum()
             turnover[t] = tv
             cost[t] = tv * COST
@@ -154,6 +163,23 @@ def main() -> None:
     b_ew, b_btc = perf(base_ew[oos]), perf(base_btc[oos])
     b_ew_is = perf(base_ew[ins])
 
+    # Gate 3: cost sensitivity, gate 5: regimes. Both on the chosen variant, out of sample.
+    g, c, n, e, to = results[chosen["variant"]]
+    paid = np.r_[0.0, c[:-1]]  # net[t+1] = gross[t+1] - cost[t]
+    cost_rows = [{"costs": f"{k}x", **perf((g - k * paid)[oos])} for k in (1, 2, 3)]
+    btc_close = close[:, names.index("BTC")]
+    ma200 = np.array([np.nanmean(btc_close[max(0, t - 200):t]) if t >= 200 else np.nan for t in range(len(days))])
+    bull = btc_close > ma200
+    basket_vol = rolling_mean(np.nan_to_num(base_ew)[:, None] ** 2, 30, 20)[:, 0]
+    hi_vol = basket_vol > np.nanmedian(basket_vol[ins])
+    regime_rows = []
+    for label, mask in (("BTC above 200d average", bull), ("BTC below 200d average", ~bull),
+                        ("high volatility", hi_vol), ("low volatility", ~hi_vol)):
+        mk = oos & mask
+        if mk.sum() > 30:
+            regime_rows.append({"regime": label, "days": int(mk.sum()), "strategy_sharpe": perf(n[mk])["sharpe"],
+                                "basket_sharpe": perf(base_ew[mk])["sharpe"]})
+
     beats = chosen["oos_sharpe"] > b_ew["sharpe"] and chosen["oos_max_dd"] < b_ew["max_dd"]
     verdict = (
         f"Picked on 2020 to 2023 data: **{chosen['variant']}** (in-sample Sharpe {chosen['is_sharpe']:.2f}). "
@@ -178,12 +204,17 @@ def main() -> None:
         + report.table([{"baseline": "equal-weight basket", "is_sharpe": b_ew_is["sharpe"], **{f"oos_{k}": v for k, v in b_ew.items()}},
                         {"baseline": "BTC buy and hold", "is_sharpe": perf(base_btc[ins])["sharpe"], **{f"oos_{k}": v for k, v in b_btc.items()}}],
                        ["baseline", "is_sharpe", "oos_sharpe", "oos_cagr", "oos_max_dd", "oos_vol"])
+        + "\n## Gate 3: chosen variant at higher costs (out of sample)\n\n"
+        + report.table(cost_rows, ["costs", "sharpe", "cagr", "max_dd"])
+        + "\n## Gate 5: chosen variant by regime (out of sample)\n\n"
+        + report.table(regime_rows, ["regime", "days", "strategy_sharpe", "basket_sharpe"])
         + "\n## All 16 variants\n\n"
         + report.table(sorted(rows, key=lambda r: -r["is_sharpe"]),
                        ["variant", "is_sharpe", "oos_sharpe", "oos_gross_sharpe", "oos_cagr", "oos_max_dd",
                         "oos_cost_yr", "avg_exposure", "turnover_yr"])
     )
     report.write("tsmom", md, {"rows": rows, "chosen": chosen, "deflated_p": dsr,
+                               "cost_sensitivity": cost_rows, "regimes": regime_rows,
                                "baseline_ew": b_ew, "baseline_btc": b_btc, "verdict": verdict})
 
 
