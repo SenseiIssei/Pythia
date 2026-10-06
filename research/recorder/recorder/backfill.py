@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import os
 import zipfile
@@ -152,6 +153,14 @@ async def monthly_then_daily(f: Fetcher, out_dir: Path, since: date, url_month, 
             if raw is not None:
                 write(norm(read_csv(raw, names)), month_file)
                 f.stats["ok"] += 1
+            elif not daily_only and (this_month - m).days > 40:
+                # Monthly archives exist for every finished month a pair traded.
+                # Missing one that old means it did not trade: no need to ask
+                # for 30 daily files to confirm (across hundreds of pairs that
+                # would be most of the requests).
+                out_dir.mkdir(parents=True, exist_ok=True)
+                absent.touch()
+                continue
             else:
                 last = (m.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
                 raws = await asyncio.gather(*(f.zip_csv(url_day(d.isoformat())) for d in days(m, last)))
@@ -207,6 +216,20 @@ async def run(args) -> None:
                     lambda l, s=s: "",
                     lambda l, s=s: f"{BASE}/futures/um/daily/metrics/{s}/{s}-metrics-{l}.zip",
                     None, norm_metrics, "ts_us", daily_only=True))
+        if args.only == "klines_1h_all":
+            # Every USDT pair Binance ever listed, delisted ones included (no survivorship bias).
+            from .universe import list_spot_usdt
+            syms = await list_spot_usdt(http)
+            (root / "universe.json").write_text(json.dumps(syms))
+            log.info("broad universe: %d USDT pairs", len(syms))
+            since = date.fromisoformat(args.since or "2020-01-01")
+            for s in syms:
+                jobs.append(monthly_then_daily(
+                    f, root / "binance_spot" / "klines_1h" / f"symbol={s}", since,
+                    lambda l, s=s: f"{BASE}/spot/monthly/klines/{s}/1h/{s}-1h-{l}.zip",
+                    lambda l, s=s: f"{BASE}/spot/daily/klines/{s}/1h/{s}-1h-{l}.zip",
+                    KLINE_COLS, norm_klines, "open_time_us"))
+
         async def guarded(job):
             try:
                 await job
@@ -214,7 +237,7 @@ async def run(args) -> None:
                 f.stats["failed_jobs"] = f.stats.get("failed_jobs", 0) + 1
                 log.exception("job failed, rerun picks it up")
 
-        step = 8
+        step = args.jobs
         for i in range(0, len(jobs), step):
             await asyncio.gather(*(guarded(j) for j in jobs[i:i + step]))
             log.info("progress %d/%d jobs, %s", min(i + step, len(jobs)), len(jobs), f.stats)
@@ -224,9 +247,11 @@ async def run(args) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", choices=["klines", "funding", "metrics"])
+    ap.add_argument("--only", choices=["klines", "funding", "metrics", "klines_1h_all"],
+                    help="klines_1h_all: hourly bars of every USDT pair ever listed, run on its own")
     ap.add_argument("--since", help="YYYY-MM-DD")
-    ap.add_argument("--parallel", type=int, default=16)
+    ap.add_argument("--parallel", type=int, default=16, help="concurrent downloads")
+    ap.add_argument("--jobs", type=int, default=8, help="symbols worked on at once")
     asyncio.run(run(ap.parse_args()))
 
 
