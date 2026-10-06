@@ -436,12 +436,20 @@ export class PaperEngine implements EngineClient {
     this.log("system", `Exit ${marketId}: ${reason}`, strat.id, marketId);
   }
 
+  /**
+   * The one slot every manual order is booked to, kept like the Rust engine's
+   * so manual P&L and costs accumulate instead of landing on a throwaway object.
+   */
   private manualStrat(venue: Venue): StrategyConfig {
-    return {
+    const existing = this.strategies.find((s) => s.id === "manual");
+    if (existing) return existing;
+    const s: StrategyConfig = {
       id: "manual", name: "Manual", kind: "manual", venueClass: venue, state: "paper",
       universe: [], params: [], budgetPct: 100, pnl: 0, trades: 0, winRate: 0,
-      maxDrawdown: 0, profitFactor: 0, equityCurve: [0],
+      maxDrawdown: 0, profitFactor: 0, equityCurve: [0], ledger: emptyLedger(),
     };
+    this.strategies.push(s);
+    return s;
   }
 
   // ── manual actions (from the UI) ────────────────────────────────────────────
