@@ -34,6 +34,7 @@ use tower_http::cors::CorsLayer;
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
 use pythia_core::connectors::cex::{self, Exchange};
 use pythia_core::connectors::{Side, Venue};
+use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, VenueCash};
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, Engine, EngineState, LiveConfig, RiskLimits, StrategyConfig,
     StrategyState,
@@ -1055,6 +1056,21 @@ enum Command {
     /// Let the execution policy rest orders inside the spread and learn from
     /// what they cost. Off by default.
     SetAdaptiveExecution { on: bool },
+    /// Give an amount to an autopilot. `confirm` is the owner's typed
+    /// confirmation, which live requires.
+    AutopilotStart {
+        config: AutopilotConfig,
+        #[serde(default)]
+        confirm: bool,
+    },
+    /// `flatten` overrides the autopilot's own `flattenOnStop`.
+    AutopilotStop {
+        id: String,
+        #[serde(default)]
+        flatten: Option<bool>,
+    },
+    AutopilotPause { id: String },
+    AutopilotResume { id: String },
 }
 
 /// Apply a command and return the fresh state so the caller updates instantly
@@ -1063,6 +1079,18 @@ async fn post_command(
     State(st): State<AppState>,
     Json(cmd): Json<Command>,
 ) -> axum::response::Response {
+    // A live autopilot may not get more than the venue holds: read its free
+    // cash first, with no engine lock held across the network call.
+    let cash = match &cmd {
+        Command::AutopilotStart { config, .. } if config.mode == AutopilotMode::Live => {
+            let paper = st.engine.lock().unwrap().live_config().paper;
+            match wallets::available_cash(&st.creds, &config.venue, paper).await {
+                Ok(c) => VenueCash::Read(c),
+                Err(why) => VenueCash::Failed(why),
+            }
+        }
+        _ => VenueCash::NotRead,
+    };
     let mut refused: Option<String> = None;
     let dto = {
         let mut e = st.engine.lock().unwrap();
@@ -1079,6 +1107,14 @@ async fn post_command(
             }
             Command::Flatten { market_id } => e.flatten(&market_id),
             Command::SetAdaptiveExecution { on } => e.set_adaptive_execution(on),
+            // Refusals (why live was refused, a conflict, a bad amount) go
+            // back as a 409 with the sentence.
+            Command::AutopilotStart { config, confirm } => {
+                refused = e.autopilot_start(config, confirm, cash).err()
+            }
+            Command::AutopilotStop { id, flatten } => refused = e.autopilot_stop(&id, flatten).err(),
+            Command::AutopilotPause { id } => refused = e.autopilot_pause(&id).err(),
+            Command::AutopilotResume { id } => refused = e.autopilot_resume(&id).err(),
         }
         // Push the mutated state to every stream listener too.
         let s = e.state();

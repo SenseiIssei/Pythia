@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AutopilotConfig,
+  AutopilotStatus,
   JournalEntry,
   Market,
   Order,
@@ -182,5 +184,31 @@ export class TauriEngineClient implements EngineClient {
   }
   flatten(marketId: string) {
     void invoke("flatten", { marketId });
+  }
+
+  autopilots(): AutopilotStatus[] {
+    return this.state.autopilots ?? [];
+  }
+  // Each rejects with the engine's sentence when refused.
+  async startAutopilot(config: AutopilotConfig, confirm = false) {
+    await refusal(invoke<string>("autopilot_start", { config, confirm }));
+  }
+  async stopAutopilot(id: string, flatten?: boolean) {
+    await refusal(invoke("autopilot_stop", { id, flatten: flatten ?? null }));
+  }
+  async pauseAutopilot(id: string) {
+    await refusal(invoke("autopilot_pause", { id }));
+  }
+  async resumeAutopilot(id: string) {
+    await refusal(invoke("autopilot_resume", { id }));
+  }
+}
+
+/** Tauri rejects with the command's error string; turn it into an Error with that sentence. */
+async function refusal<T>(p: Promise<T>): Promise<T> {
+  try {
+    return await p;
+  } catch (e) {
+    throw e instanceof Error ? e : new Error(String(e));
   }
 }

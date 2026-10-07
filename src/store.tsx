@@ -11,6 +11,8 @@ import type {
   AiPolicy,
   AiSpend,
   AiView,
+  AutopilotConfig,
+  AutopilotStatus,
   CoherenceBreak,
   ForecastStats,
   JournalEntry,
@@ -58,6 +60,8 @@ interface Store {
   aiViews: AiView[];
   aiPolicy: AiPolicy;
   aiSpend: AiSpend;
+  /** Every autopilot: running, paused and the most recent stopped ones. */
+  autopilots: AutopilotStatus[];
   // actions
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
@@ -68,6 +72,13 @@ interface Store {
   manualOrder: (marketId: string, side: "buy" | "sell", notional: number) => string;
   flatten: (marketId: string) => void;
   setAdaptiveExecution: (on: boolean) => void;
+  /** Give an amount to an autopilot. `confirm` is the owner's typed
+   *  confirmation, which live needs. Rejects with a plain sentence. */
+  startAutopilot: (config: AutopilotConfig, confirm?: boolean) => Promise<void>;
+  /** `flatten` overrides the autopilot's own `flattenOnStop`. */
+  stopAutopilot: (id: string, flatten?: boolean) => Promise<void>;
+  pauseAutopilot: (id: string) => Promise<void>;
+  resumeAutopilot: (id: string) => Promise<void>;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -108,6 +119,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       aiViews: engine.aiViews(),
       aiPolicy: engine.aiPolicy(),
       aiSpend: engine.aiSpend(),
+      autopilots: engine.autopilots(),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),
@@ -116,6 +128,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       manualOrder: (m, side, n) => engine.manualOrder(m, side, n),
       flatten: (m) => engine.flatten(m),
       setAdaptiveExecution: (on) => engine.setAdaptiveExecution(on),
+      startAutopilot: (config, confirm) => engine.startAutopilot(config, confirm),
+      stopAutopilot: (id, flatten) => engine.stopAutopilot(id, flatten),
+      pauseAutopilot: (id) => engine.pauseAutopilot(id),
+      resumeAutopilot: (id) => engine.resumeAutopilot(id),
     }),
     // rebuild views whenever the engine emits (version changes)
     [engine, version]

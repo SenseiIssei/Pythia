@@ -1,4 +1,6 @@
 import type {
+  AutopilotConfig,
+  AutopilotStatus,
   JournalEntry,
   Market,
   Order,
@@ -229,14 +231,35 @@ export class ServerEngineClient implements EngineClient {
   async setStrategyState(id: string, s: StrategyState) {
     // Awaited, unlike the other commands: a refused Live comes back as a 409
     // with the passport's reason, and the caller needs to show it.
+    await this.command({ cmd: "setStrategyState", id, state: s });
+  }
+
+  /** POST a command and wait: a refusal (409) rejects with the engine's sentence. */
+  private async command(body: Record<string, unknown>) {
     const r = await fetch(this.http + "/api/command", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cmd: "setStrategyState", id, state: s }),
+      body: JSON.stringify(body),
     });
     if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
     this.state = (await r.json()) as EngineState;
     this.bump();
+  }
+
+  autopilots(): AutopilotStatus[] {
+    return this.state.autopilots ?? [];
+  }
+  async startAutopilot(config: AutopilotConfig, confirm = false) {
+    await this.command({ cmd: "autopilotStart", config, confirm });
+  }
+  async stopAutopilot(id: string, flatten?: boolean) {
+    await this.command({ cmd: "autopilotStop", id, flatten });
+  }
+  async pauseAutopilot(id: string) {
+    await this.command({ cmd: "autopilotPause", id });
+  }
+  async resumeAutopilot(id: string) {
+    await this.command({ cmd: "autopilotResume", id });
   }
   setStrategyParam(id: string, key: string, value: number) {
     this.send({ cmd: "setStrategyParam", id, key, value });

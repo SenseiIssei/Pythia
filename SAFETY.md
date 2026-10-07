@@ -77,6 +77,29 @@ refused at preflight, not sent and rejected. Equity shorts are off by default fo
 they need a margin account, cannot be fractional at Alpaca, and quietly turn a sell signal into a
 wall of broker errors.
 
+## 3d. The Autopilot trades an amount, it never moves one
+
+An Autopilot is given an amount and trades it with its strategies until you stop it or one of its
+stop rules fires (max loss, take profit, trailing floor, end time). It is an order-placing feature
+and nothing more:
+
+- **The money is already at the venue.** The amount lives in an exchange or broker account that
+  **you** funded. Pythia has no deposit, withdrawal or transfer function anywhere, and a test checks
+  that none appears. Your Exodus wallet (or any other wallet) stays a **watched treasury**: Pythia
+  reads its balance by public address and cannot move a coin out of it. Moving money from the wallet
+  to an exchange is something you do yourself, deliberately, outside Pythia.
+- **Live is gated harder than anything else.** A live autopilot starts only when live routing is
+  armed for its venue, every strategy in it has a green Strategy Passport, it has a max-loss rule,
+  you typed the confirmation, and its amount fits in the free cash the venue reports (minus what
+  other live autopilots there already committed). It never arms anything itself.
+- **It stops safely.** A paused autopilot opens nothing new, but its stop rules still apply. On a
+  stop it closes its positions (unless you said not to) and pauses its strategies. If live routing
+  is disarmed while it runs, or after a restart, it pauses and says why; real positions it could not
+  close stay with it and are closed as soon as routing is back. Its peak and floor are saved, so a
+  restart can never reset a stop rule.
+- **Demo** mode is meant for a venue's demo account. Until those are connected it is simulated
+  exactly like paper, and the journal says so.
+
 ## 4. Your responsibilities
 
 - Test every strategy in paper for long enough to trust it. A good paper result is necessary, not
