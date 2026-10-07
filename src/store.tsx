@@ -11,6 +11,8 @@ import type {
   AiPolicy,
   AiSpend,
   AiView,
+  AutopilotStart,
+  AutopilotStatus,
   CoherenceBreak,
   ForecastStats,
   JournalEntry,
@@ -58,7 +60,14 @@ interface Store {
   aiViews: AiView[];
   aiPolicy: AiPolicy;
   aiSpend: AiSpend;
+  /** Every autopilot, running or past. */
+  autopilots: AutopilotStatus[];
   // actions
+  /** Rejects with a plain sentence when the engine refuses. A live start carries `confirm`. */
+  startAutopilot: (config: AutopilotStart) => Promise<void>;
+  stopAutopilot: (id: string, flatten: boolean) => Promise<void>;
+  pauseAutopilot: (id: string) => Promise<void>;
+  resumeAutopilot: (id: string) => Promise<void>;
   toggleKill: () => void;
   setLimits: (l: Partial<RiskLimits>) => void;
   /** Rejects with a plain-language reason when Live is refused. */
@@ -69,6 +78,8 @@ interface Store {
   flatten: (marketId: string) => void;
   setAdaptiveExecution: (on: boolean) => void;
 }
+
+const NO_AUTOPILOT = "The autopilot is not available in this version of the engine yet.";
 
 const Ctx = createContext<Store | null>(null);
 
@@ -108,6 +119,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       aiViews: engine.aiViews(),
       aiPolicy: engine.aiPolicy(),
       aiSpend: engine.aiSpend(),
+      // Thin placeholder until the engine answers for the autopilot.
+      autopilots: [],
+      startAutopilot: () => Promise.reject(new Error(NO_AUTOPILOT)),
+      stopAutopilot: () => Promise.reject(new Error(NO_AUTOPILOT)),
+      pauseAutopilot: () => Promise.reject(new Error(NO_AUTOPILOT)),
+      resumeAutopilot: () => Promise.reject(new Error(NO_AUTOPILOT)),
       toggleKill: () => engine.toggleKill(),
       setLimits: (l) => engine.setLimits(l),
       setStrategyState: (id, s) => engine.setStrategyState(id, s),

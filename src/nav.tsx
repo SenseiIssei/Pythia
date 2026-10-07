@@ -19,12 +19,14 @@ import {
   Radio,
   Gauge,
   Microscope,
+  Plane,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
 
 export type PageId =
   | "home"
+  | "autopilot"
   | "dashboard"
   | "markets"
   | "positions"
@@ -60,6 +62,7 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   // ── always visible ──
   { id: "home", label: "Home", icon: Home, section: "Overview" },
+  { id: "autopilot", label: "Autopilot", icon: Plane, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },
   { id: "wallets", label: "Money", icon: Coins, section: "Overview" },
 
@@ -85,7 +88,7 @@ export const NAV: NavItem[] = [
   { id: "about", label: "About", icon: Info, section: "Config" },
 ];
 
-/** The nav for one mode. Simple keeps five entries; advanced keeps everything. */
+/** The nav for one mode. Simple keeps six entries; advanced keeps everything. */
 export function navFor(mode: UiMode): NavItem[] {
   return mode === "advanced" ? NAV : NAV.filter((n) => !n.advanced);
 }
