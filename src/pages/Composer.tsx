@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Blocks, Play, Plus, Trash2, Rocket, TrendingUp, Activity, ArrowDownWideNarrow, Percent } from "lucide-react";
-import { Button, Card, PageHeader, Badge, Sparkline, StatCard } from "../components/ui";
+import { Button, Card, PageHeader, Badge, Field, Sparkline, StatCard, inputCls, pnlTone } from "../components/ui";
 import { useStore } from "../store";
 import {
   backtestComposed,
@@ -54,7 +54,7 @@ export function Composer() {
       rules: structuredClone(composed),
     };
     addStrategy(cfg);
-    setDeployMsg(`Deployed "${name}" to the engine (paper) — see the Strategies page.`);
+    setDeployMsg(`"${name}" now runs in the practice engine. Find it on the Strategies page.`);
     setTimeout(() => setDeployMsg(""), 4000);
   }
 
@@ -77,14 +77,18 @@ export function Composer() {
   }
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Strategy Composer" subtitle="Build a rule-based strategy and backtest it · research-only (not yet live)" />
+    <div className="animate-fade-in mx-auto max-w-6xl">
+      <PageHeader
+        title="Strategy Composer"
+        subtitle="Build your own buy rule from indicators, test it on simulated prices, then run it with practice money. Research only: it never trades real money."
+      />
 
       <Card className="mb-4">
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-cyber-text-dim">Templates:</span>
+          <span className="text-xs text-cyber-text-dim">Start from a template:</span>
           {TEMPLATES.map((t) => (
             <button
+              type="button"
               key={t.name}
               onClick={() => {
                 // A template replaces every rule built so far; keep a way back.
@@ -100,20 +104,21 @@ export function Composer() {
           ))}
         </div>
 
-        <div className="mb-3 flex items-center gap-2 text-sm">
-          <span className="text-cyber-text-dim">Enter a</span>
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-cyber-text-dim">Open a</span>
           <select
             value={composed.direction}
+            aria-label="Direction"
             onChange={(e) => {
               setComposed((c) => ({ ...c, direction: e.target.value as "long" | "short" }));
               setResult(null);
             }}
-            className="rounded border border-cyber-border bg-cyber-surface px-2 py-1 text-cyber-text focus:border-accent focus:outline-none"
+            className={`${inputCls} w-auto`}
           >
-            <option value="long">LONG</option>
-            <option value="short">SHORT</option>
+            <option value="long">LONG (bet on a rise)</option>
+            <option value="short">SHORT (bet on a fall)</option>
           </select>
-          <span className="text-cyber-text-dim">position when ALL of:</span>
+          <span className="text-cyber-text-dim">position when all of these are true:</span>
         </div>
 
         {undoNotice}
@@ -129,7 +134,7 @@ export function Composer() {
           </Button>
         </div>
 
-        <div className="mt-4 grid grid-cols-3 gap-4 border-t border-cyber-border pt-3">
+        <div className="mt-4 grid grid-cols-1 gap-3 border-t border-cyber-border pt-3 sm:grid-cols-3">
           <NumField label="Bars" value={bars} onChange={setBars} step={100} min={300} max={4000} />
           <NumField label="Seed" value={seed} onChange={setSeed} step={1} min={1} max={999999} />
           <NumField label="Volatility" value={vol} onChange={setVol} step={0.001} min={0.005} max={0.05} />
@@ -138,45 +143,60 @@ export function Composer() {
           <Button tone="purple" icon={Play} onClick={run} disabled={composed.rules.length === 0}>
             Backtest this strategy
           </Button>
-          <span className="text-xs text-cyber-text-faint">
-            <Blocks size={11} className="mr-1 inline" />
-            exits use the standard ATR stop-loss / take-profit
+          <span className="flex items-center gap-1 text-xs text-cyber-text-faint">
+            <Blocks size={12} aria-hidden />
+            Exits use the standard stop-loss and take-profit, measured in typical daily moves (ATR).
           </span>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-cyber-border pt-3">
-          <input
-            value={deployName}
-            onChange={(e) => setDeployName(e.target.value)}
-            placeholder="Name it, then deploy to the live paper engine"
-            className="min-w-[240px] flex-1 rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
-          />
+        <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-cyber-border pt-3">
+          <Field label="Name" className="min-w-0 flex-1 basis-56">
+            <input
+              value={deployName}
+              onChange={(e) => setDeployName(e.target.value)}
+              placeholder={`Composed ${composed.direction}`}
+              className={inputCls}
+            />
+          </Field>
           <Button tone="green" icon={Rocket} onClick={deploy} disabled={composed.rules.length === 0}>
-            Deploy to engine (paper)
+            Run it with practice money
           </Button>
-          {deployMsg && <span className="text-xs text-success">{deployMsg}</span>}
         </div>
-        <div className="mt-1 text-[11px] text-cyber-text-faint">
-          Runs on BTC/ETH/SOL at 10% budget, paper mode — manage it from the Strategies page like any other.
+        {deployMsg && (
+          <div role="status" className="mt-2 text-sm text-success">
+            {deployMsg}
+          </div>
+        )}
+        <div className="mt-1.5 text-xs text-cyber-text-faint">
+          It runs on BTC, ETH and SOL with 10% of the practice balance. Pause or remove it on the Strategies page like
+          any other.
         </div>
       </Card>
 
       {result && (
         <>
-          <div className="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard label="Net Return" value={`${result.totalReturnPct >= 0 ? "+" : ""}${result.totalReturnPct.toFixed(1)}%`} icon={TrendingUp} tone={result.totalReturnPct >= 0 ? "green" : "red"} sub="after costs" />
-            <StatCard label="Sharpe" value={result.sharpe.toFixed(2)} icon={Activity} tone={result.sharpe >= 1 ? "green" : result.sharpe >= 0 ? "cyan" : "red"} />
-            <StatCard label="Max Drawdown" value={`${result.maxDrawdownPct.toFixed(1)}%`} icon={ArrowDownWideNarrow} tone="red" />
-            <StatCard label="Win Rate" value={`${(result.winRate * 100).toFixed(0)}%`} sub={`${result.trades} trades`} icon={Percent} tone="purple" />
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <StatCard label="Net Return" value={`${result.totalReturnPct >= 0 ? "+" : ""}${result.totalReturnPct.toFixed(1)}%`} icon={TrendingUp} tone={pnlTone(result.totalReturnPct)} sub="after costs" />
+            <StatCard label="Sharpe" value={result.sharpe.toFixed(2)} icon={Activity} tone={result.sharpe >= 1 ? "green" : result.sharpe >= 0 ? "neutral" : "red"} />
+            <StatCard label="Max Drawdown" value={`${result.maxDrawdownPct.toFixed(1)}%`} icon={ArrowDownWideNarrow} />
+            <StatCard label="Win Rate" value={`${(result.winRate * 100).toFixed(0)}%`} sub={`${result.trades} trades`} icon={Percent} />
           </div>
-          <Card className="mb-4" title="Gross, costs, net">
+          <Card className="mb-4" title="Gross, costs, net" help="What the trades made before costs, what trading cost, and what was left.">
             <PnlLines pnl={result.pnl} />
           </Card>
-          <Card title="Composed Strategy Equity Curve" right={<Badge tone={result.profitFactor >= 1 ? "green" : "red"}>PF {result.profitFactor.toFixed(2)}</Badge>}>
+          <Card
+            title="Equity curve of the composed strategy"
+            help="The test account's value over the simulated history."
+            right={
+              <Badge tone={result.profitFactor >= 1 ? "green" : "red"} title="Profit factor: above 1 means it made money overall">
+                PF {result.profitFactor.toFixed(2)}
+              </Badge>
+            }
+          >
             <Sparkline data={result.equityCurve.length > 1 ? result.equityCurve : [0, 0]} height={200} tone={result.totalReturnPct >= 0 ? "green" : "red"} />
             <div className="mt-2 text-xs text-cyber-text-faint">
-              Research-only on synthetic data. To trade a composed rule live it would need porting into the
-              Rust + TS engines — tell me and I'll wire the winners in.
+              Tested on simulated prices only. A good result here is a reason to keep testing in practice, not proof
+              that it works on a real market.
             </div>
           </Card>
         </>
@@ -185,13 +205,16 @@ export function Composer() {
   );
 }
 
-function OperandEditor({ o, onChange }: { o: Operand; onChange: (o: Operand) => void }) {
+const smallCls = `${inputCls} w-auto px-2 py-1 text-xs`;
+
+function OperandEditor({ o, onChange, side }: { o: Operand; onChange: (o: Operand) => void; side: string }) {
   return (
     <span className="inline-flex items-center gap-1">
       <select
         value={o.kind}
+        aria-label={`${side} indicator`}
         onChange={(e) => onChange({ ...o, kind: e.target.value as IndKind })}
-        className="rounded border border-cyber-border bg-cyber-surface px-1.5 py-1 text-xs text-cyber-text focus:border-accent focus:outline-none"
+        className={smallCls}
       >
         {IND_KINDS.map((k) => (
           <option key={k} value={k}>{IND_LABELS[k]}</option>
@@ -203,8 +226,10 @@ function OperandEditor({ o, onChange }: { o: Operand; onChange: (o: Operand) => 
           value={o.period}
           min={2}
           max={200}
+          aria-label={`${side} period in candles`}
+          title="Period: how many candles the indicator looks back"
           onChange={(e) => onChange({ ...o, period: Math.max(2, Math.min(200, Number(e.target.value))) })}
-          className="w-14 rounded border border-cyber-border bg-cyber-surface px-1.5 py-1 text-xs text-cyber-text focus:border-accent focus:outline-none"
+          className={`${smallCls} !w-16 font-mono`}
         />
       )}
     </span>
@@ -214,36 +239,46 @@ function OperandEditor({ o, onChange }: { o: Operand; onChange: (o: Operand) => 
 function RuleRow({ rule, onChange, onRemove, canRemove }: { rule: Rule; onChange: (r: Rule) => void; onRemove: () => void; canRemove: boolean }) {
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-cyber-border bg-cyber-surface-2 px-3 py-2 text-sm">
-      <OperandEditor o={rule.left} onChange={(left) => onChange({ ...rule, left })} />
+      <OperandEditor o={rule.left} onChange={(left) => onChange({ ...rule, left })} side="Left" />
       <select
         value={rule.op}
+        aria-label="Comparison"
         onChange={(e) => onChange({ ...rule, op: e.target.value as "<" | ">" })}
-        className="rounded border border-cyber-border bg-cyber-surface px-1.5 py-1 text-xs font-bold text-accent focus:border-accent focus:outline-none"
+        className={`${smallCls} font-bold text-accent`}
       >
-        <option value="<">&lt;</option>
-        <option value=">">&gt;</option>
+        <option value="<">is below</option>
+        <option value=">">is above</option>
       </select>
       <select
         value={rule.rightMode}
+        aria-label="Compare with"
         onChange={(e) => onChange({ ...rule, rightMode: e.target.value as "const" | "indicator" })}
-        className="rounded border border-cyber-border bg-cyber-surface px-1.5 py-1 text-xs text-cyber-text-dim focus:border-accent focus:outline-none"
+        className={`${smallCls} text-cyber-text-dim`}
       >
-        <option value="const">value</option>
-        <option value="indicator">indicator</option>
+        <option value="const">a number</option>
+        <option value="indicator">another indicator</option>
       </select>
       {rule.rightMode === "const" ? (
         <input
           type="number"
           value={rule.rightConst}
           step={0.5}
+          aria-label="Number to compare with"
           onChange={(e) => onChange({ ...rule, rightConst: Number(e.target.value) })}
-          className="w-20 rounded border border-cyber-border bg-cyber-surface px-1.5 py-1 text-xs text-cyber-text focus:border-accent focus:outline-none"
+          className={`${smallCls} !w-20 font-mono`}
         />
       ) : (
-        <OperandEditor o={rule.rightOperand} onChange={(rightOperand) => onChange({ ...rule, rightOperand })} />
+        <OperandEditor o={rule.rightOperand} onChange={(rightOperand) => onChange({ ...rule, rightOperand })} side="Right" />
       )}
-      <button onClick={onRemove} disabled={!canRemove} className="ml-auto rounded p-1 text-cyber-text-faint hover:text-danger disabled:opacity-30">
-        <Trash2 size={14} />
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={!canRemove}
+        aria-label="Remove this condition"
+        title={canRemove ? "Remove this condition" : "A strategy needs at least one condition"}
+        className="ml-auto rounded p-1 text-cyber-text-faint hover:text-danger disabled:opacity-30"
+      >
+        <Trash2 size={14} aria-hidden />
       </button>
     </div>
   );
@@ -251,8 +286,7 @@ function RuleRow({ rule, onChange, onRemove, canRemove }: { rule: Rule; onChange
 
 function NumField({ label, value, onChange, step, min, max }: { label: string; value: number; onChange: (v: number) => void; step: number; min: number; max: number }) {
   return (
-    <label className="text-xs text-cyber-text-dim">
-      {label}
+    <Field label={label}>
       <input
         type="number"
         value={value}
@@ -260,8 +294,8 @@ function NumField({ label, value, onChange, step, min, max }: { label: string; v
         min={min}
         max={max}
         onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value))))}
-        className="mt-1 w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm text-cyber-text focus:border-accent focus:outline-none"
+        className={`${inputCls} font-mono`}
       />
-    </label>
+    </Field>
   );
 }
