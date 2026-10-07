@@ -48,6 +48,18 @@ Books (every one deflated together, baselines included):
   baselines  the same books on plain 1-day reversal and 28-day momentum,
              the equal-weight liquid universe, BTC
 
+Round three, funding-aware labels (added after round two showed the short leg
+paying heavy funding in 2025-26 while the label ignored it):
+  reg3n, reg5n, reg7n  LightGBM regression on the cross-sectional rank of
+             netH = fwdH - (funding a long pays over the same H holding days),
+             H = 3, 5, 7. One label serves both sides: a long earns netH, a
+             short earns -netH (it receives what the long pays). Coins without
+             a perpetual pay nothing. Same walk-forward, embargo H + 1 days.
+             Days whose holding window runs past the last settled funding in
+             the data have no net label (not a zero-funding one).
+  books      10/10 of 50 or 100 liquid perps, held H days or with a 30 or 50 %
+             rank buffer; no "no paying shorts" rule, the label already prices it.
+
 Costs: every book at 15 bps and at 41 bps (Kraken taker) per unit of one-way
 turnover. Variant choice uses 2022-2023 only; 2024 on is the holdout.
 """
@@ -76,6 +88,8 @@ DAY_US = 24 * HOUR_US
 MIN_HISTORY_D = 60
 MIN_ADV_USD = 1_000_000
 HORIZONS = (1, 3)
+NET_HORIZONS = (3, 5, 7)
+NET_FAMILY = "long/short, funding-aware"
 EXTEND_D = 10  # calendar days a dead segment is carried at its last close
 FIRST_TEST = int(datetime(2022, 1, 1, tzinfo=timezone.utc).timestamp() * 1e6)
 HOLDOUT = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1e6)
@@ -304,6 +318,28 @@ def build_panel(refresh: bool = False) -> pl.DataFrame:
     return p
 
 
+def add_net_labels(p: pl.DataFrame) -> tuple[pl.DataFrame, int]:
+    """fwd5, fwd7 and, for H in NET_HORIZONS, fundhH (funding a long pays while holding
+    from the entry of day d to the entry of d+H: fund_hold of d .. d+H-1) and
+    netH = fwdH - fundhH. Returns the frame and the last day whose fund_hold is
+    complete; a net label whose window runs past it is null."""
+    cnt = (p.filter(pl.col("perp").is_not_null())
+           .group_by("day").agg(n=pl.len(), nf=(pl.col("fund_hold").fill_null(0.0) != 0).sum()))
+    # The last day with funding for most perps still misses its final settlement
+    # (fund_hold runs to 01:00 two days later), so the last complete day is one before.
+    fund_end = int(cnt.filter(pl.col("nf") >= 0.5 * pl.col("n"))["day"].max()) - DAY_US
+    lp = pl.col("P").log()
+    fh = pl.col("fund_hold").fill_null(0.0)
+    p = p.sort(["symbol", "day"]).with_columns(
+        **{f"fwd{k}": (lp.shift(-k) - lp).over("symbol") for k in (5, 7)},
+        **{f"fundh{k}": fh.rolling_sum(k).shift(-(k - 1)).over("symbol") for k in NET_HORIZONS},
+    ).with_columns(
+        **{f"net{k}": pl.when(pl.col("day") + (k - 1) * DAY_US <= fund_end)
+           .then(pl.col(f"fwd{k}") - pl.col(f"fundh{k}")).otherwise(None) for k in NET_HORIZONS},
+    ).sort(["day", "symbol"])
+    return p, fund_end
+
+
 def ranked(p: pl.DataFrame) -> pl.DataFrame:
     """Eligible rows only, features as cross-sectional ranks in [0, 1] (nulls stay null)."""
     e = p.filter("eligible")
@@ -315,6 +351,10 @@ def ranked(p: pl.DataFrame) -> pl.DataFrame:
             f"q{k}": ((pl.col(f"fwd{k}").rank().over("day") - 1) * 5 / pl.col(f"fwd{k}").count().over("day"))
             .floor().clip(0, 4).cast(pl.Int32),
         })
+    for k in NET_HORIZONS:
+        if f"net{k}" in e.columns:
+            e = e.with_columns(**{f"y{k}n": (pl.col(f"net{k}").rank().over("day") - 1)
+                                  / (pl.col(f"net{k}").count().over("day") - 1).clip(1) - 0.5})
     return e.filter(pl.len().over("day") >= 20).sort(["day", "symbol"])
 
 
@@ -356,6 +396,34 @@ def fit_scores(E: pl.DataFrame) -> tuple[dict[str, np.ndarray], list[dict]]:
             ic_is = daily_ic(days[rec], m.predict(X[rec]), fwd[rec])["ic"].mean()
             folds.append({"model": name, "fold": fold.name, "ic_oos": float(ic), "ic_is_last180d": float(ic_is),
                           "secs": round(time.time() - t)})
+            print(folds[-1], flush=True)
+    return scores, folds
+
+
+def fit_net_scores(E: pl.DataFrame) -> tuple[dict[str, np.ndarray], list[dict]]:
+    """Round three: reg3n, reg5n, reg7n on the funding-net labels, the same walk-forward,
+    parameters and in-sample check as fit_scores."""
+    days = E["day"].to_numpy()
+    X = E.select(FEATURES).to_numpy().astype(np.float32)
+    scores, folds = {}, []
+    for h in NET_HORIZONS:
+        name = f"reg{h}n"
+        scores[name] = np.full(E.height, np.nan)
+        yv = np.asarray(E[f"y{h}n"].to_numpy(), dtype=float)
+        net = np.asarray(E[f"net{h}"].to_numpy(), dtype=float)
+        for fold in walk_forward(days, FIRST_TEST, embargo_h=(h + 1) * 24):
+            t = time.time()
+            tr = fold.train & np.isfinite(yv)
+            m = lgb.LGBMRegressor(**REG_PARAMS).fit(X[tr], yv[tr])
+            scores[name][fold.test] = m.predict(X[fold.test])
+            te = fold.test
+            ic = daily_ic(days[te], scores[name][te], net[te])["ic"].mean()
+            last = days[tr].max()
+            rec = tr & (days > last - 180 * DAY_US)
+            ic_is = daily_ic(days[rec], m.predict(X[rec]), net[rec])["ic"].mean()
+            # The last fold's net labels run past the funding data: no out-of-sample IC there.
+            folds.append({"model": name, "fold": fold.name, "ic_oos": None if ic is None else float(ic),
+                          "ic_is_last180d": float(ic_is), "secs": round(time.time() - t)})
             print(folds[-1], flush=True)
     return scores, folds
 
@@ -514,6 +582,7 @@ def btc_regime(days: np.ndarray) -> np.ndarray:
 def main() -> None:
     t0 = time.time()
     P = build_panel(refresh="--refresh" in __import__("sys").argv)
+    P, fund_end = add_net_labels(P)
     E = ranked(P.with_columns(adv28_raw=pl.col("adv28"), r1_raw=pl.col("r1"), r28_raw=pl.col("r28"),
                               fund7_raw=pl.col("fund7"), vol28_raw=pl.col("vol28")))
     print(f"eligible panel {E.height:,} coin-days, {E['symbol'].n_unique()} coins, {E['day'].n_unique()} days", flush=True)
@@ -527,6 +596,17 @@ def main() -> None:
         E = E.with_columns(**{k: pl.Series(v) for k, v in scores.items()})
         E.select("day", "symbol", "reg1", "reg3", "rank3").write_parquet(score_path)
         (CACHE / "xs_daily_folds.json").write_text(json.dumps(folds))
+    net_path = CACHE / "xs_daily_scores_net.parquet"
+    argv = __import__("sys").argv
+    if net_path.exists() and "--refit" not in argv and "--refit-net" not in argv:
+        E = E.join(pl.read_parquet(net_path), on=["day", "symbol"], how="left")
+        folds += json.loads((CACHE / "xs_daily_folds_net.json").read_text())
+    else:
+        nscores, nfolds = fit_net_scores(E)
+        E = E.with_columns(**{k: pl.Series(v) for k, v in nscores.items()})
+        E.select("day", "symbol", *nscores).write_parquet(net_path)
+        (CACHE / "xs_daily_folds_net.json").write_text(json.dumps(nfolds))
+        folds += nfolds
     E = E.filter(pl.col("day") >= FIRST_TEST)
     days = E["day"].to_numpy()
 
@@ -546,6 +626,16 @@ def main() -> None:
             ic = daily_ic(days, sign * E[col].to_numpy(), E[f"fwd{h}"].to_numpy())["ic"].to_numpy()
             ic_rows.append({"score": name, "horizon_d": h, "rank_ic": float(ic.mean()),
                             "t_stat": float(ic.mean() / (ic.std() / np.sqrt(len(ic)))), "rank_ic_top100_liquid": None})
+    # Round three: every 3-day-plus score against the gross and the funding-net label.
+    net_ic_rows = []
+    for m in ("reg3", "rank3", "reg3n", "reg5n", "reg7n"):
+        for h in NET_HORIZONS:
+            row = {"score": m, "horizon_d": h}
+            for lab, col in (("gross", f"fwd{h}"), ("net", f"net{h}")):
+                v = daily_ic(days, E[m].to_numpy(), np.asarray(E[col].to_numpy(), dtype=float))["ic"].to_numpy()
+                row[f"rank_ic_{lab}"] = float(v.mean())
+                row[f"t_{lab}"] = float(v.mean() / (v.std() / np.sqrt(len(v))))
+            net_ic_rows.append(row)
     # Deciles of the 1-day model on next-day return.
     dec = (E.drop_nulls(["reg1", "fwd1"])
            .with_columns(dec=((pl.col("reg1").rank().over("day") - 1) * 10 / pl.len().over("day")).floor().cast(pl.Int32))
@@ -553,7 +643,7 @@ def main() -> None:
            .with_columns(decile=pl.col("dec") + 1).drop("dec"))
 
     E = E.with_columns(rev1=-pl.col("r1_raw"), mom28=pl.col("r28_raw"), lowvol=-pl.col("vol28_raw"))
-    score_cols = ["reg1", "reg3", "rank3", "rev1", "mom28", "lowvol"]
+    score_cols = ["reg1", "reg3", "rank3", "rev1", "mom28", "lowvol"] + [f"reg{h}n" for h in NET_HORIZONS]
     m2_path = ROOT / "reports" / "picks_v2" / "scores.parquet"  # M2 v2's own walk-forward scores (read only)
     if m2_path.exists():
         m2 = pl.read_parquet(m2_path).select("day", "symbol", m2="score")
@@ -592,6 +682,17 @@ def main() -> None:
                     g, tu, fu, ex = book_buffer(M, M[m], 10, frac, n, no_paying_shorts=nps)
                     variants.append(("long/short", f"{m} 10/10 of {n} liquid perps, buffer {int(frac * 100)} %{tag} (round 2)",
                                      g, tu, fu, ex))
+    # Round three, designed after round two: the label net of the funding each side pays
+    # or receives. Held for the label's own horizon, or with the round-two rank buffers.
+    for h in NET_HORIZONS:
+        m = f"reg{h}n"
+        for n in (50, 100):
+            g, tu, fu, ex = book(M, M[m], 10, h, n, True)
+            variants.append((NET_FAMILY, f"{m} 10/10 of {n} liquid perps, hold {h}d (round 3)", g, tu, fu, ex))
+            for frac in (0.3, 0.5):
+                g, tu, fu, ex = book_buffer(M, M[m], 10, frac, n)
+                variants.append((NET_FAMILY, f"{m} 10/10 of {n} liquid perps, buffer {int(frac * 100)} % (round 3)",
+                                 g, tu, fu, ex))
     # M2 v2's weekly scores in the same daily books: does M4 add anything over M2?
     if "m2" in M:
         for n in (50, 100):
@@ -612,6 +713,7 @@ def main() -> None:
         g, tu, fu, ex = book(M, M[m], 10, 3, 50, True)
         variants.append(("baseline", f"{label} 10/10 of 50 liquid perps, hold 3d", g, tu, fu, ex))
 
+    funded = M["days"] <= fund_end
     rows = []
     for fam, name, g, tu, fu, ex in variants:
         row = {"family": fam, "variant": name}
@@ -623,7 +725,10 @@ def main() -> None:
             row[f"hold_cagr_{cname}"] = ph["cagr"]
             row[f"hold_max_dd_{cname}"] = ph["max_dd"]
             row["turnover_yr"] = ph["turnover_yr"]
+            # The same holdout cut at the last day with complete funding data.
+            row[f"hold_sharpe_{cname}_funded"] = perf(net[hold_mask & funded])["sharpe"]
         row["hold_gross_sharpe"] = perf((g + fu)[hold_mask])["sharpe"]
+        row["hold_funding_sum"] = float(fu[hold_mask].sum())
         row["avg_exposure"] = float(ex[hold_mask].mean())
         rows.append(row)
     n_obs = int(hold_mask.sum())
@@ -651,10 +756,16 @@ def main() -> None:
                           "hold_cagr": ph["cagr"], "hold_max_dd": ph["max_dd"]})
 
     picks = []
-    for fam in ("long-only", "long/short"):
+    for fam in ("long-only", "long/short", NET_FAMILY):
         fr = [r for r in rows if r["family"] == fam]
         best = max(fr, key=lambda r: r["sel_sharpe_15bps"])
-        picks.append(best)
+        picks.append(dict(best))
+    # The slower books (held longer than one day, both long/short families): the
+    # selection window's pick among them is what the M4 paper book trades.
+    slow = [r for r in rows if r["family"] in ("long/short", NET_FAMILY) and "hold 1d" not in r["variant"]]
+    slow_pick = dict(max(slow, key=lambda r: r["sel_sharpe_15bps"]))
+    slow_pick["family"] = "slower long/short books (paper book)"
+    picks.append(slow_pick)
     lines = []
     btc_dd = base_rows[1]["hold_max_dd"]
     for b in picks:
@@ -673,6 +784,8 @@ def main() -> None:
     year_rows = []
     for b in picks:
         _, _, g, tu, fu, _ = by_name[b["variant"]]
+        if b is slow_pick and any(p["variant"] == b["variant"] for p in picks[:-1]):
+            continue
         for yr in np.unique(years):
             m = years == yr
             year_rows.append({"pick": b["variant"], "year": int(yr), "days": int(m.sum()),
@@ -680,16 +793,39 @@ def main() -> None:
                               "cost_sum_15bps": float((tu[m] * COSTS["15bps"]).sum()),
                               "sharpe_15bps": perf((g + fu - tu * COSTS["15bps"])[m])["sharpe"],
                               "sharpe_41bps": perf((g + fu - tu * COSTS["41bps"])[m])["sharpe"]})
+        slug = b["family"].split(" (")[0].replace("/", "_").replace(", ", "_").replace(" ", "_")
         pl.DataFrame({"day": M["days"], "gross": g, "funding": fu, "turnover": tu}).write_parquet(
-            CACHE / f"xs_daily_pick_{b['family'].replace('/', '_')}.parquet")
+            CACHE / f"xs_daily_pick_{slug}.parquet")
     # Plateau (gate 4): how the whole model long/short family did, not just the pick.
-    ls = [r for r in rows if r["family"] == "long/short" and "hold 1d" not in r["variant"]]
-    plateau = (f"The {len(ls)} model long/short books held longer than one day: median holdout Sharpe "
-               f"{np.median([r['hold_sharpe_15bps'] for r in ls]):.2f} at 15 bps and "
-               f"{np.median([r['hold_sharpe_41bps'] for r in ls]):.2f} at 41 bps; "
-               f"{np.mean([r['hold_sharpe_15bps'] > 0 for r in ls]) * 100:.0f} % and "
-               f"{np.mean([r['hold_sharpe_41bps'] > 0 for r in ls]) * 100:.0f} % of them positive.")
-    lines.append("- " + plateau)
+    for fam, label in (("long/short", "model long/short books held longer than one day"),
+                       (NET_FAMILY, "funding-aware books")):
+        ls = [r for r in rows if r["family"] == fam and "hold 1d" not in r["variant"]]
+        plateau = (f"The {len(ls)} {label}: median holdout Sharpe "
+                   f"{np.median([r['hold_sharpe_15bps'] for r in ls]):.2f} at 15 bps and "
+                   f"{np.median([r['hold_sharpe_41bps'] for r in ls]):.2f} at 41 bps; "
+                   f"{np.mean([r['hold_sharpe_15bps'] > 0 for r in ls]) * 100:.0f} % and "
+                   f"{np.mean([r['hold_sharpe_41bps'] > 0 for r in ls]) * 100:.0f} % of them positive.")
+        lines.append("- " + plateau)
+    # Round three against its twins: the gross-label reg3 in the same book, and the
+    # plain low-vol factor in the same book where round two ran it.
+    by_variant = {r["variant"]: r for r in rows}
+    twin_rows = []
+    for r in rows:
+        if r["family"] != NET_FAMILY:
+            continue
+        h = int(r["variant"][3])
+        book_part = r["variant"].split(" ", 1)[1].replace(" (round 3)", "")
+        gross_name = f"reg3 {book_part}" + ("" if f"hold {h}d" in book_part and h == 3 else " (round 2)")
+        low = by_variant.get(f"low 28-day vol {book_part}")
+        g_r = by_variant.get(gross_name)
+        twin_rows.append({
+            "funding-aware variant": r["variant"].replace(" (round 3)", ""),
+            "sel_15": r["sel_sharpe_15bps"], "hold_15": r["hold_sharpe_15bps"], "hold_41": r["hold_sharpe_41bps"],
+            "turnover_yr": r["turnover_yr"], "funding_sum": r["hold_funding_sum"],
+            "reg3 gross label hold_15 / 41": f"{g_r['hold_sharpe_15bps']:.2f} / {g_r['hold_sharpe_41bps']:.2f}" if g_r else "",
+            "reg3 funding_sum": g_r["hold_funding_sum"] if g_r else None,
+            "low vol hold_15 / 41": f"{low['hold_sharpe_15bps']:.2f} / {low['hold_sharpe_41bps']:.2f}" if low else "",
+        })
     ic_best = max((r for r in ic_rows if r["score"] in ("reg1", "reg3", "rank3")), key=lambda r: r["rank_ic"])
     md = (
         "# M4 · Daily cross-sectional ranking\n\n"
@@ -700,6 +836,19 @@ def main() -> None:
         f"(t {ic_best['t_stat']:.1f}).\n\n" + "\n".join(lines) + "\n\n"
         "## Signal quality out of sample (Rank-IC per day, averaged)\n\n"
         + report.table(ic_rows, ["score", "horizon_d", "rank_ic", "t_stat", "rank_ic_top100_liquid"])
+        + "\n## Round three: gross and funding-net labels (Rank-IC per day, net labels end "
+        f"{datetime.fromtimestamp(fund_end / 1e6, timezone.utc):%Y-%m-%d})\n\n"
+        + report.table(net_ic_rows, ["score", "horizon_d", "rank_ic_gross", "t_gross", "rank_ic_net", "t_net"])
+        + "\n## Round three against its twins in the same book (holdout Sharpe 15 / 41 bps; funding_sum = "
+        "holdout funding P&L as a fraction of capital, negative = paid)\n\n"
+        + report.table(twin_rows, list(twin_rows[0]) if twin_rows else [])
+        + "\n## Funding data gap: holdout cut at the last day with complete funding "
+        f"({datetime.fromtimestamp(fund_end / 1e6, timezone.utc):%Y-%m-%d}, {int((hold_mask & ~funded).sum())} "
+        "holdout days after it book no funding)\n\n"
+        + report.table([r for r in rows if r["variant"] in {p["variant"] for p in picks}
+                        or r["variant"].startswith("low 28-day vol 10/10 of 100")],
+                       ["variant", "hold_sharpe_15bps", "hold_sharpe_15bps_funded", "hold_sharpe_41bps",
+                        "hold_sharpe_41bps_funded"])
         + "\n## Next-day return by reg1 decile (10 = best score), all eligible coins\n\n"
         + report.table(dec.to_dicts(), ["decile", "mean_fwd1_bps", "coin_days"])
         + "\n## Baselines\n\n"
@@ -715,8 +864,10 @@ def main() -> None:
         + "\n## Walk-forward folds\n\n"
         + report.table(folds, ["model", "fold", "ic_oos", "ic_is_last180d"])
     )
-    report.write("xs_daily", md, {"ic": ic_rows, "rows": rows, "picks": picks, "baselines": base_rows,
-                                  "folds": folds, "n_variants": len(rows)})
+    report.write("xs_daily", md, {"ic": ic_rows, "net_ic": net_ic_rows, "rows": rows, "picks": picks,
+                                  "slow_pick": slow_pick, "twins": twin_rows, "baselines": base_rows,
+                                  "folds": folds, "n_variants": len(rows),
+                                  "fund_end": datetime.fromtimestamp(fund_end / 1e6, timezone.utc).strftime("%Y-%m-%d")})
 
 
 if __name__ == "__main__":
