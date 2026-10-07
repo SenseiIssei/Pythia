@@ -51,6 +51,8 @@ pub struct LabStatus {
     pub dir: String,
     pub books: Vec<PaperBook>,
     pub reports: Vec<LabReport>,
+    /// The VPS's hourly look at every lab job (`_health/system.json`), as written.
+    pub health: Option<Value>,
 }
 
 /// One CSV line, honouring double quotes (the weights column holds JSON with commas).
@@ -176,6 +178,9 @@ fn verdict_of(name: &str, v: &Value) -> String {
 pub fn status() -> LabStatus {
     let Some(root) = data_dir() else { return LabStatus::default() };
     let mut out = LabStatus { found: root.exists(), dir: root.display().to_string(), ..Default::default() };
+    out.health = std::fs::read_to_string(root.join("_health").join("system.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));

@@ -23,11 +23,19 @@ export interface LabReport {
   verdict: string;
 }
 
+export interface HealthCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
 export interface LabStatus {
   found: boolean;
   dir: string;
   books: PaperBook[];
   reports: LabReport[];
+  /** The VPS's hourly look at every lab job. */
+  health: { at: string; ok: boolean; checks: HealthCheck[] } | null;
 }
 
 export async function labStatus(): Promise<LabStatus> {
