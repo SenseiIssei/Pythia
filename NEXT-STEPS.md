@@ -322,6 +322,32 @@ Still open:
       six attempts while the signal is valid, recomputed from the holdings each
       time; before, a brief data hiccup lost the whole day
 
+### Autopilot (engine core, 2026-10-07)
+
+`crates/pythia-core/src/engine/autopilot.rs`, design notes at the top of the
+file, rules for money in `SAFETY.md` §3d. An autopilot gets an amount and a set
+of sleeves (strategy + weight, or "auto") and trades until stopped or a stop
+rule fires. Commands `autopilotStart` / `Stop` / `Pause` / `Resume` on
+`/api/command` and as Tauri commands; `EngineState.autopilots` carries the
+status.
+
+- [x] Sleeve budgets are weights of the autopilot's equity; entries are capped
+      at the sleeve's budget and the autopilot never holds more exposure than
+      its equity
+- [x] One position per market: strategies and markets are exclusive to one
+      autopilot, Pairs and lab books claim their set first, the rest is dealt
+      out in turn; other strategies stay off reserved markets
+- [x] Stop rules: max loss (% and $), take profit (stop, or lock half the gain
+      and keep going), trailing floor, end time; peak and floor survive restarts
+- [x] Live: armed venue, green passports, max-loss rule, typed confirmation,
+      amount within the venue's free cash (`wallets::available_cash`)
+- [ ] **Demo routing.** Demo is routed like paper until `RouteIntent::Demo`
+      exists. Wire it in `AutopilotMode::route_intent`, the only place that
+      decides an autopilot order's route, and read demo-account cash for the
+      start check
+- [ ] Never run against a real venue. Do a paper-endpoint run on Alpaca first
+      (§1), then a small live one with a tight max loss
+
 ---
 
 ## 5 · Venue breadth

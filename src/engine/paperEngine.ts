@@ -1,4 +1,6 @@
 import type {
+  AutopilotConfig,
+  AutopilotStatus,
   JournalEntry,
   JournalKind,
   LiveStatus,
@@ -18,7 +20,7 @@ import { MarketSim } from "./marketSim";
 import { DEFAULT_LIMITS, evaluate, type RiskContext } from "./risk";
 import { defaultStrategies, runStrategy } from "./strategies";
 import * as ind from "./indicators";
-import { AI_OFF, DISARMED, NO_FORECASTS, NO_SPEND, type EngineClient } from "./client";
+import { AI_OFF, AUTOPILOT_NEEDS_ENGINE, DISARMED, NO_FORECASTS, NO_SPEND, type EngineClient } from "./client";
 import { breakdown, costVenueFor, modelFor, paperFill } from "./costs";
 import { applyFill } from "./position";
 import { browserPassport } from "./passport";
@@ -732,6 +734,23 @@ export class PaperEngine implements EngineClient {
       p.value = value;
       this.emit();
     }
+  }
+  // The autopilot lives in the Rust engine (desktop app or server). This
+  // browser build has nothing to run it on, and says so instead of pretending.
+  autopilots(): AutopilotStatus[] {
+    return [];
+  }
+  async startAutopilot(_config: AutopilotConfig, _confirm?: boolean): Promise<void> {
+    throw new Error(AUTOPILOT_NEEDS_ENGINE);
+  }
+  async stopAutopilot(_id: string, _flatten?: boolean): Promise<void> {
+    throw new Error(AUTOPILOT_NEEDS_ENGINE);
+  }
+  async pauseAutopilot(_id: string): Promise<void> {
+    throw new Error(AUTOPILOT_NEEDS_ENGINE);
+  }
+  async resumeAutopilot(_id: string): Promise<void> {
+    throw new Error(AUTOPILOT_NEEDS_ENGINE);
   }
   addStrategy(cfg: StrategyConfig) {
     if (this.strategies.some((s) => s.id === cfg.id)) return;

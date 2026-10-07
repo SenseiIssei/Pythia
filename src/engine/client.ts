@@ -2,6 +2,8 @@ import type {
   AiPolicy,
   AiSpend,
   AiView,
+  AutopilotConfig,
+  AutopilotStatus,
   CoherenceBreak,
   CostVenue,
   ForecastStats,
@@ -107,7 +109,24 @@ export interface EngineClient {
   manualOrder(marketId: string, side: Side, notional: number): string;
   flatten(marketId: string): void;
   setAdaptiveExecution(on: boolean): void;
+
+  /** Every autopilot: running, paused and the most recent stopped ones. */
+  autopilots(): AutopilotStatus[];
+  /**
+   * Give an amount to an autopilot. `confirm` is the owner's typed
+   * confirmation; live is refused without it. Rejects with a plain sentence
+   * (why live was refused, a market conflict, a bad amount).
+   */
+  startAutopilot(config: AutopilotConfig, confirm?: boolean): Promise<void>;
+  /** `flatten` overrides the autopilot's own `flattenOnStop`. */
+  stopAutopilot(id: string, flatten?: boolean): Promise<void>;
+  pauseAutopilot(id: string): Promise<void>;
+  resumeAutopilot(id: string): Promise<void>;
 }
+
+/** What the browser build says when asked to run an autopilot. */
+export const AUTOPILOT_NEEDS_ENGINE =
+  "The autopilot needs the desktop app or the Pythia server: this browser build runs a demo engine only.";
 
 // The full engine state the Rust daemon pushes to the UI each tick, and the
 // shape TauriEngineClient caches locally.
@@ -136,6 +155,7 @@ export interface EngineState {
   cryptoCostVenue?: CostVenue;
   passports?: Passport[];
   risk?: RiskStatus;
+  autopilots?: AutopilotStatus[];
 }
 
 export { AI_OFF, DISARMED, NO_SPEND };
