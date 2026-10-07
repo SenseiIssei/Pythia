@@ -19,6 +19,11 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# The push feed for the primary venue's ticker (see `feeds::ws`). Same version
+# axum already pulls in for the server, with rustls and the bundled roots so it
+# needs no system certificates in the container.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 # Exchange request signing (Kraken/Binance/Bybit/OKX all HMAC their payloads).
 hmac = "0.12"

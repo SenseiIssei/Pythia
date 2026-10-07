@@ -4,6 +4,8 @@
 //! same model the browser build runs in TypeScript.
 
 pub mod composed;
+#[cfg(test)]
+mod feed_engine_tests;
 pub mod indicators;
 pub mod risk;
 #[cfg(test)]
@@ -13,6 +15,7 @@ pub mod strategies;
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
 use crate::costs::{self, CostModel, CostVenue};
 use crate::execution::bandit;
+use crate::feeds::{self, DataKind, FeedConfig, FeedSource};
 use crate::forecast::{self, calibration, coherence, track};
 use crate::validation;
 use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
@@ -768,6 +771,10 @@ pub struct EngineState {
     /// strategy is being sized, for the Risk page.
     #[serde(default)]
     pub risk: risk::RiskStatus,
+    /// Which source each kind of crypto data comes from, how fresh it is,
+    /// failovers and stale markets (see [`crate::feeds`]).
+    #[serde(default)]
+    pub data_health: Option<feeds::DataHealth>,
 }
 
 fn default_crypto_venue() -> CostVenue {
@@ -1009,6 +1016,12 @@ pub struct Engine {
     sizing_noted: HashMap<String, risk::SizingMode>,
     /// The volatility spike trim's clock and rate limit.
     vol_spike: risk::VolSpikeGuard,
+    /// Which source each crypto market's quotes, candles and books come from,
+    /// and the sanity check that keeps a bad tick off the mark.
+    feeds: feeds::FeedHealth,
+    /// Markets whose stop check is waiting for a fresh price, or whose latest
+    /// quote was refused, so each is journaled once per episode.
+    feed_noted: HashSet<String>,
     tick_count: u64,
     seq: u64,
     /// Random per process, part of every client order id sent to a venue. The
@@ -1088,6 +1101,8 @@ impl Engine {
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
             vol_spike: risk::VolSpikeGuard::default(),
+            feeds: feeds::FeedHealth::default(),
+            feed_noted: HashSet::new(),
             tick_count: 0,
             seq: 0,
             boot_tag: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
@@ -1181,17 +1196,26 @@ impl Engine {
             if s.bars.len() < 2 {
                 continue; // nothing usable once the forming bar is dropped
             }
-            let closed = &s.bars[..s.bars.len() - 1];
-            let Some(newest) = closed.last().map(|b| b.ts) else { continue };
-
-            if self.last_bar_ts.get(&s.id) != Some(&newest) {
+            if self.install_bars(&s.id, &s.bars[..s.bars.len() - 1]) {
                 fresh += 1;
             }
-            self.last_bar_ts.insert(s.id.clone(), newest);
-            self.history.insert(s.id.clone(), closed.iter().map(|b| b.close).collect());
-            self.ohlc.insert(s.id.clone(), closed.to_vec());
-            self.bar_backed.insert(s.id.clone());
         }
+        self.log_new_bars(fresh);
+    }
+
+    /// Make `closed` the market's whole candle series. True when its newest
+    /// bar is one the engine had not seen.
+    fn install_bars(&mut self, id: &str, closed: &[Ohlc]) -> bool {
+        let Some(newest) = closed.last().map(|b| b.ts) else { return false };
+        let fresh = self.last_bar_ts.get(id) != Some(&newest);
+        self.last_bar_ts.insert(id.to_string(), newest);
+        self.history.insert(id.to_string(), closed.iter().map(|b| b.close).collect());
+        self.ohlc.insert(id.to_string(), closed.to_vec());
+        self.bar_backed.insert(id.to_string());
+        fresh
+    }
+
+    fn log_new_bars(&mut self, fresh: usize) {
         if fresh > 0 {
             self.log(
                 JournalKind::System,
@@ -1228,6 +1252,434 @@ impl Engine {
                 format!("Order book feed · {kept} {venue} books now price crypto spread and depth"),
                 None,
                 None,
+            );
+        }
+    }
+
+    // ── live feeds with failover (see crate::feeds) ─────────────────────────
+    //
+    // The host's feed loops (`feeds::runner`) fetch; everything they bring
+    // passes through here, where the sanity check and the source choice are
+    // made and journaled. Only a value from a market's current source moves
+    // the engine.
+
+    /// A host has started the feed loops with this configuration.
+    pub fn start_feeds(&mut self, cfg: FeedConfig) {
+        let now = self.now();
+        self.feeds.set_config(cfg);
+        self.feeds.set_book_sources(FeedSource::for_books(self.crypto_venue));
+        self.feeds.start(now);
+    }
+
+    /// The crypto markets the feeds serve: the shared universe, where the
+    /// engine has a market for it.
+    pub fn feed_markets(&self) -> Vec<String> {
+        feeds::sources::universe_ids().into_iter().filter(|id| self.markets.iter().any(|m| &m.id == id)).collect()
+    }
+
+    pub fn feed_priority(&self, kind: DataKind) -> Vec<FeedSource> {
+        self.feeds.priority(kind)
+    }
+
+    pub fn feed_needs_poll(&self, kind: DataKind, src: FeedSource) -> bool {
+        self.feeds.needs_poll(kind, src, &self.feed_markets(), self.now())
+    }
+
+    /// The markets to ask `src` about this round (empty: skip it).
+    pub fn feed_wanted(&self, kind: DataKind, src: FeedSource) -> Vec<String> {
+        self.feeds.wanted(kind, src, &self.feed_markets(), self.now())
+    }
+
+    pub fn feed_needs_failover(&self, kind: DataKind) -> bool {
+        self.feeds.needs_failover(kind, &self.feed_markets(), self.now())
+    }
+
+    /// The other venue to poll for the quote sanity check, when one is due.
+    pub fn take_feed_reference(&mut self) -> Option<FeedSource> {
+        let ids = self.feed_markets();
+        let now = self.now();
+        self.feeds.take_reference(&ids, now)
+    }
+
+    /// One quote poll (or the stream's latest prices), seen at `observed_at`.
+    /// Every price goes through the sanity check; a refused one never becomes
+    /// the mark, so the market keeps its last good price and ages, and the
+    /// risk manager and the stop checks treat it as stale.
+    pub fn apply_feed_quotes(&mut self, src: FeedSource, res: Result<Vec<RealCrypto>, String>, observed_at: i64) {
+        let now = self.now();
+        let ids = self.feed_markets();
+        let rows = match res {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.feeds.poll_failed(DataKind::Quotes, src, &e);
+                let sw = self.feeds.reselect(DataKind::Quotes, &ids, now);
+                self.journal_switches(DataKind::Quotes, sw);
+                return;
+            }
+        };
+        self.feeds.poll_ok(DataKind::Quotes, src, now);
+        let (mut good, mut refused) = (Vec::new(), Vec::new());
+        for r in rows.into_iter().filter(|r| ids.contains(&r.id)) {
+            match self.feeds.check_quote(src, &r.id, r.price, observed_at) {
+                Ok(()) => {
+                    self.feeds.observe(DataKind::Quotes, src, &r.id, observed_at);
+                    good.push(r);
+                }
+                Err(why) => refused.push((r.id.clone(), why)),
+            }
+        }
+        let sw = self.feeds.reselect(DataKind::Quotes, &ids, now);
+        for r in good {
+            self.feed_noted.remove(&format!("refused:{}", r.id));
+            if self.feeds.current(DataKind::Quotes, &r.id) != Some(src) {
+                continue;
+            }
+            if let Some(m) = self.markets.iter_mut().find(|m| m.id == r.id) {
+                // Never step back in time: a slow REST answer must not undo a
+                // newer price the stream already delivered.
+                if observed_at >= m.updated_at || !self.real_ids.contains(&r.id) {
+                    m.price = r.price;
+                    m.change24h = r.change24h;
+                    m.updated_at = observed_at;
+                }
+                self.real_ids.insert(r.id.clone());
+                self.feeds.mark_updated(DataKind::Quotes, &r.id, observed_at);
+            }
+        }
+        self.journal_switches(DataKind::Quotes, sw);
+        let fresh: Vec<(String, String)> =
+            refused.into_iter().filter(|(id, _)| self.feed_noted.insert(format!("refused:{id}"))).collect();
+        if !fresh.is_empty() {
+            let ids: Vec<String> = fresh.iter().map(|(id, _)| id.clone()).collect();
+            let msg = format!(
+                "{} quote refused for {}: {}. The last good price stays the mark; nothing trades or stops on the refused one",
+                src.label(),
+                feeds::list_markets(&ids),
+                fresh[0].1
+            );
+            self.log(JournalKind::System, msg, None, (ids.len() == 1).then(|| ids[0].clone()));
+        }
+    }
+
+    /// The stream's latest state, handed over by the drain loop. A dead or
+    /// silent stream counts as a failed poll, so its markets fail over within
+    /// a few seconds.
+    pub fn apply_stream(&mut self, snap: feeds::ws::Snapshot) {
+        let now = self.now();
+        let silent_for = snap.status.last_message.map(|t| now - t);
+        self.feeds.set_stream(snap.status.clone());
+        let push_stale = self.feeds.config().push_stale_ms;
+        if !snap.status.connected || silent_for.is_none_or(|s| s > push_stale) {
+            let why = if snap.status.connected {
+                format!("silent for {} s", silent_for.unwrap_or(0) / 1000)
+            } else {
+                snap.status.last_error.clone().unwrap_or_else(|| "not connected".into())
+            };
+            self.apply_feed_quotes(FeedSource::KrakenWs, Err(why), now);
+            return;
+        }
+        if snap.quotes.is_empty() {
+            return; // connected, waiting for the first snapshot
+        }
+        let rows = snap
+            .quotes
+            .into_iter()
+            .map(|(sym, (price, change))| RealCrypto { id: format!("crypto:{sym}"), symbol: sym, price, change24h: change })
+            .collect();
+        // Prices are as of the last frame: the stream sends every trade and a
+        // heartbeat each second, so an unchanged price is a confirmed one.
+        let at = snap.status.last_message.unwrap_or(now).min(now);
+        self.apply_feed_quotes(FeedSource::KrakenWs, Ok(rows), at);
+    }
+
+    /// One candle poll of `src` at `minutes` per bar. A series is checked as
+    /// a whole (long enough, not behind, its last close near the live price)
+    /// and installed whole: a market's candles always come from one venue.
+    /// When that venue changes the new series replaces the old one outright,
+    /// which is journaled, and no entry is taken on the switch bar.
+    pub fn apply_feed_candles(&mut self, src: FeedSource, res: Result<Vec<BarSeries>, String>, minutes: u32) {
+        let now = self.now();
+        let ids = self.feed_markets();
+        let iv = minutes.max(1) as i64 * 60_000;
+        self.feeds.set_candle_interval_ms(iv);
+        let series = match res {
+            Ok(s) => s,
+            Err(e) => {
+                self.feeds.poll_failed(DataKind::Candles, src, &e);
+                let sw = self.feeds.reselect(DataKind::Candles, &ids, now);
+                self.journal_switches(DataKind::Candles, sw);
+                return;
+            }
+        };
+        self.feeds.poll_ok(DataKind::Candles, src, now);
+        let mut good: Vec<(String, Vec<Ohlc>)> = Vec::new();
+        for s in series.into_iter().filter(|s| ids.contains(&s.id)) {
+            // Closed bars only, by the clock: venues differ on whether the
+            // forming bar is included.
+            let closed: Vec<Ohlc> = s.bars.into_iter().filter(|b| b.ts + iv <= now).collect();
+            match self.check_series(&s.id, &closed, iv, now) {
+                Ok(()) => {
+                    self.feeds.observe(DataKind::Candles, src, &s.id, now);
+                    good.push((s.id, closed));
+                }
+                Err(why) => self.feeds.reject(DataKind::Candles, src, &s.id, now, &why),
+            }
+        }
+        let sw = self.feeds.reselect(DataKind::Candles, &ids, now);
+        let mut fresh = 0;
+        for (id, closed) in good {
+            if self.feeds.current(DataKind::Candles, &id) == Some(src) {
+                if self.install_bars(&id, &closed) {
+                    fresh += 1;
+                }
+                self.feeds.mark_updated(DataKind::Candles, &id, now);
+            }
+        }
+        // A venue switch is a new series, not a new bar: whatever its
+        // indicators say on the bar it arrived with, no entry is taken on it.
+        for s in sw.iter().filter(|s| s.from.is_some()) {
+            if let Some(ts) = self.last_bar_ts.get(&s.market).copied() {
+                self.signalled_bar.insert(s.market.clone(), ts);
+            }
+        }
+        self.log_new_bars(fresh);
+        self.journal_switches(DataKind::Candles, sw);
+    }
+
+    /// Whether a candle series may be installed for `id`.
+    fn check_series(&self, id: &str, closed: &[Ohlc], iv: i64, now: i64) -> Result<(), String> {
+        if closed.len() < 2 {
+            return Err("fewer than two closed bars".into());
+        }
+        let last = closed[closed.len() - 1];
+        let behind = now - last.ts;
+        if behind > 3 * iv + 120_000 {
+            return Err(format!("behind: the newest closed bar is {} min old", behind / 60_000));
+        }
+        // Against the live mark, on intraday bars where the last close is minutes old.
+        if iv <= 3_600_000 {
+            if let Some(price) = self.trusted_price(id, now) {
+                let off = (last.close / price - 1.0).abs();
+                if off > 2.0 * self.feeds.config().max_deviation {
+                    return Err(format!("last close {:.1}% away from the live price", off * 100.0));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The market's price when it is real and fresh, for cross-checks.
+    fn trusted_price(&self, id: &str, now: i64) -> Option<f64> {
+        let limit = self.limits.max_data_staleness_sec as i64 * 1000;
+        self.markets
+            .iter()
+            .find(|m| m.id == id)
+            .filter(|m| self.real_ids.contains(id) && now - m.updated_at <= limit && m.price > 0.0)
+            .map(|m| m.price)
+    }
+
+    /// One book poll. A book whose mid is far from the live price is refused;
+    /// the rest go through [`Engine::apply_books`] when `src` is the market's
+    /// current book source.
+    pub fn apply_feed_books(&mut self, src: FeedSource, res: Result<Vec<BookSnapshot>, String>) {
+        let now = self.now();
+        let ids = self.feed_markets();
+        let books = match res {
+            Ok(b) => b,
+            Err(e) => {
+                self.feeds.poll_failed(DataKind::Books, src, &e);
+                let sw = self.feeds.reselect(DataKind::Books, &ids, now);
+                self.journal_switches(DataKind::Books, sw);
+                return;
+            }
+        };
+        self.feeds.poll_ok(DataKind::Books, src, now);
+        let tol = self.feeds.config().max_deviation;
+        let mut good = Vec::new();
+        for b in books.into_iter().filter(|b| ids.contains(&b.id)) {
+            if let Some(p) = self.trusted_price(&b.id, now) {
+                let off = (b.quote.mid / p - 1.0).abs();
+                if off > tol {
+                    let why = format!("mid {:.1}% away from the live price", off * 100.0);
+                    self.feeds.reject(DataKind::Books, src, &b.id, now, &why);
+                    continue;
+                }
+            }
+            self.feeds.observe(DataKind::Books, src, &b.id, now);
+            good.push(b);
+        }
+        let sw = self.feeds.reselect(DataKind::Books, &ids, now);
+        let current: Vec<BookSnapshot> =
+            good.into_iter().filter(|b| self.feeds.current(DataKind::Books, &b.id) == Some(src)).collect();
+        for b in &current {
+            self.feeds.mark_updated(DataKind::Books, &b.id, now);
+        }
+        self.apply_books(&current);
+        self.journal_switches(DataKind::Books, sw);
+    }
+
+    /// One journal line per group of markets that moved together.
+    fn journal_switches(&mut self, kind: DataKind, sw: Vec<feeds::Switch>) {
+        if sw.is_empty() {
+            return;
+        }
+        let pri = self.feeds.priority(kind);
+        let mut groups: Vec<((Option<FeedSource>, FeedSource), Vec<String>)> = Vec::new();
+        for s in sw {
+            match groups.iter_mut().find(|(k, _)| *k == (s.from, s.to)) {
+                Some((_, ids)) => ids.push(s.market),
+                None => groups.push(((s.from, s.to), vec![s.market])),
+            }
+        }
+        for ((from, to), ids) in groups {
+            let what = feeds::list_markets(&ids);
+            let msg = match from {
+                None => format!("{}: {what} on {}", kind.label(), to.label()),
+                Some(f) if (feeds::Switch { market: String::new(), from, to }).is_failover(&pri) => {
+                    let why = match self.feeds.last_error(kind, f) {
+                        Some(e) => format!(" ({} failed: {e})", f.label()),
+                        None => format!(" ({} went stale)", f.label()),
+                    };
+                    let series = if kind == DataKind::Candles {
+                        ". A different venue's candles are a different series: they replace the old one whole, \
+                         and no entry is taken on the switch bar"
+                    } else {
+                        ""
+                    };
+                    format!("{}: {what} failed over from {} to {}{why}{series}", kind.label(), f.label(), to.label())
+                }
+                Some(f) => format!("{}: {what} back on {} after {}", kind.label(), to.label(), f.label()),
+            };
+            self.log(JournalKind::System, msg, None, (ids.len() == 1).then(|| ids[0].clone()));
+        }
+    }
+
+    /// Stale markets per kind, while a host runs the feeds: quotes older than
+    /// the risk manager's staleness limit, candles not refreshed or behind,
+    /// books past their age limit.
+    fn stale_markets(&self, now: i64) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let Some(started) = self.feeds.started_at() else { return Default::default() };
+        let ids = self.feed_markets();
+        let limit = self.limits.max_data_staleness_sec as i64 * 1000;
+        let quotes = ids
+            .iter()
+            .filter(|id| match self.markets.iter().find(|m| &m.id == *id) {
+                Some(m) if self.real_ids.contains(*id) => now - m.updated_at > limit,
+                _ => now - started > limit,
+            })
+            .cloned()
+            .collect();
+        let cfg = self.feeds.config();
+        let iv = self.feeds.candle_interval_ms();
+        let candles = ids
+            .iter()
+            .filter(|id| match self.feeds.updated(DataKind::Candles, id) {
+                None => now - started > cfg.candle_stale_ms,
+                Some(t) => {
+                    now - t > cfg.candle_stale_ms
+                        || self.last_bar_ts.get(*id).is_none_or(|ts| now - ts > 3 * iv + 120_000)
+                }
+            })
+            .cloned()
+            .collect();
+        let books = if self.feeds.priority(DataKind::Books).is_empty() {
+            vec![]
+        } else {
+            ids.iter()
+                .filter(|id| self.bar_backed.contains(*id))
+                .filter(|id| match self.books.get(*id) {
+                    Some(b) => !b.is_fresh(now),
+                    None => now - started > cfg.book_stale_ms,
+                })
+                .cloned()
+                .collect()
+        };
+        (quotes, candles, books)
+    }
+
+    /// Once per tick: tell the webhook (through a Risk journal line) when
+    /// quotes or candles have been stale for the alert time, and again when
+    /// they recover. Short blips stay in the health report only.
+    fn check_data_alert(&mut self, now: i64) {
+        if self.feeds.started_at().is_none() {
+            return;
+        }
+        let (quotes, candles, _) = self.stale_markets(now);
+        let since = self.feeds.stale_since();
+        match self.feeds.track_episode(!quotes.is_empty() || !candles.is_empty(), now) {
+            Some(true) => {
+                let mut parts = Vec::new();
+                if !quotes.is_empty() {
+                    parts.push(format!("quotes for {}", feeds::list_markets(&quotes)));
+                }
+                if !candles.is_empty() {
+                    parts.push(format!("candles for {}", feeds::list_markets(&candles)));
+                }
+                let mins = since.map_or(0, |s| (now - s) / 60_000);
+                self.log(
+                    JournalKind::Risk,
+                    format!(
+                        "Market data stale for {mins} min: {}. Entries are refused and stops wait for a fresh price",
+                        parts.join(", ")
+                    ),
+                    None,
+                    None,
+                );
+            }
+            Some(false) => {
+                let mins = since.map_or(0, |s| (now - s) / 60_000);
+                let ids = self.feed_markets();
+                let on = |k: DataKind| self.feeds.active(k, &ids).map_or("no source", FeedSource::label);
+                let msg = format!(
+                    "Market data recovered after {mins} min: quotes on {}, candles on {}",
+                    on(DataKind::Quotes),
+                    on(DataKind::Candles)
+                );
+                self.log(JournalKind::Risk, msg, None, None);
+            }
+            None => {}
+        }
+    }
+
+    /// The `dataHealth` section of the state.
+    pub fn data_health(&self) -> feeds::DataHealth {
+        let now = self.now();
+        let ids = self.feed_markets();
+        let (q, c, b) = self.stale_markets(now);
+        let kinds = vec![
+            self.feeds.kind_health(DataKind::Quotes, &ids, q, now),
+            self.feeds.kind_health(DataKind::Candles, &ids, c, now),
+            self.feeds.kind_health(DataKind::Books, &ids, b, now),
+        ];
+        self.feeds.report(kinds, &ids)
+    }
+
+    /// Why a stop or trim must not act on this market's price right now: it
+    /// is a real feed's price and older than the staleness limit. A refused
+    /// quote never becomes the price, so it ages into this too.
+    fn exit_price_stale(&self, id: &str, now: i64) -> Option<i64> {
+        if !self.real_ids.contains(id) {
+            return None; // the simulator's own price is always current
+        }
+        let m = self.markets.iter().find(|m| m.id == id)?;
+        let age = now - m.updated_at;
+        (age > self.limits.max_data_staleness_sec as i64 * 1000).then_some(age)
+    }
+
+    /// Journal once that `id`'s exit checks wait for a fresh price.
+    fn note_exit_held(&mut self, id: &str, age_ms: i64, what: &str) {
+        if self.feed_noted.insert(format!("exit:{id}")) {
+            let why = self.feeds.suspect(id).map(|s| format!(" (latest quote refused, {s})")).unwrap_or_default();
+            self.log(
+                JournalKind::System,
+                format!(
+                    "{what} on {id} held: its price is {} s old, over the {} s limit{why}. \
+                     A stale or refused price never triggers an exit; checks resume with the next fresh price",
+                    age_ms / 1000,
+                    self.limits.max_data_staleness_sec
+                ),
+                None,
+                Some(id.to_string()),
             );
         }
     }
@@ -1451,6 +1903,9 @@ impl Engine {
 
         // position management: stop-loss / take-profit / trailing exits
         self.check_position_exits();
+
+        // Stale market data for minutes goes to the webhook, once, and so does its end.
+        self.check_data_alert(now);
 
         // max-drawdown circuit breaker
         let eq = self.equity();
@@ -1822,10 +2277,24 @@ impl Engine {
             self.markets.iter().map(|m| (m.id.clone(), m.price)).collect();
         let trail_mult = self.limits.trailing_atr_mult;
         let mut to_close: Vec<(String, String)> = Vec::new();
+        // A stale price neither trips a stop nor ratchets a trailing one: it
+        // is not where the market is. Refused quotes never become the price,
+        // so a bad tick lands here too once the last good one ages out.
+        let now = self.now();
+        let stale: HashMap<String, i64> = self
+            .positions
+            .keys()
+            .filter_map(|id| self.exit_price_stale(id, now).map(|age| (id.clone(), age)))
+            .collect();
+        let mut held: Vec<(String, i64)> = Vec::new();
 
         for (id, pos) in self.positions.iter_mut() {
             let price = *prices.get(id).unwrap_or(&0.0);
             if price <= 0.0 || pos.qty == 0.0 || pos.stop <= 0.0 && pos.target <= 0.0 {
+                continue;
+            }
+            if let Some(age) = stale.get(id) {
+                held.push((id.clone(), *age));
                 continue;
             }
             let long = pos.qty > 0.0;
@@ -1847,6 +2316,24 @@ impl Engine {
                 to_close.push((id.clone(), "stop-loss".into()));
             } else if pos.target > 0.0 && ((long && price >= pos.target) || (!long && price <= pos.target)) {
                 to_close.push((id.clone(), "take-profit".into()));
+            }
+        }
+
+        for (id, age) in held {
+            self.note_exit_held(&id, age, "Stop check");
+        }
+        // Fresh again: the next hold is a new episode and is journaled anew.
+        let resumed: Vec<String> = self
+            .feed_noted
+            .iter()
+            .filter_map(|k| k.strip_prefix("exit:"))
+            .filter(|id| !stale.contains_key(*id))
+            .map(String::from)
+            .collect();
+        for id in resumed {
+            self.feed_noted.remove(&format!("exit:{id}"));
+            if self.positions.contains_key(&id) {
+                self.log(JournalKind::System, format!("Stop check on {id} resumed with a fresh price"), None, Some(id));
             }
         }
 
@@ -1924,6 +2411,10 @@ impl Engine {
             _ => return,
         };
         if qty <= 0.0 {
+            return;
+        }
+        if let Some(age) = self.exit_price_stale(id, self.now()) {
+            self.note_exit_held(id, age, "Trim");
             return;
         }
         let Some(m) = self.markets.iter().find(|m| m.id == id).cloned() else { return };
@@ -2814,6 +3305,8 @@ impl Engine {
     /// and the cost comparison use that exchange's fees. `None` keeps Kraken.
     pub fn set_crypto_cost_venue(&mut self, venue: Option<CostVenue>) {
         self.crypto_venue = venue.unwrap_or(CostVenue::Kraken);
+        // Books describe the executing exchange's fills, so they follow it.
+        self.feeds.set_book_sources(FeedSource::for_books(self.crypto_venue));
     }
 
     pub fn crypto_cost_venue(&self) -> CostVenue {
@@ -4161,6 +4654,7 @@ impl Engine {
             crypto_cost_venue: self.crypto_venue,
             passports: self.strategies.iter().filter(|s| s.id != "manual").map(|s| self.passport_for(s)).collect(),
             risk: self.risk_status(),
+            data_health: Some(self.data_health()),
         }
     }
 

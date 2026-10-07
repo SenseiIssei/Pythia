@@ -363,6 +363,13 @@ async fn main() {
 
     // The engine daemon — the network analog of the desktop tick loop.
     tokio::spawn(tick_loop(state.clone()));
+    // Crypto quotes, candles and books with failover across venues, on their
+    // own tasks so a slow venue never delays a tick (see pythia_core::feeds).
+    tokio::spawn(pythia_core::feeds::runner::run(
+        state.engine.clone(),
+        pythia_core::feeds::FeedConfig::from_env(),
+        std::sync::Arc::new(|| bar_timeframe().1),
+    ));
     // The AI overlay runs on its own clock so a slow model call can never
     // delay a tick, a stop check, or an order.
     tokio::spawn(ai_loop(state.clone()));
@@ -463,15 +470,13 @@ async fn main() {
 /// daemon in `src-tauri/src/lib.rs`.
 async fn tick_loop(state: AppState) {
     const TICK_MS: u64 = 1500;
-    // Cadences, in ticks. Quotes move the mark; candles move the signals; the
-    // broker check gates live routing and must stay well inside the engine's
-    // five-minute staleness window.
+    // Cadences, in ticks. Equity and prediction quotes move their marks;
+    // equity candles move their signals; the broker check gates live routing
+    // and must stay well inside the engine's five-minute staleness window.
+    // Crypto quotes, candles and books are not polled here any more: the feed
+    // runner (spawned in `main`) owns them, with failover.
     const QUOTES_EVERY: u64 = 8; // ~12s
     const BARS_EVERY: u64 = 40; // ~60s
-    // Order books price a fill's spread and depth. Twenty single-pair public
-    // requests per refresh, so every ~30s rather than every quote, and offset
-    // (n = 11, 31, ...) so a tick never waits on books and quotes together.
-    const BOOKS_EVERY: u64 = 20; // ~30s
     const BROKER_EVERY: u64 = 40; // ~60s
     const RECONCILE_EVERY: u64 = 80; // ~2min
 
@@ -485,39 +490,25 @@ async fn tick_loop(state: AppState) {
         // mutex is only ever taken for the synchronous apply.
         if n % QUOTES_EVERY == 1 {
             let (key, secret, feed) = alpaca_data_keys(&state.creds);
-            let kraken = marketdata::fetch_kraken().await;
             let poly = marketdata::fetch_polymarket().await;
             let mut alpaca = marketdata::fetch_alpaca(&key, &secret, &feed).await;
             // Alpaca's crypto data is public, so these are real even without keys.
             alpaca.extend(marketdata::fetch_alpaca_crypto().await);
             let mut e = state.engine.lock().unwrap();
-            e.apply_kraken(&kraken);
             e.apply_polymarket(&poly);
             e.apply_alpaca(&alpaca);
         }
 
-        // Candle history — the series every indicator actually runs on.
+        // Candle history for the Alpaca markets; crypto candles come from the feed runner.
         if n % BARS_EVERY == 1 {
-            let (tf, kraken_min) = bar_timeframe();
+            let (tf, _) = bar_timeframe();
             let (key, secret, feed) = alpaca_data_keys(&state.creds);
-            let mut series = marketdata::fetch_kraken_bars(kraken_min).await;
-            series.extend(marketdata::fetch_alpaca_bars(&key, &secret, &feed, &tf, 10).await);
+            let mut series = marketdata::fetch_alpaca_bars(&key, &secret, &feed, &tf, 10).await;
             // Three days, not ten: crypto never closes, so ten days of small
             // bars would overrun the single page the fetch asks for.
             series.extend(marketdata::fetch_alpaca_crypto_bars(&tf, 3).await);
             if !series.is_empty() {
                 state.engine.lock().unwrap().apply_bars(&series);
-            }
-        }
-
-        // Top-20 books of the exchange whose costs crypto fills pay. A missed
-        // refresh is harmless: the engine stops trusting a book after a minute
-        // and falls back to the calibrated defaults.
-        if n % BOOKS_EVERY == 11 {
-            let venue = state.engine.lock().unwrap().crypto_cost_venue();
-            let books = marketdata::fetch_books(venue).await;
-            if !books.is_empty() {
-                state.engine.lock().unwrap().apply_books(&books);
             }
         }
 

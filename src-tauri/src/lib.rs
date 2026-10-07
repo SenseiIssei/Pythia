@@ -1,6 +1,7 @@
 //! Pythia native shell (Tauri v2). Hosts the persistent engine daemon: a Tokio
 //! task ticks the engine ~every 1.5s, periodically refreshes real read-only
-//! market data (Kraken + Polymarket), and pushes a full `EngineState` to the UI
+//! market data (Polymarket, Alpaca; crypto through `pythia_core::feeds` with
+//! failover across venues), and pushes a full `EngineState` to the UI
 //! over the `engine://state` event. Mutations arrive as commands (see commands.rs).
 //!
 //! The `connectors` module is the Phase-2 live-execution scaffold; it compiles
@@ -81,9 +82,10 @@ pub fn run() {
                     let paper = engine.lock().unwrap().live_config().paper;
                     let alpaca_keys = || commands::alpaca_data_keys(&creds, paper);
 
-                    // Refresh real read-only feeds periodically (and on first tick).
+                    // Refresh real read-only feeds periodically (and on first
+                    // tick). Crypto quotes, candles and books come from the
+                    // feed runner spawned below, with failover across venues.
                     if n % 8 == 1 {
-                        let kraken = marketdata::fetch_kraken().await;
                         let poly = marketdata::fetch_polymarket().await;
                         // Real equity quotes when Alpaca keys are in the vault
                         // (otherwise those markets stay on the simulator).
@@ -93,29 +95,24 @@ pub fn run() {
                         // Alpaca's crypto data is public: real prices even without keys.
                         alpaca.extend(marketdata::fetch_alpaca_crypto().await);
                         let mut e = engine.lock().unwrap();
-                        e.apply_kraken(&kraken);
                         e.apply_polymarket(&poly);
                         e.apply_alpaca(&alpaca);
                     }
 
-                    // Candle history — the series indicators actually run on.
-                    // Without this every EMA and RSI is measuring the tick
-                    // loop's own random walk rather than the market.
+                    // Candle history for the Alpaca markets: the series their
+                    // indicators actually run on. Crypto candles come from the
+                    // feed runner.
                     if n % 40 == 1 {
                         let (id, secret) = alpaca_keys();
                         let p = commands::get_prefs();
-                        let mut series =
-                            marketdata::fetch_kraken_bars(p.kraken_interval()).await;
-                        series.extend(
-                            marketdata::fetch_alpaca_bars(
-                                &id,
-                                &secret,
-                                &p.alpaca_feed,
-                                &p.bar_timeframe,
-                                10,
-                            )
-                            .await,
-                        );
+                        let mut series = marketdata::fetch_alpaca_bars(
+                            &id,
+                            &secret,
+                            &p.alpaca_feed,
+                            &p.bar_timeframe,
+                            10,
+                        )
+                        .await;
                         // Three days: crypto never closes, so ten days of small
                         // bars would overrun the single page fetched.
                         series.extend(
@@ -123,18 +120,6 @@ pub fn run() {
                         );
                         if !series.is_empty() {
                             engine.lock().unwrap().apply_bars(&series);
-                        }
-                    }
-
-                    // Top-20 order books of the exchange whose costs crypto
-                    // fills pay, every ~30s and offset from the other
-                    // refreshes. A missed one is harmless: the engine stops
-                    // trusting a book after a minute and uses the defaults.
-                    if n % 20 == 11 {
-                        let venue = engine.lock().unwrap().crypto_cost_venue();
-                        let books = marketdata::fetch_books(venue).await;
-                        if !books.is_empty() {
-                            engine.lock().unwrap().apply_books(&books);
                         }
                     }
 
@@ -182,6 +167,17 @@ pub fn run() {
                     }
                 }
             });
+
+            // Crypto quotes, candles and books with failover across venues
+            // (see pythia_core::feeds). The candle interval is read from the
+            // preferences before each round, so a changed timeframe applies
+            // without a restart.
+            let feed_engine = app.state::<AppState>().engine.clone();
+            tauri::async_runtime::spawn(pythia_core::feeds::runner::run(
+                feed_engine,
+                pythia_core::feeds::FeedConfig::from_env(),
+                std::sync::Arc::new(|| commands::get_prefs().kraken_interval()),
+            ));
 
             // Model forecasts in shadow mode: scored every hour, never traded.
             let ml = app.state::<pythia_core::ml::SharedMl>().inner().clone();

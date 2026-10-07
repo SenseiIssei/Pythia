@@ -12,6 +12,7 @@ pub mod connectors;
 pub mod costs;
 pub mod engine;
 pub mod execution;
+pub mod feeds;
 pub mod forecast;
 pub mod lab;
 pub mod labview;
