@@ -1,9 +1,9 @@
 //! Read-only market data. Real feeds:
 //!   · Kraken     — spot crypto last/open price  (https://api.kraken.com, no auth)
-//!   · Kraken / Binance — top-20 order books for the cost model (public, no auth)
+//!   · Kraken and Binance: top-20 order books for the cost model (public, no auth)
 //!   · Polymarket — Gamma API prediction odds     (https://gamma-api.polymarket.com, no auth)
 //!   · Alpaca     — equity snapshots              (https://data.alpaca.markets, needs keys)
-//!   · Alpaca     — crypto snapshots and candles  (same host, v1beta3, no auth)
+//!   · Alpaca crypto: snapshots and candles (same host, v1beta3, no auth)
 //!
 //! Every fetch is time-boxed and falls back to an empty result on any failure,
 //! so the engine keeps running on its simulator if the network is down or a
