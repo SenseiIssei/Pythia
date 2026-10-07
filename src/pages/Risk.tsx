@@ -1,6 +1,6 @@
 import { Power, ShieldAlert } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Meter, Button, Toggle, Badge } from "../components/ui";
+import { Card, PageHeader, Meter, Button, Toggle, Badge, Term } from "../components/ui";
 import type { RiskLimits, RiskStatus, SizingMode, StrategySizing } from "../types";
 
 interface LimitRow {
@@ -43,11 +43,14 @@ export function Risk() {
 
   return (
     <div className="animate-fade-in">
-      <PageHeader title="Risk" subtitle="The risk manager sits above every order — paper or live" />
+      <PageHeader
+        title="Risk"
+        subtitle="The risk manager checks every order, paper or live, against these limits before it goes out."
+      />
 
       {/* kill switch */}
       <Card className={`mb-4 ${limits.killSwitch ? "border-danger/50 glow-red" : ""}`}>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className={`rounded-lg p-2 ${limits.killSwitch ? "bg-danger/20 text-danger" : "bg-cyber-surface-2 text-cyber-text-dim"}`}>
               <Power size={20} />
@@ -56,7 +59,7 @@ export function Risk() {
               <div className="font-bold">Global Kill Switch</div>
               <div className="text-xs text-cyber-text-dim">
                 {limits.killSwitch
-                  ? "ENGAGED — all live buys halted, only closing intents pass"
+                  ? "Engaged: all new buys are halted, only closing orders pass."
                   : "Armed and ready. One click halts all live execution."}
               </div>
             </div>
@@ -73,21 +76,25 @@ export function Risk() {
           <div className="pr-4">
             <div className="font-bold">Regime filter</div>
             <div className="text-xs text-cyber-text-dim">
-              Block mean-reversion strategies in trending markets and trend strategies in choppy ones —
-              so strategies only fire in the conditions they suit.
+              Block mean-reversion strategies in trending markets and trend strategies in choppy ones, so
+              strategies only fire in the conditions they suit.
             </div>
           </div>
-          <Toggle on={limits.regimeFilter} onChange={(v) => setLimits({ regimeFilter: v })} />
+          <Toggle label="Regime filter" on={limits.regimeFilter} onChange={(v) => setLimits({ regimeFilter: v })} />
         </div>
         <div className="flex items-center justify-between pt-3">
           <div className="pr-4">
             <div className="font-bold">Adaptive capital allocation</div>
             <div className="text-xs text-cyber-text-dim">
               Auto-weight each strategy's budget toward its recent performance (rebalanced ~every 60s).
-              Winners get more capital; laggards get throttled — but none is fully starved.
+              Winners get more capital; laggards get throttled, but none is fully starved.
             </div>
           </div>
-          <Toggle on={limits.adaptiveAllocation} onChange={(v) => setLimits({ adaptiveAllocation: v })} />
+          <Toggle
+            label="Adaptive capital allocation"
+            on={limits.adaptiveAllocation}
+            onChange={(v) => setLimits({ adaptiveAllocation: v })}
+          />
         </div>
       </Card>
 
@@ -123,18 +130,21 @@ export function Risk() {
       <Card title="Limits" right={<ShieldAlert size={14} className="text-warning" />}>
         <div className="space-y-3">
           {ROWS.map((r) => (
-            <div key={r.key} className="flex items-center gap-4 text-sm">
-              <span className="w-44 text-cyber-text-dim">{r.label}</span>
+            <div key={r.key} className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              <span className="w-full text-cyber-text-dim sm:w-48">
+                <Term k={r.label}>{r.label}</Term>
+              </span>
               <input
                 type="range"
                 min={r.min}
                 max={r.max}
                 step={r.step}
                 value={limits[r.key] as number}
+                aria-label={r.label}
                 onChange={(e) => setLimits({ [r.key]: Number(e.target.value) } as Partial<RiskLimits>)}
-                className="flex-1 accent-[#00f0ff]"
+                className="min-w-0 flex-1"
               />
-              <span className="w-24 text-right font-mono text-accent">
+              <span className="w-24 shrink-0 text-right font-mono text-accent">
                 {limits[r.key] as number} {r.unit}
               </span>
             </div>
