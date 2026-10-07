@@ -47,6 +47,12 @@ PARAMS = dict(objective="lambdarank", n_estimators=400, learning_rate=0.03, num_
               reg_lambda=5.0, n_jobs=4, verbose=-1, label_gain=list(range(5)))
 FEATURES = ["r1", "r3", "r7", "r14", "r28", "r56", "vol7", "vol28", "vol_ratio", "volu_trend", "adv28",
             "dist_hi28", "dist_lo28", "skew7", "resid28", "age"]
+# Version 2 (--perp-features): what the coin's USDT perpetual says, where it has one.
+#   fund7       funding paid over the last 7 days (crowded longs pay, crowded shorts receive)
+#   basis       log(perp close / spot close): leveraged demand over spot demand
+#   perp_share  log(perp volume / spot volume): how much of the trading is speculation
+# Coins without a perp keep these missing; LightGBM routes missing values on its own.
+PERP_FEATURES = ["fund7", "basis", "perp_share"]
 
 
 GAP_SPLIT_US = 3 * DAY_US       # a longer trading gap starts a new series
@@ -122,7 +128,17 @@ def features(d: pl.DataFrame, btc: pl.DataFrame) -> pl.DataFrame:
     return f.with_columns(fwd=pl.Series(fwd))
 
 
-def build() -> pl.DataFrame:
+def perp_features() -> pl.DataFrame:
+    """Per (day, base): the perp's 7-day funding, close and volume, from the
+    largest perp of that coin by volume that day."""
+    from .picks_ls import perp_panel  # reads hist/binance_um, written by the um_all backfill
+    pp = perp_panel().sort(["perp", "day"]).with_columns(
+        fund7=pl.col("funding").rolling_sum(7, min_samples=1).over("perp"))
+    return (pp.sort("qv", descending=True).group_by(["day", "base"]).first()
+            .select("day", "base", "fund7", perp_close="close", perp_qv="qv"))
+
+
+def build(with_perp: bool = False) -> pl.DataFrame:
     syms = json.loads((ROOT / "hist" / "universe.json").read_text())
     btc = daily_bars("BTCUSDT")
     frames = []
@@ -140,10 +156,23 @@ def build() -> pl.DataFrame:
     p = pl.concat(frames, how="vertical_relaxed")
     p = p.filter((pl.col("age") >= MIN_HISTORY_D) & (pl.col("adv28") >= np.log(MIN_ADV_USD + 1)))
     p = p.drop_nulls(FEATURES)
+    feats = list(FEATURES)
+    if with_perp:
+        # A perp's price and volume multiplier (1000PEPE) cancels in basis only
+        # once divided out; the ratio of log closes is taken after rescaling to spot.
+        pf = perp_features()
+        p = (p.with_columns(base=pl.col("symbol").str.strip_suffix("USDT"))
+             .join(pf, on=["day", "base"], how="left")
+             .with_columns(mult=(pl.col("perp_close") / pl.col("close")).log10().round(0))
+             .with_columns(basis=(pl.col("perp_close") / (pl.col("close") * 10 ** pl.col("mult"))).log(),
+                           perp_share=((pl.col("perp_qv") + 1) / (pl.col("qv") + 1)).log())
+             .drop("perp_close", "perp_qv", "mult", "base"))
+        feats += PERP_FEATURES
     # Cross-sectional ranks per day: the model sees "where does this coin stand
     # today", which is comparable across years in a way raw returns are not.
+    # A missing perp feature stays missing (rank of null is null).
     ranked = p.with_columns([((pl.col(c).rank().over("day") - 1) / (pl.len().over("day") - 1).clip(1)).alias(c)
-                             for c in FEATURES])
+                             for c in feats])
     ranked = ranked.with_columns(
         label=((pl.col("fwd").rank().over("day") - 1) * 5 / pl.len().over("day")).floor().clip(0, 4).cast(pl.Int32))
     return ranked.filter(pl.len().over("day") >= 20).sort(["day", "symbol"])
@@ -178,10 +207,15 @@ def perf(r: np.ndarray) -> dict:
 
 
 def main() -> None:
+    import sys
+    v2 = "--perp-features" in sys.argv
+    name = "picks_v2" if v2 else "picks"
+    (ROOT / "reports" / name).mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    P = build()
+    P = build(with_perp=v2)
+    feats = FEATURES + PERP_FEATURES if v2 else FEATURES
     days = P["day"].to_numpy()
-    X = P.select(FEATURES).to_numpy().astype(np.float32)
+    X = P.select(feats).to_numpy().astype(np.float32)
     y = P["label"].to_numpy()
     fwd = P["fwd"].to_numpy()
     sym = P["symbol"].to_numpy()
@@ -207,7 +241,7 @@ def main() -> None:
     has_score = np.isfinite(score)
     pl.DataFrame({"day": days[has_score], "symbol": sym[has_score], "score": score[has_score],
                   "fwd": fwd[has_score], "adv_rank": P["adv28"].to_numpy()[has_score]}).write_parquet(
-        ROOT / "reports" / "picks" / "scores.parquet")
+        ROOT / "reports" / name / "scores.parquet")
 
     oos = np.isfinite(score) & np.isfinite(fwd)
     d_o, s_o, f_o, sy_o = days[oos], score[oos], fwd[oos], sym[oos]
@@ -270,7 +304,8 @@ def main() -> None:
                f"deflated p {best['deflated_p']:.2f}; plain momentum with the same K: Sharpe {base['sharpe']:.2f}. "
                + ("M2 earns its place: better than the no-model baseline and survives deflation."
                   if beats else "M2 does not clear the bar yet (must beat plain momentum and survive deflation)."))
-    md = ("# M2 · Picks, ranking every coin by next-week return\n\n"
+    title = "# M2 v2 · Picks with perpetual features\n\n" if v2 else "# M2 · Picks, ranking every coin by next-week return\n\n"
+    md = (title +
           f"{P.height:,} coin-days, {P['symbol'].n_unique()} coins (delisted included), eligibility: "
           f"{MIN_HISTORY_D} days of history and {MIN_ADV_USD / 1e6:.0f} M USD daily volume. Weekly rebalance, "
           f"{COST * 1e4:.0f} bps per unit turnover, out of sample from 2022. Took {(time.time() - t0) / 60:.0f} min.\n\n"
@@ -279,7 +314,7 @@ def main() -> None:
           + "\n## Next-week return by score decile (10 = best score)\n\n"
           + report.table(dec_rows, ["decile", "mean_week_return_pct", "coin_days"])
           + "\n## Rank-IC per quarter\n\n" + report.table(folds, ["fold", "days", "rank_ic"]))
-    report.write("picks", md, {"rows": rows, "folds": folds, "rank_ic": ic_mean, "rank_ic_t": ic_t,
+    report.write(name, md, {"rows": rows, "folds": folds, "rank_ic": ic_mean, "rank_ic_t": ic_t,
                                "rank_ic_liquid50": ic_liquid, "deciles": dec_rows, "verdict": verdict})
 
 

@@ -139,7 +139,9 @@ def long_short(df: pl.DataFrame, k: int, n: int, cost: float = COST,
 
 
 def main() -> None:
-    scores = pl.read_parquet(ROOT / "reports" / "picks" / "scores.parquet")
+    import sys
+    src = "picks_v2" if "--v2" in sys.argv else "picks"  # which M2 version's scores to trade
+    scores = pl.read_parquet(ROOT / "reports" / src / "scores.parquet")
     scores = scores.with_columns(base=pl.col("symbol").str.strip_suffix("USDT"))
     perps = perp_panel()
     df = (scores.select("day", "base", "score")
@@ -181,7 +183,7 @@ def main() -> None:
           + report.table(rows, ["strategy", "periods", "cagr", "sharpe", "max_dd", "deflated_p"])
           + "\n## Where the return came from (sum of weekly contributions)\n\n"
           + report.table(legs_rows, ["strategy", "long_leg_sum", "short_leg_sum", "funding_sum"]))
-    report.write("picks_ls", md, {"rows": rows, "legs": legs_rows, "stress_3x": stress, "verdict": verdict})
+    report.write("picks_ls_v2" if src == "picks_v2" else "picks_ls", md, {"rows": rows, "legs": legs_rows, "stress_3x": stress, "verdict": verdict})
 
 
 if __name__ == "__main__":
