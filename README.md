@@ -8,7 +8,7 @@
 [![Tauri](https://img.shields.io/badge/Tauri-v2-orange?style=for-the-badge&logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![React](https://img.shields.io/badge/React-19-61dafb?style=for-the-badge&logo=react&logoColor=white)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![Rust](https://img.shields.io/badge/Rust-1.82+-ce422b?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.85+-ce422b?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![axum](https://img.shields.io/badge/axum-server-000?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/tokio-rs/axum)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-cyber--neon-38bdf8?style=for-the-badge&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 
