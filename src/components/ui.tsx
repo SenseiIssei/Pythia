@@ -44,26 +44,39 @@ export function Explain({ text, label }: { text: string; label?: string }) {
   const id = useId();
   const [pos, setPos] = useState<{ left: number; top: number; width: number; above: boolean } | null>(null);
 
-  function show() {
+  function place() {
     const r = ref.current?.getBoundingClientRect();
-    if (!r) return;
+    // Gone (a hidden page has a zero-size box) or scrolled off screen: no bubble.
+    if (!r || (r.width === 0 && r.height === 0) || r.bottom < 0 || r.top > window.innerHeight) return null;
     const width = Math.min(260, window.innerWidth - 16);
     const left = Math.max(8, Math.min(r.left + r.width / 2 - width / 2, window.innerWidth - width - 8));
     const above = r.bottom + 140 > window.innerHeight;
-    setPos({ left, top: above ? r.top - 6 : r.bottom + 6, width, above });
+    return { left, top: above ? r.top - 6 : r.bottom + 6, width, above };
   }
+  const show = () => setPos(place());
   const hide = () => setPos(null);
+  const open = pos !== null;
 
+  // Follow the "?" when the page scrolls or resizes (focusing it can scroll
+  // it into view), and let go once it leaves the screen.
   useEffect(() => {
-    if (!pos) return;
-    const close = () => setPos(null);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
+    if (!open) return;
+    // Only ever moves an open bubble; a scroll that lands after a close must
+    // not bring it back.
+    const follow = () => setPos((p) => (p ? place() : null));
+    // Some phones never focus a tapped button, so a tap elsewhere closes it too.
+    const outside = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setPos(null);
     };
-  }, [pos]);
+    window.addEventListener("scroll", follow, true);
+    window.addEventListener("resize", follow);
+    document.addEventListener("pointerdown", outside);
+    return () => {
+      window.removeEventListener("scroll", follow, true);
+      window.removeEventListener("resize", follow);
+      document.removeEventListener("pointerdown", outside);
+    };
+  }, [open]);
 
   return (
     <>
@@ -77,10 +90,11 @@ export function Explain({ text, label }: { text: string; label?: string }) {
         onFocus={show}
         onBlur={hide}
         onClick={(e) => {
+          // A tap focuses and then clicks; both must open, never toggle shut.
+          // Tapping anywhere else blurs the button and closes the bubble.
           e.stopPropagation();
           e.preventDefault();
-          if (pos) hide();
-          else show();
+          show();
         }}
         onKeyDown={(e) => e.key === "Escape" && hide()}
         className="inline-flex shrink-0 cursor-help items-center rounded-full align-middle text-cyber-text-faint normal-case transition-colors hover:text-accent focus-visible:text-accent"
