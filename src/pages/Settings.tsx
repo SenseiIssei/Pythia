@@ -15,6 +15,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
+import { ComfortZone } from "../components/ComfortZone";
 import { isTauri } from "../engine";
 import { setUiMode, useAdvanced } from "../uiMode";
 import { aiMode, aiProviders, saveAiKey, clearAiKey } from "../ai";
@@ -74,6 +75,8 @@ export function Settings() {
       <PageHeader title="Settings" subtitle="Venue connections · keys stored in the OS keychain, never in code" />
 
       <ViewModeCard advanced={advanced} />
+
+      <ComfortZone />
 
       <Card className="mb-4 border-warning/30 bg-warning/5">
         <div className="flex items-start gap-3">
