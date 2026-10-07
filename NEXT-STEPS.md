@@ -142,6 +142,14 @@ until then the realised-slippage table is empty by design.
 
 Things worth knowing from building it:
 
+- **The venue is now the biggest cost lever.** With measured spreads, a taker
+  round trip is about 80 bps on Kraken and 20 on Binance, nearly all of it fee.
+  The lab backtests charge 15 bps per unit of turnover (Binance); Kraken taker is
+  about 2.7 times that. The regime momentum book still holds a Sharpe of 0.81 at
+  three times the cost (1.05 at one), the rotation book falls to 0.39. The VPS
+  engine's lab book charges Kraken, the Python paper books Binance, so expect
+  the two to drift apart by that gap.
+
 - **The deflated Sharpe was mis-scaled before this branch.** It was fed
   annualised Sharpes, which inflates the z-score by the square root of the bars
   per year and turns the verdict into a step function. Fixed in
