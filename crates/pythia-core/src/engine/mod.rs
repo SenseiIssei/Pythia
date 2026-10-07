@@ -666,8 +666,14 @@ impl LiveUpdate {
 }
 
 /// An order the engine has sent to a venue and not yet finished with.
-#[derive(Debug, Clone)]
-struct InFlight {
+///
+/// Saved with the engine state: an order resting at a broker outlives the
+/// process, and a restart that forgot it left its row "Pending" for good and
+/// never booked a fill that landed while Pythia was down. Restored entries are
+/// polled like any other (see [`Engine::apply_persisted`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InFlight {
     market_id: String,
     symbol: String,
     venue: Venue,
@@ -675,6 +681,10 @@ struct InFlight {
     strategy_id: String,
     /// `None` until the venue acknowledges the submission.
     broker_id: Option<String>,
+    /// The id the order was sent under, so a person can find it at the venue
+    /// when it was never acknowledged. Empty in saves from before it was kept.
+    #[serde(default)]
+    client_order_id: String,
     submitted_at: i64,
     /// How much of the venue's cumulative fill we have already booked. The
     /// difference against a fresh report is exactly what still needs settling,
@@ -848,6 +858,12 @@ pub struct Persisted {
     /// checked, at the seed price until the first feed refresh.
     #[serde(default)]
     pub prices: HashMap<String, (f64, i64)>,
+    /// Live orders not finished yet, by engine order id: the ones the venue
+    /// acknowledged are polled again after a restart until they fill, cancel
+    /// or are rejected. Orders still waiting for submission are saved here
+    /// too (no broker id) so the restart can close their rows honestly.
+    #[serde(default)]
+    pub inflight: Vec<(String, InFlight)>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -2368,6 +2384,7 @@ impl Engine {
 
         let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
         let order_id = order.id.clone();
+        let client_order_id = format!("pythia-{}-{order_id}", self.boot_tag);
         self.orders.insert(0, order);
         self.in_flight_markets.insert(m.id.clone());
         self.inflight.insert(
@@ -2379,6 +2396,7 @@ impl Engine {
                 side,
                 strategy_id: sid.clone(),
                 broker_id: None,
+                client_order_id: client_order_id.clone(),
                 submitted_at: self.now(),
                 booked_qty: 0.0,
                 booked_fee: 0.0,
@@ -2393,7 +2411,7 @@ impl Engine {
             },
         );
         self.pending_live.push(LiveOrderOut {
-            client_order_id: format!("pythia-{}-{order_id}", self.boot_tag),
+            client_order_id,
             order_id,
             venue: m.venue,
             market_id: m.id.clone(),
@@ -3079,6 +3097,14 @@ impl Engine {
         for bp in broker {
             let Some((market_id, price)) = known.get(&bp.symbol).cloned() else { continue };
             seen.insert(market_id.clone());
+            // An order still out in this market may already be (partly) in the
+            // venue's position but not yet in our book. Setting the book to the
+            // venue now and then booking the order's fill report would count
+            // that fill twice. The order's own report settles it; the next
+            // reconciliation after it is done checks the result.
+            if self.in_flight_markets.contains(&market_id) {
+                continue;
+            }
             let avg = if bp.avg_price > 0.0 { bp.avg_price } else { price };
             match self.positions.get_mut(&market_id) {
                 Some(p) if (p.qty - bp.qty).abs() < 1e-6 => {
@@ -3137,7 +3163,7 @@ impl Engine {
         let vanished: Vec<String> = self
             .positions
             .iter()
-            .filter(|(id, p)| p.venue == venue && p.live && !seen.contains(*id))
+            .filter(|(id, p)| p.venue == venue && p.live && !seen.contains(*id) && !self.in_flight_markets.contains(*id))
             .map(|(id, _)| id.clone())
             .collect();
         for id in vanished {
@@ -3797,6 +3823,76 @@ impl Engine {
                 .filter(|m| self.real_ids.contains(&m.id))
                 .map(|m| (m.id.clone(), (m.price, m.updated_at)))
                 .collect(),
+            inflight: self.inflight.iter().map(|(id, f)| (id.clone(), f.clone())).collect(),
+        }
+    }
+
+    /// Live orders from before a restart. An order the venue acknowledged is
+    /// followed again: back in flight, its market blocked for new orders, and
+    /// the daemon's next poll (`live_polls`) reads its status and books
+    /// whatever filled meanwhile, cancelling it first if it is past the
+    /// timeout. One without a broker id never got an answer, so its fate is
+    /// unknown here; its row is closed as rejected with the client id to look
+    /// for at the venue, and reconciliation corrects any position it opened.
+    /// A "Pending" row with no saved state at all (a save from before in-flight
+    /// orders were kept) is closed the same way rather than left pending forever.
+    fn restore_inflight(&mut self, saved: Vec<(String, InFlight)>) {
+        let mut followed = 0usize;
+        for (order_id, f) in saved {
+            if f.broker_id.is_some() {
+                self.in_flight_markets.insert(f.market_id.clone());
+                self.inflight.insert(order_id, f);
+                followed += 1;
+                continue;
+            }
+            let at = if f.client_order_id.is_empty() { String::new() } else { format!(" (client id {})", f.client_order_id) };
+            let reason = format!(
+                "status unknown: Pythia restarted before {:?} acknowledged it{at}. Check the venue; \
+                 reconciliation corrects the position if it filled",
+                f.venue
+            );
+            if let Some(ord) = self.orders.iter_mut().find(|o| o.id == order_id) {
+                ord.status = OrderStatus::Rejected;
+                ord.reject_reason = Some(reason.clone());
+            }
+            self.log(
+                JournalKind::Risk,
+                format!("LIVE order {} {:?} {}: {reason}", order_id, f.side, f.symbol),
+                Some(f.strategy_id),
+                Some(f.market_id),
+            );
+        }
+        let orphans: Vec<String> = self
+            .orders
+            .iter()
+            .filter(|o| o.status == OrderStatus::Pending && !self.inflight.contains_key(&o.id))
+            .map(|o| o.id.clone())
+            .collect();
+        for id in &orphans {
+            if let Some(ord) = self.orders.iter_mut().find(|o| &o.id == id) {
+                ord.status = OrderStatus::Rejected;
+                ord.reject_reason = Some(
+                    "status unknown: saved as pending without its venue state. Check the venue; \
+                     reconciliation corrects the position if it filled"
+                        .into(),
+                );
+            }
+        }
+        if !orphans.is_empty() {
+            self.log(
+                JournalKind::Risk,
+                format!("{} pending order(s) from an older save could not be followed and were closed", orphans.len()),
+                None,
+                None,
+            );
+        }
+        if followed > 0 {
+            self.log(
+                JournalKind::System,
+                format!("Following {followed} live order(s) from before the restart until the venue reports them done"),
+                None,
+                None,
+            );
         }
     }
 
@@ -3862,6 +3958,7 @@ impl Engine {
         }
         self.orders = p.orders;
         self.journal = p.journal;
+        self.restore_inflight(p.inflight);
         self.limits = p.limits;
         self.real_ids = p.real_ids.into_iter().collect();
         let resolved = p.forecast_store.resolved_count();
@@ -4364,9 +4461,119 @@ mod tests {
             e.drain_live_orders().remove(0)
         };
         let (a, b) = (send(), send());
+        assert_ne!(a.client_order_id, "", "kept for the restart path too");
         assert_eq!(a.order_id, b.order_id, "same counter in both runs");
         assert_ne!(a.client_order_id, b.client_order_id);
         assert!(a.client_order_id.len() <= 32, "fits every venue's limit: {}", a.client_order_id);
+    }
+
+    /// An armed engine with one Alpaca buy out at the venue, acknowledged as `broker_id`.
+    fn with_live_order(broker_id: Option<&str>) -> (Engine, LiveOrderOut) {
+        let mut e = engine_with_open_market();
+        e.set_live(armed_alpaca());
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().remove(0);
+        if let Some(b) = broker_id {
+            e.apply_live_ack(&o.order_id, b);
+        }
+        (e, o)
+    }
+
+    fn row<'a>(e: &'a Engine, id: &str) -> &'a Order {
+        e.orders.iter().find(|x| x.id == id).expect("the order row")
+    }
+
+    #[test]
+    fn an_acknowledged_live_order_is_polled_again_after_a_restart_and_its_fill_booked() {
+        let (e, o) = with_live_order(Some("broker-7"));
+        let mut back = restored(&e);
+        assert_eq!(row(&back, &o.order_id).status, OrderStatus::Pending);
+        let polls = back.live_polls();
+        assert_eq!(polls.len(), 1);
+        assert_eq!((polls[0].order_id.as_str(), polls[0].broker_id.as_str()), (o.order_id.as_str(), "broker-7"));
+        assert_eq!((polls[0].venue, polls[0].symbol.as_str(), polls[0].paper, polls[0].cancel), (Venue::Alpaca, "AAPL", true, false));
+        assert!(back.in_flight_markets.contains("alpaca:AAPL"), "no second order into that market meanwhile");
+        assert!(back.journal.iter().any(|j| j.message.contains("Following 1 live order")));
+
+        // It filled while Pythia was down: the first poll books it, once.
+        back.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, 228.0));
+        let r = row(&back, &o.order_id);
+        assert_eq!((r.status, r.filled_qty, r.avg_fill_price), (OrderStatus::Filled, o.qty, Some(228.0)));
+        let p = back.positions.get("alpaca:AAPL").expect("the fill opened the position");
+        assert!(p.live && (p.qty - o.qty).abs() < 1e-9);
+        assert_eq!(back.drain_fill_records().len(), 1, "one tax record for the fill");
+        assert!(back.live_polls().is_empty());
+        assert!(!back.in_flight_markets.contains("alpaca:AAPL"));
+        // A second restart has nothing left to follow.
+        assert!(restored(&back).live_polls().is_empty());
+    }
+
+    #[test]
+    fn a_restored_order_ends_cancelled_or_rejected_when_the_venue_says_so() {
+        // Past its timeout across the restart: the poll cancels first, then reads.
+        let (mut e, o) = with_live_order(Some("broker-8"));
+        e.inflight.get_mut(&o.order_id).unwrap().submitted_at -= 10 * 60_000;
+        let mut back = restored(&e);
+        let polls = back.live_polls();
+        assert!(polls[0].cancel, "120 s timeout, ten minutes old");
+        back.mark_cancel_sent(&o.order_id);
+        assert!(!back.live_polls()[0].cancel, "the cancel is sent once");
+        back.apply_live_update(&o.order_id, update(BrokerOrderStatus::Canceled, 0.0, 0.0));
+        assert_eq!(row(&back, &o.order_id).status, OrderStatus::Cancelled);
+        assert!(back.live_polls().is_empty() && back.positions.is_empty());
+
+        let (e, o) = with_live_order(Some("broker-9"));
+        let mut back = restored(&e);
+        back.apply_live_update(&o.order_id, update(BrokerOrderStatus::Rejected, 0.0, 0.0));
+        assert_eq!(row(&back, &o.order_id).status, OrderStatus::Rejected);
+        assert!(back.live_polls().is_empty() && !back.in_flight_markets.contains("alpaca:AAPL"));
+    }
+
+    #[test]
+    fn an_order_the_venue_never_acknowledged_is_closed_at_the_restart_not_left_pending() {
+        let (e, o) = with_live_order(None);
+        let back = restored(&e);
+        let r = row(&back, &o.order_id);
+        assert_eq!(r.status, OrderStatus::Rejected);
+        let why = r.reject_reason.clone().unwrap();
+        assert!(why.contains("restarted before") && why.contains(&o.client_order_id), "{why}");
+        assert!(back.live_polls().is_empty(), "nothing to ask the venue by");
+        assert!(!back.in_flight_markets.contains("alpaca:AAPL"));
+        assert!(back.journal.iter().any(|j| j.kind == JournalKind::Risk && j.message.contains(&o.order_id)));
+    }
+
+    #[test]
+    fn a_pending_row_from_a_save_without_inflight_orders_is_closed() {
+        let (e, o) = with_live_order(Some("broker-10"));
+        let mut v = serde_json::to_value(e.to_persisted()).unwrap();
+        v.as_object_mut().unwrap().remove("inflight");
+        let mut back = Engine::new();
+        back.apply_persisted(serde_json::from_value(v).unwrap());
+        let r = row(&back, &o.order_id);
+        assert_eq!(r.status, OrderStatus::Rejected);
+        assert!(r.reject_reason.as_deref().unwrap().contains("status unknown"));
+        assert!(back.orders.iter().all(|x| x.status != OrderStatus::Pending));
+    }
+
+    #[test]
+    fn reconciliation_waits_for_an_order_in_flight_instead_of_counting_its_fill_twice() {
+        // 1 share held, a buy out for more; it filled at the venue while Pythia was down.
+        let (mut e, first) = with_live_order(Some("b-1"));
+        e.apply_live_update(&first.order_id, update(BrokerOrderStatus::Filled, first.qty, 228.0));
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
+        let second = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&second.order_id, "b-2");
+        let mut back = restored(&e);
+        let total = first.qty + second.qty;
+        let venue = [BrokerPosition { symbol: "AAPL".into(), qty: total, avg_price: 228.0, market_value: total * 228.0 }];
+
+        assert_eq!(back.reconcile_positions(Venue::Alpaca, &venue, false), 0, "left to the order's own report");
+        assert!((back.positions["alpaca:AAPL"].qty - first.qty).abs() < 1e-9);
+        // And not dropped either, while the order is out.
+        assert_eq!(back.reconcile_positions(Venue::Alpaca, &[], false), 0);
+        back.apply_live_update(&second.order_id, update(BrokerOrderStatus::Filled, second.qty, 228.0));
+        assert!((back.positions["alpaca:AAPL"].qty - total).abs() < 1e-9);
+        assert_eq!(back.reconcile_positions(Venue::Alpaca, &venue, false), 0, "book and venue agree");
     }
 
     #[test]
