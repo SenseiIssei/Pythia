@@ -17,8 +17,8 @@ TRADES = pa.schema([
 
 BOOK = pa.schema([
     ("ts_recv_us", pa.int64()),
-    ("ts_exch_us", pa.int64()),       # Kraken: last update; Binance: null (partial depth has no time)
-    ("update_id", pa.int64()),        # Binance lastUpdateId; Kraken: null
+    ("ts_exch_us", pa.int64()),       # Kraken, Bybit, OKX, Coinbase: last update; Binance: null (partial depth has no time)
+    ("update_id", pa.int64()),        # Binance lastUpdateId, Bybit u, OKX seqId; Kraken, Coinbase: null
     ("symbol", pa.string()),
     ("bid_px", _levels),
     ("bid_qty", _levels),

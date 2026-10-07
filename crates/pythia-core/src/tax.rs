@@ -83,14 +83,20 @@ pub fn flush(engine: &std::sync::Mutex<crate::engine::Engine>, path: &Path) {
 }
 
 /// Every fill in the record, oldest first. A damaged line is skipped and
-/// counted, never silently dropped.
+/// counted, never silently dropped. A line that parses but cannot be a fill
+/// (no quantity, a price that is not a number) counts as damaged too: one zero
+/// quantity divides to NaN and turns every later gain on that asset into NaN.
 pub fn read_all(path: &Path) -> (Vec<FillRecord>, usize) {
     let Ok(text) = std::fs::read_to_string(path) else { return (vec![], 0) };
     let mut bad = 0;
+    let usable = |r: &FillRecord| r.qty.is_finite() && r.qty > 0.0 && r.price.is_finite() && r.price >= 0.0 && r.fee.is_finite();
     let mut out: Vec<FillRecord> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).map_err(|_| bad += 1).ok())
+        .filter_map(|l| serde_json::from_str::<FillRecord>(l).ok().filter(usable).or_else(|| {
+            bad += 1;
+            None
+        }))
         .collect();
     out.sort_by_key(|r| r.ts);
     (out, bad)
@@ -164,7 +170,17 @@ pub struct TaxSummary {
     pub fills: usize,
 }
 
-const YEAR_MS: i64 = 365 * 24 * 3_600_000;
+/// Held for more than a year: sold after the same calendar date one year
+/// later (§ 23 EStG with § 188 BGB; a lot bought on 29 February has its year
+/// end on 28 February). Counting 365 days instead called a sale on the
+/// anniversary tax-free whenever the year held a 29 February. Dates are UTC.
+fn held_over_a_year(bought_ms: i64, sold_ms: i64) -> bool {
+    let date = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.date_naive());
+    match (date(bought_ms), date(sold_ms)) {
+        (Some(b), Some(s)) => b.checked_add_months(chrono::Months::new(12)).is_some_and(|end| s > end),
+        _ => false,
+    }
+}
 
 /// FIFO lots per asset, gains split by holding period. A preview in the quote currency.
 pub fn fifo_summary(fills: &[FillRecord]) -> TaxSummary {
@@ -198,7 +214,7 @@ pub fn fifo_summary(fills: &[FillRecord]) -> TaxSummary {
                     };
                     let take = left.min(lot.qty);
                     let gain = take * (proceeds_per_unit - lot.cost_per_unit);
-                    if r.ts - lot.ts > YEAR_MS {
+                    if held_over_a_year(lot.ts, r.ts) {
                         y.long_term += gain;
                     } else {
                         y.short_term += gain;
@@ -270,6 +286,37 @@ mod tests {
         let s = fifo_summary(&fills);
         assert!((s.years[0].short_term + 10.0).abs() < 1e-9);
         assert_eq!(s.unmatched_sells, 1, "the second BTC was bought outside the record");
+    }
+
+    fn at(date: &str) -> i64 {
+        chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp_millis()
+    }
+
+    #[test]
+    fn the_year_is_a_calendar_year_even_when_it_holds_a_29_february() {
+        // 2027-03-01 to 2028-03-01 is 366 days but still inside the year: taxable.
+        let s = fifo_summary(&[fill(at("2027-03-01"), Side::Buy, 1.0, 100.0, 0.0), fill(at("2028-03-01"), Side::Sell, 1.0, 150.0, 0.0)]);
+        assert_eq!((s.years[1].short_term, s.years[1].long_term), (50.0, 0.0), "{s:?}");
+        // The day after, it is over a year.
+        let s = fifo_summary(&[fill(at("2027-03-01"), Side::Buy, 1.0, 100.0, 0.0), fill(at("2028-03-02"), Side::Sell, 1.0, 150.0, 0.0)]);
+        assert_eq!((s.years[1].short_term, s.years[1].long_term), (0.0, 50.0));
+        // Bought on 29 February: the year ends on 28 February.
+        assert!(!held_over_a_year(at("2028-02-29"), at("2029-02-28")));
+        assert!(held_over_a_year(at("2028-02-29"), at("2029-03-01")));
+    }
+
+    #[test]
+    fn a_fill_without_quantity_is_damaged_not_a_nan_in_every_later_gain() {
+        let dir = std::env::temp_dir().join(format!("pythia-tax-nan-{}", std::process::id()));
+        let path = dir.join("fills.jsonl");
+        let _ = std::fs::remove_file(&path);
+        append(&path, &[fill(T0, Side::Buy, 0.0, 100.0, 0.1), fill(T0 + DAY, Side::Buy, 1.0, 100.0, 0.0)]).unwrap();
+        append(&path, &[fill(T0 + 2 * DAY, Side::Sell, 1.0, 110.0, 0.0)]).unwrap();
+        let (fills, bad) = read_all(&path);
+        assert_eq!((fills.len(), bad), (2, 1));
+        let s = fifo_summary(&fills);
+        assert!((s.years[0].short_term - 10.0).abs() < 1e-9, "{s:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
