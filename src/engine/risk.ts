@@ -40,6 +40,7 @@ export const DEFAULT_LIMITS: RiskLimits = {
   // Enforced by the Rust engine only; the browser paper engine ignores them.
   maxCorrelatedExposurePct: 40,
   portfolioVolTargetPct: 30,
+  volSpikeTrimMult: 0,
 };
 
 // The risk manager is sovereign: this is the ONLY path from a strategy intent to

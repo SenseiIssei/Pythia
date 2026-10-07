@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { Layers, GitFork } from "lucide-react";
 import { useStore } from "../store";
 import { Card, PageHeader, StatCard, Badge } from "../components/ui";
-import { correlationMatrix, concentration } from "../lib/correlation";
+import { correlationMatrix, concentration, type CorrMatrix } from "../lib/correlation";
 
 // diverging colour: +1 (correlated → concentration risk) warm, 0 neutral, -1 cool
 function corrColor(r: number): string {
@@ -15,14 +15,14 @@ function corrColor(r: number): string {
 }
 
 export function Correlation() {
-  const { history, positions, markets } = useStore();
+  const { history, historyTimes, positions, markets } = useStore();
 
   const symbolOf = useMemo(() => {
     const m = new Map(markets.map((x) => [x.id, x.symbol]));
     return (id: string) => m.get(id) ?? id.split(":").slice(1).join(":");
   }, [markets]);
 
-  const corr = useMemo(() => correlationMatrix(history), [history]);
+  const corr = useMemo(() => correlationMatrix(history, historyTimes), [history, historyTimes]);
   const heldIds = useMemo(() => [...new Set(positions.map((p) => p.marketId))].filter((id) => corr.ids.includes(id)), [positions, corr]);
   const conc = useMemo(() => concentration(heldIds, corr), [heldIds, corr]);
 
@@ -68,6 +68,16 @@ export function Correlation() {
         </Card>
       )}
 
+      {conc.unmeasured > 0 && (
+        <Card className="mb-4">
+          <div className="text-sm text-cyber-text-dim">
+            {conc.unmeasured} pair{conc.unmeasured === 1 ? "" : "s"} of your positions can&apos;t be compared: one side
+            runs on 5-minute candles and the other on live ticks (or the candles share too few times). They are counted
+            as moving together here, and the risk manager does the same.
+          </div>
+        </Card>
+      )}
+
       <Card title="Return Correlation Matrix" right={<Badge tone="neutral">{corr.ids.length}×{corr.ids.length}</Badge>}>
         <div className="overflow-x-auto">
           <div
@@ -88,6 +98,7 @@ export function Correlation() {
         <div className="mt-3 flex items-center gap-4 text-xs text-cyber-text-faint">
           <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded" style={{ background: corrColor(0.9) }} /> correlated (risk)</span>
           <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded" style={{ background: corrColor(-0.9) }} /> inversely (diversifying)</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded border border-cyber-border" /> can&apos;t compare (candles vs ticks)</span>
           <span>· rows/cols outlined = markets you hold</span>
         </div>
       </Card>
@@ -105,7 +116,7 @@ function Row({
 }: {
   rowId: string;
   i: number;
-  corr: { ids: string[]; matrix: number[][] };
+  corr: CorrMatrix;
   symbolOf: (id: string) => string;
   held: boolean;
   heldIds: string[];
@@ -118,14 +129,18 @@ function Row({
       {corr.ids.map((colId, j) => {
         const r = corr.matrix[i][j];
         const both = held && heldIds.includes(colId);
+        const pair = `${symbolOf(rowId)} vs ${symbolOf(colId)}`;
         return (
           <div
             key={colId}
-            title={`${symbolOf(rowId)} vs ${symbolOf(colId)}: ${r.toFixed(2)}`}
+            title={r === null ? `${pair}: can't be compared in time (candles against ticks)` : `${pair}: ${r.toFixed(2)}`}
             className="flex h-7 items-center justify-center"
-            style={{ background: i === j ? "rgba(0,240,255,0.15)" : corrColor(r), outline: both && i !== j ? "1px solid rgba(0,240,255,0.5)" : undefined }}
+            style={{
+              background: i === j ? "rgba(0,240,255,0.15)" : r === null ? "transparent" : corrColor(r),
+              outline: both && i !== j ? "1px solid rgba(0,240,255,0.5)" : undefined,
+            }}
           >
-            <span className="text-cyber-text/70">{i === j ? "" : Math.round(r * 100)}</span>
+            <span className="text-cyber-text/70">{i === j ? "" : r === null ? "-" : Math.round(r * 100)}</span>
           </div>
         );
       })}
