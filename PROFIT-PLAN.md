@@ -351,8 +351,8 @@ and the project says so rather than shipping a losing default.
 
 ### Phase E — Venue breadth
 
-- [ ] **Coinbase Advanced Trade** — ES256 JWT auth. The only HMAC-less venue in the registry; needs a
-      JWT signer, then it drops into the existing `Exchange` enum.
+- [x] **Coinbase Advanced Trade**: ES256 JWT auth, routed through the existing `Exchange` enum
+      (`connectors/cex/coinbase.rs`). Untested against the real API until the first connection test.
 - [ ] **Perpetual futures** (funding carry, §3.4) — needs leverage-aware risk limits *first*.
 - [ ] **Polymarket order signing** — see below.
 

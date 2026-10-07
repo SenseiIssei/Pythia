@@ -56,7 +56,15 @@ Pythia only ever trades against **revocable, permission-scoped API keys**. Grant
 permission and **not** withdrawal: then the worst case from a compromised machine is unwanted trades,
 not a drained account.
 
-It has **no field that accepts a private key or a seed phrase**, and this is deliberate. On-chain
+One exchange key looks like an exception and is not: a **Coinbase** API key comes as a key name plus
+an EC private key in PEM form. That private key is the API key's secret, not a wallet key. It is
+issued by Coinbase, scoped to the permissions you picked, revocable in the CDP portal at any time,
+and it signs API requests only; it controls no funds on any blockchain. Create it with **View** and
+**Trade** and never **Transfer**, and give it an **IP allowlist**, so a leaked copy can neither move
+money off Coinbase nor be used from another machine. It is stored in the OS keychain like every
+other exchange secret and never appears in logs or error messages.
+
+It has **no field that accepts a wallet private key or a seed phrase**, and this is deliberate. On-chain
 wallets are watched by *public address* only — Pythia can read the balance and cannot move it. That
 is why Polymarket order routing is not implemented: its CLOB is signed with a Polygon private key
 rather than a revocable credential, which is a different risk category and needs its own gates. See

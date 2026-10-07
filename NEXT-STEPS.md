@@ -316,9 +316,22 @@ Still open:
 
 ## 5 · Venue breadth
 
-- [ ] **Coinbase Advanced Trade** — the only non-HMAC venue in the registry.
-      Needs an ES256 JWT signer, then it drops into the existing `Exchange` enum
-      with no other change. It is listed in the UI and refuses to trade
+- [x] **Coinbase Advanced Trade** trades through the same `Exchange` enum as
+      the other four (`connectors/cex/coinbase.rs`). A CDP API key is a key
+      name plus an EC P-256 private key; every request carries a fresh ES256
+      JWT (`sign::cdp_jwt`, built on RustCrypto `p256`, format per Coinbase's
+      "API key authentication" guide, linked in the code). Market orders are
+      sized in `base_size`, the engine's tagged client id is sent as
+      `client_order_id` (Coinbase answers a repeat with the existing order),
+      and the public product endpoint supplies minimum size, size step, price
+      step and minimum order value, cached per process for an hour, so sizes
+      and limit prices are snapped onto the grid and a too-small order is
+      refused at preflight. The connection test also shows the account's fee
+      tier. Settings checks the PEM when it is saved. Open: everything is
+      tested against documented JSON shapes only. Nobody has sent a request to
+      Coinbase with a real key yet; the first connection test and a
+      minimum-size test order are the check. The cost model still uses the
+      default 0.40 / 0.60 % rather than the fee tier the account reports
 - [x] **Alpaca crypto**: `alpaca:BTC/USD` and `alpaca:ETH/USD` are seeded. The
       seed list was not the only gap: the engine's session gate blocked them
       when the equity market was closed and applied the day-trade rule, the

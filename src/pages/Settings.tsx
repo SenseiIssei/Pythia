@@ -252,7 +252,9 @@ function ExchangesCard({ native, onChanged }: { native: boolean; onChanged: () =
         <div className="mb-3 rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-xs leading-relaxed text-cyber-text-dim">
           On a backend, exchange keys come from its environment: <code className="text-accent">PYTHIA_EXCHANGE</code>,{" "}
           <code className="text-accent">PYTHIA_EXCHANGE_KEY</code>, <code className="text-accent">PYTHIA_EXCHANGE_SECRET</code>{" "}
-          (plus <code className="text-accent">PYTHIA_EXCHANGE_PASSPHRASE</code> for OKX).
+          (plus <code className="text-accent">PYTHIA_EXCHANGE_PASSPHRASE</code> for OKX). For Coinbase the key is the
+          key name and the secret the private key PEM; its line breaks may be written as{" "}
+          <code className="text-accent">\n</code>.
         </div>
       )}
 
@@ -325,7 +327,15 @@ function ExchangeRow({
     setBusy(false);
   }
 
-  const fieldLabel = (k: string) => (k === "key" ? "API key" : k === "secret" ? "API secret" : "Passphrase");
+  // Labels come from the backend so each venue can name its own fields
+  // (Coinbase: a key *name* and a PEM private key). Fallbacks cover an older server.
+  const fieldLabel = (k: string) =>
+    k === "key" ? ex.keyLabel ?? "API key" : k === "secret" ? ex.secretLabel ?? "API secret" : "Passphrase";
+  const stored = (k: string) => (ex.configured && !vals[k] ? "•••••••• (stored)" : "");
+  const onField = (k: string, v: string) => {
+    setVals((s) => ({ ...s, [k]: v }));
+    setMsg("");
+  };
 
   return (
     <div className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-3">
@@ -338,27 +348,44 @@ function ExchangeRow({
 
       {!ex.canTrade ? (
         <div className="text-xs leading-snug text-cyber-text-faint">
-          Coinbase Advanced Trade signs with ES256 JWTs rather than an HMAC, so it is listed but cannot route orders yet.
-          See PROFIT-PLAN.md.
+          Listed, but Pythia cannot route orders to {ex.label} yet.
         </div>
       ) : !manageable ? (
-        <div className="text-xs text-cyber-text-faint">Managed by the server's environment.</div>
+        <div className="space-y-1.5">
+          <div className="text-xs text-cyber-text-faint">Managed by the server's environment.</div>
+          {ex.keyHelp && <div className="text-xs leading-snug text-cyber-text-dim">{ex.keyHelp}</div>}
+        </div>
       ) : (
         <div className="space-y-2">
+          {ex.keyHelp && <div className="text-xs leading-snug text-cyber-text-dim">{ex.keyHelp}</div>}
           {needed.map((k) => (
             <Field key={k} label={fieldLabel(k)}>
-              <input
-                type={k === "key" ? "text" : "password"}
-                value={vals[k] ?? ""}
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(e) => {
-                  setVals((s) => ({ ...s, [k]: e.target.value }));
-                  setMsg("");
-                }}
-                placeholder={ex.configured && !vals[k] ? "•••••••• (stored)" : ""}
-                className={inputCls}
-              />
+              {k === "secret" && ex.secretMultiline ? (
+                // A PEM block spans several lines; a password input would
+                // silently drop the line breaks. The backend re-wraps it either
+                // way, but a text area shows the user they pasted all of it.
+                <textarea
+                  value={vals[k] ?? ""}
+                  autoComplete="off"
+                  spellCheck={false}
+                  rows={5}
+                  onChange={(e) => onField(k, e.target.value)}
+                  placeholder={stored(k) || "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----"}
+                  className={`${inputCls} font-mono text-xs`}
+                />
+              ) : (
+                <input
+                  type={k === "key" ? "text" : "password"}
+                  value={vals[k] ?? ""}
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(e) => onField(k, e.target.value)}
+                  placeholder={
+                    stored(k) || (k === "key" && ex.id === "coinbase" ? "organizations/.../apiKeys/..." : "")
+                  }
+                  className={inputCls}
+                />
+              )}
             </Field>
           ))}
           <div className="flex flex-wrap items-center gap-2 pt-1">

@@ -112,14 +112,14 @@ export function Wallets() {
       <Notice tone="info" icon={ShieldCheck} title={advanced ? "Read-only, and self-custody stays self-custody" : "Pythia can look, not take"}>
         {advanced ? (
           <>
-            Pythia never asks for a seed phrase or a private key. On-chain wallets are watched by public address: it can
+            Pythia never asks for a seed phrase or a wallet private key. On-chain wallets are watched by public address: it can
             see them, it cannot move them. Trading happens only at venues where you hold a{" "}
             <span className="text-accent">revocable API key</span>, so a compromised Pythia costs you a key rotation,
             not your coins.
           </>
         ) : (
           <>
-            It never asks for a seed phrase or a private key. Crypto wallets are watched by their public address, which
+            It never asks for a seed phrase or a wallet private key. Crypto wallets are watched by their public address, which
             lets it see a balance but never move it. Where it can trade, it uses a key you can switch off at any time.
           </>
         )}
