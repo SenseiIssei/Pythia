@@ -30,8 +30,11 @@
 //! `depth` is the notional on the 20 best levels of the side the order takes,
 //! in quote currency: what a depth20 feed reports, and what the calibration in
 //! `research/lab` measured. A live book passed in must use the same definition,
-//! or the fitted coefficient no longer means anything. When no live book is
-//! available the venue's `default_depth` (the measured median) stands in.
+//! or the fitted coefficient no longer means anything; `crate::orderbook`
+//! computes it that way for the engine's live Kraken and Binance books. When no
+//! fresh live book is available the venue's `default_depth` (the measured
+//! median) stands in. Backtests always use the default: there is no live book
+//! for the past.
 //! The square root is the empirical square-root law of market impact: doubling
 //! the size does not double the impact, but it never makes it free either. At
 //! `notional == depth` the impact is exactly `impact_coeff` bps.
