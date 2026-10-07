@@ -1,5 +1,6 @@
+import { Package, ReceiptText } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Badge, fmtUsd } from "../components/ui";
+import { Card, PageHeader, Badge, EmptyState, Notice, Term, fmtUsd } from "../components/ui";
 import { ConfirmButton } from "../components/Confirm";
 
 export function Positions() {
@@ -8,105 +9,105 @@ export function Positions() {
   const stuck = positions.some((p) => p.live) && !live.armed;
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Positions" subtitle="Open positions & recent orders across all venues" />
+    <div className="animate-fade-in mx-auto max-w-6xl space-y-4">
+      <PageHeader title="Positions" subtitle="What it holds right now, and the orders it sent recently, across all venues." />
 
       {stuck && (
-        <Card className="mb-4 border-danger/40 bg-danger/5">
-          <div className="text-sm text-cyber-text-dim">
-            <span className="font-bold text-danger">REAL positions cannot be flattened while disarmed.</span>{" "}
-            Those shares exist at the venue — the simulator will not pretend to close them. Arm live execution
-            again, or close them in the venue's own dashboard.
-          </div>
-        </Card>
+        <Notice tone="danger" title="Real positions cannot be closed while disarmed">
+          Those shares exist at the broker, and the simulator will not pretend to close them. Arm live execution again,
+          or close them in the broker's own dashboard.
+        </Notice>
       )}
 
-      <Card title="Open Positions" className="mb-4">
+      <Card title="Open positions" icon={Package}>
         {positions.length === 0 ? (
-          <div className="py-6 text-center text-sm text-cyber-text-faint">
-            No open positions. The engine will open some as strategies fire, or trade manually from Markets.
-          </div>
+          <EmptyState icon={Package} title="Nothing held right now">
+            The engine opens positions as strategies fire. You can also place a practice order by hand on the Markets
+            page.
+          </EmptyState>
         ) : (
-          <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-x-4 text-sm">
-            <Head>Market</Head>
-            <Head right>Qty</Head>
-            <Head right>Avg</Head>
-            <Head right>Last</Head>
-            <Head right>Unrealized</Head>
-            <Head right>Action</Head>
-            {positions.map((p) => (
-              <RowGroup key={p.marketId}>
-                <div className="flex items-center gap-2 py-2">
-                  <Badge tone={p.qty >= 0 ? "green" : "red"}>{p.qty >= 0 ? "LONG" : "SHORT"}</Badge>
-                  <span>{p.symbol}</span>
-                  {/* Real shares behave differently from simulated ones: they
-                      can only be closed while live routing is armed. */}
-                  {p.live && <Badge tone="red">REAL</Badge>}
-                </div>
-                <Cell>{p.qty.toFixed(4)}</Cell>
-                <Cell>{p.avgPrice.toLocaleString()}</Cell>
-                <Cell>{p.lastPrice.toLocaleString()}</Cell>
-                <Cell className={p.unrealized >= 0 ? "text-success" : "text-danger"}>
-                  {fmtUsd(p.unrealized)}
-                </Cell>
-                <div className="flex items-center justify-end py-1.5">
-                  <ConfirmButton
-                    tone={p.live ? "red" : "neutral"}
-                    className="!px-2 !py-1"
-                    question={
-                      p.live
-                        ? `Sell all ${Math.abs(p.qty).toFixed(4)} ${p.symbol} for real, at about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}? This sends a real order and cannot be undone.`
-                        : `Close the practice position in ${p.symbol} at today's price, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}?`
-                    }
-                    confirmLabel={p.live ? "Yes, sell for real" : "Close it"}
-                    onConfirm={() => flatten(p.marketId)}
-                  >
-                    Flatten
-                  </ConfirmButton>
-                </div>
-              </RowGroup>
-            ))}
+          <div className="-mx-1 overflow-x-auto px-1">
+            <table className="w-full min-w-[620px] text-sm">
+              <thead>
+                <tr className="font-mono text-[11px] uppercase tracking-wider text-cyber-text-faint">
+                  <th className="pb-2 text-left font-medium">Market</th>
+                  <th className="pb-2 text-right font-medium"><Term>Qty</Term></th>
+                  <th className="pb-2 text-right font-medium"><Term>Avg</Term></th>
+                  <th className="pb-2 text-right font-medium"><Term>Last</Term></th>
+                  <th className="pb-2 text-right font-medium"><Term>Unrealized</Term></th>
+                  <th className="pb-2 text-right font-medium"><Term>Flatten</Term></th>
+                </tr>
+              </thead>
+              <tbody>
+                {positions.map((p) => (
+                  <tr key={p.marketId} className="border-t border-cyber-border">
+                    <td className="py-2 pr-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge
+                          tone="neutral"
+                          title={p.qty >= 0 ? "Bought: gains if the price rises" : "Sold short: gains if the price falls"}
+                        >
+                          {p.qty >= 0 ? "LONG" : "SHORT"}
+                        </Badge>
+                        <span className="font-medium">{p.symbol}</span>
+                        {/* Real shares behave differently from simulated ones: they
+                            can only be closed while live routing is armed. */}
+                        {p.live && (
+                          <Badge tone="red" title="Bought with real money at the broker">
+                            REAL
+                          </Badge>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2 text-right font-mono">{p.qty.toFixed(4)}</td>
+                    <td className="py-2 text-right font-mono text-cyber-text-dim">{p.avgPrice.toLocaleString()}</td>
+                    <td className="py-2 text-right font-mono">{p.lastPrice.toLocaleString()}</td>
+                    <td className={`py-2 text-right font-mono ${p.unrealized >= 0 ? "text-success" : "text-danger"}`}>
+                      {fmtUsd(p.unrealized)}
+                    </td>
+                    <td className="py-1.5 pl-3 text-right">
+                      <ConfirmButton
+                        tone={p.live ? "red" : "neutral"}
+                        className="!px-2.5 !py-1 !text-xs"
+                        question={
+                          p.live
+                            ? `Sell all ${Math.abs(p.qty).toFixed(4)} ${p.symbol} for real, at about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}? This sends a real order and cannot be undone.`
+                            : `Close the practice position in ${p.symbol} at today's price, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}?`
+                        }
+                        confirmLabel={p.live ? "Yes, sell for real" : "Close it"}
+                        onConfirm={() => flatten(p.marketId)}
+                      >
+                        Flatten
+                      </ConfirmButton>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </Card>
 
-      <Card title="Recent Orders">
-        <div className="space-y-1 font-mono text-xs">
-          {recent.length === 0 && <div className="text-cyber-text-faint">No orders yet.</div>}
-          {recent.map((o) => (
-            <div key={o.id} className="flex items-center gap-3 border-b border-cyber-border/50 py-1">
-              <span className="text-cyber-text-faint">{new Date(o.ts).toLocaleTimeString()}</span>
-              <span className={o.side === "buy" ? "text-success" : "text-danger"}>
-                {o.side.toUpperCase()}
-              </span>
-              <span className="flex-1 text-cyber-text-dim">{o.marketId}</span>
-              <span>{o.filledQty.toFixed(4)}</span>
-              <Badge
-                tone={
-                  o.status === "filled" ? "green" : o.status === "rejected" ? "red" : "neutral"
-                }
-              >
-                {o.status}
-              </Badge>
-              {o.rejectReason && <span className="text-danger">{o.rejectReason}</span>}
-            </div>
-          ))}
-        </div>
+      <Card title="Recent Orders" icon={ReceiptText}>
+        {recent.length === 0 ? (
+          <EmptyState compact icon={ReceiptText} title="No orders yet" />
+        ) : (
+          <ul className="divide-y divide-cyber-border/60 text-xs">
+            {recent.map((o) => (
+              <li key={o.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
+                <span className="font-mono text-cyber-text-faint">{new Date(o.ts).toLocaleTimeString()}</span>
+                <span className={`font-mono font-bold ${o.side === "buy" ? "text-success" : "text-danger"}`}>
+                  {o.side.toUpperCase()}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-cyber-text-dim">{o.marketId}</span>
+                <span className="font-mono">{o.filledQty.toFixed(4)}</span>
+                <Badge tone={o.status === "filled" ? "green" : o.status === "rejected" ? "red" : "neutral"}>{o.status}</Badge>
+                {o.rejectReason && <span className="basis-full text-danger sm:basis-auto">{o.rejectReason}</span>}
+              </li>
+            ))}
+          </ul>
+        )}
       </Card>
     </div>
   );
-}
-
-function Head({ children, right }: { children: React.ReactNode; right?: boolean }) {
-  return (
-    <div className={`pb-2 text-xs uppercase text-cyber-text-faint ${right ? "text-right" : ""}`}>
-      {children}
-    </div>
-  );
-}
-function Cell({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <div className={`py-2 text-right font-mono ${className}`}>{children}</div>;
-}
-function RowGroup({ children }: { children: React.ReactNode }) {
-  return <div className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">{children}</div>;
 }

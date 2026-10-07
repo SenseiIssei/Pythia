@@ -1,23 +1,35 @@
 import { useState } from "react";
 import { Play, Pause, Radio, FlaskConical, AlertTriangle, ShieldCheck, Lock, RefreshCw } from "lucide-react";
 import { useStore } from "../store";
-import { Button, Card, PageHeader, Badge, Sparkline, fmtUsd } from "../components/ui";
+import { Cpu } from "lucide-react";
+import { Button, Card, PageHeader, Badge, EmptyState, Explain, Sparkline, Term, fmtUsd, inputCls } from "../components/ui";
+import { explain } from "../glossary";
 import { PnlLines } from "../components/PnlBreakdown";
 import { researchAvailable, runValidation } from "../research";
 import type { Gate, GateUnit, Passport, StrategyConfig } from "../types";
 
 export function Strategies() {
   const { strategies, passports } = useStore();
+  const list = strategies.filter((s) => s.id !== "manual");
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Strategies" subtitle="Prove in paper · earn the passport · then arm live deliberately" />
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {strategies
-          .filter((s) => s.id !== "manual")
-          .map((s) => (
+    <div className="animate-fade-in mx-auto max-w-6xl">
+      <PageHeader
+        title="Strategies"
+        subtitle="Each one is a rule set that decides on its own when to buy or sell. Prove it in paper, earn the passport, then arm live deliberately."
+      />
+      {list.length === 0 ? (
+        <Card>
+          <EmptyState icon={Cpu} title="No strategies loaded yet">
+            They arrive with the first update from the engine, usually within a second or two.
+          </EmptyState>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          {list.map((s) => (
             <StrategyCard key={s.id} s={s} passport={passports.get(s.id)} />
           ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -47,30 +59,42 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
 
   return (
     <Card>
-      <div className="mb-3 flex items-start justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="font-bold">{s.name}</span>
-            <Badge tone={live ? "red" : paused ? "neutral" : "cyan"}>
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="font-semibold text-cyber-text">{s.name}</h2>
+            <Badge
+              tone={live ? "red" : paused ? "neutral" : "cyan"}
+              title={live ? "Sends real orders" : paused ? "Switched off" : "Trades practice money"}
+            >
               {live ? "LIVE" : paused ? "PAUSED" : "PAPER"}
             </Badge>
           </div>
-          <div className="mt-0.5 text-xs text-cyber-text-faint">
-            {s.kind} · {s.universe.length} markets · budget {s.budgetPct}%
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1 text-xs text-cyber-text-faint">
+            <span className="font-mono">{s.kind}</span> · {s.universe.length} markets ·{" "}
+            <Term k="Budget">budget {s.budgetPct}%</Term>
           </div>
         </div>
-        <div className={`text-right text-lg font-bold ${s.pnl >= 0 ? "text-success" : "text-danger"}`}>
-          {fmtUsd(s.pnl)}
-          <div className="text-xs font-normal text-cyber-text-faint">
-            {s.trades} trades · {(s.winRate * 100).toFixed(0)}% win
+        <div className="text-right">
+          <div className={`font-mono text-lg font-bold ${s.pnl > 0 ? "text-success" : s.pnl < 0 ? "text-danger" : "text-cyber-text"}`}>
+            {fmtUsd(s.pnl)}
           </div>
-          <div className="text-xs font-normal text-cyber-text-faint">
-            PF {s.profitFactor.toFixed(2)} · maxDD {fmtUsd(s.maxDrawdown)}
+          <div className="flex items-center justify-end gap-1 text-xs text-cyber-text-faint">
+            {s.trades} trades · {(s.winRate * 100).toFixed(0)}% won
+            <Explain text={explain("Win Rate")!} label="won" />
+          </div>
+          <div className="flex items-center justify-end gap-1 font-mono text-xs text-cyber-text-faint">
+            <Term k="PF">PF {s.profitFactor.toFixed(2)}</Term> · <Term k="maxDD">maxDD {fmtUsd(s.maxDrawdown)}</Term>
           </div>
         </div>
       </div>
 
-      <Sparkline data={s.equityCurve.length > 1 ? s.equityCurve : [0, 0]} height={44} tone={s.pnl >= 0 ? "green" : "red"} />
+      <Sparkline
+        data={s.equityCurve.length > 1 ? s.equityCurve : [0, 0]}
+        height={44}
+        tone={s.pnl >= 0 ? "green" : "red"}
+        label={`${s.name} profit and loss over time`}
+      />
 
       {s.ledger && s.trades > 0 && (
         <div className="mt-3">
@@ -81,8 +105,8 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
       {/* params */}
       <div className="mt-3 space-y-2">
         {s.params.map((p) => (
-          <div key={p.key} className="flex items-center gap-3 text-xs">
-            <span className="w-28 text-cyber-text-dim">{p.label}</span>
+          <label key={p.key} className="flex items-center gap-3 text-xs">
+            <span className="w-28 shrink-0 text-cyber-text-dim">{p.label}</span>
             <input
               type="range"
               min={p.min}
@@ -90,18 +114,18 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
               step={p.step}
               value={p.value}
               onChange={(e) => setStrategyParam(s.id, p.key, Number(e.target.value))}
-              className="flex-1 accent-[#00f0ff]"
+              className="min-w-0 flex-1"
             />
-            <span className="w-12 text-right font-mono text-accent">{p.value}</span>
-          </div>
+            <span className="w-12 shrink-0 text-right font-mono text-accent">{p.value}</span>
+          </label>
         ))}
       </div>
 
       {passport && <PassportView s={s} passport={passport} />}
 
       {/* controls */}
-      <div className="mt-4 flex items-center justify-between border-t border-cyber-border pt-3">
-        <div className="flex items-center gap-2">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-cyber-border pt-3">
+        <div className="flex flex-wrap items-center gap-2">
           {paused ? (
             <Button tone="cyan" icon={Play} onClick={() => void setStrategyState(s.id, "paper")}>
               Resume (paper)
@@ -144,16 +168,17 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
       {/* arm-live confirmation */}
       {confirm && !live && ready && (
         <div className="mt-3 rounded-lg border border-danger/40 bg-danger/5 p-3">
-          <div className="mb-2 flex items-center gap-2 text-xs text-danger">
-            <AlertTriangle size={14} />
+          <div className="mb-2 flex items-start gap-2 text-xs text-danger">
+            <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0" />
             Arming live routes REAL orders using this venue's API keys. Type the strategy name to confirm.
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <input
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
               placeholder={s.name}
-              className="flex-1 rounded border border-cyber-border bg-cyber-surface px-2 py-1 text-sm focus:border-danger focus:outline-none"
+              aria-label={`Type ${s.name} to confirm`}
+              className={`${inputCls} min-w-0 flex-1 basis-40 focus:border-danger`}
             />
             <Button tone="red" onClick={() => void armLive()} disabled={typed.trim() !== s.name}>
               Confirm live
@@ -193,12 +218,14 @@ function PassportView({ s, passport }: { s: StrategyConfig; passport: Passport }
     <div className="mt-4 rounded-lg border border-cyber-border bg-cyber-surface-2 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <ShieldCheck size={14} className={passport.liveReady ? "text-success" : "text-cyber-text-faint"} />
-        <span className="text-xs font-bold uppercase tracking-widest text-cyber-text-dim">Strategy Passport</span>
+        <span className="font-mono text-xs font-bold uppercase tracking-widest text-cyber-text-dim">
+          <Term k="Strategy Passport">Strategy Passport</Term>
+        </span>
         <Badge tone={passport.liveReady ? "green" : "neutral"}>{passed} / 8 passed</Badge>
         {passport.stale && <Badge tone="red">parameters changed</Badge>}
         <span className="flex-1" />
         {canRun && (
-          <Button tone="cyan" icon={RefreshCw} className="!px-2 !py-0.5 text-xs" onClick={() => void check()} disabled={busy}>
+          <Button tone="cyan" size="sm" icon={RefreshCw} onClick={() => void check()} disabled={busy}>
             {busy ? "Checking…" : passport.checkedAt ? "Re-run checks" : "Run checks"}
           </Button>
         )}
@@ -225,8 +252,17 @@ function GateRow({ gate, open, onToggle }: { gate: Gate; open: boolean; onToggle
   const text = gate.status === "pass" ? "text-success" : gate.status === "fail" ? "text-danger" : "text-cyber-text-faint";
   return (
     <div className="text-xs">
-      <button className="flex w-full items-center gap-2 py-0.5 text-left" onClick={onToggle} title={gate.reason}>
-        <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} aria-label={gate.status} />
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 rounded py-0.5 text-left hover:bg-cyber-surface"
+        onClick={onToggle}
+        aria-expanded={open}
+        title={gate.reason}
+      >
+        <span
+          className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`}
+          aria-label={gate.status === "pass" ? "passed" : gate.status === "fail" ? "failed" : "not checked yet"}
+        />
         <span className="w-4 text-cyber-text-faint">{gate.id}</span>
         <span className="flex-1 text-cyber-text-dim">{gate.name}</span>
         <span className={`font-mono ${text}`}>{gate.value === undefined ? "–" : fmtValue(gate.value, gate.unit)}</span>

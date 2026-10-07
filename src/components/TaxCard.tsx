@@ -58,28 +58,32 @@ export function TaxCard() {
   return (
     <Card
       title="Tax record"
-      className="mb-4"
       right={
         mode === "native" ? (
-          <Button tone="neutral" icon={FileDown} onClick={() => void exportCsv()}>
+          <Button tone="neutral" size="sm" icon={FileDown} onClick={() => void exportCsv()}>
             CoinTracking CSV
           </Button>
         ) : (
-          <a className="text-xs text-accent underline" href={`${serverUrl()}/api/tax?format=cointracking`}>
-            CoinTracking CSV
+          <a
+            className="inline-flex items-center gap-1.5 rounded-lg border border-cyber-border-bright px-2.5 py-1 text-xs text-accent hover:bg-cyber-surface-2"
+            href={`${serverUrl()}/api/tax?format=cointracking`}
+          >
+            <FileDown size={13} aria-hidden /> CoinTracking CSV
           </a>
         )
       }
     >
-      <p className="text-xs text-cyber-text-dim">
+      <p className="text-xs leading-relaxed text-cyber-text-dim">
         Every real fill is kept in an append-only file. The CSV imports into Blockpit, CoinTracking and similar tools,
         which convert to euros at each trade's rate. Below is a first-in, first-out preview in dollars: for crypto in
         Germany, gains on lots held over a year are tax-free, shorter ones count against the 1,000 EUR yearly limit.
         A preview, not tax advice.
       </p>
       {s && s.fills === 0 && <p className="mt-2 text-sm text-cyber-text-dim">No real fills yet. Paper trades are never recorded here.</p>}
+      {!s && !note && <p className="mt-2 text-xs text-cyber-text-faint">Reading the record.</p>}
       {s && s.years.length > 0 && (
-        <table className="mt-3 w-full text-sm tabular-nums">
+        <div className="-mx-1 overflow-x-auto px-1">
+        <table className="mt-3 w-full min-w-[480px] font-mono text-sm tabular-nums">
           <thead>
             <tr className="text-left text-xs uppercase tracking-wide text-cyber-text-faint">
               <th className="py-1">Year</th>
@@ -101,6 +105,7 @@ export function TaxCard() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       {s && s.unmatchedSells > 0 && (
         <p className="mt-2 text-xs text-warning">
