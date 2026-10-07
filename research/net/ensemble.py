@@ -46,6 +46,21 @@ def main() -> None:
          if out["ic_ens"] > max(out["ic_m2"], out["ic_m3"]) else
          "The average does not beat the better model: keep the better one alone."),
     ]
+    # A weighted blend, with the weight chosen on 2022-2023 only and judged on 2024 on.
+    split = int(np.datetime64("2024-01-01", "us").astype(np.int64))
+    weights = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+
+    def ic_for(w: float, part: pl.DataFrame) -> float:
+        p = part.with_columns(blend=(1 - w) * pl.col("r2") + w * pl.col("r3"))
+        return float(p.group_by("day").agg(ic=pl.corr("blend", "fwd", method="spearman"))["ic"].drop_nans().mean())
+
+    early, late = df.filter(pl.col("day") < split), df.filter(pl.col("day") >= split)
+    w_best = max(weights, key=lambda w: ic_for(w, early))
+    late_m2, late_blend = ic_for(0.0, late), ic_for(w_best, late)
+    lines.append(f"Weighted blend: weight on Pythia-Net chosen on 2022-2023 = {w_best:.1f}. From 2024: "
+                 f"M2 alone {late_m2:.4f}, blend {late_blend:.4f}. "
+                 + ("The blend adds something out of sample." if late_blend > late_m2 + 0.002 else
+                    "The blend adds nothing worth the extra model."))
     text = "# M2 and Pythia-Net combined\n\n" + "\n\n".join(lines) + "\n"
     d = root / "reports" / "ensemble"
     d.mkdir(parents=True, exist_ok=True)
