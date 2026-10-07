@@ -252,12 +252,9 @@ async fn save_loop(state: AppState) {
     let Some(path) = state_file() else { return };
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        let json = serde_json::to_string(&state.engine.lock().unwrap().to_persisted());
-        if let Ok(json) = json {
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+        let snapshot = state.engine.lock().unwrap().to_persisted();
+        if let Err(e) = pythia_core::persist::save(&path, &snapshot) {
+            tracing::warn!("state not saved to {}: {e}", path.display());
         }
     }
 }
@@ -307,13 +304,26 @@ async fn main() {
         // Resume where the last run left off: positions, strategies and their
         // forward-test records. Without this every restart would reset gate 7.
         if let Some(path) = state_file() {
-            match std::fs::read_to_string(&path).map(|t| serde_json::from_str::<pythia_core::engine::Persisted>(&t)) {
-                Ok(Ok(p)) => {
-                    e.apply_persisted(p);
+            use pythia_core::persist::Loaded;
+            match pythia_core::persist::load(&path) {
+                Loaded::Restored(p) => {
+                    e.apply_persisted(*p);
                     tracing::info!("state restored from {}", path.display());
                 }
-                Ok(Err(err)) => tracing::warn!("state file {} unreadable, starting fresh: {err}", path.display()),
-                Err(_) => tracing::info!("no state file at {} yet, starting fresh", path.display()),
+                Loaded::Missing => tracing::info!("no state file at {} yet, starting fresh", path.display()),
+                Loaded::Unreadable { error, moved_to: Some(aside) } => tracing::warn!(
+                    "state file {} unreadable, starting fresh; the old file is kept as {}: {error}",
+                    path.display(),
+                    aside.display()
+                ),
+                Loaded::Unreadable { error, moved_to: None } => {
+                    // Saving now would overwrite the only copy. Refuse to run.
+                    tracing::error!(
+                        "state file {} unreadable and could not be moved aside, not starting: {error}",
+                        path.display()
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         e.set_connected(creds.connected_venues());
