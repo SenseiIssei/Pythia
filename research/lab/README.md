@@ -42,6 +42,64 @@ and reach the PC with the next sync.
 | `carry` | Spot long, perp short, collect funding | No. 1.4 % a year on capital from 2024, an upper bound. Perpetuals are not built. |
 | `costs` | What does crossing the book really cost, per coin? | Spreads are far tighter than the guesses: BTC one tick on both venues, most coins under 2 bps a side. Fees are nearly all of it: a Kraken taker round trip is 80 bps, Binance 20. Weekly, report only (2026-10-07). |
 
+## Strategy-family sweep (2026-10-07)
+
+`python -m lab.experiments.families` (add `--fresh` to recompute; one family:
+`python -m lab.experiments.fam_<name>`). Nine families, **100 variants**, all
+on one survivorship-free daily panel: every USDT pair Binance ever listed, 591
+coin segments, delisted coins included, reused tickers split as in `picks.py`.
+Shared code in `experiments/fam_common.py`; caches and JSON under
+`<data>/agent-strategies/`; reports in `results/` (`families_summary.md` and
+one `family_<name>.md` each). Pick = best in-sample (2020-08 to 2023) Sharpe at
+15 bps per sub-family; judged from 2024-01-01 (1010 days) at 15 and 41 bps per
+unit of turnover; deflated over all 100 variants. Pass = deflated p > 0.95,
+Sharpe > 0 at 41 bps, drawdown below the benchmark.
+
+Benchmarks out of sample: BTC Sharpe 0.78, drawdown 53 %; equal-weight
+universe Sharpe -0.34, drawdown 91 %. The best of 100 noise strategies would
+show an annual Sharpe of about 2.6 here, so that is roughly the bar.
+
+| Family | In-sample pick | OOS Sharpe 15 / 41 bps | CAGR at 41 bps | Max DD at 41 bps | Turnover / yr | Sharpe BTC above / below 200d | Deflated p | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| 1 reversal, long-only | 3d losers, all eligible | -0.91 / -1.56 | -78 % | 99 % | 193 | -0.83 / -1.06 | 0.00 | Fails. Crypto continues at 1 to 7 days, it does not revert. |
+| 1 reversal, market-neutral | 7d losers vs winners | -1.18 / -2.07 | -40 % | 78 % | 83 | -1.12 / -1.26 | 0.00 | Fails. |
+| 2 tsmom, survivorship-free (+ vol management) | 28d, top 20 by volume, regime, unscaled | 0.54 / 0.32 | 4 % | 24 % | 13 | 0.70 / -2.29 | 0.00 | Fails. Book-level vol scaling made every variant worse. |
+| 3 Donchian breakout, BTC+ETH | 55/27, regime | 1.07 / 1.03 | 27 % | 28 % | 4 | 1.38 / -0.96 | 0.01 | Fails deflation only. All 12 variants positive at 41 bps. |
+| 3 Donchian breakout, top 10 | 20/10, no regime | 1.20 / 1.08 | 22 % | 22 % | 9 | 1.78 / -0.55 | 0.01 | Fails deflation only. Strongest robust family. |
+| 4 pair spreads | 90d window, z 1.5, cointegrated only | -1.21 / -1.66 | -5 % | 12 % | 5 | -1.62 / -0.37 | 0.00 | Fails. 8 % of windows test cointegrated (5 % by chance), and it does not carry into the next window. |
+| 5 seasonality, BTC | 2 best weekdays | -0.32 / -1.30 | -33 % | 70 % | 104 | -0.43 / -0.16 | 0.00 | Fails. 1 of 66 calendar effects survives BH, and it vanishes out of sample. |
+| 5 seasonality, ETH | turn of month | -0.86 / -1.10 | -27 % | 63 % | 24 | -0.96 / -0.69 | 0.00 | Fails. |
+| 6 funding timing, BTC+ETH | contrarian, z 90d | 0.08 / -0.17 | -4 % | 23 % | 15 | -0.56 / 0.69 | 0.00 | Fails. |
+| 6 funding timing, top 20 | trend, z 180d | 0.64 / 0.42 | 4 % | 16 % | 8 | 1.16 / -1.05 | 0.00 | Fails. |
+| 6 open interest (old 20 coins, from 2022) | OI and price up, 7d | 0.69 / 0.13 | 1 % | 36 % | 38 | 1.14 / -0.38 | 0.00 | Fails. |
+| 7 low vol, long-only | lowest-vol quintile of top 100 | 0.28 / 0.23 | -5 % | 75 % | 12 | 0.35 / 0.14 | 0.00 | Fails. Low-beta ranking is worse (-1.2 to -1.5). |
+| 7 low vol, market-neutral (perps) | vol 60d, top 50, beta-neutral | 2.11 / 1.91 | 72 % | 17 % | 23 | 2.38 / 1.78 | 0.21 | Fails deflation. In-sample 0.54: an altcoin-bleed bet that the out-of-sample years favoured; shorts pay heavy funding. |
+| 8 dual momentum | top 10 by 28d, regime | 0.07 / -0.05 | -2 % | 31 % | 8 | 0.07 / 0.11 | 0.00 | Fails. |
+| 8 trend + carry | tsmom top 20 minus crowded funding, regime | 0.71 / 0.37 | 3 % | 17 % | 14 | 0.93 / -2.24 | 0.00 | Fails. |
+| 8 XS momentum long/short | 28d quintiles, top 50 | -0.63 / -1.01 | -32 % | 68 % | 49 | 0.59 / -2.48 | 0.00 | Fails. M2's ranking skill is not plain momentum. |
+| 9 risk-parity ensemble, spot | 10 spot picks with IS Sharpe > 0.5 | 0.42 / 0.11 | 1 % | 23 % | 15 | 0.69 / -0.50 | 0.00 | Fails. |
+| 9 risk-parity ensemble, all | all 16 picks | 0.30 / -0.35 | -3 % | 15 % | 17 | 0.58 / -0.71 | 0.00 | Fails. |
+
+**Nothing passes.** Three findings matter beyond the verdict:
+
+- The existing paper candidate leans on survivorship. Through the same
+  simulator it makes OOS Sharpe 1.07 on today's 20 coins, but the identical
+  rule on the 20 most liquid coins of each day makes 0.54 (0.32 at 41 bps).
+  Against this sweep's bar its deflated p is 0.00 (0.22 with the pure-noise
+  variance 1/T).
+- Breakouts are the most robust family: every variant positive out of sample
+  at 41 bps, low turnover, drawdown under half of BTC's. Inside its own family
+  the pick's deflated p is 0.91; against all 100 trials it is 0.01, mostly
+  because its daily returns are fat-tailed (kurtosis 15). If anything goes to
+  a paper forward test next, this is the one.
+- The low-vol market-neutral book has the highest out-of-sample Sharpe (2.1)
+  but its in-sample Sharpe was 0.5 and its money comes from shorting
+  high-volatility coins in an altcoin bear market (see `family_lowvol.md`).
+  It needs perpetuals, which Pythia does not trade.
+
+Deflation sensitivity for every pick (raw variance, pure-noise variance,
+within-family only) is in `families_summary.md`.
+
 ## Paper forward tests (gate 7)
 
 `lab.paper.tsmom` runs both momentum books at 04:00 UTC from
