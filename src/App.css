@@ -8,9 +8,9 @@
   --cyber-surface-2: #1a1a24;
   --cyber-border: #1e1e2a;
   --cyber-border-bright: #2a2a3e;
-  --cyber-text: #e0e0e8;
-  --cyber-text-dim: #8888a0;
-  --cyber-text-faint: #555568;
+  --cyber-text: #e6e6ee;
+  --cyber-text-dim: #9a9ab2;
+  --cyber-text-faint: #7d7d93;
   --accent-cyan: #00f0ff;
   --accent-purple: #a855f7;
   --danger: #ef4444;
@@ -30,12 +30,26 @@ body,
   background: transparent;
 }
 
+/* Running text in the system sans, which reads far more easily in paragraphs
+   and fits a phone; numbers, headings and labels opt into the monospace with
+   `font-mono`, which keeps Pythia's look. */
 body {
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
   color: var(--cyber-text);
   overflow: hidden;
   user-select: none;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Text people may want to copy stays selectable. */
+input,
+textarea,
+select,
+pre,
+code {
+  user-select: text;
 }
 
 /* Frameless rounded window body */
@@ -45,8 +59,31 @@ body {
   background: var(--cyber-bg);
   border: 1px solid var(--cyber-border);
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* A phone has no window frame to round. */
+@media (max-width: 767px) {
+  .app-window {
+    border-radius: 0;
+    border: 0;
+  }
+}
+
+/* Numbers line up in columns wherever the monospace is used. */
+.font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Native form controls follow the dark theme. */
+select option {
+  background: var(--cyber-surface);
+  color: var(--cyber-text);
+}
+input[type="range"] {
+  accent-color: var(--accent-cyan);
 }
 
 /* Draggable custom titlebar */
@@ -115,6 +152,16 @@ body {
 :focus-visible {
   outline: 2px solid var(--accent-cyan);
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Animated scan line overlay */
