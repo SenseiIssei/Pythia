@@ -313,10 +313,18 @@ pub struct RiskLimits {
     /// before it existed still load.
     #[serde(default = "default_max_correlated_exposure_pct")]
     pub max_correlated_exposure_pct: f64,
+    /// Ceiling on the whole book's volatility: one standard deviation of a
+    /// year's P&L, in % of equity (0 = off). See [`risk::portfolio_vol`].
+    #[serde(default = "default_portfolio_vol_target_pct")]
+    pub portfolio_vol_target_pct: f64,
 }
 
 fn default_max_correlated_exposure_pct() -> f64 {
     40.0
+}
+
+fn default_portfolio_vol_target_pct() -> f64 {
+    30.0
 }
 
 impl Default for RiskLimits {
@@ -342,6 +350,10 @@ impl Default for RiskLimits {
             // Below the 70% gross cap on purpose: a book that moves as one
             // stops at 40%, an uncorrelated one is held by the gross cap.
             max_correlated_exposure_pct: default_max_correlated_exposure_pct(),
+            // A crypto book swings 60-90 % a year; 30 % keeps a bad month
+            // (two standard deviations) near 17 % of equity. Above the
+            // lab books' own share of that, so it does not fight them.
+            portfolio_vol_target_pct: default_portfolio_vol_target_pct(),
         }
     }
 }
@@ -3368,12 +3380,30 @@ impl Engine {
         }
         ((self.peak_equity - self.equity()) / self.peak_equity * 100.0).max(0.0)
     }
+    /// Annual volatility per market, measured from real candles. Markets
+    /// without them are left out, and the risk layer assumes
+    /// [`risk::unknown_annual_vol`] for them.
+    fn annual_vols<'a>(&self, ids: impl Iterator<Item = &'a str>) -> HashMap<String, f64> {
+        ids.filter(|id| self.bar_backed.contains(*id))
+            .filter_map(|id| {
+                let always_open = self.markets.iter().find(|m| m.id == id).map_or(true, |m| m.kind != MarketKind::Equity);
+                let vol = risk::annual_vol(self.ohlc.get(id)?, always_open)?;
+                Some((id.to_string(), vol))
+            })
+            .collect()
+    }
     /// The risk manager's live numbers for the Risk page.
     fn risk_status(&self) -> risk::RiskStatus {
         let equity = self.equity();
-        let corr = risk::correlated_exposure(&self.exposure_book(), &self.history);
+        let book = self.exposure_book();
+        let corr = risk::correlated_exposure(&book, &self.history);
+        let vols = self.annual_vols(book.iter().map(|(id, _)| id.as_str()));
+        let pvol = risk::portfolio_vol(&book, &vols, &self.history);
         let drawdown_pct = self.drawdown_pct();
         risk::RiskStatus {
+            portfolio_vol: pvol,
+            portfolio_vol_pct: if equity > 0.0 { pvol / equity * 100.0 } else { 0.0 },
+            vol_assumed: book.iter().filter(|(id, _)| !vols.contains_key(id)).map(|(id, _)| id.clone()).collect(),
             drawdown_pct,
             derisk_factor: risk::derisk_factor(drawdown_pct, self.limits.max_drawdown_pct),
             correlated_exposure: corr,
@@ -3409,9 +3439,14 @@ impl Engine {
             .map(|m| ((now - m.updated_at) / 1000).max(0) as u64)
             .unwrap_or(999);
         let book = self.exposure_book();
+        let vols = self.annual_vols(book.iter().map(|(id, _)| id.as_str()).chain(std::iter::once(market_id)));
+        let weighted = risk::vol_weighted(&book, &vols);
         risk::RiskContext {
             corr_exposure: risk::correlated_exposure(&book, &self.history),
             corr_loading: risk::correlation_loading(&book, market_id, &self.history),
+            vol_exposure: risk::correlated_exposure(&weighted, &self.history),
+            vol_loading: risk::correlation_loading(&weighted, market_id, &self.history),
+            market_vol: vols.get(market_id).copied().unwrap_or_else(risk::unknown_annual_vol),
             equity: self.equity(),
             day_start_equity: self.day_start_equity,
             realized_pnl: self.realized_pnl,
@@ -4562,7 +4597,17 @@ mod tests {
 
         // Portfolio risk layer: the new limit and the Risk page's live numbers.
         assert!(v["limits"]["maxCorrelatedExposurePct"].is_number(), "RiskLimits is missing maxCorrelatedExposurePct");
-        for key in ["correlatedExposure", "correlatedExposurePct", "sizing", "drawdownPct", "deriskFactor"] {
+        assert!(v["limits"]["portfolioVolTargetPct"].is_number(), "RiskLimits is missing portfolioVolTargetPct");
+        for key in [
+            "correlatedExposure",
+            "correlatedExposurePct",
+            "sizing",
+            "drawdownPct",
+            "deriskFactor",
+            "portfolioVol",
+            "portfolioVolPct",
+            "volAssumed",
+        ] {
             assert!(v["risk"].get(key).is_some(), "RiskStatus is missing `{key}` on the wire");
         }
         for key in ["strategyId", "mode", "trades"] {

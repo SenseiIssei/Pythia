@@ -14,7 +14,9 @@ const CHOICES = [2, 5, 10, 20];
  *   the drawdown breaker trips at M (a bad month cannot quietly go past it);
  *   the daily loss cap is M / 4 (four bad days in a row reach the monthly line);
  *   one position is at most 2M, capped 5 to 25 % (it halving costs at most M);
- *   sizing is gentler for smaller M (Kelly fraction 0.10, 0.20 or 0.25).
+ *   sizing is gentler for smaller M (Kelly fraction 0.10, 0.20 or 0.25);
+ *   the whole book swings little enough that a bad month (two standard
+ *   deviations) stays inside M: an annual volatility of M / 2 * sqrt(12).
  */
 export function limitsFor(monthlyPct: number): Partial<RiskLimits> {
   return {
@@ -22,6 +24,7 @@ export function limitsFor(monthlyPct: number): Partial<RiskLimits> {
     maxDailyLossPct: Math.round((monthlyPct / 4) * 10) / 10,
     maxPositionPct: Math.min(25, Math.max(5, monthlyPct * 2)),
     kellyFraction: monthlyPct <= 5 ? 0.1 : monthlyPct <= 10 ? 0.2 : 0.25,
+    portfolioVolTargetPct: Math.round((monthlyPct / 2) * Math.sqrt(12)),
   };
 }
 
@@ -76,6 +79,10 @@ export function ComfortZone() {
         <li>
           It never puts more than <b className="text-cyber-text">{money(plan.maxPositionPct!)}</b> into any one
           thing.
+        </li>
+        <li>
+          It holds only as much as can swing about <b className="text-cyber-text">{money(pick / 2)}</b> in a normal
+          month, counting things that move together as one.
         </li>
         <li>
           It bets {plan.kellyFraction! <= 0.1 ? "very carefully" : plan.kellyFraction! <= 0.2 ? "carefully" : "moderately"}{" "}

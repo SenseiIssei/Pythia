@@ -236,8 +236,14 @@ All three gaps are closed. The formulas live in
 
 Still open around it:
 
-- [ ] **Volatility targeting at the portfolio level** (PROFIT-PLAN §5). The
-      vol target still works per position
+- [x] **Volatility targeting at the portfolio level** (PROFIT-PLAN §5). The
+      book's volatility is `sqrt(u' C u)` with `u` = notional times the
+      market's annual vol from its candles (5 % a day assumed without them).
+      New entries that would lift it over `portfolioVolTargetPct` (default
+      30 % a year; the comfort zone sets M / 2 * sqrt(12)) are shrunk or
+      refused. A ceiling only, it never sizes up and never sells. Risk page
+      card "Book Volatility". Open: whether it should also trim the book when
+      a volatility spike lifts it far over target
 - [ ] The correlation window mixes time scales when a bar-backed market (5
       minute candles) is compared with a tick-fed one. The page has the same
       flaw. Align on timestamps once every market has real bars
