@@ -1101,7 +1101,7 @@ impl Engine {
             }
         }
         if !feed.is_empty() && self.feeds_logged.insert("alpaca") {
-            self.log(JournalKind::System, format!("Alpaca feed · {} live equity quotes", feed.len()), None, None);
+            self.log(JournalKind::System, format!("Alpaca feed · {} live quotes", feed.len()), None, None);
         }
     }
 
@@ -1189,6 +1189,22 @@ impl Engine {
             self.log(JournalKind::Risk, format!("Alpaca account restricted: {why}"), None, None);
         }
         self.broker = Some(status);
+    }
+
+    /// [`Engine::live_block_reason`] for one Alpaca market. Alpaca's crypto book
+    /// trades around the clock and is outside the pattern-day-trader rule, so
+    /// only the account checks apply to it; equities get the full session gate.
+    pub fn live_block_reason_for(&self, m: &Market) -> Option<String> {
+        if m.kind != MarketKind::Crypto {
+            return self.live_block_reason();
+        }
+        let Some(b) = &self.broker else {
+            return Some("broker status unknown, waiting for the first account check".into());
+        };
+        if self.now() - b.checked_at > BROKER_STATUS_MAX_AGE_MS {
+            return Some("broker status is stale, cannot confirm the account is usable".into());
+        }
+        b.restricted.as_ref().map(|why| format!("Alpaca account restricted: {why}"))
     }
 
     /// Why a live *equity entry* would be refused right now, or `None` when the
@@ -2195,7 +2211,7 @@ impl Engine {
                 .map(|p| p.live && p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell))
                 .unwrap_or(false);
         if m.venue == Venue::Alpaca && !self.live.dry_run && !reduces {
-            if let Some(reason) = self.live_block_reason() {
+            if let Some(reason) = self.live_block_reason_for(m) {
                 let sid = self.strategies[strat_idx].id.clone();
                 let order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
                 self.orders.insert(0, order);
@@ -2271,6 +2287,7 @@ impl Engine {
             // Only when the broker actually reports an extended session running
             // — never inferred from the local clock. Equities only.
             extended_hours: m.venue == Venue::Alpaca
+                && m.kind == MarketKind::Equity
                 && self.live.extended_hours
                 && self.broker.as_ref().map(|b| !b.market_open && b.extended_open).unwrap_or(false),
         });
@@ -2380,10 +2397,10 @@ impl Engine {
                     if (lt > 0.01 && side == Side::Sell) || (lt < -0.01 && side == Side::Buy) {
                         Some(format!("signal fights the 60-bar trend ({:+.1}%)", lt * 100.0))
                     } else {
-                        self.live_block_reason()
+                        self.live_block_reason_for(m)
                     }
                 } else {
-                    self.live_block_reason()
+                    self.live_block_reason_for(m)
                 };
 
                 MarketDiag {
@@ -2433,7 +2450,7 @@ impl Engine {
             return Some(format!("{} already has a live order in flight", m.symbol));
         }
         if m.venue == Venue::Alpaca && !self.live.dry_run {
-            return self.live_block_reason();
+            return self.live_block_reason_for(m);
         }
         None
     }
@@ -3883,6 +3900,11 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
         mk("alpaca:MSFT", Venue::Alpaca, "MSFT", MarketKind::Equity, 428.0, 0.004, None, 1_200_000.0),
         mk("alpaca:AMZN", Venue::Alpaca, "AMZN", MarketKind::Equity, 186.4, 0.009, None, 1_800_000.0),
         mk("alpaca:TSLA", Venue::Alpaca, "TSLA", MarketKind::Equity, 248.5, -0.012, None, 2_600_000.0),
+        // Alpaca's own crypto book: the same keys as the equities, open on a
+        // weekend, so the connection test can prove the broker any day. No
+        // strategy trades these by default. Seed prices from Alpaca, Oct 2026.
+        mk("alpaca:BTC/USD", Venue::Alpaca, "BTC/USD", MarketKind::Crypto, 83_150.0, 0.0, None, 1_000_000.0),
+        mk("alpaca:ETH/USD", Venue::Alpaca, "ETH/USD", MarketKind::Crypto, 2_566.0, 0.0, None, 1_000_000.0),
         mk("polymarket:fed-cut-2026", Venue::Polymarket, "Fed cuts rates before Sep 2026?", MarketKind::Prediction, 0.62, 0.03, Some(0.71), 320_000.0),
         mk("polymarket:btc-100k-2026", Venue::Polymarket, "BTC above $100k in 2026?", MarketKind::Prediction, 0.44, -0.02, Some(0.52), 510_000.0),
     ];
@@ -3918,6 +3940,8 @@ fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
     sim.insert("alpaca:MSFT".into(), SimParam { drift: 0.000006, vol: 0.0008, base: 426.0 });
     sim.insert("alpaca:AMZN".into(), SimParam { drift: 0.00001, vol: 0.0011, base: 185.0 });
     sim.insert("alpaca:TSLA".into(), SimParam { drift: 0.000004, vol: 0.0022, base: 250.0 });
+    sim.insert("alpaca:BTC/USD".into(), SimParam { drift: 0.00030, vol: 0.0022, base: 83_150.0 });
+    sim.insert("alpaca:ETH/USD".into(), SimParam { drift: 0.00030, vol: 0.0024, base: 2_566.0 });
     sim.insert("polymarket:fed-cut-2026".into(), SimParam { drift: 0.0, vol: 0.004, base: 0.6 });
     sim.insert("polymarket:btc-100k-2026".into(), SimParam { drift: 0.0, vol: 0.005, base: 0.45 });
     (markets, sim)
@@ -5286,6 +5310,77 @@ mod tests {
         pdt.day_trade_limit_reached = true;
         e.set_broker_status(pdt);
         assert!(e.live_block_reason().unwrap().contains("pattern-day-trader"));
+    }
+
+    // ── Alpaca crypto ──
+
+    #[test]
+    fn alpaca_crypto_is_seeded_and_pays_alpaca_crypto_fees_not_equity_ones() {
+        let e = Engine::new();
+        for id in ["alpaca:BTC/USD", "alpaca:ETH/USD"] {
+            let m = e.markets.iter().find(|m| m.id == id).expect("seeded");
+            assert_eq!((m.venue, m.kind), (Venue::Alpaca, MarketKind::Crypto));
+            assert!(e.sim.contains_key(id), "{id} needs simulator parameters until a real quote arrives");
+            let c = e.cost_model(m);
+            assert_eq!((c.taker_bps, c.maker_bps), (25.0, 15.0), "Alpaca crypto lowest tier");
+            assert_eq!(c.borrow_bps_yr, 0.0, "crypto on Alpaca cannot be shorted, so nothing to borrow");
+        }
+        // Equities on the same venue stay commission-free.
+        let aapl = e.markets.iter().find(|m| m.id == "alpaca:AAPL").unwrap();
+        assert_eq!(e.cost_model(aapl).taker_bps, 0.0);
+        // No default strategy trades them: they exist for the connection test
+        // and manual orders.
+        assert!(e.strategies.iter().all(|s| !s.universe.iter().any(|u| u.starts_with("alpaca:") && u.contains('/'))));
+    }
+
+    #[test]
+    fn alpaca_crypto_ignores_the_equity_session_and_the_day_trade_rule() {
+        let mut e = Engine::new();
+        e.set_live(armed_alpaca());
+        let mut closed = open_market(&e);
+        closed.market_open = false;
+        closed.extended_open = false;
+        closed.day_trade_limit_reached = true;
+        e.set_broker_status(closed.clone());
+
+        assert!(e.test_order_block("alpaca:AAPL").unwrap().contains("closed"));
+        assert_eq!(e.test_order_block("alpaca:BTC/USD"), None, "crypto trades on a Sunday");
+
+        // The account checks still apply to crypto.
+        closed.restricted = Some("trading blocked".into());
+        e.set_broker_status(closed);
+        assert!(e.test_order_block("alpaca:BTC/USD").unwrap().contains("restricted"));
+        let mut fresh = Engine::new();
+        fresh.set_live(armed_alpaca());
+        assert!(fresh.test_order_block("alpaca:BTC/USD").unwrap().contains("unknown"));
+    }
+
+    #[test]
+    fn the_connection_test_reaches_alpaca_crypto_while_equities_are_closed() {
+        let mut e = Engine::new();
+        // Extended hours opted in and running: an equity order would carry the
+        // flag, a crypto one must not.
+        e.set_live(armed_alpaca_ext(true));
+        let mut closed = open_market(&e);
+        closed.market_open = false;
+        closed.extended_open = true;
+        e.set_broker_status(closed);
+
+        let n = e.connection_test_notional("alpaca:BTC/USD");
+        assert_eq!(n, 20.0, "twice Alpaca's ~$10 crypto minimum");
+        e.connection_test_order("alpaca:BTC/USD", n).expect("routes");
+        let o = e.drain_live_orders().pop().expect("an order went out");
+        assert_eq!((o.venue, o.symbol.as_str(), o.side), (Venue::Alpaca, "BTC/USD", Side::Buy));
+        assert!(!o.extended_hours, "crypto never goes out as an extended-hours order");
+    }
+
+    #[test]
+    fn an_alpaca_crypto_position_reconciles_onto_the_alpaca_market_not_the_kraken_one() {
+        let mut e = Engine::new();
+        let held = [BrokerPosition { symbol: "BTC/USD".into(), qty: 0.001, avg_price: 83_000.0, market_value: 83.0 }];
+        assert_eq!(e.reconcile_positions(Venue::Alpaca, &held, true), 1);
+        assert!(e.positions.get("alpaca:BTC/USD").is_some_and(|p| p.live && (p.qty - 0.001).abs() < 1e-12));
+        assert!(!e.positions.contains_key("crypto:BTC/USD"));
     }
 
     #[test]

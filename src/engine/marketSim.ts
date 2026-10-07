@@ -96,6 +96,9 @@ const seedMarkets: Market[] = [
   { id: "alpaca:MSFT", venue: "alpaca", symbol: "MSFT", kind: "equity", price: 428.0, change24h: 0.004, liquidity: 1_200_000, updatedAt: Date.now() },
   { id: "alpaca:AMZN", venue: "alpaca", symbol: "AMZN", kind: "equity", price: 186.4, change24h: 0.009, liquidity: 1_800_000, updatedAt: Date.now() },
   { id: "alpaca:TSLA", venue: "alpaca", symbol: "TSLA", kind: "equity", price: 248.5, change24h: -0.012, liquidity: 2_600_000, updatedAt: Date.now() },
+  // Alpaca's own 24/7 crypto book, mirrored from the Rust seeds.
+  { id: "alpaca:BTC/USD", venue: "alpaca", symbol: "BTC/USD", kind: "crypto", price: 83_150, change24h: 0, liquidity: 1_000_000, updatedAt: Date.now() },
+  { id: "alpaca:ETH/USD", venue: "alpaca", symbol: "ETH/USD", kind: "crypto", price: 2_566, change24h: 0, liquidity: 1_000_000, updatedAt: Date.now() },
   {
     id: "polymarket:fed-cut-2026",
     venue: "polymarket",
@@ -147,6 +150,8 @@ const simParams: Record<string, SimState> = {
   "alpaca:MSFT": { drift: 0.000006, vol: 0.0008, base: 426 },
   "alpaca:AMZN": { drift: 0.00001, vol: 0.0011, base: 185 },
   "alpaca:TSLA": { drift: 0.000004, vol: 0.0022, base: 250 },
+  "alpaca:BTC/USD": { drift: 0.0003, vol: 0.0022, base: 83_150 },
+  "alpaca:ETH/USD": { drift: 0.0003, vol: 0.0024, base: 2_566 },
   "polymarket:fed-cut-2026": { drift: 0, vol: 0.004, base: 0.6 },
   "polymarket:btc-100k-2026": { drift: 0, vol: 0.005, base: 0.45 },
   "polymarket:election-turnout": { drift: 0, vol: 0.003, base: 0.37 },

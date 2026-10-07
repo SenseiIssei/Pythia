@@ -3,6 +3,7 @@
 //!   · Kraken / Binance — top-20 order books for the cost model (public, no auth)
 //!   · Polymarket — Gamma API prediction odds     (https://gamma-api.polymarket.com, no auth)
 //!   · Alpaca     — equity snapshots              (https://data.alpaca.markets, needs keys)
+//!   · Alpaca     — crypto snapshots and candles  (same host, v1beta3, no auth)
 //!
 //! Every fetch is time-boxed and falls back to an empty result on any failure,
 //! so the engine keeps running on its simulator if the network is down or a
@@ -175,6 +176,43 @@ pub async fn fetch_alpaca(key_id: &str, secret: &str, feed: &str) -> Vec<RealEqu
         return vec![];
     };
     parse_snapshots(&v)
+}
+
+/// Crypto pairs Pythia trades on Alpaca's own 24/7 crypto venue. Kept short on
+/// purpose: Alpaca crypto is thin next to Kraken and Binance, and the point of
+/// listing it is a keyed venue that is open on a weekend, not a second universe.
+pub const ALPACA_CRYPTO: [&str; 2] = ["BTC/USD", "ETH/USD"];
+
+/// Alpaca crypto snapshots, from the public crypto data API: unlike stocks it
+/// needs no keys, so these markets have real prices even before any are set.
+/// The payload wraps the per-symbol map in `snapshots`, otherwise the shape is
+/// the stocks one.
+pub async fn fetch_alpaca_crypto() -> Vec<RealEquity> {
+    let url = format!(
+        "https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols={}",
+        ALPACA_CRYPTO.join(",")
+    );
+    let Some(v) = get_json(&url).await else { return vec![] };
+    v.get("snapshots").map(parse_snapshots).unwrap_or_default()
+}
+
+/// Alpaca crypto candles, public like the snapshots. `lookback_days` should
+/// stay small: the market is open around the clock, so 1-minute bars over ten
+/// days would overrun the single page this asks for and return only the
+/// oldest bars.
+pub async fn fetch_alpaca_crypto_bars(timeframe: &str, lookback_days: i64) -> Vec<BarSeries> {
+    let start = (chrono::Utc::now() - chrono::Duration::days(lookback_days)).to_rfc3339();
+    let url = format!(
+        "https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols={}&timeframe={}&start={}&sort=asc&limit=10000",
+        ALPACA_CRYPTO.join(","),
+        timeframe,
+        urlencode(&start)
+    );
+    let fut = async { reqwest::Client::new().get(&url).send().await.ok()?.json::<Value>().await.ok() };
+    let Some(v) = tokio::time::timeout(Duration::from_secs(12), fut).await.ok().flatten() else {
+        return vec![];
+    };
+    parse_alpaca_bars(&v)
 }
 
 /// Map an Alpaca `/v2/stocks/snapshots` payload to our equity rows. Split out
@@ -551,6 +589,32 @@ mod tests {
 
         // No usable price → skipped entirely rather than emitting a zero.
         assert!(!rows.iter().any(|r| r.symbol == "BADD"));
+    }
+
+    #[test]
+    fn parses_alpaca_crypto_snapshots_and_bars() {
+        // The crypto API wraps snapshots in `snapshots`; pairs keep their slash.
+        let v: Value = serde_json::from_str(
+            r#"{"snapshots":{"BTC/USD":{
+                 "latestTrade":{"p":83150.5,"s":0.01},
+                 "dailyBar":{"o":82000.0,"c":83100.0},
+                 "prevDailyBar":{"c":81500.0}}}}"#,
+        )
+        .unwrap();
+        let rows = v.get("snapshots").map(parse_snapshots).unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "alpaca:BTC/USD");
+        assert_eq!(rows[0].price, 83_150.5);
+
+        let v: Value = serde_json::from_str(
+            r#"{"bars":{"ETH/USD":[
+                 {"t":"2026-10-07T13:50:00Z","o":2556.7,"h":2566.3,"l":2556.7,"c":2566.3,"v":0.09,"n":2,"vw":2558.7}
+               ]},"next_page_token":null}"#,
+        )
+        .unwrap();
+        let series = parse_alpaca_bars(&v);
+        assert_eq!(series[0].id, "alpaca:ETH/USD");
+        assert_eq!(series[0].bars[0].close, 2566.3);
     }
 
     #[tokio::test]
