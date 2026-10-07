@@ -209,8 +209,8 @@ def perf(r: np.ndarray) -> dict:
 def main() -> None:
     import sys
     v2 = "--perp-features" in sys.argv
-    name = "picks_v2" if v2 else "picks"
-    (ROOT / "reports" / name).mkdir(parents=True, exist_ok=True)
+    report_name = "picks_v2" if v2 else "picks"
+    (ROOT / "reports" / report_name).mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     P = build(with_perp=v2)
     feats = FEATURES + PERP_FEATURES if v2 else FEATURES
@@ -241,7 +241,7 @@ def main() -> None:
     has_score = np.isfinite(score)
     pl.DataFrame({"day": days[has_score], "symbol": sym[has_score], "score": score[has_score],
                   "fwd": fwd[has_score], "adv_rank": P["adv28"].to_numpy()[has_score]}).write_parquet(
-        ROOT / "reports" / name / "scores.parquet")
+        ROOT / "reports" / report_name / "scores.parquet")
 
     oos = np.isfinite(score) & np.isfinite(fwd)
     d_o, s_o, f_o, sy_o = days[oos], score[oos], fwd[oos], sym[oos]
@@ -314,7 +314,7 @@ def main() -> None:
           + "\n## Next-week return by score decile (10 = best score)\n\n"
           + report.table(dec_rows, ["decile", "mean_week_return_pct", "coin_days"])
           + "\n## Rank-IC per quarter\n\n" + report.table(folds, ["fold", "days", "rank_ic"]))
-    report.write(name, md, {"rows": rows, "folds": folds, "rank_ic": ic_mean, "rank_ic_t": ic_t,
+    report.write(report_name, md, {"rows": rows, "folds": folds, "rank_ic": ic_mean, "rank_ic_t": ic_t,
                                "rank_ic_liquid50": ic_liquid, "deciles": dec_rows, "verdict": verdict})
 
 

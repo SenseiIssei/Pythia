@@ -30,14 +30,17 @@ import numpy as np
 import polars as pl
 
 from ..data import ROOT
-from ..experiments.picks import FEATURES, HORIZON, PARAMS, build
+from ..experiments.picks import FEATURES, HORIZON, PARAMS, PERP_FEATURES, build
 from ..experiments.picks_ls import COST, perp_panel
 
 K, N = 10, 50
 START_EQUITY = 10_000.0
 DAY_MS = 86_400_000
-DIR = ROOT / "paper" / "picks_ls"
 FAPI = "https://fapi.binance.com/fapi/v1"
+# --v2 runs the same book on M2 v2 (with perpetual features) in its own folder,
+# so both versions earn their gate-7 record side by side.
+V2 = "--v2" in sys.argv
+DIR = ROOT / "paper" / ("picks_ls_v2" if V2 else "picks_ls")
 
 
 def get(url: str):
@@ -56,13 +59,14 @@ def funding_since(symbol: str, since_ms: int) -> float:
 
 def pick_book() -> tuple[list[str], list[str], int]:
     """Retrain M2 on everything and choose this week's book exactly as the backtest does."""
-    P = build()
+    P = build(with_perp=V2)
+    feats = FEATURES + PERP_FEATURES if V2 else FEATURES
     days = P["day"].to_numpy()
     fwd = P["fwd"].to_numpy()
     last_day = int(days.max())
     train = np.isfinite(fwd) & (days < last_day - HORIZON * 86_400_000_000)
     order = np.argsort(days[train], kind="stable")
-    X = P.select(FEATURES).to_numpy().astype(np.float32)
+    X = P.select(feats).to_numpy().astype(np.float32)
     y = P["label"].to_numpy()
     _, group = np.unique(days[train][order], return_counts=True)
     model = lgb.LGBMRanker(**PARAMS).fit(X[train][order], y[train][order].astype(np.int32), group=group)
@@ -86,7 +90,7 @@ def main() -> int:
     now_ms = int(time.time() * 1000)
     state_file = DIR / "state.json"
     st = json.loads(state_file.read_text()) if state_file.exists() else {
-        "variant": f"top {K} / bottom {K} of the {N} most liquid perps, no paying shorts",
+        "variant": f"top {K} / bottom {K} of the {N} most liquid perps, no paying shorts" + (", M2 v2" if V2 else ""),
         "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "equity": START_EQUITY, "positions": {}, "last_run_ms": None, "last_rebalance_ms": None,
     }
