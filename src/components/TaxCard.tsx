@@ -77,7 +77,7 @@ export function TaxCard() {
         Every real fill is kept in an append-only file. The CSV imports into Blockpit, CoinTracking and similar tools,
         which convert to euros at each trade's rate. Below is a first-in, first-out preview in dollars: for crypto in
         Germany, gains on lots held over a year are tax-free, shorter ones count against the 1,000 EUR yearly limit.
-        A preview, not tax advice.
+        Dates, years and holding periods use German local time. A preview, not tax advice.
       </p>
       {s && s.fills === 0 && <p className="mt-2 text-sm text-cyber-text-dim">No real fills yet. Paper trades are never recorded here.</p>}
       {!s && !note && <p className="mt-2 text-xs text-cyber-text-faint">Reading the record.</p>}
