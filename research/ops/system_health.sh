@@ -75,6 +75,32 @@ main() {
     *) add "volatility model" false "state: ${ml:-no answer}" ;;
   esac
 
+  # Engine market data: every crypto market's quotes and candles fresh, which
+  # source each kind is on, and failovers in the last 24 h (dataHealth in /api/state)
+  local md
+  md=$(curl -s -m 10 127.0.0.1:8787/api/state | python3 -c "
+import json, sys
+h = json.load(sys.stdin).get('dataHealth') or {}
+if not h.get('running'):
+    print('false|feeds not running'); sys.exit()
+parts = []
+for k in h.get('kinds', []):
+    if not k.get('sources'):
+        continue
+    parts.append('%s on %s, %ss old, %d of %d stale, %d failovers in 24h' % (
+        k['kind'], k.get('active') or 'nothing', k.get('lastUpdateAgeSec'),
+        len(k.get('stale', [])), k.get('markets', 0), k.get('failovers24h', 0)))
+s = h.get('stream') or {}
+if s.get('enabled'):
+    parts.append('stream %s, %d reconnects' % ('up' if s.get('connected') else 'down', s.get('reconnects', 0)))
+print('%s|%s' % ('true' if h.get('ok') else 'false', '; '.join(parts)))
+" 2>/dev/null)
+  case "$md" in
+    true\|*) add "market data" true "${md#true|}" ;;
+    false\|*) add "market data" false "${md#false|}" ;;
+    *) add "market data" false "no answer from the engine" ;;
+  esac
+
   local free
   free=$(df -BG --output=avail "$data" | tail -1 | tr -dc 0-9)
   if [ "${free:-0}" -gt 20 ]; then add "disk" true "${free} GB free"; else add "disk" false "only ${free} GB free"; fi
