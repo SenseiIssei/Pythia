@@ -133,8 +133,24 @@ left is calibration, which needs real fills and recorded books.
 - [x] The eight validation gates (`PROFIT-PLAN.md` §2) in
       `crates/pythia-core/src/validation.rs`, and a **Strategy Passport** on the
       Strategies page. The engine refuses *Live* until gates 1 to 7 are green
-- [ ] Feed `ExecContext` real spread and depth, and pass live top-of-book depth
-      into `CostModel::impact_bps` instead of the per-instrument default
+- [x] Pass live spread and depth into the cost model instead of the
+      per-instrument default (`crates/pythia-core/src/orderbook.rs`). The server
+      and the desktop loop fetch public top-20 books every ~30 s from the
+      exchange whose costs crypto fills pay (Kraken `Depth` or Binance
+      `depth?limit=20`); depth is the notional on the 20 best levels of the
+      side taken, the definition the calibration used. Paper fills, the cross
+      cost and the modelled slippage of live orders use the live half-spread
+      and depth while the book is under a minute old, the calibrated defaults
+      otherwise. Each fill records which (`liveFills` on the Analytics table).
+      Only bar-backed crypto markets on Kraken or Binance get books: Bybit,
+      OKX, Coinbase, Alpaca and Polymarket still price on defaults, and
+      backtests always do, since there is no live book for the past. The
+      fetchers were checked once against the real endpoints (20 of 20 books on
+      both venues, 2026-10-07); the running loop has not been watched for a day
+- [ ] Feed `ExecContext` real spread and depth. Deliberately not done: the
+      numbers exist now, but as bandit context they split evidence the bandit
+      does not have (no live fills yet). Revisit after a few hundred fills,
+      e.g. as one coarse thin/normal flag (order notional against live depth)
 
 **Done when:** you can see, for your own strategy, the gap between backtest and
 live, and what it is made of. That is now true once a strategy has live fills;
@@ -260,8 +276,17 @@ Still open around it:
 - [ ] **Coinbase Advanced Trade** — the only non-HMAC venue in the registry.
       Needs an ES256 JWT signer, then it drops into the existing `Exchange` enum
       with no other change. It is listed in the UI and refuses to trade
-- [ ] **Alpaca crypto** — the connector already handles the `crypto` asset class
-      (24/7, no clock gate). Only the seeded market list needs entries
+- [x] **Alpaca crypto**: `alpaca:BTC/USD` and `alpaca:ETH/USD` are seeded. The
+      seed list was not the only gap: the engine's session gate blocked them
+      when the equity market was closed and applied the day-trade rule, the
+      cost model charged them equity fees (zero; now 0.15 % / 0.25 %),
+      reconciliation could not match Alpaca's `BTCUSD` position symbol, and
+      they had no real prices (now Alpaca's public crypto snapshots and bars,
+      no keys needed). No strategy trades them by default; they make the
+      connection test (§1) usable on a weekend. Open: their spread and depth
+      in `config/costs.json` are a guess from one look at the book, and the
+      `GET /v2/positions/BTC%2FUSD` preflight lookup is unverified against
+      the real API (Alpaca may want `BTCUSD` there)
 - [ ] **Perpetual futures** for funding carry — needs leverage-aware risk limits
       **first**, not after
 - [ ] **Polymarket order signing** — deliberately last. Its CLOB signs with a
@@ -313,9 +338,9 @@ regardless of the algorithms underneath.
       ```bash
       cargo test --release -p pythia-core -- --ignored --nocapture bench_
       ```
-- [ ] `ExecContext` wants spread and top-of-book depth. That needs quote data
-      the market feed does not carry — when it does, it is a change to that one
-      struct and nothing else
+- [ ] `ExecContext` wants spread and top-of-book depth. The quote data now
+      exists (live books, §2) and already prices the cross arm; using it as
+      bandit context is deferred until there are live fills to split (§2)
 
 ---
 
