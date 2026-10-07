@@ -8,6 +8,8 @@
 pub mod card;
 pub mod drift;
 pub mod gbdt;
+pub mod picks;
+pub mod picks_shadow;
 pub mod shadow;
 pub mod vol;
 
