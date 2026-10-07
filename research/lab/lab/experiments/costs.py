@@ -2,7 +2,9 @@
 
 The shipped cost numbers are guesses from typical quoted spreads. The recorder has
 kept the 20 best levels of every Kraken and Binance book every 5 s since
-2026-09-30, which is enough to measure three of the model's fields per coin:
+2026-09-30, and of Bybit, OKX and Coinbase once its book feeds for those are
+deployed. Every venue in VENUES with recorded books is measured, the others are
+skipped. That is enough to measure three of the model's fields per coin:
 
   halfSpreadBps  mean of (ask - bid) / mid / 2 over the sample. The mean, not the
                  median: a cost model prices the average order, and spreads are
@@ -28,18 +30,26 @@ import numpy as np
 import polars as pl
 
 from .. import report
-from ..data import UNIVERSE, live
+from ..data import ROOT, UNIVERSE, live
 
 SAMPLE_US = 60_000_000
 FRACTIONS = [0.05, 0.10, 0.25, 0.50]  # order size as a share of the median depth
+# venue (the key in config/costs.json) -> (recorder source, symbol as the recorder stores it)
 VENUES = {
     "kraken": ("kraken", lambda b: f"{b}/USD"),
     "binance": ("binance", lambda b: f"{b}USDT"),
+    "bybit": ("bybit", lambda b: f"{b}USDT"),
+    "okx": ("okx", lambda b: f"{b}-USDT"),
+    "coinbase": ("coinbase", lambda b: f"{b}-USD"),
 }
 
 
 def load(source: str) -> pl.DataFrame:
     """One snapshot per minute per symbol, across every recorded day."""
+    # A venue the recorder has not written yet is skipped, not an error: the
+    # other venues' report must still come out.
+    if not any((ROOT / source / "book20").rglob("*.parquet")):
+        return pl.DataFrame()
     # Snapshots come every 5 s, so the first 5 s of each minute hold about one per
     # symbol. Filtering on that before anything else keeps the list columns of the
     # other eleven out of memory.
@@ -129,7 +139,7 @@ def main() -> None:
                 out[venue][base] = m
 
     md = ["# Cost model calibration from recorded books\n",
-          "What a taker actually pays against the mid on Kraken and Binance spot, measured, "
+          "What a taker actually pays against the mid on each recorded spot venue, measured, "
           "next to what `config/costs.json` assumes. Fees are not part of this; they come from "
           "the account tier.\n",
           "`halfSpreadBps` is the mean half-spread (what one aggressive side pays to the mid), "
