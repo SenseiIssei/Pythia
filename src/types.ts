@@ -727,3 +727,48 @@ export interface WalletsSnapshot {
   unpriced: string[];
   updatedAt: number;
 }
+
+// ── autopilot ────────────────────────────────────────────────────────────────
+/** One run of the autopilot: an amount it trades on its own. Mirrors Rust (serde camelCase). */
+export interface AutopilotConfig {
+  id: string;
+  name: string;
+  mode: "paper" | "demo" | "live";
+  venue: string;
+  capitalUsd: number;
+  /** Strategies and their share of the capital. Empty: the autopilot chooses. */
+  sleeves: { strategyId: string; weight: number }[];
+  stop: {
+    maxLossPct?: number;
+    maxLossUsd?: number;
+    takeProfitPct?: number;
+    onTakeProfit: "stop" | "lock";
+    trailingPct?: number;
+    endMs?: number;
+  };
+  flattenOnStop: boolean;
+}
+
+/** What a start sends: the config, plus the typed confirmation a live start needs. */
+export type AutopilotStart = AutopilotConfig & { confirm?: string };
+
+export interface AutopilotStatus {
+  config: AutopilotConfig;
+  state: "running" | "paused" | "stopped" | "finished";
+  stopReason?: string;
+  startedMs: number;
+  stoppedMs?: number;
+  startCapital: number;
+  equity: number;
+  pnl: number;
+  pnlPct: number;
+  peakEquity: number;
+  drawdownPct: number;
+  floorEquity: number;
+  trades: number;
+  fees: number;
+  bySleeve: { strategyId: string; name: string; weight: number; pnl: number; trades: number; why: string }[];
+  lastAction?: string;
+  /** `[epoch ms, equity]` points. */
+  history: [number, number][];
+}
