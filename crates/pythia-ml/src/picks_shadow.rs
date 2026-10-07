@@ -60,6 +60,9 @@ pub struct Ranking {
     pub picks: Vec<Pick>,
     #[serde(default)]
     pub drift: Vec<RawDrift>,
+    /// What this run could not see the way the lab does (approximated ages, ties).
+    #[serde(default)]
+    pub notes: Vec<String>,
     #[serde(default)]
     pub realised: Option<Realised>,
 }
@@ -241,6 +244,7 @@ mod tests {
                 .map(|i| Pick { symbol: format!("C{i}USDT"), score: (n - i) as f64, close: 100.0, perp: true })
                 .collect(),
             drift: vec![],
+            notes: vec![],
             realised: None,
         }
     }

@@ -66,6 +66,92 @@ export interface MlStatus {
   recent: ScoredHour[];
   drift: FeatureDrift[];
   updatedMs: number;
+  /** M2, the weekly coin ranking. Missing from older backends. */
+  picks?: PicksStatus;
+}
+
+// M2 "Picks" (pythia-core/src/ml_picks.rs): weekly ranking, scored a week later.
+
+export interface PicksModelInfo {
+  name: string;
+  version: string;
+  trees: number;
+  trainFromMs: number;
+  trainToMs: number;
+  horizonDays: number;
+  labRankIc: number | null;
+  labRankIcT: number | null;
+  labRankIcLiquid50: number | null;
+  typicalCoins: number | null;
+  typicalWithPerpPct: number | null;
+}
+
+export interface PickView {
+  symbol: string;
+  rank: number;
+  /** 100 = best of the day, 0 = worst. */
+  percentile: number;
+  score: number;
+  perp: boolean;
+}
+
+export interface RankingView {
+  dayMs: number;
+  madeMs: number;
+  version: string;
+  coins: number;
+  withPerp: number;
+  top: PickView[];
+  bottom: PickView[];
+  engine: PickView[];
+  notes: string[];
+}
+
+export interface WeekScore {
+  dayMs: number;
+  rankIc: number;
+  coins: number;
+  topPct: number;
+  bottomPct: number;
+}
+
+export interface PicksShadowSummary {
+  rankings: number;
+  weeks: number;
+  sinceMs: number | null;
+  rankIc: number | null;
+  rankIcRecent: number | null;
+  rankIcT: number | null;
+  hitRate: number | null;
+  history: WeekScore[];
+}
+
+export interface PicksStatus {
+  state: MlState;
+  message: string;
+  model: PicksModelInfo | null;
+  running: boolean;
+  latest: RankingView | null;
+  shadow: PicksShadowSummary;
+  drift: FeatureDrift[];
+  engineNotes: string[];
+  updatedMs: number;
+}
+
+/** Ranks the latest complete day now instead of waiting for the week. Ranks and records, never trades. */
+export async function runPicks(): Promise<void> {
+  switch (liveMode()) {
+    case "native":
+      await invoke("ml_picks_run");
+      return;
+    case "server": {
+      const r = await fetch(`${serverUrl()}/api/ml/picks/run`, { method: "POST" });
+      if (!r.ok) throw new Error(`backend answered ${r.status}`);
+      return;
+    }
+    default:
+      throw new Error("Models run in the desktop app or a connected backend.");
+  }
 }
 
 export async function mlStatus(): Promise<MlStatus> {
