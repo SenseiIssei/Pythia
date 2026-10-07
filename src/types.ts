@@ -261,6 +261,77 @@ export interface RiskStatus {
   lastVolTrim?: number;
 }
 
+/** A public market data source. Mirrors Rust `feeds::FeedSource`. */
+export type FeedSource = "kraken-ws" | "kraken" | "binance" | "binance-vision" | "coinbase" | "bybit" | "okx";
+export type DataKind = "quotes" | "candles" | "books";
+
+/** One source's standing in a kind's priority list. */
+export interface SourceHealth {
+  source: FeedSource;
+  /** Markets currently on this source. */
+  markets: number;
+  failStreak: number;
+  lastError?: string | null;
+  lastOkAgeSec?: number | null;
+}
+
+export interface KindHealth {
+  kind: DataKind;
+  primary?: FeedSource | null;
+  /** The source most markets are on now. */
+  active?: FeedSource | null;
+  sources: SourceHealth[];
+  lastUpdateAgeSec?: number | null;
+  /** Age of the least recently updated market. */
+  oldestUpdateAgeSec?: number | null;
+  failovers24h: number;
+  /** Market ids whose data of this kind is stale. */
+  stale: string[];
+  markets: number;
+}
+
+export interface StreamStatus {
+  enabled: boolean;
+  source?: FeedSource | null;
+  connected: boolean;
+  since?: number | null;
+  lastMessage?: number | null;
+  reconnects: number;
+  lastError?: string | null;
+}
+
+export interface MarketFeed {
+  market: string;
+  quotes?: FeedSource | null;
+  candles?: FeedSource | null;
+  books?: FeedSource | null;
+  /** Why the latest quote was refused, while it is. */
+  suspect?: string;
+}
+
+export interface FeedRejection {
+  ts: number;
+  kind: DataKind;
+  market: string;
+  source: FeedSource;
+  reason: string;
+}
+
+/** Where the engine's crypto data comes from and whether it is fresh.
+ *  Mirrors Rust `feeds::DataHealth`. */
+export interface DataHealth {
+  /** A host runs the feeds (false in the browser build). */
+  running: boolean;
+  /** No stale quotes and no stale candles. */
+  ok: boolean;
+  staleSince?: number | null;
+  alerted: boolean;
+  kinds: KindHealth[];
+  stream: StreamStatus;
+  markets: MarketFeed[];
+  rejections: FeedRejection[];
+}
+
 /** confidence: under 30 trades, sized off signal strength. measured: sized on
  *  its own win rate and payoff. noEdge: the record shows no edge, size zero. */
 export type SizingMode = "confidence" | "measured" | "noEdge";

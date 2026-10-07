@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Card, PageHeader, Badge, Button, EmptyState, Toggle, inputCls } from "../components/ui";
 import { useStore } from "../store";
+import { DataHealthCard } from "../components/DataHealth";
 import {
   liveMode,
   alpacaAccount,
@@ -198,6 +199,7 @@ export function Live() {
         </div>
       )}
 
+      <DataHealthCard />
       <ReadinessCard />
       <DiagnosticsCard />
 

@@ -185,6 +185,9 @@ export class ServerEngineClient implements EngineClient {
   riskStatus() {
     return this.state.risk ?? null;
   }
+  dataHealth() {
+    return this.state.dataHealth ?? null;
+  }
   setAdaptiveExecution(on: boolean) {
     this.send({ cmd: "setAdaptiveExecution", on });
   }

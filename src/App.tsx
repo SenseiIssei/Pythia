@@ -7,6 +7,7 @@ import { Home as HomePage } from "./pages/Home";
 import { StoreProvider, useStore } from "./store";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Badge } from "./components/ui";
+import { DataHealthBadge } from "./components/DataHealth";
 import { isTauri } from "./engine";
 import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
@@ -269,6 +270,7 @@ function Chrome() {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+          <DataHealthBadge />
           <Badge
             tone={live ? "red" : "green"}
             title={live ? "Real orders can be placed" : "Simulated money only"}

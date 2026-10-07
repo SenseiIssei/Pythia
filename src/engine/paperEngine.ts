@@ -673,6 +673,10 @@ export class PaperEngine implements EngineClient {
   riskStatus() {
     return null;
   }
+  /** No exchange feeds here: every price is the in-browser simulator's. */
+  dataHealth() {
+    return null;
+  }
   setAdaptiveExecution(_on: boolean) {
     // The browser engine has no venue to route to, so there is nothing to tune.
   }
