@@ -9,6 +9,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Badge } from "./components/ui";
 import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
+import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
 import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
@@ -221,8 +222,12 @@ function Chrome() {
 
 export function App() {
   const [accepted, setAccepted] = useState(hasAcceptedLegal());
+  const [onboarded, setOnboarded] = useState(hasSeenOnboarding());
   if (!accepted) {
     return <LegalGate onAccept={() => setAccepted(true)} />;
+  }
+  if (!onboarded) {
+    return <Onboarding onDone={() => setOnboarded(true)} />;
   }
   return (
     <StoreProvider>

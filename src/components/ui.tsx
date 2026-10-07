@@ -1,6 +1,31 @@
 import { motion } from "framer-motion";
-import type { LucideIcon } from "lucide-react";
+import { HelpCircle, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { explain } from "../glossary";
+
+/**
+ * A small "?" that explains a number in one plain sentence, on hover and on
+ * keyboard focus. Used by StatCard for every label in the glossary.
+ */
+export function Explain({ text }: { text: string }) {
+  return (
+    <span className="group relative inline-flex align-middle">
+      <span
+        tabIndex={0}
+        aria-label={text}
+        className="cursor-help text-cyber-text-faint outline-none hover:text-accent focus:text-accent"
+      >
+        <HelpCircle size={11} />
+      </span>
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute left-1/2 top-full z-50 mt-1.5 w-60 -translate-x-1/2 rounded-md border border-cyber-border-bright bg-cyber-surface-2 px-2.5 py-1.5 text-[11px] normal-case leading-snug tracking-normal text-cyber-text opacity-0 shadow-lg transition-opacity group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
 
 // ── shared neon UI kit (mirrors Odysync's components/ui.tsx) ────────────────
 
@@ -94,6 +119,7 @@ export function StatCard({
       <div className="flex items-center gap-2 text-cyber-text-dim">
         <Icon size={14} className={color} />
         <span className="text-xs uppercase tracking-wide">{label}</span>
+        {explain(label) && <Explain text={explain(label)!} />}
       </div>
       <div className={`mt-2 text-2xl font-bold ${color}`}>{value}</div>
       {sub && <div className="mt-1 text-xs text-cyber-text-faint">{sub}</div>}

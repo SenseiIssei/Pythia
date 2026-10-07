@@ -9,7 +9,8 @@ import {
   Wallet,
   HelpCircle,
 } from "lucide-react";
-import { Card, Sparkline, Button, fmtUsd } from "../components/ui";
+import { Card, Sparkline, Button, Explain, fmtUsd } from "../components/ui";
+import { explain } from "../glossary";
 import { useStore } from "../store";
 import { setUiMode } from "../uiMode";
 
@@ -67,6 +68,9 @@ export function Home() {
           hint={realPositions > 0 ? `${realPositions} bought for real` : undefined}
         />
       </div>
+
+      {/* The week in one paragraph. */}
+      <WeekReport />
 
       {/* 4 · What does it think? */}
       <TopPredictions forecasts={forecasts} untrusted={forecastStats.trustedSources === 0} />
@@ -132,6 +136,83 @@ function MoneyBanner({
   );
 }
 
+const WEEK_KEY = "pythia.weekStart.v1";
+
+/** Monday 00:00 UTC of the current week, in ms. */
+function weekStartMs(now: number): number {
+  const d = new Date(now);
+  const day = (d.getUTCDay() + 6) % 7; // Monday = 0
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - day);
+}
+
+/**
+ * This week in plain words: trades made, up or down, and whether its
+ * predictions have earned any trust yet. The balance at the start of the week
+ * is remembered in this browser the first time the page opens that week.
+ */
+function WeekReport() {
+  const { portfolio, journal, forecastStats } = useStore();
+  const now = Date.now();
+  const start = weekStartMs(now);
+
+  let base: { week: number; equity: number; since: number } | null = null;
+  try {
+    base = JSON.parse(localStorage.getItem(WEEK_KEY) ?? "null");
+  } catch {
+    base = null;
+  }
+  // Only a real balance may become the week's starting point: on the first
+  // render the engine has not answered yet and equity reads 0.
+  const loaded = portfolio.equity > 0;
+  if (!base || base.week !== start || !(base.equity > 0)) {
+    base = loaded ? { week: start, equity: portfolio.equity, since: now } : null;
+    if (base) {
+      try {
+        localStorage.setItem(WEEK_KEY, JSON.stringify(base));
+      } catch {
+        /* the report still works for this visit */
+      }
+    }
+  }
+  if (!base) {
+    return (
+      <Card title="This week" className="mb-4">
+        <p className="text-sm text-cyber-text-faint">Waiting for the first numbers from the engine.</p>
+      </Card>
+    );
+  }
+
+  const fills = journal.filter((j) => j.kind === "fill" && j.ts >= start).length;
+  const oldest = journal.length ? Math.min(...journal.map((j) => j.ts)) : now;
+  const atLeast = oldest > start && journal.length > 0; // the journal keeps only recent entries
+  const change = portfolio.equity - base.equity;
+  const sinceMonday = base.since - start < 6 * 3_600_000;
+  const sinceWords = sinceMonday
+    ? "since Monday"
+    : `since you first opened it this week (${new Date(base.since).toLocaleDateString("en", { weekday: "long" })})`;
+
+  const checked = forecastStats.resolved;
+  const trusted = forecastStats.trustedSources;
+
+  return (
+    <Card title="This week" className="mb-4">
+      <p className="text-sm leading-relaxed text-cyber-text-dim">
+        This week Pythia made <b className="text-cyber-text">{atLeast ? "at least " : ""}{fills}</b> trade
+        {fills === 1 ? "" : "s"} and is{" "}
+        <b className={change >= 0 ? "text-success" : "text-danger"}>
+          {change >= 0 ? "up" : "down"} {fmtUsd(Math.abs(change), 2)}
+        </b>{" "}
+        {sinceWords}.{" "}
+        {checked === 0
+          ? "None of its predictions has been checked against reality yet."
+          : trusted === 0
+            ? `Its predictions have been checked ${checked.toLocaleString()} times and none of its sources beats the market yet, so it is not betting on them.`
+            : `Its predictions have been checked ${checked.toLocaleString()} times, and ${trusted} source${trusted === 1 ? " has" : "s have"} earned enough trust to be acted on.`}
+      </p>
+    </Card>
+  );
+}
+
 function PlainStat({
   label,
   value,
@@ -147,6 +228,7 @@ function PlainStat({
     <div className="rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2.5">
       <div className="mb-1 flex items-center gap-1.5 text-[11px] text-cyber-text-faint">
         <Icon size={11} /> {label}
+        {explain(label) && <Explain text={explain(label)!} />}
       </div>
       <div className="text-xl font-bold">{value}</div>
       {hint && <div className="mt-0.5 text-[10px] text-warning">{hint}</div>}
