@@ -38,6 +38,8 @@ interface Store {
   strategies: StrategyConfig[];
   limits: RiskLimits;
   history: Record<string, number[]>;
+  /** Bar times for the candle markets in `history`; ticks have none. */
+  historyTimes: Record<string, number[]>;
   live: LiveStatus;
   forecasts: MarketForecast[];
   tracks: Track[];
@@ -91,6 +93,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       strategies: engine.strategyList(),
       limits: engine.getLimits(),
       history: engine.history(),
+      historyTimes: engine.historyTimes(),
       live: engine.liveStatus(),
       forecasts: engine.forecasts(),
       tracks: engine.tracks(),
