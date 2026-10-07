@@ -374,6 +374,7 @@ async fn main() {
         .route("/api/wallets", get(get_wallets))
         .route("/api/ml/status", get(get_ml_status))
         .route("/api/tax", get(get_tax))
+        .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         // The dashboards are served from a different origin in dev; allow them.

@@ -14,6 +14,7 @@ pub mod engine;
 pub mod execution;
 pub mod forecast;
 pub mod lab;
+pub mod labview;
 pub mod llm;
 pub mod marketdata;
 pub mod ml;

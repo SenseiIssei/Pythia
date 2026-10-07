@@ -20,6 +20,12 @@ main() {
   local log="$local_root/sync.log"
   # One run at a time: the first pull of several GB outlasts the 2-hour schedule.
   local lock="$local_root/.sync.lock"
+  # A sync killed mid-way (PC shut down, task stopped) never releases its lock.
+  # No pull takes three hours, so an older lock is taken over.
+  if [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +180 2>/dev/null)" ]; then
+    echo "$(date -u +%FT%TZ) stale lock from $(date -r "$lock" -u +%FT%TZ) taken over" >> "$log"
+    rmdir "$lock"
+  fi
   if ! mkdir "$lock" 2>/dev/null; then
     echo "$(date -u +%FT%TZ) another sync is running, skipped" >> "$log"
     return 0

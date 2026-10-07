@@ -18,6 +18,7 @@ import {
   Target,
   Radio,
   Gauge,
+  Microscope,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -36,6 +37,7 @@ export type PageId =
   | "correlation"
   | "signals"
   | "models"
+  | "lab"
   | "predictions"
   | "live"
   | "risk"
@@ -73,6 +75,7 @@ export const NAV: NavItem[] = [
   { id: "correlation", label: "Correlation", icon: Grid3x3, section: "Research", advanced: true },
   { id: "signals", label: "AI Signals", icon: BrainCircuit, section: "AI", advanced: true },
   { id: "models", label: "Models", icon: Gauge, section: "AI", advanced: true },
+  { id: "lab", label: "Lab", icon: Microscope, section: "AI", advanced: true },
   { id: "live", label: "Live", icon: Radio, section: "Control", advanced: true },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control", advanced: true },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control", advanced: true },
