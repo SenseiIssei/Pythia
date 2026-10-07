@@ -1119,6 +1119,9 @@ mod tests {
             ratio: Some(3.0),
             enough: true,
             live_fills: 0,
+            route: crate::execution::bandit::FillRoute::Live,
+            median_drift_bps: None,
+            exhausted: 0,
         };
         let f = ForwardRecord { paper_since: Some(now - 40 * DAY), trades: 50, equities: false, now, slippage: Some(bad) };
         let g = judge_forward(&f);
@@ -1140,7 +1143,7 @@ mod tests {
     fn gate_8_is_pending_until_there_is_live_data() {
         assert_eq!(judge_live(&LiveRecord::default()).status, GateStatus::Pending);
         assert_eq!(judge_live(&LiveRecord { trades: 12, slippage: None }).status, GateStatus::Pending);
-        let good = SlippageRow { venue: "alpaca".into(), fills: 60, median_realised_bps: 1.2, median_modelled_bps: 1.0, ratio: Some(1.2), enough: true, live_fills: 0 };
+        let good = SlippageRow { venue: "alpaca".into(), fills: 60, median_realised_bps: 1.2, median_modelled_bps: 1.0, ratio: Some(1.2), enough: true, live_fills: 0, route: crate::execution::bandit::FillRoute::Live, median_drift_bps: None, exhausted: 0 };
         assert_eq!(judge_live(&LiveRecord { trades: 35, slippage: Some(good.clone()) }).status, GateStatus::Pass);
         let bad = SlippageRow { ratio: Some(2.4), median_realised_bps: 2.4, ..good };
         assert_eq!(judge_live(&LiveRecord { trades: 35, slippage: Some(bad) }).status, GateStatus::Fail);

@@ -85,6 +85,76 @@ pub struct BookQuote {
     /// than the venue's stamp, because Binance's REST book carries none and the
     /// two must age the same way.
     pub ts: i64,
+    /// The levels themselves, best first, so a paper market order can be
+    /// filled by walking them (see [`BookQuote::walk`]). Fixed-size, so the
+    /// quote stays `Copy`.
+    #[serde(default)]
+    pub bids: Ladder,
+    #[serde(default)]
+    pub asks: Ladder,
+}
+
+/// Up to [`BOOK_LEVELS`] `(price, qty)` levels of one side, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Ladder {
+    levels: [(f64, f64); BOOK_LEVELS],
+    len: u8,
+}
+
+impl Ladder {
+    /// From levels already sorted best first; anything past
+    /// [`BOOK_LEVELS`] is dropped.
+    pub fn from_sorted(levels: &[(f64, f64)]) -> Ladder {
+        let mut l = Ladder::default();
+        for (i, lv) in levels.iter().take(BOOK_LEVELS).enumerate() {
+            l.levels[i] = *lv;
+            l.len = (i + 1) as u8;
+        }
+        l
+    }
+
+    pub fn levels(&self) -> &[(f64, f64)] {
+        &self.levels[..self.len as usize]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A market order filled against a book, level by level.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BookWalk {
+    /// Volume-weighted price of what the book's levels supplied.
+    pub book_vwap: f64,
+    /// Quantity the listed levels could supply, at most the order's.
+    pub book_qty: f64,
+    /// Levels touched, partially or fully.
+    pub levels_used: usize,
+    /// The order wanted more than the [`BOOK_LEVELS`] levels hold. What is
+    /// left over has no price in this snapshot.
+    pub exhausted: bool,
+    /// Price of the last (worst) level touched.
+    pub last_price: f64,
+}
+
+impl BookWalk {
+    /// The whole order's average price: the walked part at its VWAP and an
+    /// exhausted book's remainder at `beyond`, which the caller prices with
+    /// the impact model. The remainder is never priced better than the last
+    /// level walked: beyond the 20th level the book only gets worse.
+    pub fn average_price(&self, qty: f64, side: Side, beyond: f64) -> f64 {
+        let qty = qty.abs();
+        let rest = (qty - self.book_qty).max(0.0);
+        if qty <= 0.0 || rest <= 1e-12 {
+            return self.book_vwap;
+        }
+        let beyond = match side {
+            Side::Buy => beyond.max(self.last_price),
+            Side::Sell => beyond.min(self.last_price),
+        };
+        (self.book_vwap * self.book_qty + beyond * rest) / qty
+    }
 }
 
 impl BookQuote {
@@ -126,6 +196,56 @@ impl BookQuote {
             bid_depth: notional(&bids),
             ask_depth: notional(&asks),
             ts,
+            bids: Ladder::from_sorted(&bids),
+            asks: Ladder::from_sorted(&asks),
+        })
+    }
+
+    /// Fill a market order of `qty` (base units) against this snapshot: a buy
+    /// lifts the asks from the best up, a sell hits the bids from the best
+    /// down, each level at most its listed size. `None` when the side taken
+    /// has no levels (a quote built without them) or the size is not
+    /// positive.
+    pub fn walk(&self, side: Side, qty: f64) -> Option<BookWalk> {
+        let ladder = match side {
+            Side::Buy => &self.asks,
+            Side::Sell => &self.bids,
+        };
+        if ladder.is_empty() || !(qty > 0.0) || !qty.is_finite() {
+            return None;
+        }
+        let (mut left, mut cost, mut got, mut used, mut last) = (qty, 0.0, 0.0, 0usize, 0.0);
+        for &(px, size) in ladder.levels() {
+            if left <= 1e-15 {
+                break;
+            }
+            let take = size.min(left);
+            cost += take * px;
+            got += take;
+            left -= take;
+            used += 1;
+            last = px;
+        }
+        Some(BookWalk {
+            book_vwap: if got > 0.0 { cost / got } else { last },
+            book_qty: got,
+            levels_used: used,
+            exhausted: left > 1e-12 * qty.max(1.0),
+            last_price: last,
+        })
+    }
+
+    /// How far the book's mid sits from `signal`, in bps, signed so that
+    /// positive means the market moved against an order on `side` (up for a
+    /// buy, down for a sell) between the signal and the book.
+    pub fn drift_bps(&self, side: Side, signal: f64) -> Option<f64> {
+        if !(signal > 0.0) || !(self.mid > 0.0) {
+            return None;
+        }
+        let raw = (self.mid - signal) / signal * 10_000.0;
+        Some(match side {
+            Side::Buy => raw,
+            Side::Sell => -raw,
         })
     }
 
@@ -163,12 +283,14 @@ pub struct ExecCost {
     /// Live depth of the side taken, or `None` for the calibrated default.
     pub depth: Option<f64>,
     pub source: CostSource,
+    /// The book itself when `source` is live, for a paper fill to walk.
+    pub book: Option<BookQuote>,
 }
 
 impl ExecCost {
     /// The calibrated defaults, no live book.
     pub fn calibrated(model: CostModel) -> ExecCost {
-        ExecCost { model, depth: None, source: CostSource::Default }
+        ExecCost { model, depth: None, source: CostSource::Default, book: None }
     }
 
     /// Model one order against `book` when it is usable: from `venue`, fresh
@@ -190,6 +312,7 @@ impl ExecCost {
             model: CostModel { half_spread_bps: b.half_spread_bps, ..model },
             depth: Some(depth),
             source: CostSource::Live,
+            book: Some(*b),
         }
     }
 
@@ -325,6 +448,82 @@ mod tests {
         let buy = ExecCost::for_order(model(), CostVenue::Kraken, Some(&q), Side::Buy, NOW);
         let sell = ExecCost::for_order(model(), CostVenue::Kraken, Some(&q), Side::Sell, NOW);
         assert!(buy.slippage_bps(5_000.0) > 3.0 * sell.slippage_bps(5_000.0));
+    }
+
+    /// Asks 100 / 101 / 102 with 1 / 2 / 3 coins, bids 99 / 98 with 2 / 2.
+    fn fixture() -> BookQuote {
+        BookQuote::from_levels(
+            CostVenue::Binance,
+            &[(98.0, 2.0), (99.0, 2.0)],
+            &[(102.0, 3.0), (100.0, 1.0), (101.0, 2.0)],
+            NOW,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_buy_walks_the_asks_from_the_best_price_up() {
+        let q = fixture();
+        // 2.5 coins: 1 at 100, 1.5 at 101.
+        let w = q.walk(Side::Buy, 2.5).unwrap();
+        assert!((w.book_vwap - (100.0 + 1.5 * 101.0) / 2.5).abs() < 1e-12, "{}", w.book_vwap);
+        assert_eq!((w.book_qty, w.levels_used, w.exhausted, w.last_price), (2.5, 2, false, 101.0));
+        assert_eq!(w.average_price(2.5, Side::Buy, 0.0), w.book_vwap, "nothing beyond the book to price");
+        // Exactly the first level.
+        let one = q.walk(Side::Buy, 1.0).unwrap();
+        assert_eq!((one.book_vwap, one.levels_used), (100.0, 1));
+    }
+
+    #[test]
+    fn a_sell_walks_the_bids_down_and_running_out_is_flagged() {
+        let q = fixture();
+        let w = q.walk(Side::Sell, 6.0).unwrap();
+        assert!(w.exhausted);
+        assert_eq!((w.book_qty, w.levels_used, w.last_price), (4.0, 2, 98.0));
+        assert!((w.book_vwap - 98.5).abs() < 1e-12);
+        // The 2 coins beyond the book: a model price above the last bid is not
+        // believed, the last bid is the best the rest can get.
+        let avg = w.average_price(6.0, Side::Sell, 99.5);
+        assert!((avg - (98.5 * 4.0 + 98.0 * 2.0) / 6.0).abs() < 1e-12, "{avg}");
+        // A worse model price is used as is.
+        let avg = w.average_price(6.0, Side::Sell, 90.0);
+        assert!((avg - (98.5 * 4.0 + 90.0 * 2.0) / 6.0).abs() < 1e-12, "{avg}");
+        // A buy beyond the asks is never cheaper than the last ask.
+        let b = q.walk(Side::Buy, 10.0).unwrap();
+        assert!(b.exhausted);
+        assert!(b.average_price(10.0, Side::Buy, 50.0) >= b.book_vwap);
+    }
+
+    #[test]
+    fn a_walk_needs_levels_and_a_size() {
+        let q = fixture();
+        assert!(q.walk(Side::Buy, 0.0).is_none());
+        assert!(q.walk(Side::Buy, f64::NAN).is_none());
+        let bare = BookQuote { asks: Ladder::default(), ..q };
+        assert!(bare.walk(Side::Buy, 1.0).is_none(), "a quote without levels cannot be walked");
+        // Only the best 20 levels are kept, best first.
+        let many: Vec<_> = (0..30).map(|i| (200.0 - i as f64, 1.0)).collect();
+        let asks: Vec<_> = (0..30).map(|i| (201.0 + i as f64, 1.0)).collect();
+        let big = BookQuote::from_levels(CostVenue::Kraken, &many, &asks, NOW).unwrap();
+        assert_eq!(big.asks.levels().len(), BOOK_LEVELS);
+        assert_eq!(big.asks.levels()[0].0, 201.0);
+        assert_eq!(big.bids.levels()[0].0, 200.0);
+        assert!(big.walk(Side::Buy, 25.0).unwrap().exhausted);
+    }
+
+    #[test]
+    fn drift_is_signed_against_the_order() {
+        let q = fixture(); // mid 99.5
+        assert!((q.drift_bps(Side::Buy, 99.0).unwrap() - 0.5 / 99.0 * 10_000.0).abs() < 1e-9, "price rose: a buy pays");
+        assert!(q.drift_bps(Side::Sell, 99.0).unwrap() < 0.0, "price rose: a seller gains");
+        assert_eq!(q.drift_bps(Side::Buy, 0.0), None);
+    }
+
+    #[test]
+    fn a_quote_with_levels_still_round_trips_through_json() {
+        let q = fixture();
+        let back: BookQuote = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!(back, q);
     }
 
     #[test]

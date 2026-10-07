@@ -5,7 +5,7 @@
 use crate::state::AppState;
 use pythia_core::connectors::cex::{self, Exchange, ExchangeInfo};
 use pythia_core::connectors::alpaca::AlpacaAccount;
-use pythia_core::connectors::{Side, Venue};
+use pythia_core::connectors::{Environment, Side, Venue};
 use pythia_core::costs::CostVenue;
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, EngineState, LiveConfig, MarketDiag, RiskLimits, StrategyConfig,
@@ -62,6 +62,19 @@ fn credentials_from_vault() -> Credentials {
                 .then(|| (ex, k, s, f.get("passphrase").cloned().unwrap_or_default()))
         });
 
+    // The demo route's exchange choice and its keys, from their own slot: a
+    // live key is never read for demo, nor a demo key for live.
+    let exchange_demo = crypto
+        .get(vault::DEMO_EXCHANGE_FIELD)
+        .and_then(|id| Exchange::parse(id))
+        .and_then(|ex| {
+            let f = vault::get(&vault::exchange_demo_slot(ex.id()))?;
+            let k = f.get("key")?.trim().to_string();
+            let s = f.get("secret")?.trim().to_string();
+            (!k.is_empty() && !s.is_empty())
+                .then(|| (ex, k, s, f.get("passphrase").cloned().unwrap_or_default()))
+        });
+
     let flag = |m: &BTreeMap<String, String>, k: &str| {
         matches!(m.get(k).map(String::as_str), Some("1" | "true" | "on"))
     };
@@ -72,6 +85,7 @@ fn credentials_from_vault() -> Credentials {
         alpaca,
         alpaca_live,
         exchange,
+        exchange_demo,
         alpaca_slippage_bps: None,
         alpaca_allow_shorts: flag(&alpaca_fields, "allowShorts"),
     }
@@ -118,10 +132,16 @@ pub fn refresh_connected(st: &AppState) {
     let selected = vault::get("crypto")
         .and_then(|f| f.get("exchange").and_then(|id| Exchange::parse(id)))
         .map(CostVenue::for_exchange);
+    let demo_ex = creds.demo_exchange();
     {
         let mut e = st.engine.lock().unwrap();
         e.set_connected(connected);
         e.set_crypto_cost_venue(selected);
+        e.set_demo_venues(
+            creds.demo_venues(),
+            demo_ex.map(CostVenue::for_exchange),
+            demo_ex.and_then(|x| x.demo()).is_some_and(|d| d.real_prices),
+        );
     }
     *st.creds.lock().unwrap() = creds;
 }
@@ -346,9 +366,11 @@ pub async fn set_live(app: AppHandle, cfg: LiveConfig) -> Result<(), String> {
 
 /// Read-only credential check for any venue. Places no order.
 #[tauri::command]
-pub async fn live_verify(app: AppHandle, venue: Venue, paper: bool) -> Result<String, String> {
+pub async fn live_verify(app: AppHandle, venue: Venue, paper: bool, demo: Option<bool>) -> Result<String, String> {
     let creds = credentials(app.state::<AppState>().inner());
-    execution::verify(&creds, venue, paper).await
+    // `demo` reads the venue's demo account with the demo keys.
+    let env = if demo.unwrap_or(false) { Environment::Demo } else { Environment::Live };
+    execution::verify_env(&creds, venue, env, paper).await
 }
 
 /// Which endpoint the engine is set to right now.
@@ -378,14 +400,28 @@ pub fn send_test_order(
     app_state: State<AppState>,
     market_id: String,
     notional: f64,
+    demo: Option<bool>,
 ) -> Result<String, String> {
+    let demo = demo.unwrap_or(false);
     let mut e = app_state.engine.lock().unwrap();
     // 0 (what the UI sends) means "the venue's minimum size": this is a
     // connection test, not a strategy, and it should risk as little as it can.
-    let notional = if notional > 0.0 { notional.clamp(1.0, 5_000.0) } else { e.connection_test_notional(&market_id) };
-    // Armed, venue enabled, nothing in flight, and (for Alpaca) a fresh open
-    // session. Otherwise this would only paper-fill, which proves nothing.
-    e.connection_test_order(&market_id, notional)?;
+    let notional = if notional > 0.0 {
+        notional.clamp(1.0, 5_000.0)
+    } else if demo {
+        e.demo_test_notional(&market_id)
+    } else {
+        e.connection_test_notional(&market_id)
+    };
+    if demo {
+        // The demo world: demo keys, virtual money, no live arm needed.
+        e.demo_connection_test_order(&market_id, notional)?;
+    } else {
+        // Armed, venue enabled, nothing in flight, and (for Alpaca) a fresh
+        // open session. Otherwise this would only paper-fill, which proves
+        // nothing.
+        e.connection_test_order(&market_id, notional)?;
+    }
     // The engine journals what happened synchronously; surface the newest entry
     // for this market so the caller sees submit-or-reject rather than silence.
     let msg = e
@@ -473,18 +509,29 @@ pub async fn alpaca_account(app: AppHandle, paper: bool) -> Result<AlpacaAccount
 /// Every exchange Pythia can route to, with a `configured` flag from the vault.
 #[tauri::command]
 pub fn exchanges() -> Vec<ExchangeInfo> {
-    cex::exchanges_with(|e| vault::has_keys(&vault::exchange_slot(e.id())))
+    cex::exchanges_with_demo(
+        |e| vault::has_keys(&vault::exchange_slot(e.id())),
+        |e| vault::has_keys(&vault::exchange_demo_slot(e.id())),
+    )
 }
 
 /// Store one exchange's credentials and make it the active crypto venue.
+///
+/// `demo: true` stores DEMO keys in the exchange's demo slot and makes it the
+/// demo route's exchange; the live slot and the live choice are untouched.
 #[tauri::command]
 pub fn save_exchange_keys(
     app: AppHandle,
     app_state: State<AppState>,
     exchange: String,
     fields: BTreeMap<String, String>,
+    demo: Option<bool>,
 ) -> Result<(), String> {
     let ex = Exchange::parse(&exchange).ok_or_else(|| format!("unknown exchange: {exchange}"))?;
+    let demo = demo.unwrap_or(false);
+    if demo && ex.demo().is_none() {
+        return Err(format!("{} has no demo environment. {}", ex.label(), ex.no_demo_reason()));
+    }
     let fields: BTreeMap<String, String> =
         fields.into_iter().filter(|(_, v)| !v.trim().is_empty()).collect();
     if !fields.contains_key("key") || !fields.contains_key("secret") {
@@ -496,11 +543,26 @@ pub fn save_exchange_keys(
     // A Coinbase private key has structure; refuse a broken paste here rather
     // than at the first order. The message never quotes the key.
     cex::check_credentials(ex, &fields["key"], &fields["secret"]).map_err(|e| format!("{}: {e}", ex.label()))?;
-    vault::save(&vault::exchange_slot(ex.id()), &fields)?;
+    let env = if demo { Environment::Demo } else { Environment::Live };
+    // The same key in both slots means it was pasted into the wrong form.
+    // Compared here, never echoed.
+    let other = vault::get(&vault::exchange_slot_for(
+        ex.id(),
+        if demo { Environment::Live } else { Environment::Demo },
+    ));
+    if other.and_then(|f| f.get("key").cloned()).is_some_and(|k| k.trim() == fields["key"].trim()) {
+        return Err(format!(
+            "this {} key is already saved as the {} key. Live and demo keys are different keys from different accounts",
+            ex.label(),
+            if demo { "live" } else { "demo" }
+        ));
+    }
+    vault::save(&vault::exchange_slot_for(ex.id(), env), &fields)?;
 
     // Selecting an exchange is a separate slot so the choice survives a key wipe.
     let mut crypto = vault::get("crypto").unwrap_or_default();
-    crypto.insert("exchange".into(), ex.id().into());
+    let field = if demo { vault::DEMO_EXCHANGE_FIELD } else { "exchange" };
+    crypto.insert(field.into(), ex.id().into());
     vault::save("crypto", &crypto)?;
 
     refresh_connected(app_state.inner());
@@ -509,9 +571,15 @@ pub fn save_exchange_keys(
 }
 
 #[tauri::command]
-pub fn clear_exchange_keys(app: AppHandle, app_state: State<AppState>, exchange: String) -> Result<(), String> {
+pub fn clear_exchange_keys(
+    app: AppHandle,
+    app_state: State<AppState>,
+    exchange: String,
+    demo: Option<bool>,
+) -> Result<(), String> {
     let ex = Exchange::parse(&exchange).ok_or_else(|| format!("unknown exchange: {exchange}"))?;
-    vault::clear(&vault::exchange_slot(ex.id()))?;
+    let env = if demo.unwrap_or(false) { Environment::Demo } else { Environment::Live };
+    vault::clear(&vault::exchange_slot_for(ex.id(), env))?;
     refresh_connected(app_state.inner());
     push_state(&app);
     Ok(())

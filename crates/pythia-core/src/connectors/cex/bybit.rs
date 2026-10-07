@@ -1,5 +1,9 @@
 //! Bybit v5 spot (`https://api.bybit.com`).
 //!
+//! Demo: `https://api-demo.bybit.com`, same paths, same signing, a key created
+//! inside the Demo Trading account
+//! (<https://bybit-exchange.github.io/docs/v5/demo>).
+//!
 //! Signature covers `timestamp + api_key + recv_window + (query | rawBody)`, so
 //! the body must be signed and sent byte-identically — it is serialised once and
 //! passed through as a string.
@@ -33,7 +37,7 @@ fn headers(c: &CexConnector, ts: &str, payload: &str) -> Vec<(&'static str, Stri
 async fn get(c: &CexConnector, path: &str, params: &[(&str, String)]) -> Result<Value, ConnectorError> {
     let query = sign::form_encode(params);
     let ts = sign::epoch_ms().to_string();
-    let mut rb = c.http.get(format!("{BASE}{path}?{query}"));
+    let mut rb = c.http.get(format!("{}{path}?{query}", c.base(BASE)));
     for (k, v) in headers(c, &ts, &query) {
         rb = rb.header(k, v);
     }
@@ -48,7 +52,7 @@ async fn post(c: &CexConnector, path: &str, body: &Value) -> Result<Value, Conne
     let ts = sign::epoch_ms().to_string();
     let mut rb = c
         .http
-        .post(format!("{BASE}{path}"))
+        .post(format!("{}{path}", c.base(BASE)))
         .header("content-type", "application/json")
         .body(raw.clone());
     for (k, v) in headers(c, &ts, &raw) {

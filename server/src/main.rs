@@ -33,7 +33,7 @@ use tower_http::cors::CorsLayer;
 
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
 use pythia_core::connectors::cex::{self, Exchange};
-use pythia_core::connectors::{Side, Venue};
+use pythia_core::connectors::{Environment, Side, Venue};
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, Engine, EngineState, LiveConfig, RiskLimits, StrategyConfig,
     StrategyState,
@@ -94,10 +94,21 @@ fn credentials_from_env() -> Credentials {
             let s = env_str("PYTHIA_EXCHANGE_SECRET")?;
             Some((ex, k, s, env_str("PYTHIA_EXCHANGE_PASSPHRASE").unwrap_or_default()))
         });
+    // The demo route's exchange and its DEMO keys, separate variables from
+    // the live ones (see docs/DEMO.md). Never filled from PYTHIA_EXCHANGE_KEY.
+    let exchange_demo = env_str("PYTHIA_DEMO_EXCHANGE")
+        .as_deref()
+        .and_then(Exchange::parse)
+        .and_then(|ex| {
+            let k = env_str("PYTHIA_DEMO_EXCHANGE_KEY")?;
+            let s = env_str("PYTHIA_DEMO_EXCHANGE_SECRET")?;
+            Some((ex, k, s, env_str("PYTHIA_DEMO_EXCHANGE_PASSPHRASE").unwrap_or_default()))
+        });
     Credentials {
         alpaca,
         alpaca_live,
         exchange,
+        exchange_demo,
         // Marketable-limit band for Alpaca market orders; 25bps when unset.
         alpaca_slippage_bps: env_str("PYTHIA_SLIPPAGE_BPS").and_then(|v| v.parse().ok()),
         alpaca_allow_shorts: env_flag("PYTHIA_ALLOW_SHORTS"),
@@ -342,6 +353,12 @@ async fn main() {
             }
         }
         e.set_connected(creds.connected_venues());
+        let demo_ex = creds.demo_exchange();
+        e.set_demo_venues(
+            creds.demo_venues(),
+            demo_ex.map(CostVenue::for_exchange),
+            demo_ex.and_then(|x| x.demo()).is_some_and(|d| d.real_prices),
+        );
         // A headless instance that only runs lab books (the VPS) pauses the
         // built-in indicator strategies, which would otherwise hold the same
         // coins and block the lab book from running its portfolio.
@@ -449,6 +466,10 @@ async fn main() {
         None => tracing::info!(
             "Crypto exchange: none (set PYTHIA_EXCHANGE + PYTHIA_EXCHANGE_KEY/SECRET) — crypto stays simulated"
         ),
+    }
+    match state.creds.connector_env(Venue::Crypto, Environment::Demo, true, false) {
+        Ok(c) => tracing::info!("Crypto demo route: {} (virtual money, no live arm needed)", c.label()),
+        Err(why) => tracing::info!("Crypto demo route: off ({why})"),
     }
     let watched = watched_addresses().len();
     if watched > 0 {
@@ -1243,6 +1264,10 @@ async fn get_live_diagnostics(State(st): State<AppState>) -> impl IntoResponse {
 struct TestOrderReq {
     market_id: String,
     notional: f64,
+    /// Send the test to the venue's demo environment instead (virtual money,
+    /// needs demo keys, not the live arm).
+    #[serde(default)]
+    demo: bool,
 }
 
 /// Send one small order through the real path, to prove the pipeline.
@@ -1255,10 +1280,17 @@ async fn post_test_order(
         // 0 means "the venue's minimum size": a connection test, not a strategy.
         let notional = if req.notional > 0.0 {
             req.notional.clamp(1.0, 5_000.0)
+        } else if req.demo {
+            e.demo_test_notional(&req.market_id)
         } else {
             e.connection_test_notional(&req.market_id)
         };
-        if let Err(why) = e.connection_test_order(&req.market_id, notional) {
+        let sent = if req.demo {
+            e.demo_connection_test_order(&req.market_id, notional)
+        } else {
+            e.connection_test_order(&req.market_id, notional)
+        };
+        if let Err(why) = sent {
             (StatusCode::CONFLICT, why)
         } else {
             let msg = e
@@ -1305,6 +1337,9 @@ struct VerifyQuery {
     venue: Venue,
     #[serde(default = "default_true")]
     paper: bool,
+    /// Check the venue's demo account with the demo keys instead.
+    #[serde(default)]
+    demo: bool,
 }
 
 /// Read-only credential check for any venue. Never places an order.
@@ -1312,7 +1347,8 @@ async fn get_live_verify(
     State(st): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<VerifyQuery>,
 ) -> impl IntoResponse {
-    match execution::verify(&st.creds, q.venue, q.paper).await {
+    let env = if q.demo { Environment::Demo } else { Environment::Live };
+    match execution::verify_env(&st.creds, q.venue, env, q.paper).await {
         Ok(summary) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "summary": summary }))).into_response(),
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
     }
@@ -1321,7 +1357,8 @@ async fn get_live_verify(
 /// Every exchange Pythia can route to, and whether this server has keys for it.
 async fn get_exchanges(State(st): State<AppState>) -> impl IntoResponse {
     let selected = st.creds.exchange.as_ref().map(|(e, ..)| *e);
-    Json(cex::exchanges_with(|e| selected == Some(e)))
+    let demo = st.creds.demo_exchange();
+    Json(cex::exchanges_with_demo(|e| selected == Some(e), |e| demo == Some(e)))
 }
 
 #[derive(Debug, Deserialize)]

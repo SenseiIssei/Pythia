@@ -49,6 +49,36 @@ impl Venue {
     }
 }
 
+/// Which of a venue's two worlds a connector talks to.
+///
+/// `Live` is the real account with real money. `Demo` is the venue's own
+/// demo or paper environment: the same API shape, a separate host (or a
+/// header), separate keys and virtual funds. Every connector holds exactly one
+/// environment and the keys that belong to it, so a live key can never be
+/// sent to a demo host and a demo key never reaches the live one. See
+/// `docs/DEMO.md` for which venues have a demo environment and how honest its
+/// prices are.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Environment {
+    #[default]
+    Live,
+    Demo,
+}
+
+impl Environment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Environment::Live => "live",
+            Environment::Demo => "demo",
+        }
+    }
+
+    pub fn is_demo(self) -> bool {
+        self == Environment::Demo
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
