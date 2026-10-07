@@ -1,5 +1,6 @@
 //! Read-only market data. Real feeds:
 //!   · Kraken     — spot crypto last/open price  (https://api.kraken.com, no auth)
+//!   · Kraken / Binance — top-20 order books for the cost model (public, no auth)
 //!   · Polymarket — Gamma API prediction odds     (https://gamma-api.polymarket.com, no auth)
 //!   · Alpaca     — equity snapshots              (https://data.alpaca.markets, needs keys)
 //!
@@ -10,6 +11,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
+
+use crate::costs::CostVenue;
+use crate::orderbook::{BookQuote, BookSnapshot, BOOK_LEVELS};
 
 pub struct RealCrypto {
     pub id: String,
@@ -351,6 +355,98 @@ fn parse_kraken_ohlc(v: &Value) -> Option<Vec<Ohlc>> {
     Some(bars)
 }
 
+// ── order books ─────────────────────────────────────────────────────────────
+//
+// Candles say where a market has been; the book says what crossing it costs
+// right now. The cost model prices impact against the notional on the 20 best
+// levels of the side an order takes (see `crate::orderbook`), so both venues
+// are asked for exactly 20 levels. Public endpoints, no keys.
+
+/// Top-20 books for the crypto universe on the exchange whose costs the engine
+/// charges. Kraken and Binance are the two the cost model was calibrated on;
+/// any other venue returns nothing and its fills keep the calibrated defaults.
+///
+/// Both endpoints are single-pair, so this fans out one request per coin like
+/// [`fetch_kraken_bars`], and drops any that fail.
+pub async fn fetch_books(venue: CostVenue) -> Vec<BookSnapshot> {
+    let handles: Vec<_> = KRAKEN_PAIRS
+        .iter()
+        .filter_map(|(pair, _, symbol)| {
+            let url = match venue {
+                CostVenue::Kraken => {
+                    format!("https://api.kraken.com/0/public/Depth?pair={pair}&count={BOOK_LEVELS}")
+                }
+                CostVenue::Binance => format!(
+                    "https://api.binance.com/api/v3/depth?symbol={}&limit={BOOK_LEVELS}",
+                    binance_symbol(symbol)
+                ),
+                _ => return None,
+            };
+            let id = format!("crypto:{symbol}");
+            Some(tokio::spawn(async move {
+                let v = get_json(&url).await?;
+                let now = chrono::Utc::now().timestamp_millis();
+                let quote = match venue {
+                    CostVenue::Kraken => parse_kraken_depth(&v, now)?,
+                    _ => parse_binance_depth(&v, now)?,
+                };
+                Some(BookSnapshot { id, quote })
+            }))
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for h in handles {
+        if let Ok(Some(s)) = h.await {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// `BTC/USD` → `BTCUSDT`. Binance quotes the universe in USDT; the recorder and
+/// the cost calibration used the same books, so this is the market whose
+/// spread and depth `config/costs.json` describes.
+fn binance_symbol(symbol: &str) -> String {
+    let base = symbol.split('/').next().unwrap_or(symbol);
+    format!("{base}USDT")
+}
+
+/// One side of a book as `(price, qty)`. Both venues send `[price, qty, ...]`
+/// rows with numbers as strings; Kraken appends a timestamp, which is ignored.
+fn book_side(v: Option<&Value>) -> Vec<(f64, f64)> {
+    let num = |x: Option<&Value>| -> Option<f64> {
+        match x? {
+            Value::String(s) => s.parse::<f64>().ok(),
+            other => other.as_f64(),
+        }
+    };
+    v.and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    let r = r.as_array()?;
+                    Some((num(r.first())?, num(r.get(1))?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Kraken `Depth`: `{error: [], result: {<canonical pair>: {asks: [[p, v, ts]], bids: [...]}}}`.
+/// The reply key is renamed (`XBTUSD` → `XXBTZUSD`), and there is exactly one
+/// pair per request, so the first entry is the book.
+fn parse_kraken_depth(v: &Value, now: i64) -> Option<BookQuote> {
+    let (_, book) = v.get("result")?.as_object()?.iter().next()?;
+    BookQuote::from_levels(CostVenue::Kraken, &book_side(book.get("bids")), &book_side(book.get("asks")), now)
+}
+
+/// Binance `depth`: `{lastUpdateId, bids: [[p, q]], asks: [[p, q]]}`. An error
+/// (`{code, msg}`) has no sides and yields `None`.
+fn parse_binance_depth(v: &Value, now: i64) -> Option<BookQuote> {
+    BookQuote::from_levels(CostVenue::Binance, &book_side(v.get("bids")), &book_side(v.get("asks")), now)
+}
+
 /// Minimal percent-encoding for the RFC3339 timestamps we put in query strings
 /// (`:` and `+` are the only characters that actually matter here).
 fn urlencode(s: &str) -> String {
@@ -519,6 +615,61 @@ mod tests {
     fn kraken_ohlc_rejects_an_empty_result() {
         let v: Value = serde_json::from_str(r#"{"error":["EQuery:Unknown asset pair"],"result":{}}"#).unwrap();
         assert!(parse_kraken_ohlc(&v).is_none());
+    }
+
+    #[test]
+    fn parses_a_kraken_depth_payload() {
+        // Shape per Kraken /0/public/Depth: strings for price and volume, a
+        // timestamp third, and the pair renamed in the reply.
+        let v: Value = serde_json::from_str(
+            r#"{"error":[],"result":{"XXBTZUSD":{
+                 "asks":[["67010.0","0.5",1790000000],["67000.0","1.0",1790000001]],
+                 "bids":[["66990.0","2.0",1790000000],["66980.0","1.5",1790000002]]
+               }}}"#,
+        )
+        .unwrap();
+        let q = parse_kraken_depth(&v, 42).expect("book");
+        assert_eq!(q.venue, CostVenue::Kraken);
+        assert_eq!(q.ts, 42, "stamped with receipt time");
+        assert!((q.mid - 66_995.0).abs() < 1e-9, "best ask 67000 even though it came second");
+        assert!((q.half_spread_bps - 5.0 / 66_995.0 * 10_000.0).abs() < 1e-9);
+        assert!((q.ask_depth - (67_010.0 * 0.5 + 67_000.0)).abs() < 1e-6);
+        assert!((q.bid_depth - (66_990.0 * 2.0 + 66_980.0 * 1.5)).abs() < 1e-6);
+
+        let err: Value = serde_json::from_str(r#"{"error":["EQuery:Unknown asset pair"]}"#).unwrap();
+        assert!(parse_kraken_depth(&err, 42).is_none());
+    }
+
+    #[test]
+    fn parses_a_binance_depth_payload() {
+        let v: Value = serde_json::from_str(
+            r#"{"lastUpdateId":1027024,
+                "bids":[["3500.10","4.0"],["3500.00","10.0"]],
+                "asks":[["3500.20","3.0"],["3500.30","0.0"]]}"#,
+        )
+        .unwrap();
+        let q = parse_binance_depth(&v, 7).expect("book");
+        assert_eq!(q.venue, CostVenue::Binance);
+        assert!((q.half_spread_bps - 0.1 / 3500.15 / 2.0 * 10_000.0).abs() < 1e-9);
+        assert!((q.bid_depth - (3500.10 * 4.0 + 3500.0 * 10.0)).abs() < 1e-6);
+        // A zero-quantity level is no liquidity at all.
+        assert!((q.ask_depth - 3500.20 * 3.0).abs() < 1e-6);
+
+        let err: Value = serde_json::from_str(r#"{"code":-1121,"msg":"Invalid symbol."}"#).unwrap();
+        assert!(parse_binance_depth(&err, 7).is_none());
+    }
+
+    #[test]
+    fn binance_books_are_the_usdt_markets_the_calibration_used() {
+        assert_eq!(binance_symbol("BTC/USD"), "BTCUSDT");
+        assert_eq!(binance_symbol("PEPE/USD"), "PEPEUSDT");
+    }
+
+    #[tokio::test]
+    async fn venues_without_a_calibrated_book_fetch_nothing() {
+        // No request is even built for these, so this never touches the network.
+        assert!(fetch_books(CostVenue::Okx).await.is_empty());
+        assert!(fetch_books(CostVenue::Alpaca).await.is_empty());
     }
 
     #[test]
