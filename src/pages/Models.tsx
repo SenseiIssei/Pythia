@@ -3,6 +3,7 @@ import { Activity, Gauge, RefreshCw, Scale, TriangleAlert, Trophy } from "lucide
 import { Badge, Button, Card, PageHeader, StatCard } from "../components/ui";
 import { liveMode } from "../live";
 import { mlStatus, type DriftLevel, type MlStatus } from "../ml";
+import { PicksPanel } from "../components/PicksPanel";
 
 const fmtVol = (v: number) => `${v.toFixed(0)} %`;
 const NONE = "not yet";
@@ -40,7 +41,7 @@ export function Models() {
   const header = (
     <PageHeader
       title="Models"
-      subtitle="Forecasts in shadow mode: written down before the hour, scored after it, never traded"
+      subtitle="Forecasts in shadow mode: written down before the hour or week, scored after it, never traded"
     />
   );
 
@@ -80,7 +81,7 @@ export function Models() {
             <TriangleAlert size={18} className={`mt-0.5 shrink-0 ${s.state === "rejected" ? "text-danger" : "text-warning"}`} />
             <div>
               <div className="font-bold text-cyber-text">
-                {s.state === "noModel" && "No model loaded"}
+                {s.state === "noModel" && "No volatility model loaded"}
                 {s.state === "rejected" && "Model refused"}
                 {s.state === "warmingUp" && "Warming up"}
               </div>
@@ -212,6 +213,8 @@ export function Models() {
           </div>
         </Card>
       )}
+
+      {s?.picks && <PicksPanel p={s.picks} onChanged={() => void refresh()} />}
     </div>
   );
 }

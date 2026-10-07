@@ -395,6 +395,14 @@ async fn main() {
         .route("/api/exchanges", get(get_exchanges))
         .route("/api/wallets", get(get_wallets))
         .route("/api/ml/status", get(get_ml_status))
+        .route(
+            "/api/ml/picks/run",
+            post(|| async {
+                // M2 ranks the latest complete day now. Shadow mode: it records, it never trades.
+                pythia_core::ml_picks::request_run();
+                axum::http::StatusCode::ACCEPTED
+            }),
+        )
         .route("/api/tax", get(get_tax))
         .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
         .route("/api/forecast/ensemble", post(post_ensemble))
