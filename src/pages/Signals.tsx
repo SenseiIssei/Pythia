@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { BrainCircuit, Sparkles, TriangleAlert, ArrowUp, ArrowDown, Minus } from "lucide-react";
-import { Card, PageHeader, Badge, Button, Meter, Toggle, fmtPct } from "../components/ui";
+import { Card, PageHeader, Badge, Button, EmptyState, Field, Meter, Readout, Toggle, fmtPct, inputCls } from "../components/ui";
 import { useStore } from "../store";
 import { aiMode, aiProviders, aiSignal } from "../ai";
 import { setAiPolicy } from "../live";
@@ -65,21 +65,21 @@ function AiOverlayPanel() {
       className="mb-4"
       title="Live AI overlay"
       right={
-        <Badge tone={aiPolicy.enabled ? "green" : "neutral"}>{aiPolicy.enabled ? "active" : "off"}</Badge>
+        <Badge tone={aiPolicy.enabled ? "green" : "neutral"}>{aiPolicy.enabled ? "on" : "off"}</Badge>
       }
     >
       <div className="mb-3 flex items-start justify-between gap-4">
-        <div className="text-sm text-cyber-text-dim">
-          Polls your markets in the background and attaches a view to each one. A view can{" "}
-          <b className="text-warning">shrink</b> or <b className="text-danger">veto</b> an entry a strategy already
-          decided to make, or nudge its size up by at most{" "}
-          <b className="text-accent">{aiPolicy.maxBoost.toFixed(2)}×</b>.{" "}
+        <div className="text-sm leading-relaxed text-cyber-text-dim">
+          Asks a model about your markets in the background and attaches its view to each one. A view can{" "}
+          <b className="text-warning">shrink</b> or <b className="text-danger">block</b> a trade a strategy already
+          decided to make, or raise its size by at most{" "}
+          <b className="font-mono text-accent">{aiPolicy.maxBoost.toFixed(2)}×</b>.{" "}
           <b className="text-cyber-text">It can never open a trade on its own</b>, and it never touches exits.
         </div>
-        <Toggle on={aiPolicy.enabled} onChange={(v) => !busy && void toggle(v)} />
+        <Toggle label="AI overlay" on={aiPolicy.enabled} disabled={busy} onChange={(v) => void toggle(v)} />
       </div>
 
-      <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="Calls" value={aiSpend.calls.toLocaleString()} />
         <Stat label="Input tokens" value={aiSpend.inputTokens.toLocaleString()} />
         <Stat label="Output tokens" value={aiSpend.outputTokens.toLocaleString()} />
@@ -94,16 +94,20 @@ function AiOverlayPanel() {
             return (
               <div
                 key={v.marketId}
-                className={`flex items-start gap-2 rounded border border-cyber-border bg-cyber-surface/40 px-2 py-1.5 text-xs ${
+                className={`flex flex-wrap items-start gap-x-2 gap-y-0.5 rounded-lg border border-cyber-border bg-cyber-bg/40 px-2.5 py-1.5 text-xs ${
                   stale ? "opacity-50" : ""
                 }`}
               >
                 <DirIcon d={v.direction} />
                 <span className="font-mono text-cyber-text">{symbolOf(v.marketId)}</span>
-                <span className="text-cyber-text-faint">conf {v.confidence.toFixed(2)}</span>
-                <span className="flex-1 truncate text-cyber-text-dim">{v.rationale}</span>
-                <span className="shrink-0 text-cyber-text-faint">
-                  {stale ? "expired" : `${ageSec}s`} · {v.latencyMs}ms
+                <span className="font-mono text-cyber-text-faint" title="How sure the model said it is">
+                  conf {v.confidence.toFixed(2)}
+                </span>
+                <span className="min-w-0 flex-1 basis-40 truncate text-cyber-text-dim" title={v.rationale}>
+                  {v.rationale}
+                </span>
+                <span className="shrink-0 font-mono text-cyber-text-faint">
+                  {stale ? "expired" : `${ageSec}s ago`} · {v.latencyMs}ms
                 </span>
               </div>
             );
@@ -122,9 +126,8 @@ function AiOverlayPanel() {
 
 function Stat({ label, value, bad }: { label: string; value: string; bad?: boolean }) {
   return (
-    <div className="rounded border border-cyber-border bg-cyber-surface/40 px-2 py-1.5">
-      <div className="text-[10px] uppercase tracking-widest text-cyber-text-faint">{label}</div>
-      <div className={`font-mono text-sm ${bad ? "text-danger" : "text-cyber-text"}`}>{value}</div>
+    <div className="rounded-lg border border-cyber-border bg-cyber-bg/40 px-2.5 py-1.5">
+      <Readout label={label} value={value} tone={bad ? "red" : "neutral"} />
     </div>
   );
 }
@@ -187,29 +190,24 @@ export function Signals() {
 
   if (mode === "none") {
     return (
-      <div className="animate-fade-in max-w-3xl">
-        <PageHeader title="AI Signals" subtitle="Ask any LLM to reason about a market" />
-        <Card className="border-warning/30 bg-warning/5">
-          <div className="flex items-start gap-3">
-            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-warning" />
-            <div className="text-sm text-cyber-text-dim">
-              <div className="font-bold text-warning">Not available in the browser paper build</div>
-              AI signals call external model APIs, which needs a key store and a non-CORS path. Run the{" "}
-              <span className="text-accent">desktop app</span> (keys in the OS keychain) or point a web build at
-              the <span className="text-accent">backend server</span> (<code className="text-accent">VITE_PYTHIA_SERVER</code>,
-              keys in its environment).
-            </div>
-          </div>
+      <div className="animate-fade-in mx-auto max-w-4xl">
+        <PageHeader title="AI Signals" subtitle="Ask an AI model to reason about a market. Advice only: it never places an order." />
+        <Card>
+          <EmptyState icon={TriangleAlert} title="AI signals need the desktop app or a connected server">
+            They call model APIs, which needs a safe place for your key and a route the browser is not allowed to take.
+            Use the desktop app (keys in the OS keychain) or point a web build at a backend server
+            (<code className="text-accent">VITE_PYTHIA_SERVER</code>, keys in its environment).
+          </EmptyState>
         </Card>
       </div>
     );
   }
 
   return (
-    <div className="animate-fade-in max-w-4xl">
+    <div className="animate-fade-in mx-auto max-w-4xl">
       <PageHeader
         title="AI Signals"
-        subtitle="Bring any API key — Claude, GPT, Grok, GLM, Gemini, DeepSeek & more reason over your markets"
+        subtitle="Bring any API key (Claude, GPT, Grok, GLM, Gemini, DeepSeek and more) and let a model reason over your markets. Advice only: it never places an order by itself."
       />
 
       <AiOverlayPanel />
@@ -224,14 +222,14 @@ export function Signals() {
         }
       >
         {configuredCount === 0 && (
-          <div className="mb-3 rounded border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-cyber-text-dim">
+          <div className="mb-3 rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2 text-xs leading-relaxed text-cyber-text-dim">
             No provider has a key yet.{" "}
             {mode === "native" ? (
               <>Add one in <span className="text-accent">Settings → AI providers</span>.</>
             ) : (
               <>Set a key in the server's environment (e.g. <code className="text-accent">ANTHROPIC_API_KEY</code>).</>
             )}{" "}
-            You can still try a request — it will tell you what's missing.
+            You can still try a request: it will tell you what is missing.
           </div>
         )}
 
@@ -273,15 +271,21 @@ export function Signals() {
           </Field>
         </div>
 
-        <div className="mt-3 flex items-center gap-3">
+        <div className="mt-3 flex flex-wrap items-center gap-3">
           <Button tone="purple" icon={Sparkles} disabled={busy || !market} onClick={ask}>
-            {busy ? "Thinking…" : "Ask the model"}
+            {busy ? "Thinking" : "Ask the model"}
           </Button>
           {provider && !provider.configured && (
-            <span className="text-xs text-warning">⚠ {provider.label} has no key configured</span>
+            <span className="flex items-center gap-1 text-xs text-warning">
+              <TriangleAlert size={12} aria-hidden /> {provider.label} has no key yet
+            </span>
           )}
-          {err && <span className="text-xs text-danger">{err}</span>}
         </div>
+        {err && (
+          <div role="alert" className="mt-2 text-sm text-danger">
+            {err}
+          </div>
+        )}
       </Card>
 
       {result && market && (
@@ -339,14 +343,4 @@ export function Signals() {
   );
 }
 
-const selCls =
-  "w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none";
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs text-cyber-text-dim">{label}</label>
-      {children}
-    </div>
-  );
-}
+const selCls = inputCls;
