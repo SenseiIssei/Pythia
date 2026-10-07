@@ -144,6 +144,9 @@ export class TauriEngineClient implements EngineClient {
   riskStatus() {
     return this.state.risk ?? null;
   }
+  dataHealth() {
+    return this.state.dataHealth ?? null;
+  }
   setAdaptiveExecution(on: boolean) {
     void invoke("set_adaptive_execution", { on });
   }

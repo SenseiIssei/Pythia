@@ -4,6 +4,7 @@ import type {
   AiView,
   CoherenceBreak,
   CostVenue,
+  DataHealth,
   ForecastStats,
   JournalEntry,
   LiveStatus,
@@ -88,6 +89,9 @@ export interface EngineClient {
    * (the browser paper build).
    */
   riskStatus(): RiskStatus | null;
+  /** Where the crypto data comes from and whether it is fresh. Null where no
+   *  Rust engine runs the feeds (the browser paper build). */
+  dataHealth(): DataHealth | null;
   /**
    * Market ids whose indicators run on real exchange candles rather than the
    * simulator. Anything not in here is a demo, and the UI says so.
@@ -136,6 +140,7 @@ export interface EngineState {
   cryptoCostVenue?: CostVenue;
   passports?: Passport[];
   risk?: RiskStatus;
+  dataHealth?: DataHealth | null;
 }
 
 export { AI_OFF, DISARMED, NO_SPEND };

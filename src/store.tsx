@@ -12,6 +12,7 @@ import type {
   AiSpend,
   AiView,
   CoherenceBreak,
+  DataHealth,
   ForecastStats,
   JournalEntry,
   LiveStatus,
@@ -53,6 +54,8 @@ interface Store {
   passports: Map<string, Passport>;
   /** The Rust risk manager's live numbers; null in the browser paper build. */
   riskStatus: RiskStatus | null;
+  /** Feed sources, freshness and failovers; null in the browser paper build. */
+  dataHealth: DataHealth | null;
   /** Market ids running on real exchange candles rather than the simulator. */
   barBacked: Set<string>;
   aiViews: AiView[];
@@ -104,6 +107,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       slippage: engine.slippage(),
       passports: new Map(engine.passports().map((p) => [p.strategyId, p])),
       riskStatus: engine.riskStatus(),
+      dataHealth: engine.dataHealth(),
       barBacked: new Set(engine.barBacked()),
       aiViews: engine.aiViews(),
       aiPolicy: engine.aiPolicy(),
