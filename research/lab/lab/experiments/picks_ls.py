@@ -78,11 +78,15 @@ def perp_panel() -> pl.DataFrame:
         last_day = k["day"][-1]
         delisted = last_day < datetime.now(timezone.utc).timestamp() * 1e6 - 3 * DAY_US
         k = k.with_columns(
-            fwd=lc.shift(-HORIZON) - lc,
             # Funding paid by a long over the next HORIZON days (days d+1 .. d+HORIZON).
             fund_fwd=pl.col("funding").shift(-1).rolling_sum(HORIZON).shift(-(HORIZON - 1)),
+            # What holding it cost or paid over the last three days: known when deciding.
+            fund_past=pl.col("funding").rolling_sum(3, min_samples=1),
             adv28=pl.col("qv").rolling_mean(28),
         )
+        # Exactly HORIZON calendar days ahead, not HORIZON rows.
+        ahead = k.select(day=pl.col("day") - HORIZON * DAY_US, close_ahead="close")
+        k = k.join(ahead, on="day", how="left").with_columns(fwd=pl.col("close_ahead").log() - lc).drop("close_ahead")
         if delisted:
             last = float(np.log(k["close"][-1]))
             k = k.with_columns(fwd=pl.when(pl.col("fwd").is_null()).then(pl.lit(last) - lc).otherwise(pl.col("fwd")),
@@ -99,16 +103,25 @@ def perf(r: np.ndarray) -> dict:
             "max_dd": float((1 - eq / np.maximum.accumulate(eq)).max())}
 
 
-def long_short(df: pl.DataFrame, k: int, n: int, cost: float = COST) -> tuple[np.ndarray, dict]:
+def long_short(df: pl.DataFrame, k: int, n: int, cost: float = COST,
+               paying_shorts: bool = True) -> tuple[np.ndarray, dict]:
+    """`paying_shorts=False` skips short candidates whose funding over the last
+    three days was negative: there the shorts pay the longs, so a crowded short
+    hands back in funding what it makes in price."""
     days = sorted(df["day"].unique().to_list())[::HORIZON]
     rets, legs = [], {"long": [], "short": [], "funding": []}
     prev_l, prev_s = set(), set()
     for d in days:
         g = df.filter(pl.col("day") == d).sort("adv28", descending=True).head(n)
-        if g.height < 2 * k:
-            continue
         g = g.sort("score", descending=True)
-        lo, sh = g.head(k), g.tail(k)
+        lo = g.head(k)
+        pool = g.tail(max(g.height - k, 0)) if paying_shorts else g.tail(max(g.height - k, 0)).filter(pl.col("fund_past") >= 0)
+        if g.height < 2 * k or pool.height < k:
+            # No book this week: flat, which still counts as a week (skipping it would flatter the Sharpe).
+            rets.append(-(len(prev_l) + len(prev_s)) * 0.5 / k * cost if prev_l else 0.0)
+            prev_l, prev_s = set(), set()
+            continue
+        sh = pool.tail(k)
         r_long = float(np.mean(np.expm1(lo["fwd"].to_numpy())))
         r_short = float(-np.mean(np.expm1(sh["fwd"].to_numpy())))
         f_long = -float(np.mean(lo["fund_fwd"].to_numpy()))   # longs pay positive funding
@@ -130,27 +143,29 @@ def main() -> None:
     scores = scores.with_columns(base=pl.col("symbol").str.strip_suffix("USDT"))
     perps = perp_panel()
     df = (scores.select("day", "base", "score")
-          .join(perps.select("day", "base", "perp", "fwd", "fund_fwd", "adv28"), on=["day", "base"], how="inner")
-          .drop_nulls(["fwd", "adv28", "score"]).with_columns(pl.col("fund_fwd").fill_null(0.0)))
+          .join(perps.select("day", "base", "perp", "fwd", "fund_fwd", "fund_past", "adv28"), on=["day", "base"], how="inner")
+          .drop_nulls(["fwd", "adv28", "score"])
+          .with_columns(pl.col("fund_fwd").fill_null(0.0), pl.col("fund_past").fill_null(0.0)))
     print(f"{df.height:,} coin-days with a live perp, {df['perp'].n_unique()} perps", flush=True)
 
-    rows, legs_rows = [], []
-    for n in NS:
-        for k in KS:
-            r, legs = long_short(df, k, n)
-            name = f"top {k} / bottom {k} of the {n} most liquid perps"
-            rows.append({"strategy": name, **perf(r)})
-            legs_rows.append({"strategy": name, "long_leg_sum": legs["long"], "short_leg_sum": legs["short"],
-                              "funding_sum": legs["funding"]})
+    rows, legs_rows, params = [], [], {}
+    for paying in (True, False):
+        for n in NS:
+            for k in KS:
+                r, legs = long_short(df, k, n, paying_shorts=paying)
+                name = f"top {k} / bottom {k} of the {n} most liquid perps" + ("" if paying else " · no paying shorts")
+                params[name] = (k, n, paying)
+                rows.append({"strategy": name, **perf(r)})
+                legs_rows.append({"strategy": name, "long_leg_sum": legs["long"], "short_leg_sum": legs["short"],
+                                  "funding_sum": legs["funding"]})
     sr = np.array([r["sharpe"] for r in rows]) / np.sqrt(365 / HORIZON)
     for r in rows:
         r["deflated_p"] = deflated_sharpe(r["sharpe"] / np.sqrt(365 / HORIZON), r["periods"], len(rows), float(np.var(sr)))
     best = max(rows, key=lambda r: r["sharpe"])
 
     # Stress: the same book at 3x costs.
-    k_b = int(best["strategy"].split()[1])
-    n_b = int(best["strategy"].split("the ")[1].split()[0])
-    r3, _ = long_short(df, k_b, n_b, cost=COST * 3)
+    k_b, n_b, paying_b = params[best["strategy"]]
+    r3, _ = long_short(df, k_b, n_b, cost=COST * 3, paying_shorts=paying_b)
     stress = perf(r3)
 
     verdict = (f"Best: {best['strategy']}: Sharpe {best['sharpe']:.2f}, {best['cagr'] * 100:.0f} % a year, worst "
