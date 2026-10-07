@@ -19,6 +19,7 @@ const ROWS: LimitRow[] = [
   { key: "maxGrossExposurePct", label: "Max gross exposure", min: 10, max: 100, step: 5, unit: "% equity" },
   { key: "maxCorrelatedExposurePct", label: "Max correlated exposure", min: 0, max: 100, step: 5, unit: "% equity" },
   { key: "portfolioVolTargetPct", label: "Book volatility target", min: 0, max: 80, step: 1, unit: "% / year" },
+  { key: "volSpikeTrimMult", label: "Volatility spike trim", min: 0, max: 4, step: 0.25, unit: "× target" },
   { key: "perStrategyBudgetPct", label: "Per-strategy budget", min: 5, max: 60, step: 1, unit: "% equity" },
   { key: "kellyFraction", label: "Kelly fraction", min: 0.05, max: 1, step: 0.05, unit: "×" },
   { key: "volTargetPct", label: "Vol-target sizing", min: 0, max: 5, step: 0.1, unit: "%/bar" },
@@ -111,7 +112,11 @@ export function Risk() {
           <Meter pct={exposureUtil || 0} tone={exposureUtil >= 80 ? "red" : "cyan"} />
         </Card>
         <CorrelatedExposureCard status={riskStatus} capPct={limits.maxCorrelatedExposurePct} grossPct={grossPct} />
-        <BookVolatilityCard status={riskStatus} targetPct={limits.portfolioVolTargetPct} />
+        <BookVolatilityCard
+          status={riskStatus}
+          targetPct={limits.portfolioVolTargetPct}
+          trimMult={limits.volSpikeTrimMult ?? 0}
+        />
         <DrawdownCard status={riskStatus} limitPct={limits.maxDrawdownPct} />
       </div>
 
@@ -164,6 +169,7 @@ function CorrelatedExposureCard({
   }
   const off = capPct <= 0;
   const util = off ? 0 : (status.correlatedExposurePct / capPct) * 100;
+  const unaligned = status.unalignedPairs ?? [];
   return (
     <Card title="Correlated Exposure">
       <div className="mb-2 flex justify-between text-sm">
@@ -175,14 +181,24 @@ function CorrelatedExposureCard({
       <Meter pct={util} tone={util >= 80 ? "red" : "cyan"} />
       <div className="mt-2 text-xs text-cyber-text-faint">
         Raw gross is {grossPct.toFixed(0)}%. Positions that move together count as one bet: sqrt(w&apos;Cw) over the
-        return correlations on the Correlation page.
+        return correlations on the Correlation page. Markets on candles are compared on the same bar times.
+        {unaligned.length > 0 &&
+          ` ${unaligned.length} pair${unaligned.length === 1 ? "" : "s"} you hold can't be compared, because one side is on 5-minute candles and the other on live ticks. Those count as the worst case: moving together, and a short against them is not counted as a hedge.`}
       </div>
     </Card>
   );
 }
 
 /** How much the whole book swings in a typical year, against its target. */
-function BookVolatilityCard({ status, targetPct }: { status: RiskStatus | null; targetPct: number }) {
+function BookVolatilityCard({
+  status,
+  targetPct,
+  trimMult,
+}: {
+  status: RiskStatus | null;
+  targetPct: number;
+  trimMult: number;
+}) {
   if (!status) {
     return (
       <Card title="Book Volatility">
@@ -210,7 +226,36 @@ function BookVolatilityCard({ status, targetPct }: { status: RiskStatus | null; 
         {assumed.length > 0 &&
           ` No candles yet for ${assumed.length} held market${assumed.length === 1 ? "" : "s"}, counted at 5 % a day.`}
       </div>
+      <SpikeTrimLine status={status} targetPct={targetPct} trimMult={trimMult} />
     </Card>
+  );
+}
+
+const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/** What the volatility spike trim is doing, in one line. */
+function SpikeTrimLine({ status, targetPct, trimMult }: { status: RiskStatus; targetPct: number; trimMult: number }) {
+  const on = trimMult > 0 && targetPct > 0;
+  const trigger = targetPct * Math.max(1, trimMult);
+  let state: string;
+  if (!on) {
+    state = "Spike trim is off. A spike above the target only stops new entries; nothing is sold.";
+  } else if (status.volSpikeSince !== undefined) {
+    const mins = Math.max(0, Math.floor((Date.now() - status.volSpikeSince) / 60_000));
+    state = `Over ${trigger.toFixed(0)}% for ${mins} of 30 minutes. If it stays there, every position is cut by the same share back to ${targetPct}%.`;
+  } else {
+    state = `Spike trim is on: if the book stays above ${trigger.toFixed(0)}% (${trimMult}× the target) for 30 minutes, every position is cut by the same share back to ${targetPct}%. Closing only, at most once an hour.`;
+  }
+  return (
+    <div className="mt-2 flex items-start gap-2 text-xs">
+      <Badge tone={!on ? "neutral" : status.volSpikeSince !== undefined ? "red" : "cyan"}>
+        {!on ? "trim off" : status.volSpikeSince !== undefined ? "spike" : "trim on"}
+      </Badge>
+      <span className="text-cyber-text-faint">
+        {state}
+        {status.lastVolTrim !== undefined && ` Last trim at ${clock(status.lastVolTrim)}.`}
+      </span>
+    </div>
   );
 }
 
@@ -263,6 +308,12 @@ function SizingCard({ sizing, nameOf }: { sizing: StrategySizing[]; nameOf: (id:
         f = p - (1 - p) / b, shrunk by n / (n + 30), at most a quarter of that, never above the full-strength size.
         A negative Kelly means no measured edge and no new entries.
       </div>
+      <div className="mb-3 text-xs text-cyber-text-dim">
+        A strategy at size zero stays there: it opens nothing, so its record cannot recover by itself, and no timer
+        brings it back. The way back is to change its parameters on the Strategies page. That starts a fresh record,
+        sized on signal strength again until 30 new trades close, and a live strategy goes back to paper until its
+        checks are run again.
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -279,7 +330,14 @@ function SizingCard({ sizing, nameOf }: { sizing: StrategySizing[]; nameOf: (id:
           <tbody className="tabular-nums">
             {sizing.map((s) => (
               <tr key={s.strategyId} className="border-t border-cyber-border">
-                <td className="py-1.5 pr-3 font-medium text-cyber-text">{nameOf(s.strategyId)}</td>
+                <td className="py-1.5 pr-3 font-medium text-cyber-text">
+                  {nameOf(s.strategyId)}
+                  {s.since !== undefined && (
+                    <div className="text-[10px] font-normal text-cyber-text-faint">
+                      fresh record since {new Date(s.since).toLocaleDateString()}
+                    </div>
+                  )}
+                </td>
                 <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{s.trades}</td>
                 <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{pct(s.winRate)}</td>
                 <td className="py-1.5 pr-3 text-right text-cyber-text-dim">

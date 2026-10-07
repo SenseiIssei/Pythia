@@ -247,17 +247,27 @@ adaptive allocation. Phase D added the three portfolio-level pieces below (formu
   book is measured as `E = sqrt(w' C w)`, signed notional per market against the return correlation
   over the last 60 closes, the same matrix the Correlation page draws. New entries are capped on
   `E` (`maxCorrelatedExposurePct`, default 40 % of equity) as well as on the raw sum, downsized to
-  fit or refused with the reason in the journal. An unmeasurable correlation counts as 1.
+  fit or refused with the reason in the journal. Correlations are measured on aligned time: candle
+  markets on their shared bar times, tick markets on their shared tail, and a candle market against
+  a tick market not at all. An unmeasurable pair counts as the worst case for its signs, `|w_a| |w_b|`:
+  two longs move as one, and a long against a short is never credited as a hedge.
 - **Kelly on measured edge (built).** Under 30 closed trades a strategy is still sized off
   `intent.confidence`. From 30 on it is sized off its *realised* record: `f = p - (1 - p) / b` on net
   returns, shrunk toward no edge by `n / (n + 30)`, at most quarter Kelly, never above what full
-  confidence would deploy. A record with no edge sizes entries to zero.
+  confidence would deploy. A record with no edge sizes entries to zero, and stays there: the only
+  way back is a parameter change, which starts a fresh record (and takes a live strategy back to
+  paper). Saves from before the record rebuild it from the saved fills where they reconcile.
 - **Drawdown-proportional de-risking (built).** Entries are multiplied by
   `1 - drawdown / maxDrawdownPct`: half size at half the limit, nothing new at the breaker.
 
 - **Portfolio volatility target (built).** The same quadratic form with each notional weighted by its
   market's annual volatility, `sqrt(u' C u)`: one standard deviation of a year's P&L. Entries that
   would lift it over `portfolioVolTargetPct` (default 30 % of equity) are shrunk or refused.
+- **Volatility spike trim (built, off by default).** The target above only stops entries. With
+  `volSpikeTrimMult = k` set, a book that stays above k times its target for 30 minutes is cut back
+  to the target, every position by the same share, at most once an hour, closing only. Off by
+  default because it sells after the move: whether that pays is a question for the backtests, not
+  a default.
 
 ---
 

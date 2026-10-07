@@ -239,7 +239,8 @@ All three gaps are closed. The formulas live in
       page draws. An entry that would push `E` over `maxCorrelatedExposurePct`
       (default 40 % of equity, below the 70 % gross cap) is downsized to fit or
       refused with the reason in the journal. A correlation that cannot be
-      measured counts as 1. Closing a position is never stopped by it
+      measured counts as the worst case for the signs (see below). Closing a
+      position is never stopped by it
 - [x] **Kelly on measured edge.** Every closed trade lands on an edge record
       (net return on notional, after an estimated round-trip fee). From 30
       trades on, entries are sized on it: `f = p - (1 - p) / b`, shrunk by
@@ -250,24 +251,61 @@ All three gaps are closed. The formulas live in
       `1 - drawdown / maxDrawdownPct`: half size at half the limit, nothing new
       at the breaker. Linear, not stepped
 
-Still open around it:
+Built around it since:
 
 - [x] **Volatility targeting at the portfolio level** (PROFIT-PLAN §5). The
       book's volatility is `sqrt(u' C u)` with `u` = notional times the
       market's annual vol from its candles (5 % a day assumed without them).
       New entries that would lift it over `portfolioVolTargetPct` (default
       30 % a year; the comfort zone sets M / 2 * sqrt(12)) are shrunk or
-      refused. A ceiling only, it never sizes up and never sells. Risk page
-      card "Book Volatility". Open: whether it should also trim the book when
-      a volatility spike lifts it far over target
-- [ ] The correlation window mixes time scales when a bar-backed market (5
-      minute candles) is compared with a tick-fed one. The page has the same
-      flaw. Align on timestamps once every market has real bars
-- [ ] A strategy sized to zero for no edge stays there: it opens nothing, so
-      its record cannot improve. Changing its parameters does not reset the
-      record yet; decide whether it should, the same way it resets the passport
-- [ ] Saves from before the edge record start it empty, so a strategy that
-      already had 30+ trades sizes on confidence until 30 new ones close
+      refused. A ceiling only, it never sizes up. Risk page card "Book
+      Volatility"
+- [x] **Volatility spike trim** (off by default, `volSpikeTrimMult = 0`).
+      When the book's volatility stays above k times the target for 30
+      minutes, every position is cut by the same share, `1 - target / vol`,
+      which lands the book on its target. Hysteresis: a dip between the
+      target-to-trigger midpoint and the trigger keeps the clock running, one
+      below the midpoint resets it. At most one trim an hour. Closing only,
+      paper and live alike (a real position is reduced at its venue with a
+      reduce-only order, or not at all), journaled with the numbers. The clock
+      is not persisted, so a restart can only delay a trim
+- [x] **Correlation on aligned time.** Two bar-backed markets are correlated
+      on the bar times both have (a bar one of them misses drops out of both);
+      two tick-fed markets on their shared tail as before. A candle market
+      against a tick market is not computed at all: the pair is reported on the
+      Risk and Correlation pages and counts as the worst case. That worst case
+      changed too: an unmeasured pair used to count as rho = 1 whatever the
+      signs, which credited an unmeasured long/short pair as a perfect hedge.
+      It now contributes `|w_a| * |w_b|`, so an unmeasured "hedge" is never
+      credited as one. `src/lib/correlation.ts` applies the same rules (the
+      engine now sends `historyTs`, the bar times of `history`); the one kept
+      difference is that the page draws a flat tick pair as 0
+- [x] **The way back from no edge is a parameter change, nothing else.**
+      Changing a parameter starts the edge record over (the same trigger that
+      makes the passport's research gates stale), journals the record it
+      dropped, and takes a live strategy back to paper until its checks run
+      again. No probation size on a timer: that would put money back on the
+      exact parameters that measured no edge, with nobody deciding to. The
+      record carries `since`, and a slider that sends the same value again
+      changes nothing
+- [x] **Saves from before the edge record** rebuild it on load from the saved
+      orders (the newest 400): fills are replayed per market through the same
+      position arithmetic, fees estimated at the venue's taker rate. A market
+      whose replay does not end at the position held now (the list was cut in
+      the middle of a position) is left out rather than guessed at. Only trades
+      after the record's `since` count, so a restart never undoes a reset. A
+      strategy with nothing to rebuild from stays empty
+
+Still open:
+
+- [ ] Correlations between candle markets and tick markets stay unmeasured
+      until those markets get real bars (Polymarket has none). Their pairs
+      count as the worst case, which is safe but can refuse entries a
+      measurement would allow
+- [ ] A dragged slider resets the record on the first step and cannot be
+      undone by dragging back. The dropped record is in the journal. If that
+      proves too easy to trigger, an explicit "apply parameters" step on the
+      Strategies page would fix it at the source
 
 ---
 

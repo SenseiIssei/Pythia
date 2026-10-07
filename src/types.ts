@@ -228,6 +228,10 @@ export interface RiskLimits {
   /** Ceiling on the whole book's volatility: one standard deviation of a year's
    *  P&L, % of equity (0 = off). Enforced by the Rust engine. */
   portfolioVolTargetPct: number;
+  /** Trim every position back to the volatility target once the book has
+   *  stayed above this many times the target for 30 minutes (0 = off).
+   *  Closing only, at most once an hour. Enforced by the Rust engine. */
+  volSpikeTrimMult: number;
 }
 
 /** What the risk manager is doing right now. Mirrors Rust `risk::RiskStatus`. */
@@ -248,6 +252,13 @@ export interface RiskStatus {
   portfolioVolPct: number;
   /** Open markets whose volatility is assumed (5 % a day), not measured from candles. */
   volAssumed: string[];
+  /** Held pairs that cannot be compared in time (candles against live ticks).
+   *  Counted as the worst case: moving together, or against a short. */
+  unalignedPairs?: [string, string][];
+  /** When the book went over the spike-trim trigger, if it is over it now (epoch ms). */
+  volSpikeSince?: number;
+  /** When the book was last trimmed for a volatility spike (epoch ms). */
+  lastVolTrim?: number;
 }
 
 /** confidence: under 30 trades, sized off signal strength. measured: sized on
@@ -266,6 +277,8 @@ export interface StrategySizing {
   kelly?: number;
   /** kelly * n / (n + 30). */
   kellyShrunk?: number;
+  /** When a parameter change last started the record over (epoch ms). */
+  since?: number;
 }
 
 export interface StrategyParam {

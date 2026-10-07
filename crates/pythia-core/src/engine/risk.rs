@@ -12,7 +12,12 @@
 //! - **Portfolio volatility target.** The same quadratic form with every
 //!   position weighted by its market's annual volatility: one standard
 //!   deviation of the book's yearly P&L, capped as a share of equity. See
-//!   [`portfolio_vol`].
+//!   [`portfolio_vol`]. When a spike lifts it far over the cap, the book can
+//!   be trimmed back (off by default). See [`VolSpikeGuard`].
+//!
+//! Correlations are measured on aligned time: candles on shared bar times,
+//! ticks on their shared tail, and never one against the other. See
+//! [`PriceSeries`].
 
 use std::collections::HashMap;
 
@@ -36,15 +41,19 @@ pub struct RiskContext {
     /// Correlation-adjusted exposure of the open book, `sqrt(w' C w)`, in quote
     /// currency. See [`correlated_exposure`].
     pub corr_exposure: f64,
-    /// `sum_i rho(this market, i) * w_i` over the open book: how far the book
-    /// already leans the way a long in this market would. See
-    /// [`correlation_loading`].
+    /// `sum_i rho(this market, i) * w_i` over the measured pairs of the open
+    /// book: how far the book already leans the way a long in this market
+    /// would. See [`correlation_loading`].
     pub corr_loading: f64,
+    /// `sum_i |w_i|` over the pairs that cannot be measured, which lean with
+    /// the order whichever way it goes. See [`Loading`].
+    pub corr_unmeasured: f64,
     /// One standard deviation of the open book's annual P&L, quote currency.
     /// See [`portfolio_vol`].
     pub vol_exposure: f64,
     /// [`correlation_loading`] over the volatility-weighted book.
     pub vol_loading: f64,
+    pub vol_unmeasured: f64,
     /// This market's annual volatility (0.8 = 80 % a year).
     pub market_vol: f64,
 }
@@ -110,7 +119,7 @@ pub fn evaluate(
     if !reduces && limits.max_correlated_exposure_pct > 0.0 {
         let cap = (limits.max_correlated_exposure_pct / 100.0) * ctx.equity;
         let dir = if order.side == Side::Buy { 1.0 } else { -1.0 };
-        let lean = dir * ctx.corr_loading;
+        let lean = Loading { measured: ctx.corr_loading, unmeasured: ctx.corr_unmeasured }.lean(dir);
         let e0 = ctx.corr_exposure.max(0.0);
         let after = exposure_after(e0, lean, qty * price);
         if after > cap + 1e-9 && after > e0 + 1e-9 {
@@ -138,7 +147,7 @@ pub fn evaluate(
     if !reduces && limits.portfolio_vol_target_pct > 0.0 && ctx.market_vol > 0.0 {
         let cap = (limits.portfolio_vol_target_pct / 100.0) * ctx.equity;
         let dir = if order.side == Side::Buy { 1.0 } else { -1.0 };
-        let lean = dir * ctx.vol_loading;
+        let lean = Loading { measured: ctx.vol_loading, unmeasured: ctx.vol_unmeasured }.lean(dir);
         let e0 = ctx.vol_exposure.max(0.0);
         let after = exposure_after(e0, lean, qty * price * ctx.market_vol);
         if after > cap + 1e-9 && after > e0 + 1e-9 {
@@ -181,10 +190,21 @@ pub const CORR_WINDOW: usize = 60;
 /// until it has 20 closes; the risk manager does not hide it, it assumes the
 /// worst (see [`UNKNOWN_CORRELATION`]).
 pub const CORR_MIN_CLOSES: usize = 20;
-/// What a correlation the engine cannot measure counts as. 1.0 fails closed:
-/// a market without enough history, or whose price has not moved in the
-/// window, is treated as the same trade as everything else held.
+/// What a correlation the engine cannot measure counts as between two
+/// positions on the same side: 1.0, the same trade. A market without enough
+/// history, whose price has not moved in the window, or whose clock cannot be
+/// aligned with the other's, fails closed.
+///
+/// Between a long and a short the worst case is the opposite sign: an
+/// unmeasured "hedge" must not be credited as one, so the pair counts as
+/// moving against each other (rho = -1) and adds up like two longs. In both
+/// cases an unmeasured pair contributes `|w_a| * |w_b|`. See [`assumed_rho`].
 pub const UNKNOWN_CORRELATION: f64 = 1.0;
+
+/// The correlation assumed for an unmeasured pair holding `wa` and `wb`.
+pub fn assumed_rho(wa: f64, wb: f64) -> f64 {
+    if wa * wb < 0.0 { -UNKNOWN_CORRELATION } else { UNKNOWN_CORRELATION }
+}
 
 /// Simple returns of the last [`CORR_WINDOW`] closes.
 fn window_returns(closes: &[f64]) -> Vec<f64> {
@@ -192,18 +212,58 @@ fn window_returns(closes: &[f64]) -> Vec<f64> {
     tail.windows(2).filter(|w| w[0] != 0.0).map(|w| w[1] / w[0] - 1.0).collect()
 }
 
-/// Pearson correlation of two markets' simple returns over the last
-/// [`CORR_WINDOW`] closes, aligned on their shared tail. The same computation
-/// as `src/lib/correlation.ts`, which draws the Correlation page.
+/// The price history correlations are measured on.
 ///
-/// `None` when either series has fewer than [`CORR_MIN_CLOSES`] closes or no
-/// variance. The page draws those as 0; the risk manager does not guess low.
-pub fn return_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
-    let window = |s: &[f64]| s.len().min(CORR_WINDOW);
-    if window(a) < CORR_MIN_CLOSES || window(b) < CORR_MIN_CLOSES {
-        return None;
+/// Two kinds of market keep a history, on two different clocks. A bar-backed
+/// market's closes are 5-minute candles with an open time each; a tick-fed one
+/// gets a close every engine tick (about 1.5 s) and no time at all. Pairing
+/// the n-th return of one with the n-th return of the other compares a
+/// 5-minute move with a 1.5-second one, which measures nothing. So:
+///
+/// - two bar-backed markets are correlated on the bar times both have;
+/// - two tick-fed markets on their shared tail (both are appended on the same
+///   tick, so the tail is already aligned in time);
+/// - a bar-backed market against a tick-fed one cannot be aligned at all. The
+///   tick history spans minutes and has no times, the candles span hours.
+///   That pair is reported as [`Unmeasured::Unaligned`] and counts as
+///   [`UNKNOWN_CORRELATION`], like any other correlation that cannot be
+///   measured. It is never computed on mixed scales.
+pub struct PriceSeries<'a> {
+    /// Recent closes per market, oldest first.
+    pub closes: &'a HashMap<String, Vec<f64>>,
+    /// Real candles per bar-backed market, oldest first. A market in here is
+    /// correlated on its bar times, whatever `closes` holds for it.
+    pub bars: Option<&'a HashMap<String, Vec<Ohlc>>>,
+}
+
+impl<'a> PriceSeries<'a> {
+    pub fn new(closes: &'a HashMap<String, Vec<f64>>, bars: &'a HashMap<String, Vec<Ohlc>>) -> Self {
+        Self { closes, bars: Some(bars) }
     }
-    let (ra, rb) = (window_returns(a), window_returns(b));
+
+    /// Only tick-fed markets: every series is aligned on its tail.
+    pub fn ticks(closes: &'a HashMap<String, Vec<f64>>) -> Self {
+        Self { closes, bars: None }
+    }
+
+    fn bars_of(&self, id: &str) -> Option<&'a [Ohlc]> {
+        self.bars.and_then(|b| b.get(id)).map(|v| v.as_slice()).filter(|v| !v.is_empty())
+    }
+}
+
+/// Why a correlation could not be measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unmeasured {
+    /// Fewer than [`CORR_MIN_CLOSES`] closes, or shared bar times.
+    TooShort,
+    /// One of the two did not move in the window.
+    NoVariance,
+    /// One is on candles and the other on ticks: no common clock.
+    Unaligned,
+}
+
+/// Pearson correlation of two return series of equal length.
+fn pearson(ra: &[f64], rb: &[f64]) -> Option<f64> {
     let n = ra.len().min(rb.len());
     if n < 3 {
         return None;
@@ -224,17 +284,89 @@ pub fn return_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
     Some((cov / (va * vb).sqrt()).clamp(-1.0, 1.0))
 }
 
-/// Correlation between two markets as the risk manager uses it: 1 on the
-/// diagonal, the measured return correlation where there is one, and
-/// [`UNKNOWN_CORRELATION`] where there is not.
-pub fn pair_correlation(history: &HashMap<String, Vec<f64>>, a: &str, b: &str) -> f64 {
+/// Correlation of two bar-backed markets on the bar times both have, within
+/// each one's last [`CORR_WINDOW`] bars. A bar one of them is missing drops out
+/// of both, so every return pairs the same interval: a gap (a night for an
+/// equity) becomes one longer return on both sides rather than a shift.
+///
+/// The same computation as `alignedPearson` in `src/lib/correlation.ts`.
+pub fn bar_correlation(a: &[Ohlc], b: &[Ohlc]) -> Result<f64, Unmeasured> {
+    let tail = |s: &[Ohlc]| -> Vec<(i64, f64)> {
+        s[s.len().saturating_sub(CORR_WINDOW)..].iter().map(|x| (x.ts, x.close)).collect()
+    };
+    let (ta, tb) = (tail(a), tail(b));
+    if ta.len() < CORR_MIN_CLOSES || tb.len() < CORR_MIN_CLOSES {
+        return Err(Unmeasured::TooShort);
+    }
+    let times: HashMap<i64, f64> = tb.into_iter().collect();
+    let shared: Vec<(f64, f64)> = ta.iter().filter_map(|(t, ca)| times.get(t).map(|cb| (*ca, *cb))).collect();
+    if shared.len() < CORR_MIN_CLOSES {
+        return Err(Unmeasured::TooShort);
+    }
+    let rets = |pick: fn(&(f64, f64)) -> f64| -> Vec<f64> {
+        shared.windows(2).map(|w| (pick(&w[0]), pick(&w[1]))).map(|(p0, p1)| if p0 != 0.0 { p1 / p0 - 1.0 } else { 0.0 }).collect()
+    };
+    pearson(&rets(|x| x.0), &rets(|x| x.1)).ok_or(Unmeasured::NoVariance)
+}
+
+/// Pearson correlation of two tick-fed markets' simple returns over the last
+/// [`CORR_WINDOW`] closes, aligned on their shared tail. The same computation
+/// as `src/lib/correlation.ts`, which draws the Correlation page.
+///
+/// `None` when either series has fewer than [`CORR_MIN_CLOSES`] closes or no
+/// variance. The page draws those as 0; the risk manager does not guess low.
+pub fn return_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
+    let window = |s: &[f64]| s.len().min(CORR_WINDOW);
+    if window(a) < CORR_MIN_CLOSES || window(b) < CORR_MIN_CLOSES {
+        return None;
+    }
+    pearson(&window_returns(a), &window_returns(b))
+}
+
+/// The correlation of a pair, or why there is none. See [`PriceSeries`] for
+/// which clock each pair is measured on.
+pub fn measure_correlation(prices: &PriceSeries, a: &str, b: &str) -> Result<f64, Unmeasured> {
     if a == b {
-        return 1.0;
+        return Ok(1.0);
     }
-    match (history.get(a), history.get(b)) {
-        (Some(x), Some(y)) => return_correlation(x, y).unwrap_or(UNKNOWN_CORRELATION),
-        _ => UNKNOWN_CORRELATION,
+    match (prices.bars_of(a), prices.bars_of(b)) {
+        (Some(x), Some(y)) => bar_correlation(x, y),
+        (None, None) => {
+            let (Some(x), Some(y)) = (prices.closes.get(a), prices.closes.get(b)) else {
+                return Err(Unmeasured::TooShort);
+            };
+            let window = |s: &[f64]| s.len().min(CORR_WINDOW);
+            if window(x) < CORR_MIN_CLOSES || window(y) < CORR_MIN_CLOSES {
+                return Err(Unmeasured::TooShort);
+            }
+            return_correlation(x, y).ok_or(Unmeasured::NoVariance)
+        }
+        _ => Err(Unmeasured::Unaligned),
     }
+}
+
+/// Pairs in the book whose correlation cannot be aligned in time (candles
+/// against ticks), for the Risk page. They count as [`UNKNOWN_CORRELATION`].
+pub fn unaligned_pairs(book: &[(String, f64)], prices: &PriceSeries) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (i, (a, _)) in book.iter().enumerate() {
+        for (b, _) in &book[i + 1..] {
+            if measure_correlation(prices, a, b) == Err(Unmeasured::Unaligned) {
+                let (x, y) = if a <= b { (a, b) } else { (b, a) };
+                out.push((x.clone(), y.clone()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Correlation between two markets as the risk manager measures it: 1 on the
+/// diagonal, the measured return correlation where there is one, `None` where
+/// there is not (too short, flat, or on clocks that cannot be aligned). What
+/// `None` counts as depends on the positions, see [`assumed_rho`].
+pub fn pair_correlation(prices: &PriceSeries, a: &str, b: &str) -> Option<f64> {
+    measure_correlation(prices, a, b).ok()
 }
 
 /// Correlation-adjusted exposure of a book of signed notionals:
@@ -244,27 +376,55 @@ pub fn pair_correlation(history: &HashMap<String, Vec<f64>>, a: &str, b: &str) -
 /// ```
 ///
 /// with `w_i` the signed notional in market `i` and `rho_ij` from
-/// [`pair_correlation`]. Ten equal longs of size `x` give `E = 10x` when they
-/// move as one (rho = 1, the raw gross), `sqrt(10) * x` when independent, and
-/// a long hedged by a short in a market that moves with it gives close to 0.
-/// The pairwise matrix is estimated pair by pair with fallbacks, so it is not
-/// guaranteed positive semi-definite; the `max(0, ..)` keeps `E` real.
-pub fn correlated_exposure(book: &[(String, f64)], history: &HashMap<String, Vec<f64>>) -> f64 {
+/// [`pair_correlation`], or [`assumed_rho`] where it cannot be measured. Ten
+/// equal longs of size `x` give `E = 10x` when they move as one (rho = 1, the
+/// raw gross), `sqrt(10) * x` when independent, and a long hedged by a short
+/// in a market measured to move with it gives close to 0. The pairwise matrix
+/// is estimated pair by pair with fallbacks, so it is not guaranteed positive
+/// semi-definite; the `max(0, ..)` keeps `E` real.
+pub fn correlated_exposure(book: &[(String, f64)], prices: &PriceSeries) -> f64 {
     let mut q = 0.0;
     for (i, (a, wa)) in book.iter().enumerate() {
         q += wa * wa;
         for (b, wb) in &book[i + 1..] {
-            q += 2.0 * wa * wb * pair_correlation(history, a, b);
+            let rho = pair_correlation(prices, a, b).unwrap_or_else(|| assumed_rho(*wa, *wb));
+            q += 2.0 * wa * wb * rho;
         }
     }
     q.max(0.0).sqrt()
 }
 
-/// `sum_i rho(market, i) * w_i` over the book. Adding a signed notional `t` in
-/// `market` moves the quadratic form from `E^2` to `E^2 + 2 t L + t^2`, where
-/// `L` is this loading (it includes the market's own position with rho = 1).
-pub fn correlation_loading(book: &[(String, f64)], market: &str, history: &HashMap<String, Vec<f64>>) -> f64 {
-    book.iter().map(|(id, w)| pair_correlation(history, market, id) * w).sum()
+/// How far the book already leans the way a new position in one market
+/// would, split by whether the correlation is measured.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Loading {
+    /// `sum_i rho(market, i) * w_i` over the measured pairs, the market's own
+    /// position included (rho = 1).
+    pub measured: f64,
+    /// `sum_i |w_i|` over the pairs that cannot be measured. Whichever way the
+    /// new position goes, [`assumed_rho`] makes each of them lean with it.
+    pub unmeasured: f64,
+}
+
+impl Loading {
+    /// The loading in the direction of an order (+1 buy, -1 sell).
+    pub fn lean(&self, dir: f64) -> f64 {
+        dir * self.measured + self.unmeasured
+    }
+}
+
+/// Adding a signed notional `t` in `market` moves the quadratic form from
+/// `E^2` to `E^2 + 2 |t| L + t^2`, where `L` is this loading in the order's
+/// direction ([`Loading::lean`]).
+pub fn correlation_loading(book: &[(String, f64)], market: &str, prices: &PriceSeries) -> Loading {
+    let mut l = Loading::default();
+    for (id, w) in book {
+        match pair_correlation(prices, market, id) {
+            Some(rho) => l.measured += rho * w,
+            None => l.unmeasured += w.abs(),
+        }
+    }
+    l
 }
 
 /// `E` after adding notional `t >= 0` in the direction whose loading is `lean`.
@@ -349,8 +509,8 @@ pub fn vol_weighted(book: &[(String, f64)], vols: &HashMap<String, f64>) -> Vec<
 
 /// One standard deviation of the book's annual P&L, `sqrt(u' C u)`, in quote
 /// currency. See the section comment above.
-pub fn portfolio_vol(book: &[(String, f64)], vols: &HashMap<String, f64>, history: &HashMap<String, Vec<f64>>) -> f64 {
-    correlated_exposure(&vol_weighted(book, vols), history)
+pub fn portfolio_vol(book: &[(String, f64)], vols: &HashMap<String, f64>, prices: &PriceSeries) -> f64 {
+    correlated_exposure(&vol_weighted(book, vols), prices)
 }
 
 // ── Kelly on measured edge ──────────────────────────────────────────────────
@@ -378,6 +538,17 @@ pub fn portfolio_vol(book: &[(String, f64)], vols: &HashMap<String, f64>, histor
 //
 // Below 30 trades nothing changes: the confidence-based sizing runs as before.
 // `f_s <= 0` means the strategy has no measured edge and is sized to zero.
+//
+// The way back from zero. A strategy at size zero opens nothing, so its
+// record can never improve on its own: "no edge" is a terminal state for
+// those parameters, on purpose. The only way out is a parameter change,
+// which starts a fresh record (see `Engine::set_strategy_param`), the same
+// trigger that makes the passport's research gates stale. The alternative,
+// a small probation size after some days, was rejected: it would put money
+// back on exactly the parameters that measured no edge, on a timer, with
+// nobody deciding to. A parameter change is a person deciding the old record
+// no longer describes the strategy, and on a live strategy it also drops it
+// to paper until the checks are run again.
 
 /// Closed trades a strategy needs before it is sized on its own record.
 pub const MIN_EDGE_TRADES: u32 = 30;
@@ -402,9 +573,19 @@ pub struct EdgeRecord {
     pub win_return_sum: f64,
     /// Sum of the losing trades' net losses, as positive fractions of notional.
     pub loss_return_sum: f64,
+    /// Epoch ms, set when a parameter change started the record over: only
+    /// trades closed from then on describe the current parameters, and a
+    /// rebuild from saved orders must not bring older ones back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
 }
 
 impl EdgeRecord {
+    /// An empty record for parameters that start trading at `now`.
+    pub fn fresh(now: i64) -> Self {
+        Self { since: Some(now), ..Self::default() }
+    }
+
     /// Book one closed trade's net return on its entry notional.
     pub fn record(&mut self, net_return: f64) {
         if !net_return.is_finite() {
@@ -501,6 +682,83 @@ pub fn kelly_notional(est: &KellyEstimate, equity: f64, kelly_fraction: f64, slo
     frac * est.shrunk * equity / est.avg_loss / slots.max(1.0)
 }
 
+// ── Rebuilding a record from saved fills ────────────────────────────────────
+//
+// Saves from before the edge record have none, so a strategy with 100 closed
+// trades would size on signal strength until 30 new ones close. The saved
+// order list still has the fills (the newest 400 orders), and a round trip
+// can be replayed from them: per market, oldest first, through the same
+// position arithmetic the engine settles with.
+//
+// What it cannot know is how a market stood before the oldest saved order. If
+// the list was cut in the middle of a position, the first fill seen closes
+// something the replay never opened, and every trade after it is wrong by
+// that amount. The replay detects this: a market that started flat ends at
+// the position actually held, one that did not ends somewhere else. Markets
+// that do not reconcile are left out entirely rather than guessed at.
+//
+// Fees are not on the order, so the round trip is charged the venue's taker
+// rate twice on the closed part, the same estimate the live record uses.
+
+/// One saved fill, as the rebuild needs it.
+#[derive(Debug, Clone)]
+pub struct PastFill {
+    pub ts: i64,
+    pub market_id: String,
+    pub strategy_id: String,
+    /// Positive for a buy, negative for a sell.
+    pub signed_qty: f64,
+    pub price: f64,
+    /// Taker fee as a fraction of notional (0.0026 = 26 bps).
+    pub fee_rate: f64,
+}
+
+/// One closed trade found by [`replay_closed_trades`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PastTrade {
+    pub strategy_id: String,
+    pub ts: i64,
+    pub net_return: f64,
+}
+
+/// Closed trades in `fills` (oldest first), from the markets whose replay ends
+/// at the position held now (`held`: signed quantity per market; a market
+/// missing from it is flat). See the section comment above.
+pub fn replay_closed_trades(fills: &[PastFill], held: &HashMap<String, f64>) -> Vec<PastTrade> {
+    let mut by_market: HashMap<&str, Vec<&PastFill>> = HashMap::new();
+    for f in fills.iter().filter(|f| f.signed_qty != 0.0 && f.price > 0.0) {
+        by_market.entry(f.market_id.as_str()).or_default().push(f);
+    }
+    let mut out = Vec::new();
+    for (market, fills) in by_market {
+        let (mut qty, mut avg) = (0.0_f64, 0.0_f64);
+        let mut trades = Vec::new();
+        for f in fills {
+            let closes = qty != 0.0 && qty.signum() != f.signed_qty.signum();
+            let entry = avg;
+            let (q, a, realised) = super::apply_fill(qty, avg, f.signed_qty, f.price);
+            if closes {
+                let closed = f.signed_qty.abs().min(qty.abs());
+                let fee = 2.0 * f.fee_rate.max(0.0) * f.price * closed;
+                if entry > 0.0 {
+                    trades.push(PastTrade {
+                        strategy_id: f.strategy_id.clone(),
+                        ts: f.ts,
+                        net_return: (realised - fee) / (closed * entry),
+                    });
+                }
+            }
+            (qty, avg) = if q.abs() < 1e-9 { (0.0, 0.0) } else { (q, a) };
+        }
+        let now = held.get(market).copied().unwrap_or(0.0);
+        if (qty - now).abs() <= 1e-6 * now.abs().max(1.0) {
+            out.extend(trades);
+        }
+    }
+    out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.strategy_id.cmp(&b.strategy_id)));
+    out
+}
+
 // ── drawdown de-risking ─────────────────────────────────────────────────────
 
 /// Size multiplier for new entries while the book is in a drawdown. Linear in
@@ -522,6 +780,75 @@ pub fn derisk_factor(drawdown_pct: f64, max_drawdown_pct: f64) -> f64 {
     (1.0 - drawdown_pct.max(0.0) / max_drawdown_pct).clamp(0.0, 1.0)
 }
 
+// ── Volatility spike trim ───────────────────────────────────────────────────
+//
+// The volatility target is a ceiling on entries: it never sells. A book built
+// at the target in a calm week can find itself at three times it when the
+// market's own volatility jumps, and nothing would bring it back down. This
+// is the closing half, off by default (`volSpikeTrimMult = 0`):
+//
+//   trigger  = k * target              k = volSpikeTrimMult (at least 1)
+//   release  = halfway between target and trigger
+//
+// The book's volatility has to stay above the trigger for 30 minutes (six
+// 5-minute bars) without falling back under the release level; a dip between
+// the two keeps the clock running, so a book hovering around the trigger is
+// not reset by every bar. Then every position is cut by the same fraction,
+// `1 - target / vol`. `sigma_p` is linear in the positions, so that lands the
+// book on its target, and cutting all of them alike keeps what the book is
+// (its mix, its hedges) and only makes it smaller. It only ever closes: a
+// long is sold, a short is bought back, nothing flips and nothing is added.
+//
+// At most one trim an hour. After a trim the book is at its target; another
+// one within the hour would mean the volatility estimate itself is jumping,
+// and selling into that twice is how a spike becomes a loss.
+
+/// How long the book must stay above the trigger before it is trimmed.
+pub const VOL_SPIKE_SUSTAIN_MS: i64 = 30 * 60_000;
+/// The least time between two trims.
+pub const VOL_TRIM_MIN_GAP_MS: i64 = 60 * 60_000;
+
+/// The trim's state between ticks. Not persisted: after a restart the clock
+/// starts again, which can only delay a trim.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VolSpikeGuard {
+    /// When the book went above the trigger and has not come back under the
+    /// release level since.
+    pub above_since: Option<i64>,
+    pub last_trim: Option<i64>,
+}
+
+impl VolSpikeGuard {
+    /// Feed the book's volatility (% of equity a year) at `now`. Returns the
+    /// fraction every position is to be kept at when a trim is due, `None`
+    /// otherwise. `mult <= 0` or no target turns it off and clears the clock.
+    pub fn update(&mut self, vol_pct: f64, target_pct: f64, mult: f64, now: i64) -> Option<f64> {
+        if mult <= 0.0 || target_pct <= 0.0 || !vol_pct.is_finite() {
+            self.above_since = None;
+            return None;
+        }
+        // Below 1 the "trigger" would sit under the target and trim a book
+        // that is inside it.
+        let trigger = target_pct * mult.max(1.0);
+        let release = (target_pct + trigger) / 2.0;
+        if vol_pct > trigger {
+            self.above_since.get_or_insert(now);
+        } else if vol_pct < release {
+            self.above_since = None;
+        }
+        let since = self.above_since?;
+        if now - since < VOL_SPIKE_SUSTAIN_MS || vol_pct <= target_pct {
+            return None;
+        }
+        if self.last_trim.is_some_and(|t| now - t < VOL_TRIM_MIN_GAP_MS) {
+            return None;
+        }
+        self.last_trim = Some(now);
+        self.above_since = None;
+        Some((target_pct / vol_pct).clamp(0.0, 1.0))
+    }
+}
+
 /// One strategy's sizing, for the Risk page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -541,6 +868,9 @@ pub struct StrategySizing {
     /// After shrinking toward no edge, `kelly * n / (n + 30)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kelly_shrunk: Option<f64>,
+    /// When a parameter change last started the record over (epoch ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
 }
 
 impl StrategySizing {
@@ -549,6 +879,7 @@ impl StrategySizing {
         Self {
             strategy_id: strategy_id.to_string(),
             mode,
+            since: edge.since,
             trades: edge.trades(),
             win_rate: est.map(|k| k.win_rate),
             payoff: est.and_then(|k| k.payoff),
@@ -584,6 +915,17 @@ pub struct RiskStatus {
     /// Open markets whose volatility is assumed, not measured (no candles).
     #[serde(default)]
     pub vol_assumed: Vec<String>,
+    /// Held pairs on clocks that cannot be aligned (candles against ticks),
+    /// counted as moving together. See [`PriceSeries`].
+    #[serde(default)]
+    pub unaligned_pairs: Vec<(String, String)>,
+    /// The volatility spike trim's clock: when the book went over the
+    /// trigger, if it is over it now (epoch ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vol_spike_since: Option<i64>,
+    /// When the book was last trimmed for a volatility spike (epoch ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_vol_trim: Option<i64>,
 }
 
 fn one() -> f64 {
@@ -601,6 +943,9 @@ impl Default for RiskStatus {
             portfolio_vol: 0.0,
             portfolio_vol_pct: 0.0,
             vol_assumed: Vec::new(),
+            unaligned_pairs: Vec::new(),
+            vol_spike_since: None,
+            last_vol_trim: None,
         }
     }
 }
@@ -623,8 +968,10 @@ mod tests {
             data_age_sec: 0,
             corr_exposure: 0.0,
             corr_loading: 0.0,
+            corr_unmeasured: 0.0,
             vol_exposure: 0.0,
             vol_loading: 0.0,
+            vol_unmeasured: 0.0,
             market_vol: 0.0,
         }
     }
@@ -683,10 +1030,43 @@ mod tests {
         h.insert("flat".to_string(), vec![100.0; 60]);
         assert!(return_correlation(&h["a"], &h["short"]).is_none());
         assert!(return_correlation(&h["a"], &h["flat"]).is_none());
-        assert_eq!(pair_correlation(&h, "a", "short"), UNKNOWN_CORRELATION);
-        assert_eq!(pair_correlation(&h, "a", "flat"), UNKNOWN_CORRELATION);
-        assert_eq!(pair_correlation(&h, "a", "missing"), UNKNOWN_CORRELATION);
-        assert_eq!(pair_correlation(&h, "a", "a"), 1.0);
+        let p = PriceSeries::ticks(&h);
+        assert_eq!(pair_correlation(&p, "a", "short"), None);
+        assert_eq!(pair_correlation(&p, "a", "flat"), None);
+        assert_eq!(pair_correlation(&p, "a", "missing"), None);
+        assert_eq!(pair_correlation(&p, "a", "a"), Some(1.0));
+        // Two longs: the same trade.
+        let longs = vec![("a".to_string(), 3_000.0), ("flat".to_string(), 4_000.0)];
+        assert!((correlated_exposure(&longs, &p) - 7_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_unmeasured_hedge_is_never_credited_as_one() {
+        // A long against a short whose correlation is unknown: assuming rho = 1
+        // would net them to 1k. The worst case adds them up.
+        let mut h = HashMap::new();
+        h.insert("a".to_string(), series(60, wiggle));
+        h.insert("flat".to_string(), vec![100.0; 60]);
+        let p = PriceSeries::ticks(&h);
+        let book = vec![("a".to_string(), 3_000.0), ("flat".to_string(), -4_000.0)];
+        assert!((correlated_exposure(&book, &p) - 7_000.0).abs() < 1e-6);
+        // A new order in "flat" leans with the unmeasured long whichever way it goes.
+        let l = correlation_loading(&book[..1], "flat", &p);
+        assert_eq!(l, Loading { measured: 0.0, unmeasured: 3_000.0 });
+        assert_eq!(l.lean(1.0), 3_000.0);
+        assert_eq!(l.lean(-1.0), 3_000.0);
+    }
+
+    #[test]
+    fn a_short_into_an_unmeasured_long_is_capped_like_a_long() {
+        // 35k long in something unmeasured. A 10k short in the new market
+        // would net it under the old rule; worst case it adds, so only 5k fits.
+        let mut c = ctx();
+        c.corr_exposure = 35_000.0;
+        c.corr_unmeasured = 35_000.0;
+        let d = evaluate(&order(Side::Sell, 10_000.0), 1.0, &RiskLimits::default(), &c);
+        assert!(d.approved);
+        assert!((d.qty - 5_000.0).abs() < 1e-6, "got {}", d.qty);
     }
 
     #[test]
@@ -700,7 +1080,7 @@ mod tests {
             })
             .collect();
         // Moving as one, the book is its gross: 50k.
-        assert!((correlated_exposure(&book, &h) - 50_000.0).abs() < 1.0);
+        assert!((correlated_exposure(&book, &PriceSeries::ticks(&h)) - 50_000.0).abs() < 1.0);
     }
 
     #[test]
@@ -708,11 +1088,11 @@ mod tests {
         let mut h = HashMap::new();
         h.insert("a".to_string(), series(60, wiggle));
         h.insert("b".to_string(), series(60, other_wiggle));
-        let rho = pair_correlation(&h, "a", "b");
+        let rho = pair_correlation(&PriceSeries::ticks(&h), "a", "b").unwrap();
         assert!(rho.abs() < 0.5, "test series should be close to independent, got {rho}");
         let book = vec![("a".to_string(), 3_000.0), ("b".to_string(), 4_000.0)];
         let want = (9e6 + 16e6 + 2.0 * 12e6 * rho).sqrt();
-        assert!((correlated_exposure(&book, &h) - want).abs() < 1e-6);
+        assert!((correlated_exposure(&book, &PriceSeries::ticks(&h)) - want).abs() < 1e-6);
     }
 
     #[test]
@@ -721,7 +1101,7 @@ mod tests {
         h.insert("a".to_string(), series(60, wiggle));
         h.insert("b".to_string(), series(60, wiggle));
         let book = vec![("a".to_string(), 10_000.0), ("b".to_string(), -10_000.0)];
-        assert!(correlated_exposure(&book, &h) < 1.0);
+        assert!(correlated_exposure(&book, &PriceSeries::ticks(&h)) < 1.0);
     }
 
     #[test]
@@ -880,6 +1260,7 @@ mod tests {
         let book = vec![("a".to_string(), 10_000.0), ("b".to_string(), 10_000.0)];
         let vols: HashMap<String, f64> = [("a".to_string(), 0.5), ("b".to_string(), 1.0)].into_iter().collect();
         // They move as one: 10k x 0.5 + 10k x 1.0.
+        let history = PriceSeries::ticks(&history);
         assert!((portfolio_vol(&book, &vols, &history) - 15_000.0).abs() < 1e-6);
         // Without a measurement, a market counts as 5 % a day.
         let only_a: HashMap<String, f64> = [("a".to_string(), 0.5)].into_iter().collect();
@@ -997,6 +1378,165 @@ mod tests {
         for (e0, lean) in [(0.0, 0.0), (20_000.0, 5_000.0), (30_000.0, -10_000.0), (39_000.0, 39_000.0)] {
             let t = max_added_notional(e0, lean, 40_000.0);
             assert!((exposure_after(e0, lean, t) - 40_000.0).abs() < 1e-6, "e0 {e0} lean {lean} t {t}");
+        }
+    }
+
+    // ── aligned correlation ─────────────────────────────────────────────────
+
+    const FIVE_MIN: i64 = 300_000;
+
+    /// Candles from closes, `FIVE_MIN` apart from `start`.
+    fn candles(closes: &[f64], start: i64) -> Vec<Ohlc> {
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Ohlc { ts: start + i as i64 * FIVE_MIN, open: c, high: c, low: c, close: c, volume: 1.0 })
+            .collect()
+    }
+
+    #[test]
+    fn candles_are_correlated_on_shared_bar_times_not_on_position() {
+        // Same moves, but b is missing the bar at index 30. Aligned on the
+        // tail, every return before the gap would pair with its neighbour's;
+        // on bar times the pair still moves as one.
+        let moves = series(60, wiggle);
+        let a = candles(&moves, 0);
+        let mut b = candles(&moves, 0);
+        b.remove(30);
+        assert!((bar_correlation(&a, &b).unwrap() - 1.0).abs() < 1e-9);
+        let tail_aligned = return_correlation(&moves, &b.iter().map(|x| x.close).collect::<Vec<_>>()).unwrap();
+        assert!(tail_aligned < 0.99, "the old tail alignment gets this wrong: {tail_aligned}");
+    }
+
+    #[test]
+    fn candles_without_enough_shared_times_are_unknown() {
+        let moves = series(60, wiggle);
+        // b's bars are a day later: no time in common.
+        let a = candles(&moves, 0);
+        let b = candles(&moves, 86_400_000);
+        assert_eq!(bar_correlation(&a, &b), Err(Unmeasured::TooShort));
+    }
+
+    #[test]
+    fn candles_against_ticks_are_never_mixed_and_count_as_one() {
+        let moves = series(60, wiggle);
+        let closes: HashMap<String, Vec<f64>> =
+            [("bar".to_string(), moves.clone()), ("tick".to_string(), moves.clone()), ("tick2".to_string(), moves.clone())]
+                .into_iter()
+                .collect();
+        let bars: HashMap<String, Vec<Ohlc>> = [("bar".to_string(), candles(&moves, 0))].into_iter().collect();
+        let prices = PriceSeries::new(&closes, &bars);
+        // Identical numbers, but one is 5-minute candles and the other ticks.
+        assert_eq!(measure_correlation(&prices, "bar", "tick"), Err(Unmeasured::Unaligned));
+        assert_eq!(pair_correlation(&prices, "bar", "tick"), None);
+        // Two tick series still compare on their tail.
+        assert!((measure_correlation(&prices, "tick", "tick2").unwrap() - 1.0).abs() < 1e-9);
+        let book = vec![("tick".to_string(), 1.0), ("bar".to_string(), 1.0), ("tick2".to_string(), 1.0)];
+        assert_eq!(
+            unaligned_pairs(&book, &prices),
+            vec![("bar".to_string(), "tick".to_string()), ("bar".to_string(), "tick2".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_hedge_on_candles_cancels_out_like_one_on_ticks() {
+        let moves = series(60, wiggle);
+        let closes = HashMap::new();
+        let bars: HashMap<String, Vec<Ohlc>> =
+            [("a".to_string(), candles(&moves, 0)), ("b".to_string(), candles(&moves, 0))].into_iter().collect();
+        let book = vec![("a".to_string(), 10_000.0), ("b".to_string(), -10_000.0)];
+        assert!(correlated_exposure(&book, &PriceSeries::new(&closes, &bars)) < 1.0);
+    }
+
+    // ── rebuilding the edge record ──────────────────────────────────────────
+
+    fn past(ts: i64, market: &str, qty: f64, price: f64) -> PastFill {
+        PastFill { ts, market_id: market.into(), strategy_id: "s".into(), signed_qty: qty, price, fee_rate: 0.001 }
+    }
+
+    #[test]
+    fn a_round_trip_replays_to_its_net_return() {
+        let fills = [past(1, "a", 2.0, 100.0), past(2, "a", -2.0, 110.0), past(3, "a", -1.0, 50.0), past(4, "a", 1.0, 55.0)];
+        let trades = replay_closed_trades(&fills, &HashMap::new());
+        assert_eq!(trades.len(), 2);
+        // +10% less 2 x 0.1% of the exit notional over the entry notional.
+        assert!((trades[0].net_return - (20.0 - 2.0 * 0.001 * 220.0) / 200.0).abs() < 1e-12);
+        // A short that lost 10%.
+        assert!((trades[1].net_return - (-5.0 - 2.0 * 0.001 * 55.0) / 50.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_market_whose_history_was_cut_mid_position_is_left_out() {
+        // "a" starts flat and is flat now. "b" was bought before the oldest
+        // saved order: its first saved fill is the sell that closed it, then a
+        // new long that is still held.
+        let fills = [
+            past(1, "a", 1.0, 100.0),
+            past(2, "a", -1.0, 105.0),
+            past(3, "b", -1.0, 100.0),
+            past(4, "b", 1.0, 90.0),
+        ];
+        let held: HashMap<String, f64> = [("b".to_string(), 1.0)].into_iter().collect();
+        let trades = replay_closed_trades(&fills, &held);
+        assert_eq!(trades.len(), 1, "{trades:?}");
+        assert_eq!(trades[0].ts, 2);
+    }
+
+    // ── volatility spike trim ───────────────────────────────────────────────
+
+    const MIN: i64 = 60_000;
+
+    #[test]
+    fn a_spike_must_last_thirty_minutes_before_it_trims_back_to_target() {
+        let mut g = VolSpikeGuard::default();
+        // target 30, k 2: trigger 60, release 45.
+        assert_eq!(g.update(70.0, 30.0, 2.0, 0), None);
+        assert_eq!(g.update(70.0, 30.0, 2.0, 29 * MIN), None);
+        let keep = g.update(75.0, 30.0, 2.0, 30 * MIN).expect("sustained 30 minutes");
+        assert!((keep - 30.0 / 75.0).abs() < 1e-12);
+        assert_eq!(g.above_since, None, "the clock starts over after a trim");
+    }
+
+    #[test]
+    fn a_dip_between_release_and_trigger_keeps_the_clock_and_one_below_release_resets_it() {
+        let mut g = VolSpikeGuard::default();
+        g.update(70.0, 30.0, 2.0, 0);
+        // 50 is under the trigger (60) but over the release level (45).
+        assert_eq!(g.update(50.0, 30.0, 2.0, 20 * MIN), None);
+        assert_eq!(g.above_since, Some(0));
+        assert!(g.update(65.0, 30.0, 2.0, 30 * MIN).is_some(), "hysteresis keeps the clock running");
+
+        let mut g = VolSpikeGuard::default();
+        g.update(70.0, 30.0, 2.0, 0);
+        g.update(40.0, 30.0, 2.0, 10 * MIN); // under 45: reset
+        assert_eq!(g.above_since, None);
+        g.update(70.0, 30.0, 2.0, 11 * MIN);
+        assert_eq!(g.update(70.0, 30.0, 2.0, 30 * MIN), None, "only 19 minutes since it went back over");
+        assert!(g.update(70.0, 30.0, 2.0, 41 * MIN).is_some());
+    }
+
+    #[test]
+    fn trims_are_at_least_an_hour_apart() {
+        let mut g = VolSpikeGuard::default();
+        g.update(70.0, 30.0, 2.0, 0);
+        assert!(g.update(70.0, 30.0, 2.0, 30 * MIN).is_some());
+        // Another spike straight after, sustained for 30 minutes.
+        g.update(80.0, 30.0, 2.0, 31 * MIN);
+        assert_eq!(g.update(80.0, 30.0, 2.0, 61 * MIN), None);
+        assert_eq!(g.update(80.0, 30.0, 2.0, 89 * MIN), None);
+        assert!(g.update(80.0, 30.0, 2.0, 90 * MIN).is_some(), "an hour after the last trim");
+    }
+
+    #[test]
+    fn the_trim_is_off_at_zero_and_never_trims_inside_the_target() {
+        let mut g = VolSpikeGuard::default();
+        for t in 0..10 {
+            assert_eq!(g.update(500.0, 30.0, 0.0, t * 30 * MIN), None);
+        }
+        // A multiplier under 1 is read as 1: the book has to be over target.
+        let mut g = VolSpikeGuard::default();
+        for t in 0..10 {
+            assert_eq!(g.update(25.0, 30.0, 0.5, t * 30 * MIN), None);
         }
     }
 }
