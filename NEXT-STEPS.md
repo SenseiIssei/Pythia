@@ -59,8 +59,10 @@ For the web build to talk to the backend, put
 npm run check
 ```
 
-That runs `cargo test --workspace` (361 Rust tests, one benchmark
-`#[ignore]`d), vitest (27 tests) and `npm run build`. The Tauri shell is a separate workspace:
+That runs `cargo test --workspace` (539 Rust tests, two `#[ignore]`d, one of
+them the benchmark), vitest (35 tests) and `npm run build` (counts from
+2026-10-07). The recorder has its own tests:
+`cd research/recorder && python -m pytest tests` (33). The Tauri shell is a separate workspace:
 
 ```bash
 cd src-tauri && cargo build
@@ -94,6 +96,14 @@ Do this first, before any new features:
       Alpaca is right** — that is a bug in Pythia, write it down
 - [ ] Restart mid-session with a position open. Confirm reconciliation picks it
       up and journals `Reconciled … — broker wins`
+- [ ] Restart while a resting limit order is still open. The journal should say
+      `Following 1 live order(s) from before the restart`, and the row should
+      end Filled, Cancelled (after the timeout) or Rejected, never stay
+      Pending. Built and unit-tested on 2026-10-07, never run against a broker.
+      An order the venue had not acknowledged when the state was saved (the
+      server saves every minute, independent of the order cycle) is closed as
+      rejected with its client id, because Pythia has no way to look it up yet:
+      check the venue by hand when that journal line appears
 - [ ] Repeat the connection test for one crypto exchange (Kraken is the most
       forgiving)
 
@@ -340,9 +350,15 @@ Still open:
       they had no real prices (now Alpaca's public crypto snapshots and bars,
       no keys needed). No strategy trades them by default; they make the
       connection test (§1) usable on a weekend. Open: their spread and depth
-      in `config/costs.json` are a guess from one look at the book, and the
-      `GET /v2/positions/BTC%2FUSD` preflight lookup is unverified against
-      the real API (Alpaca may want `BTCUSD` there)
+      in `config/costs.json` are a guess from one look at the book. The sell
+      preflight's position lookup now asks `GET /v2/positions/BTCUSD`
+      (2026-10-07): Alpaca's reference documents the path only as "symbol or
+      assetId", its crypto guide keeps the slash-free form for backwards
+      compatibility, positions are listed as `BTCUSD`, and the slash form is
+      reported to find nothing, which read as "flat" and refused every crypto
+      sell as a short. Still to confirm on the paper account: a crypto sell
+      passes the preflight. `GET /v2/assets/BTC%2FUSD` in the same connector
+      is unverified the same way
 - [ ] **Perpetual futures** for funding carry — needs leverage-aware risk limits
       **first**, not after
 - [ ] **Polymarket order signing** — deliberately last. Its CLOB signs with a
@@ -397,6 +413,38 @@ regardless of the algorithms underneath.
 - [ ] `ExecContext` wants spread and top-of-book depth. The quote data now
       exists (live books, §2) and already prices the cross arm; using it as
       bandit context is deferred until there are live fills to split (§2)
+- [x] **Funding for the newest days** (2026-10-07). data.binance.vision has
+      USD-M funding only as monthly archives, so `hist/binance_um/funding`
+      stopped at the last full month and the lab filled every newer day with
+      zero funding: `fund7` read too low exactly on the days the paper books
+      and the next training use. The nightly backfill now fills each finished
+      UTC day the archive lacks from `GET /fapi/v1/fundingRate` for every
+      trading perp (`YYYY-MM-DD.parquet`, same schema, replaced by the monthly
+      archive when it appears), paced 0.8 s apart because the engine's coin
+      ranking shares the 500 per 5 minutes limit. It also stops asking for
+      daily funding archives every night, which do not exist.
+      The engine's own M2 port was not affected: it reads funding from that
+      REST endpoint directly. Tested with recorded replies, run once against
+      the real endpoint for two coins
+- [ ] **Deploy that backfill** to the VPS: copy `research/recorder` to
+      `/opt/pythia-recorder` and run `docker compose build` there. That
+      rebuilds the `pythia-recorder` image the 03:30 UTC cron starts; the live
+      recorder's code did not change, so it need not restart (`up -d --build`
+      works too, with a few seconds' gap in the recording). Then check
+      `hist/binance_um/funding/symbol=BTCUSDT/` for October day files and
+      `rest_days` in `/var/log/pythia-backfill.log`. Training runs and caches
+      built before that (`xs_daily`, `picks`, the families panel) still carry
+      the zero-funding days; refresh them once the files exist
+- [x] **Tax dates in German time** (2026-10-07). The CoinTracking export, the
+      § 23 holding period and the tax year used UTC dates, so a fill just after
+      midnight in Berlin landed on the previous day (and a New Year's Eve fill
+      in the wrong year). They now go through Europe/Berlin with `chrono-tz`,
+      tested around midnight and both daylight saving switches. The fills file
+      itself still stores UTC milliseconds
+- [ ] Look up a never-acknowledged live order by its client id after a
+      restart (Alpaca `GET /v2/orders:by_client_order_id`, Binance
+      `origClientOrderId`, Kraken `cl_ord_id`) instead of closing it as
+      unknown (§1)
 
 ---
 

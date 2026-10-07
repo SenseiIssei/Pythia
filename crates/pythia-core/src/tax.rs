@@ -17,14 +17,32 @@
 //!   that count.
 //!
 //! Paper fills are never written here.
+//!
+//! Every date this module derives (the export's date column, the holding
+//! period, the tax year) is a German calendar date: Europe/Berlin, CET in
+//! winter and CEST in summer. A fill at 23:30 UTC on 31 December is a fill on
+//! 1 January in Germany, in the next tax year. The record itself keeps UTC
+//! epoch millis.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::path::Path;
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
+use chrono_tz::Europe::Berlin;
 use serde::{Deserialize, Serialize};
 
 use crate::connectors::{Side, Venue};
+
+/// The German wall-clock time of an epoch-millis instant (DST included).
+fn berlin(ms: i64) -> Option<NaiveDateTime> {
+    DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&Berlin).naive_local())
+}
+
+/// The German calendar date of an epoch-millis instant.
+fn berlin_date(ms: i64) -> Option<NaiveDate> {
+    berlin(ms).map(|d| d.date())
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,7 +135,10 @@ fn exchange_name(v: Venue, crypto_exchange: &str) -> String {
     }
 }
 
-/// The CoinTracking CSV import format, one "Trade" row per fill.
+/// The CoinTracking CSV import format, one "Trade" row per fill. The date
+/// column is German local time, which is what a German account's import
+/// assumes. In the hour the clocks go back (02:00 to 03:00 local in late
+/// October) the same wall time occurs twice; the rows stay in fill order.
 pub fn cointracking_csv(fills: &[FillRecord], crypto_exchange: &str) -> String {
     let mut s = String::from(
         "\"Type\",\"Buy Amount\",\"Buy Currency\",\"Sell Amount\",\"Sell Currency\",\"Fee\",\"Fee Currency\",\
@@ -130,7 +151,7 @@ pub fn cointracking_csv(fills: &[FillRecord], crypto_exchange: &str) -> String {
             Side::Buy => (r.qty, asset.clone(), notional, quote.clone()),
             Side::Sell => (notional, quote.clone(), r.qty, asset.clone()),
         };
-        let date = chrono::DateTime::from_timestamp_millis(r.ts)
+        let date = berlin(r.ts)
             .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
             .unwrap_or_default();
         s.push_str(&format!(
@@ -173,10 +194,12 @@ pub struct TaxSummary {
 /// Held for more than a year: sold after the same calendar date one year
 /// later (§ 23 EStG with § 188 BGB; a lot bought on 29 February has its year
 /// end on 28 February). Counting 365 days instead called a sale on the
-/// anniversary tax-free whenever the year held a 29 February. Dates are UTC.
+/// anniversary tax-free whenever the year held a 29 February. Both dates are
+/// German calendar dates: with UTC dates a buy at 00:30 Berlin time (still
+/// the previous day in UTC) started the year one day early, and a sale on
+/// the anniversary at 00:30 counted as tax-free.
 fn held_over_a_year(bought_ms: i64, sold_ms: i64) -> bool {
-    let date = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.date_naive());
-    match (date(bought_ms), date(sold_ms)) {
+    match (berlin_date(bought_ms), berlin_date(sold_ms)) {
         (Some(b), Some(s)) => b.checked_add_months(chrono::Months::new(12)).is_some_and(|end| s > end),
         _ => false,
     }
@@ -194,7 +217,8 @@ pub fn fifo_summary(fills: &[FillRecord]) -> TaxSummary {
     let mut unmatched = 0;
     for r in fills {
         let (asset, _) = r.assets();
-        let year = chrono::DateTime::from_timestamp_millis(r.ts).map(|d| {
+        // The German tax year: a fill late on 31 December UTC can be 1 January in Berlin.
+        let year = berlin_date(r.ts).map(|d| {
             use chrono::Datelike;
             d.year()
         });
@@ -326,7 +350,66 @@ mod tests {
         assert!(lines[0].starts_with("\"Type\""));
         assert!(lines[1].starts_with("\"Trade\",\"0.5\",\"BTC\",\"50\",\"USD\""));
         assert!(lines[2].starts_with("\"Trade\",\"55\",\"USD\",\"0.5\",\"BTC\",\"0.2\""), "{}", lines[2]);
-        assert!(lines[1].contains("\"Kraken\"") && lines[1].contains("2026-01-01 00:00:00"));
+        // T0 is midnight UTC, 01:00 in Berlin (CET, UTC+1).
+        assert!(lines[1].contains("\"Kraken\"") && lines[1].contains("2026-01-01 01:00:00"), "{}", lines[1]);
+    }
+
+    fn utc(s: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()
+    }
+
+    fn berlin_str(ms: i64) -> String {
+        berlin(ms).unwrap().format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    #[test]
+    fn dates_are_berlin_wall_time_in_winter_summer_and_across_both_switches() {
+        assert_eq!(berlin_str(utc("2026-01-15T23:30:00Z")), "2026-01-16 00:30:00"); // CET, +1
+        assert_eq!(berlin_str(utc("2026-07-15T22:30:00Z")), "2026-07-16 00:30:00"); // CEST, +2
+        // Spring forward, 2026-03-29 01:00 UTC: 02:00 local does not exist.
+        assert_eq!(berlin_str(utc("2026-03-29T00:59:59Z")), "2026-03-29 01:59:59");
+        assert_eq!(berlin_str(utc("2026-03-29T01:00:00Z")), "2026-03-29 03:00:00");
+        // Fall back, 2026-10-25 01:00 UTC: 02:30 local happens twice.
+        assert_eq!(berlin_str(utc("2026-10-25T00:30:00Z")), "2026-10-25 02:30:00");
+        assert_eq!(berlin_str(utc("2026-10-25T01:30:00Z")), "2026-10-25 02:30:00");
+        // Just after local midnight on the switch day is still the previous UTC day.
+        assert_eq!(berlin_date(utc("2026-10-24T22:30:00Z")), NaiveDate::from_ymd_opt(2026, 10, 25));
+        assert_eq!(berlin_date(utc("2026-10-25T23:30:00Z")), NaiveDate::from_ymd_opt(2026, 10, 26));
+        assert_eq!(berlin_date(utc("2026-03-28T23:30:00Z")), NaiveDate::from_ymd_opt(2026, 3, 29));
+    }
+
+    #[test]
+    fn the_export_writes_the_german_date_of_a_fill_near_midnight() {
+        let csv = cointracking_csv(&[fill(utc("2026-06-30T22:15:00Z"), Side::Buy, 1.0, 100.0, 0.0)], "Kraken");
+        assert!(csv.lines().nth(1).unwrap().ends_with("\"2026-07-01 00:15:00\""), "{csv}");
+    }
+
+    #[test]
+    fn the_holding_period_counts_german_calendar_days() {
+        // Bought 00:30 on 11 March in Berlin, which is 10 March in UTC. Sold at
+        // noon on 11 March a year later: the anniversary, so still taxable. With
+        // UTC dates the year ended on 10 March and this sale was tax-free.
+        let bought = utc("2026-03-10T23:30:00Z");
+        assert!(!held_over_a_year(bought, utc("2027-03-11T12:00:00Z")));
+        assert!(held_over_a_year(bought, utc("2027-03-11T23:30:00Z"))); // 12 March in Berlin
+        // Bought in summer, sold 00:30 CEST the day after the anniversary
+        // (22:30 UTC on the anniversary): over a year, tax-free.
+        let bought = utc("2026-06-01T12:00:00Z");
+        assert!(held_over_a_year(bought, utc("2027-06-01T22:30:00Z")));
+        assert!(!held_over_a_year(bought, utc("2027-06-01T21:59:59Z"))); // 23:59:59 on the anniversary
+        let s = fifo_summary(&[fill(bought, Side::Buy, 1.0, 100.0, 0.0), fill(utc("2027-06-01T22:30:00Z"), Side::Sell, 1.0, 150.0, 0.0)]);
+        assert_eq!((s.years[1].short_term, s.years[1].long_term), (0.0, 50.0), "{s:?}");
+    }
+
+    #[test]
+    fn a_new_years_eve_fill_after_midnight_in_berlin_is_in_the_next_tax_year() {
+        let s = fifo_summary(&[
+            fill(utc("2026-12-01T12:00:00Z"), Side::Buy, 1.0, 100.0, 0.0),
+            fill(utc("2026-12-31T23:30:00Z"), Side::Sell, 1.0, 120.0, 0.0), // 00:30 on 1 January 2027
+        ]);
+        assert_eq!(s.years.iter().map(|y| y.year).collect::<Vec<_>>(), vec![2026, 2027]);
+        assert_eq!(s.years[1].short_term, 20.0);
+        assert_eq!(s.years[1].disposals, 1);
     }
 
     #[test]
