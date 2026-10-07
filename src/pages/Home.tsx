@@ -221,6 +221,7 @@ function StatusCard({
           q="Today"
           a={loading ? "Waiting" : !moved ? "No change" : `${change > 0 ? "Up" : "Down"} ${fmtUsd(Math.abs(change), 2)}`}
           tone={loading || !moved ? "neutral" : change > 0 ? "green" : "red"}
+          plain
         />
         <Answer
           q="Anything wrong?"
@@ -243,10 +244,11 @@ function StatusCard({
   );
 }
 
-function Answer({ q, a, tone }: { q: string; a: string; tone: Tone }) {
+/** `plain` drops the icon: a down day is a number, not an alarm. */
+function Answer({ q, a, tone, plain }: { q: string; a: string; tone: Tone; plain?: boolean }) {
   const color =
     tone === "green" ? "text-success" : tone === "red" ? "text-danger" : tone === "amber" ? "text-warning" : "text-cyber-text";
-  const Mark = tone === "green" ? CheckCircle2 : tone === "neutral" ? null : TriangleAlert;
+  const Mark = plain ? null : tone === "green" ? CheckCircle2 : tone === "neutral" ? null : TriangleAlert;
   return (
     <div className="min-w-0 rounded-lg border border-cyber-border bg-cyber-bg/50 px-2.5 py-2 sm:px-3">
       <dt className="text-[11px] text-cyber-text-faint">{q}</dt>
