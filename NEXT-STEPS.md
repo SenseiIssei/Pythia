@@ -117,9 +117,10 @@ left is calibration, which needs real fills and recorded books.
       half-spread, depth and impact for all 20 recorded coins are now measured
       (`research/lab` experiment `costs`, 6.6 days of top-20 books, re-run every
       Sunday as a report). Spreads were overstated 10 to 1000 times; fees are now
-      nearly the whole cost. Still guesses: Bybit, OKX, Coinbase (no recorder),
-      and the fees themselves, which should come from your actual tier once an
-      account exists
+      nearly the whole cost. Bybit, OKX and Coinbase books are recorded since
+      2026-10-07 18:00 UTC and join the Sunday report once each coin has 1000
+      minutes; until then their numbers are guesses. The fees themselves should
+      come from your actual tier once an account exists
 - [x] Backtester reports **gross P&L, costs, net P&L** as three separate
       figures (Rust `PnlBreakdown`, the Backtest, Composer and Analytics pages),
       flagged when costs exceed 40 % of gross
@@ -302,10 +303,14 @@ Still open:
       until those markets get real bars (Polymarket has none). Their pairs
       count as the worst case, which is safe but can refuse entries a
       measurement would allow
-- [ ] A dragged slider resets the record on the first step and cannot be
-      undone by dragging back. The dropped record is in the journal. If that
-      proves too easy to trigger, an explicit "apply parameters" step on the
-      Strategies page would fix it at the source
+- [x] A dragged slider reset the record on the first step. The Strategies
+      page now edits a draft: "Apply" sends it once (and asks first when the
+      strategy has trades or is live), "Undo changes" drops it
+- [x] Lab books are left out of adaptive allocation: they keep the budget the
+      lab tested, and their share comes off the 80 % pool
+- [x] A lab rebalance with refused orders is retried every 20 minutes, up to
+      six attempts while the signal is valid, recomputed from the holdings each
+      time; before, a brief data hiccup lost the whole day
 
 ---
 
