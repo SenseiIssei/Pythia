@@ -24,6 +24,23 @@ publishes them. `python -m recorder.backfill` fetches spot 1m klines (from
 2020), USD-M funding (from 2020) and USD-M metrics (from 2022), checks each
 archive against its published SHA-256, and skips files that already exist.
 
+Funding has no daily archives, only monthly ones, published a few days after
+the month ends. Without help the newest days would have no funding at all
+(the lab fills a missing day with zero, so `fund7` read too low exactly on the
+days the paper books trade). The backfill therefore fetches every finished UTC
+day the archive does not cover yet (the running month, and last month until
+its archive appears) from the public `GET /fapi/v1/fundingRate`, for every
+perpetual that is trading, and writes it as `YYYY-MM-DD.parquet` in the same
+folder and schema. REST `fundingTime` equals the archive's `calc_time` to the
+millisecond; `interval_hours` is taken from the spacing of the settlements.
+When the monthly archive arrives it replaces that month's day files. The
+endpoint shares 500 requests per 5 minutes per IP with the engine's coin
+ranking, so the backfill spaces its requests 0.8 s apart across all jobs
+(`--rest-interval`), waits out a 429/418 as Binance asks, and needs one request
+per perpetual and night (about 570 trading perps, so about 8 minutes).
+`--no-rest` switches it off. Today is never written: its settlements are not
+all in yet.
+
 ## Layout
 
 ```
@@ -32,6 +49,7 @@ archive against its published SHA-256, and skips files that already exist.
   <source>/<table>/date=YYYY-MM-DD/day.parquet      finished days, compacted hourly
   hist/binance_spot/klines_1m/symbol=X/YYYY-MM.parquet
   hist/binance_um/{funding,metrics}/symbol=X/YYYY-MM.parquet
+  hist/binance_um/funding/symbol=X/YYYY-MM-DD.parquet  days the archive lacks, from REST
   _health/status.json                              rewritten every minute
 ```
 
