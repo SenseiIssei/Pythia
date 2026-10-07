@@ -51,15 +51,15 @@ main() {
     add "nightly backfill" false "last finished ${last_done:-never}"
   fi
 
-  # Paper books: a row for today once their run time has passed (04:00 and 05:30 UTC + margin)
+  # Paper books: a row for today once their run time has passed (04:00, 04:15 and 05:30 UTC + margin)
   local hour
   hour=$(date -u +%H)
-  for b in tsmom tsmom_regime picks_ls picks_ls_v2; do
+  for b in tsmom tsmom_regime tsmom_top20 breakout_top10 picks_ls picks_ls_v2; do
     local j="$data/paper/$b/journal.csv"
     local last
     last=$(tail -1 "$j" 2>/dev/null | cut -d, -f1)
     local due=4
-    case $b in picks_ls*) due=6 ;; esac
+    case $b in picks_ls*) due=6 ;; tsmom_top20|breakout_top10) due=5 ;; esac
     if [ "$last" = "$today" ] || { [ "$hour" -lt "$due" ] && [ "$last" = "$(date -u -d yesterday +%F)" ]; }; then
       add "paper $b" true "last row $last"
     else
