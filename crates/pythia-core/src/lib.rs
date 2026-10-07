@@ -18,6 +18,7 @@ pub mod labview;
 pub mod llm;
 pub mod marketdata;
 pub mod ml;
+pub mod ml_picks;
 pub mod predict;
 pub mod prefs;
 pub mod research;

@@ -96,6 +96,8 @@ pub struct MlStatus {
     pub recent: Vec<Scored>,
     pub drift: Vec<FeatureDrift>,
     pub updated_ms: i64,
+    /// M2, the weekly coin ranking, also in shadow mode (ml_picks.rs).
+    pub picks: crate::ml_picks::PicksStatus,
 }
 
 impl Default for MlStatus {
@@ -109,6 +111,7 @@ impl Default for MlStatus {
             recent: vec![],
             drift: vec![],
             updated_ms: 0,
+            picks: Default::default(),
         }
     }
 }
@@ -157,6 +160,8 @@ fn load_model() -> Result<(VolModel, PathBuf), (MlState, String)> {
 }
 
 pub async fn run(shared: SharedMl) {
+    // M2 runs beside this model on its own weekly clock, with its own status.
+    tokio::spawn(crate::ml_picks::run(shared.clone()));
     let (model, version) = loop {
         match tokio::task::spawn_blocking(load_model).await {
             Ok(Ok(ok)) => break ok,
