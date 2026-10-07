@@ -13,20 +13,21 @@ fn state_file(app: &AppHandle) -> Option<PathBuf> {
     Some(dir.join("state.json"))
 }
 
+/// Atomic: a crash mid-save leaves the previous file, not a truncated one
+/// (see `pythia_core::persist`).
 pub fn save(app: &AppHandle) {
     let Some(path) = state_file(app) else { return };
     let Some(st) = app.try_state::<AppState>() else { return };
     let data = st.engine.lock().unwrap().to_persisted();
-    if let Ok(json) = serde_json::to_string(&data) {
-        let _ = fs::write(path, json);
-    }
+    let _ = pythia_core::persist::save(&path, &data);
 }
 
+/// A file that does not parse is moved aside (`state.json.unreadable-<time>`)
+/// before the app starts fresh, so the next save cannot overwrite it.
 pub fn load(app: &AppHandle) {
     let Some(path) = state_file(app) else { return };
-    let Ok(text) = fs::read_to_string(&path) else { return };
-    let Ok(data) = serde_json::from_str(&text) else { return };
+    let pythia_core::persist::Loaded::Restored(data) = pythia_core::persist::load(&path) else { return };
     if let Some(st) = app.try_state::<AppState>() {
-        st.engine.lock().unwrap().apply_persisted(data);
+        st.engine.lock().unwrap().apply_persisted(*data);
     }
 }
