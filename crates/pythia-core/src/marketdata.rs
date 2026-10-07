@@ -8,6 +8,11 @@
 //! Every fetch is time-boxed and falls back to an empty result on any failure,
 //! so the engine keeps running on its simulator if the network is down or a
 //! venue is unreachable.
+//!
+//! The hosts no longer poll the crypto fetchers here for the live engine:
+//! `crate::feeds` does, with failover across five venues, a websocket for
+//! Kraken quotes, and a sanity check. They stay for research (daily candles
+//! for validation) and as the parsers `feeds::sources` reuses.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +21,7 @@ use std::time::Duration;
 use crate::costs::CostVenue;
 use crate::orderbook::{BookQuote, BookSnapshot, BOOK_LEVELS};
 
+#[derive(Debug, Clone)]
 pub struct RealCrypto {
     pub id: String,
     pub symbol: String,
@@ -113,6 +119,12 @@ pub async fn fetch_kraken() -> Vec<RealCrypto> {
     let pairs: Vec<&str> = KRAKEN_PAIRS.iter().map(|(p, _, _)| *p).collect();
     let url = format!("https://api.kraken.com/0/public/Ticker?pair={}", pairs.join(","));
     let Some(v) = get_json(&url).await else { return vec![] };
+    parse_kraken_ticker(&v)
+}
+
+/// Map a Kraken `Ticker` payload to our rows. Split out so the feed layer
+/// (`crate::feeds::sources`) can use it with its own error handling.
+pub(crate) fn parse_kraken_ticker(v: &Value) -> Vec<RealCrypto> {
     let Some(result) = v.get("result").and_then(Value::as_object) else { return vec![] };
 
     let mut out = Vec::new();
@@ -415,7 +427,7 @@ pub async fn fetch_kraken_bars(interval_min: u32) -> Vec<BarSeries> {
 /// Kraken returns `{result: {<canonical pair>: [[time, o, h, l, c, vwap, vol, count], …], last: …}}`
 /// with numbers as strings. The canonical pair name differs from the requested
 /// one (`XBTUSD` → `XXBTZUSD`), so we take the first non-`last` key.
-fn parse_kraken_ohlc(v: &Value) -> Option<Vec<Ohlc>> {
+pub(crate) fn parse_kraken_ohlc(v: &Value) -> Option<Vec<Ohlc>> {
     let result = v.get("result")?.as_object()?;
     let arr = result.iter().find(|(k, _)| k.as_str() != "last").map(|(_, v)| v)?.as_array()?;
     let num = |x: Option<&Value>| -> Option<f64> {
@@ -498,7 +510,7 @@ pub async fn fetch_books(venue: CostVenue) -> Vec<BookSnapshot> {
 /// `BTC/USD` → `BTCUSDT`. Binance quotes the universe in USDT; the recorder and
 /// the cost calibration used the same books, so this is the market whose
 /// spread and depth `config/costs.json` describes.
-fn binance_symbol(symbol: &str) -> String {
+pub(crate) fn binance_symbol(symbol: &str) -> String {
     let base = symbol.split('/').next().unwrap_or(symbol);
     format!("{base}USDT")
 }
@@ -527,14 +539,14 @@ fn book_side(v: Option<&Value>) -> Vec<(f64, f64)> {
 /// Kraken `Depth`: `{error: [], result: {<canonical pair>: {asks: [[p, v, ts]], bids: [...]}}}`.
 /// The reply key is renamed (`XBTUSD` → `XXBTZUSD`), and there is exactly one
 /// pair per request, so the first entry is the book.
-fn parse_kraken_depth(v: &Value, now: i64) -> Option<BookQuote> {
+pub(crate) fn parse_kraken_depth(v: &Value, now: i64) -> Option<BookQuote> {
     let (_, book) = v.get("result")?.as_object()?.iter().next()?;
     BookQuote::from_levels(CostVenue::Kraken, &book_side(book.get("bids")), &book_side(book.get("asks")), now)
 }
 
 /// Binance `depth`: `{lastUpdateId, bids: [[p, q]], asks: [[p, q]]}`. An error
 /// (`{code, msg}`) has no sides and yields `None`.
-fn parse_binance_depth(v: &Value, now: i64) -> Option<BookQuote> {
+pub(crate) fn parse_binance_depth(v: &Value, now: i64) -> Option<BookQuote> {
     BookQuote::from_levels(CostVenue::Binance, &book_side(v.get("bids")), &book_side(v.get("asks")), now)
 }
 
