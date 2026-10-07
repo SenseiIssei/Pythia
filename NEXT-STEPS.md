@@ -258,15 +258,15 @@ Still open around it:
 Simple mode ships and is the default. What is left (`docs/BREAKTHROUGH.md`
 Part II):
 
-- [ ] **First-run walkthrough**, four screens: this is practice money · here is
+- [x] **First-run walkthrough**, four screens: this is practice money · here is
       what it is doing · here is the stop button · here is how you would go live
       and why you should not yet
-- [ ] **One-sentence explanations on hover** for every number: "Worst dip — the
+- [x] **One-sentence explanations on hover** for every number: "Worst dip — the
       biggest fall from a high point. Smaller is calmer."
-- [ ] **Goal-shaped setup.** Ask "how much are you willing to lose in a bad
+- [x] **Goal-shaped setup.** Ask "how much are you willing to lose in a bad
       month?" and derive the risk limits, instead of asking for
       `maxDailyLossPct`
-- [ ] **Weekly plain-English report.** "This week Pythia made 14 trades, was
+- [x] **Weekly plain-English report.** "This week Pythia made 14 trades, was
       right on 8, finished up $212. Its predictions have now been checked 340
       times and are still not beating the market, so it is not betting on them."
 - [ ] **Recoverable mistakes** — plain-language confirmation on anything
