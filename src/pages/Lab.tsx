@@ -124,6 +124,28 @@ export function Lab() {
         </Card>
       )}
 
+      {s?.health && (
+        <Card
+          title="Is everything running?"
+          right={<Badge tone={s.health.ok ? "green" : "red"}>{s.health.ok ? "all good" : "needs a look"}</Badge>}
+        >
+          <div className="grid gap-x-6 gap-y-1 text-sm md:grid-cols-2">
+            {s.health.checks.map((c) => (
+              <div key={c.name} className="flex items-baseline gap-2">
+                <span className={c.ok ? "text-success" : "text-danger"}>{c.ok ? "●" : "▲"}</span>
+                <span className="text-cyber-text">{c.name}</span>
+                <span className="truncate text-xs text-cyber-text-faint" title={c.detail}>
+                  {c.detail}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-xs text-cyber-text-faint">
+            Checked {new Date(s.health.at).toLocaleString()} on the lab machine, every hour.
+          </div>
+        </Card>
+      )}
+
       {s && s.books.length > 0 && (
         <>
           <div className="flex items-center justify-between">

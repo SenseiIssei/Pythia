@@ -39,7 +39,7 @@ main() {
   trap 'rm -f "$remote_list" "$local_list" "$want"' RETURN
 
   ssh -o BatchMode=yes -o ConnectTimeout=15 "$host" \
-    "cd $remote && find . -type f ! -name '*.tmp' ! -path './_health/*' ! -path '*/date=$today/*' -printf '%P\t%s\n'" \
+    "cd $remote && find . -type f ! -name '*.tmp' ! -path './_health/status.json' ! -path '*/date=$today/*' -printf '%P\t%s\n'" \
     | sort > "$remote_list"
 
   (cd "$local_root" && find . -type f ! -name sync.log -printf '%P\t%s\n' 2>/dev/null | sort) > "$local_list"
