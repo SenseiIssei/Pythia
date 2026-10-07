@@ -28,7 +28,8 @@ PYTHIA_DATA=F:/PythiaData PYTHIA_REPORTS=F:/PythiaData/agent-models/reports PYTH
 
 `results/<name>.md` holds the latest report of each experiment run that way.
 `xs_daily` caches its panel and scores under `$PYTHIA_REPORTS/_cache`
-(`--refresh` rebuilds the panel, `--refit` the models); `regime` reads that
+(`--refresh` rebuilds the panel, `--refit` all models, `--refit-net` only the
+funding-aware round-three models); `regime` reads that
 panel for its breadth features, so run `xs_daily` first.
 
 ## The rules every experiment follows
@@ -52,7 +53,8 @@ panel for its breadth features, so run `xs_daily` first.
 | `tsmom` | Long-only time-series momentum, vol-scaled | Candidate. OOS Sharpe 0.72, drawdown 25 % vs 73 % for the basket. Deflated p 0.82. |
 | `momentum2` | Same with a 200-day BTC regime filter, plus rotation | Regime: OOS Sharpe 1.05, drawdown 19 %, deflated p 0.86 over 50 variants. Rotation weaker. |
 | `carry` | Spot long, perp short, collect funding | No. 1.4 % a year on capital from 2024, an upper bound. Perpetuals are not built. |
-| `xs_daily` (M4) | Daily cross-sectional ranking, 51 features, 584 coins incl. dead ones, entry one hour after the features | Signal yes, money not proven. Rank-IC 0.148 on 3-day returns (t 47), mostly "calm, beaten-down coins beat wild, hot ones". Long-only: dead (holdout Sharpe 0.04 at 15 bps, below BTC). Long/short on perps, picked on 2022-23: holdout Sharpe 1.19 at 15 bps, 0.33 at 41 bps, 117x turnover, deflated p 0.06 over 82 variants. All 38 slower model books are positive (median 1.42 / 0.83), the best 2.67 / 2.46 (buffer 50 %), but a plain low-vol factor in the same book makes 1.87 / 1.80. Fails gate 6. (2026-10-07) |
+| `xs_daily` (M4) | Daily cross-sectional ranking, 51 features, 584 coins incl. dead ones, entry one hour after the features | Signal yes, money not proven. Rank-IC 0.148 on 3-day returns (t 47), mostly "calm, beaten-down coins beat wild, hot ones". Long-only: dead (holdout Sharpe 0.04 at 15 bps, below BTC). Long/short on perps, picked on 2022-23: holdout Sharpe 1.19 at 15 bps, 0.33 at 41 bps, 117x turnover, deflated p 0.03 over 100 variants. All 38 slower model books are positive (median 1.42 / 0.83), the best 2.67 / 2.46 (buffer 50 %), but a plain low-vol factor in the same book makes 1.87 / 1.80. Fails gate 6. (2026-10-07) |
+| `xs_daily` round 3 (M4, funding-aware) | Does a label net of the funding each side pays fix the short leg? | Partly. 18 books on 3, 5 and 7-day net labels, all positive in the holdout (median 2.10 / 1.69), funding paid lower than the gross-label twin in 18 of 18, holdout Sharpe higher in 16 of 18. The family's selection-window pick (reg7n, buffer 50 %, 100 perps) makes 2.15 / 2.00 at 18x turnover against 1.87 / 1.80 for low vol in the same book, but deflated p 0.39 over 100 variants, and its 2022-23 Sharpe (1.13) loses to the gross rank3 hold-3d book (1.54). Fails gate 6. See `results/m4_funding.md`. (2026-10-07) |
 | `regime` (M5) | Probability of a 15 % BTC drawdown within 30 days, as the momentum book's switch | No. Every model has AUC under 0.5 out of sample (about 57 independent windows); Brier 0.162 at best vs 0.157 for the 200-day rule. As a switch it never beats the rule: momentum book 0.71 vs 1.04. The rule works by sitting out bear markets, not by forecasting drawdowns. (2026-10-07) |
 | `vol_daily` (M6) | Better daily vol forecast for sizing | Forecast partly: next day LGBM beats HAR by 9 % QLIKE (DM p 0.04), next week it loses by 6 %. Sizing: worse. The 30-day mean the books use gives the best Sharpe (momentum 1.04 vs 0.71 with LGBM, BTC 0.82 vs 0.64); faster forecasts add turnover and cut exposure right before rebounds. Keep RW30. (2026-10-07) |
 | `costs` | What does crossing the book really cost, per coin? | Spreads are far tighter than the guesses: BTC one tick on both venues, most coins under 2 bps a side. Fees are nearly all of it: a Kraken taker round trip is 80 bps, Binance 20. Weekly, report only (2026-10-07). |
@@ -122,3 +124,13 @@ within-family only) is in `families_summary.md`.
 Binance prices and touch-plus-fee fills. Journals:
 `/srv/pythia-data/paper/<book>/journal.csv`. 30 days and 30 rebalances are
 the minimum before anything moves toward real money.
+
+Lab-only paper books (no signal file for the engine). The sweep candidates and
+M4 failed deflation and run as forward evidence only, which their variant
+string says:
+
+| Book | Module | What | Runs (UTC) |
+|---|---|---|---|
+| `tsmom_top20`, `breakout_top10` | `lab.paper.families` | sweep candidates on the most liquid coins of each day | 04:15 |
+| `m4_ls` | `lab.paper.m4_ls` | M4 rank3, long the best 10 and short the worst 10 of the 100 most liquid USDT perps, three overlapping 3-day tranches; the selection window's pick among the slower long/short books. Live Binance USD-M touch plus 5 bps taker, settled funding booked every run, model retrained weekly on all labelled history. `--dry-run` writes nothing but the cache. | 04:45 |
+| `picks_ls`, `picks_ls_v2` | `lab.paper.picks_ls` | market-neutral M2 (v1 and v2) | 05:30 |
