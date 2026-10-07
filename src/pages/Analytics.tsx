@@ -161,6 +161,11 @@ function SlippageCard({ rows }: { rows: SlippageRow[] }) {
                 <Cell>
                   {r.fills}
                   {!r.enough && <span className="ml-1 text-[10px] text-cyber-text-faint">(&lt;30)</span>}
+                  {(r.liveFills ?? 0) > 0 && (
+                    <span className="ml-1 text-[10px] text-cyber-text-faint" title="Modelled on a live order book instead of the calibrated default">
+                      {r.liveFills} live book
+                    </span>
+                  )}
                 </Cell>
                 <Cell>{r.medianRealisedBps.toFixed(1)} bps</Cell>
                 <Cell className="text-cyber-text-dim">{r.medianModelledBps.toFixed(1)} bps</Cell>
@@ -172,7 +177,9 @@ function SlippageCard({ rows }: { rows: SlippageRow[] }) {
           </div>
           <div className="mt-2 text-xs text-cyber-text-faint">
             Positive bps cost money. A ratio above 1.5x means real fills cost more than the model assumed, and
-            every backtest using the model is too optimistic for that venue until it is recalibrated.
+            every backtest using the model is too optimistic for that venue until it is recalibrated. Crypto
+            fills are modelled on the live order book of the exchange when one less than a minute old exists,
+            and on the calibrated averages otherwise. The live book count says how many were the first kind.
           </div>
         </>
       )}

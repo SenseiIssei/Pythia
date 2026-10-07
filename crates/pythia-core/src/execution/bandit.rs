@@ -32,15 +32,18 @@
 //! ## What it cannot do yet
 //!
 //! The context is deliberately coarse — venue and urgency — because that is what
-//! the engine reliably knows. Spread and top-of-book depth are the features that
-//! would make this genuinely sharp, and they need quote data the market feed does
-//! not yet carry. Adding them later is a change to [`ExecContext`] and nothing
-//! else.
+//! the engine reliably knows. Spread and depth are the features that would make
+//! this genuinely sharp. The engine now has them for bar-backed crypto markets
+//! (`crate::orderbook`), and they already price the cross arm's expected cost,
+//! but they are not context yet: each extra dimension splits evidence the
+//! bandit does not have, and it has no live fills at all so far. Adding them is
+//! a change to [`ExecContext`] and nothing else.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::connectors::{Side, Venue};
+use crate::orderbook::CostSource;
 
 /// How aggressively to work one order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -200,6 +203,10 @@ pub struct FillRecord {
     /// The model's half-spread plus impact for this order, in bps.
     pub modelled_bps: f64,
     pub ts: i64,
+    /// Whether `modelled_bps` came from a live book or the calibrated default.
+    /// Records from before live books existed were all modelled on the default.
+    #[serde(default)]
+    pub source: CostSource,
 }
 
 /// Fills kept per venue. Old enough fills describe a market that has moved on.
@@ -250,6 +257,11 @@ pub struct SlippageRow {
     pub ratio: Option<f64>,
     /// At least [`MIN_FILLS_FOR_VERDICT`] fills behind the medians.
     pub enough: bool,
+    /// How many of `fills` were modelled on a fresh live book rather than the
+    /// calibrated default. Each fill is compared against the model it was
+    /// actually given, so the medians mix both; this says in what proportion.
+    #[serde(default)]
+    pub live_fills: usize,
 }
 
 fn default_patience() -> f64 {
@@ -340,9 +352,10 @@ impl ExecPolicy {
     }
 
     /// [`ExecPolicy::observe`], plus keep the fill for the realised-versus-
-    /// modelled comparison. `venue` is the cost venue key and `modelled_bps`
-    /// the cost model's expected slippage for this order. Orders that never
-    /// filled teach the bandit but are not slippage: there was no fill price.
+    /// modelled comparison. `venue` is the cost venue key, `modelled_bps` the
+    /// cost model's expected slippage for this order and `source` whether that
+    /// expectation came from a live book. Orders that never filled teach the
+    /// bandit but are not slippage: there was no fill price.
     #[allow(clippy::too_many_arguments)]
     pub fn observe_against_model(
         &mut self,
@@ -353,12 +366,13 @@ impl ExecPolicy {
         filled_price: Option<f64>,
         venue: &str,
         modelled_bps: f64,
+        source: CostSource,
         ts: i64,
     ) -> Option<f64> {
         self.observe(ctx, arm, side, arrival, filled_price);
         let realised = filled_price.and_then(|p| realised_cost_bps(side, arrival, p))?;
         let list = self.fills.entry(venue.to_string()).or_default();
-        list.push(FillRecord { realised_bps: realised, modelled_bps, ts });
+        list.push(FillRecord { realised_bps: realised, modelled_bps, ts, source });
         if list.len() > MAX_FILLS_PER_VENUE {
             let excess = list.len() - MAX_FILLS_PER_VENUE;
             list.drain(..excess);
@@ -384,6 +398,7 @@ impl ExecPolicy {
                     median_modelled_bps: mm,
                     ratio: (mm > 1e-9).then(|| mr / mm),
                     enough: f.len() >= MIN_FILLS_FOR_VERDICT,
+                    live_fills: f.iter().filter(|r| r.source == CostSource::Live).count(),
                 }
             })
             .collect();
@@ -595,14 +610,16 @@ mod tests {
         assert!(p.slippage_report().is_empty(), "no fills, no row");
         // Three Kraken buys at 5, 10 and 30 bps worse than arrival; the model
         // expected 4 each time.
+        // The middle one was modelled on a live book.
         for (i, px) in [100.05, 100.10, 100.30].into_iter().enumerate() {
-            let got = p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Buy, 100.0, Some(px), "kraken", 4.0, i as i64);
+            let src = if i == 1 { CostSource::Live } else { CostSource::Default };
+            let got = p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Buy, 100.0, Some(px), "kraken", 4.0, src, i as i64);
             assert!(got.is_some());
         }
         // A sell that received more than arrival is negative slippage.
-        p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Sell, 100.0, Some(100.02), "alpaca", 1.0, 9);
+        p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Sell, 100.0, Some(100.02), "alpaca", 1.0, CostSource::Default, 9);
         // A miss teaches the bandit but is not a slippage observation.
-        let miss = p.observe_against_model(&ctx(), ExecStyle::Passive, Side::Buy, 100.0, None, "kraken", 4.0, 10);
+        let miss = p.observe_against_model(&ctx(), ExecStyle::Passive, Side::Buy, 100.0, None, "kraken", 4.0, CostSource::Live, 10);
         assert!(miss.is_none());
 
         let r = p.slippage_report();
@@ -613,8 +630,10 @@ mod tests {
         assert!((k.median_modelled_bps - 4.0).abs() < 1e-12);
         assert!((k.ratio.unwrap() - 2.5).abs() < 1e-6);
         assert!(!k.enough, "three fills is not a verdict");
+        assert_eq!(k.live_fills, 1, "only the fill priced on a live book counts, not the miss");
         let a = r.iter().find(|x| x.venue == "alpaca").unwrap();
         assert!(a.median_realised_bps < 0.0);
+        assert_eq!(a.live_fills, 0);
         // The bandit itself still learned from all five.
         assert_eq!(p.stat(&ctx(), ExecStyle::Cross).fills, 4);
         assert_eq!(p.stat(&ctx(), ExecStyle::Passive).misses, 1);
@@ -624,15 +643,23 @@ mod tests {
     fn the_fill_record_survives_a_restart_and_stays_bounded() {
         let mut p = ExecPolicy::new(false);
         for i in 0..(MAX_FILLS_PER_VENUE + 50) {
-            p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Buy, 100.0, Some(100.01), "binance", 2.0, i as i64);
+            p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Buy, 100.0, Some(100.01), "binance", 2.0, CostSource::Live, i as i64);
         }
         let back: ExecPolicy = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         let row = back.slippage_for("binance").unwrap();
         assert_eq!(row.fills, MAX_FILLS_PER_VENUE);
+        assert_eq!(row.live_fills, MAX_FILLS_PER_VENUE, "the source survives a restart");
         assert!(row.enough);
         // An old save with no fill record still loads.
         let old: ExecPolicy = serde_json::from_str(r#"{"stats":{},"enabled":false}"#).unwrap();
         assert!(old.slippage_report().is_empty());
+        // Fill records from before live books load as modelled on the default.
+        let older: ExecPolicy = serde_json::from_str(
+            r#"{"stats":{},"enabled":false,"fills":{"kraken":[{"realisedBps":3.0,"modelledBps":2.0,"ts":1}]}}"#,
+        )
+        .unwrap();
+        let k = older.slippage_for("kraken").unwrap();
+        assert_eq!((k.fills, k.live_fills), (1, 0));
     }
 
     #[test]

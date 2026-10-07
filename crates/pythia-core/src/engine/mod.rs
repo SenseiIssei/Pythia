@@ -16,6 +16,7 @@ use crate::execution::bandit;
 use crate::forecast::{self, calibration, coherence, track};
 use crate::validation;
 use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
+use crate::orderbook::{BookQuote, BookSnapshot, CostSource, ExecCost};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -684,6 +685,8 @@ struct InFlight {
     /// slippage to be. Compared against the realised number when it finishes.
     cost_venue: CostVenue,
     modelled_bps: f64,
+    /// Whether `modelled_bps` used a live book; kept with the fill record.
+    cost_source: CostSource,
 }
 
 /// The full state pushed to the UI every tick.
@@ -929,6 +932,10 @@ pub struct Engine {
     /// Which exchange's costs apply to `Venue::Crypto`. The engine is
     /// exchange-agnostic; the host says which one executes.
     crypto_venue: CostVenue,
+    /// Latest top-20 book per bar-backed crypto market, from whichever
+    /// exchange the host polled. Used for a fill's spread and depth only while
+    /// fresh and from the exchange that executes (see [`crate::orderbook`]).
+    books: HashMap<String, BookQuote>,
     /// Validation gates 1 to 6 per strategy, computed on request by the host
     /// (they need candle history) and kept against the parameters they judged.
     research: HashMap<String, validation::ResearchVerdict>,
@@ -1011,6 +1018,7 @@ impl Engine {
             actionable: HashSet::new(),
             exec_policy: bandit::ExecPolicy::default(),
             crypto_venue: CostVenue::Kraken,
+            books: HashMap::new(),
             research: HashMap::new(),
             lab_signals: HashMap::new(),
             lab_done: HashMap::new(),
@@ -1136,6 +1144,36 @@ impl Engine {
     /// equity curve for a real one.
     pub fn is_bar_backed(&self, market_id: &str) -> bool {
         self.bar_backed.contains(market_id)
+    }
+
+    /// Keep the latest order book of each bar-backed crypto market. A book for
+    /// a market still on the simulator is dropped: its price is invented, and
+    /// a real spread around an invented price prices nothing.
+    pub fn apply_books(&mut self, books: &[BookSnapshot]) {
+        let mut kept = 0usize;
+        for b in books {
+            let crypto = self.markets.iter().any(|m| m.id == b.id && m.venue == Venue::Crypto);
+            if crypto && self.bar_backed.contains(&b.id) {
+                self.books.insert(b.id.clone(), b.quote);
+                kept += 1;
+            }
+        }
+        if kept > 0 && self.feeds_logged.insert("books") {
+            let venue = books.first().map(|b| b.quote.venue.id()).unwrap_or("?");
+            self.log(
+                JournalKind::System,
+                format!("Order book feed · {kept} {venue} books now price crypto spread and depth"),
+                None,
+                None,
+            );
+        }
+    }
+
+    /// The cost inputs for one order: the calibrated model, with the live
+    /// half-spread and the live depth of the side taken when a fresh book
+    /// from the executing exchange exists.
+    fn exec_cost(&self, m: &Market, side: Side) -> ExecCost {
+        ExecCost::for_order(self.cost_model(m), self.cost_venue(m), self.books.get(&m.id), side, self.now())
     }
 
     /// Record the broker's session/account snapshot. Live equity routing is
@@ -1901,9 +1939,10 @@ impl Engine {
     }
 
     /// Paper fill: cross the spread and pay the taker fee the cost model says
-    /// this venue charges, then settle.
+    /// this venue charges, then settle. Spread and depth come from a live book
+    /// when a fresh one exists.
     fn fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
-        let (fill_price, fee) = paper_fill(&self.cost_model(m), m.kind, side, qty, price);
+        let (fill_price, fee) = paper_fill(&self.exec_cost(m, side), m.kind, side, qty, price);
         self.settle_fill(strat_idx, m, side, qty, fill_price, fee, price, false, true);
     }
 
@@ -2182,9 +2221,10 @@ impl Engine {
         // What the cost model expects this order to lose against arrival. A
         // resting order is not expected to pay the spread at all.
         let cost_venue = self.cost_venue(m);
-        let modelled_bps = match style {
-            bandit::ExecStyle::Cross => self.cost_model(m).slippage_bps(qty * price, None),
-            bandit::ExecStyle::Join | bandit::ExecStyle::Passive => 0.0,
+        let cost = self.exec_cost(m, side);
+        let (modelled_bps, cost_source) = match style {
+            bandit::ExecStyle::Cross => (cost.slippage_bps(qty * price), cost.source),
+            bandit::ExecStyle::Join | bandit::ExecStyle::Passive => (0.0, CostSource::Default),
         };
 
         let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
@@ -2210,6 +2250,7 @@ impl Engine {
                 exec_ctx,
                 cost_venue,
                 modelled_bps,
+                cost_source,
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -2829,6 +2870,7 @@ impl Engine {
             realised,
             f.cost_venue.id(),
             f.modelled_bps,
+            f.cost_source,
             now,
         );
         if let (Some(bps), Some(ord)) = (realised_bps, self.orders.iter_mut().find(|x| x.id == order_id)) {
@@ -3767,10 +3809,13 @@ pub fn apply_fill(qty: f64, avg: f64, signed: f64, fill: f64) -> (f64, f64, f64)
 /// A simulated fill: the price after crossing the half-spread and paying
 /// impact, and the taker fee in quote currency. Both come from the cost model,
 /// so a paper fill on Kraken pays Kraken's costs and one on Binance pays
-/// Binance's. Prediction-market prices are probabilities and stay inside (0, 1).
-pub fn paper_fill(model: &CostModel, kind: MarketKind, side: Side, qty: f64, price: f64) -> (f64, f64) {
+/// Binance's. `cost` carries a live book's spread and depth when the engine
+/// has a fresh one. Prediction-market prices are probabilities and stay inside
+/// (0, 1).
+pub fn paper_fill(cost: &ExecCost, kind: MarketKind, side: Side, qty: f64, price: f64) -> (f64, f64) {
     let qty = qty.abs();
-    let slip = model.slippage_bps(qty * price, None) / 10_000.0;
+    let model = &cost.model;
+    let slip = cost.slippage_bps(qty * price) / 10_000.0;
     let mut px = match side {
         Side::Buy => price * (1.0 + slip),
         Side::Sell => price * (1.0 - slip),
@@ -4098,6 +4143,131 @@ mod tests {
         let fees = |e: &Engine| e.strategies.iter().find(|s| s.id == "manual").unwrap().ledger.fees;
         assert!(fees(&kraken) > 3.0 * fees(&binance), "40 bps vs 10 bps taker");
         assert_eq!(binance.state().crypto_cost_venue, CostVenue::Binance);
+    }
+
+    // ── live order books in the cost model ──
+
+    /// Real candles for one market, so it counts as bar-backed.
+    fn with_bars(e: &mut Engine, id: &str) {
+        let bars: Vec<Ohlc> = (0..5)
+            .map(|i| Ohlc { ts: i * 300_000, open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1.0 })
+            .collect();
+        e.apply_bars(&[BarSeries { id: id.into(), bars }]);
+    }
+
+    /// A 20-level book around `mid` with `half_bps` of half-spread and
+    /// `per_level` quote currency on every level of both sides.
+    fn book(e: &Engine, venue: CostVenue, mid: f64, half_bps: f64, per_level: f64, age_ms: i64) -> BookQuote {
+        let half = mid * half_bps / 10_000.0;
+        let bids: Vec<_> = (0..20).map(|i| (mid - half - i as f64 * 0.01, per_level / (mid - half))).collect();
+        let asks: Vec<_> = (0..20).map(|i| (mid + half + i as f64 * 0.01, per_level / (mid + half))).collect();
+        BookQuote::from_levels(venue, &bids, &asks, e.now() - age_ms).unwrap()
+    }
+
+    /// What a 5k paper buy of BTC pays against the quote, in bps, given
+    /// whatever book the engine holds.
+    fn btc_buy_fill(e: &mut Engine) -> f64 {
+        let px = e.price_of("crypto:BTC/USD");
+        e.live_order_for_test("crypto:BTC/USD", Side::Buy, 5_000.0);
+        let avg = e.positions.get("crypto:BTC/USD").expect("a paper buy fills").avg_price;
+        e.flatten("crypto:BTC/USD");
+        (avg / px - 1.0) * 10_000.0
+    }
+
+    #[test]
+    fn a_thin_live_book_makes_a_paper_fill_dearer_and_a_deep_one_cheaper() {
+        let mut calibrated = Engine::new();
+        with_bars(&mut calibrated, "crypto:BTC/USD");
+        let base = btc_buy_fill(&mut calibrated);
+
+        let mut thin = Engine::new();
+        with_bars(&mut thin, "crypto:BTC/USD");
+        // 20 levels of 500 USD and a 5 bp half-spread: a weekend night.
+        let q = book(&thin, CostVenue::Kraken, 67_000.0, 5.0, 500.0, 0);
+        thin.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
+        let thin_bps = btc_buy_fill(&mut thin);
+
+        let mut deep = Engine::new();
+        with_bars(&mut deep, "crypto:BTC/USD");
+        // 20 levels of 1M each, a one-tick spread: far deeper than the median.
+        let q = book(&deep, CostVenue::Kraken, 67_000.0, 0.001, 1_000_000.0, 0);
+        deep.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
+        let deep_bps = btc_buy_fill(&mut deep);
+
+        assert!(thin_bps > base, "thin book {thin_bps} bps vs calibrated {base}");
+        assert!(deep_bps < base, "deep book {deep_bps} bps vs calibrated {base}");
+        // The thin fill is the live half-spread plus impact of 5k against the
+        // 10k on the asks.
+        let m = thin.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
+        let want = thin.cost_model(&m).impact_bps(5_000.0, Some(10_000.0)) + 5.0;
+        assert!((thin_bps - want).abs() < 0.05, "{thin_bps} vs {want}");
+    }
+
+    #[test]
+    fn a_stale_or_foreign_book_falls_back_to_the_calibrated_default() {
+        let mut calibrated = Engine::new();
+        with_bars(&mut calibrated, "crypto:BTC/USD");
+        let base = btc_buy_fill(&mut calibrated);
+
+        let mut stale = Engine::new();
+        with_bars(&mut stale, "crypto:BTC/USD");
+        let q = book(&stale, CostVenue::Kraken, 67_000.0, 5.0, 500.0, crate::orderbook::MAX_BOOK_AGE_MS + 5_000);
+        stale.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
+        assert!((btc_buy_fill(&mut stale) - base).abs() < 1e-6, "a book older than a minute is not used");
+
+        // A Kraken book while Binance executes says nothing about Binance.
+        let mut binance_base = Engine::new();
+        binance_base.set_crypto_cost_venue(Some(CostVenue::Binance));
+        with_bars(&mut binance_base, "crypto:BTC/USD");
+        let b_base = btc_buy_fill(&mut binance_base);
+        let mut foreign = Engine::new();
+        foreign.set_crypto_cost_venue(Some(CostVenue::Binance));
+        with_bars(&mut foreign, "crypto:BTC/USD");
+        let q = book(&foreign, CostVenue::Kraken, 67_000.0, 5.0, 500.0, 0);
+        foreign.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
+        assert!((btc_buy_fill(&mut foreign) - b_base).abs() < 1e-6);
+    }
+
+    #[test]
+    fn books_are_kept_only_for_bar_backed_crypto_markets() {
+        let mut e = Engine::new();
+        with_bars(&mut e, "crypto:BTC/USD");
+        let q = book(&e, CostVenue::Kraken, 100.0, 1.0, 1_000.0, 0);
+        e.apply_books(&[
+            BookSnapshot { id: "crypto:BTC/USD".into(), quote: q },
+            // Still on the simulator: no real price for the book to sit around.
+            BookSnapshot { id: "crypto:ETH/USD".into(), quote: q },
+            // Not a crypto market, and not one at all.
+            BookSnapshot { id: "alpaca:AAPL".into(), quote: q },
+            BookSnapshot { id: "crypto:NOPE/USD".into(), quote: q },
+        ]);
+        assert_eq!(e.books.len(), 1);
+        assert!(e.books.contains_key("crypto:BTC/USD"));
+        assert!(e.journal.iter().any(|j| j.message.contains("Order book feed")));
+    }
+
+    #[test]
+    fn a_live_crypto_fill_records_that_its_model_came_from_the_live_book() {
+        let mut e = Engine::new();
+        e.set_live(LiveConfig { venues: vec![Venue::Crypto], ..armed_alpaca() });
+        with_bars(&mut e, "crypto:BTC/USD");
+        let q = book(&e, CostVenue::Kraken, 67_000.0, 3.0, 2_000.0, 0);
+        e.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
+
+        e.live_order_for_test("crypto:BTC/USD", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().pop().expect("an order went out");
+        let m = e.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
+        let want = ExecCost::for_order(e.cost_model(&m), CostVenue::Kraken, Some(&q), Side::Buy, e.now())
+            .slippage_bps(o.qty * o.ref_price);
+        e.apply_live_ack(&o.order_id, "k1");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, o.ref_price * 1.0005));
+
+        let row = e.slippage_report().into_iter().find(|r| r.venue == "kraken").expect("a kraken row");
+        assert_eq!((row.fills, row.live_fills), (1, 1));
+        assert!((row.median_modelled_bps - want).abs() < 1e-9, "{} vs {want}", row.median_modelled_bps);
+        assert!(want > 3.0, "the live 3 bp half-spread, not the calibrated 0.01");
+        let v = serde_json::to_value(e.state()).unwrap();
+        assert_eq!(v["slippage"][0]["liveFills"], 1, "the UI sees how many fills used a live book");
     }
 
     #[test]

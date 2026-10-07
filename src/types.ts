@@ -126,6 +126,8 @@ export interface SlippageRow {
   ratio?: number;
   /** At least 30 fills behind the medians. */
   enough: boolean;
+  /** How many fills were modelled on a fresh live order book rather than the calibrated default. */
+  liveFills?: number;
 }
 
 // ── research (real candles, Rust) ───────────────────────────────────────────
