@@ -51,7 +51,9 @@ impl Gbdt {
 
     pub fn from_value(v: &Value) -> Result<Self, MlError> {
         let objective = v.get("objective").and_then(Value::as_str).unwrap_or("");
-        if !objective.starts_with("regression") {
+        // Regression and ranking both answer with the raw sum of leaves; a
+        // ranker's score has no unit, only its order within a group means anything.
+        if !(objective.starts_with("regression") || objective.starts_with("lambdarank") || objective.starts_with("rank_xendcg")) {
             return Err(MlError::Format(format!("unsupported objective {objective:?}")));
         }
         if v.get("num_tree_per_iteration").and_then(Value::as_u64) != Some(1) {
@@ -216,6 +218,13 @@ mod tests {
     fn zero_missing_type() {
         assert_eq!(stump("Zero", false).predict(&[0.0]), 2.0);
         assert_eq!(stump("Zero", false).predict(&[1.0]), -1.0);
+    }
+
+    #[test]
+    fn accepts_a_ranker() {
+        let j = r#"{"objective":"lambdarank","num_tree_per_iteration":1,"max_feature_idx":0,
+            "tree_info":[{"tree_structure":{"leaf_value":0.25}}]}"#;
+        assert_eq!(Gbdt::from_json(j).unwrap().predict(&[1.0]), 0.25);
     }
 
     #[test]

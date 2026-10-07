@@ -580,6 +580,13 @@ pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::M
     ml.read().map(|s| s.clone()).unwrap_or_default()
 }
 
+/// M2 ranks the latest complete day now instead of waiting for the week.
+/// Shadow mode: it records the ranking, it never trades.
+#[tauri::command]
+pub fn ml_picks_run() {
+    pythia_core::ml_picks::request_run();
+}
+
 /// The unified balance sheet across broker, exchange and watched addresses.
 /// Read-only: this command cannot move anything.
 #[tauri::command]

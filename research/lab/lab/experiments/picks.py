@@ -139,6 +139,13 @@ def perp_features() -> pl.DataFrame:
 
 
 def build(with_perp: bool = False) -> pl.DataFrame:
+    p = build_raw(with_perp)
+    return rank_cross_section(p, FEATURES + PERP_FEATURES if with_perp else FEATURES)
+
+
+def build_raw(with_perp: bool = False) -> pl.DataFrame:
+    """Every eligible coin-day with its raw (unranked) features. The engine
+    rebuilds these from live bars (crates/pythia-ml/src/picks.rs)."""
     syms = json.loads((ROOT / "hist" / "universe.json").read_text())
     btc = daily_bars("BTCUSDT")
     frames = []
@@ -156,7 +163,6 @@ def build(with_perp: bool = False) -> pl.DataFrame:
     p = pl.concat(frames, how="vertical_relaxed")
     p = p.filter((pl.col("age") >= MIN_HISTORY_D) & (pl.col("adv28") >= np.log(MIN_ADV_USD + 1)))
     p = p.drop_nulls(FEATURES)
-    feats = list(FEATURES)
     if with_perp:
         # A perp's price and volume multiplier (1000PEPE) cancels in basis only
         # once divided out; the ratio of log closes is taken after rescaling to spot.
@@ -167,7 +173,10 @@ def build(with_perp: bool = False) -> pl.DataFrame:
              .with_columns(basis=(pl.col("perp_close") / (pl.col("close") * 10 ** pl.col("mult"))).log(),
                            perp_share=((pl.col("perp_qv") + 1) / (pl.col("qv") + 1)).log())
              .drop("perp_close", "perp_qv", "mult", "base"))
-        feats += PERP_FEATURES
+    return p
+
+
+def rank_cross_section(p: pl.DataFrame, feats: list[str]) -> pl.DataFrame:
     # Cross-sectional ranks per day: the model sees "where does this coin stand
     # today", which is comparable across years in a way raw returns are not.
     # A missing perp feature stays missing (rank of null is null).
@@ -212,8 +221,9 @@ def main() -> None:
     report_name = "picks_v2" if v2 else "picks"
     (ROOT / "reports" / report_name).mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    P = build(with_perp=v2)
     feats = FEATURES + PERP_FEATURES if v2 else FEATURES
+    raw = build_raw(with_perp=v2)
+    P = rank_cross_section(raw, feats)
     days = P["day"].to_numpy()
     X = P.select(feats).to_numpy().astype(np.float32)
     y = P["label"].to_numpy()
@@ -316,6 +326,13 @@ def main() -> None:
           + "\n## Rank-IC per quarter\n\n" + report.table(folds, ["fold", "days", "rank_ic"]))
     report.write(report_name, md, {"rows": rows, "folds": folds, "rank_ic": ic_mean, "rank_ic_t": ic_t,
                                "rank_ic_liquid50": ic_liquid, "deciles": dec_rows, "verdict": verdict})
+    # --export: the final model on all labelled history, as LightGBM JSON plus a
+    # model card, for the engine's shadow scoring (lab/export/picks.py).
+    if "--export" in sys.argv:
+        from ..export.picks import export_model
+        out = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else None
+        export_model(raw, P, feats, {"rank_ic": ic_mean, "rank_ic_t": ic_t, "rank_ic_liquid50": ic_liquid,
+                                     "folds": folds, "deciles": dec_rows, "verdict": verdict}, out)
 
 
 if __name__ == "__main__":
