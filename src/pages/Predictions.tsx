@@ -9,7 +9,22 @@ import {
   ChevronRight,
   Gauge,
 } from "lucide-react";
-import { Card, PageHeader, Badge, Button, Meter } from "../components/ui";
+import {
+  Card,
+  PageHeader,
+  Badge,
+  Button,
+  EmptyState,
+  Explain,
+  Field,
+  Meter,
+  Notice,
+  Readout,
+  Term,
+  inputCls,
+} from "../components/ui";
+import { explain } from "../glossary";
+import { liveMode } from "../live";
 import { useStore } from "../store";
 import { runEnsemble, canRunEnsemble } from "../predict";
 import { useAdvanced } from "../uiMode";
@@ -37,7 +52,7 @@ export function Predictions() {
         [marketId]:
           r.answered > 0
             ? `${r.answered}/${r.asked} models answered${r.errors.length ? ` · ${r.errors.join("; ")}` : ""}`
-            : `no model answered — ${r.errors.join("; ") || "check your keys"}`,
+            : `no model answered: ${r.errors.join("; ") || "check your keys"}`,
       }));
     } catch (e) {
       setMsg((m) => ({ ...m, [marketId]: e instanceof Error ? e.message : String(e) }));
@@ -45,58 +60,112 @@ export function Predictions() {
     setBusy(null);
   }
 
+  const header = (
+    <PageHeader
+      title="Predictions"
+      subtitle={
+        advanced
+          ? "Ensemble forecasts scored against the market: Polymarket events and price direction."
+          : "What Pythia thinks will happen, next to what everyone else thinks, and whether it has earned the right to act on it."
+      }
+    />
+  );
+
+  const contextCard = canRunEnsemble() ? (
+    <Card title={advanced ? "Context for the models" : "Something the AI models should know"} icon={Sparkles}>
+      <Field
+        label="Notes (optional)"
+        hint="Passed word for word to every model, so any disagreement between them measures the question rather than the wording."
+      >
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          placeholder="e.g. CPI print came in at 2.9% this morning; the committee meets on the 18th"
+          className={inputCls}
+        />
+      </Field>
+    </Card>
+  ) : null;
+
+  // The forecasting layer lives in the Rust core. The browser demo has none, so
+  // say that instead of showing an empty page.
+  if (liveMode() === "none" && forecasts.length === 0) {
+    return (
+      <div className="animate-fade-in mx-auto max-w-4xl">
+        {header}
+        <Card>
+          <EmptyState icon={Target} title="Predictions need the desktop app or a connected server">
+            Forecasts are made, written down and scored by the engine in the desktop app or on a backend server. This
+            browser version only practises trading with fake money, so there is nothing to show here yet.
+          </EmptyState>
+        </Card>
+      </div>
+    );
+  }
+
   return (
-    <div className="animate-fade-in">
-      <PageHeader
-        title="Predictions"
-        subtitle="Ensemble forecasts, scored against the market — Polymarket & directional"
-      />
+    <div className="animate-fade-in mx-auto max-w-4xl space-y-4">
+      {header}
 
       {/* The single most important thing to understand about this page. */}
-      <Card className={`mb-4 ${untrusted ? "border-warning/30 bg-warning/5" : "border-accent/20 bg-accent/5"}`}>
-        <div className="flex items-start gap-3">
-          {untrusted ? (
-            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-warning" />
-          ) : (
-            <ShieldCheck size={18} className="mt-0.5 shrink-0 text-accent" />
-          )}
-          <div className="text-sm text-cyber-text-dim">
-            <div className={`font-bold ${untrusted ? "text-warning" : "text-accent"}`}>
-              {untrusted
-                ? "No source has earned any weight yet"
-                : `${forecastStats.trustedSources} source(s) have beaten the market and carry weight`}
-            </div>
-            The market price is the default answer, and every source has to <b>earn</b> a deviation from
-            it by beating it on a scored track record. Until one does, the ensemble sits on the market
-            price, the edge is ~0, and nothing trades — which is the honest state, not a broken one.
-            <div className="mt-1 text-[11px] text-cyber-text-faint">
-              {forecastStats.recorded.toLocaleString()} forecasts recorded ·{" "}
-              {forecastStats.resolved.toLocaleString()} scored · {forecastStats.pending.toLocaleString()}{" "}
-              awaiting resolution
-            </div>
-          </div>
+      <Notice
+        tone={untrusted ? "warning" : "success"}
+        icon={untrusted ? TriangleAlert : ShieldCheck}
+        title={
+          untrusted
+            ? advanced
+              ? "No source has earned any weight yet"
+              : "It is still learning, so it does not bet on its own opinions"
+            : `${forecastStats.trustedSources} source${forecastStats.trustedSources === 1 ? " has" : "s have"} beaten the market and carr${forecastStats.trustedSources === 1 ? "ies" : "y"} weight`
+        }
+      >
+        {advanced ? (
+          <>
+            The market price is the default answer, and every source has to <b>earn</b> a deviation from it by beating
+            it on a scored track record. Until one does, the ensemble sits on the market price, the edge is about zero,
+            and nothing trades. That is the honest state, not a broken one.
+          </>
+        ) : untrusted ? (
+          <>
+            The price a market trades at is everyone's combined guess. Pythia only moves away from it once one of its
+            sources has beaten that guess on a checked record. Until then it mostly agrees with the market and makes no
+            bets, on purpose.
+          </>
+        ) : (
+          <>
+            The price a market trades at is everyone's combined guess. Some of Pythia's sources have beaten that guess
+            on a checked record, so where they disagree it may lean away from the market, but only as far as they have
+            earned.
+          </>
+        )}
+        <div className="mt-1.5 font-mono text-[11px] text-cyber-text-faint">
+          {forecastStats.recorded.toLocaleString()} forecasts written down · {forecastStats.resolved.toLocaleString()}{" "}
+          checked · {forecastStats.pending.toLocaleString()} waiting for the outcome
         </div>
-      </Card>
+      </Notice>
 
       {/* Coherence is an arbitrage table. Real, but meaningless without knowing
           what a leg and a basis point are. */}
       {advanced && coherence.length > 0 && (
-        <Card title="Coherence breaks" className="mb-4" right={<Scale size={14} className="text-purple-neon" />}>
-          <div className="mb-2 text-sm text-cyber-text-dim">
-            A market's own outcomes must price to 1. When they do not, the gap is arithmetic, not a
-            forecast — no opinion about the world is involved.
-          </div>
-          <div className="space-y-1">
+        <Card
+          title="Coherence breaks"
+          icon={Scale}
+          subtitle="A market's own outcomes must price to 1. When they do not, the gap is arithmetic, not a forecast: no opinion about the world is involved."
+        >
+          <div className="space-y-1.5">
             {coherence.map((b) => (
               <div
                 key={b.eventId}
-                className="flex items-center justify-between gap-3 rounded border border-cyber-border bg-cyber-surface/40 px-3 py-1.5 text-sm"
+                className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2 text-sm"
               >
-                <span className="min-w-0 flex-1 truncate">{b.title}</span>
-                <span className="font-mono text-xs text-cyber-text-dim">Σ {b.sum.toFixed(4)}</span>
+                <span className="min-w-0 flex-1 basis-48 truncate">{b.title}</span>
+                <span className="font-mono text-xs text-cyber-text-dim" title="Sum of the outcome prices">
+                  Σ {b.sum.toFixed(4)}
+                </span>
                 <span className={`font-mono text-xs ${b.netBps > 0 ? "text-success" : "text-cyber-text-faint"}`}>
                   {b.netBps > 0 ? "+" : ""}
-                  {b.netBps.toFixed(0)}bps net
+                  {b.netBps.toFixed(0)} <Term k="bps">bps</Term> net
                 </span>
                 <Badge tone={b.actionable ? "green" : "neutral"}>
                   {b.actionable ? "actionable" : b.kind === "overpriced" ? "needs shorting" : "below costs"}
@@ -107,19 +176,14 @@ export function Predictions() {
         </Card>
       )}
 
-      {canRunEnsemble() && (
-        <Card className="mb-4" title="Context for the models" right={<Sparkles size={14} className="text-purple-neon" />}>
-          <div className="mb-2 text-sm text-cyber-text-dim">
-            Optional. Passed verbatim and identically to every model, so any disagreement between them
-            measures the question rather than the prompt.
-          </div>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            rows={2}
-            placeholder="e.g. CPI print came in at 2.9% this morning; the committee meets on the 18th"
-            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
-          />
+      {advanced && contextCard}
+
+      {events.length === 0 && prices.length === 0 && (
+        <Card>
+          <EmptyState icon={Target} title="No forecasts yet">
+            Prediction markets usually arrive within a few seconds of starting. If this stays empty, check that the
+            engine is running on the Home page.
+          </EmptyState>
         </Card>
       )}
 
@@ -127,8 +191,8 @@ export function Predictions() {
         title={advanced ? "Event markets" : "Will this happen?"}
         subtitle={
           advanced
-            ? "P(YES) — the question a model can actually reason about"
-            : "How likely each thing is, according to everyone else and according to Pythia"
+            ? "P(YES): the question a model can actually reason about."
+            : "How likely each thing is, according to everyone else (left) and according to Pythia (right). Tap a row for the reasons."
         }
         forecasts={events}
         open={open}
@@ -142,7 +206,7 @@ export function Predictions() {
         title={advanced ? "Directional markets" : "Will this go up?"}
         subtitle={
           advanced
-            ? "P(price higher over the forecast horizon) — resolves on a timer, which is where the calibration data comes from"
+            ? "P(price higher over the forecast horizon). Resolves on a timer, which is where the calibration data comes from."
             : "Chance the price is higher a while from now. 50% means it has no idea, which is usually the honest answer."
         }
         forecasts={prices}
@@ -157,6 +221,9 @@ export function Predictions() {
       {/* The scoreboard is the most important thing on this page and the least
           readable without the vocabulary. Advanced only. */}
       {advanced && tracks.length > 0 && <Scoreboard tracks={tracks} />}
+
+      {/* A beginner reads the forecasts first; the optional notes come after. */}
+      {!advanced && contextCard}
     </div>
   );
 }
@@ -183,34 +250,39 @@ function Section({
   advanced: boolean;
 }) {
   if (forecasts.length === 0) return null;
-  // Biggest net edge first — that is the only ordering that matters here.
+  // Biggest net edge first: that is the only ordering that matters here.
   const sorted = [...forecasts].sort((a, b) => b.netEdgeBps - a.netEdgeBps);
 
   return (
-    <Card title={title} className="mb-4" right={<Target size={14} className="text-accent" />}>
-      <div className="mb-3 text-[11px] text-cyber-text-faint">{subtitle}</div>
-      <div className="space-y-1">
+    <Card title={title} icon={Target} subtitle={subtitle}>
+      <div className="space-y-1.5">
         {sorted.map((f) => (
-          <div key={f.marketId} className="rounded border border-cyber-border bg-cyber-surface/40">
+          <div key={f.marketId} className="rounded-lg border border-cyber-border bg-cyber-bg/40">
             <button
+              type="button"
               onClick={() => setOpen(open === f.marketId ? null : f.marketId)}
-              className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover:bg-cyber-surface/70"
+              aria-expanded={open === f.marketId}
+              aria-label={`${f.symbol}: the market says ${pct(f.marketP)}, Pythia says ${pct(f.ensembleP)}, ${
+                f.action === "hold" ? "not acting" : `would ${f.action}`
+              }. Show details.`}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm hover:bg-cyber-surface-2/60 sm:gap-3"
             >
               <ChevronRight
-                size={13}
+                size={14}
+                aria-hidden
                 className={`shrink-0 text-cyber-text-faint transition-transform ${open === f.marketId ? "rotate-90" : ""}`}
               />
               <span className="min-w-0 flex-1 truncate">{f.symbol}</span>
-              <span className="hidden font-mono text-xs text-cyber-text-faint sm:inline">
-                {advanced ? "mkt " : "others "}
+              <span className="shrink-0 font-mono text-xs text-cyber-text-faint">
+                <span className="hidden sm:inline">{advanced ? "mkt " : "others "}</span>
                 {pct(f.marketP)}
               </span>
-              <span className="font-mono text-xs">
-                → <span className="font-bold">{pct(f.ensembleP)}</span>
+              <span className="shrink-0 font-mono text-xs" aria-hidden>
+                → <span className="font-bold text-accent">{pct(f.ensembleP)}</span>
               </span>
               {advanced && (
                 <span
-                  className={`w-20 text-right font-mono text-xs ${
+                  className={`hidden w-20 shrink-0 text-right font-mono text-xs sm:inline ${
                     f.netEdgeBps > 0 ? "text-success" : "text-cyber-text-faint"
                   }`}
                 >
@@ -218,9 +290,12 @@ function Section({
                   {f.netEdgeBps.toFixed(0)}bps
                 </span>
               )}
-              <Badge tone={f.action === "buy" ? "green" : f.action === "sell" ? "red" : "neutral"}>
-                {advanced ? f.action : f.action === "hold" ? "not acting" : `would ${f.action}`}
-              </Badge>
+              {/* On a phone only a buy or sell earns the room; "not acting" is the default. */}
+              <span className={f.action === "hold" ? "hidden shrink-0 sm:inline" : "shrink-0"}>
+                <Badge tone={f.action === "buy" ? "green" : f.action === "sell" ? "red" : "neutral"}>
+                  {advanced ? f.action : f.action === "hold" ? "not acting" : `would ${f.action}`}
+                </Badge>
+              </span>
             </button>
 
             {open === f.marketId &&
@@ -250,10 +325,10 @@ function Detail({
   return (
     <div className="border-t border-cyber-border px-3 py-3">
       <div className="mb-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-        <Stat label="Market" value={pct(f.marketP)} />
-        <Stat label="Pooled sources" value={pct(f.modelP)} />
-        <Stat label="Ensemble" value={pct(f.ensembleP)} strong />
-        <Stat label="Kelly stake" value={`${(f.kelly * 100).toFixed(2)}%`} />
+        <Readout label="Market" value={pct(f.marketP)} />
+        <Readout label="Pooled sources" value={pct(f.modelP)} />
+        <Readout label="Ensemble" value={pct(f.ensembleP)} tone="cyan" />
+        <Readout label="Kelly stake" value={`${(f.kelly * 100).toFixed(2)}%`} />
       </div>
 
       <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -266,16 +341,16 @@ function Detail({
         <Gauge2
           label="Effective sources"
           value={Math.min(f.effectiveSources / 5, 1)}
-          hint={`${f.effectiveSources.toFixed(1)} of ${f.sources.length} — agreement is not independence`}
+          hint={`${f.effectiveSources.toFixed(1)} of ${f.sources.length}: agreement is not independence`}
         />
       </div>
 
-      <div className="mb-3 rounded border border-cyber-border/60 bg-cyber-bg/40 px-3 py-2 text-xs text-cyber-text-dim">
-        <span className="font-bold uppercase tracking-widest text-cyber-text-faint">Verdict</span>{" "}
+      <div className="mb-3 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2 text-xs text-cyber-text-dim">
+        <span className="font-mono font-bold uppercase tracking-widest text-cyber-text-faint">Verdict</span>{" "}
         {f.reason}
-        <div className="mt-1 text-[11px] text-cyber-text-faint">
+        <div className="mt-1 font-mono text-[11px] text-cyber-text-faint">
           gross edge {f.edgeBps.toFixed(0)}bps − {f.costBps.toFixed(0)}bps round-trip cost ={" "}
-          {f.netEdgeBps.toFixed(0)}bps net
+          {f.netEdgeBps.toFixed(0)}bps net <Explain text={explain("bps")!} label="bps" />
         </div>
       </div>
 
@@ -335,7 +410,7 @@ function SimpleDetail({
           : `It thinks that is ${Math.abs(diff)} point${Math.abs(diff) === 1 ? "" : "s"} too ${diff > 0 ? "low" : "high"}.`}
       </p>
 
-      <div className="rounded border border-cyber-border/60 bg-cyber-bg/40 px-3 py-2 text-cyber-text-dim">
+      <div className="rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2 text-cyber-text-dim">
         <b className="text-cyber-text">
           {f.action === "hold" ? "It is not acting on this." : `It would ${f.action}.`}
         </b>{" "}
@@ -344,14 +419,14 @@ function SimpleDetail({
 
       {f.sources.length > 0 && (
         <div className="text-cyber-text-dim">
-          <div className="mb-1 text-[11px] uppercase tracking-widest text-cyber-text-faint">
+          <div className="mb-1 font-mono text-[11px] uppercase tracking-widest text-cyber-text-faint">
             Who contributed
           </div>
           <ul className="space-y-0.5">
             {f.sources.map((s) => (
               <li key={s.source} className="text-[13px]">
                 <span className="text-cyber-text">{friendlySource(s.source)}</span> said{" "}
-                {Math.round(s.p * 100)}% —{" "}
+                <span className="font-mono">{Math.round(s.p * 100)}%</span>,{" "}
                 {s.trust > 0 ? (
                   <span className="text-success">has a proven record ({s.n} checked)</span>
                 ) : (
@@ -426,8 +501,8 @@ function SourceRow({ s }: { s: SourceView }) {
   // providing. Only worth showing when it actually bit.
   const redundancy = s.rawWeight > 0 ? 1 - s.weight / s.rawWeight : 0;
   return (
-    <div className="rounded border border-cyber-border/60 bg-cyber-bg/30 px-3 py-1.5">
-      <div className="flex items-center gap-2 text-sm">
+    <div className="rounded-lg border border-cyber-border bg-cyber-bg/30 px-3 py-1.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
         <Layers size={11} className="shrink-0 text-cyber-text-faint" />
         <span className="font-mono text-xs">{s.source}</span>
         <span className="font-mono text-xs text-cyber-text-dim">{pct(s.p)}</span>
@@ -468,25 +543,30 @@ function SourceRow({ s }: { s: SourceView }) {
 function Scoreboard({ tracks }: { tracks: Track[] }) {
   const sorted = [...tracks].sort((a, b) => b.brierSkill - a.brierSkill);
   return (
-    <Card title="Source scoreboard" right={<Gauge size={14} className="text-accent" />}>
-      <div className="mb-3 text-sm text-cyber-text-dim">
-        Brier score against reality, compared with the market's score on <b>the same questions</b>.
-        Positive skill is the only thing that earns weight — a confident rationale earns nothing.
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+    <Card
+      title="Source scoreboard"
+      icon={Gauge}
+      subtitle={
+        <>
+          Brier score against reality, compared with the market's score on <b>the same questions</b>. Positive skill is
+          the only thing that earns weight: a confident rationale earns nothing.
+        </>
+      }
+    >
+      <div className="-mx-1 overflow-x-auto px-1">
+        <table className="w-full min-w-[640px] text-sm">
           <thead>
-            <tr className="text-[10px] uppercase tracking-widest text-cyber-text-faint">
+            <tr className="font-mono text-[10px] uppercase tracking-widest text-cyber-text-faint">
               <th className="py-1 text-left font-normal">Source</th>
               <th className="py-1 text-left font-normal">Question</th>
               <th className="py-1 text-left font-normal">Class</th>
-              <th className="py-1 text-right font-normal">n</th>
-              <th className="py-1 text-right font-normal">Brier</th>
+              <th className="py-1 text-right font-normal"><Term k="n">n</Term></th>
+              <th className="py-1 text-right font-normal"><Term>Brier</Term></th>
               <th className="py-1 text-right font-normal">Market</th>
-              <th className="py-1 text-right font-normal">Skill</th>
-              <th className="py-1 text-right font-normal">Pooled</th>
-              <th className="py-1 text-right font-normal">Bias</th>
-              <th className="py-1 text-right font-normal">Trust</th>
+              <th className="py-1 text-right font-normal"><Term>Skill</Term></th>
+              <th className="py-1 text-right font-normal"><Term>Pooled</Term></th>
+              <th className="py-1 text-right font-normal"><Term>Bias</Term></th>
+              <th className="py-1 text-right font-normal"><Term>Trust</Term></th>
             </tr>
           </thead>
           <tbody>
@@ -513,14 +593,14 @@ function Scoreboard({ tracks }: { tracks: Track[] }) {
                     className="py-1 text-right font-mono text-xs text-cyber-text-dim"
                     title="After partial pooling toward this source's overall record and the pool's"
                   >
-                    {t.skill ? `${(t.skill.pooled * 100).toFixed(1)}%` : "—"}
+                    {t.skill ? `${(t.skill.pooled * 100).toFixed(1)}%` : "-"}
                   </td>
                   <td className="py-1 text-right font-mono text-xs text-cyber-text-dim">
                     {bias > 0 ? "+" : ""}
                     {(bias * 100).toFixed(1)}pp
                   </td>
                   <td className="py-1 text-right font-mono text-xs">
-                    {t.trust > 0 ? t.trust.toFixed(2) : "—"}
+                    {t.trust > 0 ? t.trust.toFixed(2) : "-"}
                   </td>
                 </tr>
               );
@@ -529,7 +609,7 @@ function Scoreboard({ tracks }: { tracks: Track[] }) {
         </table>
       </div>
       <div className="mt-2 text-[11px] leading-snug text-cyber-text-faint">
-        <b>Brier</b>: mean squared error against the 0/1 outcome — 0.25 is what always saying 50% scores.{" "}
+        <b>Brier</b>: mean squared error against the 0/1 outcome; 0.25 is what always saying 50% scores.{" "}
         <b>Skill</b>: how much better than the market on the same questions. <b>Pooled</b>: that skill
         after partial pooling toward the source's overall record and the pool's, so a thin record on one
         market class is carried by a deep one elsewhere. <b>Bias</b>: systematic over- or
@@ -539,24 +619,15 @@ function Scoreboard({ tracks }: { tracks: Track[] }) {
   );
 }
 
-function Stat({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-widest text-cyber-text-faint">{label}</div>
-      <div className={`font-mono ${strong ? "text-base font-bold text-glow" : "text-sm"}`}>{value}</div>
-    </div>
-  );
-}
-
 function Gauge2({ label, value, hint }: { label: string; value: number; hint: string }) {
   return (
-    <div className="rounded border border-cyber-border/60 bg-cyber-bg/30 px-3 py-2">
-      <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-widest text-cyber-text-faint">
-        <span>{label}</span>
+    <div className="rounded-lg border border-cyber-border bg-cyber-bg/30 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-medium uppercase tracking-wider text-cyber-text-faint">
+        <Term k={label}>{label}</Term>
         <span className="font-mono">{(value * 100).toFixed(0)}%</span>
       </div>
-      <Meter pct={Math.max(0, Math.min(1, value)) * 100} />
-      <div className="mt-1 text-[10px] text-cyber-text-faint">{hint}</div>
+      <Meter pct={Math.max(0, Math.min(1, value)) * 100} label={label} />
+      <div className="mt-1 text-[11px] text-cyber-text-faint">{hint}</div>
     </div>
   );
 }

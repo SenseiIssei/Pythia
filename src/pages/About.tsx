@@ -10,8 +10,11 @@ export function About() {
   const runtime = isTauri() ? "Native desktop (Rust engine)" : aiMode() === "server" ? "Web app → backend server" : "Browser paper engine";
 
   return (
-    <div className="animate-fade-in max-w-3xl">
-      <PageHeader title="About Pythia" subtitle="Autonomous multi-venue prediction & trading cockpit" />
+    <div className="animate-fade-in mx-auto max-w-3xl">
+      <PageHeader
+        title="About Pythia"
+        subtitle="A trading cockpit that watches prediction markets, crypto and US shares, practises with fake money, and only trusts what it has proven."
+      />
 
       <Card className="mb-4">
         <div className="flex items-center gap-3">
@@ -30,20 +33,20 @@ export function About() {
 
       <Card title="Architecture" className="mb-4" right={<Server size={14} className="text-accent" />}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <Pillar icon={Cpu} title="pythia-core" body="One Rust engine crate — strategies, indicators, sovereign risk, connectors, real market data. No UI." />
+          <Pillar icon={Cpu} title="pythia-core" body="One Rust engine crate: strategies, indicators, sovereign risk, connectors, real market data. No UI." />
           <Pillar icon={Server} title="Backend server" body="axum HTTP + WebSocket over the same core, so a web dashboard or phone app share one authoritative brain." />
-          <Pillar icon={Globe} title="One UI, 3 runtimes" body="Native (Rust daemon), web (→ backend), or browser paper engine — auto-detected, byte-for-byte in lockstep." />
+          <Pillar icon={Globe} title="One UI, 3 runtimes" body="Native (Rust daemon), web (→ backend), or browser paper engine. Auto-detected, byte-for-byte in lockstep." />
         </div>
       </Card>
 
       <Card title="What works today" className="mb-4">
         <ul className="list-inside list-disc space-y-1 text-sm text-cyber-text-dim">
-          <li>Runs three ways from one UI: <span className="text-accent">native desktop</span>, <span className="text-accent">web + backend server</span>, and <span className="text-accent">browser paper</span> — identical, verified indicator-for-indicator</li>
+          <li>Runs three ways from one UI: <span className="text-accent">native desktop</span>, <span className="text-accent">web + backend server</span>, and <span className="text-accent">browser paper</span>, identical and verified indicator-for-indicator</li>
           <li>8 strategies: EMA cross, Bollinger, RSI, MACD, Donchian breakout, multi-timeframe momentum, BTC/ETH pairs, Prob-Edge (EWMA fair-value on live odds), plus a rule-based Strategy Composer</li>
           <li>Position management: ATR stop-loss, take-profit &amp; trailing stops (auto-exit)</li>
           <li>Advanced risk: max-drawdown breaker, daily reset, loss-streak cooldowns, fractional-Kelly &amp; volatility-targeted sizing, regime filter, adaptive allocation</li>
           <li>Research suite: backtester, Monte-Carlo optimizer, walk-forward validation, analytics &amp; correlation matrix</li>
-          <li><span className="text-accent">AI Signals</span>: bring any API key — Claude, GPT, Grok, GLM, Gemini, DeepSeek, Groq, Mistral, OpenRouter or local Ollama reason over your markets</li>
+          <li><span className="text-accent">AI Signals</span>: bring any API key (Claude, GPT, Grok, GLM, Gemini, DeepSeek, Groq, Mistral, OpenRouter or local Ollama) and let it reason over your markets</li>
           <li>Discord/webhook alerts on fills, exits &amp; risk trips; real read-only Kraken + Polymarket data; OS-keychain key storage; persistent state; system tray; first-run legal gate</li>
         </ul>
         <div className="mt-3 text-xs text-cyber-text-faint">
@@ -59,7 +62,7 @@ export function About() {
             <div className="font-bold text-danger text-glow-red">Not financial advice</div>
             Automated trading and prediction-market betting carry a real risk of losing all committed
             money. Pythia ships in paper mode; going live requires your own API keys and a deliberate
-            per-strategy confirmation. AI signals are advisory only — no model reliably predicts prices, and none of
+            per-strategy confirmation. AI signals are advisory only: no model reliably predicts prices, and none of
             them place orders. Confirm legality in your jurisdiction (Polymarket is geoblocked for US persons).
             Read <span className="text-accent">SAFETY.md</span> in full.
           </div>

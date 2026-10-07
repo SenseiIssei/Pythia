@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Layers, GitFork } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, StatCard, Badge } from "../components/ui";
+import { Card, PageHeader, StatCard, Badge, EmptyState, Notice } from "../components/ui";
 import { correlationMatrix, concentration, type CorrMatrix } from "../lib/correlation";
 
 // diverging colour: +1 (correlated → concentration risk) warm, 0 neutral, -1 cool
@@ -26,46 +26,53 @@ export function Correlation() {
   const heldIds = useMemo(() => [...new Set(positions.map((p) => p.marketId))].filter((id) => corr.ids.includes(id)), [positions, corr]);
   const conc = useMemo(() => concentration(heldIds, corr), [heldIds, corr]);
 
+  const header = (
+    <PageHeader
+      title="Correlation"
+      subtitle="Whether your positions are really separate bets, or one bet in disguise: markets that move together fall together."
+    />
+  );
+
   if (corr.ids.length < 2) {
     return (
-      <div className="animate-fade-in">
-        <PageHeader title="Correlation" subtitle="How correlated your markets & positions really are" />
+      <div className="animate-fade-in mx-auto max-w-6xl">
+        {header}
         <Card>
-          <div className="py-6 text-center text-sm text-cyber-text-faint">Gathering price history… correlations appear after ~20 bars per market.</div>
+          <EmptyState icon={GitFork} title="Gathering price history">
+            Correlations appear after about 20 price bars per market.
+          </EmptyState>
         </Card>
       </div>
     );
   }
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Correlation" subtitle="How correlated your markets & positions really are" />
+    <div className="animate-fade-in mx-auto max-w-6xl">
+      {header}
 
-      <div className="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
-        <StatCard label="Open positions" value={String(conc.n)} icon={Layers} tone="cyan" sub={`${corr.ids.length} markets tracked`} />
+      <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <StatCard label="Open positions" value={String(conc.n)} icon={Layers} sub={`${corr.ids.length} markets tracked`} />
         <StatCard
           label="Avg |correlation|"
-          value={conc.n >= 2 ? conc.avgAbsCorr.toFixed(2) : "—"}
+          value={conc.n >= 2 ? conc.avgAbsCorr.toFixed(2) : "-"}
           icon={GitFork}
-          tone={conc.avgAbsCorr > 0.6 ? "red" : conc.avgAbsCorr > 0.3 ? "purple" : "green"}
+          tone={conc.n < 2 ? "neutral" : conc.avgAbsCorr > 0.6 ? "red" : conc.avgAbsCorr > 0.3 ? "amber" : "green"}
           sub="across held positions"
         />
         <StatCard
           label="Effective bets"
           value={conc.n >= 2 ? conc.effectiveBets.toFixed(1) : String(conc.n)}
           icon={GitFork}
-          tone={conc.n >= 2 && conc.effectiveBets < conc.n * 0.5 ? "red" : "green"}
-          sub={conc.n >= 2 ? `you hold ${conc.n}, worth ~${conc.effectiveBets.toFixed(1)} independent` : "need 2+ positions"}
+          tone={conc.n < 2 ? "neutral" : conc.effectiveBets < conc.n * 0.5 ? "red" : "green"}
+          sub={conc.n >= 2 ? `you hold ${conc.n}, worth about ${conc.effectiveBets.toFixed(1)} separate bets` : "needs 2 or more positions"}
         />
       </div>
 
       {conc.n >= 2 && conc.effectiveBets < conc.n * 0.6 && (
-        <Card className="mb-4 border-danger/30 bg-danger/5">
-          <div className="text-sm text-danger">
-            ⚠ Concentration warning — your {conc.n} positions behave like only ~{conc.effectiveBets.toFixed(1)} independent bets.
-            A move against that cluster hits all of them at once.
-          </div>
-        </Card>
+        <Notice tone="warning" title="Your bets are bunched together" className="mb-4">
+          Your {conc.n} positions behave like only about {conc.effectiveBets.toFixed(1)} separate bets. A move against
+          that group hits all of them at once.
+        </Notice>
       )}
 
       {conc.unmeasured > 0 && (
@@ -79,7 +86,7 @@ export function Correlation() {
       )}
 
       <Card title="Return Correlation Matrix" right={<Badge tone="neutral">{corr.ids.length}×{corr.ids.length}</Badge>}>
-        <div className="overflow-x-auto">
+        <div className="-mx-1 overflow-x-auto px-1">
           <div
             className="inline-grid gap-px text-[10px]"
             style={{ gridTemplateColumns: `minmax(64px,auto) repeat(${corr.ids.length}, 28px)` }}
@@ -95,11 +102,11 @@ export function Correlation() {
             ))}
           </div>
         </div>
-        <div className="mt-3 flex items-center gap-4 text-xs text-cyber-text-faint">
-          <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded" style={{ background: corrColor(0.9) }} /> correlated (risk)</span>
-          <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded" style={{ background: corrColor(-0.9) }} /> inversely (diversifying)</span>
-          <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded border border-cyber-border" /> can&apos;t compare (candles vs ticks)</span>
-          <span>· rows/cols outlined = markets you hold</span>
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-cyber-text-faint">
+          <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded" style={{ background: corrColor(0.9) }} /> move together (risk piles up)</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded" style={{ background: corrColor(-0.9) }} /> move opposite (they balance)</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded border border-cyber-border" /> can&apos;t compare (candles against ticks)</span>
+          <span>Outlined squares: two markets you hold. Numbers are correlation × 100.</span>
         </div>
       </Card>
     </div>

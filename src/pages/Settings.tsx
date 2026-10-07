@@ -1,24 +1,24 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  KeyRound,
   Lock,
-  Link2,
   ShieldCheck,
   Trash2,
   Bell,
   Send,
   BrainCircuit,
   Building2,
+  Landmark,
   PlugZap,
   SlidersHorizontal,
   TriangleAlert,
+  Eye,
 } from "lucide-react";
-import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
+import { Card, PageHeader, Badge, Button, Field, Notice, inputCls } from "../components/ui";
 import { ComfortZone } from "../components/ComfortZone";
 import { ConfirmButton } from "../components/Confirm";
 import { isTauri } from "../engine";
-import { setUiMode, useAdvanced } from "../uiMode";
+import { setUiMode, useAdvanced, type UiMode } from "../uiMode";
 import { aiMode, aiProviders, saveAiKey, clearAiKey } from "../ai";
 import { alpacaAccount, listExchanges, saveExchangeKeys, clearExchangeKeys } from "../live";
 import { DEFAULT_PREFS, EFFORTS, TIMEFRAMES, getPrefs, savePrefs, testLlmKey, type Prefs } from "../prefs";
@@ -34,7 +34,7 @@ interface VenueCfg {
 const VENUES: VenueCfg[] = [
   {
     id: "alpaca",
-    name: "Alpaca — Paper",
+    name: "Alpaca paper account",
     fields: [
       { key: "keyId", label: "API key id" },
       { key: "secret", label: "API secret", secret: true },
@@ -43,14 +43,27 @@ const VENUES: VenueCfg[] = [
   },
   {
     id: "alpaca-live",
-    name: "Alpaca — Live 💵",
+    name: "Alpaca live account (real money)",
     fields: [
       { key: "keyId", label: "API key id" },
       { key: "secret", label: "API secret", secret: true },
     ],
-    note: "⚠ REAL MONEY. Keys from the Live account — a different pair to the paper ones. Storing them changes nothing on its own: routing still needs a typed ARM LIVE on the Live page.",
+    note: "Real money. Keys from the Live account, which is a different pair from the paper ones. Storing them changes nothing on its own: routing still needs a typed ARM LIVE on the Live page.",
   },
 ];
+
+/** A heading between groups of cards, so a long settings page reads in parts. */
+function Group({ title, children, intro }: { title: string; intro?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="space-y-4">
+      <div className="border-b border-cyber-border pb-2 pt-2">
+        <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-cyber-text-dim">{title}</h2>
+        {intro && <p className="mt-1 text-sm text-cyber-text-faint">{intro}</p>}
+      </div>
+      {children}
+    </section>
+  );
+}
 
 export function Settings() {
   const native = isTauri();
@@ -72,77 +85,70 @@ export function Settings() {
   }, []);
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Settings" subtitle="Venue connections · keys stored in the OS keychain, never in code" />
+    <div className="animate-fade-in mx-auto max-w-5xl space-y-6">
+      <PageHeader
+        title="Settings"
+        subtitle={
+          advanced
+            ? "View, safety limits, venue connections and AI providers. Keys are stored in the OS keychain, never in code."
+            : "How much to show, how careful to be, and (only when you want it) connections to real accounts."
+        }
+      />
 
-      <ViewModeCard advanced={advanced} />
+      <Group title="You">
+        <ViewModeCard advanced={advanced} />
+        <ComfortZone />
+      </Group>
 
-      <ComfortZone />
+      <Group
+        title="Connections"
+        intro={
+          advanced
+            ? "Broker, exchange and AI keys. None of them turns on live trading by itself."
+            : "Optional. Only needed to see or trade real accounts. You can skip all of this while you practise."
+        }
+      >
+        <Notice tone="warning" icon={Lock} title="Keys never leave your machine">
+          {native ? (
+            <>
+              Saved keys go into the <span className="text-accent">Windows Credential Manager</span> and are read back
+              only by the connector that owns them. They are never shown here and never logged. Storing keys does{" "}
+              <b className="text-cyber-text">not</b> turn on live trading; that still needs a per-strategy confirmation.
+              Read <span className="text-accent">SAFETY.md</span> first.
+            </>
+          ) : (
+            <>
+              This is the <span className="text-accent">browser version</span>, which has no keychain, so keys cannot be
+              stored here. The desktop app (<code className="text-accent">npm run tauri dev</code>) stores them safely.
+              Read <span className="text-accent">SAFETY.md</span> before going live.
+            </>
+          )}
+        </Notice>
 
-      <Card className="mb-4 border-warning/30 bg-warning/5">
-        <div className="flex items-start gap-3">
-          <Lock size={18} className="mt-0.5 text-warning" />
-          <div className="text-sm text-cyber-text-dim">
-            <div className="font-bold text-warning">Keys never leave your machine</div>
-            {native ? (
-              <>
-                Saved keys go into the <span className="text-accent">Windows Credential Manager</span> and
-                are read back only by the connector that owns them (Phase 2) — never shown here, never
-                logged. Storing keys does <span className="text-accent">not</span> enable live trading; that
-                still needs a per-strategy confirmation. Read <span className="text-accent">SAFETY.md</span> first.
-              </>
-            ) : (
-              <>
-                You're in the <span className="text-accent">browser build</span>, which has no OS keychain —
-                key storage is disabled here. Run the desktop app (<span className="text-accent">npm run tauri dev</span>)
-                to store keys securely. Read <span className="text-accent">SAFETY.md</span> before going live.
-              </>
-            )}
-          </div>
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          {VENUES.map((v) => (
+            <VenueCard key={v.id} v={v} native={native} connected={!!status[v.id]} onChanged={refresh} />
+          ))}
         </div>
-      </Card>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {VENUES.map((v) => (
-          <VenueCard key={v.id} v={v} native={native} connected={!!status[v.id]} onChanged={refresh} />
-        ))}
-      </div>
+        {native && status["alpaca-live"] && (
+          <Notice tone="danger" icon={TriangleAlert} title="Live keys are stored">
+            Switch endpoints on the <span className="text-accent">Live</span> page. Real money needs a typed{" "}
+            <b className="text-danger">ARM LIVE</b>, and the endpoint can only be changed while disarmed. Storing keys
+            here does not route a single order.
+          </Notice>
+        )}
 
-      {native && status["alpaca-live"] && (
-        <Card className="mt-4 border-danger/30 bg-danger/5">
-          <div className="flex items-start gap-3">
-            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-danger" />
-            <div className="text-sm text-cyber-text-dim">
-              <div className="font-bold text-danger text-glow-red">Live keys are stored</div>
-              Switch endpoints on the <span className="text-accent">Live</span> page — it needs a typed{" "}
-              <span className="text-danger font-bold">ARM LIVE</span> for real money, and the endpoint can only be
-              changed while disarmed. Storing keys here does not route a single order.
-            </div>
-          </div>
-        </Card>
-      )}
-
-      <div className="mt-4">
         <ExchangesCard native={native} onChanged={refresh} />
-      </div>
 
-      {native && (
-        <div className="mt-4">
-          <PreferencesCard />
-        </div>
-      )}
-
-      <div className="mt-4">
         <AiProvidersCard />
-      </div>
 
-      {/* Webhooks are an integration, not a setting — nothing a first-time user
-          needs in order to understand or use the app. */}
-      {advanced && (
-        <div className="mt-4">
-          <AlertsCard native={native} />
-        </div>
-      )}
+        {native && <PreferencesCard />}
+
+        {/* Webhooks are an integration, not a setting: nothing a first-time user
+            needs in order to understand or use the app. */}
+        {advanced && <AlertsCard native={native} />}
+      </Group>
     </div>
   );
 }
@@ -153,41 +159,63 @@ export function Settings() {
  * find it without knowing what to look for.
  */
 function ViewModeCard({ advanced }: { advanced: boolean }) {
+  const options: { id: UiMode; label: string; body: string }[] = [
+    {
+      id: "simple",
+      label: "Simple",
+      body: "Only what you need to understand what the app is doing with your money.",
+    },
+    {
+      id: "advanced",
+      label: "Advanced",
+      body: "Everything: markets, positions, strategies, backtests, the optimizer, risk limits and the full journal.",
+    },
+  ];
+  const current: UiMode = advanced ? "advanced" : "simple";
   return (
-    <Card
-      className="mb-4"
-      title="View"
-      right={<Badge tone={advanced ? "purple" : "green"}>{advanced ? "advanced" : "simple"}</Badge>}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="max-w-xl text-sm text-cyber-text-dim">
-          {advanced ? (
-            <>
-              <b className="text-cyber-text">Advanced view.</b> Everything is shown: markets,
-              positions, strategies, the composer, backtests, the optimizer, correlation, risk limits
-              and the full journal.
-            </>
-          ) : (
-            <>
-              <b className="text-cyber-text">Simple view.</b> Only what you need to understand what
-              the app is doing with your money. Turning on advanced adds charts, strategies,
-              backtests and risk controls — it changes nothing about how the app behaves, only what
-              you can see and adjust.
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-2 text-xs">
-          <span className={advanced ? "text-cyber-text-faint" : "text-success"}>Simple</span>
-          <Toggle on={advanced} onChange={(v) => setUiMode(v ? "advanced" : "simple")} />
-          <span className={advanced ? "text-purple-neon" : "text-cyber-text-faint"}>Advanced</span>
-        </div>
+    <Card title="How much to show" icon={Eye}>
+      <div role="radiogroup" aria-label="How much to show" className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {options.map((o) => {
+          const on = current === o.id;
+          return (
+            <button
+              key={o.id}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              onClick={() => setUiMode(o.id)}
+              className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                on
+                  ? "border-accent/50 bg-accent/10"
+                  : "border-cyber-border bg-cyber-bg/40 hover:border-cyber-border-bright"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  aria-hidden
+                  className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border ${
+                    on ? "border-accent" : "border-cyber-text-faint"
+                  }`}
+                >
+                  {on && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}
+                </span>
+                <span className={`text-sm font-semibold ${on ? "text-accent" : "text-cyber-text"}`}>{o.label}</span>
+              </div>
+              <p className="mt-1 pl-5 text-xs leading-relaxed text-cyber-text-dim">{o.body}</p>
+            </button>
+          );
+        })}
       </div>
+      <p className="mt-2 text-xs text-cyber-text-faint">
+        This changes only what you can see and adjust, never how the app behaves. The same switch sits at the bottom of
+        the menu.
+      </p>
     </Card>
   );
 }
 
 /**
- * Crypto exchanges. One is active at a time — whichever was saved last — because
+ * Crypto exchanges. One is active at a time (whichever was saved last) because
  * `Venue::Crypto` routes to exactly one book, and quietly splitting orders
  * across venues would make position sizing a lie.
  */
@@ -208,25 +236,28 @@ function ExchangesCard({ native, onChanged }: { native: boolean; onChanged: () =
   }, [refresh]);
 
   return (
-    <Card title="Crypto exchanges" right={<Building2 size={14} className="text-accent" />}>
-      <div className="mb-3 text-sm text-cyber-text-dim">
-        Pick where <span className="text-accent">Venue::Crypto</span> executes. Saving keys selects that exchange;
-        the markets and strategies stay identical, so a strategy proven on one book can be pointed at another.
-        Grant the key <span className="text-accent">trade</span> permission and <b>not</b> withdrawal — then a
-        leaked key costs you trades, not coins.
-      </div>
-
+    <Card
+      title="Crypto exchanges"
+      icon={Building2}
+      subtitle={
+        <>
+          Pick the one exchange where crypto orders go. Saving keys selects it; the markets and strategies stay the same,
+          so a strategy proven on one exchange can be pointed at another. Give the key permission to{" "}
+          <b className="text-cyber-text">trade</b> and <b className="text-cyber-text">not</b> to withdraw: then a leaked
+          key costs you trades, not coins.
+        </>
+      }
+    >
       {!native && (
-        <div className="mb-3 rounded border border-accent/20 bg-accent/5 px-3 py-2 text-xs text-cyber-text-dim">
-          On a backend, exchange keys come from its environment:{" "}
-          <code className="text-accent">PYTHIA_EXCHANGE</code>,{" "}
-          <code className="text-accent">PYTHIA_EXCHANGE_KEY</code>,{" "}
-          <code className="text-accent">PYTHIA_EXCHANGE_SECRET</code>
-          {" "}(plus <code className="text-accent">PYTHIA_EXCHANGE_PASSPHRASE</code> for OKX).
+        <div className="mb-3 rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-xs leading-relaxed text-cyber-text-dim">
+          On a backend, exchange keys come from its environment: <code className="text-accent">PYTHIA_EXCHANGE</code>,{" "}
+          <code className="text-accent">PYTHIA_EXCHANGE_KEY</code>, <code className="text-accent">PYTHIA_EXCHANGE_SECRET</code>{" "}
+          (plus <code className="text-accent">PYTHIA_EXCHANGE_PASSPHRASE</code> for OKX).
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+      {list.length === 0 && !err && <div className="text-sm text-cyber-text-faint">Loading the list of exchanges.</div>}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {list.map((ex) => (
           <ExchangeRow
             key={ex.id}
@@ -239,7 +270,7 @@ function ExchangesCard({ native, onChanged }: { native: boolean; onChanged: () =
           />
         ))}
       </div>
-      {err && <div className="mt-2 text-xs text-danger">{err}</div>}
+      {err && <div className="mt-2 text-sm text-danger">Could not list the exchanges: {err}</div>}
     </Card>
   );
 }
@@ -256,6 +287,7 @@ function ExchangeRow({
   const [vals, setVals] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
 
   const needed = ["key", "secret", ...(ex.needsPassphrase ? ["passphrase"] : [])];
   const filled = needed.every((k) => (vals[k] ?? "").trim().length > 0);
@@ -263,13 +295,16 @@ function ExchangeRow({
   async function save() {
     setBusy(true);
     setMsg("");
+    setOk(null);
     try {
       await saveExchangeKeys(ex.id, vals);
       setVals({}); // don't keep secrets in component memory
-      setMsg("saved — this is now the active crypto venue");
+      setMsg("Saved. This is now the exchange crypto orders go to.");
+      setOk(true);
       await onChanged();
     } catch (e) {
-      setMsg(`error: ${e instanceof Error ? e.message : String(e)}`);
+      setMsg(`Could not save: ${e instanceof Error ? e.message : String(e)}`);
+      setOk(false);
     }
     setBusy(false);
   }
@@ -277,54 +312,58 @@ function ExchangeRow({
   async function clear() {
     setBusy(true);
     setMsg("");
+    setOk(null);
     try {
       await clearExchangeKeys(ex.id);
       setVals({});
-      setMsg("cleared");
+      setMsg("Keys deleted from this computer.");
       await onChanged();
     } catch (e) {
-      setMsg(`error: ${e instanceof Error ? e.message : String(e)}`);
+      setMsg(`Could not delete: ${e instanceof Error ? e.message : String(e)}`);
+      setOk(false);
     }
     setBusy(false);
   }
 
+  const fieldLabel = (k: string) => (k === "key" ? "API key" : k === "secret" ? "API secret" : "Passphrase");
+
   return (
-    <div className="rounded-lg border border-cyber-border bg-cyber-surface/40 p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-medium">{ex.label}</span>
+    <div className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold">{ex.label}</span>
         <Badge tone={ex.configured ? "green" : "neutral"}>
-          {ex.configured ? "configured" : ex.canTrade ? "no key" : "not wired"}
+          {ex.configured ? "connected" : ex.canTrade ? "no key" : "not supported yet"}
         </Badge>
       </div>
 
       {!ex.canTrade ? (
-        <div className="text-[11px] leading-snug text-cyber-text-faint">
-          Coinbase Advanced Trade signs with ES256 JWTs rather than an HMAC, so it is listed but cannot route
-          orders yet. See PROFIT-PLAN.md.
+        <div className="text-xs leading-snug text-cyber-text-faint">
+          Coinbase Advanced Trade signs with ES256 JWTs rather than an HMAC, so it is listed but cannot route orders yet.
+          See PROFIT-PLAN.md.
         </div>
       ) : !manageable ? (
-        <div className="text-[11px] text-cyber-text-faint">Managed by the server's environment.</div>
+        <div className="text-xs text-cyber-text-faint">Managed by the server's environment.</div>
       ) : (
-        <>
+        <div className="space-y-2">
           {needed.map((k) => (
-            <input
-              key={k}
-              type={k === "key" ? "text" : "password"}
-              value={vals[k] ?? ""}
-              autoComplete="off"
-              onChange={(e) => {
-                setVals((s) => ({ ...s, [k]: e.target.value }));
-                setMsg("");
-              }}
-              placeholder={
-                ex.configured && !vals[k] ? `•••••••• (${k} stored)` : k === "key" ? "API key" : `API ${k}`
-              }
-              className="mb-1.5 w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
-            />
+            <Field key={k} label={fieldLabel(k)}>
+              <input
+                type={k === "key" ? "text" : "password"}
+                value={vals[k] ?? ""}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(e) => {
+                  setVals((s) => ({ ...s, [k]: e.target.value }));
+                  setMsg("");
+                }}
+                placeholder={ex.configured && !vals[k] ? "•••••••• (stored)" : ""}
+                className={inputCls}
+              />
+            </Field>
           ))}
-          <div className="mt-1 flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 pt-1">
             <Button tone="cyan" icon={ShieldCheck} disabled={!filled || busy} onClick={save}>
-              {ex.configured ? "Update" : "Save & select"}
+              {ex.configured ? "Update keys" : "Save and use this exchange"}
             </Button>
             {ex.configured && (
               <ConfirmButton
@@ -338,8 +377,12 @@ function ExchangeRow({
               </ConfirmButton>
             )}
           </div>
-          {msg && <div className="mt-1.5 text-[11px] text-cyber-text-dim">{msg}</div>}
-        </>
+          {msg && (
+            <div role="status" className={`text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
+              {msg}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -357,6 +400,7 @@ function PreferencesCard() {
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
 
   useEffect(() => {
     getPrefs()
@@ -364,7 +408,10 @@ function PreferencesCard() {
         setPrefs(p);
         setLoaded(true);
       })
-      .catch((e) => setMsg(String(e)));
+      .catch((e) => {
+        setMsg(`Could not load the preferences: ${String(e)}`);
+        setOk(false);
+      });
   }, []);
 
   function set<K extends keyof Prefs>(key: K, value: Prefs[K]) {
@@ -375,33 +422,36 @@ function PreferencesCard() {
   async function save() {
     setBusy(true);
     setMsg("");
+    setOk(null);
     try {
-      // The daemon sanitizes on the way in, so adopt what it actually stored —
+      // The daemon sanitizes on the way in, so adopt what it actually stored;
       // otherwise the form can keep showing a value that was corrected.
       setPrefs(await savePrefs(prefs));
-      setMsg("saved — the daemon picks these up on its next pass, no restart");
+      setMsg("Saved. The engine picks these up on its next pass, no restart needed.");
+      setOk(true);
     } catch (e) {
-      setMsg(`error: ${String(e instanceof Error ? e.message : e)}`);
+      setMsg(`Could not save: ${String(e instanceof Error ? e.message : e)}`);
+      setOk(false);
     }
     setBusy(false);
   }
 
   return (
-    <Card title="Data & AI overlay" right={<SlidersHorizontal size={14} className="text-accent" />}>
-      <div className="mb-3 text-sm text-cyber-text-dim">
-        Stored beside your keys and loaded automatically on every start. Nothing here is secret.
-      </div>
-
+    <Card
+      title="Data and AI overlay"
+      icon={SlidersHorizontal}
+      subtitle="Stored beside your keys and loaded on every start. Nothing here is secret."
+    >
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <Field label="Alpaca data feed" hint="iex is the free tier; sip needs a paid subscription">
           <Select value={prefs.alpacaFeed} onChange={(v) => set("alpacaFeed", v)} options={["iex", "sip"]} />
         </Field>
 
-        <Field label="Candle size" hint="the bars every indicator runs on">
+        <Field label="Candle size" hint="The length of one price bar every indicator runs on">
           <Select value={prefs.barTimeframe} onChange={(v) => set("barTimeframe", v)} options={TIMEFRAMES} />
         </Field>
 
-        <Field label="AI provider" hint="which model the background overlay polls">
+        <Field label="AI provider" hint="Which model the background overlay asks">
           <Select
             value={prefs.aiProvider}
             onChange={(v) => set("aiProvider", v)}
@@ -409,52 +459,46 @@ function PreferencesCard() {
           />
         </Field>
 
-        <Field label="AI model" hint="blank = that provider's default">
+        <Field label="AI model" hint="Leave empty for that provider's default">
           <input
             value={prefs.aiModel}
             onChange={(e) => set("aiModel", e.target.value)}
             placeholder="claude-opus-5"
-            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+            className={inputCls}
           />
         </Field>
 
-        <Field label="Thinking effort" hint="low keeps the answer inside its bar">
+        <Field label="Thinking effort" hint="Low keeps the answer short and cheap">
           <Select value={prefs.aiEffort} onChange={(v) => set("aiEffort", v)} options={EFFORTS} />
         </Field>
 
-        <Field label="Poll interval (s)" hint="one market per pass — this is the cost dial">
+        <Field label="Seconds between AI calls" hint="One market per call, so this is the cost dial">
           <input
             type="number"
             min={30}
             max={86400}
             value={prefs.aiIntervalSec}
             onChange={(e) => set("aiIntervalSec", Number(e.target.value))}
-            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+            className={inputCls}
           />
         </Field>
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button tone="cyan" icon={ShieldCheck} disabled={busy || !loaded} onClick={save}>
           Save preferences
         </Button>
-        {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
+        {msg && (
+          <span role="status" className={`text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
+            {msg}
+          </span>
+        )}
       </div>
-      <div className="mt-2 text-[11px] text-cyber-text-faint">
-        The overlay itself stays off until you enable it on the AI Signals page — these settings only
-        decide how it behaves once you do.
+      <div className="mt-2 text-xs text-cyber-text-faint">
+        The overlay itself stays off until you switch it on in the AI Signals page. These settings only decide how it
+        behaves once you do.
       </div>
     </Card>
-  );
-}
-
-function Field({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs text-cyber-text-dim">{label}</label>
-      {children}
-      <div className="mt-1 text-[10px] text-cyber-text-faint">{hint}</div>
-    </div>
   );
 }
 
@@ -468,11 +512,7 @@ function Select({
   options: string[];
 }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
-    >
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
       {options.map((o) => (
         <option key={o} value={o}>
           {o}
@@ -503,34 +543,36 @@ function AiProvidersCard() {
   return (
     <Card
       title="AI providers"
-      right={<BrainCircuit size={14} className="text-purple-neon" />}
+      icon={BrainCircuit}
+      subtitle={
+        <>
+          Bring any API key: Claude, GPT, Grok, GLM, Gemini, DeepSeek, Groq, Mistral, OpenRouter or a local Ollama. They
+          are used to reason about markets and only ever give advice: <b className="text-cyber-text">they never place
+          orders</b>.
+        </>
+      }
     >
-      <div className="mb-3 text-sm text-cyber-text-dim">
-        Bring any API key — <span className="text-accent">Claude, GPT, Grok, GLM, Gemini, DeepSeek, Groq, Mistral,
-        OpenRouter</span> or a local <span className="text-accent">Ollama</span>. Used on the{" "}
-        <span className="text-accent">AI Signals</span> page to reason about markets. Keys are advisory only —
-        they never place orders.
-      </div>
-
       {mode === "none" ? (
-        <div className="rounded border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-cyber-text-dim">
-          The browser paper build can't reach model APIs. Run the <span className="text-accent">desktop app</span>{" "}
-          (keys in the OS keychain) or a <span className="text-accent">backend server</span> (keys in its env).
+        <div className="rounded-lg border border-warning/30 bg-warning/[0.06] px-3 py-2 text-xs leading-relaxed text-cyber-text-dim">
+          The browser version cannot reach model APIs. Use the <span className="text-accent">desktop app</span> (keys in
+          the keychain) or a <span className="text-accent">backend server</span> (keys in its environment).
         </div>
       ) : mode === "server" ? (
-        <div className="rounded border border-accent/20 bg-accent/5 px-3 py-2 text-xs text-cyber-text-dim">
-          Connected to a backend — provider keys live in the <span className="text-accent">server's environment</span>{" "}
+        <div className="rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-xs leading-relaxed text-cyber-text-dim">
+          Connected to a backend: provider keys live in the <span className="text-accent">server's environment</span>{" "}
           (e.g. <code className="text-accent">ANTHROPIC_API_KEY</code>, <code className="text-accent">OPENAI_API_KEY</code>,{" "}
           <code className="text-accent">XAI_API_KEY</code>). Configured providers show a green badge below.
         </div>
       ) : null}
 
-      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
-        {providers.map((p) => (
-          <ProviderRow key={p.id} p={p} manageable={mode === "native"} onChanged={refresh} />
-        ))}
-      </div>
-      {err && <div className="mt-2 text-xs text-danger">{err}</div>}
+      {providers.length > 0 && (
+        <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {providers.map((p) => (
+            <ProviderRow key={p.id} p={p} manageable={mode === "native"} onChanged={refresh} />
+          ))}
+        </div>
+      )}
+      {err && <div className="mt-2 text-sm text-danger">Could not list the providers: {err}</div>}
     </Card>
   );
 }
@@ -557,7 +599,8 @@ function ProviderRow({
     try {
       await saveAiKey(p.id, val);
       setVal("");
-      setMsg("saved");
+      setMsg("Saved.");
+      setOk(true);
       await onChanged();
     } catch (e) {
       setMsg(String(e instanceof Error ? e.message : e));
@@ -567,7 +610,7 @@ function ProviderRow({
   }
   async function test() {
     setBusy(true);
-    setMsg("testing…");
+    setMsg("Testing the key");
     setOk(null);
     try {
       setMsg(await testLlmKey(p.id));
@@ -584,7 +627,7 @@ function ProviderRow({
     setOk(null);
     try {
       await clearAiKey(p.id);
-      setMsg("cleared");
+      setMsg("Key deleted from this computer.");
       await onChanged();
     } catch (e) {
       setMsg(String(e instanceof Error ? e.message : e));
@@ -594,34 +637,42 @@ function ProviderRow({
   }
 
   return (
-    <div className="rounded-lg border border-cyber-border bg-cyber-surface/40 p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-medium">{p.label}</span>
-        <Badge tone={p.configured ? "green" : "neutral"}>{p.configured ? "configured" : p.needsKey ? "no key" : "local"}</Badge>
+    <div className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold">{p.label}</span>
+        <Badge tone={p.configured ? "green" : "neutral"}>{p.configured ? "connected" : p.needsKey ? "no key" : "local"}</Badge>
       </div>
-      <div className="mb-2 text-[11px] text-cyber-text-faint">
-        default model <span className="text-cyber-text-dim">{p.defaultModel}</span>
-        {p.needsKey && <> · env <code className="text-cyber-text-dim">{p.envKey}</code></>}
+      <div className="mb-2 text-xs text-cyber-text-faint">
+        Default model <span className="font-mono text-cyber-text-dim">{p.defaultModel}</span>
+        {p.needsKey && (
+          <>
+            {" "}
+            · env <code className="text-cyber-text-dim">{p.envKey}</code>
+          </>
+        )}
       </div>
       {p.needsKey && manageable ? (
         <>
-          <input
-            type="password"
-            value={val}
-            autoComplete="off"
-            onChange={(e) => {
-              setVal(e.target.value);
-              setMsg("");
-            }}
-            placeholder={p.configured ? "•••••••• (stored)" : "paste API key"}
-            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
-          />
+          <Field label={`${p.label} API key`}>
+            <input
+              type="password"
+              value={val}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => {
+                setVal(e.target.value);
+                setMsg("");
+              }}
+              placeholder={p.configured ? "•••••••• (stored)" : "Paste the key"}
+              className={inputCls}
+            />
+          </Field>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Button tone="cyan" icon={ShieldCheck} disabled={busy || val.trim().length === 0} onClick={save}>
               {p.configured ? "Update" : "Save"}
             </Button>
             {p.configured && (
-              <Button tone="purple" icon={PlugZap} disabled={busy} onClick={test}>
+              <Button tone="purple" icon={PlugZap} disabled={busy} onClick={test} title="Send one tiny request to check the key works">
                 Test
               </Button>
             )}
@@ -638,13 +689,13 @@ function ProviderRow({
             )}
           </div>
           {msg && (
-            <div className={`mt-2 text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
+            <div role="status" className={`mt-2 text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
               {msg}
             </div>
           )}
         </>
       ) : !p.needsKey ? (
-        <div className="text-[11px] text-cyber-text-dim">No key needed — runs against your local Ollama.</div>
+        <div className="text-xs text-cyber-text-dim">No key needed: it runs against your local Ollama.</div>
       ) : null}
     </div>
   );
@@ -663,9 +714,9 @@ function AlertsCard({ native }: { native: boolean }) {
       await invoke("save_venue_keys", { venue: "alerts", fields: { webhook: url } });
       setUrl("");
       setSaved(true);
-      setMsg("webhook saved");
+      setMsg("Webhook saved.");
     } catch (e) {
-      setMsg(`error: ${String(e)}`);
+      setMsg(`Could not save: ${String(e)}`);
     }
     setBusy(false);
   }
@@ -674,9 +725,9 @@ function AlertsCard({ native }: { native: boolean }) {
     setMsg("");
     try {
       await invoke("test_alert");
-      setMsg("test alert sent — check your channel");
+      setMsg("Test alert sent. Check your channel.");
     } catch (e) {
-      setMsg(`error: ${String(e)}`);
+      setMsg(`Could not send: ${String(e)}`);
     }
     setBusy(false);
   }
@@ -686,38 +737,41 @@ function AlertsCard({ native }: { native: boolean }) {
       await invoke("clear_venue_keys", { venue: "alerts" });
       setSaved(false);
       setUrl("");
-      setMsg("cleared");
+      setMsg("Webhook deleted.");
     } catch (e) {
-      setMsg(`error: ${String(e)}`);
+      setMsg(`Could not delete: ${String(e)}`);
     }
     setBusy(false);
   }
 
   return (
-    <Card title="Discord / Webhook Alerts" right={<Bell size={14} className="text-purple-neon" />}>
+    <Card title="Discord and webhook alerts" icon={Bell}>
       {!native ? (
         <div className="text-sm text-cyber-text-dim">
-          Alerts are available in the <span className="text-accent">desktop app</span> only — a browser can't
-          POST to Discord (CORS). Run <span className="text-accent">npm run tauri dev</span> to enable them.
+          Alerts work in the <span className="text-accent">desktop app</span> only: a browser is not allowed to post to
+          Discord (CORS). Run <code className="text-accent">npm run tauri dev</code> to use them.
         </div>
       ) : (
         <>
-          <div className="mb-2 text-sm text-cyber-text-dim">
-            Get a message on every fill, position exit and risk trip (kill switch, drawdown breaker, cooldown).
-            Paste a Discord webhook URL (or any endpoint that accepts <code className="text-accent">{"{ content }"}</code> JSON).
-          </div>
-          <input
-            type="password"
-            value={url}
-            autoComplete="off"
-            onChange={(e) => {
-              setUrl(e.target.value);
-              setSaved(false);
-            }}
-            placeholder={saved ? "•••••••• (stored)" : "https://discord.com/api/webhooks/…"}
-            className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
-          />
-          <div className="mt-3 flex items-center gap-2">
+          <p className="mb-3 text-sm text-cyber-text-dim">
+            Get a message on every fill, position exit and risk trip (kill switch, drawdown breaker, cooldown). Paste a
+            Discord webhook URL, or any endpoint that accepts <code className="text-accent">{"{ content }"}</code> JSON.
+          </p>
+          <Field label="Webhook URL" hint="Stored in the OS keychain and only sent to the host you give here.">
+            <input
+              type="password"
+              value={url}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                setSaved(false);
+              }}
+              placeholder={saved ? "•••••••• (stored)" : "https://discord.com/api/webhooks/…"}
+              className={inputCls}
+            />
+          </Field>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <Button tone="purple" icon={ShieldCheck} disabled={busy || url.trim().length === 0} onClick={save}>
               Save webhook
             </Button>
@@ -733,10 +787,11 @@ function AlertsCard({ native }: { native: boolean }) {
             >
               Clear
             </ConfirmButton>
-            {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
-          </div>
-          <div className="mt-2 text-[11px] text-cyber-text-faint">
-            The URL is stored in the OS keychain and only sent to the host you provide.
+            {msg && (
+              <span role="status" className="text-xs text-cyber-text-dim">
+                {msg}
+              </span>
+            )}
           </div>
         </>
       )}
@@ -768,12 +823,12 @@ function VenueCard({
    * Read-only account check against **this card's own endpoint**.
    *
    * Only Alpaca has one, because it's the only venue here that routes real
-   * orders — and a key that saved fine but is rejected at the broker is
+   * orders, and a key that saved fine but is rejected at the broker is
    * indistinguishable from a working one until the first trade doesn't happen.
    */
   async function test() {
     setBusy(true);
-    setMsg("testing…");
+    setMsg("Testing the keys");
     setOk(null);
     try {
       const a = await alpacaAccount(isPaperSlot);
@@ -785,9 +840,9 @@ function VenueCard({
       setOk(a.status === "ACTIVE");
     } catch (e) {
       setMsg(
-        `${String(e instanceof Error ? e.message : e)} — a 401 here usually means ${
+        `${String(e instanceof Error ? e.message : e)}. A 401 here usually means ${
           isPaperSlot ? "live keys pasted into the paper slot" : "paper keys pasted into the live slot"
-        }`
+        }.`
       );
       setOk(false);
     }
@@ -797,17 +852,20 @@ function VenueCard({
   async function save() {
     setBusy(true);
     setMsg("");
+    setOk(null);
     try {
       if (native) {
         await invoke("save_venue_keys", { venue: v.id, fields: vals });
         setVals({}); // don't keep secrets in component memory
-        setMsg("saved to OS keychain");
+        setMsg("Saved to the OS keychain.");
+        setOk(true);
         await onChanged();
       } else {
-        setMsg("desktop app only — no keychain in the browser");
+        setMsg("Only the desktop app can store keys: the browser has no keychain.");
       }
     } catch (e) {
-      setMsg(`error: ${String(e)}`);
+      setMsg(`Could not save: ${String(e)}`);
+      setOk(false);
     }
     setBusy(false);
   }
@@ -815,52 +873,55 @@ function VenueCard({
   async function clear() {
     setBusy(true);
     setMsg("");
+    setOk(null);
     try {
       if (native) {
         await invoke("clear_venue_keys", { venue: v.id });
         setVals({});
-        setMsg("cleared from keychain");
+        setMsg("Deleted from the keychain.");
         await onChanged();
       }
     } catch (e) {
-      setMsg(`error: ${String(e)}`);
+      setMsg(`Could not delete: ${String(e)}`);
+      setOk(false);
     }
     setBusy(false);
   }
 
+  const live = v.id === "alpaca-live";
   return (
     <Card
       title={v.name}
+      icon={Landmark}
+      className={live ? "border-danger/25" : ""}
       right={<Badge tone={connected ? "green" : "neutral"}>{connected ? "connected" : "not connected"}</Badge>}
     >
       <div className="space-y-2">
         {v.fields.map((f) => (
-          <div key={f.key}>
-            <label className="mb-1 flex items-center gap-1 text-xs text-cyber-text-dim">
-              {f.secret ? <KeyRound size={11} /> : <Link2 size={11} />}
-              {f.label}
-            </label>
+          <Field key={f.key} label={f.label}>
             <input
               type={f.secret ? "password" : "text"}
               value={vals[f.key] ?? ""}
               autoComplete="off"
+              spellCheck={false}
+              disabled={!native}
               onChange={(e) => {
                 setVals((s) => ({ ...s, [f.key]: e.target.value }));
                 setMsg("");
               }}
               placeholder={connected ? "•••••••• (stored)" : f.secret ? "••••••••" : ""}
-              className="w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-accent focus:outline-none"
+              className={inputCls}
             />
-          </div>
+          </Field>
         ))}
       </div>
-      <div className="mt-2 text-[11px] leading-snug text-cyber-text-faint">{v.note}</div>
+      <div className={`mt-2 text-xs leading-snug ${live ? "text-danger/90" : "text-cyber-text-faint"}`}>{v.note}</div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button tone="cyan" icon={ShieldCheck} disabled={!filled || busy} onClick={save}>
-          {connected ? "Update keys" : "Save to vault"}
+          {connected ? "Update keys" : "Save to keychain"}
         </Button>
         {native && connected && isAlpaca && (
-          <Button tone="purple" icon={PlugZap} disabled={busy} onClick={test}>
+          <Button tone="purple" icon={PlugZap} disabled={busy} onClick={test} title="A read-only account check; places no order">
             Test
           </Button>
         )}
@@ -877,7 +938,7 @@ function VenueCard({
         )}
       </div>
       {msg && (
-        <div className={`mt-2 text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
+        <div role="status" className={`mt-2 text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
           {msg}
         </div>
       )}

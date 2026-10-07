@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { Sparkles, Play, Trophy, Database, AlertTriangle } from "lucide-react";
 import { useStore } from "../store";
-import { Button, Card, PageHeader, Badge, StatCard } from "../components/ui";
+import { Button, Card, PageHeader, Badge, Field, StatCard, Term, inputCls, pnlTone } from "../components/ui";
 import { autoGrid, monteCarlo, sweep, walkForward, type SweepPoint, type MonteCarlo, type WalkForward } from "../engine/optimize";
 import { Dice5, TrendingUp, ShieldCheck, Activity, GitBranch } from "lucide-react";
 import { researchAvailable, runSweep } from "../research";
@@ -82,12 +82,14 @@ export function Optimizer() {
   }
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Optimizer" subtitle="Every result next to the two numbers that say how much of it to believe" />
+    <div className="animate-fade-in mx-auto max-w-6xl">
+      <PageHeader
+        title="Optimizer"
+        subtitle="Tries many settings for a strategy, and puts every result next to the two numbers that say how much of it to believe."
+      />
 
       <Card className="mb-4">
-        <label className="block max-w-sm text-xs text-cyber-text-dim">
-          Strategy
+        <Field label="Strategy" className="max-w-sm">
           <select
             value={strat?.id ?? ""}
             onChange={(e) => {
@@ -95,114 +97,112 @@ export function Optimizer() {
               setReal(null);
               setPoints(null);
             }}
-            className="mt-1 w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm text-cyber-text focus:border-accent focus:outline-none"
+            className={inputCls}
           >
             {testable.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
             ))}
           </select>
-        </label>
-        <div className="mt-3 text-xs text-cyber-text-faint">
-          <b>Deflated Sharpe</b> asks how likely a Sharpe is to be real edge given how many configurations were
-          tried: the best of many tries on pure noise always looks good. <b>OOS/IS</b> compares results on data the
-          ranking never saw with the data it was chosen on; below {RATIO_BAR} the parameters are mostly noise.
-        </div>
+        </Field>
+        <p className="mt-3 text-xs leading-relaxed text-cyber-text-dim">
+          <b className="text-cyber-text">Deflated Sharpe</b> asks how likely a Sharpe is to be real edge given how many
+          settings were tried: the best of many tries on pure noise always looks good. <b className="text-cyber-text">OOS/IS</b>{" "}
+          compares results on data the ranking never saw with the data it was chosen on; below {RATIO_BAR} the settings
+          are mostly noise.
+        </p>
       </Card>
 
-      <Card
-        className="mb-4"
-        title="Real candles"
-        right={<Database size={14} className="text-accent" />}
-      >
+      <Card className="mb-4" title="Real candles" icon={Database} help="A sweep on real daily price history, run by the Rust engine.">
         {canResearch ? (
           <>
             <div className="flex flex-wrap items-center gap-3">
               <Button tone="purple" icon={Play} onClick={() => void runReal()} disabled={!strat || realBusy}>
-                {realBusy ? "Sweeping…" : "Sweep on real candles"}
+                {realBusy ? "Sweeping" : "Sweep on real candles"}
               </Button>
               <span className="text-xs text-cyber-text-faint">
-                daily candles · fit on the first 60 %, hold out the last 40 % · costs from config/costs.json
+                Daily candles. Fit on the first 60 %, hold out the last 40 %. Costs from config/costs.json.
               </span>
             </div>
-            {realErr && <div className="mt-2 text-xs text-danger">{realErr}</div>}
+            {realBusy && <div className="mt-2 text-xs text-cyber-text-dim">Running every setting on real history. This can take a minute.</div>}
+            {realErr && <div className="mt-2 text-sm text-danger">The sweep failed: {realErr}</div>}
             {real && <RealSweep report={real} />}
           </>
         ) : (
-          <div className="text-xs text-cyber-text-faint">
+          <div className="text-xs leading-relaxed text-cyber-text-faint">
             Real-candle sweeps run in the Rust core, which this browser build does not have. Open the desktop app or
-            connect a backend (<span className="font-mono">VITE_PYTHIA_SERVER</span>) to get deflated Sharpe on
-            real history. The synthetic sweep below is a demo of the mechanics, not evidence.
+            connect a backend (<span className="font-mono">VITE_PYTHIA_SERVER</span>) to get deflated Sharpe on real
+            history. The simulated sweep below shows the mechanics; it is not evidence.
           </div>
         )}
       </Card>
 
-      <Card className="mb-4" title="Synthetic demo">
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+      <Card className="mb-4" title="Simulated demo" icon={Sparkles} help="The same search on made-up price histories. Good for seeing how it works, not for deciding anything.">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <NumField label="Seeds / combo" value={seeds} onChange={setSeeds} step={1} min={4} max={40} />
           <NumField label="Bars" value={bars} onChange={setBars} step={100} min={300} max={2000} />
           <NumField label="Volatility" value={vol} onChange={setVol} step={0.001} min={0.005} max={0.05} />
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <Button tone="cyan" icon={Play} onClick={run} disabled={!strat || running}>
-            {running ? "Optimizing…" : "Run synthetic sweep"}
+            {running ? "Optimizing" : "Run simulated sweep"}
           </Button>
           <Button tone="cyan" icon={GitBranch} onClick={runWalkForward} disabled={!strat || running}>
             Walk-forward test
           </Button>
-          <span className="text-xs text-cyber-text-faint">
-            <Sparkles size={11} className="mr-1 inline" />
-            sweeps {paramKeys.join(", ") || "params"} · each combo Monte-Carlo'd across {seeds} random histories,
-            then re-run on {seeds} histories it never saw
-          </span>
         </div>
+        <p className="mt-2 text-xs text-cyber-text-faint">
+          Tries every combination of {paramKeys.join(", ") || "the settings"}, each on {seeds} random histories, then
+          re-runs it on {seeds} histories it never saw.
+        </p>
       </Card>
 
       {wf && (
         <Card
-          className={`mb-4 ${wf.holdsUp ? "border-success/40 glow-green" : "border-danger/40 glow-red"}`}
+          className={`mb-4 ${wf.holdsUp ? "border-success/40" : "border-danger/40"}`}
           title="Walk-forward validation"
-          right={<Badge tone={wf.holdsUp ? "green" : "red"}>{wf.holdsUp ? "holds up out-of-sample" : "likely overfit"}</Badge>}
+          right={<Badge tone={wf.holdsUp ? "green" : "red"}>{wf.holdsUp ? "holds up on new data" : "likely overfit"}</Badge>}
         >
           <div className="mb-2 text-xs text-cyber-text-dim">
-            Best params <span className="font-mono text-accent">{JSON.stringify(wf.best)}</span> optimized on
-            in-sample histories, then tested on <span className="text-accent">disjoint</span> out-of-sample histories.
+            Best settings <span className="break-all font-mono text-accent">{JSON.stringify(wf.best)}</span>, chosen on
+            one batch of histories, then tested on a <span className="text-accent">separate</span> batch they never saw.
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <WfCol title="In-sample (train)" mc={wf.inSample} />
             <WfCol title="Out-of-sample (test)" mc={wf.outOfSample} />
           </div>
           <div className="mt-3 text-xs text-cyber-text-faint">
-            Degradation IS→OOS: <span className={wf.degradationPct > 2 ? "text-danger" : "text-success"}>{wf.degradationPct >= 0 ? "" : "+"}{(-wf.degradationPct).toFixed(1)}pp</span>.
+            Change from the first batch to the new one:{" "}
+            <span className={wf.degradationPct > 2 ? "text-danger" : "text-success"}>{wf.degradationPct >= 0 ? "" : "+"}{(-wf.degradationPct).toFixed(1)} percentage points</span>.
             {wf.holdsUp
-              ? " The edge survived unseen data — a real (if modest) signal by this test."
-              : " The edge mostly vanished on unseen data — classic overfitting. Don't trust it."}
+              ? " The edge survived data it never saw: a real, if modest, signal by this test."
+              : " The edge mostly vanished on data it never saw. That is classic overfitting: do not trust it."}
           </div>
         </Card>
       )}
 
       {mc && (
-        <div className="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatCard label="Median Return" value={`${mc.medianReturn >= 0 ? "+" : ""}${mc.medianReturn.toFixed(1)}%`} icon={TrendingUp} tone={mc.medianReturn >= 0 ? "green" : "red"} sub="best combo, across seeds" />
+        <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <StatCard label="Median Return" value={`${mc.medianReturn >= 0 ? "+" : ""}${mc.medianReturn.toFixed(1)}%`} icon={TrendingUp} tone={pnlTone(mc.medianReturn)} sub="best settings, across seeds" />
           <StatCard label="% Profitable" value={`${(mc.pctProfitable * 100).toFixed(0)}%`} icon={ShieldCheck} tone={mc.pctProfitable >= 0.5 ? "green" : "red"} sub={`${mc.seeds} seeds`} />
-          <StatCard label="Median Sharpe" value={mc.medianSharpe.toFixed(2)} icon={Activity} tone={mc.medianSharpe >= 1 ? "green" : mc.medianSharpe >= 0 ? "cyan" : "red"} />
-          <StatCard label="Worst Drawdown" value={`${mc.worstDD.toFixed(1)}%`} icon={Dice5} tone="red" sub={`worst ${mc.worstReturn.toFixed(0)}% / best +${mc.bestReturn.toFixed(0)}%`} />
+          <StatCard label="Median Sharpe" value={mc.medianSharpe.toFixed(2)} icon={Activity} tone={mc.medianSharpe >= 1 ? "green" : mc.medianSharpe >= 0 ? "neutral" : "red"} />
+          <StatCard label="Worst Drawdown" value={`${mc.worstDD.toFixed(1)}%`} icon={Dice5} sub={`worst ${mc.worstReturn.toFixed(0)}% / best +${mc.bestReturn.toFixed(0)}%`} />
         </div>
       )}
 
       {points && (
-        <Card title="Synthetic sweep, ranked by robustness" right={<Trophy size={14} className="text-warning" />}>
+        <Card title="Simulated sweep, ranked by robustness" icon={Trophy} help="Every combination of settings, the steadiest first, not the luckiest.">
           <div className="overflow-x-auto">
             <div className="grid min-w-[760px]" style={{ gridTemplateColumns: `repeat(${paramKeys.length}, auto) repeat(7, 1fr)` }}>
               {paramKeys.map((k) => (
                 <Head key={k}>{k}</Head>
               ))}
-              <Head right>Med. Ret</Head>
-              <Head right>Med. Sharpe</Head>
-              <Head right>% Prof</Head>
-              <Head right>Worst DD</Head>
-              <Head right>OOS Sharpe</Head>
-              <Head right>OOS/IS</Head>
-              <Head right>Deflated</Head>
+              <Head right><Term k="Median Return">Med. Ret</Term></Head>
+              <Head right><Term k="Median Sharpe">Med. Sharpe</Term></Head>
+              <Head right><Term k="% Profitable">% Prof</Term></Head>
+              <Head right><Term>Worst DD</Term></Head>
+              <Head right><Term>OOS Sharpe</Term></Head>
+              <Head right><Term>OOS/IS</Term></Head>
+              <Head right><Term>Deflated</Term></Head>
               {points.slice(0, 15).map((p, i) => (
                 <Fragment key={i}>
                   {paramKeys.map((k) => (
@@ -226,9 +226,9 @@ export function Optimizer() {
             </div>
           </div>
           <div className="mt-3 text-xs text-cyber-text-faint">
-            Ranked by a robustness score (median return × consistency − drawdown penalty). OOS columns re-run each
-            combo on random histories the ranking never saw. Synthetic data, so a filter, not a promise: the deflated
-            Sharpe lives in the real-candle sweep above.
+            Ranked by a robustness score (median return × consistency − drawdown penalty). The OOS columns re-run
+            each combination on random histories the ranking never saw. Simulated data, so a filter, not a promise:
+            the deflated Sharpe lives in the real-candle sweep above.
           </div>
         </Card>
       )}
@@ -256,11 +256,11 @@ function RealSweep({ report }: { report: SweepReport }) {
           {keys.map((k) => (
             <Head key={k}>{k}</Head>
           ))}
-          <Head right>IS Sharpe</Head>
-          <Head right>OOS Sharpe</Head>
-          <Head right>OOS/IS</Head>
-          <Head right>Deflated Sharpe</Head>
-          <Head right>OOS net</Head>
+          <Head right><Term>IS Sharpe</Term></Head>
+          <Head right><Term>OOS Sharpe</Term></Head>
+          <Head right><Term>OOS/IS</Term></Head>
+          <Head right><Term>Deflated Sharpe</Term></Head>
+          <Head right><Term>OOS net</Term></Head>
           <Head right>OOS trades</Head>
           {report.rows.map((r, i) => (
             <SweepLine key={i} row={r} first={i === 0} />
@@ -347,8 +347,7 @@ function Cell({ children, className = "" }: { children: React.ReactNode; classNa
 }
 function NumField({ label, value, onChange, step, min, max }: { label: string; value: number; onChange: (v: number) => void; step: number; min: number; max: number }) {
   return (
-    <label className="text-xs text-cyber-text-dim">
-      {label}
+    <Field label={label}>
       <input
         type="number"
         value={value}
@@ -356,8 +355,8 @@ function NumField({ label, value, onChange, step, min, max }: { label: string; v
         min={min}
         max={max}
         onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value))))}
-        className="mt-1 w-full rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm text-cyber-text focus:border-accent focus:outline-none"
+        className={`${inputCls} font-mono`}
       />
-    </label>
+    </Field>
   );
 }
