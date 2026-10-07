@@ -119,6 +119,18 @@ pub fn run() {
                         }
                     }
 
+                    // Top-20 order books of the exchange whose costs crypto
+                    // fills pay, every ~30s and offset from the other
+                    // refreshes. A missed one is harmless: the engine stops
+                    // trusting a book after a minute and uses the defaults.
+                    if n % 20 == 11 {
+                        let venue = engine.lock().unwrap().crypto_cost_venue();
+                        let books = marketdata::fetch_books(venue).await;
+                        if !books.is_empty() {
+                            engine.lock().unwrap().apply_books(&books);
+                        }
+                    }
+
                     // Session + account state. Live equity entries are blocked
                     // until this is fresh, so it must beat the engine's
                     // five-minute staleness window comfortably.

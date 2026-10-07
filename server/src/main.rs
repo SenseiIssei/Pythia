@@ -438,6 +438,10 @@ async fn tick_loop(state: AppState) {
     // five-minute staleness window.
     const QUOTES_EVERY: u64 = 8; // ~12s
     const BARS_EVERY: u64 = 40; // ~60s
+    // Order books price a fill's spread and depth. Twenty single-pair public
+    // requests per refresh, so every ~30s rather than every quote, and offset
+    // (n = 11, 31, ...) so a tick never waits on books and quotes together.
+    const BOOKS_EVERY: u64 = 20; // ~30s
     const BROKER_EVERY: u64 = 40; // ~60s
     const RECONCILE_EVERY: u64 = 80; // ~2min
 
@@ -468,6 +472,17 @@ async fn tick_loop(state: AppState) {
             series.extend(marketdata::fetch_alpaca_bars(&key, &secret, &feed, &tf, 10).await);
             if !series.is_empty() {
                 state.engine.lock().unwrap().apply_bars(&series);
+            }
+        }
+
+        // Top-20 books of the exchange whose costs crypto fills pay. A missed
+        // refresh is harmless: the engine stops trusting a book after a minute
+        // and falls back to the calibrated defaults.
+        if n % BOOKS_EVERY == 11 {
+            let venue = state.engine.lock().unwrap().crypto_cost_venue();
+            let books = marketdata::fetch_books(venue).await;
+            if !books.is_empty() {
+                state.engine.lock().unwrap().apply_books(&books);
             }
         }
 
