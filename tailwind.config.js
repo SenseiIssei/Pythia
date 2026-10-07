@@ -13,17 +13,22 @@ export default {
           "surface-2": "#1a1a24",
           border: "#1e1e2a",
           "border-bright": "#2a2a3e",
-          text: "#e0e0e8",
-          "text-dim": "#8888a0",
-          "text-faint": "#555568",
+          text: "#e6e6ee",
+          // Raised from #8888a0 / #555568: the faint grey failed WCAG AA on
+          // the card surface (2.6:1). These two read at about 6.7:1 and 4.6:1.
+          "text-dim": "#9a9ab2",
+          "text-faint": "#7d7d93",
         },
         success: "#22c55e",
         warning: "#f59e0b",
         danger: "#ef4444",
       },
       fontFamily: {
+        // Numbers, headings and labels stay in the monospace that gives Pythia
+        // its look; running text uses the system sans, which reads far more
+        // easily in paragraphs and fits a phone screen.
         mono: ['"JetBrains Mono"', '"Fira Code"', "monospace"],
-        sans: ['"JetBrains Mono"', '"Inter"', "system-ui", "sans-serif"],
+        sans: ['"Inter"', '"Segoe UI Variable Text"', '"Segoe UI"', "system-ui", "-apple-system", "Roboto", "sans-serif"],
       },
       keyframes: {
         "glow-pulse": {

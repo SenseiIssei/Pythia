@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { AlertTriangle, TrendingDown, Trophy } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Badge, Sparkline, MultiLineChart, fmtUsd } from "../components/ui";
+import { Card, PageHeader, Badge, EmptyState, Sparkline, MultiLineChart, Term, fmtUsd } from "../components/ui";
 import { costWarning } from "../components/PnlBreakdown";
 import { breakdown } from "../engine/costs";
 import type { PnlBreakdown, SlippageRow, StrategyConfig } from "../types";
@@ -27,13 +27,25 @@ export function Analytics() {
   const fills = orders.filter((o) => o.status === "filled").slice(0, 30);
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Analytics" subtitle="Drawdown, strategy leaderboard & trade log" />
+    <div className="animate-fade-in mx-auto max-w-6xl">
+      <PageHeader
+        title="Analytics"
+        subtitle="How deep the dips were, which strategies earned their keep after costs, and every fill."
+      />
 
-      <Card title="Portfolio Drawdown" className="mb-4" right={<Badge tone="red">{curMaxDD.toFixed(2)}% max</Badge>}>
-        <Sparkline data={drawdown.length > 1 ? drawdown : [0, 0]} height={120} tone="red" />
+      <Card
+        title="Portfolio Drawdown"
+        className="mb-4"
+        right={
+          <Badge tone={curMaxDD < -0.005 ? "amber" : "neutral"} title="The deepest dip below a high point so far">
+            {curMaxDD.toFixed(2)}% worst
+          </Badge>
+        }
+      >
+        <Sparkline data={drawdown.length > 1 ? drawdown : [0, 0]} height={120} tone="red" label="Drawdown over the session" />
         <div className="mt-1 flex items-center gap-1 text-xs text-cyber-text-faint">
-          <TrendingDown size={11} /> peak-to-current equity drawdown over the session
+          <TrendingDown size={12} aria-hidden /> How far below its best point the account was, over this session. Zero
+          is at the high.
         </div>
       </Card>
 
@@ -41,23 +53,27 @@ export function Analytics() {
         {(() => {
           const active = ranked.filter((s) => s.equityCurve.length > 1 && (s.pnl !== 0 || s.trades > 0));
           if (active.length === 0) {
-            return <div className="py-4 text-center text-xs text-cyber-text-faint">Curves appear once strategies close trades.</div>;
+            return (
+              <EmptyState compact icon={TrendingDown} title="No curves yet">
+                Each strategy's curve appears once it has closed a trade.
+              </EmptyState>
+            );
           }
           return <MultiLineChart height={180} series={active.map((s) => ({ label: s.name.split(" · ")[0], data: s.equityCurve }))} />;
         })()}
       </Card>
 
-      <Card title="Strategy Leaderboard" className="mb-4" right={<Trophy size={14} className="text-warning" />}>
-        <div className="overflow-x-auto">
-          <div className="grid min-w-[640px] grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 text-sm">
+      <Card title="Strategy Leaderboard" icon={Trophy} className="mb-4">
+        <div className="-mx-1 overflow-x-auto px-1">
+          <div className="grid min-w-[680px] grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 text-sm">
             <Head>Strategy</Head>
-            <Head right>Gross</Head>
-            <Head right>Costs</Head>
-            <Head right>Net</Head>
-            <Head right>Trades</Head>
-            <Head right>Win</Head>
-            <Head right>PF</Head>
-            <Head right>maxDD</Head>
+            <Head right><Term>Gross</Term></Head>
+            <Head right><Term>Costs</Term></Head>
+            <Head right><Term>Net</Term></Head>
+            <Head right><Term>Trades</Term></Head>
+            <Head right><Term>Win</Term></Head>
+            <Head right><Term>PF</Term></Head>
+            <Head right><Term>maxDD</Term></Head>
             {ranked.map((s) => {
               const p = pnlOf(s);
               const warn = costWarning(p);
@@ -67,8 +83,8 @@ export function Analytics() {
                     <Badge tone={s.state === "live" ? "red" : s.state === "paused" ? "neutral" : "cyan"}>{s.state}</Badge>
                     <span className="truncate">{s.name}</span>
                     {warn && (
-                      <span title={warn} className="text-warning">
-                        <AlertTriangle size={13} />
+                      <span title={warn} aria-label={warn} className="text-warning">
+                        <AlertTriangle size={13} aria-hidden />
                       </span>
                     )}
                   </div>
@@ -78,7 +94,7 @@ export function Analytics() {
                   <Cell>{s.trades}</Cell>
                   <Cell>{(s.winRate * 100).toFixed(0)}%</Cell>
                   <Cell className={s.profitFactor >= 1 ? "text-success" : "text-cyber-text-dim"}>{s.profitFactor.toFixed(2)}</Cell>
-                  <Cell className="text-danger">{fmtUsd(s.maxDrawdown)}</Cell>
+                  <Cell className="text-cyber-text-dim">{fmtUsd(s.maxDrawdown)}</Cell>
                 </RowGroup>
               );
             })}
@@ -90,7 +106,7 @@ export function Analytics() {
           whose costs exceed 40% of its gross.
         </div>
         {ranked.every((s) => s.trades === 0) && (
-          <div className="mt-2 text-xs text-cyber-text-faint">No closed trades yet — stats populate as positions close.</div>
+          <div className="mt-2 text-xs text-cyber-text-faint">No closed trades yet. The numbers fill in as positions close.</div>
         )}
       </Card>
 
@@ -98,12 +114,12 @@ export function Analytics() {
 
       <Card title="Trade Log">
         <div className="space-y-1 font-mono text-xs">
-          {fills.length === 0 && <div className="text-cyber-text-faint">No fills yet.</div>}
+          {fills.length === 0 && <EmptyState compact icon={Trophy} title="No fills yet" />}
           {fills.map((o) => (
-            <div key={o.id} className="flex items-center gap-3 border-b border-cyber-border/40 py-1">
+            <div key={o.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-cyber-border/40 py-1.5">
               <span className="text-cyber-text-faint">{new Date(o.ts).toLocaleTimeString()}</span>
-              <span className={o.side === "buy" ? "text-success" : "text-danger"}>{o.side.toUpperCase()}</span>
-              <span className="flex-1 truncate text-cyber-text-dim">{o.marketId}</span>
+              <span className={`font-bold ${o.side === "buy" ? "text-success" : "text-danger"}`}>{o.side.toUpperCase()}</span>
+              <span className="min-w-0 flex-1 basis-32 truncate text-cyber-text-dim">{o.marketId}</span>
               <span>{o.filledQty.toFixed(4)}</span>
               <span className="text-cyber-text-faint">@ {o.avgFillPrice}</span>
               {o.realisedSlippageBps !== undefined && (
@@ -124,7 +140,11 @@ export function Analytics() {
 }
 
 function Head({ children, right }: { children: React.ReactNode; right?: boolean }) {
-  return <div className={`pb-2 text-xs uppercase text-cyber-text-faint ${right ? "text-right" : ""}`}>{children}</div>;
+  return (
+    <div className={`pb-2 font-mono text-[11px] uppercase tracking-wider text-cyber-text-faint ${right ? "text-right" : ""}`}>
+      {children}
+    </div>
+  );
 }
 function Cell({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return <div className={`py-2 text-right font-mono ${className}`}>{children}</div>;
@@ -148,8 +168,8 @@ function SlippageCard({ rows }: { rows: SlippageRow[] }) {
           fills per venue. Simulated paper fills are not counted: they pay the model by construction.
         </div>
       ) : (
-        <>
-          <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 text-sm">
+        <div className="-mx-1 overflow-x-auto px-1">
+          <div className="grid min-w-[520px] grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 text-sm">
             <Head>Venue</Head>
             <Head right>Fills</Head>
             <Head right>Median realised</Head>
@@ -181,7 +201,7 @@ function SlippageCard({ rows }: { rows: SlippageRow[] }) {
             fills are modelled on the live order book of the exchange when one less than a minute old exists,
             and on the calibrated averages otherwise. The live book count says how many were the first kind.
           </div>
-        </>
+        </div>
       )}
     </Card>
   );

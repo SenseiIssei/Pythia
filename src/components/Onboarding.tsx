@@ -88,12 +88,15 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div className="app-window grid-bg flex items-center justify-center p-6">
-      <div className="w-full max-w-xl rounded-xl border border-cyber-border bg-cyber-surface p-6">
-        <div className="mb-5 flex gap-1.5" aria-label={`Step ${i + 1} of ${STEPS.length}`}>
+    <div className="app-window grid-bg flex items-start justify-center overflow-y-auto p-4 sm:items-center sm:p-6">
+      <div className="w-full max-w-xl rounded-xl border border-cyber-border bg-cyber-surface p-5 sm:p-6">
+        <div className="mb-2 flex gap-1.5" role="img" aria-label={`Step ${i + 1} of ${STEPS.length}`}>
           {STEPS.map((_, k) => (
             <div key={k} className={`h-1 flex-1 rounded-full ${k <= i ? "bg-accent" : "bg-cyber-surface-2"}`} />
           ))}
+        </div>
+        <div className="mb-5 font-mono text-[11px] text-cyber-text-faint">
+          {i + 1} of {STEPS.length}
         </div>
         <AnimatePresence mode="wait">
           <motion.div
@@ -103,8 +106,8 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             exit={{ opacity: 0, x: -16 }}
             transition={{ duration: 0.18 }}
           >
-            <step.icon size={30} className={`mb-3 ${step.tone}`} />
-            <h1 className="mb-3 text-xl font-bold text-cyber-text">{step.title}</h1>
+            <step.icon size={30} aria-hidden className={`mb-3 ${step.tone}`} />
+            <h1 className="mb-3 font-mono text-xl font-bold text-cyber-text">{step.title}</h1>
             <div className="space-y-3 text-sm leading-relaxed text-cyber-text-dim">
               {step.body.map((p) => (
                 <p key={p}>{p}</p>
@@ -114,14 +117,16 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         </AnimatePresence>
         <div className="mt-6 flex items-center justify-between">
           <button
+            type="button"
             onClick={finish}
-            className="text-xs text-cyber-text-faint hover:text-cyber-text"
+            className="rounded px-1 text-xs text-cyber-text-faint hover:text-cyber-text"
           >
-            Skip
+            Skip the introduction
           </button>
           <div className="flex gap-2">
             {i > 0 && (
               <button
+                type="button"
                 onClick={() => setI(i - 1)}
                 className="flex items-center gap-1.5 rounded-lg border border-cyber-border px-3 py-1.5 text-sm text-cyber-text-dim hover:text-cyber-text"
               >
@@ -129,6 +134,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               </button>
             )}
             <button
+              type="button"
               onClick={() => (last ? finish() : setI(i + 1))}
               className="flex items-center gap-1.5 rounded-lg border border-accent/50 bg-accent/10 px-4 py-1.5 text-sm font-bold text-accent hover:bg-accent/20"
             >

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { RefreshCw, TriangleAlert } from "lucide-react";
-import { Badge, Button, Card, PageHeader, Sparkline } from "../components/ui";
+import { Microscope, RefreshCw } from "lucide-react";
+import { Badge, Button, Card, EmptyState, Loading, Meter, Notice, PageHeader, Sparkline } from "../components/ui";
 import { liveMode } from "../live";
 import { labStatus, type LabStatus, type PaperBook } from "../lab";
 
@@ -63,8 +63,12 @@ function Book({ b }: { b: PaperBook }) {
           )}
         </div>
       )}
-      <div className="mt-2 text-xs text-cyber-text-faint">
-        Gate 7 needs 30 days: {Math.min(b.days, 30)}/30
+      <div className="mt-3" title="Gate 7 of the Strategy Passport: 30 days of practice before real money">
+        <div className="mb-1 flex justify-between text-xs text-cyber-text-faint">
+          <span>Days of practice (30 needed for real money)</span>
+          <span className="font-mono">{Math.min(b.days, 30)}/30</span>
+        </div>
+        <Meter pct={(Math.min(b.days, 30) / 30) * 100} tone={b.days >= 30 ? "green" : "neutral"} label="Days of practice" />
       </div>
     </Card>
   );
@@ -97,31 +101,31 @@ export function Lab() {
 
   if (mode === "none") {
     return (
-      <div className="animate-fade-in max-w-5xl">
+      <div className="animate-fade-in mx-auto max-w-5xl">
         {header}
-        <Card className="border-warning/30 bg-warning/5">
-          <div className="text-sm text-cyber-text-dim">The lab view needs the desktop app or a connected backend.</div>
+        <Card>
+          <EmptyState icon={Microscope} title="The lab needs the desktop app or a connected server">
+            The paper books and experiment reports are read from the lab's data folder, which this browser version
+            cannot reach.
+          </EmptyState>
         </Card>
       </div>
     );
   }
 
   return (
-    <div className="animate-fade-in max-w-5xl space-y-4">
+    <div className="animate-fade-in mx-auto max-w-5xl space-y-4">
       {header}
+      {!s && !err && <Loading>Reading the lab's data</Loading>}
       {err && (
-        <Card className="border-danger/30 bg-danger/5">
-          <div className="text-sm text-danger">{err}</div>
-        </Card>
+        <Notice tone="danger" title="Could not read the lab">
+          {err}
+        </Notice>
       )}
       {s && !s.found && (
-        <Card className="border-warning/30 bg-warning/5">
-          <div className="flex items-start gap-3 text-sm text-cyber-text-dim">
-            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-warning" />
-            No lab data found. Set PYTHIA_DATA (or PYTHIA_MODELS) to the folder the lab syncs to, for example the
-            synced PythiaData folder.
-          </div>
-        </Card>
+        <Notice tone="warning" title="No lab data found">
+          Set PYTHIA_DATA (or PYTHIA_MODELS) to the folder the lab syncs to, for example the synced PythiaData folder.
+        </Notice>
       )}
 
       {s?.health && (
@@ -131,8 +135,10 @@ export function Lab() {
         >
           <div className="grid gap-x-6 gap-y-1 text-sm md:grid-cols-2">
             {s.health.checks.map((c) => (
-              <div key={c.name} className="flex items-baseline gap-2">
-                <span className={c.ok ? "text-success" : "text-danger"}>{c.ok ? "●" : "▲"}</span>
+              <div key={c.name} className="flex min-w-0 items-baseline gap-2">
+                <span className={c.ok ? "text-success" : "text-danger"} aria-label={c.ok ? "fine" : "needs a look"}>
+                  {c.ok ? "●" : "▲"}
+                </span>
                 <span className="text-cyber-text">{c.name}</span>
                 <span className="truncate text-xs text-cyber-text-faint" title={c.detail}>
                   {c.detail}
@@ -148,8 +154,11 @@ export function Lab() {
 
       {s && s.books.length > 0 && (
         <>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-bold text-accent">Paper books</div>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="font-mono text-sm font-bold text-accent">Paper books</h2>
+              <p className="text-xs text-cyber-text-faint">Strategies trading real prices with play money, to see if the backtest holds.</p>
+            </div>
             <Button tone="neutral" icon={RefreshCw} onClick={() => void refresh()}>
               Refresh
             </Button>

@@ -39,35 +39,35 @@ export function ComfortZone() {
   const money = (pct: number) => fmtUsd((eq * pct) / 100, 0);
 
   return (
-    <Card className="mb-4">
-      <div className="mb-3 flex items-start gap-3">
-        <HeartPulse size={18} className="mt-0.5 text-accent" />
-        <div>
-          <div className="font-bold text-cyber-text">How much could you lose in a bad month without it hurting?</div>
-          <div className="text-sm text-cyber-text-dim">
-            Pick an answer and Pythia sets its safety limits to match. You can change it any time.
-          </div>
-        </div>
-      </div>
-      <div className="mb-4 flex flex-wrap gap-2">
+    <Card
+      title="How careful should it be?"
+      icon={HeartPulse}
+      subtitle="How much could you lose in a bad month without it hurting? Pick an answer and Pythia sets its safety limits to match. You can change it any time."
+    >
+      <div role="radiogroup" aria-label="A bad month could cost" className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {CHOICES.map((c) => (
           <button
             key={c}
+            type="button"
+            role="radio"
+            aria-checked={pick === c}
             onClick={() => {
               setPick(c);
               setSaved(false);
             }}
-            className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${
+            className={`rounded-lg border px-3 py-2 text-left transition-colors ${
               pick === c
                 ? "border-accent/50 bg-accent/10 text-accent"
-                : "border-cyber-border text-cyber-text-dim hover:text-cyber-text"
+                : "border-cyber-border bg-cyber-bg/40 text-cyber-text-dim hover:border-cyber-border-bright hover:text-cyber-text"
             }`}
           >
-            {c} % <span className="text-xs text-cyber-text-faint">({money(c)})</span>
+            <div className="font-mono text-base font-bold">{c} %</div>
+            <div className="font-mono text-xs text-cyber-text-faint">{money(c)}</div>
           </button>
         ))}
       </div>
-      <ul className="mb-4 space-y-1.5 text-sm text-cyber-text-dim">
+      <div className="mb-1.5 text-xs font-medium text-cyber-text-faint">With that answer:</div>
+      <ul className="mb-4 list-disc space-y-1.5 pl-5 text-sm text-cyber-text-dim marker:text-cyber-text-faint">
         <li>
           If it is down <b className="text-cyber-text">{money(plan.maxDrawdownPct!)}</b> from its best point, it
           stops buying anything new until you let it.
@@ -98,8 +98,13 @@ export function ComfortZone() {
         >
           Use these limits
         </Button>
-        {saved && <span className="text-sm text-success">Saved. The limits apply from the next trade on.</span>}
+        {saved && (
+          <span role="status" className="text-sm text-success">
+            Saved. The limits apply from the next trade on.
+          </span>
+        )}
         <button
+          type="button"
           onClick={() => {
             resetOnboarding();
             window.location.reload();
