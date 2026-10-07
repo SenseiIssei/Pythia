@@ -242,7 +242,7 @@ export function StatCard({
     >
       <div className="flex items-center gap-1.5 text-cyber-text-dim">
         <Icon size={14} aria-hidden className={`shrink-0 ${tone === "neutral" ? "text-cyber-text-faint" : TEXT[tone]}`} />
-        <span className="min-w-0 truncate text-[11px] font-medium uppercase tracking-wider">{label}</span>
+        <span className="min-w-0 text-[11px] font-medium uppercase leading-tight tracking-wider">{label}</span>
         {tip && <Explain text={tip} label={label} />}
       </div>
       <div className={`mt-2 break-words font-mono text-xl font-bold tabular-nums sm:text-2xl ${TEXT[tone]}`}>{value}</div>
