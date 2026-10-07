@@ -668,11 +668,18 @@ export type ExchangeId = "kraken" | "binance" | "bybit" | "okx" | "coinbase";
 export interface ExchangeInfo {
   id: ExchangeId;
   label: string;
-  /** OKX and Coinbase need an API passphrase alongside key + secret. */
+  /** OKX needs an API passphrase alongside key + secret. */
   needsPassphrase: boolean;
   /** Whether order routing is implemented for this venue. */
   canTrade: boolean;
   configured: boolean;
+  /** Form labels: Coinbase calls them "API key name" and "Private key (PEM)". */
+  keyLabel: string;
+  secretLabel: string;
+  /** The secret is a multi-line PEM block, so the form shows a text area. */
+  secretMultiline: boolean;
+  /** Plain-language instructions for creating a correctly scoped key. */
+  keyHelp: string;
 }
 
 export type Chain =

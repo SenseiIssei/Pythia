@@ -493,6 +493,9 @@ pub fn save_exchange_keys(
     if ex.needs_passphrase() && !fields.contains_key("passphrase") {
         return Err(format!("{} also needs the API passphrase you chose", ex.label()));
     }
+    // A Coinbase private key has structure; refuse a broken paste here rather
+    // than at the first order. The message never quotes the key.
+    cex::check_credentials(ex, &fields["key"], &fields["secret"]).map_err(|e| format!("{}: {e}", ex.label()))?;
     vault::save(&vault::exchange_slot(ex.id()), &fields)?;
 
     // Selecting an exchange is a separate slot so the choice survives a key wipe.
