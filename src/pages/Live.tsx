@@ -11,7 +11,7 @@ import {
   Timer,
   Gauge,
 } from "lucide-react";
-import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
+import { Card, PageHeader, Badge, Button, EmptyState, Toggle, inputCls } from "../components/ui";
 import { useStore } from "../store";
 import {
   liveMode,
@@ -46,7 +46,7 @@ export function Live() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [acct, setAcct] = useState<AlpacaAccount | null>(null);
-  const [checks, setChecks] = useState<Record<string, string>>({});
+  const [checks, setChecks] = useState<Record<string, { ok: boolean; text: string }>>({});
 
   // Reflect the engine's actual arm config once it reports back.
   useEffect(() => {
@@ -67,12 +67,12 @@ export function Live() {
     setBusy(true);
     setAcct(null);
     setErr("");
-    const next: Record<string, string> = {};
+    const next: Record<string, { ok: boolean; text: string }> = {};
     for (const v of venues) {
       try {
-        next[v] = await verifyVenue(v, paper);
+        next[v] = { ok: true, text: await verifyVenue(v, paper) };
       } catch (e) {
-        next[v] = `❌ ${e instanceof Error ? e.message : String(e)}`;
+        next[v] = { ok: false, text: e instanceof Error ? e.message : String(e) };
       }
     }
     setChecks(next);
@@ -115,18 +115,13 @@ export function Live() {
 
   if (mode === "none") {
     return (
-      <div className="animate-fade-in max-w-3xl">
-        <PageHeader title="Live Execution" subtitle="Route real orders — gated, paper-first" />
-        <Card className="border-warning/30 bg-warning/5">
-          <div className="flex items-start gap-3">
-            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-warning" />
-            <div className="text-sm text-cyber-text-dim">
-              <div className="font-bold text-warning">Not available in the browser paper build</div>
-              Live execution needs a venue connection. Run the <span className="text-accent">desktop app</span>{" "}
-              (keys in the OS keychain) or a <span className="text-accent">backend server</span> (keys in its
-              environment).
-            </div>
-          </div>
+      <div className="animate-fade-in mx-auto max-w-3xl">
+        <PageHeader title="Live Execution" subtitle="Send real orders to a broker: gated, and paper first." />
+        <Card>
+          <EmptyState icon={Radio} title="Live execution needs the desktop app or a connected server">
+            Real orders need a connection to a broker. Use the desktop app (keys in the OS keychain) or a backend server
+            (keys in its environment). This browser version can only practise.
+          </EmptyState>
         </Card>
       </div>
     );
@@ -136,30 +131,36 @@ export function Live() {
   const realMoney = live.armed && !live.paper && !live.dryRun;
 
   return (
-    <div className="animate-fade-in max-w-3xl">
-      <PageHeader title="Live Execution" subtitle="Per-venue arming · paper-first · fully gated" />
+    <div className="animate-fade-in mx-auto max-w-3xl">
+      <PageHeader
+        title="Live Execution"
+        subtitle="Send real orders to a broker. Each venue is armed separately, paper endpoint first, and every order still passes the risk limits."
+      />
 
       {/* status banner */}
       {live.armed ? (
         <div
-          className={`mb-4 flex items-center justify-between rounded-lg border px-4 py-2 text-sm font-bold ${
+          role="status"
+          className={`mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-2.5 text-sm font-bold ${
             realMoney
               ? "border-danger/50 bg-danger/15 text-danger text-glow-red animate-pulse-red"
               : "border-warning/40 bg-warning/10 text-warning"
           }`}
         >
-          <span className="flex items-center gap-2">
-            <Radio size={15} /> LIVE ARMED —{" "}
-            {live.dryRun ? "dry-run (nothing sent)" : live.paper ? "paper endpoint (no real money)" : "REAL MONEY"}
-            {live.venues.length > 0 && (
-              <span className="font-normal opacity-80">· {live.venues.join(", ")}</span>
-            )}
+          <span className="flex flex-wrap items-center gap-x-2">
+            <Radio size={15} aria-hidden /> Armed:{" "}
+            {live.dryRun ? "dry-run, nothing is sent" : live.paper ? "paper endpoint, no real money" : "REAL MONEY"}
+            {live.venues.length > 0 && <span className="font-normal opacity-80">· {live.venues.join(", ")}</span>}
           </span>
-          <span className="text-xs">{live.pending} pending</span>
+          <span className="font-mono text-xs">{live.pending} pending</span>
         </div>
       ) : (
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-accent/20 bg-accent/5 px-4 py-2 text-sm text-accent">
-          <Power size={14} /> Disarmed — everything simulates. No order leaves this machine.
+        <div
+          role="status"
+          className="mb-4 flex items-center gap-2 rounded-xl border border-success/30 bg-success/[0.06] px-4 py-2.5 text-sm text-success"
+        >
+          <Power size={14} aria-hidden className="shrink-0" /> Disarmed: everything is simulated. No order leaves this
+          machine.
         </div>
       )}
 
@@ -191,7 +192,7 @@ export function Live() {
             <div className="font-bold">New entries are on hold</div>
             <div className="text-cyber-text-dim">{live.blockedReason}</div>
             <div className="mt-1 text-[11px] text-cyber-text-faint">
-              Exits are never blocked — an open position can always be closed.
+              Exits are never blocked: an open position can always be closed.
             </div>
           </div>
         </div>
@@ -241,7 +242,7 @@ export function Live() {
             <span className="text-accent">enabled venue</span> are sent for real. Everything else stays paper. The
             global kill switch and every risk limit still gate each order. Start on the{" "}
             <span className="text-accent">paper endpoint</span> (real API, fake money); flip to real money only once
-            you trust it. Not financial advice — read SAFETY.md.
+            you trust it. Not financial advice: read SAFETY.md.
           </div>
         </div>
       </Card>
@@ -262,10 +263,11 @@ export function Live() {
                 <div>
                   <div className="text-sm font-medium">{label}</div>
                   <div className="text-[11px] text-cyber-text-faint">
-                    {connected ? note : "no keys — add them in Settings"}
+                    {connected ? note : "No keys yet: add them in Settings"}
                   </div>
                 </div>
                 <Toggle
+                  label={`Arm ${label}`}
                   on={venues.includes(venue)}
                   onChange={(v) => toggleVenue(venue, v)}
                 />
@@ -289,9 +291,10 @@ export function Live() {
         }
       >
         <div className="mb-3 text-sm text-cyber-text-dim">
-          Verify your keys reach the {paper ? "paper" : "live"} endpoint before arming. Read-only — places no order.{" "}
+          Check that your keys reach the {paper ? "paper" : "live"} endpoint before arming. Read-only: it places no
+          order.{" "}
           {mode === "native"
-            ? `Keys come from the OS keychain (Settings). Alpaca uses the ${paper ? "Alpaca — Paper" : "Alpaca — Live"} slot; the two accounts have separate key pairs.`
+            ? `Keys come from the OS keychain (Settings). Alpaca uses the ${paper ? "Alpaca paper account" : "Alpaca live account"} keys; the two accounts have separate key pairs.`
             : "Keys come from the server environment (Alpaca: APCA_API_KEY_ID / APCA_API_SECRET_KEY, or APCA_LIVE_* for the live endpoint)."}
         </div>
         <Button tone="cyan" icon={PlugZap} disabled={busy || venues.length === 0} onClick={testConn}>
@@ -300,8 +303,15 @@ export function Live() {
         {Object.entries(checks).length > 0 && (
           <div className="mt-3 space-y-1 rounded-lg border border-cyber-border bg-cyber-surface/50 p-3 text-xs">
             {Object.entries(checks).map(([v, r]) => (
-              <div key={v} className={r.startsWith("❌") ? "text-danger" : "text-success"}>
-                <span className="uppercase tracking-widest text-cyber-text-faint">{v}</span> — {r}
+              <div key={v} className={`flex items-start gap-1.5 ${r.ok ? "text-success" : "text-danger"}`}>
+                {r.ok ? (
+                  <CheckCircle2 size={13} aria-label="works" className="mt-0.5 shrink-0" />
+                ) : (
+                  <TriangleAlert size={13} aria-label="failed" className="mt-0.5 shrink-0" />
+                )}
+                <span>
+                  <span className="font-mono uppercase tracking-widest text-cyber-text-faint">{v}</span>: {r.text}
+                </span>
               </div>
             ))}
           </div>
@@ -336,15 +346,20 @@ export function Live() {
               <div className="text-sm font-medium">Endpoint</div>
               <div className="text-[11px] text-cyber-text-faint">
                 {live.armed
-                  ? "locked while armed — disarm to change"
+                  ? "Locked while armed: disarm to change"
                   : paper
-                    ? "paper — no real money"
-                    : "LIVE — real money"}
+                    ? "Paper: no real money"
+                    : "LIVE: real money"}
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span className={paper ? "text-accent" : "text-danger"}>{paper ? "Paper" : "Live"}</span>
-              <Toggle on={!paper} onChange={(v) => !live.armed && setPaper(!v)} />
+              <Toggle
+                label="Use the live (real money) endpoint"
+                on={!paper}
+                disabled={live.armed}
+                onChange={(v) => !live.armed && setPaper(!v)}
+              />
             </div>
           </div>
           <div
@@ -355,18 +370,18 @@ export function Live() {
             <div>
               <div className="text-sm font-medium">Dry-run</div>
               <div className="text-[11px] text-cyber-text-faint">
-                {live.armed ? "locked while armed — disarm to change" : "log intended orders, submit nothing"}
+                {live.armed ? "Locked while armed: disarm to change" : "Write down the orders it would send, send nothing"}
               </div>
             </div>
-            <Toggle on={dryRun} onChange={(v) => !live.armed && setDryRun(v)} />
+            <Toggle label="Dry-run" on={dryRun} disabled={live.armed} onChange={(v) => !live.armed && setDryRun(v)} />
           </div>
-          <div className="flex items-center justify-between rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2 sm:col-span-2">
-            <div>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2 sm:col-span-2">
+            <div className="min-w-0">
               <div className="flex items-center gap-1.5 text-sm font-medium">
-                <Timer size={13} /> Order timeout
+                <Timer size={13} aria-hidden /> Order timeout
               </div>
               <div className="text-[11px] text-cyber-text-faint">
-                after this long, an unfilled order is <b>cancelled at the venue</b> and whatever filled is booked
+                After this long, an unfilled order is <b>cancelled at the venue</b> and whatever filled is booked.
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs">
@@ -376,8 +391,9 @@ export function Live() {
                 max={900}
                 step={15}
                 value={timeoutSec}
+                aria-label="Order timeout in seconds"
                 onChange={(e) => setTimeoutSec(Number(e.target.value))}
-                className="w-32 accent-accent"
+                className="w-32"
               />
               <span className="w-12 text-right font-mono">{timeoutSec}s</span>
             </div>
@@ -398,13 +414,18 @@ export function Live() {
             <div className="text-sm font-medium">Extended hours</div>
             <div className="text-[11px] text-cyber-text-faint">
               {live.armed
-                ? "locked while armed — disarm to change"
+                ? "Locked while armed: disarm to change"
                 : live.broker?.extendedOpen && !live.broker?.marketOpen
-                  ? `pre/after-market is open right now${live.broker.sessionEnd ? ` until ${live.broker.sessionEnd} ET` : ""} — thin book, wide spreads`
-                  : "trade 04:00–20:00 ET instead of 09:30–16:00 · whole-share limit orders only"}
+                  ? `Pre/after-market is open right now${live.broker.sessionEnd ? ` until ${live.broker.sessionEnd} ET` : ""}: few buyers and sellers, wide spreads`
+                  : "Trade 04:00–20:00 ET instead of 09:30–16:00 · whole-share limit orders only"}
             </div>
           </div>
-          <Toggle on={extendedHours} onChange={(v) => !live.armed && setExtendedHours(v)} />
+          <Toggle
+            label="Extended hours"
+            on={extendedHours}
+            disabled={live.armed}
+            onChange={(v) => !live.armed && setExtendedHours(v)}
+          />
         </div>
 
         {/* Switching to real money is a different decision from arming at all. */}
@@ -413,8 +434,8 @@ export function Live() {
             <TriangleAlert size={15} className="mt-0.5 shrink-0 text-danger" />
             <div className="text-cyber-text-dim">
               <span className="font-bold text-danger">Real money.</span> Arming now routes orders to your live
-              Alpaca account. This uses the <span className="text-accent">Alpaca — Live</span> keys from Settings,
-              not the paper ones — test them there first if you haven't.
+              Alpaca account. This uses the <span className="text-accent">Alpaca live account</span> keys from Settings,
+              not the paper ones. Test them there first if you have not.
             </div>
           </div>
         )}
@@ -425,12 +446,14 @@ export function Live() {
               Type <span className="font-bold text-danger">{ARM_PHRASE}</span> to enable order routing
               {!paper && !dryRun ? " with REAL MONEY" : ""}.
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <input
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 placeholder={ARM_PHRASE}
-                className="w-40 rounded border border-cyber-border bg-cyber-surface px-2 py-1.5 text-sm focus:border-danger focus:outline-none"
+                aria-label={`Type ${ARM_PHRASE} to confirm`}
+                spellCheck={false}
+                className={`${inputCls} w-40 font-mono focus:border-danger`}
               />
               <Button tone="red" icon={Radio} disabled={!canArm || busy} onClick={arm}>
                 Arm live
@@ -444,7 +467,7 @@ export function Live() {
         ) : (
           <div className="flex items-center gap-2">
             <Button tone="cyan" icon={Power} disabled={busy} onClick={disarm}>
-              Disarm — back to paper
+              Disarm: back to paper
             </Button>
             {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
           </div>
@@ -494,16 +517,16 @@ function ExecutionPolicyCard() {
           <span className={adaptiveExecution ? "text-purple-neon" : "text-cyber-text-faint"}>
             {adaptiveExecution ? "learning" : "always cross"}
           </span>
-          <Toggle on={adaptiveExecution} onChange={setAdaptiveExecution} />
+          <Toggle label="Adaptive execution" on={adaptiveExecution} onChange={setAdaptiveExecution} />
         </div>
       </div>
 
       <div className="mb-3 text-[11px] leading-snug text-cyber-text-faint">
         Crossing the spread on a signal that stays valid for hours is pure waste. With this on,
         orders may rest inside the spread instead, and the policy learns from what each choice
-        actually cost — against the price at decision time, not the fill. An order that never fills
+        actually cost, measured against the price at decision time, not the fill. An order that never fills
         is charged a penalty, because the signal was acted on late or not at all.
-        {!adaptiveExecution && " While off, every order crosses — but costs are still recorded, so turning it on starts with real data."}
+        {!adaptiveExecution && " While off, every order crosses, but costs are still recorded, so turning it on starts with real data."}
       </div>
 
       {execution.length === 0 ? (
@@ -544,7 +567,7 @@ function ExecutionPolicyCard() {
             </tbody>
           </table>
           <div className="mt-1.5 text-[10px] text-cyber-text-faint">
-            Cost is measured against the price when the order was created — negative means it beat
+            Cost is measured against the price when the order was created; negative means it beat
             that price. Missed orders are charged a penalty, so a style that never fills does not
             look cheap.
           </div>
@@ -578,14 +601,14 @@ function ReadinessCard() {
     {
       label: "Alpaca keys saved",
       ok: live.alpacaConnected,
-      detail: live.alpacaConnected ? "in the OS keychain" : "Settings → Alpaca — Paper",
+      detail: live.alpacaConnected ? "in the OS keychain" : "Settings → Alpaca paper account",
     },
     {
       label: "Real equity candles loaded",
       ok: barsReady,
       detail: barsReady
         ? "indicators are running on real bars"
-        : "waiting for Alpaca bars — strategies skip any market with under 30",
+        : "waiting for Alpaca bars: strategies skip any market with under 30",
     },
     {
       label: "Live execution armed for Alpaca",
@@ -656,7 +679,7 @@ function ReadinessCard() {
       </div>
       {done === steps.length && (
         <div className="mt-3 text-[11px] text-success">
-          Every gate is clear — the next signal on an Alpaca market routes to the broker.
+          Every gate is clear: the next signal on an Alpaca market routes to the broker.
         </div>
       )}
     </Card>
@@ -735,7 +758,7 @@ function DiagnosticsCard() {
             </div>
             {r.signal && <div className="mt-1 text-success">signal · {r.signal}</div>}
             <div className={`mt-0.5 ${r.suppressed ? "text-warning" : "text-success"}`}>
-              {r.suppressed ?? "clear — the next signal routes to the broker"}
+              {r.suppressed ?? "Clear: the next signal routes to the broker"}
             </div>
           </div>
         ))}
