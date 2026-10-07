@@ -89,7 +89,9 @@ pub fn run() {
                         // (otherwise those markets stay on the simulator).
                         let (id, secret) = alpaca_keys();
                         let feed = commands::get_prefs().alpaca_feed;
-                        let alpaca = marketdata::fetch_alpaca(&id, &secret, &feed).await;
+                        let mut alpaca = marketdata::fetch_alpaca(&id, &secret, &feed).await;
+                        // Alpaca's crypto data is public: real prices even without keys.
+                        alpaca.extend(marketdata::fetch_alpaca_crypto().await);
                         let mut e = engine.lock().unwrap();
                         e.apply_kraken(&kraken);
                         e.apply_polymarket(&poly);
@@ -113,6 +115,11 @@ pub fn run() {
                                 10,
                             )
                             .await,
+                        );
+                        // Three days: crypto never closes, so ten days of small
+                        // bars would overrun the single page fetched.
+                        series.extend(
+                            marketdata::fetch_alpaca_crypto_bars(&p.bar_timeframe, 3).await,
                         );
                         if !series.is_empty() {
                             engine.lock().unwrap().apply_bars(&series);

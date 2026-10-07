@@ -862,8 +862,10 @@ impl MarketConnector for AlpacaConnector {
         Ok(arr
             .iter()
             .filter_map(|p| {
+                let symbol = p.get("symbol")?.as_str()?;
+                let class = p.get("asset_class").and_then(|c| c.as_str()).unwrap_or("");
                 Some(BrokerPosition {
-                    symbol: p.get("symbol")?.as_str()?.to_string(),
+                    symbol: position_symbol(symbol, class),
                     qty: num(p.get("qty"))?,
                     avg_price: num_or0(p.get("avg_entry_price")),
                     market_value: num_or0(p.get("market_value")),
@@ -885,9 +887,36 @@ impl MarketConnector for AlpacaConnector {
     }
 }
 
+/// The symbol a position is reported under, in the form orders and markets
+/// use. Alpaca takes crypto orders as `BTC/USD` but lists the position as
+/// `BTCUSD`; without putting the slash back, reconciliation would not find the
+/// market and would treat a real holding as someone else's.
+fn position_symbol(symbol: &str, asset_class: &str) -> String {
+    if asset_class != "crypto" || symbol.contains('/') {
+        return symbol.to_string();
+    }
+    // Longest quote first, so `USDT` is not read as `USD` plus a stray `T`.
+    for quote in ["USDT", "USDC", "USD", "BTC"] {
+        if let Some(base) = symbol.strip_suffix(quote).filter(|b| !b.is_empty()) {
+            return format!("{base}/{quote}");
+        }
+    }
+    symbol.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crypto_positions_come_back_in_the_pair_form_orders_use() {
+        assert_eq!(position_symbol("BTCUSD", "crypto"), "BTC/USD");
+        assert_eq!(position_symbol("ETHUSDT", "crypto"), "ETH/USDT");
+        assert_eq!(position_symbol("ETH/USD", "crypto"), "ETH/USD");
+        // An equity ticker that happens to end in USD is left alone.
+        assert_eq!(position_symbol("ABUSD", "us_equity"), "ABUSD");
+        assert_eq!(position_symbol("AAPL", ""), "AAPL");
+    }
 
     fn conn() -> AlpacaConnector {
         AlpacaConnector::new(Some("k".into()), Some("s".into()), true)

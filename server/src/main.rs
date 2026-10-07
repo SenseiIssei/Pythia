@@ -457,7 +457,9 @@ async fn tick_loop(state: AppState) {
             let (key, secret, feed) = alpaca_data_keys(&state.creds);
             let kraken = marketdata::fetch_kraken().await;
             let poly = marketdata::fetch_polymarket().await;
-            let alpaca = marketdata::fetch_alpaca(&key, &secret, &feed).await;
+            let mut alpaca = marketdata::fetch_alpaca(&key, &secret, &feed).await;
+            // Alpaca's crypto data is public, so these are real even without keys.
+            alpaca.extend(marketdata::fetch_alpaca_crypto().await);
             let mut e = state.engine.lock().unwrap();
             e.apply_kraken(&kraken);
             e.apply_polymarket(&poly);
@@ -470,6 +472,9 @@ async fn tick_loop(state: AppState) {
             let (key, secret, feed) = alpaca_data_keys(&state.creds);
             let mut series = marketdata::fetch_kraken_bars(kraken_min).await;
             series.extend(marketdata::fetch_alpaca_bars(&key, &secret, &feed, &tf, 10).await);
+            // Three days, not ten: crypto never closes, so ten days of small
+            // bars would overrun the single page the fetch asks for.
+            series.extend(marketdata::fetch_alpaca_crypto_bars(&tf, 3).await);
             if !series.is_empty() {
                 state.engine.lock().unwrap().apply_bars(&series);
             }

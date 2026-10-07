@@ -12,11 +12,14 @@
     "(the square-root law). Depth means the notional on the 20 best levels of that side, in quote currency",
     "(USD), which is what a depth20 feed reports; defaultDepth is its median, used when no live book is",
     "available. minNotional is the smallest order the venue accepts, in USD, approximately.",
-    "symbols overrides any field for one instrument, keyed by base asset (BTC) or ticker (AAPL).",
+    "symbols overrides any field for one instrument, keyed by base asset (BTC) or ticker (AAPL); a full",
+    "pair (BTC/USD) wins over the base asset, which is how Alpaca's crypto pairs get crypto fees.",
     "Fee sources (lowest tier, checked 2026): Kraken Pro spot 0.25 % maker / 0.40 % taker; Binance spot",
     "0.10 / 0.10; Bybit spot 0.10 / 0.10; OKX spot 0.08 maker / 0.10 taker; Coinbase Advanced 0.40 / 0.60;",
     "Alpaca US equities commission-free (SEC and FINRA TAF regulatory fees on sells are well under 1 bp and",
-    "are not modelled); Polymarket charges no trading fee on most markets, so the spread is the cost."
+    "are not modelled); Alpaca crypto 0.15 % maker / 0.25 % taker, and its spread and depth are a guess from",
+    "one look at Alpaca's public book on 2026-10-07, not a calibration; Polymarket charges no trading fee",
+    "on most markets, so the spread is the cost."
   ],
   "version": 1,
   "venues": {
@@ -144,7 +147,9 @@
         "MSFT": { "halfSpreadBps": 0.5, "impactCoeff": 4, "defaultDepth": 150000 },
         "NVDA": { "halfSpreadBps": 0.7, "impactCoeff": 4, "defaultDepth": 150000 },
         "AMZN": { "halfSpreadBps": 0.6, "impactCoeff": 4, "defaultDepth": 150000 },
-        "TSLA": { "halfSpreadBps": 0.8, "impactCoeff": 5, "defaultDepth": 120000 }
+        "TSLA": { "halfSpreadBps": 0.8, "impactCoeff": 5, "defaultDepth": 120000 },
+        "BTC/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 1.5, "impactCoeff": 5, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 1000000 },
+        "ETH/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 2.5, "impactCoeff": 6, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 1000000 }
       }
     },
     "polymarket": {
