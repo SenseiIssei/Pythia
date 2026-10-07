@@ -71,6 +71,23 @@ export function Predictions() {
     />
   );
 
+  const contextCard = canRunEnsemble() ? (
+    <Card title={advanced ? "Context for the models" : "Something the AI models should know"} icon={Sparkles}>
+      <Field
+        label="Notes (optional)"
+        hint="Passed word for word to every model, so any disagreement between them measures the question rather than the wording."
+      >
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          placeholder="e.g. CPI print came in at 2.9% this morning; the committee meets on the 18th"
+          className={inputCls}
+        />
+      </Field>
+    </Card>
+  ) : null;
+
   // The forecasting layer lives in the Rust core. The browser demo has none, so
   // say that instead of showing an empty page.
   if (liveMode() === "none" && forecasts.length === 0) {
@@ -109,11 +126,17 @@ export function Predictions() {
             it on a scored track record. Until one does, the ensemble sits on the market price, the edge is about zero,
             and nothing trades. That is the honest state, not a broken one.
           </>
-        ) : (
+        ) : untrusted ? (
           <>
             The price a market trades at is everyone's combined guess. Pythia only moves away from it once one of its
             sources has beaten that guess on a checked record. Until then it mostly agrees with the market and makes no
             bets, on purpose.
+          </>
+        ) : (
+          <>
+            The price a market trades at is everyone's combined guess. Some of Pythia's sources have beaten that guess
+            on a checked record, so where they disagree it may lean away from the market, but only as far as they have
+            earned.
           </>
         )}
         <div className="mt-1.5 font-mono text-[11px] text-cyber-text-faint">
@@ -153,22 +176,7 @@ export function Predictions() {
         </Card>
       )}
 
-      {canRunEnsemble() && (
-        <Card title={advanced ? "Context for the models" : "Something the AI models should know"} icon={Sparkles}>
-          <Field
-            label="Notes (optional)"
-            hint="Passed word for word to every model, so any disagreement between them measures the question rather than the wording."
-          >
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              placeholder="e.g. CPI print came in at 2.9% this morning; the committee meets on the 18th"
-              className={inputCls}
-            />
-          </Field>
-        </Card>
-      )}
+      {advanced && contextCard}
 
       {events.length === 0 && prices.length === 0 && (
         <Card>
@@ -213,6 +221,9 @@ export function Predictions() {
       {/* The scoreboard is the most important thing on this page and the least
           readable without the vocabulary. Advanced only. */}
       {advanced && tracks.length > 0 && <Scoreboard tracks={tracks} />}
+
+      {/* A beginner reads the forecasts first; the optional notes come after. */}
+      {!advanced && contextCard}
     </div>
   );
 }
