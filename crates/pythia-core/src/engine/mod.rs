@@ -877,6 +877,12 @@ const STARTING_CASH: f64 = 100_000.0;
 /// cash settling).
 const LIVE_REJECT_BACKOFF_MS: i64 = 60_000;
 
+/// A lab rebalance with refused orders is tried again this often, at most
+/// `LAB_RETRY_MAX` times in all: six attempts over 1 h 40 min, well inside a
+/// signal's 36-hour validity, then the rest waits for the next signal.
+const LAB_RETRY_EVERY_MS: i64 = 20 * 60_000;
+const LAB_RETRY_MAX: u32 = 6;
+
 pub struct Engine {
     markets: Vec<Market>,
     sim: HashMap<String, SimParam>,
@@ -972,6 +978,9 @@ pub struct Engine {
     /// has already been rebalanced to (by `generated_ms`).
     lab_signals: HashMap<String, crate::lab::LabSignal>,
     lab_done: HashMap<String, i64>,
+    /// A rebalance with refused orders, per lab strategy: (signal, attempts so
+    /// far, time of the last one). Not saved; a restart simply tries again.
+    lab_retry: HashMap<String, (i64, u32, i64)>,
     /// Lab notes already journaled, so a stale signal is said once, not every tick.
     lab_notes: HashSet<String>,
     /// Real fills not yet handed to the host for the tax record (see `crate::tax`).
@@ -1057,6 +1066,7 @@ impl Engine {
             research: HashMap::new(),
             lab_signals: HashMap::new(),
             lab_done: HashMap::new(),
+            lab_retry: HashMap::new(),
             lab_notes: HashSet::new(),
             fill_records: Vec::new(),
             ref_prices: HashMap::new(),
@@ -1750,12 +1760,22 @@ impl Engine {
     /// performance: shift-normalize recent P&L over an 80% pool, clamped so no
     /// strategy is starved or dominant.
     fn rebalance_allocations(&mut self) {
-        const POOL: f64 = 80.0;
+        // Lab books keep the budget they were given: the lab tested them on
+        // that capital, and steering it by a few days of P&L would make the
+        // forward test a different strategy from the one judged. Their share
+        // comes off the pool so the total stays where it was.
+        let lab_budget: f64 = self
+            .strategies
+            .iter()
+            .filter(|s| s.kind == StrategyKind::LabTargets && s.state != StrategyState::Paused)
+            .map(|s| s.budget_pct)
+            .sum();
+        let pool = (80.0 - lab_budget).max(0.0);
         let idxs: Vec<usize> = self
             .strategies
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.state != StrategyState::Paused && s.id != "manual")
+            .filter(|(_, s)| s.state != StrategyState::Paused && s.id != "manual" && s.kind != StrategyKind::LabTargets)
             .map(|(i, _)| i)
             .collect();
         if idxs.len() < 2 {
@@ -1775,7 +1795,7 @@ impl Engine {
             return;
         }
         for (j, &i) in idxs.iter().enumerate() {
-            self.strategies[i].budget_pct = ((shifted[j] / sum) * POOL).clamp(3.0, 35.0);
+            self.strategies[i].budget_pct = ((shifted[j] / sum) * pool).clamp(3.0, 35.0);
         }
         self.log(JournalKind::System, "Adaptive allocation rebalanced by recent performance".into(), None, None);
     }
@@ -3295,6 +3315,15 @@ impl Engine {
             if self.lab_done.get(&sid) == Some(&sig.generated_ms) {
                 continue;
             }
+            let attempt = match self.lab_retry.get(&sid) {
+                Some(&(g, n, last)) if g == sig.generated_ms => {
+                    if now - last < LAB_RETRY_EVERY_MS {
+                        continue;
+                    }
+                    n + 1
+                }
+                _ => 1,
+            };
             if !sig.is_fresh(now) {
                 if self.lab_notes.insert(format!("stale:{sid}:{}", sig.generated_ms)) {
                     self.log(
@@ -3338,16 +3367,44 @@ impl Engine {
             // A coin held by another strategy is reported as that, not as missing.
             untradable.retain(|c| !owned_elsewhere.iter().any(|s| s == &format!("{c}/USD")));
             let n = orders.len();
+            let mut refused = 0;
             for o in orders {
                 let Some(m) = crypto.iter().find(|m| m.id == o.market_id).cloned() else { continue };
-                self.place_lab_order(idx, &m, o.side, o.notional);
+                if !self.place_lab_order(idx, &m, o.side, o.notional) {
+                    refused += 1;
+                }
             }
+            let day = chrono::DateTime::from_timestamp_millis(sig.as_of_ms)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            // A refused order is often passing trouble (stale data for a few
+            // seconds, the order rate limit). Losing a whole day's rebalance to
+            // it would make the forward test drift from the lab book, so try
+            // again later while the signal is still valid. The next attempt is
+            // computed from the holdings as they are then, so whatever did fill
+            // is not ordered twice.
+            if refused > 0 && attempt < LAB_RETRY_MAX {
+                self.lab_retry.insert(sid.clone(), (sig.generated_ms, attempt, now));
+                self.log(
+                    JournalKind::Risk,
+                    format!(
+                        "Rebalance toward the lab's weights of {day}: {refused} of {n} orders refused, trying again in {} minutes (attempt {attempt} of {LAB_RETRY_MAX})",
+                        LAB_RETRY_EVERY_MS / 60_000
+                    ),
+                    Some(sid),
+                    None,
+                );
+                continue;
+            }
+            self.lab_retry.remove(&sid);
             self.lab_done.insert(sid.clone(), sig.generated_ms);
             let mut note = format!(
-                "Rebalanced toward the lab's weights of {}: {n} orders, {:.0} % of the book invested",
-                chrono::DateTime::from_timestamp_millis(sig.as_of_ms).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+                "Rebalanced toward the lab's weights of {day}: {n} orders, {:.0} % of the book invested",
                 sig.weights.values().sum::<f64>() * 100.0
             );
+            if refused > 0 {
+                note.push_str(&format!("; {refused} still refused after {attempt} attempts, left until the next signal"));
+            }
             if !untradable.is_empty() {
                 note.push_str(&format!("; no market here for {}", untradable.join(", ")));
             }
@@ -3362,9 +3419,10 @@ impl Engine {
     /// strategy (Live only if the strategy is Live, which needs its passport).
     /// Lab positions carry no ATR stops: the backtest had none, and a stop the
     /// lab never tested would make this a different strategy from the one judged.
-    fn place_lab_order(&mut self, idx: usize, m: &Market, side: Side, notional: f64) {
+    /// `false` when the order did not go out (no price, or the risk check refused it).
+    fn place_lab_order(&mut self, idx: usize, m: &Market, side: Side, notional: f64) -> bool {
         if m.price <= 0.0 {
-            return;
+            return false;
         }
         let sid = self.strategies[idx].id.clone();
         let qty = notional / m.price;
@@ -3385,7 +3443,7 @@ impl Engine {
             let order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
             self.orders.insert(0, order);
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
-            return;
+            return false;
         }
         let route = if self.strategies[idx].state == StrategyState::Live { RouteIntent::Live } else { RouteIntent::Paper };
         self.route_fill(idx, m, side, decision.qty, m.price, route);
@@ -3395,6 +3453,7 @@ impl Engine {
                 p.target = 0.0;
             }
         }
+        true
     }
 
     pub fn flatten(&mut self, market_id: &str) {
@@ -6060,6 +6119,92 @@ mod tests {
         e.run_lab_books();
         assert!(!e.positions.contains_key("crypto:BTC/USD"));
         assert!(e.journal.iter().any(|j| j.message.contains("past its validity window")));
+    }
+
+    /// BTC and ETH on real prices, BTC's quote too old to trade on.
+    fn lab_engine_with_stale_btc() -> Engine {
+        let mut e = Engine::new();
+        let feed: Vec<RealCrypto> = ["BTC", "ETH"]
+            .iter()
+            .map(|c| {
+                let id = format!("crypto:{c}/USD");
+                let price = e.markets.iter().find(|m| m.id == id).unwrap().price;
+                RealCrypto { price, id, symbol: format!("{c}/USD"), change24h: 0.0 }
+            })
+            .collect();
+        e.apply_kraken(&feed);
+        let old = e.now() - 120_000;
+        e.markets.iter_mut().find(|m| m.id == "crypto:BTC/USD").unwrap().updated_at = old;
+        e
+    }
+
+    /// Pretend the last attempt was long enough ago for the next one.
+    fn age_lab_retry(e: &mut Engine) {
+        for v in e.lab_retry.values_mut() {
+            v.2 -= LAB_RETRY_EVERY_MS + 1;
+        }
+    }
+
+    #[test]
+    fn a_refused_lab_order_is_tried_again_later_and_only_what_is_missing_is_ordered() {
+        let mut e = lab_engine_with_stale_btc();
+        let now = e.now();
+        e.apply_lab_signal(lab_signal(now, &[("BTC", 0.10), ("ETH", 0.05)], 0.86));
+        e.run_lab_books();
+        assert!(e.positions.contains_key("crypto:ETH/USD"), "ETH had a fresh price");
+        assert!(!e.positions.contains_key("crypto:BTC/USD"), "BTC's price was stale");
+        assert!(e.journal.iter().any(|j| j.message.contains("1 of 2 orders refused, trying again in 20 minutes")));
+        assert!(!e.lab_done.contains_key("lab:tsmom_regime"), "the day is not done yet");
+
+        // Too soon: nothing happens.
+        let n = e.orders.len();
+        e.run_lab_books();
+        assert_eq!(e.orders.len(), n);
+
+        // Later, with a fresh BTC price: only BTC is bought, ETH is not ordered again.
+        let eth_qty = e.positions["crypto:ETH/USD"].qty;
+        e.markets.iter_mut().find(|m| m.id == "crypto:BTC/USD").unwrap().updated_at = now;
+        age_lab_retry(&mut e);
+        e.run_lab_books();
+        assert!(e.positions.contains_key("crypto:BTC/USD"));
+        assert!((e.positions["crypto:ETH/USD"].qty - eth_qty).abs() < 1e-12);
+        assert_eq!(e.lab_done.get("lab:tsmom_regime"), Some(&now));
+    }
+
+    #[test]
+    fn a_lab_rebalance_gives_up_after_six_attempts_and_says_so() {
+        let mut e = lab_engine_with_stale_btc();
+        let now = e.now();
+        e.apply_lab_signal(lab_signal(now, &[("BTC", 0.10)], 0.86));
+        for _ in 0..LAB_RETRY_MAX {
+            e.run_lab_books();
+            age_lab_retry(&mut e);
+        }
+        assert_eq!(e.lab_done.get("lab:tsmom_regime"), Some(&now));
+        assert!(e.journal.iter().any(|j| j.message.contains("1 still refused after 6 attempts")));
+        let n = e.orders.len();
+        e.run_lab_books();
+        assert_eq!(e.orders.len(), n, "done means done until the next signal");
+    }
+
+    #[test]
+    fn adaptive_allocation_leaves_lab_books_at_their_tested_budget() {
+        let mut e = Engine::new();
+        let now = e.now();
+        e.apply_lab_signal(lab_signal(now, &[("BTC", 0.10)], 0.86));
+        let lab = e.strategies.iter().position(|s| s.id == "lab:tsmom_regime").unwrap();
+        e.strategies[lab].budget_pct = 25.0;
+        e.strategies[lab].equity_curve = vec![0.0, -5_000.0];
+        e.rebalance_allocations();
+        assert_eq!(e.strategies[lab].budget_pct, 25.0, "a losing week does not shrink a lab book");
+        let others: f64 = e
+            .strategies
+            .iter()
+            .filter(|s| s.state != StrategyState::Paused && s.id != "manual" && s.kind != StrategyKind::LabTargets)
+            .map(|s| s.budget_pct)
+            .sum();
+        let floors = 3.0 * e.strategies.iter().filter(|s| s.state != StrategyState::Paused).count() as f64;
+        assert!(others <= 55.0 + floors, "the lab book's share comes off the pool: {others}");
     }
 
     #[test]

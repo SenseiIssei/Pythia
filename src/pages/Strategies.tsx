@@ -7,6 +7,7 @@ import { explain } from "../glossary";
 import { PnlLines } from "../components/PnlBreakdown";
 import { researchAvailable, runValidation } from "../research";
 import type { Gate, GateUnit, Passport, StrategyConfig } from "../types";
+import { ConfirmButton } from "../components/Confirm";
 
 export function Strategies() {
   const { strategies, passports } = useStore();
@@ -38,6 +39,15 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
   const { setStrategyState, setStrategyParam } = useStore();
   const [confirm, setConfirm] = useState(false);
   const [typed, setTyped] = useState("");
+  // Sliders edit a draft. The engine starts a strategy's record over on every
+  // parameter change, so dragging through ten values must not reach it until
+  // the person decides; "Apply" sends the draft once.
+  const [draft, setDraft] = useState<Record<string, number>>({});
+  const changed = s.params.filter((p) => draft[p.key] !== undefined && draft[p.key] !== p.value);
+  function applyDraft() {
+    for (const p of changed) setStrategyParam(s.id, p.key, draft[p.key]);
+    setDraft({});
+  }
   const [armErr, setArmErr] = useState("");
 
   const live = s.state === "live";
@@ -104,22 +114,57 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
 
       {/* params */}
       <div className="mt-3 space-y-2">
-        {s.params.map((p) => (
-          <label key={p.key} className="flex items-center gap-3 text-xs">
-            <span className="w-28 shrink-0 text-cyber-text-dim">{p.label}</span>
-            <input
-              type="range"
-              min={p.min}
-              max={p.max}
-              step={p.step}
-              value={p.value}
-              onChange={(e) => setStrategyParam(s.id, p.key, Number(e.target.value))}
-              className="min-w-0 flex-1"
-            />
-            <span className="w-12 shrink-0 text-right font-mono text-accent">{p.value}</span>
-          </label>
-        ))}
+        {s.params.map((p) => {
+          const v = draft[p.key] ?? p.value;
+          return (
+            <label key={p.key} className="flex items-center gap-3 text-xs">
+              <span className="w-28 shrink-0 text-cyber-text-dim">{p.label}</span>
+              <input
+                type="range"
+                min={p.min}
+                max={p.max}
+                step={p.step}
+                value={v}
+                onChange={(e) => setDraft((d) => ({ ...d, [p.key]: Number(e.target.value) }))}
+                className="min-w-0 flex-1"
+              />
+              <span className={`w-12 shrink-0 text-right font-mono ${v !== p.value ? "text-warning" : "text-accent"}`}>
+                {v}
+              </span>
+            </label>
+          );
+        })}
       </div>
+      {changed.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-cyber-text-dim">
+          <span className="min-w-0 flex-1">
+            {changed.length === 1 ? "1 setting changed" : `${changed.length} settings changed`}, not applied yet.
+          </span>
+          {s.trades > 0 || live ? (
+            <ConfirmButton
+              tone="cyan"
+              className="!px-2 !py-1"
+              question={
+                <>
+                  New settings make it a different strategy, so its record of {s.trades} trades starts over
+                  {live ? " and it goes back to practice money until its checks pass again" : ""}. Apply?
+                </>
+              }
+              confirmLabel="Yes, apply"
+              onConfirm={applyDraft}
+            >
+              Apply
+            </ConfirmButton>
+          ) : (
+            <Button tone="cyan" className="!px-2 !py-1" onClick={applyDraft}>
+              Apply
+            </Button>
+          )}
+          <Button tone="neutral" className="!px-2 !py-1" onClick={() => setDraft({})}>
+            Undo changes
+          </Button>
+        </div>
+      )}
 
       {passport && <PassportView s={s} passport={passport} />}
 
