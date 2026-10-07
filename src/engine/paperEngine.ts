@@ -725,6 +725,14 @@ export class PaperEngine implements EngineClient {
       this.emit();
       throw new Error(why);
     }
+    if (state === "demo") {
+      // Demo orders go to a venue's demo API, which only the Rust engine (desktop
+      // app or backend) can reach.
+      const why = "demo trading needs the desktop app or a connected backend with demo keys";
+      this.log("reject", `${s.name} cannot demo-trade: ${why}`, id);
+      this.emit();
+      throw new Error(why);
+    }
     s.state = state;
     this.log("system", `Strategy ${s.name} → ${state.toUpperCase()}`, id);
     this.emit();

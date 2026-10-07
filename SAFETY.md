@@ -77,6 +77,16 @@ refused at preflight, not sent and rejected. Equity shorts are off by default fo
 they need a margin account, cannot be fractional at Alpaca, and quietly turn a sell signal into a
 wall of broker errors.
 
+## 3d. Demo is virtual money, and kept apart
+
+A strategy set to **Demo** sends orders to a venue's demo environment (Bybit Demo
+Trading, Binance Spot Demo Mode, OKX demo, Alpaca paper) with **demo keys** stored
+in their own slot. It needs no live arm, still passes the risk manager, and its
+fills are marked demo everywhere and never written to the tax record. Live keys
+are never used for demo orders and demo keys never for live ones. A good demo
+record is better evidence than paper, and still not a promise: some demo books are
+not the real market (`docs/DEMO.md`).
+
 ## 4. Your responsibilities
 
 - Test every strategy in paper for long enough to trust it. A good paper result is necessary, not

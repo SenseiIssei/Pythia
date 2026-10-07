@@ -4,7 +4,7 @@ import { useStore } from "../store";
 import { Card, PageHeader, Badge, EmptyState, Sparkline, MultiLineChart, Term, fmtUsd } from "../components/ui";
 import { costWarning } from "../components/PnlBreakdown";
 import { breakdown } from "../engine/costs";
-import type { PnlBreakdown, SlippageRow, StrategyConfig } from "../types";
+import type { FillRoute, PnlBreakdown, SlippageRow, StrategyConfig } from "../types";
 
 export function Analytics() {
   const { portfolio, strategies, orders, slippage } = useStore();
@@ -80,7 +80,11 @@ export function Analytics() {
               return (
                 <RowGroup key={s.id}>
                   <div className="flex items-center gap-2 py-2">
-                    <Badge tone={s.state === "live" ? "red" : s.state === "paused" ? "neutral" : "cyan"}>{s.state}</Badge>
+                    <Badge
+                      tone={s.state === "live" ? "red" : s.state === "paused" ? "neutral" : s.state === "demo" ? "purple" : "cyan"}
+                    >
+                      {s.state}
+                    </Badge>
                     <span className="truncate">{s.name}</span>
                     {warn && (
                       <span title={warn} aria-label={warn} className="text-warning">
@@ -122,6 +126,11 @@ export function Analytics() {
               <span className="min-w-0 flex-1 basis-32 truncate text-cyber-text-dim">{o.marketId}</span>
               <span>{o.filledQty.toFixed(4)}</span>
               <span className="text-cyber-text-faint">@ {o.avgFillPrice}</span>
+              {o.route && o.route !== "paper" && (
+                <Badge tone={o.route === "live" ? "red" : "purple"} title={ROUTE_HELP[o.route]}>
+                  {o.route}
+                </Badge>
+              )}
               {o.realisedSlippageBps !== undefined && (
                 <span
                   className={o.realisedSlippageBps > (o.modelledSlippageBps ?? 0) * 1.5 ? "text-warning" : "text-cyber-text-dim"}
@@ -153,8 +162,14 @@ function RowGroup({ children }: { children: React.ReactNode }) {
   return <div className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">{children}</div>;
 }
 
+const ROUTE_HELP: Record<FillRoute, string> = {
+  paper: "Simulated by Pythia: the live book walked, or the cost model",
+  demo: "Filled by a venue's demo account: real API, virtual money",
+  live: "Real money",
+};
+
 /**
- * Realised slippage against the cost model, per venue. This is the number that
+ * Realised slippage against the cost model, per venue and route. This is the number that
  * says whether the backtests were fiction: if real fills cost far more than the
  * model assumed, every backtest built on the model was too optimistic.
  */
@@ -163,43 +178,68 @@ function SlippageCard({ rows }: { rows: SlippageRow[] }) {
     <Card title="Execution: realised vs modelled slippage" className="mb-4">
       {rows.length === 0 ? (
         <div className="text-xs text-cyber-text-faint">
-          No live fills yet. Every live or paper-live fill is measured against the price when the order was
-          decided, and compared with what the cost model expected. The comparison means something after 30
-          fills per venue. Simulated paper fills are not counted: they pay the model by construction.
+          No fills measured yet. Every fill (paper on a real price, demo, live) is measured against the price when
+          the order was decided, and compared with what the cost model expected. The comparison means something
+          after 30 fills per venue and route.
         </div>
       ) : (
         <div className="-mx-1 overflow-x-auto px-1">
-          <div className="grid min-w-[520px] grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 text-sm">
+          <div className="grid min-w-[640px] grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-4 text-sm">
             <Head>Venue</Head>
+            <Head>Route</Head>
             <Head right>Fills</Head>
             <Head right>Median realised</Head>
             <Head right>Median modelled</Head>
+            <Head right>Drift</Head>
             <Head right>Ratio</Head>
-            {rows.map((r) => (
-              <div key={r.venue} className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border">
-                <div className="py-2 capitalize">{r.venue}</div>
-                <Cell>
-                  {r.fills}
-                  {!r.enough && <span className="ml-1 text-[10px] text-cyber-text-faint">(&lt;30)</span>}
-                  {(r.liveFills ?? 0) > 0 && (
-                    <span className="ml-1 text-[10px] text-cyber-text-faint" title="Modelled on a live order book instead of the calibrated default">
-                      {r.liveFills} live book
-                    </span>
-                  )}
-                </Cell>
-                <Cell>{r.medianRealisedBps.toFixed(1)} bps</Cell>
-                <Cell className="text-cyber-text-dim">{r.medianModelledBps.toFixed(1)} bps</Cell>
-                <Cell className={r.ratio === undefined ? "text-cyber-text-faint" : r.ratio <= 1.5 ? "text-success" : "text-danger"}>
-                  {r.ratio === undefined ? "n/a" : `${r.ratio.toFixed(2)}x`}
-                </Cell>
-              </div>
-            ))}
+            {rows.map((r) => {
+              const route = r.route ?? "live";
+              return (
+                <div
+                  key={`${r.venue}:${route}`}
+                  className="col-span-full grid grid-cols-[1fr_auto_auto_auto_auto_auto_auto] gap-x-4 border-t border-cyber-border"
+                >
+                  <div className="py-2 capitalize">{r.venue}</div>
+                  <div className="py-2">
+                    <Badge
+                      tone={route === "live" ? "red" : route === "demo" ? "purple" : "cyan"}
+                      title={ROUTE_HELP[route]}
+                    >
+                      {route}
+                    </Badge>
+                  </div>
+                  <Cell>
+                    {r.fills}
+                    {!r.enough && <span className="ml-1 text-[10px] text-cyber-text-faint">(&lt;30)</span>}
+                    {(r.liveFills ?? 0) > 0 && (
+                      <span className="ml-1 text-[10px] text-cyber-text-faint" title="Modelled on a live order book instead of the calibrated default">
+                        {r.liveFills} live book
+                      </span>
+                    )}
+                    {(r.exhausted ?? 0) > 0 && (
+                      <span className="ml-1 text-[10px] text-warning" title="Paper fills larger than the 20 book levels; the rest was priced by the impact model">
+                        {r.exhausted} past book
+                      </span>
+                    )}
+                  </Cell>
+                  <Cell>{r.medianRealisedBps.toFixed(1)} bps</Cell>
+                  <Cell className="text-cyber-text-dim">{r.medianModelledBps.toFixed(1)} bps</Cell>
+                  <Cell className="text-cyber-text-dim">
+                    {r.medianDriftBps === undefined ? "n/a" : `${r.medianDriftBps.toFixed(1)} bps`}
+                  </Cell>
+                  <Cell className={r.ratio === undefined ? "text-cyber-text-faint" : r.ratio <= 1.5 ? "text-success" : "text-danger"}>
+                    {r.ratio === undefined ? "n/a" : `${r.ratio.toFixed(2)}x`}
+                  </Cell>
+                </div>
+              );
+            })}
           </div>
           <div className="mt-2 text-xs text-cyber-text-faint">
-            Positive bps cost money. A ratio above 1.5x means real fills cost more than the model assumed, and
-            every backtest using the model is too optimistic for that venue until it is recalibrated. Crypto
-            fills are modelled on the live order book of the exchange when one less than a minute old exists,
-            and on the calibrated averages otherwise. The live book count says how many were the first kind.
+            Positive bps cost money. Paper rows walk the exchange's live order book level by level when one less
+            than a minute old exists, so they are honest about size; demo rows are what a venue's demo account
+            really filled; live rows are real money. A live or demo ratio above 1.5x means real fills cost more
+            than the model assumed, and every backtest using the model is too optimistic for that venue. Drift is
+            how far the book had moved from the signal price before the order was priced.
           </div>
         </div>
       )}

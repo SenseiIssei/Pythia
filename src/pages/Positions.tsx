@@ -57,6 +57,11 @@ export function Positions() {
                             REAL
                           </Badge>
                         )}
+                        {p.demo && (
+                          <Badge tone="purple" title="Filled by the venue's demo account: real API, virtual money">
+                            DEMO
+                          </Badge>
+                        )}
                       </div>
                     </td>
                     <td className="py-2 text-right font-mono">{p.qty.toFixed(4)}</td>
@@ -72,7 +77,9 @@ export function Positions() {
                         question={
                           p.live
                             ? `Sell all ${Math.abs(p.qty).toFixed(4)} ${p.symbol} for real, at about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}? This sends a real order and cannot be undone.`
-                            : `Close the practice position in ${p.symbol} at today's price, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}?`
+                            : p.demo
+                              ? `Sell the demo position in ${p.symbol} at the demo venue, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)} of virtual money?`
+                              : `Close the practice position in ${p.symbol} at today's price, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}?`
                         }
                         confirmLabel={p.live ? "Yes, sell for real" : "Close it"}
                         onConfirm={() => flatten(p.marketId)}
@@ -101,6 +108,8 @@ export function Positions() {
                 </span>
                 <span className="min-w-0 flex-1 truncate font-mono text-cyber-text-dim">{o.marketId}</span>
                 <span className="font-mono">{o.filledQty.toFixed(4)}</span>
+                {o.route === "demo" && <Badge tone="purple" title="Sent to a venue's demo account">demo</Badge>}
+                {o.route === "live" && <Badge tone="red" title="Real money">live</Badge>}
                 <Badge tone={o.status === "filled" ? "green" : o.status === "rejected" ? "red" : "neutral"}>{o.status}</Badge>
                 {o.rejectReason && <span className="basis-full text-danger sm:basis-auto">{o.rejectReason}</span>}
               </li>
