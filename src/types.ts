@@ -223,6 +223,9 @@ export interface RiskLimits {
   adaptiveAllocation: boolean; // auto-weight strategy budgets by recent performance
   /** Cap on correlation-adjusted exposure sqrt(w'Cw), % of equity (0 = off). */
   maxCorrelatedExposurePct: number;
+  /** Ceiling on the whole book's volatility: one standard deviation of a year's
+   *  P&L, % of equity (0 = off). Enforced by the Rust engine. */
+  portfolioVolTargetPct: number;
 }
 
 /** What the risk manager is doing right now. Mirrors Rust `risk::RiskStatus`. */
@@ -237,6 +240,12 @@ export interface RiskStatus {
   drawdownPct: number;
   /** New entries are multiplied by this: 1 - drawdown / maxDrawdownPct, clamped to 0..1. */
   deriskFactor: number;
+  /** One standard deviation of the book's annual P&L, quote currency. */
+  portfolioVol: number;
+  /** The same as % of equity, next to `portfolioVolTargetPct`. */
+  portfolioVolPct: number;
+  /** Open markets whose volatility is assumed (5 % a day), not measured from candles. */
+  volAssumed: string[];
 }
 
 /** confidence: under 30 trades, sized off signal strength. measured: sized on

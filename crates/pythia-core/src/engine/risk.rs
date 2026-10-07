@@ -9,6 +9,10 @@
 //!   the signed notional per market (long positive, short negative) and `C` the
 //!   return correlation matrix, and `evaluate` caps `E` rather than only the
 //!   raw sum of notionals. See [`correlated_exposure`].
+//! - **Portfolio volatility target.** The same quadratic form with every
+//!   position weighted by its market's annual volatility: one standard
+//!   deviation of the book's yearly P&L, capped as a share of equity. See
+//!   [`portfolio_vol`].
 
 use std::collections::HashMap;
 
@@ -16,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{RiskDecision, RiskLimits};
 use crate::connectors::{OrderRequest, Side};
+use crate::marketdata::Ohlc;
 
 /// Live state the risk check needs, supplied by the portfolio ledger.
 pub struct RiskContext {
@@ -35,6 +40,13 @@ pub struct RiskContext {
     /// already leans the way a long in this market would. See
     /// [`correlation_loading`].
     pub corr_loading: f64,
+    /// One standard deviation of the open book's annual P&L, quote currency.
+    /// See [`portfolio_vol`].
+    pub vol_exposure: f64,
+    /// [`correlation_loading`] over the volatility-weighted book.
+    pub vol_loading: f64,
+    /// This market's annual volatility (0.8 = 80 % a year).
+    pub market_vol: f64,
 }
 
 pub fn evaluate(
@@ -113,6 +125,33 @@ pub fn evaluate(
                         "correlated exposure cap: the book already counts as {held:.0}% of equity \
                          once correlation is taken into account, limit {:.0}%",
                         limits.max_correlated_exposure_pct
+                    )),
+                };
+            }
+            qty = qty.min(room / price);
+        }
+    }
+    // 9. Portfolio volatility target. Step 8's arithmetic in other units: each
+    // notional is weighted by its market's annual volatility, so `E` becomes
+    // one standard deviation of a year's P&L. A ceiling only; it never sizes
+    // anything up. Closing passes for the same reason as above.
+    if !reduces && limits.portfolio_vol_target_pct > 0.0 && ctx.market_vol > 0.0 {
+        let cap = (limits.portfolio_vol_target_pct / 100.0) * ctx.equity;
+        let dir = if order.side == Side::Buy { 1.0 } else { -1.0 };
+        let lean = dir * ctx.vol_loading;
+        let e0 = ctx.vol_exposure.max(0.0);
+        let after = exposure_after(e0, lean, qty * price * ctx.market_vol);
+        if after > cap + 1e-9 && after > e0 + 1e-9 {
+            let room = max_added_notional(e0, lean, cap) / ctx.market_vol;
+            if room <= 0.0 || room <= ctx.equity.abs() * 1e-6 {
+                let held = if ctx.equity > 0.0 { e0 / ctx.equity * 100.0 } else { 0.0 };
+                return RiskDecision {
+                    approved: false,
+                    qty: 0.0,
+                    reason: Some(format!(
+                        "volatility target: the book already swings about {held:.0}% of equity in a \
+                         typical year, target {:.0}%",
+                        limits.portfolio_vol_target_pct
                     )),
                 };
             }
@@ -240,6 +279,78 @@ fn exposure_after(e0: f64, lean: f64, t: f64) -> f64 {
 fn max_added_notional(e0: f64, lean: f64, cap: f64) -> f64 {
     let l = cap.max(e0);
     (-lean + (lean * lean + l * l - e0 * e0).max(0.0).sqrt()).max(0.0)
+}
+
+// ── Portfolio volatility target ─────────────────────────────────────────────
+//
+// The per-position target (`volTargetPct`) sizes each entry on its own
+// market's swings. It cannot see that ten coins at a comfortable size each
+// still swing the account like one large coin when they move together. This
+// one measures the book:
+//
+//   u_i      = w_i * sigma_i      signed notional times the market's annual vol
+//   sigma_p  = sqrt(u' C u)       C: the same correlations as the cap above
+//
+// sigma_p is one standard deviation of the book's P&L over a year, in quote
+// currency; over equity it is how much the account swings in a typical year.
+// A 30 % target means a bad year (two standard deviations) costs about 60 %,
+// a bad month about 17 %.
+
+/// Daily volatility assumed for a market whose own cannot be measured yet (no
+/// real candles): 5 % a day, a typical altcoin. Like an unmeasurable
+/// correlation it errs toward caution.
+pub const UNKNOWN_DAILY_VOL: f64 = 0.05;
+const DAY_MS: f64 = 86_400_000.0;
+
+/// Annual volatility assumed when it cannot be measured.
+pub fn unknown_annual_vol() -> f64 {
+    UNKNOWN_DAILY_VOL * 365f64.sqrt()
+}
+
+/// Trading time in a year, in milliseconds: crypto never closes, US equities
+/// have 252 sessions of 6.5 hours. Scaling a bar's volatility by wall-clock
+/// time would count every night and weekend as a bar that never happened.
+fn trading_ms_per_year(always_open: bool) -> f64 {
+    if always_open { 365.0 * DAY_MS } else { 252.0 * 6.5 * 3_600_000.0 }
+}
+
+/// Annual volatility of a market from its real candles: the standard
+/// deviation of bar returns over the last [`CORR_WINDOW`] bars, times the
+/// square root of bars per trading year. The bar length is the median gap
+/// between bar times, so a missing bar does not change the scale. `None`
+/// below [`CORR_MIN_CLOSES`] bars.
+pub fn annual_vol(bars: &[Ohlc], always_open: bool) -> Option<f64> {
+    let tail = &bars[bars.len().saturating_sub(CORR_WINDOW)..];
+    if tail.len() < CORR_MIN_CLOSES {
+        return None;
+    }
+    let mut gaps: Vec<f64> = tail.windows(2).map(|w| (w[1].ts - w[0].ts) as f64).filter(|g| *g > 0.0).collect();
+    if gaps.is_empty() {
+        return None;
+    }
+    gaps.sort_by(|a, b| a.total_cmp(b));
+    let bar_ms = gaps[gaps.len() / 2];
+    let closes: Vec<f64> = tail.iter().map(|b| b.close).collect();
+    let rets = window_returns(&closes);
+    let n = rets.len() as f64;
+    let mean = rets.iter().sum::<f64>() / n;
+    let var = rets.iter().map(|r| (r - mean) * (r - mean)).sum::<f64>() / n;
+    let vol = (var * trading_ms_per_year(always_open) / bar_ms).sqrt();
+    (vol.is_finite() && vol > 0.0).then_some(vol)
+}
+
+/// The book with each notional multiplied by its market's annual volatility;
+/// a market missing from `vols` gets [`unknown_annual_vol`].
+pub fn vol_weighted(book: &[(String, f64)], vols: &HashMap<String, f64>) -> Vec<(String, f64)> {
+    book.iter()
+        .map(|(id, w)| (id.clone(), w * vols.get(id).copied().unwrap_or_else(unknown_annual_vol)))
+        .collect()
+}
+
+/// One standard deviation of the book's annual P&L, `sqrt(u' C u)`, in quote
+/// currency. See the section comment above.
+pub fn portfolio_vol(book: &[(String, f64)], vols: &HashMap<String, f64>, history: &HashMap<String, Vec<f64>>) -> f64 {
+    correlated_exposure(&vol_weighted(book, vols), history)
 }
 
 // ── Kelly on measured edge ──────────────────────────────────────────────────
@@ -464,6 +575,15 @@ pub struct RiskStatus {
     /// What new entries are multiplied by because of it, see [`derisk_factor`].
     #[serde(default = "one")]
     pub derisk_factor: f64,
+    /// One standard deviation of the book's annual P&L, quote currency.
+    #[serde(default)]
+    pub portfolio_vol: f64,
+    /// The same as % of equity, next to `portfolioVolTargetPct`.
+    #[serde(default)]
+    pub portfolio_vol_pct: f64,
+    /// Open markets whose volatility is assumed, not measured (no candles).
+    #[serde(default)]
+    pub vol_assumed: Vec<String>,
 }
 
 fn one() -> f64 {
@@ -478,6 +598,9 @@ impl Default for RiskStatus {
             sizing: Vec::new(),
             drawdown_pct: 0.0,
             derisk_factor: 1.0,
+            portfolio_vol: 0.0,
+            portfolio_vol_pct: 0.0,
+            vol_assumed: Vec::new(),
         }
     }
 }
@@ -500,6 +623,9 @@ mod tests {
             data_age_sec: 0,
             corr_exposure: 0.0,
             corr_loading: 0.0,
+            vol_exposure: 0.0,
+            vol_loading: 0.0,
+            market_vol: 0.0,
         }
     }
 
@@ -646,6 +772,119 @@ mod tests {
         let d = evaluate(&order(Side::Sell, 10_000.0), 1.0, &RiskLimits::default(), &c);
         assert!(d.approved, "{:?}", d.reason);
         assert!((d.qty - 10_000.0).abs() < 1e-9);
+    }
+
+    /// A book of `held` notional at 80 % a year that moves as one with the
+    /// market being bought (loading equals exposure).
+    fn vol_book(held: f64) -> RiskContext {
+        let mut c = ctx();
+        c.gross_exposure = held;
+        c.vol_exposure = held * 0.8;
+        c.vol_loading = held * 0.8;
+        c.market_vol = 0.8;
+        c
+    }
+
+    #[test]
+    fn an_entry_that_would_lift_the_book_over_its_vol_target_is_downsized() {
+        // 30k at 80 % swings 24k a year; the target is 30 % of 100k = 30k, so
+        // 6k of swing is left, which is 7.5k of notional at 80 %.
+        let d = evaluate(&buy(10_000.0), 1.0, &RiskLimits::default(), &vol_book(30_000.0));
+        assert!(d.approved);
+        assert!((d.qty - 7_500.0).abs() < 1e-6, "got {}", d.qty);
+    }
+
+    #[test]
+    fn a_calm_market_fits_where_a_wild_one_does_not() {
+        // Same book, but the new market moves 20 % a year: 6k of swing is
+        // 30k of notional, so the whole 10k order passes.
+        let mut c = vol_book(30_000.0);
+        c.market_vol = 0.2;
+        c.vol_loading = 30_000.0 * 0.2; // rho 1 against the book, in its own units
+        let d = evaluate(&buy(10_000.0), 1.0, &RiskLimits::default(), &c);
+        assert!(d.approved);
+        assert!((d.qty - 10_000.0).abs() < 1e-9, "got {}", d.qty);
+    }
+
+    #[test]
+    fn a_book_at_its_vol_target_refuses_new_risk_with_a_reason() {
+        let mut c = ctx();
+        c.vol_exposure = 35_000.0;
+        c.vol_loading = 35_000.0;
+        c.market_vol = 0.8;
+        let d = evaluate(&buy(1_000.0), 1.0, &RiskLimits::default(), &c);
+        assert!(!d.approved);
+        let why = d.reason.unwrap();
+        assert!(why.starts_with("volatility target"), "{why}");
+        assert!(why.contains("35%") && why.contains("30%"), "{why}");
+    }
+
+    #[test]
+    fn closing_and_a_zero_target_are_never_stopped_by_the_vol_target() {
+        let mut c = ctx();
+        c.position_notional = 10_000.0;
+        c.vol_exposure = 60_000.0;
+        c.vol_loading = 60_000.0;
+        c.market_vol = 0.8;
+        let d = evaluate(&order(Side::Sell, 10_000.0), 1.0, &RiskLimits::default(), &c);
+        assert!(d.approved, "{:?}", d.reason);
+
+        let off = RiskLimits { portfolio_vol_target_pct: 0.0, ..RiskLimits::default() };
+        c.position_notional = 0.0;
+        let d = evaluate(&buy(1_000.0), 1.0, &off, &c);
+        assert!(d.approved, "{:?}", d.reason);
+    }
+
+    /// Bars `gap_ms` apart whose returns alternate between +r and -r exactly.
+    fn zigzag(n: usize, r: f64, gap_ms: i64) -> Vec<Ohlc> {
+        let mut p = 100.0;
+        (0..n)
+            .map(|i| {
+                if i > 0 {
+                    p *= if i % 2 == 1 { 1.0 + r } else { 1.0 - r };
+                }
+                Ohlc { ts: i as i64 * gap_ms, open: p, high: p, low: p, close: p, volume: 1.0 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn annual_vol_scales_bar_vol_by_trading_time_not_wall_clock() {
+        let five_min = 300_000;
+        let bars = zigzag(61, 0.002, five_min);
+        // 60 returns of +-0.2 %: per-bar sd 0.2 %. Crypto: 105,120 bars a year.
+        let crypto = annual_vol(&bars, true).unwrap();
+        assert!((crypto - 0.002 * 105_120f64.sqrt()).abs() < 1e-3, "{crypto}");
+        // Equities trade 252 x 6.5 h, so the same bars are fewer per year.
+        let equity = annual_vol(&bars, false).unwrap();
+        let ratio = crypto / equity;
+        assert!((ratio - (365.0 * 24.0 / (252.0 * 6.5f64)).sqrt()).abs() < 1e-9, "{ratio}");
+    }
+
+    #[test]
+    fn a_missing_bar_does_not_change_the_bar_length() {
+        let mut bars = zigzag(61, 0.002, 300_000);
+        let whole = annual_vol(&bars, true).unwrap();
+        for b in bars.iter_mut().skip(30) {
+            b.ts += 300_000; // one bar never arrived
+        }
+        assert!((annual_vol(&bars, true).unwrap() - whole).abs() < 1e-12);
+        assert!(annual_vol(&bars[..10], true).is_none(), "too few bars is unknown, not zero");
+    }
+
+    #[test]
+    fn portfolio_vol_weights_each_position_by_its_market() {
+        let moves = series(60, wiggle);
+        let history: HashMap<String, Vec<f64>> =
+            [("a".to_string(), moves.clone()), ("b".to_string(), moves)].into_iter().collect();
+        let book = vec![("a".to_string(), 10_000.0), ("b".to_string(), 10_000.0)];
+        let vols: HashMap<String, f64> = [("a".to_string(), 0.5), ("b".to_string(), 1.0)].into_iter().collect();
+        // They move as one: 10k x 0.5 + 10k x 1.0.
+        assert!((portfolio_vol(&book, &vols, &history) - 15_000.0).abs() < 1e-6);
+        // Without a measurement, a market counts as 5 % a day.
+        let only_a: HashMap<String, f64> = [("a".to_string(), 0.5)].into_iter().collect();
+        let assumed = 5_000.0 + 10_000.0 * unknown_annual_vol();
+        assert!((portfolio_vol(&book, &only_a, &history) - assumed).abs() < 1e-6);
     }
 
     #[test]

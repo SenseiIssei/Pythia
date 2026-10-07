@@ -14,6 +14,14 @@ describe("limitsFor: risk limits from the monthly loss someone can live with", (
     expect(limitsFor(20).maxPositionPct).toBe(25);
   });
 
+  it("lets the whole book swing so a bad month, two standard deviations, stays inside the line", () => {
+    expect(limitsFor(10).portfolioVolTargetPct).toBe(17);
+    for (const m of [2, 5, 10, 20]) {
+      const monthlySd = limitsFor(m).portfolioVolTargetPct! / Math.sqrt(12);
+      expect(2 * monthlySd).toBeLessThanOrEqual(m * 1.1);
+    }
+  });
+
   it("bets more carefully the less someone can lose", () => {
     expect(limitsFor(2).kellyFraction).toBe(0.1);
     expect(limitsFor(10).kellyFraction).toBe(0.2);

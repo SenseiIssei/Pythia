@@ -255,9 +255,9 @@ adaptive allocation. Phase D added the three portfolio-level pieces below (formu
 - **Drawdown-proportional de-risking (built).** Entries are multiplied by
   `1 - drawdown / maxDrawdownPct`: half size at half the limit, nothing new at the breaker.
 
-Still missing:
-
-- **Volatility targeting at the portfolio level**, not per position.
+- **Portfolio volatility target (built).** The same quadratic form with each notional weighted by its
+  market's annual volatility, `sqrt(u' C u)`: one standard deviation of a year's P&L. Entries that
+  would lift it over `portfolioVolTargetPct` (default 30 % of equity) are shrunk or refused.
 
 ---
 
@@ -337,7 +337,7 @@ and the project says so rather than shipping a losing default.
 - [x] Risk manager consumes the correlation matrix
 - [x] Kelly from realised edge once a strategy has 30+ trades
 - [x] Drawdown-proportional de-risking
-- [ ] Volatility targeting at the portfolio level
+- [x] Volatility targeting at the portfolio level
 
 ### Phase E — Venue breadth
 

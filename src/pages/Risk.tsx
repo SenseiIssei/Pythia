@@ -18,6 +18,7 @@ const ROWS: LimitRow[] = [
   { key: "maxPositionPct", label: "Max position size", min: 1, max: 50, step: 1, unit: "% equity" },
   { key: "maxGrossExposurePct", label: "Max gross exposure", min: 10, max: 100, step: 5, unit: "% equity" },
   { key: "maxCorrelatedExposurePct", label: "Max correlated exposure", min: 0, max: 100, step: 5, unit: "% equity" },
+  { key: "portfolioVolTargetPct", label: "Book volatility target", min: 0, max: 80, step: 1, unit: "% / year" },
   { key: "perStrategyBudgetPct", label: "Per-strategy budget", min: 5, max: 60, step: 1, unit: "% equity" },
   { key: "kellyFraction", label: "Kelly fraction", min: 0.05, max: 1, step: 0.05, unit: "×" },
   { key: "volTargetPct", label: "Vol-target sizing", min: 0, max: 5, step: 0.1, unit: "%/bar" },
@@ -110,6 +111,7 @@ export function Risk() {
           <Meter pct={exposureUtil || 0} tone={exposureUtil >= 80 ? "red" : "cyan"} />
         </Card>
         <CorrelatedExposureCard status={riskStatus} capPct={limits.maxCorrelatedExposurePct} grossPct={grossPct} />
+        <BookVolatilityCard status={riskStatus} targetPct={limits.portfolioVolTargetPct} />
         <DrawdownCard status={riskStatus} limitPct={limits.maxDrawdownPct} />
       </div>
 
@@ -174,6 +176,39 @@ function CorrelatedExposureCard({
       <div className="mt-2 text-xs text-cyber-text-faint">
         Raw gross is {grossPct.toFixed(0)}%. Positions that move together count as one bet: sqrt(w&apos;Cw) over the
         return correlations on the Correlation page.
+      </div>
+    </Card>
+  );
+}
+
+/** How much the whole book swings in a typical year, against its target. */
+function BookVolatilityCard({ status, targetPct }: { status: RiskStatus | null; targetPct: number }) {
+  if (!status) {
+    return (
+      <Card title="Book Volatility">
+        <div className="text-xs text-cyber-text-faint">Measured by the Rust engine. Not available in the browser build.</div>
+      </Card>
+    );
+  }
+  const off = targetPct <= 0;
+  const pct = status.portfolioVolPct ?? 0;
+  const util = off ? 0 : (pct / targetPct) * 100;
+  const assumed = status.volAssumed ?? [];
+  return (
+    <Card title="Book Volatility">
+      <div className="mb-2 flex justify-between text-sm">
+        <span className="text-cyber-text-dim">
+          {pct.toFixed(1)}% a year {off ? "(target off)" : `of ${targetPct}% target`}
+        </span>
+        {!off && <span className={util >= 100 ? "text-danger" : "text-cyber-text-dim"}>{util.toFixed(0)}%</span>}
+      </div>
+      <Meter pct={util} tone={util >= 80 ? "red" : "cyan"} />
+      <div className="mt-2 text-xs text-cyber-text-faint">
+        How far the account moves in a typical year, every position weighted by how much its market swings and
+        things that move together counted as one. A normal month is about {(pct / Math.sqrt(12)).toFixed(1)}%. New
+        entries that would push it over the target are shrunk or refused; it never sizes anything up.
+        {assumed.length > 0 &&
+          ` No candles yet for ${assumed.length} held market${assumed.length === 1 ? "" : "s"}, counted at 5 % a day.`}
       </div>
     </Card>
   );

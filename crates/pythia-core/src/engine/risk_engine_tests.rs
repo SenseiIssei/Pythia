@@ -121,6 +121,62 @@ fn the_same_book_of_unrelated_markets_still_has_room() {
     assert!(e.positions.contains_key(CRYPTO[8]), "{:?}", e.orders.first().and_then(|o| o.reject_reason.clone()));
 }
 
+// ── Portfolio volatility target ─────────────────────────────────────────────
+
+/// Nine crypto markets on real-looking 5-minute candles that move as one,
+/// each bar +-0.3 %: about 97 % a year. Eight are held at `each` notional.
+fn candle_book(each: f64) -> Engine {
+    let mut e = Engine::new();
+    for id in CRYPTO {
+        let mut p = e.price_of(id);
+        let bars: Vec<Ohlc> = (0..62)
+            .map(|i| {
+                if i > 0 {
+                    p *= if i % 2 == 1 { 1.003 } else { 0.997 };
+                }
+                Ohlc { ts: 1_790_000_000_000 + i * 300_000, open: p, high: p, low: p, close: p, volume: 1.0 }
+            })
+            .collect();
+        e.apply_bars(&[crate::marketdata::BarSeries { id: id.into(), bars }]);
+    }
+    for id in &CRYPTO[..8] {
+        hold(&mut e, id, each);
+    }
+    e
+}
+
+#[test]
+fn the_risk_page_shows_the_book_volatility_measured_from_candles() {
+    let e = candle_book(3_000.0);
+    let st = e.state();
+    let vol = 0.003 * 105_120f64.sqrt();
+    assert!((st.risk.portfolio_vol - 24_000.0 * vol).abs() < 50.0, "{}", st.risk.portfolio_vol);
+    assert!(st.risk.vol_assumed.is_empty(), "every held market has candles: {:?}", st.risk.vol_assumed);
+}
+
+#[test]
+fn a_book_swinging_past_its_target_takes_no_new_correlated_long() {
+    // 32k at about 97 % swings about 31k a year, over the 30k target, while
+    // the correlation cap (40k) would still allow 8k more.
+    let mut e = candle_book(4_000.0);
+    let idx = strategy_idx(&e);
+    let m = market(&e, CRYPTO[8]);
+    e.place_from_intent(idx, &m, &buy_intent(CRYPTO[8]));
+    assert!(!e.positions.contains_key(CRYPTO[8]));
+    let why = e.orders[0].reject_reason.clone().unwrap_or_default();
+    assert!(why.starts_with("volatility target"), "{why}");
+}
+
+#[test]
+fn turning_the_vol_target_off_lets_the_same_long_open() {
+    let mut e = candle_book(4_000.0);
+    e.limits.portfolio_vol_target_pct = 0.0;
+    let idx = strategy_idx(&e);
+    let m = market(&e, CRYPTO[8]);
+    e.place_from_intent(idx, &m, &buy_intent(CRYPTO[8]));
+    assert!(e.positions.contains_key(CRYPTO[8]), "{:?}", e.orders.first().and_then(|o| o.reject_reason.clone()));
+}
+
 // ── Kelly on measured edge ──────────────────────────────────────────────────
 
 fn set_price(e: &mut Engine, id: &str, price: f64) {
@@ -283,4 +339,12 @@ fn a_save_from_before_the_correlation_cap_loads_with_the_default() {
     v.as_object_mut().unwrap().remove("maxCorrelatedExposurePct");
     let limits: RiskLimits = serde_json::from_value(v).unwrap();
     assert_eq!(limits.max_correlated_exposure_pct, 40.0);
+}
+
+#[test]
+fn a_save_from_before_the_vol_target_loads_with_the_default() {
+    let mut v = serde_json::to_value(RiskLimits::default()).unwrap();
+    v.as_object_mut().unwrap().remove("portfolioVolTargetPct");
+    let limits: RiskLimits = serde_json::from_value(v).unwrap();
+    assert_eq!(limits.portfolio_vol_target_pct, 30.0);
 }
