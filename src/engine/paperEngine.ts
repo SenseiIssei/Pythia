@@ -684,6 +684,10 @@ export class PaperEngine implements EngineClient {
   barBacked(): string[] {
     return [];
   }
+  /** Every market here is simulated on ticks: no bar times. */
+  historyTimes(): Record<string, number[]> {
+    return {};
+  }
   // Model APIs need a key, and a browser build has nowhere safe to keep one.
   aiViews() {
     return [];

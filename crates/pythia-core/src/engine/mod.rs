@@ -317,6 +317,11 @@ pub struct RiskLimits {
     /// year's P&L, in % of equity (0 = off). See [`risk::portfolio_vol`].
     #[serde(default = "default_portfolio_vol_target_pct")]
     pub portfolio_vol_target_pct: f64,
+    /// Trim the whole book back to `portfolio_vol_target_pct` once its
+    /// volatility has stayed above this many times the target for 30 minutes
+    /// (0 = off). Closing only. See [`risk::VolSpikeGuard`].
+    #[serde(default)]
+    pub vol_spike_trim_mult: f64,
 }
 
 fn default_max_correlated_exposure_pct() -> f64 {
@@ -354,6 +359,9 @@ impl Default for RiskLimits {
             // (two standard deviations) near 17 % of equity. Above the
             // lab books' own share of that, so it does not fight them.
             portfolio_vol_target_pct: default_portfolio_vol_target_pct(),
+            // Off: selling into a spike is a decision with a cost (it sells
+            // after the move), so it is the operator's to switch on.
+            vol_spike_trim_mult: 0.0,
         }
     }
 }
@@ -703,6 +711,11 @@ pub struct EngineState {
     pub strategies: Vec<StrategyConfig>,
     pub limits: RiskLimits,
     pub history: HashMap<String, Vec<f64>>, // recent closes per tradable market
+    /// Bar open times for the closes in `history`, for bar-backed markets
+    /// only, so the Correlation page aligns candles on time the way the risk
+    /// manager does (see [`risk::PriceSeries`]). A market missing here is on ticks.
+    #[serde(default)]
+    pub history_ts: HashMap<String, Vec<i64>>,
     pub live: LiveStatus,
     /// Market ids whose indicators run on real candles rather than the simulator.
     #[serde(default)]
@@ -946,6 +959,8 @@ pub struct Engine {
     /// The sizing mode last announced per strategy, so a switch to measured
     /// edge or to "no edge" is journaled once, not on every signal.
     sizing_noted: HashMap<String, risk::SizingMode>,
+    /// The volatility spike trim's clock and rate limit.
+    vol_spike: risk::VolSpikeGuard,
     tick_count: u64,
     seq: u64,
     rng: u64,
@@ -1018,6 +1033,7 @@ impl Engine {
             fill_records: Vec::new(),
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
+            vol_spike: risk::VolSpikeGuard::default(),
             tick_count: 0,
             seq: 0,
             rng: 0x9E3779B97F4A7C15,
@@ -1347,6 +1363,10 @@ impl Engine {
                 self.log(JournalKind::Risk, format!("Max drawdown {dd:.1}% ≥ {:.1}% — KILL SWITCH tripped", self.limits.max_drawdown_pct), None, None);
             }
         }
+
+        // Trim the book back to its volatility target after a sustained spike
+        // (off unless volSpikeTrimMult is set).
+        self.check_vol_spike(now);
 
         // Lab books rebalance once per new signal, on their own pass.
         if self.tick_count % 5 == 0 {
@@ -1748,6 +1768,68 @@ impl Engine {
         // already explained why.
         if !live || self.live_routable(m.venue) {
             self.log(JournalKind::System, format!("Exit {id}: {reason}"), Some(sid), Some(id.to_string()));
+        }
+    }
+
+    /// Cut every open position to the same fraction once the book's
+    /// volatility has stayed far over its target. See [`risk::VolSpikeGuard`]
+    /// for the trigger, the hysteresis and the rate limit; `now` is passed in
+    /// so the clock can be driven in tests.
+    fn check_vol_spike(&mut self, now: i64) {
+        let equity = self.equity();
+        let vol_pct = if equity > 0.0 { self.book_vol() / equity * 100.0 } else { 0.0 };
+        let (target, k) = (self.limits.portfolio_vol_target_pct, self.limits.vol_spike_trim_mult);
+        let Some(keep) = self.vol_spike.update(vol_pct, target, k, now) else { return };
+        let mut ids: Vec<String> = self.positions.keys().cloned().collect();
+        ids.sort();
+        self.log(
+            JournalKind::Risk,
+            format!(
+                "Volatility spike: the book has swung about {vol_pct:.0}% a year for over {} minutes, more than \
+                 {k}x its {target:.0}% target. Every position is cut by {:.0}% to bring it back to the target",
+                risk::VOL_SPIKE_SUSTAIN_MS / 60_000,
+                (1.0 - keep) * 100.0
+            ),
+            None,
+            None,
+        );
+        for id in ids {
+            self.trim_position(&id, keep, "volatility spike trim");
+        }
+    }
+
+    /// Reduce a position to `keep` of its size, never past flat: a long is
+    /// sold and a short bought back. A real position is reduced at its venue
+    /// or not at all, like any other exit.
+    fn trim_position(&mut self, id: &str, keep: f64, reason: &str) {
+        let keep = keep.clamp(0.0, 1.0);
+        let (qty, side, sid, live) = match self.positions.get(id) {
+            Some(p) if p.qty != 0.0 => (
+                p.qty.abs() * (1.0 - keep),
+                if p.qty > 0.0 { Side::Sell } else { Side::Buy },
+                p.strategy_id.clone(),
+                p.live,
+            ),
+            _ => return,
+        };
+        if qty <= 0.0 {
+            return;
+        }
+        let Some(m) = self.markets.iter().find(|m| m.id == id).cloned() else { return };
+        let idx = self
+            .strategies
+            .iter()
+            .position(|s| s.id == sid)
+            .unwrap_or_else(|| self.ensure_manual_strategy());
+        let intent = if live { RouteIntent::LiveExit } else { RouteIntent::Paper };
+        self.route_fill(idx, &m, side, qty, m.price, intent);
+        if !live || self.live_routable(m.venue) {
+            self.log(
+                JournalKind::System,
+                format!("Trim {id} by {:.0}%: {reason}", (1.0 - keep) * 100.0),
+                Some(sid),
+                Some(id.to_string()),
+            );
         }
     }
 
@@ -3339,11 +3421,61 @@ impl Engine {
             self.log(JournalKind::System, format!("Strategy {name} → {state:?}"), Some(id.to_string()), None);
         }
     }
+    /// Change one parameter. Different parameters are a different strategy as
+    /// far as the evidence goes, so this is also the one trigger that starts
+    /// the edge record over (the passport's research gates go stale on the
+    /// same comparison), and the only way back for a strategy sized to zero
+    /// for no edge: see the comment above [`risk::MIN_EDGE_TRADES`].
     pub fn set_strategy_param(&mut self, id: &str, key: &str, value: f64) {
-        if let Some(s) = self.strategies.iter_mut().find(|s| s.id == id) {
-            if let Some(p) = s.params.iter_mut().find(|p| p.key == key) {
-                p.value = value;
-            }
+        let Some(idx) = self.strategies.iter().position(|s| s.id == id) else { return };
+        let Some(p) = self.strategies[idx].params.iter_mut().find(|p| p.key == key) else { return };
+        // A slider sends every step; the same value again changes nothing.
+        if (p.value - value).abs() < 1e-12 {
+            return;
+        }
+        p.value = value;
+        let now = self.now();
+        self.restart_edge_record(idx, key, now);
+    }
+
+    /// Start a strategy's edge record over after a parameter change, saying
+    /// what was dropped, and take a live strategy back to paper: its research
+    /// gates judged the old parameters, so its passport no longer holds.
+    fn restart_edge_record(&mut self, idx: usize, key: &str, now: i64) {
+        let old = std::mem::replace(&mut self.strategies[idx].ledger.edge, risk::EdgeRecord::fresh(now));
+        let (sid, name) = (self.strategies[idx].id.clone(), self.strategies[idx].name.clone());
+        self.sizing_noted.remove(&sid);
+        // Dragging a slider through ten values would otherwise say this ten
+        // times; an empty record has nothing to report.
+        if old.trades() > 0 {
+            let (mode, est) = risk::edge_sizing(&old);
+            let won = est.map_or(0.0, |k| k.win_rate * 100.0);
+            let was = match mode {
+                risk::SizingMode::NoEdge => " It was sized to zero for no measured edge; the new parameters trade again on \
+                                             signal strength.",
+                risk::SizingMode::Measured => " It was sized on that record; the new parameters go back to signal strength.",
+                risk::SizingMode::Confidence => "",
+            };
+            self.log(
+                JournalKind::Risk,
+                format!(
+                    "{name}: parameter {key} changed, so its edge record ({} trades, {won:.0}% won) no longer describes \
+                     it and starts again.{was} Sized on its own record again after {} new closed trades",
+                    old.trades(),
+                    risk::MIN_EDGE_TRADES
+                ),
+                Some(sid.clone()),
+                None,
+            );
+        }
+        if self.strategies[idx].state == StrategyState::Live && !self.passport_for(&self.strategies[idx]).live_ready {
+            self.strategies[idx].state = StrategyState::Paper;
+            self.log(
+                JournalKind::Risk,
+                format!("{name} back to PAPER: its parameters changed since its checks. Run them again to go live"),
+                Some(sid),
+                None,
+            );
         }
     }
     /// Which venues have API keys in the vault — drives the "connected" badges.
@@ -3392,15 +3524,30 @@ impl Engine {
             })
             .collect()
     }
+    /// Price history for correlations: candles for bar-backed markets (aligned
+    /// on bar times), closes for the rest. See [`risk::PriceSeries`].
+    fn prices(&self) -> risk::PriceSeries<'_> {
+        risk::PriceSeries::new(&self.history, &self.ohlc)
+    }
+    /// One standard deviation of the open book's annual P&L.
+    fn book_vol(&self) -> f64 {
+        let book = self.exposure_book();
+        let vols = self.annual_vols(book.iter().map(|(id, _)| id.as_str()));
+        risk::portfolio_vol(&book, &vols, &self.prices())
+    }
     /// The risk manager's live numbers for the Risk page.
     fn risk_status(&self) -> risk::RiskStatus {
         let equity = self.equity();
         let book = self.exposure_book();
-        let corr = risk::correlated_exposure(&book, &self.history);
+        let prices = self.prices();
+        let corr = risk::correlated_exposure(&book, &prices);
         let vols = self.annual_vols(book.iter().map(|(id, _)| id.as_str()));
-        let pvol = risk::portfolio_vol(&book, &vols, &self.history);
+        let pvol = risk::portfolio_vol(&book, &vols, &prices);
         let drawdown_pct = self.drawdown_pct();
         risk::RiskStatus {
+            unaligned_pairs: risk::unaligned_pairs(&book, &prices),
+            vol_spike_since: self.vol_spike.above_since,
+            last_vol_trim: self.vol_spike.last_trim,
             portfolio_vol: pvol,
             portfolio_vol_pct: if equity > 0.0 { pvol / equity * 100.0 } else { 0.0 },
             vol_assumed: book.iter().filter(|(id, _)| !vols.contains_key(id)).map(|(id, _)| id.clone()).collect(),
@@ -3441,11 +3588,16 @@ impl Engine {
         let book = self.exposure_book();
         let vols = self.annual_vols(book.iter().map(|(id, _)| id.as_str()).chain(std::iter::once(market_id)));
         let weighted = risk::vol_weighted(&book, &vols);
+        let prices = self.prices();
+        let corr = risk::correlation_loading(&book, market_id, &prices);
+        let vol = risk::correlation_loading(&weighted, market_id, &prices);
         risk::RiskContext {
-            corr_exposure: risk::correlated_exposure(&book, &self.history),
-            corr_loading: risk::correlation_loading(&book, market_id, &self.history),
-            vol_exposure: risk::correlated_exposure(&weighted, &self.history),
-            vol_loading: risk::correlation_loading(&weighted, market_id, &self.history),
+            corr_exposure: risk::correlated_exposure(&book, &prices),
+            corr_loading: corr.measured,
+            corr_unmeasured: corr.unmeasured,
+            vol_exposure: risk::correlated_exposure(&weighted, &prices),
+            vol_loading: vol.measured,
+            vol_unmeasured: vol.unmeasured,
             market_vol: vols.get(market_id).copied().unwrap_or_else(risk::unknown_annual_vol),
             equity: self.equity(),
             day_start_equity: self.day_start_equity,
@@ -3558,6 +3710,7 @@ impl Engine {
         self.research = p.research;
         self.ref_prices = p.ref_prices;
         self.log(JournalKind::System, "Restored saved state from disk".into(), None, None);
+        self.rebuild_edge_records();
         // A strategy saved as Live keeps that switch only if its passport still
         // allows it. Saves from before the gates existed, or a strategy whose
         // parameters changed since its checks, go back to paper and say why.
@@ -3581,6 +3734,70 @@ impl Engine {
                 JournalKind::System,
                 format!("Forecast track record restored — {resolved} scored prediction(s)"),
                 None,
+                None,
+            );
+        }
+    }
+
+    /// Give a strategy restored with an empty edge record the closed trades
+    /// the saved orders still show (see `risk::replay_closed_trades`). A save
+    /// from before the record existed would otherwise size a strategy with a
+    /// long history on signal strength for another 30 trades. Only trades
+    /// closed since the record last started over count, so this never undoes
+    /// a reset by a parameter change. A strategy with nothing to rebuild from
+    /// is left empty.
+    fn rebuild_edge_records(&mut self) {
+        let empty: Vec<usize> =
+            (0..self.strategies.len()).filter(|&i| self.strategies[i].ledger.edge.trades() == 0).collect();
+        if empty.is_empty() {
+            return;
+        }
+        let fills: Vec<risk::PastFill> = self
+            .orders
+            .iter()
+            .rev() // newest first on the book, oldest first for the replay
+            .filter(|o| o.status != OrderStatus::Rejected && o.filled_qty > 0.0)
+            .filter_map(|o| {
+                let price = o.avg_fill_price?;
+                let symbol = self
+                    .markets
+                    .iter()
+                    .find(|m| m.id == o.market_id)
+                    .map(|m| m.symbol.clone())
+                    .unwrap_or_else(|| o.market_id.split(':').nth(1).unwrap_or(&o.market_id).to_string());
+                let model = costs::model_for(CostVenue::for_venue(o.venue, Some(self.crypto_venue)), &symbol);
+                Some(risk::PastFill {
+                    ts: o.ts,
+                    market_id: o.market_id.clone(),
+                    strategy_id: o.strategy_id.clone(),
+                    signed_qty: if o.side == Side::Buy { o.filled_qty } else { -o.filled_qty },
+                    price,
+                    fee_rate: model.taker_bps / 10_000.0,
+                })
+            })
+            .collect();
+        let held: HashMap<String, f64> = self.positions.iter().map(|(id, p)| (id.clone(), p.qty)).collect();
+        let trades = risk::replay_closed_trades(&fills, &held);
+        for idx in empty {
+            let s = &mut self.strategies[idx];
+            // Strictly after: a trade stamped in the same millisecond as the
+            // reset may have closed before it, and leaving one out is the
+            // cheaper mistake.
+            let since = s.ledger.edge.since.unwrap_or(i64::MIN);
+            let mine: Vec<f64> =
+                trades.iter().filter(|t| t.strategy_id == s.id && t.ts > since).map(|t| t.net_return).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            mine.iter().for_each(|r| s.ledger.edge.record(*r));
+            let (sid, name, n) = (s.id.clone(), s.name.clone(), mine.len());
+            self.log(
+                JournalKind::Risk,
+                format!(
+                    "{name}: edge record rebuilt from {n} closed trade(s) in the saved order history (fees estimated at \
+                     the venue's taker rate)"
+                ),
+                Some(sid),
                 None,
             );
         }
@@ -3648,6 +3865,12 @@ impl Engine {
                         (m.id.clone(), recent)
                     })
                 })
+                .collect(),
+            history_ts: self
+                .ohlc
+                .iter()
+                .filter(|(id, _)| self.history.contains_key(*id))
+                .map(|(id, bars)| (id.clone(), bars.iter().skip(bars.len().saturating_sub(60)).map(|b| b.ts).collect()))
                 .collect(),
             live: self.live_status(),
             bar_backed: self.bar_backed.iter().cloned().collect(),

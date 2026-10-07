@@ -63,6 +63,10 @@ export interface EngineClient {
   getLimits(): RiskLimits;
   /** Recent close-price history per tradable market (for correlation analysis). */
   history(): Record<string, number[]>;
+  /** Bar open times (epoch ms) for the closes in `history`, for markets on
+   *  real candles only. A market missing here is on ticks, which have no
+   *  times, and cannot be correlated against a candle market. */
+  historyTimes(): Record<string, number[]>;
   /** Live-execution status (arm state, endpoint, pending live orders, session gate). */
   liveStatus(): LiveStatus;
   /** The forecasting layer's view: per-market ensembles, source scoreboard,
@@ -116,6 +120,7 @@ export interface EngineState {
   strategies: StrategyConfig[];
   limits: RiskLimits;
   history: Record<string, number[]>;
+  historyTs?: Record<string, number[]>;
   live: LiveStatus;
   barBacked?: string[];
   aiViews?: AiView[];

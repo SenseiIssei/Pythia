@@ -111,6 +111,9 @@ export class TauriEngineClient implements EngineClient {
   history(): Record<string, number[]> {
     return this.state.history ?? {};
   }
+  historyTimes(): Record<string, number[]> {
+    return this.state.historyTs ?? {};
+  }
   liveStatus() {
     return this.state.live ?? DISARMED;
   }
