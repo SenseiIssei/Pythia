@@ -63,8 +63,14 @@ function useNarrow(): boolean {
     const mq = window.matchMedia?.(NARROW);
     if (!mq) return;
     const on = () => setNarrow(mq.matches);
+    // Sync once: the width may have changed between the first render and now.
+    on();
     mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
+    window.addEventListener("resize", on);
+    return () => {
+      mq.removeEventListener("change", on);
+      window.removeEventListener("resize", on);
+    };
   }, []);
   return narrow;
 }
