@@ -283,7 +283,8 @@ def pretrain(model: PythiaNet, panel: Panel, rows: np.ndarray, dev, epochs: int,
         log(f"pretrain epoch {ep + 1}/{epochs}: reconstruction loss {tot / n:.4f}")
 
 
-def finetune(model: PythiaNet, panel: Panel, rows: np.ndarray, dev, epochs: int, batch: int) -> None:
+def finetune(model: PythiaNet, panel: Panel, rows: np.ndarray, dev, epochs: int, batch: int,
+             listwise: bool = False) -> None:
     rows = rows[np.isfinite(panel.rank_target[rows]) & np.isfinite(panel.fvol[rows])]
     vol_mu, vol_sd = float(np.mean(panel.fvol[rows])), float(np.std(panel.fvol[rows]) + 1e-6)
     model.vol_norm = (vol_mu, vol_sd)
@@ -295,20 +296,62 @@ def finetune(model: PythiaNet, panel: Panel, rows: np.ndarray, dev, epochs: int,
                             weight_decay=0.05)
     model.train()
     for _ in range(epochs):
-        perm = np.random.permutation(rows)
-        for s in range(0, len(perm), batch):
-            b = perm[s:s + batch]
+        for b, day_ids in batches(panel, rows, batch, listwise):
             x = standardise(panel.window(b).to(dev, non_blocking=True))
             yr = torch.from_numpy(panel.rank_target[b]).to(dev)
             yv = torch.from_numpy(((panel.fvol[b] - vol_mu) / vol_sd).astype(np.float32)).to(dev)
             s_b = torch.from_numpy(panel.static[b]).to(dev) if panel.static is not None else None
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 pr, pv = model(x, s_b)
-                loss = F.mse_loss(pr.float(), yr) + 0.5 * F.mse_loss(pv.float(), yv)
+            pr, pv = pr.float(), pv.float()
+            vol_loss = 0.5 * F.mse_loss(pv, yv)
+            if listwise:
+                loss = listnet_loss(pr, yr, torch.from_numpy(day_ids).to(dev)) + vol_loss
+            else:
+                loss = F.mse_loss(pr, yr) + vol_loss
             opt.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+
+
+def batches(panel: Panel, rows: np.ndarray, batch: int, listwise: bool):
+    """Pointwise: random rows. Listwise: whole days, so every day in a batch is
+    complete and the loss can compare each coin with the others of its day."""
+    if not listwise:
+        perm = np.random.permutation(rows)
+        for s in range(0, len(perm), batch):
+            yield perm[s:s + batch], None
+        return
+    days = panel.day[rows]
+    uniq = np.random.permutation(np.unique(days))
+    by_day = {d: rows[days == d] for d in uniq}
+    cur, ids = [], []
+    for k, d in enumerate(uniq):
+        r = by_day[d]
+        cur.append(r)
+        ids.append(np.full(len(r), k, dtype=np.int64))
+        if sum(len(c) for c in cur) >= batch:
+            yield np.concatenate(cur), np.concatenate(ids)
+            cur, ids = [], []
+    if cur:
+        yield np.concatenate(cur), np.concatenate(ids)
+
+
+def listnet_loss(pred: torch.Tensor, target: torch.Tensor, day: torch.Tensor, temp: float = 1.0) -> torch.Tensor:
+    """ListNet top-one cross-entropy per day: the softmax of the predictions
+    should match the softmax of the true cross-sectional ranks. It optimises the
+    ordering within each day, which is the task, instead of each coin's level."""
+    loss, n = pred.new_zeros(()), 0
+    for d in torch.unique(day):
+        m = day == d
+        if m.sum() < 5:
+            continue
+        p = F.log_softmax(pred[m] / temp, dim=0)
+        t = F.softmax(target[m] / temp, dim=0)
+        loss = loss - (t * p).sum()
+        n += 1
+    return loss / max(n, 1)
 
 
 @torch.no_grad()
@@ -370,13 +413,15 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=512)
     ap.add_argument("--max-coins", type=int, default=None, help="for a quick smoke test")
     ap.add_argument("--hybrid", action="store_true", help="attempt two: add M2's cross-sectional features")
+    ap.add_argument("--listwise", action="store_true", help="attempt three: rank whole days (ListNet), bigger model")
     args = ap.parse_args()
     root = Path(args.data)
     dev = torch.device("cuda")
     torch.manual_seed(7)
     np.random.seed(7)
     t0 = time.time()
-    out_dir = root / "reports" / ("pythia_net_hybrid" if args.hybrid else "pythia_net")
+    variant = "pythia_net" + ("_hybrid" if args.hybrid else "") + ("_listwise" if args.listwise else "")
+    out_dir = root / "reports" / variant
     out_dir.mkdir(parents=True, exist_ok=True)
     log_lines: list[str] = []
 
@@ -392,7 +437,8 @@ def main() -> None:
     if n_static:
         covered = float(np.isfinite(panel.static).all(axis=1).mean())
         log(f"hybrid: {n_static} M2 features attached, {covered * 100:.0f} % of coin-days covered")
-    model = PythiaNet(n_static=n_static).to(dev)
+    size = dict(d=192, layers=6, heads=6) if args.listwise else {}
+    model = PythiaNet(n_static=n_static, **size).to(dev)
     log(f"model: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M parameters on {torch.cuda.get_device_name(0)}")
 
     pre_rows = np.flatnonzero(panel.day < first_test - HORIZON_D * DAY_US)
@@ -408,7 +454,7 @@ def main() -> None:
         if len(te) == 0:
             continue
         model.load_state_dict(base_state)  # every quarter starts from the same pretrained encoder
-        finetune(model, panel, tr, dev, args.finetune_epochs, args.batch)
+        finetune(model, panel, tr, dev, args.finetune_epochs, args.batch, listwise=args.listwise)
         score[te] = predict(model, panel, te, dev, args.batch * 2)
         ok = te[np.isfinite(panel.fwd[te])]
         ics = []
@@ -437,7 +483,7 @@ def main() -> None:
     m2_file = root / "reports" / "picks" / "latest.json"
     if m2_file.exists():
         m2 = json.loads(m2_file.read_text())
-    title = "# M3 · Pythia-Net hybrid against M2\n\n" if args.hybrid else "# M3 · Pythia-Net against M2\n\n"
+    title = f"# M3 · {variant} against M2\n\n"
     md = (title +
           f"{len(panel.symbols)} coins, {len(panel.day):,} coin-days, pretrained on data before 2022, fine-tuned per "
           f"quarter. {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M parameters, "

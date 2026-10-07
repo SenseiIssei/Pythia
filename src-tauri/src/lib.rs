@@ -237,6 +237,7 @@ pub fn run() {
             commands::wallet_snapshot,
             commands::ml_status,
             commands::tax_export,
+            commands::lab_status,
             commands::tax_save_csv,
             commands::run_ensemble,
             commands::forecast_config,

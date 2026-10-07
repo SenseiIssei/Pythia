@@ -568,6 +568,12 @@ pub fn tax_save_csv(app: AppHandle) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+/// The research lab's paper books and reports, from the synced data folder. Read-only.
+#[tauri::command]
+pub fn lab_status() -> pythia_core::labview::LabStatus {
+    pythia_core::labview::status()
+}
+
 /// The volatility model in shadow mode: forecasts, live score, drift. Read-only.
 #[tauri::command]
 pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::MlStatus {
