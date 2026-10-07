@@ -47,9 +47,14 @@ export function ConfirmButton({
     );
   }
   return (
-    <span className="inline-flex flex-wrap items-center gap-2 rounded-lg border border-danger/40 bg-danger/5 px-2.5 py-1.5 text-xs text-cyber-text">
+    <span
+      role="group"
+      aria-label="Confirm"
+      className="inline-flex max-w-full flex-wrap items-center gap-2 rounded-lg border border-danger/40 bg-danger/5 px-2.5 py-1.5 text-left text-xs text-cyber-text"
+    >
       <span className="max-w-xs">{question}</span>
       <button
+        type="button"
         onClick={() => {
           setAsking(false);
           onConfirm();
@@ -59,6 +64,7 @@ export function ConfirmButton({
         {confirmLabel}
       </button>
       <button
+        type="button"
         ref={keepRef}
         onClick={() => setAsking(false)}
         className="rounded border border-cyber-border px-2 py-0.5 text-cyber-text-dim hover:text-cyber-text focus:outline focus:outline-1 focus:outline-accent"
@@ -87,6 +93,7 @@ export function useUndo(ms = 8000): [ReactNode, (message: string, undo: () => vo
     >
       <span>{notice.message}</span>
       <button
+        type="button"
         onClick={() => {
           notice.undo();
           setNotice(null);
