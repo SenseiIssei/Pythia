@@ -4,9 +4,10 @@
 //! exchange actually *executes* is a user setting, so a strategy proven on
 //! Kraken can be pointed at Binance without touching the strategy.
 //!
-//! Every venue here authenticates with an HMAC over a canonical string (see
-//! [`super::sign`]) and speaks plain REST. They differ in three places, and
-//! those three places are all this module has to normalise:
+//! Every venue here speaks plain REST and signs each private request (see
+//! [`super::sign`]): four with an HMAC over a canonical string, Coinbase with
+//! a per-request ES256 JWT. They differ in three places, and those three
+//! places are all this module has to normalise:
 //!
 //! | | symbol | market-buy size unit | order id |
 //! |---|---|---|---|
@@ -14,6 +15,7 @@
 //! | Binance  | `BTCUSDT`  | base (`quantity`) | `orderId` |
 //! | Bybit    | `BTCUSDT`  | quote *unless* `marketUnit=baseCoin` | `orderId` |
 //! | OKX      | `BTC-USDT` | quote *unless* `tgtCcy=base_ccy` | `ordId` |
+//! | Coinbase | `BTC-USD`  | base (`base_size`) | `order_id` |
 //!
 //! That "market-buy size unit" column is the classic way to spend 10× what you
 //! meant to, so each adapter pins it to the base currency explicitly.
@@ -22,6 +24,7 @@
 
 mod binance;
 mod bybit;
+mod coinbase;
 mod kraken;
 mod okx;
 
@@ -40,9 +43,9 @@ pub enum Exchange {
     Binance,
     Bybit,
     Okx,
-    /// Coinbase Advanced Trade authenticates with ES256 JWTs rather than an
-    /// HMAC. Listed so the UI can show it, but it refuses to trade rather than
-    /// pretending — see `PROFIT-PLAN.md` for the plan to add it.
+    /// Coinbase Advanced Trade. Authenticates with a CDP API key (a key name
+    /// plus an EC private key) and an ES256 JWT per request rather than an
+    /// HMAC; see `coinbase.rs`.
     Coinbase,
 }
 
@@ -81,12 +84,45 @@ impl Exchange {
 
     /// Venues that need a third credential besides key + secret.
     pub fn needs_passphrase(self) -> bool {
-        matches!(self, Exchange::Okx | Exchange::Coinbase)
+        matches!(self, Exchange::Okx)
     }
 
-    /// Whether order routing is implemented for this venue.
+    /// Whether order routing is implemented for this venue. Every venue in the
+    /// registry trades now; a future venue that is listed before its adapter
+    /// exists returns false here and is refused by `creds_ok`.
     pub fn can_trade(self) -> bool {
-        !matches!(self, Exchange::Coinbase)
+        match self {
+            Exchange::Kraken | Exchange::Binance | Exchange::Bybit | Exchange::Okx | Exchange::Coinbase => true,
+        }
+    }
+
+    /// What this venue calls the two credential fields, for the settings form.
+    /// Coinbase's "key" is a key *name* and its "secret" a multi-line PEM.
+    pub fn key_labels(self) -> (&'static str, &'static str) {
+        match self {
+            Exchange::Coinbase => ("API key name", "Private key (PEM)"),
+            _ => ("API key", "API secret"),
+        }
+    }
+
+    /// Plain-language instructions for creating a key with the right
+    /// permissions on this venue, shown under its form.
+    pub fn key_help(self) -> &'static str {
+        match self {
+            Exchange::Coinbase => {
+                "Create the key at portal.cdp.coinbase.com under API Keys, as a Secret API key. Under \
+                 Advanced settings choose ECDSA as the signature algorithm (Ed25519 keys do not work with \
+                 Advanced Trade). Give it the View and Trade permissions and NOT Transfer, so it cannot move \
+                 money off Coinbase, and add an IP allowlist with the address of the machine Pythia runs on. \
+                 Paste the key name (organizations/.../apiKeys/...) and the whole private key, including the \
+                 BEGIN and END lines."
+            }
+            Exchange::Okx => {
+                "Create a trade-only API key with no withdrawal permission, bound to your IP, and enter the \
+                 passphrase you chose for it."
+            }
+            _ => "Create a trade-only API key with no withdrawal permission, and restrict it to your IP address.",
+        }
     }
 
     /// The quote asset Pythia's `…/USD` markets map to here. Binance and Bybit
@@ -130,19 +166,50 @@ pub struct ExchangeInfo {
     pub can_trade: bool,
     /// Whether credentials for it exist in the vault / env.
     pub configured: bool,
+    /// Form labels for the key and secret fields.
+    pub key_label: &'static str,
+    pub secret_label: &'static str,
+    /// The secret is a multi-line PEM block (Coinbase), so the form should
+    /// offer a text area rather than a one-line password field.
+    pub secret_multiline: bool,
+    /// How to create a correctly scoped key, in plain language.
+    pub key_help: &'static str,
 }
 
 pub fn exchanges_with(configured: impl Fn(Exchange) -> bool) -> Vec<ExchangeInfo> {
     Exchange::ALL
         .into_iter()
-        .map(|e| ExchangeInfo {
-            id: e.id(),
-            label: e.label(),
-            needs_passphrase: e.needs_passphrase(),
-            can_trade: e.can_trade(),
-            configured: configured(e),
+        .map(|e| {
+            let (key_label, secret_label) = e.key_labels();
+            ExchangeInfo {
+                id: e.id(),
+                label: e.label(),
+                needs_passphrase: e.needs_passphrase(),
+                can_trade: e.can_trade(),
+                configured: configured(e),
+                key_label,
+                secret_label,
+                secret_multiline: e == Exchange::Coinbase,
+                key_help: e.key_help(),
+            }
         })
         .collect()
+}
+
+/// Check a pasted credential set before it is stored, so a wrong paste is
+/// caught on the settings page instead of at the first order. Only Coinbase
+/// has a secret with structure worth checking (an EC private key); for the
+/// HMAC venues any string is a well-formed secret. Errors never quote the key.
+pub fn check_credentials(exchange: Exchange, key: &str, secret: &str) -> Result<(), String> {
+    if exchange == Exchange::Coinbase {
+        if key.trim().contains("BEGIN") {
+            return Err("the key name field holds the private key; put the key name \
+                        (organizations/.../apiKeys/...) there and the PEM block in the private key field"
+                .into());
+        }
+        super::sign::cdp_signing_key(secret).map(|_| ())?;
+    }
+    Ok(())
 }
 
 /// The single `Venue::Crypto` connector, backed by whichever exchange the user
@@ -192,9 +259,7 @@ impl CexConnector {
 
     fn creds_ok(&self) -> Result<(), ConnectorError> {
         if !self.exchange.can_trade() {
-            return Err(ConnectorError::Unimplemented(
-                "Coinbase Advanced Trade needs ES256 JWT auth — not wired yet",
-            ));
+            return Err(ConnectorError::Unimplemented("order routing for this exchange"));
         }
         if self.key.trim().is_empty() || self.secret.trim().is_empty() {
             return Err(ConnectorError::NotConfigured(self.exchange.id().into()));
@@ -263,15 +328,33 @@ impl MarketConnector for CexConnector {
         self.creds_ok()?;
         let bal = self.balances().await?;
         let usd: f64 = bal.iter().filter_map(|b| b.usd_value).sum();
-        Ok(format!(
+        let mut summary = format!(
             "{} · {} assets · ≈${usd:.2} priced",
             self.exchange.label(),
             bal.len()
-        ))
+        );
+        // Coinbase publishes the account's fee tier; show it, since it decides
+        // whether a strategy's edge survives the fees there.
+        if self.exchange == Exchange::Coinbase {
+            if let Some((tier, maker, taker)) = coinbase::fee_tier(self).await {
+                let tier = if tier.is_empty() { String::new() } else { format!("{tier}, ") };
+                summary.push_str(&format!(
+                    " · fee tier {tier}maker {:.2} % / taker {:.2} %",
+                    maker * 100.0,
+                    taker * 100.0
+                ));
+            }
+        }
+        Ok(summary)
     }
 
     async fn preflight(&self, req: &OrderRequest) -> Result<(), ConnectorError> {
         self.creds_ok()?;
+        // Coinbase publishes its lot rules (minimum size, step, minimum order
+        // value, halted books); refuse what it would refuse before sending.
+        if self.exchange == Exchange::Coinbase {
+            coinbase::preflight(self, req).await?;
+        }
         // Spot cannot go short: selling what you do not hold is not an order,
         // it is a rejection with extra steps.
         if req.side == super::Side::Sell {
@@ -302,7 +385,7 @@ impl MarketConnector for CexConnector {
             Exchange::Binance => binance::submit(self, req).await,
             Exchange::Bybit => bybit::submit(self, req).await,
             Exchange::Okx => okx::submit(self, req).await,
-            Exchange::Coinbase => Err(ConnectorError::Unimplemented("coinbase::submit_order")),
+            Exchange::Coinbase => coinbase::submit(self, req).await,
         }
     }
 
@@ -314,7 +397,7 @@ impl MarketConnector for CexConnector {
             Exchange::Binance => binance::status(self, broker_id, &venue_symbol).await,
             Exchange::Bybit => bybit::status(self, broker_id, &venue_symbol).await,
             Exchange::Okx => okx::status(self, broker_id, &venue_symbol).await,
-            Exchange::Coinbase => Err(ConnectorError::Unimplemented("coinbase::order_status")),
+            Exchange::Coinbase => coinbase::status(self, broker_id).await,
         }
     }
 
@@ -326,7 +409,7 @@ impl MarketConnector for CexConnector {
             Exchange::Binance => binance::cancel(self, broker_id, &venue_symbol).await,
             Exchange::Bybit => bybit::cancel(self, broker_id, &venue_symbol).await,
             Exchange::Okx => okx::cancel(self, broker_id, &venue_symbol).await,
-            Exchange::Coinbase => Err(ConnectorError::Unimplemented("coinbase::cancel_order")),
+            Exchange::Coinbase => coinbase::cancel(self, broker_id).await,
         }
     }
 
@@ -353,7 +436,7 @@ impl MarketConnector for CexConnector {
             Exchange::Binance => binance::balances(self).await,
             Exchange::Bybit => bybit::balances(self).await,
             Exchange::Okx => okx::balances(self).await,
-            Exchange::Coinbase => Err(ConnectorError::Unimplemented("coinbase::balances")),
+            Exchange::Coinbase => coinbase::balances(self).await,
         }
     }
 }
@@ -434,9 +517,41 @@ mod tests {
         let okx = CexConnector::new(Exchange::Okx, "k".into(), "s".into(), String::new());
         assert!(!okx.is_live_ready());
         assert!(CexConnector::new(Exchange::Okx, "k".into(), "s".into(), "p".into()).is_live_ready());
-        // Coinbase is listed but must never claim it can trade.
-        let cb = CexConnector::new(Exchange::Coinbase, "k".into(), "s".into(), "p".into());
-        assert!(!cb.is_live_ready());
+        // Coinbase needs a key name and a private key, and no passphrase.
+        assert!(!CexConnector::new(Exchange::Coinbase, "k".into(), String::new(), String::new()).is_live_ready());
+        assert!(CexConnector::new(Exchange::Coinbase, "k".into(), "pem".into(), String::new()).is_live_ready());
+    }
+
+    #[test]
+    fn every_listed_exchange_can_trade_and_describes_its_key() {
+        let list = exchanges_with(|_| false);
+        assert_eq!(list.len(), Exchange::ALL.len());
+        for info in &list {
+            assert!(info.can_trade, "{} is listed but cannot trade", info.label);
+            assert!(!info.key_help.is_empty());
+        }
+        let cb = list.iter().find(|i| i.id == "coinbase").unwrap();
+        assert!(!cb.needs_passphrase, "a CDP key has no passphrase");
+        assert!(cb.secret_multiline);
+        assert_eq!(cb.key_label, "API key name");
+        assert!(cb.key_help.contains("Trade") && cb.key_help.contains("NOT Transfer"));
+        assert!(cb.key_help.contains("IP allowlist"));
+        let okx = list.iter().find(|i| i.id == "okx").unwrap();
+        assert!(okx.needs_passphrase && !okx.secret_multiline);
+    }
+
+    #[test]
+    fn coinbase_credentials_are_checked_before_they_are_stored() {
+        let sk = p256::SecretKey::from_slice(&[0x42u8; 32]).unwrap();
+        let pem = sk.to_sec1_pem(Default::default()).unwrap().to_string();
+        assert!(check_credentials(Exchange::Coinbase, "organizations/o/apiKeys/k", &pem).is_ok());
+        assert!(check_credentials(Exchange::Coinbase, "organizations/o/apiKeys/k", "abc").is_err());
+        // Pasted into the wrong field.
+        let e = check_credentials(Exchange::Coinbase, &pem, &pem).unwrap_err();
+        assert!(e.contains("key name field"), "{e}");
+        assert!(!e.contains(pem.lines().nth(1).unwrap()), "never echo the key");
+        // HMAC venues accept any non-empty string as a secret.
+        assert!(check_credentials(Exchange::Kraken, "k", "s").is_ok());
     }
 
     #[test]
