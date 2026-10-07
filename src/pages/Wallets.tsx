@@ -18,6 +18,7 @@ import {
   saveWalletAddresses,
 } from "../live";
 import type { Chain, WalletAccount, WalletKind, WalletsSnapshot, WatchedAddress } from "../types";
+import { useUndo } from "../components/Confirm";
 
 const CHAINS: { id: Chain; label: string; asset: string }[] = [
   { id: "ethereum", label: "Ethereum", asset: "ETH" },
@@ -195,6 +196,7 @@ function AddressBook({ onSaved }: { onSaved: () => void }) {
   const [address, setAddress] = useState("");
   const [label, setLabel] = useState("");
   const [err, setErr] = useState("");
+  const [undoNotice, offerUndo] = useUndo();
 
   useEffect(() => {
     void walletAddresses().then(setList).catch(() => setList([]));
@@ -259,6 +261,7 @@ function AddressBook({ onSaved }: { onSaved: () => void }) {
         </Button>
       </div>
       {err && <div className="mb-2 text-xs text-danger">{err}</div>}
+      {undoNotice}
 
       {list.length > 0 && (
         <div className="space-y-1">
@@ -277,7 +280,11 @@ function AddressBook({ onSaved }: { onSaved: () => void }) {
               <Button
                 tone="red"
                 icon={Trash2}
-                onClick={() => void persist(list.filter((_, j) => j !== i))}
+                onClick={() => {
+                  const before = list;
+                  void persist(list.filter((_, j) => j !== i));
+                  offerUndo(`Stopped watching ${w.label || w.address.slice(0, 10) + "…"}.`, () => void persist(before));
+                }}
               >
                 Remove
               </Button>

@@ -15,6 +15,7 @@ import {
 import type { BacktestResult } from "../engine/backtest";
 import type { StrategyConfig } from "../types";
 import { PnlLines } from "../components/PnlBreakdown";
+import { useUndo } from "../components/Confirm";
 
 const IND_KINDS: IndKind[] = ["price", "rsi", "ema", "sma", "zscore", "roc", "macdHist", "atr"];
 
@@ -31,6 +32,7 @@ export function Composer() {
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [deployName, setDeployName] = useState("");
   const [deployMsg, setDeployMsg] = useState("");
+  const [undoNotice, offerUndo] = useUndo();
 
   function deploy() {
     const name = deployName.trim() || `Composed ${composed.direction}`;
@@ -65,8 +67,10 @@ export function Composer() {
     setResult(null);
   }
   function removeRule(i: number) {
+    const before = composed;
     setComposed((c) => ({ ...c, rules: c.rules.filter((_, j) => j !== i) }));
     setResult(null);
+    offerUndo(`Rule ${i + 1} removed.`, () => setComposed(before));
   }
   function run() {
     setResult(backtestComposed(composed, { bars, seed, vol }));
@@ -83,8 +87,11 @@ export function Composer() {
             <button
               key={t.name}
               onClick={() => {
+                // A template replaces every rule built so far; keep a way back.
+                const before = composed;
                 setComposed(structuredClone(t.composed));
                 setResult(null);
+                offerUndo(`Your rules were replaced by "${t.name}".`, () => setComposed(before));
               }}
               className="rounded-lg border border-cyber-border px-2 py-1 text-xs text-cyber-text-dim hover:border-accent/40 hover:text-accent"
             >
@@ -109,6 +116,7 @@ export function Composer() {
           <span className="text-cyber-text-dim">position when ALL of:</span>
         </div>
 
+        {undoNotice}
         <div className="space-y-2">
           {composed.rules.map((r, i) => (
             <RuleRow key={i} rule={r} onChange={(x) => setRule(i, x)} onRemove={() => removeRule(i)} canRemove={composed.rules.length > 1} />

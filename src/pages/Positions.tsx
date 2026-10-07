@@ -1,5 +1,6 @@
 import { useStore } from "../store";
-import { Button, Card, PageHeader, Badge, fmtUsd } from "../components/ui";
+import { Card, PageHeader, Badge, fmtUsd } from "../components/ui";
+import { ConfirmButton } from "../components/Confirm";
 
 export function Positions() {
   const { positions, orders, flatten, live } = useStore();
@@ -49,9 +50,19 @@ export function Positions() {
                   {fmtUsd(p.unrealized)}
                 </Cell>
                 <div className="flex items-center justify-end py-1.5">
-                  <Button tone="neutral" onClick={() => flatten(p.marketId)} className="!px-2 !py-1">
+                  <ConfirmButton
+                    tone={p.live ? "red" : "neutral"}
+                    className="!px-2 !py-1"
+                    question={
+                      p.live
+                        ? `Sell all ${Math.abs(p.qty).toFixed(4)} ${p.symbol} for real, at about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}? This sends a real order and cannot be undone.`
+                        : `Close the practice position in ${p.symbol} at today's price, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}?`
+                    }
+                    confirmLabel={p.live ? "Yes, sell for real" : "Close it"}
+                    onConfirm={() => flatten(p.marketId)}
+                  >
                     Flatten
-                  </Button>
+                  </ConfirmButton>
                 </div>
               </RowGroup>
             ))}
