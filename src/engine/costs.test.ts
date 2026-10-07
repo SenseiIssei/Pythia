@@ -16,7 +16,7 @@ describe("the shared cost file", () => {
     expect(kBtc).toBeLessThan(modelFor("kraken", "DOT/USD").halfSpreadBps);
     expect(modelFor("binance", "BTC/USD").halfSpreadBps).toBeLessThan(kBtc);
     // Unlisted instruments get the venue default.
-    expect(modelFor("kraken", "PEPE/USD").halfSpreadBps).toBe(25);
+    expect(modelFor("kraken", "SHIB/USD").halfSpreadBps).toBe(25);
   });
 
   it("charges crypto as the configured exchange, Kraken by default", () => {
