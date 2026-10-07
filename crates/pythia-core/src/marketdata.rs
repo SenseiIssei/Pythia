@@ -274,29 +274,82 @@ pub async fn fetch_alpaca_bars(
         return vec![];
     }
     let start = (chrono::Utc::now() - chrono::Duration::days(lookback_days)).to_rfc3339();
-    let url = format!(
+    let base = format!(
         "https://data.alpaca.markets/v2/stocks/bars?symbols={}&timeframe={}&start={}&feed={}&adjustment=split&sort=asc&limit=10000",
         ALPACA_SYMBOLS.join(","),
         timeframe,
         urlencode(&start),
         feed
     );
-    let fut = async {
-        reqwest::Client::new()
-            .get(&url)
-            .header("APCA-API-KEY-ID", key_id)
-            .header("APCA-API-SECRET-KEY", secret)
-            .send()
-            .await
-            .ok()?
-            .json::<Value>()
-            .await
-            .ok()
-    };
-    let Some(v) = tokio::time::timeout(Duration::from_secs(12), fut).await.ok().flatten() else {
-        return vec![];
-    };
-    parse_alpaca_bars(&v)
+    // `limit` caps the bars of all symbols together, symbol by symbol, and the
+    // rest comes on further pages. Reading only the first page gave the later
+    // symbols old bars or none at 1-minute bars (5 symbols x 10 days is about
+    // 48 000), and the engine then signalled on days-old candles.
+    let client = reqwest::Client::new();
+    let mut pages = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..MAX_BAR_PAGES {
+        let url = match &token {
+            // The token is base64 and may hold `+`, `/` and `=`.
+            Some(t) => format!(
+                "{base}&page_token={}",
+                t.bytes()
+                    .map(|b| match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+                        _ => format!("%{b:02X}"),
+                    })
+                    .collect::<String>()
+            ),
+            None => base.clone(),
+        };
+        let fut = async {
+            client
+                .get(&url)
+                .header("APCA-API-KEY-ID", key_id)
+                .header("APCA-API-SECRET-KEY", secret)
+                .send()
+                .await
+                .ok()?
+                .json::<Value>()
+                .await
+                .ok()
+        };
+        // A page that fails leaves a series cut short, which is worse than the
+        // previous refresh: keep that one instead.
+        let Some(v) = tokio::time::timeout(Duration::from_secs(12), fut).await.ok().flatten() else {
+            return vec![];
+        };
+        token = v.get("next_page_token").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string);
+        pages.push(v);
+        if token.is_none() {
+            return merge_alpaca_pages(&pages);
+        }
+    }
+    // Still more after MAX_BAR_PAGES: the newest bars of the last symbols are
+    // missing, so nothing here is safe to signal on.
+    vec![]
+}
+
+/// Pages of one bars request. 1-minute bars over 10 days take about five.
+const MAX_BAR_PAGES: usize = 20;
+
+/// Join the pages of one `/v2/stocks/bars` request: a symbol cut at a page
+/// boundary continues on the next page.
+fn merge_alpaca_pages(pages: &[Value]) -> Vec<BarSeries> {
+    let mut by_id: std::collections::BTreeMap<String, Vec<Ohlc>> = Default::default();
+    for p in pages {
+        for s in parse_alpaca_bars(p) {
+            by_id.entry(s.id).or_default().extend(s.bars);
+        }
+    }
+    by_id
+        .into_iter()
+        .map(|(id, mut bars)| {
+            bars.sort_by_key(|b| b.ts);
+            bars.dedup_by_key(|b| b.ts);
+            BarSeries { id, bars }
+        })
+        .collect()
 }
 
 /// Map an Alpaca `/v2/stocks/bars` payload to our series. Split out so the
@@ -640,6 +693,29 @@ mod tests {
         assert_eq!(series[0].bars.len(), 2);
         assert!(series[0].bars[0].ts < series[0].bars[1].ts);
         assert_eq!(series[0].bars[1].close, 227.8);
+    }
+
+    #[test]
+    fn a_symbol_cut_at_a_page_boundary_continues_on_the_next_page() {
+        let bar = |t: &str, c: f64| format!(r#"{{"t":"{t}","o":{c},"h":{c},"l":{c},"c":{c},"v":1}}"#);
+        let page1: Value = serde_json::from_str(&format!(
+            r#"{{"bars": {{"AAPL": [{}], "MSFT": [{}]}}, "next_page_token": "TVNGVHwyMDI2"}}"#,
+            bar("2026-07-23T13:30:00Z", 227.0),
+            bar("2026-07-23T13:30:00Z", 428.0)
+        ))
+        .unwrap();
+        let page2: Value = serde_json::from_str(&format!(
+            r#"{{"bars": {{"MSFT": [{}, {}], "TSLA": [{}]}}, "next_page_token": null}}"#,
+            bar("2026-07-23T13:35:00Z", 429.0),
+            bar("2026-07-23T13:40:00Z", 430.0),
+            bar("2026-07-23T13:40:00Z", 250.0)
+        ))
+        .unwrap();
+        let series = merge_alpaca_pages(&[page1, page2]);
+        let ids: Vec<&str> = series.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["alpaca:AAPL", "alpaca:MSFT", "alpaca:TSLA"]);
+        let msft = &series[1].bars;
+        assert_eq!(msft.iter().map(|b| b.close).collect::<Vec<_>>(), [428.0, 429.0, 430.0]);
     }
 
     #[test]

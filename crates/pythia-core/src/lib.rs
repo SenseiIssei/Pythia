@@ -19,6 +19,7 @@ pub mod llm;
 pub mod marketdata;
 pub mod ml;
 pub mod orderbook;
+pub mod persist;
 pub mod predict;
 pub mod prefs;
 pub mod research;

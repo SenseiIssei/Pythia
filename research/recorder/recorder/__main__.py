@@ -13,13 +13,17 @@ import aiohttp
 
 from . import config
 from .binance import BinanceFutures, BinanceSpotBook, load_symbols
+from .bybit import BybitBooks
+from .coinbase import CoinbaseBooks
 from .kraken import KrakenFeed, load_pairs
+from .okx import OkxBooks
 from .sink import Sinks, now_us
 from .spread import SpreadLogger
 from .state import State
 
 log = logging.getLogger("recorder")
 started_us = now_us()
+BOOK_FEEDS = {"bybit": BybitBooks, "okx": OkxBooks, "coinbase": CoinbaseBooks}
 STALE_S = 120
 # Liquidations only arrive when someone gets liquidated; a quiet night is normal.
 STALE_OVERRIDE_S = {"binance_liq": 1800}
@@ -90,12 +94,20 @@ async def main() -> None:
         bspot = BinanceSpotBook(http, sinks, state, spot)
         bfut = BinanceFutures(http, sinks, state, perp)
         spread = SpreadLogger(sinks, state, bases)
+        books = []
+        for v in config.BOOK_VENUES:
+            if v in BOOK_FEEDS:
+                books.append(BOOK_FEEDS[v](http, sinks, state, config.UNIVERSE))
+            else:
+                log.warning("PYTHIA_BOOK_VENUES: unknown venue %r, ignored", v)
 
         tasks = [asyncio.create_task(c, name=n) for n, c in [
             ("kraken", kraken.run()), ("kraken_sample", kraken.sample_loop()),
             ("binance_spot", bspot.run()), ("binance_sample", bspot.sample_loop()),
             ("binance_futures", bfut.poll_loop()), ("binance_liq", bfut.liquidations()),
             ("spread", spread.run()),
+            *[(f.name, f.run()) for f in books],
+            *[(f"{f.name}_sample", f.sample_loop()) for f in books],
             ("flush", sinks.flush_loop(config.FLUSH_S)),
             ("health", health_loop(state, sinks)), ("compact", compact_loop(sinks)),
         ]]

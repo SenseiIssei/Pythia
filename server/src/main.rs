@@ -252,12 +252,24 @@ async fn save_loop(state: AppState) {
     let Some(path) = state_file() else { return };
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        let json = serde_json::to_string(&state.engine.lock().unwrap().to_persisted());
-        if let Ok(json) = json {
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+        let snapshot = state.engine.lock().unwrap().to_persisted();
+        if let Err(e) = pythia_core::persist::save(&path, &snapshot) {
+            tracing::warn!("state not saved to {}: {e}", path.display());
+        }
+    }
+}
+
+/// `PYTHIA_LAB_ONLY`: the built-in indicator strategies are paused, the lab
+/// books run. Lab books restored from the state file are lab strategies too;
+/// pausing them with the rest froze every lab book from its first restart on,
+/// because a lab signal only creates a missing book and never resumes one.
+fn lab_only(e: &mut Engine) {
+    use pythia_core::engine::StrategyKind;
+    for s in e.state().strategies {
+        if s.kind != StrategyKind::LabTargets {
+            let _ = e.set_strategy_state(&s.id, StrategyState::Paused);
+        } else if s.state == StrategyState::Paused {
+            let _ = e.set_strategy_state(&s.id, StrategyState::Paper);
         }
     }
 }
@@ -307,13 +319,26 @@ async fn main() {
         // Resume where the last run left off: positions, strategies and their
         // forward-test records. Without this every restart would reset gate 7.
         if let Some(path) = state_file() {
-            match std::fs::read_to_string(&path).map(|t| serde_json::from_str::<pythia_core::engine::Persisted>(&t)) {
-                Ok(Ok(p)) => {
-                    e.apply_persisted(p);
+            use pythia_core::persist::Loaded;
+            match pythia_core::persist::load(&path) {
+                Loaded::Restored(p) => {
+                    e.apply_persisted(*p);
                     tracing::info!("state restored from {}", path.display());
                 }
-                Ok(Err(err)) => tracing::warn!("state file {} unreadable, starting fresh: {err}", path.display()),
-                Err(_) => tracing::info!("no state file at {} yet, starting fresh", path.display()),
+                Loaded::Missing => tracing::info!("no state file at {} yet, starting fresh", path.display()),
+                Loaded::Unreadable { error, moved_to: Some(aside) } => tracing::warn!(
+                    "state file {} unreadable, starting fresh; the old file is kept as {}: {error}",
+                    path.display(),
+                    aside.display()
+                ),
+                Loaded::Unreadable { error, moved_to: None } => {
+                    // Saving now would overwrite the only copy. Refuse to run.
+                    tracing::error!(
+                        "state file {} unreadable and could not be moved aside, not starting: {error}",
+                        path.display()
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         e.set_connected(creds.connected_venues());
@@ -321,10 +346,7 @@ async fn main() {
         // built-in indicator strategies, which would otherwise hold the same
         // coins and block the lab book from running its portfolio.
         if std::env::var("PYTHIA_LAB_ONLY").map(|v| v == "1").unwrap_or(false) {
-            let ids: Vec<String> = e.state().strategies.iter().map(|s| s.id.clone()).collect();
-            for id in ids {
-                let _ = e.set_strategy_state(&id, pythia_core::engine::StrategyState::Paused);
-            }
+            lab_only(&mut e);
             tracing::info!("PYTHIA_LAB_ONLY: built-in strategies paused, lab strategies only");
         }
         // Costs follow the selected exchange even before its keys are set.
@@ -1400,5 +1422,55 @@ async fn post_llm_signal(Json(req): Json<LlmReq>) -> impl IntoResponse {
             tracing::warn!("llm signal failed: {e}");
             (StatusCode::BAD_GATEWAY, format!("llm error: {e}")).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pythia_core::engine::StrategyKind;
+
+    fn with_lab_book() -> Engine {
+        let mut e = Engine::new();
+        let now = chrono::Utc::now().timestamp_millis();
+        e.apply_lab_signal(pythia_core::lab::LabSignal {
+            strategy: "tsmom_regime".into(),
+            variant: "28d".into(),
+            as_of_ms: now,
+            generated_ms: now,
+            valid_until_ms: now + 3_600_000,
+            quote: "USD".into(),
+            weights: [("BTC".to_string(), 0.1)].into_iter().collect(),
+            regime_on: Some(true),
+            evidence: Default::default(),
+        });
+        e
+    }
+
+    fn states(e: &Engine, lab: bool) -> Vec<StrategyState> {
+        e.state()
+            .strategies
+            .iter()
+            .filter(|s| (s.kind == StrategyKind::LabTargets) == lab)
+            .map(|s| s.state)
+            .collect()
+    }
+
+    #[test]
+    fn lab_only_keeps_a_restored_lab_book_running() {
+        let saved = with_lab_book().to_persisted();
+        let mut e = Engine::new();
+        e.apply_persisted(saved);
+        lab_only(&mut e);
+        assert_eq!(states(&e, true), vec![StrategyState::Paper]);
+        assert!(states(&e, false).iter().all(|s| *s == StrategyState::Paused));
+    }
+
+    #[test]
+    fn lab_only_resumes_a_lab_book_an_earlier_restart_paused() {
+        let mut e = with_lab_book();
+        e.set_strategy_state("lab:tsmom_regime", StrategyState::Paused).unwrap();
+        lab_only(&mut e);
+        assert_eq!(states(&e, true), vec![StrategyState::Paper]);
     }
 }

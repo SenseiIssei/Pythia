@@ -832,6 +832,22 @@ pub struct Persisted {
     /// Reference-price entry per open position, for the gross line.
     #[serde(default)]
     pub ref_prices: HashMap<String, f64>,
+    /// The id counter. Without it every restart handed out `ord_1`, `j_1` and
+    /// so on again, next to the restored orders and journal that already had them.
+    #[serde(default)]
+    pub seq: u64,
+    /// The drawdown breaker's peak and the UTC day the daily counters belong
+    /// to. Without them a restart measured the drawdown from the starting
+    /// balance and skipped the daily reset when it fell on a new day.
+    #[serde(default)]
+    pub peak_equity: f64,
+    #[serde(default)]
+    pub day: i64,
+    /// Last price and its time (epoch ms) per market with a real feed. Markets
+    /// are re-seeded on load; without this a position was valued, and its stop
+    /// checked, at the seed price until the first feed refresh.
+    #[serde(default)]
+    pub prices: HashMap<String, (f64, i64)>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -970,6 +986,10 @@ pub struct Engine {
     vol_spike: risk::VolSpikeGuard,
     tick_count: u64,
     seq: u64,
+    /// Random per process, part of every client order id sent to a venue. The
+    /// id counter alone repeats after a crash that lost the last save, and a
+    /// venue that sees a known client id (Alpaca) hands back the old order.
+    boot_tag: String,
     rng: u64,
 }
 
@@ -1044,6 +1064,7 @@ impl Engine {
             vol_spike: risk::VolSpikeGuard::default(),
             tick_count: 0,
             seq: 0,
+            boot_tag: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
             rng: 0x9E3779B97F4A7C15,
         };
         let now = e.now();
@@ -2352,7 +2373,7 @@ impl Engine {
             },
         );
         self.pending_live.push(LiveOrderOut {
-            client_order_id: format!("pythia-{order_id}"),
+            client_order_id: format!("pythia-{}-{order_id}", self.boot_tag),
             order_id,
             venue: m.venue,
             market_id: m.id.clone(),
@@ -3708,13 +3729,42 @@ impl Engine {
             exec_policy: self.exec_policy.clone(),
             research: self.research.clone(),
             ref_prices: self.ref_prices.clone(),
+            seq: self.seq,
+            peak_equity: self.peak_equity,
+            day: self.day,
+            prices: self
+                .markets
+                .iter()
+                .filter(|m| self.real_ids.contains(&m.id))
+                .map(|m| (m.id.clone(), (m.price, m.updated_at)))
+                .collect(),
         }
     }
 
     pub fn apply_persisted(&mut self, p: Persisted) {
+        // Ids continue after the highest one restored. Saves from before the
+        // counter was kept still carry their ids in the orders and journal.
+        let suffix = |id: &str| id.rsplit('_').next().and_then(|n| n.parse::<u64>().ok());
+        let highest = p.orders.iter().map(|o| &o.id).chain(p.journal.iter().map(|j| &j.id)).filter_map(|id| suffix(id)).max();
+        self.seq = self.seq.max(p.seq).max(highest.unwrap_or(0));
         self.cash = p.cash;
         self.realized_pnl = p.realized_pnl;
         self.day_start_equity = p.day_start_equity;
+        // A save from before these were kept: the day's start is the best peak
+        // known, and the first tick moves it up if equity is higher.
+        self.peak_equity = if p.peak_equity > 0.0 { p.peak_equity } else { p.day_start_equity };
+        if p.day > 0 {
+            // A save from an earlier day gets its daily reset on the first tick.
+            self.day = p.day;
+        }
+        for (id, (price, at)) in &p.prices {
+            if let Some(m) = self.markets.iter_mut().find(|m| &m.id == id).filter(|_| price.is_finite() && *price > 0.0) {
+                m.price = *price;
+                // The saved time, not now: the risk check's staleness limit
+                // keeps entries off until the feed has confirmed the price.
+                m.updated_at = *at;
+            }
+        }
         self.equity_curve = p.equity_curve;
         self.positions = p
             .positions
@@ -4210,6 +4260,103 @@ mod tests {
         assert_eq!(pos.avg_price, 60_000.0);
         // markets are re-seeded, not persisted
         assert!(!e2.markets.is_empty());
+    }
+
+    fn restored(e: &Engine) -> Engine {
+        let json = serde_json::to_string(&e.to_persisted()).unwrap();
+        let mut back = Engine::new();
+        back.apply_persisted(serde_json::from_str(&json).unwrap());
+        back
+    }
+
+    #[test]
+    fn ids_are_not_handed_out_twice_across_a_restart() {
+        let num = |id: &str| id.rsplit('_').next().unwrap().parse::<u64>().unwrap();
+        let mut e = Engine::new();
+        for _ in 0..5 {
+            e.manual_order("crypto:BTC/USD", Side::Buy, 100.0);
+        }
+        let saved_max = e.orders.iter().map(|o| num(&o.id)).chain(e.journal.iter().map(|j| num(&j.id))).max().unwrap();
+        assert!(saved_max >= 10);
+
+        let mut back = restored(&e);
+        back.manual_order("crypto:ETH/USD", Side::Buy, 100.0);
+        assert!(num(&back.orders[0].id) > saved_max, "{} was handed out before the restart", back.orders[0].id);
+        assert!(num(&back.journal[0].id) > saved_max, "{} was handed out before the restart", back.journal[0].id);
+
+        // A save without the counter (older format) still continues after its ids.
+        let mut old = e.to_persisted();
+        old.seq = 0;
+        let mut back = Engine::new();
+        back.apply_persisted(old);
+        back.manual_order("crypto:ETH/USD", Side::Buy, 100.0);
+        assert!(num(&back.orders[0].id) > saved_max, "{}", back.orders[0].id);
+    }
+
+    #[test]
+    fn a_client_order_id_is_never_reused_by_the_next_process() {
+        // The same engine order id in two processes (a crash that lost the last
+        // save) must not reach the venue as the same client id: Alpaca answers a
+        // known one with the old order, which would then be booked as this one.
+        let send = || {
+            let mut e = engine_with_open_market();
+            e.set_live(armed_alpaca());
+            e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
+            e.drain_live_orders().remove(0)
+        };
+        let (a, b) = (send(), send());
+        assert_eq!(a.order_id, b.order_id, "same counter in both runs");
+        assert_ne!(a.client_order_id, b.client_order_id);
+        assert!(a.client_order_id.len() <= 32, "fits every venue's limit: {}", a.client_order_id);
+    }
+
+    #[test]
+    fn a_restart_does_not_measure_the_drawdown_from_the_starting_balance() {
+        // Down to 80 000 on earlier days, flat today: no drawdown today.
+        let mut e = Engine::new();
+        e.cash = 80_000.0;
+        e.day_start_equity = 80_000.0;
+        e.peak_equity = 80_000.0;
+        let mut back = restored(&e);
+        back.tick();
+        assert!(!back.limits.kill_switch, "the breaker tripped on a loss from before today");
+        assert!(back.drawdown_pct() < 1.0, "drawdown {}", back.drawdown_pct());
+    }
+
+    #[test]
+    fn a_save_from_yesterday_gets_its_daily_reset_after_the_restart() {
+        let mut e = Engine::new();
+        e.day -= 1;
+        e.day_start_equity = 120_000.0; // yesterday's start, nothing to do with today
+        let mut back = restored(&e);
+        back.tick();
+        assert!((back.day_start_equity - back.equity()).abs() < 1e-6 * back.equity().max(1.0));
+        assert!(back.journal.iter().any(|j| j.message.starts_with("New UTC day")));
+    }
+
+    #[test]
+    fn a_restored_position_keeps_its_last_real_price_until_the_feed_answers() {
+        let mut e = Engine::new();
+        e.apply_kraken(&[RealCrypto { id: "crypto:BTC/USD".into(), symbol: "BTC/USD".into(), price: 120_000.0, change24h: 0.0 }]);
+        e.positions.insert(
+            "crypto:BTC/USD".into(),
+            PositionInternal {
+                venue: Venue::Crypto,
+                symbol: "BTC/USD".into(),
+                qty: 0.1,
+                avg_price: 118_000.0,
+                strategy_id: "ema-cross-1".into(),
+                stop: 110_000.0,
+                target: 0.0,
+                trail_ref: 118_000.0,
+                live: false,
+            },
+        );
+        let mut back = restored(&e);
+        // The first feed refresh failed: the seed price (67 250) is under the stop.
+        back.tick();
+        assert!(back.positions.contains_key("crypto:BTC/USD"), "stopped out at the seed price");
+        assert_eq!(back.price_of("crypto:BTC/USD"), 120_000.0);
     }
 
     #[test]
