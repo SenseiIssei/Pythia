@@ -411,6 +411,119 @@ function ExchangeRow({
           )}
         </div>
       )}
+      {ex.canTrade && <DemoKeys ex={ex} manageable={manageable} onChanged={onChanged} />}
+    </div>
+  );
+}
+
+/**
+ * The exchange's DEMO keys: a separate key from the venue's demo account,
+ * stored in its own slot, used only for demo orders (virtual money). Kept
+ * visually apart from the live form so nobody pastes one into the other.
+ */
+function DemoKeys({
+  ex,
+  manageable,
+  onChanged,
+}: {
+  ex: ExchangeInfo;
+  manageable: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
+  const needed = ["key", "secret", ...(ex.needsPassphrase ? ["passphrase"] : [])];
+  const filled = needed.every((k) => (vals[k] ?? "").trim().length > 0);
+
+  if (!ex.demoSupported) {
+    return (
+      <div className="mt-3 border-t border-cyber-border pt-2 text-xs leading-snug text-cyber-text-faint">
+        <Badge tone="neutral">no demo</Badge> {ex.demoHelp ?? "This exchange has no demo environment."}
+      </div>
+    );
+  }
+
+  async function run(action: () => Promise<void>, done: string) {
+    setBusy(true);
+    setMsg("");
+    setOk(null);
+    try {
+      await action();
+      setVals({});
+      setMsg(done);
+      setOk(true);
+      await onChanged();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+      setOk(false);
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="mt-3 space-y-2 rounded-md border border-dashed border-purple-neon/40 bg-purple-neon/5 p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-purple-neon">Demo keys (virtual money)</span>
+        <Badge tone={ex.demoConfigured ? "green" : "neutral"}>{ex.demoConfigured ? "demo ready" : "no demo key"}</Badge>
+      </div>
+      <div className="text-xs leading-snug text-cyber-text-dim">{ex.demoHelp}</div>
+      <div className="text-xs leading-snug text-cyber-text-faint">
+        {ex.demoRealPrices ? "Real market prices. " : "Own demo book: prices are not documented as real. "}
+        {ex.demoNote} Orders go to <span className="font-mono">{ex.demoBase}</span>.
+      </div>
+      {!manageable ? (
+        <div className="text-xs text-cyber-text-faint">
+          Managed by the server's environment (PYTHIA_DEMO_EXCHANGE and PYTHIA_DEMO_EXCHANGE_KEY / _SECRET
+          {ex.needsPassphrase ? " / _PASSPHRASE" : ""}).
+        </div>
+      ) : (
+        <>
+          {needed.map((k) => (
+            <Field key={k} label={`Demo ${k === "key" ? "API key" : k === "secret" ? "API secret" : "passphrase"}`}>
+              <input
+                type={k === "key" ? "text" : "password"}
+                value={vals[k] ?? ""}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(e) => {
+                  setVals((s) => ({ ...s, [k]: e.target.value }));
+                  setMsg("");
+                }}
+                placeholder={ex.demoConfigured && !vals[k] ? "•••••••• (stored)" : ""}
+                className={inputCls}
+              />
+            </Field>
+          ))}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <Button
+              tone="cyan"
+              icon={ShieldCheck}
+              disabled={!filled || busy}
+              onClick={() => run(() => saveExchangeKeys(ex.id, vals, true), "Demo keys saved. Demo orders now go here.")}
+            >
+              {ex.demoConfigured ? "Update demo keys" : "Save demo keys"}
+            </Button>
+            {ex.demoConfigured && (
+              <ConfirmButton
+                icon={Trash2}
+                disabled={busy}
+                question={`Delete the ${ex.label} DEMO keys from this computer? Live keys are not touched.`}
+                confirmLabel="Delete demo keys"
+                onConfirm={() => run(() => clearExchangeKeys(ex.id, true), "Demo keys deleted.")}
+              >
+                Clear demo
+              </ConfirmButton>
+            )}
+          </div>
+        </>
+      )}
+      {msg && (
+        <div role="status" className={`text-xs ${ok === false ? "text-danger" : ok ? "text-success" : "text-cyber-text-dim"}`}>
+          {msg}
+        </div>
+      )}
     </div>
   );
 }
