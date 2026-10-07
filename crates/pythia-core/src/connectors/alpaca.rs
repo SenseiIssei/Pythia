@@ -487,8 +487,7 @@ impl AlpacaConnector {
     /// Current signed quantity held in `symbol` (0 when flat). A 404 from Alpaca
     /// means "no position", which is an answer, not an error.
     async fn position_qty(&self, symbol: &str) -> Result<f64, ConnectorError> {
-        let path = format!("/v2/positions/{}", symbol.replace('/', "%2F"));
-        match self.send(self.req(reqwest::Method::GET, &path)?, "position").await {
+        match self.send(self.req(reqwest::Method::GET, &position_path(symbol))?, "position").await {
             Ok(v) => Ok(num_or0(v.get("qty"))),
             Err(ConnectorError::Rejected(msg)) if msg.contains("404") => Ok(0.0),
             Err(e) => Err(e),
@@ -887,6 +886,24 @@ impl MarketConnector for AlpacaConnector {
     }
 }
 
+/// The path of one open position: `GET /v2/positions/{symbol_or_asset_id}`.
+///
+/// A crypto pair goes in without its slash, `BTCUSD`, never `BTC%2FUSD`.
+/// Alpaca's reference for this endpoint
+/// (<https://docs.alpaca.markets/reference/getopenposition-1>, checked
+/// 2026-10-07) only says "symbol or assetId". Its crypto guide
+/// (<https://docs.alpaca.markets/docs/crypto-trading>) says pairs moved from
+/// `BTCUSD` to `BTC/USD` and that the API keeps supporting the legacy form
+/// "for backwards compatibility", and `GET /v2/positions` itself lists crypto
+/// positions as `BTCUSD` (see [`position_symbol`]). The slash form is not
+/// documented for this path and has been reported to find nothing
+/// (forum.alpaca.markets/t/10424). A lookup that finds nothing is read as
+/// "flat" by `position_qty`, so the slash form refused every crypto sell as a
+/// short. The legacy form is the one this endpoint is known to answer.
+fn position_path(symbol: &str) -> String {
+    format!("/v2/positions/{}", symbol.replace('/', ""))
+}
+
 /// The symbol a position is reported under, in the form orders and markets
 /// use. Alpaca takes crypto orders as `BTC/USD` but lists the position as
 /// `BTCUSD`; without putting the slash back, reconciliation would not find the
@@ -916,6 +933,15 @@ mod tests {
         // An equity ticker that happens to end in USD is left alone.
         assert_eq!(position_symbol("ABUSD", "us_equity"), "ABUSD");
         assert_eq!(position_symbol("AAPL", ""), "AAPL");
+    }
+
+    #[test]
+    fn a_crypto_position_is_looked_up_without_its_slash() {
+        assert_eq!(position_path("BTC/USD"), "/v2/positions/BTCUSD");
+        assert_eq!(position_path("ETH/USDT"), "/v2/positions/ETHUSDT");
+        assert_eq!(position_path("AAPL"), "/v2/positions/AAPL");
+        // Round trip: the lookup key is the symbol the position list reports.
+        assert_eq!(position_symbol(position_path("BTC/USD").trim_start_matches("/v2/positions/"), "crypto"), "BTC/USD");
     }
 
     fn conn() -> AlpacaConnector {
