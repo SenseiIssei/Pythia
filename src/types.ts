@@ -7,7 +7,10 @@ export type Mode = "paper" | "live";
 export type Side = "buy" | "sell";
 export type OrderType = "market" | "limit";
 export type OrderStatus = "pending" | "filled" | "partial" | "rejected" | "cancelled";
-export type StrategyState = "paper" | "live" | "paused";
+/** `demo` routes orders to a venue's demo environment: real API, virtual money. */
+export type StrategyState = "paper" | "live" | "paused" | "demo";
+/** Where a fill's price came from: Pythia's simulator, a venue's demo world, or real money. */
+export type FillRoute = "paper" | "demo" | "live";
 
 export interface Market {
   id: string; // venue-qualified, e.g. "polymarket:will-x-happen"
@@ -39,6 +42,8 @@ export interface PositionView {
   mode: Mode;
   /** Opened with a real venue fill — closing it needs live routing. */
   live: boolean;
+  /** Opened with a demo-venue fill (virtual money); exits go back to the demo venue. */
+  demo?: boolean;
 }
 
 export interface Order {
@@ -56,10 +61,18 @@ export interface Order {
   avgFillPrice?: number;
   mode: Mode;
   rejectReason?: string;
-  /** Live fills only: fill against arrival price in bps, positive = it cost us. */
+  /** Fill against the signal (arrival) price in bps, positive = it cost us. */
   realisedSlippageBps?: number;
-  /** Live fills only: what the cost model expected. */
+  /** What the cost model expected. */
   modelledSlippageBps?: number;
+  /** paper, demo or live. Older rows have none and are paper. */
+  route?: FillRoute;
+  /** Whether the cost estimate (and a paper fill itself) used a fresh live book. */
+  costSource?: "live" | "default";
+  /** Book mid against the signal price, bps, positive = the market had moved against the order. */
+  driftBps?: number;
+  /** A paper fill that outgrew the 20 book levels. */
+  bookExhausted?: boolean;
 }
 
 // ── costs ────────────────────────────────────────────────────────────────────
@@ -103,6 +116,8 @@ export interface StrategyLedger {
   /** Closed paper trades on real prices (demo-simulator trades do not count). */
   forwardTrades: number;
   liveTrades: number;
+  /** Closed trades filled by a venue's demo environment. */
+  demoTrades?: number;
   /** Closed-trade record in net returns on notional; sizes entries from 30 trades. */
   edge?: EdgeRecord;
 }
@@ -117,7 +132,7 @@ export interface EdgeRecord {
   lossReturnSum: number;
 }
 
-/** Realised against modelled slippage for one venue. */
+/** Realised against modelled slippage for one venue and route. */
 export interface SlippageRow {
   venue: string;
   fills: number;
@@ -128,6 +143,12 @@ export interface SlippageRow {
   enough: boolean;
   /** How many fills were modelled on a fresh live order book rather than the calibrated default. */
   liveFills?: number;
+  /** paper, demo or live; rows from older engines are live. */
+  route?: FillRoute;
+  /** Median signal-to-book drift over the fills that had a fresh book. */
+  medianDriftBps?: number;
+  /** Paper fills that ran past the 20 book levels. */
+  exhausted?: number;
 }
 
 // ── research (real candles, Rust) ───────────────────────────────────────────
@@ -531,6 +552,12 @@ export interface LiveStatus {
    * instead of looking broken.
    */
   blockedReason?: string;
+  /** Venues whose demo environment has keys. Demo needs these, not the live arm. */
+  demoVenues?: Venue[];
+  /** The exchange crypto demo orders go to. */
+  demoExchange?: CostVenue;
+  /** Open positions opened by demo fills. */
+  demoPositions?: number;
 }
 
 /** What the arm flow sends. Mirrors the Rust `LiveConfig`. */
@@ -751,6 +778,18 @@ export interface ExchangeInfo {
   secretMultiline: boolean;
   /** Plain-language instructions for creating a correctly scoped key. */
   keyHelp: string;
+  /** The venue has a demo environment Pythia can route to. */
+  demoSupported?: boolean;
+  /** Demo keys are saved (in their own slot, apart from the live keys). */
+  demoConfigured?: boolean;
+  /** The venue documents that demo orders trade on real market prices. */
+  demoRealPrices?: boolean;
+  /** Where demo orders go. */
+  demoBase?: string;
+  /** How to get a demo key, or why there is no demo route. */
+  demoHelp?: string;
+  /** Known differences between demo and live. */
+  demoNote?: string;
 }
 
 export type Chain =

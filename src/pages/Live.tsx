@@ -165,6 +165,8 @@ export function Live() {
         </div>
       )}
 
+      <DemoCard />
+
       {/* Real positions cannot be closed by the simulator, so this is not a detail. */}
       {live.livePositions > 0 && !live.armed && (
         <div className="mb-4 flex items-start gap-3 rounded-lg border border-danger/50 bg-danger/10 px-4 py-3 text-sm">
@@ -500,6 +502,97 @@ export function Live() {
  * market, so this shows the one number that matters: what each style actually
  * cost, measured against the price at the moment the decision was made.
  */
+/** Where each venue's demo connection test buys its minimum size. */
+const DEMO_TEST_MARKET: Record<string, string> = {
+  crypto: "crypto:BTC/USD",
+  // Alpaca's crypto book trades around the clock, so the test works on a weekend.
+  alpaca: "alpaca:BTC/USD",
+};
+
+/**
+ * The demo route: real API round trips against a venue's demo account, with
+ * virtual money. Separate from arming: it needs demo keys (Settings), never the
+ * ARM LIVE phrase, and never touches the live keys.
+ */
+function DemoCard() {
+  const { live } = useStore();
+  const ready = live.demoVenues ?? [];
+  const [busy, setBusy] = useState("");
+  const [out, setOut] = useState<Record<string, { ok: boolean; text: string }>>({});
+
+  async function run(key: string, action: () => Promise<string>) {
+    setBusy(key);
+    try {
+      const text = await action();
+      setOut((o) => ({ ...o, [key]: { ok: true, text } }));
+    } catch (e) {
+      setOut((o) => ({ ...o, [key]: { ok: false, text: e instanceof Error ? e.message : String(e) } }));
+    }
+    setBusy("");
+  }
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <Badge tone="purple">DEMO</Badge> Demo trading: real venue API, virtual money
+        </div>
+        <span className="font-mono text-xs text-cyber-text-faint">
+          {live.demoPositions ?? 0} demo position{(live.demoPositions ?? 0) === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="mb-3 text-xs leading-snug text-cyber-text-dim">
+        A strategy set to Demo sends its orders to the venue's demo account with the demo keys from Settings: signing,
+        size rules, rejects, latency and partial fills are all real, the money is not. No arming needed, the risk
+        limits still apply, and demo fills never reach the tax record. See docs/DEMO.md for which venues trade on real
+        prices.
+      </div>
+      <div className="space-y-2">
+        {ROUTABLE.map(({ venue, label }) => {
+          const on = ready.includes(venue);
+          const where = venue === "crypto" ? (live.demoExchange ? `${live.demoExchange} demo` : "no demo exchange") : "Alpaca paper account";
+          return (
+            <div key={venue} className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm">
+                  {label} <span className="text-xs text-cyber-text-faint">· {where}</span>
+                </span>
+                <Badge tone={on ? "purple" : "neutral"}>{on ? "demo ready" : "no demo keys"}</Badge>
+              </div>
+              {on && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button
+                    tone="neutral"
+                    icon={PlugZap}
+                    disabled={busy !== ""}
+                    onClick={() => void run(`${venue}:check`, () => verifyVenue(venue, true, true))}
+                  >
+                    Check demo account
+                  </Button>
+                  <Button
+                    tone="purple"
+                    disabled={busy !== ""}
+                    onClick={() => void run(`${venue}:test`, () => sendTestOrder(DEMO_TEST_MARKET[venue], 0, true))}
+                  >
+                    Demo connection test
+                  </Button>
+                </div>
+              )}
+              {[`${venue}:check`, `${venue}:test`].map((k) =>
+                out[k] ? (
+                  <div key={k} className={`mt-1.5 text-xs ${out[k].ok ? "text-success" : "text-danger"}`}>
+                    {out[k].text}
+                  </div>
+                ) : null
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 function ExecutionPolicyCard() {
   const { execution, adaptiveExecution, setAdaptiveExecution } = useStore();
 

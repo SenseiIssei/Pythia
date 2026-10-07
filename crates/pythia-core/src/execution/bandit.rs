@@ -191,10 +191,46 @@ pub struct ExecPolicy {
     /// needs the individual fills, so the medians are robust to one bad print.
     #[serde(default)]
     fills: HashMap<String, Vec<FillRecord>>,
+    /// Paper and demo fills, keyed `"{route}:{venue}"`, bounded separately
+    /// from the live ones above. They never teach the bandit: a demo book or
+    /// Pythia's own book walk says nothing about how a resting order would
+    /// have done at the real venue.
+    #[serde(default)]
+    route_fills: HashMap<String, Vec<FillRecord>>,
 }
 
-/// One live fill's execution cost: what it paid against the arrival price, and
-/// what the cost model said it would.
+/// Where a fill's price came from. The one label every fill record, order row
+/// and slippage row carries, so paper, demo and live can be compared per
+/// strategy and per venue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FillRoute {
+    /// Simulated by Pythia: the live book walked, or the cost model.
+    Paper,
+    /// A venue's demo or paper environment answered: real API round trip,
+    /// virtual money. Never in the tax record.
+    Demo,
+    /// A real fill with real money.
+    Live,
+}
+
+impl FillRoute {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FillRoute::Paper => "paper",
+            FillRoute::Demo => "demo",
+            FillRoute::Live => "live",
+        }
+    }
+}
+
+/// Records from before routes existed were all live-path fills.
+fn live_route() -> FillRoute {
+    FillRoute::Live
+}
+
+/// One fill's execution cost: what it paid against the arrival (signal)
+/// price, and what the cost model said it would.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FillRecord {
@@ -207,9 +243,31 @@ pub struct FillRecord {
     /// Records from before live books existed were all modelled on the default.
     #[serde(default)]
     pub source: CostSource,
+    /// Paper, demo or live.
+    #[serde(default = "live_route")]
+    pub route: FillRoute,
+    /// How far the book's mid had moved from the signal price when the order
+    /// was priced, signed like `realised_bps` (positive: the market moved
+    /// against us before we traded). `None` without a fresh book.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_bps: Option<f64>,
+    /// A paper fill that ran past the 20 book levels and priced the rest with
+    /// the impact model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub book_exhausted: bool,
 }
 
-/// Fills kept per venue. Old enough fills describe a market that has moved on.
+impl FillRecord {
+    /// A record with no drift and no exhausted book, the shape of every live
+    /// fill so far.
+    pub fn new(realised_bps: f64, modelled_bps: f64, ts: i64, source: CostSource, route: FillRoute) -> Self {
+        FillRecord { realised_bps, modelled_bps, ts, source, route, drift_bps: None, book_exhausted: false }
+    }
+}
+
+/// Fills kept per venue and route. Old enough fills describe a market that
+/// has moved on, and paper fills, which come every few seconds, must never
+/// push the rare live ones out.
 const MAX_FILLS_PER_VENUE: usize = 1000;
 
 /// Below this many fills the realised/modelled comparison is shown but not
@@ -262,6 +320,41 @@ pub struct SlippageRow {
     /// actually given, so the medians mix both; this says in what proportion.
     #[serde(default)]
     pub live_fills: usize,
+    /// Which fills this row is about. Saves and clients from before routes
+    /// existed only ever had live rows.
+    #[serde(default = "live_route")]
+    pub route: FillRoute,
+    /// Median drift between the signal price and the book's mid when the
+    /// order was priced, over the fills that had a fresh book.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_drift_bps: Option<f64>,
+    /// Paper fills that ran past the 20 book levels.
+    #[serde(default)]
+    pub exhausted: usize,
+}
+
+/// One row from a set of fill records; `None` when there are none.
+fn slippage_row(venue: &str, route: FillRoute, f: &[&FillRecord]) -> Option<SlippageRow> {
+    if f.is_empty() {
+        return None;
+    }
+    let mut realised: Vec<f64> = f.iter().map(|r| r.realised_bps).collect();
+    let mut modelled: Vec<f64> = f.iter().map(|r| r.modelled_bps).collect();
+    let mut drift: Vec<f64> = f.iter().filter_map(|r| r.drift_bps).collect();
+    let mr = median(&mut realised);
+    let mm = median(&mut modelled);
+    Some(SlippageRow {
+        venue: venue.to_string(),
+        fills: f.len(),
+        median_realised_bps: mr,
+        median_modelled_bps: mm,
+        ratio: (mm > 1e-9).then(|| mr / mm),
+        enough: f.len() >= MIN_FILLS_FOR_VERDICT,
+        live_fills: f.iter().filter(|r| r.source == CostSource::Live).count(),
+        route,
+        median_drift_bps: (!drift.is_empty()).then(|| median(&mut drift)),
+        exhausted: f.iter().filter(|r| r.book_exhausted).count(),
+    })
 }
 
 fn default_patience() -> f64 {
@@ -372,7 +465,7 @@ impl ExecPolicy {
         self.observe(ctx, arm, side, arrival, filled_price);
         let realised = filled_price.and_then(|p| realised_cost_bps(side, arrival, p))?;
         let list = self.fills.entry(venue.to_string()).or_default();
-        list.push(FillRecord { realised_bps: realised, modelled_bps, ts, source });
+        list.push(FillRecord::new(realised, modelled_bps, ts, source, FillRoute::Live));
         if list.len() > MAX_FILLS_PER_VENUE {
             let excess = list.len() - MAX_FILLS_PER_VENUE;
             list.drain(..excess);
@@ -380,35 +473,54 @@ impl ExecPolicy {
         Some(realised)
     }
 
-    /// Realised against modelled slippage, one row per venue with fills.
+    /// Keep a paper or demo fill for the comparison, without teaching the
+    /// bandit. A record marked live goes to the live list, which is what
+    /// [`ExecPolicy::observe_against_model`] fills; prefer that for live.
+    pub fn record_fill(&mut self, venue: &str, rec: FillRecord) {
+        let list = match rec.route {
+            FillRoute::Live => self.fills.entry(venue.to_string()).or_default(),
+            r => self.route_fills.entry(format!("{}:{venue}", r.as_str())).or_default(),
+        };
+        list.push(rec);
+        if list.len() > MAX_FILLS_PER_VENUE {
+            let excess = list.len() - MAX_FILLS_PER_VENUE;
+            list.drain(..excess);
+        }
+    }
+
+    /// Realised against modelled slippage, one row per venue and route with
+    /// fills, live rows first within a venue.
     pub fn slippage_report(&self) -> Vec<SlippageRow> {
-        let mut out: Vec<SlippageRow> = self
-            .fills
-            .iter()
-            .filter(|(_, f)| !f.is_empty())
-            .map(|(venue, f)| {
-                let mut realised: Vec<f64> = f.iter().map(|r| r.realised_bps).collect();
-                let mut modelled: Vec<f64> = f.iter().map(|r| r.modelled_bps).collect();
-                let mr = median(&mut realised);
-                let mm = median(&mut modelled);
-                SlippageRow {
-                    venue: venue.clone(),
-                    fills: f.len(),
-                    median_realised_bps: mr,
-                    median_modelled_bps: mm,
-                    ratio: (mm > 1e-9).then(|| mr / mm),
-                    enough: f.len() >= MIN_FILLS_FOR_VERDICT,
-                    live_fills: f.iter().filter(|r| r.source == CostSource::Live).count(),
-                }
-            })
-            .collect();
-        out.sort_by(|a, b| a.venue.cmp(&b.venue));
+        let live = self.fills.iter().map(|(venue, f)| (venue.clone(), FillRoute::Live, f.iter().collect::<Vec<_>>()));
+        let other = self.route_fills.iter().filter_map(|(key, f)| {
+            let (route, venue) = key.split_once(':')?;
+            let route = match route {
+                "paper" => FillRoute::Paper,
+                "demo" => FillRoute::Demo,
+                _ => return None,
+            };
+            Some((venue.to_string(), route, f.iter().collect::<Vec<_>>()))
+        });
+        let mut out: Vec<SlippageRow> =
+            live.chain(other).filter_map(|(venue, route, f)| slippage_row(&venue, route, &f)).collect();
+        let rank = |r: FillRoute| match r {
+            FillRoute::Live => 0,
+            FillRoute::Demo => 1,
+            FillRoute::Paper => 2,
+        };
+        out.sort_by(|a, b| a.venue.cmp(&b.venue).then(rank(a.route).cmp(&rank(b.route))));
         out
     }
 
-    /// The row for one venue, if it has fills.
+    /// The evidence the Strategy Passport judges slippage on for one venue:
+    /// every fill a venue actually reported, live and demo together. Paper
+    /// fills are Pythia's own arithmetic and never count here.
     pub fn slippage_for(&self, venue: &str) -> Option<SlippageRow> {
-        self.slippage_report().into_iter().find(|r| r.venue == venue)
+        let mut recs: Vec<&FillRecord> = self.fills.get(venue).map(|f| f.iter().collect()).unwrap_or_default();
+        if let Some(d) = self.route_fills.get(&format!("demo:{venue}")) {
+            recs.extend(d.iter());
+        }
+        slippage_row(venue, FillRoute::Live, &recs)
     }
 
     /// Everything learned so far, for the UI.
@@ -660,6 +772,45 @@ mod tests {
         .unwrap();
         let k = older.slippage_for("kraken").unwrap();
         assert_eq!((k.fills, k.live_fills), (1, 0));
+    }
+
+    #[test]
+    fn paper_and_demo_fills_get_their_own_rows_and_never_push_live_ones_out() {
+        let mut p = ExecPolicy::new(true);
+        p.observe_against_model(&ctx(), ExecStyle::Cross, Side::Buy, 100.0, Some(100.05), "bybit", 2.0, CostSource::Default, 1);
+        // A flood of paper fills, far past the per-list cap.
+        for i in 0..(MAX_FILLS_PER_VENUE + 10) {
+            let mut r = FillRecord::new(3.0, 2.0, i as i64, CostSource::Live, FillRoute::Paper);
+            r.drift_bps = Some(1.0);
+            r.book_exhausted = i % 2 == 0;
+            p.record_fill("bybit", r);
+        }
+        p.record_fill("bybit", FillRecord::new(8.0, 2.0, 5, CostSource::Default, FillRoute::Demo));
+
+        let rows = p.slippage_report();
+        let routes: Vec<FillRoute> = rows.iter().filter(|r| r.venue == "bybit").map(|r| r.route).collect();
+        assert_eq!(routes, vec![FillRoute::Live, FillRoute::Demo, FillRoute::Paper], "live first, then demo, then paper");
+        let live = rows.iter().find(|r| r.route == FillRoute::Live).unwrap();
+        assert_eq!(live.fills, 1, "paper fills never evict the live record");
+        let paper = rows.iter().find(|r| r.route == FillRoute::Paper).unwrap();
+        assert_eq!(paper.fills, MAX_FILLS_PER_VENUE);
+        assert_eq!(paper.median_drift_bps, Some(1.0));
+        assert_eq!(paper.exhausted, MAX_FILLS_PER_VENUE / 2);
+
+        // The passport sees what venues reported (live and demo), never paper.
+        let judged = p.slippage_for("bybit").unwrap();
+        assert_eq!(judged.fills, 2);
+        // Paper and demo fills do not teach the bandit.
+        assert_eq!(p.stat(&ctx(), ExecStyle::Cross).fills, 1);
+
+        // Round trip, and an old save without routes still loads as live.
+        let back: ExecPolicy = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.slippage_report().len(), 3);
+        let old: ExecPolicy = serde_json::from_str(
+            r#"{"stats":{},"enabled":false,"fills":{"kraken":[{"realisedBps":3.0,"modelledBps":2.0,"ts":1}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.slippage_report()[0].route, FillRoute::Live);
     }
 
     #[test]

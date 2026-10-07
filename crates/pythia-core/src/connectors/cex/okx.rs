@@ -10,6 +10,9 @@
 //!
 //! Like Bybit, a spot market **buy** sizes in the quote currency by default;
 //! `tgtCcy=base_ccy` pins it to the coin.
+//!
+//! Demo trading uses the same host with `x-simulated-trading: 1` and a demo
+//! key and passphrase (see [`simulated_header`]).
 
 use super::super::{
     num_or0, sign, Balance, BrokerOrder, BrokerOrderStatus, ConnectorError, OrderRequest, OrderType,
@@ -17,7 +20,17 @@ use super::super::{
 use super::{is_fiat, normalize_asset, CexConnector};
 use serde_json::Value;
 
-const BASE: &str = "https://www.okx.com";
+const BASE: &str = super::OKX_HOST;
+
+/// OKX's demo world is the production host plus this header, with a key
+/// created under Demo Trading
+/// (<https://www.okx.com/docs-v5/en/#overview-demo-trading-services>).
+/// `1` is demo, `0` production. Sent explicitly in both worlds, so a demo key
+/// on a live connector (or the reverse) is refused by OKX with 50101 rather
+/// than guessed at.
+fn simulated_header(c: &CexConnector) -> (&'static str, &'static str) {
+    ("x-simulated-trading", if c.env.is_demo() { "1" } else { "0" })
+}
 
 /// OKX wants `2020-12-08T09:08:57.715Z`, to the millisecond.
 fn iso_timestamp() -> String {
@@ -36,9 +49,11 @@ async fn request(
         &format!("{ts}{}{request_path}{body}", method.as_str()),
     );
 
+    let (sim_k, sim_v) = simulated_header(c);
     let mut rb = c
         .http
-        .request(method, format!("{BASE}{request_path}"))
+        .request(method, format!("{}{request_path}", c.base(BASE)))
+        .header(sim_k, sim_v)
         .header("OK-ACCESS-KEY", c.key.trim())
         .header("OK-ACCESS-SIGN", signature)
         .header("OK-ACCESS-TIMESTAMP", ts)
@@ -71,8 +86,9 @@ fn check_error(v: &Value, what: &str) -> Result<(), ConnectorError> {
         .or_else(|| v.get("msg").and_then(Value::as_str))
         .unwrap_or("unknown error");
     Err(match code {
-        // 50111/50113 bad key or signature, 50114 bad passphrase.
-        "50111" | "50113" | "50114" | "50100" => ConnectorError::Auth(format!("OKX: {msg}")),
+        // 50111/50113 bad key or signature, 50114 bad passphrase, 50101 a
+        // demo key on the live world or a live key on the demo one.
+        "50101" | "50111" | "50113" | "50114" | "50100" => ConnectorError::Auth(format!("OKX: {msg}")),
         _ => ConnectorError::Rejected(format!("OKX {what}: {msg} ({code})")),
     })
 }
@@ -244,6 +260,20 @@ mod tests {
         let o = parse_order(&v).unwrap();
         assert_eq!(o.avg_price, None);
         assert!(!o.status.is_terminal());
+    }
+
+    #[test]
+    fn demo_sends_the_simulated_trading_header_and_live_says_it_is_not() {
+        use super::super::{Environment, Exchange};
+        let live = CexConnector::new(Exchange::Okx, "k".into(), "s".into(), "p".into());
+        let demo = CexConnector::with_env(Exchange::Okx, "k".into(), "s".into(), "p".into(), Environment::Demo);
+        assert_eq!(simulated_header(&live), ("x-simulated-trading", "0"));
+        assert_eq!(simulated_header(&demo), ("x-simulated-trading", "1"));
+        // Same host for both worlds: the header and the key pick the world.
+        assert_eq!(live.base(BASE), demo.base(BASE));
+        // A key from the other world is an auth problem, not a rejected order.
+        let v = serde_json::json!({"code": "50101", "msg": "APIKey does not match current environment."});
+        assert!(check_error(&v, "/x").is_err_and(|e| matches!(e, ConnectorError::Auth(_))));
     }
 
     #[test]

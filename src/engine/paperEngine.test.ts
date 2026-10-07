@@ -55,6 +55,14 @@ describe("PaperEngine", () => {
     expect(e.strategyList()[0].state).toBe("paused");
   });
 
+  it("refuses Demo in the browser build, which cannot reach a venue's demo API", async () => {
+    const e = new PaperEngine();
+    const id = e.strategyList()[0].id;
+    const before = e.strategyList()[0].state;
+    await expect(e.setStrategyState(id, "demo")).rejects.toThrow(/desktop app or a connected backend/);
+    expect(e.strategyList()[0].state).toBe(before);
+  });
+
   it("deploys a new strategy in paper with a clean record", () => {
     const e = new PaperEngine();
     const base = e.strategyList()[0];

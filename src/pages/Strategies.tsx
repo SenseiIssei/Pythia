@@ -52,7 +52,18 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
 
   const live = s.state === "live";
   const paused = s.state === "paused";
+  const demo = s.state === "demo";
   const ready = passport?.liveReady ?? false;
+
+  /** Demo needs demo keys for the strategy's venue; the engine says if they are missing. */
+  async function goDemo() {
+    setArmErr("");
+    try {
+      await setStrategyState(s.id, "demo");
+    } catch (e) {
+      setArmErr(String(e instanceof Error ? e.message : e));
+    }
+  }
 
   async function armLive() {
     if (typed.trim() !== s.name) return;
@@ -74,10 +85,18 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="font-semibold text-cyber-text">{s.name}</h2>
             <Badge
-              tone={live ? "red" : paused ? "neutral" : "cyan"}
-              title={live ? "Sends real orders" : paused ? "Switched off" : "Trades practice money"}
+              tone={live ? "red" : paused ? "neutral" : demo ? "purple" : "cyan"}
+              title={
+                live
+                  ? "Sends real orders"
+                  : paused
+                    ? "Switched off"
+                    : demo
+                      ? "Sends orders to the venue's demo account: real API, virtual money"
+                      : "Trades practice money"
+              }
             >
-              {live ? "LIVE" : paused ? "PAUSED" : "PAPER"}
+              {live ? "LIVE" : paused ? "PAUSED" : demo ? "DEMO" : "PAPER"}
             </Badge>
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-1 text-xs text-cyber-text-faint">
@@ -185,6 +204,11 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
               Paper
             </Button>
           )}
+          {!paused && !live && s.venueClass !== "polymarket" && (
+            <Button tone="purple" onClick={() => void goDemo()} disabled={demo}>
+              Demo
+            </Button>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -207,6 +231,14 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
             Live is locked. {passport.blockedReason} To check that keys and the broker work without a strategy,
             use the connection test on the Live page.
           </span>
+        </div>
+      )}
+
+      {armErr && !confirm && <div className="mt-2 text-xs text-danger">{armErr}</div>}
+      {demo && (
+        <div className="mt-2 text-[11px] text-cyber-text-dim">
+          Demo: orders go to the venue's demo account with its demo keys. Real API, virtual money, never in the tax
+          record. Exits go back to the same demo account.
         </div>
       )}
 

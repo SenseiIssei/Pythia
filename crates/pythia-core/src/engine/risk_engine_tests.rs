@@ -54,6 +54,7 @@ fn hold(e: &mut Engine, id: &str, notional: f64) {
             target: 0.0,
             trail_ref: price,
             live: false,
+            demo: false,
         },
     );
 }

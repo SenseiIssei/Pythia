@@ -1,5 +1,11 @@
 //! Binance spot (`https://api.binance.com`).
 //!
+//! Demo: Spot Demo Mode at `https://demo-api.binance.com`, same paths and
+//! signing, keys from Binance Demo Trading
+//! (<https://developers.binance.com/en/docs/products/spot/demo-mode/general-info>).
+//! Not the Spot Testnet (`testnet.binance.vision`), whose prices and books are
+//! independent of the live exchange.
+//!
 //! Signed REST: every private call carries `timestamp`, and the signature is a
 //! hex HMAC-SHA256 over the *exact* query string that is sent. Building the
 //! string once and appending `&signature=` to it is the only way to guarantee
@@ -32,7 +38,7 @@ async fn signed(
 
     let query = sign::form_encode(&all);
     let signature = sign::hmac_sha256_hex(c.secret.trim(), &query);
-    let url = format!("{BASE}{path}?{query}&signature={signature}");
+    let url = format!("{}{path}?{query}&signature={signature}", c.base(BASE));
 
     let rb = c.http.request(method, url).header("X-MBX-APIKEY", c.key.trim());
     let v = c.send(rb, path).await?;

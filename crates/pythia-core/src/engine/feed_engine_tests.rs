@@ -33,6 +33,7 @@ fn long_btc(e: &mut Engine, stop: f64) {
             target: 0.0,
             trail_ref: 80_000.0,
             live: false,
+            demo: false,
         },
     );
 }
