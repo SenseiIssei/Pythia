@@ -269,8 +269,11 @@ Part II):
 - [x] **Weekly plain-English report.** "This week Pythia made 14 trades, was
       right on 8, finished up $212. Its predictions have now been checked 340
       times and are still not beating the market, so it is not betting on them."
-- [ ] **Recoverable mistakes** — plain-language confirmation on anything
-      destructive, and undo where physics allows
+- [x] **Recoverable mistakes**: plain-language confirmation on anything
+      destructive, and undo where physics allows. Flatten and clearing a key
+      ask in place first (a live flatten names the real order and its size);
+      removing a watched address, a Composer rule or loading a template over
+      your rules offers Undo for 8 seconds
 
 **The metric to test against:** hand the app to someone who has never traded and
 see whether they can answer these in two minutes — is real money at risk, am I

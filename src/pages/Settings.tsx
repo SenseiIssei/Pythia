@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { Card, PageHeader, Badge, Button, Toggle } from "../components/ui";
 import { ComfortZone } from "../components/ComfortZone";
+import { ConfirmButton } from "../components/Confirm";
 import { isTauri } from "../engine";
 import { setUiMode, useAdvanced } from "../uiMode";
 import { aiMode, aiProviders, saveAiKey, clearAiKey } from "../ai";
@@ -326,9 +327,15 @@ function ExchangeRow({
               {ex.configured ? "Update" : "Save & select"}
             </Button>
             {ex.configured && (
-              <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+              <ConfirmButton
+                icon={Trash2}
+                disabled={busy}
+                question={`Delete the ${ex.label} keys from this computer? Pythia cannot get them back; you would paste them again to reconnect.`}
+                confirmLabel="Delete keys"
+                onConfirm={clear}
+              >
                 Clear
-              </Button>
+              </ConfirmButton>
             )}
           </div>
           {msg && <div className="mt-1.5 text-[11px] text-cyber-text-dim">{msg}</div>}
@@ -619,9 +626,15 @@ function ProviderRow({
               </Button>
             )}
             {p.configured && (
-              <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+              <ConfirmButton
+                icon={Trash2}
+                disabled={busy}
+                question={`Delete the ${p.label} key from this computer? You would paste it again to use this model.`}
+                confirmLabel="Delete key"
+                onConfirm={clear}
+              >
                 Clear
-              </Button>
+              </ConfirmButton>
             )}
           </div>
           {msg && (
@@ -711,9 +724,15 @@ function AlertsCard({ native }: { native: boolean }) {
             <Button tone="cyan" icon={Send} disabled={busy} onClick={test}>
               Send test
             </Button>
-            <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+            <ConfirmButton
+              icon={Trash2}
+              disabled={busy}
+              question="Delete the alert webhook? Pythia stops sending alerts until you paste a new one."
+              confirmLabel="Delete webhook"
+              onConfirm={clear}
+            >
               Clear
-            </Button>
+            </ConfirmButton>
             {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
           </div>
           <div className="mt-2 text-[11px] text-cyber-text-faint">
@@ -846,9 +865,15 @@ function VenueCard({
           </Button>
         )}
         {native && connected && (
-          <Button tone="red" icon={Trash2} disabled={busy} onClick={clear}>
+          <ConfirmButton
+            icon={Trash2}
+            disabled={busy}
+            question={`Delete the ${v.name} keys from this computer? Pythia cannot get them back; you would paste them again to reconnect.`}
+            confirmLabel="Delete keys"
+            onConfirm={clear}
+          >
             Clear
-          </Button>
+          </ConfirmButton>
         )}
       </div>
       {msg && (
