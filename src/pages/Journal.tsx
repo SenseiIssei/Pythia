@@ -73,6 +73,8 @@ export function Journal() {
                   {e.kind}
                 </span>
                 {e.mode === "live" && <Badge tone="red">live</Badge>}
+                {/* Every demo-route line starts with DEMO (the engine writes it that way). */}
+                {e.message.startsWith("DEMO") && <Badge tone="purple">demo</Badge>}
                 <span className="min-w-0 basis-full break-words text-cyber-text-dim sm:basis-auto">{e.message}</span>
               </li>
             ))}

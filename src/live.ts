@@ -87,15 +87,15 @@ export async function liveDiagnostics(): Promise<MarketDiag[]> {
  * It is a connection test, not a strategy, so it is the one order that needs
  * no Strategy Passport. Pass `notional` 0 for the venue's minimum size.
  */
-export async function sendTestOrder(marketId: string, notional: number): Promise<string> {
+export async function sendTestOrder(marketId: string, notional: number, demo = false): Promise<string> {
   switch (liveMode()) {
     case "native":
-      return invoke<string>("send_test_order", { marketId, notional });
+      return invoke<string>("send_test_order", { marketId, notional, demo });
     case "server": {
       const r = await fetch(`${serverUrl()}/api/live/test-order`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ marketId, notional }),
+        body: JSON.stringify({ marketId, notional, demo }),
       });
       if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
       return await r.text();
@@ -137,13 +137,13 @@ export async function alpacaAccount(paper: boolean): Promise<AlpacaAccount> {
  * arm flow runs first, so a wrong key surfaces here rather than on the first
  * signal with the order already gone.
  */
-export async function verifyVenue(venue: Venue, paper: boolean): Promise<string> {
+export async function verifyVenue(venue: Venue, paper: boolean, demo = false): Promise<string> {
   switch (liveMode()) {
     case "native":
-      return invoke<string>("live_verify", { venue, paper });
+      return invoke<string>("live_verify", { venue, paper, demo });
     case "server": {
       const r = await get<{ ok: boolean; summary: string }>(
-        `/api/live/verify?venue=${venue}&paper=${paper}`
+        `/api/live/verify?venue=${venue}&paper=${paper}&demo=${demo}`
       );
       return r.summary;
     }
@@ -196,17 +196,23 @@ export async function listExchanges(): Promise<ExchangeInfo[]> {
  */
 export async function saveExchangeKeys(
   exchange: string,
-  fields: Record<string, string>
+  fields: Record<string, string>,
+  demo = false
 ): Promise<void> {
   if (liveMode() !== "native") {
-    throw new Error("On the backend, exchange keys come from PYTHIA_EXCHANGE_* in its environment.");
+    throw new Error(
+      demo
+        ? "On the backend, demo keys come from PYTHIA_DEMO_EXCHANGE_* in its environment."
+        : "On the backend, exchange keys come from PYTHIA_EXCHANGE_* in its environment."
+    );
   }
-  await invoke("save_exchange_keys", { exchange, fields });
+  // `demo` stores into the exchange's separate demo slot; live keys are untouched.
+  await invoke("save_exchange_keys", { exchange, fields, demo });
 }
 
-export async function clearExchangeKeys(exchange: string): Promise<void> {
+export async function clearExchangeKeys(exchange: string, demo = false): Promise<void> {
   if (liveMode() !== "native") throw new Error("Server keys are managed in its environment.");
-  await invoke("clear_exchange_keys", { exchange });
+  await invoke("clear_exchange_keys", { exchange, demo });
 }
 
 /** The unified balance sheet. Read-only in every runtime. */

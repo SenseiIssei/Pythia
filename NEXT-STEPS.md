@@ -106,6 +106,13 @@ Do this first, before any new features:
       check the venue by hand when that journal line appears
 - [ ] Repeat the connection test for one crypto exchange (Kraken is the most
       forgiving)
+- [ ] **Demo route first, before any real crypto money** (built 2026-10-07,
+      `docs/DEMO.md`): Bybit Demo Trading keys into *Settings → Exchanges →
+      Bybit → Demo keys*, Live page → *Demo trading* → *Check demo account*,
+      then *Demo connection test*. Expect `DEMO submit` → `DEMO FILL` and a
+      DEMO badge on the position; cross-check in Bybit's demo order history.
+      Then set one crypto strategy to **Demo** and let it run for a week. No
+      request has been sent to any demo host yet
 
 Until this is done, treat every venue connector as unproven code.
 
@@ -158,6 +165,14 @@ left is calibration, which needs real fills and recorded books.
       backtests always do, since there is no live book for the past. The
       fetchers were checked once against the real endpoints (20 of 20 books on
       both venues, 2026-10-07); the running loop has not been watched for a day
+- [x] **Paper fills walk the live book** (2026-10-07, `docs/DEMO.md`). With
+      a fresh top-20 book a paper market order fills level by level at the
+      VWAP it consumed plus the taker fee; past the 20 levels the rest is
+      priced with the impact model and flagged. Every fill (paper, demo, live)
+      records its route, book source, modelled vs realised slippage and the
+      drift from signal price to book; the Analytics slippage table has a
+      route column. Alpaca paper-endpoint fills are labelled demo and no
+      longer reach the tax record
 - [ ] Feed `ExecContext` real spread and depth. Deliberately not done: the
       numbers exist now, but as bandit context they split evidence the bandit
       does not have (no live fills yet). Revisit after a few hundred fills,
@@ -359,6 +374,12 @@ Still open:
       sell as a short. Still to confirm on the paper account: a crypto sell
       passes the preflight. `GET /v2/assets/BTC%2FUSD` in the same connector
       is unverified the same way
+- [x] **Demo environments** (2026-10-07): `RouteIntent::Demo` /
+      `StrategyState::Demo` route through the real connectors to Bybit Demo
+      Trading, Binance Spot Demo Mode, OKX demo (`x-simulated-trading: 1`) and
+      Alpaca paper, with demo keys in their own vault slot. Kraken (spot UAT
+      only on request) and Coinbase (static sandbox) have no demo route. Table
+      and caveats in `docs/DEMO.md`. Open: never run against a demo host
 - [ ] **Perpetual futures** for funding carry — needs leverage-aware risk limits
       **first**, not after
 - [ ] **Polymarket order signing** — deliberately last. Its CLOB signs with a
