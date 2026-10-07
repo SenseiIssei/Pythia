@@ -179,7 +179,26 @@ class Panel:
         from scipy.stats import norm
         q = ((df["r"].to_numpy() - 0.5) / df["n"].to_numpy()).clip(1e-4, 1 - 1e-4)
         self.rank_target[df["row"].to_numpy()] = norm.ppf(q).astype(np.float32)
+        self.static: np.ndarray | None = None
         print(f"panel: {len(self.symbols)} coins, {len(a):,} coin-days", flush=True)
+
+    def attach_m2_features(self, root: Path) -> int:
+        """M2's 16 cross-sectional feature ranks, from M2's own code, for the hybrid.
+
+        An anchor at 00:00 of day A sees M2's features of day A - 1 (computed at
+        that day's close), so nothing from day A leaks in.
+        """
+        import os
+        import sys
+        os.environ["PYTHIA_DATA"] = str(root)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lab"))
+        from lab.experiments.picks import FEATURES, build  # noqa: E402
+        P = build()
+        names = np.array(self.symbols)[self.coin]
+        keys = pl.DataFrame({"row": np.arange(len(self.day)), "day": self.day - DAY_US, "symbol": names})
+        joined = keys.join(P.select(["day", "symbol", *FEATURES]), on=["day", "symbol"], how="left").sort("row")
+        self.static = joined.select(FEATURES).to_numpy().astype(np.float32)
+        return len(FEATURES)
 
     def window(self, rows: np.ndarray) -> torch.Tensor:
         out = np.empty((len(rows), WINDOW_H, CHANNELS), dtype=np.float32)
@@ -192,8 +211,15 @@ class Panel:
 # ── model ─────────────────────────────────────────────────────────────────────
 
 class PythiaNet(nn.Module):
-    def __init__(self, d: int = 128, layers: int = 4, heads: int = 4, dropout: float = 0.1):
+    """`n_static > 0` makes it the hybrid (attempt two): the encoded price shape is
+    joined by M2's cross-sectional features (liquidity, age, momentum ranks...),
+    which a single coin's normalised window cannot show."""
+
+    def __init__(self, d: int = 128, layers: int = 4, heads: int = 4, dropout: float = 0.1, n_static: int = 0):
         super().__init__()
+        self.n_static = n_static
+        head_in = d * 2 if n_static else d
+        self.static = nn.Sequential(nn.Linear(n_static, d), nn.GELU(), nn.Linear(d, d)) if n_static else None
         self.embed = nn.Linear(PATCH * CHANNELS, d)
         self.pos = nn.Parameter(torch.zeros(1, N_PATCH + 1, d))
         self.cls = nn.Parameter(torch.zeros(1, 1, d))
@@ -202,8 +228,8 @@ class PythiaNet(nn.Module):
         self.encoder = nn.TransformerEncoder(enc, layers)
         self.norm = nn.LayerNorm(d)
         self.recon = nn.Linear(d, PATCH * CHANNELS)
-        self.rank_head = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
-        self.vol_head = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
+        self.rank_head = nn.Sequential(nn.Linear(head_in, d), nn.GELU(), nn.Linear(d, 1))
+        self.vol_head = nn.Sequential(nn.Linear(head_in, d), nn.GELU(), nn.Linear(d, 1))
         nn.init.normal_(self.pos, std=0.02)
         nn.init.normal_(self.cls, std=0.02)
 
@@ -218,8 +244,10 @@ class PythiaNet(nn.Module):
         z = torch.cat([self.cls.expand(z.shape[0], -1, -1), z], dim=1) + self.pos
         return self.norm(self.encoder(z))
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, s: torch.Tensor | None = None):
         h = self.encode(self.patches(x))[:, 0]
+        if self.static is not None:
+            h = torch.cat([h, self.static(s)], dim=-1)
         return self.rank_head(h).squeeze(-1), self.vol_head(h).squeeze(-1)
 
 
@@ -259,9 +287,11 @@ def finetune(model: PythiaNet, panel: Panel, rows: np.ndarray, dev, epochs: int,
     rows = rows[np.isfinite(panel.rank_target[rows]) & np.isfinite(panel.fvol[rows])]
     vol_mu, vol_sd = float(np.mean(panel.fvol[rows])), float(np.std(panel.fvol[rows]) + 1e-6)
     model.vol_norm = (vol_mu, vol_sd)
-    head_params = list(model.rank_head.parameters()) + list(model.vol_head.parameters())
-    opt = torch.optim.AdamW([{"params": head_params, "lr": 1e-3},
-                             {"params": [p for n_, p in model.named_parameters() if "head" not in n_], "lr": 1e-4}],
+    if panel.static is not None:
+        rows = rows[np.isfinite(panel.static[rows]).all(axis=1)]
+    fresh = ("head", "static")  # new layers learn fast, the pretrained encoder slowly
+    opt = torch.optim.AdamW([{"params": [p for n_, p in model.named_parameters() if n_.startswith(fresh)], "lr": 1e-3},
+                             {"params": [p for n_, p in model.named_parameters() if not n_.startswith(fresh)], "lr": 1e-4}],
                             weight_decay=0.05)
     model.train()
     for _ in range(epochs):
@@ -271,8 +301,9 @@ def finetune(model: PythiaNet, panel: Panel, rows: np.ndarray, dev, epochs: int,
             x = standardise(panel.window(b).to(dev, non_blocking=True))
             yr = torch.from_numpy(panel.rank_target[b]).to(dev)
             yv = torch.from_numpy(((panel.fvol[b] - vol_mu) / vol_sd).astype(np.float32)).to(dev)
+            s_b = torch.from_numpy(panel.static[b]).to(dev) if panel.static is not None else None
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                pr, pv = model(x)
+                pr, pv = model(x, s_b)
                 loss = F.mse_loss(pr.float(), yr) + 0.5 * F.mse_loss(pv.float(), yv)
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -286,8 +317,11 @@ def predict(model: PythiaNet, panel: Panel, rows: np.ndarray, dev, batch: int) -
     out = []
     for s in range(0, len(rows), batch):
         x = standardise(panel.window(rows[s:s + batch]).to(dev))
+        s_b = None
+        if panel.static is not None:
+            s_b = torch.from_numpy(np.nan_to_num(panel.static[rows[s:s + batch]], nan=0.5)).to(dev)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            pr, _ = model(x)
+            pr, _ = model(x, s_b)
         out.append(pr.float().cpu().numpy())
     return np.concatenate(out) if out else np.array([])
 
@@ -335,13 +369,14 @@ def main() -> None:
     ap.add_argument("--finetune-epochs", type=int, default=2)
     ap.add_argument("--batch", type=int, default=512)
     ap.add_argument("--max-coins", type=int, default=None, help="for a quick smoke test")
+    ap.add_argument("--hybrid", action="store_true", help="attempt two: add M2's cross-sectional features")
     args = ap.parse_args()
     root = Path(args.data)
     dev = torch.device("cuda")
     torch.manual_seed(7)
     np.random.seed(7)
     t0 = time.time()
-    out_dir = root / "reports" / "pythia_net"
+    out_dir = root / "reports" / ("pythia_net_hybrid" if args.hybrid else "pythia_net")
     out_dir.mkdir(parents=True, exist_ok=True)
     log_lines: list[str] = []
 
@@ -353,7 +388,11 @@ def main() -> None:
     panel = Panel(root, args.max_coins)
     first_test = int(FIRST_TEST.timestamp() * 1e6)
     starts = quarter_starts(FIRST_TEST, int(panel.day.max()))
-    model = PythiaNet().to(dev)
+    n_static = panel.attach_m2_features(root) if args.hybrid else 0
+    if n_static:
+        covered = float(np.isfinite(panel.static).all(axis=1).mean())
+        log(f"hybrid: {n_static} M2 features attached, {covered * 100:.0f} % of coin-days covered")
+    model = PythiaNet(n_static=n_static).to(dev)
     log(f"model: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M parameters on {torch.cuda.get_device_name(0)}")
 
     pre_rows = np.flatnonzero(panel.day < first_test - HORIZON_D * DAY_US)
@@ -398,7 +437,8 @@ def main() -> None:
     m2_file = root / "reports" / "picks" / "latest.json"
     if m2_file.exists():
         m2 = json.loads(m2_file.read_text())
-    md = ("# M3 · Pythia-Net against M2\n\n"
+    title = "# M3 · Pythia-Net hybrid against M2\n\n" if args.hybrid else "# M3 · Pythia-Net against M2\n\n"
+    md = (title +
           f"{len(panel.symbols)} coins, {len(panel.day):,} coin-days, pretrained on data before 2022, fine-tuned per "
           f"quarter. {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M parameters, "
           f"{(time.time() - t0) / 60:.0f} min on {torch.cuda.get_device_name(0)}.\n\n"
