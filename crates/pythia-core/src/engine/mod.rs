@@ -13,6 +13,7 @@ pub mod strategies;
 use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
 use crate::costs::{self, CostModel, CostVenue};
 use crate::execution::bandit;
+pub use crate::execution::bandit::FillRoute;
 use crate::forecast::{self, calibration, coherence, track};
 use crate::validation;
 use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
@@ -59,6 +60,10 @@ pub enum StrategyState {
     Paper,
     Live,
     Paused,
+    /// Orders go to the venue's demo environment (`RouteIntent::Demo`): real
+    /// API round trips, virtual money. Needs demo keys, not the live arm and
+    /// not a green passport.
+    Demo,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +161,10 @@ pub struct PositionView {
     pub mode: Mode,
     /// Held via a real venue fill — closing it needs live routing.
     pub live: bool,
+    /// Held via a demo-venue fill (virtual money). Its exits route to the
+    /// same demo environment.
+    #[serde(default)]
+    pub demo: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,13 +188,35 @@ pub struct Order {
     pub mode: Mode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reject_reason: Option<String>,
-    /// Live fills only: fill price against the arrival price, in bps, signed so
-    /// positive means it cost us.
+    /// Fill price against the arrival (signal) price, in bps, signed so
+    /// positive means it cost us. Live and demo fills once the order is done,
+    /// paper fills at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realised_slippage_bps: Option<f64>,
-    /// Live fills only: what the cost model expected that to be.
+    /// What the cost model expected that to be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modelled_slippage_bps: Option<f64>,
+    /// Where the fill came from: Pythia's simulator (`paper`), a venue's demo
+    /// environment (`demo`, virtual money, never taxed) or a real venue
+    /// (`live`). Rows saved before routes existed load as paper.
+    #[serde(default = "paper_route")]
+    pub route: FillRoute,
+    /// Whether the modelled cost (and, for paper, the fill itself) used a
+    /// fresh live book or the calibrated default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<CostSource>,
+    /// The book's mid against the signal price when the order was priced, in
+    /// bps, positive when the market had moved against the order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_bps: Option<f64>,
+    /// A paper fill that outgrew the 20 book levels; the rest was priced by
+    /// the impact model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub book_exhausted: bool,
+}
+
+fn paper_route() -> FillRoute {
+    FillRoute::Paper
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +300,10 @@ pub struct StrategyLedger {
     pub forward_trades: u32,
     /// Closed trades filled for real at a venue (paper endpoint included).
     pub live_trades: u32,
+    /// Closed trades filled by a venue's demo environment. Also counted in
+    /// `forward_trades`: they are forward-test evidence on real prices.
+    #[serde(default)]
+    pub demo_trades: u32,
     /// Win rate and payoff in net returns on notional, which entries are
     /// sized on once there are 30 trades (see [`risk::edge_sizing`]).
     #[serde(default)]
@@ -488,6 +523,16 @@ pub struct LiveStatus {
     /// engine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// Venues whose demo environment has keys. Demo routing needs only this,
+    /// not `armed`.
+    #[serde(default)]
+    pub demo_venues: Vec<Venue>,
+    /// The exchange crypto demo orders go to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demo_exchange: Option<CostVenue>,
+    /// Open positions opened by demo fills.
+    #[serde(default)]
+    pub demo_positions: usize,
 }
 
 /// Why an order is being routed — and therefore what is allowed to happen to it
@@ -503,6 +548,16 @@ pub enum RouteIntent {
     /// venue or not happen at all: simulating it would tell the user they are
     /// flat while real shares sit at the broker.
     LiveExit,
+    /// Send it to the venue's DEMO environment: the real connector path
+    /// (signing, sizing rules, preflight, rejects, latency, partial fills,
+    /// status polling) against virtual money. Booked in the paper ledger at
+    /// the price the venue reported, marked demo on the order and position,
+    /// never in the tax record. Needs demo keys for the venue (see
+    /// [`Engine::set_demo_venues`]); does NOT need the live arm. Still passes
+    /// the risk manager like every other order. Exits of a demo position use
+    /// this intent too. See `docs/DEMO.md` for how other modules send one
+    /// ([`Engine::place_order`]).
+    Demo,
 }
 
 /// One live order handed to the async daemon to submit. The daemon is the only
@@ -535,6 +590,11 @@ pub struct LiveOrderOut {
     /// Submit into the pre-market / after-hours session. Forces a whole-share
     /// limit order — the only shape Alpaca accepts outside regular hours.
     pub extended_hours: bool,
+    /// Route to the venue's demo environment with its demo keys
+    /// ([`RouteIntent::Demo`]). The daemon builds the demo connector from
+    /// this flag alone; `paper` and `dry_run` belong to the live arm.
+    #[serde(default)]
+    pub demo: bool,
 }
 
 // ── AI overlay ──────────────────────────────────────────────────────────────
@@ -632,6 +692,9 @@ pub struct LivePoll {
     pub market_id: String,
     pub symbol: String,
     pub paper: bool,
+    /// Ask the demo environment, with the demo keys.
+    #[serde(default)]
+    pub demo: bool,
     pub age_ms: i64,
     /// This order has outlived the timeout: cancel it at the venue first, then
     /// report whatever ended up filled.
@@ -705,6 +768,26 @@ pub struct InFlight {
     modelled_bps: f64,
     /// Whether `modelled_bps` used a live book; kept with the fill record.
     cost_source: CostSource,
+    /// Sent to the venue's demo environment (`RouteIntent::Demo`).
+    #[serde(default)]
+    demo: bool,
+    /// The book's mid against the arrival price when the order was sent, in
+    /// bps signed against us; `None` without a fresh book.
+    #[serde(default)]
+    drift_bps: Option<f64>,
+}
+
+impl InFlight {
+    /// What this order's fills are, for every label and record: demo when
+    /// sent to a demo environment or to Alpaca's paper endpoint (both are
+    /// virtual money), live otherwise.
+    fn route(&self) -> FillRoute {
+        if self.demo || self.paper {
+            FillRoute::Demo
+        } else {
+            FillRoute::Live
+        }
+    }
 }
 
 /// The full state pushed to the UI every tick.
@@ -805,6 +888,9 @@ pub struct PersistedPosition {
     /// would let the simulator "close" shares that are really sitting at a broker.
     #[serde(default)]
     pub live: bool,
+    /// Opened with a demo-venue fill; its exits go back to the demo venue.
+    #[serde(default)]
+    pub demo: bool,
 }
 
 /// The raw engine state written to disk so the daemon resumes exactly where it
@@ -877,6 +963,7 @@ struct PositionInternal {
     target: f64,    // 0 = none
     trail_ref: f64, // best favorable price seen, for trailing stops
     live: bool,     // opened via a real (live) fill — its exits must also route live
+    demo: bool,     // opened via a demo-venue fill: its exits route to the same demo world
 }
 
 struct SimParam {
@@ -939,6 +1026,13 @@ pub struct Engine {
     ai: HashMap<String, AiView>,         // latest model view per market
     ai_policy: AiPolicy,
     ai_spend: AiSpend,
+    /// Venues whose demo environment has keys, set by the host from its
+    /// credentials. Demo routing needs this and nothing from `live`.
+    demo_venues: HashSet<Venue>,
+    /// The exchange `Venue::Crypto` demo orders go to (its costs price the
+    /// modelled side of a demo fill), and whether it documents real prices.
+    crypto_demo_venue: Option<CostVenue>,
+    crypto_demo_real_prices: bool,
     pending_live: Vec<LiveOrderOut>,     // outbox drained by the async daemon
     inflight: HashMap<String, InFlight>, // engine order id → its state at the venue
     in_flight_markets: HashSet<String>,  // one live order per market at a time
@@ -1060,6 +1154,9 @@ impl Engine {
             ai: HashMap::new(),
             ai_policy: AiPolicy::default(),
             ai_spend: AiSpend::default(),
+            demo_venues: HashSet::new(),
+            crypto_demo_venue: None,
+            crypto_demo_real_prices: false,
             pending_live: Vec::new(),
             inflight: HashMap::new(),
             in_flight_markets: HashSet::new(),
@@ -1857,12 +1954,13 @@ impl Engine {
 
     /// Close a position attributing the fill to its owning strategy.
     fn close_position(&mut self, id: &str, reason: &str) {
-        let (qty, side, sid, live) = match self.positions.get(id) {
+        let (qty, side, sid, live, intent) = match self.positions.get(id) {
             Some(p) if p.qty != 0.0 => (
                 p.qty.abs(),
                 if p.qty > 0.0 { Side::Sell } else { Side::Buy },
                 p.strategy_id.clone(),
                 p.live,
+                Self::exit_intent(p),
             ),
             _ => return,
         };
@@ -1872,7 +1970,6 @@ impl Engine {
             .iter()
             .position(|s| s.id == sid)
             .unwrap_or_else(|| self.ensure_manual_strategy());
-        let intent = if live { RouteIntent::LiveExit } else { RouteIntent::Paper };
         self.route_fill(idx, &m, side, qty, m.price, intent);
         // Only claim the exit happened if it actually did. A live exit that
         // could not route leaves the position open, and `route_fill` has
@@ -1914,12 +2011,13 @@ impl Engine {
     /// or not at all, like any other exit.
     fn trim_position(&mut self, id: &str, keep: f64, reason: &str) {
         let keep = keep.clamp(0.0, 1.0);
-        let (qty, side, sid, live) = match self.positions.get(id) {
+        let (qty, side, sid, live, intent) = match self.positions.get(id) {
             Some(p) if p.qty != 0.0 => (
                 p.qty.abs() * (1.0 - keep),
                 if p.qty > 0.0 { Side::Sell } else { Side::Buy },
                 p.strategy_id.clone(),
                 p.live,
+                Self::exit_intent(p),
             ),
             _ => return,
         };
@@ -1932,7 +2030,6 @@ impl Engine {
             .iter()
             .position(|s| s.id == sid)
             .unwrap_or_else(|| self.ensure_manual_strategy());
-        let intent = if live { RouteIntent::LiveExit } else { RouteIntent::Paper };
         self.route_fill(idx, &m, side, qty, m.price, intent);
         if !live || self.live_routable(m.venue) {
             self.log(
@@ -2043,12 +2140,17 @@ impl Engine {
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return;
         }
-        let route = if self.strategies[strat_idx].state == StrategyState::Live {
-            RouteIntent::Live
-        } else {
-            RouteIntent::Paper
-        };
+        let route = Self::entry_intent(self.strategies[strat_idx].state);
         self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
+    }
+
+    /// How a strategy in `state` routes a new entry.
+    fn entry_intent(state: StrategyState) -> RouteIntent {
+        match state {
+            StrategyState::Live => RouteIntent::Live,
+            StrategyState::Demo => RouteIntent::Demo,
+            StrategyState::Paper | StrategyState::Paused => RouteIntent::Paper,
+        }
     }
 
     /// How this strategy's next entry is sized, journaling a change of mode
@@ -2096,9 +2198,44 @@ impl Engine {
     /// Paper fill: cross the spread and pay the taker fee the cost model says
     /// this venue charges, then settle. Spread and depth come from a live book
     /// when a fresh one exists.
+    ///
+    /// With a fresh top-20 book from the executing exchange, a crypto order
+    /// walks it level by level ([`paper_fill_detail`]). On a market with a
+    /// real price the fill is also kept in the slippage record as a `paper`
+    /// row: realised against the signal price, next to what the model
+    /// expected, with the drift between signal and book.
     fn fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
-        let (fill_price, fee) = paper_fill(&self.exec_cost(m, side), m.kind, side, qty, price);
-        self.settle_fill(strat_idx, m, side, qty, fill_price, fee, price, false, true);
+        let pf = paper_fill_detail(&self.exec_cost(m, side), m.kind, side, qty, price);
+        self.settle_fill(strat_idx, m, side, qty, pf.price, pf.fee, price, false, true);
+        if let Some(o) = self.orders.first_mut().filter(|o| o.market_id == m.id && o.status == OrderStatus::Filled) {
+            o.route = FillRoute::Paper;
+            o.cost_source = Some(pf.source);
+            o.drift_bps = pf.drift_bps;
+            o.book_exhausted = pf.exhausted;
+            o.modelled_slippage_bps = Some(pf.modelled_bps);
+            o.realised_slippage_bps = bandit::realised_cost_bps(side, price, pf.price);
+        }
+        let real_price = self.real_ids.contains(&m.id) || self.bar_backed.contains(&m.id);
+        if real_price {
+            if let Some(realised) = bandit::realised_cost_bps(side, price, pf.price) {
+                let mut rec = bandit::FillRecord::new(realised, pf.modelled_bps, self.now(), pf.source, FillRoute::Paper);
+                rec.drift_bps = pf.drift_bps;
+                rec.book_exhausted = pf.exhausted;
+                self.exec_policy.record_fill(self.cost_venue(m).id(), rec);
+            }
+        }
+        if pf.exhausted {
+            let sid = self.strategies[strat_idx].id.clone();
+            self.log(
+                JournalKind::System,
+                format!(
+                    "Paper fill on {} outgrew the 20 book levels ({} used); the rest was priced with the impact model",
+                    m.symbol, pf.levels_used
+                ),
+                Some(sid),
+                Some(m.id.clone()),
+            );
+        }
     }
 
     /// Apply a fill (paper or live) to positions, cash, P&L and strategy stats.
@@ -2122,6 +2259,26 @@ impl Engine {
         live: bool,
         emit_order: bool,
     ) {
+        self.settle_fill_on(strat_idx, m, side, qty, fill_price, fee, reference, live, false, emit_order)
+    }
+
+    /// [`Engine::settle_fill`] that can also mark the position as opened by a
+    /// demo-venue fill (`demo`): booked in the same ledger as paper, flagged so
+    /// its exits go back to the demo venue and the UI says what it is.
+    #[allow(clippy::too_many_arguments)]
+    fn settle_fill_on(
+        &mut self,
+        strat_idx: usize,
+        m: &Market,
+        side: Side,
+        qty: f64,
+        fill_price: f64,
+        fee: f64,
+        reference: f64,
+        live: bool,
+        demo: bool,
+        emit_order: bool,
+    ) {
         let sid = self.strategies[strat_idx].id.clone();
         let signed = if side == Side::Buy { qty } else { -qty };
         {
@@ -2133,6 +2290,9 @@ impl Engine {
         // A closed trade on a real price is forward-test evidence; one on the
         // demo simulator is not evidence of anything.
         let real_price = self.real_ids.contains(&m.id) || self.bar_backed.contains(&m.id);
+        // Alpaca paper fills against the real NBBO; a crypto demo venue only
+        // counts when it documents real prices (see `docs/DEMO.md`).
+        let demo_real = m.venue != Venue::Crypto || self.crypto_demo_real_prices;
         let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
 
         // update / open position, realizing P&L on reductions
@@ -2167,6 +2327,7 @@ impl Engine {
                         target: new_target,
                         trail_ref: fill_price,
                         live,
+                        demo,
                     },
                 );
             }
@@ -2216,6 +2377,13 @@ impl Engine {
                 s.win_rate = wins / s.trades as f64;
                 if live {
                     s.ledger.live_trades += 1;
+                } else if demo {
+                    s.ledger.demo_trades += 1;
+                    // Forward evidence only where the demo venue documents
+                    // real prices; an own demo book is not the market.
+                    if real_price && demo_real {
+                        s.ledger.forward_trades += 1;
+                    }
                 } else if real_price {
                     s.ledger.forward_trades += 1;
                 }
@@ -2312,6 +2480,13 @@ impl Engine {
     /// unmanaged. When it cannot route, it refuses and says so.
     fn route_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64, intent: RouteIntent) {
         let routable = self.live_routable(m.venue);
+        let demo = intent == RouteIntent::Demo;
+        // One position per market: real, demo and paper fills must never be
+        // booked into each other's position. Exits are never refused here.
+        if let Some(why) = self.mixed_book_reason(m, intent) {
+            self.refuse_mixed(strat_idx, m, &why);
+            return;
+        }
         match intent {
             RouteIntent::Paper => return self.fill(strat_idx, m, side, qty, price),
             RouteIntent::Live if !routable => return self.fill(strat_idx, m, side, qty, price),
@@ -2333,6 +2508,40 @@ impl Engine {
         if self.live_backoff_until.get(&m.id).is_some_and(|&until| self.now() < until) {
             return;
         }
+        if demo {
+            if let Some(reason) = self.demo_block_reason(m) {
+                let sid = self.strategies[strat_idx].id.clone();
+                // Closing a demo position whose demo keys are gone: no money
+                // is at stake, and a position nothing can ever close is
+                // worse than a simulated exit that says what it is.
+                let closes_demo = self
+                    .positions
+                    .get(&m.id)
+                    .is_some_and(|p| p.demo && p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell));
+                if closes_demo {
+                    self.log(
+                        JournalKind::Risk,
+                        format!(
+                            "{}: demo route unavailable ({reason}). The exit is SIMULATED; the demo account may \
+                             still hold the position",
+                            m.symbol
+                        ),
+                        Some(sid),
+                        Some(m.id.clone()),
+                    );
+                    if let Some(p) = self.positions.get_mut(&m.id) {
+                        p.demo = false;
+                    }
+                    return self.fill(strat_idx, m, side, qty, price);
+                }
+                let mut order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+                order.route = FillRoute::Demo;
+                self.orders.insert(0, order);
+                self.live_backoff_until.insert(m.id.clone(), self.now() + LIVE_REJECT_BACKOFF_MS);
+                self.log(JournalKind::Reject, format!("DEMO order refused for {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
+                return;
+            }
+        }
 
         // Session / account gate (Alpaca only: the broker status describes the
         // US equity session and the Alpaca account, and crypto trades 24/7).
@@ -2343,20 +2552,30 @@ impl Engine {
         // rehearse outside market hours is the point of dry-run.
         // Only a *real* position can be reduced at the venue; a paper one
         // there is invisible to the broker.
+        // A demo position is reduced at the demo venue, a real one at the
+        // real venue; a paper one is invisible to both.
         let reduces = intent == RouteIntent::LiveExit
             || self
                 .positions
                 .get(&m.id)
-                .map(|p| p.live && p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell))
+                .map(|p| (if demo { p.demo } else { p.live }) && p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell))
                 .unwrap_or(false);
-        if m.venue == Venue::Alpaca && !self.live.dry_run && !reduces {
+        // Demo orders face the same session gate: an equity order queued
+        // overnight is a gamble on the gap whether the money is real or not,
+        // and the demo record should say what a live order would have met.
+        // `dry_run` belongs to the live arm and never skips it for demo.
+        let dry_run = self.live.dry_run && !demo;
+        if m.venue == Venue::Alpaca && !dry_run && !reduces {
             if let Some(reason) = self.live_block_reason_for(m) {
                 let sid = self.strategies[strat_idx].id.clone();
-                let order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+                let mut order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+                if demo {
+                    order.route = FillRoute::Demo;
+                }
                 self.orders.insert(0, order);
                 self.log(
                     JournalKind::Reject,
-                    format!("Live entry blocked for {}: {reason}", m.symbol),
+                    format!("{} entry blocked for {}: {reason}", if demo { "DEMO" } else { "Live" }, m.symbol),
                     Some(sid),
                     Some(m.id.clone()),
                 );
@@ -2371,18 +2590,26 @@ impl Engine {
             venue: m.venue,
             urgent: intent == RouteIntent::LiveExit,
         };
-        let style = self.exec_policy.choose(&exec_ctx);
+        // Demo always crosses: its fills never teach the policy (a demo book
+        // says little about how a resting order would do at the real venue),
+        // so it must not spend the policy's exploration either.
+        let style = if demo { bandit::ExecStyle::Cross } else { self.exec_policy.choose(&exec_ctx) };
         let patience_bps = self.exec_policy.patience_bps();
         // What the cost model expects this order to lose against arrival. A
-        // resting order is not expected to pay the spread at all.
-        let cost_venue = self.cost_venue(m);
-        let cost = self.exec_cost(m, side);
+        // resting order is not expected to pay the spread at all. A demo
+        // order is priced with the costs of the demo exchange.
+        let cost_venue = if demo { self.demo_cost_venue(m) } else { self.cost_venue(m) };
+        let cost = self.exec_cost_at(m, side, cost_venue);
         let (modelled_bps, cost_source) = match style {
             bandit::ExecStyle::Cross => (cost.slippage_bps(qty * price), cost.source),
             bandit::ExecStyle::Join | bandit::ExecStyle::Passive => (0.0, CostSource::Default),
         };
+        let drift_bps = cost.book.and_then(|b| b.drift_bps(side, price));
 
-        let order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
+        let mut order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
+        order.route = if demo || self.live.paper { FillRoute::Demo } else { FillRoute::Live };
+        order.cost_source = Some(cost_source);
+        order.drift_bps = drift_bps;
         let order_id = order.id.clone();
         let client_order_id = format!("pythia-{}-{order_id}", self.boot_tag);
         self.orders.insert(0, order);
@@ -2400,7 +2627,9 @@ impl Engine {
                 submitted_at: self.now(),
                 booked_qty: 0.0,
                 booked_fee: 0.0,
-                paper: self.live.paper,
+                // The live arm's endpoint choice; a demo order has its own
+                // world and ignores it.
+                paper: self.live.paper && !demo,
                 cancel_sent: false,
                 arrival: price,
                 style,
@@ -2408,6 +2637,8 @@ impl Engine {
                 cost_venue,
                 modelled_bps,
                 cost_source,
+                demo,
+                drift_bps,
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -2423,21 +2654,217 @@ impl Engine {
             reduce_only: reduces,
             style,
             patience_bps,
-            paper: self.live.paper,
-            dry_run: self.live.dry_run,
+            paper: self.live.paper && !demo,
+            dry_run,
             // Only when the broker actually reports an extended session running
             // — never inferred from the local clock. Equities only.
             extended_hours: m.venue == Venue::Alpaca
                 && m.kind == MarketKind::Equity
                 && self.live.extended_hours
                 && self.broker.as_ref().map(|b| !b.market_open && b.extended_open).unwrap_or(false),
+            demo,
         });
+        let dest = if demo { "DEMO" } else { self.live_dest() };
         self.log(
             JournalKind::Order,
-            format!("{} submit {side:?} {qty:.4} {} @ ~{price:.2}", self.live_dest(), m.symbol),
+            format!("{dest} submit {side:?} {qty:.4} {} @ ~{price:.2}", m.symbol),
             Some(sid),
             Some(m.id.clone()),
         );
+    }
+
+    /// Why an order with `intent` would mix books in `m`, or `None`. The
+    /// engine keeps one position per market, so a demo fill booked into a
+    /// paper position (or a paper fill into a demo one, or anything into a
+    /// real one) would leave a position that is neither. An order on the
+    /// position's own route (which is how its exits are sent) never mixes.
+    fn mixed_book_reason(&self, m: &Market, intent: RouteIntent) -> Option<String> {
+        let p = self.positions.get(&m.id).filter(|p| p.qty.abs() > 1e-12)?;
+        let held = if p.live {
+            "a REAL position"
+        } else if p.demo {
+            "a demo position"
+        } else {
+            "a paper position"
+        };
+        let mixes = match intent {
+            // A demo order may only touch a demo position (or open one).
+            RouteIntent::Demo => !p.demo,
+            // A paper fill may not touch a demo position; an exit of one is
+            // routed demo by `exit_intent`. (A paper fill next to a real
+            // position keeps the rules it always had.)
+            RouteIntent::Paper => p.demo,
+            // Live and live exits keep their existing rules, except that a
+            // demo position is never fed with or closed by real money.
+            RouteIntent::Live | RouteIntent::LiveExit => p.demo,
+        };
+        mixes.then(|| {
+            format!(
+                "{} holds {held}; a {} order may not be booked into it. One position per market: close it \
+                 first, or trade another market",
+                m.symbol,
+                match intent {
+                    RouteIntent::Demo => "demo",
+                    RouteIntent::Paper => "paper",
+                    _ => "live",
+                }
+            )
+        })
+    }
+
+    /// Say once a minute per market that an order was refused for mixing
+    /// books. A strategy that keeps signalling must not flood the journal.
+    fn refuse_mixed(&mut self, strat_idx: usize, m: &Market, why: &str) {
+        let now = self.now();
+        let key = format!("mix:{}", m.id);
+        if self.live_warned_at.get(&key).is_some_and(|&t| now - t < 60_000) {
+            return;
+        }
+        self.live_warned_at.insert(key, now);
+        let sid = self.strategies[strat_idx].id.clone();
+        self.log(JournalKind::Reject, format!("Order refused: {why}"), Some(sid), Some(m.id.clone()));
+    }
+
+    /// The route that closes or trims a position: back to the world it came
+    /// from.
+    fn exit_intent(p: &PositionInternal) -> RouteIntent {
+        if p.live {
+            RouteIntent::LiveExit
+        } else if p.demo {
+            RouteIntent::Demo
+        } else {
+            RouteIntent::Paper
+        }
+    }
+
+    /// Why a demo order on `m` cannot be sent right now, or `None`.
+    fn demo_block_reason(&self, m: &Market) -> Option<String> {
+        if m.venue == Venue::Polymarket {
+            return Some("Polymarket has no demo environment".into());
+        }
+        if !self.demo_venues.contains(&m.venue) {
+            return Some(match m.venue {
+                Venue::Alpaca => "no Alpaca paper keys: demo on Alpaca is the paper account".into(),
+                _ => "no demo exchange keys: add Bybit, OKX or Binance demo keys in Settings → Exchanges".into(),
+            });
+        }
+        None
+    }
+
+    /// Whose costs a demo order on `m` is modelled with: the demo exchange for
+    /// crypto, the venue itself otherwise.
+    fn demo_cost_venue(&self, m: &Market) -> CostVenue {
+        match m.venue {
+            Venue::Crypto => self.crypto_demo_venue.unwrap_or(self.crypto_venue),
+            v => CostVenue::for_venue(v, None),
+        }
+    }
+
+    /// [`Engine::exec_cost`] for an explicit cost venue.
+    fn exec_cost_at(&self, m: &Market, side: Side, venue: CostVenue) -> ExecCost {
+        ExecCost::for_order(costs::model_for(venue, &m.symbol), venue, self.books.get(&m.id), side, self.now())
+    }
+
+    /// Tell the engine which venues have demo keys, which exchange crypto demo
+    /// orders go to, and whether that exchange documents real prices. Hosts
+    /// call this whenever credentials change, next to `set_connected`.
+    pub fn set_demo_venues(&mut self, venues: HashSet<Venue>, crypto: Option<CostVenue>, crypto_real_prices: bool) {
+        let changed = venues != self.demo_venues || crypto != self.crypto_demo_venue;
+        self.demo_venues = venues;
+        self.crypto_demo_venue = crypto;
+        self.crypto_demo_real_prices = crypto_real_prices;
+        if changed && !self.demo_venues.is_empty() {
+            let mut names: Vec<String> = self
+                .demo_venues
+                .iter()
+                .map(|v| match (v, crypto) {
+                    (Venue::Crypto, Some(c)) => format!("{} demo", c.id()),
+                    (Venue::Alpaca, _) => "Alpaca paper".to_string(),
+                    (v, _) => format!("{v:?} demo"),
+                })
+                .collect();
+            names.sort();
+            self.log(JournalKind::System, format!("Demo route ready: {}", names.join(", ")), None, None);
+        }
+    }
+
+    /// Venues the demo route can reach.
+    pub fn demo_venues(&self) -> Vec<Venue> {
+        let mut v: Vec<Venue> = self.demo_venues.iter().copied().collect();
+        v.sort_by_key(|v| format!("{v:?}"));
+        v
+    }
+
+    /// Place one order on behalf of `strategy_id` through the risk manager and
+    /// the router. This is the entry point for code outside the engine's own
+    /// strategy loop (the Autopilot): `RouteIntent::Paper` simulates it,
+    /// `RouteIntent::Demo` sends it to the venue's demo environment. Live is
+    /// deliberately not accepted here: real money moves only for a strategy
+    /// whose state is Live (green passport) or the connection test.
+    ///
+    /// `notional` is in quote currency at the current price. Returns the
+    /// approved quantity, or why nothing was routed. "Routed" is not "filled":
+    /// a demo order fills when the venue says so, and its row and journal
+    /// lines say what happened.
+    pub fn place_order(
+        &mut self,
+        strategy_id: &str,
+        market_id: &str,
+        side: Side,
+        notional: f64,
+        intent: RouteIntent,
+    ) -> Result<f64, String> {
+        if !matches!(intent, RouteIntent::Paper | RouteIntent::Demo) {
+            return Err("place_order routes paper or demo only; live goes through a Live strategy".into());
+        }
+        let idx = self
+            .strategies
+            .iter()
+            .position(|s| s.id == strategy_id)
+            .ok_or_else(|| format!("unknown strategy {strategy_id}"))?;
+        let m = self.markets.iter().find(|m| m.id == market_id).cloned().ok_or_else(|| format!("unknown market {market_id}"))?;
+        if !(m.price > 0.0) || !(notional > 0.0) || !notional.is_finite() {
+            return Err(format!("nothing to size: price {} notional {notional}", m.price));
+        }
+        if intent == RouteIntent::Demo {
+            if let Some(why) = self.demo_block_reason(&m) {
+                return Err(why);
+            }
+            if self.in_flight_markets.contains(&m.id) {
+                return Err(format!("{} already has an order in flight", m.symbol));
+            }
+            if self.live_backoff_until.get(&m.id).is_some_and(|&until| self.now() < until) {
+                return Err(format!("{} was refused by the venue a moment ago; backing off", m.symbol));
+            }
+        }
+        if let Some(why) = self.mixed_book_reason(&m, intent) {
+            return Err(why);
+        }
+        let qty = notional / m.price;
+        let req = crate::connectors::OrderRequest {
+            symbol: m.symbol.clone(),
+            side,
+            order_type: OrderType::Market,
+            qty,
+            limit_price: None,
+            ref_price: Some(m.price),
+            client_order_id: None,
+            reduce_only: false,
+        };
+        let ctx = self.risk_ctx(&m.id, strategy_id, m.price);
+        let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
+        if !decision.approved {
+            let reason = decision.reason.unwrap_or_default();
+            let mut order = self.build_order(strategy_id, &m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+            if intent == RouteIntent::Demo {
+                order.route = FillRoute::Demo;
+            }
+            self.orders.insert(0, order);
+            self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(strategy_id.into()), Some(m.id.clone()));
+            return Err(reason);
+        }
+        self.route_fill(idx, &m, side, decision.qty, m.price, intent);
+        Ok(decision.qty)
     }
 
     fn live_dest(&self) -> &'static str {
@@ -2918,6 +3345,7 @@ impl Engine {
                     market_id: f.market_id.clone(),
                     symbol: f.symbol.clone(),
                     paper: f.paper,
+                    demo: f.demo,
                     age_ms: age,
                     cancel: age > timeout_ms && !f.cancel_sent,
                 })
@@ -2957,23 +3385,35 @@ impl Engine {
                     // emit_order = false: the pending order row already exists
                     // and is updated below rather than duplicated.
                     let reference = if f.arrival > 0.0 { f.arrival } else { price };
-                    self.settle_fill(idx, &m, f.side, delta, price, fee_delta, reference, true, false);
-                    // The tax record: every real fill, for the host to append to fills.jsonl.
-                    self.fill_records.push(crate::tax::FillRecord {
-                        ts: chrono::Utc::now().timestamp_millis(),
-                        venue: m.venue,
-                        market_id: m.id.clone(),
-                        symbol: m.symbol.clone(),
-                        side: f.side,
-                        qty: delta,
-                        price,
-                        fee: fee_delta,
-                        strategy_id: f.strategy_id.clone(),
-                        order_id: order_id.to_string(),
-                    });
+                    // A demo fill is booked like a paper one (no `live` flag,
+                    // so the reconciler and the real-money guards ignore it)
+                    // and marks its position demo.
+                    self.settle_fill_on(idx, &m, f.side, delta, price, fee_delta, reference, !f.demo, f.demo, false);
+                    // The tax record: every REAL fill, for the host to append
+                    // to fills.jsonl. Never a demo fill, and never one from
+                    // Alpaca's paper endpoint: both are virtual money.
+                    if f.route() == FillRoute::Live {
+                        self.fill_records.push(crate::tax::FillRecord {
+                            ts: chrono::Utc::now().timestamp_millis(),
+                            venue: m.venue,
+                            market_id: m.id.clone(),
+                            symbol: m.symbol.clone(),
+                            side: f.side,
+                            qty: delta,
+                            price,
+                            fee: fee_delta,
+                            strategy_id: f.strategy_id.clone(),
+                            order_id: order_id.to_string(),
+                        });
+                    }
                     self.log(
                         JournalKind::Fill,
-                        format!("LIVE FILL {:?} {delta:.6} {} @ {price:.4}", f.side, m.symbol),
+                        format!(
+                            "{} FILL {:?} {delta:.6} {} @ {price:.4}",
+                            if f.demo { "DEMO" } else { "LIVE" },
+                            f.side,
+                            m.symbol
+                        ),
                         Some(f.strategy_id.clone()),
                         Some(f.market_id.clone()),
                     );
@@ -2989,7 +3429,9 @@ impl Engine {
         if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
             ord.filled_qty = update.filled_qty;
             ord.avg_fill_price = update.avg_price;
-            ord.mode = Mode::Live;
+            // A demo order stays in the paper book; its route says demo.
+            ord.mode = if f.demo { Mode::Paper } else { Mode::Live };
+            ord.route = f.route();
             ord.status = match update.status {
                 BrokerOrderStatus::Filled => OrderStatus::Filled,
                 BrokerOrderStatus::PartiallyFilled => OrderStatus::Partial,
@@ -3020,17 +3462,29 @@ impl Engine {
         // The same observation also lands in the realised-versus-modelled
         // slippage record, next to what the cost model expected.
         let now = self.now();
-        let realised_bps = self.exec_policy.observe_against_model(
-            &f.exec_ctx,
-            f.style,
-            f.side,
-            f.arrival,
-            realised,
-            f.cost_venue.id(),
-            f.modelled_bps,
-            f.cost_source,
-            now,
-        );
+        let realised_bps = if f.demo {
+            // A demo fill is kept for the comparison but never teaches the
+            // execution policy, which learns for the real venue.
+            let r = realised.and_then(|p| bandit::realised_cost_bps(f.side, f.arrival, p));
+            if let Some(bps) = r {
+                let mut rec = bandit::FillRecord::new(bps, f.modelled_bps, now, f.cost_source, FillRoute::Demo);
+                rec.drift_bps = f.drift_bps;
+                self.exec_policy.record_fill(f.cost_venue.id(), rec);
+            }
+            r
+        } else {
+            self.exec_policy.observe_against_model(
+                &f.exec_ctx,
+                f.style,
+                f.side,
+                f.arrival,
+                realised,
+                f.cost_venue.id(),
+                f.modelled_bps,
+                f.cost_source,
+                now,
+            )
+        };
         if let (Some(bps), Some(ord)) = (realised_bps, self.orders.iter_mut().find(|x| x.id == order_id)) {
             ord.realised_slippage_bps = Some(bps);
             ord.modelled_slippage_bps = Some(f.modelled_bps);
@@ -3043,7 +3497,7 @@ impl Engine {
             }
             self.log(
                 JournalKind::Reject,
-                format!("LIVE order {} {} — nothing filled", f.symbol, reason),
+                format!("{} order {} {}: nothing filled", if f.demo { "DEMO" } else { "LIVE" }, f.symbol, reason),
                 Some(f.strategy_id),
                 Some(f.market_id),
             );
@@ -3063,9 +3517,10 @@ impl Engine {
             ord.reject_reason = Some(reason.to_string());
         }
         let symbol = f.as_ref().map(|f| f.symbol.clone()).unwrap_or_default();
+        let what = if f.as_ref().is_some_and(|f| f.demo) { "DEMO" } else { "LIVE" };
         self.log(
             JournalKind::Reject,
-            format!("LIVE order not sent{}: {reason}", if symbol.is_empty() { String::new() } else { format!(" ({symbol})") }),
+            format!("{what} order not sent{}: {reason}", if symbol.is_empty() { String::new() } else { format!(" ({symbol})") }),
             f.as_ref().map(|f| f.strategy_id.clone()),
             f.as_ref().map(|f| f.market_id.clone()),
         );
@@ -3103,6 +3558,13 @@ impl Engine {
             // that fill twice. The order's own report settles it; the next
             // reconciliation after it is done checks the result.
             if self.in_flight_markets.contains(&market_id) {
+                continue;
+            }
+            // A demo position belongs to the demo account. Alpaca's paper
+            // account can be both the demo route and the live arm's paper
+            // endpoint, and its holdings must never turn a demo position into
+            // a "real" one.
+            if self.positions.get(&market_id).is_some_and(|p| p.demo) {
                 continue;
             }
             let avg = if bp.avg_price > 0.0 { bp.avg_price } else { price };
@@ -3143,6 +3605,7 @@ impl Engine {
                             target: 0.0,
                             trail_ref: avg,
                             live: true,
+                            demo: false,
                         },
                     );
                     changes += 1;
@@ -3203,6 +3666,9 @@ impl Engine {
             // Only meaningful once Alpaca is armed; before that the answer is
             // always "nothing is going live there anyway".
             blocked_reason: if self.live_routable(Venue::Alpaca) { self.live_block_reason() } else { None },
+            demo_venues: self.demo_venues(),
+            demo_exchange: self.demo_venues.contains(&Venue::Crypto).then_some(self.crypto_demo_venue).flatten(),
+            demo_positions: self.positions.values().filter(|p| p.demo && p.qty.abs() > 1e-9).count(),
         }
     }
 
@@ -3249,6 +3715,57 @@ impl Engine {
             Some(m.id.clone()),
         );
         self.place_manual(&m, Side::Buy, notional, RouteIntent::Live);
+        Ok(())
+    }
+
+    /// Why a demo connection test on `market_id` would not reach the demo
+    /// venue right now, or `None`. Needs demo keys, not the live arm.
+    pub fn demo_test_block(&self, market_id: &str) -> Option<String> {
+        let Some(m) = self.markets.iter().find(|m| m.id == market_id) else {
+            return Some(format!("unknown market {market_id}"));
+        };
+        if let Some(why) = self.demo_block_reason(m) {
+            return Some(why);
+        }
+        if self.in_flight_markets.contains(&m.id) {
+            return Some(format!("{} already has an order in flight", m.symbol));
+        }
+        if let Some(why) = self.mixed_book_reason(m, RouteIntent::Demo) {
+            return Some(why);
+        }
+        if m.venue == Venue::Alpaca {
+            return self.live_block_reason_for(m);
+        }
+        None
+    }
+
+    /// [`Engine::connection_test_notional`] on the demo exchange's minimum.
+    pub fn demo_test_notional(&self, market_id: &str) -> f64 {
+        self.markets
+            .iter()
+            .find(|m| m.id == market_id)
+            .map(|m| (costs::model_for(self.demo_cost_venue(m), &m.symbol).min_notional * 2.0).max(5.0))
+            .unwrap_or(5.0)
+    }
+
+    /// The connection test against a venue's demo environment: one buy at the
+    /// venue minimum through the full demo path (keys, signing, preflight,
+    /// submit, poll, fill), with virtual money. Passes the risk manager like
+    /// any order. Proves the demo pipeline before a strategy relies on it.
+    pub fn demo_connection_test_order(&mut self, market_id: &str, notional: f64) -> Result<(), String> {
+        if let Some(why) = self.demo_test_block(market_id) {
+            return Err(why);
+        }
+        let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else {
+            return Err(format!("unknown market {market_id}"));
+        };
+        self.log(
+            JournalKind::System,
+            format!("DEMO connection test: {} for ${notional:.2} with virtual money", m.symbol),
+            Some("manual".into()),
+            Some(m.id.clone()),
+        );
+        self.place_manual(&m, Side::Buy, notional, RouteIntent::Demo);
         Ok(())
     }
 
@@ -3471,7 +3988,7 @@ impl Engine {
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return false;
         }
-        let route = if self.strategies[idx].state == StrategyState::Live { RouteIntent::Live } else { RouteIntent::Paper };
+        let route = Self::entry_intent(self.strategies[idx].state);
         self.route_fill(idx, m, side, decision.qty, m.price, route);
         if let Some(p) = self.positions.get_mut(&m.id) {
             if p.strategy_id == sid {
@@ -3487,9 +4004,9 @@ impl Engine {
         let qty = pos.qty.abs();
         let side = if pos.qty > 0.0 { Side::Sell } else { Side::Buy };
         let live = pos.live; // a live-opened position must be closed live too
+        let intent = Self::exit_intent(pos); // and a demo one at the demo venue
         let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
         let idx = self.ensure_manual_strategy();
-        let intent = if live { RouteIntent::LiveExit } else { RouteIntent::Paper };
         self.route_fill(idx, &m, side, qty, m.price, intent);
         if !live || self.live_routable(m.venue) {
             self.log(JournalKind::System, format!("Flattened {market_id}"), Some("manual".into()), Some(market_id.to_string()));
@@ -3558,6 +4075,28 @@ impl Engine {
     /// one-click connection test on the Live page is not a strategy and does
     /// not go through here.
     pub fn set_strategy_state(&mut self, id: &str, state: StrategyState) -> Result<(), String> {
+        // Demo needs no passport (no money moves) but does need a demo
+        // environment for the strategy's venue, or every signal would be a
+        // refusal.
+        if state == StrategyState::Demo {
+            let Some(s) = self.strategies.iter().find(|s| s.id == id) else {
+                return Err(format!("unknown strategy {id}"));
+            };
+            let venue = s.venue_class;
+            let why = match venue {
+                Venue::Polymarket => Some("Polymarket has no demo environment".to_string()),
+                v if !self.demo_venues.contains(&v) => Some(format!(
+                    "no demo keys for {v:?}: add {} in Settings first",
+                    if v == Venue::Alpaca { "Alpaca paper keys" } else { "Bybit, OKX or Binance demo keys" }
+                )),
+                _ => None,
+            };
+            if let Some(why) = why {
+                let name = s.name.clone();
+                self.log(JournalKind::Reject, format!("{name} cannot demo-trade: {why}"), Some(id.to_string()), None);
+                return Err(why);
+            }
+        }
         if state == StrategyState::Live {
             let Some(s) = self.strategies.iter().find(|s| s.id == id) else {
                 return Err(format!("unknown strategy {id}"));
@@ -3799,6 +4338,7 @@ impl Engine {
                             target: p.target,
                             trail_ref: p.trail_ref,
                             live: p.live,
+                            demo: p.demo,
                         },
                     )
                 })
@@ -3939,6 +4479,7 @@ impl Engine {
                         // Restored exactly as saved: a real position stays real.
                         // The daemon reconciles it against the venue on boot.
                         live: pp.live,
+                        demo: pp.demo,
                     },
                 )
             })
@@ -4098,6 +4639,7 @@ impl Engine {
                     // and a real one can coexist and must look different.
                     mode: if p.live { Mode::Live } else { Mode::Paper },
                     live: p.live,
+                    demo: p.demo,
                 }
             })
             .collect();
@@ -4184,6 +4726,10 @@ impl Engine {
             reject_reason: reject,
             realised_slippage_bps: None,
             modelled_slippage_bps: None,
+            route: FillRoute::Paper,
+            cost_source: None,
+            drift_bps: None,
+            book_exhausted: false,
         }
     }
     fn build_order_filled(&mut self, strategy_id: &str, m: &Market, side: Side, qty: f64, fill_price: f64) -> Order {
@@ -4259,18 +4805,83 @@ pub fn apply_fill(qty: f64, avg: f64, signed: f64, fill: f64) -> (f64, f64, f64)
 /// has a fresh one. Prediction-market prices are probabilities and stay inside
 /// (0, 1).
 pub fn paper_fill(cost: &ExecCost, kind: MarketKind, side: Side, qty: f64, price: f64) -> (f64, f64) {
+    let f = paper_fill_detail(cost, kind, side, qty, price);
+    (f.price, f.fee)
+}
+
+/// A simulated fill and how it was priced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaperFill {
+    /// Average fill price.
+    pub price: f64,
+    /// Taker fee, quote currency.
+    pub fee: f64,
+    /// What the cost model expected the price slippage to be, in bps
+    /// (half-spread plus impact), on the same book the fill used.
+    pub modelled_bps: f64,
+    /// Whether spread and depth came from a fresh live book.
+    pub source: CostSource,
+    /// The book's mid against the signal price, signed so positive costs us.
+    /// `None` without a live book.
+    pub drift_bps: Option<f64>,
+    /// The fill walked the live book level by level (otherwise: priced by
+    /// the model around the signal price).
+    pub walked: bool,
+    /// Levels the walk touched.
+    pub levels_used: usize,
+    /// The order was bigger than the 20 levels; the rest was priced with the
+    /// impact model.
+    pub exhausted: bool,
+}
+
+/// [`paper_fill`] with its working shown.
+///
+/// With a fresh top-20 book from the executing venue (`cost.book`), a crypto
+/// market order is filled the way the venue's matching engine would fill it:
+/// level by level from the best price, at the volume-weighted average of what
+/// it consumed. That price is in the book's own frame, so it also carries any
+/// drift between the signal price and the book (recorded in `drift_bps`). If
+/// the order outgrows the 20 levels, the remainder is priced at the book's mid
+/// plus the modelled half-spread and impact for the whole order, never better
+/// than the last level, and the fill says so (`exhausted`).
+///
+/// Without a usable book it is the cost model around the signal price, as
+/// before: half-spread plus square-root impact against the calibrated depth.
+/// Either way the taker fee is charged on the fill's notional.
+pub fn paper_fill_detail(cost: &ExecCost, kind: MarketKind, side: Side, qty: f64, price: f64) -> PaperFill {
     let qty = qty.abs();
     let model = &cost.model;
-    let slip = cost.slippage_bps(qty * price) / 10_000.0;
-    let mut px = match side {
-        Side::Buy => price * (1.0 + slip),
-        Side::Sell => price * (1.0 - slip),
+    let modelled_bps = cost.slippage_bps(qty * price);
+    let slip = modelled_bps / 10_000.0;
+    let shift = |p: f64| match side {
+        Side::Buy => p * (1.0 + slip),
+        Side::Sell => p * (1.0 - slip),
     };
-    if kind == MarketKind::Prediction {
-        px = px.clamp(0.001, 0.999);
+    let walked = if kind == MarketKind::Crypto {
+        cost.book.and_then(|b| b.walk(side, qty).map(|w| (b, w)))
+    } else {
+        None
+    };
+    let (px, drift_bps, levels_used, exhausted) = match walked {
+        Some((b, w)) => (w.average_price(qty, side, shift(b.mid)), b.drift_bps(side, price), w.levels_used, w.exhausted),
+        None => {
+            let mut px = shift(price);
+            if kind == MarketKind::Prediction {
+                px = px.clamp(0.001, 0.999);
+            }
+            (px, None, 0, false)
+        }
+    };
+    PaperFill {
+        price: px,
+        fee: px * qty * model.taker_bps / 10_000.0,
+        modelled_bps,
+        source: cost.source,
+        drift_bps,
+        walked: walked.is_some(),
+        levels_used,
+        exhausted,
     }
-    let fee = px * qty * model.taker_bps / 10_000.0;
-    (px, fee)
 }
 
 /// Regime filter: mean-reversion strategies are blocked in trending markets,
@@ -4398,6 +5009,7 @@ mod tests {
                 target: 65_000.0,
                 trail_ref: 60_000.0,
                 live: false,
+                demo: false,
             },
         );
 
@@ -4501,7 +5113,10 @@ mod tests {
         assert_eq!((r.status, r.filled_qty, r.avg_fill_price), (OrderStatus::Filled, o.qty, Some(228.0)));
         let p = back.positions.get("alpaca:AAPL").expect("the fill opened the position");
         assert!(p.live && (p.qty - o.qty).abs() < 1e-9);
-        assert_eq!(back.drain_fill_records().len(), 1, "one tax record for the fill");
+        // Armed against Alpaca's PAPER endpoint: virtual money, so the fill is
+        // labelled demo and stays out of the tax record.
+        assert_eq!(r.route, FillRoute::Demo);
+        assert!(back.drain_fill_records().is_empty(), "a paper-endpoint fill is never taxed");
         assert!(back.live_polls().is_empty());
         assert!(!back.in_flight_markets.contains("alpaca:AAPL"));
         // A second restart has nothing left to follow.
@@ -4616,6 +5231,7 @@ mod tests {
                 target: 0.0,
                 trail_ref: 118_000.0,
                 live: false,
+                demo: false,
             },
         );
         let mut back = restored(&e);
@@ -4641,6 +5257,7 @@ mod tests {
                 target: 0.0,
                 trail_ref: 67_000.0,
                 live: false,
+                demo: false,
             },
         );
         e.check_position_exits();
@@ -4842,25 +5459,296 @@ mod tests {
 
         let mut thin = Engine::new();
         with_bars(&mut thin, "crypto:BTC/USD");
-        // 20 levels of 500 USD and a 5 bp half-spread: a weekend night.
-        let q = book(&thin, CostVenue::Kraken, 67_000.0, 5.0, 500.0, 0);
+        // 20 levels of 500 USD and a 5 bp half-spread: a weekend night. The
+        // book sits on the quote, so there is no drift in the number.
+        let mid = thin.price_of("crypto:BTC/USD");
+        let q = book(&thin, CostVenue::Kraken, mid, 5.0, 500.0, 0);
         thin.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
         let thin_bps = btc_buy_fill(&mut thin);
 
         let mut deep = Engine::new();
         with_bars(&mut deep, "crypto:BTC/USD");
         // 20 levels of 1M each, a one-tick spread: far deeper than the median.
-        let q = book(&deep, CostVenue::Kraken, 67_000.0, 0.001, 1_000_000.0, 0);
+        let q = book(&deep, CostVenue::Kraken, mid, 0.001, 1_000_000.0, 0);
         deep.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
         let deep_bps = btc_buy_fill(&mut deep);
 
         assert!(thin_bps > base, "thin book {thin_bps} bps vs calibrated {base}");
         assert!(deep_bps < base, "deep book {deep_bps} bps vs calibrated {base}");
-        // The thin fill is the live half-spread plus impact of 5k against the
-        // 10k on the asks.
+        // The thin fill walked ten 500-dollar levels a cent apart from the 5 bp
+        // ask: 5 bps plus 4.5 cents, not the square-root model's 5 bps plus
+        // impact of 5k against 10k.
+        let walked = 5.0 + 0.045 / mid * 10_000.0;
+        assert!((thin_bps - walked).abs() < 0.01, "{thin_bps} vs {walked}");
         let m = thin.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
-        let want = thin.cost_model(&m).impact_bps(5_000.0, Some(10_000.0)) + 5.0;
-        assert!((thin_bps - want).abs() < 0.05, "{thin_bps} vs {want}");
+        let modelled = thin.cost_model(&m).impact_bps(5_000.0, Some(10_000.0)) + 5.0;
+        assert!(thin_bps < modelled, "the levels held enough: {thin_bps} vs model {modelled}");
+    }
+
+    /// A fixture book: asks 100.0, 100.5, 101.0 (2, 2, 2 coins), bids 99.5,
+    /// 99.0, 98.5 (1, 1, 1), on Kraken, fresh.
+    fn fixture_book(e: &Engine) -> BookQuote {
+        let bids = [(99.5, 1.0), (99.0, 1.0), (98.5, 1.0)];
+        let asks = [(100.0, 2.0), (100.5, 2.0), (101.0, 2.0)];
+        BookQuote::from_levels(CostVenue::Kraken, &bids, &asks, e.now()).unwrap()
+    }
+
+    /// An engine whose BTC market is real (bar-backed), priced at `price`,
+    /// with the fixture book installed.
+    fn engine_on_fixture(price: f64) -> Engine {
+        let mut e = Engine::new();
+        with_bars(&mut e, "crypto:BTC/USD");
+        if let Some(m) = e.markets.iter_mut().find(|m| m.id == "crypto:BTC/USD") {
+            m.price = price;
+        }
+        let q = fixture_book(&e);
+        e.apply_books(&[BookSnapshot { id: "crypto:BTC/USD".into(), quote: q }]);
+        e
+    }
+
+    #[test]
+    fn a_paper_market_buy_walks_the_book_and_pays_the_vwap_plus_the_taker_fee() {
+        let mut e = engine_on_fixture(100.0);
+        let sid = e.ensure_manual_strategy();
+        let m = e.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
+        // 3 coins: 2 at 100.0 and 1 at 100.5.
+        e.fill(sid, &m, Side::Buy, 3.0, 100.0);
+        let want_px = (2.0 * 100.0 + 1.0 * 100.5) / 3.0;
+        let p = e.positions.get("crypto:BTC/USD").unwrap();
+        assert!((p.avg_price - want_px).abs() < 1e-9, "{} vs {want_px}", p.avg_price);
+        // Kraken's 40 bps taker fee on the notional actually paid.
+        let fees = e.strategies[sid].ledger.fees;
+        assert!((fees - want_px * 3.0 * 0.004).abs() < 1e-9, "{fees}");
+        let o = &e.orders[0];
+        assert_eq!(o.route, FillRoute::Paper);
+        assert_eq!(o.cost_source, Some(CostSource::Live));
+        assert!(!o.book_exhausted);
+        // Realised against the signal price, next to what the model expected.
+        let realised = o.realised_slippage_bps.unwrap();
+        assert!((realised - (want_px / 100.0 - 1.0) * 10_000.0).abs() < 1e-6);
+        assert!(o.modelled_slippage_bps.is_some());
+        // Mid is 99.75 against a signal of 100: the market had moved 25 bps in
+        // the buyer's favour, which is negative drift.
+        assert!((o.drift_bps.unwrap() + 25.0).abs() < 1e-9, "{:?}", o.drift_bps);
+        // The record keeps a paper row for the venue, and nothing for tax.
+        let row = e.slippage_report().into_iter().find(|r| r.route == FillRoute::Paper).unwrap();
+        assert_eq!((row.venue.as_str(), row.fills, row.live_fills), ("kraken", 1, 1));
+        assert!(e.drain_fill_records().is_empty());
+    }
+
+    #[test]
+    fn a_paper_sell_walks_the_bids_and_an_order_bigger_than_the_book_is_flagged() {
+        let mut e = engine_on_fixture(99.75);
+        let sid = e.ensure_manual_strategy();
+        let m = e.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
+        // The bids hold 3 coins; selling 5 runs out after 98.5.
+        e.fill(sid, &m, Side::Sell, 5.0, 99.75);
+        let o = e.orders[0].clone();
+        assert!(o.book_exhausted, "past the listed levels must be flagged");
+        let px = o.avg_fill_price.unwrap();
+        // The walked part averages 99.0; the rest is never better than 98.5.
+        assert!(px <= (99.5 + 99.0 + 98.5 + 2.0 * 98.5) / 5.0 + 1e-9, "{px}");
+        assert!(px < 99.0);
+        assert!(e.journal.iter().any(|j| j.message.contains("outgrew the 20 book levels")));
+        let row = e.slippage_report().into_iter().find(|r| r.route == FillRoute::Paper).unwrap();
+        assert_eq!(row.exhausted, 1);
+    }
+
+    #[test]
+    fn without_a_fresh_book_a_paper_fill_stays_on_the_model_and_says_so() {
+        let mut e = Engine::new();
+        with_bars(&mut e, "crypto:BTC/USD");
+        let sid = e.ensure_manual_strategy();
+        let m = e.markets.iter().find(|m| m.id == "crypto:BTC/USD").cloned().unwrap();
+        e.fill(sid, &m, Side::Buy, 0.01, m.price);
+        let o = &e.orders[0];
+        assert_eq!(o.cost_source, Some(CostSource::Default));
+        assert_eq!(o.drift_bps, None);
+        let (r, md) = (o.realised_slippage_bps.unwrap(), o.modelled_slippage_bps.unwrap());
+        assert!((r - md).abs() < 1e-6, "on the model, realised is the model: {r} vs {md}");
+    }
+
+    // ── demo routing ──
+
+    /// An engine whose crypto demo route (Bybit demo) has keys. Nothing armed.
+    fn demo_engine() -> (Engine, String) {
+        let mut e = Engine::new();
+        e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Bybit), true);
+        let idx = e.ensure_manual_strategy();
+        let sid = e.strategies[idx].id.clone();
+        (e, sid)
+    }
+
+    /// Send a 1k demo buy of BTC and let the venue fill it at `px`.
+    fn demo_fill(e: &mut Engine, sid: &str, px: f64) -> LiveOrderOut {
+        e.place_order(sid, "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Demo).expect("routed");
+        let o = e.drain_live_orders().pop().expect("a demo order reached the outbox");
+        e.apply_live_ack(&o.order_id, "demo-1");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, px));
+        o
+    }
+
+    #[test]
+    fn a_demo_order_goes_out_without_the_live_arm_and_is_booked_as_demo_not_taxed() {
+        let (mut e, sid) = demo_engine();
+        assert!(!e.live_config().armed, "demo must not need the live arm");
+        e.place_order(&sid, "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap();
+        let o = e.drain_live_orders().pop().expect("a demo order reached the outbox");
+        assert!(o.demo && !o.paper && !o.dry_run, "{o:?}");
+        let row = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+        assert_eq!((row.route, row.status), (FillRoute::Demo, OrderStatus::Pending));
+        assert!(e.journal.iter().any(|j| j.message.starts_with("DEMO submit")));
+        assert!(e.positions.get("crypto:BTC/USD").is_none(), "nothing is booked before the venue answers");
+
+        e.apply_live_ack(&o.order_id, "demo-1");
+        let polls = e.live_polls();
+        assert!(polls[0].demo && !polls[0].paper, "the poll asks the demo world");
+        // The venue fills it in two parts.
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::PartiallyFilled, o.qty / 2.0, 67_300.0));
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, 67_300.0));
+
+        let p = e.positions.get("crypto:BTC/USD").expect("the demo fill opened a position");
+        assert!(p.demo && !p.live, "demo, never real");
+        assert!((p.qty - o.qty).abs() < 1e-12, "partial fills book once each");
+        let view = e.state().positions.into_iter().find(|v| v.market_id == "crypto:BTC/USD").unwrap();
+        assert!(view.demo && !view.live && view.mode == Mode::Paper);
+        let row = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+        assert_eq!((row.route, row.mode, row.status), (FillRoute::Demo, Mode::Paper, OrderStatus::Filled));
+        assert!(row.realised_slippage_bps.is_some() && row.modelled_slippage_bps.is_some());
+        assert!(e.drain_fill_records().is_empty(), "a demo fill never enters the tax record");
+        assert!(e.journal.iter().any(|j| j.message.starts_with("DEMO FILL")));
+        // Its slippage is kept under the demo exchange, as a demo row, and
+        // the execution policy (which learns for real venues) is untouched.
+        let r = e.slippage_report();
+        assert!(r.iter().any(|x| x.venue == "bybit" && x.route == FillRoute::Demo && x.fills == 1), "{r:?}");
+        assert!(e.execution_report().is_empty());
+        let live = e.state().live;
+        assert_eq!((live.demo_positions, live.live_positions), (1, 0));
+        assert_eq!(live.demo_exchange, Some(CostVenue::Bybit));
+    }
+
+    #[test]
+    fn demo_needs_demo_keys_and_still_answers_to_the_risk_manager() {
+        let mut e = Engine::new();
+        let idx = e.ensure_manual_strategy();
+        let sid = e.strategies[idx].id.clone();
+        let err = e.place_order(&sid, "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap_err();
+        assert!(err.contains("demo"), "{err}");
+        assert!(e.set_strategy_state("ema-cross-1", StrategyState::Demo).is_err());
+        assert!(e.drain_live_orders().is_empty());
+
+        let (mut e, sid) = demo_engine();
+        e.toggle_kill();
+        assert!(e.place_order(&sid, "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Demo).is_err());
+        assert!(e.drain_live_orders().is_empty(), "the kill switch stops demo orders too");
+        // Live is never reachable through this entry point.
+        e.toggle_kill();
+        assert!(e.place_order(&sid, "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Live).is_err());
+        assert!(e.drain_live_orders().is_empty());
+        // Polymarket has no demo world.
+        assert!(e.demo_test_block("polymarket:fed-cut-2026").is_some());
+    }
+
+    #[test]
+    fn a_demo_strategy_routes_its_entries_demo() {
+        let (mut e, _) = demo_engine();
+        e.set_strategy_state("ema-cross-1", StrategyState::Demo).unwrap();
+        assert_eq!(Engine::entry_intent(StrategyState::Demo), RouteIntent::Demo);
+        assert_eq!(Engine::entry_intent(StrategyState::Live), RouteIntent::Live);
+        assert_eq!(Engine::entry_intent(StrategyState::Paper), RouteIntent::Paper);
+        // No passport needed: nothing real is at stake.
+        assert_eq!(e.strategy_config("ema-cross-1").unwrap().state, StrategyState::Demo);
+    }
+
+    #[test]
+    fn a_demo_position_exits_at_the_demo_venue_and_never_mixes_with_paper() {
+        let (mut e, sid) = demo_engine();
+        demo_fill(&mut e, &sid, 67_300.0);
+        // A paper order into the same market is refused, not merged.
+        let err = e.place_order(&sid, "crypto:BTC/USD", Side::Buy, 500.0, RouteIntent::Paper).unwrap_err();
+        assert!(err.contains("demo position"), "{err}");
+        let before = e.positions.get("crypto:BTC/USD").unwrap().qty;
+        assert!(e.drain_live_orders().is_empty());
+
+        e.flatten("crypto:BTC/USD");
+        let exit = e.drain_live_orders().pop().expect("the exit goes to the demo venue");
+        assert!(exit.demo && exit.reduce_only && exit.side == Side::Sell);
+        assert!((exit.qty - before).abs() < 1e-12);
+        e.apply_live_ack(&exit.order_id, "demo-2");
+        e.apply_live_update(&exit.order_id, update(BrokerOrderStatus::Filled, exit.qty, 67_400.0));
+        assert!(e.positions.get("crypto:BTC/USD").is_none());
+        assert_eq!(e.strategy_config(&sid).unwrap().ledger.demo_trades, 1);
+        assert_eq!(e.strategy_config(&sid).unwrap().ledger.live_trades, 0);
+        assert!(e.drain_fill_records().is_empty());
+    }
+
+    #[test]
+    fn a_demo_exit_without_demo_keys_is_simulated_and_says_so() {
+        let (mut e, sid) = demo_engine();
+        demo_fill(&mut e, &sid, 67_300.0);
+        e.set_demo_venues(HashSet::new(), None, false);
+        e.flatten("crypto:BTC/USD");
+        assert!(e.drain_live_orders().is_empty());
+        assert!(e.positions.get("crypto:BTC/USD").is_none(), "no position nothing could ever close");
+        assert!(e.journal.iter().any(|j| j.message.contains("SIMULATED")));
+    }
+
+    #[test]
+    fn reconciliation_never_turns_a_demo_position_real() {
+        let mut e = Engine::new();
+        e.set_demo_venues([Venue::Alpaca].into_iter().collect(), None, true);
+        e.set_broker_status(open_market(&e));
+        let idx = e.ensure_manual_strategy();
+        let sid = e.strategies[idx].id.clone();
+        e.place_order(&sid, "alpaca:AAPL", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap();
+        let o = e.drain_live_orders().pop().unwrap();
+        assert!(o.demo);
+        e.apply_live_ack(&o.order_id, "p-1");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, 228.0));
+        let held = BrokerPosition { symbol: "AAPL".into(), qty: o.qty + 5.0, avg_price: 228.0, market_value: 0.0 };
+        assert_eq!(e.reconcile_positions(Venue::Alpaca, &[held], true), 0);
+        let p = e.positions.get("alpaca:AAPL").unwrap();
+        assert!(p.demo && !p.live && (p.qty - o.qty).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_demo_order_in_flight_and_a_demo_position_survive_a_restart() {
+        let (mut e, sid) = demo_engine();
+        demo_fill(&mut e, &sid, 67_300.0);
+        e.place_order(&sid, "crypto:ETH/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap();
+        let o = e.drain_live_orders().pop().unwrap();
+        e.apply_live_ack(&o.order_id, "demo-9");
+        let back = restored(&e);
+        assert!(back.positions.get("crypto:BTC/USD").unwrap().demo);
+        let polls = back.live_polls();
+        assert_eq!(polls.len(), 1);
+        assert!(polls[0].demo, "a restored demo order is still asked of the demo world");
+    }
+
+    #[test]
+    fn a_real_money_fill_is_taxed_and_labelled_live() {
+        let mut e = engine_with_open_market();
+        e.set_live(LiveConfig { paper: false, ..armed_alpaca() });
+        e.live_order_for_test("alpaca:AAPL", Side::Buy, 1_000.0);
+        let o = e.drain_live_orders().pop().unwrap();
+        assert!(!o.demo && !o.paper);
+        e.apply_live_ack(&o.order_id, "real-1");
+        e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, 228.0));
+        assert_eq!(e.drain_fill_records().len(), 1, "one tax record for the real fill");
+        assert_eq!(e.orders.iter().find(|x| x.id == o.order_id).unwrap().route, FillRoute::Live);
+        assert!(e.positions.get("alpaca:AAPL").unwrap().live);
+    }
+
+    #[test]
+    fn the_demo_connection_test_needs_demo_keys_not_the_arm() {
+        let mut e = Engine::new();
+        assert!(e.demo_connection_test_order("crypto:BTC/USD", 10.0).is_err());
+        let (mut e2, _) = demo_engine();
+        e2.demo_connection_test_order("crypto:BTC/USD", e2.demo_test_notional("crypto:BTC/USD")).unwrap();
+        let o = e2.drain_live_orders().pop().expect("the test order went out");
+        assert!(o.demo && o.side == Side::Buy);
+        // And it must not have touched the live path.
+        assert!(e.test_order_block("crypto:BTC/USD").is_some());
     }
 
     #[test]
@@ -5153,6 +6041,7 @@ mod tests {
                 target: 0.0,
                 trail_ref: 227.0,
                 live: true,
+                demo: false,
             },
         );
         for _ in 0..5 {
@@ -5600,7 +6489,7 @@ mod tests {
             "alpaca:AAPL".into(),
             PositionInternal {
                 venue: Venue::Alpaca, symbol: "AAPL".into(), qty: 10.0, avg_price: 220.0,
-                strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 220.0, live: true,
+                strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 220.0, live: true, demo: false,
             },
         );
         e.reconcile_positions(
@@ -5669,7 +6558,7 @@ mod tests {
             "alpaca:AAPL".into(),
             PositionInternal {
                 venue: Venue::Alpaca, symbol: "AAPL".into(), qty: 3.0, avg_price: 227.0,
-                strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 227.0, live: true,
+                strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 227.0, live: true, demo: false,
             },
         );
         let json = serde_json::to_string(&e.to_persisted()).unwrap();
@@ -5737,6 +6626,7 @@ mod tests {
                 target: 0.0,
                 trail_ref: 220.0,
                 live: true,
+                demo: false,
             },
         );
         e.flatten("alpaca:AAPL");
@@ -6079,6 +6969,7 @@ mod tests {
                     target: 0.0,
                     trail_ref: 100.0,
                     live: true,
+                    demo: false,
                 },
             );
         }
@@ -6243,6 +7134,7 @@ mod tests {
                 target: 0.0,
                 trail_ref: 220.0,
                 live: true,
+                demo: false,
             },
         );
         let json = serde_json::to_string(&e.to_persisted()).unwrap();

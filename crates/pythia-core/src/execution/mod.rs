@@ -25,7 +25,7 @@ pub mod bandit;
 
 use crate::connectors::cex::{CexConnector, Exchange};
 use crate::connectors::{
-    alpaca::AlpacaConnector, ConnectorError, MarketConnector, OrderRequest, OrderType, Venue,
+    alpaca::AlpacaConnector, ConnectorError, Environment, MarketConnector, OrderRequest, OrderType, Venue,
 };
 use crate::engine::{Engine, LiveOrderOut, LiveUpdate};
 use std::collections::HashSet;
@@ -43,6 +43,11 @@ pub struct Credentials {
     pub alpaca_live: Option<(String, String)>,
     /// The selected crypto exchange and its (key, secret, passphrase).
     pub exchange: Option<(Exchange, String, String, String)>,
+    /// The exchange the DEMO route uses and its demo (key, secret,
+    /// passphrase), from a slot of its own (`vault::exchange_demo_slot`).
+    /// Never used for a live order, and the live keys above are never used for
+    /// a demo one: see [`Credentials::connector_env`].
+    pub exchange_demo: Option<(Exchange, String, String, String)>,
     /// Cap on the marketable-limit band for Alpaca market orders, in basis
     /// points. `None` keeps the connector default; 0 sends plain market orders
     /// during regular hours.
@@ -118,6 +123,77 @@ impl Credentials {
         }
     }
 
+    /// The connector for one venue in one environment, built from that
+    /// environment's own keys.
+    ///
+    /// * `Live` is [`Credentials::connector_with`]: the live exchange keys, or
+    ///   Alpaca's live or paper pair by `paper` (the arm-time endpoint choice).
+    /// * `Demo` is the venue's demo world with its demo keys only: Alpaca's
+    ///   paper pair against `paper-api.alpaca.markets` whatever `paper` says,
+    ///   and the demo exchange slot against that exchange's demo host. A demo
+    ///   exchange key that is byte-for-byte the live key of the same exchange
+    ///   is refused: it means the same key was pasted into both forms.
+    pub fn connector_env(
+        &self,
+        venue: Venue,
+        env: Environment,
+        paper: bool,
+        extended_hours: bool,
+    ) -> Result<Box<dyn MarketConnector>, String> {
+        if env == Environment::Live {
+            return self.connector_with(venue, paper, extended_hours);
+        }
+        match venue {
+            Venue::Alpaca => {
+                let c = self.alpaca_connector(true, extended_hours).map_err(|_| {
+                    "Alpaca demo means the paper account: its keys are not set (APCA_API_KEY_ID / \
+                     APCA_API_SECRET_KEY, or Settings → Alpaca paper)"
+                        .to_string()
+                })?;
+                // The paper pair only authenticates at paper-api.alpaca.markets,
+                // which is where this connector points; a live pair in the
+                // paper slot would be refused there (401), not trade for real.
+                Ok(Box::new(c))
+            }
+            Venue::Crypto => {
+                let (ex, k, s, p) = self.exchange_demo.clone().ok_or(
+                    "No demo exchange is configured: add demo keys in Settings → Exchanges (Bybit, OKX or Binance)",
+                )?;
+                if ex.demo().is_none() {
+                    return Err(format!("{} has no demo environment. {}", ex.label(), ex.no_demo_reason()));
+                }
+                if let Some((lex, lk, _, _)) = &self.exchange {
+                    if *lex == ex && lk.trim() == k.trim() {
+                        return Err(format!(
+                            "the {} demo key is the same as the live key. Demo keys are created inside the \
+                             venue's demo account; demo orders refused until a real demo key is saved",
+                            ex.label()
+                        ));
+                    }
+                }
+                let c = CexConnector::with_env(ex, k, s, p, Environment::Demo);
+                if !c.is_live_ready() {
+                    return Err(format!("{} demo credentials are incomplete", ex.label()));
+                }
+                Ok(Box::new(c))
+            }
+            Venue::Polymarket => Err("Polymarket has no demo environment and no order path".into()),
+        }
+    }
+
+    /// Venues whose demo route has usable keys, for the engine and the badges.
+    pub fn demo_venues(&self) -> HashSet<Venue> {
+        [Venue::Alpaca, Venue::Crypto]
+            .into_iter()
+            .filter(|v| self.connector_env(*v, Environment::Demo, true, false).is_ok())
+            .collect()
+    }
+
+    /// The exchange the demo route trades on, if one is configured.
+    pub fn demo_exchange(&self) -> Option<Exchange> {
+        self.exchange_demo.as_ref().map(|e| e.0)
+    }
+
     /// Venues with usable credentials, for the "connected" badges.
     pub fn connected_venues(&self) -> HashSet<Venue> {
         let mut set = HashSet::new();
@@ -142,7 +218,13 @@ pub async fn cycle(engine: &Mutex<Engine>, creds: &Credentials) {
 /// Read-only credential check, for the UI's "test connection" button and as the
 /// gate before arming.
 pub async fn verify(creds: &Credentials, venue: Venue, paper: bool) -> Result<String, String> {
-    let conn = creds.connector(venue, paper)?;
+    verify_env(creds, venue, Environment::Live, paper).await
+}
+
+/// [`verify`] for one environment: the demo check reads the demo account
+/// with the demo keys, never the live ones. Read-only either way.
+pub async fn verify_env(creds: &Credentials, venue: Venue, env: Environment, paper: bool) -> Result<String, String> {
+    let conn = creds.connector_env(venue, env, paper, false)?;
     conn.verify().await.map_err(|e| e.to_string())
 }
 
@@ -159,7 +241,10 @@ async fn submit_one(engine: &Mutex<Engine>, creds: &Credentials, o: LiveOrderOut
         return reject(engine, &o.order_id, "dry-run: not submitted");
     }
 
-    let conn = match creds.connector_with(o.venue, o.paper, o.extended_hours) {
+    // A demo order is built against the demo world with the demo keys; a live
+    // one exactly as before. `env` comes from the engine's routing decision.
+    let env = if o.demo { Environment::Demo } else { Environment::Live };
+    let conn = match creds.connector_env(o.venue, env, o.paper, o.extended_hours) {
         Ok(c) => c,
         Err(e) => return reject(engine, &o.order_id, &e),
     };
@@ -227,7 +312,8 @@ pub async fn poll_inflight(engine: &Mutex<Engine>, creds: &Credentials) {
     let timeout_ms = { engine.lock().unwrap().live_config().timeout_sec as i64 * 1000 };
 
     for p in polls {
-        let conn = match creds.connector(p.venue, p.paper) {
+        let env = if p.demo { Environment::Demo } else { Environment::Live };
+        let conn = match creds.connector_env(p.venue, env, p.paper, false) {
             Ok(c) => c,
             // Keys disappeared mid-flight. We cannot see the order any more, so
             // say so rather than leaving it silently stuck.
@@ -362,6 +448,82 @@ mod tests {
         assert!(live_only.connector(Venue::Alpaca, false).is_ok());
         assert!(live_only.connector(Venue::Alpaca, true).is_err());
         assert!(live_only.connected_venues().contains(&Venue::Alpaca));
+    }
+
+    #[test]
+    fn live_keys_are_never_used_for_demo_and_demo_keys_never_for_live() {
+        // Only live Bybit keys: the demo route has nothing to use.
+        let live_only = Credentials {
+            exchange: Some((Exchange::Bybit, "LIVEKEY".into(), "LIVESECRET".into(), String::new())),
+            ..Default::default()
+        };
+        assert!(live_only.connector_env(Venue::Crypto, Environment::Live, false, false).is_ok());
+        let err = live_only.connector_env(Venue::Crypto, Environment::Demo, false, false).err().unwrap();
+        assert!(err.contains("demo"), "{err}");
+        assert!(live_only.demo_venues().is_empty());
+
+        // Only demo keys: the live route has nothing to use.
+        let demo_only = Credentials {
+            exchange_demo: Some((Exchange::Bybit, "DEMOKEY".into(), "DEMOSECRET".into(), String::new())),
+            ..Default::default()
+        };
+        assert!(demo_only.connector_env(Venue::Crypto, Environment::Live, false, false).is_err());
+        let c = demo_only.connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap();
+        assert_eq!(c.label(), "Bybit (demo)");
+        assert!(demo_only.connected_venues().is_empty(), "demo keys do not make a venue live-connected");
+        assert!(demo_only.demo_venues().contains(&Venue::Crypto));
+
+        // Both: each route gets its own world.
+        let both = Credentials { exchange: live_only.exchange.clone(), ..demo_only.clone() };
+        assert_eq!(both.connector_env(Venue::Crypto, Environment::Live, false, false).unwrap().label(), "Bybit");
+        assert_eq!(both.connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap().label(), "Bybit (demo)");
+
+        // The same key pasted into both forms is refused for demo.
+        let same = Credentials {
+            exchange: Some((Exchange::Bybit, "K".into(), "S".into(), String::new())),
+            exchange_demo: Some((Exchange::Bybit, " K ".into(), "S".into(), String::new())),
+            ..Default::default()
+        };
+        let err = same.connector_env(Venue::Crypto, Environment::Demo, false, false).err().unwrap();
+        assert!(err.contains("same as the live key"), "{err}");
+
+        // A venue with no demo world refuses even with keys in the demo slot.
+        let kraken = Credentials {
+            exchange_demo: Some((Exchange::Kraken, "a".into(), "b".into(), String::new())),
+            ..Default::default()
+        };
+        assert!(kraken.connector_env(Venue::Crypto, Environment::Demo, false, false).is_err());
+
+        // Alpaca: demo is the paper account, whatever the arm's endpoint says,
+        // and live keys alone never stand in for it.
+        let alpaca_live = Credentials { alpaca_live: Some(("lk".into(), "ls".into())), ..Default::default() };
+        assert!(alpaca_live.connector_env(Venue::Alpaca, Environment::Demo, false, false).is_err());
+        let alpaca_paper = Credentials { alpaca: Some(("pk".into(), "ps".into())), ..Default::default() };
+        let c = alpaca_paper.connector_env(Venue::Alpaca, Environment::Demo, false, false).unwrap();
+        assert_eq!(c.label(), "Alpaca (paper)");
+    }
+
+    #[tokio::test]
+    async fn a_demo_order_without_demo_keys_is_rejected_and_never_reaches_the_live_keys() {
+        let engine = Mutex::new(Engine::new());
+        {
+            let mut e = engine.lock().unwrap();
+            // The engine believes a demo route exists (stale host state), but
+            // the credentials only hold LIVE keys.
+            e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(crate::costs::CostVenue::Bybit), true);
+            e.place_order("ema-cross-1", "crypto:BTC/USD", Side::Buy, 1_000.0, crate::engine::RouteIntent::Demo).unwrap();
+        }
+        let creds = Credentials {
+            exchange: Some((Exchange::Bybit, "LIVEKEY".into(), "LIVESECRET".into(), String::new())),
+            ..Default::default()
+        };
+        submit_pending(&engine, &creds).await;
+        let e = engine.lock().unwrap();
+        assert_eq!(e.state().live.pending, 0);
+        let row = e.state().orders.into_iter().find(|o| o.market_id == "crypto:BTC/USD").unwrap();
+        assert_eq!(row.status, crate::engine::OrderStatus::Rejected);
+        assert!(row.reject_reason.unwrap_or_default().contains("demo"));
+        assert!(e.state().journal.iter().any(|j| j.message.starts_with("DEMO order not sent")));
     }
 
     #[test]

@@ -35,6 +35,26 @@ pub fn exchange_slot(exchange_id: &str) -> String {
     format!("exchange:{exchange_id}")
 }
 
+/// Where a crypto exchange's DEMO key/secret/passphrase lives. A slot of its
+/// own, never the live one: a demo key saved over a live key (or the reverse)
+/// would either break live trading or send demo orders with real money.
+pub fn exchange_demo_slot(exchange_id: &str) -> String {
+    format!("exchange-demo:{exchange_id}")
+}
+
+/// The slot for one exchange in one environment.
+pub fn exchange_slot_for(exchange_id: &str, env: crate::connectors::Environment) -> String {
+    match env {
+        crate::connectors::Environment::Live => exchange_slot(exchange_id),
+        crate::connectors::Environment::Demo => exchange_demo_slot(exchange_id),
+    }
+}
+
+/// Which exchange the demo route uses, stored under the `crypto` slot as the
+/// field `demoExchange`. Independent of the live choice: Kraken has no demo,
+/// so someone trading Kraken live may well demo-trade on Bybit.
+pub const DEMO_EXCHANGE_FIELD: &str = "demoExchange";
+
 /// The slot holding watch-only on-chain addresses (a JSON array under
 /// `addresses`). Deliberately never holds a private key — see `wallets.rs`.
 pub const WALLETS: &str = "wallets";
@@ -50,9 +70,10 @@ pub fn selected_exchange() -> Option<String> {
 pub fn status(exchange_ids: &[&str]) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = VENUES.iter().map(|v| (v.to_string(), has_keys(v))).collect();
     for id in exchange_ids {
-        let slot = exchange_slot(id);
-        let present = has_keys(&slot);
-        out.push((slot, present));
+        for slot in [exchange_slot(id), exchange_demo_slot(id)] {
+            let present = has_keys(&slot);
+            out.push((slot, present));
+        }
     }
     out.push((WALLETS.to_string(), has_keys(WALLETS)));
     out
@@ -125,5 +146,17 @@ mod tests {
         assert_ne!(alpaca_slot(true), alpaca_slot(false));
         assert!(VENUES.contains(&alpaca_slot(true)));
         assert!(VENUES.contains(&alpaca_slot(false)));
+    }
+
+    #[test]
+    fn demo_exchange_keys_have_their_own_slot() {
+        use crate::connectors::Environment;
+        for id in ["bybit", "okx", "binance"] {
+            let live = exchange_slot_for(id, Environment::Live);
+            let demo = exchange_slot_for(id, Environment::Demo);
+            assert_ne!(live, demo, "{id}: a demo key must never overwrite a live one");
+            assert_eq!(live, exchange_slot(id));
+            assert!(demo.contains("demo"));
+        }
     }
 }

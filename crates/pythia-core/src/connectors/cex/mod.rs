@@ -29,7 +29,7 @@ mod kraken;
 mod okx;
 
 use super::{
-    Balance, BrokerOrder, BrokerPosition, ConnectorError, MarketConnector, OrderRequest, Venue,
+    Balance, BrokerOrder, BrokerPosition, ConnectorError, Environment, MarketConnector, OrderRequest, Venue,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -125,6 +125,77 @@ impl Exchange {
         }
     }
 
+    /// This venue's demo environment, or `None` when it has no self-service
+    /// one Pythia can trade against. The research behind every row, with the
+    /// doc each fact comes from, is in `docs/DEMO.md`.
+    pub fn demo(self) -> Option<DemoEnv> {
+        match self {
+            // https://bybit-exchange.github.io/docs/v5/demo
+            // "api-demo.bybit.com"; keys are created inside the Demo Trading
+            // account (its own user id) on bybit.com; public data identical to
+            // mainnet; "Basic trading rules are the same as real trading".
+            Exchange::Bybit => Some(DemoEnv {
+                base: "https://api-demo.bybit.com",
+                real_prices: true,
+                key_help: "Log in at bybit.com, switch to Demo Trading (top right, it is a separate account with \
+                           its own user id), then avatar > API and create a key there. A key from your real \
+                           account does not work on the demo host, and a demo key does not work on the real one.",
+                note: "Mainnet prices and trading rules. Demo orders are kept for 7 days; top up virtual funds \
+                       in the Demo Trading page.",
+            }),
+            // https://www.okx.com/docs-v5/en/#overview-demo-trading-services
+            // Same REST host as production, plus `x-simulated-trading: 1`
+            // and a key created under Trade > Demo Trading. A mismatched key
+            // answers 50101 "APIKey does not match current environment".
+            Exchange::Okx => Some(DemoEnv {
+                base: OKX_HOST,
+                real_prices: false,
+                key_help: "Log in at okx.com, open Trade > Demo Trading > Personal Center > Demo Trading API and \
+                           create a demo key with its own passphrase. Real-account keys are refused in demo mode \
+                           (error 50101), and demo keys are refused on the real account.",
+                note: "OKX runs its own demo matching engine. Prices follow the market, but OKX does not \
+                       document whether its demo book has real depth: compare demo fills against the live book \
+                       before trusting them.",
+            }),
+            // https://developers.binance.com/en/docs/products/spot/demo-mode/general-info
+            // Spot Demo Mode, not the older Spot Testnet: "Demo Mode's prices
+            // and order books are similar to the live exchange", and its
+            // filters and limits are "exactly the same as the live exchange".
+            Exchange::Binance => Some(DemoEnv {
+                base: "https://demo-api.binance.com",
+                real_prices: true,
+                key_help: "Log in at binance.com, open Binance Demo Trading and create an API key on its API Key \
+                           Management page. Not a Spot Testnet key (testnet.binance.vision): the testnet has its \
+                           own unrelated prices and is not what Pythia's demo route uses.",
+                note: "Spot Demo Mode: prices and books similar to the live exchange, same filters and limits, \
+                       balance resettable from the UI. Binance warns that realistic is not real.",
+            }),
+            // Kraken spot UAT exists only on request through an account
+            // manager; the self-service sandbox (demo-futures.kraken.com) is
+            // futures only. https://docs.kraken.com/home/guides/quickstart
+            Exchange::Kraken => None,
+            // The Advanced Trade sandbox answers with "static and
+            // pre-defined" responses: no fills worth booking.
+            // https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/sandbox
+            Exchange::Coinbase => None,
+        }
+    }
+
+    /// Why this venue has no demo route, in one sentence for the UI.
+    pub fn no_demo_reason(self) -> &'static str {
+        match self {
+            Exchange::Kraken => {
+                "Kraken has no self-service spot demo: its spot test environment is given out on request by an \
+                 account manager, and the public sandbox is futures only."
+            }
+            Exchange::Coinbase => {
+                "Coinbase's Advanced Trade sandbox returns fixed, pre-defined responses, so there is no fill in \
+                 it worth analysing."
+            }
+            _ => "",
+        }
+    }
+
     /// The quote asset Pythia's `…/USD` markets map to here. Binance and Bybit
     /// have no USD spot book for most pairs; USDT is the liquid equivalent.
     fn usd_quote(self) -> &'static str {
@@ -145,6 +216,27 @@ impl Exchange {
             Exchange::Okx | Exchange::Coinbase => format!("{base}-{quote}"),
         }
     }
+}
+
+/// OKX's REST host. Production and demo share it; the demo world is chosen by
+/// the `x-simulated-trading: 1` header and a demo key. OKX's overview now also
+/// lists `https://openapi.okx.com` for both; `www.okx.com` is the host this
+/// connector has always used and still serves the v5 API.
+pub(crate) const OKX_HOST: &str = "https://www.okx.com";
+
+/// One venue's demo environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemoEnv {
+    /// REST base URL for the demo world.
+    pub base: &'static str,
+    /// Whether the venue documents that demo orders trade on real market
+    /// prices. `false` means "own demo book, or not documented": demo fills
+    /// there say something about the API path and little about the price.
+    pub real_prices: bool,
+    /// How to get a demo key, in plain language.
+    pub key_help: &'static str,
+    /// Known differences from the live venue.
+    pub note: &'static str,
 }
 
 /// Split `BTC/USD` into (`BTC`, `USD`); a bare `BTC` is assumed USD-quoted.
@@ -174,14 +266,43 @@ pub struct ExchangeInfo {
     pub secret_multiline: bool,
     /// How to create a correctly scoped key, in plain language.
     pub key_help: &'static str,
+    /// The venue has a demo environment Pythia can route to.
+    pub demo_supported: bool,
+    /// Demo keys for it exist in the vault / env. Stored apart from the live
+    /// keys, in their own slot.
+    pub demo_configured: bool,
+    /// The venue documents that demo orders trade on real market prices.
+    pub demo_real_prices: bool,
+    /// Demo base URL, for the settings page to show where demo orders go.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demo_base: Option<&'static str>,
+    /// How to get a demo key, or why there is no demo route.
+    pub demo_help: &'static str,
+    /// Known differences between the demo and the live venue.
+    pub demo_note: &'static str,
 }
 
 pub fn exchanges_with(configured: impl Fn(Exchange) -> bool) -> Vec<ExchangeInfo> {
+    exchanges_with_demo(configured, |_| false)
+}
+
+/// [`exchanges_with`], also reporting which venues have demo keys.
+pub fn exchanges_with_demo(
+    configured: impl Fn(Exchange) -> bool,
+    demo_configured: impl Fn(Exchange) -> bool,
+) -> Vec<ExchangeInfo> {
     Exchange::ALL
         .into_iter()
         .map(|e| {
             let (key_label, secret_label) = e.key_labels();
+            let demo = e.demo();
             ExchangeInfo {
+                demo_supported: demo.is_some(),
+                demo_configured: demo.is_some() && demo_configured(e),
+                demo_real_prices: demo.is_some_and(|d| d.real_prices),
+                demo_base: demo.map(|d| d.base),
+                demo_help: demo.map_or(e.no_demo_reason(), |d| d.key_help),
+                demo_note: demo.map_or("", |d| d.note),
                 id: e.id(),
                 label: e.label(),
                 needs_passphrase: e.needs_passphrase(),
@@ -220,20 +341,47 @@ pub struct CexConnector {
     pub(crate) key: String,
     pub(crate) secret: String,
     pub(crate) passphrase: String,
+    /// Live or demo. Fixed at construction together with the keys, so the
+    /// pairing of key and host cannot change under a running connector.
+    pub(crate) env: Environment,
     pub(crate) http: reqwest::Client,
 }
 
 impl CexConnector {
+    /// A connector for the venue's LIVE environment (real money).
     pub fn new(exchange: Exchange, key: String, secret: String, passphrase: String) -> Self {
+        Self::with_env(exchange, key, secret, passphrase, Environment::Live)
+    }
+
+    /// A connector for one environment. The keys passed in must be the keys of
+    /// that environment: the caller (`execution::Credentials`) keeps live and
+    /// demo keys in separate slots and never crosses them.
+    pub fn with_env(exchange: Exchange, key: String, secret: String, passphrase: String, env: Environment) -> Self {
         Self {
             exchange,
             key,
             secret,
             passphrase,
+            env,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .unwrap_or_default(),
+        }
+    }
+
+    pub fn env(&self) -> Environment {
+        self.env
+    }
+
+    /// The REST base URL for this connector's venue and environment. `live`
+    /// is the adapter's own production host. A demo connector on a venue with
+    /// no demo environment has no base: `creds_ok` refuses it before any
+    /// request is built, and the empty string here could not reach a host.
+    pub(crate) fn base(&self, live: &'static str) -> &'static str {
+        match self.env {
+            Environment::Live => live,
+            Environment::Demo => self.exchange.demo().map_or("", |d| d.base),
         }
     }
 
@@ -260,6 +408,13 @@ impl CexConnector {
     fn creds_ok(&self) -> Result<(), ConnectorError> {
         if !self.exchange.can_trade() {
             return Err(ConnectorError::Unimplemented("order routing for this exchange"));
+        }
+        if self.env.is_demo() && self.exchange.demo().is_none() {
+            return Err(ConnectorError::NotConfigured(format!(
+                "{} has no demo environment Pythia can route to. {}",
+                self.exchange.label(),
+                self.exchange.no_demo_reason()
+            )));
         }
         if self.key.trim().is_empty() || self.secret.trim().is_empty() {
             return Err(ConnectorError::NotConfigured(self.exchange.id().into()));
@@ -310,7 +465,10 @@ impl MarketConnector for CexConnector {
     }
 
     fn label(&self) -> String {
-        self.exchange.label().to_string()
+        match self.env {
+            Environment::Live => self.exchange.label().to_string(),
+            Environment::Demo => format!("{} (demo)", self.exchange.label()),
+        }
     }
 
     /// Spot lot sizes differ per pair and per venue; 8 decimals is inside every
@@ -328,11 +486,7 @@ impl MarketConnector for CexConnector {
         self.creds_ok()?;
         let bal = self.balances().await?;
         let usd: f64 = bal.iter().filter_map(|b| b.usd_value).sum();
-        let mut summary = format!(
-            "{} · {} assets · ≈${usd:.2} priced",
-            self.exchange.label(),
-            bal.len()
-        );
+        let mut summary = format!("{} · {} assets · ≈${usd:.2} priced", self.label(), bal.len());
         // Coinbase publishes the account's fee tier; show it, since it decides
         // whether a strategy's edge survives the fees there.
         if self.exchange == Exchange::Coinbase {
@@ -552,6 +706,32 @@ mod tests {
         assert!(!e.contains(pem.lines().nth(1).unwrap()), "never echo the key");
         // HMAC venues accept any non-empty string as a secret.
         assert!(check_credentials(Exchange::Kraken, "k", "s").is_ok());
+    }
+
+    #[test]
+    fn demo_hosts_are_separate_from_live_ones_and_venues_without_demo_refuse() {
+        let demo = |e| CexConnector::with_env(e, "k".into(), "s".into(), "p".into(), Environment::Demo);
+        let live = |e| CexConnector::with_env(e, "k".into(), "s".into(), "p".into(), Environment::Live);
+        assert_eq!(demo(Exchange::Bybit).base("https://api.bybit.com"), "https://api-demo.bybit.com");
+        assert_eq!(live(Exchange::Bybit).base("https://api.bybit.com"), "https://api.bybit.com");
+        assert_eq!(demo(Exchange::Binance).base("https://api.binance.com"), "https://demo-api.binance.com");
+        assert_eq!(demo(Exchange::Okx).base(OKX_HOST), OKX_HOST, "OKX picks the world by header");
+        assert!(demo(Exchange::Bybit).is_live_ready());
+        assert_eq!(demo(Exchange::Bybit).label(), "Bybit (demo)");
+        // No self-service demo: refused before any request is built.
+        for e in [Exchange::Kraken, Exchange::Coinbase] {
+            assert!(e.demo().is_none());
+            assert!(!demo(e).is_live_ready(), "{e:?} demo must fail closed");
+            assert!(live(e).is_live_ready());
+            assert!(!e.no_demo_reason().is_empty());
+        }
+        let info = exchanges_with_demo(|_| true, |e| e == Exchange::Bybit);
+        let by = info.iter().find(|i| i.id == "bybit").unwrap();
+        assert!(by.demo_supported && by.demo_configured && by.demo_real_prices);
+        let kr = info.iter().find(|i| i.id == "kraken").unwrap();
+        assert!(!kr.demo_supported && !kr.demo_configured && kr.demo_base.is_none());
+        let okx = info.iter().find(|i| i.id == "okx").unwrap();
+        assert!(okx.demo_supported && !okx.demo_real_prices, "OKX does not document real demo depth");
     }
 
     #[test]
