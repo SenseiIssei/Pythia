@@ -21,9 +21,11 @@ import polars as pl
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="F:/PythiaData")
-    root = Path(ap.parse_args().data)
+    ap.add_argument("--m3", default="pythia_net", help="report folder of the Pythia-Net run (pythia_net_hybrid for attempt two)")
+    args = ap.parse_args()
+    root = Path(args.data)
     m2 = pl.read_parquet(root / "reports" / "picks" / "scores.parquet").select("day", "symbol", m2="score", fwd="fwd")
-    m3 = pl.read_parquet(root / "reports" / "pythia_net" / "scores.parquet").select("day", "symbol", m3="score")
+    m3 = pl.read_parquet(root / "reports" / args.m3 / "scores.parquet").select("day", "symbol", m3="score")
     df = m2.join(m3, on=["day", "symbol"], how="inner").drop_nulls().filter(pl.col("fwd").is_not_nan())
     df = df.with_columns(
         r2=pl.col("m2").rank().over("day") / pl.len().over("day"),
@@ -62,7 +64,7 @@ def main() -> None:
                  + ("The blend adds something out of sample." if late_blend > late_m2 + 0.002 else
                     "The blend adds nothing worth the extra model."))
     text = "# M2 and Pythia-Net combined\n\n" + "\n\n".join(lines) + "\n"
-    d = root / "reports" / "ensemble"
+    d = root / "reports" / f"ensemble_{args.m3}"
     d.mkdir(parents=True, exist_ok=True)
     (d / "latest.md").write_text(text, encoding="utf-8")
     print(text)
