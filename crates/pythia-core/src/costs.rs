@@ -27,8 +27,11 @@
 //!   impact      impact_coeff * sqrt(notional / depth)
 //! ```
 //!
-//! `depth` is the top-of-book depth in quote currency on the side the order
-//! takes. When no live book is available the venue's `default_depth` stands in.
+//! `depth` is the notional on the 20 best levels of the side the order takes,
+//! in quote currency: what a depth20 feed reports, and what the calibration in
+//! `research/lab` measured. A live book passed in must use the same definition,
+//! or the fitted coefficient no longer means anything. When no live book is
+//! available the venue's `default_depth` (the measured median) stands in.
 //! The square root is the empirical square-root law of market impact: doubling
 //! the size does not double the impact, but it never makes it free either. At
 //! `notional == depth` the impact is exactly `impact_coeff` bps.
@@ -129,14 +132,14 @@ pub struct CostModel {
     pub maker_bps: f64,
     /// Half the quoted spread, per side: what a taker pays against the mid.
     pub half_spread_bps: f64,
-    /// Impact in bps when the order's notional equals the top-of-book depth;
+    /// Impact in bps when the order's notional equals the 20-level depth;
     /// scaled by `sqrt(notional / depth)` otherwise.
     pub impact_coeff: f64,
     /// Annual borrow cost for a short, in bps per year.
     pub borrow_bps_yr: f64,
     /// Smallest order the venue accepts, in quote currency (approximate).
     pub min_notional: f64,
-    /// Top-of-book depth (quote currency) assumed when no live book is known.
+    /// 20-level depth (quote currency) assumed when no live book is known.
     #[serde(default)]
     pub default_depth: f64,
 }
@@ -444,10 +447,10 @@ mod tests {
         let b_btc = t.model_for(CostVenue::Binance, "BTC/USD");
         assert!(k_btc.half_spread_bps < k_alt.half_spread_bps);
         assert!(b_btc.half_spread_bps < k_btc.half_spread_bps);
-        assert!((1.0..=2.0).contains(&b_btc.half_spread_bps), "Binance majors ~1-2 bps");
-        assert!((2.0..=5.0).contains(&k_btc.half_spread_bps), "Kraken majors ~2-5 bps");
+        // Measured from recorded books: BTC trades at a one-tick spread on both.
+        assert!(k_btc.half_spread_bps < 0.1, "Kraken BTC is about 0.01 bp: {}", k_btc.half_spread_bps);
         // An instrument nobody listed gets the venue default, which is the alt level.
-        let unknown = t.model_for(CostVenue::Kraken, "PEPE/USD");
+        let unknown = t.model_for(CostVenue::Kraken, "SHIB/USD");
         assert_eq!(unknown.half_spread_bps, t.venue_model(CostVenue::Kraken).half_spread_bps);
     }
 

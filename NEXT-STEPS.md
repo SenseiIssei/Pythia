@@ -113,9 +113,13 @@ left is calibration, which needs real fills and recorded books.
       overridable at runtime with `PYTHIA_COSTS_FILE`; the server also picks up
       the repo file). Paper fills and both backtesters use it; the flat 8 bps +
       6 bps is gone
-- [ ] **Calibrate `config/costs.json`** from recorded data. The shipped numbers
-      are public fee schedules and typical spreads, not measurements. Spread and
-      depth should come from the data recorder; fees from your actual tier
+- [x] **Calibrate `config/costs.json`** from recorded data. Kraken and Binance
+      half-spread, depth and impact for all 20 recorded coins are now measured
+      (`research/lab` experiment `costs`, 6.6 days of top-20 books, re-run every
+      Sunday as a report). Spreads were overstated 10 to 1000 times; fees are now
+      nearly the whole cost. Still guesses: Bybit, OKX, Coinbase (no recorder),
+      and the fees themselves, which should come from your actual tier once an
+      account exists
 - [x] Backtester reports **gross P&L, costs, net P&L** as three separate
       figures (Rust `PnlBreakdown`, the Backtest, Composer and Analytics pages),
       flagged when costs exceed 40 % of gross

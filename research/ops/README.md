@@ -10,6 +10,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 04:00 | momentum paper books, engine signals, paper vs backtest review | `/etc/cron.d/pythia-paper` |
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | Sun 05:00 | volatility model retrain (published only if it passes) | `/etc/cron.d/pythia-retrain` |
+| Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | hourly :07 | health check of all of the above | `/etc/cron.d/pythia-health` |
 
 ## Health check
