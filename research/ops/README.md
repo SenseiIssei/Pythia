@@ -18,7 +18,8 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 ## Health check
 
 `system_health.sh` looks at the containers, the recorder's streams, the last
-backfill, each paper book's last row and the model service, and writes
+backfill, each paper book's last row, the model service and the engine's
+market data (`dataHealth` in `/api/state`), and writes
 `/srv/pythia-data/_health/system.json`. It never restarts anything. The Lab
 page shows it ("Is everything running?"); the PC gets it with the sync.
 
@@ -27,3 +28,27 @@ Install or update:
 ```bash
 scp research/ops/system_health.sh pythia-vps:/tmp/ && ssh pythia-vps 'install -m 755 /tmp/system_health.sh /opt/pythia-ops/system_health.sh'
 ```
+
+## Market data in the engine
+
+The engine's crypto quotes, candles and books come from `pythia_core::feeds`,
+with a priority list of public venues per kind:
+
+| Kind | Sources, best first | Fails over when |
+|---|---|---|
+| quotes | Kraken stream, Kraken, Binance, Coinbase, Bybit, OKX | 10 s of stream silence, 25 s without a polled quote, or two failed polls |
+| candles (5 min) | Kraken, Binance, Coinbase, Bybit, OKX | 150 s without a refresh, or two failed polls |
+| books (top 20) | the executing exchange only (Binance also via its data mirror) | 60 s; past that fills use the calibrated costs |
+
+A market returns to a better source once it has delivered for a minute
+without a gap. A quote more than 5 % from every other venue's recent price is
+refused and never becomes the mark; stops and trims wait while a price is older
+than the risk limit (30 s). The health check's "market data" line is red when
+quotes or candles are stale at the moment it runs. With `PYTHIA_WEBHOOK_URL`
+set, the engine also posts once when data has been stale for 5 minutes and once
+when it recovers.
+
+Knobs, all optional, in the server's environment: `PYTHIA_FEED_QUOTES` and
+`PYTHIA_FEED_CANDLES` (comma lists of `kraken-ws,kraken,binance,coinbase,bybit,okx`),
+`PYTHIA_FEED_STREAM=0`, `PYTHIA_FEED_STALE_SEC`, `PYTHIA_FEED_RECOVER_SEC`,
+`PYTHIA_FEED_MAX_DEVIATION_PCT`, `PYTHIA_FEED_ALERT_MIN`.
