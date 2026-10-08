@@ -1114,6 +1114,9 @@ pub struct Engine {
     lab_retry: HashMap<String, (i64, u32, i64)>,
     /// Lab notes already journaled, so a stale signal is said once, not every tick.
     lab_notes: HashSet<String>,
+    /// `PYTHIA_LAB_BOOKS=idle`: every lab book waits, paused and holding
+    /// nothing, until an autopilot claims it. Set by the host, not saved.
+    lab_books_idle: bool,
     /// Real fills not yet handed to the host for the tax record (see `crate::tax`).
     fill_records: Vec<crate::tax::FillRecord>,
     /// Average entry per open position at reference prices (before execution
@@ -1210,6 +1213,7 @@ impl Engine {
             lab_done: HashMap::new(),
             lab_retry: HashMap::new(),
             lab_notes: HashSet::new(),
+            lab_books_idle: false,
             fill_records: Vec::new(),
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
@@ -4363,8 +4367,15 @@ impl Engine {
     /// Install the latest signal for a lab strategy. The first signal creates
     /// the strategy in Paper; its gates 1 to 6 come from the lab's evidence,
     /// gate 7 from its paper record here, like every other strategy.
+    ///
+    /// An *idle* lab book (every lab book under `PYTHIA_LAB_BOOKS=idle`, and
+    /// any book whose signal says `autopilot_only`) is created paused instead
+    /// and stays paused, holding nothing, until an autopilot claims it. Its
+    /// signal and evidence are still updated here every time, so the auto
+    /// pick always judges the latest numbers.
     pub fn apply_lab_signal(&mut self, sig: crate::lab::LabSignal) {
         let id = format!("lab:{}", sig.strategy);
+        let idle = self.lab_books_idle || sig.autopilot_only;
         if !self.strategies.iter().any(|s| s.id == id) {
             let universe = self.markets.iter().filter(|m| m.venue == Venue::Crypto).map(|m| m.id.clone()).collect();
             self.strategies.push(StrategyConfig {
@@ -4372,7 +4383,7 @@ impl Engine {
                 name: format!("Lab · {}", sig.variant),
                 kind: StrategyKind::LabTargets,
                 venue_class: Venue::Crypto,
-                state: StrategyState::Paper,
+                state: if idle { StrategyState::Paused } else { StrategyState::Paper },
                 universe,
                 params: vec![],
                 budget_pct: 30.0,
@@ -4385,16 +4396,73 @@ impl Engine {
                 rules: None,
                 ledger: StrategyLedger::default(),
             });
-            self.log(
-                JournalKind::System,
-                format!("Lab strategy {} added in Paper: target weights from the research lab, executed here", sig.variant),
-                Some(id.clone()),
-                None,
-            );
+            let msg = if idle {
+                format!(
+                    "Lab strategy {} added, idle: it holds nothing and trades only inside an autopilot that claims it",
+                    sig.variant
+                )
+            } else {
+                format!("Lab strategy {} added in Paper: target weights from the research lab, executed here", sig.variant)
+            };
+            self.log(JournalKind::System, msg, Some(id.clone()), None);
         }
         let verdict = crate::lab::verdict(&id, vec![], &sig.evidence, self.now());
         self.research.insert(id.clone(), verdict);
-        self.lab_signals.insert(id, sig);
+        self.lab_signals.insert(id.clone(), sig);
+        // A book restored from the state file, or resumed before its first
+        // signal arrived, goes back to idle as soon as the signal says so.
+        self.idle_unclaimed_lab_books(Some(&id));
+    }
+
+    /// `PYTHIA_LAB_BOOKS=idle`: lab books trade only inside an autopilot. The
+    /// default (off) keeps them trading on their own, as before. Turning it on
+    /// pauses every lab book no autopilot runs.
+    pub fn set_lab_books_idle(&mut self, idle: bool) {
+        self.lab_books_idle = idle;
+        if idle {
+            self.idle_unclaimed_lab_books(None);
+        }
+    }
+
+    /// Whether this lab book trades only inside an autopilot.
+    pub fn lab_book_autopilot_only(&self, sid: &str) -> bool {
+        let lab = self.strategies.iter().any(|s| s.id == sid && s.kind == StrategyKind::LabTargets);
+        lab && (self.lab_books_idle || self.lab_signals.get(sid).is_some_and(|s| s.autopilot_only))
+    }
+
+    /// Pause every autopilot-only lab book (or just `only`) that no active
+    /// autopilot runs. Nothing is sold: coins such a book still holds stay
+    /// open and are named, so the owner can close them.
+    fn idle_unclaimed_lab_books(&mut self, only: Option<&str>) {
+        let ids: Vec<String> = self
+            .strategies
+            .iter()
+            .filter(|s| s.kind == StrategyKind::LabTargets && s.state != StrategyState::Paused)
+            .filter(|s| only.is_none_or(|o| o == s.id))
+            .map(|s| s.id.clone())
+            .collect();
+        for sid in ids {
+            if !self.lab_book_autopilot_only(&sid) || self.autopilot_claimant(&sid).is_some() {
+                continue;
+            }
+            self.apply_strategy_state(&sid, StrategyState::Paused);
+            let held: Vec<String> = self
+                .positions
+                .iter()
+                .filter(|(_, p)| p.strategy_id == sid && p.qty.abs() > 1e-12)
+                .map(|(m, _)| self.markets.iter().find(|x| &x.id == m).map(|x| x.symbol.clone()).unwrap_or_else(|| m.clone()))
+                .collect::<std::collections::BTreeSet<String>>()
+                .into_iter()
+                .collect();
+            let mut msg = "Lab book is idle: it trades only inside an autopilot that claims it".to_string();
+            if !held.is_empty() {
+                msg.push_str(&format!(
+                    "; it still holds {} from before, left open and unmanaged: close them on the Positions page before an autopilot can use it",
+                    held.join(", ")
+                ));
+            }
+            self.log(JournalKind::System, msg, Some(sid), None);
+        }
     }
 
     /// Move every lab book to its latest targets, once per signal.
@@ -4416,6 +4484,10 @@ impl Engine {
             // while it is paused.
             let scope = self.autopilot_lab_scope(&sid);
             if scope.as_ref().is_some_and(|s| !s.running) {
+                continue;
+            }
+            // An idle book never trades on its own, whatever its state says.
+            if scope.is_none() && self.lab_book_autopilot_only(&sid) {
                 continue;
             }
             let attempt = match self.lab_retry.get(&sid) {
@@ -4520,6 +4592,12 @@ impl Engine {
             }
             if !untradable.is_empty() {
                 note.push_str(&format!("; no market here for {}", untradable.join(", ")));
+            }
+            if !sig.dropped.is_empty() {
+                note.push_str(&format!(
+                    "; the lab's book also holds {}, which Pythia has no market for, so that share stays in cash",
+                    sig.dropped.join(", ")
+                ));
             }
             if !owned_elsewhere.is_empty() {
                 note.push_str(&format!("; left alone because another strategy holds them: {}", owned_elsewhere.join(", ")));
@@ -4651,6 +4729,13 @@ impl Engine {
         if let Some(ap) = self.autopilot_claimant(id) {
             let name = self.strategies.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string());
             return Err(format!("{name} runs in the autopilot \"{ap}\", which sets its state. Pause the autopilot to hold it, or stop it to change the strategy."));
+        }
+        // An idle lab book only trades with an autopilot's money.
+        if state != StrategyState::Paused && self.lab_book_autopilot_only(id) {
+            let name = self.strategies.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string());
+            return Err(format!(
+                "{name} trades only inside an autopilot here, never on its own. Start an autopilot with it, or let Pythia choose."
+            ));
         }
         // Demo needs no passport (no money moves) but does need a demo
         // environment for the strategy's venue, or every signal would be a
@@ -7750,6 +7835,8 @@ mod tests {
                 regime_filter: true,
                 ..Default::default()
             },
+            autopilot_only: false,
+            dropped: vec![],
         }
     }
 

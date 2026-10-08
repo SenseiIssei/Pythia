@@ -732,7 +732,8 @@ fn auto_picks_runnable_strategies_by_evidence_and_explains_each() {
     assert!(!ids.contains(&"macd-1"), "a strategy paused on its evidence is never picked");
     assert!((s.by_sleeve.iter().map(|x| x.weight).sum::<f64>() - 1.0).abs() < 1e-9);
     for sl in &s.by_sleeve {
-        assert!(sl.why.starts_with("Auto pick for ") && sl.why.contains("gates green") && sl.why.contains("% of the capital"), "{}", sl.why);
+        assert!(sl.why.starts_with("Auto pick, ") && sl.why.contains("gates green") && sl.why.contains("% of the capital"), "{}", sl.why);
+        assert!(sl.why.contains("its edge is not proven"), "nothing unvalidated is sold as proven: {}", sl.why);
         assert!(!sl.markets.is_empty());
     }
 
@@ -762,6 +763,8 @@ fn lab_signal(now: i64, weights: &[(&str, f64)]) -> crate::lab::LabSignal {
         weights: weights.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
         regime_on: Some(true),
         evidence: crate::lab::LabEvidence { oos_sharpe: Some(1.1), deflated_p: Some(0.97), ..Default::default() },
+        autopilot_only: false,
+        dropped: vec![],
     }
 }
 
@@ -792,6 +795,323 @@ fn a_lab_book_in_an_autopilot_rebalances_with_the_autopilots_money() {
     e.autopilot_stop(&id, Some(false)).unwrap();
     let err = e.autopilot_start(config("lab2", 10_000.0, &[("lab:tsmom", 1.0)], StopRules::default()), false, VenueCash::NotRead).unwrap_err();
     assert!(err.contains("still holds coins from its own run"), "{err}");
+}
+
+// ── idle lab books (PYTHIA_LAB_BOOKS=idle) ─────────────────────────────────
+
+/// The momentum book with the regime filter (reports/momentum2): gates 1 to 5
+/// green, deflated p 0.86 over 50 variants.
+fn regime_evidence() -> crate::lab::LabEvidence {
+    crate::lab::LabEvidence {
+        report: "momentum2".into(),
+        is_sharpe: Some(1.97),
+        oos_sharpe: Some(1.05),
+        deflated_p: Some(0.86),
+        sharpe_2x_cost: Some(0.93),
+        variants_tried: Some(50),
+        plateau_share: Some(1.0),
+        regime_sharpes: [("BTC above 200d average".to_string(), 1.56), ("BTC below 200d average".to_string(), -0.4)]
+            .into_iter()
+            .collect(),
+        regime_filter: true,
+        ..Default::default()
+    }
+}
+
+/// Donchian 20/10 on the top 10 (results/families_summary.md): no regime
+/// filter, loses below the 200-day average, deflated p 0.01 over 100.
+fn breakout_evidence() -> crate::lab::LabEvidence {
+    crate::lab::LabEvidence {
+        report: "families_summary".into(),
+        is_sharpe: Some(1.40),
+        oos_sharpe: Some(1.20),
+        deflated_p: Some(0.01),
+        sharpe_2x_cost: Some(1.08),
+        variants_tried: Some(100),
+        plateau_share: Some(1.0),
+        plateau_variants: Some(6),
+        regime_sharpes: [("BTC above 200d average".to_string(), 1.78), ("BTC below 200d average".to_string(), -0.55)]
+            .into_iter()
+            .collect(),
+        regime_filter: false,
+        ..Default::default()
+    }
+}
+
+/// tsmom 28d on the top 20 of each day (results/families_summary.md).
+fn top20_evidence() -> crate::lab::LabEvidence {
+    crate::lab::LabEvidence {
+        report: "families_summary".into(),
+        is_sharpe: Some(1.44),
+        oos_sharpe: Some(0.54),
+        deflated_p: Some(0.0003),
+        sharpe_2x_cost: Some(0.32),
+        variants_tried: Some(100),
+        plateau_share: Some(0.5625),
+        plateau_variants: Some(16),
+        regime_sharpes: [("BTC above 200d average".to_string(), 0.70), ("BTC below 200d average".to_string(), -2.29)]
+            .into_iter()
+            .collect(),
+        regime_filter: true,
+        ..Default::default()
+    }
+}
+
+fn book(
+    strategy: &str,
+    generated: i64,
+    weights: &[(&str, f64)],
+    evidence: crate::lab::LabEvidence,
+    autopilot_only: bool,
+) -> crate::lab::LabSignal {
+    crate::lab::LabSignal {
+        strategy: strategy.into(),
+        variant: strategy.into(),
+        as_of_ms: generated - 3_600_000,
+        generated_ms: generated,
+        valid_until_ms: generated + 36 * 3_600_000,
+        quote: "USD".into(),
+        weights: weights.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        regime_on: None,
+        evidence,
+        autopilot_only,
+        dropped: vec![],
+    }
+}
+
+/// An engine like the VPS autopilot engine: real prices, lab books idle.
+fn idle_engine() -> Engine {
+    let mut e = engine();
+    e.set_lab_books_idle(true);
+    e
+}
+
+fn held_by(e: &Engine, sid: &str) -> usize {
+    e.positions.values().filter(|p| p.strategy_id == sid && p.qty.abs() > 1e-12).count()
+}
+
+#[test]
+fn an_idle_lab_book_holds_nothing_does_not_trade_and_keeps_its_signal_up_to_date() {
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(book("breakout_top10", now, &[("BTC", 0.5), ("ETH", 0.25)], breakout_evidence(), false));
+    assert_eq!(state_of(&e, "lab:breakout_top10"), StrategyState::Paused, "created idle, not in paper");
+    assert!(journal_has(&e, "added, idle: it holds nothing and trades only inside an autopilot"));
+
+    for _ in 0..3 {
+        e.run_lab_books();
+    }
+    assert_eq!(held_by(&e, "lab:breakout_top10"), 0, "an idle book buys nothing");
+    assert!(e.orders.iter().all(|o| o.strategy_id != "lab:breakout_top10"), "not even an order");
+
+    // It cannot be switched on to trade by itself.
+    let err = e.set_strategy_state("lab:breakout_top10", StrategyState::Paper).unwrap_err();
+    assert!(err.contains("trades only inside an autopilot here, never on its own"), "{err}");
+    assert_eq!(state_of(&e, "lab:breakout_top10"), StrategyState::Paused);
+
+    // A new day: the signal and its evidence are replaced, and it still holds nothing.
+    let mut ev = breakout_evidence();
+    ev.oos_sharpe = Some(1.25);
+    e.apply_lab_signal(book("breakout_top10", now + 86_400_000, &[("SOL", 0.1)], ev, false));
+    let sig = &e.lab_signals["lab:breakout_top10"];
+    assert_eq!(sig.generated_ms, now + 86_400_000);
+    assert_eq!(sig.weights.keys().collect::<Vec<_>>(), vec!["SOL"]);
+    assert_eq!(sig.evidence.oos_sharpe, Some(1.25));
+    let gates = e.passport("lab:breakout_top10").unwrap().gates;
+    assert_eq!(gates[5].status, validation::GateStatus::Fail, "gate 6 follows the new evidence: still fails deflation");
+    e.run_lab_books();
+    assert_eq!(held_by(&e, "lab:breakout_top10"), 0);
+    assert_eq!(e.strategies.iter().filter(|s| s.id == "lab:breakout_top10").count(), 1, "one book, updated in place");
+}
+
+#[test]
+fn an_autopilot_claims_an_idle_lab_book_rebalances_with_its_capital_and_stopping_makes_it_idle_again() {
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.5), ("ETH", 0.25)], regime_evidence(), false));
+    let id = start(&mut e, config("lab", 10_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()));
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paper, "claimed: it trades for the autopilot");
+    e.run_lab_books();
+    let (btc, eth) = (notional(&e, BTC), notional(&e, ETH));
+    assert!((btc - 5_000.0).abs() < 60.0, "half of the autopilot's 10,000, not of the 100,000 account: {btc}");
+    assert!((eth - 2_500.0).abs() < 30.0, "{eth}");
+    let s = status(&e, &id);
+    assert_eq!(s.open_positions, 2, "both positions are the autopilot's");
+    assert!(s.fees > 0.0, "and so are their fees");
+
+    // Stop with the default flatten: everything is closed and the book is idle again.
+    e.autopilot_stop(&id, None).unwrap();
+    assert_eq!(held_by(&e, "lab:tsmom_regime"), 0);
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused);
+    assert!(journal_has(&e, "Idle again, waiting for the next autopilot"));
+    e.apply_lab_signal(book("tsmom_regime", now + 1, &[("BTC", 0.3)], regime_evidence(), false));
+    e.run_lab_books();
+    assert_eq!(held_by(&e, "lab:tsmom_regime"), 0, "idle again: a new signal moves nothing");
+
+    // Flat, so the next autopilot can claim it, on its own capital.
+    let id2 = start(&mut e, config("lab2", 2_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()));
+    e.run_lab_books();
+    assert!((notional(&e, BTC) - 600.0).abs() < 10.0, "30 % of 2,000: {}", notional(&e, BTC));
+
+    // Stopped without flattening, its coins stay open and unmanaged, and the
+    // flatten rule's consequence is said: it cannot join the next one.
+    e.autopilot_stop(&id2, Some(false)).unwrap();
+    assert_eq!(held_by(&e, "lab:tsmom_regime"), 1);
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused);
+    assert!(journal_has(&e, "1 of them belong to a lab book, which carries no stops"));
+    let err = e
+        .autopilot_start(config("lab3", 2_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()), false, VenueCash::NotRead)
+        .unwrap_err();
+    assert!(err.contains("still holds coins, left open when an autopilot stopped without closing them"), "{err}");
+    e.flatten(BTC);
+    start(&mut e, config("lab3", 2_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()));
+}
+
+#[test]
+fn an_autopilot_only_signal_keeps_its_book_idle_on_a_default_engine() {
+    // No PYTHIA_LAB_BOOKS here: an ordinary lab book still runs standalone
+    // exactly as before, but a signal marked autopilot-only stays idle.
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.05)], regime_evidence(), false));
+    e.apply_lab_signal(book("breakout_top10", now, &[("ETH", 0.05)], breakout_evidence(), true));
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paper);
+    assert_eq!(state_of(&e, "lab:breakout_top10"), StrategyState::Paused);
+    e.run_lab_books();
+    assert_eq!(held_by(&e, "lab:tsmom_regime"), 1, "the standalone book trades as before");
+    assert_eq!(held_by(&e, "lab:breakout_top10"), 0, "the autopilot-only book does not");
+    assert!(e.set_strategy_state("lab:breakout_top10", StrategyState::Paper).is_err());
+
+    // A book saved in paper and restored before its signal arrived (or
+    // resumed by PYTHIA_LAB_ONLY) goes idle again with its next signal.
+    let mut r = Engine::new();
+    r.apply_persisted(e.to_persisted());
+    mark_real(&mut r);
+    r.set_strategy_state("lab:breakout_top10", StrategyState::Paper).unwrap();
+    r.apply_lab_signal(book("breakout_top10", now + 1, &[("ETH", 0.05)], breakout_evidence(), true));
+    assert_eq!(state_of(&r, "lab:breakout_top10"), StrategyState::Paused);
+    assert!(journal_has(&r, "Lab book is idle: it trades only inside an autopilot"));
+    r.run_lab_books();
+    assert_eq!(held_by(&r, "lab:breakout_top10"), 0);
+}
+
+#[test]
+fn turning_idle_on_pauses_running_lab_books_and_names_coins_they_still_hold() {
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.05)], regime_evidence(), false));
+    e.run_lab_books();
+    assert_eq!(held_by(&e, "lab:tsmom_regime"), 1);
+    e.set_lab_books_idle(true);
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused);
+    assert!(journal_has(&e, "it still holds BTC/USD from before, left open and unmanaged"));
+    assert_eq!(held_by(&e, "lab:tsmom_regime"), 1, "nothing is sold behind the owner's back");
+}
+
+#[test]
+fn auto_picks_the_lab_book_with_the_best_evidence_and_never_calls_it_proven() {
+    let mut e = idle_engine();
+    let now = e.now();
+    let w = &[("BTC", 0.3), ("ETH", 0.2)];
+    e.apply_lab_signal(book("tsmom_top20", now, w, top20_evidence(), true));
+    e.apply_lab_signal(book("breakout_top10", now, w, breakout_evidence(), true));
+    e.apply_lab_signal(book("tsmom_regime", now, w, regime_evidence(), false));
+    let id = start(&mut e, config("auto", 10_000.0, &[], StopRules::default()));
+    let s = status(&e, &id);
+    assert_eq!(s.by_sleeve.len(), 1, "a lab book claims every crypto market, so it runs alone: {:?}", s.by_sleeve);
+    let sl = &s.by_sleeve[0];
+    assert_eq!(sl.strategy_id, "lab:tsmom_regime", "5 gates green and deflated p 0.86 beat the families' candidates");
+    assert_eq!(sl.weight, 1.0);
+    assert_eq!(sl.markets.len(), e.markets.iter().filter(|m| m.venue == Venue::Crypto).count());
+    assert!(sl.why.starts_with("Auto pick, the best evidence of the "), "{}", sl.why);
+    assert!(
+        sl.why.contains("lab out-of-sample Sharpe 1.05, deflated p 0.86 over 50 variants, Sharpe 0.93 with costs doubled"),
+        "{}",
+        sl.why
+    );
+    assert!(
+        sl.why.contains(
+            "it fails the deflation test (deflated p 0.86, 0.95 needed), so it is picked as the best available evidence, not as a proven edge"
+        ),
+        "{}",
+        sl.why
+    );
+    let msg = s.last_action.unwrap();
+    assert!(msg.contains("Auto passed over") && msg.contains("Lab · breakout_top10") && msg.contains("EMA Cross"), "{msg}");
+    e.run_lab_books();
+    assert!(notional(&e, BTC) > 2_900.0, "it rebalances with the autopilot's 10,000");
+    e.autopilot_stop(&id, None).unwrap();
+
+    // Without the regime book, breakout's robustness beats top 20's weaker numbers.
+    let mut e = idle_engine();
+    e.apply_lab_signal(book("tsmom_top20", now, w, top20_evidence(), true));
+    e.apply_lab_signal(book("breakout_top10", now, w, breakout_evidence(), true));
+    let id = start(&mut e, config("auto2", 10_000.0, &[], StopRules::default()));
+    let sl = status(&e, &id).by_sleeve.remove(0);
+    assert_eq!(sl.strategy_id, "lab:breakout_top10");
+    assert!(sl.why.contains("deflated p 0.01 over 100 variants, Sharpe 1.08 with costs doubled"), "{}", sl.why);
+    assert!(sl.why.contains("it fails the deflation test (deflated p 0.01, 0.95 needed)"), "{}", sl.why);
+
+    // A built-in with a green passport out-scores them all: it gets its
+    // markets and the lab books, which would need all of crypto, are passed over.
+    let mut e = idle_engine();
+    e.apply_lab_signal(book("tsmom_regime", now, w, regime_evidence(), false));
+    make_live_ready(&mut e, "multi-tf-1");
+    let id = start(&mut e, config("auto3", 10_000.0, &[], StopRules::default()));
+    let s = status(&e, &id);
+    assert_eq!(s.by_sleeve[0].strategy_id, "multi-tf-1");
+    assert!(!s.by_sleeve[0].why.contains("best available evidence"), "a green passport needs no caveat: {}", s.by_sleeve[0].why);
+    assert!(s.by_sleeve.iter().all(|x| !x.strategy_id.starts_with("lab:")));
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused, "passed over: still idle");
+    assert!(s.last_action.unwrap().contains("Lab · tsmom_regime"));
+}
+
+#[test]
+fn auto_skips_a_lab_book_whose_signal_has_expired() {
+    let mut e = idle_engine();
+    let old = e.now() - 48 * 3_600_000;
+    e.apply_lab_signal(book("tsmom_regime", old, &[("BTC", 0.3)], regime_evidence(), false));
+    let id = start(&mut e, config("auto", 1_000.0, &[], StopRules::default()));
+    assert!(status(&e, &id).by_sleeve.iter().all(|x| x.strategy_id != "lab:tsmom_regime"), "a stale book would only hold cash");
+}
+
+#[test]
+fn the_score_ranks_evidence_and_the_caveat_never_oversells() {
+    let ev = |l: crate::lab::LabEvidence, passed: usize, failed: usize| Evidence {
+        passed,
+        failed,
+        lab: true,
+        lab_oos_sharpe: l.oos_sharpe,
+        lab_deflated_p: l.deflated_p,
+        lab_variants: l.variants_tried,
+        lab_sharpe_2x_cost: l.sharpe_2x_cost,
+        ..Default::default()
+    };
+    // Gates as lab::verdict judges them: regime 5 green / 1 red, breakout 4 / 2, top 20 3 / 3.
+    let regime = ev(regime_evidence(), 5, 1);
+    let breakout = ev(breakout_evidence(), 4, 2);
+    let top20 = ev(top20_evidence(), 3, 3);
+    let builtin = Evidence::default();
+    let (r, b, t, n) = (regime.score().unwrap(), breakout.score().unwrap(), top20.score().unwrap(), builtin.score().unwrap());
+    assert!((r - (1.0 + 5.0 + 1.05 + 0.465 + 0.86) / 2.0).abs() < 1e-9, "{r}");
+    assert!((b - (1.0 + 4.0 + 1.20 + 0.54 + 0.01) / 3.0).abs() < 1e-9, "{b}");
+    assert!(r > b && b > t && t > n, "regime {r:.3} > breakout {b:.3} > top 20 {t:.3} > an unchecked built-in {n:.3}");
+
+    // A negative Sharpe adds nothing, it does not subtract below the gates.
+    let mut losing = breakout_evidence();
+    losing.oos_sharpe = Some(-0.5);
+    losing.sharpe_2x_cost = Some(-0.9);
+    assert!((ev(losing, 4, 2).score().unwrap() - (1.0 + 4.0 + 0.01) / 3.0).abs() < 1e-9);
+
+    // Deflation passed and every gate green: no caveat. Failed: always one.
+    let proven = Evidence { live_ready: true, lab: true, lab_deflated_p: Some(0.97), ..Default::default() };
+    assert!(proven.caveat().is_none());
+    let almost = Evidence { lab: true, lab_deflated_p: Some(0.97), ..Default::default() };
+    assert_eq!(almost.caveat().unwrap(), "its edge is not proven: not every gate is green, so it is picked as the best available evidence");
+    assert!(Evidence { lab: true, ..Default::default() }.caveat().unwrap().contains("gives no deflated Sharpe"));
+    assert!(breakout.caveat().unwrap().starts_with("it fails the deflation test (deflated p 0.01, 0.95 needed)"));
+    assert!(regime.auto_why(0, 1).starts_with("Auto pick, the only strategy it could run here (5 of 8 gates green, 1 failed"));
+    assert!(breakout.auto_why(1, 4).starts_with("Auto pick, number 2 of 4 by evidence ("));
 }
 
 #[test]

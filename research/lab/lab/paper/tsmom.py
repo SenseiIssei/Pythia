@@ -176,8 +176,6 @@ def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_
     """
     if not cfg.get("engine"):
         return
-    d = ROOT / "signals" / name
-    d.mkdir(parents=True, exist_ok=True)
     sig = {
         "strategy": name,
         "variant": cfg["variant"],
@@ -189,6 +187,13 @@ def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_
         "regime_on": risk_on if cfg["regime"] else None,
         "evidence": evidence(cfg),
     }
+    save_signal(name, sig, now_us)
+
+
+def save_signal(name: str, sig: dict, now_us: int, root=None) -> None:
+    """<root>/signals/<name>/latest.json, replaced atomically, plus a dated copy."""
+    d = (ROOT if root is None else root) / "signals" / name
+    d.mkdir(parents=True, exist_ok=True)
     tmp = d / "latest.json.tmp"
     tmp.write_text(json.dumps(sig, indent=2))
     tmp.replace(d / "latest.json")

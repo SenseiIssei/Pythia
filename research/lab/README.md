@@ -125,12 +125,21 @@ Binance prices and touch-plus-fee fills. Journals:
 `/srv/pythia-data/paper/<book>/journal.csv`. 30 days and 30 rebalances are
 the minimum before anything moves toward real money.
 
-Lab-only paper books (no signal file for the engine). The sweep candidates and
-M4 failed deflation and run as forward evidence only, which their variant
-string says:
+Lab-only paper books. The sweep candidates and M4 failed deflation and run as
+forward evidence only, which their variant string says. The two sweep
+candidates also write an engine signal marked `autopilot_only`: no engine runs
+them on its own, but an autopilot can claim one (see "Lab books inside
+autopilots" in `crates/pythia-core/src/engine/autopilot.rs`). The signal holds
+what the sweep's simulator holds after the decision close, restricted to the
+20 coins the engine has markets for; the others are listed in `dropped` and
+stay cash there. Its evidence is the pick's row in the sweep (the
+`families_summary` JSON next to the sweep caches, else
+`results/families_summary.md`), deflation failure included.
+`--signals-only` refreshes the signals without stepping the books, `--dry-run`
+prints both and writes nothing.
 
 | Book | Module | What | Runs (UTC) |
 |---|---|---|---|
-| `tsmom_top20`, `breakout_top10` | `lab.paper.families` | sweep candidates on the most liquid coins of each day | 04:15 |
+| `tsmom_top20`, `breakout_top10` | `lab.paper.families` | sweep candidates on the most liquid coins of each day; autopilot-only engine signals | 04:15 |
 | `m4_ls` | `lab.paper.m4_ls` | M4 rank3, long the best 10 and short the worst 10 of the 100 most liquid USDT perps, three overlapping 3-day tranches; the selection window's pick among the slower long/short books. Live Binance USD-M touch plus 5 bps taker, settled funding booked every run, model retrained weekly on all labelled history. `--dry-run` writes nothing but the cache. | 04:45 |
 | `picks_ls`, `picks_ls_v2` | `lab.paper.picks_ls` | market-neutral M2 (v1 and v2) | 05:30 |

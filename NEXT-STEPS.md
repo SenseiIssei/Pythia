@@ -356,6 +356,25 @@ status.
       and keep going), trailing floor, end time; peak and floor survive restarts
 - [x] Live: armed venue, green passports, max-loss rule, typed confirmation,
       amount within the venue's free cash (`wallets::available_cash`)
+- [x] **Lab books inside autopilots** (2026-10-08). `PYTHIA_LAB_BOOKS=idle`
+      (server; default off, so nothing changes elsewhere) keeps every lab book
+      idle: created paused, holding nothing, its signal and evidence updated
+      on every read, trading only once an autopilot claims it, with the
+      autopilot's capital; stopping the autopilot pauses it again and
+      `flattenOnStop` decides about the coins. A signal marked `autopilot_only`
+      does the same on any engine: `tsmom_top20` and `breakout_top10`
+      (`lab.paper.families`) now write such signals, so the lab engine
+      (`PYTHIA_LAB_ONLY`) keeps running only `tsmom_regime` standalone
+- [x] The auto pick scores built-ins and lab books on one scale (gates, live
+      clearance, measured edge, forward record, lab OOS Sharpe, Sharpe with
+      costs doubled, deflated p; divided by 1 + gates failed), explains each
+      pick in one sentence and says "fails the deflation test ... best
+      available evidence, not a proven edge" where that is so. Markets go to
+      the better evidence: the best lab book takes the crypto markets alone,
+      built-ins only get them when they out-score it
+- [ ] Wire the second (autopilot) engine on the VPS to the signal directory
+      with `PYTHIA_LAB_BOOKS=idle`, and copy `research/lab/results/` with the
+      lab code so the family signals carry their evidence there
 - [ ] **Demo routing.** Demo is routed like paper until `RouteIntent::Demo`
       exists. Wire it in `AutopilotMode::route_intent`, the only place that
       decides an autopilot order's route, and read demo-account cash for the
