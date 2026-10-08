@@ -56,10 +56,13 @@
 //!
 //! # Modes and the money
 //!
-//! `paper` trades virtual money at prices from live books. `demo` is meant
-//! for a venue's demo or testnet account; until the connectors can route
-//! there it is routed exactly like paper, through the one hook in
-//! [`AutopilotMode::route_intent`]. `live` sends real orders and is gated
+//! `paper` trades virtual money at prices from live books. `demo` sends its
+//! orders to a venue's demo account through the real connector (the one hook
+//! is [`AutopilotMode::route_intent`]). A crypto demo autopilot trades on the
+//! exchange whose demo keys are saved, and that exchange is its venue. It is
+//! refused on a demo whose prices are not documented as the real market
+//! (OKX, see `docs/DEMO.md`): its fills would be measured in another price
+//! world than the one its stop rules watch. `live` sends real orders and is gated
 //! harder than anything else: live routing must be armed for the venue, every
 //! sleeve strategy needs a green Strategy Passport, X may not exceed the cash
 //! the venue reports as free (minus what other live autopilots there already
@@ -596,7 +599,7 @@ fn engine_venue(cv: CostVenue) -> Venue {
     }
 }
 
-fn venue_label(cv: CostVenue) -> &'static str {
+pub(super) fn venue_label(cv: CostVenue) -> &'static str {
     match cv {
         CostVenue::Kraken => "Kraken",
         CostVenue::Binance => "Binance",
@@ -861,11 +864,40 @@ impl Engine {
             // A stopped one under the same id is replaced once this one starts.
         }
 
-        let Some(cv) = CostVenue::parse(&cfg.venue) else {
+        let Some(mut cv) = CostVenue::parse(&cfg.venue) else {
             return Err(format!("Unknown venue \"{}\". Use one from config/costs.json, for example kraken or alpaca.", cfg.venue));
         };
         let venue = engine_venue(cv);
-        if venue == Venue::Crypto && cv != self.crypto_venue {
+        if cfg.mode == AutopilotMode::Demo && venue == Venue::Crypto {
+            // Crypto demo orders go to the exchange whose demo keys are in
+            // Settings, whatever the live exchange is. That exchange is the
+            // autopilot's venue, so every label names where it trades.
+            if !self.demo_venues.contains(&venue) {
+                return Err(format!(
+                    "A demo autopilot needs demo keys for {}: add Bybit, OKX or Binance demo keys in Settings first (docs/DEMO.md says how to get them).",
+                    venue_label(cv)
+                ));
+            }
+            let demo_cv = self.crypto_demo_venue.unwrap_or(self.crypto_venue);
+            if cv != demo_cv && cv != self.crypto_venue {
+                return Err(format!(
+                    "Crypto demo orders go to {}, the exchange whose demo keys are in Settings. A demo autopilot on {} would trade there anyway: pick {} or save demo keys for {} first.",
+                    venue_label(demo_cv),
+                    venue_label(cv),
+                    demo_cv.id(),
+                    venue_label(cv)
+                ));
+            }
+            if !self.crypto_demo_real_prices {
+                return Err(format!(
+                    "{} runs its demo account on its own prices, which it does not document as the real market. A demo autopilot there would have its fills measured in a different price world than the one its stop rules watch, so its results would mean nothing. Use Bybit or Binance demo keys (their demos trade on real prices), or run it on paper. A single strategy can still demo-trade on {} as an API test.",
+                    venue_label(demo_cv),
+                    venue_label(demo_cv)
+                ));
+            }
+            cv = demo_cv;
+            cfg.venue = demo_cv.id().to_string();
+        } else if venue == Venue::Crypto && cv != self.crypto_venue {
             return Err(format!(
                 "Crypto here executes on {}, the exchange selected in Settings. An autopilot on {} would be priced and routed there anyway: pick {} or switch the exchange first.",
                 venue_label(self.crypto_venue),

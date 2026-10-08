@@ -25,6 +25,7 @@ import {
   type MarketDiag,
 } from "../live";
 import type { Venue } from "../types";
+import { cryptoDemoName, demoApiTestNote, demoIsApiTestOnly } from "../venueNames";
 
 const ARM_PHRASE = "ARM LIVE";
 
@@ -550,15 +551,18 @@ function DemoCard() {
       <div className="space-y-2">
         {ROUTABLE.map(({ venue, label }) => {
           const on = ready.includes(venue);
-          const where = venue === "crypto" ? (live.demoExchange ? `${live.demoExchange} demo` : "no demo exchange") : "Alpaca paper account";
+          const demoName = cryptoDemoName(live);
+          const where = venue === "crypto" ? (demoName ? `${demoName} demo` : "no demo exchange") : "Alpaca paper account";
+          const apiOnly = venue === "crypto" && demoIsApiTestOnly(live);
           return (
             <div key={venue} className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm">
                   {label} <span className="text-xs text-cyber-text-faint">· {where}</span>
                 </span>
-                <Badge tone={on ? "purple" : "neutral"}>{on ? "demo ready" : "no demo keys"}</Badge>
+                <Badge tone={on ? "purple" : "neutral"}>{on ? (apiOnly ? "API test only" : "demo ready") : "no demo keys"}</Badge>
               </div>
+              {apiOnly && <div className="mt-1.5 text-xs text-warning">{demoApiTestNote(live)}</div>}
               {on && (
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Button
