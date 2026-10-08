@@ -70,6 +70,14 @@ pub struct LabEvidence {
     pub regime_sharpes: BTreeMap<String, f64>,
     #[serde(default)]
     pub regime_filter: bool,
+    /// The same rule's out-of-sample Sharpe on a survivorship-free universe,
+    /// when the lab has measured it. Lower than `oos_sharpe` means the
+    /// headline result leaned on coins that happened to survive.
+    #[serde(default)]
+    pub oos_sharpe_survivorship_free: Option<f64>,
+    /// A known weakness of this evidence, in one plain sentence.
+    #[serde(default)]
+    pub caveat: Option<String>,
 }
 
 /// Where the lab's signals live: `PYTHIA_SIGNALS`, else `signals/` next to the
