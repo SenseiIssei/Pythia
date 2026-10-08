@@ -1004,3 +1004,25 @@ fn a_demo_stop_says_its_closes_are_at_the_venue_not_that_live_routing_is_off() {
     assert_eq!((s.open_positions, s.trades), (0, 1));
     assert!((s.fees - 0.2).abs() < 1e-9, "both demo fees are the autopilot's: {}", s.fees);
 }
+
+#[test]
+fn a_demo_entry_that_fills_after_the_stop_is_booked_and_closed_again() {
+    let (mut e, id) = demo_engine("late", 1_000.0);
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, BTC);
+    e.place_from_intent(i, &m, &buy_intent(BTC));
+    let o = e.drain_live_orders().remove(0);
+    e.apply_live_ack(&o.order_id, "venue-1");
+    e.autopilot_stop(&id, None).unwrap();
+    assert_eq!(status(&e, &id).open_positions, 0, "nothing filled yet");
+
+    e.apply_live_update(
+        &o.order_id,
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, raw_status: "filled".into() },
+    );
+    assert_eq!(status(&e, &id).open_positions, 1, "the late fill is the stopped autopilot's");
+    step(&mut e);
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 1, "and its close goes back to the demo venue");
+    assert!(out[0].demo && out[0].side == Side::Sell);
+}
