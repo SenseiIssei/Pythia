@@ -146,3 +146,37 @@ prints both and writes nothing.
 | `tsmom_top20`, `breakout_top10` | `lab.paper.families` | sweep candidates on the most liquid coins of each day; autopilot-only engine signals | 04:15 |
 | `m4_ls` | `lab.paper.m4_ls` | M4 rank3, long the best 10 and short the worst 10 of the 100 most liquid USDT perps, three overlapping 3-day tranches; the selection window's pick among the slower long/short books. Live Binance USD-M touch plus 5 bps taker, settled funding booked every run, model retrained weekly on all labelled history. `--dry-run` writes nothing but the cache. | 04:45 |
 | `picks_ls`, `picks_ls_v2` | `lab.paper.picks_ls` | market-neutral M2 (v1 and v2) | 05:30 |
+
+### Forward report
+
+`lab.paper.forward_report` (06:15 UTC, see `research/ops/README.md`) asks of
+every paper book and every autopilot of the autopilot engine whether the
+forward result is what the backtest led us to expect, in one plain sentence
+each: "on track", "below the backtest's range after N days, worth watching",
+"too early to say" (under 7 days), and so on. Report:
+`reports/forward/latest.{md,json}`; the Lab page shows it as "Forward test".
+
+- **Band.** A moving-block bootstrap (5-day blocks, 4000 draws) of the
+  backtest's out-of-sample daily net returns, compounded over the same
+  number of days the book has run: 5 % to 95 %, median in the middle, plus
+  the 95 % quantile of the worst dip inside such a stretch. The series are
+  `reports/forward/backtest/<book>.json`, written by `--export-backtests`
+  (momentum books from the history files, sweep candidates from the sweep's
+  run caches at 15 bps, M4 from the xs_daily holdout at 15 bps with funding).
+  Without one the band is log-normal from the report's growth and
+  volatility, marked "approximate" (the M2 books, which have only weekly
+  report rows).
+- **Costs.** Summed `paper_cost_bps` against `model_cost_bps`; the M2 books
+  journal the modelled 10 bps as their fill cost, so they say so instead of
+  a ratio. Funding where a book has it.
+- **Gate 7.** Journal days and rebalances (rows with turnover over 1 %), 30
+  each; for autopilots days running and closed trades.
+- **Autopilots.** From `PYTHIA_AUTOPILOT_STATE_URL` (default
+  `http://127.0.0.1:8788/api/state`, `off` to skip): equity against start and
+  floor, return against BTC bought and held over the same window (Binance
+  1-minute opens), fees as a share of the gain before fees, trades per day
+  (from one day on), and realised against modelled slippage per route from
+  the orders the engine still keeps. An autopilot that runs a single lab book
+  is held against that book's band.
+
+Tests: `python -m pytest tests` from `research/lab`.
