@@ -1216,7 +1216,9 @@ impl Engine {
                 let name = self.autopilots[i].config.name.clone();
                 let open: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
                 for m in open {
-                    self.close_position(&m, &format!("autopilot \"{name}\" stopped"));
+                    if !self.ap_close_waits_for_price(&m) {
+                        self.close_position(&m, &format!("autopilot \"{name}\" stopped"));
+                    }
                 }
             }
             if self.autopilots[i].is_active() || !self.autopilots[i].owned.is_empty() {
@@ -1253,6 +1255,21 @@ impl Engine {
                 self.autopilots[i].label()
             );
             self.log(JournalKind::Risk, msg, None, Some(m));
+        }
+    }
+
+    /// A paper position is closed by Pythia itself at the mark, so its close
+    /// waits for a fresh price like every other exit does (journaled once).
+    /// Demo and live closes are filled by the venue at its own price.
+    /// Measured on the engine's own clock, like the stop checks.
+    fn ap_close_waits_for_price(&mut self, market: &str) -> bool {
+        let paper = self.positions.get(market).is_some_and(|p| !p.live && !p.demo);
+        match self.exit_price_stale(market, self.now()).filter(|_| paper) {
+            Some(age) => {
+                self.note_exit_held(market, age, "Autopilot close");
+                true
+            }
+            None => false,
         }
     }
 
@@ -1406,15 +1423,42 @@ impl Engine {
         let mut tail = String::new();
         if flatten {
             for m in &open {
-                self.close_position(m, &format!("autopilot \"{name}\" {word}"));
+                if !self.ap_close_waits_for_price(m) {
+                    self.close_position(m, &format!("autopilot \"{name}\" {word}"));
+                }
             }
-            let left = self.autopilots[i].owned.len();
-            if left > 0 {
-                tail.push_str(&format!(
-                    " {left} real position(s) could not be closed yet because live routing is not available; they stay with the autopilot and are closed as soon as it is."
-                ));
-            } else if !open.is_empty() {
-                tail.push_str(&format!(" Closed its {} position(s).", open.len()));
+            let left: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
+            if left.is_empty() {
+                if !open.is_empty() {
+                    tail.push_str(&format!(" Closed its {} position(s).", open.len()));
+                }
+            } else {
+                // Say why each one is still open: they have different cures.
+                let (mut at_venue, mut stale, mut stuck) = (0, 0, 0);
+                for m in &left {
+                    if self.in_flight_markets.contains(m) {
+                        at_venue += 1;
+                    } else if self.ap_close_waits_for_price(m) {
+                        stale += 1;
+                    } else {
+                        stuck += 1;
+                    }
+                }
+                if at_venue > 0 {
+                    tail.push_str(&format!(
+                        " {at_venue} close order(s) are at the venue; their fills are booked to the autopilot when the venue reports them."
+                    ));
+                }
+                if stale > 0 {
+                    tail.push_str(&format!(
+                        " {stale} paper position(s) wait for a fresh price before they are closed: a stale price is not where the market is."
+                    ));
+                }
+                if stuck > 0 {
+                    tail.push_str(&format!(
+                        " {stuck} real position(s) could not be closed yet because live routing is not available; they stay with the autopilot and are closed as soon as it is."
+                    ));
+                }
             }
         } else if !open.is_empty() {
             let u = self.ap_unrealized(&self.autopilots[i], None);

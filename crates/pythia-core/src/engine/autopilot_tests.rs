@@ -940,3 +940,67 @@ fn an_entry_that_uses_the_last_room_leaves_exposure_within_equity_after_its_cost
     let equity = status(&e, &id).equity;
     assert!(gross <= equity + 1e-9, "exposure {gross} within the equity left after costs {equity}");
 }
+
+/// Age a market's price past the staleness limit, as a dead or refused feed does.
+fn make_stale(e: &mut Engine, market: &str) {
+    let old = e.now() - (e.limits.max_data_staleness_sec as i64 + 60) * 1000;
+    e.markets.iter_mut().find(|m| m.id == market).unwrap().updated_at = old;
+}
+
+#[test]
+fn a_stop_does_not_close_a_paper_position_at_a_stale_price() {
+    // Every other exit waits for a fresh price; the autopilot's flatten booked
+    // its paper close at whatever the last price was, minutes old.
+    let mut e = engine();
+    let id = start(&mut e, config("stale", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default()));
+    enter(&mut e, "ema-cross-1", BTC, 500.0);
+    make_stale(&mut e, BTC);
+    e.autopilot_stop(&id, None).unwrap();
+    assert!(e.positions.contains_key(BTC), "not closed at a stale price");
+    let s = status(&e, &id);
+    assert_eq!(s.open_positions, 1, "still the autopilot's, to be closed");
+    let last = s.last_action.unwrap();
+    assert!(last.contains("fresh price"), "says why it waits: {last}");
+    assert!(!last.contains("live routing"), "and does not blame live routing: {last}");
+
+    step(&mut e);
+    assert!(e.positions.contains_key(BTC), "still waiting while the price is stale");
+    let p = e.price_of(BTC);
+    set_price(&mut e, BTC, p);
+    step(&mut e);
+    assert!(!e.positions.contains_key(BTC), "closed with the first fresh price");
+    assert_eq!(status(&e, &id).open_positions, 0);
+}
+
+#[test]
+fn a_demo_stop_says_its_closes_are_at_the_venue_not_that_live_routing_is_off() {
+    let (mut e, id) = demo_engine("dstop", 1_000.0);
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, BTC);
+    e.place_from_intent(i, &m, &buy_intent(BTC));
+    let o = e.drain_live_orders().remove(0);
+    e.apply_live_ack(&o.order_id, "venue-1");
+    e.apply_live_update(
+        &o.order_id,
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, raw_status: "filled".into() },
+    );
+    assert_eq!(status(&e, &id).open_positions, 1);
+
+    e.autopilot_stop(&id, None).unwrap();
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 1, "the close went to the demo venue");
+    assert!(out[0].demo && out[0].side == Side::Sell);
+    let last = status(&e, &id).last_action.unwrap();
+    assert!(!last.contains("live routing"), "a demo close in flight is not a live routing problem: {last}");
+    assert!(last.contains("at the venue"), "{last}");
+
+    // The close fills: booked to the stopped autopilot, nothing left.
+    e.apply_live_ack(&out[0].order_id, "venue-2");
+    e.apply_live_update(
+        &out[0].order_id,
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: out[0].qty, avg_price: Some(o.ref_price * 1.01), fee: 0.1, raw_status: "filled".into() },
+    );
+    let s = status(&e, &id);
+    assert_eq!((s.open_positions, s.trades), (0, 1));
+    assert!((s.fees - 0.2).abs() < 1e-9, "both demo fees are the autopilot's: {}", s.fees);
+}
