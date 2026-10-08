@@ -923,3 +923,20 @@ fn orders_still_at_the_venue_count_against_the_sleeves_room() {
     let after = e.autopilot_sizing("ema-cross-1").unwrap().room;
     assert!((after - room).abs() < 1e-6, "no room appears out of a partial fill: {room} then {after}");
 }
+
+#[test]
+fn an_entry_that_uses_the_last_room_leaves_exposure_within_equity_after_its_costs() {
+    // The room is equity minus what is held, at the mark. The fill then pays
+    // the walk past the mark and the fee out of that same equity, so an entry
+    // sized to the whole room ended with more exposure than equity.
+    let mut e = engine();
+    let id = start(&mut e, config("cost", 100.0, &[("ema-cross-1", 1.0)], StopRules::default()));
+    enter(&mut e, "ema-cross-1", BTC, 95.0);
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, ETH);
+    e.place_from_intent(i, &m, &buy_intent(ETH));
+    assert!(e.positions.contains_key(ETH), "the last room was used");
+    let gross: f64 = [BTC, ETH].iter().map(|m| notional(&e, m)).sum();
+    let equity = status(&e, &id).equity;
+    assert!(gross <= equity + 1e-9, "exposure {gross} within the equity left after costs {equity}");
+}

@@ -2647,6 +2647,15 @@ impl Engine {
         // autopilot's equity.
         if let Some(s) = &sleeve {
             qty_wanted = qty_wanted.min(s.room / price);
+            // The fill walks past the mark and pays a fee, both out of the
+            // same equity the room was measured against: leave space for them.
+            if qty_wanted > 0.0 {
+                let pf = paper_fill_detail(&self.exec_cost(m, intent.side), m.kind, intent.side, qty_wanted, price);
+                let per_unit = (pf.price - price).abs() + pf.fee / qty_wanted;
+                if per_unit.is_finite() {
+                    qty_wanted = qty_wanted.min(s.room / (price + per_unit));
+                }
+            }
             if qty_wanted * price < autopilot::MIN_ENTRY_USD {
                 return;
             }
