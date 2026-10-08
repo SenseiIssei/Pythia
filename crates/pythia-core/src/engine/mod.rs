@@ -755,6 +755,10 @@ pub struct InFlight {
     #[serde(default)]
     client_order_id: String,
     submitted_at: i64,
+    /// The quantity sent. What is not filled yet still counts against an
+    /// autopilot's room (see `autopilot::ap_pending`). Zero in older saves.
+    #[serde(default)]
+    qty: f64,
     /// How much of the venue's cumulative fill we have already booked. The
     /// difference against a fresh report is exactly what still needs settling,
     /// which is what makes partial fills safe to apply repeatedly.
@@ -3163,6 +3167,7 @@ impl Engine {
                 broker_id: None,
                 client_order_id: client_order_id.clone(),
                 submitted_at: self.now(),
+                qty,
                 booked_qty: 0.0,
                 booked_fee: 0.0,
                 // The live arm's endpoint choice; a demo order has its own
