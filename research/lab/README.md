@@ -57,6 +57,7 @@ panel for its breadth features, so run `xs_daily` first.
 | `xs_daily` round 3 (M4, funding-aware) | Does a label net of the funding each side pays fix the short leg? | Partly. 18 books on 3, 5 and 7-day net labels, all positive in the holdout (median 2.10 / 1.69), funding paid lower than the gross-label twin in 18 of 18, holdout Sharpe higher in 16 of 18. The family's selection-window pick (reg7n, buffer 50 %, 100 perps) makes 2.15 / 2.00 at 18x turnover against 1.87 / 1.80 for low vol in the same book, but deflated p 0.39 over 100 variants, and its 2022-23 Sharpe (1.13) loses to the gross rank3 hold-3d book (1.54). Fails gate 6. See `results/m4_funding.md`. (2026-10-07) |
 | `regime` (M5) | Probability of a 15 % BTC drawdown within 30 days, as the momentum book's switch | No. Every model has AUC under 0.5 out of sample (about 57 independent windows); Brier 0.162 at best vs 0.157 for the 200-day rule. As a switch it never beats the rule: momentum book 0.71 vs 1.04. The rule works by sitting out bear markets, not by forecasting drawdowns. (2026-10-07) |
 | `vol_daily` (M6) | Better daily vol forecast for sizing | Forecast partly: next day LGBM beats HAR by 9 % QLIKE (DM p 0.04), next week it loses by 6 %. Sizing: worse. The 30-day mean the books use gives the best Sharpe (momentum 1.04 vs 0.71 with LGBM, BTC 0.82 vs 0.64); faster forecasts add turnover and cut exposure right before rebounds. Keep RW30. (2026-10-07) |
+| `breakout_study` | Is the Donchian 20/10 top-10 edge robust? Pre-registered, 54 more variants counted | A real family, an unproven number. All 48 grid cells (entry 10 to 55, exit N/2 and N/3, top 5 to 30) positive at 41 bps, the base's neighbours a plateau by the registered rule, but the in-sample surface is flat and the grid's median is 0.48; robust to fills up to a day late (0.82) and 80 bps (0.90). Carried by 2024 (0.46 without it) and ten trades (96 % of P&L), XRP 37 %. Deflated p 0.01 over 100 and over all 154 trials (fat tails are not the cause, the 2.5 bar is); bootstrap 90 % interval at 41 bps -0.14 to 2.15, 93 % of draws above 0. Volume confirmation adds nothing. No change recommended. See `results/breakout_study.md`. (2026-10-08) |
 | `costs` | What does crossing the book really cost, per coin? | Spreads are far tighter than the guesses: BTC one tick on both venues, most coins under 2 bps a side. Fees are nearly all of it: a Kraken taker round trip is 80 bps, Binance 20. Weekly, report only (2026-10-07). |
 
 ## Strategy-family sweep (2026-10-07)
@@ -106,9 +107,11 @@ show an annual Sharpe of about 2.6 here, so that is roughly the bar.
   variance 1/T).
 - Breakouts are the most robust family: every variant positive out of sample
   at 41 bps, low turnover, drawdown under half of BTC's. Inside its own family
-  the pick's deflated p is 0.91; against all 100 trials it is 0.01, mostly
-  because its daily returns are fat-tailed (kurtosis 15). If anything goes to
-  a paper forward test next, this is the one.
+  the pick's deflated p is 0.91; against all 100 trials it is 0.01, because
+  the best of 100 noise trials would show a Sharpe of about 2.6 (its fat
+  tails, kurtosis 15, barely matter: with normal returns the p is the same,
+  see `results/breakout_study.md`). If anything goes to a paper forward test
+  next, this is the one.
 - The low-vol market-neutral book has the highest out-of-sample Sharpe (2.1)
   but its in-sample Sharpe was 0.5 and its money comes from shorting
   high-volatility coins in an altcoin bear market (see `family_lowvol.md`).
