@@ -212,7 +212,38 @@ impl Credentials {
 /// One full execution pass. Call it once per tick, after `engine.tick()`.
 pub async fn cycle(engine: &Mutex<Engine>, creds: &Credentials) {
     submit_pending(engine, creds).await;
+    lookup_unacknowledged(engine, creds).await;
     poll_inflight(engine, creds).await;
+}
+
+/// Ask the demo venue about demo orders that were sent before a restart and
+/// never acknowledged, by the client id they were sent under. Found: booked
+/// and followed. The venue says it has none: closed, nothing filled. The
+/// venue cannot be asked: journaled with the client id, at once when it can
+/// never answer (no keys, no such lookup), after twice the order timeout when
+/// it only does not answer right now.
+pub async fn lookup_unacknowledged(engine: &Mutex<Engine>, creds: &Credentials) {
+    let lookups = { engine.lock().unwrap().client_lookups() };
+    if lookups.is_empty() {
+        return;
+    }
+    let timeout_ms = { engine.lock().unwrap().live_config().timeout_sec as i64 * 1000 };
+    for l in lookups {
+        let env = if l.demo { Environment::Demo } else { Environment::Live };
+        let conn = match creds.connector_env(l.venue, env, true, false) {
+            Ok(c) => c,
+            Err(e) => {
+                engine.lock().unwrap().apply_lookup_failed(&l.order_id, &e);
+                continue;
+            }
+        };
+        match conn.order_by_client_id(&l.client_order_id, &l.symbol).await {
+            Ok(Some(bo)) => engine.lock().unwrap().apply_lookup_found(&l.order_id, bo),
+            Ok(None) => engine.lock().unwrap().apply_lookup_missing(&l.order_id),
+            Err(e) if e.is_transient() && l.age_ms <= timeout_ms * 2 => {} // ask again next tick
+            Err(e) => engine.lock().unwrap().apply_lookup_failed(&l.order_id, &e.to_string()),
+        }
+    }
 }
 
 /// Read-only credential check, for the UI's "test connection" button and as the
@@ -287,16 +318,7 @@ async fn submit_one(engine: &Mutex<Engine>, creds: &Credentials, o: LiveOrderOut
             // Some venues fill on submit; book it now rather than waiting a tick.
             if bo.filled_qty > 0.0 || bo.status.is_terminal() {
                 let mut e = engine.lock().unwrap();
-                e.apply_live_update(
-                    &o.order_id,
-                    LiveUpdate {
-                        status: bo.status,
-                        filled_qty: bo.filled_qty,
-                        avg_price: bo.avg_price,
-                        fee: bo.fee,
-                        raw_status: bo.raw_status,
-                    },
-                );
+                e.apply_live_update(&o.order_id, LiveUpdate::from(bo));
             }
         }
         Err(e) => reject(engine, &o.order_id, &e.to_string()),
@@ -343,16 +365,7 @@ pub async fn poll_inflight(engine: &Mutex<Engine>, creds: &Credentials) {
         match conn.order_status(&p.broker_id, &p.symbol).await {
             Ok(bo) => {
                 let mut e = engine.lock().unwrap();
-                e.apply_live_update(
-                    &p.order_id,
-                    LiveUpdate {
-                        status: bo.status,
-                        filled_qty: bo.filled_qty,
-                        avg_price: bo.avg_price,
-                        fee: bo.fee,
-                        raw_status: bo.raw_status,
-                    },
-                );
+                e.apply_live_update(&p.order_id, LiveUpdate::from(bo));
             }
             Err(e) if e.is_transient() => {} // retry next tick
             Err(e) => {

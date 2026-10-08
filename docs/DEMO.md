@@ -92,6 +92,21 @@ The first demo connection test is the check.
   money too: its fills are now labelled `demo` and **no longer written to the
   tax record**. Positions from it keep the `live` flag as before (they are
   reconciled against the paper account).
+- A demo whose prices are not documented as real (OKX): a strategy set to Demo
+  there keeps working, and the Strategies and Live pages say its numbers are
+  an **API test, not a price test**. A **demo autopilot** there is refused at
+  start: its fills would be measured in another price world than the one its
+  stop rules watch. A crypto demo autopilot's venue is the demo exchange.
+- Fees: on a spot buy Bybit, OKX and Binance keep their fee in the coin
+  bought. Every fill books the coins actually received and the fee in dollars
+  at the fill price, so the position matches the demo (or live) account and
+  the exit sells what is there.
+- A demo order that was sent but not yet acknowledged when Pythia stopped is
+  looked up at the demo venue by its client order id after the restart
+  (Bybit `orderLinkId`, OKX `clOrdId`, Binance `origClientOrderId`, Alpaca
+  `by_client_order_id`) and booked and followed, or closed when the venue has
+  no such order. If the venue cannot be asked, the journal keeps the client
+  order id to look for in the demo account.
 
 ### Routing an order as demo from other code (Autopilot)
 

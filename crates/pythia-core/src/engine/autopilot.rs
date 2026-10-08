@@ -29,7 +29,10 @@
 //! - **Positions belong to whoever opened them.** A fill that opens a
 //!   position for a sleeve strategy on one of its markets makes the position
 //!   the autopilot's; every later fill on it (the strategy's exit, an ATR
-//!   stop, a flatten from the Positions page) is booked to the autopilot. A
+//!   stop, a flatten from the Positions page) is booked to the autopilot, and
+//!   so is a broker correction from reconciliation: the quantity follows the
+//!   venue and the difference is realised at the mark, journaled, so the
+//!   correction itself never moves its equity past a stop unseen. A
 //!   position a sleeve strategy held from before the autopilot started stays
 //!   outside it: its P&L is not counted, and the autopilot trades that market
 //!   once it is closed. Lab books only trade by rebalancing, so a lab book
@@ -88,10 +91,13 @@
 //!
 //! # Modes and the money
 //!
-//! `paper` trades virtual money at prices from live books. `demo` is meant
-//! for a venue's demo or testnet account; until the connectors can route
-//! there it is routed exactly like paper, through the one hook in
-//! [`AutopilotMode::route_intent`]. `live` sends real orders and is gated
+//! `paper` trades virtual money at prices from live books. `demo` sends its
+//! orders to a venue's demo account through the real connector (the one hook
+//! is [`AutopilotMode::route_intent`]). A crypto demo autopilot trades on the
+//! exchange whose demo keys are saved, and that exchange is its venue. It is
+//! refused on a demo whose prices are not documented as the real market
+//! (OKX, see `docs/DEMO.md`): its fills would be measured in another price
+//! world than the one its stop rules watch. `live` sends real orders and is gated
 //! harder than anything else: live routing must be armed for the venue, every
 //! sleeve strategy needs a green Strategy Passport, X may not exceed the cash
 //! the venue reports as free (minus what other live autopilots there already
@@ -699,7 +705,7 @@ fn engine_venue(cv: CostVenue) -> Venue {
     }
 }
 
-fn venue_label(cv: CostVenue) -> &'static str {
+pub(super) fn venue_label(cv: CostVenue) -> &'static str {
     match cv {
         CostVenue::Kraken => "Kraken",
         CostVenue::Binance => "Binance",
@@ -936,6 +942,42 @@ impl Engine {
         }
     }
 
+    /// Reconciliation set a position to what the venue holds. When an
+    /// autopilot owns it, the difference is booked to that autopilot: the
+    /// quantity follows the venue, and the P&L the changed part carried is
+    /// booked as realised at the mark (and so is a change of the average
+    /// price the venue reported). The autopilot's equity is the same just
+    /// before and just after, so a correction can never lift it over a stop,
+    /// or drop a loss its stop rules were about to see. Journaled with the
+    /// numbers. `before` and `after` are (quantity, average price).
+    pub(super) fn autopilot_on_correction(&mut self, market: &str, before: (f64, f64), after: (f64, f64), venue: &str) {
+        let Some(i) = self.autopilots.iter().position(|a| a.owned.contains_key(market)) else { return };
+        let mark = self.ap_mark(market, before.1);
+        let open_after = after.0.abs() > 1e-12;
+        let unreal = |(q, avg): (f64, f64)| if q.abs() > 1e-12 { (mark - avg) * q } else { 0.0 };
+        let booked = unreal(before) - unreal(after);
+        let symbol = self.markets.iter().find(|m| m.id == market).map(|m| m.symbol.clone()).unwrap_or_else(|| market.to_string());
+        let ap = &mut self.autopilots[i];
+        let owner = ap.owned.get(market).cloned().unwrap_or_default();
+        ap.realized += booked;
+        if let Some(s) = ap.sleeve_mut(&owner) {
+            s.realized += booked;
+        }
+        if !open_after {
+            ap.owned.remove(market);
+        }
+        let msg = format!(
+            "{}: {symbol} corrected against {venue}: the book had {:.8}, the venue has {:.8}. Booked {} to the autopilot at the mark {} so the correction moves none of its equity and hides no stop.",
+            ap.label(),
+            before.0,
+            after.0,
+            signed_usd(booked),
+            usd(mark)
+        );
+        ap.last_action = Some(msg.clone());
+        self.log(JournalKind::Risk, msg, Some(owner), Some(market.to_string()));
+    }
+
     // ── commands ───────────────────────────────────────────────────────────
 
     /// Start an autopilot. `confirm` is the owner's typed confirmation (the UI
@@ -964,11 +1006,40 @@ impl Engine {
             // A stopped one under the same id is replaced once this one starts.
         }
 
-        let Some(cv) = CostVenue::parse(&cfg.venue) else {
+        let Some(mut cv) = CostVenue::parse(&cfg.venue) else {
             return Err(format!("Unknown venue \"{}\". Use one from config/costs.json, for example kraken or alpaca.", cfg.venue));
         };
         let venue = engine_venue(cv);
-        if venue == Venue::Crypto && cv != self.crypto_venue {
+        if cfg.mode == AutopilotMode::Demo && venue == Venue::Crypto {
+            // Crypto demo orders go to the exchange whose demo keys are in
+            // Settings, whatever the live exchange is. That exchange is the
+            // autopilot's venue, so every label names where it trades.
+            if !self.demo_venues.contains(&venue) {
+                return Err(format!(
+                    "A demo autopilot needs demo keys for {}: add Bybit, OKX or Binance demo keys in Settings first (docs/DEMO.md says how to get them).",
+                    venue_label(cv)
+                ));
+            }
+            let demo_cv = self.crypto_demo_venue.unwrap_or(self.crypto_venue);
+            if cv != demo_cv && cv != self.crypto_venue {
+                return Err(format!(
+                    "Crypto demo orders go to {}, the exchange whose demo keys are in Settings. A demo autopilot on {} would trade there anyway: pick {} or save demo keys for {} first.",
+                    venue_label(demo_cv),
+                    venue_label(cv),
+                    demo_cv.id(),
+                    venue_label(cv)
+                ));
+            }
+            if !self.crypto_demo_real_prices {
+                return Err(format!(
+                    "{} runs its demo account on its own prices, which it does not document as the real market. A demo autopilot there would have its fills measured in a different price world than the one its stop rules watch, so its results would mean nothing. Use Bybit or Binance demo keys (their demos trade on real prices), or run it on paper. A single strategy can still demo-trade on {} as an API test.",
+                    venue_label(demo_cv),
+                    venue_label(demo_cv)
+                ));
+            }
+            cv = demo_cv;
+            cfg.venue = demo_cv.id().to_string();
+        } else if venue == Venue::Crypto && cv != self.crypto_venue {
             return Err(format!(
                 "Crypto here executes on {}, the exchange selected in Settings. An autopilot on {} would be priced and routed there anyway: pick {} or switch the exchange first.",
                 venue_label(self.crypto_venue),
@@ -1677,6 +1748,12 @@ impl Engine {
                 "{} runs live on its own. A {} autopilot would take it off live; set it to paper yourself first if that is what you want.",
                 s.name,
                 mode.word()
+            ));
+        }
+        if mode == AutopilotMode::Paper && s.state == StrategyState::Demo {
+            return Some(format!(
+                "{} demo-trades on its own. A paper autopilot would take it off demo; set it to paper yourself first if that is what you want, or start a demo autopilot.",
+                s.name
             ));
         }
         if s.venue_class != venue {
