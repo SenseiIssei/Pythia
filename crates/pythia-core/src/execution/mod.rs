@@ -11,6 +11,7 @@
 //!   submit_pending  →  engine.drain_live_orders()  →  preflight → submit → ack
 //!   poll_inflight   →  engine.live_polls()         →  status (→ cancel if overdue)
 //!   reconcile       →  venue positions             →  engine.reconcile_positions()
+//!   alpaca fees     →  engine.alpaca_fee_queries() →  CFEE/FEE activities → engine.apply_alpaca_fees()
 //! ```
 //!
 //! Two rules hold throughout:
@@ -214,6 +215,22 @@ pub async fn cycle(engine: &Mutex<Engine>, creds: &Credentials) {
     submit_pending(engine, creds).await;
     lookup_unacknowledged(engine, creds).await;
     poll_inflight(engine, creds).await;
+    read_alpaca_fees(engine, creds).await;
+}
+
+/// Read the crypto fees Alpaca has posted for fills that are waiting on
+/// theirs (`engine::alpaca_fees`). The engine asks at most every half hour
+/// and only while it waits; Alpaca posts them at the end of the day.
+/// Read-only. A failed read is simply asked again at the next interval.
+pub async fn read_alpaca_fees(engine: &Mutex<Engine>, creds: &Credentials) {
+    let queries = { engine.lock().unwrap().alpaca_fee_queries() };
+    for q in queries {
+        let Ok(conn) = creds.alpaca_connector(q.paper, false) else { continue };
+        match conn.crypto_fee_activities(&q.after).await {
+            Ok(acts) => engine.lock().unwrap().apply_alpaca_fees(q.paper, &acts),
+            Err(e) => tracing::warn!("Alpaca fee activities ({}) not read: {e}", if q.paper { "paper" } else { "live" }),
+        }
+    }
 }
 
 /// Ask the demo venue about demo orders that were sent before a restart and

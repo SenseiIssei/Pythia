@@ -60,6 +60,61 @@ pub struct FillRecord {
     pub fee: f64,
     pub strategy_id: String,
     pub order_id: String,
+    /// A trade, or a fee the venue posted after it (see [`RecordKind::Fee`]).
+    /// Absent on trades, so every line written before it existed still reads.
+    #[serde(default, skip_serializing_if = "RecordKind::is_fill")]
+    pub kind: RecordKind,
+}
+
+/// What one line of the record is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordKind {
+    #[default]
+    Fill,
+    /// A fee posted after its trade: Alpaca posts crypto fees at the end of
+    /// the day, as account activities (`engine::alpaca_fees`). Same order id,
+    /// side and price as the trade; `qty` is the coins the venue kept (zero
+    /// for a fee in dollars) and `fee` the whole fee in the quote currency.
+    /// [`fold_fees`] merges it into its trade, which then carries the same
+    /// numbers as a fee reported with the fill: the coins received, and the
+    /// fee in dollars.
+    Fee,
+}
+
+impl RecordKind {
+    fn is_fill(&self) -> bool {
+        *self == RecordKind::Fill
+    }
+}
+
+/// Merge every posted fee into the trade it belongs to (same order id and
+/// market, the latest such trade before it). A buy then holds the coins it
+/// actually received and carries the fee; a sell carries the fee. A fee whose
+/// trade is not in the record stays a line of its own.
+pub fn fold_fees(fills: &[FillRecord]) -> Vec<FillRecord> {
+    let mut out: Vec<FillRecord> = Vec::with_capacity(fills.len());
+    for r in fills {
+        if r.kind == RecordKind::Fee {
+            let trade = out
+                .iter_mut()
+                .rev()
+                .find(|t| t.kind == RecordKind::Fill && t.order_id == r.order_id && t.market_id == r.market_id);
+            if let Some(t) = trade {
+                let qty = match t.side {
+                    Side::Buy => t.qty - r.qty,
+                    Side::Sell => t.qty + r.qty,
+                };
+                if qty > 1e-12 {
+                    t.qty = qty;
+                    t.fee += r.fee;
+                    continue;
+                }
+            }
+        }
+        out.push(r.clone());
+    }
+    out
 }
 
 impl FillRecord {
@@ -107,7 +162,14 @@ pub fn flush(engine: &std::sync::Mutex<crate::engine::Engine>, path: &Path) {
 pub fn read_all(path: &Path) -> (Vec<FillRecord>, usize) {
     let Ok(text) = std::fs::read_to_string(path) else { return (vec![], 0) };
     let mut bad = 0;
-    let usable = |r: &FillRecord| r.qty.is_finite() && r.qty > 0.0 && r.price.is_finite() && r.price >= 0.0 && r.fee.is_finite();
+    let usable = |r: &FillRecord| {
+        let qty_ok = match r.kind {
+            RecordKind::Fill => r.qty > 0.0,
+            // A fee in dollars takes no coins; it must still be a fee.
+            RecordKind::Fee => r.qty >= 0.0 && r.fee > 0.0,
+        };
+        qty_ok && r.qty.is_finite() && r.price.is_finite() && r.price >= 0.0 && r.fee.is_finite()
+    };
     let mut out: Vec<FillRecord> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -144,16 +206,28 @@ pub fn cointracking_csv(fills: &[FillRecord], crypto_exchange: &str) -> String {
         "\"Type\",\"Buy Amount\",\"Buy Currency\",\"Sell Amount\",\"Sell Currency\",\"Fee\",\"Fee Currency\",\
          \"Exchange\",\"Trade-Group\",\"Comment\",\"Date\"\n",
     );
-    for r in fills {
+    for r in &fold_fees(fills) {
         let (asset, quote) = r.assets();
+        let date = berlin(r.ts)
+            .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default();
+        if r.kind == RecordKind::Fee {
+            // A fee whose trade is not in the record: CoinTracking's own fee type.
+            let (amt, cur) = if r.qty > 0.0 { (r.qty, asset.clone()) } else { (r.fee, quote.clone()) };
+            s.push_str(&format!(
+                "\"Other Fee\",\"\",\"\",\"{}\",\"{cur}\",\"\",\"\",\"{}\",\"{}\",\"{}\",\"{date}\"\n",
+                num(amt),
+                exchange_name(r.venue, crypto_exchange),
+                r.strategy_id,
+                r.order_id,
+            ));
+            continue;
+        }
         let notional = r.qty * r.price;
         let (buy_amt, buy_cur, sell_amt, sell_cur) = match r.side {
             Side::Buy => (r.qty, asset.clone(), notional, quote.clone()),
             Side::Sell => (notional, quote.clone(), r.qty, asset.clone()),
         };
-        let date = berlin(r.ts)
-            .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_default();
         s.push_str(&format!(
             "\"Trade\",\"{}\",\"{buy_cur}\",\"{}\",\"{sell_cur}\",\"{}\",\"{quote}\",\"{}\",\"{}\",\"{}\",\"{date}\"\n",
             num(buy_amt),
@@ -215,7 +289,9 @@ pub fn fifo_summary(fills: &[FillRecord]) -> TaxSummary {
     let mut lots: HashMap<String, VecDeque<Lot>> = HashMap::new();
     let mut years: BTreeMap<i32, YearSummary> = BTreeMap::new();
     let mut unmatched = 0;
-    for r in fills {
+    // A fee posted after its trade counts as if the trade had reported it.
+    let fills = fold_fees(fills);
+    for r in &fills {
         let (asset, _) = r.assets();
         // The German tax year: a fill late on 31 December UTC can be 1 January in Berlin.
         let year = berlin_date(r.ts).map(|d| {
@@ -225,6 +301,22 @@ pub fn fifo_summary(fills: &[FillRecord]) -> TaxSummary {
         let y = years.entry(year.unwrap_or(0)).or_insert_with(|| YearSummary { year: year.unwrap_or(0), ..Default::default() });
         y.fees += r.fee;
         let q = lots.entry(asset).or_default();
+        if r.kind == RecordKind::Fee {
+            // A fee whose trade is not in the record: its coins leave the
+            // oldest lots without proceeds, and its value is a cost of the year.
+            y.short_term -= r.fee;
+            let mut left = r.qty;
+            while left > 1e-12 {
+                let Some(lot) = q.front_mut() else { break };
+                let take = left.min(lot.qty);
+                lot.qty -= take;
+                left -= take;
+                if lot.qty <= 1e-12 {
+                    q.pop_front();
+                }
+            }
+            continue;
+        }
         match r.side {
             Side::Buy => q.push_back(Lot { qty: r.qty, cost_per_unit: (r.qty * r.price + r.fee) / r.qty, ts: r.ts }),
             Side::Sell => {
@@ -278,7 +370,47 @@ mod tests {
             fee,
             strategy_id: "lab:tsmom_regime".into(),
             order_id: format!("o{ts}"),
+            kind: RecordKind::Fill,
         }
+    }
+
+    /// A fee Alpaca posted later for the fill `of`.
+    fn posted_fee(of: &FillRecord, ts: i64, coins: f64, usd: f64) -> FillRecord {
+        FillRecord { ts, qty: coins, fee: coins * of.price + usd, kind: RecordKind::Fee, ..of.clone() }
+    }
+
+    #[test]
+    fn a_fee_posted_later_counts_as_if_the_fill_had_reported_it() {
+        // Alpaca: buy 1 ETH at 2000, keeps 0.0025 ETH; sell 0.9975 ETH at 2200, $5.49 fee.
+        let buy = FillRecord { market_id: "alpaca:ETH/USD".into(), symbol: "ETH/USD".into(), venue: Venue::Alpaca, ..fill(T0, Side::Buy, 1.0, 2000.0, 0.0) };
+        let sell = FillRecord { order_id: "o-sell".into(), ..buy.clone() };
+        let sell = FillRecord { ts: T0 + DAY, side: Side::Sell, qty: 0.9975, price: 2200.0, ..sell };
+        let record = vec![
+            buy.clone(),
+            sell.clone(),
+            posted_fee(&buy, T0 + DAY / 2, 0.0025, 0.0),
+            posted_fee(&sell, T0 + 2 * DAY, 0.0, 5.49),
+        ];
+        let folded = fold_fees(&record);
+        assert_eq!(folded.len(), 2, "both fees found their trades");
+        assert!((folded[0].qty - 0.9975).abs() < 1e-12 && (folded[0].fee - 5.0).abs() < 1e-9, "{:?}", folded[0]);
+        assert!((folded[1].qty - 0.9975).abs() < 1e-12 && (folded[1].fee - 5.49).abs() < 1e-9);
+        let s = fifo_summary(&record);
+        // Paid 2000 for 0.9975 ETH, got 0.9975 * 2200 - 5.49 = 2189.01.
+        assert!((s.years[0].short_term - 189.01).abs() < 1e-6, "{s:?}");
+        assert!((s.years[0].fees - 10.49).abs() < 1e-9);
+        assert!(s.open.get("ETH").is_none(), "nothing left over: the fee coins are gone");
+        let csv = cointracking_csv(&record, "Kraken");
+        assert_eq!(csv.lines().count(), 3, "two trades, no extra rows: {csv}");
+        assert!(csv.lines().nth(1).unwrap().starts_with("\"Trade\",\"0.9975\",\"ETH\",\"1995\",\"USD\",\"5\""), "{csv}");
+
+        // A fee whose trade is not in the record stays a row of its own.
+        let orphan = posted_fee(&FillRecord { order_id: "elsewhere".into(), ..buy.clone() }, T0, 0.001, 0.0);
+        let csv = cointracking_csv(&[orphan.clone()], "Kraken");
+        assert!(csv.lines().nth(1).unwrap().starts_with("\"Other Fee\",\"\",\"\",\"0.001\",\"ETH\""), "{csv}");
+        let line = serde_json::to_string(&orphan).unwrap();
+        assert!(line.contains("\"kind\":\"fee\""));
+        assert!(!serde_json::to_string(&buy).unwrap().contains("kind"), "a trade line is written as before");
     }
 
     // 2026-01-01T00:00:00Z
