@@ -46,6 +46,7 @@ import { PnlLines } from "../components/PnlBreakdown";
 import { explain } from "../glossary";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
+import { demoIsApiTestOnly, exchangeName } from "../venueNames";
 import { useMockAutopilot, type MockScenario } from "../autopilotMock";
 import {
   LIVE_PHRASE,
@@ -397,6 +398,12 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   if (tpOn && !limit(stop.takeProfitPct)) problems.push("The take-profit has to be above zero.");
   if (trailOn && !(limit(stop.trailingPct) && stop.trailingPct! < 100)) problems.push("The trailing limit has to be between 0 and 100 percent.");
   if (endOn && !(endMs && endMs > Date.now())) problems.push("The end date has to be in the future.");
+  // The engine refuses this too; saying it here saves a round trip.
+  if (mode === "demo" && venue === "crypto" && demoIsApiTestOnly(live)) {
+    problems.push(
+      `${exchangeName(live.demoExchange)} runs its demo account on its own prices, so a demo autopilot there would be judged in a different price world than its stop rules watch. Use Bybit or Binance demo keys, or practice money.`,
+    );
+  }
 
   // Real money: every requirement spelled out, checked here and again by the engine.
   const liveCash = portfolio.balances.find((b) => b.venue === venue && b.mode === "live")?.cash;

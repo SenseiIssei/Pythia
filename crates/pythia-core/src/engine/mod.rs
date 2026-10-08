@@ -13,6 +13,8 @@ pub mod indicators;
 pub mod risk;
 #[cfg(test)]
 mod risk_engine_tests;
+#[cfg(test)]
+mod seam_tests;
 pub mod strategies;
 
 use crate::connectors::{BrokerOrder, BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
@@ -536,6 +538,12 @@ pub struct LiveStatus {
     /// The exchange crypto demo orders go to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub demo_exchange: Option<CostVenue>,
+    /// That exchange documents that its demo trades on real market prices.
+    /// When it does not (OKX), a demo fill there proves the API path and says
+    /// little about the price: the UI labels demo numbers on it as an API
+    /// test, and a demo autopilot there is refused.
+    #[serde(default)]
+    pub demo_real_prices: bool,
     /// Open positions opened by demo fills.
     #[serde(default)]
     pub demo_positions: usize,
@@ -4311,6 +4319,7 @@ impl Engine {
             blocked_reason: if self.live_routable(Venue::Alpaca) { self.live_block_reason() } else { None },
             demo_venues: self.demo_venues(),
             demo_exchange: self.demo_venues.contains(&Venue::Crypto).then_some(self.crypto_demo_venue).flatten(),
+            demo_real_prices: self.crypto_demo_real_prices,
             demo_positions: self.positions.values().filter(|p| p.demo && p.qty.abs() > 1e-9).count(),
         }
     }
@@ -4776,6 +4785,22 @@ impl Engine {
             }
         }
         self.apply_strategy_state(id, state);
+        // Demo on an exchange whose demo book has its own prices still runs,
+        // but its numbers prove the API path, not the strategy.
+        let crypto = self.strategies.iter().find(|s| s.id == id).is_some_and(|s| s.venue_class == Venue::Crypto);
+        if state == StrategyState::Demo && crypto && !self.crypto_demo_real_prices {
+            let ex = self.crypto_demo_venue.unwrap_or(self.crypto_venue);
+            self.log(
+                JournalKind::System,
+                format!(
+                    "{id} demo-trades on {}, whose demo account has its own prices that are not documented as the \
+                     real market. Its demo results are an API test, not a price test.",
+                    autopilot::venue_label(ex)
+                ),
+                Some(id.to_string()),
+                None,
+            );
+        }
         Ok(())
     }
 
