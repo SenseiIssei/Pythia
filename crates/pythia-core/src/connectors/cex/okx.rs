@@ -153,12 +153,8 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
     if let (OrderType::Limit, Some(p)) = (req.order_type, req.limit_price) {
         order["px"] = serde_json::json!(sign::trim_decimals(p, 8));
     }
-    if let Some(cid) = &req.client_order_id {
-        // clOrdId: alphanumeric, 1–32 characters.
-        let clean: String = cid.chars().filter(char::is_ascii_alphanumeric).take(32).collect();
-        if !clean.is_empty() {
-            order["clOrdId"] = serde_json::json!(clean);
-        }
+    if let Some(clean) = req.client_order_id.as_deref().map(cl_ord_id).filter(|s| !s.is_empty()) {
+        order["clOrdId"] = serde_json::json!(clean);
     }
 
     let body = serde_json::to_string(&serde_json::json!([order]))
@@ -191,6 +187,42 @@ pub(super) async fn status(
         .and_then(|a| a.first())
         .ok_or_else(|| ConnectorError::Rejected(format!("OKX has no order {order_id}")))?;
     parse_order(o, base, quote)
+}
+
+/// The `clOrdId` an engine client id is sent as: OKX takes 1 to 32
+/// alphanumeric characters, so the dashes go.
+fn cl_ord_id(cid: &str) -> String {
+    cid.chars().filter(char::is_ascii_alphanumeric).take(32).collect()
+}
+
+/// Look an order up by the client id it was sent under. Get order details
+/// takes `clOrdId` instead of `ordId`, and answers 51603 "Order does not
+/// exist" for one it never received
+/// (<https://www.okx.com/docs-v5/en/#order-book-trading-trade-get-order-details>).
+pub(super) async fn by_client_id(
+    c: &CexConnector,
+    cid: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<Option<BrokerOrder>, ConnectorError> {
+    let id = cl_ord_id(cid);
+    if id.is_empty() {
+        return Ok(None); // nothing was sent under it
+    }
+    let path = format!("/api/v5/trade/order?instId={symbol}&clOrdId={id}");
+    match request(c, reqwest::Method::GET, &path, "").await {
+        Ok(data) => match data.as_array().and_then(|a| a.first()) {
+            Some(o) => parse_order(o, base, quote).map(Some),
+            None => Ok(None),
+        },
+        Err(e) if is_no_such_order(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn is_no_such_order(e: &ConnectorError) -> bool {
+    matches!(e, ConnectorError::Rejected(m) if m.contains("(51603)"))
 }
 
 pub(super) async fn cancel(c: &CexConnector, order_id: &str, symbol: &str) -> Result<(), ConnectorError> {
@@ -294,6 +326,18 @@ mod tests {
         });
         let o = parse_order(&v, "SOL", "USDT").unwrap();
         assert_eq!((o.fee, o.fee_base), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_client_id_is_looked_up_as_it_was_sent_and_51603_means_never_received() {
+        // Sent and looked up under the same cleaned id.
+        assert_eq!(cl_ord_id("pythia-a1b2-ord_17"), "pythiaa1b2ord17");
+        assert!(cl_ord_id("pythia-0123456789-0123456789-0123456789").len() <= 32);
+        let v = serde_json::json!({"code": "51603", "msg": "Order does not exist", "data": []});
+        let e = check_error(&v, "/api/v5/trade/order").unwrap_err();
+        assert!(is_no_such_order(&e), "{e}");
+        let other = check_error(&serde_json::json!({"code": "50011", "msg": "Rate limit"}), "/x").unwrap_err();
+        assert!(!is_no_such_order(&other));
     }
 
     #[test]

@@ -101,6 +101,12 @@ The first demo connection test is the check.
   bought. Every fill books the coins actually received and the fee in dollars
   at the fill price, so the position matches the demo (or live) account and
   the exit sells what is there.
+- A demo order that was sent but not yet acknowledged when Pythia stopped is
+  looked up at the demo venue by its client order id after the restart
+  (Bybit `orderLinkId`, OKX `clOrdId`, Binance `origClientOrderId`, Alpaca
+  `by_client_order_id`) and booked and followed, or closed when the venue has
+  no such order. If the venue cannot be asked, the journal keeps the client
+  order id to look for in the demo account.
 
 ### Routing an order as demo from other code (Autopilot)
 

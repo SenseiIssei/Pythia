@@ -137,6 +137,34 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
     parse_order(&v, None, &base, &quote)
 }
 
+/// Query one order (by `orderId` or `origClientOrderId`, the two keys of
+/// `GET /api/v3/order`) together with the commission of its trades.
+async fn query(
+    c: &CexConnector,
+    key: (&'static str, String),
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<BrokerOrder, ConnectorError> {
+    let v = signed(c, reqwest::Method::GET, "/api/v3/order", &[("symbol", symbol.to_string()), key]).await?;
+    // The order has no fee field; its trades do. Without them a buy would
+    // book coins Binance kept as commission, so a failed read is retried
+    // (the error goes back to the poll) rather than booked without fees.
+    let trades = match num(v.get("orderId")).map(|n| format!("{n:.0}")) {
+        Some(order_id) if num_or0(v.get("executedQty")) > 0.0 => Some(
+            signed(
+                c,
+                reqwest::Method::GET,
+                "/api/v3/myTrades",
+                &[("symbol", symbol.to_string()), ("orderId", order_id)],
+            )
+            .await?,
+        ),
+        _ => None,
+    };
+    parse_order(&v, trades.as_ref(), base, quote)
+}
+
 pub(super) async fn status(
     c: &CexConnector,
     order_id: &str,
@@ -144,30 +172,30 @@ pub(super) async fn status(
     base: &str,
     quote: &str,
 ) -> Result<BrokerOrder, ConnectorError> {
-    let v = signed(
-        c,
-        reqwest::Method::GET,
-        "/api/v3/order",
-        &[("symbol", symbol.to_string()), ("orderId", order_id.to_string())],
-    )
-    .await?;
-    // The order has no fee field; its trades do. Without them a buy would
-    // book coins Binance kept as commission, so a failed read is retried
-    // (the error goes back to the poll) rather than booked without fees.
-    let trades = if num_or0(v.get("executedQty")) > 0.0 {
-        Some(
-            signed(
-                c,
-                reqwest::Method::GET,
-                "/api/v3/myTrades",
-                &[("symbol", symbol.to_string()), ("orderId", order_id.to_string())],
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    parse_order(&v, trades.as_ref(), base, quote)
+    query(c, ("orderId", order_id.to_string()), symbol, base, quote).await
+}
+
+/// Look an order up by the client id it was sent under
+/// (`origClientOrderId`); -2013 "Order does not exist." means it never arrived
+/// (<https://developers.binance.com/docs/binance-spot-api-docs/errors>).
+pub(super) async fn by_client_id(
+    c: &CexConnector,
+    cid: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<Option<BrokerOrder>, ConnectorError> {
+    match query(c, ("origClientOrderId", cid.to_string()), symbol, base, quote).await {
+        Ok(o) => Ok(Some(o)),
+        Err(e) if is_no_such_order(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn is_no_such_order(e: &ConnectorError) -> bool {
+    // A 400 carries it in the body (`{"code":-2013,...}`), a 200 through
+    // `check_error` as "(-2013)": both contain the code.
+    matches!(e, ConnectorError::Rejected(m) if m.contains("-2013"))
 }
 
 pub(super) async fn cancel(c: &CexConnector, order_id: &str, symbol: &str) -> Result<(), ConnectorError> {
@@ -265,6 +293,17 @@ mod tests {
         let o = parse_order(&order, Some(&trades), "SOL", "USDT").unwrap();
         assert_eq!((o.fee, o.fee_base), (0.15, 0.0));
         assert_eq!(o.fee_unpriced, vec![("BNB".to_string(), 0.0002)]);
+    }
+
+    #[test]
+    fn order_does_not_exist_means_the_order_never_arrived() {
+        // How `CexConnector::send` reports Binance's HTTP 400 for -2013.
+        let e = ConnectorError::Rejected(r#"/api/v3/order 400: {"code":-2013,"msg":"Order does not exist."}"#.into());
+        assert!(is_no_such_order(&e));
+        let e = check_error(&serde_json::json!({"code": -2013, "msg": "Order does not exist."}), "/api/v3/order").unwrap_err();
+        assert!(is_no_such_order(&e));
+        assert!(!is_no_such_order(&ConnectorError::Network("timeout".into())));
+        assert!(!is_no_such_order(&ConnectorError::Rejected("insufficient balance (-2010)".into())));
     }
 
     #[test]

@@ -212,7 +212,38 @@ impl Credentials {
 /// One full execution pass. Call it once per tick, after `engine.tick()`.
 pub async fn cycle(engine: &Mutex<Engine>, creds: &Credentials) {
     submit_pending(engine, creds).await;
+    lookup_unacknowledged(engine, creds).await;
     poll_inflight(engine, creds).await;
+}
+
+/// Ask the demo venue about demo orders that were sent before a restart and
+/// never acknowledged, by the client id they were sent under. Found: booked
+/// and followed. The venue says it has none: closed, nothing filled. The
+/// venue cannot be asked: journaled with the client id, at once when it can
+/// never answer (no keys, no such lookup), after twice the order timeout when
+/// it only does not answer right now.
+pub async fn lookup_unacknowledged(engine: &Mutex<Engine>, creds: &Credentials) {
+    let lookups = { engine.lock().unwrap().client_lookups() };
+    if lookups.is_empty() {
+        return;
+    }
+    let timeout_ms = { engine.lock().unwrap().live_config().timeout_sec as i64 * 1000 };
+    for l in lookups {
+        let env = if l.demo { Environment::Demo } else { Environment::Live };
+        let conn = match creds.connector_env(l.venue, env, true, false) {
+            Ok(c) => c,
+            Err(e) => {
+                engine.lock().unwrap().apply_lookup_failed(&l.order_id, &e);
+                continue;
+            }
+        };
+        match conn.order_by_client_id(&l.client_order_id, &l.symbol).await {
+            Ok(Some(bo)) => engine.lock().unwrap().apply_lookup_found(&l.order_id, bo),
+            Ok(None) => engine.lock().unwrap().apply_lookup_missing(&l.order_id),
+            Err(e) if e.is_transient() && l.age_ms <= timeout_ms * 2 => {} // ask again next tick
+            Err(e) => engine.lock().unwrap().apply_lookup_failed(&l.order_id, &e.to_string()),
+        }
+    }
 }
 
 /// Read-only credential check, for the UI's "test connection" button and as the

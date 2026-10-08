@@ -345,6 +345,15 @@ pub trait MarketConnector: Send + Sync {
     /// is not an error.
     async fn cancel_order(&self, broker_id: &str, symbol: &str) -> Result<(), ConnectorError>;
 
+    /// Look an order up by the client order id it was sent under, for an
+    /// order whose submission was never acknowledged (the process stopped
+    /// between sending it and reading the answer). `Ok(None)` means the venue
+    /// says it has no such order: it never arrived. A venue that cannot look
+    /// orders up this way answers `Unimplemented`.
+    async fn order_by_client_id(&self, _client_order_id: &str, _symbol: &str) -> Result<Option<BrokerOrder>, ConnectorError> {
+        Err(ConnectorError::Unimplemented("order lookup by client order id"))
+    }
+
     /// Open positions as the venue sees them — used to reconcile on startup and
     /// after any restart.
     async fn positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
