@@ -44,7 +44,7 @@ use super::{
     MarketConnector, OrderRequest, OrderType, Side, Venue,
 };
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -500,6 +500,34 @@ impl AlpacaConnector {
         Ok(())
     }
 
+    /// Crypto fees posted since `after` (RFC 3339 or `YYYY-MM-DD`), oldest
+    /// first: `GET /v2/account/activities/{CFEE,FEE}` with the documented
+    /// `after`, `direction`, `page_size` and `page_token` parameters
+    /// (<https://docs.alpaca.markets/reference/getaccountactivitiesbyactivitytype-1>).
+    /// Paper and live answer in the same shape. Read-only.
+    pub async fn crypto_fee_activities(&self, after: &str) -> Result<Vec<CryptoFeeActivity>, ConnectorError> {
+        const PAGE: usize = 100;
+        const MAX_PAGES: usize = 20;
+        let mut out = Vec::new();
+        for kind in ["CFEE", "FEE"] {
+            let mut token: Option<String> = None;
+            for _ in 0..MAX_PAGES {
+                let mut path = format!("/v2/account/activities/{kind}?direction=asc&page_size={PAGE}&after={after}");
+                if let Some(t) = &token {
+                    path.push_str(&format!("&page_token={t}"));
+                }
+                let v = self.send(self.req(reqwest::Method::GET, &path)?, "fee activities").await?;
+                let page = v.as_array().cloned().unwrap_or_default();
+                out.extend(page.iter().filter_map(parse_fee_activity));
+                token = page.last().and_then(|a| a.get("id")).and_then(Value::as_str).map(str::to_string);
+                if page.len() < PAGE || token.is_none() {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     async fn order_json_by_client_id(&self, client_order_id: &str) -> Result<Value, ConnectorError> {
         let path = format!("/v2/orders:by_client_order_id?client_order_id={client_order_id}");
         self.send(self.req(reqwest::Method::GET, &path)?, "order lookup").await
@@ -677,11 +705,122 @@ fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
         status: map_status(&raw),
         filled_qty: num_or0(v.get("filled_qty")),
         avg_price: num(v.get("filled_avg_price")).filter(|p| *p > 0.0),
-        fee: 0.0, // Alpaca US equities are commission-free
+        // US equities are commission-free. A crypto order does pay a fee, but
+        // Alpaca's Order object has no fee field at all
+        // (<https://docs.alpaca.markets/reference/getorderbyorderid-1>,
+        // checked 2026-10-08): the fee is posted later as an account activity
+        // and booked from there (see [`CryptoFeeActivity`] and
+        // `engine::alpaca_fees`). Zero here means "not known yet" for crypto.
+        fee: 0.0,
         fee_base: 0.0,
         fee_unpriced: Vec::new(),
         raw_status: raw,
     })
+}
+
+/// The highest crypto fee Alpaca charges, in basis points: tier 1 taker
+/// (30-day volume under $100k), from the fee table at
+/// <https://docs.alpaca.markets/docs/crypto-trading> (section "Crypto Spot
+/// Trading Fees", checked 2026-10-08; maker 15, taker 25, lower tiers less).
+/// A fee in the coin can never be more than this share of the fill, which is
+/// what bounds how far the book may follow the venue before an activity says
+/// so (see `engine::alpaca_fees`). `config/costs.json` models the same rates.
+pub const CRYPTO_FEE_MAX_BPS: f64 = 25.0;
+
+/// True when `held` falls short of `wanted` by no more than Alpaca's highest
+/// crypto fee: what a buy's fee taken in the coin leaves behind.
+pub fn within_crypto_fee(wanted: f64, held: f64) -> bool {
+    held > 0.0 && wanted > held && wanted - held <= wanted * CRYPTO_FEE_MAX_BPS / 10_000.0 * 1.01 + 2e-9
+}
+
+/// One crypto fee Alpaca posted to the account.
+///
+/// How Alpaca charges it, per <https://docs.alpaca.markets/docs/crypto-trading>
+/// ("Crypto Spot Trading Fees", checked 2026-10-08): "The crypto fee will be
+/// charged on the credited crypto asset/fiat (what you receive) per trade."
+/// Buying BTC/USD credits BTC, so the fee is in BTC; selling BTC/USD credits
+/// dollars, so the fee is in USD. The same page says fees "are currently
+/// calculated and posted end of day" and are read from the Activities API with
+/// `activity_type` `CFEE` or `FEE`. Its example is a coin fee:
+///
+/// ```json
+/// {"id": "20220812000000000::53be51ba-46f9-43de-b81f-576f241dc680",
+///  "activity_type": "CFEE", "date": "2022-08-12", "net_amount": "0",
+///  "description": "Coin Pair Transaction Fee (Non USD)", "symbol": "ETHUSD",
+///  "qty": "-0.000195", "price": "1884.5", "status": "executed"}
+/// ```
+///
+/// The endpoint and its fields: `GET /v2/account/activities/{activity_type}`
+/// (<https://docs.alpaca.markets/reference/getaccountactivitiesbyactivitytype-1>):
+/// a non-trade activity carries `date`, `net_amount`, `qty`, `symbol`,
+/// `status` and no `order_id`, so a fee is matched to Pythia's fills by pair,
+/// side and trade date. The order object itself has no fee field.
+///
+/// What the docs do not show: a USD fee on a sell. It is read from
+/// `net_amount` when `qty` is zero, under either type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoFeeActivity {
+    pub id: String,
+    pub activity_type: String,
+    /// The date Alpaca files the fee under, `YYYY-MM-DD`.
+    pub date: String,
+    /// The pair in the form orders use, `ETH/USD`.
+    pub symbol: String,
+    /// Fee taken in the base coin, in coins (positive: charged).
+    pub coins: f64,
+    /// Fee charged in dollars (positive: charged).
+    pub usd: f64,
+    /// The price on the record, kept for the journal only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<f64>,
+}
+
+/// Read one activity as a crypto fee. Anything else (a fill, a dividend, an
+/// equity's regulatory `FEE`, a cancelled entry) is `None`.
+///
+/// A coin fee has a negative `qty` (the coins taken) and `net_amount` "0".
+/// When `qty` is set, `net_amount` is ignored even if non-zero: counting both
+/// would charge the same fee twice, once as coins and once as dollars.
+pub fn parse_fee_activity(v: &Value) -> Option<CryptoFeeActivity> {
+    let kind = v.get("activity_type")?.as_str()?.to_ascii_uppercase();
+    if kind != "CFEE" && kind != "FEE" {
+        return None;
+    }
+    let status = v.get("status").and_then(Value::as_str).unwrap_or("executed").to_ascii_lowercase();
+    if status.starts_with("cancel") {
+        return None;
+    }
+    let raw_symbol = v.get("symbol").and_then(Value::as_str)?;
+    let symbol = position_symbol(raw_symbol, "crypto");
+    if !symbol.contains('/') {
+        return None; // an equity's fee, or one without a pair
+    }
+    let qty = num_or0(v.get("qty"));
+    let (coins, usd) = if qty != 0.0 { (-qty, 0.0) } else { (0.0, -num_or0(v.get("net_amount"))) };
+    if !(coins.is_finite() && usd.is_finite()) || (coins == 0.0 && usd == 0.0) {
+        return None;
+    }
+    let date = v
+        .get("date")
+        .or_else(|| v.get("created_at"))
+        .and_then(Value::as_str)
+        .map(|d| d.chars().take(10).collect::<String>())
+        .unwrap_or_default();
+    Some(CryptoFeeActivity {
+        id: v.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        activity_type: kind,
+        date,
+        symbol,
+        coins,
+        usd,
+        price: num(v.get("price")).filter(|p| *p > 0.0),
+    })
+}
+
+/// Every crypto fee in an activities response (a JSON array).
+pub fn parse_fee_activities(v: &Value) -> Vec<CryptoFeeActivity> {
+    v.as_array().map(|a| a.iter().filter_map(parse_fee_activity).collect()).unwrap_or_default()
 }
 
 fn now_ms() -> i64 {
@@ -773,7 +912,11 @@ impl MarketConnector for AlpacaConnector {
                 // Selling more than we hold is a short. Alpaca cannot short
                 // fractionally at all, and will not short a non-shortable name.
                 let held = self.position_qty(&req.symbol).await?;
-                if req.qty > held + 1e-9 {
+                // A crypto exit for a few coins more than the venue shows is
+                // the buy's fee, taken in the coin and not posted yet: the
+                // submit sells what is held (see `submit_order`).
+                let fee_gap = req.reduce_only && asset.is_crypto() && within_crypto_fee(req.qty, held);
+                if req.qty > held + 1e-9 && !fee_gap {
                     if req.reduce_only {
                         return Err(ConnectorError::Preflight(format!(
                             "exit wants {:.4} {} but the broker only shows {:.4}",
@@ -811,6 +954,20 @@ impl MarketConnector for AlpacaConnector {
         let fractionable = asset.as_ref().map(|a| a.fractionable).unwrap_or(true);
         let ref_price = req.ref_price.or(req.limit_price).unwrap_or(0.0);
         let limit_price = if req.order_type == OrderType::Limit { req.limit_price } else { None };
+
+        // Alpaca takes a buy's crypto fee out of the coins bought, and Pythia
+        // only learns how many when the fee activity is posted. Until then an
+        // exit can ask for slightly more than the account holds; it sells
+        // what is held instead, and the engine books the gap as that fee.
+        let mut req = req;
+        if crypto && req.reduce_only && req.side == Side::Sell {
+            let held = self.position_qty(&req.symbol).await?;
+            if within_crypto_fee(req.qty, held) {
+                // Down to the 6 decimals the body is written with, so the
+                // rounding can never ask for more than is there.
+                req.qty = (held * 1e6).floor() / 1e6;
+            }
+        }
 
         let notional_entry = req.side == Side::Buy
             && !req.reduce_only
@@ -1013,6 +1170,72 @@ mod tests {
         for s in ["new", "accepted", "pending_new", "partially_filled"] {
             assert!(!map_status(s).is_terminal(), "{s} is still working");
         }
+    }
+
+    #[test]
+    fn a_filled_crypto_order_carries_no_fee_because_alpaca_reports_none() {
+        // The Order object's fields (reference getorderbyorderid-1) have no
+        // fee or commission; this is the shape a filled BTC/USD buy comes in.
+        let v: Value = serde_json::from_str(
+            r#"{"id":"61e69015-8549-4bfd-b9c3-01e75843f47d","client_order_id":"pythia-ord_9-x",
+                "created_at":"2026-10-08T12:00:00.1Z","filled_at":"2026-10-08T12:00:00.4Z",
+                "asset_class":"crypto","symbol":"BTC/USD","qty":"0.016","filled_qty":"0.016",
+                "filled_avg_price":"60000","order_type":"market","type":"market","side":"buy",
+                "time_in_force":"gtc","status":"filled","extended_hours":false}"#,
+        )
+        .unwrap();
+        let o = parse_order(&v).unwrap();
+        assert_eq!((o.status, o.filled_qty, o.avg_price), (BrokerOrderStatus::Filled, 0.016, Some(60_000.0)));
+        assert_eq!((o.fee, o.fee_base), (0.0, 0.0), "not known yet: posted later as an activity");
+    }
+
+    #[test]
+    fn reads_the_crypto_fee_activity_from_alpacas_own_example() {
+        // Verbatim from docs.alpaca.markets/docs/crypto-trading.
+        let v: Value = serde_json::from_str(
+            r#"{"id":"20220812000000000::53be51ba-46f9-43de-b81f-576f241dc680","activity_type":"CFEE",
+                "date":"2022-08-12","net_amount":"0","description":"Coin Pair Transaction Fee (Non USD)",
+                "symbol":"ETHUSD","qty":"-0.000195","price":"1884.5","status":"executed"}"#,
+        )
+        .unwrap();
+        let a = parse_fee_activity(&v).expect("a crypto fee");
+        assert_eq!(a.id, "20220812000000000::53be51ba-46f9-43de-b81f-576f241dc680");
+        assert_eq!((a.activity_type.as_str(), a.date.as_str(), a.symbol.as_str()), ("CFEE", "2022-08-12", "ETH/USD"));
+        assert_eq!((a.coins, a.usd), (0.000195, 0.0), "charged in ETH, the coin bought");
+        assert_eq!(a.price, Some(1884.5));
+        // In dollars at the record's price, the way the engine values it at the fill.
+        assert!((a.coins * 1884.5 - 0.3674775).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_sells_fee_is_in_dollars_and_everything_else_is_not_a_crypto_fee() {
+        let v: Value = serde_json::from_str(
+            r#"[
+              {"id":"1","activity_type":"FEE","date":"2026-10-08","net_amount":"-2.75","symbol":"BTCUSD","status":"executed"},
+              {"id":"2","activity_type":"CFEE","date":"2026-10-08","net_amount":"-1.50","qty":"0","symbol":"ETH/USD"},
+              {"id":"3","activity_type":"FILL","order_id":"904837e3-3b76-47ec-b432-046db621571b","symbol":"BTC/USD","qty":"0.1","price":"60000","side":"buy"},
+              {"id":"4","activity_type":"FEE","date":"2026-10-08","net_amount":"-0.02","symbol":"AAPL"},
+              {"id":"5","activity_type":"DIV","date":"2026-10-08","net_amount":"1.10","symbol":"MSFT"},
+              {"id":"6","activity_type":"CFEE","date":"2026-10-08","net_amount":"0","qty":"-0.0001","symbol":"BTCUSD","status":"canceled"},
+              {"id":"7","activity_type":"CFEE","date":"2026-10-08","net_amount":"0","qty":"0","symbol":"BTCUSD"}
+            ]"#,
+        )
+        .unwrap();
+        let fees = parse_fee_activities(&v);
+        let ids: Vec<&str> = fees.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2"], "the fills, the equity fee, the dividend, the cancelled and the empty entry are not crypto fees");
+        assert_eq!((fees[0].symbol.as_str(), fees[0].coins, fees[0].usd), ("BTC/USD", 0.0, 2.75));
+        assert_eq!((fees[1].symbol.as_str(), fees[1].coins, fees[1].usd), ("ETH/USD", 0.0, 1.5));
+    }
+
+    #[test]
+    fn an_exit_may_fall_short_by_at_most_alpacas_highest_fee() {
+        // 1 BTC bought, 25 bps kept: 0.9975 held.
+        assert!(within_crypto_fee(1.0, 0.9975));
+        assert!(within_crypto_fee(1.0, 0.9985), "a lower tier keeps less");
+        assert!(!within_crypto_fee(1.0, 0.99), "1 % short is not a fee");
+        assert!(!within_crypto_fee(1.0, 1.0) && !within_crypto_fee(1.0, 1.2), "nothing short");
+        assert!(!within_crypto_fee(1.0, 0.0), "nothing held is not a fee");
     }
 
     #[test]

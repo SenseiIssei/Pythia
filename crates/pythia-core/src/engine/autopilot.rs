@@ -942,6 +942,33 @@ impl Engine {
         }
     }
 
+    /// A fee that reached the engine after its fill: Alpaca posts crypto fees
+    /// at the end of the day (`engine::alpaca_fees`). The autopilot that owns
+    /// the market pays it, or else the one whose sleeve `sid` trades it (the
+    /// round trip may be closed, or the autopilot stopped, by then): a fee
+    /// is a cost of the trade that caused it, whenever it arrives.
+    /// `open_after` is whether the position is still open once the fee's
+    /// coins left it. Returns the autopilot's label, for the journal.
+    pub(super) fn autopilot_on_late_fee(&mut self, sid: &str, market: &str, fee: f64, open_after: bool) -> Option<String> {
+        let trades_it = |a: &Autopilot| a.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market));
+        let i = self
+            .autopilots
+            .iter()
+            .position(|a| a.owned.contains_key(market))
+            .or_else(|| self.autopilots.iter().rposition(trades_it))?;
+        let ap = &mut self.autopilots[i];
+        let owner = ap.owned.get(market).cloned().unwrap_or_else(|| sid.to_string());
+        let fee = fee.max(0.0);
+        ap.fees += fee;
+        if let Some(s) = ap.sleeve_mut(&owner) {
+            s.fees += fee;
+        }
+        if !open_after {
+            ap.owned.remove(market);
+        }
+        Some(ap.label())
+    }
+
     /// Reconciliation set a position to what the venue holds. When an
     /// autopilot owns it, the difference is booked to that autopilot: the
     /// quantity follows the venue, and the P&L the changed part carried is

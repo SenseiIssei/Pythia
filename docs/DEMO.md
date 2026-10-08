@@ -101,6 +101,20 @@ The first demo connection test is the check.
   bought. Every fill books the coins actually received and the fee in dollars
   at the fill price, so the position matches the demo (or live) account and
   the exit sells what is there.
+- Alpaca crypto fees work differently: Alpaca charges them in what the trade
+  credits (a BTC/USD buy pays in BTC, a sell in dollars), its order object
+  has no fee field, and the fee is posted at the end of the day as a `CFEE`
+  or `FEE` account activity
+  ([docs](https://docs.alpaca.markets/docs/crypto-trading)). Pythia books
+  the fill as filled, waits for the fee, and reads the activities every half
+  hour while it waits (paper and live accounts alike). A posted coin fee
+  leaves the position, the fee goes into the strategy's and the autopilot's
+  fees in dollars at the fill price, and the journal says so. If the account
+  shows the coins gone earlier (reconciliation, or an exit that sold what
+  the account held), that gap is booked as the fee at once and the posting
+  only confirms it. Whether the paper account charges these fees is not in
+  Alpaca's docs; if no fee is posted within a week the journal says so.
+  Equities are unchanged: commission-free, regulatory fees not modelled.
 - A demo order that was sent but not yet acknowledged when Pythia stopped is
   looked up at the demo venue by its client order id after the restart
   (Bybit `orderLinkId`, OKX `clOrdId`, Binance `origClientOrderId`, Alpaca

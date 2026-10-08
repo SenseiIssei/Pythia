@@ -3,6 +3,9 @@
 //! [`EngineState`] snapshot to the UI each tick. This is the Rust owner of the
 //! same model the browser build runs in TypeScript.
 
+pub mod alpaca_fees;
+#[cfg(test)]
+mod alpaca_fees_tests;
 pub mod autopilot;
 #[cfg(test)]
 mod autopilot_tests;
@@ -1025,6 +1028,13 @@ pub struct Persisted {
     /// can never reset a stop rule.
     #[serde(default)]
     pub autopilots: Vec<autopilot::Autopilot>,
+    /// Alpaca crypto fills still waiting for their fee, and the fee
+    /// activities already booked. Losing either on restart would leave a
+    /// fee unbooked or book it twice.
+    #[serde(default)]
+    pub alpaca_fees: Vec<alpaca_fees::AlpacaFeeWatch>,
+    #[serde(default)]
+    pub alpaca_fee_seen: Vec<(String, i64)>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -1173,6 +1183,13 @@ pub struct Engine {
     lab_books_idle: bool,
     /// Real fills not yet handed to the host for the tax record (see `crate::tax`).
     fill_records: Vec<crate::tax::FillRecord>,
+    /// Alpaca crypto fills waiting for the fee Alpaca posts at the end of the
+    /// day (see [`alpaca_fees`]).
+    alpaca_fees: Vec<alpaca_fees::AlpacaFeeWatch>,
+    /// Fee activities already booked, by account and id, with when.
+    alpaca_fee_seen: HashMap<String, i64>,
+    /// When the daemon was last told to read them. Not saved.
+    alpaca_fee_polled: i64,
     /// Average entry per open position at reference prices (before execution
     /// costs), for the gross line. Missing means "same as the fill price".
     ref_prices: HashMap<String, f64>,
@@ -1269,6 +1286,9 @@ impl Engine {
             lab_notes: HashSet::new(),
             lab_books_idle: false,
             fill_records: Vec::new(),
+            alpaca_fees: Vec::new(),
+            alpaca_fee_seen: HashMap::new(),
+            alpaca_fee_polled: 0,
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
             vol_spike: risk::VolSpikeGuard::default(),
@@ -4112,8 +4132,12 @@ impl Engine {
                             fee: fee_delta,
                             strategy_id: f.strategy_id.clone(),
                             order_id: order_id.to_string(),
+                            kind: crate::tax::RecordKind::Fill,
                         });
                     }
+                    // Alpaca crypto reports no fee with the fill; it is
+                    // booked when Alpaca posts it (see `alpaca_fees`).
+                    self.watch_alpaca_fee(order_id, &f, &m, &update);
                     let coin_note = if coin_fee > 0.0 {
                         let base = m.symbol.split('/').next().unwrap_or("coin");
                         format!(
@@ -4164,6 +4188,9 @@ impl Engine {
         }
 
         if update.status.is_terminal() {
+            // An Alpaca crypto exit that sold what the venue held, short of
+            // the book by the buy's unposted fee.
+            self.alpaca_exit_gap(&f, &update);
             self.finish_live_order(order_id, &update);
         }
     }
@@ -4321,6 +4348,19 @@ impl Engine {
             if self.positions.get(&market_id).is_some_and(|p| p.demo) {
                 continue;
             }
+            // Alpaca took a crypto buy's fee out of the coins and has not
+            // posted it yet: the gap is that fee, not a stranger's trade.
+            let fee_gap = self
+                .positions
+                .get(&market_id)
+                .filter(|p| venue == Venue::Alpaca && p.live && p.qty > 0.0 && bp.qty >= 0.0 && p.qty > bp.qty + 1e-6)
+                .map(|p| p.qty - bp.qty);
+            if let Some(gap) = fee_gap {
+                let paper = self.live.paper;
+                if self.take_alpaca_fee_gap(&market_id, gap, paper, false, "the venue's position shows it") {
+                    continue;
+                }
+            }
             let avg = if bp.avg_price > 0.0 { bp.avg_price } else { price };
             match self.positions.get_mut(&market_id) {
                 Some(p) if (p.qty - bp.qty).abs() < 1e-6 => {
@@ -4387,6 +4427,12 @@ impl Engine {
             .map(|(id, _)| id.clone())
             .collect();
         for id in vanished {
+            // All that was left was a fee Alpaca took in the coin.
+            let left = self.positions.get(&id).map(|p| p.qty).unwrap_or(0.0);
+            let paper = self.live.paper;
+            if venue == Venue::Alpaca && left > 0.0 && self.take_alpaca_fee_gap(&id, left, paper, false, "the venue holds none") {
+                continue;
+            }
             let gone = self.positions.remove(&id);
             self.ref_prices.remove(&id);
             changes += 1;
@@ -5246,6 +5292,8 @@ impl Engine {
                 .collect(),
             inflight: self.inflight.iter().map(|(id, f)| (id.clone(), f.clone())).collect(),
             autopilots: self.autopilots.clone(),
+            alpaca_fees: self.alpaca_fees.clone(),
+            alpaca_fee_seen: self.alpaca_fee_seen.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         }
     }
 
@@ -5445,6 +5493,8 @@ impl Engine {
         }
         self.autopilots = p.autopilots;
         self.autopilots_after_restore();
+        self.alpaca_fees = p.alpaca_fees;
+        self.alpaca_fee_seen = p.alpaca_fee_seen.into_iter().collect();
         if resolved > 0 {
             self.log(
                 JournalKind::System,
