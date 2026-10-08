@@ -917,7 +917,7 @@ fn orders_still_at_the_venue_count_against_the_sleeves_room() {
     let half = o.qty / 2.0;
     e.apply_live_update(
         &o.order_id,
-        LiveUpdate { status: BrokerOrderStatus::PartiallyFilled, filled_qty: half, avg_price: Some(o.ref_price), fee: 0.0, raw_status: "partially_filled".into() },
+        LiveUpdate { status: BrokerOrderStatus::PartiallyFilled, filled_qty: half, avg_price: Some(o.ref_price), fee: 0.0, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "partially_filled".into() },
     );
     assert_eq!(status(&e, &id).open_positions, 1, "the partial fill is the autopilot's");
     let after = e.autopilot_sizing("ema-cross-1").unwrap().room;
@@ -982,7 +982,7 @@ fn a_demo_stop_says_its_closes_are_at_the_venue_not_that_live_routing_is_off() {
     e.apply_live_ack(&o.order_id, "venue-1");
     e.apply_live_update(
         &o.order_id,
-        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, raw_status: "filled".into() },
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "filled".into() },
     );
     assert_eq!(status(&e, &id).open_positions, 1);
 
@@ -998,7 +998,7 @@ fn a_demo_stop_says_its_closes_are_at_the_venue_not_that_live_routing_is_off() {
     e.apply_live_ack(&out[0].order_id, "venue-2");
     e.apply_live_update(
         &out[0].order_id,
-        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: out[0].qty, avg_price: Some(o.ref_price * 1.01), fee: 0.1, raw_status: "filled".into() },
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: out[0].qty, avg_price: Some(o.ref_price * 1.01), fee: 0.1, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "filled".into() },
     );
     let s = status(&e, &id);
     assert_eq!((s.open_positions, s.trades), (0, 1));
@@ -1018,7 +1018,7 @@ fn a_demo_entry_that_fills_after_the_stop_is_booked_and_closed_again() {
 
     e.apply_live_update(
         &o.order_id,
-        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, raw_status: "filled".into() },
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "filled".into() },
     );
     assert_eq!(status(&e, &id).open_positions, 1, "the late fill is the stopped autopilot's");
     step(&mut e);

@@ -18,7 +18,7 @@ use super::super::{
     num, num_or0, sign, Balance, BrokerOrder, BrokerOrderStatus, ConnectorError, OrderRequest,
     OrderType,
 };
-use super::{is_fiat, normalize_asset, CexConnector};
+use super::{is_fiat, normalize_asset, CexConnector, FeeSplit};
 use serde_json::Value;
 
 const BASE: &str = "https://api.binance.com";
@@ -74,22 +74,47 @@ fn map_status(s: &str) -> BrokerOrderStatus {
 
 /// Binance reports cumulative filled base qty and cumulative quote spend; the
 /// average price is the ratio (it never sends an average directly).
-fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
+///
+/// The order itself carries no fee. Commission is per trade, as `commission`
+/// plus `commissionAsset`: in the `fills` of a FULL new-order response
+/// (market and limit orders default to FULL,
+/// <https://developers.binance.com/docs/binance-spot-api-docs/rest-api/trading-endpoints>)
+/// and in `GET /api/v3/myTrades`
+/// (<https://developers.binance.com/docs/binance-spot-api-docs/rest-api/account-endpoints>).
+/// Binance charges it in the asset received (the coin on a buy) unless the
+/// account pays with BNB, so `commissionAsset` decides what it is.
+fn parse_order(v: &Value, trades: Option<&Value>, base: &str, quote_asset: &str) -> Result<BrokerOrder, ConnectorError> {
     let id = num(v.get("orderId"))
         .map(|n| format!("{n:.0}"))
         .ok_or_else(|| ConnectorError::Network("Binance order response has no orderId".into()))?;
     let raw = v.get("status").and_then(Value::as_str).unwrap_or("NEW").to_string();
     let filled = num_or0(v.get("executedQty"));
     let quote = num_or0(v.get("cummulativeQuoteQty"));
-    Ok(BrokerOrder {
+    let mut order = BrokerOrder {
         id,
         client_order_id: v.get("clientOrderId").and_then(Value::as_str).map(str::to_string),
         status: map_status(&raw),
         filled_qty: filled,
         avg_price: (filled > 0.0 && quote > 0.0).then(|| quote / filled),
-        fee: 0.0, // charged in BNB or the received asset; not reported on this endpoint
+        fee: 0.0,
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
         raw_status: raw,
-    })
+    };
+    let legs: Vec<(String, f64)> = trades
+        .or_else(|| v.get("fills"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| {
+                    let asset = t.get("commissionAsset").and_then(Value::as_str)?;
+                    Some((asset.to_string(), num_or0(t.get("commission"))))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    FeeSplit::fold(legs, base, quote_asset).apply(&mut order);
+    Ok(order)
 }
 
 pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<BrokerOrder, ConnectorError> {
@@ -108,10 +133,17 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
         params.push(("newClientOrderId", cid.clone()));
     }
     let v = signed(c, reqwest::Method::POST, "/api/v3/order", &params).await?;
-    parse_order(&v)
+    let (base, quote) = c.exchange.assets(&req.symbol);
+    parse_order(&v, None, &base, &quote)
 }
 
-pub(super) async fn status(c: &CexConnector, order_id: &str, symbol: &str) -> Result<BrokerOrder, ConnectorError> {
+pub(super) async fn status(
+    c: &CexConnector,
+    order_id: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<BrokerOrder, ConnectorError> {
     let v = signed(
         c,
         reqwest::Method::GET,
@@ -119,7 +151,23 @@ pub(super) async fn status(c: &CexConnector, order_id: &str, symbol: &str) -> Re
         &[("symbol", symbol.to_string()), ("orderId", order_id.to_string())],
     )
     .await?;
-    parse_order(&v)
+    // The order has no fee field; its trades do. Without them a buy would
+    // book coins Binance kept as commission, so a failed read is retried
+    // (the error goes back to the poll) rather than booked without fees.
+    let trades = if num_or0(v.get("executedQty")) > 0.0 {
+        Some(
+            signed(
+                c,
+                reqwest::Method::GET,
+                "/api/v3/myTrades",
+                &[("symbol", symbol.to_string()), ("orderId", order_id.to_string())],
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    parse_order(&v, trades.as_ref(), base, quote)
 }
 
 pub(super) async fn cancel(c: &CexConnector, order_id: &str, symbol: &str) -> Result<(), ConnectorError> {
@@ -179,11 +227,44 @@ mod tests {
             "orderId": 28457, "clientOrderId": "pythia-3", "status": "FILLED",
             "executedQty": "0.50000000", "cummulativeQuoteQty": "16000.00000000"
         });
-        let o = parse_order(&v).unwrap();
+        let o = parse_order(&v, None, "BTC", "USDT").unwrap();
         assert_eq!(o.id, "28457", "the numeric id must not become 28457.0 or 2.8e4");
         assert_eq!(o.status, BrokerOrderStatus::Filled);
         assert_eq!(o.filled_qty, 0.5);
         assert_eq!(o.avg_price, Some(32000.0));
+    }
+
+    /// A FULL new-order response for a market buy: two fills, commission in
+    /// the coin bought.
+    #[test]
+    fn a_market_buy_pays_commission_in_the_coin_it_bought() {
+        let v: Value = serde_json::json!({
+            "symbol": "BTCUSDT", "orderId": 28, "clientOrderId": "pythia-x-1", "status": "FILLED",
+            "executedQty": "0.02000000", "cummulativeQuoteQty": "1200.00000000", "side": "BUY", "type": "MARKET",
+            "fills": [
+                {"price": "60000.00", "qty": "0.01500000", "commission": "0.00001500", "commissionAsset": "BTC"},
+                {"price": "60000.00", "qty": "0.00500000", "commission": "0.00000500", "commissionAsset": "BTC"}
+            ]
+        });
+        let o = parse_order(&v, None, "BTC", "USDT").unwrap();
+        assert!((o.fee_base - 0.00002).abs() < 1e-15, "{}", o.fee_base);
+        assert!((o.fee - 1.2).abs() < 1e-9, "0.00002 BTC at $60,000: {}", o.fee);
+    }
+
+    /// `GET /api/v3/myTrades` for a status poll: a sell paid in USDT and a
+    /// trade paid in BNB, which this connector cannot price.
+    #[test]
+    fn trades_fold_quote_and_bnb_commission_apart() {
+        let order: Value = serde_json::json!({
+            "orderId": 7, "status": "FILLED", "executedQty": "2", "cummulativeQuoteQty": "300"
+        });
+        let trades: Value = serde_json::json!([
+            {"orderId": 7, "price": "150", "qty": "1", "commission": "0.15", "commissionAsset": "USDT", "isBuyer": false},
+            {"orderId": 7, "price": "150", "qty": "1", "commission": "0.0002", "commissionAsset": "BNB", "isBuyer": false}
+        ]);
+        let o = parse_order(&order, Some(&trades), "SOL", "USDT").unwrap();
+        assert_eq!((o.fee, o.fee_base), (0.15, 0.0));
+        assert_eq!(o.fee_unpriced, vec![("BNB".to_string(), 0.0002)]);
     }
 
     #[test]
@@ -191,7 +272,7 @@ mod tests {
         let v: Value = serde_json::json!({
             "orderId": 1, "status": "NEW", "executedQty": "0", "cummulativeQuoteQty": "0"
         });
-        let o = parse_order(&v).unwrap();
+        let o = parse_order(&v, None, "BTC", "USDT").unwrap();
         assert_eq!(o.avg_price, None, "0/0 must not become NaN");
         assert!(!o.status.is_terminal());
     }

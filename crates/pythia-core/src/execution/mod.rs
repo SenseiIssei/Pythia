@@ -287,16 +287,7 @@ async fn submit_one(engine: &Mutex<Engine>, creds: &Credentials, o: LiveOrderOut
             // Some venues fill on submit; book it now rather than waiting a tick.
             if bo.filled_qty > 0.0 || bo.status.is_terminal() {
                 let mut e = engine.lock().unwrap();
-                e.apply_live_update(
-                    &o.order_id,
-                    LiveUpdate {
-                        status: bo.status,
-                        filled_qty: bo.filled_qty,
-                        avg_price: bo.avg_price,
-                        fee: bo.fee,
-                        raw_status: bo.raw_status,
-                    },
-                );
+                e.apply_live_update(&o.order_id, LiveUpdate::from(bo));
             }
         }
         Err(e) => reject(engine, &o.order_id, &e.to_string()),
@@ -343,16 +334,7 @@ pub async fn poll_inflight(engine: &Mutex<Engine>, creds: &Credentials) {
         match conn.order_status(&p.broker_id, &p.symbol).await {
             Ok(bo) => {
                 let mut e = engine.lock().unwrap();
-                e.apply_live_update(
-                    &p.order_id,
-                    LiveUpdate {
-                        status: bo.status,
-                        filled_qty: bo.filled_qty,
-                        avg_price: bo.avg_price,
-                        fee: bo.fee,
-                        raw_status: bo.raw_status,
-                    },
-                );
+                e.apply_live_update(&p.order_id, LiveUpdate::from(bo));
             }
             Err(e) if e.is_transient() => {} // retry next tick
             Err(e) => {

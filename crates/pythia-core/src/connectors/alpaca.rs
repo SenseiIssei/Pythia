@@ -678,6 +678,8 @@ fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
         filled_qty: num_or0(v.get("filled_qty")),
         avg_price: num(v.get("filled_avg_price")).filter(|p| *p > 0.0),
         fee: 0.0, // Alpaca US equities are commission-free
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
         raw_status: raw,
     })
 }

@@ -199,11 +199,41 @@ pub struct BrokerOrder {
     pub filled_qty: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_price: Option<f64>,
-    /// Cumulative fees/commission charged so far, in quote currency.
+    /// Cumulative fees/commission charged so far, valued in the quote
+    /// currency. A fee the venue took in the coin itself is included here at
+    /// the fill price (and its coins are in `fee_base`).
     pub fee: f64,
+    /// The part of the fee charged in the base coin, in coins. On a spot buy
+    /// Bybit, OKX and Binance take their fee out of the coin bought, so the
+    /// account receives `filled_qty - fee_base`: that is the position, not
+    /// `filled_qty`. Zero when every fee was charged in the quote currency.
+    #[serde(default)]
+    pub fee_base: f64,
+    /// Fees charged in a third asset the connector cannot price (Binance's
+    /// BNB discount), as (asset, amount). Not in `fee`; the engine values
+    /// them from its own prices when it can and journals them when it cannot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fee_unpriced: Vec<(String, f64)>,
     /// The venue's own status string, kept for the journal so a surprising
     /// rejection is debuggable without reading our mapping code.
     pub raw_status: String,
+}
+
+impl BrokerOrder {
+    /// A submission the venue accepted and has not filled any of yet.
+    pub fn acknowledged(id: impl Into<String>, client_order_id: Option<String>) -> Self {
+        BrokerOrder {
+            id: id.into(),
+            client_order_id,
+            status: BrokerOrderStatus::Working,
+            filled_qty: 0.0,
+            avg_price: None,
+            fee: 0.0,
+            fee_base: 0.0,
+            fee_unpriced: Vec::new(),
+            raw_status: "submitted".into(),
+        }
+    }
 }
 
 /// A position as the *venue* sees it — the ground truth for reconciliation.

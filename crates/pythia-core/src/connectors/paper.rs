@@ -77,6 +77,8 @@ impl MarketConnector for PaperConnector {
             filled_qty: req.qty,
             avg_price: Some(price),
             fee: price * req.qty * 0.0006,
+            fee_base: 0.0,
+            fee_unpriced: Vec::new(),
             raw_status: "paper-filled".into(),
         };
         self.filled.lock().unwrap().insert(order.id.clone(), order.clone());

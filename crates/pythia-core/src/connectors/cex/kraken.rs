@@ -71,16 +71,7 @@ fn map_status(s: &str) -> BrokerOrderStatus {
 }
 
 pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<BrokerOrder, ConnectorError> {
-    let pair = c.exchange.symbol(&req.symbol);
-    let mut params: Vec<(&str, String)> = vec![
-        ("ordertype", if req.order_type == OrderType::Limit { "limit".into() } else { "market".into() }),
-        ("pair", pair),
-        ("type", req.side.as_str().to_string()),
-        ("volume", sign::trim_decimals(req.qty, 8)),
-    ];
-    if let (OrderType::Limit, Some(p)) = (req.order_type, req.limit_price) {
-        params.push(("price", sign::trim_decimals(p, 8)));
-    }
+    let params = add_order_params(c.exchange.symbol(&req.symbol), &req);
     // Kraken's userref is a signed 32-bit int, so a UUID will not fit; the
     // engine's client id is carried for the journal only.
     let result = private(c, "AddOrder", &params).await?;
@@ -91,15 +82,27 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
         .and_then(Value::as_str)
         .ok_or_else(|| ConnectorError::Rejected("Kraken accepted the order but returned no txid".into()))?;
 
-    Ok(BrokerOrder {
-        id: txid.to_string(),
-        client_order_id: req.client_order_id,
-        status: BrokerOrderStatus::Working,
-        filled_qty: 0.0,
-        avg_price: None,
-        fee: 0.0,
-        raw_status: "submitted".into(),
-    })
+    Ok(BrokerOrder::acknowledged(txid, req.client_order_id))
+}
+
+/// The `AddOrder` form for one order on Kraken's `pair`.
+fn add_order_params(pair: String, req: &OrderRequest) -> Vec<(&'static str, String)> {
+    let mut params: Vec<(&'static str, String)> = vec![
+        ("ordertype", if req.order_type == OrderType::Limit { "limit".into() } else { "market".into() }),
+        ("pair", pair),
+        ("type", req.side.as_str().to_string()),
+        ("volume", sign::trim_decimals(req.qty, 8)),
+    ];
+    if let (OrderType::Limit, Some(p)) = (req.order_type, req.limit_price) {
+        params.push(("price", sign::trim_decimals(p, 8)));
+    }
+    // Fee currency: Kraken's default is the quote currency on a buy and the
+    // BASE coin on a sell ("fcib prefer fee in base currency (default if
+    // selling)", <https://docs.kraken.com/api/docs/rest-api/add-order>). A
+    // sell would then need more coin than it sells, and an exit of the whole
+    // position could never go through. Pin the quote currency on both sides.
+    params.push(("oflags", "fciq".into()));
+    params
 }
 
 pub(super) async fn status(c: &CexConnector, txid: &str) -> Result<BrokerOrder, ConnectorError> {
@@ -107,7 +110,17 @@ pub(super) async fn status(c: &CexConnector, txid: &str) -> Result<BrokerOrder, 
     let o = result
         .get(txid)
         .ok_or_else(|| ConnectorError::Rejected(format!("Kraken has no order {txid}")))?;
+    Ok(parse_order(txid, o))
+}
 
+/// One order of `QueryOrders`
+/// (<https://docs.kraken.com/api/docs/rest-api/get-orders-info>): `fee` is
+/// the "Total fee (quote currency)" and `price` the "Average price". Orders
+/// from Pythia carry `fciq`, so the fee was also charged in the quote
+/// currency. An order with `fcib` in its `oflags` (placed elsewhere, or
+/// before the pin) paid its fee in the base coin: the same value, taken as
+/// coins at the average price.
+fn parse_order(txid: &str, o: &Value) -> BrokerOrder {
     let raw = o.get("status").and_then(Value::as_str).unwrap_or("unknown").to_string();
     let exec = num_or0(o.get("vol_exec"));
     let mut st = map_status(&raw);
@@ -117,15 +130,26 @@ pub(super) async fn status(c: &CexConnector, txid: &str) -> Result<BrokerOrder, 
         st = BrokerOrderStatus::PartiallyFilled;
     }
     // A cancel that caught a partial still filled that much — keep the quantity.
-    Ok(BrokerOrder {
+    let avg_price = num(o.get("price")).filter(|p| *p > 0.0);
+    let fee = num_or0(o.get("fee"));
+    let in_base = o
+        .get("oflags")
+        .and_then(Value::as_str)
+        .is_some_and(|f| f.split(',').any(|x| x.trim() == "fcib"));
+    BrokerOrder {
         id: txid.to_string(),
         client_order_id: None,
         status: st,
         filled_qty: exec,
-        avg_price: num(o.get("price")).filter(|p| *p > 0.0),
-        fee: num_or0(o.get("fee")),
+        avg_price,
+        fee,
+        fee_base: match avg_price {
+            Some(p) if in_base => fee / p,
+            _ => 0.0,
+        },
+        fee_unpriced: Vec::new(),
         raw_status: raw,
-    })
+    }
 }
 
 pub(super) async fn cancel(c: &CexConnector, txid: &str) -> Result<(), ConnectorError> {
@@ -196,6 +220,34 @@ mod tests {
         assert_eq!(map_status("closed"), BrokerOrderStatus::Filled);
         assert_eq!(map_status("canceled"), BrokerOrderStatus::Canceled);
         assert!(!map_status("pending").is_terminal());
+    }
+
+    #[test]
+    fn every_order_asks_for_its_fee_in_the_quote_currency() {
+        for side in [super::super::super::Side::Buy, super::super::super::Side::Sell] {
+            let req = OrderRequest::market("BTC/USD", side, 0.01);
+            let p = add_order_params("XBTUSD".into(), &req);
+            assert!(p.contains(&("oflags", "fciq".to_string())), "{side:?}: {p:?}");
+        }
+    }
+
+    /// QueryOrders reports `fee` in the quote currency. With `fciq` that is
+    /// money; an order carrying `fcib` paid the same value in coins.
+    #[test]
+    fn a_fee_in_the_quote_currency_takes_no_coins_and_fcib_does() {
+        let quote: Value = serde_json::json!({
+            "status": "closed", "vol_exec": "0.01000000", "price": "60000.0", "fee": "1.56000", "oflags": "fciq"
+        });
+        let o = parse_order("OABC", &quote);
+        assert_eq!((o.fee, o.fee_base), (1.56, 0.0));
+        assert_eq!(o.status, BrokerOrderStatus::Filled);
+
+        let base: Value = serde_json::json!({
+            "status": "closed", "vol_exec": "0.01000000", "price": "60000.0", "fee": "1.56000", "oflags": "fcib,post"
+        });
+        let o = parse_order("OABD", &base);
+        assert_eq!(o.fee, 1.56);
+        assert!((o.fee_base - 0.000026).abs() < 1e-12, "{}", o.fee_base);
     }
 
     #[test]
