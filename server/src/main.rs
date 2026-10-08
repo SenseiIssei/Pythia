@@ -281,9 +281,18 @@ fn lab_only(e: &mut Engine) {
         if s.kind != StrategyKind::LabTargets {
             let _ = e.set_strategy_state(&s.id, StrategyState::Paused);
         } else if s.state == StrategyState::Paused {
+            // Refused for a book that trades only inside an autopilot; one
+            // restored before its signal says so is paused again by the signal.
             let _ = e.set_strategy_state(&s.id, StrategyState::Paper);
         }
     }
+}
+
+/// `PYTHIA_LAB_BOOKS=idle`: lab books wait, paused and holding nothing, until
+/// an autopilot claims them. Anything else (or unset) keeps the default: a
+/// lab book trades on its own from its first signal.
+fn lab_books_idle() -> bool {
+    std::env::var("PYTHIA_LAB_BOOKS").map(|v| v.trim().eq_ignore_ascii_case("idle")).unwrap_or(false)
 }
 
 /// The model service's status handle, set once at startup.
@@ -363,9 +372,21 @@ async fn main() {
         // A headless instance that only runs lab books (the VPS) pauses the
         // built-in indicator strategies, which would otherwise hold the same
         // coins and block the lab book from running its portfolio.
-        if std::env::var("PYTHIA_LAB_ONLY").map(|v| v == "1").unwrap_or(false) {
+        let lab_only_on = std::env::var("PYTHIA_LAB_ONLY").map(|v| v == "1").unwrap_or(false);
+        if lab_only_on {
             lab_only(&mut e);
             tracing::info!("PYTHIA_LAB_ONLY: built-in strategies paused, lab strategies only");
+        }
+        // An instance that runs autopilots (the second engine on the VPS)
+        // reads the same signals but keeps every lab book idle until an
+        // autopilot claims it, so a book never fills up on its own and is
+        // then locked out of every autopilot.
+        if lab_books_idle() {
+            if lab_only_on {
+                tracing::warn!("PYTHIA_LAB_BOOKS=idle and PYTHIA_LAB_ONLY are both set: lab books stay idle, so nothing trades on its own here");
+            }
+            e.set_lab_books_idle(true);
+            tracing::info!("PYTHIA_LAB_BOOKS=idle: lab books trade only inside an autopilot");
         }
         // Costs follow the selected exchange even before its keys are set.
         e.set_crypto_cost_venue(
@@ -1515,6 +1536,8 @@ mod tests {
             weights: [("BTC".to_string(), 0.1)].into_iter().collect(),
             regime_on: Some(true),
             evidence: Default::default(),
+            autopilot_only: false,
+            dropped: vec![],
         });
         e
     }
@@ -1544,5 +1567,55 @@ mod tests {
         e.set_strategy_state("lab:tsmom_regime", StrategyState::Paused).unwrap();
         lab_only(&mut e);
         assert_eq!(states(&e, true), vec![StrategyState::Paper]);
+    }
+
+    fn autopilot_only_signal(e: &mut Engine) {
+        let now = chrono::Utc::now().timestamp_millis();
+        e.apply_lab_signal(pythia_core::lab::LabSignal {
+            strategy: "breakout_top10".into(),
+            variant: "Donchian 20/10".into(),
+            as_of_ms: now,
+            generated_ms: now,
+            valid_until_ms: now + 3_600_000,
+            quote: "USD".into(),
+            weights: [("ETH".to_string(), 0.1)].into_iter().collect(),
+            regime_on: None,
+            evidence: Default::default(),
+            autopilot_only: true,
+            dropped: vec![],
+        });
+    }
+
+    #[test]
+    fn lab_only_runs_the_standalone_book_and_leaves_an_autopilot_only_book_idle() {
+        let mut e = with_lab_book();
+        autopilot_only_signal(&mut e);
+        lab_only(&mut e);
+        let lab: Vec<(String, StrategyState)> = e
+            .state()
+            .strategies
+            .iter()
+            .filter(|s| s.kind == StrategyKind::LabTargets)
+            .map(|s| (s.id.clone(), s.state))
+            .collect();
+        assert_eq!(
+            lab,
+            vec![
+                ("lab:tsmom_regime".to_string(), StrategyState::Paper),
+                ("lab:breakout_top10".to_string(), StrategyState::Paused)
+            ]
+        );
+    }
+
+    #[test]
+    fn idle_lab_books_stay_paused_whatever_lab_only_did() {
+        let saved = with_lab_book().to_persisted();
+        let mut e = Engine::new();
+        e.apply_persisted(saved);
+        lab_only(&mut e);
+        e.set_lab_books_idle(true);
+        assert_eq!(states(&e, true), vec![StrategyState::Paused]);
+        autopilot_only_signal(&mut e);
+        assert_eq!(states(&e, true), vec![StrategyState::Paused, StrategyState::Paused]);
     }
 }

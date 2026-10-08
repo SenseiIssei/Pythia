@@ -36,6 +36,38 @@
 //!   that already holds coins cannot join an autopilot: it would never start
 //!   flat.
 //!
+//! # Lab books inside autopilots
+//!
+//! A lab book (`StrategyKind::LabTargets`) executes the research lab's daily
+//! target weights. By default the first signal creates it in paper and it
+//! rebalances on its own, which also means it holds coins and can never join
+//! an autopilot. An engine meant for autopilots runs with
+//! `PYTHIA_LAB_BOOKS=idle` instead: every lab book is created *idle*
+//! (paused, holding nothing) and kept up to date with its latest signal and
+//! evidence, and it trades only once an autopilot claims it, with that
+//! autopilot's capital and route. When the autopilot stops, the book is
+//! paused again (idle) and the autopilot's `flattenOnStop` decides what
+//! happens to the coins; coins left open stay unmanaged (a lab book has no
+//! stops) and keep the book out of the next autopilot until they are closed.
+//! A signal can also ask for this on any engine (`autopilot_only`), which
+//! the lab does for candidates that fail deflation or overlap a book that
+//! already runs standalone.
+//!
+//! # The auto pick
+//!
+//! "Let Pythia choose" scores every candidate on one scale
+//! ([`Evidence::score`]): gates passed, cleared for live, a measured edge,
+//! a positive forward record and, for lab books, the out-of-sample Sharpe,
+//! the Sharpe with costs doubled and the deflated-Sharpe probability, all
+//! divided by one plus the gates failed. Each pick says why in one sentence,
+//! and a pick that fails the deflation test (or has no green passport) says
+//! that it is the best available evidence, not a proven edge. Candidates are
+//! taken best first and markets stay exclusive: a lab book claims every
+//! crypto market as one set, so the best lab book takes the crypto markets
+//! alone, and built-ins only get crypto markets when they out-score every
+//! lab book. Whoever is passed over for that reason is named in the start
+//! message.
+//!
 //! # Stop rules
 //!
 //! The *floor* is the highest of: the max-loss levels (`maxLossUsd`, and
@@ -508,13 +540,38 @@ pub struct Evidence {
     pub forward_trades: u32,
     /// Net P&L of its closed trades, fees included.
     pub net: f64,
-    /// Lab books: out-of-sample Sharpe and deflated-Sharpe probability.
+    /// A lab book: its research numbers come from the lab's report.
+    pub lab: bool,
+    /// Lab books: out-of-sample Sharpe, deflated-Sharpe probability over
+    /// `lab_variants` variants, and the Sharpe with costs doubled (or more).
     pub lab_oos_sharpe: Option<f64>,
     pub lab_deflated_p: Option<f64>,
+    pub lab_variants: Option<usize>,
+    pub lab_sharpe_2x_cost: Option<f64>,
 }
+
+/// Gate 6 passes above this deflated-Sharpe probability (see `lab::verdict`).
+pub const DEFLATION_PASS: f64 = 0.95;
 
 impl Evidence {
     /// A score for weighting, or `None` when the evidence rules it out.
+    ///
+    /// Every strategy, built-in or lab book, is scored on one scale:
+    ///
+    /// ```text
+    /// ( 1 + gates passed
+    ///     + 4                        cleared for live
+    ///     + 2 + 20 x Kelly (<= 0.25)  a measured edge from 30+ closed trades
+    ///     + 1                        10+ forward trades, net positive
+    ///     + OOS Sharpe   (0 to 2)    lab books, out of sample, after costs
+    ///     + 0.5 x Sharpe at 2x cost (0 to 2)
+    ///     + deflated p   (0 to 1)    the probability the Sharpe is skill
+    /// ) / (1 + gates failed)
+    /// ```
+    ///
+    /// A built-in strategy nobody has run the checks for scores 1. A lab book
+    /// that fails half its gates is divided down hard, so a high Sharpe on its
+    /// own does not buy a pick.
     pub fn score(&self) -> Option<f64> {
         if self.no_edge {
             return None;
@@ -529,11 +586,14 @@ impl Evidence {
         if self.forward_trades >= 10 && self.net > 0.0 {
             s += 1.0;
         }
-        if let Some(sh) = self.lab_oos_sharpe.filter(|v| *v > 0.0) {
-            s += sh.min(2.0);
+        if let Some(sh) = self.lab_oos_sharpe.filter(|v| v.is_finite()) {
+            s += sh.clamp(0.0, 2.0);
         }
-        if self.lab_deflated_p.is_some_and(|p| p >= 0.95) {
-            s += 1.0;
+        if let Some(sh) = self.lab_sharpe_2x_cost.filter(|v| v.is_finite()) {
+            s += 0.5 * sh.clamp(0.0, 2.0);
+        }
+        if let Some(p) = self.lab_deflated_p.filter(|v| v.is_finite()) {
+            s += p.clamp(0.0, 1.0);
         }
         Some(s / (1.0 + self.failed as f64))
     }
@@ -556,9 +616,46 @@ impl Evidence {
         }
         if let Some(sh) = self.lab_oos_sharpe {
             let p = self.lab_deflated_p.map(|p| format!(", deflated p {p:.2}")).unwrap_or_default();
-            parts.push(format!("lab out-of-sample Sharpe {sh:.2}{p}"));
+            let over = match (self.lab_deflated_p, self.lab_variants) {
+                (Some(_), Some(n)) => format!(" over {n} variants"),
+                _ => String::new(),
+            };
+            let cost = self.lab_sharpe_2x_cost.map(|c| format!(", Sharpe {c:.2} with costs doubled")).unwrap_or_default();
+            parts.push(format!("lab out-of-sample Sharpe {sh:.2}{p}{over}{cost}"));
         }
         parts.join(", ")
+    }
+
+    /// What the evidence does not prove, so that a pick is never presented
+    /// as a proven edge when it is not. `None` only for a strategy cleared
+    /// for live (every gate green, deflation included).
+    pub fn caveat(&self) -> Option<String> {
+        if self.live_ready {
+            return None;
+        }
+        Some(match (self.lab, self.lab_deflated_p) {
+            (_, Some(p)) if p <= DEFLATION_PASS => format!(
+                "it fails the deflation test (deflated p {p:.2}, {DEFLATION_PASS} needed), so it is picked as the best available evidence, not as a proven edge"
+            ),
+            (true, None) => "its lab report gives no deflated Sharpe, so it is picked as the best available evidence, not as a proven edge".into(),
+            _ => "its edge is not proven: not every gate is green, so it is picked as the best available evidence".into(),
+        })
+    }
+
+    /// One plain sentence on why auto picked it. `rank` 0 is the best.
+    pub fn auto_why(&self, rank: usize, candidates: usize) -> String {
+        let place = if candidates == 1 {
+            "the only strategy it could run here".to_string()
+        } else if rank == 0 {
+            format!("the best evidence of the {candidates} strategies it could run here")
+        } else {
+            format!("number {} of {candidates} by evidence", rank + 1)
+        };
+        let mut s = format!("Auto pick, {place} ({})", self.describe());
+        if let Some(c) = self.caveat() {
+            s.push_str(&format!(": {c}"));
+        }
+        s
     }
 }
 
@@ -874,8 +971,11 @@ impl Engine {
             .collect();
 
         let auto = cfg.sleeves.is_empty();
+        let mut passed_over: Vec<String> = Vec::new();
         let picks: Vec<(String, f64, String)> = if auto {
-            self.auto_pick(venue, cfg.mode, &busy)?
+            let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken)?;
+            passed_over = over;
+            picks
         } else {
             let mut out = Vec::new();
             for sl in &cfg.sleeves {
@@ -896,22 +996,18 @@ impl Engine {
             .iter()
             .map(|(sid, w, _)| {
                 let s = self.strategies.iter().find(|s| &s.id == sid).expect("picked strategies exist");
-                let universe = if s.kind == StrategyKind::LabTargets {
-                    self.markets.iter().filter(|m| m.venue == Venue::Crypto).map(|m| m.id.clone()).collect()
-                } else {
-                    s.universe.iter().filter(|id| self.markets.iter().any(|m| &m.id == *id)).cloned().collect()
-                };
-                Want { weight: *w, whole: trades_as_set(s.kind), universe }
+                Want { weight: *w, whole: trades_as_set(s.kind), universe: self.sleeve_universe(s) }
             })
             .collect();
         let assigned = assign_markets(&wants, &taken);
         let mut chosen: Vec<(String, f64, String, Vec<String>)> = Vec::new();
         for ((sid, w, why), markets) in picks.into_iter().zip(assigned) {
             if markets.is_empty() {
+                let name = self.strategies.iter().find(|s| s.id == sid).map(|s| s.name.clone()).unwrap_or(sid);
                 if auto {
+                    passed_over.push(name);
                     continue;
                 }
-                let name = self.strategies.iter().find(|s| s.id == sid).map(|s| s.name.clone()).unwrap_or(sid);
                 return Err(format!(
                     "{name} has no market of its own left: every market it trades already belongs to another sleeve or another autopilot. One position per market means two strategies cannot hold the same coin; drop one of them or pick strategies on different markets."
                 ));
@@ -1026,6 +1122,12 @@ impl Engine {
         );
         for sl in &sleeves {
             msg.push_str(&format!(" {}: {}", sl.name, sl.why));
+        }
+        if !passed_over.is_empty() {
+            msg.push_str(&format!(
+                " Auto passed over {}: the markets they need already belong to a pick with better evidence or to another autopilot (one position per market).",
+                passed_over.join(", ")
+            ));
         }
         if !outside.is_empty() {
             msg.push_str(&format!(
@@ -1393,6 +1495,11 @@ impl Engine {
                 tail.push_str(&format!(" Closed its {} position(s).", open.len()));
             }
         } else if !open.is_empty() {
+            let lab_open = self.autopilots[i]
+                .owned
+                .values()
+                .filter(|sid| self.strategies.iter().any(|s| &s.id == *sid && s.kind == StrategyKind::LabTargets))
+                .count();
             let u = self.ap_unrealized(&self.autopilots[i], None);
             let ap = &mut self.autopilots[i];
             ap.released += u;
@@ -1401,6 +1508,11 @@ impl Engine {
                 " Left its {} position(s) open, now managed by their strategies' stops; its P&L counts them at their price now.",
                 open.len()
             ));
+            if lab_open > 0 {
+                tail.push_str(&format!(
+                    " {lab_open} of them belong to a lab book, which carries no stops and does not trade on its own: close them on the Positions page, and until then the book cannot join another autopilot."
+                ));
+            }
         }
         let sleeves: Vec<(String, String, StrategyState)> =
             self.autopilots[i].sleeves.iter().map(|s| (s.strategy_id.clone(), s.name.clone(), s.prior_state)).collect();
@@ -1413,6 +1525,14 @@ impl Engine {
         }
         if !paused.is_empty() {
             tail.push_str(&format!(" Paused its strategies: {}.", paused.join(", ")));
+        }
+        let idle: Vec<String> =
+            sleeves.iter().filter(|(sid, ..)| self.lab_book_autopilot_only(sid)).map(|(_, n, _)| n.clone()).collect();
+        if !idle.is_empty() {
+            tail.push_str(&format!(
+                " Idle again, waiting for the next autopilot: {} (it keeps receiving the lab's signal and trades only inside an autopilot).",
+                idle.join(", ")
+            ));
         }
         let ap = &self.autopilots[i];
         let eq = self.ap_equity(ap);
@@ -1497,6 +1617,12 @@ impl Engine {
                 return Some(format!("{} has no signal from the lab yet.", s.name));
             }
             let held = self.positions.values().any(|p| p.strategy_id == s.id && p.qty.abs() > 1e-12);
+            if held && self.lab_book_autopilot_only(&s.id) {
+                return Some(format!(
+                    "{} still holds coins, left open when an autopilot stopped without closing them (or from before it was idle). A lab book only trades by rebalancing, so it could never start flat inside the autopilot: close them on the Positions page first.",
+                    s.name
+                ));
+            }
             if held {
                 return Some(format!(
                     "{} still holds coins from its own run. A lab book only trades by rebalancing, so it could never start flat inside the autopilot: pause it and close its positions first.",
@@ -1522,20 +1648,56 @@ impl Engine {
             kelly: est.map(|k| k.shrunk).unwrap_or(0.0),
             forward_trades: s.ledger.forward_trades,
             net: s.ledger.pnl.net,
+            lab: s.kind == StrategyKind::LabTargets,
             lab_oos_sharpe: lab.and_then(|e| e.oos_sharpe),
             lab_deflated_p: lab.and_then(|e| e.deflated_p),
+            lab_variants: lab.and_then(|e| e.variants_tried),
+            lab_sharpe_2x_cost: lab.and_then(|e| e.sharpe_2x_cost),
+        }
+    }
+
+    /// The markets a sleeve of this strategy would trade: a lab book every
+    /// crypto market (its weights may name any of them), anything else the
+    /// markets of its universe that exist here.
+    fn sleeve_universe(&self, s: &super::StrategyConfig) -> Vec<String> {
+        if s.kind == StrategyKind::LabTargets {
+            self.markets.iter().filter(|m| m.venue == Venue::Crypto).map(|m| m.id.clone()).collect()
+        } else {
+            s.universe.iter().filter(|id| self.markets.iter().any(|m| &m.id == *id)).cloned().collect()
         }
     }
 
     /// "Auto": the strategies the engine can run on this venue today, weighted
-    /// by their evidence. Paused strategies are left out (they were paused on
-    /// purpose, often on their evidence), so is any whose own record shows no
-    /// edge, and live only takes strategies cleared for live.
-    fn auto_pick(&self, venue: Venue, mode: AutopilotMode, busy: &HashSet<String>) -> Result<Vec<(String, f64, String)>, String> {
+    /// by their evidence ([`Evidence::score`], one scale for built-ins and lab
+    /// books). Paused strategies are left out (they were paused on purpose,
+    /// often on their evidence) except idle lab books, which wait paused for
+    /// exactly this; so is any whose own record shows no edge, a lab book
+    /// whose signal has expired, and live only takes strategies cleared for
+    /// live.
+    ///
+    /// Markets stay exclusive, and the evidence decides who gets them: the
+    /// candidates are taken best first, and a candidate is passed over when a
+    /// stronger pick already holds what it needs. A lab book trades its whole
+    /// universe (every crypto market) as one set, so it is passed over when a
+    /// stronger pick holds any crypto market; and once the best lab book is
+    /// in, a built-in on crypto has nothing left and is passed over too. On
+    /// crypto that normally means: the best lab book takes the crypto markets
+    /// alone, and built-ins only run when they out-score every lab book.
+    /// Returns the picks (id, weight, why) and the names passed over.
+    fn auto_pick(
+        &self,
+        venue: Venue,
+        mode: AutopilotMode,
+        busy: &HashSet<String>,
+        taken: &HashSet<String>,
+    ) -> Result<(Vec<(String, f64, String)>, Vec<String>), String> {
+        let now = self.now();
         let mut scored: Vec<(String, f64, Evidence)> = self
             .strategies
             .iter()
-            .filter(|s| s.id != "manual" && s.state != StrategyState::Paused)
+            .filter(|s| s.id != "manual")
+            .filter(|s| s.state != StrategyState::Paused || self.lab_book_autopilot_only(&s.id))
+            .filter(|s| s.kind != StrategyKind::LabTargets || self.lab_signals.get(&s.id).is_some_and(|g| g.is_fresh(now)))
             .filter(|s| self.sleeve_block(&s.id, venue, mode, busy).is_none())
             .filter_map(|s| {
                 let ev = self.evidence(&s.id);
@@ -1553,7 +1715,31 @@ impl Engine {
         }
         // Highest score first; ties keep the engine's order.
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(AUTO_MAX_SLEEVES);
-        Ok(scored.into_iter().map(|(id, sc, ev)| (id, sc, format!("Auto pick for {}", ev.describe()))).collect())
+        let candidates = scored.len();
+        let mut held: HashSet<String> = HashSet::new(); // markets a kept pick trades
+        let mut sets: HashSet<String> = taken.clone(); // markets a kept whole set claimed
+        let mut picks = Vec::new();
+        let mut passed_over = Vec::new();
+        for (rank, (sid, sc, ev)) in scored.into_iter().enumerate() {
+            let s = self.strategies.iter().find(|s| s.id == sid).expect("scored strategies exist");
+            let universe = self.sleeve_universe(s);
+            let fits = if trades_as_set(s.kind) {
+                !universe.is_empty() && universe.iter().all(|m| !held.contains(m) && !sets.contains(m))
+            } else {
+                universe.iter().any(|m| !sets.contains(m))
+            };
+            if !fits || picks.len() >= AUTO_MAX_SLEEVES {
+                if !fits {
+                    passed_over.push(s.name.clone());
+                }
+                continue;
+            }
+            if trades_as_set(s.kind) {
+                sets.extend(universe.iter().cloned());
+            }
+            held.extend(universe);
+            picks.push((sid, sc, ev.auto_why(rank, candidates)));
+        }
+        Ok((picks, passed_over))
     }
 }

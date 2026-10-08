@@ -35,6 +35,16 @@ pub struct LabSignal {
     pub regime_on: Option<bool>,
     #[serde(default)]
     pub evidence: LabEvidence,
+    /// The book trades only inside an autopilot, never on its own: the lab
+    /// writes this for candidates that overlap a book the engine already
+    /// runs, or that have not earned a standalone run (they fail deflation).
+    /// Old signals without the field run standalone, as before.
+    #[serde(default)]
+    pub autopilot_only: bool,
+    /// Coins the lab's book holds that Pythia has no market for. They are
+    /// left out of `weights`, so that share of the book stays in cash here.
+    #[serde(default)]
+    pub dropped: Vec<String>,
 }
 
 /// What the lab measured for the variant (reports/tsmom, reports/momentum2).
@@ -50,8 +60,12 @@ pub struct LabEvidence {
     pub deflated_p: Option<f64>,
     pub sharpe_2x_cost: Option<f64>,
     pub variants_tried: Option<usize>,
-    /// Share of all variants tried that were profitable out of sample.
+    /// Share of the neighbouring variants that were profitable out of sample.
     pub plateau_share: Option<f64>,
+    /// How many variants `plateau_share` counts, when that is fewer than
+    /// `variants_tried` (the plateau of one sub-family inside a larger sweep).
+    #[serde(default)]
+    pub plateau_variants: Option<usize>,
     #[serde(default)]
     pub regime_sharpes: BTreeMap<String, f64>,
     #[serde(default)]
@@ -154,7 +168,7 @@ pub fn verdict(strategy_id: &str, params: Vec<(String, f64)>, ev: &LabEvidence, 
             format!(
                 "{:.0} % of the {} variants tried were profitable out of sample",
                 p * 100.0,
-                ev.variants_tried.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
+                ev.plateau_variants.or(ev.variants_tried).map(|n| n.to_string()).unwrap_or_else(|| "?".into())
             ),
             Some(p),
             vec![],
@@ -388,5 +402,18 @@ mod tests {
         assert!(s.is_fresh(3) && !s.is_fresh(4));
         assert_eq!(s.weights["BTC"], 0.05);
         assert!(s.evidence.regime_filter);
+        assert!(!s.autopilot_only && s.dropped.is_empty(), "an old signal runs standalone, as before");
+
+        // The family candidates: autopilot only, coins without a market named,
+        // the plateau counted over their own sub-family.
+        let j = r#"{"strategy":"breakout_top10","variant":"Donchian 20/10","as_of_ms":1,"generated_ms":2,"valid_until_ms":3,
+            "quote":"USD","weights":{"BTC":0.1},"regime_on":null,"autopilot_only":true,"dropped":["HYPE"],
+            "evidence":{"report":"families_summary","oos_sharpe":1.2,"deflated_p":0.01,"variants_tried":100,
+            "plateau_share":1.0,"plateau_variants":6,"cost_note":"ignored by the engine"}}"#;
+        let s: LabSignal = serde_json::from_str(j).unwrap();
+        assert!(s.autopilot_only);
+        assert_eq!(s.dropped, vec!["HYPE".to_string()]);
+        let v = verdict("lab:breakout_top10", vec![], &s.evidence, 0);
+        assert!(v.gates[3].reason.contains("of the 6 variants tried"), "{}", v.gates[3].reason);
     }
 }
