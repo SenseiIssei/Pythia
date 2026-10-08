@@ -155,8 +155,7 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
         body["timeInForce"] = serde_json::json!("GTC");
     }
     if let Some(cid) = &req.client_order_id {
-        // orderLinkId is capped at 36 chars.
-        body["orderLinkId"] = serde_json::json!(cid.chars().take(36).collect::<String>());
+        body["orderLinkId"] = serde_json::json!(link_id(cid));
     }
 
     let result = post(c, "/v5/order/create", &body).await?;
@@ -167,6 +166,27 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
     Ok(BrokerOrder::acknowledged(id, req.client_order_id))
 }
 
+/// The `orderLinkId` an engine client id is sent as: capped at 36 chars.
+fn link_id(cid: &str) -> String {
+    cid.chars().take(36).collect()
+}
+
+/// One order by `orderId` or `orderLinkId`, or `None` when Bybit has no
+/// such order. `realtime` only keeps open orders; once terminal the order
+/// moves to history, so a miss there is a look-up in `/v5/order/history`.
+async fn find(c: &CexConnector, key: (&'static str, String), symbol: &str, base: &str, quote: &str) -> Result<Option<BrokerOrder>, ConnectorError> {
+    let params = [("category", "spot".to_string()), ("symbol", symbol.to_string()), key];
+    let live = get(c, "/v5/order/realtime", &params).await?;
+    if let Some(o) = live.get("list").and_then(Value::as_array).and_then(|a| a.first()) {
+        return parse_order(o, base, quote).map(Some);
+    }
+    let hist = get(c, "/v5/order/history", &params).await?;
+    match hist.get("list").and_then(Value::as_array).and_then(|a| a.first()) {
+        Some(o) => parse_order(o, base, quote).map(Some),
+        None => Ok(None),
+    }
+}
+
 pub(super) async fn status(
     c: &CexConnector,
     order_id: &str,
@@ -174,24 +194,22 @@ pub(super) async fn status(
     base: &str,
     quote: &str,
 ) -> Result<BrokerOrder, ConnectorError> {
-    let params = [
-        ("category", "spot".to_string()),
-        ("symbol", symbol.to_string()),
-        ("orderId", order_id.to_string()),
-    ];
-    // `realtime` only keeps open orders; once terminal the order moves to
-    // history, so a miss there is a look-up in `/v5/order/history`.
-    let live = get(c, "/v5/order/realtime", &params).await?;
-    if let Some(o) = live.get("list").and_then(Value::as_array).and_then(|a| a.first()) {
-        return parse_order(o, base, quote);
-    }
-    let hist = get(c, "/v5/order/history", &params).await?;
-    let o = hist
-        .get("list")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .ok_or_else(|| ConnectorError::Rejected(format!("Bybit has no order {order_id}")))?;
-    parse_order(o, base, quote)
+    find(c, ("orderId", order_id.to_string()), symbol, base, quote)
+        .await?
+        .ok_or_else(|| ConnectorError::Rejected(format!("Bybit has no order {order_id}")))
+}
+
+/// Look an order up by the client id it was sent under: `orderLinkId` is a
+/// query parameter of both order lists
+/// (<https://bybit-exchange.github.io/docs/v5/order/order-list>).
+pub(super) async fn by_client_id(
+    c: &CexConnector,
+    cid: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<Option<BrokerOrder>, ConnectorError> {
+    find(c, ("orderLinkId", link_id(cid)), symbol, base, quote).await
 }
 
 pub(super) async fn cancel(c: &CexConnector, order_id: &str, symbol: &str) -> Result<(), ConnectorError> {
@@ -307,6 +325,13 @@ mod tests {
         });
         let o = parse_order(&named, "SOL", "USDT").unwrap();
         assert_eq!((o.fee, o.fee_base), (0.2, 0.0));
+    }
+
+    #[test]
+    fn a_client_id_is_looked_up_under_the_order_link_id_it_was_sent_as() {
+        assert_eq!(link_id("pythia-a1b2-ord_17"), "pythia-a1b2-ord_17");
+        let long = "x".repeat(50);
+        assert_eq!(link_id(&long).len(), 36, "capped like the submission");
     }
 
     #[test]

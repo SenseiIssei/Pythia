@@ -715,6 +715,21 @@ pub struct LivePoll {
     pub cancel: bool,
 }
 
+/// A demo order sent before a restart that the venue never acknowledged.
+/// Produced by [`Engine::client_lookups`]; the daemon asks the demo venue for
+/// it by `client_order_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientLookup {
+    pub order_id: String,
+    pub client_order_id: String,
+    pub venue: Venue,
+    pub symbol: String,
+    pub demo: bool,
+    /// Since the restart.
+    pub age_ms: i64,
+}
+
 /// What a venue says about one of our orders, normalised.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -819,6 +834,11 @@ pub struct InFlight {
     /// bps signed against us; `None` without a fresh book.
     #[serde(default)]
     drift_bps: Option<f64>,
+    /// A demo order the venue never acknowledged before a restart: the daemon
+    /// looks it up by its client id ([`Engine::client_lookups`]) instead of
+    /// polling a broker id it does not have.
+    #[serde(default)]
+    lookup: bool,
 }
 
 impl InFlight {
@@ -3226,6 +3246,7 @@ impl Engine {
                 cost_source,
                 demo,
                 drift_bps,
+                lookup: false,
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -3940,6 +3961,84 @@ impl Engine {
                 })
             })
             .collect()
+    }
+
+    /// Demo orders from before a restart that the venue never acknowledged:
+    /// the daemon looks each up by its client id and answers with
+    /// [`Engine::apply_lookup_found`], [`Engine::apply_lookup_missing`] or
+    /// [`Engine::apply_lookup_failed`].
+    pub fn client_lookups(&self) -> Vec<ClientLookup> {
+        let now = self.now();
+        self.inflight
+            .iter()
+            .filter(|(_, f)| f.lookup && f.broker_id.is_none())
+            .map(|(order_id, f)| ClientLookup {
+                order_id: order_id.clone(),
+                client_order_id: f.client_order_id.clone(),
+                venue: f.venue,
+                symbol: f.symbol.clone(),
+                demo: f.demo,
+                age_ms: now - f.submitted_at,
+            })
+            .collect()
+    }
+
+    /// The demo venue has the order. From here it is followed like any other:
+    /// acknowledged under the venue's id, its fill so far booked now, and
+    /// polled until it is done.
+    pub fn apply_lookup_found(&mut self, order_id: &str, order: BrokerOrder) {
+        let Some(f) = self.inflight.get_mut(order_id) else { return };
+        f.lookup = false;
+        let (strategy, market, cid) = (f.strategy_id.clone(), f.market_id.clone(), f.client_order_id.clone());
+        self.apply_live_ack(order_id, &order.id);
+        self.log(
+            JournalKind::System,
+            format!(
+                "DEMO order {order_id} found at the demo venue by client id {cid} after the restart: {} with {} filled",
+                order.raw_status, order.filled_qty
+            ),
+            Some(strategy),
+            Some(market),
+        );
+        self.apply_live_update(order_id, LiveUpdate::from(order));
+    }
+
+    /// The demo venue has no order under that client id: it never arrived,
+    /// so nothing filled and nothing is booked.
+    pub fn apply_lookup_missing(&mut self, order_id: &str) {
+        let Some(f) = self.inflight.get(order_id) else { return };
+        let reason = format!(
+            "never reached the demo venue: it has no order with client id {} after the restart. Nothing filled",
+            f.client_order_id
+        );
+        self.close_unacknowledged(order_id, &reason, JournalKind::System);
+    }
+
+    /// The demo venue could not be asked (no keys, no lookup on this venue,
+    /// or no answer for too long). The order's fate stays unknown: its row is
+    /// closed with the client id to look for in the demo account.
+    pub fn apply_lookup_failed(&mut self, order_id: &str, why: &str) {
+        let Some(f) = self.inflight.get(order_id) else { return };
+        let reason = format!(
+            "status unknown: Pythia restarted before the demo venue acknowledged it, and the lookup by client id {} failed ({why}). Check the demo account for it; a fill there is not in Pythia's books",
+            f.client_order_id
+        );
+        self.close_unacknowledged(order_id, &reason, JournalKind::Risk);
+    }
+
+    fn close_unacknowledged(&mut self, order_id: &str, reason: &str, kind: JournalKind) {
+        let Some(f) = self.inflight.remove(order_id) else { return };
+        self.in_flight_markets.remove(&f.market_id);
+        if let Some(ord) = self.orders.iter_mut().find(|o| o.id == order_id) {
+            ord.status = OrderStatus::Rejected;
+            ord.reject_reason = Some(reason.to_string());
+        }
+        self.log(
+            kind,
+            format!("DEMO order {order_id} {:?} {}: {reason}", f.side, f.symbol),
+            Some(f.strategy_id),
+            Some(f.market_id),
+        );
     }
 
     /// Note that a cancel has been sent, so we do not send it every tick while
@@ -5069,18 +5168,44 @@ impl Engine {
     /// followed again: back in flight, its market blocked for new orders, and
     /// the daemon's next poll (`live_polls`) reads its status and books
     /// whatever filled meanwhile, cancelling it first if it is past the
-    /// timeout. One without a broker id never got an answer, so its fate is
-    /// unknown here; its row is closed as rejected with the client id to look
-    /// for at the venue, and reconciliation corrects any position it opened.
+    /// timeout. One without a broker id never got an answer. A demo one is
+    /// looked up at the demo venue by its client id ([`Engine::client_lookups`]),
+    /// since no reconciliation would ever correct the paper ledger it books
+    /// into. A live one's fate is unknown here; its row is closed as rejected
+    /// with the client id to look for at the venue, and reconciliation
+    /// corrects any position it opened.
     /// A "Pending" row with no saved state at all (a save from before in-flight
     /// orders were kept) is closed the same way rather than left pending forever.
     fn restore_inflight(&mut self, saved: Vec<(String, InFlight)>) {
         let mut followed = 0usize;
-        for (order_id, f) in saved {
+        let now = self.now();
+        for (order_id, mut f) in saved {
             if f.broker_id.is_some() {
                 self.in_flight_markets.insert(f.market_id.clone());
                 self.inflight.insert(order_id, f);
                 followed += 1;
+                continue;
+            }
+            // A demo order is in the paper ledger, which no reconciliation
+            // corrects: a fill that landed while Pythia was down would never
+            // be booked. Ask the demo venue for it by the client id it was
+            // sent under (`client_lookups`); the answer books it or closes it.
+            if f.demo && !f.client_order_id.is_empty() {
+                f.lookup = true;
+                // The lookup's own clock: it gives up on a venue that keeps
+                // not answering, counted from the restart.
+                f.submitted_at = now;
+                self.log(
+                    JournalKind::System,
+                    format!(
+                        "DEMO order {order_id} {:?} {} was sent before the restart and not acknowledged; looking it up at the demo venue by client id {}",
+                        f.side, f.symbol, f.client_order_id
+                    ),
+                    Some(f.strategy_id.clone()),
+                    Some(f.market_id.clone()),
+                );
+                self.in_flight_markets.insert(f.market_id.clone());
+                self.inflight.insert(order_id, f);
                 continue;
             }
             let at = if f.client_order_id.is_empty() { String::new() } else { format!(" (client id {})", f.client_order_id) };

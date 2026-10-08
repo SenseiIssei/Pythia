@@ -621,6 +621,22 @@ impl MarketConnector for CexConnector {
         }
     }
 
+    async fn order_by_client_id(&self, client_order_id: &str, symbol: &str) -> Result<Option<BrokerOrder>, ConnectorError> {
+        self.creds_ok()?;
+        let venue_symbol = self.exchange.symbol(symbol);
+        let (base, quote) = self.exchange.assets(symbol);
+        match self.exchange {
+            Exchange::Bybit => bybit::by_client_id(self, client_order_id, &venue_symbol, &base, &quote).await,
+            Exchange::Okx => okx::by_client_id(self, client_order_id, &venue_symbol, &base, &quote).await,
+            Exchange::Binance => binance::by_client_id(self, client_order_id, &venue_symbol, &base, &quote).await,
+            // Kraken's order id for us is a 32-bit userref, never the engine's
+            // client id, and neither venue has a demo route that needs this.
+            Exchange::Kraken | Exchange::Coinbase => {
+                Err(ConnectorError::Unimplemented("order lookup by client order id on this exchange"))
+            }
+        }
+    }
+
     async fn cancel_order(&self, broker_id: &str, symbol: &str) -> Result<(), ConnectorError> {
         self.creds_ok()?;
         let venue_symbol = self.exchange.symbol(symbol);

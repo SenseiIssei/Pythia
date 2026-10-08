@@ -179,3 +179,86 @@ fn a_demo_autopilot_on_a_real_price_demo_runs_on_and_names_the_demo_exchange() {
     let err = e.autopilot_start(c, false, VenueCash::NotRead).unwrap_err();
     assert!(err.contains("Bybit") && err.contains("demo"), "{err}");
 }
+
+// ── 5 · a demo order across a restart ──────────────────────────────────────
+
+/// A demo buy sent to Bybit's demo account that the venue had not
+/// acknowledged yet when the process stopped, and the engine after the restart.
+fn demo_order_across_restart() -> (Engine, LiveOrderOut) {
+    let mut e = engine();
+    e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Bybit), true);
+    let i = e.ensure_manual_strategy();
+    let sid = e.strategies[i].id.clone();
+    e.place_order(&sid, BTC, Side::Buy, 1_000.0, RouteIntent::Demo).expect("routed");
+    let o = e.drain_live_orders().pop().expect("a demo order went out");
+    let json = serde_json::to_string(&e.to_persisted()).unwrap();
+    let mut back = Engine::new();
+    back.apply_persisted(serde_json::from_str(&json).unwrap());
+    back.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Bybit), true);
+    (back, o)
+}
+
+fn filled_at_venue(o: &LiveOrderOut, px: f64) -> crate::connectors::BrokerOrder {
+    let mut bo = crate::connectors::BrokerOrder::acknowledged("bybit-77", Some(o.client_order_id.clone()));
+    bo.status = BrokerOrderStatus::Filled;
+    bo.filled_qty = o.qty;
+    bo.avg_price = Some(px);
+    bo.raw_status = "Filled".into();
+    bo
+}
+
+#[test]
+fn an_unacknowledged_demo_order_is_looked_up_by_client_id_after_a_restart_and_booked() {
+    let (mut e, o) = demo_order_across_restart();
+    let ls = e.client_lookups();
+    assert_eq!(ls.len(), 1, "the demo order is asked for, not dropped");
+    assert_eq!((ls[0].order_id.as_str(), ls[0].client_order_id.as_str()), (o.order_id.as_str(), o.client_order_id.as_str()));
+    assert!(ls[0].demo && ls[0].venue == Venue::Crypto && ls[0].symbol == "BTC/USD");
+    assert!(e.live_polls().is_empty(), "there is no broker id to poll yet");
+    assert!(e.in_flight_markets.contains(BTC), "no second order into that market meanwhile");
+    assert!(e.journal.iter().any(|j| j.message.contains(&o.client_order_id) && j.message.contains("looking it up")));
+
+    // It filled at the demo venue while Pythia was down.
+    e.apply_lookup_found(&o.order_id, filled_at_venue(&o, 60_000.0));
+    let p = e.positions.get(BTC).expect("the fill is booked");
+    assert!(p.demo && !p.live && (p.qty - o.qty).abs() < 1e-12);
+    let row = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+    assert_eq!((row.status, row.route), (OrderStatus::Filled, FillRoute::Demo));
+    assert!(e.client_lookups().is_empty() && e.live_polls().is_empty() && !e.in_flight_markets.contains(BTC));
+    assert!(e.drain_fill_records().is_empty(), "demo, never taxed");
+}
+
+#[test]
+fn a_demo_order_still_working_at_the_venue_is_followed_after_the_lookup() {
+    let (mut e, o) = demo_order_across_restart();
+    let mut bo = crate::connectors::BrokerOrder::acknowledged("bybit-78", Some(o.client_order_id.clone()));
+    bo.raw_status = "New".into();
+    e.apply_lookup_found(&o.order_id, bo);
+    let polls = e.live_polls();
+    assert_eq!(polls.len(), 1);
+    assert_eq!((polls[0].broker_id.as_str(), polls[0].demo), ("bybit-78", true));
+    assert!(e.client_lookups().is_empty());
+}
+
+#[test]
+fn a_demo_order_the_venue_never_received_is_closed_with_nothing_filled() {
+    let (mut e, o) = demo_order_across_restart();
+    e.apply_lookup_missing(&o.order_id);
+    let row = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+    assert_eq!(row.status, OrderStatus::Rejected);
+    assert!(row.reject_reason.as_deref().unwrap().contains("never reached the demo venue"));
+    assert!(e.positions.get(BTC).is_none());
+    assert!(e.client_lookups().is_empty() && !e.in_flight_markets.contains(BTC));
+}
+
+#[test]
+fn a_demo_venue_that_cannot_answer_leaves_the_client_id_in_the_journal() {
+    let (mut e, o) = demo_order_across_restart();
+    e.apply_lookup_failed(&o.order_id, "No demo exchange is configured");
+    let row = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+    assert_eq!(row.status, OrderStatus::Rejected);
+    let why = row.reject_reason.clone().unwrap();
+    assert!(why.contains(&o.client_order_id) && why.contains("Check the demo account"), "{why}");
+    assert!(e.journal.iter().any(|j| j.kind == JournalKind::Risk && j.message.contains(&o.client_order_id)));
+    assert!(e.client_lookups().is_empty() && !e.in_flight_markets.contains(BTC));
+}
