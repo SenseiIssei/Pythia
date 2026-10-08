@@ -158,13 +158,26 @@ def evidence(cfg: dict) -> dict:
                 "regime_sharpes": {r["regime"]: r["strategy_sharpe"] for r in rep.get("regimes", [])},
                 "regime_filter": False}
     pick = next(d for d in rep["details"] if d["family"] == "A regime")
-    return {"report": src, "oos_sharpe": pick["oos_sharpe"], "oos_max_dd": pick["oos_max_dd"],
-            "is_sharpe": pick["is_sharpe"], "deflated_p": pick["deflated_p"],
-            "sharpe_2x_cost": pick["sharpe_2x_cost"], "variants_tried": len(rep["rows"]),
-            "plateau_share": pick["family_positive_share"],
-            "regime_sharpes": {"BTC above 200d average": pick["sharpe_btc_above"],
-                               "BTC below 200d average": pick["sharpe_btc_below"]},
-            "regime_filter": True}
+    ev = {"report": src, "oos_sharpe": pick["oos_sharpe"], "oos_max_dd": pick["oos_max_dd"],
+          "is_sharpe": pick["is_sharpe"], "deflated_p": pick["deflated_p"],
+          "sharpe_2x_cost": pick["sharpe_2x_cost"], "variants_tried": len(rep["rows"]),
+          "plateau_share": pick["family_positive_share"],
+          "regime_sharpes": {"BTC above 200d average": pick["sharpe_btc_above"],
+                             "BTC below 200d average": pick["sharpe_btc_below"]},
+          "regime_filter": True}
+    # momentum2 tested this rule on today's 20 coins, which survived by
+    # definition. The strategy-family sweep ran the same rule on the 20 most
+    # liquid coins of each day (tsmom_top20); when that is known, it travels
+    # with the evidence, so nothing downstream ranks the book on a number that
+    # leaned on survivors.
+    from .families import evidence as family_evidence  # local: families imports this module
+    twin = family_evidence("tsmom_top20")
+    if not twin.get("missing") and twin.get("oos_sharpe") is not None:
+        ev["oos_sharpe_survivorship_free"] = twin["oos_sharpe"]
+        ev["caveat"] = (f"the same rule on the 20 most liquid coins of each day, dead ones included, made "
+                        f"out-of-sample Sharpe {twin['oos_sharpe']:.2f} instead of {pick['oos_sharpe']:.2f}: "
+                        f"part of the headline came from coins that happened to survive")
+    return ev
 
 
 def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_us: int, now_us: int,

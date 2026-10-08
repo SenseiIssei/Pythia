@@ -548,6 +548,8 @@ pub struct Evidence {
     pub lab_deflated_p: Option<f64>,
     pub lab_variants: Option<usize>,
     pub lab_sharpe_2x_cost: Option<f64>,
+    /// A known weakness of the lab evidence (see `lab::LabEvidence::caveat`).
+    pub lab_caveat: Option<String>,
 }
 
 /// Gate 6 passes above this deflated-Sharpe probability (see `lab::verdict`).
@@ -631,14 +633,18 @@ impl Evidence {
     /// for live (every gate green, deflation included).
     pub fn caveat(&self) -> Option<String> {
         if self.live_ready {
-            return None;
+            return self.lab_caveat.clone();
         }
-        Some(match (self.lab, self.lab_deflated_p) {
+        let base = match (self.lab, self.lab_deflated_p) {
             (_, Some(p)) if p <= DEFLATION_PASS => format!(
                 "it fails the deflation test (deflated p {p:.2}, {DEFLATION_PASS} needed), so it is picked as the best available evidence, not as a proven edge"
             ),
             (true, None) => "its lab report gives no deflated Sharpe, so it is picked as the best available evidence, not as a proven edge".into(),
             _ => "its edge is not proven: not every gate is green, so it is picked as the best available evidence".into(),
+        };
+        Some(match &self.lab_caveat {
+            Some(c) => format!("{base}; also, {c}"),
+            None => base,
         })
     }
 
@@ -1717,10 +1723,17 @@ impl Engine {
             forward_trades: s.ledger.forward_trades,
             net: s.ledger.pnl.net,
             lab: s.kind == StrategyKind::LabTargets,
-            lab_oos_sharpe: lab.and_then(|e| e.oos_sharpe),
+            // When the lab also measured the rule without survivorship, the
+            // lower of the two counts: a headline that leaned on coins that
+            // happened to survive must not win the pick.
+            lab_oos_sharpe: lab.and_then(|e| match (e.oos_sharpe, e.oos_sharpe_survivorship_free) {
+                (Some(a), Some(b)) if b.is_finite() => Some(a.min(b)),
+                (a, _) => a,
+            }),
             lab_deflated_p: lab.and_then(|e| e.deflated_p),
             lab_variants: lab.and_then(|e| e.variants_tried),
             lab_sharpe_2x_cost: lab.and_then(|e| e.sharpe_2x_cost),
+            lab_caveat: lab.and_then(|e| e.caveat.clone()),
         }
     }
 

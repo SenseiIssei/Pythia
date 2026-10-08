@@ -1076,6 +1076,22 @@ fn auto_skips_a_lab_book_whose_signal_has_expired() {
 }
 
 #[test]
+fn a_survivorship_free_measurement_lowers_the_lab_sharpe_and_the_pick_says_why() {
+    let mut l = regime_evidence();
+    l.oos_sharpe_survivorship_free = Some(0.54);
+    l.caveat = Some("the same rule on the 20 most liquid coins of each day made Sharpe 0.54, not 1.05".into());
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.3)], l, false));
+    let id = start(&mut e, config("auto", 1_000.0, &[], StopRules::default()));
+    let s = status(&e, &id);
+    let why = &s.by_sleeve.iter().find(|x| x.strategy_id == "lab:tsmom_regime").expect("still the only lab book").why;
+    assert!(why.contains("Sharpe 0.54"), "the lower Sharpe is the one shown: {why}");
+    assert!(!why.contains("Sharpe 1.05"), "{why}");
+    assert!(why.contains("also, the same rule on the 20 most liquid coins"), "{why}");
+}
+
+#[test]
 fn the_score_ranks_evidence_and_the_caveat_never_oversells() {
     let ev = |l: crate::lab::LabEvidence, passed: usize, failed: usize| Evidence {
         passed,
