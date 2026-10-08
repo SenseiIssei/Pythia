@@ -77,6 +77,21 @@ export const GLOSSARY: Record<string, string> = {
   "Execution: realised vs modelled slippage":
     "Whether real fills cost what the cost model assumed. If they cost much more, every backtest was too optimistic.",
   "Trade Log": "Every filled order, newest first.",
+
+  // Lab: forward tests
+  "Forward test":
+    "Trading with made-up money on real prices after the backtest was done, to see whether its promise holds on days it never saw.",
+  "Expected range":
+    "Where the backtest's own history says the result should land after this many days, 9 times out of 10. Outside it is a reason to look closer, not a verdict.",
+  "Gate 7":
+    "The practice check of the Strategy Passport: at least 30 days and 30 rebalances or closed trades with made-up money before anything goes near real money.",
+  "Paper vs model costs":
+    "What the practice fills actually paid, next to what the backtest assumed for the same trades. Much higher means the backtest was too optimistic.",
+  "Worst dip": "The biggest fall from a high point so far. Smaller is calmer.",
+  "Slippage by route":
+    "How far fills landed from the price at the moment of the decision, against what the cost model expected, split by practice, demo and real fills.",
+  Funding:
+    "What a perpetual futures position pays or receives every few hours to stay near the coin's price. Longs usually pay it, shorts receive it.",
   "Return Correlation Matrix": "How alike each pair of markets moves. Red squares move together (risk piles up), green ones move opposite (they balance).",
 
   // Diversification
