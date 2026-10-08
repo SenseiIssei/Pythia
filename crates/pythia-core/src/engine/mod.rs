@@ -4225,6 +4225,7 @@ impl Engine {
                 }
                 Some(p) => {
                     let was = p.qty;
+                    let was_avg = p.avg_price;
                     p.qty = bp.qty;
                     p.avg_price = avg;
                     p.live = true;
@@ -4240,8 +4241,10 @@ impl Engine {
                         JournalKind::Risk,
                         format!("Reconciled {}: book had {was:.6}, {venue:?} has {:.6} — broker wins", bp.symbol, bp.qty),
                         None,
-                        Some(market_id),
+                        Some(market_id.clone()),
                     );
+                    // An autopilot's position: the difference is its to book.
+                    self.autopilot_on_correction(&market_id, (was, was_avg), (bp.qty, avg), &format!("{venue:?}"));
                 }
                 None if adopt_unknown => {
                     self.positions.insert(
@@ -4281,7 +4284,7 @@ impl Engine {
             .map(|(id, _)| id.clone())
             .collect();
         for id in vanished {
-            self.positions.remove(&id);
+            let gone = self.positions.remove(&id);
             self.ref_prices.remove(&id);
             changes += 1;
             self.log(
@@ -4290,6 +4293,9 @@ impl Engine {
                 None,
                 Some(id.clone()),
             );
+            if let Some(p) = gone {
+                self.autopilot_on_correction(&id, (p.qty, p.avg_price), (0.0, 0.0), &format!("{venue:?}"));
+            }
         }
 
         if changes > 0 {
