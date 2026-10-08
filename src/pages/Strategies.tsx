@@ -8,6 +8,7 @@ import { PnlLines } from "../components/PnlBreakdown";
 import { researchAvailable, runValidation } from "../research";
 import type { Gate, GateUnit, Passport, StrategyConfig } from "../types";
 import { ConfirmButton } from "../components/Confirm";
+import { changeStrategyState } from "../strategyState";
 
 export function Strategies() {
   const { strategies, passports } = useStore();
@@ -55,14 +56,11 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
   const demo = s.state === "demo";
   const ready = passport?.liveReady ?? false;
 
-  /** Demo needs demo keys for the strategy's venue; the engine says if they are missing. */
-  async function goDemo() {
+  /** Every switch can be refused (demo keys missing, or an autopilot runs
+   *  this strategy and sets its state itself); the refusal is shown, never dropped. */
+  async function change(state: StrategyConfig["state"]) {
     setArmErr("");
-    try {
-      await setStrategyState(s.id, "demo");
-    } catch (e) {
-      setArmErr(String(e instanceof Error ? e.message : e));
-    }
+    setArmErr(await changeStrategyState(setStrategyState, s.id, state));
   }
 
   async function armLive() {
@@ -191,21 +189,21 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-cyber-border pt-3">
         <div className="flex flex-wrap items-center gap-2">
           {paused ? (
-            <Button tone="cyan" icon={Play} onClick={() => void setStrategyState(s.id, "paper")}>
+            <Button tone="cyan" icon={Play} onClick={() => void change("paper")}>
               Resume (paper)
             </Button>
           ) : (
-            <Button tone="neutral" icon={Pause} onClick={() => void setStrategyState(s.id, "paused")}>
+            <Button tone="neutral" icon={Pause} onClick={() => void change("paused")}>
               Pause
             </Button>
           )}
           {!paused && (
-            <Button icon={FlaskConical} tone="cyan" onClick={() => void setStrategyState(s.id, "paper")} disabled={s.state === "paper"}>
+            <Button icon={FlaskConical} tone="cyan" onClick={() => void change("paper")} disabled={s.state === "paper"}>
               Paper
             </Button>
           )}
           {!paused && !live && s.venueClass !== "polymarket" && (
-            <Button tone="purple" onClick={() => void goDemo()} disabled={demo}>
+            <Button tone="purple" onClick={() => void change("demo")} disabled={demo}>
               Demo
             </Button>
           )}
@@ -213,7 +211,7 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
 
         <div className="flex items-center gap-2">
           {live ? (
-            <Button tone="red" icon={Radio} onClick={() => void setStrategyState(s.id, "paper")}>
+            <Button tone="red" icon={Radio} onClick={() => void change("paper")}>
               Disarm live
             </Button>
           ) : (
