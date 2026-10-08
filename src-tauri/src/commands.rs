@@ -7,6 +7,7 @@ use pythia_core::connectors::cex::{self, Exchange, ExchangeInfo};
 use pythia_core::connectors::alpaca::AlpacaAccount;
 use pythia_core::connectors::{Environment, Side, Venue};
 use pythia_core::costs::CostVenue;
+use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, VenueCash};
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, EngineState, LiveConfig, MarketDiag, RiskLimits, StrategyConfig,
     StrategyState,
@@ -218,6 +219,53 @@ pub fn flatten(app: AppHandle, app_state: State<AppState>, market_id: String) {
 pub fn set_adaptive_execution(app: AppHandle, app_state: State<AppState>, on: bool) {
     app_state.engine.lock().unwrap().set_adaptive_execution(on);
     push_state(&app);
+}
+
+// ── autopilot ───────────────────────────────────────────────────────────────
+
+/// Give an amount to an autopilot. Live reads the venue's free cash first (no
+/// engine lock across the network) and needs the owner's typed `confirm`.
+/// Refusals come back as plain sentences. Returns the autopilot's id.
+#[tauri::command]
+pub async fn autopilot_start(app: AppHandle, config: AutopilotConfig, confirm: Option<bool>) -> Result<String, String> {
+    let (engine, creds) = {
+        let st = app.state::<AppState>();
+        (st.engine.clone(), credentials(st.inner()))
+    };
+    let cash = if config.mode == AutopilotMode::Live {
+        let paper = engine.lock().unwrap().live_config().paper;
+        match wallets::available_cash(&creds, &config.venue, paper).await {
+            Ok(c) => VenueCash::Read(c),
+            Err(why) => VenueCash::Failed(why),
+        }
+    } else {
+        VenueCash::NotRead
+    };
+    let id = engine.lock().unwrap().autopilot_start(config, confirm.unwrap_or(false), cash)?;
+    push_state(&app);
+    Ok(id)
+}
+
+/// Stop an autopilot; `flatten` overrides its own `flattenOnStop`.
+#[tauri::command]
+pub fn autopilot_stop(app: AppHandle, app_state: State<AppState>, id: String, flatten: Option<bool>) -> Result<(), String> {
+    let result = app_state.engine.lock().unwrap().autopilot_stop(&id, flatten);
+    push_state(&app);
+    result
+}
+
+#[tauri::command]
+pub fn autopilot_pause(app: AppHandle, app_state: State<AppState>, id: String) -> Result<(), String> {
+    let result = app_state.engine.lock().unwrap().autopilot_pause(&id);
+    push_state(&app);
+    result
+}
+
+#[tauri::command]
+pub fn autopilot_resume(app: AppHandle, app_state: State<AppState>, id: String) -> Result<(), String> {
+    let result = app_state.engine.lock().unwrap().autopilot_resume(&id);
+    push_state(&app);
+    result
 }
 
 // ── secrets vault ───────────────────────────────────────────────────────────

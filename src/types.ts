@@ -837,3 +837,98 @@ export interface WalletsSnapshot {
   unpriced: string[];
   updatedAt: number;
 }
+
+// ── autopilot ────────────────────────────────────────────────────────────────
+// Mirrors Rust `engine::autopilot`. An autopilot is given an amount
+// (`capitalUsd`) and trades it with its sleeves until the owner stops it or a
+// stop rule fires. It never moves money: the amount lives in an exchange or
+// broker account the owner funded.
+
+/** paper: virtual money. demo: a venue's demo account (routed like paper until
+ *  demo routing exists). live: real money, gated hardest of all. */
+export type AutopilotMode = "paper" | "demo" | "live";
+
+/** running · paused (opens nothing new, stop rules still apply) · stopped (by
+ *  the owner or a loss rule) · finished (end time, or a take-profit that stops). */
+export type AutopilotState = "running" | "paused" | "stopped" | "finished";
+
+export interface AutopilotSleeveConfig {
+  strategyId: string;
+  /** Relative weight; the engine normalises the weights to add up to 1. */
+  weight: number;
+}
+
+export interface AutopilotStopRules {
+  /** Stop once the loss reaches this % of the amount. */
+  maxLossPct?: number | null;
+  /** Stop once the loss reaches this many dollars (at most the amount). */
+  maxLossUsd?: number | null;
+  /** Profit target in % of the amount. */
+  takeProfitPct?: number | null;
+  /** "stop" finishes at the target; "lock" keeps half the gain as a floor and
+   *  moves the target up one step. */
+  onTakeProfit: "stop" | "lock";
+  /** Give back at most this % from the peak equity. */
+  trailingPct?: number | null;
+  /** Finish at this time (epoch ms). None and no profit target = endless. */
+  endMs?: number | null;
+}
+
+export interface AutopilotConfig {
+  /** Empty: the engine assigns one. */
+  id: string;
+  name: string;
+  mode: AutopilotMode;
+  /** A cost venue id from config/costs.json, e.g. "kraken" or "alpaca". */
+  venue: CostVenue;
+  capitalUsd: number;
+  /** Empty: "auto" picks strategies by their evidence. */
+  sleeves: AutopilotSleeveConfig[];
+  stop: AutopilotStopRules;
+  /** Close its positions when it stops (default true). */
+  flattenOnStop: boolean;
+}
+
+export interface AutopilotSleeveStatus {
+  strategyId: string;
+  name: string;
+  /** Share of the autopilot's equity, 0..1; the sleeves add up to 1. */
+  weight: number;
+  /** Realised and unrealised P&L of this sleeve's positions, net of fees. */
+  pnl: number;
+  /** Closed trades. */
+  trades: number;
+  /** Why this strategy is in the autopilot, in one sentence. */
+  why: string;
+  /** Markets assigned to this sleeve; no other sleeve or autopilot trades them. */
+  markets: string[];
+}
+
+export interface AutopilotStatus {
+  config: AutopilotConfig;
+  state: AutopilotState;
+  stopReason: string | null;
+  /** Why it is paused, when it is. */
+  pausedReason: string | null;
+  startedMs: number;
+  stoppedMs: number | null;
+  startCapital: number;
+  equity: number;
+  pnl: number;
+  pnlPct: number;
+  peakEquity: number;
+  drawdownPct: number;
+  /** The equity at which it stops; null without a loss or trailing rule. */
+  floorEquity: number | null;
+  /** The next take-profit level, when there is one. */
+  targetEquity: number | null;
+  /** Closed trades. */
+  trades: number;
+  fees: number;
+  /** Positions it owns right now. */
+  openPositions: number;
+  bySleeve: AutopilotSleeveStatus[];
+  lastAction: string | null;
+  /** [epoch ms, equity], one point a minute, thinned to at most 300. */
+  history: [number, number][];
+}
