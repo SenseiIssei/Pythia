@@ -1585,6 +1585,12 @@ impl Engine {
                 mode.word()
             ));
         }
+        if mode == AutopilotMode::Paper && s.state == StrategyState::Demo {
+            return Some(format!(
+                "{} demo-trades on its own. A paper autopilot would take it off demo; set it to paper yourself first if that is what you want, or start a demo autopilot.",
+                s.name
+            ));
+        }
         if s.venue_class != venue {
             return Some(format!("{} trades {:?} markets, not this autopilot's venue.", s.name, s.venue_class));
         }

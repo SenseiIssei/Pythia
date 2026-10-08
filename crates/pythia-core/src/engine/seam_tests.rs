@@ -37,6 +37,24 @@ fn state_of(e: &Engine, sid: &str) -> StrategyState {
     e.strategy_config(sid).unwrap().state
 }
 
+// ── 3 · a demo strategy and a paper autopilot ──────────────────────────────
+
+#[test]
+fn a_paper_autopilot_refuses_a_strategy_that_demo_trades_on_its_own() {
+    let mut e = engine();
+    e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Bybit), true);
+    e.set_strategy_state("ema-cross-1", StrategyState::Demo).unwrap();
+    let err = e.autopilot_start(config("p", AutopilotMode::Paper, &["ema-cross-1"]), false, VenueCash::NotRead).unwrap_err();
+    assert!(err.contains("demo-trades on its own"), "the same kind of sentence as for live: {err}");
+    assert!(err.contains("set it to paper yourself"), "{err}");
+    assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Demo, "not silently switched to paper");
+    assert!(e.autopilot_statuses().is_empty());
+
+    // A demo autopilot may take it: it keeps trading in demo there.
+    e.autopilot_start(config("d", AutopilotMode::Demo, &["ema-cross-1"]), false, VenueCash::NotRead)
+        .expect("demo takes a demo strategy");
+}
+
 // ── 2 · a demo whose prices are its own ────────────────────────────────────
 
 #[test]
