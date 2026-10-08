@@ -712,6 +712,28 @@ impl Engine {
             .sum()
     }
 
+    /// Notional of entries sent to a venue (demo or live) on the autopilot's
+    /// markets that have not filled yet. They become positions when the venue
+    /// says so; until then they still use up room, or every signal in the
+    /// meantime would be sized from the same budget again.
+    fn ap_pending(&self, ap: &Autopilot, sleeve: Option<&str>) -> f64 {
+        self.inflight
+            .values()
+            .filter(|f| sleeve.is_none_or(|s| s == f.strategy_id))
+            .filter(|f| ap.sleeves.iter().any(|s| s.strategy_id == f.strategy_id && s.markets.contains(&f.market_id)))
+            .filter(|f| {
+                // An entry, or the rest of one: not an exit of what is held.
+                let buy = f.side == crate::connectors::Side::Buy;
+                self.positions.get(&f.market_id).is_none_or(|p| p.qty.abs() < 1e-12 || (p.qty > 0.0) == buy)
+            })
+            .map(|f| {
+                let left = (f.qty - f.booked_qty).max(0.0);
+                let px = self.price_of(&f.market_id);
+                left * if px > 0.0 { px } else { f.arrival }
+            })
+            .sum()
+    }
+
     fn ap_equity(&self, ap: &Autopilot) -> f64 {
         ap.start_capital + ap.realized - ap.fees + ap.released + self.ap_unrealized(ap, None)
     }
@@ -743,7 +765,9 @@ impl Engine {
         let s = ap.sleeve(sid)?;
         let equity = self.ap_equity(ap).max(0.0);
         let capital = equity * s.weight;
-        let room = (capital - self.ap_gross(ap, Some(sid))).min(equity - self.ap_gross(ap, None)).max(0.0);
+        let used = self.ap_gross(ap, Some(sid)) + self.ap_pending(ap, Some(sid));
+        let used_all = self.ap_gross(ap, None) + self.ap_pending(ap, None);
+        let room = (capital - used).min(equity - used_all).max(0.0);
         Some(SleeveSizing { capital, slots: s.markets.len().max(1) as f64, equity, room })
     }
 

@@ -877,3 +877,49 @@ fn the_state_carries_autopilots_in_the_camel_case_the_ui_expects() {
     assert_eq!(cfg.stop.on_take_profit, OnTakeProfit::Lock);
     assert!(cfg.stop.max_loss_pct.is_none() && !cfg.flatten_on_stop);
 }
+
+// ── seams with demo, live, feeds and the book walk ─────────────────────────
+
+/// A demo autopilot whose entries go out to the demo venue and wait there.
+fn demo_engine(id: &str, capital: f64) -> (Engine, String) {
+    let mut e = engine();
+    e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Bybit), true);
+    let mut c = config(id, capital, &[("ema-cross-1", 1.0)], StopRules::default());
+    c.mode = AutopilotMode::Demo;
+    let id = start(&mut e, c);
+    (e, id)
+}
+
+#[test]
+fn orders_still_at_the_venue_count_against_the_sleeves_room() {
+    // Demo and live entries fill when the venue says so. Until then the
+    // autopilot has no position, so every signal in the same tick used to be
+    // sized from the full room again and together they committed more than X.
+    let (mut e, id) = demo_engine("pend", 1_000.0);
+    let markets = status(&e, &id).by_sleeve[0].markets.clone();
+    assert!(markets.len() >= 7, "a sleeve on many markets");
+    let i = idx(&e, "ema-cross-1");
+    for mk in &markets {
+        let m = market(&e, mk);
+        e.place_from_intent(i, &m, &buy_intent(mk));
+    }
+    let out = e.drain_live_orders();
+    assert!(out.len() > 1 && out.iter().all(|o| o.demo), "several demo entries went out: {}", out.len());
+    let sent: f64 = out.iter().map(|o| o.qty * o.ref_price).sum();
+    assert!(sent <= 1_000.0 + 1e-6, "orders in flight never commit more than the autopilot's $1,000: {sent}");
+    let room = e.autopilot_sizing("ema-cross-1").unwrap().room;
+    assert!(room < 1_000.0 - sent + 1e-6, "what is in flight is not room any more: {room}");
+
+    // A partial fill moves part of it from "in flight" to "held": the room
+    // stays what it was, give or take the fee.
+    let o = &out[0];
+    e.apply_live_ack(&o.order_id, "venue-1");
+    let half = o.qty / 2.0;
+    e.apply_live_update(
+        &o.order_id,
+        LiveUpdate { status: BrokerOrderStatus::PartiallyFilled, filled_qty: half, avg_price: Some(o.ref_price), fee: 0.0, raw_status: "partially_filled".into() },
+    );
+    assert_eq!(status(&e, &id).open_positions, 1, "the partial fill is the autopilot's");
+    let after = e.autopilot_sizing("ema-cross-1").unwrap().room;
+    assert!((after - room).abs() < 1e-6, "no room appears out of a partial fill: {room} then {after}");
+}
