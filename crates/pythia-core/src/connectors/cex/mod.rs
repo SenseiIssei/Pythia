@@ -205,6 +205,14 @@ impl Exchange {
         }
     }
 
+    /// The (base, quote) assets of a Pythia pair as this venue names them:
+    /// `BTC/USD` on Bybit is (`BTC`, `USDT`).
+    pub(crate) fn assets(self, pair: &str) -> (String, String) {
+        let (base, quote) = split_pair(pair);
+        let quote = if quote == "USD" { self.usd_quote().to_string() } else { quote };
+        (base, quote)
+    }
+
     /// Map `BTC/USD` onto this venue's symbol.
     pub fn symbol(self, pair: &str) -> String {
         let (base, quote) = split_pair(pair);
@@ -237,6 +245,61 @@ pub struct DemoEnv {
     pub key_help: &'static str,
     /// Known differences from the live venue.
     pub note: &'static str,
+}
+
+/// The fees of one order, sorted by the asset the venue charged them in.
+///
+/// Spot venues do not all charge in dollars. On a buy, Bybit, OKX and Binance
+/// take the fee out of the coin bought (each adapter cites the doc), so the
+/// account receives less coin than the fill size. Booking the fee as dollars
+/// and the gross size as the position made fees look near zero and left the
+/// book holding coins the account never had; the exit for them would then be
+/// refused, again and again. Every adapter therefore folds its fee fields
+/// through here: a fee in the quote currency (or a dollar stablecoin) is
+/// money, a fee in the base coin is coins kept from the fill and is valued at
+/// the fill price, and a fee in any other asset is passed on unpriced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct FeeSplit {
+    /// Fees charged in the quote currency or a dollar stablecoin.
+    pub quote: f64,
+    /// Fees charged in the base coin, in coins.
+    pub base: f64,
+    /// Fees in another asset, as (asset, amount).
+    pub unpriced: Vec<(String, f64)>,
+}
+
+impl FeeSplit {
+    /// Sort fee legs `(asset, amount paid)` for an order on `base`/`quote`
+    /// (as the venue names them). Zero legs are skipped.
+    pub(crate) fn fold<S: AsRef<str>>(legs: impl IntoIterator<Item = (S, f64)>, base: &str, quote: &str) -> Self {
+        let base = normalize_asset(base);
+        let quote = normalize_asset(quote);
+        let mut out = FeeSplit::default();
+        for (asset, amount) in legs {
+            if amount == 0.0 || !amount.is_finite() {
+                continue;
+            }
+            let a = normalize_asset(asset.as_ref());
+            if a == base {
+                out.base += amount;
+            } else if a == quote || is_fiat(&a) {
+                out.quote += amount;
+            } else if let Some(u) = out.unpriced.iter_mut().find(|u| u.0 == a) {
+                u.1 += amount;
+            } else {
+                out.unpriced.push((a, amount));
+            }
+        }
+        out
+    }
+
+    /// Write the fees onto an order report: `fee` is the quote fee plus the
+    /// coin fee at the order's average fill price, `fee_base` the coins.
+    pub(crate) fn apply(self, order: &mut BrokerOrder) {
+        order.fee = self.quote + self.base * order.avg_price.unwrap_or(0.0);
+        order.fee_base = self.base;
+        order.fee_unpriced = self.unpriced;
+    }
 }
 
 /// Split `BTC/USD` into (`BTC`, `USD`); a bare `BTC` is assumed USD-quoted.
@@ -546,11 +609,14 @@ impl MarketConnector for CexConnector {
     async fn order_status(&self, broker_id: &str, symbol: &str) -> Result<BrokerOrder, ConnectorError> {
         self.creds_ok()?;
         let venue_symbol = self.exchange.symbol(symbol);
+        // The pair's assets, so each adapter can tell a fee taken in the coin
+        // from one taken in the quote currency.
+        let (base, quote) = self.exchange.assets(symbol);
         match self.exchange {
             Exchange::Kraken => kraken::status(self, broker_id).await,
-            Exchange::Binance => binance::status(self, broker_id, &venue_symbol).await,
-            Exchange::Bybit => bybit::status(self, broker_id, &venue_symbol).await,
-            Exchange::Okx => okx::status(self, broker_id, &venue_symbol).await,
+            Exchange::Binance => binance::status(self, broker_id, &venue_symbol, &base, &quote).await,
+            Exchange::Bybit => bybit::status(self, broker_id, &venue_symbol, &base, &quote).await,
+            Exchange::Okx => okx::status(self, broker_id, &venue_symbol, &base, &quote).await,
             Exchange::Coinbase => coinbase::status(self, broker_id).await,
         }
     }
@@ -732,6 +798,29 @@ mod tests {
         assert!(!kr.demo_supported && !kr.demo_configured && kr.demo_base.is_none());
         let okx = info.iter().find(|i| i.id == "okx").unwrap();
         assert!(okx.demo_supported && !okx.demo_real_prices, "OKX does not document real demo depth");
+    }
+
+    #[test]
+    fn fees_are_sorted_by_the_asset_they_were_charged_in() {
+        let (base, quote) = Exchange::Bybit.assets("BTC/USD");
+        assert_eq!((base.as_str(), quote.as_str()), ("BTC", "USDT"));
+        let f = FeeSplit::fold(
+            [("BTC", 0.0001), ("USDT", 0.5), ("USDC", 0.25), ("BNB", 0.001), ("BNB", 0.001), ("ETH", 0.0)],
+            &base,
+            &quote,
+        );
+        assert_eq!(f.base, 0.0001);
+        assert_eq!(f.quote, 0.75, "the quote and any dollar stablecoin are money");
+        assert_eq!(f.unpriced, vec![("BNB".to_string(), 0.002)], "zero legs are dropped");
+        // Kraken spells the coin XBT; it is still the base.
+        let k = FeeSplit::fold([("XXBT", 0.001)], "BTC", "USD");
+        assert_eq!(k.base, 0.001);
+
+        let mut o = BrokerOrder::acknowledged("1", None);
+        o.avg_price = Some(50_000.0);
+        f.apply(&mut o);
+        assert!((o.fee - (0.75 + 0.0001 * 50_000.0)).abs() < 1e-9, "{}", o.fee);
+        assert_eq!(o.fee_base, 0.0001);
     }
 
     #[test]
