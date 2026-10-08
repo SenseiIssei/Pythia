@@ -419,6 +419,26 @@ status.
       sell as a short. Still to confirm on the paper account: a crypto sell
       passes the preflight. `GET /v2/assets/BTC%2FUSD` in the same connector
       is unverified the same way
+- [x] **Alpaca crypto fees** (2026-10-08): Alpaca charges the fee in what the
+      trade credits (BTC on a BTC/USD buy, dollars on a sell), reports none
+      on the order and posts it at the end of the day as a `CFEE`/`FEE`
+      activity without an order id (docs/crypto-trading, reference
+      getaccountactivitiesbyactivitytype-1). Fills are booked as filled and
+      watched (`engine::alpaca_fees`); the daemon reads the activities every
+      30 min while a fee is awaited, matches them by pair, side and New York
+      date, splits them by size, and books coins received, the fee in
+      dollars (strategy, autopilot, tax record as a `fee` line merged into
+      its trade) and a journal line. A gap the account shows first (the
+      reconciler, or an exit that the connector cut to what is held) is
+      booked as the fee straight away when it fits under 25 bps of the
+      waiting buys. Open, not answered by the docs: (1) whether the coins
+      leave the position at the fill or at the posting (both are handled);
+      (2) what a sell's dollar fee looks like (read from `net_amount` when
+      `qty` is 0, under `CFEE` or `FEE`); (3) whether one activity is posted
+      per fill or per pair and day (split by size either way); (4) the time
+      zone of `date` (New York assumed, one day either side accepted);
+      (5) whether the paper account charges crypto fees at all. Check all
+      five against the paper account's first crypto round trip
 - [x] **Demo environments** (2026-10-07): `RouteIntent::Demo` /
       `StrategyState::Demo` route through the real connectors to Bybit Demo
       Trading, Binance Spot Demo Mode, OKX demo (`x-simulated-trading: 1`) and
