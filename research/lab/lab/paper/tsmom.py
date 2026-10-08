@@ -167,17 +167,28 @@ def evidence(cfg: dict) -> dict:
           "regime_filter": True}
     # momentum2 tested this rule on today's 20 coins, which survived by
     # definition. The strategy-family sweep ran the same rule on the 20 most
-    # liquid coins of each day (tsmom_top20); when that is known, it travels
-    # with the evidence, so nothing downstream ranks the book on a number that
+    # liquid coins of each day, dead ones included (tsmom_top20). When that is
+    # known, it IS the evidence: every gate is judged on the survivorship-free
+    # run, and momentum2's numbers travel along only as the headline that
     # leaned on survivors.
     from .families import evidence as family_evidence  # local: families imports this module
     twin = family_evidence("tsmom_top20")
-    if not twin.get("missing") and twin.get("oos_sharpe") is not None:
-        ev["oos_sharpe_survivorship_free"] = twin["oos_sharpe"]
-        ev["caveat"] = (f"the same rule on the 20 most liquid coins of each day, dead ones included, made "
-                        f"out-of-sample Sharpe {twin['oos_sharpe']:.2f} instead of {pick['oos_sharpe']:.2f}: "
-                        f"part of the headline came from coins that happened to survive")
-    return ev
+    if twin.get("missing") or twin.get("oos_sharpe") is None:
+        return ev
+    honest = {k: twin[k] for k in ("is_sharpe", "oos_sharpe", "oos_max_dd", "deflated_p", "sharpe_2x_cost",
+                                    "variants_tried", "plateau_share", "plateau_variants", "regime_sharpes",
+                                    "cost_note") if k in twin}
+    return {
+        **ev,
+        **honest,
+        "report": f"{twin.get('report', 'families')} (survivorship-free run of this rule; headline from {src})",
+        "regime_filter": True,
+        "oos_sharpe_survivorship_free": twin["oos_sharpe"],
+        "headline": {k: ev[k] for k in ("is_sharpe", "oos_sharpe", "deflated_p", "sharpe_2x_cost", "variants_tried")},
+        "caveat": (f"its gates are judged on the survivorship-free run (out-of-sample Sharpe {twin['oos_sharpe']:.2f}); "
+                   f"the original backtest on today's 20 coins showed {pick['oos_sharpe']:.2f}, part of it from coins "
+                   f"that happened to survive"),
+    }
 
 
 def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_us: int, now_us: int,
