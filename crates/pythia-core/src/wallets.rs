@@ -511,9 +511,62 @@ fn kraken_result_asset(key: &str) -> Option<String> {
     Some(if a == "XDG" { "DOGE".into() } else { a })
 }
 
+// ── free cash for an autopilot ──────────────────────────────────────────────
+
+/// The quote cash an account can spend right now, in USD: free US dollars and
+/// dollar stablecoins. Coins already held are not cash, and neither are other
+/// fiat currencies, which would need a conversion first.
+pub fn free_usd_cash(balances: &[Balance]) -> f64 {
+    balances
+        .iter()
+        .filter(|b| matches!(normalize_asset(&b.asset).as_str(), "USD" | "USDT" | "USDC"))
+        .map(|b| b.free.max(0.0))
+        .sum()
+}
+
+/// Read the free cash at a venue (a cost venue id such as "kraken" or
+/// "alpaca") before a live autopilot starts: its amount may not exceed it.
+///
+/// Read-only, like everything in this module. The autopilot trades the money
+/// the owner put into that account; nothing here or anywhere else in Pythia can
+/// deposit, withdraw or transfer it, and a watched wallet stays watched.
+pub async fn available_cash(creds: &crate::execution::Credentials, venue: &str, paper: bool) -> Result<f64, String> {
+    use crate::costs::CostVenue;
+    match CostVenue::parse(venue) {
+        Some(CostVenue::Alpaca) => {
+            let conn = creds.alpaca_connector(paper, false)?;
+            let account = conn.account().await.map_err(|e| e.to_string())?;
+            // Settled cash, never margin: buying power can be a multiple of it.
+            let cash: f64 = account.cash.trim().parse().unwrap_or(0.0);
+            Ok(cash.min(account.buying_power_f64()).max(0.0))
+        }
+        Some(CostVenue::Polymarket) => Err("Polymarket has no order path in Pythia".into()),
+        Some(cv) => {
+            let Some((ex, key, secret, passphrase)) = &creds.exchange else {
+                return Err(format!("no API keys for {venue} are set"));
+            };
+            if CostVenue::for_exchange(*ex) != cv {
+                return Err(format!("the exchange with keys is {}, not {venue}", ex.label()));
+            }
+            let conn = CexConnector::new(*ex, key.clone(), secret.clone(), passphrase.clone());
+            let balances = conn.balances().await.map_err(|e| e.to_string())?;
+            Ok(free_usd_cash(&balances))
+        }
+        None => Err(format!("unknown venue {venue}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_cash_is_free_dollars_and_dollar_stablecoins_only() {
+        let b = |asset: &str, free: f64, total: f64| Balance { asset: asset.into(), free, total, usd_value: None };
+        let balances = [b("USD", 700.0, 1_000.0), b("USDT", 50.0, 50.0), b("USDC", 25.0, 25.0), b("BTC", 0.5, 0.5), b("EUR", 300.0, 300.0)];
+        // 300 USD is held in open orders, the coins are not cash, EUR needs converting first.
+        assert_eq!(free_usd_cash(&balances), 775.0);
+    }
 
     #[test]
     fn evm_addresses_are_shape_checked() {

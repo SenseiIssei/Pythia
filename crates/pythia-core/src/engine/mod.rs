@@ -3,6 +3,9 @@
 //! [`EngineState`] snapshot to the UI each tick. This is the Rust owner of the
 //! same model the browser build runs in TypeScript.
 
+pub mod autopilot;
+#[cfg(test)]
+mod autopilot_tests;
 pub mod composed;
 #[cfg(test)]
 mod feed_engine_tests;
@@ -858,6 +861,9 @@ pub struct EngineState {
     /// failovers and stale markets (see [`crate::feeds`]).
     #[serde(default)]
     pub data_health: Option<feeds::DataHealth>,
+    /// Every autopilot: running, paused, and the most recent stopped ones.
+    #[serde(default)]
+    pub autopilots: Vec<autopilot::AutopilotStatus>,
 }
 
 fn default_crypto_venue() -> CostVenue {
@@ -957,6 +963,10 @@ pub struct Persisted {
     /// too (no broker id) so the restart can close their rows honestly.
     #[serde(default)]
     pub inflight: Vec<(String, InFlight)>,
+    /// Autopilots with their peak, floor and owned positions, so a restart
+    /// can never reset a stop rule.
+    #[serde(default)]
+    pub autopilots: Vec<autopilot::Autopilot>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -1116,6 +1126,8 @@ pub struct Engine {
     /// Markets whose stop check is waiting for a fresh price, or whose latest
     /// quote was refused, so each is journaled once per episode.
     feed_noted: HashSet<String>,
+    /// Capital sleeves that trade on their own (see [`autopilot`]).
+    autopilots: Vec<autopilot::Autopilot>,
     tick_count: u64,
     seq: u64,
     /// Random per process, part of every client order id sent to a venue. The
@@ -1200,6 +1212,7 @@ impl Engine {
             vol_spike: risk::VolSpikeGuard::default(),
             feeds: feeds::FeedHealth::default(),
             feed_noted: HashSet::new(),
+            autopilots: Vec::new(),
             tick_count: 0,
             seq: 0,
             boot_tag: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
@@ -2021,6 +2034,10 @@ impl Engine {
         // (off unless volSpikeTrimMult is set).
         self.check_vol_spike(now);
 
+        // Autopilots: live gates, stop rules and history, before anything new
+        // is opened this tick.
+        self.autopilot_step(now);
+
         // Lab books rebalance once per new signal, on their own pass.
         if self.tick_count % 5 == 0 {
             self.run_lab_books();
@@ -2047,6 +2064,11 @@ impl Engine {
                     // ATR stop-loss / take-profit / trailing, not by flipping on
                     // every opposing signal. This kills the fee-bleeding churn.
                     if self.positions.contains_key(&intent.market_id) {
+                        continue;
+                    }
+                    // An autopilot's strategies trade only its markets, only
+                    // while it runs; everyone else stays off the markets it reserved.
+                    if !self.autopilot_entry_allowed(&self.strategies[idx].id, &intent.market_id) {
                         continue;
                     }
                     // On a bar-backed market, act at most once per closed candle.
@@ -2568,18 +2590,28 @@ impl Engine {
         let price = m.price;
         let equity = self.equity();
         let sid = self.strategies[strat_idx].id.clone();
-        let budget = (self.strategies[strat_idx].budget_pct / 100.0) * equity;
+        // A strategy inside an autopilot is sized from the autopilot's
+        // capital: its sleeve's share of it, over the sleeve's own markets.
+        let sleeve = self.autopilot_sizing(&sid);
+        let budget = match &sleeve {
+            Some(s) => s.capital,
+            None => (self.strategies[strat_idx].budget_pct / 100.0) * equity,
+        };
         // Spread the budget across the universe → many small positions, so the
         // trend's edge shows through with low variance (not 2-3 concentrated
         // bets). Risk caps still bound the total.
-        let universe_n = self.strategies[strat_idx].universe.len().max(1) as f64;
+        let universe_n = match &sleeve {
+            Some(s) => s.slots,
+            None => self.strategies[strat_idx].universe.len().max(1) as f64,
+        };
         let strength = intent.size.max(intent.confidence).clamp(0.3, 1.0);
         let full = (budget / universe_n) * 1.5 * (self.limits.kelly_fraction / 0.25).clamp(0.25, 3.0);
+        let kelly_equity = sleeve.as_ref().map_or(equity, |s| s.equity);
         // Under 30 closed trades the signal strength sizes the entry. After
         // that the strategy's own record does, never above full strength.
         let deploy = match self.edge_sizing(strat_idx) {
             (risk::SizingMode::Measured, Some(k)) => {
-                full.min(risk::kelly_notional(&k, equity, self.limits.kelly_fraction, universe_n))
+                full.min(risk::kelly_notional(&k, kelly_equity, self.limits.kelly_fraction, universe_n))
             }
             (risk::SizingMode::NoEdge, _) => return,
             _ => full * strength,
@@ -2607,6 +2639,14 @@ impl Engine {
                 }
             }
         }
+        // Never past the sleeve's budget, and never more exposure than the
+        // autopilot's equity.
+        if let Some(s) = &sleeve {
+            qty_wanted = qty_wanted.min(s.room / price);
+            if qty_wanted * price < autopilot::MIN_ENTRY_USD {
+                return;
+            }
+        }
         if qty_wanted <= 0.0 {
             return;
         }
@@ -2631,7 +2671,10 @@ impl Engine {
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return;
         }
-        let route = Self::entry_intent(self.strategies[strat_idx].state);
+        // Inside an autopilot its mode decides the route, not the strategy's switch.
+        let route = self
+            .autopilot_route(&sid)
+            .unwrap_or_else(|| Self::entry_intent(self.strategies[strat_idx].state));
         self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
     }
 
@@ -2804,6 +2847,7 @@ impl Engine {
         } else {
             self.ref_prices.insert(key.clone(), reference);
         }
+        let existed = self.positions.contains_key(&key);
         match self.positions.get_mut(&key) {
             None => {
                 self.positions.insert(
@@ -2850,6 +2894,9 @@ impl Engine {
             self.realized_pnl += realized;
         }
         self.cash -= signed * fill_price + fee;
+        // The autopilot that owns this position, or that just opened it, books it.
+        let open_after = self.positions.contains_key(&key);
+        self.autopilot_on_fill(&sid, &key, realized, fee, existed, open_after);
         // The measured edge: net return on the closed notional. The entry fee
         // is not tracked per position, so the round trip is estimated as twice
         // this fill's fee on the closed quantity.
@@ -4351,6 +4398,12 @@ impl Engine {
             if self.lab_done.get(&sid) == Some(&sig.generated_ms) {
                 continue;
             }
+            // Inside an autopilot: its capital, its positions, and nothing
+            // while it is paused.
+            let scope = self.autopilot_lab_scope(&sid);
+            if scope.as_ref().is_some_and(|s| !s.running) {
+                continue;
+            }
             let attempt = match self.lab_retry.get(&sid) {
                 Some(&(g, n, last)) if g == sig.generated_ms => {
                     if now - last < LAB_RETRY_EVERY_MS {
@@ -4381,9 +4434,16 @@ impl Engine {
             }
             let mut owned_elsewhere = vec![];
             let mut prices = HashMap::new();
+            // A position is this book's when the strategy holds it and, inside
+            // an autopilot, the autopilot owns it.
+            let mine = |id: &str, p: &PositionInternal| {
+                p.strategy_id == sid && scope.as_ref().is_none_or(|s| s.owned.contains(id))
+            };
             for m in &crypto {
                 match self.positions.get(&m.id) {
-                    Some(p) if p.strategy_id != sid && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
+                    Some(p) if !mine(&m.id, p) && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
+                    // A market an autopilot reserved for someone else.
+                    None if !self.autopilot_entry_allowed(&sid, &m.id) => owned_elsewhere.push(m.symbol.clone()),
                     _ if self.real_ids.contains(&m.id) => {
                         prices.insert(m.id.clone(), m.price);
                     }
@@ -4393,10 +4453,13 @@ impl Engine {
             let holdings: HashMap<String, (f64, f64)> = self
                 .positions
                 .iter()
-                .filter(|(_, p)| p.strategy_id == sid)
+                .filter(|(k, p)| mine(k, p))
                 .map(|(k, p)| (k.clone(), (p.qty, p.avg_price)))
                 .collect();
-            let capital = self.strategies[idx].budget_pct / 100.0 * self.equity();
+            let capital = match &scope {
+                Some(s) => s.capital,
+                None => self.strategies[idx].budget_pct / 100.0 * self.equity(),
+            };
             let has_market = |coin: &str| -> Option<String> { Some(format!("crypto:{coin}/USD")) };
             let (orders, mut untradable) =
                 crate::lab::rebalance(&sig.weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
@@ -4481,7 +4544,9 @@ impl Engine {
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return false;
         }
-        let route = Self::entry_intent(self.strategies[idx].state);
+        let route = self
+            .autopilot_route(&sid)
+            .unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state));
         self.route_fill(idx, m, side, decision.qty, m.price, route);
         if let Some(p) = self.positions.get_mut(&m.id) {
             if p.strategy_id == sid {
@@ -4568,6 +4633,11 @@ impl Engine {
     /// one-click connection test on the Live page is not a strategy and does
     /// not go through here.
     pub fn set_strategy_state(&mut self, id: &str, state: StrategyState) -> Result<(), String> {
+        // While an autopilot runs a strategy, the autopilot sets its state.
+        if let Some(ap) = self.autopilot_claimant(id) {
+            let name = self.strategies.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string());
+            return Err(format!("{name} runs in the autopilot \"{ap}\", which sets its state. Pause the autopilot to hold it, or stop it to change the strategy."));
+        }
         // Demo needs no passport (no money moves) but does need a demo
         // environment for the strategy's venue, or every signal would be a
         // refusal.
@@ -4857,6 +4927,7 @@ impl Engine {
                 .map(|m| (m.id.clone(), (m.price, m.updated_at)))
                 .collect(),
             inflight: self.inflight.iter().map(|(id, f)| (id.clone(), f.clone())).collect(),
+            autopilots: self.autopilots.clone(),
         }
     }
 
@@ -5028,6 +5099,8 @@ impl Engine {
             }
             self.log(JournalKind::Risk, format!("{id} restored as PAPER, not live. {why}"), Some(id.clone()), None);
         }
+        self.autopilots = p.autopilots;
+        self.autopilots_after_restore();
         if resolved > 0 {
             self.log(
                 JournalKind::System,
@@ -5197,6 +5270,7 @@ impl Engine {
             passports: self.strategies.iter().filter(|s| s.id != "manual").map(|s| self.passport_for(s)).collect(),
             risk: self.risk_status(),
             data_health: Some(self.data_health()),
+            autopilots: self.autopilot_statuses(),
         }
     }
 

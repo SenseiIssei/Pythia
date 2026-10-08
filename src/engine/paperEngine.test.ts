@@ -73,6 +73,25 @@ describe("PaperEngine", () => {
   });
 });
 
+describe("PaperEngine autopilot", () => {
+  it("says the autopilot needs the desktop app or the server instead of pretending", async () => {
+    const e = new PaperEngine();
+    expect(e.autopilots()).toEqual([]);
+    const cfg = {
+      id: "",
+      name: "x",
+      mode: "paper" as const,
+      venue: "kraken" as const,
+      capitalUsd: 1_000,
+      sleeves: [],
+      stop: { onTakeProfit: "stop" as const },
+      flattenOnStop: true,
+    };
+    await expect(e.startAutopilot(cfg)).rejects.toThrow("needs the desktop app or the Pythia server");
+    await expect(e.stopAutopilot("a")).rejects.toThrow("needs the desktop app");
+  });
+});
+
 describe("optimizer helpers", () => {
   it("gives no OOS/IS ratio against a non-positive in-sample Sharpe", () => {
     expect(oosIsRatio(1.2, 0.6)).toBeCloseTo(0.5);
