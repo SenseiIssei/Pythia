@@ -889,6 +889,11 @@ export interface AutopilotConfig {
   flattenOnStop: boolean;
 }
 
+/** What the Autopilot page's setup hands over: the config plus the phrase a
+ *  live start was confirmed with. The store turns the phrase into the
+ *  engine's `confirm` flag. */
+export type AutopilotStart = AutopilotConfig & { confirm?: string };
+
 export interface AutopilotSleeveStatus {
   strategyId: string;
   name: string;

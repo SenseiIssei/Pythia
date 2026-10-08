@@ -24,7 +24,7 @@ import { AI_OFF, AUTOPILOT_NEEDS_ENGINE, DISARMED, NO_FORECASTS, NO_SPEND, type 
 import { breakdown, costVenueFor, modelFor, paperFill } from "./costs";
 import { applyFill } from "./position";
 import { browserPassport } from "./passport";
-import type { StrategyLedger } from "../types";
+import type { CostVenue, StrategyLedger } from "../types";
 
 /** A fresh cost and forward-test record. */
 export function emptyLedger(): StrategyLedger {
@@ -678,6 +678,10 @@ export class PaperEngine implements EngineClient {
   /** No exchange feeds here: every price is the in-browser simulator's. */
   dataHealth() {
     return null;
+  }
+  /** The browser engine charges crypto as Kraken unless told otherwise. */
+  cryptoCostVenue(): CostVenue {
+    return "kraken";
   }
   setAdaptiveExecution(_on: boolean) {
     // The browser engine has no venue to route to, so there is nothing to tune.

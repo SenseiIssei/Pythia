@@ -1,6 +1,7 @@
 import type {
   AutopilotConfig,
   AutopilotStatus,
+  CostVenue,
   JournalEntry,
   Market,
   Order,
@@ -189,6 +190,9 @@ export class ServerEngineClient implements EngineClient {
   }
   dataHealth() {
     return this.state.dataHealth ?? null;
+  }
+  cryptoCostVenue(): CostVenue {
+    return this.state.cryptoCostVenue ?? "kraken";
   }
   setAdaptiveExecution(on: boolean) {
     this.send({ cmd: "setAdaptiveExecution", on });

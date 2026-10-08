@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { NAV, isVisible, navFor } from "./nav";
 
 describe("navFor", () => {
-  it("keeps simple mode to the five beginner destinations", () => {
-    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "predictions", "wallets", "settings", "about"]);
+  it("keeps simple mode to the six beginner destinations", () => {
+    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "predictions", "wallets", "settings", "about"]);
   });
 
   it("shows everything in advanced mode", () => {
@@ -31,7 +31,7 @@ describe("isVisible", () => {
   });
 
   it("shows the always-visible pages in both modes", () => {
-    for (const id of ["home", "predictions", "wallets", "settings", "about"] as const) {
+    for (const id of ["home", "autopilot", "predictions", "wallets", "settings", "about"] as const) {
       expect(isVisible(id, "simple")).toBe(true);
       expect(isVisible(id, "advanced")).toBe(true);
     }

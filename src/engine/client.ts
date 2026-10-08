@@ -94,6 +94,8 @@ export interface EngineClient {
   /** Where the crypto data comes from and whether it is fresh. Null where no
    *  Rust engine runs the feeds (the browser paper build). */
   dataHealth(): DataHealth | null;
+  /** The exchange crypto is charged and routed on (Settings), e.g. "kraken". */
+  cryptoCostVenue(): CostVenue;
   /**
    * Market ids whose indicators run on real exchange candles rather than the
    * simulator. Anything not in here is a demo, and the UI says so.
