@@ -39,7 +39,7 @@ engine's `/api/state` and writes `/srv/pythia-data/reports/forward/`
 read-only, so the Lab page of either shows it as "Forward test". The
 container needs the host network to reach the autopilot engine on
 127.0.0.1:8788; if the engine is down the report says so and still covers the
-paper books. Not installed yet. `/etc/cron.d/pythia-forward`:
+paper books. `/etc/cron.d/pythia-forward`:
 
 ```cron
 # Pythia: daily forward report, paper books and autopilots against their backtests. Reads only.
