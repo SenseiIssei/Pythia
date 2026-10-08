@@ -46,7 +46,7 @@ import { PnlLines } from "../components/PnlBreakdown";
 import { explain } from "../glossary";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
-import { demoIsApiTestOnly, exchangeName } from "../venueNames";
+import { autopilotVenue, demoIsApiTestOnly, exchangeName } from "../venueNames";
 import { useMockAutopilot, type MockScenario } from "../autopilotMock";
 import {
   LIVE_PHRASE,
@@ -373,7 +373,10 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   const [err, setErr] = useState("");
 
   const capital = num(amount);
-  const eligible = strategies.filter((s) => s.id !== "manual" && s.venueClass === venue);
+  // The exchange it would trade on, by its own name ("Bybit", not "crypto").
+  const target = autopilotVenue(mode, venue, live, cryptoCostVenue);
+  const targetName = exchangeName(target);
+  const eligible =strategies.filter((s) => s.id !== "manual" && s.venueClass === venue);
   const chosen = eligible
     .map((s) => ({ s, w: num(weights[s.id] ?? "") }))
     .filter((x) => x.w > 0);
@@ -415,8 +418,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
     {
       ok: armedHere,
       text: armedHere
-        ? `Real-money trading is armed for ${venueLabel(venue)}.`
-        : `Real-money trading has to be armed for ${venueLabel(venue)} on the Live page (advanced view), on the real endpoint, not dry-run.`,
+        ? `Real-money trading is armed for ${targetName}.`
+        : `Real-money trading has to be armed for ${targetName} on the Live page (advanced view), on the real endpoint, not dry-run.`,
     },
     {
       ok: checksOk,
@@ -451,9 +454,10 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
       id: `ap-${now.toString(36)}`,
       name: name.trim() || `Autopilot ${new Date(now).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`,
       mode,
-      // The engine wants the exchange, not the asset class: crypto runs on
-      // the one selected in Settings, US shares on Alpaca.
-      venue: venue === "crypto" ? cryptoCostVenue : "alpaca",
+      // The engine wants the exchange, not the asset class: crypto demo runs
+      // on the demo exchange, other crypto on the one selected in Settings,
+      // US shares on Alpaca.
+      venue: target,
       capitalUsd: capital,
       sleeves: pick === "manual" ? chosen.map((x) => ({ strategyId: x.s.id, weight: x.w / weightSum })) : [],
       stop,
@@ -474,8 +478,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
     mode === "paper"
       ? "Virtual money. Pythia sets this much practice money aside for the autopilot. Nothing real is involved and nothing can be lost."
       : mode === "demo"
-        ? `Comes from ${venueLabel(venue)}'s demo account: a practice balance kept by the venue itself. Orders really go there, but no real money moves.`
-        : `Comes from the ${venueLabel(venue)} account you funded yourself. The autopilot buys and sells inside that account and can lose this money.`;
+        ? `Comes from ${targetName}'s demo account: a practice balance kept by ${targetName} itself. Orders really go there, but no real money moves.`
+        : `Comes from the ${targetName} account you funded yourself. The autopilot buys and sells inside that account and can lose this money.`;
 
   return (
     <Card
@@ -521,7 +525,11 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
                 name="ap-venue"
                 checked={venue === v.id}
                 onChange={() => setVenue(v.id)}
-                title={v.label}
+                title={
+                  v.id === "crypto"
+                    ? `${v.label} · ${exchangeName(autopilotVenue(mode, "crypto", live, cryptoCostVenue))}${mode === "demo" ? " demo" : ""}`
+                    : v.label
+                }
                 detail={v.note}
               />
             ))}
@@ -884,7 +892,7 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
               </div>
               <p className="mt-1 text-sm leading-relaxed text-cyber-text-dim">
                 {running
-                  ? `Trading ${fmtUsd(s.startCapital, 0)} on ${venueLabel(s.config.venue)} on its own, for ${fmtDuration(now - s.startedMs)} now.`
+                  ? `Trading ${fmtUsd(s.startCapital, 0)} on ${exchangeName(s.config.venue)}${s.config.mode === "demo" ? "'s demo account" : ""} on its own, for ${fmtDuration(now - s.startedMs)} now.`
                   : "Holding what it has and opening nothing new until you resume it."}
               </p>
               <p className="mt-0.5 text-xs text-cyber-text-faint">

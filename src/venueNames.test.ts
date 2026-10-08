@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { cryptoDemoName, demoApiTestNote, demoIsApiTestOnly, exchangeName } from "./venueNames";
+import { autopilotVenue, cryptoDemoName, demoApiTestNote, demoIsApiTestOnly, exchangeName } from "./venueNames";
+
+describe("autopilotVenue", () => {
+  const live = { demoVenues: ["crypto" as const], demoExchange: "bybit" as const, demoRealPrices: true };
+
+  it("sends a crypto demo autopilot to the demo exchange, not the live one", () => {
+    expect(autopilotVenue("demo", "crypto", live, "kraken")).toBe("bybit");
+    expect(exchangeName(autopilotVenue("demo", "crypto", live, "kraken"))).toBe("Bybit");
+  });
+
+  it("keeps paper and live crypto on the exchange selected in Settings, and shares on Alpaca", () => {
+    expect(autopilotVenue("paper", "crypto", live, "kraken")).toBe("kraken");
+    expect(autopilotVenue("live", "crypto", live, "kraken")).toBe("kraken");
+    expect(autopilotVenue("demo", "alpaca", live, "kraken")).toBe("alpaca");
+  });
+
+  it("falls back to the selected exchange when no demo keys are saved", () => {
+    expect(autopilotVenue("demo", "crypto", { demoVenues: [] }, "okx")).toBe("okx");
+  });
+});
 
 describe("exchangeName", () => {
   it("shows the exchange's own name, not the engine id", () => {
