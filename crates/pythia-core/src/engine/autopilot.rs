@@ -29,7 +29,10 @@
 //! - **Positions belong to whoever opened them.** A fill that opens a
 //!   position for a sleeve strategy on one of its markets makes the position
 //!   the autopilot's; every later fill on it (the strategy's exit, an ATR
-//!   stop, a flatten from the Positions page) is booked to the autopilot. A
+//!   stop, a flatten from the Positions page) is booked to the autopilot, and
+//!   so is a broker correction from reconciliation: the quantity follows the
+//!   venue and the difference is realised at the mark, journaled, so the
+//!   correction itself never moves its equity past a stop unseen. A
 //!   position a sleeve strategy held from before the autopilot started stays
 //!   outside it: its P&L is not counted, and the autopilot trades that market
 //!   once it is closed. Lab books only trade by rebalancing, so a lab book
@@ -834,6 +837,42 @@ impl Engine {
         } else {
             ap.owned.remove(market);
         }
+    }
+
+    /// Reconciliation set a position to what the venue holds. When an
+    /// autopilot owns it, the difference is booked to that autopilot: the
+    /// quantity follows the venue, and the P&L the changed part carried is
+    /// booked as realised at the mark (and so is a change of the average
+    /// price the venue reported). The autopilot's equity is the same just
+    /// before and just after, so a correction can never lift it over a stop,
+    /// or drop a loss its stop rules were about to see. Journaled with the
+    /// numbers. `before` and `after` are (quantity, average price).
+    pub(super) fn autopilot_on_correction(&mut self, market: &str, before: (f64, f64), after: (f64, f64), venue: &str) {
+        let Some(i) = self.autopilots.iter().position(|a| a.owned.contains_key(market)) else { return };
+        let mark = self.ap_mark(market, before.1);
+        let open_after = after.0.abs() > 1e-12;
+        let unreal = |(q, avg): (f64, f64)| if q.abs() > 1e-12 { (mark - avg) * q } else { 0.0 };
+        let booked = unreal(before) - unreal(after);
+        let symbol = self.markets.iter().find(|m| m.id == market).map(|m| m.symbol.clone()).unwrap_or_else(|| market.to_string());
+        let ap = &mut self.autopilots[i];
+        let owner = ap.owned.get(market).cloned().unwrap_or_default();
+        ap.realized += booked;
+        if let Some(s) = ap.sleeve_mut(&owner) {
+            s.realized += booked;
+        }
+        if !open_after {
+            ap.owned.remove(market);
+        }
+        let msg = format!(
+            "{}: {symbol} corrected against {venue}: the book had {:.8}, the venue has {:.8}. Booked {} to the autopilot at the mark {} so the correction moves none of its equity and hides no stop.",
+            ap.label(),
+            before.0,
+            after.0,
+            signed_usd(booked),
+            usd(mark)
+        );
+        ap.last_action = Some(msg.clone());
+        self.log(JournalKind::Risk, msg, Some(owner), Some(market.to_string()));
     }
 
     // ── commands ───────────────────────────────────────────────────────────
