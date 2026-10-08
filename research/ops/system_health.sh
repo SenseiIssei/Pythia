@@ -19,13 +19,28 @@ main() {
     checks+=("{\"name\":\"$1\",\"ok\":$2,\"detail\":\"$d\"}")
   }
 
-  for c in pythia-recorder pythia-server; do
+  for c in pythia-recorder pythia-server pythia-autopilot; do
     if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = "true" ]; then
       add "$c" true "running since $(docker inspect -f '{{.State.StartedAt}}' "$c" | cut -c1-16)"
     else
       add "$c" false "not running"
     fi
   done
+
+  # The practice autopilot engine (127.0.0.1:8788): each autopilot's state and
+  # result. A stop by a rule is not a failure; an engine that does not answer is.
+  local ap
+  ap=$(curl -s -m 10 127.0.0.1:8788/api/state | python3 -c "
+import json, sys
+a = json.load(sys.stdin).get('autopilots') or []
+if not a:
+    print('true|no autopilot started'); sys.exit()
+print('true|' + '; '.join('%s %s, %+.2f %% since %s' % (x['config']['name'], x['state'], x['pnlPct'], x['config']['mode']) for x in a[:3]))
+" 2>/dev/null)
+  case "$ap" in
+    true\|*) add "autopilot" true "${ap#true|}" ;;
+    *) add "autopilot" false "no answer from the autopilot engine" ;;
+  esac
 
   # Recorder: every stream fresh, status written in the last five minutes
   local st="$data/_health/status.json"
