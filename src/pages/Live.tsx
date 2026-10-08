@@ -26,6 +26,7 @@ import {
 } from "../live";
 import type { Venue } from "../types";
 import { cryptoDemoName, demoApiTestNote, demoIsApiTestOnly } from "../venueNames";
+import { changeStrategyState } from "../strategyState";
 
 const ARM_PHRASE = "ARM LIVE";
 
@@ -687,6 +688,7 @@ function ExecutionPolicyCard() {
  */
 function ReadinessCard() {
   const { live, strategies, barBacked, setStrategyState, passports } = useStore();
+  const [fixErr, setFixErr] = useState("");
 
   // Only this strategy trades Alpaca markets today.
   const equityStrategies = strategies.filter((s) => s.venueClass === "alpaca");
@@ -733,7 +735,14 @@ function ReadinessCard() {
         liveEquity.length === 0 && equityStrategies.length > 0 && canArmFirst
           ? {
               label: `Set ${equityStrategies[0].name} Live`,
-              run: () => void setStrategyState(equityStrategies[0].id, "live").catch(() => undefined),
+              // The engine can still refuse (a passport that went stale, an
+              // autopilot that runs this strategy); show why, like the
+              // Strategies page does, instead of dropping it.
+              run: () =>
+                void (async () => {
+                  setFixErr("");
+                  setFixErr(await changeStrategyState(setStrategyState, equityStrategies[0].id, "live"));
+                })(),
             }
           : undefined,
     },
@@ -776,6 +785,11 @@ function ReadinessCard() {
           </div>
         ))}
       </div>
+      {fixErr && (
+        <div role="alert" className="mt-2 text-xs text-danger">
+          {fixErr}
+        </div>
+      )}
       {done === steps.length && (
         <div className="mt-3 text-[11px] text-success">
           Every gate is clear: the next signal on an Alpaca market routes to the broker.
