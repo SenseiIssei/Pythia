@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AutopilotConfig,
   AutopilotStatus,
+  CostVenue,
   JournalEntry,
   Market,
   Order,
@@ -148,6 +149,9 @@ export class TauriEngineClient implements EngineClient {
   }
   dataHealth() {
     return this.state.dataHealth ?? null;
+  }
+  cryptoCostVenue(): CostVenue {
+    return this.state.cryptoCostVenue ?? "kraken";
   }
   setAdaptiveExecution(on: boolean) {
     void invoke("set_adaptive_execution", { on });

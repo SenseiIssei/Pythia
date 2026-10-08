@@ -12,6 +12,7 @@ import { isTauri } from "./engine";
 import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
+import { Autopilot } from "./pages/Autopilot";
 import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
@@ -34,6 +35,7 @@ import { About } from "./pages/About";
 
 const PAGES: Record<PageId, () => ReactNode> = {
   home: HomePage,
+  autopilot: Autopilot,
   dashboard: Dashboard,
   markets: Markets,
   positions: Positions,

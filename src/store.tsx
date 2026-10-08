@@ -10,6 +10,7 @@ import { getEngine } from "./engine";
 import type {
   AiPolicy,
   AiSpend,
+  CostVenue,
   AiView,
   AutopilotConfig,
   AutopilotStatus,
@@ -58,6 +59,8 @@ interface Store {
   riskStatus: RiskStatus | null;
   /** Feed sources, freshness and failovers; null in the browser paper build. */
   dataHealth: DataHealth | null;
+  /** The exchange crypto is charged and routed on, from Settings. */
+  cryptoCostVenue: CostVenue;
   /** Market ids running on real exchange candles rather than the simulator. */
   barBacked: Set<string>;
   aiViews: AiView[];
@@ -119,6 +122,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       passports: new Map(engine.passports().map((p) => [p.strategyId, p])),
       riskStatus: engine.riskStatus(),
       dataHealth: engine.dataHealth(),
+      cryptoCostVenue: engine.cryptoCostVenue(),
       barBacked: new Set(engine.barBacked()),
       aiViews: engine.aiViews(),
       aiPolicy: engine.aiPolicy(),

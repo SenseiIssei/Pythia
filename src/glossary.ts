@@ -140,6 +140,22 @@ export const GLOSSARY: Record<string, string> = {
   "Day-trade cap": "US brokers limit how many same-day round trips a small account may make. When reached, new entries wait.",
   "Buying power": "How much the broker would let it buy right now.",
 
+  // Autopilot
+  Autopilot: "Give it an amount and it trades that amount on its own, until you stop it or a limit you set is reached.",
+  "Start amount": "The money the autopilot may use. It never touches more than this, and never moves money out of the account.",
+  "Demo account": "A practice account at the exchange or broker itself. Orders really go there, but with its own fake balance.",
+  Floor: "The lowest the autopilot's value may fall. When it gets there, it stops on its own.",
+  "Room to the floor": "How far the value can still fall before the autopilot stops on its own.",
+  "Take profit": "Once it is up this much, it either stops or locks the gain in, whichever you chose.",
+  "Lock it in": "After reaching the take-profit it keeps trading, but the floor moves up so it can no longer end below that gain.",
+  "Trailing limit": "A floor that follows the best point up: it never gives back more than this share of its highest value.",
+  "From its best": "How far it is below its highest value so far. Zero means it is at its best right now.",
+  "Just holding Bitcoin": "What the same money would have done if it had simply bought Bitcoin at the start and done nothing else.",
+  "Cost share": "Fees as a share of what it made before fees. Above 40 % the costs are eating the result.",
+  "Trades per day": "How often it bought or sold on an average day. More trades means more fees.",
+  "Strategy share": "The part of the start amount this strategy may use.",
+  Fees: "What the exchange or broker charged for every buy and sell.",
+
   // Models
   "Hours scored live": "How many forecasts have been checked against what really happened since it started.",
   "Better than HAR": "How much smaller its forecast error is than the standard textbook method. Above zero means it is better.",
