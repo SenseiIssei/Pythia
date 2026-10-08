@@ -500,7 +500,7 @@ impl AlpacaConnector {
         Ok(())
     }
 
-    async fn order_by_client_id(&self, client_order_id: &str) -> Result<Value, ConnectorError> {
+    async fn order_json_by_client_id(&self, client_order_id: &str) -> Result<Value, ConnectorError> {
         let path = format!("/v2/orders:by_client_order_id?client_order_id={client_order_id}");
         self.send(self.req(reqwest::Method::GET, &path)?, "order lookup").await
     }
@@ -637,11 +637,11 @@ impl AlpacaConnector {
             // 422 with a duplicate client_order_id means a previous attempt
             // *did* land — adopt that order instead of double-submitting.
             Err(ConnectorError::Rejected(msg)) if !cid.is_empty() && msg.contains("client_order_id") => {
-                parse_order(&self.order_by_client_id(cid).await?)
+                parse_order(&self.order_json_by_client_id(cid).await?)
             }
             // The request may or may not have reached Alpaca. Look it up by the
             // deterministic client id before deciding it failed.
-            Err(ConnectorError::Network(e)) if !cid.is_empty() => match self.order_by_client_id(cid).await {
+            Err(ConnectorError::Network(e)) if !cid.is_empty() => match self.order_json_by_client_id(cid).await {
                 Ok(v) => parse_order(&v),
                 Err(_) => Err(ConnectorError::Network(e)),
             },
@@ -678,6 +678,8 @@ fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
         filled_qty: num_or0(v.get("filled_qty")),
         avg_price: num(v.get("filled_avg_price")).filter(|p| *p > 0.0),
         fee: 0.0, // Alpaca US equities are commission-free
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
         raw_status: raw,
     })
 }
@@ -851,6 +853,16 @@ impl MarketConnector for AlpacaConnector {
             Ok(_) => Ok(()),
             // 404 (gone) and 422 (already terminal) both mean "nothing resting".
             Err(ConnectorError::Rejected(msg)) if msg.contains("404") || msg.contains("422") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `GET /v2/orders:by_client_order_id`; a 404 means Alpaca has no order
+    /// under that id, so it never arrived.
+    async fn order_by_client_id(&self, client_order_id: &str, _symbol: &str) -> Result<Option<BrokerOrder>, ConnectorError> {
+        match self.order_json_by_client_id(client_order_id).await {
+            Ok(v) => parse_order(&v).map(Some),
+            Err(ConnectorError::Rejected(msg)) if msg.contains(" 404") => Ok(None),
             Err(e) => Err(e),
         }
     }

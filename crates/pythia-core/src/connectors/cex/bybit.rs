@@ -15,7 +15,7 @@
 use super::super::{
     num_or0, sign, Balance, BrokerOrder, BrokerOrderStatus, ConnectorError, OrderRequest, OrderType,
 };
-use super::{is_fiat, normalize_asset, CexConnector};
+use super::{is_fiat, normalize_asset, CexConnector, FeeSplit};
 use serde_json::Value;
 
 const BASE: &str = "https://api.bybit.com";
@@ -88,7 +88,35 @@ fn map_status(s: &str) -> BrokerOrderStatus {
     }
 }
 
-fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
+/// The fee legs of one Bybit order, by currency.
+///
+/// Bybit's order list (<https://bybit-exchange.github.io/docs/v5/order/order-list>)
+/// marks `cumExecFee` as deprecated for spot ("Use `cumFeeDetail` instead");
+/// `cumFeeDetail` maps each fee currency to the cumulative amount, for example
+/// `{"BTC": "0.0000015"}`. The currency follows Bybit's spot fee currency
+/// rule (<https://bybit-exchange.github.io/docs/v5/enum#spot-fee-currency-instruction>):
+/// with a positive maker fee rate a buy pays in the base coin and a sell in
+/// the quote coin, and a taker always does. When an older answer has only
+/// `cumExecFee`, that rule decides its currency, using `feeCurrency` if the
+/// answer names one.
+fn fee_legs(v: &Value, base: &str, quote: &str) -> Vec<(String, f64)> {
+    if let Some(detail) = v.get("cumFeeDetail").and_then(Value::as_object).filter(|d| !d.is_empty()) {
+        return detail.iter().map(|(ccy, amt)| (ccy.clone(), num_or0(Some(amt)))).collect();
+    }
+    let fee = num_or0(v.get("cumExecFee"));
+    if fee == 0.0 {
+        return Vec::new();
+    }
+    let named = v.get("feeCurrency").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let ccy = match (named, v.get("side").and_then(Value::as_str)) {
+        (Some(c), _) => c.to_string(),
+        (None, Some("Buy")) => base.to_string(),
+        _ => quote.to_string(),
+    };
+    vec![(ccy, fee)]
+}
+
+fn parse_order(v: &Value, base: &str, quote: &str) -> Result<BrokerOrder, ConnectorError> {
     let id = v
         .get("orderId")
         .and_then(Value::as_str)
@@ -97,15 +125,19 @@ fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
     let raw = v.get("orderStatus").and_then(Value::as_str).unwrap_or("New").to_string();
     let filled = num_or0(v.get("cumExecQty"));
     let value = num_or0(v.get("cumExecValue"));
-    Ok(BrokerOrder {
+    let mut order = BrokerOrder {
         id,
-        client_order_id: v.get("orderLinkId").and_then(Value::as_str).map(str::to_string),
+        client_order_id: v.get("orderLinkId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
         status: map_status(&raw),
         filled_qty: filled,
         avg_price: (filled > 0.0 && value > 0.0).then(|| value / filled),
-        fee: num_or0(v.get("cumExecFee")),
+        fee: 0.0,
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
         raw_status: raw,
-    })
+    };
+    FeeSplit::fold(fee_legs(v, base, quote), base, quote).apply(&mut order);
+    Ok(order)
 }
 
 pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<BrokerOrder, ConnectorError> {
@@ -123,8 +155,7 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
         body["timeInForce"] = serde_json::json!("GTC");
     }
     if let Some(cid) = &req.client_order_id {
-        // orderLinkId is capped at 36 chars.
-        body["orderLinkId"] = serde_json::json!(cid.chars().take(36).collect::<String>());
+        body["orderLinkId"] = serde_json::json!(link_id(cid));
     }
 
     let result = post(c, "/v5/order/create", &body).await?;
@@ -132,36 +163,53 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
         .get("orderId")
         .and_then(Value::as_str)
         .ok_or_else(|| ConnectorError::Rejected("Bybit accepted the order but returned no orderId".into()))?;
-    Ok(BrokerOrder {
-        id: id.to_string(),
-        client_order_id: req.client_order_id,
-        status: BrokerOrderStatus::Working,
-        filled_qty: 0.0,
-        avg_price: None,
-        fee: 0.0,
-        raw_status: "submitted".into(),
-    })
+    Ok(BrokerOrder::acknowledged(id, req.client_order_id))
 }
 
-pub(super) async fn status(c: &CexConnector, order_id: &str, symbol: &str) -> Result<BrokerOrder, ConnectorError> {
-    let params = [
-        ("category", "spot".to_string()),
-        ("symbol", symbol.to_string()),
-        ("orderId", order_id.to_string()),
-    ];
-    // `realtime` only keeps open orders; once terminal the order moves to
-    // history, so a miss there is a look-up in `/v5/order/history`.
+/// The `orderLinkId` an engine client id is sent as: capped at 36 chars.
+fn link_id(cid: &str) -> String {
+    cid.chars().take(36).collect()
+}
+
+/// One order by `orderId` or `orderLinkId`, or `None` when Bybit has no
+/// such order. `realtime` only keeps open orders; once terminal the order
+/// moves to history, so a miss there is a look-up in `/v5/order/history`.
+async fn find(c: &CexConnector, key: (&'static str, String), symbol: &str, base: &str, quote: &str) -> Result<Option<BrokerOrder>, ConnectorError> {
+    let params = [("category", "spot".to_string()), ("symbol", symbol.to_string()), key];
     let live = get(c, "/v5/order/realtime", &params).await?;
     if let Some(o) = live.get("list").and_then(Value::as_array).and_then(|a| a.first()) {
-        return parse_order(o);
+        return parse_order(o, base, quote).map(Some);
     }
     let hist = get(c, "/v5/order/history", &params).await?;
-    let o = hist
-        .get("list")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .ok_or_else(|| ConnectorError::Rejected(format!("Bybit has no order {order_id}")))?;
-    parse_order(o)
+    match hist.get("list").and_then(Value::as_array).and_then(|a| a.first()) {
+        Some(o) => parse_order(o, base, quote).map(Some),
+        None => Ok(None),
+    }
+}
+
+pub(super) async fn status(
+    c: &CexConnector,
+    order_id: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<BrokerOrder, ConnectorError> {
+    find(c, ("orderId", order_id.to_string()), symbol, base, quote)
+        .await?
+        .ok_or_else(|| ConnectorError::Rejected(format!("Bybit has no order {order_id}")))
+}
+
+/// Look an order up by the client id it was sent under: `orderLinkId` is a
+/// query parameter of both order lists
+/// (<https://bybit-exchange.github.io/docs/v5/order/order-list>).
+pub(super) async fn by_client_id(
+    c: &CexConnector,
+    cid: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<Option<BrokerOrder>, ConnectorError> {
+    find(c, ("orderLinkId", link_id(cid)), symbol, base, quote).await
 }
 
 pub(super) async fn cancel(c: &CexConnector, order_id: &str, symbol: &str) -> Result<(), ConnectorError> {
@@ -223,12 +271,67 @@ mod tests {
             "orderId": "abc", "orderStatus": "PartiallyFilledCanceled",
             "cumExecQty": "0.25", "cumExecValue": "8000", "cumExecFee": "8"
         });
-        let o = parse_order(&v).unwrap();
+        let o = parse_order(&v, "BTC", "USDT").unwrap();
         assert_eq!(o.status, BrokerOrderStatus::Canceled);
         assert!(o.status.is_terminal());
         assert_eq!(o.filled_qty, 0.25, "the 0.25 that did fill is a real position");
         assert_eq!(o.avg_price, Some(32000.0));
         assert_eq!(o.fee, 8.0);
+        assert_eq!(o.fee_base, 0.0);
+    }
+
+    /// A filled spot market buy as `/v5/order/history` returns it: the fee is
+    /// in `cumFeeDetail`, in BTC, and `cumExecFee` is the deprecated echo.
+    /// Shape from <https://bybit-exchange.github.io/docs/v5/order/order-list>.
+    #[test]
+    fn a_spot_buy_fee_taken_in_the_coin_is_valued_at_the_fill_and_kept_as_coins() {
+        let v: Value = serde_json::json!({
+            "orderId": "1854", "orderLinkId": "pythia-a-1", "symbol": "BTCUSDT", "side": "Buy",
+            "orderType": "Market", "orderStatus": "Filled",
+            "cumExecQty": "0.010000", "cumExecValue": "600.00", "avgPrice": "60000",
+            "cumExecFee": "0.00001", "cumFeeDetail": {"BTC": "0.00001"}
+        });
+        let o = parse_order(&v, "BTC", "USDT").unwrap();
+        assert_eq!(o.filled_qty, 0.01, "the venue filled 0.01");
+        assert!((o.fee_base - 0.00001).abs() < 1e-15, "and kept 0.00001 BTC as the fee");
+        assert!((o.fee - 0.6).abs() < 1e-9, "worth $0.60 at the fill price, not $0.00001: {}", o.fee);
+        assert!(o.fee_unpriced.is_empty());
+    }
+
+    #[test]
+    fn a_spot_sell_fee_in_usdt_is_money_and_takes_no_coins() {
+        let v: Value = serde_json::json!({
+            "orderId": "1855", "side": "Sell", "orderStatus": "Filled",
+            "cumExecQty": "0.01", "cumExecValue": "600", "cumFeeDetail": {"USDT": "0.6"}
+        });
+        let o = parse_order(&v, "BTC", "USDT").unwrap();
+        assert_eq!((o.fee, o.fee_base), (0.6, 0.0));
+    }
+
+    #[test]
+    fn without_fee_detail_the_documented_spot_rule_decides_the_currency() {
+        // An answer with only the deprecated field: a buy paid in the coin.
+        let buy: Value = serde_json::json!({
+            "orderId": "1", "side": "Buy", "orderStatus": "Filled",
+            "cumExecQty": "2", "cumExecValue": "200", "cumExecFee": "0.002"
+        });
+        let o = parse_order(&buy, "SOL", "USDT").unwrap();
+        assert_eq!(o.fee_base, 0.002);
+        assert!((o.fee - 0.2).abs() < 1e-12);
+        // A named feeCurrency wins over the rule.
+        let named: Value = serde_json::json!({
+            "orderId": "2", "side": "Buy", "orderStatus": "Filled",
+            "cumExecQty": "2", "cumExecValue": "200", "cumExecFee": "0.2", "feeCurrency": "USDT"
+        });
+        let o = parse_order(&named, "SOL", "USDT").unwrap();
+        assert_eq!((o.fee, o.fee_base), (0.2, 0.0));
+    }
+
+    #[test]
+    fn a_client_id_is_looked_up_under_the_order_link_id_it_was_sent_as() {
+        assert_eq!(link_id("pythia-a1b2-ord_17"), "pythia-a1b2-ord_17");
+        let long = "x".repeat(50);
+        assert_eq!(link_id(&long).len(), 36, "capped like the submission");
     }
 
     #[test]

@@ -13,9 +13,11 @@ pub mod indicators;
 pub mod risk;
 #[cfg(test)]
 mod risk_engine_tests;
+#[cfg(test)]
+mod seam_tests;
 pub mod strategies;
 
-use crate::connectors::{BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
+use crate::connectors::{BrokerOrder, BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
 use crate::costs::{self, CostModel, CostVenue};
 use crate::execution::bandit;
 pub use crate::execution::bandit::FillRoute;
@@ -536,6 +538,12 @@ pub struct LiveStatus {
     /// The exchange crypto demo orders go to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub demo_exchange: Option<CostVenue>,
+    /// That exchange documents that its demo trades on real market prices.
+    /// When it does not (OKX), a demo fill there proves the API path and says
+    /// little about the price: the UI labels demo numbers on it as an API
+    /// test, and a demo autopilot there is refused.
+    #[serde(default)]
+    pub demo_real_prices: bool,
     /// Open positions opened by demo fills.
     #[serde(default)]
     pub demo_positions: usize,
@@ -707,6 +715,21 @@ pub struct LivePoll {
     pub cancel: bool,
 }
 
+/// A demo order sent before a restart that the venue never acknowledged.
+/// Produced by [`Engine::client_lookups`]; the daemon asks the demo venue for
+/// it by `client_order_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientLookup {
+    pub order_id: String,
+    pub client_order_id: String,
+    pub venue: Venue,
+    pub symbol: String,
+    pub demo: bool,
+    /// Since the restart.
+    pub age_ms: i64,
+}
+
 /// What a venue says about one of our orders, normalised.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -715,10 +738,33 @@ pub struct LiveUpdate {
     /// Cumulative filled quantity, as the venue reports it.
     pub filled_qty: f64,
     pub avg_price: Option<f64>,
-    /// Cumulative fees so far.
+    /// Cumulative fees so far, valued in the quote currency (a fee taken in
+    /// the coin is included at the fill price).
     pub fee: f64,
+    /// Cumulative fee taken in the base coin, in coins. A buy then holds
+    /// `filled_qty - fee_base` at the venue, and that net quantity is what is
+    /// booked (see [`BrokerOrder::fee_base`]).
+    #[serde(default)]
+    pub fee_base: f64,
+    /// Cumulative fees in a third asset the connector could not price.
+    #[serde(default)]
+    pub fee_unpriced: Vec<(String, f64)>,
     /// The venue's own status word, for the journal.
     pub raw_status: String,
+}
+
+impl From<BrokerOrder> for LiveUpdate {
+    fn from(bo: BrokerOrder) -> Self {
+        LiveUpdate {
+            status: bo.status,
+            filled_qty: bo.filled_qty,
+            avg_price: bo.avg_price,
+            fee: bo.fee,
+            fee_base: bo.fee_base,
+            fee_unpriced: bo.fee_unpriced,
+            raw_status: bo.raw_status,
+        }
+    }
 }
 
 impl LiveUpdate {
@@ -764,6 +810,9 @@ pub struct InFlight {
     /// which is what makes partial fills safe to apply repeatedly.
     booked_qty: f64,
     booked_fee: f64,
+    /// Of the fee booked so far, the coins the venue kept from the fill.
+    #[serde(default)]
+    booked_fee_base: f64,
     paper: bool,
     cancel_sent: bool,
     /// Price at the moment the execution style was chosen. Realised slippage is
@@ -785,6 +834,11 @@ pub struct InFlight {
     /// bps signed against us; `None` without a fresh book.
     #[serde(default)]
     drift_bps: Option<f64>,
+    /// A demo order the venue never acknowledged before a restart: the daemon
+    /// looks it up by its client id ([`Engine::client_lookups`]) instead of
+    /// polling a broker id it does not have.
+    #[serde(default)]
+    lookup: bool,
 }
 
 impl InFlight {
@@ -3183,6 +3237,7 @@ impl Engine {
                 qty,
                 booked_qty: 0.0,
                 booked_fee: 0.0,
+                booked_fee_base: 0.0,
                 // The live arm's endpoint choice; a demo order has its own
                 // world and ignores it.
                 paper: self.live.paper && !demo,
@@ -3195,6 +3250,7 @@ impl Engine {
                 cost_source,
                 demo,
                 drift_bps,
+                lookup: false,
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -3911,6 +3967,84 @@ impl Engine {
             .collect()
     }
 
+    /// Demo orders from before a restart that the venue never acknowledged:
+    /// the daemon looks each up by its client id and answers with
+    /// [`Engine::apply_lookup_found`], [`Engine::apply_lookup_missing`] or
+    /// [`Engine::apply_lookup_failed`].
+    pub fn client_lookups(&self) -> Vec<ClientLookup> {
+        let now = self.now();
+        self.inflight
+            .iter()
+            .filter(|(_, f)| f.lookup && f.broker_id.is_none())
+            .map(|(order_id, f)| ClientLookup {
+                order_id: order_id.clone(),
+                client_order_id: f.client_order_id.clone(),
+                venue: f.venue,
+                symbol: f.symbol.clone(),
+                demo: f.demo,
+                age_ms: now - f.submitted_at,
+            })
+            .collect()
+    }
+
+    /// The demo venue has the order. From here it is followed like any other:
+    /// acknowledged under the venue's id, its fill so far booked now, and
+    /// polled until it is done.
+    pub fn apply_lookup_found(&mut self, order_id: &str, order: BrokerOrder) {
+        let Some(f) = self.inflight.get_mut(order_id) else { return };
+        f.lookup = false;
+        let (strategy, market, cid) = (f.strategy_id.clone(), f.market_id.clone(), f.client_order_id.clone());
+        self.apply_live_ack(order_id, &order.id);
+        self.log(
+            JournalKind::System,
+            format!(
+                "DEMO order {order_id} found at the demo venue by client id {cid} after the restart: {} with {} filled",
+                order.raw_status, order.filled_qty
+            ),
+            Some(strategy),
+            Some(market),
+        );
+        self.apply_live_update(order_id, LiveUpdate::from(order));
+    }
+
+    /// The demo venue has no order under that client id: it never arrived,
+    /// so nothing filled and nothing is booked.
+    pub fn apply_lookup_missing(&mut self, order_id: &str) {
+        let Some(f) = self.inflight.get(order_id) else { return };
+        let reason = format!(
+            "never reached the demo venue: it has no order with client id {} after the restart. Nothing filled",
+            f.client_order_id
+        );
+        self.close_unacknowledged(order_id, &reason, JournalKind::System);
+    }
+
+    /// The demo venue could not be asked (no keys, no lookup on this venue,
+    /// or no answer for too long). The order's fate stays unknown: its row is
+    /// closed with the client id to look for in the demo account.
+    pub fn apply_lookup_failed(&mut self, order_id: &str, why: &str) {
+        let Some(f) = self.inflight.get(order_id) else { return };
+        let reason = format!(
+            "status unknown: Pythia restarted before the demo venue acknowledged it, and the lookup by client id {} failed ({why}). Check the demo account for it; a fill there is not in Pythia's books",
+            f.client_order_id
+        );
+        self.close_unacknowledged(order_id, &reason, JournalKind::Risk);
+    }
+
+    fn close_unacknowledged(&mut self, order_id: &str, reason: &str, kind: JournalKind) {
+        let Some(f) = self.inflight.remove(order_id) else { return };
+        self.in_flight_markets.remove(&f.market_id);
+        if let Some(ord) = self.orders.iter_mut().find(|o| o.id == order_id) {
+            ord.status = OrderStatus::Rejected;
+            ord.reject_reason = Some(reason.to_string());
+        }
+        self.log(
+            kind,
+            format!("DEMO order {order_id} {:?} {}: {reason}", f.side, f.symbol),
+            Some(f.strategy_id),
+            Some(f.market_id),
+        );
+    }
+
     /// Note that a cancel has been sent, so we do not send it every tick while
     /// the venue works through it.
     pub fn mark_cancel_sent(&mut self, order_id: &str) {
@@ -3928,6 +4062,7 @@ impl Engine {
     pub fn apply_live_update(&mut self, order_id: &str, update: LiveUpdate) {
         let Some(f) = self.inflight.get(order_id).cloned() else { return };
         let delta = update.filled_qty - f.booked_qty;
+        let (fee_total, _) = self.live_fee_value(&update);
 
         if delta > 1e-9 {
             if let Some(price) = update.avg_price.filter(|p| *p > 0.0) {
@@ -3937,7 +4072,20 @@ impl Engine {
                         .iter()
                         .position(|s| s.id == f.strategy_id)
                         .unwrap_or_else(|| self.ensure_manual_strategy());
-                    let fee_delta = (update.fee - f.booked_fee).max(0.0);
+                    let fee_delta = (fee_total - f.booked_fee).max(0.0);
+                    // A fee the venue took in the coin itself never reached
+                    // the account: a buy holds that much less than it filled,
+                    // a sell gave that much more away. Booking the gross fill
+                    // would leave the book holding coins the venue does not,
+                    // and the exit for them would be refused every time. The
+                    // coins are valued in `fee_delta` already, so the cash
+                    // works out: (filled - fee coins) * price + fee value =
+                    // filled * price + quote fee.
+                    let coin_fee = (update.fee_base - f.booked_fee_base).max(0.0);
+                    let qty = match f.side {
+                        Side::Buy => (delta - coin_fee).max(0.0),
+                        Side::Sell => delta + coin_fee,
+                    };
                     // Reference is the arrival price, so a fill better than
                     // arrival books negative slippage.
                     // emit_order = false: the pending order row already exists
@@ -3946,7 +4094,7 @@ impl Engine {
                     // A demo fill is booked like a paper one (no `live` flag,
                     // so the reconciler and the real-money guards ignore it)
                     // and marks its position demo.
-                    self.settle_fill_on(idx, &m, f.side, delta, price, fee_delta, reference, !f.demo, f.demo, false);
+                    self.settle_fill_on(idx, &m, f.side, qty, price, fee_delta, reference, !f.demo, f.demo, false);
                     // The tax record: every REAL fill, for the host to append
                     // to fills.jsonl. Never a demo fill, and never one from
                     // Alpaca's paper endpoint: both are virtual money.
@@ -3957,17 +4105,28 @@ impl Engine {
                             market_id: m.id.clone(),
                             symbol: m.symbol.clone(),
                             side: f.side,
-                            qty: delta,
+                            // What the account gained or gave, with the coin
+                            // fee in `fee`: the same numbers as the book.
+                            qty,
                             price,
                             fee: fee_delta,
                             strategy_id: f.strategy_id.clone(),
                             order_id: order_id.to_string(),
                         });
                     }
+                    let coin_note = if coin_fee > 0.0 {
+                        let base = m.symbol.split('/').next().unwrap_or("coin");
+                        format!(
+                            ", fee {coin_fee:.8} {base} taken from the coins (${:.4}), {qty:.6} booked",
+                            coin_fee * price
+                        )
+                    } else {
+                        String::new()
+                    };
                     self.log(
                         JournalKind::Fill,
                         format!(
-                            "{} FILL {:?} {delta:.6} {} @ {price:.4}",
+                            "{} FILL {:?} {delta:.6} {} @ {price:.4}{coin_note}",
                             if f.demo { "DEMO" } else { "LIVE" },
                             f.side,
                             m.symbol
@@ -3977,7 +4136,8 @@ impl Engine {
                     );
                     if let Some(g) = self.inflight.get_mut(order_id) {
                         g.booked_qty = update.filled_qty;
-                        g.booked_fee = update.fee;
+                        g.booked_fee = fee_total.max(f.booked_fee);
+                        g.booked_fee_base = update.fee_base.max(f.booked_fee_base);
                     }
                 }
             }
@@ -4008,9 +4168,45 @@ impl Engine {
         }
     }
 
+    /// What a venue report's fees are worth in the quote currency: the
+    /// connector's own valuation plus any third-asset fee (Binance BNB) at the
+    /// engine's price for that coin. Returns the value and the fees it could
+    /// not price.
+    fn live_fee_value(&self, update: &LiveUpdate) -> (f64, Vec<(String, f64)>) {
+        let mut total = update.fee;
+        let mut unpriced = Vec::new();
+        for (asset, amount) in &update.fee_unpriced {
+            let px = self.price_of(&format!("crypto:{}/USD", asset.to_ascii_uppercase()));
+            if px > 0.0 {
+                total += amount * px;
+            } else {
+                unpriced.push((asset.clone(), *amount));
+            }
+        }
+        (total, unpriced)
+    }
+
     fn finish_live_order(&mut self, order_id: &str, update: &LiveUpdate) {
         let Some(f) = self.inflight.remove(order_id) else { return };
         self.in_flight_markets.remove(&f.market_id);
+
+        // A fee in a coin Pythia has no price for is not in the P&L; say so
+        // instead of letting the fees look smaller than they were.
+        let (_, unpriced) = self.live_fee_value(update);
+        if !unpriced.is_empty() && update.filled_qty > 0.0 {
+            let list: Vec<String> = unpriced.iter().map(|(a, n)| format!("{n:.8} {a}")).collect();
+            self.log(
+                JournalKind::Risk,
+                format!(
+                    "{} order {} paid a fee of {} that Pythia has no price for; it is not counted in the P&L",
+                    if f.demo { "DEMO" } else { "LIVE" },
+                    f.symbol,
+                    list.join(", ")
+                ),
+                Some(f.strategy_id.clone()),
+                Some(f.market_id.clone()),
+            );
+        }
 
         // Tell the execution policy what that choice actually cost. This is the
         // only feedback it gets, and it is the reason the whole thing works:
@@ -4132,6 +4328,7 @@ impl Engine {
                 }
                 Some(p) => {
                     let was = p.qty;
+                    let was_avg = p.avg_price;
                     p.qty = bp.qty;
                     p.avg_price = avg;
                     p.live = true;
@@ -4147,8 +4344,10 @@ impl Engine {
                         JournalKind::Risk,
                         format!("Reconciled {}: book had {was:.6}, {venue:?} has {:.6} — broker wins", bp.symbol, bp.qty),
                         None,
-                        Some(market_id),
+                        Some(market_id.clone()),
                     );
+                    // An autopilot's position: the difference is its to book.
+                    self.autopilot_on_correction(&market_id, (was, was_avg), (bp.qty, avg), &format!("{venue:?}"));
                 }
                 None if adopt_unknown => {
                     self.positions.insert(
@@ -4188,7 +4387,7 @@ impl Engine {
             .map(|(id, _)| id.clone())
             .collect();
         for id in vanished {
-            self.positions.remove(&id);
+            let gone = self.positions.remove(&id);
             self.ref_prices.remove(&id);
             changes += 1;
             self.log(
@@ -4197,6 +4396,9 @@ impl Engine {
                 None,
                 Some(id.clone()),
             );
+            if let Some(p) = gone {
+                self.autopilot_on_correction(&id, (p.qty, p.avg_price), (0.0, 0.0), &format!("{venue:?}"));
+            }
         }
 
         if changes > 0 {
@@ -4226,6 +4428,7 @@ impl Engine {
             blocked_reason: if self.live_routable(Venue::Alpaca) { self.live_block_reason() } else { None },
             demo_venues: self.demo_venues(),
             demo_exchange: self.demo_venues.contains(&Venue::Crypto).then_some(self.crypto_demo_venue).flatten(),
+            demo_real_prices: self.crypto_demo_real_prices,
             demo_positions: self.positions.values().filter(|p| p.demo && p.qty.abs() > 1e-9).count(),
         }
     }
@@ -4772,6 +4975,22 @@ impl Engine {
             }
         }
         self.apply_strategy_state(id, state);
+        // Demo on an exchange whose demo book has its own prices still runs,
+        // but its numbers prove the API path, not the strategy.
+        let crypto = self.strategies.iter().find(|s| s.id == id).is_some_and(|s| s.venue_class == Venue::Crypto);
+        if state == StrategyState::Demo && crypto && !self.crypto_demo_real_prices {
+            let ex = self.crypto_demo_venue.unwrap_or(self.crypto_venue);
+            self.log(
+                JournalKind::System,
+                format!(
+                    "{id} demo-trades on {}, whose demo account has its own prices that are not documented as the \
+                     real market. Its demo results are an API test, not a price test.",
+                    autopilot::venue_label(ex)
+                ),
+                Some(id.to_string()),
+                None,
+            );
+        }
         Ok(())
     }
 
@@ -5034,18 +5253,44 @@ impl Engine {
     /// followed again: back in flight, its market blocked for new orders, and
     /// the daemon's next poll (`live_polls`) reads its status and books
     /// whatever filled meanwhile, cancelling it first if it is past the
-    /// timeout. One without a broker id never got an answer, so its fate is
-    /// unknown here; its row is closed as rejected with the client id to look
-    /// for at the venue, and reconciliation corrects any position it opened.
+    /// timeout. One without a broker id never got an answer. A demo one is
+    /// looked up at the demo venue by its client id ([`Engine::client_lookups`]),
+    /// since no reconciliation would ever correct the paper ledger it books
+    /// into. A live one's fate is unknown here; its row is closed as rejected
+    /// with the client id to look for at the venue, and reconciliation
+    /// corrects any position it opened.
     /// A "Pending" row with no saved state at all (a save from before in-flight
     /// orders were kept) is closed the same way rather than left pending forever.
     fn restore_inflight(&mut self, saved: Vec<(String, InFlight)>) {
         let mut followed = 0usize;
-        for (order_id, f) in saved {
+        let now = self.now();
+        for (order_id, mut f) in saved {
             if f.broker_id.is_some() {
                 self.in_flight_markets.insert(f.market_id.clone());
                 self.inflight.insert(order_id, f);
                 followed += 1;
+                continue;
+            }
+            // A demo order is in the paper ledger, which no reconciliation
+            // corrects: a fill that landed while Pythia was down would never
+            // be booked. Ask the demo venue for it by the client id it was
+            // sent under (`client_lookups`); the answer books it or closes it.
+            if f.demo && !f.client_order_id.is_empty() {
+                f.lookup = true;
+                // The lookup's own clock: it gives up on a venue that keeps
+                // not answering, counted from the restart.
+                f.submitted_at = now;
+                self.log(
+                    JournalKind::System,
+                    format!(
+                        "DEMO order {order_id} {:?} {} was sent before the restart and not acknowledged; looking it up at the demo venue by client id {}",
+                        f.side, f.symbol, f.client_order_id
+                    ),
+                    Some(f.strategy_id.clone()),
+                    Some(f.market_id.clone()),
+                );
+                self.in_flight_markets.insert(f.market_id.clone());
+                self.inflight.insert(order_id, f);
                 continue;
             }
             let at = if f.client_order_id.is_empty() { String::new() } else { format!(" (client id {})", f.client_order_id) };
@@ -6256,6 +6501,66 @@ mod tests {
     }
 
     #[test]
+    fn a_fee_taken_in_the_coin_books_the_coins_received_and_the_fee_in_dollars() {
+        let (mut e, sid) = demo_engine();
+        let cash0 = e.cash;
+        e.place_order(&sid, "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap();
+        let o = e.drain_live_orders().pop().unwrap();
+        e.apply_live_ack(&o.order_id, "demo-1");
+        let px = 60_000.0;
+        // Bybit keeps 0.1 % of the BTC bought, reported cumulatively over two parts.
+        let rate = 0.001;
+        let part = |filled: f64, status| LiveUpdate {
+            fee: filled * rate * px,
+            fee_base: filled * rate,
+            ..update(status, filled, px)
+        };
+        e.apply_live_update(&o.order_id, part(o.qty / 2.0, BrokerOrderStatus::PartiallyFilled));
+        e.apply_live_update(&o.order_id, part(o.qty, BrokerOrderStatus::Filled));
+
+        let p = e.positions.get("crypto:BTC/USD").expect("a position");
+        let net = o.qty * (1.0 - rate);
+        assert!((p.qty - net).abs() < 1e-12, "the book holds what the venue holds: {} vs {net}", p.qty);
+        // The dollars spent are exactly the fill: the fee coins are inside it.
+        assert!((cash0 - e.cash - o.qty * px).abs() < 1e-6, "spent {}", cash0 - e.cash);
+        let fees = e.strategies.iter().find(|s| s.id == sid).unwrap().ledger.fees;
+        assert!((fees - o.qty * rate * px).abs() < 1e-6, "the fee in dollars, not in coins: {fees}");
+        let row = e.orders.iter().find(|x| x.id == o.order_id).unwrap();
+        assert_eq!(row.filled_qty, o.qty, "the order row keeps what the venue filled");
+        assert!(e.journal.iter().any(|j| j.message.contains("taken from the coins")), "the journal says so");
+
+        // The exit sells what is actually there, not the gross fill.
+        e.close_position("crypto:BTC/USD", "test");
+        let exit = e.drain_live_orders().pop().expect("the exit goes to the demo venue");
+        assert!((exit.qty - net).abs() < 1e-12, "exit {} for {net} held", exit.qty);
+    }
+
+    #[test]
+    fn a_fee_in_a_third_coin_is_priced_from_the_engine_or_journaled() {
+        let (mut e, sid) = demo_engine();
+        e.place_order(&sid, "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap();
+        let o = e.drain_live_orders().pop().unwrap();
+        e.apply_live_ack(&o.order_id, "demo-1");
+        let sol = e.price_of("crypto:SOL/USD");
+        assert!(sol > 0.0);
+        e.apply_live_update(
+            &o.order_id,
+            LiveUpdate {
+                fee_unpriced: vec![("SOL".into(), 0.01), ("BNB".into(), 0.002)],
+                ..update(BrokerOrderStatus::Filled, o.qty, 60_000.0)
+            },
+        );
+        let fees = e.strategies.iter().find(|s| s.id == sid).unwrap().ledger.fees;
+        assert!((fees - 0.01 * sol).abs() < 1e-9, "SOL has a price here: {fees}");
+        assert!(
+            e.journal.iter().any(|j| j.message.contains("0.00200000 BNB") && j.message.contains("no price")),
+            "BNB has none, and the journal says the fee is not counted"
+        );
+        let p = e.positions.get("crypto:BTC/USD").unwrap();
+        assert!((p.qty - o.qty).abs() < 1e-12, "a fee in another coin takes nothing from the BTC");
+    }
+
+    #[test]
     fn a_demo_order_goes_out_without_the_live_arm_and_is_booked_as_demo_not_taxed() {
         let (mut e, sid) = demo_engine();
         assert!(!e.live_config().armed, "demo must not need the live arm");
@@ -6532,7 +6837,15 @@ mod tests {
     }
 
     fn update(status: BrokerOrderStatus, filled: f64, price: f64) -> LiveUpdate {
-        LiveUpdate { status, filled_qty: filled, avg_price: Some(price), fee: 0.0, raw_status: format!("{status:?}") }
+        LiveUpdate {
+            status,
+            filled_qty: filled,
+            avg_price: Some(price),
+            fee: 0.0,
+            fee_base: 0.0,
+            fee_unpriced: Vec::new(),
+            raw_status: format!("{status:?}"),
+        }
     }
 
     /// An engine whose Alpaca session gate is open: a fresh broker snapshot

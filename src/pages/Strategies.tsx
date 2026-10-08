@@ -9,6 +9,7 @@ import { researchAvailable, runValidation } from "../research";
 import type { Gate, GateUnit, Passport, StrategyConfig } from "../types";
 import { ConfirmButton } from "../components/Confirm";
 import { changeStrategyState } from "../strategyState";
+import { cryptoDemoName, demoApiTestNote, demoIsApiTestOnly } from "../venueNames";
 
 export function Strategies() {
   const { strategies, passports } = useStore();
@@ -37,7 +38,7 @@ export function Strategies() {
 }
 
 function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport }) {
-  const { setStrategyState, setStrategyParam } = useStore();
+  const { setStrategyState, setStrategyParam, live: liveStatus } = useStore();
   const [confirm, setConfirm] = useState(false);
   const [typed, setTyped] = useState("");
   // Sliders edit a draft. The engine starts a strategy's record over on every
@@ -235,8 +236,15 @@ function StrategyCard({ s, passport }: { s: StrategyConfig; passport?: Passport 
       {armErr && !confirm && <div className="mt-2 text-xs text-danger">{armErr}</div>}
       {demo && (
         <div className="mt-2 text-[11px] text-cyber-text-dim">
-          Demo: orders go to the venue's demo account with its demo keys. Real API, virtual money, never in the tax
-          record. Exits go back to the same demo account.
+          Demo: orders go to {s.venueClass === "crypto" && cryptoDemoName(liveStatus) ? `${cryptoDemoName(liveStatus)}'s` : "the venue's"} demo
+          account with its demo keys. Real API, virtual money, never in the tax record. Exits go back to the same demo
+          account.
+        </div>
+      )}
+      {demo && s.venueClass === "crypto" && demoIsApiTestOnly(liveStatus) && (
+        <div className="mt-1 flex items-start gap-1.5 text-[11px] text-warning">
+          <AlertTriangle size={12} aria-hidden className="mt-0.5 shrink-0" />
+          <span>{demoApiTestNote(liveStatus)}</span>
         </div>
       )}
 

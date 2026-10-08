@@ -556,6 +556,12 @@ export interface LiveStatus {
   demoVenues?: Venue[];
   /** The exchange crypto demo orders go to. */
   demoExchange?: CostVenue;
+  /**
+   * That exchange documents that its demo trades on real prices. False on
+   * OKX: demo numbers there are an API test, not a price test, and a demo
+   * autopilot there is refused.
+   */
+  demoRealPrices?: boolean;
   /** Open positions opened by demo fills. */
   demoPositions?: number;
 }

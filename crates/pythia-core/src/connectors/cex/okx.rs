@@ -17,7 +17,7 @@
 use super::super::{
     num_or0, sign, Balance, BrokerOrder, BrokerOrderStatus, ConnectorError, OrderRequest, OrderType,
 };
-use super::{is_fiat, normalize_asset, CexConnector};
+use super::{is_fiat, normalize_asset, CexConnector, FeeSplit};
 use serde_json::Value;
 
 const BASE: &str = super::OKX_HOST;
@@ -102,7 +102,16 @@ fn map_status(s: &str) -> BrokerOrderStatus {
     }
 }
 
-fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
+/// Parse one order of `GET /api/v5/trade/order`
+/// (<https://www.okx.com/docs-v5/en/#order-book-trading-trade-get-order-details>).
+///
+/// The fee comes as `fee` plus `feeCcy`. OKX: `feeCcy` is the "currency in
+/// which fees are charged" (the quote currency only for maker sells), and
+/// its own example is a spot buy of BTC-USDT with `"fee": "-0.00000192834",
+/// "feeCcy": "BTC"`: a buy pays in the coin bought. `fee` is negative for a
+/// fee paid and positive for a net rebate, and is already net of the rebate,
+/// so `rebate` is not added again.
+fn parse_order(v: &Value, base: &str, quote: &str) -> Result<BrokerOrder, ConnectorError> {
     let id = v
         .get("ordId")
         .and_then(Value::as_str)
@@ -110,16 +119,25 @@ fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
         .to_string();
     let raw = v.get("state").and_then(Value::as_str).unwrap_or("live").to_string();
     let filled = num_or0(v.get("accFillSz"));
-    Ok(BrokerOrder {
+    let mut order = BrokerOrder {
         id,
         client_order_id: v.get("clOrdId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
         status: map_status(&raw),
         filled_qty: filled,
         // avgPx is blank until something fills.
         avg_price: Some(num_or0(v.get("avgPx"))).filter(|p| *p > 0.0),
-        fee: num_or0(v.get("fee")).abs(), // OKX reports fees as negative
+        fee: 0.0,
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
         raw_status: raw,
-    })
+    };
+    // Paid is negative at OKX; Pythia counts a fee paid as positive. A net
+    // rebate is not booked as income: the engine never lets a fee go below zero.
+    let paid = (-num_or0(v.get("fee"))).max(0.0);
+    // No feeCcy (an older answer): the quote currency, as Pythia always assumed.
+    let ccy = v.get("feeCcy").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(quote);
+    FeeSplit::fold([(ccy, paid)], base, quote).apply(&mut order);
+    Ok(order)
 }
 
 pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<BrokerOrder, ConnectorError> {
@@ -135,12 +153,8 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
     if let (OrderType::Limit, Some(p)) = (req.order_type, req.limit_price) {
         order["px"] = serde_json::json!(sign::trim_decimals(p, 8));
     }
-    if let Some(cid) = &req.client_order_id {
-        // clOrdId: alphanumeric, 1–32 characters.
-        let clean: String = cid.chars().filter(char::is_ascii_alphanumeric).take(32).collect();
-        if !clean.is_empty() {
-            order["clOrdId"] = serde_json::json!(clean);
-        }
+    if let Some(clean) = req.client_order_id.as_deref().map(cl_ord_id).filter(|s| !s.is_empty()) {
+        order["clOrdId"] = serde_json::json!(clean);
     }
 
     let body = serde_json::to_string(&serde_json::json!([order]))
@@ -156,25 +170,59 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ConnectorError::Rejected("OKX accepted the order but returned no ordId".into()))?;
 
-    Ok(BrokerOrder {
-        id: id.to_string(),
-        client_order_id: req.client_order_id,
-        status: BrokerOrderStatus::Working,
-        filled_qty: 0.0,
-        avg_price: None,
-        fee: 0.0,
-        raw_status: "submitted".into(),
-    })
+    Ok(BrokerOrder::acknowledged(id, req.client_order_id))
 }
 
-pub(super) async fn status(c: &CexConnector, order_id: &str, symbol: &str) -> Result<BrokerOrder, ConnectorError> {
+pub(super) async fn status(
+    c: &CexConnector,
+    order_id: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<BrokerOrder, ConnectorError> {
     let path = format!("/api/v5/trade/order?instId={symbol}&ordId={order_id}");
     let data = request(c, reqwest::Method::GET, &path, "").await?;
     let o = data
         .as_array()
         .and_then(|a| a.first())
         .ok_or_else(|| ConnectorError::Rejected(format!("OKX has no order {order_id}")))?;
-    parse_order(o)
+    parse_order(o, base, quote)
+}
+
+/// The `clOrdId` an engine client id is sent as: OKX takes 1 to 32
+/// alphanumeric characters, so the dashes go.
+fn cl_ord_id(cid: &str) -> String {
+    cid.chars().filter(char::is_ascii_alphanumeric).take(32).collect()
+}
+
+/// Look an order up by the client id it was sent under. Get order details
+/// takes `clOrdId` instead of `ordId`, and answers 51603 "Order does not
+/// exist" for one it never received
+/// (<https://www.okx.com/docs-v5/en/#order-book-trading-trade-get-order-details>).
+pub(super) async fn by_client_id(
+    c: &CexConnector,
+    cid: &str,
+    symbol: &str,
+    base: &str,
+    quote: &str,
+) -> Result<Option<BrokerOrder>, ConnectorError> {
+    let id = cl_ord_id(cid);
+    if id.is_empty() {
+        return Ok(None); // nothing was sent under it
+    }
+    let path = format!("/api/v5/trade/order?instId={symbol}&clOrdId={id}");
+    match request(c, reqwest::Method::GET, &path, "").await {
+        Ok(data) => match data.as_array().and_then(|a| a.first()) {
+            Some(o) => parse_order(o, base, quote).map(Some),
+            None => Ok(None),
+        },
+        Err(e) if is_no_such_order(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn is_no_such_order(e: &ConnectorError) -> bool {
+    matches!(e, ConnectorError::Rejected(m) if m.contains("(51603)"))
 }
 
 pub(super) async fn cancel(c: &CexConnector, order_id: &str, symbol: &str) -> Result<(), ConnectorError> {
@@ -246,18 +294,56 @@ mod tests {
     fn fees_are_reported_positive_even_though_okx_sends_them_negative() {
         let v: Value = serde_json::json!({
             "ordId": "312269865356374016", "state": "filled",
-            "accFillSz": "2", "avgPx": "31500", "fee": "-0.01"
+            "accFillSz": "2", "avgPx": "31500", "fee": "-0.01", "feeCcy": "USDT"
         });
-        let o = parse_order(&v).unwrap();
+        let o = parse_order(&v, "BTC", "USDT").unwrap();
         assert_eq!(o.fee, 0.01);
+        assert_eq!(o.fee_base, 0.0);
         assert_eq!(o.avg_price, Some(31500.0));
         assert_eq!(o.status, BrokerOrderStatus::Filled);
+    }
+
+    /// OKX's own example for Get order details: a spot market buy on
+    /// BTC-USDT whose fee is charged in BTC.
+    #[test]
+    fn the_documented_spot_buy_pays_its_fee_in_btc() {
+        let v: Value = serde_json::json!({
+            "accFillSz": "0.00192834", "avgPx": "51858", "fee": "-0.00000192834", "feeCcy": "BTC",
+            "instId": "BTC-USDT", "instType": "SPOT", "ordId": "680800019749904384", "ordType": "market",
+            "rebate": "0", "rebateCcy": "USDT", "side": "buy", "state": "filled", "clOrdId": ""
+        });
+        let o = parse_order(&v, "BTC", "USDT").unwrap();
+        assert_eq!(o.filled_qty, 0.00192834);
+        assert!((o.fee_base - 0.00000192834).abs() < 1e-18, "the coins OKX kept: {}", o.fee_base);
+        assert!((o.fee - 0.00000192834 * 51858.0).abs() < 1e-9, "valued at the fill: {}", o.fee);
+        assert!(o.fee > 0.09, "about ten cents, not a millionth of a dollar");
+    }
+
+    #[test]
+    fn a_net_rebate_is_not_booked_as_income() {
+        let v: Value = serde_json::json!({
+            "ordId": "9", "state": "filled", "accFillSz": "1", "avgPx": "100", "fee": "0.02", "feeCcy": "USDT"
+        });
+        let o = parse_order(&v, "SOL", "USDT").unwrap();
+        assert_eq!((o.fee, o.fee_base), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_client_id_is_looked_up_as_it_was_sent_and_51603_means_never_received() {
+        // Sent and looked up under the same cleaned id.
+        assert_eq!(cl_ord_id("pythia-a1b2-ord_17"), "pythiaa1b2ord17");
+        assert!(cl_ord_id("pythia-0123456789-0123456789-0123456789").len() <= 32);
+        let v = serde_json::json!({"code": "51603", "msg": "Order does not exist", "data": []});
+        let e = check_error(&v, "/api/v5/trade/order").unwrap_err();
+        assert!(is_no_such_order(&e), "{e}");
+        let other = check_error(&serde_json::json!({"code": "50011", "msg": "Rate limit"}), "/x").unwrap_err();
+        assert!(!is_no_such_order(&other));
     }
 
     #[test]
     fn a_live_order_has_no_average_price() {
         let v: Value = serde_json::json!({"ordId": "1", "state": "live", "accFillSz": "0", "avgPx": ""});
-        let o = parse_order(&v).unwrap();
+        let o = parse_order(&v, "BTC", "USDT").unwrap();
         assert_eq!(o.avg_price, None);
         assert!(!o.status.is_terminal());
     }

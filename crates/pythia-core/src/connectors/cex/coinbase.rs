@@ -177,7 +177,16 @@ fn parse_order(o: &Value) -> Result<BrokerOrder, ConnectorError> {
         status,
         filled_qty: filled,
         avg_price: avg,
+        // Coinbase charges in the quote currency on both sides: its Get Order
+        // reference defines `total_value_after_fees` as "filled_value +
+        // total_fees for buy orders and filled_value - total_fees for sell
+        // orders", both in quote (`filled_value` is "in quote currency").
+        // <https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/get-order>
+        // So the coins bought are the full `filled_size`, and nothing is
+        // taken from them.
         fee: num_or0(o.get("total_fees")).abs(),
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
         raw_status: raw,
     })
 }
@@ -362,15 +371,7 @@ fn parse_submit(v: &Value, cid: String) -> Result<BrokerOrder, ConnectorError> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ConnectorError::Rejected("Coinbase accepted the order but returned no order_id".into()))?;
-    Ok(BrokerOrder {
-        id: id.to_string(),
-        client_order_id: Some(cid),
-        status: BrokerOrderStatus::Working,
-        filled_qty: 0.0,
-        avg_price: None,
-        fee: 0.0,
-        raw_status: "submitted".into(),
-    })
+    Ok(BrokerOrder::acknowledged(id, Some(cid)))
 }
 
 pub(super) async fn status(c: &CexConnector, order_id: &str) -> Result<BrokerOrder, ConnectorError> {
@@ -657,6 +658,21 @@ mod tests {
         assert_eq!(o.avg_price, Some(60010.5));
         assert_eq!(o.fee, 1.44);
         assert_eq!(o.raw_status, "OPEN");
+    }
+
+    /// A filled market buy: Coinbase adds the fee to the dollars spent
+    /// (`total_value_after_fees` = `filled_value` + `total_fees`), so every
+    /// coin of `filled_size` arrives and none is kept as the fee.
+    #[test]
+    fn a_buy_pays_its_fee_in_dollars_and_keeps_the_full_size() {
+        let o = parse_order(&serde_json::json!({
+            "order_id": "cb-1", "side": "BUY", "status": "FILLED",
+            "filled_size": "0.01", "average_filled_price": "60000", "filled_value": "600",
+            "total_fees": "3.6", "total_value_after_fees": "603.6", "size_inclusive_of_fees": false
+        }))
+        .unwrap();
+        assert_eq!((o.filled_qty, o.fee, o.fee_base), (0.01, 3.6, 0.0));
+        assert!(o.fee_unpriced.is_empty());
     }
 
     #[test]
