@@ -243,3 +243,47 @@ def test_engine_state_from_a_file(reports, tmp_path):
     assert data["engine"]["reachable"] and data["autopilots"][0]["status"] == "stopped"
     assert data["engine"]["slippage"][0]["ratio"] == 0.5
     assert "Practice" in fr.markdown(data)
+
+
+# ---------------------------------------------------------------- evidence.json for the engine
+
+def test_evidence_status_waits_ten_days():
+    assert fr.EVIDENCE_MIN_DAYS == 10
+    assert fr.evidence_status(9.9, "below", "watch") == "early"
+    assert fr.evidence_status(10, "below", "watch") == "below"
+    assert fr.evidence_status(12, "inside", "watch") == "watch"
+    assert fr.evidence_status(12, "inside", "on_track") == "ok"
+    assert fr.evidence_status(12, "above", "ahead") == "ok"
+    assert fr.evidence_status(12, None, "unknown") == "none"
+
+
+def test_evidence_file_per_book_and_autopilot(reports, tmp_path):
+    write_series("tsmom", np.random.default_rng(2).normal(0.001, 0.005, 800))
+    journal(tmp_path, "tsmom", [START * (1 - 0.01 * i) for i in range(1, 13)])          # 11 days, far below
+    journal(tmp_path, "tsmom_regime", [START * 0.9, START * 0.8, START * 0.7])         # below, but 2 days
+    f = tmp_path / "state.json"
+    f.write_text(json.dumps({"autopilots": [state(bySleeve=[])], "orders": []}))
+    data = fr.build(now_ms=3 * fr.DAY_MS, url=f.as_uri(), price_at=lambda ms: None, root=tmp_path)
+    p = fr.write_evidence(data)
+    assert p.name == "evidence.json" and p.parent == report.REPORTS / "forward"
+    ev = json.loads(p.read_text(encoding="utf-8"))
+    assert ev["min_days"] == 10 and ev["generated_ms"] == 3 * fr.DAY_MS
+    ts = ev["books"]["tsmom"]
+    assert ts["status"] == "below" and ts["days"] == 11
+    assert ts["return_pct"] == pytest.approx(-12.0)
+    assert ts["band_low_pct"] < ts["band_high_pct"] and ts["return_pct"] < ts["band_low_pct"]
+    assert ts["band_method"] == "bootstrap"
+    assert ev["books"]["tsmom_regime"]["status"] == "early"
+    assert "m4_ls" not in ev["books"], "a book that has not started says nothing"
+    ap = ev["autopilots"]["ap_1"]
+    assert ap["status"] == "early" and ap["state"] == "running" and ap["band_low_pct"] is None
+    assert not list(p.parent.glob("*.tmp"))
+
+
+def test_evidence_is_strict_json(reports):
+    data = {"generated_ms": 1, "books": [{"name": "x", "days": 12, "elapsed_days": 11.0, "return_pct": float("nan"),
+                                          "expected": None, "position": None, "status": "unknown"}],
+            "autopilots": []}
+    text = json.dumps(fr.evidence(data), allow_nan=False)
+    assert json.loads(text)["books"]["x"] == {"days": 11.0, "return_pct": None, "band_low_pct": None,
+                                              "band_high_pct": None, "band_method": None, "status": "none"}

@@ -28,7 +28,11 @@ Where the band comes from, best first:
   3. nothing: the sentence says there is no range to compare with.
 
   python -m lab.paper.forward_report
-      the report: <reports>/forward/latest.json, latest.md and dated copies
+      the report: <reports>/forward/latest.json, latest.md and dated copies,
+      plus evidence.json: per book and autopilot its days, return, band and
+      one status word (early, ok, watch, below, none). The engine reads it for
+      the autopilot's auto pick, which lets a book's forward result count
+      only from EVIDENCE_MIN_DAYS days on.
   python -m lab.paper.forward_report --export-backtests [--source DIR]
       write the backtest series from whatever this machine has: the momentum
       books from the history files, the sweep candidates from the sweep's run
@@ -62,6 +66,9 @@ GATE_DAYS, GATE_TRADES = 30, 30
 # Below this many days a forward result says little either way; the band is wide
 # and a single day can put it anywhere.
 MIN_JUDGE_DAYS = 7
+# The engine's auto pick lets a forward result count only from this many days
+# on (evidence.json says "early" before that), and then only against it.
+EVIDENCE_MIN_DAYS = 10
 BAND = (0.05, 0.95)
 SIMS = 4000
 BLOCK_DAYS = 5
@@ -506,6 +513,7 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
         "venue": cfg.get("venue"),
         "state": state,
         "since": datetime.fromtimestamp(start_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "started_ms": start_ms,
         "days": days,
         "elapsed_days": elapsed,
         "start_equity": start,
@@ -747,6 +755,64 @@ def export_backtests(source: Path) -> None:
         print("m4_ls skipped:", type(e).__name__, e, file=sys.stderr)
 
 
+# ---------------------------------------------------------------- evidence for the engine
+
+def evidence_status(days: float, pos: str | None, status: str) -> str:
+    """The forward verdict the engine's auto pick reads, one word.
+
+    early: fewer than EVIDENCE_MIN_DAYS days, so it must not count either way;
+    below: under the backtest's band; watch: inside it but worth a look (worst
+    dip deeper than the backtest's, or an autopilot close to its floor);
+    ok: inside or above the band; none: no band to compare with.
+    """
+    if days < EVIDENCE_MIN_DAYS:
+        return "early"
+    if pos == "below":
+        return "below"
+    if status == "watch":
+        return "watch"
+    if pos is None:
+        return "none"
+    return "ok"
+
+
+def evidence_entry(row: dict) -> dict:
+    exp = row.get("expected") or {}
+    days = float(row.get("elapsed_days") or 0.0)
+    out = {"days": days, "return_pct": row.get("return_pct"),
+           "band_low_pct": exp.get("low_pct"), "band_high_pct": exp.get("high_pct"),
+           "band_method": exp.get("method"),
+           "status": evidence_status(days, row.get("position"), row.get("status", ""))}
+    if row.get("kind") == "autopilot":
+        out["state"] = row.get("state")
+        out["started_ms"] = row.get("started_ms")
+    return out
+
+
+def evidence(data: dict) -> dict:
+    """The small machine-readable summary the engine reads (evidence.json):
+    per paper book and per autopilot, its days, return, band and one status
+    word. Books that have not started are left out."""
+    return _finite({
+        "generated_ms": data["generated_ms"],
+        "min_days": EVIDENCE_MIN_DAYS,
+        "books": {b["name"]: evidence_entry(b) for b in data["books"] if b.get("days")},
+        "autopilots": {a["name"]: evidence_entry(a) for a in data["autopilots"]},
+    })
+
+
+def write_evidence(data: dict) -> Path:
+    """evidence.json next to latest.md, replaced in one step so the engine
+    never reads half a file."""
+    d = report.REPORTS / NAME
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "evidence.json"
+    tmp = d / "evidence.json.tmp"
+    tmp.write_text(json.dumps(evidence(data), indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+    return p
+
+
 def main() -> int:
     if "--export-backtests" in sys.argv:
         src = ROOT
@@ -756,6 +822,7 @@ def main() -> int:
         return 0
     data = build()
     report.write(NAME, markdown(data), data)
+    write_evidence(data)
     return 0
 
 
