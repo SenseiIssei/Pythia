@@ -562,6 +562,11 @@ export interface LiveStatus {
    * autopilot there is refused.
    */
   demoRealPrices?: boolean;
+  /**
+   * Crypto markets the crypto demo route cannot trade because the venue does
+   * not list them (Alpaca paper), by symbol. Absent when there are none.
+   */
+  demoNotListed?: string[];
   /** Open positions opened by demo fills. */
   demoPositions?: number;
 }
@@ -887,6 +892,12 @@ export interface AutopilotConfig {
   mode: AutopilotMode;
   /** A cost venue id from config/costs.json, e.g. "kraken" or "alpaca". */
   venue: CostVenue;
+  /**
+   * The markets it trades when the venue alone does not say: crypto demo on
+   * the Alpaca paper account is venue "alpaca" with asset class "crypto".
+   * Absent: the venue decides ("alpaca" alone is US shares).
+   */
+  assetClass?: Venue;
   capitalUsd: number;
   /** Empty: "auto" picks strategies by their evidence. */
   sleeves: AutopilotSleeveConfig[];
