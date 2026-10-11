@@ -15,6 +15,13 @@ describe("autopilotVenue", () => {
     expect(autopilotVenue("demo", "alpaca", live, "kraken")).toBe("alpaca");
   });
 
+  it("sends a crypto demo autopilot to Alpaca when crypto demo runs on the Alpaca paper account", () => {
+    const alp = { demoVenues: ["crypto" as const, "alpaca" as const], demoExchange: "alpaca" as const, demoRealPrices: true };
+    expect(autopilotVenue("demo", "crypto", alp, "kraken")).toBe("alpaca");
+    expect(cryptoDemoName(alp)).toBe("Alpaca");
+    expect(demoIsApiTestOnly(alp)).toBe(false);
+  });
+
   it("falls back to the selected exchange when no demo keys are saved", () => {
     expect(autopilotVenue("demo", "crypto", { demoVenues: [] }, "okx")).toBe("okx");
   });

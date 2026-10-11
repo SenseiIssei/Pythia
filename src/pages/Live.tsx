@@ -544,7 +544,8 @@ function DemoCard() {
         </span>
       </div>
       <div className="mb-3 text-xs leading-snug text-cyber-text-dim">
-        A strategy set to Demo sends its orders to the venue's demo account with the demo keys from Settings: signing,
+        A strategy set to Demo sends its orders to the venue's demo account with the demo keys from Settings (for
+        crypto: Bybit, OKX or Binance demo keys, or the Alpaca paper account with PYTHIA_DEMO_EXCHANGE=alpaca): signing,
         size rules, rejects, latency and partial fills are all real, the money is not. No arming needed, the risk
         limits still apply, and demo fills never reach the tax record. See docs/DEMO.md for which venues trade on real
         prices.
@@ -553,8 +554,16 @@ function DemoCard() {
         {ROUTABLE.map(({ venue, label }) => {
           const on = ready.includes(venue);
           const demoName = cryptoDemoName(live);
-          const where = venue === "crypto" ? (demoName ? `${demoName} demo` : "no demo exchange") : "Alpaca paper account";
+          const where =
+            venue === "crypto"
+              ? live.demoExchange === "alpaca" && demoName
+                ? "Alpaca paper account"
+                : demoName
+                  ? `${demoName} demo`
+                  : "no demo exchange"
+              : "Alpaca paper account";
           const apiOnly = venue === "crypto" && demoIsApiTestOnly(live);
+          const notListed = venue === "crypto" && on ? (live.demoNotListed ?? []) : [];
           return (
             <div key={venue} className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -564,6 +573,11 @@ function DemoCard() {
                 <Badge tone={on ? "purple" : "neutral"}>{on ? (apiOnly ? "API test only" : "demo ready") : "no demo keys"}</Badge>
               </div>
               {apiOnly && <div className="mt-1.5 text-xs text-warning">{demoApiTestNote(live)}</div>}
+              {notListed.length > 0 && (
+                <div className="mt-1.5 text-xs text-cyber-text-faint">
+                  Not listed on {demoName}, so demo skips them: {notListed.join(", ")}.
+                </div>
+              )}
               {on && (
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Button

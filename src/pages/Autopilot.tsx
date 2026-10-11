@@ -404,7 +404,7 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   // The engine refuses this too; saying it here saves a round trip.
   if (mode === "demo" && venue === "crypto" && demoIsApiTestOnly(live)) {
     problems.push(
-      `${exchangeName(live.demoExchange)} runs its demo account on its own prices, so a demo autopilot there would be judged in a different price world than its stop rules watch. Use Bybit or Binance demo keys, or practice money.`,
+      `${exchangeName(live.demoExchange)} runs its demo account on its own prices, so a demo autopilot there would be judged in a different price world than its stop rules watch. Use Bybit or Binance demo keys, Alpaca paper, or practice money.`,
     );
   }
 
@@ -458,6 +458,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
       // on the demo exchange, other crypto on the one selected in Settings,
       // US shares on Alpaca.
       venue: target,
+      // Crypto demo on Alpaca paper is venue "alpaca" trading crypto, not shares.
+      assetClass: venue,
       capitalUsd: capital,
       sleeves: pick === "manual" ? chosen.map((x) => ({ strategyId: x.s.id, weight: x.w / weightSum })) : [],
       stop,
