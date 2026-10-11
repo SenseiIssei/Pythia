@@ -46,7 +46,7 @@ use super::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -1090,9 +1090,242 @@ fn position_symbol(symbol: &str, asset_class: &str) -> String {
     symbol.to_string()
 }
 
+// ── the crypto venue's demo route on the Alpaca paper account ──────────────
+
+/// The Alpaca pair for one of Pythia's crypto market symbols, or `None` when
+/// Alpaca cannot trade it. Alpaca's crypto pairs used here are USD-quoted and
+/// written `BTC/USD`; Pythia's crypto markets are `BTC/USD` too, so the usual
+/// case is the identity. Kraken's old names (`XBT`, `XDG`) and the forms
+/// without a slash are accepted for safety. Another quote (`USDT`, `EUR`) is
+/// `None`: the engine prices these markets in dollars.
+pub fn alpaca_crypto_pair(symbol: &str) -> Option<String> {
+    let s = symbol.trim().to_ascii_uppercase();
+    let (base, quote) = match s.split_once(['/', '-']) {
+        Some((b, q)) => (b.to_string(), q.to_string()),
+        None => {
+            // `BTCUSD`: only a plain USD suffix, never `USDT` read as `USD` + `T`.
+            if s.ends_with("USDT") || s.ends_with("USDC") {
+                return None;
+            }
+            let b = s.strip_suffix("USD")?;
+            (b.to_string(), "USD".to_string())
+        }
+    };
+    if quote != "USD" || base.is_empty() || !base.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let base = match base.as_str() {
+        "XBT" => "BTC".to_string(),
+        "XDG" => "DOGE".to_string(),
+        _ => base,
+    };
+    Some(format!("{base}/USD"))
+}
+
+/// The USD pairs a `GET /v2/assets?asset_class=crypto&status=active` answer
+/// lists as tradable, in the `BTC/USD` form. Entries that are not crypto, not
+/// active, not tradable or not USD-quoted are left out.
+pub fn parse_tradable_usd_pairs(v: &Value) -> BTreeSet<String> {
+    let Some(arr) = v.as_array() else { return BTreeSet::new() };
+    arr.iter()
+        .filter(|a| a.get("tradable").and_then(Value::as_bool).unwrap_or(false))
+        .filter(|a| a.get("status").and_then(Value::as_str).is_none_or(|s| s.eq_ignore_ascii_case("active")))
+        .filter(|a| a.get("class").and_then(Value::as_str).is_none_or(|c| c == "crypto"))
+        .filter_map(|a| a.get("symbol").and_then(Value::as_str))
+        .filter(|s| s.contains('/'))
+        .filter_map(alpaca_crypto_pair)
+        .collect()
+}
+
+impl AlpacaConnector {
+    /// The crypto pairs this account can trade in dollars right now:
+    /// `GET /v2/assets?asset_class=crypto&status=active`
+    /// (<https://docs.alpaca.markets/reference/get-v2-assets-1>). Read-only.
+    pub async fn tradable_crypto_pairs(&self) -> Result<BTreeSet<String>, ConnectorError> {
+        let v = self
+            .send(self.req(reqwest::Method::GET, "/v2/assets?asset_class=crypto&status=active")?, "crypto assets")
+            .await?;
+        Ok(parse_tradable_usd_pairs(&v))
+    }
+}
+
+/// The reason a crypto market cannot go to the Alpaca paper account.
+pub fn not_listed_reason(symbol: &str) -> String {
+    format!("{symbol} is not listed on Alpaca, so the crypto demo route (Alpaca paper) cannot trade it")
+}
+
+/// The crypto venue's demo route on the Alpaca **paper** account
+/// (`PYTHIA_DEMO_EXCHANGE=alpaca`): `Venue::Crypto` orders in demo mode go to
+/// Alpaca's crypto book with the paper key pair, at
+/// `paper-api.alpaca.markets` only. Built by
+/// `execution::Credentials::connector_env` from the paper pair and nothing
+/// else, so a live Alpaca key can never reach it.
+///
+/// It translates Pythia's market symbol into the Alpaca pair and refuses a
+/// coin Alpaca does not list ([`not_listed_reason`]) before anything is sent.
+/// Everything else is the ordinary Alpaca order path: crypto goes out in
+/// coins, fractional, GTC, as a market order (or as the limit the engine
+/// chose), and its fee is posted later as a `CFEE` activity.
+pub struct AlpacaCryptoDemo {
+    inner: AlpacaConnector,
+}
+
+impl AlpacaCryptoDemo {
+    /// `inner` must be the paper connector; anything else is refused.
+    pub fn new(inner: AlpacaConnector) -> Result<Self, String> {
+        if !inner.paper_endpoint {
+            return Err("the crypto demo route only runs on the Alpaca paper account".into());
+        }
+        Ok(AlpacaCryptoDemo { inner })
+    }
+
+    pub fn is_paper(&self) -> bool {
+        self.inner.paper_endpoint
+    }
+
+    /// The key id it would sign with, for tests that prove which pair it got.
+    #[cfg(test)]
+    pub(crate) fn key_id(&self) -> Option<&str> {
+        self.inner.key_id.as_deref()
+    }
+
+    fn pair(&self, symbol: &str) -> Result<String, ConnectorError> {
+        alpaca_crypto_pair(symbol).ok_or_else(|| ConnectorError::Preflight(not_listed_reason(symbol)))
+    }
+}
+
+#[async_trait]
+impl MarketConnector for AlpacaCryptoDemo {
+    fn venue(&self) -> Venue {
+        Venue::Crypto
+    }
+
+    fn is_live_ready(&self) -> bool {
+        self.inner.is_live_ready()
+    }
+
+    fn label(&self) -> String {
+        self.inner.label()
+    }
+
+    fn round_qty(&self, qty: f64, symbol: &str) -> f64 {
+        match alpaca_crypto_pair(symbol) {
+            Some(p) => self.inner.round_qty(qty, &p),
+            None => qty,
+        }
+    }
+
+    async fn verify(&self) -> Result<String, ConnectorError> {
+        self.inner.verify().await.map(|s| format!("{s} · crypto demo route"))
+    }
+
+    async fn preflight(&self, req: &OrderRequest) -> Result<(), ConnectorError> {
+        let pair = self.pair(&req.symbol)?;
+        let req = OrderRequest { symbol: pair.clone(), ..req.clone() };
+        match self.inner.preflight(&req).await {
+            // `GET /v2/assets/{symbol}` answers 404 for a pair Alpaca does not have.
+            Err(ConnectorError::Rejected(msg)) if msg.contains("404") => {
+                Err(ConnectorError::Preflight(not_listed_reason(&pair)))
+            }
+            Ok(()) => {
+                let asset = self.inner.asset(&pair).await?;
+                if !asset.is_crypto() {
+                    return Err(ConnectorError::Preflight(not_listed_reason(&pair)));
+                }
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    async fn submit_order(&self, req: OrderRequest) -> Result<BrokerOrder, ConnectorError> {
+        let pair = self.pair(&req.symbol)?;
+        self.inner.submit_order(OrderRequest { symbol: pair, ..req }).await
+    }
+
+    async fn order_status(&self, broker_id: &str, symbol: &str) -> Result<BrokerOrder, ConnectorError> {
+        self.inner.order_status(broker_id, symbol).await
+    }
+
+    async fn cancel_order(&self, broker_id: &str, symbol: &str) -> Result<(), ConnectorError> {
+        self.inner.cancel_order(broker_id, symbol).await
+    }
+
+    async fn order_by_client_id(&self, client_order_id: &str, symbol: &str) -> Result<Option<BrokerOrder>, ConnectorError> {
+        self.inner.order_by_client_id(client_order_id, symbol).await
+    }
+
+    /// Only the crypto positions: the paper account may hold shares too.
+    async fn positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
+        Ok(self.inner.positions().await?.into_iter().filter(|p| p.symbol.contains('/')).collect())
+    }
+
+    async fn balances(&self) -> Result<Vec<Balance>, ConnectorError> {
+        self.inner.balances().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crypto_market_symbols_map_onto_alpaca_usd_pairs() {
+        assert_eq!(alpaca_crypto_pair("BTC/USD").as_deref(), Some("BTC/USD"));
+        assert_eq!(alpaca_crypto_pair(" eth/usd ").as_deref(), Some("ETH/USD"));
+        assert_eq!(alpaca_crypto_pair("SOL-USD").as_deref(), Some("SOL/USD"));
+        assert_eq!(alpaca_crypto_pair("BTCUSD").as_deref(), Some("BTC/USD"));
+        assert_eq!(alpaca_crypto_pair("XBT/USD").as_deref(), Some("BTC/USD"));
+        assert_eq!(alpaca_crypto_pair("XDG/USD").as_deref(), Some("DOGE/USD"));
+        assert_eq!(alpaca_crypto_pair("PEPE/USD").as_deref(), Some("PEPE/USD"));
+        // Not a dollar pair, or not a pair at all: nothing to send.
+        assert_eq!(alpaca_crypto_pair("BTC/USDT"), None);
+        assert_eq!(alpaca_crypto_pair("BTCUSDT"), None);
+        assert_eq!(alpaca_crypto_pair("ETH/EUR"), None);
+        assert_eq!(alpaca_crypto_pair("AAPL"), None);
+        assert_eq!(alpaca_crypto_pair("/USD"), None);
+    }
+
+    #[test]
+    fn the_tradable_list_keeps_active_tradable_usd_pairs_only() {
+        // The shape of GET /v2/assets (reference get-v2-assets-1): one Asset
+        // object per entry, crypto pairs written with a slash.
+        let v: Value = serde_json::from_str(
+            r#"[
+              {"id":"1","class":"crypto","exchange":"CRYPTO","symbol":"BTC/USD","status":"active","tradable":true,"fractionable":true},
+              {"id":"2","class":"crypto","exchange":"CRYPTO","symbol":"ETH/USD","status":"active","tradable":true},
+              {"id":"3","class":"crypto","exchange":"CRYPTO","symbol":"BTC/USDT","status":"active","tradable":true},
+              {"id":"4","class":"crypto","exchange":"CRYPTO","symbol":"SOL/USD","status":"active","tradable":false},
+              {"id":"5","class":"crypto","exchange":"CRYPTO","symbol":"DOGE/USD","status":"inactive","tradable":true},
+              {"id":"6","class":"us_equity","exchange":"NASDAQ","symbol":"AAPL","status":"active","tradable":true}
+            ]"#,
+        )
+        .unwrap();
+        let set = parse_tradable_usd_pairs(&v);
+        assert_eq!(set.into_iter().collect::<Vec<_>>(), vec!["BTC/USD".to_string(), "ETH/USD".to_string()]);
+        assert!(parse_tradable_usd_pairs(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn the_crypto_demo_route_is_the_paper_account_only() {
+        let live = AlpacaConnector::new(Some("k".into()), Some("s".into()), false);
+        assert!(AlpacaCryptoDemo::new(live).is_err(), "never built on the live endpoint");
+        let demo = AlpacaCryptoDemo::new(conn()).unwrap();
+        assert!(demo.is_paper());
+        assert_eq!(demo.venue(), Venue::Crypto);
+        assert_eq!(demo.label(), "Alpaca (paper)");
+    }
+
+    #[tokio::test]
+    async fn an_order_on_a_pair_alpaca_cannot_trade_is_refused_before_any_request() {
+        let demo = AlpacaCryptoDemo::new(conn()).unwrap();
+        let req = OrderRequest::market("BTC/USDT", Side::Buy, 0.001);
+        let err = demo.preflight(&req).await.unwrap_err();
+        assert!(matches!(err, ConnectorError::Preflight(_)));
+        assert!(err.to_string().contains("not listed on Alpaca"), "{err}");
+        let err = demo.submit_order(req).await.unwrap_err();
+        assert!(err.to_string().contains("not listed on Alpaca"), "{err}");
+    }
 
     #[test]
     fn crypto_positions_come_back_in_the_pair_form_orders_use() {
