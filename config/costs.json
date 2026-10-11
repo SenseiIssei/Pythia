@@ -18,7 +18,8 @@
     "0.10 / 0.10; Bybit spot 0.10 / 0.10; OKX spot 0.08 maker / 0.10 taker; Coinbase Advanced 0.40 / 0.60;",
     "Alpaca US equities commission-free (SEC and FINRA TAF regulatory fees on sells are well under 1 bp and",
     "are not modelled); Alpaca crypto 0.15 % maker / 0.25 % taker, and its spread and depth are a guess from",
-    "one look at Alpaca's public book on 2026-10-07, not a calibration; Polymarket charges no trading fee",
+    "one look at Alpaca's public book on 2026-10-07, not a calibration (the pairs beyond BTC and ETH, there for",
+    "the crypto demo route on Alpaca paper, are wider guesses still, unmeasured); Polymarket charges no trading fee",
     "on most markets, so the spread is the cost."
   ],
   "version": 1,
@@ -149,7 +150,25 @@
         "AMZN": { "halfSpreadBps": 0.6, "impactCoeff": 4, "defaultDepth": 150000 },
         "TSLA": { "halfSpreadBps": 0.8, "impactCoeff": 5, "defaultDepth": 120000 },
         "BTC/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 1.5, "impactCoeff": 5, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 1000000 },
-        "ETH/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 2.5, "impactCoeff": 6, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 1000000 }
+        "ETH/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 2.5, "impactCoeff": 6, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 1000000 },
+        "SOL/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 4, "impactCoeff": 8, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 500000 },
+        "XRP/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 6, "impactCoeff": 8, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 300000 },
+        "DOGE/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 6, "impactCoeff": 10, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 300000 },
+        "LTC/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 8, "impactCoeff": 10, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 200000 },
+        "LINK/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 8, "impactCoeff": 10, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 200000 },
+        "AVAX/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 8, "impactCoeff": 12, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 200000 },
+        "BCH/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 10, "impactCoeff": 12, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 150000 },
+        "ADA/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "DOT/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "TRX/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "SUI/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "NEAR/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "ATOM/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "UNI/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "AAVE/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "XLM/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 12, "impactCoeff": 15, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "PEPE/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 15, "impactCoeff": 20, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 },
+        "FIL/USD": { "takerBps": 25, "makerBps": 15, "halfSpreadBps": 15, "impactCoeff": 20, "borrowBpsYr": 0, "minNotional": 10, "defaultDepth": 100000 }
       }
     },
     "polymarket": {

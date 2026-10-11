@@ -476,7 +476,8 @@ function DemoKeys({
       {!manageable ? (
         <div className="text-xs text-cyber-text-faint">
           Managed by the server's environment (PYTHIA_DEMO_EXCHANGE and PYTHIA_DEMO_EXCHANGE_KEY / _SECRET
-          {ex.needsPassphrase ? " / _PASSPHRASE" : ""}).
+          {ex.needsPassphrase ? " / _PASSPHRASE" : ""}). Or PYTHIA_DEMO_EXCHANGE=alpaca: crypto demo on the Alpaca paper
+          account, with the Alpaca paper keys.
         </div>
       ) : (
         <>

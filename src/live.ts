@@ -202,7 +202,7 @@ export async function saveExchangeKeys(
   if (liveMode() !== "native") {
     throw new Error(
       demo
-        ? "On the backend, demo keys come from PYTHIA_DEMO_EXCHANGE_* in its environment."
+        ? "On the backend, demo keys come from PYTHIA_DEMO_EXCHANGE_* in its environment (or PYTHIA_DEMO_EXCHANGE=alpaca for the Alpaca paper account)."
         : "On the backend, exchange keys come from PYTHIA_EXCHANGE_* in its environment."
     );
   }
