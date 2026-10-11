@@ -1172,6 +1172,10 @@ pub struct Engine {
     /// The latest lab signal per lab strategy id, and which signal each book
     /// has already been rebalanced to (by `generated_ms`).
     lab_signals: HashMap<String, crate::lab::LabSignal>,
+    /// The lab's forward report in brief (`reports/forward/evidence.json`):
+    /// each paper book and autopilot against its backtest. Read by the host
+    /// with the signals; not saved, the next read brings it back.
+    lab_forward: Option<crate::lab::ForwardFile>,
     lab_done: HashMap<String, i64>,
     /// A rebalance with refused orders, per lab strategy: (signal, attempts so
     /// far, time of the last one). Not saved; a restart simply tries again.
@@ -1281,6 +1285,7 @@ impl Engine {
             books: HashMap::new(),
             research: HashMap::new(),
             lab_signals: HashMap::new(),
+            lab_forward: None,
             lab_done: HashMap::new(),
             lab_retry: HashMap::new(),
             lab_notes: HashSet::new(),

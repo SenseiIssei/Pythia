@@ -199,21 +199,30 @@ fn bar_timeframe() -> (String, u32) {
 }
 
 /// Reads the lab's signal files every five minutes and hands them to the
-/// engine, which rebalances each lab book once per new signal.
+/// engine, which rebalances each lab book once per new signal. The forward
+/// report's summary (`reports/forward/evidence.json`) comes along with them:
+/// the autopilot's auto pick and its status line read it.
 async fn lab_loop(state: AppState) {
-    let Some(dir) = pythia_core::lab::signals_dir() else {
+    let dir = pythia_core::lab::signals_dir();
+    if dir.is_none() {
         tracing::info!("lab strategies: PYTHIA_SIGNALS / PYTHIA_MODELS not set, none loaded");
+    }
+    if dir.is_none() && pythia_core::labview::data_dir().is_none() {
         return;
-    };
+    }
     loop {
-        let (signals, errors) = pythia_core::lab::read_all(&dir);
+        let (signals, errors) = dir.as_deref().map(pythia_core::lab::read_all).unwrap_or_default();
         for e in errors {
             tracing::warn!("lab signal skipped: {e}");
         }
+        let forward = pythia_core::labview::forward_evidence();
         {
             let mut e = state.engine.lock().unwrap();
             for s in signals {
                 e.apply_lab_signal(s);
+            }
+            if let Some(f) = forward {
+                e.apply_lab_forward(f);
             }
         }
         tokio::time::sleep(Duration::from_secs(300)).await;

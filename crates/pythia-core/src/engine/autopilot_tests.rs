@@ -1362,3 +1362,148 @@ fn a_demo_entry_that_fills_after_the_stop_is_booked_and_closed_again() {
     assert_eq!(out.len(), 1, "and its close goes back to the demo venue");
     assert!(out[0].demo && out[0].side == Side::Sell);
 }
+
+// ── forward evidence in the auto pick ──────────────────────────────────────
+
+/// One row of `reports/forward/evidence.json`.
+fn fwd(days: f64, ret: f64, lo: f64, hi: f64) -> crate::lab::ForwardEvidence {
+    crate::lab::ForwardEvidence {
+        days,
+        return_pct: Some(ret),
+        band_low_pct: Some(lo),
+        band_high_pct: Some(hi),
+        band_method: Some("bootstrap".into()),
+        status: String::new(),
+        state: None,
+        started_ms: None,
+    }
+}
+
+fn forward_file(generated_ms: i64, books: &[(&str, crate::lab::ForwardEvidence)]) -> crate::lab::ForwardFile {
+    crate::lab::ForwardFile {
+        generated_ms,
+        books: books.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        autopilots: Default::default(),
+    }
+}
+
+/// The regime book and the breakout book, both idle, as on the autopilot engine.
+fn two_books() -> Engine {
+    let mut e = idle_engine();
+    let now = e.now();
+    let w = &[("BTC", 0.3), ("ETH", 0.2)];
+    e.apply_lab_signal(book("breakout_top10", now, w, breakout_evidence(), true));
+    e.apply_lab_signal(book("tsmom_regime", now, w, regime_evidence(), false));
+    e
+}
+
+#[test]
+fn a_forward_record_below_its_band_after_ten_days_halves_the_score_and_says_why() {
+    let mut e = two_books();
+    let base = e.evidence("lab:tsmom_regime").score().unwrap();
+    let now = e.now();
+    e.apply_lab_forward(forward_file(now, &[("tsmom_regime", fwd(12.0, -9.5, -4.0, 5.0))]));
+    let ev = e.evidence("lab:tsmom_regime");
+    assert!(ev.forward_below());
+    assert!((ev.score().unwrap() - base * FORWARD_BELOW_FACTOR).abs() < 1e-9);
+    assert!(
+        ev.describe().contains("lab paper book 12 days at -9.50 %, below its backtest's range (-4.00 to +5.00 %), so its score is halved"),
+        "{}",
+        ev.describe()
+    );
+    assert!(ev.caveat().unwrap().contains("its forward record is below what its backtest led us to expect"));
+
+    // Halved, regime (4.19 -> 2.09) falls behind breakout (2.25), which now
+    // takes the crypto markets; regime is named as passed over.
+    let id = start(&mut e, config("auto", 10_000.0, &[], StopRules::default()));
+    let s = status(&e, &id);
+    assert_eq!(s.by_sleeve[0].strategy_id, "lab:breakout_top10");
+    assert!(s.last_action.unwrap().contains("Auto passed over Lab · tsmom_regime"));
+}
+
+#[test]
+fn under_ten_days_the_forward_record_changes_nothing() {
+    let mut e = two_books();
+    let base = e.evidence("lab:tsmom_regime").score().unwrap();
+    let now = e.now();
+    // Thirty points under its band, but only nine days in.
+    e.apply_lab_forward(forward_file(now, &[("tsmom_regime", fwd(9.0, -30.0, -3.0, 4.0))]));
+    let ev = e.evidence("lab:tsmom_regime");
+    assert!(!ev.forward_below());
+    assert_eq!(ev.score().unwrap(), base, "the score is exactly what it was without the report");
+    assert!(ev.describe().contains("lab paper book 9 days at -30.00 %, too early to count (10 needed)"), "{}", ev.describe());
+    assert!(!ev.caveat().unwrap().contains("forward record"));
+    let id = start(&mut e, config("auto", 10_000.0, &[], StopRules::default()));
+    let sl = &status(&e, &id).by_sleeve[0];
+    assert_eq!(sl.strategy_id, "lab:tsmom_regime", "the pick is the one without forward data");
+    assert!(sl.why.contains("too early to count"), "the reason is shown: {}", sl.why);
+}
+
+#[test]
+fn an_old_report_and_a_record_inside_its_band_do_not_lower_the_pick() {
+    let mut e = two_books();
+    let base = e.evidence("lab:tsmom_regime").score().unwrap();
+    let now = e.now();
+    // Four days old: the daily job stopped, so its numbers are not used.
+    e.apply_lab_forward(forward_file(now - FORWARD_STALE_MS - 3_600_000, &[("tsmom_regime", fwd(20.0, -9.0, -4.0, 5.0))]));
+    let ev = e.evidence("lab:tsmom_regime");
+    assert!(ev.forward.is_none() && ev.score().unwrap() == base);
+
+    e.apply_lab_forward(forward_file(now, &[("tsmom_regime", fwd(15.0, 1.2, -4.0, 5.0))]));
+    let ev = e.evidence("lab:tsmom_regime");
+    assert_eq!(ev.score().unwrap(), base, "inside the band: no bonus, no penalty");
+    assert!(ev.describe().contains("lab paper book 15 days at +1.20 %, inside its backtest's range (-4.00 to +5.00 %)"), "{}", ev.describe());
+
+    // Above it: still no bonus, a lucky stretch buys nothing.
+    e.apply_lab_forward(forward_file(now, &[("tsmom_regime", fwd(15.0, 9.0, -4.0, 5.0))]));
+    assert_eq!(e.evidence("lab:tsmom_regime").score().unwrap(), base);
+    // A built-in strategy is never matched to a lab book.
+    e.apply_lab_forward(forward_file(now, &[("ema-cross-1", fwd(15.0, -9.0, -4.0, 5.0))]));
+    assert!(e.evidence("ema-cross-1").forward.is_none());
+}
+
+#[test]
+fn the_running_autopilot_carries_its_forward_status() {
+    let mut e = engine();
+    let id = start(&mut e, config("fw", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default()));
+    // No report yet and one day old at most: too early.
+    let f = status(&e, &id).forward.expect("a young autopilot is too early");
+    assert_eq!(f.status, "early");
+    assert!(f.days < 1.0);
+
+    let started = status(&e, &id).started_ms;
+    let now = e.now();
+    let row = |days: f64, ret: f64, started_ms: Option<i64>| crate::lab::ForwardEvidence {
+        state: Some("running".into()),
+        started_ms,
+        ..fwd(days, ret, -4.0, 5.0)
+    };
+    let mut file = forward_file(now, &[]);
+    file.autopilots.insert(id.clone(), row(12.0, -6.0, Some(started)));
+    e.apply_lab_forward(file.clone());
+    let f = status(&e, &id).forward.unwrap();
+    assert_eq!((f.status.as_str(), f.days, f.band_low_pct), ("below", 12.0, Some(-4.0)));
+
+    file.autopilots.insert(id.clone(), row(12.0, 0.5, Some(started)));
+    e.apply_lab_forward(file.clone());
+    assert_eq!(status(&e, &id).forward.unwrap().status, "ok");
+
+    let mut no_band = row(12.0, 0.5, Some(started));
+    no_band.band_low_pct = None;
+    no_band.band_high_pct = None;
+    file.autopilots.insert(id.clone(), no_band);
+    e.apply_lab_forward(file.clone());
+    assert_eq!(status(&e, &id).forward.unwrap().status, "none");
+
+    // A row from an earlier run under the same id is not this one's.
+    file.autopilots.insert(id.clone(), row(12.0, -6.0, Some(started - 86_400_000)));
+    e.apply_lab_forward(file);
+    assert_eq!(status(&e, &id).forward.unwrap().status, "early", "falls back to its own age");
+
+    // The camelCase the UI reads; and a stopped one carries none.
+    let v = serde_json::to_value(e.state()).unwrap();
+    assert_eq!(v["autopilots"][0]["forward"]["status"], "early");
+    assert!(v["autopilots"][0]["forward"].get("bandLowPct").is_some());
+    e.autopilot_stop(&id, None).unwrap();
+    assert!(status(&e, &id).forward.is_none());
+}

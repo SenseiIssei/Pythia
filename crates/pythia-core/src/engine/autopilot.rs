@@ -290,6 +290,25 @@ pub struct AutopilotStatus {
     pub last_action: Option<String>,
     /// `[epoch ms, equity]`, one point a minute, thinned to at most 300.
     pub history: Vec<(i64, f64)>,
+    /// How its forward result compares with the backtest, from the lab's
+    /// daily forward report. Only for an active autopilot; `None` when the
+    /// report has nothing on it.
+    #[serde(default)]
+    pub forward: Option<AutopilotForward>,
+}
+
+/// An autopilot's forward result against its backtest, for one plain line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutopilotForward {
+    /// early (under `lab::FORWARD_MIN_DAYS` days) · ok (inside or above the
+    /// band) · watch (inside, but its dip or its floor is worth a look) ·
+    /// below (under the band) · none (no band to compare with)
+    pub status: String,
+    pub days: f64,
+    pub return_pct: Option<f64>,
+    pub band_low_pct: Option<f64>,
+    pub band_high_pct: Option<f64>,
 }
 
 /// What the host read from the venue before a live start. The engine does no
@@ -556,10 +575,22 @@ pub struct Evidence {
     pub lab_sharpe_2x_cost: Option<f64>,
     /// A known weakness of the lab evidence (see `lab::LabEvidence::caveat`).
     pub lab_caveat: Option<String>,
+    /// Lab books: the lab's own paper book against its backtest's band, from
+    /// the daily forward report. Counts only from `lab::FORWARD_MIN_DAYS` on.
+    pub forward: Option<crate::lab::ForwardEvidence>,
 }
 
 /// Gate 6 passes above this deflated-Sharpe probability (see `lab::verdict`).
 pub const DEFLATION_PASS: f64 = 0.95;
+
+/// A lab book whose forward return is below its backtest's band (after at
+/// least `lab::FORWARD_MIN_DAYS` days) keeps this share of its score.
+pub const FORWARD_BELOW_FACTOR: f64 = 0.5;
+
+/// A forward report older than this is not used: the lab writes one a day,
+/// so three days without one means the job stopped, and old numbers would
+/// keep judging a book on a record that has moved on.
+pub const FORWARD_STALE_MS: i64 = 3 * 86_400_000;
 
 impl Evidence {
     /// A score for weighting, or `None` when the evidence rules it out.
@@ -575,7 +606,12 @@ impl Evidence {
     ///     + 0.5 x Sharpe at 2x cost (0 to 2)
     ///     + deflated p   (0 to 1)    the probability the Sharpe is skill
     /// ) / (1 + gates failed)
+    ///   x 0.5                        lab books whose forward return is below
+    ///                                their backtest's band after 10+ days
     /// ```
+    ///
+    /// The forward record only ever lowers a score, and only once it has
+    /// [`crate::lab::FORWARD_MIN_DAYS`] days: before that it changes nothing.
     ///
     /// A built-in strategy nobody has run the checks for scores 1. A lab book
     /// that fails half its gates is divided down hard, so a high Sharpe on its
@@ -603,7 +639,40 @@ impl Evidence {
         if let Some(p) = self.lab_deflated_p.filter(|v| v.is_finite()) {
             s += p.clamp(0.0, 1.0);
         }
-        Some(s / (1.0 + self.failed as f64))
+        let mut s = s / (1.0 + self.failed as f64);
+        if self.forward_below() {
+            s *= FORWARD_BELOW_FACTOR;
+        }
+        Some(s)
+    }
+
+    /// Its forward return is below its backtest's band after enough days.
+    pub fn forward_below(&self) -> bool {
+        self.forward.as_ref().is_some_and(|f| f.below_band())
+    }
+
+    /// The forward record in a few words, when there is one.
+    fn describe_forward(&self) -> Option<String> {
+        let f = self.forward.as_ref()?;
+        let days = f.days.max(0.0).floor() as i64;
+        let d = if days == 1 { "1 day".to_string() } else { format!("{days} days") };
+        let ret = f.return_pct.filter(|r| r.is_finite()).map(|r| format!(" at {r:+.2} %")).unwrap_or_default();
+        let band = match (f.band_low_pct, f.band_high_pct) {
+            (Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() => format!(" ({lo:+.2} to {hi:+.2} %)"),
+            _ => String::new(),
+        };
+        let tail = if !f.counts() {
+            format!(", too early to count ({} needed)", crate::lab::FORWARD_MIN_DAYS as i64)
+        } else if f.below_band() {
+            format!(", below its backtest's range{band}, so its score is halved")
+        } else if f.above_band() {
+            format!(", above its backtest's range{band}")
+        } else if f.has_band() {
+            format!(", inside its backtest's range{band}")
+        } else {
+            ", no backtest range to compare with".into()
+        };
+        Some(format!("lab paper book {d}{ret}{tail}"))
     }
 
     /// The evidence in a few words.
@@ -631,6 +700,9 @@ impl Evidence {
             let cost = self.lab_sharpe_2x_cost.map(|c| format!(", Sharpe {c:.2} with costs doubled")).unwrap_or_default();
             parts.push(format!("lab out-of-sample Sharpe {sh:.2}{p}{over}{cost}"));
         }
+        if let Some(f) = self.describe_forward() {
+            parts.push(f);
+        }
         parts.join(", ")
     }
 
@@ -638,8 +710,19 @@ impl Evidence {
     /// as a proven edge when it is not. `None` only for a strategy cleared
     /// for live (every gate green, deflation included).
     pub fn caveat(&self) -> Option<String> {
+        let forward = self
+            .forward_below()
+            .then_some("its forward record is below what its backtest led us to expect, so it is ranked lower");
+        let joined = |base: Option<String>| -> Option<String> {
+            match (base, forward) {
+                (Some(b), Some(f)) => Some(format!("{b}; also, {f}")),
+                (Some(b), None) => Some(b),
+                (None, Some(f)) => Some(f.to_string()),
+                (None, None) => None,
+            }
+        };
         if self.live_ready {
-            return self.lab_caveat.clone();
+            return joined(self.lab_caveat.clone());
         }
         let base = match (self.lab, self.lab_deflated_p) {
             (_, Some(p)) if p <= DEFLATION_PASS => format!(
@@ -648,10 +731,10 @@ impl Evidence {
             (true, None) => "its lab report gives no deflated Sharpe, so it is picked as the best available evidence, not as a proven edge".into(),
             _ => "its edge is not proven: not every gate is green, so it is picked as the best available evidence".into(),
         };
-        Some(match &self.lab_caveat {
+        joined(Some(match &self.lab_caveat {
             Some(c) => format!("{base}; also, {c}"),
             None => base,
-        })
+        }))
     }
 
     /// One plain sentence on why auto picked it. `rank` 0 is the best.
@@ -1402,9 +1485,68 @@ impl Engine {
                         .collect(),
                     last_action: ap.last_action.clone(),
                     history: ap.history.clone(),
+                    forward: self.ap_forward(ap),
                 }
             })
             .collect()
+    }
+
+    /// The lab's forward report in brief (`reports/forward/evidence.json`),
+    /// handed in by the host next to the signals. The auto pick and the
+    /// autopilot status read it; nothing else changes.
+    pub fn apply_lab_forward(&mut self, f: crate::lab::ForwardFile) {
+        self.lab_forward = Some(f);
+    }
+
+    /// The forward report, when it is recent enough to use.
+    fn lab_forward_fresh(&self) -> Option<&crate::lab::ForwardFile> {
+        self.lab_forward.as_ref().filter(|f| self.now() - f.generated_ms <= FORWARD_STALE_MS)
+    }
+
+    /// One active autopilot against its backtest. The report's row for it
+    /// when there is one (and it is this run, not an earlier one under the
+    /// same id); otherwise an autopilot younger than the minimum is simply
+    /// too early, and an older one has nothing to say yet.
+    fn ap_forward(&self, ap: &Autopilot) -> Option<AutopilotForward> {
+        if !ap.is_active() {
+            return None;
+        }
+        let row = self
+            .lab_forward_fresh()
+            .and_then(|f| f.autopilots.get(&ap.config.id))
+            .filter(|r| r.started_ms.is_none_or(|t| t == ap.started_ms));
+        match row {
+            Some(r) => {
+                let status = if !r.counts() {
+                    "early"
+                } else if r.below_band() {
+                    "below"
+                } else if r.status == "watch" {
+                    "watch"
+                } else if r.has_band() {
+                    "ok"
+                } else {
+                    "none"
+                };
+                Some(AutopilotForward {
+                    status: status.into(),
+                    days: r.days,
+                    return_pct: r.return_pct,
+                    band_low_pct: r.band_low_pct,
+                    band_high_pct: r.band_high_pct,
+                })
+            }
+            None => {
+                let days = (self.now() - ap.started_ms).max(0) as f64 / 86_400_000.0;
+                (days < crate::lab::FORWARD_MIN_DAYS).then(|| AutopilotForward {
+                    status: "early".into(),
+                    days,
+                    return_pct: None,
+                    band_low_pct: None,
+                    band_high_pct: None,
+                })
+            }
+        }
     }
 
     // ── the tick ───────────────────────────────────────────────────────────
@@ -1812,7 +1954,7 @@ impl Engine {
     }
 
     /// The evidence behind one strategy.
-    fn evidence(&self, sid: &str) -> Evidence {
+    pub(super) fn evidence(&self, sid: &str) -> Evidence {
         let Some(s) = self.strategies.iter().find(|s| s.id == sid) else { return Evidence::default() };
         let pp = self.passport_for(s);
         let (mode, est) = super::risk::edge_sizing(&s.ledger.edge);
@@ -1838,6 +1980,12 @@ impl Engine {
             lab_variants: lab.and_then(|e| e.variants_tried),
             lab_sharpe_2x_cost: lab.and_then(|e| e.sharpe_2x_cost),
             lab_caveat: lab.and_then(|e| e.caveat.clone()),
+            // The lab's own paper book of the same rule, against its backtest.
+            forward: if s.kind == StrategyKind::LabTargets {
+                sid.strip_prefix("lab:").and_then(|b| self.lab_forward_fresh()?.books.get(b).cloned())
+            } else {
+                None
+            },
         }
     }
 

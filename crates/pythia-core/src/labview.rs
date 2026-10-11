@@ -194,6 +194,13 @@ pub fn parse_forward(text: &str) -> Option<ForwardReport> {
     })
 }
 
+/// The forward report's small summary (`reports/forward/evidence.json`) from
+/// the lab's data folder, for the engine's auto pick. `None` without a data
+/// folder or a file.
+pub fn forward_evidence() -> Option<crate::lab::ForwardFile> {
+    crate::lab::read_forward_evidence(&data_dir()?)
+}
+
 fn read_forward(root: &Path) -> Option<ForwardReport> {
     parse_forward(&std::fs::read_to_string(root.join("reports").join("forward").join("latest.json")).ok()?)
 }

@@ -80,6 +80,94 @@ pub struct LabEvidence {
     pub caveat: Option<String>,
 }
 
+// ── forward evidence ────────────────────────────────────────────────────────
+
+/// A forward result counts in the auto pick only from this many days on.
+/// Before that the band is wide and a single day can put it anywhere.
+pub const FORWARD_MIN_DAYS: f64 = 10.0;
+
+/// One paper book's (or autopilot's) forward record against its backtest, as
+/// `lab.paper.forward_report` writes it to `reports/forward/evidence.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ForwardEvidence {
+    /// Days the record spans (the horizon the band was computed for).
+    pub days: f64,
+    pub return_pct: Option<f64>,
+    /// The backtest's 5 % and 95 % cumulative return over the same days.
+    pub band_low_pct: Option<f64>,
+    pub band_high_pct: Option<f64>,
+    /// "bootstrap" or "approximate".
+    pub band_method: Option<String>,
+    /// early · ok · watch · below · none
+    pub status: String,
+    /// Autopilots only: running, paused, stopped, finished.
+    pub state: Option<String>,
+    /// Autopilots only: when this run started (epoch ms), so a row is never
+    /// taken for a later autopilot that reuses the id.
+    pub started_ms: Option<i64>,
+}
+
+impl ForwardEvidence {
+    /// Enough days for the record to count at all.
+    pub fn counts(&self) -> bool {
+        self.days.is_finite() && self.days >= FORWARD_MIN_DAYS
+    }
+
+    /// Below the backtest's band after at least [`FORWARD_MIN_DAYS`] days.
+    /// Judged from the numbers themselves, not from the status word, so a
+    /// report that says "below" too early (or without a band) changes nothing.
+    pub fn below_band(&self) -> bool {
+        self.counts()
+            && matches!((self.return_pct, self.band_low_pct), (Some(r), Some(lo)) if r.is_finite() && lo.is_finite() && r < lo)
+    }
+
+    pub fn above_band(&self) -> bool {
+        self.counts()
+            && matches!((self.return_pct, self.band_high_pct), (Some(r), Some(hi)) if r.is_finite() && hi.is_finite() && r > hi)
+    }
+
+    pub fn has_band(&self) -> bool {
+        self.band_low_pct.is_some_and(f64::is_finite) && self.band_high_pct.is_some_and(f64::is_finite)
+    }
+}
+
+/// `reports/forward/evidence.json`: every paper book and autopilot by name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ForwardFile {
+    pub generated_ms: i64,
+    pub books: BTreeMap<String, ForwardEvidence>,
+    pub autopilots: BTreeMap<String, ForwardEvidence>,
+}
+
+/// The forward evidence as the lab wrote it; `None` when it is not a JSON
+/// object. Rows that do not parse are skipped, so one bad row costs that row.
+pub fn parse_forward_evidence(text: &str) -> Option<ForwardFile> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let obj = v.as_object()?;
+    let rows = |k: &str| -> BTreeMap<String, ForwardEvidence> {
+        obj.get(k)
+            .and_then(|r| r.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(name, r)| Some((name.clone(), serde_json::from_value(r.clone()).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(ForwardFile {
+        generated_ms: obj.get("generated_ms").and_then(|g| g.as_i64()).unwrap_or(0),
+        books: rows("books"),
+        autopilots: rows("autopilots"),
+    })
+}
+
+/// `<root>/reports/forward/evidence.json`, if there is one that parses.
+pub fn read_forward_evidence(root: &Path) -> Option<ForwardFile> {
+    let text = std::fs::read_to_string(root.join("reports").join("forward").join("evidence.json")).ok()?;
+    parse_forward_evidence(&text)
+}
+
 /// Where the lab's signals live: `PYTHIA_SIGNALS`, else `signals/` next to the
 /// `PYTHIA_MODELS` folder (the lab writes both under one data root).
 pub fn signals_dir() -> Option<std::path::PathBuf> {
@@ -398,6 +486,46 @@ mod tests {
     fn missing_evidence_is_pending_never_passed() {
         let v = verdict("x", vec![], &LabEvidence::default(), 0);
         assert!(v.gates.iter().all(|g| g.status == GateStatus::Pending));
+    }
+
+    const EVIDENCE: &str = r#"{
+      "generated_ms": 1791440100000, "min_days": 10,
+      "books": {
+        "tsmom": {"days": 11.0, "return_pct": -12.0, "band_low_pct": -3.1, "band_high_pct": 4.2,
+                  "band_method": "bootstrap", "status": "below", "some_future_field": 1},
+        "tsmom_regime": {"days": 2.0, "return_pct": -30.0, "band_low_pct": -2.0, "band_high_pct": 2.0,
+                         "band_method": "bootstrap", "status": "early"},
+        "m4_ls": {"days": 14.0, "return_pct": 1.0, "band_low_pct": null, "band_high_pct": null,
+                  "band_method": null, "status": "none"},
+        "broken": {"days": "eleven"}
+      },
+      "autopilots": {"ap_1": {"days": 3.5, "return_pct": 0.4, "band_low_pct": null, "band_high_pct": null,
+                              "band_method": null, "status": "early", "state": "running"}}
+    }"#;
+
+    #[test]
+    fn reads_the_forward_evidence_and_only_trusts_ten_days_and_a_band() {
+        let f = parse_forward_evidence(EVIDENCE).unwrap();
+        assert_eq!(f.generated_ms, 1791440100000);
+        assert_eq!(f.books.len(), 3, "the broken row is skipped, the rest stays");
+        assert!(f.books["tsmom"].below_band());
+        assert!(!f.books["tsmom_regime"].below_band(), "two days count for nothing, however far below");
+        assert!(!f.books["m4_ls"].below_band() && !f.books["m4_ls"].has_band());
+        assert_eq!(f.autopilots["ap_1"].state.as_deref(), Some("running"));
+        // A status word that says "below" without the numbers changes nothing.
+        let liar = ForwardEvidence { days: 20.0, status: "below".into(), return_pct: Some(-5.0), ..Default::default() };
+        assert!(!liar.below_band());
+        let nan = ForwardEvidence { days: f64::NAN, return_pct: Some(-5.0), band_low_pct: Some(0.0), ..Default::default() };
+        assert!(!nan.below_band());
+        assert!(parse_forward_evidence("[1]").is_none() && parse_forward_evidence("").is_none());
+        assert!(parse_forward_evidence("{}").unwrap().books.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("pythia-lab-fwd-{}", std::process::id()));
+        assert!(read_forward_evidence(&dir).is_none());
+        std::fs::create_dir_all(dir.join("reports").join("forward")).unwrap();
+        std::fs::write(dir.join("reports").join("forward").join("evidence.json"), EVIDENCE).unwrap();
+        assert_eq!(read_forward_evidence(&dir).map(|f| f.books.len()), Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
