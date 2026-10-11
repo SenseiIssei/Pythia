@@ -255,6 +255,7 @@ fn a_late_fee_is_paid_by_the_autopilot_whose_trade_caused_it() {
         name: "Fee test".into(),
         mode: AutopilotMode::Paper,
         venue: "kraken".into(),
+        asset_class: None,
         capital_usd: 10_000.0,
         sleeves: vec![SleeveConfig { strategy_id: "ema-cross-1".into(), weight: 1.0 }],
         stop: StopRules::default(),
@@ -290,4 +291,60 @@ fn a_late_fee_is_paid_by_the_autopilot_whose_trade_caused_it() {
     // Less the fee, give or take the open P&L the fee coins carried.
     assert!((after.equity - (before.equity - coins * m.price)).abs() < 0.01, "and its equity shows it: {} then {}", before.equity, after.equity);
     assert!(e.journal.iter().any(|j| j.message.contains("Fee test")), "the journal names who paid");
+}
+
+#[test]
+fn a_crypto_demo_fill_on_the_alpaca_paper_route_waits_for_its_fee_and_stays_out_of_the_tax_record() {
+    let mut e = Engine::new();
+    let now = e.now();
+    let ids: Vec<String> = e.markets.iter().filter(|m| m.venue == Venue::Crypto).map(|m| m.id.clone()).collect();
+    for m in e.markets.iter_mut().filter(|m| m.venue == Venue::Crypto) {
+        m.updated_at = now;
+    }
+    e.real_ids.extend(ids);
+    // PYTHIA_DEMO_EXCHANGE=alpaca: crypto demo orders go to the Alpaca paper account.
+    e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Alpaca), true);
+    let market = "crypto:BTC/USD";
+    let i = e.ensure_manual_strategy();
+    let sid = e.strategies[i].id.clone();
+    e.place_order(&sid, market, Side::Buy, 1_000.0, RouteIntent::Demo).expect("routed");
+    let o = e.drain_live_orders().pop().expect("a demo order went out");
+    assert!(o.demo && !o.paper && o.venue == Venue::Crypto && o.symbol == "BTC/USD");
+    assert_eq!(e.inflight[&o.order_id].cost_venue, CostVenue::Alpaca, "priced with Alpaca's costs");
+
+    e.apply_live_ack(&o.order_id, "alp-paper-1");
+    e.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, PX));
+    let slip = e.strategy_config(&sid).unwrap().ledger.slippage;
+    assert!((slip - o.qty * (PX - o.ref_price)).abs() < 1e-6, "slippage against the engine's price, as for any demo fill: {slip}");
+    assert!(e.positions[market].demo);
+    assert!(e.drain_fill_records().is_empty(), "a demo fill never enters the tax record");
+
+    assert_eq!(e.alpaca_fees.len(), 1, "Alpaca reports no fee with the fill, so it waits for the CFEE");
+    let w = e.alpaca_fees[0].clone();
+    assert!(w.demo && !w.taxed && w.symbol == "BTC/USD" && w.market_id == market);
+    let q = e.alpaca_fee_queries();
+    assert_eq!(q.len(), 1);
+    assert!(q[0].paper, "asked of the paper account");
+
+    let coins = o.qty * RATE;
+    e.apply_alpaca_fees(true, &cfee("20261011::demo", coins, &ny_date(e.now())));
+    assert!((e.positions[market].qty - (o.qty - coins)).abs() < 1e-9, "the book holds what the paper account holds");
+    assert!((fees_of(&e, &sid) - coins * PX).abs() < 1e-6, "the fee in dollars at the fill price");
+    assert!(e.drain_fill_records().is_empty(), "nor does its fee");
+
+    // A demo exchange that reports its fee with the fill is not watched.
+    let mut b = Engine::new();
+    b.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Bybit), true);
+    let i = b.ensure_manual_strategy();
+    let sid = b.strategies[i].id.clone();
+    b.real_ids.insert(market.to_string());
+    let t = b.now();
+    if let Some(m) = b.markets.iter_mut().find(|m| m.id == market) {
+        m.updated_at = t;
+    }
+    b.place_order(&sid, market, Side::Buy, 1_000.0, RouteIntent::Demo).expect("routed");
+    let o = b.drain_live_orders().pop().unwrap();
+    b.apply_live_ack(&o.order_id, "by-1");
+    b.apply_live_update(&o.order_id, update(BrokerOrderStatus::Filled, o.qty, PX));
+    assert!(b.alpaca_fees.is_empty());
 }
