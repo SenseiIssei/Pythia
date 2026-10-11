@@ -1507,3 +1507,129 @@ fn the_running_autopilot_carries_its_forward_status() {
     e.autopilot_stop(&id, None).unwrap();
     assert!(status(&e, &id).forward.is_none());
 }
+
+// ── correctness gaps found in review ───────────────────────────────────────
+
+#[test]
+fn money_and_percentages_never_print_a_negative_zero() {
+    assert_eq!(usd(-0.004), "$0.00");
+    assert_eq!(usd(-0.006), "-$0.01");
+    assert_eq!(usd(-1_234.5), "-$1,234.50");
+    assert_eq!(pct(-0.001), "0");
+    assert_eq!(pct(-0.004), "0");
+    assert_eq!(pct(-0.006), "-0.01");
+    assert_eq!(pct(10.0), "10");
+    assert_eq!(pct(-2.5), "-2.5");
+}
+
+#[test]
+fn a_stale_price_never_raises_the_peak_or_takes_profit() {
+    let mut e = engine();
+    let stop = StopRules { take_profit_pct: Some(10.0), trailing_pct: Some(5.0), ..Default::default() };
+    let id = start(&mut e, config("st", 1_000.0, &[("ema-cross-1", 1.0)], stop));
+    enter(&mut e, "ema-cross-1", BTC, 500.0);
+    equity_to(&mut e, &id, BTC, 1_120.0);
+    make_stale(&mut e, BTC);
+    step(&mut e);
+    let s = status(&e, &id);
+    assert_eq!(s.state, AutopilotState::Running, "a stale price is not a profit to finish on");
+    let peak = e.autopilots.iter().find(|a| a.config.id == id).unwrap().peak_equity;
+    assert!((peak - 1_000.0).abs() < 1e-9, "nor a peak for the trailing floor: {peak}");
+
+    // The same price, confirmed by the feed: now it counts.
+    let p = e.price_of(BTC);
+    set_price(&mut e, BTC, p);
+    step(&mut e);
+    let s = status(&e, &id);
+    assert_eq!(s.state, AutopilotState::Finished);
+    assert!(s.stop_reason.unwrap().starts_with("take profit of 10 % reached"));
+}
+
+#[test]
+fn a_loss_rule_still_fires_on_a_stale_price() {
+    // Safety first: the floor does not wait for a feed.
+    let mut e = engine();
+    let id = start(&mut e, config("sl", 1_000.0, &[("ema-cross-1", 1.0)], StopRules { max_loss_pct: Some(10.0), ..Default::default() }));
+    enter(&mut e, "ema-cross-1", BTC, 500.0);
+    equity_to(&mut e, &id, BTC, 890.0);
+    make_stale(&mut e, BTC);
+    step(&mut e);
+    assert_eq!(status(&e, &id).state, AutopilotState::Stopped);
+}
+
+#[test]
+fn a_close_at_exactly_the_entry_price_is_a_closed_trade() {
+    let mut e = engine();
+    let id = start(&mut e, config("be", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default()));
+    enter(&mut e, "ema-cross-1", BTC, 500.0);
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, BTC);
+    let (qty, avg) = (e.positions[BTC].qty, e.positions[BTC].avg_price);
+    // A fill at exactly the average entry price, as a venue can report it.
+    e.settle_fill(i, &m, Side::Sell, qty, avg, 0.05, avg, false, true);
+    assert!(!e.positions.contains_key(BTC));
+    let s = status(&e, &id);
+    assert_eq!((s.open_positions, s.trades), (0, 1), "nothing realised, still one round trip");
+    assert_eq!(s.by_sleeve[0].trades, 1);
+}
+
+#[test]
+fn paper_autopilots_cannot_give_out_the_same_money_twice() {
+    let mut e = engine();
+    // Pairs holds BTC and ETH, EMA Cross the rest: no market conflict between them.
+    start(&mut e, config("p1", 60_000.0, &[("pairs-1", 1.0)], StopRules::default()));
+    let err = e
+        .autopilot_start(config("p2", 50_000.0, &[("ema-cross-1", 1.0)], StopRules::default()), false, VenueCash::NotRead)
+        .unwrap_err();
+    assert!(
+        err.contains("The paper account holds $100,000.00, of which $60,000.00 is already given to other paper autopilots, so $40,000.00 is left"),
+        "{err}"
+    );
+    start(&mut e, config("p2", 40_000.0, &[("ema-cross-1", 1.0)], StopRules::default()));
+}
+
+#[test]
+fn the_live_cash_check_counts_other_autopilots_whatever_the_venue_spelling() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    make_live_ready(&mut e, "pairs-1");
+    make_live_ready(&mut e, "ema-cross-1");
+    let mut c = live_config("live", 1_000.0, &[("pairs-1", 1.0)]);
+    c.venue = " Kraken".into();
+    let id = e.autopilot_start(c, true, VenueCash::Read(2_000.0)).unwrap();
+    assert_eq!(status(&e, &id).config.venue, "kraken", "saved under the venue's id");
+    let err = e.autopilot_start(live_config("live2", 1_500.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(2_000.0)).unwrap_err();
+    assert!(err.contains("of which $1,000.00 is already committed to other live autopilots"), "{err}");
+
+    // A record saved before the venue was normalised still counts.
+    e.autopilots.iter_mut().find(|a| a.config.id == id).unwrap().config.venue = "KRAKEN".into();
+    let err = e.autopilot_start(live_config("live2", 1_500.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(2_000.0)).unwrap_err();
+    assert!(err.contains("already committed"), "{err}");
+}
+
+#[test]
+fn a_late_fill_after_a_stop_without_flattening_is_handed_out_too() {
+    let (mut e, id) = demo_engine("lateopen", 1_000.0);
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, BTC);
+    e.place_from_intent(i, &m, &buy_intent(BTC));
+    let o = e.drain_live_orders().remove(0);
+    e.apply_live_ack(&o.order_id, "venue-1");
+    e.autopilot_stop(&id, Some(false)).unwrap();
+
+    e.apply_live_update(
+        &o.order_id,
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "filled".into() },
+    );
+    assert!(e.positions.contains_key(BTC), "the position is left open, as asked");
+    let s = status(&e, &id);
+    assert_eq!(s.open_positions, 0, "but not kept by the stopped autopilot");
+    assert!((s.fees - 0.1).abs() < 1e-9, "its fee is still the autopilot's: {}", s.fees);
+    assert!(journal_has(&e, "filled after it stopped without closing its positions"));
+    step(&mut e);
+    assert!(e.drain_live_orders().is_empty(), "and nothing closes it behind the owner's back");
+    // The id is free again: it is not "still closing its positions".
+    let mut c = config("lateopen", 1_000.0, &[("multi-tf-1", 1.0)], StopRules::default());
+    c.mode = AutopilotMode::Demo;
+    e.autopilot_start(c, false, VenueCash::NotRead).unwrap();
+}
