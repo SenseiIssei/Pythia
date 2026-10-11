@@ -184,16 +184,24 @@ pub fn run() {
             tauri::async_runtime::spawn(pythia_core::ml::run(ml));
 
             // Lab strategies: the research lab's daily target weights, read every
-            // five minutes from the synced signals folder.
+            // five minutes from the synced signals folder, with the forward
+            // report's summary for the autopilot's auto pick.
             let lab_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let Some(dir) = pythia_core::lab::signals_dir() else { return };
+                let dir = pythia_core::lab::signals_dir();
+                if dir.is_none() && pythia_core::labview::data_dir().is_none() {
+                    return;
+                }
                 loop {
-                    let (signals, _) = pythia_core::lab::read_all(&dir);
+                    let (signals, _) = dir.as_deref().map(pythia_core::lab::read_all).unwrap_or_default();
+                    let forward = pythia_core::labview::forward_evidence();
                     if let Some(st) = lab_handle.try_state::<AppState>() {
                         let mut e = st.engine.lock().unwrap();
                         for s in signals {
                             e.apply_lab_signal(s);
+                        }
+                        if let Some(f) = forward {
+                            e.apply_lab_forward(f);
                         }
                     }
                     tokio::time::sleep(Duration::from_secs(300)).await;
