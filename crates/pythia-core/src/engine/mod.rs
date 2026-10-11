@@ -547,6 +547,10 @@ pub struct LiveStatus {
     /// test, and a demo autopilot there is refused.
     #[serde(default)]
     pub demo_real_prices: bool,
+    /// Crypto markets the crypto demo route cannot trade because the venue
+    /// does not list them (Alpaca paper), by symbol. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub demo_not_listed: Vec<String>,
     /// Open positions opened by demo fills.
     #[serde(default)]
     pub demo_positions: usize,
@@ -1118,6 +1122,11 @@ pub struct Engine {
     /// modelled side of a demo fill), and whether it documents real prices.
     crypto_demo_venue: Option<CostVenue>,
     crypto_demo_real_prices: bool,
+    /// The Alpaca pairs (`BTC/USD`) the Alpaca paper account lists, when
+    /// crypto demo orders go there; `None` until the host has read them.
+    /// A crypto market Alpaca does not list is refused for demo and left out
+    /// of a demo autopilot's sleeves. Not persisted: read at every start.
+    crypto_demo_listed: Option<HashSet<String>>,
     pending_live: Vec<LiveOrderOut>,     // outbox drained by the async daemon
     inflight: HashMap<String, InFlight>, // engine order id → its state at the venue
     in_flight_markets: HashSet<String>,  // one live order per market at a time
@@ -1264,6 +1273,7 @@ impl Engine {
             demo_venues: HashSet::new(),
             crypto_demo_venue: None,
             crypto_demo_real_prices: false,
+            crypto_demo_listed: None,
             pending_live: Vec::new(),
             inflight: HashMap::new(),
             in_flight_markets: HashSet::new(),
@@ -3382,10 +3392,73 @@ impl Engine {
         if !self.demo_venues.contains(&m.venue) {
             return Some(match m.venue {
                 Venue::Alpaca => "no Alpaca paper keys: demo on Alpaca is the paper account".into(),
-                _ => "no demo exchange keys: add Bybit, OKX or Binance demo keys in Settings → Exchanges".into(),
+                _ => "no demo route: add Bybit, OKX or Binance demo keys in Settings → Exchanges, or use Alpaca \
+                      paper (PYTHIA_DEMO_EXCHANGE=alpaca)"
+                    .into(),
             });
         }
-        None
+        self.demo_not_listed(m)
+    }
+
+    /// Crypto demo orders go to the Alpaca paper account.
+    pub(crate) fn crypto_demo_on_alpaca(&self) -> bool {
+        self.demo_venues.contains(&Venue::Crypto) && self.crypto_demo_venue == Some(CostVenue::Alpaca)
+    }
+
+    /// Why the crypto demo route cannot trade `m` at all: Alpaca does not
+    /// list it. `None` for every other route, and while the list is unread
+    /// (the connector's own asset check still refuses an unlisted pair).
+    fn demo_not_listed(&self, m: &Market) -> Option<String> {
+        use crate::connectors::alpaca::{alpaca_crypto_pair, not_listed_reason};
+        if m.venue != Venue::Crypto || !self.crypto_demo_on_alpaca() {
+            return None;
+        }
+        match alpaca_crypto_pair(&m.symbol) {
+            None => Some(not_listed_reason(&m.symbol)),
+            Some(pair) if self.crypto_demo_listed.as_ref().is_some_and(|l| !l.contains(&pair)) => {
+                Some(not_listed_reason(&m.symbol))
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// The crypto demo route can trade this market (see [`Engine::demo_not_listed`]).
+    pub(crate) fn demo_lists(&self, m: &Market) -> bool {
+        self.demo_not_listed(m).is_none()
+    }
+
+    /// The crypto markets the demo route cannot trade, by symbol.
+    fn demo_not_listed_symbols(&self) -> Vec<String> {
+        self.markets
+            .iter()
+            .filter(|m| m.venue == Venue::Crypto && !self.demo_lists(m))
+            .map(|m| m.symbol.clone())
+            .collect()
+    }
+
+    /// Which crypto pairs the Alpaca paper account lists (`BTC/USD`), read by
+    /// the host at startup and once a day while crypto demo orders go there.
+    /// `None` forgets the list. Journaled when it changes.
+    pub fn set_crypto_demo_listed(&mut self, listed: Option<HashSet<String>>) {
+        if listed == self.crypto_demo_listed {
+            return;
+        }
+        self.crypto_demo_listed = listed;
+        if self.crypto_demo_listed.is_none() || !self.crypto_demo_on_alpaca() {
+            return;
+        }
+        let missing = self.demo_not_listed_symbols();
+        let total = self.markets.iter().filter(|m| m.venue == Venue::Crypto).count();
+        let msg = if missing.is_empty() {
+            format!("Alpaca paper lists all {total} crypto markets here; crypto demo orders can trade every one")
+        } else {
+            format!(
+                "Alpaca paper lists {} of the {total} crypto markets here. Crypto demo orders skip the rest: {}",
+                total - missing.len(),
+                missing.join(", ")
+            )
+        };
+        self.log(JournalKind::System, msg, None, None);
     }
 
     /// Whose costs a demo order on `m` is modelled with: the demo exchange for
@@ -3415,6 +3488,7 @@ impl Engine {
                 .demo_venues
                 .iter()
                 .map(|v| match (v, crypto) {
+                    (Venue::Crypto, Some(CostVenue::Alpaca)) => "crypto on Alpaca paper".to_string(),
                     (Venue::Crypto, Some(c)) => format!("{} demo", c.id()),
                     (Venue::Alpaca, _) => "Alpaca paper".to_string(),
                     (v, _) => format!("{v:?} demo"),
@@ -4480,6 +4554,7 @@ impl Engine {
             demo_venues: self.demo_venues(),
             demo_exchange: self.demo_venues.contains(&Venue::Crypto).then_some(self.crypto_demo_venue).flatten(),
             demo_real_prices: self.crypto_demo_real_prices,
+            demo_not_listed: self.demo_not_listed_symbols(),
             demo_positions: self.positions.values().filter(|p| p.demo && p.qty.abs() > 1e-9).count(),
         }
     }
@@ -4773,6 +4848,12 @@ impl Engine {
                 continue;
             }
             let mut owned_elsewhere = vec![];
+            // Coins the demo route cannot trade (not listed on the Alpaca
+            // paper account): skipped, their weight stays in cash. The rest
+            // keep their own weights; nothing is scaled up to fill the gap.
+            let mut unlisted: Vec<String> = vec![];
+            let demo_route =
+                self.autopilot_route(&sid).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state)) == RouteIntent::Demo;
             let mut prices = HashMap::new();
             // A position is this book's when the strategy holds it and, inside
             // an autopilot, the autopilot owns it.
@@ -4782,6 +4863,7 @@ impl Engine {
             for m in &crypto {
                 match self.positions.get(&m.id) {
                     Some(p) if !mine(&m.id, p) && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
+                    None if demo_route && !self.demo_lists(m) => unlisted.push(m.symbol.clone()),
                     // A market an autopilot reserved for someone else.
                     None if !self.autopilot_entry_allowed(&sid, &m.id) => owned_elsewhere.push(m.symbol.clone()),
                     _ if self.real_ids.contains(&m.id) => {
@@ -4805,6 +4887,10 @@ impl Engine {
                 crate::lab::rebalance(&sig.weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
             // A coin held by another strategy is reported as that, not as missing.
             untradable.retain(|c| !owned_elsewhere.iter().any(|s| s == &format!("{c}/USD")));
+            // An unlisted coin the lab wants is named once, as that.
+            let skipped: Vec<String> =
+                unlisted.iter().filter(|s| sig.weights.keys().any(|c| **s == format!("{c}/USD"))).cloned().collect();
+            untradable.retain(|c| !unlisted.iter().any(|s| s == &format!("{c}/USD")));
             let n = orders.len();
             let mut refused = 0;
             for o in orders {
@@ -4846,6 +4932,12 @@ impl Engine {
             }
             if !untradable.is_empty() {
                 note.push_str(&format!("; no market here for {}", untradable.join(", ")));
+            }
+            if !skipped.is_empty() {
+                note.push_str(&format!(
+                    "; skipped {} (not listed on Alpaca, the demo route), that share stays in cash",
+                    skipped.join(", ")
+                ));
             }
             if !sig.dropped.is_empty() {
                 note.push_str(&format!(
@@ -5003,7 +5095,11 @@ impl Engine {
                 Venue::Polymarket => Some("Polymarket has no demo environment".to_string()),
                 v if !self.demo_venues.contains(&v) => Some(format!(
                     "no demo keys for {v:?}: add {} in Settings first",
-                    if v == Venue::Alpaca { "Alpaca paper keys" } else { "Bybit, OKX or Binance demo keys" }
+                    if v == Venue::Alpaca {
+                        "Alpaca paper keys"
+                    } else {
+                        "Bybit, OKX or Binance demo keys (or use Alpaca paper: PYTHIA_DEMO_EXCHANGE=alpaca)"
+                    }
                 )),
                 _ => None,
             };

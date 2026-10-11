@@ -219,6 +219,12 @@ pub struct AutopilotConfig {
     pub mode: AutopilotMode,
     /// A cost venue id from `config/costs.json` ("kraken", "alpaca", ...).
     pub venue: String,
+    /// The markets it trades, when the venue alone does not say: crypto on
+    /// the Alpaca paper account is venue "alpaca" with asset class "crypto".
+    /// Empty: the venue decides (alpaca is US shares, polymarket prediction
+    /// markets, any other crypto). The engine fills it in at start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_class: Option<Venue>,
     pub capital_usd: f64,
     /// Empty: "auto" picks the strategies.
     #[serde(default)]
@@ -795,6 +801,20 @@ fn engine_venue(cv: CostVenue) -> Venue {
     }
 }
 
+fn asset_words(v: Venue) -> &'static str {
+    match v {
+        Venue::Alpaca => "US shares",
+        Venue::Crypto => "crypto",
+        Venue::Polymarket => "prediction markets",
+    }
+}
+
+/// The engine venue an autopilot trades on: its asset class, else what its
+/// venue implies.
+fn config_venue(cfg: &AutopilotConfig) -> Option<Venue> {
+    cfg.asset_class.or_else(|| CostVenue::parse(&cfg.venue).map(engine_venue))
+}
+
 pub(super) fn venue_label(cv: CostVenue) -> &'static str {
     match cv {
         CostVenue::Kraken => "Kraken",
@@ -950,7 +970,7 @@ impl Engine {
         if let Some(i) = self.ap_of_strategy(sid) {
             let ap = &self.autopilots[i];
             let live_ok = ap.config.mode != AutopilotMode::Live
-                || CostVenue::parse(&ap.config.venue).is_some_and(|cv| self.live_routable(engine_venue(cv)));
+                || config_venue(&ap.config).is_some_and(|v| self.live_routable(v));
             return ap.state == AutopilotState::Running
                 && live_ok
                 && ap.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market));
@@ -1149,14 +1169,20 @@ impl Engine {
         // Saved under its canonical id: the live cash check below adds up
         // other autopilots by venue, and " Kraken" must be the same as "kraken".
         cfg.venue = cv.id().to_string();
-        let venue = engine_venue(cv);
+        let venue = cfg.asset_class.unwrap_or_else(|| engine_venue(cv));
+        // Crypto is the one asset class another venue's book can carry
+        // (crypto on the Alpaca paper account); shares are only on Alpaca.
+        if venue != Venue::Crypto && venue != engine_venue(cv) {
+            return Err(format!("{} does not trade {} here.", venue_label(cv), asset_words(venue)));
+        }
         if cfg.mode == AutopilotMode::Demo && venue == Venue::Crypto {
             // Crypto demo orders go to the exchange whose demo keys are in
-            // Settings, whatever the live exchange is. That exchange is the
-            // autopilot's venue, so every label names where it trades.
+            // Settings (or to the Alpaca paper account), whatever the live
+            // exchange is. That venue is the autopilot's venue, so every
+            // label names where it trades.
             if !self.demo_venues.contains(&venue) {
                 return Err(format!(
-                    "A demo autopilot needs demo keys for {}: add Bybit, OKX or Binance demo keys in Settings first (docs/DEMO.md says how to get them).",
+                    "A demo autopilot needs demo keys for {}: add Bybit, OKX or Binance demo keys in Settings first, or use Alpaca paper (PYTHIA_DEMO_EXCHANGE=alpaca). docs/DEMO.md says how.",
                     venue_label(cv)
                 ));
             }
@@ -1179,7 +1205,7 @@ impl Engine {
             }
             cv = demo_cv;
             cfg.venue = demo_cv.id().to_string();
-        } else if venue == Venue::Crypto && cv != self.crypto_venue {
+        } else if venue == Venue::Crypto && cv != self.crypto_venue && engine_venue(cv) == Venue::Crypto {
             return Err(format!(
                 "Crypto here executes on {}, the exchange selected in Settings. An autopilot on {} would be priced and routed there anyway: pick {} or switch the exchange first.",
                 venue_label(self.crypto_venue),
@@ -1190,13 +1216,26 @@ impl Engine {
         if venue == Venue::Polymarket && cfg.mode != AutopilotMode::Paper {
             return Err("Polymarket has no order path in Pythia: an autopilot there can only run on paper.".into());
         }
+        if venue == Venue::Crypto && engine_venue(cv) != Venue::Crypto && cfg.mode != AutopilotMode::Demo {
+            return Err(format!(
+                "Crypto on {} is only the demo route here (the Alpaca paper account). Paper and live crypto execute on {}, the exchange selected in Settings: pick {}.",
+                venue_label(cv),
+                venue_label(self.crypto_venue),
+                self.crypto_venue.id()
+            ));
+        }
         if cfg.mode == AutopilotMode::Demo && !self.demo_venues.contains(&venue) {
             return Err(format!(
                 "A demo autopilot needs demo keys for {}: add {} in Settings first (docs/DEMO.md says how to get them).",
                 venue_label(cv),
-                if venue == Venue::Alpaca { "Alpaca paper keys" } else { "Bybit, OKX or Binance demo keys" }
+                if venue == Venue::Alpaca {
+                    "Alpaca paper keys"
+                } else {
+                    "Bybit, OKX or Binance demo keys, or use Alpaca paper (PYTHIA_DEMO_EXCHANGE=alpaca)"
+                }
             ));
         }
+        cfg.asset_class = Some(venue);
         if self.limits.kill_switch {
             return Err("The kill switch is on, so every new entry would be refused. Release it first.".into());
         }
@@ -1214,7 +1253,14 @@ impl Engine {
         let auto = cfg.sleeves.is_empty();
         let mut passed_over: Vec<String> = Vec::new();
         let picks: Vec<(String, f64, String)> = if auto {
-            let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken)?;
+            let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken).map_err(|why| {
+                // "alpaca" alone means US shares; crypto there is its own choice.
+                if cfg.mode == AutopilotMode::Demo && venue == Venue::Alpaca && self.crypto_demo_on_alpaca() {
+                    format!("{why} Crypto on the Alpaca paper account is a separate choice: pick Crypto (asset class \"crypto\").")
+                } else {
+                    why
+                }
+            })?;
             passed_over = over;
             picks
         } else {
@@ -1237,7 +1283,7 @@ impl Engine {
             .iter()
             .map(|(sid, w, _)| {
                 let s = self.strategies.iter().find(|s| &s.id == sid).expect("picked strategies exist");
-                Want { weight: *w, whole: trades_as_set(s.kind), universe: self.sleeve_universe(s) }
+                Want { weight: *w, whole: trades_as_set(s.kind), universe: self.sleeve_universe(s, cfg.mode) }
             })
             .collect();
         let assigned = assign_markets(&wants, &taken);
@@ -1392,6 +1438,15 @@ impl Engine {
         }
         if cfg.mode == AutopilotMode::Demo {
             msg.push_str(" Orders go to the venue's demo account: virtual money through the real API, never in the tax record.");
+            if venue == Venue::Crypto && self.crypto_demo_on_alpaca() {
+                msg.push_str(" Crypto demo here is the Alpaca paper account");
+                let missing = self.demo_not_listed_symbols();
+                if missing.is_empty() {
+                    msg.push('.');
+                } else {
+                    msg.push_str(&format!("; Alpaca does not list {}, so no sleeve trades them.", missing.join(", ")));
+                }
+            }
         }
         if cfg.mode == AutopilotMode::Live {
             if self.live.dry_run {
@@ -1672,7 +1727,7 @@ impl Engine {
         if !self.live.armed {
             return Some("live routing is disarmed. Arm it on the Live page, then resume the autopilot.".into());
         }
-        if !self.live_routable(engine_venue(cv)) {
+        if !config_venue(&ap.config).is_some_and(|v| self.live_routable(v)) {
             return Some(format!("{} is not enabled for live routing any more.", venue_label(cv)));
         }
         for sl in &ap.sleeves {
@@ -2041,12 +2096,19 @@ impl Engine {
 
     /// The markets a sleeve of this strategy would trade: a lab book every
     /// crypto market (its weights may name any of them), anything else the
-    /// markets of its universe that exist here.
-    fn sleeve_universe(&self, s: &super::StrategyConfig) -> Vec<String> {
+    /// markets of its universe that exist here. In demo, only markets the
+    /// demo route can trade: on the Alpaca paper account, the coins Alpaca
+    /// lists (a lab book's unlisted coins stay in cash, see `run_lab_books`).
+    fn sleeve_universe(&self, s: &super::StrategyConfig, mode: AutopilotMode) -> Vec<String> {
+        let tradable = |m: &super::Market| mode != AutopilotMode::Demo || self.demo_lists(m);
         if s.kind == StrategyKind::LabTargets {
-            self.markets.iter().filter(|m| m.venue == Venue::Crypto).map(|m| m.id.clone()).collect()
+            self.markets.iter().filter(|m| m.venue == Venue::Crypto && tradable(m)).map(|m| m.id.clone()).collect()
         } else {
-            s.universe.iter().filter(|id| self.markets.iter().any(|m| &m.id == *id)).cloned().collect()
+            s.universe
+                .iter()
+                .filter(|id| self.markets.iter().any(|m| &m.id == *id && tradable(m)))
+                .cloned()
+                .collect()
         }
     }
 
@@ -2105,7 +2167,7 @@ impl Engine {
         let mut passed_over = Vec::new();
         for (rank, (sid, sc, ev)) in scored.into_iter().enumerate() {
             let s = self.strategies.iter().find(|s| s.id == sid).expect("scored strategies exist");
-            let universe = self.sleeve_universe(s);
+            let universe = self.sleeve_universe(s, mode);
             let fits = if trades_as_set(s.kind) {
                 !universe.is_empty() && universe.iter().all(|m| !held.contains(m) && !sets.contains(m))
             } else {

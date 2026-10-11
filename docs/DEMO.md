@@ -33,7 +33,60 @@ links are in the connector code next to the base URLs.
 **Best venue to start on: Bybit Demo Trading.** Mainnet prices, mainnet rules,
 self-service keys, and spot trading on the same v5 endpoints the live connector
 already uses. Binance Demo Mode is the second choice (prices "similar to live").
-For equities, Alpaca paper.
+For equities, Alpaca paper. With only Alpaca paper keys, crypto demo can run on
+the Alpaca paper account too (next section).
+
+## Crypto demo on the Alpaca paper account
+
+`PYTHIA_DEMO_EXCHANGE=alpaca` (backend `.env`) sends the crypto venue's demo
+orders (`crypto:BTC/USD` and the rest, what the lab books trade) to Alpaca's
+crypto book on the **paper** account. No extra keys: it uses the
+`APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` paper pair, only against
+`paper-api.alpaca.markets`. The live pair (`APCA_LIVE_*`) is never read for it.
+A demo exchange with keys of its own (`PYTHIA_DEMO_EXCHANGE=bybit` plus its
+keys) keeps working exactly as before; the two are one setting, so pick one.
+
+- **Symbols.** Pythia's `BTC/USD` is Alpaca's `BTC/USD`. Alpaca crypto here is
+  USD-quoted only; orders go out in coins, fractional, GTC, as market orders
+  (or the limit the engine chose).
+- **What Alpaca lists.** Alpaca does not list every coin of the 20-coin
+  universe. At startup (before the first tick, at most 20 s) and then once a
+  day the server reads `GET /v2/assets?asset_class=crypto&status=active` from
+  the paper API and keeps the tradable USD pairs (a failed read is retried
+  after 10 minutes). A demo order on a coin Alpaca does not list is refused
+  with "not listed on Alpaca"; the connector's own asset check refuses it too,
+  even before the list is read. The Live page's demo card names the skipped
+  coins (`live.demoNotListed`).
+- **Autopilots.** A demo autopilot on crypto trades on Alpaca (its venue is
+  `alpaca`, asset class `crypto`; the Autopilot page sends both). Its sleeves
+  only get the coins Alpaca lists. A lab book whose target holds an unlisted
+  coin trades the rest and leaves that coin's share in cash: the weights are
+  not scaled up. The rebalance line in the journal names the skipped coins
+  once per rebalance. Venue `alpaca` without an asset class is still US shares.
+- **Costs and fills.** Fills are what Alpaca reports; slippage against the
+  engine's price is recorded like any demo fill. The modelled side uses the
+  `alpaca` entry of `config/costs.json` (crypto pairs: 0.25 % taker, 0.15 %
+  maker; spreads beyond BTC and ETH are unmeasured guesses). Alpaca posts the
+  crypto fee later as a `CFEE` activity; the fee booking below covers these
+  fills too, read from the paper account. Demo fills and their fees never
+  enter the tax record.
+- **Prices.** Alpaca paper fills against Alpaca's own real quotes, so a demo
+  autopilot is allowed (unlike OKX). Pythia's crypto marks come from its feeds
+  (Kraken first), so a small gap between the two books is normal and shows up
+  as slippage.
+- **One account, one position per coin.** `alpaca:BTC/USD` (Alpaca's own
+  market, used by the Alpaca connection test) and `crypto:BTC/USD` on this
+  route land in the same BTC position of the paper account. Pythia keeps them
+  apart in its own book and every exit sells only its own quantity, but do
+  not hold the same coin through both at once if the numbers should match
+  the paper account's.
+- **Desktop app.** Backend only for now: the desktop app keeps the demo
+  exchange slots.
+
+Verified against the real paper account: a demo connection test order
+`alpaca:BTC/USD` fills through the Alpaca connector. The crypto-venue route
+reuses that connector; the asset list call is from Alpaca's reference
+(`get-v2-assets-1`) and was not called from this branch.
 
 Nothing in this branch has sent a request to any demo host: every response shape
 is from the docs, the same state as the live connectors (see `NEXT-STEPS.md` §1).

@@ -26,6 +26,7 @@ fn config(id: &str, mode: AutopilotMode, sleeves: &[&str]) -> AutopilotConfig {
         name: format!("Test {id}"),
         mode,
         venue: "kraken".into(),
+        asset_class: None,
         capital_usd: 1_000.0,
         sleeves: sleeves.iter().map(|s| SleeveConfig { strategy_id: s.to_string(), weight: 1.0 }).collect(),
         stop: StopRules::default(),
@@ -261,4 +262,54 @@ fn a_demo_venue_that_cannot_answer_leaves_the_client_id_in_the_journal() {
     assert!(why.contains(&o.client_order_id) && why.contains("Check the demo account"), "{why}");
     assert!(e.journal.iter().any(|j| j.kind == JournalKind::Risk && j.message.contains(&o.client_order_id)));
     assert!(e.client_lookups().is_empty() && !e.in_flight_markets.contains(BTC));
+}
+
+// ── 6 · crypto demo on the Alpaca paper account ────────────────────────────
+
+fn listed(pairs: &[&str]) -> Option<HashSet<String>> {
+    Some(pairs.iter().map(|p| p.to_string()).collect())
+}
+
+#[test]
+fn crypto_demo_on_alpaca_paper_shows_alpaca_and_refuses_a_coin_alpaca_does_not_list() {
+    let mut e = engine();
+    e.set_demo_venues([Venue::Crypto, Venue::Alpaca].into_iter().collect(), Some(CostVenue::Alpaca), true);
+    let live = e.state().live;
+    assert!(live.demo_venues.contains(&Venue::Crypto));
+    assert_eq!(live.demo_exchange, Some(CostVenue::Alpaca), "the demo venue is shown as Alpaca");
+    assert!(live.demo_real_prices);
+    assert!(live.demo_not_listed.is_empty(), "nothing is refused before the list is read");
+    assert!(e.journal.iter().any(|j| j.message.contains("crypto on Alpaca paper")));
+
+    e.set_crypto_demo_listed(listed(&["BTC/USD", "ETH/USD"]));
+    let live = e.state().live;
+    assert!(live.demo_not_listed.contains(&"SUI/USD".to_string()) && !live.demo_not_listed.contains(&"BTC/USD".to_string()));
+    assert!(e.journal.iter().any(|j| j.message.contains("Alpaca paper lists 2 of the")));
+
+    let i = e.ensure_manual_strategy();
+    let sid = e.strategies[i].id.clone();
+    let err = e.place_order(&sid, "crypto:SUI/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap_err();
+    assert!(err.contains("SUI/USD is not listed on Alpaca"), "{err}");
+    assert!(e.drain_live_orders().is_empty(), "nothing went out");
+    assert_eq!(e.demo_test_block("crypto:SUI/USD").as_deref(), Some(err.as_str()));
+
+    // A strategy's own signal on it: a refused row with the reason.
+    e.set_strategy_state("ema-cross-1", StrategyState::Demo).unwrap();
+    let idx = e.strategies.iter().position(|s| s.id == "ema-cross-1").unwrap();
+    let sui = e.markets.iter().find(|m| m.id == "crypto:SUI/USD").cloned().unwrap();
+    e.route_fill(idx, &sui, Side::Buy, 10.0, sui.price, RouteIntent::Demo);
+    let row = e.orders.iter().find(|o| o.market_id == "crypto:SUI/USD" && o.strategy_id == "ema-cross-1").unwrap();
+    assert_eq!((row.status, row.route), (OrderStatus::Rejected, FillRoute::Demo));
+    assert!(row.reject_reason.as_deref().unwrap_or_default().contains("not listed on Alpaca"));
+
+    // A listed coin goes out to the demo route as a crypto order.
+    e.place_order(&sid, BTC, Side::Buy, 1_000.0, RouteIntent::Demo).expect("routed");
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 1);
+    assert!(out[0].demo && !out[0].paper && out[0].venue == Venue::Crypto && out[0].symbol == "BTC/USD");
+
+    // A real demo exchange instead: Alpaca's list does not apply.
+    e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Bybit), true);
+    assert!(e.state().live.demo_not_listed.is_empty());
+    assert!(e.demo_test_block("crypto:SUI/USD").is_none());
 }

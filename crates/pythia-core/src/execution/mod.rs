@@ -26,8 +26,10 @@ pub mod bandit;
 
 use crate::connectors::cex::{CexConnector, Exchange};
 use crate::connectors::{
-    alpaca::AlpacaConnector, ConnectorError, Environment, MarketConnector, OrderRequest, OrderType, Venue,
+    alpaca::{AlpacaConnector, AlpacaCryptoDemo},
+    ConnectorError, Environment, MarketConnector, OrderRequest, OrderType, Venue,
 };
+use crate::costs::CostVenue;
 use crate::engine::{Engine, LiveOrderOut, LiveUpdate};
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -49,6 +51,11 @@ pub struct Credentials {
     /// Never used for a live order, and the live keys above are never used for
     /// a demo one: see [`Credentials::connector_env`].
     pub exchange_demo: Option<(Exchange, String, String, String)>,
+    /// The crypto venue's demo route goes to the Alpaca PAPER account
+    /// (`PYTHIA_DEMO_EXCHANGE=alpaca`), with the paper pair in `alpaca` and
+    /// nothing else. Only used while `exchange_demo` is empty: a demo
+    /// exchange with its own keys keeps the route it always had.
+    pub crypto_demo_alpaca: bool,
     /// Cap on the marketable-limit band for Alpaca market orders, in basis
     /// points. `None` keeps the connector default; 0 sends plain market orders
     /// during regular hours.
@@ -134,6 +141,9 @@ impl Credentials {
     ///   and the demo exchange slot against that exchange's demo host. A demo
     ///   exchange key that is byte-for-byte the live key of the same exchange
     ///   is refused: it means the same key was pasted into both forms.
+    ///   Without a demo exchange, `crypto_demo_alpaca` sends crypto demo
+    ///   orders to the Alpaca paper account with the paper pair
+    ///   ([`AlpacaCryptoDemo`]).
     pub fn connector_env(
         &self,
         venue: Venue,
@@ -157,9 +167,14 @@ impl Credentials {
                 Ok(Box::new(c))
             }
             Venue::Crypto => {
-                let (ex, k, s, p) = self.exchange_demo.clone().ok_or(
-                    "No demo exchange is configured: add demo keys in Settings → Exchanges (Bybit, OKX or Binance)",
-                )?;
+                let Some((ex, k, s, p)) = self.exchange_demo.clone() else {
+                    if self.crypto_demo_alpaca {
+                        return Ok(Box::new(self.alpaca_crypto_demo()?));
+                    }
+                    return Err("No demo exchange is configured: add demo keys in Settings → Exchanges (Bybit, OKX \
+                                or Binance), or set PYTHIA_DEMO_EXCHANGE=alpaca for the Alpaca paper account"
+                        .into());
+                };
                 if ex.demo().is_none() {
                     return Err(format!("{} has no demo environment. {}", ex.label(), ex.no_demo_reason()));
                 }
@@ -193,6 +208,43 @@ impl Credentials {
     /// The exchange the demo route trades on, if one is configured.
     pub fn demo_exchange(&self) -> Option<Exchange> {
         self.exchange_demo.as_ref().map(|e| e.0)
+    }
+
+    /// The crypto venue's demo route goes to the Alpaca paper account: opted
+    /// in, and no demo exchange with keys of its own.
+    pub fn crypto_demo_on_alpaca(&self) -> bool {
+        self.crypto_demo_alpaca && self.exchange_demo.is_none()
+    }
+
+    /// The Alpaca paper connector for crypto demo orders. Built from the
+    /// PAPER pair against the paper host only: the live pair is never read
+    /// here, whatever the arm's endpoint says.
+    pub fn alpaca_crypto_demo(&self) -> Result<AlpacaCryptoDemo, String> {
+        let paper = self.alpaca_connector(true, false).map_err(|_| {
+            "PYTHIA_DEMO_EXCHANGE=alpaca sends crypto demo orders to the Alpaca paper account, but its keys are \
+             not set (APCA_API_KEY_ID / APCA_API_SECRET_KEY)"
+                .to_string()
+        })?;
+        AlpacaCryptoDemo::new(paper)
+    }
+
+    /// Whose costs and name a crypto demo order carries: the demo exchange,
+    /// or Alpaca on the Alpaca paper route. `None` without a crypto demo route.
+    pub fn crypto_demo_venue(&self) -> Option<CostVenue> {
+        match self.demo_exchange() {
+            Some(ex) => Some(CostVenue::for_exchange(ex)),
+            None if self.crypto_demo_on_alpaca() => Some(CostVenue::Alpaca),
+            None => None,
+        }
+    }
+
+    /// The crypto demo route trades on real market prices. Alpaca paper
+    /// fills against Alpaca's own real quotes (docs/DEMO.md).
+    pub fn crypto_demo_real_prices(&self) -> bool {
+        match self.demo_exchange() {
+            Some(ex) => ex.demo().is_some_and(|d| d.real_prices),
+            None => self.crypto_demo_on_alpaca(),
+        }
     }
 
     /// Venues with usable credentials, for the "connected" badges.
@@ -231,6 +283,26 @@ pub async fn read_alpaca_fees(engine: &Mutex<Engine>, creds: &Credentials) {
             Err(e) => tracing::warn!("Alpaca fee activities ({}) not read: {e}", if q.paper { "paper" } else { "live" }),
         }
     }
+}
+
+/// Read which crypto pairs the Alpaca paper account lists and hand them to
+/// the engine, when crypto demo orders go there. Hosts call it at startup and
+/// once a day. Read-only. Returns how many dollar pairs Alpaca lists, or why
+/// the list could not be read (the engine keeps the last list it had).
+pub async fn refresh_crypto_demo_listing(engine: &Mutex<Engine>, creds: &Credentials) -> Result<usize, String> {
+    if !creds.crypto_demo_on_alpaca() {
+        engine.lock().unwrap().set_crypto_demo_listed(None);
+        return Ok(0);
+    }
+    let conn = creds.alpaca_connector(true, false)?;
+    let pairs = conn.tradable_crypto_pairs().await.map_err(|e| e.to_string())?;
+    if pairs.is_empty() {
+        // An empty answer would refuse every coin; more likely a bad read.
+        return Err("Alpaca listed no tradable USD crypto pair".into());
+    }
+    let n = pairs.len();
+    engine.lock().unwrap().set_crypto_demo_listed(Some(pairs.into_iter().collect()));
+    Ok(n)
 }
 
 /// Ask the demo venue about demo orders that were sent before a restart and
@@ -531,6 +603,80 @@ mod tests {
         let alpaca_paper = Credentials { alpaca: Some(("pk".into(), "ps".into())), ..Default::default() };
         let c = alpaca_paper.connector_env(Venue::Alpaca, Environment::Demo, false, false).unwrap();
         assert_eq!(c.label(), "Alpaca (paper)");
+    }
+
+    fn alpaca_route(paper: bool, live: bool) -> Credentials {
+        Credentials {
+            alpaca: paper.then(|| ("PAPERKEY".to_string(), "PAPERSECRET".to_string())),
+            alpaca_live: live.then(|| ("LIVEKEY".to_string(), "LIVESECRET".to_string())),
+            crypto_demo_alpaca: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn crypto_demo_goes_to_alpaca_paper_only_when_opted_in_and_no_demo_exchange_is_set() {
+        // Opted in with the paper pair: the crypto venue's demo route is Alpaca paper.
+        let creds = alpaca_route(true, true);
+        let c = creds.connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap();
+        assert_eq!((c.venue(), c.label().as_str()), (Venue::Crypto, "Alpaca (paper)"));
+        assert!(creds.demo_venues().contains(&Venue::Crypto) && creds.demo_venues().contains(&Venue::Alpaca));
+        assert!(creds.crypto_demo_on_alpaca());
+        assert_eq!(creds.crypto_demo_venue(), Some(CostVenue::Alpaca));
+        assert!(creds.crypto_demo_real_prices());
+        assert_eq!(creds.demo_exchange(), None);
+
+        // Not opted in: no crypto demo route, as before.
+        let off = Credentials { crypto_demo_alpaca: false, ..creds.clone() };
+        assert!(off.connector_env(Venue::Crypto, Environment::Demo, false, false).is_err());
+        assert!(!off.demo_venues().contains(&Venue::Crypto));
+        assert_eq!(off.crypto_demo_venue(), None);
+
+        // A real demo exchange with its keys keeps its route.
+        let bybit = Credentials {
+            exchange_demo: Some((Exchange::Bybit, "DEMOKEY".into(), "DEMOSECRET".into(), String::new())),
+            ..creds.clone()
+        };
+        let c = bybit.connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap();
+        assert_eq!(c.label(), "Bybit (demo)");
+        assert!(!bybit.crypto_demo_on_alpaca());
+        assert_eq!(bybit.crypto_demo_venue(), Some(CostVenue::Bybit));
+
+        // Live crypto is untouched: still only the live exchange.
+        assert!(creds.connector_env(Venue::Crypto, Environment::Live, true, false).is_err());
+        assert!(!creds.connected_venues().contains(&Venue::Crypto));
+    }
+
+    #[test]
+    fn the_alpaca_crypto_demo_route_never_uses_the_live_alpaca_keys() {
+        // Both pairs set: the route signs with the paper pair, on the paper host.
+        let both = alpaca_route(true, true);
+        let c = both.alpaca_crypto_demo().unwrap();
+        assert!(c.is_paper());
+        assert_eq!(c.key_id(), Some("PAPERKEY"));
+        // Whatever the live arm's endpoint says (`paper = false`).
+        let boxed = both.connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap();
+        assert_eq!(boxed.label(), "Alpaca (paper)");
+
+        // Only the live pair: refused, never borrowed.
+        let live_only = alpaca_route(false, true);
+        let err = live_only.connector_env(Venue::Crypto, Environment::Demo, false, false).err().unwrap();
+        assert!(err.contains("PYTHIA_DEMO_EXCHANGE=alpaca") && err.contains("APCA_API_KEY_ID"), "{err}");
+        assert!(!live_only.demo_venues().contains(&Venue::Crypto));
+        assert!(live_only.alpaca_crypto_demo().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_crypto_demo_order_on_a_pair_alpaca_cannot_trade_is_rejected_before_any_request() {
+        // The connector the daemon builds for a crypto demo order, and a pair
+        // Alpaca has no dollar book for: refused by preflight and by submit
+        // alike, with no request built (these keys would fail if one were).
+        let conn = alpaca_route(true, false).connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap();
+        let req = OrderRequest::market("BTC/USDT", Side::Buy, 0.01);
+        let err = conn.preflight(&req).await.unwrap_err();
+        assert!(err.to_string().contains("BTC/USDT is not listed on Alpaca"), "{err}");
+        let err = conn.submit_order(req).await.unwrap_err();
+        assert!(err.to_string().contains("not listed on Alpaca"), "{err}");
     }
 
     #[tokio::test]
