@@ -32,6 +32,7 @@ fn config(id: &str, capital: f64, sleeves: &[(&str, f64)], stop: StopRules) -> A
         name: format!("Test {id}"),
         mode: AutopilotMode::Paper,
         venue: "kraken".into(),
+        asset_class: None,
         capital_usd: capital,
         sleeves: sleeves.iter().map(|(s, w)| SleeveConfig { strategy_id: s.to_string(), weight: *w }).collect(),
         stop,
@@ -1361,4 +1362,53 @@ fn a_demo_entry_that_fills_after_the_stop_is_booked_and_closed_again() {
     let out = e.drain_live_orders();
     assert_eq!(out.len(), 1, "and its close goes back to the demo venue");
     assert!(out[0].demo && out[0].side == Side::Sell);
+}
+
+#[test]
+fn a_demo_autopilot_on_the_alpaca_paper_route_trades_the_coins_alpaca_lists_and_skips_the_rest() {
+    let mut e = idle_engine();
+    let now = e.now();
+    // PYTHIA_DEMO_EXCHANGE=alpaca with only the Alpaca paper keys.
+    e.set_demo_venues([Venue::Crypto, Venue::Alpaca].into_iter().collect(), Some(CostVenue::Alpaca), true);
+    e.set_crypto_demo_listed(Some(["BTC/USD", "ETH/USD", "SOL/USD"].into_iter().map(String::from).collect()));
+    e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.4), ("ETH", 0.2), ("SUI", 0.1)], regime_evidence(), false));
+
+    // "alpaca" alone is US shares: auto finds nothing there and says where crypto is.
+    let mut c = config("alp", 10_000.0, &[], StopRules::default());
+    c.mode = AutopilotMode::Demo;
+    c.venue = "alpaca".into();
+    let err = e.autopilot_start(c.clone(), false, VenueCash::NotRead).unwrap_err();
+    assert!(err.contains("pick Crypto"), "{err}");
+
+    // What the page sends for crypto demo: the demo venue and the asset class.
+    c.asset_class = Some(Venue::Crypto);
+    let id = start(&mut e, c);
+    let s = status(&e, &id);
+    assert_eq!((s.config.venue.as_str(), s.config.asset_class), ("alpaca", Some(Venue::Crypto)));
+    assert_eq!(s.by_sleeve.len(), 1);
+    assert_eq!(s.by_sleeve[0].strategy_id, "lab:tsmom_regime");
+    let mut markets = s.by_sleeve[0].markets.clone();
+    markets.sort();
+    assert_eq!(markets, vec![BTC.to_string(), ETH.to_string(), "crypto:SOL/USD".to_string()], "only the listed coins");
+    assert!(journal_has(&e, "Crypto demo here is the Alpaca paper account; Alpaca does not list"));
+
+    e.run_lab_books();
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 2, "BTC and ETH go out, SUI is skipped: {out:?}");
+    assert!(out.iter().all(|o| o.demo && !o.paper && o.venue == Venue::Crypto && o.side == Side::Buy));
+    let sent = |m: &str| out.iter().find(|o| o.market_id == m).map(|o| o.qty * o.ref_price).unwrap();
+    // Not renormalised: BTC keeps its 40 %, the 10 % meant for SUI stays in cash.
+    assert!((sent(BTC) - 4_000.0).abs() < 60.0, "{}", sent(BTC));
+    assert!((sent(ETH) - 2_000.0).abs() < 30.0, "{}", sent(ETH));
+    let notes: Vec<&JournalEntry> = e.journal.iter().filter(|j| j.message.contains("not listed on Alpaca, the demo route")).collect();
+    assert_eq!(notes.len(), 1, "said once for the rebalance");
+    assert!(notes[0].message.contains("skipped SUI/USD"));
+    assert!(!notes[0].message.contains("another strategy holds"), "{}", notes[0].message);
+
+    // The paper and live routes do not use Alpaca for crypto.
+    let mut p = config("alp-paper", 1_000.0, &[], StopRules::default());
+    p.venue = "alpaca".into();
+    p.asset_class = Some(Venue::Crypto);
+    let err = e.autopilot_start(p, false, VenueCash::NotRead).unwrap_err();
+    assert!(err.contains("only the demo route"), "{err}");
 }

@@ -34,8 +34,9 @@
 //! paid, and the fee is in the ledger in dollars at the fill price.
 
 use super::{Engine, InFlight, JournalKind, LiveUpdate, Market};
-use crate::connectors::alpaca::{CryptoFeeActivity, CRYPTO_FEE_MAX_BPS};
+use crate::connectors::alpaca::{alpaca_crypto_pair, CryptoFeeActivity, CRYPTO_FEE_MAX_BPS};
 use crate::connectors::{BrokerOrderStatus, Side, Venue};
+use crate::costs::CostVenue;
 use serde::{Deserialize, Serialize};
 
 /// How often the daemon asks Alpaca for posted fees while any are awaited.
@@ -115,6 +116,14 @@ pub(super) fn ny_date(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+/// An order on Alpaca's crypto book: an Alpaca crypto market, or a crypto
+/// demo order the Alpaca paper route took (its cost venue says so, and it is
+/// kept with the order across a restart).
+pub(super) fn alpaca_crypto_order(f: &InFlight) -> bool {
+    let on_alpaca = f.venue == Venue::Alpaca || (f.demo && f.venue == Venue::Crypto && f.cost_venue == CostVenue::Alpaca);
+    on_alpaca && f.symbol.contains('/')
+}
+
 fn day_gap(a: &str, b: &str) -> Option<i64> {
     let p = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
     Some((p(a)? - p(b)?).num_days().abs())
@@ -124,7 +133,7 @@ impl Engine {
     /// Start (or update) the watch on an Alpaca crypto fill that came without
     /// a fee. Called after each booked part of a fill.
     pub(super) fn watch_alpaca_fee(&mut self, order_id: &str, f: &InFlight, m: &Market, update: &LiveUpdate) {
-        let crypto = m.venue == Venue::Alpaca && m.symbol.contains('/');
+        let crypto = alpaca_crypto_order(f);
         let price = update.avg_price.unwrap_or(0.0);
         if !crypto || update.fee != 0.0 || update.fee_base != 0.0 || update.filled_qty <= 0.0 || price <= 0.0 {
             return;
@@ -138,7 +147,8 @@ impl Engine {
         self.alpaca_fees.push(AlpacaFeeWatch {
             order_id: order_id.to_string(),
             market_id: m.id.clone(),
-            symbol: m.symbol.clone(),
+            // The pair as Alpaca files its fee activities under it.
+            symbol: alpaca_crypto_pair(&m.symbol).unwrap_or_else(|| m.symbol.clone()),
             side: f.side,
             strategy_id: f.strategy_id.clone(),
             qty: update.filled_qty,
@@ -244,7 +254,7 @@ impl Engine {
     /// the venue held less than the book (see `AlpacaConnector::submit_order`):
     /// the coins left over in the book are the buy's fee.
     pub(super) fn alpaca_exit_gap(&mut self, f: &InFlight, update: &LiveUpdate) {
-        if f.venue != Venue::Alpaca || f.side != Side::Sell || update.status != BrokerOrderStatus::Filled || !f.symbol.contains('/') {
+        if !alpaca_crypto_order(f) || f.side != Side::Sell || update.status != BrokerOrderStatus::Filled {
             return;
         }
         let Some(left) = self.positions.get(&f.market_id).map(|p| p.qty).filter(|q| *q > 0.0) else { return };
