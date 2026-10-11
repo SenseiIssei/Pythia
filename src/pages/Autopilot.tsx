@@ -60,6 +60,7 @@ import {
   fmtDays,
   fmtDuration,
   fmtWhen,
+  forwardLine,
   isActive,
   limit,
   type Stop,
@@ -848,6 +849,8 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
   const room = floor > 0 ? s.equity - floor : null;
   const span = floor > 0 ? Math.max(1e-9, s.peakEquity - floor) : 0;
   const roomPct = room !== null ? (room / span) * 100 : 0;
+  const fwd = forwardLine(s.forward);
+  const fwdTone = { neutral: "text-cyber-text-dim", good: "text-success", warn: "text-warning", bad: "text-danger" };
 
   async function act(fn: () => Promise<void>) {
     setBusy(true);
@@ -899,6 +902,12 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
                 Started {fmtWhen(s.startedMs)}
                 {s.config.stop.endMs ? ` · ends ${fmtWhen(s.config.stop.endMs)} at the latest` : " · runs until you stop it or a limit is reached"}
               </p>
+              {fwd && (
+                <p className="mt-1 text-sm" data-testid="forward-line">
+                  <span className="text-cyber-text-faint">Against the backtest: </span>
+                  <span className={fwdTone[fwd.tone]}>{fwd.text}</span>
+                </p>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">

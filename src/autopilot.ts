@@ -6,7 +6,7 @@
 // 12.5 %), like `RiskStatus.drawdownPct`. Sleeve weights are fractions that
 // add up to 1.
 
-import type { AutopilotConfig, AutopilotStatus, Market, PnlBreakdown } from "./types";
+import type { AutopilotConfig, AutopilotForward, AutopilotStatus, Market, PnlBreakdown } from "./types";
 
 export const DAY_MS = 86_400_000;
 
@@ -237,4 +237,45 @@ export function fmtDays(days: number): string {
   if (days < 1) return "less than a day";
   const d = Math.floor(days);
   return `${d} day${d === 1 ? "" : "s"}`;
+}
+
+/** Days before a forward result counts against the backtest (the engine's rule too). */
+export const FORWARD_MIN_DAYS = 10;
+
+export interface ForwardLine {
+  tone: "neutral" | "good" | "warn" | "bad";
+  text: string;
+}
+
+/**
+ * One plain line on how a running autopilot compares with its backtest, from
+ * the lab's forward report. Null when there is nothing to say.
+ */
+export function forwardLine(f: AutopilotForward | null | undefined): ForwardLine | null {
+  if (!f) return null;
+  const after = `after ${fmtDays(f.days)}`;
+  switch (f.status) {
+    case "early":
+      return {
+        tone: "neutral",
+        text:
+          f.days < 1
+            ? `Too early to tell: it needs ${FORWARD_MIN_DAYS} days before it is held against the backtest.`
+            : `Too early to tell: ${Math.floor(f.days)} of the ${FORWARD_MIN_DAYS} days it needs.`,
+      };
+    case "ok": {
+      const ahead = f.returnPct != null && f.bandHighPct != null && f.returnPct > f.bandHighPct;
+      return ahead
+        ? { tone: "good", text: `Ahead of its backtest range ${after}, which can be luck as easily as skill.` }
+        : { tone: "good", text: `In line with its backtest ${after}.` };
+    }
+    case "watch":
+      return { tone: "warn", text: `Inside its backtest range ${after}, but worth watching.` };
+    case "below":
+      return { tone: "bad", text: `Below its backtest range ${after}.` };
+    case "none":
+      return { tone: "neutral", text: "No backtest range to compare with." };
+    default:
+      return null;
+  }
 }
