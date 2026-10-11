@@ -273,9 +273,10 @@ pub fn providers_with(configured: impl Fn(Provider) -> bool) -> Vec<ProviderInfo
 /// wanted inside a bar, and on the current Opus generation low effort is
 /// genuinely strong. Raise it for slow, high-stakes event markets where a few
 /// extra seconds cost nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
+    #[default]
     Low,
     Medium,
     High,
@@ -295,11 +296,6 @@ impl Effort {
     }
 }
 
-impl Default for Effort {
-    fn default() -> Self {
-        Effort::Low
-    }
-}
 
 /// A request for a signal: which provider/model, the key, and the context.
 #[derive(Debug, Clone)]

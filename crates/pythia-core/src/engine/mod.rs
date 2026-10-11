@@ -5154,7 +5154,7 @@ impl Engine {
     fn annual_vols<'a>(&self, ids: impl Iterator<Item = &'a str>) -> HashMap<String, f64> {
         ids.filter(|id| self.bar_backed.contains(*id))
             .filter_map(|id| {
-                let always_open = self.markets.iter().find(|m| m.id == id).map_or(true, |m| m.kind != MarketKind::Equity);
+                let always_open = self.markets.iter().find(|m| m.id == id).is_none_or(|m| m.kind != MarketKind::Equity);
                 let vol = risk::annual_vol(self.ohlc.get(id)?, always_open)?;
                 Some((id.to_string(), vol))
             })
@@ -5854,11 +5854,11 @@ pub fn paper_fill_detail(cost: &ExecCost, kind: MarketKind, side: Side, qty: f64
 /// Regime filter: mean-reversion strategies are blocked in trending markets,
 /// trend strategies are blocked in ranging (choppy) markets.
 pub(crate) fn strategy_regime_ok(kind: StrategyKind, regime: Option<Regime>) -> bool {
-    match (regime, kind) {
-        (Some(Regime::Trending), StrategyKind::Bollinger | StrategyKind::RsiReversal) => false,
-        (Some(Regime::Ranging), StrategyKind::EmaCross | StrategyKind::MacdTrend | StrategyKind::Breakout | StrategyKind::MultiTf) => false,
-        _ => true,
-    }
+    !matches!(
+        (regime, kind),
+        (Some(Regime::Trending), StrategyKind::Bollinger | StrategyKind::RsiReversal)
+            | (Some(Regime::Ranging), StrategyKind::EmaCross | StrategyKind::MacdTrend | StrategyKind::Breakout | StrategyKind::MultiTf)
+    )
 }
 
 // ── seed universe (mirrors the TS MarketSim) ───────────────────────────────

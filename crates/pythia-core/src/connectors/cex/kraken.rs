@@ -29,7 +29,7 @@ async fn private(c: &CexConnector, endpoint: &str, params: &[(&str, String)]) ->
     let postdata = sign::form_encode(&all);
 
     let signature = sign::kraken_signature(&c.secret, &path, &nonce, &postdata)
-        .map_err(|e| ConnectorError::Auth(e))?;
+        .map_err(ConnectorError::Auth)?;
 
     let rb = c
         .http
