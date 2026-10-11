@@ -550,6 +550,10 @@ pub fn assign_markets(wants: &[Want], taken: &HashSet<String>) -> Vec<Vec<String
     out
 }
 
+/// What "auto" chose: (strategy id, weight, why) per pick, and the names of
+/// the candidates it passed over.
+type AutoPick = (Vec<(String, f64, String)>, Vec<String>);
+
 /// The evidence behind one strategy, for the auto pick.
 #[derive(Debug, Clone, Default)]
 pub struct Evidence {
@@ -1621,7 +1625,7 @@ impl Engine {
             .map(|a| (a.stopped_ms.unwrap_or(0), a.config.id.clone()))
             .collect();
         if done.len() > KEEP_FINISHED {
-            done.sort_by(|a, b| b.0.cmp(&a.0));
+            done.sort_by_key(|a| std::cmp::Reverse(a.0));
             let drop: HashSet<String> = done.into_iter().skip(KEEP_FINISHED).map(|d| d.1).collect();
             self.autopilots.retain(|a| !drop.contains(&a.config.id));
         }
@@ -2069,7 +2073,7 @@ impl Engine {
         mode: AutopilotMode,
         busy: &HashSet<String>,
         taken: &HashSet<String>,
-    ) -> Result<(Vec<(String, f64, String)>, Vec<String>), String> {
+    ) -> Result<AutoPick, String> {
         let now = self.now();
         let mut scored: Vec<(String, f64, Evidence)> = self
             .strategies

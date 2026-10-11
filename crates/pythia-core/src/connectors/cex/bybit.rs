@@ -72,7 +72,7 @@ fn check_error(v: &Value, what: &str) -> Result<(), ConnectorError> {
     let msg = v.get("retMsg").and_then(Value::as_str).unwrap_or("unknown error");
     Err(match code {
         // 10003 invalid key, 10004 bad signature, 10005 permission denied.
-        10003 | 10004 | 10005 => ConnectorError::Auth(format!("Bybit: {msg}")),
+        10003..=10005 => ConnectorError::Auth(format!("Bybit: {msg}")),
         _ => ConnectorError::Rejected(format!("Bybit {what}: {msg} ({code})")),
     })
 }

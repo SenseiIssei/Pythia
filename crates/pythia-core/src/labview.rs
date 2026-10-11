@@ -351,7 +351,7 @@ pub fn status() -> LabStatus {
                 .unwrap_or(0);
             out.reports.push(LabReport { verdict: verdict_of(&name, &v), name, updated_ms });
         }
-        out.reports.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+        out.reports.sort_by_key(|r| std::cmp::Reverse(r.updated_ms));
     }
     out
 }

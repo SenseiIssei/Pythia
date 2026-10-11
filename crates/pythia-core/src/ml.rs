@@ -6,6 +6,7 @@
 //!   1. scores the forecast made an hour ago against what actually happened,
 //!      next to the HAR baseline from the model card;
 //!   2. forecasts the next hour.
+//!
 //! Nothing here places or sizes an order. The scores are what will decide
 //! whether the risk manager may ever use these numbers.
 //!

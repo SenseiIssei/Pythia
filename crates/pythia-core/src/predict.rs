@@ -56,7 +56,7 @@ impl EnsembleKeys {
                     });
                 }
                 let key = std::env::var(provider.env_key()).ok()?;
-                (!key.trim().is_empty()).then(|| ProviderKey { provider, api_key: key, model })
+                (!key.trim().is_empty()).then_some(ProviderKey { provider, api_key: key, model })
             })
             .collect();
         Self { providers }
