@@ -942,4 +942,20 @@ export interface AutopilotStatus {
   lastAction: string | null;
   /** [epoch ms, equity], one point a minute, thinned to at most 300. */
   history: [number, number][];
+  /** Its forward result against the backtest, from the lab's daily forward
+   *  report. Only while it is active; absent when the report says nothing. */
+  forward?: AutopilotForward | null;
+}
+
+/** An autopilot's forward result held against its backtest's band. */
+export interface AutopilotForward {
+  /** early: under 10 days, it does not count yet. ok: inside or above the
+   *  band. watch: inside, but its dip or its floor is worth a look. below:
+   *  under the band. none: no band to compare with. */
+  status: "early" | "ok" | "watch" | "below" | "none";
+  days: number;
+  returnPct: number | null;
+  /** The backtest's 5 % and 95 % cumulative return over the same days. */
+  bandLowPct: number | null;
+  bandHighPct: number | null;
 }

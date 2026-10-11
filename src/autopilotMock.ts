@@ -238,6 +238,7 @@ function seed(scenario: MockScenario, names: Record<string, string>): State {
       ],
       lastAction: "Bought 0.021 BTC at $64,120 because the trend turned up.",
       history: hist,
+      forward: { status: "ok", days: 12, returnPct: 1.4, bandLowPct: -4.2, bandHighPct: 6.1 },
     });
     const split = run.pnl + run.fees;
     run.bySleeve[0].pnl = split * 0.8 - run.fees * 0.6;

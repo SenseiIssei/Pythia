@@ -6,6 +6,7 @@ import {
   compareWithHold,
   curve,
   floorAtStart,
+  forwardLine,
   maturity,
   worstDip,
 } from "./autopilot";
@@ -169,5 +170,45 @@ describe("analyse", () => {
 
   it("does not invent a daily rate in the first hour", () => {
     expect(analyse(status({ trades: 3 }), 10 * 60_000).tradesPerDay).toBeNull();
+  });
+});
+
+describe("forwardLine", () => {
+  const f = (over: Partial<NonNullable<AutopilotStatus["forward"]>>) => ({
+    status: "ok" as const,
+    days: 12,
+    returnPct: 1,
+    bandLowPct: -4,
+    bandHighPct: 5,
+    ...over,
+  });
+
+  it("says nothing without forward data", () => {
+    expect(forwardLine(undefined)).toBeNull();
+    expect(forwardLine(null)).toBeNull();
+  });
+
+  it("is too early under ten days, whatever the return", () => {
+    expect(forwardLine(f({ status: "early", days: 3.7, returnPct: -20 }))).toEqual({
+      tone: "neutral",
+      text: "Too early to tell: 3 of the 10 days it needs.",
+    });
+    expect(forwardLine(f({ status: "early", days: 0.2 }))!.text).toBe(
+      "Too early to tell: it needs 10 days before it is held against the backtest.",
+    );
+  });
+
+  it("is in line, ahead, below or worth watching in plain words", () => {
+    expect(forwardLine(f({}))).toEqual({ tone: "good", text: "In line with its backtest after 12 days." });
+    expect(forwardLine(f({ returnPct: 9 }))!.text).toBe("Ahead of its backtest range after 12 days, which can be luck as easily as skill.");
+    expect(forwardLine(f({ status: "below", returnPct: -7 }))).toEqual({ tone: "bad", text: "Below its backtest range after 12 days." });
+    expect(forwardLine(f({ status: "watch" }))!.tone).toBe("warn");
+    expect(forwardLine(f({ status: "none", bandLowPct: null, bandHighPct: null }))!.text).toBe("No backtest range to compare with.");
+  });
+
+  it("never uses an em dash", () => {
+    for (const status of ["early", "ok", "watch", "below", "none"] as const) {
+      for (const days of [0.5, 3, 12]) expect(forwardLine(f({ status, days }))!.text).not.toContain(String.fromCharCode(0x2014));
+    }
   });
 });
