@@ -78,41 +78,50 @@ fn env_flag(key: &str) -> bool {
 /// live pair; when it's unset the base pair is used for both, which is correct
 /// for the common case of only ever running on paper.
 fn credentials_from_env() -> Credentials {
-    let alpaca = match (env_str("APCA_API_KEY_ID"), env_str("APCA_API_SECRET_KEY")) {
+    credentials_from(&env_str)
+}
+
+/// [`credentials_from_env`] over any variable source, for tests.
+fn credentials_from(get: &dyn Fn(&str) -> Option<String>) -> Credentials {
+    let alpaca = match (get("APCA_API_KEY_ID"), get("APCA_API_SECRET_KEY")) {
         (Some(k), Some(s)) => Some((k, s)),
         _ => None,
     };
-    let alpaca_live = match (env_str("APCA_LIVE_API_KEY_ID"), env_str("APCA_LIVE_API_SECRET_KEY")) {
+    let alpaca_live = match (get("APCA_LIVE_API_KEY_ID"), get("APCA_LIVE_API_SECRET_KEY")) {
         (Some(k), Some(s)) => Some((k, s)),
         _ => alpaca.clone(),
     };
     // One exchange at a time — `PYTHIA_EXCHANGE` picks which.
-    let exchange = env_str("PYTHIA_EXCHANGE")
+    let exchange = get("PYTHIA_EXCHANGE")
         .as_deref()
         .and_then(Exchange::parse)
         .and_then(|ex| {
-            let k = env_str("PYTHIA_EXCHANGE_KEY")?;
-            let s = env_str("PYTHIA_EXCHANGE_SECRET")?;
-            Some((ex, k, s, env_str("PYTHIA_EXCHANGE_PASSPHRASE").unwrap_or_default()))
+            let k = get("PYTHIA_EXCHANGE_KEY")?;
+            let s = get("PYTHIA_EXCHANGE_SECRET")?;
+            Some((ex, k, s, get("PYTHIA_EXCHANGE_PASSPHRASE").unwrap_or_default()))
         });
     // The demo route's exchange and its DEMO keys, separate variables from
     // the live ones (see docs/DEMO.md). Never filled from PYTHIA_EXCHANGE_KEY.
-    let exchange_demo = env_str("PYTHIA_DEMO_EXCHANGE")
+    // `alpaca` needs no keys of its own: crypto demo orders go to the Alpaca
+    // paper account with the APCA_API_* paper pair.
+    let crypto_demo_alpaca = get("PYTHIA_DEMO_EXCHANGE").is_some_and(|v| v.eq_ignore_ascii_case("alpaca"));
+    let exchange_demo = get("PYTHIA_DEMO_EXCHANGE")
         .as_deref()
         .and_then(Exchange::parse)
         .and_then(|ex| {
-            let k = env_str("PYTHIA_DEMO_EXCHANGE_KEY")?;
-            let s = env_str("PYTHIA_DEMO_EXCHANGE_SECRET")?;
-            Some((ex, k, s, env_str("PYTHIA_DEMO_EXCHANGE_PASSPHRASE").unwrap_or_default()))
+            let k = get("PYTHIA_DEMO_EXCHANGE_KEY")?;
+            let s = get("PYTHIA_DEMO_EXCHANGE_SECRET")?;
+            Some((ex, k, s, get("PYTHIA_DEMO_EXCHANGE_PASSPHRASE").unwrap_or_default()))
         });
     Credentials {
         alpaca,
         alpaca_live,
         exchange,
         exchange_demo,
+        crypto_demo_alpaca,
         // Marketable-limit band for Alpaca market orders; 25bps when unset.
-        alpaca_slippage_bps: env_str("PYTHIA_SLIPPAGE_BPS").and_then(|v| v.parse().ok()),
-        alpaca_allow_shorts: env_flag("PYTHIA_ALLOW_SHORTS"),
+        alpaca_slippage_bps: get("PYTHIA_SLIPPAGE_BPS").and_then(|v| v.parse().ok()),
+        alpaca_allow_shorts: matches!(get("PYTHIA_ALLOW_SHORTS").as_deref(), Some("1" | "true" | "TRUE" | "yes" | "on")),
     }
 }
 
@@ -217,6 +226,31 @@ async fn lab_loop(state: AppState) {
             }
         }
         tokio::time::sleep(Duration::from_secs(300)).await;
+    }
+}
+
+/// Reads the crypto pairs the Alpaca paper account lists, at startup and then
+/// once a day, while crypto demo orders go there. A failed read is retried
+/// after ten minutes; the engine keeps the last list it had meanwhile, and the
+/// connector's own asset check still refuses an unlisted pair.
+async fn crypto_demo_listing_loop(state: AppState, mut wait: Duration) {
+    loop {
+        tokio::time::sleep(wait).await;
+        wait = read_crypto_demo_listing(&state).await;
+    }
+}
+
+/// One read of the Alpaca crypto list; returns how long until the next one.
+async fn read_crypto_demo_listing(state: &AppState) -> Duration {
+    match execution::refresh_crypto_demo_listing(&state.engine, &state.creds).await {
+        Ok(n) => {
+            tracing::info!("Crypto demo route: Alpaca paper lists {n} tradable USD crypto pairs");
+            Duration::from_secs(24 * 3600)
+        }
+        Err(e) => {
+            tracing::warn!("Crypto demo route: Alpaca crypto list not read ({e}), retrying in 10 minutes");
+            Duration::from_secs(600)
+        }
     }
 }
 
@@ -363,12 +397,7 @@ async fn main() {
             }
         }
         e.set_connected(creds.connected_venues());
-        let demo_ex = creds.demo_exchange();
-        e.set_demo_venues(
-            creds.demo_venues(),
-            demo_ex.map(CostVenue::for_exchange),
-            demo_ex.and_then(|x| x.demo()).is_some_and(|d| d.real_prices),
-        );
+        e.set_demo_venues(creds.demo_venues(), creds.crypto_demo_venue(), creds.crypto_demo_real_prices());
         // A headless instance that only runs lab books (the VPS) pauses the
         // built-in indicator strategies, which would otherwise hold the same
         // coins and block the lab book from running its portfolio.
@@ -400,6 +429,15 @@ async fn main() {
         creds,
     };
 
+    // Crypto demo on the Alpaca paper account: which coins Alpaca lists, read
+    // before the first tick (at most 20 s) so no demo order goes out for a
+    // coin Alpaca does not have, then once a day.
+    if state.creds.crypto_demo_on_alpaca() {
+        let wait = tokio::time::timeout(Duration::from_secs(20), read_crypto_demo_listing(&state))
+            .await
+            .unwrap_or(Duration::from_secs(600));
+        tokio::spawn(crypto_demo_listing_loop(state.clone(), wait));
+    }
     // The engine daemon — the network analog of the desktop tick loop.
     tokio::spawn(tick_loop(state.clone()));
     // Crypto quotes, candles and books with failover across venues, on their
@@ -1522,6 +1560,49 @@ async fn post_llm_signal(Json(req): Json<LlmReq>) -> impl IntoResponse {
 mod tests {
     use super::*;
     use pythia_core::engine::StrategyKind;
+
+    fn creds(vars: &[(&str, &str)]) -> Credentials {
+        let map: std::collections::HashMap<String, String> =
+            vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        credentials_from(&move |k: &str| map.get(k).cloned())
+    }
+
+    #[test]
+    fn demo_exchange_alpaca_routes_crypto_demo_to_the_alpaca_paper_account() {
+        let paper = [("APCA_API_KEY_ID", "PK"), ("APCA_API_SECRET_KEY", "PS")];
+        let c = creds(&[paper[0], paper[1], ("PYTHIA_DEMO_EXCHANGE", "alpaca")]);
+        assert!(c.crypto_demo_on_alpaca());
+        assert_eq!(c.crypto_demo_venue(), Some(CostVenue::Alpaca));
+        assert!(c.demo_venues().contains(&Venue::Crypto));
+        let conn = c.connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap();
+        assert_eq!(conn.label(), "Alpaca (paper)");
+        // What the engine is told at startup: crypto demo shown as Alpaca.
+        let mut e = Engine::new();
+        e.set_demo_venues(c.demo_venues(), c.crypto_demo_venue(), c.crypto_demo_real_prices());
+        let live = e.state().live;
+        assert!(live.demo_venues.contains(&Venue::Crypto));
+        assert_eq!(live.demo_exchange, Some(CostVenue::Alpaca));
+
+        // Only the live pair: no crypto demo route, never the live keys.
+        let c = creds(&[("APCA_LIVE_API_KEY_ID", "LK"), ("APCA_LIVE_API_SECRET_KEY", "LS"), ("PYTHIA_DEMO_EXCHANGE", "alpaca")]);
+        assert!(c.connector_env(Venue::Crypto, Environment::Demo, false, false).is_err());
+        assert!(!c.demo_venues().contains(&Venue::Crypto));
+
+        // A real demo exchange with its keys: behaviour as before.
+        let c = creds(&[
+            paper[0],
+            paper[1],
+            ("PYTHIA_DEMO_EXCHANGE", "bybit"),
+            ("PYTHIA_DEMO_EXCHANGE_KEY", "DK"),
+            ("PYTHIA_DEMO_EXCHANGE_SECRET", "DS"),
+        ]);
+        assert!(!c.crypto_demo_on_alpaca());
+        assert_eq!(c.crypto_demo_venue(), Some(CostVenue::Bybit));
+        assert_eq!(c.connector_env(Venue::Crypto, Environment::Demo, false, false).unwrap().label(), "Bybit (demo)");
+
+        // Unset: no crypto demo route at all.
+        assert!(!creds(&paper).demo_venues().contains(&Venue::Crypto));
+    }
 
     fn with_lab_book() -> Engine {
         let mut e = Engine::new();

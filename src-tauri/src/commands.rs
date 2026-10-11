@@ -87,6 +87,10 @@ fn credentials_from_vault() -> Credentials {
         alpaca_live,
         exchange,
         exchange_demo,
+        // Crypto demo on the Alpaca paper account is a backend option for
+        // now (PYTHIA_DEMO_EXCHANGE=alpaca): it needs the daily crypto list
+        // that only the server reads.
+        crypto_demo_alpaca: false,
         alpaca_slippage_bps: None,
         alpaca_allow_shorts: flag(&alpaca_fields, "allowShorts"),
     }
