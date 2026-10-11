@@ -754,9 +754,10 @@ impl Evidence {
     }
 }
 
-fn usd(x: f64) -> String {
-    let neg = x < 0.0;
+pub(super) fn usd(x: f64) -> String {
     let cents = (x.abs() * 100.0).round() as u128;
+    // A loss that rounds to nothing is "$0.00", not "-$0.00".
+    let neg = x < 0.0 && cents > 0;
     let (whole, frac) = (cents / 100, cents % 100);
     let digits = whole.to_string();
     let mut grouped = String::new();
@@ -773,7 +774,9 @@ fn signed_usd(x: f64) -> String {
     if x >= 0.0 { format!("+{}", usd(x)) } else { usd(x) }
 }
 
-fn pct(x: f64) -> String {
+pub(super) fn pct(x: f64) -> String {
+    // Anything that rounds to zero is "0", never "-0".
+    let x = if x.abs() < 0.005 { 0.0 } else { x };
     let t = format!("{x:.2}");
     let t = t.trim_end_matches('0').trim_end_matches('.');
     t.to_string()
@@ -1002,12 +1005,24 @@ impl Engine {
             }
             None => return,
         };
+        // A late fill on an autopilot that stopped and left its positions open
+        // is handed out the same way: its P&L counted at the mark now, the
+        // position no longer its own. Kept, it would hold the autopilot open
+        // ("still closing") forever with nothing that ever closes it.
+        let hand_out = open_after && !self.autopilots[i].is_active() && !self.autopilots[i].flatten_at_stop;
+        let unreal = if hand_out {
+            self.positions.get(market).map(|p| (self.ap_mark(market, p.avg_price) - p.avg_price) * p.qty).unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let ap = &mut self.autopilots[i];
         let owner = ap.owned.get(market).cloned().unwrap_or_else(|| sid.to_string());
         let fee = fee.max(0.0);
         ap.realized += realized;
         ap.fees += fee;
-        let closed = realized != 0.0;
+        // A closed trade: P&L realised, or a position closed out entirely
+        // (a close at exactly its entry price realises nothing and is still a trade).
+        let closed = realized != 0.0 || (existed && !open_after);
         if closed {
             ap.trades += 1;
         }
@@ -1018,7 +1033,15 @@ impl Engine {
                 s.trades += 1;
             }
         }
-        if open_after {
+        if hand_out {
+            ap.released += unreal;
+            ap.owned.remove(market);
+            let msg = format!(
+                "{}: an order still at the venue filled after it stopped without closing its positions; the position is left open like the others and its P&L counted at its price now.",
+                ap.label()
+            );
+            self.log(JournalKind::Risk, msg, Some(owner), Some(market.to_string()));
+        } else if open_after {
             ap.owned.insert(market.to_string(), owner);
         } else {
             ap.owned.remove(market);
@@ -1119,6 +1142,9 @@ impl Engine {
         let Some(mut cv) = CostVenue::parse(&cfg.venue) else {
             return Err(format!("Unknown venue \"{}\". Use one from config/costs.json, for example kraken or alpaca.", cfg.venue));
         };
+        // Saved under its canonical id: the live cash check below adds up
+        // other autopilots by venue, and " Kraken" must be the same as "kraken".
+        cfg.venue = cv.id().to_string();
         let venue = engine_venue(cv);
         if cfg.mode == AutopilotMode::Demo && venue == Venue::Crypto {
             // Crypto demo orders go to the exchange whose demo keys are in
@@ -1267,7 +1293,7 @@ impl Engine {
             let committed: f64 = self
                 .autopilots
                 .iter()
-                .filter(|a| a.is_active() && a.config.mode == AutopilotMode::Live && a.config.venue == cfg.venue)
+                .filter(|a| a.is_active() && a.config.mode == AutopilotMode::Live && CostVenue::parse(&a.config.venue) == Some(cv))
                 .map(|a| a.start_capital)
                 .sum();
             let available = (free - committed).max(0.0);
@@ -1281,8 +1307,22 @@ impl Engine {
                 ));
             }
         } else if cfg.mode == AutopilotMode::Paper {
+            // Paper autopilots share the one paper account: what the active
+            // ones were given is not there to give again, or together they
+            // would trade more than the account holds.
             let paper = self.equity();
-            if cfg.capital_usd > paper + EPS {
+            let committed: f64 =
+                self.autopilots.iter().filter(|a| a.is_active() && a.config.mode == AutopilotMode::Paper).map(|a| a.start_capital).sum();
+            let available = (paper - committed).max(0.0);
+            if cfg.capital_usd > available + EPS {
+                if committed > 0.0 {
+                    return Err(format!(
+                        "The paper account holds {}, of which {} is already given to other paper autopilots, so {} is left for this one.",
+                        usd(paper),
+                        usd(committed),
+                        usd(available)
+                    ));
+                }
                 return Err(format!("The paper account holds {}; a paper autopilot cannot trade more than that.", usd(paper)));
             }
         }
@@ -1652,7 +1692,13 @@ impl Engine {
         }
         let eq = self.ap_equity(&self.autopilots[i]);
         let flatten = self.autopilots[i].config.flatten_on_stop;
-        {
+        // A stale price never raises the peak (and with it the trailing
+        // floor), locks in a profit or finishes on one: the last price of a
+        // dead feed, or of the moments before a restart, is not where the
+        // market is. The floor is still checked on it, so a loss rule never
+        // waits for a feed.
+        let marks_fresh = self.autopilots[i].owned.keys().all(|m| self.exit_price_stale(m, now).is_none());
+        if marks_fresh {
             let ap = &mut self.autopilots[i];
             if eq > ap.peak_equity {
                 ap.peak_equity = eq;
@@ -1665,7 +1711,7 @@ impl Engine {
 
         // Take profit.
         if let (Some(tp), Some(target)) = (stop.take_profit_pct, take_profit_target(&stop, x, self.autopilots[i].tp_steps)) {
-            if eq >= target - EPS {
+            if marks_fresh && eq >= target - EPS {
                 match stop.on_take_profit {
                     OnTakeProfit::Stop => {
                         let reason = format!("take profit of {} % reached (equity {}, target {})", pct(tp), usd(eq), usd(target));
