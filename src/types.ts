@@ -569,6 +569,64 @@ export interface LiveStatus {
   demoNotListed?: string[];
   /** Open positions opened by demo fills. */
   demoPositions?: number;
+  /**
+   * The last reconciliation of the Alpaca paper account against the demo
+   * book, per Alpaca pair, with the fees booked as estimates. Absent until
+   * it has run. Mirrors the Rust `DemoReconcile`.
+   */
+  demoReconcile?: DemoReconcile;
+  /** Demo routes waiting after a 403, as [venue, until epoch ms]. */
+  demoPaused?: [Venue, number][];
+}
+
+/** What one Alpaca pair came out as. Mirrors the Rust `PairStatus`. */
+export type PairStatus =
+  | "ok"
+  | "pending"
+  | "feeTaken"
+  | "corrected"
+  | "adopted"
+  | "strayOrder"
+  | "mismatch"
+  | "untracked";
+
+export interface PairCheck {
+  /** `BTC/USD`. */
+  symbol: string;
+  /** Pythia's markets holding it on the paper account. */
+  markets: string[];
+  pythia: number;
+  alpaca: number;
+  diff: number;
+  diffUsd: number;
+  status: PairStatus;
+  note: string;
+}
+
+/** A fee booked from Alpaca's published schedule because none was posted. */
+export interface EstimatedFee {
+  orderId: string;
+  marketId: string;
+  symbol: string;
+  side: "buy" | "sell";
+  strategyId: string;
+  notional: number;
+  rateBps: number;
+  usd: number;
+  ts: number;
+  paper: boolean;
+}
+
+export interface DemoReconcile {
+  /** Epoch ms; 0 when it never completed. */
+  checkedAt: number;
+  pairs: PairCheck[];
+  mismatches: number;
+  openOrders: number;
+  strayOrders: string[];
+  error?: string;
+  failedAt?: number;
+  estimatedFees: EstimatedFee[];
 }
 
 /** What the arm flow sends. Mirrors the Rust `LiveConfig`. */

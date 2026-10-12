@@ -263,6 +263,19 @@ async fn read_crypto_demo_listing(state: &AppState) -> Duration {
     }
 }
 
+/// Reconciles the Alpaca paper account against the demo book shortly after
+/// startup (once the first ticks have polled the orders restored from the
+/// save) and then every ten minutes, while demo orders go there. See
+/// `pythia_core::engine::demo_reconcile`.
+async fn demo_reconcile_loop(state: AppState) {
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    let every = Duration::from_millis(pythia_core::engine::demo_reconcile::DEMO_RECONCILE_EVERY_MS as u64);
+    loop {
+        execution::reconcile_demo(&state.engine, &state.creds).await;
+        tokio::time::sleep(every).await;
+    }
+}
+
 /// The append-only record of real fills: `PYTHIA_FILLS_FILE`, else
 /// `fills.jsonl` next to the state file, else in the working directory.
 fn fills_file() -> std::path::PathBuf {
@@ -446,6 +459,11 @@ async fn main() {
             .await
             .unwrap_or(Duration::from_secs(600));
         tokio::spawn(crypto_demo_listing_loop(state.clone(), wait));
+    }
+    // The Alpaca paper account against the demo book, at startup and every
+    // ten minutes, while demo orders go there.
+    if state.creds.crypto_demo_on_alpaca() || state.creds.demo_venues().contains(&Venue::Alpaca) {
+        tokio::spawn(demo_reconcile_loop(state.clone()));
     }
     // The engine daemon — the network analog of the desktop tick loop.
     tokio::spawn(tick_loop(state.clone()));

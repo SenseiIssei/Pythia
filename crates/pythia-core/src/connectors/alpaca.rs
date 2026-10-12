@@ -39,6 +39,7 @@
 //!
 //! Fails closed without a configured key id/secret.
 
+use super::alpaca_crypto::{self, CryptoRules, OpenOrder, QtyFit};
 use super::{
     num, num_or0, Balance, BrokerOrder, BrokerOrderStatus, BrokerPosition, ConnectorError,
     MarketConnector, OrderRequest, OrderType, Side, Venue,
@@ -247,7 +248,7 @@ impl CalendarDay {
 }
 
 /// `GET /v2/assets/{symbol}` — the subset that decides whether an order is legal.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct AssetInfo {
     #[serde(default)]
     status: String,
@@ -259,11 +260,30 @@ struct AssetInfo {
     shortable: bool,
     #[serde(default)]
     class: String, // "us_equity" | "crypto"
+    /// Crypto size rules, as Alpaca sends them (strings). See [`CryptoRules`].
+    #[serde(default)]
+    min_order_size: Option<Value>,
+    #[serde(default)]
+    min_trade_increment: Option<Value>,
+    #[serde(default)]
+    price_increment: Option<Value>,
 }
 
 impl AssetInfo {
     fn is_crypto(&self) -> bool {
         self.class == "crypto"
+    }
+
+    /// The crypto size rules, when the asset carries them.
+    fn rules(&self) -> Option<CryptoRules> {
+        if !self.is_crypto() {
+            return None;
+        }
+        CryptoRules::from_asset(&serde_json::json!({
+            "min_order_size": self.min_order_size,
+            "min_trade_increment": self.min_trade_increment,
+            "price_increment": self.price_increment,
+        }))
     }
 }
 
@@ -299,6 +319,9 @@ pub struct AlpacaOrder {
     pub reduce_only: bool,
     /// Alpaca's own crypto book: 24/7, GTC, never an extended-hours order.
     pub crypto: bool,
+    /// The asset's crypto size rules, when known: the quantity and a limit
+    /// price are written on their steps (see [`CryptoRules`]).
+    pub rules: Option<CryptoRules>,
 }
 
 impl AlpacaConnector {
@@ -380,11 +403,16 @@ impl AlpacaConnector {
         let code = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
         if !(200..300).contains(&code) {
+            let text = body.trim();
             return Err(match code {
+                // Alpaca answers an order it refuses for the balance or as a
+                // wash trade with 403 too. That is the order, not the keys.
+                403 if refusal_403(text) => ConnectorError::Rejected(format!("{what} {code}: {text}")),
                 401 | 403 => ConnectorError::Auth(format!(
                     "HTTP {code} on {what}: are these {} keys? Paper and live accounts have separate key pairs; \
-                     check they are saved in the right slot",
-                    if self.paper_endpoint { "paper" } else { "live" }
+                     check they are saved in the right slot{}",
+                    if self.paper_endpoint { "paper" } else { "live" },
+                    if text.is_empty() { String::new() } else { format!(" (Alpaca says: {text})") }
                 )),
                 429 => ConnectorError::Network(format!("rate limited on {what}")),
                 500..=599 => ConnectorError::Network(format!("Alpaca {code} on {what}")),
@@ -553,15 +581,28 @@ impl AlpacaConnector {
             body["client_order_id"] = serde_json::json!(o.client_order_id);
         }
         match o.sizing {
+            // Crypto: up to 9 decimals, on the asset's step, rounded down.
+            Sizing::Shares(q) if o.crypto => {
+                let q = match &o.rules {
+                    Some(r) => r.format_qty(q),
+                    None => alpaca_crypto::format_qty_plain(q),
+                };
+                body["qty"] = serde_json::json!(q)
+            }
             Sizing::Shares(q) => body["qty"] = serde_json::json!(format!("{q:.6}")),
             Sizing::Notional(n) => body["notional"] = serde_json::json!(format!("{n:.2}")),
         }
 
         // An explicit limit from the execution policy is honoured as-is: it is
-        // the whole point of resting an order inside the spread.
+        // the whole point of resting an order inside the spread. A crypto
+        // limit sits on the asset's price step (a PEPE limit is not "0.00").
         if let Some(limit) = o.limit_price.filter(|l| *l > 0.0) {
             body["type"] = serde_json::json!("limit");
-            body["limit_price"] = serde_json::json!(format!("{limit:.2}"));
+            body["limit_price"] = serde_json::json!(match (&o.rules, o.crypto) {
+                (Some(r), true) => r.format_price(r.round_price(limit, o.side)),
+                (None, true) => format!("{limit:.9}").trim_end_matches('0').trim_end_matches('.').to_string(),
+                _ => format!("{limit:.2}"),
+            });
             if extended {
                 body["extended_hours"] = serde_json::json!(true);
             }
@@ -733,6 +774,19 @@ pub fn within_crypto_fee(wanted: f64, held: f64) -> bool {
     held > 0.0 && wanted > held && wanted - held <= wanted * CRYPTO_FEE_MAX_BPS / 10_000.0 * 1.01 + 2e-9
 }
 
+/// The sentence a crypto order below the asset's minimum is skipped with.
+/// [`alpaca_crypto::classify_reject`] reads it as `BelowMinimum`.
+pub fn below_minimum(qty: f64, symbol: &str, min: f64) -> String {
+    format!("{} {symbol} is below Alpaca's minimum order size of {}; not sent", alpaca_crypto::format_qty_plain(qty), alpaca_crypto::format_qty_plain(min))
+}
+
+/// A 403 body that refuses the order rather than the keys: not enough
+/// balance (cash, buying power, coins) or a wash trade.
+fn refusal_403(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    b.contains("insufficient") || b.contains("wash trade")
+}
+
 /// One crypto fee Alpaca posted to the account.
 ///
 /// How Alpaca charges it, per <https://docs.alpaca.markets/docs/crypto-trading>
@@ -844,13 +898,19 @@ impl MarketConnector for AlpacaConnector {
     /// Alpaca takes up to 9 decimals on fractionable symbols. Anything below
     /// ~0.0001 share is worth less than the rounding and gets dropped.
     fn round_qty(&self, qty: f64, symbol: &str) -> f64 {
-        let fractionable = self
-            .asset_cache
-            .lock()
-            .unwrap()
-            .get(symbol)
-            .map(|(_, a)| a.fractionable || a.is_crypto())
-            .unwrap_or(true);
+        let cached = self.asset_cache.lock().unwrap().get(symbol).map(|(_, a)| a.clone());
+        // Crypto: the asset's step and minimum when known, else 9 decimals
+        // down. Preflight holds the minimum against a fresh read either way.
+        if let Some(rules) = cached.as_ref().and_then(AssetInfo::rules) {
+            return match rules.fit_qty(qty) {
+                QtyFit::Ok(q) => q,
+                QtyFit::BelowMinimum { .. } => 0.0,
+            };
+        }
+        if cached.as_ref().map(AssetInfo::is_crypto).unwrap_or_else(|| symbol.contains('/')) {
+            return alpaca_crypto::floor_to(qty, 0.0, alpaca_crypto::MAX_DECIMALS);
+        }
+        let fractionable = cached.map(|a| a.fractionable).unwrap_or(true);
         if fractionable {
             let r = (qty * 1e6).trunc() / 1e6;
             if r < 1e-4 {
@@ -881,6 +941,14 @@ impl MarketConnector for AlpacaConnector {
                 "{} is not tradable at Alpaca (status {})",
                 req.symbol, asset.status
             )));
+        }
+
+        // A crypto order below the asset's minimum, once on its step, would be
+        // refused: say so here instead.
+        if let Some(rules) = asset.rules() {
+            if let QtyFit::BelowMinimum { qty, min } = rules.fit_qty(req.qty) {
+                return Err(ConnectorError::Preflight(below_minimum(qty, &req.symbol, min)));
+            }
         }
 
         // Equities respect the session clock; Alpaca crypto is 24/7.
@@ -951,6 +1019,7 @@ impl MarketConnector for AlpacaConnector {
     async fn submit_order(&self, req: OrderRequest) -> Result<BrokerOrder, ConnectorError> {
         let asset = self.asset(&req.symbol).await.ok();
         let crypto = asset.as_ref().map(AssetInfo::is_crypto).unwrap_or_else(|| req.symbol.contains('/'));
+        let rules = asset.as_ref().and_then(AssetInfo::rules);
         let fractionable = asset.as_ref().map(|a| a.fractionable).unwrap_or(true);
         let ref_price = req.ref_price.or(req.limit_price).unwrap_or(0.0);
         let limit_price = if req.order_type == OrderType::Limit { req.limit_price } else { None };
@@ -963,9 +1032,23 @@ impl MarketConnector for AlpacaConnector {
         if crypto && req.reduce_only && req.side == Side::Sell {
             let held = self.position_qty(&req.symbol).await?;
             if within_crypto_fee(req.qty, held) {
-                // Down to the 6 decimals the body is written with, so the
-                // rounding can never ask for more than is there.
-                req.qty = (held * 1e6).floor() / 1e6;
+                // Down to the step the body is written with, so the rounding
+                // can never ask for more than is there.
+                req.qty = match &rules {
+                    Some(r) => r.floor_qty(held),
+                    None => alpaca_crypto::floor_to(held, 0.0, alpaca_crypto::MAX_DECIMALS),
+                };
+            }
+        }
+        // On the asset's step, rounded down; below its minimum it is never sent.
+        if crypto {
+            if let Some(r) = &rules {
+                match r.fit_qty(req.qty) {
+                    QtyFit::Ok(q) => req.qty = q,
+                    QtyFit::BelowMinimum { qty, min } => {
+                        return Err(ConnectorError::Preflight(below_minimum(qty, &req.symbol, min)));
+                    }
+                }
             }
         }
 
@@ -990,6 +1073,7 @@ impl MarketConnector for AlpacaConnector {
             client_order_id: req.client_order_id.clone().unwrap_or_default(),
             reduce_only: req.reduce_only,
             crypto,
+            rules,
         };
         self.submit(&order).await
     }
@@ -1138,6 +1222,27 @@ pub fn parse_tradable_usd_pairs(v: &Value) -> BTreeSet<String> {
 }
 
 impl AlpacaConnector {
+    /// The crypto orders open on this account: `GET /v2/orders?status=open`
+    /// (<https://docs.alpaca.markets/reference/getallorders-1>), up to the
+    /// documented maximum of 500. Read-only.
+    pub async fn open_crypto_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError> {
+        let v = self
+            .send(self.req(reqwest::Method::GET, "/v2/orders?status=open&limit=500&direction=asc")?, "open orders")
+            .await?;
+        Ok(alpaca_crypto::parse_open_orders(&v))
+    }
+
+    /// The crypto positions on this account, in the pair form. Read-only.
+    pub async fn crypto_positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
+        Ok(self.positions().await?.into_iter().filter(|p| p.symbol.contains('/')).collect())
+    }
+
+    /// A crypto pair's size rules (`GET /v2/assets/{symbol}`), cached for an
+    /// hour. `None` for an asset that publishes none.
+    pub async fn crypto_rules(&self, pair: &str) -> Result<Option<CryptoRules>, ConnectorError> {
+        Ok(self.asset(pair).await?.rules())
+    }
+
     /// The crypto pairs this account can trade in dollars right now:
     /// `GET /v2/assets?asset_class=crypto&status=active`
     /// (<https://docs.alpaca.markets/reference/get-v2-assets-1>). Read-only.
@@ -1360,6 +1465,7 @@ mod tests {
             client_order_id: "pythia-test-1".into(),
             reduce_only: false,
             crypto: false,
+            rules: None,
         }
     }
 
@@ -1560,7 +1666,7 @@ mod tests {
             "BRK.A".into(),
             (
                 now_ms(),
-                AssetInfo { status: "active".into(), tradable: true, fractionable: false, shortable: false, class: "us_equity".into() },
+                AssetInfo { status: "active".into(), tradable: true, fractionable: false, shortable: false, class: "us_equity".into(), ..Default::default() },
             ),
         );
         assert_eq!(c.round_qty(3.9, "BRK.A"), 3.0, "non-fractionable → whole shares");
@@ -1756,5 +1862,81 @@ mod tests {
 
         let inactive = AlpacaAccount { status: "ONBOARDING".into(), ..base };
         assert!(inactive.is_restricted().unwrap().contains("ONBOARDING"));
+    }
+
+    // ── crypto size rules on the wire ──
+
+    fn pepe_asset() -> AssetInfo {
+        serde_json::from_str(
+            r#"{"status":"active","tradable":true,"fractionable":true,"class":"crypto",
+                "min_order_size":"1000","min_trade_increment":"1","price_increment":"0.000000001"}"#,
+        )
+        .unwrap()
+    }
+
+    fn btc_asset() -> AssetInfo {
+        serde_json::from_str(
+            r#"{"status":"active","tradable":true,"fractionable":true,"class":"crypto",
+                "min_order_size":"0.0001","min_trade_increment":"0.000000001","price_increment":"1"}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_crypto_order_body_carries_up_to_nine_decimals_on_the_assets_step() {
+        let c = conn();
+        let btc = AlpacaOrder {
+            symbol: "BTC/USD".into(),
+            sizing: Sizing::Shares(0.0074719999),
+            crypto: true,
+            rules: btc_asset().rules(),
+            ..order(Side::Buy, Sizing::Shares(0.0))
+        };
+        let body = c.order_body_for(&btc, false);
+        assert_eq!(body["qty"], "0.007471999", "9 decimals, rounded down, not 6");
+        assert_eq!(body["time_in_force"], "gtc");
+
+        // PEPE in whole coins, and a limit price that is not "0.00".
+        let pepe = AlpacaOrder {
+            symbol: "PEPE/USD".into(),
+            sizing: Sizing::Shares(49_452_471.482889),
+            limit_price: Some(0.0000123456789),
+            crypto: true,
+            rules: pepe_asset().rules(),
+            ..order(Side::Buy, Sizing::Shares(0.0))
+        };
+        let body = c.order_body_for(&pepe, false);
+        assert_eq!(body["qty"], "49452471");
+        assert_eq!(body["limit_price"], "0.000012345");
+
+        // Without rules: 9 decimals down, never rounded up.
+        let plain = AlpacaOrder { rules: None, ..btc };
+        assert_eq!(c.order_body_for(&plain, false)["qty"], "0.007471999");
+    }
+
+    #[test]
+    fn round_qty_follows_the_cached_rules_and_drops_what_is_below_the_minimum() {
+        let c = conn();
+        // Unknown asset: 9 decimals down, nothing dropped (preflight checks the minimum).
+        assert_eq!(c.round_qty(0.00005, "BTC/USD"), 0.00005);
+        c.asset_cache.lock().unwrap().insert("BTC/USD".into(), (now_ms(), btc_asset()));
+        c.asset_cache.lock().unwrap().insert("PEPE/USD".into(), (now_ms(), pepe_asset()));
+        assert_eq!(c.round_qty(0.00005, "BTC/USD"), 0.0, "below 0.0001 BTC: too small to send");
+        assert_eq!(c.round_qty(0.0074719999, "BTC/USD"), 0.007471999);
+        assert_eq!(c.round_qty(49_452_471.482889, "PEPE/USD"), 49_452_471.0);
+        assert_eq!(c.round_qty(999.0, "PEPE/USD"), 0.0);
+        // Equities as before.
+        assert_eq!(c.round_qty(1.23456789, "AAPL"), 1.234567);
+    }
+
+    #[test]
+    fn a_403_for_the_balance_or_a_wash_trade_is_a_refusal_not_a_key_problem() {
+        assert!(refusal_403(r#"{"code":40310000,"message":"insufficient balance for USD (requested: 1000, available: 12.5)"}"#));
+        assert!(refusal_403(r#"{"message":"potential wash trade detected. use complex orders"}"#));
+        assert!(!refusal_403(r#"{"message":"forbidden."}"#));
+        assert!(!refusal_403(""));
+        let msg = below_minimum(0.00005, "BTC/USD", 0.0001);
+        assert_eq!(msg, "0.00005 BTC/USD is below Alpaca's minimum order size of 0.0001; not sent");
+        assert_eq!(alpaca_crypto::classify_reject(&msg), alpaca_crypto::RejectKind::BelowMinimum);
     }
 }

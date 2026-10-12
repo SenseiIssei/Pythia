@@ -6,6 +6,9 @@
 pub mod alpaca_fees;
 #[cfg(test)]
 mod alpaca_fees_tests;
+pub mod demo_reconcile;
+#[cfg(test)]
+mod demo_reconcile_tests;
 pub mod autopilot;
 #[cfg(test)]
 mod autopilot_tests;
@@ -20,6 +23,7 @@ mod risk_engine_tests;
 mod seam_tests;
 pub mod strategies;
 
+use crate::connectors::alpaca_crypto::{classify_reject, RejectKind};
 use crate::connectors::{BrokerOrder, BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
 use crate::costs::{self, CostModel, CostVenue};
 use crate::execution::bandit;
@@ -554,6 +558,14 @@ pub struct LiveStatus {
     /// Open positions opened by demo fills.
     #[serde(default)]
     pub demo_positions: usize,
+    /// The last reconciliation of the Alpaca paper account against the
+    /// demo book, with the fees booked as estimates. Absent until it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demo_reconcile: Option<demo_reconcile::DemoReconcile>,
+    /// Until when the demo route to a venue waits after a 403 (epoch ms), by
+    /// venue. Empty when nothing waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub demo_paused: Vec<(Venue, i64)>,
 }
 
 /// Why an order is being routed — and therefore what is allowed to happen to it
@@ -931,6 +943,11 @@ pub struct EngineState {
     pub autopilots: Vec<autopilot::AutopilotStatus>,
 }
 
+/// The key a route's backoff is kept under: `demo:Crypto`, `live:Alpaca`.
+fn route_key(venue: Venue, demo: bool) -> String {
+    format!("{}:{venue:?}", if demo { "demo" } else { "live" })
+}
+
 fn default_crypto_venue() -> CostVenue {
     CostVenue::Kraken
 }
@@ -1039,6 +1056,9 @@ pub struct Persisted {
     pub alpaca_fees: Vec<alpaca_fees::AlpacaFeeWatch>,
     #[serde(default)]
     pub alpaca_fee_seen: Vec<(String, i64)>,
+    /// Alpaca crypto fees booked as estimates (see [`alpaca_fees::EstimatedFee`]).
+    #[serde(default)]
+    pub alpaca_fee_estimates: Vec<alpaca_fees::EstimatedFee>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -1137,6 +1157,22 @@ pub struct Engine {
     /// every few seconds while the condition holds; without this, a closed market
     /// produces one identical rejection per tick until it opens.
     live_backoff_until: HashMap<String, i64>,
+    /// Per-route backoff (`demo:Crypto`, `live:Alpaca`) after a refusal that
+    /// is about the route, not the market: a 403 on the keys or the account.
+    /// Every market on it waits. See [`crate::connectors::alpaca_crypto::RejectKind`].
+    route_backoff_until: HashMap<String, i64>,
+    /// When a classified refusal was last journaled, per market and kind (or
+    /// per route), and how many like it were kept quiet since.
+    reject_noted: HashMap<String, (i64, u32)>,
+    /// The last reconciliation of the Alpaca paper account against the
+    /// demo book (see [`demo_reconcile`]). Not saved: the next run rebuilds it.
+    demo_reconcile: Option<demo_reconcile::DemoReconcile>,
+    /// What each pair's last journaled reconciliation said, so the same
+    /// mismatch is journaled once, not every ten minutes.
+    demo_reconcile_noted: HashMap<String, String>,
+    /// Alpaca crypto fees booked from the published schedule because Alpaca
+    /// never posted them (see [`alpaca_fees`]), newest last.
+    alpaca_fee_estimates: Vec<alpaca_fees::EstimatedFee>,
     /// Feeds we have already announced, so the journal is not a 12-second
     /// heartbeat with the occasional fill hidden in it.
     feeds_logged: HashSet<&'static str>,
@@ -1279,6 +1315,11 @@ impl Engine {
             in_flight_markets: HashSet::new(),
             live_warned_at: HashMap::new(),
             live_backoff_until: HashMap::new(),
+            route_backoff_until: HashMap::new(),
+            reject_noted: HashMap::new(),
+            demo_reconcile: None,
+            demo_reconcile_noted: HashMap::new(),
+            alpaca_fee_estimates: Vec::new(),
             feeds_logged: HashSet::new(),
             forecast_cfg: forecast::ForecastConfig::default(),
             forecast_store: track::ForecastStore::default(),
@@ -3149,7 +3190,7 @@ impl Engine {
         // Still backing off from a refusal (market closed, no buying power).
         // Re-sending the identical order every tick would achieve nothing except
         // an unreadable journal.
-        if self.live_backoff_until.get(&m.id).is_some_and(|&until| self.now() < until) {
+        if self.backing_off(m, demo) {
             return;
         }
         if demo {
@@ -3544,7 +3585,7 @@ impl Engine {
             if self.in_flight_markets.contains(&m.id) {
                 return Err(format!("{} already has an order in flight", m.symbol));
             }
-            if self.live_backoff_until.get(&m.id).is_some_and(|&until| self.now() < until) {
+            if self.backing_off(&m, true) {
                 return Err(format!("{} was refused by the venue a moment ago; backing off", m.symbol));
             }
         }
@@ -4366,11 +4407,28 @@ impl Engine {
 
     /// The order never reached the venue (dry-run, missing keys, preflight
     /// refusal, network failure). Nothing is resting anywhere, so we can drop it.
+    ///
+    /// What the refusal means decides how long the market (or, for a 403 on
+    /// the keys, the whole route) waits, and whether the journal hears about
+    /// it again: see [`RejectKind`]. A refusal of a kind already journaled
+    /// for this market inside its quiet window is counted, not repeated, so a
+    /// signal that fires on every tick cannot become a retry storm in the
+    /// journal any more than at the venue.
     pub fn apply_live_reject(&mut self, order_id: &str, reason: &str) {
+        let now = self.now();
+        let kind = classify_reject(reason);
         let f = self.inflight.remove(order_id);
         if let Some(f) = &f {
             self.in_flight_markets.remove(&f.market_id);
-            self.live_backoff_until.insert(f.market_id.clone(), self.now() + LIVE_REJECT_BACKOFF_MS);
+            let backoff = if kind == RejectKind::Other { LIVE_REJECT_BACKOFF_MS } else { kind.backoff_ms() };
+            self.live_backoff_until.insert(f.market_id.clone(), now + backoff);
+            if kind.whole_route() {
+                // Set once: an order skipped because of the pause must not stretch it.
+                let key = route_key(f.venue, f.demo);
+                if self.route_backoff_until.get(&key).is_none_or(|&until| now >= until) {
+                    self.route_backoff_until.insert(key, now + backoff);
+                }
+            }
         }
         if let Some(ord) = self.orders.iter_mut().find(|x| x.id == order_id) {
             ord.status = OrderStatus::Rejected;
@@ -4378,12 +4436,51 @@ impl Engine {
         }
         let symbol = f.as_ref().map(|f| f.symbol.clone()).unwrap_or_default();
         let what = if f.as_ref().is_some_and(|f| f.demo) { "DEMO" } else { "LIVE" };
+        let mut tail = String::new();
+        if kind != RejectKind::Other {
+            let key = match &f {
+                Some(f) if kind.whole_route() => route_key(f.venue, f.demo),
+                Some(f) => format!("{}|{kind:?}", f.market_id),
+                None => format!("{order_id}|{kind:?}"),
+            };
+            if let Some((at, quiet)) = self.reject_noted.get_mut(&key) {
+                if now - *at < kind.quiet_ms() {
+                    *quiet += 1;
+                    return;
+                }
+                if *quiet > 0 {
+                    tail = format!("; {} more like it since the last note", *quiet);
+                }
+            }
+            self.reject_noted.insert(key, (now, 0));
+            let mins = kind.backoff_ms() / 60_000;
+            let scope = if kind.whole_route() { "every market on this route" } else { "this market" };
+            tail = format!(" [{}: {scope} waits {mins} min{tail}]", kind.label());
+            if kind.whole_route() {
+                self.pending_alerts.push(format!("⚠ {what} route refused with {}: {reason}", kind.label()));
+            }
+        }
         self.log(
             JournalKind::Reject,
-            format!("{what} order not sent{}: {reason}", if symbol.is_empty() { String::new() } else { format!(" ({symbol})") }),
+            format!("{what} order not sent{}: {reason}{tail}", if symbol.is_empty() { String::new() } else { format!(" ({symbol})") }),
             f.as_ref().map(|f| f.strategy_id.clone()),
             f.as_ref().map(|f| f.market_id.clone()),
         );
+        self.reject_noted.retain(|_, (at, _)| now - *at < 24 * 3_600_000);
+    }
+
+    /// A market (or its whole route) is still waiting after a refusal.
+    fn backing_off(&self, m: &Market, demo: bool) -> bool {
+        let now = self.now();
+        self.live_backoff_until.get(&m.id).is_some_and(|&until| now < until)
+            || self.route_backoff_until.get(&route_key(m.venue, demo)).is_some_and(|&until| now < until)
+    }
+
+    /// Until when a whole route waits after a 403 on its keys or account,
+    /// if it does. The executor skips that route's queued orders without a
+    /// request while this holds.
+    pub fn route_paused_until(&self, venue: Venue, demo: bool) -> Option<i64> {
+        self.route_backoff_until.get(&route_key(venue, demo)).copied().filter(|&until| self.now() < until)
     }
 
     /// Reconcile against what the venue actually holds. The broker is always
@@ -4411,6 +4508,25 @@ impl Engine {
         let mut seen: HashSet<String> = HashSet::new();
         for bp in broker {
             let Some((market_id, price)) = known.get(&bp.symbol).cloned() else { continue };
+            // On the paper endpoint a crypto pair's position also holds the
+            // coins of the demo book on the same account (`crypto:BTC/USD`
+            // on the Alpaca demo route next to `alpaca:BTC/USD`): only the
+            // rest is the live arm's. See `demo_reconcile`.
+            let shared = if venue == Venue::Alpaca && self.live.paper && bp.symbol.contains('/') {
+                crate::connectors::alpaca::alpaca_crypto_pair(&bp.symbol).map(|pair| self.paper_demo_qty(&pair)).unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let own;
+            let bp = if shared != 0.0 {
+                own = BrokerPosition { qty: bp.qty - shared, ..bp.clone() };
+                if own.qty.abs() < 1e-9 {
+                    continue; // all of it is the demo book's
+                }
+                &own
+            } else {
+                bp
+            };
             seen.insert(market_id.clone());
             // An order still out in this market may already be (partly) in the
             // venue's position but not yet in our book. Setting the book to the
@@ -4556,6 +4672,11 @@ impl Engine {
             demo_real_prices: self.crypto_demo_real_prices,
             demo_not_listed: self.demo_not_listed_symbols(),
             demo_positions: self.positions.values().filter(|p| p.demo && p.qty.abs() > 1e-9).count(),
+            demo_reconcile: self.demo_reconcile_view(),
+            demo_paused: [Venue::Crypto, Venue::Alpaca]
+                .into_iter()
+                .filter_map(|v| self.route_paused_until(v, true).map(|t| (v, t)))
+                .collect(),
         }
     }
 
@@ -4654,6 +4775,16 @@ impl Engine {
         );
         self.place_manual(&m, Side::Buy, notional, RouteIntent::Demo);
         Ok(())
+    }
+
+    /// Tests outside the engine: every crypto price counts as real and fresh.
+    #[cfg(test)]
+    pub(crate) fn fresh_crypto_prices_for_test(&mut self) {
+        let now = self.now();
+        for m in self.markets.iter_mut().filter(|m| m.symbol.contains('/')) {
+            m.updated_at = now;
+            self.real_ids.insert(m.id.clone());
+        }
     }
 
     /// Engine-internal tests drive the live-routing machinery through this, now
@@ -5395,6 +5526,7 @@ impl Engine {
             autopilots: self.autopilots.clone(),
             alpaca_fees: self.alpaca_fees.clone(),
             alpaca_fee_seen: self.alpaca_fee_seen.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            alpaca_fee_estimates: self.alpaca_fee_estimates.clone(),
         }
     }
 
@@ -5596,6 +5728,7 @@ impl Engine {
         self.autopilots_after_restore();
         self.alpaca_fees = p.alpaca_fees;
         self.alpaca_fee_seen = p.alpaca_fee_seen.into_iter().collect();
+        self.alpaca_fee_estimates = p.alpaca_fee_estimates;
         if resolved > 0 {
             self.log(
                 JournalKind::System,

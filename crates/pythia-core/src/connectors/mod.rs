@@ -22,6 +22,7 @@
 //! the broker has actually reported. Positions can no longer drift.
 
 pub mod alpaca;
+pub mod alpaca_crypto;
 pub mod cex;
 pub mod paper;
 pub mod polymarket;
