@@ -13,6 +13,9 @@ pub mod composed;
 #[cfg(test)]
 mod feed_engine_tests;
 pub mod indicators;
+pub mod maker;
+#[cfg(test)]
+mod maker_tests;
 pub mod risk;
 #[cfg(test)]
 mod risk_engine_tests;
@@ -224,6 +227,20 @@ pub struct Order {
     /// the impact model.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub book_exhausted: bool,
+    /// Maker-route orders only (see [`maker`]): the quantity that filled
+    /// resting at our own limit, and the quantity that filled by crossing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker_qty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taker_qty: Option<f64>,
+    /// Maker-route orders: what the fills cost in bps of notional, slippage
+    /// against arrival plus the fee rate their maker and taker parts pay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realised_cost_bps: Option<f64>,
+    /// What the cost model charges the same order sent as a market order:
+    /// its modelled slippage plus the taker fee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modelled_cost_bps: Option<f64>,
 }
 
 fn paper_route() -> FillRoute {
@@ -554,6 +571,9 @@ pub struct LiveStatus {
     /// Open positions opened by demo fills.
     #[serde(default)]
     pub demo_positions: usize,
+    /// Maker execution per route, by route key ([`maker`]).
+    #[serde(default)]
+    pub maker_routes: std::collections::BTreeMap<String, maker::MakerSettings>,
 }
 
 /// Why an order is being routed — and therefore what is allowed to happen to it
@@ -616,6 +636,13 @@ pub struct LiveOrderOut {
     /// this flag alone; `paper` and `dry_run` belong to the live arm.
     #[serde(default)]
     pub demo: bool,
+    /// An exact limit chosen by the engine (a maker order resting at the
+    /// touch, or its marketable fallback). Wins over `style`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_price: Option<f64>,
+    /// Send the limit immediate-or-cancel (the maker fallback).
+    #[serde(default)]
+    pub ioc: bool,
 }
 
 // ── AI overlay ──────────────────────────────────────────────────────────────
@@ -846,6 +873,11 @@ pub struct InFlight {
     /// polling a broker id it does not have.
     #[serde(default)]
     lookup: bool,
+    /// Worked as a maker order on a maker route ([`maker`]): one or more
+    /// limit orders in turn, `broker_id` and `client_order_id` being the
+    /// current one's. `booked_*` above stay totals over all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maker: Option<maker::MakerWork>,
 }
 
 impl InFlight {
@@ -1039,6 +1071,10 @@ pub struct Persisted {
     pub alpaca_fees: Vec<alpaca_fees::AlpacaFeeWatch>,
     #[serde(default)]
     pub alpaca_fee_seen: Vec<(String, i64)>,
+    /// Maker execution per route. A save from before it existed gets the
+    /// defaults (on for the Alpaca crypto demo route only).
+    #[serde(default = "maker::default_maker_routes")]
+    pub maker_routes: std::collections::BTreeMap<String, maker::MakerSettings>,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -1203,6 +1239,16 @@ pub struct Engine {
     alpaca_fee_seen: HashMap<String, i64>,
     /// When the daemon was last told to read them. Not saved.
     alpaca_fee_polled: i64,
+    /// Maker execution per route ([`maker`]), by route key. Saved.
+    maker_routes: std::collections::BTreeMap<String, maker::MakerSettings>,
+    /// Open orders at the maker venue have been checked against the books
+    /// since this process started, and when that was last tried. Not saved:
+    /// every start checks again.
+    open_orders_checked: bool,
+    open_orders_tried_at: i64,
+    /// Set while an exit that must not wait (a stop, a target, a halt, a
+    /// flatten) is being routed: it never rests as a maker order.
+    urgent_exit: bool,
     /// Average entry per open position at reference prices (before execution
     /// costs), for the gross line. Missing means "same as the fill price".
     ref_prices: HashMap<String, f64>,
@@ -1304,6 +1350,10 @@ impl Engine {
             alpaca_fees: Vec::new(),
             alpaca_fee_seen: HashMap::new(),
             alpaca_fee_polled: 0,
+            maker_routes: maker::default_maker_routes(),
+            open_orders_checked: false,
+            open_orders_tried_at: 0,
+            urgent_exit: false,
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
             vol_spike: risk::VolSpikeGuard::default(),
@@ -2576,7 +2626,10 @@ impl Engine {
             .iter()
             .position(|s| s.id == sid)
             .unwrap_or_else(|| self.ensure_manual_strategy());
+        // A stop, a target or a halt never rests as a maker order.
+        self.urgent_exit = true;
         self.route_fill(idx, &m, side, qty, m.price, intent);
+        self.urgent_exit = false;
         // Only claim the exit happened if it actually did. A live exit that
         // could not route leaves the position open, and `route_fill` has
         // already explained why.
@@ -2766,6 +2819,7 @@ impl Engine {
             ref_price: Some(price),
             client_order_id: None,
             reduce_only: false,
+            ioc: false,
         };
         let ctx = self.risk_ctx(&m.id, &sid, price);
         let decision = risk::evaluate(&req, price, &self.limits, &ctx);
@@ -3142,8 +3196,13 @@ impl Engine {
         }
 
         // One live order per market at a time — never double-send while a prior
-        // order is still awaiting a broker response.
+        // order is still awaiting a broker response. An exit that must not
+        // wait asks a maker order resting there to stand down; the exit goes
+        // out once that order is done.
         if self.in_flight_markets.contains(&m.id) {
+            if self.urgent_exit {
+                self.maker_stand_down(&m.id, "an exit needs the market");
+            }
             return;
         }
         // Still backing off from a refusal (market closed, no buying power).
@@ -3237,14 +3296,27 @@ impl Engine {
         // Demo always crosses: its fills never teach the policy (a demo book
         // says little about how a resting order would do at the real venue),
         // so it must not spend the policy's exploration either.
-        let style = if demo { bandit::ExecStyle::Cross } else { self.exec_policy.choose(&exec_ctx) };
+        // A demo order on a maker route (the Alpaca crypto demo route by
+        // default) rests at the touch instead, and crosses only if that does
+        // not fill in time (see `maker`).
+        let mut maker_work = if demo { self.maker_plan(m, side) } else { None };
+        let style = if maker_work.is_some() {
+            bandit::ExecStyle::Join
+        } else if demo {
+            bandit::ExecStyle::Cross
+        } else {
+            self.exec_policy.choose(&exec_ctx)
+        };
         let patience_bps = self.exec_policy.patience_bps();
         // What the cost model expects this order to lose against arrival. A
         // resting order is not expected to pay the spread at all. A demo
-        // order is priced with the costs of the demo exchange.
+        // order is priced with the costs of the demo exchange. A maker order
+        // keeps the market order's model, so its realised cost reads against
+        // what crossing was expected to cost.
         let cost_venue = if demo { self.demo_cost_venue(m) } else { self.cost_venue(m) };
         let cost = self.exec_cost_at(m, side, cost_venue);
         let (modelled_bps, cost_source) = match style {
+            _ if maker_work.is_some() => (cost.slippage_bps(qty * price), cost.source),
             bandit::ExecStyle::Cross => (cost.slippage_bps(qty * price), cost.source),
             bandit::ExecStyle::Join | bandit::ExecStyle::Passive => (0.0, CostSource::Default),
         };
@@ -3254,8 +3326,16 @@ impl Engine {
         order.route = if demo || self.live.paper { FillRoute::Demo } else { FillRoute::Live };
         order.cost_source = Some(cost_source);
         order.drift_bps = drift_bps;
+        if let Some(w) = &maker_work {
+            order.order_type = OrderType::Limit;
+            order.limit_price = Some(w.limit);
+        }
         let order_id = order.id.clone();
         let client_order_id = format!("pythia-{}-{order_id}", self.boot_tag);
+        if let Some(w) = maker_work.as_mut() {
+            w.base_client_id = client_order_id.clone();
+            w.reduce_only = reduces;
+        }
         self.orders.insert(0, order);
         self.in_flight_markets.insert(m.id.clone());
         self.inflight.insert(
@@ -3286,6 +3366,7 @@ impl Engine {
                 demo,
                 drift_bps,
                 lookup: false,
+                maker: maker_work.clone(),
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -3310,11 +3391,17 @@ impl Engine {
                 && self.live.extended_hours
                 && self.broker.as_ref().map(|b| !b.market_open && b.extended_open).unwrap_or(false),
             demo,
+            limit_price: maker_work.as_ref().map(|w| w.limit),
+            ioc: false,
         });
         let dest = if demo { "DEMO" } else { self.live_dest() };
+        let how = match &maker_work {
+            Some(w) => format!(" as a maker limit at {} (best {} of the book)", w.limit, if side == Side::Buy { "bid" } else { "ask" }),
+            None => String::new(),
+        };
         self.log(
             JournalKind::Order,
-            format!("{dest} submit {side:?} {qty:.4} {} @ ~{price:.2}", m.symbol),
+            format!("{dest} submit {side:?} {qty:.4} {} @ ~{price:.2}{how}", m.symbol),
             Some(sid),
             Some(m.id.clone()),
         );
@@ -3561,6 +3648,7 @@ impl Engine {
             ref_price: Some(m.price),
             client_order_id: None,
             reduce_only: false,
+            ioc: false,
         };
         let ctx = self.risk_ctx(&m.id, strategy_id, m.price);
         let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
@@ -4039,6 +4127,9 @@ impl Engine {
         if let Some(f) = self.inflight.get_mut(order_id) {
             f.broker_id = Some(broker_id.to_string());
             f.submitted_at = chrono::Utc::now().timestamp_millis();
+            if let Some(w) = f.maker.as_mut() {
+                w.child_at = f.submitted_at;
+            }
         }
     }
 
@@ -4060,7 +4151,11 @@ impl Engine {
                     paper: f.paper,
                     demo: f.demo,
                     age_ms: age,
-                    cancel: age > timeout_ms && !f.cancel_sent,
+                    cancel: !f.cancel_sent
+                        && match &f.maker {
+                            Some(w) => w.cancel_due(now, age, timeout_ms),
+                            None => age > timeout_ms,
+                        },
                 })
             })
             .collect()
@@ -4109,6 +4204,9 @@ impl Engine {
     /// The demo venue has no order under that client id: it never arrived,
     /// so nothing filled and nothing is booked.
     pub fn apply_lookup_missing(&mut self, order_id: &str) {
+        if self.maker_child_missing(order_id) {
+            return;
+        }
         let Some(f) = self.inflight.get(order_id) else { return };
         let reason = format!(
             "never reached the demo venue: it has no order with client id {} after the restart. Nothing filled",
@@ -4121,6 +4219,9 @@ impl Engine {
     /// or no answer for too long). The order's fate stays unknown: its row is
     /// closed with the client id to look for in the demo account.
     pub fn apply_lookup_failed(&mut self, order_id: &str, why: &str) {
+        if self.maker_child_lost(order_id, why) {
+            return;
+        }
         let Some(f) = self.inflight.get(order_id) else { return };
         let reason = format!(
             "status unknown: Pythia restarted before the demo venue acknowledged it, and the lookup by client id {} failed ({why}). Check the demo account for it; a fill there is not in Pythia's books",
@@ -4159,6 +4260,15 @@ impl Engine {
     /// this safe to call repeatedly with the same numbers — a partial fill
     /// reported three times books once.
     pub fn apply_live_update(&mut self, order_id: &str, update: LiveUpdate) {
+        if self.inflight.get(order_id).is_some_and(|f| f.maker.is_some()) {
+            return self.apply_maker_update(order_id, update);
+        }
+        self.apply_order_update(order_id, update);
+    }
+
+    /// [`Engine::apply_live_update`] for one order as a whole: `update` is
+    /// cumulative over everything the order has filled.
+    fn apply_order_update(&mut self, order_id: &str, update: LiveUpdate) {
         let Some(f) = self.inflight.get(order_id).cloned() else { return };
         let delta = update.filled_qty - f.booked_qty;
         let (fee_total, _) = self.live_fee_value(&update);
@@ -4367,6 +4477,9 @@ impl Engine {
     /// The order never reached the venue (dry-run, missing keys, preflight
     /// refusal, network failure). Nothing is resting anywhere, so we can drop it.
     pub fn apply_live_reject(&mut self, order_id: &str, reason: &str) {
+        if self.maker_child_refused(order_id, reason) {
+            return;
+        }
         let f = self.inflight.remove(order_id);
         if let Some(f) = &f {
             self.in_flight_markets.remove(&f.market_id);
@@ -4556,6 +4669,7 @@ impl Engine {
             demo_real_prices: self.crypto_demo_real_prices,
             demo_not_listed: self.demo_not_listed_symbols(),
             demo_positions: self.positions.values().filter(|p| p.demo && p.qty.abs() > 1e-9).count(),
+            maker_routes: self.maker_routes.clone(),
         }
     }
 
@@ -4676,6 +4790,7 @@ impl Engine {
             ref_price: Some(m.price),
             client_order_id: None,
             reduce_only: false,
+            ioc: false,
         };
         let ctx = self.risk_ctx(&m.id, "manual", m.price);
         let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
@@ -4972,6 +5087,7 @@ impl Engine {
             ref_price: Some(m.price),
             client_order_id: None,
             reduce_only: side == Side::Sell,
+            ioc: false,
         };
         let ctx = self.risk_ctx(&m.id, &sid, m.price);
         let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
@@ -5003,7 +5119,9 @@ impl Engine {
         let intent = Self::exit_intent(pos); // and a demo one at the demo venue
         let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
         let idx = self.ensure_manual_strategy();
+        self.urgent_exit = true;
         self.route_fill(idx, &m, side, qty, m.price, intent);
+        self.urgent_exit = false;
         if !live || self.live_routable(m.venue) {
             self.log(JournalKind::System, format!("Flattened {market_id}"), Some("manual".into()), Some(market_id.to_string()));
         }
@@ -5395,6 +5513,7 @@ impl Engine {
             autopilots: self.autopilots.clone(),
             alpaca_fees: self.alpaca_fees.clone(),
             alpaca_fee_seen: self.alpaca_fee_seen.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            maker_routes: self.maker_routes.clone(),
         }
     }
 
@@ -5596,6 +5715,7 @@ impl Engine {
         self.autopilots_after_restore();
         self.alpaca_fees = p.alpaca_fees;
         self.alpaca_fee_seen = p.alpaca_fee_seen.into_iter().collect();
+        self.maker_routes = p.maker_routes;
         if resolved > 0 {
             self.log(
                 JournalKind::System,
@@ -5793,6 +5913,10 @@ impl Engine {
             cost_source: None,
             drift_bps: None,
             book_exhausted: false,
+            maker_qty: None,
+            taker_qty: None,
+            realised_cost_bps: None,
+            modelled_cost_bps: None,
         }
     }
     fn build_order_filled(&mut self, strategy_id: &str, m: &Market, side: Side, qty: f64, fill_price: f64) -> Order {

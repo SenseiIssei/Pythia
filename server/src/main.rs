@@ -35,6 +35,7 @@ use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
 use pythia_core::connectors::cex::{self, Exchange};
 use pythia_core::connectors::{Environment, Side, Venue};
 use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, VenueCash};
+use pythia_core::engine::maker::MakerSettings;
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, Engine, EngineState, LiveConfig, RiskLimits, StrategyConfig,
     StrategyState,
@@ -426,6 +427,15 @@ async fn main() {
             e.set_lab_books_idle(true);
             tracing::info!("PYTHIA_LAB_BOOKS=idle: lab books trade only inside an autopilot");
         }
+        // Maker execution on the Alpaca crypto demo route (on by default):
+        // PYTHIA_ALPACA_MAKER=off sends its orders as market orders again.
+        if let Some(on) = env_str("PYTHIA_ALPACA_MAKER").as_deref().and_then(parse_switch) {
+            let key = pythia_core::engine::maker::ALPACA_CRYPTO_DEMO;
+            let cur = e.maker_routes().get(key).copied().unwrap_or_default();
+            if let Err(err) = e.set_maker_route(key, MakerSettings { enabled: on, ..cur }) {
+                tracing::warn!("PYTHIA_ALPACA_MAKER not applied: {err}");
+            }
+        }
         // Costs follow the selected exchange even before its keys are set.
         e.set_crypto_cost_venue(
             env_str("PYTHIA_EXCHANGE").as_deref().and_then(Exchange::parse).map(CostVenue::for_exchange),
@@ -481,6 +491,7 @@ async fn main() {
         .route("/api/llm/signal", post(post_llm_signal))
         .route("/api/ai/config", post(post_ai_config))
         .route("/api/live/config", post(post_live_config))
+        .route("/api/live/maker", post(post_live_maker))
         .route("/api/live/account", get(get_live_account))
         .route("/api/live/verify", get(get_live_verify))
         .route("/api/live/diagnostics", get(get_live_diagnostics))
@@ -1245,6 +1256,36 @@ async fn get_llm_providers() -> impl IntoResponse {
     Json(llm::providers_from_env())
 }
 
+/// `on`/`off` and the usual spellings; anything else is not a switch.
+fn parse_switch(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "on" | "true" | "yes" => Some(true),
+        "0" | "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MakerRouteReq {
+    route: String,
+    settings: MakerSettings,
+}
+
+/// Change how one route works its orders: maker limits at the touch, or
+/// market orders (`docs/DEMO.md`). Orders already working keep theirs.
+async fn post_live_maker(State(st): State<AppState>, Json(req): Json<MakerRouteReq>) -> impl IntoResponse {
+    let dto = {
+        let mut e = st.engine.lock().unwrap();
+        if let Err(err) = e.set_maker_route(&req.route, req.settings) {
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+        e.state()
+    };
+    let _ = st.tx.send(serde_json::to_string(&dto).unwrap_or_default());
+    Json(dto).into_response()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiveConfigReq {
@@ -1707,5 +1748,21 @@ mod tests {
         assert_eq!(states(&e, true), vec![StrategyState::Paused]);
         autopilot_only_signal(&mut e);
         assert_eq!(states(&e, true), vec![StrategyState::Paused, StrategyState::Paused]);
+    }
+
+    #[test]
+    fn the_maker_switch_reads_the_usual_spellings_and_nothing_else() {
+        assert_eq!(parse_switch("off"), Some(false));
+        assert_eq!(parse_switch(" ON "), Some(true));
+        assert_eq!(parse_switch("0"), Some(false));
+        assert_eq!(parse_switch("maybe"), None);
+        let req: MakerRouteReq = serde_json::from_value(serde_json::json!({
+            "route": "demo:alpaca:crypto",
+            "settings": { "enabled": true, "restSec": 30, "maxTries": 2, "fallbackBandBps": 40 }
+        }))
+        .unwrap();
+        let mut e = Engine::new();
+        e.set_maker_route(&req.route, req.settings).unwrap();
+        assert_eq!(e.maker_routes()["demo:alpaca:crypto"].max_tries, 2);
     }
 }

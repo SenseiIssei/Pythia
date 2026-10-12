@@ -490,6 +490,7 @@ mod tests {
             ref_price: Some(60_000.0),
             client_order_id: Some("pythia-ab12-7".into()),
             reduce_only: false,
+            ioc: false,
         }
     }
 

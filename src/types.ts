@@ -73,6 +73,13 @@ export interface Order {
   driftBps?: number;
   /** A paper fill that outgrew the 20 book levels. */
   bookExhausted?: boolean;
+  /** Maker-route orders: quantity filled resting at our own limit, and by crossing. */
+  makerQty?: number;
+  takerQty?: number;
+  /** Maker-route orders: slippage against arrival plus the fee rate of the maker/taker mix, bps. */
+  realisedCostBps?: number;
+  /** What the cost model charges the same order as a market order (slippage plus taker fee), bps. */
+  modelledCostBps?: number;
 }
 
 // ── costs ────────────────────────────────────────────────────────────────────
@@ -569,6 +576,19 @@ export interface LiveStatus {
   demoNotListed?: string[];
   /** Open positions opened by demo fills. */
   demoPositions?: number;
+  /** Maker execution per route, by route key (`demo:alpaca:crypto`). */
+  makerRoutes?: Record<string, MakerSettings>;
+}
+
+/** How one route works its orders. Mirrors the Rust `MakerSettings`. */
+export interface MakerSettings {
+  enabled: boolean;
+  /** How long one resting limit waits before it is re-priced. */
+  restSec: number;
+  /** Resting limits in all before the marketable fallback. */
+  maxTries: number;
+  /** How far past the touch the fallback may pay. */
+  fallbackBandBps: number;
 }
 
 /** What the arm flow sends. Mirrors the Rust `LiveConfig`. */

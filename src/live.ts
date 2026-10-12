@@ -10,6 +10,7 @@ import { serverUrl } from "./engine/serverEngine";
 import type {
   ExchangeInfo,
   LiveConfig,
+  MakerSettings,
   Venue,
   WalletsSnapshot,
   WatchedAddress,
@@ -103,6 +104,17 @@ export async function sendTestOrder(marketId: string, notional: number, demo = f
     default:
       throw new Error("Test orders need the desktop app or a connected backend.");
   }
+}
+
+/** Change how one route works its orders (backend only for now). */
+export async function setMakerRoute(route: string, settings: MakerSettings): Promise<void> {
+  if (liveMode() !== "server") throw new Error("Maker execution is set on the backend for now.");
+  const r = await fetch(`${serverUrl()}/api/live/maker`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ route, settings }),
+  });
+  if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
 }
 
 export function liveMode(): LiveMode {

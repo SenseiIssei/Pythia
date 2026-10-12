@@ -41,7 +41,7 @@
 
 use super::{
     num, num_or0, Balance, BrokerOrder, BrokerOrderStatus, BrokerPosition, ConnectorError,
-    MarketConnector, OrderRequest, OrderType, Side, Venue,
+    MarketConnector, OpenOrder, OrderRequest, OrderType, Side, Venue,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -299,6 +299,9 @@ pub struct AlpacaOrder {
     pub reduce_only: bool,
     /// Alpaca's own crypto book: 24/7, GTC, never an extended-hours order.
     pub crypto: bool,
+    /// Immediate or cancel (`time_in_force: ioc`): fill what the book has
+    /// at the limit now, drop the rest. Crypto only.
+    pub ioc: bool,
 }
 
 impl AlpacaConnector {
@@ -545,9 +548,14 @@ impl AlpacaConnector {
         let mut body = serde_json::json!({
             "symbol": o.symbol,
             "side": o.side.as_str(),
-            // Crypto is 24/7 and wants GTC; equities use DAY so a stale order
-            // cannot wake up and fill days later.
-            "time_in_force": if o.crypto { "gtc" } else { "day" },
+            // Crypto is 24/7 and wants GTC (or IOC for a marketable limit
+            // that must not rest); equities use DAY so a stale order cannot
+            // wake up and fill days later.
+            "time_in_force": match (o.crypto, o.ioc) {
+                (true, true) => "ioc",
+                (true, false) => "gtc",
+                (false, _) => "day",
+            },
         });
         if !o.client_order_id.is_empty() {
             body["client_order_id"] = serde_json::json!(o.client_order_id);
@@ -561,7 +569,8 @@ impl AlpacaConnector {
         // the whole point of resting an order inside the spread.
         if let Some(limit) = o.limit_price.filter(|l| *l > 0.0) {
             body["type"] = serde_json::json!("limit");
-            body["limit_price"] = serde_json::json!(format!("{limit:.2}"));
+            body["limit_price"] =
+                serde_json::json!(if o.crypto { crypto_price_text(limit) } else { format!("{limit:.2}") });
             if extended {
                 body["extended_hours"] = serde_json::json!(true);
             }
@@ -716,6 +725,60 @@ fn parse_order(v: &Value) -> Result<BrokerOrder, ConnectorError> {
         fee_unpriced: Vec::new(),
         raw_status: raw,
     })
+}
+
+/// The open orders in a `GET /v2/orders` answer, with their symbols.
+/// Entries without an id or a symbol are skipped.
+pub fn parse_open_orders(v: &Value) -> Vec<OpenOrder> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| {
+                    let symbol = o.get("symbol")?.as_str()?.to_string();
+                    Some(OpenOrder { order: parse_order(o).ok()?, symbol })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Significant digits a crypto limit price is rounded to. Alpaca prices
+/// crypto from about $0.00001 (PEPE) to about $100,000 (BTC), so a fixed
+/// number of decimals is wrong at one end or the other: two decimals put a
+/// DOGE limit a whole percent away from the touch.
+const CRYPTO_PRICE_DIGITS: i32 = 6;
+
+/// A crypto limit price rounded to [`CRYPTO_PRICE_DIGITS`] significant
+/// digits (at most 9 decimals), `up` or down. A resting buy rounds down and
+/// a resting sell up, so rounding never makes a maker order marketable; a
+/// marketable limit rounds the other way. The engine rounds with this before
+/// it compares a fill against its limit, and the body is written from the
+/// same number ([`crypto_price_text`]).
+pub fn round_crypto_price(px: f64, up: bool) -> f64 {
+    if !px.is_finite() || px <= 0.0 {
+        return 0.0;
+    }
+    let decimals = (CRYPTO_PRICE_DIGITS - 1 - px.log10().floor() as i32).clamp(0, 9);
+    let scale = 10f64.powi(decimals);
+    // A hair of slack so a price that already sits on the grid is kept.
+    let scaled = px * scale;
+    let r = if up { (scaled - 1e-6).ceil() } else { (scaled + 1e-6).floor() };
+    r / scale
+}
+
+/// A crypto limit price as written into the order body: enough decimals for
+/// [`CRYPTO_PRICE_DIGITS`] significant digits, trailing zeros dropped.
+pub fn crypto_price_text(px: f64) -> String {
+    if !px.is_finite() || px <= 0.0 {
+        return "0".into();
+    }
+    let decimals = (CRYPTO_PRICE_DIGITS - 1 - px.log10().floor() as i32).clamp(0, 9) as usize;
+    let s = format!("{px:.decimals$}");
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    }
 }
 
 /// The highest crypto fee Alpaca charges, in basis points: tier 1 taker
@@ -990,6 +1053,7 @@ impl MarketConnector for AlpacaConnector {
             client_order_id: req.client_order_id.clone().unwrap_or_default(),
             reduce_only: req.reduce_only,
             crypto,
+            ioc: req.ioc && crypto && limit_price.is_some(),
         };
         self.submit(&order).await
     }
@@ -1022,6 +1086,15 @@ impl MarketConnector for AlpacaConnector {
             Err(ConnectorError::Rejected(msg)) if msg.contains(" 404") => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// `GET /v2/orders?status=open`, newest first, up to Alpaca's page cap of
+    /// 500 (<https://docs.alpaca.markets/reference/getallorders-1>).
+    async fn open_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError> {
+        let v = self
+            .send(self.req(reqwest::Method::GET, "/v2/orders?status=open&limit=500&direction=desc")?, "open orders")
+            .await?;
+        Ok(parse_open_orders(&v))
     }
 
     async fn positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
@@ -1255,6 +1328,12 @@ impl MarketConnector for AlpacaCryptoDemo {
         self.inner.order_by_client_id(client_order_id, symbol).await
     }
 
+    /// Only the crypto orders: the paper account may hold equity orders too,
+    /// and those are not this route's to touch.
+    async fn open_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError> {
+        Ok(self.inner.open_orders().await?.into_iter().filter(|o| o.symbol.contains('/')).collect())
+    }
+
     /// Only the crypto positions: the paper account may hold shares too.
     async fn positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
         Ok(self.inner.positions().await?.into_iter().filter(|p| p.symbol.contains('/')).collect())
@@ -1360,6 +1439,7 @@ mod tests {
             client_order_id: "pythia-test-1".into(),
             reduce_only: false,
             crypto: false,
+            ioc: false,
         }
     }
 
@@ -1756,5 +1836,59 @@ mod tests {
 
         let inactive = AlpacaAccount { status: "ONBOARDING".into(), ..base };
         assert!(inactive.is_restricted().unwrap().contains("ONBOARDING"));
+    }
+
+    #[test]
+    fn crypto_limits_keep_six_significant_digits_and_round_away_from_crossing() {
+        // A resting buy rounds down, a resting sell up: never marketable by rounding.
+        assert_eq!(round_crypto_price(60_123.456, false), 60_123.4);
+        assert_eq!(round_crypto_price(60_123.456, true), 60_123.5);
+        assert_eq!(round_crypto_price(0.1234567, false), 0.123456);
+        assert_eq!(round_crypto_price(0.1234567, true), 0.123457);
+        // On the grid already: kept as it is.
+        assert_eq!(round_crypto_price(0.123456, true), 0.123456);
+        assert_eq!(round_crypto_price(60_000.0, false), 60_000.0);
+        // PEPE-sized prices stop at 9 decimals.
+        assert_eq!(round_crypto_price(0.0000123456, false), 0.000012345);
+        assert_eq!(crypto_price_text(60_123.4), "60123.4");
+        assert_eq!(crypto_price_text(60_000.0), "60000");
+        assert_eq!(crypto_price_text(0.123456), "0.123456");
+        assert_eq!(crypto_price_text(0.000012345), "0.000012345");
+        assert_eq!(round_crypto_price(0.0, true), 0.0);
+    }
+
+    #[test]
+    fn a_crypto_limit_goes_out_with_its_own_precision_and_ioc_when_asked() {
+        let mut o = order(Side::Buy, Sizing::Shares(1_000.0));
+        o.symbol = "DOGE/USD".into();
+        o.crypto = true;
+        o.limit_price = Some(0.123456);
+        let body = conn().order_body(&o);
+        assert_eq!(body["type"], "limit");
+        assert_eq!(body["limit_price"], "0.123456", "two decimals would be a whole percent off");
+        assert_eq!(body["time_in_force"], "gtc");
+        o.ioc = true;
+        assert_eq!(conn().order_body(&o)["time_in_force"], "ioc");
+        // Equities never go out IOC from here.
+        let mut eq = order(Side::Buy, Sizing::Shares(1.0));
+        eq.ioc = true;
+        assert_eq!(conn().order_body(&eq)["time_in_force"], "day");
+    }
+
+    #[test]
+    fn open_orders_are_read_with_their_symbols() {
+        let v: Value = serde_json::from_str(
+            r#"[
+              {"id":"a1","client_order_id":"pythia-ab12cd34-ord_7","symbol":"BTC/USD","status":"new","filled_qty":"0","filled_avg_price":null},
+              {"id":"a2","client_order_id":"mine","symbol":"AAPL","status":"partially_filled","filled_qty":"1","filled_avg_price":"200"},
+              {"client_order_id":"no-id","symbol":"ETH/USD","status":"new"}
+            ]"#,
+        )
+        .unwrap();
+        let open = parse_open_orders(&v);
+        assert_eq!(open.len(), 2);
+        assert_eq!((open[0].symbol.as_str(), open[0].order.id.as_str()), ("BTC/USD", "a1"));
+        assert_eq!(open[0].order.client_order_id.as_deref(), Some("pythia-ab12cd34-ord_7"));
+        assert_eq!(open[1].order.status, BrokerOrderStatus::PartiallyFilled);
     }
 }
