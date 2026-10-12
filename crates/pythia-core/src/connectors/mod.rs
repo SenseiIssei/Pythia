@@ -138,6 +138,11 @@ pub struct OrderRequest {
     pub client_order_id: Option<String>,
     /// This order closes an existing position and must never flip it long/short.
     pub reduce_only: bool,
+    /// Immediate or cancel: a limit that fills what it can at once and drops
+    /// the rest instead of resting. Only meaningful with a limit price; a
+    /// venue without the flag ignores it.
+    #[serde(default)]
+    pub ioc: bool,
 }
 
 impl OrderRequest {
@@ -151,6 +156,7 @@ impl OrderRequest {
             ref_price: None,
             client_order_id: None,
             reduce_only: false,
+            ioc: false,
         }
     }
 
@@ -235,6 +241,16 @@ impl BrokerOrder {
             raw_status: "submitted".into(),
         }
     }
+}
+
+/// An order the venue lists as open, with the venue symbol it trades, for
+/// finding orders a previous run left behind
+/// ([`MarketConnector::open_orders`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenOrder {
+    pub order: BrokerOrder,
+    pub symbol: String,
 }
 
 /// A position as the *venue* sees it — the ground truth for reconciliation.
@@ -353,6 +369,13 @@ pub trait MarketConnector: Send + Sync {
     /// orders up this way answers `Unimplemented`.
     async fn order_by_client_id(&self, _client_order_id: &str, _symbol: &str) -> Result<Option<BrokerOrder>, ConnectorError> {
         Err(ConnectorError::Unimplemented("order lookup by client order id"))
+    }
+
+    /// Every order the venue lists as still open on this account. Used at
+    /// startup to find orders a previous run left resting. A venue that
+    /// cannot list them answers `Unimplemented`.
+    async fn open_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError> {
+        Err(ConnectorError::Unimplemented("open order listing"))
     }
 
     /// Open positions as the venue sees them — used to reconcile on startup and

@@ -8,6 +8,7 @@
 //! ## The cycle
 //!
 //! ```text
+//!   open orders     →  once per start: the maker venue's open orders → adopt or cancel
 //!   submit_pending  →  engine.drain_live_orders()  →  preflight → submit → ack
 //!   poll_inflight   →  engine.live_polls()         →  status (→ cancel if overdue)
 //!   reconcile       →  venue positions             →  engine.reconcile_positions()
@@ -28,8 +29,8 @@ pub mod bandit;
 use crate::connectors::cex::{CexConnector, Exchange};
 use crate::connectors::{
     alpaca::{AlpacaConnector, AlpacaCryptoDemo},
-    alpaca_crypto::OpenOrder,
-    BrokerPosition, ConnectorError, Environment, MarketConnector, OrderRequest, OrderType, Venue,
+    alpaca_crypto::OpenOrder as CryptoOpenOrder,
+    BrokerPosition, ConnectorError, Environment, MarketConnector, OpenOrder, OrderRequest, OrderType, Venue,
 };
 use async_trait::async_trait;
 use crate::costs::CostVenue;
@@ -265,12 +266,89 @@ impl Credentials {
     }
 }
 
+/// Where the order path gets its connectors. [`Credentials`] in the hosts;
+/// tests hand in a scripted venue.
+pub trait ConnectorSource: Sync {
+    /// The connector for one venue in one environment
+    /// ([`Credentials::connector_env`]).
+    fn connector_for(
+        &self,
+        venue: Venue,
+        env: Environment,
+        paper: bool,
+        extended_hours: bool,
+    ) -> Result<Box<dyn MarketConnector>, String>;
+
+    /// The venue maker orders rest at, whose open orders are checked at
+    /// startup; `None` when no maker route can trade.
+    fn maker_venue(&self) -> Option<Box<dyn MarketConnector>>;
+}
+
+impl ConnectorSource for Credentials {
+    fn connector_for(
+        &self,
+        venue: Venue,
+        env: Environment,
+        paper: bool,
+        extended_hours: bool,
+    ) -> Result<Box<dyn MarketConnector>, String> {
+        self.connector_env(venue, env, paper, extended_hours)
+    }
+
+    /// The Alpaca paper account, when crypto demo orders go there.
+    fn maker_venue(&self) -> Option<Box<dyn MarketConnector>> {
+        if !self.crypto_demo_on_alpaca() {
+            return None;
+        }
+        self.alpaca_crypto_demo().ok().map(|c| Box::new(c) as Box<dyn MarketConnector>)
+    }
+}
+
 /// One full execution pass. Call it once per tick, after `engine.tick()`.
 pub async fn cycle(engine: &Mutex<Engine>, creds: &Credentials) {
-    submit_pending(engine, creds).await;
-    lookup_unacknowledged(engine, creds).await;
-    poll_inflight(engine, creds).await;
+    cycle_orders(engine, creds).await;
     read_alpaca_fees(engine, creds).await;
+}
+
+/// The order part of [`cycle`]: open orders from an earlier run (once per
+/// start), then submit, look up and poll.
+pub async fn cycle_orders<C: ConnectorSource + ?Sized>(engine: &Mutex<Engine>, src: &C) {
+    reconcile_open_orders(engine, src).await;
+    submit_pending(engine, src).await;
+    lookup_unacknowledged(engine, src).await;
+    poll_inflight(engine, src).await;
+}
+
+/// Once per start, before anything new is sent: list the maker venue's
+/// open orders and check them against the books
+/// ([`Engine::apply_open_orders`]). An order an in-flight order is waiting
+/// for is adopted; an order Pythia sent that nothing here knows of is left
+/// from an earlier run and is cancelled, so no maker limit rests at the
+/// venue unseen. A failed listing or cancel is tried again a minute later.
+pub async fn reconcile_open_orders<C: ConnectorSource + ?Sized>(engine: &Mutex<Engine>, src: &C) {
+    if !engine.lock().unwrap().open_orders_check_due() {
+        return;
+    }
+    let Some(conn) = src.maker_venue() else {
+        engine.lock().unwrap().open_orders_check_skipped();
+        return;
+    };
+    let open = match conn.open_orders().await {
+        Ok(open) => open,
+        Err(e) => return engine.lock().unwrap().open_orders_check_failed(&e.to_string()),
+    };
+    let orphans = engine.lock().unwrap().apply_open_orders(&open);
+    let mut cancelled: Vec<OpenOrder> = Vec::new();
+    let mut failed: Vec<(OpenOrder, String)> = Vec::new();
+    for o in orphans {
+        match conn.cancel_order(&o.order.id, &o.symbol).await {
+            Ok(()) => cancelled.push(o),
+            Err(e) => failed.push((o, e.to_string())),
+        }
+    }
+    if !cancelled.is_empty() || !failed.is_empty() {
+        engine.lock().unwrap().apply_orphans_cancelled(&cancelled, &failed);
+    }
 }
 
 /// Read the crypto fees Alpaca has posted for fills that are waiting on
@@ -314,7 +392,7 @@ pub async fn refresh_crypto_demo_listing(engine: &Mutex<Engine>, creds: &Credent
 /// venue cannot be asked: journaled with the client id, at once when it can
 /// never answer (no keys, no such lookup), after twice the order timeout when
 /// it only does not answer right now.
-pub async fn lookup_unacknowledged(engine: &Mutex<Engine>, creds: &Credentials) {
+pub async fn lookup_unacknowledged<C: ConnectorSource + ?Sized>(engine: &Mutex<Engine>, creds: &C) {
     let lookups = { engine.lock().unwrap().client_lookups() };
     if lookups.is_empty() {
         return;
@@ -322,7 +400,7 @@ pub async fn lookup_unacknowledged(engine: &Mutex<Engine>, creds: &Credentials) 
     let timeout_ms = { engine.lock().unwrap().live_config().timeout_sec as i64 * 1000 };
     for l in lookups {
         let env = if l.demo { Environment::Demo } else { Environment::Live };
-        let conn = match creds.connector_env(l.venue, env, true, false) {
+        let conn = match creds.connector_for(l.venue, env, true, false) {
             Ok(c) => c,
             Err(e) => {
                 engine.lock().unwrap().apply_lookup_failed(&l.order_id, &e);
@@ -352,12 +430,12 @@ pub async fn verify_env(creds: &Credentials, venue: Venue, env: Environment, pap
 }
 
 /// Submit everything the engine queued this tick.
-pub async fn submit_pending(engine: &Mutex<Engine>, creds: &Credentials) {
+pub async fn submit_pending<C: ConnectorSource + ?Sized>(engine: &Mutex<Engine>, creds: &C) {
     submit_pending_with(engine, |o| {
         // A demo order is built against the demo world with the demo keys; a
         // live one exactly as before. `env` comes from the engine's routing decision.
         let env = if o.demo { Environment::Demo } else { Environment::Live };
-        creds.connector_env(o.venue, env, o.paper, o.extended_hours)
+        creds.connector_for(o.venue, env, o.paper, o.extended_hours)
     })
     .await;
 }
@@ -409,7 +487,8 @@ async fn submit_one(engine: &Mutex<Engine>, conn: &dyn MarketConnector, o: LiveO
 
     // The execution policy picked a style when the order was created; this is
     // where it becomes a price. `Cross` stays a market order, exactly as before.
-    let limit_price = o.style.limit_price(o.side, o.ref_price, o.patience_bps);
+    // A limit the engine priced itself (a maker order) wins.
+    let limit_price = o.limit_price.or_else(|| o.style.limit_price(o.side, o.ref_price, o.patience_bps));
     let req = OrderRequest {
         symbol: o.symbol.clone(),
         side: o.side,
@@ -419,6 +498,7 @@ async fn submit_one(engine: &Mutex<Engine>, conn: &dyn MarketConnector, o: LiveO
         ref_price: Some(o.ref_price),
         client_order_id: Some(o.client_order_id.clone()),
         reduce_only: o.reduce_only,
+        ioc: o.ioc && limit_price.is_some(),
     };
 
     if let Err(e) = conn.preflight(&req).await {
@@ -442,7 +522,7 @@ async fn submit_one(engine: &Mutex<Engine>, conn: &dyn MarketConnector, o: LiveO
 }
 
 /// Ask every venue about every order we have out, and cancel the overdue ones.
-pub async fn poll_inflight(engine: &Mutex<Engine>, creds: &Credentials) {
+pub async fn poll_inflight<C: ConnectorSource + ?Sized>(engine: &Mutex<Engine>, creds: &C) {
     let polls = { engine.lock().unwrap().live_polls() };
     if polls.is_empty() {
         return;
@@ -451,7 +531,7 @@ pub async fn poll_inflight(engine: &Mutex<Engine>, creds: &Credentials) {
 
     for p in polls {
         let env = if p.demo { Environment::Demo } else { Environment::Live };
-        let conn = match creds.connector_env(p.venue, env, p.paper, false) {
+        let conn = match creds.connector_for(p.venue, env, p.paper, false) {
             Ok(c) => c,
             // Keys disappeared mid-flight. We cannot see the order any more, so
             // say so rather than leaving it silently stuck.
@@ -529,7 +609,7 @@ pub async fn reconcile(engine: &Mutex<Engine>, creds: &Credentials) {
 #[async_trait]
 pub trait PaperAccount: Send + Sync {
     async fn crypto_positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError>;
-    async fn open_crypto_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError>;
+    async fn open_crypto_orders(&self) -> Result<Vec<CryptoOpenOrder>, ConnectorError>;
 }
 
 #[async_trait]
@@ -537,7 +617,7 @@ impl PaperAccount for AlpacaConnector {
     async fn crypto_positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
         AlpacaConnector::crypto_positions(self).await
     }
-    async fn open_crypto_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError> {
+    async fn open_crypto_orders(&self) -> Result<Vec<CryptoOpenOrder>, ConnectorError> {
         AlpacaConnector::open_crypto_orders(self).await
     }
 }

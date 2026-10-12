@@ -75,6 +75,13 @@ export interface Order {
   bookExhausted?: boolean;
   /** Fees paid on the fill, dollars, when known. Alpaca crypto posts its fee at the end of the day. */
   fee?: number;
+  /** Maker-route orders: quantity filled resting at our own limit, and by crossing. */
+  makerQty?: number;
+  takerQty?: number;
+  /** Maker-route orders: slippage against arrival plus the fee rate of the maker/taker mix, bps. */
+  realisedCostBps?: number;
+  /** What the cost model charges the same order as a market order (slippage plus taker fee), bps. */
+  modelledCostBps?: number;
 }
 
 // ── costs ────────────────────────────────────────────────────────────────────
@@ -579,6 +586,8 @@ export interface LiveStatus {
   demoReconcile?: DemoReconcile;
   /** Demo routes waiting after a 403, as [venue, until epoch ms]. */
   demoPaused?: [Venue, number][];
+  /** Maker execution per route, by route key (`demo:alpaca:crypto`). */
+  makerRoutes?: Record<string, MakerSettings>;
 }
 
 /** What one Alpaca pair came out as. Mirrors the Rust `PairStatus`. */
@@ -629,6 +638,17 @@ export interface DemoReconcile {
   error?: string;
   failedAt?: number;
   estimatedFees: EstimatedFee[];
+}
+
+/** How one route works its orders. Mirrors the Rust `MakerSettings`. */
+export interface MakerSettings {
+  enabled: boolean;
+  /** How long one resting limit waits before it is re-priced. */
+  restSec: number;
+  /** Resting limits in all before the marketable fallback. */
+  maxTries: number;
+  /** How far past the touch the fallback may pay. */
+  fallbackBandBps: number;
 }
 
 /** What the arm flow sends. Mirrors the Rust `LiveConfig`. */

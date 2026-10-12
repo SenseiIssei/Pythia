@@ -2213,6 +2213,15 @@ impl Engine {
         self.autopilots[i].btc_end = self.ap_btc_price(&self.autopilots[i]);
         let name = self.autopilots[i].config.name.clone();
         let word = if state == AutopilotState::Finished { "finished" } else { "stopped" };
+        // Its maker orders resting at the venue are cancelled: a stopped
+        // autopilot leaves nothing working there.
+        let sids: HashSet<String> = self.autopilots[i]
+            .sleeves
+            .iter()
+            .map(|s| s.strategy_id.clone())
+            .chain(self.autopilots[i].owned.values().cloned())
+            .collect();
+        self.maker_stand_down_for(&sids, &format!("autopilot \"{name}\" {word}"));
         let open: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
         let mut tail = String::new();
         if flatten {

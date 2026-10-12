@@ -47,8 +47,9 @@ A demo exchange with keys of its own (`PYTHIA_DEMO_EXCHANGE=bybit` plus its
 keys) keeps working exactly as before; the two are one setting, so pick one.
 
 - **Symbols.** Pythia's `BTC/USD` is Alpaca's `BTC/USD`. Alpaca crypto here is
-  USD-quoted only; orders go out in coins, fractional, GTC, as market orders
-  (or the limit the engine chose).
+  USD-quoted only; orders go out in coins, fractional, GTC, as maker limits
+  at the touch by default (next section), as market orders when that is off
+  or an exit must not wait.
 - **What Alpaca lists.** Alpaca does not list every coin of the 20-coin
   universe. At startup (before the first tick, at most 20 s) and then once a
   day the server reads `GET /v2/assets?asset_class=crypto&status=active` from
@@ -113,6 +114,84 @@ keys) keeps working exactly as before; the two are one setting, so pick one.
   the tax record.
 - **Desktop app.** Backend only for now: the desktop app keeps the demo
   exchange slots.
+
+### Maker orders on the Alpaca crypto demo route
+
+Alpaca charges crypto 0.25 % taker and 0.15 % maker per side
+([fee table](https://docs.alpaca.markets/docs/crypto-trading)). A market
+order pays the taker fee and the half spread; a limit that rests and is
+filled by someone else pays the maker fee and earns the spread. So crypto
+demo orders on the Alpaca paper route are worked as maker orders by default:
+
+1. **Rest.** A GTC limit at the best bid (buys) or best ask (sells) of the
+   engine's live order book for the coin (the crypto feed's book, Kraken
+   first), rounded to six significant digits away from crossing.
+2. **Re-price.** Not filled after `restSec` (20 s): cancelled, and placed
+   again at the current touch for what is still open. Up to `maxTries` (3)
+   resting limits in all.
+3. **Fall back.** Then the rest goes out as a marketable limit, IOC, up to
+   `fallbackBandBps` (50 bps) past the far side of the book (never better
+   than the last price), and whatever the IOC leaves goes out as a market
+   order. A limit Alpaca refuses goes straight to the market order. A
+   rebalance is therefore done after about `restSec x maxTries` plus two
+   order timeouts, whatever the book does.
+
+Each limit is a separate Alpaca order; the first keeps the order's client id,
+later ones add `-m1`, `-m2`. Partial fills carry over: the next limit is for
+what is still open, and every part is booked into the one order row.
+
+**Maker or taker.** Alpaca crypto has no post-only flag (limit orders take
+`gtc` or `ioc`), so a limit that is marketable when it arrives simply fills
+as a taker. Pythia counts a fill as **maker** when a resting limit filled at
+its own price (within 0.5 bps, the rounding), and as **taker** when it filled
+better than the limit (it crossed on arrival) or came from the fallback. The
+touch is the feed's book, not Alpaca's, so when the two books disagree some
+"resting" limits cross; the maker share on the order row says how often.
+
+**What is recorded.** Per fill a journal line (`filled as maker, resting at
+our limit ...` or `as taker ...`); per order, on the order row:
+`makerQty`, `takerQty`, `realisedCostBps` (slippage against arrival plus the
+fee rate of the maker and taker mix, from `config/costs.json`) and
+`modelledCostBps` (what the cost model charges the same order as a market
+order: modelled slippage plus the taker fee), and a closing journal line
+(`done: 80% maker ...; cost 9.3 bps (fee 17.0) against 26.5 modelled for a
+market order`). The Analytics trade log shows both. The fee actually charged
+is still the `CFEE` activity Alpaca posts later (above).
+
+**What never rests.** Stop-loss and take-profit exits, an autopilot's
+flatten at stop, and a manual flatten go out as market orders. An exit like
+that in a coin with a resting maker order makes the maker order stand down
+first. Every other route (Bybit, OKX and Binance demo, paper, live) is
+unchanged, as is adaptive execution.
+
+**Nothing left behind.**
+
+- Every limit is saved with its order. After a restart it is polled again;
+  one that was queued but not acknowledged is looked up by its client id
+  (found: followed; not at Alpaca: the next limit is sent).
+- At startup, before anything new is sent, the server lists the paper
+  account's open crypto orders (`GET /v2/orders?status=open`). An order
+  Pythia sent (client id `pythia-...`) that an order here is waiting for is
+  adopted; one nothing here knows of is left from an earlier run and is
+  cancelled, with a journal line naming its client id. Orders not sent by
+  Pythia are never touched. A failed listing is tried again every minute.
+- Stopping an autopilot cancels its resting maker orders at once; nothing
+  new is placed for them, and what already filled stays booked.
+
+**Setting.** Per route, keyed `demo:alpaca:crypto`, saved with the engine
+state and shown as `live.makerRoutes`. Change it with
+`POST /api/live/maker` and a body like
+`{"route":"demo:alpaca:crypto","settings":{"enabled":true,"restSec":20,"maxTries":3,"fallbackBandBps":50}}`,
+the button on the Live page's demo card, or `PYTHIA_ALPACA_MAKER=off`
+(`on`) in the backend `.env`, applied at every start. Only this route can be
+switched on for now: the fallback needs IOC limits and the startup check
+needs an open-order listing, which only the Alpaca connector has.
+
+Not verified against the paper account from this branch: that Alpaca paper
+fills a resting crypto limit at its limit price, that it accepts six
+significant digits for every pair's limit price, and the open-order listing.
+The logic is covered by tests against a scripted venue
+(`engine/maker_tests.rs`).
 
 Verified against the real paper account: a demo connection test order
 `alpaca:BTC/USD` fills through the Alpaca connector. The crypto-venue route
@@ -199,8 +278,10 @@ this branch. The tests drive the engine with hand-set quotes and broker status.
 - Engine: `RouteIntent::Demo`, `StrategyState::Demo`, `Engine::set_demo_venues`
   (hosts call it when credentials change). A demo order runs the same in-flight
   machinery as a live one (`LiveOrderOut.demo`, `LivePoll.demo`, restored after
-  a restart), always crosses (the execution bandit neither chooses for it nor
-  learns from it), and is costed with the demo exchange's costs.
+  a restart), crosses unless its route works maker orders (the Alpaca crypto
+  demo route by default, `engine/maker.rs`; the execution bandit neither
+  chooses for a demo order nor learns from it), and is costed with the demo
+  exchange's costs.
 - Booking: a demo fill settles with `live = false, demo = true`. The position is
   flagged demo (persisted), its exits route `Demo`, reconciliation never touches
   it, and its closed trades count as `demoTrades` (and as forward trades only on
@@ -287,6 +368,8 @@ markets and equities stay on the model (no live books for them).
 | `realisedSlippageBps` / `modelledSlippageBps` | order row, slippage record | fill against the signal price, next to the model's half-spread plus impact |
 | `driftBps` | order row, slippage record (`medianDriftBps` on the row) | book mid against the signal price when the order was priced, positive = moved against the order |
 | `bookExhausted` | order row, slippage record (`exhausted` count on the row) | a paper fill that ran past the 20 levels |
+| `makerQty` / `takerQty` | order row (maker routes) | filled resting at our own limit, and by crossing |
+| `realisedCostBps` / `modelledCostBps` | order row (maker routes) | slippage plus the fee of the maker and taker mix, next to the model's cost for a market order |
 
 The execution policy keeps paper and demo fills in their own bounded lists
 (`"{route}:{venue}"`), so the frequent paper fills never push live ones out. The
