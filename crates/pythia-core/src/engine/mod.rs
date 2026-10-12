@@ -4706,12 +4706,13 @@ impl Engine {
         let id = format!("lab:{}", sig.strategy);
         let idle = self.lab_books_idle || sig.autopilot_only;
         if !self.strategies.iter().any(|s| s.id == id) {
-            let universe = self.markets.iter().filter(|m| m.venue == Venue::Crypto).map(|m| m.id.clone()).collect();
+            let venue_class = if sig.is_us_equity() { Venue::Alpaca } else { Venue::Crypto };
+            let universe = self.lab_book_markets(sig.is_us_equity()).into_iter().map(|m| m.id).collect();
             self.strategies.push(StrategyConfig {
                 id: id.clone(),
                 name: format!("Lab · {}", sig.variant),
                 kind: StrategyKind::LabTargets,
-                venue_class: Venue::Crypto,
+                venue_class,
                 state: if idle { StrategyState::Paused } else { StrategyState::Paper },
                 universe,
                 params: vec![],
@@ -4794,6 +4795,43 @@ impl Engine {
         }
     }
 
+    /// The markets a lab book can hold: every crypto market for a coin book,
+    /// every Alpaca equity market for a book of US shares and ETFs.
+    pub(crate) fn lab_book_markets(&self, us_equity: bool) -> Vec<Market> {
+        self.markets
+            .iter()
+            .filter(|m| {
+                if us_equity {
+                    m.venue == Venue::Alpaca && m.kind == MarketKind::Equity
+                } else {
+                    m.venue == Venue::Crypto
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Why a lab book of US shares waits instead of trading now, or `None`.
+    /// It trades only in the regular session, whatever the extended-hours
+    /// setting says: the lab's backtest filled at regular-session closes, and
+    /// an order queued overnight is a bet on the gap. Sells wait too, so a
+    /// rebalance is never half done (the sells out, the buys refused).
+    fn lab_equity_session_wait(&self) -> Option<String> {
+        let Some(b) = &self.broker else {
+            return Some("broker status unknown, waiting for the first account check".into());
+        };
+        if self.now() - b.checked_at > BROKER_STATUS_MAX_AGE_MS {
+            return Some("broker status is stale, cannot confirm the regular session is open".into());
+        }
+        if !b.market_open {
+            return Some(match &b.next_open {
+                Some(t) => format!("US regular session closed (next open {t})"),
+                None => "US regular session closed".into(),
+            });
+        }
+        None
+    }
+
     /// Move every lab book to its latest targets, once per signal.
     fn run_lab_books(&mut self) {
         let now = self.now();
@@ -4839,13 +4877,29 @@ impl Engine {
                 }
                 continue;
             }
+            let equity = sig.is_us_equity();
             // Only real prices: a rebalance against the simulator is no evidence of anything.
-            let crypto: Vec<Market> = self.markets.iter().filter(|m| m.venue == Venue::Crypto).cloned().collect();
-            if !crypto.iter().any(|m| self.real_ids.contains(&m.id)) {
+            let book = self.lab_book_markets(equity);
+            if !book.iter().any(|m| self.real_ids.contains(&m.id)) {
                 if self.lab_notes.insert(format!("noprices:{sid}")) {
-                    self.log(JournalKind::System, "Lab book waits for real crypto prices".into(), Some(sid.clone()), None);
+                    let what = if equity { "US share prices from Alpaca" } else { "crypto prices" };
+                    self.log(JournalKind::System, format!("Lab book waits for real {what}"), Some(sid.clone()), None);
                 }
                 continue;
+            }
+            // US shares: queued until the regular session, then sent.
+            if equity {
+                if let Some(why) = self.lab_equity_session_wait() {
+                    if self.lab_notes.insert(format!("session:{sid}:{}", sig.generated_ms)) {
+                        self.log(
+                            JournalKind::System,
+                            format!("Lab rebalance queued: {why}. It goes out once the regular session is open"),
+                            Some(sid.clone()),
+                            None,
+                        );
+                    }
+                    continue;
+                }
             }
             let mut owned_elsewhere = vec![];
             // Coins the demo route cannot trade (not listed on the Alpaca
@@ -4860,7 +4914,7 @@ impl Engine {
             let mine = |id: &str, p: &PositionInternal| {
                 p.strategy_id == sid && scope.as_ref().is_none_or(|s| s.owned.contains(id))
             };
-            for m in &crypto {
+            for m in &book {
                 match self.positions.get(&m.id) {
                     Some(p) if !mine(&m.id, p) && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
                     None if demo_route && !self.demo_lists(m) => unlisted.push(m.symbol.clone()),
@@ -4882,19 +4936,19 @@ impl Engine {
                 Some(s) => s.capital,
                 None => self.strategies[idx].budget_pct / 100.0 * self.equity(),
             };
-            let has_market = |coin: &str| -> Option<String> { Some(format!("crypto:{coin}/USD")) };
+            let has_market = |key: &str| -> Option<String> { Some(sig.market_id(key)) };
             let (orders, mut untradable) =
                 crate::lab::rebalance(&sig.weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
             // A coin held by another strategy is reported as that, not as missing.
-            untradable.retain(|c| !owned_elsewhere.iter().any(|s| s == &format!("{c}/USD")));
+            untradable.retain(|c| !owned_elsewhere.contains(&sig.market_symbol(c)));
             // An unlisted coin the lab wants is named once, as that.
             let skipped: Vec<String> =
-                unlisted.iter().filter(|s| sig.weights.keys().any(|c| **s == format!("{c}/USD"))).cloned().collect();
-            untradable.retain(|c| !unlisted.iter().any(|s| s == &format!("{c}/USD")));
+                unlisted.iter().filter(|s| sig.weights.keys().any(|c| **s == sig.market_symbol(c))).cloned().collect();
+            untradable.retain(|c| !unlisted.contains(&sig.market_symbol(c)));
             let n = orders.len();
             let mut refused = 0;
             for o in orders {
-                let Some(m) = crypto.iter().find(|m| m.id == o.market_id).cloned() else { continue };
+                let Some(m) = book.iter().find(|m| m.id == o.market_id).cloned() else { continue };
                 if !self.place_lab_order(idx, &m, o.side, o.notional) {
                     refused += 1;
                 }
@@ -5959,6 +6013,43 @@ pub(crate) fn strategy_regime_ok(kind: StrategyKind, regime: Option<Regime>) -> 
 
 // ── seed universe (mirrors the TS MarketSim) ───────────────────────────────
 fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
+    seed_markets_with(&crate::marketdata::equity_symbols())
+}
+
+/// The seeded universe plus one Alpaca equity market for every symbol of the
+/// configured equity list ([`crate::marketdata::equity_symbols`]) the seeds
+/// do not already have. Such a market starts at a placeholder price of 100
+/// that the simulator never moves, and is marked real by its first Alpaca
+/// quote; lab books and the risk checks wait for that quote.
+fn seed_markets_with(equities: &[String]) -> (Vec<Market>, HashMap<String, SimParam>) {
+    let (mut markets, mut sim) = seed_markets_fixed();
+    let now = chrono::Utc::now().timestamp_millis();
+    for sym in equities {
+        let id = format!("alpaca:{sym}");
+        if markets.iter().any(|m| m.id == id) {
+            continue;
+        }
+        markets.push(Market {
+            id: id.clone(),
+            venue: Venue::Alpaca,
+            symbol: sym.clone(),
+            kind: MarketKind::Equity,
+            price: 100.0,
+            change24h: 0.0,
+            model_prob: None,
+            liquidity: Some(1_000_000.0),
+            regime: None,
+            trend_strength: None,
+            no_price: None,
+            resolves_at: None,
+            updated_at: now,
+        });
+        sim.insert(id, SimParam { drift: 0.0, vol: 0.0, base: 100.0 });
+    }
+    (markets, sim)
+}
+
+fn seed_markets_fixed() -> (Vec<Market>, HashMap<String, SimParam>) {
     let now = chrono::Utc::now().timestamp_millis();
     let mk = |id: &str, venue: Venue, symbol: &str, kind: MarketKind, price: f64, change: f64, model: Option<f64>, liq: f64| Market {
         id: id.into(),
@@ -8301,6 +8392,7 @@ mod tests {
             },
             autopilot_only: false,
             dropped: vec![],
+            asset_class: None,
         }
     }
 
@@ -8339,6 +8431,98 @@ mod tests {
 
         // Gate 6 is red (deflated p 0.86): Live is refused.
         assert!(e.set_strategy_state("lab:tsmom_regime", StrategyState::Live).is_err());
+    }
+
+    #[test]
+    fn the_configured_equities_are_seeded_once_each() {
+        let (markets, sim) = seed_markets_with(&["SPY".to_string(), "AAPL".to_string(), "GLD".to_string()]);
+        let spy: Vec<&Market> = markets.iter().filter(|m| m.id == "alpaca:SPY").collect();
+        assert_eq!(spy.len(), 1);
+        assert_eq!((spy[0].venue, spy[0].kind, spy[0].symbol.as_str()), (Venue::Alpaca, MarketKind::Equity, "SPY"));
+        assert_eq!(markets.iter().filter(|m| m.id == "alpaca:AAPL").count(), 1, "a seeded stock is not added twice");
+        assert_eq!(sim["alpaca:GLD"].vol, 0.0, "the placeholder price never wanders");
+        let (fixed, _) = seed_markets_fixed();
+        assert_eq!(markets.len(), fixed.len() + 2);
+    }
+
+    fn etf_signal(generated_ms: i64, weights: &[(&str, f64)]) -> crate::lab::LabSignal {
+        crate::lab::LabSignal {
+            strategy: "etf_trend".into(),
+            variant: "ETF trend".into(),
+            asset_class: Some(crate::lab::US_EQUITY.into()),
+            ..lab_signal(generated_ms, weights, 0.5)
+        }
+    }
+
+    /// An engine with real Alpaca quotes for SPY and IEF.
+    fn etf_engine() -> Engine {
+        let (markets, sim) = seed_markets_with(&["SPY".to_string(), "IEF".to_string()]);
+        let mut e = Engine::new();
+        e.markets = markets;
+        e.sim = sim;
+        e.apply_alpaca(&[
+            RealEquity { id: "alpaca:SPY".into(), symbol: "SPY".into(), price: 512.34, change24h: 0.0 },
+            RealEquity { id: "alpaca:IEF".into(), symbol: "IEF".into(), price: 95.67, change24h: 0.0 },
+        ]);
+        e
+    }
+
+    #[test]
+    fn an_etf_lab_book_waits_for_the_regular_session_then_trades_alpaca_shares() {
+        let mut e = etf_engine();
+        let now = e.now();
+        e.apply_lab_signal(etf_signal(now, &[("SPY", 0.3), ("IEF", 0.2)]));
+        let s = e.strategies.iter().find(|s| s.id == "lab:etf_trend").unwrap();
+        assert_eq!(s.venue_class, Venue::Alpaca);
+        assert!(s.universe.contains(&"alpaca:SPY".to_string()) && !s.universe.iter().any(|m| m.starts_with("crypto:")));
+
+        // No broker status yet, then a closed market: queued, nothing ordered.
+        e.run_lab_books();
+        let mut closed = open_market(&e);
+        closed.market_open = false;
+        closed.extended_open = true;
+        closed.next_open = Some("2026-10-13T09:30:00-04:00".into());
+        e.set_broker_status(closed);
+        e.live.extended_hours = true;
+        e.run_lab_books();
+        assert!(e.positions.is_empty(), "not even in extended hours");
+        assert!(e.orders.is_empty());
+        assert!(e.journal.iter().any(|j| j.message.contains("Lab rebalance queued")));
+        let fresh = e.lab_signals["lab:etf_trend"].generated_ms + 1;
+        e.apply_lab_signal(etf_signal(fresh, &[("SPY", 0.3), ("IEF", 0.2)]));
+        e.run_lab_books();
+        assert!(e.journal.iter().any(|j| j.message.contains("US regular session closed (next open 2026-10-13")));
+
+        // The regular session opens: the queued rebalance goes out.
+        e.set_broker_status(open_market(&e));
+        e.run_lab_books();
+        let spy = e.positions.get("alpaca:SPY").expect("bought SPY");
+        assert_eq!(spy.strategy_id, "lab:etf_trend");
+        assert!(spy.qty.fract() > 0.0, "sized in dollars: fractional shares");
+        let capital = e.strategies.iter().find(|s| s.id == "lab:etf_trend").unwrap().budget_pct / 100.0 * e.equity();
+        assert!((spy.qty * 512.34 / capital - 0.3).abs() < 0.01);
+        assert!(e.positions.contains_key("alpaca:IEF"));
+
+        // Next week SPY leaves the targets: sold, IEF kept.
+        e.apply_lab_signal(etf_signal(fresh + 1, &[("IEF", 0.2)]));
+        e.run_lab_books();
+        assert!(e.positions.get("alpaca:SPY").map(|p| p.qty.abs() < 1e-9).unwrap_or(true));
+        assert!(e.positions.contains_key("alpaca:IEF"));
+    }
+
+    #[test]
+    fn an_etf_lab_book_in_demo_sends_its_orders_to_the_alpaca_paper_account() {
+        let mut e = etf_engine();
+        e.set_demo_venues([Venue::Alpaca].into_iter().collect(), None, true);
+        e.set_broker_status(open_market(&e));
+        let now = e.now();
+        e.apply_lab_signal(etf_signal(now, &[("SPY", 0.3)]));
+        e.set_strategy_state("lab:etf_trend", StrategyState::Demo).unwrap();
+        e.run_lab_books();
+        let out = e.drain_live_orders();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!((out[0].venue, out[0].symbol.as_str(), out[0].side), (Venue::Alpaca, "SPY", Side::Buy));
+        assert!(out[0].demo && !out[0].extended_hours);
     }
 
     #[test]

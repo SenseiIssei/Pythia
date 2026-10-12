@@ -92,6 +92,44 @@ Nothing in this branch has sent a request to any demo host: every response shape
 is from the docs, the same state as the live connectors (see `NEXT-STEPS.md` §1).
 The first demo connection test is the check.
 
+## US shares and ETFs on the Alpaca paper account
+
+**Which symbols.** The engine quotes and trades a configurable list of US
+equities on Alpaca (`alpaca:<SYMBOL>` markets, IEX feed unless set otherwise).
+`PYTHIA_EQUITIES` (backend `.env`, comma or space separated, for example
+`PYTHIA_EQUITIES=SPY,QQQ,TLT,IEF,GLD`) wins; else `PYTHIA_EQUITIES_FILE`
+names a file with one list (new lines and `#` comments allowed); else the
+default is the five stocks (AAPL NVDA MSFT AMZN TSLA) plus the 15 ETFs of the
+lab's `etf_trend` study (SPY QQQ IWM TLT IEF GLD SLV XLE XLF XLK XLV EFA EEM
+VNQ DBC). A setting with no valid ticker falls back to the default. The five
+stocks stay seeded either way (the default strategies name them); left out of
+the list they get no quotes and stay on the simulator. A symbol that is not
+one of the five starts at a placeholder price of 100 that never moves and is
+real from its first Alpaca quote; nothing trades it before then.
+
+**Lab books of US shares.** A lab signal with `"asset_class": "us_equity"`
+names ETFs and shares (`"SPY": 0.3`), traded as `alpaca:SPY`; a key that is
+already a market id (`"alpaca:SPY"`) is taken as it is. Signals without the
+field are coins, as before. Such a book is created on venue Alpaca, so an
+autopilot on venue `alpaca` without an asset class (US shares) can claim it;
+in demo mode its orders go to the Alpaca paper account.
+
+- **Regular session only.** The rebalance waits until the broker status says
+  the regular session is open, whatever the extended-hours setting: the lab
+  filled at regular-session closes. Before that it is queued and the journal
+  says so once per signal ("Lab rebalance queued: US regular session closed
+  (next open ...)"). Sells wait too, so a rebalance is never half done. The
+  signal must still be valid when the session opens, so a weekly book's
+  validity window has to cover the weekend.
+- **Sizing.** Orders are sized in dollars. Buys of fractionable symbols go out
+  as Alpaca `notional` market orders, sells as fractional share quantities
+  (reduce only); the connector handles both, as for any Alpaca order.
+- **Costs.** No commission; spread and slippage from the `alpaca` entry of
+  `config/costs.json`.
+
+Not yet verified against the paper account: no ETF order has been sent from
+this branch. The tests drive the engine with hand-set quotes and broker status.
+
 ## What the owner does to start demo trading on Bybit
 
 1. bybit.com > log in > **Demo Trading** (top right). In the demo account: avatar >
