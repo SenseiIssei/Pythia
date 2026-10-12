@@ -159,6 +159,11 @@ pub fn run() {
                     if n % 80 == 1 {
                         execution::reconcile(&engine, &creds).await;
                     }
+                    // The Alpaca paper account against the demo book: shortly
+                    // after startup, then every ten minutes (400 ticks).
+                    if n % 400 == 11 {
+                        execution::reconcile_demo(&engine, &creds).await;
+                    }
                     let _ = handle.emit("engine://state", engine.lock().unwrap().state());
 
                     // Checkpoint to disk periodically (~every 60s).

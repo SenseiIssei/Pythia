@@ -12,6 +12,7 @@
 //!   poll_inflight   →  engine.live_polls()         →  status (→ cancel if overdue)
 //!   reconcile       →  venue positions             →  engine.reconcile_positions()
 //!   alpaca fees     →  engine.alpaca_fee_queries() →  CFEE/FEE activities → engine.apply_alpaca_fees()
+//!   reconcile_demo  →  Alpaca paper positions + open orders → engine.apply_demo_reconcile()
 //! ```
 //!
 //! Two rules hold throughout:
@@ -27,8 +28,10 @@ pub mod bandit;
 use crate::connectors::cex::{CexConnector, Exchange};
 use crate::connectors::{
     alpaca::{AlpacaConnector, AlpacaCryptoDemo},
-    ConnectorError, Environment, MarketConnector, OrderRequest, OrderType, Venue,
+    alpaca_crypto::OpenOrder,
+    BrokerPosition, ConnectorError, Environment, MarketConnector, OrderRequest, OrderType, Venue,
 };
+use async_trait::async_trait;
 use crate::costs::CostVenue;
 use crate::engine::{Engine, LiveOrderOut, LiveUpdate};
 use std::collections::HashSet;
@@ -350,24 +353,48 @@ pub async fn verify_env(creds: &Credentials, venue: Venue, env: Environment, pap
 
 /// Submit everything the engine queued this tick.
 pub async fn submit_pending(engine: &Mutex<Engine>, creds: &Credentials) {
+    submit_pending_with(engine, |o| {
+        // A demo order is built against the demo world with the demo keys; a
+        // live one exactly as before. `env` comes from the engine's routing decision.
+        let env = if o.demo { Environment::Demo } else { Environment::Live };
+        creds.connector_env(o.venue, env, o.paper, o.extended_hours)
+    })
+    .await;
+}
+
+/// [`submit_pending`] with the connector for each order supplied by the
+/// caller, so the whole path runs against a mock venue in tests.
+pub async fn submit_pending_with<F>(engine: &Mutex<Engine>, connector_for: F)
+where
+    F: Fn(&LiveOrderOut) -> Result<Box<dyn MarketConnector>, String>,
+{
     let orders = { engine.lock().unwrap().drain_live_orders() };
     for o in orders {
-        submit_one(engine, creds, o).await;
+        if o.dry_run {
+            reject(engine, &o.order_id, "dry-run: not submitted");
+            continue;
+        }
+        // A route that answered 403 on its keys or account a moment ago is
+        // not asked again for every queued order: each one is refused here,
+        // without a request, until the pause ends.
+        let paused = { engine.lock().unwrap().route_paused_until(o.venue, o.demo) };
+        if let Some(until) = paused {
+            let at = chrono::DateTime::from_timestamp_millis(until).map(|d| d.format("%H:%M UTC").to_string()).unwrap_or_default();
+            reject(
+                engine,
+                &o.order_id,
+                &format!("not sent: the route answered 403 a moment ago and waits until {at} before it is asked again"),
+            );
+            continue;
+        }
+        match connector_for(&o) {
+            Ok(conn) => submit_one(engine, conn.as_ref(), o).await,
+            Err(e) => reject(engine, &o.order_id, &e),
+        }
     }
 }
 
-async fn submit_one(engine: &Mutex<Engine>, creds: &Credentials, o: LiveOrderOut) {
-    if o.dry_run {
-        return reject(engine, &o.order_id, "dry-run: not submitted");
-    }
-
-    // A demo order is built against the demo world with the demo keys; a live
-    // one exactly as before. `env` comes from the engine's routing decision.
-    let env = if o.demo { Environment::Demo } else { Environment::Live };
-    let conn = match creds.connector_env(o.venue, env, o.paper, o.extended_hours) {
-        Ok(c) => c,
-        Err(e) => return reject(engine, &o.order_id, &e),
-    };
+async fn submit_one(engine: &Mutex<Engine>, conn: &dyn MarketConnector, o: LiveOrderOut) {
 
     // Round to what the venue accepts *before* preflight, so the size we check
     // is the size we send.
@@ -493,6 +520,56 @@ pub async fn reconcile(engine: &Mutex<Engine>, creds: &Credentials) {
             }
             Err(e) => tracing::warn!("reconcile {venue:?} failed: {e}"),
         }
+    }
+}
+
+/// What the paper-account reconciliation reads: the account's crypto
+/// positions and its open crypto orders. [`AlpacaConnector`] reads Alpaca;
+/// tests hand in a mock.
+#[async_trait]
+pub trait PaperAccount: Send + Sync {
+    async fn crypto_positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError>;
+    async fn open_crypto_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError>;
+}
+
+#[async_trait]
+impl PaperAccount for AlpacaConnector {
+    async fn crypto_positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
+        AlpacaConnector::crypto_positions(self).await
+    }
+    async fn open_crypto_orders(&self) -> Result<Vec<OpenOrder>, ConnectorError> {
+        AlpacaConnector::open_crypto_orders(self).await
+    }
+}
+
+/// Reconcile the Alpaca paper account against the demo book, when demo
+/// orders go there (crypto with `PYTHIA_DEMO_EXCHANGE=alpaca`, or Alpaca's
+/// own demo route). Hosts call it at startup and every ten minutes
+/// (`engine::demo_reconcile::DEMO_RECONCILE_EVERY_MS`). Read-only at the venue.
+pub async fn reconcile_demo(engine: &Mutex<Engine>, creds: &Credentials) {
+    if !creds.crypto_demo_on_alpaca() && !creds.demo_venues().contains(&Venue::Alpaca) {
+        return;
+    }
+    match creds.alpaca_connector(true, false) {
+        Ok(conn) => reconcile_demo_with(engine, &conn).await,
+        Err(e) => engine.lock().unwrap().demo_reconcile_failed(&e),
+    }
+}
+
+/// [`reconcile_demo`] against any [`PaperAccount`]. Both reads must succeed:
+/// positions without the open orders would correct a pair whose order is
+/// still filling.
+pub async fn reconcile_demo_with(engine: &Mutex<Engine>, account: &dyn PaperAccount) {
+    let positions = account.crypto_positions().await;
+    let open = account.open_crypto_orders().await;
+    match (positions, open) {
+        (Ok(p), Ok(o)) => {
+            let n = engine.lock().unwrap().apply_demo_reconcile(&p, &o);
+            if n > 0 {
+                tracing::warn!("Alpaca paper reconcile: {n} pair(s) differ from the demo book");
+            }
+        }
+        (Err(e), _) | (_, Err(e)) => engine.lock().unwrap().demo_reconcile_failed(&e.to_string()),
     }
 }
 
@@ -779,5 +856,224 @@ mod tests {
             engine.lock().unwrap().state().positions.iter().any(|p| p.market_id == "alpaca:AAPL"),
             "a disarmed engine has nothing to reconcile and must not touch paper positions"
         );
+    }
+
+    // ── the Alpaca paper route against a mock venue ──
+
+    use crate::connectors::alpaca_crypto::{parse_open_orders, CryptoRules, QtyFit};
+    use crate::connectors::{BrokerOrder, BrokerPosition};
+    use crate::costs::CostVenue as CV;
+    use crate::engine::RouteIntent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A venue that answers every submission the same way and counts them.
+    struct MockVenue {
+        submits: Arc<AtomicUsize>,
+        sent: Arc<Mutex<Vec<f64>>>,
+        answer: fn() -> Result<BrokerOrder, ConnectorError>,
+        rules: Option<CryptoRules>,
+    }
+
+    #[async_trait]
+    impl MarketConnector for MockVenue {
+        fn venue(&self) -> Venue {
+            Venue::Crypto
+        }
+        fn is_live_ready(&self) -> bool {
+            true
+        }
+        fn round_qty(&self, qty: f64, _symbol: &str) -> f64 {
+            match self.rules.map(|r| r.fit_qty(qty)) {
+                Some(QtyFit::Ok(q)) => q,
+                Some(QtyFit::BelowMinimum { .. }) => 0.0,
+                None => qty,
+            }
+        }
+        async fn verify(&self) -> Result<String, ConnectorError> {
+            Ok("mock".into())
+        }
+        async fn submit_order(&self, req: OrderRequest) -> Result<BrokerOrder, ConnectorError> {
+            self.submits.fetch_add(1, Ordering::SeqCst);
+            self.sent.lock().unwrap().push(req.qty);
+            (self.answer)()
+        }
+        async fn order_status(&self, broker_id: &str, _symbol: &str) -> Result<BrokerOrder, ConnectorError> {
+            Ok(BrokerOrder::acknowledged(broker_id, None))
+        }
+        async fn cancel_order(&self, _broker_id: &str, _symbol: &str) -> Result<(), ConnectorError> {
+            Ok(())
+        }
+    }
+
+    struct Mock {
+        submits: Arc<AtomicUsize>,
+        sent: Arc<Mutex<Vec<f64>>>,
+        answer: fn() -> Result<BrokerOrder, ConnectorError>,
+        rules: Option<CryptoRules>,
+    }
+
+    impl Mock {
+        fn new(answer: fn() -> Result<BrokerOrder, ConnectorError>) -> Self {
+            Mock { submits: Arc::new(AtomicUsize::new(0)), sent: Arc::new(Mutex::new(Vec::new())), answer, rules: None }
+        }
+        fn conn(&self) -> Result<Box<dyn MarketConnector>, String> {
+            Ok(Box::new(MockVenue { submits: self.submits.clone(), sent: self.sent.clone(), answer: self.answer, rules: self.rules }))
+        }
+        fn submits(&self) -> usize {
+            self.submits.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Crypto demo orders on the Alpaca paper account, one demo buy queued per market.
+    fn alpaca_demo(markets: &[&str]) -> Mutex<Engine> {
+        let mut e = Engine::new();
+        e.fresh_crypto_prices_for_test();
+        e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CV::Alpaca), true);
+        for m in markets {
+            e.place_order("ema-cross-1", m, Side::Buy, 1_000.0, RouteIntent::Demo).expect("routed");
+        }
+        Mutex::new(e)
+    }
+
+    fn journal_count(engine: &Mutex<Engine>, needle: &str) -> usize {
+        engine.lock().unwrap().state().journal.iter().filter(|j| j.message.contains(needle)).count()
+    }
+
+    const MARKETS: [&str; 3] = ["crypto:BTC/USD", "crypto:ETH/USD", "crypto:SOL/USD"];
+
+    #[tokio::test]
+    async fn a_403_on_the_keys_is_asked_once_not_once_per_queued_order() {
+        let engine = alpaca_demo(&MARKETS);
+        let mock = Mock::new(|| Err(ConnectorError::Auth("HTTP 403 on submit: are these paper keys?".into())));
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        assert_eq!(mock.submits(), 1, "the first 403 pauses the route; the rest are not sent");
+        let e = engine.lock().unwrap();
+        assert_eq!(e.state().live.pending, 0);
+        let rejected = e.state().orders.iter().filter(|o| o.status == crate::engine::OrderStatus::Rejected).count();
+        assert_eq!(rejected, 3, "every queued order is closed with its reason");
+        assert!(e.route_paused_until(Venue::Crypto, true).is_some());
+        drop(e);
+        assert_eq!(journal_count(&engine, "DEMO order not sent"), 1, "one note for the route, not three");
+
+        // Signals keep firing: nothing reaches the venue until the pause ends.
+        let err = engine.lock().unwrap().place_order("ema-cross-1", "crypto:XRP/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap_err();
+        assert!(err.contains("backing off"), "{err}");
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        assert_eq!(mock.submits(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_insufficient_balance_refusal_holds_its_market_only() {
+        let engine = alpaca_demo(&MARKETS[..2]);
+        let mock = Mock::new(|| {
+            Err(ConnectorError::Rejected(
+                r#"submit 403: {"code":40310000,"message":"insufficient balance for USD (requested: 1000, available: 12.5)"}"#.into(),
+            ))
+        });
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        assert_eq!(mock.submits(), 2, "a balance refusal is not a route problem: both were asked");
+        let mut e = engine.lock().unwrap();
+        assert!(e.route_paused_until(Venue::Crypto, true).is_none());
+        let err = e.place_order("ema-cross-1", "crypto:BTC/USD", Side::Buy, 1_000.0, RouteIntent::Demo).unwrap_err();
+        assert!(err.contains("backing off"), "{err}");
+        assert!(e.state().journal.iter().any(|j| j.message.contains("insufficient balance: this market waits 15 min")));
+    }
+
+    #[tokio::test]
+    async fn a_wash_trade_or_a_422_is_one_request_and_a_wait() {
+        let engine = alpaca_demo(&MARKETS[..1]);
+        let mock = Mock::new(|| Err(ConnectorError::Rejected(r#"submit 403: {"message":"potential wash trade detected. use complex orders"}"#.into())));
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        assert_eq!(mock.submits(), 1);
+        assert!(journal_count(&engine, "[wash trade: this market waits 5 min]") == 1);
+
+        let engine = alpaca_demo(&MARKETS[..1]);
+        let mock = Mock::new(|| Err(ConnectorError::Rejected(r#"submit 422: {"message":"invalid crypto time_in_force"}"#.into())));
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        assert_eq!(mock.submits(), 1);
+        assert!(journal_count(&engine, "[422 unprocessable: this market waits 30 min]") == 1);
+    }
+
+    #[tokio::test]
+    async fn quantities_go_out_on_the_step_and_below_the_minimum_nothing_is_sent() {
+        let btc = CryptoRules { min_order_size: 0.0001, min_trade_increment: 1e-9, price_increment: 1.0 };
+        // On the step: what is sent is the rounded-down quantity.
+        let engine = alpaca_demo(&MARKETS[..1]);
+        let mut mock = Mock::new(|| Ok(BrokerOrder::acknowledged("alp-1", None)));
+        mock.rules = Some(btc);
+        let wanted = { engine.lock().unwrap().state().orders[0].qty };
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        let sent = mock.sent.lock().unwrap()[0];
+        assert!(sent <= wanted && wanted - sent < 1e-9, "{sent} for {wanted}");
+        assert_eq!(sent, btc.floor_qty(sent), "on the 1e-9 step");
+        assert_eq!(engine.lock().unwrap().state().live.pending, 1, "acknowledged and followed");
+
+        // Below the minimum: skipped without a request, with the reason.
+        let engine = alpaca_demo(&MARKETS[..1]);
+        let mut mock = Mock::new(|| Ok(BrokerOrder::acknowledged("never", None)));
+        mock.rules = Some(CryptoRules { min_order_size: 10.0, ..btc });
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        assert_eq!(mock.submits(), 0, "never sent to be rejected");
+        let e = engine.lock().unwrap();
+        let row = &e.state().orders[0];
+        assert!(row.reject_reason.as_deref().unwrap_or_default().contains("below"), "{row:?}");
+        assert!(e.state().journal.iter().any(|j| j.message.contains("[below the minimum order size: this market waits 30 min]")));
+    }
+
+    /// A paper account that answers with fixed positions and open orders, or fails.
+    struct MockAccount {
+        positions: Result<Vec<BrokerPosition>, ()>,
+        open: Vec<crate::connectors::alpaca_crypto::OpenOrder>,
+    }
+
+    #[async_trait]
+    impl PaperAccount for MockAccount {
+        async fn crypto_positions(&self) -> Result<Vec<BrokerPosition>, ConnectorError> {
+            self.positions.clone().map_err(|_| ConnectorError::Network("timed out".into()))
+        }
+        async fn open_crypto_orders(&self) -> Result<Vec<crate::connectors::alpaca_crypto::OpenOrder>, ConnectorError> {
+            Ok(self.open.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_paper_reconcile_reads_positions_and_open_orders_and_needs_both() {
+        let engine = alpaca_demo(&MARKETS[..1]);
+        let mock = Mock::new(|| {
+            let mut o = BrokerOrder::acknowledged("alp-1", None);
+            o.status = crate::connectors::BrokerOrderStatus::Filled;
+            o.filled_qty = 0.016;
+            o.avg_price = Some(62_000.0);
+            Ok(o)
+        });
+        submit_pending_with(&engine, |_| mock.conn()).await;
+        let btc = BrokerPosition { symbol: "BTC/USD".into(), qty: 0.016, avg_price: 62_000.0, market_value: 992.0 };
+
+        // A failed read changes nothing and says why.
+        let down = MockAccount { positions: Err(()), open: Vec::new() };
+        reconcile_demo_with(&engine, &down).await;
+        let d = engine.lock().unwrap().demo_reconcile().unwrap();
+        assert!(d.error.unwrap_or_default().contains("timed out"));
+
+        // Agreement.
+        let up = MockAccount { positions: Ok(vec![btc.clone()]), open: Vec::new() };
+        reconcile_demo_with(&engine, &up).await;
+        let d = engine.lock().unwrap().demo_reconcile().unwrap();
+        assert_eq!((d.mismatches, d.error), (0, None));
+
+        // A stray open order is reported.
+        let open = parse_open_orders(&serde_json::json!([{"id":"x","symbol":"BTC/USD","asset_class":"crypto","side":"sell","qty":"0.016","filled_qty":"0","status":"new"}]));
+        let stray = MockAccount { positions: Ok(vec![btc]), open };
+        reconcile_demo_with(&engine, &stray).await;
+        let d = engine.lock().unwrap().demo_reconcile().unwrap();
+        assert_eq!(d.stray_orders.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_paper_route_means_no_paper_reconcile() {
+        let engine = Mutex::new(Engine::new());
+        reconcile_demo(&engine, &Credentials::default()).await;
+        assert!(engine.lock().unwrap().demo_reconcile().is_none());
     }
 }
