@@ -36,7 +36,8 @@ Where the band comes from, best first:
   python -m lab.paper.forward_report --export-backtests [--source DIR]
       write the backtest series from whatever this machine has: the momentum
       books from the history files, the sweep candidates from the sweep's run
-      caches, M4 from the xs_daily pick cache. --source reads those inputs
+      caches, the tranche book re-simulated on the sweep's cached panel, M4
+      from the xs_daily pick cache. --source reads those inputs
       from DIR instead of PYTHIA_DATA (nothing is written there).
 
 Environment: PYTHIA_AUTOPILOT_STATE_URL (default http://127.0.0.1:8788/api/state;
@@ -83,6 +84,7 @@ BOOKS: dict[str, str] = {
     "tsmom_regime": "Momentum with BTC regime filter",
     "tsmom_top20": "Momentum, 20 most traded coins each day",
     "breakout_top10": "Breakout, 10 most traded coins each day",
+    "tsmom_tranches": "Momentum in seven weekly tranches, 20 most traded coins each day",
     "m4_ls": "M4 market-neutral (perps)",
     "picks_ls": "M2 market-neutral (perps)",
     "picks_ls_v2": "M2 v2 market-neutral (perps)",
@@ -278,6 +280,12 @@ def report_stats(book: str, root: Path | None = None) -> dict | None:
             p = next(x for x in rep["picks"] if x["variant"] == variant)
             return {"cagr": p["oos_cagr_15bps"], "vol": p["oos_vol"], "max_dd": p["oos_max_dd_15bps"],
                     "source": "strategy-family sweep"}
+        if book == "tsmom_tranches":
+            out = Path(os.environ.get("PYTHIA_AGENT_OUT", str(root / "agent-strategies")))
+            rep = _read_json(out / "reports" / "tsmom_tranches.json", root / "lab-cache" / "reports" / "tsmom_tranches.json")
+            p = rep["rows"][0]
+            return {"cagr": p["cagr_maker 15bps"], "vol": vol_from_sharpe(p["cagr_maker 15bps"], p["oos_maker 15bps"]),
+                    "max_dd": p["dd_maker 15bps"], "source": "tsmom_tranches report"}
         if book == "m4_ls":
             rep = _read_json(*(r / "xs_daily" / "latest.json" for r in reports))
             p = rep["slow_pick"] if isinstance(rep.get("slow_pick"), dict) else next(
@@ -734,6 +742,21 @@ def export_backtests(source: Path) -> None:
     except (StopIteration, OSError, KeyError, ValueError) as e:
         print("sweep candidates skipped:", type(e).__name__, e, file=sys.stderr)
 
+    # The tranche book: re-simulated on the sweep's cached panel (its own run is not cached).
+    try:
+        from ..experiments import fam_common as fc
+        from ..experiments import tsmom_tranches as tranches
+        cache = fc.OUT / "cache" / "daily_panel.parquet"
+        if not cache.exists():
+            raise OSError(f"no cached sweep panel at {cache}")
+        P = fc.load_panel()
+        g, tv, _, _, _, _ = tranches.simulate(P, tranches.targets(P))
+        _, oos = fc.masks(P)
+        net = (g - 0.0015 * np.r_[0.0, tv[:-1]])[oos]
+        _save_series("tsmom_tranches", net, "tsmom_tranches backtest", 1, _day(P.days[oos][0]), _day(P.days[oos][-1]))
+    except (OSError, KeyError, ValueError) as e:
+        print("tsmom_tranches skipped:", type(e).__name__, e, file=sys.stderr)
+
     # M4: the xs_daily pick cache (holdout from 2024).
     try:
         import polars as pl
@@ -751,7 +774,7 @@ def export_backtests(source: Path) -> None:
         df = pl.read_parquet(f).filter(pl.col("day") >= holdout).sort("day")
         net = (df["gross"] + df["funding"].fill_null(0.0) - df["turnover"] * 0.0015).to_numpy()
         _save_series("m4_ls", net, f"xs_daily holdout ({slow})", 1, _day(df["day"][0]), _day(df["day"][-1]))
-    except (StopIteration, OSError, KeyError, ValueError, TypeError, ImportError) as e:
+    except (StopIteration, OSError, KeyError, ValueError, TypeError, ImportError, AttributeError) as e:
         print("m4_ls skipped:", type(e).__name__, e, file=sys.stderr)
 
 

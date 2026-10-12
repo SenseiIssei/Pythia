@@ -22,6 +22,7 @@ const BOOK_LABEL: Record<string, string> = {
   tsmom_regime: "Momentum with BTC regime filter",
   tsmom_top20: "Momentum, 20 most traded coins each day",
   breakout_top10: "Breakout, 10 most traded coins each day",
+  tsmom_tranches: "Momentum in seven weekly tranches, 20 most traded coins each day",
   m4_ls: "M4 market-neutral (perps)",
   picks_ls: "M2 market-neutral (perps)",
   picks_ls_v2: "M2 v2 market-neutral (perps)",
