@@ -153,8 +153,57 @@ fn kraken_symbol(key: &str) -> Option<&'static str> {
     KRAKEN_PAIRS.iter().find(|(req, reply, _)| *reply == key || *req == key).map(|(_, _, sym)| *sym)
 }
 
-/// The equity universe we pull real quotes for (mirrors the engine's Alpaca seeds).
-pub const ALPACA_SYMBOLS: [&str; 5] = ["AAPL", "NVDA", "MSFT", "AMZN", "TSLA"];
+/// The five stocks the engine has always seeded (and its default strategies trade).
+pub const ALPACA_STOCKS: [&str; 5] = ["AAPL", "NVDA", "MSFT", "AMZN", "TSLA"];
+
+/// The ETFs of the lab's `etf_trend` study: US large, tech and small caps,
+/// long and mid Treasuries, gold, silver, four sectors, developed and
+/// emerging markets, real estate and broad commodities.
+pub const ALPACA_ETFS: [&str; 15] = [
+    "SPY", "QQQ", "IWM", "TLT", "IEF", "GLD", "SLV", "XLE", "XLF", "XLK", "XLV", "EFA", "EEM", "VNQ", "DBC",
+];
+
+/// The equity symbols in a list: separated by commas, spaces or new lines,
+/// `#` starts a comment. Upper-cased; anything that is not a plain ticker
+/// (1 to 10 of A-Z, 0-9 and `.`, starting with a letter) is skipped, and so
+/// is a repeat.
+pub fn parse_equity_list(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("");
+        for tok in line.split(|c: char| c == ',' || c.is_whitespace()) {
+            let t = tok.trim().to_ascii_uppercase();
+            let ok = (1..=10).contains(&t.len())
+                && t.starts_with(|c: char| c.is_ascii_uppercase())
+                && t.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.');
+            if ok && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// The equity universe the engine quotes and trades on Alpaca:
+/// `PYTHIA_EQUITIES` (a list as [`parse_equity_list`] reads it), else the
+/// file named by `PYTHIA_EQUITIES_FILE`, else the five stocks and the ETFs.
+/// A setting that names no valid symbol falls back to the default.
+pub fn equity_symbols() -> Vec<String> {
+    equity_symbols_from(
+        std::env::var("PYTHIA_EQUITIES").ok().as_deref(),
+        std::env::var("PYTHIA_EQUITIES_FILE").ok().and_then(|f| std::fs::read_to_string(f).ok()).as_deref(),
+    )
+}
+
+fn equity_symbols_from(env: Option<&str>, file: Option<&str>) -> Vec<String> {
+    for text in [env, file].into_iter().flatten() {
+        let list = parse_equity_list(text);
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    ALPACA_STOCKS.iter().chain(ALPACA_ETFS.iter()).map(|s| s.to_string()).collect()
+}
 
 /// Alpaca multi-symbol snapshots → real last-trade price + daily change.
 ///
@@ -169,7 +218,7 @@ pub async fn fetch_alpaca(key_id: &str, secret: &str, feed: &str) -> Vec<RealEqu
     }
     let url = format!(
         "https://data.alpaca.markets/v2/stocks/snapshots?symbols={}&feed={}",
-        ALPACA_SYMBOLS.join(","),
+        equity_symbols().join(","),
         feed
     );
     let fut = async {
@@ -288,7 +337,7 @@ pub async fn fetch_alpaca_bars(
     let start = (chrono::Utc::now() - chrono::Duration::days(lookback_days)).to_rfc3339();
     let base = format!(
         "https://data.alpaca.markets/v2/stocks/bars?symbols={}&timeframe={}&start={}&feed={}&adjustment=split&sort=asc&limit=10000",
-        ALPACA_SYMBOLS.join(","),
+        equity_symbols().join(","),
         timeframe,
         urlencode(&start),
         feed
@@ -620,6 +669,22 @@ fn parse_end_date(m: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_equity_list_is_read_from_the_env_then_the_file_then_the_default() {
+        assert_eq!(
+            parse_equity_list("spy, QQQ\n# bonds\nTLT IEF # comment\nBRK.B, spy, BTC/USD, 1ABC, TOOLONGTICKER"),
+            vec!["SPY", "QQQ", "TLT", "IEF", "BRK.B"]
+        );
+        let default = equity_symbols_from(None, None);
+        assert_eq!(default.len(), 20);
+        assert_eq!(&default[..5], &ALPACA_STOCKS.map(String::from)[..]);
+        assert!(default.contains(&"DBC".to_string()));
+        assert_eq!(equity_symbols_from(Some("gld"), Some("SPY")), vec!["GLD"]);
+        assert_eq!(equity_symbols_from(None, Some("SPY\nIEF")), vec!["SPY", "IEF"]);
+        // A setting with nothing usable in it does not empty the universe.
+        assert_eq!(equity_symbols_from(Some(" , # nothing"), None), default);
+    }
 
     #[test]
     fn parses_alpaca_snapshot_payload() {

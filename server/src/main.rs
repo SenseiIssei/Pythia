@@ -1628,6 +1628,7 @@ mod tests {
             evidence: Default::default(),
             autopilot_only: false,
             dropped: vec![],
+            asset_class: None,
         });
         e
     }
@@ -1673,6 +1674,7 @@ mod tests {
             evidence: Default::default(),
             autopilot_only: true,
             dropped: vec![],
+            asset_class: None,
         });
     }
 
