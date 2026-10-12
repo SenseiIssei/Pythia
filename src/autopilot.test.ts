@@ -8,6 +8,7 @@ import {
   floorAtStart,
   forwardLine,
   maturity,
+  sleeveExposure,
   worstDip,
 } from "./autopilot";
 import type { AutopilotStatus } from "./types";
@@ -210,5 +211,20 @@ describe("forwardLine", () => {
     for (const status of ["early", "ok", "watch", "below", "none"] as const) {
       for (const days of [0.5, 3, 12]) expect(forwardLine(f({ status, days }))!.text).not.toContain(String.fromCharCode(0x2014));
     }
+  });
+});
+
+describe("sleeveExposure", () => {
+  const base = { strategyId: "lab:a", name: "Lab A", weight: 0.6, pnl: 0, trades: 0, why: "", markets: [] };
+  it("names the weight and what it holds", () => {
+    expect(sleeveExposure({ ...base, exposure: 6_012.4, exposurePct: 60.1 })).toBe("60% of the amount, holds $6,012 (60% of its worth)");
+  });
+  it("says in cash when it holds nothing, also for an older engine without the field", () => {
+    expect(sleeveExposure({ ...base, exposure: 0, exposurePct: 0 })).toBe("60% of the amount, in cash right now");
+    expect(sleeveExposure(base)).toBe("60% of the amount, in cash right now");
+  });
+  it("says a dropped sleeve is being sold down or done", () => {
+    expect(sleeveExposure({ ...base, weight: 0, dropped: true, exposure: 120 })).toBe("Dropped at a re-pick, its coins are being sold down");
+    expect(sleeveExposure({ ...base, weight: 0, dropped: true, exposure: 0 })).toBe("Dropped at a re-pick, holds nothing");
   });
 });
