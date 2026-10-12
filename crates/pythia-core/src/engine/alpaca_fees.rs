@@ -231,6 +231,9 @@ impl Engine {
             s.ledger.fees += value;
             s.ledger.pnl = s.ledger.breakdown(s.pnl);
         }
+        if let Some(o) = self.orders.iter_mut().find(|o| o.id == w.order_id) {
+            o.fee = Some(o.fee.unwrap_or(0.0) + value.max(0.0));
+        }
         let mut left = coins.max(0.0);
         if left > 0.0 {
             if let Some(p) = self.positions.get_mut(&w.market_id).filter(|p| p.qty > 0.0) {

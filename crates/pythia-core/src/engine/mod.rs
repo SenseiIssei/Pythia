@@ -224,6 +224,11 @@ pub struct Order {
     /// the impact model.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub book_exhausted: bool,
+    /// What the fill paid in fees, in dollars, when that is known: the
+    /// modelled fee on a paper fill, the venue's on a live or demo one.
+    /// Alpaca crypto posts its fee at the end of the day; it is added then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee: Option<f64>,
 }
 
 fn paper_route() -> FillRoute {
@@ -2854,6 +2859,7 @@ impl Engine {
             o.book_exhausted = pf.exhausted;
             o.modelled_slippage_bps = Some(pf.modelled_bps);
             o.realised_slippage_bps = bandit::realised_cost_bps(side, price, pf.price);
+            o.fee = Some(pf.fee.max(0.0));
         }
         let real_price = self.real_ids.contains(&m.id) || self.bar_backed.contains(&m.id);
         if real_price {
@@ -4253,6 +4259,9 @@ impl Engine {
             // A demo order stays in the paper book; its route says demo.
             ord.mode = if f.demo { Mode::Paper } else { Mode::Live };
             ord.route = f.route();
+            if fee_total > 0.0 {
+                ord.fee = Some(fee_total.max(ord.fee.unwrap_or(0.0)));
+            }
             ord.status = match update.status {
                 BrokerOrderStatus::Filled => OrderStatus::Filled,
                 BrokerOrderStatus::PartiallyFilled => OrderStatus::Partial,
@@ -5793,6 +5802,7 @@ impl Engine {
             cost_source: None,
             drift_bps: None,
             book_exhausted: false,
+            fee: None,
         }
     }
     fn build_order_filled(&mut self, strategy_id: &str, m: &Market, side: Side, qty: f64, fill_price: f64) -> Order {
