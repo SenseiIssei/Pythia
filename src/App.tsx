@@ -13,6 +13,7 @@ import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
 import { Autopilot } from "./pages/Autopilot";
+import { Practice } from "./pages/Practice";
 import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
@@ -35,6 +36,7 @@ import { About } from "./pages/About";
 
 const PAGES: Record<PageId, () => ReactNode> = {
   home: HomePage,
+  practice: Practice,
   autopilot: Autopilot,
   dashboard: Dashboard,
   markets: Markets,
