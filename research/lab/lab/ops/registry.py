@@ -133,9 +133,14 @@ def predictor(name: str, folder: Path) -> Callable[[np.ndarray], np.ndarray]:
     """The champion's own model file, as the engine would run it."""
     card = read_json(folder / "card.json") or {}
     if name == "vol_1h":
+        rv = float(card.get("residual_var", 0.0))
+        if (folder / "model.txt").exists():
+            # LightGBM's own file: the same trees as the model.json the engine runs.
+            import lightgbm as lgb
+            vol = lgb.Booster(model_file=str(folder / "model.txt"))
+            return lambda X: np.exp(vol.predict(X.astype(np.float32)) + rv / 2)
         import onnxruntime as ort
         sess = ort.InferenceSession(str(folder / "model.onnx"))
-        rv = float(card.get("residual_var", 0.0))
         return lambda X: np.exp(sess.run(None, {"features": X.astype(np.float32)})[0].ravel() + rv / 2)
     import lightgbm as lgb
     booster = lgb.Booster(model_file=str(folder / "model.txt"))
