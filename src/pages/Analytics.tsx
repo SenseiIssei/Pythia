@@ -5,6 +5,7 @@ import { Card, PageHeader, Badge, EmptyState, Sparkline, MultiLineChart, Term, f
 import { costWarning } from "../components/PnlBreakdown";
 import { breakdown } from "../engine/costs";
 import type { FillRoute, PnlBreakdown, SlippageRow, StrategyConfig } from "../types";
+import { makerShare } from "../lib/maker";
 
 export function Analytics() {
   const { portfolio, strategies, orders, slippage } = useStore();
@@ -137,6 +138,19 @@ export function Analytics() {
                   title="Realised slippage against the arrival price, next to what the cost model expected"
                 >
                   {o.realisedSlippageBps.toFixed(1)} bps vs {(o.modelledSlippageBps ?? 0).toFixed(1)} modelled
+                </span>
+              )}
+              {makerShare(o) && (
+                <Badge tone="neutral" title="Filled resting at our own limit (maker fee) vs by crossing (taker fee)">
+                  {makerShare(o)}
+                </Badge>
+              )}
+              {o.realisedCostBps !== undefined && (
+                <span
+                  className={o.realisedCostBps > (o.modelledCostBps ?? 0) ? "text-warning" : "text-success"}
+                  title="Slippage plus the fee of the maker and taker mix, next to the model's cost for a market order"
+                >
+                  cost {o.realisedCostBps.toFixed(1)} bps vs {(o.modelledCostBps ?? 0).toFixed(1)} as taker
                 </span>
               )}
               <Badge tone="neutral">{o.strategyId}</Badge>
