@@ -63,6 +63,8 @@ import {
   forwardLine,
   isActive,
   limit,
+  REPICK_CHOICES,
+  sleeveExposure,
   type Stop,
 } from "../autopilot";
 import type { AutopilotConfig, AutopilotStart, AutopilotStatus, Venue } from "../types";
@@ -355,6 +357,7 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   const [venue, setVenue] = useState<Venue>("crypto");
   const [amount, setAmount] = useState("1000");
   const [pick, setPick] = useState<"auto" | "manual">("auto");
+  const [repick, setRepick] = useState(24);
   const [weights, setWeights] = useState<Record<string, string>>({});
   const [lossPctOn, setLossPctOn] = useState(false);
   const [lossPct, setLossPct] = useState("10");
@@ -463,6 +466,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
       assetClass: venue,
       capitalUsd: capital,
       sleeves: pick === "manual" ? chosen.map((x) => ({ strategyId: x.s.id, weight: x.w / weightSum })) : [],
+      // Re-picking applies only when Pythia chooses; 0 turns it off.
+      ...(pick === "auto" ? { repickEveryHours: repick } : {}),
       stop,
       flattenOnStop: flatten,
       ...(mode === "live" ? { confirm: typed.trim().toUpperCase() } : {}),
@@ -575,6 +580,32 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
               detail="Choose strategies yourself and how much of the amount each may use."
             />
           </div>
+          {pick === "auto" && (
+            <div className="mt-3 space-y-1.5 text-xs text-cyber-text-dim">
+              <p>
+                For crypto it can run up to three of the lab's strategies together. Their targets are added up per coin, so
+                each coin is one position, and each strategy gets a share of the amount by the strength of its evidence.
+              </p>
+              <label className="flex flex-wrap items-center gap-2">
+                <span>Choose again with fresh evidence</span>
+                <select
+                  value={repick}
+                  onChange={(e) => setRepick(Number(e.target.value))}
+                  aria-label="How often it chooses again"
+                  className="rounded border border-cyber-border bg-cyber-bg px-2 py-1 text-cyber-text"
+                >
+                  {REPICK_CHOICES.map((c) => (
+                    <option key={c.hours} value={c.hours}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="text-[11px] text-cyber-text-faint">
+                A change is traded in at the next rebalance, only by the difference per coin. Nothing is sold off at once.
+              </p>
+            </div>
+          )}
           {pick === "manual" && (
             <div className="mt-3 space-y-1.5">
               {eligible.length === 0 ? (
@@ -990,6 +1021,12 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
           <div className="text-[11px] uppercase tracking-wider text-cyber-text-faint">Last action</div>
           <div className="mt-0.5 text-cyber-text">{s.lastAction ?? "Nothing yet. It is waiting for its first signal."}</div>
         </div>
+        {s.waiting && (
+          <div className="mt-2 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2.5 text-sm text-cyber-text-dim">{s.waiting}</div>
+        )}
+        {s.nextRepickMs != null && (
+          <div className="mt-2 text-xs text-cyber-text-faint">Chooses its strategies again with fresh evidence around {fmtWhen(s.nextRepickMs)}.</div>
+        )}
 
         <div className="mt-3 space-y-2">
           {s.bySleeve.length === 0 ? (
@@ -1007,7 +1044,7 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
                 </div>
                 <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-cyber-text-faint">
                   <span>
-                    <Term k="Strategy share">{(b.weight * 100).toFixed(0)}% of the amount</Term>
+                    <Term k="Strategy share">{sleeveExposure(b)}</Term>
                   </span>
                   <span>{b.trades} trade{b.trades === 1 ? "" : "s"}</span>
                 </div>

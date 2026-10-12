@@ -904,6 +904,12 @@ export interface AutopilotConfig {
   stop: AutopilotStopRules;
   /** Close its positions when it stops (default true). */
   flattenOnStop: boolean;
+  /** "Auto" picks at most this many strategies (default 3). */
+  maxSleeves?: number;
+  /** Re-run the auto pick with fresh evidence every this many hours. Auto
+   *  pick only: absent means every 24 hours, 0 turns it off. The engine
+   *  echoes what it uses (absent when off). */
+  repickEveryHours?: number;
 }
 
 /** What the Autopilot page's setup hands over: the config plus the phrase a
@@ -922,8 +928,15 @@ export interface AutopilotSleeveStatus {
   trades: number;
   /** Why this strategy is in the autopilot, in one sentence. */
   why: string;
-  /** Markets assigned to this sleeve; no other sleeve or autopilot trades them. */
+  /** Markets assigned to this sleeve; no other sleeve or autopilot trades
+   *  them, except lab books, which net their targets on the same coins. */
   markets: string[];
+  /** What it holds right now at the mark: its share of every position. */
+  exposure?: number;
+  /** `exposure` as a percent of the autopilot's equity. */
+  exposurePct?: number;
+  /** A re-pick took its weight to zero; listed for its record. */
+  dropped?: boolean;
 }
 
 export interface AutopilotStatus {
@@ -956,6 +969,10 @@ export interface AutopilotStatus {
   /** Its forward result against the backtest, from the lab's daily forward
    *  report. Only while it is active; absent when the report says nothing. */
   forward?: AutopilotForward | null;
+  /** Running and holding nothing: in cash, waiting for signals, and why. */
+  waiting?: string | null;
+  /** When the auto pick runs again with fresh evidence, if it does. */
+  nextRepickMs?: number | null;
 }
 
 /** An autopilot's forward result held against its backtest's band. */

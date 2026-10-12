@@ -6,7 +6,7 @@
 // 12.5 %), like `RiskStatus.drawdownPct`. Sleeve weights are fractions that
 // add up to 1.
 
-import type { AutopilotConfig, AutopilotForward, AutopilotStatus, Market, PnlBreakdown } from "./types";
+import type { AutopilotConfig, AutopilotForward, AutopilotSleeveStatus, AutopilotStatus, Market, PnlBreakdown } from "./types";
 
 export const DAY_MS = 86_400_000;
 
@@ -278,4 +278,27 @@ export function forwardLine(f: AutopilotForward | null | undefined): ForwardLine
     default:
       return null;
   }
+}
+
+/** Re-pick choices on the setup form, in hours; 0 is off. */
+export const REPICK_CHOICES: { hours: number; label: string }[] = [
+  { hours: 24, label: "every day" },
+  { hours: 168, label: "every week" },
+  { hours: 0, label: "never" },
+];
+
+/**
+ * One sleeve's weight and what it holds right now, in plain words. A
+ * dropped sleeve says so; a sleeve that holds nothing is "in cash".
+ */
+export function sleeveExposure(b: AutopilotSleeveStatus): string {
+  const share = `${(b.weight * 100).toFixed(0)}% of the amount`;
+  if (b.dropped) {
+    const left = b.exposure != null && b.exposure >= 0.5;
+    return left ? "Dropped at a re-pick, its coins are being sold down" : "Dropped at a re-pick, holds nothing";
+  }
+  const usd = b.exposure ?? 0;
+  if (!(usd >= 0.5)) return `${share}, in cash right now`;
+  const pct = b.exposurePct != null && Number.isFinite(b.exposurePct) ? ` (${b.exposurePct.toFixed(0)}% of its worth)` : "";
+  return `${share}, holds ${Math.round(usd).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })}${pct}`;
 }
