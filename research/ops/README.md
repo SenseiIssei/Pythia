@@ -13,7 +13,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 04:45 | M4 shadow paper book, market-neutral on perps (`lab.paper.m4_ls`, 2 to 3 minutes, about 3 GB; rebuilds the xs_daily panel and retrains weekly into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-m4` |
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
-| Sun 05:00 | volatility model retrain (published only if it passes) | `/etc/cron.d/pythia-retrain` |
+| 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | hourly :07 | health check of all of the above | `/etc/cron.d/pythia-health` |
 
@@ -59,6 +59,83 @@ scp <exported>/forward/backtest/*.json pythia-vps:/srv/pythia-data/reports/forwa
 
 Re-export after an experiment is re-run. Books without a file fall back to an
 approximate band from their report (growth and volatility), marked as such.
+
+## Learning loop
+
+`lab.ops.learn` runs every night after the forward report and keeps the
+system improving on its own, inside fixed bounds. Each step is isolated; a
+failing one is named in the digest and the rest still run.
+
+| Step | When | What it does | Writes |
+|---|---|---|---|
+| costs | nightly | reads the autopilot engine's orders (`GET /api/state`, or `PYTHIA_LEARN_ORDERS_FILE`), keeps the finished demo orders of the Alpaca paper account in a ledger that only grows, measures per symbol realised against modelled and base-table slippage and the maker (limit) and taker (market) fill rates. A symbol's `halfSpreadBps` and `impactCoeff` are scaled by realised over base cost only from 30 market fills on, by at most 4x and inside fixed bounds; fees, borrow, minimum notional and depth never move | `learn/fills.jsonl`, `costs/learned.json` (base table plus a `measured` section) |
+| evidence | nightly | snapshots `reports/forward/evidence.json` and tracks, per paper book and autopilot, its status, since when, the one before and how often it was ok in the last 30 reports | `learn/evidence_history.jsonl`, `reports/learn/evidence.json` |
+| sweep | every 28 days | re-runs the strategy-family sweep on fresh data in `learn/sweep/<date>`; publishes its reports and run caches to `PYTHIA_AGENT_OUT` only if every pick is there with finite numbers and no fewer variants are counted (the old files are kept in `models/registry/families_sweep/previous/`); lists every gate that flipped. A pick that newly passes is flagged for the owner's review | `reports/learn/gates.json` |
+| vol | Sundays | retrains the volatility model as a challenger (`lab.experiments.vol --challenger`) | `models/registry/vol_1h/` |
+| m2 | every 28 days | retrains M2 v2 as a challenger (`lab.experiments.picks --perp-features --challenger`) | `models/registry/picks_7d/` |
+| digest | nightly | what changed, what was promoted or rejected and why, each autopilot's P&L today and since start against BTC over the same windows | `reports/learn/latest.md`, `latest.json`, dated copies |
+
+**Champion and challenger.** A challenger first has to pass its own gate (the
+volatility model: better than HAR, significant, not worse in the last four
+quarters; M2: walk-forward rank-IC positive with t of at least 2). Then both
+are scored on the rows the champion never saw (after its training end plus the
+label horizon): the champion with its own model file, the challenger with the
+walk-forward predictions behind its out-of-sample numbers. It replaces the
+champion only if it wins by a margin (1 % lower QLIKE, 0.005 higher rank-IC) on
+a window of at least 7 days (vol) or 14 days (M2); otherwise the champion
+stays. A promotion is copied to `models/<name>/<version>/`, a name that sorts
+after the running one, so the engine switches to it on its next hourly check.
+Every decision, promoted or not, is a line in
+`models/registry/<name>/decisions.jsonl`; `champion.json` says which version is
+in force and since when. Without a champion, a challenger that passes its gate
+is promoted.
+
+**What it can never do** (`lab/ops/guard.py`, tested): write anywhere but its
+own folders, the learned cost file, the model registry and the published model
+folders (never the engine's state, settings, keys or the paper books); call the
+engine for anything but `GET /api/state`; change a fee, a venue default or a
+symbol the base table does not list. Live settings, arming live, moving money
+and risk limits live in the engine's state and settings, which the loop only
+reads, so it cannot change them. The engine's own auto pick keeps reading the
+forward report's `evidence.json` as before.
+
+Install once: the base cost table the loop scales from (copy again whenever
+`config/costs.json` changes in the repo), then the cron line. The weekly
+retrain moves into the loop, so its old cron line goes.
+
+```bash
+install -D -m 644 config/costs.json /srv/pythia-data/costs/base.json
+```
+
+```bash
+rm -f /etc/cron.d/pythia-retrain
+```
+
+`/etc/cron.d/pythia-learn` (host network to read the autopilot engine on
+127.0.0.1:8788; `PYTHIA_AGENT_OUT` the same folder the paper-families job uses):
+
+```cron
+# Pythia: nightly learning loop. Updates evidence, costs and models within fixed bounds; never touches live settings or money.
+30 6 * * * root docker run --rm --network host --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.learn >> /var/log/pythia-learn.log 2>&1
+```
+
+Run a step now, or leave the heavy ones out:
+
+```bash
+docker run --rm --network host --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.learn --force vol
+```
+
+```bash
+docker run --rm --network host --memory 2g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.learn --no-train
+```
+
+Both engines already mount the reports read-only, so the Lab page of either
+shows the digest as "What the system learned last night". The learned costs
+are used only if the operator opts in: add
+`-e PYTHIA_COSTS_FILE=/data/costs/learned.json -v /srv/pythia-data/costs:/data/costs:ro`
+to the autopilot engine's `docker run` and recreate the container (the cost
+file is read at start). Until a symbol has 30 demo market fills the learned
+file equals the base table for it.
 
 ## Market data in the engine
 
