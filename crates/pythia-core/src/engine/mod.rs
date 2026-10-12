@@ -30,7 +30,7 @@ use crate::validation;
 use crate::marketdata::{BarSeries, Ohlc, RealCrypto, RealEquity, RealPrediction};
 use crate::orderbook::{BookQuote, BookSnapshot, CostSource, ExecCost};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 // ── serialized enums (match the TypeScript unions) ─────────────────────────
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -4795,32 +4795,78 @@ impl Engine {
     }
 
     /// Move every lab book to its latest targets, once per signal.
+    ///
+    /// The lab books of one autopilot are one netted book: their targets are
+    /// scaled by their sleeve weights and added up per coin
+    /// ([`autopilot::net_lab_targets`]), and that one target is rebalanced
+    /// with the autopilot's capital, one position per coin. Each book's share
+    /// of the target per coin is handed to the autopilot, which splits fills,
+    /// fees and P&L by it. A book on its own is the same with one member.
     fn run_lab_books(&mut self) {
         let now = self.now();
-        let ids: Vec<(usize, String)> = self
+        let ids: Vec<String> = self
             .strategies
             .iter()
-            .enumerate()
-            .filter(|(_, s)| s.kind == StrategyKind::LabTargets && s.state != StrategyState::Paused)
-            .map(|(i, s)| (i, s.id.clone()))
+            .filter(|s| s.kind == StrategyKind::LabTargets && s.state != StrategyState::Paused)
+            .map(|s| s.id.clone())
             .collect();
-        for (idx, sid) in ids {
-            let Some(sig) = self.lab_signals.get(&sid).cloned() else { continue };
-            if self.lab_done.get(&sid) == Some(&sig.generated_ms) {
-                continue;
-            }
-            // Inside an autopilot: its capital, its positions, and nothing
-            // while it is paused.
-            let scope = self.autopilot_lab_scope(&sid);
-            if scope.as_ref().is_some_and(|s| !s.running) {
-                continue;
+        let mut groups_done: HashSet<usize> = HashSet::new();
+        for sid in ids {
+            // Inside an autopilot: its capital, its positions, all its lab
+            // books together, and nothing while it is paused.
+            let group = self.autopilot_lab_group(&sid);
+            if let Some(g) = &group {
+                if !groups_done.insert(g.ap) || !g.running {
+                    continue;
+                }
             }
             // An idle book never trades on its own, whatever its state says.
-            if scope.is_none() && self.lab_book_autopilot_only(&sid) {
+            if group.is_none() && self.lab_book_autopilot_only(&sid) {
                 continue;
             }
-            let attempt = match self.lab_retry.get(&sid) {
-                Some(&(g, n, last)) if g == sig.generated_ms => {
+            let members: Vec<(String, f64)> = match &group {
+                Some(g) => g.members.clone(),
+                None => vec![(sid.clone(), 1.0)],
+            };
+            // The book that places orders for coins nobody holds yet: the
+            // heaviest one (a coin already held is traded by its holder).
+            let lead = members
+                .iter()
+                .fold(None::<&(String, f64)>, |b, m| match b {
+                    Some(x) if x.1 >= m.1 => Some(x),
+                    _ => Some(m),
+                })
+                .map(|m| m.0.clone())
+                .unwrap_or_else(|| sid.clone());
+            let Some(idx) = self.strategies.iter().position(|s| s.id == lead) else { continue };
+            let sigs: Vec<(String, f64, crate::lab::LabSignal)> = members
+                .iter()
+                .filter_map(|(m, scale)| self.lab_signals.get(m).map(|g| (m.clone(), *scale, g.clone())))
+                .collect();
+            let Some(sig) = sigs.iter().find(|x| x.0 == lead).map(|x| x.2.clone()).or_else(|| sigs.first().map(|x| x.2.clone())) else {
+                continue;
+            };
+            // Due when a book with weight has a fresh signal not yet traded.
+            let due = sigs.iter().any(|(m, scale, g)| {
+                (*scale > 0.0 || members.len() == 1) && g.is_fresh(now) && self.lab_done.get(m) != Some(&g.generated_ms)
+            });
+            let generated = sigs.iter().map(|x| x.2.generated_ms).max().unwrap_or(sig.generated_ms);
+            if !due {
+                // One book alone, with a signal past its window: said once.
+                if members.len() == 1 && !sig.is_fresh(now) && self.lab_done.get(&lead) != Some(&sig.generated_ms) {
+                    if self.lab_notes.insert(format!("stale:{lead}:{}", sig.generated_ms)) {
+                        self.log(
+                            JournalKind::System,
+                            "Lab signal is past its validity window; holding positions as they are until a fresh one arrives".into(),
+                            Some(lead.clone()),
+                            None,
+                        );
+                    }
+                }
+                continue;
+            }
+            let attempt = match self.lab_retry.get(&lead) {
+                Some(&(g, n, last)) if g == generated => {
                     if now - last < LAB_RETRY_EVERY_MS {
                         continue;
                     }
@@ -4828,44 +4874,34 @@ impl Engine {
                 }
                 _ => 1,
             };
-            if !sig.is_fresh(now) {
-                if self.lab_notes.insert(format!("stale:{sid}:{}", sig.generated_ms)) {
-                    self.log(
-                        JournalKind::System,
-                        "Lab signal is past its validity window; holding positions as they are until a fresh one arrives".into(),
-                        Some(sid.clone()),
-                        None,
-                    );
-                }
-                continue;
-            }
             // Only real prices: a rebalance against the simulator is no evidence of anything.
             let crypto: Vec<Market> = self.markets.iter().filter(|m| m.venue == Venue::Crypto).cloned().collect();
             if !crypto.iter().any(|m| self.real_ids.contains(&m.id)) {
-                if self.lab_notes.insert(format!("noprices:{sid}")) {
-                    self.log(JournalKind::System, "Lab book waits for real crypto prices".into(), Some(sid.clone()), None);
+                if self.lab_notes.insert(format!("noprices:{lead}")) {
+                    self.log(JournalKind::System, "Lab book waits for real crypto prices".into(), Some(lead.clone()), None);
                 }
                 continue;
             }
+            let member_ids: HashSet<String> = members.iter().map(|m| m.0.clone()).collect();
             let mut owned_elsewhere = vec![];
             // Coins the demo route cannot trade (not listed on the Alpaca
             // paper account): skipped, their weight stays in cash. The rest
             // keep their own weights; nothing is scaled up to fill the gap.
             let mut unlisted: Vec<String> = vec![];
             let demo_route =
-                self.autopilot_route(&sid).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state)) == RouteIntent::Demo;
+                self.autopilot_route(&lead).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state)) == RouteIntent::Demo;
             let mut prices = HashMap::new();
-            // A position is this book's when the strategy holds it and, inside
-            // an autopilot, the autopilot owns it.
+            // A position is this book's when one of its books holds it and,
+            // inside an autopilot, the autopilot owns it.
             let mine = |id: &str, p: &PositionInternal| {
-                p.strategy_id == sid && scope.as_ref().is_none_or(|s| s.owned.contains(id))
+                member_ids.contains(&p.strategy_id) && group.as_ref().is_none_or(|g| g.owned.contains(id))
             };
             for m in &crypto {
                 match self.positions.get(&m.id) {
                     Some(p) if !mine(&m.id, p) && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
                     None if demo_route && !self.demo_lists(m) => unlisted.push(m.symbol.clone()),
                     // A market an autopilot reserved for someone else.
-                    None if !self.autopilot_entry_allowed(&sid, &m.id) => owned_elsewhere.push(m.symbol.clone()),
+                    None if !self.autopilot_entry_allowed(&lead, &m.id) => owned_elsewhere.push(m.symbol.clone()),
                     _ if self.real_ids.contains(&m.id) => {
                         prices.insert(m.id.clone(), m.price);
                     }
@@ -4878,24 +4914,72 @@ impl Engine {
                 .filter(|(k, p)| mine(k, p))
                 .map(|(k, p)| (k.clone(), (p.qty, p.avg_price)))
                 .collect();
-            let capital = match &scope {
-                Some(s) => s.capital,
+            let holders: HashMap<String, String> =
+                self.positions.iter().filter(|(k, p)| mine(k, p)).map(|(k, p)| (k.clone(), p.strategy_id.clone())).collect();
+            let capital = match &group {
+                Some(g) => g.capital,
                 None => self.strategies[idx].budget_pct / 100.0 * self.equity(),
             };
+            // A book whose signal is past its window holds its last targets
+            // inside the netted book: its share stays invested as it was,
+            // neither sold off nor topped up on old news.
+            let stale: Vec<String> = sigs
+                .iter()
+                .filter(|(_, scale, g)| *scale > 0.0 && !g.is_fresh(now))
+                .filter_map(|(m, ..)| self.strategies.iter().find(|s| &s.id == m).map(|s| s.name.clone()))
+                .collect();
+            let books: Vec<(String, f64, &BTreeMap<String, f64>)> =
+                sigs.iter().map(|(m, scale, g)| (m.clone(), if members.len() == 1 { 1.0 } else { *scale }, &g.weights)).collect();
+            let (weights, coin_shares) = autopilot::net_lab_targets(&books);
             let has_market = |coin: &str| -> Option<String> { Some(format!("crypto:{coin}/USD")) };
             let (orders, mut untradable) =
-                crate::lab::rebalance(&sig.weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+                crate::lab::rebalance(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
             // A coin held by another strategy is reported as that, not as missing.
             untradable.retain(|c| !owned_elsewhere.iter().any(|s| s == &format!("{c}/USD")));
             // An unlisted coin the lab wants is named once, as that.
             let skipped: Vec<String> =
-                unlisted.iter().filter(|s| sig.weights.keys().any(|c| **s == format!("{c}/USD"))).cloned().collect();
+                unlisted.iter().filter(|s| weights.keys().any(|c| **s == format!("{c}/USD"))).cloned().collect();
             untradable.retain(|c| !unlisted.iter().any(|s| s == &format!("{c}/USD")));
+            if let Some(g) = &group {
+                // The netted target per market, each book's share of it, and
+                // why it holds cash when it holds nothing.
+                let mut targets = BTreeMap::new();
+                let mut shares = BTreeMap::new();
+                for (coin, w) in &weights {
+                    let m = format!("crypto:{coin}/USD");
+                    if prices.contains_key(&m) {
+                        targets.insert(m.clone(), *w * g.capital);
+                    }
+                    if let Some(sh) = coin_shares.get(coin) {
+                        shares.insert(m, sh.clone());
+                    }
+                }
+                let equity = self.autopilot_equity(g.ap).max(0.0);
+                let targets: BTreeMap<String, f64> =
+                    targets.into_iter().map(|(m, v)| (m, if equity > 0.0 { v / equity } else { 0.0 })).collect();
+                let wanted: Vec<String> = weights.keys().map(|c| format!("{c}/USD")).collect();
+                let cash_note = if targets.values().sum::<f64>() > 1e-9 {
+                    None
+                } else if wanted.is_empty() {
+                    Some(if members.iter().filter(|m| m.1 > 0.0).count() > 1 {
+                        "its lab books want no coins today".to_string()
+                    } else {
+                        "its lab book wants no coins today".to_string()
+                    })
+                } else if !skipped.is_empty() && skipped.len() == wanted.len() {
+                    Some(format!("the lab wants only {}, which the demo route (Alpaca) does not list", skipped.join(", ")))
+                } else {
+                    Some(format!("the lab wants only {}, which cannot be traded here now", wanted.join(", ")))
+                };
+                self.autopilot_lab_retarget(g.ap, targets, shares, cash_note);
+            }
             let n = orders.len();
             let mut refused = 0;
             for o in orders {
                 let Some(m) = crypto.iter().find(|m| m.id == o.market_id).cloned() else { continue };
-                if !self.place_lab_order(idx, &m, o.side, o.notional) {
+                // A coin already held is traded by the book that holds it.
+                let by = holders.get(&m.id).and_then(|h| self.strategies.iter().position(|s| &s.id == h)).unwrap_or(idx);
+                if !self.place_lab_order(by, &m, o.side, o.notional) {
                     refused += 1;
                 }
             }
@@ -4909,26 +4993,48 @@ impl Engine {
             // computed from the holdings as they are then, so whatever did fill
             // is not ordered twice.
             if refused > 0 && attempt < LAB_RETRY_MAX {
-                self.lab_retry.insert(sid.clone(), (sig.generated_ms, attempt, now));
+                self.lab_retry.insert(lead.clone(), (generated, attempt, now));
                 self.log(
                     JournalKind::Risk,
                     format!(
                         "Rebalance toward the lab's weights of {day}: {refused} of {n} orders refused, trying again in {} minutes (attempt {attempt} of {LAB_RETRY_MAX})",
                         LAB_RETRY_EVERY_MS / 60_000
                     ),
-                    Some(sid),
+                    Some(lead),
                     None,
                 );
                 continue;
             }
-            self.lab_retry.remove(&sid);
-            self.lab_done.insert(sid.clone(), sig.generated_ms);
-            let mut note = format!(
-                "Rebalanced toward the lab's weights of {day}: {n} orders, {:.0} % of the book invested",
-                sig.weights.values().sum::<f64>() * 100.0
-            );
+            self.lab_retry.remove(&lead);
+            for (m, _, g) in &sigs {
+                self.lab_done.insert(m.clone(), g.generated_ms);
+            }
+            let netted: Vec<(String, f64)> = members
+                .iter()
+                .filter(|m| m.1 > 0.0)
+                .filter_map(|(m, w)| self.strategies.iter().find(|s| &s.id == m).map(|s| (s.name.clone(), *w)))
+                .collect();
+            let mut note = if netted.len() > 1 {
+                format!(
+                    "Rebalanced toward the netted weights of {} lab books ({}) of {day}: {n} orders, {:.0} % of the lab share invested",
+                    netted.len(),
+                    netted.iter().map(|(n, w)| format!("{n} {:.0} %", w * 100.0)).collect::<Vec<_>>().join(", "),
+                    weights.values().sum::<f64>() * 100.0
+                )
+            } else {
+                format!(
+                    "Rebalanced toward the lab's weights of {day}: {n} orders, {:.0} % of the book invested",
+                    weights.values().sum::<f64>() * 100.0
+                )
+            };
             if refused > 0 {
                 note.push_str(&format!("; {refused} still refused after {attempt} attempts, left until the next signal"));
+            }
+            if !stale.is_empty() {
+                note.push_str(&format!(
+                    "; {} has no fresh signal, so it holds its last targets until one arrives",
+                    stale.join(", ")
+                ));
             }
             if !untradable.is_empty() {
                 note.push_str(&format!("; no market here for {}", untradable.join(", ")));
@@ -4939,16 +5045,17 @@ impl Engine {
                     skipped.join(", ")
                 ));
             }
-            if !sig.dropped.is_empty() {
+            let dropped: Vec<String> = sigs.iter().flat_map(|x| x.2.dropped.iter().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            if !dropped.is_empty() {
                 note.push_str(&format!(
                     "; the lab's book also holds {}, which Pythia has no market for, so that share stays in cash",
-                    sig.dropped.join(", ")
+                    dropped.join(", ")
                 ));
             }
             if !owned_elsewhere.is_empty() {
                 note.push_str(&format!("; left alone because another strategy holds them: {}", owned_elsewhere.join(", ")));
             }
-            self.log(JournalKind::Signal, note, Some(sid), None);
+            self.log(JournalKind::Signal, note, Some(lead), None);
         }
     }
 

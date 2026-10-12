@@ -22,10 +22,12 @@
 //! - **Markets are exclusive.** At start every market is assigned to exactly
 //!   one sleeve. Strategies that trade a whole set at once (Pairs, lab books)
 //!   claim their full universe first, all or nothing; the other sleeves then
-//!   deal the remaining markets out in turn, highest weight first. A market
-//!   already assigned to another active autopilot is not available. While an
-//!   autopilot is active its markets are reserved: strategies outside it do
-//!   not open positions there.
+//!   deal the remaining markets out in turn, highest weight first. The one
+//!   exception is lab books among themselves: they net their targets per
+//!   coin (below), so several of them share the crypto markets of one
+//!   autopilot. A market already assigned to another active autopilot is not
+//!   available. While an autopilot is active its markets are reserved:
+//!   strategies outside it do not open positions there.
 //! - **Positions belong to whoever opened them.** A fill that opens a
 //!   position for a sleeve strategy on one of its markets makes the position
 //!   the autopilot's; every later fill on it (the strategy's exit, an ATR
@@ -56,6 +58,32 @@
 //! the lab does for candidates that fail deflation or overlap a book that
 //! already runs standalone.
 //!
+//! # Several lab books, netted
+//!
+//! The lab books of one autopilot are rebalanced as one book. Each book's
+//! target weights are scaled by its sleeve weight (over the lab sleeves'
+//! combined weight) and added up per coin ([`net_lab_targets`]); the netted
+//! target is rebalanced with the autopilot's capital, one position per coin,
+//! and only the difference is traded. Each book's share of the netted
+//! target per coin is kept (`Autopilot::shares`): fills, fees, closed trades
+//! and P&L on that coin are split by it, and when a new target changes the
+//! shares, the position's open P&L so far stays with the books that earned
+//! it (booked across at the mark, adding up to zero). A book whose signal is
+//! past its window holds its last targets inside the netted book.
+//!
+//! An auto-pick autopilot re-runs its pick every `repickEveryHours` (24 by
+//! default, 0 = never; explicit sleeves are never re-picked) and re-weights,
+//! adds or drops lab books. A change is netted in at the next rebalance;
+//! a dropped book stays listed at weight zero (and stays the autopilot's),
+//! and its coins are sold down only where the other books do not want them.
+//! A live autopilot only re-weights or drops: it never adds a strategy the
+//! owner did not confirm. Built-in sleeves own their positions outright and
+//! are not re-picked.
+//!
+//! When a running autopilot holds nothing, its status says it is in cash,
+//! waiting for signals, with the reason when the netted target knows it.
+//! Nothing is ever bought to look busy.
+//!
 //! # The auto pick
 //!
 //! "Let Pythia choose" scores every candidate on one scale
@@ -64,12 +92,12 @@
 //! the Sharpe with costs doubled and the deflated-Sharpe probability, all
 //! divided by one plus the gates failed. Each pick says why in one sentence,
 //! and a pick that fails the deflation test (or has no green passport) says
-//! that it is the best available evidence, not a proven edge. Candidates are
-//! taken best first and markets stay exclusive: a lab book claims every
-//! crypto market as one set, so the best lab book takes the crypto markets
-//! alone, and built-ins only get crypto markets when they out-score every
-//! lab book. Whoever is passed over for that reason is named in the start
-//! message.
+//! that it is the best available evidence, not a proven edge. It picks up to
+//! `maxSleeves` (3 by default) with positive evidence, weighted by score.
+//! Candidates are taken best first and markets stay exclusive: lab books
+//! claim every crypto market together (they net), so built-ins only get
+//! crypto markets when they out-score every lab book. Whoever is passed over
+//! for that reason is named in the start message.
 //!
 //! # Stop rules
 //!
@@ -121,8 +149,15 @@ const EPS: f64 = 1e-9;
 /// One equity point per minute in the history, at most `HISTORY_MAX` of them.
 const HISTORY_EVERY_MS: i64 = 60_000;
 const HISTORY_MAX: usize = 300;
-/// "Auto" picks at most this many strategies.
-const AUTO_MAX_SLEEVES: usize = 3;
+/// "Auto" picks at most this many strategies unless told otherwise.
+pub const AUTO_MAX_SLEEVES: usize = 3;
+/// And never more than this many, whatever it is told.
+pub const AUTO_MAX_SLEEVES_LIMIT: usize = 10;
+/// An auto-pick autopilot re-runs its pick this often unless told otherwise.
+pub const REPICK_DEFAULT_HOURS: f64 = 24.0;
+/// A re-pick that moves no weight by more than this keeps the sleeves as they
+/// are: a shift of a point or two is noise in the evidence, not news.
+pub const REPICK_MIN_SHIFT: f64 = 0.02;
 /// Stopped autopilots kept for the record, newest first.
 const KEEP_FINISHED: usize = 10;
 /// A live order still working when its autopilot stopped can fill until the
@@ -233,6 +268,15 @@ pub struct AutopilotConfig {
     pub stop: StopRules,
     #[serde(default = "yes")]
     pub flatten_on_stop: bool,
+    /// "Auto" picks at most this many strategies. Empty: 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sleeves: Option<usize>,
+    /// Re-run the auto pick with fresh evidence every this many hours. Only
+    /// for an autopilot whose strategies Pythia picks: empty means every 24
+    /// hours there, 0 turns it off. Explicit sleeves are never re-picked.
+    /// The engine fills it in at start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repick_every_hours: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,8 +305,19 @@ pub struct SleeveStatus {
     pub trades: u32,
     /// Why this strategy is in the autopilot, in one sentence.
     pub why: String,
-    /// The markets assigned to this sleeve. No other sleeve trades them.
+    /// The markets assigned to this sleeve. No other sleeve trades them,
+    /// except lab books, which net their targets on the same coins.
     pub markets: Vec<String>,
+    /// What this sleeve holds right now, at the mark: its share of every
+    /// position the autopilot owns.
+    #[serde(default)]
+    pub exposure: f64,
+    /// `exposure` as a % of the autopilot's equity.
+    #[serde(default)]
+    pub exposure_pct: f64,
+    /// A re-pick took its weight to zero; it is listed for its record.
+    #[serde(default)]
+    pub dropped: bool,
 }
 
 /// An autopilot as the UI shows it. Pushed in `EngineState::autopilots`.
@@ -301,6 +356,13 @@ pub struct AutopilotStatus {
     /// report has nothing on it.
     #[serde(default)]
     pub forward: Option<AutopilotForward>,
+    /// Running and holding nothing: it is in cash, waiting for signals, and
+    /// says why in plain words. It never forces a trade to look busy.
+    #[serde(default)]
+    pub waiting: Option<String>,
+    /// When the auto pick runs again with fresh evidence, if it does.
+    #[serde(default)]
+    pub next_repick_ms: Option<i64>,
 }
 
 /// An autopilot's forward result against its backtest, for one plain line.
@@ -347,6 +409,11 @@ pub struct Sleeve {
     pub trades: u32,
     /// The strategy's state before the autopilot took it, for the journal.
     pub prior_state: StrategyState,
+    /// A re-pick took its weight to zero at this time. It stays listed with
+    /// its record, and its coins are sold down by the next netted rebalance
+    /// only as far as the other books do not want them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_ms: Option<i64>,
 }
 
 /// One autopilot, exactly as it is saved with the engine state.
@@ -391,6 +458,22 @@ pub struct Autopilot {
     pub last_action: Option<String>,
     #[serde(default)]
     pub history: Vec<(i64, f64)>,
+    /// Lab books are netted: for a market they hold together, each lab
+    /// sleeve's share of the combined target there (the shares add up to 1).
+    /// Fills, fees and P&L on that market are split by these shares. A market
+    /// without an entry belongs wholly to the sleeve in `owned`.
+    #[serde(default)]
+    pub shares: BTreeMap<String, BTreeMap<String, f64>>,
+    /// The netted lab target of the last rebalance: market to weight of the
+    /// autopilot's equity.
+    #[serde(default)]
+    pub lab_target: BTreeMap<String, f64>,
+    /// Why the last netted target holds cash, when it holds nothing.
+    #[serde(default)]
+    pub cash_note: Option<String>,
+    /// When the auto pick last ran (the start, or the last re-pick).
+    #[serde(default)]
+    pub last_pick_ms: Option<i64>,
 }
 
 impl Autopilot {
@@ -412,6 +495,52 @@ impl Autopilot {
 
     fn label(&self) -> String {
         format!("Autopilot \"{}\"", self.config.name)
+    }
+
+    /// This sleeve's share of the position in `market`.
+    fn share(&self, market: &str, sid: &str) -> f64 {
+        match self.shares.get(market).filter(|m| !m.is_empty()) {
+            Some(m) => m.get(sid).copied().unwrap_or(0.0),
+            None => {
+                if self.owned.get(market).is_some_and(|o| o == sid) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// How an amount booked on `market` splits over the sleeves: by their
+    /// shares when lab books net there, else all of it to `owner`.
+    fn split(&self, market: &str, owner: &str) -> Vec<(String, f64)> {
+        if let Some(m) = self.shares.get(market) {
+            let total: f64 = m.values().filter(|v| v.is_finite() && **v > 0.0).sum();
+            if total > EPS {
+                return m.iter().filter(|(_, v)| v.is_finite() && **v > 0.0).map(|(k, v)| (k.clone(), v / total)).collect();
+            }
+        }
+        vec![(owner.to_string(), 1.0)]
+    }
+
+    /// Book `amount` of realised P&L (and `fee`) on `market` to its sleeves.
+    fn book_split(&mut self, market: &str, owner: &str, realized: f64, fee: f64, closed: bool) {
+        for (sid, w) in self.split(market, owner) {
+            if let Some(s) = self.sleeve_mut(&sid) {
+                s.realized += realized * w;
+                s.fees += fee * w;
+                if closed {
+                    s.trades += 1;
+                }
+            }
+        }
+    }
+
+    /// The market is no longer its own. Its shares stay until the next netted
+    /// target replaces them: a fee the venue posts later (Alpaca books crypto
+    /// fees at the end of the day) is still split the way the trade was.
+    fn release(&mut self, market: &str) {
+        self.owned.remove(market);
     }
 }
 
@@ -490,6 +619,19 @@ pub fn validate(cfg: &AutopilotConfig, now: i64) -> Result<(), String> {
             return Err("The end time is already in the past.".into());
         }
     }
+    if let Some(n) = cfg.max_sleeves {
+        if n == 0 || n > AUTO_MAX_SLEEVES_LIMIT {
+            return Err(format!("Auto can pick 1 to {AUTO_MAX_SLEEVES_LIMIT} strategies, not {n}."));
+        }
+    }
+    if let Some(h) = cfg.repick_every_hours {
+        if !h.is_finite() || h < 0.0 || (h > 0.0 && h < 1.0) {
+            return Err(format!("Re-picking runs at most once an hour (or 0 for never), not every {h} hours."));
+        }
+        if h > 0.0 && !cfg.sleeves.is_empty() {
+            return Err("Re-picking only applies when Pythia chooses the strategies; strategies you chose stay as you chose them.".into());
+        }
+    }
     let mut seen = HashSet::new();
     for sl in &cfg.sleeves {
         if !sl.weight.is_finite() || sl.weight <= 0.0 {
@@ -508,30 +650,43 @@ pub struct Want {
     pub weight: f64,
     /// Trades its universe as one set (Pairs, lab books): all or nothing.
     pub whole: bool,
+    /// Nets its targets with the other netting sleeves (lab books): they
+    /// share their markets with each other, never with anyone else.
+    pub net: bool,
     pub universe: Vec<String>,
 }
 
 /// Give every market to exactly one sleeve. Whole-set sleeves claim their full
 /// universe first, highest weight first, and get nothing if any of it is
-/// taken. The other sleeves then deal the remaining markets out in turn,
-/// highest weight first, each taking its next free market. `taken` are
-/// markets that belong to another active autopilot. Returns the markets per
-/// sleeve, in the input order.
+/// taken. Netting sleeves (lab books) are the one exception: they share
+/// markets with each other, because their targets are netted per coin into
+/// one position, but never with any other sleeve. The other sleeves then
+/// deal the remaining markets out in turn, highest weight first, each taking
+/// its next free market. `taken` are markets that belong to another active
+/// autopilot. Returns the markets per sleeve, in the input order.
 pub fn assign_markets(wants: &[Want], taken: &HashSet<String>) -> Vec<Vec<String>> {
     let mut order: Vec<usize> = (0..wants.len()).collect();
     // Stable: equal weights keep the order they were given in.
     order.sort_by(|&a, &b| wants[b].weight.partial_cmp(&wants[a].weight).unwrap_or(std::cmp::Ordering::Equal));
     let mut claimed: HashSet<String> = taken.clone();
+    // Markets netting sleeves hold: closed to everyone but other netting sleeves.
+    let mut netted: HashSet<String> = HashSet::new();
     let mut out: Vec<Vec<String>> = vec![Vec::new(); wants.len()];
     for &i in order.iter().filter(|&&i| wants[i].whole) {
         let w = &wants[i];
-        if !w.universe.is_empty() && w.universe.iter().all(|m| !claimed.contains(m)) {
+        let free = |m: &String| !claimed.contains(m) && (w.net || !netted.contains(m));
+        if !w.universe.is_empty() && w.universe.iter().all(free) {
             for m in &w.universe {
-                claimed.insert(m.clone());
+                if w.net {
+                    netted.insert(m.clone());
+                } else {
+                    claimed.insert(m.clone());
+                }
             }
             out[i] = w.universe.clone();
         }
     }
+    claimed.extend(netted);
     let dealers: Vec<usize> = order.iter().copied().filter(|&i| !wants[i].whole).collect();
     let mut cursor: Vec<usize> = vec![0; wants.len()];
     loop {
@@ -886,12 +1041,48 @@ pub(super) struct SleeveSizing {
     pub room: f64,
 }
 
-/// What a lab book inside an autopilot may do.
-pub(super) struct LabScope {
+/// The lab books of one autopilot, rebalanced as one netted book.
+pub(super) struct LabGroup {
+    pub ap: usize,
     pub running: bool,
+    /// The autopilot's equity times the lab sleeves' combined weight.
     pub capital: f64,
-    /// Markets the autopilot owns for this book.
+    /// Every lab sleeve (dropped ones too, at scale 0) and its share of
+    /// `capital`: its weight over the lab sleeves' combined weight.
+    pub members: Vec<(String, f64)>,
+    /// Markets the autopilot owns.
     pub owned: HashSet<String>,
+}
+
+/// Net several lab books into one target. `books` are (sleeve id, scale,
+/// target weights per coin); a book's weights are scaled by its share of the
+/// group. Returns the combined weight per coin and, per coin, each book's
+/// share of that combined weight (adding up to 1). Weights are long-only:
+/// a negative or non-finite weight counts as zero, as in `lab::rebalance`.
+pub fn net_lab_targets(books: &[(String, f64, &BTreeMap<String, f64>)]) -> (BTreeMap<String, f64>, BTreeMap<String, BTreeMap<String, f64>>) {
+    let mut parts: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for (sid, scale, weights) in books {
+        if !scale.is_finite() || *scale <= 0.0 {
+            continue;
+        }
+        for (coin, w) in weights.iter() {
+            let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
+            if w > 0.0 {
+                *parts.entry(coin.clone()).or_default().entry(sid.clone()).or_insert(0.0) += scale * w;
+            }
+        }
+    }
+    let mut combined = BTreeMap::new();
+    let mut shares = BTreeMap::new();
+    for (coin, by) in parts {
+        let total: f64 = by.values().sum();
+        if total <= 0.0 {
+            continue;
+        }
+        combined.insert(coin.clone(), total);
+        shares.insert(coin, by.into_iter().map(|(k, v)| (k, v / total)).collect());
+    }
+    (combined, shares)
 }
 
 impl Engine {
@@ -909,24 +1100,26 @@ impl Engine {
         if px > 0.0 { px } else { avg }
     }
 
+    /// Unrealised P&L of what it owns, or of one sleeve's share of it.
     fn ap_unrealized(&self, ap: &Autopilot, sleeve: Option<&str>) -> f64 {
         ap.owned
-            .iter()
-            .filter(|(_, sid)| sleeve.is_none_or(|s| s == sid.as_str()))
-            .filter_map(|(m, _)| {
+            .keys()
+            .filter_map(|m| {
                 let p = self.positions.get(m)?;
-                Some((self.ap_mark(m, p.avg_price) - p.avg_price) * p.qty)
+                let share = sleeve.map_or(1.0, |s| ap.share(m, s));
+                Some((self.ap_mark(m, p.avg_price) - p.avg_price) * p.qty * share)
             })
             .sum()
     }
 
+    /// Gross notional at the mark of what it owns, or of one sleeve's share.
     fn ap_gross(&self, ap: &Autopilot, sleeve: Option<&str>) -> f64 {
         ap.owned
-            .iter()
-            .filter(|(_, sid)| sleeve.is_none_or(|s| s == sid.as_str()))
-            .filter_map(|(m, _)| {
+            .keys()
+            .filter_map(|m| {
                 let p = self.positions.get(m)?;
-                Some((p.qty * self.ap_mark(m, p.avg_price)).abs())
+                let share = sleeve.map_or(1.0, |s| ap.share(m, s));
+                Some((p.qty * self.ap_mark(m, p.avg_price)).abs() * share)
             })
             .sum()
     }
@@ -951,6 +1144,11 @@ impl Engine {
                 left * if px > 0.0 { px } else { f.arrival }
             })
             .sum()
+    }
+
+    /// The equity of the autopilot at this index.
+    pub(super) fn autopilot_equity(&self, i: usize) -> f64 {
+        self.ap_equity(&self.autopilots[i])
     }
 
     fn ap_equity(&self, ap: &Autopilot) -> f64 {
@@ -996,14 +1194,67 @@ impl Engine {
         self.ap_of_strategy(sid).map(|i| self.autopilots[i].config.mode.route_intent())
     }
 
-    pub(super) fn autopilot_lab_scope(&self, sid: &str) -> Option<LabScope> {
-        let ap = &self.autopilots[self.ap_of_strategy(sid)?];
-        let s = ap.sleeve(sid)?;
-        Some(LabScope {
+    /// The lab books of the autopilot that runs this lab book, as one group.
+    pub(super) fn autopilot_lab_group(&self, sid: &str) -> Option<LabGroup> {
+        let i = self.ap_of_strategy(sid)?;
+        let ap = &self.autopilots[i];
+        let labs: Vec<&Sleeve> = ap.sleeves.iter().filter(|s| self.is_lab_book(&s.strategy_id)).collect();
+        let total: f64 = labs.iter().map(|s| s.weight.max(0.0)).sum();
+        Some(LabGroup {
+            ap: i,
             running: ap.state == AutopilotState::Running,
-            capital: self.ap_equity(ap).max(0.0) * s.weight,
-            owned: ap.owned.iter().filter(|(_, o)| o.as_str() == sid).map(|(m, _)| m.clone()).collect(),
+            capital: self.ap_equity(ap).max(0.0) * total,
+            members: labs
+                .iter()
+                .map(|s| (s.strategy_id.clone(), if total > 0.0 { s.weight.max(0.0) / total } else { 0.0 }))
+                .collect(),
+            owned: ap.owned.keys().cloned().collect(),
         })
+    }
+
+    fn is_lab_book(&self, sid: &str) -> bool {
+        self.strategies.iter().any(|s| s.id == sid && s.kind == StrategyKind::LabTargets)
+    }
+
+    /// A netted rebalance is about to trade toward new targets. Each sleeve's
+    /// share of a market it holds moves to its share of the new target; the
+    /// unrealised P&L the position carries so far stays with the sleeves that
+    /// earned it (booked across at the mark, adding up to zero), so a share
+    /// change never moves P&L from one sleeve to another. A market the new
+    /// target leaves out keeps its old shares until it is sold: the sale's
+    /// result belongs to the sleeves that held it.
+    pub(super) fn autopilot_lab_retarget(
+        &mut self,
+        ap_i: usize,
+        targets: BTreeMap<String, f64>,
+        shares: BTreeMap<String, BTreeMap<String, f64>>,
+        cash_note: Option<String>,
+    ) {
+        let marks: BTreeMap<String, f64> = self.autopilots[ap_i]
+            .owned
+            .keys()
+            .filter_map(|m| {
+                let p = self.positions.get(m)?;
+                Some((m.clone(), (self.ap_mark(m, p.avg_price) - p.avg_price) * p.qty))
+            })
+            .collect();
+        let ap = &mut self.autopilots[ap_i];
+        for (m, new) in &shares {
+            if let Some(unreal) = marks.get(m) {
+                let sids: Vec<String> = ap.sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+                for sid in sids {
+                    let delta = ap.share(m, &sid) - new.get(&sid).copied().unwrap_or(0.0);
+                    if delta.abs() > 1e-12 {
+                        if let Some(s) = ap.sleeve_mut(&sid) {
+                            s.realized += unreal * delta;
+                        }
+                    }
+                }
+            }
+            ap.shares.insert(m.clone(), new.clone());
+        }
+        ap.lab_target = targets;
+        ap.cash_note = cash_note;
     }
 
     /// Book a fill to the autopilot that owns the position, or that opened it.
@@ -1050,16 +1301,11 @@ impl Engine {
         if closed {
             ap.trades += 1;
         }
-        if let Some(s) = ap.sleeve_mut(&owner) {
-            s.realized += realized;
-            s.fees += fee;
-            if closed {
-                s.trades += 1;
-            }
-        }
+        // Netted lab books split it by their shares of the market.
+        ap.book_split(market, &owner, realized, fee, closed);
         if hand_out {
             ap.released += unreal;
-            ap.owned.remove(market);
+            ap.release(market);
             let msg = format!(
                 "{}: an order still at the venue filled after it stopped without closing its positions; the position is left open like the others and its P&L counted at its price now.",
                 ap.label()
@@ -1068,7 +1314,7 @@ impl Engine {
         } else if open_after {
             ap.owned.insert(market.to_string(), owner);
         } else {
-            ap.owned.remove(market);
+            ap.release(market);
         }
     }
 
@@ -1090,11 +1336,9 @@ impl Engine {
         let owner = ap.owned.get(market).cloned().unwrap_or_else(|| sid.to_string());
         let fee = fee.max(0.0);
         ap.fees += fee;
-        if let Some(s) = ap.sleeve_mut(&owner) {
-            s.fees += fee;
-        }
+        ap.book_split(market, &owner, 0.0, fee, false);
         if !open_after {
-            ap.owned.remove(market);
+            ap.release(market);
         }
         Some(ap.label())
     }
@@ -1117,11 +1361,9 @@ impl Engine {
         let ap = &mut self.autopilots[i];
         let owner = ap.owned.get(market).cloned().unwrap_or_default();
         ap.realized += booked;
-        if let Some(s) = ap.sleeve_mut(&owner) {
-            s.realized += booked;
-        }
+        ap.book_split(market, &owner, booked, 0.0, false);
         if !open_after {
-            ap.owned.remove(market);
+            ap.release(market);
         }
         let msg = format!(
             "{}: {symbol} corrected against {venue}: the book had {:.8}, the venue has {:.8}. Booked {} to the autopilot at the mark {} so the correction moves none of its equity and hides no stop.",
@@ -1253,7 +1495,8 @@ impl Engine {
         let auto = cfg.sleeves.is_empty();
         let mut passed_over: Vec<String> = Vec::new();
         let picks: Vec<(String, f64, String)> = if auto {
-            let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken).map_err(|why| {
+            let max = cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
+            let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken, &HashSet::new(), max).map_err(|why| {
                 // "alpaca" alone means US shares; crypto there is its own choice.
                 if cfg.mode == AutopilotMode::Demo && venue == Venue::Alpaca && self.crypto_demo_on_alpaca() {
                     format!("{why} Crypto on the Alpaca paper account is a separate choice: pick Crypto (asset class \"crypto\").")
@@ -1269,7 +1512,7 @@ impl Engine {
                 let Some(s) = self.strategies.iter().find(|s| s.id == sl.strategy_id) else {
                     return Err(format!("There is no strategy \"{}\".", sl.strategy_id));
                 };
-                if let Some(why) = self.sleeve_block(s.id.as_str(), venue, cfg.mode, &busy) {
+                if let Some(why) = self.sleeve_block(s.id.as_str(), venue, cfg.mode, &busy, &HashSet::new()) {
                     return Err(why);
                 }
                 let ev = self.evidence(&s.id);
@@ -1283,7 +1526,12 @@ impl Engine {
             .iter()
             .map(|(sid, w, _)| {
                 let s = self.strategies.iter().find(|s| &s.id == sid).expect("picked strategies exist");
-                Want { weight: *w, whole: trades_as_set(s.kind), universe: self.sleeve_universe(s, cfg.mode) }
+                Want {
+                    weight: *w,
+                    whole: trades_as_set(s.kind),
+                    net: s.kind == StrategyKind::LabTargets,
+                    universe: self.sleeve_universe(s, cfg.mode),
+                }
             })
             .collect();
         let assigned = assign_markets(&wants, &taken);
@@ -1378,22 +1626,36 @@ impl Engine {
         }
 
         // Go.
+        let labs = chosen.iter().filter(|c| self.is_lab_book(&c.0)).count();
         let mut sleeves = Vec::new();
         for (sid, w, why, markets) in chosen {
             let s = self.strategies.iter().find(|s| s.id == sid).expect("chosen strategies exist");
             let weight = w / total;
+            let netted = if s.kind == StrategyKind::LabTargets && labs > 1 {
+                format!(", netted per coin with the other {} lab book(s) into one position per coin", labs - 1)
+            } else {
+                String::new()
+            };
             sleeves.push(Sleeve {
                 strategy_id: sid.clone(),
                 name: s.name.clone(),
                 weight,
-                why: format!("{why}; gets {:.0} % of the capital on {} market(s).", weight * 100.0, markets.len()),
+                why: format!("{why}; gets {:.0} % of the capital on {} market(s){netted}.", weight * 100.0, markets.len()),
                 markets,
                 realized: 0.0,
                 fees: 0.0,
                 trades: 0,
                 prior_state: s.state,
+                dropped_ms: None,
             });
         }
+        // Re-picking is for autopilots whose strategies Pythia picks.
+        cfg.repick_every_hours = match cfg.repick_every_hours {
+            _ if !auto => None,
+            None => Some(REPICK_DEFAULT_HOURS),
+            Some(h) if h > 0.0 => Some(h),
+            Some(_) => None,
+        };
         let id = cfg.id.clone();
         let want_state = if cfg.mode == AutopilotMode::Live { StrategyState::Live } else { StrategyState::Paper };
         for sl in &sleeves {
@@ -1428,6 +1690,12 @@ impl Engine {
             msg.push_str(&format!(
                 " Auto passed over {}: the markets they need already belong to a pick with better evidence or to another autopilot (one position per market).",
                 passed_over.join(", ")
+            ));
+        }
+        if let Some(h) = cfg.repick_every_hours {
+            msg.push_str(&format!(
+                " It re-runs the pick with fresh evidence every {} h; a change is netted in at the next rebalance, never sold off at once.",
+                pct(h)
             ));
         }
         if !outside.is_empty() {
@@ -1479,6 +1747,10 @@ impl Engine {
             owned: BTreeMap::new(),
             last_action: Some(msg),
             history: Vec::new(),
+            shares: BTreeMap::new(),
+            lab_target: BTreeMap::new(),
+            cash_note: None,
+            last_pick_ms: Some(now),
         });
         let i = self.autopilots.len() - 1;
         let x = self.autopilots[i].config.capital_usd;
@@ -1572,22 +1844,50 @@ impl Engine {
                     by_sleeve: ap
                         .sleeves
                         .iter()
-                        .map(|s| SleeveStatus {
-                            strategy_id: s.strategy_id.clone(),
-                            name: s.name.clone(),
-                            weight: s.weight,
-                            pnl: s.realized - s.fees + self.ap_unrealized(ap, Some(&s.strategy_id)),
-                            trades: s.trades,
-                            why: s.why.clone(),
-                            markets: s.markets.clone(),
+                        .map(|s| {
+                            let exposure = self.ap_gross(ap, Some(&s.strategy_id)).max(0.0);
+                            SleeveStatus {
+                                strategy_id: s.strategy_id.clone(),
+                                name: s.name.clone(),
+                                weight: s.weight,
+                                pnl: s.realized - s.fees + self.ap_unrealized(ap, Some(&s.strategy_id)),
+                                trades: s.trades,
+                                why: s.why.clone(),
+                                markets: s.markets.clone(),
+                                exposure,
+                                exposure_pct: if equity > 0.0 { exposure / equity * 100.0 } else { 0.0 },
+                                dropped: s.dropped_ms.is_some(),
+                            }
                         })
                         .collect(),
                     last_action: ap.last_action.clone(),
                     history: ap.history.clone(),
                     forward: self.ap_forward(ap),
+                    waiting: self.ap_waiting(ap),
+                    next_repick_ms: ap
+                        .config
+                        .repick_every_hours
+                        .filter(|h| ap.is_active() && *h > 0.0 && ap.config.sleeves.is_empty())
+                        .map(|h| ap.last_pick_ms.unwrap_or(ap.started_ms) + (h * 3_600_000.0) as i64),
                 }
             })
             .collect()
+    }
+
+    /// A running autopilot that holds nothing and has nothing at the venue is
+    /// in cash, waiting for signals. Said plainly, with the reason when the
+    /// last netted target knows it; nothing is ever bought just to be busy.
+    fn ap_waiting(&self, ap: &Autopilot) -> Option<String> {
+        if ap.state != AutopilotState::Running || !ap.owned.is_empty() || self.ap_pending(ap, None) > 0.0 {
+            return None;
+        }
+        let mut s = "In cash, waiting for signals".to_string();
+        match &ap.cash_note {
+            Some(n) => s.push_str(&format!(": {n}.")),
+            None => s.push('.'),
+        }
+        s.push_str(" It never forces a trade; it buys when a strategy has something to buy.");
+        Some(s)
     }
 
     /// The lab's forward report in brief (`reports/forward/evidence.json`),
@@ -1657,6 +1957,7 @@ impl Engine {
             self.ap_prune(i);
             if self.autopilots[i].is_active() {
                 self.ap_check(i, now);
+                self.ap_repick(i, now);
             } else if self.autopilots[i].flatten_at_stop && !self.autopilots[i].owned.is_empty() {
                 // A late fill after the stop, or a real position that could
                 // not be closed then: close it now.
@@ -2011,8 +2312,9 @@ impl Engine {
 
     // ── strategy choice ────────────────────────────────────────────────────
 
-    /// Why a strategy cannot be a sleeve, if it cannot.
-    fn sleeve_block(&self, sid: &str, venue: Venue, mode: AutopilotMode, busy: &HashSet<String>) -> Option<String> {
+    /// Why a strategy cannot be a sleeve, if it cannot. `own` are the sleeves
+    /// of the autopilot that asks (a re-pick): coins they hold are its own.
+    fn sleeve_block(&self, sid: &str, venue: Venue, mode: AutopilotMode, busy: &HashSet<String>, own: &HashSet<String>) -> Option<String> {
         let s = self.strategies.iter().find(|s| s.id == sid)?;
         if !runnable(s.kind) {
             return Some(format!("{} is not a strategy the engine runs on its own.", s.name));
@@ -2037,7 +2339,7 @@ impl Engine {
             let other = self.autopilot_claimant(&s.id).unwrap_or_default();
             return Some(format!("{} already runs in the autopilot \"{other}\". A strategy runs for one autopilot at a time.", s.name));
         }
-        if s.kind == StrategyKind::LabTargets {
+        if s.kind == StrategyKind::LabTargets && !own.contains(&s.id) {
             if !self.lab_signals.contains_key(&s.id) {
                 return Some(format!("{} has no signal from the lab yet.", s.name));
             }
@@ -2114,20 +2416,25 @@ impl Engine {
 
     /// "Auto": the strategies the engine can run on this venue today, weighted
     /// by their evidence ([`Evidence::score`], one scale for built-ins and lab
-    /// books). Paused strategies are left out (they were paused on purpose,
-    /// often on their evidence) except idle lab books, which wait paused for
-    /// exactly this; so is any whose own record shows no edge, a lab book
-    /// whose signal has expired, and live only takes strategies cleared for
-    /// live.
+    /// books), at most `max` of them. Paused strategies are left out (they
+    /// were paused on purpose, often on their evidence) except idle lab
+    /// books, which wait paused for exactly this; so is any whose own record
+    /// shows no edge, a lab book whose signal has expired or whose lab
+    /// out-of-sample Sharpe is not positive, and live only takes strategies
+    /// cleared for live.
     ///
     /// Markets stay exclusive, and the evidence decides who gets them: the
     /// candidates are taken best first, and a candidate is passed over when a
-    /// stronger pick already holds what it needs. A lab book trades its whole
-    /// universe (every crypto market) as one set, so it is passed over when a
-    /// stronger pick holds any crypto market; and once the best lab book is
-    /// in, a built-in on crypto has nothing left and is passed over too. On
-    /// crypto that normally means: the best lab book takes the crypto markets
-    /// alone, and built-ins only run when they out-score every lab book.
+    /// stronger pick already holds what it needs. Lab books are the one
+    /// exception among themselves: each trades every crypto market, and the
+    /// autopilot nets their targets per coin into one position, so up to
+    /// `max` of them run together, weighted by score. Against everyone else a
+    /// lab book still claims every crypto market as one set: it is passed
+    /// over when a stronger built-in holds any crypto market, and once a lab
+    /// book is in, a built-in on crypto has nothing left. On crypto that
+    /// normally means: the best lab books take the crypto markets together,
+    /// and built-ins only run when they out-score every lab book.
+    /// `own` are the sleeves of the autopilot that re-picks.
     /// Returns the picks (id, weight, why) and the names passed over.
     fn auto_pick(
         &self,
@@ -2135,21 +2442,29 @@ impl Engine {
         mode: AutopilotMode,
         busy: &HashSet<String>,
         taken: &HashSet<String>,
+        own: &HashSet<String>,
+        max: usize,
     ) -> Result<AutoPick, String> {
         let now = self.now();
+        let max = max.clamp(1, AUTO_MAX_SLEEVES_LIMIT);
         let mut scored: Vec<(String, f64, Evidence)> = self
             .strategies
             .iter()
             .filter(|s| s.id != "manual")
             .filter(|s| s.state != StrategyState::Paused || self.lab_book_autopilot_only(&s.id))
             .filter(|s| s.kind != StrategyKind::LabTargets || self.lab_signals.get(&s.id).is_some_and(|g| g.is_fresh(now)))
-            .filter(|s| self.sleeve_block(&s.id, venue, mode, busy).is_none())
+            .filter(|s| self.sleeve_block(&s.id, venue, mode, busy, own).is_none())
             .filter_map(|s| {
                 let ev = self.evidence(&s.id);
                 if mode == AutopilotMode::Live && !ev.live_ready {
                     return None;
                 }
-                ev.score().map(|sc| (s.id.clone(), sc, ev))
+                // Positive evidence only: a lab book whose own out-of-sample
+                // Sharpe is zero or below has nothing to weight.
+                if ev.lab && ev.lab_oos_sharpe.is_some_and(|sh| sh.is_nan() || sh <= 0.0) {
+                    return None;
+                }
+                ev.score().filter(|sc| *sc > 0.0).map(|sc| (s.id.clone(), sc, ev))
             })
             .collect();
         if scored.is_empty() {
@@ -2161,30 +2476,171 @@ impl Engine {
         // Highest score first; ties keep the engine's order.
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let candidates = scored.len();
-        let mut held: HashSet<String> = HashSet::new(); // markets a kept pick trades
+        let mut held: HashSet<String> = HashSet::new(); // markets a kept built-in trades
         let mut sets: HashSet<String> = taken.clone(); // markets a kept whole set claimed
+        let mut netted: HashSet<String> = HashSet::new(); // markets kept lab books share
         let mut picks = Vec::new();
         let mut passed_over = Vec::new();
         for (rank, (sid, sc, ev)) in scored.into_iter().enumerate() {
             let s = self.strategies.iter().find(|s| s.id == sid).expect("scored strategies exist");
             let universe = self.sleeve_universe(s, mode);
-            let fits = if trades_as_set(s.kind) {
+            let lab = s.kind == StrategyKind::LabTargets;
+            let fits = if lab {
                 !universe.is_empty() && universe.iter().all(|m| !held.contains(m) && !sets.contains(m))
+            } else if trades_as_set(s.kind) {
+                !universe.is_empty() && universe.iter().all(|m| !held.contains(m) && !sets.contains(m) && !netted.contains(m))
             } else {
-                universe.iter().any(|m| !sets.contains(m))
+                universe.iter().any(|m| !sets.contains(m) && !netted.contains(m))
             };
-            if !fits || picks.len() >= AUTO_MAX_SLEEVES {
+            if !fits || picks.len() >= max {
                 if !fits {
                     passed_over.push(s.name.clone());
                 }
                 continue;
             }
-            if trades_as_set(s.kind) {
-                sets.extend(universe.iter().cloned());
+            if lab {
+                netted.extend(universe);
+            } else {
+                if trades_as_set(s.kind) {
+                    sets.extend(universe.iter().cloned());
+                }
+                held.extend(universe);
             }
-            held.extend(universe);
             picks.push((sid, sc, ev.auto_why(rank, candidates)));
         }
         Ok((picks, passed_over))
+    }
+
+    /// Re-run the auto pick with fresh evidence, when it is due: an
+    /// auto-pick autopilot, running, `repick_every_hours` since the last pick.
+    ///
+    /// Only lab books are re-picked, because only they can change gradually:
+    /// their targets are netted per coin, so a new weight is a new netted
+    /// target that the next rebalance trades toward by the difference only.
+    /// A book that drops out keeps its record at weight zero and its coins
+    /// are sold down only as far as the books that stay do not want them;
+    /// nothing is sold off at once. A built-in owns its positions outright,
+    /// so an autopilot running built-ins keeps them as they are. Live never
+    /// adds a strategy the owner did not confirm at the start; it may only
+    /// re-weight or drop the ones it has. Journaled with the reasons.
+    pub(super) fn ap_repick(&mut self, i: usize, now: i64) {
+        let ap = &self.autopilots[i];
+        if ap.state != AutopilotState::Running || !ap.config.sleeves.is_empty() {
+            return;
+        }
+        let Some(hours) = ap.config.repick_every_hours.filter(|h| *h > 0.0) else { return };
+        if now - ap.last_pick_ms.unwrap_or(ap.started_ms) < (hours * 3_600_000.0) as i64 {
+            return;
+        }
+        self.autopilots[i].last_pick_ms = Some(now);
+        let ap = &self.autopilots[i];
+        let Some(venue) = config_venue(&ap.config) else { return };
+        let mode = ap.config.mode;
+        let label = ap.label();
+        let current: Vec<(String, String, f64)> =
+            ap.sleeves.iter().map(|s| (s.strategy_id.clone(), s.name.clone(), s.weight)).collect();
+        if current.iter().any(|(sid, _, w)| *w > 0.0 && !self.is_lab_book(sid)) {
+            return;
+        }
+        let own: HashSet<String> = current.iter().map(|c| c.0.clone()).collect();
+        let others = |a: &&Autopilot| a.is_active() && a.config.id != ap.config.id;
+        let busy: HashSet<String> =
+            self.autopilots.iter().filter(others).flat_map(|a| a.sleeves.iter().map(|s| s.strategy_id.clone())).collect();
+        let taken: HashSet<String> =
+            self.autopilots.iter().filter(others).flat_map(|a| a.sleeves.iter().flat_map(|s| s.markets.iter().cloned())).collect();
+        let max = ap.config.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
+        let picks = match self.auto_pick(venue, mode, &busy, &taken, &own, max) {
+            Ok((p, _)) => p,
+            Err(why) => {
+                let msg = format!("{label} re-ran its pick and keeps its strategies as they are: {why}");
+                self.autopilots[i].last_action = Some(msg.clone());
+                self.log(JournalKind::System, msg, None, None);
+                return;
+            }
+        };
+        let mut picks: Vec<(String, f64, String)> = picks.into_iter().filter(|(sid, ..)| self.is_lab_book(sid)).collect();
+        if mode == AutopilotMode::Live {
+            picks.retain(|(sid, ..)| own.contains(sid));
+        }
+        if picks.is_empty() {
+            let msg = format!(
+                "{label} re-ran its pick and keeps its strategies as they are: no lab book with positive evidence is free to take their place."
+            );
+            self.autopilots[i].last_action = Some(msg.clone());
+            self.log(JournalKind::System, msg, None, None);
+            return;
+        }
+        let total: f64 = picks.iter().map(|p| p.1).sum();
+        let target: BTreeMap<String, (f64, String)> =
+            picks.iter().map(|(sid, sc, why)| (sid.clone(), (sc / total, why.clone()))).collect();
+        let shift = current
+            .iter()
+            .map(|(sid, _, w)| (target.get(sid).map_or(0.0, |t| t.0) - w).abs())
+            .chain(target.iter().filter(|(sid, _)| !own.contains(*sid)).map(|(_, t)| t.0))
+            .fold(0.0_f64, f64::max);
+        if shift <= REPICK_MIN_SHIFT {
+            let msg = format!(
+                "{label} re-ran its pick with fresh evidence: the same strategies, no weight moving by more than {} points, so nothing changes.",
+                pct(REPICK_MIN_SHIFT * 100.0)
+            );
+            self.log(JournalKind::System, msg, None, None);
+            return;
+        }
+
+        // Apply: new weights, new books in, dropped books at zero.
+        let mut parts: Vec<String> = Vec::new();
+        let want_state = if mode == AutopilotMode::Live { StrategyState::Live } else { StrategyState::Paper };
+        for (sid, name, was) in &current {
+            let (w, why) = target.get(sid).cloned().unwrap_or((0.0, String::new()));
+            let s = self.autopilots[i].sleeve_mut(sid).expect("current sleeves exist");
+            s.weight = w;
+            if w > 0.0 {
+                s.dropped_ms = None;
+                s.why = format!("{why}; re-picked to {:.0} % of the capital, netted per coin with the other lab books.", w * 100.0);
+                parts.push(format!("{name} {:.0} % (was {:.0} %)", w * 100.0, was * 100.0));
+            } else if *was > 0.0 {
+                s.dropped_ms = Some(now);
+                s.why = format!(
+                    "Dropped at the re-pick of {}: another lab book has better evidence now. Its coins are sold down by the next netted rebalance only as far as the books that stay do not want them.",
+                    chrono::DateTime::from_timestamp_millis(now).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
+                );
+                parts.push(format!("{name} dropped (was {:.0} %)", was * 100.0));
+            }
+        }
+        for (sid, (w, why)) in target.iter().filter(|(sid, _)| !own.contains(*sid)) {
+            let Some(s) = self.strategies.iter().find(|s| &s.id == sid) else { continue };
+            let markets = self.sleeve_universe(s, mode);
+            let (name, prior) = (s.name.clone(), s.state);
+            self.autopilots[i].sleeves.push(Sleeve {
+                strategy_id: sid.clone(),
+                name: name.clone(),
+                weight: *w,
+                markets,
+                why: format!("{why}; added at a re-pick with {:.0} % of the capital, netted per coin with the other lab books.", w * 100.0),
+                realized: 0.0,
+                fees: 0.0,
+                trades: 0,
+                prior_state: prior,
+                dropped_ms: None,
+            });
+            if prior != want_state {
+                self.apply_strategy_state(sid, want_state);
+            }
+            parts.push(format!("{name} {:.0} % (new)", w * 100.0));
+        }
+        // The netted target changes now, so the next rebalance runs now:
+        // it trades only the difference per coin.
+        let members: Vec<String> = self.autopilots[i].sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+        for sid in &members {
+            self.lab_done.remove(sid);
+            self.lab_retry.remove(sid);
+        }
+        let msg = format!(
+            "{label} re-ran its pick with fresh evidence and changed its lab books: {}. The new weights are netted into one target per coin at the next rebalance, which trades only the difference; nothing is sold off at once.",
+            parts.join(", ")
+        );
+        self.autopilots[i].last_action = Some(msg.clone());
+        self.pending_alerts.push(msg.clone());
+        self.log(JournalKind::System, msg, None, None);
     }
 }
