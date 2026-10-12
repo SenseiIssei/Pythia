@@ -65,10 +65,15 @@ The first forecast comes after about three minutes, once ten days of
 
 ## Retraining
 
-Sundays 05:00 UTC on the VPS (`/etc/cron.d/pythia-retrain`). A model that
-passes lands in `models/vol_1h/<date>/`; the engine checks every hour and
-switches to it after its probe check, without a restart. The live score
-carries on across versions.
+Sundays, inside the nightly learning loop (`lab.ops.learn`, see
+`research/ops/README.md`). A retrain is a challenger: it lands in
+`models/registry/vol_1h/candidates/` and is copied to `models/vol_1h/<version>/`
+only if it passes its own test against HAR and beats the running model on the
+hours that model never saw. Every decision is recorded in
+`models/registry/vol_1h/decisions.jsonl`. M2 (`picks_7d`) is retrained the same
+way every 28 days. The engine checks every hour and switches to a promoted
+model after its probe check, without a restart. The live score carries on
+across versions.
 
 When `vol.py`'s features change, regenerate the parity fixture
 (`python -m lab.export.parity`, then copy `fixtures/vol_parity.json` into

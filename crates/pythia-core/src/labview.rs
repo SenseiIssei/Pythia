@@ -56,6 +56,98 @@ pub struct LabStatus {
     /// The daily forward report (`reports/forward/latest.json`): every paper
     /// book and autopilot against its backtest. `None` until the job has run.
     pub forward: Option<ForwardReport>,
+    /// The nightly learning loop's digest (`reports/learn/latest.json`): what
+    /// changed, what was promoted or rejected and why, autopilots against BTC.
+    /// `None` until the loop has run.
+    pub learn: Option<LearnDigest>,
+}
+
+// ── learning loop digest ────────────────────────────────────────────────────
+// Written by `lab.ops.learn`. Read only, shown as written; the loop itself
+// cannot change anything the engine trades with beyond evidence, costs and
+// models (see research/ops/README.md).
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct LearnChange {
+    /// costs · evidence · gates · models
+    pub area: String,
+    pub what: String,
+    pub why: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct LearnDecision {
+    pub model: String,
+    pub candidate: Option<String>,
+    pub champion: Option<String>,
+    /// promoted · rejected · kept
+    pub decision: String,
+    pub why: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct LearnAutopilot {
+    pub id: String,
+    pub name: String,
+    pub state: Option<String>,
+    pub pnl_day_pct: Option<f64>,
+    pub btc_day_pct: Option<f64>,
+    pub pnl_total_pct: Option<f64>,
+    pub btc_total_pct: Option<f64>,
+    pub vs_btc_total_pts: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct LearnStep {
+    pub step: String,
+    /// ok · failed · not due · skipped
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnDigest {
+    pub generated: String,
+    pub generated_ms: i64,
+    pub headline: String,
+    pub changes: Vec<LearnChange>,
+    pub decisions: Vec<LearnDecision>,
+    pub autopilots: Vec<LearnAutopilot>,
+    pub steps: Vec<LearnStep>,
+}
+
+/// The learning loop's digest as the lab wrote it; `None` when it is not a
+/// JSON object. Rows that do not parse are skipped.
+pub fn parse_learn(text: &str) -> Option<LearnDigest> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    fn rows<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Vec<T> {
+        v.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect())
+            .unwrap_or_default()
+    }
+    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    Some(LearnDigest {
+        generated: s("generated"),
+        generated_ms: v.get("generated_ms").and_then(Value::as_i64).unwrap_or(0),
+        headline: s("headline"),
+        changes: rows(&v, "changes"),
+        decisions: rows(&v, "decisions"),
+        autopilots: rows(&v, "autopilots"),
+        steps: rows(&v, "steps"),
+    })
+}
+
+fn read_learn(root: &Path) -> Option<LearnDigest> {
+    parse_learn(&std::fs::read_to_string(root.join("reports").join("learn").join("latest.json")).ok()?)
 }
 
 // ── forward report ──────────────────────────────────────────────────────────
@@ -315,6 +407,7 @@ fn verdict_of(name: &str, v: &Value) -> String {
             f(v, "rank_ic"),
             f(v, "rank_ic_t")
         ),
+        "learn" => v.get("headline").and_then(Value::as_str).unwrap_or_default().to_string(),
         "vol_1h" => format!(
             "LGBM {} HAR by {:.1} % QLIKE out of sample (DM p {:.2e}).",
             if v.get("passed").and_then(Value::as_bool) == Some(true) { "beats" } else { "does not clearly beat" },
@@ -332,6 +425,7 @@ pub fn status() -> LabStatus {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     out.forward = read_forward(&root);
+    out.learn = read_learn(&root);
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));
@@ -437,6 +531,42 @@ mod tests {
         assert_eq!(out["books"][0]["gate7"]["daysNeeded"], 30.0);
         assert_eq!(out["autopilots"][0]["btcReturnPct"], -1.99);
         assert_eq!(out["generatedMs"], 1791440100000i64);
+    }
+
+    const LEARN: &str = r#"{
+      "generated": "2026-10-11 06:30 UTC", "generated_ms": 1791700200000,
+      "headline": "Promoted vol_1h; 1 cost update.",
+      "changes": [{"area": "costs", "what": "Alpaca BTC/USD: spread 2.1 bps", "why": "40 demo market fills"},
+                  {"area": 7}],
+      "decisions": [{"ts_ms": 1, "model": "vol_1h", "candidate": "2026-10-11", "champion": "2026-09-01",
+                     "decision": "promoted", "why": "qlike 0.41 vs champion 0.47", "challenger_score": 0.41}],
+      "autopilots": [{"id": "ap1", "name": "Breakout demo", "state": "running", "pnl_day_pct": 0.4,
+                      "btc_day_pct": NaN}],
+      "steps": [{"step": "m2", "status": "failed", "detail": "exited with 1"}]
+    }"#;
+
+    #[test]
+    fn parses_the_learning_digest_and_serves_it_in_camel_case() {
+        assert!(parse_learn(LEARN).is_none(), "NaN is not JSON; the lab writes null");
+        let text = LEARN.replace("NaN", "null");
+        let d = parse_learn(&text).unwrap();
+        assert_eq!(d.headline, "Promoted vol_1h; 1 cost update.");
+        assert_eq!(d.changes.len(), 1, "the row with area = 7 is dropped");
+        assert_eq!(d.decisions[0].decision, "promoted");
+        assert_eq!(d.autopilots[0].pnl_day_pct, Some(0.4));
+        assert_eq!(d.autopilots[0].btc_day_pct, None);
+        assert_eq!(d.steps[0].status, "failed");
+        let out = serde_json::to_value(&d).unwrap();
+        assert_eq!(out["autopilots"][0]["pnlDayPct"], 0.4);
+        assert_eq!(out["generatedMs"], 1791700200000i64);
+        assert!(parse_learn("[]").is_none());
+
+        let dir = std::env::temp_dir().join(format!("pythia-labview-learn-{}", std::process::id()));
+        assert!(read_learn(&dir).is_none(), "no digest yet");
+        std::fs::create_dir_all(dir.join("reports").join("learn")).unwrap();
+        std::fs::write(dir.join("reports").join("learn").join("latest.json"), &text).unwrap();
+        assert_eq!(read_learn(&dir).map(|d| d.decisions.len()), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

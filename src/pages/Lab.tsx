@@ -12,6 +12,7 @@ import {
   type ForwardReport,
   type ForwardRow,
   type LabStatus,
+  type LearnDigest,
   type PaperBook,
 } from "../lab";
 import { useAdvanced } from "../uiMode";
@@ -40,6 +41,7 @@ const REPORT_LABEL: Record<string, string> = {
   meta_breakout: "Meta-labeled breakout",
   paper_review: "Paper books vs backtests",
   forward: "Forward tests, daily",
+  learn: "Learning loop, nightly",
 };
 
 const usd = (v: number, digits: number) =>
@@ -82,6 +84,48 @@ function BandBar({ row }: { row: ForwardRow }) {
         {e.method === "approximate" && " (approximate)"}
       </div>
     </div>
+  );
+}
+
+/** The nightly learning loop: what it changed and why. It only reads the engine. */
+function LearnSection({ d }: { d: LearnDigest }) {
+  const failed = d.steps.filter((x) => x.status === "failed");
+  return (
+    <Card
+      title="What the system learned last night"
+      right={<Badge tone={failed.length ? "red" : "green"}>{failed.length ? `${failed.length} step failed` : d.generated}</Badge>}
+    >
+      <p className="text-sm text-cyber-text-dim">{d.headline}</p>
+      {d.changes.length > 0 && (
+        <ul className="mt-2 space-y-1 text-sm">
+          {d.changes.map((c, i) => (
+            <li key={i} className="text-cyber-text-dim">
+              <Badge tone="neutral">{c.area}</Badge> <span className="text-cyber-text">{c.what}.</span> {c.why}
+            </li>
+          ))}
+        </ul>
+      )}
+      {d.autopilots.length > 0 && (
+        <div className="mt-3 grid gap-x-4 gap-y-1 text-xs text-cyber-text-faint sm:grid-cols-2">
+          {d.autopilots.map((a) => (
+            <div key={a.id}>
+              <span className="text-cyber-text">{a.name}</span>: today{" "}
+              <span className="font-mono text-cyber-text">{signedPct(a.pnlDayPct)}</span> (BTC {signedPct(a.btcDayPct)}),
+              since start <span className="font-mono text-cyber-text">{signedPct(a.pnlTotalPct)}</span> (BTC{" "}
+              {signedPct(a.btcTotalPct)})
+            </div>
+          ))}
+        </div>
+      )}
+      {failed.map((x) => (
+        <div key={x.step} className="mt-2 break-words text-xs text-danger">
+          {x.step}: {x.detail}
+        </div>
+      ))}
+      <div className="mt-2 text-xs text-cyber-text-faint">
+        It updates evidence, costs and models within fixed bounds. It cannot change settings, arm live or move money.
+      </div>
+    </Card>
   );
 }
 
@@ -365,6 +409,8 @@ export function Lab() {
       )}
 
       {s?.forward && <ForwardSection f={s.forward} />}
+
+      {s?.learn && <LearnSection d={s.learn} />}
 
       {s && s.books.length > 0 && (
         <>

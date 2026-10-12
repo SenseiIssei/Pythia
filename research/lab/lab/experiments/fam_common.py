@@ -47,7 +47,8 @@ MIN_AGE_D = 60
 MIN_ADV_USD = 1_000_000
 
 OUT = Path(os.environ.get("PYTHIA_AGENT_OUT", str(ROOT / "agent-strategies")))
-RESULTS_DIR = Path(__file__).resolve().parents[2] / "results"
+# PYTHIA_FAM_RESULTS moves the markdown elsewhere (the learning loop's monthly re-run stages it).
+RESULTS_DIR = Path(os.environ.get("PYTHIA_FAM_RESULTS", str(Path(__file__).resolve().parents[2] / "results")))
 
 # Not crypto risk: stablecoins and pegged dollars, gold, wrapped or staked
 # duplicates of BTC, ETH and SOL. Tokenised stocks (the "...BUSDT" listings

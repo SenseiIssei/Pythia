@@ -18,8 +18,10 @@ says whether the LGBM gain over HAR is more than noise.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
@@ -33,6 +35,7 @@ from ..metrics import diebold_mariano, qlike, r2
 EPS = 1e-10
 FIRST_TEST = int(datetime(2021, 1, 1, tzinfo=timezone.utc).timestamp() * 1e6)
 HAR_COLS = ["har1", "har24", "har168"]
+HOLDOUT_DAYS = 120  # walk-forward rows a challenger keeps for the champion comparison
 LGBM_PARAMS = dict(n_estimators=500, learning_rate=0.03, num_leaves=63, min_child_samples=500,
                    subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
                    n_jobs=4, verbose=-1)
@@ -160,8 +163,21 @@ def main() -> None:
     passed = gain > 0 and dm_p < 0.05 and all(r["qlike_lgbm"] <= r["qlike_har"] * 1.02 for r in fold_rows[-4:])
     # Only a model that passes is published where the engine looks (models/vol_1h/<date>).
     # A failing retrain goes to vol_1h_rejected and the engine keeps the last good one.
+    # --challenger DIR: the learning loop's retrain. The model goes to DIR/<date> as a
+    # challenger, never where the engine looks; lab.ops.registry decides whether it
+    # replaces the champion.
+    challenger = Path(sys.argv[sys.argv.index("--challenger") + 1]) if "--challenger" in sys.argv else None
     model_dir = export_model(final, X, final_resid, summary, gain, dm_p, ts, har_beta, har_resid,
-                             "vol_1h" if passed else "vol_1h_rejected")
+                             "vol_1h" if passed else "vol_1h_rejected", dest=challenger)
+    if challenger is not None:
+        recent = ok & (ts >= ts.max() - HOLDOUT_DAYS * 24 * HOUR_US)
+        hold = pl.DataFrame({"ts_us": ts[recent], "symbol": sym[recent], "target": yvar[recent],
+                             "challenger": np.exp(preds["lgbm"][recent] + resid_var["lgbm"][recent] / 2)})
+        hold = hold.with_columns([pl.Series(f, X[recent, i]) for i, f in enumerate(FEATURES)])
+        hold.write_parquet(model_dir / "holdout.parquet")
+        why = ("passes" if passed else "the gain over HAR is not significant or not stable in the last four quarters")
+        (model_dir / "challenger.json").write_text(json.dumps(
+            {"passed": bool(passed), "why": why, "qlike_gain_vs_har": gain, "dm_p_vs_har": dm_p}, indent=2))
     verdict = (f"LGBM beats HAR by {gain * 100:.1f} % QLIKE out of sample (DM p = {dm_p:.2g}). "
                + ("It passes: better overall, significant, and not worse than HAR in any of the last four quarters."
                   if passed else "It does not pass the bar yet: the gain is not significant or not stable in recent quarters."))
@@ -201,7 +217,7 @@ def drift_bins(col: np.ndarray) -> dict:
             "lo": float(np.quantile(v, 0.005)), "hi": float(np.quantile(v, 0.995))}
 
 
-def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_resid, folder="vol_1h"):
+def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_resid, folder="vol_1h", dest=None):
     """Writes model.json (LightGBM's own tree dump, what the Rust engine evaluates),
     model.onnx (for tools that speak ONNX), and card.json.
 
@@ -215,7 +231,7 @@ def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_res
     from onnxmltools.convert.common.data_types import FloatTensorType
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    d = ROOT / "models" / folder / stamp
+    d = (Path(dest) if dest is not None else ROOT / "models" / folder) / stamp
     d.mkdir(parents=True, exist_ok=True)
     onx = convert_lightgbm(model, initial_types=[("features", FloatTensorType([None, X.shape[1]]))],
                            target_opset=15)
