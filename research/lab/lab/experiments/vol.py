@@ -240,8 +240,15 @@ def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_res
     probe = X[-5000:]
     got = sess.run(None, {"features": probe})[0].ravel()
     max_err = float(np.max(np.abs(got - model.predict(probe))))
+    # The engine evaluates model.json and checks it against the card's probes,
+    # so an ONNX copy that drifts (float32 thresholds can send a row down
+    # another branch) is dropped with a note instead of blocking the model.
+    onnx_note = None
     if max_err > 1e-4:
-        raise RuntimeError(f"ONNX output differs from LightGBM by {max_err}")
+        (d / "model.onnx").unlink()
+        onnx_note = f"model.onnx dropped: it differed from LightGBM by {max_err:.4g}"
+        print(onnx_note)
+    model.booster_.save_model(str(d / "model.txt"))
     (d / "model.json").write_text(json.dumps(model.booster_.dump_model()))
     rng = np.random.default_rng(11)
     pick = rng.choice(len(X), size=64, replace=False)
@@ -265,6 +272,7 @@ def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_res
         "train_from_us": int(ts.min()), "train_to_us": int(ts.max()),
         "out_of_sample": summary, "qlike_gain_vs_har": gain, "dm_p_vs_har": dm_p,
         "onnx_max_abs_err": max_err,
+        "onnx_note": onnx_note,
         "lightgbm_params": LGBM_PARAMS,
     }
     (d / "card.json").write_text(json.dumps(card, indent=2))
