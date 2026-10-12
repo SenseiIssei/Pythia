@@ -121,12 +121,14 @@ def train_final(P: pl.DataFrame, feats: list[str]) -> tuple[lgb.LGBMRanker, np.n
     return model, Xt, dt
 
 
-def export_model(raw: pl.DataFrame, P: pl.DataFrame, feats: list[str], metrics: dict, out: str | None = None) -> Path:
+def export_model(raw: pl.DataFrame, P: pl.DataFrame, feats: list[str], metrics: dict, out: str | None = None,
+                 dest: Path | None = None) -> Path:
+    """Writes <out or data/models>/picks_7d/<date>/, or <dest>/<date>/ for a challenger."""
     if feats != FEATURES + PERP_FEATURES:
         raise ValueError("the engine runs M2 v2 only: export with --perp-features")
     model, Xt, dt = train_final(P, feats)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    d = (Path(out) if out else ROOT / "models") / NAME / stamp
+    d = (Path(dest) if dest is not None else (Path(out) if out else ROOT / "models") / NAME) / stamp
     d.mkdir(parents=True, exist_ok=True)
     (d / "model.json").write_text(json.dumps(model.booster_.dump_model()))
     model.booster_.save_model(str(d / "model.txt"))

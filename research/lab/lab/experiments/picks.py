@@ -37,6 +37,7 @@ from ..metrics import deflated_sharpe
 
 DAY_US = 24 * HOUR_US
 HORIZON = 7
+HOLDOUT_DAYS = 180  # walk-forward days a challenger keeps for the champion comparison
 COST = 0.0025
 MIN_HISTORY_D = 60
 MIN_ADV_USD = 1_000_000
@@ -328,11 +329,23 @@ def main() -> None:
                                "rank_ic_liquid50": ic_liquid, "deciles": dec_rows, "verdict": verdict})
     # --export: the final model on all labelled history, as LightGBM JSON plus a
     # model card, for the engine's shadow scoring (lab/export/picks.py).
-    if "--export" in sys.argv:
+    # --challenger DIR (with --perp-features): the learning loop's retrain. The model goes
+    # to DIR/<date> with holdout.parquet (the recent walk-forward scores and the features
+    # behind them), never where the engine looks; lab.ops.registry decides.
+    if "--export" in sys.argv or "--challenger" in sys.argv:
+        from pathlib import Path
+
         from ..export.picks import export_model
         out = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else None
-        export_model(raw, P, feats, {"rank_ic": ic_mean, "rank_ic_t": ic_t, "rank_ic_liquid50": ic_liquid,
-                                     "folds": folds, "deciles": dec_rows, "verdict": verdict}, out)
+        dest = Path(sys.argv[sys.argv.index("--challenger") + 1]) if "--challenger" in sys.argv else None
+        d = export_model(raw, P, feats, {"rank_ic": ic_mean, "rank_ic_t": ic_t, "rank_ic_liquid50": ic_liquid,
+                                         "folds": folds, "deciles": dec_rows, "verdict": verdict}, out, dest)
+        if dest is not None:
+            recent = has_score & np.isfinite(fwd) & (days >= days.max() - HOLDOUT_DAYS * DAY_US)
+            hold = pl.DataFrame({"ts_us": days[recent], "symbol": sym[recent], "target": fwd[recent],
+                                 "challenger": score[recent]})
+            hold.with_columns([pl.Series(f, X[recent, i]) for i, f in enumerate(feats)]).write_parquet(
+                d / "holdout.parquet")
 
 
 if __name__ == "__main__":
