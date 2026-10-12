@@ -45,7 +45,15 @@ pub struct LabSignal {
     /// left out of `weights`, so that share of the book stays in cash here.
     #[serde(default)]
     pub dropped: Vec<String>,
+    /// What the weights' keys name. Absent (every signal so far): coins,
+    /// traded as `crypto:<COIN>/USD`. [`US_EQUITY`]: US shares and ETFs,
+    /// traded as `alpaca:<SYMBOL>` on Alpaca in the regular session.
+    #[serde(default)]
+    pub asset_class: Option<String>,
 }
+
+/// [`LabSignal::asset_class`] of a book of US shares and ETFs.
+pub const US_EQUITY: &str = "us_equity";
 
 /// What the lab measured for the variant (reports/tsmom, reports/momentum2).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -204,6 +212,30 @@ pub fn read_signal(path: &Path) -> Result<LabSignal, String> {
 impl LabSignal {
     pub fn is_fresh(&self, now_ms: i64) -> bool {
         now_ms <= self.valid_until_ms
+    }
+
+    /// A book of US shares and ETFs, traded on Alpaca.
+    pub fn is_us_equity(&self) -> bool {
+        self.asset_class.as_deref() == Some(US_EQUITY)
+    }
+
+    /// The engine market a weight's key names: a key that is already a market
+    /// id (`alpaca:SPY`) as it is, else `alpaca:<KEY>` for a US equity book
+    /// and `crypto:<KEY>/USD` for a coin book.
+    pub fn market_id(&self, key: &str) -> String {
+        if key.contains(':') {
+            key.to_string()
+        } else if self.is_us_equity() {
+            format!("alpaca:{key}")
+        } else {
+            format!("crypto:{key}/USD")
+        }
+    }
+
+    /// The symbol of that market as the engine shows it (`SPY`, `BTC/USD`).
+    pub fn market_symbol(&self, key: &str) -> String {
+        let id = self.market_id(key);
+        id.split_once(':').map(|(_, s)| s.to_string()).unwrap_or(id)
     }
 }
 
@@ -551,5 +583,31 @@ mod tests {
         assert_eq!(s.dropped, vec!["HYPE".to_string()]);
         let v = verdict("lab:breakout_top10", vec![], &s.evidence, 0);
         assert!(v.gates[3].reason.contains("of the 6 variants tried"), "{}", v.gates[3].reason);
+    }
+
+    #[test]
+    fn an_equity_signal_maps_its_symbols_to_alpaca_markets() {
+        let j = r#"{"strategy":"etf_trend","variant":"trend","as_of_ms":1,"generated_ms":2,"valid_until_ms":3,
+            "quote":"USD","weights":{"SPY":0.3,"GLD":0.2},"asset_class":"us_equity","autopilot_only":true}"#;
+        let s: LabSignal = serde_json::from_str(j).unwrap();
+        assert!(s.is_us_equity());
+        assert_eq!(s.market_id("SPY"), "alpaca:SPY");
+        assert_eq!(s.market_symbol("GLD"), "GLD");
+        assert_eq!(s.market_id("alpaca:IEF"), "alpaca:IEF", "a full market id is taken as it is");
+        let w: BTreeMap<String, f64> = s.weights.clone();
+        let p: HashMap<String, f64> =
+            [("alpaca:SPY".to_string(), 500.0), ("alpaca:GLD".to_string(), 250.0)].into_iter().collect();
+        let (orders, missing) = rebalance(&w, |k| Some(s.market_id(k)), &HashMap::new(), &p, 10_000.0, 1.0, 0.002);
+        assert!(missing.is_empty());
+        let spy = orders.iter().find(|o| o.market_id == "alpaca:SPY").unwrap();
+        assert!((spy.notional - 3_000.0).abs() < 1e-9, "dollar sizing: fractional shares are fine on Alpaca");
+
+        // Every signal so far names coins.
+        let j = r#"{"strategy":"tsmom","variant":"28d","as_of_ms":1,"generated_ms":2,"valid_until_ms":3,
+            "quote":"USD","weights":{"BTC":0.05}}"#;
+        let s: LabSignal = serde_json::from_str(j).unwrap();
+        assert!(!s.is_us_equity());
+        assert_eq!(s.market_id("BTC"), "crypto:BTC/USD");
+        assert_eq!(s.market_symbol("BTC"), "BTC/USD");
     }
 }
