@@ -1,6 +1,6 @@
-"""Paper forward tests of two candidates from the strategy-family sweep. No real money.
+"""Paper forward tests of candidates from the strategy-family sweep. No real money.
 
-Neither passed the deflation gate (see results/families_summary.md); they run
+None passed the deflation gate (see results/families_summary.md); they run
 so that forward evidence accumulates, labelled as such:
 
   tsmom_top20     28d time-series momentum on the 20 most liquid coins OF EACH
@@ -9,6 +9,12 @@ so that forward evidence accumulates, labelled as such:
                   journals show what survivorship was worth.     since 2026-10-07
   breakout_top10  Donchian 20/10 on the 10 most liquid coins of each day, no
                   regime. The sweep's most robust family.        since 2026-10-07
+  tsmom_tranches  tsmom_top20's targets held by seven tranches, one rebalanced
+                  each day (weekly per tranche, 50 % no-trade band), capital
+                  set back to 1/7 each every 30 days: the blend study's
+                  weekday-free weekly book, about a third of the daily book's
+                  turnover. Simulator and evidence in
+                  experiments/tsmom_tranches.py.
 
 Each book's target comes from the SAME weight function the sweep used
 (fam_volmom.base_weights, fam_breakout.breakout_weights) on a panel rebuilt
@@ -17,7 +23,12 @@ touch plus the 10 bps taker fee, the modelled 15 bps per unit of turnover
 journaled next to it.
 
 The universe changes from day to day, so unlike paper/tsmom.py the state keeps
-weights and marks per symbol rather than as a fixed vector.
+weights and marks per symbol rather than as a fixed vector. tsmom_tranches
+keeps one weight map per tranche plus each tranche's share of the book; a run
+marks all of them, rebalances only the tranche due on the decision close's
+date (calendar days since 2020-01-01, modulo 7) and trades the net change of
+the combined book. A missed run leaves that tranche as it is for a week, as
+the backtest would not.
 
 Engine signals. Each book also writes <data>/signals/<book>/latest.json in the
 format of paper/tsmom.py's write_signal, marked "autopilot_only": the engine
@@ -29,6 +40,9 @@ entry), restricted to the coins the engine has a market for; the rest is
 named in "dropped" and stays cash there. The evidence is the book's pick in
 the sweep (families_summary JSON, else results/families_summary.md), with its
 failed deflation test. The paper books themselves are unchanged.
+tsmom_tranches' signal carries the combined target weights of all seven
+tranches after the decision close, and its evidence is
+results/tsmom_tranches.md (out of sample at Alpaca-like costs).
 
   --dry-run        print the books' holdings and the signals; write nothing
   --signals-only   refresh the signal files without stepping the paper books
@@ -49,11 +63,14 @@ import numpy as np
 
 from ..data import ROOT, UNIVERSE
 from ..experiments import fam_breakout, fam_common as fc, fam_volmom
+from ..experiments import tsmom_tranches as tranches
 from .tsmom import COST, START_EQUITY, TAKER, live_quotes, save_signal
 
 BOOKS = {
     "tsmom_top20": "28d · top 20 by volume each day · regime · unscaled (fails deflation, forward evidence only)",
     "breakout_top10": "Donchian 20/10 · top 10 by volume each day (fails deflation, forward evidence only)",
+    "tsmom_tranches": "28d · top 20 by volume each day · regime · seven weekly tranches, band 50 % "
+                      "(fails deflation, forward evidence only)",
 }
 
 # Each book's in-sample pick in the sweep, and whether it carries the regime filter.
@@ -62,6 +79,7 @@ PICKS = {
     "breakout_top10": {"family": "breakout", "variant": "Donchian 20/10 · top 10 liquid", "regime": False},
 }
 REPORT = "families_summary"
+REGIME = {"tsmom_top20": True, "breakout_top10": False, "tsmom_tranches": True}
 # The engine's crypto markets are the lab's 20-coin universe (crypto:<coin>/USD,
 # engine::seed_markets in pythia-core). A coin outside it has no market there.
 ENGINE_COINS = frozenset(UNIVERSE)
@@ -75,6 +93,7 @@ def targets(P: fc.Panel) -> dict[str, np.ndarray]:
     return {
         "tsmom_top20": fam_volmom.base_weights(P, 20, regime=True),
         "breakout_top10": fam_breakout.breakout_weights(P, cols, top10, 20, 10, regime=False),
+        "tsmom_tranches": tranches.targets(P),
     }
 
 
@@ -158,6 +177,109 @@ def step(name: str, row_w: np.ndarray, P: fc.Panel, t: int, quotes: dict[str, tu
         wr.writerow(row)
 
     st.update(equity=equity, weights=tgt, mid={s: mid[s] for s in tgt})
+    state_file.write_text(json.dumps(st, indent=2))
+    return row
+
+
+def step_tranches(P: fc.Panel, W: np.ndarray, t: int, quotes: dict[str, tuple[float, float]],
+                  now_us: int, name: str = "tsmom_tranches") -> dict:
+    """One run of the tranche book: mark every tranche, rebalance the one due on
+    the decision close's date, trade the net change of the combined book.
+
+    State: "alloc" (each tranche's share of the book) and "tranches" (per
+    tranche, weights as shares of that tranche). A new book starts where the
+    backtest stands after the decision close, all seven tranches filled.
+    """
+    d = ROOT / "paper" / name
+    d.mkdir(parents=True, exist_ok=True)
+    state_file = d / "state.json"
+    mid = {s: (b + a) / 2 for s, (b, a) in quotes.items()}
+    k = tranches.due_tranche(int(P.days[t]))
+    reset = tranches.reset_due(int(P.days[t]))
+
+    def book(alloc: list[float], tr: list[dict[str, float]]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for a, w in zip(alloc, tr):
+            for s, x in w.items():
+                out[s] = out.get(s, 0.0) + a * x
+        return out
+
+    if state_file.exists():
+        st = json.loads(state_file.read_text())
+        alloc = [float(a) for a in st["alloc"]]
+        tr = [{s: float(x) for s, x in w.items()} for w in st["tranches"]]
+        equity = st["equity"]
+        # Mark to market, per tranche. A coin without a live quote is closed at its last mark.
+        held = {s for w in tr for s in w}
+        rets = {s: mid[s] / st["mid"][s] - 1 for s in held if s in mid and st["mid"].get(s)}
+        gk = [sum(x * rets.get(s, 0.0) for s, x in w.items()) for w in tr]
+        gross = sum(a * g for a, g in zip(alloc, gk))
+        equity *= 1 + gross
+        if 1 + gross > 0:
+            alloc = [a * (1 + g) / (1 + gross) for a, g in zip(alloc, gk)]
+        tr = [{s: x * (1 + rets.get(s, 0.0)) / (1 + g) for s, x in w.items() if s in mid} if 1 + g > 0 else {}
+              for w, g in zip(tr, gk)]
+        before = book(alloc, tr)
+        # The due tranche goes to the momentum targets, with the backtest's band.
+        cur = tr[k]
+        tgt: dict[str, float] = {}
+        row_w = W[t]
+        for j in np.flatnonzero(np.isfinite(row_w) & (row_w != 0) | np.isnan(row_w)):
+            sym = P.names[j]
+            if "~" in sym or sym not in mid:
+                continue
+            x = cur.get(sym, 0.0) if np.isnan(row_w[j]) else float(row_w[j])
+            if x > 0:
+                c = cur.get(sym, 0.0)
+                tgt[sym] = c if c > 0 and abs(x - c) <= tranches.BAND * x else x
+        tr[k] = tgt
+        if reset:
+            alloc = [1.0 / tranches.K] * tranches.K
+        expo = sum(a * sum(w.values()) for a, w in zip(alloc, tr))
+        if expo > 1 + 1e-9:
+            alloc = [a / expo for a in alloc]
+    else:
+        st = {"variant": BOOKS[name], "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "equity": START_EQUITY}
+        equity, gross, before = START_EQUITY, 0.0, {}
+        _, _, _, a0, inner, _ = tranches.simulate(P, W, until=t)
+        alloc = [float(a) for a in a0]
+        tr = [{P.names[j]: float(w[j]) for j in np.flatnonzero(w > 0)
+               if "~" not in P.names[j] and P.names[j] in mid} for w in inner]
+    after = book(alloc, tr)
+    syms = set(before) | set(after)
+    delta = {s: after.get(s, 0.0) - before.get(s, 0.0) for s in syms}
+    half = {s: (quotes[s][1] - quotes[s][0]) / mid[s] / 2 for s in syms if s in quotes}
+    paper_cost = sum(abs(x) * (TAKER + half.get(s, 0.0)) for s, x in delta.items())
+    model_cost = sum(abs(x) for x in delta.values()) * COST
+    equity *= 1 - paper_cost
+    moved = [(abs(x), mid[s] / P.close[t, P.col(s)] - 1) for s, x in delta.items()
+             if x and s in mid and np.isfinite(P.close[t, P.col(s)])]
+    timing_bps = sum(a * m for a, m in moved) / max(sum(a for a, _ in moved), 1e-12) * 1e4
+
+    row = {
+        "date": datetime.fromtimestamp(now_us / 1e6, timezone.utc).strftime("%Y-%m-%d"),
+        "equity": round(equity, 2),
+        "gross_ret_pct": round(gross * 100, 4),
+        "paper_cost_bps": round(paper_cost * 1e4, 2),
+        "model_cost_bps": round(model_cost * 1e4, 2),
+        "turnover": round(sum(abs(x) for x in delta.values()), 4),
+        "exposure": round(sum(after.values()), 4),
+        "held": sum(1 for x in after.values() if x > 0),
+        "timing_drift_bps": round(timing_bps, 2),
+        "tranche": k,
+        "reset": reset,
+        "weights": json.dumps({s[:-4]: round(x, 4) for s, x in sorted(after.items()) if x > 0}),
+    }
+    journal = d / "journal.csv"
+    new = not journal.exists()
+    with journal.open("a", newline="") as fh:
+        wr = csv.DictWriter(fh, fieldnames=list(row))
+        if new:
+            wr.writeheader()
+        wr.writerow(row)
+
+    st.update(equity=equity, alloc=alloc, tranches=tr, mid={s: mid[s] for s in after if s in mid})
     state_file.write_text(json.dumps(st, indent=2))
     return row
 
@@ -247,11 +369,71 @@ def _pick_row(family: str, variant: str) -> tuple[dict | None, int | None, str]:
     return row, int(m.group(1)), str(md)
 
 
+def tranche_evidence() -> dict:
+    """The tranche book's out-of-sample numbers from experiments/tsmom_tranches.py:
+    the JSON next to the sweep's caches, else results/tsmom_tranches.md. Sharpe at
+    Alpaca taker cost (25 bps plus 10 bps slippage per side), "costs doubled" at
+    70 bps. It does not pass: deflated p far below 0.95."""
+    js = fc.OUT / "reports" / f"{tranches.NAME}.json"
+    row, n, sr0, share, src = None, None, None, None, ""
+    try:
+        rep = json.loads(js.read_text(encoding="utf-8"))
+        row, n, sr0, share, src = rep["rows"][0], rep["n_trials"], rep["sr0_annual"], rep["non_alpaca_share"], str(js)
+    except (OSError, ValueError, KeyError, IndexError):
+        md = fc.RESULTS_DIR / f"{tranches.NAME}.md"
+        try:
+            text = md.read_text(encoding="utf-8")
+            # The variant's row in every table (out of sample, then per year and regime), merged.
+            row = {}
+            for r in (r for tb in _md_tables(text) for r in tb if r.get("variant") == tranches.VARIANT):
+                row.update(r)
+            if not row:
+                raise StopIteration
+            m = re.search(r"over (\d+) trials", text)
+            n = int(m.group(1)) if m else None
+            m = re.search(r"On average (\d+) %", text)
+            share = int(m.group(1)) / 100 if m else None
+            src = str(md)
+        except (OSError, StopIteration):
+            return {"report": tranches.NAME, "missing": True}
+    if row is None:
+        return {"report": tranches.NAME, "missing": True}
+    return {
+        "report": tranches.NAME,
+        "source": src,
+        "variant": tranches.VARIANT,
+        "is_sharpe": row["is_taker 35bps"] if "is_taker 35bps" in row else None,
+        "oos_sharpe": row["oos_taker 35bps"],
+        "oos_sharpe_maker": row["oos_maker 15bps"],
+        "oos_max_dd": row["dd_taker 35bps"],
+        "deflated_p": row["deflated_p"],
+        "sharpe_2x_cost": row["oos_taker x2 70bps"],
+        "cost_note": "Sharpe at Alpaca taker cost, 35 bps per unit of turnover (25 bps fee plus about 10 bps "
+                     "slippage); oos_sharpe_maker at 15 bps; sharpe_2x_cost at 70 bps",
+        "variants_tried": n,
+        "bootstrap_90": [row["boot35_p05"], row["boot35_p95"]],
+        "turnover_yr": row["turnover_yr"],
+        "non_alpaca_share": share,
+        "oos_sharpe_survivorship_free": row["oos_taker 35bps"],
+        # The engine reads these as numbers: a missing one is left out, never null.
+        "regime_sharpes": {k: row[c] for k, c in (("BTC above 200d average", "oos_btc_above"),
+                                                  ("BTC below 200d average", "oos_btc_below"))
+                           if isinstance(row.get(c), float)},
+        "regime_filter": True,
+        "verdict": f"fails: deflated p {row['deflated_p']:.2f} <= 0.95",
+        "caveat": "Forward evidence only. Survivorship-free out-of-sample backtest from 2024; the rule is the "
+                  "blend study's weekday-free form of a weekly pick whose own number was weekday luck. Coins "
+                  "Alpaca does not list stay cash on an Alpaca autopilot.",
+    }
+
+
 def evidence(name: str) -> dict:
     """What the sweep measured for this book's pick, for the engine's Strategy
     Passport and the autopilot's auto pick. Sharpes are net of 15 bps per unit
     of turnover; the "costs doubled" figure is the sweep's 41 bps run (2.7x,
     stricter than 2x). Neither candidate passes: deflated p is far below 0.95."""
+    if name == "tsmom_tranches":
+        return tranche_evidence()
     pick = PICKS[name]
     row, n, src = _pick_row(pick["family"], pick["variant"])
     if row is None:
@@ -278,7 +460,7 @@ def evidence(name: str) -> dict:
 
 def signal(name: str, P: fc.Panel, W: np.ndarray, t: int, now_us: int) -> dict:
     """The engine signal for one book, in the format of paper/tsmom.py's write_signal."""
-    w = backtest_weights(P, W, t)
+    w = tranches.book_weights(P, W, t) if name == "tsmom_tranches" else backtest_weights(P, W, t)
     weights: dict[str, float] = {}
     dropped: dict[str, float] = {}
     for j in np.flatnonzero(w > 0):
@@ -298,7 +480,7 @@ def signal(name: str, P: fc.Panel, W: np.ndarray, t: int, now_us: int) -> dict:
         "valid_until_ms": now_us // 1000 + SIGNAL_VALID_MS,
         "quote": "USD",
         "weights": weights,
-        "regime_on": bool(P.btc_on[t]) if PICKS[name]["regime"] else None,
+        "regime_on": bool(P.btc_on[t]) if REGIME[name] else None,
         "evidence": evidence(name),
         "autopilot_only": True,
         "dropped": sorted(dropped),
@@ -335,14 +517,15 @@ def main() -> int:
     for name in BOOKS:
         f = ROOT / "paper" / name / "state.json"
         if f.exists():
-            held |= set(json.loads(f.read_text())["weights"])
+            st = json.loads(f.read_text())
+            held |= set(st.get("weights", {})) | {s for w in st.get("tranches", []) for s in w}
     wanted = {P.names[j] for w in W.values() for j in np.flatnonzero(np.nan_to_num(w[t], nan=1.0) != 0)}
     quotes = live_quotes(sorted((held | wanted) - {s for s in wanted if "~" in s}))
 
     for name, w in W.items():
         sig = signal(name, P, w, t, now_us)
         if dry:
-            now = held_now(w, t)
+            now = tranches.book_weights(P, w, t) if name == "tsmom_tranches" else held_now(w, t)
             row = {P.names[j]: round(float(now[j]), 4) for j in np.flatnonzero(now > 0)}
             print(name, "BTC above 200d" if P.btc_on[t] else "BTC below 200d", json.dumps(row))
             ev = sig["evidence"]
@@ -352,7 +535,10 @@ def main() -> int:
                 "source", "is_sharpe", "oos_sharpe", "sharpe_2x_cost", "deflated_p", "variants_tried",
                 "plateau_share", "plateau_variants", "regime_sharpes", "regime_filter", "verdict", "missing")}))
             continue
-        print(name, json.dumps(step(name, w[t], P, t, quotes, now_us, held_now(w, t))))
+        if name == "tsmom_tranches":
+            print(name, json.dumps(step_tranches(P, w, t, quotes, now_us)))
+        else:
+            print(name, json.dumps(step(name, w[t], P, t, quotes, now_us, held_now(w, t))))
         save_signal(name, sig, now_us)
     return 0
 
