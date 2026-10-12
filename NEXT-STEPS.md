@@ -370,8 +370,28 @@ status.
       costs doubled, deflated p; divided by 1 + gates failed), explains each
       pick in one sentence and says "fails the deflation test ... best
       available evidence, not a proven edge" where that is so. Markets go to
-      the better evidence: the best lab book takes the crypto markets alone,
-      built-ins only get them when they out-score it
+      the better evidence: the lab books take the crypto markets together,
+      built-ins only get them when they out-score every lab book
+- [x] **Several lab books in one autopilot** (2026-10-12). The lab books of an
+      autopilot are one netted book: their target weights are scaled by
+      their sleeve weights and added up per coin (`net_lab_targets`), one
+      position per coin, rebalanced by the difference only. Each book's share
+      of the target per coin splits fills, fees and P&L; when a share changes,
+      the position's open P&L so far stays with the books that earned it. The
+      auto pick takes up to `maxSleeves` (default 3) lab books with positive
+      evidence, weighted by score. `repickEveryHours` (default 24 for auto
+      pick, off for explicit sleeves, 0 = off) re-runs the pick with fresh
+      evidence and re-weights, adds or drops lab books; a dropped book stays
+      listed at weight zero and its coins are sold down only where the other
+      books do not want them; live never adds a book the owner did not
+      confirm. A running autopilot that holds nothing says it is in cash,
+      waiting for signals, and why. Strategies and markets stay exclusive
+      between autopilots
+- [ ] Netted fills are booked in the strategy ledger of the book that placed
+      them (the heaviest book for a new coin, the holder for a held one), so a
+      book's own engine-side record inside a multi-book autopilot is mixed.
+      Its pick evidence comes from the lab and the lab's own paper book, not
+      from that ledger, but splitting the ledger by share would be cleaner
 - [ ] Wire the second (autopilot) engine on the VPS to the signal directory
       with `PYTHIA_LAB_BOOKS=idle`, and copy `research/lab/results/` with the
       lab code so the family signals carry their evidence there

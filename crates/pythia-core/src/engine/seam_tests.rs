@@ -31,6 +31,8 @@ fn config(id: &str, mode: AutopilotMode, sleeves: &[&str]) -> AutopilotConfig {
         sleeves: sleeves.iter().map(|s| SleeveConfig { strategy_id: s.to_string(), weight: 1.0 }).collect(),
         stop: StopRules::default(),
         flatten_on_stop: true,
+        max_sleeves: None,
+        repick_every_hours: None,
     }
 }
 

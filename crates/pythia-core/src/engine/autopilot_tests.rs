@@ -37,6 +37,8 @@ fn config(id: &str, capital: f64, sleeves: &[(&str, f64)], stop: StopRules) -> A
         sleeves: sleeves.iter().map(|(s, w)| SleeveConfig { strategy_id: s.to_string(), weight: *w }).collect(),
         stop,
         flatten_on_stop: true,
+        max_sleeves: None,
+        repick_every_hours: None,
     }
 }
 
@@ -660,7 +662,7 @@ fn whole_set_strategies_claim_their_markets_first_and_the_rest_is_dealt_out() {
 
 #[test]
 fn assigning_markets_is_exclusive_and_deterministic() {
-    let w = |weight: f64, whole: bool, u: &[&str]| Want { weight, whole, universe: u.iter().map(|s| s.to_string()).collect() };
+    let w = |weight: f64, whole: bool, u: &[&str]| Want { weight, whole, net: false, universe: u.iter().map(|s| s.to_string()).collect() };
     let taken: HashSet<String> = ["d".to_string()].into_iter().collect();
     let out = assign_markets(
         &[w(1.0, false, &["a", "b", "c", "d", "e"]), w(3.0, false, &["a", "b", "c", "e"]), w(2.0, true, &["c", "f"])],
@@ -1019,10 +1021,18 @@ fn auto_picks_the_lab_book_with_the_best_evidence_and_never_calls_it_proven() {
     e.apply_lab_signal(book("tsmom_regime", now, w, regime_evidence(), false));
     let id = start(&mut e, config("auto", 10_000.0, &[], StopRules::default()));
     let s = status(&e, &id);
-    assert_eq!(s.by_sleeve.len(), 1, "a lab book claims every crypto market, so it runs alone: {:?}", s.by_sleeve);
+    // Lab books net their targets per coin, so up to three run together,
+    // weighted by their scores; the built-ins on crypto have nothing left.
+    let ids: Vec<&str> = s.by_sleeve.iter().map(|x| x.strategy_id.as_str()).collect();
+    assert_eq!(ids, ["lab:tsmom_regime", "lab:breakout_top10", "lab:tsmom_top20"], "best evidence first");
+    let scores: Vec<f64> = ids.iter().map(|i| e.evidence(i).score().unwrap()).collect();
+    let total: f64 = scores.iter().sum();
+    for (sl, sc) in s.by_sleeve.iter().zip(&scores) {
+        assert!((sl.weight - sc / total).abs() < 1e-9, "weight proportional to score: {} vs {}", sl.weight, sc / total);
+        assert!(sl.why.contains("netted per coin with the other 2 lab book(s)"), "{}", sl.why);
+    }
     let sl = &s.by_sleeve[0];
     assert_eq!(sl.strategy_id, "lab:tsmom_regime", "5 gates green and deflated p 0.86 beat the families' candidates");
-    assert_eq!(sl.weight, 1.0);
     assert_eq!(sl.markets.len(), e.markets.iter().filter(|m| m.venue == Venue::Crypto).count());
     assert!(sl.why.starts_with("Auto pick, the best evidence of the "), "{}", sl.why);
     assert!(
@@ -1038,9 +1048,12 @@ fn auto_picks_the_lab_book_with_the_best_evidence_and_never_calls_it_proven() {
         sl.why
     );
     let msg = s.last_action.unwrap();
-    assert!(msg.contains("Auto passed over") && msg.contains("Lab · breakout_top10") && msg.contains("EMA Cross"), "{msg}");
+    assert!(msg.contains("Auto passed over EMA Cross") && !msg.contains("passed over Lab"), "{msg}");
+    assert!(msg.contains("re-runs the pick with fresh evidence every 24 h"), "{msg}");
     e.run_lab_books();
-    assert!(notional(&e, BTC) > 2_900.0, "it rebalances with the autopilot's 10,000");
+    // All three want BTC 0.3 and ETH 0.2: netted, still 0.3 and 0.2 of the 10,000.
+    assert!((notional(&e, BTC) - 3_000.0).abs() < 40.0, "it rebalances with the autopilot's 10,000: {}", notional(&e, BTC));
+    assert_eq!(e.positions.len(), 2, "one position per coin, not one per book");
     e.autopilot_stop(&id, None).unwrap();
 
     // Without the regime book, breakout's robustness beats top 20's weaker numbers.
@@ -1414,12 +1427,14 @@ fn a_forward_record_below_its_band_after_ten_days_halves_the_score_and_says_why(
     );
     assert!(ev.caveat().unwrap().contains("its forward record is below what its backtest led us to expect"));
 
-    // Halved, regime (4.19 -> 2.09) falls behind breakout (2.25), which now
-    // takes the crypto markets; regime is named as passed over.
+    // Halved, regime (4.19 -> 2.09) falls behind breakout (2.25): both still
+    // run, netted, but breakout now leads and regime gets the smaller weight.
     let id = start(&mut e, config("auto", 10_000.0, &[], StopRules::default()));
     let s = status(&e, &id);
     assert_eq!(s.by_sleeve[0].strategy_id, "lab:breakout_top10");
-    assert!(s.last_action.unwrap().contains("Auto passed over Lab · tsmom_regime"));
+    assert_eq!(s.by_sleeve[1].strategy_id, "lab:tsmom_regime");
+    assert!(s.by_sleeve[1].weight < s.by_sleeve[0].weight);
+    assert!(s.by_sleeve[1].why.contains("so its score is halved"), "{}", s.by_sleeve[1].why);
 }
 
 #[test]
@@ -1682,4 +1697,338 @@ fn a_demo_autopilot_on_the_alpaca_paper_route_trades_the_coins_alpaca_lists_and_
     p.asset_class = Some(Venue::Crypto);
     let err = e.autopilot_start(p, false, VenueCash::NotRead).unwrap_err();
     assert!(err.contains("only the demo route"), "{err}");
+}
+
+// ── several lab books in one autopilot: netting, attribution, re-pick ─────
+
+const SOL: &str = "crypto:SOL/USD";
+
+fn weights(w: &[(&str, f64)]) -> std::collections::BTreeMap<String, f64> {
+    w.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+}
+
+#[test]
+fn netting_scales_each_book_by_its_sleeve_weight_and_splits_every_coin_by_share() {
+    let a = weights(&[("BTC", 0.5), ("ETH", 0.5)]);
+    let b = weights(&[("BTC", 0.25), ("SOL", 0.75), ("DOGE", -0.4)]);
+    let c = weights(&[("BTC", 1.0)]);
+    let (combined, shares) =
+        net_lab_targets(&[("a".into(), 0.6, &a), ("b".into(), 0.4, &b), ("dropped".into(), 0.0, &c)]);
+    let close = |x: f64, y: f64| (x - y).abs() < 1e-12;
+    assert!(close(combined["BTC"], 0.6 * 0.5 + 0.4 * 0.25), "{combined:?}");
+    assert!(close(combined["ETH"], 0.3));
+    assert!(close(combined["SOL"], 0.3));
+    assert!(!combined.contains_key("DOGE"), "long only: a negative weight is cash");
+    assert!(close(combined.values().sum::<f64>(), 1.0), "two fully invested books net to a fully invested target");
+    assert!(close(shares["BTC"]["a"], 0.75) && close(shares["BTC"]["b"], 0.25));
+    assert!(close(shares["ETH"]["a"], 1.0) && !shares["ETH"].contains_key("b"));
+    assert!(shares.values().all(|s| !s.contains_key("dropped")), "a book at weight zero adds nothing and owns nothing");
+    for s in shares.values() {
+        assert!(close(s.values().sum::<f64>(), 1.0));
+    }
+    // Nothing wanted: an empty target, all cash.
+    let empty = weights(&[]);
+    let (combined, shares) = net_lab_targets(&[("a".into(), 1.0, &empty)]);
+    assert!(combined.is_empty() && shares.is_empty());
+}
+
+#[test]
+fn lab_books_share_their_markets_with_each_other_and_with_no_one_else() {
+    let u = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let wants = vec![
+        Want { weight: 0.5, whole: true, net: true, universe: u(&["BTC", "ETH", "SOL"]) },
+        Want { weight: 0.3, whole: true, net: true, universe: u(&["BTC", "ETH", "SOL"]) },
+        Want { weight: 0.1, whole: true, net: false, universe: u(&["ETH", "XRP"]) },
+        Want { weight: 0.1, whole: false, net: false, universe: u(&["SOL", "ADA"]) },
+    ];
+    let out = assign_markets(&wants, &HashSet::new());
+    assert_eq!(out[0], u(&["BTC", "ETH", "SOL"]));
+    assert_eq!(out[1], u(&["BTC", "ETH", "SOL"]), "a second lab book nets on the same coins");
+    assert!(out[2].is_empty(), "a pair set never shares a coin with the lab books");
+    assert_eq!(out[3], u(&["ADA"]), "a built-in gets only what the lab books do not hold");
+    // Another autopilot's market keeps both lab books out, all or nothing.
+    let taken: HashSet<String> = ["SOL".to_string()].into_iter().collect();
+    let out = assign_markets(&wants[..2], &taken);
+    assert!(out[0].is_empty() && out[1].is_empty());
+}
+
+/// Regime wants BTC and ETH, breakout BTC and SOL, half each.
+fn netted_engine(capital: f64) -> (Engine, String) {
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.5), ("ETH", 0.5)], regime_evidence(), false));
+    e.apply_lab_signal(book("breakout_top10", now, &[("BTC", 0.5), ("SOL", 0.5)], breakout_evidence(), false));
+    let id = start(&mut e, config("net", capital, &[("lab:tsmom_regime", 0.6), ("lab:breakout_top10", 0.4)], StopRules::default()));
+    (e, id)
+}
+
+fn sleeve<'a>(s: &'a AutopilotStatus, sid: &str) -> &'a SleeveStatus {
+    s.by_sleeve.iter().find(|b| b.strategy_id == sid).expect("the sleeve exists")
+}
+
+fn assert_adds_up(s: &AutopilotStatus) {
+    let pnl: f64 = s.by_sleeve.iter().map(|b| b.pnl).sum();
+    assert!((pnl - s.pnl).abs() < 1e-6, "the sleeves' P&L adds up to the autopilot's: {pnl} vs {}", s.pnl);
+    let trades: u32 = s.by_sleeve.iter().map(|b| b.trades).sum();
+    assert!(trades >= s.trades, "every closed trade is counted for each sleeve that held it");
+}
+
+#[test]
+fn two_lab_books_net_into_one_position_per_coin_and_split_exposure_and_pnl_by_share() {
+    let (mut e, id) = netted_engine(10_000.0);
+    let s = status(&e, &id);
+    assert_eq!(s.by_sleeve.len(), 2, "two lab books run in one autopilot");
+    assert!(s.by_sleeve.iter().all(|b| b.markets.len() == e.markets.iter().filter(|m| m.venue == Venue::Crypto).count()));
+    assert!(sleeve(&s, "lab:tsmom_regime").why.contains("netted per coin with the other 1 lab book(s)"));
+    e.run_lab_books();
+
+    // 0.6 x 0.5 + 0.4 x 0.5 of BTC, 0.6 x 0.5 of ETH, 0.4 x 0.5 of SOL.
+    assert!((notional(&e, BTC) - 5_000.0).abs() < 60.0, "{}", notional(&e, BTC));
+    assert!((notional(&e, ETH) - 3_000.0).abs() < 40.0, "{}", notional(&e, ETH));
+    assert!((notional(&e, SOL) - 2_000.0).abs() < 30.0, "{}", notional(&e, SOL));
+    assert_eq!(e.positions.len(), 3, "one position per coin");
+    assert!(journal_has(&e, "Rebalanced toward the netted weights of 2 lab books (Lab · tsmom_regime 60 %, Lab · breakout_top10 40 %)"));
+    let s = status(&e, &id);
+    assert_eq!(s.open_positions, 3);
+    let (r, b) = (sleeve(&s, "lab:tsmom_regime"), sleeve(&s, "lab:breakout_top10"));
+    assert!((r.exposure - 6_000.0).abs() < 80.0, "regime: 60 % of BTC and all of ETH: {}", r.exposure);
+    assert!((b.exposure - 4_000.0).abs() < 60.0, "breakout: 40 % of BTC and all of SOL: {}", b.exposure);
+    assert!((r.exposure_pct + b.exposure_pct - 100.0).abs() < 2.0);
+    assert!(s.waiting.is_none(), "it holds coins, it is not waiting");
+    assert_adds_up(&s);
+    let fees: f64 = e.autopilots[0].sleeves.iter().map(|x| x.fees).sum();
+    assert!((fees - s.fees).abs() < 1e-9 && s.fees > 0.0, "fees split, none lost");
+
+    // BTC up 10 %: its gain splits 60 / 40.
+    let before = (r.pnl, b.pnl);
+    let gain = notional(&e, BTC) * 0.1;
+    let p = e.price_of(BTC);
+    set_price(&mut e, BTC, p * 1.1);
+    let s = status(&e, &id);
+    assert!((sleeve(&s, "lab:tsmom_regime").pnl - before.0 - gain * 0.6).abs() < 1e-6);
+    assert!((sleeve(&s, "lab:breakout_top10").pnl - before.1 - gain * 0.4).abs() < 1e-6);
+    assert_adds_up(&s);
+
+    // The next day regime wants nothing. Only the difference is traded: ETH
+    // is sold (it was regime's alone), BTC comes down to breakout's 0.2.
+    let regime_before = sleeve(&s, "lab:tsmom_regime").pnl;
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_regime", now + 1, &[], regime_evidence(), false));
+    e.run_lab_books();
+    assert!(!e.positions.contains_key(ETH), "ETH sold");
+    let eq = status(&e, &id).equity;
+    assert!((notional(&e, BTC) - 0.4 * 0.5 * eq).abs() < 60.0, "BTC down to breakout's share: {}", notional(&e, BTC));
+    assert!(e.positions.contains_key(SOL), "SOL untouched");
+    let s = status(&e, &id);
+    let r = sleeve(&s, "lab:tsmom_regime");
+    assert!(r.exposure < 1e-6, "regime holds nothing now: {}", r.exposure);
+    assert!((r.pnl - regime_before).abs() < 25.0, "regime keeps the BTC gain it earned (less the fees of selling): {} vs {regime_before}", r.pnl);
+    assert!(r.pnl > before.0 + gain * 0.6 - 25.0);
+    assert_adds_up(&s);
+}
+
+#[test]
+fn stopping_flattens_every_netted_position_and_idles_every_book() {
+    let (mut e, id) = netted_engine(10_000.0);
+    e.run_lab_books();
+    assert_eq!(e.positions.len(), 3);
+    e.autopilot_stop(&id, None).unwrap();
+    let s = status(&e, &id);
+    assert_eq!(s.state, AutopilotState::Stopped);
+    assert!(e.positions.is_empty(), "every netted coin closed");
+    assert_eq!(s.open_positions, 0);
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused);
+    assert_eq!(state_of(&e, "lab:breakout_top10"), StrategyState::Paused);
+    assert!(journal_has(&e, "Closed its 3 position(s)"));
+    assert_adds_up(&s);
+    let r = sleeve(&s, "lab:tsmom_regime");
+    let b = sleeve(&s, "lab:breakout_top10");
+    assert_eq!((r.trades, b.trades), (2, 2), "BTC and ETH for regime, BTC and SOL for breakout");
+    assert_eq!(s.trades, 3);
+    // Both books are free again, for another autopilot.
+    e.run_lab_books();
+    assert!(e.positions.is_empty(), "idle again: nothing trades");
+    start(&mut e, config("again", 5_000.0, &[("lab:breakout_top10", 1.0)], StopRules::default()));
+
+    // Without flattening, the positions are handed out at their price.
+    let (mut e, id) = netted_engine(10_000.0);
+    e.run_lab_books();
+    e.autopilot_stop(&id, Some(false)).unwrap();
+    assert_eq!(e.positions.len(), 3, "left open");
+    assert!(journal_has(&e, "3 of them belong to a lab book"));
+}
+
+#[test]
+fn netted_books_come_back_after_a_restart_with_their_shares() {
+    let (mut e, id) = netted_engine(10_000.0);
+    e.run_lab_books();
+    let p = e.price_of(BTC);
+    set_price(&mut e, BTC, p * 1.05);
+    let before = status(&e, &id);
+    let saved = serde_json::to_string(&e.to_persisted()).unwrap();
+    let mut r = Engine::new();
+    r.apply_persisted(serde_json::from_str(&saved).unwrap());
+    mark_real(&mut r);
+    let after = status(&r, &id);
+    assert_eq!(after.state, AutopilotState::Running);
+    assert_eq!(after.config.repick_every_hours, None, "explicit sleeves are never re-picked");
+    assert!((after.equity - before.equity).abs() < 1e-6);
+    for b in &before.by_sleeve {
+        let a = sleeve(&after, &b.strategy_id);
+        assert!((a.pnl - b.pnl).abs() < 1e-6, "{}: the share of every coin survives", b.strategy_id);
+        assert!((a.exposure - b.exposure).abs() < 1e-6);
+        assert_eq!(a.weight, b.weight);
+    }
+    assert_eq!(r.autopilots[0].shares, e.autopilots[0].shares);
+    assert_eq!(r.autopilots[0].lab_target, e.autopilots[0].lab_target);
+    // Same signals, already traded: the restart trades nothing.
+    let orders = r.orders.len();
+    r.run_lab_books();
+    assert_eq!(r.orders.len(), orders);
+    r.autopilot_stop(&id, None).unwrap();
+    assert!(r.positions.is_empty());
+}
+
+#[test]
+fn auto_picks_up_to_n_lab_books_and_a_book_without_positive_evidence_is_left_out() {
+    let mut e = idle_engine();
+    let now = e.now();
+    let w = &[("BTC", 0.3)];
+    e.apply_lab_signal(book("tsmom_top20", now, w, top20_evidence(), true));
+    e.apply_lab_signal(book("breakout_top10", now, w, breakout_evidence(), true));
+    e.apply_lab_signal(book("tsmom_regime", now, w, regime_evidence(), false));
+    let mut c = config("two", 10_000.0, &[], StopRules::default());
+    c.max_sleeves = Some(2);
+    let id = start(&mut e, c);
+    let ids: Vec<String> = status(&e, &id).by_sleeve.into_iter().map(|b| b.strategy_id).collect();
+    assert_eq!(ids, ["lab:tsmom_regime", "lab:breakout_top10"], "at most two, best evidence first");
+
+    let mut e = idle_engine();
+    let mut neg = top20_evidence();
+    neg.oos_sharpe = Some(-0.3);
+    e.apply_lab_signal(book("tsmom_top20", now, w, neg, true));
+    e.apply_lab_signal(book("tsmom_regime", now, w, regime_evidence(), false));
+    let id = start(&mut e, config("pos", 10_000.0, &[], StopRules::default()));
+    let ids: Vec<String> = status(&e, &id).by_sleeve.into_iter().map(|b| b.strategy_id).collect();
+    assert_eq!(ids, ["lab:tsmom_regime"], "a negative out-of-sample Sharpe is no evidence to weight");
+
+    // Bad settings are refused in plain words.
+    let mut e = idle_engine();
+    let mut c = config("x", 1_000.0, &[], StopRules::default());
+    c.max_sleeves = Some(0);
+    assert!(e.autopilot_start(c, false, VenueCash::NotRead).unwrap_err().contains("Auto can pick 1 to 10"));
+    let mut c = config("x", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default());
+    c.repick_every_hours = Some(24.0);
+    assert!(e.autopilot_start(c, false, VenueCash::NotRead).unwrap_err().contains("only applies when Pythia chooses"));
+    let mut c = config("x", 1_000.0, &[], StopRules::default());
+    c.repick_every_hours = Some(0.5);
+    assert!(e.autopilot_start(c, false, VenueCash::NotRead).unwrap_err().contains("at most once an hour"));
+    let mut c = config("x", 1_000.0, &[], StopRules::default());
+    c.repick_every_hours = Some(0.0);
+    let id = start(&mut e, c);
+    assert_eq!(status(&e, &id).config.repick_every_hours, None, "0 turns it off");
+    assert_eq!(status(&e, &id).next_repick_ms, None);
+}
+
+#[test]
+fn a_repick_adds_and_drops_lab_books_gradually_and_says_why() {
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.5), ("ETH", 0.5)], regime_evidence(), false));
+    let id = start(&mut e, config("re", 10_000.0, &[], StopRules::default()));
+    let s = status(&e, &id);
+    assert_eq!(s.config.repick_every_hours, Some(REPICK_DEFAULT_HOURS), "auto pick: every 24 h by default");
+    assert_eq!(s.next_repick_ms, Some(s.started_ms + 24 * 3_600_000));
+    assert_eq!(s.by_sleeve.len(), 1);
+    e.run_lab_books();
+    assert!((notional(&e, ETH) - 5_000.0).abs() < 60.0);
+
+    // Not due yet: nothing happens.
+    e.autopilot_step(now + 23 * 3_600_000);
+    assert_eq!(status(&e, &id).by_sleeve.len(), 1);
+
+    // A day later a second book has a signal: the re-pick adds it, by score.
+    e.apply_lab_signal(book("breakout_top10", now, &[("BTC", 0.5), ("SOL", 0.5)], breakout_evidence(), false));
+    let orders = e.orders.len();
+    e.autopilot_step(now + 25 * 3_600_000);
+    assert_eq!(e.orders.len(), orders, "a re-pick itself never trades");
+    let s = status(&e, &id);
+    assert_eq!(s.by_sleeve.len(), 2);
+    let total = e.evidence("lab:tsmom_regime").score().unwrap() + e.evidence("lab:breakout_top10").score().unwrap();
+    let wb = e.evidence("lab:breakout_top10").score().unwrap() / total;
+    assert!((sleeve(&s, "lab:breakout_top10").weight - wb).abs() < 1e-9);
+    assert!(sleeve(&s, "lab:breakout_top10").why.contains("added at a re-pick"));
+    assert_eq!(state_of(&e, "lab:breakout_top10"), StrategyState::Paper, "claimed by the autopilot");
+    let msg = s.last_action.clone().unwrap();
+    assert!(msg.contains("re-ran its pick with fresh evidence and changed its lab books") && msg.contains("(new)"), "{msg}");
+    assert!(msg.contains("nothing is sold off at once"), "{msg}");
+    assert_eq!(s.next_repick_ms, Some(now + 49 * 3_600_000));
+    // The next rebalance nets the new weights in: ETH comes down, BTC stays, SOL arrives.
+    let btc = notional(&e, BTC);
+    e.run_lab_books();
+    let wr = 1.0 - wb;
+    assert!((notional(&e, ETH) - 10_000.0 * wr * 0.5).abs() < 80.0, "{}", notional(&e, ETH));
+    assert!((notional(&e, BTC) - btc).abs() < 80.0, "BTC was wanted by both: barely traded");
+    assert!((notional(&e, SOL) - 10_000.0 * wb * 0.5).abs() < 80.0);
+    assert_adds_up(&status(&e, &id));
+
+    // Regime loses its evidence: it is dropped to zero, kept for its record,
+    // and its coins are sold down only where breakout does not want them.
+    let mut bad = regime_evidence();
+    bad.oos_sharpe = Some(-0.1);
+    e.apply_lab_signal(book("tsmom_regime", now + 1, &[("BTC", 0.5), ("ETH", 0.5)], bad, false));
+    e.autopilot_step(now + 50 * 3_600_000);
+    let s = status(&e, &id);
+    let r = sleeve(&s, "lab:tsmom_regime");
+    assert!(r.dropped && r.weight == 0.0, "{r:?}");
+    assert!((sleeve(&s, "lab:breakout_top10").weight - 1.0).abs() < 1e-9);
+    assert!(s.last_action.unwrap().contains("Lab · tsmom_regime dropped"));
+    e.run_lab_books();
+    assert!(!e.positions.contains_key(ETH), "ETH was regime's alone");
+    let eq = status(&e, &id).equity;
+    assert!((notional(&e, BTC) - eq * 0.5).abs() < 80.0, "BTC kept at breakout's half: {}", notional(&e, BTC));
+    let s = status(&e, &id);
+    assert!(sleeve(&s, "lab:tsmom_regime").exposure < 1e-6);
+    assert_adds_up(&s);
+
+    // The same evidence again: nothing changes, and that is said.
+    e.autopilot_step(now + 75 * 3_600_000);
+    assert!(journal_has(&e, "the same strategies, no weight moving by more than 2 points, so nothing changes"));
+
+    // The dropped book is still the autopilot's: no other autopilot takes it.
+    let err = e
+        .autopilot_start(config("other", 1_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()), false, VenueCash::NotRead)
+        .unwrap_err();
+    assert!(err.contains("already runs in the autopilot"), "{err}");
+    e.autopilot_stop(&id, None).unwrap();
+    assert!(e.positions.is_empty());
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused);
+}
+
+#[test]
+fn with_nothing_to_hold_it_says_it_waits_in_cash_and_forces_nothing() {
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(book("breakout_top10", now, &[], breakout_evidence(), false));
+    let id = start(&mut e, config("cash", 10_000.0, &[("lab:breakout_top10", 1.0)], StopRules::default()));
+    e.run_lab_books();
+    assert!(e.positions.is_empty());
+    assert!(e.orders.iter().all(|o| o.strategy_id != "lab:breakout_top10"), "no trade forced");
+    let s = status(&e, &id);
+    let w = s.waiting.expect("it says it waits");
+    assert!(w.starts_with("In cash, waiting for signals: its lab book wants no coins today."), "{w}");
+    assert!(w.contains("never forces a trade"), "{w}");
+
+    // A coin this route cannot trade is named as the reason.
+    e.apply_lab_signal(book("breakout_top10", now + 1, &[("NOPE", 0.4)], breakout_evidence(), false));
+    e.run_lab_books();
+    let w = status(&e, &id).waiting.unwrap();
+    assert!(w.contains("the lab wants only NOPE/USD, which cannot be traded here now"), "{w}");
+
+    // Once it buys, it is no longer waiting; paused, it does not say so either.
+    e.apply_lab_signal(book("breakout_top10", now + 2, &[("BTC", 0.4)], breakout_evidence(), false));
+    e.run_lab_books();
+    assert!(status(&e, &id).waiting.is_none());
+    e.autopilot_pause(&id).unwrap();
+    assert!(status(&e, &id).waiting.is_none());
 }

@@ -260,6 +260,8 @@ fn a_late_fee_is_paid_by_the_autopilot_whose_trade_caused_it() {
         sleeves: vec![SleeveConfig { strategy_id: "ema-cross-1".into(), weight: 1.0 }],
         stop: StopRules::default(),
         flatten_on_stop: true,
+        max_sleeves: None,
+        repick_every_hours: None,
     };
     let id = e.autopilot_start(cfg, false, VenueCash::NotRead).unwrap();
     let market = "crypto:BTC/USD";
