@@ -513,6 +513,16 @@ mod tests {
     }
 
     #[test]
+    fn a_learned_table_with_a_measured_section_still_parses() {
+        // lab.ops.learn writes the base table plus a "measured" block of demo-fill statistics.
+        let mut v: serde_json::Value = serde_json::from_str(EMBEDDED).unwrap();
+        v["measured"] = serde_json::json!({"min_fills": 30, "alpaca": {"BTC/USD": {"taker_fills": 40}}});
+        v["venues"]["alpaca"]["symbols"]["BTC/USD"]["halfSpreadBps"] = serde_json::json!(2.1);
+        let t = CostTable::parse(&v.to_string()).unwrap();
+        assert_eq!(t.model_for(CostVenue::Alpaca, "BTC/USD").half_spread_bps, 2.1);
+    }
+
+    #[test]
     fn a_negative_cost_is_refused_rather_than_making_trading_pay() {
         let bad = r#"{"venues":{"x":{"takerBps":-1,"makerBps":0,"halfSpreadBps":0,"impactCoeff":0,"borrowBpsYr":0,"minNotional":0}}}"#;
         assert!(CostTable::parse(bad).is_err());
