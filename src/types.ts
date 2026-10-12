@@ -73,6 +73,8 @@ export interface Order {
   driftBps?: number;
   /** A paper fill that outgrew the 20 book levels. */
   bookExhausted?: boolean;
+  /** Fees paid on the fill, dollars, when known. Alpaca crypto posts its fee at the end of the day. */
+  fee?: number;
 }
 
 // ── costs ────────────────────────────────────────────────────────────────────
@@ -973,6 +975,11 @@ export interface AutopilotStatus {
   waiting?: string | null;
   /** When the auto pick runs again with fresh evidence, if it does. */
   nextRepickMs?: number | null;
+  /** Holding Bitcoin over the same period, percent: the BTC price at its
+   *  start against now (or its stop). Absent when none was known at the start. */
+  btcReturnPct?: number | null;
+  /** Market ids it holds right now. */
+  held?: string[];
 }
 
 /** An autopilot's forward result held against its backtest's band. */

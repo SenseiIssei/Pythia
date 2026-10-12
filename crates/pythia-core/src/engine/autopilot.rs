@@ -363,6 +363,14 @@ pub struct AutopilotStatus {
     /// When the auto pick runs again with fresh evidence, if it does.
     #[serde(default)]
     pub next_repick_ms: Option<i64>,
+    /// What holding Bitcoin did over the same period, in %: the BTC price at
+    /// its start against the price now (or when it stopped). `None` when no
+    /// BTC price was known at the start.
+    #[serde(default)]
+    pub btc_return_pct: Option<f64>,
+    /// Market ids it holds right now.
+    #[serde(default)]
+    pub held: Vec<String>,
 }
 
 /// An autopilot's forward result against its backtest, for one plain line.
@@ -474,6 +482,12 @@ pub struct Autopilot {
     /// When the auto pick last ran (the start, or the last re-pick).
     #[serde(default)]
     pub last_pick_ms: Option<i64>,
+    /// The BTC price when it started, for the buy-and-hold comparison.
+    #[serde(default)]
+    pub btc_start: Option<f64>,
+    /// The BTC price when it stopped; the comparison ends there.
+    #[serde(default)]
+    pub btc_end: Option<f64>,
 }
 
 impl Autopilot {
@@ -1151,6 +1165,26 @@ impl Engine {
         self.ap_equity(&self.autopilots[i])
     }
 
+    /// The BTC/USD price to hold an autopilot against: on its own venue when
+    /// that venue lists BTC, else any priced BTC/USD market.
+    fn ap_btc_price(&self, ap: &Autopilot) -> Option<f64> {
+        let venue = config_venue(&ap.config);
+        let btc = |m: &&super::Market| m.symbol == "BTC/USD" && m.price > 0.0 && m.price.is_finite();
+        self.markets
+            .iter()
+            .filter(btc)
+            .find(|m| Some(m.venue) == venue)
+            .or_else(|| self.markets.iter().find(btc))
+            .map(|m| m.price)
+    }
+
+    /// Buy-and-hold BTC over the autopilot's run, in %.
+    fn ap_btc_return_pct(&self, ap: &Autopilot) -> Option<f64> {
+        let p0 = ap.btc_start.filter(|p| *p > 0.0)?;
+        let p1 = if ap.is_active() { self.ap_btc_price(ap) } else { ap.btc_end }?;
+        Some((p1 / p0 - 1.0) * 100.0)
+    }
+
     fn ap_equity(&self, ap: &Autopilot) -> f64 {
         ap.start_capital + ap.realized - ap.fees + ap.released + self.ap_unrealized(ap, None)
     }
@@ -1751,12 +1785,15 @@ impl Engine {
             lab_target: BTreeMap::new(),
             cash_note: None,
             last_pick_ms: Some(now),
+            btc_start: None,
+            btc_end: None,
         });
         let i = self.autopilots.len() - 1;
         let x = self.autopilots[i].config.capital_usd;
         self.autopilots[i].start_capital = x;
         self.autopilots[i].peak_equity = x;
         self.autopilots[i].history.push((now, x));
+        self.autopilots[i].btc_start = self.ap_btc_price(&self.autopilots[i]);
         Ok(id)
     }
 
@@ -1869,6 +1906,8 @@ impl Engine {
                         .repick_every_hours
                         .filter(|h| ap.is_active() && *h > 0.0 && ap.config.sleeves.is_empty())
                         .map(|h| ap.last_pick_ms.unwrap_or(ap.started_ms) + (h * 3_600_000.0) as i64),
+                    btc_return_pct: self.ap_btc_return_pct(ap),
+                    held: ap.owned.keys().cloned().collect(),
                 }
             })
             .collect()
@@ -2171,6 +2210,7 @@ impl Engine {
             ap.stopped_ms = Some(now);
             ap.flatten_at_stop = flatten;
         }
+        self.autopilots[i].btc_end = self.ap_btc_price(&self.autopilots[i]);
         let name = self.autopilots[i].config.name.clone();
         let word = if state == AutopilotState::Finished { "finished" } else { "stopped" };
         let open: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
