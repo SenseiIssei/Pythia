@@ -458,6 +458,54 @@ fn the_equity_history_is_thinned_and_survives_a_restart() {
     assert_eq!(status(&r, &id).history, h);
 }
 
+#[test]
+fn it_is_held_against_bitcoin_over_its_own_run_and_lists_what_it_holds() {
+    let mut e = engine();
+    set_price(&mut e, BTC, 100_000.0);
+    let id = start(&mut e, config("b", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default()));
+    let s = status(&e, &id);
+    assert_eq!(s.btc_return_pct, Some(0.0));
+    assert!(s.held.is_empty(), "in cash at the start");
+
+    enter(&mut e, "ema-cross-1", ETH, 300.0);
+    let fee = e.orders[0].fee.expect("a paper fill knows its fee");
+    assert!(fee > 0.0 && (fee - status(&e, &id).fees).abs() < 1e-9, "the order row carries the fee the autopilot paid");
+    set_price(&mut e, BTC, 105_000.0);
+    let s = status(&e, &id);
+    assert!((s.btc_return_pct.unwrap() - 5.0).abs() < 1e-9, "BTC up 5 %: {:?}", s.btc_return_pct);
+    assert_eq!(s.held, vec![ETH.to_string()]);
+
+    // A restart keeps the start price.
+    let mut r = Engine::new();
+    r.apply_persisted(e.to_persisted());
+    mark_real(&mut r);
+    set_price(&mut r, BTC, 105_000.0);
+    assert!((status(&r, &id).btc_return_pct.unwrap() - 5.0).abs() < 1e-9);
+
+    // Once stopped, the comparison ends where the run ended.
+    e.autopilot_stop(&id, None).unwrap();
+    set_price(&mut e, BTC, 50_000.0);
+    let s = status(&e, &id);
+    assert!((s.btc_return_pct.unwrap() - 5.0).abs() < 1e-9, "frozen at the stop");
+    assert!(s.held.is_empty());
+}
+
+#[test]
+fn an_autopilot_saved_before_the_benchmark_has_none_rather_than_a_guess() {
+    let mut e = engine();
+    let id = start(&mut e, config("c", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default()));
+    let mut v = serde_json::to_value(e.to_persisted()).unwrap();
+    let aps = v.get_mut("autopilots").and_then(|a| a.as_array_mut()).expect("autopilots are saved");
+    for ap in aps {
+        let o = ap.as_object_mut().unwrap();
+        o.remove("btcStart");
+        o.remove("btcEnd");
+    }
+    let mut r = Engine::new();
+    r.apply_persisted(serde_json::from_value(v).unwrap());
+    assert_eq!(status(&r, &id).btc_return_pct, None);
+}
+
 // ── live ───────────────────────────────────────────────────────────────────
 
 #[test]
