@@ -26,6 +26,7 @@ import {
 } from "../live";
 import type { Venue } from "../types";
 import { cryptoDemoName, demoApiTestNote, demoIsApiTestOnly } from "../venueNames";
+import { PAIR_STATUS, estimatedFeeTotal, pairsToShow, qty9, reconcileHeadline } from "../demoReconcile";
 import { changeStrategyState } from "../strategyState";
 
 const ARM_PHRASE = "ARM LIVE";
@@ -168,6 +169,7 @@ export function Live() {
       )}
 
       <DemoCard />
+      <PaperReconcileCard />
 
       {/* Real positions cannot be closed by the simulator, so this is not a detail. */}
       {live.livePositions > 0 && !live.armed && (
@@ -608,6 +610,69 @@ function DemoCard() {
           );
         })}
       </div>
+    </Card>
+  );
+}
+
+/**
+ * The Alpaca paper account against the demo book, per Alpaca pair (several
+ * markets can hold one pair there, so they are summed). Runs at startup and
+ * every ten minutes on the backend; differences it can settle (an unposted
+ * fee, the one holder off) are settled and listed, the rest is reported.
+ */
+function PaperReconcileCard() {
+  const { live } = useStore();
+  const d = live.demoReconcile;
+  if (!d) return null;
+  const rows = pairsToShow(d);
+  const fees = d.estimatedFees ?? [];
+  const paused = live.demoPaused ?? [];
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <Badge tone="purple">DEMO</Badge> Alpaca paper reconcile
+        </div>
+        <Badge tone={d.mismatches > 0 ? "amber" : d.checkedAt > 0 ? "green" : "neutral"}>
+          {d.mismatches > 0 ? `${d.mismatches} to check` : d.checkedAt > 0 ? "in step" : "not yet"}
+        </Badge>
+      </div>
+      <div className="mb-2 text-xs text-cyber-text-dim">{reconcileHeadline(d, Date.now())}</div>
+      {paused.map(([venue, until]) => (
+        <div key={venue} className="mb-2 text-xs text-warning">
+          The {venue} demo route answered 403 and sends nothing until {new Date(until).toLocaleTimeString()}. Check the
+          paper keys in Settings.
+        </div>
+      ))}
+      {rows.length > 0 && (
+        <div className="space-y-1.5">
+          {rows.map((p) => (
+            <div key={p.symbol} className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-mono">{p.symbol}</span>
+                <Badge tone={PAIR_STATUS[p.status].attention ? "amber" : "neutral"}>{PAIR_STATUS[p.status].label}</Badge>
+              </div>
+              <div className="mt-1 font-mono text-cyber-text-faint">
+                Pythia {qty9(p.pythia)} · Alpaca {qty9(p.alpaca)} · {p.diffUsd >= 0 ? "+" : "-"}$
+                {Math.abs(p.diffUsd).toFixed(2)}
+                {p.markets.length > 1 ? ` · ${p.markets.join(" + ")}` : ""}
+              </div>
+              {p.note && <div className="mt-1 text-cyber-text-dim">{p.note}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+      {d.strayOrders.length > 0 && (
+        <div className="mt-2 text-xs text-warning">
+          Open at Alpaca, not followed by Pythia: {d.strayOrders.join("; ")}
+        </div>
+      )}
+      {fees.length > 0 && (
+        <div className="mt-2 text-xs text-cyber-text-faint">
+          {fees.length} fee{fees.length === 1 ? "" : "s"} booked as estimates (${estimatedFeeTotal(d).toFixed(2)}): Alpaca
+          posted no fee within 7 days, so the published tier 1 rate was booked in dollars. Not in the tax record.
+        </div>
+      )}
     </Card>
   );
 }
