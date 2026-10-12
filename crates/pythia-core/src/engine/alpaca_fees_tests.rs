@@ -88,6 +88,8 @@ fn a_posted_coin_fee_books_the_coins_received_and_the_fee_in_dollars() {
     let records = e.drain_fill_records();
     assert_eq!(records.len(), 1);
     let cash = e.cash;
+    let fee_of = |e: &Engine| e.orders.iter().find(|o| o.id == oid).and_then(|o| o.fee);
+    assert_eq!(fee_of(&e), None, "the fee is not known at the fill");
 
     let today = ny_date(e.now());
     let coins = qty * RATE;
@@ -98,6 +100,7 @@ fn a_posted_coin_fee_books_the_coins_received_and_the_fee_in_dollars() {
     assert!((fees_of(&e, "manual") - coins * PX).abs() < 1e-6, "the fee in dollars at the fill price");
     assert!((e.cash - cash).abs() < 1e-9, "no cash moves: the fill already paid for those coins");
     assert!(e.journal.iter().any(|j| j.message.contains("CFEE") && j.message.contains("taken from the position now")));
+    assert!((fee_of(&e).unwrap() - coins * PX).abs() < 1e-6, "the order row shows the posted fee");
 
     // The tax record gets the fee for the same order, and the two lines
     // together read like a fill that reported its fee.
@@ -113,15 +116,17 @@ fn a_posted_coin_fee_books_the_coins_received_and_the_fee_in_dollars() {
     e.apply_alpaca_fees(false, &cfee("20261008::a", coins, &today));
     assert!((e.positions[BTC].qty - net).abs() < 1e-9);
     assert!((fees_of(&e, "manual") - coins * PX).abs() < 1e-6);
+    assert!((fee_of(&e).unwrap() - coins * PX).abs() < 1e-6, "and only once on the order row");
     assert!(e.drain_fill_records().is_empty());
 }
 
 #[test]
 fn the_venues_position_books_the_fee_first_and_the_posting_only_confirms_it() {
     let mut e = live_engine();
-    let (_, qty) = live_buy(&mut e);
+    let (oid, qty) = live_buy(&mut e);
     let coins = qty * RATE;
     let stop = e.positions[BTC].stop;
+    let fee_of = |e: &Engine| e.orders.iter().find(|o| o.id == oid).and_then(|o| o.fee);
 
     // Alpaca already shows the coins gone.
     let venue = [BrokerPosition { symbol: "BTC/USD".into(), qty: qty - coins, avg_price: PX, market_value: 0.0 }];
@@ -138,6 +143,7 @@ fn the_venues_position_books_the_fee_first_and_the_posting_only_confirms_it() {
     e.apply_alpaca_fees(false, &cfee("20261008::b", coins, &today));
     assert!((e.positions[BTC].qty - (qty - coins)).abs() < 1e-9, "not taken twice");
     assert!((fees_of(&e, "manual") - coins * PX).abs() < 1e-6, "not charged twice");
+    assert!((fee_of(&e).unwrap() - coins * PX).abs() < 1e-6, "the order row is not charged twice either");
     assert!(e.journal.iter().any(|j| j.message.contains("already showed it")));
     let records = e.drain_fill_records();
     assert_eq!(records.iter().filter(|r| r.kind == RecordKind::Fee).count(), 1, "the record gets the posted fee");
