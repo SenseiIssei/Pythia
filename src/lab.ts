@@ -38,6 +38,29 @@ export interface LabStatus {
   health: { at: string; ok: boolean; checks: HealthCheck[] } | null;
   /** The daily forward report: paper books and autopilots against their backtests. */
   forward?: ForwardReport | null;
+  /** The nightly learning loop's digest. */
+  learn?: LearnDigest | null;
+}
+
+// ── learning loop digest (pythia-core labview::LearnDigest) ─────────────────
+
+export interface LearnDigest {
+  generated: string;
+  generatedMs: number;
+  headline: string;
+  changes: { area: string; what: string; why: string }[];
+  decisions: { model: string; candidate: string | null; champion: string | null; decision: string; why: string }[];
+  autopilots: {
+    id: string;
+    name: string;
+    state: string | null;
+    pnlDayPct: number | null;
+    btcDayPct: number | null;
+    pnlTotalPct: number | null;
+    btcTotalPct: number | null;
+    vsBtcTotalPts: number | null;
+  }[];
+  steps: { step: string; status: string; detail: string }[];
 }
 
 // ── forward report (pythia-core labview::ForwardReport) ─────────────────────
