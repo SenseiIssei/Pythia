@@ -77,9 +77,40 @@ keys) keeps working exactly as before; the two are one setting, so pick one.
 - **One account, one position per coin.** `alpaca:BTC/USD` (Alpaca's own
   market, used by the Alpaca connection test) and `crypto:BTC/USD` on this
   route land in the same BTC position of the paper account. Pythia keeps them
-  apart in its own book and every exit sells only its own quantity, but do
-  not hold the same coin through both at once if the numbers should match
-  the paper account's.
+  apart in its own book and every exit sells only its own quantity. The
+  reconciliation below compares their sum with the paper account, and the
+  live arm's reconciliation on the paper endpoint leaves the demo book's
+  coins out of the position it compares.
+- **Reconciliation.** At startup (after 15 s) and every 10 minutes the server
+  reads the paper account's crypto positions and open orders and compares
+  them with the demo book per Alpaca pair (`engine::demo_reconcile`). Equal up
+  to rounding (a billionth of the position, or under a cent) is quiet. A pair
+  with an order in flight waits for that order's report. A gap the unposted
+  fees of the watched buys explain is booked as those fees. When one demo
+  position holds the pair and nothing is open, Alpaca wins. A position at
+  Alpaca the book does not have is adopted only when exactly one market on
+  the route has Pythia demo orders in that pair; anything else (several
+  markets share the pair, an open order Pythia does not follow, a coin Pythia
+  never traded there) is reported, never guessed. Each finding is journaled
+  once; the Live page shows the result (`live.demoReconcile`).
+- **Size rules.** Each crypto asset's `min_order_size`, `min_trade_increment`
+  and `price_increment` (from `GET /v2/assets`) are applied before sending:
+  quantities are rounded down to the step with up to 9 decimals, limit prices
+  sit on the price step, and an order below the minimum is skipped with one
+  journal note per 6 hours instead of being sent to be refused.
+- **Refusals.** Insufficient balance (15 min), wash trade (5 min), any other
+  422 (30 min) and below the minimum (30 min) hold that market back; a 403 on
+  the keys or the account holds the whole route for 15 minutes, and the
+  orders already queued are closed without a request. Each kind is journaled
+  once per window (an hour; 6 hours for the minimum), with a count of the
+  ones kept quiet. Alpaca answers balance and wash trade refusals with 403
+  too; those are read as refusals, not as a key problem.
+- **A fee that never comes.** It is not known whether the paper account
+  posts `CFEE` at all. A fill still without a posted fee after 7 days gets
+  one from the published tier 1 rate (25 bps taker, 15 bps maker) on its
+  notional, in dollars only, so the coins keep matching Alpaca. It is marked
+  ESTIMATED in the journal and listed on the Live page, and never written to
+  the tax record.
 - **Desktop app.** Backend only for now: the desktop app keeps the demo
   exchange slots.
 

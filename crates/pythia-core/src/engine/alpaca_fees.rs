@@ -32,11 +32,23 @@
 //! Either way the end state is the one a venue that reports fees with the
 //! fill produces: the book holds the coins received, the cash is what was
 //! paid, and the fee is in the ledger in dollars at the fill price.
+//!
+//! **When no fee is ever posted.** It is not known whether the paper account
+//! posts `CFEE` at all. A fill still waiting after [`WATCH_KEEP_MS`] gets its
+//! fee from the published schedule instead ([`EstimatedFee`]): Alpaca's own
+//! rate for the pair (`config/costs.json`, tier 1: 25 bps taker, 15 bps maker)
+//! on the fill's notional, less whatever the venue's position already showed
+//! taken. It is booked in dollars only, out of the cash and into the
+//! strategy's and the autopilot's fees, and never moves the coins: the venue
+//! did not take any, so the book keeps matching the venue's position. It is
+//! marked estimated in the journal and in the Live page's list, and never
+//! written to the tax record, which only holds what a venue reported.
 
 use super::{Engine, InFlight, JournalKind, LiveUpdate, Market};
 use crate::connectors::alpaca::{alpaca_crypto_pair, CryptoFeeActivity, CRYPTO_FEE_MAX_BPS};
 use crate::connectors::{BrokerOrderStatus, Side, Venue};
-use crate::costs::CostVenue;
+use crate::costs::{self, CostVenue};
+use crate::execution::bandit::ExecStyle;
 use serde::{Deserialize, Serialize};
 
 /// How often the daemon asks Alpaca for posted fees while any are awaited.
@@ -46,9 +58,9 @@ pub(super) const FEE_POLL_MS: i64 = 30 * 60_000;
 pub(super) const WATCH_KEEP_MS: i64 = 7 * 86_400_000;
 /// How long a booked activity id is remembered, against booking it twice.
 const SEEN_KEEP_MS: i64 = 45 * 86_400_000;
-/// Slack on top of the fee bound: the exit is sent rounded down to 6
-/// decimals (see `AlpacaConnector::submit_order`), and that much may stay at
-/// the venue.
+/// Slack on top of the fee bound: the exit is sent rounded down to the
+/// asset's quantity step (9 decimals at most, see `AlpacaConnector::submit_order`),
+/// and that much may stay at the venue.
 const GAP_SLACK: f64 = 1.5e-6;
 
 /// An Alpaca crypto fill whose fee has not been posted yet.
@@ -82,7 +94,36 @@ pub struct AlpacaFeeWatch {
     pub posted_coins: f64,
     #[serde(default)]
     pub posted_usd: f64,
+    /// Sent as a resting limit (maker rate) rather than crossing (taker).
+    /// Only used for an estimate; older saves read as taker, the higher one.
+    #[serde(default)]
+    pub maker: bool,
 }
+
+/// A fee booked from Alpaca's published schedule because Alpaca posted none
+/// within [`WATCH_KEEP_MS`]. Kept for the Live page; the newest 50.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimatedFee {
+    pub order_id: String,
+    pub market_id: String,
+    pub symbol: String,
+    pub side: Side,
+    pub strategy_id: String,
+    /// The fill's notional, and the rate applied, in bps.
+    pub notional: f64,
+    pub rate_bps: f64,
+    /// Dollars booked now; what the venue's position had already shown
+    /// taken (booked earlier) is not counted twice.
+    pub usd: f64,
+    /// When it was booked (epoch ms).
+    pub ts: i64,
+    /// The paper account (demo route or paper endpoint), or the live one.
+    pub paper: bool,
+}
+
+/// How many estimates the Live page keeps.
+const ESTIMATES_KEPT: usize = 50;
 
 impl AlpacaFeeWatch {
     /// The paper account answers for both the paper endpoint and the demo route.
@@ -160,6 +201,7 @@ impl Engine {
             taken: 0.0,
             posted_coins: 0.0,
             posted_usd: 0.0,
+            maker: f.style != ExecStyle::Cross,
         });
     }
 
@@ -274,21 +316,8 @@ impl Engine {
         let expired: Vec<AlpacaFeeWatch> = self.alpaca_fees.iter().filter(|w| now - w.ts > WATCH_KEEP_MS).cloned().collect();
         if !expired.is_empty() {
             self.alpaca_fees.retain(|w| now - w.ts <= WATCH_KEEP_MS);
-            let never: Vec<String> = expired
-                .iter()
-                .filter(|w| w.posted_coins == 0.0 && w.posted_usd == 0.0)
-                .map(|w| format!("{} {:?} {}", w.symbol, w.side, w.order_id))
-                .collect();
-            if !never.is_empty() {
-                self.log(
-                    JournalKind::Risk,
-                    format!(
-                        "Alpaca posted no fee within 7 days for {}; the book keeps what it has (an account that charges no fee, or one Pythia could not read)",
-                        never.join(", ")
-                    ),
-                    None,
-                    None,
-                );
+            for w in expired.iter().filter(|w| w.posted_coins == 0.0 && w.posted_usd == 0.0) {
+                self.estimate_alpaca_fee(w);
             }
         }
         self.alpaca_fee_seen.retain(|_, at| now - *at <= SEEN_KEEP_MS);
@@ -306,6 +335,55 @@ impl Engine {
             out.push(AlpacaFeeQuery { paper, after });
         }
         out
+    }
+
+    /// Book the fee of a fill Alpaca never posted one for, from the published
+    /// schedule, in dollars only (see the module docs). Journaled as estimated.
+    fn estimate_alpaca_fee(&mut self, w: &AlpacaFeeWatch) {
+        let model = costs::model_for(CostVenue::Alpaca, &w.symbol);
+        let rate_bps = if w.maker { model.maker_bps } else { model.taker_bps };
+        let notional = w.qty * w.price;
+        let full = notional * rate_bps / 10_000.0;
+        // Coins the venue's position already showed gone are in the ledger.
+        let usd = (full - w.taken * w.price).max(0.0);
+        let account = if w.paper_account() { "paper" } else { "live" };
+        let ap = if usd > 0.0 { self.charge_late_fee(w, 0.0, usd, usd) } else { None };
+        let who = ap.map(|a| format!(" ({a})")).unwrap_or_default();
+        let tax = if w.taxed { " Not in the tax record, which holds only fees a venue reported." } else { "" };
+        self.log(
+            JournalKind::Fill,
+            format!(
+                "Alpaca posted no fee within 7 days for {} {:?} {} on the {account} account: booked an ESTIMATED fee of ${usd:.4} \
+                 ({rate_bps:.0} bps {} on ${notional:.2}, Alpaca's published tier 1 rate) to {}{who}, in dollars only; the coins \
+                 stay as the venue holds them.{tax}",
+                w.symbol,
+                w.side,
+                w.order_id,
+                if w.maker { "maker" } else { "taker" },
+                w.strategy_id
+            ),
+            Some(w.strategy_id.clone()),
+            Some(w.market_id.clone()),
+        );
+        self.alpaca_fee_estimates.push(EstimatedFee {
+            order_id: w.order_id.clone(),
+            market_id: w.market_id.clone(),
+            symbol: w.symbol.clone(),
+            side: w.side,
+            strategy_id: w.strategy_id.clone(),
+            notional,
+            rate_bps,
+            usd,
+            ts: self.now(),
+            paper: w.paper_account(),
+        });
+        let extra = self.alpaca_fee_estimates.len().saturating_sub(ESTIMATES_KEPT);
+        self.alpaca_fee_estimates.drain(..extra);
+    }
+
+    /// The fees booked as estimates, newest last.
+    pub fn alpaca_fee_estimates(&self) -> &[EstimatedFee] {
+        &self.alpaca_fee_estimates
     }
 
     /// Book the crypto fees one Alpaca account posted (`paper`: the paper

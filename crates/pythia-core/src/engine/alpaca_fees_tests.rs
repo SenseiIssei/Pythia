@@ -283,6 +283,7 @@ fn a_late_fee_is_paid_by_the_autopilot_whose_trade_caused_it() {
         taken: 0.0,
         posted_coins: 0.0,
         posted_usd: 0.0,
+        maker: false,
     });
     let coins = qty * RATE;
     e.apply_alpaca_fees(true, &cfee("ap-1", coins, &ny_date(now)));
