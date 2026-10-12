@@ -2437,14 +2437,20 @@ impl Engine {
     }
 
     /// The markets a sleeve of this strategy would trade: a lab book every
-    /// crypto market (its weights may name any of them), anything else the
+    /// market of its asset class (every crypto market, or every Alpaca
+    /// equity market for a book of US shares; its weights may name any of
+    /// them), anything else the
     /// markets of its universe that exist here. In demo, only markets the
     /// demo route can trade: on the Alpaca paper account, the coins Alpaca
     /// lists (a lab book's unlisted coins stay in cash, see `run_lab_books`).
     fn sleeve_universe(&self, s: &super::StrategyConfig, mode: AutopilotMode) -> Vec<String> {
         let tradable = |m: &super::Market| mode != AutopilotMode::Demo || self.demo_lists(m);
         if s.kind == StrategyKind::LabTargets {
-            self.markets.iter().filter(|m| m.venue == Venue::Crypto && tradable(m)).map(|m| m.id.clone()).collect()
+            self.lab_book_markets(s.venue_class == Venue::Alpaca)
+                .into_iter()
+                .filter(|m| tradable(m))
+                .map(|m| m.id)
+                .collect()
         } else {
             s.universe
                 .iter()

@@ -816,6 +816,7 @@ fn lab_signal(now: i64, weights: &[(&str, f64)]) -> crate::lab::LabSignal {
         evidence: crate::lab::LabEvidence { oos_sharpe: Some(1.1), deflated_p: Some(0.97), ..Default::default() },
         autopilot_only: false,
         dropped: vec![],
+        asset_class: None,
     }
 }
 
@@ -927,6 +928,7 @@ fn book(
         evidence,
         autopilot_only,
         dropped: vec![],
+        asset_class: None,
     }
 }
 
@@ -2079,4 +2081,59 @@ fn with_nothing_to_hold_it_says_it_waits_in_cash_and_forces_nothing() {
     assert!(status(&e, &id).waiting.is_none());
     e.autopilot_pause(&id).unwrap();
     assert!(status(&e, &id).waiting.is_none());
+}
+
+#[test]
+fn a_demo_autopilot_on_alpaca_shares_runs_an_etf_lab_book_on_the_paper_account() {
+    let mut e = idle_engine();
+    // The ETF markets come from the configured equity list; pinned here so
+    // the test does not depend on the environment.
+    let (markets, sim) = super::seed_markets_with(&["SPY".to_string(), "GLD".to_string()]);
+    e.markets = markets;
+    e.sim = sim;
+    mark_real(&mut e);
+    e.apply_alpaca(&[
+        RealEquity { id: "alpaca:SPY".into(), symbol: "SPY".into(), price: 500.0, change24h: 0.0 },
+        RealEquity { id: "alpaca:GLD".into(), symbol: "GLD".into(), price: 250.0, change24h: 0.0 },
+    ]);
+    e.set_demo_venues([Venue::Alpaca].into_iter().collect(), None, true);
+    let now = e.now();
+    let mut sig = book("etf_trend", now, &[("SPY", 0.5), ("GLD", 0.25)], regime_evidence(), true);
+    sig.asset_class = Some(crate::lab::US_EQUITY.into());
+    e.apply_lab_signal(sig);
+    assert_eq!(state_of(&e, "lab:etf_trend"), StrategyState::Paused, "idle until an autopilot claims it");
+
+    // "alpaca" without an asset class: US shares on the paper account.
+    let mut c = config("etf", 10_000.0, &[("lab:etf_trend", 1.0)], StopRules::default());
+    c.mode = AutopilotMode::Demo;
+    c.venue = "alpaca".into();
+    let id = start(&mut e, c);
+    let s = status(&e, &id);
+    assert_eq!(s.config.asset_class, Some(Venue::Alpaca));
+    let mut markets = s.by_sleeve[0].markets.clone();
+    markets.sort();
+    assert!(markets.contains(&"alpaca:SPY".to_string()) && markets.contains(&"alpaca:GLD".to_string()));
+    assert!(markets.iter().all(|m| m.starts_with("alpaca:") && !m.contains('/')), "{markets:?}");
+
+    // Closed: nothing goes out. Open: both buys, in dollars of the autopilot's capital.
+    e.run_lab_books();
+    assert!(e.drain_live_orders().is_empty());
+    e.set_broker_status(BrokerStatus {
+        market_open: true,
+        extended_open: true,
+        session_end: None,
+        next_open: None,
+        day_trade_limit_reached: false,
+        restricted: None,
+        equity: 100_000.0,
+        buying_power: 200_000.0,
+        checked_at: e.now(),
+    });
+    e.run_lab_books();
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(out.iter().all(|o| o.demo && o.venue == Venue::Alpaca && o.side == Side::Buy));
+    let sent = |m: &str| out.iter().find(|o| o.market_id == m).map(|o| o.qty * o.ref_price).unwrap();
+    assert!((sent("alpaca:SPY") - 5_000.0).abs() < 1.0, "{}", sent("alpaca:SPY"));
+    assert!((sent("alpaca:GLD") - 2_500.0).abs() < 1.0, "{}", sent("alpaca:GLD"));
 }
