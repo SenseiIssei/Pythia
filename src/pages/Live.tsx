@@ -21,6 +21,7 @@ import {
   verifyVenue,
   liveDiagnostics,
   sendTestOrder,
+  setMakerRoute,
   type AlpacaAccount,
   type MarketDiag,
 } from "../live";
@@ -28,6 +29,7 @@ import type { Venue } from "../types";
 import { cryptoDemoName, demoApiTestNote, demoIsApiTestOnly } from "../venueNames";
 import { PAIR_STATUS, estimatedFeeTotal, pairsToShow, qty9, reconcileHeadline } from "../demoReconcile";
 import { changeStrategyState } from "../strategyState";
+import { ALPACA_CRYPTO_DEMO, alpacaMaker, makerSummary } from "../lib/maker";
 
 const ARM_PHRASE = "ARM LIVE";
 
@@ -580,6 +582,28 @@ function DemoCard() {
                   Not listed on {demoName}, so demo skips them: {notListed.join(", ")}.
                 </div>
               )}
+              {venue === "crypto" && on && live.demoExchange === "alpaca" && alpacaMaker(live) && (
+                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-cyber-text-faint">
+                  <span title="Alpaca crypto: 0.15 % maker, 0.25 % taker. Stops and exits that must not wait still cross.">
+                    Orders: {makerSummary(alpacaMaker(live))}.
+                  </span>
+                  {liveMode() === "server" && (
+                    <Button
+                      tone="neutral"
+                      disabled={busy !== ""}
+                      onClick={() => {
+                        const s = alpacaMaker(live)!;
+                        void run("crypto:maker", async () => {
+                          await setMakerRoute(ALPACA_CRYPTO_DEMO, { ...s, enabled: !s.enabled });
+                          return s.enabled ? "Maker execution off: market orders" : "Maker execution on";
+                        });
+                      }}
+                    >
+                      {alpacaMaker(live)!.enabled ? "Use market orders" : "Use maker limits"}
+                    </Button>
+                  )}
+                </div>
+              )}
               {on && (
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Button
@@ -599,7 +623,7 @@ function DemoCard() {
                   </Button>
                 </div>
               )}
-              {[`${venue}:check`, `${venue}:test`].map((k) =>
+              {[`${venue}:check`, `${venue}:test`, `${venue}:maker`].map((k) =>
                 out[k] ? (
                   <div key={k} className={`mt-1.5 text-xs ${out[k].ok ? "text-success" : "text-danger"}`}>
                     {out[k].text}

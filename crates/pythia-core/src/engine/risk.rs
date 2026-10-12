@@ -990,6 +990,7 @@ mod tests {
             ref_price: Some(1.0),
             client_order_id: None,
             reduce_only: false,
+            ioc: false,
         }
     }
 
