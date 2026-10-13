@@ -9,7 +9,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | always | a second engine for autopilots, kept apart so they never touch the lab book's markets or evidence; state in `/srv/pythia-data/autopilot` | container `pythia-autopilot` on 127.0.0.1:8788 only |
 | 03:30 | history backfill: 20 lab coins, every USDT pair, every USDT perp | `/etc/cron.d/pythia-backfill` |
 | 04:00 | momentum paper books, engine signals, paper vs backtest review | `/etc/cron.d/pythia-paper` |
-| 04:15 | sweep candidates as paper books: survivorship-free momentum, Donchian breakout (about 10 minutes, rebuilds the daily panel into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-families` |
+| 04:15 | sweep candidates as paper books: survivorship-free momentum (daily, and in seven weekly tranches), Donchian breakout (about 10 minutes, rebuilds the daily panel into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-families` |
 | 04:45 | M4 shadow paper book, market-neutral on perps (`lab.paper.m4_ls`, 2 to 3 minutes, about 3 GB; rebuilds the xs_daily panel and retrains weekly into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-m4` |
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
@@ -49,8 +49,9 @@ paper books. `/etc/cron.d/pythia-forward`:
 The bands come from the backtests' out-of-sample daily returns in
 `reports/forward/backtest/<book>.json`. The momentum books can be exported on
 the VPS itself; the sweep candidates and M4 need the sweep's run caches and
-the xs_daily pick cache, which live where those experiments ran, so their
-files are exported there and copied over:
+the xs_daily pick cache (the tranche book is re-simulated on the sweep's cached
+panel), which live where those experiments ran, so their files are exported
+there and copied over:
 
 ```bash
 docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.paper.forward_report --export-backtests
