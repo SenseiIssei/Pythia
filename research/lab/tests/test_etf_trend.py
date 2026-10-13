@@ -149,3 +149,15 @@ def test_the_whole_study_runs_and_counts_every_trial():
                                  "drawdown below SPY", "Sharpe above 60/40"}
     assert res["passes"] == all(res["gates"].values())
     assert "Gates" in et.markdown(res)
+
+
+def test_yahoo_answer_becomes_a_stooq_shaped_csv_without_gaps_or_nulls():
+    payload = {"chart": {"result": [{
+        "timestamp": [946909800, 946996200, 947082600],
+        "indicators": {"adjclose": [{"adjclose": [90.9, None, 88.1]}]},
+    }]}}
+    d, c = et.parse_stooq(et.yahoo_csv(payload))
+    assert [str(x) for x in d] == ["2000-01-03", "2000-01-05"]
+    assert list(c) == [90.9, 88.1]
+    with pytest.raises(et.DataUnavailable):
+        et.yahoo_csv({"chart": {"result": None}})

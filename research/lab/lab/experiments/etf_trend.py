@@ -11,8 +11,8 @@ to 5 bps a side for these ETFs, so the books are judged at 5 bps per unit of
 turnover and again at 10 bps (costs doubled).
 
 Data: daily closes from Stooq (https://stooq.com/q/d/l/?s=spy.us&i=d, no key),
-cached as <data>/etf/daily/<SYM>.csv. Stooq's US closes are adjusted for
-splits and dividends. When the download is blocked and no cache exists the
+or Yahoo's chart API when Stooq serves a page instead of its CSV, cached as
+<data>/etf/daily/<SYM>.csv. Both are adjusted for splits and dividends. When the download is blocked and no cache exists the
 experiment says so and stops; it never falls back to made-up prices (the
 tests use a synthetic panel, nothing else does).
 
@@ -65,6 +65,7 @@ from ..metrics import deflated_sharpe
 NAME = "etf_trend"
 SYMBOLS = ("SPY", "QQQ", "IWM", "TLT", "IEF", "GLD", "SLV", "XLE", "XLF", "XLK", "XLV", "EFA", "EEM", "VNQ", "DBC")
 STOOQ = "https://stooq.com/q/d/l/?s={}.us&i=d"
+YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{}?period1=946684800&period2={}&interval=1d"
 CACHE = Path(os.environ.get("PYTHIA_ETF_DATA", ROOT / "etf" / "daily"))
 SPLIT = np.datetime64("2017-01-01")
 COSTS = {"5bps": 0.0005, "10bps": 0.0010}
@@ -133,13 +134,50 @@ def parse_stooq(text: str) -> tuple[np.ndarray, np.ndarray]:
     return np.array(d, dtype="datetime64[D]")[order], np.array(c)[order]
 
 
-def download(sym: str, timeout: float = 30.0) -> str:
+def download_stooq(sym: str, timeout: float = 30.0) -> str:
     req = urllib.request.Request(STOOQ.format(sym.lower()), headers={"User-Agent": "pythia-lab"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
     except OSError as e:
         raise DataUnavailable(f"{sym}: {e}") from e
+
+
+def yahoo_csv(payload: dict) -> str:
+    """Yahoo's chart answer as a Stooq-shaped CSV of adjusted closes
+    (adjusted for splits and dividends, like Stooq's)."""
+    try:
+        r = payload["chart"]["result"][0]
+        ts = r["timestamp"]
+        adj = r["indicators"]["adjclose"][0]["adjclose"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise DataUnavailable(f"not a Yahoo chart answer: {e}") from e
+    rows = ["Date,Close"]
+    for t, c in zip(ts, adj):
+        if c is not None and c > 0:
+            rows.append(f"{datetime.fromtimestamp(t, timezone.utc).date().isoformat()},{c}")
+    return "\n".join(rows)
+
+
+def download_yahoo(sym: str, timeout: float = 30.0) -> str:
+    url = YAHOO.format(sym, int(datetime.now(timezone.utc).timestamp()))
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return yahoo_csv(json.loads(r.read().decode("utf-8", "replace")))
+    except (OSError, ValueError) as e:
+        raise DataUnavailable(f"{sym} (Yahoo): {e}") from e
+
+
+def download(sym: str, timeout: float = 30.0) -> str:
+    """Stooq first; when it answers with anything but its CSV (it now often
+    serves a page instead), Yahoo's adjusted closes."""
+    try:
+        text = download_stooq(sym, timeout)
+        parse_stooq(text)
+        return text
+    except DataUnavailable:
+        return download_yahoo(sym, timeout)
 
 
 def load_csv(sym: str, refresh: bool = False, fetch=download) -> str:
