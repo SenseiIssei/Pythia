@@ -1,6 +1,7 @@
 import type {
   AutopilotConfig,
   AutopilotStatus,
+  AutopilotUpdate,
   CostVenue,
   JournalEntry,
   Market,
@@ -267,6 +268,9 @@ export class ServerEngineClient implements EngineClient {
   }
   async resumeAutopilot(id: string) {
     await this.command({ cmd: "autopilotResume", id });
+  }
+  async updateAutopilot(id: string, update: AutopilotUpdate, confirm = false) {
+    await this.command({ cmd: "autopilotUpdate", id, update, confirm });
   }
   setStrategyParam(id: string, key: string, value: number) {
     this.send({ cmd: "setStrategyParam", id, key, value });

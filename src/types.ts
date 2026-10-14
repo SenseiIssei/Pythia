@@ -992,6 +992,23 @@ export interface AutopilotConfig {
   repickEveryHours?: number;
 }
 
+/**
+ * A change to a running or paused autopilot, made in place. Mirrors Rust
+ * `AutopilotUpdate`: what is left out stays as it is. An empty `sleeves`
+ * switches to the auto pick.
+ */
+export interface AutopilotUpdate {
+  name?: string;
+  capitalUsd?: number;
+  sleeves?: AutopilotSleeveConfig[];
+  /** The new stop rules, whole. */
+  stop?: AutopilotStopRules;
+  flattenOnStop?: boolean;
+  maxSleeves?: number;
+  /** 0 turns re-picking off. */
+  repickEveryHours?: number;
+}
+
 /** What the Autopilot page's setup hands over: the config plus the phrase a
  *  live start was confirmed with. The store turns the phrase into the
  *  engine's `confirm` flag. */

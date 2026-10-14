@@ -14,6 +14,7 @@ import type {
   AiView,
   AutopilotConfig,
   AutopilotStatus,
+  AutopilotUpdate,
   CoherenceBreak,
   DataHealth,
   ForecastStats,
@@ -85,6 +86,9 @@ interface Store {
   stopAutopilot: (id: string, flatten?: boolean) => Promise<void>;
   pauseAutopilot: (id: string) => Promise<void>;
   resumeAutopilot: (id: string) => Promise<void>;
+  /** Change a running or paused autopilot in place. `confirm` is needed for
+   *  a live one and for a looser max-loss rule. Rejects with a plain sentence. */
+  updateAutopilot: (id: string, update: AutopilotUpdate, confirm?: boolean) => Promise<void>;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -140,6 +144,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       stopAutopilot: (id, flatten) => engine.stopAutopilot(id, flatten),
       pauseAutopilot: (id) => engine.pauseAutopilot(id),
       resumeAutopilot: (id) => engine.resumeAutopilot(id),
+      updateAutopilot: (id, u, confirm) => engine.updateAutopilot(id, u, confirm),
     }),
     // rebuild views whenever the engine emits (version changes)
     [engine, version]

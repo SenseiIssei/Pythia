@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AutopilotConfig,
   AutopilotStatus,
+  AutopilotUpdate,
   CostVenue,
   JournalEntry,
   Market,
@@ -208,6 +209,9 @@ export class TauriEngineClient implements EngineClient {
   }
   async resumeAutopilot(id: string) {
     await refusal(invoke("autopilot_resume", { id }));
+  }
+  async updateAutopilot(id: string, update: AutopilotUpdate, confirm = false) {
+    await refusal(invoke<string>("autopilot_update", { id, update, confirm }));
   }
 }
 

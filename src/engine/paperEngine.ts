@@ -1,6 +1,7 @@
 import type {
   AutopilotConfig,
   AutopilotStatus,
+  AutopilotUpdate,
   JournalEntry,
   JournalKind,
   LiveStatus,
@@ -766,6 +767,9 @@ export class PaperEngine implements EngineClient {
     throw new Error(AUTOPILOT_NEEDS_ENGINE);
   }
   async resumeAutopilot(_id: string): Promise<void> {
+    throw new Error(AUTOPILOT_NEEDS_ENGINE);
+  }
+  async updateAutopilot(_id: string, _update: AutopilotUpdate, _confirm?: boolean): Promise<void> {
     throw new Error(AUTOPILOT_NEEDS_ENGINE);
   }
   addStrategy(cfg: StrategyConfig) {

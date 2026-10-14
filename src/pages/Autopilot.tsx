@@ -11,6 +11,7 @@ import {
   History,
   Lock,
   Pause,
+  Pencil,
   Plane,
   Play,
   Receipt,
@@ -49,6 +50,7 @@ import { useAdvanced } from "../uiMode";
 import { autopilotVenue, demoIsApiTestOnly, exchangeName } from "../venueNames";
 import { useMockAutopilot, type MockScenario } from "../autopilotMock";
 import {
+  LIVE_EDIT_PHRASE,
   LIVE_PHRASE,
   MEANINGFUL_DAYS,
   MEANINGFUL_TRADES,
@@ -56,6 +58,7 @@ import {
   bitcoinMarket,
   compareWithHold,
   curve,
+  editForm,
   floorAtStart,
   fmtDays,
   fmtDuration,
@@ -63,11 +66,13 @@ import {
   forwardLine,
   isActive,
   limit,
+  planEdit,
   REPICK_CHOICES,
   sleeveExposure,
+  type EditForm,
   type Stop,
 } from "../autopilot";
-import type { AutopilotConfig, AutopilotStart, AutopilotStatus, Venue } from "../types";
+import type { AutopilotConfig, AutopilotStart, AutopilotStatus, AutopilotUpdate, Venue } from "../types";
 
 // ── where the numbers come from ─────────────────────────────────────────────
 
@@ -80,6 +85,8 @@ interface AutopilotApi {
   stop: (id: string, flatten: boolean) => Promise<void>;
   pause: (id: string) => Promise<void>;
   resume: (id: string) => Promise<void>;
+  /** Change it in place; `confirm` for live and for a looser loss limit. */
+  update: (id: string, update: AutopilotUpdate, confirm: boolean) => Promise<void>;
   /** Bitcoin bar times and closes, for the "just holding" comparison. */
   btc: { symbol: string; times?: number[]; closes?: number[] } | null;
 }
@@ -104,6 +111,7 @@ function useAutopilotApi(): AutopilotApi {
       stop: mock.stop,
       pause: mock.pause,
       resume: mock.resume,
+      update: mock.update,
       btc: { symbol: "BTC/USD", times: mock.btc.times, closes: mock.btc.closes },
     };
   }
@@ -117,6 +125,7 @@ function useAutopilotApi(): AutopilotApi {
     stop: store.stopAutopilot,
     pause: store.pauseAutopilot,
     resume: store.resumeAutopilot,
+    update: store.updateAutopilot,
     btc: btc ? { symbol: btc.symbol, times: store.historyTimes[btc.id], closes: store.history[btc.id] } : null,
   };
 }
@@ -871,6 +880,7 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
   const simple = !advanced;
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
   const now = Date.now();
   const id = s.config.id;
   const running = s.state === "running";
@@ -953,11 +963,16 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
                 Resume
               </Button>
             )}
+            <Button tone="neutral" icon={Pencil} disabled={busy || editing} onClick={() => setEditing(true)}>
+              Edit
+            </Button>
             <StopButton live={live} preferFlatten={s.config.flattenOnStop} disabled={busy} onStop={(f) => void act(() => api.stop(id, f))} />
           </div>
         </div>
         {err && <div className="mt-3 text-sm text-danger">{err}</div>}
       </div>
+
+      {editing && <EditPanel s={s} api={api} onClose={() => setEditing(false)} />}
 
       {/* money */}
       <Card>
@@ -1075,6 +1090,124 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
         </div>
       </Card>
     </section>
+  );
+}
+
+/** The markets an autopilot trades, for the strategies it may run. */
+function venueClassOf(c: AutopilotConfig): Venue {
+  if (c.assetClass) return c.assetClass;
+  return c.venue === "alpaca" ? "alpaca" : c.venue === "polymarket" ? "polymarket" : "crypto";
+}
+
+/**
+ * Change a running autopilot without stopping it: name, amount, strategies
+ * and loss limits. Nothing is sold to make the change; the engine checks it
+ * again and says why when it refuses.
+ */
+function EditPanel({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi; onClose: () => void }) {
+  const { strategies } = useStore();
+  const [f, setF] = useState<EditForm>(() => editForm(s.config));
+  const [accept, setAccept] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const live = s.config.mode === "live";
+  const plan = planEdit(s.config, f);
+  const venue = venueClassOf(s.config);
+  const listed = new Set(s.config.sleeves.map((x) => x.strategyId));
+  const eligible = strategies
+    .filter((x) => x.id !== "manual" && x.venueClass === venue)
+    .sort((a, b) => Number(listed.has(b.id)) - Number(listed.has(a.id)));
+  const confirmed = live ? typed.trim().toUpperCase() === LIVE_EDIT_PHRASE : !plan.looser || accept;
+  const canSave = plan.changed && plan.problems.length === 0 && confirmed && !busy;
+  const set = (patch: Partial<EditForm>) => setF((x) => ({ ...x, ...patch }));
+
+  async function save() {
+    if (!canSave) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await api.update(s.config.id, plan.update, live || (plan.looser && accept));
+      onClose();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  }
+
+  return (
+    <Card title="Change this autopilot" icon={Pencil} help="Change it without stopping it. Nothing is sold to make the change.">
+      <p className="text-sm leading-relaxed text-cyber-text-dim">
+        It keeps what it holds. Coins the new setup also wants stay, and the next rebalance trades only the difference.
+      </p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <Field label="Name">
+          <input value={f.name} onChange={(e) => set({ name: e.target.value })} aria-label="Name" className={inputCls} />
+        </Field>
+        <Field label="Amount" hint="Lower: it scales down at the next rebalance, no fire sale.">
+          <input inputMode="decimal" value={f.amount} onChange={(e) => set({ amount: e.target.value })} aria-label="Amount" className={`${inputCls} font-mono`} />
+        </Field>
+      </div>
+
+      <div className="mt-4 text-xs font-medium text-cyber-text-dim">Strategies</div>
+      <div className="mt-1 grid gap-2 sm:grid-cols-2">
+        <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "auto"} onChange={() => set({ pick: "auto" })} title="Let Pythia choose" detail="It picks by evidence and checks again every day." />
+        <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "manual"} onChange={() => set({ pick: "manual" })} title="I choose" detail="Give each strategy a share. Empty means not used." />
+      </div>
+      {f.pick === "manual" && (
+        <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto pr-1">
+          {eligible.map((x) => (
+            <li key={x.id} className="flex items-center justify-between gap-2 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-1.5 text-sm">
+              <span className="min-w-0 truncate text-cyber-text">{x.name}</span>
+              <SmallInput value={f.weights[x.id] ?? ""} onChange={(v) => set({ weights: { ...f.weights, [x.id]: v } })} label={`Share for ${x.name}`} width="w-16" />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-4 text-xs font-medium text-cyber-text-dim">Limits (empty means off)</div>
+      <div className="mt-1 flex flex-wrap gap-3 text-sm text-cyber-text-dim">
+        <label className="inline-flex items-center gap-1.5">
+          Stop at a loss of <SmallInput value={f.lossPct} onChange={(v) => set({ lossPct: v })} label="Loss limit in percent" suffix="%" width="w-16" />
+        </label>
+        <label className="inline-flex items-center gap-1.5">
+          or <SmallInput value={f.lossUsd} onChange={(v) => set({ lossUsd: v })} label="Loss limit in dollars" prefix="$" width="w-20" />
+        </label>
+        <label className="inline-flex items-center gap-1.5">
+          Give back at most <SmallInput value={f.trailing} onChange={(v) => set({ trailing: v })} label="Trailing limit in percent" suffix="%" width="w-16" /> from its best
+        </label>
+      </div>
+
+      {plan.problems.length > 0 && (
+        <ul className="mt-3 space-y-0.5 text-sm text-warning">
+          {plan.problems.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
+      )}
+      {plan.looser && !live && (
+        <label className="mt-3 flex items-center gap-2 text-sm text-warning">
+          <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} aria-label="Accept a bigger possible loss" className="accent-amber-400" />
+          This lets it lose more than before. I accept that.
+        </label>
+      )}
+      {live && (
+        <label className="mt-3 block text-sm text-danger">
+          Real money. Type <b className="font-mono">{LIVE_EDIT_PHRASE}</b> to confirm
+          <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={LIVE_EDIT_PHRASE} aria-label={`Type ${LIVE_EDIT_PHRASE} to confirm`} className={`${inputCls} mt-1 font-mono`} />
+        </label>
+      )}
+      {err && <div className="mt-3 text-sm text-danger">{err}</div>}
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button tone={live ? "red" : "cyan"} icon={CheckCircle2} disabled={!canSave} onClick={() => void save()}>
+          {busy ? "Saving" : "Save changes"}
+        </Button>
+        <Button tone="neutral" disabled={busy} onClick={onClose}>
+          Cancel
+        </Button>
+      </div>
+      {!plan.changed && <p className="mt-2 text-xs text-cyber-text-faint">Nothing changed yet.</p>}
+    </Card>
   );
 }
 
