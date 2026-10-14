@@ -13,6 +13,10 @@ Two jobs, one webhook (PYTHIA_ALERT_WEBHOOK, the same one the engine posts to):
 
   python -m lab.ops.notify                  the daily digest
   python -m lab.ops.notify --dry-run        print it, post nothing
+  python3 notify.py --pending               a digest now, if one was asked for
+                                            (POST /api/alerts/digest writes
+                                            reports/notify/request.json) after
+                                            the last digest; run every 5 minutes
   python3 notify.py --health <system.json>  the health alarm (stdlib only, so
                                             the host's health script can run
                                             this file without the lab image)
@@ -23,6 +27,11 @@ or instead of a webhook PYTHIA_TELEGRAM_BOT_TOKEN and PYTHIA_TELEGRAM_CHAT_ID,
 which post to that chat through Telegram's sendMessage,
 PYTHIA_ALERT_PREFIX (first word of every post, default Pythia), PYTHIA_DATA
 and PYTHIA_REPORTS as for the rest of the lab.
+
+Every digest (not a dry run) is written to reports/notify/latest.json as
+{"ts", "text", "delivered"}, which the engine's GET /api/alerts shows as the
+last digest. A digest asked for on demand does not move the snapshot the next
+daily digest counts today's trades and fees from.
 
 The webhook URL is a secret: it is never printed, logged or written to a file.
 Only the standard library is used here on purpose.
@@ -230,7 +239,15 @@ def digest(learn: dict | None, forward: dict | None, health: dict | None, prev: 
     return clip("\n".join(out)), snap
 
 
-def daily(dry_run: bool = False, now_ms: int | None = None) -> int:
+def notify_dir() -> Path:
+    """Where the last digest and the engine's digest requests live."""
+    return reports_root() / "notify"
+
+
+def daily(dry_run: bool = False, now_ms: int | None = None, keep_snapshot: bool = True,
+          request_ts: int | None = None) -> int:
+    """The digest. `keep_snapshot` False (an on-demand digest) leaves the
+    snapshot of trades and fees alone; `request_ts` is the request it answers."""
     now_ms = now_ms or int(time.time() * 1000)
     rep = reports_root()
     state_path = data_root() / "notify" / "state.json"
@@ -240,16 +257,44 @@ def daily(dry_run: bool = False, now_ms: int | None = None) -> int:
                         config()[2])
     print(text)
     url, fmt, _ = config()
-    if dry_run or not url:
-        if not dry_run:
-            print("PYTHIA_ALERT_WEBHOOK is not set: printed only.")
+    if dry_run:
+        return 0
+
+    def record(delivered: bool) -> None:
+        latest = {"ts": now_ms, "text": text, "delivered": delivered}
+        if request_ts is not None:
+            latest["request"] = request_ts
+        write_json(notify_dir() / "latest.json", latest)
+
+    if not url:
+        print("PYTHIA_ALERT_WEBHOOK is not set: printed only.")
+        record(False)
         return 0
     ok, err = post(url, fmt, text)
+    record(ok)
     if not ok:
         print(f"digest not delivered: {err}", file=sys.stderr)
         return 1
-    write_json(state_path, {"autopilots": snap, "last_digest_ms": now_ms})
+    if keep_snapshot:
+        write_json(state_path, {"autopilots": snap, "last_digest_ms": now_ms})
     return 0
+
+
+def pending(now_ms: int | None = None) -> int:
+    """A digest now when reports/notify/request.json asks for one after the
+    last digest. One request gets one digest, delivered or not: the result is
+    in latest.json, and the operator can ask again."""
+    req = _num((read_json(notify_dir() / "request.json") or {}).get("ts"))
+    if req is None:
+        print("no digest request")
+        return 0
+    last = read_json(notify_dir() / "latest.json") or {}
+    # `request` too: the engine's clock may run ahead of this one.
+    answered = max(_num(last.get("ts")) or 0, _num(last.get("request")) or 0)
+    if req <= answered:
+        print("no new digest request")
+        return 0
+    return daily(now_ms=now_ms, keep_snapshot=False, request_ts=int(req))
 
 
 # ---------------------------------------------------------------- the health alarm
@@ -302,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
         i = argv.index("--health")
         path = Path(argv[i + 1]) if i + 1 < len(argv) else data_root() / "_health" / "system.json"
         return health(path)
+    if "--pending" in argv:
+        return pending()
     return daily(dry_run="--dry-run" in argv)
 
 
