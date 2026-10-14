@@ -4,6 +4,7 @@ import type {
   AiView,
   AutopilotConfig,
   AutopilotStatus,
+  AutopilotUpdate,
   CoherenceBreak,
   CostVenue,
   DataHealth,
@@ -128,6 +129,11 @@ export interface EngineClient {
   stopAutopilot(id: string, flatten?: boolean): Promise<void>;
   pauseAutopilot(id: string): Promise<void>;
   resumeAutopilot(id: string): Promise<void>;
+  /**
+   * Change a running or paused autopilot in place. `confirm` is needed for a
+   * live one and for a looser max-loss rule. Rejects with a plain sentence.
+   */
+  updateAutopilot(id: string, update: AutopilotUpdate, confirm?: boolean): Promise<void>;
 }
 
 /** What the browser build says when asked to run an autopilot. */

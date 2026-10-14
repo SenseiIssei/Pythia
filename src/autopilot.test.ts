@@ -5,13 +5,17 @@ import {
   breakdown,
   compareWithHold,
   curve,
+  editForm,
   floorAtStart,
   forwardLine,
+  lossAllowance,
+  loosensLoss,
   maturity,
+  planEdit,
   sleeveExposure,
   worstDip,
 } from "./autopilot";
-import type { AutopilotStatus } from "./types";
+import type { AutopilotConfig, AutopilotStatus } from "./types";
 
 function status(over: Partial<AutopilotStatus> = {}): AutopilotStatus {
   return {
@@ -224,7 +228,65 @@ describe("sleeveExposure", () => {
     expect(sleeveExposure(base)).toBe("60% of the amount, in cash right now");
   });
   it("says a dropped sleeve is being sold down or done", () => {
-    expect(sleeveExposure({ ...base, weight: 0, dropped: true, exposure: 120 })).toBe("Dropped at a re-pick, its coins are being sold down");
-    expect(sleeveExposure({ ...base, weight: 0, dropped: true, exposure: 0 })).toBe("Dropped at a re-pick, holds nothing");
+    expect(sleeveExposure({ ...base, weight: 0, dropped: true, exposure: 120 })).toBe("Taken out, what it holds winds down at the next rebalance");
+    expect(sleeveExposure({ ...base, weight: 0, dropped: true, exposure: 0 })).toBe("Taken out, holds nothing");
+  });
+});
+
+describe("editing a running autopilot", () => {
+  const cfg = (over: Partial<AutopilotConfig> = {}): AutopilotConfig => ({
+    id: "a",
+    name: "Momentum",
+    mode: "paper",
+    venue: "alpaca",
+    assetClass: "crypto",
+    capitalUsd: 10_000,
+    sleeves: [{ strategyId: "lab:tsmom_top20", weight: 1 }],
+    stop: { onTakeProfit: "stop", maxLossPct: 10, maxLossUsd: null, trailingPct: null, takeProfitPct: 30 },
+    flattenOnStop: true,
+    ...over,
+  });
+
+  it("fills the form with what runs now and sends nothing when nothing changed", () => {
+    const f = editForm(cfg());
+    expect(f).toMatchObject({ name: "Momentum", amount: "10000", pick: "manual", lossPct: "10", lossUsd: "", trailing: "" });
+    expect(f.weights).toEqual({ "lab:tsmom_top20": "1" });
+    const p = planEdit(cfg(), f);
+    expect(p.changed).toBe(false);
+    expect(p.update).toEqual({});
+    expect(p.problems).toEqual([]);
+  });
+
+  it("switches strategies without touching the rest", () => {
+    const f = { ...editForm(cfg()), weights: { "lab:tsmom_top20": "", "lab:tsmom_tranches": "1" } };
+    const p = planEdit(cfg(), f);
+    expect(p.update).toEqual({ sleeves: [{ strategyId: "lab:tsmom_tranches", weight: 1 }] });
+    expect(p.looser).toBe(false);
+    expect(planEdit(cfg(), { ...f, pick: "auto" }).update).toEqual({ sleeves: [] });
+    expect(planEdit(cfg(), { ...f, weights: {} }).problems).toContain("Pick at least one strategy with a share above zero.");
+  });
+
+  it("keeps the profit target and end time and flags a looser loss limit", () => {
+    const tighter = planEdit(cfg(), { ...editForm(cfg()), lossPct: "5", trailing: "8" });
+    expect(tighter.update.stop).toMatchObject({ maxLossPct: 5, trailingPct: 8, takeProfitPct: 30, onTakeProfit: "stop" });
+    expect(tighter.looser).toBe(false);
+    expect(planEdit(cfg(), { ...editForm(cfg()), lossPct: "20" }).looser).toBe(true);
+    expect(planEdit(cfg(), { ...editForm(cfg()), lossPct: "" }).looser).toBe(true);
+    // More money at the same percent can lose more dollars.
+    const more = planEdit(cfg(), { ...editForm(cfg()), amount: "20000" });
+    expect(more.update).toEqual({ capitalUsd: 20_000 });
+    expect(more.looser).toBe(true);
+    const less = planEdit(cfg(), { ...editForm(cfg()), amount: "5,000" });
+    expect(less.update).toEqual({ capitalUsd: 5_000 });
+    expect(less.looser).toBe(false);
+  });
+
+  it("says what is wrong in plain words, and live keeps a loss limit", () => {
+    expect(planEdit(cfg(), { ...editForm(cfg()), amount: "0" }).problems).toContain("Enter an amount above zero.");
+    expect(planEdit(cfg(), { ...editForm(cfg()), lossUsd: "20000" }).problems[0]).toMatch(/at most the amount/);
+    const live = cfg({ mode: "live" });
+    expect(planEdit(live, { ...editForm(live), lossPct: "" }).problems).toContain("Real money needs a loss limit, in percent or in dollars.");
+    expect(lossAllowance({ onTakeProfit: "stop", maxLossPct: 10, maxLossUsd: 500 }, 10_000)).toEqual({ usd: 500, pct: 5 });
+    expect(loosensLoss({ onTakeProfit: "stop" }, 1_000, { onTakeProfit: "stop", maxLossPct: 50 }, 1_000)).toBe(false);
   });
 });

@@ -6,7 +6,16 @@
 // 12.5 %), like `RiskStatus.drawdownPct`. Sleeve weights are fractions that
 // add up to 1.
 
-import type { AutopilotConfig, AutopilotForward, AutopilotSleeveStatus, AutopilotStatus, Market, PnlBreakdown } from "./types";
+import type {
+  AutopilotConfig,
+  AutopilotForward,
+  AutopilotSleeveConfig,
+  AutopilotSleeveStatus,
+  AutopilotStatus,
+  AutopilotUpdate,
+  Market,
+  PnlBreakdown,
+} from "./types";
 
 export const DAY_MS = 86_400_000;
 
@@ -295,10 +304,126 @@ export function sleeveExposure(b: AutopilotSleeveStatus): string {
   const share = `${(b.weight * 100).toFixed(0)}% of the amount`;
   if (b.dropped) {
     const left = b.exposure != null && b.exposure >= 0.5;
-    return left ? "Dropped at a re-pick, its coins are being sold down" : "Dropped at a re-pick, holds nothing";
+    // Dropped at a re-pick or taken out by an edit: either way it winds down.
+    return left ? "Taken out, what it holds winds down at the next rebalance" : "Taken out, holds nothing";
   }
   const usd = b.exposure ?? 0;
   if (!(usd >= 0.5)) return `${share}, in cash right now`;
   const pct = b.exposurePct != null && Number.isFinite(b.exposurePct) ? ` (${b.exposurePct.toFixed(0)}% of its worth)` : "";
   return `${share}, holds ${Math.round(usd).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })}${pct}`;
+}
+
+// ── editing a running autopilot ────────────────────────────────────────────
+
+/** The phrase a change to a live autopilot is confirmed with. */
+export const LIVE_EDIT_PHRASE = "CHANGE LIVE";
+
+/** The Edit form, as typed. An empty loss or trailing field is "off". */
+export interface EditForm {
+  name: string;
+  amount: string;
+  pick: "auto" | "manual";
+  /** Strategy id to its share, as typed. */
+  weights: Record<string, string>;
+  lossPct: string;
+  lossUsd: string;
+  trailing: string;
+}
+
+const shown = (n: number | null | undefined) => (n != null && Number.isFinite(n) && n > 0 ? String(n) : "");
+
+/** The form filled in with what the autopilot runs now. */
+export function editForm(c: AutopilotConfig): EditForm {
+  return {
+    name: c.name,
+    amount: String(c.capitalUsd),
+    pick: c.sleeves.length === 0 ? "auto" : "manual",
+    weights: Object.fromEntries(c.sleeves.map((s) => [s.strategyId, String(s.weight)])),
+    lossPct: shown(c.stop.maxLossPct),
+    lossUsd: shown(c.stop.maxLossUsd),
+    trailing: shown(c.stop.trailingPct),
+  };
+}
+
+function field(s: string): number | undefined {
+  const t = s.replace(/[$,\s%]/g, "");
+  if (t === "") return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/**
+ * The most the max-loss rules let it lose, in dollars and in % of the
+ * amount; undefined is no limit. Mirrors the engine's `max_loss_allowance`.
+ */
+export function lossAllowance(stop: Stop, capital: number): { usd?: number; pct?: number } {
+  const byPct = limit(stop.maxLossPct) !== undefined ? (capital * stop.maxLossPct!) / 100 : undefined;
+  const byUsd = limit(stop.maxLossUsd);
+  const usd = byPct !== undefined && byUsd !== undefined ? Math.min(byPct, byUsd) : (byPct ?? byUsd);
+  if (usd === undefined) return {};
+  return { usd, pct: capital > 0 ? (usd / capital) * 100 : 0 };
+}
+
+/** Does the change let it lose more, in dollars or in %? Then it needs a confirmation. */
+export function loosensLoss(oldStop: Stop, oldCapital: number, newStop: Stop, newCapital: number): boolean {
+  const o = lossAllowance(oldStop, oldCapital);
+  const n = lossAllowance(newStop, newCapital);
+  const more = (a?: number, b?: number) => a !== undefined && (b === undefined || b > a + 1e-6);
+  return more(o.usd, n.usd) || more(o.pct, n.pct);
+}
+
+export interface EditPlan {
+  /** Only what changed; empty when nothing did. */
+  update: AutopilotUpdate;
+  changed: boolean;
+  /** What is wrong with the form, in plain sentences. */
+  problems: string[];
+  /** It lets the autopilot lose more: the owner has to confirm. */
+  looser: boolean;
+}
+
+function sameSleeves(a: AutopilotSleeveConfig[], b: AutopilotSleeveConfig[]): boolean {
+  if (a.length !== b.length) return false;
+  const m = new Map(a.map((s) => [s.strategyId, s.weight]));
+  return b.every((s) => m.has(s.strategyId) && Math.abs(m.get(s.strategyId)! - s.weight) < 1e-9);
+}
+
+/** Turn the form into the change to send, checked the way the engine checks it. */
+export function planEdit(c: AutopilotConfig, f: EditForm): EditPlan {
+  const problems: string[] = [];
+  const update: AutopilotUpdate = {};
+  const name = f.name.trim();
+  if (name && name !== c.name) update.name = name;
+
+  const capital = field(f.amount);
+  if (!(capital !== undefined && capital > 0)) problems.push("Enter an amount above zero.");
+  else if (Math.abs(capital - c.capitalUsd) > 1e-9) update.capitalUsd = capital;
+  const x = capital !== undefined && capital > 0 ? capital : c.capitalUsd;
+
+  // Strategies: the ones the owner already had first, in their order.
+  if (f.pick === "auto") {
+    if (c.sleeves.length > 0) update.sleeves = [];
+  } else {
+    const ids = [...c.sleeves.map((s) => s.strategyId), ...Object.keys(f.weights).filter((id) => !c.sleeves.some((s) => s.strategyId === id))];
+    const sleeves = ids
+      .map((id) => ({ strategyId: id, weight: field(f.weights[id] ?? "") ?? 0 }))
+      .filter((s) => Number.isFinite(s.weight) && s.weight > 0);
+    if (sleeves.length === 0) problems.push("Pick at least one strategy with a share above zero.");
+    else if (!sameSleeves(sleeves, c.sleeves)) update.sleeves = sleeves;
+  }
+
+  const lossPct = field(f.lossPct);
+  const lossUsd = field(f.lossUsd);
+  const trailing = field(f.trailing);
+  if (lossPct !== undefined && !(lossPct > 0 && lossPct <= 100)) problems.push("The loss limit in percent has to be above 0 and at most 100.");
+  if (lossUsd !== undefined && !(lossUsd > 0 && lossUsd <= x)) problems.push("The loss limit in dollars has to be above zero and at most the amount.");
+  if (trailing !== undefined && !(trailing > 0 && trailing < 100)) problems.push("The trailing limit has to be between 0 and 100 percent.");
+  if (c.mode === "live" && lossPct === undefined && lossUsd === undefined) problems.push("Real money needs a loss limit, in percent or in dollars.");
+  const stop: Stop = { ...c.stop, maxLossPct: lossPct ?? null, maxLossUsd: lossUsd ?? null, trailingPct: trailing ?? null };
+  const same = (a: number | null | undefined, b: number | null | undefined) => (a ?? null) === (b ?? null);
+  if (!same(stop.maxLossPct, c.stop.maxLossPct) || !same(stop.maxLossUsd, c.stop.maxLossUsd) || !same(stop.trailingPct, c.stop.trailingPct)) {
+    update.stop = stop;
+  }
+  const changed = Object.keys(update).length > 0;
+  return { update, changed, problems, looser: loosensLoss(c.stop, c.capitalUsd, stop, x) };
 }

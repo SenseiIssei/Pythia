@@ -10,7 +10,7 @@
 // also labels every mocked view as sample data.
 
 import { useEffect, useSyncExternalStore } from "react";
-import type { AutopilotStart, AutopilotStatus } from "./types";
+import type { AutopilotStart, AutopilotStatus, AutopilotUpdate } from "./types";
 import { LIVE_PHRASE, floorAtStart } from "./autopilot";
 
 export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading";
@@ -25,6 +25,7 @@ export interface MockAutopilot {
   stop: (id: string, flatten: boolean) => Promise<void>;
   pause: (id: string) => Promise<void>;
   resume: (id: string) => Promise<void>;
+  update: (id: string, u: AutopilotUpdate, confirm: boolean) => Promise<void>;
 }
 
 function requested(): MockScenario | null {
@@ -340,6 +341,29 @@ const api = {
   },
   resume(id: string): Promise<void> {
     update(id, (s) => ({ ...s, state: "running", lastAction: "Resumed by you." }));
+    return Promise.resolve();
+  },
+  update(id: string, u: AutopilotUpdate, confirm: boolean): Promise<void> {
+    const s = state?.list.find((x) => x.config.id === id);
+    if (!s) return Promise.reject(new Error("There is no such autopilot."));
+    if (s.config.mode === "live" && !confirm) return Promise.reject(new Error("Live trades real money: type the confirmation to change it."));
+    const delta = u.capitalUsd !== undefined ? u.capitalUsd - s.config.capitalUsd : 0;
+    update(id, (x) =>
+      summarise({
+        ...x,
+        config: {
+          ...x.config,
+          name: u.name ?? x.config.name,
+          capitalUsd: u.capitalUsd ?? x.config.capitalUsd,
+          sleeves: u.sleeves ?? x.config.sleeves,
+          stop: u.stop ?? x.config.stop,
+        },
+        startCapital: x.startCapital + delta,
+        equity: x.equity + delta,
+        peakEquity: x.peakEquity + delta,
+        lastAction: "Changed by you. Its positions stay; the next rebalance trades only the difference.",
+      }),
+    );
     return Promise.resolve();
   },
 };
