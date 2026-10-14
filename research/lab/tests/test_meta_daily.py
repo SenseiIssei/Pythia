@@ -221,6 +221,9 @@ def test_multipliers():
     assert np.array_equal(md.multipliers(meta, "S1"), [[1, 0, 1, 1]])
     assert np.array_equal(md.multipliers(meta, "S2"), [[1, 0, 1, 1]])
     assert np.allclose(md.multipliers(meta, "Z"), [[1, 0.5, 1.25, 1.5]])
+    meta.q_raw = np.stack([np.full_like(p, 0.3), np.full_like(p, 0.6)], axis=-1)
+    assert np.array_equal(md.multipliers(meta, "raw half"), [[1, 0, 0, 1]])
+    assert np.array_equal(md.multipliers(meta, "raw quarter"), [[1, 0, 1, 1]])
 
 
 def test_late_fill_shifts_one_row():
