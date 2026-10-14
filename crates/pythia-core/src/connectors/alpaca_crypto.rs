@@ -68,6 +68,7 @@ fn decimals_of(step: f64) -> u32 {
 
 /// `x` written with `decimals` decimals, trailing zeros dropped.
 fn trimmed(x: f64, decimals: u32) -> String {
+    let decimals = safe_decimals(x, decimals);
     let s = format!("{x:.*}", decimals as usize);
     if s.contains('.') {
         s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -142,6 +143,18 @@ impl CryptoRules {
     }
 }
 
+/// Significant decimal digits an `f64` carries exactly.
+const F64_DIGITS: u32 = 15;
+
+/// At most `d` decimals, and no more than an `f64` of this size can carry.
+/// 490974559.154990649 PEPE has nine digits before the point, so only six
+/// after it are real: written with nine, the float prints 490974559.154990673,
+/// more than the account holds, and Alpaca refuses the sell.
+pub fn safe_decimals(x: f64, d: u32) -> u32 {
+    let int_digits = if x.abs() >= 1.0 { x.abs().log10().floor() as u32 + 1 } else { 0 };
+    d.min(F64_DIGITS.saturating_sub(int_digits))
+}
+
 /// Round `x` to `d` decimals, removing float noise.
 fn clean(x: f64, d: u32) -> f64 {
     format!("{x:.*}", d as usize).parse().unwrap_or(x)
@@ -152,7 +165,11 @@ pub fn floor_to(qty: f64, step: f64, d: u32) -> f64 {
     if !(qty > 0.0) || !qty.is_finite() {
         return 0.0;
     }
-    if step > 0.0 {
+    // Below the float's precision the step cannot be written exactly: the
+    // grid of the last real decimal is used instead, which is coarser.
+    let d = safe_decimals(qty, d);
+    let grid = 10f64.powi(-(d as i32));
+    if step > 0.0 && step >= grid * (1.0 - 1e-9) {
         let n = (qty / step + 1e-9).floor();
         return clean(n * step, d);
     }
@@ -316,6 +333,20 @@ mod tests {
         )
         .unwrap();
         CryptoRules::from_asset(&v).unwrap()
+    }
+
+    #[test]
+    fn a_large_quantity_is_written_with_only_the_decimals_its_float_carries() {
+        assert_eq!(safe_decimals(0.5, 9), 9);
+        assert_eq!(safe_decimals(123_456.0, 9), 9);
+        assert_eq!(safe_decimals(490_974_559.15, 9), 6);
+        assert_eq!(safe_decimals(1e16, 9), 0);
+        let held: f64 = "490974559.154990649".parse().unwrap();
+        assert_eq!(format_qty_plain(held), "490974559.15499");
+        assert!(floor_to(held, 1e-9, 9) <= held);
+        assert_eq!(floor_to(held, 1.0, 0), 490_974_559.0);
+        // Small quantities keep all nine.
+        assert_eq!(format_qty_plain(0.000123456789), "0.000123456");
     }
 
     #[test]

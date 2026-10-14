@@ -148,6 +148,9 @@ export interface EngineState {
   positions: PositionView[];
   orders: Order[];
   journal: JournalEntry[];
+  /** The durable ring of trade, risk, autopilot and rejection events
+   *  (newest first, up to 2000). Only in GET /api/state, not in the stream. */
+  events?: JournalEntry[];
   strategies: StrategyConfig[];
   limits: RiskLimits;
   history: Record<string, number[]>;
