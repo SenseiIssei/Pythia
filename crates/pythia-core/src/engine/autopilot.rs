@@ -80,6 +80,24 @@
 //! owner did not confirm. Built-in sleeves own their positions outright and
 //! are not re-picked.
 //!
+//! # Changing it in place
+//!
+//! [`Engine::autopilot_update`] changes a running or paused autopilot
+//! without a stop: its name, strategies and weights (or the auto pick), its
+//! stop rules, its amount and its pick settings. Nothing is sold to make the
+//! change. A new set of lab books is netted in at the next rebalance, which
+//! runs at once and trades only the difference per coin, so a coin the old
+//! and the new books both want is re-attributed, not sold and bought back.
+//! A strategy taken out stays listed at weight zero while it holds something
+//! or has a record, exactly like a book a re-pick dropped. A new amount
+//! moves X, the peak and a locked floor by the difference, so the P&L so far
+//! stays; a lower one brings the targets down at the next rebalance. The
+//! checks are the start's, plus: a live change needs the typed confirmation,
+//! a looser max-loss rule (in dollars or in % of X) needs a confirmation in
+//! any mode, a live amount never goes above the venue's free cash plus what
+//! the autopilot already holds there, and rules that would end it on the
+//! spot are refused (that is what Stop is for). Journaled with what changed.
+//!
 //! When a running autopilot holds nothing, its status says it is in cash,
 //! waiting for signals, with the reason when the netted target knows it.
 //! Nothing is ever bought to look busy.
@@ -399,6 +417,32 @@ pub enum VenueCash {
     Failed(String),
 }
 
+/// A change to a running or paused autopilot, made in place. Every field is
+/// optional: what is left out stays as it is.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutopilotUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The new amount X. Lower: its targets come down at the next rebalance,
+    /// nothing is sold at once. Higher: within the same checks as a start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capital_usd: Option<f64>,
+    /// New strategies and weights. An empty list switches to the auto pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleeves: Option<Vec<SleeveConfig>>,
+    /// The new stop rules, whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopRules>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatten_on_stop: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sleeves: Option<usize>,
+    /// 0 turns re-picking off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repick_every_hours: Option<f64>,
+}
+
 // ── the saved record ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -656,6 +700,39 @@ pub fn validate(cfg: &AutopilotConfig, now: i64) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The most the max-loss rules let an autopilot with capital `x` lose: in
+/// dollars and in % of `x`. `None` is no limit.
+pub fn max_loss_allowance(stop: &StopRules, x: f64) -> (Option<f64>, Option<f64>) {
+    let by_pct = stop.max_loss_pct.map(|p| x * p / 100.0);
+    let usd = match (by_pct, stop.max_loss_usd) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let pct = usd.map(|u| if x > 0.0 { u / x * 100.0 } else { 0.0 });
+    (usd, pct)
+}
+
+/// Does going from (`old`, `old_x`) to (`new`, `new_x`) let the autopilot
+/// lose more, in dollars or in % of its amount? Removing every max-loss rule
+/// does.
+pub fn loosens_max_loss(old: &StopRules, old_x: f64, new: &StopRules, new_x: f64) -> bool {
+    let (ou, op) = max_loss_allowance(old, old_x);
+    let (nu, np) = max_loss_allowance(new, new_x);
+    let more = |o: Option<f64>, n: Option<f64>| match (o, n) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(o), Some(n)) => n > o + 1e-6,
+    };
+    more(ou, nu) || more(op, np)
+}
+
+fn describe_allowance(stop: &StopRules, x: f64) -> String {
+    match max_loss_allowance(stop, x) {
+        (Some(u), Some(p)) => format!("{} ({} %)", usd(u), pct(p)),
+        _ => "no limit".into(),
+    }
 }
 
 /// What one sleeve asks for when markets are assigned.
@@ -1843,6 +1920,474 @@ impl Engine {
         ap.last_action = Some(msg.clone());
         self.log(JournalKind::System, msg, None, None);
         Ok(())
+    }
+
+    /// The saved config of one autopilot, for a host that has to read the
+    /// venue before a change (the free cash of a live one).
+    pub fn autopilot_config(&self, id: &str) -> Option<AutopilotConfig> {
+        self.ap_index(id).map(|i| self.autopilots[i].config.clone())
+    }
+
+    /// Change a running or paused autopilot in place: its name, strategies
+    /// and weights (or the auto pick), stop rules, amount and pick settings.
+    ///
+    /// Nothing is sold to make the change. Positions stay where they are:
+    /// lab books net their targets per coin, so a coin the new strategies
+    /// also want is re-attributed to them at the next rebalance, which trades
+    /// only the difference with the route's normal execution. A strategy
+    /// taken out stays listed at weight zero while it still holds something
+    /// or has a record; a lower amount brings the targets down at the next
+    /// rebalance. The checks are the start's: the same validation, the
+    /// confirmation for any live change and for a looser max-loss rule, a
+    /// live amount never above the venue's free cash, a paper amount never
+    /// above what the paper account has left. Journaled with what changed.
+    /// Returns that sentence.
+    pub fn autopilot_update(&mut self, id: &str, upd: AutopilotUpdate, confirm: bool, cash: VenueCash) -> Result<String, String> {
+        let now = self.now();
+        let Some(i) = self.ap_index(id) else { return Err(format!("There is no autopilot \"{id}\".")) };
+        let label = self.autopilots[i].label();
+        if !self.autopilots[i].is_active() {
+            return Err(format!("{label} is stopped; start a new one instead."));
+        }
+        let old = self.autopilots[i].config.clone();
+        let mut cfg = old.clone();
+        if let Some(n) = &upd.name {
+            let n = n.trim();
+            cfg.name = if n.is_empty() { "Autopilot".into() } else { n.to_string() };
+        }
+        if let Some(x) = upd.capital_usd {
+            cfg.capital_usd = x;
+        }
+        if let Some(s) = &upd.stop {
+            cfg.stop = s.clone();
+        }
+        if let Some(f) = upd.flatten_on_stop {
+            cfg.flatten_on_stop = f;
+        }
+        if let Some(s) = &upd.sleeves {
+            cfg.sleeves = s.clone();
+        }
+        if upd.max_sleeves.is_some() {
+            cfg.max_sleeves = upd.max_sleeves;
+        }
+        let auto = cfg.sleeves.is_empty();
+        cfg.repick_every_hours = match upd.repick_every_hours {
+            Some(h) => Some(h),
+            None if !auto => None,
+            None if old.sleeves.is_empty() => old.repick_every_hours.or(Some(0.0)),
+            None => Some(REPICK_DEFAULT_HOURS),
+        };
+        validate(&cfg, now)?;
+        cfg.repick_every_hours = cfg.repick_every_hours.filter(|h| auto && *h > 0.0);
+
+        let re_sleeve = cfg.sleeves != old.sleeves || (auto && cfg.max_sleeves != old.max_sleeves);
+        let capital_changed = (cfg.capital_usd - old.capital_usd).abs() > EPS;
+        if cfg == old && !re_sleeve {
+            return Err(format!("Nothing to change: {label} already runs like this."));
+        }
+        let live = cfg.mode == AutopilotMode::Live;
+        let Some(venue) = config_venue(&cfg) else { return Err(format!("{label} has an unknown venue.")) };
+        let cv = CostVenue::parse(&cfg.venue).unwrap_or(CostVenue::Kraken);
+
+        // The live gate: the owner confirms every change, and a max-loss rule stays.
+        if live {
+            if !confirm {
+                return Err("Live trades real money: type the confirmation to change it.".into());
+            }
+            if cfg.stop.max_loss_pct.is_none() && cfg.stop.max_loss_usd.is_none() {
+                return Err("Live needs a max-loss rule, in % or in dollars, so there is always a level at which it stops.".into());
+            }
+            if re_sleeve || cfg.capital_usd > old.capital_usd + EPS {
+                if !self.live.armed {
+                    return Err("Live routing is not armed. Arm it on the Live page first; the autopilot never arms anything itself.".into());
+                }
+                if !self.live.venues.contains(&venue) {
+                    return Err(format!("{} is not enabled for live routing. Enable it on the Live page first.", venue_label(cv)));
+                }
+            }
+        }
+        if loosens_max_loss(&old.stop, old.capital_usd, &cfg.stop, cfg.capital_usd) && !confirm {
+            return Err(format!(
+                "This loosens the max-loss rule: the most it may lose goes from {} to {}. Confirm to change it.",
+                describe_allowance(&old.stop, old.capital_usd),
+                describe_allowance(&cfg.stop, cfg.capital_usd)
+            ));
+        }
+
+        // The amount: more only from money that is there, less never below zero.
+        let delta = cfg.capital_usd - old.capital_usd;
+        let others = |a: &&Autopilot| a.is_active() && a.config.id != old.id;
+        if delta > EPS {
+            if live {
+                let free = match cash {
+                    VenueCash::Read(c) => c,
+                    VenueCash::Failed(why) => {
+                        return Err(format!(
+                            "Could not read the free cash at {} ({why}), so the higher amount is refused: it has to fit in what the account holds.",
+                            venue_label(cv)
+                        ))
+                    }
+                    VenueCash::NotRead => {
+                        return Err(format!("The free cash at {} was not read, so the higher amount is refused.", venue_label(cv)))
+                    }
+                };
+                let committed: f64 = self
+                    .autopilots
+                    .iter()
+                    .filter(others)
+                    .filter(|a| a.config.mode == AutopilotMode::Live && CostVenue::parse(&a.config.venue) == Some(cv))
+                    .map(|a| a.start_capital)
+                    .sum();
+                // What it already holds at the venue is its own, not free cash.
+                let held = self.ap_gross(&self.autopilots[i], None);
+                let available = (free + held - committed).max(0.0);
+                if cfg.capital_usd > available + EPS {
+                    let other = if committed > 0.0 { format!(", of which {} is already committed to other live autopilots", usd(committed)) } else { String::new() };
+                    return Err(format!(
+                        "{} holds {} of free cash{other}, and the autopilot holds {} in positions, so it can have at most {}, not {}. Fund the account at the venue yourself; Pythia never moves money in or out.",
+                        venue_label(cv),
+                        usd(free),
+                        usd(held),
+                        usd(available),
+                        usd(cfg.capital_usd)
+                    ));
+                }
+            } else if cfg.mode == AutopilotMode::Paper {
+                let paper = self.equity();
+                let committed: f64 =
+                    self.autopilots.iter().filter(others).filter(|a| a.config.mode == AutopilotMode::Paper).map(|a| a.start_capital).sum();
+                let available = (paper - committed).max(0.0);
+                if cfg.capital_usd > available + EPS {
+                    return Err(format!(
+                        "The paper account holds {}{}, so this autopilot can have at most {}, not {}.",
+                        usd(paper),
+                        if committed > 0.0 { format!(", of which {} is given to other paper autopilots", usd(committed)) } else { String::new() },
+                        usd(available),
+                        usd(cfg.capital_usd)
+                    ));
+                }
+            }
+        }
+        let eq = self.ap_equity(&self.autopilots[i]);
+        if eq + delta <= EPS {
+            return Err(format!(
+                "{label} has an equity of {}; the amount can come down by less than that, not by {}.",
+                usd(eq),
+                usd(-delta)
+            ));
+        }
+        // New rules that would end it on the spot are refused: stopping is
+        // the Stop button's job, with its own choice about the positions.
+        let (start, peak, locked, steps) = {
+            let ap = &self.autopilots[i];
+            let tp_changed = cfg.stop.take_profit_pct != old.stop.take_profit_pct || cfg.stop.on_take_profit != old.stop.on_take_profit;
+            (
+                ap.start_capital + delta,
+                ap.peak_equity.max(eq) + delta,
+                ap.locked_floor.map(|f| f + delta),
+                if tp_changed { 0 } else { ap.tp_steps },
+            )
+        };
+        if let Some((floor, _)) = floor_equity(&cfg.stop, start, peak, locked) {
+            if eq + delta <= floor + EPS {
+                return Err(format!(
+                    "With these rules it would stop at once: its equity would be {} and the floor {}. Use Stop if that is what you want.",
+                    usd(eq + delta),
+                    usd(floor)
+                ));
+            }
+        }
+        if cfg.stop.on_take_profit == OnTakeProfit::Stop {
+            if let Some(t) = take_profit_target(&cfg.stop, start, steps) {
+                if eq + delta >= t - EPS {
+                    return Err(format!(
+                        "With this profit target it would finish at once: its equity would be {} and the target {}. Use Stop if that is what you want.",
+                        usd(eq + delta),
+                        usd(t)
+                    ));
+                }
+            }
+        }
+
+        // The strategies, chosen with the start's checks, before anything changes.
+        let mut plan: Option<Vec<(String, f64, String, Vec<String>)>> = None;
+        let mut passed_over: Vec<String> = Vec::new();
+        if re_sleeve {
+            let ap = &self.autopilots[i];
+            let own: HashSet<String> = ap.sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+            let busy: HashSet<String> =
+                self.autopilots.iter().filter(others).flat_map(|a| a.sleeves.iter().map(|s| s.strategy_id.clone())).collect();
+            let mut taken: HashSet<String> = self
+                .autopilots
+                .iter()
+                .filter(others)
+                .flat_map(|a| a.sleeves.iter().flat_map(|s| s.markets.iter().cloned()))
+                .collect();
+            // What it holds stays where it is: a built-in's position is its
+            // own, and a lab book's coins net only with other lab books.
+            let mut builtin_held: BTreeMap<String, String> = BTreeMap::new();
+            let mut lab_held: Vec<String> = Vec::new();
+            for (m, owner) in &ap.owned {
+                if self.is_lab_book(owner) {
+                    lab_held.push(m.clone());
+                } else {
+                    builtin_held.insert(m.clone(), owner.clone());
+                }
+            }
+            taken.extend(builtin_held.keys().cloned());
+            let picks: Vec<(String, f64, String)> = if auto {
+                let max = cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
+                let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken, &own, max)?;
+                passed_over = over;
+                // Live never adds a strategy the owner has not seen: the
+                // confirmation above covers what this pick shows them.
+                picks
+            } else {
+                let mut out = Vec::new();
+                for sl in &cfg.sleeves {
+                    let Some(s) = self.strategies.iter().find(|s| s.id == sl.strategy_id) else {
+                        return Err(format!("There is no strategy \"{}\".", sl.strategy_id));
+                    };
+                    if let Some(why) = self.sleeve_block(&s.id, venue, cfg.mode, &busy, &own) {
+                        return Err(why);
+                    }
+                    out.push((s.id.clone(), sl.weight, format!("Chosen by you; {}", self.evidence(&s.id).describe())));
+                }
+                out
+            };
+            if live {
+                for (sid, ..) in &picks {
+                    let s = self.strategies.iter().find(|s| &s.id == sid).expect("picked strategies exist");
+                    let pp = self.passport_for(s);
+                    if !pp.live_ready {
+                        let why = pp.blocked_reason.unwrap_or_else(|| "its validation gates are not green".into());
+                        return Err(format!("{} is not cleared for live: {why}", s.name));
+                    }
+                }
+            }
+            let mut wants: Vec<Want> = picks
+                .iter()
+                .map(|(sid, w, _)| {
+                    let s = self.strategies.iter().find(|s| &s.id == sid).expect("picked strategies exist");
+                    Want {
+                        weight: *w,
+                        whole: trades_as_set(s.kind),
+                        net: s.kind == StrategyKind::LabTargets,
+                        universe: self.sleeve_universe(s, cfg.mode),
+                    }
+                })
+                .collect();
+            // Coins the lab books hold now: open to lab books, closed to the rest.
+            if !lab_held.is_empty() {
+                wants.push(Want { weight: f64::INFINITY, whole: true, net: true, universe: lab_held });
+            }
+            let mut assigned = assign_markets(&wants, &taken);
+            assigned.truncate(picks.len());
+            let mut chosen = Vec::new();
+            for ((sid, w, why), mut markets) in picks.into_iter().zip(assigned) {
+                for (m, owner) in &builtin_held {
+                    if *owner == sid && !markets.contains(m) {
+                        markets.push(m.clone());
+                    }
+                }
+                let name = self.strategies.iter().find(|s| s.id == sid).map(|s| s.name.clone()).unwrap_or_else(|| sid.clone());
+                if markets.is_empty() {
+                    if auto {
+                        passed_over.push(name);
+                        continue;
+                    }
+                    return Err(format!(
+                        "{name} has no market of its own left: every market it trades already belongs to another sleeve or another autopilot. One position per market means two strategies cannot hold the same coin; drop one of them or pick strategies on different markets."
+                    ));
+                }
+                chosen.push((sid, w, why, markets));
+            }
+            if chosen.is_empty() {
+                return Err("Auto found no strategy with a market of its own left: the others already belong to running autopilots.".into());
+            }
+            plan = Some(chosen);
+        }
+
+        // Apply. The amount first: X moves by the difference, and so do the
+        // peak and a locked floor, so its P&L and every stop level keep their
+        // distance from the equity. The max-loss rules are measured on the
+        // new X.
+        let mut parts: Vec<String> = Vec::new();
+        if cfg.name != old.name {
+            parts.push(format!("name \"{}\" to \"{}\"", old.name, cfg.name));
+        }
+        {
+            let ap = &mut self.autopilots[i];
+            ap.start_capital = start;
+            ap.peak_equity = peak;
+            ap.locked_floor = locked;
+            ap.tp_steps = steps;
+        }
+        if capital_changed {
+            let mut s = format!("amount {} to {}", usd(old.capital_usd), usd(cfg.capital_usd));
+            if delta < 0.0 {
+                s.push_str(" (its positions come down at the next rebalance; nothing is sold at once)");
+            } else {
+                s.push_str(" (the extra is invested by its next rebalance or entries)");
+            }
+            parts.push(s);
+        }
+        if let Some(chosen) = plan {
+            parts.push(self.ap_apply_sleeves(i, chosen, now));
+            if !passed_over.is_empty() {
+                parts.push(format!("auto passed over {} (their markets belong to a better pick or another autopilot)", passed_over.join(", ")));
+            }
+            if auto {
+                self.autopilots[i].last_pick_ms = Some(now);
+            }
+        }
+        if cfg.stop != old.stop || capital_changed {
+            let rules = describe_rules(&cfg);
+            if rules.is_empty() {
+                parts.push("stop rules: none".into());
+            } else {
+                parts.push(format!("stop rules: {rules}"));
+            }
+        }
+        if cfg.flatten_on_stop != old.flatten_on_stop {
+            parts.push(if cfg.flatten_on_stop { "closes its positions when it stops".into() } else { "leaves its positions open when it stops".into() });
+        }
+        if auto && cfg.max_sleeves != old.max_sleeves {
+            parts.push(format!("picks at most {}", cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES)));
+        }
+        if cfg.repick_every_hours != old.repick_every_hours {
+            parts.push(match cfg.repick_every_hours {
+                Some(h) => format!("re-picks every {} h", pct(h)),
+                None => "never re-picks".into(),
+            });
+        }
+        if parts.is_empty() {
+            parts.push("pick settings".into());
+        }
+        let ap = &mut self.autopilots[i];
+        ap.config = cfg;
+        let msg = format!("{label} changed by you: {}.", parts.join("; "));
+        ap.last_action = Some(msg.clone());
+        let kind = if live { JournalKind::Risk } else { JournalKind::System };
+        self.log(kind, msg.clone(), None, None);
+        self.pending_alerts.push(msg.clone());
+        self.ap_sample(i, now, true);
+        Ok(msg)
+    }
+
+    /// Put a new set of sleeves in place, keeping every position. A sleeve
+    /// that stays gets its new weight and markets; a new one is claimed; one
+    /// taken out stays listed at weight zero while it holds something or has
+    /// a record (lab books: its coins are re-attributed by the next netted
+    /// target, sold only where nobody wants them; built-ins: it opens nothing
+    /// new and its positions run to their own exits), and is released
+    /// otherwise. Returns the change in words.
+    fn ap_apply_sleeves(&mut self, i: usize, chosen: Vec<(String, f64, String, Vec<String>)>, now: i64) -> String {
+        let mode = self.autopilots[i].config.mode;
+        let want_state = if mode == AutopilotMode::Live { StrategyState::Live } else { StrategyState::Paper };
+        let total: f64 = chosen.iter().map(|c| c.1).sum();
+        let labs = chosen.iter().filter(|c| self.is_lab_book(&c.0)).count();
+        let when = chrono::DateTime::from_timestamp_millis(now).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+        let mut parts: Vec<String> = Vec::new();
+        let keep: HashSet<String> = chosen.iter().map(|c| c.0.clone()).collect();
+        for (sid, w, why, markets) in chosen {
+            let weight = if total > 0.0 { w / total } else { 0.0 };
+            let lab = self.is_lab_book(&sid);
+            let netted = if lab && labs > 1 {
+                format!(", netted per coin with the other {} lab book(s) into one position per coin", labs - 1)
+            } else {
+                String::new()
+            };
+            let why = format!("{why}; gets {:.0} % of the capital on {} market(s){netted}.", weight * 100.0, markets.len());
+            let ap = &mut self.autopilots[i];
+            if let Some(s) = ap.sleeve_mut(&sid) {
+                let was = s.weight;
+                s.weight = weight;
+                s.why = why;
+                s.markets = markets;
+                s.dropped_ms = None;
+                if (was - weight).abs() > 1e-9 {
+                    parts.push(format!("{} {:.0} % (was {:.0} %)", s.name, weight * 100.0, was * 100.0));
+                }
+                continue;
+            }
+            let Some(s) = self.strategies.iter().find(|s| s.id == sid) else { continue };
+            let (name, prior) = (s.name.clone(), s.state);
+            self.autopilots[i].sleeves.push(Sleeve {
+                strategy_id: sid.clone(),
+                name: name.clone(),
+                weight,
+                why,
+                markets,
+                realized: 0.0,
+                fees: 0.0,
+                trades: 0,
+                prior_state: prior,
+                dropped_ms: None,
+            });
+            if prior != want_state {
+                self.apply_strategy_state(&sid, want_state);
+            }
+            parts.push(format!("{name} {:.0} % (new)", weight * 100.0));
+        }
+        // The ones taken out.
+        let out: Vec<String> =
+            self.autopilots[i].sleeves.iter().filter(|s| !keep.contains(&s.strategy_id)).map(|s| s.strategy_id.clone()).collect();
+        for sid in out {
+            let lab = self.is_lab_book(&sid);
+            let ap = &self.autopilots[i];
+            let holds = ap.owned.iter().any(|(m, owner)| *owner == sid || ap.share(m, &sid) > 0.0)
+                || ap.owned.keys().any(|m| self.positions.get(m).is_some_and(|p| p.strategy_id == sid && p.qty.abs() > 1e-12));
+            let s = ap.sleeve(&sid).expect("listed sleeves exist");
+            let record = s.trades > 0 || s.realized.abs() > EPS || s.fees > EPS;
+            let (name, was, dropped_before) = (s.name.clone(), s.weight, s.dropped_ms.is_some());
+            if holds || record {
+                let held: Vec<String> = if lab {
+                    Vec::new()
+                } else {
+                    ap.owned.iter().filter(|(_, o)| **o == sid).map(|(m, _)| m.clone()).collect()
+                };
+                let s = self.autopilots[i].sleeve_mut(&sid).expect("listed sleeves exist");
+                s.weight = 0.0;
+                if !lab {
+                    s.markets = held;
+                }
+                if !dropped_before {
+                    s.dropped_ms = Some(now);
+                    s.why = if lab {
+                        format!("Taken out by you at {when}. Its coins stay: a coin the other lab books want is theirs from the next rebalance, the rest is sold by it.")
+                    } else {
+                        format!("Taken out by you at {when}. It opens nothing new; its open positions run to their own exits.")
+                    };
+                }
+                if was > 0.0 {
+                    parts.push(format!("{name} taken out (was {:.0} %)", was * 100.0));
+                }
+            } else {
+                self.autopilots[i].sleeves.retain(|s| s.strategy_id != sid);
+                if self.strategies.iter().any(|s| s.id == sid && s.state != StrategyState::Paused) {
+                    self.apply_strategy_state(&sid, StrategyState::Paused);
+                }
+                if was > 0.0 {
+                    parts.push(format!("{name} taken out and released (it held nothing)"));
+                }
+            }
+        }
+        // The netted target changes now, so the next rebalance runs now: it
+        // trades only the difference per coin.
+        let members: Vec<String> = self.autopilots[i].sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+        for sid in &members {
+            self.lab_done.remove(sid);
+            self.lab_retry.remove(sid);
+        }
+        if parts.is_empty() {
+            "strategies as they were".into()
+        } else {
+            format!(
+                "strategies {}. Its positions stay: coins the new target also wants are kept, and the next rebalance trades only the difference",
+                parts.join(", ")
+            )
+        }
     }
 
     /// Every autopilot as the UI shows it.

@@ -2137,3 +2137,250 @@ fn a_demo_autopilot_on_alpaca_shares_runs_an_etf_lab_book_on_the_paper_account()
     assert!((sent("alpaca:SPY") - 5_000.0).abs() < 1.0, "{}", sent("alpaca:SPY"));
     assert!((sent("alpaca:GLD") - 2_500.0).abs() < 1.0, "{}", sent("alpaca:GLD"));
 }
+
+// ── changing a running autopilot in place ─────────────────────────────────
+
+fn sleeves_upd(s: &[(&str, f64)]) -> AutopilotUpdate {
+    AutopilotUpdate {
+        sleeves: Some(s.iter().map(|(id, w)| SleeveConfig { strategy_id: id.to_string(), weight: *w }).collect()),
+        ..Default::default()
+    }
+}
+
+/// Orders placed since `before` (the ids then): the newest come first.
+fn orders_since<'a>(e: &'a Engine, before: &HashSet<String>) -> Vec<&'a Order> {
+    e.orders.iter().filter(|o| !before.contains(&o.id)).collect()
+}
+
+fn order_ids(e: &Engine) -> HashSet<String> {
+    e.orders.iter().map(|o| o.id.clone()).collect()
+}
+
+fn update(e: &mut Engine, id: &str, u: AutopilotUpdate) -> Result<String, String> {
+    e.autopilot_update(id, u, false, VenueCash::NotRead)
+}
+
+/// top20 holds BTC and ETH; tranches wants BTC, less ETH, and SOL.
+fn top20_running() -> (Engine, String) {
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_top20", now, &[("BTC", 0.4), ("ETH", 0.4)], top20_evidence(), true));
+    e.apply_lab_signal(book("tsmom_tranches", now, &[("BTC", 0.4), ("ETH", 0.2), ("SOL", 0.2)], top20_evidence(), true));
+    let id = start(&mut e, config("sw", 10_000.0, &[("lab:tsmom_top20", 1.0)], StopRules::default()));
+    e.run_lab_books();
+    assert!((notional(&e, BTC) - 4_000.0).abs() < 60.0);
+    assert!((notional(&e, ETH) - 4_000.0).abs() < 60.0);
+    (e, id)
+}
+
+#[test]
+fn an_update_switches_lab_books_in_place_and_never_sells_a_coin_both_want() {
+    let (mut e, id) = top20_running();
+    let before = status(&e, &id);
+    let orders = e.orders.len();
+    let ids = order_ids(&e);
+    let msg = update(&mut e, &id, sleeves_upd(&[("lab:tsmom_tranches", 1.0)])).unwrap();
+    assert!(msg.contains("Lab · tsmom_tranches 100 % (new)"), "{msg}");
+    assert!(msg.contains("Lab · tsmom_top20 taken out (was 100 %)"), "{msg}");
+    assert!(msg.contains("Its positions stay"), "{msg}");
+    assert!(!msg.contains('\u{2014}'), "no em dashes: {msg}");
+    assert!(journal_has(&e, "changed by you: strategies"));
+    assert_eq!(e.orders.len(), orders, "the change itself trades nothing");
+    assert_eq!(e.positions.len(), 2, "every position kept");
+    assert_eq!(state_of(&e, "lab:tsmom_tranches"), StrategyState::Paper, "claimed by the autopilot");
+    let s = status(&e, &id);
+    assert_eq!(s.state, AutopilotState::Running);
+    assert!((s.equity - before.equity).abs() < 1e-9, "a change moves no equity");
+    let top = sleeve(&s, "lab:tsmom_top20");
+    assert!(top.dropped && top.weight == 0.0, "{top:?}");
+    assert!((sleeve(&s, "lab:tsmom_tranches").weight - 1.0).abs() < 1e-12);
+    assert_eq!(s.config.sleeves.len(), 1);
+
+    // The next rebalance trades only the difference: BTC (both want 40 %)
+    // is not touched, ETH comes down to 20 %, SOL arrives.
+    e.run_lab_books();
+    let new = orders_since(&e, &ids);
+    assert!(new.iter().all(|o| o.market_id != BTC), "BTC is wanted by both: {new:?}");
+    assert!(new.iter().all(|o| !(o.market_id == ETH && o.side == Side::Buy)));
+    let eth_sold: f64 = new.iter().filter(|o| o.market_id == ETH && o.side == Side::Sell).map(|o| o.filled_qty * o.avg_fill_price.unwrap_or(0.0)).sum();
+    assert!((eth_sold - 2_000.0).abs() < 60.0, "ETH sold down by the difference only: {eth_sold}");
+    assert!((notional(&e, SOL) - 2_000.0).abs() < 60.0, "{}", notional(&e, SOL));
+    assert!((notional(&e, BTC) - 4_000.0).abs() < 1e-6);
+    let s = status(&e, &id);
+    assert_eq!(s.open_positions, 3);
+    assert!(sleeve(&s, "lab:tsmom_top20").exposure < 1e-6, "every coin is re-attributed to the new book");
+    assert!((sleeve(&s, "lab:tsmom_tranches").exposure - 8_000.0).abs() < 100.0);
+    assert_adds_up(&s);
+
+    // Restart: the new strategies, the dropped one and the shares come back,
+    // and the same signal is not traded again.
+    let saved = serde_json::to_string(&e.to_persisted()).unwrap();
+    let mut r = Engine::new();
+    r.set_lab_books_idle(true);
+    r.apply_persisted(serde_json::from_str(&saved).unwrap());
+    mark_real(&mut r);
+    let after = status(&r, &id);
+    assert_eq!(after.config.sleeves, s.config.sleeves);
+    assert_eq!(after.by_sleeve.len(), 2);
+    assert!(sleeve(&after, "lab:tsmom_top20").dropped);
+    assert!((after.equity - s.equity).abs() < 1e-6);
+    assert_eq!(after.last_action, s.last_action);
+    let n = r.orders.len();
+    r.run_lab_books();
+    assert_eq!(r.orders.len(), n, "nothing traded twice after a restart");
+
+    // A stopped autopilot is not changed.
+    r.autopilot_stop(&id, None).unwrap();
+    assert!(update(&mut r, &id, AutopilotUpdate { name: Some("x".into()), ..Default::default() }).unwrap_err().contains("is stopped"));
+}
+
+#[test]
+fn a_lower_amount_brings_targets_down_at_the_next_rebalance_and_keeps_the_pnl() {
+    let (mut e, id) = top20_running();
+    let p = e.price_of(BTC);
+    set_price(&mut e, BTC, p * 1.1);
+    let before = status(&e, &id);
+    let orders = e.orders.len();
+    let ids = order_ids(&e);
+    let msg = update(&mut e, &id, AutopilotUpdate { capital_usd: Some(5_000.0), ..Default::default() }).unwrap();
+    assert!(msg.contains("amount $10,000.00 to $5,000.00") && msg.contains("nothing is sold at once"), "{msg}");
+    assert_eq!(e.orders.len(), orders, "no fire sale");
+    let s = status(&e, &id);
+    assert!((s.start_capital - 5_000.0).abs() < 1e-9);
+    assert!((s.pnl - before.pnl).abs() < 1e-6, "the P&L it earned stays its own");
+    assert!((s.equity - (before.equity - 5_000.0)).abs() < 1e-6);
+    assert!((s.peak_equity - (before.peak_equity - 5_000.0)).abs() < 1e-6);
+
+    // The next day's signal is rebalanced with the smaller amount: positions
+    // are sold down, not closed.
+    let now = e.now();
+    e.apply_lab_signal(book("tsmom_top20", now + 1, &[("BTC", 0.4), ("ETH", 0.4)], top20_evidence(), true));
+    e.run_lab_books();
+    let eq = status(&e, &id).equity;
+    assert!((notional(&e, BTC) - 0.4 * eq).abs() < 30.0, "{} vs {}", notional(&e, BTC), 0.4 * eq);
+    assert!((notional(&e, ETH) - 0.4 * eq).abs() < 30.0);
+    let new = orders_since(&e, &ids);
+    assert!(!new.is_empty() && new.iter().all(|o| o.side == Side::Sell), "{new:?}");
+
+    // More than the paper account holds is refused, and so is a cut past the equity.
+    let err = update(&mut e, &id, AutopilotUpdate { capital_usd: Some(10_000_000.0), ..Default::default() }).unwrap_err();
+    assert!(err.contains("The paper account holds"), "{err}");
+    let err = update(&mut e, &id, AutopilotUpdate { capital_usd: Some(0.0), ..Default::default() }).unwrap_err();
+    assert!(err.contains("above zero"), "{err}");
+    set_price(&mut e, BTC, p * 0.5);
+    assert!(status(&e, &id).pnl < -10.0);
+    let err = update(&mut e, &id, AutopilotUpdate { capital_usd: Some(1.0), ..Default::default() }).unwrap_err();
+    assert!(err.contains("the amount can come down by less than that"), "{err}");
+    let err = update(&mut e, &id, AutopilotUpdate::default()).unwrap_err();
+    assert!(err.contains("Nothing to change"), "{err}");
+}
+
+#[test]
+fn stop_rules_change_in_place_and_a_looser_max_loss_needs_confirmation() {
+    let mut e = engine();
+    let stop = StopRules { max_loss_pct: Some(10.0), ..Default::default() };
+    let id = start(&mut e, config("rules", 1_000.0, &[("ema-cross-1", 1.0)], stop));
+    enter(&mut e, "ema-cross-1", BTC, 500.0);
+    e.autopilot_pause(&id).unwrap();
+
+    // Tighter: no confirmation needed, works while paused, journaled.
+    let tight = StopRules { max_loss_pct: Some(5.0), trailing_pct: Some(8.0), ..Default::default() };
+    let msg = update(&mut e, &id, AutopilotUpdate { stop: Some(tight.clone()), ..Default::default() }).unwrap();
+    assert!(msg.contains("stop rules: stops at a loss of 5 %"), "{msg}");
+    let s = status(&e, &id);
+    assert_eq!(s.state, AutopilotState::Paused, "a change does not resume it");
+    assert_eq!(s.config.stop, tight);
+    assert!((s.floor_equity.unwrap() - 950.0).abs() < 2.0, "{:?}", s.floor_equity);
+
+    // Looser: refused without confirmation, in plain words, and nothing changes.
+    let loose = StopRules { max_loss_pct: Some(20.0), ..Default::default() };
+    let err = update(&mut e, &id, AutopilotUpdate { stop: Some(loose.clone()), ..Default::default() }).unwrap_err();
+    assert!(err.contains("loosens the max-loss rule") && err.contains("$50.00 (5 %) to $200.00 (20 %)"), "{err}");
+    assert_eq!(status(&e, &id).config.stop, tight);
+    let err = update(&mut e, &id, AutopilotUpdate { stop: Some(StopRules::default()), ..Default::default() }).unwrap_err();
+    assert!(err.contains("to no limit"), "removing it is looser too: {err}");
+    // More money with the same % is a bigger loss in dollars.
+    let err = update(&mut e, &id, AutopilotUpdate { capital_usd: Some(2_000.0), ..Default::default() }).unwrap_err();
+    assert!(err.contains("loosens the max-loss rule"), "{err}");
+    e.autopilot_update(&id, AutopilotUpdate { stop: Some(loose.clone()), ..Default::default() }, true, VenueCash::NotRead).unwrap();
+    assert_eq!(status(&e, &id).config.stop, loose);
+
+    // Rules that would end it on the spot are refused: that is what Stop is for.
+    equity_to(&mut e, &id, BTC, 960.0);
+    let err = update(&mut e, &id, AutopilotUpdate { stop: Some(StopRules { max_loss_pct: Some(3.0), ..Default::default() }), ..Default::default() })
+        .unwrap_err();
+    assert!(err.contains("would stop at once"), "{err}");
+    let bad = StopRules { trailing_pct: Some(150.0), ..loose.clone() };
+    assert!(update(&mut e, &id, AutopilotUpdate { stop: Some(bad), ..Default::default() }).unwrap_err().contains("trailing floor"));
+
+    // A name, and the stop survives a restart and fires at its new level.
+    update(&mut e, &id, AutopilotUpdate { name: Some("  Calm  ".into()), stop: Some(StopRules { max_loss_pct: Some(5.0), ..Default::default() }), ..Default::default() })
+        .unwrap();
+    let saved = serde_json::to_string(&e.to_persisted()).unwrap();
+    let mut r = Engine::new();
+    r.apply_persisted(serde_json::from_str(&saved).unwrap());
+    mark_real(&mut r);
+    let s = status(&r, &id);
+    assert_eq!(s.config.name, "Calm");
+    assert_eq!(s.config.stop.max_loss_pct, Some(5.0));
+    equity_to(&mut r, &id, BTC, 950.0);
+    step(&mut r);
+    assert_eq!(status(&r, &id).state, AutopilotState::Stopped, "the changed rule fires after the restart");
+}
+
+#[test]
+fn a_live_change_needs_the_confirmation_a_max_loss_rule_and_the_free_cash() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    make_live_ready(&mut e, "ema-cross-1");
+    let id = e.autopilot_start(live_config("live", 1_000.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    let name = || AutopilotUpdate { name: Some("Real".into()), ..Default::default() };
+
+    let err = update(&mut e, &id, name()).unwrap_err();
+    assert!(err.contains("type the confirmation"), "{err}");
+    let err = e
+        .autopilot_update(&id, AutopilotUpdate { stop: Some(StopRules::default()), ..Default::default() }, true, VenueCash::NotRead)
+        .unwrap_err();
+    assert!(err.contains("max-loss rule"), "{err}");
+
+    // More money: only what the venue holds free.
+    let more = |x: f64| AutopilotUpdate { capital_usd: Some(x), stop: Some(StopRules { max_loss_usd: Some(100.0), ..Default::default() }), ..Default::default() };
+    let err = e.autopilot_update(&id, more(5_000.0), true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.contains("can have at most $1,000.00, not $5,000.00") && err.contains("never moves money"), "{err}");
+    let err = e.autopilot_update(&id, more(5_000.0), true, VenueCash::NotRead).unwrap_err();
+    assert!(err.contains("was not read"), "{err}");
+    let err = e.autopilot_update(&id, more(5_000.0), true, VenueCash::Failed("timed out".into())).unwrap_err();
+    assert!(err.contains("(timed out)"), "{err}");
+    // Disarmed: no more money, no new strategies.
+    e.set_live(LiveConfig { armed: false, ..armed_crypto() });
+    let err = e.autopilot_update(&id, more(2_000.0), true, VenueCash::Read(5_000.0)).unwrap_err();
+    assert!(err.contains("not armed"), "{err}");
+    e.set_live(armed_crypto());
+    // A strategy without a green passport cannot be added.
+    let err = e.autopilot_update(&id, sleeves_upd(&[("ema-cross-1", 1.0), ("pairs-1", 1.0)]), true, VenueCash::NotRead).unwrap_err();
+    assert!(err.contains("is not cleared for live"), "{err}");
+    assert_eq!(status(&e, &id).config.capital_usd, 1_000.0, "nothing changed");
+
+    e.autopilot_update(&id, more(2_000.0), true, VenueCash::Read(5_000.0)).unwrap();
+    let s = status(&e, &id);
+    assert_eq!(s.config.capital_usd, 2_000.0);
+    assert!((s.floor_equity.unwrap() - 1_900.0).abs() < 1e-6);
+    e.autopilot_update(&id, name(), true, VenueCash::NotRead).unwrap();
+    assert_eq!(status(&e, &id).config.name, "Real");
+    assert!(e.journal.iter().any(|j| j.kind == JournalKind::Risk && j.message.contains("changed by you: name")));
+}
+
+#[test]
+fn an_update_can_hand_the_choice_to_the_auto_pick() {
+    let (mut e, id) = top20_running();
+    let msg = update(&mut e, &id, sleeves_upd(&[])).unwrap();
+    let s = status(&e, &id);
+    assert!(s.config.sleeves.is_empty());
+    assert_eq!(s.config.repick_every_hours, Some(REPICK_DEFAULT_HOURS), "auto re-picks every 24 h by default");
+    assert!(s.next_repick_ms.is_some());
+    assert!(msg.contains("re-picks every 24 h"), "{msg}");
+    assert!(s.by_sleeve.iter().any(|b| b.strategy_id == "lab:tsmom_top20" && !b.dropped), "its own book can be picked again");
+    // And back to an explicit choice: re-picking stops.
+    update(&mut e, &id, sleeves_upd(&[("lab:tsmom_tranches", 1.0)])).unwrap();
+    assert_eq!(status(&e, &id).config.repick_every_hours, None);
+}
