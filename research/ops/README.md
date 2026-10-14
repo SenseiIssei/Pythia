@@ -190,7 +190,10 @@ PYTHIA_ALERT_FORMAT=discord
 ENV
 ```
 
-`PYTHIA_ALERT_FORMAT=slack` for a Slack incoming webhook. Optional:
+`PYTHIA_ALERT_FORMAT=slack` for a Slack incoming webhook. For Telegram,
+leave the webhook out and set `PYTHIA_TELEGRAM_BOT_TOKEN` (from BotFather)
+and `PYTHIA_TELEGRAM_CHAT_ID` (the chat the bot writes to; send the bot
+any message, then read the id from its `getUpdates`). Optional:
 `PYTHIA_ALERT_PREFIX` (default `Pythia`), and for the engine
 `PYTHIA_ALERT_REJECTS` (3), `PYTHIA_ALERT_DEDUP_MIN` (30),
 `PYTHIA_ALERT_MAX_PER_HOUR` (20).
