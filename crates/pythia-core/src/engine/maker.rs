@@ -239,6 +239,12 @@ impl Engine {
         (px.is_finite() && px > 0.0).then_some(px)
     }
 
+    /// Maker execution is switched on for the demo route `m` trades on.
+    pub(super) fn maker_route_on(&self, m: &Market) -> bool {
+        let key = self.maker_route_key(m);
+        m.venue == Venue::Crypto && route_supported(&key) && self.maker_routes.get(&key).is_some_and(|s| s.enabled)
+    }
+
     /// A new demo order on `m` as a maker order, or `None` to send it as
     /// before: not a crypto order, an exit that must not wait, the route is
     /// off, or there is no fresh book to price the limit from.
