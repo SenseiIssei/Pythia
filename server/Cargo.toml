@@ -21,3 +21,7 @@ dotenvy = "0.15" # load keys from a local .env so nothing lives in shell history
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+# `oneshot` to drive the router in tests without a socket.
+tower = { version = "0.5", features = ["util"] }
