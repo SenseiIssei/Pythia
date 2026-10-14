@@ -1105,7 +1105,7 @@ async fn get_preflight(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 async fn get_state(State(st): State<AppState>) -> Json<EngineState> {
-    let dto = st.engine.lock().unwrap().state();
+    let dto = st.engine.lock().unwrap().state_with_events();
     Json(dto)
 }
 

@@ -926,6 +926,12 @@ pub struct EngineState {
     pub positions: Vec<PositionView>,
     pub orders: Vec<Order>,
     pub journal: Vec<JournalEntry>,
+    /// The durable record of trades, risk actions, autopilot actions and
+    /// rejections, newest first (see [`EVENT_RING`]). Filled by
+    /// [`Engine::state_with_events`] (`GET /api/state`); left empty in the
+    /// state pushed every tick, which would otherwise carry it each time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<JournalEntry>,
     pub strategies: Vec<StrategyConfig>,
     pub limits: RiskLimits,
     pub history: HashMap<String, Vec<f64>>, // recent closes per tradable market
@@ -1039,6 +1045,9 @@ pub struct Persisted {
     pub strategies: Vec<StrategyConfig>,
     pub orders: Vec<Order>,
     pub journal: Vec<JournalEntry>,
+    /// The durable event ring ([`EVENT_RING`]). Absent in older saves.
+    #[serde(default)]
+    pub events: Vec<JournalEntry>,
     pub limits: RiskLimits,
     pub real_ids: Vec<String>,
     /// The forecast ledger. Losing this on restart would reset every source's
@@ -1136,6 +1145,32 @@ const LIVE_REJECT_BACKOFF_MS: i64 = 60_000;
 /// `LAB_RETRY_MAX` times in all: six attempts over 1 h 40 min, well inside a
 /// signal's 36-hour validity, then the rest waits for the next signal.
 const LAB_RETRY_EVERY_MS: i64 = 20 * 60_000;
+
+/// How many trade, risk, autopilot and rejection events the durable ring
+/// keeps (see `Engine::events`).
+pub const EVENT_RING: usize = 2000;
+
+/// One minute of a repetitive notice: the minute, the count so far, how
+/// many notices were folded in and the journal line that shows them.
+#[derive(Debug, Clone)]
+struct Rollup {
+    minute: i64,
+    total: usize,
+    times: u32,
+    entry: String,
+}
+
+/// Belongs in the durable event ring: an order, a fill, a rejection, a risk
+/// action, an exit or trim, a lab rebalance, or anything an autopilot did.
+fn is_event(kind: JournalKind, message: &str) -> bool {
+    match kind {
+        JournalKind::Order | JournalKind::Fill | JournalKind::Reject | JournalKind::Risk => true,
+        JournalKind::Signal => message.starts_with("Rebalance") || message.contains("utopilot"),
+        JournalKind::System => {
+            ["Exit ", "Trim ", "DEMO ", "Live ", "LIVE "].iter().any(|p| message.starts_with(p)) || message.contains("utopilot")
+        }
+    }
+}
 const LAB_RETRY_MAX: u32 = 6;
 
 pub struct Engine {
@@ -1302,6 +1337,15 @@ pub struct Engine {
     vol_spike: risk::VolSpikeGuard,
     /// Added to the wall clock. Always 0 outside tests.
     clock_skew_ms: i64,
+    /// The venue order whose fills are being booked right now, if any.
+    fill_order: Option<String>,
+    /// The durable record of trades, risk actions, autopilot actions and
+    /// rejections, newest first, at most [`EVENT_RING`]. Saved. The journal
+    /// also carries feed and forecast notices and turns over in hours; this
+    /// is what is left to read after an incident.
+    events: Vec<JournalEntry>,
+    /// Repetitive system notices folded into one journal line per minute.
+    rollups: HashMap<&'static str, Rollup>,
     /// Which source each crypto market's quotes, candles and books come from,
     /// and the sanity check that keeps a bad tick off the mark.
     feeds: feeds::FeedHealth,
@@ -1408,6 +1452,9 @@ impl Engine {
             sizing_noted: HashMap::new(),
             vol_spike: risk::VolSpikeGuard::default(),
             clock_skew_ms: 0,
+            fill_order: None,
+            events: Vec::new(),
+            rollups: HashMap::new(),
             feeds: feeds::FeedHealth::default(),
             feed_noted: HashSet::new(),
             autopilots: Vec::new(),
@@ -1532,12 +1579,7 @@ impl Engine {
 
     fn log_new_bars(&mut self, fresh: usize) {
         if fresh > 0 {
-            self.log(
-                JournalKind::System,
-                format!("Candle feed · {fresh} market(s) advanced to a new bar"),
-                None,
-                None,
-            );
+            self.log_rollup("candles", fresh, |n| format!("Candle feed · {n} market(s) advanced to a new bar"));
         }
     }
 
@@ -2411,12 +2453,7 @@ impl Engine {
             .collect();
         let settled = self.forecast_store.resolve_settled(now, &pred_prices);
         if settled > 0 {
-            self.log(
-                JournalKind::System,
-                format!("{settled} outcome forecast(s) settled — track records updated"),
-                None,
-                None,
-            );
+            self.log_rollup("settled", settled, |n| format!("{n} outcome forecast(s) settled · track records updated"));
         }
         let _ = resolved; // scored silently; the journal would be noise
 
@@ -4476,10 +4513,15 @@ impl Engine {
     /// this safe to call repeatedly with the same numbers — a partial fill
     /// reported three times books once.
     pub fn apply_live_update(&mut self, order_id: &str, update: LiveUpdate) {
+        // The fills booked now belong to this order: an autopilot counts the
+        // order once, not once per partial fill or maker child.
+        self.fill_order = Some(order_id.to_string());
         if self.inflight.get(order_id).is_some_and(|f| f.maker.is_some()) {
-            return self.apply_maker_update(order_id, update);
+            self.apply_maker_update(order_id, update);
+        } else {
+            self.apply_order_update(order_id, update);
         }
-        self.apply_order_update(order_id, update);
+        self.fill_order = None;
     }
 
     /// [`Engine::apply_live_update`] for one order as a whole: `update` is
@@ -5962,6 +6004,7 @@ impl Engine {
             strategies: self.strategies.clone(),
             orders: self.orders.clone(),
             journal: self.journal.clone(),
+            events: self.events.clone(),
             limits: self.limits.clone(),
             real_ids: self.real_ids.iter().cloned().collect(),
             forecast_store: self.forecast_store.clone(),
@@ -6147,6 +6190,8 @@ impl Engine {
         }
         self.orders = p.orders;
         self.journal = p.journal;
+        self.events = p.events;
+        self.events.truncate(EVENT_RING);
         self.restore_inflight(p.inflight);
         self.limits = p.limits;
         self.real_ids = p.real_ids.into_iter().collect();
@@ -6263,6 +6308,13 @@ impl Engine {
         }
     }
 
+    /// [`Engine::state`] with the durable event ring, for `GET /api/state`.
+    pub fn state_with_events(&self) -> EngineState {
+        let mut s = self.state();
+        s.events = self.events.clone();
+        s
+    }
+
     pub fn state(&self) -> EngineState {
         let mode = self.mode();
         let equity = self.equity();
@@ -6314,6 +6366,7 @@ impl Engine {
             positions,
             orders: self.orders.iter().take(200).cloned().collect(),
             journal: self.journal.iter().take(400).cloned().collect(),
+            events: Vec::new(),
             strategies: self.strategies.clone(),
             limits: self.limits.clone(),
             history: self
@@ -6411,10 +6464,37 @@ impl Engine {
         }
         let id = self.next_id("j");
         let mode = self.mode();
-        self.journal.insert(0, JournalEntry { id, ts: self.now(), kind, strategy_id, market_id, message, mode });
+        let entry = JournalEntry { id, ts: self.now(), kind, strategy_id, market_id, message, mode };
+        if is_event(kind, &entry.message) {
+            self.events.insert(0, entry.clone());
+            self.events.truncate(EVENT_RING);
+        }
+        self.journal.insert(0, entry);
         if self.journal.len() > 1000 {
             self.journal.pop();
         }
+    }
+
+    /// A repetitive system notice (forecasts settled, the candle feed moving
+    /// on): `n` more of `key` this minute. The first in a minute is a new
+    /// journal line; the rest update that line in place, so a notice every
+    /// 15 seconds costs one line a minute, not four. `say` writes the line
+    /// from the minute's total.
+    fn log_rollup(&mut self, key: &'static str, n: usize, say: impl Fn(usize) -> String) {
+        let now = self.now();
+        let minute = now.div_euclid(60_000);
+        if let Some(r) = self.rollups.get_mut(key).filter(|r| r.minute == minute) {
+            if let Some(j) = self.journal.iter_mut().take(200).find(|j| j.id == r.entry) {
+                r.total += n;
+                r.times += 1;
+                j.message = format!("{} ({}x this minute)", say(r.total), r.times);
+                j.ts = now;
+                return;
+            }
+        }
+        self.log(JournalKind::System, say(n), None, None);
+        let entry = self.journal[0].id.clone();
+        self.rollups.insert(key, Rollup { minute, total: n, times: 1, entry });
     }
 
     /// Take and clear queued alert messages (drained by the webhook poster).

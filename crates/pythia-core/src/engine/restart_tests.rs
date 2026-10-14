@@ -349,3 +349,84 @@ fn a_sell_never_asks_the_venue_for_more_than_is_held_and_closes_without_dust() {
     );
     assert!(!e.positions.contains_key(SOL), "{:?}", e.positions.get(SOL).map(|p| p.qty));
 }
+
+// ── the journal after an incident ──────────────────────────────────────────
+
+#[test]
+fn repetitive_notices_are_one_journal_line_a_minute() {
+    let mut e = Engine::new();
+    let before = e.journal.len();
+    // Every 15 seconds for two minutes, the way forecasts settle.
+    for i in 0..8 {
+        e.log_rollup("settled", 12, |n| format!("{n} outcome forecast(s) settled · track records updated"));
+        e.advance_clock_for_test(15_000);
+        assert!(e.journal.len() - before <= 1 + i / 4 + 1);
+    }
+    let lines: Vec<&JournalEntry> = e.journal.iter().filter(|j| j.message.contains("outcome forecast(s) settled")).collect();
+    assert!(lines.len() <= 3, "eight notices in two minutes are at most three lines: {}", lines.len());
+    assert!(lines.iter().any(|j| j.message.contains("(4x this minute)") || j.message.contains("(3x this minute)")));
+    assert!(e.journal.len() - before <= 3);
+    assert!(e.events.iter().all(|j| !j.message.contains("settled")), "not an event");
+}
+
+#[test]
+fn trades_risk_and_rejections_survive_a_flood_and_a_restart_in_the_event_ring() {
+    let (mut e, _) = holding_engine(0.0);
+    let trades = e.events.iter().filter(|j| j.kind == JournalKind::Order || j.kind == JournalKind::Fill).count();
+    assert!(trades > 0, "the venue fills are events");
+    // A flood of system notices that turns the journal over completely.
+    for i in 0..1_500 {
+        e.log(JournalKind::System, format!("Order book feed notice {i}"), None, None);
+    }
+    assert!(e.state().journal.iter().all(|j| j.kind == JournalKind::System), "the journal view has lost them");
+    let kept = e.events.iter().filter(|j| j.kind == JournalKind::Order || j.kind == JournalKind::Fill).count();
+    assert_eq!(kept, trades, "the ring has not");
+    e.log(JournalKind::Risk, "Trim crypto:SOL/USD by 30%: test".into(), None, Some(SOL.into()));
+    e.log(JournalKind::Reject, "Rejected SOL/USD: test".into(), None, Some(SOL.into()));
+
+    let r = restart(&e);
+    let ids = |v: &[JournalEntry]| v.iter().map(|j| j.id.clone()).collect::<Vec<_>>();
+    assert!(ids(&r.events).ends_with(&ids(&e.events)), "saved in the state file, newest first");
+    assert!(e.events[0].message.starts_with("Rejected"));
+    let api = serde_json::to_value(r.state_with_events()).unwrap();
+    assert_eq!(api["events"].as_array().unwrap().len(), r.events.len(), "exposed in /api/state");
+    let tick = serde_json::to_value(r.state()).unwrap();
+    assert!(tick.get("events").is_none(), "not pushed with every tick");
+
+    // Capped at EVENT_RING, oldest dropped.
+    let mut r = r;
+    for i in 0..(EVENT_RING + 10) {
+        r.log(JournalKind::Risk, format!("risk {i}"), None, None);
+    }
+    assert_eq!(r.events.len(), EVENT_RING);
+    assert_eq!(r.events[0].message, format!("risk {}", EVENT_RING + 9));
+}
+
+#[test]
+fn an_order_filled_in_parts_is_one_order_and_one_trade() {
+    let (mut e, id) = holding_engine(0.0);
+    let st = |e: &Engine| e.autopilot_statuses().into_iter().find(|s| s.config.id == id).unwrap();
+    assert_eq!((st(&e).orders, st(&e).trades), (3, 0), "three buys, nothing closed");
+    e.flatten(BTC);
+    let out = e.drain_live_orders();
+    let o = out.iter().find(|o| o.market_id == BTC).unwrap();
+    let fill = |status, filled| LiveUpdate {
+        status,
+        filled_qty: filled,
+        // Above the entry: every part realises a profit.
+        avg_price: Some(o.ref_price * 1.01),
+        fee: 0.0,
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
+        raw_status: "x".into(),
+    };
+    e.apply_live_update(&o.order_id, fill(BrokerOrderStatus::PartiallyFilled, o.qty * 0.3));
+    e.apply_live_update(&o.order_id, fill(BrokerOrderStatus::PartiallyFilled, o.qty * 0.7));
+    e.apply_live_update(&o.order_id, fill(BrokerOrderStatus::Filled, o.qty));
+    assert!(!e.positions.contains_key(BTC));
+    assert_eq!((st(&e).orders, st(&e).trades), (4, 1), "three fills of one sell are one order and one closed trade");
+    // Counted the same after a restart.
+    let r = restart(&e);
+    let s = r.autopilot_statuses().into_iter().find(|s| s.config.id == id).unwrap();
+    assert_eq!((s.orders, s.trades), (4, 1));
+}

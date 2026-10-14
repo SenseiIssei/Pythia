@@ -216,6 +216,13 @@ def test_autopilot_row_against_btc_and_its_lab_book(reports):
     assert row["gate7"]["trades_label"] == "closed trades" and row["gate7"]["days"] == 10
 
 
+def test_trades_per_day_counts_orders_not_maker_child_fills(reports):
+    # 12 closed-trade ticks from child fills, but 7 orders over ten days.
+    row = fr.autopilot_row(state(orders=7), ORDERS, 10 * fr.DAY_MS, price_at=lambda ms: None)
+    assert row["trades_per_day"] == pytest.approx(0.7)
+    assert row["orders"] == 7 and row["trades"] == 12
+
+
 def test_autopilot_near_its_floor_and_without_prices(reports):
     row = fr.autopilot_row(state(equity=9000.0, pnl=-1000.0, bySleeve=[]), [], 10 * fr.DAY_MS, price_at=lambda ms: None)
     assert row["btc_return_pct"] is None and row["status"] == "watch"
