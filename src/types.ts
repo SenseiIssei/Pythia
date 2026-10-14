@@ -588,6 +588,33 @@ export interface LiveStatus {
   demoPaused?: [Venue, number][];
   /** Maker execution per route, by route key (`demo:alpaca:crypto`). */
   makerRoutes?: Record<string, MakerSettings>;
+  /** Maker execution statistics per route over 7 and 30 days. */
+  makerStats?: MakerRouteStats[];
+}
+
+/** Maker execution on one route over a window. Mirrors the Rust `MakerWindow`. */
+export interface MakerWindow {
+  days: number;
+  orders: number;
+  filledOrders: number;
+  /** Share of the filled quantity that filled resting (maker), 0 to 1. */
+  makerFillRateQty?: number;
+  /** Share of filled orders that filled entirely as maker, 0 to 1. */
+  makerFillRateOrders?: number;
+  avgRestSec?: number;
+  /** Notional-weighted realised cost and the market-order model, bps. */
+  realisedBps?: number;
+  modelledBps?: number;
+  fallbacks: number;
+  noBookFallbacks: number;
+}
+
+/** Mirrors the Rust `MakerRouteStats`. */
+export interface MakerRouteStats {
+  route: string;
+  enabled: boolean;
+  d7: MakerWindow;
+  d30: MakerWindow;
 }
 
 /** What one Alpaca pair came out as. Mirrors the Rust `PairStatus`. */

@@ -1081,6 +1081,45 @@ mod tests {
         assert!(!at_limit(0.0, 60_000.0, Side::Sell));
     }
 
+    fn rec(at: i64, filled: f64, maker: f64, rest_ms: i64, fallback: bool, realised: Option<f64>) -> MakerRecord {
+        MakerRecord {
+            at,
+            route: ALPACA_CRYPTO_DEMO.into(),
+            symbol: "BTC/USD".into(),
+            qty: 1.0,
+            filled,
+            notional: filled * 60_000.0,
+            maker_qty: maker,
+            rest_ms,
+            fallback,
+            no_book: false,
+            realised_bps: realised,
+            modelled_bps: 27.0,
+        }
+    }
+
+    #[test]
+    fn the_window_counts_maker_fills_by_quantity_and_by_order() {
+        let day = 86_400_000;
+        let rs = vec![
+            rec(10 * day, 1.0, 1.0, 20_000, false, Some(15.0)),
+            rec(10 * day, 1.0, 0.5, 60_000, true, Some(25.0)),
+            rec(10 * day, 0.0, 0.0, 40_000, false, None), // nothing filled
+            rec(day, 1.0, 1.0, 10_000, false, Some(15.0)), // outside the window
+        ];
+        let w = maker_window(&rs, 5 * day, 7);
+        assert_eq!((w.days, w.orders, w.filled_orders), (7, 3, 2));
+        assert_eq!(w.maker_fill_rate_qty, Some(0.75));
+        assert_eq!(w.maker_fill_rate_orders, Some(0.5));
+        assert_eq!(w.avg_rest_sec, Some(40.0));
+        assert_eq!(w.realised_bps, Some(20.0));
+        assert_eq!(w.modelled_bps, Some(27.0));
+        assert_eq!((w.fallbacks, w.no_book_fallbacks), (1, 0));
+        let empty = maker_window(&rs, 20 * day, 7);
+        assert_eq!(empty.orders, 0);
+        assert!(empty.maker_fill_rate_qty.is_none() && empty.realised_bps.is_none() && empty.avg_rest_sec.is_none());
+    }
+
     #[test]
     fn only_the_alpaca_crypto_demo_route_rests_by_default() {
         let routes = default_maker_routes();

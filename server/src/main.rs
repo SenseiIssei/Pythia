@@ -678,6 +678,7 @@ async fn main() {
         .route("/api/ai/config", post(post_ai_config))
         .route("/api/live/config", post(post_live_config))
         .route("/api/live/maker", post(post_live_maker))
+        .route("/api/execution/stats", get(get_execution_stats))
         .route("/api/live/account", get(get_live_account))
         .route("/api/live/verify", get(get_live_verify))
         .route("/api/live/diagnostics", get(get_live_diagnostics))
@@ -1502,6 +1503,17 @@ async fn post_live_maker(State(st): State<AppState>, Json(req): Json<MakerRouteR
     Json(dto).into_response()
 }
 
+/// Maker execution per route over the last 7 and 30 days: fill rate by
+/// quantity and by order, resting time, realised against modelled cost,
+/// fallbacks. The same numbers are in `/api/state` as `live.makerStats`.
+async fn get_execution_stats(State(st): State<AppState>) -> Json<serde_json::Value> {
+    Json(execution_stats(&st.engine.lock().unwrap()))
+}
+
+fn execution_stats(e: &Engine) -> serde_json::Value {
+    serde_json::json!({ "routes": e.maker_stats() })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiveConfigReq {
@@ -1966,6 +1978,41 @@ mod tests {
         assert_eq!(states(&e, true), vec![StrategyState::Paused]);
         autopilot_only_signal(&mut e);
         assert_eq!(states(&e, true), vec![StrategyState::Paused, StrategyState::Paused]);
+    }
+
+    #[test]
+    fn execution_stats_report_each_maker_route_over_7_and_30_days_and_survive_a_restart() {
+        let e = Engine::new();
+        let v = execution_stats(&e);
+        let routes = v["routes"].as_array().unwrap();
+        assert_eq!(routes.len(), 1, "the Alpaca crypto demo route, on by default: {v}");
+        assert_eq!(routes[0]["route"], "demo:alpaca:crypto");
+        assert_eq!(routes[0]["d7"]["orders"], 0);
+        assert!(routes[0]["d7"].get("makerFillRateQty").is_none(), "no orders, no rate");
+
+        // Two finished orders, one 10 days ago: in the 30-day window only.
+        let mut saved = serde_json::to_value(e.to_persisted()).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let rec = |at: i64, maker: f64, fallback: bool| {
+            serde_json::json!({
+                "at": at, "route": "demo:alpaca:crypto", "symbol": "BTC/USD", "qty": 1.0, "filled": 1.0,
+                "notional": 60000.0, "makerQty": maker, "restMs": 30000, "fallback": fallback,
+                "realisedBps": if fallback { 30.0 } else { 15.0 }, "modelledBps": 27.0
+            })
+        };
+        saved["maker_records"] = serde_json::json!([rec(now - 3_600_000, 1.0, false), rec(now - 10 * 86_400_000, 0.0, true)]);
+        let mut back = Engine::new();
+        back.apply_persisted(serde_json::from_value(saved).unwrap());
+        let v = execution_stats(&back);
+        let r = &v["routes"][0];
+        assert_eq!((r["d7"]["orders"].as_u64(), r["d30"]["orders"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(r["d7"]["makerFillRateQty"], 1.0);
+        assert_eq!(r["d30"]["makerFillRateOrders"], 0.5);
+        assert_eq!(r["d30"]["fallbacks"], 1);
+        assert_eq!(r["d30"]["realisedBps"], 22.5);
+        assert_eq!(r["d30"]["avgRestSec"], 30.0);
+        let state = serde_json::to_value(back.state()).unwrap();
+        assert_eq!(state["live"]["makerStats"][0]["d30"]["orders"], 2, "and in /api/state");
     }
 
     #[test]

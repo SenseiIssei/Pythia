@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ALPACA_CRYPTO_DEMO, alpacaMaker, makerShare, makerSummary } from "./maker";
-import type { LiveStatus } from "../types";
+import { ALPACA_CRYPTO_DEMO, alpacaMaker, alpacaMakerStats, makerShare, makerSummary, makerWindowLine } from "./maker";
+import type { LiveStatus, MakerWindow } from "../types";
 
 describe("maker execution in the UI", () => {
   it("reads the Alpaca crypto demo route's setting and says what it does", () => {
@@ -22,5 +22,32 @@ describe("maker execution in the UI", () => {
     expect(makerShare({ makerQty: 0, takerQty: 1 })).toBe("0% maker");
     expect(makerShare({ makerQty: 0, takerQty: 0 })).toBeNull();
     expect(makerShare({})).toBeNull();
+  });
+
+  it("says in one line how maker orders did over a window", () => {
+    const w: MakerWindow = {
+      days: 7,
+      orders: 12,
+      filledOrders: 12,
+      makerFillRateQty: 0.834,
+      makerFillRateOrders: 0.75,
+      avgRestSec: 41.4,
+      realisedBps: 16.23,
+      modelledBps: 27,
+      fallbacks: 3,
+      noBookFallbacks: 1,
+    };
+    expect(makerWindowLine(w)).toBe(
+      "7d: 12 orders, 83% maker by qty (75% of orders), rests 41s, cost 16.2 vs 27.0 bps modelled, 3 fallbacks (1 without a book)"
+    );
+    expect(makerWindowLine({ days: 30, orders: 0, filledOrders: 0, fallbacks: 0, noBookFallbacks: 0 })).toBe(
+      "30d: no maker orders yet"
+    );
+    expect(makerWindowLine({ days: 30, orders: 1, filledOrders: 0, avgRestSec: 60, fallbacks: 1, noBookFallbacks: 0 })).toBe(
+      "30d: 1 order, rests 60s, 1 fallback"
+    );
+    const live = { makerStats: [{ route: ALPACA_CRYPTO_DEMO, enabled: true, d7: w, d30: w }] } as unknown as LiveStatus;
+    expect(alpacaMakerStats(live)?.d7.orders).toBe(12);
+    expect(alpacaMakerStats({} as LiveStatus)).toBeUndefined();
   });
 });

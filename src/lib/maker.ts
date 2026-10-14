@@ -1,7 +1,7 @@
 // Maker execution, as the UI shows it. See docs/DEMO.md ("Maker orders on the
 // Alpaca crypto demo route").
 
-import type { LiveStatus, MakerSettings, Order } from "../types";
+import type { LiveStatus, MakerRouteStats, MakerSettings, MakerWindow, Order } from "../types";
 
 /** The route key of crypto demo orders on the Alpaca paper account. */
 export const ALPACA_CRYPTO_DEMO = "demo:alpaca:crypto";
@@ -26,4 +26,29 @@ export function makerShare(o: Pick<Order, "makerQty" | "takerQty">): string | nu
   const total = maker + (o.takerQty ?? 0);
   if (o.makerQty === undefined || total <= 0) return null;
   return `${Math.round((maker / total) * 100)}% maker`;
+}
+
+/** The Alpaca crypto demo route's statistics, when there are any. */
+export function alpacaMakerStats(live: LiveStatus): MakerRouteStats | undefined {
+  return live.makerStats?.find((s) => s.route === ALPACA_CRYPTO_DEMO);
+}
+
+const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+/** One short line for a window: "7d: 12 orders, 83% maker by qty (75% of orders), rests 41s, cost 16.2 vs 27.0 bps, 2 fallbacks". */
+export function makerWindowLine(w: MakerWindow): string {
+  const head = `${w.days}d: `;
+  if (w.orders === 0) return `${head}no maker orders yet`;
+  const parts = [`${w.orders} ${w.orders === 1 ? "order" : "orders"}`];
+  if (w.makerFillRateQty !== undefined) {
+    const byOrder = w.makerFillRateOrders !== undefined ? ` (${pct(w.makerFillRateOrders)} of orders)` : "";
+    parts.push(`${pct(w.makerFillRateQty)} maker by qty${byOrder}`);
+  }
+  if (w.avgRestSec !== undefined) parts.push(`rests ${Math.round(w.avgRestSec)}s`);
+  if (w.realisedBps !== undefined && w.modelledBps !== undefined) {
+    parts.push(`cost ${w.realisedBps.toFixed(1)} vs ${w.modelledBps.toFixed(1)} bps modelled`);
+  }
+  const noBook = w.noBookFallbacks > 0 ? ` (${w.noBookFallbacks} without a book)` : "";
+  parts.push(`${w.fallbacks} ${w.fallbacks === 1 ? "fallback" : "fallbacks"}${noBook}`);
+  return head + parts.join(", ");
 }
