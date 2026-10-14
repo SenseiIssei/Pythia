@@ -15,7 +15,8 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
-| hourly :07 | health check of all of the above | `/etc/cron.d/pythia-health` |
+| after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
+| hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 
 ## Health check
 
@@ -161,3 +162,66 @@ Knobs, all optional, in the server's environment: `PYTHIA_FEED_QUOTES` and
 `PYTHIA_FEED_CANDLES` (comma lists of `kraken-ws,kraken,binance,coinbase,bybit,okx`),
 `PYTHIA_FEED_STREAM=0`, `PYTHIA_FEED_STALE_SEC`, `PYTHIA_FEED_RECOVER_SEC`,
 `PYTHIA_FEED_MAX_DEVIATION_PCT`, `PYTHIA_FEED_ALERT_MIN`.
+
+## Alerts and the daily digest
+
+One webhook (Discord or Slack) gets three things; the full list and the
+behaviour are in `docs/ALERTS.md`:
+
+- the engine's operator alerts, as they happen: autopilot started, stopped,
+  stop rule or floor hit, kill switch, daily loss brake, orders refused again
+  and again, reconcile mismatch, market data stale for more than 10 minutes,
+  model drift
+- the daily digest after the learning loop: each running autopilot's equity
+  and P&L today and since start against BTC, trades and fees today, the
+  forward test per book, anything red in the health check
+- the health alarm: `system.json` not ok for two runs in a row, posted once,
+  and once when green again
+
+Nothing is posted until the webhook is set. Keep it in one root-only env file
+on the server, outside the repo and outside every log:
+
+```bash
+install -d -m 700 /etc/pythia
+install -m 600 /dev/null /etc/pythia/alerts.env
+cat > /etc/pythia/alerts.env <<'ENV'
+PYTHIA_ALERT_WEBHOOK=<your webhook URL>
+PYTHIA_ALERT_FORMAT=discord
+ENV
+```
+
+`PYTHIA_ALERT_FORMAT=slack` for a Slack incoming webhook. Optional:
+`PYTHIA_ALERT_PREFIX` (default `Pythia`), and for the engine
+`PYTHIA_ALERT_REJECTS` (3), `PYTHIA_ALERT_DEDUP_MIN` (30),
+`PYTHIA_ALERT_MAX_PER_HOUR` (20).
+
+**Engine.** Add `--env-file /etc/pythia/alerts.env` to the `docker run` of the
+engine that runs the autopilots (and of the lab engine, if its alerts are
+wanted too, with a different `PYTHIA_ALERT_PREFIX` via `-e`) and recreate the
+container. The log says `operator alerts on (Discord format)` at start.
+
+**Daily digest.** It runs right after the learning loop, in the same cron
+line, so it always reads tonight's digest. `/etc/cron.d/pythia-learn` becomes:
+
+```cron
+# Pythia: nightly learning loop, then the daily digest to the operator's webhook. Never touches live settings or money.
+30 6 * * * root docker run --rm --network host --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.learn >> /var/log/pythia-learn.log 2>&1; docker run --rm --memory 512m --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify >> /var/log/pythia-notify.log 2>&1
+```
+
+See it without posting:
+
+```bash
+docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify --dry-run
+```
+
+**Health alarm.** `system_health.sh` runs `/opt/pythia-ops/notify.py --health`
+after each check when that file and `/etc/pythia/alerts.env` exist
+(`PYTHIA_NOTIFY_PY` and `PYTHIA_ALERT_ENV` move them). It needs only
+`python3` on the host. Install with the health script:
+
+```bash
+install -m 755 research/ops/system_health.sh /opt/pythia-ops/system_health.sh
+install -m 644 research/lab/lab/ops/notify.py /opt/pythia-ops/notify.py
+```
+
+The cron line of the health check stays as it is.
