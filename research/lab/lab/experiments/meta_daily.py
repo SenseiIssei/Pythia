@@ -63,6 +63,8 @@ FEATURES = ["m2_score", "m2_rank",
             "fund7", "fund7_mkt",
             "age", "log_adv28", "liq_rank"]
 USES = ("S1", "S2", "Z")
+DIAGNOSTIC = ("raw half", "raw quarter")          # not registered, not counted, cannot pass anything
+REFERENCE = ("unfiltered", "unfiltered · a day late (reference)")
 NULL_DRAWS, BOOT_DRAWS = 1000, 4000
 AUC_BOOT = 2000
 PRIOR_TRIALS = 265
@@ -270,7 +272,7 @@ def design(f: dict[str, np.ndarray], ti: np.ndarray, ji: np.ndarray) -> np.ndarr
     return np.column_stack([f[k][ti, ji] for k in FEATURES]).astype(np.float64)
 
 
-def m2_matrix(P, refit: bool = False) -> np.ndarray:
+def m2_scores(refit: bool = False) -> pl.DataFrame:
     """picks.py's out-of-sample LambdaRank score per (day, coin segment), walk-forward from 2020-10."""
     cache = fc.OUT / "cache" / "meta_daily_m2.parquet"
     if refit or not cache.exists():
@@ -297,7 +299,11 @@ def m2_matrix(P, refit: bool = False) -> np.ndarray:
         ok = np.isfinite(score)
         cache.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame({"day": days[ok], "symbol": R["symbol"].to_numpy()[ok], "score": score[ok]}).write_parquet(cache)
-    s = pl.read_parquet(cache)
+    return pl.read_parquet(cache)
+
+
+def m2_matrix(P, refit: bool = False) -> np.ndarray:
+    s = m2_scores(refit)
     di = {int(d): i for i, d in enumerate(P.days)}
     ni = {n: j for j, n in enumerate(P.names)}
     m = np.full(P.px.shape, np.nan)
@@ -320,6 +326,7 @@ class Meta:
     thr25: np.ndarray    # (T, N) the fold's S2 threshold
     folds: list
     importance: dict
+    q_raw: np.ndarray | None = None   # (T, N, 2) 25th and 50th percentile of the calibration set's raw scores
 
 
 def quarter_starts(days: np.ndarray, first: int) -> list[int]:
@@ -348,6 +355,7 @@ def walk_forward(P, f: dict[str, np.ndarray], ev: np.ndarray, pred: np.ndarray, 
     raw = np.full((T, N), np.nan)
     pbar = np.full((T, N), np.nan)
     thr = np.full((T, N), np.nan)
+    qraw = np.full((T, N, 2), np.nan)
     eti, etj = np.nonzero(ev & (ex >= 0))
     Xe, ye, exd, ed = design(f, eti, etj), label[eti, etj], ex_day[eti, etj], days[eti]
     oos_raw = np.full(len(eti), np.nan)      # out-of-sample raw prediction of each event, once made
@@ -370,12 +378,15 @@ def walk_forward(P, f: dict[str, np.ndarray], ev: np.ndarray, pred: np.ndarray, 
             iso = isotonic(oos_raw[cal], ye[cal])
             pc = iso.predict(r)
             t25 = float(np.percentile(iso.predict(oos_raw[cal]), 25))
+            qr = np.percentile(oos_raw[cal], [25, 50])
         else:
             # Too few earlier out-of-sample events: raw probabilities, and the S2 cut from the
             # model's own predictions on its training events (not registered; first folds only).
             pc = r
             t25 = float(np.percentile(m.predict_proba(Xe[tr])[:, 1], 25))
+            qr = np.percentile(m.predict_proba(Xe[tr])[:, 1], [25, 50])
         raw[ti, tj], p[ti, tj], pbar[ti, tj], thr[ti, tj] = r, pc, base, t25
+        qraw[ti, tj] = qr
         # Remember the out-of-sample predictions of this quarter's events for later calibration.
         evq = (ed >= s) & (ed < e)
         if evq.any():
@@ -391,7 +402,7 @@ def walk_forward(P, f: dict[str, np.ndarray], ev: np.ndarray, pred: np.ndarray, 
             print(f"  meta {row['fold']}: train {row['train_events']}, base {base:.2f}, "
                   f"cal {row['cal_events']}, auc {row['auc']:.3f}", flush=True)
     imp = dict(zip(FEATURES, (gains / max(gains.sum(), 1e-12)).tolist()))
-    return Meta(p, raw, pbar, thr, folds, imp)
+    return Meta(p, raw, pbar, thr, folds, imp, qraw)
 
 
 def multipliers(meta: Meta, use: str) -> np.ndarray:
@@ -405,6 +416,10 @@ def multipliers(meta: Meta, use: str) -> np.ndarray:
             m = (p > meta.thr25).astype(float)
         elif use == "Z":
             m = np.clip(p / pbar, 0.0, Z_CAP)
+        elif use in ("raw half", "raw quarter"):
+            # Unregistered diagnostic: skip the cells whose raw score is in the calibration set's
+            # bottom half or quarter (raw scores have no isotonic ties).
+            m = (meta.raw >= meta.q_raw[..., 1 if use == "raw half" else 0]).astype(float)
         else:
             raise ValueError(use)
     return np.where(has, m, 1.0)
@@ -588,6 +603,14 @@ def main() -> None:
     g, tv, ex_ = run_book(P, cols, late(W0))
     rows.append(describe(P, "unfiltered · a day late (reference)", g, tv, ex_))
     nets["unfiltered · a day late (reference)"] = (g, tv)
+    diag = []
+    for use in DIAGNOSTIC:
+        M = multipliers(meta, use)
+        W, ent = book_weights(P, cols, top10, M)
+        g, tv, ex_ = run_book(P, cols, W)
+        cand = candidates(P, cols, top10, M) & (P.days >= FIRST_TEST)[:, None]
+        diag.append({**describe(P, f"{use} (diagnostic)", g, tv, ex_),
+                     "skip_rate": float(1 - (ent & cand).sum() / max(cand.sum(), 1))})
     print("books done", flush=True)
 
     # ---- entry statistics: how much each use skips, and its random null
@@ -624,7 +647,7 @@ def main() -> None:
         print(f"null {use}: {nulls[use]}", flush=True)
 
     # ---- deflation over the pool (the 265 before this study plus the 10 counted here)
-    trials = [n for n in nets if n not in ("unfiltered", "unfiltered · a day late (reference)")]
+    trials = [n for n in nets if n not in REFERENCE]
     assert len(trials) == HERE_TRIALS, trials
     var, pool = rh.pooled_var([sharpe_ann(net(*nets[n], c)[oos]) for n in trials])
     n_total = pool["n_total"]
@@ -669,7 +692,7 @@ def main() -> None:
            "n_pred": int(pred.sum()), "event_hit_rate": float(np.nanmean(label[ev])),
            "m2_cells": int(np.isfinite(m2).sum()), "folds": meta.folds, "importance": meta.importance,
            "quality": quality, "rows": rows, "skip": skip, "nulls": nulls, "judged": judged, "pick": pick,
-           "pool": pool, "trials": trials, "minutes": (time.time() - t0) / 60}
+           "pool": pool, "trials": trials, "diagnostic": diag, "minutes": (time.time() - t0) / 60}
     write(res)
     print(f"done in {res['minutes']:.0f} min; pick {pick}", flush=True)
 
@@ -688,7 +711,14 @@ def write(res: dict) -> None:
         verdict = (f"**Verdict: gate A holds for {res['pick']}.** It becomes an autopilot-only paper variant "
                    f"with its deflation result in the evidence.")
     else:
-        verdict = "**Verdict: negative. No use of the classifier passes gate A; no paper book.**"
+        jz = {j["use"]: j for j in res["judged"]}
+        verdict = ("**Verdict: negative. No use of the classifier passes gate A; no paper book.** "
+                   f"Out of sample the classifier ranks the trades worse than chance (AUC {q['auc_raw']:.2f} on "
+                   f"the events from 2022, band {q['auc_p05']:.2f} to {q['auc_p95']:.2f}; {qb['auc_raw']:.2f} on "
+                   f"the book's own entries). From 2024 at 35 bps the unfiltered book makes Sharpe "
+                   f"{jz['Z']['sharpe_unfiltered']:.2f}; S1 {jz['S1']['sharpe']:.2f}, S2 {jz['S2']['sharpe']:.2f}, "
+                   f"Z {jz['Z']['sharpe']:.2f}. Every gate fails for every use, and deflated p is "
+                   f"{max(j['deflated_p'] for j in res['judged']):.2f} at best over {pool['n_total']} trials.")
     md.append(verdict + "\n\n")
     md.append(f"Events: {res['n_signal']:,} breakout cells on the panel, {res['n_events']:,} training events on "
               f"the top 30 ({res['n_events_labelled']:,} with a known exit; {res['event_hit_rate'] * 100:.0f} % "
@@ -736,6 +766,15 @@ def write(res: dict) -> None:
     md.append("\n`boot_*`: 90 % stationary-bootstrap band of the Sharpe at 35 bps. Per year, Sharpe at 35 bps "
               "(2022 and 2023 are walk-forward for the classifier but the book was picked on them):\n\n")
     md.append(fc.table(res["rows"], ["variant", "2022_23"] + [f"y{y}" for y in YEARS]))
+    md.append("\n### Unregistered diagnostic (not counted, not gated)\n\n"
+              "S1 and S2 skip far more than half and a quarter of the entries: isotonic calibration of a "
+              "score with no out-of-sample skill flattens the calibrated probability near the recent hit rate, "
+              "which is below the training base rate (that includes 2020-21), and many cells tie at the S2 "
+              "cut. To check that the negative result is not only that mechanism, the same book skips the "
+              "cells whose raw score falls in the bottom half or bottom quarter of the calibration set's raw "
+              "scores (no ties):\n\n")
+    md.append(fc.table(res["diagnostic"], ["variant", "skip_rate", f"oos_{BASE}", f"dd_{BASE}", "2022_23"]
+                       + [f"y{y}" for y in YEARS_OOS]))
     md.append(f"\n### Deflation\n\nPrior: {pool['prior_trials']} trials, variance backed out of the fast "
               f"strategies' bar (2.74 over 265); here {pool['mine']} trials at 35 bps. Pooled bar "
               f"{pool['sr0_annual']:.2f} over {pool['n_total']}. Trials counted here: "
