@@ -30,6 +30,22 @@
 //! cancelled ([`Engine::apply_open_orders`]). An autopilot that stops, and an
 //! exit that must not wait, make a resting maker order stand down.
 //!
+//! No fresh book, no maker price: right after a restart the order book feed
+//! needs a few seconds to load. A non-urgent order (a lab rebalance, a
+//! strategy entry or exit signal, a risk trim) then **waits** for a fresh
+//! book instead of crossing, said once in the journal, for at most
+//! [`MAKER_BOOK_WAIT_MS`]. After that it goes the fallback way (a
+//! marketable limit a band past the last price, then a market order for
+//! what is left) and is counted as a fallback. Only an exit that must not
+//! wait (a stop, the floor, the kill switch, a flatten) crosses at once.
+//! A lab rebalance waits whole: no order of it goes out until every coin it
+//! trades has a book, so sells and buys are never split.
+//!
+//! Every finished maker order leaves a [`MakerRecord`] (kept 30 days, saved)
+//! from which [`Engine::maker_stats`] reports per route, over 7 and 30 days:
+//! fill rate by quantity and by order, resting time, realised against
+//! modelled cost and fallbacks.
+//!
 //! Which routes work this way is a per-route setting
 //! ([`Engine::set_maker_route`]), on by default only for the Alpaca crypto
 //! demo route. Every other route is unchanged.
@@ -46,6 +62,28 @@ pub const ALPACA_CRYPTO_DEMO: &str = "demo:alpaca:crypto";
 /// limit is rounded to six significant digits, which is never more than
 /// 0.1 bps away from the number the engine compares.
 const AT_LIMIT_BPS: f64 = 0.5;
+
+/// The longest a non-urgent order on a maker route waits for a fresh book.
+pub const MAKER_BOOK_WAIT_MS: i64 = 10 * 60_000;
+
+/// A wait not asked about for this long is over: the next ask starts a new
+/// one (the signal that wanted the order went away and came back later).
+const BOOK_WAIT_GAP_MS: i64 = 2 * 60_000;
+
+/// How long finished maker orders are kept for the statistics.
+pub const MAKER_RECORD_KEEP_MS: i64 = 30 * 86_400_000;
+const MAKER_RECORD_MAX: usize = 20_000;
+
+/// What a non-urgent order on a maker route does without a fresh book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BookWait {
+    /// Waiting started now: say so once.
+    Started,
+    /// Still waiting; already said.
+    Waiting,
+    /// Waited [`MAKER_BOOK_WAIT_MS`]: go out the fallback way.
+    Expired,
+}
 
 /// How maker execution works on one route.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -144,6 +182,105 @@ pub struct MakerWork {
     /// placed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<String>,
+    /// The route key (`demo:alpaca:crypto`). Empty in a save from before.
+    #[serde(default)]
+    pub route: String,
+    /// Time spent resting at the touch by finished resting children, ms.
+    #[serde(default)]
+    pub rest_ms: i64,
+    /// A marketable limit or a market order was needed.
+    #[serde(default)]
+    pub fallback: bool,
+    /// It went out without a book after waiting [`MAKER_BOOK_WAIT_MS`].
+    #[serde(default)]
+    pub no_book: bool,
+}
+
+/// One finished maker order, for the statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MakerRecord {
+    pub at: i64,
+    pub route: String,
+    pub symbol: String,
+    pub qty: f64,
+    pub filled: f64,
+    pub notional: f64,
+    pub maker_qty: f64,
+    pub rest_ms: i64,
+    pub fallback: bool,
+    #[serde(default)]
+    pub no_book: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realised_bps: Option<f64>,
+    pub modelled_bps: f64,
+}
+
+/// Maker execution on one route over a window of days.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MakerWindow {
+    pub days: u32,
+    /// Finished maker orders, and those with any fill.
+    pub orders: usize,
+    pub filled_orders: usize,
+    /// Share of the filled quantity that filled resting (maker), 0 to 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maker_fill_rate_qty: Option<f64>,
+    /// Share of filled orders that filled entirely as maker, 0 to 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maker_fill_rate_orders: Option<f64>,
+    /// Average time an order rested at the touch, seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_rest_sec: Option<f64>,
+    /// Notional-weighted realised cost (slippage against arrival plus fee)
+    /// and what a market order was modelled to cost, bps, over the same
+    /// orders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realised_bps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modelled_bps: Option<f64>,
+    /// Orders that needed the marketable fallback, and of those how many
+    /// went out without a book after the wait.
+    pub fallbacks: usize,
+    pub no_book_fallbacks: usize,
+}
+
+/// Maker execution statistics of one route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MakerRouteStats {
+    pub route: String,
+    pub enabled: bool,
+    pub d7: MakerWindow,
+    pub d30: MakerWindow,
+}
+
+/// The statistics of `records` finished at or after `since`.
+pub fn maker_window(records: &[MakerRecord], since: i64, days: u32) -> MakerWindow {
+    let rs: Vec<&MakerRecord> = records.iter().filter(|r| r.at >= since).collect();
+    let filled: Vec<&MakerRecord> = rs.iter().copied().filter(|r| r.filled > 0.0).collect();
+    let fq: f64 = filled.iter().map(|r| r.filled).sum();
+    let mq: f64 = filled.iter().map(|r| r.maker_qty.min(r.filled)).sum();
+    let all_maker = filled.iter().filter(|r| !r.fallback && r.maker_qty >= r.filled * 0.999).count();
+    let costed: Vec<(&MakerRecord, f64)> =
+        filled.iter().filter_map(|r| r.realised_bps.filter(|b| b.is_finite()).map(|b| (*r, b))).collect();
+    let cn: f64 = costed.iter().map(|(r, _)| r.notional).sum();
+    let wavg = |f: &dyn Fn(&MakerRecord, f64) -> f64| -> Option<f64> {
+        (cn > 0.0).then(|| costed.iter().map(|(r, b)| f(r, *b) * r.notional).sum::<f64>() / cn)
+    };
+    MakerWindow {
+        days,
+        orders: rs.len(),
+        filled_orders: filled.len(),
+        maker_fill_rate_qty: (fq > 0.0).then(|| mq / fq),
+        maker_fill_rate_orders: (!filled.is_empty()).then(|| all_maker as f64 / filled.len() as f64),
+        avg_rest_sec: (!rs.is_empty()).then(|| rs.iter().map(|r| r.rest_ms as f64).sum::<f64>() / rs.len() as f64 / 1000.0),
+        realised_bps: wavg(&|_, b| b),
+        modelled_bps: wavg(&|r, _| r.modelled_bps),
+        fallbacks: rs.iter().filter(|r| r.fallback).count(),
+        no_book_fallbacks: rs.iter().filter(|r| r.no_book).count(),
+    }
 }
 
 impl MakerWork {
@@ -225,7 +362,7 @@ impl Engine {
 
     /// The best price on `side`'s own side of a fresh book: the best bid for
     /// a buy, the best ask for a sell. `None` without a fresh book.
-    fn maker_touch(&self, m: &Market, side: Side) -> Option<f64> {
+    pub(super) fn maker_touch(&self, m: &Market, side: Side) -> Option<f64> {
         let b = self.books.get(&m.id).filter(|b| b.is_fresh(self.now()))?;
         let level = match side {
             Side::Buy => b.bids.levels().first(),
@@ -284,7 +421,117 @@ impl Engine {
             reduce_only: false,
             base_client_id: String::new(),
             stop: None,
+            route: key,
+            rest_ms: 0,
+            fallback: false,
+            no_book: false,
         })
+    }
+
+    /// A non-urgent order on a maker route that has no fresh book to price
+    /// a resting limit from.
+    pub(super) fn maker_book_missing(&self, m: &Market, side: Side) -> bool {
+        !self.urgent_exit && self.maker_route_on(m) && self.maker_touch(m, side).is_none()
+    }
+
+    /// Wait for a fresh book under `key` (one wait per market, or per lab
+    /// rebalance). Waits not asked about for [`BOOK_WAIT_GAP_MS`] start over.
+    pub(super) fn maker_book_wait(&mut self, key: &str) -> BookWait {
+        let now = self.now();
+        let mut started = false;
+        let e = self.maker_book_waits.entry(key.to_string()).or_insert_with(|| {
+            started = true;
+            (now, now)
+        });
+        if now - e.1 > BOOK_WAIT_GAP_MS {
+            *e = (now, now);
+            started = true;
+        }
+        e.1 = now;
+        if now - e.0 >= MAKER_BOOK_WAIT_MS {
+            self.maker_book_waits.remove(key);
+            return BookWait::Expired;
+        }
+        if started {
+            BookWait::Started
+        } else {
+            BookWait::Waiting
+        }
+    }
+
+    /// The book came back: the wait under `key` is over.
+    pub(super) fn maker_book_ready(&mut self, key: &str) {
+        self.maker_book_waits.remove(key);
+    }
+
+    /// A maker order that waited [`MAKER_BOOK_WAIT_MS`] for a book in vain:
+    /// it starts at the fallback, a marketable limit IOC a band past the last
+    /// price, and what that leaves goes out as a market order.
+    pub(super) fn maker_plan_no_book(&self, m: &Market, side: Side) -> Option<MakerWork> {
+        let key = self.maker_route_key(m);
+        let settings = *self.maker_routes.get(&key).filter(|s| s.enabled)?;
+        if m.price <= 0.0 {
+            return None;
+        }
+        let band = settings.fallback_band_bps / 10_000.0;
+        let px = match side {
+            Side::Buy => m.price * (1.0 + band),
+            Side::Sell => m.price * (1.0 - band),
+        };
+        let cost = costs::model_for(self.demo_cost_venue(m), &m.symbol);
+        Some(MakerWork {
+            settings,
+            child: Child::Marketable,
+            tries: settings.max_tries,
+            seq: 0,
+            limit: round_crypto_price(px, side == Side::Buy),
+            child_at: self.now(),
+            prior_qty: 0.0,
+            prior_notional: 0.0,
+            prior_fee: 0.0,
+            prior_fee_base: 0.0,
+            child_qty: 0.0,
+            child_notional: 0.0,
+            maker_qty: 0.0,
+            maker_notional: 0.0,
+            taker_qty: 0.0,
+            taker_notional: 0.0,
+            maker_bps: cost.maker_bps,
+            taker_bps: cost.taker_bps,
+            reduce_only: false,
+            base_client_id: String::new(),
+            stop: None,
+            route: key,
+            rest_ms: 0,
+            fallback: true,
+            no_book: true,
+        })
+    }
+
+    /// Finished maker orders of the last 30 days.
+    pub fn maker_records(&self) -> &[MakerRecord] {
+        &self.maker_records
+    }
+
+    /// Maker execution per route over the last 7 and 30 days: every route
+    /// with maker execution on, and any route with finished maker orders.
+    pub fn maker_stats(&self) -> Vec<MakerRouteStats> {
+        let now = self.now();
+        let mut routes: std::collections::BTreeSet<String> =
+            self.maker_routes.iter().filter(|(_, s)| s.enabled).map(|(k, _)| k.clone()).collect();
+        routes.extend(self.maker_records.iter().map(|r| r.route.clone()));
+        routes
+            .into_iter()
+            .map(|route| {
+                let rs: Vec<MakerRecord> = self.maker_records.iter().filter(|r| r.route == route).cloned().collect();
+                MakerRouteStats {
+                    enabled: self.maker_routes.get(&route).is_some_and(|s| s.enabled),
+                    d7: maker_window(&rs, now - 7 * 86_400_000, 7),
+                    d30: maker_window(&rs, now - MAKER_RECORD_KEEP_MS, 30),
+                    route,
+                }
+            })
+            .collect()
     }
 
     /// The venue's report on a maker order's current child. Books what is
@@ -409,6 +656,9 @@ impl Engine {
             (Child::Rest, Some(t)) if w.tries < w.settings.max_tries => {
                 (Child::Rest, round_crypto_price(t, f.side == Side::Sell))
             }
+            // The book went stale while resting: rest again at the same
+            // limit rather than crossing early.
+            (Child::Rest, None) if w.tries < w.settings.max_tries && w.limit > 0.0 => (Child::Rest, w.limit),
             (Child::Rest, _) => {
                 // The far side of the book, never better than the last price.
                 let far = self.maker_touch(&m, opposite(f.side));
@@ -421,13 +671,18 @@ impl Engine {
             }
             _ => (Child::Market, 0.0),
         };
+        let now = self.now();
+        if w.child == Child::Rest {
+            w.rest_ms += (now - w.child_at).max(0);
+        }
         if child == Child::Rest {
             w.tries += 1;
+        } else {
+            w.fallback = true;
         }
         w.seq += 1;
         w.child = child;
         w.limit = limit;
-        let now = self.now();
         w.child_at = now;
         let cid = format!("{}-m{}", w.base_client_id, w.seq);
         let what = w.describe();
@@ -622,6 +877,28 @@ impl Engine {
             ord.realised_cost_bps = realised;
             ord.modelled_cost_bps = Some(modelled);
         }
+        let now = self.now();
+        let route = if w.route.is_empty() {
+            self.markets.iter().find(|m| m.id == f.market_id).map(|m| self.maker_route_key(m)).unwrap_or_default()
+        } else {
+            w.route.clone()
+        };
+        let rest_ms = w.rest_ms + if w.child == Child::Rest && w.child_at > 0 { (now - w.child_at).max(0) } else { 0 };
+        self.maker_records.push(MakerRecord {
+            at: now,
+            route,
+            symbol: f.symbol.clone(),
+            qty: f.qty,
+            filled,
+            notional,
+            maker_qty: w.maker_qty,
+            rest_ms,
+            fallback: w.fallback,
+            no_book: w.no_book,
+            realised_bps: realised,
+            modelled_bps: modelled,
+        });
+        self.prune_maker_records();
         if filled <= 0.0 {
             return;
         }
@@ -643,6 +920,17 @@ impl Engine {
             Some(f.strategy_id.clone()),
             Some(f.market_id.clone()),
         );
+    }
+
+    /// Keep the last 30 days of finished maker orders, at most
+    /// [`MAKER_RECORD_MAX`].
+    pub(super) fn prune_maker_records(&mut self) {
+        let cut = self.now() - MAKER_RECORD_KEEP_MS;
+        self.maker_records.retain(|r| r.at >= cut);
+        if self.maker_records.len() > MAKER_RECORD_MAX {
+            let drop = self.maker_records.len() - MAKER_RECORD_MAX;
+            self.maker_records.drain(..drop);
+        }
     }
 
     // ── open orders left from an earlier run ───────────────────────────────
@@ -744,6 +1032,25 @@ impl Engine {
                 w.child_at -= ms;
             }
         }
+    }
+
+    /// A fresh book one basis point either side of the price for every
+    /// crypto market, as the book feed gives it once it has loaded. For tests
+    /// that route demo crypto orders and are not about the book.
+    #[cfg(test)]
+    pub(crate) fn fresh_books_for_test(&mut self) {
+        let now = self.now();
+        let quotes: Vec<(String, crate::orderbook::BookQuote)> = self
+            .markets
+            .iter()
+            .filter(|m| m.venue == Venue::Crypto && m.price > 0.0)
+            .filter_map(|m| {
+                let (bid, ask) = (m.price * 0.9999, m.price * 1.0001);
+                crate::orderbook::BookQuote::from_levels(CostVenue::Kraken, &[(bid, 10.0)], &[(ask, 10.0)], now)
+                    .map(|q| (m.id.clone(), q))
+            })
+            .collect();
+        self.books.extend(quotes);
     }
 
     /// The maker state of an in-flight order, for tests.

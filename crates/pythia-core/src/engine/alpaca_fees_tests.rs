@@ -313,6 +313,7 @@ fn a_crypto_demo_fill_on_the_alpaca_paper_route_waits_for_its_fee_and_stays_out_
     e.real_ids.extend(ids);
     // PYTHIA_DEMO_EXCHANGE=alpaca: crypto demo orders go to the Alpaca paper account.
     e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CostVenue::Alpaca), true);
+    e.fresh_books_for_test();
     let market = "crypto:BTC/USD";
     let i = e.ensure_manual_strategy();
     let sid = e.strategies[i].id.clone();

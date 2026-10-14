@@ -593,6 +593,9 @@ pub struct LiveStatus {
     /// Maker execution per route, by route key ([`maker`]).
     #[serde(default)]
     pub maker_routes: std::collections::BTreeMap<String, maker::MakerSettings>,
+    /// Maker execution statistics per route over 7 and 30 days.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maker_stats: Vec<maker::MakerRouteStats>,
 }
 
 /// Why an order is being routed — and therefore what is allowed to happen to it
@@ -1111,6 +1114,9 @@ pub struct Persisted {
     /// defaults (on for the Alpaca crypto demo route only).
     #[serde(default = "maker::default_maker_routes")]
     pub maker_routes: std::collections::BTreeMap<String, maker::MakerSettings>,
+    /// Finished maker orders of the last 30 days, for the statistics.
+    #[serde(default)]
+    pub maker_records: Vec<maker::MakerRecord>,
     /// Operator alerts are muted until this time (epoch ms; 0 = not muted),
     /// so a mute set through the API survives a restart.
     #[serde(default)]
@@ -1347,6 +1353,15 @@ pub struct Engine {
     /// Set while an exit that must not wait (a stop, a target, a halt, a
     /// flatten) is being routed: it never rests as a maker order.
     urgent_exit: bool,
+    /// Non-urgent orders on a maker route waiting for a fresh book, by
+    /// market or lab rebalance: (since, last asked). Not saved: a restart
+    /// starts every wait again.
+    maker_book_waits: HashMap<String, (i64, i64)>,
+    /// Set while a lab rebalance whose wait for books ran out is placed: its
+    /// orders go out the fallback way instead of waiting again.
+    maker_no_book_go: bool,
+    /// Finished maker orders of the last 30 days ([`maker::MakerRecord`]). Saved.
+    maker_records: Vec<maker::MakerRecord>,
     /// Average entry per open position at reference prices (before execution
     /// costs), for the gross line. Missing means "same as the fill price".
     ref_prices: HashMap<String, f64>,
@@ -1474,6 +1489,9 @@ impl Engine {
             open_orders_checked: false,
             open_orders_tried_at: 0,
             urgent_exit: false,
+            maker_book_waits: HashMap::new(),
+            maker_no_book_go: false,
+            maker_records: Vec::new(),
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
             vol_spike: risk::VolSpikeGuard::default(),
@@ -3633,7 +3651,55 @@ impl Engine {
         // default) rests at the touch instead, and crosses only if that does
         // not fill in time (see `maker`).
         let mut maker_work = if demo { self.maker_plan(m, side) } else { None };
-        let style = if maker_work.is_some() {
+        // No fresh book to price the limit (right after a restart, before
+        // the book feed has loaded): a non-urgent order waits for one, said
+        // once, rather than crossing. After `MAKER_BOOK_WAIT_MS` it goes out
+        // the fallback way. An urgent exit never gets here.
+        let wait_key = format!("order:{}", m.id);
+        if demo && maker_work.is_none() && self.maker_book_missing(m, side) {
+            let wait = if self.maker_no_book_go { maker::BookWait::Expired } else { self.maker_book_wait(&wait_key) };
+            match wait {
+                maker::BookWait::Started => {
+                    let sid = self.strategies[strat_idx].id.clone();
+                    self.log(
+                        JournalKind::Order,
+                        format!(
+                            "DEMO {side:?} {} waits for a fresh order book to price its maker limit (none yet, e.g. right \
+                             after a restart); it does not cross the spread. At most {} minutes, then a marketable limit",
+                            m.symbol,
+                            maker::MAKER_BOOK_WAIT_MS / 60_000
+                        ),
+                        Some(sid),
+                        Some(m.id.clone()),
+                    );
+                    return;
+                }
+                maker::BookWait::Waiting => return,
+                maker::BookWait::Expired => {
+                    maker_work = self.maker_plan_no_book(m, side);
+                    if maker_work.is_some() {
+                        let sid = self.strategies[strat_idx].id.clone();
+                        self.log(
+                            JournalKind::Risk,
+                            format!(
+                                "DEMO {side:?} {}: no fresh order book after {} minutes, so it goes out as a marketable \
+                                 limit near the last price (counted as a fallback)",
+                                m.symbol,
+                                maker::MAKER_BOOK_WAIT_MS / 60_000
+                            ),
+                            Some(sid),
+                            Some(m.id.clone()),
+                        );
+                    }
+                }
+            }
+        } else if maker_work.is_some() {
+            self.maker_book_ready(&wait_key);
+        }
+        let marketable = maker_work.as_ref().is_some_and(|w| w.child != maker::Child::Rest);
+        let style = if marketable {
+            bandit::ExecStyle::Cross
+        } else if maker_work.is_some() {
             bandit::ExecStyle::Join
         } else if demo {
             bandit::ExecStyle::Cross
@@ -3725,10 +3791,11 @@ impl Engine {
                 && self.broker.as_ref().map(|b| !b.market_open && b.extended_open).unwrap_or(false),
             demo,
             limit_price: maker_work.as_ref().map(|w| w.limit),
-            ioc: false,
+            ioc: marketable,
         });
         let dest = if demo { "DEMO" } else { self.live_dest() };
         let how = match &maker_work {
+            Some(w) if marketable => format!(" as a marketable limit IOC at {} (no book to rest on)", w.limit),
             Some(w) => format!(" as a maker limit at {} (best {} of the book)", w.limit, if side == Side::Buy { "bid" } else { "ask" }),
             None => String::new(),
         };
@@ -5107,6 +5174,7 @@ impl Engine {
                 .filter_map(|v| self.route_paused_until(v, true).map(|t| (v, t)))
                 .collect(),
             maker_routes: self.maker_routes.clone(),
+            maker_stats: self.maker_stats(),
         }
     }
 
@@ -5556,6 +5624,60 @@ impl Engine {
             let skipped: Vec<String> =
                 unlisted.iter().filter(|s| weights.keys().any(|c| **s == sig.market_symbol(c))).cloned().collect();
             untradable.retain(|c| !unlisted.contains(&sig.market_symbol(c)));
+            // On a maker route each order rests at the touch of a fresh book.
+            // Without one (right after a restart the book feed takes a few
+            // seconds) the whole rebalance waits, said once, so sells and buys
+            // stay together and nothing crosses the spread. After
+            // `MAKER_BOOK_WAIT_MS` it goes out the fallback way.
+            let wait_key = format!("lab:{lead}:{generated}");
+            let mut no_book_go = false;
+            if demo_route {
+                let mut missing: Vec<String> = orders
+                    .iter()
+                    .filter_map(|o| book.iter().find(|m| m.id == o.market_id).map(|m| (m, o.side)))
+                    .filter(|(m, side)| self.maker_book_missing(m, *side))
+                    .map(|(m, _)| m.symbol.clone())
+                    .collect();
+                missing.sort();
+                missing.dedup();
+                if missing.is_empty() {
+                    self.maker_book_ready(&wait_key);
+                } else {
+                    match self.maker_book_wait(&wait_key) {
+                        maker::BookWait::Started => {
+                            self.log(
+                                JournalKind::Order,
+                                format!(
+                                    "Lab rebalance waits for fresh order books: its {} orders rest as maker limits on this \
+                                     route and there is no book yet for {} (the book feed loads after a restart). It goes \
+                                     out as soon as there is, at most {} minutes from now, then as marketable limits",
+                                    orders.len(),
+                                    missing.join(", "),
+                                    maker::MAKER_BOOK_WAIT_MS / 60_000
+                                ),
+                                Some(lead.clone()),
+                                None,
+                            );
+                            continue;
+                        }
+                        maker::BookWait::Waiting => continue,
+                        maker::BookWait::Expired => {
+                            self.log(
+                                JournalKind::Risk,
+                                format!(
+                                    "Lab rebalance waited {} minutes and there is still no fresh order book for {}: those \
+                                     orders go out as marketable limits near the last price (counted as fallbacks)",
+                                    maker::MAKER_BOOK_WAIT_MS / 60_000,
+                                    missing.join(", ")
+                                ),
+                                Some(lead.clone()),
+                                None,
+                            );
+                            no_book_go = true;
+                        }
+                    }
+                }
+            }
             if let Some(g) = &group {
                 // The netted target per market, each book's share of it, and
                 // why it holds cash when it holds nothing.
@@ -5595,7 +5717,10 @@ impl Engine {
                 let Some(m) = book.iter().find(|m| m.id == o.market_id).cloned() else { continue };
                 // A coin already held is traded by the book that holds it.
                 let by = holders.get(&m.id).and_then(|h| self.strategies.iter().position(|s| &s.id == h)).unwrap_or(idx);
-                if !self.place_lab_order(by, &m, o.side, o.notional) {
+                self.maker_no_book_go = no_book_go;
+                let placed = self.place_lab_order(by, &m, o.side, o.notional);
+                self.maker_no_book_go = false;
+                if !placed {
                     refused += 1;
                 }
             }
@@ -6130,6 +6255,7 @@ impl Engine {
             alpaca_fee_seen: self.alpaca_fee_seen.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             alpaca_fee_estimates: self.alpaca_fee_estimates.clone(),
             maker_routes: self.maker_routes.clone(),
+            maker_records: self.maker_records.clone(),
             alerts_muted_until_ms: self.alerts_muted_until_ms,
         }
     }
@@ -6337,6 +6463,8 @@ impl Engine {
         self.alpaca_fee_seen = p.alpaca_fee_seen.into_iter().collect();
         self.alpaca_fee_estimates = p.alpaca_fee_estimates;
         self.maker_routes = p.maker_routes;
+        self.maker_records = p.maker_records;
+        self.prune_maker_records();
         self.alerts_muted_until_ms = p.alerts_muted_until_ms.max(0);
         if resolved > 0 {
             self.log(

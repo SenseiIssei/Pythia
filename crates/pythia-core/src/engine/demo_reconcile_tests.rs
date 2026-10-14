@@ -25,6 +25,9 @@ fn engine() -> (Engine, String) {
     }
     e.real_ids.extend(ids);
     e.set_demo_venues([Venue::Crypto, Venue::Alpaca].into_iter().collect(), Some(CostVenue::Alpaca), true);
+    // These tests are about market orders and their refusals: maker
+    // execution off, as without a book it was before orders waited for one.
+    e.set_maker_route(super::maker::ALPACA_CRYPTO_DEMO, super::maker::MakerSettings::default()).unwrap();
     let i = e.ensure_manual_strategy();
     let sid = e.strategies[i].id.clone();
     (e, sid)

@@ -1712,6 +1712,7 @@ fn a_demo_autopilot_on_the_alpaca_paper_route_trades_the_coins_alpaca_lists_and_
     let now = e.now();
     // PYTHIA_DEMO_EXCHANGE=alpaca with only the Alpaca paper keys.
     e.set_demo_venues([Venue::Crypto, Venue::Alpaca].into_iter().collect(), Some(CostVenue::Alpaca), true);
+    e.fresh_books_for_test();
     e.set_crypto_demo_listed(Some(["BTC/USD", "ETH/USD", "SOL/USD"].into_iter().map(String::from).collect()));
     e.apply_lab_signal(book("tsmom_regime", now, &[("BTC", 0.4), ("ETH", 0.2), ("SUI", 0.1)], regime_evidence(), false));
 
