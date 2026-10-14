@@ -127,7 +127,7 @@ file records the negative result. Not done here: the `tsmom_top20` entries
 
 ## Results (generated 2026-10-14, data to 2026-10-13, 591 coin segments)
 
-**Verdict: negative. No use of the classifier passes gate A; no paper book.**
+**Verdict: negative. No use of the classifier passes gate A; no paper book.** Out of sample the classifier ranks the trades worse than chance (AUC 0.45 on the events from 2022, band 0.39 to 0.53; 0.40 on the book's own entries). From 2024 at 35 bps the unfiltered book makes Sharpe 1.06; S1 0.00, S2 -0.11, Z 1.05. Every gate fails for every use, and deflated p is 0.00 at best over 275 trials.
 
 Events: 68,333 breakout cells on the panel, 1,602 training events on the top 30 (1,600 with a known exit; 36 % clear the 70 bps round trip), 7,355 cells predicted (top 30 plus the Alpaca top 10). M2 scores on 562,936 coin-days.
 
@@ -262,8 +262,17 @@ S1 and S2: the same skip rate drawn at random over the predicted cells, 1000 tim
 | Z · a day late | 0.47 | -0.85 | 1.75 | 1.60 | 0.11 | 0.04 |
 | unfiltered · a day late (reference) | 0.64 | -0.91 | 1.90 | 1.62 | 0.11 | 0.06 |
 
+### Unregistered diagnostic (not counted, not gated)
+
+S1 and S2 skip far more than half and a quarter of the entries. Two mechanisms: isotonic calibration of a score with no out-of-sample skill flattens the calibrated probability near the recent hit rate, which is below the training base rate (that includes 2020-21's 47 %), and many cells tie at the S2 cut; and a skipped coin that keeps closing above its 20-day high is a new candidate every day, so a filter that skips a share of cells skips a larger share of decisions. To check that the negative result is not only the first mechanism, the same book skips the cells whose raw score falls in the bottom half or bottom quarter of the calibration set's raw scores (no ties). Looked at after the registered run; one look, not a candidate:
+
+| variant | skip_rate | oos_taker 35bps | dd_taker 35bps | 2022_23 | y2024 | y2025 | y2026 |
+|---|---|---|---|---|---|---|---|
+| raw half (diagnostic) | 0.73 | 1.09 | 0.16 | 0.32 | 1.94 | 0.37 | 0.32 |
+| raw quarter (diagnostic) | 0.40 | 0.95 | 0.20 | 0.60 | 1.77 | 0.31 | 0.18 |
+
 ### Deflation
 
 Prior: 265 trials, variance backed out of the fast strategies' bar (2.74 over 265); here 10 trials at 35 bps. Pooled bar 2.72 over 275. Trials counted here: unfiltered · Alpaca coins; S1; S1 · Alpaca coins; S1 · a day late; S2; S2 · Alpaca coins; S2 · a day late; Z; Z · Alpaca coins; Z · a day late.
 
-Took 11 min.
+Took 10 min.

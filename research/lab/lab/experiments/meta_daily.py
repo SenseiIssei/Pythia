@@ -767,12 +767,14 @@ def write(res: dict) -> None:
               "(2022 and 2023 are walk-forward for the classifier but the book was picked on them):\n\n")
     md.append(fc.table(res["rows"], ["variant", "2022_23"] + [f"y{y}" for y in YEARS]))
     md.append("\n### Unregistered diagnostic (not counted, not gated)\n\n"
-              "S1 and S2 skip far more than half and a quarter of the entries: isotonic calibration of a "
-              "score with no out-of-sample skill flattens the calibrated probability near the recent hit rate, "
-              "which is below the training base rate (that includes 2020-21), and many cells tie at the S2 "
-              "cut. To check that the negative result is not only that mechanism, the same book skips the "
-              "cells whose raw score falls in the bottom half or bottom quarter of the calibration set's raw "
-              "scores (no ties):\n\n")
+              "S1 and S2 skip far more than half and a quarter of the entries. Two mechanisms: isotonic "
+              "calibration of a score with no out-of-sample skill flattens the calibrated probability near "
+              "the recent hit rate, which is below the training base rate (that includes 2020-21's 47 %), and "
+              "many cells tie at the S2 cut; and a skipped coin that keeps closing above its 20-day high is a "
+              "new candidate every day, so a filter that skips a share of cells skips a larger share of "
+              "decisions. To check that the negative result is not only the first mechanism, the same book "
+              "skips the cells whose raw score falls in the bottom half or bottom quarter of the calibration "
+              "set's raw scores (no ties). Looked at after the registered run; one look, not a candidate:\n\n")
     md.append(fc.table(res["diagnostic"], ["variant", "skip_rate", f"oos_{BASE}", f"dd_{BASE}", "2022_23"]
                        + [f"y{y}" for y in YEARS_OOS]))
     md.append(f"\n### Deflation\n\nPrior: {pool['prior_trials']} trials, variance backed out of the fast "
