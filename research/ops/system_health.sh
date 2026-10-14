@@ -124,6 +124,15 @@ print('%s|%s' % ('true' if h.get('ok') else 'false', '; '.join(parts)))
   for c in "${checks[@]}"; do case $c in *'"ok":false'*) all=false ;; esac; done
   local IFS=,
   printf '{"at":"%s","ok":%s,"checks":[%s]}\n' "$(date -u +%FT%TZ)" "$all" "${checks[*]}" > "$out.tmp" && mv "$out.tmp" "$out"
+
+  # Push: not ok for two runs in a row posts once to the operator's webhook,
+  # and once more when it is green again (notify.py, standard library only).
+  # The webhook lives in the env file, never in this script or its log.
+  local notify=${PYTHIA_NOTIFY_PY:-/opt/pythia-ops/notify.py}
+  local envfile=${PYTHIA_ALERT_ENV:-/etc/pythia/alerts.env}
+  if [ -f "$notify" ] && [ -r "$envfile" ]; then
+    ( set -a; . "$envfile"; set +a; python3 "$notify" --health "$out" ) || true
+  fi
 }
 
 main "$@"
