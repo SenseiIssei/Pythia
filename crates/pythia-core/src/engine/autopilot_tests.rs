@@ -239,6 +239,12 @@ fn max_loss_in_percent_fires_exactly_at_its_floor_and_flattens() {
     assert!(s.equity < 900.0 && s.equity > 898.0, "the exit paid its costs: {}", s.equity);
     assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Paused);
     assert!(e.drain_alerts().iter().any(|a| a.contains("max loss of 10 %")), "the stop is pushed as an alert");
+    let typed = e.drain_alert_events();
+    let kinds: Vec<_> = typed.iter().map(|a| a.kind).collect();
+    assert!(kinds.contains(&crate::alerts::AlertKind::AutopilotStarted), "{kinds:?}");
+    let floor = typed.iter().find(|a| a.kind == crate::alerts::AlertKind::FloorHit).expect("the floor is an operator alert");
+    assert!(floor.text.contains("max loss of 10 % reached"), "{}", floor.text);
+    assert!(!kinds.contains(&crate::alerts::AlertKind::AutopilotStopped));
 }
 
 #[test]

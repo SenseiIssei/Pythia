@@ -302,3 +302,32 @@ fn books_from_the_mirror_count_as_the_executing_venue_and_off_books_are_refused(
     e.apply_feed_books(FeedSource::BinanceVision, Ok(vec![book(96_000.0)]));
     assert!(!e.books.contains_key(BTC));
 }
+
+#[test]
+fn stale_data_past_ten_minutes_is_an_operator_alert_once() {
+    use crate::alerts::AlertKind;
+    let mut e = fed();
+    let t0 = e.now();
+    let stale = |e: &mut Engine| e.drain_alert_events().into_iter().filter(|a| a.kind == AlertKind::DataStale).collect::<Vec<_>>();
+    // Stale from a minute in (past the 30 s limit), so ten minutes later.
+    e.check_data_alert(t0 + 60_000);
+    e.check_data_alert(t0 + 10 * 60_000);
+    assert!(stale(&mut e).is_empty(), "nine minutes is not yet an alert");
+    e.check_data_alert(t0 + 12 * 60_000);
+    e.check_data_alert(t0 + 13 * 60_000);
+    let a = stale(&mut e);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!(a[0].key, "stale:on");
+    assert!(a[0].text.starts_with("for 1"), "{}", a[0].text);
+
+    let ids = e.feed_markets();
+    let now = e.now();
+    let rows: Vec<RealCrypto> = ids.iter().map(|id| quote(id, 100.0)).collect();
+    e.apply_feed_quotes(FeedSource::Kraken, Ok(rows), now);
+    let bars: Vec<BarSeries> = ids.iter().map(|id| series(id, 100.0)).collect();
+    e.apply_feed_candles(FeedSource::Kraken, Ok(bars), 5);
+    e.check_data_alert(e.now());
+    let a = stale(&mut e);
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].key, "stale:off");
+}

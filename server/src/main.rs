@@ -58,6 +58,9 @@ struct AppState {
     engine: Arc<Mutex<Engine>>,
     tx: broadcast::Sender<String>,
     webhook: Arc<Mutex<Option<String>>>,
+    /// Typed operator alerts to `PYTHIA_ALERT_WEBHOOK` (off when unset). The
+    /// sender runs on its own task: queuing never waits on the network.
+    alert_sink: Option<alerts::AlertSink>,
     /// Venue credentials, read once from the environment at boot. Restart the
     /// server to pick up an edited `.env` — keys are not hot-reloaded, so a
     /// half-saved file can never arm a venue mid-session.
@@ -352,6 +355,22 @@ fn lab_books_idle() -> bool {
     std::env::var("PYTHIA_LAB_BOOKS").map(|v| v.trim().eq_ignore_ascii_case("idle")).unwrap_or(false)
 }
 
+/// Model drift for the operator alerts: every five minutes, whether a shadow
+/// model has inputs outside its trained range (see `alerts::DriftWatch`).
+async fn drift_alert_loop(state: AppState) {
+    let mut watch = alerts::DriftWatch::default();
+    let mut every = tokio::time::interval(Duration::from_secs(300));
+    loop {
+        every.tick().await;
+        let Some(status) = ML.get().and_then(|ml| ml.read().ok().map(|s| s.clone())) else { continue };
+        if let Some(sink) = &state.alert_sink {
+            for ev in watch.check(&status) {
+                sink.send(ev);
+            }
+        }
+    }
+}
+
 /// The model service's status handle, set once at startup.
 static ML: OnceLock<pythia_core::ml::SharedMl> = OnceLock::new();
 
@@ -458,8 +477,16 @@ async fn main() {
         engine,
         tx: tx.clone(),
         webhook: Arc::new(Mutex::new(std::env::var("PYTHIA_WEBHOOK_URL").ok())),
+        alert_sink: alerts::AlertConfig::from_env().map(|cfg| {
+            // The URL is a secret: only that it is set and the format are logged.
+            tracing::info!("operator alerts on ({:?} format)", cfg.format);
+            alerts::AlertSink::spawn(cfg)
+        }),
         creds,
     };
+    if let Some(n) = env_str("PYTHIA_ALERT_REJECTS").and_then(|v| v.parse::<u32>().ok()) {
+        state.engine.lock().unwrap().set_alert_reject_threshold(n);
+    }
 
     // Crypto demo on the Alpaca paper account: which coins Alpaca lists, read
     // before the first tick (at most 20 s) so no demo order goes out for a
@@ -490,6 +517,9 @@ async fn main() {
     // Model forecasts in shadow mode (scored, never traded). Idles with a
     // status message when PYTHIA_MODELS is unset.
     let _ = ML.set(pythia_core::ml::spawn());
+    if state.alert_sink.is_some() {
+        tokio::spawn(drift_alert_loop(state.clone()));
+    }
     // Lab strategies: pick up the research lab's daily target weights.
     tokio::spawn(lab_loop(state.clone()));
     if state_file().is_some() {
@@ -637,11 +667,16 @@ async fn tick_loop(state: AppState) {
             refresh_broker_status(&state).await;
         }
 
-        let (json, queued) = {
+        let (json, queued, events) = {
             let mut e = state.engine.lock().unwrap();
             e.tick();
-            (serde_json::to_string(&e.state()).unwrap_or_default(), e.drain_alerts())
+            (serde_json::to_string(&e.state()).unwrap_or_default(), e.drain_alerts(), e.drain_alert_events())
         };
+        if let Some(sink) = &state.alert_sink {
+            for ev in events {
+                sink.send(ev);
+            }
+        }
         // Ignore the "no receivers" error — clients come and go.
         let _ = state.tx.send(json);
 

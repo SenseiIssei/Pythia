@@ -138,6 +138,7 @@
 //! treasury that Pythia can read and never move (see `SAFETY.md`).
 
 use super::{Engine, JournalKind, RouteIntent, StrategyKind, StrategyState};
+use crate::alerts::AlertKind;
 use crate::connectors::Venue;
 use crate::costs::CostVenue;
 use crate::validation::GateStatus;
@@ -1717,6 +1718,12 @@ impl Engine {
             usd(cfg.capital_usd),
             describe_rules(&cfg)
         );
+        let started_alert = if sleeves.is_empty() {
+            msg.clone()
+        } else {
+            let books: Vec<&str> = sleeves.iter().map(|s| s.name.as_str()).collect();
+            format!("{msg} Books: {}.", books.join(", "))
+        };
         for sl in &sleeves {
             msg.push_str(&format!(" {}: {}", sl.name, sl.why));
         }
@@ -1760,6 +1767,7 @@ impl Engine {
         let kind = if cfg.mode == AutopilotMode::Live { JournalKind::Risk } else { JournalKind::System };
         self.log(kind, msg.clone(), None, None);
         self.pending_alerts.push(msg.clone());
+        self.alert(AlertKind::AutopilotStarted, format!("start:{id}:{now}"), started_alert);
         self.autopilots.retain(|a| a.config.id != id);
         self.autopilots.push(Autopilot {
             config: cfg,
@@ -1805,7 +1813,7 @@ impl Engine {
         }
         let flatten = flatten.unwrap_or(self.autopilots[i].config.flatten_on_stop);
         let now = self.now();
-        self.ap_halt(i, AutopilotState::Stopped, "stopped by you".into(), flatten, now);
+        self.ap_halt(i, AutopilotState::Stopped, "stopped by you".into(), flatten, now, AlertKind::AutopilotStopped);
         Ok(())
     }
 
@@ -2114,7 +2122,7 @@ impl Engine {
                 match stop.on_take_profit {
                     OnTakeProfit::Stop => {
                         let reason = format!("take profit of {} % reached (equity {}, target {})", pct(tp), usd(eq), usd(target));
-                        self.ap_halt(i, AutopilotState::Finished, reason, flatten, now);
+                        self.ap_halt(i, AutopilotState::Finished, reason, flatten, now, AlertKind::StopRuleHit);
                         return;
                     }
                     OnTakeProfit::Lock => {
@@ -2172,7 +2180,7 @@ impl Engine {
                         usd(floor)
                     ),
                 };
-                self.ap_halt(i, AutopilotState::Stopped, reason, flatten, now);
+                self.ap_halt(i, AutopilotState::Stopped, reason, flatten, now, AlertKind::FloorHit);
                 return;
             }
         }
@@ -2180,7 +2188,7 @@ impl Engine {
         // The end time.
         if let Some(end) = stop.end_ms {
             if now >= end {
-                self.ap_halt(i, AutopilotState::Finished, "end time reached".into(), flatten, now);
+                self.ap_halt(i, AutopilotState::Finished, "end time reached".into(), flatten, now, AlertKind::StopRuleHit);
             }
         }
     }
@@ -2201,7 +2209,7 @@ impl Engine {
 
     /// Stop or finish: close or release its positions, pause its strategies,
     /// and say so with the numbers.
-    fn ap_halt(&mut self, i: usize, state: AutopilotState, reason: String, flatten: bool, now: i64) {
+    fn ap_halt(&mut self, i: usize, state: AutopilotState, reason: String, flatten: bool, now: i64, cause: AlertKind) {
         {
             let ap = &mut self.autopilots[i];
             ap.state = state;
@@ -2317,6 +2325,8 @@ impl Engine {
         );
         self.autopilots[i].last_action = Some(msg.clone());
         self.pending_alerts.push(msg.clone());
+        let key = format!("halt:{}:{now}", self.autopilots[i].config.id);
+        self.alert(cause, key, msg.clone());
         self.log(JournalKind::Risk, msg, None, None);
         self.ap_sample(i, now, true);
     }

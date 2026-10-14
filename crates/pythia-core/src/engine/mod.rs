@@ -1129,6 +1129,8 @@ const STARTING_CASH: f64 = 100_000.0;
 /// engine reacts within a minute of the condition clearing (a market opening,
 /// cash settling).
 const LIVE_REJECT_BACKOFF_MS: i64 = 60_000;
+/// Market data stale for longer than this many minutes is an operator alert.
+const DATA_STALE_ALERT_MIN: i64 = 10;
 
 /// A lab rebalance with refused orders is tried again this often, at most
 /// `LAB_RETRY_MAX` times in all: six attempts over 1 h 40 min, well inside a
@@ -1170,6 +1172,16 @@ pub struct Engine {
     gross_win: HashMap<String, f64>,     // per-strategy cumulative winning $ (for profit factor)
     gross_loss: HashMap<String, f64>,    // per-strategy cumulative losing $
     pending_alerts: Vec<String>,         // notable events awaiting a webhook push
+    /// Typed operator alerts for `PYTHIA_ALERT_WEBHOOK` (see `alerts::AlertSink`).
+    alert_events: Vec<crate::alerts::AlertEvent>,
+    /// Demo and live orders refused in a row, `[live, demo]`; any fill resets.
+    reject_streak: [u32; 2],
+    /// More than this many refusals in a row is an alert.
+    alert_reject_after: u32,
+    /// Market data stale for more than ten minutes was alerted this episode.
+    data_stale_alerted: bool,
+    /// UTC day the daily loss brake was last alerted.
+    daily_loss_alerted_day: Option<i64>,
     // ── live execution (OFF by default) ──
     live: LiveConfig,
     broker: Option<BrokerStatus>,        // Alpaca session/account snapshot from the daemon
@@ -1352,6 +1364,11 @@ impl Engine {
             gross_win: HashMap::new(),
             gross_loss: HashMap::new(),
             pending_alerts: Vec::new(),
+            alert_events: Vec::new(),
+            reject_streak: [0; 2],
+            alert_reject_after: 3,
+            data_stale_alerted: false,
+            daily_loss_alerted_day: None,
             live: LiveConfig::default(),
             broker: None,
             ai: HashMap::new(),
@@ -1909,6 +1926,30 @@ impl Engine {
         }
         let (quotes, candles, _) = self.stale_markets(now);
         let since = self.feeds.stale_since();
+        let stale = !quotes.is_empty() || !candles.is_empty();
+        if !stale {
+            if self.data_stale_alerted {
+                self.data_stale_alerted = false;
+                self.alert(crate::alerts::AlertKind::DataStale, "stale:off", "market data is fresh again.");
+            }
+        } else if !self.data_stale_alerted {
+            let mins = since.map_or(0, |s| (now - s) / 60_000);
+            if mins >= DATA_STALE_ALERT_MIN {
+                self.data_stale_alerted = true;
+                let mut parts = Vec::new();
+                if !quotes.is_empty() {
+                    parts.push(format!("quotes for {}", feeds::list_markets(&quotes)));
+                }
+                if !candles.is_empty() {
+                    parts.push(format!("candles for {}", feeds::list_markets(&candles)));
+                }
+                self.alert(
+                    crate::alerts::AlertKind::DataStale,
+                    "stale:on",
+                    format!("for {mins} min: {}. Entries are refused and stops wait for a fresh price.", parts.join(", ")),
+                );
+            }
+        }
         match self.feeds.track_episode(!quotes.is_empty() || !candles.is_empty(), now) {
             Some(true) => {
                 let mut parts = Vec::new();
@@ -1941,6 +1982,27 @@ impl Engine {
                 self.log(JournalKind::Risk, msg, None, None);
             }
             None => {}
+        }
+    }
+
+    /// Alert once per UTC day when the day's loss reaches the limit at which
+    /// the risk manager refuses new risk (`risk::evaluate`, check 3).
+    fn check_daily_loss_alert(&mut self, today: i64) {
+        if self.daily_loss_alerted_day == Some(today) || self.day_start_equity <= 0.0 || self.limits.max_daily_loss_pct <= 0.0 {
+            return;
+        }
+        let day_pnl = self.realized_pnl + self.unrealized();
+        let loss_pct = -day_pnl / self.day_start_equity * 100.0;
+        if loss_pct >= self.limits.max_daily_loss_pct {
+            self.daily_loss_alerted_day = Some(today);
+            self.alert(
+                crate::alerts::AlertKind::DailyLossBrake,
+                format!("dailyloss:{today}"),
+                format!(
+                    "the book is down {loss_pct:.1} % today, limit {:.1} %. New entries are refused until the next UTC day.",
+                    self.limits.max_daily_loss_pct
+                ),
+            );
         }
     }
 
@@ -2210,6 +2272,10 @@ impl Engine {
         // Stale market data for minutes goes to the webhook, once, and so does its end.
         self.check_data_alert(now);
 
+        // The daily loss brake: once a day, the moment the day's loss reaches
+        // the limit the risk manager refuses new risk at.
+        self.check_daily_loss_alert(today);
+
         // max-drawdown circuit breaker
         let eq = self.equity();
         if eq > self.peak_equity {
@@ -2220,6 +2286,11 @@ impl Engine {
             if dd >= self.limits.max_drawdown_pct {
                 self.limits.kill_switch = true;
                 self.log(JournalKind::Risk, format!("Max drawdown {dd:.1}% ≥ {:.1}% — KILL SWITCH tripped", self.limits.max_drawdown_pct), None, None);
+                let text = format!(
+                    "tripped by the drawdown brake: equity {:.2} is {dd:.1} % below its peak, limit {:.1} %. Only closing orders pass until it is released.",
+                    eq, self.limits.max_drawdown_pct
+                );
+                self.alert(crate::alerts::AlertKind::KillSwitch, "kill:on", text);
             }
         }
 
@@ -4319,6 +4390,11 @@ impl Engine {
         let Some(f) = self.inflight.get(order_id).cloned() else { return };
         let delta = update.filled_qty - f.booked_qty;
         let (fee_total, _) = self.live_fee_value(&update);
+        if delta > 1e-9 {
+            self.note_route_fill(f.demo);
+        } else if update.status == BrokerOrderStatus::Rejected {
+            self.note_route_reject(f.demo, &f.symbol, "rejected by the venue");
+        }
 
         if delta > 1e-9 {
             if let Some(price) = update.avg_price.filter(|p| *p > 0.0) {
@@ -4540,6 +4616,12 @@ impl Engine {
         let now = self.now();
         let kind = classify_reject(reason);
         let f = self.inflight.remove(order_id);
+        if let Some(f) = &f {
+            if !reason.starts_with("dry-run") {
+                let (demo, symbol) = (f.demo, f.symbol.clone());
+                self.note_route_reject(demo, &symbol, reason);
+            }
+        }
         if let Some(f) = &f {
             self.in_flight_markets.remove(&f.market_id);
             let backoff = if kind == RejectKind::Other { LIVE_REJECT_BACKOFF_MS } else { kind.backoff_ms() };
@@ -4767,6 +4849,11 @@ impl Engine {
         if changes > 0 {
             self.pending_alerts
                 .push(format!("⚠ Pythia reconciled {changes} position difference(s) with {venue:?}"));
+            self.alert(
+                crate::alerts::AlertKind::ReconcileMismatch,
+                format!("reconcile:{venue:?}:{changes}"),
+                format!("{venue:?} and Pythia's book differed in {changes} position(s); Pythia took the venue's numbers. See the journal."),
+            );
         }
         changes
     }
@@ -5478,6 +5565,12 @@ impl Engine {
         self.limits.kill_switch = !self.limits.kill_switch;
         let s = if self.limits.kill_switch { "ENGAGED — live buys halted" } else { "released" };
         self.log(JournalKind::Risk, format!("KILL SWITCH {s}"), None, None);
+        let (key, text) = if self.limits.kill_switch {
+            ("kill:on", "engaged by hand. Only closing orders pass until it is released.")
+        } else {
+            ("kill:off", "released by hand.")
+        };
+        self.alert(crate::alerts::AlertKind::KillSwitch, key, text);
     }
     pub fn set_limits(&mut self, next: RiskLimits) {
         self.limits = next;
@@ -6250,6 +6343,47 @@ impl Engine {
     /// Take and clear queued alert messages (drained by the webhook poster).
     pub fn drain_alerts(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_alerts)
+    }
+
+    /// Queue a typed operator alert. Bounded: the oldest go first.
+    pub(crate) fn alert(&mut self, kind: crate::alerts::AlertKind, key: impl Into<String>, text: impl Into<String>) {
+        self.alert_events.push(crate::alerts::AlertEvent::new(kind, key, text));
+        if self.alert_events.len() > 100 {
+            self.alert_events.remove(0);
+        }
+    }
+
+    /// Take and clear queued operator alerts (drained by the host into its
+    /// `alerts::AlertSink`).
+    pub fn drain_alert_events(&mut self) -> Vec<crate::alerts::AlertEvent> {
+        std::mem::take(&mut self.alert_events)
+    }
+
+    /// More than `n` demo or live orders refused in a row is an alert (default 3).
+    pub fn set_alert_reject_threshold(&mut self, n: u32) {
+        self.alert_reject_after = n.max(1);
+    }
+
+    /// One more demo or live order refused (by the venue, or before it got
+    /// there). The alert goes out once per streak, when it passes the threshold.
+    fn note_route_reject(&mut self, demo: bool, symbol: &str, reason: &str) {
+        let i = usize::from(demo);
+        self.reject_streak[i] += 1;
+        let n = self.reject_streak[i];
+        if n == self.alert_reject_after + 1 {
+            let what = if demo { "demo" } else { "live" };
+            let on = if symbol.is_empty() { String::new() } else { format!(" (last: {symbol})") };
+            self.alert(
+                crate::alerts::AlertKind::OrderRejects,
+                format!("rejects:{what}"),
+                format!("{n} {what} orders refused in a row{on}: {reason}"),
+            );
+        }
+    }
+
+    /// A demo or live order filled: the refusal streak on its route is over.
+    fn note_route_fill(&mut self, demo: bool) {
+        self.reject_streak[usize::from(demo)] = 0;
     }
 }
 
