@@ -288,6 +288,11 @@ impl Engine {
         let mismatches = checks.iter().filter(|c| !c.status.settled()).count();
         if mismatches > 0 && self.demo_reconcile.as_ref().is_none_or(|d| d.mismatches != mismatches) {
             self.pending_alerts.push(format!("⚠ Alpaca paper and Pythia's demo book differ in {mismatches} pair(s); see the Live page"));
+            self.alert(
+                crate::alerts::AlertKind::ReconcileMismatch,
+                format!("reconcile:demo:{mismatches}"),
+                format!("the Alpaca paper account and Pythia's demo book differ in {mismatches} pair(s); see the Live page."),
+            );
         }
         self.demo_reconcile = Some(DemoReconcile {
             checked_at: now,

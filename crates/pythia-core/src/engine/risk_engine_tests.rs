@@ -624,3 +624,29 @@ fn a_real_position_is_trimmed_at_its_venue_not_in_the_simulator() {
     // Booked when the venue reports the fill, not before.
     assert_eq!(e.positions["crypto:BTC/USD"].qty, held);
 }
+
+#[test]
+fn kill_switch_and_daily_loss_brake_are_operator_alerts() {
+    use crate::alerts::AlertKind;
+    let mut e = Engine::new();
+    e.toggle_kill();
+    e.toggle_kill();
+    let a = e.drain_alert_events();
+    assert_eq!(a.iter().map(|a| a.key.as_str()).collect::<Vec<_>>(), ["kill:on", "kill:off"]);
+    assert!(a.iter().all(|a| a.kind == AlertKind::KillSwitch));
+
+    e.limits.max_daily_loss_pct = 3.0;
+    e.day_start_equity = 100_000.0;
+    e.realized_pnl = -2_000.0;
+    e.check_daily_loss_alert(7);
+    assert!(e.drain_alert_events().is_empty(), "2 % is inside the limit");
+    e.realized_pnl = -3_500.0;
+    e.check_daily_loss_alert(7);
+    e.check_daily_loss_alert(7);
+    let a = e.drain_alert_events();
+    assert_eq!(a.len(), 1, "once a day: {a:?}");
+    assert_eq!(a[0].kind, AlertKind::DailyLossBrake);
+    assert!(a[0].text.starts_with("the book is down 3.5 % today, limit 3.0 %"), "{}", a[0].text);
+    e.check_daily_loss_alert(8);
+    assert_eq!(e.drain_alert_events().len(), 1, "the next day may alert again");
+}

@@ -448,3 +448,37 @@ fn a_wash_trade_waits_for_the_opposite_order_and_others_stay_as_before() {
     assert_eq!(journal_count(&e, "connection reset"), 2);
     assert!(e.live_backoff_until["crypto:ETH/USD"] - e.now() <= LIVE_REJECT_BACKOFF_MS);
 }
+
+#[test]
+fn refusals_in_a_row_past_the_threshold_alert_once_per_streak() {
+    use crate::alerts::AlertKind;
+    let (mut e, sid) = engine();
+    e.set_alert_reject_threshold(2);
+    let refuse = |e: &mut Engine, reason: &str| {
+        time_passes(e);
+        e.place_order(&sid, BTC, Side::Buy, 1_000.0, RouteIntent::Demo).unwrap();
+        let o = e.drain_live_orders().pop().unwrap();
+        e.apply_live_reject(&o.order_id, reason);
+    };
+    let rejects = |e: &mut Engine| e.drain_alert_events().into_iter().filter(|a| a.kind == AlertKind::OrderRejects).collect::<Vec<_>>();
+    refuse(&mut e, "venue rejected order: submit 500: busy");
+    refuse(&mut e, "venue rejected order: submit 500: busy");
+    assert!(rejects(&mut e).is_empty(), "two is not more than two");
+    refuse(&mut e, "venue rejected order: submit 500: busy");
+    let a = rejects(&mut e);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!(a[0].key, "rejects:demo");
+    assert!(a[0].text.starts_with("3 demo orders refused in a row (last: BTC/USD)"), "{}", a[0].text);
+    refuse(&mut e, "venue rejected order: submit 500: busy");
+    assert!(rejects(&mut e).is_empty(), "once per streak");
+    // A fill ends the streak; a dry run never counts.
+    e.note_route_fill(true);
+    for _ in 0..4 {
+        refuse(&mut e, "dry-run: not submitted");
+    }
+    assert!(rejects(&mut e).is_empty());
+    for _ in 0..3 {
+        refuse(&mut e, "venue rejected order: submit 500: busy");
+    }
+    assert_eq!(rejects(&mut e).len(), 1, "a new streak alerts again");
+}
