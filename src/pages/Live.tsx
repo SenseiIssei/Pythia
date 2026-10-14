@@ -29,7 +29,7 @@ import type { Venue } from "../types";
 import { cryptoDemoName, demoApiTestNote, demoIsApiTestOnly } from "../venueNames";
 import { PAIR_STATUS, estimatedFeeTotal, pairsToShow, qty9, reconcileHeadline } from "../demoReconcile";
 import { changeStrategyState } from "../strategyState";
-import { ALPACA_CRYPTO_DEMO, alpacaMaker, makerSummary } from "../lib/maker";
+import { ALPACA_CRYPTO_DEMO, alpacaMaker, alpacaMakerStats, makerSummary, makerWindowLine } from "../lib/maker";
 
 const ARM_PHRASE = "ARM LIVE";
 
@@ -602,6 +602,15 @@ function DemoCard() {
                       {alpacaMaker(live)!.enabled ? "Use market orders" : "Use maker limits"}
                     </Button>
                   )}
+                </div>
+              )}
+              {venue === "crypto" && on && live.demoExchange === "alpaca" && alpacaMakerStats(live) && (
+                <div
+                  className="mt-1 text-xs text-cyber-text-faint"
+                  title="Maker orders on this route. Maker by qty: share of the filled amount that rested at our limit. Cost: realised slippage plus fee against what a market order was modelled to cost. Fallback: the rest went out as a marketable limit."
+                >
+                  <div>Maker {makerWindowLine(alpacaMakerStats(live)!.d7)}</div>
+                  <div>Maker {makerWindowLine(alpacaMakerStats(live)!.d30)}</div>
                 </div>
               )}
               {on && (

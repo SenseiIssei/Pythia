@@ -158,6 +158,24 @@ order: modelled slippage plus the taker fee), and a closing journal line
 market order`). The Analytics trade log shows both. The fee actually charged
 is still the `CFEE` activity Alpaca posts later (above).
 
+**No book yet.** Right after a restart the order book feed needs a few
+seconds to load. A non-urgent order (a lab rebalance, a strategy signal, a
+hand-placed demo order, a risk trim) then waits for a fresh book instead of
+crossing, with one journal line, for at most 10 minutes. A lab rebalance
+waits whole, so its sells and buys stay together. If no book comes in that
+time, the order starts at the fallback (a marketable limit IOC a
+`fallbackBandBps` band past the last price, then a market order for the
+rest) and counts as a fallback without a book. A resting limit whose book
+went stale is placed again at the same price rather than crossing early.
+
+**Statistics.** Each finished maker order is kept for 30 days (saved with
+the engine state). Per route, over the last 7 and 30 days: the maker fill
+rate by quantity and by order (orders filled entirely as maker), the
+average resting time, the notional-weighted realised cost against the
+modelled market-order cost, and the fallback count (and how many of those
+had no book). They are in `/api/state` as `live.makerStats`, at
+`GET /api/execution/stats`, and on the Live page's demo card.
+
 **What never rests.** Stop-loss and take-profit exits, an autopilot's
 flatten at stop, and a manual flatten go out as market orders. An exit like
 that in a coin with a resting maker order makes the maker order stand down
