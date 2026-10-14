@@ -7,7 +7,7 @@ use pythia_core::connectors::cex::{self, Exchange, ExchangeInfo};
 use pythia_core::connectors::alpaca::AlpacaAccount;
 use pythia_core::connectors::{Environment, Side, Venue};
 use pythia_core::costs::CostVenue;
-use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, VenueCash};
+use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, AutopilotUpdate, VenueCash};
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, EngineState, LiveConfig, MarketDiag, RiskLimits, StrategyConfig,
     StrategyState,
@@ -263,6 +263,31 @@ pub fn autopilot_pause(app: AppHandle, app_state: State<AppState>, id: String) -
     let result = app_state.engine.lock().unwrap().autopilot_pause(&id);
     push_state(&app);
     result
+}
+
+/// Change a running or paused autopilot in place. A higher amount for a live
+/// one reads the venue's free cash first, like a start. Returns what changed,
+/// in one sentence.
+#[tauri::command]
+pub async fn autopilot_update(app: AppHandle, id: String, update: AutopilotUpdate, confirm: Option<bool>) -> Result<String, String> {
+    let (engine, creds) = {
+        let st = app.state::<AppState>();
+        (st.engine.clone(), credentials(st.inner()))
+    };
+    let live = engine.lock().unwrap().autopilot_config(&id).filter(|c| c.mode == AutopilotMode::Live);
+    let cash = match live {
+        Some(c) if update.capital_usd.is_some() => {
+            let paper = engine.lock().unwrap().live_config().paper;
+            match wallets::available_cash(&creds, &c.venue, paper).await {
+                Ok(c) => VenueCash::Read(c),
+                Err(why) => VenueCash::Failed(why),
+            }
+        }
+        _ => VenueCash::NotRead,
+    };
+    let msg = engine.lock().unwrap().autopilot_update(&id, update, confirm.unwrap_or(false), cash)?;
+    push_state(&app);
+    Ok(msg)
 }
 
 #[tauri::command]

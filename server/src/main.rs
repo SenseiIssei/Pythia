@@ -34,7 +34,7 @@ use tower_http::cors::CorsLayer;
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
 use pythia_core::connectors::cex::{self, Exchange};
 use pythia_core::connectors::{Environment, Side, Venue};
-use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, VenueCash};
+use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, AutopilotUpdate, VenueCash};
 use pythia_core::engine::maker::MakerSettings;
 use pythia_core::engine::{
     AiPolicy, AiView, BrokerStatus, Engine, EngineState, LiveConfig, RiskLimits, StrategyConfig,
@@ -1180,6 +1180,15 @@ enum Command {
     },
     AutopilotPause { id: String },
     AutopilotResume { id: String },
+    /// Change a running or paused autopilot in place (name, strategies,
+    /// amount, stop rules). A live one needs `confirm`, and so does a looser
+    /// max-loss rule.
+    AutopilotUpdate {
+        id: String,
+        update: AutopilotUpdate,
+        #[serde(default)]
+        confirm: bool,
+    },
 }
 
 /// Apply a command and return the fresh state so the caller updates instantly
@@ -1190,15 +1199,27 @@ async fn post_command(
 ) -> axum::response::Response {
     // A live autopilot may not get more than the venue holds: read its free
     // cash first, with no engine lock held across the network call.
-    let cash = match &cmd {
-        Command::AutopilotStart { config, .. } if config.mode == AutopilotMode::Live => {
+    // A higher amount for a running live autopilot is read the same way.
+    let live_venue = match &cmd {
+        Command::AutopilotStart { config, .. } if config.mode == AutopilotMode::Live => Some(config.venue.clone()),
+        Command::AutopilotUpdate { id, update, .. } if update.capital_usd.is_some() => st
+            .engine
+            .lock()
+            .unwrap()
+            .autopilot_config(id)
+            .filter(|c| c.mode == AutopilotMode::Live)
+            .map(|c| c.venue),
+        _ => None,
+    };
+    let cash = match live_venue {
+        Some(venue) => {
             let paper = st.engine.lock().unwrap().live_config().paper;
-            match wallets::available_cash(&st.creds, &config.venue, paper).await {
+            match wallets::available_cash(&st.creds, &venue, paper).await {
                 Ok(c) => VenueCash::Read(c),
                 Err(why) => VenueCash::Failed(why),
             }
         }
-        _ => VenueCash::NotRead,
+        None => VenueCash::NotRead,
     };
     let mut refused: Option<String> = None;
     let dto = {
@@ -1224,6 +1245,9 @@ async fn post_command(
             Command::AutopilotStop { id, flatten } => refused = e.autopilot_stop(&id, flatten).err(),
             Command::AutopilotPause { id } => refused = e.autopilot_pause(&id).err(),
             Command::AutopilotResume { id } => refused = e.autopilot_resume(&id).err(),
+            Command::AutopilotUpdate { id, update, confirm } => {
+                refused = e.autopilot_update(&id, update, confirm, cash).err()
+            }
         }
         // Push the mutated state to every stream listener too.
         let s = e.state();
@@ -1784,5 +1808,23 @@ mod tests {
         let mut e = Engine::new();
         e.set_maker_route(&req.route, req.settings).unwrap();
         assert_eq!(e.maker_routes()["demo:alpaca:crypto"].max_tries, 2);
+    }
+
+    #[test]
+    fn the_autopilot_update_command_reads_the_wire_shape_the_ui_sends() {
+        let cmd: Command = serde_json::from_str(
+            r#"{"cmd":"autopilotUpdate","id":"ap_1","confirm":true,"update":{"name":"Momentum","capitalUsd":5000,"sleeves":[{"strategyId":"lab:tsmom_tranches","weight":1}],"stop":{"maxLossPct":10}}}"#,
+        )
+        .unwrap();
+        let Command::AutopilotUpdate { id, update, confirm } = cmd else { panic!("not an update") };
+        assert_eq!(id, "ap_1");
+        assert!(confirm);
+        assert_eq!(update.capital_usd, Some(5000.0));
+        assert_eq!(update.sleeves.unwrap()[0].strategy_id, "lab:tsmom_tranches");
+        assert_eq!(update.stop.unwrap().max_loss_pct, Some(10.0));
+        assert_eq!(update.repick_every_hours, None, "left out: unchanged");
+        let cmd: Command = serde_json::from_str(r#"{"cmd":"autopilotUpdate","id":"ap_1","update":{"sleeves":[]}}"#).unwrap();
+        let Command::AutopilotUpdate { update, confirm, .. } = cmd else { panic!("not an update") };
+        assert!(!confirm && update.sleeves.unwrap().is_empty(), "an empty list is the auto pick");
     }
 }

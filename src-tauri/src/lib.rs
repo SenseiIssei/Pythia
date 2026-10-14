@@ -245,6 +245,7 @@ pub fn run() {
             commands::autopilot_stop,
             commands::autopilot_pause,
             commands::autopilot_resume,
+            commands::autopilot_update,
             commands::save_venue_keys,
             commands::clear_venue_keys,
             commands::venue_status,
