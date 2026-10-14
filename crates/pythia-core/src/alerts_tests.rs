@@ -202,3 +202,29 @@ fn drift_mutes_once_and_says_when_it_clears() {
     assert_eq!(off.len(), 1);
     assert!(off[0].text.contains("back in the trained range"));
 }
+
+#[test]
+fn telegram_comes_from_its_token_and_chat_and_posts_plain_text_with_the_chat_id() {
+    let env = |k: &str| match k {
+        "PYTHIA_TELEGRAM_BOT_TOKEN" => Some(" 123:abc ".to_string()),
+        "PYTHIA_TELEGRAM_CHAT_ID" => Some("4242".to_string()),
+        _ => None,
+    };
+    let c = AlertConfig::from_lookup(env).expect("telegram is configured");
+    assert_eq!(c.format, AlertFormat::Telegram);
+    assert_eq!(c.url, "https://api.telegram.org/bot123:abc/sendMessage");
+    assert!(!format!("{c:?}").contains("123:abc"), "the token never shows in a log line");
+    let ev = AlertEvent::new(AlertKind::KillSwitch, "k", "all trading halted");
+    let text = compose(&c, &[ev], 0);
+    assert!(text.starts_with("Pythia\n") && !text.contains('*'), "{text}");
+    let b = c.body(&text);
+    assert_eq!(b["chat_id"], "4242");
+    assert_eq!(b["text"], text);
+    // A token without a chat is not enough, and a webhook wins over both.
+    assert!(AlertConfig::from_lookup(|k| (k == "PYTHIA_TELEGRAM_BOT_TOKEN").then(|| "t".to_string())).is_none());
+    let both = |k: &str| match k {
+        "PYTHIA_ALERT_WEBHOOK" => Some("https://example.invalid/hook".to_string()),
+        _ => env(k),
+    };
+    assert_eq!(AlertConfig::from_lookup(both).unwrap().format, AlertFormat::Discord);
+}

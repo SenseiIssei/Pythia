@@ -143,6 +143,17 @@ def test_daily_posts_to_the_webhook_in_its_format(hook, data, monkeypatch, capsy
     assert "secret-token" not in capsys.readouterr().out + json.dumps(st)
 
 
+def test_telegram_needs_token_and_chat_and_carries_the_chat_id(monkeypatch):
+    monkeypatch.delenv("PYTHIA_ALERT_WEBHOOK", raising=False)
+    monkeypatch.setenv("PYTHIA_TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.delenv("PYTHIA_TELEGRAM_CHAT_ID", raising=False)
+    assert notify.config()[0] is None
+    monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "4242")
+    url, fmt, _ = notify.config()
+    assert fmt == "telegram" and url == "https://api.telegram.org/bot123:abc/sendMessage"
+    assert notify.body(fmt, "hi") == {"chat_id": "4242", "text": "hi"}
+
+
 def test_a_failed_post_is_reported_without_the_url(hook, data, monkeypatch, capsys):
     url, got, state = hook
     state["status"] = 500

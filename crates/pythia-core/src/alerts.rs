@@ -103,6 +103,7 @@ impl AlertEvent {
         match format {
             AlertFormat::Discord => format!("**{}** {}", self.kind.label(), self.text),
             AlertFormat::Slack => format!("*{}* {}", self.kind.label(), self.text),
+            AlertFormat::Telegram => format!("{}: {}", self.kind.label(), self.text),
         }
     }
 }
@@ -114,6 +115,9 @@ pub enum AlertFormat {
     Discord,
     /// `{"text": "..."}`
     Slack,
+    /// Telegram's `sendMessage`: `{"chat_id": "...", "text": "..."}`, plain
+    /// text so nothing in a message has to be escaped.
+    Telegram,
 }
 
 impl AlertFormat {
@@ -121,24 +125,31 @@ impl AlertFormat {
         match s.trim().to_ascii_lowercase().as_str() {
             "discord" | "content" => Some(AlertFormat::Discord),
             "slack" | "text" => Some(AlertFormat::Slack),
+            "telegram" => Some(AlertFormat::Telegram),
             _ => None,
         }
     }
-    /// Discord caps a message at 2000 characters; Slack takes far more, but a
-    /// phone notification is no place for a wall of text either.
+    /// Discord caps a message at 2000 characters, Telegram at 4096; Slack takes
+    /// far more, but a phone notification is no place for a wall of text either.
     fn limit(self) -> usize {
         match self {
             AlertFormat::Discord => 1900,
             AlertFormat::Slack => 3000,
+            AlertFormat::Telegram => 3900,
         }
     }
     pub fn body(self, content: &str) -> serde_json::Value {
         let c = truncate(content, self.limit());
         match self {
             AlertFormat::Discord => serde_json::json!({ "content": c }),
-            AlertFormat::Slack => serde_json::json!({ "text": c }),
+            AlertFormat::Slack | AlertFormat::Telegram => serde_json::json!({ "text": c }),
         }
     }
+}
+
+/// The Telegram Bot API endpoint that sends a message with this bot token.
+pub fn telegram_url(token: &str) -> String {
+    format!("https://api.telegram.org/bot{}/sendMessage", token.trim())
 }
 
 /// How the sender behaves. All of it can be set from the environment, see
@@ -159,6 +170,8 @@ pub struct AlertConfig {
     pub timeout: Duration,
     /// Prefix of every post, so one channel can serve several engines.
     pub prefix: String,
+    /// Telegram only: the chat the bot writes to.
+    pub chat_id: Option<String>,
 }
 
 impl std::fmt::Debug for AlertConfig {
@@ -185,29 +198,60 @@ impl AlertConfig {
             queue: 64,
             timeout: Duration::from_secs(10),
             prefix: "Pythia".into(),
+            chat_id: None,
         }
     }
 
     /// `PYTHIA_ALERT_WEBHOOK` (required, else `None`), `PYTHIA_ALERT_FORMAT`
     /// (`discord`, the default, or `slack`), `PYTHIA_ALERT_DEDUP_MIN` (30),
     /// `PYTHIA_ALERT_MAX_PER_HOUR` (20), `PYTHIA_ALERT_PREFIX` (`Pythia`).
+    /// Telegram instead: `PYTHIA_TELEGRAM_BOT_TOKEN` and
+    /// `PYTHIA_TELEGRAM_CHAT_ID` (both required, used when no webhook is set).
     pub fn from_env() -> Option<Self> {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
+    /// The JSON this config posts for one message.
+    pub fn body(&self, content: &str) -> serde_json::Value {
+        let mut b = self.format.body(content);
+        if let (AlertFormat::Telegram, Some(chat)) = (self.format, &self.chat_id) {
+            b["chat_id"] = serde_json::json!(chat);
+        }
+        b
+    }
+
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        let url = get("PYTHIA_ALERT_WEBHOOK").map(|u| u.trim().to_string()).filter(|u| !u.is_empty())?;
+        let nonempty = |k: &str| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let url = match nonempty("PYTHIA_ALERT_WEBHOOK") {
+            Some(u) => u,
+            None => {
+                let token = nonempty("PYTHIA_TELEGRAM_BOT_TOKEN")?;
+                let chat = nonempty("PYTHIA_TELEGRAM_CHAT_ID")?;
+                let mut c = Self::new(telegram_url(&token), AlertFormat::Telegram);
+                c.chat_id = Some(chat);
+                return Some(c.tuned(&get));
+            }
+        };
         let format = match get("PYTHIA_ALERT_FORMAT").filter(|s| !s.trim().is_empty()) {
             None => AlertFormat::Discord,
             Some(s) => match AlertFormat::parse(&s) {
                 Some(f) => f,
                 None => {
-                    tracing::warn!("PYTHIA_ALERT_FORMAT={s} is not discord or slack; using discord");
+                    tracing::warn!("PYTHIA_ALERT_FORMAT={s} is not discord, slack or telegram; using discord");
                     AlertFormat::Discord
                 }
             },
         };
         let mut c = Self::new(url, format);
+        if format == AlertFormat::Telegram {
+            c.chat_id = nonempty("PYTHIA_TELEGRAM_CHAT_ID");
+        }
+        Some(c.tuned(&get))
+    }
+
+    /// The optional knobs shared by every destination.
+    fn tuned(mut self, get: &impl Fn(&str) -> Option<String>) -> Self {
+        let c = &mut self;
         let num = |k: &str| get(k).and_then(|v| v.trim().parse::<u64>().ok());
         if let Some(m) = num("PYTHIA_ALERT_DEDUP_MIN") {
             c.dedup = Duration::from_secs(m * 60);
@@ -218,7 +262,7 @@ impl AlertConfig {
         if let Some(p) = get("PYTHIA_ALERT_PREFIX") {
             c.prefix = p.trim().to_string();
         }
-        Some(c)
+        self
     }
 }
 
@@ -348,6 +392,7 @@ pub fn compose(cfg: &AlertConfig, events: &[AlertEvent], suppressed: usize) -> S
         lines.push(match cfg.format {
             AlertFormat::Discord => format!("**{}**", cfg.prefix),
             AlertFormat::Slack => format!("*{}*", cfg.prefix),
+            AlertFormat::Telegram => cfg.prefix.clone(),
         });
     }
     lines.extend(events.iter().map(|e| e.line(cfg.format)));
@@ -361,7 +406,7 @@ pub fn compose(cfg: &AlertConfig, events: &[AlertEvent], suppressed: usize) -> S
 async fn deliver(client: &reqwest::Client, cfg: &AlertConfig, content: &str) -> Result<(), String> {
     let resp = client
         .post(&cfg.url)
-        .json(&cfg.format.body(content))
+        .json(&cfg.body(content))
         .send()
         .await
         .map_err(|e| e.without_url().to_string())?;

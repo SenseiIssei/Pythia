@@ -19,6 +19,8 @@ Two jobs, one webhook (PYTHIA_ALERT_WEBHOOK, the same one the engine posts to):
 
 Environment: PYTHIA_ALERT_WEBHOOK (unset: print only), PYTHIA_ALERT_FORMAT
 (discord, the default, posts {"content": ...}; slack posts {"text": ...}),
+or instead of a webhook PYTHIA_TELEGRAM_BOT_TOKEN and PYTHIA_TELEGRAM_CHAT_ID,
+which post to that chat through Telegram's sendMessage,
 PYTHIA_ALERT_PREFIX (first word of every post, default Pythia), PYTHIA_DATA
 and PYTHIA_REPORTS as for the rest of the lab.
 
@@ -52,15 +54,23 @@ def reports_root() -> Path:
 # ---------------------------------------------------------------- posting
 
 def config() -> tuple[str | None, str, str]:
-    """(url or None, format, prefix) from the environment."""
-    url = (os.environ.get("PYTHIA_ALERT_WEBHOOK") or "").strip() or None
-    fmt = (os.environ.get("PYTHIA_ALERT_FORMAT") or "discord").strip().lower()
-    fmt = "slack" if fmt in ("slack", "text") else "discord"
+    """(url or None, format, prefix) from the environment. Without a webhook,
+    PYTHIA_TELEGRAM_BOT_TOKEN and PYTHIA_TELEGRAM_CHAT_ID send to Telegram."""
     prefix = os.environ.get("PYTHIA_ALERT_PREFIX", "Pythia").strip()
+    url = (os.environ.get("PYTHIA_ALERT_WEBHOOK") or "").strip() or None
+    if url is None:
+        token = (os.environ.get("PYTHIA_TELEGRAM_BOT_TOKEN") or "").strip()
+        if token and (os.environ.get("PYTHIA_TELEGRAM_CHAT_ID") or "").strip():
+            return f"https://api.telegram.org/bot{token}/sendMessage", "telegram", prefix
+        return None, "discord", prefix
+    fmt = (os.environ.get("PYTHIA_ALERT_FORMAT") or "discord").strip().lower()
+    fmt = {"slack": "slack", "text": "slack", "telegram": "telegram"}.get(fmt, "discord")
     return url, fmt, prefix
 
 
 def body(fmt: str, text: str) -> dict:
+    if fmt == "telegram":
+        return {"chat_id": (os.environ.get("PYTHIA_TELEGRAM_CHAT_ID") or "").strip(), "text": text}
     return {"text": text} if fmt == "slack" else {"content": text}
 
 
