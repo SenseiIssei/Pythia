@@ -23,6 +23,8 @@ pub mod risk;
 #[cfg(test)]
 mod risk_engine_tests;
 #[cfg(test)]
+mod restart_tests;
+#[cfg(test)]
 mod seam_tests;
 pub mod strategies;
 
@@ -924,6 +926,12 @@ pub struct EngineState {
     pub positions: Vec<PositionView>,
     pub orders: Vec<Order>,
     pub journal: Vec<JournalEntry>,
+    /// The durable record of trades, risk actions, autopilot actions and
+    /// rejections, newest first (see [`EVENT_RING`]). Filled by
+    /// [`Engine::state_with_events`] (`GET /api/state`); left empty in the
+    /// state pushed every tick, which would otherwise carry it each time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<JournalEntry>,
     pub strategies: Vec<StrategyConfig>,
     pub limits: RiskLimits,
     pub history: HashMap<String, Vec<f64>>, // recent closes per tradable market
@@ -1037,6 +1045,9 @@ pub struct Persisted {
     pub strategies: Vec<StrategyConfig>,
     pub orders: Vec<Order>,
     pub journal: Vec<JournalEntry>,
+    /// The durable event ring ([`EVENT_RING`]). Absent in older saves.
+    #[serde(default)]
+    pub events: Vec<JournalEntry>,
     pub limits: RiskLimits,
     pub real_ids: Vec<String>,
     /// The forecast ledger. Losing this on restart would reset every source's
@@ -1134,6 +1145,32 @@ const LIVE_REJECT_BACKOFF_MS: i64 = 60_000;
 /// `LAB_RETRY_MAX` times in all: six attempts over 1 h 40 min, well inside a
 /// signal's 36-hour validity, then the rest waits for the next signal.
 const LAB_RETRY_EVERY_MS: i64 = 20 * 60_000;
+
+/// How many trade, risk, autopilot and rejection events the durable ring
+/// keeps (see `Engine::events`).
+pub const EVENT_RING: usize = 2000;
+
+/// One minute of a repetitive notice: the minute, the count so far, how
+/// many notices were folded in and the journal line that shows them.
+#[derive(Debug, Clone)]
+struct Rollup {
+    minute: i64,
+    total: usize,
+    times: u32,
+    entry: String,
+}
+
+/// Belongs in the durable event ring: an order, a fill, a rejection, a risk
+/// action, an exit or trim, a lab rebalance, or anything an autopilot did.
+fn is_event(kind: JournalKind, message: &str) -> bool {
+    match kind {
+        JournalKind::Order | JournalKind::Fill | JournalKind::Reject | JournalKind::Risk => true,
+        JournalKind::Signal => message.starts_with("Rebalance") || message.contains("utopilot"),
+        JournalKind::System => {
+            ["Exit ", "Trim ", "DEMO ", "Live ", "LIVE "].iter().any(|p| message.starts_with(p)) || message.contains("utopilot")
+        }
+    }
+}
 const LAB_RETRY_MAX: u32 = 6;
 
 pub struct Engine {
@@ -1298,6 +1335,17 @@ pub struct Engine {
     sizing_noted: HashMap<String, risk::SizingMode>,
     /// The volatility spike trim's clock and rate limit.
     vol_spike: risk::VolSpikeGuard,
+    /// Added to the wall clock. Always 0 outside tests.
+    clock_skew_ms: i64,
+    /// The venue order whose fills are being booked right now, if any.
+    fill_order: Option<String>,
+    /// The durable record of trades, risk actions, autopilot actions and
+    /// rejections, newest first, at most [`EVENT_RING`]. Saved. The journal
+    /// also carries feed and forecast notices and turns over in hours; this
+    /// is what is left to read after an incident.
+    events: Vec<JournalEntry>,
+    /// Repetitive system notices folded into one journal line per minute.
+    rollups: HashMap<&'static str, Rollup>,
     /// Which source each crypto market's quotes, candles and books come from,
     /// and the sanity check that keeps a bad tick off the mark.
     feeds: feeds::FeedHealth,
@@ -1403,6 +1451,10 @@ impl Engine {
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
             vol_spike: risk::VolSpikeGuard::default(),
+            clock_skew_ms: 0,
+            fill_order: None,
+            events: Vec::new(),
+            rollups: HashMap::new(),
             feeds: feeds::FeedHealth::default(),
             feed_noted: HashSet::new(),
             autopilots: Vec::new(),
@@ -1437,7 +1489,14 @@ impl Engine {
     }
 
     fn now(&self) -> i64 {
-        chrono::Utc::now().timestamp_millis()
+        chrono::Utc::now().timestamp_millis() + self.clock_skew_ms
+    }
+
+    /// Tests run the engine forward in time with this: every clock reading
+    /// the engine takes moves by `ms`.
+    #[cfg(test)]
+    pub(crate) fn advance_clock_for_test(&mut self, ms: i64) {
+        self.clock_skew_ms += ms;
     }
     fn next_id(&mut self, prefix: &str) -> String {
         self.seq += 1;
@@ -1520,12 +1579,7 @@ impl Engine {
 
     fn log_new_bars(&mut self, fresh: usize) {
         if fresh > 0 {
-            self.log(
-                JournalKind::System,
-                format!("Candle feed · {fresh} market(s) advanced to a new bar"),
-                None,
-                None,
-            );
+            self.log_rollup("candles", fresh, |n| format!("Candle feed · {n} market(s) advanced to a new bar"));
         }
     }
 
@@ -2399,12 +2453,7 @@ impl Engine {
             .collect();
         let settled = self.forecast_store.resolve_settled(now, &pred_prices);
         if settled > 0 {
-            self.log(
-                JournalKind::System,
-                format!("{settled} outcome forecast(s) settled — track records updated"),
-                None,
-                None,
-            );
+            self.log_rollup("settled", settled, |n| format!("{n} outcome forecast(s) settled · track records updated"));
         }
         let _ = resolved; // scored silently; the journal would be noise
 
@@ -2599,10 +2648,19 @@ impl Engine {
             .filter_map(|id| self.exit_price_stale(id, now).map(|age| (id.clone(), age)))
             .collect();
         let mut held: Vec<(String, i64)> = Vec::new();
+        // A lab book is held to the lab's targets and nothing else: a stop on
+        // one of its positions would trade a strategy the lab never tested.
+        let lab: HashSet<String> =
+            self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
 
         for (id, pos) in self.positions.iter_mut() {
             let price = *prices.get(id).unwrap_or(&0.0);
             if price <= 0.0 || pos.qty == 0.0 || pos.stop <= 0.0 && pos.target <= 0.0 {
+                continue;
+            }
+            if lab.contains(&pos.strategy_id) {
+                pos.stop = 0.0;
+                pos.target = 0.0;
                 continue;
             }
             if let Some(age) = stale.get(id) {
@@ -2692,9 +2750,75 @@ impl Engine {
         let equity = self.equity();
         let vol_pct = if equity > 0.0 { self.book_vol() / equity * 100.0 } else { 0.0 };
         let (target, k) = (self.limits.portfolio_vol_target_pct, self.limits.vol_spike_trim_mult);
+        // Cold estimates (after a restart, before enough real candles): a
+        // market's volatility is then the 5 %-a-day assumption and its pairs
+        // count as fully correlated. That reads as a spike and is not one, so
+        // a trim that would sell a lab book waits until each of its positions
+        // has a measured volatility.
+        let lab: HashSet<String> =
+            self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
+        let lab_ids: Vec<String> = self
+            .positions
+            .iter()
+            .filter(|(_, p)| p.qty != 0.0 && lab.contains(&p.strategy_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let vols = self.annual_vols(lab_ids.iter().map(String::as_str));
+        let mut cold: Vec<String> = lab_ids.into_iter().filter(|id| !vols.contains_key(id)).collect();
+        cold.sort();
+        if k > 0.0 && target > 0.0 && !cold.is_empty() {
+            self.vol_spike.above_since = None;
+            if vol_pct > target * k.max(1.0) && self.feed_noted.insert("voltrim:cold".into()) {
+                self.log(
+                    JournalKind::Risk,
+                    format!(
+                        "Volatility spike trim waits for warm estimates: the book reads about {vol_pct:.0}% a year, but \
+                         {} of its markets have no measured volatility yet ({}), so that number is an assumption. \
+                         Nothing is sold until each has {} real candles",
+                        cold.len(),
+                        cold.join(", "),
+                        risk::CORR_MIN_CLOSES
+                    ),
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
+        self.feed_noted.remove("voltrim:cold");
+        let before = self.vol_spike.clone();
         let Some(keep) = self.vol_spike.update(vol_pct, target, k, now) else { return };
         let mut ids: Vec<String> = self.positions.keys().cloned().collect();
         ids.sort();
+        // A lab book on a maker route is reduced with maker limits, never by
+        // crossing the spread: without a fresh book to price them from, the
+        // trim waits (its clock keeps running) instead of selling at market.
+        let no_book: Vec<String> = ids
+            .iter()
+            .filter(|id| self.trim_needs_maker(id))
+            .filter(|id| {
+                let side = if self.positions[*id].qty > 0.0 { Side::Sell } else { Side::Buy };
+                self.markets.iter().find(|m| &m.id == *id).is_none_or(|m| self.maker_plan(m, side).is_none())
+            })
+            .cloned()
+            .collect();
+        if !no_book.is_empty() {
+            self.vol_spike = before;
+            if self.feed_noted.insert("voltrim:book".into()) {
+                self.log(
+                    JournalKind::Risk,
+                    format!(
+                        "Volatility spike trim held: the lab book is reduced with maker limits on this route and \
+                         there is no fresh order book to price them for {}. It goes out as soon as there is",
+                        no_book.join(", ")
+                    ),
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
+        self.feed_noted.remove("voltrim:book");
         self.log(
             JournalKind::Risk,
             format!(
@@ -2709,6 +2833,15 @@ impl Engine {
         for id in ids {
             self.trim_position(&id, keep, "volatility spike trim");
         }
+    }
+
+    /// A risk trim of this position must rest as a maker order: a lab-book
+    /// position at the demo venue on a route with maker execution on.
+    fn trim_needs_maker(&self, id: &str) -> bool {
+        let Some(p) = self.positions.get(id) else { return false };
+        p.demo
+            && self.strategies.iter().any(|s| s.id == p.strategy_id && s.kind == StrategyKind::LabTargets)
+            && self.markets.iter().find(|m| m.id == id).is_some_and(|m| self.maker_route_on(m))
     }
 
     /// Reduce a position to `keep` of its size, never past flat: a long is
@@ -2742,12 +2875,70 @@ impl Engine {
         self.route_fill(idx, &m, side, qty, m.price, intent);
         if !live || self.live_routable(m.venue) {
             self.log(
-                JournalKind::System,
-                format!("Trim {id} by {:.0}%: {reason}", (1.0 - keep) * 100.0),
+                JournalKind::Risk,
+                format!("Trim {id} by {:.0}%: {reason} (a risk-driven reduction, not a strategy signal)", (1.0 - keep) * 100.0),
                 Some(sid),
                 Some(id.to_string()),
             );
         }
+    }
+
+    /// A sell sent to a venue never asks for more than the book holds there
+    /// (the venue refuses a hair more as "insufficient balance"). The
+    /// connector clamps again to what the account itself reports.
+    fn venue_sell_qty(&self, m: &Market, side: Side, qty: f64, demo: bool) -> f64 {
+        if side != Side::Sell {
+            return qty;
+        }
+        let held = self
+            .positions
+            .get(&m.id)
+            .filter(|p| p.qty > 0.0 && if demo { p.demo } else { p.live })
+            .map(|p| p.qty);
+        let q = held.map_or(qty, |h| qty.min(h));
+        use crate::connectors::alpaca_crypto::{floor_to, safe_decimals, MAX_DECIMALS};
+        // The connector rounds down to the asset's step. Above about a
+        // million coins the float no longer carries the venue's nine
+        // decimals: rounded down here to the ones it does carry, so the
+        // order row and the venue agree on a quantity that is really held.
+        if (m.venue == Venue::Crypto || m.symbol.contains('/')) && safe_decimals(q, MAX_DECIMALS) < MAX_DECIMALS {
+            floor_to(q, 0.0, MAX_DECIMALS)
+        } else {
+            q
+        }
+    }
+
+    /// A state file written before lab fills at a venue were kept free of
+    /// stops carries the ordinary ATR stops on lab positions. They are not
+    /// the lab's, so they are dropped on restore, and the journal says so.
+    fn clear_restored_lab_stops(&mut self) {
+        let lab: HashSet<String> =
+            self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
+        let mut cleared: Vec<String> = self
+            .positions
+            .iter_mut()
+            .filter(|(_, p)| lab.contains(&p.strategy_id) && (p.stop > 0.0 || p.target > 0.0))
+            .map(|(id, p)| {
+                p.stop = 0.0;
+                p.target = 0.0;
+                id.clone()
+            })
+            .collect();
+        if cleared.is_empty() {
+            return;
+        }
+        cleared.sort();
+        self.log(
+            JournalKind::Risk,
+            format!(
+                "Removed the stop-loss from {} lab position(s) restored from the state file ({}): a lab book carries \
+                 no stops and changes only on a new lab signal",
+                cleared.len(),
+                cleared.join(", ")
+            ),
+            None,
+            None,
+        );
     }
 
     /// Volatility-based stop-loss / take-profit for a new position (price units).
@@ -3034,7 +3225,14 @@ impl Engine {
         // Alpaca paper fills against the real NBBO; a crypto demo venue only
         // counts when it documents real prices (see `docs/DEMO.md`).
         let demo_real = m.venue != Venue::Crypto || self.crypto_demo_real_prices;
-        let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
+        // Lab positions carry no ATR stops (see `place_lab_order`), whichever
+        // route fills them. A demo or live fill is booked here, long after
+        // `place_lab_order` returned, so the rule is applied here as well.
+        let (new_stop, new_target) = if self.strategies[strat_idx].kind == StrategyKind::LabTargets {
+            (0.0, 0.0)
+        } else {
+            self.compute_stops(m, side, fill_price)
+        };
 
         // update / open position, realizing P&L on reductions
         let key = m.id.clone();
@@ -3082,7 +3280,11 @@ impl Engine {
                 let (new_qty, new_avg, r) = apply_fill(pos.qty, pos.avg_price, signed, fill_price);
                 realized = r;
                 pos.avg_price = new_avg;
-                if new_qty.abs() < 1e-9 {
+                // What a close rounded down to the venue's decimals leaves
+                // behind (under a millionth of a coin on 490 million PEPE)
+                // is float noise, not a position.
+                let dust = closed.is_some() && new_qty.signum() == was.signum() && new_qty.abs() <= was.abs() * 1e-12;
+                if new_qty.abs() < 1e-9 || dust {
                     self.positions.remove(&key);
                 } else {
                     pos.qty = new_qty;
@@ -3240,6 +3442,10 @@ impl Engine {
                 return;
             }
             _ => {}
+        }
+        let qty = self.venue_sell_qty(m, side, qty, demo);
+        if qty <= 0.0 {
+            return;
         }
 
         // One live order per market at a time — never double-send while a prior
@@ -4307,10 +4513,15 @@ impl Engine {
     /// this safe to call repeatedly with the same numbers — a partial fill
     /// reported three times books once.
     pub fn apply_live_update(&mut self, order_id: &str, update: LiveUpdate) {
+        // The fills booked now belong to this order: an autopilot counts the
+        // order once, not once per partial fill or maker child.
+        self.fill_order = Some(order_id.to_string());
         if self.inflight.get(order_id).is_some_and(|f| f.maker.is_some()) {
-            return self.apply_maker_update(order_id, update);
+            self.apply_maker_update(order_id, update);
+        } else {
+            self.apply_order_update(order_id, update);
         }
-        self.apply_order_update(order_id, update);
+        self.fill_order = None;
     }
 
     /// [`Engine::apply_live_update`] for one order as a whole: `update` is
@@ -5793,6 +6004,7 @@ impl Engine {
             strategies: self.strategies.clone(),
             orders: self.orders.clone(),
             journal: self.journal.clone(),
+            events: self.events.clone(),
             limits: self.limits.clone(),
             real_ids: self.real_ids.iter().cloned().collect(),
             forecast_store: self.forecast_store.clone(),
@@ -5965,6 +6177,7 @@ impl Engine {
         if !p.strategies.is_empty() {
             self.strategies = p.strategies;
         }
+        self.clear_restored_lab_stops();
         // A save from before the forward-test clock existed starts it now:
         // there is no record of how long it ran before, and guessing would be
         // crediting time that was never observed.
@@ -5977,6 +6190,8 @@ impl Engine {
         }
         self.orders = p.orders;
         self.journal = p.journal;
+        self.events = p.events;
+        self.events.truncate(EVENT_RING);
         self.restore_inflight(p.inflight);
         self.limits = p.limits;
         self.real_ids = p.real_ids.into_iter().collect();
@@ -6093,6 +6308,13 @@ impl Engine {
         }
     }
 
+    /// [`Engine::state`] with the durable event ring, for `GET /api/state`.
+    pub fn state_with_events(&self) -> EngineState {
+        let mut s = self.state();
+        s.events = self.events.clone();
+        s
+    }
+
     pub fn state(&self) -> EngineState {
         let mode = self.mode();
         let equity = self.equity();
@@ -6144,6 +6366,7 @@ impl Engine {
             positions,
             orders: self.orders.iter().take(200).cloned().collect(),
             journal: self.journal.iter().take(400).cloned().collect(),
+            events: Vec::new(),
             strategies: self.strategies.clone(),
             limits: self.limits.clone(),
             history: self
@@ -6241,10 +6464,37 @@ impl Engine {
         }
         let id = self.next_id("j");
         let mode = self.mode();
-        self.journal.insert(0, JournalEntry { id, ts: self.now(), kind, strategy_id, market_id, message, mode });
+        let entry = JournalEntry { id, ts: self.now(), kind, strategy_id, market_id, message, mode };
+        if is_event(kind, &entry.message) {
+            self.events.insert(0, entry.clone());
+            self.events.truncate(EVENT_RING);
+        }
+        self.journal.insert(0, entry);
         if self.journal.len() > 1000 {
             self.journal.pop();
         }
+    }
+
+    /// A repetitive system notice (forecasts settled, the candle feed moving
+    /// on): `n` more of `key` this minute. The first in a minute is a new
+    /// journal line; the rest update that line in place, so a notice every
+    /// 15 seconds costs one line a minute, not four. `say` writes the line
+    /// from the minute's total.
+    fn log_rollup(&mut self, key: &'static str, n: usize, say: impl Fn(usize) -> String) {
+        let now = self.now();
+        let minute = now.div_euclid(60_000);
+        if let Some(r) = self.rollups.get_mut(key).filter(|r| r.minute == minute) {
+            if let Some(j) = self.journal.iter_mut().take(200).find(|j| j.id == r.entry) {
+                r.total += n;
+                r.times += 1;
+                j.message = format!("{} ({}x this minute)", say(r.total), r.times);
+                j.ts = now;
+                return;
+            }
+        }
+        self.log(JournalKind::System, say(n), None, None);
+        let entry = self.journal[0].id.clone();
+        self.rollups.insert(key, Rollup { minute, total: n, times: 1, entry });
     }
 
     /// Take and clear queued alert messages (drained by the webhook poster).

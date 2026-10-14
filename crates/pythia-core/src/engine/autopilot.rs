@@ -360,8 +360,12 @@ pub struct AutopilotStatus {
     pub floor_equity: Option<f64>,
     /// The next take-profit level, when there is one.
     pub target_equity: Option<f64>,
-    /// Closed trades.
+    /// Closed trades, one per order however many fills it took.
     pub trades: u32,
+    /// Orders that filled, buys and sells, one per order: a maker order
+    /// worked through several child orders or partial fills counts once.
+    #[serde(default)]
+    pub orders: u32,
     pub fees: f64,
     /// Positions it owns right now.
     pub open_positions: usize,
@@ -532,9 +536,52 @@ pub struct Autopilot {
     /// The BTC price when it stopped; the comparison ends there.
     #[serde(default)]
     pub btc_end: Option<f64>,
+    /// Orders that filled, one per order (see [`AutopilotStatus::orders`]).
+    #[serde(default)]
+    pub orders: u32,
+    /// The last venue orders it booked fills of, and whether each has
+    /// already counted as a closed trade, so the next fill of the same order
+    /// (a partial fill, another maker child) does not count again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_orders: Vec<(String, bool)>,
 }
 
+/// How many venue orders an autopilot remembers for counting.
+const RECENT_ORDERS: usize = 64;
+
 impl Autopilot {
+    /// Count one fill: a new order once in `orders`, and a closed trade once
+    /// per order. Returns whether this fill counts as a closed trade. A
+    /// paper fill (`order` is `None`) is an order of its own.
+    fn count_fill(&mut self, order: Option<&str>, closed: bool) -> bool {
+        let Some(id) = order else {
+            self.orders += 1;
+            if closed {
+                self.trades += 1;
+            }
+            return closed;
+        };
+        let counts = match self.recent_orders.iter_mut().find(|(o, _)| o == id) {
+            Some((_, done)) => {
+                let first = closed && !*done;
+                *done |= closed;
+                first
+            }
+            None => {
+                self.orders += 1;
+                self.recent_orders.push((id.to_string(), closed));
+                if self.recent_orders.len() > RECENT_ORDERS {
+                    self.recent_orders.remove(0);
+                }
+                closed
+            }
+        };
+        if counts {
+            self.trades += 1;
+        }
+        counts
+    }
+
     pub fn is_active(&self) -> bool {
         matches!(self.state, AutopilotState::Running | AutopilotState::Paused)
     }
@@ -1395,6 +1442,7 @@ impl Engine {
         // is handed out the same way: its P&L counted at the mark now, the
         // position no longer its own. Kept, it would hold the autopilot open
         // ("still closing") forever with nothing that ever closes it.
+        let order = self.fill_order.clone();
         let hand_out = open_after && !self.autopilots[i].is_active() && !self.autopilots[i].flatten_at_stop;
         let unreal = if hand_out {
             self.positions.get(market).map(|p| (self.ap_mark(market, p.avg_price) - p.avg_price) * p.qty).unwrap_or(0.0)
@@ -1409,9 +1457,7 @@ impl Engine {
         // A closed trade: P&L realised, or a position closed out entirely
         // (a close at exactly its entry price realises nothing and is still a trade).
         let closed = realized != 0.0 || (existed && !open_after);
-        if closed {
-            ap.trades += 1;
-        }
+        let closed = ap.count_fill(order.as_deref(), closed);
         // Netted lab books split it by their shares of the market.
         ap.book_split(market, &owner, realized, fee, closed);
         if hand_out {
@@ -1864,6 +1910,8 @@ impl Engine {
             last_pick_ms: Some(now),
             btc_start: None,
             btc_end: None,
+            orders: 0,
+            recent_orders: Vec::new(),
         });
         let i = self.autopilots.len() - 1;
         let x = self.autopilots[i].config.capital_usd;
@@ -2421,6 +2469,7 @@ impl Engine {
                     floor_equity: floor,
                     target_equity: target,
                     trades: ap.trades,
+                    orders: ap.orders,
                     fees: ap.fees,
                     open_positions: ap.owned.len(),
                     by_sleeve: ap

@@ -515,11 +515,13 @@ impl AlpacaConnector {
         Ok(a)
     }
 
-    /// Current signed quantity held in `symbol` (0 when flat). A 404 from Alpaca
-    /// means "no position", which is an answer, not an error.
+    /// Current signed quantity held in `symbol` (0 when flat), as far as it
+    /// can be sold: `qty_available` when Alpaca reports it (coins tied up in
+    /// open orders are not), else `qty`. A 404 from Alpaca means "no
+    /// position", which is an answer, not an error.
     async fn position_qty(&self, symbol: &str) -> Result<f64, ConnectorError> {
         match self.send(self.req(reqwest::Method::GET, &position_path(symbol))?, "position").await {
-            Ok(v) => Ok(num_or0(v.get("qty"))),
+            Ok(v) => Ok(sellable_qty(&v)),
             Err(ConnectorError::Rejected(msg)) if msg.contains("404") => Ok(0.0),
             Err(e) => Err(e),
         }
@@ -830,6 +832,34 @@ pub fn crypto_price_text(px: f64) -> String {
 /// so (see `engine::alpaca_fees`). `config/costs.json` models the same rates.
 pub const CRYPTO_FEE_MAX_BPS: f64 = 25.0;
 
+/// What a position object says can be sold: the smaller of `qty` and
+/// `qty_available` for a long (Alpaca's "available" in its refusal).
+pub fn sellable_qty(v: &Value) -> f64 {
+    let qty = num_or0(v.get("qty"));
+    match v.get("qty_available").and_then(|a| num(Some(a))) {
+        Some(a) if qty > 0.0 && a.is_finite() => qty.min(a.max(0.0)),
+        _ => qty,
+    }
+}
+
+/// A crypto sell never asks for more than the venue holds: `wanted` is
+/// clamped to `held` and then rounded down to the asset's step (to the
+/// decimals the float can carry, see [`alpaca_crypto::safe_decimals`]).
+/// Below the step's grid the result can only be smaller, never larger.
+pub fn clamp_crypto_sell(wanted: f64, held: f64, rules: Option<&CryptoRules>) -> f64 {
+    let q = if held > 0.0 { wanted.min(held) } else { wanted };
+    let floor = |x: f64| match rules {
+        Some(r) => r.floor_qty(x),
+        None => alpaca_crypto::floor_to(x, 0.0, alpaca_crypto::MAX_DECIMALS),
+    };
+    let mut out = floor(q);
+    // Written in the body and read back, it must still fit what is held.
+    if held > 0.0 && out > held {
+        out = floor(held - (out - held));
+    }
+    out
+}
+
 /// True when `held` falls short of `wanted` by no more than Alpaca's highest
 /// crypto fee: what a buy's fee taken in the coin leaves behind.
 pub fn within_crypto_fee(wanted: f64, held: f64) -> bool {
@@ -1045,8 +1075,10 @@ impl MarketConnector for AlpacaConnector {
                 // A crypto exit for a few coins more than the venue shows is
                 // the buy's fee, taken in the coin and not posted yet: the
                 // submit sells what is held (see `submit_order`).
-                let fee_gap = req.reduce_only && asset.is_crypto() && within_crypto_fee(req.qty, held);
-                if req.qty > held + 1e-9 && !fee_gap {
+                // A crypto exit for more than is held sells what is held
+                // (see `submit_order`): an exit, never a short.
+                let sells_held = req.reduce_only && asset.is_crypto() && held > 0.0;
+                if req.qty > held + 1e-9 && !sells_held {
                     if req.reduce_only {
                         return Err(ConnectorError::Preflight(format!(
                             "exit wants {:.4} {} but the broker only shows {:.4}",
@@ -1090,16 +1122,13 @@ impl MarketConnector for AlpacaConnector {
         // only learns how many when the fee activity is posted. Until then an
         // exit can ask for slightly more than the account holds; it sells
         // what is held instead, and the engine books the gap as that fee.
+        // Any crypto sell is clamped to what the account holds, rounded down:
+        // asking for a hair more is refused as "insufficient balance".
         let mut req = req;
-        if crypto && req.reduce_only && req.side == Side::Sell {
+        if crypto && req.side == Side::Sell {
             let held = self.position_qty(&req.symbol).await?;
-            if within_crypto_fee(req.qty, held) {
-                // Down to the step the body is written with, so the rounding
-                // can never ask for more than is there.
-                req.qty = match &rules {
-                    Some(r) => r.floor_qty(held),
-                    None => alpaca_crypto::floor_to(held, 0.0, alpaca_crypto::MAX_DECIMALS),
-                };
+            if held > 0.0 && (req.reduce_only || req.qty <= held || within_crypto_fee(req.qty, held)) {
+                req.qty = clamp_crypto_sell(req.qty, held, rules.as_ref());
             }
         }
         // On the asset's step, rounded down; below its minimum it is never sent.
@@ -1451,6 +1480,66 @@ impl MarketConnector for AlpacaCryptoDemo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `a <= b` for two plain decimal strings, digit by digit: the venue
+    /// compares decimals, not floats.
+    fn dec_le(a: &str, b: &str) -> bool {
+        let split = |x: &str| {
+            let (i, f) = x.split_once('.').unwrap_or((x, ""));
+            (i.trim_start_matches('0').to_string(), f.to_string())
+        };
+        let ((ai, af), (bi, bf)) = (split(a), split(b));
+        if ai.len() != bi.len() {
+            return ai.len() < bi.len();
+        }
+        let w = af.len().max(bf.len());
+        let pad = |f: &str| format!("{f:0<w$}");
+        (ai, pad(&af)) <= (bi, pad(&bf))
+    }
+
+    // The incident: the book held 490974559.154990673 PEPE, the Alpaca paper
+    // account 490974559.154990649, and both market sells were refused as
+    // "insufficient balance for PEPE (requested 490974559.154990673,
+    // available 490974559.154990649)".
+    const PEPE_BOOK: f64 = 490974559.154990673;
+    const PEPE_AVAILABLE: &str = "490974559.154990649";
+
+    #[test]
+    fn a_pepe_sell_never_asks_for_more_than_the_account_holds() {
+        let held: f64 = PEPE_AVAILABLE.parse().unwrap();
+        // The old body: nine decimals of a float that carries six there.
+        assert_eq!(format!("{held:.9}"), "490974559.154990673", "the float prints more than is held");
+        let pepe_step = CryptoRules { min_order_size: 0.0, min_trade_increment: 1e-9, price_increment: 0.0 };
+        for rules in [None, Some(&pepe_step)] {
+            let q = clamp_crypto_sell(PEPE_BOOK, held, rules);
+            let body = match rules {
+                Some(r) => r.format_qty(q),
+                None => alpaca_crypto::format_qty_plain(q),
+            };
+            assert!(dec_le(&body, PEPE_AVAILABLE), "{body} is more than {PEPE_AVAILABLE}");
+            assert_eq!(body, "490974559.15499", "rounded down to the last real decimal");
+            assert!(q <= held);
+        }
+        // On a whole-coin step it is rounded down to whole coins.
+        let whole = CryptoRules { min_order_size: 1000.0, min_trade_increment: 1.0, price_increment: 1e-9 };
+        assert_eq!(whole.format_qty(clamp_crypto_sell(PEPE_BOOK, held, Some(&whole))), "490974559");
+        // A sell for less than is held is only rounded down.
+        let q = clamp_crypto_sell(0.123456789987, 1.0, None);
+        assert_eq!(alpaca_crypto::format_qty_plain(q), "0.123456789");
+    }
+
+    #[test]
+    fn the_sellable_quantity_is_what_is_available_not_what_is_tied_up() {
+        let v: Value = serde_json::from_str(
+            r#"{"symbol":"PEPEUSD","qty":"490974559.154990649","qty_available":"490974559.154990649"}"#,
+        )
+        .unwrap();
+        assert_eq!(sellable_qty(&v), PEPE_AVAILABLE.parse::<f64>().unwrap());
+        let tied: Value = serde_json::from_str(r#"{"qty":"2.5","qty_available":"1.5"}"#).unwrap();
+        assert_eq!(sellable_qty(&tied), 1.5);
+        let old: Value = serde_json::from_str(r#"{"qty":"2.5"}"#).unwrap();
+        assert_eq!(sellable_qty(&old), 2.5);
+    }
 
     #[test]
     fn crypto_market_symbols_map_onto_alpaca_usd_pairs() {
