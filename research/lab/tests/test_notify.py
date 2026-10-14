@@ -212,3 +212,62 @@ def test_health_retries_when_the_post_fails(hook, data, monkeypatch):
     write(data, "_health/system.json", health_bad("2026-10-14T09:07:00Z"))
     assert notify.main(["--health", str(sysj)]) == 0
     assert len(got) == 2, "not marked as posted until it went through"
+
+
+def test_every_digest_is_written_to_latest_json(hook, data, monkeypatch):
+    url, got, state = hook
+    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+    write(data, "reports/learn/latest.json", learn_report())
+    assert notify.daily(now_ms=NOW) == 0
+    latest = json.loads((data / "reports/notify/latest.json").read_text())
+    assert latest == {"ts": NOW, "text": got[0]["content"], "delivered": True}
+    state["status"] = 500
+    assert notify.daily(now_ms=NOW + 1) == 1
+    latest = json.loads((data / "reports/notify/latest.json").read_text())
+    assert latest["ts"] == NOW + 1 and latest["delivered"] is False
+    assert url not in (data / "reports/notify/latest.json").read_text()
+
+
+def test_a_dry_run_writes_no_latest_and_no_webhook_writes_undelivered(data):
+    assert notify.daily(dry_run=True, now_ms=NOW) == 0
+    assert not (data / "reports/notify/latest.json").exists()
+    assert notify.daily(now_ms=NOW) == 0
+    assert json.loads((data / "reports/notify/latest.json").read_text())["delivered"] is False
+
+
+def test_pending_sends_once_per_request_newer_than_the_last_digest(hook, data, monkeypatch, capsys):
+    url, got, _ = hook
+    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+    write(data, "reports/learn/latest.json", learn_report())
+    assert notify.pending(now_ms=NOW) == 0
+    assert got == [] and "no digest request" in capsys.readouterr().out
+
+    write(data, "reports/notify/request.json", {"ts": NOW - 60_000, "source": "api"})
+    assert notify.pending(now_ms=NOW) == 0
+    assert len(got) == 1 and got[0]["content"].startswith("Pythia daily")
+    assert notify.pending(now_ms=NOW + 300_000) == 0
+    assert len(got) == 1, "the same request is answered once"
+
+    # A request older than the last daily digest is already answered.
+    assert notify.daily(now_ms=NOW + 600_000) == 0
+    write(data, "reports/notify/request.json", {"ts": NOW + 500_000, "source": "api"})
+    assert notify.pending(now_ms=NOW + 900_000) == 0
+    assert len(got) == 2
+
+    # The engine's clock ahead of this one: still answered once.
+    write(data, "reports/notify/request.json", {"ts": NOW + 2_000_000, "source": "api"})
+    assert notify.pending(now_ms=NOW + 1_000_000) == 0
+    assert notify.pending(now_ms=NOW + 1_300_000) == 0
+    assert len(got) == 3
+
+
+def test_an_on_demand_digest_leaves_the_daily_snapshot_alone(hook, data, monkeypatch):
+    url, _, _ = hook
+    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+    write(data, "reports/learn/latest.json", learn_report())
+    assert notify.daily(now_ms=NOW) == 0
+    before = (data / "notify/state.json").read_text()
+    write(data, "reports/learn/latest.json", learn_report(trades=20))
+    write(data, "reports/notify/request.json", {"ts": NOW + 60_000})
+    assert notify.main(["--pending"]) == 0
+    assert (data / "notify/state.json").read_text() == before

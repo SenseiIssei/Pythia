@@ -228,3 +228,17 @@ install -m 644 research/lab/lab/ops/notify.py /opt/pythia-ops/notify.py
 ```
 
 The cron line of the health check stays as it is.
+
+**Digest on demand.** `POST /api/alerts/digest` on the engine writes
+`reports/notify/request.json`; this cron line sends the digest within five
+minutes, with the same `notify.py` the health alarm uses (stdlib only, no
+container start). Without a request it does nothing. `/etc/cron.d/pythia-notify-pending`:
+
+```cron
+# Pythia: a digest asked for through the engine API, if any. Posts nothing otherwise.
+*/5 * * * * root set -a; . /etc/pythia/alerts.env; PYTHIA_DATA=/srv/pythia-data python3 /opt/pythia-ops/notify.py --pending >> /var/log/pythia-notify.log 2>&1
+```
+
+The engine that serves the API needs the same folder: add
+`-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
+to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
