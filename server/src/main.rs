@@ -9,6 +9,10 @@
 //!   GET  /api/stream           → WebSocket: full EngineState pushed every tick
 //!   POST /api/command          → mutate the engine (see `Command`)
 //!   POST /api/claude/signal    → ask Claude for a structured signal (env-gated)
+//!   GET  /api/alerts           → operator alerts: destination, mute, counts, recent posts
+//!   POST /api/alerts/test      → send one test message (409 when alerts are off)
+//!   POST /api/alerts/mute      → mute for `{minutes}` (0 unmutes, at most 7 days)
+//!   POST /api/alerts/digest    → ask the lab's notify job for a digest now (202)
 //!
 //! Paper-first, exactly like the desktop app: real money stays gated behind the
 //! same sovereign risk manager and vault. This process only ever runs the
@@ -61,6 +65,11 @@ struct AppState {
     /// Typed operator alerts to `PYTHIA_ALERT_WEBHOOK` (off when unset). The
     /// sender runs on its own task: queuing never waits on the network.
     alert_sink: Option<alerts::AlertSink>,
+    /// What the alert sender posted, today's counts and the mute. Kept even
+    /// when alerts are off, so the API can say so.
+    alert_log: alerts::AlertLog,
+    /// Where the alert API reads and writes its files.
+    alert_files: Arc<AlertFiles>,
     /// Venue credentials, read once from the environment at boot. Restart the
     /// server to pick up an edited `.env` — keys are not hot-reloaded, so a
     /// half-saved file can never arm a venue mid-session.
@@ -371,6 +380,127 @@ async fn drift_alert_loop(state: AppState) {
     }
 }
 
+// ── operator alerts API ──────────────────────────────────────────────────────
+
+/// Files behind the alert API.
+#[derive(Debug, Clone, Default)]
+struct AlertFiles {
+    /// `<PYTHIA_DATA>/reports/notify`: the lab's `latest.json` (the last
+    /// digest) and the `request.json` this API writes for a digest now.
+    notify_dir: Option<std::path::PathBuf>,
+    /// The engine state file, saved right away when the mute changes.
+    state_file: Option<std::path::PathBuf>,
+}
+
+fn alert_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/alerts", get(get_alerts))
+        .route("/api/alerts/test", post(post_alerts_test))
+        .route("/api/alerts/mute", post(post_alerts_mute))
+        .route("/api/alerts/digest", post(post_alerts_digest))
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// The reason given when alerts are not configured.
+const ALERTS_OFF: &str = "alerts are not configured: set PYTHIA_ALERT_WEBHOOK (Discord or Slack), \
+     or PYTHIA_TELEGRAM_BOT_TOKEN and PYTHIA_TELEGRAM_CHAT_ID, and restart the server";
+
+fn api_error(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
+    (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
+}
+
+/// The last digest the lab's notify job wrote, `{ts, text}`, if any.
+fn last_digest(files: &AlertFiles) -> Option<serde_json::Value> {
+    let path = files.notify_dir.as_ref()?.join("latest.json");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(serde_json::json!({ "ts": v.get("ts")?, "text": v.get("text")? }))
+}
+
+/// Destination, mute, today's counts, the last 100 posts and the last digest.
+async fn get_alerts(State(st): State<AppState>) -> impl IntoResponse {
+    let view = st.alert_log.view(now_ms());
+    Json(serde_json::json!({
+        "enabled": st.alert_sink.is_some(),
+        "destination": st.alert_sink.as_ref().map(|s| s.format().name()),
+        "mutedUntilMs": view.muted_until_ms,
+        "counts": view.counts,
+        "recent": view.recent,
+        "lastDigest": last_digest(&st.alert_files),
+    }))
+}
+
+/// One test message through the configured destination, now. 200 when it
+/// went through, 502 when the destination did not take it, 409 when alerts
+/// are off.
+async fn post_alerts_test(State(st): State<AppState>) -> impl IntoResponse {
+    let Some(sink) = &st.alert_sink else {
+        return api_error(StatusCode::CONFLICT, ALERTS_OFF);
+    };
+    let rec = sink.test().await;
+    let code = if rec.delivered { StatusCode::OK } else { StatusCode::BAD_GATEWAY };
+    (code, Json(rec)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct MuteReq {
+    minutes: u64,
+}
+
+/// Mute for `minutes` (0 unmutes, at most seven days). Saved with the engine
+/// state right away, so a restart keeps it.
+async fn post_alerts_mute(State(st): State<AppState>, Json(req): Json<MuteReq>) -> impl IntoResponse {
+    if req.minutes > alerts::MAX_MUTE_MINUTES {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!("minutes must be 0 to {} (seven days)", alerts::MAX_MUTE_MINUTES),
+        );
+    }
+    let until = if req.minutes == 0 { 0 } else { now_ms() + req.minutes as i64 * 60_000 };
+    st.alert_log.set_muted_until(until);
+    let snapshot = {
+        let mut e = st.engine.lock().unwrap();
+        e.set_alerts_muted_until(until);
+        st.alert_files.state_file.as_ref().map(|_| e.to_persisted())
+    };
+    if let (Some(path), Some(snapshot)) = (&st.alert_files.state_file, snapshot) {
+        if let Err(e) = pythia_core::persist::save(path, &snapshot) {
+            tracing::warn!("state not saved to {}: {e}", path.display());
+        }
+    }
+    if until > 0 {
+        tracing::info!("operator alerts muted for {} min", req.minutes);
+    } else {
+        tracing::info!("operator alerts unmuted");
+    }
+    Json(serde_json::json!({ "mutedUntilMs": until })).into_response()
+}
+
+/// Ask for a digest now: writes `reports/notify/request.json`, which the
+/// lab's `notify.py --pending` (every five minutes) turns into a digest.
+async fn post_alerts_digest(State(st): State<AppState>) -> impl IntoResponse {
+    let Some(dir) = &st.alert_files.notify_dir else {
+        return api_error(StatusCode::CONFLICT, "no data folder: set PYTHIA_DATA to the lab's data root");
+    };
+    let ts = now_ms();
+    let body = serde_json::json!({ "ts": ts, "source": "api" });
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join("request.json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;
+        std::fs::rename(&tmp, dir.join("request.json"))
+    };
+    match write() {
+        Ok(()) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "requestedAt": ts }))).into_response(),
+        Err(e) => {
+            tracing::warn!("digest request not written: {e}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("digest request not written: {}", e.kind()))
+        }
+    }
+}
+
 /// The model service's status handle, set once at startup.
 static ML: OnceLock<pythia_core::ml::SharedMl> = OnceLock::new();
 
@@ -473,6 +603,9 @@ async fn main() {
             env_str("PYTHIA_EXCHANGE").as_deref().and_then(Exchange::parse).map(CostVenue::for_exchange),
         );
     }
+    // A mute set through the API holds across the restart.
+    let alert_log = alerts::AlertLog::default();
+    alert_log.set_muted_until(engine.lock().unwrap().alerts_muted_until());
     let state = AppState {
         engine,
         tx: tx.clone(),
@@ -480,7 +613,12 @@ async fn main() {
         alert_sink: alerts::AlertConfig::from_env().map(|cfg| {
             // The URL is a secret: only that it is set and the format are logged.
             tracing::info!("operator alerts on ({:?} format)", cfg.format);
-            alerts::AlertSink::spawn(cfg)
+            alerts::AlertSink::spawn_with_log(cfg, alert_log.clone())
+        }),
+        alert_log,
+        alert_files: Arc::new(AlertFiles {
+            notify_dir: pythia_core::labview::data_dir().map(|d| d.join("reports").join("notify")),
+            state_file: state_file(),
         }),
         creds,
     };
@@ -559,6 +697,7 @@ async fn main() {
         .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
+        .merge(alert_routes())
         // The dashboards are served from a different origin in dev; allow them.
         .layer(CorsLayer::permissive())
         .with_state(state.clone());
@@ -1863,3 +2002,7 @@ mod tests {
         assert!(!confirm && update.sleeves.unwrap().is_empty(), "an empty list is the auto pick");
     }
 }
+
+#[cfg(test)]
+#[path = "alerts_api_tests.rs"]
+mod alerts_api_tests;

@@ -1111,6 +1111,10 @@ pub struct Persisted {
     /// defaults (on for the Alpaca crypto demo route only).
     #[serde(default = "maker::default_maker_routes")]
     pub maker_routes: std::collections::BTreeMap<String, maker::MakerSettings>,
+    /// Operator alerts are muted until this time (epoch ms; 0 = not muted),
+    /// so a mute set through the API survives a restart.
+    #[serde(default)]
+    pub alerts_muted_until_ms: i64,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -1215,6 +1219,10 @@ pub struct Engine {
     reject_streak: [u32; 2],
     /// More than this many refusals in a row is an alert.
     alert_reject_after: u32,
+    /// Operator alerts muted until this time (epoch ms; 0 = not muted). The
+    /// host's alert sender does the muting; the engine only keeps it so it is
+    /// saved with the rest of the state.
+    alerts_muted_until_ms: i64,
     /// Market data stale for more than ten minutes was alerted this episode.
     data_stale_alerted: bool,
     /// UTC day the daily loss brake was last alerted.
@@ -1415,6 +1423,7 @@ impl Engine {
             alert_events: Vec::new(),
             reject_streak: [0; 2],
             alert_reject_after: 3,
+            alerts_muted_until_ms: 0,
             data_stale_alerted: false,
             daily_loss_alerted_day: None,
             live: LiveConfig::default(),
@@ -6121,6 +6130,7 @@ impl Engine {
             alpaca_fee_seen: self.alpaca_fee_seen.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             alpaca_fee_estimates: self.alpaca_fee_estimates.clone(),
             maker_routes: self.maker_routes.clone(),
+            alerts_muted_until_ms: self.alerts_muted_until_ms,
         }
     }
 
@@ -6327,6 +6337,7 @@ impl Engine {
         self.alpaca_fee_seen = p.alpaca_fee_seen.into_iter().collect();
         self.alpaca_fee_estimates = p.alpaca_fee_estimates;
         self.maker_routes = p.maker_routes;
+        self.alerts_muted_until_ms = p.alerts_muted_until_ms.max(0);
         if resolved > 0 {
             self.log(
                 JournalKind::System,
@@ -6607,6 +6618,17 @@ impl Engine {
     /// `alerts::AlertSink`).
     pub fn drain_alert_events(&mut self) -> Vec<crate::alerts::AlertEvent> {
         std::mem::take(&mut self.alert_events)
+    }
+
+    /// Until when operator alerts are muted (epoch ms; 0 = not muted).
+    pub fn alerts_muted_until(&self) -> i64 {
+        self.alerts_muted_until_ms
+    }
+
+    /// Mute operator alerts until this time (epoch ms; 0 unmutes). Saved with
+    /// the state, so the mute holds across a restart.
+    pub fn set_alerts_muted_until(&mut self, until_ms: i64) {
+        self.alerts_muted_until_ms = until_ms.max(0);
     }
 
     /// More than `n` demo or live orders refused in a row is an alert (default 3).
