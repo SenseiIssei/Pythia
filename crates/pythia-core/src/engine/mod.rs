@@ -23,6 +23,8 @@ pub mod risk;
 #[cfg(test)]
 mod risk_engine_tests;
 #[cfg(test)]
+mod restart_tests;
+#[cfg(test)]
 mod seam_tests;
 pub mod strategies;
 
@@ -1298,6 +1300,8 @@ pub struct Engine {
     sizing_noted: HashMap<String, risk::SizingMode>,
     /// The volatility spike trim's clock and rate limit.
     vol_spike: risk::VolSpikeGuard,
+    /// Added to the wall clock. Always 0 outside tests.
+    clock_skew_ms: i64,
     /// Which source each crypto market's quotes, candles and books come from,
     /// and the sanity check that keeps a bad tick off the mark.
     feeds: feeds::FeedHealth,
@@ -1403,6 +1407,7 @@ impl Engine {
             ref_prices: HashMap::new(),
             sizing_noted: HashMap::new(),
             vol_spike: risk::VolSpikeGuard::default(),
+            clock_skew_ms: 0,
             feeds: feeds::FeedHealth::default(),
             feed_noted: HashSet::new(),
             autopilots: Vec::new(),
@@ -1437,7 +1442,14 @@ impl Engine {
     }
 
     fn now(&self) -> i64 {
-        chrono::Utc::now().timestamp_millis()
+        chrono::Utc::now().timestamp_millis() + self.clock_skew_ms
+    }
+
+    /// Tests run the engine forward in time with this: every clock reading
+    /// the engine takes moves by `ms`.
+    #[cfg(test)]
+    pub(crate) fn advance_clock_for_test(&mut self, ms: i64) {
+        self.clock_skew_ms += ms;
     }
     fn next_id(&mut self, prefix: &str) -> String {
         self.seq += 1;
@@ -2599,10 +2611,19 @@ impl Engine {
             .filter_map(|id| self.exit_price_stale(id, now).map(|age| (id.clone(), age)))
             .collect();
         let mut held: Vec<(String, i64)> = Vec::new();
+        // A lab book is held to the lab's targets and nothing else: a stop on
+        // one of its positions would trade a strategy the lab never tested.
+        let lab: HashSet<String> =
+            self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
 
         for (id, pos) in self.positions.iter_mut() {
             let price = *prices.get(id).unwrap_or(&0.0);
             if price <= 0.0 || pos.qty == 0.0 || pos.stop <= 0.0 && pos.target <= 0.0 {
+                continue;
+            }
+            if lab.contains(&pos.strategy_id) {
+                pos.stop = 0.0;
+                pos.target = 0.0;
                 continue;
             }
             if let Some(age) = stale.get(id) {
@@ -2692,9 +2713,75 @@ impl Engine {
         let equity = self.equity();
         let vol_pct = if equity > 0.0 { self.book_vol() / equity * 100.0 } else { 0.0 };
         let (target, k) = (self.limits.portfolio_vol_target_pct, self.limits.vol_spike_trim_mult);
+        // Cold estimates (after a restart, before enough real candles): a
+        // market's volatility is then the 5 %-a-day assumption and its pairs
+        // count as fully correlated. That reads as a spike and is not one, so
+        // a trim that would sell a lab book waits until each of its positions
+        // has a measured volatility.
+        let lab: HashSet<String> =
+            self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
+        let lab_ids: Vec<String> = self
+            .positions
+            .iter()
+            .filter(|(_, p)| p.qty != 0.0 && lab.contains(&p.strategy_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let vols = self.annual_vols(lab_ids.iter().map(String::as_str));
+        let mut cold: Vec<String> = lab_ids.into_iter().filter(|id| !vols.contains_key(id)).collect();
+        cold.sort();
+        if k > 0.0 && target > 0.0 && !cold.is_empty() {
+            self.vol_spike.above_since = None;
+            if vol_pct > target * k.max(1.0) && self.feed_noted.insert("voltrim:cold".into()) {
+                self.log(
+                    JournalKind::Risk,
+                    format!(
+                        "Volatility spike trim waits for warm estimates: the book reads about {vol_pct:.0}% a year, but \
+                         {} of its markets have no measured volatility yet ({}), so that number is an assumption. \
+                         Nothing is sold until each has {} real candles",
+                        cold.len(),
+                        cold.join(", "),
+                        risk::CORR_MIN_CLOSES
+                    ),
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
+        self.feed_noted.remove("voltrim:cold");
+        let before = self.vol_spike.clone();
         let Some(keep) = self.vol_spike.update(vol_pct, target, k, now) else { return };
         let mut ids: Vec<String> = self.positions.keys().cloned().collect();
         ids.sort();
+        // A lab book on a maker route is reduced with maker limits, never by
+        // crossing the spread: without a fresh book to price them from, the
+        // trim waits (its clock keeps running) instead of selling at market.
+        let no_book: Vec<String> = ids
+            .iter()
+            .filter(|id| self.trim_needs_maker(id))
+            .filter(|id| {
+                let side = if self.positions[*id].qty > 0.0 { Side::Sell } else { Side::Buy };
+                self.markets.iter().find(|m| &m.id == *id).is_none_or(|m| self.maker_plan(m, side).is_none())
+            })
+            .cloned()
+            .collect();
+        if !no_book.is_empty() {
+            self.vol_spike = before;
+            if self.feed_noted.insert("voltrim:book".into()) {
+                self.log(
+                    JournalKind::Risk,
+                    format!(
+                        "Volatility spike trim held: the lab book is reduced with maker limits on this route and \
+                         there is no fresh order book to price them for {}. It goes out as soon as there is",
+                        no_book.join(", ")
+                    ),
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
+        self.feed_noted.remove("voltrim:book");
         self.log(
             JournalKind::Risk,
             format!(
@@ -2709,6 +2796,15 @@ impl Engine {
         for id in ids {
             self.trim_position(&id, keep, "volatility spike trim");
         }
+    }
+
+    /// A risk trim of this position must rest as a maker order: a lab-book
+    /// position at the demo venue on a route with maker execution on.
+    fn trim_needs_maker(&self, id: &str) -> bool {
+        let Some(p) = self.positions.get(id) else { return false };
+        p.demo
+            && self.strategies.iter().any(|s| s.id == p.strategy_id && s.kind == StrategyKind::LabTargets)
+            && self.markets.iter().find(|m| m.id == id).is_some_and(|m| self.maker_route_on(m))
     }
 
     /// Reduce a position to `keep` of its size, never past flat: a long is
@@ -2742,12 +2838,70 @@ impl Engine {
         self.route_fill(idx, &m, side, qty, m.price, intent);
         if !live || self.live_routable(m.venue) {
             self.log(
-                JournalKind::System,
-                format!("Trim {id} by {:.0}%: {reason}", (1.0 - keep) * 100.0),
+                JournalKind::Risk,
+                format!("Trim {id} by {:.0}%: {reason} (a risk-driven reduction, not a strategy signal)", (1.0 - keep) * 100.0),
                 Some(sid),
                 Some(id.to_string()),
             );
         }
+    }
+
+    /// A sell sent to a venue never asks for more than the book holds there
+    /// (the venue refuses a hair more as "insufficient balance"). The
+    /// connector clamps again to what the account itself reports.
+    fn venue_sell_qty(&self, m: &Market, side: Side, qty: f64, demo: bool) -> f64 {
+        if side != Side::Sell {
+            return qty;
+        }
+        let held = self
+            .positions
+            .get(&m.id)
+            .filter(|p| p.qty > 0.0 && if demo { p.demo } else { p.live })
+            .map(|p| p.qty);
+        let q = held.map_or(qty, |h| qty.min(h));
+        use crate::connectors::alpaca_crypto::{floor_to, safe_decimals, MAX_DECIMALS};
+        // The connector rounds down to the asset's step. Above about a
+        // million coins the float no longer carries the venue's nine
+        // decimals: rounded down here to the ones it does carry, so the
+        // order row and the venue agree on a quantity that is really held.
+        if (m.venue == Venue::Crypto || m.symbol.contains('/')) && safe_decimals(q, MAX_DECIMALS) < MAX_DECIMALS {
+            floor_to(q, 0.0, MAX_DECIMALS)
+        } else {
+            q
+        }
+    }
+
+    /// A state file written before lab fills at a venue were kept free of
+    /// stops carries the ordinary ATR stops on lab positions. They are not
+    /// the lab's, so they are dropped on restore, and the journal says so.
+    fn clear_restored_lab_stops(&mut self) {
+        let lab: HashSet<String> =
+            self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
+        let mut cleared: Vec<String> = self
+            .positions
+            .iter_mut()
+            .filter(|(_, p)| lab.contains(&p.strategy_id) && (p.stop > 0.0 || p.target > 0.0))
+            .map(|(id, p)| {
+                p.stop = 0.0;
+                p.target = 0.0;
+                id.clone()
+            })
+            .collect();
+        if cleared.is_empty() {
+            return;
+        }
+        cleared.sort();
+        self.log(
+            JournalKind::Risk,
+            format!(
+                "Removed the stop-loss from {} lab position(s) restored from the state file ({}): a lab book carries \
+                 no stops and changes only on a new lab signal",
+                cleared.len(),
+                cleared.join(", ")
+            ),
+            None,
+            None,
+        );
     }
 
     /// Volatility-based stop-loss / take-profit for a new position (price units).
@@ -3034,7 +3188,14 @@ impl Engine {
         // Alpaca paper fills against the real NBBO; a crypto demo venue only
         // counts when it documents real prices (see `docs/DEMO.md`).
         let demo_real = m.venue != Venue::Crypto || self.crypto_demo_real_prices;
-        let (new_stop, new_target) = self.compute_stops(m, side, fill_price);
+        // Lab positions carry no ATR stops (see `place_lab_order`), whichever
+        // route fills them. A demo or live fill is booked here, long after
+        // `place_lab_order` returned, so the rule is applied here as well.
+        let (new_stop, new_target) = if self.strategies[strat_idx].kind == StrategyKind::LabTargets {
+            (0.0, 0.0)
+        } else {
+            self.compute_stops(m, side, fill_price)
+        };
 
         // update / open position, realizing P&L on reductions
         let key = m.id.clone();
@@ -3082,7 +3243,11 @@ impl Engine {
                 let (new_qty, new_avg, r) = apply_fill(pos.qty, pos.avg_price, signed, fill_price);
                 realized = r;
                 pos.avg_price = new_avg;
-                if new_qty.abs() < 1e-9 {
+                // What a close rounded down to the venue's decimals leaves
+                // behind (under a millionth of a coin on 490 million PEPE)
+                // is float noise, not a position.
+                let dust = closed.is_some() && new_qty.signum() == was.signum() && new_qty.abs() <= was.abs() * 1e-12;
+                if new_qty.abs() < 1e-9 || dust {
                     self.positions.remove(&key);
                 } else {
                     pos.qty = new_qty;
@@ -3240,6 +3405,10 @@ impl Engine {
                 return;
             }
             _ => {}
+        }
+        let qty = self.venue_sell_qty(m, side, qty, demo);
+        if qty <= 0.0 {
+            return;
         }
 
         // One live order per market at a time — never double-send while a prior
@@ -5965,6 +6134,7 @@ impl Engine {
         if !p.strategies.is_empty() {
             self.strategies = p.strategies;
         }
+        self.clear_restored_lab_stops();
         // A save from before the forward-test clock existed starts it now:
         // there is no record of how long it ran before, and guessing would be
         // crediting time that was never observed.
