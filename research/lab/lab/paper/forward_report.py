@@ -16,7 +16,8 @@ Per paper book
 Per autopilot (read from the autopilot engine's /api/state)
   equity against its start and its stop floor, return against BTC bought and
   held over the same window, fees as a share of the result before fees,
-  trades per day, and realised against modelled slippage per route (paper,
+  trades per day (orders that filled, one per order however many maker child
+  orders or partial fills it took), and realised against modelled slippage per route (paper,
   demo, live) from its fill records. An autopilot that runs a single lab book
   is also held against that book's backtest band.
 
@@ -494,6 +495,12 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
     gross = pnl + fees
     fees_share = fees_share_of_gross(fees, gross)
     trades = int(ap.get("trades") or 0)
+    # Orders, one per order: the engine's closed-trade count used to tick on
+    # every fill, so a maker order worked through child orders and partial
+    # fills counted several times. An engine from before `orders` existed
+    # reports only closed trades.
+    orders_n = ap.get("orders")
+    per_day = int(orders_n) if orders_n is not None else trades
     floor = ap.get("floorEquity")
     floor_close = bool(floor is not None and start > floor and (equity - floor) / (start - floor) < 0.5)
 
@@ -535,8 +542,9 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
         "fees_pct_of_capital": fees / start * 100,
         "gross_pct": gross / start * 100,
         "trades": trades,
-        # Per day only once there is a day to divide by; three hours times eight says little.
-        "trades_per_day": trades / elapsed if elapsed >= 1 else None,
+        "orders": int(orders_n) if orders_n is not None else None,
+        # Orders per day, only once there is a day to divide by; three hours times eight says little.
+        "trades_per_day": per_day / elapsed if elapsed >= 1 else None,
         "slippage": slippage_by_route(orders, strategies, start_ms, end_ms),
         "lab_book": lab_book,
         "expected": exp,
