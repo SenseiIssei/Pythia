@@ -1010,6 +1010,9 @@ mod tests {
         let mut e = Engine::new();
         e.fresh_crypto_prices_for_test();
         e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(CV::Alpaca), true);
+        // Market orders and their refusals: maker execution off.
+        e.set_maker_route(crate::engine::maker::ALPACA_CRYPTO_DEMO, crate::engine::maker::MakerSettings::default())
+            .unwrap();
         for m in markets {
             e.place_order("ema-cross-1", m, Side::Buy, 1_000.0, RouteIntent::Demo).expect("routed");
         }

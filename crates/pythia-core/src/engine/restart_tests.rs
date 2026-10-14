@@ -104,6 +104,8 @@ fn holding_engine(trim_mult: f64) -> (Engine, String) {
         repick_every_hours: None,
     };
     let id = e.autopilot_start(cfg, false, VenueCash::NotRead).expect("the autopilot starts");
+    // The book feed has loaded: the rebalance rests as maker limits.
+    e.fresh_books_for_test();
     e.run_lab_books();
     let out = e.drain_live_orders();
     assert_eq!(out.len(), 3, "one buy per coin: {out:?}");
@@ -429,4 +431,130 @@ fn an_order_filled_in_parts_is_one_order_and_one_trade() {
     let r = restart(&e);
     let s = r.autopilot_statuses().into_iter().find(|s| s.config.id == id).unwrap();
     assert_eq!((s.orders, s.trades), (4, 1));
+}
+
+// ── maker route, right after a restart: no books yet ────────────────────────
+
+/// A sleeve change after the restart: a new signal with other weights, so
+/// the rebalance sells most of ETH and SOL and leaves BTC.
+fn reweigh(r: &mut Engine) {
+    // The book is held near the per-strategy budget; room for the trades.
+    let mut limits = r.limits.clone();
+    limits.per_strategy_budget_pct = 100.0;
+    limits.max_position_pct = 100.0;
+    r.set_limits(limits);
+    let now = r.now();
+    let mut s = signal(now);
+    s.weights = [("BTC", 0.15), ("ETH", 0.05), ("SOL", 0.05)].iter().map(|(k, v)| (k.to_string(), *v)).collect();
+    r.apply_lab_signal(s);
+}
+
+/// `ms` of 5-second ticks at steady prices; `books` gives the coins a fresh
+/// book from the first tick on. Returns every order sent to the venue.
+fn run_for(e: &mut Engine, ms: i64, books: bool) -> Vec<LiveOrderOut> {
+    let px: HashMap<&str, f64> = COINS.iter().map(|id| (*id, e.price_of(id))).collect();
+    let mut sent = Vec::new();
+    for _ in 0..ms / TICK_MS {
+        e.advance_clock_for_test(TICK_MS);
+        for id in COINS {
+            set_price(e, id, px[id]);
+        }
+        if books {
+            e.fresh_books_for_test();
+        }
+        e.tick();
+        sent.extend(e.drain_live_orders());
+    }
+    sent
+}
+
+fn journal_count(e: &Engine, needle: &str) -> usize {
+    e.journal.iter().filter(|j| j.message.contains(needle)).count()
+}
+
+#[test]
+fn a_lab_rebalance_after_a_restart_waits_for_books_and_then_rests_as_maker_limits() {
+    // The evidence: a restart, then 22 s later a sleeve change whose
+    // rebalance went out as market orders because the book feed had not
+    // loaded. It must wait, said once, and rest as maker limits once books
+    // are there.
+    let (e, _) = holding_engine(0.0);
+    let mut r = restart(&e);
+    reweigh(&mut r);
+    let sent = run_for(&mut r, 60_000, false);
+    assert!(sent.is_empty(), "nothing goes out without a book: {sent:?}");
+    assert_eq!(journal_count(&r, "Lab rebalance waits for fresh order books"), 1, "said once");
+    assert!(r.journal.iter().any(|j| j.message.contains("no book yet for ETH/USD, SOL/USD")), "names the coins");
+    // The book feed loads: the rebalance goes out whole, as maker limits.
+    // (Lab books are looked at every fifth tick.)
+    let sent = run_for(&mut r, 30_000, true);
+    assert_eq!(sent.len(), 2, "ETH and SOL sells: {sent:?}");
+    assert!(sent.iter().all(|o| o.side == Side::Sell));
+    for o in &sent {
+        assert!(o.limit_price.is_some() && !o.ioc && o.style == bandit::ExecStyle::Join, "a resting maker limit: {o:?}");
+    }
+    assert_eq!(journal_count(&r, "Lab rebalance waits for fresh order books"), 1);
+}
+
+#[test]
+fn a_lab_rebalance_that_never_gets_a_book_goes_out_after_ten_minutes_as_a_counted_fallback() {
+    let (e, _) = holding_engine(0.0);
+    let mut r = restart(&e);
+    reweigh(&mut r);
+    let sent = run_for(&mut r, maker::MAKER_BOOK_WAIT_MS - 30_000, false);
+    assert!(sent.is_empty(), "still waiting: {sent:?}");
+    let sent = run_for(&mut r, 120_000, false);
+    assert_eq!(sent.len(), 2, "the cap ran out: {sent:?}");
+    for o in &sent {
+        assert!(o.ioc && o.limit_price.is_some(), "a marketable limit, not a bare market order: {o:?}");
+    }
+    assert_eq!(journal_count(&r, "Lab rebalance waits for fresh order books"), 1);
+    assert_eq!(journal_count(&r, "Lab rebalance waited 10 minutes"), 1);
+    // Filled: each is one fallback without a book in the statistics.
+    for o in &sent {
+        r.apply_live_update(
+            &o.order_id,
+            LiveUpdate {
+                status: BrokerOrderStatus::Filled,
+                filled_qty: o.qty,
+                avg_price: Some(o.ref_price),
+                fee: 0.0,
+                fee_base: 0.0,
+                fee_unpriced: Vec::new(),
+                raw_status: "filled".into(),
+            },
+        );
+    }
+    let st = r.maker_stats();
+    let s = st.iter().find(|s| s.route == maker::ALPACA_CRYPTO_DEMO).expect("the route");
+    assert_eq!((s.d7.fallbacks, s.d7.no_book_fallbacks), (2, 2), "{s:?}");
+    // The three maker buys before the restart rested and filled as maker.
+    assert_eq!(s.d7.orders, 5);
+    assert_eq!(s.d30.orders, 5);
+    assert!((s.d7.maker_fill_rate_orders.unwrap() - 0.6).abs() < 1e-9, "3 of 5 all maker: {s:?}");
+}
+
+#[test]
+fn an_urgent_exit_crosses_at_once_without_a_book_and_a_strategy_order_waits() {
+    let (e, _) = holding_engine(0.0);
+    let mut r = restart(&e);
+    // A stop: urgent, it never waits.
+    r.close_position(BTC, "stop-loss");
+    let out = r.drain_live_orders();
+    assert_eq!(out.len(), 1);
+    assert!(out[0].limit_price.is_none() && out[0].style == bandit::ExecStyle::Cross, "the exit crosses: {:?}", out[0]);
+    // A hand-placed demo order on the maker route (part of the ETH lab
+    // position sold): not urgent, it waits.
+    let i = r.ensure_manual_strategy();
+    let sid = r.strategies[i].id.clone();
+    r.place_order(&sid, ETH, Side::Sell, 500.0, RouteIntent::Demo).unwrap();
+    assert!(r.drain_live_orders().is_empty(), "no market order without a book");
+    r.place_order(&sid, ETH, Side::Sell, 500.0, RouteIntent::Demo).unwrap();
+    assert!(r.drain_live_orders().is_empty());
+    assert_eq!(journal_count(&r, "waits for a fresh order book to price its maker limit"), 1, "said once");
+    r.fresh_books_for_test();
+    r.place_order(&sid, ETH, Side::Sell, 500.0, RouteIntent::Demo).unwrap();
+    let out = r.drain_live_orders();
+    assert_eq!(out.len(), 1);
+    assert!(out[0].limit_price.is_some() && !out[0].ioc, "rests as a maker limit: {:?}", out[0]);
 }

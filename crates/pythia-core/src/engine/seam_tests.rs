@@ -276,6 +276,7 @@ fn listed(pairs: &[&str]) -> Option<HashSet<String>> {
 fn crypto_demo_on_alpaca_paper_shows_alpaca_and_refuses_a_coin_alpaca_does_not_list() {
     let mut e = engine();
     e.set_demo_venues([Venue::Crypto, Venue::Alpaca].into_iter().collect(), Some(CostVenue::Alpaca), true);
+    e.fresh_books_for_test();
     let live = e.state().live;
     assert!(live.demo_venues.contains(&Venue::Crypto));
     assert_eq!(live.demo_exchange, Some(CostVenue::Alpaca), "the demo venue is shown as Alpaca");

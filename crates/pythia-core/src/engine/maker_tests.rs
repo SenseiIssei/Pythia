@@ -644,12 +644,13 @@ fn stops_and_other_routes_keep_their_market_orders() {
     assert!(out[0].limit_price.is_none() && out[0].style == bandit::ExecStyle::Cross);
     assert!(e.set_maker_route("demo:bybit:crypto", MakerSettings { enabled: true, ..MakerSettings::default() }).is_err());
 
-    // Without a fresh book there is no touch to rest at.
+    // Without a fresh book there is no touch to rest at: the order waits
+    // rather than crossing (see `a_non_urgent_order_without_a_book_waits...`).
     let mut e = engine();
     e.books.clear();
     let sid = manual(&mut e);
     e.place_order(&sid, BTC, Side::Buy, 1_200.0, RouteIntent::Demo).unwrap();
-    assert!(e.drain_live_orders()[0].limit_price.is_none());
+    assert!(e.drain_live_orders().is_empty(), "no market order without a book");
 }
 
 #[test]
