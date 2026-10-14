@@ -66,6 +66,8 @@ pub enum AlertKind {
     ReconcileMismatch,
     DataStale,
     ModelDrift,
+    /// A test message asked for by the operator (`POST /api/alerts/test`).
+    Test,
 }
 
 impl AlertKind {
@@ -81,7 +83,13 @@ impl AlertKind {
             AlertKind::ReconcileMismatch => "Reconcile mismatch",
             AlertKind::DataStale => "Market data stale",
             AlertKind::ModelDrift => "Model drift",
+            AlertKind::Test => "Test",
         }
+    }
+
+    /// Sent even while alerts are muted: the money stopped trading.
+    pub fn bypasses_mute(self) -> bool {
+        matches!(self, AlertKind::KillSwitch | AlertKind::FloorHit)
     }
 }
 
@@ -121,6 +129,15 @@ pub enum AlertFormat {
 }
 
 impl AlertFormat {
+    /// The destination's name as the API reports it.
+    pub fn name(self) -> &'static str {
+        match self {
+            AlertFormat::Discord => "discord",
+            AlertFormat::Slack => "slack",
+            AlertFormat::Telegram => "telegram",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "discord" | "content" => Some(AlertFormat::Discord),
@@ -308,19 +325,183 @@ impl Throttle {
     }
 }
 
+// ── the record of what was posted ────────────────────────────────────────────
+
+/// How many posts [`AlertLog`] keeps.
+pub const RECENT_POSTS: usize = 100;
+/// The longest mute the API accepts: seven days.
+pub const MAX_MUTE_MINUTES: u64 = 7 * 24 * 60;
+
+/// One post, or one batch of events held back, as the API reports it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertRecord {
+    /// Epoch ms.
+    pub ts: i64,
+    pub kinds: Vec<AlertKind>,
+    pub text: String,
+    pub delivered: bool,
+    /// Why a post failed (`HTTP 500`, a connection error). Never the URL or
+    /// the token.
+    pub error: Option<String>,
+    /// Why nothing was posted: `muted` or `hourlyLimit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Counts for the current UTC day.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertCounts {
+    /// Posts that went through.
+    pub sent_today: u64,
+    /// Posts the destination did not take.
+    pub failed_today: u64,
+    /// Events held back by the mute or the hourly limit.
+    pub suppressed_today: u64,
+}
+
+/// What [`AlertLog::view`] returns.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertLogView {
+    /// 0 when not muted.
+    pub muted_until_ms: i64,
+    pub counts: AlertCounts,
+    /// Newest first.
+    pub recent: Vec<AlertRecord>,
+}
+
+#[derive(Debug, Default)]
+struct LogInner {
+    recent: VecDeque<AlertRecord>,
+    counts: AlertCounts,
+    day: i64,
+    muted_until_ms: i64,
+}
+
+impl LogInner {
+    fn roll(&mut self, now: i64) {
+        let day = now.div_euclid(86_400_000);
+        if day != self.day {
+            self.day = day;
+            self.counts = AlertCounts::default();
+        }
+    }
+}
+
+/// The last [`RECENT_POSTS`] posts, today's counts and the mute, shared by
+/// the sender and the host's API. Cloning is cheap.
+#[derive(Debug, Clone, Default)]
+pub struct AlertLog(std::sync::Arc<std::sync::Mutex<LogInner>>);
+
+impl AlertLog {
+    fn inner(&self) -> std::sync::MutexGuard<'_, LogInner> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Mute until this time (epoch ms; 0 or a past time unmutes).
+    pub fn set_muted_until(&self, until_ms: i64) {
+        self.inner().muted_until_ms = until_ms.max(0);
+    }
+
+    /// Until when alerts are muted, 0 when they are not (any more).
+    pub fn muted_until(&self, now: i64) -> i64 {
+        let m = self.inner().muted_until_ms;
+        if m > now {
+            m
+        } else {
+            0
+        }
+    }
+
+    pub fn is_muted(&self, now: i64) -> bool {
+        self.muted_until(now) > 0
+    }
+
+    /// Keep one record and count it: delivered as sent, with an error as
+    /// failed, otherwise its events as suppressed.
+    pub fn record(&self, rec: AlertRecord) {
+        let mut g = self.inner();
+        g.roll(rec.ts);
+        if rec.delivered {
+            g.counts.sent_today += 1;
+        } else if rec.error.is_some() {
+            g.counts.failed_today += 1;
+        } else {
+            g.counts.suppressed_today += rec.kinds.len().max(1) as u64;
+        }
+        g.recent.push_back(rec);
+        while g.recent.len() > RECENT_POSTS {
+            g.recent.pop_front();
+        }
+    }
+
+    pub fn view(&self, now: i64) -> AlertLogView {
+        let mut g = self.inner();
+        g.roll(now);
+        AlertLogView {
+            muted_until_ms: if g.muted_until_ms > now { g.muted_until_ms } else { 0 },
+            counts: g.counts,
+            recent: g.recent.iter().rev().cloned().collect(),
+        }
+    }
+}
+
 /// The engine's handle on the sender. Cloning is cheap; sending never waits.
 #[derive(Clone)]
 pub struct AlertSink {
     tx: mpsc::Sender<AlertEvent>,
     full_logged: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cfg: std::sync::Arc<AlertConfig>,
+    client: reqwest::Client,
+    log: AlertLog,
 }
 
 impl AlertSink {
     /// Start the sender on the current tokio runtime.
     pub fn spawn(cfg: AlertConfig) -> Self {
+        Self::spawn_with_log(cfg, AlertLog::default())
+    }
+
+    /// Start the sender, recording every post (and the mute) in `log`.
+    pub fn spawn_with_log(cfg: AlertConfig, log: AlertLog) -> Self {
         let (tx, rx) = mpsc::channel(cfg.queue.max(1));
-        tokio::spawn(run(cfg, rx));
-        Self { tx, full_logged: Default::default() }
+        let client = reqwest::Client::builder().timeout(cfg.timeout).build().unwrap_or_default();
+        let cfg = std::sync::Arc::new(cfg);
+        tokio::spawn(run(cfg.clone(), client.clone(), log.clone(), rx));
+        Self { tx, full_logged: Default::default(), cfg, client, log }
+    }
+
+    pub fn log(&self) -> &AlertLog {
+        &self.log
+    }
+
+    /// Where the alerts go.
+    pub fn format(&self) -> AlertFormat {
+        self.cfg.format
+    }
+
+    /// Post one test message now, past the queue, the throttle and the mute
+    /// (the operator asked for it), and record it.
+    pub async fn test(&self) -> AlertRecord {
+        let ev = AlertEvent::new(
+            AlertKind::Test,
+            "test",
+            "test message from the engine: alerts reach this destination.",
+        );
+        let content = compose(&self.cfg, std::slice::from_ref(&ev), 0);
+        let res = deliver(&self.client, &self.cfg, &content).await;
+        let rec = AlertRecord {
+            ts: now_ms(),
+            kinds: vec![AlertKind::Test],
+            text: content,
+            delivered: res.is_ok(),
+            error: res.err(),
+            reason: None,
+        };
+        self.log.record(rec.clone());
+        rec
     }
 
     /// Queue an alert. A full queue drops it (logged once until it drains):
@@ -343,8 +524,7 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-async fn run(cfg: AlertConfig, mut rx: mpsc::Receiver<AlertEvent>) {
-    let client = reqwest::Client::builder().timeout(cfg.timeout).build().unwrap_or_default();
+async fn run(cfg: std::sync::Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut rx: mpsc::Receiver<AlertEvent>) {
     let mut throttle = Throttle::new(cfg.dedup, cfg.max_per_hour);
     let mut failing = false;
     while let Some(first) = rx.recv().await {
@@ -358,17 +538,36 @@ async fn run(cfg: AlertConfig, mut rx: mpsc::Receiver<AlertEvent>) {
             }
         }
         let now = now_ms();
-        let fresh: Vec<AlertEvent> = batch.into_iter().filter(|e| throttle.fresh(&e.key, now)).collect();
+        let mut fresh: Vec<AlertEvent> = batch.into_iter().filter(|e| throttle.fresh(&e.key, now)).collect();
+        if log.is_muted(now) {
+            // Muted: recorded, not sent. The kill switch and a floor hit still go out.
+            let (urgent, held): (Vec<AlertEvent>, Vec<AlertEvent>) =
+                fresh.into_iter().partition(|e| e.kind.bypasses_mute());
+            if !held.is_empty() {
+                log.record(held_back(&cfg, &held, now, "muted"));
+            }
+            fresh = urgent;
+        }
         if fresh.is_empty() {
             continue;
         }
         if !throttle.may_post(now) {
             throttle.suppressed += fresh.len();
+            log.record(held_back(&cfg, &fresh, now, "hourlyLimit"));
             continue;
         }
         let content = compose(&cfg, &fresh, throttle.suppressed);
         throttle.suppressed = 0;
-        match deliver(&client, &cfg, &content).await {
+        let res = deliver(&client, &cfg, &content).await;
+        log.record(AlertRecord {
+            ts: now,
+            kinds: fresh.iter().map(|e| e.kind).collect(),
+            text: content,
+            delivered: res.is_ok(),
+            error: res.clone().err(),
+            reason: None,
+        });
+        match res {
             Ok(()) => {
                 if failing {
                     tracing::info!("alert webhook works again");
@@ -382,6 +581,18 @@ async fn run(cfg: AlertConfig, mut rx: mpsc::Receiver<AlertEvent>) {
                 }
             }
         }
+    }
+}
+
+/// The record of events that were not posted, and why.
+fn held_back(cfg: &AlertConfig, events: &[AlertEvent], now: i64, reason: &str) -> AlertRecord {
+    AlertRecord {
+        ts: now,
+        kinds: events.iter().map(|e| e.kind).collect(),
+        text: compose(cfg, events, 0),
+        delivered: false,
+        error: None,
+        reason: Some(reason.into()),
     }
 }
 
@@ -402,20 +613,37 @@ pub fn compose(cfg: &AlertConfig, events: &[AlertEvent], suppressed: usize) -> S
     lines.join("\n")
 }
 
-/// One POST. The error never carries the URL.
+/// One POST. The error never carries the URL, the token or the chat.
 async fn deliver(client: &reqwest::Client, cfg: &AlertConfig, content: &str) -> Result<(), String> {
     let resp = client
         .post(&cfg.url)
         .json(&cfg.body(content))
         .send()
         .await
-        .map_err(|e| e.without_url().to_string())?;
+        .map_err(|e| scrub(&e.without_url().to_string(), cfg))?;
     let status = resp.status();
     if status.is_success() {
         Ok(())
     } else {
         Err(format!("HTTP {}", status.as_u16()))
     }
+}
+
+/// An error message with every secret part of the destination taken out: the
+/// URL, each longer piece of it (a webhook id, a bot token) and the chat id.
+pub fn scrub(msg: &str, cfg: &AlertConfig) -> String {
+    let mut secrets: Vec<&str> = vec![cfg.url.as_str()];
+    let rest = cfg.url.split_once("://").map_or(cfg.url.as_str(), |(_, r)| r);
+    secrets.extend(rest.split(['/', '?', '&', '=', '#']).filter(|p| p.len() >= 8));
+    if let Some(chat) = cfg.chat_id.as_deref().filter(|c| c.len() >= 5) {
+        secrets.push(chat);
+    }
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let mut out = msg.to_string();
+    for s in secrets.into_iter().filter(|s| !s.is_empty()) {
+        out = out.replace(s, "<redacted>");
+    }
+    out
 }
 
 /// Watches the shadow models' input drift. A model with an input in the
