@@ -35,7 +35,8 @@ from . import engine, facts, score
 FIXED = ("BTC", "ETH")
 MAX_COINS = 12
 MAX_TOKENS = 1500
-BATCH_WAIT_SEC = 20 * 60
+# Short: the digest after the learning loop quotes the brief only when it is ready.
+BATCH_WAIT_SEC = 10 * 60
 NAME = "ai_brief"
 
 SYSTEM = """You write the daily market brief for Pythia, an automated paper-trading research system for crypto. \
@@ -169,7 +170,7 @@ def parse_answer(obj, coins: list[str]) -> tuple[dict[str, dict], list[str], lis
 
 
 def ask(prompt: str, poster=None) -> dict:
-    """The call: a batch at half price first; if it has not finished in 20
+    """The call: a batch at half price first; if it has not finished in 10
     minutes (it is cancelled and counted at its worst case), once directly."""
     try:
         return engine.complete("brief", SYSTEM, prompt, MAX_TOKENS, model=engine.ROUTINE, schema=SCHEMA,

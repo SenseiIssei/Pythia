@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capsNote, edgeWords, parseCap, usd, usedShare, vsRows, type AiScores } from "./aiBudget";
+import { brierGap, capsNote, parseCap, usd, usedShare, vsRows, type AiScores } from "./aiBudget";
 
 describe("usedShare", () => {
   it("is the share of the cap spent, clamped", () => {
@@ -74,14 +74,10 @@ describe("vsRows", () => {
   });
 });
 
-describe("edgeWords", () => {
-  it("says better, worse or no difference by the t statistic", () => {
-    expect(edgeWords({ diff: -0.02, t: -2.5 }, "the momentum rule")).toEqual({
-      text: "better than the momentum rule (-2.00 pts, t -2.5)",
-      tone: "up",
-    });
-    expect(edgeWords({ diff: 0.01, t: 2.1 }, "x").tone).toBe("down");
-    expect(edgeWords({ diff: 0.01, t: 0.4 }, "x").text).toMatch(/no measurable difference/);
-    expect(edgeWords({ diff: null, t: null }, "x").text).toMatch(/no comparison/);
+describe("brierGap", () => {
+  it("is the LLM's Brier minus the reference's in points, signed", () => {
+    expect(brierGap({ diff: -0.02 })).toBe("-2.00 pts");
+    expect(brierGap({ diff: 0.0123 })).toBe("+1.23 pts");
+    expect(brierGap({ diff: null })).toBeNull();
   });
 });

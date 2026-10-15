@@ -9,7 +9,7 @@ vetoes an order.
 
 | What | When | Model | Size of one call | Expected cost |
 |---|---|---|---|---|
-| Daily brief (`lab.ai.brief`, jobs.yaml `ai-brief`) | every day 06:50 UTC | `claude-haiku-5-5`, Batches API | about 6,000 tokens in, under 1,000 out (at most 1,500) | about $0.0005 a day |
+| Daily brief (`lab.ai.brief`, jobs.yaml `ai-brief`) | every day 06:20 UTC, before the digest | `claude-haiku-5-5`, Batches API | about 6,000 tokens in, under 1,000 out (at most 1,500) | about $0.0005 a day |
 | Weekly review (`lab.ai.weekly`, jobs.yaml `ai-weekly`) | Sundays 09:00 UTC | `claude-sonnet-5-5`, Batches API, effort medium | about 15,000 to 20,000 tokens in, up to 8,000 out | about $0.03 to $0.05 a week |
 | AI overlay (Signals page) | only while switched on, one market every `PYTHIA_AI_INTERVAL_SEC` (120 s) | `claude-haiku-5-5` unless set otherwise | about 900 tokens in, under 100 out | about $0.09 a day while on |
 | One signal, an ensemble forecast, a key test | when asked for in the app | the provider's default (Haiku for Claude) | under 2,000 tokens | well under a cent |
@@ -137,8 +137,9 @@ are not the published ones.
 ### Keeping cost down
 
 - Batches: both scheduled jobs go through the Message Batches API at half
-  price. If the daily brief's batch has not finished after 20 minutes it is
-  cancelled (and counted at its worst case) and asked once directly.
+  price. If the daily brief's batch has not finished after 10 minutes it is
+  cancelled (and counted at its worst case) and asked once directly. The
+  digest quotes the brief only when today's is ready.
 - Small answers: the brief allows 1,500 output tokens and Haiku answers it
   without thinking first; the overlay's signal allows 1,024.
 - Prompt caching: the fixed system prompt of every call is marked for the

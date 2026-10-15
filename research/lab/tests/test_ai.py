@@ -286,7 +286,8 @@ def test_coins_come_from_running_autopilots_only():
 # ---------------------------------------------------------------- the digest
 
 def test_the_digest_quotes_a_fresh_brief_only():
-    b = {"generated_ms": NOW - 3_600_000, "summary": [f"one {chr(0x2014)} a", "two", "three"]}
+    b = {"date": "2026-10-15", "generated_ms": NOW - 3_600_000, "summary": [f"one {chr(0x2014)} a", "two", "three"]}
+    assert notify.ai_lines({**b, "date": "2026-10-14"}, NOW) == [], "yesterday's brief is not today's news"
     lines = notify.ai_lines(b, NOW)
     assert [ln.text for ln in lines] == ["one - a", "two", "three"]
     assert lines[0].lead == "AI brief (shadow)"

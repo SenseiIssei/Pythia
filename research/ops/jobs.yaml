@@ -256,7 +256,7 @@ jobs:
   # write sizes, places or vetoes an order.
   - name: ai-brief
     description: daily AI brief (Haiku, batch), 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule
-    schedule: "50 6 * * *"
+    schedule: "20 6 * * *"
     command: python -m lab.ai.brief
     network: host
     env_file: /etc/pythia/alerts.env
