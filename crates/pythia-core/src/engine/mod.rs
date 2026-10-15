@@ -1754,9 +1754,13 @@ impl Engine {
         self.feeds.needs_poll(kind, src, &self.feed_markets(), self.now())
     }
 
-    /// The markets to ask `src` about this round (empty: skip it).
+    /// The markets to ask `src` about this round (empty: skip it). A source
+    /// is never asked about a coin it does not list, so such a coin falls
+    /// through to the next source in the same round.
     pub fn feed_wanted(&self, kind: DataKind, src: FeedSource) -> Vec<String> {
-        self.feeds.wanted(kind, src, &self.feed_markets(), self.now())
+        let mut out = self.feeds.wanted(kind, src, &self.feed_markets(), self.now());
+        out.retain(|m| crate::coins::lists(src, m));
+        out
     }
 
     pub fn feed_needs_failover(&self, kind: DataKind) -> bool {
@@ -7263,7 +7267,42 @@ pub(crate) fn strategy_regime_ok(kind: StrategyKind, regime: Option<Regime>) -> 
 
 // ── seed universe (mirrors the TS MarketSim) ───────────────────────────────
 fn seed_markets() -> (Vec<Market>, HashMap<String, SimParam>) {
-    seed_markets_with(&crate::marketdata::equity_symbols())
+    let (mut markets, mut sim) = seed_markets_with(&crate::marketdata::equity_symbols());
+    add_crypto_universe(&mut markets, &mut sim, crate::coins::configured());
+    (markets, sim)
+}
+
+/// One `crypto:` market for every coin of the configured universe
+/// ([`crate::coins::configured`]) the seeds do not already have. Like a
+/// configured equity it sits still at a rough seed price until its first live
+/// quote marks it real; nothing trades it before that. The twenty seeded coins
+/// stay whatever the setting says, so a position or a lab book holding one
+/// never loses its market; the feeds serve only the configured ones.
+fn add_crypto_universe(markets: &mut Vec<Market>, sim: &mut HashMap<String, SimParam>, universe: &[&str]) {
+    let now = chrono::Utc::now().timestamp_millis();
+    for sym in universe {
+        let id = format!("crypto:{sym}");
+        if markets.iter().any(|m| m.id == id) {
+            continue;
+        }
+        let seed = crate::coins::coin(sym).map_or(1.0, |c| c.seed);
+        markets.push(Market {
+            id: id.clone(),
+            venue: Venue::Crypto,
+            symbol: sym.to_string(),
+            kind: MarketKind::Crypto,
+            price: seed,
+            change24h: 0.0,
+            model_prob: None,
+            liquidity: Some(100_000.0),
+            regime: None,
+            trend_strength: None,
+            no_price: None,
+            resolves_at: None,
+            updated_at: now,
+        });
+        sim.insert(id, SimParam { drift: 0.0, vol: 0.0, base: seed });
+    }
 }
 
 /// The seeded universe plus one Alpaca equity market for every symbol of the

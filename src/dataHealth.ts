@@ -11,6 +11,7 @@ export const SOURCE_LABEL: Record<FeedSource, string> = {
   coinbase: "Coinbase",
   bybit: "Bybit",
   okx: "OKX",
+  alpaca: "Alpaca",
 };
 
 export const KIND_LABEL: Record<DataKind, string> = {

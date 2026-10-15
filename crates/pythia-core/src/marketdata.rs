@@ -150,7 +150,7 @@ pub(crate) fn parse_kraken_ticker(v: &Value) -> Vec<RealCrypto> {
 
 /// Map a Kraken reply key (e.g. "XXBTZUSD", "AVAXUSD") to our symbol.
 fn kraken_symbol(key: &str) -> Option<&'static str> {
-    KRAKEN_PAIRS.iter().find(|(req, reply, _)| *reply == key || *req == key).map(|(_, _, sym)| *sym)
+    crate::coins::by_kraken_key(key)
 }
 
 /// The five stocks the engine has always seeded (and its default strategies trade).
