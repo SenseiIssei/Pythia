@@ -16,6 +16,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
+| hourly :12 | CS2 skins: Skinport snapshots and sales history, Steam prices for the watchlist, then models (refit daily), alerts, the play-money portfolio (weekly) and the board for the app (`lab.collect.cs2`, then `lab.cs2.run`; 2 Skinport requests and up to 100 Steam requests, about 6 minutes) | `/etc/cron.d/pythia-cs2` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 
 ## Health check
@@ -242,3 +243,57 @@ container start). Without a request it does nothing. `/etc/cron.d/pythia-notify-
 The engine that serves the API needs the same folder: add
 `-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
 to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
+
+## CS2 skins (W8)
+
+Market data, predictions, a play-money portfolio and alerts for the CS2 skins
+market. **Nothing buys or sells**: automated trading on the Steam Community
+Market or any skin marketplace breaks their terms and puts the account at
+risk, so the owner trades by hand, if at all. The sources are public and need
+no key: Skinport's `/v1/items` and `/v1/sales/history` (8 requests per 5
+minutes allowed, the job makes 2 an hour) and Steam's `priceoverview` (one
+request every 3.2 s, at most 100 a run, a 429 waits 60 s then 120 s and a
+third ends the Steam part of the run; the watchlist resumes where it stopped).
+
+The image needs `brotli` (in `requirements.txt` now): rebuild it once.
+
+```bash
+docker build -t pythia-lab /opt/pythia-lab
+```
+
+`/etc/cron.d/pythia-cs2` (default bridge network: it needs the internet, not
+the engines; the env file only for the Telegram alerts):
+
+```cron
+# Pythia: CS2 skins, hourly. Collects public prices, refits daily, alerts, paper portfolio. Never trades.
+12 * * * * root docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.cs2 >> /var/log/pythia-cs2.log 2>&1; docker run --rm --memory 4g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.cs2.run >> /var/log/pythia-cs2.log 2>&1
+```
+
+What it writes, under `/srv/pythia-data`:
+
+| Path | What |
+|---|---|
+| `cs2/skinport_items/date=*/HHMM.parquet` | every item each hour: lowest and highest ask, mean, median, listings |
+| `cs2/skinport_sales/date=*/HHMM.parquet` | 24 h, 7, 30 and 90-day sales min, max, average, median, volume |
+| `cs2/steam_prices/date=*/HHMM.parquet` | the watchlist (cases, popular skins, sticker capsules from `lab/collect/cs2_watchlist.json`, plus the 40 most traded Skinport items): lowest ask, median, 24 h volume |
+| `cs2/daily/{skinport,steam}/date=*.parquet` | the day's last snapshot per item, what the models read |
+| `cs2/model/` | today's predictions and how they were made |
+| `cs2/paper/state.json`, `journal.csv` | the play-money portfolio (10,000 EUR) |
+| `cs2/alerts.jsonl`, `alerts_state.json` | alerts sent, 24 h cooldown per item and kind |
+| `reports/cs2_board/latest.json` | the CS2 Skins page in the app |
+| `reports/cs2/` | the research report, daily (`results/cs2.md` in the repo) |
+| `reports/cs2_weekly/` | the weekly paper report, at each weekly look |
+
+About 5 to 10 MB a day. Alerts (cross-market gaps of 5 % or more after both
+venues' fees in items Steam trades 20 a day or more; liquid items 15 % under
+their 30-day median and 10 % down in 24 h) and the weekly summary go to the
+same Telegram chat or webhook as the digest. Drop pool changes and new
+operations go into `events` in `lab/collect/cs2_watchlist.json` as they
+happen, for the event study. Run once by hand, without posting:
+
+```bash
+docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.cs2 --steam-max 10
+docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.cs2.run --dry-run
+```
+
+The health check has a `cs2 collector` row (last run within three hours).
