@@ -34,7 +34,17 @@ Lake (under $PYTHIA_DATA/pokemon):
 
 Politeness: keyless the API allows about 30 requests a minute, so pages are
 spaced 2.1 s apart (0.3 s with a key); 429 and 5xx answers are retried with
-exponential backoff and Retry-After is honoured. A full run is about 90 pages.
+exponential backoff (up to 8 tries a page) and Retry-After is honoured. A
+full run is about 85 pages. The API has bad hours: on 2026-10-15 /sets
+answered 500 and 502 for minutes and single card pages needed a minute of
+retries, so a keyless run took about 40 minutes. A run that still fails is
+tried again (--attempts, default 3, --pause 300 s) and continues from the day
+cache. If /sets never answers, the sets are rebuilt from the cards.
+
+Freshness: TCGplayer prices are refreshed daily. The API stopped refreshing
+Cardmarket for most cards in mid 2026; a Cardmarket block older than 14 days
+(CM_FRESH_DAYS) is kept in the lake for the record but counts for nothing
+(see `fresh`). meta/<date>.json records how fresh both sources were.
 
   python -m lab.collect.pokemon                 today's snapshot
   python -m lab.collect.pokemon --sealed        plus sealed product
@@ -118,7 +128,7 @@ class Client:
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
     spacing: float = 2.1
-    retries: int = 6
+    retries: int = 8
     backoff: float = 2.0
     timeout: float = 60.0
     cache_dir: Path | None = None
@@ -256,6 +266,7 @@ def card_row(card: dict, snap: str) -> dict:
         "rarity": card.get("rarity"),
         "artist": card.get("artist"),
         "dex": int(dex[0]) if dex and str(dex[0]).isdigit() else None,
+        "hp": int(card["hp"]) if str(card.get("hp") or "").isdigit() else None,
         "set_id": s.get("id"),
         "set_name": s.get("name"),
         "series": s.get("series"),
@@ -514,13 +525,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sealed", action="store_true", help="also snapshot sealed product (tcgcsv.com)")
     ap.add_argument("--max-pages", type=int, help="stop after this many card pages (a test run)")
     ap.add_argument("--dry-run", action="store_true", help="fetch and count, write nothing")
+    ap.add_argument("--attempts", type=int, default=3,
+                    help="whole-run attempts; the day cache makes each retry continue where the last stopped")
+    ap.add_argument("--pause", type=float, default=300.0, help="seconds between whole-run attempts")
     a = ap.parse_args(argv)
-    try:
-        collect(a.date, a.min_usd, a.sealed, a.max_pages, a.dry_run)
-    except FetchError as e:
-        print(f"pokemon collector failed: {e}", file=sys.stderr)
-        return 1
-    return 0
+    return run_with_attempts(lambda: collect(a.date, a.min_usd, a.sealed, a.max_pages, a.dry_run),
+                             a.attempts, a.pause)
+
+
+def run_with_attempts(fn: Callable[[], dict], attempts: int, pause: float,
+                      sleep: Callable[[float], None] = time.sleep) -> int:
+    """The API has had bad hours (5xx on single pages for minutes). A page that
+    fails all its retries ends the attempt; the next attempt reads every page
+    already fetched from the day cache and asks only for the rest."""
+    for i in range(1, max(attempts, 1) + 1):
+        try:
+            fn()
+            return 0
+        except FetchError as e:
+            print(f"pokemon collector attempt {i} of {attempts} failed: {e}", file=sys.stderr)
+            if i < attempts:
+                sleep(pause)
+    return 1
 
 
 if __name__ == "__main__":

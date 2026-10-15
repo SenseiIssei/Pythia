@@ -31,6 +31,7 @@ import polars as pl
 AGE_BUCKETS = [(0, 30, "0-30 d"), (30, 90, "1-3 mo"), (90, 180, "3-6 mo"), (180, 365, "6-12 mo"),
                (365, 730, "1-2 y"), (730, 1825, "2-5 y"), (1825, 100_000, "5 y +")]
 PANEL_MIN_DAYS = 30
+TREND_MIN_CARDS = 200
 REPRINT_WINDOW = 90
 
 
@@ -156,7 +157,7 @@ def mark_reprints(snap: pl.DataFrame, events: pl.DataFrame, window: int = REPRIN
 def reprint_cross(snap: pl.DataFrame) -> list[dict]:
     """Within each rarity group: median Cardmarket 30-day trend of reprinted vs other cards."""
     rows = []
-    s = snap
+    s = snap.filter(pl.col("cm_trend_30").is_not_null() & pl.col("cm_trend_30").is_not_nan())
     for g in sorted(s["rarity_group"].unique().to_list()):
         a = s.filter((pl.col("rarity_group") == g) & pl.col("reprinted"))
         b = s.filter((pl.col("rarity_group") == g) & ~pl.col("reprinted"))
@@ -202,7 +203,7 @@ def reprint_panel(df: pl.DataFrame, events: pl.DataFrame, days: int) -> dict:
 def design(snap: pl.DataFrame) -> tuple[np.ndarray, list[str]]:
     """Dummies for the hedonic regression; base = common, no character, Pokemon card."""
     cols, names = [np.ones(snap.height)], ["intercept"]
-    for g in ("rare", "holo", "ultra", "chase", "other"):
+    for g in ("rare", "holo", "ultra", "chase", "promo", "other"):
         cols.append((snap["rarity_group"] == g).to_numpy().astype(float))
         names.append(f"rarity: {g}")
     for c in ("charizard", "pikachu", "eeveelution", "mew", "legendary_bird_dragon"):
@@ -251,7 +252,12 @@ def premiums(snap: pl.DataFrame) -> dict:
              "cards": int(X[:, i].sum()) if n not in ("intercept", "log(1 + set age in years)") else snap.height}
             for i, (n, bi, ti) in enumerate(zip(names, b, t)) if n != "intercept"]
     # The same features against the Cardmarket 30-day trend: who has been rising.
-    tb, tt, tr2 = ols_hc1(X, snap["cm_trend_30"].cast(pl.Float64).to_numpy())
+    # Only with enough fresh Cardmarket rows (stale ones are null in cm_trend_30).
+    ytr = snap["cm_trend_30"].cast(pl.Float64).fill_nan(None).to_numpy().astype(float)
+    if np.isfinite(ytr).sum() < TREND_MIN_CARDS:
+        return {"r2": r2, "rows": rows, "trend_r2": None, "trend_rows": [], "cards": snap.height,
+                "trend_cards": int(np.isfinite(ytr).sum())}
+    tb, tt, tr2 = ols_hc1(X, ytr)
     trend = [{"feature": n, "trend_pts": _pct(bi) if np.isfinite(bi) else None,
               "t": float(ti) if np.isfinite(ti) else None}
              for n, bi, ti in zip(names, tb, tt) if n != "intercept"]

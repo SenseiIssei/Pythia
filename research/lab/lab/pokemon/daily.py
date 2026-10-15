@@ -226,9 +226,14 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
             "## Price by rarity and character (latest snapshot)", "",
             f"OLS of log price, HC1 t-statistics, R2 {prem['r2']:.3f}. Premium = price against a common, "
             "non-character Pokemon card of the same set age, all else equal.", "",
-            _tbl(prem["rows"], ["feature", "premium_pct", "t", "cards"]),
-            f"Same features against the Cardmarket 30-day trend (trend / avg30 - 1, points), R2 {prem['trend_r2']:.3f}:", "",
-            _tbl(prem["trend_rows"], ["feature", "trend_pts", "t"]),
+            _tbl(prem["rows"], ["feature", "premium_pct", "t", "cards"])]
+    if prem.get("trend_r2") is not None and math.isfinite(prem["trend_r2"]):
+        out += [f"Same features against the Cardmarket 30-day trend (trend / avg30 - 1, points; fresh Cardmarket "
+                f"rows only), R2 {prem['trend_r2']:.3f}:", "", _tbl(prem["trend_rows"], ["feature", "trend_pts", "t"])]
+    else:
+        out += ["Who has been rising (the same features against Cardmarket's 30-day trend): not possible today, "
+                "no card has a fresh Cardmarket trend. Our own snapshots replace it after 30 days.", ""]
+    out += [
             "## Around set release", "",
             "Cross-section now: Cardmarket trend against its 30-day average, by set age. A description of the "
             "last 30 days across sets of different ages, not one set followed over time.", "",

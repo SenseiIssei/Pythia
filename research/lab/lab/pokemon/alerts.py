@@ -7,8 +7,8 @@ PYTHIA_TELEGRAM_CHAT_ID, or PYTHIA_ALERT_WEBHOOK. Unset: printed only.
                 previous snapshot (at most 3 days back), or 35 % over 7 days.
                 Before we have a previous snapshot: Cardmarket's avg1 against
                 avg7, 30 % or more, on a card with a trend of 20 EUR or more.
-  undervalued   a card at $10 to $500 whose fair value is at least 60 % above
-                its price, from a set at least 60 days old, and whose 90-day
+  undervalued   a card at $10 to $500 whose fair value is 60 % to 400 % above
+                its price (more is model error), from a set at least 60 days old, and whose 90-day
                 forecast is positive. Until the forecast validates this rests
                 on the fair-value model alone, and the message says so.
 
@@ -31,6 +31,9 @@ from ..ops import notify
 MOVE_MIN_USD, MOVE_1D, MOVE_7D = 20.0, 0.20, 0.35
 CM_MOVE, CM_MIN_EUR = 0.30, 20.0
 UV_MIN_USD, UV_MAX_USD, UV_GAP, UV_MIN_AGE = 10.0, 500.0, 0.60, 60
+# A fair value more than 5x the price is the model failing on an odd card
+# (the first real run had promos at 25x), not a bargain worth a message.
+UV_GAP_MAX = 4.0
 COOLDOWN_DAYS = 7
 MAX_MOVES, MAX_UV = 8, 5
 
@@ -56,7 +59,7 @@ def strong_moves(snap: pl.DataFrame) -> list[dict]:
 
 def undervalued(snap: pl.DataFrame) -> list[dict]:
     s = snap.filter(pl.col("price").is_between(UV_MIN_USD, UV_MAX_USD)
-                    & (pl.col("fv_gap") >= math.log1p(UV_GAP))
+                    & pl.col("fv_gap").is_between(math.log1p(UV_GAP), math.log1p(UV_GAP_MAX))
                     & (pl.col("set_age_days") >= UV_MIN_AGE) & (pl.col("pred_90d") > 0))
     return [{"card_id": r["card_id"], "name": r["name"], "set": r.get("set_name"), "price": r["price"],
              "fair": math.exp(r["fv_log"]), "gap": math.expm1(r["fv_gap"]), "pred_90d": r["pred_90d"]}

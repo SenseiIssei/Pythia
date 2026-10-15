@@ -46,7 +46,11 @@ def rarity_group(r: str | None) -> str:
         return "chase"
     if words & ULTRA_WORDS:
         return "ultra"
-    if "holo" in words or "promo" in words:
+    if "promo" in words:
+        # Black Star promos: everything from box toppers to prize cards. Their
+        # own group; as "holo" the first real run valued a $10 promo at $278.
+        return "promo"
+    if "holo" in words:
         return "holo"
     if "common" in words or "uncommon" in words:
         return "common"
@@ -163,6 +167,11 @@ def features(df: pl.DataFrame) -> pl.DataFrame:
         cm_trend_30=pl.when(fresh).then(pl.col("cm_trend") / pl.col("cm_avg30") - 1),
         spread=pl.when(fresh).then((pl.col("tp_market") / (pl.col("cm_trend") * pl.col("eurusd"))).log()),
         is_pokemon=pl.col("supertype").str.starts_with("Pok"),
+        # Where the card sits in its set: chase cards are numbered at the end.
+        number_pos=pl.col("number").cast(pl.Utf8).str.extract(r"^(\d+)$").cast(pl.Float64)
+        / pl.col("set_printed_total").cast(pl.Float64),
+        # The printing that is priced: first edition, unlimited, reverse holo ...
+        printing=pl.col("tp_variant").cast(pl.Utf8) if "tp_variant" in df.columns else pl.lit(None, pl.Utf8),
         # Cheapest listing against recent sales on TCGplayer: sellers undercutting
         # the market price, or not. Known today without any history.
         tp_low_gap=pl.when((pl.col("tp_low") > 0) & (pl.col("tp_market") > 0))

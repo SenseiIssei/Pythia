@@ -22,10 +22,12 @@ Forecast (needs our own history)
   forecast shown is the prior below and says so.
 
 Prior (until a horizon validates)
-  A fixed rule, not fitted: 30 d = 0.10 x log(fair / price) + 0.30 x the
-  Cardmarket 30-day trend; 90 d = 0.25 x log(fair / price) + 0.30 x trend.
-  Clipped to plus or minus 50 %. The paper collection following it is the
-  rule's forward test.
+  A fixed rule, not fitted: 30 d = 0.04 x g + 0.30 x the fresh Cardmarket
+  30-day trend; 90 d = 0.10 x g + 0.30 x trend, where g is log(fair / price)
+  squashed towards a factor of 3 either way, and 0 beyond a factor of 5
+  (model error; see `prior_gap`). Clipped to plus or minus 30 %. With
+  Cardmarket stale (most cards since mid 2026) the trend term is zero. The
+  paper collection following it is the rule's forward test.
 """
 
 from __future__ import annotations
@@ -42,10 +44,16 @@ HORIZONS = (30, 90)
 MIN_TEST_MONTHS = 4
 MIN_TRAIN_DAYS = 45
 IC_MIN, T_MIN = 0.03, 2.0
-CLIP = 0.5
-PRIOR = {30: (0.10, 0.30), 90: (0.25, 0.30)}
-STATIC = ["rarity_group", "character", "series", "supertype"]
-NUMERIC = ["alt_art", "secret", "set_age_days", "cm_mom_1_7", "cm_mom_7_30", "cm_trend_30", "dex"]
+CLIP = 0.3
+# The first real snapshot showed fair-value gaps of 5x to 25x on old promos and
+# vintage cards: model error, not bargains. The prior uses the gap clipped to
+# a factor of 3 either way and only a small share of it.
+GAP_CLIP = math.log(3.0)
+GAP_IGNORE = math.log(5.0)
+PRIOR = {30: (0.04, 0.30), 90: (0.10, 0.30)}
+STATIC = ["rarity_group", "character", "series", "supertype", "subtypes", "printing"]
+NUMERIC = ["alt_art", "secret", "set_age_days", "cm_mom_1_7", "cm_mom_7_30", "cm_trend_30", "dex", "number_pos",
+           "set_printed_total", "hp"]
 DYNAMIC = ["ret_7d", "ret_30d", "fv_gap", "tp_low_gap"]
 
 
@@ -89,10 +97,29 @@ def matrix(df: pl.DataFrame, cols: list[str], cats: dict[str, list[str]] | None 
 
 # ---------------------------------------------------------------- fair value
 
+def with_set_level(snap: pl.DataFrame) -> pl.DataFrame:
+    """Leave-one-out mean log price of the OTHER cards of the same set
+    (`loo_set`) and of the same set and rarity group (`loo_set_rarity`): how
+    much collectors pay for this set, without the card's own price. Folds
+    grouped by set still keep the model from learning any one set; these
+    columns tell it how dear the set is. Without them the first real snapshot
+    gave an out-of-fold R2 of 0.63 and fair values of 5x to 25x the price on
+    old promos."""
+    s = snap.with_columns(_lp=pl.col("log_price").cast(pl.Float64))
+    out = s
+    for name, keys in (("loo_set", ["set_id"]), ("loo_set_rarity", ["set_id", "rarity_group"])):
+        tot, n = pl.col("_lp").sum().over(keys), pl.col("_lp").count().over(keys)
+        out = out.with_columns(pl.when(n > 1).then((tot - pl.col("_lp")) / (n - 1)).alias(name))
+    return out.drop("_lp")
+
+
+FAIR_EXTRA = ["loo_set", "loo_set_rarity"]
+
+
 def fair_value(snap: pl.DataFrame, folds: int = 5) -> tuple[np.ndarray, dict]:
     """Out-of-fold fair log price for each card of one snapshot, and the fit's R2."""
-    cols = STATIC + NUMERIC
-    X, _, _ = matrix(snap, cols)
+    cols = STATIC + NUMERIC + FAIR_EXTRA
+    X, _, _ = matrix(with_set_level(snap), cols)
     y = snap["log_price"].to_numpy()
     sets = snap["set_id"].fill_null("?").to_list()
     uniq = sorted(set(sets))
@@ -198,9 +225,18 @@ def fit_full(df: pl.DataFrame, horizon: int):
     return model, cats, cols
 
 
+def prior_gap(gap: np.ndarray) -> np.ndarray:
+    """The fair-value gap as the prior uses it: a gap beyond a factor of 5 is
+    taken as model error and ignored, the rest squashed smoothly towards a
+    factor of 3 (smoothly, so the ranking has no ties at the cap)."""
+    g = np.asarray(gap, dtype=float)
+    g = np.where(np.isfinite(g) & (np.abs(g) <= GAP_IGNORE), g, 0.0)
+    return GAP_CLIP * np.tanh(g / GAP_CLIP)
+
+
 def prior(snap: pl.DataFrame, horizon: int) -> np.ndarray:
     a, b = PRIOR[horizon]
-    gap = snap["fv_gap"].cast(pl.Float64).fill_nan(None).fill_null(0.0).to_numpy()
+    gap = prior_gap(snap["fv_gap"].cast(pl.Float64).fill_nan(None).fill_null(0.0).to_numpy())
     tr = snap["cm_trend_30"].cast(pl.Float64).fill_nan(None).fill_null(0.0).to_numpy()
     return np.clip(np.expm1(a * gap + b * np.log1p(np.clip(tr, -0.9, 3.0))), -CLIP, CLIP)
 

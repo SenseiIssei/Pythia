@@ -82,11 +82,12 @@ print('true|' + '; '.join('%s %s, %+.2f %% since %s' % (x['config']['name'], x['
     fi
   done
 
-  # Pokemon cards (07:05 UTC + margin): only once the job is installed, i.e. the lake exists
+  # Pokemon cards (07:05 UTC; a slow API day with retries can take until about
+  # 10:00): only once the job is installed, i.e. the lake exists
   if [ -d "$data/pokemon" ]; then
     local pj
     pj=$(tail -1 "$data/pokemon/paper/journal.csv" 2>/dev/null | cut -d, -f1)
-    if [ "$pj" = "$today" ] || { [ "$hour" -lt 8 ] && [ "$pj" = "$(date -u -d yesterday +%F)" ]; }; then
+    if [ "$pj" = "$today" ] || { [ "$hour" -lt 10 ] && [ "$pj" = "$(date -u -d yesterday +%F)" ]; }; then
       add "pokemon cards" true "last run $pj"
     else
       add "pokemon cards" false "last run ${pj:-none}, expected $today"
