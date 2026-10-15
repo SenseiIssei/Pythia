@@ -205,6 +205,9 @@ pub struct Card {
     pub rows: Vec<Row>,
     pub table: Option<Table>,
     pub footer: Option<String>,
+    /// The table above the numbers (a rebalance: the trades, then the totals).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub table_first: bool,
 }
 
 /// Width in monospace cells. Emoji are two cells wide on a phone.
@@ -303,6 +306,13 @@ impl Card {
         Some(lines.join("\n"))
     }
 
+    /// The numbers and the table, in the card's order.
+    fn blocks(&self) -> Vec<String> {
+        let (a, b) = (self.rows_block(), self.table_block());
+        let both = if self.table_first { [b, a] } else { [a, b] };
+        both.into_iter().flatten().collect()
+    }
+
     /// The card in one destination's markup.
     pub fn render(&self, format: AlertFormat) -> String {
         let head = if self.emoji.is_empty() { self.title.clone() } else { format!("{} {}", self.emoji, self.title) };
@@ -313,7 +323,7 @@ impl Card {
                 if let Some(s) = &self.summary {
                     parts.push(esc(s));
                 }
-                for block in [self.rows_block(), self.table_block()].into_iter().flatten() {
+                for block in self.blocks() {
                     parts.push(format!("<pre>{}</pre>", esc(&block)));
                 }
                 if let Some(f) = &self.footer {
@@ -325,7 +335,7 @@ impl Card {
                 if let Some(s) = &self.summary {
                     parts.push(s.clone());
                 }
-                for block in [self.rows_block(), self.table_block()].into_iter().flatten() {
+                for block in self.blocks() {
                     parts.push(format!("```\n{block}\n```"));
                 }
                 if let Some(f) = &self.footer {
@@ -337,7 +347,7 @@ impl Card {
                 if let Some(s) = &self.summary {
                     parts.push(s.clone());
                 }
-                for block in [self.rows_block(), self.table_block()].into_iter().flatten() {
+                for block in self.blocks() {
                     parts.push(format!("```{block}```"));
                 }
                 if let Some(f) = &self.footer {
