@@ -67,6 +67,10 @@ pub struct LabStatus {
     /// New coin listings the watcher saw (`reports/listings/latest.json`),
     /// shown on the Markets page. `None` until `lab.ops.listings` has run.
     pub listings: Option<ListingsFeed>,
+    /// The real money readiness check (`reports/readiness/latest.json`,
+    /// `lab.ops.readiness`): every autopilot against the pre-registered rule
+    /// of docs/LIVE-READINESS.md. As written; `None` until the check has run.
+    pub readiness: Option<Value>,
 }
 
 // ── new listings ────────────────────────────────────────────────────────────
@@ -788,6 +792,9 @@ pub fn status() -> LabStatus {
     out.learn = read_learn(&root);
     out.jobs = read_jobs(&root);
     out.listings = read_listings(&root);
+    out.readiness = std::fs::read_to_string(root.join("reports").join("readiness").join("latest.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));
@@ -814,6 +821,39 @@ pub use pythia_ml::zoo::ZooStatus;
 
 pub fn model_zoo() -> Option<ZooStatus> {
     read_zoo(&data_dir()?)
+}
+
+/// The lab's AI reports for the Models page, read only: the daily brief
+/// (`reports/ai_brief/latest.json`), the scores of every brief prediction
+/// against a base rate and the lab's own rule (`reports/ai/scores.json`) and
+/// the weekly review (`reports/ai/weekly.md`). Each part is `null` until its
+/// job has run.
+pub fn ai_report() -> Value {
+    match data_dir() {
+        Some(d) => read_ai_report(&d),
+        None => serde_json::json!({ "brief": null, "scores": null, "weekly": null }),
+    }
+}
+
+fn read_ai_report(root: &Path) -> Value {
+    let rep = root.join("reports");
+    let json = |p: PathBuf| std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let weekly = {
+        let p = rep.join("ai").join("weekly.md");
+        std::fs::read_to_string(&p).ok().map(|md| {
+            let ms = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+            serde_json::json!({ "markdown": md.chars().take(40_000).collect::<String>(), "updatedMs": ms })
+        })
+    };
+    serde_json::json!({
+        "brief": json(rep.join("ai_brief").join("latest.json")),
+        "scores": json(rep.join("ai").join("scores.json")),
+        "weekly": weekly,
+    })
 }
 
 fn read_zoo(root: &Path) -> Option<pythia_ml::zoo::ZooStatus> {
@@ -969,6 +1009,25 @@ pub fn cs2_board() -> Option<Cs2Board> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_ai_brief_its_scores_and_the_weekly_review() {
+        let dir = std::env::temp_dir().join(format!("pythia-labview-ai-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let empty = read_ai_report(&dir);
+        assert!(empty["brief"].is_null() && empty["scores"].is_null() && empty["weekly"].is_null());
+        std::fs::create_dir_all(dir.join("reports/ai_brief")).unwrap();
+        std::fs::create_dir_all(dir.join("reports/ai")).unwrap();
+        std::fs::write(dir.join("reports/ai_brief/latest.json"), r#"{"date":"2026-10-15","summary":["a","b","c"]}"#).unwrap();
+        std::fs::write(dir.join("reports/ai/scores.json"), r#"{"resolved":0,"verdict":"Too early"}"#).unwrap();
+        std::fs::write(dir.join("reports/ai/weekly.md"), "# Weekly AI review\n").unwrap();
+        let v = read_ai_report(&dir);
+        assert_eq!(v["brief"]["date"], "2026-10-15");
+        assert_eq!(v["scores"]["verdict"], "Too early");
+        assert!(v["weekly"]["markdown"].as_str().unwrap().starts_with("# Weekly AI review"));
+        assert!(v["weekly"]["updatedMs"].as_i64().unwrap() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reads_the_model_zoo_and_names_it_in_the_report_list() {

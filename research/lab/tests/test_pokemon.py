@@ -492,8 +492,14 @@ def test_card_detail_has_everything_a_buyer_needs():
     tested = alerts.detail(_row(), "2026-10-15", {"30": {"validated": True, "mean_rank_ic": 0.08, "test_months": 6},
                                                   "90": {"validated": True, "mean_rank_ic": 0.05, "test_months": 4}})
     assert tested["trust"] == "tested" and "rank IC 0.08 over 6 months" in tested["trust_words"]
-    m = {"move": 0.25, "basis": "since the last snapshot"}
+    m = {"move": 0.25, "basis_key": "last"}
     assert alerts.change_line(d, m) == "Moved +25 % since the last snapshot", "the 1-day change is not said twice"
+    de = notify_text(alerts.card_parts(1, d, m, "de"))
+    for want in ("ungradiert, Druck holofoil", "Jetzt 120,50 $ (TCGplayer-Marktpreis, Do 15. Okt)",
+                 "Cardmarket 98,00 € Trend, 95,10 € Durchschnittsverkauf", "⚠️ 106 Tage alt, veraltet",
+                 "Fairer Wert 180,00 $ (+49 % ggü. Preis)", "Prognose 30 T +3 %, 90 T +8 %", "Vertrauen: niedrig",
+                 "Bewegt +25 % seit dem letzten Stand", "Cardmarket-Suche https://www.cardmarket.com/"):
+        assert want in de, want
 
 
 def notify_text(parts) -> str:

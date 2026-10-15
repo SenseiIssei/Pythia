@@ -11,16 +11,24 @@ and losses.
   bottom right what the autopilots hold, by value, with its share
 
 lab.ops.notify builds the data from the engine's GET /api/state
-(notify.chart_data) and sends the file as a Telegram photo.
+(notify.chart_data) and sends the file as a Telegram photo. Its words,
+amounts and dates follow the language of the messages (lang "en" or "de":
+1.234,56 $, 15. Okt).
 
 render_trends draws the CS2 Steam market summary (lab.cs2.trends): the
-median 7-day change by item group, and the day's top movers, in percent.
+median 7-day change by item group, and the day's top movers, in percent
+(the caller passes the titles in the messages' language).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+
+try:  # inside the lab package
+    from . import i18n
+except ImportError:  # a copy next to notify.py and i18n.py
+    import i18n  # type: ignore[no-redef]
 
 try:
     import matplotlib
@@ -48,24 +56,45 @@ def available() -> bool:
     return plt is not None
 
 
-def _money(v: float) -> str:
+def _amount(a: float, small: str, lang: str) -> str:
+    """A positive amount: $12.5k for 10,000 and up, else `small` (a format)
+    of it; German 12,5 Tsd. $."""
+    if a >= 10_000:
+        return f"{i18n.num(a / 1000, 1, 'de')} Tsd. $" if lang == "de" else f"${a / 1000:,.1f}k"
+    s = format(a, small)
+    return f"{i18n.de_digits(s)} $" if lang == "de" else f"${s}"
+
+
+def _money(v: float, lang: str = "en") -> str:
     """+$31.20, -$1,240, +$12.5k: a signed amount for a bar's end."""
     a = abs(v)
-    s = f"${a / 1000:,.1f}k" if a >= 10_000 else f"${a:,.0f}" if a >= 100 else f"${a:,.2f}"
-    return ("-" if v < 0 else "+") + s
+    return ("-" if v < 0 else "+") + _amount(a, ",.0f" if a >= 100 else ",.2f", lang)
 
 
-def _tick_money(v: float, signed: bool) -> str:
+def _tick_money(v: float, signed: bool, lang: str = "en") -> str:
     """An axis tick: $0, +$40, -$1.2k."""
     if abs(v) < 1e-9:
-        return "$0"
+        return "0 $" if lang == "de" else "$0"
     a = abs(v)
-    s = f"${a / 1000:,.1f}k" if a >= 10_000 else f"${a:,.0f}" if a >= 10 else f"${a:,.1f}"
+    s = _amount(a, ",.0f" if a >= 10 else ",.1f", lang)
     return (("-" if v < 0 else "+") if signed else ("-" if v < 0 else "")) + s
 
 
-def _plain_money(v: float) -> str:
-    return f"${v / 1000:,.1f}k" if v >= 10_000 else f"${v:,.0f}"
+def _plain_money(v: float, lang: str = "en") -> str:
+    return _amount(v, ",.0f", lang)
+
+
+def _pct_tick(v: float, lang: str = "en") -> str:
+    """0 %, +3 %, +0.5 % (German +0,5 %)."""
+    if abs(v) < 1e-9:
+        return "0 %"
+    s = f"{v:+.0f} %" if abs(v) >= 1 else f"{v:+.1f} %"
+    return s.replace(".", ",") if lang == "de" else s
+
+
+def _date_tick(d, lang: str = "en") -> str:
+    """15 Oct, or 15. Okt."""
+    return i18n.day_month(d, lang) if lang == "de" else d.strftime("%d %b")
 
 
 def _style(ax) -> None:
@@ -83,7 +112,7 @@ def _local(ms: int) -> datetime:
     return notify.local_time(int(ms))
 
 
-def _equity(ax, data: dict) -> None:
+def _equity(ax, data: dict, lang: str = "en") -> None:
     _style(ax)
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.axhline(0, color=MUTED, linewidth=0.8, alpha=0.6)
@@ -106,17 +135,17 @@ def _equity(ax, data: dict) -> None:
     if btc:
         xs = [_local(t) for t, _ in btc]
         ax.plot(xs, [v for _, v in btc], color=MUTED, linewidth=1.4, linestyle=(0, (4, 3)),
-                label="BTC buy and hold", zorder=2)
+                label=i18n.t("btc_hold", lang), zorder=2)
         ends.append((xs[-1], btc[-1][1], MUTED))
     for x, y, c in ends:
-        ax.annotate(f"{y:+.1f} %", (x, y), xytext=(6, 0), textcoords="offset points", va="center",
-                    fontsize=10, fontweight="bold", color=c)
-    ax.yaxis.set_major_formatter(FuncFormatter(
-        lambda v, _: "0 %" if abs(v) < 1e-9 else f"{v:+.0f} %" if abs(v) >= 1 else f"{v:+.1f} %"))
+        ax.annotate(f"{i18n.num(y, 1, lang, sign=True)} %", (x, y), xytext=(6, 0), textcoords="offset points",
+                    va="center", fontsize=10, fontweight="bold", color=c)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: _pct_tick(v, lang)))
     if span_ms <= 2 * 86_400_000:
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     else:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+        # The month by the language, not by the machine's locale.
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: _date_tick(mdates.num2date(v), lang)))
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=6))
     ax.margins(x=0.02)
     # Room on the right for the end labels.
@@ -128,7 +157,7 @@ def _equity(ax, data: dict) -> None:
             t.set_color(INK)
 
 
-def _bars(ax, items: list[tuple[str, float]], title: str, signed: bool, empty: str) -> None:
+def _bars(ax, items: list[tuple[str, float]], title: str, signed: bool, empty: str, lang: str = "en") -> None:
     _style(ax)
     ax.set_title(title, loc="left", fontsize=11, color=INK, fontweight="bold", pad=10)
     if not items:
@@ -145,7 +174,7 @@ def _bars(ax, items: list[tuple[str, float]], title: str, signed: bool, empty: s
     ax.set_yticks([])
     ax.spines["left"].set_visible(False)
     ax.grid(axis="x", color=GRID, linewidth=0.8, zorder=0)
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: _tick_money(v, signed)))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: _tick_money(v, signed, lang)))
     ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(3))
     total = sum(abs(v) for v in vals) or 1.0
     lo, hi = min(vals + [0.0]), max(vals + [0.0])
@@ -158,12 +187,12 @@ def _bars(ax, items: list[tuple[str, float]], title: str, signed: bool, empty: s
     for yi, v, lab in zip(y, vals, labels):
         # The name sits above its bar, so a long one is never cut off.
         ax.text(x0, yi + 0.27, lab, ha="left", va="bottom", fontsize=9, color=INK)
-        text = _money(v) if signed else f"{_plain_money(v)} · {abs(v) / total * 100:.0f} %"
+        text = _money(v, lang) if signed else f"{_plain_money(v, lang)} · {abs(v) / total * 100:.0f} %"
         ax.annotate(text, (v, yi), xytext=(5 if v >= 0 else -5, 0), textcoords="offset points",
                     ha="left" if v >= 0 else "right", va="center", fontsize=9, color=INK)
 
 
-def _pct_bars(ax, items: list[tuple[str, float]], title: str, empty: str) -> None:
+def _pct_bars(ax, items: list[tuple[str, float]], title: str, empty: str, lang: str = "en") -> None:
     """Signed percent bars, green up and red down, the name above each bar."""
     _style(ax)
     ax.set_title(title, loc="left", fontsize=11, color=INK, fontweight="bold", pad=10)
@@ -179,7 +208,8 @@ def _pct_bars(ax, items: list[tuple[str, float]], title: str, empty: str) -> Non
     ax.set_yticks([])
     ax.spines["left"].set_visible(False)
     ax.grid(axis="x", color=GRID, linewidth=0.8, zorder=0)
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: "0 %" if abs(v) < 1e-9 else f"{v:+.0f} %"))
+    ax.xaxis.set_major_formatter(FuncFormatter(
+        lambda v, _: "0 %" if abs(v) < 1e-9 else f"{i18n.num(v, 0, lang, sign=True)} %"))
     ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
     lo, hi = min(vals + [0.0]), max(vals + [0.0])
     pad = (hi - lo) * 0.35 or 1.0
@@ -189,17 +219,18 @@ def _pct_bars(ax, items: list[tuple[str, float]], title: str, empty: str) -> Non
     x0 = ax.get_xlim()[0]
     for yi, v, lab in zip(y, vals, labels):
         ax.text(x0, yi + 0.27, lab, ha="left", va="bottom", fontsize=9, color=INK)
-        ax.annotate(f"{v:+.1f} %", (v, yi), xytext=(5 if v >= 0 else -5, 0), textcoords="offset points",
-                    ha="left" if v >= 0 else "right", va="center", fontsize=9, color=INK)
+        ax.annotate(f"{i18n.num(v, 1, lang, sign=True)} %", (v, yi), xytext=(5 if v >= 0 else -5, 0),
+                    textcoords="offset points", ha="left" if v >= 0 else "right", va="center", fontsize=9, color=INK)
 
 
 TRENDS_SIZE_IN = (8.0, 8.0)
 
 
-def render_trends(data: dict, path: Path | str, title: str, subtitle: str = "") -> Path:
+def render_trends(data: dict, path: Path | str, title: str, subtitle: str = "", lang: str = "en") -> Path:
     """The CS2 Steam market summary: median 7-day change by group on top,
     the day's top movers below. `data`: {"groups": [(name, pct)], "movers":
-    [(name, pct)], "groups_title", "movers_title"}."""
+    [(name, pct)], "groups_title", "movers_title", "empty_groups",
+    "empty_movers"}, the words already in `lang`."""
     if plt is None:
         raise RuntimeError("matplotlib is not installed")
     path = Path(path)
@@ -213,17 +244,18 @@ def render_trends(data: dict, path: Path | str, title: str, subtitle: str = "") 
             fig.text(0.06, 0.925, subtitle if len(subtitle) <= 95 else subtitle[:94] + "…", fontsize=9.5,
                      color=MUTED, ha="left", va="top")
         _pct_bars(fig.add_subplot(gs[0]), data.get("groups") or [], data.get("groups_title") or "By group",
-                  "No group with enough items")
+                  data.get("empty_groups") or "No group with enough items", lang)
         _pct_bars(fig.add_subplot(gs[1]), data.get("movers") or [], data.get("movers_title") or "Top movers",
-                  "No liquid item moved")
+                  data.get("empty_movers") or "No liquid item moved", lang)
         fig.savefig(path, dpi=DPI, facecolor="white")
     finally:
         plt.close(fig)
     return path
 
 
-def render(data: dict, path: Path | str, title: str, subtitle: str = "") -> Path:
-    """Draw the chart to `path` (PNG) and return the path."""
+def render(data: dict, path: Path | str, title: str, subtitle: str = "", lang: str = "en") -> Path:
+    """Draw the chart to `path` (PNG) and return the path. `lang` ("en" or
+    "de") is the language of its labels, amounts and dates."""
     if plt is None:
         raise RuntimeError("matplotlib is not installed")
     path = Path(path)
@@ -236,10 +268,11 @@ def render(data: dict, path: Path | str, title: str, subtitle: str = "") -> Path
         fig.text(0.06, 0.955, title, fontsize=16, fontweight="bold", color=INK, ha="left", va="top")
         if subtitle:
             fig.text(0.06, 0.915, subtitle, fontsize=10.5, color=MUTED, ha="left", va="top")
-        _equity(fig.add_subplot(gs[0, :]), data)
+        _equity(fig.add_subplot(gs[0, :]), data, lang)
         _bars(fig.add_subplot(gs[1, 0]), sorted(data.get("sleeves") or [], key=lambda s: -s[1]),
-              "P&L per sleeve", True, "No sleeves")
-        _bars(fig.add_subplot(gs[1, 1]), data.get("positions") or [], "Positions", False, "In cash")
+              i18n.t("pnl_per_sleeve", lang), True, i18n.t("no_sleeves", lang), lang)
+        _bars(fig.add_subplot(gs[1, 1]), data.get("positions") or [], i18n.t("positions", lang), False,
+              i18n.t("in_cash", lang), lang)
         fig.savefig(path, dpi=DPI, facecolor="white")
     finally:
         plt.close(fig)

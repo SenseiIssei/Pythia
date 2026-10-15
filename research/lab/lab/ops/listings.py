@@ -51,9 +51,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import notify
+from . import i18n, notify
 
-VENUES = ("alpaca", "binance", "coinbase", "kraken")
+VENUES =("alpaca", "binance", "coinbase", "kraken")
 NEWS = "binance_news"
 RECENT_DAYS = 90
 RECENT_MAX = 200
@@ -312,37 +312,45 @@ def alert_groups(events: list[dict]) -> list[list[dict]]:
     return list(groups.values())
 
 
-def alert_line(es: list[dict]) -> str:
+def venue_name(venue: str, lang: str = "en") -> str:
+    return i18n.t("ls_news", lang) if venue == NEWS else VENUE_NAMES[venue]
+
+
+def alert_line(es: list[dict], lang: str = "en") -> str:
     """One listing in one sentence: venue, coin, symbols, Alpaca, first price."""
+    t = i18n.t
     e0 = es[0]
     venue = e0["venue"]
     if e0["event"] == "announced":
-        return f"{VENUE_NAMES[venue]}: {e0.get('title', '')}. Alpaca: {alpaca_word(e0)}."
-    syms = ", ".join(e["symbol"] for e in es[:6]) + (f" and {len(es) - 6} more" if len(es) > 6 else "")
+        return t("ls_announced", lang, venue=venue_name(venue, lang), title=e0.get("title", ""),
+                 alpaca=alpaca_word(e0, lang))
+    syms = ", ".join(e["symbol"] for e in es[:6]) + (t("ls_and_more", lang, n=len(es) - 6) if len(es) > 6 else "")
     priced = [e for e in es if e.get("price") is not None]
     px = min(priced, key=lambda e: DOLLARS.index(e["quote"]) if e["quote"] in DOLLARS else len(DOLLARS),
              default=None)
-    price = f" First price {px['price']:.8g} {px['quote']} ({px['symbol']})." if px else " No price yet."
-    what = "new pair" if venue == "alpaca" and not e0["new_base"] else "new coin"
-    return f"{VENUE_NAMES[venue]} {what} {e0['base']}: {syms}. Alpaca: {alpaca_word(e0)}.{price}"
+    price = (t("ls_first_price", lang, price=i18n.plain_num(px["price"], lang), quote=px["quote"], symbol=px["symbol"])
+             if px else t("ls_no_price", lang))
+    key = "ls_line_pair" if venue == "alpaca" and not e0["new_base"] else "ls_line_coin"
+    return t(key, lang, venue=venue_name(venue, lang), base=e0["base"], syms=syms, alpaca=alpaca_word(e0, lang),
+             price=price)
 
 
-def alert_texts(events: list[dict], prefix: str, limit: int = MAX_ALERTS) -> list[str]:
+def alert_texts(events: list[dict], prefix: str, limit: int = MAX_ALERTS, lang: str = "en") -> list[str]:
     """One message per new listing; past `limit` the rest share one message."""
-    lines = [alert_line(es) for es in alert_groups(events)]
+    lines = [alert_line(es, lang) for es in alert_groups(events)]
     if len(lines) > limit:
-        lines = lines[:limit - 1] + ["\n".join([f"{len(lines) - limit + 1} more:"] + lines[limit - 1:])]
-    return [notify.clip(f"{prefix} new listing: {ln}\nInformation only: nothing is bought.") for ln in lines]
+        lines = lines[:limit - 1] + ["\n".join([i18n.t("ls_more", lang, n=len(lines) - limit + 1)] + lines[limit - 1:])]
+    return [notify.clip(i18n.t("ls_msg", lang, prefix=prefix, line=ln), lang=lang) for ln in lines]
 
 
-def alert_text(events: list[dict], prefix: str) -> str:
+def alert_text(events: list[dict], prefix: str, lang: str = "en") -> str:
     """Every message of the run, one after the other (for the dry run and the logs)."""
-    return "\n\n".join(alert_texts(events, prefix))
+    return "\n\n".join(alert_texts(events, prefix, lang=lang))
 
 
-def alpaca_word(e: dict) -> str:
+def alpaca_word(e: dict, lang: str = "en") -> str:
     v = e.get("alpaca_lists")
-    return "unknown (no keys)" if v is None else ("lists it" if v else "does not list it")
+    return i18n.t("ls_alpaca_unknown" if v is None else ("ls_alpaca_yes" if v else "ls_alpaca_no"), lang)
 
 
 # ---------------------------------------------------------------- writing
@@ -473,7 +481,7 @@ def run(dry_run: bool = False, now_ms: int | None = None, fetcher=fetch, news_fe
             e["price"] = pricer(e["venue"], e["symbol"])
 
     prefix = notify.config()[2]
-    texts = alert_texts(events, prefix)
+    texts = alert_texts(events, prefix, lang=notify.alert_lang())
     text = "\n\n".join(texts)
     delivered = None
     if dry_run:

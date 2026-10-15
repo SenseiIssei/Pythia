@@ -16,6 +16,12 @@
 //!   GET  /api/alerts/settings  → category switches, quiet hours, big-move sizes
 //!   POST /api/alerts/settings  → change them (saved with the engine state)
 //!   POST /api/alerts/event     → a lab job posts an alert (localhost only)
+//!   GET  /api/ai/budget        → Claude API caps, spend and the last calls
+//!   POST /api/ai/budget        → change the caps
+//!   POST /api/ai/complete      → a lab job's metered Claude call (localhost, key token)
+//!   GET  /api/ai/report        → the AI brief, its scores and the weekly review
+//!   GET  /api/readiness/settings → the real money readiness check's risk step
+//!   POST /api/readiness/settings → change it (`{riskStep}`, 1 to 5); report only
 //!
 //! Paper-first, exactly like the desktop app: real money stays gated behind the
 //! same sovereign risk manager and vault. This process only ever runs the
@@ -477,6 +483,22 @@ async fn post_alert_settings(
     Json(s.view(now_ms())).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadinessPatch {
+    risk_step: u8,
+}
+
+/// `POST /api/readiness/settings`: the risk step of the real money readiness
+/// check (docs/LIVE-READINESS.md), written for the lab. It changes what the
+/// daily check reports and nothing else; nothing is armed or traded.
+async fn post_readiness_settings(Json(patch): Json<ReadinessPatch>) -> axum::response::Response {
+    match pythia_core::readiness::set_settings(patch.risk_step) {
+        Ok(s) => Json(s).into_response(),
+        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+    }
+}
+
 /// One row of a posted event: `["Equity", "$1,234"]`, or with a sign for the
 /// circle: `{"label": "P&L", "value": "+$12", "sign": 12}`.
 #[derive(Debug, Deserialize)]
@@ -879,6 +901,7 @@ async fn main() {
     };
     // The lab reads the same switches and quiet hours.
     write_settings_file(&state.alert_files, &state.alert_log.settings());
+    init_ai_budget(&state);
     if let Some(n) = env_str("PYTHIA_ALERT_REJECTS").and_then(|v| v.parse::<u32>().ok()) {
         state.engine.lock().unwrap().set_alert_reject_threshold(n);
     }
@@ -934,6 +957,7 @@ async fn main() {
         .route("/api/llm/providers", get(get_llm_providers))
         .route("/api/llm/signal", post(post_llm_signal))
         .route("/api/ai/config", post(post_ai_config))
+        .merge(ai_routes())
         .route("/api/live/config", post(post_live_config))
         .route("/api/live/maker", post(post_live_maker))
         .route("/api/execution/stats", get(get_execution_stats))
@@ -961,6 +985,10 @@ async fn main() {
         .route("/api/pokemon", get(|| async { Json(pythia_core::labview::pokemon()) }))
         .route("/api/lab/feeds", get(|| async { Json(pythia_core::labview::feeds()) }))
         .route("/api/lab/studies", get(|| async { Json(pythia_core::labview::studies()) }))
+        .route(
+            "/api/readiness/settings",
+            get(|| async { Json(pythia_core::readiness::settings()) }).post(post_readiness_settings),
+        )
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         .merge(alert_routes())
@@ -1171,6 +1199,7 @@ async fn ai_loop(state: AppState) {
     );
     let mut interval = tokio::time::interval(period);
     let mut cursor: usize = 0;
+    let mut last_budget_note: Option<std::time::Instant> = None;
 
     loop {
         interval.tick().await;
@@ -1216,9 +1245,18 @@ async fn ai_loop(state: AppState) {
         };
         let cfg = LlmConfig::new(provider, std::env::var("PYTHIA_AI_MODEL").unwrap_or_default(), key)
             .with_effort(effort)
+            .with_job("overlay")
             .with_timeout(Duration::from_secs(45));
 
         match llm::signal(&cfg, &context).await {
+            // The budget said no: nothing was sent. Said once an hour in the
+            // journal, not on every tick.
+            Err(llm::LlmError::Budget(r)) => {
+                if last_budget_note.is_none_or(|t: std::time::Instant| t.elapsed() >= Duration::from_secs(3_600)) {
+                    last_budget_note = Some(std::time::Instant::now());
+                    state.engine.lock().unwrap().record_ai_error(&r.to_string());
+                }
+            }
             Ok(sig) => {
                 let view = AiView {
                     market_id: market_id.clone(),
@@ -2103,14 +2141,220 @@ async fn post_llm_signal(Json(req): Json<LlmReq>) -> impl IntoResponse {
             .into_response();
     }
 
-    let cfg = LlmConfig::new(provider, req.model.unwrap_or_default(), key);
+    let cfg = LlmConfig::new(provider, req.model.unwrap_or_default(), key).with_job("signal");
     match llm::signal(&cfg, &req.context).await {
         Ok(sig) => (StatusCode::OK, Json(sig)).into_response(),
+        Err(e @ llm::LlmError::Budget(_)) => (StatusCode::PAYMENT_REQUIRED, e.to_string()).into_response(),
         Err(e) => {
             tracing::warn!("llm signal failed: {e}");
             (StatusCode::BAD_GATEWAY, format!("llm error: {e}")).into_response()
         }
     }
+}
+
+// ── the Claude API budget ───────────────────────────────────────────────────
+
+fn ai_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/ai/budget", get(get_ai_budget).post(post_ai_budget))
+        .route("/api/ai/complete", post(post_ai_complete))
+        .route("/api/ai/report", get(|| async { Json(pythia_core::labview::ai_report()) }))
+}
+
+/// The process-wide budget over `<data>/ai` (or `PYTHIA_AI_DIR`), with its
+/// 50/80/100 % alerts going out through the operator alerts.
+fn init_ai_budget(state: &AppState) {
+    let budget = pythia_core::ai_budget::Budget::open(pythia_core::ai_budget::default_dir(), "server");
+    if let Some(sink) = state.alert_sink.clone() {
+        budget.set_alert_hook(move |a| {
+            let mut ev = alerts::AlertEvent::new(alerts::AlertKind::Event, format!("ai-budget:{}", a.percent), a.text())
+                .titled(if a.percent >= 100 { "Claude API budget used up" } else { "Claude API budget" })
+                .with_emoji("💳")
+                .with_rows(vec![
+                    alerts::Row::new("Spent", format!("${:.2}", a.spent_usd)),
+                    alerts::Row::new("Lifetime cap", format!("${:.2}", a.cap_usd)),
+                ]);
+            if a.percent >= 100 {
+                ev = ev.urgent();
+            }
+            sink.send(ev);
+        });
+    }
+    match budget.dir() {
+        Some(d) => tracing::info!("AI budget: ledger in {} ({:?})", d.display(), budget.caps()),
+        None => tracing::warn!("AI budget: no data folder, the ledger is kept in memory only (set PYTHIA_AI_DIR)"),
+    }
+    if !pythia_core::ai_budget::init(budget) {
+        tracing::warn!("AI budget was already in use before it was set up");
+    }
+}
+
+async fn get_ai_budget() -> impl IntoResponse {
+    let mut v = serde_json::to_value(pythia_core::ai_budget::global().view(now_ms())).unwrap_or_default();
+    // Whether a key is there, never the key.
+    v["keyConfigured"] = serde_json::json!(Provider::Anthropic.configured_in_env());
+    v["models"] = serde_json::json!({
+        "routine": llm::CLAUDE_ROUTINE,
+        "review": llm::CLAUDE_REVIEW,
+        "deep": llm::CLAUDE_DEEP,
+    });
+    Json(v)
+}
+
+/// Change the caps. Missing fields keep their value.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiBudgetReq {
+    #[serde(default)]
+    lifetime_usd: Option<f64>,
+    #[serde(default)]
+    monthly_usd: Option<f64>,
+    #[serde(default)]
+    daily_usd: Option<f64>,
+}
+
+async fn post_ai_budget(Json(req): Json<AiBudgetReq>) -> axum::response::Response {
+    let b = pythia_core::ai_budget::global();
+    let cur = b.caps();
+    for v in [req.lifetime_usd, req.monthly_usd, req.daily_usd].into_iter().flatten() {
+        if !v.is_finite() || !(0.0..=pythia_core::ai_budget::MAX_CAP_USD).contains(&v) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!("a cap must be 0 to {} USD", pythia_core::ai_budget::MAX_CAP_USD),
+            );
+        }
+    }
+    let next = pythia_core::ai_budget::Caps {
+        lifetime_usd: req.lifetime_usd.unwrap_or(cur.lifetime_usd),
+        monthly_usd: req.monthly_usd.unwrap_or(cur.monthly_usd),
+        daily_usd: req.daily_usd.unwrap_or(cur.daily_usd),
+    };
+    match b.set_caps(next) {
+        Ok(c) => {
+            tracing::info!("AI budget caps set: {c:?}");
+            get_ai_budget().await.into_response()
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("caps not saved: {e}")),
+    }
+}
+
+/// A lab job's Claude call (the daily brief, the weekly review). The engine
+/// holds the key and the budget, so every paid call in Pythia goes through
+/// one gate and one ledger.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiCompleteReq {
+    job: String,
+    #[serde(default)]
+    model: Option<String>,
+    system: String,
+    user: String,
+    #[serde(default)]
+    schema: Option<serde_json::Value>,
+    max_tokens: u64,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    batch: bool,
+    #[serde(default)]
+    batch_wait_sec: Option<u64>,
+}
+
+/// The largest answer a lab job may ask for.
+const AI_MAX_TOKENS: u64 = 16_000;
+
+/// 200 with the completion (its `json` is null and `parseError` says why when
+/// the answer did not parse; it was billed all the same); 400 bad request;
+/// 402 the budget refused; 403 not from this machine or without the key's
+/// token; 503 no key; 502/504 the API failed or a batch did not finish.
+async fn post_ai_complete(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<AiCompleteReq>,
+) -> axum::response::Response {
+    if !addr.ip().to_canonical().is_loopback() {
+        return api_error(StatusCode::FORBIDDEN, "AI calls are taken from this machine only");
+    }
+    let key = std::env::var(Provider::Anthropic.env_key()).unwrap_or_default();
+    if key.trim().is_empty() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "no Claude API key on this server (ANTHROPIC_API_KEY)");
+    }
+    let token = headers.get("x-pythia-ai-token").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    if token.is_empty() || token != pythia_core::ai_budget::caller_token(&key) {
+        return api_error(StatusCode::FORBIDDEN, "the caller does not hold this server's Claude API key");
+    }
+    if let Err(why) = check_ai_request(&req) {
+        return api_error(StatusCode::BAD_REQUEST, why);
+    }
+    let model = req.model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| llm::CLAUDE_ROUTINE.into());
+    let effort = match req.effort.as_deref().unwrap_or("low") {
+        "medium" => Effort::Medium,
+        "high" => Effort::High,
+        "xhigh" => Effort::Xhigh,
+        "max" => Effort::Max,
+        _ => Effort::Low,
+    };
+    let cfg = LlmConfig::new(Provider::Anthropic, model, key)
+        .with_effort(effort)
+        .with_job(req.job.clone())
+        .with_timeout(Duration::from_secs(240));
+    let mut creq = llm::CompleteRequest::new(req.system, req.user, req.max_tokens);
+    creq.schema = req.schema;
+    creq.batch = req.batch;
+    if let Some(s) = req.batch_wait_sec {
+        creq.batch_wait = Duration::from_secs(s.clamp(10, 3_600));
+    }
+    match llm::complete(&cfg, &creq).await {
+        Ok(c) => {
+            tracing::info!(
+                "AI {}: {} in / {} out tokens, ${:.4}{}",
+                req.job,
+                c.usage.input_tokens + c.usage.cache_read_tokens + c.usage.cache_write_tokens,
+                c.usage.output_tokens,
+                c.cost_usd,
+                if c.batch_id.is_some() { " (batch)" } else { "" }
+            );
+            Json(c).into_response()
+        }
+        Err(llm::LlmError::Budget(r)) => (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(serde_json::json!({ "error": r.to_string(), "refusal": r })),
+        )
+            .into_response(),
+        Err(e @ llm::LlmError::BatchTimeout(_)) | Err(e @ llm::LlmError::Timeout(_)) => {
+            api_error(StatusCode::GATEWAY_TIMEOUT, e.to_string())
+        }
+        Err(e) => {
+            tracing::warn!("AI {} failed: {e}", req.job);
+            api_error(StatusCode::BAD_GATEWAY, e.to_string())
+        }
+    }
+}
+
+/// The request as the endpoint accepts it: a short job name, a Claude model
+/// with a price, a bounded answer.
+fn check_ai_request(req: &AiCompleteReq) -> Result<(), String> {
+    let job_ok = !req.job.is_empty()
+        && req.job.len() <= 40
+        && req.job.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !job_ok {
+        return Err("job must be 1 to 40 lower case letters, digits or dashes".into());
+    }
+    if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
+        if !pythia_core::ai_budget::prices().price(m).1 {
+            return Err(format!("unknown model {m}: only priced Claude models are called"));
+        }
+    }
+    if req.max_tokens == 0 || req.max_tokens > AI_MAX_TOKENS {
+        return Err(format!("maxTokens must be 1 to {AI_MAX_TOKENS}"));
+    }
+    if req.system.trim().is_empty() || req.user.trim().is_empty() {
+        return Err("system and user must not be empty".into());
+    }
+    if req.system.len() + req.user.len() > 400_000 {
+        return Err("the prompt is too long (at most 400,000 characters)".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2332,3 +2576,7 @@ mod tests {
 #[cfg(test)]
 #[path = "alerts_api_tests.rs"]
 mod alerts_api_tests;
+
+#[cfg(test)]
+#[path = "ai_api_tests.rs"]
+mod ai_api_tests;

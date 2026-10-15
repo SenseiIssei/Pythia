@@ -104,11 +104,13 @@ rsync -a --delete --exclude __pycache__/ --exclude .pytest_cache/ "$repo/researc
 exists() { docker inspect "$1" >/dev/null 2>&1; }
 if [ "$engines" = true ]; then
   install -d -m 755 "$data/server" "$data/autopilot" "$data/models" "$data/reports" "$data/paper"
+  # The Claude API ledger and caps (docs/AI.md), shared by both engines.
+  install -d -m 700 "$data/ai"
   if ! exists pythia-server; then
     docker run -d --name pythia-server --restart unless-stopped --memory 1g \
       -p 127.0.0.1:8787:8787 \
       -e PYTHIA_MODELS=/models -e PYTHIA_DATA=/data -e PYTHIA_STATE_FILE=/state/state.json \
-      -v "$data/models:/models" -v "$data/server:/state" \
+      -v "$data/models:/models" -v "$data/server:/state" -v "$data/ai:/data/ai" \
       -v "$data/_health:/data/_health:ro" -v "$data/paper:/data/paper:ro" -v "$data/reports:/data/reports:ro" \
       pythia-server
   fi
@@ -117,7 +119,7 @@ if [ "$engines" = true ]; then
       -p 127.0.0.1:8788:8788 -e PYTHIA_BIND=0.0.0.0:8788 \
       --env-file /etc/pythia/alerts.env \
       -e PYTHIA_MODELS=/models -e PYTHIA_DATA=/data -e PYTHIA_STATE_FILE=/state/state.json \
-      -v "$data/models:/models:ro" -v "$data/autopilot:/state" \
+      -v "$data/models:/models:ro" -v "$data/autopilot:/state" -v "$data/ai:/data/ai" \
       -v "$data/_health:/data/_health:ro" -v "$data/paper:/data/paper:ro" -v "$data/reports:/data/reports:ro" \
       -v "$data/reports/notify:/data/reports/notify" \
       pythia-server

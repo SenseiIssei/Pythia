@@ -146,7 +146,7 @@ covers the rest. Every model is overridable — type any model id you like.
 
 | Provider | id | Env var | Default model | Notes |
 |---|---|---|---|---|
-| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5` | Messages API · adaptive thinking · structured output · server-side refusal fallback |
+| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` | Messages and Batches API · structured output · hard budget with a persisted ledger ([docs/AI.md](docs/AI.md)) · `claude-sonnet-5-5` for the weekly review, `claude-opus-5-5` only by name |
 | OpenAI (GPT) | `openai` | `OPENAI_API_KEY` | `gpt-5.6` | Sol; `-terra` / `-luna` tiers |
 | xAI (Grok) | `xai` | `XAI_API_KEY` | `grok-4.5` | |
 | z.ai (GLM) | `zai` | `ZAI_API_KEY` | `glm-5.2` | |

@@ -3,7 +3,8 @@ and new sets, each with what a buyer needs to look the card up by hand.
 
 Uses the lab's notifier (`lab.ops.notify`, category "pokemon", so the app's
 switch and the quiet hours apply): PYTHIA_TELEGRAM_BOT_TOKEN and
-PYTHIA_TELEGRAM_CHAT_ID, or PYTHIA_ALERT_WEBHOOK. Unset: printed only.
+PYTHIA_TELEGRAM_CHAT_ID, or PYTHIA_ALERT_WEBHOOK. Unset: printed only. The
+words follow the language of the messages (English or German, lab.ops.i18n).
 
   strong move   a card worth at least $20 that moved 20 % or more since the
                 previous snapshot (at most 3 days back), or 35 % over 7 days.
@@ -43,7 +44,7 @@ from pathlib import Path
 import polars as pl
 
 from ..collect.pokemon import CM_FRESH_DAYS
-from ..ops import notify
+from ..ops import i18n, notify
 from . import links
 
 MOVE_MIN_USD, MOVE_1D, MOVE_7D = 20.0, 0.20, 0.35
@@ -57,7 +58,6 @@ COOLDOWN_DAYS = 7
 MAX_MOVES, MAX_UV = 5, 5
 NEW_SET_CARDS, NEW_SET_MIN_SINGLES, NEW_SET_MAX = 5, 10, 2
 NEW_SET_AGE = (-60, 30)
-FOOTER = "Information only; nothing is bought or sold. You trade by hand."
 
 
 def _num(v) -> float | None:
@@ -87,18 +87,18 @@ def strong_moves(snap: pl.DataFrame) -> list[dict]:
     out = []
     for r in snap.filter(pl.col("price") >= MOVE_MIN_USD).to_dicts():
         r1, r7 = r.get("ret_1d"), r.get("ret_7d")
-        move, basis = None, None
+        move, key = None, None
         if r1 is not None and abs(math.expm1(r1)) >= MOVE_1D:
-            move, basis = math.expm1(r1), "since the last snapshot"
+            move, key = math.expm1(r1), "last"
         elif r7 is not None and abs(math.expm1(r7)) >= MOVE_7D:
-            move, basis = math.expm1(r7), "over 7 days"
+            move, key = math.expm1(r7), "7d"
         elif r1 is None and r7 is None and (r.get("cm_trend") or 0) >= CM_MIN_EUR:
             m = r.get("cm_mom_1_7")
             if m is not None and abs(m) >= CM_MOVE:
-                move, basis = m, "Cardmarket 1-day vs 7-day average"
+                move, key = m, "cm"
         if move is not None:
             out.append({"card_id": r["card_id"], "name": r["name"], "set": r.get("set_name"), "price": r["price"],
-                        "move": move, "basis": basis, "_row": r})
+                        "move": move, "basis": i18n.t(f"pk_basis_{key}"), "basis_key": key, "_row": r})
     return sorted(out, key=lambda x: -abs(x["move"]))
 
 
@@ -146,22 +146,41 @@ def _cool(state: dict, kind: str, cid: str, today: str) -> bool:
 
 # ---------------------------------------------------------------- what a buyer needs per card
 
-def trust(horizons: dict | None, validated: bool) -> tuple[str, str]:
-    """(level, words) for the 30 and 90 day forecasts."""
+def trust_info(horizons: dict | None, validated: bool) -> dict:
+    """Which forecast horizons passed their out-of-sample test, with their rank IC."""
     hz = horizons or {}
     done = []
     for h in ("30", "90"):
         e = hz.get(h) or hz.get(int(h)) or {}
         if e.get("validated"):
-            ic, n = _num(e.get("mean_rank_ic")), e.get("test_months")
-            done.append(f"{h} d tested" + (f", rank IC {ic:.2f} over {n} months" if ic is not None and n else ""))
-    if len(done) == 2:
-        return "tested", "tested out of sample (" + "; ".join(done) + ")"
-    if done:
-        return "mixed", "; ".join(done) + "; the other horizon an untested rule"
-    if validated:
-        return "mixed", "partly tested"
-    return "low", "low, an untested rule (fair-value gap)"
+            done.append({"h": h, "ic": _num(e.get("mean_rank_ic")), "months": e.get("test_months")})
+    level = "tested" if len(done) == 2 else "mixed" if done or validated else "low"
+    return {"level": level, "done": done}
+
+
+def trust_words(info: dict, lang: str = "en") -> str:
+    t = i18n.t
+    if info.get("level") == "none":
+        return t("pk_trust_none", lang)
+    parts = []
+    for d in info.get("done") or []:
+        s = t("pk_trust_tested_h", lang, h=d["h"])
+        if d.get("ic") is not None and d.get("months"):
+            s += t("pk_trust_ic", lang, ic=i18n.num(d["ic"], 2, lang), m=d["months"])
+        parts.append(s)
+    if info.get("level") == "tested":
+        return t("pk_trust_tested", lang, parts="; ".join(parts))
+    if parts:
+        return t("pk_trust_mixed", lang, parts="; ".join(parts))
+    if info.get("level") == "mixed":
+        return t("pk_trust_partly", lang)
+    return t("pk_trust_low", lang)
+
+
+def trust(horizons: dict | None, validated: bool, lang: str = "en") -> tuple[str, str]:
+    """(level, words) for the 30 and 90 day forecasts."""
+    info = trust_info(horizons, validated)
+    return info["level"], trust_words(info, lang)
 
 
 def detail(r: dict, today: str, horizons: dict | None = None, validated: bool = False) -> dict:
@@ -170,26 +189,25 @@ def detail(r: dict, today: str, horizons: dict | None = None, validated: bool = 
     cm_day = r.get("cm_updated")
     cm_age = _days(cm_day, snap_day)
     eur = _num(r.get("cm_trend"))
-    level, words = trust(horizons, validated)
+    info = trust_info(horizons, validated)
     fv = _num(r.get("fv_log"))
-    variant = r.get("tp_variant")
+    tp = r.get("price_src", "tcgplayer") == "tcgplayer"
     ch30, ch30_src = _chg(r.get("ret_30d")), "snapshots"
     if ch30 is None and r.get("cm_fresh") and _num(r.get("cm_trend_30")) is not None:
         ch30, ch30_src = _num(r.get("cm_trend_30")), "cardmarket"
     return {
         "card_id": r.get("card_id"), "name": r.get("name"), "set": r.get("set_name"), "number": r.get("number"),
-        "rarity": r.get("rarity"), "image": r.get("image_small"),
-        "condition": "ungraded" + (f", {variant} printing" if variant else ""),
-        "usd": _num(r.get("price")), "usd_src": "TCGplayer market" if r.get("price_src", "tcgplayer") == "tcgplayer"
-        else "Cardmarket trend in USD",
-        "usd_date": r.get("tp_updated") if r.get("price_src", "tcgplayer") == "tcgplayer" else cm_day,
+        "rarity": r.get("rarity"), "image": r.get("image_small"), "variant": r.get("tp_variant"),
+        "condition": "ungraded" + (f", {r['tp_variant']} printing" if r.get("tp_variant") else ""),
+        "usd": _num(r.get("price")), "usd_src": "tcgplayer" if tp else "cardmarket",
+        "usd_date": r.get("tp_updated") if tp else cm_day,
         "eur_trend": eur, "eur_avg": _num(r.get("cm_avg_sell")) or _num(r.get("cm_avg30")),
         "eur_low_explus": _num(r.get("cm_low_explus")),
         "eur_date": cm_day if eur is not None else None, "eur_age_days": cm_age if eur is not None else None,
         "eur_stale": bool(eur is not None and (cm_age is None or cm_age > CM_FRESH_DAYS)),
         "fair": math.exp(fv) if fv is not None else None, "gap": _chg(r.get("fv_gap")),
         "pred_30d": _num(r.get("pred_30d")), "pred_90d": _num(r.get("pred_90d")),
-        "trust": level, "trust_words": words,
+        "trust": info["level"], "trust_info": info, "trust_words": trust_words(info),
         "chg_1d": _chg(r.get("ret_1d")), "chg_7d": _chg(r.get("ret_7d")), "chg_30d": ch30, "chg_30d_src": ch30_src,
         **links.for_card(r),
     }
@@ -198,143 +216,169 @@ def detail(r: dict, today: str, horizons: dict | None = None, validated: bool = 
 def single_detail(c: dict, set_name: str, snap_day: str) -> dict:
     """The same for a single of a new set (TCGplayer through tcgcsv): no
     Cardmarket price, no fair value or forecast yet."""
+    info = {"level": "none", "done": []}
     return {
         "card_id": f"tcgplayer:{c.get('product_id')}", "name": links.search_name(c.get("name")), "set": set_name,
-        "number": c.get("number"), "rarity": c.get("rarity"), "image": c.get("image_url"),
+        "number": c.get("number"), "rarity": c.get("rarity"), "image": c.get("image_url"), "variant": c.get("sub_type"),
         "condition": "ungraded" + (f", {c['sub_type']} printing" if c.get("sub_type") else ""),
-        "usd": _num(c.get("market")), "usd_src": "TCGplayer market", "usd_date": c.get("date") or snap_day,
+        "usd": _num(c.get("market")), "usd_src": "tcgplayer", "usd_date": c.get("date") or snap_day,
         "eur_trend": None, "eur_avg": None, "eur_low_explus": None, "eur_date": None, "eur_age_days": None,
         "eur_stale": False, "fair": None, "gap": None, "pred_30d": None, "pred_90d": None,
-        "trust": "none", "trust_words": "no fair value or forecast: the card API does not price this set yet",
+        "trust": "none", "trust_info": info, "trust_words": trust_words(info),
         "chg_1d": _num(c.get("chg_prev")), "chg_7d": None, "chg_30d": None, "chg_30d_src": "snapshots",
         **links.for_card({"name": c.get("name"), "url": c.get("url")}),
     }
 
 
-def _usd(v) -> str:
-    return "n/a" if v is None else f"${v:,.2f}"
+# ---------------------------------------------------------------- the words, in the messages' language
+
+def _usd(v, lang: str = "en") -> str:
+    return i18n.t("pk_na", lang) if v is None else i18n.money(v, 2, lang)
 
 
-def _eur(v) -> str:
-    return "n/a" if v is None else f"€{v:,.2f}"
+def _eur(v, lang: str = "en") -> str:
+    if v is None:
+        return i18n.t("pk_na", lang)
+    return f"{i18n.num(v, 2, 'de')} €" if lang == "de" else f"€{v:,.2f}"
 
 
-def _pct(v, dp: int = 0) -> str:
-    return "n/a" if v is None else f"{v * 100:+.{dp}f} %"
+def _pct(v, lang: str = "en", dp: int = 0) -> str:
+    return i18n.signed_pct(None if v is None else v * 100, dp, lang)
 
 
-def price_line(d: dict) -> str:
-    s = f"Now {_usd(d['usd'])} ({d['usd_src']}, {d.get('usd_date') or 'date n/a'})"
-    if d.get("eur_trend") is not None:
-        s += f" · Cardmarket {_eur(d['eur_trend'])} trend"
-        if d.get("eur_avg") is not None:
-            s += f", {_eur(d['eur_avg'])} avg sell"
-        s += f" ({d.get('eur_date') or 'date n/a'}"
-        if d.get("eur_stale"):
-            age = d.get("eur_age_days")
-            s += f", ⚠️ {age} days old, stale" if age is not None else ", ⚠️ undated, stale"
-        s += ")"
-    else:
-        s += " · no Cardmarket price"
-    return s
+def _day(s, lang: str = "en") -> str:
+    return i18n.iso_day(str(s), lang) if s else i18n.t("pk_date_na", lang)
 
 
-def value_line(d: dict) -> str:
+def condition(d: dict, lang: str = "en") -> str:
+    return i18n.t("pk_ungraded", lang) + (i18n.t("pk_printing", lang, v=d["variant"]) if d.get("variant") else "")
+
+
+def price_line(d: dict, lang: str = "en") -> str:
+    t = i18n.t
+    src = t("pk_src_tcg" if d.get("usd_src") == "tcgplayer" else "pk_src_cm_usd", lang)
+    s = t("pk_now", lang, price=_usd(d.get("usd"), lang), src=src, date=_day(d.get("usd_date"), lang))
+    if d.get("eur_trend") is None:
+        return s + t("pk_no_cm", lang)
+    s += t("pk_cm", lang, trend=_eur(d["eur_trend"], lang))
+    if d.get("eur_avg") is not None:
+        s += t("pk_cm_avg", lang, avg=_eur(d["eur_avg"], lang))
+    s += f" ({_day(d.get('eur_date'), lang)}"
+    if d.get("eur_stale"):
+        age = d.get("eur_age_days")
+        s += t("pk_stale", lang, n=age) if age is not None else t("pk_stale_undated", lang)
+    return s + ")"
+
+
+def value_line(d: dict, lang: str = "en") -> str:
+    t = i18n.t
+    words = trust_words(d.get("trust_info") or {"level": d.get("trust", "low"), "done": []}, lang)
     if d.get("fair") is None and d.get("pred_90d") is None:
-        w = d["trust_words"]
-        return w[:1].upper() + w[1:]
+        return words[:1].upper() + words[1:]
     parts = []
     if d.get("fair") is not None:
-        parts.append(f"Fair {_usd(d['fair'])} ({_pct(d.get('gap'))} vs price)")
-    parts.append(f"forecast 30 d {_pct(d.get('pred_30d'))}, 90 d {_pct(d.get('pred_90d'))}")
-    parts.append(f"trust: {d['trust_words']}")
+        parts.append(t("pk_fair", lang, fair=_usd(d["fair"], lang), gap=_pct(d.get("gap"), lang)))
+    parts.append(t("pk_forecast", lang, p30=_pct(d.get("pred_30d"), lang), p90=_pct(d.get("pred_90d"), lang)))
+    parts.append(t("pk_trust", lang, words=words))
     return " · ".join(parts)
 
 
-def change_line(d: dict, move: dict | None = None) -> str:
+def change_line(d: dict, move: dict | None = None, lang: str = "en") -> str:
     """The recent change: the move that made the alert first, then the other
     horizons we have (1 day is the last snapshot, a few days back at most)."""
+    t = i18n.t
     bits = []
+    key = (move or {}).get("basis_key")
     if move:
-        bits.append(f"Moved {_pct(move['move'])} {move['basis']}")
-    said = {"since the last snapshot": "chg_1d", "over 7 days": "chg_7d"}.get(move["basis"]) if move else None
-    for k, label in (("chg_1d", "1 d"), ("chg_7d", "7 d"), ("chg_30d", "30 d")):
+        basis = t(f"pk_basis_{key}", lang) if key else str(move.get("basis") or "")
+        bits.append(t("pk_moved", lang, move=_pct(move["move"], lang), basis=basis))
+    said = {"last": "chg_1d", "7d": "chg_7d"}.get(key or "")
+    for k, h in (("chg_1d", 1), ("chg_7d", 7), ("chg_30d", 30)):
         v = d.get(k)
         if v is None or k == said:
             continue
         src = " (Cardmarket)" if k == "chg_30d" and d.get("chg_30d_src") == "cardmarket" else ""
-        bits.append(f"{label} {_pct(v)}{src}")
+        bits.append(f"{t('pk_d', lang, h=h)} {_pct(v, lang)}{src}")
     if not bits:
-        return "No price change yet: our history starts with the first snapshot"
-    return " · ".join(bits) if move else "Change " + " · ".join(bits)
+        return t("pk_no_change", lang)
+    return " · ".join(bits) if move else t("pk_change", lang, bits=" · ".join(bits))
 
 
-def link_part(d: dict) -> notify.Links:
-    cm = "Cardmarket" if d.get("cardmarketKind") == "product" else "Cardmarket search"
-    tp = "TCGplayer" if d.get("tcgplayerKind") == "product" else "TCGplayer search"
+def link_part(d: dict, lang: str = "en") -> notify.Links:
+    t = i18n.t
+    cm = t("pk_link_cm" if d.get("cardmarketKind") == "product" else "pk_link_cm_search", lang)
+    tp = t("pk_link_tp" if d.get("tcgplayerKind") == "product" else "pk_link_tp_search", lang)
     return notify.Links([(cm, d.get("cardmarket")), (tp, d.get("tcgplayer"))])
 
 
-def card_parts(i: int, d: dict, move: dict | None = None) -> list:
+def card_parts(i: int, d: dict, move: dict | None = None, lang: str = "en") -> list:
     where = " · ".join(x for x in [f"{d.get('set') or '?'}" + (f" #{d['number']}" if d.get("number") else ""),
-                                   d.get("rarity"), d.get("condition")] if x)
-    return [notify.Line(f"({where})", f"{i}. {d.get('name')}"), notify.Line(price_line(d)), notify.Line(value_line(d)),
-            notify.Line(change_line(d, move)), link_part(d)]
+                                   d.get("rarity"), condition(d, lang)] if x)
+    return [notify.Line(f"({where})", f"{i}. {d.get('name')}"), notify.Line(price_line(d, lang)),
+            notify.Line(value_line(d, lang)), notify.Line(change_line(d, move, lang)), link_part(d, lang)]
 
 
-def photos(title: str, ds: list[dict]) -> list[tuple[str, str]]:
+def photos(title: str, ds: list[dict], lang: str = "en") -> list[tuple[str, str]]:
     """The small pictures for the album, the list of names as its caption."""
-    cap = f"<b>{notify.esc(title)}</b>\n" + "\n".join(f"{i}. {notify.esc(d.get('name'))} · {_usd(d.get('usd'))}"
-                                                      for i, d in enumerate(ds, 1))
+    cap = f"<b>{notify.esc(title)}</b>\n" + "\n".join(
+        f"{i}. {notify.esc(d.get('name'))} · {notify.esc(_usd(d.get('usd'), lang))}" for i, d in enumerate(ds, 1))
     return [(d["image"], cap) for d in ds if d.get("image")]
 
 
-def moves_card(moves: list[dict], details: list[dict]) -> notify.Card:
-    n = len(moves)
+def moves_card(moves: list[dict], details: list[dict], lang: str = "en") -> notify.Card:
     parts: list = []
     for i, (m, d) in enumerate(zip(moves, details), 1):
-        parts += card_parts(i, d, m)
-    return notify.Card(notify.CATEGORIES["pokemon"][1], f"{n} card{'s' if n != 1 else ''} moved strongly",
-                       "Worth $20 or more and moved 20 % since the last snapshot or 35 % in 7 days.", parts, FOOTER)
+        parts += card_parts(i, d, m, lang)
+    return notify.Card(notify.CATEGORIES["pokemon"][1], i18n.t("pk_moves_title", lang, n=len(moves)),
+                       i18n.t("pk_moves_why", lang), parts, i18n.t("pk_card_foot", lang))
 
 
-def uv_card(uv: list[dict], details: list[dict], validated: bool) -> notify.Card:
-    n = len(uv)
+def uv_card(uv: list[dict], details: list[dict], validated: bool, lang: str = "en") -> notify.Card:
     parts: list = []
     for i, d in enumerate(details, 1):
-        parts += card_parts(i, d)
-    why = ("Priced at a third to a half of what similar cards cost, positive 90-day forecast. "
-           + ("The forecast is validated." if validated else
-              "Fair-value model only; the return forecast is not validated yet."))
-    return notify.Card(notify.CATEGORIES["pokemon"][1], f"{n} card{'s' if n != 1 else ''} cheap next to similar ones",
-                       why, parts, FOOTER)
+        parts += card_parts(i, d, None, lang)
+    why = i18n.t("pk_uv_why", lang) + i18n.t("pk_uv_validated" if validated else "pk_uv_unvalidated", lang)
+    return notify.Card(notify.CATEGORIES["pokemon"][1], i18n.t("pk_uv_title", lang, n=len(uv)), why, parts,
+                       i18n.t("pk_card_foot", lang))
 
 
-def new_set_card(s: dict, details: list[dict]) -> notify.Card:
-    when = (f"out in {-s['age_days']} days" if s["age_days"] < 0 else "out today" if s["age_days"] == 0
-            else f"out {s['age_days']} days")
+def new_set_card(s: dict, details: list[dict], lang: str = "en") -> notify.Card:
+    t = i18n.t
+    age = s["age_days"]
+    when = (t("pk_out_in", lang, n=-age) if age < 0 else t("pk_out_today", lang) if age == 0
+            else t("pk_out_since", lang, n=age))
     parts: list = []
     for i, d in enumerate(details, 1):
-        parts += card_parts(i, d)
-    return notify.Card("🆕", f"New set: {s['set']}",
-                       f"Released {s.get('released') or '?'} ({when}), {s['singles']} singles priced on TCGplayer. "
-                       "The dearest five; prices of a set this new swing hard.", parts, FOOTER)
+        parts += card_parts(i, d, None, lang)
+    return notify.Card("🆕", t("pk_new_title", lang, set=s["set"]),
+                       t("pk_new_why", lang, released=_day(s.get("released"), lang), when=when, n=s["singles"]),
+                       parts, t("pk_card_foot", lang))
 
 
 def message(moves: list[dict], uv: list[dict], today: str, validated: bool, prefix: str = "Pythia",
-            horizons: dict | None = None, sets: list[dict] | None = None) -> str:
-    """All of today's alerts as plain text (the log and the app)."""
-    cards = []
+            lang: str = "en", sets: list[dict] | None = None) -> str:
+    """Today's alerts in a few plain lines, in `lang` (en or de): the log and the app."""
+    t = i18n.t
+
+    def basis(m: dict) -> str:
+        return t(f"pk_basis_{m['basis_key']}", lang) if m.get("basis_key") else str(m.get("basis") or "")
+
+    lines = [t("pk_head", lang, prefix=prefix, today=i18n.iso_day(today, lang))]
     if moves:
-        cards.append(moves_card(moves, [m.get("detail") or detail(m.get("_row") or m, today, horizons, validated)
-                                        for m in moves]))
+        lines.append(t("pk_moves", lang))
+        lines += [t("pk_move_line", lang, name=m["name"], set=m["set"], move=i18n.signed_pct(m["move"] * 100, 0, lang),
+                    basis=basis(m), price=i18n.money(m["price"], 2, lang)) for m in moves]
     if uv:
-        cards.append(uv_card(uv, [u.get("detail") or detail(u.get("_row") or u, today, horizons, validated)
-                                  for u in uv], validated))
+        lines.append(t("pk_cheap", lang, note="" if validated else t("pk_unvalidated", lang)))
+        lines += [t("pk_uv_line", lang, name=u["name"], set=u["set"], price=i18n.money(u["price"], 2, lang),
+                    fair=i18n.money(u["fair"], 2, lang), gap=i18n.signed_pct(u["gap"] * 100, 0, lang),
+                    pred=i18n.signed_pct(u["pred_90d"] * 100, 0, lang)) for u in uv]
     for s in sets or []:
-        cards.append(new_set_card(s, s["details"]))
-    text = "\n\n".join(notify.plain(c.render("telegram")) for c in cards)
-    return notify.nodash(f"{prefix} cards {today}\n{text}" if text else f"{prefix} cards {today}")
+        top = (s.get("details") or [{}])[0]
+        lines.append(t("pk_new_set_line", lang, set=s["set"], name=top.get("name") or "?",
+                       price=_usd(top.get("usd"), lang)))
+    lines.append(t("pk_foot", lang))
+    return notify.clip("\n".join(lines), lang=lang)
 
 
 def _public(x: dict) -> dict:
@@ -359,17 +403,19 @@ def run(snap: pl.DataFrame, root: Path, today: str, validated: bool, dry_run: bo
            "newSets": [{k: v for k, v in s.items() if k != "cards"} for s in sets], "sent": False, "text": None}
     if not moves and not uv and not sets:
         return out
-    prefix = notify.config()[2]
-    out["text"] = message(moves, uv, today, validated, prefix, horizons, sets)
+    prefix, lang = notify.config()[2], notify.alert_lang()
+    out["text"] = message(moves, uv, today, validated, prefix, lang, sets)
     posts = []
     if moves:
-        posts.append(("move", [m["card_id"] for m in moves], moves_card(moves, [m["detail"] for m in moves]),
-                      photos("Strong moves", [m["detail"] for m in moves])))
+        posts.append(("move", [m["card_id"] for m in moves], moves_card(moves, [m["detail"] for m in moves], lang),
+                      photos(i18n.t("pk_album_moves", lang), [m["detail"] for m in moves], lang)))
     if uv:
-        posts.append(("undervalued", [u["card_id"] for u in uv], uv_card(uv, [u["detail"] for u in uv], validated),
-                      photos("Cheap next to similar cards", [u["detail"] for u in uv])))
+        posts.append(("undervalued", [u["card_id"] for u in uv],
+                      uv_card(uv, [u["detail"] for u in uv], validated, lang),
+                      photos(i18n.t("pk_album_uv", lang), [u["detail"] for u in uv], lang)))
     for s in sets:
-        posts.append(("new_set", [s["set_id"]], new_set_card(s, s["details"]), photos(f"New set: {s['set']}", s["details"])))
+        posts.append(("new_set", [s["set_id"]], new_set_card(s, s["details"], lang),
+                      photos(i18n.t("pk_new_title", lang, set=s["set"]), s["details"], lang)))
     results = []
     for kind, ids, card, pics in posts:
         res = notify.send("pokemon", [card], photos=pics, dry_run=dry_run)

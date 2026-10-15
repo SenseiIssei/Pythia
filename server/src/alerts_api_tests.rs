@@ -317,6 +317,36 @@ async fn settings_are_listed_changed_saved_and_written_for_the_lab() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn the_message_language_round_trips_through_the_api_the_lab_file_and_the_state() {
+    let dir = tmp_dir("language");
+    let notify = dir.join("reports").join("notify");
+    let state = dir.join("state.json");
+    let files = AlertFiles { notify_dir: Some(notify.clone()), state_file: Some(state.clone()), ..Default::default() };
+    let st = app_state(None, files);
+    let (_, v) = call(&st, "GET", "/api/alerts/settings", None).await;
+    assert_eq!(v["language"], "en", "English unless set");
+    let (code, v) = call(&st, "POST", "/api/alerts/settings", Some(serde_json::json!({"language": "de"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["language"], "de");
+    assert_eq!(st.alert_log.settings().language, alerts::Lang::De);
+    // The lab reads it from its copy.
+    let lab: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(notify.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(lab["language"], "de");
+    // A restart keeps it.
+    let mut e = Engine::new();
+    match pythia_core::persist::load(&state) {
+        pythia_core::persist::Loaded::Restored(p) => e.apply_persisted(*p),
+        _ => panic!("the language did not save the state file"),
+    }
+    assert_eq!(e.alert_settings().language, alerts::Lang::De);
+    let (code, v) = call(&st, "POST", "/api/alerts/settings", Some(serde_json::json!({"language": "fr"}))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert!(v["error"].as_str().unwrap().contains("en or de"));
+    assert_eq!(st.alert_log.settings().language, alerts::Lang::De, "a refused change changes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── events from the lab ──────────────────────────────────────────────────────
 
 /// A Telegram look-alike on 127.0.0.1: `sendMessage` records the JSON,

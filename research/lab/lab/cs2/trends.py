@@ -80,7 +80,7 @@ import polars as pl
 
 from .. import report
 from ..collect.cs2 import WATCHLIST, load_watchlist
-from ..ops import notify
+from ..ops import i18n, notify
 from . import market
 from .model import spearman
 
@@ -459,7 +459,7 @@ def find_alerts(df: pl.DataFrame, basis: dict, dr: dict, sp: dict) -> list[dict]
     out = []
     x = df.filter(pl.col("liquid") & (pl.col(col).abs() >= th)).sort(pl.col(col).abs(), descending=True)
     for r in x.head(TOP).iter_rows(named=True):
-        out.append({"kind": "mover", **_item(r), "move": r[col],
+        out.append({"kind": "mover", **_item(r), "move": r[col], "basis_key": "snap" if snap else "window",
                     "basis": "since yesterday's snapshot" if snap else "24-hour average against the 7-day average"})
     for n in dr.get("new") or []:
         out.append({"kind": "new_drop", **n})
@@ -486,110 +486,175 @@ def fresh_alerts(found: list[dict], state: dict, today: str) -> tuple[list[dict]
     return out, st
 
 
-def pct(v, dp: int = 1) -> str:
-    return "n/a" if v is None else notify.signed_pct(v * 100, dp)
+def pct(v, dp: int = 1, lang: str = "en") -> str:
+    return i18n.signed_pct(None if v is None else v * 100, dp, lang)
 
 
-def eur(v) -> str:
-    return "n/a" if v is None else f"€{v:,.2f}"
+def eur(v, lang: str = "en") -> str:
+    if v is None:
+        return i18n.t("pk_na", lang)
+    return f"{i18n.num(v, 2, 'de')} €" if lang == "de" else f"€{v:,.2f}"
 
 
-ALERT_WORDS = {"mover": ("📈", "Moved"), "new_drop": ("🆕", "New case or capsule"), "case_rise": ("📦", "Case rising"),
-               "spread": ("↔️", "Unusual spread")}
+# The emoji of each alert kind; the words are ct_kind_<kind> in lab.ops.i18n.
+ALERT_WORDS = {"mover": "📈", "new_drop": "🆕", "case_rise": "📦", "spread": "↔️"}
+# The English words in reports and the page (the cards say them in the messages' language).
+ALERT_NAMES = {"mover": "Moved", "new_drop": "New case or capsule", "case_rise": "Case rising",
+               "spread": "Unusual spread"}
 
 
-def item_lines(i: int, a: dict) -> list:
+def basis_words(b: str | None, lang: str = "en") -> str:
+    """A change's basis as frame() names it, in `lang`."""
+    b = str(b or "")
+    if b.startswith("snapshot "):
+        return i18n.t("ct_basis_snap", lang, day=i18n.iso_day(b.split(" ", 1)[1], lang))
+    if "7-day average" in b:
+        return i18n.t("ct_basis_w7", lang)
+    if "30-day average" in b:
+        return i18n.t("ct_basis_w30", lang)
+    return i18n.t("ct_basis_none", lang)
+
+
+def group_words(g: str | None, lang: str = "en") -> str:
+    """skin, Field-Tested stays (wear names are the game's); the rest in `lang`."""
+    g = str(g or "?")
+    head, _, wear = g.partition(", ")
+    key = "ct_group_" + head.replace(" ", "_")
+    word = i18n.t(key, lang) if key in i18n.CATALOG["en"] else head
+    return f"{word}, {wear}" if wear else word
+
+
+def lean_words(lean: str | None, lang: str = "en") -> str:
+    key = f"ct_lean_{lean}"
+    return i18n.t(key, lang) if key in i18n.CATALOG["en"] else i18n.t("ct_lean_n/a", lang)
+
+
+def kind_words(kind: str, lang: str = "en") -> str:
+    key = "ct_event_" + str(kind).replace(" ", "_")
+    return i18n.t(key, lang) if key in i18n.CATALOG["en"] else str(kind)
+
+
+def item_lines(i: int, a: dict, lang: str = "en") -> list:
+    t = i18n.t
     k = a["kind"]
     if k == "mover":
-        head = f"{pct(a['move'])} {a['basis']}"
+        head = t("ct_head_mover", lang, v=pct(a["move"], 1, lang),
+                 basis=t("ct_since_yesterday", lang) if a.get("basis_key") == "snap" else t("ct_basis_w7", lang))
     elif k == "case_rise":
-        head = f"{pct(a['chg_7d'])} in 7 days"
+        head = t("ct_head_case", lang, v=pct(a["chg_7d"], 1, lang))
     elif k == "new_drop":
-        head = "first seen on the Steam market today"
+        head = t("ct_head_new", lang)
+    elif a.get("why") == "cash":
+        head = t("ct_head_cash", lang, v=pct(a["to_skinport"], 1, lang))
     else:
-        head = (f"buy on Steam, sell on Skinport: {pct(a['to_skinport'])} after fees, cash"
-                if a.get("why") == "cash" else
-                f"Steam {pct(a['steam_premium'], 0)} over Skinport, group usually {pct(a.get('group_median'), 0)}; "
-                f"Skinport to Steam {pct(a['to_steam'], 0)} after fees, in wallet funds")
-    sp = f"Skinport ask {eur(a.get('skinport_ask'))}" + (f", {a['skinport_sales7']} sales in 7 d" if a.get("skinport_sales7") else "")
-    group = (a.get("group") or "?").split(",")[0]
+        head = t("ct_head_premium", lang, v=pct(a["steam_premium"], 0, lang), usual=pct(a.get("group_median"), 0, lang),
+                 w=pct(a["to_steam"], 0, lang))
+    sp = t("ct_sp_ask", lang, ask=eur(a.get("skinport_ask"), lang))
+    if a.get("skinport_sales7"):
+        sp += t("ct_sp_sales", lang, n=a["skinport_sales7"])
+    group = group_words((a.get("group") or "?").split(",")[0], lang)
     return [notify.Line(f"({group}) {head}", f"{i}. {a['name']}"),
-            notify.Line(f"Steam {eur(a.get('eur'))} (24 h average) · {sp} · 7 d {pct(a.get('chg_7d'))} · "
-                        f"30 d {pct(a.get('chg_30d'))}"),
-            notify.Links([("Steam market", a["steam_url"]), ("Skinport", a["skinport_url"])])]
+            notify.Line(t("ct_item_prices", lang, steam=eur(a.get("eur"), lang), sp=sp, c7=pct(a.get("chg_7d"), 1, lang),
+                          c30=pct(a.get("chg_30d"), 1, lang))),
+            notify.Links([(t("ct_link_steam", lang), a["steam_url"]), ("Skinport", a["skinport_url"])])]
 
 
-def alert_card(alerts: list[dict]) -> notify.Card:
+def alert_card(alerts: list[dict], lang: str = "en") -> notify.Card:
+    t = i18n.t
     kinds = sorted({a["kind"] for a in alerts}, key=list(ALERT_WORDS).index)
-    title = " · ".join(ALERT_WORDS[k][1] for k in kinds)
+    title = " · ".join(t(f"ct_kind_{k}", lang) for k in kinds)
     parts: list = []
     for i, a in enumerate(alerts[:MAX_IN_CARD], 1):
-        parts += item_lines(i, a)
+        parts += item_lines(i, a, lang)
     if len(alerts) > MAX_IN_CARD:
-        parts.append(notify.Line(f"{len(alerts) - MAX_IN_CARD} more on the CS2 page"))
-    return notify.Card(ALERT_WORDS[kinds[0]][0] if len(kinds) == 1 else notify.CATEGORIES["cs2"][1],
-                       f"CS2 Steam market: {title}",
-                       f"{len(alerts)} thing{'s' if len(alerts) != 1 else ''} worth a look by hand. "
-                       "Steam pays sellers in wallet funds, not cash.", parts,
-                       "Information only; nothing is bought or sold.")
+        parts.append(notify.Line(t("ct_more", lang, n=len(alerts) - MAX_IN_CARD)))
+    return notify.Card(ALERT_WORDS[kinds[0]] if len(kinds) == 1 else notify.CATEGORIES["cs2"][1],
+                       t("ct_alert_title", lang, title=title), t("ct_alert_summary", lang, n=len(alerts)), parts,
+                       t("ct_foot", lang))
 
 
-def summary_card(s: dict) -> notify.Card:
+def ic_words(v: float | None, lang: str = "en") -> str:
+    return i18n.num(v, 3, lang, sign=True) if v is not None else i18n.t("pk_na", lang)
+
+
+def summary_headline(s: dict, lang: str = "en") -> str:
+    t = i18n.t
+    up, down = s["movers"]["up"], s["movers"]["down"]
+    return (t("ct_sum_items", lang, items=i18n.num(s["items"], 0, lang), liquid=i18n.num(s["liquid"], 0, lang))
+            + (t("ct_sum_top", lang, name=up[0]["name"], v=pct(up[0]["move"], 1, lang)) if up else t("ct_sum_no_up", lang))
+            + (t("ct_sum_drop", lang, name=down[0]["name"], v=pct(down[0]["move"], 1, lang)) if down else "")
+            + t("ct_sum_days", lang, n=s["snapshots"]))
+
+
+def summary_card(s: dict, lang: str = "en") -> notify.Card:
+    t = i18n.t
     rows = []
     for g in s["groups"][:7]:
-        rows.append([g["group"], str(g["liquid"]), pct(g["median_7d"]), pct(g["median_30d"]), pct(g["steam_premium"], 0)])
-    parts: list = [notify.Table(["Group", "Items", "7 d", "30 d", "Steam vs SP"], rows, "Liquid items, medians")]
+        rows.append([group_words(g["group"], lang), str(g["liquid"]), pct(g["median_7d"], 1, lang),
+                     pct(g["median_30d"], 1, lang), pct(g["steam_premium"], 0, lang)])
+    parts: list = [notify.Table([t("ct_col_group", lang), t("ct_col_items", lang), t("pk_d", lang, h=7),
+                                 t("pk_d", lang, h=30), t("ct_col_premium", lang)], rows, t("ct_table_groups", lang))]
     up, down = s["movers"]["up"][:3], s["movers"]["down"][:3]
     if up or down:
-        parts.append(notify.Table(["Mover", "Move", "EUR"], [[notify.short(m["name"], 28), pct(m["move"]), eur(m["eur"])]
-                                                              for m in up + down], f"Top movers ({s['movers']['basis']})"))
+        parts.append(notify.Table([t("ct_col_mover", lang), t("ct_col_move", lang), "EUR"],
+                                  [[notify.short(m["name"], 28), pct(m["move"], 1, lang), eur(m["eur"], lang)]
+                                   for m in up + down],
+                                  t("ct_table_movers", lang, basis=basis_words(s["movers"]["basis"], lang))))
     mom = s["momentum"]
     snapm = mom["snapshots"]
     if snapm.get("ready"):
         a = next((r for r in snapm["rows"] if r["group"] == "all"), None)
         if a:
-            parts.append(notify.Line(f"IC {a['ic']:+.3f} over {a['days']} days, t {a['t'] or 0:.1f}: leans {a['lean']}",
-                                     "Momentum, our snapshots:"))
+            parts.append(notify.Line(t("ct_mom_snap", lang, ic=ic_words(a["ic"], lang), n=a["days"],
+                                       t=i18n.num(a["t"] or 0, 1, lang), lean=lean_words(a["lean"], lang)),
+                                     t("ct_mom_snap_lead", lang)))
     a = next((r for r in mom["window"] if r["group"] == "all"), None)
     if a and a.get("ic") is not None:
-        parts.append(notify.Line(f"IC {a['ic']:+.3f} on {a['items']} items: leans {a['lean']} (one snapshot, a hint)",
-                                 "Momentum, from the averages:"))
+        parts.append(notify.Line(t("ct_mom_win", lang, ic=ic_words(a["ic"], lang), n=a["items"],
+                                   lean=lean_words(a["lean"], lang)), t("ct_mom_win_lead", lang)))
     d = s["drops"]
     if d.get("around_last"):
         al = d["around_last"]
-        parts.append(notify.Line(
-            f"{', '.join(al['items'][:2])} ({al['kind']}, {al['date']}, {al['days_ago']} days ago); other cases "
-            + (f"{pct(al['other_cases_since'])} since" if al.get("other_cases_since") is not None
-               else f"7 d {pct(al.get('other_cases_7d'))}, 30 d {pct(al.get('other_cases_30d'))}"), "Last drop:"))
+        others = (t("ct_drop_since", lang, v=pct(al["other_cases_since"], 1, lang))
+                  if al.get("other_cases_since") is not None else
+                  t("ct_drop_window", lang, c7=pct(al.get("other_cases_7d"), 1, lang),
+                    c30=pct(al.get("other_cases_30d"), 1, lang)))
+        parts.append(notify.Line(t("ct_drop_line", lang, items=", ".join(al["items"][:2]), kind=kind_words(al["kind"], lang),
+                                   day=i18n.iso_day(al["date"], lang), n=al["days_ago"], others=others),
+                                 t("ct_drop_lead", lang)))
     if d.get("rising_cases"):
-        parts.append(notify.Line(", ".join(f"{c['name']} {pct(c['chg_7d'])}" for c in d["rising_cases"][:3]),
-                                 "Cases up 15 %+ in 7 d:"))
+        parts.append(notify.Line(", ".join(f"{c['name']} {pct(c['chg_7d'], 1, lang)}" for c in d["rising_cases"][:3]),
+                                 t("ct_rising_lead", lang)))
     spd = s["spread"]
     if spd.get("items"):
-        parts.append(notify.Line(f"Steam {pct(spd['median_premium'], 0)} over Skinport (median); "
-                                 f"Skinport to Steam nets {pct(spd['median_to_steam'], 0)} in wallet funds, "
-                                 f"Steam to Skinport {pct(spd['median_to_skinport'], 0)} in cash", "Spread after fees:"))
-    return notify.Card(notify.CATEGORIES["cs2"][1], f"CS2 Steam market · {s['date']}", s["headline"], parts,
-                       "Steam prices from csgotrader.app's public file. Information only.")
+        parts.append(notify.Line(t("ct_spread_line", lang, p=pct(spd["median_premium"], 0, lang),
+                                   w=pct(spd["median_to_steam"], 0, lang), c=pct(spd["median_to_skinport"], 0, lang)),
+                                 t("ct_spread_lead", lang)))
+    return notify.Card(notify.CATEGORIES["cs2"][1], t("ct_sum_title", lang, day=i18n.iso_day(s["date"], lang)),
+                       summary_headline(s, lang), parts, t("ct_sum_foot", lang))
 
 
-def chart_data(s: dict) -> dict:
-    g = [(r["group"], (r["median_7d"] or 0) * 100) for r in s["groups"] if r["median_7d"] is not None and r["liquid"] >= 5]
+def chart_data(s: dict, lang: str = "en") -> dict:
+    t = i18n.t
+    g = [(group_words(r["group"], lang), (r["median_7d"] or 0) * 100) for r in s["groups"]
+         if r["median_7d"] is not None and r["liquid"] >= 5]
     m = [(x["name"], x["move"] * 100) for x in s["movers"]["up"][:4] + s["movers"]["down"][:4]]
-    return {"groups": g[:8], "movers": m, "groups_title": "Median 7-day change by group, liquid items",
-            "movers_title": "Top movers of the day",
-            "subtitle": f"{s['date']} · 7 days: {s['basis'].get('chg_7d', '')}"
-            + ("" if s["movers"]["basis"] == s["basis"].get("chg_7d") else f" · movers: {s['movers']['basis']}")}
+    sub = t("ct_chart_sub", lang, day=i18n.iso_day(s["date"], lang), basis=basis_words(s["basis"].get("chg_7d"), lang))
+    if s["movers"]["basis"] != s["basis"].get("chg_7d"):
+        sub += t("ct_chart_sub_movers", lang, basis=basis_words(s["movers"]["basis"], lang))
+    return {"groups": g[:8], "movers": m, "groups_title": t("ct_chart_groups", lang),
+            "movers_title": t("ct_chart_movers", lang), "empty_groups": t("ct_chart_no_groups", lang),
+            "empty_movers": t("ct_chart_no_movers", lang), "subtitle": sub}
 
 
-def make_chart(s: dict, base: Path) -> bytes | None:
+def make_chart(s: dict, base: Path, lang: str = "en") -> bytes | None:
     ch = notify._charts()
     if ch is None or not hasattr(ch, "render_trends"):
         return None
     path = base / "trends" / f"chart-{s['date']}.png"
     try:
-        data = chart_data(s)
-        ch.render_trends(data, path, "CS2 Steam market", data["subtitle"])
+        data = chart_data(s, lang)
+        ch.render_trends(data, path, i18n.t("ct_chart_title", lang), data["subtitle"], lang=lang)
         return path.read_bytes()
     except Exception as e:  # noqa: BLE001 - a chart never stops the summary
         notify.say(f"chart not drawn: {type(e).__name__}: {e}", err=True)
@@ -708,7 +773,7 @@ def headline_value(a: dict) -> float | None:
 
 def feed(s: dict) -> dict:
     items = [{"label": a["name"], "value": pct(headline_value(a)), "status": "watch",
-              "detail": f"{ALERT_WORDS[a['kind']][1]}. Information only.", "link": a["steam_url"], "importance": 50}
+              "detail": f"{ALERT_NAMES[a['kind']]}. Information only.", "link": a["steam_url"], "importance": 50}
              for a in s["alerts"][:8]]
     return report.feed_header("CS2 Steam market", "watch" if s["alerts"] else "ok", s["headline"], items)
 
@@ -740,6 +805,7 @@ def run(root: Path | None = None, now_ms: int | None = None, dry_run: bool = Fal
     state = market.read_json(st_path) or {}
     fresh, new_state = fresh_alerts(s["alerts"], state.get("alerts") or {}, s["date"])
     live = send and not dry_run
+    lang = notify.alert_lang()
     sent = []
 
     def said(res: dict) -> bool:
@@ -749,14 +815,14 @@ def run(root: Path | None = None, now_ms: int | None = None, dry_run: bool = Fal
 
     alerts_said = False
     if fresh:
-        res = notify.send("cs2", [alert_card(fresh)], now=now_ms, dry_run=not live, poster=poster)
+        res = notify.send("cs2", [alert_card(fresh, lang)], now=now_ms, dry_run=not live, poster=poster)
         sent.append({"what": "alerts", "n": len(fresh), "delivered": res["delivered"], "reason": res["reason"]})
         alerts_said = said(res)
     if not alerts_said:
         new_state = state.get("alerts") or {}  # not said: the next run tries again
     if state.get("last_summary") != s["date"]:
-        image = make_chart(s, base) if live else None
-        res = notify.send("cs2", [summary_card(s)], image=image, now=now_ms, dry_run=not live,
+        image = make_chart(s, base, lang) if live else None
+        res = notify.send("cs2", [summary_card(s, lang)], image=image, now=now_ms, dry_run=not live,
                           poster=poster, hold_in_quiet=False)
         sent.append({"what": "summary", "delivered": res["delivered"], "reason": res["reason"]})
         if said(res):
