@@ -1,112 +1,39 @@
-/* Stand-in tokens for the redesigned flows (Autopilot, Activity,
-   Notifications) until the shared design system in src/design lands. Calm
-   and mostly white, with a true black dark mode. Swap the variables for the
-   shared tokens and the flows follow. */
-.fl {
-  --fl-bg: #ffffff;
-  --fl-surface: #ffffff;
-  --fl-surface-2: #f3f3f5;
-  --fl-line: #e6e6ea;
-  --fl-text: #0b0b0d;
-  --fl-muted: #5f5f6b;
-  --fl-up: #0a7d3b;
-  --fl-down: #c8102e;
-  --fl-warn: #8a5a00;
-  --fl-primary: #0b0b0d;
-  --fl-on-primary: #ffffff;
-  --fl-on-down: #ffffff;
-  --fl-scrim: rgba(0, 0, 0, 0.35);
-  /* Categorical series, fixed order (src/flows/compare.ts SERIES): validated
-     for colour-blind separation on both surfaces. */
-  --fl-s1: #2a78d6;
-  --fl-s2: #eb6834;
-  --fl-s3: #1baf7a;
-  --fl-s4: #eda100;
-  --fl-s5: #e87ba4;
-  --fl-s6: #4a3aa7;
-  color: var(--fl-text);
-  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+/* Class names from the flows' stand-in kit, kept for pages and components
+   that still use them. They are thin aliases of the design tokens now
+   (src/design/tokens.ts), so they follow light and dark like everything else. */
+:root {
+  --fl-bg: var(--color-bg);
+  --fl-surface: var(--color-surface);
+  --fl-surface-2: var(--color-surface-2);
+  --fl-line: var(--color-line);
+  --fl-text: var(--color-text);
+  --fl-muted: var(--color-muted);
+  --fl-up: var(--color-up);
+  --fl-down: var(--color-down);
+  --fl-warn: var(--color-warn);
+  --fl-primary: var(--color-primary);
+  --fl-on-primary: var(--color-on-primary);
+  --fl-on-down: var(--color-on-down);
 }
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .fl {
-    --fl-bg: #000000;
-    --fl-surface: #111113;
-    --fl-surface-2: #1c1c1f;
-    --fl-line: #26262a;
-    --fl-text: #f5f5f7;
-    --fl-muted: #a1a1aa;
-    --fl-up: #3ddc84;
-    --fl-down: #ff6b6b;
-    --fl-warn: #f5b942;
-    --fl-primary: #f5f5f7;
-    --fl-on-primary: #000000;
-    --fl-on-down: #000000;
-    --fl-scrim: rgba(0, 0, 0, 0.6);
-    --fl-s1: #3987e5;
-    --fl-s2: #d95926;
-    --fl-s3: #199e70;
-    --fl-s4: #c98500;
-    --fl-s5: #d55181;
-    --fl-s6: #9085e9;
-  }
-}
-:root[data-theme="dark"] .fl,
-.dark .fl {
-  --fl-bg: #000000;
-  --fl-surface: #111113;
-  --fl-surface-2: #1c1c1f;
-  --fl-line: #26262a;
-  --fl-text: #f5f5f7;
-  --fl-muted: #a1a1aa;
-  --fl-up: #3ddc84;
-  --fl-down: #ff6b6b;
-  --fl-warn: #f5b942;
-  --fl-primary: #f5f5f7;
-  --fl-on-primary: #000000;
-  --fl-on-down: #000000;
-  --fl-scrim: rgba(0, 0, 0, 0.6);
-  --fl-s1: #3987e5;
-  --fl-s2: #d95926;
-  --fl-s3: #199e70;
-  --fl-s4: #c98500;
-  --fl-s5: #d55181;
-  --fl-s6: #9085e9;
-}
-
-.fl-page { background: var(--fl-bg); min-height: calc(100dvh - 96px); }
-.fl-sheet:focus, .fl-sheet:focus-visible { outline: none; box-shadow: none; }
-.fl-card { background: var(--fl-surface); border: 1px solid var(--fl-line); border-radius: 16px; }
-.fl-surface-2 { background: var(--fl-surface-2); }
-.fl-line { border-color: var(--fl-line); }
-.fl-text { color: var(--fl-text); }
-.fl-muted { color: var(--fl-muted); }
-.fl-up { color: var(--fl-up); }
-.fl-down { color: var(--fl-down); }
-.fl-warn { color: var(--fl-warn); }
+.fl { color: var(--color-text); font-family: var(--font-sans); }
+.fl-page { background: transparent; }
+.fl-card { background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-card); }
+.fl-surface-2 { background: var(--color-surface-2); }
+.fl-line { border-color: var(--color-line); }
+.fl-text { color: var(--color-text); }
+.fl-muted { color: var(--color-muted); }
+.fl-up { color: var(--color-up); }
+.fl-down { color: var(--color-down); }
+.fl-warn { color: var(--color-warn); }
 .fl-num { font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-.fl-btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  min-height: 44px; padding: 0 18px; border-radius: 999px; font-weight: 600; font-size: 15px;
-  transition: opacity 0.15s ease;
-}
-.fl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.fl-btn:focus-visible, .fl-focus:focus-visible { outline: 2px solid var(--fl-text); outline-offset: 2px; }
-.fl-btn-primary { background: var(--fl-primary); color: var(--fl-on-primary); }
-.fl-btn-secondary { background: var(--fl-surface-2); color: var(--fl-text); }
-.fl-btn-danger { background: var(--fl-down); color: var(--fl-on-down); }
-.fl-tabbar {
-  background: var(--fl-surface); border-top: 1px solid var(--fl-line);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-}
-.fl-btn-ghost { background: transparent; color: var(--fl-text); }
+.fl-focus:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .fl-input {
-  width: 100%; min-height: 48px; padding: 0 14px; border-radius: 12px;
-  background: var(--fl-surface-2); color: var(--fl-text); border: 1px solid transparent;
+  width: 100%; min-height: 46px; padding: 0 14px; border-radius: var(--radius-control);
+  background: var(--color-surface-2); color: var(--color-text); border: 1px solid transparent;
 }
-.fl-input:focus { outline: none; border-color: var(--fl-text); }
-.fl-scrim { background: var(--fl-scrim); }
-.fl-sheet { background: var(--fl-surface); color: var(--fl-text); }
-.fl-skeleton { background: var(--fl-surface-2); border-radius: 8px; animation: fl-pulse 1.4s ease-in-out infinite; }
-@keyframes fl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.fl-input:hover { border-color: var(--color-line-strong); }
+.fl-input:focus { outline: none; border-color: var(--color-accent); }
+.fl-scrim { background: rgb(0 0 0 / 0.5); }
+.fl-sheet { background: var(--color-surface); color: var(--color-text); }
+.fl-skeleton { background: var(--color-surface-2); border-radius: 10px; animation: pt-pulse 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .fl-skeleton { animation: none; } }
