@@ -2268,12 +2268,16 @@ const AI_MAX_TOKENS: u64 = 16_000;
 /// 402 the budget refused; 403 not from this machine or without the key's
 /// token; 503 no key; 502/504 the API failed or a batch did not finish.
 async fn post_ai_complete(
+    State(st): State<AppState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(req): Json<AiCompleteReq>,
 ) -> axum::response::Response {
-    if !addr.ip().to_canonical().is_loopback() {
-        return api_error(StatusCode::FORBIDDEN, "AI calls are taken from this machine only");
+    // This machine, or the addresses `PYTHIA_ALERT_EVENT_FROM` allows (an
+    // engine in a container sees the host's jobs from its bridge network).
+    // The key token below is checked either way.
+    if !event_source_allowed(addr.ip(), &st.alert_files.event_from) {
+        return api_error(StatusCode::FORBIDDEN, "AI calls are taken from this machine only (see PYTHIA_ALERT_EVENT_FROM)");
     }
     let key = std::env::var(Provider::Anthropic.env_key()).unwrap_or_default();
     if key.trim().is_empty() {
