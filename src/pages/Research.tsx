@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { BookOpen, ChevronDown, ExternalLink, RefreshCw } from "lucide-react";
-import { Badge, Button, Card, EmptyState, Loading, Meter, Notice, PageHeader, Term } from "../components/ui";
+import { Button, Card, Chip, Empty, Page, SectionTitle, Skeleton, type ChipTone } from "../design/flows";
 import { InsightList } from "../components/Insights";
 import { Markdown } from "../components/Markdown";
 import { liveMode } from "../live";
@@ -25,7 +25,7 @@ import { useAdvanced } from "../uiMode";
  * Everything the research lab knows, in plain words: the strategies being
  * tested and how they are doing, the models and their scores, what the
  * learning loop changed, every lab feed, and every study with its verdict
- * and full write-up. Read-only.
+ * and full write-up. Read-only. Calm flows look (design/flows).
  */
 export function Research() {
   const engine = liveMode() !== "none";
@@ -36,6 +36,7 @@ export function Research() {
   const [docs, setDocs] = useState<Record<string, string> | null>(null);
   const [readme, setReadme] = useState("");
   const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(engine);
   const [open, setOpen] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -47,6 +48,7 @@ export function Research() {
       setDocs(bundled);
       return;
     }
+    setLoading(true);
     const [s, f, m, served] = await Promise.allSettled([labStatus(), labFeeds(), mlStatus(), labStudies()]);
     setStatus(s.status === "fulfilled" ? s.value : null);
     setFeeds(f.status === "fulfilled" ? f.value : []);
@@ -54,6 +56,7 @@ export function Research() {
     setDocs(mergeDocs(bundled, served.status === "fulfilled" ? served.value : []));
     const failed = [s, f].find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
     setErr(failed ? String(failed.reason instanceof Error ? failed.reason.message : failed.reason) : "");
+    setLoading(false);
   }, [engine]);
 
   useEffect(() => {
@@ -79,222 +82,272 @@ export function Research() {
   );
 
   const otherFeeds = (feeds ?? []).filter((f) => f.name !== "forward" && f.name !== "learn");
+  const tested = books.filter((b) => b.forward || b.paper);
+  const waiting = books.filter((b) => !b.forward && !b.paper);
 
   return (
-    <div className="animate-fade-in mx-auto max-w-4xl space-y-5">
-      <PageHeader
-        title="Research"
-        subtitle="What the lab has tried, what is being tested now and what it learned. Every number is out of sample and after fees unless it says otherwise."
-        right={
-          <Button tone="neutral" size="sm" icon={RefreshCw} onClick={() => void load()}>
-            Refresh
-          </Button>
-        }
-      />
-
+    <Page
+      title="Research"
+      subtitle="What the lab tried, what it is testing now and what it learned. Numbers are out of sample and after fees."
+      right={
+        <Button variant="secondary" icon={RefreshCw} onClick={() => void load()}>
+          Refresh
+        </Button>
+      }
+    >
       {!engine && (
-        <Notice tone="info" title="Studies only">
-          The forward tests, models and lab feeds are read by the engine, so they need the desktop app or a connected
-          server. The studies below ship with the app.
-        </Notice>
+        <Card>
+          <p className="fl-muted text-sm">
+            The forward tests, models and lab feeds are read by the engine, so they need the desktop app or a connected
+            server. The studies below ship with the app.
+          </p>
+        </Card>
       )}
       {err && (
-        <Notice tone="warning" title="Part of the lab could not be read">
-          {err}
-        </Notice>
+        <Card label="Problem">
+          <p className="fl-warn text-sm font-semibold">Part of the lab could not be read</p>
+          <p className="fl-muted mt-1 break-words text-sm">{err}</p>
+        </Card>
       )}
 
       {engine && (
-        <Section title="Today" subtitle="The few things from the lab worth knowing right now.">
+        <>
+          <SectionTitle>Today</SectionTitle>
           <Card>
             {feeds === null ? (
-              <Loading>Reading the lab</Loading>
+              <Skeletons />
             ) : insights.length === 0 ? (
-              <p className="text-sm text-cyber-text-dim">All quiet. Nothing in the lab needs your attention today.</p>
+              <p className="fl-muted text-[15px]">All quiet. Nothing in the lab needs your attention today.</p>
             ) : (
               <InsightList insights={insights} now={now} />
             )}
           </Card>
-        </Section>
+        </>
       )}
 
-      <Section
-        title="Strategies being tested"
-        subtitle="Each one first had to make money in a backtest. Now it trades real prices with play money, to see whether the backtest holds."
-      >
-        {engine && !status && !err ? (
-          <Loading>Reading the forward tests</Loading>
-        ) : (
-          <div className="space-y-3">
-            {status?.forward?.verdict && <p className="text-sm text-cyber-text-dim">{status.forward.verdict}</p>}
-            {books.map((b) => (
-              <BookCard key={b.name} b={b} advanced={advanced} hasStudy={!!(b.info?.study && docs?.[b.info.study])} onStudy={showStudy} />
-            ))}
-          </div>
-        )}
-      </Section>
+      <SectionTitle>Strategies being tested</SectionTitle>
+      <p className="fl-muted -mt-2 px-1 text-sm">
+        Each one first made money in a backtest. Now it trades real prices with play money, to see whether the backtest
+        holds.
+        {status?.forward?.verdict ? ` ${status.forward.verdict}` : ""}
+      </p>
+      {loading && !status ? (
+        <Card>
+          <Skeletons />
+        </Card>
+      ) : (
+        <>
+          {tested.map((b) => (
+            <BookCard key={b.name} b={b} advanced={advanced} hasStudy={!!(b.info?.study && docs?.[b.info.study])} onStudy={showStudy} />
+          ))}
+          {waiting.length > 0 && (
+            <Card>
+              <div className="text-[15px] font-semibold">{tested.length ? "Not on paper right now" : "The lab's strategy books"}</div>
+              <p className="fl-muted mt-0.5 text-sm">
+                {engine ? "No forward test of these is running." : "Their forward tests show with the desktop app or a connected server."}
+              </p>
+              <div className="mt-1">
+                {waiting.map((b) => (
+                  <WaitingBook key={b.name} b={b} advanced={advanced} hasStudy={!!(b.info?.study && docs?.[b.info.study])} onStudy={showStudy} />
+                ))}
+              </div>
+            </Card>
+          )}
+        </>
+      )}
 
       {engine && (
-        <Section title="Models" subtitle="The models score themselves on what happened after each forecast, not on the data they learned from.">
+        <>
+          <SectionTitle>Models</SectionTitle>
           <ModelScores ml={ml} learn={status?.learn ?? null} />
-        </Section>
+        </>
       )}
 
       {engine && status?.learn && (
-        <Section title="What the learning loop changed" subtitle="Every night it updates costs, evidence and models within fixed bounds. It cannot arm live trading or move money.">
-          <LearnCard d={status.learn} now={now} />
-        </Section>
+        <>
+          <SectionTitle right={<span className="fl-muted text-xs">{status.learn.generatedMs ? ago(status.learn.generatedMs, now) : status.learn.generated}</span>}>
+            Learning loop
+          </SectionTitle>
+          <LearnCard d={status.learn} />
+        </>
       )}
 
       {engine && otherFeeds.length > 0 && (
-        <Section title="Lab feeds" subtitle="Every other lab job that reports here, worst first.">
-          <div className="space-y-3">
-            {otherFeeds.map((f) => (
-              <FeedCard key={f.name} f={f} now={now} advanced={advanced} onStudy={showStudy} />
-            ))}
-          </div>
-        </Section>
+        <>
+          <SectionTitle>Lab feeds</SectionTitle>
+          {otherFeeds.map((f) => (
+            <FeedCard key={f.name} f={f} now={now} advanced={advanced} onStudy={showStudy} />
+          ))}
+        </>
       )}
 
-      <Section
-        title="Studies"
-        subtitle="Every question the lab asked, with its answer. Most ideas fail; a failure with a number is still a result. Open one for the full write-up."
-      >
-        {docs === null ? (
-          <Loading>Loading the write-ups</Loading>
-        ) : studies.length === 0 ? (
-          <Card>
-            <EmptyState icon={BookOpen} title="No studies found" compact />
-          </Card>
-        ) : (
-          <div className="space-y-4">
-            <StudyList
-              studies={studies.filter((s) => s.group === "study")}
-              docs={docs}
-              open={open}
-              setOpen={setOpen}
-              onStudy={showStudy}
-              advanced={advanced}
-            />
-            {studies.some((s) => s.group === "sweep") && (
-              <div>
-                <h3 className="mb-2 text-sm font-medium text-cyber-text">The strategy-family sweep</h3>
-                <p className="mb-2 text-xs leading-relaxed text-cyber-text-faint">
-                  Nine families of strategies, 100 variants, all judged together so the best of many tries is not
-                  mistaken for skill.
-                </p>
-                <StudyList
-                  studies={studies.filter((s) => s.group === "sweep")}
-                  docs={docs}
-                  open={open}
-                  setOpen={setOpen}
-                  onStudy={showStudy}
-                  advanced={advanced}
-                />
-              </div>
-            )}
-          </div>
-        )}
-      </Section>
+      <SectionTitle>Studies</SectionTitle>
+      <p className="fl-muted -mt-2 px-1 text-sm">
+        Every question the lab asked and what it found. Most ideas fail; a failure with a number is still a result.
+      </p>
+      {docs === null ? (
+        <Card>
+          <Skeletons />
+        </Card>
+      ) : studies.length === 0 ? (
+        <Card>
+          <Empty icon={BookOpen} title="No studies found" />
+        </Card>
+      ) : (
+        <>
+          <StudyList studies={studies.filter((s) => s.group === "study")} docs={docs} open={open} setOpen={setOpen} onStudy={showStudy} advanced={advanced} />
+          {studies.some((s) => s.group === "sweep") && (
+            <>
+              <SectionTitle>The strategy-family sweep</SectionTitle>
+              <p className="fl-muted -mt-2 px-1 text-sm">
+                Nine families of strategies, 100 variants, judged together so the best of many tries is not mistaken for
+                skill.
+              </p>
+              <StudyList studies={studies.filter((s) => s.group === "sweep")} docs={docs} open={open} setOpen={setOpen} onStudy={showStudy} advanced={advanced} />
+            </>
+          )}
+        </>
+      )}
+    </Page>
+  );
+}
+
+function Skeletons() {
+  return (
+    <div className="space-y-2" role="status" aria-label="Loading">
+      <Skeleton className="h-4 w-3/4" />
+      <Skeleton className="h-4 w-1/2" />
+      <Skeleton className="h-4 w-2/3" />
     </div>
   );
 }
 
-function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
+const CHIP: Record<string, ChipTone> = { green: "good", amber: "warn", red: "bad", cyan: "good", neutral: "neutral", purple: "neutral" };
+const DOT: Record<string, string> = { green: "var(--fl-up)", amber: "var(--fl-warn)", red: "var(--fl-down)", neutral: "var(--fl-muted)" };
+
+function Dot({ tone, label }: { tone: string; label: string }) {
+  return <span aria-label={label} className="mt-1.5 inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: DOT[tone] ?? DOT.neutral }} />;
+}
+
+function Progress({ pct, label }: { pct: number; label: string }) {
+  const v = Math.max(0, Math.min(100, pct));
   return (
-    <section className="space-y-2.5">
-      <div>
-        <h2 className="text-base font-semibold text-cyber-text">{title}</h2>
-        {subtitle && <p className="mt-0.5 max-w-2xl text-sm leading-relaxed text-cyber-text-dim">{subtitle}</p>}
-      </div>
-      {children}
-    </section>
+    <div role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(v)} className="fl-surface-2 h-1.5 w-full overflow-hidden rounded-full">
+      <div className="h-full rounded-full" style={{ width: `${v}%`, background: v >= 100 ? "var(--fl-up)" : "var(--fl-text)" }} />
+    </div>
   );
 }
 
 function Label({ children }: { children: ReactNode }) {
-  return <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-cyber-text-faint">{children}</div>;
+  return <div className="fl-muted mb-1 text-xs font-medium">{children}</div>;
 }
 
-function BookCard({
-  b,
-  advanced,
-  hasStudy,
-  onStudy,
-}: {
-  b: BookView;
-  advanced: boolean;
-  hasStudy: boolean;
-  onStudy: (name: string) => void;
-}) {
+function Rows({ rows }: { rows: { k: string; v: string }[] }) {
+  return (
+    <dl className="space-y-1 text-sm">
+      {rows.map((r) => (
+        <div key={r.k} className="flex justify-between gap-3">
+          <dt className="fl-muted">{r.k}</dt>
+          <dd className="fl-num shrink-0 font-semibold">{r.v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function BookCard({ b, advanced, hasStudy, onStudy }: { b: BookView; advanced: boolean; hasStudy: boolean; onStudy: (name: string) => void }) {
   const f = b.forward;
   const st = f ? forwardStatus(f.status) : null;
   const gate = gateLine(b);
   const ret = f?.returnPct ?? b.paper?.returnPct ?? null;
   return (
-    <Card>
-      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+    <Card label={b.title}>
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[15px] font-semibold text-cyber-text">{b.title}</div>
-          {advanced && <div className="text-xs text-cyber-text-faint">{b.name}</div>}
+          <div className="text-[17px] font-semibold leading-snug">{b.title}</div>
+          {advanced && <div className="fl-muted text-xs">{b.name}</div>}
         </div>
-        {st ? <Badge tone={st.tone}>{st.label}</Badge> : <Badge tone="neutral">not on paper</Badge>}
+        {st && <Chip tone={CHIP[st.tone]}>{st.label}</Chip>}
       </div>
-      {b.info && <p className="mt-1.5 text-sm leading-relaxed text-cyber-text-dim">{b.info.what}</p>}
 
-      <div className="mt-4 grid gap-4 sm:grid-cols-3">
+      <div className="mt-3 flex items-end justify-between gap-3">
+        <div>
+          <div className="fl-muted text-sm">On paper so far</div>
+          <div className={`fl-num text-[28px] font-bold leading-tight tracking-tight ${ret == null ? "" : ret >= 0 ? "fl-up" : "fl-down"}`}>{signedPct(ret)}</div>
+        </div>
+        {f?.expected && (
+          <div className="fl-muted text-right text-sm">
+            expected
+            <div className="fl-num font-semibold" style={{ color: "var(--fl-text)" }}>
+              {signedPct(f.expected.lowPct, 1)} to {signedPct(f.expected.highPct, 1)}
+            </div>
+          </div>
+        )}
+      </div>
+      {f?.sentence && <p className="mt-2 text-[15px]">{f.sentence}</p>}
+      {b.info && <p className="fl-muted mt-2 text-sm">{b.info.what}</p>}
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <div className="min-w-0">
-          <Label>
-            <Term k="Backtest">Backtest</Term>
-          </Label>
+          <Label>Backtest</Label>
           {b.info && b.info.backtest.length > 0 ? (
-            <dl className="space-y-1 text-sm">
-              {b.info.backtest.map((x) => (
-                <div key={x.label} className="flex justify-between gap-2">
-                  <dt className="text-cyber-text-dim">{x.label}</dt>
-                  <dd className="font-mono tabular-nums text-cyber-text">{x.value}</dd>
-                </div>
-              ))}
-            </dl>
+            <Rows rows={b.info.backtest.map((x) => ({ k: x.label, v: x.value }))} />
           ) : (
-            <p className="text-sm text-cyber-text-faint">No backtest numbers on file.</p>
+            <p className="fl-muted text-sm">No backtest numbers on file.</p>
           )}
         </div>
         <div className="min-w-0">
-          <Label>Forward test so far</Label>
-          {ret != null ? (
-            <>
-              <div className={`font-mono text-xl font-semibold tabular-nums ${ret >= 0 ? "text-success" : "text-danger"}`}>{signedPct(ret)}</div>
-              {f?.expected && (
-                <div className="text-xs text-cyber-text-faint">
-                  expected {signedPct(f.expected.lowPct)} to {signedPct(f.expected.highPct)} after {Math.round(f.days)} days
-                </div>
-              )}
-              {f?.sentence && <p className="mt-1 text-sm leading-relaxed text-cyber-text-dim">{f.sentence}</p>}
-            </>
-          ) : (
-            <p className="text-sm text-cyber-text-faint">No forward test yet.</p>
-          )}
-        </div>
-        <div className="min-w-0">
-          <Label>
-            <Term k="Gate 7">Checks</Term>
-          </Label>
-          <Meter pct={gate.pct} tone={gate.ready ? "green" : "neutral"} label={`${b.title}: paper test progress`} />
-          <p className="mt-1.5 text-sm leading-relaxed text-cyber-text-dim">{gate.text}</p>
-          {b.info && <p className="mt-1 text-xs leading-relaxed text-cyber-text-faint">{b.info.checks}</p>}
+          <Label>Checks</Label>
+          <Progress pct={gate.pct} label={`${b.title}: paper test progress`} />
+          <p className="mt-1.5 text-sm">{gate.text}</p>
+          {b.info && <p className="fl-muted mt-1 text-xs">{b.info.checks}</p>}
         </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-cyber-border pt-3 text-sm">
-        <span className={b.autopilots.length ? "text-accent" : "text-cyber-text-dim"}>{autopilotLine(b)}</span>
+      <div className="fl-line mt-4 flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-sm">
+        <span className={b.autopilots.length ? "font-semibold" : "fl-muted"}>{autopilotLine(b)}</span>
         {hasStudy && b.info?.study && (
-          <button type="button" onClick={() => onStudy(b.info!.study!)} className="text-xs font-medium text-accent hover:underline">
+          <button type="button" onClick={() => onStudy(b.info!.study!)} className="fl-focus text-sm font-semibold underline underline-offset-2">
             Read the study
           </button>
         )}
       </div>
     </Card>
+  );
+}
+
+/** A catalogued book with no forward test: what it is and what its backtest said, folded. */
+function WaitingBook({ b, advanced, hasStudy, onStudy }: { b: BookView; advanced: boolean; hasStudy: boolean; onStudy: (name: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const headline = b.info?.backtest[0];
+  return (
+    <div className="fl-line border-t first:border-t-0">
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="fl-focus flex w-full items-center gap-3 py-3 text-left">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px] font-semibold">{b.title}</span>
+          {headline && (
+            <span className="fl-muted block text-sm">
+              {headline.label}: <span className="fl-num">{headline.value}</span>
+            </span>
+          )}
+        </span>
+        <ChevronDown size={16} aria-hidden className={`fl-muted shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && b.info && (
+        <div className="space-y-2 pb-3 text-sm">
+          {advanced && <div className="fl-muted text-xs">{b.name}</div>}
+          <p>{b.info.what}</p>
+          {b.info.backtest.length > 0 && <Rows rows={b.info.backtest.map((x) => ({ k: x.label, v: x.value }))} />}
+          <p className="fl-muted text-xs">{b.info.checks}</p>
+          <p className="fl-muted text-xs">{autopilotLine(b)}</p>
+          {hasStudy && b.info.study && (
+            <button type="button" onClick={() => onStudy(b.info!.study!)} className="fl-focus font-semibold underline underline-offset-2">
+              Read the study
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -304,149 +357,148 @@ function ModelScores({ ml, learn }: { ml: MlStatus | null; learn: LearnDigest | 
   const pct = (v: number | null | undefined, d = 1) => (v == null || !Number.isFinite(v) ? "n/a" : `${v.toFixed(d)} %`);
   const num = (v: number | null | undefined, d = 3) => (v == null || !Number.isFinite(v) ? "n/a" : v.toFixed(d));
   return (
-    <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Card>
-          <div className="text-[15px] font-semibold text-cyber-text">Next-hour volatility (M1)</div>
-          <p className="mt-1 text-sm text-cyber-text-dim">How much each coin will move in the next hour. Used to size trades, never to pick them.</p>
+    <>
+      <Card>
+        <div className="text-[15px] font-semibold">Next-hour volatility (M1)</div>
+        <p className="fl-muted mt-0.5 text-sm">How much each coin will move in the next hour. Used to size trades, never to pick them.</p>
+        <div className="mt-3">
           {vol ? (
-            <dl className="mt-3 space-y-1 text-sm">
-              <Score k="Better than the simple model, in the lab" v={pct(vol.model!.labGainVsHarPct)} />
-              <Score k="Better than the simple model, live" v={pct(vol.shadow.gainVsHarPct)} />
-              <Score k="Hours scored live" v={vol.shadow.scored.toLocaleString()} />
-              <Score k="Version" v={vol.model!.version} />
-            </dl>
+            <Rows
+              rows={[
+                { k: "Better than the simple model, in the lab", v: pct(vol.model!.labGainVsHarPct) },
+                { k: "Better than the simple model, live", v: pct(vol.shadow.gainVsHarPct) },
+                { k: "Hours scored live", v: vol.shadow.scored.toLocaleString() },
+                { k: "Version", v: vol.model!.version },
+              ]}
+            />
           ) : (
-            <p className="mt-3 text-sm text-cyber-text-faint">{ml?.message || "No model loaded."}</p>
+            <p className="fl-muted text-sm">{ml?.message || "No model loaded."}</p>
           )}
-        </Card>
-        <Card>
-          <div className="text-[15px] font-semibold text-cyber-text">Weekly coin ranking (M2)</div>
-          <p className="mt-1 text-sm text-cyber-text-dim">Ranks coins by how they should do over the next week. Scored a week later.</p>
+        </div>
+      </Card>
+      <Card>
+        <div className="text-[15px] font-semibold">Weekly coin ranking (M2)</div>
+        <p className="fl-muted mt-0.5 text-sm">Ranks coins by how they should do over the next week, scored a week later.</p>
+        <div className="mt-3">
           {picks ? (
-            <dl className="mt-3 space-y-1 text-sm">
-              <Score k="Ranking skill in the lab (rank-IC)" v={num(picks.model!.labRankIc)} />
-              <Score k="Ranking skill live" v={num(picks.shadow.rankIc)} />
-              <Score k="Weeks scored live" v={String(picks.shadow.weeks)} />
-              <Score k="Version" v={picks.model!.version} />
-            </dl>
+            <Rows
+              rows={[
+                { k: "Ranking skill in the lab (rank-IC)", v: num(picks.model!.labRankIc) },
+                { k: "Ranking skill live", v: num(picks.shadow.rankIc) },
+                { k: "Weeks scored live", v: String(picks.shadow.weeks) },
+                { k: "Version", v: picks.model!.version },
+              ]}
+            />
           ) : (
-            <p className="mt-3 text-sm text-cyber-text-faint">{ml?.picks?.message || "No model loaded."}</p>
+            <p className="fl-muted text-sm">{ml?.picks?.message || "No model loaded."}</p>
           )}
-        </Card>
-      </div>
+        </div>
+      </Card>
       {learn && learn.decisions.length > 0 && (
         <Card>
-          <Label>Last model decisions</Label>
-          <ul className="space-y-2">
+          <div className="text-[15px] font-semibold">Last model decisions</div>
+          <p className="fl-muted mt-0.5 text-sm">A new version replaces the old one only when it is better on data neither has seen.</p>
+          <ul className="mt-2">
             {learn.decisions.map((d, i) => (
-              <li key={i} className="text-sm">
-                <span className="text-cyber-text">{d.model}</span>{" "}
-                <Badge tone={d.decision === "promoted" ? "green" : d.decision === "rejected" ? "amber" : "neutral"}>
-                  {d.decision === "promoted" ? "new version in use" : d.decision === "rejected" ? "turned down" : "kept as is"}
-                </Badge>
-                {d.why && <div className="mt-0.5 text-cyber-text-dim">{d.why}</div>}
+              <li key={i} className="fl-line flex items-start justify-between gap-3 border-t py-2.5 first:border-t-0">
+                <div className="min-w-0">
+                  <div className="text-[15px] font-semibold">{d.model}</div>
+                  {d.why && <div className="fl-muted text-sm">{d.why}</div>}
+                </div>
+                <Chip tone={d.decision === "promoted" ? "good" : d.decision === "rejected" ? "warn" : "neutral"}>
+                  {d.decision === "promoted" ? "now in use" : d.decision === "rejected" ? "turned down" : "kept as is"}
+                </Chip>
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-xs text-cyber-text-faint">A new version replaces the old one only when it is better on data neither has seen.</p>
         </Card>
       )}
-    </div>
+    </>
   );
 }
 
-function Score({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="flex justify-between gap-3">
-      <dt className="text-cyber-text-dim">{k}</dt>
-      <dd className="shrink-0 font-mono tabular-nums text-cyber-text">{v}</dd>
-    </div>
-  );
-}
-
-function LearnCard({ d, now }: { d: LearnDigest; now: number }) {
+function LearnCard({ d }: { d: LearnDigest }) {
   const failed = d.steps.filter((x) => x.status === "failed");
   return (
     <Card>
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <p className="min-w-0 flex-1 text-sm leading-relaxed text-cyber-text">{d.headline || "Nothing changed."}</p>
-        <span className="text-xs text-cyber-text-faint">{d.generatedMs ? ago(d.generatedMs, now) : d.generated}</span>
-      </div>
+      <p className="text-[15px]">{d.headline || "Nothing changed."}</p>
       {d.changes.length > 0 && (
-        <ul className="mt-3 space-y-2">
+        <ul className="mt-2">
           {d.changes.map((c, i) => (
-            <li key={i} className="text-sm">
-              <span className="text-cyber-text">{c.what}</span>
-              <span className="text-cyber-text-faint"> · {c.area}</span>
-              {c.why && <div className="text-cyber-text-dim">{c.why}</div>}
+            <li key={i} className="fl-line border-t py-2.5 first:border-t-0">
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-[15px] font-semibold">{c.what}</span>
+                <Chip>{c.area}</Chip>
+              </div>
+              {c.why && <div className="fl-muted text-sm">{c.why}</div>}
             </li>
           ))}
         </ul>
       )}
       {failed.map((x) => (
-        <div key={x.step} className="mt-2 break-words text-sm text-danger">
+        <p key={x.step} className="fl-down mt-2 break-words text-sm">
           Step {x.step} failed: {x.detail}
-        </div>
+        </p>
       ))}
+      <p className="fl-muted mt-2 text-xs">It updates costs, evidence and models within fixed bounds. It cannot arm live trading or move money.</p>
     </Card>
   );
 }
-
-const DOT = { green: "bg-success", amber: "bg-warning", red: "bg-danger", neutral: "bg-cyber-text-faint" } as const;
 
 function FeedCard({ f, now, advanced, onStudy }: { f: LabFeed; now: number; advanced: boolean; onStudy: (name: string) => void }) {
   const [all, setAll] = useState(false);
   const t = feedTone(f.status);
   const items = all ? f.items : f.items.slice(0, 5);
   return (
-    <Card>
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span aria-label={t.label} className={`h-2 w-2 shrink-0 rounded-full ${DOT[t.tone]}`} />
-          <span className="text-[15px] font-semibold text-cyber-text">{f.title}</span>
+    <Card label={f.title}>
+      <div className="flex items-start gap-3">
+        <Dot tone={t.tone} label={t.label} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+            <span className="text-[15px] font-semibold">{f.title}</span>
+            <span className="fl-muted text-xs">{ago(f.updatedMs, now)}</span>
+          </div>
+          {f.headline && <p className="fl-muted mt-0.5 text-sm">{f.headline}</p>}
           {advanced && !f.conforms && (
-            <Badge tone="neutral" title="This report does not carry the common feed header (docs/LAB-FEEDS.md).">
-              older format
-            </Badge>
+            <div className="mt-1">
+              <Chip title="This report does not carry the common feed header (docs/LAB-FEEDS.md).">older format</Chip>
+            </div>
           )}
         </div>
-        <span className="text-xs text-cyber-text-faint">{ago(f.updatedMs, now)}</span>
       </div>
-      {f.headline && <p className="mt-1.5 text-sm leading-relaxed text-cyber-text-dim">{f.headline}</p>}
       {items.length > 0 && (
-        <ul className="mt-3 divide-y divide-cyber-border">
+        <ul className="mt-2">
           {items.map((it, i) => {
             const study = it.link ? studyLink(it.link) : null;
             const web = it.link && /^https?:\/\//.test(it.link) ? it.link : null;
+            const label = study ? (
+              <button type="button" onClick={() => onStudy(study)} className="fl-focus text-left underline underline-offset-2">
+                {it.label}
+              </button>
+            ) : web ? (
+              <a href={web} target="_blank" rel="noreferrer noopener" className="fl-focus inline-flex items-center gap-1 underline underline-offset-2">
+                {it.label}
+                <ExternalLink size={12} aria-hidden />
+              </a>
+            ) : (
+              it.label
+            );
             return (
-              <li key={i} className="flex items-start justify-between gap-3 py-2 text-sm">
+              <li key={i} className="fl-line flex items-start justify-between gap-3 border-t py-2.5">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 text-cyber-text">
-                    {it.status && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT[feedTone(it.status).tone]}`} />}
-                    {study ? (
-                      <button type="button" onClick={() => onStudy(study)} className="text-left hover:underline">
-                        {it.label}
-                      </button>
-                    ) : web ? (
-                      <a href={web} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 hover:underline">
-                        {it.label}
-                        <ExternalLink size={11} aria-hidden />
-                      </a>
-                    ) : (
-                      it.label
-                    )}
-                  </div>
-                  {it.detail && <div className="text-cyber-text-dim">{it.detail}</div>}
+                  <div className="text-[15px] font-medium">{label}</div>
+                  {it.detail && <div className="fl-muted text-sm">{it.detail}</div>}
                 </div>
-                {it.value && <div className="shrink-0 font-mono tabular-nums text-cyber-text">{it.value}</div>}
+                {it.value && (
+                  <span className={`fl-num shrink-0 text-[15px] font-semibold ${it.status === "bad" ? "fl-down" : it.status === "watch" ? "fl-warn" : ""}`}>{it.value}</span>
+                )}
               </li>
             );
           })}
         </ul>
       )}
       {f.items.length > 5 && (
-        <button type="button" onClick={() => setAll((a) => !a)} className="mt-2 text-xs font-medium text-accent hover:underline">
+        <button type="button" onClick={() => setAll((a) => !a)} className="fl-focus mt-1 text-sm font-semibold underline underline-offset-2">
           {all ? "Show fewer" : `Show all ${f.items.length}`}
         </button>
       )}
@@ -470,46 +522,44 @@ function StudyList({
   advanced: boolean;
 }) {
   return (
-    <div className="divide-y divide-cyber-border overflow-hidden rounded-xl border border-cyber-border bg-cyber-surface">
-      {studies.map((s) => {
+    <Card className="!p-0">
+      {studies.map((s, i) => {
         const isOpen = open === s.id;
         const v = verdictBadge(s.kind);
         const md = s.file ? docs[s.file] : undefined;
         return (
-          <div key={s.id} id={`study-${s.id}`} className="scroll-mt-4">
+          <div key={s.id} id={`study-${s.id}`} className={`scroll-mt-4 ${i > 0 ? "fl-line border-t" : ""}`}>
             <button
               type="button"
               onClick={() => setOpen(isOpen ? null : s.id)}
               aria-expanded={isOpen}
-              className="flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-cyber-surface-2/50"
+              className="fl-focus flex w-full items-start gap-3 rounded-2xl px-4 py-3.5 text-left"
             >
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className="text-sm font-medium text-cyber-text">{s.title}</span>
-                  <Badge tone={v.tone}>{v.label}</Badge>
-                </div>
-                <p className="mt-1 text-sm leading-relaxed text-cyber-text-dim">{s.verdict}</p>
-                <div className="mt-1 text-xs text-cyber-text-faint">
-                  {s.date ?? "undated"}
-                  {advanced && ` · ${s.code}`}
+                <div className="text-[15px] font-semibold leading-snug">{s.title}</div>
+                <p className="fl-muted mt-1 text-sm">{s.verdict}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Chip tone={CHIP[v.tone]}>{v.label}</Chip>
+                  <span className="fl-muted text-xs">
+                    {s.date ?? "undated"}
+                    {advanced && ` · ${s.code}`}
+                  </span>
                 </div>
               </div>
-              <ChevronDown size={16} aria-hidden className={`mt-0.5 shrink-0 text-cyber-text-faint transition-transform ${isOpen ? "rotate-180" : ""}`} />
+              <ChevronDown size={18} aria-hidden className={`fl-muted mt-0.5 shrink-0 transition-transform ${isOpen ? "rotate-180" : ""}`} />
             </button>
             {isOpen && (
-              <div className="border-t border-cyber-border bg-cyber-bg/30 px-4 py-4">
+              <div className="px-4 pb-5">
                 {md ? (
                   <Markdown source={md} onStudy={onStudy} />
                 ) : (
-                  <p className="text-sm text-cyber-text-dim">
-                    There is no separate write-up for this one; the answer above is the lab's summary of it.
-                  </p>
+                  <p className="fl-muted text-sm">There is no separate write-up for this one; the answer above is the lab's summary of it.</p>
                 )}
               </div>
             )}
           </div>
         );
       })}
-    </div>
+    </Card>
   );
 }

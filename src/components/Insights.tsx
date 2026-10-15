@@ -38,19 +38,27 @@ export function useLabInsights(): { insights: Insight[] | null; available: boole
 
 const DOT = { green: "bg-success", amber: "bg-warning", red: "bg-danger", neutral: "bg-cyber-text-faint" } as const;
 
-/** Three lines at most: what happened, where it comes from, how long ago. */
+/**
+ * Three lines at most: what happened, where it comes from, how long ago.
+ * Colours come from the surrounding text (muted parts by opacity), so the list
+ * reads the same on Home's card and on the calm Research page.
+ */
 export function InsightList({ insights, now = Date.now() }: { insights: Insight[]; now?: number }) {
   return (
-    <ol className="divide-y divide-cyber-border">
-      {insights.map((x) => {
+    <ol>
+      {insights.map((x, i) => {
         const t = feedTone(x.status);
         return (
-          <li key={`${x.source}:${x.text}`} className="flex gap-3 py-3 first:pt-0 last:pb-0">
+          <li
+            key={`${x.source}:${x.text}`}
+            className={`flex gap-3 py-3 first:pt-0 last:pb-0 ${i > 0 ? "border-t" : ""}`}
+            style={i > 0 ? { borderTopColor: "color-mix(in srgb, currentColor 12%, transparent)" } : undefined}
+          >
             <span aria-label={t.label} className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${DOT[t.tone]}`} />
             <div className="min-w-0">
-              <div className="text-[15px] leading-snug text-cyber-text">{x.text}</div>
-              {x.detail && <div className="mt-0.5 text-sm leading-relaxed text-cyber-text-dim">{x.detail}</div>}
-              <div className="mt-1 text-xs text-cyber-text-faint">
+              <div className="text-[15px] font-medium leading-snug">{x.text}</div>
+              {x.detail && <div className="mt-0.5 text-sm leading-relaxed opacity-75">{x.detail}</div>}
+              <div className="mt-1 text-xs opacity-60">
                 {x.title}
                 {x.atMs ? ` · ${ago(x.atMs, now)}` : ""}
               </div>
