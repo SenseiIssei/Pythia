@@ -9,9 +9,12 @@ mod alpaca_fees_tests;
 pub mod demo_reconcile;
 #[cfg(test)]
 mod demo_reconcile_tests;
+pub mod allocator;
 pub mod autopilot;
 #[cfg(test)]
 mod autopilot_tests;
+#[cfg(test)]
+mod portfolio_tests;
 pub mod composed;
 #[cfg(test)]
 mod feed_engine_tests;
@@ -5728,8 +5731,9 @@ impl Engine {
         // together, and nothing while it is paused. The same lab book can run
         // in several autopilots; each rebalances it in its own book.
         let mut runs: Vec<(String, Option<autopilot::LabGroup>)> = Vec::new();
+        // A portfolio has one group per asset class, each on its own clock.
         for i in 0..self.autopilots.len() {
-            if let Some(g) = self.autopilot_lab_group(i) {
+            for g in self.autopilot_lab_groups(i) {
                 if g.running && !g.members.is_empty() {
                     runs.push((self.autopilots[i].config.id.clone(), Some(g)));
                 }
@@ -5774,8 +5778,13 @@ impl Engine {
                 continue;
             };
             // Due when a book with weight has a fresh signal not yet traded.
+            // A group whose books all lost their weight (a portfolio's class
+            // that has no evidence left) is due too: it sells down.
+            let none_weighted = members.iter().all(|m| m.1 <= 0.0);
             let due = sigs.iter().any(|(m, scale, g)| {
-                (*scale > 0.0 || members.len() == 1) && g.is_fresh(now) && self.lab_done.get(&done_key(m)) != Some(&g.generated_ms)
+                (*scale > 0.0 || members.len() == 1 || none_weighted)
+                    && g.is_fresh(now)
+                    && self.lab_done.get(&done_key(m)) != Some(&g.generated_ms)
             });
             let generated = sigs.iter().map(|x| x.2.generated_ms).max().unwrap_or(sig.generated_ms);
             let retry_key = done_key(&lead);
@@ -5970,7 +5979,7 @@ impl Engine {
                 } else {
                     Some(format!("the lab wants only {}, which cannot be traded here now", wanted.join(", ")))
                 };
-                self.autopilot_lab_retarget(g.ap, targets, shares, cash_note);
+                self.autopilot_lab_retarget(g.ap, targets, shares, cash_note, g.class);
             }
             let n = orders.len();
             let mut refused = 0;

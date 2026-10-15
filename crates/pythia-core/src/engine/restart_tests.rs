@@ -107,6 +107,7 @@ fn holding_engine(trim_mult: f64) -> (Engine, String) {
         flatten_on_stop: true,
         max_sleeves: None,
         repick_every_hours: None,
+        portfolio: false,
     };
     let id = e.autopilot_start(cfg, false, VenueCash::NotRead).expect("the autopilot starts");
     // The book feed has loaded: the rebalance rests as maker limits.
