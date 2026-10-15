@@ -348,11 +348,13 @@ def w7_finding() -> str | None:
     for v in data.get("verdicts", []):
         if v.get("family", "").startswith("F4"):
             return (f"W7 backtest: buying volume surges on the Alpaca memecoins made Sharpe {v['pick_oos_35']:.2f} "
-                    f"out of sample at 35 bps (drawdown {v['pick_dd'] * 100:.0f} %). Not a paper book.")
+                    f"out of sample at 35 bps (drawdown {v['pick_dd'] * 100:.0f} %), positive in "
+                    f"{v['years_pos']} of 3 years. Not a paper book.")
     return W7_LINE
 
 
-W7_LINE = "W7 backtest: buying surges did not earn their risk on the Alpaca memecoins (results/memecoins.md)."
+W7_LINE = ("W7 backtest: buying volume surges on the Alpaca memecoins paid in 2024 and lost in 2025 and 2026; "
+           "not a paper book (results/memecoins.md).")
 
 
 # ---------------------------------------------------------------- one run
