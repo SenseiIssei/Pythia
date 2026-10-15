@@ -46,6 +46,7 @@ const REPORT_LABEL: Record<string, string> = {
   learn: "Learning loop, nightly",
   cs2: "CS2 skins, hourly feed and board",
   cs2_weekly: "CS2 skins, weekly paper report",
+  pokemon: "Pokemon cards, daily (data and play money)",
 };
 
 /** A return drawn against the band its backtest expected over the same days. */

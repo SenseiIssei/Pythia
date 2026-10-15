@@ -740,6 +740,12 @@ pub fn cs2_board() -> Option<pythia_core::labview::Cs2Board> {
     pythia_core::labview::cs2_board()
 }
 
+/// Pokemon cards from the lab (prices, forecasts, the paper collection). Read-only.
+#[tauri::command]
+pub fn pokemon_status() -> pythia_core::labview::PokemonView {
+    pythia_core::labview::pokemon()
+}
+
 /// Every lab job's `reports/<name>/latest.json`, by the feed convention (docs/LAB-FEEDS.md).
 #[tauri::command]
 pub fn lab_feeds() -> Vec<pythia_core::labview::LabFeed> {

@@ -24,6 +24,7 @@ import {
   History,
   Bell,
   BookOpen,
+  Layers,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -50,6 +51,7 @@ export type PageId =
   | "lab"
   | "research"
   | "predictions"
+  | "cards"
   | "live"
   | "risk"
   | "journal"
@@ -76,6 +78,8 @@ export const NAV: NavItem[] = [
   { id: "notifications", label: "Notifications", icon: Bell, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },
   { id: "wallets", label: "Money", icon: Coins, section: "Overview" },
+  // Pokemon cards: prices and forecasts, paper only. Plain enough for simple mode.
+  { id: "cards", label: "Cards", icon: Layers, section: "Overview" },
 
   // ── advanced only ──
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, section: "Overview", advanced: true },
