@@ -1,9 +1,12 @@
 """M12: the BTC and US equity correlation regime.
 
-Data: BTC's daily close (UTC day end, from the recorder's 1-minute bars) and
-SPY's adjusted daily close from Yahoo, on the days SPY trades. BTC's close is
-three to four hours after SPY's, which is fine for daily returns: every input
-is known at the end of day t and the target starts with day t+1's returns.
+Data: BTC-USD's and SPY's daily closes from Yahoo's chart API (BTC from
+September 2014, its UTC day close; SPY adjusted for dividends), on the days
+SPY trades, cached for a day. Without Yahoo and without a cache, BTC falls
+back to the recorder's 1-minute bars (from 2020 only). The day in progress is
+dropped. BTC's close is three to four hours after SPY's, which is fine for
+daily returns: every input is known at the end of day t and the target
+starts with day t+1's returns.
 
 Target: the correlation of daily BTC and SPY log returns over the next 20 SPY
 trading days, Fisher-transformed (atanh), so errors in a calm and a coupled
@@ -11,11 +14,16 @@ market count alike. Inputs: the correlation over the last 20, 60 and 120 days
 (atanh), its change over a month, both volatilities and their ratio, SPY's
 drawdown from its one-year high, both trends against a 200-day mean.
 
-Model: ridge regression on standardised inputs (about 1,500 overlapping
-rows; a tree would only memorise them). Baseline: the last 60 days'
-correlation, carried forward. Gate: lower squared error than the baseline
-with DM p < 0.05 (lag 20 for the overlap). The regime the page shows:
-coupled (forecast above 0.3), decoupled (below 0.1), mixed in between.
+Model: ridge regression on standardised inputs (about 2,900 overlapping
+rows; a tree would only memorise them), fitted on the change from the last
+60 days' correlation rather than its level (the level moved from about zero
+before 2020 to coupled after; a ridge on the level kept pulling forecasts to
+the old regime). Baseline: the last 60 days' correlation, carried forward.
+Gate: lower squared error than the baseline with DM p < 0.05 (lag 20 for the
+overlap). The regime the page shows: coupled (above 0.3), decoupled (below
+0.1), mixed in between, from the model only if it passed its gate and from
+the baseline otherwise. On real data (October 2026) neither ridge beats the
+baseline (results/model_zoo.md), so the regime shown is the last 60 days'.
 Used by no book: information for the owner on whether BTC is trading as a
 risk asset; any use (e.g. leaving the equity and coin books' combined risk
 alone when coupled) needs its own study.
@@ -37,6 +45,7 @@ FEATURES = ["z20", "z60", "z120", "dz60", "btc_vol20", "spy_vol20", "vol_ratio",
             "spy_trend"]
 WINDOW = 20
 LAMBDA = 5.0
+ANCHOR = "z60"            # the model forecasts the change from this, see fit()
 COUPLED, DECOUPLED = 0.3, 0.1
 YAHOO_MAX_AGE_S = 20 * 3600
 
@@ -44,35 +53,39 @@ SPEC = Spec(
     code="M12", name="m12_cross_asset", title="BTC vs US equities correlation regime",
     target="correlation of daily BTC and SPY returns over the next 20 SPY trading days (atanh)",
     features=FEATURES, horizon="next 20 trading days", horizon_days=28,
-    universe="BTC and SPY", metric="mse_z", baseline="the last 60 days' correlation, carried forward",
+    universe="BTC-USD and SPY (Yahoo daily)", metric="mse_z", baseline="the last 60 days' correlation, carried forward",
     every_days=28, margin=0.002, first_test="2020-01-01", folds="quarter", min_rows=60, min_days=60, min_train=300,
     use_rule="No book. Shown to the owner as the regime (coupled, mixed, decoupled); any use needs its own study.",
     results="model_zoo.md",
 )
 
 
-def spy_closes(fetch=None, cache: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """SPY's adjusted closes from Yahoo, cached for a day under <data>/models/zoo/_data."""
+def yahoo_closes(sym: str, fetch=None, cache: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Daily closes from Yahoo's chart API, cached for a day under <data>/models/zoo/_data."""
     from ..experiments import etf_trend
     from ..ops import guard
     from ..data import ROOT
-    cache = cache or ROOT / "models" / "zoo" / "_data" / "SPY.csv"
+    cache = cache or ROOT / "models" / "zoo" / "_data" / f"{sym}.csv"
     fresh = cache.exists() and time.time() - cache.stat().st_mtime < YAHOO_MAX_AGE_S
     if not fresh:
         try:
-            text = (fetch or etf_trend.download_yahoo)("SPY")
+            text = (fetch or etf_trend.download_yahoo)(sym)
             etf_trend.parse_stooq(text)
             guard.write_text(cache, text)
         except (etf_trend.DataUnavailable, OSError) as e:
             if not cache.exists():
-                raise DataUnavailable(f"SPY from Yahoo: {e}") from e
+                raise DataUnavailable(f"{sym} from Yahoo: {e}") from e
     try:
         return etf_trend.parse_stooq(cache.read_text(encoding="utf-8"))
     except etf_trend.DataUnavailable as e:
         raise DataUnavailable(str(e)) from e
 
 
-def btc_closes() -> tuple[np.ndarray, np.ndarray]:
+def spy_closes(fetch=None, cache: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
+    return yahoo_closes("SPY", fetch, cache)
+
+
+def recorder_btc() -> tuple[np.ndarray, np.ndarray]:
     from ..experiments.vol_daily import coin_daily
     f = coin_daily("BTC")
     if f.is_empty():
@@ -81,8 +94,22 @@ def btc_closes() -> tuple[np.ndarray, np.ndarray]:
     return (f["day"].to_numpy() // 86_400_000_000).astype("datetime64[D]"), f["close"].to_numpy().astype(float)
 
 
+def btc_closes(fetch=None, cache: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        return yahoo_closes("BTC-USD", fetch, cache)
+    except DataUnavailable:
+        return recorder_btc()
+
+
+def complete_days(series: tuple[np.ndarray, np.ndarray], today: np.datetime64 | None = None):
+    """Only days that are over (UTC): Yahoo includes the day in progress."""
+    today = today if today is not None else np.datetime64(int(time.time() // 86_400), "D")
+    keep = series[0] < today
+    return series[0][keep], series[1][keep]
+
+
 def load() -> pl.DataFrame:
-    return panel_from(btc_closes(), spy_closes())
+    return panel_from(complete_days(btc_closes()), complete_days(spy_closes()))
 
 
 def _atanh(c):
@@ -116,18 +143,24 @@ def _X(frame: pl.DataFrame) -> np.ndarray:
 
 
 def fit(frame: pl.DataFrame) -> dict:
+    """Ridge on the change from the last 60 days' correlation (anchor), not on its level:
+    the level moved from about zero before 2020 to coupled after, and a fitted level
+    would pull every forecast towards the old regime."""
     X, y = _X(frame), frame["target"].to_numpy().astype(float)
+    y = y - np.nan_to_num(frame[ANCHOR].to_numpy().astype(float))
     mu, sd = np.nanmean(X, 0), np.nanstd(X, 0)
     sd = np.where(sd > 0, sd, 1.0)
     Z = np.nan_to_num((X - mu) / sd)
     ym = y.mean()
     w = np.linalg.solve(Z.T @ Z + LAMBDA * len(y) / 100 * np.eye(Z.shape[1]), Z.T @ (y - ym))
-    return {"mu": mu.tolist(), "sd": sd.tolist(), "w": w.tolist(), "b": float(ym)}
+    return {"mu": mu.tolist(), "sd": sd.tolist(), "w": w.tolist(), "b": float(ym), "anchor": ANCHOR}
 
 
 def predict(fitted: dict, frame: pl.DataFrame) -> np.ndarray:
     Z = np.nan_to_num((_X(frame) - np.asarray(fitted["mu"])) / np.asarray(fitted["sd"]))
-    return fitted["b"] + Z @ np.asarray(fitted["w"])
+    a = fitted.get("anchor")
+    base = np.nan_to_num(frame[a].to_numpy().astype(float)) if a else 0.0
+    return base + fitted["b"] + Z @ np.asarray(fitted["w"])
 
 
 def baseline(fitted: dict, frame: pl.DataFrame) -> np.ndarray:
@@ -153,8 +186,11 @@ def extra(fitted: dict, panel: pl.DataFrame, ev: dict) -> dict:
     last = panel.filter(pl.col("ts_us") == panel["ts_us"].max())
     if not last.is_empty():
         c = float(np.tanh(predict(fitted, last)[0]))
-        out["today"] = {"date": core.iso(int(last["ts_us"][0])), "forecast_corr": c, "regime": regime(c),
-                        "corr60": float(np.tanh(last["z60"][0])) if last["z60"][0] is not None else None}
+        c60 = float(np.tanh(last["z60"][0])) if last["z60"][0] is not None else None
+        # A model that did not beat its baseline does not get to name the regime.
+        use_model = bool((ev.get("gate") or {}).get("passed")) or c60 is None
+        out["today"] = {"date": core.iso(int(last["ts_us"][0])), "forecast_corr": c, "corr60": c60,
+                        "regime": regime(c if use_model else c60), "regime_from": "model" if use_model else "baseline"}
     out["weights"] = dict(zip(FEATURES, fitted["w"]))
     return core.finite(out)
 
@@ -165,7 +201,7 @@ def save(fitted: dict, folder: Path) -> None:
 
 def restore(folder: Path) -> dict:
     m = json.loads((folder / "model.json").read_text(encoding="utf-8"))
-    return {k: m[k] for k in ("mu", "sd", "w", "b")}
+    return {k: m.get(k) for k in ("mu", "sd", "w", "b", "anchor")}
 
 
 def synthetic(n: int = 2200, seed: int = 0) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:

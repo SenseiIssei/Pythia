@@ -2,8 +2,8 @@
 
 M1 and M2 existed before the zoo: the nightly learning loop (lab.ops.learn)
 retrains them as challengers and the engine scores them live, so the zoo only
-reports on them. M7 failed as a gate and is kept here as a record. M8, M10,
-M11 and M12 are the zoo's own: lab.models.train retrains them when due,
+reports on them. M7 failed as a gate and is kept here as a record. M8, M8q,
+M10, M11 and M12 are the zoo's own: lab.models.train retrains them when due,
 judges every challenger against the champion, scores the champion in shadow
 every day and watches its inputs for drift.
 """
@@ -15,6 +15,7 @@ from importlib import import_module
 import numpy as np
 
 from ..ops import guard, registry
+from . import core
 from .core import Spec
 
 M1 = Spec(
@@ -46,7 +47,7 @@ M7 = Spec(
     use_rule="Retired. The 200-day rule stays.", results="regime_hmm.md",
 )
 
-ZOO_MODULES = ("m8_direction", "m10_vol_regime", "m11_slippage", "m12_cross_asset")
+ZOO_MODULES = ("m8_direction", "m8_quantiles", "m10_vol_regime", "m11_slippage", "m12_cross_asset")
 
 
 def module(name: str):
@@ -77,7 +78,7 @@ def register_all() -> None:
         s = mod.SPEC
         assert s.name in guard.ZOO_MODELS, f"{s.name} is not in guard.ZOO_MODELS"
         cfg = {"metric": s.metric, "higher_better": s.higher_better, "margin": s.margin, "relative": s.relative,
-               "embargo_us": max(s.horizon_days, 1) * 86_400_000_000, "min_rows": s.min_rows, "min_days": s.min_days}
+               "embargo_us": core.embargo_h(s) * 3_600_000_000, "min_rows": s.min_rows, "min_days": s.min_days}
 
         def gate_fn(folder, card):
             g = card.get("gate") or {}

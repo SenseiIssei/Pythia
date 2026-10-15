@@ -74,6 +74,7 @@ class Spec:
     min_rows: int = 200       # smallest champion window worth a decision
     min_days: int = 14
     min_train: int = 500      # smallest training set for a fold
+    embargo_h: int | None = None     # gap between train and test; default the label horizon
     calendar: tuple[str, ...] = ()   # features set by the clock: nothing to drift
     managed_by: str = "zoo"   # zoo, learn (M1, M2 are retrained by the nightly loop) or retired
     status_note: str = ""
@@ -126,6 +127,10 @@ def pinball(y: np.ndarray, q: np.ndarray, alpha: float) -> np.ndarray:
 
 # ---------------------------------------------------------------- folds
 
+def embargo_h(spec: Spec) -> int:
+    return spec.embargo_h if spec.embargo_h is not None else max(spec.horizon_days, 1) * 24
+
+
 @dataclass
 class Fold:
     name: str
@@ -136,7 +141,7 @@ class Fold:
 def folds_for(spec: Spec, ts: np.ndarray, known: np.ndarray) -> list[Fold]:
     """Quarterly walk-forward with the label horizon as embargo, or for small samples
     (demo fills) five expanding time blocks with the same embargo."""
-    emb_h = max(spec.horizon_days, 1) * 24
+    emb_h = embargo_h(spec)
     if spec.folds == "quarter":
         return [Fold(f.name, f.train, f.test) for f in walk_forward(ts, us(spec.first_test), embargo_h=emb_h)]
     order = np.sort(ts[known])
@@ -168,8 +173,7 @@ def evaluate(mod, panel: pl.DataFrame) -> dict:
     panel = panel.sort(["ts_us", "symbol"])
     ts = panel["ts_us"].to_numpy()
     known = panel["target"].is_not_null().to_numpy() & np.isfinite(panel["target"].fill_null(np.nan).to_numpy())
-    pred = np.full(panel.height, np.nan)
-    base = np.full(panel.height, np.nan)
+    pred = base = None
     side_fn = getattr(mod, "side", None)
     side: dict[str, np.ndarray] = {}
     fold_rows = []
@@ -180,8 +184,14 @@ def evaluate(mod, panel: pl.DataFrame) -> dict:
             continue
         fitted = mod.fit(panel.filter(pl.Series(tr)))
         test = panel.filter(pl.Series(te))
-        pred[te] = mod.predict(fitted, test)
-        base[te] = mod.baseline(fitted, test)
+        p_ = np.asarray(mod.predict(fitted, test), float)
+        b_ = np.asarray(mod.baseline(fitted, test), float)
+        if pred is None:
+            # One number per row, or one row of numbers per row (quantiles).
+            pred = np.full((panel.height,) + p_.shape[1:], np.nan)
+            base = np.full((panel.height,) + b_.shape[1:], np.nan)
+        pred[te] = p_
+        base[te] = b_
         if side_fn:
             for k, v in side_fn(fitted, test).items():
                 side.setdefault(k, np.full(panel.height, np.nan))[te] = v
@@ -189,7 +199,9 @@ def evaluate(mod, panel: pl.DataFrame) -> dict:
         lm, lb = mod.loss(y, pred[te]), mod.loss(y, base[te])
         fold_rows.append({"fold": f.name, "from": iso(ts[te].min()), "rows": int(te.sum()),
                           "model": float(np.nanmean(lm)), "baseline": float(np.nanmean(lb))})
-    ev_mask = known & np.isfinite(pred) & np.isfinite(base)
+    if pred is None:
+        pred = base = np.full(panel.height, np.nan)
+    ev_mask = known & finite_rows(pred) & finite_rows(base)
     out = {"folds": fold_rows, "rows_oos": int(ev_mask.sum())}
     if ev_mask.sum() == 0:
         out.update(model_score=None, baseline_score=None, gain_pct=None, dm_stat=None, dm_p=None,
@@ -338,10 +350,10 @@ def shadow_forecasts(mod, fitted, panel: pl.DataFrame, version: str, now_ms: int
     b = mod.baseline(fitted, open_rows)
     out = []
     for i, (t, s) in enumerate(zip(open_rows["ts_us"].to_list(), open_rows["symbol"].to_list())):
-        if (int(t), str(s)) in have or not (np.isfinite(p[i]) and np.isfinite(b[i])):
+        if (int(t), str(s)) in have or not (np.all(np.isfinite(p[i])) and np.all(np.isfinite(b[i]))):
             continue
-        out.append({"ts_us": int(t), "symbol": str(s), "version": version, "pred": float(p[i]),
-                    "baseline": float(b[i]), "recorded_ms": now_ms})
+        out.append({"ts_us": int(t), "symbol": str(s), "version": version, "pred": _plain(p[i]),
+                    "baseline": _plain(b[i]), "recorded_ms": now_ms})
     return out
 
 
@@ -357,7 +369,7 @@ def shadow_score(mod, rows: list[dict], panel: pl.DataFrame) -> dict:
     if j.is_empty():
         return {"rows": 0, "open": len(rows)}
     y = j["target"].to_numpy().astype(float)
-    lm, lb = mod.loss(y, j["pred"].to_numpy()), mod.loss(y, j["baseline"].to_numpy())
+    lm, lb = mod.loss(y, as_array(j["pred"])), mod.loss(y, as_array(j["baseline"]))
     sm, sb = float(np.mean(lm)), float(np.mean(lb))
     weeks = (pl.DataFrame({"w": j["ts_us"].to_numpy() // (7 * DAY_US) * (7 * DAY_US), "m": lm, "b": lb})
              .group_by("w").agg(model=pl.col("m").mean(), baseline=pl.col("b").mean(), rows=pl.len()).sort("w"))
@@ -369,6 +381,22 @@ def shadow_score(mod, rows: list[dict], panel: pl.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------- small helpers
+
+def finite_rows(a: np.ndarray) -> np.ndarray:
+    """Rows where every number is finite (a forecast may be one number or several)."""
+    f = np.isfinite(a)
+    return f if f.ndim == 1 else f.all(axis=1)
+
+
+def _plain(v):
+    a = np.asarray(v, float)
+    return float(a) if a.ndim == 0 else [float(x) for x in a]
+
+
+def as_array(s: pl.Series) -> np.ndarray:
+    """A column of numbers, or of lists of numbers, as a 1-D or 2-D float array."""
+    return np.array(s.to_list(), dtype=float)
+
 
 def finite(x):
     """NaN and infinities become None, recursively, so the JSON stays strict."""

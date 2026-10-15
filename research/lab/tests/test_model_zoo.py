@@ -15,6 +15,7 @@ import pytest
 from lab import report
 from lab.models import core, daily, train, zoo
 from lab.models import m8_direction as m8
+from lab.models import m8_quantiles as m8q
 from lab.models import m10_vol_regime as m10
 from lab.models import m11_slippage as m11
 from lab.models import m12_cross_asset as m12
@@ -94,12 +95,29 @@ def test_m8_on_noise_fails_its_gate_and_reports_calibration(coins):
     assert ev["rows_oos"] > 1000 and len(ev["folds"]) >= 3
     assert not ev["gate"]["passed"], "a direction model on a random walk must not pass"
     x = ev["extra"]
-    assert 0.3 < x["auc"] < 0.7 and x["calibration"] and set(x["coverage"]) == {"q10", "q50", "q90"}
+    assert 0.3 < x["auc"] < 0.7 and x["calibration"]
     p = ev["holdout"]["challenger"].to_numpy()
     assert np.all((p > 0) & (p < 1))
     # Calibrated: the average forecast sits near the share of up days.
     assert abs(p.mean() - x["up_share"]) < 0.05
-    assert x["today"] and all(0 < t["p_up"] < 1 and t["q10"] <= t["q50"] <= t["q90"] for t in x["today"])
+    assert x["today"] and all(0 < t["p_up"] < 1 for t in x["today"])
+
+
+def test_m8q_forecasts_three_ordered_quantiles_and_scores_each(coins):
+    panel = m8q.panel_from(coins)
+    ev = core.evaluate(m8q, panel)
+    assert ev["rows_oos"] > 1000 and ev["model_score"] > 0 and ev["baseline_score"] > 0
+    q = core.as_array(ev["holdout"]["challenger"])
+    assert q.shape[1] == 3 and np.all(q[:, 0] <= q[:, 1]) and np.all(q[:, 1] <= q[:, 2])
+    x = ev["extra"]
+    assert [r["quantile"] for r in x["per_quantile"]] == ["q10", "q50", "q90"]
+    # The 10 % quantile is undershot about one day in ten, out of sample.
+    assert 0.04 < x["per_quantile"][0]["coverage"] < 0.2 and 0.8 < x["per_quantile"][2]["coverage"] < 0.96
+    assert x["today"] and all(t["q10"] <= t["q50"] <= t["q90"] for t in x["today"])
+    # The loss is the mean pinball over the three quantiles, row by row.
+    y = np.array([0.0, 0.1])
+    qq = np.array([[-0.1, 0.0, 0.1], [-0.1, 0.0, 0.1]])
+    np.testing.assert_allclose(m8q.loss(y, qq), [(0.01 + 0 + 0.01) / 3, (0.02 + 0.05 + 0) / 3])
 
 
 def test_m10_beats_har_but_the_regime_part_must_earn_its_place(coins):
@@ -111,8 +129,8 @@ def test_m10_beats_har_but_the_regime_part_must_earn_its_place(coins):
 
 
 def test_m11_waits_for_fills_then_beats_a_flat_cost_model():
-    with pytest.raises(core.DataUnavailable, match="needs 200"):
-        m11.load(ledger={o["id"]: o for o in m11.synthetic_orders(50)}, base=None)
+    with pytest.raises(core.DataUnavailable, match="needs 30"):
+        m11.load(ledger={o["id"]: o for o in m11.synthetic_orders(20)}, base=None)
     p = m11.load(ledger={o["id"]: o for o in m11.synthetic_orders(400)}, base=None)
     ev = core.evaluate(m11, p)
     assert ev["gate"]["passed"], ev["gate"]
@@ -137,13 +155,35 @@ def test_m12_builds_a_leak_free_target_and_names_the_regime():
     want = np.arctanh(np.clip(np.corrcoef(rb[t + 1:t + 21], rs[t + 1:t + 21])[0, 1], -0.99, 0.99))
     assert abs(p["target"][t] - want) < 1e-9
     ev = core.evaluate(m12, m12.panel_from(*m12.synthetic()))
-    assert ev["rows_oos"] > 500 and ev["extra"]["today"]["regime"] in ("coupled", "mixed", "decoupled")
+    today = ev["extra"]["today"]
+    assert ev["rows_oos"] > 500 and today["regime"] in ("coupled", "mixed", "decoupled")
+    # Only a model that beat its baseline names the regime; otherwise the last 60 days do.
+    assert today["regime_from"] == ("model" if ev["gate"]["passed"] else "baseline")
+    shown = today["forecast_corr"] if ev["gate"]["passed"] else today["corr60"]
+    assert today["regime"] == m12.regime(shown)
+    # Yahoo includes the day in progress; it is dropped.
+    d = np.array(["2026-10-13", "2026-10-14", "2026-10-15"], dtype="datetime64[D]")
+    kept = m12.complete_days((d, np.array([1.0, 2.0, 3.0])), today=np.datetime64("2026-10-15"))
+    assert list(kept[1]) == [1.0, 2.0]
     with pytest.raises(core.DataUnavailable):
         m12.panel_from((btc[0][:100], btc[1][:100]), (spy[0][:100], spy[1][:100]))
 
 
+def test_shadow_scores_a_forecast_of_several_numbers_once_the_outcome_is_known():
+    rows = [{"ts_us": 1, "symbol": "BTC", "pred": [-0.02, 0.0, 0.02], "baseline": [-0.05, 0.0, 0.05]},
+            {"ts_us": 1, "symbol": "ETH", "pred": [-0.02, 0.0, 0.02], "baseline": [-0.05, 0.0, 0.05]},
+            {"ts_us": 2, "symbol": "BTC", "pred": [-0.02, 0.0, 0.02], "baseline": [-0.05, 0.0, 0.05]}]
+    for r in rows:
+        r.update(version="v", recorded_ms=0)
+    panel = pl.DataFrame({"ts_us": [1, 1, 2], "symbol": ["BTC", "ETH", "BTC"], "target": [0.01, -0.01, None]})
+    s = core.shadow_score(m8q, rows, panel)
+    assert s["rows"] == 2 and s["open"] == 1
+    # A narrow band that holds the outcome beats a wide one.
+    assert s["model"] < s["baseline"] and s["win_rate"] == 1.0
+
+
 def test_models_round_trip_through_their_files(tmp_path, coins):
-    for mod, panel in ((m8, m8.panel_from(coins)), (m10, m10.panel_from(coins)),
+    for mod, panel in ((m8, m8.panel_from(coins)), (m8q, m8q.panel_from(coins)), (m10, m10.panel_from(coins)),
                        (m11, m11.panel_from(m11.synthetic_orders(300), None)), (m12, m12.panel_from(*m12.synthetic()))):
         known = panel.filter(pl.col("target").is_not_null())
         fitted = mod.fit(known)
@@ -159,7 +199,8 @@ def test_models_round_trip_through_their_files(tmp_path, coins):
 
 def loaders(coins, orders=400):
     led = {o["id"]: o for o in m11.synthetic_orders(orders)}
-    return {"m8_direction": lambda: m8.panel_from(coins), "m10_vol_regime": lambda: m10.panel_from(coins),
+    return {"m8_direction": lambda: m8.panel_from(coins), "m8_quantiles": lambda: m8q.panel_from(coins),
+            "m10_vol_regime": lambda: m10.panel_from(coins),
             "m11_slippage": lambda: m11.load(ledger=led, base=None),
             "m12_cross_asset": lambda: m12.panel_from(*m12.synthetic())}
 
@@ -169,7 +210,7 @@ def test_train_due_promotes_shadows_reports_and_alerts(root, coins):
     poster = lambda t: (posted.append(t) or True, None)  # noqa: E731
     d = train.run(now_ms=NOW, loaders=loaders(coins), poster=poster)
     by = {e["code"]: e for e in d["models"]}
-    assert set(by) == {"M1", "M2", "M7", "M8", "M10", "M11", "M12"}
+    assert set(by) == {"M1", "M2", "M7", "M8", "M8q", "M10", "M11", "M12"}
     assert by["M7"]["status"] == "retired"
     assert by["M1"]["status"] == "not on this machine"
     # M11 passes its gate and, with no champion, is promoted and published.
@@ -181,10 +222,18 @@ def test_train_due_promotes_shadows_reports_and_alerts(root, coins):
     assert by["M8"]["history"] and by["M8"]["drift"]["level"] in ("stable", "shift", "drift")
     # The promotion went out once, to the channel, without em dashes.
     assert len(posted) == 1 and "M11" in posted[0] and "promoted" in posted[0] and chr(0x2014) not in posted[0]
-    assert (root / "reports" / "model_zoo" / "latest.json").exists()
-    js = json.loads((root / "reports" / "model_zoo" / "latest.json").read_text())
+    assert (root / "reports" / "models" / "latest.json").exists()
+    js = json.loads((root / "reports" / "models" / "latest.json").read_text())
     assert js["models"] and js["specs"]
-    assert "| M11 Slippage of demo market orders | shadow |" in (root / "reports" / "model_zoo" / "latest.md").read_text()
+    # The lab feed header (docs/LAB-FEEDS.md): Home and Research read the zoo like any other feed.
+    assert js["title"] == "Models" and js["status"] in ("ok", "watch", "bad") and js["updated_ms"] == NOW
+    assert "zoo models beat their baseline" in js["headline"] and chr(0x2014) not in js["headline"]
+    assert {i["label"].split()[0] for i in js["items"]} == set(by)
+    m11_item = next(i for i in js["items"] if i["label"].startswith("M11"))
+    assert m11_item["status"] == "ok" and m11_item["importance"] == 70
+    # M8q's shadow forecasts are three numbers each and are scored as such.
+    assert by["M8q"]["live"]["recorded_today"] > 0
+    assert "| M11 Slippage of demo market orders | shadow |" in (root / "reports" / "models" / "latest.md").read_text()
 
     # The next day nothing is due: no retrain, the shadow forecasts are not recorded twice, no repeat alert.
     posted.clear()
