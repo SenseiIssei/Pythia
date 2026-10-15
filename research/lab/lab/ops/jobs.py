@@ -60,14 +60,13 @@ except ImportError:  # /opt/pythia-ops/jobs.py next to notify.py
 
 DEFAULT_TABLE = "/opt/pythia-ops/jobs.yaml"
 CRON_FILE = "pythia-jobs"
-# The hand-written cron files the table replaces (render --prune-legacy).
-LEGACY_CRON = ("pythia-backfill", "pythia-paper", "pythia-paper-families", "pythia-paper-m4",
-               "pythia-paper-ls", "pythia-forward", "pythia-learn", "pythia-costs", "pythia-health",
-               "pythia-notify-pending", "pythia-retrain")
+# Hand-written cron files no job of the table names in `replaces` but that
+# render --prune-legacy also moves away (retired before the table existed).
+LEGACY_CRON = ("pythia-retrain",)
 JOB_KINDS = ("lab", "image", "host")
 JOB_KEYS = {"name", "description", "schedule", "kind", "image", "command", "resources", "timeout",
             "lock", "lock_wait", "depends_on", "depends_within", "enabled", "network", "env",
-            "env_file", "volumes", "code", "grace", "alert"}
+            "env_file", "volumes", "code", "grace", "alert", "replaces"}
 STATUS_OK = "ok"
 
 
@@ -440,6 +439,11 @@ class Table:
         job["volumes"] = [str(x) for x in _as_list(job["volumes"])]
         job["env"] = {str(k): "" if v is None else str(v) for k, v in (job["env"] or {}).items()}
         job["alert"] = j.get("alert", d.get("alert", True)) is not False
+        job["env_files"] = [str(x) for x in _as_list(job["env_file"])]
+        job["replaces"] = [str(x) for x in _as_list(job["replaces"])]
+        for r in job["replaces"]:
+            if not re.fullmatch(r"pythia-[a-z0-9-]+", r) or r == CRON_FILE:
+                raise TableError(f"job {name}: replaces names a file in the cron folder like pythia-paper, not {r!r}")
         sched = j.get("schedule")
         job["schedule"] = sched
         job["cron"] = Cron(str(sched)) if sched else None
@@ -514,11 +518,32 @@ def load_table(path: str | os.PathLike | None = None) -> Table:
 
 # ================================================================ rendering
 
+def legacy_present(t: Table) -> dict[str, list[str]]:
+    """Hand-written cron files still in the cron folder -> the jobs replacing them."""
+    out: dict[str, list[str]] = {}
+    for job in t.jobs.values():
+        for r in job["replaces"]:
+            if (t.cron_dir / r).exists():
+                out.setdefault(r, []).append(job["name"])
+    return out
+
+
+def held(t: Table, job: dict) -> str | None:
+    """The hand-written cron file that still runs this job, if any. Such a job
+    stays commented out in the rendered file so it never runs twice."""
+    for r in job["replaces"]:
+        if (t.cron_dir / r).exists():
+            return r
+    return None
+
+
 def render_cron(t: Table) -> str:
     """The /etc/cron.d file for every enabled job that has a schedule.
 
     Cron always runs the installed copy (<ops>/jobs.py with <ops>/jobs.yaml),
-    whichever file the render read; deploy_ops.sh installs both first."""
+    whichever file the render read; deploy_ops.sh installs both first. A job
+    whose hand-written file (`replaces`) is still in the cron folder is held,
+    commented out, until `render --prune-legacy` moves that file away."""
     table_path = f"{t.ops}/jobs.yaml"
     runner = f"{t.ops}/jobs.py"
     out = [
@@ -536,36 +561,55 @@ def render_cron(t: Table) -> str:
                 f" >> {t.logs}/runner.log 2>&1")
         if desc:
             out.append(f"# {job['name']}: {desc}")
-        out.append(line if job["enabled"] else "# disabled: " + line)
+        old = held(t, job)
+        if not job["enabled"]:
+            out.append("# disabled: " + line)
+        elif old:
+            out.append(f"# held while {t.cron_dir / old} exists: " + line)
+        else:
+            out.append(line)
     return "\n".join(out) + "\n"
 
 
 def write_cron(t: Table, dry_run: bool = False, prune_legacy: bool = False) -> list[str]:
-    text = render_cron(t)
     did = []
     if dry_run:
-        sys.stdout.write(text)
+        sys.stdout.write(render_cron(t))
         return did
-    t.cron_dir.mkdir(parents=True, exist_ok=True)
-    dest = t.cron_dir / CRON_FILE
-    tmp = t.cron_dir / f".{CRON_FILE}.tmp"
-    tmp.write_text(text, encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, dest)
-    did.append(f"wrote {dest}")
-    t.logs.mkdir(parents=True, exist_ok=True)
-    marker = t.ops_dir / "installed_at"
-    if not marker.exists():
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(_iso(_now()) + "\n")
     if prune_legacy:
         keep = Path(os.environ.get("PYTHIA_LEGACY_CRON_DIR", "/etc/pythia/cron-legacy"))
-        for n in LEGACY_CRON:
+        names = sorted({r for j in t.jobs.values() if j["enabled"] for r in j["replaces"]} | set(LEGACY_CRON))
+        for n in names:
             f = t.cron_dir / n
             if f.exists():
                 keep.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(f), str(keep / n))
                 did.append(f"moved {f} to {keep / n}")
+    t.cron_dir.mkdir(parents=True, exist_ok=True)
+    dest = t.cron_dir / CRON_FILE
+    tmp = t.cron_dir / f".{CRON_FILE}.tmp"
+    tmp.write_text(render_cron(t), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, dest)
+    did.append(f"wrote {dest}")
+    t.logs.mkdir(parents=True, exist_ok=True)
+    # When each job went live in the rendered file: a job counts as late only
+    # for fires after that (a held job's earlier fires were the old file's).
+    now = _iso(_now())
+    marker = t.ops_dir / "installed_at"
+    if not marker.exists():
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(now + "\n")
+    live = _read_json(t.ops_dir / "installed.json") or {}
+    for job in t.jobs.values():
+        active = job["enabled"] and job["cron"] is not None and held(t, job) is None
+        if active:
+            live.setdefault(job["name"], now)
+        else:
+            live.pop(job["name"], None)
+    _write_json(t.ops_dir / "installed.json", live)
+    for old, names in sorted(legacy_present(t).items()):
+        did.append(f"held until {t.cron_dir / old} is gone (render --prune-legacy): {', '.join(sorted(names))}")
     return did
 
 
@@ -778,8 +822,8 @@ def build_argv(t: Table, job: dict) -> list[str]:
         argv += ["--cpus", str(r["cpus"])]
     if r.get("memory") is not None:
         argv += ["--memory", str(r["memory"])]
-    if job.get("env_file"):
-        argv += ["--env-file", str(job["env_file"])]
+    for f in env_files(job):
+        argv += ["--env-file", f]
     for k, v in sorted(job["env"].items()):
         argv += ["-e", f"{k}={v}"]
     argv += ["-v", f"{t.data}:/data"]
@@ -792,11 +836,25 @@ def build_argv(t: Table, job: dict) -> list[str]:
     return argv
 
 
+def env_files(job: dict) -> list[str]:
+    """The job's env files. One ending in `?` is optional and left out when
+    missing; a missing required one stops the run before it starts."""
+    out = []
+    for f in job["env_files"]:
+        path = f[:-1] if f.endswith("?") else f
+        if os.path.isfile(path):
+            out.append(path)
+        elif not f.endswith("?"):
+            raise FileNotFoundError(errno.ENOENT, "env file missing", path)
+    return out
+
+
 def _job_env(t: Table, job: dict) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("PYTHIA_DATA", str(t.data))
     if job["kind"] == "host":
-        env.update(read_env_file(job.get("env_file")))
+        for f in env_files(job):
+            env.update(read_env_file(f))
         env.update(job["env"])
     return env
 
@@ -864,6 +922,7 @@ def run_job(t: Table, name: str, force: bool = False, chain: bool = True, _depth
             finish("skipped", None, f"lock {busy} busy")
             write_status(t)
             return 0
+        why = None
         try:
             why = None if force else _deps_ok(t, job, start)
             if why:
@@ -880,7 +939,8 @@ def run_job(t: Table, name: str, force: bool = False, chain: bool = True, _depth
             code, status = _execute(argv, _job_env(t, job), log, job)
             note(f"end, {status}, exit {code}")
         except OSError as e:
-            note(f"could not start: {e.strerror or e}")
+            why = f"could not start: {e.strerror or e}" + (f" {e.filename}" if e.filename else "")
+            note(why)
             code, status = 127, "failed"
         finally:
             try:
@@ -888,7 +948,7 @@ def run_job(t: Table, name: str, force: bool = False, chain: bool = True, _depth
             except OSError:
                 pass
             locks.release()
-    r = finish(status, code)
+    r = finish(status, code, why if code == 127 else None)
     st = job_state(t, name)
     if job["alert"] and status != STATUS_OK and st.get("consecutive_failures") == 1:
         _alert(t, f"job {name} {status} (exit {code}) after {r['duration_s']} s; log {log_path}")
@@ -957,8 +1017,11 @@ def job_status(t: Table, job: dict, now: datetime, installed: datetime | None) -
     }
     state, ok, detail = "ok", True, ""
     last_start = _parse_iso((last or {}).get("start"))
+    old = held(t, job) if job["enabled"] else None
     if not job["enabled"]:
         state, detail = "disabled", "disabled in the table"
+    elif old and not run:
+        state, detail = "legacy", f"still run by {t.cron_dir / old}; render --prune-legacy hands it to the table"
     elif run:
         since = _parse_iso(run.get("start")) or now
         age = (now - since).total_seconds()
@@ -1003,7 +1066,9 @@ def build_status(t: Table, now: datetime | None = None) -> dict:
     now = now or _now()
     installed = _parse_iso(((t.ops_dir / "installed_at").read_text().strip()
                             if (t.ops_dir / "installed_at").exists() else None))
-    jobs = [job_status(t, j, now, installed) for j in sorted(t.jobs.values(), key=lambda j: j["name"])]
+    live = _read_json(t.ops_dir / "installed.json") or {}
+    jobs = [job_status(t, j, now, _parse_iso(live.get(j["name"])) or installed)
+            for j in sorted(t.jobs.values(), key=lambda j: j["name"])]
     failing = [j["name"] for j in jobs if not j["ok"]]
     return {"at": _iso(now), "ok": not failing, "failing": failing, "table": t.path, "jobs": jobs,
             "disk": _read_json(t.ops_dir / "disk" / "latest.json")}

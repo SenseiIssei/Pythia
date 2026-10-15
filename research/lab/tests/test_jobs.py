@@ -172,15 +172,90 @@ def test_render_writes_one_cron_file(tmp_path):
 
 
 def test_render_moves_legacy_files_away(tmp_path, monkeypatch):
-    t = table(tmp_path, '  - name: a\n    schedule: "0 * * * *"\n    command: x')
+    t = table(tmp_path, '  - name: a\n    schedule: "0 * * * *"\n    command: x\n    replaces: pythia-learn')
     (tmp_path / "cron.d").mkdir()
     (tmp_path / "cron.d" / "pythia-learn").write_text("old")
+    (tmp_path / "cron.d" / "pythia-retrain").write_text("retired")
+    (tmp_path / "cron.d" / "pythia-unrelated").write_text("keep")
     (tmp_path / "cron.d" / "other-app").write_text("keep")
     monkeypatch.setenv("PYTHIA_LEGACY_CRON_DIR", str(tmp_path / "legacy"))
     jobs.write_cron(t, prune_legacy=True)
     assert not (tmp_path / "cron.d" / "pythia-learn").exists()
     assert (tmp_path / "legacy" / "pythia-learn").read_text() == "old"
+    assert (tmp_path / "legacy" / "pythia-retrain").read_text() == "retired"
+    assert (tmp_path / "cron.d" / "pythia-unrelated").exists()  # no job replaces it
     assert (tmp_path / "cron.d" / "other-app").exists()
+    assert "\n0 * * * * root " in (tmp_path / "cron.d" / "pythia-jobs").read_text()
+
+
+def test_a_job_is_held_while_its_hand_written_cron_file_exists(tmp_path, monkeypatch):
+    t = table(tmp_path, """
+  - name: learn
+    schedule: "30 6 * * *"
+    command: x
+    replaces: pythia-learn
+  - name: digest
+    schedule: "35 6 * * *"
+    command: y
+    replaces: [pythia-learn]
+  - name: fresh
+    schedule: "0 * * * *"
+    command: z
+""")
+    (tmp_path / "cron.d").mkdir()
+    (tmp_path / "cron.d" / "pythia-learn").write_text("30 6 * * * root docker run ...")
+    monkeypatch.setenv("PYTHIA_JOBS_NOW", "2026-10-15T05:00:00Z")
+    did = jobs.write_cron(t)
+    text = (tmp_path / "cron.d" / "pythia-jobs").read_text()
+    live = [ln for ln in text.splitlines() if ln and not ln.startswith("#") and " root " in ln]
+    assert len(live) == 1 and " run fresh " in live[0]  # never twice: the old file still runs learn
+    assert f"# held while {tmp_path}/cron.d/pythia-learn exists: 30 6 * * * root" in text
+    assert any("held until" in d and "digest, learn" in d for d in did)
+    assert jobs.legacy_present(t) == {"pythia-learn": ["learn", "digest"]}
+
+    monkeypatch.setenv("PYTHIA_JOBS_NOW", "2026-10-15T12:00:00Z")
+    s = {j["name"]: j for j in jobs.build_status(t)["jobs"]}
+    assert s["learn"]["state"] == "legacy" and s["learn"]["ok"]  # not late: the old cron runs it
+    assert s["fresh"]["state"] == "late"
+
+    # Handing over at noon: learn's 06:30 run today belonged to the old file.
+    monkeypatch.setenv("PYTHIA_LEGACY_CRON_DIR", str(tmp_path / "legacy"))
+    jobs.write_cron(t, prune_legacy=True)
+    live = json.loads((t.ops_dir / "installed.json").read_text())
+    assert live["learn"] == "2026-10-15T12:00:00Z" and live["fresh"] == "2026-10-15T05:00:00Z"
+    s = {j["name"]: j for j in jobs.build_status(t)["jobs"]}
+    assert s["learn"]["state"] == "never" and s["learn"]["ok"]
+    monkeypatch.setenv("PYTHIA_JOBS_NOW", "2026-10-16T12:00:00Z")
+    s = {j["name"]: j for j in jobs.build_status(t)["jobs"]}
+    assert s["learn"]["state"] == "late"
+
+
+@pytest.mark.parametrize("bad", ["learn", "pythia-jobs", "../pythia-x"])
+def test_replaces_must_name_a_pythia_cron_file(tmp_path, bad):
+    with pytest.raises(jobs.TableError, match="replaces"):
+        table(tmp_path, f'  - name: a\n    schedule: "0 * * * *"\n    command: x\n    replaces: {bad}')
+
+
+def test_optional_and_required_env_files(tmp_path):
+    (tmp_path / "a.env").write_text("A=1\n")
+    t = table(tmp_path, f"""
+  - name: c
+    kind: lab
+    schedule: "0 * * * *"
+    command: python -m lab.ops.listings
+    env_file: [{tmp_path}/a.env, '{tmp_path}/b.env?']
+  - name: h
+    schedule: "0 * * * *"
+    command: echo "A=$A"
+    env_file: {tmp_path}/missing.env
+""")
+    argv = jobs.build_argv(t, t.job("c"))
+    assert argv.count("--env-file") == 1 and f"{tmp_path}/a.env" in argv
+    (tmp_path / "b.env").write_text("B=2\n")
+    assert jobs.build_argv(t, t.job("c")).count("--env-file") == 2
+    assert jobs.run_job(t, "h") == 127
+    last = jobs.job_state(t, "h")["last"]
+    assert last["status"] == "failed" and "missing.env" in last["reason"]
 
 
 def test_render_of_the_repo_table_has_every_enabled_scheduled_job():
@@ -197,15 +272,16 @@ def test_render_of_the_repo_table_has_every_enabled_scheduled_job():
 
 
 def test_docker_argv(tmp_path):
-    t = table(tmp_path, """
+    (tmp_path / "alerts.env").write_text("")
+    t = table(tmp_path, f"""
   - name: learn
     kind: lab
     schedule: "30 6 * * *"
     command: python -m lab.ops.learn --force "vol x"
     network: host
-    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
-    env_file: /etc/pythia/alerts.env
-    resources: {cpus: 4, memory: 8g}
+    env: {{PYTHIA_AGENT_OUT: /data/lab-cache}}
+    env_file: {tmp_path}/alerts.env
+    resources: {{cpus: 4, memory: 8g}}
   - name: backfill
     kind: image
     image: pythia-recorder
@@ -666,10 +742,15 @@ def test_deploy_lab_keeps_results_and_checks_the_manifest(tmp_path):
         return subprocess.run(["bash", str(OPS / "deploy_lab.sh"), "--src", str(src), "--dest", str(dest), "--force",
                                *extra], capture_output=True, text=True, timeout=60)
 
+    (src / "results" / "study.md").write_text("older repo copy")
+    (src / "results" / "factory_seed").mkdir()
+    (src / "results" / "factory_seed" / "ledger.jsonl").write_text("{}\n")
     r = deploy()
     assert r.returncode == 0, r.stderr
-    assert (dest / "results" / "study.md").read_text() == "written on the server"
-    assert not (dest / "results" / "from_repo.md").exists()
+    assert "2 new files added" in r.stdout
+    assert (dest / "results" / "study.md").read_text() == "written on the server"  # never replaced
+    assert (dest / "results" / "from_repo.md").read_text() == "repo copy"  # new files arrive
+    assert (dest / "results" / "factory_seed" / "ledger.jsonl").exists()
     assert not (dest / "stale.py").exists()
     assert (dest / "cache" / "panel.parquet").exists()  # caches are neither sent nor deleted
     assert not (dest / "lab" / "__pycache__").exists()
@@ -677,8 +758,11 @@ def test_deploy_lab_keeps_results_and_checks_the_manifest(tmp_path):
     assert "lab/x.py" in man and "results" not in man and ".pyc" not in man
     info = json.loads((dest / ".deploy-info").read_text())
     assert info["files"] == 2
-    # a second deploy is a no-op and still passes
-    assert deploy().returncode == 0
+    # a second deploy is a no-op and still passes; a file only the server has stays
+    (dest / "results" / "server_only.md").write_text("mine")
+    r = deploy()
+    assert r.returncode == 0 and "0 new files added" in r.stdout, r.stderr
+    assert (dest / "results" / "server_only.md").read_text() == "mine"
     # dry run changes nothing
     (src / "lab" / "y.py").write_text("")
     assert deploy("--dry-run").returncode == 0 and not (dest / "lab" / "y.py").exists()

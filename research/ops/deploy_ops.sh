@@ -5,9 +5,11 @@
 #   research/ops/deploy_ops.sh [--prune-legacy] [--no-cron] [--dest DIR]
 #
 # The table is validated with the new runner before anything is installed; a
-# broken table changes nothing. --prune-legacy moves the old hand-written
-# /etc/cron.d/pythia-* files to /etc/pythia/cron-legacy/ (once, when switching
-# to the table). Safe to run again after every pull.
+# broken table changes nothing. A job whose old hand-written cron file
+# (`replaces` in the table) is still in /etc/cron.d stays commented out, so
+# nothing runs twice; --prune-legacy moves those files to
+# /etc/pythia/cron-legacy/ and hands their jobs to the table (once, when
+# switching). Safe to run again after every pull.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +22,7 @@ while [ $# -gt 0 ]; do
     --prune-legacy) render_args+=(--prune-legacy) ;;
     --no-cron) cron=false ;;
     --dest) dest=${2:?--dest needs a folder}; shift ;;
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift

@@ -27,8 +27,14 @@
 #                 not be running; otherwise the run is recorded as blocked
 #   enabled       false keeps the entry but renders it commented out
 #   network, env, env_file, volumes   passed to docker run (env_file is read
-#                 by the runner for host jobs)
+#                 by the runner for host jobs; one file or a list, a name
+#                 ending in ? is optional and skipped when missing)
 #   alert         false: no Telegram/webhook post on this job's first failure
+#   replaces      the hand-written /etc/cron.d file(s) that ran this job before
+#                 the table. While such a file exists the job stays commented
+#                 out in the rendered cron file (it never runs twice);
+#                 `render --prune-legacy` moves the files to
+#                 /etc/pythia/cron-legacy/ and hands the jobs to the table.
 #
 # The heavy nightly jobs share the lock `heavy` and wait for each other, so
 # two of them never compete for memory even when one runs long.
@@ -64,6 +70,7 @@ jobs:
     timeout: 3h
     lock: heavy
     lock_wait: 1h
+    replaces: pythia-backfill
 
   - name: paper
     description: momentum paper books and engine signals
@@ -73,12 +80,14 @@ jobs:
     timeout: 45m
     lock: heavy
     lock_wait: 2h
+    replaces: pythia-paper
 
   - name: paper-review
     description: paper against backtest review, after the momentum books
     depends_on: [paper]
     command: python -m lab.paper.review
     timeout: 15m
+    replaces: pythia-paper
 
   - name: paper-families
     description: sweep candidates as paper books (momentum, tranches, breakout)
@@ -89,6 +98,7 @@ jobs:
     timeout: 1h
     lock: heavy
     lock_wait: 2h
+    replaces: pythia-paper-families
 
   - name: paper-m4
     description: M4 shadow paper book, market-neutral on perps
@@ -99,6 +109,7 @@ jobs:
     timeout: 1h
     lock: heavy
     lock_wait: 2h
+    replaces: pythia-paper-m4
 
   - name: paper-ls
     description: market-neutral M2 paper book v1
@@ -108,6 +119,7 @@ jobs:
     timeout: 1h
     lock: heavy
     lock_wait: 1h
+    replaces: pythia-paper-ls
 
   - name: paper-ls-v2
     description: market-neutral M2 paper book v2, after v1
@@ -117,6 +129,7 @@ jobs:
     timeout: 1h
     lock: heavy
     lock_wait: 1h
+    replaces: pythia-paper-ls
 
   - name: forward
     description: forward report, every paper book and autopilot against its backtest
@@ -124,6 +137,7 @@ jobs:
     command: python -m lab.paper.forward_report
     network: host
     timeout: 30m
+    replaces: pythia-forward
 
   - name: learn
     description: learning loop, costs, evidence, challengers, digest
@@ -135,14 +149,17 @@ jobs:
     timeout: 5h
     lock: heavy
     lock_wait: 1h
+    replaces: pythia-learn
 
   - name: notify
     description: daily digest to the operator, right after the learning loop
     depends_on: [learn]
     command: python -m lab.ops.notify
+    network: host
     env_file: /etc/pythia/alerts.env
-    resources: {cpus: 1, memory: 512m}
-    timeout: 5m
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+    replaces: pythia-learn
 
   - name: costs
     description: weekly cost calibration from the recorded books, report only
@@ -152,6 +169,7 @@ jobs:
     timeout: 1h
     lock: heavy
     lock_wait: 1h
+    replaces: pythia-costs
 
   # ---------------------------------------------------------------- host jobs
   - name: health
@@ -161,6 +179,7 @@ jobs:
     command: /opt/pythia-ops/system_health.sh
     timeout: 10m
     alert: false
+    replaces: pythia-health
 
   - name: notify-pending
     description: a digest asked for through the engine API, if any
@@ -170,6 +189,7 @@ jobs:
     env_file: /etc/pythia/alerts.env
     timeout: 2m
     alert: false
+    replaces: pythia-notify-pending
 
   - name: backup
     description: archive of engine state, model registry, paper books and ledgers, rotated
@@ -185,69 +205,106 @@ jobs:
     command: python3 /opt/pythia-ops/jobs.py prune
     timeout: 1h
 
-  # ---------------------------------------------------------------- new collectors and studies
-  # Added disabled; switch on (enabled: true, then render) once the module is
-  # deployed to /opt/pythia-lab and its command is confirmed.
-  - name: listings-watch
-    description: new exchange listings watcher
-    schedule: "*/10 * * * *"
-    command: python -m lab.watch.listings
+  - name: weekly-report
+    description: the weekly report with its chart, Sunday from 18:00 Europe/Berlin, posts once a week
+    schedule: "5 16-21 * * 0"
+    command: python -m lab.ops.notify --weekly
     network: host
-    resources: {cpus: 0.5, memory: 512m}
-    timeout: 8m
-    grace: 10m
-    enabled: false
-
-  - name: trending-watch
-    description: trending coins watcher
-    schedule: "3-59/15 * * * *"
-    command: python -m lab.watch.trending
-    network: host
-    resources: {cpus: 0.5, memory: 512m}
-    timeout: 12m
-    grace: 10m
-    enabled: false
-
-  - name: cs2-collector
-    description: CS2 item market collector
-    schedule: "25 * * * *"
-    command: python -m lab.collect.cs2
+    env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
-    timeout: 40m
-    enabled: false
+    timeout: 15m
+    replaces: pythia-weekly
 
+  # ---------------------------------------------------------------- models and the strategy factory
+  - name: models
+    description: model zoo, retrains what is due, shadow forecasts, drift, the Models page report
+    schedule: "15 7 * * *"
+    command: python -m lab.models.train --due
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 4, memory: 8g}
+    timeout: 4h
+    lock: heavy
+    lock_wait: 6h
+    replaces: pythia-models
+
+  - name: factory-shadow
+    description: strategy factory, daily forward shadow step on the panel paper-families cached
+    schedule: "0 5 * * *"
+    command: python -m lab.factory shadow --notify
+    env_file: /etc/pythia/alerts.env
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 1, memory: 2g}
+    timeout: 30m
+    replaces: pythia-factory
+
+  - name: factory-weekly
+    description: strategy factory, weekly search, held-back checks and digest; every trial in the ledger
+    schedule: "30 7 * * 0"
+    command: python -m lab.factory --notify
+    env_file: /etc/pythia/alerts.env
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 4, memory: 4g}
+    timeout: 3h
+    lock: heavy
+    lock_wait: 6h
+    replaces: pythia-factory
+
+  # ---------------------------------------------------------------- watchers and collectors
+  - name: listings
+    description: new listings on Alpaca, Binance, Coinbase, Kraken, then the listings paper book
+    schedule: "*/10 * * * *"
+    command: sh -c 'python -m lab.ops.listings && python -m lab.paper.listings_book'
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/alpaca-paper.env?']
+    resources: {cpus: 1, memory: 512m}
+    timeout: 8m
+    grace: 15m
+    replaces: pythia-listings
+
+  - name: trending
+    description: trending watcher, boosted tokens, gainers and volume surges, read only
+    schedule: "*/15 * * * *"
+    command: python -m lab.ops.trending
+    env_file: /etc/pythia/alerts.env
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 1, memory: 512m}
+    timeout: 10m
+    grace: 20m
+    replaces: pythia-trending
+
+  - name: cs2-collect
+    description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist
+    schedule: "12 * * * *"
+    command: python -m lab.collect.cs2
+    resources: {cpus: 1, memory: 4g}
+    timeout: 40m
+    replaces: pythia-cs2
+
+  - name: cs2-run
+    description: CS2 models, alerts, the play-money portfolio and the board, after the collector
+    depends_on: [cs2-collect]
+    depends_within: 2h
+    command: python -m lab.cs2.run
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 4g}
+    timeout: 15m
+    replaces: pythia-cs2
+
+  # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
+  # module is deployed to /opt/pythia-lab and its command is confirmed.
   - name: pokemon-collector
     description: Pokemon card market collector
     schedule: "10 2 * * *"
     command: python -m lab.collect.pokemon
+    env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 1h
-    enabled: false
-
-  - name: strategy-factory
-    description: weekly strategy factory, every trial goes to the trial ledger
-    schedule: "0 9 * * 6"
-    command: python -m lab.factory.run
-    resources: {cpus: 4, memory: 8g}
-    timeout: 8h
-    lock: heavy
-    lock_wait: 3h
-    enabled: false
-
-  - name: model-zoo
-    description: model zoo training as challengers
-    schedule: "0 12 * * 6"
-    command: python -m lab.zoo.train
-    resources: {cpus: 4, memory: 8g}
-    timeout: 8h
-    lock: heavy
-    lock_wait: 3h
     enabled: false
 
   - name: equities-studies
     description: equities studies refresh
     schedule: "0 23 * * 1-5"
     command: python -m lab.equities.run
+    env_file: '/etc/pythia/alpaca-paper.env?'
     resources: {cpus: 2, memory: 6g}
     timeout: 3h
     lock: heavy
@@ -301,6 +358,31 @@ datasets:
   - name: learn
     path: learn
     max_gb: 50
+  - name: recorder-binance-um
+    path: binance_um
+    max_gb: 100
+  - name: spread
+    path: spread
+    max_gb: 20
+  - name: factory
+    description: the trial ledger and shadow books; never deleted
+    path: factory
+    max_gb: 5
+  - name: cs2-snapshots
+    description: hourly Skinport and Steam snapshots; the models read only cs2/daily, kept forever
+    path: cs2
+    max_gb: 40
+    retention_days: 180
+    pattern: ["[0-2][0-9][0-5][0-9].parquet"]
+  - name: trending
+    description: a snapshot every 15 minutes
+    path: trending/snapshots
+    max_gb: 10
+    retention_days: 365
+    pattern: ["*.parquet"]
+  - name: listings
+    path: listings
+    max_gb: 2
   - name: job-runs
     description: the runner's own run records, by month
     path: _ops/runs
@@ -320,6 +402,7 @@ backup:
     - server
     - models
     - paper
+    - cs2/paper
     - signals
     - learn
     - costs
@@ -327,4 +410,6 @@ backup:
     - factory
     - reports/forward/evidence.json
     - reports/forward/backtest
-  exclude: ["*.tmp", "*.lock", "*.part"]
+  # By file or folder name: caches the jobs rebuild (the zoo's panels, the
+  # learning loop's sweep run caches) stay out of the archive.
+  exclude: ["*.tmp", "*.lock", "*.part", "_data", "sweep"]
