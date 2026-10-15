@@ -89,7 +89,8 @@ losses.
 It goes as a Telegram photo (`sendPhoto`) whose caption is the card in HTML.
 When the card does not fit a caption (1024 characters), the photo carries the
 title and summary and the full card follows as a message. The data comes from
-the autopilot engine's `GET /api/state` (`PYTHIA_AUTOPILOT_STATE_URL`) and BTC
+every autopilot engine's `GET /api/state` (`PYTHIA_AUTOPILOT_STATE_URLS`, the
+main and the safe account, each autopilot labelled with its account) and BTC
 prices from Binance's public klines; without either, or without matplotlib, the
 digest goes out as text.
 
@@ -168,6 +169,37 @@ A move counts only once that much history exists, so a restart never reads
 its first minutes as a move. The same move is said once per window, and again
 only when it grew by another full threshold.
 
+## Language
+
+The messages to the chat (and to the alert webhook) are in English or German;
+the app, the journal, the reports and the API stay in English. Choose
+**Message language: English / Deutsch** under Settings, Notifications, or send
+`{"language": "de"}` to `POST /api/alerts/settings`. `PYTHIA_ALERT_LANG=de`
+(or `en`) in the environment of the engine and the lab jobs fixes it over the
+setting, and the app says so.
+
+In German every card, digest, chart and lab post is worded anew: numbers as
+`1.234,56 $` and `+3,20 %`, days as `Do 15. Okt`, times in Europe/Berlin,
+trading words that are at home in German kept (Sharpe, Drawdown, Stop,
+Take-Profit, Autopilot, Paper):
+
+```
+🛑 Momentum gestoppt
+Höchstverlust von 5 % erreicht (Wert 9.500,00 $, Untergrenze 9.500,00 $).
+Wert               9.500,00 $
+GuV         -500,00 $ -5,00 % 🔴
+Abschlüsse                 14
+Gebühren              12,50 $
+3 Positionen geschlossen.
+```
+
+The words live in one catalog per side: `crates/pythia-core/src/alerts_i18n.rs`
+(`Msg`, one arm per language) for the engine, `research/lab/lab/ops/i18n.py`
+(`CATALOG`, one entry per language) for the lab. A new message is one more
+entry in both; the tests check that every one has both languages and that the
+German has no English left in it. Names and what a venue or a report says
+(a coin, a strategy, an error) stay as they are.
+
 ## How the engine sends
 
 The engine only queues an alert; a background task posts it. The queue
@@ -189,6 +221,7 @@ works again.
 | `PYTHIA_ALERT_WEBHOOK` | unset | instead of Telegram: a Discord or Slack webhook; wins when set |
 | `PYTHIA_ALERT_FORMAT` | `discord` | with a webhook: `discord` posts `{"content"}`, `slack` posts `{"text"}` |
 | `PYTHIA_ALERT_PREFIX` | `Pythia` | the footer of every post, to tell several engines apart in one chat |
+| `PYTHIA_ALERT_LANG` | unset | `en` or `de`: the language of the messages, over the setting in the app |
 | `PYTHIA_ALERT_REJECTS` | `3` | engine: more than this many demo or live orders refused in a row is an alert |
 | `PYTHIA_ALERT_DEDUP_MIN` | `30` | engine: the same alert is sent at most once in this many minutes |
 | `PYTHIA_ALERT_MAX_PER_HOUR` | `20` | engine: posts per rolling hour; urgent ones pass |
@@ -197,10 +230,11 @@ works again.
 | `PYTHIA_QUIET_HOURS` | unset | lab: `off`, or `HH:MM-HH:MM`, over the settings file |
 | `PYTHIA_ALERT_VIA` | unset | lab: `engine` posts lab cards through `POST /api/alerts/event` |
 | `PYTHIA_ALERT_EVENT_URL` | from the state URL | lab: where that endpoint is |
-| `PYTHIA_AUTOPILOT_STATE_URL` | `http://127.0.0.1:8788/api/state` | lab: the engine the charts are drawn from, `off` for none |
+| `PYTHIA_AUTOPILOT_STATE_URLS` | `http://127.0.0.1:8788/api/state,http://127.0.0.1:8789/api/state` | lab: every autopilot engine (main and safe Alpaca paper account), comma separated; `?name=` names an account, else main, safe by place; one that does not answer is skipped |
+| `PYTHIA_AUTOPILOT_STATE_URL` | unset | lab: the old single engine, read only when the list is unset; `off` for none |
 
-The category switches, quiet hours and big-move sizes are saved with the
-engine state (`PYTHIA_STATE_FILE`) and written for the lab to
+The category switches, quiet hours, big-move sizes and the message language
+are saved with the engine state (`PYTHIA_STATE_FILE`) and written for the lab to
 `reports/notify/settings.json` under `PYTHIA_DATA` at start and on every
 change.
 
@@ -401,11 +435,15 @@ digest within about five minutes. `409` when the engine has no data folder.
   ],
   "quietHours": { "enabled": true, "start": "23:00", "end": "07:00", "timezone": "Europe/Berlin" },
   "bigMoves": { "hourPct": 3.0, "dayPct": 8.0 },
-  "quietNow": false
+  "quietNow": false,
+  "language": "en",
+  "languageEnv": null,
+  "languages": [{ "id": "en", "label": "English" }, { "id": "de", "label": "Deutsch" }]
 }
 ```
 
 All fourteen categories are listed, in the order of the table above.
+`languageEnv` is `"en"` or `"de"` when `PYTHIA_ALERT_LANG` fixes the language.
 
 ### POST /api/alerts/settings
 
@@ -418,8 +456,8 @@ A change; what is left out stays:
 Answers `200` with the settings as `GET` gives them, saved with the engine
 state at once and written to `reports/notify/settings.json`. All or nothing:
 an unknown category, a time that is not `HH:MM`, an unknown time zone, an
-hour size outside 0.5 to 50 or a day size outside 1 to 90 is `400` with the
-reason, and nothing changes. An unknown field is a `4xx` from the parser.
+hour size outside 0.5 to 50, a day size outside 1 to 90 or a `language` other
+than `en` or `de` is `400` with the reason, and nothing changes. An unknown field is a `4xx` from the parser.
 
 ### POST /api/alerts/event
 
@@ -466,5 +504,5 @@ python3 notify.py --event venue "Disk almost full" "12 GB left on /srv"
 ## Install
 
 See `research/ops/README.md`, section "Alerts and the daily digest", for the
-env file, the copy of `notify.py`, the lab image with matplotlib and the cron
-lines.
+env file, the copy of `notify.py` (with `i18n.py` next to it), the lab image
+with matplotlib and the cron lines.

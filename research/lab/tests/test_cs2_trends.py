@@ -269,6 +269,22 @@ def test_alert_card_has_links_and_fits_telegram():
     assert len(later) == 2
 
 
+def test_cards_speak_the_messages_language(tmp_path):
+    one_day(tmp_path)
+    s = trends.summarize(trends.history(tmp_path), market.latest_daily(tmp_path, "skinport"), watch=WATCH)
+    de = notify.plain(trends.alert_card(s["alerts"], "de").render("telegram", "de"))
+    assert "CS2 Steam-Markt: Bewegt · Ungewöhnliche Preisspanne" in de
+    assert "+30,0 % 24-Stunden-Schnitt ggü. dem 7-Tage-Schnitt" in de and "Steam-Markt https://steamcommunity.com/" in de
+    assert "auf Steam kaufen, auf Skinport verkaufen" in de and "Nur zur Information" in de
+    summ = notify.plain(trends.summary_card(s, "de").render("telegram", "de"))
+    assert "CS2 Steam-Markt · Do 15. Okt" in summ and "Liquide Gegenstände, Mediane" in summ and "Kiste" in summ
+    assert "Spanne nach Gebühren:" in summ and "1 Tag Steam-Stände" in summ
+    en = notify.plain(trends.summary_card(s).render("telegram", "en"))
+    assert "CS2 Steam market · 2026-10-15" in en and "1 day of Steam snapshots" in en
+    data = trends.chart_data(s, "de")
+    assert data["movers_title"] == "Größte Bewegungen des Tages" and "Do 15. Okt" in data["subtitle"]
+
+
 def test_run_posts_alerts_and_one_summary_a_day_and_writes_the_page_data(tmp_path, monkeypatch):
     one_day(tmp_path)
     monkeypatch.setattr(trends, "load_watchlist", lambda path=None: WATCH)
