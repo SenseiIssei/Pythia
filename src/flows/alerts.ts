@@ -16,17 +16,26 @@ export type AlertKind =
   | "reconcileMismatch"
   | "dataStale"
   | "modelDrift"
+  | "trade"
+  | "bigMove"
+  | "event"
+  | "overnight"
   | "test";
 
 /** Mirrors Rust `alerts::AlertRecord`. */
 export interface AlertRecord {
   ts: number;
   kinds: AlertKind[];
+  /** The first card's title, plain text. */
+  title?: string;
+  /** What was posted, in the destination's markup (HTML for Telegram). */
   text: string;
   delivered: boolean;
   error: string | null;
-  /** Why nothing was posted: "muted" or "hourlyLimit". */
+  /** Why nothing was posted: "muted", "quiet" or "hourlyLimit". */
   reason?: string;
+  /** A chart went with it as a photo. */
+  photo?: boolean;
 }
 
 export interface AlertCounts {
@@ -57,14 +66,30 @@ export const KIND_LABEL: Record<AlertKind, string> = {
   reconcileMismatch: "Balances do not match",
   dataStale: "Prices are late",
   modelDrift: "Model drift",
+  trade: "Trade",
+  bigMove: "Big move",
+  event: "From the lab",
+  overnight: "Quiet hours are over",
   test: "Test message",
 };
 
-/** The title of one alert: its first kind, plus how many more. */
-export function alertTitle(a: Pick<AlertRecord, "kinds">): string {
-  if (a.kinds.length === 0) return "Alert";
-  const first = KIND_LABEL[a.kinds[0]] ?? a.kinds[0];
+/** The title of one alert: its card's title, else its first kind; plus how many more. */
+export function alertTitle(a: Pick<AlertRecord, "kinds"> & { title?: string }): string {
+  if (a.kinds.length === 0) return a.title || "Alert";
+  const first = a.title || (KIND_LABEL[a.kinds[0]] ?? a.kinds[0]);
   return a.kinds.length > 1 ? `${first} +${a.kinds.length - 1}` : first;
+}
+
+/** A post without its markup: Telegram HTML tags and entities, markdown stars and fences. */
+export function plainText(text: string): string {
+  return text
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/```/g, "")
+    .replace(/\*\*/g, "");
 }
 
 export type DeliveryTone = "good" | "warn" | "bad" | "neutral";
@@ -73,6 +98,7 @@ export type DeliveryTone = "good" | "warn" | "bad" | "neutral";
 export function deliveryOf(a: Pick<AlertRecord, "delivered" | "error" | "reason">): { label: string; tone: DeliveryTone } {
   if (a.delivered) return { label: "Delivered", tone: "good" };
   if (a.reason === "muted") return { label: "Muted", tone: "neutral" };
+  if (a.reason === "quiet") return { label: "Quiet hours", tone: "neutral" };
   if (a.reason === "hourlyLimit") return { label: "Held back", tone: "warn" };
   return { label: a.error ? `Failed: ${a.error}` : "Failed", tone: "bad" };
 }
@@ -180,6 +206,108 @@ export async function setMute(minutes: number): Promise<Fetched<{ mutedUntilMs: 
     });
     if (!r.ok) return { ok: false, error: await readError(r) };
     return { ok: true, data: (await r.json()) as { mutedUntilMs: number } };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// ── settings: what is sent, and when ─────────────────────────────────────────
+
+export type AlertCategoryId =
+  | "trades"
+  | "rebalances"
+  | "dailyPnl"
+  | "bigMoves"
+  | "autopilot"
+  | "risk"
+  | "venue"
+  | "models"
+  | "studies"
+  | "listings"
+  | "trending"
+  | "cs2"
+  | "pokemon"
+  | "weekly";
+
+/** One switch, as GET /api/alerts/settings lists it. */
+export interface AlertCategoryView {
+  id: AlertCategoryId;
+  label: string;
+  emoji: string;
+  about: string;
+  /** Who sends it: the engine itself, or a lab job. */
+  source: "engine" | "lab";
+  on: boolean;
+}
+
+export interface QuietHours {
+  enabled: boolean;
+  /** HH:MM local time in `timezone`. */
+  start: string;
+  end: string;
+  timezone: string;
+}
+
+export interface BigMoves {
+  hourPct: number;
+  dayPct: number;
+}
+
+/** GET /api/alerts/settings (and what POST answers). */
+export interface AlertSettingsView {
+  categories: AlertCategoryView[];
+  quietHours: QuietHours;
+  bigMoves: BigMoves;
+  quietNow: boolean;
+}
+
+/** A change: what is left out stays. */
+export interface AlertSettingsPatch {
+  categories?: Partial<Record<AlertCategoryId, boolean>>;
+  quietHours?: Partial<QuietHours>;
+  bigMoves?: Partial<BigMoves>;
+}
+
+/** Whether a time is HH:MM, 00:00 to 23:59. */
+export function validHhmm(s: string): boolean {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
+  return !!m && Number(m[1]) < 24 && Number(m[2]) < 60;
+}
+
+/** "23:00 to 07:00", or "Off". */
+export function quietLine(q: QuietHours | null | undefined): string {
+  if (!q || !q.enabled) return "Off";
+  return `${q.start} to ${q.end}`;
+}
+
+/** The switches split by who sends them, engine first. */
+export function groupCategories(cats: AlertCategoryView[]): { engine: AlertCategoryView[]; lab: AlertCategoryView[] } {
+  return { engine: cats.filter((c) => c.source === "engine"), lab: cats.filter((c) => c.source !== "engine") };
+}
+
+export async function fetchSettings(): Promise<Fetched<AlertSettingsView>> {
+  const base = serverUrl();
+  if (!base) return { ok: false, error: "Notifications need the Pythia server." };
+  try {
+    const r = await fetch(`${base}/api/alerts/settings`);
+    if (!r.ok) return { ok: false, error: await readError(r) };
+    return { ok: true, data: (await r.json()) as AlertSettingsView };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function saveSettings(patch: AlertSettingsPatch): Promise<Fetched<AlertSettingsView>> {
+  const base = serverUrl();
+  if (!base) return { ok: false, error: "Notifications need the Pythia server." };
+  try {
+    const r = await fetch(`${base}/api/alerts/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) return { ok: false, error: await readError(r) };
+    return { ok: true, data: (await r.json()) as AlertSettingsView };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

@@ -204,62 +204,101 @@ Knobs, all optional, in the server's environment: `PYTHIA_FEED_QUOTES` and
 
 ## Alerts and the daily digest
 
-One webhook (Discord or Slack) gets three things; the full list and the
-behaviour are in `docs/ALERTS.md`:
+Everything goes to the owner's Telegram chat, one design for all of it (a
+card: bold title with one emoji, a short summary, aligned numbers with green
+and red circles); the full list, the look and the API are in `docs/ALERTS.md`:
 
-- the engine's operator alerts, as they happen: autopilot started, stopped,
-  stop rule or floor hit, kill switch, daily loss brake, orders refused again
-  and again, reconcile mismatch, market data stale for more than 10 minutes,
-  model drift
-- the daily digest after the learning loop: each running autopilot's equity
-  and P&L today and since start against BTC, trades and fees today, the
-  forward test per book, anything red in the health check
+- the engine's alerts, as they happen: autopilot events, the fills of an
+  autopilot (a rebalance as one message with a small table), big moves of a
+  held coin or an autopilot's equity, kill switch, floors, daily loss brake,
+  orders refused, reconcile mismatch, market data stale, model drift
+- lab posts: the factory, trending, and any job that posts a card through
+  `POST /api/alerts/event` or `lab.ops.notify`
+- the daily digest after the learning loop, with a chart of each autopilot's
+  equity against BTC, P&L per sleeve and positions
+- the weekly report on Sunday at 18:00 Europe/Berlin, with the week's chart
 - the health alarm: `system.json` not ok for two runs in a row, posted once,
   and once when green again
 
-Nothing is posted until the webhook is set. Keep it in one root-only env file
-on the server, outside the repo and outside every log:
+Each category has a switch in the app (Notifications, "What is sent"), and
+quiet hours (23:00 to 07:00 Europe/Berlin unless changed there) hold back all
+but urgent alerts and list them in one message after.
+
+Nothing is posted until the bot is set. Keep its token in one root-only env
+file on the server, outside the repo and outside every log:
 
 ```bash
 install -d -m 700 /etc/pythia
 install -m 600 /dev/null /etc/pythia/alerts.env
 cat > /etc/pythia/alerts.env <<'ENV'
-PYTHIA_ALERT_WEBHOOK=<your webhook URL>
-PYTHIA_ALERT_FORMAT=discord
+PYTHIA_TELEGRAM_BOT_TOKEN=<token from BotFather>
+PYTHIA_TELEGRAM_CHAT_ID=<your chat id>
 ENV
 ```
 
-`PYTHIA_ALERT_FORMAT=slack` for a Slack incoming webhook. For Telegram,
-leave the webhook out and set `PYTHIA_TELEGRAM_BOT_TOKEN` (from BotFather)
-and `PYTHIA_TELEGRAM_CHAT_ID` (the chat the bot writes to; send the bot
-any message, then read the id from its `getUpdates`). Optional:
-`PYTHIA_ALERT_PREFIX` (default `Pythia`), and for the engine
-`PYTHIA_ALERT_REJECTS` (3), `PYTHIA_ALERT_DEDUP_MIN` (30),
+The chat id: send the bot any message, then read it from the bot's
+`getUpdates`. Instead of Telegram, `PYTHIA_ALERT_WEBHOOK=<webhook URL>` with
+`PYTHIA_ALERT_FORMAT=discord` or `slack` posts the same cards in markdown.
+Optional: `PYTHIA_ALERT_PREFIX` (the footer, default `Pythia`), and for the
+engine `PYTHIA_ALERT_REJECTS` (3), `PYTHIA_ALERT_DEDUP_MIN` (30),
 `PYTHIA_ALERT_MAX_PER_HOUR` (20).
+
+**Lab image.** The charts need matplotlib, which is in
+`research/lab/requirements.txt`: rebuild the image once after copying the lab
+(`docker build -t pythia-lab /opt/pythia-lab`, or `research/lab` from a
+checkout). Without it the digest and the report go out as text.
 
 **Engine.** Add `--env-file /etc/pythia/alerts.env` to the `docker run` of the
 engine that runs the autopilots (and of the lab engine, if its alerts are
-wanted too, with a different `PYTHIA_ALERT_PREFIX` via `-e`) and recreate the
-container. The log says `operator alerts on (Discord format)` at start.
+wanted too, with a different `PYTHIA_ALERT_PREFIX` via `-e`), give it the
+notify folder with `-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
+(the last digest, digest requests, the settings file for the lab, event
+images), and recreate the container. The log says
+`operator alerts on (Telegram format)` at start. The switches, quiet hours and
+big-move sizes are saved in its state file and written to
+`/srv/pythia-data/reports/notify/settings.json`, which every lab job reads.
+
+Lab jobs in their own containers reach the engine's `127.0.0.1:8788` through
+Docker's port mapping, so the engine sees them from the bridge, not from
+127.0.0.1: to let them post through `POST /api/alerts/event`, add
+`-e PYTHIA_ALERT_EVENT_FROM=172.17.` (the bridge's prefix; `docker network
+inspect bridge` shows it) to the engine. Without that, lab jobs post straight
+to Telegram through `lab.ops.notify`, with the same design, switches and quiet
+hours, which is the default.
 
 **Daily digest.** It runs right after the learning loop, in the same cron
-line, so it always reads tonight's digest. `/etc/cron.d/pythia-learn` becomes:
+line, so it always reads tonight's report. `--network host` lets it read the
+engine's state on 127.0.0.1:8788 for the chart. `/etc/cron.d/pythia-learn`
+becomes:
 
 ```cron
-# Pythia: nightly learning loop, then the daily digest to the operator's webhook. Never touches live settings or money.
-30 6 * * * root docker run --rm --network host --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.learn >> /var/log/pythia-learn.log 2>&1; docker run --rm --memory 512m --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify >> /var/log/pythia-notify.log 2>&1
+# Pythia: nightly learning loop, then the daily digest with its chart to the owner's Telegram. Never touches live settings or money.
+30 6 * * * root docker run --rm --network host --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.learn >> /var/log/pythia-learn.log 2>&1; docker run --rm --network host --memory 1g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify >> /var/log/pythia-notify.log 2>&1
 ```
 
 See it without posting:
 
 ```bash
-docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify --dry-run
+docker run --rm --network host -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify --dry-run
 ```
+
+**Weekly report.** Sunday from 18:00 Europe/Berlin, once a week. The cron
+runs hourly on Sunday afternoons in UTC (16:05 to 21:05, which is 18:05 or
+17:05 Berlin and later, summer or winter); the job sends when it is 18:00 or
+later in Berlin and nothing went out this week yet. `/etc/cron.d/pythia-weekly`:
+
+```cron
+# Pythia: the weekly report with its chart, Sunday from 18:00 Europe/Berlin. Posts once a week.
+5 16-21 * * 0 root docker run --rm --network host --memory 1g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify --weekly >> /var/log/pythia-notify.log 2>&1
+```
+
+Now, whatever the day: `... python -m lab.ops.notify --weekly --force`.
 
 **Health alarm.** `system_health.sh` runs `/opt/pythia-ops/notify.py --health`
 after each check when that file and `/etc/pythia/alerts.env` exist
 (`PYTHIA_NOTIFY_PY` and `PYTHIA_ALERT_ENV` move them). It needs only
-`python3` on the host. Install with the health script:
+`python3` on the host. Install with the health script (and again after an
+update of `notify.py`):
 
 ```bash
 install -m 755 research/ops/system_health.sh /opt/pythia-ops/system_health.sh
@@ -268,19 +307,22 @@ install -m 644 research/lab/lab/ops/notify.py /opt/pythia-ops/notify.py
 
 The cron line of the health check stays as it is.
 
-**Digest on demand.** `POST /api/alerts/digest` on the engine writes
-`reports/notify/request.json`; this cron line sends the digest within five
-minutes, with the same `notify.py` the health alarm uses (stdlib only, no
-container start). Without a request it does nothing. `/etc/cron.d/pythia-notify-pending`:
+**Digest on demand, and after quiet hours.** `POST /api/alerts/digest` on the
+engine writes `reports/notify/request.json`; this cron line sends the digest
+within five minutes, with the same `notify.py` the health alarm uses (stdlib
+only, no container start, so without the chart). It also sends a daily digest
+that fell into quiet hours once they are over, and one note listing the lab
+posts quiet hours held back. Otherwise it does nothing.
+`/etc/cron.d/pythia-notify-pending`:
 
 ```cron
-# Pythia: a digest asked for through the engine API, if any. Posts nothing otherwise.
+# Pythia: a digest asked for through the engine API, and what quiet hours held back. Posts nothing otherwise.
 */5 * * * * root set -a; . /etc/pythia/alerts.env; PYTHIA_DATA=/srv/pythia-data python3 /opt/pythia-ops/notify.py --pending >> /var/log/pythia-notify.log 2>&1
 ```
 
-The engine that serves the API needs the same folder: add
-`-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
-to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
+**One card from a script.** `python3 /opt/pythia-ops/notify.py --event venue "Disk almost full" "12 GB left"`
+(after `set -a; . /etc/pythia/alerts.env` and with `PYTHIA_DATA=/srv/pythia-data`),
+in any of the categories listed in `docs/ALERTS.md`.
 
 ## Trending watcher
 

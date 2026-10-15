@@ -423,8 +423,12 @@ def test_digest_goes_through_notify_post_to_telegram(home, monkeypatch):
     run.publish(run.weekly(20, False, "2026-10-17", log=lambda *_: None))
     monkeypatch.setenv("PYTHIA_TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("PYTHIA_QUIET_HOURS", "off")
     sent = []
     monkeypatch.setattr(notify, "post", lambda url, fmt, text: sent.append((url, fmt, text)) or (True, None))
     assert run.main(["digest"]) == 0
     assert len(sent) == 1 and sent[0][1] == "telegram"
-    assert sent[0][2].startswith("Pythia Factory 2026-10-17") and len(sent[0][2]) <= notify.MAX_CHARS
+    text = sent[0][2]
+    assert text.startswith("<b>🧪 Factory 2026-10-17</b>\n") and len(text) <= notify.MAX_CHARS, text
+    assert text.endswith("<i>Pythia</i>")
+    assert text.count("<b>") == text.count("</b>")

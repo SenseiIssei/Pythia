@@ -2,7 +2,7 @@
 // operator alerts, turned into simple rows grouped by day. Pure functions.
 
 import type { JournalEntry, Market } from "../types";
-import { alertTitle, type AlertRecord } from "./alerts";
+import { alertTitle, plainText, type AlertRecord } from "./alerts";
 
 export type ActivityKind = "buy" | "sell" | "rebalance" | "autopilot" | "alert" | "risk" | "refused" | "summary";
 
@@ -130,7 +130,7 @@ export function fromAlert(a: AlertRecord, i: number): ActivityItem {
     ts: a.ts,
     kind: "alert",
     title: alertTitle(a),
-    detail: shortLine(a.text.replace(/\*\*/g, "")),
+    detail: shortLine(plainText(a.text)),
     real: false,
   };
 }
