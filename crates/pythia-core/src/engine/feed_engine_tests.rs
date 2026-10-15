@@ -231,8 +231,9 @@ fn data_health_names_sources_ages_and_stale_markets() {
     assert_eq!(q.kind, DataKind::Quotes);
     assert_eq!(q.primary, Some(FeedSource::Kraken));
     assert_eq!(q.active, Some(FeedSource::Kraken));
-    assert_eq!(q.markets, 20);
-    assert_eq!(q.stale.len(), 19, "every market but BTC");
+    let n = crate::coins::configured().len();
+    assert_eq!(q.markets, n, "the configured universe");
+    assert_eq!(q.stale.len(), n - 1, "every market but BTC");
     assert!(!q.stale.contains(&BTC.to_string()));
     assert_eq!(q.last_update_age_sec, Some(0));
     assert_eq!(q.sources[0].markets, 1);
@@ -284,7 +285,7 @@ fn stale_data_alerts_the_webhook_once_and_its_recovery_once() {
 fn books_from_the_mirror_count_as_the_executing_venue_and_off_books_are_refused() {
     let mut e = fed();
     e.set_crypto_cost_venue(Some(CostVenue::Binance));
-    assert_eq!(e.feed_priority(DataKind::Books), vec![FeedSource::Binance, FeedSource::BinanceVision]);
+    assert_eq!(e.feed_priority(DataKind::Books), vec![FeedSource::Binance, FeedSource::BinanceVision, FeedSource::Alpaca]);
     e.apply_feed_candles(FeedSource::Kraken, Ok(vec![series(BTC, 80_000.0)]), 5);
     let now = e.now();
     e.apply_feed_quotes(FeedSource::Kraken, Ok(vec![quote(BTC, 80_000.0)]), now);
@@ -330,4 +331,40 @@ fn stale_data_past_ten_minutes_is_an_operator_alert_once() {
     let a = stale(&mut e);
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].key, "stale:off");
+}
+
+#[test]
+fn every_coin_of_the_universe_has_a_market_and_only_venues_that_list_it_are_asked() {
+    let e = fed();
+    let ids = e.feed_markets();
+    assert_eq!(ids.len(), crate::coins::configured().len());
+    for sym in ["BONK/USD", "WIF/USD", "TRUMP/USD", "HYPE/USD", "SKY/USD", "TRX/USD"] {
+        let id = format!("crypto:{sym}");
+        assert!(ids.contains(&id), "{sym}");
+        let m = e.markets.iter().find(|m| m.id == id).unwrap();
+        assert_eq!((m.venue, m.kind), (Venue::Crypto, MarketKind::Crypto));
+        assert!(!e.real_ids.contains(&id), "a seed price is not a mark");
+    }
+    let kraken = e.feed_wanted(DataKind::Candles, FeedSource::Kraken);
+    assert!(kraken.contains(&BTC.to_string()) && !kraken.iter().any(|m| m.ends_with("HYPE/USD")));
+    // Nothing has delivered yet: Alpaca is asked about its coins only.
+    let alpaca = e.feed_wanted(DataKind::Candles, FeedSource::Alpaca);
+    assert!(alpaca.iter().any(|m| m.ends_with("HYPE/USD")) && !alpaca.iter().any(|m| m.ends_with("TRX/USD")));
+    let binance = e.feed_wanted(DataKind::Quotes, FeedSource::Binance);
+    assert!(binance.iter().any(|m| m.ends_with("BONK/USD")) && !binance.iter().any(|m| m.ends_with("SKY/USD")));
+}
+
+#[test]
+fn a_coin_kraken_lacks_takes_its_quotes_and_candles_from_alpaca() {
+    let mut e = fed();
+    let hype = "crypto:HYPE/USD";
+    let now = e.now();
+    e.apply_feed_quotes(FeedSource::Alpaca, Ok(vec![quote(hype, 41.0)]), now);
+    e.apply_feed_candles(FeedSource::Alpaca, Ok(vec![series(hype, 41.0)]), 5);
+    assert_eq!(e.feeds.current(DataKind::Quotes, hype), Some(FeedSource::Alpaca));
+    assert_eq!(e.feeds.current(DataKind::Candles, hype), Some(FeedSource::Alpaca));
+    assert!(e.real_ids.contains(hype));
+    assert!((e.price_of(hype) - 41.0).abs() < 1.0);
+    // Once it delivers, nobody further down is asked about it.
+    assert!(!e.feed_wanted(DataKind::Quotes, FeedSource::Bybit).iter().any(|m| m == hype));
 }

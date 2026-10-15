@@ -10,7 +10,8 @@ interface SimState {
   base: number; // reference price for change24h
 }
 
-/** Coins beyond the original nine, with Kraken seed prices from Oct 2026. */
+/** Coins beyond the original nine: the lab's twenty with Kraken seed prices from Oct 2026, then the
+ * Alpaca-only coins at rough seed prices (the simulator only). */
 const LAB_COINS: [string, number][] = [
   ["DOGE", 0.0934],
   ["BCH", 310.4],
@@ -23,6 +24,24 @@ const LAB_COINS: [string, number][] = [
   ["XLM", 0.2126],
   ["PEPE", 0.000004266],
   ["FIL", 1.159],
+  // The rest of what the Alpaca paper account trades (Rust `coins::COINS`).
+  ["ARB", 0.4],
+  ["BAT", 0.15],
+  ["BONK", 0.000015],
+  ["CRV", 0.6],
+  ["GRT", 0.08],
+  ["HYPE", 40],
+  ["LDO", 1.0],
+  ["ONDO", 0.8],
+  ["POL", 0.2],
+  ["RENDER", 3.5],
+  ["SHIB", 0.000012],
+  ["SKY", 0.07],
+  ["SUSHI", 0.6],
+  ["TRUMP", 8.0],
+  ["WIF", 0.8],
+  ["XTZ", 0.6],
+  ["YFI", 5000],
 ];
 
 const seedMarkets: Market[] = [

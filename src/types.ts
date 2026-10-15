@@ -292,7 +292,7 @@ export interface RiskStatus {
 }
 
 /** A public market data source. Mirrors Rust `feeds::FeedSource`. */
-export type FeedSource = "kraken-ws" | "kraken" | "binance" | "binance-vision" | "coinbase" | "bybit" | "okx";
+export type FeedSource = "kraken-ws" | "kraken" | "binance" | "binance-vision" | "coinbase" | "bybit" | "okx" | "alpaca";
 export type DataKind = "quotes" | "candles" | "books";
 
 /** One source's standing in a kind's priority list. */

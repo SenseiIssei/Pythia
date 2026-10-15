@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dataStatus, fmtAge, onFallback, venueOf } from "./dataHealth";
+import { dataStatus, fmtAge, onFallback, sourceLabel, venueOf } from "./dataHealth";
 import type { DataHealth, KindHealth } from "./types";
 
 function kind(k: Partial<KindHealth> & Pick<KindHealth, "kind">): KindHealth {
@@ -79,5 +79,11 @@ describe("data health summary", () => {
     expect(fmtAge(240)).toBe("4 min");
     expect(fmtAge(7200)).toBe("2 h");
     expect(fmtAge(null)).toBe("never");
+  });
+
+  it("names Alpaca, the source that covers every coin Alpaca trades", () => {
+    expect(sourceLabel("alpaca")).toBe("Alpaca");
+    expect(venueOf("alpaca")).toBe("alpaca");
+    expect(onFallback(kind({ kind: "quotes", primary: "kraken-ws", active: "alpaca" }))).toBe(true);
   });
 });

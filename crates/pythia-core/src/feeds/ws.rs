@@ -229,7 +229,7 @@ mod tests {
     #[ignore]
     async fn live_stream_delivers_prices() {
         let shared = std::sync::Arc::new(Shared::default());
-        let syms: Vec<String> = super::super::sources::universe().map(String::from).collect();
+        let syms: Vec<String> = super::super::sources::listed(super::super::FeedSource::KrakenWs).map(String::from).collect();
         let task = tokio::spawn(run_kraken(shared.clone(), syms));
         tokio::time::sleep(Duration::from_secs(8)).await;
         let snap = shared.snapshot();
