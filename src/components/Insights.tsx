@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowRight, Lightbulb } from "lucide-react";
-import { Card } from "./ui";
+import { Card } from "../design";
 import { liveMode } from "../live";
 import { labStatus } from "../lab";
 import { ago, feedTone, labFeeds, pickInsights, type Insight } from "../labFeeds";
@@ -36,7 +35,7 @@ export function useLabInsights(): { insights: Insight[] | null; available: boole
   return { insights, available };
 }
 
-const DOT = { green: "bg-success", amber: "bg-warning", red: "bg-danger", neutral: "bg-cyber-text-faint" } as const;
+const DOT = { green: "bg-up", amber: "bg-warn", red: "bg-down", neutral: "bg-faint" } as const;
 
 /**
  * Three lines at most: what happened, where it comes from, how long ago.
@@ -77,27 +76,26 @@ export function InsightsCard() {
   if (!available || insights === null) return null;
   const canOpen = isVisible("research", mode);
   return (
-    <Card
-      title="Today in the lab"
-      icon={Lightbulb}
-      help="The lab tests strategies and models on real prices with play money. These are the few things from it worth knowing today."
-      right={
-        canOpen ? (
-          <button
-            type="button"
-            onClick={() => openPage("research")}
-            className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
-          >
-            All research <ArrowRight size={12} aria-hidden />
+    <section aria-labelledby="lab-today" className="space-y-2">
+      <div className="flex items-baseline justify-between gap-2 px-1 pt-3">
+        <h2 id="lab-today" className="text-xl font-semibold tracking-tight text-ink">
+          Today in the lab
+        </h2>
+        {canOpen && (
+          <button type="button" onClick={() => openPage("research")} className="rounded text-[15px] font-semibold text-accent hover:underline">
+            All research
           </button>
-        ) : undefined
-      }
-    >
-      {insights.length === 0 ? (
-        <p className="text-sm text-cyber-text-dim">All quiet. Nothing in the lab needs your attention today.</p>
-      ) : (
-        <InsightList insights={insights} />
-      )}
-    </Card>
+        )}
+      </div>
+      <Card>
+        {insights.length === 0 ? (
+          <p className="text-[15px] text-muted">All quiet. Nothing in the lab needs your attention today.</p>
+        ) : (
+          <div className="text-ink">
+            <InsightList insights={insights} />
+          </div>
+        )}
+      </Card>
+    </section>
   );
 }

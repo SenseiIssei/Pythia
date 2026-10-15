@@ -52,6 +52,9 @@ export default {
         mono: ["var(--font-sans)"],
         code: ["var(--font-code)"],
       },
+      // A bare `border` or `divide-y` draws a hairline in the theme, not Tailwind grey.
+      borderColor: { DEFAULT: v("line") },
+      divideColor: { DEFAULT: v("line") },
       borderRadius: {
         control: "var(--radius-control)",
         card: "var(--radius-card)",
