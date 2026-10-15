@@ -7,6 +7,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | always | market data recorder | container `pythia-recorder` (`research/recorder`) |
 | always | headless engine: lab book, volatility model in shadow mode, `/api/lab` | container `pythia-server` on 127.0.0.1:8787 only |
 | always | a second engine for autopilots, kept apart so they never touch the lab book's markets or evidence; state in `/srv/pythia-data/autopilot` | container `pythia-autopilot` on 127.0.0.1:8788 only |
+| 00:40 | flow data: Coinbase BTC-USD 1h and Upbit KRW-BTC 1d (the exchange premiums), USD/KRW, DefiLlama stablecoin supply, Deribit BTC and ETH DVOL, a Deribit option snapshot with the 25-delta skew at 30 days (`lab.collect.flow`, under a minute daily; the first run fetches the history back to 2019 in about 4 minutes). Into `/srv/pythia-data/flow/`, read by the X6 study (`results/flow_overlays.md`) | `jobs.yaml` only |
 | 03:30 | history backfill: 20 lab coins, every USDT pair, every USDT perp | `/etc/cron.d/pythia-backfill` |
 | 04:00 | momentum paper books, engine signals, paper vs backtest review | `/etc/cron.d/pythia-paper` |
 | 04:15 | sweep candidates as paper books: survivorship-free momentum (daily, and in seven weekly tranches), Donchian breakout (about 10 minutes, rebuilds the daily panel into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-families` |

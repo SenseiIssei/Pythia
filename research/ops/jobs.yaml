@@ -302,6 +302,13 @@ jobs:
     timeout: 15m
     replaces: pythia-cs2
 
+  - name: flow-collect
+    description: flow data, Coinbase and Upbit BTC, USD/KRW, stablecoin supply, Deribit DVOL and 25-delta skew, continues from what is stored
+    schedule: "40 0 * * *"
+    command: python -m lab.collect.flow
+    resources: {cpus: 1, memory: 1g}
+    timeout: 30m
+
   # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
   # module is deployed to /opt/pythia-lab and its command is confirmed.
   - name: pokemon
@@ -410,6 +417,10 @@ datasets:
   - name: listings
     path: listings
     max_gb: 2
+  - name: flow
+    description: daily flow data and the Deribit option snapshots; kept forever
+    path: flow
+    max_gb: 5
   - name: job-runs
     description: the runner's own run records, by month
     path: _ops/runs
