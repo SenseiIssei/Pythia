@@ -65,8 +65,8 @@ jobs:
     schedule: "30 3 * * *"
     kind: image
     image: pythia-recorder
-    command: python -m recorder.backfill
-    resources: {cpus: 1, memory: 2g}
+    command: sh -c 'python -m recorder.backfill && python -m recorder.backfill --only klines_1h_all --jobs 48 --parallel 48 && python -m recorder.backfill --only um_all --jobs 48 --parallel 48'
+    resources: {cpus: 3, memory: 2g}
     timeout: 3h
     lock: heavy
     lock_wait: 1h
@@ -104,8 +104,8 @@ jobs:
     description: M4 shadow paper book, market-neutral on perps
     schedule: "45 4 * * *"
     command: python -m lab.paper.m4_ls
-    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
-    resources: {cpus: 2, memory: 6g}
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 4, memory: 8g}
     timeout: 1h
     lock: heavy
     lock_wait: 2h
@@ -115,20 +115,20 @@ jobs:
     description: market-neutral M2 paper book v1
     schedule: "30 5 * * *"
     command: python -m lab.paper.picks_ls
-    resources: {cpus: 2, memory: 6g}
+    resources: {cpus: 3, memory: 10g}
     timeout: 1h
     lock: heavy
-    lock_wait: 1h
+    lock_wait: 3h
     replaces: pythia-paper-ls
 
   - name: paper-ls-v2
     description: market-neutral M2 paper book v2, after v1
     depends_on: [paper-ls]
     command: python -m lab.paper.picks_ls --v2
-    resources: {cpus: 2, memory: 6g}
+    resources: {cpus: 3, memory: 10g}
     timeout: 1h
     lock: heavy
-    lock_wait: 1h
+    lock_wait: 3h
     replaces: pythia-paper-ls
 
   - name: forward
@@ -148,7 +148,7 @@ jobs:
     resources: {cpus: 4, memory: 8g}
     timeout: 5h
     lock: heavy
-    lock_wait: 1h
+    lock_wait: 3h
     replaces: pythia-learn
 
   - name: notify
@@ -165,10 +165,10 @@ jobs:
     description: weekly cost calibration from the recorded books, report only
     schedule: "40 5 * * 0"
     command: python -m lab.experiments.costs
-    resources: {cpus: 2, memory: 4g}
+    resources: {cpus: 2, memory: 8g}
     timeout: 1h
     lock: heavy
-    lock_wait: 1h
+    lock_wait: 3h
     replaces: pythia-costs
 
   # ---------------------------------------------------------------- host jobs
@@ -184,10 +184,11 @@ jobs:
   - name: notify-pending
     description: a digest asked for through the engine API, if any
     schedule: "*/5 * * * *"
-    kind: host
-    command: python3 /opt/pythia-ops/notify.py --pending
+    command: python -m lab.ops.notify --pending
+    network: host
     env_file: /etc/pythia/alerts.env
-    timeout: 2m
+    resources: {cpus: 1, memory: 512m}
+    timeout: 4m
     alert: false
     replaces: pythia-notify-pending
 
@@ -291,14 +292,24 @@ jobs:
 
   # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
   # module is deployed to /opt/pythia-lab and its command is confirmed.
-  - name: pokemon-collector
-    description: Pokemon card market collector
-    schedule: "10 2 * * *"
-    command: python -m lab.collect.pokemon
+  - name: pokemon
+    description: Pokemon cards, price snapshot (sealed products too), then studies, forecasts, the paper collection and card alerts
+    schedule: "5 7 * * *"
+    command: sh -c 'python -m lab.collect.pokemon --sealed && python -m lab.pokemon.daily'
     env_file: /etc/pythia/alerts.env
-    resources: {cpus: 1, memory: 1g}
-    timeout: 1h
-    enabled: false
+    resources: {cpus: 2, memory: 6g}
+    timeout: 2h
+    replaces: pythia-pokemon
+
+  - name: retrain
+    description: weekly retrain of the volatility model (M1), promoted only if better
+    schedule: "0 5 * * 0"
+    command: sh -c 'python -m lab.experiments.vol > /data/reports/vol_1h/run.log 2>&1'
+    resources: {cpus: 4, memory: 8g}
+    timeout: 3h
+    lock: heavy
+    lock_wait: 2h
+    replaces: pythia-retrain
 
   - name: equities-studies
     description: equities studies refresh
