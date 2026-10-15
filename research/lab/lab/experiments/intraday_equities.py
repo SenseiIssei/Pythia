@@ -1020,7 +1020,7 @@ def write(res: dict) -> str:
     except OSError:
         text = f"# {NAME}\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(splice(text, res["source"], md), encoding="utf-8")
+    path.write_text(splice(text, res["source"], md), encoding="utf-8", newline="\n")
     return md
 
 
