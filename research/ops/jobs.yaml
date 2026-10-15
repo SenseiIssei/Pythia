@@ -151,6 +151,18 @@ jobs:
     lock_wait: 3h
     replaces: pythia-learn
 
+  # Listed before notify on purpose: chained jobs run in table order, so the
+  # digest reads today's readiness. notify does not depend on it, so a failed
+  # readiness check never holds the digest back.
+  - name: readiness
+    description: real money readiness, every autopilot against the pre-registered rule (docs/LIVE-READINESS.md)
+    depends_on: [learn]
+    command: python -m lab.ops.readiness
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+
   - name: notify
     description: daily digest to the operator, right after the learning loop
     depends_on: [learn]
@@ -398,6 +410,10 @@ datasets:
   - name: learn
     path: learn
     max_gb: 50
+  - name: readiness
+    description: the real money readiness record (one line a day) and the inflation cache; never deleted
+    path: readiness
+    max_gb: 1
   - name: recorder-binance-um
     path: binance_um
     max_gb: 100
@@ -453,6 +469,7 @@ backup:
     - cs2/paper
     - signals
     - learn
+    - readiness
     - costs
     - trials
     - factory
