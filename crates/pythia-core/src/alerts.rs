@@ -334,6 +334,7 @@ impl AlertEvent {
             rows: self.rows.clone(),
             table: self.table.clone(),
             footer: self.footer.clone(),
+            table_first: false,
         }
     }
 
@@ -417,6 +418,7 @@ pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
         // Sells first, then buys, the larger first: what a rebalance did.
         rows.sort_by(|a, b| (a[0] == "Buy").cmp(&(b[0] == "Buy")));
         c.table = Some(Table { header: vec!["Side".into(), "Coin".into(), "Value".into(), "Price".into()], rows, more: 0 });
+        c.table_first = true;
         if realized.abs() > 1e-9 {
             c = c.row(Row::toned("Realised", signed_usd(realized), realized));
         }

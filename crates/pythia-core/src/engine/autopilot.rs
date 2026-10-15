@@ -1441,10 +1441,7 @@ impl Engine {
                         .iter()
                         .position(|a| !a.is_active() && a.stopped_ms.is_some_and(|t| now - t <= late) && opens(a))
                 };
-                match active.or_else(recent) {
-                    Some(i) => i,
-                    None => return None,
-                }
+                active.or_else(recent)?
             }
             None => return None,
         };
