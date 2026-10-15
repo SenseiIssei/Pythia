@@ -696,6 +696,7 @@ async fn main() {
         )
         .route("/api/tax", get(get_tax))
         .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
+        .route("/api/cs2", get(|| async { Json(pythia_core::labview::cs2_board()) }))
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         .merge(alert_routes())

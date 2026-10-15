@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None, root: Path | None = None, now_ms: int | 
     collector = market.read_json(base / "collector.json") or {}
     if snap.is_empty():
         _write_json(reports / BOARD / "latest.json", {
-            "generated": now.strftime("%Y-%m-%d %H:%M UTC"), "generated_ms": now_ms, "status": "no data",
+            "generated": now.strftime("%Y-%m-%d %H:%M UTC"), "generatedMs": now_ms, "status": "no data",
             "verdict": "No CS2 data collected yet.", "items": [], "collector": collector})
         print("no CS2 snapshot yet")
         return 0
@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None, root: Path | None = None, now_ms: int | 
             "price": prices.get(n) or p.get("last_price"), "returnPct": ((prices.get(n) or p["cost"]) / p["cost"] - 1) * 100}
            for n, p in st["positions"].items()]
     boardj = {
-        "generated": now.strftime("%Y-%m-%d %H:%M UTC"), "generated_ms": now_ms, "status": "ok",
+        "generated": now.strftime("%Y-%m-%d %H:%M UTC"), "generatedMs": now_ms, "status": "ok",
         "verdict": f"{len(rows)} items, {sum(r['signal'] == 'buy' for r in rows)} buy signals after fees, "
                    f"paper {eq / book.START_EQUITY - 1:+.2%}; {history} days of history.",
         "currency": "EUR", "historyDays": history, "change7Basis": basis,

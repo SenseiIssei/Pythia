@@ -722,6 +722,12 @@ pub fn lab_status() -> pythia_core::labview::LabStatus {
     pythia_core::labview::status()
 }
 
+/// The CS2 skins board (prices, predictions, paper portfolio) from the synced data folder. Read-only.
+#[tauri::command]
+pub fn cs2_board() -> Option<pythia_core::labview::Cs2Board> {
+    pythia_core::labview::cs2_board()
+}
+
 /// The volatility model in shadow mode: forecasts, live score, drift. Read-only.
 #[tauri::command]
 pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::MlStatus {
