@@ -207,7 +207,7 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
         <MiniChart data={m.chart} tone={m.tone} label={`Value of ${m.name} since it started`} />
       </div>
 
-      <ul className="fl-line mt-2 divide-y border-t" style={{ borderColor: "var(--fl-line)" }}>
+      <ul className="mt-2 divide-y divide-line border-t border-line">
         <li>
           <ListRow
             icon={Bitcoin}
@@ -221,7 +221,7 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
       {m.holdings.length === 0 ? (
         <p className="mt-1 text-sm">Cash</p>
       ) : (
-        <ul className="mt-1 divide-y" style={{ borderColor: "var(--fl-line)" }}>
+        <ul className="mt-1 divide-y divide-line">
           {m.holdings.map((h) => (
             <li key={h.marketId} className="flex items-center justify-between gap-3 py-2">
               <span className="min-w-0 truncate text-[15px] font-semibold">{h.coin}</span>
@@ -246,7 +246,7 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
                 <span className="fl-num shrink-0 font-semibold">{st.pct}%</span>
               </div>
               <div className="fl-surface-2 mt-1 h-1.5 overflow-hidden rounded-full" aria-hidden>
-                <div className="h-full rounded-full" style={{ width: `${st.pct}%`, background: "var(--fl-text)" }} />
+                <div className="h-full rounded-full" style={{ width: `${st.pct}%`, background: "var(--color-text)" }} />
               </div>
             </li>
           ))}
@@ -330,7 +330,7 @@ function Choice({ on, title, detail, onClick, disabled }: { on: boolean; title: 
       disabled={disabled}
       onClick={onClick}
       className={`fl-focus w-full rounded-2xl border-2 p-4 text-left transition-colors disabled:opacity-40 ${on ? "" : "fl-line"}`}
-      style={{ borderColor: on ? "var(--fl-text)" : "var(--fl-line)" }}
+      style={{ borderColor: on ? "var(--color-text)" : "var(--color-line)" }}
     >
       <span className="block text-[15px] font-semibold">{title}</span>
       <span className="fl-muted block text-sm">{detail}</span>
@@ -393,7 +393,7 @@ function StartSheet({ open, onClose, onStart }: { open: boolean; onClose: () => 
     >
       <div className="mb-4 flex items-center gap-1.5" aria-label={`Step ${step} of 3`}>
         {[1, 2, 3].map((i) => (
-          <span key={i} className="h-1 flex-1 rounded-full" style={{ background: i <= step ? "var(--fl-text)" : "var(--fl-line)" }} />
+          <span key={i} className="h-1 flex-1 rounded-full" style={{ background: i <= step ? "var(--color-text)" : "var(--color-line)" }} />
         ))}
       </div>
 

@@ -96,7 +96,7 @@ export function Activity() {
               {d.summary && <span className="fl-muted text-sm">{d.summary}</span>}
             </div>
             <Card className="py-1">
-              <ul className="divide-y" style={{ borderColor: "var(--fl-line)" }}>
+              <ul className="divide-y divide-line">
                 {d.items.map((it) => (
                   <li key={it.id}>
                     <ListRow

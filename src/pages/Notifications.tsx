@@ -151,7 +151,7 @@ export function Notifications() {
                 Starts, stops, loss limits and problems show up here.
               </Empty>
             ) : (
-              <ul className="divide-y" style={{ borderColor: "var(--fl-line)" }}>
+              <ul className="divide-y divide-line">
                 {view.recent.map((a, i) => {
                   const d = deliveryOf(a);
                   return (
