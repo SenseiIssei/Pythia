@@ -253,12 +253,24 @@ export interface BigMoves {
   dayPct: number;
 }
 
+/** The language of the messages to the chat. The app stays in English. */
+export type AlertLanguage = "en" | "de";
+
+export const ALERT_LANGUAGES: { id: AlertLanguage; label: string }[] = [
+  { id: "en", label: "English" },
+  { id: "de", label: "Deutsch" },
+];
+
 /** GET /api/alerts/settings (and what POST answers). */
 export interface AlertSettingsView {
   categories: AlertCategoryView[];
   quietHours: QuietHours;
   bigMoves: BigMoves;
   quietNow: boolean;
+  /** Older servers leave it out: English. */
+  language?: AlertLanguage;
+  /** Set when PYTHIA_ALERT_LANG on the server overrides the setting. */
+  languageEnv?: AlertLanguage | null;
 }
 
 /** A change: what is left out stays. */
@@ -266,6 +278,16 @@ export interface AlertSettingsPatch {
   categories?: Partial<Record<AlertCategoryId, boolean>>;
   quietHours?: Partial<QuietHours>;
   bigMoves?: Partial<BigMoves>;
+  language?: AlertLanguage;
+}
+
+/** The language messages go out in and, when the server's environment fixes it, a line that says so. */
+export function languageOf(s: Pick<AlertSettingsView, "language" | "languageEnv">): { lang: AlertLanguage; note: string | null } {
+  const name = (l: AlertLanguage) => ALERT_LANGUAGES.find((x) => x.id === l)?.label ?? l;
+  const set: AlertLanguage = s.language === "de" ? "de" : "en";
+  const env = s.languageEnv === "de" || s.languageEnv === "en" ? s.languageEnv : null;
+  if (!env) return { lang: set, note: null };
+  return { lang: env, note: `PYTHIA_ALERT_LANG on the server sends them in ${name(env)}, whatever is chosen here.` };
 }
 
 /** Whether a time is HH:MM, 00:00 to 23:59. */
