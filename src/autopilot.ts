@@ -300,6 +300,22 @@ export const REPICK_CHOICES: { hours: number; label: string }[] = [
  * One sleeve's weight and what it holds right now, in plain words. A
  * dropped sleeve says so; a sleeve that holds nothing is "in cash".
  */
+/** The word an experimental lab book carries wherever it is shown. */
+export const EXPERIMENT_LABEL = "Experiment";
+
+/** What an experiment is, in one line, for the badge's tooltip. */
+export const EXPERIMENT_HINT =
+  "Failed the lab's deflation test. Runs on paper only because you named it; Pythia never picks it.";
+
+/**
+ * Whether a strategy or sleeve is an experimental lab book: the engine's flag
+ * on a sleeve, else the label the lab puts at the front of its name.
+ */
+export function isExperiment(s: { experimental?: boolean; name?: string } | null | undefined): boolean {
+  if (!s) return false;
+  return s.experimental === true || /\bEXPERIMENT\b/.test(s.name ?? "");
+}
+
 export function sleeveExposure(b: AutopilotSleeveStatus): string {
   const share = `${(b.weight * 100).toFixed(0)}% of the amount`;
   if (b.dropped) {

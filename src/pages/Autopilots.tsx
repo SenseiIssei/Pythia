@@ -35,7 +35,16 @@ import {
   type CardModel,
   type PracticeAccount,
 } from "../flows/autopilotView";
-import { LIVE_EDIT_PHRASE, editForm, forwardLine, isActive, planEdit, type EditForm } from "../autopilot";
+import {
+  EXPERIMENT_LABEL,
+  LIVE_EDIT_PHRASE,
+  editForm,
+  forwardLine,
+  isActive,
+  isExperiment,
+  planEdit,
+  type EditForm,
+} from "../autopilot";
 import { practiceAutopilots } from "../practice";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
@@ -595,6 +604,7 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
               {ids.map((id) => (
                 <li key={id} className="flex items-center justify-between gap-3">
                   <span className="min-w-0 truncate text-sm">{s.bySleeve.find((b) => b.strategyId === id)?.name ?? id}</span>
+                  {isExperiment(s.bySleeve.find((b) => b.strategyId === id)) && <Chip tone="warn">{EXPERIMENT_LABEL}</Chip>}
                   <input
                     aria-label={`Share for ${id}`}
                     inputMode="decimal"

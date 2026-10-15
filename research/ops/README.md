@@ -10,6 +10,10 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 03:30 | history backfill: 20 lab coins, every USDT pair, every USDT perp | `/etc/cron.d/pythia-backfill` |
 | 04:00 | momentum paper books, engine signals, paper vs backtest review | `/etc/cron.d/pythia-paper` |
 | 04:15 | sweep candidates as paper books: survivorship-free momentum (daily, and in seven weekly tranches), Donchian breakout (about 10 minutes, rebuilds the daily panel into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-families` |
+| 04:30 | EXPERIMENT memecoin paper books (rotation and momentum on Alpaca's six memecoins) and their experimental engine signals (`lab.paper.memes`, a minute; daily klines from data.binance.vision, topped up from the public klines endpoint) | `jobs.yaml`: `paper-memes` |
+| hourly :07 | EXPERIMENT 4h trend with pullback maker entries: the hour's fills and exits, a decision at every 4h close, the signal when the holdings change (`lab.paper.trend4h`, about 67 public kline requests) | `jobs.yaml`: `paper-trend4h` |
+| every 5 min | pump.fun PAPER watcher: new Solana pools from GeckoTerminal, graduations bought on paper by three pre-registered rules, marks from DexScreener, rugs as total losses, winner and loser alerts (`lab.paper.pumpfun`, under a minute; at most 8 GeckoTerminal and 20 DexScreener calls; reads only, no wallet) | `jobs.yaml`: `pumpfun` |
+| 06:40 | pump.fun daily report, `reports/pumpfun/latest.json` and its card (`lab.paper.pumpfun --report`, seconds) | `jobs.yaml`: `pumpfun-report` |
 | 04:45 | M4 shadow paper book, market-neutral on perps (`lab.paper.m4_ls`, 2 to 3 minutes, about 3 GB; rebuilds the xs_daily panel and retrains weekly into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-m4` |
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |

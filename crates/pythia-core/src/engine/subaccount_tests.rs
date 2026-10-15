@@ -142,6 +142,7 @@ fn lab_signal(strategy: &str, generated: i64, weights: &[(&str, f64)]) -> crate:
         autopilot_only: false,
         dropped: vec![],
         asset_class: None,
+        experimental: false,
     }
 }
 

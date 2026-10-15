@@ -1074,6 +1074,9 @@ export interface AutopilotSleeveStatus {
   exposurePct?: number;
   /** A re-pick took its weight to zero; listed for its record. */
   dropped?: boolean;
+  /** An experimental lab book: a rule that failed the lab's deflation test,
+   *  run on paper only because the owner named it. Never auto-picked. */
+  experimental?: boolean;
 }
 
 export interface AutopilotStatus {

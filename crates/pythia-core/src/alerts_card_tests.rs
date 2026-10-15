@@ -90,7 +90,28 @@ fn line(book: &str, buy: bool, sym: &str, q: f64, p: f64, rebalance: bool) -> Tr
         realized: if buy { 0.0 } else { 5.0 },
         rebalance,
         mode: "demo".into(),
+        experiment: false,
     }
+}
+
+#[test]
+fn a_fill_for_an_experiment_says_so_on_its_line_and_card() {
+    let one = TradeLine { experiment: true, ..line("Memes", true, "PEPE", 1000.0, 0.01, false) };
+    let ev = AlertEvent::trade("1", one.clone());
+    assert!(ev.text.contains("Memes (experiment) bought"), "{}", ev.text);
+    let cards = trade_cards(&[&one]);
+    assert!(cards[0].title.ends_with("· experiment"), "{}", cards[0].title);
+    assert!(cards[0].footer.as_deref().unwrap_or("").contains("experiment"));
+    // A rebalance that mixes an experiment with a proven book marks only the experiment's coins.
+    let a = TradeLine { experiment: true, ..line("Mix", true, "PEPE", 1000.0, 0.01, true) };
+    let b = line("Mix", true, "BTC", 0.01, 60_000.0, true);
+    let cards = trade_cards(&[&a, &b]);
+    let t = cards[0].table.as_ref().unwrap();
+    assert!(t.rows.iter().any(|r| r[1] == "PEPE (exp)") && t.rows.iter().any(|r| r[1] == "BTC"));
+    assert!(cards[0].title.contains("experiment"));
+    // Without an experiment nothing changes.
+    let plain = trade_cards(&[&b]);
+    assert!(!plain[0].title.contains("experiment") && !plain[0].footer.as_deref().unwrap_or("").contains("experiment"));
 }
 
 #[test]

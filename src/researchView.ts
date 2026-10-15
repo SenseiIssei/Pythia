@@ -283,7 +283,12 @@ export interface BookInfo {
   study: string | null;
   /** Writes a signal an autopilot can run; no engine runs it on its own. */
   autopilotOnly: boolean;
+  /** Failed the lab's bar and runs anyway, on paper, as a labelled
+   *  experiment: never auto-picked, only where an autopilot names it. */
+  experiment?: boolean;
 }
+
+const EXPERIMENT_CHECKS = "Experiment: failed the lab's deflation test. Runs on paper only; Pythia never picks it, an autopilot runs it only when you name it.";
 
 /**
  * The lab's paper books in plain words. The numbers are the out-of-sample
@@ -377,6 +382,72 @@ export const BOOKS: Record<string, BookInfo> = {
     checks: "Forward evidence only; the backtest exists as weekly report rows, so its range is approximate.",
     study: null,
     autopilotOnly: false,
+  },
+  memes_rotation: {
+    title: "Experiment: memecoin rotation",
+    what: "Holds the one memecoin Alpaca lists (DOGE, SHIB, PEPE, BONK, WIF, TRUMP) with the best four-week return, only while that return is positive and Bitcoin is above its 200-day average.",
+    backtest: [
+      { label: "Sharpe at 35 / 70 bps", value: "1.15 / 0.94" },
+      { label: "Worst dip", value: "27 %" },
+      { label: "Share of P&L from PEPE", value: "52 %" },
+    ],
+    checks: `Deflated p 0.01 over 427 trials. ${EXPERIMENT_CHECKS}`,
+    study: "experiments",
+    autopilotOnly: true,
+    experiment: true,
+  },
+  memes_tsmom: {
+    title: "Experiment: memecoin momentum",
+    what: "Holds each of Alpaca's six memecoins while it is up over four weeks and Bitcoin is above its 200-day average, each sized for 40 % volatility over six slots.",
+    backtest: [
+      { label: "Sharpe at 35 / 70 bps", value: "0.67 / 0.50" },
+      { label: "Bitcoin over the same days", value: "0.74" },
+      { label: "Worst dip", value: "19 %" },
+    ],
+    checks: `Below Bitcoin, deflated p 0.00 over 427 trials. ${EXPERIMENT_CHECKS}`,
+    study: "experiments",
+    autopilotOnly: true,
+    experiment: true,
+  },
+  trend4h_pullback: {
+    title: "Experiment: 4-hour trend, pullback entries",
+    what: "On 4-hour bars, holds an Alpaca coin while its fast average is above its slow one and Bitcoin is above its 200-day average. It buys only with a resting limit half a 4-hour move under the price, so it pays the maker fee; trades last about 8 days.",
+    backtest: [
+      { label: "Sharpe maker / taker", value: "0.71 / 0.51" },
+      { label: "Worst dip", value: "44 %" },
+      { label: "Entry orders that fill", value: "18 %" },
+    ],
+    checks: `Deflated p 0.00 over 841 trials, lost in 2025. ${EXPERIMENT_CHECKS}`,
+    study: "experiments",
+    autopilotOnly: true,
+    experiment: true,
+  },
+  pumpfun_migration: {
+    title: "Experiment: pump.fun, every graduation",
+    what: "On paper only: $100 into every pump.fun token that completes its bonding curve with at least $10,000 of liquidity, sold after 24 hours or on a 30 % fall from its best. No wallet, no orders.",
+    backtest: [],
+    checks: "No backtest exists. Most of these tokens go to zero; a drained pool counts as a total loss.",
+    study: "experiments",
+    autopilotOnly: false,
+    experiment: true,
+  },
+  pumpfun_filtered: {
+    title: "Experiment: pump.fun, filtered graduations",
+    what: "On paper only: graduations with $20,000 of liquidity, 300 holders or more, the top 10 under 30 % and no mint or freeze authority; held up to 72 hours with a 40 % trailing stop.",
+    backtest: [],
+    checks: "No backtest exists. Filters remove the obvious traps, not the risk.",
+    study: "experiments",
+    autopilotOnly: false,
+    experiment: true,
+  },
+  pumpfun_filtered_quick: {
+    title: "Experiment: pump.fun, filtered and quick",
+    what: "On paper only: the filtered graduations, sold at +100 %, after 6 hours or on a 25 % trailing stop.",
+    backtest: [],
+    checks: "No backtest exists. Measures whether quick exits keep anything at all.",
+    study: "experiments",
+    autopilotOnly: false,
+    experiment: true,
   },
 };
 
