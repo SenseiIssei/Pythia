@@ -37,7 +37,7 @@ export function Positions() {
         ) : (
           <List>
             {positions.map((p) => (
-              <PositionRow key={p.marketId} p={p} onFlatten={() => flatten(p.marketId)} />
+              <PositionRow key={p.key ?? p.marketId} p={p} onFlatten={() => flatten(p.key ?? p.marketId)} />
             ))}
           </List>
         )}
@@ -106,6 +106,8 @@ function PositionRow({ p, onFlatten }: { p: PositionView; onFlatten: () => void 
               </Badge>
             )}
           </div>
+          {/* Every autopilot keeps a book of its own: two can hold the same coin. */}
+          {p.book && <div className="mt-0.5 text-[13px] text-muted">Autopilot {p.bookName ?? p.book}</div>}
           <div className="tabular mt-0.5 text-[13px] text-muted">
             <Term k="Qty">{num(p.qty, 4)}</Term> · <Term k="Avg">avg {p.avgPrice.toLocaleString()}</Term> ·{" "}
             <Term k="Last">last {p.lastPrice.toLocaleString()}</Term>

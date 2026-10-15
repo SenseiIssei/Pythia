@@ -823,12 +823,27 @@ impl Engine {
         }
     }
 
-    /// Make every maker order of these strategies stand down.
+    /// Make every maker order of these strategies stand down, in every book.
+    #[cfg(test)]
     pub(super) fn maker_stand_down_for(&mut self, strategies: &HashSet<String>, why: &str) {
         let ids: Vec<String> = self
             .inflight
             .iter()
             .filter(|(_, f)| strategies.contains(&f.strategy_id) && f.maker.as_ref().is_some_and(|w| w.stop.is_none()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.maker_stand_down_order(&id, why);
+        }
+    }
+
+    /// Make every maker order for one book (an autopilot's) stand down.
+    /// Another autopilot running the same strategies keeps its own.
+    pub(super) fn maker_stand_down_book(&mut self, book: &str, why: &str) {
+        let ids: Vec<String> = self
+            .inflight
+            .iter()
+            .filter(|(_, f)| f.book == book && f.maker.as_ref().is_some_and(|w| w.stop.is_none()))
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {

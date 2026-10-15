@@ -67,6 +67,8 @@ fn hold(e: &mut Engine, market: &str, qty: f64, demo: bool, live: bool) {
     e.positions.insert(
         market.into(),
         PositionInternal {
+            market: market.into(),
+            book: String::new(),
             venue: m.venue,
             symbol: m.symbol.clone(),
             qty,
@@ -349,7 +351,7 @@ fn an_estimate_counts_what_the_venue_already_showed_and_a_posted_fee_is_never_es
     let o = filled_buy(&mut e, &sid, BTC, 1_000.0, PX);
     // The venue showed a tenth of the fee gone; the estimate is the rest.
     let shown = o.qty * 0.00025;
-    assert!(e.take_alpaca_fee_gap(BTC, shown, false, true, "test"));
+    assert!(e.take_alpaca_fee_gap(BTC, None, shown, false, true, "test"));
     let fees0 = e.strategy_config(&sid).unwrap().ledger.fees;
     e.alpaca_fees[0].ts -= WATCH_KEEP_MS + 1;
     e.alpaca_fee_queries();

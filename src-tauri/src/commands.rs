@@ -236,9 +236,16 @@ pub async fn autopilot_start(app: AppHandle, config: AutopilotConfig, confirm: O
         let st = app.state::<AppState>();
         (st.engine.clone(), credentials(st.inner()))
     };
+    let paper_account = engine.lock().unwrap().autopilot_needs_paper_equity(Some(&config), None);
     let cash = if config.mode == AutopilotMode::Live {
         let paper = engine.lock().unwrap().live_config().paper;
         match wallets::available_cash(&creds, &config.venue, paper).await {
+            Ok(c) => VenueCash::Read(c),
+            Err(why) => VenueCash::Failed(why),
+        }
+    } else if paper_account {
+        // Demo autopilots on the Alpaca paper account share it.
+        match wallets::paper_account_equity(&creds).await {
             Ok(c) => VenueCash::Read(c),
             Err(why) => VenueCash::Failed(why),
         }
@@ -275,6 +282,7 @@ pub async fn autopilot_update(app: AppHandle, id: String, update: AutopilotUpdat
         (st.engine.clone(), credentials(st.inner()))
     };
     let live = engine.lock().unwrap().autopilot_config(&id).filter(|c| c.mode == AutopilotMode::Live);
+    let paper_account = update.capital_usd.is_some() && engine.lock().unwrap().autopilot_needs_paper_equity(None, Some(&id));
     let cash = match live {
         Some(c) if update.capital_usd.is_some() => {
             let paper = engine.lock().unwrap().live_config().paper;
@@ -283,6 +291,10 @@ pub async fn autopilot_update(app: AppHandle, id: String, update: AutopilotUpdat
                 Err(why) => VenueCash::Failed(why),
             }
         }
+        _ if paper_account => match wallets::paper_account_equity(&creds).await {
+            Ok(c) => VenueCash::Read(c),
+            Err(why) => VenueCash::Failed(why),
+        },
         _ => VenueCash::NotRead,
     };
     let msg = engine.lock().unwrap().autopilot_update(&id, update, confirm.unwrap_or(false), cash)?;
