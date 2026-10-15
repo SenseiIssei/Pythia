@@ -55,14 +55,12 @@ export function ComfortZone() {
               setPick(c);
               setSaved(false);
             }}
-            className={`rounded-lg border px-3 py-2 text-left transition-colors ${
-              pick === c
-                ? "border-accent/50 bg-accent/10 text-accent"
-                : "border-cyber-border bg-cyber-bg/40 text-cyber-text-dim hover:border-cyber-border-bright hover:text-cyber-text"
+            className={`rounded-2xl border-2 px-3.5 py-3 text-left transition-colors ${
+              pick === c ? "border-ink text-ink" : "border-line text-muted hover:border-line-strong hover:text-ink"
             }`}
           >
-            <div className="font-mono text-base font-bold">{c} %</div>
-            <div className="font-mono text-xs text-cyber-text-faint">{money(c)}</div>
+            <div className="tabular text-[17px] font-bold">{c}%</div>
+            <div className="tabular text-[13px] text-muted">{money(c)}</div>
           </button>
         ))}
       </div>

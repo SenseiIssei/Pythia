@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { motion } from "framer-motion";
-import { ShieldAlert, Check } from "lucide-react";
+import { Check, ExternalLink, ShieldAlert } from "lucide-react";
+import { Button } from "../design";
 
 const ACK_KEY = "pythia.legal.ack.v1";
 
@@ -23,6 +23,7 @@ const TERMS = [
 export function LegalGate({ onAccept }: { onAccept: () => void }) {
   const [checked, setChecked] = useState<boolean[]>(TERMS.map(() => false));
   const all = checked.every(Boolean);
+  const count = checked.filter(Boolean).length;
 
   function accept() {
     if (!all) return;
@@ -35,63 +36,56 @@ export function LegalGate({ onAccept }: { onAccept: () => void }) {
   }
 
   return (
-    <div className="app-window grid-bg flex items-start justify-center overflow-y-auto p-4 sm:items-center sm:p-6">
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-2xl rounded-xl border border-danger/40 bg-cyber-surface p-5 glow-red sm:p-6"
-      >
-        <div className="mb-4 flex items-start gap-3">
-          <ShieldAlert className="mt-0.5 shrink-0 text-danger" size={26} aria-hidden />
-          <div>
-            <h1 className="font-mono text-xl font-bold text-glow-red">Read this before you continue</h1>
-            <p className="mt-1 text-sm text-cyber-text-dim">
-              Pythia can place real orders with real money. Tick each point to continue. It starts with practice money
-              either way.
-            </p>
-          </div>
-        </div>
+    <div className="app-window overflow-y-auto">
+      <main className="mx-auto flex w-full max-w-xl flex-1 flex-col px-4 pb-8 pt-10 sm:px-6 sm:pt-16">
+        <span className="mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-down/10 text-down" aria-hidden>
+          <ShieldAlert size={26} />
+        </span>
+        <h1 className="text-[28px] font-bold leading-tight tracking-tight text-ink sm:text-[32px]">Before you start</h1>
+        <p className="mt-2 text-[15px] leading-relaxed text-muted">
+          Pythia can place real orders with real money. Tick each point to continue. It starts with practice money either way.
+        </p>
 
-        <div className="space-y-2">
-          {TERMS.map((t, i) => (
-            <button
-              key={i}
-              type="button"
-              role="checkbox"
-              aria-checked={checked[i]}
-              onClick={() => setChecked((c) => c.map((v, j) => (j === i ? !v : v)))}
-              className={`flex w-full items-start gap-3 rounded-lg border p-3 text-left text-sm transition-colors ${
-                checked[i] ? "border-success/40 bg-success/5 text-cyber-text" : "border-cyber-border bg-cyber-surface-2 text-cyber-text-dim hover:border-cyber-border-bright"
-              }`}
-            >
-              <span
-                className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                  checked[i] ? "border-success bg-success/20 text-success" : "border-cyber-border-bright"
-                }`}
+        <fieldset className="mt-7">
+          <legend className="sr-only">Points to confirm</legend>
+          <div className="divide-y divide-line rounded-card border border-line bg-surface">
+            {TERMS.map((t, i) => (
+              <button
+                key={i}
+                type="button"
+                role="checkbox"
+                aria-checked={checked[i]}
+                onClick={() => setChecked((c) => c.map((v, j) => (j === i ? !v : v)))}
+                className="flex w-full items-start gap-3.5 px-4 py-4 text-left first:rounded-t-card last:rounded-b-card hover:bg-surface-2"
               >
-                {checked[i] && <Check size={12} />}
-              </span>
-              {t}
-            </button>
-          ))}
-        </div>
+                <span
+                  aria-hidden
+                  className={`mt-0.5 flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full border-2 transition-colors ${
+                    checked[i] ? "border-primary bg-primary text-on-primary" : "border-line-strong"
+                  }`}
+                >
+                  {checked[i] && <Check size={13} strokeWidth={3} />}
+                </span>
+                <span className={`text-[15px] leading-snug ${checked[i] ? "text-ink" : "text-muted"}`}>{t}</span>
+              </button>
+            ))}
+          </div>
+        </fieldset>
 
-        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-          <a className="text-xs text-accent hover:underline" href="https://github.com/SenseiIssei/Pythia/blob/main/SAFETY.md" target="_blank" rel="noreferrer">
-            Read the full SAFETY.md →
-          </a>
-          <button
-            type="button"
-            onClick={accept}
-            disabled={!all}
-            className={`rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
-              all ? "border-accent/50 bg-accent/10 text-accent glow-cyan hover:bg-accent/20" : "cursor-not-allowed border-cyber-border text-cyber-text-faint"
-            }`}
+        <div className="mt-7 space-y-4">
+          <Button full onClick={accept} disabled={!all}>
+            {all ? "I understand, start in practice mode" : `Tick all ${TERMS.length} points (${count} of ${TERMS.length})`}
+          </Button>
+          <a
+            className="mx-auto flex w-fit items-center gap-1.5 rounded text-[13px] font-medium text-accent hover:underline"
+            href="https://github.com/SenseiIssei/Pythia/blob/main/SAFETY.md"
+            target="_blank"
+            rel="noreferrer"
           >
-            {all ? "I understand: enter Pythia in practice mode" : `Tick all ${TERMS.length} points to continue`}
-          </button>
+            Read the full safety notes <ExternalLink size={13} aria-hidden />
+          </a>
         </div>
-      </motion.div>
+      </main>
     </div>
   );
 }

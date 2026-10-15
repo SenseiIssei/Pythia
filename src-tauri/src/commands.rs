@@ -728,6 +728,18 @@ pub fn cs2_board() -> Option<pythia_core::labview::Cs2Board> {
     pythia_core::labview::cs2_board()
 }
 
+/// Every lab job's `reports/<name>/latest.json`, by the feed convention (docs/LAB-FEEDS.md).
+#[tauri::command]
+pub fn lab_feeds() -> Vec<pythia_core::labview::LabFeed> {
+    pythia_core::labview::feeds()
+}
+
+/// The lab's study write-ups (`results/*.md`) from the synced data folder.
+#[tauri::command]
+pub fn lab_studies() -> Vec<pythia_core::labview::Study> {
+    pythia_core::labview::studies()
+}
+
 /// The volatility model in shadow mode: forecasts, live score, drift. Read-only.
 #[tauri::command]
 pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::MlStatus {

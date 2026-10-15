@@ -60,6 +60,83 @@ pub struct LabStatus {
     /// changed, what was promoted or rejected and why, autopilots against BTC.
     /// `None` until the loop has run.
     pub learn: Option<LearnDigest>,
+    /// New coin listings the watcher saw (`reports/listings/latest.json`),
+    /// shown on the Markets page. `None` until `lab.ops.listings` has run.
+    pub listings: Option<ListingsFeed>,
+}
+
+// ── new listings ────────────────────────────────────────────────────────────
+// Written every 10 minutes by `lab.ops.listings`: the last 90 days of new
+// pairs and Binance listing announcements, and how each venue answered.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct Listing {
+    pub ts_ms: i64,
+    /// alpaca · binance · coinbase · kraken · binance_news
+    pub venue: String,
+    /// listed · announced
+    pub event: String,
+    pub symbol: String,
+    pub base: String,
+    pub quote: Option<String>,
+    /// The venue had no pair of this coin before.
+    pub new_base: Option<bool>,
+    /// Whether Alpaca lists the coin; `None` without Alpaca keys.
+    pub alpaca_lists: Option<bool>,
+    pub price: Option<f64>,
+    /// The announcement's title (binance_news only).
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct ListingVenue {
+    pub ok: bool,
+    pub count: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingsFeed {
+    pub generated: String,
+    pub generated_ms: i64,
+    pub venues: BTreeMap<String, ListingVenue>,
+    pub listings: Vec<Listing>,
+}
+
+/// The watcher's file as written; `None` when it is not a JSON object. Rows
+/// and venues that do not parse are skipped.
+pub fn parse_listings(text: &str) -> Option<ListingsFeed> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let venues = v
+        .get("venues")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, x)| Some((k.clone(), serde_json::from_value(x.clone()).ok()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let listings = v
+        .get("listings")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect())
+        .unwrap_or_default();
+    Some(ListingsFeed {
+        generated: v.get("generated").and_then(Value::as_str).unwrap_or_default().to_string(),
+        generated_ms: v.get("generated_ms").and_then(Value::as_i64).unwrap_or(0),
+        venues,
+        listings,
+    })
+}
+
+fn read_listings(root: &Path) -> Option<ListingsFeed> {
+    parse_listings(&std::fs::read_to_string(root.join("reports").join("listings").join("latest.json")).ok()?)
 }
 
 // ── learning loop digest ────────────────────────────────────────────────────
@@ -355,7 +432,11 @@ fn verdict_of(name: &str, v: &Value) -> String {
     if let Some(s) = v.get("verdict").and_then(Value::as_str) {
         return s.replace("**", "");
     }
-    let f = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
+    // The cockpit's common feed header (title, updatedMs, status, headline, items).
+    if let Some(s) = v.get("headline").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        return s.to_string();
+    }
+    let f =|v: &Value, k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
     match name {
         "carry" => {
             let c = v.get("chosen").cloned().unwrap_or(Value::Null);
@@ -418,6 +499,224 @@ fn verdict_of(name: &str, v: &Value) -> String {
     }
 }
 
+// ── generic lab feeds ───────────────────────────────────────────────────────
+// Any lab job can show up in the app by writing `reports/<name>/latest.json`
+// with a small common header (docs/LAB-FEEDS.md):
+//
+//   { "title": "...", "updated_ms": 0, "status": "ok|watch|bad",
+//     "headline": "one sentence", "items": [{ "label": "...", ... }] }
+//
+// Everything is optional. A report written before the convention still shows,
+// with a title from its folder name and a headline from `verdict_of`.
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedItem {
+    pub label: String,
+    /// Numbers are served as text, as the job formatted them.
+    pub value: Option<String>,
+    pub status: Option<String>,
+    pub detail: Option<String>,
+    /// A web link or `study:<name>` for a write-up under results/.
+    pub link: Option<String>,
+    /// 0..100: how much it matters today. The Home insights pick from it.
+    pub importance: Option<f64>,
+    pub at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LabFeed {
+    /// The folder name under reports/.
+    pub name: String,
+    pub title: String,
+    pub updated_ms: i64,
+    /// ok · watch · bad · unknown
+    pub status: String,
+    pub headline: String,
+    pub items: Vec<FeedItem>,
+    /// Whether the file carries the common header (title and status).
+    pub conforms: bool,
+}
+
+/// At most this many items per feed; a job that writes more loses the tail.
+pub const FEED_MAX_ITEMS: usize = 50;
+
+/// The four statuses the app knows, from the words jobs tend to write.
+pub fn feed_status(s: &str) -> &'static str {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "ok" | "good" | "green" | "pass" | "passed" | "healthy" => "ok",
+        "watch" | "warn" | "warning" | "amber" | "yellow" => "watch",
+        "bad" | "fail" | "failed" | "error" | "red" | "critical" => "bad",
+        _ => "unknown",
+    }
+}
+
+fn str_of(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// The first key present, camelCase or snake_case.
+fn pick<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|k| v.get(*k).filter(|x| !x.is_null()))
+}
+
+fn parse_item(v: &Value) -> Option<FeedItem> {
+    if let Value::String(s) = v {
+        return Some(FeedItem { label: s.clone(), ..Default::default() });
+    }
+    let label = pick(v, &["label", "title", "name"]).and_then(str_of)?;
+    let text = |keys: &[&str]| pick(v, keys).and_then(str_of).filter(|s| !s.is_empty());
+    Some(FeedItem {
+        label,
+        value: text(&["value"]),
+        status: text(&["status"]).map(|s| feed_status(&s).to_string()),
+        detail: text(&["detail", "why", "sentence"]),
+        link: text(&["link", "url"]),
+        importance: pick(v, &["importance"]).and_then(Value::as_f64).map(|x| x.clamp(0.0, 100.0)),
+        at_ms: pick(v, &["atMs", "at_ms"]).and_then(Value::as_i64),
+    })
+}
+
+/// "alpaca_listings" -> "Alpaca listings".
+fn title_of(name: &str) -> String {
+    let words = name.replace(['_', '-'], " ");
+    let mut c = words.trim().chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// One feed from its file text. `file_ms` is the file's modification time,
+/// used when the header has no time. `None` when the text is not a JSON object.
+pub fn parse_feed(name: &str, text: &str, file_ms: i64) -> Option<LabFeed> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let title = pick(&v, &["title"]).and_then(str_of).filter(|s| !s.trim().is_empty());
+    let status = pick(&v, &["status"]).and_then(str_of);
+    let headline = pick(&v, &["headline"]).and_then(str_of).filter(|s| !s.trim().is_empty());
+    let items = pick(&v, &["items"])
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(parse_item).take(FEED_MAX_ITEMS).collect())
+        .unwrap_or_default();
+    Some(LabFeed {
+        name: name.to_string(),
+        conforms: title.is_some() && status.as_deref().map(feed_status) != Some("unknown") && status.is_some(),
+        title: title.unwrap_or_else(|| title_of(name)),
+        updated_ms: pick(&v, &["updatedMs", "updated_ms", "generated_ms", "generatedMs"])
+            .and_then(Value::as_i64)
+            .filter(|ms| *ms > 0)
+            .unwrap_or(file_ms),
+        status: status.as_deref().map(feed_status).unwrap_or("unknown").to_string(),
+        headline: headline.unwrap_or_else(|| verdict_of(name, &v)),
+        items,
+    })
+}
+
+fn severity(status: &str) -> u8 {
+    match status {
+        "bad" => 0,
+        "watch" => 1,
+        "ok" => 2,
+        _ => 3,
+    }
+}
+
+/// Every `reports/<name>/latest.json` under `root`, worst status first, then newest.
+/// Folders starting with `_` or `.` are private to the lab and skipped.
+pub fn feeds_in(root: &Path) -> Vec<LabFeed> {
+    let Ok(entries) = std::fs::read_dir(root.join("reports")) else { return vec![] };
+    let mut out: Vec<LabFeed> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('_') || name.starts_with('.') {
+                return None;
+            }
+            let p = e.path().join("latest.json");
+            let text = std::fs::read_to_string(&p).ok()?;
+            parse_feed(&name, &text, file_ms(&p))
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        severity(&a.status).cmp(&severity(&b.status)).then(b.updated_ms.cmp(&a.updated_ms)).then(a.name.cmp(&b.name))
+    });
+    out
+}
+
+/// The lab's feeds from its data folder; empty without one.
+pub fn feeds() -> Vec<LabFeed> {
+    data_dir().map(|d| feeds_in(&d)).unwrap_or_default()
+}
+
+fn file_ms(p: &Path) -> i64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+// ── study write-ups ─────────────────────────────────────────────────────────
+// The lab's `results/*.md`, served as written so the app shows the newest
+// copy. The app also ships the copies that were in the repository when it was
+// built, so this only matters once the lab has written something newer.
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Study {
+    pub name: String,
+    pub updated_ms: i64,
+    pub markdown: String,
+}
+
+/// Larger files are skipped rather than truncated mid-table.
+pub const STUDY_MAX_BYTES: u64 = 1 << 20;
+
+/// Where the write-ups are: `PYTHIA_LAB_RESULTS`, else `<data>/results`.
+pub fn results_dir() -> Option<PathBuf> {
+    if let Ok(d) = std::env::var("PYTHIA_LAB_RESULTS") {
+        return Some(d.into());
+    }
+    data_dir().map(|d| d.join("results"))
+}
+
+pub fn studies_in(dir: &Path) -> Vec<Study> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+    let mut out: Vec<Study> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("md") {
+                return None;
+            }
+            if std::fs::metadata(&p).ok()?.len() > STUDY_MAX_BYTES {
+                return None;
+            }
+            Some(Study {
+                name: p.file_stem()?.to_string_lossy().into_owned(),
+                updated_ms: file_ms(&p),
+                markdown: std::fs::read_to_string(&p).ok()?,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn studies() -> Vec<Study> {
+    results_dir().map(|d| studies_in(&d)).unwrap_or_default()
+}
+
 pub fn status() -> LabStatus {
     let Some(root) = data_dir() else { return LabStatus::default() };
     let mut out = LabStatus { found: root.exists(), dir: root.display().to_string(), ..Default::default() };
@@ -426,6 +725,7 @@ pub fn status() -> LabStatus {
         .and_then(|t| serde_json::from_str(&t).ok());
     out.forward = read_forward(&root);
     out.learn = read_learn(&root);
+    out.listings = read_listings(&root);
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));
@@ -437,12 +737,7 @@ pub fn status() -> LabStatus {
             let Ok(text) = std::fs::read_to_string(&p) else { continue };
             let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
             let name = e.file_name().to_string_lossy().into_owned();
-            let updated_ms = std::fs::metadata(&p)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
+            let updated_ms = file_ms(&p);
             out.reports.push(LabReport { verdict: verdict_of(&name, &v), name, updated_ms });
         }
         out.reports.sort_by_key(|r| std::cmp::Reverse(r.updated_ms));
@@ -720,6 +1015,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_listings_feed_and_skips_broken_rows() {
+        let f = parse_listings(
+            r#"{"generated": "2026-10-15 10:20 UTC", "generated_ms": 1791800000000,
+                "venues": {"binance": {"ok": true, "count": 3120, "error": null, "seeded": false},
+                           "alpaca": {"ok": false, "count": 0, "error": "no Alpaca keys"},
+                           "broken": "yes"},
+                "listings": [
+                  {"ts_ms": 1791800000000, "venue": "binance", "event": "listed", "symbol": "NEWUSDT",
+                   "base": "NEW", "quote": "USDT", "new_base": true, "alpaca_lists": false, "price": 0.0123,
+                   "title": null},
+                  {"ts_ms": "soon", "venue": "kraken"},
+                  {"ts_ms": 1791790000000, "venue": "binance_news", "event": "announced", "symbol": "ZED",
+                   "base": "ZED", "quote": "", "new_base": true, "alpaca_lists": null, "price": null,
+                   "title": "Binance Will List Zed (ZED)"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(f.venues.len(), 2);
+        assert!(!f.venues["alpaca"].ok);
+        assert_eq!(f.listings.len(), 2, "the row with ts_ms = \"soon\" is dropped");
+        assert_eq!(f.listings[0].price, Some(0.0123));
+        assert_eq!(f.listings[1].alpaca_lists, None);
+        let j = serde_json::to_value(&f).unwrap();
+        assert_eq!(j["listings"][0]["alpacaLists"], serde_json::json!(false));
+        assert_eq!(j["generatedMs"], serde_json::json!(1791800000000i64));
+        assert!(parse_listings("[]").is_none());
+        // The same file carries the common feed header; its headline is the report's verdict.
+        let v: Value = serde_json::from_str(
+            r#"{"title": "New listings", "updatedMs": 1, "status": "watch",
+                "headline": "1 new in the last 24 hours: Kraken NEW. 1 in 90 days.", "items": []}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict_of("listings", &v), "1 new in the last 24 hours: Kraken NEW. 1 in 90 days.");
+    }
+
+    #[test]
     fn a_missing_or_broken_forward_report_degrades_to_none() {
         assert!(parse_forward("").is_none());
         assert!(parse_forward("{\"books\": [NaN]}").is_none());
@@ -733,6 +1063,104 @@ mod tests {
         std::fs::create_dir_all(dir.join("reports").join("forward")).unwrap();
         std::fs::write(dir.join("reports").join("forward").join("latest.json"), FORWARD).unwrap();
         assert_eq!(read_forward(&dir).map(|f| f.books.len()), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_feed_with_the_common_header_is_read_as_written() {
+        let text = r#"{
+          "title": "New listings", "updated_ms": 1791800000000, "status": "Watch",
+          "headline": "Alpaca lists two new coins.",
+          "items": [
+            {"label": "SUI/USD", "value": 1.5, "status": "ok", "detail": "listed today",
+             "link": "study:alpaca_universe", "importance": 140, "at_ms": 1791790000000},
+            {"label": 7},
+            "a plain line",
+            {"title": "HYPE/USD", "why": "listed yesterday", "importance": "high"}
+          ],
+          "anything_else": {"kept": "out"}
+        }"#;
+        let f = parse_feed("listings", text, 5).unwrap();
+        assert!(f.conforms);
+        assert_eq!(f.title, "New listings");
+        assert_eq!(f.status, "watch");
+        assert_eq!(f.updated_ms, 1791800000000);
+        assert_eq!(f.items.len(), 4, "a numeric label and a bare string both count");
+        assert_eq!(f.items[0].value.as_deref(), Some("1.5"));
+        assert_eq!(f.items[0].importance, Some(100.0), "clamped to 0..100");
+        assert_eq!(f.items[0].link.as_deref(), Some("study:alpaca_universe"));
+        assert_eq!(f.items[1].label, "7");
+        assert_eq!(f.items[2].label, "a plain line");
+        assert_eq!(f.items[3].label, "HYPE/USD");
+        assert_eq!(f.items[3].detail.as_deref(), Some("listed yesterday"));
+        assert_eq!(f.items[3].importance, None, "importance must be a number");
+        assert!(parse_item(&serde_json::json!({"value": 3})).is_none(), "an item needs a label");
+        let out = serde_json::to_value(&f).unwrap();
+        assert_eq!(out["updatedMs"], 1791800000000i64);
+        assert_eq!(out["items"][0]["atMs"], 1791790000000i64);
+    }
+
+    #[test]
+    fn a_report_without_the_header_still_shows() {
+        let f = parse_feed("vol_1h", r#"{"passed": true, "qlike_gain": 0.12, "dm_p": 0.001}"#, 42).unwrap();
+        assert!(!f.conforms);
+        assert_eq!(f.title, "Vol 1h");
+        assert_eq!(f.status, "unknown");
+        assert_eq!(f.updated_ms, 42, "the file time stands in");
+        assert!(f.headline.starts_with("LGBM beats HAR"), "{}", f.headline);
+        let learn = parse_feed("learn", r#"{"generated_ms": 9, "headline": "Promoted vol_1h."}"#, 1).unwrap();
+        assert_eq!(learn.updated_ms, 9);
+        assert_eq!(learn.headline, "Promoted vol_1h.");
+        assert!(parse_feed("x", "[1]", 0).is_none());
+        assert!(parse_feed("x", "not json", 0).is_none());
+        let odd = parse_feed("x", r#"{"title": "T", "status": "sideways"}"#, 0).unwrap();
+        assert_eq!(odd.status, "unknown");
+        assert!(!odd.conforms, "a status the app does not know does not conform");
+    }
+
+    #[test]
+    fn feed_statuses_and_item_caps() {
+        assert_eq!(feed_status(" OK "), "ok");
+        assert_eq!(feed_status("warning"), "watch");
+        assert_eq!(feed_status("FAILED"), "bad");
+        assert_eq!(feed_status(""), "unknown");
+        let many: Vec<String> = (0..80).map(|i| format!("\"row {i}\"")).collect();
+        let f = parse_feed("big", &format!("{{\"items\": [{}]}}", many.join(",")), 0).unwrap();
+        assert_eq!(f.items.len(), FEED_MAX_ITEMS);
+    }
+
+    #[test]
+    fn feeds_are_discovered_by_folder_worst_first() {
+        let dir = std::env::temp_dir().join(format!("pythia-labview-feeds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(feeds_in(&dir).is_empty(), "no reports folder yet");
+        let write = |name: &str, body: &str| {
+            std::fs::create_dir_all(dir.join("reports").join(name)).unwrap();
+            std::fs::write(dir.join("reports").join(name).join("latest.json"), body).unwrap();
+        };
+        write("good", r#"{"title": "Good", "status": "ok", "updated_ms": 30}"#);
+        write("old_bad", r#"{"title": "Bad", "status": "bad", "updated_ms": 10}"#);
+        write("new_watch", r#"{"title": "Watch", "status": "watch", "updated_ms": 20}"#);
+        write("broken", "{ nope");
+        write("_private", r#"{"title": "Hidden", "status": "bad"}"#);
+        std::fs::create_dir_all(dir.join("reports").join("notify")).unwrap();
+        let names: Vec<String> = feeds_in(&dir).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, vec!["old_bad", "new_watch", "good"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn studies_are_read_from_markdown_files() {
+        let dir = std::env::temp_dir().join(format!("pythia-labview-studies-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b_study.md"), "# B\n\n**Verdict: nothing passes.**\n").unwrap();
+        std::fs::write(dir.join("a_study.md"), "# A\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "skip").unwrap();
+        let s = studies_in(&dir);
+        assert_eq!(s.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["a_study", "b_study"]);
+        assert!(s[1].markdown.contains("Verdict"));
+        assert!(s[0].updated_ms > 0);
+        assert!(studies_in(&dir.join("missing")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
