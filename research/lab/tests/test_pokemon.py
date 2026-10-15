@@ -12,6 +12,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -82,6 +83,33 @@ def test_cache_makes_a_rerun_free(tmp_path):
     a = c.get(f"{col.API}/sets?page=1", cache_key="sets_1")
     c2 = col.Client(opener=lambda *a: (_ for _ in ()).throw(AssertionError("network")), cache_dir=tmp_path)
     assert c2.get("ignored", cache_key="sets_1") == a and c2.cache_hits == 1
+
+
+def test_a_failed_run_is_tried_again_and_continues_from_the_cache(lake):
+    m = Market(date(2026, 3, 1), n_sets=2, per_set=300)  # 600 cards: three pages
+    inner = m.opener()
+    seen = []
+
+    def flaky(url, h, t):
+        seen.append(url)
+        # The third card page fails every try of the first attempt.
+        if "/cards" in url and "page=3" in url and len([u for u in seen if "page=3" in u and "/cards" in u]) <= 2:
+            return 502, {}, b""
+        return inner(url, h, t)
+
+    def attempt():
+        cl = col.Client(opener=flaky, sleep=lambda s: None, spacing=0.0, retries=2,
+                        cache_dir=lake / "_cache" / "2026-03-01")
+        return col.collect("2026-03-01", min_usd=0.0, client=cl, log=lambda *a: None)
+
+    pauses = []
+    assert col.run_with_attempts(attempt, 3, 5.0, sleep=pauses.append) == 0
+    assert pauses == [5.0], "one failed attempt, one pause"
+    card_pages = [u for u in seen if "/cards" in u]
+    assert sum("page=1&" in u for u in card_pages) == 1, "page 1 came from the cache the second time"
+    assert pl.read_parquet(lake / "catalog.parquet").height == 600
+    assert col.run_with_attempts(lambda: (_ for _ in ()).throw(col.FetchError("down")), 2, 1.0,
+                                 sleep=lambda s: None) == 1
 
 
 def test_api_key_comes_from_the_environment_only(monkeypatch):
@@ -428,6 +456,21 @@ def test_sets_are_rebuilt_from_the_cards_when_the_sets_endpoint_fails(lake):
     sets = pl.read_parquet(lake / "sets" / "date=2026-03-01" / "sets.parquet")
     assert sets.height == 3 and sets["release_date"].null_count() == 0
     assert meta["freshness"]["tcgplayer_fresh"] == meta["cards_kept"]
+
+
+def test_promos_set_level_and_a_sober_prior():
+    assert pdata.rarity_group("Promo") == "promo" and pdata.rarity_group("Rare Holo") == "holo"
+    snap = pl.DataFrame({"set_id": ["a", "a", "a", "b"], "rarity_group": ["rare", "rare", "holo", "rare"],
+                         "log_price": [1.0, 3.0, 5.0, 2.0]})
+    s = model.with_set_level(snap)
+    assert s["loo_set"].to_list() == [4.0, 3.0, 2.0, None], "the card's own price never counts"
+    assert s["loo_set_rarity"].to_list() == [3.0, 1.0, None, None]
+    g = model.prior_gap(np.array([0.0, 0.5, math.log(4.0), math.log(6.0), -math.log(6.0), np.nan]))
+    assert g[0] == 0 and 0 < g[1] < 0.5 and g[1] < g[2] < model.GAP_CLIP, "smooth, no ties at the cap"
+    assert g[3] == 0 and g[4] == 0 and g[5] == 0, "beyond a factor of 5 is model error"
+    p = model.prior(pl.DataFrame({"fv_gap": [math.log(4.0), 0.0], "cm_trend_30": [None, None]},
+                                 schema={"fv_gap": pl.Float64, "cm_trend_30": pl.Float64}), 90)
+    assert 0.05 < p[0] < 0.12 and p[1] == 0
 
 
 def test_feed_header_follows_the_lab_convention():
