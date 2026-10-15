@@ -50,6 +50,15 @@ pub fn run() {
                     eprintln!("ignoring cost file: {e}");
                 }
             }
+            // The Claude API budget: this machine's ledger in the app's data
+            // directory, plus the server's (read only) when the lab data is
+            // synced here, so the two stay under one set of caps.
+            let ai_dir = app.path().app_data_dir().ok().map(|d| d.join("ai"));
+            let mut budget = pythia_core::ai_budget::Budget::open(ai_dir, "desktop");
+            if let Some(d) = pythia_core::labview::data_dir() {
+                budget = budget.with_mirror(d.join("ai").join("ledger.jsonl"));
+            }
+            pythia_core::ai_budget::init(budget);
             // Resume any previously saved daemon state.
             persist::load(app.handle());
             // Reflect which venues already have keys in the vault.
@@ -270,6 +279,9 @@ pub fn run() {
             commands::wallet_snapshot,
             commands::ml_status,
             commands::ml_zoo,
+            commands::ai_budget,
+            commands::set_ai_budget,
+            commands::ai_report,
             commands::ml_picks_run,
             commands::tax_export,
             commands::lab_status,

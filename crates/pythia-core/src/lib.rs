@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub mod ai_budget;
 pub mod alerts;
 pub mod coins;
 pub mod connectors;

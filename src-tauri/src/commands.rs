@@ -770,6 +770,49 @@ pub fn ml_zoo() -> Option<pythia_core::labview::ZooStatus> {
     pythia_core::labview::model_zoo()
 }
 
+/// The Claude API budget of this machine: caps, spend, the last calls.
+#[tauri::command]
+pub fn ai_budget() -> serde_json::Value {
+    let mut v = serde_json::to_value(pythia_core::ai_budget::global().view(chrono::Utc::now().timestamp_millis()))
+        .unwrap_or_default();
+    v["keyConfigured"] = serde_json::json!(ai_keys().get(Provider::Anthropic.id()).is_some_and(|k| !k.trim().is_empty()));
+    v["models"] = serde_json::json!({
+        "routine": llm::CLAUDE_ROUTINE,
+        "review": llm::CLAUDE_REVIEW,
+        "deep": llm::CLAUDE_DEEP,
+    });
+    v
+}
+
+/// Change the caps; missing values keep theirs.
+#[tauri::command]
+pub fn set_ai_budget(
+    lifetime_usd: Option<f64>,
+    monthly_usd: Option<f64>,
+    daily_usd: Option<f64>,
+) -> Result<serde_json::Value, String> {
+    let b = pythia_core::ai_budget::global();
+    let cur = b.caps();
+    for v in [lifetime_usd, monthly_usd, daily_usd].into_iter().flatten() {
+        if !v.is_finite() || !(0.0..=pythia_core::ai_budget::MAX_CAP_USD).contains(&v) {
+            return Err(format!("a cap must be 0 to {} USD", pythia_core::ai_budget::MAX_CAP_USD));
+        }
+    }
+    b.set_caps(pythia_core::ai_budget::Caps {
+        lifetime_usd: lifetime_usd.unwrap_or(cur.lifetime_usd),
+        monthly_usd: monthly_usd.unwrap_or(cur.monthly_usd),
+        daily_usd: daily_usd.unwrap_or(cur.daily_usd),
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(ai_budget())
+}
+
+/// The lab's AI brief, its scores and the weekly review, from the synced folder.
+#[tauri::command]
+pub fn ai_report() -> serde_json::Value {
+    pythia_core::labview::ai_report()
+}
+
 /// M2 ranks the latest complete day now instead of waiting for the week.
 /// Shadow mode: it records the ranking, it never trades.
 #[tauri::command]
@@ -916,6 +959,7 @@ pub async fn ai_overlay_pass(app: &AppHandle, cursor: usize) -> bool {
     }
 
     let cfg = LlmConfig::new(provider, saved.ai_model.clone(), key)
+        .with_job("overlay")
         .with_effort(saved.effort())
         .with_timeout(std::time::Duration::from_secs(45));
 
@@ -976,6 +1020,7 @@ pub async fn test_llm_key(provider: String) -> Result<String, String> {
     let saved = get_prefs();
     let model = if p == saved.provider() { saved.ai_model.clone() } else { String::new() };
     let cfg = LlmConfig::new(p, model, key)
+        .with_job("key-test")
         .with_effort(pythia_core::llm::Effort::Low)
         .with_timeout(std::time::Duration::from_secs(30));
 
@@ -1005,6 +1050,6 @@ pub async fn llm_signal(provider: String, model: String, context: String) -> Res
     if p.needs_key() && key.trim().is_empty() {
         return Err(format!("{} not configured — add a key in Settings", p.id()));
     }
-    let cfg = LlmConfig::new(p, model, key);
+    let cfg = LlmConfig::new(p, model, key).with_job("signal");
     llm::signal(&cfg, &context).await.map_err(|e| e.to_string())
 }
