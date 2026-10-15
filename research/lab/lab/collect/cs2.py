@@ -295,7 +295,11 @@ def run(root: Path | None = None, fetch: Fetch = http_fetch, steam: bool = True,
     if steam:
         names = steam_names(load_watchlist(), sales)
         batch, nxt = rotate(names, cursor, steam_max)
-        rows, done, limited = fetch_steam(fetch, batch, now_ms, sleep=sleep)
+        # After a run that Steam refused outright, this run only knocks once:
+        # the first 429 ends the Steam part at once instead of waiting it out.
+        cooling = bool(prev.get("steam_rate_limited")) and not prev.get("steam_ok")
+        rows, done, limited = fetch_steam(fetch, batch, now_ms, sleep=sleep,
+                                          backoff=() if cooling else STEAM_BACKOFF_S)
         cursor = (cursor + done) % max(len(names), 1)
         if not limited:
             cursor = nxt
@@ -306,9 +310,11 @@ def run(root: Path | None = None, fetch: Fetch = http_fetch, steam: bool = True,
             _write(merge_daily_steam(daily_path, df), daily_path)
         missing = [r["name"] for r in rows if r["status"] == 200 and not r["ok"]]
         report.update(steam_requested=len(batch), steam_ok=int(df["ok"].sum()) if not df.is_empty() else 0,
-                      steam_rate_limited=limited, steam_missing=missing[:20], steam_watchlist=len(names))
+                      steam_rate_limited=limited, steam_missing=missing[:20], steam_watchlist=len(names),
+                      steam_cooling=cooling)
         if limited:
-            report["errors"].append("steam: rate limited three times, stopped early")
+            report["errors"].append("steam: refused (429) after one try, cooling off" if cooling
+                                    else "steam: rate limited three times, stopped early")
     report["steam_cursor"] = cursor
     report["ok"] = items is not None and sales is not None
     base.mkdir(parents=True, exist_ok=True)

@@ -9,7 +9,9 @@ Paper rules (fixed before the first run):
   - looks once a week; buys only items with a lowest ask of 1 EUR or more,
     20 or more Skinport sales in 7 days and 5 or more listings, whose expected
     return over the model's horizon beats the round trip (Skinport fee plus a
-    2 % spread allowance)
+    2 % spread allowance) by at least 3 % (MIN_EDGE, set on 2026-10-15 before
+    the first run on the lab machine: the first local run bought music kits
+    the model expected to clear the fees by 0.0 to 0.9 %, which is noise)
   - buys at the lowest ask, at most a day of sales (7-day sales / 7) and never
     more than is listed; sells one cent under the lowest ask minus the fee
   - holds at least 30 days unless the 7-day prediction is a loss of 5 % or
@@ -39,6 +41,7 @@ MIN_LISTED = 5
 MIN_HOLD_DAYS = 30
 REBALANCE_DAYS = 7
 SELL_PRED7 = -0.05
+MIN_EDGE = 0.03  # expected return over the horizon must beat the round trip by this much
 
 GAP_MIN = 0.05
 GAP_STEAM_VOLUME = 20
@@ -115,7 +118,7 @@ def rebalance(st: dict, snap: pl.DataFrame, preds: dict[str, tuple[float | None,
         if r["s7_volume"] < MIN_SALES7 or (r["quantity"] or 0) < MIN_LISTED:
             continue
         exp, _h = expected(p7, p30)
-        if exp is None or exp <= hurdle:
+        if exp is None or exp - hurdle < MIN_EDGE:
             continue
         cands.append((exp - hurdle, name))
     cands.sort(reverse=True)
@@ -290,7 +293,7 @@ def signal_of(exp: float | None, pred7: float | None, gap: float | None, drop: b
         return "gap"
     if drop:
         return "drop"
-    if exp is not None and liquid and exp > hurdle:
+    if exp is not None and liquid and exp - hurdle >= MIN_EDGE:
         return "buy"
     if pred7 is not None and math.isfinite(pred7) and math.expm1(pred7) <= SELL_PRED7:
         return "avoid"

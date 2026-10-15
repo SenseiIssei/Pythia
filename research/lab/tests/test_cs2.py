@@ -161,6 +161,16 @@ def test_collector_stops_steam_after_repeated_429(tmp_path):
     rep = collect.run(tmp_path, fetch=FakeNet(items, sales, steam_429=10), steam_max=5, now_ms=NOW, sleep=lambda s: None)
     assert rep["steam_rate_limited"] and rep["steam_ok"] == 0 and rep["steam_cursor"] == 0
     assert rep["ok"]  # Skinport still collected
+    # the next run knocks once and gives up at the first 429, without waiting
+    net, slept = FakeNet(items, sales, steam_429=10), []
+    rep2 = collect.run(tmp_path, fetch=net, steam_max=5, now_ms=NOW + 3_600_000, sleep=slept.append)
+    assert rep2["steam_cooling"] and rep2["steam_rate_limited"] and slept == []
+    assert sum(1 for u in net.calls if u.startswith(collect.STEAM_PRICE)) == 1
+    # once Steam answers again, the run after that is back to normal
+    rep3 = collect.run(tmp_path, fetch=FakeNet(items, sales), steam_max=5, now_ms=NOW + 7_200_000, sleep=lambda s: None)
+    assert rep3["steam_cooling"] and rep3["steam_ok"] == 5 and not rep3["steam_rate_limited"]
+    rep4 = collect.run(tmp_path, fetch=FakeNet(items, sales), steam_max=5, now_ms=NOW + 10_800_000, sleep=lambda s: None)
+    assert not rep4["steam_cooling"]
 
 
 def test_collector_survives_a_skinport_failure(tmp_path):
@@ -329,15 +339,22 @@ def test_run_end_to_end(tmp_path, monkeypatch):
     sales.append(sales_row("Recoil Case", np.full(90, 1.0) * np.exp(rng.normal(0, 0.01, 90)), 50, rng))
     collect.run(tmp_path, fetch=FakeNet(items, sales), steam_max=3, now_ms=NOW, sleep=lambda s: None)
     assert cs2run.main([], root=tmp_path, now_ms=NOW) == 0
-    board = json.loads((tmp_path / "reports" / "cs2_board" / "latest.json").read_text())
-    assert board["status"] == "ok" and board["items"]
+    board = json.loads((tmp_path / "reports" / "cs2" / "latest.json").read_text(encoding="utf-8"))
+    assert board["boardStatus"] == "ok" and board["rows"]
     assert board["model"]["src7"] == "bootstrap" and board["historyDays"] == 1
-    row = board["items"][0]
+    row = board["rows"][0]
     assert {"name", "price", "change7d", "pred7d", "pred30d", "signal"} <= set(row)
     assert board["portfolio"]["lastRebalance"] == "2026-10-15"
-    research = json.loads((tmp_path / "reports" / "cs2" / "latest.json").read_text())
+    # the lab feed header (docs/LAB-FEEDS.md): every item has a label, at most 50
+    assert board["title"] == "CS2 skins" and board["status"] in ("ok", "watch", "bad")
+    assert board["updated_ms"] == NOW and board["headline"] and "—" not in board["headline"]
+    assert 0 < len(board["items"]) <= 50 and all(i.get("label") for i in board["items"])
+    assert any(i.get("link") == "study:cs2" for i in board["items"])
+    research = json.loads((tmp_path / "reports" / "cs2" / "2026-10-15.json").read_text(encoding="utf-8"))
     assert research["history_days"] == 1 and "Too early" in research["verdict"]
-    assert (tmp_path / "reports" / "cs2_weekly" / "latest.json").exists()
+    assert board["research"]["historyDays"] == 1 and "Too early" in board["research"]["verdict"]
+    weekly = json.loads((tmp_path / "reports" / "cs2_weekly" / "latest.json").read_text(encoding="utf-8"))
+    assert weekly["title"].startswith("CS2 paper") and weekly["items"]
     # a second run the same day keeps one journal row and does not trade again
     assert cs2run.main([], root=tmp_path, now_ms=NOW + 3_600_000) == 0
     assert len(book.read_journal(tmp_path)) == 1
@@ -345,5 +362,24 @@ def test_run_end_to_end(tmp_path, monkeypatch):
 
 def test_run_without_data_writes_an_empty_board(tmp_path):
     assert cs2run.main([], root=tmp_path, now_ms=NOW) == 0
-    board = json.loads((tmp_path / "reports" / "cs2_board" / "latest.json").read_text())
-    assert board["status"] == "no data" and board["items"] == []
+    board = json.loads((tmp_path / "reports" / "cs2" / "latest.json").read_text(encoding="utf-8"))
+    assert board["boardStatus"] == "no data" and board["rows"] == []
+    assert board["status"] == "watch" and board["items"][0]["label"] == "Collector"
+
+
+def test_feed_status_follows_the_collector_and_the_alerts():
+    rows = [{"name": "A", "signal": "buy", "expectedNet": 0.04, "horizon": 30, "price": 2.0},
+            {"name": "B", "signal": "hold", "expectedNet": -0.1, "horizon": 7, "price": 1.0}]
+    fresh = {"ts_ms": NOW - 600_000, "ok": True, "skinport_items": 100, "errors": []}
+    quiet = cs2run.feed(rows, [], 10_000.0, 3, fresh, NOW)
+    assert quiet["status"] == "ok" and "No price gap" in quiet["headline"]
+    assert [i["label"] for i in quiet["items"]] == ["A", "Paper portfolio", "History collected"]
+    found = [{"kind": "gap", "name": "G", "strength": 0.08, "text": "t"},
+             {"kind": "drop", "name": "D", "strength": 0.2, "text": "t"}]
+    loud = cs2run.feed(rows, found, 10_000.0, 3, fresh, NOW)
+    assert loud["status"] == "watch" and "G" in loud["headline"] and loud["items"][0]["importance"] == 74
+    assert loud["items"][1]["value"].startswith("−")
+    stale = cs2run.feed(rows, found, 10_000.0, 3, {**fresh, "ts_ms": NOW - 4 * 3_600_000}, NOW)
+    assert stale["status"] == "bad" and stale["items"][0]["label"] == "Collector"
+    failed = cs2run.feed(rows, [], 10_000.0, 3, {**fresh, "ok": False, "errors": ["skinport items: boom"]}, NOW)
+    assert failed["status"] == "bad" and "boom" in failed["items"][0]["detail"]
