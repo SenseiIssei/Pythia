@@ -1,19 +1,22 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
-import { Menu, Minus, X, Power, ShieldCheck, TriangleAlert } from "lucide-react";
-import { navFor, isVisible, type PageId } from "./nav";
+import { Menu, Minus, Moon, PanelLeft, Power, ShieldCheck, Sun, TriangleAlert, X } from "lucide-react";
+import { activeTab, navFor, isVisible, resolvePage, tabsFor, type PageId } from "./nav";
+import { onOpenPage } from "./navigate";
+import { Segmented, TabBar } from "./design";
+import { setThemePref, useTheme } from "./design/theme";
 import { setUiMode, useUiMode, type UiMode } from "./uiMode";
 import { Home as HomePage } from "./pages/Home";
 import { StoreProvider, useStore } from "./store";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { Badge } from "./components/ui";
 import { DataHealthBadge } from "./components/DataHealth";
 import { isTauri } from "./engine";
 import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
-import { Autopilot } from "./pages/Autopilot";
-import { Practice } from "./pages/Practice";
+import { Autopilots } from "./pages/Autopilots";
+import { Activity } from "./pages/Activity";
+import { Notifications } from "./pages/Notifications";
 import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
@@ -29,16 +32,20 @@ import { Predictions } from "./pages/Predictions";
 import { Models } from "./pages/Models";
 import { Lab } from "./pages/Lab";
 import { Cards } from "./pages/Cards";
+import { Research } from "./pages/Research";
 import { Live } from "./pages/Live";
 import { Risk } from "./pages/Risk";
 import { Journal } from "./pages/Journal";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 
-const PAGES: Record<PageId, () => ReactNode> = {
+// "practice" is not a page of its own any more: resolvePage sends it to the
+// Autopilot page, which shows what Practice showed.
+const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
   home: HomePage,
-  practice: Practice,
-  autopilot: Autopilot,
+  autopilot: Autopilots,
+  activity: Activity,
+  notifications: Notifications,
   dashboard: Dashboard,
   markets: Markets,
   positions: Positions,
@@ -54,6 +61,7 @@ const PAGES: Record<PageId, () => ReactNode> = {
   models: Models,
   lab: Lab,
   cards: Cards,
+  research: Research,
   live: Live,
   risk: Risk,
   journal: Journal,
@@ -61,7 +69,7 @@ const PAGES: Record<PageId, () => ReactNode> = {
   about: About,
 };
 
-/** Below this width the sidebar becomes a drawer over the page. */
+/** Below this width the sidebar becomes a drawer and the phone tab bar shows. */
 const NARROW = "(max-width: 767px)";
 
 function useNarrow(): boolean {
@@ -83,49 +91,83 @@ function useNarrow(): boolean {
 }
 
 /**
- * Always visible, in both modes. Simple mode changes the *words*, never the
- * warning: hiding whether real money is in play would be the one thing a
- * beginner-friendly view must never do.
+ * A strip under the top bar, only when it matters: real money, or the kill
+ * switch. Practice mode is said by the pill in the top bar, on every page.
+ * Simple mode changes the words, never the warning.
  */
 function ModeBanner() {
   const { portfolio, limits } = useStore();
-  const mode = useUiMode();
-  const simple = mode === "simple";
+  const simple = useUiMode() === "simple";
   const live = portfolio.mode === "live";
 
   if (limits.killSwitch) {
     return (
-      <div
-        role="status"
-        className="flex items-center justify-center gap-2 border-b border-danger/40 bg-danger/10 px-3 py-1.5 text-center font-mono text-xs font-bold text-danger text-glow-red animate-pulse-red"
-      >
-        <Power size={13} aria-hidden className="shrink-0" />
+      <div role="status" className="flex items-center justify-center gap-2 bg-down/10 px-3 py-2 text-center text-[13px] font-semibold text-down">
+        <Power size={14} aria-hidden className="shrink-0" />
         {simple ? "Stopped: it will not open anything new" : "Kill switch engaged: live buys halted"}
       </div>
     );
   }
+  if (!live) return null;
   return (
-    <div
+    <div role="status" className="flex items-center justify-center gap-2 bg-down px-3 py-2 text-center text-[13px] font-semibold text-on-down">
+      <TriangleAlert size={14} aria-hidden className="shrink-0" />
+      {simple ? "Real money: this can place real orders" : "Live: real orders may be placed"}
+    </div>
+  );
+}
+
+/** Practice or real money, always in the top bar. */
+function ModePill() {
+  const { portfolio } = useStore();
+  const simple = useUiMode() === "simple";
+  const live = portfolio.mode === "live";
+  return (
+    <span
       role="status"
-      className={`flex items-center justify-center gap-2 border-b px-3 py-1.5 text-center font-mono text-xs font-medium ${
-        live
-          ? "border-danger/40 bg-danger/10 text-danger animate-pulse-red"
-          : "border-success/20 bg-success/[0.06] text-success"
+      title={live ? "Real orders can be placed" : "Simulated money only. Nothing can be lost."}
+      className={`inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-full px-3 text-[13px] font-semibold ${
+        live ? "bg-down text-on-down" : "bg-up/10 text-up"
       }`}
     >
-      {live ? (
-        <TriangleAlert size={13} aria-hidden className="shrink-0" />
-      ) : (
-        <ShieldCheck size={13} aria-hidden className="shrink-0" />
-      )}
-      {live
-        ? simple
-          ? "Real money: this can place real orders"
-          : "Live: real orders may be placed"
-        : simple
-          ? "Practice mode: fake money, nothing can be lost"
-          : "Paper mode: simulated money, no orders leave this machine"}
-    </div>
+      {live ? <TriangleAlert size={14} aria-hidden /> : <ShieldCheck size={14} aria-hidden />}
+      {live ? (simple ? "Real money" : "Live") : simple ? "Practice" : "Paper"}
+    </span>
+  );
+}
+
+function StopButton() {
+  const { toggleKill, limits } = useStore();
+  const on = limits.killSwitch;
+  return (
+    <button
+      type="button"
+      onClick={toggleKill}
+      aria-pressed={on}
+      title={on ? "Stopped. Press to let it open new trades again." : "Stop it opening anything new, right away. It can still close what it holds."}
+      className={`inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-full px-3 text-[13px] font-semibold transition-colors ${
+        on ? "bg-down text-on-down" : "bg-surface-2 text-ink hover:bg-down/10 hover:text-down"
+      }`}
+    >
+      <Power size={14} aria-hidden />
+      {on ? "Stopped" : "Stop"}
+    </button>
+  );
+}
+
+function ThemeButton() {
+  const theme = useTheme();
+  const next = theme === "dark" ? "light" : "dark";
+  return (
+    <button
+      type="button"
+      onClick={() => setThemePref(next)}
+      aria-label={`Switch to ${next} mode`}
+      title={`Switch to ${next} mode`}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-ink"
+    >
+      {theme === "dark" ? <Sun size={17} aria-hidden /> : <Moon size={17} aria-hidden />}
+    </button>
   );
 }
 
@@ -135,44 +177,32 @@ function ModeBanner() {
  * same switch with a longer explanation.
  */
 function ViewSwitch({ mode }: { mode: UiMode }) {
-  const options: { id: UiMode; label: string }[] = [
-    { id: "simple", label: "Simple" },
-    { id: "advanced", label: "Advanced" },
-  ];
   return (
-    <div className="border-t border-cyber-border p-3">
-      <div id="view-switch-label" className="mb-1.5 px-1 font-mono text-[10px] uppercase tracking-widest text-cyber-text-faint">
-        View
-      </div>
-      <div
-        role="radiogroup"
-        aria-labelledby="view-switch-label"
-        className="grid grid-cols-2 gap-0.5 rounded-lg border border-cyber-border-bright bg-cyber-bg/60 p-0.5"
-      >
-        {options.map((o) => {
-          const on = mode === o.id;
-          return (
-            <button
-              key={o.id}
-              type="button"
-              role="radio"
-              aria-checked={on}
-              onClick={() => setUiMode(o.id)}
-              className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
-                on ? "bg-accent/15 text-accent" : "text-cyber-text-dim hover:text-cyber-text"
-              }`}
-            >
-              {o.label}
-            </button>
-          );
-        })}
-      </div>
-      <p className="mt-1.5 px-1 text-[11px] leading-snug text-cyber-text-faint">
-        {mode === "simple"
-          ? "Only the essentials. Advanced adds charts, strategies and risk controls."
-          : "Every page and control. Simple keeps only the essentials."}
+    <div className="border-t border-line p-4">
+      <Segmented<UiMode>
+        label="View"
+        value={mode}
+        onChange={setUiMode}
+        options={[
+          { id: "simple", label: "Simple" },
+          { id: "advanced", label: "Advanced" },
+        ]}
+      />
+      <p className="mt-2 px-1 text-[12px] leading-snug text-faint">
+        {mode === "simple" ? "Only the essentials. Advanced adds charts, strategies and risk controls." : "Every page and control. Simple keeps only the essentials."}
       </p>
     </div>
+  );
+}
+
+function Brand() {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-[13px] font-bold text-on-primary" aria-hidden>
+        P
+      </span>
+      <span className="truncate text-[17px] font-bold tracking-tight text-ink">Pythia</span>
+    </span>
   );
 }
 
@@ -180,7 +210,6 @@ function Chrome() {
   const [page, setPage] = useState<PageId>("home");
   const narrow = useNarrow();
   const [sidebar, setSidebar] = useState(() => !(window.matchMedia?.(NARROW).matches ?? false));
-  const { portfolio, toggleKill, limits } = useStore();
   const mode = useUiMode();
   const mainRef = useRef<HTMLElement>(null);
   const native = isTauri();
@@ -201,9 +230,7 @@ function Chrome() {
   const sections = [...new Set(nav.map((n) => n.section))];
   // Leaving advanced mode while on an advanced page would strand the user on a
   // screen with no way back to it in the sidebar.
-  const current = isVisible(page, mode) ? page : "home";
-  const live = portfolio.mode === "live";
-  const simple = mode === "simple";
+  const current = isVisible(page, mode) ? (resolvePage(page) as keyof typeof PAGES) : "home";
 
   function go(id: PageId) {
     setPage(id);
@@ -211,14 +238,30 @@ function Chrome() {
     mainRef.current?.scrollTo({ top: 0 });
   }
 
+  // A page asking for another (Home's insights open Research).
+  const goRef = useRef(go);
+  goRef.current = go;
+  useEffect(() => onOpenPage((id) => goRef.current(id)), []);
+
   const navBody = (
-    <div className="flex h-full w-64 flex-col md:w-52">
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {sections.map((section) => (
-          <div key={section} className="mb-4">
-            <div className="mb-1 px-2 font-mono text-[10px] uppercase tracking-widest text-cyber-text-faint">
-              {section}
-            </div>
+    <div className="flex h-full w-[264px] flex-col md:w-60">
+      {narrow && (
+        <div className="flex items-center justify-between px-4 pb-1 pt-4">
+          <Brand />
+          <button
+            type="button"
+            onClick={() => setSidebar(false)}
+            aria-label="Close the menu"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-ink hover:bg-line"
+          >
+            <X size={17} aria-hidden />
+          </button>
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {sections.map((section, si) => (
+          <div key={section} className={si === 0 ? "" : "mt-5"}>
+            <div className="mb-1 px-3 text-[12px] font-semibold text-faint">{section}</div>
             {nav
               .filter((n) => n.section === section)
               .map((item) => {
@@ -230,20 +273,12 @@ function Chrome() {
                     type="button"
                     onClick={() => go(item.id)}
                     aria-current={active ? "page" : undefined}
-                    className={`relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors ${
-                      active
-                        ? "bg-accent/[0.07] font-medium text-accent"
-                        : "text-cyber-text-dim hover:bg-cyber-surface-2 hover:text-cyber-text"
+                    className={`flex h-10 w-full items-center gap-3 rounded-control px-3 text-[15px] transition-colors ${
+                      active ? "bg-surface-2 font-semibold text-ink" : "text-muted hover:bg-surface-2 hover:text-ink"
                     }`}
                   >
-                    {active && (
-                      <motion.div
-                        layoutId="sidebar-active"
-                        className="absolute left-0 h-6 w-0.5 rounded-full bg-accent glow-cyan"
-                      />
-                    )}
-                    <Icon size={16} aria-hidden />
-                    {item.label}
+                    <Icon size={18} strokeWidth={active ? 2.2 : 1.8} aria-hidden className="shrink-0" />
+                    <span className="truncate">{item.label}</span>
                   </button>
                 );
               })}
@@ -255,52 +290,29 @@ function Chrome() {
   );
 
   return (
-    <div className="app-window grid-bg">
-      {/* titlebar */}
-      <div className="titlebar flex h-12 shrink-0 items-center justify-between gap-2 border-b border-cyber-border bg-cyber-surface/80 px-2 backdrop-blur-sm sm:px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setSidebar((s) => !s)}
-            aria-label={sidebar ? "Hide the menu" : "Show the menu"}
-            aria-expanded={sidebar}
-            aria-controls="main-nav"
-            className="rounded-md p-1.5 text-cyber-text-dim hover:bg-cyber-surface-2 hover:text-accent"
-          >
-            <Menu size={18} aria-hidden />
-          </button>
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="h-3 w-3 shrink-0 rounded-full bg-gradient-to-br from-accent to-purple-neon glow-cyan" aria-hidden />
-            <span className="font-mono font-bold tracking-widest text-glow-cyan">PYTHIA</span>
-            <span className="hidden font-mono text-xs text-cyber-text-faint sm:inline">v0.4</span>
-          </div>
+    <div className="app-window">
+      {/* top bar */}
+      <div className="titlebar flex h-14 shrink-0 items-center justify-between gap-2 border-b border-line bg-canvas px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {!narrow && (
+            <button
+              type="button"
+              onClick={() => setSidebar((s) => !s)}
+              aria-label={sidebar ? "Hide the menu" : "Show the menu"}
+              aria-expanded={sidebar}
+              aria-controls="main-nav"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-2 hover:text-ink"
+            >
+              <PanelLeft size={18} aria-hidden />
+            </button>
+          )}
+          <Brand />
         </div>
-        <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <DataHealthBadge />
-          <Badge
-            tone={live ? "red" : "green"}
-            title={live ? "Real orders can be placed" : "Simulated money only"}
-          >
-            {live ? (simple ? "REAL MONEY" : "LIVE") : simple ? "PRACTICE" : "PAPER"}
-          </Badge>
-          <button
-            type="button"
-            onClick={toggleKill}
-            aria-pressed={limits.killSwitch}
-            title={
-              limits.killSwitch
-                ? "Stopped. Press to let it open new trades again."
-                : "Stop it opening anything new, right away. It can still close what it holds."
-            }
-            className={`flex items-center gap-1 rounded-lg border px-2 py-1 font-mono text-xs font-bold transition-colors ${
-              limits.killSwitch
-                ? "border-danger/50 bg-danger/20 text-danger glow-red"
-                : "border-cyber-border-bright text-cyber-text-dim hover:border-danger/50 hover:text-danger"
-            }`}
-          >
-            <Power size={13} aria-hidden />
-            {limits.killSwitch ? "STOPPED" : "KILL"}
-          </button>
+          <ModePill />
+          <StopButton />
+          {!narrow && <ThemeButton />}
           {/* Window controls only mean something in the desktop app. */}
           {native && (
             <>
@@ -309,7 +321,7 @@ function Chrome() {
                 onClick={() => void minimizeWindow()}
                 aria-label="Minimize"
                 title="Minimize"
-                className="rounded-md p-1 text-cyber-text-dim hover:text-accent"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface-2 hover:text-ink"
               >
                 <Minus size={16} aria-hidden />
               </button>
@@ -318,7 +330,7 @@ function Chrome() {
                 onClick={() => void hideWindow()}
                 aria-label="Close to tray"
                 title="Close to tray (keeps running)"
-                className="rounded-md p-1 text-cyber-text-dim hover:text-danger"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface-2 hover:text-ink"
               >
                 <X size={16} aria-hidden />
               </button>
@@ -341,7 +353,7 @@ function Chrome() {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   onClick={() => setSidebar(false)}
-                  className="absolute inset-0 z-30 bg-black/60"
+                  className="absolute inset-0 z-30 bg-black/40"
                   aria-hidden
                 />
                 <motion.nav
@@ -351,8 +363,8 @@ function Chrome() {
                   initial={{ x: "-100%" }}
                   animate={{ x: 0 }}
                   exit={{ x: "-100%" }}
-                  transition={{ type: "tween", duration: 0.2 }}
-                  className="absolute inset-y-0 left-0 z-40 border-r border-cyber-border bg-cyber-surface shadow-2xl shadow-black/60"
+                  transition={{ type: "tween", duration: 0.2, ease: "easeOut" }}
+                  className="absolute inset-y-0 left-0 z-40 max-w-[85vw] bg-surface shadow-pop"
                 >
                   {navBody}
                 </motion.nav>
@@ -366,9 +378,10 @@ function Chrome() {
                 id="main-nav"
                 aria-label="Pages"
                 initial={{ width: 0, opacity: 0 }}
-                animate={{ width: 208, opacity: 1 }}
+                animate={{ width: 240, opacity: 1 }}
                 exit={{ width: 0, opacity: 0 }}
-                className="shrink-0 overflow-hidden border-r border-cyber-border bg-cyber-surface/50"
+                transition={{ duration: 0.18 }}
+                className="shrink-0 overflow-hidden border-r border-line bg-canvas"
               >
                 {navBody}
               </motion.nav>
@@ -377,15 +390,11 @@ function Chrome() {
         )}
 
         {/* page host: all pages mounted, inactive hidden, for instant switching */}
-        <main ref={mainRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-          {(Object.keys(PAGES) as PageId[]).map((id) => {
+        <main ref={mainRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden bg-canvas">
+          {(Object.keys(PAGES) as (keyof typeof PAGES)[]).map((id) => {
             const Page = PAGES[id];
             return (
-              <div
-                key={id}
-                style={{ display: current === id ? "block" : "none" }}
-                className="px-4 pb-10 pt-5 sm:px-6 sm:pt-6"
-              >
+              <div key={id} style={{ display: current === id ? "block" : "none" }} className="px-4 pb-12 pt-6 sm:px-8 sm:pt-8">
                 <ErrorBoundary>
                   <Page />
                 </ErrorBoundary>
@@ -394,6 +403,16 @@ function Chrome() {
           })}
         </main>
       </div>
+
+      {/* a phone gets bottom tabs for the everyday pages; the rest sit behind More */}
+      {narrow && (
+        <TabBar<PageId | "more">
+          label="Main pages"
+          items={[...tabsFor(mode), { id: "more", label: "More", icon: Menu }]}
+          active={sidebar ? "more" : activeTab(current)}
+          onSelect={(id) => (id === "more" ? setSidebar((s) => !s) : go(id))}
+        />
+      )}
     </div>
   );
 }

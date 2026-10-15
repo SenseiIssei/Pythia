@@ -1,21 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, Gauge, RefreshCw, Scale, TriangleAlert, Trophy } from "lucide-react";
-import { Badge, Button, Card, PageHeader, StatCard } from "../components/ui";
+import { BrainCircuit, RefreshCw } from "lucide-react";
+import { Badge, Button, Card, List, Notice, Page, signedPct } from "../design";
+import { KeyStats, LoadingRows, More, Nothing, Row, Section, num, pct, plural, share } from "../pagekit";
+import { outlook } from "../pagekit/insight";
 import { liveMode } from "../live";
-import { mlStatus, type DriftLevel, type MlStatus } from "../ml";
-import { PicksPanel } from "../components/PicksPanel";
+import { mlStatus, type MlStatus } from "../ml";
+import { DriftRows, PicksPanel } from "../components/PicksPanel";
 
-const fmtVol = (v: number) => `${v.toFixed(0)} %`;
+const fmtVol = (v: number) => pct(v, 0);
 const NONE = "not yet";
 const fmtHour = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const fmtDate = (ms: number) => new Date(ms).toLocaleDateString();
-
-const DRIFT_TONE: Record<DriftLevel, "green" | "purple" | "red"> = { stable: "green", shift: "purple", drift: "red" };
-const DRIFT_WORD: Record<DriftLevel, string> = {
-  stable: "like training",
-  shift: "different regime",
-  drift: "outside trained range",
-};
 
 export function Models() {
   const mode = liveMode();
@@ -38,25 +33,18 @@ export function Models() {
     return () => clearInterval(t);
   }, [mode, refresh]);
 
-  const header = (
-    <PageHeader
-      title="Models"
-      subtitle="Forecasts in shadow mode: written down before the hour or week, scored after it, never traded"
-    />
-  );
+  const title = "Models";
+  const subtitle = "Forecasts in shadow mode: written down before the hour or week, scored after it, never traded.";
 
   if (mode === "none") {
     return (
-      <div className="animate-fade-in max-w-5xl">
-        {header}
-        <Card className="border-warning/30 bg-warning/5">
-          <div className="flex items-start gap-3 text-sm text-cyber-text-dim">
-            <TriangleAlert size={18} className="mt-0.5 shrink-0 text-warning" />
-            Models run in the <span className="text-accent">desktop app</span> or a{" "}
-            <span className="text-accent">backend server</span>, not in the browser paper build.
-          </div>
+      <Page title={title} subtitle={subtitle}>
+        <Card>
+          <Nothing icon={BrainCircuit} title="Models need the desktop app or a connected server">
+            Models run in the desktop app or a backend server, not in the browser paper build.
+          </Nothing>
         </Card>
-      </div>
+      </Page>
     );
   }
 
@@ -66,155 +54,137 @@ export function Models() {
   const drifted = (s?.drift ?? []).filter((d) => d.level === "drift");
 
   return (
-    <div className="animate-fade-in max-w-5xl space-y-4">
-      {header}
+    <Page
+      title={title}
+      subtitle={subtitle}
+      right={
+        <Button variant="secondary" size="sm" icon={RefreshCw} onClick={() => void refresh()}>
+          Refresh
+        </Button>
+      }
+    >
+      {shadow && s?.model && (
+        <KeyStats
+          items={[
+            {
+              label: "Better than HAR",
+              value: gain === null ? NONE : signedPct(gain, 1),
+              tone: gain === null ? "plain" : gain > 0 ? "up" : "down",
+              sub: "smaller forecast error than the textbook method, live",
+            },
+            {
+              label: "Hours won",
+              value: shadow.winRate === null ? NONE : share(shadow.winRate),
+              sub: "model closer than HAR",
+            },
+            {
+              label: "Hours scored live",
+              value: shadow.scored.toLocaleString(),
+              sub: shadow.sinceMs ? `since ${fmtDate(shadow.sinceMs)}` : "first score after the next full hour",
+            },
+          ]}
+        />
+      )}
 
       {err && (
-        <Card className="border-danger/30 bg-danger/5">
-          <div className="text-sm text-danger">{err}</div>
+        <Notice tone="danger" title="Could not read the models">
+          {err}
+        </Notice>
+      )}
+
+      {!s && !err && (
+        <Card>
+          <LoadingRows label="Reading the models" />
         </Card>
       )}
 
       {s && s.state !== "live" && (
-        <Card className={s.state === "rejected" ? "border-danger/30 bg-danger/5" : "border-warning/30 bg-warning/5"}>
-          <div className="flex items-start gap-3 text-sm">
-            <TriangleAlert size={18} className={`mt-0.5 shrink-0 ${s.state === "rejected" ? "text-danger" : "text-warning"}`} />
-            <div>
-              <div className="font-bold text-cyber-text">
-                {s.state === "noModel" && "No volatility model loaded"}
-                {s.state === "rejected" && "Model refused"}
-                {s.state === "warmingUp" && "Warming up"}
-              </div>
-              <div className="text-cyber-text-dim">{s.message}</div>
-            </div>
-          </div>
-        </Card>
+        <Notice
+          tone={s.state === "rejected" ? "danger" : "warning"}
+          title={s.state === "noModel" ? "No volatility model loaded" : s.state === "rejected" ? "Model refused" : "Warming up"}
+        >
+          {s.message}
+        </Notice>
       )}
 
       {s?.model && (
-        <Card
+        <Section
           title="Next-hour volatility"
-          right={
-            <div className="flex items-center gap-2">
-              <Badge tone="purple">shadow mode</Badge>
-              <Button tone="neutral" icon={RefreshCw} onClick={() => void refresh()}>
-                Refresh
-              </Button>
-            </div>
-          }
+          hint="Forecasts how much each coin will move in the coming hour, so position sizes and stops can follow the market instead of a fixed guess."
+          right={<Badge tone="accent">shadow mode</Badge>}
         >
-          <p className="text-sm text-cyber-text-dim">
-            Forecasts how much each coin will move in the coming hour, so position sizes and stops can follow the
-            market instead of a fixed guess. Version {s.model.version}, {s.model.trees} trees, trained on data up to{" "}
-            {fmtDate(s.model.trainToMs)}. In the lab it was{" "}
-            <span className="text-accent">{s.model.labGainVsHarPct.toFixed(1)} %</span> more accurate than the
-            standard baseline (HAR), out of sample.
-          </p>
-        </Card>
-      )}
-
-      {shadow && s?.model && (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <StatCard label="Hours scored live" value={shadow.scored} icon={Activity} sub={shadow.sinceMs ? `since ${fmtDate(shadow.sinceMs)}` : "first score after the next full hour"} />
-          <StatCard
-            label="Better than HAR"
-            value={gain === null ? NONE : `${gain >= 0 ? "+" : ""}${gain.toFixed(1)} %`}
-            icon={Trophy}
-            tone={gain === null ? "cyan" : gain > 0 ? "green" : "red"}
-            sub="lower forecast error (QLIKE)"
-          />
-          <StatCard
-            label="Hours won"
-            value={shadow.winRate === null ? NONE : `${(shadow.winRate * 100).toFixed(0)} %`}
-            icon={Scale}
-            sub="model closer than HAR"
-          />
-          <StatCard
-            label="Error, model vs HAR"
-            value={shadow.qlikeModel === null ? NONE : shadow.qlikeModel.toFixed(3)}
-            icon={Gauge}
-            sub={shadow.qlikeHar === null ? "" : `HAR ${shadow.qlikeHar.toFixed(3)}`}
-          />
-        </div>
+          <List>
+            <Row
+              label="Better than HAR in the lab"
+              sub="out of sample, before going live"
+              value={signedPct(s.model.labGainVsHarPct, 1)}
+              tone={s.model.labGainVsHarPct > 0 ? "up" : "down"}
+              help="How much smaller its forecast error was than the standard baseline (HAR) on data it never trained on."
+            />
+            {shadow && (
+              <Row
+                label="Error, model vs HAR"
+                sub="QLIKE, lower is better"
+                value={shadow.qlikeModel === null ? NONE : num(shadow.qlikeModel, 3)}
+                valueSub={shadow.qlikeHar === null ? undefined : `HAR ${num(shadow.qlikeHar, 3)}`}
+              />
+            )}
+            <Row label="Version" sub={`${plural(s.model.trees, "tree")}, trained on data up to ${fmtDate(s.model.trainToMs)}`} value={s.model.version} />
+          </List>
+        </Section>
       )}
 
       {s && s.coins.length > 0 && (
-        <Card title={`Coming hour, from ${fmtHour(s.coins[0].hourMs)}`}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wide text-cyber-text-faint">
-                  <th className="py-1.5 pr-3">Coin</th>
-                  <th className="py-1.5 pr-3 text-right">Model</th>
-                  <th className="py-1.5 pr-3 text-right">HAR</th>
-                  <th className="py-1.5 pr-3 text-right">Last hour</th>
-                  <th className="py-1.5 pr-3 text-right">Week average</th>
-                  <th className="py-1.5">Outlook</th>
-                </tr>
-              </thead>
-              <tbody className="tabular-nums">
-                {s.coins.map((c) => {
-                  const ratio = c.modelVolPct / c.weekVolPct;
-                  return (
-                    <tr key={c.coin} className="border-t border-cyber-border">
-                      <td className="py-1.5 pr-3 font-medium text-cyber-text">{c.coin}</td>
-                      <td className="py-1.5 pr-3 text-right text-accent">{fmtVol(c.modelVolPct)}</td>
-                      <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{fmtVol(c.harVolPct)}</td>
-                      <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{fmtVol(c.lastHourVolPct)}</td>
-                      <td className="py-1.5 pr-3 text-right text-cyber-text-dim">{fmtVol(c.weekVolPct)}</td>
-                      <td className="py-1.5">
-                        {ratio > 1.25 ? (
-                          <Badge tone="red">busier than usual</Badge>
-                        ) : ratio < 0.8 ? (
-                          <Badge tone="green">calmer than usual</Badge>
-                        ) : (
-                          <Badge tone="neutral">normal</Badge>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <p className="mt-3 text-xs text-cyber-text-faint">
-            Annualised volatility. Model and HAR forecast the coming hour; last hour and week average are what
-            happened.
-          </p>
-        </Card>
+        <Section
+          title={`Coming hour, from ${fmtHour(s.coins[0].hourMs)}`}
+          hint="The model's forecast for each coin, against the textbook method and what really happened lately. Annualised volatility."
+        >
+          <List>
+            {s.coins.map((c) => {
+              const o = outlook(c.modelVolPct, c.weekVolPct);
+              return (
+                <Row
+                  key={c.coin}
+                  label={<span className="font-semibold">{c.coin}</span>}
+                  sub={
+                    <span className="tabular">
+                      HAR {fmtVol(c.harVolPct)} · last hour {fmtVol(c.lastHourVolPct)} · week {fmtVol(c.weekVolPct)}
+                    </span>
+                  }
+                  value={fmtVol(c.modelVolPct)}
+                  valueSub={<Badge tone={o.tone}>{o.word}</Badge>}
+                />
+              );
+            })}
+          </List>
+          <p className="mt-2 text-[13px] text-muted">Model and HAR forecast the coming hour; last hour and week average are what happened.</p>
+        </Section>
       )}
 
       {s && s.drift.length > 0 && (
-        <Card title="Are the inputs still like the training data?">
+        <Section title="Are the inputs still like the training data?" hint="Trees cannot extrapolate, so inputs outside what the model has seen make forecasts less reliable.">
           {drifted.length > 0 ? (
-            <p className="mb-3 text-sm text-danger">
-              {drifted.length} of {s.drift.length} inputs spent more than 5 % of the last week outside the range the
-              model was trained on. Trees cannot extrapolate, so forecasts may be off until the weekly retrain has
-              seen this market.
-            </p>
+            <Notice tone="warning">
+              {drifted.length} of {s.drift.length} inputs spent more than 5% of the last week outside the range the model was
+              trained on. Trees cannot extrapolate, so forecasts may be off until the weekly retrain has seen this market.
+            </Notice>
           ) : notStable.length === 0 ? (
-            <p className="text-sm text-success">
-              All {s.drift.length} market inputs over the last week sit inside what the model was trained on.
-            </p>
+            <Notice tone="success">All {s.drift.length} market inputs over the last week sit inside what the model was trained on.</Notice>
           ) : (
-            <p className="mb-3 text-sm text-cyber-text-dim">
-              All inputs are inside the trained range. {notStable.length} of {s.drift.length} are spread differently
-              from the six-year average, which is normal: a single week is one market regime.
+            <p className="text-[15px] leading-relaxed text-ink">
+              All inputs are inside the trained range. {notStable.length} of {s.drift.length} are spread differently from the
+              six-year average, which is normal: a single week is one market regime.
             </p>
           )}
-          <div className="mt-2 flex flex-wrap gap-2">
-            {s.drift.map((d) => (
-              <span key={d.feature} title={`${d.outsidePct.toFixed(1)} % outside the trained range, PSI ${d.psi.toFixed(2)}`}>
-                <Badge tone={DRIFT_TONE[d.level]}>
-                  {d.feature} · {DRIFT_WORD[d.level]}
-                </Badge>
-              </span>
-            ))}
+          <div className="mt-2">
+            <More title={`All ${plural(s.drift.length, "input")}`}>
+              <DriftRows drift={s.drift} />
+            </More>
           </div>
-        </Card>
+        </Section>
       )}
 
       {s?.picks && <PicksPanel p={s.picks} onChanged={() => void refresh()} />}
-    </div>
+    </Page>
   );
 }

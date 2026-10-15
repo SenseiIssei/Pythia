@@ -93,6 +93,14 @@ print('true|' + '; '.join('%s %s, %+.2f %% since %s' % (x['config']['name'], x['
     fi
   fi
 
+  # Trending watcher: a snapshot in the last 45 minutes (cron every 15)
+  local tj="$data/reports/trending/latest.json"
+  if [ -f "$tj" ] && [ $(( now - $(stat -c %Y "$tj") )) -lt 2700 ]; then
+    add "trending watcher" true "last snapshot $(date -u -d @"$(stat -c %Y "$tj")" +%H:%M) UTC"
+  else
+    add "trending watcher" false "no snapshot in the last 45 minutes"
+  fi
+
   # Shadow model service answers and is live
   local ml
   ml=$(curl -s -m 5 127.0.0.1:8787/api/ml/status | python3 -c "import json,sys;s=json.load(sys.stdin);print(s['state'], s['shadow']['scored'])" 2>/dev/null)

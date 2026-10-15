@@ -663,7 +663,23 @@ def build(now_ms: int | None = None, url: str | None = None, price_at=btc_price_
             "min_judge_days": MIN_JUDGE_DAYS, "band": list(BAND),
             "books": books, "autopilots": aps, "engine": engine}
     data["verdict"] = summary(books, aps, engine)
+    data.update(feed(books, aps, data["verdict"], now_ms))
     return _finite(data)
+
+
+def feed(books: list[dict], aps: list[dict], verdict: str, now_ms: int) -> dict:
+    """The common feed header (docs/LAB-FEEDS.md): watch when any book or
+    autopilot is worth watching, one item per row, a book below its band first."""
+    rows = books + aps
+    items = [{"label": r.get("label") or r.get("name"),
+              "value": None if r.get("return_pct") is None else f"{r['return_pct']:+.2f} %",
+              "status": "watch" if r.get("status") == "watch" else "ok",
+              "detail": r.get("sentence"),
+              "importance": 70 if r.get("position") == "below" else 40 if r.get("status") == "watch" else 10}
+             for r in rows if r.get("label") or r.get("name")]
+    items.sort(key=lambda it: -it["importance"])
+    status = "watch" if any(r.get("status") == "watch" for r in rows) else "ok"
+    return report.feed_header("Forward tests", status, verdict, items, now_ms)
 
 
 def _finite(v):

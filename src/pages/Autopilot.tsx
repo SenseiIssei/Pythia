@@ -1,7 +1,6 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
-  ArrowLeftRight,
   BarChart3,
   CalendarClock,
   CheckCircle2,
@@ -25,25 +24,48 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  AreaChart,
   Badge,
   Button,
   Card,
-  EmptyState,
-  Explain,
   Field,
-  Loading,
-  Meter,
+  List,
   Notice,
-  PageHeader,
-  Readout,
-  StatCard,
-  Term,
-  fmtUsd,
+  Sheet,
+  Toggle,
+  changeTone,
   inputCls,
-  pnlTone,
-  type Tone,
-} from "../components/ui";
-import { PnlLines } from "../components/PnlBreakdown";
+  money,
+  signedMoney,
+  signedPct,
+  type Scrub,
+} from "../design";
+import {
+  CostLines,
+  Explain,
+  KeyStats,
+  LoadingRows,
+  Meter,
+  Nothing,
+  Row,
+  Section,
+  SwitchRow,
+  Term,
+  plural,
+  type StatTone,
+} from "../pagekit";
+import {
+  capitalise,
+  feeShare,
+  floorRoom,
+  modeLabel,
+  moveWords,
+  parseInput,
+  pointsWord,
+  setupProblems,
+  splitCurve,
+  stillToGo,
+} from "../pagekit/autopilotView";
 import { explain } from "../glossary";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
@@ -76,7 +98,7 @@ import type { AutopilotConfig, AutopilotStart, AutopilotStatus, AutopilotUpdate,
 
 // ── where the numbers come from ─────────────────────────────────────────────
 
-interface AutopilotApi {
+export interface AutopilotApi {
   loading: boolean;
   /** Set only in a dev build opened with `?mockAutopilot`: the page shows sample data. */
   mocked: MockScenario | null;
@@ -91,7 +113,7 @@ interface AutopilotApi {
   btc: { symbol: string; times?: number[]; closes?: number[] } | null;
 }
 
-function useAutopilotApi(): AutopilotApi {
+export function useAutopilotApi(): AutopilotApi {
   const store = useStore();
   const names = useMemo(
     () => Object.fromEntries(store.strategies.map((s) => [s.id, s.name])),
@@ -143,26 +165,17 @@ function venueLabel(v: string): string {
 
 type Mode = AutopilotConfig["mode"];
 
-function modeBadge(mode: Mode, simple: boolean): { tone: Tone; text: string } {
-  if (mode === "live") return { tone: "red", text: simple ? "REAL MONEY" : "LIVE" };
-  if (mode === "demo") return { tone: "amber", text: "DEMO ACCOUNT" };
-  return { tone: "green", text: simple ? "PRACTICE" : "PAPER" };
-}
-
-function signedUsd(n: number, dp = 2): string {
-  return `${n > 0 ? "+" : ""}${fmtUsd(n, dp)}`;
-}
-
-function signedPct(n: number, dp = 1): string {
-  return `${n > 0 ? "+" : ""}${n.toFixed(dp)}%`;
-}
+/** Text colour for an up, down or flat amount. */
+const TONE_TEXT = { up: "text-up", down: "text-down", flat: "text-ink" } as const;
 
 // ── the page ────────────────────────────────────────────────────────────────
 
 /**
- * The autopilot: an amount it trades on its own until it is stopped, a limit
- * is hit, or an end date passes. Setup when nothing runs, the running view
- * while something does, then an honest analysis and the runs that came before.
+ * The autopilot in full: an amount it trades on its own until it is stopped,
+ * a limit is hit, or an end date passes. Setup when nothing runs, the running
+ * view while something does, then an honest analysis and the runs that came
+ * before. The Autopilot page shows this under "Full setup and analysis", so it
+ * brings no page frame of its own.
  */
 export function Autopilot() {
   const api = useAutopilotApi();
@@ -182,11 +195,13 @@ export function Autopilot() {
   }
 
   return (
-    <div className="animate-fade-in mx-auto max-w-4xl space-y-4">
-      <PageHeader
-        title="Autopilot"
-        subtitle="Give it an amount and it trades that amount on its own: until you stop it, until a limit you set is reached, or for ever."
-      />
+    <div className="min-w-0 space-y-5">
+      <header className="px-1">
+        <h2 className="text-xl font-semibold tracking-tight text-ink">Full setup and analysis</h2>
+        <p className="mt-1 text-[15px] leading-relaxed text-muted">
+          Give it an amount and it trades that amount on its own: until you stop it, until a limit you set is reached, or for ever.
+        </p>
+      </header>
 
       {api.mocked && (
         <Notice tone="warning" title="Sample data for development">
@@ -203,16 +218,14 @@ export function Autopilot() {
 
       {api.loading ? (
         <Card>
-          <Loading>Waiting for the engine to report its autopilots</Loading>
+          <LoadingRows label="Waiting for the engine to report its autopilots" />
         </Card>
       ) : (
         <>
           {active.length === 0 ? (
             <Setup onStart={api.start} />
           ) : (
-            active.map((s) => (
-              <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />
-            ))
+            active.map((s) => <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />)
           )}
 
           <div ref={analysisRef} className="scroll-mt-4">
@@ -231,15 +244,15 @@ export function Autopilot() {
 function Step({ n, title, help, children }: { n: number; title: string; help?: string; children: ReactNode }) {
   const tip = help ?? explain(title);
   return (
-    <fieldset className="min-w-0 border-t border-cyber-border pt-4 first:border-t-0 first:pt-0">
-      <legend className="mb-2 flex items-center gap-2 text-sm font-semibold text-cyber-text">
-        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-accent/40 font-mono text-[11px] text-accent">
+    <fieldset className="min-w-0 py-5 first:pt-0 last:pb-0">
+      <legend className="float-left mb-3 flex w-full items-center gap-2 text-[15px] font-semibold text-ink">
+        <span className="tabular flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-2 text-[12px] font-semibold text-muted" aria-hidden>
           {n}
         </span>
-        {title}
+        <span className="min-w-0">{title}</span>
         {tip && <Explain text={tip} label={title} />}
       </legend>
-      {children}
+      <div className="clear-both">{children}</div>
     </fieldset>
   );
 }
@@ -264,29 +277,35 @@ function Choice({
   danger?: boolean;
   badge?: ReactNode;
 }) {
-  const on = danger
-    ? "border-danger/60 bg-danger/10"
-    : "border-accent/50 bg-accent/[0.07]";
+  const on = danger ? "border-down bg-down/[0.08]" : "border-ink bg-surface-2";
   return (
     <label
-      className={`flex min-w-0 cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2.5 transition-colors ${
-        checked ? on : "border-cyber-border bg-cyber-bg/40 hover:border-cyber-border-bright"
+      className={`flex min-w-0 cursor-pointer items-start gap-3 rounded-2xl border px-4 py-3 transition-colors ${
+        checked ? on : "border-line hover:border-line-strong"
       }`}
     >
-      <input type="radio" name={name} checked={checked} onChange={onChange} aria-label={title} className="mt-1 shrink-0 accent-cyan-400" />
+      <input
+        type="radio"
+        name={name}
+        checked={checked}
+        onChange={onChange}
+        aria-label={title}
+        className="mt-1 h-4 w-4 shrink-0"
+        style={{ accentColor: danger ? "var(--color-down)" : "var(--color-accent)" }}
+      />
       <span className="min-w-0">
-        <span className={`flex flex-wrap items-center gap-1.5 text-sm font-medium ${danger ? "text-danger" : "text-cyber-text"}`}>
-          {Icon && <Icon size={14} aria-hidden className="shrink-0" />}
+        <span className={`flex flex-wrap items-center gap-1.5 text-[15px] font-semibold ${danger ? "text-down" : "text-ink"}`}>
+          {Icon && <Icon size={15} aria-hidden className="shrink-0" />}
           {title}
           {badge}
         </span>
-        <span className="mt-0.5 block text-xs leading-relaxed text-cyber-text-dim">{detail}</span>
+        <span className="mt-0.5 block text-[13px] leading-relaxed text-muted">{detail}</span>
       </span>
     </label>
   );
 }
 
-/** A checkbox that switches one optional limit on, with its input beside it. */
+/** A switch that turns one optional limit on, with its input under it. */
 function LimitRow({
   on,
   onToggle,
@@ -302,24 +321,21 @@ function LimitRow({
 }) {
   const tip = help ?? explain(label);
   return (
-    <div className={`rounded-lg border px-3 py-2.5 ${on ? "border-accent/40 bg-accent/[0.04]" : "border-cyber-border bg-cyber-bg/40"}`}>
-      <label className="flex cursor-pointer items-center gap-2 text-sm text-cyber-text">
-        <input type="checkbox" checked={on} onChange={(e) => onToggle(e.target.checked)} aria-label={label} className="shrink-0 accent-cyan-400" />
-        <span className="min-w-0">{label}</span>
-        {tip && <Explain text={tip} label={label} />}
-      </label>
-      {on && children && <div className="mt-2 flex flex-wrap items-center gap-2 pl-6 text-sm text-cyber-text-dim">{children}</div>}
+    <div className="py-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex min-w-0 items-center gap-1 text-[15px] text-ink">
+          <span className="min-w-0">{label}</span>
+          {tip && <Explain text={tip} label={label} />}
+        </span>
+        <Toggle on={on} onChange={onToggle} label={label} />
+      </div>
+      {on && children && <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted">{children}</div>}
     </div>
   );
 }
 
 /** The shared input look without its full width, for inputs that sit inside a sentence. */
 const inlineCls = inputCls.replace("w-full ", "");
-
-function num(s: string): number {
-  const n = Number(s.replace(/[$,\s%]/g, ""));
-  return Number.isFinite(n) ? n : NaN;
-}
 
 function SmallInput({
   value,
@@ -337,16 +353,10 @@ function SmallInput({
   width?: string;
 }) {
   return (
-    <span className="inline-flex items-center gap-1">
-      {prefix && <span className="text-cyber-text-faint">{prefix}</span>}
-      <input
-        inputMode="decimal"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={label}
-        className={`${inlineCls} ${width} font-mono`}
-      />
-      {suffix && <span className="text-cyber-text-faint">{suffix}</span>}
+    <span className="inline-flex items-center gap-1.5">
+      {prefix && <span className="text-muted">{prefix}</span>}
+      <input inputMode="decimal" value={value} onChange={(e) => onChange(e.target.value)} aria-label={label} className={`${inlineCls} ${width} tabular`} />
+      {suffix && <span className="text-muted">{suffix}</span>}
     </span>
   );
 }
@@ -385,35 +395,41 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const capital = num(amount);
+  const capital = parseInput(amount);
   // The exchange it would trade on, by its own name ("Bybit", not "crypto").
   const target = autopilotVenue(mode, venue, live, cryptoCostVenue);
   const targetName = exchangeName(target);
-  const eligible =strategies.filter((s) => s.id !== "manual" && s.venueClass === venue);
-  const chosen = eligible
-    .map((s) => ({ s, w: num(weights[s.id] ?? "") }))
-    .filter((x) => x.w > 0);
+  const eligible = strategies.filter((s) => s.id !== "manual" && s.venueClass === venue);
+  const chosen = eligible.map((s) => ({ s, w: parseInput(weights[s.id] ?? "") })).filter((x) => x.w > 0);
   const weightSum = chosen.reduce((a, x) => a + x.w, 0);
 
   const stop: Stop = { onTakeProfit: onTp };
-  if (lossPctOn) stop.maxLossPct = num(lossPct);
-  if (lossUsdOn) stop.maxLossUsd = num(lossUsd);
-  if (tpOn) stop.takeProfitPct = num(tp);
-  if (trailOn) stop.trailingPct = num(trail);
+  if (lossPctOn) stop.maxLossPct = parseInput(lossPct);
+  if (lossUsdOn) stop.maxLossUsd = parseInput(lossUsd);
+  if (tpOn) stop.takeProfitPct = parseInput(tp);
+  if (trailOn) stop.trailingPct = parseInput(trail);
   const endMs = endOn ? new Date(end).getTime() : undefined;
   if (endOn && endMs !== undefined && Number.isFinite(endMs)) stop.endMs = endMs;
   const plan = floorAtStart(capital > 0 ? capital : 0, stop);
   const anyLimit = lossPctOn || lossUsdOn || tpOn || trailOn || endOn;
 
   // What is wrong with the form, in plain sentences.
-  const problems: string[] = [];
-  if (!(capital > 0)) problems.push("Enter how much it may use, more than zero.");
-  if (pick === "manual" && chosen.length === 0) problems.push("Pick at least one strategy and give it a share above zero.");
-  if (lossPctOn && !(limit(stop.maxLossPct) && stop.maxLossPct! < 100)) problems.push("The loss limit in percent has to be between 0 and 100.");
-  if (lossUsdOn && !(limit(stop.maxLossUsd) && capital > 0 && stop.maxLossUsd! < capital)) problems.push("The loss limit in dollars has to be above zero and below the amount.");
-  if (tpOn && !limit(stop.takeProfitPct)) problems.push("The take-profit has to be above zero.");
-  if (trailOn && !(limit(stop.trailingPct) && stop.trailingPct! < 100)) problems.push("The trailing limit has to be between 0 and 100 percent.");
-  if (endOn && !(endMs && endMs > Date.now())) problems.push("The end date has to be in the future.");
+  const problems = setupProblems({
+    capital,
+    manual: pick === "manual",
+    chosen: chosen.length,
+    lossPctOn,
+    lossPct: stop.maxLossPct,
+    lossUsdOn,
+    lossUsd: stop.maxLossUsd,
+    tpOn,
+    tp: stop.takeProfitPct,
+    trailOn,
+    trail: stop.trailingPct,
+    endOn,
+    endMs,
+    now: Date.now(),
+  });
   // The engine refuses this too; saying it here saves a round trip.
   if (mode === "demo" && venue === "crypto" && demoIsApiTestOnly(live)) {
     problems.push(
@@ -451,8 +467,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
         liveCash === undefined
           ? "The amount may not be more than the cash in the account. Pythia checks that with the exchange when it starts."
           : capital <= liveCash
-            ? `The amount is within the account's cash (${fmtUsd(liveCash, 0)}).`
-            : `The amount is more than the account's cash (${fmtUsd(liveCash, 0)}).`,
+            ? `The amount is within the account's cash (${money(liveCash, 0)}).`
+            : `The amount is more than the account's cash (${money(liveCash, 0)}).`,
     },
   ];
   const liveBlocked = mode === "live" && (requirements.some((r) => r.ok === false) || typed.trim().toUpperCase() !== LIVE_PHRASE);
@@ -499,13 +515,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
         : `Comes from the ${targetName} account you funded yourself. The autopilot buys and sells inside that account and can lose this money.`;
 
   return (
-    <Card
-      title="Start an autopilot"
-      icon={Plane}
-      subtitle="Four short questions. You can stop it at any moment, whatever you choose here."
-      help={explain("Autopilot")}
-    >
-      <div className="space-y-5">
+    <Section title="Start an autopilot" help={explain("Autopilot")} hint="Four short questions. You can stop it at any moment, whatever you choose here.">
+      <div className="divide-y divide-line">
         {/* 1 · which money */}
         <Step n={1} title="Which money" help="Practice money, a demo account at the venue, or real money in an account you funded.">
           <div role="radiogroup" aria-label="Which money" className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -555,13 +566,13 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
 
         {/* 2 · how much */}
         <Step n={2} title="How much" help={explain("Start amount")}>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
             <SmallInput value={amount} onChange={setAmount} label="Amount in US dollars" prefix="$" width="w-36" />
-            {capital > 0 && <span className="font-mono text-sm text-cyber-text-dim">{fmtUsd(capital, 0)}</span>}
+            {capital > 0 && <span className="tabular text-[15px] font-semibold text-ink">{money(capital, 0)}</span>}
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-cyber-text-dim">{source}</p>
-          <p className="mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-cyber-text-faint">
-            <ShieldCheck size={13} aria-hidden className="mt-0.5 shrink-0 text-success" />
+          <p className="mt-3 text-[13px] leading-relaxed text-muted">{source}</p>
+          <p className="mt-2 flex items-start gap-2 text-[13px] leading-relaxed text-muted">
+            <ShieldCheck size={15} aria-hidden className="mt-0.5 shrink-0 text-accent" />
             <span>
               Pythia never moves money out of a wallet and never withdraws from any account. Your Exodus wallet is only
               watched by its public address: nothing can be sent from it. The autopilot only buys and sells inside the
@@ -578,7 +589,7 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
               checked={pick === "auto"}
               onChange={() => setPick("auto")}
               title="Let Pythia choose"
-              badge={<Badge tone="cyan">recommended</Badge>}
+              badge={<Badge tone="accent">Recommended</Badge>}
               detail="It picks the strategies with the best record after costs that suit the market right now, and tells you why."
             />
             <Choice
@@ -590,78 +601,64 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
             />
           </div>
           {pick === "auto" && (
-            <div className="mt-3 space-y-1.5 text-xs text-cyber-text-dim">
+            <div className="mt-3 space-y-2 text-[13px] leading-relaxed text-muted">
               <p>
                 For crypto it can run up to three of the lab's strategies together. Their targets are added up per coin, so
                 each coin is one position, and each strategy gets a share of the amount by the strength of its evidence.
               </p>
-              <label className="flex flex-wrap items-center gap-2">
-                <span>Choose again with fresh evidence</span>
-                <select
-                  value={repick}
-                  onChange={(e) => setRepick(Number(e.target.value))}
-                  aria-label="How often it chooses again"
-                  className="rounded border border-cyber-border bg-cyber-bg px-2 py-1 text-cyber-text"
-                >
+              <Field label="Choose again with fresh evidence" hint="A change is traded in at the next rebalance, only by the difference per coin. Nothing is sold off at once.">
+                <select value={repick} onChange={(e) => setRepick(Number(e.target.value))} aria-label="How often it chooses again" className={`${inputCls} sm:max-w-xs`}>
                   {REPICK_CHOICES.map((c) => (
                     <option key={c.hours} value={c.hours}>
                       {c.label}
                     </option>
                   ))}
                 </select>
-              </label>
-              <p className="text-[11px] text-cyber-text-faint">
-                A change is traded in at the next rebalance, only by the difference per coin. Nothing is sold off at once.
-              </p>
+              </Field>
             </div>
           )}
           {pick === "manual" && (
-            <div className="mt-3 space-y-1.5">
+            <div className="mt-3">
               {eligible.length === 0 ? (
-                <EmptyState icon={Activity} title={`No strategies for ${venueLabel(venue)} yet`} compact>
+                <Nothing icon={Activity} title={`No strategies for ${venueLabel(venue)} yet`}>
                   They arrive with the first update from the engine.
-                </EmptyState>
+                </Nothing>
               ) : (
-                eligible.map((s) => {
-                  const w = num(weights[s.id] ?? "");
-                  const share = w > 0 && weightSum > 0 ? (w / weightSum) * 100 : 0;
-                  return (
-                    <div
-                      key={s.id}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2"
-                    >
-                      <label className="flex min-w-0 flex-1 basis-48 cursor-pointer items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={w > 0}
-                          onChange={(e) => setWeights((p) => ({ ...p, [s.id]: e.target.checked ? "1" : "" }))}
-                          aria-label={`Use ${s.name}`}
-                          className="shrink-0 accent-cyan-400"
-                        />
-                        <span className="min-w-0 truncate text-cyber-text">{s.name}</span>
-                      </label>
-                      {mode === "live" && (
-                        <Badge tone={ready(s.id) ? "green" : "neutral"} title="Strategy Passport">
-                          {ready(s.id) ? "checks passed" : "checks not passed"}
-                        </Badge>
-                      )}
-                      <span className="flex items-center gap-2 text-xs text-cyber-text-dim">
-                        <Term k="Strategy share">weight</Term>
-                        <SmallInput
-                          value={weights[s.id] ?? ""}
-                          onChange={(v) => setWeights((p) => ({ ...p, [s.id]: v }))}
-                          label={`Weight for ${s.name}`}
-                          width="w-16"
-                        />
-                        <span className="w-12 text-right font-mono">{share > 0 ? `${share.toFixed(0)}%` : "off"}</span>
-                      </span>
-                    </div>
-                  );
-                })
+                <List>
+                  {eligible.map((s) => {
+                    const w = parseInput(weights[s.id] ?? "");
+                    const share = w > 0 && weightSum > 0 ? (w / weightSum) * 100 : 0;
+                    return (
+                      <div key={s.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
+                        <label className="flex min-w-0 flex-1 basis-48 cursor-pointer items-center gap-2.5 text-[15px] text-ink">
+                          <input
+                            type="checkbox"
+                            checked={w > 0}
+                            onChange={(e) => setWeights((p) => ({ ...p, [s.id]: e.target.checked ? "1" : "" }))}
+                            aria-label={`Use ${s.name}`}
+                            className="h-4 w-4 shrink-0"
+                            style={{ accentColor: "var(--color-accent)" }}
+                          />
+                          <span className="min-w-0 truncate">{s.name}</span>
+                        </label>
+                        {mode === "live" && (
+                          <Badge tone={ready(s.id) ? "good" : "neutral"} title="Strategy Passport">
+                            {ready(s.id) ? "Checks passed" : "Checks not passed"}
+                          </Badge>
+                        )}
+                        <span className="flex items-center gap-2 text-[13px] text-muted">
+                          <Term k="Strategy share">Weight</Term>
+                          <SmallInput value={weights[s.id] ?? ""} onChange={(v) => setWeights((p) => ({ ...p, [s.id]: v }))} label={`Weight for ${s.name}`} width="w-16" />
+                          <span className="tabular w-10 text-right text-ink">{share > 0 ? `${share.toFixed(0)}%` : "Off"}</span>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </List>
               )}
               {chosen.length > 0 && (
-                <p className="text-[11px] text-cyber-text-faint">
-                  Weights are relative: 2 and 1 means two thirds and one third of {capital > 0 ? fmtUsd(capital, 0) : "the amount"}.
+                <p className="mt-2 text-[13px] text-muted">
+                  Weights are relative: 2 and 1 means two thirds and one third of {capital > 0 ? money(capital, 0) : "the amount"}.
                 </p>
               )}
             </div>
@@ -670,34 +667,24 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
 
         {/* 4 · when to stop */}
         <Step n={4} title="When to stop" help="It runs until you stop it. Each limit below is optional and ends the run on its own.">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2.5 text-sm text-cyber-text">
-              {anyLimit ? (
-                <Circle size={14} aria-hidden className="text-cyber-text-faint" />
-              ) : (
-                <CheckCircle2 size={14} aria-hidden className="text-accent" />
-              )}
-              Run until I stop it
-              <span className="text-xs text-cyber-text-faint">{anyLimit ? "or until a limit below" : "(no limits set)"}</span>
-            </div>
+          <div className="flex items-center gap-2 rounded-2xl bg-surface-2 px-4 py-3 text-[15px] text-ink">
+            {anyLimit ? <Circle size={15} aria-hidden className="shrink-0 text-faint" /> : <CheckCircle2 size={15} aria-hidden className="shrink-0 text-accent" />}
+            <span className="min-w-0">
+              Run until I stop it <span className="text-[13px] text-muted">{anyLimit ? "or until a limit below" : "(no limits set)"}</span>
+            </span>
+          </div>
+          <List className="mt-1">
             <LimitRow on={lossPctOn} onToggle={setLossPctOn} label="Stop after losing a percentage" help={explain("Floor")}>
-              stop after losing <SmallInput value={lossPct} onChange={setLossPct} label="Loss limit in percent" suffix="%" width="w-16" />
-              {capital > 0 && limit(num(lossPct)) && (
-                <span className="text-xs text-cyber-text-faint">= {fmtUsd((capital * num(lossPct)) / 100, 0)}</span>
-              )}
+              Stop after losing <SmallInput value={lossPct} onChange={setLossPct} label="Loss limit in percent" suffix="%" width="w-20" />
+              {capital > 0 && limit(parseInput(lossPct)) && <span className="tabular text-muted">= {money((capital * parseInput(lossPct)) / 100, 0)}</span>}
             </LimitRow>
             <LimitRow on={lossUsdOn} onToggle={setLossUsdOn} label="Stop after losing an amount" help={explain("Floor")}>
-              stop after losing <SmallInput value={lossUsd} onChange={setLossUsd} label="Loss limit in dollars" prefix="$" width="w-24" />
+              Stop after losing <SmallInput value={lossUsd} onChange={setLossUsd} label="Loss limit in dollars" prefix="$" width="w-24" />
             </LimitRow>
             <LimitRow on={tpOn} onToggle={setTpOn} label="Take profit">
-              <span className="flex flex-wrap items-center gap-2">
-                when it is up <SmallInput value={tp} onChange={setTp} label="Take profit in percent" suffix="%" width="w-16" />
-                <select
-                  value={onTp}
-                  onChange={(e) => setOnTp(e.target.value as "stop" | "lock")}
-                  aria-label="What happens at the take-profit"
-                  className={`${inlineCls} w-auto max-w-full`}
-                >
+              When it is up <SmallInput value={tp} onChange={setTp} label="Take profit in percent" suffix="%" width="w-20" />
+              <span className="flex min-w-0 max-w-full items-center gap-1">
+                <select value={onTp} onChange={(e) => setOnTp(e.target.value as "stop" | "lock")} aria-label="What happens at the take-profit" className={`${inlineCls} w-auto max-w-full`}>
                   <option value="stop">then stop</option>
                   <option value="lock">then lock it in and keep going</option>
                 </select>
@@ -705,7 +692,7 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
               </span>
             </LimitRow>
             <LimitRow on={trailOn} onToggle={setTrailOn} label="Never give back more than" help={explain("Trailing limit")}>
-              <SmallInput value={trail} onChange={setTrail} label="Trailing limit in percent" suffix="%" width="w-16" />
+              <SmallInput value={trail} onChange={setTrail} label="Trailing limit in percent" suffix="%" width="w-20" />
               from its best point
             </LimitRow>
             <LimitRow on={endOn} onToggle={setEndOn} label="End on a date" help="It stops on its own at this moment, whatever it is doing.">
@@ -718,95 +705,90 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
                 className={`${inlineCls} w-auto max-w-full`}
               />
             </LimitRow>
-          </div>
+          </List>
 
           <FloorSummary capital={capital} plan={plan} stop={stop} trailOn={trailOn} endOn={endOn} />
 
-          <label className="mt-3 flex cursor-pointer items-start gap-2 text-sm text-cyber-text">
-            <input
-              type="checkbox"
-              checked={flatten}
-              onChange={(e) => setFlatten(e.target.checked)}
-              aria-label="When it stops on its own, sell everything it bought"
-              className="mt-1 shrink-0 accent-cyan-400"
-            />
-            <span>
-              When it stops on its own, sell everything it bought
-              <span className="block text-xs text-cyber-text-faint">
-                {flatten
+          <div className="mt-2">
+            <SwitchRow
+              label="When it stops on its own, sell everything it bought"
+              on={flatten}
+              onChange={setFlatten}
+              hint={
+                flatten
                   ? "It ends in cash. You can still choose differently when you stop it yourself."
-                  : "What it bought stays in the account, and from then on you look after it yourself."}
-              </span>
-            </span>
-          </label>
+                  : "What it bought stays in the account, and from then on you look after it yourself."
+              }
+            />
+          </div>
 
           {advanced && (
-            <Field label="Name (optional)" className="mt-3 max-w-xs" help="Only for you, to tell runs apart in the list of past autopilots.">
+            <Field label="Name (optional)" className="mt-3 sm:max-w-xs" hint="Only for you, to tell runs apart in the list of past autopilots.">
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Autopilot" className={inputCls} />
             </Field>
           )}
         </Step>
 
         {mode === "live" && (
-          <div className="rounded-xl border border-danger/50 bg-danger/[0.07] p-4">
-            <div className="flex items-start gap-2 text-sm font-semibold text-danger">
-              <TriangleAlert size={16} aria-hidden className="mt-0.5 shrink-0" />
-              Real money: this autopilot can lose the whole amount, also while you sleep.
-            </div>
-            <ul className="mt-3 space-y-1.5">
-              {requirements.map((r, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-cyber-text-dim">
-                  {r.ok === true ? (
-                    <CheckCircle2 size={15} aria-hidden className="mt-0.5 shrink-0 text-success" />
-                  ) : r.ok === false ? (
-                    <XCircle size={15} aria-hidden className="mt-0.5 shrink-0 text-danger" />
-                  ) : (
-                    <Circle size={15} aria-hidden className="mt-0.5 shrink-0 text-cyber-text-faint" />
-                  )}
-                  <span>{r.text}</span>
-                </li>
-              ))}
-            </ul>
-            <label className="mt-3 block text-xs text-cyber-text-dim">
-              Type <b className="font-mono text-danger">{LIVE_PHRASE}</b> to confirm
-              <input
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-                placeholder={LIVE_PHRASE}
-                autoComplete="off"
-                aria-label={`Type ${LIVE_PHRASE} to confirm`}
-                className={`${inputCls} mt-1 max-w-xs focus:border-danger`}
-              />
-            </label>
+          <div className="py-5">
+            <Notice tone="danger" icon={TriangleAlert} title="Real money: this autopilot can lose the whole amount, also while you sleep.">
+              <ul className="mt-3 space-y-2">
+                {requirements.map((r, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm text-ink">
+                    {r.ok === true ? (
+                      <CheckCircle2 size={16} aria-label="Done" className="mt-0.5 shrink-0 text-up" />
+                    ) : r.ok === false ? (
+                      <XCircle size={16} aria-label="Missing" className="mt-0.5 shrink-0 text-down" />
+                    ) : (
+                      <Circle size={16} aria-label="Checked at the start" className="mt-0.5 shrink-0 text-faint" />
+                    )}
+                    <span className="min-w-0">{r.text}</span>
+                  </li>
+                ))}
+              </ul>
+              <label className="mt-3 block text-sm text-ink">
+                Type <b className="text-down">{LIVE_PHRASE}</b> to confirm
+                <input
+                  value={typed}
+                  onChange={(e) => setTyped(e.target.value)}
+                  placeholder={LIVE_PHRASE}
+                  autoComplete="off"
+                  aria-label={`Type ${LIVE_PHRASE} to confirm`}
+                  className={`${inputCls} mt-1.5 bg-surface focus:border-down sm:max-w-xs`}
+                />
+              </label>
+            </Notice>
           </div>
         )}
 
-        {problems.length > 0 && (
-          <ul className="space-y-1">
-            {problems.map((p) => (
-              <li key={p} className="flex items-start gap-1.5 text-xs text-warning">
-                <TriangleAlert size={13} aria-hidden className="mt-0.5 shrink-0" />
-                {p}
-              </li>
-            ))}
-          </ul>
-        )}
-        {err && (
-          <Notice tone="danger" title="It did not start">
-            {err}
-          </Notice>
+        {(problems.length > 0 || err) && (
+          <div className="space-y-3 py-5">
+            {problems.length > 0 && (
+              <ul className="space-y-1.5">
+                {problems.map((p) => (
+                  <li key={p} className="flex items-start gap-2 text-[13px] leading-relaxed text-warn">
+                    <TriangleAlert size={14} aria-hidden className="mt-0.5 shrink-0" />
+                    <span className="min-w-0">{p}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {err && (
+              <Notice tone="danger" title="It did not start">
+                {err}
+              </Notice>
+            )}
+          </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-3 border-t border-cyber-border pt-4">
-          <Button tone={mode === "live" ? "red" : "cyan"} icon={Play} onClick={() => void start()} disabled={!canStart}>
+        <div className="flex flex-wrap items-center gap-3 pt-5">
+          <Button variant={mode === "live" ? "danger" : "primary"} icon={Play} onClick={() => void start()} disabled={!canStart}>
             {busy ? "Starting" : mode === "live" ? "Start with real money" : mode === "demo" ? "Start on the demo account" : "Start the autopilot"}
           </Button>
-          <span className="text-xs text-cyber-text-faint">
-            {mode === "paper" ? "Practice money: nothing can be lost." : "You can pause or stop it at any moment."}
-          </span>
+          <span className="text-[13px] text-muted">{mode === "paper" ? "Practice money: nothing can be lost." : "You can pause or stop it at any moment."}</span>
         </div>
       </div>
-    </Card>
+    </Section>
   );
 }
 
@@ -829,7 +811,7 @@ function FloorSummary({
   if (plan.takeProfitAt !== null) {
     lines.push(
       <>
-        At <b className="font-mono text-success">{fmtUsd(plan.takeProfitAt, 0)}</b> it takes the profit and{" "}
+        At <b className="tabular font-semibold text-ink">{money(plan.takeProfitAt, 0)}</b> it takes the profit and{" "}
         {stop.onTakeProfit === "stop" ? "stops." : "keeps going, with the gain locked in."}
       </>,
     );
@@ -841,28 +823,28 @@ function FloorSummary({
     lines.push(<>It stops on {new Date(stop.endMs).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })} at the latest.</>);
   }
   return (
-    <div className="mt-3 rounded-lg border border-accent/30 bg-accent/[0.05] px-3 py-3">
+    <div className="mt-3 rounded-2xl bg-surface-2 px-4 py-3.5">
       {plan.floor !== null ? (
         <>
-          <div className="flex flex-wrap items-center gap-1.5 text-base font-semibold text-cyber-text">
-            It stops at <span className="font-mono text-warning">{fmtUsd(plan.floor, 0)}</span> at the latest
+          <div className="flex flex-wrap items-center gap-1.5 text-[17px] font-semibold text-ink">
+            It stops at <span className="tabular">{money(plan.floor, 0)}</span> at the latest
             <Explain text={explain("Floor")!} label="Floor" />
           </div>
-          <div className="mt-0.5 text-xs text-cyber-text-dim">
-            That is a loss of at most {fmtUsd(capital - plan.floor, 0)} ({(((capital - plan.floor) / capital) * 100).toFixed(1)}%) of the{" "}
-            {fmtUsd(capital, 0)}. A sudden price jump can carry it a little past the floor before the sale goes through.
+          <div className="mt-1 text-[13px] leading-relaxed text-muted">
+            That is a loss of at most {money(capital - plan.floor, 0)} ({(((capital - plan.floor) / capital) * 100).toFixed(1)}%) of the{" "}
+            {money(capital, 0)}. A sudden price jump can carry it a little past the floor before the sale goes through.
           </div>
         </>
       ) : (
         <>
-          <div className="text-base font-semibold text-cyber-text">No floor: it runs until you stop it</div>
-          <div className="mt-0.5 text-xs text-cyber-text-dim">
+          <div className="text-[17px] font-semibold text-ink">No floor: it runs until you stop it</div>
+          <div className="mt-1 text-[13px] leading-relaxed text-muted">
             The general risk limits (the daily loss limit and the drawdown breaker) still apply to everything it does.
           </div>
         </>
       )}
       {lines.length > 0 && (
-        <ul className="mt-2 space-y-0.5 text-xs text-cyber-text-dim">
+        <ul className="mt-2 space-y-1 text-[13px] leading-relaxed text-muted">
           {lines.map((l, i) => (
             <li key={i}>{l}</li>
           ))}
@@ -874,6 +856,9 @@ function FloorSummary({
 
 // ── 2 · running ─────────────────────────────────────────────────────────────
 
+const FWD_TONE = { neutral: "text-muted", good: "text-up", warn: "text-warn", bad: "text-down" } as const;
+const ROOM_TONE: Record<"off" | "ok" | "near" | "over", StatTone> = { off: "plain", ok: "plain", near: "warn", over: "down" };
+
 function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi; onAnalyse: () => void }) {
   const { journal } = useStore();
   const advanced = useAdvanced();
@@ -881,19 +866,21 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [scrub, setScrub] = useState<Scrub | null>(null);
   const now = Date.now();
   const id = s.config.id;
   const running = s.state === "running";
   const live = s.config.mode === "live";
-  const badge = modeBadge(s.config.mode, simple);
+  const badge = modeLabel(s.config.mode, simple);
   const plan = floorAtStart(s.startCapital, s.config.stop);
   // No loss or trailing rule means no floor (the engine sends null).
-  const floor = s.floorEquity ?? 0;
-  const room = floor > 0 ? s.equity - floor : null;
-  const span = floor > 0 ? Math.max(1e-9, s.peakEquity - floor) : 0;
-  const roomPct = room !== null ? (room / span) * 100 : 0;
+  const room = floorRoom(s.equity, s.floorEquity, s.peakEquity);
   const fwd = forwardLine(s.forward);
-  const fwdTone = { neutral: "text-cyber-text-dim", good: "text-success", warn: "text-warning", bad: "text-danger" };
+  const { times, values } = splitCurve(curve(s, now));
+  const last = values[values.length - 1] ?? s.equity;
+  const fees = feeShare(s.fees, s.pnl);
+  const exchange = exchangeName(s.config.venue);
 
   async function act(fn: () => Promise<void>) {
     setBusy(true);
@@ -911,184 +898,218 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
     .filter((j) => j.ts >= s.startedMs && j.strategyId && sleeveIds.has(j.strategyId) && (j.kind === "fill" || j.kind === "reject" || j.kind === "risk"))
     .slice(0, 5);
 
-  const box = live
-    ? "border-danger/50 bg-danger/[0.07]"
-    : running
-      ? "border-success/35 bg-success/[0.05]"
-      : "border-warning/40 bg-warning/[0.06]";
-
   return (
-    <section aria-label={`Autopilot ${s.config.name}`} className="space-y-4">
+    <section aria-label={`Autopilot ${s.config.name}`} className="space-y-5">
       {/* status */}
-      <div className={`rounded-xl border p-4 sm:p-5 ${box} ${live && running ? "animate-pulse-red" : ""}`}>
-        <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
-          <div className="flex min-w-0 flex-1 basis-64 items-start gap-3">
-            {running ? (
-              <Plane size={24} aria-hidden className={`mt-0.5 shrink-0 ${live ? "text-danger" : "text-success"}`} />
-            ) : (
-              <Pause size={24} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-            )}
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={`text-xl font-semibold leading-tight ${running ? (live ? "text-danger" : "text-success") : "text-warning"}`}>
-                  {running ? "Running" : "Paused"}
-                </span>
-                <Badge tone={badge.tone}>{badge.text}</Badge>
-                <span className="text-sm text-cyber-text-dim">{s.config.name}</span>
-              </div>
-              <p className="mt-1 text-sm leading-relaxed text-cyber-text-dim">
-                {running
-                  ? `Trading ${fmtUsd(s.startCapital, 0)} on ${exchangeName(s.config.venue)}${s.config.mode === "demo" ? "'s demo account" : ""} on its own, for ${fmtDuration(now - s.startedMs)} now.`
-                  : "Holding what it has and opening nothing new until you resume it."}
-              </p>
-              <p className="mt-0.5 text-xs text-cyber-text-faint">
-                Started {fmtWhen(s.startedMs)}
-                {s.config.stop.endMs ? ` · ends ${fmtWhen(s.config.stop.endMs)} at the latest` : " · runs until you stop it or a limit is reached"}
-              </p>
-              {fwd && (
-                <p className="mt-1 text-sm" data-testid="forward-line">
-                  <span className="text-cyber-text-faint">Against the backtest: </span>
-                  <span className={fwdTone[fwd.tone]}>{fwd.text}</span>
-                </p>
-              )}
+      <Card as="article" label={`Status of ${s.config.name}`}>
+        <div className="flex items-start gap-3">
+          <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${live ? "bg-down/10 text-down" : "bg-surface-2 text-ink"}`} aria-hidden>
+            {running ? <Plane size={18} /> : <Pause size={18} />}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xl font-semibold leading-tight text-ink">{running ? "Running" : "Paused"}</span>
+              <Badge tone={badge.tone}>{badge.text}</Badge>
             </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {running ? (
-              <Button tone="neutral" icon={Pause} disabled={busy} onClick={() => void act(() => api.pause(id))}>
-                Pause
-              </Button>
-            ) : (
-              <Button tone="cyan" icon={Play} disabled={busy} onClick={() => void act(() => api.resume(id))}>
-                Resume
-              </Button>
-            )}
-            <Button tone="neutral" icon={Pencil} disabled={busy || editing} onClick={() => setEditing(true)}>
-              Edit
-            </Button>
-            <StopButton live={live} preferFlatten={s.config.flattenOnStop} disabled={busy} onStop={(f) => void act(() => api.stop(id, f))} />
+            <div className="mt-0.5 break-words text-[15px] text-muted">{s.config.name}</div>
           </div>
         </div>
-        {err && <div className="mt-3 text-sm text-danger">{err}</div>}
-      </div>
+
+        {live && (
+          <Notice tone="danger" title="Real money" className="mt-4">
+            It buys and sells with real money in your {exchange} account and can lose it, also while you sleep.
+          </Notice>
+        )}
+
+        <p className="mt-4 text-[15px] leading-relaxed text-ink">
+          {running
+            ? `Trading ${money(s.startCapital, 0)} on ${exchange}${s.config.mode === "demo" ? "'s demo account" : ""} on its own, for ${fmtDuration(now - s.startedMs)} now.`
+            : "Holding what it has and opening nothing new until you resume it."}
+        </p>
+        <p className="mt-1 text-[13px] text-muted">
+          Started {fmtWhen(s.startedMs)}
+          {s.config.stop.endMs ? `, ends ${fmtWhen(s.config.stop.endMs)} at the latest` : ", runs until you stop it or a limit is reached"}
+        </p>
+        {fwd && (
+          <p className="mt-2 text-sm" data-testid="forward-line">
+            <span className="text-muted">Against the backtest: </span>
+            <span className={FWD_TONE[fwd.tone]}>{fwd.text}</span>
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {running ? (
+            <Button variant="secondary" icon={Pause} disabled={busy} onClick={() => void act(() => api.pause(id))}>
+              Pause
+            </Button>
+          ) : (
+            <Button variant="secondary" icon={Play} disabled={busy} onClick={() => void act(() => api.resume(id))}>
+              Resume
+            </Button>
+          )}
+          <Button variant="secondary" icon={Pencil} disabled={busy || editing} onClick={() => setEditing(true)}>
+            Edit
+          </Button>
+          <Button variant="danger" icon={Square} disabled={busy} onClick={() => setStopping(true)}>
+            Stop
+          </Button>
+        </div>
+        {err && (
+          <Notice tone="danger" className="mt-3">
+            {err}
+          </Notice>
+        )}
+      </Card>
+
+      <StopSheet
+        open={stopping}
+        live={live}
+        preferFlatten={s.config.flattenOnStop}
+        onClose={() => setStopping(false)}
+        onStop={(f) => {
+          setStopping(false);
+          void act(() => api.stop(id, f));
+        }}
+      />
 
       {editing && <EditPanel s={s} api={api} onClose={() => setEditing(false)} />}
 
       {/* money */}
-      <Card>
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 text-sm text-cyber-text-dim">
-              It is worth <Explain text={explain("Equity")!} label="worth" />
-            </div>
-            <div className="font-mono text-3xl font-bold tabular-nums text-cyber-text sm:text-4xl">{fmtUsd(s.equity, 2)}</div>
-            <div className="mt-1 text-sm">
-              <span className={s.pnl >= 0 ? "text-success" : "text-danger"}>
-                {Math.abs(s.pnl) < 0.005 ? "No change" : `${s.pnl > 0 ? "Up" : "Down"} ${fmtUsd(Math.abs(s.pnl), 2)} (${signedPct(s.pnlPct, 2)})`}
-              </span>{" "}
-              <span className="text-cyber-text-faint">since it started with {fmtUsd(s.startCapital, 0)}</span>
-            </div>
-          </div>
-          <div className="w-full min-w-0 text-sm sm:w-56 sm:text-right">
-            {room !== null ? (
+      <KeyStats
+        items={[
+          {
+            label: "It is worth",
+            value: money(s.equity, 2),
+            help: explain("Equity"),
+            sub: (
               <>
-                <div className="flex items-center gap-1 text-cyber-text-dim sm:justify-end">
-                  <Term k="Room to the floor">Room to the floor</Term>
-                </div>
-                <div className={`font-mono font-bold ${roomPct > 50 ? "text-success" : roomPct > 20 ? "text-warning" : "text-danger"}`}>
-                  {fmtUsd(Math.max(0, room), 0)} <span className="text-xs font-normal text-cyber-text-faint">above {fmtUsd(floor, 0)}</span>
-                </div>
-                <div className="mt-1">
-                  <Meter pct={roomPct} tone={roomPct > 50 ? "green" : roomPct > 20 ? "amber" : "red"} label="Room left before the floor" />
-                </div>
+                <span className={TONE_TEXT[changeTone(s.pnl)]}>{moveWords(s.pnl, s.pnlPct)}</span> since it started with {money(s.startCapital, 0)}
               </>
-            ) : (
-              <div className="text-xs text-cyber-text-faint">No floor set: it stops when you stop it.</div>
-            )}
-          </div>
+            ),
+          },
+          { label: "P&L", value: signedMoney(s.pnl), tone: changeTone(s.pnl), sub: `${signedPct(s.pnlPct, 2)} after fees` },
+          room
+            ? {
+                label: "Room to the floor",
+                value: money(room.room, 0),
+                tone: ROOM_TONE[room.level],
+                sub: `Above ${money(room.floor, 0)}. ${room.word}.`,
+              }
+            : { label: "Room to the floor", value: "No floor", sub: "It stops when you stop it." },
+        ]}
+      />
+
+      <Section title="Value since it started" hint="The dotted line is where it started. Drag across the chart or use the arrow keys to read a moment.">
+        <div className="text-[13px] text-muted" aria-live="polite">
+          {scrub ? (
+            <>
+              <span className="tabular text-[15px] font-semibold text-ink">{money(scrub.value, 2)}</span> on {fmtWhen(times[scrub.index] ?? now)}
+            </>
+          ) : (
+            <>
+              <span className="tabular text-[15px] font-semibold text-ink">{money(s.equity, 2)}</span> {running ? "now" : "while paused"}
+            </>
+          )}
         </div>
-        <div className="mt-4">
-          <EquityChart
-            points={curve(s, now)}
-            start={s.startCapital}
-            floor={floor > 0 ? floor : null}
-            takeProfit={s.config.stop.onTakeProfit === "stop" ? plan.takeProfitAt : null}
-            endLabel={running ? "now" : "paused"}
+        <div className="mt-3">
+          <AreaChart
+            data={values}
+            baseline={s.startCapital}
+            tone={last >= s.startCapital ? "up" : "down"}
+            label={`Value over time: started at ${money(s.startCapital, 0)}, now ${money(last, 0)}${room ? `, floor at ${money(room.floor, 0)}` : ""}`}
+            onScrub={setScrub}
+            empty="The chart fills in as it trades."
           />
         </div>
-      </Card>
-
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="P&L" icon={s.pnl >= 0 ? TrendingUp : TrendingDown} tone={pnlTone(s.pnl)} value={signedUsd(s.pnl)} sub={signedPct(s.pnlPct, 2)} />
-        <StatCard
-          label="From its best"
-          icon={TrendingDown}
-          tone={s.drawdownPct > 5 ? "amber" : "neutral"}
-          value={`${Math.abs(s.drawdownPct).toFixed(1)}%`}
-          sub={`best was ${fmtUsd(s.peakEquity, 0)}`}
-        />
-        <StatCard label="Trades" icon={ArrowLeftRight} value={String(s.trades)} help="How many buys and sells it made." />
-        <StatCard label="Fees" icon={Receipt} value={fmtUsd(s.fees)} sub={s.pnl + s.fees > 0 ? `${((s.fees / (s.pnl + s.fees)) * 100).toFixed(0)}% of the gain before fees` : undefined} />
-      </div>
-
-      <Card title="What it is doing" icon={Activity} help="Its latest move, and why each strategy is in the mix.">
-        <div className="rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2.5 text-sm">
-          <div className="text-[11px] uppercase tracking-wider text-cyber-text-faint">Last action</div>
-          <div className="mt-0.5 text-cyber-text">{s.lastAction ?? "Nothing yet. It is waiting for its first signal."}</div>
-        </div>
-        {s.waiting && (
-          <div className="mt-2 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2.5 text-sm text-cyber-text-dim">{s.waiting}</div>
+        {times.length > 1 && (
+          <div className="mt-1 flex justify-between text-[12px] text-faint">
+            <span>{fmtWhen(times[0])}</span>
+            <span>{running ? "now" : "paused"}</span>
+          </div>
         )}
-        {s.nextRepickMs != null && (
-          <div className="mt-2 text-xs text-cyber-text-faint">Chooses its strategies again with fresh evidence around {fmtWhen(s.nextRepickMs)}.</div>
-        )}
-
-        <div className="mt-3 space-y-2">
-          {s.bySleeve.length === 0 ? (
-            <EmptyState icon={Activity} title="Choosing its strategies" compact>
-              The strategies it picks, and why, show up here within a minute of starting.
-            </EmptyState>
-          ) : (
-            s.bySleeve.map((b) => (
-              <div key={b.strategyId} className="rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2.5">
-                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                  <span className="min-w-0 text-sm font-medium text-cyber-text">{b.name}</span>
-                  <span className={`font-mono text-sm font-bold ${b.pnl > 0.005 ? "text-success" : b.pnl < -0.005 ? "text-danger" : "text-cyber-text"}`}>
-                    {signedUsd(b.pnl)}
-                  </span>
-                </div>
-                <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-cyber-text-faint">
-                  <span>
-                    <Term k="Strategy share">{sleeveExposure(b)}</Term>
-                  </span>
-                  <span>{b.trades} trade{b.trades === 1 ? "" : "s"}</span>
-                </div>
-                <div className="mt-1 text-xs leading-relaxed text-cyber-text-dim">{b.why}</div>
+        <List className="mt-3">
+          <Row label="Started with" value={money(s.startCapital, 0)} sub="The dotted line" />
+          {room ? (
+            <div className="pb-3">
+              <Row label="Floor" value={money(room.floor, 0)} sub="It stops on its own here" help={explain("Floor")} />
+              <Meter pct={room.pct} level={room.level} label="Room left before the floor" />
+              <div className="mt-1.5 text-[13px] text-muted">
+                {room.word}: {money(room.room, 0)} above it
               </div>
-            ))
+            </div>
+          ) : (
+            <Row label="Floor" value="None" sub="No floor set: it stops when you stop it." help={explain("Floor")} />
+          )}
+          {s.config.stop.onTakeProfit === "stop" && plan.takeProfitAt !== null && (
+            <Row label="Take profit" value={money(plan.takeProfitAt, 0)} sub="It takes the profit and stops here" />
+          )}
+        </List>
+      </Section>
+
+      <Section title="Its numbers" hint="Since it started, after every fee.">
+        <List>
+          <Row
+            label="From its best"
+            value={`${Math.abs(s.drawdownPct).toFixed(1)}%`}
+            tone={s.drawdownPct > 5 ? "warn" : "plain"}
+            sub={`The best was ${money(s.peakEquity, 0)}`}
+          />
+          <Row label="Trades" value={String(s.trades)} help="How many buys and sells it made." />
+          <Row label="Fees" value={money(s.fees)} sub={fees !== null ? `${(fees * 100).toFixed(0)}% of the gain before fees` : undefined} />
+        </List>
+      </Section>
+
+      <Section title="What it is doing" help="Its latest move, and why each strategy is in the mix." hint="Its latest move, and why each strategy is in the mix.">
+        <div>
+          <div className="text-[13px] font-medium text-muted">Last action</div>
+          <p className="mt-0.5 break-words text-[15px] text-ink">{s.lastAction ?? "Nothing yet. It is waiting for its first signal."}</p>
+        </div>
+        {s.waiting && <p className="mt-3 rounded-2xl bg-surface-2 px-4 py-3 text-sm leading-relaxed text-muted">{s.waiting}</p>}
+        {s.nextRepickMs != null && <p className="mt-2 text-[13px] text-muted">Chooses its strategies again with fresh evidence around {fmtWhen(s.nextRepickMs)}.</p>}
+
+        <div className="mt-3">
+          {s.bySleeve.length === 0 ? (
+            <Nothing icon={Activity} title="Choosing its strategies">
+              The strategies it picks, and why, show up here within a minute of starting.
+            </Nothing>
+          ) : (
+            <List>
+              {s.bySleeve.map((b) => (
+                <div key={b.strategyId} className="py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="min-w-0 break-words text-[15px] font-semibold text-ink">{b.name}</span>
+                    <span className={`tabular shrink-0 text-[15px] font-semibold ${TONE_TEXT[changeTone(b.pnl)]}`}>{signedMoney(b.pnl)}</span>
+                  </div>
+                  <div className="mt-0.5 text-[13px] text-muted">
+                    <Term k="Strategy share">{sleeveExposure(b)}</Term> · {plural(b.trades, "trade")}
+                  </div>
+                  <p className="mt-1 text-[13px] leading-relaxed text-muted">{b.why}</p>
+                </div>
+              ))}
+            </List>
           )}
         </div>
 
         {advanced && recent.length > 0 && (
-          <div className="mt-3">
-            <div className="mb-1 text-[11px] uppercase tracking-wider text-cyber-text-faint">Recent activity of its strategies</div>
-            <ul className="space-y-1 text-xs text-cyber-text-dim">
+          <div className="mt-4">
+            <h3 className="text-[15px] font-semibold text-ink">Recent activity of its strategies</h3>
+            <List className="mt-1">
               {recent.map((j) => (
-                <li key={j.id} className="flex gap-2">
-                  <span className="shrink-0 font-mono text-cyber-text-faint">{new Date(j.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
-                  <span className="min-w-0 break-words">{j.message}</span>
-                </li>
+                <div key={j.id} className="flex gap-3 py-2 text-[13px]">
+                  <span className="tabular shrink-0 text-faint">{new Date(j.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
+                  <span className="min-w-0 break-words text-muted">{j.message}</span>
+                </div>
               ))}
-            </ul>
+            </List>
           </div>
         )}
 
-        <div className="mt-3">
-          <Button tone="neutral" size="sm" icon={BarChart3} onClick={onAnalyse}>
+        <div className="mt-4">
+          <Button variant="secondary" size="sm" icon={BarChart3} onClick={onAnalyse}>
             How is it doing?
           </Button>
         </div>
-      </Card>
+      </Section>
     </section>
   );
 }
@@ -1136,249 +1157,156 @@ function EditPanel({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
   }
 
   return (
-    <Card title="Change this autopilot" icon={Pencil} help="Change it without stopping it. Nothing is sold to make the change.">
-      <p className="text-sm leading-relaxed text-cyber-text-dim">
-        It keeps what it holds. Coins the new setup also wants stay, and the next rebalance trades only the difference.
-      </p>
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+    <Section title="Change this autopilot" help="Change it without stopping it. Nothing is sold to make the change." hint="It keeps what it holds. Coins the new setup also wants stay, and the next rebalance trades only the difference.">
+      <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Name">
           <input value={f.name} onChange={(e) => set({ name: e.target.value })} aria-label="Name" className={inputCls} />
         </Field>
         <Field label="Amount" hint="Lower: it scales down at the next rebalance, no fire sale.">
-          <input inputMode="decimal" value={f.amount} onChange={(e) => set({ amount: e.target.value })} aria-label="Amount" className={`${inputCls} font-mono`} />
+          <input inputMode="decimal" value={f.amount} onChange={(e) => set({ amount: e.target.value })} aria-label="Amount" className={`${inputCls} tabular`} />
         </Field>
       </div>
 
-      <div className="mt-4 text-xs font-medium text-cyber-text-dim">Strategies</div>
-      <div className="mt-1 grid gap-2 sm:grid-cols-2">
+      <h3 className="mt-5 text-[15px] font-semibold text-ink">Strategies</h3>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Who picks the strategies">
         <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "auto"} onChange={() => set({ pick: "auto" })} title="Let Pythia choose" detail="It picks by evidence and checks again every day." />
         <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "manual"} onChange={() => set({ pick: "manual" })} title="I choose" detail="Give each strategy a share. Empty means not used." />
       </div>
       {f.pick === "manual" && (
-        <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto pr-1">
-          {eligible.map((x) => (
-            <li key={x.id} className="flex items-center justify-between gap-2 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-1.5 text-sm">
-              <span className="min-w-0 truncate text-cyber-text">{x.name}</span>
-              <SmallInput value={f.weights[x.id] ?? ""} onChange={(v) => set({ weights: { ...f.weights, [x.id]: v } })} label={`Share for ${x.name}`} width="w-16" />
-            </li>
-          ))}
-        </ul>
+        <div className="mt-2 max-h-72 overflow-y-auto pr-1">
+          <List>
+            {eligible.map((x) => (
+              <div key={x.id} className="flex items-center justify-between gap-3 py-2">
+                <span className="min-w-0 truncate text-[15px] text-ink">{x.name}</span>
+                <SmallInput value={f.weights[x.id] ?? ""} onChange={(v) => set({ weights: { ...f.weights, [x.id]: v } })} label={`Share for ${x.name}`} width="w-20" />
+              </div>
+            ))}
+          </List>
+        </div>
       )}
 
-      <div className="mt-4 text-xs font-medium text-cyber-text-dim">Limits (empty means off)</div>
-      <div className="mt-1 flex flex-wrap gap-3 text-sm text-cyber-text-dim">
-        <label className="inline-flex items-center gap-1.5">
-          Stop at a loss of <SmallInput value={f.lossPct} onChange={(v) => set({ lossPct: v })} label="Loss limit in percent" suffix="%" width="w-16" />
+      <h3 className="mt-5 text-[15px] font-semibold text-ink">Limits</h3>
+      <p className="text-[13px] text-muted">Empty means off.</p>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted">
+        <label className="inline-flex flex-wrap items-center gap-1.5">
+          Stop at a loss of <SmallInput value={f.lossPct} onChange={(v) => set({ lossPct: v })} label="Loss limit in percent" suffix="%" width="w-20" />
         </label>
-        <label className="inline-flex items-center gap-1.5">
-          or <SmallInput value={f.lossUsd} onChange={(v) => set({ lossUsd: v })} label="Loss limit in dollars" prefix="$" width="w-20" />
+        <label className="inline-flex flex-wrap items-center gap-1.5">
+          or <SmallInput value={f.lossUsd} onChange={(v) => set({ lossUsd: v })} label="Loss limit in dollars" prefix="$" width="w-24" />
         </label>
-        <label className="inline-flex items-center gap-1.5">
-          Give back at most <SmallInput value={f.trailing} onChange={(v) => set({ trailing: v })} label="Trailing limit in percent" suffix="%" width="w-16" /> from its best
+        <label className="inline-flex flex-wrap items-center gap-1.5">
+          Give back at most <SmallInput value={f.trailing} onChange={(v) => set({ trailing: v })} label="Trailing limit in percent" suffix="%" width="w-20" /> from its best
         </label>
       </div>
 
       {plan.problems.length > 0 && (
-        <ul className="mt-3 space-y-0.5 text-sm text-warning">
+        <ul className="mt-3 space-y-1 text-[13px] text-warn">
           {plan.problems.map((p) => (
-            <li key={p}>{p}</li>
+            <li key={p} className="flex items-start gap-2">
+              <TriangleAlert size={14} aria-hidden className="mt-0.5 shrink-0" />
+              <span className="min-w-0">{p}</span>
+            </li>
           ))}
         </ul>
       )}
       {plan.looser && !live && (
-        <label className="mt-3 flex items-center gap-2 text-sm text-warning">
-          <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} aria-label="Accept a bigger possible loss" className="accent-amber-400" />
+        <label className="mt-3 flex items-start gap-2.5 text-sm text-warn">
+          <input
+            type="checkbox"
+            checked={accept}
+            onChange={(e) => setAccept(e.target.checked)}
+            aria-label="Accept a bigger possible loss"
+            className="mt-0.5 h-4 w-4 shrink-0"
+            style={{ accentColor: "var(--color-warn)" }}
+          />
           This lets it lose more than before. I accept that.
         </label>
       )}
       {live && (
-        <label className="mt-3 block text-sm text-danger">
-          Real money. Type <b className="font-mono">{LIVE_EDIT_PHRASE}</b> to confirm
-          <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={LIVE_EDIT_PHRASE} aria-label={`Type ${LIVE_EDIT_PHRASE} to confirm`} className={`${inputCls} mt-1 font-mono`} />
-        </label>
+        <Notice tone="danger" title="Real money" className="mt-3">
+          <label className="block text-sm text-ink">
+            Type <b className="text-down">{LIVE_EDIT_PHRASE}</b> to confirm
+            <input
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={LIVE_EDIT_PHRASE}
+              autoComplete="off"
+              aria-label={`Type ${LIVE_EDIT_PHRASE} to confirm`}
+              className={`${inputCls} mt-1.5 bg-surface focus:border-down sm:max-w-xs`}
+            />
+          </label>
+        </Notice>
       )}
-      {err && <div className="mt-3 text-sm text-danger">{err}</div>}
+      {err && (
+        <Notice tone="danger" className="mt-3">
+          {err}
+        </Notice>
+      )}
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button tone={live ? "red" : "cyan"} icon={CheckCircle2} disabled={!canSave} onClick={() => void save()}>
+        <Button variant={live ? "danger" : "primary"} icon={CheckCircle2} disabled={!canSave} onClick={() => void save()}>
           {busy ? "Saving" : "Save changes"}
         </Button>
-        <Button tone="neutral" disabled={busy} onClick={onClose}>
+        <Button variant="secondary" disabled={busy} onClick={onClose}>
           Cancel
         </Button>
       </div>
-      {!plan.changed && <p className="mt-2 text-xs text-cyber-text-faint">Nothing changed yet.</p>}
-    </Card>
+      {!plan.changed && <p className="mt-2 text-[13px] text-muted">Nothing changed yet.</p>}
+    </Section>
   );
 }
 
 /**
- * Stop asks first, in place, like ConfirmButton: stop for good, and either
- * sell everything or keep what it bought. The choice made at the start is
- * offered first; "Keep it running" has the focus.
+ * Stop asks first, in a sheet: stop for good, and either sell everything or
+ * keep what it bought. The choice made at the start is offered first; "Keep
+ * it running" closes the sheet without doing anything.
  */
-function StopButton({
+function StopSheet({
+  open,
+  onClose,
   onStop,
   preferFlatten,
   live,
-  disabled,
 }: {
+  open: boolean;
+  onClose: () => void;
   onStop: (flatten: boolean) => void;
   preferFlatten: boolean;
   live: boolean;
-  disabled?: boolean;
 }) {
-  const [asking, setAsking] = useState(false);
-  const keepRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!asking) return;
-    keepRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setAsking(false);
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [asking]);
-
-  if (!asking) {
-    return (
-      <Button tone="red" icon={Square} disabled={disabled} onClick={() => setAsking(true)}>
-        Stop
-      </Button>
-    );
-  }
-  const choice = "rounded border px-2 py-1 font-bold";
   const sell = (
-    <button key="sell" type="button" onClick={() => { setAsking(false); onStop(true); }} className={`${choice} border-danger/50 bg-danger/15 text-danger hover:bg-danger/25`}>
+    <Button key="sell" variant="danger" full onClick={() => onStop(true)}>
       Stop and sell everything
-    </button>
+    </Button>
   );
   const keep = (
-    <button key="keep" type="button" onClick={() => { setAsking(false); onStop(false); }} className={`${choice} border-warning/50 bg-warning/10 text-warning hover:bg-warning/20`}>
+    <Button key="keep" variant="secondary" full onClick={() => onStop(false)}>
       Stop and keep the positions
-    </button>
+    </Button>
   );
   return (
-    <span
-      role="group"
-      aria-label="Confirm stop"
-      className="flex w-full max-w-md flex-wrap items-center gap-2 rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-left text-xs text-cyber-text"
+    <Sheet
+      open={open}
+      onClose={onClose}
+      title="Stop the autopilot for good?"
+      footer={
+        <div className="grid gap-2">
+          {preferFlatten ? [sell, keep] : [keep, sell]}
+          <Button variant="ghost" full onClick={onClose}>
+            Keep it running
+          </Button>
+        </div>
+      }
     >
-      <span className="w-full">
-        Stop the autopilot for good? It cannot be resumed afterwards. What should happen to what it bought?
+      <p className="text-[15px] leading-relaxed text-muted">
+        It cannot be resumed afterwards. What should happen to what it bought?
         {live && " Kept positions stay at the exchange, and you look after them there."}
-      </span>
-      {preferFlatten ? [sell, keep] : [keep, sell]}
-      <button
-        type="button"
-        ref={keepRef}
-        onClick={() => setAsking(false)}
-        className="rounded border border-cyber-border px-2 py-1 text-cyber-text-dim hover:text-cyber-text focus:outline focus:outline-1 focus:outline-accent"
-      >
-        Keep it running
-      </button>
-    </span>
-  );
-}
-
-/** Equity over time, with the start and the floor as lines across. */
-function EquityChart({
-  points,
-  start,
-  floor,
-  takeProfit,
-  endLabel,
-  height = 180,
-}: {
-  points: [number, number][];
-  start: number;
-  floor: number | null;
-  takeProfit: number | null;
-  endLabel: string;
-  height?: number;
-}) {
-  const gid = useId().replace(/:/g, "");
-  if (points.length < 2) {
-    return (
-      <div style={{ height }} className="flex items-center justify-center rounded-lg border border-dashed border-cyber-border text-xs text-cyber-text-faint">
-        The chart fills in as it trades.
-      </div>
-    );
-  }
-  const t0 = points[0][0];
-  const t1 = Math.max(points[points.length - 1][0], t0 + 1);
-  const vals = points.map((p) => p[1]);
-  let lo = Math.min(...vals, start, floor ?? Infinity);
-  let hi = Math.max(...vals, start);
-  // Show the take-profit line only when it is near enough not to flatten everything else.
-  const showTp = takeProfit !== null && takeProfit <= hi + (hi - lo) * 0.6;
-  if (showTp) hi = Math.max(hi, takeProfit!);
-  const pad = (hi - lo || hi * 0.01 || 1) * 0.08;
-  lo -= pad;
-  hi += pad;
-  const y = (v: number) => height - ((v - lo) / (hi - lo)) * height;
-  const x = (t: number) => ((t - t0) / (t1 - t0)) * 100;
-  const line = points.map(([t, v]) => `${x(t).toFixed(2)},${y(v).toFixed(2)}`).join(" ");
-  const last = vals[vals.length - 1];
-  const color = last >= start ? "#22c55e" : "#ef4444";
-  const pct = (v: number) => `${(y(v) / height) * 100}%`;
-
-  return (
-    <div>
-      <div className="relative" style={{ height }}>
-        <svg
-          viewBox={`0 0 100 ${height}`}
-          preserveAspectRatio="none"
-          className="absolute inset-0 h-full w-full"
-          role="img"
-          aria-label={`Value over time: started at ${fmtUsd(start, 0)}, now ${fmtUsd(last, 0)}${floor ? `, floor at ${fmtUsd(floor, 0)}` : ""}.`}
-        >
-          <defs>
-            <linearGradient id={`ap-fill-${gid}`} x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity="0.18" />
-              <stop offset="100%" stopColor={color} stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          {[0.25, 0.5, 0.75].map((f) => (
-            <line key={f} x1="0" x2="100" y1={height * f} y2={height * f} stroke="#1e1e2a" strokeWidth="0.5" vectorEffect="non-scaling-stroke" />
-          ))}
-          <polygon points={`0,${height} ${line} 100,${height}`} fill={`url(#ap-fill-${gid})`} />
-          <line x1="0" x2="100" y1={y(start)} y2={y(start)} stroke="#9a9ab2" strokeWidth="1" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
-          {floor !== null && (
-            <line x1="0" x2="100" y1={y(floor)} y2={y(floor)} stroke="#ef4444" strokeWidth="1.2" strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
-          )}
-          {showTp && (
-            <line x1="0" x2="100" y1={y(takeProfit!)} y2={y(takeProfit!)} stroke="#22c55e" strokeWidth="1" strokeDasharray="2 4" vectorEffect="non-scaling-stroke" />
-          )}
-          <polyline points={line} fill="none" stroke={color} strokeWidth="1.8" vectorEffect="non-scaling-stroke" />
-        </svg>
-        <ChartLabel top={pct(start)} above className="text-cyber-text-dim">
-          start {fmtUsd(start, 0)}
-        </ChartLabel>
-        {floor !== null && (
-          <ChartLabel top={pct(floor)} className="text-danger">
-            floor {fmtUsd(floor, 0)}
-          </ChartLabel>
-        )}
-        {showTp && (
-          <ChartLabel top={pct(takeProfit!)} above className="text-success">
-            take profit {fmtUsd(takeProfit!, 0)}
-          </ChartLabel>
-        )}
-      </div>
-      <div className="mt-1 flex justify-between text-[11px] text-cyber-text-faint">
-        <span>{fmtWhen(t0)}</span>
-        <span>{endLabel}</span>
-      </div>
-    </div>
-  );
-}
-
-function ChartLabel({ top, above, className, children }: { top: string; above?: boolean; className: string; children: ReactNode }) {
-  return (
-    <span
-      style={{ top, transform: above ? "translateY(-100%)" : undefined }}
-      className={`pointer-events-none absolute right-1 rounded bg-cyber-surface/80 px-1 font-mono text-[10px] leading-4 ${className}`}
-    >
-      {children}
-    </span>
+      </p>
+      {live && (
+        <Notice tone="danger" title="Real money" className="mt-3">
+          Selling sends real orders to the exchange.
+        </Notice>
+      )}
+    </Sheet>
   );
 }
 
@@ -1391,21 +1319,22 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
   const active = isActive(s);
   const hold = compareWithHold(a.points, btc?.times, btc?.closes, a.startMs, a.endMs);
   const over = `${fmtDays(a.days)}${a.days < 1 ? ` (${fmtDuration(a.endMs - a.startMs)})` : ""}`;
+  const strong = "font-semibold text-ink";
 
   const items: { icon: LucideIcon; tone: string; text: ReactNode }[] = [];
 
   // Against its start.
   items.push({
     icon: s.pnl >= 0 ? TrendingUp : TrendingDown,
-    tone: s.pnl > 0.005 ? "text-success" : s.pnl < -0.005 ? "text-danger" : "text-cyber-text-faint",
+    tone: TONE_TEXT[changeTone(s.pnl)],
     text: (
       <>
-        It {active ? "has turned" : "turned"} {fmtUsd(s.startCapital, 0)} into <b className="text-cyber-text">{fmtUsd(s.equity, 2)}</b>:{" "}
+        It {active ? "has turned" : "turned"} {money(s.startCapital, 0)} into <b className={`tabular ${strong}`}>{money(s.equity, 2)}</b>:{" "}
         {Math.abs(s.pnl) < 0.005 ? (
           "no change"
         ) : (
-          <b className={s.pnl > 0 ? "text-success" : "text-danger"}>
-            {s.pnl > 0 ? "up" : "down"} {fmtUsd(Math.abs(s.pnl), 2)} ({signedPct(s.pnlPct, 1)})
+          <b className={`tabular font-semibold ${s.pnl > 0 ? "text-up" : "text-down"}`}>
+            {s.pnl > 0 ? "up" : "down"} {money(Math.abs(s.pnl), 2)} ({signedPct(s.pnlPct, 1)})
           </b>
         )}{" "}
         after every fee, over {over}.
@@ -1418,7 +1347,7 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
     const diff = hold.runPct - hold.holdPct;
     items.push({
       icon: BarChart3,
-      tone: diff >= 0 ? "text-success" : "text-warning",
+      tone: diff >= 0 ? "text-up" : "text-warn",
       text: (
         <>
           <Term k="Just holding Bitcoin">Just holding Bitcoin</Term>{" "}
@@ -1429,19 +1358,17 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
           ) : (
             "over the same period"
           )}{" "}
-          would have gone <b className="text-cyber-text">{signedPct(hold.holdPct, 1)}</b>; the autopilot went{" "}
-          <b className="text-cyber-text">{signedPct(hold.runPct, 1)}</b>. That is{" "}
-          <b className={diff >= 0 ? "text-success" : "text-warning"}>
-            {Math.abs(diff).toFixed(1)} percentage point{Math.abs(diff).toFixed(1) === "1.0" ? "" : "s"} {diff >= 0 ? "better" : "worse"}
-          </b>{" "}
-          than doing nothing{s.config.venue === "alpaca" ? " with Bitcoin, though this run traded shares" : ""}.
+          would have gone <b className={`tabular ${strong}`}>{signedPct(hold.holdPct, 1)}</b>; the autopilot went{" "}
+          <b className={`tabular ${strong}`}>{signedPct(hold.runPct, 1)}</b>. That is{" "}
+          <b className={`font-semibold ${diff >= 0 ? "text-up" : "text-warn"}`}>{pointsWord(diff)}</b> than doing nothing
+          {s.config.venue === "alpaca" ? " with Bitcoin, though this run traded shares" : ""}.
         </>
       ),
     });
   } else {
     items.push({
       icon: BarChart3,
-      tone: "text-cyber-text-faint",
+      tone: "text-faint",
       text: !btc
         ? "There is no Bitcoin price in this build to compare it with."
         : !btc.times || btc.times.length < 2
@@ -1460,12 +1387,9 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
           {a.sleeves.map((b, i) => (
             <span key={b.strategyId}>
               {i > 0 && (i === a.sleeves.length - 1 ? " and " : ", ")}
-              <b className="text-cyber-text">{b.name}</b>{" "}
-              {Math.abs(b.pnl) < 0.005 ? "broke even" : b.pnl > 0 ? "earned" : "lost"}{" "}
-              {Math.abs(b.pnl) >= 0.005 && (
-                <b className={b.pnl > 0 ? "text-success" : "text-danger"}>{fmtUsd(Math.abs(b.pnl), 2)}</b>
-              )}{" "}
-              from {b.trades} trade{b.trades === 1 ? "" : "s"}
+              <b className={strong}>{b.name}</b> {Math.abs(b.pnl) < 0.005 ? "broke even" : b.pnl > 0 ? "earned" : "lost"}{" "}
+              {Math.abs(b.pnl) >= 0.005 && <b className={`tabular font-semibold ${b.pnl > 0 ? "text-up" : "text-down"}`}>{money(Math.abs(b.pnl), 2)}</b>} from{" "}
+              {plural(b.trades, "trade")}
             </span>
           ))}
           .
@@ -1478,21 +1402,21 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
   const share = a.pnl.costShare;
   items.push({
     icon: Receipt,
-    tone: a.pnl.costHeavy ? "text-warning" : "text-cyber-text-faint",
+    tone: a.pnl.costHeavy ? "text-warn" : "text-faint",
     text:
       a.pnl.costs <= 0 ? (
         "It has paid no fees yet."
       ) : share !== undefined ? (
         <>
-          Fees came to <b className="text-cyber-text">{fmtUsd(a.pnl.costs, 2)}</b>, which is{" "}
-          <b className={a.pnl.costHeavy ? "text-warning" : "text-cyber-text"}>{(share * 100).toFixed(0)}%</b> of the{" "}
-          {fmtUsd(a.pnl.gross, 2)} it made before fees.
+          Fees came to <b className={`tabular ${strong}`}>{money(a.pnl.costs, 2)}</b>, which is{" "}
+          <b className={`tabular font-semibold ${a.pnl.costHeavy ? "text-warn" : "text-ink"}`}>{(share * 100).toFixed(0)}%</b> of the {money(a.pnl.gross, 2)} it
+          made before fees.
           {a.pnl.costHeavy && " Above 40 % the costs are the story, not the strategies."}
         </>
       ) : (
         <>
-          It paid <b className="text-cyber-text">{fmtUsd(a.pnl.costs, 2)}</b> in fees and made nothing before fees, so the fees only
-          added to the loss.
+          It paid <b className={`tabular ${strong}`}>{money(a.pnl.costs, 2)}</b> in fees and made nothing before fees, so the fees only added to
+          the loss.
         </>
       ),
   });
@@ -1500,11 +1424,11 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
   // Worst dip.
   items.push({
     icon: TrendingDown,
-    tone: a.dip && a.dip.pct > 10 ? "text-warning" : "text-cyber-text-faint",
+    tone: a.dip && a.dip.pct > 10 ? "text-warn" : "text-faint",
     text: a.dip ? (
       <>
-        Its worst dip was <b className="text-cyber-text">{a.dip.pct.toFixed(1)}%</b> ({fmtUsd(a.dip.usd, 0)}), from its high on{" "}
-        {fmtWhen(a.dip.peakMs)} to the low on {fmtWhen(a.dip.troughMs)}.
+        Its worst dip was <b className={`tabular ${strong}`}>{a.dip.pct.toFixed(1)}%</b> ({money(a.dip.usd, 0)}), from its high on {fmtWhen(a.dip.peakMs)} to
+        the low on {fmtWhen(a.dip.troughMs)}.
       </>
     ) : (
       "It never fell below an earlier high."
@@ -1514,34 +1438,31 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
   // How often.
   items.push({
     icon: Clock,
-    tone: "text-cyber-text-faint",
+    tone: "text-faint",
     text:
       a.tradesPerDay === null ? (
         "Too early to say how often it trades."
       ) : (
         <>
-          It made <b className="text-cyber-text">{a.tradesPerDay.toFixed(1)}</b> trade{a.tradesPerDay.toFixed(1) === "1.0" ? "" : "s"} a day on
-          average ({s.trades} in {fmtDays(a.days)}).
+          It made <b className={`tabular ${strong}`}>{a.tradesPerDay.toFixed(1)}</b> trade{a.tradesPerDay.toFixed(1) === "1.0" ? "" : "s"} a day on average (
+          {s.trades} in {fmtDays(a.days)}).
         </>
       ),
   });
 
   const m = a.maturity;
-  const left: string[] = [];
-  if (m.daysLeft > 0) left.push(`${m.daysLeft} more day${m.daysLeft === 1 ? "" : "s"}`);
-  if (m.tradesLeft > 0) left.push(`${m.tradesLeft} more trade${m.tradesLeft === 1 ? "" : "s"}`);
+  const left = stillToGo(m.daysLeft, m.tradesLeft);
 
   return (
-    <Card
+    <Section
       title={`How it did: ${s.config.name}`}
-      icon={BarChart3}
       help="A plain report on this run: against its start, against just holding Bitcoin, per strategy, and what it cost."
-      subtitle={`${active ? "So far" : s.state === "finished" ? "Finished" : "Stopped"} · ${fmtWhen(a.startMs)} to ${active ? "now" : fmtWhen(a.endMs)}`}
+      hint={`${active ? "So far" : s.state === "finished" ? "Finished" : "Stopped"}, ${fmtWhen(a.startMs)} to ${active ? "now" : fmtWhen(a.endMs)}.`}
     >
-      <ul className="space-y-2.5">
+      <ul className="space-y-3">
         {items.map((it, i) => (
-          <li key={i} className="flex items-start gap-2.5 text-sm leading-relaxed text-cyber-text-dim">
-            <it.icon size={15} aria-hidden className={`mt-0.5 shrink-0 ${it.tone}`} />
+          <li key={i} className="flex items-start gap-3 text-[15px] leading-relaxed text-muted">
+            <it.icon size={16} aria-hidden className={`mt-1 shrink-0 ${it.tone}`} />
             <span className="min-w-0">{it.text}</span>
           </li>
         ))}
@@ -1550,106 +1471,95 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
       <Notice tone={m.enough ? "info" : "warning"} className="mt-4" title={m.enough ? "Enough to start judging" : "Too early to judge"}>
         {m.enough ? (
           <>
-            With {fmtDays(m.days)} and {m.trades} trades the numbers carry some weight. They still describe the past, not the
-            future.
+            With {fmtDays(m.days)} and {m.trades} trades the numbers carry some weight. They still describe the past, not the future.
           </>
         ) : (
           <>
-            {fmtDays(m.days)[0].toUpperCase() + fmtDays(m.days).slice(1)} and {m.trades} trade{m.trades === 1 ? "" : "s"} are mostly
-            noise: a good result can be luck, a bad one bad luck. The numbers start to mean something after at least{" "}
-            {MEANINGFUL_DAYS} days and {MEANINGFUL_TRADES} trades, the same bar a strategy has to clear before it may use real money.
-            {active ? ` ${left.join(" and ")} to go.` : " This run ended before that."}
+            {capitalise(fmtDays(m.days))} and {plural(m.trades, "trade")} are mostly noise: a good result can be luck, a bad one bad luck. The numbers
+            start to mean something after at least {MEANINGFUL_DAYS} days and {MEANINGFUL_TRADES} trades, the same bar a strategy has to clear before it
+            may use real money.
+            {active ? ` ${left} to go.` : " This run ended before that."}
           </>
         )}
       </Notice>
 
       {advanced && (
-        <div className="mt-4 space-y-3 border-t border-cyber-border pt-4">
-          <PnlLines pnl={a.pnl} compact />
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Readout label="Days" value={a.days.toFixed(1)} help="How long it has run, in days." />
-            <Readout label="Trades per day" value={a.tradesPerDay === null ? "n/a" : a.tradesPerDay.toFixed(2)} />
-            <Readout label="Worst Drawdown" value={a.dip ? `${a.dip.pct.toFixed(2)}%` : "0%"} tone={a.dip && a.dip.pct > 10 ? "amber" : "neutral"} />
-            <Readout
+        <div className="mt-4 border-t border-line pt-2">
+          <CostLines pnl={a.pnl} />
+          <List className="mt-2 border-t border-line">
+            <Row label="Days" value={a.days.toFixed(1)} help="How long it has run, in days." />
+            <Row label="Trades per day" value={a.tradesPerDay === null ? "n/a" : a.tradesPerDay.toFixed(2)} />
+            <Row label="Worst Drawdown" value={a.dip ? `${a.dip.pct.toFixed(2)}%` : "0%"} tone={a.dip && a.dip.pct > 10 ? "warn" : "plain"} />
+            <Row
               label="Cost share"
-              value={share !== undefined ? `${(share * 100).toFixed(1)}%` : a.pnl.costs > 0 ? "no gross gain" : "n/a"}
-              tone={a.pnl.costHeavy ? "amber" : "neutral"}
+              value={share !== undefined ? `${(share * 100).toFixed(1)}%` : a.pnl.costs > 0 ? "No gross gain" : "n/a"}
+              tone={a.pnl.costHeavy ? "warn" : "plain"}
             />
-          </div>
+          </List>
         </div>
       )}
-    </Card>
+    </Section>
   );
 }
 
 // ── 4 · past runs ───────────────────────────────────────────────────────────
 
-function PastList({
-  past,
-  shownId,
-  onAnalyse,
-}: {
-  past: AutopilotStatus[];
-  shownId?: string;
-  onAnalyse: (id: string) => void;
-}) {
+function PastList({ past, shownId, onAnalyse }: { past: AutopilotStatus[]; shownId?: string; onAnalyse: (id: string) => void }) {
   const simple = !useAdvanced();
   return (
-    <Card title="Past autopilots" icon={History} help="Every earlier run with how it ended. Pick one to see its report above.">
+    <Section
+      title="Past autopilots"
+      help="Every earlier run with how it ended. Pick one to see its report above."
+      hint="Every earlier run with how it ended. Tap one to see its report above."
+    >
       {past.length === 0 ? (
-        <EmptyState icon={History} title="No finished autopilots yet" compact>
+        <Nothing icon={History} title="No finished autopilots yet">
           When an autopilot stops or finishes, it is listed here with its result.
-        </EmptyState>
+        </Nothing>
       ) : (
-        <ul className="space-y-2">
+        <List>
           {past.map((p) => {
-            const badge = modeBadge(p.config.mode, simple);
+            const badge = modeLabel(p.config.mode, simple);
             const end = p.stoppedMs ?? p.startedMs;
             const shown = p.config.id === shownId;
+            const Icon = p.state === "finished" ? Flag : Square;
             return (
-              <li
+              <button
                 key={p.config.id}
-                className={`rounded-lg border px-3 py-2.5 ${shown ? "border-accent/40 bg-accent/[0.04]" : "border-cyber-border bg-cyber-bg/40"}`}
+                type="button"
+                onClick={() => onAnalyse(p.config.id)}
+                aria-current={shown ? "true" : undefined}
+                className={`-mx-2 block w-[calc(100%+1rem)] rounded-control px-2 py-3.5 text-left transition-colors hover:bg-surface-2 ${shown ? "bg-surface-2" : ""}`}
               >
-                <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {p.state === "finished" ? (
-                        <Flag size={14} aria-hidden className="shrink-0 text-accent" />
-                      ) : (
-                        <Square size={13} aria-hidden className="shrink-0 text-cyber-text-faint" />
-                      )}
-                      <span className="text-sm font-medium text-cyber-text">{p.config.name}</span>
-                      <Badge tone={badge.tone}>{badge.text}</Badge>
-                      <Badge tone="neutral">{p.state === "finished" ? "finished" : "stopped"}</Badge>
-                    </div>
-                    <div className="mt-0.5 flex items-start gap-1 text-xs text-cyber-text-faint">
-                      <CalendarClock size={12} aria-hidden className="mt-0.5 shrink-0" />
-                      <span className="min-w-0">
-                        {fmtWhen(p.startedMs)} to {fmtWhen(end)} · {fmtDuration(end - p.startedMs)} · {p.trades} trades
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex w-full items-baseline gap-2 sm:block sm:w-auto sm:text-right">
-                    <div className={`font-mono text-sm font-bold ${p.pnl > 0.005 ? "text-success" : p.pnl < -0.005 ? "text-danger" : "text-cyber-text"}`}>
-                      {signedUsd(p.pnl)}
-                    </div>
-                    <div className="font-mono text-xs text-cyber-text-faint">
-                      {signedPct(p.pnlPct, 1)} of {fmtUsd(p.startCapital, 0)}
-                    </div>
-                  </div>
-                </div>
-                {p.stopReason && <div className="mt-1 text-xs text-cyber-text-dim">{p.stopReason}</div>}
-                <div className="mt-2">
-                  <Button tone={shown ? "cyan" : "neutral"} size="sm" icon={BarChart3} onClick={() => onAnalyse(p.config.id)}>
-                    {shown ? "Showing its report" : "Show its report"}
-                  </Button>
-                </div>
-              </li>
+                <span className="flex items-start justify-between gap-3">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Icon size={15} aria-hidden className="shrink-0 text-muted" />
+                    <span className="min-w-0 break-words text-[15px] font-semibold text-ink">{p.config.name}</span>
+                  </span>
+                  <span className="shrink-0 text-right">
+                    <span className={`tabular block text-[15px] font-semibold ${TONE_TEXT[changeTone(p.pnl)]}`}>{signedMoney(p.pnl)}</span>
+                    <span className="tabular block text-[13px] text-muted">
+                      {signedPct(p.pnlPct, 1)} of {money(p.startCapital, 0)}
+                    </span>
+                  </span>
+                </span>
+                <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <Badge tone={badge.tone}>{badge.text}</Badge>
+                  <Badge>{p.state === "finished" ? "Finished" : "Stopped"}</Badge>
+                  {shown && <Badge tone="accent">Showing its report</Badge>}
+                </span>
+                <span className="mt-1.5 flex items-start gap-1.5 text-[13px] text-muted">
+                  <CalendarClock size={13} aria-hidden className="mt-0.5 shrink-0" />
+                  <span className="min-w-0">
+                    {fmtWhen(p.startedMs)} to {fmtWhen(end)}, {fmtDuration(end - p.startedMs)}, {plural(p.trades, "trade")}
+                  </span>
+                </span>
+                {p.stopReason && <span className="mt-1 block break-words text-[13px] leading-snug text-muted">{p.stopReason}</span>}
+              </button>
             );
           })}
-        </ul>
+        </List>
       )}
-    </Card>
+    </Section>
   );
 }
