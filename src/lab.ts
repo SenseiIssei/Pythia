@@ -42,6 +42,8 @@ export interface LabStatus {
   learn?: LearnDigest | null;
   /** Every scheduled job of the job table (research/ops/jobs.yaml). */
   jobs?: JobsStatus | null;
+  /** New coin listings the watcher saw in the last 90 days. */
+  listings?: ListingsFeed | null;
 }
 
 // ── scheduled jobs (research/lab/lab/ops/jobs.py, _health/jobs.json) ───────
@@ -61,7 +63,7 @@ export interface JobStatus {
   enabled: boolean;
   schedule: string | null;
   after: string[];
-  state: "ok" | "running" | "never" | "disabled" | "failed" | "timeout" | "late" | "blocked" | "stuck";
+  state: "ok" | "running" | "never" | "disabled" | "legacy" | "failed" | "timeout" | "late" | "blocked" | "stuck";
   ok: boolean;
   detail: string;
   nextRun: string | null;
@@ -75,6 +77,86 @@ export interface JobsStatus {
   ok: boolean;
   failing: string[];
   jobs: JobStatus[];
+}
+
+// ── new listings (pythia-core labview::ListingsFeed) ────────────────────────
+
+export interface Listing {
+  tsMs: number;
+  venue: string;
+  event: string;
+  symbol: string;
+  base: string;
+  quote: string | null;
+  newBase: boolean | null;
+  alpacaLists: boolean | null;
+  price: number | null;
+  title: string | null;
+}
+
+export interface ListingsFeed {
+  generated: string;
+  generatedMs: number;
+  venues: Record<string, { ok: boolean; count: number; error: string | null }>;
+  listings: Listing[];
+}
+
+const VENUE_LABEL: Record<string, string> = {
+  alpaca: "Alpaca",
+  binance: "Binance",
+  coinbase: "Coinbase",
+  kraken: "Kraken",
+  binance_news: "Binance announcement",
+};
+
+export interface ListingRow {
+  key: string;
+  tsMs: number;
+  venue: string;
+  coin: string;
+  symbols: string[];
+  /** Alpaca lists it: yes, no, or unknown without Alpaca keys. */
+  alpaca: "yes" | "no" | "unknown";
+  price: string | null;
+  title: string | null;
+}
+
+/**
+ * One row per coin per venue per watcher run, newest first: a new pair of a
+ * coin the venue already had is left out unless the venue is Alpaca.
+ */
+export function listingRows(feed: ListingsFeed | null | undefined, limit = 20): ListingRow[] {
+  const rows = new Map<string, ListingRow>();
+  for (const l of feed?.listings ?? []) {
+    if (l.event !== "announced" && !(l.newBase || l.venue === "alpaca")) continue;
+    const key = `${l.venue}:${l.base || l.symbol}:${l.tsMs}`;
+    const r = rows.get(key);
+    const price =
+      l.price != null && Number.isFinite(l.price) ? `${l.price.toPrecision(4)} ${l.quote ?? ""}`.trim() : null;
+    if (r) {
+      r.symbols.push(l.symbol);
+      r.price ??= price;
+      continue;
+    }
+    rows.set(key, {
+      key,
+      tsMs: l.tsMs,
+      venue: VENUE_LABEL[l.venue] ?? l.venue,
+      coin: l.base || l.symbol,
+      symbols: [l.symbol],
+      alpaca: l.venue === "alpaca" ? "yes" : l.alpacaLists == null ? "unknown" : l.alpacaLists ? "yes" : "no",
+      price,
+      title: l.title,
+    });
+  }
+  return [...rows.values()].sort((a, b) => b.tsMs - a.tsMs).slice(0, limit);
+}
+
+/** Venues the watcher could not read on its last run, in plain words. */
+export function listingGaps(feed: ListingsFeed | null | undefined): string[] {
+  return Object.entries(feed?.venues ?? {})
+    .filter(([, v]) => !v.ok)
+    .map(([k, v]) => `${VENUE_LABEL[k] ?? k}: ${v.error ?? "no answer"}`);
 }
 
 // ── learning loop digest (pythia-core labview::LearnDigest) ─────────────────

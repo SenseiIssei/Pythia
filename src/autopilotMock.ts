@@ -13,7 +13,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { AutopilotStart, AutopilotStatus, AutopilotUpdate } from "./types";
 import { LIVE_PHRASE, floorAtStart } from "./autopilot";
 
-export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading";
+export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading" | "sidebyside";
 
 export interface MockAutopilot {
   scenario: MockScenario;
@@ -33,7 +33,7 @@ function requested(): MockScenario | null {
   const q = new URLSearchParams(window.location.search);
   if (!q.has("mockAutopilot")) return null;
   const v = q.get("mockAutopilot");
-  return v === "paused" || v === "finished" || v === "empty" || v === "loading" ? v : "running";
+  return v === "paused" || v === "finished" || v === "empty" || v === "loading" || v === "sidebyside" ? v : "running";
 }
 
 const H = 3_600_000;
@@ -246,7 +246,60 @@ function seed(scenario: MockScenario, names: Record<string, string>): State {
     run.bySleeve[1].pnl = split * 0.2 - run.fees * 0.4;
     list.push(run);
   }
-  if (scenario !== "empty") list.push(lost, won);
+  if (scenario === "sidebyside") {
+    // Three demo autopilots on the one Alpaca paper account, each in a book
+    // of its own; two of them run the same lab book.
+    const runs: [string, string, number, number, number, string[]][] = [
+      ["mock-a", "Breakout top 10", 60_000, 21, 0.0003, ["lab:breakout_top10"]],
+      ["mock-b", "Tranches", 25_000, 9, -0.0001, ["lab:tsmom_tranches", "lab:tsmom_regime"]],
+      ["mock-c", "Regime only", 10_000, 4, 0.00045, ["lab:tsmom_regime"]],
+    ];
+    runs.forEach(([id, name, capital, days, drift, sleeves], k) => {
+      const start = now - days * DAY;
+      const hist = walk(31 + k, start, now - H, H, capital, drift, 0.005);
+      const s = summarise({
+        config: {
+          id,
+          name,
+          mode: "demo",
+          venue: "alpaca",
+          assetClass: "crypto",
+          capitalUsd: capital,
+          sleeves: sleeves.map((strategyId) => ({ strategyId, weight: 1 })),
+          stop: { maxLossPct: 10, onTakeProfit: "stop" },
+          flattenOnStop: true,
+        },
+        state: "running",
+        startedMs: start,
+        startCapital: capital,
+        equity: 0,
+        pnl: 0,
+        pnlPct: 0,
+        peakEquity: capital,
+        drawdownPct: 0,
+        floorEquity: 0,
+        trades: 3 * days + k,
+        fees: capital * 0.0004 * days,
+        bySleeve: sleeves.map((strategyId) => ({
+          strategyId,
+          name: n(strategyId),
+          weight: 1 / sleeves.length,
+          pnl: 0,
+          trades: days,
+          markets: [],
+          why: "You picked it.",
+        })),
+        lastAction: "Rebalanced toward the lab's weights.",
+        history: hist,
+      });
+      const i0 = btc.times.findIndex((t) => t >= start);
+      const btcPct = i0 >= 0 ? (btc.closes[btc.closes.length - 1] / btc.closes[i0] - 1) * 100 : 0;
+      s.benchmark = { symbol: "BTC/USD", name: "BTC buy and hold", returnPct: btcPct, excessPct: s.pnlPct - btcPct };
+      s.btcReturnPct = btcPct;
+      list.push(s);
+    });
+  }
+  if (scenario !== "empty" && scenario !== "sidebyside") list.push(lost, won);
   return { scenario, list, btc, names };
 }
 

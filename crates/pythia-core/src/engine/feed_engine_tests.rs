@@ -24,6 +24,8 @@ fn long_btc(e: &mut Engine, stop: f64) {
     e.positions.insert(
         BTC.into(),
         PositionInternal {
+            market: BTC.into(),
+            book: String::new(),
             venue: Venue::Crypto,
             symbol: "BTC/USD".into(),
             qty: 0.1,
