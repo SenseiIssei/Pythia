@@ -175,14 +175,19 @@ def variant(name: str) -> str:
 
 
 def step(name: str, row_w: np.ndarray, P: fc.Panel, t: int, quotes: dict[str, tuple[float, float]],
-         now_us: int, start_row: np.ndarray) -> dict:
+         now_us: int, start_row: np.ndarray, label: str | None = None, taker: float = TAKER,
+         model: float = COST) -> dict:
+    """One run of a paper book. `label` replaces the journal's description of the
+    book; `taker` is the fee the paper fill pays on top of the half spread and
+    `model` the backtest's cost per unit of turnover (Binance's by default; the
+    experimental books on Alpaca coins pass Alpaca's)."""
     d = ROOT / "paper" / name
     d.mkdir(parents=True, exist_ok=True)
     state_file = d / "state.json"
     if state_file.exists():
         st = json.loads(state_file.read_text())
     else:
-        st = {"variant": variant(name), "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        st = {"variant": label or variant(name), "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "equity": START_EQUITY, "weights": {}, "mid": {}}
         # A new book starts where the backtest stands, not flat: breakout only
         # writes a weight on the entry day, so "leave it" would never buy the
@@ -217,8 +222,8 @@ def step(name: str, row_w: np.ndarray, P: fc.Panel, t: int, quotes: dict[str, tu
     syms = set(w) | set(tgt)
     delta = {s: tgt.get(s, 0.0) - w.get(s, 0.0) for s in syms}
     half = {s: (quotes[s][1] - quotes[s][0]) / mid[s] / 2 for s in syms if s in quotes}
-    paper_cost = sum(abs(x) * (TAKER + half.get(s, 0.0)) for s, x in delta.items())
-    model_cost = sum(abs(x) for x in delta.values()) * COST
+    paper_cost = sum(abs(x) * (taker + half.get(s, 0.0)) for s, x in delta.items())
+    model_cost = sum(abs(x) for x in delta.values()) * model
     equity *= 1 - paper_cost
     # How far the live price had moved from the close the signal used (the sweep fills at that close)
     moved = [(abs(x), mid[s] / P.close[t, P.col(s)] - 1) for s, x in delta.items()
