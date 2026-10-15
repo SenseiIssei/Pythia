@@ -2087,28 +2087,19 @@ impl Engine {
             if self.data_stale_alerted {
                 self.data_stale_alerted = false;
                 self.alert_event(
-                    crate::alerts::AlertEvent::new(crate::alerts::AlertKind::DataStale, "stale:off", "market data is fresh again.")
-                        .titled("Market data is fresh again")
-                        .with_summary("Entries and stops work on live prices again.")
-                        .with_emoji("✅"),
+                    crate::alerts::AlertEvent::from_msg("stale:off", crate::alerts::Msg::DataFresh).with_emoji("✅"),
                 );
             }
         } else if !self.data_stale_alerted {
             let mins = since.map_or(0, |s| (now - s) / 60_000);
             if mins >= DATA_STALE_ALERT_MIN {
                 self.data_stale_alerted = true;
-                let mut parts = Vec::new();
-                if !quotes.is_empty() {
-                    parts.push(format!("quotes for {}", feeds::list_markets(&quotes)));
-                }
-                if !candles.is_empty() {
-                    parts.push(format!("candles for {}", feeds::list_markets(&candles)));
-                }
-                self.alert(
-                    crate::alerts::AlertKind::DataStale,
-                    "stale:on",
-                    format!("for {mins} min: {}. Entries are refused and stops wait for a fresh price.", parts.join(", ")),
-                );
+                let msg = crate::alerts::Msg::DataStale {
+                    mins,
+                    quotes: (!quotes.is_empty()).then(|| feeds::list_markets(&quotes)),
+                    candles: (!candles.is_empty()).then(|| feeds::list_markets(&candles)),
+                };
+                self.alert_event(crate::alerts::AlertEvent::from_msg("stale:on", msg));
             }
         }
         match self.feeds.track_episode(!quotes.is_empty() || !candles.is_empty(), now) {
@@ -2156,14 +2147,10 @@ impl Engine {
         let loss_pct = -day_pnl / self.day_start_equity * 100.0;
         if loss_pct >= self.limits.max_daily_loss_pct {
             self.daily_loss_alerted_day = Some(today);
-            self.alert(
-                crate::alerts::AlertKind::DailyLossBrake,
+            self.alert_event(crate::alerts::AlertEvent::from_msg(
                 format!("dailyloss:{today}"),
-                format!(
-                    "the book is down {loss_pct:.1} % today, limit {:.1} %. New entries are refused until the next UTC day.",
-                    self.limits.max_daily_loss_pct
-                ),
-            );
+                crate::alerts::Msg::DailyLoss { loss_pct, limit_pct: self.limits.max_daily_loss_pct },
+            ));
         }
     }
 
@@ -2447,11 +2434,8 @@ impl Engine {
             if dd >= self.limits.max_drawdown_pct {
                 self.limits.kill_switch = true;
                 self.log(JournalKind::Risk, format!("Max drawdown {dd:.1}% ≥ {:.1}% — KILL SWITCH tripped", self.limits.max_drawdown_pct), None, None);
-                let text = format!(
-                    "tripped by the drawdown brake: equity {:.2} is {dd:.1} % below its peak, limit {:.1} %. Only closing orders pass until it is released.",
-                    eq, self.limits.max_drawdown_pct
-                );
-                self.alert(crate::alerts::AlertKind::KillSwitch, "kill:on", text);
+                let msg = crate::alerts::Msg::KillDrawdown { equity: eq, dd_pct: dd, limit_pct: self.limits.max_drawdown_pct };
+                self.alert_event(crate::alerts::AlertEvent::from_msg("kill:on", msg));
             }
         }
 
@@ -5395,11 +5379,10 @@ impl Engine {
         if changes > 0 {
             self.pending_alerts
                 .push(format!("⚠ Pythia reconciled {changes} position difference(s) with {venue:?}"));
-            self.alert(
-                crate::alerts::AlertKind::ReconcileMismatch,
+            self.alert_event(crate::alerts::AlertEvent::from_msg(
                 format!("reconcile:{venue:?}:{changes}"),
-                format!("{venue:?} and Pythia's book differed in {changes} position(s); Pythia took the venue's numbers. See the journal."),
-            );
+                crate::alerts::Msg::Reconcile { venue: format!("{venue:?}"), changes },
+            ));
         }
         changes
     }
@@ -6209,15 +6192,12 @@ impl Engine {
         self.limits.kill_switch = !self.limits.kill_switch;
         let s = if self.limits.kill_switch { "ENGAGED — live buys halted" } else { "released" };
         self.log(JournalKind::Risk, format!("KILL SWITCH {s}"), None, None);
-        let (key, text) = if self.limits.kill_switch {
-            ("kill:on", "engaged by hand. Only closing orders pass until it is released.")
+        use crate::alerts::{AlertEvent, Msg};
+        let ev = if self.limits.kill_switch {
+            AlertEvent::from_msg("kill:on", Msg::KillByHand)
         } else {
-            ("kill:off", "released by hand.")
+            AlertEvent::from_msg("kill:off", Msg::KillReleased).with_emoji("🟢")
         };
-        let mut ev = crate::alerts::AlertEvent::new(crate::alerts::AlertKind::KillSwitch, key, text);
-        if !self.limits.kill_switch {
-            ev = ev.titled("Kill switch released").with_emoji("🟢");
-        }
         self.alert_event(ev);
     }
     pub fn set_limits(&mut self, next: RiskLimits) {
@@ -7127,12 +7107,8 @@ impl Engine {
         let n = self.reject_streak[i];
         if n == self.alert_reject_after + 1 {
             let what = if demo { "demo" } else { "live" };
-            let on = if symbol.is_empty() { String::new() } else { format!(" (last: {symbol})") };
-            self.alert(
-                crate::alerts::AlertKind::OrderRejects,
-                format!("rejects:{what}"),
-                format!("{n} {what} orders refused in a row{on}: {reason}"),
-            );
+            let msg = crate::alerts::Msg::OrderRejects { n, demo, symbol: symbol.to_string(), reason: reason.to_string() };
+            self.alert_event(crate::alerts::AlertEvent::from_msg(format!("rejects:{what}"), msg));
         }
     }
 
