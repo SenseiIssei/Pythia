@@ -67,6 +67,7 @@ import {
   stillToGo,
 } from "../pagekit/autopilotView";
 import { explain } from "../glossary";
+import { ReadinessCard } from "../components/ReadinessCard";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
 import { autopilotVenue, demoIsApiTestOnly, exchangeName } from "../venueNames";
@@ -248,6 +249,8 @@ export function Autopilot() {
               )}
             </>
           )}
+
+          {!api.mocked && <ReadinessCard />}
 
           <div ref={analysisRef} className="scroll-mt-4">
             {shown && <AnalysisCard s={shown} btc={api.btc} />}
