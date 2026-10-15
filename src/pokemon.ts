@@ -22,6 +22,10 @@ export interface PokemonCard {
   priceSrc: string | null;
   variant: string | null;
   cardmarketEur: number | null;
+  /** When the API last refreshed this card's Cardmarket prices (YYYY-MM-DD). */
+  cardmarketUpdated?: string | null;
+  /** Updated within two weeks. A stale block is shown for the record only. */
+  cardmarketFresh?: boolean;
   spreadPct: number | null;
   tcgplayerUrl: string | null;
   cardmarketUrl: string | null;
@@ -64,12 +68,39 @@ export interface PokemonCollection {
   returnPct: number;
   holdings: PokemonHolding[];
   curve: [string, number][];
+  trades?: PokemonTrade[];
+}
+
+export interface PokemonTrade {
+  date: string;
+  side: string;
+  name: string;
+  qty: string | number;
+  price: string | number;
+  cash: string | number;
+  why: string;
 }
 
 export interface PokemonModel {
   validated: boolean;
   sentence: string;
   fairValueR2: number | null;
+}
+
+export interface PokemonFreshness {
+  /** Share of priced cards whose Cardmarket block is under two weeks old, 0..1. */
+  cardmarketFreshShare: number | null;
+  cardmarketNewest: string | null;
+  tcgplayerNewest: string | null;
+}
+
+export interface PokemonAlertMove {
+  card_id: string;
+  name: string;
+  set: string | null;
+  price: number;
+  move: number;
+  basis: string;
 }
 
 export interface PokemonData {
@@ -80,6 +111,8 @@ export interface PokemonData {
   model: PokemonModel;
   cards: PokemonCard[];
   collection: PokemonCollection;
+  freshness?: PokemonFreshness;
+  alerts?: { moves: PokemonAlertMove[]; undervalued: { card_id: string }[]; sent: boolean };
 }
 
 export interface PokemonView {
@@ -127,6 +160,32 @@ export function headlineChange(c: PokemonCard): { pct: number | null; label: str
     return { pct: c.change30dPct, label: c.change30dSrc === "cardmarket" ? "30 days (Cardmarket)" : "30 days" };
   return { pct: null, label: "" };
 }
+
+/**
+ * The figure under a row's price, following the sort: the forecast when
+ * sorting by forecast, the distance to fair value when sorting by cheapness,
+ * else the latest change. Percent units.
+ */
+export function rowFigure(c: PokemonCard, by: CardSort): { pct: number | null; suffix: string } {
+  if (by === "forecast") return { pct: c.pred90dPct, suffix: "in 90 d" };
+  if (by === "cheap") return { pct: c.fairGapPct, suffix: "to fair" };
+  const h = headlineChange(c);
+  return { pct: h.pct, suffix: h.label };
+}
+
+/** Most Cardmarket prices are older than two weeks: the EU side is left out. */
+export function cardmarketStale(d: Pick<PokemonData, "freshness">): boolean {
+  const s = d.freshness?.cardmarketFreshShare;
+  return s != null && Number.isFinite(s) && s < 0.5;
+}
+
+/** Prices from our own snapshots, oldest first, without gaps. */
+export function priceHistory(c: PokemonCard): number[] {
+  return c.history.map(([, p]) => p).filter((p): p is number => p != null && Number.isFinite(p));
+}
+
+/** Days of our own history a first honest test of the 30-day forecast needs. */
+export const DAYS_FOR_A_TEST = 225;
 
 export function predLabel(src: string | null): string {
   switch (src) {

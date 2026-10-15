@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterCards, headlineChange, money, pct, predLabel, sortCards, type PokemonCard } from "./pokemon";
+import { cardmarketStale, filterCards, headlineChange, money, pct, predLabel, priceHistory, rowFigure, sortCards, type PokemonCard } from "./pokemon";
 
 function card(over: Partial<PokemonCard>): PokemonCard {
   return {
@@ -49,6 +49,21 @@ describe("helpers", () => {
     expect(predLabel("prior")).toMatch(/not validated/);
     expect(predLabel(null)).toMatch(/not validated/);
     expect(predLabel("model")).toMatch(/validated out of sample/);
+  });
+  it("shows the figure the sort is about under the price", () => {
+    const c = card({ change7dPct: 9, pred90dPct: 14, fairGapPct: -20 });
+    expect(rowFigure(c, "price")).toEqual({ pct: 9, suffix: "7 days" });
+    expect(rowFigure(c, "change")).toEqual({ pct: 9, suffix: "7 days" });
+    expect(rowFigure(c, "forecast")).toEqual({ pct: 14, suffix: "in 90 d" });
+    expect(rowFigure(c, "cheap")).toEqual({ pct: -20, suffix: "to fair" });
+  });
+  it("flags stale Cardmarket data only when most of it is old", () => {
+    expect(cardmarketStale({ freshness: { cardmarketFreshShare: 0.1, cardmarketNewest: "2026-07-01", tcgplayerNewest: null } })).toBe(true);
+    expect(cardmarketStale({ freshness: { cardmarketFreshShare: 0.9, cardmarketNewest: null, tcgplayerNewest: null } })).toBe(false);
+    expect(cardmarketStale({})).toBe(false);
+  });
+  it("keeps only real prices in the history line", () => {
+    expect(priceHistory(card({ history: [["2026-10-14", 3], ["2026-10-15", null], ["2026-10-16", 4]] }))).toEqual([3, 4]);
   });
   it("formats money and percentages", () => {
     expect(money(1234.5)).toBe("$1,234.50");
