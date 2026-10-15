@@ -66,6 +66,7 @@ panel for its breadth features, so run `xs_daily` first.
 | `meta_daily` (C14) | Can a LightGBM meta-label on the daily `breakout_top10` entries (21 features known at the entry close: M2 score and rank, realised and HAR vol, breakout strength, volume surge, BTC regime, breadth, funding, liquidity), purged quarterly walk-forward from 2021-07 with a 10-day embargo, skip or size the entries profitably? Pre-registered, 10 trials | No. Out of sample the classifier ranks trades worse than chance: AUC 0.45 on 1,124 events from 2022 (90 % band 0.39 to 0.53), 0.40 on the book's own entries, Brier 0.23 vs 0.22 for the base rate. From 2024 at 35 bps (Alpaca taker plus slippage) the unfiltered book makes Sharpe 1.06, drawdown 22 %; skip below average 0.00 (skips 98 % of decisions), skip the worst quarter -0.11, size by probability 1.05 (drawdown 20 %). Every gate fails for every use, deflated p 0.00 over 275 trials. No paper book. See `results/meta_daily.md`. (2026-10-14) |
 | `regime_hmm` (M7) | A Gaussian HMM regime gate (2 to 4 states, price or full features incl. breadth and funding, filtered probabilities only, monthly expanding refits) against the BTC 200-day rule and no gate, for breakout_top10, tsmom_top20, tsmom_tranches and tsmom_regime. Pre-registered, 66 trials | No. The pick (3 states, full features, switch) beats the 200-day rule in 3 of 4 books but no difference survives deflation or the bootstrap, and it hurts the best book: breakout_top10 1.02 against 1.24 with the 200-day rule. The 200-day rule stays. Deflated p over 331 trials. See `results/regime_hmm.md`. (2026-10-14) |
 | `alpaca_universe` (C16) | What the books earn on what Alpaca lists: the original books, the same books with non-Alpaca coins left in cash (what the autopilot does), and the rules choosing only among the 15 Alpaca coins (top K 5 to 15). Pre-registered, 46 trials, 35 bps | No new book, but a useful answer: leaving the unlisted coins in cash is BETTER than the original books out of sample (breakout_top10 1.17 vs 1.06, tsmom_top20 0.54 vs 0.22, tsmom_tranches 0.65 vs 0.39), so the live autopilot is set up right. Choosing only among the 15 does not beat it for breakout (0.49 vs 1.17); for momentum it looks better (tranches 0.92 vs 0.65) but the bootstrap band of the difference includes 0 and deflated p is 0.01. See `results/alpaca_universe.md`. (2026-10-15) |
+| `pokemon` (W9) | Pokemon cards: daily price snapshots (Pokemon TCG API: TCGplayer USD and Cardmarket EUR per card, sets, optional sealed from tcgcsv), rarity, character, release, reprint and US/EU spread studies, a set-grouped fair value, 30 and 90 day forecasts, a $1,000 play-money collection, Telegram alerts, the Cards page. Data and paper only, no orders | Built, no real prices yet: the API was not reachable from the build machine, so the first snapshot is the server's first run. Forecasts are a labelled fixed rule until the walk-forward validates (about 225 days for 30 d, 345 for 90 d). On synthetic markets the walk-forward finds a planted signal (rank IC 0.37, t 9.3) and rejects noise (-0.03). Card costs need +24 to +36 % to break even. See `results/pokemon.md`. (2026-10-15) |
 | `costs` | What does crossing the book really cost, per coin? | Spreads are far tighter than the guesses: BTC one tick on both venues, most coins under 2 bps a side. Fees are nearly all of it: a Kraken taker round trip is 80 bps, Binance 20. Weekly, report only (2026-10-07). |
 
 ## Strategy-family sweep (2026-10-07)
@@ -187,5 +188,12 @@ each: "on track", "below the backtest's range after N days, worth watching",
   (from one day on), and realised against modelled slippage per route from
   the orders the engine still keeps. An autopilot that runs a single lab book
   is held against that book's band.
+
+## Pokemon cards
+
+`lab.collect.pokemon` (collector) and `lab.pokemon.daily` (everything after
+it) run at 07:05 UTC, see `research/ops/README.md`. Data, forecasts, a
+paper collection and alerts only: nothing here can place an order. Lake under
+`<data>/pokemon/`; results and caveats in `results/pokemon.md`.
 
 Tests: `python -m pytest tests` from `research/lab`.
