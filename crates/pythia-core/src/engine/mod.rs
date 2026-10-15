@@ -1209,6 +1209,8 @@ const STARTING_CASH: f64 = 100_000.0;
 /// engine reacts within a minute of the condition clearing (a market opening,
 /// cash settling).
 const LIVE_REJECT_BACKOFF_MS: i64 = 60_000;
+/// A position worth less than this (in USD) is rounding dust, not a position.
+const DUST_USD: f64 = 0.01;
 /// Market data stale for longer than this many minutes is an operator alert.
 const DATA_STALE_ALERT_MIN: i64 = 10;
 
@@ -2906,6 +2908,23 @@ impl Engine {
             _ => return,
         };
         let Some(m) = self.markets.iter().find(|m| m.id == market).cloned() else { return };
+        // What rounding left behind (a few billionths of a coin, worth less
+        // than a cent) no venue sells: it is written off once instead of an
+        // exit that never goes out, tried again at every tick.
+        if m.price > 0.0 && qty * m.price < DUST_USD {
+            self.positions.remove(key);
+            if let Some(ap) = self.autopilots.iter_mut().find(|a| a.config.id == book) {
+                ap.release(&market);
+            }
+            let whose = self.book_label(&book).map(|l| format!(" ({l})")).unwrap_or_default();
+            self.log(
+                JournalKind::System,
+                format!("{market}{whose}: a remainder of {qty:.3e} coins (under a cent) written off, nothing to sell"),
+                Some(sid),
+                Some(market),
+            );
+            return;
+        }
         let idx = self
             .strategies
             .iter()
