@@ -356,3 +356,107 @@ Bootstrap: stationary, mean block 10 days, 5,000 draws, of the out-of-sample Sha
 | 2020 | -0.014 |
 
 <!-- end of the generated proxy section -->
+
+<!-- generated below by lab.experiments.intraday_equities --source alpaca; do not edit -->
+
+## Alpaca run (ETFs and the 20 most liquid of 40 large caps)
+
+Generated 2026-10-15T15:20:12+00:00. Data 2016-01-04 to 2026-10-14 (2709 sessions), in sample from 2016-01-01 (1257 days), out of sample from 2021-01-01 (1452 days), 23.0 symbols a day on average. feed sip, adjustment all, 5Min. 2709 full sessions; 2 SPY days left out as half days or incomplete.
+
+**Verdict: nothing passes.** Pick by in-sample Sharpe: Gap go 1.5 long, out of sample Sharpe -0.15 (-0.35 with costs doubled, -0.14 filled a bar late), in sample 0.72; deflated p 0.00 over 46 trials.
+
+### Every trial (base cost; Sharpe from daily book returns, x sqrt 252)
+
+`oos_sharpe_gross` is before spread and fees (information, never judged); `trades_per_day` entries per symbol slot; `net_bps_per_trade` net P&L per entry on the slot's capital; `expo` mean share of the session in a position.
+
+| name | is_sharpe | oos_sharpe | oos_sharpe_2x | oos_sharpe_gross | oos_cagr | oos_max_dd | trades_per_day | net_bps_per_trade | expo | deflated_p |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ORB 5m long | -1.370 | -0.536 | -1.718 | 0.670 | -0.056 | 0.345 | 0.497 | -4.238 | 0.463 | 0.000 |
+| ORB 5m long stop | -1.636 | -0.925 | -2.485 | 0.659 | -0.070 | 0.350 | 0.497 | -5.569 | 0.341 | 0.000 |
+| ORB 5m L/S | -2.889 | -1.309 | -3.644 | 1.099 | -0.126 | 0.551 | 0.990 | -5.213 | 0.923 | 0.000 |
+| ORB 5m L/S stop | -2.951 | -1.745 | -4.326 | 0.916 | -0.149 | 0.610 | 0.990 | -6.289 | 0.683 | 0.000 |
+| ORB 15m long | -1.255 | -0.692 | -1.994 | 0.631 | -0.062 | 0.309 | 0.481 | -4.978 | 0.416 | 0.000 |
+| ORB 15m long stop | -1.345 | -0.903 | -2.424 | 0.637 | -0.068 | 0.333 | 0.481 | -5.580 | 0.350 | 0.000 |
+| ORB 15m L/S | -2.667 | -1.601 | -4.025 | 0.898 | -0.142 | 0.586 | 0.961 | -6.132 | 0.832 | 0.000 |
+| ORB 15m L/S stop | -2.660 | -1.825 | -4.321 | 0.748 | -0.155 | 0.622 | 0.961 | -6.789 | 0.703 | 0.000 |
+| ORB 30m long | -1.401 | -0.908 | -2.362 | 0.565 | -0.068 | 0.335 | 0.458 | -5.847 | 0.362 | 0.000 |
+| ORB 30m long stop | -1.383 | -1.113 | -2.720 | 0.512 | -0.074 | 0.359 | 0.458 | -6.498 | 0.328 | 0.000 |
+| ORB 30m L/S | -2.555 | -1.962 | -4.453 | 0.602 | -0.158 | 0.630 | 0.915 | -7.304 | 0.723 | 0.000 |
+| ORB 30m L/S stop | -2.441 | -2.031 | -4.538 | 0.549 | -0.162 | 0.641 | 0.915 | -7.514 | 0.656 | 0.000 |
+| Gap fade 0.5 long | -0.372 | -0.497 | -1.028 | 0.052 | -0.030 | 0.203 | 0.132 | -8.564 | 0.103 | 0.000 |
+| Gap fade 0.5 L/S | -1.898 | -1.138 | -2.030 | -0.213 | -0.083 | 0.401 | 0.288 | -11.581 | 0.223 | 0.000 |
+| Gap go 0.5 long | 0.651 | -0.392 | -1.135 | 0.377 | -0.020 | 0.164 | 0.156 | -4.780 | 0.121 | 0.000 |
+| Gap go 0.5 L/S | -0.169 | -0.729 | -1.618 | 0.195 | -0.055 | 0.342 | 0.288 | -7.429 | 0.223 | 0.000 |
+| Gap fade 1.0 long | -0.188 | -0.038 | -0.306 | 0.238 | -0.002 | 0.086 | 0.039 | -1.271 | 0.034 | 0.000 |
+| Gap fade 1.0 L/S | -1.088 | -0.445 | -0.877 | 0.001 | -0.020 | 0.173 | 0.080 | -9.369 | 0.071 | 0.000 |
+| Gap go 1.0 long | 0.697 | -0.072 | -0.423 | 0.292 | -0.002 | 0.070 | 0.041 | -1.867 | 0.036 | 0.000 |
+| Gap go 1.0 L/S | -0.056 | -0.448 | -0.871 | -0.006 | -0.020 | 0.156 | 0.080 | -9.518 | 0.071 | 0.000 |
+| Gap fade 1.5 long | -0.538 | 0.079 | -0.089 | 0.251 | 0.002 | 0.039 | 0.016 | 4.368 | 0.015 | 0.000 |
+| Gap fade 1.5 L/S | -1.178 | -0.109 | -0.367 | 0.157 | -0.004 | 0.086 | 0.031 | -3.931 | 0.029 | 0.000 |
+| Gap go 1.5 long | 0.721 | -0.149 | -0.350 | 0.060 | -0.003 | 0.060 | 0.015 | -6.905 | 0.014 | 0.000 |
+| Gap go 1.5 L/S | 0.406 | -0.424 | -0.676 | -0.160 | -0.013 | 0.098 | 0.031 | -15.449 | 0.029 | 0.000 |
+| VWAP k 1.0 long | -2.036 | -2.316 | -4.324 | -0.134 | -0.158 | 0.627 | 0.660 | -10.144 | 0.247 | 0.000 |
+| VWAP k 1.0 L/S | -3.527 | -3.762 | -7.065 | -0.391 | -0.299 | 0.871 | 1.302 | -10.699 | 0.494 | 0.000 |
+| VWAP k 1.5 long | -1.098 | -1.607 | -3.036 | -0.042 | -0.088 | 0.423 | 0.366 | -9.777 | 0.152 | 0.000 |
+| VWAP k 1.5 L/S | -1.962 | -2.271 | -4.313 | -0.135 | -0.167 | 0.652 | 0.699 | -10.163 | 0.293 | 0.000 |
+| VWAP k 2.0 long | -0.573 | -0.861 | -1.891 | 0.258 | -0.037 | 0.222 | 0.199 | -7.355 | 0.085 | 0.000 |
+| VWAP k 2.0 L/S | -0.942 | -1.318 | -2.606 | 0.040 | -0.083 | 0.407 | 0.361 | -9.270 | 0.155 | 0.000 |
+| EOD momentum first long | -3.682 | -6.027 | -10.962 | -0.537 | -0.130 | 0.552 | 0.524 | -10.483 | 0.034 | 0.000 |
+| EOD momentum first L/S | -5.394 | -9.212 | -17.650 | -0.514 | -0.226 | 0.771 | 0.997 | -10.164 | 0.065 | 0.000 |
+| EOD momentum first+12th long | -3.772 | -5.880 | -10.792 | -0.411 | -0.127 | 0.544 | 0.524 | -10.268 | 0.034 | 0.000 |
+| EOD momentum first+12th L/S | -5.376 | -8.915 | -17.278 | -0.293 | -0.221 | 0.764 | 0.999 | -9.923 | 0.065 | 0.000 |
+
+Robustness on each family's pick (counted):
+
+| name | is_sharpe | oos_sharpe | oos_sharpe_2x | oos_sharpe_gross | oos_cagr | oos_max_dd | trades_per_day | net_bps_per_trade | expo | deflated_p |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ORB 15m long · one bar later | -1.442 | -0.706 | -2.028 | 0.641 | -0.062 | 0.308 | 0.481 | -4.991 | 0.410 | 0.000 |
+| ORB 15m long · macro-day filter | -1.319 | -0.689 | -1.948 | 0.592 | -0.061 | 0.304 | 0.460 | -5.123 | 0.398 | 0.000 |
+| ORB 15m long · abnormal-open filter | -1.144 | -0.733 | -2.049 | 0.606 | -0.064 | 0.319 | 0.476 | -5.211 | 0.412 | 0.000 |
+| Gap go 1.5 long · one bar later | 0.751 | -0.140 | -0.350 | 0.079 | -0.003 | 0.055 | 0.015 | -6.183 | 0.014 | 0.000 |
+| Gap go 1.5 long · macro-day filter | 0.771 | -0.172 | -0.366 | 0.031 | -0.003 | 0.058 | 0.015 | -8.196 | 0.014 | 0.000 |
+| Gap go 1.5 long · abnormal-open filter | 0.673 | -0.159 | -0.321 | 0.010 | -0.003 | 0.048 | 0.012 | -8.942 | 0.011 | 0.000 |
+| VWAP k 2.0 long · one bar later | -0.719 | -1.078 | -2.117 | 0.057 | -0.045 | 0.257 | 0.199 | -9.039 | 0.083 | 0.000 |
+| VWAP k 2.0 long · macro-day filter | -0.613 | -0.872 | -1.857 | 0.200 | -0.037 | 0.228 | 0.188 | -7.767 | 0.080 | 0.000 |
+| VWAP k 2.0 long · abnormal-open filter | -0.774 | -0.886 | -1.896 | 0.213 | -0.037 | 0.223 | 0.192 | -7.684 | 0.082 | 0.000 |
+| EOD momentum first long · one bar later | -3.302 | -6.688 | -12.004 | -0.690 | -0.131 | 0.556 | 0.524 | -10.644 | 0.027 | 0.000 |
+| EOD momentum first long · macro-day filter | -3.557 | -5.836 | -10.523 | -0.550 | -0.125 | 0.537 | 0.500 | -10.544 | 0.032 | 0.000 |
+| EOD momentum first long · abnormal-open filter | -3.828 | -6.004 | -10.930 | -0.518 | -0.128 | 0.547 | 0.519 | -10.444 | 0.034 | 0.000 |
+
+46 trials in this study; the best of that many noise books would show an annual Sharpe of about 2.23. Pooled with the lab's earlier trials: hand studies (pre-registered) 423 trials, bar 2.52, deflated p 0.00; global ledger now 723 trials, bar 2.51, deflated p 0.00.
+
+### Benchmarks (out of sample)
+
+| book | is_sharpe | oos_sharpe | oos_cagr | oos_vol | oos_max_dd | recent_sharpe |
+|---|---|---|---|---|---|---|
+| session drift (open to 15:55, same symbols and costs) | -1.064 | -1.009 | -0.188 | 0.189 | 0.702 | -1.079 |
+| session drift before costs (information) | 0.402 | 0.270 | 0.034 | 0.189 | 0.333 | 0.287 |
+| SPY buy and hold | 0.838 | 0.927 | 0.149 | 0.164 | 0.245 | 1.305 |
+
+The pick's daily returns correlate 0.17 with SPY's. The pick on the ETF leg alone (information, not a trial): out of sample Sharpe -0.28. Best long-only variant in sample (only a long-only pick can become a book): Gap go 1.5 long, out of sample -0.15 (-0.35 doubled), deflated p 0.00.
+
+### Gates, per pick
+
+| pick | trial | 1 | 2 | 3 | 4 | 5 | 6 | boot 5 % | boot 95 % | minus SPY 5 to 95 % | from 2024 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| overall | Gap go 1.5 long | FAIL | FAIL | FAIL | FAIL | pass | FAIL | -0.736 | 0.562 | -1.88 to -0.24 | -0.86 |
+| ORB | ORB 15m long | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL | -1.380 | -0.052 | -2.35 to -0.97 | -0.62 |
+| Gap | Gap go 1.5 long | FAIL | FAIL | FAIL | FAIL | pass | FAIL | -0.736 | 0.562 | -1.88 to -0.24 | -0.86 |
+| VWAP | VWAP k 2.0 long | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL | -1.354 | -0.355 | -2.52 to -1.06 | -0.58 |
+| Momentum | EOD momentum first long | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL | -6.875 | -5.221 | -8.11 to -5.89 | -5.06 |
+
+Gates: 1 deflated p > 0.95 over this study's trials; 2 OOS Sharpe >= half the in-sample one; 3 Sharpe > 0 with costs doubled; 4 bootstrap 90 % lower bound > 0; 5 positive in >= 60 % of OOS years; 6 Sharpe > 0 with fills one bar later.
+Bootstrap: stationary, mean block 10 days, 5,000 draws, of the out-of-sample Sharpe.
+
+### The overall pick by year (out of sample, return at base cost)
+
+| year | return |
+|---|---|
+| 2021 | 0.010 |
+| 2022 | 0.009 |
+| 2023 | 0.012 |
+| 2024 | 0.005 |
+| 2025 | -0.052 |
+| 2026 | 0.001 |
+
+<!-- end of the generated alpaca section -->
