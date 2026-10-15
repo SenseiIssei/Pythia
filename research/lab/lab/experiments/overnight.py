@@ -560,6 +560,11 @@ def pick_series(P: Panel | None = None) -> tuple[np.ndarray, np.ndarray, str]:
     return P.dates, pk["r"], pk["name"]
 
 
+def report_dir() -> Path:
+    from ..report import REPORTS
+    return REPORTS / NAME
+
+
 def spy_total(P: Panel, N: Nights) -> np.ndarray:
     return np.nan_to_num(N.total[:, P.col("SPY")])
 
