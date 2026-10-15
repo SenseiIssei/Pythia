@@ -327,7 +327,7 @@ def test_full_run_finds_a_planted_edge_and_counts_46_trials(tmp_path, monkeypatc
     monkeypatch.setattr(ie, "REPORTS", tmp_path / "reports")
     (tmp_path / f"{ie.NAME}.md").write_text(pre, encoding="utf-8")
     md = ie.write(res)
-    assert "### Every trial" in md and "—" not in md
+    assert "### Every trial" in md and chr(0x2014) not in md
     text = (tmp_path / f"{ie.NAME}.md").read_text(encoding="utf-8")
     assert text.startswith(pre.rstrip())
     ie.write(res)                                  # a second run replaces its own section only
