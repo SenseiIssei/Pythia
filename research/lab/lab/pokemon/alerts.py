@@ -6,8 +6,9 @@ PYTHIA_TELEGRAM_CHAT_ID, or PYTHIA_ALERT_WEBHOOK. Unset: printed only.
   strong move   a card worth at least $20 that moved 20 % or more since the
                 previous snapshot (at most 3 days back), or 35 % over 7 days.
                 Before we have a previous snapshot: Cardmarket's avg1 against
-                avg7, 30 % or more, on a card with a trend of 20 EUR or more.
-  undervalued   a card at $10 to $500 whose fair value is 60 % to 400 % above
+                avg7, 30 % or more, on a card with a trend of 20 EUR or more,
+                only where Cardmarket is fresh (none was on 2026-10-15).
+  undervalued   a card at $10 to $500 whose fair value is 2 to 3 times
                 its price (more is model error), from a set at least 60 days old, and whose 90-day
                 forecast is positive. Until the forecast validates this rests
                 on the fair-value model alone, and the message says so.
@@ -30,10 +31,11 @@ from ..ops import notify
 
 MOVE_MIN_USD, MOVE_1D, MOVE_7D = 20.0, 0.20, 0.35
 CM_MOVE, CM_MIN_EUR = 0.30, 20.0
-UV_MIN_USD, UV_MAX_USD, UV_GAP, UV_MIN_AGE = 10.0, 500.0, 0.60, 60
-# A fair value more than 5x the price is the model failing on an odd card
-# (the first real run had promos at 25x), not a bargain worth a message.
-UV_GAP_MAX = 4.0
+UV_MIN_USD, UV_MAX_USD, UV_GAP, UV_MIN_AGE = 10.0, 500.0, 1.0, 60
+# The fair value is off by a factor of about 1.7 for a typical card (first real
+# snapshot), and the largest gaps are mostly its failures (promos at 25x). Only
+# a fair value of 2x to 3x the price makes a message; beyond is model error.
+UV_GAP_MAX = 2.0
 COOLDOWN_DAYS = 7
 MAX_MOVES, MAX_UV = 8, 5
 

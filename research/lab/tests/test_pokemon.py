@@ -409,7 +409,7 @@ def test_alerts_moves_undervalued_and_cooldown(lake, monkeypatch):
         "price": [50.0, 50.0, 5.0, 40.0], "ret_1d": [math.log(1.3), math.log(1.05), math.log(2.0), None],
         "ret_7d": [None, None, None, None], "cm_trend": [40.0, 40.0, 4.0, 30.0], "cm_mom_1_7": [0.0, 0.0, 0.0, 0.5],
         "fv_log": [math.log(200.0), math.log(50.0), 0.0, math.log(40.0)],
-        "fv_gap": [math.log(4.0), 0.0, 0.0, 0.0], "set_age_days": [400, 400, 400, 400],
+        "fv_gap": [math.log(2.5), 0.0, 0.0, 0.0], "set_age_days": [400, 400, 400, 400],
         "pred_90d": [0.2, 0.0, 0.0, 0.0]})
     moves = alerts.strong_moves(snap)
     assert [m["card_id"] for m in moves] == ["d", "a"], "c is under $20; d by Cardmarket, no snapshot return"
