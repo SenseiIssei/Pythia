@@ -1,8 +1,13 @@
-import { useState } from "react";
-import { LineChart } from "lucide-react";
+import { useEffect, useState } from "react";
+import { LineChart, Sparkles } from "lucide-react";
 import { useStore } from "../store";
 import { Button, Card, PageHeader, Badge, EmptyState, Notice, Term, fmtPct, inputCls } from "../components/ui";
+import { fmtWhen } from "../autopilot";
+import { labStatus, listingGaps, listingRows, type ListingsFeed } from "../lab";
+import { liveMode } from "../live";
 import type { Venue } from "../types";
+
+const LISTINGS_REFRESH_MS = 5 * 60_000;
 
 const venues: { id: Venue | "all"; label: string }[] = [
   { id: "all", label: "All" },
@@ -193,6 +198,95 @@ export function Markets() {
           </div>
         )}
       </Card>
+
+      <NewListings />
     </div>
+  );
+}
+
+/** What the lab's listings watcher saw in the last 90 days (reports/listings/recent.json). */
+function NewListings() {
+  const [feed, setFeed] = useState<ListingsFeed | null>(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (liveMode() === "none") return;
+    let alive = true;
+    const read = async () => {
+      try {
+        const s = await labStatus();
+        if (alive) {
+          setFeed(s.listings ?? null);
+          setErr("");
+        }
+      } catch (e) {
+        if (alive) setErr(e instanceof Error ? e.message : String(e));
+      }
+    };
+    void read();
+    const t = setInterval(() => void read(), LISTINGS_REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  const rows = listingRows(feed);
+  const gaps = listingGaps(feed);
+
+  return (
+    <Card
+      title="New listings"
+      icon={Sparkles}
+      help="Coins a venue started trading, seen by the lab's watcher within 10 minutes. Information only: nothing is bought."
+      subtitle={feed ? `Last look ${feed.generated}. Alpaca is the only venue Pythia trades on.` : undefined}
+    >
+      {rows.length === 0 ? (
+        <EmptyState icon={Sparkles} title={feed ? "No new coins in the last 90 days" : "No listings feed yet"}>
+          {feed
+            ? "The watcher looks at Alpaca, Binance, Coinbase and Kraken every 10 minutes."
+            : liveMode() === "none"
+              ? "The feed needs the desktop app or a connected backend."
+              : err || "The lab's watcher (lab.ops.listings) writes it every 10 minutes once it runs on the lab server."}
+        </EmptyState>
+      ) : (
+        <div className="-mx-1 overflow-x-auto px-1">
+          <table className="w-full min-w-[560px] text-sm">
+            <thead>
+              <tr className="font-mono text-[11px] uppercase tracking-wider text-cyber-text-faint">
+                <th className="pb-2 text-left font-medium">Seen</th>
+                <th className="pb-2 text-left font-medium">Venue</th>
+                <th className="pb-2 text-left font-medium">Coin</th>
+                <th className="pb-2 text-left font-medium">On Alpaca</th>
+                <th className="pb-2 text-right font-medium">First price</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.key} className="border-t border-cyber-border">
+                  <td className="py-2 pr-3 font-mono text-xs text-cyber-text-dim">{fmtWhen(r.tsMs)}</td>
+                  <td className="py-2 pr-3">{r.venue}</td>
+                  <td className="py-2 pr-3">
+                    <span className="font-medium">{r.coin}</span>
+                    <span className="ml-1.5 text-xs text-cyber-text-faint">{r.title ?? r.symbols.join(", ")}</span>
+                  </td>
+                  <td className="py-2 pr-3">
+                    <Badge tone={r.alpaca === "yes" ? "green" : "neutral"}>
+                      {r.alpaca === "yes" ? "listed" : r.alpaca === "no" ? "not listed" : "unknown"}
+                    </Badge>
+                  </td>
+                  <td className="py-2 text-right font-mono">
+                    {r.price ?? <span className="text-cyber-text-faint">-</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {gaps.length > 0 && (
+        <p className="mt-2 text-xs text-cyber-text-faint">Not read on the last look: {gaps.join("; ")}.</p>
+      )}
+    </Card>
   );
 }
