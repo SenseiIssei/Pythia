@@ -16,6 +16,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
+| every 15 min | trending watcher: DexScreener boosted tokens, Binance gainers and volume surges, surge alerts on coins Alpaca lists, a daily on-chain hype digest from 08:00 (`lab.ops.trending`, seconds; reads only) | `/etc/cron.d/pythia-trending` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 
 ## Health check
@@ -242,3 +243,40 @@ container start). Without a request it does nothing. `/etc/cron.d/pythia-notify-
 The engine that serves the API needs the same folder: add
 `-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
 to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
+
+## Trending watcher
+
+`lab.ops.trending` looks every 15 minutes at what the crowd is chasing and
+never trades: DexScreener's top boosted tokens and latest token profiles (with
+each token's most liquid pair and risk flags: thin liquidity, a pair under 3
+days old, FDV over 50x liquidity, volume over 20x liquidity, few sells), the
+24h tickers of every Binance USDT pair (top gainers) and, for the coins Alpaca
+lists, 24h quote volume and trade count against their 28-day median.
+
+- Every run appends a line to `/srv/pythia-data/trending/<date>.jsonl` and
+  rewrites `reports/trending/latest.json`.
+- A strong surge on a coin Alpaca lists (volume 3x its 28-day median and up
+  8 % in 24 h, or 2x and up 20 %) is posted at once, at most once per coin per
+  20 hours, as "watch only".
+- At the first run from 08:00 UTC a short digest goes out: the Alpaca coins'
+  volume ratios, Binance's top gainers and volume surges, and the on-chain
+  hype, labelled high risk and read-only. On-chain tokens are not on Alpaca;
+  nothing here trades on a DEX or touches a wallet.
+
+It posts through the same settings as the digest (`/etc/pythia/alerts.env`,
+Telegram or webhook). `PYTHIA_ALPACA_COINS` (comma separated bases) overrides
+the list of coins Alpaca lists. `/etc/cron.d/pythia-trending`:
+
+```cron
+# Pythia: trending watcher. Public market data only; posts surge alerts and a daily watchlist; never trades.
+*/15 * * * * root docker run --rm --memory 512m --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.trending >> /var/log/pythia-trending.log 2>&1
+```
+
+See it without posting or writing:
+
+```bash
+docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.trending --dry-run
+```
+
+The health check marks it red when `reports/trending/latest.json` is older
+than 45 minutes.
