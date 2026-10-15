@@ -1,0 +1,39 @@
+/* Class names from the flows' stand-in kit, kept for pages and components
+   that still use them. They are thin aliases of the design tokens now
+   (src/design/tokens.ts), so they follow light and dark like everything else. */
+:root {
+  --fl-bg: var(--color-bg);
+  --fl-surface: var(--color-surface);
+  --fl-surface-2: var(--color-surface-2);
+  --fl-line: var(--color-line);
+  --fl-text: var(--color-text);
+  --fl-muted: var(--color-muted);
+  --fl-up: var(--color-up);
+  --fl-down: var(--color-down);
+  --fl-warn: var(--color-warn);
+  --fl-primary: var(--color-primary);
+  --fl-on-primary: var(--color-on-primary);
+  --fl-on-down: var(--color-on-down);
+}
+.fl { color: var(--color-text); font-family: var(--font-sans); }
+.fl-page { background: transparent; }
+.fl-card { background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-card); }
+.fl-surface-2 { background: var(--color-surface-2); }
+.fl-line { border-color: var(--color-line); }
+.fl-text { color: var(--color-text); }
+.fl-muted { color: var(--color-muted); }
+.fl-up { color: var(--color-up); }
+.fl-down { color: var(--color-down); }
+.fl-warn { color: var(--color-warn); }
+.fl-num { font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.fl-focus:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.fl-input {
+  width: 100%; min-height: 46px; padding: 0 14px; border-radius: var(--radius-control);
+  background: var(--color-surface-2); color: var(--color-text); border: 1px solid transparent;
+}
+.fl-input:hover { border-color: var(--color-line-strong); }
+.fl-input:focus { outline: none; border-color: var(--color-accent); }
+.fl-scrim { background: rgb(0 0 0 / 0.5); }
+.fl-sheet { background: var(--color-surface); color: var(--color-text); }
+.fl-skeleton { background: var(--color-surface-2); border-radius: 10px; animation: pt-pulse 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .fl-skeleton { animation: none; } }

@@ -51,6 +51,17 @@ MODELS = {
                  "embargo_us": 7 * DAY_US, "min_rows": 200, "min_days": 14},
 }
 
+# Models registered at run time (the zoo, lab.models): their own gate, score and
+# champion predictor. The predictor takes the holdout frame, not a feature matrix.
+HOOKS: dict[str, dict] = {}
+
+
+def register(name: str, cfg: dict, gate_fn: Callable[[Path, dict], tuple[bool, str]],
+             score_fn: Callable[[pl.DataFrame, np.ndarray], float],
+             predictor_fn: Callable[[Path], Callable[[pl.DataFrame], np.ndarray]]) -> None:
+    MODELS[name] = cfg
+    HOOKS[name] = {"gate": gate_fn, "score": score_fn, "predictor": predictor_fn}
+
 
 def published_dir(name: str) -> Path:
     return ROOT / "models" / name
@@ -97,6 +108,8 @@ def champion(name: str) -> dict | None:
 
 def gate(name: str, folder: Path, card: dict) -> tuple[bool, str]:
     """The challenger's own bar, before any comparison."""
+    if name in HOOKS:
+        return HOOKS[name]["gate"](folder, card)
     if name == "vol_1h":
         ch = read_json(folder / "challenger.json") or {}
         if ch.get("passed") is True:
@@ -124,6 +137,8 @@ def rank_ic(groups: np.ndarray, target: np.ndarray, score: np.ndarray) -> float:
 
 
 def score(name: str, frame: pl.DataFrame, pred: np.ndarray) -> float:
+    if name in HOOKS:
+        return HOOKS[name]["score"](frame, pred)
     if name == "vol_1h":
         return qlike(frame["target"].to_numpy(), pred)
     return rank_ic(frame["ts_us"].to_numpy(), frame["target"].to_numpy(), pred)
@@ -131,6 +146,8 @@ def score(name: str, frame: pl.DataFrame, pred: np.ndarray) -> float:
 
 def predictor(name: str, folder: Path) -> Callable[[np.ndarray], np.ndarray]:
     """The champion's own model file, as the engine would run it."""
+    if name in HOOKS:
+        return HOOKS[name]["predictor"](folder)
     card = read_json(folder / "card.json") or {}
     if name == "vol_1h":
         rv = float(card.get("residual_var", 0.0))
@@ -220,7 +237,8 @@ def decide(name: str, cand: Path, now_ms: int, champion_predict: Callable | None
                               "why": f"the champion's features are not in the holdout ({', '.join(missing[:5])}); champion stays"})
     try:
         fn = champion_predict or predictor(name, champ["path"])
-        champ_pred = np.asarray(fn(win.select(feats).to_numpy().astype(np.float32)), float)
+        arg = win if name in HOOKS else win.select(feats).to_numpy().astype(np.float32)
+        champ_pred = np.asarray(fn(arg), float)
     except Exception as e:  # noqa: BLE001
         return _record(name, {**base, "decision": "kept", "why": f"champion could not be scored ({type(e).__name__}: {e})"})
     s_ch = score(name, win, win["challenger"].to_numpy())

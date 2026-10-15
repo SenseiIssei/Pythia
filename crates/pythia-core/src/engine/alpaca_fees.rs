@@ -98,6 +98,11 @@ pub struct AlpacaFeeWatch {
     /// Only used for an estimate; older saves read as taker, the higher one.
     #[serde(default)]
     pub maker: bool,
+    /// The book the fill was for (an autopilot id, or empty for the main
+    /// book): its coins leave that book's position, and its dollars that
+    /// autopilot's fees.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub book: String,
 }
 
 /// A fee booked from Alpaca's published schedule because Alpaca posted none
@@ -202,15 +207,16 @@ impl Engine {
             posted_coins: 0.0,
             posted_usd: 0.0,
             maker: f.style != ExecStyle::Cross,
+            book: f.book.clone(),
         });
     }
 
-    /// Coins the watched buys in this market, on this account and route, can
-    /// still have paid as a fee.
-    fn alpaca_fee_room(&self, market_id: &str, paper: bool, demo: bool) -> f64 {
+    /// Coins the watched buys in this market, on this account and route (and
+    /// in `book` when one is named), can still have paid as a fee.
+    fn alpaca_fee_room(&self, market_id: &str, book: Option<&str>, paper: bool, demo: bool) -> f64 {
         self.alpaca_fees
             .iter()
-            .filter(|w| w.market_id == market_id && w.paper == paper && w.demo == demo)
+            .filter(|w| w.market_id == market_id && w.paper == paper && w.demo == demo && book.is_none_or(|b| w.book == b))
             .map(AlpacaFeeWatch::room)
             .sum()
     }
@@ -219,8 +225,18 @@ impl Engine {
     /// market. When the watched buys' unposted fees can explain it, book it
     /// as those fees (provisionally, until Alpaca posts them) and return
     /// true. Otherwise leave it to the caller's ordinary correction.
-    pub(super) fn take_alpaca_fee_gap(&mut self, market_id: &str, gap: f64, paper: bool, demo: bool, seen_by: &str) -> bool {
-        let room = self.alpaca_fee_room(market_id, paper, demo);
+    /// `book` limits it to one book's fills (an exit that sold what one book
+    /// held); `None` takes every book's, for a gap in the account's sum.
+    pub(super) fn take_alpaca_fee_gap(
+        &mut self,
+        market_id: &str,
+        book: Option<&str>,
+        gap: f64,
+        paper: bool,
+        demo: bool,
+        seen_by: &str,
+    ) -> bool {
+        let room = self.alpaca_fee_room(market_id, book, paper, demo);
         if gap.is_nan() || gap <= 0.0 || room <= 0.0 || gap > room + GAP_SLACK {
             return false;
         }
@@ -229,6 +245,7 @@ impl Engine {
             .iter()
             .enumerate()
             .filter(|(_, w)| w.market_id == market_id && w.paper == paper && w.demo == demo && w.room() > 0.0)
+            .filter(|(_, w)| book.is_none_or(|b| w.book == b))
             .map(|(i, w)| (i, gap * w.room() / room))
             .collect();
         let mut value = 0.0;
@@ -277,22 +294,23 @@ impl Engine {
             o.fee = Some(o.fee.unwrap_or(0.0) + value.max(0.0));
         }
         let mut left = coins.max(0.0);
+        let key = super::pos_key(&w.book, &w.market_id);
         if left > 0.0 {
-            if let Some(p) = self.positions.get_mut(&w.market_id).filter(|p| p.qty > 0.0) {
+            if let Some(p) = self.positions.get_mut(&key).filter(|p| p.qty > 0.0) {
                 let take = left.min(p.qty);
                 p.qty -= take;
                 left -= take;
                 if p.qty < 1e-9 {
-                    self.positions.remove(&w.market_id);
-                    self.ref_prices.remove(&w.market_id);
+                    self.positions.remove(&key);
+                    self.ref_prices.remove(&key);
                 }
             }
         }
         // Coins the book had already sold: the sale was booked for more than
         // the account had to sell, so the difference comes out of the cash.
         self.cash -= usd + left * w.price;
-        let open_after = self.positions.contains_key(&w.market_id);
-        self.autopilot_on_late_fee(&w.strategy_id, &w.market_id, value, open_after)
+        let open_after = self.positions.contains_key(&key);
+        self.autopilot_on_late_fee(&w.book, &w.strategy_id, &w.market_id, value, open_after)
     }
 
     /// An Alpaca crypto exit that filled less than it was sent for, because
@@ -302,13 +320,14 @@ impl Engine {
         if !alpaca_crypto_order(f) || f.side != Side::Sell || update.status != BrokerOrderStatus::Filled {
             return;
         }
-        let Some(left) = self.positions.get(&f.market_id).map(|p| p.qty).filter(|q| *q > 0.0) else { return };
+        let key = super::pos_key(&f.book, &f.market_id);
+        let Some(left) = self.positions.get(&key).map(|p| p.qty).filter(|q| *q > 0.0) else { return };
         // The exit was meant to close the position: what it did not sell is
         // what is left.
         if f.qty - update.filled_qty + GAP_SLACK < left {
             return;
         }
-        self.take_alpaca_fee_gap(&f.market_id, left, f.paper, f.demo, "the exit sold what the venue held");
+        self.take_alpaca_fee_gap(&f.market_id, Some(&f.book), left, f.paper, f.demo, "the exit sold what the venue held");
     }
 
     /// The fee requests the daemon should make now: one per Alpaca account

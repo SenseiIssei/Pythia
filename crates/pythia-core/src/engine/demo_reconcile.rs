@@ -20,9 +20,13 @@
 //! - **feeTaken**: the venue holds fewer coins than the book, and the
 //!   unposted fees of the watched buys explain the gap (see `alpaca_fees`).
 //!   Booked as those fees.
-//! - **corrected**: one demo position holds the pair and nothing is open:
-//!   the venue wins, as in the live reconciliation, and an autopilot that
-//!   owns it books the difference at the mark.
+//! - **corrected**: demo positions of one market hold the pair and nothing
+//!   is open: the venue wins, as in the live reconciliation. Several
+//!   autopilots each keep their own book on the one paper account
+//!   (`engine::pos_key`), so the comparison is Alpaca's quantity against the
+//!   sum over every book; when they differ, each book's position is set to
+//!   its share of Alpaca's quantity (in proportion to what it held), and
+//!   each autopilot books its own difference at the mark.
 //! - **adopted**: the venue holds the pair, the book holds none, and exactly
 //!   one market on the paper route has Pythia demo orders in that pair: the
 //!   position is taken into the book as a demo position of the strategy that
@@ -235,7 +239,7 @@ impl Engine {
             let diff = pythia - alpaca;
             let price = holders
                 .iter()
-                .map(|h| self.price_of(&h.0))
+                .map(|h| self.price_of(super::split_key(&h.0).1))
                 .chain(self.paper_route_markets(&pair).iter().map(|m| self.price_of(m)))
                 .find(|p| *p > 0.0)
                 .unwrap_or(venue_avg);
@@ -314,8 +318,11 @@ impl Engine {
         let pythia: f64 = holders.iter().map(|h| h.1).sum();
         let gap = pythia - alpaca;
         // Fewer coins at the venue: the unposted fees of the watched buys?
+        // The sum is short, so every book's watched buys in the market count.
         if gap > 0.0 && alpaca >= 0.0 {
-            for (market, _, demo) in holders {
+            let markets: BTreeSet<(String, bool)> =
+                holders.iter().map(|(key, _, demo)| (super::split_key(key).1.to_string(), *demo)).collect();
+            for (market, demo) in &markets {
                 let flags: Vec<(bool, bool)> = self
                     .alpaca_fees
                     .iter()
@@ -325,45 +332,65 @@ impl Engine {
                     .into_iter()
                     .collect();
                 for (paper, wdemo) in flags {
-                    if wdemo == *demo && self.take_alpaca_fee_gap(market, gap, paper, wdemo, "the Alpaca paper reconcile shows it") {
+                    if wdemo == *demo && self.take_alpaca_fee_gap(market, None, gap, paper, wdemo, "the Alpaca paper reconcile shows it") {
                         return (PairStatus::FeeTaken, format!("the gap is the unposted Alpaca fee of {market}'s buys; booked as that fee"));
                     }
                 }
             }
         }
+        let markets: BTreeSet<&str> = holders.iter().map(|h| super::split_key(&h.0).1).collect();
         match holders {
             [] if alpaca > 0.0 => self.adopt_pair(pair, alpaca, venue_avg, price),
             [] => (PairStatus::Untracked, "Alpaca reports a short crypto position; not Pythia's".to_string()),
-            [(market, was, true)] => {
-                let market = market.clone();
-                let was = *was;
-                let Some(p) = self.positions.get_mut(&market) else {
-                    return (PairStatus::Mismatch, "the position went away during the check".to_string());
-                };
-                let was_avg = p.avg_price;
-                let avg = if venue_avg > 0.0 { venue_avg } else { was_avg };
-                if alpaca.abs() < 1e-12 {
-                    self.positions.remove(&market);
-                    self.ref_prices.remove(&market);
-                } else {
-                    p.qty = alpaca;
-                    p.avg_price = avg;
-                    // Stops were sized for the old quantity.
-                    p.stop = 0.0;
-                    p.target = 0.0;
-                    p.trail_ref = avg;
-                    self.ref_prices.remove(&market);
-                }
-                self.autopilot_on_correction(&market, (was, was_avg), (alpaca, avg), "Alpaca paper");
-                (PairStatus::Corrected, format!("{market} is the only holder and nothing is open: set to Alpaca's {alpaca:.9}, Alpaca wins"))
-            }
             [(market, _, false)] => (
                 PairStatus::Mismatch,
                 format!("{market} is a live paper-endpoint position; the live reconciliation owns it"),
             ),
+            // Every holder a demo book in the same market: the autopilots
+            // (and the main book) that share the paper account there. Alpaca
+            // wins; one holder takes its number, several share the
+            // difference in proportion to what each holds, each booked to
+            // its own autopilot at the mark.
+            _ if markets.len() == 1 && holders.iter().all(|h| h.2) => {
+                let market = markets.iter().next().map(|m| m.to_string()).unwrap_or_default();
+                let n = holders.len();
+                for (key, was, _) in holders {
+                    let Some(p) = self.positions.get_mut(key) else {
+                        return (PairStatus::Mismatch, "a position went away during the check".to_string());
+                    };
+                    let was = *was;
+                    let was_avg = p.avg_price;
+                    let avg = if venue_avg > 0.0 { venue_avg } else { was_avg };
+                    let new = if n == 1 || pythia.abs() < 1e-12 { alpaca } else { alpaca * was / pythia };
+                    let book = p.book.clone();
+                    if new.abs() < 1e-12 {
+                        self.positions.remove(key);
+                        self.ref_prices.remove(key);
+                    } else {
+                        p.qty = new;
+                        p.avg_price = avg;
+                        // Stops were sized for the old quantity.
+                        p.stop = 0.0;
+                        p.target = 0.0;
+                        p.trail_ref = avg;
+                        self.ref_prices.remove(key);
+                    }
+                    self.autopilot_on_correction(&book, &market, (was, was_avg), (new, avg), "Alpaca paper");
+                }
+                if n == 1 {
+                    (PairStatus::Corrected, format!("{market} is the only holder and nothing is open: set to Alpaca's {alpaca:.9}, Alpaca wins"))
+                } else {
+                    (
+                        PairStatus::Corrected,
+                        format!(
+                            "{n} books hold {market} and nothing is open: their sum set to Alpaca's {alpaca:.9}, each in proportion to what it held; Alpaca wins"
+                        ),
+                    )
+                }
+            }
             _ => (
                 PairStatus::Mismatch,
-                format!("{} markets share {pair} on the paper account; which one is off cannot be told, so nothing is changed", holders.len()),
+                format!("{} markets share {pair} on the paper account; which one is off cannot be told, so nothing is changed", markets.len()),
             ),
         }
     }
@@ -400,9 +427,12 @@ impl Engine {
             self.strategies[i].id.clone()
         };
         let avg = if venue_avg > 0.0 { venue_avg } else { price };
+        // Into the main book: no autopilot decided to hold it.
         self.positions.insert(
             market_id.clone(),
             PositionInternal {
+                market: market_id.clone(),
+                book: String::new(),
                 venue: m.venue,
                 symbol: m.symbol.clone(),
                 qty,

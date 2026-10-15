@@ -50,7 +50,7 @@ export function ConfirmButton({
     <span
       role="group"
       aria-label="Confirm"
-      className="inline-flex max-w-full flex-wrap items-center gap-2 rounded-lg border border-danger/40 bg-danger/5 px-2.5 py-1.5 text-left text-xs text-cyber-text"
+      className="inline-flex max-w-full flex-wrap items-center gap-2 rounded-2xl bg-down/[0.08] px-3 py-2 text-left text-[13px] text-ink"
     >
       <span className="max-w-xs">{question}</span>
       <button
@@ -59,7 +59,7 @@ export function ConfirmButton({
           setAsking(false);
           onConfirm();
         }}
-        className="rounded border border-danger/50 bg-danger/15 px-2 py-0.5 font-bold text-danger hover:bg-danger/25"
+        className="min-h-[32px] rounded-full bg-down px-3 font-semibold text-on-down hover:opacity-90"
       >
         {confirmLabel}
       </button>
@@ -67,7 +67,7 @@ export function ConfirmButton({
         type="button"
         ref={keepRef}
         onClick={() => setAsking(false)}
-        className="rounded border border-cyber-border px-2 py-0.5 text-cyber-text-dim hover:text-cyber-text focus:outline focus:outline-1 focus:outline-accent"
+        className="min-h-[32px] rounded-full bg-surface-2 px-3 font-semibold text-ink hover:bg-line"
       >
         Keep it
       </button>
@@ -89,7 +89,7 @@ export function useUndo(ms = 8000): [ReactNode, (message: string, undo: () => vo
   const el = notice ? (
     <div
       role="status"
-      className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-sm text-cyber-text-dim"
+      className="mb-3 flex items-center justify-between gap-3 rounded-2xl bg-primary px-4 py-3 text-sm text-on-primary shadow-pop"
     >
       <span>{notice.message}</span>
       <button
@@ -98,7 +98,7 @@ export function useUndo(ms = 8000): [ReactNode, (message: string, undo: () => vo
           notice.undo();
           setNotice(null);
         }}
-        className="rounded border border-accent/50 px-2 py-0.5 text-xs font-bold text-accent hover:bg-accent/10"
+        className="rounded-full px-2 py-1 text-[13px] font-bold text-on-primary underline underline-offset-2 hover:opacity-80"
       >
         Undo
       </button>

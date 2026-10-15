@@ -20,7 +20,10 @@ import {
   Gauge,
   Microscope,
   Plane,
-  GraduationCap,
+  Crosshair,
+  History,
+  Bell,
+  BookOpen,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -29,6 +32,8 @@ export type PageId =
   | "home"
   | "practice"
   | "autopilot"
+  | "activity"
+  | "notifications"
   | "dashboard"
   | "markets"
   | "positions"
@@ -39,9 +44,11 @@ export type PageId =
   | "optimizer"
   | "analytics"
   | "correlation"
+  | "cs2"
   | "signals"
   | "models"
   | "lab"
+  | "research"
   | "predictions"
   | "live"
   | "risk"
@@ -64,8 +71,9 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   // ── always visible ──
   { id: "home", label: "Home", icon: Home, section: "Overview" },
-  { id: "practice", label: "Practice", icon: GraduationCap, section: "Overview" },
   { id: "autopilot", label: "Autopilot", icon: Plane, section: "Overview" },
+  { id: "activity", label: "Activity", icon: History, section: "Overview" },
+  { id: "notifications", label: "Notifications", icon: Bell, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },
   { id: "wallets", label: "Money", icon: Coins, section: "Overview" },
 
@@ -74,11 +82,13 @@ export const NAV: NavItem[] = [
   { id: "markets", label: "Markets", icon: LineChart, section: "Trading", advanced: true },
   { id: "positions", label: "Positions", icon: Wallet, section: "Trading", advanced: true },
   { id: "strategies", label: "Strategies", icon: Cpu, section: "Trading", advanced: true },
+  { id: "research", label: "Research", icon: BookOpen, section: "Research", advanced: true },
   { id: "composer", label: "Composer", icon: Blocks, section: "Research", advanced: true },
   { id: "backtest", label: "Backtest", icon: FlaskConical, section: "Research", advanced: true },
   { id: "optimizer", label: "Optimizer", icon: Sparkles, section: "Research", advanced: true },
   { id: "analytics", label: "Analytics", icon: BarChart3, section: "Research", advanced: true },
   { id: "correlation", label: "Correlation", icon: Grid3x3, section: "Research", advanced: true },
+  { id: "cs2", label: "CS2 Skins", icon: Crosshair, section: "Research", advanced: true },
   { id: "signals", label: "AI Signals", icon: BrainCircuit, section: "AI", advanced: true },
   { id: "models", label: "Models", icon: Gauge, section: "AI", advanced: true },
   { id: "lab", label: "Lab", icon: Microscope, section: "AI", advanced: true },
@@ -91,11 +101,48 @@ export const NAV: NavItem[] = [
   { id: "about", label: "About", icon: Info, section: "Config" },
 ];
 
-/** The nav for one mode. Simple keeps seven entries; advanced keeps everything. */
+/**
+ * Pages that moved. Practice now lives on the Autopilot page; the old id
+ * still leads there, so a saved link or an old button keeps working.
+ */
+export const REDIRECTS: Partial<Record<PageId, PageId>> = {
+  practice: "autopilot",
+};
+
+/** Where a page id leads now. */
+export function resolvePage(id: PageId): PageId {
+  return REDIRECTS[id] ?? id;
+}
+
+/** The nav for one mode. Simple keeps the beginner entries; advanced keeps everything. */
 export function navFor(mode: UiMode): NavItem[] {
   return mode === "advanced" ? NAV : NAV.filter((n) => !n.advanced);
 }
 
 export function isVisible(id: PageId, mode: UiMode): boolean {
-  return navFor(mode).some((n) => n.id === id);
+  const to = resolvePage(id);
+  return navFor(mode).some((n) => n.id === to);
+}
+
+/** The phone's bottom tabs, in order. Everything else sits behind "More". */
+export const TAB_IDS: PageId[] = ["home", "autopilot", "activity", "notifications"];
+
+/** Short tab labels: a phone has about 70 px per tab. */
+const TAB_LABEL: Partial<Record<PageId, string>> = { notifications: "Alerts" };
+
+export function tabsFor(mode: UiMode): NavItem[] {
+  const nav = navFor(mode);
+  return TAB_IDS.flatMap((id) => {
+    const n = nav.find((x) => x.id === id);
+    return n ? [{ ...n, label: TAB_LABEL[id] ?? n.label }] : [];
+  });
+}
+
+/**
+ * Which bottom tab is lit for a page: its own tab, or "more" for a page that
+ * only the menu reaches.
+ */
+export function activeTab(page: PageId): PageId | "more" {
+  const to = resolvePage(page);
+  return TAB_IDS.includes(to) ? to : "more";
 }
