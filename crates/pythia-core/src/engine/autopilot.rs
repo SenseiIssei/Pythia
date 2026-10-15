@@ -145,6 +145,44 @@
 //! also carries its own cash, its deepest drawdown and its equity history,
 //! which the Autopilot page sets side by side.
 //!
+//! # Portfolios across asset classes
+//!
+//! A portfolio autopilot (`portfolio: true`) is one amount over two asset
+//! classes on the Alpaca account: crypto lab books and lab books of US
+//! shares and ETFs, side by side in its one book, with one equity, one set
+//! of stop rules and one P&L. Paper or demo only (demo needs crypto demo
+//! orders on the Alpaca paper account, `PYTHIA_DEMO_EXCHANGE=alpaca`, so
+//! both classes trade the same account); a portfolio never goes live, and
+//! single-class live autopilots keep every gate they had.
+//!
+//! - **The split between the classes is by evidence** (`engine::allocator`).
+//!   Each class runs the auto pick on its own lab books, and only books with
+//!   a positive out-of-sample Sharpe from the lab count. A class's budget is
+//!   the score of its best book per unit of that book's out-of-sample
+//!   drawdown (the class's typical drawdown when the lab measured none),
+//!   over the sum of both. A class with no such book gets nothing, never a
+//!   forced share: today that is usually US shares, whose books have no
+//!   evidence yet, and the whole amount goes to crypto. Inside a class the
+//!   books split its budget by score, as the auto pick always did. The
+//!   forward report (`reports/forward/evidence.json`) lowers a book's score
+//!   once its forward record falls below its backtest's band, here as in
+//!   every auto pick.
+//! - **Re-picks move the split in bounded steps.** Every `repickEveryHours`
+//!   the pick runs again; a class budget moves by at most
+//!   [`PORTFOLIO_MAX_SHIFT`] per re-pick while both classes have evidence,
+//!   so noisy evidence never swings the portfolio from one class to the
+//!   other. A class that loses all its evidence drops to zero at once, and
+//!   one that gains evidence starts from zero and grows by the step.
+//! - **Each class rebalances on its own clock.** The lab books of one class
+//!   are netted into one target, as in any autopilot; the two classes are
+//!   two netted groups of the same book. US shares rebalance only in the
+//!   regular session (the same wait every lab book of US shares has), so
+//!   their queued rebalance never holds the crypto books back, which trade
+//!   at any time.
+//! - **Blended benchmark.** It is held against BTC and SPY bought and held
+//!   at its class budgets ([`BlendBench`]); when a re-pick moves the budgets
+//!   the blend is chain-linked and continues at the new weights.
+//!
 //! # Capital on a shared account
 //!
 //! Paper autopilots share the engine's paper account: together they are
@@ -218,6 +256,11 @@ pub const REPICK_MIN_SHIFT: f64 = 0.02;
 const KEEP_FINISHED: usize = 10;
 /// An entry worth less than this is not worth its fee.
 pub(super) const MIN_ENTRY_USD: f64 = 1.0;
+/// The asset classes of a portfolio autopilot, in the order it lists them.
+pub const PORTFOLIO_CLASSES: [Venue; 2] = [Venue::Crypto, Venue::Alpaca];
+/// A portfolio's class budget moves by at most this much per re-pick while
+/// both classes have evidence.
+pub const PORTFOLIO_MAX_SHIFT: f64 = 0.10;
 
 // ── the wire contract ──────────────────────────────────────────────────────
 
@@ -329,6 +372,13 @@ pub struct AutopilotConfig {
     /// The engine fills it in at start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repick_every_hours: Option<f64>,
+    /// A portfolio across asset classes: one amount over crypto lab books
+    /// and lab books of US shares in one book on the Alpaca account, split
+    /// between the two classes by evidence (see "Portfolios across asset
+    /// classes" above). Paper or demo only, and Pythia picks the books.
+    /// Off: one asset class, as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub portfolio: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -438,6 +488,43 @@ pub struct AutopilotStatus {
     /// The deepest fall from a peak over its equity history, in %.
     #[serde(default)]
     pub max_drawdown_pct: f64,
+    /// A portfolio: each asset class with its budget and its own P&L.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<ClassStatus>,
+}
+
+/// One asset class of a portfolio autopilot, as the UI shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassStatus {
+    /// "crypto" or "alpaca" (US shares), as [`Venue`] is written.
+    pub class: Venue,
+    /// "Crypto", "US shares".
+    pub label: String,
+    /// Its share of the portfolio's equity, 0..1: the sum of its books'
+    /// weights. 0 when no book of the class has evidence.
+    pub weight: f64,
+    /// Realised and unrealised P&L of its books, net of fees.
+    pub pnl: f64,
+    /// What it holds now, at the mark.
+    pub exposure: f64,
+    /// Lab books of the class with weight.
+    pub books: usize,
+    /// Why it holds nothing or waits, in plain words, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One leg of a blended benchmark.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkLeg {
+    pub symbol: String,
+    /// Its weight in the blend now, 0..1.
+    pub weight: f64,
+    /// Buy and hold of this leg since the blend was last set to these
+    /// weights, in %.
+    pub return_pct: Option<f64>,
 }
 
 /// What an autopilot is held against, as the UI shows it.
@@ -459,6 +546,31 @@ pub struct BenchmarkStatus {
     /// How a start price was filled in after the fact, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// A blend (a portfolio): BTC and SPY with their weights.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legs: Vec<BenchmarkLeg>,
+}
+
+/// A portfolio's blended benchmark: BTC and SPY bought and held at the
+/// portfolio's class budgets, set back to the new budgets at every change
+/// of them and chain-linked, so each stretch is measured at the weights it
+/// actually had. Saved with the autopilot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlendBench {
+    /// Growth of the stretches before this one, 1.0 at the start.
+    pub index: f64,
+    /// When this stretch began.
+    pub since_ms: i64,
+    pub w_btc: f64,
+    pub w_spy: f64,
+    /// The prices this stretch is measured from. `None` in the first one:
+    /// the autopilot's own BTC and SPY starts are used (filled in later
+    /// when no price was known at the start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btc_ref: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spy_ref: Option<f64>,
 }
 
 /// A benchmark start missing this long (no candle from the autopilot's
@@ -669,6 +781,13 @@ pub struct Autopilot {
     /// restart looks again, candles first.
     #[serde(skip)]
     pub bench_wait_ms: Option<i64>,
+    /// A portfolio: its blended BTC and SPY benchmark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<BlendBench>,
+    /// A portfolio: why an asset class holds cash, by class ("crypto",
+    /// "alpaca"), from its last netted target.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub class_notes: BTreeMap<String, String>,
 }
 
 /// How many venue orders an autopilot remembers for counting.
@@ -974,6 +1093,24 @@ pub fn assign_markets(wants: &[Want], taken: &HashSet<String>) -> Vec<Vec<String
 /// the candidates it passed over.
 type AutoPick = (Vec<(String, f64, String)>, Vec<String>);
 
+/// What a portfolio's pick chose (see `Engine::portfolio_pick`).
+struct PortfolioPick {
+    /// (strategy id, weight, why); the weights add up to one.
+    picks: Vec<(String, f64, String)>,
+    /// Each class's share of the amount, in [`PORTFOLIO_CLASSES`] order.
+    budgets: Vec<(Venue, f64)>,
+    /// The classes that got nothing, and why.
+    empty: Vec<(Venue, String)>,
+    passed_over: Vec<String>,
+}
+
+impl PortfolioPick {
+    /// The split in words: "Crypto 70 %, US shares 30 %".
+    fn split_words(&self) -> String {
+        self.budgets.iter().map(|(c, b)| format!("{} {:.0} %", class_label(*c), b * 100.0)).collect::<Vec<_>>().join(", ")
+    }
+}
+
 /// The evidence behind one strategy, for the auto pick.
 #[derive(Debug, Clone, Default)]
 pub struct Evidence {
@@ -997,6 +1134,9 @@ pub struct Evidence {
     pub lab_deflated_p: Option<f64>,
     pub lab_variants: Option<usize>,
     pub lab_sharpe_2x_cost: Option<f64>,
+    /// Lab books: the deepest out-of-sample drawdown, as a fraction. The
+    /// portfolio allocator weights evidence per unit of it.
+    pub lab_max_dd: Option<f64>,
     /// A known weakness of the lab evidence (see `lab::LabEvidence::caveat`).
     pub lab_caveat: Option<String>,
     /// Lab books: the lab's own paper book against its backtest's band, from
@@ -1223,6 +1363,24 @@ fn asset_words(v: Venue) -> &'static str {
     }
 }
 
+/// How an asset class is written in a portfolio's records.
+fn class_key(v: Venue) -> &'static str {
+    match v {
+        Venue::Alpaca => "alpaca",
+        Venue::Crypto => "crypto",
+        Venue::Polymarket => "polymarket",
+    }
+}
+
+/// An asset class as a heading: "Crypto", "US shares".
+fn class_label(v: Venue) -> &'static str {
+    match v {
+        Venue::Alpaca => "US shares",
+        Venue::Crypto => "Crypto",
+        Venue::Polymarket => "Prediction markets",
+    }
+}
+
 /// The engine venue an autopilot trades on: its asset class, else what its
 /// venue implies.
 fn config_venue(cfg: &AutopilotConfig) -> Option<Venue> {
@@ -1300,9 +1458,13 @@ pub(super) struct SleeveSizing {
     pub room: f64,
 }
 
-/// The lab books of one autopilot, rebalanced as one netted book.
+/// The lab books of one autopilot, rebalanced as one netted book. A
+/// portfolio has one group per asset class.
 pub(super) struct LabGroup {
     pub ap: usize,
+    /// The asset class, for a portfolio's group; `None` for an autopilot of
+    /// one class.
+    pub class: Option<Venue>,
     pub running: bool,
     /// The autopilot's equity times the lab sleeves' combined weight.
     pub capital: f64,
@@ -1428,7 +1590,8 @@ impl Engine {
     /// The BTC/USD price to hold an autopilot against: on its own venue when
     /// that venue lists BTC, else any priced BTC/USD market.
     fn ap_btc_price(&self, ap: &Autopilot) -> Option<f64> {
-        let venue = config_venue(&ap.config);
+        // A portfolio's crypto is priced by the crypto feeds.
+        let venue = if ap.config.portfolio { Some(Venue::Crypto) } else { config_venue(&ap.config) };
         let btc = |m: &&super::Market| m.symbol == "BTC/USD" && m.price > 0.0 && m.price.is_finite();
         self.markets
             .iter()
@@ -1546,6 +1709,9 @@ impl Engine {
     /// `equity` is its equity now; when the comparison starts after its
     /// start, its own return is measured from the same moment.
     fn ap_benchmark(&self, ap: &Autopilot, equity: f64) -> Option<BenchmarkStatus> {
+        if ap.config.portfolio {
+            return self.ap_blend_status(ap, equity);
+        }
         let active = ap.is_active();
         let (symbol, ret, from) = if self.ap_wants_spy(ap) {
             ("SPY", leg_return(ap.spy_start, if active { self.ap_spy_price() } else { ap.spy_end }), ap.spy_from_ms)
@@ -1568,6 +1734,7 @@ impl Engine {
             excess_pct: ret.map(|r| own - r),
             from_ms: from,
             note,
+            legs: Vec::new(),
         })
     }
 
@@ -1610,28 +1777,89 @@ impl Engine {
         self.ap_of_book(book).map(|i| self.autopilots[i].config.mode.route_intent())
     }
 
-    /// The lab books of the autopilot at index `i`, as one group; `None`
-    /// when it is not active or runs no lab book.
-    pub(super) fn autopilot_lab_group(&self, i: usize) -> Option<LabGroup> {
+    /// The lab books of the autopilot at index `i`, as netted groups: one
+    /// for an autopilot of one asset class, one per class for a portfolio
+    /// (crypto and US shares rebalance on their own clocks: shares only in
+    /// the regular session). Empty when it is not active or runs no lab book.
+    pub(super) fn autopilot_lab_groups(&self, i: usize) -> Vec<LabGroup> {
         let ap = &self.autopilots[i];
         if !ap.is_active() {
-            return None;
+            return Vec::new();
         }
-        let labs: Vec<&Sleeve> = ap.sleeves.iter().filter(|s| self.is_lab_book(&s.strategy_id)).collect();
-        if labs.is_empty() {
-            return None;
-        }
-        let total: f64 = labs.iter().map(|s| s.weight.max(0.0)).sum();
-        Some(LabGroup {
-            ap: i,
-            running: ap.state == AutopilotState::Running,
-            capital: self.ap_equity(ap).max(0.0) * total,
-            members: labs
+        let classes: Vec<Option<Venue>> =
+            if ap.config.portfolio { PORTFOLIO_CLASSES.iter().copied().map(Some).collect() } else { vec![None] };
+        let equity = self.ap_equity(ap).max(0.0);
+        let mut out = Vec::new();
+        for class in classes {
+            let labs: Vec<&Sleeve> = ap
+                .sleeves
                 .iter()
-                .map(|s| (s.strategy_id.clone(), if total > 0.0 { s.weight.max(0.0) / total } else { 0.0 }))
-                .collect(),
-            owned: ap.owned.keys().cloned().collect(),
-        })
+                .filter(|s| self.is_lab_book(&s.strategy_id))
+                .filter(|s| class.is_none_or(|c| self.strategy_class(&s.strategy_id) == Some(c)))
+                .collect();
+            if labs.is_empty() {
+                continue;
+            }
+            let total: f64 = labs.iter().map(|s| s.weight.max(0.0)).sum();
+            // A portfolio never holds more than its equity across both
+            // classes: when the split moves while the other class waits for
+            // its session to sell, this class buys only into what is free.
+            let capital = match class {
+                Some(c) => (equity * total).min((equity - self.ap_class_gross(ap, |v| v != c)).max(0.0)),
+                None => equity * total,
+            };
+            out.push(LabGroup {
+                ap: i,
+                class,
+                running: ap.state == AutopilotState::Running,
+                capital,
+                members: labs
+                    .iter()
+                    .map(|s| (s.strategy_id.clone(), if total > 0.0 { s.weight.max(0.0) / total } else { 0.0 }))
+                    .collect(),
+                owned: ap.owned.keys().cloned().collect(),
+            });
+        }
+        out
+    }
+
+    /// The asset class a strategy trades.
+    fn strategy_class(&self, sid: &str) -> Option<Venue> {
+        self.strategies.iter().find(|s| s.id == sid).map(|s| s.venue_class)
+    }
+
+    /// The asset class (engine venue) of a market.
+    fn market_class(&self, market: &str) -> Option<Venue> {
+        self.markets.iter().find(|m| m.id == market).map(|m| m.venue)
+    }
+
+    /// Gross notional at the mark of what it owns in the classes `pick`
+    /// accepts, plus its orders for them still at the venue.
+    fn ap_class_gross(&self, ap: &Autopilot, pick: impl Fn(Venue) -> bool) -> f64 {
+        let held: f64 = ap
+            .owned
+            .keys()
+            .filter(|m| self.market_class(m).is_some_and(&pick))
+            .filter_map(|m| {
+                let p = self.ap_position(ap, m)?;
+                Some((p.qty * self.ap_mark(m, p.avg_price)).abs())
+            })
+            .sum();
+        let pending: f64 = self
+            .inflight
+            .values()
+            .filter(|f| f.book == ap.config.id && self.market_class(&f.market_id).is_some_and(&pick))
+            .filter(|f| {
+                let buy = f.side == crate::connectors::Side::Buy;
+                self.ap_position(ap, &f.market_id).is_none_or(|p| p.qty.abs() < 1e-12 || (p.qty > 0.0) == buy)
+            })
+            .map(|f| {
+                let left = (f.qty - f.booked_qty).max(0.0);
+                let px = self.price_of(&f.market_id);
+                left * if px > 0.0 { px } else { f.arrival }
+            })
+            .sum();
+        held + pending
     }
 
     fn is_lab_book(&self, sid: &str) -> bool {
@@ -1651,7 +1879,31 @@ impl Engine {
         targets: BTreeMap<String, f64>,
         shares: BTreeMap<String, BTreeMap<String, f64>>,
         cash_note: Option<String>,
+        class: Option<Venue>,
     ) {
+        // A portfolio's group sets only its own class's part of the target.
+        let (targets, cash_note) = match class {
+            None => (targets, cash_note),
+            Some(c) => {
+                let mut all: BTreeMap<String, f64> = self.autopilots[ap_i]
+                    .lab_target
+                    .iter()
+                    .filter(|(m, _)| self.market_class(m) != Some(c))
+                    .map(|(m, w)| (m.clone(), *w))
+                    .collect();
+                all.extend(targets);
+                let notes = &mut self.autopilots[ap_i].class_notes;
+                match cash_note {
+                    Some(n) => notes.insert(class_key(c).to_string(), n),
+                    None => notes.remove(class_key(c)),
+                };
+                let joined: Vec<String> = PORTFOLIO_CLASSES
+                    .iter()
+                    .filter_map(|v| notes.get(class_key(*v)).map(|n| format!("{}: {n}", asset_words(*v))))
+                    .collect();
+                (all, (!joined.is_empty()).then(|| joined.join("; ")))
+            }
+        };
         let marks: BTreeMap<String, f64> = self.autopilots[ap_i]
             .owned
             .keys()
@@ -1855,6 +2107,9 @@ impl Engine {
     pub fn autopilot_start(&mut self, mut cfg: AutopilotConfig, confirm: bool, cash: VenueCash) -> Result<String, String> {
         let now = self.now();
         validate(&cfg, now)?;
+        if cfg.portfolio {
+            self.portfolio_preflight(&mut cfg)?;
+        }
         cfg.name = cfg.name.trim().to_string();
         if cfg.name.is_empty() {
             cfg.name = "Autopilot".into();
@@ -1954,7 +2209,9 @@ impl Engine {
                 }
             ));
         }
-        cfg.asset_class = Some(venue);
+        if !cfg.portfolio {
+            cfg.asset_class = Some(venue);
+        }
         if self.limits.kill_switch {
             return Err("The kill switch is on, so every new entry would be refused. Release it first.".into());
         }
@@ -1967,9 +2224,17 @@ impl Engine {
 
         let auto = cfg.sleeves.is_empty();
         let mut passed_over: Vec<String> = Vec::new();
-        let picks: Vec<(String, f64, String)> = if auto {
+        let mut split: Option<PortfolioPick> = None;
+        let picks: Vec<(String, f64, String)> = if cfg.portfolio {
             let max = cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
-            let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken, &HashSet::new(), max).map_err(|why| {
+            let mut pp = self.portfolio_pick(cfg.mode, &busy, &HashSet::new(), max, None)?;
+            passed_over = std::mem::take(&mut pp.passed_over);
+            let picks = std::mem::take(&mut pp.picks);
+            split = Some(pp);
+            picks
+        } else if auto {
+            let max = cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
+            let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken, &HashSet::new(), max, false).map_err(|why| {
                 // "alpaca" alone means US shares; crypto there is its own choice.
                 if cfg.mode == AutopilotMode::Demo && venue == Venue::Alpaca && self.crypto_demo_on_alpaca() {
                     format!("{why} Crypto on the Alpaca paper account is a separate choice: pick Crypto (asset class \"crypto\").")
@@ -2164,11 +2429,12 @@ impl Engine {
             .filter_map(|sl| self.autopilot_claimant(&sl.strategy_id).map(|who| format!("{} (also in {who})", sl.name)))
             .collect();
 
+        let place = if cfg.portfolio { "crypto and US shares".to_string() } else { venue_label(cv).to_string() };
         let mut msg = format!(
             "Autopilot \"{}\" started in {} on {} with {}: {}.",
             cfg.name,
             cfg.mode.word(),
-            venue_label(cv),
+            place,
             usd(cfg.capital_usd),
             describe_rules(&cfg)
         );
@@ -2178,6 +2444,16 @@ impl Engine {
             let books: Vec<&str> = sleeves.iter().map(|s| s.name.as_str()).collect();
             format!("{msg} Books: {}.", books.join(", "))
         };
+        if let Some(pp) = &split {
+            msg.push_str(&format!(" A portfolio across asset classes, split by evidence: {}.", pp.split_words()));
+            for (c, why) in &pp.empty {
+                msg.push_str(&format!(
+                    " Nothing goes to {} for now ({why}); a re-pick adds them once a book has evidence, never forced.",
+                    asset_words(*c)
+                ));
+            }
+            msg.push_str(" US shares rebalance only in the regular session; crypto at any time. It is held against a blend of BTC and SPY at the same split.");
+        }
         for sl in &sleeves {
             msg.push_str(&format!(" {}: {}", sl.name, sl.why));
         }
@@ -2233,8 +2509,11 @@ impl Engine {
             let mut rows = vec![
                 Row::new("Capital", card::usd(cfg.capital_usd)),
                 Row::new("Mode", cfg.mode.word()),
-                Row::new("Venue", venue_label(cv)),
+                Row::new("Venue", place.clone()),
             ];
+            if let Some(pp) = &split {
+                rows.push(Row::new("Split", pp.split_words()));
+            }
             let books: Vec<&str> = sleeves.iter().map(|s| s.name.as_str()).collect();
             if !books.is_empty() {
                 rows.push(Row::new("Books", books.join(", ")));
@@ -2282,6 +2561,8 @@ impl Engine {
             spy_from_ms: None,
             bench_notes: Vec::new(),
             bench_wait_ms: None,
+            blend: None,
+            class_notes: BTreeMap::new(),
         });
         let i = self.autopilots.len() - 1;
         let x = self.autopilots[i].config.capital_usd;
@@ -2292,6 +2573,9 @@ impl Engine {
         if self.ap_wants_spy(&self.autopilots[i]) {
             self.autopilots[i].spy_start = self.ap_spy_price();
         }
+        // A portfolio's blend starts at its class split, from the same
+        // BTC and SPY starts (filled in later when no price is known yet).
+        self.ap_blend_relink(i, now);
         Ok(id)
     }
 
@@ -2455,6 +2739,9 @@ impl Engine {
             return Err(format!("{label} is stopped; start a new one instead."));
         }
         let old = self.autopilots[i].config.clone();
+        if old.portfolio && upd.sleeves.as_ref().is_some_and(|s| !s.is_empty()) {
+            return Err(format!("{label} is a portfolio: Pythia picks its lab books by evidence, class by class, so its strategies cannot be chosen by hand."));
+        }
         let mut cfg = old.clone();
         if let Some(n) = &upd.name {
             let n = n.trim();
@@ -2637,9 +2924,14 @@ impl Engine {
                 }
             }
             taken.extend(builtin_held.keys().cloned());
-            let picks: Vec<(String, f64, String)> = if auto {
+            let picks: Vec<(String, f64, String)> = if cfg.portfolio {
                 let max = cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
-                let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken, &own, max)?;
+                let pp = self.portfolio_pick(cfg.mode, &busy, &own, max, None)?;
+                passed_over = pp.passed_over;
+                pp.picks
+            } else if auto {
+                let max = cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
+                let (picks, over) = self.auto_pick(venue, cfg.mode, &busy, &taken, &own, max, false)?;
                 passed_over = over;
                 // Live never adds a strategy the owner has not seen: the
                 // confirmation above covers what this pick shows them.
@@ -2750,6 +3042,15 @@ impl Engine {
             }
             if auto {
                 self.autopilots[i].last_pick_ms = Some(now);
+            }
+            if cfg.portfolio {
+                let split: Vec<String> = PORTFOLIO_CLASSES
+                    .iter()
+                    .zip(self.ap_class_weights(&self.autopilots[i]))
+                    .map(|(c, w)| format!("{} {:.0} %", class_label(*c), w * 100.0))
+                    .collect();
+                parts.push(format!("split by evidence {}", split.join(", ")));
+                self.ap_blend_relink(i, now);
             }
         }
         if cfg.stop != old.stop || capital_changed {
@@ -3002,6 +3303,7 @@ impl Engine {
                     benchmark: self.ap_benchmark(ap, equity),
                     cash: equity - self.ap_gross(ap, None) - self.ap_pending(ap, None),
                     max_drawdown_pct: max_drawdown_pct(&ap.history, equity),
+                    classes: self.ap_class_statuses(ap),
                 }
             })
             .collect()
@@ -3678,6 +3980,7 @@ impl Engine {
             lab_deflated_p: lab.and_then(|e| e.deflated_p),
             lab_variants: lab.and_then(|e| e.variants_tried),
             lab_sharpe_2x_cost: lab.and_then(|e| e.sharpe_2x_cost),
+            lab_max_dd: lab.and_then(|e| e.oos_max_dd),
             lab_caveat: lab.and_then(|e| e.caveat.clone()),
             // The lab's own paper book of the same rule, against its backtest.
             forward: if s.kind == StrategyKind::LabTargets {
@@ -3733,7 +4036,14 @@ impl Engine {
     /// normally means: the best lab books take the crypto markets together,
     /// and built-ins only run when they out-score every lab book.
     /// `own` are the sleeves of the autopilot that re-picks.
+    ///
+    /// `labs_only` is a portfolio's pick of one class: lab books only, each
+    /// with a positive out-of-sample Sharpe from the lab (no evidence, no
+    /// money), and a book it already runs stays a candidate while its signal
+    /// is past its window (it holds its last targets, as inside any netted
+    /// book), so a late signal never empties a class.
     /// Returns the picks (id, weight, why) and the names passed over.
+    #[allow(clippy::too_many_arguments)]
     fn auto_pick(
         &self,
         venue: Venue,
@@ -3742,6 +4052,7 @@ impl Engine {
         taken: &HashSet<String>,
         own: &HashSet<String>,
         max: usize,
+        labs_only: bool,
     ) -> Result<AutoPick, String> {
         let now = self.now();
         let max = max.clamp(1, AUTO_MAX_SLEEVES_LIMIT);
@@ -3749,12 +4060,19 @@ impl Engine {
             .strategies
             .iter()
             .filter(|s| s.id != "manual")
+            .filter(|s| !labs_only || s.kind == StrategyKind::LabTargets)
             .filter(|s| s.state != StrategyState::Paused || self.lab_book_autopilot_only(&s.id))
-            .filter(|s| s.kind != StrategyKind::LabTargets || self.lab_signals.get(&s.id).is_some_and(|g| g.is_fresh(now)))
+            .filter(|s| {
+                s.kind != StrategyKind::LabTargets
+                    || self.lab_signals.get(&s.id).is_some_and(|g| g.is_fresh(now) || (labs_only && own.contains(&s.id)))
+            })
             .filter(|s| self.sleeve_block(&s.id, venue, mode, busy, own).is_none())
             .filter_map(|s| {
                 let ev = self.evidence(&s.id);
                 if mode == AutopilotMode::Live && !ev.live_ready {
+                    return None;
+                }
+                if labs_only && !ev.lab_oos_sharpe.is_some_and(|sh| sh.is_finite() && sh > 0.0) {
                     return None;
                 }
                 // Positive evidence only: a lab book whose own out-of-sample
@@ -3766,6 +4084,12 @@ impl Engine {
             })
             .collect();
         if scored.is_empty() {
+            if labs_only {
+                return Err(format!(
+                    "no lab book of {} has a positive out-of-sample Sharpe from the lab (or every one is paused or kept by a live autopilot)",
+                    asset_words(venue)
+                ));
+            }
             return Err(match mode {
                 AutopilotMode::Live => "Auto found no strategy cleared for live on this venue. Live needs a green Strategy Passport; run the checks on the Strategies page or choose paper.".into(),
                 _ => "Auto found no strategy it can run on this venue: every candidate is paused, already in an autopilot, or has a record that shows no edge.".into(),
@@ -3809,6 +4133,232 @@ impl Engine {
         Ok((picks, passed_over))
     }
 
+    /// A portfolio's pick. Each asset class runs the auto pick on its own lab
+    /// books (only books with a positive out-of-sample Sharpe count), and
+    /// the allocator splits the amount between the classes: the score of a
+    /// class's best book per unit of that book's out-of-sample drawdown (the
+    /// class prior when none was measured), over the sum of both. A class
+    /// with no such book gets nothing. Inside a class the books split its
+    /// budget by score. `current` is the class split in place, in
+    /// [`PORTFOLIO_CLASSES`] order (a re-pick): while both classes have
+    /// evidence, a budget moves toward its target by at most
+    /// [`PORTFOLIO_MAX_SHIFT`]. The picks' weights add up to one.
+    fn portfolio_pick(
+        &self,
+        mode: AutopilotMode,
+        busy: &HashSet<String>,
+        own: &HashSet<String>,
+        max: usize,
+        current: Option<&[f64]>,
+    ) -> Result<PortfolioPick, String> {
+        let mut per: Vec<Vec<(String, f64, String)>> = Vec::new();
+        let mut raw: Vec<(f64, f64)> = Vec::new();
+        let mut empty: Vec<(Venue, String)> = Vec::new();
+        let mut passed_over: Vec<String> = Vec::new();
+        for c in PORTFOLIO_CLASSES {
+            match self.auto_pick(c, mode, busy, &HashSet::new(), own, max, true) {
+                Ok((picks, over)) if !picks.is_empty() => {
+                    passed_over.extend(over);
+                    // The picks come best first.
+                    let best = &picks[0];
+                    let risk = super::allocator::risk_of(self.evidence(&best.0).lab_max_dd, c == Venue::Alpaca);
+                    raw.push((best.1, risk));
+                    per.push(picks);
+                }
+                Ok(_) => {
+                    raw.push((0.0, 1.0));
+                    per.push(Vec::new());
+                    empty.push((c, format!("no lab book of {} is free to run", asset_words(c))));
+                }
+                Err(why) => {
+                    raw.push((0.0, 1.0));
+                    per.push(Vec::new());
+                    empty.push((c, why));
+                }
+            }
+        }
+        let target = super::allocator::risk_budgets(&raw);
+        if target.iter().all(|w| *w <= 0.0) {
+            let why: Vec<String> = empty.iter().map(|(_, w)| w.clone()).collect();
+            return Err(format!("Auto found nothing a portfolio can run: {}.", why.join("; ")));
+        }
+        // No evidence, no money at once; between two classes with evidence
+        // the split moves in bounded steps.
+        let budgets = match current {
+            Some(cur) if cur.len() == target.len() && target.iter().all(|w| *w > 0.0) => {
+                super::allocator::bounded_step(cur, &target, PORTFOLIO_MAX_SHIFT)
+            }
+            _ => target,
+        };
+        let mut picks = Vec::new();
+        for ((c, class_picks), b) in PORTFOLIO_CLASSES.iter().zip(per).zip(&budgets) {
+            let total: f64 = class_picks.iter().map(|p| p.1).sum();
+            if *b <= 1e-9 || total <= 0.0 {
+                continue;
+            }
+            for (sid, sc, why) in class_picks {
+                let w = b * sc / total;
+                picks.push((sid, w, format!("{why}; its class ({}) gets {:.0} % of the portfolio by evidence", class_label(*c), b * 100.0)));
+            }
+        }
+        Ok(PortfolioPick { picks, budgets: PORTFOLIO_CLASSES.iter().copied().zip(budgets).collect(), empty, passed_over })
+    }
+
+    /// A portfolio's class split as its sleeves hold it now, in
+    /// [`PORTFOLIO_CLASSES`] order.
+    fn ap_class_weights(&self, ap: &Autopilot) -> Vec<f64> {
+        PORTFOLIO_CLASSES
+            .iter()
+            .map(|c| {
+                ap.sleeves
+                    .iter()
+                    .filter(|s| self.strategy_class(&s.strategy_id) == Some(*c))
+                    .map(|s| s.weight.max(0.0))
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// The blend's growth over its current stretch at these prices, or
+    /// `None` while a weighted leg has no price.
+    fn blend_growth(&self, ap: &Autopilot, b: &BlendBench, btc: Option<f64>, spy: Option<f64>) -> Option<f64> {
+        let mut g = 1.0;
+        for (w, p0, p1) in [(b.w_btc, b.btc_ref.or(ap.btc_start), btc), (b.w_spy, b.spy_ref.or(ap.spy_start), spy)] {
+            if w > 1e-9 {
+                g += w * leg_return(p0, p1)? / 100.0;
+            }
+        }
+        Some(g)
+    }
+
+    /// A portfolio's class budgets moved: close the blend's stretch at the
+    /// prices now and go on at the new weights. Kept as it is (and said so)
+    /// while a newly weighted leg has no price to start from.
+    fn ap_blend_relink(&mut self, i: usize, now: i64) {
+        let ap = &self.autopilots[i];
+        if !ap.config.portfolio {
+            return;
+        }
+        let w = self.ap_class_weights(ap);
+        let (w_btc, w_spy) = (w[0], w[1]);
+        let btc = self.ap_btc_price(ap);
+        let spy = self.ap_spy_price();
+        let Some(b) = ap.blend.clone() else {
+            self.autopilots[i].blend = Some(BlendBench { index: 1.0, since_ms: now, w_btc, w_spy, btc_ref: None, spy_ref: None });
+            return;
+        };
+        if (b.w_btc - w_btc).abs() < 1e-9 && (b.w_spy - w_spy).abs() < 1e-9 {
+            return;
+        }
+        let growth = self.blend_growth(ap, &b, btc, spy);
+        let priced = (w_btc <= 1e-9 || btc.is_some()) && (w_spy <= 1e-9 || spy.is_some());
+        let Some(growth) = growth.filter(|_| priced) else {
+            let msg = format!(
+                "{}: its blended benchmark keeps the weights {:.0} % BTC, {:.0} % SPY for now: a price it needs is not known yet.",
+                ap.label(),
+                b.w_btc * 100.0,
+                b.w_spy * 100.0
+            );
+            self.log(JournalKind::System, msg, None, None);
+            return;
+        };
+        self.autopilots[i].blend = Some(BlendBench { index: b.index * growth, since_ms: now, w_btc, w_spy, btc_ref: btc, spy_ref: spy });
+    }
+
+    /// A portfolio's blended benchmark, as the UI shows it.
+    fn ap_blend_status(&self, ap: &Autopilot, equity: f64) -> Option<BenchmarkStatus> {
+        let b = ap.blend.as_ref()?;
+        let active = ap.is_active();
+        let btc = if active { self.ap_btc_price(ap) } else { ap.btc_end };
+        let spy = if active { self.ap_spy_price() } else { ap.spy_end };
+        let ret = self.blend_growth(ap, b, btc, spy).map(|g| (b.index * g - 1.0) * 100.0);
+        let from = [(b.w_btc, ap.btc_from_ms), (b.w_spy, ap.spy_from_ms)]
+            .into_iter()
+            .filter(|(w, _)| *w > 1e-9)
+            .filter_map(|(_, t)| t)
+            .max();
+        let base = match from {
+            Some(t) => ap.history.iter().find(|h| h.0 >= t).map(|h| h.1).unwrap_or(equity),
+            None => ap.start_capital,
+        };
+        let own = if base > 0.0 { (equity / base - 1.0) * 100.0 } else { 0.0 };
+        let note = (!ap.bench_notes.is_empty()).then(|| ap.bench_notes.join(" "));
+        Some(BenchmarkStatus {
+            symbol: format!("{BTC_SYMBOL}+SPY"),
+            name: format!("Blend of {:.0} % BTC and {:.0} % SPY, bought and held", b.w_btc * 100.0, b.w_spy * 100.0),
+            return_pct: ret,
+            excess_pct: ret.map(|r| own - r),
+            from_ms: from,
+            note,
+            legs: vec![
+                BenchmarkLeg { symbol: BTC_SYMBOL.into(), weight: b.w_btc, return_pct: leg_return(b.btc_ref.or(ap.btc_start), btc) },
+                BenchmarkLeg { symbol: "SPY".into(), weight: b.w_spy, return_pct: leg_return(b.spy_ref.or(ap.spy_start), spy) },
+            ],
+        })
+    }
+
+    /// The checks only a portfolio has, before the start's own: paper or
+    /// demo, picked by Pythia, both classes on the Alpaca account.
+    fn portfolio_preflight(&self, cfg: &mut AutopilotConfig) -> Result<(), String> {
+        if cfg.mode == AutopilotMode::Live {
+            return Err("A portfolio across asset classes runs on paper or demo only. Live stays with autopilots of one asset class, behind every gate they have.".into());
+        }
+        if !cfg.sleeves.is_empty() {
+            return Err("Pythia picks a portfolio's lab books by evidence, class by class: leave the strategies empty.".into());
+        }
+        if cfg.mode == AutopilotMode::Demo {
+            if !self.demo_venues.contains(&Venue::Alpaca) {
+                return Err("A demo portfolio trades on the Alpaca paper account: add the Alpaca paper keys first (docs/DEMO.md says how).".into());
+            }
+            if !self.crypto_demo_on_alpaca() {
+                return Err("A demo portfolio trades both classes on the Alpaca paper account, so crypto demo orders have to go there too: set PYTHIA_DEMO_EXCHANGE=alpaca (docs/DEMO.md says how), or run the portfolio on paper.".into());
+            }
+        }
+        // Both classes trade on the Alpaca account; crypto's prices still
+        // come from the crypto feeds.
+        cfg.venue = CostVenue::Alpaca.id().to_string();
+        cfg.asset_class = None;
+        Ok(())
+    }
+
+    /// A portfolio's asset classes, as the UI shows them.
+    fn ap_class_statuses(&self, ap: &Autopilot) -> Vec<ClassStatus> {
+        if !ap.config.portfolio {
+            return Vec::new();
+        }
+        PORTFOLIO_CLASSES
+            .iter()
+            .map(|&c| {
+                let sleeves: Vec<&Sleeve> = ap.sleeves.iter().filter(|s| self.strategy_class(&s.strategy_id) == Some(c)).collect();
+                let weight: f64 = sleeves.iter().map(|s| s.weight.max(0.0)).sum();
+                let pnl: f64 = sleeves.iter().map(|s| s.realized - s.fees + self.ap_unrealized(ap, Some(&s.strategy_id))).sum();
+                let books = sleeves.iter().filter(|s| s.weight > 0.0).count();
+                let note = if books == 0 {
+                    Some(format!(
+                        "No lab book of {} has evidence now, so it gets nothing; it joins at a re-pick once one does.",
+                        asset_words(c)
+                    ))
+                } else if c == Venue::Alpaca && ap.state == AutopilotState::Running {
+                    match self.lab_equity_session_wait() {
+                        Some(why) => Some(format!("Rebalances only in the regular session: {why}.")),
+                        None => ap.class_notes.get(class_key(c)).map(|n| format!("In cash: {n}.")),
+                    }
+                } else {
+                    ap.class_notes.get(class_key(c)).map(|n| format!("In cash: {n}."))
+                };
+                ClassStatus {
+                    class: c,
+                    label: class_label(c).into(),
+                    weight,
+                    pnl,
+                    exposure: self.ap_class_gross(ap, |v| v == c),
+                    books,
+                    note,
+                }
+            })
+            .collect()
+    }
+
     /// Re-run the auto pick with fresh evidence, when it is due: an
     /// auto-pick autopilot, running, `repick_every_hours` since the last pick.
     ///
@@ -3844,8 +4394,15 @@ impl Engine {
         let busy = self.busy_strategies(mode, Some(&ap.config.id));
         let taken: HashSet<String> = HashSet::new();
         let max = ap.config.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
-        let picks = match self.auto_pick(venue, mode, &busy, &taken, &own, max) {
-            Ok((p, _)) => p,
+        let portfolio = ap.config.portfolio;
+        let split_before = self.ap_class_weights(ap);
+        let picked = if portfolio {
+            self.portfolio_pick(mode, &busy, &own, max, Some(&split_before)).map(|p| p.picks)
+        } else {
+            self.auto_pick(venue, mode, &busy, &taken, &own, max, false).map(|(p, _)| p)
+        };
+        let picks = match picked {
+            Ok(p) => p,
             Err(why) => {
                 let msg = format!("{label} re-ran its pick and keeps its strategies as they are: {why}");
                 self.autopilots[i].last_action = Some(msg.clone());
@@ -3931,10 +4488,23 @@ impl Engine {
             self.lab_done.remove(&super::pos_key(&book, sid));
             self.lab_retry.remove(&super::pos_key(&book, sid));
         }
-        let msg = format!(
+        let mut msg = format!(
             "{label} re-ran its pick with fresh evidence and changed its lab books: {}. The new weights are netted into one target per coin at the next rebalance, which trades only the difference; nothing is sold off at once.",
             parts.join(", ")
         );
+        if portfolio {
+            let split: Vec<String> = PORTFOLIO_CLASSES
+                .iter()
+                .zip(self.ap_class_weights(&self.autopilots[i]).iter().zip(&split_before))
+                .map(|(c, (w, was))| format!("{} {:.0} % (was {:.0} %)", class_label(*c), w * 100.0, was * 100.0))
+                .collect();
+            msg.push_str(&format!(
+                " Split by evidence: {}; while both classes have evidence a class moves by at most {:.0} points a re-pick.",
+                split.join(", "),
+                PORTFOLIO_MAX_SHIFT * 100.0
+            ));
+            self.ap_blend_relink(i, now);
+        }
         self.autopilots[i].last_action = Some(msg.clone());
         self.pending_alerts.push(msg.clone());
         self.log(JournalKind::System, msg, None, None);
