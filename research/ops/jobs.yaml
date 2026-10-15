@@ -1,0 +1,330 @@
+# Every scheduled Pythia job, in one table. Times are UTC.
+#
+# This file is the only place a schedule is written down. After a change:
+#
+#   install -m 644 research/ops/jobs.yaml /opt/pythia-ops/jobs.yaml
+#   python3 /opt/pythia-ops/jobs.py validate
+#   python3 /opt/pythia-ops/jobs.py render        # rewrites /etc/cron.d/pythia-jobs
+#
+# (research/ops/deploy_ops.sh does all three.) Fields per job:
+#
+#   name          lower case, digits, dashes; the log is /var/log/pythia/<name>.log
+#   description   one line, shown in the status and the cron file
+#   schedule      5-field cron, quoted. Leave it out and set depends_on to run
+#                 the job right after its dependencies succeed (a chain).
+#   kind          lab (the pythia-lab image, lab code mounted at /app, the
+#                 default), image (another image, no code mount) or host (a
+#                 shell command on the host)
+#   image         for kind image
+#   command       what runs; in a container it is split like a shell would,
+#                 without a shell (use sh -c '...' for one)
+#   resources     {cpus, memory} for docker run
+#   timeout       hard limit (90s, 45m, 3h); the run is killed past it
+#   grace         how long past the schedule plus timeout before the job is late (15m)
+#   lock          lock name(s); jobs sharing a lock never overlap (default: the job's name)
+#   lock_wait     how long to wait for a busy lock before skipping this run (0)
+#   depends_on    jobs that must have succeeded within depends_within (20h) and
+#                 not be running; otherwise the run is recorded as blocked
+#   enabled       false keeps the entry but renders it commented out
+#   network, env, env_file, volumes   passed to docker run (env_file is read
+#                 by the runner for host jobs)
+#   alert         false: no Telegram/webhook post on this job's first failure
+#
+# The heavy nightly jobs share the lock `heavy` and wait for each other, so
+# two of them never compete for memory even when one runs long.
+
+paths:
+  data: /srv/pythia-data
+  code: /opt/pythia-lab
+  ops: /opt/pythia-ops
+  logs: /var/log/pythia
+  locks: /run/lock/pythia
+  python: /usr/bin/python3
+  cron_dir: /etc/cron.d
+  alert_env: /etc/pythia/alerts.env
+  min_free_gb: 20
+  log_max_mb: 10
+  log_keep: 5
+
+defaults:
+  kind: lab
+  image: pythia-lab
+  timeout: 1h
+  resources: {cpus: 1, memory: 2g}
+
+jobs:
+  # ---------------------------------------------------------------- nightly pipeline
+  - name: backfill
+    description: history backfill, 20 lab coins, every USDT pair and perp
+    schedule: "30 3 * * *"
+    kind: image
+    image: pythia-recorder
+    command: python -m recorder.backfill
+    resources: {cpus: 1, memory: 2g}
+    timeout: 3h
+    lock: heavy
+    lock_wait: 1h
+
+  - name: paper
+    description: momentum paper books and engine signals
+    schedule: "0 4 * * *"
+    command: python -m lab.paper.tsmom
+    resources: {cpus: 2, memory: 4g}
+    timeout: 45m
+    lock: heavy
+    lock_wait: 2h
+
+  - name: paper-review
+    description: paper against backtest review, after the momentum books
+    depends_on: [paper]
+    command: python -m lab.paper.review
+    timeout: 15m
+
+  - name: paper-families
+    description: sweep candidates as paper books (momentum, tranches, breakout)
+    schedule: "15 4 * * *"
+    command: python -m lab.paper.families
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 2, memory: 6g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+
+  - name: paper-m4
+    description: M4 shadow paper book, market-neutral on perps
+    schedule: "45 4 * * *"
+    command: python -m lab.paper.m4_ls
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 2, memory: 6g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+
+  - name: paper-ls
+    description: market-neutral M2 paper book v1
+    schedule: "30 5 * * *"
+    command: python -m lab.paper.picks_ls
+    resources: {cpus: 2, memory: 6g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 1h
+
+  - name: paper-ls-v2
+    description: market-neutral M2 paper book v2, after v1
+    depends_on: [paper-ls]
+    command: python -m lab.paper.picks_ls --v2
+    resources: {cpus: 2, memory: 6g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 1h
+
+  - name: forward
+    description: forward report, every paper book and autopilot against its backtest
+    schedule: "15 6 * * *"
+    command: python -m lab.paper.forward_report
+    network: host
+    timeout: 30m
+
+  - name: learn
+    description: learning loop, costs, evidence, challengers, digest
+    schedule: "30 6 * * *"
+    command: python -m lab.ops.learn
+    network: host
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 4, memory: 8g}
+    timeout: 5h
+    lock: heavy
+    lock_wait: 1h
+
+  - name: notify
+    description: daily digest to the operator, right after the learning loop
+    depends_on: [learn]
+    command: python -m lab.ops.notify
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+
+  - name: costs
+    description: weekly cost calibration from the recorded books, report only
+    schedule: "40 5 * * 0"
+    command: python -m lab.experiments.costs
+    resources: {cpus: 2, memory: 4g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 1h
+
+  # ---------------------------------------------------------------- host jobs
+  - name: health
+    description: health check of every job, container, stream, book and the disk
+    schedule: "7 * * * *"
+    kind: host
+    command: /opt/pythia-ops/system_health.sh
+    timeout: 10m
+    alert: false
+
+  - name: notify-pending
+    description: a digest asked for through the engine API, if any
+    schedule: "*/5 * * * *"
+    kind: host
+    command: python3 /opt/pythia-ops/notify.py --pending
+    env_file: /etc/pythia/alerts.env
+    timeout: 2m
+    alert: false
+
+  - name: backup
+    description: archive of engine state, model registry, paper books and ledgers, rotated
+    schedule: "20 2 * * *"
+    kind: host
+    command: python3 /opt/pythia-ops/jobs.py backup
+    timeout: 1h
+
+  - name: prune
+    description: retention rules of the datasets below
+    schedule: "50 2 * * *"
+    kind: host
+    command: python3 /opt/pythia-ops/jobs.py prune
+    timeout: 1h
+
+  # ---------------------------------------------------------------- new collectors and studies
+  # Added disabled; switch on (enabled: true, then render) once the module is
+  # deployed to /opt/pythia-lab and its command is confirmed.
+  - name: listings-watch
+    description: new exchange listings watcher
+    schedule: "*/10 * * * *"
+    command: python -m lab.watch.listings
+    network: host
+    resources: {cpus: 0.5, memory: 512m}
+    timeout: 8m
+    grace: 10m
+    enabled: false
+
+  - name: trending-watch
+    description: trending coins watcher
+    schedule: "3-59/15 * * * *"
+    command: python -m lab.watch.trending
+    network: host
+    resources: {cpus: 0.5, memory: 512m}
+    timeout: 12m
+    grace: 10m
+    enabled: false
+
+  - name: cs2-collector
+    description: CS2 item market collector
+    schedule: "25 * * * *"
+    command: python -m lab.collect.cs2
+    resources: {cpus: 1, memory: 1g}
+    timeout: 40m
+    enabled: false
+
+  - name: pokemon-collector
+    description: Pokemon card market collector
+    schedule: "10 2 * * *"
+    command: python -m lab.collect.pokemon
+    resources: {cpus: 1, memory: 1g}
+    timeout: 1h
+    enabled: false
+
+  - name: strategy-factory
+    description: weekly strategy factory, every trial goes to the trial ledger
+    schedule: "0 9 * * 6"
+    command: python -m lab.factory.run
+    resources: {cpus: 4, memory: 8g}
+    timeout: 8h
+    lock: heavy
+    lock_wait: 3h
+    enabled: false
+
+  - name: model-zoo
+    description: model zoo training as challengers
+    schedule: "0 12 * * 6"
+    command: python -m lab.zoo.train
+    resources: {cpus: 4, memory: 8g}
+    timeout: 8h
+    lock: heavy
+    lock_wait: 3h
+    enabled: false
+
+  - name: equities-studies
+    description: equities studies refresh
+    schedule: "0 23 * * 1-5"
+    command: python -m lab.equities.run
+    resources: {cpus: 2, memory: 6g}
+    timeout: 3h
+    lock: heavy
+    lock_wait: 2h
+    enabled: false
+
+# Size and growth per dataset (paths under the data root). max_gb turns the
+# dataset red in the health check; retention_days lets the prune job delete
+# files older than that (by modification time, only those matching pattern).
+# Datasets without retention_days are never deleted from.
+datasets:
+  - name: recorder-binance
+    path: binance
+    max_gb: 250
+  - name: recorder-kraken
+    path: kraken
+    max_gb: 100
+  - name: recorder-bybit
+    path: bybit
+    max_gb: 100
+  - name: recorder-okx
+    path: okx
+    max_gb: 100
+  - name: recorder-coinbase
+    path: coinbase
+    max_gb: 100
+  - name: history
+    path: hist
+    max_gb: 300
+  - name: lab-cache
+    description: run caches and panels, rebuilt by the nightly jobs
+    path: lab-cache
+    max_gb: 80
+  - name: models
+    path: models
+    max_gb: 20
+  - name: paper
+    path: paper
+    max_gb: 5
+  - name: reports
+    description: dated report copies older than a year go; latest.* stay
+    path: reports
+    max_gb: 10
+    retention_days: 365
+    pattern: ["20??-??-??*.json", "20??-??-??*.md"]
+  - name: signals
+    path: signals
+    max_gb: 2
+    retention_days: 180
+    pattern: ["20??-??-??.json"]
+  - name: learn
+    path: learn
+    max_gb: 50
+  - name: job-runs
+    description: the runner's own run records, by month
+    path: _ops/runs
+    max_gb: 1
+    retention_days: 400
+    pattern: ["*.jsonl"]
+
+# The state that cannot be rebuilt from market data. Paths are under the
+# data root. Archives go to dest (outside the data root) as
+# pythia-state-<UTC time>.tar.gz with a .sha256 and a .json manifest, mode 600.
+backup:
+  dest: /srv/pythia-backup
+  keep_daily: 7
+  keep_weekly: 4
+  include:
+    - autopilot
+    - server
+    - models
+    - paper
+    - signals
+    - learn
+    - costs
+    - trials
+    - factory
+    - reports/forward/evidence.json
+    - reports/forward/backtest
+  exclude: ["*.tmp", "*.lock", "*.part"]
