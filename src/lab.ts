@@ -44,6 +44,8 @@ export interface LabStatus {
   jobs?: JobsStatus | null;
   /** New coin listings the watcher saw in the last 90 days. */
   listings?: ListingsFeed | null;
+  /** The real money readiness check, as the lab wrote it (see readiness.ts). */
+  readiness?: unknown;
 }
 
 // ── scheduled jobs (research/lab/lab/ops/jobs.py, _health/jobs.json) ───────

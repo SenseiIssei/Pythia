@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boardCounts, categoryLabel, changeTone, eur, frac, prediction, signalInfo, visibleItems, type Cs2Board, type Cs2Item } from "./cs2";
+import { boardCounts, categoryLabel, changeTone, eur, frac, itemLinks, leanWords, prediction, signalInfo, visibleItems, type Cs2Board, type Cs2Item } from "./cs2";
 
 const item = (over: Partial<Cs2Item>): Cs2Item => ({
   name: "Recoil Case",
@@ -87,5 +87,24 @@ describe("page helpers", () => {
   it("writes a loss in euro with a real minus", () => {
     expect(eur(-3.5)).toBe("−3,50 €");
     expect(eur(-0.001)).toBe("0,00 €");
+  });
+});
+
+describe("itemLinks", () => {
+  it("keeps the lab's links on Steam and Skinport", () => {
+    const l = itemLinks({ name: "AK-47 | Redline (Field-Tested)", steam_url: "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29", skinport_url: "https://skinport.com/item/ak-47-redline-field-tested" });
+    expect(l.map((x) => x.label)).toEqual(["Steam market", "Skinport"]);
+    expect(l[1].url).toBe("https://skinport.com/item/ak-47-redline-field-tested");
+  });
+  it("builds them from the name, encoded, when the lab's are missing or foreign", () => {
+    const l = itemLinks({ name: "StatTrak™ Zeus x27 | Tosai (Well-Worn)", steam_url: "javascript:alert(1)", skinport_url: "https://evil.example/item" });
+    expect(l[0].url).toBe("https://steamcommunity.com/market/listings/730/StatTrak%E2%84%A2%20Zeus%20x27%20%7C%20Tosai%20(Well-Worn)");
+    expect(l[1].url).toBe("https://skinport.com/item/stattrak-zeus-x27-tosai-well-worn");
+    expect(itemLinks({ name: "★ Karambit | Doppler (Factory New)" })[1].url).toBe("https://skinport.com/item/karambit-doppler-factory-new");
+  });
+  it("says which way the market leans", () => {
+    expect(leanWords("momentum")).toContain("kept rising");
+    expect(leanWords("reversion")).toContain("fell back");
+    expect(leanWords(undefined)).toBe("not enough data");
   });
 });

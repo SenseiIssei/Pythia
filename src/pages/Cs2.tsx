@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Crosshair, RefreshCw, Search, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Crosshair, ExternalLink, RefreshCw, Search, ShieldCheck, TriangleAlert } from "lucide-react";
 import { Badge, Button, Change, List, Notice, Page, Segmented, Sparkline, inputCls, signedPct } from "../design";
 import { FilterChips, KeyStats, LoadingRows, More, Nothing, Row, Section, num, plural, type ChipOption } from "../pagekit";
 import { liveMode } from "../live";
@@ -10,10 +10,14 @@ import {
   cs2Board,
   eur,
   frac,
+  itemLinks,
+  leanWords,
   prediction,
   signalInfo,
   visibleItems,
   type Cs2Board,
+  type Cs2SteamTrends,
+  type Cs2TrendItem,
   type Cs2Filter,
   type Cs2Item,
   type Cs2Sort,
@@ -70,6 +74,162 @@ function ItemRow({ r }: { r: Cs2Item }) {
         </Badge>
       </div>
     </div>
+  );
+}
+
+function TrendLinks({ it }: { it: Cs2TrendItem }) {
+  return (
+    <div className="flex flex-wrap gap-x-4 text-[13px]">
+      {itemLinks(it).map((l) => (
+        <a key={l.label} href={l.url} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-[28px] items-center gap-1 font-semibold text-accent hover:underline">
+          {l.label} <ExternalLink size={12} aria-hidden />
+        </a>
+      ))}
+    </div>
+  );
+}
+
+/** One item of the trends: name, group and links on the left; the number it is about on the right. */
+function TrendRow({ it, value, sub }: { it: Cs2TrendItem; value: number | null | undefined; sub?: string }) {
+  return (
+    <div className="flex items-start justify-between gap-3 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[15px] font-semibold text-ink" title={it.name}>
+          {it.name}
+        </div>
+        <div className="truncate text-[13px] text-muted">
+          {[it.group, it.eur != null ? `Steam ${eur(it.eur)}` : null, it.skinport_ask != null ? `Skinport ask ${eur(it.skinport_ask)}` : null, it.skinport_sales7 ? `${it.skinport_sales7} sales in 7 d` : null]
+            .filter(Boolean)
+            .join(" · ")}
+        </div>
+        <TrendLinks it={it} />
+      </div>
+      <div className="shrink-0 text-right">
+        <div className={`tabular text-[15px] font-semibold ${TONE_TEXT[changeTone(value)]}`}>{frac(value)}</div>
+        {sub && <div className="text-[13px] text-muted">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+function SteamTrends({ t }: { t: Cs2SteamTrends }) {
+  const movers = [...(t.movers?.up ?? []).slice(0, 5), ...(t.movers?.down ?? []).slice(0, 5)];
+  const groups = (t.groups ?? []).filter((g) => g.liquid > 0).slice(0, 10);
+  const win = t.momentum?.window?.find((m) => m.group === "all");
+  const snap = t.momentum?.snapshots;
+  const snapAll = snap?.rows?.find((m) => m.group === "all");
+  const sp = t.spread;
+  const cases = t.cases;
+  const unusual = sp?.unusual ?? [];
+  return (
+    <Section
+      title="Steam market trends"
+      hint={`Daily Steam Community Market prices (average sales) for ${t.items != null ? num(t.items, 0) : "n/a"} items, ${t.liquid != null ? num(t.liquid, 0) : "n/a"} liquid. ${t.source ?? ""} Updated ${t.date ?? "n/a"}.`}
+    >
+      {t.headline && <p className="text-[13px] leading-relaxed text-muted">{t.headline}</p>}
+      <div className="mt-2 divide-y divide-line">
+        <Row
+          label="Momentum or reversion"
+          value={snapAll?.ic != null ? num(snapAll.ic, 3) : win?.ic != null ? num(win.ic, 3) : "n/a"}
+          sub={
+            snapAll
+              ? `From our snapshots over ${plural(snapAll.days ?? 0, "day")}: ${leanWords(snapAll.lean)}.`
+              : `One snapshot of the averages (30 days against 90, then a day against the week): ${leanWords(win?.lean)}. Our own test needs ${snap?.waiting_days ?? "more"} more days.`
+          }
+          help="Rank correlation of an earlier move with the next one across liquid items. Above zero leans momentum, below leans mean reversion."
+        />
+        <Row
+          label="Steam against Skinport"
+          value={sp?.median_premium != null ? frac(sp.median_premium, 0) : "n/a"}
+          sub={
+            sp?.items
+              ? `Median Steam premium. After fees, Skinport to Steam nets ${frac(sp.median_to_steam, 0)} in wallet funds (Steam keeps about 13 % and the money cannot be withdrawn); Steam to Skinport nets ${frac(sp.median_to_skinport, 0)} in cash (8 % fee).`
+              : "No item with both prices today."
+          }
+        />
+        <Row
+          label="Cases"
+          value={cases?.median7d != null ? frac(cases.median7d) : "n/a"}
+          sub={[
+            `median 7 days, 30 days ${frac(cases?.median30d)}`,
+            cases?.new?.length ? `new: ${cases.new.map((c) => c.name).join(", ")}` : null,
+            cases?.lastDrop ? `last drop ${cases.lastDrop.items.join(", ")} on ${cases.lastDrop.date} (${cases.lastDrop.kind})${cases.lastDrop.other_cases_since != null ? `, other cases ${frac(cases.lastDrop.other_cases_since)} since` : ""}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        />
+      </div>
+
+      {movers.length > 0 && (
+        <>
+          <h3 className="mt-4 text-[13px] font-semibold text-muted">Top movers · {t.movers?.basis ?? ""}</h3>
+          <List>
+            {movers.map((m) => (
+              <TrendRow key={`m-${m.name}`} it={m} value={m.move} sub={m.chg_30d != null ? `30 d ${frac(m.chg_30d)}` : undefined} />
+            ))}
+          </List>
+        </>
+      )}
+
+      {(cases?.rising?.length ?? 0) > 0 && (
+        <>
+          <h3 className="mt-4 text-[13px] font-semibold text-muted">Cases up 15 % or more in 7 days</h3>
+          <List>
+            {cases!.rising!.slice(0, 5).map((c) => (
+              <TrendRow key={`c-${c.name}`} it={c} value={c.chg_7d} sub="7 days" />
+            ))}
+          </List>
+        </>
+      )}
+
+      {unusual.length > 0 && (
+        <More title={`Unusual spreads (${unusual.length})`}>
+          <List>
+            {unusual.slice(0, 10).map((u) => (
+              <TrendRow
+                key={`u-${u.name}`}
+                it={u}
+                value={u.why === "cash" ? u.to_skinport : u.steam_premium}
+                sub={u.why === "cash" ? "Steam to Skinport, cash, after fees" : `Steam premium; wallet route ${frac(u.to_steam, 0)}`}
+              />
+            ))}
+          </List>
+        </More>
+      )}
+
+      {groups.length > 0 && (
+        <More title="By group">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[420px] text-[13px]">
+              <thead>
+                <tr className="text-left text-muted">
+                  <th className="py-1.5 font-semibold">Group</th>
+                  <th className="py-1.5 text-right font-semibold">Liquid</th>
+                  <th className="py-1.5 text-right font-semibold">7 d</th>
+                  <th className="py-1.5 text-right font-semibold">30 d</th>
+                  <th className="py-1.5 text-right font-semibold">Steam vs Skinport</th>
+                </tr>
+              </thead>
+              <tbody className="tabular">
+                {groups.map((g) => (
+                  <tr key={g.group} className="border-t border-line">
+                    <td className="py-1.5 text-ink">{g.group}</td>
+                    <td className="py-1.5 text-right">{num(g.liquid, 0)}</td>
+                    <td className={`py-1.5 text-right ${TONE_TEXT[changeTone(g.median_7d)]}`}>{frac(g.median_7d)}</td>
+                    <td className={`py-1.5 text-right ${TONE_TEXT[changeTone(g.median_30d)]}`}>{frac(g.median_30d)}</td>
+                    <td className="py-1.5 text-right">{frac(g.steam_premium, 0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-[13px] text-muted">
+            Changes: 7 days {t.basis?.chg_7d ?? "n/a"}; 30 days {t.basis?.chg_30d ?? "n/a"}. Liquid means 1 € or more and 10 or more Skinport sales in 7 days; this Steam feed has no volume.
+          </p>
+        </More>
+      )}
+      <p className="mt-3 text-[13px] text-faint">Information only. Pythia never buys or sells; open a listing and decide by hand.</p>
+    </Section>
   );
 }
 
@@ -195,6 +355,8 @@ export function Cs2() {
             The 7-day change is against the {b.change7Basis}. Updated {b.generated}. Paper only: automated
             buying or selling on Steam or a skin marketplace breaks their terms, and Pythia never does it.
           </Notice>
+
+          {b.steamTrends && b.steamTrends.date && <SteamTrends t={b.steamTrends} />}
 
           {b.alerts.length > 0 && (
             <Section title="Worth a look by hand" hint="Recent alerts. Gaps are after both venues' fees; Steam pays in wallet funds, not cash.">

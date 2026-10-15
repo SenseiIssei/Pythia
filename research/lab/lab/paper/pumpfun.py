@@ -105,6 +105,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..data import ROOT
+from ..ops import i18n as _i18n
 
 NAME = "pumpfun"
 GT = "https://api.geckoterminal.com/api/v2"
@@ -138,8 +139,7 @@ RULES: dict[str, dict] = {
                        "label": "the filtered entry; +100 %, 6 h or 25 % trailing stop"},
 }
 MIN_HOLDERS, MAX_TOP10 = 300, 30.0
-CAVEAT = ("Paper only: no wallet, no key, no transaction. Most pump.fun tokens go to zero; these books measure "
-          "how fast and how often, they are not a strategy.")
+CAVEAT = _i18n.t("pf_caveat", "en")       # the report's (English) caveat; posts take it in their language
 
 Fetch = Callable[[str], object]
 
@@ -380,8 +380,11 @@ def value_now(p: dict, price: float | None, liq: float | None) -> float:
     return max(0.0, amm_sell(p["tokens"], liq / 2, price) - tx_cost_usd(p.get("sol_usd")))
 
 
-def close(st: dict, p: dict, now: int, usd: float, reason: str, ledger: list) -> None:
-    p.update(open=False, exit={"ts_ms": now, "usd": usd, "reason": reason,
+def close(st: dict, p: dict, now: int, usd: float, reason: str, ledger: list, code: str = "",
+          arg: dict | None = None) -> None:
+    """Close a paper position. `reason` is the English record; `code` and `arg` let a
+    message say it in the owner's language (reason_text)."""
+    p.update(open=False, exit={"ts_ms": now, "usd": usd, "reason": reason, "code": code, "arg": arg or {},
                                "ret": usd / p["stake"] - 1, "hours": (now - p["entry_ms"]) / HOUR_MS})
     p["value"] = usd
     st["books"][p["rule"]]["cash"] += usd
@@ -403,28 +406,45 @@ def mark_and_exit(st: dict, marks: dict[str, dict], now: int, ledger: list) -> l
             p["gone"] += 1
             p["gone_since"] = p["gone_since"] or now
             if p["gone"] >= GONE_RUNS and now - p["gone_since"] >= HOUR_MS:
-                close(st, p, now, 0.0, "rug: no pool left", ledger)
+                close(st, p, now, 0.0, "rug: no pool left", ledger, "rug_gone")
                 closed.append(p)
             continue
         p["gone"], p["gone_since"] = 0, None
         p["last_price"], p["last_liq"] = price, liq
         if liq is not None and liq < RUG_LIQ_USD:
-            close(st, p, now, 0.0, f"rug: liquidity ${liq:,.0f}", ledger)
+            close(st, p, now, 0.0, f"rug: liquidity ${liq:,.0f}", ledger, "rug_liq", {"liq": liq})
             closed.append(p)
             continue
         p["peak"] = max(p["peak"], price)
         p["value"] = value_now(p, price, liq)
-        reason = None
+        why = None
         if r["take"] is not None and price >= p["entry_price"] * (1 + r["take"]):
-            reason = f"take profit +{r['take'] * 100:.0f} %"
+            why = (f"take profit +{r['take'] * 100:.0f} %", "take", {"f": r["take"]})
         elif price <= p["peak"] * (1 - r["trail"]):
-            reason = f"trailing stop {r['trail'] * 100:.0f} %"
+            why = (f"trailing stop {r['trail'] * 100:.0f} %", "trail", {"f": r["trail"]})
         elif now - p["entry_ms"] >= r["hold_h"] * HOUR_MS:
-            reason = f"time {r['hold_h']} h"
-        if reason:
-            close(st, p, now, p["value"], reason, ledger)
+            why = (f"time {r['hold_h']} h", "time", {"h": r["hold_h"]})
+        if why:
+            close(st, p, now, p["value"], why[0], ledger, why[1], why[2])
             closed.append(p)
     return closed
+
+
+def reason_text(e: dict, lang: str = "en") -> str:
+    """Why a position closed, in the message language (the English record when unknown)."""
+    from ..ops import i18n
+    code, a = e.get("code") or "", e.get("arg") or {}
+    if code == "take":
+        return i18n.t("pf_take", lang, pct=i18n.frac_pct(a["f"], 0, lang))
+    if code == "trail":
+        return i18n.t("pf_trail", lang, pct=i18n.frac_pct(a["f"], 0, lang, sign=False))
+    if code == "time":
+        return i18n.t("pf_time", lang, h=a["h"])
+    if code == "rug_liq":
+        return i18n.t("pf_rug_liq", lang, usd=i18n.money(a["liq"], 0, lang))
+    if code == "rug_gone":
+        return i18n.t("pf_rug_gone", lang)
+    return e.get("reason", "")
 
 
 def equity(st: dict, rule: str) -> float:
@@ -570,25 +590,31 @@ def pct(x: float) -> str:
     return f"{x * 100:+.0f} %"
 
 
-def alert_cards(closed: list[dict], st: dict, now: int) -> list:
-    """Big paper winners at once; big losers (rugs too) together, at most once an hour."""
-    from ..ops import notify
+def alert_cards(closed: list[dict], st: dict, now: int, lang: str = "en") -> list:
+    """Big paper winners at once; big losers (rugs too) together, at most once an hour.
+    Every word from the message catalog (lab.ops.i18n), English or German."""
+    from ..ops import i18n, notify
+    t = i18n.t
     cards = []
     for p in closed:
         e = p["exit"]
         if e["ret"] >= WIN_ALERT:
-            cards.append(notify.Card("🚀", f"pump.fun paper winner {p.get('name') or p['mint'][:8]} {pct(e['ret'])}",
-                                     f"Rule {p['rule']}: ${p['stake']:.0f} became ${e['usd']:.0f} in {e['hours']:.1f} h "
-                                     f"({e['reason']}).", [notify.Line(CAVEAT)], footer="Paper only"))
+            cards.append(notify.Card(
+                "🚀", t("pf_winner_title", lang, name=p.get("name") or p["mint"][:8],
+                        ret=i18n.frac_pct(e["ret"], 0, lang)),
+                t("pf_winner_summary", lang, rule=p["rule"], stake=i18n.money(p["stake"], 0, lang),
+                  usd=i18n.money(e["usd"], 0, lang), hours=i18n.num(e["hours"], 1, lang), why=reason_text(e, lang)),
+                [notify.Line(t("pf_caveat", lang))], footer=t("pf_footer", lang)))
     losers = [p for p in closed if p["exit"]["ret"] <= LOSS_ALERT]
     if losers and now - st.get("last_loss_alert_ms", 0) >= HOUR_MS:
         st["last_loss_alert_ms"] = now
-        rows = [[(p.get("name") or p["mint"][:8])[:18], p["rule"], pct(p["exit"]["ret"]), p["exit"]["reason"][:22]]
-                for p in losers[:10]]
-        cards.append(notify.Card("🪦", f"pump.fun paper losers: {len(losers)}",
-                                 "Positions closed at -80 % or worse this run; a rug is a total loss.",
-                                 [notify.Table(["Token", "Rule", "Return", "Why"], rows, more=max(0, len(losers) - 10)),
-                                  notify.Line(CAVEAT)], footer="Paper only"))
+        rows = [[(p.get("name") or p["mint"][:8])[:18], p["rule"], i18n.frac_pct(p["exit"]["ret"], 0, lang),
+                 reason_text(p["exit"], lang)[:24]] for p in losers[:10]]
+        cards.append(notify.Card(
+            "🪦", t("pf_losers_title", lang, n=len(losers)), t("pf_losers_summary", lang),
+            [notify.Table([t("pf_col_token", lang), t("pf_col_rule", lang), t("pf_col_return", lang),
+                           t("pf_col_why", lang)], rows, more=max(0, len(losers) - 10)),
+             notify.Line(t("pf_caveat", lang))], footer=t("pf_footer", lang)))
     return cards
 
 
@@ -663,11 +689,24 @@ def report(st: dict, now: int) -> tuple[dict, str]:
     return data, "\n".join(md) + "\n"
 
 
-def report_card(data: dict):
-    from ..ops import notify
-    rows = [[i["label"].replace("pump.fun ", ""), i["value"]] for i in data["items"] if i["label"].startswith("pump.fun ")]
-    return notify.Card("🎰", "pump.fun paper books", data["headline"], [notify.Table(["Rule", "Book"], rows),
-                                                                         notify.Line(CAVEAT)], footer="Paper only")
+def report_card(data: dict, lang: str = "en"):
+    """The daily card, in the message language (the report itself stays English)."""
+    from ..ops import i18n, notify
+    t = i18n.t
+    s = data["summary"]
+    y = s.get("yesterday") or {}
+    lines = []
+    rows = []
+    for rule, r in s["rules"].items():
+        ret = i18n.signed_pct(r["return_pct"], 1, lang)
+        rows.append([rule, ret])
+        lines.append(t("pf_rule_line", lang, rule=rule, closed=r["closed"], rugs=r["rugs"], ret=ret) if r["closed"]
+                     else t("pf_rule_none", lang, rule=rule))
+    summary = t("pf_report_summary", lang, launches=y.get("launches", 0), grads=y.get("graduations", 0),
+                rules="; ".join(lines) + ".")
+    return notify.Card("🎰", t("pf_report_title", lang), summary,
+                       [notify.Table([t("pf_col_rule", lang), t("pf_col_book", lang)], rows),
+                        notify.Line(t("pf_caveat", lang))], footer=t("pf_footer", lang))
 
 
 # ---------------------------------------------------------------- main
@@ -687,7 +726,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         from .. import report as rep
         rep.write(NAME, md, data)
-        notify.send("trending", [report_card(data)], now=now)
+        notify.send("trending", [report_card(data, notify.alert_lang())], now=now)
         return 0
     res = run(Http(), now, st)
     if a.dry_run:
@@ -712,7 +751,7 @@ def main(argv: list[str] | None = None) -> int:
                 fh.write(json.dumps(c, default=str) + "\n")
     for rule, row in journal_rows(st, now).items():
         write_journal(rule, row)
-    cards = alert_cards(res["closed"], st, now)
+    cards = alert_cards(res["closed"], st, now, notify.alert_lang())
     save_state(st)
     if cards:
         notify.send("trending", cards, now=now)

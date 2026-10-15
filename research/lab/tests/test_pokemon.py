@@ -435,6 +435,129 @@ def test_alerts_post_to_telegram(lake, monkeypatch):
     assert out["sent"] and sent[0][1] == "telegram" and "-30 %" in sent[0][2]
 
 
+# ---------------------------------------------------------------- links and what an alert says per card
+
+def test_links_use_the_api_product_pages_and_fall_back_to_an_encoded_search():
+    from lab.pokemon import links
+    assert links.cardmarket("https://prices.pokemontcg.io/cardmarket/sv3-125", "Charizard ex") == (
+        "https://prices.pokemontcg.io/cardmarket/sv3-125", "product")
+    assert links.tcgplayer("https://prices.pokemontcg.io/tcgplayer/sv3-125", "Charizard ex")[1] == "product"
+    assert links.tcgplayer("https://www.tcgplayer.com/product/717605/x", "Mew ex")[1] == "product"
+    # Missing, foreign host, plain http, wrong path on the API host, junk: a search for the exact name.
+    for bad in (None, "", "https://evil.example/cardmarket/x", "http://prices.pokemontcg.io/cardmarket/x",
+                "https://prices.pokemontcg.io/tcgplayer/x", "https://www.cardmarket.com/a b", 5):
+        url, kind = links.cardmarket(bad, "Professor's Research")
+        assert kind == "search" and url == ("https://www.cardmarket.com/en/Pokemon/Products/Search"
+                                            "?searchString=Professor%27s%20Research")
+    url, _ = links.cardmarket(None, "Pikachu & Zekrom-GX #1?x=<y>")
+    assert url == ("https://www.cardmarket.com/en/Pokemon/Products/Search"
+                   "?searchString=Pikachu%20%26%20Zekrom-GX%20%231%3Fx%3D%3Cy%3E"), "one parameter, nothing leaks"
+    assert links.tcgplayer(None, "Mew ex - 152/128")[0] == (
+        "https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&q=Mew%20ex&view=grid")
+    assert links.cardmarket(None, "  ")[0] is None and links.cardmarket(None, None) == (None, "none")
+    assert links.search_name("Mew - R/RGB") == "Mew" and links.search_name("Gengar (Prime)") == "Gengar (Prime)"
+    assert links.search_name("Porygon-Z") == "Porygon-Z" and links.search_name("Ho-Oh ex - 230") == "Ho-Oh ex"
+    lk = links.for_card({"name": "Lugia", "url": "https://www.tcgplayer.com/product/714386/lugia"})
+    assert lk["tcgplayerKind"] == "product" and lk["cardmarketKind"] == "search"
+
+
+def _row(**kw):
+    r = {"date": "2026-10-15", "card_id": "sv3-125", "name": "Charizard ex", "set_name": "Obsidian Flames",
+         "number": "125", "rarity": "Special Illustration Rare", "tp_variant": "holofoil", "price": 120.5,
+         "price_src": "tcgplayer", "tp_updated": "2026-10-15", "cm_trend": 98.0, "cm_avg_sell": 95.1,
+         "cm_updated": "2026-07-01", "cm_fresh": False, "fv_log": math.log(180.0), "fv_gap": math.log(180 / 120.5),
+         "pred_30d": 0.03, "pred_90d": 0.08, "ret_1d": math.log(1.25), "ret_7d": None, "ret_30d": None,
+         "tp_url": "https://prices.pokemontcg.io/tcgplayer/sv3-125", "cm_url": None,
+         "image_small": "https://images.pokemontcg.io/sv3/125.png", "set_age_days": 400, "cm_mom_1_7": None}
+    r.update(kw)
+    return r
+
+
+def test_card_detail_has_everything_a_buyer_needs():
+    d = alerts.detail(_row(), "2026-10-15", {"30": {"validated": False}, "90": {"validated": False}})
+    assert d["eur_stale"] and d["eur_age_days"] == 106 and d["condition"] == "ungraded, holofoil printing"
+    assert round(d["fair"], 2) == 180.0 and round(d["gap"], 3) == round(180 / 120.5 - 1, 3) and d["trust"] == "low"
+    assert d["cardmarketKind"] == "search" and d["tcgplayerKind"] == "product"
+    text = notify_text(alerts.card_parts(1, d))
+    for want in ("1. Charizard ex", "Obsidian Flames #125", "Special Illustration Rare", "ungraded, holofoil printing",
+                 "Now $120.50 (TCGplayer market, 2026-10-15)", "Cardmarket €98.00 trend, €95.10 avg sell",
+                 "2026-07-01, ⚠️ 106 days old, stale", "Fair $180.00 (+49 % vs price)", "30 d +3 %", "90 d +8 %",
+                 "trust: low", "Change 1 d +25 %", "Cardmarket search https://www.cardmarket.com/en/Pokemon/",
+                 "TCGplayer https://prices.pokemontcg.io/tcgplayer/sv3-125"):
+        assert want in text, want
+    fresh = alerts.detail(_row(cm_updated="2026-10-10"), "2026-10-15")
+    assert not fresh["eur_stale"] and "stale" not in alerts.price_line(fresh)
+    none = alerts.detail(_row(cm_trend=None), "2026-10-15")
+    assert "no Cardmarket price" in alerts.price_line(none)
+    tested = alerts.detail(_row(), "2026-10-15", {"30": {"validated": True, "mean_rank_ic": 0.08, "test_months": 6},
+                                                  "90": {"validated": True, "mean_rank_ic": 0.05, "test_months": 4}})
+    assert tested["trust"] == "tested" and "rank IC 0.08 over 6 months" in tested["trust_words"]
+    m = {"move": 0.25, "basis_key": "last"}
+    assert alerts.change_line(d, m) == "Moved +25 % since the last snapshot", "the 1-day change is not said twice"
+    de = notify_text(alerts.card_parts(1, d, m, "de"))
+    for want in ("ungradiert, Druck holofoil", "Jetzt 120,50 $ (TCGplayer-Marktpreis, Do 15. Okt)",
+                 "Cardmarket 98,00 € Trend, 95,10 € Durchschnittsverkauf", "⚠️ 106 Tage alt, veraltet",
+                 "Fairer Wert 180,00 $ (+49 % ggü. Preis)", "Prognose 30 T +3 %, 90 T +8 %", "Vertrauen: niedrig",
+                 "Bewegt +25 % seit dem letzten Stand", "Cardmarket-Suche https://www.cardmarket.com/"):
+        assert want in de, want
+
+
+def notify_text(parts) -> str:
+    from lab.ops import notify
+    return notify.plain(notify.Card("x", "T", parts=parts).render("telegram"))
+
+
+def test_an_alert_is_top_five_with_pictures_links_and_fits_telegram(lake, monkeypatch):
+    from lab.ops import notify
+    sent = []
+    monkeypatch.setattr(alerts.notify, "send", lambda cat, cards, photos=None, dry_run=False, **k: (
+        sent.append((cat, cards, photos)), {"delivered": True, "reason": None, "error": None})[1])
+    rows = [_row(card_id=f"c{i}", name=f"Card {i}", price=50.0 + i, ret_1d=math.log(1.3 + i / 100),
+                 image_small=f"https://images.pokemontcg.io/x/{i}.png") for i in range(8)]
+    snap = pl.DataFrame(rows, infer_schema_length=None)
+    out = alerts.run(snap, lake, "2026-10-15", validated=False)
+    assert len(out["moves"]) == 5 and out["sent"]
+    cat, cards, photos = sent[0]
+    assert cat == "pokemon" and len(photos) == 5 and photos[0][0] == "https://images.pokemontcg.io/x/7.png"
+    assert "1. Card 7" in photos[0][1] and "$57.00" in photos[0][1]
+    html = notify.render_post(cards, "telegram")
+    assert html == "\n\n".join(c.render("telegram") for c in cards), "five cards fit one message whole"
+    assert html.count('<a href="') == 10 and len(html) < notify.LIMITS["telegram"]
+    assert "Information only" in html and "—" not in html
+    assert "_row" not in json.dumps(out, default=str)
+
+
+def test_new_sets_are_noted_once_with_their_dearest_singles(lake, monkeypatch):
+    sent = []
+    monkeypatch.setattr(alerts.notify, "send", lambda cat, cards, photos=None, dry_run=False, **k: (
+        sent.append((cards, photos)), {"delivered": False, "reason": "no destination", "error": None})[1])
+    def single(day, pid, gid, gname, pub, market, main=True):
+        return {"date": day, "product_id": pid, "group_id": gid, "group_name": gname, "published_on": pub,
+                "main_set": main, "name": f"Mew ex - {pid}/128", "number": f"{pid}/128", "rarity": "SIR",
+                "image_url": f"https://tcgplayer-cdn.tcgplayer.com/product/{pid}_200w.jpg",
+                "url": f"https://www.tcgplayer.com/product/{pid}/x", "sub_type": "Holofoil", "low": 1.0,
+                "mid": 1.0, "market": market}
+    rows = [single("2026-10-15", p, 1, "ME: New", "2026-10-01", 10.0 + p) for p in range(12)]
+    rows += [single("2026-10-14", 11, 1, "ME: New", "2026-10-01", 20.0)]
+    rows += [single("2026-10-15", 100 + p, 2, "SV: Old", "2025-01-01", 50.0) for p in range(12)]
+    rows += [single("2026-10-15", 200 + p, 3, "Promos", "2026-10-10", 50.0, main=False) for p in range(12)]
+    singles = pl.DataFrame(rows)
+    snap = pl.DataFrame({"card_id": ["a"], "name": ["A"], "set_name": ["S"], "price": [5.0], "ret_1d": [None],
+                         "ret_7d": [None], "cm_trend": [None], "cm_mom_1_7": [None], "fv_log": [0.0], "fv_gap": [0.0],
+                         "set_age_days": [10], "pred_90d": [0.0]},
+                        schema_overrides={"ret_1d": pl.Float64, "ret_7d": pl.Float64, "cm_trend": pl.Float64,
+                                          "cm_mom_1_7": pl.Float64})
+    out = alerts.run(snap, lake, "2026-10-15", validated=False, singles=singles)
+    assert [s["set"] for s in out["newSets"]] == ["ME: New"]
+    cards, photos = sent[0]
+    text = notify_text(cards[0].parts)
+    assert "1. Mew ex (ME: New #11/128" in text and "+5 %" in text, "the dearest first, with its change"
+    assert "searchString=Mew%20ex" in text and "https://www.tcgplayer.com/product/11/x" in text
+    assert "no fair value or forecast" in text.lower() and len(photos) == 5
+    again = alerts.run(snap, lake, "2026-10-16", validated=False, singles=singles)
+    assert again["newSets"] == [], "a set is noted once"
+
+
 # ---------------------------------------------------------------- the daily job
 
 def test_daily_job_writes_ui_report_collection_and_monthly(lake):

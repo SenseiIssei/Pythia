@@ -19,6 +19,7 @@ import { Card, Badge, Button, Field, Notice, inputCls } from "../components/ui";
 import { Page, Segmented } from "../design";
 import { setThemePref, useThemePref, type ThemePref } from "../design/theme";
 import { ComfortZone } from "../components/ComfortZone";
+import { AiBudgetCard } from "../components/AiBudgetCard";
 import { ConfirmButton } from "../components/Confirm";
 import { isTauri } from "../engine";
 import { setUiMode, useAdvanced, type UiMode } from "../uiMode";
@@ -144,6 +145,8 @@ export function Settings() {
         <ExchangesCard native={native} onChanged={refresh} />
 
         <AiProvidersCard />
+
+        <AiBudgetCard />
 
         {native && <PreferencesCard />}
 
@@ -620,7 +623,7 @@ function PreferencesCard() {
           <input
             value={prefs.aiModel}
             onChange={(e) => set("aiModel", e.target.value)}
-            placeholder="claude-opus-5"
+            placeholder="claude-haiku-5-5"
             className={inputCls}
           />
         </Field>

@@ -67,6 +67,10 @@ pub struct LabStatus {
     /// New coin listings the watcher saw (`reports/listings/latest.json`),
     /// shown on the Markets page. `None` until `lab.ops.listings` has run.
     pub listings: Option<ListingsFeed>,
+    /// The real money readiness check (`reports/readiness/latest.json`,
+    /// `lab.ops.readiness`): every autopilot against the pre-registered rule
+    /// of docs/LIVE-READINESS.md. As written; `None` until the check has run.
+    pub readiness: Option<Value>,
 }
 
 // ── new listings ────────────────────────────────────────────────────────────
@@ -788,6 +792,9 @@ pub fn status() -> LabStatus {
     out.learn = read_learn(&root);
     out.jobs = read_jobs(&root);
     out.listings = read_listings(&root);
+    out.readiness = std::fs::read_to_string(root.join("reports").join("readiness").join("latest.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));
@@ -814,6 +821,39 @@ pub use pythia_ml::zoo::ZooStatus;
 
 pub fn model_zoo() -> Option<ZooStatus> {
     read_zoo(&data_dir()?)
+}
+
+/// The lab's AI reports for the Models page, read only: the daily brief
+/// (`reports/ai_brief/latest.json`), the scores of every brief prediction
+/// against a base rate and the lab's own rule (`reports/ai/scores.json`) and
+/// the weekly review (`reports/ai/weekly.md`). Each part is `null` until its
+/// job has run.
+pub fn ai_report() -> Value {
+    match data_dir() {
+        Some(d) => read_ai_report(&d),
+        None => serde_json::json!({ "brief": null, "scores": null, "weekly": null }),
+    }
+}
+
+fn read_ai_report(root: &Path) -> Value {
+    let rep = root.join("reports");
+    let json = |p: PathBuf| std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let weekly = {
+        let p = rep.join("ai").join("weekly.md");
+        std::fs::read_to_string(&p).ok().map(|md| {
+            let ms = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+            serde_json::json!({ "markdown": md.chars().take(40_000).collect::<String>(), "updatedMs": ms })
+        })
+    };
+    serde_json::json!({
+        "brief": json(rep.join("ai_brief").join("latest.json")),
+        "scores": json(rep.join("ai").join("scores.json")),
+        "weekly": weekly,
+    })
 }
 
 fn read_zoo(root: &Path) -> Option<pythia_ml::zoo::ZooStatus> {
@@ -916,6 +956,8 @@ pub struct Cs2Board {
     pub alerts: Vec<Cs2Alert>,
     /// The daily research summary (verdict, spread, momentum, bootstrap scores), as the lab wrote it.
     pub research: Option<Value>,
+    /// The daily Steam market trends (`lab.cs2.trends`: movers, groups, momentum, spreads, cases), as the lab wrote them.
+    pub steam_trends: Option<Value>,
     pub items: Vec<Cs2Item>,
 }
 
@@ -951,6 +993,7 @@ pub fn parse_cs2(text: &str) -> Option<Cs2Board> {
         portfolio: v.get("portfolio").and_then(|p| serde_json::from_value(p.clone()).ok()),
         alerts: rows(&v, "alerts"),
         research: v.get("research").filter(|r| r.is_object()).cloned(),
+        steam_trends: v.get("steamTrends").filter(|r| r.is_object()).cloned(),
         items: if feed { rows(&v, "rows") } else { rows(&v, "items") },
     })
 }
@@ -966,6 +1009,25 @@ pub fn cs2_board() -> Option<Cs2Board> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_ai_brief_its_scores_and_the_weekly_review() {
+        let dir = std::env::temp_dir().join(format!("pythia-labview-ai-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let empty = read_ai_report(&dir);
+        assert!(empty["brief"].is_null() && empty["scores"].is_null() && empty["weekly"].is_null());
+        std::fs::create_dir_all(dir.join("reports/ai_brief")).unwrap();
+        std::fs::create_dir_all(dir.join("reports/ai")).unwrap();
+        std::fs::write(dir.join("reports/ai_brief/latest.json"), r#"{"date":"2026-10-15","summary":["a","b","c"]}"#).unwrap();
+        std::fs::write(dir.join("reports/ai/scores.json"), r#"{"resolved":0,"verdict":"Too early"}"#).unwrap();
+        std::fs::write(dir.join("reports/ai/weekly.md"), "# Weekly AI review\n").unwrap();
+        let v = read_ai_report(&dir);
+        assert_eq!(v["brief"]["date"], "2026-10-15");
+        assert_eq!(v["scores"]["verdict"], "Too early");
+        assert!(v["weekly"]["markdown"].as_str().unwrap().starts_with("# Weekly AI review"));
+        assert!(v["weekly"]["updatedMs"].as_i64().unwrap() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reads_the_model_zoo_and_names_it_in_the_report_list() {
@@ -1019,6 +1081,7 @@ mod tests {
             "items":[{"label":"Gap item","value":"+6.0 %","status":"watch","importance":68}],
             "generated":"2026-10-15 12:05 UTC","generatedMs":5,"boardStatus":"ok","verdict":"v","historyDays":1,
             "research":{"verdict":"Too early","historyDays":1},
+            "steamTrends":{"date":"2026-10-15","movers":{"up":[{"name":"AWP | Black Box (Field-Tested)","move":0.41}]}},
             "rows":[{"name":"Recoil Case","category":"case","price":0.3,"signal":"hold","sales7d":900,"listed":5000}]}"#;
         let b = parse_cs2(text).unwrap();
         assert_eq!(b.status, "ok");
@@ -1027,6 +1090,8 @@ mod tests {
         assert_eq!(b.items.len(), 1, "the board's rows, not the feed's items");
         assert_eq!(b.items[0].name, "Recoil Case");
         assert_eq!(b.research.as_ref().unwrap()["verdict"], "Too early");
+        assert_eq!(b.steam_trends.as_ref().unwrap()["movers"]["up"][0]["move"], 0.41);
+        assert_eq!(serde_json::to_value(&b).unwrap()["steamTrends"]["date"], "2026-10-15");
         let f = parse_feed("cs2", text, 0).unwrap();
         assert_eq!(f.items.len(), 1);
         assert_eq!(f.items[0].label, "Gap item");
