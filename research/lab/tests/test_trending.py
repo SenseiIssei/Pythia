@@ -9,6 +9,7 @@ import json
 import urllib.error
 from datetime import datetime, timezone
 
+import polars as pl
 import pytest
 
 from lab.ops import trending as tr
@@ -113,23 +114,41 @@ def test_run_alerts_once_per_coin_and_stores(world, data):
     assert snap["alpaca"]["BONK"]["qv_ratio"] == pytest.approx(4.5)
     assert "DOGE" not in [a["coin"] for a in snap["alerts_sent"]]
     alert = posted[0]
-    assert "BONK on Alpaca" in alert and "Watch only" in alert and "—" not in alert
+    assert "BONK on Alpaca" in alert and "Watch only" in alert and chr(0x2014) not in alert
     # 09:00 UTC: the daily digest goes out on the first run, labelled high risk.
     assert snap["digest"]["delivered"]
     digest = posted[1]
     assert "HIGH RISK" in digest and "ALP (solana)" in digest and "honeypot" in digest
     assert len(digest) <= 1800
-    # Stored.
-    lines = (data / "trending" / "2026-10-15.jsonl").read_text().splitlines()
-    assert len(lines) == 1 and json.loads(lines[0])["alpaca"]["BONK"]
-    assert (data / "reports" / "trending" / "latest.json").exists()
-    # 15 minutes later: no second alert, no second digest.
+    # Stored in the data lake as parquet, one file per run.
+    files = sorted((data / "trending" / "snapshots" / "date=2026-10-15").glob("*.parquet"))
+    assert [f.name for f in files] == ["090000.parquet"]
+    df = pl.read_parquet(files[0])
+    assert set(df["kind"]) == {"alpaca", "gainer", "dex"}
+    bonk = df.filter((pl.col("kind") == "alpaca") & (pl.col("name") == "BONK")).row(0, named=True)
+    assert bonk["strong"] and bonk["qv_ratio"] == pytest.approx(4.5) and bonk["ts_ms"] == NOW
+    alp = df.filter(pl.col("name") == "ALP").row(0, named=True)
+    assert "honeypot" in alp["flags"] and alp["chain"] == "solana"
+    # The report header.
+    rep = json.loads((data / "reports" / "trending" / "latest.json").read_text())
+    assert rep["title"] == "Trending watcher" and rep["updatedMs"] == NOW and rep["status"] == "ok"
+    assert rep["headline"].startswith("Surge on Alpaca: BONK 4.5x +25%")
+    assert "high risk" in rep["headline"] and "HIGH RISK" in rep["caveat"]
+    assert rep["items"][0]["name"] == "BONK" and any(i["kind"] == "dex" and i["risk"] == "high" for i in rep["items"])
+    # 15 minutes later: no second alert, no second digest, and the medians come from the state.
     posted.clear()
-    snap2 = tr.run(fake(world), now=NOW + 15 * 60_000, poster=poster)
+    get2 = fake(world)
+    snap2 = tr.run(get2, now=NOW + 15 * 60_000, poster=poster)
     assert snap2["alerts_sent"] == [] and "digest" not in snap2 and posted == []
-    # A day later it may alert again.
-    snap3 = tr.run(fake(world), now=NOW + 21 * 3_600_000, poster=poster)
+    assert not any("klines" in u for u in get2.calls)
+    assert len(list((data / "trending" / "snapshots" / "date=2026-10-15").glob("*.parquet"))) == 2
+    # A day later it may alert again (with fresh medians for the new day).
+    get3 = fake(world)
+    snap3 = tr.run(get3, now=NOW + 21 * 3_600_000, poster=poster)
     assert [a["coin"] for a in snap3["alerts_sent"]] == ["BONK"]
+    assert any("klines" in u for u in get3.calls)
+    both = pl.read_parquet(data / "trending" / "snapshots" / "**" / "*.parquet", hive_partitioning=True)
+    assert both["date"].n_unique() == 2
 
 
 def test_no_digest_before_the_hour(world, data):
@@ -147,6 +166,42 @@ def test_dry_run_writes_nothing(world, data):
 def test_sources_down_is_reported_not_raised(data):
     snap = tr.run(fake({}), now=NOW, poster=lambda t: (True, None))
     assert snap["errors"] and snap["alpaca"] == {} and snap["dex"] == []
+    rep = json.loads((data / "reports" / "trending" / "latest.json").read_text())
+    assert rep["status"] == "error" and rep["items"] == [] and rep["headline"].startswith("No source answered")
+    files = list((data / "trending" / "snapshots").rglob("*.parquet"))
+    assert len(files) == 1 and pl.read_parquet(files[0]).height == 0
+
+
+def test_search_fallbacks_are_capped(data):
+    toks = [{"chainId": "base", "tokenAddress": f"T{i}"} for i in range(12)]
+    get = fake({"/token-boosts/top/v1": toks, "/token-profiles/latest/v1": [], "/tokens/v1/base/": [],
+                "/latest/dex/search": {"pairs": []}})
+    rows = tr.dex_enrich(get, tr.dex_tokens(get), NOW)
+    assert len(rows) == 12 and all(r["flags"] == ["no pair found"] for r in rows)
+    assert sum("/latest/dex/search" in u for u in get.calls) == tr.MAX_SEARCH
+
+
+def test_rate_limited_host_is_not_called_again(monkeypatch):
+    calls = []
+
+    def boom(req, timeout):
+        calls.append(req.full_url)
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+    monkeypatch.setattr(tr.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(tr, "MIN_GAP_S", 0.0)
+    monkeypatch.setattr(tr, "_blocked", set())
+    with pytest.raises(tr.RateLimited):
+        tr.http_json("https://api.dexscreener.com/token-boosts/top/v1")
+    with pytest.raises(tr.RateLimited):
+        tr.http_json("https://api.dexscreener.com/token-profiles/latest/v1")
+    assert len(calls) == 1
+    # The watcher treats it like any other failed source.
+    assert tr.dex_tokens(tr.http_json) == []
+    assert len(calls) == 1
+
+
+def test_alpaca_list_is_the_full_one():
+    assert len(tr.ALPACA_COINS) == 32 and {"HYPE", "ONDO", "SKY", "POL", "RENDER", "WIF"} <= set(tr.ALPACA_COINS)
 
 
 def test_market_surges_need_a_week_of_history():
