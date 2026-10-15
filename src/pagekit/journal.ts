@@ -1,7 +1,7 @@
 // What each kind of journal line means, in words, and the counts the Journal
 // and Dashboard show on top.
 
-import type { ChipTone } from "../design/flows";
+import type { ChipTone } from "../design";
 import type { JournalEntry, JournalKind } from "../types";
 
 export interface KindInfo {

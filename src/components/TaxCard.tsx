@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { FileDown } from "lucide-react";
-import { Button, LoadingRows, More, Note, Row, Rows, Section, plural, toneOf, usd } from "../pagekit";
+import { Button, List, Notice, changeTone as toneOf, money as usd } from "../design";
+import { LoadingRows, More, Row, Section, plural } from "../pagekit";
 import { liveMode } from "../live";
 import { serverUrl } from "../engine/serverEngine";
 
@@ -65,16 +66,16 @@ export function TaxCard() {
             CoinTracking CSV
           </Button>
         ) : (
-          <a className="fl-btn fl-btn-secondary fl-focus" href={`${serverUrl()}/api/tax?format=cointracking`}>
+          <a className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-full bg-surface-2 px-5 text-[15px] font-semibold text-ink hover:bg-line" href={`${serverUrl()}/api/tax?format=cointracking`}>
             <FileDown size={16} aria-hidden /> CoinTracking CSV
           </a>
         )
       }
     >
       {!s && !note && <LoadingRows rows={2} label="Reading the record" />}
-      {s && s.fills === 0 && <p className="fl-muted text-[15px]">No real fills yet. Paper trades are never recorded here.</p>}
+      {s && s.fills === 0 && <p className="text-[15px] text-muted">No real fills yet. Paper trades are never recorded here.</p>}
       {s && s.years.length > 0 && (
-        <Rows>
+        <List>
           {s.years.map((y) => (
             <Row
               key={y.year}
@@ -86,25 +87,25 @@ export function TaxCard() {
               help="Gains on lots held up to a year count against the yearly limit; lots held longer are shown under the year."
             />
           ))}
-        </Rows>
+        </List>
       )}
       {s && s.unmatchedSells > 0 && (
         <div className="mt-2">
-          <Note tone="warn">
+          <Notice tone="warning">
             {plural(s.unmatchedSells, "sale")} had no matching purchase in the record (bought before Pythia or elsewhere), so
             their gains are not in this preview. The tax tool needs those purchases too.
-          </Note>
+          </Notice>
         </div>
       )}
       {s && s.damagedLines > 0 && (
         <div className="mt-2">
-          <Note tone="bad">{plural(s.damagedLines, "damaged line")} in the record were skipped.</Note>
+          <Notice tone="danger">{plural(s.damagedLines, "damaged line")} in the record were skipped.</Notice>
         </div>
       )}
-      {note && <p className="fl-muted mt-2 break-words text-sm">{note}</p>}
+      {note && <p className="mt-2 break-words text-sm text-muted">{note}</p>}
       <div className="mt-2">
         <More title="How the preview counts">
-          <p className="fl-muted text-sm leading-relaxed">
+          <p className="text-sm leading-relaxed text-muted">
             The CSV imports into Blockpit, CoinTracking and similar tools, which convert to euros at each trade's rate.
             For crypto in Germany, gains on lots held over a year are tax-free, shorter ones count against the 1,000 EUR
             yearly limit. Dates, years and holding periods use German local time.
