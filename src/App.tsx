@@ -32,6 +32,7 @@ import { Predictions } from "./pages/Predictions";
 import { Models } from "./pages/Models";
 import { Lab } from "./pages/Lab";
 import { Cs2 } from "./pages/Cs2";
+import { Cards } from "./pages/Cards";
 import { Research } from "./pages/Research";
 import { Live } from "./pages/Live";
 import { Risk } from "./pages/Risk";
@@ -61,6 +62,7 @@ const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
   predictions: Predictions,
   models: Models,
   lab: Lab,
+  cards: Cards,
   research: Research,
   live: Live,
   risk: Risk,

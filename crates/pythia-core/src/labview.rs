@@ -515,6 +515,35 @@ fn verdict_of(name: &str, v: &Value) -> String {
     }
 }
 
+// ── Pokemon cards ───────────────────────────────────────────────────────────
+// Written daily by `lab.pokemon.daily` into `<data>/pokemon/ui/latest.json`,
+// already in camelCase: cards with price, change, forecast and fair value, the
+// paper collection (play money) and the model's status. Served as written; the
+// lab owns the shape. Data only: nothing here or there can place an order.
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PokemonView {
+    /// The data folder was found (the lab may still not have written the file).
+    pub found: bool,
+    pub data: Option<Value>,
+}
+
+/// The Cards page's file as the lab wrote it; `None` unless a JSON object with a `cards` array.
+pub fn parse_pokemon(text: &str) -> Option<Value> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    (v.is_object() && v.get("cards").map(Value::is_array).unwrap_or(false)).then_some(v)
+}
+
+fn read_pokemon(root: &Path) -> Option<Value> {
+    parse_pokemon(&std::fs::read_to_string(root.join("pokemon").join("ui").join("latest.json")).ok()?)
+}
+
+pub fn pokemon() -> PokemonView {
+    let Some(root) = data_dir() else { return PokemonView::default() };
+    PokemonView { found: root.exists(), data: read_pokemon(&root) }
+}
+
 // ── generic lab feeds ───────────────────────────────────────────────────────
 // Any lab job can show up in the app by writing `reports/<name>/latest.json`
 // with a small common header (docs/LAB-FEEDS.md):
@@ -1150,6 +1179,27 @@ mod tests {
         std::fs::create_dir_all(dir.join("reports").join("forward")).unwrap();
         std::fs::write(dir.join("reports").join("forward").join("latest.json"), FORWARD).unwrap();
         assert_eq!(read_forward(&dir).map(|f| f.books.len()), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_the_pokemon_view_and_rejects_anything_else() {
+        assert!(parse_pokemon("").is_none());
+        assert!(parse_pokemon("[]").is_none());
+        assert!(parse_pokemon("{\"cards\": 3}").is_none());
+        assert!(parse_pokemon("{\"cards\": [NaN]}").is_none(), "NaN is not JSON; the lab writes null");
+        let text = r#"{"snapshot": "2026-10-15", "cards": [{"id": "sv3pt5-6", "priceUsd": 12.5, "pred90dPct": null}],
+                      "model": {"validated": false}, "collection": {"equity": 1000.0}}"#;
+        let v = parse_pokemon(text).unwrap();
+        assert_eq!(v["cards"][0]["id"], "sv3pt5-6");
+
+        let dir = std::env::temp_dir().join(format!("pythia-labview-pokemon-{}", std::process::id()));
+        assert!(read_pokemon(&dir).is_none(), "nothing collected yet");
+        std::fs::create_dir_all(dir.join("pokemon").join("ui")).unwrap();
+        std::fs::write(dir.join("pokemon").join("ui").join("latest.json"), text).unwrap();
+        assert_eq!(read_pokemon(&dir).map(|v| v["cards"].as_array().map(Vec::len)), Some(Some(1)));
+        let out = serde_json::to_value(PokemonView { found: true, data: read_pokemon(&dir) }).unwrap();
+        assert_eq!(out["data"]["collection"]["equity"], 1000.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

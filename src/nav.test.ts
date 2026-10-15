@@ -3,7 +3,7 @@ import { NAV, activeTab, isVisible, navFor, resolvePage, tabsFor } from "./nav";
 
 describe("navFor", () => {
   it("keeps simple mode to the beginner destinations", () => {
-    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "activity", "notifications", "predictions", "wallets", "settings", "about"]);
+    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "activity", "notifications", "predictions", "wallets", "cards", "settings", "about"]);
   });
 
   it("shows everything in advanced mode", () => {
@@ -36,7 +36,7 @@ describe("isVisible", () => {
   });
 
   it("shows the always-visible pages in both modes", () => {
-    for (const id of ["home", "practice", "autopilot", "activity", "notifications", "predictions", "wallets", "settings", "about"] as const) {
+    for (const id of ["home", "practice", "autopilot", "activity", "notifications", "predictions", "wallets", "cards", "settings", "about"] as const) {
       expect(isVisible(id, "simple")).toBe(true);
       expect(isVisible(id, "advanced")).toBe(true);
     }
