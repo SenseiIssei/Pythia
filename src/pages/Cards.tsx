@@ -27,6 +27,8 @@ import { FilterChips, KeyStats, LoadingRows, More, Nothing, Row, Section, plural
 import { liveMode } from "../live";
 import {
   DAYS_FOR_A_TEST,
+  cardLinks,
+  cardmarketAgeDays,
   cardmarketStale,
   filterCards,
   headlineChange,
@@ -36,6 +38,7 @@ import {
   releaseWords,
   rowFigure,
   sortCards,
+  type CardLink,
   type CardSort,
   type PokemonCard,
   type PokemonData,
@@ -70,21 +73,46 @@ function Figure({ pct, suffix }: { pct: number | null; suffix: string }) {
   return <Change pct={pct} tone={changeTone(pct, 0.05)} size="sm" suffix={suffix} />;
 }
 
-function CardRow({ c, sort, onOpen }: { c: PokemonCard; sort: CardSort; onOpen: () => void }) {
-  const f = rowFigure(c, sort);
+/** Small text links to the card on the markets, opened in a new tab. */
+function MarketLinks({ links, className = "" }: { links: CardLink[]; className?: string }) {
+  if (links.length === 0) return null;
   return (
-    <ListRow
-      leading={<Thumb src={c.image} alt="" />}
-      title={c.name}
-      subtitle={[c.set, c.number ? `#${c.number}` : null, c.rarity].filter(Boolean).join(" · ")}
-      right={usd(c.priceUsd)}
-      rightSub={<Figure pct={f.pct} suffix={f.suffix} />}
-      onClick={onOpen}
-    />
+    <div className={`flex flex-wrap gap-x-4 gap-y-1 text-[13px] ${className}`}>
+      {links.map((l) => (
+        <a
+          key={l.label}
+          href={l.url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex min-h-[28px] items-center gap-1 font-semibold text-accent hover:underline"
+          title={l.search ? "No direct page for this card: a search for its exact name" : undefined}
+        >
+          {l.label} <ExternalLink size={12} aria-hidden />
+        </a>
+      ))}
+    </div>
   );
 }
 
-function Detail({ c, stale }: { c: PokemonCard; stale: boolean }) {
+function CardRow({ c, sort, onOpen }: { c: PokemonCard; sort: CardSort; onOpen: () => void }) {
+  const f = rowFigure(c, sort);
+  return (
+    <div>
+      <ListRow
+        leading={<Thumb src={c.image} alt="" />}
+        title={c.name}
+        subtitle={[c.set, c.number ? `#${c.number}` : null, c.rarity].filter(Boolean).join(" · ")}
+        right={usd(c.priceUsd)}
+        rightSub={<Figure pct={f.pct} suffix={f.suffix} />}
+        onClick={onOpen}
+      />
+      <MarketLinks links={cardLinks(c)} className="-mt-2 pb-2.5 pl-[52px]" />
+    </div>
+  );
+}
+
+function Detail({ c, stale, snapshot }: { c: PokemonCard; stale: boolean; snapshot: string }) {
+  const cmAge = cardmarketAgeDays(c.cardmarketUpdated, snapshot);
   const hist = priceHistory(c);
   const ch = headlineChange(c);
   const [at, setAt] = useState<number | null>(null);
@@ -130,30 +158,36 @@ function Detail({ c, stale }: { c: PokemonCard; stale: boolean }) {
           sub="What cards like this one (rarity, Pokemon, printing, set age, how dear the rest of its set is) cost, from a model that never saw this card. A rough guide, not a promise: for a typical card it is off by a factor of about 1.7 either way."
           value={usd(c.fairUsd)}
         />
+        {c.priceSrc === "tcgplayer" && (
+          <Row
+            label="TCGplayer (US)"
+            sub={`Market price of the ${c.variant ?? "dearest"} printing, ungraded${c.tcgplayerUpdated ? `, as of ${c.tcgplayerUpdated}` : ""}.`}
+            value={usd(c.priceUsd)}
+          />
+        )}
         {c.cardmarketEur != null && (
           <Row
             label="Cardmarket (EU)"
-            sub={cmFresh ? (c.spreadPct != null ? `TCGplayer is ${signedPct(c.spreadPct, 0)} against it in dollars` : undefined) : `Last refreshed ${c.cardmarketUpdated ?? "long ago"}: too old to compare.`}
+            sub={
+              cmFresh
+                ? [c.cardmarketAvgEur != null ? `average sell €${c.cardmarketAvgEur.toFixed(2)}` : null, c.cardmarketUpdated ? `as of ${c.cardmarketUpdated}` : null, c.spreadPct != null ? `TCGplayer is ${signedPct(c.spreadPct, 0)} against it in dollars` : null]
+                    .filter(Boolean)
+                    .join(" · ") || undefined
+                : `Last refreshed ${c.cardmarketUpdated ?? "long ago"}${cmAge != null ? `, ${cmAge} days before this snapshot` : ""}: too old to rely on.`
+            }
             value={`€${c.cardmarketEur.toFixed(2)}`}
             tone={cmFresh ? "plain" : "warn"}
           />
         )}
       </div>
 
-      {(c.tcgplayerUrl || c.cardmarketUrl) && (
-        <div className="flex flex-wrap gap-2">
-          {c.tcgplayerUrl && (
-            <a href={c.tcgplayerUrl} target="_blank" rel="noreferrer" className="inline-flex min-h-[34px] items-center gap-1.5 rounded-full bg-surface-2 px-3.5 text-[13px] font-semibold text-ink hover:bg-line">
-              TCGplayer <ExternalLink size={14} aria-hidden />
-            </a>
-          )}
-          {c.cardmarketUrl && (
-            <a href={c.cardmarketUrl} target="_blank" rel="noreferrer" className="inline-flex min-h-[34px] items-center gap-1.5 rounded-full bg-surface-2 px-3.5 text-[13px] font-semibold text-ink hover:bg-line">
-              Cardmarket <ExternalLink size={14} aria-hidden />
-            </a>
-          )}
-        </div>
-      )}
+      <div className="flex flex-wrap gap-2">
+        {cardLinks(c).map((l) => (
+          <a key={l.label} href={l.url} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-[34px] items-center gap-1.5 rounded-full bg-surface-2 px-3.5 text-[13px] font-semibold text-ink hover:bg-line">
+            {l.label} <ExternalLink size={14} aria-hidden />
+          </a>
+        ))}
+      </div>
       <p className="text-[13px] text-faint">Prices only. Pythia never buys or sells a card; you do that by hand.</p>
     </div>
   );
@@ -195,13 +229,19 @@ function SetDetail({ s }: { s: PokemonNewSet }) {
         {s.released ? `Released ${s.released}, ${releaseWords(s.ageDays)}.` : ""} The dearest cards on TCGplayer today. Prices of a set this new move a lot; our own daily snapshots will show how.
       </p>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        {s.cards.map((c) => (
-          <a key={`${c.name}-${c.number}`} href={c.url ?? undefined} target="_blank" rel="noreferrer" className="min-w-0 rounded-control p-1 hover:bg-surface-2">
-            {c.image ? <img src={c.image} alt={c.name} loading="lazy" className="aspect-[63/88] w-full rounded-lg bg-surface-2 object-cover" /> : <div className="aspect-[63/88] w-full rounded-lg bg-surface-2" aria-hidden />}
-            <div className="mt-1.5 truncate text-[13px] font-semibold text-ink">{c.name}</div>
-            <div className="tabular text-[13px] text-muted">{usd(c.priceUsd)}</div>
-          </a>
-        ))}
+        {s.cards.map((c) => {
+          const links = cardLinks(c);
+          return (
+            <div key={`${c.name}-${c.number}`} className="min-w-0 rounded-control p-1">
+              <a href={links[1]?.url} target="_blank" rel="noreferrer noopener" className="block hover:opacity-90">
+                {c.image ? <img src={c.image} alt={c.name} loading="lazy" className="aspect-[63/88] w-full rounded-lg bg-surface-2 object-cover" /> : <div className="aspect-[63/88] w-full rounded-lg bg-surface-2" aria-hidden />}
+                <div className="mt-1.5 truncate text-[13px] font-semibold text-ink">{c.name}</div>
+              </a>
+              <div className="tabular text-[13px] text-muted">{usd(c.priceUsd)}</div>
+              <MarketLinks links={links} className="mt-0.5" />
+            </div>
+          );
+        })}
       </div>
       <p className="text-[13px] text-faint">Prices only. Pythia never buys or sells a card; you do that by hand.</p>
     </div>
@@ -425,7 +465,7 @@ export function Cards() {
       )}
 
       <Sheet open={!!selected} onClose={() => setOpen(null)} title={selected?.name ?? "Card"} wide>
-        {selected && <Detail c={selected} stale={stale} />}
+        {selected && d && <Detail c={selected} stale={stale} snapshot={d.snapshot} />}
       </Sheet>
       <Sheet open={!!openedSet} onClose={() => setOpenSet(null)} title={openedSet?.set ?? "Set"} wide>
         {openedSet && <SetDetail s={openedSet} />}

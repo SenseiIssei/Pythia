@@ -581,3 +581,66 @@ def test_an_event_from_the_shell(telegram, data):
     assert notify.main(["--event", "venue", "Disk almost full", "12 GB left"]) == 0
     assert texts(got)[0] == "<b>📡 Disk almost full</b>\n12 GB left\n<i>Pythia</i>"
     assert notify.main(["--event", "weather", "x"]) == 2
+
+
+# ---------------------------------------------------------------- links and pictures
+
+def test_links_render_per_format_and_bad_urls_are_only_labels():
+    lk = notify.Links([("Steam", "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline"),
+                       ("A & B", "https://example.org/x?a=1&b=2"), ("Bad", "javascript:alert(1)"),
+                       ("Quote", 'https://example.org/"onmouseover=x'), ("None", None)], lead="Look")
+    tg = notify.Card("🎮", "T", parts=[lk]).render("telegram")
+    assert '<a href="https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline">Steam</a>' in tg
+    assert '<a href="https://example.org/x?a=1&amp;b=2">A &amp; B</a>' in tg
+    assert "javascript" not in tg and "onmouseover" not in tg and "Bad" in tg and "None" in tg
+    assert tg.startswith("<b>🎮 T</b>\n<b>Look</b> ")
+    assert "[Steam](<https://steamcommunity.com/" in notify.Card("x", "T", parts=[lk]).render("discord")
+    assert "<https://example.org/x?a=1&b=2|A & B>" in notify.Card("x", "T", parts=[lk]).render("slack")
+    # The plain fallback keeps the URL next to its label.
+    assert "Steam https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline" in notify.plain(tg)
+    assert "A & B https://example.org/x?a=1&b=2" in notify.plain(tg)
+    assert not notify.fits_event([notify.Card("x", "T", parts=[lk])])
+
+
+def test_safe_url_takes_only_plain_http_urls():
+    assert notify.safe_url("https://a.org/x?q=1") == "https://a.org/x?q=1"
+    for bad in ("ftp://a.org/x", "https://", "https://a.org/x y", "https://user@a.org/", "https://a.org/<b>", 7, None):
+        assert notify.safe_url(bad) is None
+
+
+def test_pictures_go_first_as_an_album_then_the_text(telegram, data):
+    _, got, _ = telegram
+    card = notify.Card("🃏", "Cheap cards", "Two", [notify.Links([("Cardmarket", "https://www.cardmarket.com/x")])])
+    pics = [("https://images.pokemontcg.io/sv3/1.png", "<b>Cheap cards</b>\n1. A"),
+            ("https://images.pokemontcg.io/sv3/2.png", "ignored"), ("not a url", "x")]
+    res = notify.send("pokemon", [card], photos=pics)
+    assert res["delivered"] and res["photo"]
+    (p1, album), (p2, msg) = got
+    assert p1.endswith("/sendMediaGroup") and p2.endswith("/hook/secret-token")
+    assert [m["media"] for m in album["media"]] == ["https://images.pokemontcg.io/sv3/1.png",
+                                                    "https://images.pokemontcg.io/sv3/2.png"]
+    assert album["media"][0]["caption"] == "<b>Cheap cards</b>\n1. A" and "caption" not in album["media"][1]
+    assert '<a href="https://www.cardmarket.com/x">Cardmarket</a>' in msg["text"]
+    assert msg["disable_web_page_preview"] is True
+    one = notify.photos_body("1", pics[:1])
+    assert one[0] == "sendPhoto" and one[1]["photo"].endswith("1.png") and one[1]["parse_mode"] == "HTML"
+    assert notify.photos_body("1", [("x", "y")]) is None
+    long = notify.photos_body("1", [("https://a.org/1.png", "<b>x</b>" + "y" * 2000)])
+    assert len(long[1]["caption"]) <= notify.CAPTION_LIMIT and "<b>" not in long[1]["caption"]
+
+
+def test_a_refused_album_is_tried_as_one_picture(telegram, data, monkeypatch):
+    calls = []
+    monkeypatch.setattr(notify, "_request", lambda req, timeout: (calls.append(req.full_url), (False, "HTTP 400"))[1]
+                        if req.full_url.endswith("sendMediaGroup") else (calls.append(req.full_url), (True, None))[1])
+    res = notify.send("pokemon", [notify.Card("x", "T")], photos=[("https://a.org/1.png", "c"), ("https://a.org/2.png", "")])
+    assert [c.rsplit("/", 1)[1] for c in calls] == ["sendMediaGroup", "sendPhoto", "secret-token"]
+    assert res["photo"] and res["delivered"]
+
+
+def test_a_webhook_gets_no_pictures_only_the_links(hook, data, monkeypatch):
+    url, got, _ = hook
+    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+    card = notify.Card("🃏", "T", parts=[notify.Links([("TCGplayer", "https://www.tcgplayer.com/product/1")])])
+    notify.send("pokemon", [card], photos=[("https://a.org/1.png", "c")])
+    assert len(got) == 1 and "[TCGplayer](<https://www.tcgplayer.com/product/1>)" in got[0][1]["content"]
