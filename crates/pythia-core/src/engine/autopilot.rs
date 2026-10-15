@@ -231,6 +231,7 @@
 //! treasury that Pythia can read and never move (see `SAFETY.md`).
 
 use super::{Engine, JournalKind, RouteIntent, StrategyKind, StrategyState};
+use crate::alerts::i18n::{self, Lang};
 use crate::alerts::AlertKind;
 use crate::connectors::Venue;
 use crate::costs::CostVenue;
@@ -1334,19 +1335,8 @@ impl Evidence {
 }
 
 pub(super) fn usd(x: f64) -> String {
-    let cents = (x.abs() * 100.0).round() as u128;
     // A loss that rounds to nothing is "$0.00", not "-$0.00".
-    let neg = x < 0.0 && cents > 0;
-    let (whole, frac) = (cents / 100, cents % 100);
-    let digits = whole.to_string();
-    let mut grouped = String::new();
-    for (k, c) in digits.chars().enumerate() {
-        if k > 0 && (digits.len() - k) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(c);
-    }
-    format!("{}${grouped}.{frac:02}", if neg { "-" } else { "" })
+    i18n::cents(Lang::En, x)
 }
 
 fn signed_usd(x: f64) -> String {
@@ -1355,10 +1345,7 @@ fn signed_usd(x: f64) -> String {
 
 pub(super) fn pct(x: f64) -> String {
     // Anything that rounds to zero is "0", never "-0".
-    let x = if x.abs() < 0.005 { 0.0 } else { x };
-    let t = format!("{x:.2}");
-    let t = t.trim_end_matches('0').trim_end_matches('.');
-    t.to_string()
+    i18n::short_pct(Lang::En, x)
 }
 
 /// The engine venue a cost venue trades on.
@@ -1389,10 +1376,15 @@ fn class_key(v: Venue) -> &'static str {
 
 /// An asset class as a heading: "Crypto", "US shares".
 fn class_label(v: Venue) -> &'static str {
+    asset_class(v).label(Lang::En)
+}
+
+/// An asset class for the messages to the chat.
+fn asset_class(v: Venue) -> i18n::AssetClass {
     match v {
-        Venue::Alpaca => "US shares",
-        Venue::Crypto => "Crypto",
-        Venue::Polymarket => "Prediction markets",
+        Venue::Alpaca => i18n::AssetClass::UsShares,
+        Venue::Crypto => i18n::AssetClass::Crypto,
+        Venue::Polymarket => i18n::AssetClass::Predictions,
     }
 }
 
@@ -1426,36 +1418,22 @@ fn runnable(kind: StrategyKind) -> bool {
 
 /// The stop rules in plain words.
 fn describe_rules(cfg: &AutopilotConfig) -> String {
-    let x = cfg.capital_usd;
+    rules_of(cfg).text(Lang::En)
+}
+
+/// The stop rules, to be put in words in any language.
+fn rules_of(cfg: &AutopilotConfig) -> i18n::Rules {
     let s = &cfg.stop;
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(p) = s.max_loss_pct {
-        parts.push(format!("stops at a loss of {} % (equity {})", pct(p), usd(x * (1.0 - p / 100.0))));
+    i18n::Rules {
+        capital: cfg.capital_usd,
+        max_loss_pct: s.max_loss_pct,
+        max_loss_usd: s.max_loss_usd,
+        trailing_pct: s.trailing_pct,
+        take_profit_pct: s.take_profit_pct,
+        lock: s.on_take_profit == OnTakeProfit::Lock,
+        // A time that is no time is no end.
+        end_ms: s.end_ms.filter(|ms| chrono::DateTime::from_timestamp_millis(*ms).is_some()),
     }
-    if let Some(u) = s.max_loss_usd {
-        parts.push(format!("stops at a loss of {} (equity {})", usd(u), usd(x - u)));
-    }
-    if let Some(p) = s.trailing_pct {
-        parts.push(format!("gives back at most {} % from its peak", pct(p)));
-    }
-    if let Some(p) = s.take_profit_pct {
-        parts.push(match s.on_take_profit {
-            OnTakeProfit::Stop => format!("finishes at a profit of {} % (equity {})", pct(p), usd(x * (1.0 + p / 100.0))),
-            OnTakeProfit::Lock => format!(
-                "locks in half the gain at every {} % of profit (first at equity {}) and keeps going",
-                pct(p),
-                usd(x * (1.0 + p / 100.0))
-            ),
-        });
-    }
-    match s.end_ms.and_then(chrono::DateTime::from_timestamp_millis) {
-        Some(t) => parts.push(format!("ends {}", t.format("%Y-%m-%d %H:%M UTC"))),
-        None if s.take_profit_pct.is_none() || s.on_take_profit == OnTakeProfit::Lock => {
-            parts.push("otherwise runs until you stop it".into())
-        }
-        None => {}
-    }
-    parts.join("; ")
 }
 
 // ── the engine side ────────────────────────────────────────────────────────
@@ -2529,25 +2507,22 @@ impl Engine {
         self.log(kind, msg.clone(), None, None);
         self.pending_alerts.push(msg.clone());
         {
-            use crate::alerts::{card, AlertEvent, Row};
-            let mut rows = vec![
-                Row::new("Capital", card::usd(cfg.capital_usd)),
-                Row::new("Mode", cfg.mode.word()),
-                Row::new("Venue", place.clone()),
-            ];
-            if let Some(pp) = &split {
-                rows.push(Row::new("Split", pp.split_words()));
-            }
-            let books: Vec<&str> = sleeves.iter().map(|s| s.name.as_str()).collect();
-            if !books.is_empty() {
-                rows.push(Row::new("Books", books.join(", ")));
-            }
-            let rules = describe_rules(&cfg);
+            use crate::alerts::{AlertEvent, Msg};
+            let msg = Msg::AutopilotStarted {
+                name: cfg.name.clone(),
+                mode: match cfg.mode {
+                    AutopilotMode::Paper => i18n::ApMode::Paper,
+                    AutopilotMode::Demo => i18n::ApMode::Demo,
+                    AutopilotMode::Live => i18n::ApMode::Live,
+                },
+                place: if cfg.portfolio { i18n::Place::Portfolio } else { i18n::Place::Venue(place.clone()) },
+                capital: cfg.capital_usd,
+                split: split.as_ref().map(|pp| pp.budgets.iter().map(|(c, b)| (asset_class(*c), *b)).collect()),
+                books: sleeves.iter().map(|s| s.name.clone()).collect(),
+                rules: rules_of(&cfg),
+            };
             self.alert_event(
-                AlertEvent::new(AlertKind::AutopilotStarted, format!("start:{id}:{now}"), started_alert)
-                    .titled(format!("{} started", cfg.name))
-                    .with_summary(format!("Rules: {rules}."))
-                    .with_rows(rows),
+                AlertEvent::new(AlertKind::AutopilotStarted, format!("start:{id}:{now}"), started_alert).with_msg(msg),
             );
         }
         self.autopilots.retain(|a| a.config.id != id);
@@ -2699,7 +2674,7 @@ impl Engine {
         }
         let flatten = flatten.unwrap_or(self.autopilots[i].config.flatten_on_stop);
         let now = self.now();
-        self.ap_halt(i, AutopilotState::Stopped, "stopped by you".into(), flatten, now, AlertKind::AutopilotStopped);
+        self.ap_halt(i, AutopilotState::Stopped, i18n::StopWhy::ByYou, flatten, now, AlertKind::AutopilotStopped);
         Ok(())
     }
 
@@ -3540,8 +3515,8 @@ impl Engine {
             if marks_fresh && eq >= target - EPS {
                 match stop.on_take_profit {
                     OnTakeProfit::Stop => {
-                        let reason = format!("take profit of {} % reached (equity {}, target {})", pct(tp), usd(eq), usd(target));
-                        self.ap_halt(i, AutopilotState::Finished, reason, flatten, now, AlertKind::StopRuleHit);
+                        let why = i18n::StopWhy::TakeProfit { pct: tp, equity: eq, target };
+                        self.ap_halt(i, AutopilotState::Finished, why, flatten, now, AlertKind::StopRuleHit);
                         return;
                     }
                     OnTakeProfit::Lock => {
@@ -3573,33 +3548,19 @@ impl Engine {
         let locked = self.autopilots[i].locked_floor;
         if let Some((floor, rule)) = floor_equity(&stop, x, peak, locked) {
             if eq <= floor + EPS {
-                let reason = match rule {
-                    FloorRule::MaxLossPct => format!(
-                        "max loss of {} % reached (equity {}, floor {})",
-                        pct(stop.max_loss_pct.unwrap_or(0.0)),
-                        usd(eq),
-                        usd(floor)
-                    ),
-                    FloorRule::MaxLossUsd => format!(
-                        "max loss of {} reached (equity {}, floor {})",
-                        usd(stop.max_loss_usd.unwrap_or(0.0)),
-                        usd(eq),
-                        usd(floor)
-                    ),
-                    FloorRule::Trailing => format!(
-                        "trailing floor reached: equity {} gave back {} % from its peak of {} (floor {})",
-                        usd(eq),
-                        pct(stop.trailing_pct.unwrap_or(0.0)),
-                        usd(peak),
-                        usd(floor)
-                    ),
-                    FloorRule::LockedProfit => format!(
-                        "locked-in profit floor reached (equity {}, floor {})",
-                        usd(eq),
-                        usd(floor)
-                    ),
+                let why = match rule {
+                    FloorRule::MaxLossPct => {
+                        i18n::StopWhy::MaxLossPct { pct: stop.max_loss_pct.unwrap_or(0.0), equity: eq, floor }
+                    }
+                    FloorRule::MaxLossUsd => {
+                        i18n::StopWhy::MaxLossUsd { usd: stop.max_loss_usd.unwrap_or(0.0), equity: eq, floor }
+                    }
+                    FloorRule::Trailing => {
+                        i18n::StopWhy::Trailing { equity: eq, pct: stop.trailing_pct.unwrap_or(0.0), peak, floor }
+                    }
+                    FloorRule::LockedProfit => i18n::StopWhy::LockedProfit { equity: eq, floor },
                 };
-                self.ap_halt(i, AutopilotState::Stopped, reason, flatten, now, AlertKind::FloorHit);
+                self.ap_halt(i, AutopilotState::Stopped, why, flatten, now, AlertKind::FloorHit);
                 return;
             }
         }
@@ -3607,7 +3568,7 @@ impl Engine {
         // The end time.
         if let Some(end) = stop.end_ms {
             if now >= end {
-                self.ap_halt(i, AutopilotState::Finished, "end time reached".into(), flatten, now, AlertKind::StopRuleHit);
+                self.ap_halt(i, AutopilotState::Finished, i18n::StopWhy::EndTime, flatten, now, AlertKind::StopRuleHit);
             }
         }
     }
@@ -3628,7 +3589,11 @@ impl Engine {
 
     /// Stop or finish: close or release its positions, pause its strategies,
     /// and say so with the numbers.
-    fn ap_halt(&mut self, i: usize, state: AutopilotState, reason: String, flatten: bool, now: i64, cause: AlertKind) {
+    fn ap_halt(&mut self, i: usize, state: AutopilotState, why: i18n::StopWhy, flatten: bool, now: i64, cause: AlertKind) {
+        use i18n::HaltFoot;
+        let reason = why.text(Lang::En);
+        // The first thing said about its positions and strategies, for the card.
+        let mut first: Option<HaltFoot> = None;
         {
             let ap = &mut self.autopilots[i];
             ap.state = state;
@@ -3660,6 +3625,7 @@ impl Engine {
             if left.is_empty() {
                 if !open.is_empty() {
                     tail.push_str(&format!(" Closed its {} position(s).", open.len()));
+                    first.get_or_insert(HaltFoot::Closed(open.len() as u64));
                 }
             } else {
                 // Say why each one is still open: they have different cures.
@@ -3677,16 +3643,19 @@ impl Engine {
                     tail.push_str(&format!(
                         " {at_venue} close order(s) are at the venue; their fills are booked to the autopilot when the venue reports them."
                     ));
+                    first.get_or_insert(HaltFoot::AtVenue(at_venue));
                 }
                 if stale > 0 {
                     tail.push_str(&format!(
                         " {stale} paper position(s) wait for a fresh price before they are closed: a stale price is not where the market is."
                     ));
+                    first.get_or_insert(HaltFoot::WaitPrice(stale));
                 }
                 if stuck > 0 {
                     tail.push_str(&format!(
                         " {stuck} real position(s) could not be closed yet because live routing is not available; they stay with the autopilot and are closed as soon as it is."
                     ));
+                    first.get_or_insert(HaltFoot::Stuck(stuck));
                 }
             }
         } else if !open.is_empty() {
@@ -3703,6 +3672,7 @@ impl Engine {
                 " Left its {} position(s) open, now managed by their strategies' stops; its P&L counts them at their price now.",
                 open.len()
             ));
+            first.get_or_insert(HaltFoot::LeftOpen(open.len() as u64));
             if lab_open > 0 {
                 tail.push_str(&format!(
                     " {lab_open} of them belong to a lab book, which carries no stops and does not trade on its own: close them on the Positions page. They stay in this autopilot's book, so a new autopilot under the same id waits until they are closed."
@@ -3726,12 +3696,14 @@ impl Engine {
         }
         if !paused.is_empty() {
             tail.push_str(&format!(" Paused its strategies: {}.", paused.join(", ")));
+            first.get_or_insert_with(|| HaltFoot::Paused(paused.clone()));
         }
         if !still.is_empty() {
             tail.push_str(&format!(
                 " Still running for the other autopilots, which are untouched: {}.",
                 still.join(", ")
             ));
+            first.get_or_insert_with(|| HaltFoot::Still(still.clone()));
         }
         let idle: Vec<String> = sleeves
             .iter()
@@ -3743,6 +3715,7 @@ impl Engine {
                 " Idle again, waiting for the next autopilot: {} (it keeps receiving the lab's signal and trades only inside an autopilot).",
                 idle.join(", ")
             ));
+            first.get_or_insert_with(|| HaltFoot::Idle(idle.clone()));
         }
         let ap = &self.autopilots[i];
         let eq = self.ap_equity(ap);
@@ -3760,30 +3733,25 @@ impl Engine {
         self.pending_alerts.push(msg.clone());
         let key = format!("halt:{}:{now}", self.autopilots[i].config.id);
         {
-            use crate::alerts::{card, AlertEvent, Row};
+            use crate::alerts::{AlertEvent, Msg};
             let ap = &self.autopilots[i];
             let pnl = eq - x;
             let pnl_pct = if x > 0.0 { pnl / x * 100.0 } else { 0.0 };
-            let mut rows = vec![
-                Row::new("Equity", card::usd(eq)),
-                Row::toned("P&L", format!("{} {}", card::signed_usd(pnl), card::signed_pct(pnl_pct, 2)), pnl),
-            ];
-            if let Some(b) = self.ap_btc_return_pct(ap) {
-                rows.push(Row::toned("vs BTC", format!("{:+.2} pts", pnl_pct - b), pnl_pct - b));
-            }
-            rows.push(Row::new("Trades", ap.trades.to_string()));
-            rows.push(Row::new("Fees", card::usd(ap.fees)));
-            // The first sentence of what happened to its positions, no more.
-            let tail = tail.trim();
-            let foot = tail.split_inclusive(". ").next().unwrap_or(tail).trim().to_string();
-            let title = format!("{} {word}", ap.config.name);
-            self.alert_event(
-                AlertEvent::new(cause, key, msg.clone())
-                    .titled(title)
-                    .with_summary(format!("{}.", reason.trim_end_matches('.')))
-                    .with_rows(rows)
-                    .with_footer(foot),
-            );
+            // The footer: the first sentence of what happened to its
+            // positions, no more.
+            let card = Msg::AutopilotHalted {
+                name: ap.config.name.clone(),
+                finished: state == AutopilotState::Finished,
+                why,
+                equity: eq,
+                pnl,
+                pnl_pct,
+                vs_btc: self.ap_btc_return_pct(ap),
+                trades: u64::from(ap.trades),
+                fees: ap.fees,
+                foot: first,
+            };
+            self.alert_event(AlertEvent::new(cause, key, msg.clone()).with_msg(card));
         }
         self.log(JournalKind::Risk, msg, None, None);
         self.ap_sample(i, now, true);

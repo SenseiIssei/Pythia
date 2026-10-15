@@ -12,7 +12,8 @@ Writes:
   <data>/cs2/model/research.json                 today's research summary (verdict, spread, history)
   <reports>/cs2/latest.json                      hourly: the lab feed header (docs/LAB-FEEDS.md) for the
                                                  Research page and Home, plus the board for the CS2 page
-                                                 (`rows`, `portfolio`, `alerts`, `research`)
+                                                 (`rows`, `portfolio`, `alerts`, `research`, and
+                                                 `steamTrends` from the daily lab.cs2.trends job)
   <reports>/cs2/<date>.md, latest.md             the research report, daily (results/cs2.md)
   <reports>/cs2_weekly/                          the weekly report, at each paper rebalance (also a feed)
 
@@ -32,7 +33,7 @@ import polars as pl
 
 from .. import report
 from ..collect.cs2 import load_watchlist
-from ..ops import notify
+from ..ops import i18n, notify
 from . import book, market, model
 
 BOARD = "cs2"
@@ -84,7 +85,7 @@ def change7(root: Path | None, snap: pl.DataFrame, today: date) -> tuple[dict[st
 
 def post(text: str, dry_run: bool) -> bool:
     url, fmt, _ = notify.config()
-    text = notify.clip(text)
+    text = notify.clip(text, lang=notify.alert_lang())
     print(text)
     if dry_run or not url:
         return False
@@ -92,6 +93,14 @@ def post(text: str, dry_run: bool) -> bool:
     if not ok:
         print(f"not delivered: {err}", file=sys.stderr)
     return ok
+
+
+def weekly_message(prefix: str, verdict: str, eq: float, st: dict, lang: str = "en") -> str:
+    """The weekly line to the chat, in `lang`; English says the report's verdict."""
+    if lang == "de":
+        verdict = i18n.t("cs2_verdict", lang, ret=i18n.frac_pct(eq / book.START_EQUITY - 1, 2, lang),
+                         n=len(st["positions"]))
+    return i18n.t("cs2_weekly", lang, prefix=prefix, verdict=verdict, n=len(st.get("last_trades") or []))
 
 
 def weekly_report(st: dict, eq: float, prices: dict, board_rows: list[dict], model_rep: dict, history_days: int,
@@ -242,7 +251,7 @@ def main(argv: list[str] | None = None, root: Path | None = None, now_ms: int | 
     st_path = base / "alerts_state.json"
     fresh, alert_state = book.fresh_alerts(found, market.read_json(st_path) or {}, now_ms)
     if fresh:
-        delivered = post(book.alert_text(fresh, notify.config()[2]), dry)
+        delivered = post(book.alert_text(fresh, notify.config()[2], lang=notify.alert_lang()), dry)
         if not dry:
             _write_json(st_path, alert_state)
             with (base / "alerts.jsonl").open("a", encoding="utf-8") as fh:
@@ -278,8 +287,7 @@ def main(argv: list[str] | None = None, root: Path | None = None, now_ms: int | 
                 _write_json(reports / "cs2_weekly" / "latest.json", data)
             book.save_state(root, st)
         weekly = data["verdict"]
-        post(f"{notify.config()[2]} CS2 weekly: {data['verdict']} "
-             f"{len(st['last_trades'])} paper trades. Details on the CS2 page.", dry)
+        post(weekly_message(notify.config()[2], data["verdict"], eq, st, notify.alert_lang()), dry)
     elif not dry:
         book.save_state(root, st)
 
@@ -325,6 +333,8 @@ def main(argv: list[str] | None = None, root: Path | None = None, now_ms: int | 
         "alerts": [{"tsMs": a.get("ts_ms"), "kind": a.get("kind"), "name": a.get("name"), "text": a.get("text")} for a in recent],
         "collector": {k: collector.get(k) for k in ("at", "ok", "skinport_items", "steam_ok", "steam_requested", "errors")},
         "research": research_sum,
+        # The daily Steam market trends (lab.cs2.trends), as that job wrote them.
+        "steamTrends": market.read_json(base / "trends" / "latest.json"),
         "rows": rows,
     }
     boardj.update(feed(rows, found, eq, history, collector, now_ms, research_sum.get("verdict")))

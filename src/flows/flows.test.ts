@@ -23,7 +23,19 @@ import {
   shortLine,
   timeline,
 } from "./activity";
-import { alertTitle, countsLine, deliveryOf, destinationName, groupCategories, muteText, plainText, quietLine, validHhmm } from "./alerts";
+import {
+  ALERT_LANGUAGES,
+  alertTitle,
+  countsLine,
+  deliveryOf,
+  destinationName,
+  groupCategories,
+  languageOf,
+  muteText,
+  plainText,
+  quietLine,
+  validHhmm,
+} from "./alerts";
 import type { AutopilotSleeveStatus, AutopilotStatus, JournalEntry, PositionView } from "../types";
 
 function status(over: Partial<AutopilotStatus> = {}): AutopilotStatus {
@@ -297,6 +309,15 @@ describe("alerts", () => {
     expect(validHhmm("24:00") || validHhmm("9pm") || validHhmm("12:60")).toBe(false);
     expect(quietLine({ enabled: true, start: "23:00", end: "07:00", timezone: "Europe/Berlin" })).toBe("23:00 to 07:00");
     expect(quietLine({ enabled: false, start: "23:00", end: "07:00", timezone: "Europe/Berlin" })).toBe("Off");
+  });
+  it("words the message language and says when the server fixes it", () => {
+    expect(languageOf({})).toEqual({ lang: "en", note: null });
+    expect(languageOf({ language: "de", languageEnv: null })).toEqual({ lang: "de", note: null });
+    const forced = languageOf({ language: "en", languageEnv: "de" });
+    expect(forced.lang).toBe("de");
+    expect(forced.note).toContain("PYTHIA_ALERT_LANG");
+    expect(forced.note).toContain("Deutsch");
+    expect(ALERT_LANGUAGES.map((l) => l.label)).toEqual(["English", "Deutsch"]);
   });
   it("groups the switches by who sends them", () => {
     const c = (id: string, source: "engine" | "lab") => ({ id, label: id, emoji: "", about: "", source, on: true }) as never;

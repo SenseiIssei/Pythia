@@ -32,18 +32,22 @@ use tokio::sync::mpsc;
 
 #[path = "alerts_card.rs"]
 pub mod card;
+#[path = "alerts_i18n.rs"]
+pub mod i18n;
 #[path = "alerts_moves.rs"]
 mod moves;
 #[path = "alerts_settings.rs"]
 mod settings;
 
 pub use card::{Card, Row, Table, Tone};
+pub use i18n::{Lang, Msg};
 pub use moves::{MoveInput, MoveSubject, MoveWatch};
 pub use settings::{
     parse_hhmm, AlertCategory, AlertSettings, AlertSettingsPatch, BigMoves, BigMovesPatch, QuietHours, QuietHoursPatch,
 };
 
-use card::{esc, price, qty, render_post, signed_usd, usd};
+use card::{esc, price, qty, render_post};
+use i18n::{word, Word};
 
 /// Char-safe truncation to keep within Discord's 2000-char content limit.
 fn truncate(s: &str, max: usize) -> String {
@@ -224,16 +228,16 @@ pub struct AlertEvent {
     /// A PNG or JPEG sent as a photo with the card as its caption (Telegram).
     #[serde(skip)]
     pub image: Option<Arc<Vec<u8>>>,
+    /// The engine's message behind the card, so it can be said in the
+    /// language the chat is set to. Lab events come already worded.
+    #[serde(skip)]
+    pub msg: Option<Box<Msg>>,
 }
 
 /// The first letter in upper case: the engine's texts were written to follow
 /// a label ("Kill switch: engaged by hand.").
 fn sentence(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
-    }
+    i18n::sentence(s)
 }
 
 impl AlertEvent {
@@ -252,7 +256,38 @@ impl AlertEvent {
             urgent: false,
             trade: None,
             image: None,
+            msg: None,
         }
+    }
+
+    /// One of the engine's messages: its kind, its English text for the
+    /// journal and its card, said again in the chat's language when sent.
+    pub fn from_msg(key: impl Into<String>, msg: Msg) -> Self {
+        let text = msg.text(Lang::En);
+        Self::new(msg.kind(), key, text).with_msg(msg)
+    }
+
+    /// Attach the message behind the card: the English card fields come from
+    /// it, the text stays what was given.
+    pub fn with_msg(mut self, msg: Msg) -> Self {
+        let c = msg.card_text(Lang::En);
+        if c.title.is_some() {
+            self.title = c.title;
+        }
+        if let Some(s) = c.summary {
+            self = self.with_summary(s);
+        }
+        if !c.rows.is_empty() {
+            self.rows = c.rows;
+        }
+        if c.table.is_some() {
+            self.table = c.table;
+        }
+        if c.footer.is_some() {
+            self.footer = c.footer;
+        }
+        self.msg = Some(Box::new(msg));
+        self
     }
 
     /// A fill of an autopilot. A rebalance fill counts as a rebalance, any
@@ -318,27 +353,57 @@ impl AlertEvent {
 
     /// The card's title, as plain text.
     pub fn title_text(&self) -> String {
-        if let Some(t) = &self.trade {
-            return format!("{} {} {}", t.book, if t.buy { "bought" } else { "sold" }, t.symbol);
-        }
-        self.title.clone().unwrap_or_else(|| self.kind.label().to_string())
+        self.title_text_in(Lang::En)
     }
 
-    /// The alert as a card.
+    /// The card's title in a language.
+    pub fn title_text_in(&self, lang: Lang) -> String {
+        if let Some(t) = &self.trade {
+            let side = word(if t.buy { Word::Bought } else { Word::Sold }, lang);
+            return format!("{} {side} {}", t.book, t.symbol);
+        }
+        if let Some(m) = &self.msg {
+            return m.card_text(lang).title.unwrap_or_else(|| i18n::kind_label(self.kind, lang).to_string());
+        }
+        self.title.clone().unwrap_or_else(|| i18n::kind_label(self.kind, lang).to_string())
+    }
+
+    /// The alert as a card, in English.
     pub fn card(&self) -> Card {
+        self.card_in(Lang::En)
+    }
+
+    /// The alert as a card in a language: an engine message is worded anew,
+    /// a lab event is shown as it came.
+    pub fn card_in(&self, lang: Lang) -> Card {
         let emoji = self
             .emoji
             .clone()
             .or_else(|| (self.kind == AlertKind::Event).then(|| self.category().map(|c| c.emoji().to_string())).flatten())
             .unwrap_or_else(|| self.kind.emoji().to_string());
+        if let Some(m) = &self.msg {
+            let c = m.card_text(lang);
+            let summary = c.summary.unwrap_or_else(|| m.text(lang));
+            return Card {
+                emoji,
+                title: self.title_text_in(lang),
+                summary: Some(sentence(&summary)).filter(|s| !s.trim().is_empty()),
+                rows: c.rows,
+                table: c.table,
+                footer: c.footer,
+                table_first: false,
+                lang,
+            };
+        }
         Card {
             emoji,
-            title: self.title_text(),
+            title: self.title_text_in(lang),
             summary: Some(sentence(self.summary.as_deref().unwrap_or(&self.text))).filter(|s| !s.trim().is_empty()),
             rows: self.rows.clone(),
             table: self.table.clone(),
             footer: self.footer.clone(),
             table_first: false,
+            lang,
         }
     }
 
@@ -356,6 +421,13 @@ impl AlertEvent {
 /// short card; several (a rebalance) are one card with a table, the same coin
 /// and side added up.
 pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
+    trade_cards_in(trades, Lang::En)
+}
+
+/// [`trade_cards`] in a language.
+pub fn trade_cards_in(trades: &[&TradeLine], lang: Lang) -> Vec<Card> {
+    use i18n::{fills_summary, fills_title, mode_footer};
+    let w = |x: Word| word(x, lang).to_string();
     let mut books: Vec<(String, Vec<&TradeLine>)> = Vec::new();
     for t in trades {
         match books.iter_mut().find(|(b, _)| *b == t.book) {
@@ -383,79 +455,68 @@ pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
             }
         }
         let experiment = !exp_syms.is_empty();
-        let tag = if experiment { " · experiment" } else { "" };
+        let tag = if experiment { format!(" · {}", w(Word::Experiment)) } else { String::new() };
         let fees: f64 = fills.iter().map(|t| t.fee).sum();
         let realized: f64 = fills.iter().map(|t| t.realized).sum();
         let mode = fills[0].mode.clone();
-        let footer = |m: &str| {
-            if experiment {
-                format!("{} · experiment: a rule that failed the lab's deflation test", mode_word(m))
-            } else {
-                mode_word(m)
-            }
-        };
+        let footer = |m: &str| if experiment { i18n::experiment_footer(m, lang) } else { mode_footer(m, lang) };
         let rebalance = fills.iter().any(|t| t.rebalance);
         if lines.len() == 1 && !rebalance {
             let (buy, sym, q, value) = lines[0].clone();
-            let mut c = Card::new(if buy { "🟢" } else { "🔴" }, format!("{book} {} {sym}{tag}", if buy { "bought" } else { "sold" }))
-                .row(Row::new("Amount", format!("{} {sym}", qty(q))))
-                .row(Row::new("Price", price(if q > 0.0 { value / q } else { 0.0 })))
-                .row(Row::new("Value", usd(value)));
+            let side = word(if buy { Word::Bought } else { Word::Sold }, lang);
+            let mut c = Card::new(if buy { "🟢" } else { "🔴" }, format!("{book} {side} {sym}{tag}"))
+                .row(Row::new(w(Word::Amount), format!("{} {sym}", i18n::qty(lang, q))))
+                .row(Row::new(w(Word::Price), i18n::price(lang, if q > 0.0 { value / q } else { 0.0 })))
+                .row(Row::new(w(Word::Value), i18n::usd(lang, value)));
             if fees > 0.0 {
-                c = c.row(Row::new("Fee", usd(fees)));
+                c = c.row(Row::new(w(Word::Fee), i18n::usd(lang, fees)));
             }
             if realized.abs() > 1e-9 {
-                c = c.row(Row::toned("Realised", signed_usd(realized), realized));
+                c = c.row(Row::toned(w(Word::Realised), i18n::signed_usd(lang, realized), realized));
             }
+            c.lang = lang;
             out.push(c.footer(footer(&mode)));
             continue;
         }
         let bought: f64 = lines.iter().filter(|l| l.0).map(|l| l.3).sum();
         let sold: f64 = lines.iter().filter(|l| !l.0).map(|l| l.3).sum();
         let n = lines.len();
-        let mut parts = Vec::new();
-        if bought > 0.0 {
-            parts.push(format!("bought {}", usd(bought)));
-        }
-        if sold > 0.0 {
-            parts.push(format!("sold {}", usd(sold)));
-        }
-        let title = if rebalance { format!("Rebalance · {book}{tag}") } else { format!("{n} trades · {book}{tag}") };
-        let mut c = Card::new(if rebalance { "🔁" } else { "💱" }, title)
-            .summary(format!("{n} {}: {}.", if n == 1 { "trade" } else { "trades" }, parts.join(", ")));
-        let mut rows: Vec<Vec<String>> = lines
+        let title = if rebalance { format!("{} · {book}{tag}", w(Word::Rebalance)) } else { format!("{}{tag}", fills_title(lang, n, &book)) };
+        let mut c =
+            Card::new(if rebalance { "🔁" } else { "💱" }, title).summary(fills_summary(lang, n, bought, sold));
+        let mut rows: Vec<(bool, Vec<String>)> = lines
             .iter()
             .map(|(buy, sym, q, v)| {
-                vec![
-                    if *buy { "Buy" } else { "Sell" }.to_string(),
-                    if exp_syms.contains(sym) { format!("{sym} (exp)") } else { sym.clone() },
-                    card::money(*v, 0),
-                    price(if *q > 0.0 { v / q } else { 0.0 }),
-                ]
+                (
+                    *buy,
+                    vec![
+                        w(if *buy { Word::Buy } else { Word::Sell }),
+                        if exp_syms.contains(sym) { format!("{sym} ({})", w(Word::ExperimentShort)) } else { sym.clone() },
+                        i18n::money(lang, *v, 0),
+                        i18n::price(lang, if *q > 0.0 { v / q } else { 0.0 }),
+                    ],
+                )
             })
             .collect();
         // Sells first, then buys, the larger first: what a rebalance did.
-        rows.sort_by(|a, b| (a[0] == "Buy").cmp(&(b[0] == "Buy")));
-        c.table = Some(Table { header: vec!["Side".into(), "Coin".into(), "Value".into(), "Price".into()], rows, more: 0 });
+        rows.sort_by_key(|r| r.0);
+        let rows: Vec<Vec<String>> = rows.into_iter().map(|(_, r)| r).collect();
+        c.table = Some(Table {
+            header: vec![w(Word::Side), w(Word::Coin), w(Word::Value), w(Word::Price)],
+            rows,
+            more: 0,
+        });
         c.table_first = true;
         if realized.abs() > 1e-9 {
-            c = c.row(Row::toned("Realised", signed_usd(realized), realized));
+            c = c.row(Row::toned(w(Word::Realised), i18n::signed_usd(lang, realized), realized));
         }
         if fees > 0.0 {
-            c = c.row(Row::new("Fees", usd(fees)));
+            c = c.row(Row::new(w(Word::Fees), i18n::usd(lang, fees)));
         }
+        c.lang = lang;
         out.push(c.footer(footer(&mode)));
     }
     out
-}
-
-fn mode_word(mode: &str) -> String {
-    match mode {
-        "live" => "Live: real money".into(),
-        "demo" => "Demo: virtual money at the venue".into(),
-        "paper" => "Paper".into(),
-        other => other.to_string(),
-    }
 }
 
 /// The JSON shape the webhook takes.
@@ -540,6 +601,8 @@ pub struct AlertConfig {
     pub chat_id: Option<String>,
     /// How often the sender looks whether quiet hours are over.
     pub wake: Duration,
+    /// `PYTHIA_ALERT_LANG`: the language of the messages, over the setting.
+    pub lang: Option<Lang>,
 }
 
 impl std::fmt::Debug for AlertConfig {
@@ -568,7 +631,14 @@ impl AlertConfig {
             prefix: "Pythia".into(),
             chat_id: None,
             wake: Duration::from_secs(60),
+            lang: None,
         }
+    }
+
+    /// The language the messages go out in: the environment's, else the
+    /// setting's.
+    pub fn lang_for(&self, settings: &AlertSettings) -> Lang {
+        settings.lang(self.lang)
     }
 
     /// `PYTHIA_TELEGRAM_BOT_TOKEN` and `PYTHIA_TELEGRAM_CHAT_ID` (both needed)
@@ -576,7 +646,8 @@ impl AlertConfig {
     /// `PYTHIA_ALERT_FORMAT` (`discord`, the default, or `slack`). A webhook,
     /// when set, wins over Telegram. Neither: `None`. Optional:
     /// `PYTHIA_ALERT_DEDUP_MIN` (30), `PYTHIA_ALERT_MAX_PER_HOUR` (20),
-    /// `PYTHIA_ALERT_PREFIX` (`Pythia`).
+    /// `PYTHIA_ALERT_PREFIX` (`Pythia`), `PYTHIA_ALERT_LANG` (`en` or `de`,
+    /// over the language in the settings).
     pub fn from_env() -> Option<Self> {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
@@ -640,6 +711,7 @@ impl AlertConfig {
         if let Some(p) = get("PYTHIA_ALERT_PREFIX") {
             c.prefix = p.trim().to_string();
         }
+        c.lang = Lang::from_lookup(get);
         self
     }
 }
@@ -876,27 +948,14 @@ impl AlertSink {
     /// a card looks like and what is set.
     pub async fn test(&self) -> AlertRecord {
         let s = self.log.settings();
-        let on = AlertCategory::ALL.iter().filter(|c| s.enabled(**c)).count();
-        let q = &s.quiet_hours;
-        let ev = AlertEvent::new(AlertKind::Test, "test", "test message from the engine: alerts reach this destination.")
-            .titled("Test message")
-            .with_summary("Alerts from the engine reach this chat.")
-            .with_rows(vec![
-                Row::new("Categories on", format!("{on} of {}", AlertCategory::ALL.len())),
-                Row::new(
-                    "Quiet hours",
-                    if q.enabled { format!("{} to {}", q.start, q.end) } else { "off".to_string() },
-                ),
-                Row::new("Big move", format!("{} % / 1 h, {} % / 24 h", s.big_moves.hour_pct, s.big_moves.day_pct)),
-                Row::toned("Example gain", format!("{} {}", signed_usd(1234.5), card::signed_pct(1.23, 2)), 1.0),
-                Row::toned("Example loss", format!("{} {}", signed_usd(-87.65), card::signed_pct(-0.42, 2)), -1.0),
-            ]);
-        let content = compose(&self.cfg, std::slice::from_ref(&ev), 0);
+        let lang = self.cfg.lang_for(&s);
+        let ev = test_event(&s);
+        let content = compose_in(&self.cfg, std::slice::from_ref(&ev), 0, lang);
         let res = deliver(&self.client, &self.cfg, &content).await;
         let rec = AlertRecord {
             ts: now_ms(),
             kinds: vec![AlertKind::Test],
-            title: Some(ev.title_text()),
+            title: Some(ev.title_text_in(lang)),
             text: content,
             delivered: res.is_ok(),
             error: res.err(),
@@ -925,6 +984,21 @@ impl AlertSink {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// The test message: what a card looks like and what is set.
+pub fn test_event(s: &AlertSettings) -> AlertEvent {
+    let q = &s.quiet_hours;
+    AlertEvent::from_msg(
+        "test",
+        Msg::Test {
+            on: AlertCategory::ALL.iter().filter(|c| s.enabled(**c)).count(),
+            total: AlertCategory::ALL.len(),
+            quiet: q.enabled.then(|| (q.start.clone(), q.end.clone())),
+            hour_pct: s.big_moves.hour_pct,
+            day_pct: s.big_moves.day_pct,
+        },
+    )
 }
 
 /// Wait up to `batch_wait` for more events after the first.
@@ -974,31 +1048,16 @@ pub fn sort_events(events: Vec<AlertEvent>, settings: &AlertSettings, muted: boo
 
 /// The morning note: what quiet hours held back, one line each.
 pub fn overnight_event(held: &[(i64, String)], dropped: usize, settings: &AlertSettings) -> AlertEvent {
-    let tz: chrono_tz::Tz = settings.quiet_hours.timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
-    let n = held.len() + dropped;
-    let rows: Vec<Vec<String>> = held
-        .iter()
-        .map(|(ts, title)| {
-            let t = chrono::DateTime::from_timestamp_millis(*ts)
-                .map(|d| d.with_timezone(&tz).format("%H:%M").to_string())
-                .unwrap_or_default();
-            vec![t, title.clone()]
-        })
-        .collect();
-    let mut ev = AlertEvent::new(
-        AlertKind::Overnight,
+    AlertEvent::from_msg(
         format!("overnight:{}", held.first().map_or(0, |h| h.0)),
-        format!("{n} alert(s) were held back in quiet hours."),
+        Msg::Overnight {
+            held: held.to_vec(),
+            dropped,
+            start: settings.quiet_hours.start.clone(),
+            end: settings.quiet_hours.end.clone(),
+            timezone: settings.quiet_hours.timezone.clone(),
+        },
     )
-    .titled("Quiet hours are over")
-    .with_summary(format!(
-        "{n} {} held back from {} to {}. Urgent ones went out at once.",
-        if n == 1 { "alert was" } else { "alerts were" },
-        settings.quiet_hours.start,
-        settings.quiet_hours.end
-    ));
-    ev.table = Some(Table { header: vec!["Time".into(), "Alert".into()], rows, more: dropped });
-    ev
 }
 
 async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut rx: mpsc::Receiver<AlertEvent>) {
@@ -1019,6 +1078,7 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
         };
         let now = now_ms();
         let settings = log.settings();
+        let lang = cfg.lang_for(&settings);
         let muted = log.is_muted(now);
         let mut out: Vec<AlertEvent> = Vec::new();
         // Quiet hours are over: say what they held back, once.
@@ -1031,13 +1091,13 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
             let fresh: Vec<AlertEvent> = batch.into_iter().filter(|e| throttle.fresh(&e.key, now)).collect();
             let sorted = sort_events(fresh, &settings, muted, now);
             if !sorted.muted.is_empty() {
-                log.record(held_back(&cfg, &sorted.muted, now, "muted"));
+                log.record(held_back(&cfg, &sorted.muted, now, "muted", lang));
             }
             if !sorted.quiet.is_empty() {
-                log.record(held_back(&cfg, &sorted.quiet, now, "quiet"));
+                log.record(held_back(&cfg, &sorted.quiet, now, "quiet", lang));
                 for e in &sorted.quiet {
                     if overnight.len() < OVERNIGHT_MAX {
-                        overnight.push((now, e.title_text()));
+                        overnight.push((now, e.title_text_in(lang)));
                     } else {
                         overnight_more += 1;
                     }
@@ -1052,7 +1112,7 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
             throttle.count(now);
         } else if !throttle.may_post(now) {
             throttle.suppressed += out.len();
-            log.record(held_back(&cfg, &out, now, "hourlyLimit"));
+            log.record(held_back(&cfg, &out, now, "hourlyLimit", lang));
             continue;
         }
         // A picture goes as a photo of its own, its card the caption.
@@ -1060,13 +1120,13 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
             out.into_iter().partition(|e| e.image.is_some() && cfg.format == AlertFormat::Telegram);
         let mut results = Vec::new();
         if !texts.is_empty() {
-            let content = compose(&cfg, &texts, throttle.suppressed);
+            let content = compose_in(&cfg, &texts, throttle.suppressed, lang);
             throttle.suppressed = 0;
             let res = deliver(&client, &cfg, &content).await;
             log.record(AlertRecord {
                 ts: now,
                 kinds: texts.iter().map(|e| e.kind).collect(),
-                title: first_title(&texts),
+                title: first_title(&texts, lang),
                 text: content,
                 delivered: res.is_ok(),
                 error: res.clone().err(),
@@ -1076,7 +1136,7 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
             results.push(res);
         }
         for ev in &photos {
-            let caption = caption_of(&cfg, ev);
+            let caption = caption_of(&cfg, ev, lang);
             let res = match &ev.image {
                 Some(png) => deliver_photo(&client, &cfg, png, &caption).await,
                 None => deliver(&client, &cfg, &caption).await,
@@ -1084,7 +1144,7 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
             log.record(AlertRecord {
                 ts: now,
                 kinds: vec![ev.kind],
-                title: Some(ev.title_text()),
+                title: Some(ev.title_text_in(lang)),
                 text: caption,
                 delivered: res.is_ok(),
                 error: res.clone().err(),
@@ -1113,12 +1173,12 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
 }
 
 /// The record of events that were not posted, and why.
-fn held_back(cfg: &AlertConfig, events: &[AlertEvent], now: i64, reason: &str) -> AlertRecord {
+fn held_back(cfg: &AlertConfig, events: &[AlertEvent], now: i64, reason: &str, lang: Lang) -> AlertRecord {
     AlertRecord {
         ts: now,
         kinds: events.iter().map(|e| e.kind).collect(),
-        title: first_title(events),
-        text: compose(cfg, events, 0),
+        title: first_title(events, lang),
+        text: compose_in(cfg, events, 0, lang),
         delivered: false,
         error: None,
         reason: Some(reason.into()),
@@ -1127,40 +1187,52 @@ fn held_back(cfg: &AlertConfig, events: &[AlertEvent], now: i64, reason: &str) -
 }
 
 /// The title of a post's first card, as the app lists it.
-fn first_title(events: &[AlertEvent]) -> Option<String> {
-    cards_of(events).first().map(|c| c.title.clone())
+fn first_title(events: &[AlertEvent], lang: Lang) -> Option<String> {
+    cards_of_in(events, lang).first().map(|c| c.title.clone())
 }
 
 /// The cards of a batch: fills of the same autopilot together in one table,
 /// every other event a card of its own, in the order they came.
 pub fn cards_of(events: &[AlertEvent]) -> Vec<Card> {
+    cards_of_in(events, Lang::En)
+}
+
+/// [`cards_of`] in a language.
+pub fn cards_of_in(events: &[AlertEvent], lang: Lang) -> Vec<Card> {
     let trades: Vec<&TradeLine> = events.iter().filter_map(|e| e.trade.as_ref()).collect();
     let mut cards = Vec::new();
     let mut trades_done = false;
     for e in events {
         if e.trade.is_some() {
             if !trades_done {
-                cards.extend(trade_cards(&trades));
+                cards.extend(trade_cards_in(&trades, lang));
                 trades_done = true;
             }
             continue;
         }
-        cards.push(e.card());
+        cards.push(e.card_in(lang));
     }
     cards
 }
 
 /// The text of one post: the cards, the engine's name in the footer and how
 /// many alerts the hourly limit held back, fitted to the destination's limit.
+/// In the environment's language, else English; the sender uses
+/// [`compose_in`] with the language of the settings.
 pub fn compose(cfg: &AlertConfig, events: &[AlertEvent], suppressed: usize) -> String {
-    let mut cards = cards_of(events);
+    compose_in(cfg, events, suppressed, cfg.lang.unwrap_or_default())
+}
+
+/// [`compose`] in a language.
+pub fn compose_in(cfg: &AlertConfig, events: &[AlertEvent], suppressed: usize, lang: Lang) -> String {
+    let mut cards = cards_of_in(events, lang);
     if let Some(last) = cards.last_mut() {
         let mut foot: Vec<String> = Vec::new();
         if let Some(f) = last.footer.take() {
             foot.push(f);
         }
         if suppressed > 0 {
-            foot.push(format!("{suppressed} more held back by the hourly limit"));
+            foot.push(i18n::held_by_limit(lang, suppressed));
         }
         if !cfg.prefix.is_empty() {
             foot.push(cfg.prefix.clone());
@@ -1171,8 +1243,8 @@ pub fn compose(cfg: &AlertConfig, events: &[AlertEvent], suppressed: usize) -> S
 }
 
 /// A photo's caption: its card, under Telegram's 1024 characters.
-fn caption_of(cfg: &AlertConfig, ev: &AlertEvent) -> String {
-    let mut c = ev.card();
+fn caption_of(cfg: &AlertConfig, ev: &AlertEvent, lang: Lang) -> String {
+    let mut c = ev.card_in(lang);
     if !cfg.prefix.is_empty() {
         c.footer = Some(cfg.prefix.clone());
     }
@@ -1294,40 +1366,16 @@ impl DriftWatch {
             .map(|d| (d.feature.clone(), d.outside_pct))
             .collect();
         let mut out = Vec::new();
-        for (name, label, total, hits) in [
-            ("vol", "volatility model", status.drift.len(), vol),
-            ("picks", "M2 coin ranking", status.picks.drift.len(), picks),
+        for (name, model, total, hits) in [
+            ("vol", i18n::DriftModel::Vol, status.drift.len(), vol),
+            ("picks", i18n::DriftModel::Picks, status.picks.drift.len(), picks),
         ] {
             let now = !hits.is_empty();
             let was = self.muted.insert(name, now).unwrap_or(false);
             if now && !was {
-                let list: Vec<String> = hits.iter().take(4).map(|(f, p)| format!("{f} {p:.0} % outside")).collect();
-                let mut rows = vec![Row::new("Inputs outside", format!("{} of {total}", hits.len()))];
-                rows.extend(hits.iter().take(4).map(|(f, p)| Row::new(f.clone(), format!("{p:.0} % outside"))));
-                out.push(
-                    AlertEvent::new(
-                        AlertKind::ModelDrift,
-                        format!("drift:{name}:on"),
-                        format!(
-                            "{label} muted: {} of {total} inputs outside the trained range ({}). Its forecasts are not to be trusted until they are back in range or it is retrained.",
-                            hits.len(),
-                            list.join(", ")
-                        ),
-                    )
-                    .titled(format!("{} muted", sentence(label)))
-                    .with_summary("Inputs outside the range it was trained on: not to be trusted until back in range or retrained.")
-                    .with_rows(rows),
-                );
+                out.push(AlertEvent::from_msg(format!("drift:{name}:on"), Msg::DriftOn { model, total, hits }));
             } else if was && !now {
-                out.push(
-                    AlertEvent::new(
-                        AlertKind::ModelDrift,
-                        format!("drift:{name}:off"),
-                        format!("{label} inputs are back in the trained range."),
-                    )
-                    .titled(format!("{} back in range", sentence(label)))
-                    .with_emoji("✅"),
-                );
+                out.push(AlertEvent::from_msg(format!("drift:{name}:off"), Msg::DriftOff { model }).with_emoji("✅"));
             }
         }
         out
@@ -1346,3 +1394,7 @@ mod tests;
 #[cfg(test)]
 #[path = "alerts_card_tests.rs"]
 mod card_tests;
+
+#[cfg(test)]
+#[path = "alerts_i18n_tests.rs"]
+mod i18n_tests;

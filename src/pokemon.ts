@@ -27,8 +27,16 @@ export interface PokemonCard {
   /** Updated within two weeks. A stale block is shown for the record only. */
   cardmarketFresh?: boolean;
   spreadPct: number | null;
+  /** The card's page (the API's product link), else a search for its exact name. */
   tcgplayerUrl: string | null;
   cardmarketUrl: string | null;
+  /** "product" or "search" (missing on data written before the links were added). */
+  tcgplayerLink?: string;
+  cardmarketLink?: string;
+  /** Cardmarket's average sell price, EUR. */
+  cardmarketAvgEur?: number | null;
+  /** When TCGplayer's price was last refreshed (YYYY-MM-DD). */
+  tcgplayerUpdated?: string | null;
   change1dPct: number | null;
   change7dPct: number | null;
   change30dPct: number | null;
@@ -113,7 +121,57 @@ export interface PokemonNewSet {
   /** Mean of the 10 dearest singles. */
   top10MeanUsd: number | null;
   boosterBoxUsd: number | null;
-  cards: { name: string; number: string | null; rarity: string | null; priceUsd: number | null; image: string | null; url: string | null }[];
+  cards: { name: string; number: string | null; rarity: string | null; priceUsd: number | null; image: string | null; url: string | null; cardmarketUrl?: string | null }[];
+}
+
+export const CARDMARKET_SEARCH = "https://www.cardmarket.com/en/Pokemon/Products/Search";
+export const TCGPLAYER_SEARCH = "https://www.tcgplayer.com/search/pokemon/product";
+
+/** A card's name as the markets list it: TCGplayer's " - 152/128" number suffix dropped (as lab.pokemon.links). */
+export function searchName(name: string): string {
+  const s = name.split(/\s+/).filter(Boolean).join(" ");
+  const t = s.replace(/\s+-\s+[A-Za-z]{0,6}\d*[A-Za-z]*\/[A-Za-z0-9]+$|\s+-\s+\d+[A-Za-z]?$/, "").trim();
+  return t || s;
+}
+
+/** Only https links are opened from the page. */
+export function safeLink(u: string | null | undefined): string | null {
+  if (!u) return null;
+  try {
+    const p = new URL(u);
+    return p.protocol === "https:" && !p.username && !p.password ? p.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface CardLink {
+  label: string;
+  url: string;
+  /** A search for the name, not the card's own page. */
+  search: boolean;
+}
+
+/** Cardmarket and TCGplayer for a card: its own pages when the lab has them, else a search for its exact name. */
+export function cardLinks(c: { name: string; cardmarketUrl?: string | null; tcgplayerUrl?: string | null; url?: string | null; cardmarketLink?: string; tcgplayerLink?: string }): CardLink[] {
+  const q = encodeURIComponent(searchName(c.name));
+  const cm = safeLink(c.cardmarketUrl);
+  const tp = safeLink(c.tcgplayerUrl ?? c.url);
+  const cmSearch = !cm || c.cardmarketLink === "search" || cm.startsWith(CARDMARKET_SEARCH);
+  const tpSearch = !tp || c.tcgplayerLink === "search" || tp.startsWith(TCGPLAYER_SEARCH);
+  if (!q) return [];
+  return [
+    { label: cmSearch ? "Cardmarket search" : "Cardmarket", url: cm ?? `${CARDMARKET_SEARCH}?searchString=${q}`, search: cmSearch },
+    { label: tpSearch ? "TCGplayer search" : "TCGplayer", url: tp ?? `${TCGPLAYER_SEARCH}?productLineName=pokemon&q=${q}&view=grid`, search: tpSearch },
+  ];
+}
+
+/** How old a Cardmarket price is on the snapshot day, in days; null without both dates. */
+export function cardmarketAgeDays(updated: string | null | undefined, snapshot: string | null | undefined): number | null {
+  if (!updated || !snapshot) return null;
+  const a = Date.parse(`${updated.slice(0, 10)}T00:00:00Z`);
+  const b = Date.parse(`${snapshot.slice(0, 10)}T00:00:00Z`);
+  return Number.isFinite(a) && Number.isFinite(b) ? Math.round((b - a) / 86_400_000) : null;
 }
 
 /** "out 29 days", "out in 22 days", "out today". */

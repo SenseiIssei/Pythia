@@ -164,6 +164,31 @@ def test_alerts_for_big_winners_and_grouped_losers():
     assert not [c for c in again if "losers" in c.title], "losers at most once an hour"
 
 
+def test_cards_come_from_the_message_catalog_in_english_or_german():
+    from lab.ops import notify
+
+    f = Feed()
+    st = pf.run(f, NOW)["state"]
+    f.marks[MINT] = (0.0021, 80_000.0)
+    res = pf.run(f, NOW + 30 * 60_000, st)
+    de = pf.alert_cards(res["closed"], res["state"], NOW + 30 * 60_000, "de")
+    text = notify.plain(notify.render_post(de))
+    assert "Paper-Gewinner" in text and "Gewinnmitnahme" in text and "Nur Paper" in text
+    import re
+    for english in ("winner", "became", "take profit", "Paper only", "Rule"):
+        assert not re.search(rf"\b{english}\b", text), english
+    f.marks[MINT] = (0.0001, 100.0)
+    res = pf.run(f, NOW + 40 * 60_000, res["state"])
+    de = pf.alert_cards(res["closed"], res["state"], NOW + 40 * 60_000, "de")
+    text = notify.plain(notify.render_post(de))
+    assert "Paper-Verlierer" in text and "Rug: Liquidität" in text and "Totalverlust" in text
+    data, _ = pf.report(res["state"], NOW + 50 * 60_000)
+    card = notify.plain(notify.render_post([pf.report_card(data, "de")]))
+    assert "pump.fun Paper-Bücher" in card and "Regel" in card and "Gestern" in card
+    en = notify.plain(notify.render_post([pf.report_card(data, "en")]))
+    assert "pump.fun paper books" in en and "Yesterday" in en
+
+
 def test_report_carries_the_lab_feed_header():
     f = Feed()
     st = pf.run(f, NOW)["state"]

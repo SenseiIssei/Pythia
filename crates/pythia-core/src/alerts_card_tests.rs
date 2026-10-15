@@ -109,6 +109,12 @@ fn a_fill_for_an_experiment_says_so_on_its_line_and_card() {
     let t = cards[0].table.as_ref().unwrap();
     assert!(t.rows.iter().any(|r| r[1] == "PEPE (exp)") && t.rows.iter().any(|r| r[1] == "BTC"));
     assert!(cards[0].title.contains("experiment"));
+    // In German too, from the catalog.
+    let de = trade_cards_in(&[&a, &b], Lang::De);
+    assert!(de[0].title.ends_with("· Experiment"), "{}", de[0].title);
+    let t = de[0].table.as_ref().unwrap();
+    assert!(t.rows.iter().any(|r| r[1] == "PEPE (Exp.)"));
+    assert!(de[0].footer.as_deref().unwrap_or("").contains("Deflationstest"));
     // Without an experiment nothing changes.
     let plain = trade_cards(&[&b]);
     assert!(!plain[0].title.contains("experiment") && !plain[0].footer.as_deref().unwrap_or("").contains("experiment"));

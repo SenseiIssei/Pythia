@@ -35,7 +35,7 @@ import polars as pl
 
 from .. import report
 from ..collect.pokemon import lake
-from . import alerts, collection, model, study
+from . import alerts, collection, links, model, study
 from . import data as pdata
 
 NAME = "pokemon"
@@ -69,6 +69,7 @@ def ui_cards(snap: pl.DataFrame, hist: pl.DataFrame, extra_ids: set[str]) -> lis
         c30_src = "snapshots"
         if c30 is None and r.get("cm_trend_30") is not None:
             c30, c30_src = _f(r["cm_trend_30"] * 100, 2), "cardmarket"
+        lk = links.for_card(r)
         out.append({
             "id": r["card_id"], "name": r["name"], "set": r.get("set_name"), "setId": r.get("set_id"),
             "number": r.get("number"), "rarity": r.get("rarity"), "releaseDate": r.get("release_date"),
@@ -76,7 +77,10 @@ def ui_cards(snap: pl.DataFrame, hist: pl.DataFrame, extra_ids: set[str]) -> lis
             "priceUsd": _f(r["price"], 2), "priceSrc": r.get("price_src"), "variant": r.get("tp_variant"),
             "cardmarketEur": _f(r.get("cm_trend"), 2), "spreadPct": _chg(r.get("spread")),
             "cardmarketUpdated": r.get("cm_updated"), "cardmarketFresh": bool(r.get("cm_fresh")),
-            "tcgplayerUrl": r.get("tp_url"), "cardmarketUrl": r.get("cm_url"),
+            "cardmarketAvgEur": _f(r.get("cm_avg_sell"), 2), "tcgplayerUpdated": r.get("tp_updated"),
+            # The card's own page from the API, else a search for its exact name (lab.pokemon.links).
+            "tcgplayerUrl": lk["tcgplayer"], "cardmarketUrl": lk["cardmarket"],
+            "tcgplayerLink": lk["tcgplayerKind"], "cardmarketLink": lk["cardmarketKind"],
             "change1dPct": _chg(r.get("ret_1d")), "change7dPct": _chg(r.get("ret_7d")),
             "change30dPct": c30, "change30dSrc": c30_src,
             "pred30dPct": _f((r.get("pred_30d") or 0) * 100, 2), "pred90dPct": _f((r.get("pred_90d") or 0) * 100, 2),
@@ -102,7 +106,9 @@ def ui_new_sets(rows: list[dict], singles: pl.DataFrame, top: int = 6) -> list[d
         out.append({"set": r["set"], "released": r["released"], "ageDays": r["age_days"], "singles": r["singles"],
                     "top10MeanUsd": _f(r["top10_mean_usd"], 2), "boosterBoxUsd": _f(r["booster_box_usd"], 2),
                     "cards": [{"name": c["name"], "number": c["number"], "rarity": c["rarity"],
-                               "priceUsd": _f(c["market"], 2), "image": c["image_url"], "url": c["url"]}
+                               "priceUsd": _f(c["market"], 2), "image": c["image_url"],
+                               "url": links.tcgplayer(c["url"], c["name"])[0],
+                               "cardmarketUrl": links.cardmarket(None, c["name"])[0]}
                               for c in g.to_dicts()]})
     return out
 
@@ -312,8 +318,14 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
                    "pred_90d_pct": c["pred90dPct"], "source": c["predSrc"]} for c in top],
                  ["card", "set", "price", "fair", "pred_90d_pct", "source"]),
             "## Alerts today", "",
-            f"{len(al.get('moves') or [])} strong moves, {len(al.get('undervalued') or [])} undervalued cards"
-            + (" (sent)." if al.get("sent") else ".")]
+            f"{len(al.get('moves') or [])} strong moves, {len(al.get('undervalued') or [])} undervalued cards, "
+            f"{len(al.get('newSets') or [])} new-set notes" + (" (sent)." if al.get("sent") else "."),
+            "",
+            "Every alert lists per card: set, number, rarity, the condition the prices are for (ungraded, which "
+            "printing), TCGplayer and Cardmarket prices with their dates (a Cardmarket price older than 14 days is "
+            "marked stale), fair value and gap, the 30 and 90 day forecasts with how far to trust them, the recent "
+            "change, and links to the card on Cardmarket and TCGplayer (the API's own product links, else a "
+            "search for the exact name). Top 5 per alert, the card pictures first on Telegram."]
     return "\n".join(out) + "\n"
 
 
@@ -363,7 +375,8 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
     month_before = collection.load_state(pdir).get("last_rebalance")
     if not dry_run:
         collection.step(snap, pdir, today, str(snap["pred_src"][0]))
-    al = alerts.run(snap, root, today, mstat["validated"], dry_run=dry_run or not send_alerts)
+    al = alerts.run(snap, root, today, mstat["validated"], dry_run=dry_run or not send_alerts,
+                    horizons=mstat["horizons"], singles=singles)
     coll = ui_collection(pdir)
     extra = {h["id"] for h in coll["holdings"]} | {a["card_id"] for a in al["moves"] + al["undervalued"]}
     cards = ui_cards(snap, df, extra)
@@ -384,7 +397,8 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
                                                           "mae", "mae_zero")}
                                for h, e in mstat["horizons"].items()}},
         "cards": cards, "collection": coll, "newSets": ui_new_sets(studies["release"]["new_sets"], singles),
-        "alerts": {"moves": al["moves"], "undervalued": al["undervalued"], "sent": al.get("sent", False)},
+        "alerts": {"moves": al["moves"], "undervalued": al["undervalued"], "newSets": al.get("newSets") or [],
+                   "sent": al.get("sent", False)},
         "studies": {"premium": studies["premium"]["rows"], "release": studies["release"]["cross"],
                     "spread": {k: studies["spread"].get(k) for k in ("cards", "median_pct", "p25_pct", "p75_pct")}},
     }
@@ -405,7 +419,8 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
     os.replace(rtmp, rp)
     data = {"verdict": v, "generated": ui["generated"], "meta": meta, "model": mstat,
             "fair_value": fv, "studies": studies, "collection": {k: coll[k] for k in ("started", "equity", "returnPct")},
-            "alerts": {"moves": len(al["moves"]), "undervalued": len(al["undervalued"])},
+            "alerts": {"moves": len(al["moves"]), "undervalued": len(al["undervalued"]),
+                       "new_sets": len(al.get("newSets") or [])},
             "seconds": round(time.time() - t0, 1)}
     data.update(feed(meta, mstat, coll, al, top))
     report.write(NAME, md, clean(data))

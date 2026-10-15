@@ -7,6 +7,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | always | market data recorder | container `pythia-recorder` (`research/recorder`) |
 | always | headless engine: lab book, volatility model in shadow mode, `/api/lab` | container `pythia-server` on 127.0.0.1:8787 only |
 | always | a second engine for autopilots, kept apart so they never touch the lab book's markets or evidence; state in `/srv/pythia-data/autopilot` | container `pythia-autopilot` on 127.0.0.1:8788 only |
+| 00:40 | flow data: Coinbase BTC-USD 1h and Upbit KRW-BTC 1d (the exchange premiums), USD/KRW, DefiLlama stablecoin supply, Deribit BTC and ETH DVOL, a Deribit option snapshot with the 25-delta skew at 30 days (`lab.collect.flow`, under a minute daily; the first run fetches the history back to 2019 in about 4 minutes). Into `/srv/pythia-data/flow/`, read by the X6 study (`results/flow_overlays.md`) | `jobs.yaml` only |
 | 03:30 | history backfill: 20 lab coins, every USDT pair, every USDT perp | `/etc/cron.d/pythia-backfill` |
 | 04:00 | momentum paper books, engine signals, paper vs backtest review | `/etc/cron.d/pythia-paper` |
 | 04:15 | sweep candidates as paper books: survivorship-free momentum (daily, and in seven weekly tranches), Donchian breakout (about 10 minutes, rebuilds the daily panel into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-families` |
@@ -20,11 +21,14 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | 07:15 | model zoo: retrains the zoo models that are due, promotes a challenger only if better out of sample, shadow forecasts and scores, drift, the Models page report; posts promotions and drift (`lab.models.train --due`, about 5 minutes; longer on Sundays when M8, M8q and M10 retrain) | `/etc/cron.d/pythia-models` |
 | 07:05 | Pokemon cards: price snapshot (`lab.collect.pokemon`, 15 to 45 minutes keyless, the API is slow and retried), then studies, fair value, forecasts, the paper collection and card alerts (`lab.pokemon.daily`, seconds at first, up to about 20 minutes with a year of history). Data and play money only | `/etc/cron.d/pythia-pokemon` |
+| 06:20 | AI brief: one Haiku call through the autopilot engine's metered `POST /api/ai/complete` (batch, half price), 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule; three lines for the digest (`lab.ai.brief`, minutes; see `docs/AI.md`) | jobs.yaml `ai-brief` |
+| Sun 09:00 | AI weekly review: one Sonnet call (batch) over every study and live result, three proposed experiments in `reports/ai/weekly.md`, never run by anything (`lab.ai.weekly`) | jobs.yaml `ai-weekly` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
 | hourly :12 | CS2 skins: Skinport snapshots and sales history, Steam prices for the watchlist, then models (refit daily), alerts, the play-money portfolio (weekly) and the board for the app (`lab.collect.cs2`, then `lab.cs2.run`; 2 Skinport requests and up to 100 Steam requests, about 6 minutes) | `/etc/cron.d/pythia-cs2` |
+| 14:40, 20:40 | CS2 Steam market: the day's Steam price snapshot from csgotrader's public file, then trends, trend alerts with Steam and Skinport links, and a summary card with a chart (`lab.collect.cs2 --steam-market`, then `lab.cs2.trends`; 2 GETs, seconds; the second run only catches a late rebuild) | `jobs.yaml` only (`cs2-trends`) |
 | every 15 min | trending watcher: DexScreener boosted tokens, Binance gainers and volume surges, surge alerts on coins Alpaca lists, a daily on-chain hype digest from 08:00 (`lab.ops.trending`, seconds; reads only) | `/etc/cron.d/pythia-trending` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 | every 10 minutes | listings watcher: new pairs on Alpaca, Binance, Coinbase, Kraken and Binance listing announcements, posted to Telegram (`lab.ops.listings`, seconds); then the listings paper book, off unless the W6 rule passed (`lab.paper.listings_book`) | `/etc/cron.d/pythia-listings` |
@@ -57,7 +61,7 @@ or only the part that changed:
 
 ```bash
 research/ops/deploy_lab.sh     # the lab code in /opt/pythia-lab
-research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, system_health.sh in /opt/pythia-ops, then render
+research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, i18n.py, system_health.sh in /opt/pythia-ops, then render
 ```
 
 ## The job table
@@ -554,13 +558,20 @@ Now, whatever the day: `... python -m lab.ops.notify --weekly --force`.
 **Health alarm.** `system_health.sh` runs `/opt/pythia-ops/notify.py --health`
 after each check when that file and `/etc/pythia/alerts.env` exist
 (`PYTHIA_NOTIFY_PY` and `PYTHIA_ALERT_ENV` move them). It needs only
-`python3` on the host. Install with the health script (and again after an
-update of `notify.py`):
+`python3` on the host, and `i18n.py` next to it (the words of the messages in
+English and German). Install with the health script (and again after an
+update of `notify.py` or `i18n.py`):
 
 ```bash
 install -m 755 research/ops/system_health.sh /opt/pythia-ops/system_health.sh
 install -m 644 research/lab/lab/ops/notify.py /opt/pythia-ops/notify.py
+install -m 644 research/lab/lab/ops/i18n.py /opt/pythia-ops/i18n.py
 ```
+
+**Message language.** The messages follow the app's setting (Settings,
+Notifications, Message language). `PYTHIA_ALERT_LANG=de` in
+`/etc/pythia/alerts.env` (and the engine's environment) fixes German for every
+job and the engine whatever the app says.
 
 The cron line of the health check stays as it is.
 
@@ -653,6 +664,51 @@ docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app py
 ```
 
 The health check has a `cs2 collector` row (last run within three hours).
+
+### Steam market trends (daily, job `cs2-trends`)
+
+Steam's own endpoint refuses the collector (above), and that is left alone:
+no other user agent, no proxy, nothing that works around it. The Steam side
+comes instead from the public price files of the open-source CSGO Trader
+browser extension (`https://prices.csgotrader.app/latest/steam.json` and
+`exchange_rates.json`; the extension downloads the same files for every
+user). `steam.json` has, for about 34,000 items, the average Steam Community
+Market sale price in USD over the last 24 hours, 7, 30 and 90 days, rebuilt
+once a day (13:25 UTC on 2026-10-15); no volume. There are no published terms
+or limits for the files: the job takes them once a day (about 0.6 MB
+gzipped), names itself in the user agent, and the CS2 page and the reports
+name the source. Should the owner of the files object, switch the job off
+(`enabled: false` in `jobs.yaml`).
+
+The job (table entry `cs2-trends`, 14:40 and 20:40 UTC, the second one only
+catches a late rebuild) runs `python -m lab.collect.cs2 --steam-market` (the
+day's snapshot, dated by the file's Last-Modified day, stored once) and then
+`python -m lab.cs2.trends`: 1, 7 and 30-day changes (the source's windows
+until our own snapshots cover the span), momentum against mean reversion by
+group (cases, capsules, stickers, knives and gloves, skins by wear, price
+tiers as a stand-in for rarity), the Steam against Skinport spread after both
+fees (Steam keeps about 13 % and pays in wallet funds; Skinport 8 %, cash),
+new cases and capsules and the cases around the latest drop. It posts a trend
+alert when something is notable (top movers 15 % or more in a day, or 20 % off
+the weekly average before there is a day-old snapshot; cases up 15 % in a
+week; a new case or capsule; Steam to Skinport clearing 5 % after fees, or a
+Steam premium far above its group), each item with its Steam market listing
+and Skinport page, and once a day a summary card with a small chart (category
+`cs2` in the app's notification switches). Information only.
+
+| Path | What |
+|---|---|
+| `cs2/daily/steam_market/date=*.parquet` | the daily Steam snapshot (USD averages per window, EUR per USD), kept forever (about 1 MB a day) |
+| `cs2/steam_market.json` | the last snapshot run |
+| `cs2/trends/latest.json` | what the CS2 page shows; the hourly board carries it as `steamTrends` |
+| `cs2/trends/alerts_state.json`, `alerts.jsonl` | alerts sent, 3-day cooldown per item and kind; the last summary day |
+| `reports/cs2_trends/latest.{md,json}` | the daily report, also a lab feed |
+
+Run once by hand, without posting:
+
+```bash
+docker run --rm --memory 3g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.cs2 --steam-market && python -m lab.cs2.trends --dry-run'
+```
 
 ## Trending watcher
 
