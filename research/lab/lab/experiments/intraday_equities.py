@@ -292,7 +292,9 @@ def load_proxy(refresh: bool = False, workers: int = 6, fetch=None) -> Bars:
         valid[s] = proxy_valid(mins, vol)
         per[s] = (days, a)
         notes.append(f"{s} as {inst}: {valid[s].sum()} valid days of {len(days)} with session quotes")
-    calendar = per["SPY"][0][valid["SPY"]]
+    # A market day is a day at least one of the three passes; Oanda's SPX500 feed is
+    # thin in some years (2017), so SPX alone would drop days the other two trade.
+    calendar = np.unique(np.concatenate([per[s][0][valid[s]] for s in PROXY]))
     return assemble(per, valid, calendar, PROXY_SCALE, "proxy", notes)
 
 
@@ -791,8 +793,10 @@ def evaluate(B: Bars, F: Features, U: np.ndarray, v: dict, cost: np.ndarray, win
     x1, x2 = book(sim, U, cost, 1.0), book(sim, U, cost, 2.0)
     is_m, oos_m = windows
     row = {k: v[k] for k in v}
+    n_u = np.maximum(U.sum(0), 1)
+    x0 = np.where(U, sim.gross, 0.0).sum(0) / n_u            # before spread and fees (information only)
     row.update(is_sharpe=sharpe(x1[is_m]), oos_sharpe=sharpe(x1[oos_m]), oos_sharpe_2x=sharpe(x2[oos_m]),
-               is_sharpe_2x=sharpe(x2[is_m]))
+               is_sharpe_2x=sharpe(x2[is_m]), oos_sharpe_gross=sharpe(x0[oos_m]))
     s = et.summary(x1[oos_m])
     nU = np.maximum(U.sum(0), 1)
     ent = (np.where(U, sim.entries, 0).sum(0) / nU)[oos_m]
@@ -849,7 +853,9 @@ def run(B: Bars, event_days: set | None = None) -> dict:
     drift_x = book(drift, U, cost)
     spy = buy_and_hold(B, F)
     etf_U = U & np.array([s in ETFS for s in B.syms])[:, None]
+    drift_0 = np.where(U, drift.gross, 0.0).sum(0) / np.maximum(U.sum(0), 1)
     bench = {"session drift (open to 15:55, same symbols and costs)": drift_x,
+             "session drift before costs (information)": drift_0,
              "SPY buy and hold" + (" (S&P 500 CFD, no dividends)" if B.source == "proxy" else ""): spy}
 
     def verdict(p: dict) -> dict:
@@ -879,7 +885,8 @@ def run(B: Bars, event_days: set | None = None) -> dict:
         s = et.summary(x[oos_m])
         bench_rows.append({"book": label, "is_sharpe": sharpe(x[is_m]), "oos_sharpe": s["sharpe"],
                            "oos_cagr": s["cagr"], "oos_vol": s["vol"], "oos_max_dd": s["max_dd"],
-                           "recent_sharpe": sharpe(x[(B.dates >= RECENT) & oos_m]) if ((B.dates >= RECENT) & oos_m).sum() > 20 else None})
+                           "recent_sharpe": sharpe(x[(B.dates >= RECENT) & oos_m])
+                           if ((B.dates >= RECENT) & oos_m).sum() > 20 else "n/a"})
     # Information only (not a trial): the pick on the ETF leg alone.
     pick_sim = simulate(B, held_from_targets(targets(B, F, pick)))
     etf_only = book(pick_sim, etf_U, cost)
@@ -947,9 +954,12 @@ def markdown(res: dict) -> str:
               f"({ov['row']['oos_sharpe_2x']:.2f} with costs doubled, {ov['late_sharpe']:.2f} filled a bar late), "
               f"in sample {ov['row']['is_sharpe']:.2f}; deflated p {ov['row']['deflated_p']:.2f} over "
               f"{res['deflation']['n_trials']} trials.", ""]
-    cols = ["name", "is_sharpe", "oos_sharpe", "oos_sharpe_2x", "oos_cagr", "oos_max_dd", "trades_per_day",
-            "net_bps_per_trade", "expo", "deflated_p"]
+    cols = ["name", "is_sharpe", "oos_sharpe", "oos_sharpe_2x", "oos_sharpe_gross", "oos_cagr", "oos_max_dd",
+            "trades_per_day", "net_bps_per_trade", "expo", "deflated_p"]
     lines += ["### Every trial (base cost; Sharpe from daily book returns, x sqrt 252)", "",
+              "`oos_sharpe_gross` is before spread and fees (information, never judged); `trades_per_day` entries "
+              "per symbol slot; `net_bps_per_trade` net P&L per entry on the slot's capital; `expo` mean share of "
+              "the session in a position.", "",
               table([r for r in res["rows"] if not r.get("robustness")], cols),
               "Robustness on each family's pick (counted):", "",
               table([r for r in res["rows"] if r.get("robustness")], cols)]
