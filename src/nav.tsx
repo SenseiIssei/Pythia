@@ -21,6 +21,7 @@ import {
   Microscope,
   Plane,
   GraduationCap,
+  Layers,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -43,6 +44,7 @@ export type PageId =
   | "models"
   | "lab"
   | "predictions"
+  | "cards"
   | "live"
   | "risk"
   | "journal"
@@ -68,6 +70,8 @@ export const NAV: NavItem[] = [
   { id: "autopilot", label: "Autopilot", icon: Plane, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },
   { id: "wallets", label: "Money", icon: Coins, section: "Overview" },
+  // Pokemon cards: prices and forecasts, paper only. Plain enough for simple mode.
+  { id: "cards", label: "Cards", icon: Layers, section: "Overview" },
 
   // ── advanced only ──
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, section: "Overview", advanced: true },
@@ -91,7 +95,7 @@ export const NAV: NavItem[] = [
   { id: "about", label: "About", icon: Info, section: "Config" },
 ];
 
-/** The nav for one mode. Simple keeps seven entries; advanced keeps everything. */
+/** The nav for one mode. Simple keeps eight entries; advanced keeps everything. */
 export function navFor(mode: UiMode): NavItem[] {
   return mode === "advanced" ? NAV : NAV.filter((n) => !n.advanced);
 }

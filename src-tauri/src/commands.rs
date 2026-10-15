@@ -722,6 +722,12 @@ pub fn lab_status() -> pythia_core::labview::LabStatus {
     pythia_core::labview::status()
 }
 
+/// Pokemon cards from the lab (prices, forecasts, the paper collection). Read-only.
+#[tauri::command]
+pub fn pokemon_status() -> pythia_core::labview::PokemonView {
+    pythia_core::labview::pokemon()
+}
+
 /// The volatility model in shadow mode: forecasts, live score, drift. Read-only.
 #[tauri::command]
 pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::MlStatus {
