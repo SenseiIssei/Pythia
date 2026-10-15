@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Menu, Minus, X, Power, ShieldCheck, TriangleAlert } from "lucide-react";
 import { navFor, isVisible, type PageId } from "./nav";
+import { onOpenPage } from "./navigate";
 import { setUiMode, useUiMode, type UiMode } from "./uiMode";
 import { Home as HomePage } from "./pages/Home";
 import { StoreProvider, useStore } from "./store";
@@ -28,6 +29,7 @@ import { Signals } from "./pages/Signals";
 import { Predictions } from "./pages/Predictions";
 import { Models } from "./pages/Models";
 import { Lab } from "./pages/Lab";
+import { Research } from "./pages/Research";
 import { Live } from "./pages/Live";
 import { Risk } from "./pages/Risk";
 import { Journal } from "./pages/Journal";
@@ -52,6 +54,7 @@ const PAGES: Record<PageId, () => ReactNode> = {
   predictions: Predictions,
   models: Models,
   lab: Lab,
+  research: Research,
   live: Live,
   risk: Risk,
   journal: Journal,
@@ -208,6 +211,11 @@ function Chrome() {
     if (narrow) setSidebar(false);
     mainRef.current?.scrollTo({ top: 0 });
   }
+
+  // A page asking for another (Home's insights open Research).
+  const goRef = useRef(go);
+  goRef.current = go;
+  useEffect(() => onOpenPage((id) => goRef.current(id)), []);
 
   const navBody = (
     <div className="flex h-full w-64 flex-col md:w-52">

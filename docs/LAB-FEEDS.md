@@ -84,12 +84,25 @@ candidates and scores them:
 
 - an item's own `importance`, or 60 for a `bad` feed's headline and 35 for a
   `watch` one;
-- a paper book or autopilot below its backtest's band: 75;
+- a paper book or autopilot below its backtest's band: 75, otherwise worth
+  watching: 40;
 - a model promoted by the learning loop: 70, rejected: 35;
 - half the score after 36 hours, nothing after a week.
 
+The forward report and the learning loop write the header too, so they show
+up in any reader of the feeds; where the app has their full reports it uses
+the plain sentences above instead of their feed items.
+
 The three highest, at most one per feed, are shown. With nothing above 20, the
-card says all is quiet.
+card says all is quiet. The code is `pickInsights` in `src/labFeeds.ts`.
+
+## Where it shows
+
+- **Home**, "Today in the lab": the three insights. Hidden without an engine.
+- **Research** (advanced view): the same insights, every strategy book with
+  its backtest, forward test, gate 7 progress and the autopilots running it,
+  the model scores and registry decisions, what the learning loop changed,
+  every other feed as a card with its items, and every study.
 
 ## Study write-ups
 
@@ -97,5 +110,9 @@ card says all is quiet.
 `PYTHIA_RESULTS` is set) is the full write-up of a study. The app ships the
 copies in the repository and the engine serves newer ones from
 `PYTHIA_LAB_RESULTS`, else `<PYTHIA_DATA>/results`, at `GET /api/lab/studies`.
-The Research page takes each study's one-line verdict from its first
-`**Verdict: ...**` paragraph, so start the results section with one.
+The Research page takes each study's one-line verdict from its row in the
+"Results so far" table of `research/lab/README.md` (a row that says
+`See results/<name>.md` is linked to that write-up), the families of the
+strategy sweep from the sweep table, and any other write-up from its first
+`**Verdict: ...**` paragraph, so start the results section with one. The
+write-up's first `# ` heading is its title.
