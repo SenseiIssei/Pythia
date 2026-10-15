@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { ShieldCheck, Eye, Power, KeyRound, ArrowRight, ArrowLeft } from "lucide-react";
+import { ShieldCheck, Eye, Power, KeyRound, ArrowLeft } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Button } from "../design";
 
 const DONE_KEY = "pythia.onboarding.v1";
 
@@ -24,7 +24,7 @@ export function resetOnboarding(): void {
 
 interface Step {
   icon: LucideIcon;
-  tone: string;
+  tint: string;
   title: string;
   body: string[];
 }
@@ -37,34 +37,34 @@ interface Step {
 const STEPS: Step[] = [
   {
     icon: ShieldCheck,
-    tone: "text-success",
+    tint: "bg-up/10 text-up",
     title: "This is practice money",
     body: [
       "Pythia starts with a pretend balance of 100,000 dollars. Every trade it makes is simulated on real market prices.",
-      "Nothing leaves this computer and nothing can be lost. The green banner at the top says so whenever that is true.",
+      "Nothing leaves this computer and nothing can be lost. The label at the top says Practice whenever that is true.",
     ],
   },
   {
     icon: Eye,
-    tone: "text-accent",
+    tint: "bg-accent/10 text-accent",
     title: "Here is what it is doing",
     body: [
       "It watches crypto, shares and prediction markets, and a few strategies decide when to buy or sell.",
-      "Every prediction it makes is written down and later checked against what really happened. Until a strategy has proven itself over weeks, it stays in practice. The Home page tells you in plain words how it is doing today.",
+      "Every prediction it makes is written down and later checked against what really happened. Until a strategy has proven itself over weeks, it stays in practice. Home tells you in plain words how it is doing today.",
     ],
   },
   {
     icon: Power,
-    tone: "text-danger",
+    tint: "bg-down/10 text-down",
     title: "Here is the stop button",
     body: [
-      "\"Stop everything\" on the Home page stops it from buying anything new, immediately. It can still sell what it already holds.",
-      "There is also a KILL button in the top bar, on every page. Pressing it is never wrong.",
+      "\"Stop everything\" on Home stops it from buying anything new, immediately. It can still sell what it already holds.",
+      "There is also a Stop button at the top of every page. Pressing it is never wrong.",
     ],
   },
   {
     icon: KeyRound,
-    tone: "text-warning",
+    tint: "bg-warn/10 text-warn",
     title: "How it could ever use real money, and why not yet",
     body: [
       "Real money needs your own broker keys, a typed confirmation, and a strategy that has passed all of its checks, including 30 days of practice. It cannot happen by accident.",
@@ -88,61 +88,47 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div className="app-window grid-bg flex items-start justify-center overflow-y-auto p-4 sm:items-center sm:p-6">
-      <div className="w-full max-w-xl rounded-xl border border-cyber-border bg-cyber-surface p-5 sm:p-6">
-        <div className="mb-2 flex gap-1.5" role="img" aria-label={`Step ${i + 1} of ${STEPS.length}`}>
-          {STEPS.map((_, k) => (
-            <div key={k} className={`h-1 flex-1 rounded-full ${k <= i ? "bg-accent" : "bg-cyber-surface-2"}`} />
-          ))}
-        </div>
-        <div className="mb-5 font-mono text-[11px] text-cyber-text-faint">
-          {i + 1} of {STEPS.length}
-        </div>
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={i}
-            initial={{ opacity: 0, x: 16 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -16 }}
-            transition={{ duration: 0.18 }}
-          >
-            <step.icon size={30} aria-hidden className={`mb-3 ${step.tone}`} />
-            <h1 className="mb-3 font-mono text-xl font-bold text-cyber-text">{step.title}</h1>
-            <div className="space-y-3 text-sm leading-relaxed text-cyber-text-dim">
-              {step.body.map((p) => (
-                <p key={p}>{p}</p>
-              ))}
-            </div>
-          </motion.div>
-        </AnimatePresence>
-        <div className="mt-6 flex items-center justify-between">
-          <button
-            type="button"
-            onClick={finish}
-            className="rounded px-1 text-xs text-cyber-text-faint hover:text-cyber-text"
-          >
-            Skip the introduction
-          </button>
-          <div className="flex gap-2">
-            {i > 0 && (
-              <button
-                type="button"
-                onClick={() => setI(i - 1)}
-                className="flex items-center gap-1.5 rounded-lg border border-cyber-border px-3 py-1.5 text-sm text-cyber-text-dim hover:text-cyber-text"
-              >
-                <ArrowLeft size={14} /> Back
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => (last ? finish() : setI(i + 1))}
-              className="flex items-center gap-1.5 rounded-lg border border-accent/50 bg-accent/10 px-4 py-1.5 text-sm font-bold text-accent hover:bg-accent/20"
-            >
-              {last ? "Start in practice mode" : "Next"} {!last && <ArrowRight size={14} />}
+    <div className="app-window overflow-y-auto">
+      <main className="mx-auto flex min-h-full w-full max-w-xl flex-col px-4 pb-6 pt-6 sm:px-6 sm:pt-12">
+        <div className="flex items-center justify-between gap-3">
+          {i > 0 ? (
+            <button type="button" onClick={() => setI(i - 1)} aria-label="Back" className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-ink hover:bg-line">
+              <ArrowLeft size={17} aria-hidden />
             </button>
+          ) : (
+            <span className="h-9 w-9" aria-hidden />
+          )}
+          <div className="flex gap-1.5" role="img" aria-label={`Step ${i + 1} of ${STEPS.length}`}>
+            {STEPS.map((_, k) => (
+              <span key={k} className={`h-1.5 rounded-full transition-all ${k === i ? "w-6 bg-ink" : k < i ? "w-1.5 bg-ink" : "w-1.5 bg-line-strong"}`} />
+            ))}
+          </div>
+          <button type="button" onClick={finish} className="rounded-full px-2 py-1 text-[13px] font-semibold text-muted hover:text-ink">
+            Skip
+          </button>
+        </div>
+
+        <div key={i} className="flex-1 animate-slide-up pt-12 sm:pt-16">
+          <span className={`mb-6 flex h-16 w-16 items-center justify-center rounded-full ${step.tint}`} aria-hidden>
+            <step.icon size={28} />
+          </span>
+          <h1 className="text-[28px] font-bold leading-tight tracking-tight text-ink sm:text-[32px]">{step.title}</h1>
+          <div className="mt-4 space-y-3 text-[16px] leading-relaxed text-muted">
+            {step.body.map((p) => (
+              <p key={p}>{p}</p>
+            ))}
           </div>
         </div>
-      </div>
+
+        <div className="pt-8">
+          <Button full onClick={() => (last ? finish() : setI(i + 1))}>
+            {last ? "Start in practice mode" : "Continue"}
+          </Button>
+          <p className="mt-3 text-center text-[13px] text-faint">
+            {i + 1} of {STEPS.length}
+          </p>
+        </div>
+      </main>
     </div>
   );
 }

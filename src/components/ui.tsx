@@ -1,36 +1,33 @@
-import { motion } from "framer-motion";
-import {
-  CheckCircle2,
-  HelpCircle,
-  Info,
-  Loader2,
-  ShieldAlert,
-  TriangleAlert,
-  type LucideIcon,
-} from "lucide-react";
+import { HelpCircle, Info, Loader2, type LucideIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { explain } from "../glossary";
+import { Notice as DsNotice, type NoticeTone } from "../design/primitives/feedback";
+import { Sparkline as DsSparkline, LineChart, type ChartTone } from "../design/primitives/charts";
+import { Toggle as DsToggle } from "../design/primitives/controls";
 
-// ── shared neon UI kit ──────────────────────────────────────────────────────
+// ── the shared UI kit, in the calm design system's look ─────────────────────
 //
-// Colour carries meaning and nothing else: green is good, red is bad or
-// dangerous, amber asks for caution. Cyan is the accent for headings and
-// controls, purple marks research and AI. Plain numbers are plain white.
+// Older pages still build on these. Their APIs stay as they were, but every
+// colour now comes from the design tokens (src/design/tokens.ts), so they
+// follow light and dark mode. New code should prefer src/design.
+//
+// Colour carries meaning and nothing else: green is up or good, red is down or
+// dangerous, amber asks for caution. The one accent marks links, selection and
+// research. Plain numbers are plain ink.
 
 export type Tone = "cyan" | "purple" | "green" | "red" | "amber" | "neutral";
 
 /** Shared look for every text input, select and textarea. */
-export const inputCls =
-  "w-full min-w-0 rounded-md border border-cyber-border-bright bg-cyber-bg/60 px-2.5 py-1.5 text-sm text-cyber-text placeholder:text-cyber-text-faint transition-colors hover:border-cyber-text-faint focus:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50";
+export { inputCls } from "../design/primitives/controls";
 
 const TEXT: Record<Tone, string> = {
-  cyan: "text-accent",
-  purple: "text-purple-neon",
-  green: "text-success",
-  red: "text-danger",
-  amber: "text-warning",
-  neutral: "text-cyber-text",
+  cyan: "text-ink",
+  purple: "text-accent",
+  green: "text-up",
+  red: "text-down",
+  amber: "text-warn",
+  neutral: "text-ink",
 };
 
 /**
@@ -97,9 +94,9 @@ export function Explain({ text, label }: { text: string; label?: string }) {
           show();
         }}
         onKeyDown={(e) => e.key === "Escape" && hide()}
-        className="inline-flex shrink-0 cursor-help items-center rounded-full align-middle text-cyber-text-faint normal-case transition-colors hover:text-accent focus-visible:text-accent"
+        className="inline-flex shrink-0 cursor-help items-center rounded-full align-middle text-faint normal-case transition-colors hover:text-ink focus-visible:text-ink"
       >
-        <HelpCircle size={12} aria-hidden />
+        <HelpCircle size={13} aria-hidden />
       </button>
       {pos &&
         createPortal(
@@ -113,7 +110,7 @@ export function Explain({ text, label }: { text: string; label?: string }) {
               width: pos.width,
               transform: pos.above ? "translateY(-100%)" : undefined,
             }}
-            className="pointer-events-none z-[100] rounded-lg border border-cyber-border-bright bg-cyber-surface-2 px-3 py-2 font-sans text-xs normal-case leading-relaxed tracking-normal text-cyber-text shadow-xl shadow-black/50"
+            className="pointer-events-none z-[100] rounded-xl bg-primary px-3 py-2 font-sans text-[13px] font-normal normal-case leading-relaxed tracking-normal text-on-primary shadow-pop"
           >
             {text}
           </span>,
@@ -140,12 +137,12 @@ export function Term({ children, k, text }: { children: ReactNode; k?: string; t
 }
 
 const BUTTON: Record<Tone, string> = {
-  cyan: "bg-accent/10 border-accent/35 text-accent hover:bg-accent/20 hover:border-accent/60",
-  purple: "bg-purple-neon/10 border-purple-neon/35 text-purple-neon hover:bg-purple-neon/20 hover:border-purple-neon/60",
-  green: "bg-success/10 border-success/35 text-success hover:bg-success/20 hover:border-success/60",
-  red: "bg-danger/10 border-danger/35 text-danger hover:bg-danger/20 hover:border-danger/60",
-  amber: "bg-warning/10 border-warning/35 text-warning hover:bg-warning/20 hover:border-warning/60",
-  neutral: "bg-cyber-surface-2 border-cyber-border-bright text-cyber-text hover:bg-cyber-border-bright",
+  cyan: "bg-primary text-on-primary hover:opacity-90",
+  purple: "bg-accent/10 text-accent hover:bg-accent/15",
+  green: "bg-up/10 text-up hover:bg-up/15",
+  red: "bg-down/10 text-down hover:bg-down/15",
+  amber: "bg-warn/10 text-warn hover:bg-warn/15",
+  neutral: "bg-surface-2 text-ink hover:bg-line",
 };
 
 export function Button({
@@ -169,21 +166,19 @@ export function Button({
   title?: string;
   ariaLabel?: string;
 }) {
-  const sizing = size === "sm" ? "gap-1.5 px-2.5 py-1 text-xs" : "gap-2 px-3 py-1.5 text-sm";
+  const sizing = size === "sm" ? "min-h-[32px] gap-1.5 px-3 text-[13px]" : "min-h-[40px] gap-2 px-4 text-sm";
   return (
-    <motion.button
+    <button
       type="button"
-      whileHover={disabled ? undefined : { scale: 1.02 }}
-      whileTap={disabled ? undefined : { scale: 0.98 }}
       onClick={onClick}
       disabled={disabled}
       title={title}
       aria-label={ariaLabel}
-      className={`inline-flex items-center justify-center rounded-lg border font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${sizing} ${BUTTON[tone]} ${className}`}
+      className={`inline-flex items-center justify-center rounded-full font-semibold transition-[opacity,background-color] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${sizing} ${BUTTON[tone]} ${className}`}
     >
-      {Icon && <Icon size={size === "sm" ? 13 : 15} aria-hidden />}
+      {Icon && <Icon size={size === "sm" ? 14 : 16} aria-hidden className="shrink-0" />}
       {children}
-    </motion.button>
+    </button>
   );
 }
 
@@ -207,17 +202,17 @@ export function Card({
 }) {
   const tip = help ?? (title ? explain(title) : undefined);
   return (
-    <section className={`rounded-xl border border-cyber-border bg-cyber-surface p-4 sm:p-5 ${className}`}>
+    <section className={`rounded-card border border-line bg-surface p-5 ${className}`}>
       {(title || right) && (
-        <div className="mb-3 flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
           {title && (
             <div className="min-w-0 flex-1">
-              <h2 className="flex items-center gap-1.5 font-mono text-sm font-bold text-accent">
-                {Icon && <Icon size={15} aria-hidden className="shrink-0" />}
+              <h2 className="flex items-center gap-2 text-[17px] font-semibold tracking-tight text-ink">
+                {Icon && <Icon size={17} aria-hidden className="shrink-0 text-muted" />}
                 <span className="min-w-0">{title}</span>
                 {tip && <Explain text={tip} label={title} />}
               </h2>
-              {subtitle && <p className="mt-1 text-xs leading-relaxed text-cyber-text-dim">{subtitle}</p>}
+              {subtitle && <p className="mt-1 text-[13px] leading-relaxed text-muted">{subtitle}</p>}
             </div>
           )}
           {right && <div className="flex shrink-0 flex-wrap items-center gap-2">{right}</div>}
@@ -233,7 +228,7 @@ export function StatCard({
   value,
   icon: Icon,
   tone = "neutral",
-  delay = 0,
+  delay: _delay = 0,
   sub,
   help,
 }: {
@@ -241,6 +236,7 @@ export function StatCard({
   value: ReactNode;
   icon: LucideIcon;
   tone?: Tone;
+  /** Kept for older callers; cards no longer animate in. */
   delay?: number;
   sub?: ReactNode;
   /** Overrides the glossary entry for this label. */
@@ -248,29 +244,24 @@ export function StatCard({
 }) {
   const tip = help ?? explain(label);
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay }}
-      className="min-w-0 rounded-xl border border-cyber-border bg-cyber-surface p-4"
-    >
-      <div className="flex items-center gap-1.5 text-cyber-text-dim">
-        <Icon size={14} aria-hidden className={`shrink-0 ${tone === "neutral" ? "text-cyber-text-faint" : TEXT[tone]}`} />
-        <span className="min-w-0 text-[11px] font-medium uppercase leading-tight tracking-wider">{label}</span>
+    <div className="min-w-0 rounded-card border border-line bg-surface p-5">
+      <div className="flex items-center gap-1.5 text-muted">
+        <Icon size={15} aria-hidden className="shrink-0 text-faint" />
+        <span className="min-w-0 text-[13px] font-medium leading-tight">{label}</span>
         {tip && <Explain text={tip} label={label} />}
       </div>
-      <div className={`mt-2 break-words font-mono text-xl font-bold tabular-nums sm:text-2xl ${TEXT[tone]}`}>{value}</div>
-      {sub && <div className="mt-1 text-xs text-cyber-text-faint">{sub}</div>}
-    </motion.div>
+      <div className={`mt-2 break-words font-mono text-2xl font-bold tracking-tight tabular-nums ${TEXT[tone]}`}>{value}</div>
+      {sub && <div className="mt-1 text-[13px] text-muted">{sub}</div>}
+    </div>
   );
 }
 
 export function PageHeader({ title, subtitle, right }: { title: string; subtitle?: ReactNode; right?: ReactNode }) {
   return (
-    <header className="mb-5 flex flex-wrap items-end justify-between gap-3">
+    <header className="mb-6 flex flex-wrap items-end justify-between gap-3 pt-1">
       <div className="min-w-0">
-        <h1 className="font-mono text-xl font-bold tracking-tight text-cyber-text text-glow-cyan sm:text-2xl">{title}</h1>
-        {subtitle && <p className="mt-1 max-w-2xl text-sm leading-relaxed text-cyber-text-dim">{subtitle}</p>}
+        <h1 className="text-[28px] font-bold leading-tight tracking-tight text-ink">{title}</h1>
+        {subtitle && <p className="mt-1 max-w-2xl text-[15px] leading-relaxed text-muted">{subtitle}</p>}
       </div>
       {right && <div className="flex shrink-0 flex-wrap items-center gap-2">{right}</div>}
     </header>
@@ -289,41 +280,20 @@ export function Toggle({
   label?: string;
   disabled?: boolean;
 }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!on)}
-      className={`relative h-6 w-11 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-        on ? "border-accent/50 bg-accent/30" : "border-cyber-border-bright bg-cyber-surface-2"
-      }`}
-    >
-      <motion.span
-        layout
-        transition={{ type: "spring", stiffness: 500, damping: 30 }}
-        className={`absolute top-0.5 h-4 w-4 rounded-full ${on ? "right-0.5 bg-accent" : "left-0.5 bg-cyber-text-faint"}`}
-      />
-    </button>
-  );
+  return <DsToggle on={on} onChange={onChange} label={label} disabled={disabled} />;
 }
 
 export function Badge({ tone, children, title }: { tone: Tone; children: ReactNode; title?: string }) {
   const map: Record<Tone, string> = {
-    cyan: "border-accent/40 text-accent",
-    purple: "border-purple-neon/40 text-purple-neon",
-    green: "border-success/40 text-success",
-    red: "border-danger/40 text-danger",
-    amber: "border-warning/40 text-warning",
-    neutral: "border-cyber-border-bright text-cyber-text-dim",
+    cyan: "bg-accent/10 text-accent",
+    purple: "bg-accent/10 text-accent",
+    green: "bg-up/10 text-up",
+    red: "bg-down/10 text-down",
+    amber: "bg-warn/10 text-warn",
+    neutral: "bg-surface-2 text-muted",
   };
   return (
-    <span
-      title={title}
-      className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-medium ${map[tone]}`}
-    >
+    <span title={title} className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold ${map[tone]}`}>
       {children}
     </span>
   );
@@ -332,12 +302,12 @@ export function Badge({ tone, children, title }: { tone: Tone; children: ReactNo
 export function Meter({ pct, tone = "cyan", label }: { pct: number; tone?: Tone; label?: string }) {
   const clamped = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0));
   const bar: Record<Tone, string> = {
-    cyan: "bg-accent",
-    purple: "bg-purple-neon",
-    green: "bg-success",
-    red: "bg-danger",
-    amber: "bg-warning",
-    neutral: "bg-cyber-text-dim",
+    cyan: "bg-ink",
+    purple: "bg-accent",
+    green: "bg-up",
+    red: "bg-down",
+    amber: "bg-warn",
+    neutral: "bg-muted",
   };
   return (
     <div
@@ -346,14 +316,9 @@ export function Meter({ pct, tone = "cyan", label }: { pct: number; tone?: Tone;
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={Math.round(clamped)}
-      className="h-2 w-full overflow-hidden rounded-full bg-cyber-surface-2"
+      className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2"
     >
-      <motion.div
-        className={`h-full rounded-full ${bar[tone]}`}
-        initial={{ width: 0 }}
-        animate={{ width: `${clamped}%` }}
-        transition={{ duration: 0.4 }}
-      />
+      <div className={`h-full rounded-full transition-[width] duration-500 ${bar[tone]}`} style={{ width: `${clamped}%` }} />
     </div>
   );
 }
@@ -362,41 +327,15 @@ export function Meter({ pct, tone = "cyan", label }: { pct: number; tone?: Tone;
  * A boxed message. `info` explains, `success` reassures, `warning` asks for
  * care, `danger` is about real money or something broken.
  */
-export function Notice({
-  tone = "info",
-  title,
-  icon,
-  children,
-  action,
-  className = "",
-}: {
-  tone?: "info" | "success" | "warning" | "danger";
+export function Notice(props: {
+  tone?: NoticeTone;
   title?: ReactNode;
   icon?: LucideIcon;
   children?: ReactNode;
   action?: ReactNode;
   className?: string;
 }) {
-  const look = {
-    info: { box: "border-accent/25 bg-accent/5", text: "text-accent", Icon: Info },
-    success: { box: "border-success/35 bg-success/[0.07]", text: "text-success", Icon: CheckCircle2 },
-    warning: { box: "border-warning/35 bg-warning/[0.07]", text: "text-warning", Icon: TriangleAlert },
-    danger: { box: "border-danger/45 bg-danger/10", text: "text-danger", Icon: ShieldAlert },
-  }[tone];
-  const Icon = icon ?? look.Icon;
-  return (
-    <div
-      role={tone === "danger" || tone === "warning" ? "alert" : undefined}
-      className={`flex flex-wrap items-start gap-3 rounded-xl border px-4 py-3 ${look.box} ${className}`}
-    >
-      <Icon size={18} aria-hidden className={`mt-0.5 shrink-0 ${look.text}`} />
-      <div className="min-w-0 flex-1 text-sm leading-relaxed text-cyber-text-dim">
-        {title && <div className={`font-semibold ${look.text}`}>{title}</div>}
-        {children}
-      </div>
-      {action && <div className="flex shrink-0 items-center gap-2 self-center">{action}</div>}
-    </div>
-  );
+  return <DsNotice {...props} />;
 }
 
 /** What a section says when there is nothing to show yet, and what to do about it. */
@@ -414,13 +353,13 @@ export function EmptyState({
   compact?: boolean;
 }) {
   return (
-    <div className={`flex flex-col items-center text-center ${compact ? "gap-1.5 py-4" : "gap-2 py-8"}`}>
-      <div className="rounded-full border border-cyber-border-bright bg-cyber-surface-2 p-2.5 text-cyber-text-faint">
-        <Icon size={compact ? 16 : 20} aria-hidden />
+    <div className={`flex flex-col items-center text-center ${compact ? "gap-1.5 py-5" : "gap-2 py-10"}`}>
+      <div className={`flex items-center justify-center rounded-full bg-surface-2 text-ink ${compact ? "h-10 w-10" : "h-12 w-12"}`}>
+        <Icon size={compact ? 17 : 21} aria-hidden />
       </div>
-      <div className="text-sm font-medium text-cyber-text">{title}</div>
-      {children && <div className="max-w-md text-xs leading-relaxed text-cyber-text-dim">{children}</div>}
-      {action && <div className="mt-1">{action}</div>}
+      <div className="mt-1 text-[15px] font-semibold text-ink">{title}</div>
+      {children && <div className="max-w-md text-[13px] leading-relaxed text-muted">{children}</div>}
+      {action && <div className="mt-2">{action}</div>}
     </div>
   );
 }
@@ -428,8 +367,8 @@ export function EmptyState({
 /** A quiet spinner with words, for anything that has to wait for an answer. */
 export function Loading({ children = "Loading" }: { children?: ReactNode }) {
   return (
-    <div role="status" className="flex items-center gap-2 py-3 text-sm text-cyber-text-dim">
-      <Loader2 size={15} aria-hidden className="animate-spin text-accent" />
+    <div role="status" className="flex items-center gap-2 py-3 text-sm text-muted">
+      <Loader2 size={15} aria-hidden className="animate-spin" />
       {children}
     </div>
   );
@@ -452,12 +391,12 @@ export function Field({
   const tip = help ?? explain(label);
   return (
     <label className={`block min-w-0 ${className}`}>
-      <span className="mb-1 flex items-center gap-1 text-xs font-medium text-cyber-text-dim">
+      <span className="mb-1.5 flex items-center gap-1 text-[13px] font-medium text-muted">
         {label}
         {tip && <Explain text={tip} label={label} />}
       </span>
       {children}
-      {hint && <span className="mt-1 block text-[11px] leading-snug text-cyber-text-faint">{hint}</span>}
+      {hint && <span className="mt-1.5 block text-[12px] leading-snug text-faint">{hint}</span>}
     </label>
   );
 }
@@ -477,25 +416,25 @@ export function Readout({
   const tip = help ?? explain(label);
   return (
     <div className="min-w-0">
-      <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-cyber-text-faint">
+      <div className="flex items-center gap-1 text-[12px] font-medium text-muted">
         <span className="truncate">{label}</span>
         {tip && <Explain text={tip} label={label} />}
       </div>
-      <div className={`font-mono text-sm font-bold tabular-nums ${TEXT[tone]}`}>{value}</div>
+      <div className={`font-mono text-[15px] font-semibold tabular-nums ${TEXT[tone]}`}>{value}</div>
     </div>
   );
 }
 
-const STROKE: Record<Tone, string> = {
-  green: "#22c55e",
-  red: "#ef4444",
-  purple: "#a855f7",
-  cyan: "#00f0ff",
-  amber: "#f59e0b",
-  neutral: "#9a9ab2",
+const CHART_TONE: Record<Tone, ChartTone> = {
+  green: "up",
+  red: "down",
+  purple: "accent",
+  cyan: "up",
+  amber: "accent",
+  neutral: "flat",
 };
 
-// tiny inline sparkline / equity curve
+/** A small chart: green when it ended up, red when down, unless a tone says otherwise. */
 export function Sparkline({
   data,
   tone = "cyan",
@@ -510,109 +449,18 @@ export function Sparkline({
 }) {
   if (data.length < 2) {
     return (
-      <div
-        style={{ height }}
-        className="flex items-center justify-center rounded-lg border border-dashed border-cyber-border text-xs text-cyber-text-faint"
-      >
+      <div style={{ height }} className="flex items-center justify-center rounded-xl bg-surface-2 text-[13px] text-muted">
         The chart fills in as new prices arrive.
       </div>
     );
   }
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const range = max - min || 1;
-  const w = 100;
-  const pts = data
-    .map((v, i) => {
-      const x = (i / (data.length - 1)) * w;
-      const y = height - ((v - min) / range) * height;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(" ");
-  const last = data[data.length - 1];
-  const first = data[0];
-  const up = last >= first;
-  return (
-    <svg
-      viewBox={`0 0 ${w} ${height}`}
-      preserveAspectRatio="none"
-      className="w-full"
-      style={{ height }}
-      role="img"
-      aria-label={label ?? `Chart, ${up ? "up" : "down"} over the period shown`}
-    >
-      <polyline
-        points={pts}
-        fill="none"
-        stroke={up ? STROKE[tone] : STROKE.red}
-        strokeWidth={1.5}
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
-  );
+  const up = data[data.length - 1] >= data[0];
+  return <DsSparkline data={data} tone={up ? CHART_TONE[tone] : "down"} height={height} label={label} fill />;
 }
 
-// Multi-series line chart with grid, shared y-scale and a legend.
-const CHART_PALETTE = ["#00f0ff", "#a855f7", "#22c55e", "#f59e0b", "#ef4444", "#38bdf8", "#e879f9", "#84cc16"];
-
-export function MultiLineChart({
-  series,
-  height = 200,
-}: {
-  series: { label: string; data: number[]; color?: string }[];
-  height?: number;
-}) {
-  const all = series.flatMap((s) => s.data);
-  if (all.length < 2) {
-    return (
-      <div
-        style={{ height }}
-        className="flex items-center justify-center rounded-lg border border-dashed border-cyber-border text-xs text-cyber-text-faint"
-      >
-        The chart fills in as new prices arrive.
-      </div>
-    );
-  }
-  const min = Math.min(...all);
-  const max = Math.max(...all);
-  const range = max - min || 1;
-  const w = 100;
-  const maxLen = Math.max(...series.map((s) => s.data.length), 2);
-  const toPoints = (data: number[]) =>
-    data
-      .map((v, i) => {
-        const x = (i / (maxLen - 1)) * w;
-        const y = height - ((v - min) / range) * height;
-        return `${x.toFixed(2)},${y.toFixed(2)}`;
-      })
-      .join(" ");
-  return (
-    <div>
-      <svg
-        viewBox={`0 0 ${w} ${height}`}
-        preserveAspectRatio="none"
-        className="w-full"
-        style={{ height }}
-        role="img"
-        aria-label={`Chart of ${series.map((s) => s.label).join(", ")}`}
-      >
-        {[0.25, 0.5, 0.75].map((f) => (
-          <line key={f} x1="0" x2={w} y1={height * f} y2={height * f} stroke="#1e1e2a" strokeWidth="0.5" vectorEffect="non-scaling-stroke" />
-        ))}
-        {series.map((s, i) => (
-          <polyline key={i} points={toPoints(s.data)} fill="none" stroke={s.color ?? CHART_PALETTE[i % CHART_PALETTE.length]} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
-        ))}
-      </svg>
-      <div className="mt-2 flex flex-wrap gap-3 text-xs text-cyber-text-dim">
-        {series.map((s, i) => (
-          <span key={i} className="flex items-center gap-1.5">
-            <span className="inline-block h-2 w-2 rounded-full" style={{ background: s.color ?? CHART_PALETTE[i % CHART_PALETTE.length] }} />
-            {s.label}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
+/** Several lines on one scale, with a legend. */
+export function MultiLineChart({ series, height = 200 }: { series: { label: string; data: number[]; color?: string }[]; height?: number }) {
+  return <LineChart series={series} height={height} />;
 }
 
 /** Green when up, red when down, plain when it has not moved. */

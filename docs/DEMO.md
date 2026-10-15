@@ -64,6 +64,18 @@ keys) keeps working exactly as before; the two are one setting, so pick one.
   coin trades the rest and leaves that coin's share in cash: the weights are
   not scaled up. The rebalance line in the journal names the skipped coins
   once per rebalance. Venue `alpaca` without an asset class is still US shares.
+- **Several autopilots on the one paper account.** Each autopilot is a
+  sub-account with a book of its own (positions kept under
+  `autopilot id|market`), so two of them can hold BTC at once, each with its
+  own quantity, fills, fees, P&L, cash and equity curve. Each sends its own
+  orders; every fill is booked to the autopilot whose order it was. An order
+  on the other side of a coin from another autopilot waits until that one is
+  done (Alpaca refuses opposite orders that could meet as a wash trade). Paper
+  and demo autopilots may run the same strategy or lab book, each in its own
+  book; a live one keeps its strategies to itself. Together the demo
+  autopilots here may be given no more than the paper account's equity, which
+  the server reads before a start or a raise; lowering one autopilot's amount
+  frees the room for another. Stopping one closes only its own book.
 - **Costs and fills.** Fills are what Alpaca reports; slippage against the
   engine's price is recorded like any demo fill. The modelled side uses the
   `alpaca` entry of `config/costs.json` (crypto pairs: 0.25 % taker, 0.15 %
@@ -87,8 +99,11 @@ keys) keeps working exactly as before; the two are one setting, so pick one.
   them with the demo book per Alpaca pair (`engine::demo_reconcile`). Equal up
   to rounding (a billionth of the position, or under a cent) is quiet. A pair
   with an order in flight waits for that order's report. A gap the unposted
-  fees of the watched buys explain is booked as those fees. When one demo
-  position holds the pair and nothing is open, Alpaca wins. A position at
+  fees of the watched buys explain is booked as those fees. The comparison is
+  Alpaca's quantity against the sum over every autopilot's book. When demo
+  positions of one market hold the pair and nothing is open, Alpaca wins: one
+  book takes Alpaca's number, several share it in proportion to what each
+  held, and each autopilot books its own difference at the mark. A position at
   Alpaca the book does not have is adopted only when exactly one market on
   the route has Pythia demo orders in that pair; anything else (several
   markets share the pair, an open order Pythia does not follow, a coin Pythia

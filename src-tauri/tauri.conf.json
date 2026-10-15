@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://clob.polymarket.com https://gamma-api.polymarket.com https://api.kraken.com https://paper-api.alpaca.markets https://api.alpaca.markets"
+      "csp": "default-src 'self'; img-src 'self' data: https://images.pokemontcg.io https://images.scrydex.com https://tcgplayer-cdn.tcgplayer.com; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://clob.polymarket.com https://gamma-api.polymarket.com https://api.kraken.com https://paper-api.alpaca.markets https://api.alpaca.markets"
     }
   },
   "bundle": {

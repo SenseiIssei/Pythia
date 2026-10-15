@@ -74,9 +74,9 @@ async fn discord_posts_content_and_batches_what_arrives_together() {
     let got = got.lock().unwrap();
     assert_eq!(got.len(), 1, "one post for both");
     let c = got[0]["content"].as_str().unwrap();
-    assert!(c.starts_with("**Pythia**"));
-    assert!(c.contains("**Kill switch** engaged by you"));
-    assert!(c.contains("**Floor hit** Momentum stopped"));
+    assert!(c.starts_with("**🚨 Kill switch**\nEngaged by you"), "{c}");
+    assert!(c.contains("**🛑 Floor hit**\nMomentum stopped"));
+    assert!(c.ends_with("*Pythia*"), "the engine's name is the footer");
     assert!(got[0].get("text").is_none());
 }
 
@@ -87,7 +87,7 @@ async fn slack_posts_text() {
     sink.send(AlertEvent::new(AlertKind::DataStale, "stale", "quotes stale for 11 min"));
     wait_for(&got, 1).await;
     let got = got.lock().unwrap();
-    assert_eq!(got[0]["text"].as_str().unwrap(), "*Pythia*\n*Market data stale* quotes stale for 11 min");
+    assert_eq!(got[0]["text"].as_str().unwrap(), "*📡 Market data stale*\nQuotes stale for 11 min\n_Pythia_");
     assert!(got[0].get("content").is_none());
 }
 
@@ -113,12 +113,16 @@ async fn the_hourly_cap_holds_back_and_counts() {
     let mut cfg = quick(&url, AlertFormat::Discord);
     cfg.max_per_hour = 1;
     let sink = AlertSink::spawn(cfg);
-    sink.send(AlertEvent::new(AlertKind::KillSwitch, "a", "one"));
+    sink.send(AlertEvent::new(AlertKind::DataStale, "a", "one"));
     wait_for(&got, 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    sink.send(AlertEvent::new(AlertKind::KillSwitch, "b", "two"));
+    sink.send(AlertEvent::new(AlertKind::ModelDrift, "b", "two"));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(got.lock().unwrap().len(), 1, "the second post waits for the hour");
+    // An urgent alert does not wait.
+    sink.send(AlertEvent::new(AlertKind::KillSwitch, "c", "engaged"));
+    wait_for(&got, 2).await;
+    assert_eq!(got.lock().unwrap().len(), 2, "the kill switch passes the hourly limit");
 }
 
 #[tokio::test]
@@ -216,10 +220,11 @@ fn telegram_comes_from_its_token_and_chat_and_posts_plain_text_with_the_chat_id(
     assert!(!format!("{c:?}").contains("123:abc"), "the token never shows in a log line");
     let ev = AlertEvent::new(AlertKind::KillSwitch, "k", "all trading halted");
     let text = compose(&c, &[ev], 0);
-    assert!(text.starts_with("Pythia\n") && !text.contains('*'), "{text}");
+    assert_eq!(text, "<b>🚨 Kill switch</b>\nAll trading halted\n<i>Pythia</i>");
     let b = c.body(&text);
     assert_eq!(b["chat_id"], "4242");
     assert_eq!(b["text"], text);
+    assert_eq!(b["parse_mode"], "HTML");
     // A token without a chat is not enough, and a webhook wins over both.
     assert!(AlertConfig::from_lookup(|k| (k == "PYTHIA_TELEGRAM_BOT_TOKEN").then(|| "t".to_string())).is_none());
     let both = |k: &str| match k {
@@ -252,7 +257,8 @@ async fn every_post_is_recorded_with_todays_counts() {
     assert_eq!(v.recent[0].kinds, vec![AlertKind::DataStale, AlertKind::ModelDrift]);
     assert!(v.recent[0].delivered);
     assert!(v.recent[0].error.is_none());
-    assert!(v.recent[0].text.contains("quotes stale"));
+    assert!(v.recent[0].text.contains("Quotes stale"));
+    assert_eq!(v.recent[0].title.as_deref(), Some("Market data stale"));
     assert_eq!(v.counts, AlertCounts { sent_today: 1, failed_today: 0, suppressed_today: 0 });
     let json = serde_json::to_value(&v.recent[0]).unwrap();
     assert_eq!(json["kinds"], serde_json::json!(["dataStale", "modelDrift"]));
@@ -348,10 +354,12 @@ fn the_log_keeps_the_last_hundred_newest_first_and_counts_per_utc_day() {
         log.record(AlertRecord {
             ts: day + i,
             kinds: vec![AlertKind::DataStale],
+            title: None,
             text: format!("n{i}"),
             delivered: true,
             error: None,
             reason: None,
+            photo: false,
         });
     }
     let v = log.view(day + 200);
@@ -375,7 +383,10 @@ async fn the_test_message_goes_out_even_when_muted() {
     assert_eq!(rec.kinds, vec![AlertKind::Test]);
     let got = got.lock().unwrap();
     assert_eq!(got[0]["chat_id"], "42");
-    assert!(got[0]["text"].as_str().unwrap().contains("Test: test message"));
+    let text = got[0]["text"].as_str().unwrap();
+    assert!(text.starts_with("<b>✅ Test message</b>\nAlerts from the engine reach this chat."), "{text}");
+    assert!(text.contains("Quiet hours") && text.contains("23:00 to 07:00"), "{text}");
+    assert_eq!(got[0]["parse_mode"], "HTML");
     assert_eq!(log.view(now_ms()).counts.sent_today, 1);
 }
 
