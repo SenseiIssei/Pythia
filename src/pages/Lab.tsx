@@ -47,6 +47,7 @@ const REPORT_LABEL: Record<string, string> = {
   learn: "Learning loop, nightly",
   cs2: "CS2 skins, hourly feed and board",
   cs2_weekly: "CS2 skins, weekly paper report",
+  cs2_trends: "CS2 Steam market trends, daily",
   pokemon: "Pokemon cards, daily (data and play money)",
 };
 

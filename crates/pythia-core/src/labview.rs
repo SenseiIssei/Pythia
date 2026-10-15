@@ -916,6 +916,8 @@ pub struct Cs2Board {
     pub alerts: Vec<Cs2Alert>,
     /// The daily research summary (verdict, spread, momentum, bootstrap scores), as the lab wrote it.
     pub research: Option<Value>,
+    /// The daily Steam market trends (`lab.cs2.trends`: movers, groups, momentum, spreads, cases), as the lab wrote them.
+    pub steam_trends: Option<Value>,
     pub items: Vec<Cs2Item>,
 }
 
@@ -951,6 +953,7 @@ pub fn parse_cs2(text: &str) -> Option<Cs2Board> {
         portfolio: v.get("portfolio").and_then(|p| serde_json::from_value(p.clone()).ok()),
         alerts: rows(&v, "alerts"),
         research: v.get("research").filter(|r| r.is_object()).cloned(),
+        steam_trends: v.get("steamTrends").filter(|r| r.is_object()).cloned(),
         items: if feed { rows(&v, "rows") } else { rows(&v, "items") },
     })
 }
@@ -1019,6 +1022,7 @@ mod tests {
             "items":[{"label":"Gap item","value":"+6.0 %","status":"watch","importance":68}],
             "generated":"2026-10-15 12:05 UTC","generatedMs":5,"boardStatus":"ok","verdict":"v","historyDays":1,
             "research":{"verdict":"Too early","historyDays":1},
+            "steamTrends":{"date":"2026-10-15","movers":{"up":[{"name":"AWP | Black Box (Field-Tested)","move":0.41}]}},
             "rows":[{"name":"Recoil Case","category":"case","price":0.3,"signal":"hold","sales7d":900,"listed":5000}]}"#;
         let b = parse_cs2(text).unwrap();
         assert_eq!(b.status, "ok");
@@ -1027,6 +1031,8 @@ mod tests {
         assert_eq!(b.items.len(), 1, "the board's rows, not the feed's items");
         assert_eq!(b.items[0].name, "Recoil Case");
         assert_eq!(b.research.as_ref().unwrap()["verdict"], "Too early");
+        assert_eq!(b.steam_trends.as_ref().unwrap()["movers"]["up"][0]["move"], 0.41);
+        assert_eq!(serde_json::to_value(&b).unwrap()["steamTrends"]["date"], "2026-10-15");
         let f = parse_feed("cs2", text, 0).unwrap();
         assert_eq!(f.items.len(), 1);
         assert_eq!(f.items[0].label, "Gap item");

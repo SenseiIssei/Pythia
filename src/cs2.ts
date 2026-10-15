@@ -69,6 +69,102 @@ export interface Cs2Research {
   walkForward30?: string;
 }
 
+/** One item in the Steam trends (lab/cs2/trends.py `board_summary`). Fractions; EUR. */
+export interface Cs2TrendItem {
+  name: string;
+  group?: string;
+  eur?: number | null;
+  move?: number | null;
+  chg_1d?: number | null;
+  chg_7d?: number | null;
+  chg_30d?: number | null;
+  skinport_ask?: number | null;
+  skinport_sales7?: number | null;
+  to_steam?: number | null;
+  to_skinport?: number | null;
+  steam_premium?: number | null;
+  steam_url?: string;
+  skinport_url?: string;
+  /** For spreads: "cash" (Steam to Skinport clears the fees) or "premium" (Steam far above its group). */
+  why?: string;
+}
+
+export interface Cs2TrendGroup {
+  group: string;
+  items: number;
+  liquid: number;
+  median_1d: number | null;
+  median_7d: number | null;
+  median_30d: number | null;
+  steam_premium: number | null;
+  skinport_sales7: number;
+}
+
+export interface Cs2Momentum {
+  group: string;
+  items?: number;
+  days?: number;
+  ic: number | null;
+  t?: number | null;
+  lean: string;
+}
+
+/** The daily Steam market trends, written by lab.cs2.trends and carried on the hourly board. Every field may be missing. */
+export interface Cs2SteamTrends {
+  date?: string;
+  headline?: string;
+  items?: number;
+  liquid?: number;
+  snapshots?: number;
+  source?: string;
+  basis?: { chg_1d?: string; chg_7d?: string; chg_30d?: string };
+  groups?: Cs2TrendGroup[];
+  movers?: { up?: Cs2TrendItem[]; down?: Cs2TrendItem[]; basis?: string };
+  momentum?: { window?: Cs2Momentum[]; snapshots?: { ready?: boolean; days?: number; waiting_days?: number; rows?: Cs2Momentum[] } };
+  spread?: { items?: number; median_premium?: number | null; median_to_steam?: number | null; median_to_skinport?: number | null; unusual?: Cs2TrendItem[] };
+  cases?: {
+    new?: Cs2TrendItem[];
+    rising?: Cs2TrendItem[];
+    median7d?: number | null;
+    median30d?: number | null;
+    lastDrop?: { date: string; kind: string; items: string[]; days_ago: number; other_cases_since: number | null; other_cases_7d?: number | null; other_cases_30d?: number | null } | null;
+  };
+}
+
+const STEAM_LISTING = "https://steamcommunity.com/market/listings/730/";
+
+/** Steam and Skinport for an item: the lab's links when they are https on those hosts, else built from the name. */
+export function itemLinks(it: Pick<Cs2TrendItem, "name" | "steam_url" | "skinport_url">): { label: string; url: string }[] {
+  const ok = (u: string | undefined, host: string): string | null => {
+    if (!u) return null;
+    try {
+      const p = new URL(u);
+      return p.protocol === "https:" && p.hostname === host ? p.toString() : null;
+    } catch {
+      return null;
+    }
+  };
+  const slug = it.name.replace(/[★™]/g, " ").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return [
+    { label: "Steam market", url: ok(it.steam_url, "steamcommunity.com") ?? STEAM_LISTING + encodeURIComponent(it.name) },
+    { label: "Skinport", url: ok(it.skinport_url, "skinport.com") ?? `https://skinport.com/item/${slug}` },
+  ];
+}
+
+/** "momentum", "reversion" or "neither" from the lab, as words for a row. */
+export function leanWords(lean: string | undefined): string {
+  switch (lean) {
+    case "momentum":
+      return "leans momentum: what rose kept rising";
+    case "reversion":
+      return "leans mean reversion: what rose fell back";
+    case "neither":
+      return "no lean either way";
+    default:
+      return "not enough data";
+  }
+}
+
 export interface Cs2Board {
   generated: string;
   generatedMs: number;
@@ -86,6 +182,8 @@ export interface Cs2Board {
   portfolio: Cs2Portfolio | null;
   alerts: { tsMs: number | null; kind: string; name: string; text: string }[];
   research: Cs2Research | null;
+  /** Missing on boards from before the Steam trends job. */
+  steamTrends?: Cs2SteamTrends | null;
   items: Cs2Item[];
 }
 

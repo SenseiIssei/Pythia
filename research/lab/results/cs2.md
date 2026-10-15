@@ -88,3 +88,46 @@ lab machine). What is and is not evidence here:
   qualified, so the play-money book holds cash. That is the expected answer
   for most weeks.
 
+## Steam market trends (lab.cs2.trends, added by hand, first run 2026-10-15)
+
+Because Steam refuses the collector, the Steam side now comes from a public
+aggregate instead of Steam itself: the price files of the open-source CSGO
+Trader browser extension (`prices.csgotrader.app/latest/steam.json`, average
+Steam Community Market sale prices in USD over 24 hours, 7, 30 and 90 days,
+rebuilt daily; no volume; no published terms, so the lab takes it once a day
+and names the source). The daily job `cs2-trends` stores one snapshot a day
+and reports in `reports/cs2_trends/` and on the CS2 page. Information only.
+
+First run, one snapshot (PC, 2026-10-15; the file was rebuilt 13:25 UTC):
+
+- 32,077 items with a Steam price, 17,678 of them sold in the last 24 hours.
+  1,124 are liquid by the lab's rule (1 EUR or more, 10 or more Skinport sales
+  in 7 days; the Steam file has no volume).
+- **Steam against Skinport.** On 1,120 liquid items Steam's average sale
+  price is +62 % over Skinport's recent sale price (median). After fees,
+  buying on Skinport and selling on Steam nets +43 %, but in Steam wallet
+  funds that cannot be withdrawn; buying on Steam and selling on Skinport
+  nets -47 % in cash. The premium is the price of wallet money, not a free
+  lunch. Cases carry the largest premium (+88 %), Factory New skins +100 %,
+  Battle-Scarred +54 %. Three liquid items cleared the cash route by 5 % or
+  more after fees that day (two stickers and a sealed graffiti, 1.36 to 2.65
+  EUR on Steam, +8 to +13 %); 24 more had a Steam premium far above their
+  group's (4 robust deviations and twice the group median).
+  The Steam price is an average of sales, not an ask, and the spread uses the
+  less flattering of the 24-hour and 7-day averages for each route.
+- **Changes.** Before there are older snapshots, "7 days" is the 24-hour
+  average against the 7-day one. Median by group: within 2 % either way for
+  every group; cases +0.0 % on that measure and -3.7 % against their 30-day
+  average. Top mover M4A4 | Dark Operative (Minimal Wear) +84 %, biggest
+  drop StatTrak UMP-45 | Momentum (Minimal Wear) -40 %, both on thin items
+  (10 to 14 Skinport sales a week).
+- **Momentum or reversion.** From the averages of one day (30 days against
+  90, then 24 hours against 7 days), the rank IC across liquid items is
+  +0.02: no lean. By group it ranges from -0.40 (capsules, 24 items) to +0.17
+  (Field-Tested skins, 240 items); with these few items and nested windows
+  that is a hint at most. The real test, a week's change against the next
+  week's from our own snapshots, starts after 21 days.
+- **Drops.** No release or drop-pool event in the last 45 days in the
+  watchlist, and a new case or capsule can only be seen from the second
+  snapshot on.
+

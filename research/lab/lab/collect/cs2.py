@@ -8,8 +8,10 @@ Hourly on the lab machine (see research/ops/README.md):
   python -m lab.collect.cs2                 Skinport items + sales history + Steam watchlist
   python -m lab.collect.cs2 --no-steam      Skinport only
   python -m lab.collect.cs2 --steam-max 40  fewer Steam requests this run
+  python -m lab.collect.cs2 --steam-market  only the daily Steam market snapshot (csgotrader, below);
+                                            --force stores it again for a day already stored
 
-Sources, both public and keyless:
+Sources, all public and keyless:
   Skinport  GET https://api.skinport.com/v1/items?app_id=730&currency=EUR
             GET https://api.skinport.com/v1/sales/history?app_id=730&currency=EUR
             Brotli only (Accept-Encoding: br). Limit 8 requests per 5 minutes;
@@ -18,7 +20,24 @@ Sources, both public and keyless:
             About 20 requests a minute: one every 3.2 s, at most --steam-max a
             run (default 100). A 429 waits (Retry-After, else 60 s, then
             120 s) and a third one ends the Steam part of the run; the
-            watchlist then resumes where it stopped next hour.
+            watchlist then resumes where it stopped next hour. In October
+            2026 Steam answered every request from the lab with 429 (it
+            filters the client). That is left as it is: no other user agent,
+            no proxies, nothing that works around the filter. After a refused
+            run the next one knocks once and stops.
+  Steam market, aggregated (daily, --steam-market)
+            GET https://prices.csgotrader.app/latest/steam.json
+            GET https://prices.csgotrader.app/latest/exchange_rates.json
+            The public price files of the open-source CSGO Trader browser
+            extension (GPL-3.0 code, github.com/gergelyszabo94/csgo-trader-extension),
+            which the extension itself downloads for every user. steam.json
+            has, per item (34,413 on 2026-10-15), the average Steam Community
+            Market sale price in USD over the last 24 hours, 7, 30 and 90 days;
+            no volume. Rebuilt once a day. No published terms of use or rate
+            limit: the job takes the two files once a day (about 0.6 MB
+            gzipped), says who it is in the user agent, and the source is
+            named wherever the numbers are shown. If the owner of the files
+            asks, the job stops.
 
 Writes under <data>/cs2/ (PYTHIA_DATA, as the rest of the lab):
   skinport_items/date=YYYY-MM-DD/HHMM.parquet   every item, every run
@@ -26,7 +45,11 @@ Writes under <data>/cs2/ (PYTHIA_DATA, as the rest of the lab):
   steam_prices/date=YYYY-MM-DD/HHMM.parquet     the watchlist
   daily/skinport/date=YYYY-MM-DD.parquet        the day's last snapshot per item (items joined with sales)
   daily/steam/date=YYYY-MM-DD.parquet           the day's last Steam price per item
+  daily/steam_market/date=YYYY-MM-DD.parquet    Steam 24h/7d/30d/90d average sale prices (USD) for
+                                                every item, with the day's EUR per USD; dated by the
+                                                source file's Last-Modified day
   collector.json                                the last run: counts, errors, where the watchlist stopped
+  steam_market.json                             the last --steam-market run
 """
 
 from __future__ import annotations
@@ -49,6 +72,8 @@ from ..data import ROOT
 SKINPORT_ITEMS = "https://api.skinport.com/v1/items?app_id=730&currency=EUR"
 SKINPORT_SALES = "https://api.skinport.com/v1/sales/history?app_id=730&currency=EUR"
 STEAM_PRICE = "https://steamcommunity.com/market/priceoverview/?appid=730&currency=3&market_hash_name="
+CSGOTRADER_STEAM = "https://prices.csgotrader.app/latest/steam.json"
+CSGOTRADER_FX = "https://prices.csgotrader.app/latest/exchange_rates.json"
 USER_AGENT = "pythia-lab-cs2/1.0 (hourly price snapshots, read-only)"
 WATCHLIST = Path(__file__).with_name("cs2_watchlist.json")
 
@@ -95,10 +120,16 @@ def _f(v) -> float | None:
     return f if f == f else None
 
 
+def _page(u) -> str | None:
+    """Skinport's own item page for the item, only when it is one."""
+    return u if isinstance(u, str) and u.startswith("https://skinport.com/") and " " not in u else None
+
+
 def parse_items(rows: list[dict], ts_ms: int) -> pl.DataFrame:
     out = [{
         "ts_ms": ts_ms,
         "name": str(r.get("market_hash_name") or ""),
+        "item_page": _page(r.get("item_page")),
         "currency": str(r.get("currency") or "EUR"),
         "suggested_price": _f(r.get("suggested_price")),
         "min_price": _f(r.get("min_price")),
@@ -112,7 +143,7 @@ def parse_items(rows: list[dict], ts_ms: int) -> pl.DataFrame:
     return pl.DataFrame(out, schema=ITEM_SCHEMA)
 
 
-ITEM_SCHEMA = {"ts_ms": pl.Int64, "name": pl.Utf8, "currency": pl.Utf8, "suggested_price": pl.Float64,
+ITEM_SCHEMA = {"ts_ms": pl.Int64, "name": pl.Utf8, "item_page": pl.Utf8, "currency": pl.Utf8, "suggested_price": pl.Float64,
                "min_price": pl.Float64, "max_price": pl.Float64, "mean_price": pl.Float64,
                "median_price": pl.Float64, "quantity": pl.Int64, "created_at": pl.Int64, "updated_at": pl.Int64}
 WINDOWS = {"s24": "last_24_hours", "s7": "last_7_days", "s30": "last_30_days", "s90": "last_90_days"}
@@ -240,6 +271,110 @@ def fetch_steam(fetch: Fetch, names: list[str], ts_ms: int, sleep: Callable[[flo
     return rows, len(names), False
 
 
+# ---------------------------------------------------------------- Steam market prices, aggregated
+
+STEAM_MARKET_SCHEMA = {"name": pl.Utf8, "usd_24h": pl.Float64, "usd_7d": pl.Float64, "usd_30d": pl.Float64,
+                       "usd_90d": pl.Float64, "eur_per_usd": pl.Float64, "source_updated": pl.Utf8,
+                       "fetched_ms": pl.Int64}
+STEAM_WINDOWS = {"usd_24h": "last_24h", "usd_7d": "last_7d", "usd_30d": "last_30d", "usd_90d": "last_90d"}
+MIN_STEAM_MARKET_ITEMS = 5_000  # a smaller file is a broken one (the real one had 34,413 on 2026-10-15)
+
+
+def _http_date(v: str | None) -> datetime | None:
+    if not v:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        t = parsedate_to_datetime(v)
+    except (TypeError, ValueError, IndexError):
+        return None
+    return t.astimezone(timezone.utc) if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def parse_steam_market(d, eur_per_usd: float | None, source_updated: str, ts_ms: int) -> pl.DataFrame:
+    """csgotrader's steam.json: {market_hash_name: {last_24h, last_7d, last_30d,
+    last_90d}}, average Steam Community Market sale prices in USD over each
+    window. A window without sales is null; a price at or below zero too."""
+    if not isinstance(d, dict):
+        raise ValueError("the Steam price file is not an object")
+    rows = []
+    for name, v in d.items():
+        if not name or not isinstance(v, dict):
+            continue
+        row = {"name": str(name), "eur_per_usd": eur_per_usd, "source_updated": source_updated, "fetched_ms": ts_ms}
+        for col, key in STEAM_WINDOWS.items():
+            f = _f(v.get(key))
+            row[col] = f if f is not None and f > 0 and f != float("inf") else None
+        if any(row[c] is not None for c in STEAM_WINDOWS):
+            rows.append(row)
+    return pl.DataFrame(rows, schema=STEAM_MARKET_SCHEMA)
+
+
+def fetch_json(fetch: Fetch, url: str) -> tuple[object, dict]:
+    status, body, headers = fetch(url, {"Accept-Encoding": "gzip", "Accept": "application/json"})
+    if status != 200:
+        raise RuntimeError(f"{url.split('/')[2]} answered HTTP {status}")
+    return json.loads(decode(body, headers).decode("utf-8")), headers
+
+
+def steam_market(root: Path | None = None, fetch: Fetch = http_fetch, now_ms: int | None = None,
+                 force: bool = False) -> dict:
+    """Today's Steam market prices from csgotrader's public price file, one
+    snapshot a day: <data>/cs2/daily/steam_market/date=YYYY-MM-DD.parquet,
+    dated by the file's own Last-Modified day (the file is rebuilt once a day,
+    early afternoon UTC on 2026-10-15), so a fetch before the rebuild does not
+    pass yesterday's prices off as today's. Two GETs; nothing on Steam itself."""
+    base = cs2_root(root)
+    now_ms = now_ms or int(time.time() * 1000)
+    rep: dict = {"ts_ms": now_ms, "source": CSGOTRADER_STEAM, "errors": []}
+    try:
+        data, headers = fetch_json(fetch, CSGOTRADER_STEAM)
+        mod = _http_date({k.lower(): v for k, v in headers.items()}.get("last-modified"))
+        day = (mod or datetime.fromtimestamp(now_ms / 1000, timezone.utc)).strftime("%Y-%m-%d")
+        path = base / "daily" / "steam_market" / f"date={day}.parquet"
+        rep.update(day=day, source_updated=mod.isoformat() if mod else None)
+        if path.exists() and not force:
+            rep.update(ok=True, skipped="this day's file is already stored")
+            return _save_steam_market_report(base, rep)
+        fx = None
+        try:
+            rates, _ = fetch_json(fetch, CSGOTRADER_FX)
+            fx = _f((rates or {}).get("EUR")) if isinstance(rates, dict) else None
+        except Exception as e:  # noqa: BLE001 - the last known rate does
+            rep["errors"].append(f"exchange rates: {type(e).__name__}: {e}")
+        prev = market_json(base / "steam_market.json") or {}
+        if not fx or not 0.5 < fx < 1.5:
+            fx = _f(prev.get("eur_per_usd"))
+            rep["fx_source"] = "last known" if fx else "none"
+        else:
+            rep["fx_source"] = "csgotrader"
+        df = parse_steam_market(data, fx, rep["source_updated"] or day, now_ms)
+        if df.height < MIN_STEAM_MARKET_ITEMS:
+            raise RuntimeError(f"only {df.height} items in the Steam price file")
+        _write(df, path)
+        rep.update(ok=True, items=df.height, eur_per_usd=fx,
+                   with_24h=int(df["usd_24h"].is_not_null().sum()))
+    except Exception as e:  # noqa: BLE001
+        rep.update(ok=False)
+        rep["errors"].append(f"steam market: {type(e).__name__}: {e}")
+    return _save_steam_market_report(base, rep)
+
+
+def market_json(p: Path):
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _save_steam_market_report(base: Path, rep: dict) -> dict:
+    prev = market_json(base / "steam_market.json") or {}
+    out = {**rep, "eur_per_usd": rep.get("eur_per_usd") or prev.get("eur_per_usd")}
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "steam_market.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return out
+
+
 def _write(df: pl.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -324,6 +459,10 @@ def run(root: Path | None = None, fetch: Fetch = http_fetch, steam: bool = True,
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if "--steam-market" in argv:
+        rep = steam_market(force="--force" in argv)
+        print(json.dumps(rep, indent=2))
+        return 0 if rep.get("ok") else 1
     steam_max = STEAM_MAX_PER_RUN
     if "--steam-max" in argv:
         steam_max = int(argv[argv.index("--steam-max") + 1])

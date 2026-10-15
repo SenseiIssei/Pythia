@@ -12,7 +12,8 @@ Writes:
   <data>/cs2/model/research.json                 today's research summary (verdict, spread, history)
   <reports>/cs2/latest.json                      hourly: the lab feed header (docs/LAB-FEEDS.md) for the
                                                  Research page and Home, plus the board for the CS2 page
-                                                 (`rows`, `portfolio`, `alerts`, `research`)
+                                                 (`rows`, `portfolio`, `alerts`, `research`, and
+                                                 `steamTrends` from the daily lab.cs2.trends job)
   <reports>/cs2/<date>.md, latest.md             the research report, daily (results/cs2.md)
   <reports>/cs2_weekly/                          the weekly report, at each paper rebalance (also a feed)
 
@@ -325,6 +326,8 @@ def main(argv: list[str] | None = None, root: Path | None = None, now_ms: int | 
         "alerts": [{"tsMs": a.get("ts_ms"), "kind": a.get("kind"), "name": a.get("name"), "text": a.get("text")} for a in recent],
         "collector": {k: collector.get(k) for k in ("at", "ok", "skinport_items", "steam_ok", "steam_requested", "errors")},
         "research": research_sum,
+        # The daily Steam market trends (lab.cs2.trends), as that job wrote them.
+        "steamTrends": market.read_json(base / "trends" / "latest.json"),
         "rows": rows,
     }
     boardj.update(feed(rows, found, eq, history, collector, now_ms, research_sum.get("verdict")))

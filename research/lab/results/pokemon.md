@@ -176,9 +176,10 @@ This is a rough comparison with similar cards, not a price target.
 | Features, studies | `lab.pokemon.data`, `lab.pokemon.study` (release, new sets, reprints, premiums, spread) |
 | Fair value, forecast, prior | `lab.pokemon.model` |
 | Paper collection | `lab.pokemon.collection` |
-| Alerts | `lab.pokemon.alerts` |
+| Alerts | `lab.pokemon.alerts`: strong moves, cheap cards and new-set notes, top 5 per alert, the small card pictures first as a Telegram album; per card set, number, rarity, condition basis (ungraded, which printing), TCGplayer USD and Cardmarket EUR with their dates (a Cardmarket price older than 14 days is marked stale, which on 2026-10-15 was every card), fair value and gap, 30 and 90 day forecasts with how far to trust them, the recent change, and links |
+| Links | `lab.pokemon.links`: the API's own product links (`cardmarket.url`, `tcgplayer.url`, redirects through prices.pokemontcg.io), else a URL-encoded search for the exact name (the set is named next to the link, not put in the query: Cardmarket's search matches product names, so name plus set name risks an empty page). All 10,694 kept cards of the first snapshot had a TCGplayer link, 214 had no Cardmarket link and get the search. Cardmarket's own site sits behind a bot check, so the search link could not be opened from the lab |
 | Daily job | `lab.pokemon.daily`: `pokemon/ui/latest.json` (Cards page), `reports/pokemon/latest.{md,json}` with the lab feed header, a monthly report on the first run of a month |
 | App | `src/pages/Cards.tsx` in the calm design (key numbers, sortable list with pictures, a sheet per card with its price line and forecasts, new sets, the paper collection), `/api/pokemon`, `pokemon_status` |
 
 Operator steps and the cron line: `research/ops/README.md`, "Pokemon cards".
-Tests: `python -m pytest tests/test_pokemon.py` (34), from `research/lab`.
+Tests: `python -m pytest tests/test_pokemon.py` (38), from `research/lab`.

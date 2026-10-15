@@ -290,6 +290,17 @@ jobs:
     timeout: 15m
     replaces: pythia-cs2
 
+  # New, no hand-written cron file before it. The source file is rebuilt once
+  # a day (13:25 UTC on 2026-10-15); the 20:40 run only catches a late rebuild
+  # and is a no-op once the day is stored.
+  - name: cs2-trends
+    description: CS2 Steam market, the daily price snapshot (csgotrader's public file), trends, trend alerts and the summary card
+    schedule: "40 14,20 * * *"
+    command: sh -c 'python -m lab.collect.cs2 --steam-market && python -m lab.cs2.trends'
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 3g}
+    timeout: 20m
+
   # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
   # module is deployed to /opt/pythia-lab and its command is confirmed.
   - name: pokemon
