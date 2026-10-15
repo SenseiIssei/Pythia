@@ -8,15 +8,10 @@ import { curve, isActive, worstDip } from "../autopilot";
 import { benchmark } from "../practice";
 import type { AutopilotStatus } from "../types";
 
-/** The categorical slots the comparison chart draws with, in fixed order
- *  (validated for both themes: colour-blind separation and a contrast that
- *  is relieved by the table and the legend). A seventh autopilot on is in
- *  the table only. */
-export const SERIES = {
-  light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7"],
-  dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#9085e9"],
-} as const;
-export const MAX_SERIES = SERIES.light.length;
+/** The chart draws with the design system's series colours
+ *  (`--color-series-1` to `-6`, src/design/tokens.ts), in fixed order. A
+ *  seventh autopilot on is in the table only. */
+export const MAX_SERIES = 6;
 
 export interface CompareRow {
   id: string;

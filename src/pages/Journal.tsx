@@ -1,86 +1,84 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ScrollText } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Badge, EmptyState } from "../components/ui";
-import type { JournalKind } from "../types";
+import { Badge, Card, Chip, Page } from "../design";
+import { FilterChips, KeyStats, Nothing, Section, type ChipOption } from "../pagekit";
+import { JOURNAL_KINDS, filterJournal, isDemoLine, journalCounts, kindInfo, type JournalFilter } from "../pagekit/journal";
 import { TaxCard } from "../components/TaxCard";
+import type { JournalKind } from "../types";
 
-const KINDS: { id: JournalKind | "all"; label: string; help: string }[] = [
-  { id: "all", label: "All", help: "Everything, newest first." },
-  { id: "signal", label: "Signals", help: "A strategy decided it wants to buy or sell." },
-  { id: "order", label: "Orders", help: "An order was sent." },
-  { id: "fill", label: "Fills", help: "An order was filled: the trade happened." },
-  { id: "reject", label: "Refused", help: "An order was refused, with the reason." },
-  { id: "risk", label: "Risk", help: "The risk manager stepped in or a limit changed." },
-  { id: "system", label: "System", help: "Something about the engine itself." },
-];
+const ORDER: JournalKind[] = ["fill", "order", "signal", "reject", "risk", "system"];
 
-const kindTone: Record<string, string> = {
-  signal: "text-purple-neon",
-  fill: "text-success",
-  reject: "text-danger",
-  risk: "text-warning",
-  order: "text-accent",
-  system: "text-cyber-text-faint",
-};
+/** Long lists stay quick: the newest lines first, more on request. */
+const PAGE = 200;
 
 export function Journal() {
   const { journal } = useStore();
-  const [filter, setFilter] = useState<JournalKind | "all">("all");
-  const shown = journal.filter((e) => filter === "all" || e.kind === filter);
+  const [filter, setFilter] = useState<JournalFilter>("all");
+  const [limit, setLimit] = useState(PAGE);
+  const counts = useMemo(() => journalCounts(journal), [journal]);
+  const shown = filterJournal(journal, filter);
+
+  const options: ChipOption<JournalFilter>[] = [
+    { id: "all", label: "All", help: "Everything, newest first.", count: counts.all },
+    ...ORDER.map((k) => ({ id: k, label: JOURNAL_KINDS[k].label, help: JOURNAL_KINDS[k].help, count: counts[k] })),
+  ];
 
   return (
-    <div className="animate-fade-in mx-auto max-w-6xl space-y-4">
-      <PageHeader
-        title="Journal"
-        subtitle="An append-only record of every signal, order, fill and refusal, so anything that happened can be traced afterwards."
+    <Page
+      title="Journal"
+      subtitle="A record of every signal, order, fill and refusal that is only ever added to, so anything that happened can be traced afterwards."
+    >
+      <KeyStats
+        items={[
+          { label: "Entries", value: counts.all.toLocaleString("en-US"), help: "Lines in the journal this session." },
+          { label: "Filled", value: counts.fill.toLocaleString("en-US"), help: "Orders that turned into trades." },
+          { label: "Refused", value: counts.reject.toLocaleString("en-US"), tone: counts.reject > 0 ? "warn" : "plain", help: "Orders the venue or the risk manager turned down." },
+        ]}
       />
 
       <TaxCard />
 
-      <div role="radiogroup" aria-label="Show entries" className="flex flex-wrap gap-1.5">
-        {KINDS.map((k) => (
-          <button
-            key={k.id}
-            type="button"
-            role="radio"
-            aria-checked={filter === k.id}
-            title={k.help}
-            onClick={() => setFilter(k.id)}
-            className={`rounded-lg border px-3 py-1 text-xs font-medium transition-colors ${
-              filter === k.id
-                ? "border-accent/40 bg-accent/10 text-accent"
-                : "border-cyber-border text-cyber-text-dim hover:border-cyber-border-bright hover:text-cyber-text"
-            }`}
-          >
-            {k.label}
-          </button>
-        ))}
-      </div>
-
-      <Card>
-        {shown.length === 0 ? (
-          <EmptyState icon={ScrollText} title="No entries of this kind yet" compact />
-        ) : (
-          <ul className="max-h-[calc(100dvh-300px)] min-h-[200px] divide-y divide-cyber-border/50 overflow-y-auto text-xs">
-            {shown.map((e) => (
-              <li key={e.id} className="flex flex-wrap items-start gap-x-2 gap-y-0.5 py-1.5 sm:flex-nowrap">
-                <span className="w-20 shrink-0 font-mono text-cyber-text-faint">{new Date(e.ts).toLocaleTimeString()}</span>
-                <span
-                  title={KINDS.find((k) => k.id === e.kind)?.help}
-                  className={`w-14 shrink-0 font-mono uppercase ${kindTone[e.kind] ?? "text-cyber-text-faint"}`}
-                >
-                  {e.kind}
-                </span>
-                {e.mode === "live" && <Badge tone="red">live</Badge>}
-                {/* Every demo-route line starts with DEMO (the engine writes it that way). */}
-                {e.message.startsWith("DEMO") && <Badge tone="purple">demo</Badge>}
-                <span className="min-w-0 basis-full break-words text-cyber-text-dim sm:basis-auto">{e.message}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
-    </div>
+      <Section title="Entries" hint="Pick a kind to see only that. The newest is at the top." bare>
+        <FilterChips
+          label="Show entries"
+          options={options}
+          value={filter}
+          onChange={(f) => {
+            setFilter(f);
+            setLimit(PAGE);
+          }}
+        />
+        <Card>
+          {shown.length === 0 ? (
+            <Nothing icon={ScrollText} title="No entries of this kind yet" />
+          ) : (
+            <ul className="divide-y divide-line">
+              {shown.slice(0, limit).map((e) => {
+                const k = kindInfo(e.kind);
+                return (
+                  <li key={e.id} className="py-3">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Chip tone={k.tone} title={k.help}>
+                        {k.label}
+                      </Chip>
+                      {e.mode === "live" && <Badge tone="bad">Live</Badge>}
+                      {isDemoLine(e) && <Badge tone="accent">Demo</Badge>}
+                      <span className="tabular ml-auto text-[13px] text-faint">{new Date(e.ts).toLocaleTimeString()}</span>
+                    </div>
+                    <p className="mt-1 break-words text-[15px] text-ink">{e.message}</p>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {shown.length > limit && (
+            <button type="button" onClick={() => setLimit((l) => l + PAGE)} className="mt-2 w-full rounded-control py-2.5 text-center text-[15px] font-semibold text-accent hover:bg-surface-2">
+              Show {Math.min(PAGE, shown.length - limit)} more of {shown.length - limit}
+            </button>
+          )}
+        </Card>
+      </Section>
+    </Page>
   );
 }

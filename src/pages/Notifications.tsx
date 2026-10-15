@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Bell, BellOff, FileText, Send } from "lucide-react";
-import { Button, Card, Chip, Empty, ListRow, Page, Sheet, Skeleton, type ChipTone } from "../design/flows";
+import { Button, Card, Chip, Empty, ListRow, Page, SectionTitle, Sheet, Skeleton, type ChipTone } from "../design";
 import { shortLine, timeOfDay, dayLabel } from "../flows/activity";
 import {
   MUTE_CHOICES,
@@ -101,10 +101,10 @@ export function Notifications() {
           <Card>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-lg font-semibold">
+                <p className="text-[17px] font-semibold tracking-tight">
                   {!view.enabled ? "Alerts are off" : muted ?? `Sending to ${destinationName(view.destination)}`}
                 </p>
-                <p className="fl-muted text-sm">
+                <p className="text-muted text-sm">
                   {!view.enabled ? "Set an alert destination on the server to turn them on." : countsLine(view.counts)}
                 </p>
               </div>
@@ -127,7 +127,7 @@ export function Notifications() {
               </div>
             )}
             {note && (
-              <p role="status" className="fl-muted mt-2 text-sm">
+              <p role="status" className="text-muted mt-2 text-sm">
                 {note}
               </p>
             )}
@@ -142,24 +142,23 @@ export function Notifications() {
             {view.lastDigest && <p className="whitespace-pre-line break-words text-sm">{view.lastDigest.text}</p>}
           </Card>
 
-          <div className="px-1 pt-2">
-            <h2 className="text-lg font-semibold tracking-tight">Recent</h2>
-          </div>
+          <SectionTitle>Recent</SectionTitle>
           <Card className="py-1">
             {view.recent.length === 0 ? (
               <Empty icon={Bell} title="No alerts yet">
                 Starts, stops, loss limits and problems show up here.
               </Empty>
             ) : (
-              <ul className="divide-y" style={{ borderColor: "var(--fl-line)" }}>
+              <ul className="divide-y">
                 {view.recent.map((a, i) => {
                   const d = deliveryOf(a);
                   return (
                     <li key={`${a.ts}:${i}`}>
                       <ListRow
+                        icon={Bell}
                         title={alertTitle(a)}
                         subtitle={shortLine(a.text.replace(/\*\*/g, ""), 140)}
-                        right={<span className="fl-muted text-sm font-normal">{`${dayLabel(a.ts, now)} ${timeOfDay(a.ts)}`}</span>}
+                        right={<span className="text-muted text-sm font-normal">{`${dayLabel(a.ts, now)} ${timeOfDay(a.ts)}`}</span>}
                         rightSub={<Chip tone={TONE[d.tone]} title={d.label}>{d.label.startsWith("Failed") ? "Failed" : d.label}</Chip>}
                       />
                     </li>
@@ -172,7 +171,7 @@ export function Notifications() {
       ) : null}
 
       <Sheet open={muting} title="Mute alerts" onClose={() => setMuting(false)}>
-        <p className="fl-muted text-[15px]">Nothing is sent while muted. Alerts are still listed here.</p>
+        <p className="text-muted text-[15px]">Nothing is sent while muted. Alerts are still listed here.</p>
         <div className="mt-4 space-y-2">
           {MUTE_CHOICES.map((c) => (
             <Button key={c.minutes} variant="secondary" full disabled={busy} onClick={() => void mute(c.minutes)}>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card } from "../design/flows";
+import { Card } from "../design";
 import { fmtWhen } from "../autopilot";
 import {
   chartFrame,
@@ -16,7 +16,7 @@ import type { AutopilotStatus } from "../types";
 const MODE: Record<CompareRow["mode"], string> = { paper: "Practice", demo: "Demo", live: "Real money" };
 
 function seriesColor(slot: number): string {
-  return `var(--fl-s${slot + 1})`;
+  return `var(--color-series-${slot + 1})`;
 }
 
 function money(n: number): string {
@@ -38,17 +38,17 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
     <Card label="Autopilots side by side">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="text-base font-semibold">Side by side</h2>
-        <span className="fl-muted text-xs">Each trades its own book on the shared account</span>
+        <span className="text-muted text-xs">Each trades its own book on the shared account</span>
       </div>
-      {lead && <p className="fl-muted mt-1 text-sm">{lead}</p>}
+      {lead && <p className="text-muted mt-1 text-sm">{lead}</p>}
 
       <CompareChart series={series} />
-      {hidden > 0 && <p className="fl-muted mt-1 text-xs">{hidden} more in the table below; the chart draws the first six by start.</p>}
+      {hidden > 0 && <p className="text-muted mt-1 text-xs">{hidden} more in the table below; the chart draws the first six by start.</p>}
 
       {/* Narrow screens: one block per autopilot instead of a wide table. */}
       <ul className="mt-3 sm:hidden" aria-label="Autopilots compared">
         {rows.map((r, i) => (
-          <li key={r.id} className={`py-2.5 ${i > 0 ? "border-t" : ""}`} style={{ borderColor: "var(--fl-line)" }}>
+          <li key={r.id} className={`py-2.5 ${i > 0 ? "border-t" : ""}`} style={{ borderColor: "var(--color-line)" }}>
             <div className="flex items-center gap-2">
               <span
                 aria-hidden
@@ -56,21 +56,21 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
                 style={{ background: r.slot !== null ? seriesColor(r.slot) : "transparent" }}
               />
               <span className="min-w-0 flex-1 truncate font-semibold">{r.name}</span>
-              <span className={`fl-num font-semibold ${r.returnPct > 0.005 ? "fl-up" : r.returnPct < -0.005 ? "fl-down" : ""}`}>
+              <span className={`tabular font-semibold ${r.returnPct > 0.005 ? "text-up" : r.returnPct < -0.005 ? "text-down" : ""}`}>
                 {fmtPct(r.returnPct)}
               </span>
             </div>
-            <dl className="fl-muted mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 pl-[18px] text-xs">
+            <dl className="text-muted mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 pl-[18px] text-xs">
               <dt>vs {r.benchLabel}</dt>
-              <dd className="fl-num text-right">{r.vsBenchPts == null ? "n/a" : `${r.vsBenchPts >= 0 ? "+" : "−"}${Math.abs(r.vsBenchPts).toFixed(1)} pts`}</dd>
+              <dd className="tabular text-right">{r.vsBenchPts == null ? "n/a" : `${r.vsBenchPts >= 0 ? "+" : "−"}${Math.abs(r.vsBenchPts).toFixed(1)} pts`}</dd>
               <dt>Deepest drawdown</dt>
-              <dd className="fl-num text-right">{r.maxDrawdownPct.toFixed(1)}%</dd>
+              <dd className="tabular text-right">{r.maxDrawdownPct.toFixed(1)}%</dd>
               <dt>Trades · fees</dt>
-              <dd className="fl-num text-right">
+              <dd className="tabular text-right">
                 {r.trades} · ${r.fees.toFixed(2)}
               </dd>
               <dt>{MODE[r.mode]}</dt>
-              <dd className="fl-num text-right">
+              <dd className="tabular text-right">
                 {money(r.amount)}
                 {!r.active ? " · stopped" : ""}
               </dd>
@@ -83,7 +83,7 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
         <table className="w-full min-w-[520px] text-sm">
           <caption className="sr-only">Autopilots compared: return, against the benchmark, drawdown, trades and fees</caption>
           <thead>
-            <tr className="fl-muted text-left text-xs">
+            <tr className="text-muted text-left text-xs">
               <th scope="col" className="py-1.5 pr-2 font-semibold">Autopilot</th>
               <th scope="col" className="py-1.5 pr-2 text-right font-semibold">Return</th>
               <th scope="col" className="py-1.5 pr-2 text-right font-semibold">vs benchmark</th>
@@ -96,7 +96,7 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.id} className="border-t" style={{ borderColor: "var(--fl-line)" }}>
+              <tr key={r.id} className="border-t" style={{ borderColor: "var(--color-line)" }}>
                 <th scope="row" className="py-2 pr-2 text-left font-normal">
                   <span className="flex items-center gap-2">
                     {r.slot !== null ? (
@@ -106,46 +106,46 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
                     )}
                     <span className="min-w-0">
                       <span className="block truncate font-semibold">{r.name}</span>
-                      <span className="fl-muted block text-xs">
+                      <span className="text-muted block text-xs">
                         {MODE[r.mode]} · {money(r.amount)}
                         {!r.active ? " · stopped" : ""}
                       </span>
                     </span>
                   </span>
                 </th>
-                <td className={`fl-num py-2 pr-2 text-right font-semibold ${r.returnPct > 0.005 ? "fl-up" : r.returnPct < -0.005 ? "fl-down" : ""}`}>
+                <td className={`tabular py-2 pr-2 text-right font-semibold ${r.returnPct > 0.005 ? "text-up" : r.returnPct < -0.005 ? "text-down" : ""}`}>
                   {fmtPct(r.returnPct)}
                 </td>
-                <td className="fl-num py-2 pr-2 text-right">
+                <td className="tabular py-2 pr-2 text-right">
                   {r.vsBenchPts == null ? (
-                    <span className="fl-muted">n/a</span>
+                    <span className="text-muted">n/a</span>
                   ) : (
                     <>
                       <span className="block">
                         {r.vsBenchPts > 0.05 ? "+" : r.vsBenchPts < -0.05 ? "−" : ""}
                         {Math.abs(r.vsBenchPts).toFixed(1)} pts
                       </span>
-                      <span className="fl-muted block text-xs">
+                      <span className="text-muted block text-xs">
                         {r.benchLabel} {fmtPct(r.benchPct, 1)}
                       </span>
                     </>
                   )}
                 </td>
-                <td className="fl-num py-2 pr-2 text-right">
+                <td className="tabular py-2 pr-2 text-right">
                   <span className="block">{r.maxDrawdownPct.toFixed(1)}%</span>
-                  <span className="fl-muted block text-xs">now {r.drawdownPct.toFixed(1)}%</span>
+                  <span className="text-muted block text-xs">now {r.drawdownPct.toFixed(1)}%</span>
                 </td>
-                <td className="fl-num py-2 pr-2 text-right">{r.trades}</td>
-                <td className="fl-num py-2 text-right">
+                <td className="tabular py-2 pr-2 text-right">{r.trades}</td>
+                <td className="tabular py-2 text-right">
                   <span className="block">${r.fees.toFixed(2)}</span>
-                  <span className="fl-muted block text-xs">{r.feesPct.toFixed(2)}%</span>
+                  <span className="text-muted block text-xs">{r.feesPct.toFixed(2)}%</span>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <p className="fl-muted mt-2 text-xs">
+      <p className="text-muted mt-2 text-xs">
         Benchmark: buying and holding Bitcoin for crypto, SPY for US shares, over the same period. Points are the return less the
         benchmark's.
       </p>
@@ -173,8 +173,8 @@ function CompareChart({ series }: { series: CompareSeries[] }) {
   const frame = chartFrame(series);
   if (!frame) {
     return (
-      <div className="fl-surface-2 mt-3 flex h-24 items-center justify-center rounded-xl text-sm" role="img" aria-label="Not enough history yet to draw">
-        <span className="fl-muted">Not enough history yet to draw them together.</span>
+      <div className="bg-surface-2 mt-3 flex h-24 items-center justify-center rounded-xl text-sm" role="img" aria-label="Not enough history yet to draw">
+        <span className="text-muted">Not enough history yet to draw them together.</span>
       </div>
     );
   }
@@ -223,19 +223,19 @@ function CompareChart({ series }: { series: CompareSeries[] }) {
                 x2={PAD.left + iw}
                 y1={y(v)}
                 y2={y(v)}
-                stroke="var(--fl-line)"
+                stroke="var(--color-line)"
                 strokeWidth={Math.abs(v) < 1e-9 ? 1.5 : 1}
                 strokeDasharray={Math.abs(v) < 1e-9 ? undefined : "2 3"}
               />
-              <text x={PAD.left - 6} y={y(v) + 3} textAnchor="end" fontSize={10} fill="var(--fl-muted)">
+              <text x={PAD.left - 6} y={y(v) + 3} textAnchor="end" fontSize={10} fill="var(--color-muted)">
                 {fmtPct(v, Math.abs(hi - lo) < 4 ? 1 : 0)}
               </text>
             </g>
           ))}
-          <text x={PAD.left} y={H - 6} fontSize={10} fill="var(--fl-muted)">
+          <text x={PAD.left} y={H - 6} fontSize={10} fill="var(--color-muted)">
             {fmtWhen(t0)}
           </text>
-          <text x={PAD.left + iw} y={H - 6} fontSize={10} fill="var(--fl-muted)" textAnchor="end">
+          <text x={PAD.left + iw} y={H - 6} fontSize={10} fill="var(--color-muted)" textAnchor="end">
             {fmtWhen(t1)}
           </text>
           {series.map((s) => (
@@ -258,7 +258,7 @@ function CompareChart({ series }: { series: CompareSeries[] }) {
                 cy={y(last[1])}
                 r={4}
                 fill={seriesColor(s.slot)}
-                stroke="var(--fl-surface)"
+                stroke="var(--color-surface)"
                 strokeWidth={2}
               />
             );
@@ -275,8 +275,8 @@ function CompareChart({ series }: { series: CompareSeries[] }) {
                   fontSize={11}
                   fontWeight={600}
                   textAnchor={right ? "end" : "start"}
-                  fill="var(--fl-text)"
-                  stroke="var(--fl-surface)"
+                  fill="var(--color-text)"
+                  stroke="var(--color-surface)"
                   strokeWidth={3}
                   paintOrder="stroke"
                 >
@@ -284,27 +284,27 @@ function CompareChart({ series }: { series: CompareSeries[] }) {
                 </text>
               );
             })}
-          {hover !== null && <line x1={hover} x2={hover} y1={PAD.top} y2={PAD.top + ih} stroke="var(--fl-muted)" strokeWidth={1} />}
+          {hover !== null && <line x1={hover} x2={hover} y1={PAD.top} y2={PAD.top + ih} stroke="var(--color-muted)" strokeWidth={1} />}
           {hover !== null &&
             at.map(({ s, v }) => (
-              <circle key={s.id} cx={hover} cy={y(v as number)} r={4} fill={seriesColor(s.slot)} stroke="var(--fl-surface)" strokeWidth={2} />
+              <circle key={s.id} cx={hover} cy={y(v as number)} r={4} fill={seriesColor(s.slot)} stroke="var(--color-surface)" strokeWidth={2} />
             ))}
         </svg>
         {hover !== null && hoverT !== null && at.length > 0 && (
           // In the corner away from the crosshair, so it never covers it or
           // runs off a narrow screen.
           <div
-            className="fl-card pointer-events-none absolute top-1 z-10 max-w-[70%] px-2.5 py-1.5 text-xs shadow-sm"
+            className="rounded-card border border-line bg-surface pointer-events-none absolute top-1 z-10 max-w-[70%] px-2.5 py-1.5 text-xs shadow-sm"
             style={hover > PAD.left + iw / 2 ? { left: PAD.left + 4 } : { right: PAD.right + 4 }}
           >
-            <div className="fl-muted mb-0.5">{fmtWhen(hoverT)}</div>
+            <div className="text-muted mb-0.5">{fmtWhen(hoverT)}</div>
             {at
               .sort((a, b) => (b.v as number) - (a.v as number))
               .map(({ s, v }) => (
                 <div key={s.id} className="flex items-center gap-1.5 whitespace-nowrap">
                   <span aria-hidden className="inline-block h-2 w-2 rounded-full" style={{ background: seriesColor(s.slot) }} />
                   <span>{s.name}</span>
-                  <span className="fl-num ml-auto pl-2 font-semibold">{fmtPct(v, 2)}</span>
+                  <span className="tabular ml-auto pl-2 font-semibold">{fmtPct(v, 2)}</span>
                 </div>
               ))}
           </div>
