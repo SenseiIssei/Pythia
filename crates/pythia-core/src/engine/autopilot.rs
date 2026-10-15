@@ -420,6 +420,10 @@ pub struct SleeveStatus {
     /// A re-pick took its weight to zero; it is listed for its record.
     #[serde(default)]
     pub dropped: bool,
+    /// An experimental lab book (failed the lab's bar): the page marks it
+    /// "experiment". Only ever here because the owner named it.
+    #[serde(default)]
+    pub experimental: bool,
 }
 
 /// An autopilot as the UI shows it. Pushed in `EngineState::autopilots`.
@@ -1142,7 +1146,14 @@ pub struct Evidence {
     /// Lab books: the lab's own paper book against its backtest's band, from
     /// the daily forward report. Counts only from `lab::FORWARD_MIN_DAYS` on.
     pub forward: Option<crate::lab::ForwardEvidence>,
+    /// Lab books: an experiment that failed the lab's bar
+    /// ([`crate::lab::LabSignal::is_experimental`]). Never auto-picked.
+    pub experimental: bool,
 }
+
+/// How an experimental lab book is named wherever it shows up: its sleeve,
+/// its trade lines, its evidence.
+pub const EXPERIMENT_WORD: &str = "experiment";
 
 /// Gate 6 passes above this deflated-Sharpe probability (see `lab::verdict`).
 pub const DEFLATION_PASS: f64 = 0.95;
@@ -1241,7 +1252,11 @@ impl Evidence {
 
     /// The evidence in a few words.
     pub fn describe(&self) -> String {
-        let mut parts = vec![format!("{} of 8 gates green", self.passed)];
+        let mut parts = Vec::new();
+        if self.experimental {
+            parts.push("EXPERIMENT: it failed the lab's deflation test and runs on paper only because you named it".to_string());
+        }
+        parts.push(format!("{} of 8 gates green", self.passed));
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
         }
@@ -2018,6 +2033,14 @@ impl Engine {
     ) {
         let Some(ap) = self.autopilots.get(i) else { return };
         let rebalance = self.strategies.iter().any(|s| s.id == sid && s.kind == StrategyKind::LabTargets);
+        // An experimental lab book traded this coin: the one that sent the
+        // order, or one that holds a share of the netted position.
+        let market = self.markets.iter().find(|m| m.symbol == symbol).map(|m| m.id.clone()).unwrap_or_default();
+        let experiment = (rebalance && self.lab_book_experimental(sid))
+            || ap
+                .shares
+                .get(&market)
+                .is_some_and(|sh| sh.iter().any(|(b, x)| *x > 1e-9 && self.lab_book_experimental(b)));
         let mode = match ap.config.mode {
             AutopilotMode::Live => "live",
             AutopilotMode::Demo => "demo",
@@ -2033,6 +2056,7 @@ impl Engine {
             realized,
             rebalance,
             mode: mode.into(),
+            experiment,
         };
         let key = format!("fill:{}:{symbol}:{}:{qty}", ap.config.id, self.now());
         self.alert_event(crate::alerts::AlertEvent::trade(key, line));
@@ -3290,6 +3314,7 @@ impl Engine {
                                 exposure,
                                 exposure_pct: if equity > 0.0 { exposure / equity * 100.0 } else { 0.0 },
                                 dropped: s.dropped_ms.is_some(),
+                                experimental: self.lab_book_experimental(&s.strategy_id),
                             }
                         })
                         .collect(),
@@ -3903,6 +3928,12 @@ impl Engine {
         if !runnable(s.kind) {
             return Some(format!("{} is not a strategy the engine runs on its own.", s.name));
         }
+        if mode == AutopilotMode::Live && s.kind == StrategyKind::LabTargets && self.lab_book_experimental(&s.id) {
+            return Some(format!(
+                "{} is an experiment: it failed the lab's deflation test and runs only in paper or demo autopilots, never with real money.",
+                s.name
+            ));
+        }
         if mode != AutopilotMode::Live && s.state == StrategyState::Live {
             return Some(format!(
                 "{} runs live on its own. A {} autopilot would take it off live; set it to paper yourself first if that is what you want.",
@@ -3992,6 +4023,7 @@ impl Engine {
             } else {
                 None
             },
+            experimental: s.kind == StrategyKind::LabTargets && self.lab_book_experimental(sid),
         }
     }
 
@@ -4065,6 +4097,9 @@ impl Engine {
             .iter()
             .filter(|s| s.id != "manual")
             .filter(|s| !labs_only || s.kind == StrategyKind::LabTargets)
+            // Experiments failed the lab's bar: they run only where an
+            // autopilot names them as a sleeve, never by a pick or re-pick.
+            .filter(|s| !(s.kind == StrategyKind::LabTargets && self.lab_book_experimental(&s.id)))
             .filter(|s| s.state != StrategyState::Paused || self.lab_book_autopilot_only(&s.id))
             .filter(|s| {
                 s.kind != StrategyKind::LabTargets

@@ -93,6 +93,9 @@ import {
   limit,
   planEdit,
   REPICK_CHOICES,
+  EXPERIMENT_HINT,
+  EXPERIMENT_LABEL,
+  isExperiment,
   sleeveExposure,
   type EditForm,
   type Stop,
@@ -423,7 +426,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   // A portfolio trades both classes on the Alpaca account.
   const target = both ? "alpaca" : autopilotVenue(mode, venue, live, cryptoCostVenue);
   const targetName = exchangeName(target);
-  const eligible = strategies.filter((s) => s.id !== "manual" && s.venueClass === venue);
+  // Experiments failed the lab's bar: never offered for real money.
+  const eligible = strategies.filter((s) => s.id !== "manual" && s.venueClass === venue && !(mode === "live" && isExperiment(s)));
   const chosen = eligible.map((s) => ({ s, w: parseInput(weights[s.id] ?? "") })).filter((x) => x.w > 0);
   const weightSum = chosen.reduce((a, x) => a + x.w, 0);
 
@@ -717,6 +721,11 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
                           />
                           <span className="min-w-0 truncate">{s.name}</span>
                         </label>
+                        {isExperiment(s) && (
+                          <Badge tone="warn" title={EXPERIMENT_HINT}>
+                            {EXPERIMENT_LABEL}
+                          </Badge>
+                        )}
                         {mode === "live" && (
                           <Badge tone={ready(s.id) ? "good" : "neutral"} title="Strategy Passport">
                             {ready(s.id) ? "Checks passed" : "Checks not passed"}
@@ -1187,7 +1196,16 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
               {s.bySleeve.map((b) => (
                 <div key={b.strategyId} className="py-3">
                   <div className="flex items-start justify-between gap-3">
-                    <span className="min-w-0 break-words text-[15px] font-semibold text-ink">{b.name}</span>
+                    <span className="min-w-0 break-words text-[15px] font-semibold text-ink">
+                      {b.name}
+                      {isExperiment(b) && (
+                        <span className="ml-2 align-middle">
+                          <Badge tone="warn" title={EXPERIMENT_HINT}>
+                            {EXPERIMENT_LABEL}
+                          </Badge>
+                        </span>
+                      )}
+                    </span>
                     <span className={`tabular shrink-0 text-[15px] font-semibold ${TONE_TEXT[changeTone(b.pnl)]}`}>{signedMoney(b.pnl)}</span>
                   </div>
                   <div className="mt-0.5 text-[13px] text-muted">
@@ -1247,7 +1265,7 @@ function EditPanel({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
   const venue = venueClassOf(s.config);
   const listed = new Set(s.config.sleeves.map((x) => x.strategyId));
   const eligible = strategies
-    .filter((x) => x.id !== "manual" && x.venueClass === venue)
+    .filter((x) => x.id !== "manual" && x.venueClass === venue && !(live && isExperiment(x)))
     .sort((a, b) => Number(listed.has(b.id)) - Number(listed.has(a.id)));
   const confirmed = live ? typed.trim().toUpperCase() === LIVE_EDIT_PHRASE : !plan.looser || accept;
   const canSave = plan.changed && plan.problems.length === 0 && confirmed && !busy;
@@ -1294,6 +1312,11 @@ function EditPanel({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
             {eligible.map((x) => (
               <div key={x.id} className="flex items-center justify-between gap-3 py-2">
                 <span className="min-w-0 truncate text-[15px] text-ink">{x.name}</span>
+                {isExperiment(x) && (
+                  <Badge tone="warn" title={EXPERIMENT_HINT}>
+                    {EXPERIMENT_LABEL}
+                  </Badge>
+                )}
                 <SmallInput value={f.weights[x.id] ?? ""} onChange={(v) => set({ weights: { ...f.weights, [x.id]: v } })} label={`Share for ${x.name}`} width="w-20" />
               </div>
             ))}

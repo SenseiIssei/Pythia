@@ -2177,6 +2177,7 @@ mod tests {
             autopilot_only: false,
             dropped: vec![],
             asset_class: None,
+            experimental: false,
         });
         e
     }
@@ -2223,6 +2224,7 @@ mod tests {
             autopilot_only: true,
             dropped: vec![],
             asset_class: None,
+            experimental: false,
         });
     }
 

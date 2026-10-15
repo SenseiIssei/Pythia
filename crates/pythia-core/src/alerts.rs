@@ -182,6 +182,9 @@ pub struct TradeLine {
     pub rebalance: bool,
     /// `paper`, `demo` or `live`.
     pub mode: String,
+    /// Traded for an experimental lab book (one that failed the lab's bar):
+    /// the line and its card say "experiment".
+    pub experiment: bool,
 }
 
 /// One operator alert. `key` identifies the condition for deduplication:
@@ -256,7 +259,8 @@ impl AlertEvent {
     /// other as a trade.
     pub fn trade(key: impl Into<String>, t: TradeLine) -> Self {
         let side = if t.buy { "bought" } else { "sold" };
-        let text = format!("{} {side} {} {} at {}", t.book, qty(t.qty), t.symbol, price(t.price));
+        let exp = if t.experiment { " (experiment)" } else { "" };
+        let text = format!("{}{exp} {side} {} {} at {}", t.book, qty(t.qty), t.symbol, price(t.price));
         let cat = if t.rebalance { AlertCategory::Rebalances } else { AlertCategory::Trades };
         let mut ev = Self::new(AlertKind::Trade, key, text).in_category(cat);
         ev.trade = Some(t);
@@ -361,24 +365,39 @@ pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
     }
     let mut out = Vec::new();
     for (book, fills) in books {
-        // Same coin, same side: one line.
+        // Same coin, same side: one line. A line traded for an experimental
+        // lab book is marked "experiment", and so is the card.
         let mut lines: Vec<(bool, String, f64, f64)> = Vec::new(); // buy, symbol, qty, value
+        let mut exp_syms: Vec<String> = Vec::new();
         for t in &fills {
-            match lines.iter_mut().find(|(b, s, ..)| *b == t.buy && *s == t.symbol) {
+            let sym = t.symbol.clone();
+            if t.experiment && !exp_syms.contains(&sym) {
+                exp_syms.push(sym.clone());
+            }
+            match lines.iter_mut().find(|(b, s, ..)| *b == t.buy && *s == sym) {
                 Some(l) => {
                     l.2 += t.qty;
                     l.3 += t.qty * t.price;
                 }
-                None => lines.push((t.buy, t.symbol.clone(), t.qty, t.qty * t.price)),
+                None => lines.push((t.buy, sym, t.qty, t.qty * t.price)),
             }
         }
+        let experiment = !exp_syms.is_empty();
+        let tag = if experiment { " · experiment" } else { "" };
         let fees: f64 = fills.iter().map(|t| t.fee).sum();
         let realized: f64 = fills.iter().map(|t| t.realized).sum();
         let mode = fills[0].mode.clone();
+        let footer = |m: &str| {
+            if experiment {
+                format!("{} · experiment: a rule that failed the lab's deflation test", mode_word(m))
+            } else {
+                mode_word(m)
+            }
+        };
         let rebalance = fills.iter().any(|t| t.rebalance);
         if lines.len() == 1 && !rebalance {
             let (buy, sym, q, value) = lines[0].clone();
-            let mut c = Card::new(if buy { "🟢" } else { "🔴" }, format!("{book} {} {sym}", if buy { "bought" } else { "sold" }))
+            let mut c = Card::new(if buy { "🟢" } else { "🔴" }, format!("{book} {} {sym}{tag}", if buy { "bought" } else { "sold" }))
                 .row(Row::new("Amount", format!("{} {sym}", qty(q))))
                 .row(Row::new("Price", price(if q > 0.0 { value / q } else { 0.0 })))
                 .row(Row::new("Value", usd(value)));
@@ -388,7 +407,7 @@ pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
             if realized.abs() > 1e-9 {
                 c = c.row(Row::toned("Realised", signed_usd(realized), realized));
             }
-            out.push(c.footer(mode_word(&mode)));
+            out.push(c.footer(footer(&mode)));
             continue;
         }
         let bought: f64 = lines.iter().filter(|l| l.0).map(|l| l.3).sum();
@@ -401,7 +420,7 @@ pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
         if sold > 0.0 {
             parts.push(format!("sold {}", usd(sold)));
         }
-        let title = if rebalance { format!("Rebalance · {book}") } else { format!("{n} trades · {book}") };
+        let title = if rebalance { format!("Rebalance · {book}{tag}") } else { format!("{n} trades · {book}{tag}") };
         let mut c = Card::new(if rebalance { "🔁" } else { "💱" }, title)
             .summary(format!("{n} {}: {}.", if n == 1 { "trade" } else { "trades" }, parts.join(", ")));
         let mut rows: Vec<Vec<String>> = lines
@@ -409,7 +428,7 @@ pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
             .map(|(buy, sym, q, v)| {
                 vec![
                     if *buy { "Buy" } else { "Sell" }.to_string(),
-                    sym.clone(),
+                    if exp_syms.contains(sym) { format!("{sym} (exp)") } else { sym.clone() },
                     card::money(*v, 0),
                     price(if *q > 0.0 { v / q } else { 0.0 }),
                 ]
@@ -425,7 +444,7 @@ pub fn trade_cards(trades: &[&TradeLine]) -> Vec<Card> {
         if fees > 0.0 {
             c = c.row(Row::new("Fees", usd(fees)));
         }
-        out.push(c.footer(mode_word(&mode)));
+        out.push(c.footer(footer(&mode)));
     }
     out
 }

@@ -50,6 +50,14 @@ pub struct LabSignal {
     /// traded as `alpaca:<SYMBOL>` on Alpaca in the regular session.
     #[serde(default)]
     pub asset_class: Option<String>,
+    /// An experiment: a rule that failed the lab's bar (deflation), run on
+    /// paper for forward evidence because the owner asked for more risk. It
+    /// is autopilot-only whatever `autopilot_only` says, the auto pick never
+    /// picks it, a live autopilot never runs it, and every place it shows up
+    /// says "experiment". The lab writes the flag here and in the evidence;
+    /// either one is enough ([`LabSignal::is_experimental`]).
+    #[serde(default)]
+    pub experimental: bool,
 }
 
 /// [`LabSignal::asset_class`] of a book of US shares and ETFs.
@@ -86,6 +94,13 @@ pub struct LabEvidence {
     /// A known weakness of this evidence, in one plain sentence.
     #[serde(default)]
     pub caveat: Option<String>,
+    /// The rule failed the bar and runs as an experiment (see
+    /// [`LabSignal::experimental`]).
+    #[serde(default)]
+    pub experimental: bool,
+    /// Why the experiment failed the bar, in the lab's words.
+    #[serde(default)]
+    pub why_failed: Option<String>,
 }
 
 // ── forward evidence ────────────────────────────────────────────────────────
@@ -114,6 +129,8 @@ pub struct ForwardEvidence {
     /// Autopilots only: when this run started (epoch ms), so a row is never
     /// taken for a later autopilot that reuses the id.
     pub started_ms: Option<i64>,
+    /// Books only: an experiment that failed the lab's bar.
+    pub experimental: bool,
 }
 
 impl ForwardEvidence {
@@ -212,6 +229,12 @@ pub fn read_signal(path: &Path) -> Result<LabSignal, String> {
 impl LabSignal {
     pub fn is_fresh(&self, now_ms: i64) -> bool {
         now_ms <= self.valid_until_ms
+    }
+
+    /// An experiment that failed the lab's bar: flagged on the signal or in
+    /// its evidence.
+    pub fn is_experimental(&self) -> bool {
+        self.experimental || self.evidence.experimental
     }
 
     /// A book of US shares and ETFs, traded on Alpaca.
@@ -583,6 +606,21 @@ mod tests {
         assert_eq!(s.dropped, vec!["HYPE".to_string()]);
         let v = verdict("lab:breakout_top10", vec![], &s.evidence, 0);
         assert!(v.gates[3].reason.contains("of the 6 variants tried"), "{}", v.gates[3].reason);
+        assert!(!s.is_experimental());
+
+        // An experiment: flagged on the signal, in the evidence, or both; the
+        // lab's extra fields (bootstrap band, why it failed) do not break it.
+        let j = r#"{"strategy":"memes_rotation","variant":"EXPERIMENT, failed deflation · memecoins","as_of_ms":1,
+            "generated_ms":2,"valid_until_ms":3,"quote":"USD","weights":{"PEPE":0.37},"regime_on":true,
+            "autopilot_only":true,"experimental":true,"experiment":{"label":"EXPERIMENT, failed deflation"},
+            "evidence":{"report":"memecoins","experimental":true,"oos_sharpe":1.15,"deflated_p":0.01,
+            "variants_tried":427,"bootstrap_90":[-0.24,2.27],"why_failed":"deflated p 0.01","verdict":"experiment, fails"}}"#;
+        let s: LabSignal = serde_json::from_str(j).unwrap();
+        assert!(s.is_experimental() && s.evidence.experimental);
+        assert_eq!(s.evidence.why_failed.as_deref(), Some("deflated p 0.01"));
+        let only_evidence = j.replace(r#""autopilot_only":true,"experimental":true,"#, "");
+        let s: LabSignal = serde_json::from_str(&only_evidence).unwrap();
+        assert!(!s.experimental && s.is_experimental(), "the evidence alone is enough");
     }
 
     #[test]

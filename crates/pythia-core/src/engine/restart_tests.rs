@@ -50,6 +50,7 @@ fn signal(generated: i64) -> crate::lab::LabSignal {
         autopilot_only: false,
         dropped: vec![],
         asset_class: None,
+        experimental: false,
     }
 }
 

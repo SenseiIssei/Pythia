@@ -10,6 +10,7 @@ import {
   editForm,
   floorAtStart,
   forwardLine,
+  isExperiment,
   lossAllowance,
   loosensLoss,
   maturity,
@@ -324,5 +325,15 @@ describe("portfolio across asset classes", () => {
   it("says the blend in a few words, and nothing for a single benchmark", () => {
     expect(blendWords(portfolio)).toBe("62% BTC, 38% SPY");
     expect(blendWords(status({ benchmark: { symbol: "SPY", name: "SPY buy and hold", returnPct: 1, excessPct: 0 } }))).toBeNull();
+  });
+});
+
+describe("isExperiment", () => {
+  it("knows an experimental lab book by the engine's flag or the lab's label", () => {
+    expect(isExperiment({ experimental: true, name: "Lab · memes" })).toBe(true);
+    expect(isExperiment({ name: "Lab · EXPERIMENT, failed deflation · memecoins top 1" })).toBe(true);
+    expect(isExperiment({ name: "Lab · Donchian 20/10" })).toBe(false);
+    expect(isExperiment({ experimental: false, name: "an experimental idea" })).toBe(false);
+    expect(isExperiment(undefined)).toBe(false);
   });
 });

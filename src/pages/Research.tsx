@@ -262,7 +262,10 @@ function BookCard({ b, advanced, hasStudy, onStudy }: { b: BookView; advanced: b
           <div className="text-[17px] font-semibold leading-snug">{b.title}</div>
           {advanced && <div className="text-muted text-xs">{b.name}</div>}
         </div>
-        {st && <Chip tone={CHIP[st.tone]}>{st.label}</Chip>}
+        <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+          {b.info?.experiment && <Chip tone="warn">Experiment</Chip>}
+          {st && <Chip tone={CHIP[st.tone]}>{st.label}</Chip>}
+        </div>
       </div>
 
       <div className="mt-3 flex items-end justify-between gap-3">

@@ -67,6 +67,7 @@ fn book(name: &str, generated: i64, weights: &[(&str, f64)], ev: crate::lab::Lab
         autopilot_only: false,
         dropped: vec![],
         asset_class: shares.then(|| crate::lab::US_EQUITY.to_string()),
+        experimental: false,
     }
 }
 

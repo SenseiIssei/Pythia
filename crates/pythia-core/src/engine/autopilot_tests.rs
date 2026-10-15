@@ -852,6 +852,7 @@ fn lab_signal(now: i64, weights: &[(&str, f64)]) -> crate::lab::LabSignal {
         autopilot_only: false,
         dropped: vec![],
         asset_class: None,
+        experimental: false,
     }
 }
 
@@ -977,6 +978,7 @@ fn book(
         autopilot_only,
         dropped: vec![],
         asset_class: None,
+        experimental: false,
     }
 }
 
@@ -1487,6 +1489,7 @@ fn fwd(days: f64, ret: f64, lo: f64, hi: f64) -> crate::lab::ForwardEvidence {
         status: String::new(),
         state: None,
         started_ms: None,
+        experimental: false,
     }
 }
 
@@ -2453,4 +2456,103 @@ fn an_update_can_hand_the_choice_to_the_auto_pick() {
     // And back to an explicit choice: re-picking stops.
     update(&mut e, &id, sleeves_upd(&[("lab:tsmom_tranches", 1.0)])).unwrap();
     assert_eq!(status(&e, &id).config.repick_every_hours, None);
+}
+
+// ── experimental lab books ─────────────────────────────────────────────────
+
+/// W7's near miss as the lab writes it: a better headline than any book here,
+/// but it failed deflation and runs as an experiment.
+fn experiment(strategy: &str, generated: i64, weights: &[(&str, f64)]) -> crate::lab::LabSignal {
+    let ev = crate::lab::LabEvidence {
+        report: "memecoins".into(),
+        is_sharpe: Some(1.67),
+        oos_sharpe: Some(1.15),
+        deflated_p: Some(0.01),
+        sharpe_2x_cost: Some(0.94),
+        variants_tried: Some(427),
+        experimental: true,
+        why_failed: Some("deflated p 0.01 over 427 trials".into()),
+        ..Default::default()
+    };
+    let mut s = book(strategy, generated, weights, ev, true);
+    s.variant = format!("EXPERIMENT, failed deflation · {strategy}");
+    s.experimental = true;
+    s
+}
+
+#[test]
+fn auto_pick_never_picks_an_experiment_however_good_its_numbers() {
+    let mut e = idle_engine();
+    let now = e.now();
+    let w = &[("BTC", 0.3), ("ETH", 0.2)];
+    e.apply_lab_signal(experiment("memes_rotation", now, w));
+    e.apply_lab_signal(book("tsmom_top20", now, w, top20_evidence(), true));
+    assert_eq!(state_of(&e, "lab:memes_rotation"), StrategyState::Paused, "an experiment is idle until named");
+    assert!(e.evidence("lab:memes_rotation").score().unwrap() > e.evidence("lab:tsmom_top20").score().unwrap(),
+        "the experiment's numbers would win a pick");
+    let id = start(&mut e, config("auto", 10_000.0, &[], StopRules::default()));
+    let s = status(&e, &id);
+    assert!(s.by_sleeve.iter().all(|b| b.strategy_id != "lab:memes_rotation" && !b.experimental));
+    assert!(s.by_sleeve.iter().any(|b| b.strategy_id == "lab:tsmom_top20"));
+    assert!(!s.last_action.unwrap_or_default().contains("memes_rotation"), "not even named as passed over");
+
+    // Nor at a re-pick, nor when it is the only lab book there is.
+    e.apply_lab_signal(experiment("trend4h_pullback", now, w));
+    e.autopilot_step(now + 25 * 3_600_000);
+    let s = status(&e, &id);
+    assert!(s.by_sleeve.iter().all(|b| !b.strategy_id.contains("memes") && !b.strategy_id.contains("trend4h")));
+    let mut e = idle_engine();
+    e.apply_lab_signal(experiment("memes_rotation", now, w));
+    if let Ok(id) = e.autopilot_start(config("only", 10_000.0, &[], StopRules::default()), false, VenueCash::NotRead) {
+        assert!(status(&e, &id).by_sleeve.iter().all(|b| !b.strategy_id.starts_with("lab:")));
+    }
+    assert_eq!(state_of(&e, "lab:memes_rotation"), StrategyState::Paused);
+
+    // A portfolio picks by evidence too: never an experiment.
+    let mut e = idle_engine();
+    e.apply_lab_signal(experiment("memes_rotation", now, w));
+    e.apply_lab_signal(book("breakout_top10", now, w, breakout_evidence(), true));
+    let mut c = config("pf", 10_000.0, &[], StopRules::default());
+    c.portfolio = true;
+    c.mode = AutopilotMode::Paper;
+    if let Ok(id) = e.autopilot_start(c, false, VenueCash::NotRead) {
+        assert!(status(&e, &id).by_sleeve.iter().all(|b| b.strategy_id != "lab:memes_rotation"));
+    }
+}
+
+#[test]
+fn an_experiment_named_as_a_sleeve_runs_and_says_experiment() {
+    let mut e = idle_engine();
+    let now = e.now();
+    e.apply_lab_signal(experiment("memes_rotation", now, &[("BTC", 0.4)]));
+    // A signal that forgot autopilot_only is still an experiment: idle, never standalone.
+    let mut loose = experiment("memes_tsmom", now, &[("ETH", 0.1)]);
+    loose.autopilot_only = false;
+    loose.experimental = false; // only the evidence says it
+    let mut plain = engine(); // lab books trade on their own here, unless they are autopilot-only
+    plain.apply_lab_signal(loose.clone());
+    assert_eq!(state_of(&plain, "lab:memes_tsmom"), StrategyState::Paused);
+    plain.run_lab_books();
+    assert!(plain.positions.is_empty(), "an experiment never trades on its own");
+
+    let id = start(&mut e, config("exp", 10_000.0, &[("lab:memes_rotation", 1.0)], StopRules::default()));
+    let s = status(&e, &id);
+    let sl = sleeve(&s, "lab:memes_rotation");
+    assert!(sl.experimental);
+    assert!(sl.why.starts_with("Chosen by you; EXPERIMENT"), "{}", sl.why);
+    assert!(sl.name.contains("EXPERIMENT, failed deflation"));
+    e.run_lab_books();
+    assert!((notional(&e, BTC) - 4_000.0).abs() < 50.0, "it trades with the autopilot's money: {}", notional(&e, BTC));
+    // Its fills reach Telegram marked as an experiment.
+    let lines: Vec<_> = e.alert_events.iter().filter_map(|a| a.trade.clone()).collect();
+    assert!(!lines.is_empty() && lines.iter().all(|t| t.experiment), "{lines:?}");
+
+    // A live autopilot never runs one, even when named.
+    let mut e = idle_engine();
+    e.apply_lab_signal(experiment("memes_rotation", now, &[("BTC", 0.4)]));
+    e.set_live(armed_crypto());
+    let err = e
+        .autopilot_start(live_config("live", 1_000.0, &[("lab:memes_rotation", 1.0)]), true, VenueCash::Read(1_000.0))
+        .unwrap_err();
+    assert!(err.contains("is an experiment") && err.contains("never with real money"), "{err}");
 }
