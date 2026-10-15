@@ -96,7 +96,11 @@ limit at the hour's close, re-placed every hour, the rest at taker cost after
 Sharpe 0.71 with resting maker fills, 0.51 with every order filled at the
 close at taker cost (35 bps a side); drawdown 44 %; 0.62 round trips a day,
 18 % of entry orders fill, 243 bps net per round trip, holds about 10 days.
-Twin 0.40, an hour late 0.52; per year 1.70, -0.91, 1.12.
+Twin 0.40, an hour late 0.52; per year 1.70, -0.91, 1.12. The registered
+5-minute run on the server (results/fast_maker_5m.md) gives the same pick the
+same numbers (0.71 maker, 0.51 taker, twin 0.40, a bar late 0.56; per year
+1.71, -0.93, 1.11), and the fill model matched real aggTrades on 98 % of 1,314
+orders. The engine's evidence reads the 5-minute run where it exists.
 
 **Why it failed.** Deflated p 0.00 over 841 trials (bar 2.72); 2025 was
 negative; its bootstrap band runs from -0.70 to 1.92; BTC made 0.74 over the

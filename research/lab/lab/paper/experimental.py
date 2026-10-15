@@ -135,12 +135,20 @@ def _memes_evidence(name: str, b: dict) -> dict | None:
 
 
 def _trend4h_evidence(b: dict) -> dict | None:
-    rows = _rows(b["study"])
-    row = next((r for r in rows if r.get("variant") == b["pick"] and "twin_oos" in r), None)
+    """The registered 5-minute run (results/fast_maker_5m.md) where it exists, else the 1h run."""
+    row, rows, study = None, [], b["study"]
+    for study in (f"{b['study']}_5m", b["study"]):
+        rows = _rows(study)
+        row = next((r for r in rows if r.get("variant") == b["pick"] and "twin_oos" in r), None)
+        if row is not None:
+            break
     if row is None:
         return None
     every = next((r for r in rows if r.get("variant") == b["pick"] and "cagr_base" in r), {})
     return {
+        "report": study,
+        "source": str(fc.RESULTS_DIR / f"{study}.md"),
+        "bars": "5m" if study.endswith("_5m") else "1h",
         "oos_cagr": _num(every.get("cagr_base")),
         "is_sharpe": _num(row.get("is_base")),
         "oos_sharpe": _num(row.get("oos_base")),
@@ -152,13 +160,14 @@ def _trend4h_evidence(b: dict) -> dict | None:
         "late_fill_sharpe": _num(row.get("late_oos")),
         "net_bps_round_trip": _num(row.get("net_bps_rt")),
         "fill_rate_orders": _num(row.get("fill_rate_orders")),
-        "variants_tried": _n_trials(b["study"], 841),
+        "variants_tried": _n_trials(study, 841),
         "cost_note": "Sharpe with resting maker fills (15 bps fee plus a 3 bps adverse-selection haircut, fills "
                      "only where the price trades through the limit); sharpe_2x_cost is the same rules filled "
                      "at the close at taker cost (35 bps a side, more than twice the maker cost)",
         "regime_filter": True,
-        "caveat": "Experiment: failed deflation. Simulated on 1h bars; the engine enters after the paper "
-                  "book's pullback limit filled, at its own maker price, so its fills differ from the backtest's.",
+        "caveat": "Experiment: failed deflation. The paper book simulates the study's fills on live 1h bars; "
+                  "the engine enters after the paper book's pullback limit filled, at its own maker price, so its "
+                  "fills differ from the backtest's.",
     }
 
 
@@ -175,7 +184,7 @@ def evidence(name: str) -> dict:
     ev = {k: v for k, v in ev.items() if v is not None}
     p = ev.get("deflated_p")
     ev["verdict"] = f"experiment, fails: deflated p {p:.2f} <= 0.95" if p is not None else "experiment, fails"
-    return {**base, "source": str(fc.RESULTS_DIR / f"{b['study']}.md"), **ev}
+    return {**base, "source": str(fc.RESULTS_DIR / f"{b['study']}.md"), **ev}   # ev may name its own report
 
 
 def mark(sig: dict, name: str) -> dict:
