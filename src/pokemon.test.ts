@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cardmarketStale, filterCards, headlineChange, money, pct, predLabel, priceHistory, rowFigure, sortCards, type PokemonCard } from "./pokemon";
+import { cardmarketStale, filterCards, headlineChange, money, pct, predLabel, priceHistory, releaseWords, rowFigure, sortCards, type PokemonCard } from "./pokemon";
 
 function card(over: Partial<PokemonCard>): PokemonCard {
   return {
@@ -64,6 +64,14 @@ describe("helpers", () => {
   });
   it("keeps only real prices in the history line", () => {
     expect(priceHistory(card({ history: [["2026-10-14", 3], ["2026-10-15", null], ["2026-10-16", 4]] }))).toEqual([3, 4]);
+  });
+  it("says how long a set has been out, or when it comes", () => {
+    expect(releaseWords(29)).toBe("out 29 days");
+    expect(releaseWords(1)).toBe("out 1 day");
+    expect(releaseWords(146)).toBe("out 5 months");
+    expect(releaseWords(-22)).toBe("out in 22 days");
+    expect(releaseWords(0)).toBe("out today");
+    expect(releaseWords(null)).toBe("");
   });
   it("formats money and percentages", () => {
     expect(money(1234.5)).toBe("$1,234.50");
