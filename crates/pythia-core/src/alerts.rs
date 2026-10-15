@@ -1045,7 +1045,7 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
             log.record(AlertRecord {
                 ts: now,
                 kinds: texts.iter().map(|e| e.kind).collect(),
-                title: texts.first().map(AlertEvent::title_text),
+                title: first_title(&texts),
                 text: content,
                 delivered: res.is_ok(),
                 error: res.clone().err(),
@@ -1096,13 +1096,18 @@ fn held_back(cfg: &AlertConfig, events: &[AlertEvent], now: i64, reason: &str) -
     AlertRecord {
         ts: now,
         kinds: events.iter().map(|e| e.kind).collect(),
-        title: events.first().map(AlertEvent::title_text),
+        title: first_title(events),
         text: compose(cfg, events, 0),
         delivered: false,
         error: None,
         reason: Some(reason.into()),
         photo: false,
     }
+}
+
+/// The title of a post's first card, as the app lists it.
+fn first_title(events: &[AlertEvent]) -> Option<String> {
+    cards_of(events).first().map(|c| c.title.clone())
 }
 
 /// The cards of a batch: fills of the same autopilot together in one table,

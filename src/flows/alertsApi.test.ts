@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { alertsAvailable, fetchAlerts, fetchEvents, sendTest, setMute } from "./alerts";
+import { alertsAvailable, fetchAlerts, fetchEvents, fetchSettings, saveSettings, sendTest, setMute } from "./alerts";
 
 // The server address comes from the build's env; here it is a plain switch.
 const server = vi.hoisted(() => ({ url: null as string | null }));
@@ -64,5 +64,30 @@ describe("alerts calls", () => {
     stubFetch(200, {});
     const empty = await fetchEvents();
     expect(empty.ok && empty.data).toEqual([]);
+  });
+
+  const settings = {
+    categories: [{ id: "trades", label: "Trades", emoji: "💱", about: "x", source: "engine", on: false }],
+    quietHours: { enabled: true, start: "23:00", end: "07:00", timezone: "Europe/Berlin" },
+    bigMoves: { hourPct: 3, dayPct: 8 },
+    quietNow: false,
+  };
+
+  it("read GET /api/alerts/settings", async () => {
+    const calls = stubFetch(200, settings);
+    const r = await fetchSettings();
+    expect(calls[0].url).toBe("http://engine.test/api/alerts/settings");
+    expect(r.ok && r.data.categories[0].on).toBe(false);
+  });
+
+  it("change settings with a patch and show the server's reason when refused", async () => {
+    const calls = stubFetch(200, settings);
+    const r = await saveSettings({ categories: { trades: false }, quietHours: { start: "22:00" } });
+    expect(calls[0].url).toBe("http://engine.test/api/alerts/settings");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ categories: { trades: false }, quietHours: { start: "22:00" } });
+    expect(r.ok).toBe(true);
+    stubFetch(400, { error: "quiet hours: start and end are HH:MM, 00:00 to 23:59" });
+    expect(await saveSettings({ quietHours: { start: "9pm" } })).toEqual({ ok: false, error: "quiet hours: start and end are HH:MM, 00:00 to 23:59" });
   });
 });

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import polars as pl
 import pytest
 
+from lab.ops import notify
 from lab.ops import trending as tr
 
 NOW = int(datetime(2026, 10, 15, 9, 0, tzinfo=timezone.utc).timestamp() * 1000)
@@ -70,7 +71,8 @@ def data(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHIA_DATA", str(tmp_path))
     monkeypatch.delenv("PYTHIA_REPORTS", raising=False)
     monkeypatch.setenv("PYTHIA_AGENT_OUT", str(tmp_path / "agent"))
-    for k in ("PYTHIA_ALERT_WEBHOOK", "PYTHIA_TELEGRAM_BOT_TOKEN", "PYTHIA_TELEGRAM_CHAT_ID", "PYTHIA_ALPACA_COINS"):
+    for k in ("PYTHIA_ALERT_WEBHOOK", "PYTHIA_TELEGRAM_BOT_TOKEN", "PYTHIA_TELEGRAM_CHAT_ID", "PYTHIA_ALPACA_COINS",
+              "PYTHIA_QUIET_HOURS", "PYTHIA_ALERT_VIA", "PYTHIA_ALERT_PREFIX"):
         monkeypatch.delenv(k, raising=False)
     return tmp_path
 
@@ -114,12 +116,16 @@ def test_run_alerts_once_per_coin_and_stores(world, data):
     assert snap["alpaca"]["BONK"]["qv_ratio"] == pytest.approx(4.5)
     assert "DOGE" not in [a["coin"] for a in snap["alerts_sent"]]
     alert = posted[0]
-    assert "BONK on Alpaca" in alert and "Watch only" in alert and chr(0x2014) not in alert
+    assert alert.startswith("<b>🔥 BONK on Alpaca +25% in 24h</b>"), alert
+    assert "Watch only" in alert and chr(0x2014) not in alert
+    assert "<pre>24h change" in alert and "4.5x its 28d median" in alert
     # 09:00 UTC: the daily digest goes out on the first run, labelled high risk.
     assert snap["digest"]["delivered"]
     digest = posted[1]
-    assert "HIGH RISK" in digest and "ALP (solana)" in digest and "honeypot" in digest
-    assert len(digest) <= 1800
+    assert digest.startswith("<b>🔥 Trending · 2026-10-15</b>"), digest
+    assert "HIGH RISK" in digest and "<b>ALP (solana)</b>" in digest and "honeypot" in digest
+    assert "<pre>Coin" in digest
+    assert len(digest) <= notify.MAX_CHARS and digest.count("<b>") == digest.count("</b>")
     # Stored in the data lake as parquet, one file per run.
     files = sorted((data / "trending" / "snapshots" / "date=2026-10-15").glob("*.parquet"))
     assert [f.name for f in files] == ["090000.parquet"]

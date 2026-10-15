@@ -37,6 +37,8 @@ What it does with them:
 
 Delivery is lab.ops.notify's (PYTHIA_TELEGRAM_BOT_TOKEN and
 PYTHIA_TELEGRAM_CHAT_ID, or PYTHIA_ALERT_WEBHOOK); unset, it only prints.
+Posts are cards in the category "trending": its switch in the app turns them
+off, and a surge in quiet hours is held back and listed after them.
 PYTHIA_ALPACA_COINS (comma separated bases) overrides the list of coins
 Alpaca lists. State (alert times, daily volumes, last digest) is
 <data>/trending/state.json. Standard library plus polars for the parquet.
@@ -339,42 +341,59 @@ def money(v: float | None) -> str:
     return f"${v:.0f}"
 
 
-def alert_text(prefix: str, coin: str, s: dict, finding: str | None) -> str:
-    lines = [f"{prefix} surge: {coin} on Alpaca (paper account) {pct(s['change'])} in 24h, "
-             f"volume {s['qv_ratio']:.1f}x its 28-day median"
-             + (f", trades {s['count_ratio']:.1f}x" if s.get("count_ratio") else "") + ".",
-             "Watch only: no order is placed."]
+def alert_card(coin: str, s: dict, finding: str | None) -> "notify.Card":
+    """A strong surge on a coin Alpaca lists, as one card."""
+    ratio = f"{s['qv_ratio']:.1f}x"
+    rows = [("24h change", pct(s["change"]), s["change"]), ("Volume", f"{ratio} its 28d median")]
+    if s.get("count_ratio"):
+        rows.append(("Trades", f"{s['count_ratio']:.1f}x its 28d median"))
+    parts: list = [notify.Rows(rows)]
     if coin in MEMES:
-        lines.append("Memecoin: moves like this often reverse within days.")
+        parts.append(notify.Line("moves like this often reverse within days.", "Memecoin:"))
     if finding:
-        lines.append(finding)
-    return "\n".join(lines)
+        parts.append(notify.Line(finding))
+    return notify.Card("🔥", f"{coin} on Alpaca {pct(s['change'])} in 24h",
+                       "Volume surge on the paper account's list. Watch only: no order is placed.", parts)
 
 
-def digest_text(prefix: str, snap: dict, finding: str | None) -> str:
-    lines = [f"{prefix} trending digest {snap['ts'][:10]}"]
+def alert_text(prefix: str, coin: str, s: dict, finding: str | None) -> str:
+    """The alert as plain text (the log)."""
+    return notify.plain(notify.render_post([alert_card(coin, s, finding)]))
+
+
+def digest_card(snap: dict, finding: str | None) -> "notify.Card":
+    """The daily watchlist as one card: the Alpaca coins as a table, gainers
+    and surges in a line each, the on-chain hype labelled high risk."""
+    parts: list = []
     al = snap.get("alpaca") or {}
     hot = sorted(((c, s) for c, s in al.items() if s.get("qv_ratio")), key=lambda cs: -cs[1]["qv_ratio"])[:6]
     if hot:
-        lines.append("Alpaca coins, volume vs 28d median:")
-        lines += [f"  {c} {s['qv_ratio']:.1f}x, {pct(s['change'])}" for c, s in hot]
+        parts.append(notify.Table(["Coin", "Vol x", "24h"], [[c, f"{s['qv_ratio']:.1f}x", pct(s["change"])] for c, s in hot],
+                                  "Alpaca coins, volume vs 28d median"))
     g = snap.get("gainers") or []
     if g:
-        lines.append("Binance top gainers 24h: " + ", ".join(f"{r['coin']} {pct(r['change'])}" for r in g[:6]))
+        parts.append(notify.Line(" · ".join(f"{r['coin']} {pct(r['change'])}" for r in g[:6]), "Binance gainers 24h"))
     ms = snap.get("market_surges") or []
     if ms:
-        lines.append("Binance volume surges: " + ", ".join(f"{r['coin']} {r['qv_ratio']:.1f}x" for r in ms[:6]))
+        parts.append(notify.Line(" · ".join(f"{r['coin']} {r['qv_ratio']:.1f}x" for r in ms[:6]), "Binance volume surges"))
     dex = [r for r in snap.get("dex") or [] if r.get("symbol")]
     if dex:
-        lines.append("")
-        lines.append("ON-CHAIN HYPE (" + CAVEAT + ")")
+        parts.append(notify.Line(CAVEAT, "⚠️ On-chain hype:"))
         for r in dex[:8]:
             fl = "; ".join(r.get("flags") or []) or "no flags"
-            lines.append(f"  {r['symbol']} ({r['chain']}) {pct((r.get('change_h24') or 0) / 100)} 24h, "
-                         f"liq {money(r.get('liquidity_usd'))}, vol {money(r.get('volume_h24'))} [{fl}]")
+            parts.append(notify.Line(f"{pct((r.get('change_h24') or 0) / 100)} 24h, liq {money(r.get('liquidity_usd'))}, "
+                                     f"vol {money(r.get('volume_h24'))} [{fl}]", f"{r['symbol']} ({r['chain']})"))
     if finding:
-        lines += ["", finding]
-    return notify.clip("\n".join(lines))
+        parts.append(notify.Line(finding))
+    n = len(hot)
+    summary = (f"{n} Alpaca {'coin' if n == 1 else 'coins'} with volume data, {len(dex)} on-chain tokens watched."
+               if hot or dex else "No source answered with data.")
+    return notify.Card("🔥", f"Trending · {snap['ts'][:10]}", summary, parts)
+
+
+def digest_text(prefix: str, snap: dict, finding: str | None) -> str:
+    """The digest as plain text (the log)."""
+    return notify.plain(notify.render_post([digest_card(snap, finding)]))
 
 
 def w7_finding() -> str | None:
@@ -518,8 +537,6 @@ def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, f
     now = now or now_ms()
     st = notify.read_json(state_path()) or {}
     snap, hist, medians = snapshot(get, st.get("history", {}), now, st.get("medians"))
-    url, fmt, prefix = notify.config()
-    post = poster or (lambda text: notify.post(url, fmt, text) if url else (False, "no webhook"))
     finding = w7_finding()
     alerts = st.get("alerts", {})
     sent = []
@@ -528,9 +545,8 @@ def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, f
             continue
         if now - alerts.get(c, 0) < ALERT_EVERY_H * 3_600_000:
             continue
-        text = notify.clip(alert_text(prefix, c, s, finding))
-        ok, err = (False, "dry run") if dry_run else post(text)
-        print(text, flush=True)
+        res = notify.send("trending", [alert_card(c, s, finding)], now=now, dry_run=dry_run, poster=poster)
+        ok, err = res["delivered"], res["error"] or res["reason"]
         sent.append({"coin": c, "delivered": ok, "error": err})
         if not dry_run:
             alerts[c] = now
@@ -539,10 +555,8 @@ def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, f
     day = f"{ts:%Y-%m-%d}"
     due = force_digest or (ts.hour >= DIGEST_HOUR and st.get("last_digest") != day)
     if due:
-        text = digest_text(prefix, snap, finding)
-        ok, err = (False, "dry run") if dry_run else post(text)
-        print(text, flush=True)
-        snap["digest"] = {"delivered": ok, "error": err}
+        res = notify.send("trending", [digest_card(snap, finding)], now=now, dry_run=dry_run, poster=poster)
+        snap["digest"] = {"delivered": res["delivered"], "error": res["error"] or res["reason"]}
         if not dry_run:
             st["last_digest"] = day
     if dry_run:

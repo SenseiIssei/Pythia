@@ -198,15 +198,15 @@ def _compact(d: dict) -> dict:
 
 
 def send(text: str, dry_run: bool) -> bool:
-    url, fmt, prefix = notify.config()
-    text = notify.clip(f"{prefix} {text}")
-    if dry_run or url is None:
-        print(text)
-        return False
-    ok, err = notify.post(url, fmt, text)
-    if not ok:
-        print(f"digest not delivered: {err}", file=sys.stderr)
-    return ok
+    """The digest as one card in the category "studies" (lab.ops.notify): the
+    words before the first colon the title, the rest the summary and lines."""
+    first, _, rest = text.partition("\n")
+    title, _, lead = first.partition(":")
+    card = notify.text_card("studies", title.strip(), (lead.strip() + "\n" + rest).strip())
+    res = notify.send("studies", [card], dry_run=dry_run)
+    if res["error"]:
+        print(f"digest not delivered: {res['error']}", file=sys.stderr)
+    return res["delivered"]
 
 
 def last_run() -> dict | None:

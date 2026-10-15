@@ -235,8 +235,9 @@ cargo run -p pythia-server        # listens on http://0.0.0.0:8787
 | `GET /api/preflight` | every go-live check in one response (`npm run preflight`) |
 | `GET /api/research/validate` | walk-forward validate every strategy (`npm run validate`) |
 
-Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, `PYTHIA_ALERT_WEBHOOK` and
-`PYTHIA_ALERT_FORMAT` (operator alerts, see `docs/ALERTS.md`), any provider key
+Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, `PYTHIA_TELEGRAM_BOT_TOKEN` and
+`PYTHIA_TELEGRAM_CHAT_ID`, or `PYTHIA_ALERT_WEBHOOK` and `PYTHIA_ALERT_FORMAT` (operator alerts, see
+`docs/ALERTS.md`), any provider key
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), Alpaca for real equity quotes +
 live execution (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY` for the paper account, `APCA_LIVE_API_KEY_ID`
 / `APCA_LIVE_API_SECRET_KEY` for the live one, which fall back to the paper pair when unset, and
