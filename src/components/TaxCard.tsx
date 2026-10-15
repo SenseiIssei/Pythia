@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { FileDown } from "lucide-react";
-import { Button, Card, fmtUsd } from "./ui";
+import { Button, LoadingRows, More, Note, Row, Rows, Section, plural, toneOf, usd } from "../pagekit";
 import { liveMode } from "../live";
 import { serverUrl } from "../engine/serverEngine";
 
@@ -56,67 +56,61 @@ export function TaxCard() {
   }
 
   return (
-    <Card
+    <Section
       title="Tax record"
+      hint="Every real fill is kept in a file that is only ever added to. A first-in, first-out preview in dollars; a preview, not tax advice."
       right={
         mode === "native" ? (
-          <Button tone="neutral" size="sm" icon={FileDown} onClick={() => void exportCsv()}>
+          <Button variant="secondary" icon={FileDown} onClick={() => void exportCsv()}>
             CoinTracking CSV
           </Button>
         ) : (
-          <a
-            className="inline-flex items-center gap-1.5 rounded-lg border border-cyber-border-bright px-2.5 py-1 text-xs text-accent hover:bg-cyber-surface-2"
-            href={`${serverUrl()}/api/tax?format=cointracking`}
-          >
-            <FileDown size={13} aria-hidden /> CoinTracking CSV
+          <a className="fl-btn fl-btn-secondary fl-focus" href={`${serverUrl()}/api/tax?format=cointracking`}>
+            <FileDown size={16} aria-hidden /> CoinTracking CSV
           </a>
         )
       }
     >
-      <p className="text-xs leading-relaxed text-cyber-text-dim">
-        Every real fill is kept in an append-only file. The CSV imports into Blockpit, CoinTracking and similar tools,
-        which convert to euros at each trade's rate. Below is a first-in, first-out preview in dollars: for crypto in
-        Germany, gains on lots held over a year are tax-free, shorter ones count against the 1,000 EUR yearly limit.
-        Dates, years and holding periods use German local time. A preview, not tax advice.
-      </p>
-      {s && s.fills === 0 && <p className="mt-2 text-sm text-cyber-text-dim">No real fills yet. Paper trades are never recorded here.</p>}
-      {!s && !note && <p className="mt-2 text-xs text-cyber-text-faint">Reading the record.</p>}
+      {!s && !note && <LoadingRows rows={2} label="Reading the record" />}
+      {s && s.fills === 0 && <p className="fl-muted text-[15px]">No real fills yet. Paper trades are never recorded here.</p>}
       {s && s.years.length > 0 && (
-        <div className="-mx-1 overflow-x-auto px-1">
-        <table className="mt-3 w-full min-w-[480px] font-mono text-sm tabular-nums">
-          <thead>
-            <tr className="text-left text-xs uppercase tracking-wide text-cyber-text-faint">
-              <th className="py-1">Year</th>
-              <th className="py-1 text-right">Held up to a year</th>
-              <th className="py-1 text-right">Held over a year</th>
-              <th className="py-1 text-right">Sales</th>
-              <th className="py-1 text-right">Fees</th>
-            </tr>
-          </thead>
-          <tbody>
-            {s.years.map((y) => (
-              <tr key={y.year} className="border-t border-cyber-border">
-                <td className="py-1">{y.year}</td>
-                <td className={`py-1 text-right ${y.shortTerm >= 0 ? "text-success" : "text-danger"}`}>{fmtUsd(y.shortTerm)}</td>
-                <td className="py-1 text-right text-cyber-text-dim">{fmtUsd(y.longTerm)}</td>
-                <td className="py-1 text-right">{y.disposals}</td>
-                <td className="py-1 text-right text-cyber-text-dim">{fmtUsd(y.fees)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        </div>
+        <Rows>
+          {s.years.map((y) => (
+            <Row
+              key={y.year}
+              label={String(y.year)}
+              sub={`${plural(y.disposals, "sale")} · fees ${usd(y.fees)} · held over a year ${usd(y.longTerm)}`}
+              value={usd(y.shortTerm)}
+              tone={toneOf(y.shortTerm)}
+              valueSub="held up to a year"
+              help="Gains on lots held up to a year count against the yearly limit; lots held longer are shown under the year."
+            />
+          ))}
+        </Rows>
       )}
       {s && s.unmatchedSells > 0 && (
-        <p className="mt-2 text-xs text-warning">
-          {s.unmatchedSells} sale(s) had no matching purchase in the record (bought before Pythia or elsewhere), so their
-          gains are not in this preview. The tax tool needs those purchases too.
-        </p>
+        <div className="mt-2">
+          <Note tone="warn">
+            {plural(s.unmatchedSells, "sale")} had no matching purchase in the record (bought before Pythia or elsewhere), so
+            their gains are not in this preview. The tax tool needs those purchases too.
+          </Note>
+        </div>
       )}
       {s && s.damagedLines > 0 && (
-        <p className="mt-2 text-xs text-danger">{s.damagedLines} damaged line(s) in the record were skipped.</p>
+        <div className="mt-2">
+          <Note tone="bad">{plural(s.damagedLines, "damaged line")} in the record were skipped.</Note>
+        </div>
       )}
-      {note && <p className="mt-2 text-xs text-cyber-text-dim">{note}</p>}
-    </Card>
+      {note && <p className="fl-muted mt-2 break-words text-sm">{note}</p>}
+      <div className="mt-2">
+        <More title="How the preview counts">
+          <p className="fl-muted text-sm leading-relaxed">
+            The CSV imports into Blockpit, CoinTracking and similar tools, which convert to euros at each trade's rate.
+            For crypto in Germany, gains on lots held over a year are tax-free, shorter ones count against the 1,000 EUR
+            yearly limit. Dates, years and holding periods use German local time.
+          </p>
+        </More>
+      </div>
+    </Section>
   );
 }

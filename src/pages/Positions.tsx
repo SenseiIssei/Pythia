@@ -1,122 +1,129 @@
 import { Package, ReceiptText } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Badge, EmptyState, Notice, Term, fmtUsd } from "../components/ui";
-import { ConfirmButton } from "../components/Confirm";
+import { Chip, ConfirmAction, KeyStats, Nothing, Note, PageShell, Rows, Section, Term, num, toneOf, usd } from "../pagekit";
+import type { PositionView } from "../types";
 
 export function Positions() {
   const { positions, orders, flatten, live } = useStore();
   const recent = orders.slice(0, 25);
   const stuck = positions.some((p) => p.live) && !live.armed;
+  const unrealized = positions.reduce((a, p) => a + p.unrealized, 0);
+  const held = positions.reduce((a, p) => a + Math.abs(p.qty) * p.lastPrice, 0);
 
   return (
-    <div className="animate-fade-in mx-auto max-w-6xl space-y-4">
-      <PageHeader title="Positions" subtitle="What it holds right now, and the orders it sent recently, across all venues." />
+    <PageShell title="Positions" subtitle="What it holds right now, and the orders it sent recently, across all venues.">
+      <KeyStats
+        items={[
+          { label: "Unrealized", value: usd(unrealized), tone: toneOf(unrealized), sub: "gain or loss if everything were sold now" },
+          { label: "Open positions", value: String(positions.length), help: "Markets it holds something in." },
+          { label: "Held value", value: usd(held, 0), help: "What the open positions are worth at the last price." },
+        ]}
+      />
 
       {stuck && (
-        <Notice tone="danger" title="Real positions cannot be closed while disarmed">
+        <Note tone="bad" title="Real positions cannot be closed while disarmed">
           Those shares exist at the broker, and the simulator will not pretend to close them. Arm live execution again,
           or close them in the broker's own dashboard.
-        </Notice>
+        </Note>
       )}
 
-      <Card title="Open positions" icon={Package}>
+      <Section title="Open positions" hint="Flatten sells everything in that market. It asks first.">
         {positions.length === 0 ? (
-          <EmptyState icon={Package} title="Nothing held right now">
+          <Nothing icon={Package} title="Nothing held right now">
             The engine opens positions as strategies fire. You can also place a practice order by hand on the Markets
             page.
-          </EmptyState>
+          </Nothing>
         ) : (
-          <div className="-mx-1 overflow-x-auto px-1">
-            <table className="w-full min-w-[620px] text-sm">
-              <thead>
-                <tr className="font-mono text-[11px] uppercase tracking-wider text-cyber-text-faint">
-                  <th className="pb-2 text-left font-medium">Market</th>
-                  <th className="pb-2 text-right font-medium"><Term>Qty</Term></th>
-                  <th className="pb-2 text-right font-medium"><Term>Avg</Term></th>
-                  <th className="pb-2 text-right font-medium"><Term>Last</Term></th>
-                  <th className="pb-2 text-right font-medium"><Term>Unrealized</Term></th>
-                  <th className="pb-2 text-right font-medium"><Term>Flatten</Term></th>
-                </tr>
-              </thead>
-              <tbody>
-                {positions.map((p) => (
-                  <tr key={p.marketId} className="border-t border-cyber-border">
-                    <td className="py-2 pr-3">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge
-                          tone="neutral"
-                          title={p.qty >= 0 ? "Bought: gains if the price rises" : "Sold short: gains if the price falls"}
-                        >
-                          {p.qty >= 0 ? "LONG" : "SHORT"}
-                        </Badge>
-                        <span className="font-medium">{p.symbol}</span>
-                        {/* Real shares behave differently from simulated ones: they
-                            can only be closed while live routing is armed. */}
-                        {p.live && (
-                          <Badge tone="red" title="Bought with real money at the broker">
-                            REAL
-                          </Badge>
-                        )}
-                        {p.demo && (
-                          <Badge tone="purple" title="Filled by the venue's demo account: real API, virtual money">
-                            DEMO
-                          </Badge>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-2 text-right font-mono">{p.qty.toFixed(4)}</td>
-                    <td className="py-2 text-right font-mono text-cyber-text-dim">{p.avgPrice.toLocaleString()}</td>
-                    <td className="py-2 text-right font-mono">{p.lastPrice.toLocaleString()}</td>
-                    <td className={`py-2 text-right font-mono ${p.unrealized >= 0 ? "text-success" : "text-danger"}`}>
-                      {fmtUsd(p.unrealized)}
-                    </td>
-                    <td className="py-1.5 pl-3 text-right">
-                      <ConfirmButton
-                        tone={p.live ? "red" : "neutral"}
-                        className="!px-2.5 !py-1 !text-xs"
-                        question={
-                          p.live
-                            ? `Sell all ${Math.abs(p.qty).toFixed(4)} ${p.symbol} for real, at about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}? This sends a real order and cannot be undone.`
-                            : p.demo
-                              ? `Sell the demo position in ${p.symbol} at the demo venue, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)} of virtual money?`
-                              : `Close the practice position in ${p.symbol} at today's price, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}?`
-                        }
-                        confirmLabel={p.live ? "Yes, sell for real" : "Close it"}
-                        onConfirm={() => flatten(p.marketId)}
-                      >
-                        Flatten
-                      </ConfirmButton>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      <Card title="Recent Orders" icon={ReceiptText}>
-        {recent.length === 0 ? (
-          <EmptyState compact icon={ReceiptText} title="No orders yet" />
-        ) : (
-          <ul className="divide-y divide-cyber-border/60 text-xs">
-            {recent.map((o) => (
-              <li key={o.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
-                <span className="font-mono text-cyber-text-faint">{new Date(o.ts).toLocaleTimeString()}</span>
-                <span className={`font-mono font-bold ${o.side === "buy" ? "text-success" : "text-danger"}`}>
-                  {o.side.toUpperCase()}
-                </span>
-                <span className="min-w-0 flex-1 truncate font-mono text-cyber-text-dim">{o.marketId}</span>
-                <span className="font-mono">{o.filledQty.toFixed(4)}</span>
-                {o.route === "demo" && <Badge tone="purple" title="Sent to a venue's demo account">demo</Badge>}
-                {o.route === "live" && <Badge tone="red" title="Real money">live</Badge>}
-                <Badge tone={o.status === "filled" ? "green" : o.status === "rejected" ? "red" : "neutral"}>{o.status}</Badge>
-                {o.rejectReason && <span className="basis-full text-danger sm:basis-auto">{o.rejectReason}</span>}
-              </li>
+          <Rows>
+            {positions.map((p) => (
+              <PositionRow key={p.marketId} p={p} onFlatten={() => flatten(p.marketId)} />
             ))}
-          </ul>
+          </Rows>
         )}
-      </Card>
+      </Section>
+
+      <Section title="Recent Orders" hint="The last 25 orders, newest first.">
+        {recent.length === 0 ? (
+          <Nothing icon={ReceiptText} title="No orders yet" />
+        ) : (
+          <Rows>
+            {recent.map((o) => (
+              <div key={o.id} className="py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[15px] font-semibold">
+                      <span className={o.side === "buy" ? "fl-up" : "fl-down"}>{o.side === "buy" ? "Buy" : "Sell"}</span>{" "}
+                      <span className="break-all">{o.marketId}</span>
+                    </div>
+                    <div className="fl-muted fl-num text-sm">
+                      {new Date(o.ts).toLocaleTimeString()} · {num(o.filledQty, 4)} filled
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                    {o.route === "demo" && <Chip title="Sent to a venue's demo account">Demo</Chip>}
+                    {o.route === "live" && (
+                      <Chip tone="bad" title="Real money">
+                        Live
+                      </Chip>
+                    )}
+                    <Chip tone={o.status === "filled" ? "good" : o.status === "rejected" ? "bad" : "neutral"}>{o.status}</Chip>
+                  </div>
+                </div>
+                {o.rejectReason && <p className="fl-down mt-1 break-words text-sm">{o.rejectReason}</p>}
+              </div>
+            ))}
+          </Rows>
+        )}
+      </Section>
+    </PageShell>
+  );
+}
+
+function PositionRow({ p, onFlatten }: { p: PositionView; onFlatten: () => void }) {
+  const value = Math.abs(p.qty) * p.lastPrice;
+  return (
+    <div className="py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[15px] font-semibold">{p.symbol}</span>
+            <Chip title={p.qty >= 0 ? "Bought: gains if the price rises" : "Sold short: gains if the price falls"}>{p.qty >= 0 ? "Long" : "Short"}</Chip>
+            {/* Real shares behave differently from simulated ones: they can
+                only be closed while live routing is armed. */}
+            {p.live && (
+              <Chip tone="bad" title="Bought with real money at the broker">
+                Real
+              </Chip>
+            )}
+            {p.demo && <Chip title="Filled by the venue's demo account: real API, virtual money">Demo</Chip>}
+          </div>
+          <div className="fl-muted fl-num mt-0.5 text-sm">
+            <Term k="Qty">{num(p.qty, 4)}</Term> · <Term k="Avg">avg {p.avgPrice.toLocaleString()}</Term> · <Term k="Last">last {p.lastPrice.toLocaleString()}</Term>
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <div className={`fl-num text-[15px] font-semibold ${p.unrealized > 0 ? "fl-up" : p.unrealized < 0 ? "fl-down" : ""}`}>{usd(p.unrealized)}</div>
+          <div className="fl-muted fl-num text-sm">{usd(value)}</div>
+        </div>
+      </div>
+      <div className="mt-2 flex justify-end">
+        <ConfirmAction
+          title={p.live ? `Sell ${p.symbol} for real?` : `Close ${p.symbol}?`}
+          danger={!!p.live}
+          variant={p.live ? "danger" : "secondary"}
+          question={
+            p.live
+              ? `Sell all ${Math.abs(p.qty).toFixed(4)} ${p.symbol} for real, at about ${usd(value)}? This sends a real order and cannot be undone.`
+              : p.demo
+                ? `Sell the demo position in ${p.symbol} at the demo venue, about ${usd(value)} of virtual money?`
+                : `Close the practice position in ${p.symbol} at today's price, about ${usd(value)}?`
+          }
+          confirmLabel={p.live ? "Yes, sell for real" : "Close it"}
+          onConfirm={onFlatten}
+        >
+          Flatten
+        </ConfirmAction>
+      </div>
     </div>
   );
 }
