@@ -398,6 +398,23 @@ fn one_lab_book_runs_in_two_autopilots_each_with_its_own_money() {
 // ── stop, restart, migration ───────────────────────────────────────────────
 
 #[test]
+fn rounding_dust_left_in_a_stopped_book_is_written_off_once() {
+    let mut e = engine();
+    let a = start(&mut e, config("a", 10_000.0, &["ema-cross-1"]));
+    signal_in(&mut e, &a, "ema-cross-1", BTC);
+    // What a sale rounded to the venue's decimals leaves: billionths of a coin.
+    e.positions.get_mut(&pos_key(&a, BTC)).unwrap().qty = 3e-9;
+    let orders = e.orders.len();
+    e.autopilot_stop(&a, None).unwrap();
+    assert_eq!(qty_in(&e, &a, BTC), 0.0);
+    assert_eq!(e.orders.len(), orders, "nothing to sell");
+    assert!(journal_has(&e, "written off"));
+    assert!(!journal_has(&e, "Exit crypto:BTC/USD"));
+    let s = status(&e, &a);
+    assert_eq!((s.state, s.open_positions), (AutopilotState::Stopped, 0));
+}
+
+#[test]
 fn stopping_one_autopilot_leaves_the_other_untouched() {
     let mut e = engine();
     let a = start(&mut e, config("a", 10_000.0, &["ema-cross-1"]));

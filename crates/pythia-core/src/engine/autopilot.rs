@@ -765,7 +765,7 @@ impl Autopilot {
     /// The market is no longer its own. Its shares stay until the next netted
     /// target replaces them: a fee the venue posts later (Alpaca books crypto
     /// fees at the end of the day) is still split the way the trade was.
-    fn release(&mut self, market: &str) {
+    pub(super) fn release(&mut self, market: &str) {
         self.owned.remove(market);
     }
 }
