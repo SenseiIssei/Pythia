@@ -28,24 +28,30 @@ CHARACTERS: dict[str, list[str]] = {
     "legendary_bird_dragon": ["rayquaza", "lugia", "gengar", "greninja", "lucario", "gardevoir"],
 }
 
-# Rarity strings of the API, grouped. Anything unmatched is "other".
-RARITY_GROUPS: list[tuple[str, tuple[str, ...]]] = [
-    ("chase", ("special illustration", "hyper", "secret", "rainbow", "gold", "shiny ultra", "ace spec",
-               "illustration rare", "trainer gallery", "radiant", "amazing", "shining", "star", "legend",
-               "classic collection")),
-    ("ultra", ("ultra", "double rare", "rare holo v", "rare holo gx", "rare holo ex", "rare holo lv",
-               "rare break", "rare prime", "prism", "vmax", "vstar", "ex")),
-    ("holo", ("holo", "promo")),
-    ("rare", ("rare",)),
-    ("common", ("common", "uncommon")),
-]
+# Rarity strings of the API, grouped. Checked against every rarity string in
+# the public card data (2026-10): chase = secret, illustration, shiny, gold
+# and other short-print cards; ultra = the rule-box Pokemon (ex, V, GX ...).
+CHASE_PHRASES = ("special illustration", "illustration rare", "hyper", "secret", "rainbow", "gold", "shiny",
+                 "shining", "trainer gallery", "radiant", "amazing", "prism star", "holo star", "legend",
+                 "classic collection")
+ULTRA_WORDS = {"ultra", "double", "v", "vmax", "vstar", "gx", "ex", "lv.x", "break", "prime", "mega", "attack"}
 
 
 def rarity_group(r: str | None) -> str:
-    s = (r or "").lower()
-    for g, keys in RARITY_GROUPS:
-        if any(k in s for k in keys):
-            return g
+    s = (r or "").lower().replace("_", " ")
+    words = set(re.findall(r"[a-z.]+", s))
+    if not s:
+        return "other"
+    if any(k in s for k in CHASE_PHRASES) or "ace" in words:
+        return "chase"
+    if words & ULTRA_WORDS:
+        return "ultra"
+    if "holo" in words or "promo" in words:
+        return "holo"
+    if "common" in words or "uncommon" in words:
+        return "common"
+    if "rare" in words:
+        return "rare"
     return "other"
 
 

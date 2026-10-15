@@ -155,6 +155,11 @@ def test_feature_rules():
     assert pdata.rarity_group("Double Rare") == "ultra"
     assert pdata.rarity_group("Rare Holo") == "holo"
     assert pdata.rarity_group("Uncommon") == "common"
+    # Real strings that a naive substring rule got wrong.
+    assert pdata.rarity_group("Rare Holo VSTAR") == "ultra" and pdata.rarity_group("Holo Rare V") == "ultra"
+    assert pdata.rarity_group("Rare Holo Star") == "chase" and pdata.rarity_group("Rare Shiny GX") == "chase"
+    assert pdata.rarity_group("Rare ACE") == "chase" and pdata.rarity_group("MEGA_ATTACK_RARE") == "ultra"
+    assert pdata.rarity_group("Pikachu Rare") == "rare" and pdata.rarity_group(None) == "other"
     assert pdata.character("Charizard ex") == "charizard"
     assert pdata.character("Pikachu VMAX") == "pikachu"
     assert pdata.character("Mewtwo GX") == "mew"
@@ -192,17 +197,27 @@ def test_premium_regression_finds_the_planted_charizard_premium(lake):
 
 
 def test_reprint_events_and_marks():
-    cat = pl.DataFrame({"card_id": ["a-1", "b-1", "c-1", "t-1"], "name": ["Pikachu", "Pikachu", "Bulbasaur", "Boss"],
-                        "supertype": ["Pokémon", "Pokémon", "Pokémon", "Trainer"], "rarity": ["Rare"] * 4,
-                        "number": ["1"] * 4, "set_id": ["a", "b", "c", "t"], "set_name": ["A", "B", "C", "T"],
-                        "release_date": ["2020-01-01", "2026-09-01", "2021-01-01", "2026-09-01"]})
+    cat = pl.DataFrame({"card_id": ["a-1", "b-1", "n-1", "c-1"],
+                        "name": ["Pikachu", "Pikachu", "Pikachu", "Bulbasaur"],
+                        "text_key": ["Pikachu|60|Gnaw|", "Pikachu|60|Gnaw|", "Pikachu|70|Thunder|", "Bulbasaur|70||"],
+                        "release_date": ["2020-01-01", "2026-09-01", "2026-09-10", "2021-01-01"]})
     ann = pl.DataFrame({"name": ["Bulbasaur"], "announced": ["2026-09-20"]})
     ev = study.reprint_events(cat, ann)
-    assert set(map(tuple, ev.select("name", "kind").rows())) == {("Pikachu", "release"), ("Bulbasaur", "announced")}
-    snap = pl.DataFrame({"card_id": ["a-1", "b-1", "c-1"], "name": ["Pikachu", "Pikachu", "Bulbasaur"],
-                         "date": ["2026-10-15"] * 3, "release_date": ["2020-01-01", "2026-09-01", "2021-01-01"]})
+    assert set(map(tuple, ev.select("key", "by", "kind").rows())) == {
+        ("Pikachu|60|Gnaw|", "text_key", "release"), ("Bulbasaur", "name", "announced")}, \
+        "a new Pikachu card with other attacks is not a reprint"
+    snap = cat.with_columns(date=pl.lit("2026-10-15"))
     m = study.mark_reprints(snap, ev)
-    assert dict(m.select("card_id", "reprinted").rows()) == {"a-1": True, "b-1": False, "c-1": True}
+    assert dict(m.select("card_id", "reprinted").rows()) == {"a-1": True, "b-1": False, "n-1": False, "c-1": True}
+    # A lake from before text keys falls back to names.
+    assert study.reprint_events(cat.drop("text_key"))["by"].unique().to_list() == ["name"]
+
+
+def test_text_key_ignores_art_and_order():
+    a = {"name": "Boss's Orders", "attacks": [], "abilities": []}
+    b = {"name": "Pikachu", "hp": "60", "attacks": [{"name": "B"}, {"name": "A"}]}
+    c = {"name": "Pikachu", "hp": "60", "attacks": [{"name": "A"}, {"name": "B"}], "images": {"small": "other"}}
+    assert col.text_key(b) == col.text_key(c) == "Pikachu|60|A,B|" and col.text_key(a) == "Boss's Orders|||"
 
 
 def test_studies_wait_for_history_then_report_panels(lake):
