@@ -1317,7 +1317,7 @@ function EquityChart({
   const x = (t: number) => ((t - t0) / (t1 - t0)) * 100;
   const line = points.map(([t, v]) => `${x(t).toFixed(2)},${y(v).toFixed(2)}`).join(" ");
   const last = vals[vals.length - 1];
-  const color = last >= start ? "#22c55e" : "#ef4444";
+  const color = last >= start ? "var(--color-up)" : "var(--color-down)";
   const pct = (v: number) => `${(y(v) / height) * 100}%`;
 
   return (
@@ -1332,22 +1332,22 @@ function EquityChart({
         >
           <defs>
             <linearGradient id={`ap-fill-${gid}`} x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity="0.18" />
-              <stop offset="100%" stopColor={color} stopOpacity="0" />
+              <stop offset="0%" style={{ stopColor: color, stopOpacity: 0.16 }} />
+              <stop offset="100%" style={{ stopColor: color, stopOpacity: 0 }} />
             </linearGradient>
           </defs>
           {[0.25, 0.5, 0.75].map((f) => (
-            <line key={f} x1="0" x2="100" y1={height * f} y2={height * f} stroke="#1e1e2a" strokeWidth="0.5" vectorEffect="non-scaling-stroke" />
+            <line key={f} x1="0" x2="100" y1={height * f} y2={height * f} style={{ stroke: "var(--color-line)" }} strokeWidth="1" vectorEffect="non-scaling-stroke" />
           ))}
           <polygon points={`0,${height} ${line} 100,${height}`} fill={`url(#ap-fill-${gid})`} />
-          <line x1="0" x2="100" y1={y(start)} y2={y(start)} stroke="#9a9ab2" strokeWidth="1" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
+          <line x1="0" x2="100" y1={y(start)} y2={y(start)} style={{ stroke: "var(--color-faint)" }} strokeWidth="1" strokeDasharray="2 4" vectorEffect="non-scaling-stroke" />
           {floor !== null && (
-            <line x1="0" x2="100" y1={y(floor)} y2={y(floor)} stroke="#ef4444" strokeWidth="1.2" strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
+            <line x1="0" x2="100" y1={y(floor)} y2={y(floor)} style={{ stroke: "var(--color-down)" }} strokeWidth="1.2" strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
           )}
           {showTp && (
-            <line x1="0" x2="100" y1={y(takeProfit!)} y2={y(takeProfit!)} stroke="#22c55e" strokeWidth="1" strokeDasharray="2 4" vectorEffect="non-scaling-stroke" />
+            <line x1="0" x2="100" y1={y(takeProfit!)} y2={y(takeProfit!)} style={{ stroke: "var(--color-up)" }} strokeWidth="1" strokeDasharray="2 4" vectorEffect="non-scaling-stroke" />
           )}
-          <polyline points={line} fill="none" stroke={color} strokeWidth="1.8" vectorEffect="non-scaling-stroke" />
+          <polyline points={line} fill="none" style={{ stroke: color }} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
         </svg>
         <ChartLabel top={pct(start)} above className="text-cyber-text-dim">
           start {fmtUsd(start, 0)}
