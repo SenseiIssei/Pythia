@@ -51,10 +51,13 @@ pub enum FeedSource {
     Coinbase,
     Bybit,
     Okx,
+    /// Alpaca's crypto market data (v1beta3), keyless. The venue the demo
+    /// orders go to, and the one source that lists every coin Alpaca trades.
+    Alpaca,
 }
 
 impl FeedSource {
-    pub const ALL: [FeedSource; 7] = [
+    pub const ALL: [FeedSource; 8] = [
         FeedSource::KrakenWs,
         FeedSource::Kraken,
         FeedSource::Binance,
@@ -62,6 +65,7 @@ impl FeedSource {
         FeedSource::Coinbase,
         FeedSource::Bybit,
         FeedSource::Okx,
+        FeedSource::Alpaca,
     ];
 
     pub fn id(self) -> &'static str {
@@ -73,6 +77,7 @@ impl FeedSource {
             FeedSource::Coinbase => "coinbase",
             FeedSource::Bybit => "bybit",
             FeedSource::Okx => "okx",
+            FeedSource::Alpaca => "alpaca",
         }
     }
 
@@ -85,6 +90,7 @@ impl FeedSource {
             FeedSource::Coinbase => "Coinbase",
             FeedSource::Bybit => "Bybit",
             FeedSource::Okx => "OKX",
+            FeedSource::Alpaca => "Alpaca",
         }
     }
 
@@ -102,6 +108,7 @@ impl FeedSource {
             FeedSource::Coinbase => "coinbase",
             FeedSource::Bybit => "bybit",
             FeedSource::Okx => "okx",
+            FeedSource::Alpaca => "alpaca",
         }
     }
 
@@ -112,12 +119,17 @@ impl FeedSource {
 
     /// Book sources for the exchange whose costs crypto fills pay. Only that
     /// exchange's own book describes its fills (`ExecCost::for_order` ignores
-    /// any other), so the fallback is another host of the same venue, and past
-    /// that the calibrated defaults. Venues without a calibrated book get none.
+    /// any other), so the fallback is another host of the same venue. Last
+    /// comes Alpaca's book, for the coins the exchange does not list and while
+    /// it is down: the cost model then uses its calibrated defaults as it
+    /// would without a book, but a maker order on the Alpaca demo route still
+    /// gets a price from the venue it rests on. Venues without a calibrated
+    /// book get none.
     pub fn for_books(venue: CostVenue) -> Vec<FeedSource> {
         match venue {
-            CostVenue::Kraken => vec![FeedSource::Kraken],
-            CostVenue::Binance => vec![FeedSource::Binance, FeedSource::BinanceVision],
+            CostVenue::Kraken => vec![FeedSource::Kraken, FeedSource::Alpaca],
+            CostVenue::Binance => vec![FeedSource::Binance, FeedSource::BinanceVision, FeedSource::Alpaca],
+            CostVenue::Alpaca => vec![FeedSource::Alpaca],
             _ => vec![],
         }
     }
@@ -203,6 +215,7 @@ impl Default for FeedConfig {
             quotes: vec![
                 FeedSource::KrakenWs,
                 FeedSource::Kraken,
+                FeedSource::Alpaca,
                 FeedSource::Binance,
                 FeedSource::Coinbase,
                 FeedSource::Bybit,
@@ -210,6 +223,7 @@ impl Default for FeedConfig {
             ],
             candles: vec![
                 FeedSource::Kraken,
+                FeedSource::Alpaca,
                 FeedSource::Binance,
                 FeedSource::Coinbase,
                 FeedSource::Bybit,
@@ -239,7 +253,9 @@ impl FeedConfig {
     /// Defaults with the environment's overrides:
     ///
     /// * `PYTHIA_FEED_QUOTES`, `PYTHIA_FEED_CANDLES`: comma lists of source
-    ///   ids (`kraken-ws,kraken,binance,coinbase,bybit,okx`), best first
+    ///   ids (`kraken-ws,kraken,alpaca,binance,coinbase,bybit,okx`), best
+    ///   first. A coin is only asked of the sources that list it
+    ///   ([`crate::coins::lists`]), so a coin Kraken lacks starts at Alpaca.
     /// * `PYTHIA_FEED_STREAM=0`: no websocket, quotes are polled only
     /// * `PYTHIA_FEED_STALE_SEC`: polled quote stale time (default 25)
     /// * `PYTHIA_FEED_RECOVER_SEC`: hold before switching back (default 60)
@@ -1086,11 +1102,12 @@ mod tests {
         let mut f = rest();
         let ms = ids(2);
         deliver(&mut f, DataKind::Quotes, Kraken, &ms, T0);
-        assert_eq!(f.take_reference(&ms, T0), Some(Binance));
+        assert_eq!(f.take_reference(&ms, T0), Some(Alpaca));
         assert_eq!(f.take_reference(&ms, T0 + 30_000), None, "not due yet");
-        // Binance is down: the next venue serves.
-        f.poll_failed(DataKind::Quotes, Binance, "HTTP 451");
-        f.poll_failed(DataKind::Quotes, Binance, "HTTP 451");
+        // Alpaca and Binance are down: the next venue serves.
+        for s in [Alpaca, Alpaca, Binance, Binance] {
+            f.poll_failed(DataKind::Quotes, s, "HTTP 451");
+        }
         assert_eq!(f.take_reference(&ms, T0 + 61_000), Some(Coinbase));
         // On Binance, Kraken is the reference.
         let mut g = rest();
@@ -1113,9 +1130,10 @@ mod tests {
     }
 
     #[test]
-    fn book_sources_are_the_executing_venue_only() {
-        assert_eq!(FeedSource::for_books(CostVenue::Kraken), vec![Kraken]);
-        assert_eq!(FeedSource::for_books(CostVenue::Binance), vec![Binance, BinanceVision]);
+    fn book_sources_are_the_executing_venue_then_the_demo_venue() {
+        assert_eq!(FeedSource::for_books(CostVenue::Kraken), vec![Kraken, Alpaca]);
+        assert_eq!(FeedSource::for_books(CostVenue::Binance), vec![Binance, BinanceVision, Alpaca]);
+        assert_eq!(FeedSource::for_books(CostVenue::Alpaca), vec![Alpaca]);
         assert!(FeedSource::for_books(CostVenue::Okx).is_empty());
     }
 
