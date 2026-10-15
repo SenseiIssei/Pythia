@@ -55,6 +55,7 @@ SPEC = Spec(
     features=FEATURES, horizon="next 20 trading days", horizon_days=28,
     universe="BTC-USD and SPY (Yahoo daily)", metric="mse_z", baseline="the last 60 days' correlation, carried forward",
     every_days=28, margin=0.002, first_test="2020-01-01", folds="quarter", min_rows=60, min_days=60, min_train=300,
+    drift_days=120,
     use_rule="No book. Shown to the owner as the regime (coupled, mixed, decoupled); any use needs its own study.",
     results="model_zoo.md",
 )

@@ -75,6 +75,7 @@ class Spec:
     min_days: int = 14
     min_train: int = 500      # smallest training set for a fold
     embargo_h: int | None = None     # gap between train and test; default the label horizon
+    drift_days: int = DRIFT_DAYS     # window the inputs are checked over (one row a day needs longer)
     calendar: tuple[str, ...] = ()   # features set by the clock: nothing to drift
     managed_by: str = "zoo"   # zoo, learn (M1, M2 are retrained by the nightly loop) or retired
     status_note: str = ""

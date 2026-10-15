@@ -189,7 +189,7 @@ def zoo_entry(mod, panel, st: dict, now_ms: int, alerts: list[str], prev_alerts:
             e["live"] = shadow(mod, folder, role, panel, now_ms)
         except Exception as ex:  # noqa: BLE001 - shadow must not stop the report
             e["live"] = {"error": f"{type(ex).__name__}: {ex}"[:300]}
-        d = core.drift(card, panel)
+        d = core.drift(card, panel, s.drift_days)
         e["drift"] = d
         if d["level"] == "drift" and prev_alerts.get(s.name, {}).get("drift") != "drift":
             worst = ", ".join(f"{x['feature']} {x['outside_pct']:.0f} %" for x in d["features"][:3] if x["level"] == "drift")
@@ -363,8 +363,9 @@ def feed(d: dict) -> dict:
     for e in d["models"]:
         lvl = (e.get("drift") or {}).get("level")
         passed = (e.get("gate") or {}).get("passed")
+        # A shift (inputs spread differently, inside the trained range) is normal for one month: no colour.
         st = ("bad" if lvl == "drift" or e.get("status") == "error" else
-              "watch" if lvl == "shift" or e.get("status") == "waiting for data" else
+              "watch" if e.get("status") == "waiting for data" else
               "ok" if passed or e.get("status") in ("in use", "shadow") else None)
         was_promoted = any(s.get("model") == e["code"] and s.get("status") == "promoted" for s in d["steps"])
         imp = 75 if lvl == "drift" else 70 if was_promoted else 30 if passed else 10
