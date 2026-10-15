@@ -40,7 +40,7 @@ export function Positions() {
               </thead>
               <tbody>
                 {positions.map((p) => (
-                  <tr key={p.marketId} className="border-t border-cyber-border">
+                  <tr key={p.key ?? p.marketId} className="border-t border-cyber-border">
                     <td className="py-2 pr-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <Badge
@@ -63,6 +63,10 @@ export function Positions() {
                           </Badge>
                         )}
                       </div>
+                      {/* Every autopilot keeps a book of its own: two can hold the same coin. */}
+                      {p.book && (
+                        <div className="mt-0.5 text-xs text-cyber-text-dim">Autopilot {p.bookName ?? p.book}</div>
+                      )}
                     </td>
                     <td className="py-2 text-right font-mono">{p.qty.toFixed(4)}</td>
                     <td className="py-2 text-right font-mono text-cyber-text-dim">{p.avgPrice.toLocaleString()}</td>
@@ -82,7 +86,7 @@ export function Positions() {
                               : `Close the practice position in ${p.symbol} at today's price, about ${fmtUsd(Math.abs(p.qty) * p.lastPrice)}?`
                         }
                         confirmLabel={p.live ? "Yes, sell for real" : "Close it"}
-                        onConfirm={() => flatten(p.marketId)}
+                        onConfirm={() => flatten(p.key ?? p.marketId)}
                       >
                         Flatten
                       </ConfirmButton>

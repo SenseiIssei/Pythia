@@ -3,7 +3,7 @@
 // tested rather than eyeballed.
 
 import { curve, floorAtStart, isActive, type Stop } from "../autopilot";
-import { benchmark, holdings, type Holding } from "../practice";
+import { benchLabel, benchmark, holdings, type Holding } from "../practice";
 import type { AutopilotConfig, AutopilotStart, AutopilotStatus, PositionView, Venue } from "../types";
 
 export type Tone = "up" | "down" | "flat";
@@ -41,9 +41,12 @@ export interface CardModel {
   pnl: number;
   pnlPct: number;
   tone: Tone;
-  /** Percentage points ahead of holding Bitcoin; null when unknown. */
+  /** Percentage points ahead of holding its benchmark (Bitcoin, or SPY for
+   *  US shares); null when unknown. */
   vsBtcPts: number | null;
   btcPct: number | null;
+  /** "Bitcoin" or "SPY". */
+  benchLabel: string;
   /** Equity values for the small chart, oldest first. */
   chart: number[];
   holdings: Holding[];
@@ -131,6 +134,7 @@ export function cardModel(
     tone: toneOf(s.pnl),
     vsBtcPts: bench ? bench.edgePct : null,
     btcPct: bench ? bench.btcPct : null,
+    benchLabel: bench?.label ?? benchLabel(s.benchmark?.symbol),
     chart: curve(s, now).map((p) => p[1]),
     holdings: held,
     strategies: strategyShares(s, names),
@@ -139,11 +143,11 @@ export function cardModel(
 }
 
 /** "Ahead of Bitcoin by 1.2 pts", "Behind Bitcoin by 3.0 pts", "Level with Bitcoin". */
-export function vsBtcText(pts: number | null): string {
-  if (pts == null || !Number.isFinite(pts)) return "No Bitcoin comparison yet";
+export function vsBtcText(pts: number | null, label = "Bitcoin"): string {
+  if (pts == null || !Number.isFinite(pts)) return `No ${label} comparison yet`;
   const t = toneOf(pts, 0.05);
-  if (t === "flat") return "Level with Bitcoin";
-  return `${t === "up" ? "Ahead of" : "Behind"} Bitcoin by ${Math.abs(pts).toFixed(1)} pts`;
+  if (t === "flat") return `Level with ${label}`;
+  return `${t === "up" ? "Ahead of" : "Behind"} ${label} by ${Math.abs(pts).toFixed(1)} pts`;
 }
 
 /** Totals over the active autopilots, for the header of the page. */

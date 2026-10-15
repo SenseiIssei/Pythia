@@ -16,6 +16,14 @@
   --fl-on-primary: #ffffff;
   --fl-on-down: #ffffff;
   --fl-scrim: rgba(0, 0, 0, 0.35);
+  /* Categorical series, fixed order (src/flows/compare.ts SERIES): validated
+     for colour-blind separation on both surfaces. */
+  --fl-s1: #2a78d6;
+  --fl-s2: #eb6834;
+  --fl-s3: #1baf7a;
+  --fl-s4: #eda100;
+  --fl-s5: #e87ba4;
+  --fl-s6: #4a3aa7;
   color: var(--fl-text);
   font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
 }
@@ -35,6 +43,12 @@
     --fl-on-primary: #000000;
     --fl-on-down: #000000;
     --fl-scrim: rgba(0, 0, 0, 0.6);
+    --fl-s1: #3987e5;
+    --fl-s2: #d95926;
+    --fl-s3: #199e70;
+    --fl-s4: #c98500;
+    --fl-s5: #d55181;
+    --fl-s6: #9085e9;
   }
 }
 :root[data-theme="dark"] .fl,
@@ -52,6 +66,12 @@
   --fl-on-primary: #000000;
   --fl-on-down: #000000;
   --fl-scrim: rgba(0, 0, 0, 0.6);
+  --fl-s1: #3987e5;
+  --fl-s2: #d95926;
+  --fl-s3: #199e70;
+  --fl-s4: #c98500;
+  --fl-s5: #d55181;
+  --fl-s6: #9085e9;
 }
 
 .fl-page { background: var(--fl-bg); min-height: calc(100dvh - 96px); }

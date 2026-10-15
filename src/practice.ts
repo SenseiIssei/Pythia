@@ -97,16 +97,25 @@ export interface Holding {
 }
 
 /**
- * What an autopilot holds now. The engine says which markets are its own
- * (`held`); an older engine does not, and then a position in one of its
- * sleeves' markets is taken to be its own.
+ * Is this position in the autopilot's own book? Every autopilot keeps a book
+ * of its own, so two of them can hold the same coin: the position says whose
+ * it is (`book`). An older engine has no books; there the markets it holds
+ * (`held`, or its sleeves' markets) decide.
+ */
+export function inBook(s: AutopilotStatus, p: PositionView): boolean {
+  if (p.key !== undefined) return p.book === s.config.id && (s.held ? s.held.includes(p.marketId) : true);
+  const own = s.held ?? s.bySleeve.flatMap((b) => b.markets);
+  return own.includes(p.marketId);
+}
+
+/**
+ * What an autopilot holds now: the positions of its own book (see
+ * [`inBook`]).
  */
 export function holdings(s: AutopilotStatus, positions: PositionView[]): Holding[] {
-  const own = s.held ?? s.bySleeve.flatMap((b) => b.markets);
-  const ids = new Set(own);
   if (!isActive(s) && !s.held) return [];
   return positions
-    .filter((p) => ids.has(p.marketId) && Math.abs(p.qty) > 1e-12)
+    .filter((p) => inBook(s, p) && Math.abs(p.qty) > 1e-12)
     .map((p) => {
       const cost = Math.abs(p.qty * p.avgPrice);
       return {
@@ -138,12 +147,20 @@ export interface Benchmark {
   edgePct: number;
   /** Taken from the price history, which may not reach back to the start. */
   approximate: boolean;
+  /** What it is held against, in words: "Bitcoin" or "SPY". */
+  label?: string;
+}
+
+/** "Bitcoin" for BTC/USD, the symbol for anything else. */
+export function benchLabel(symbol: string | undefined): string {
+  return !symbol || /^BTC\b/i.test(symbol) ? "Bitcoin" : symbol;
 }
 
 /**
- * The autopilot against simply holding Bitcoin over the same period. The
- * engine's own figure first (BTC price at its start against now); without
- * one, the price history the app has.
+ * The autopilot against simply holding its benchmark over the same period:
+ * the engine's own figure first (BTC for crypto, SPY for US shares, from its
+ * start or from when the comparison could start); without one, the BTC
+ * price at its start against now; without that, the price history the app has.
  */
 export function benchmark(
   s: AutopilotStatus,
@@ -151,6 +168,12 @@ export function benchmark(
   btcTimes?: number[],
   btcCloses?: number[],
 ): Benchmark | null {
+  const b = s.benchmark;
+  if (b && b.returnPct != null && Number.isFinite(b.returnPct)) {
+    const edge = b.excessPct != null && Number.isFinite(b.excessPct) ? b.excessPct : s.pnlPct - b.returnPct;
+    return { btcPct: b.returnPct, runPct: b.returnPct + edge, edgePct: edge, approximate: b.fromMs != null, label: benchLabel(b.symbol) };
+  }
+  if (b && b.symbol !== "BTC/USD") return null;
   if (s.btcReturnPct != null && Number.isFinite(s.btcReturnPct)) {
     return { btcPct: s.btcReturnPct, runPct: s.pnlPct, edgePct: s.pnlPct - s.btcReturnPct, approximate: false };
   }
@@ -161,15 +184,19 @@ export function benchmark(
 
 /** "Ahead of Bitcoin by 1.20 points", in words a beginner can read. */
 export function benchmarkLine(b: Benchmark): string {
-  const btc = `Holding Bitcoin would have made ${signedPctText(b.btcPct)}`;
+  const btc = `Holding ${b.label ?? "Bitcoin"} would have made ${signedPctText(b.btcPct)}`;
   const d = direction(b.edgePct, 0.005);
   const gap = `${Math.abs(b.edgePct).toFixed(2)} points`;
   const verdict = d === "up" ? `ahead by ${gap}` : d === "down" ? `behind by ${gap}` : "level with it";
   return `${btc}; this is ${verdict}${b.approximate ? " (over the part the price history covers)" : ""}.`;
 }
 
-/** The autopilot that ran this strategy, by the strategy id of an order. */
+/**
+ * The autopilot an order was for: the book the order names, or, for an
+ * order from an older engine, the autopilot that ran its strategy then.
+ */
 export function autopilotOf(order: Order, list: AutopilotStatus[]): AutopilotStatus | undefined {
+  if (order.book) return list.find((s) => s.config.id === order.book);
   return list.find(
     (s) =>
       order.ts >= s.startedMs &&
