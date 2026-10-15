@@ -172,7 +172,7 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
     else:
         out += [f"Panel from our snapshots: waiting for {rel['panel']['waiting_days']} more days.", ""]
     out += ["## Reprints", "",
-            f"{rep['events']} reprint events (later printings of the same Pokemon name, plus listed announcements); "
+            f"{rep['events']} reprint events (later printings of the same card text: name, HP, attacks, abilities; plus listed announcements); "
             f"{rep['reprinted_now']} cards reprinted in the last {study.REPRINT_WINDOW} days.", "",
             _tbl(rep["cross"], ["rarity_group", "reprinted", "others", "reprinted_trend_pct", "others_trend_pct",
                                 "difference_pts"])]

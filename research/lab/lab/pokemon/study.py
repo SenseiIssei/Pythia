@@ -8,8 +8,9 @@ snapshots and is reported only once enough of them exist; until then it says
 how many days it is waiting for.
 
   release    do new sets drop and then recover? Price trend by set age.
-  reprint    does a reprint hurt the older printing? Cards whose name came
-             out again in a newer set (any rarity, from the full catalogue),
+  reprint    does a reprint hurt the older printing? Cards whose text (name,
+             HP, attacks, abilities) came out again in a newer set (any
+             rarity, from the full catalogue),
              plus announcements the owner lists in <lake>/reprints.csv
              (columns name, announced as YYYY-MM-DD), against cards that
              were not reprinted, within the same rarity group.
@@ -110,37 +111,52 @@ def release_panel(df: pl.DataFrame, days: int) -> dict:
 # ---------------------------------------------------------------- reprints
 
 def reprint_events(catalog: pl.DataFrame, announced: pl.DataFrame | None = None) -> pl.DataFrame:
-    """(name, event_date, kind): the release of every later printing of a
-    Pokemon's name, and the owner's announcement dates."""
+    """(key, by, event_date, kind): the release of every later printing of the
+    same card text (`by` = "text_key"; by name for a lake without text keys),
+    and the owner's announcement dates (`by` = "name")."""
     ev = []
     if not catalog.is_empty():
-        c = (catalog.filter(pl.col("supertype").str.starts_with("Pok") & pl.col("release_date").is_not_null())
-             .group_by("name").agg(dates=pl.col("release_date").unique().sort()))
-        for name, dates in c.iter_rows():
+        by = "text_key" if "text_key" in catalog.columns else "name"
+        c = (catalog.filter(pl.col("release_date").is_not_null() & pl.col(by).is_not_null())
+             .group_by(by).agg(dates=pl.col("release_date").unique().sort()))
+        for key, dates in c.iter_rows():
             for d in dates[1:]:
-                ev.append({"name": name, "event_date": d, "kind": "release"})
+                ev.append({"key": key, "by": by, "event_date": d, "kind": "release"})
     if announced is not None and not announced.is_empty():
         for name, d in announced.select("name", "announced").iter_rows():
-            ev.append({"name": name, "event_date": str(d)[:10], "kind": "announced"})
-    return pl.DataFrame(ev, schema={"name": pl.Utf8, "event_date": pl.Utf8, "kind": pl.Utf8})
+            ev.append({"key": name, "by": "name", "event_date": str(d)[:10], "kind": "announced"})
+    return pl.DataFrame(ev, schema={"key": pl.Utf8, "by": pl.Utf8, "event_date": pl.Utf8, "kind": pl.Utf8})
+
+
+def _join_events(frame: pl.DataFrame, events: pl.DataFrame) -> pl.DataFrame:
+    """Each row of `frame` with every event of its card text or its name."""
+    parts = []
+    for by in ("text_key", "name"):
+        e = events.filter(pl.col("by") == by)
+        if by in frame.columns and not e.is_empty():
+            parts.append(frame.join(e.drop("by").rename({"key": by}), on=by, how="inner"))
+    return pl.concat(parts, how="diagonal_relaxed") if parts else frame.clear().with_columns(
+        event_date=pl.lit(None, pl.Utf8), kind=pl.lit(None, pl.Utf8))
 
 
 def mark_reprints(snap: pl.DataFrame, events: pl.DataFrame, window: int = REPRINT_WINDOW) -> pl.DataFrame:
-    """`reprinted` for each card: a reprint event of its name after its own set's
-    release and within `window` days before the snapshot."""
-    if events.is_empty():
+    """`reprinted` for each card: a reprint event of its text (or an announcement
+    for its name) after its own set's release and within `window` days before
+    the snapshot."""
+    cols = [c for c in ("card_id", "name", "text_key", "date", "release_date") if c in snap.columns]
+    j = _join_events(snap.select(cols), events)
+    if j.is_empty():
         return snap.with_columns(reprinted=pl.lit(False))
-    j = (snap.select("card_id", "name", "date", "release_date").join(events, on="name", how="left")
-         .with_columns(age=(pl.col("date").str.to_date() - pl.col("event_date").str.to_date()).dt.total_days())
-         .with_columns(hit=(pl.col("event_date") > pl.col("release_date")) & pl.col("age").is_between(0, window))
-         .group_by("card_id", "date").agg(reprinted=pl.col("hit").fill_null(False).any()))
+    j = (j.with_columns(age=(pl.col("date").str.to_date() - pl.col("event_date").str.to_date()).dt.total_days())
+         .filter((pl.col("event_date") > pl.col("release_date")) & pl.col("age").is_between(0, window))
+         .select("card_id", "date").unique().with_columns(reprinted=pl.lit(True)))
     return snap.join(j, on=["card_id", "date"], how="left").with_columns(pl.col("reprinted").fill_null(False))
 
 
 def reprint_cross(snap: pl.DataFrame) -> list[dict]:
-    """Within each rarity group: median Cardmarket 30-day trend of reprinted vs other Pokemon cards."""
+    """Within each rarity group: median Cardmarket 30-day trend of reprinted vs other cards."""
     rows = []
-    s = snap.filter(pl.col("is_pokemon"))
+    s = snap
     for g in sorted(s["rarity_group"].unique().to_list()):
         a = s.filter((pl.col("rarity_group") == g) & pl.col("reprinted"))
         b = s.filter((pl.col("rarity_group") == g) & ~pl.col("reprinted"))
@@ -158,7 +174,9 @@ def reprint_panel(df: pl.DataFrame, events: pl.DataFrame, days: int) -> dict:
     median, by days relative to the event (-30..+60), scaled to 30 days."""
     if days < PANEL_MIN_DAYS or events.is_empty():
         return {"ready": False, "waiting_days": max(PANEL_MIN_DAYS - days, 0), "rows": []}
-    d = (df.select("card_id", "name", "date", "price", "price_src", "release_date", "rarity_group")
+    keep = [c for c in ("card_id", "name", "text_key", "date", "price", "price_src", "release_date", "rarity_group")
+            if c in df.columns]
+    d = (df.select(keep)
          .with_columns(_d=pl.col("date").str.to_date()).sort("card_id", "_d")
          .with_columns(r=(pl.col("price") / pl.col("price").shift(1).over("card_id")).log(),
                        gap=(pl.col("_d") - pl.col("_d").shift(1).over("card_id")).dt.total_days(),
@@ -166,7 +184,7 @@ def reprint_panel(df: pl.DataFrame, events: pl.DataFrame, days: int) -> dict:
          .filter(pl.col("same") & (pl.col("gap") <= 3))
          .with_columns(r=pl.col("r") / pl.col("gap")))
     d = d.with_columns(ex=pl.col("r") - pl.col("r").median().over("_d", "rarity_group"))
-    j = (d.join(events, on="name", how="inner")
+    j = (_join_events(d, events)
          .filter(pl.col("event_date") > pl.col("release_date"))
          .with_columns(rel=(pl.col("_d") - pl.col("event_date").str.to_date()).dt.total_days())
          .filter(pl.col("rel").is_between(-30, 60)))
@@ -267,9 +285,9 @@ def _pct(v):
 def run(df: pl.DataFrame, catalog: pl.DataFrame, announced: pl.DataFrame | None, days: int) -> dict:
     """All four studies on a featured frame (`data.features`)."""
     snap = latest(df)
-    events = reprint_events(catalog if not catalog.is_empty() else df.select(
-        "card_id", "name", "supertype", "rarity", "number", "set_id", "set_name", "release_date").unique(),
-        announced)
+    if catalog.is_empty():
+        catalog = df.select([c for c in ("card_id", "name", "text_key", "release_date") if c in df.columns]).unique()
+    events = reprint_events(catalog, announced)
     snap = mark_reprints(snap, events)
     return {
         "release": {"cross": release_cross(snap), "panel": release_panel(df, days)},

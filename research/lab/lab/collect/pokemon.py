@@ -67,10 +67,10 @@ PAGE_SIZE = 250
 MIN_USD = 2.0
 CACHE_DAYS = 3
 USER_AGENT = "pythia-lab-collector (data only)"
-CARD_FIELDS = ("id,name,supertype,subtypes,types,number,rarity,artist,nationalPokedexNumbers,"
-               "set,images,tcgplayer,cardmarket")
+CARD_FIELDS = ("id,name,supertype,subtypes,types,hp,attacks,abilities,number,rarity,artist,"
+               "nationalPokedexNumbers,set,images,tcgplayer,cardmarket")
 
-CATALOG_COLS = ("card_id", "name", "supertype", "rarity", "number", "set_id", "set_name", "release_date")
+CATALOG_COLS = ("card_id", "name", "text_key", "supertype", "rarity", "number", "set_id", "set_name", "release_date")
 
 # Cardmarket price keys -> lake columns (EUR).
 CM_KEYS = {
@@ -229,6 +229,14 @@ def cardmarket_prices(card: dict) -> dict:
     return out
 
 
+def text_key(card: dict) -> str:
+    """Same name, HP, attacks and abilities: the same card text, so a later
+    printing is a reprint (new art or not), not just a new card of that Pokemon."""
+    atk = sorted(str(a.get("name") or "") for a in card.get("attacks") or [] if isinstance(a, dict))
+    abi = sorted(str(a.get("name") or "") for a in card.get("abilities") or [] if isinstance(a, dict))
+    return "|".join([str(card.get("name") or ""), str(card.get("hp") or ""), ",".join(atk), ",".join(abi)])
+
+
 def card_row(card: dict, snap: str) -> dict:
     s = card.get("set") or {}
     imgs = card.get("images") or {}
@@ -237,6 +245,7 @@ def card_row(card: dict, snap: str) -> dict:
         "date": snap,
         "card_id": card.get("id"),
         "name": card.get("name"),
+        "text_key": text_key(card),
         "supertype": card.get("supertype"),
         "subtypes": "|".join(card.get("subtypes") or []),
         "types": "|".join(card.get("types") or []),
