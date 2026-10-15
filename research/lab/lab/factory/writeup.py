@@ -7,6 +7,7 @@ from collections import defaultdict
 
 import numpy as np
 
+from ..ops import i18n
 from . import evaluate
 
 GATE_LABEL = {"is_stable": "IS halves", "oos_positive": "OOS > 0", "stress": "70 bps", "drawdown": "DD < BTC",
@@ -163,23 +164,54 @@ def header(d: dict, updated_ms: int) -> dict:
             "items": items[:50], "verdict": d["verdict"]}
 
 
-def digest(d: dict) -> str:
+def decision_line(x: dict, lang: str = "en") -> str:
+    """One shadow decision: Promoted: name (why), in `lang`. In German a
+    retired genome names the gates it failed instead of the numbers."""
+    if lang != "de":
+        return f"{x['status'].capitalize()}: {x['name']} ({x['reason']})"
+    if x.get("status") == "promoted":
+        why = i18n.t("fa_promoted_reason", lang)
+    elif x.get("failed"):
+        why = i18n.t("fa_fails", lang, gates=", ".join(i18n.GATES_DE.get(k, k) for k in x["failed"]))
+    else:
+        why = i18n.reason(str(x.get("reason") or ""), lang)
+    status = i18n.word(str(x.get("status")), lang)
+    return i18n.t("fa_decision", lang, status=status[:1].upper() + status[1:], name=x["name"], reason=why)
+
+
+def verdict_text(d: dict, lang: str = "en") -> str:
+    """The run's verdict; English is the report's own."""
+    if lang != "de":
+        return d["verdict"]
+    trials = d["pool_after"]["n_trials"]
+    prom = [x for x in d["decisions"] if x["status"] == "promoted"]
+    n_sh = sum(1 for h in d["holdout"] if h["decision"] == "shadow")
+    if prom:
+        return i18n.t("fa_verdict_promoted", lang, n=len(prom))
+    if n_sh:
+        return i18n.t("fa_verdict_shadow", lang, n=n_sh, trials=trials)
+    return i18n.t("fa_verdict_none", lang, n=len(d["holdout"]), trials=trials)
+
+
+def digest(d: dict, lang: str = "en") -> str:
     """Short text for Telegram or a webhook: what was tried, what survived, why."""
+    t = i18n.t
     p = d["pool_after"]
-    lines = [f"Factory {d['run_id']}: {d['search']['evaluated']} new strategies tried, pool now "
-             f"{p['n_trials']} trials (noise bar Sharpe {p['sr0_annual']:.2f})."]
+    lines = [t("fa_head", lang, run=d["run_id"], n=d["search"]["evaluated"], trials=p["n_trials"],
+               sr0=i18n.num(p["sr0_annual"], 2, lang))]
     if d["top"]:
         b = d["top"][0]
-        lines.append(f"Best in sample: {b['name']}, Sharpe {b['is_sharpe']:.2f} at 35 bps.")
+        lines.append(t("fa_best", lang, name=b["name"], sharpe=i18n.num(b["is_sharpe"], 2, lang)))
     if d["holdout"]:
-        lines.append("Held back:")
+        lines.append(t("fa_held", lang))
         for h in d["holdout"]:
-            lines.append(f"- {h['name']}: OOS {h['oos_sharpe_35bps']:.2f}, defl p {h['deflated_p']:.2f}, "
-                         f"{h['decision']}")
+            lines.append(t("fa_holdout_line", lang, name=h["name"], oos=i18n.num(h["oos_sharpe_35bps"], 2, lang),
+                           p=i18n.num(h["deflated_p"], 2, lang), decision=i18n.word(h["decision"], lang)))
     act = [s for s in d["shadows"] if s["status"] == "active"]
-    lines.append(f"Shadow books: {len(act)} running" + (": " + ", ".join(
-        f"{s['key'][:6]} {s['days']}d {s['return'] * 100:+.1f}%" for s in act) if act else "") + ".")
+    items = ", ".join(t("fa_shadow_item", lang, id=s["key"][:6], days=s["days"],
+                        ret=i18n.frac_pct(s["return"], 1, lang)) for s in act)
+    lines.append(t("fa_shadows", lang, n=len(act), list=f": {items}" if act else ""))
     for x in d["decisions"]:
-        lines.append(f"{x['status'].capitalize()}: {x['name']} ({x['reason']})")
-    lines.append(d["verdict"])
+        lines.append(decision_line(x, lang))
+    lines.append(verdict_text(d, lang))
     return "\n".join(lines)

@@ -87,6 +87,10 @@ describe("alerts calls", () => {
     expect(calls[0].init?.method).toBe("POST");
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({ categories: { trades: false }, quietHours: { start: "22:00" } });
     expect(r.ok).toBe(true);
+    const lang = stubFetch(200, { ...settings, language: "de", languageEnv: null });
+    const de = await saveSettings({ language: "de" });
+    expect(JSON.parse(String(lang[0].init?.body))).toEqual({ language: "de" });
+    expect(de.ok && de.data.language).toBe("de");
     stubFetch(400, { error: "quiet hours: start and end are HH:MM, 00:00 to 23:59" });
     expect(await saveSettings({ quietHours: { start: "9pm" } })).toEqual({ ok: false, error: "quiet hours: start and end are HH:MM, 00:00 to 23:59" });
   });

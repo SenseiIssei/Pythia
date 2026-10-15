@@ -67,7 +67,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import notify
+from . import i18n, notify
 
 DEX = "https://api.dexscreener.com"
 BINANCE_HOSTS = ("https://api.binance.com", "https://data-api.binance.vision")
@@ -92,8 +92,7 @@ MIN_GAP_S = 0.25
 LOW_LIQ_USD = 50_000
 YOUNG_H = 72
 FDV_LIQ_MAX = 50
-CAVEAT = ("HIGH RISK, watch only. On-chain tokens are not on Alpaca; pumps, rug pulls and wash trading "
-          "dominate. Nothing here trades on a DEX or touches a wallet.")
+CAVEAT = i18n.t("tr_caveat", "en")
 
 Fetch = Callable[[str], object]
 
@@ -328,90 +327,93 @@ def gainers(tick: dict[str, dict], top: int = 10) -> list[dict]:
 
 # ---------------------------------------------------------------- texts
 
-def pct(v: float | None) -> str:
-    return "n/a" if v is None else f"{v * 100:+.0f}%"
-
-
-def money(v: float | None) -> str:
+def pct(v: float | None, lang: str = "en") -> str:
+    """+12% (German +12 %), a fraction as a whole %."""
     if v is None:
-        return "n/a"
-    for unit, d in (("B", 1e9), ("M", 1e6), ("k", 1e3)):
-        if abs(v) >= d:
-            return f"${v / d:.1f}{unit}"
-    return f"${v:.0f}"
+        return "k. A." if lang == "de" else "n/a"
+    return f"{v * 100:+.0f} %" if lang == "de" else f"{v * 100:+.0f}%"
 
 
-def alert_card(coin: str, s: dict, finding: str | None) -> "notify.Card":
+def money(v: float | None, lang: str = "en") -> str:
+    """$1.2M (German 1,2 Mio. $)."""
+    return i18n.short_money(v, lang)
+
+
+def alert_card(coin: str, s: dict, finding: str | None, lang: str = "en") -> "notify.Card":
     """A strong surge on a coin Alpaca lists, as one card."""
-    ratio = f"{s['qv_ratio']:.1f}x"
-    rows = [("24h change", pct(s["change"]), s["change"]), ("Volume", f"{ratio} its 28d median")]
+    t = i18n.t
+    rows = [(t("tr_change24", lang), pct(s["change"], lang), s["change"]),
+            (t("tr_volume", lang), t("tr_vs_median", lang, r=i18n.times(s["qv_ratio"], 1, lang)))]
     if s.get("count_ratio"):
-        rows.append(("Trades", f"{s['count_ratio']:.1f}x its 28d median"))
+        rows.append((t("tr_trades", lang), t("tr_vs_median", lang, r=i18n.times(s["count_ratio"], 1, lang))))
     parts: list = [notify.Rows(rows)]
     if coin in MEMES:
-        parts.append(notify.Line("moves like this often reverse within days.", "Memecoin:"))
+        parts.append(notify.Line(t("tr_meme", lang), t("tr_meme_lead", lang)))
     if finding:
         parts.append(notify.Line(finding))
-    return notify.Card("🔥", f"{coin} on Alpaca {pct(s['change'])} in 24h",
-                       "Volume surge on the paper account's list. Watch only: no order is placed.", parts)
+    return notify.Card("🔥", t("tr_alert_title", lang, coin=coin, pct=pct(s["change"], lang)),
+                       t("tr_alert_summary", lang), parts)
 
 
 def alert_text(prefix: str, coin: str, s: dict, finding: str | None) -> str:
     """The alert as plain text (the log)."""
-    return notify.plain(notify.render_post([alert_card(coin, s, finding)]))
+    return notify.plain(notify.render_post([alert_card(coin, s, finding)], lang="en"))
 
 
-def digest_card(snap: dict, finding: str | None) -> "notify.Card":
+def flags_text(flags: list[str] | None, lang: str = "en") -> str:
+    return "; ".join(i18n.word(f, lang) for f in flags or []) or i18n.t("tr_no_flags", lang)
+
+
+def digest_card(snap: dict, finding: str | None, lang: str = "en") -> "notify.Card":
     """The daily watchlist as one card: the Alpaca coins as a table, gainers
     and surges in a line each, the on-chain hype labelled high risk."""
+    t = i18n.t
     parts: list = []
     al = snap.get("alpaca") or {}
     hot = sorted(((c, s) for c, s in al.items() if s.get("qv_ratio")), key=lambda cs: -cs[1]["qv_ratio"])[:6]
     if hot:
-        parts.append(notify.Table(["Coin", "Vol x", "24h"], [[c, f"{s['qv_ratio']:.1f}x", pct(s["change"])] for c, s in hot],
-                                  "Alpaca coins, volume vs 28d median"))
+        parts.append(notify.Table([t("tr_hdr_coin", lang), t("tr_hdr_volx", lang), t("tr_hdr_24h", lang)],
+                                  [[c, i18n.times(s["qv_ratio"], 1, lang), pct(s["change"], lang)] for c, s in hot],
+                                  t("tr_table_title", lang)))
     g = snap.get("gainers") or []
     if g:
-        parts.append(notify.Line(" · ".join(f"{r['coin']} {pct(r['change'])}" for r in g[:6]), "Binance gainers 24h"))
+        parts.append(notify.Line(" · ".join(f"{r['coin']} {pct(r['change'], lang)}" for r in g[:6]), t("tr_gainers", lang)))
     ms = snap.get("market_surges") or []
     if ms:
-        parts.append(notify.Line(" · ".join(f"{r['coin']} {r['qv_ratio']:.1f}x" for r in ms[:6]), "Binance volume surges"))
+        parts.append(notify.Line(" · ".join(f"{r['coin']} {i18n.times(r['qv_ratio'], 1, lang)}" for r in ms[:6]),
+                                 t("tr_surges", lang)))
     dex = [r for r in snap.get("dex") or [] if r.get("symbol")]
     if dex:
-        parts.append(notify.Line(CAVEAT, "⚠️ On-chain hype:"))
+        parts.append(notify.Line(t("tr_caveat", lang), t("tr_onchain", lang)))
         for r in dex[:8]:
-            fl = "; ".join(r.get("flags") or []) or "no flags"
-            parts.append(notify.Line(f"{pct((r.get('change_h24') or 0) / 100)} 24h, liq {money(r.get('liquidity_usd'))}, "
-                                     f"vol {money(r.get('volume_h24'))} [{fl}]", f"{r['symbol']} ({r['chain']})"))
+            parts.append(notify.Line(t("tr_dex_line", lang, pct=pct((r.get("change_h24") or 0) / 100, lang),
+                                       liq=money(r.get("liquidity_usd"), lang), vol=money(r.get("volume_h24"), lang),
+                                       flags=flags_text(r.get("flags"), lang)), f"{r['symbol']} ({r['chain']})"))
     if finding:
         parts.append(notify.Line(finding))
-    n = len(hot)
-    summary = (f"{n} Alpaca {'coin' if n == 1 else 'coins'} with volume data, {len(dex)} on-chain tokens watched."
-               if hot or dex else "No source answered with data.")
-    return notify.Card("🔥", f"Trending · {snap['ts'][:10]}", summary, parts)
+    summary = t("tr_summary", lang, n=len(hot), d=len(dex)) if hot or dex else t("tr_no_data", lang)
+    return notify.Card("🔥", t("tr_digest_title", lang, day=i18n.iso_day(snap["ts"][:10], lang)), summary, parts)
 
 
 def digest_text(prefix: str, snap: dict, finding: str | None) -> str:
     """The digest as plain text (the log)."""
-    return notify.plain(notify.render_post([digest_card(snap, finding)]))
+    return notify.plain(notify.render_post([digest_card(snap, finding)], lang="en"))
 
 
-def w7_finding() -> str | None:
+def w7_finding(lang: str = "en") -> str | None:
     """One line from the W7 report, if it is there."""
     p = Path(os.environ.get("PYTHIA_AGENT_OUT", str(notify.data_root() / "agent-strategies"))) / "reports" / "memecoins.json"
     data = notify.read_json(p)
     if not data:
-        return W7_LINE
+        return i18n.t("tr_w7_line", lang)
     for v in data.get("verdicts", []):
         if v.get("family", "").startswith("F4"):
-            return (f"W7 backtest: buying volume surges on the Alpaca memecoins made Sharpe {v['pick_oos_35']:.2f} "
-                    f"out of sample at 35 bps (drawdown {v['pick_dd'] * 100:.0f} %), positive in "
-                    f"{v['years_pos']} of 3 years. Not a paper book.")
-    return W7_LINE
+            return i18n.t("tr_w7", lang, sharpe=i18n.num(v["pick_oos_35"], 2, lang), dd=f"{v['pick_dd'] * 100:.0f}",
+                          years=v["years_pos"])
+    return i18n.t("tr_w7_line", lang)
 
 
-W7_LINE = ("W7 backtest: buying volume surges on the Alpaca memecoins paid in 2024 and lost in 2025 and 2026; "
-           "not a paper book (results/memecoins.md).")
+W7_LINE = i18n.t("tr_w7_line", "en")
 
 
 # ---------------------------------------------------------------- one run
@@ -537,7 +539,8 @@ def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, f
     now = now or now_ms()
     st = notify.read_json(state_path()) or {}
     snap, hist, medians = snapshot(get, st.get("history", {}), now, st.get("medians"))
-    finding = w7_finding()
+    lang = notify.alert_lang()
+    finding = w7_finding(lang)
     alerts = st.get("alerts", {})
     sent = []
     for c, s in snap["alpaca"].items():
@@ -545,7 +548,7 @@ def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, f
             continue
         if now - alerts.get(c, 0) < ALERT_EVERY_H * 3_600_000:
             continue
-        res = notify.send("trending", [alert_card(c, s, finding)], now=now, dry_run=dry_run, poster=poster)
+        res = notify.send("trending", [alert_card(c, s, finding, lang)], now=now, dry_run=dry_run, poster=poster)
         ok, err = res["delivered"], res["error"] or res["reason"]
         sent.append({"coin": c, "delivered": ok, "error": err})
         if not dry_run:
@@ -555,7 +558,7 @@ def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, f
     day = f"{ts:%Y-%m-%d}"
     due = force_digest or (ts.hour >= DIGEST_HOUR and st.get("last_digest") != day)
     if due:
-        res = notify.send("trending", [digest_card(snap, finding)], now=now, dry_run=dry_run, poster=poster)
+        res = notify.send("trending", [digest_card(snap, finding, lang)], now=now, dry_run=dry_run, poster=poster)
         snap["digest"] = {"delivered": res["delivered"], "error": res["error"] or res["reason"]}
         if not dry_run:
             st["last_digest"] = day

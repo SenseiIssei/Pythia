@@ -51,8 +51,16 @@ jobs:
 @pytest.fixture(autouse=True)
 def no_alerts(monkeypatch):
     sent: list[str] = []
-    monkeypatch.setattr(jobs, "_alert", lambda t, text: sent.append(text))
+    monkeypatch.setattr(jobs, "_alert", lambda t, key, **kw: sent.append(jobs.alert_text(key, "en", **kw)))
     return sent
+
+
+def test_job_alerts_in_german():
+    text = jobs.alert_text("job_failed", "de", name="backfill", status="failed", code=3, s=12, log="/var/log/x.log")
+    assert text == "Job backfill fehlgeschlagen (Exit-Code 3) nach 12 s; Protokoll /var/log/x.log"
+    assert jobs.alert_text("job_ok_again", "de", name="backfill") == "Job backfill läuft wieder"
+    assert jobs.alert_text("job_failed", "en", name="b", status="timeout", code=124, s=60, log="l") == \
+        "job b timeout (exit 124) after 60 s; log l"
 
 
 # ---------------------------------------------------------------- the YAML subset
@@ -700,6 +708,7 @@ def test_runs_standalone_with_the_host_python(tmp_path):
     src = Path(jobs.__file__)
     shutil.copy(src, ops / "jobs.py")
     shutil.copy(src.with_name("notify.py"), ops / "notify.py")
+    shutil.copy(src.with_name("i18n.py"), ops / "i18n.py")
     t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: echo standalone')
     r = subprocess.run(["python3", "-I", str(ops / "jobs.py"), "--table", t.path, "run", "a"],
                        capture_output=True, text=True, timeout=60)

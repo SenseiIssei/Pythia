@@ -37,6 +37,7 @@ python3 -I "$lab/jobs.py" --table "$here/jobs.yaml" validate
 install -d -m 755 "$dest"
 install -m 755 "$lab/jobs.py" "$dest/jobs.py"
 install -m 644 "$lab/notify.py" "$dest/notify.py"
+install -m 644 "$lab/i18n.py" "$dest/i18n.py"
 install -m 644 "$here/jobs.yaml" "$dest/jobs.yaml"
 install -m 755 "$here/system_health.sh" "$dest/system_health.sh"
 install -m 755 "$here/deploy_lab.sh" "$dest/deploy_lab.sh"

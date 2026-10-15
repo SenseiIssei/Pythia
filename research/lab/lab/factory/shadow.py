@@ -169,7 +169,7 @@ def review(c: build.Ctx, pool: dict, btc: dict, today: str) -> list[dict]:
             write_json(promoted_path(), pr)
         write_json(shadow_dir() / f"{m['key']}.json", m)
         decisions.append({"key": m["key"], "name": m["name"], "status": m["status"], "reason": m["reason"],
-                          "forward": fw})
+                          "failed": bad, "forward": fw})
     return decisions
 
 
