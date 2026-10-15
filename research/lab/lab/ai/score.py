@@ -193,7 +193,7 @@ def verdict(resolved: int, vs_momentum: dict, vs_base: dict) -> str:
             words.append(f"worse than {name} (t {t:+.1f})")
         else:
             words.append(f"no measurable difference to {name} (t {t:+.1f})")
-    return f"After {resolved} resolved weeks the LLM is " + "; ".join(words) + "."
+    return f"After {resolved} resolved 7-day calls the LLM is " + "; ".join(words) + "."
 
 
 def week_of(day: str) -> str:

@@ -1,7 +1,7 @@
 import { Badge, List } from "../design";
 import { More, Row, Section, num, share } from "../pagekit";
 import { Markdown } from "./Markdown";
-import { edgeWords, usd, vsRows, type AiReport } from "../aiBudget";
+import { brierGap, usd, vsRows, type AiReport } from "../aiBudget";
 
 const fmtP = (p: number) => `${Math.round(p * 100)} %`;
 
@@ -14,8 +14,8 @@ export function LlmVsModels({ r }: { r: AiReport }) {
   const brief = r.brief;
   if (!s && !brief && !r.weekly) return null;
   const rows = s ? vsRows(s) : [];
-  const mom = s ? edgeWords(s.vs.momentum, "the momentum rule") : null;
-  const base = s ? edgeWords(s.vs.base, "the base rate") : null;
+  const mom = s ? brierGap(s.vs.momentum) : null;
+  const base = s ? brierGap(s.vs.base) : null;
 
   return (
     <Section
@@ -50,7 +50,7 @@ export function LlmVsModels({ r }: { r: AiReport }) {
             ))}
           </List>
           <p className="mt-2 text-[13px] text-muted">
-            {s.verdict} {s.resolved > 0 && mom && base ? `Brier difference: ${mom.text}; ${base.text}.` : ""} {s.pending} waiting for their week.
+            {s.verdict} {mom && base ? `LLM Brier minus momentum rule ${mom}, minus base rate ${base}.` : ""} {s.pending} waiting for their week.
           </p>
         </>
       )}

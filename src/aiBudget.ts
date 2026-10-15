@@ -202,8 +202,6 @@ export function usd(v: number | null | undefined): string {
   return `$${v.toFixed(2)}`;
 }
 
-export type Tone = "up" | "down" | "plain";
-
 export interface VsRow {
   key: "llm" | "momentum" | "base";
   label: string;
@@ -236,12 +234,8 @@ function pick(x: SourceScore): Pick<VsRow, "brier" | "logloss" | "hitRate" | "n"
   return { brier: x?.brier ?? null, logloss: x?.logloss ?? null, hitRate: x?.hitRate ?? null, n: x?.n ?? 0 };
 }
 
-/** The LLM's edge over a reference in Brier points (negative is better), with its t, in words. */
-export function edgeWords(v: { diff: number | null; t: number | null }, name: string): { text: string; tone: Tone } {
-  if (v.diff === null) return { text: `no comparison with ${name} yet`, tone: "plain" };
-  const t = v.t === null ? "" : `, t ${v.t.toFixed(1)}`;
-  const pts = `${v.diff > 0 ? "+" : ""}${(v.diff * 100).toFixed(2)} pts${t}`;
-  if (v.t !== null && v.t < -2) return { text: `better than ${name} (${pts})`, tone: "up" };
-  if (v.t !== null && v.t > 2) return { text: `worse than ${name} (${pts})`, tone: "down" };
-  return { text: `no measurable difference to ${name} (${pts})`, tone: "plain" };
+/** The LLM's Brier score minus a reference's, in points of 0.01 (negative: the LLM is better). */
+export function brierGap(v: { diff: number | null }): string | null {
+  if (v.diff === null || !Number.isFinite(v.diff)) return null;
+  return `${v.diff > 0 ? "+" : ""}${(v.diff * 100).toFixed(2)} pts`;
 }

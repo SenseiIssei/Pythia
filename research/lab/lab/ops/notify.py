@@ -822,11 +822,12 @@ def health_line(health: dict | None, now: int) -> Line:
 
 def ai_lines(brief: dict | None, now: int) -> list[Line]:
     """The AI brief's three lines (reports/ai_brief/latest.json, lab.ai.brief),
-    when it is from the last 26 hours. Shadow only, and labelled so."""
+    when it is today's (UTC). Shadow only, and labelled so."""
     if not isinstance(brief, dict):
         return []
     gen = _num(brief.get("generated_ms"))
-    if gen is None or not 0 <= now - gen <= 26 * 3_600_000:
+    today = datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d")
+    if gen is None or not 0 <= now - gen <= 26 * 3_600_000 or brief.get("date") != today:
         return []
     lines = [short(nodash(str(s)), 220) for s in brief.get("summary") or [] if isinstance(s, str) and s.strip()][:3]
     return [Line(s, "AI brief (shadow)" if i == 0 else None) for i, s in enumerate(lines)]
