@@ -273,6 +273,41 @@ in demo mode its orders go to the Alpaca paper account.
 Not yet verified against the paper account: no ETF order has been sent from
 this branch. The tests drive the engine with hand-set quotes and broker status.
 
+## A portfolio across crypto and US shares
+
+A portfolio autopilot (`"portfolio": true`, the Autopilot page's choice
+*Crypto and US shares*) is one amount over crypto lab books and lab books
+of US shares, in one book on the Alpaca account, with one equity, one set
+of stop rules and one P&L. Paper or demo only: a live start is refused,
+and single-class live autopilots keep every gate they had.
+
+- **Demo** needs both classes on the one Alpaca paper account: the Alpaca
+  paper keys and `PYTHIA_DEMO_EXCHANGE=alpaca`. The amount counts against
+  the paper account like any demo autopilot there.
+- **The split is by evidence** (`engine::allocator`). Each class runs the
+  auto pick on its own lab books, and only books with a positive
+  out-of-sample Sharpe from the lab count. A class's budget is the score of
+  its best book per unit of that book's out-of-sample drawdown, against
+  the other class's. A class with no such book gets nothing, never a forced
+  share; today that usually means everything goes to crypto until a book of
+  US shares has evidence. Inside a class the books split its budget by
+  score. The forward report (`reports/forward/evidence.json`) halves a
+  book's score once its forward record falls below its backtest's band.
+- **Re-picks** (every 24 h by default) move a class by at most 10 points
+  while both classes have evidence. A class that loses its evidence drops
+  to zero at once and is sold down at its next rebalance.
+- **Sessions.** The two classes are separate netted groups. US shares
+  rebalance only in the regular session (the same wait every lab book of
+  US shares has, sells included); crypto rebalances at any time. Neither
+  class buys past the portfolio's equity while the other waits to sell.
+- **Benchmark.** It is held against BTC and SPY bought and held at its
+  class split, chain-linked whenever a re-pick moves the split. The
+  Autopilot page shows the split, each class's P&L and what it holds, and
+  the blend next to the result.
+
+Not verified against the paper account from this branch: the logic is
+covered by `engine/portfolio_tests.rs` with hand-set prices and sessions.
+
 ## What the owner does to start demo trading on Bybit
 
 1. bybit.com > log in > **Demo Trading** (top right). In the demo account: avatar >

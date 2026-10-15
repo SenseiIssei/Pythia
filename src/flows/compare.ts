@@ -5,7 +5,7 @@
 // amount: one axis, never two. Pure functions, tested in compare.test.ts.
 
 import { curve, isActive, worstDip } from "../autopilot";
-import { benchmark } from "../practice";
+import { benchLabel, benchmark } from "../practice";
 import type { AutopilotStatus } from "../types";
 
 /** The chart draws with the design system's series colours
@@ -26,7 +26,7 @@ export interface CompareRow {
   /** Return on its amount, percent. */
   returnPct: number;
   pnl: number;
-  /** What it is held against: "Bitcoin" or "SPY". */
+  /** What it is held against: "Bitcoin", "SPY" or "BTC/SPY blend". */
   benchLabel: string;
   benchPct: number | null;
   /** Points ahead of its benchmark (negative: behind); null when unknown. */
@@ -74,7 +74,7 @@ export function compareRows(list: AutopilotStatus[], now: number): CompareRow[] 
       equity: s.equity,
       returnPct: s.pnlPct,
       pnl: s.pnl,
-      benchLabel: b?.label ?? (s.benchmark?.symbol === "SPY" ? "SPY" : "Bitcoin"),
+      benchLabel: b?.label ?? benchLabel(s.benchmark?.symbol),
       benchPct: b ? b.btcPct : null,
       vsBenchPts: b ? b.edgePct : null,
       drawdownPct: s.drawdownPct,

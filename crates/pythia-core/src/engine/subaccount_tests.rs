@@ -61,6 +61,7 @@ fn config(id: &str, capital: f64, sleeves: &[&str]) -> AutopilotConfig {
         flatten_on_stop: true,
         max_sleeves: None,
         repick_every_hours: None,
+        portfolio: false,
     }
 }
 

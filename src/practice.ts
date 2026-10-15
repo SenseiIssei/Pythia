@@ -151,8 +151,10 @@ export interface Benchmark {
   label?: string;
 }
 
-/** "Bitcoin" for BTC/USD, the symbol for anything else. */
+/** "Bitcoin" for BTC/USD, "BTC/SPY blend" for a portfolio's blend
+ *  ("BTC/USD+SPY"), the symbol for anything else. */
 export function benchLabel(symbol: string | undefined): string {
+  if (symbol && symbol.includes("+")) return "BTC/SPY blend";
   return !symbol || /^BTC\b/i.test(symbol) ? "Bitcoin" : symbol;
 }
 
