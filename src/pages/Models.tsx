@@ -4,6 +4,8 @@ import { Badge, Button, Card, PageHeader, StatCard } from "../components/ui";
 import { liveMode } from "../live";
 import { mlStatus, type DriftLevel, type MlStatus } from "../ml";
 import { PicksPanel } from "../components/PicksPanel";
+import { ModelZoo } from "../components/ModelZoo";
+import { modelZoo, type ZooStatus } from "../zoo";
 
 const fmtVol = (v: number) => `${v.toFixed(0)} %`;
 const NONE = "not yet";
@@ -21,6 +23,7 @@ export function Models() {
   const mode = liveMode();
   const [s, setS] = useState<MlStatus | null>(null);
   const [err, setErr] = useState("");
+  const [zoo, setZoo] = useState<ZooStatus | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -28,6 +31,12 @@ export function Models() {
       setErr("");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    }
+    // The zoo is the lab's daily report; an engine without it still shows the live models.
+    try {
+      setZoo(await modelZoo());
+    } catch {
+      setZoo(null);
     }
   }, []);
 
@@ -74,6 +83,8 @@ export function Models() {
           <div className="text-sm text-danger">{err}</div>
         </Card>
       )}
+
+      {zoo && zoo.models.length > 0 && <ModelZoo z={zoo} />}
 
       {s && s.state !== "live" && (
         <Card className={s.state === "rejected" ? "border-danger/30 bg-danger/5" : "border-warning/30 bg-warning/5"}>
