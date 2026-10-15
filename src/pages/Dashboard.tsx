@@ -1,6 +1,22 @@
-import { Wallet, TrendingUp, Activity, Layers, Zap } from "lucide-react";
+import { Activity, Wallet } from "lucide-react";
 import { useStore } from "../store";
-import { Card, PageHeader, Sparkline, StatCard, fmtUsd, Badge, EmptyState, pnlTone } from "../components/ui";
+import {
+  Chip,
+  Delta,
+  KeyStats,
+  LineChart,
+  Nothing,
+  PageShell,
+  Row,
+  Rows,
+  Section,
+  clock,
+  plural,
+  toneOf,
+  usd,
+  usdShort,
+} from "../pagekit";
+import { kindInfo } from "../pagekit/journal";
 
 const venueLabel: Record<string, string> = {
   polymarket: "Polymarket",
@@ -8,127 +24,76 @@ const venueLabel: Record<string, string> = {
   alpaca: "Alpaca (US shares)",
 };
 
-/** What each journal kind means, for the tag's tooltip. */
-const KIND_HELP: Record<string, string> = {
-  signal: "A strategy decided it wants to buy or sell.",
-  order: "An order was sent.",
-  fill: "An order was filled: the trade happened.",
-  reject: "An order was refused, with the reason.",
-  risk: "The risk manager stepped in or a limit changed.",
-  system: "Something about the engine itself.",
-};
-
+/** The live cockpit: account value, today's result, the curve, venues and the latest engine events. */
 export function Dashboard() {
   const { portfolio, journal, positions } = useStore();
   const dayPnl = portfolio.realizedPnl + portfolio.unrealizedPnl;
   const dayPnlPct = portfolio.dayStartEquity > 0 ? (dayPnl / portfolio.dayStartEquity) * 100 : 0;
   const feed = journal.slice(0, 12);
   const live = portfolio.mode === "live";
+  const tone = toneOf(dayPnl);
 
   return (
-    <div className="animate-fade-in mx-auto max-w-6xl space-y-4">
-      <PageHeader
-        title="Dashboard"
-        subtitle={live ? "Live cockpit: real orders may be placed." : "Live cockpit on the paper engine: simulated money."}
+    <PageShell
+      title="Dashboard"
+      subtitle={live ? "The live cockpit. Real orders may be placed." : "The live cockpit on the paper engine, with simulated money."}
+      right={<Chip tone={live ? "bad" : "neutral"}>{live ? "Live" : "Simulated"}</Chip>}
+    >
+      <KeyStats
+        items={[
+          { label: "Equity", value: usd(portfolio.equity), sub: <Delta usd={dayPnl} pct={dayPnlPct} tone={tone} />, help: "What the whole account is worth right now." },
+          { label: "Open Exposure", value: usdShort(portfolio.grossExposure), sub: plural(positions.length, "position") },
+          { label: "Unrealized", value: usd(portfolio.unrealizedPnl), tone: toneOf(portfolio.unrealizedPnl), sub: "on open positions" },
+        ]}
       />
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Equity" value={fmtUsd(portfolio.equity)} icon={Wallet} delay={0} />
-        <StatCard
-          label="Today's P&L"
-          value={fmtUsd(dayPnl)}
-          sub={`${dayPnlPct >= 0 ? "+" : ""}${dayPnlPct.toFixed(2)}% today`}
-          icon={TrendingUp}
-          tone={pnlTone(dayPnl)}
-          delay={0.05}
-        />
-        <StatCard
-          label="Open Exposure"
-          value={fmtUsd(portfolio.grossExposure)}
-          sub={`${positions.length} position${positions.length === 1 ? "" : "s"}`}
-          icon={Layers}
-          delay={0.1}
-        />
-        <StatCard
-          label="Unrealized"
-          value={fmtUsd(portfolio.unrealizedPnl)}
-          icon={Zap}
-          tone={pnlTone(portfolio.unrealizedPnl)}
-          delay={0.15}
-        />
-      </div>
+      <Section title="Equity Curve" hint="The account's value over this session.">
+        <LineChart series={[{ label: "Equity", data: portfolio.equityCurve }]} tone={tone} height={170} label="Equity over this session" format={usdShort} />
+        <div className="fl-muted fl-num mt-2 flex justify-between text-sm">
+          <span>Start {usd(portfolio.dayStartEquity, 0)}</span>
+          <span>Now {usd(portfolio.equity, 0)}</span>
+        </div>
+      </Section>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card
-          title="Equity Curve"
-          className="lg:col-span-2"
-          right={<Badge tone={live ? "red" : "neutral"}>{live ? "live" : "simulated"}</Badge>}
-        >
-          <Sparkline data={portfolio.equityCurve} height={160} tone={dayPnl >= 0 ? "green" : "red"} label="Equity over this session" />
-          <div className="mt-2 flex justify-between font-mono text-xs text-cyber-text-faint">
-            <span>start {fmtUsd(portfolio.dayStartEquity, 0)}</span>
-            <span>now {fmtUsd(portfolio.equity, 0)}</span>
-          </div>
-        </Card>
-
-        <Card title="Venue Balances">
-          {portfolio.balances.length === 0 ? (
-            <EmptyState compact icon={Wallet} title="No venues yet" />
-          ) : (
-            <div className="space-y-3">
-              {portfolio.balances.map((b) => (
-                <div key={b.venue} className="flex items-center justify-between gap-2">
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="text-sm">{venueLabel[b.venue] ?? b.venue}</span>
-                    <Badge
-                      tone={b.connected ? "green" : "neutral"}
-                      title={b.connected ? "Keys are set, so real data or orders can reach it" : "No keys: simulated"}
-                    >
-                      {b.connected ? "connected" : "simulated"}
-                    </Badge>
-                  </div>
-                  <span className="font-mono text-sm text-cyber-text-dim">{fmtUsd(b.equity, 0)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <Card title="Live Activity" icon={Activity}>
-        {feed.length === 0 ? (
-          <EmptyState compact icon={Activity} title="Waiting for the first engine events" />
+      <Section title="Venue Balances" hint="Where the money sits. Connected venues have keys set; the rest are simulated.">
+        {portfolio.balances.length === 0 ? (
+          <Nothing icon={Wallet} title="No venues yet" />
         ) : (
-          <ul className="space-y-1.5 text-xs">
-            {feed.map((e) => (
-              <li key={e.id} className="flex flex-wrap items-start gap-x-2 gap-y-0.5 sm:flex-nowrap">
-                <span className="w-16 shrink-0 font-mono text-cyber-text-faint">{new Date(e.ts).toLocaleTimeString()}</span>
-                <FeedTag kind={e.kind} />
-                <span className="min-w-0 basis-full break-words text-cyber-text-dim sm:basis-auto">{e.message}</span>
-              </li>
+          <Rows>
+            {portfolio.balances.map((b) => (
+              <Row
+                key={b.venue}
+                label={venueLabel[b.venue] ?? b.venue}
+                sub={b.connected ? "Connected: real data or orders can reach it" : "Simulated: no keys set"}
+                value={usd(b.equity, 0)}
+              />
             ))}
-          </ul>
+          </Rows>
         )}
-      </Card>
-    </div>
-  );
-}
+      </Section>
 
-function FeedTag({ kind }: { kind: string }) {
-  const map: Record<string, string> = {
-    signal: "text-purple-neon",
-    fill: "text-success",
-    reject: "text-danger",
-    risk: "text-warning",
-    order: "text-accent",
-    system: "text-cyber-text-faint",
-  };
-  return (
-    <span
-      title={KIND_HELP[kind]}
-      className={`w-14 shrink-0 font-mono uppercase ${map[kind] ?? "text-cyber-text-faint"}`}
-    >
-      {kind}
-    </span>
+      <Section title="Live Activity" hint="The engine's latest events, newest first. The Journal keeps all of them.">
+        {feed.length === 0 ? (
+          <Nothing icon={Activity} title="Waiting for the first engine events" />
+        ) : (
+          <Rows>
+            {feed.map((e) => {
+              const k = kindInfo(e.kind);
+              return (
+                <div key={e.id} className="py-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <Chip tone={k.tone} title={k.help}>
+                      {k.label}
+                    </Chip>
+                    <span className="fl-muted fl-num text-sm">{clock(e.ts)}</span>
+                  </div>
+                  <p className="mt-1 break-words text-[15px]">{e.message}</p>
+                </div>
+              );
+            })}
+          </Rows>
+        )}
+      </Section>
+    </PageShell>
   );
 }
