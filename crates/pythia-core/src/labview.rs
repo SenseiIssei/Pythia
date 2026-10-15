@@ -776,6 +776,147 @@ fn read_zoo(root: &Path) -> Option<pythia_ml::zoo::ZooStatus> {
     })
 }
 
+// ── CS2 skins board ─────────────────────────────────────────────────────────
+// Written hourly by `lab.cs2.run` to `reports/cs2/latest.json`: the lab feed
+// header (title, status, headline, items; docs/LAB-FEEDS.md) for the Research
+// page, and the board under `rows`, `portfolio`, `alerts` and `research`.
+// Prices, predictions and a play-money portfolio; nothing in Pythia trades skins.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Item {
+    pub name: String,
+    pub category: String,
+    /// Reference price in EUR (24h or 7-day Skinport sales median, else the lowest ask).
+    pub price: Option<f64>,
+    pub ask: Option<f64>,
+    pub steam_price: Option<f64>,
+    /// Fractions, not percent.
+    pub change7d: Option<f64>,
+    pub pred7d: Option<f64>,
+    pub pred30d: Option<f64>,
+    pub expected_net: Option<f64>,
+    pub horizon: Option<i64>,
+    pub gap: Option<f64>,
+    pub sales7d: i64,
+    pub listed: i64,
+    pub held: bool,
+    pub watch: bool,
+    /// buy · hold · avoid · gap · drop
+    pub signal: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Position {
+    pub name: String,
+    pub qty: f64,
+    pub cost: f64,
+    pub bought: String,
+    pub price: Option<f64>,
+    pub return_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Portfolio {
+    pub equity: f64,
+    pub start_equity: f64,
+    pub cash: f64,
+    pub return_pct: f64,
+    pub started: Option<String>,
+    pub last_rebalance: Option<String>,
+    pub positions: Vec<Cs2Position>,
+    pub last_trades: Vec<Value>,
+    pub dates: Vec<String>,
+    pub equity_curve: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Alert {
+    pub ts_ms: Option<i64>,
+    pub kind: String,
+    pub name: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Model {
+    pub src7: String,
+    pub src30: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cs2Board {
+    pub generated: String,
+    pub generated_ms: i64,
+    /// "ok" when the board has rows, "no data" before the first collection.
+    pub status: String,
+    /// The feed's own status: ok, watch (something to look at by hand) or bad (collector late or failing).
+    pub feed_status: String,
+    /// The feed's one sentence.
+    pub headline: String,
+    pub verdict: String,
+    pub currency: String,
+    pub history_days: i64,
+    pub change7_basis: String,
+    pub hurdle: Option<f64>,
+    pub model: Cs2Model,
+    pub portfolio: Option<Cs2Portfolio>,
+    pub alerts: Vec<Cs2Alert>,
+    /// The daily research summary (verdict, spread, momentum, bootstrap scores), as the lab wrote it.
+    pub research: Option<Value>,
+    pub items: Vec<Cs2Item>,
+}
+
+/// The CS2 board as the lab wrote it; `None` when it is not a JSON object.
+/// Rows that do not parse are skipped.
+pub fn parse_cs2(text: &str) -> Option<Cs2Board> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    fn rows<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Vec<T> {
+        v.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect())
+            .unwrap_or_default()
+    }
+    // The board's own status sits in `boardStatus` since it shares the file
+    // with the feed header; the first boards had it in `status`, rows in `items`.
+    let feed = v.get("boardStatus").is_some();
+    Some(Cs2Board {
+        generated: s("generated"),
+        generated_ms: v.get("generatedMs").and_then(Value::as_i64).unwrap_or(0),
+        status: if feed { s("boardStatus") } else { s("status") },
+        feed_status: if feed { s("status") } else { String::new() },
+        headline: s("headline"),
+        verdict: s("verdict"),
+        currency: v.get("currency").and_then(Value::as_str).unwrap_or("EUR").to_string(),
+        history_days: v.get("historyDays").and_then(Value::as_i64).unwrap_or(0),
+        change7_basis: s("change7Basis"),
+        hurdle: v.get("hurdle").and_then(Value::as_f64),
+        model: v.get("model").and_then(|m| serde_json::from_value(m.clone()).ok()).unwrap_or_default(),
+        portfolio: v.get("portfolio").and_then(|p| serde_json::from_value(p.clone()).ok()),
+        alerts: rows(&v, "alerts"),
+        research: v.get("research").filter(|r| r.is_object()).cloned(),
+        items: if feed { rows(&v, "rows") } else { rows(&v, "items") },
+    })
+}
+
+/// The CS2 board from the lab's data folder; `None` until `lab.cs2.run` has written one.
+pub fn cs2_board() -> Option<Cs2Board> {
+    let reports = data_dir()?.join("reports");
+    ["cs2", "cs2_board"]
+        .iter()
+        .find_map(|d| std::fs::read_to_string(reports.join(d).join("latest.json")).ok().and_then(|t| parse_cs2(&t)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,6 +939,51 @@ mod tests {
             "2 models: 0 in use, 1 in shadow, 1 failed their gate, 0 waiting for data, 1 drifting."
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_the_cs2_board_and_skips_broken_items() {
+        let text = r#"{"generated":"2026-10-15 12:05 UTC","generatedMs":1,"status":"ok","verdict":"v",
+            "currency":"EUR","historyDays":3,"change7Basis":"Skinport 7-day median","hurdle":0.1,
+            "model":{"src7":"bootstrap","src30":"bootstrap","note":"n"},
+            "portfolio":{"equity":9990.5,"startEquity":10000,"cash":5000,"returnPct":-0.1,"started":"2026-10-15",
+                "lastRebalance":"2026-10-15","positions":[{"name":"Recoil Case","qty":10,"cost":1.0,"bought":"2026-10-15",
+                "price":1.02,"returnPct":2.0}],"lastTrades":[],"dates":["2026-10-15"],"equityCurve":[9990.5]},
+            "alerts":[{"tsMs":1,"kind":"gap","name":"X","text":"t"}],
+            "items":[{"name":"Recoil Case","category":"case","price":1.02,"ask":1.03,"steamPrice":null,
+                "change7d":0.01,"pred7d":0.02,"pred30d":null,"expectedNet":-0.08,"horizon":7,"gap":null,
+                "sales7d":900,"listed":5000,"held":true,"watch":true,"signal":"hold"},
+                {"name":5}]}"#;
+        let b = parse_cs2(text).unwrap();
+        assert_eq!(b.items.len(), 1);
+        assert_eq!(b.items[0].signal, "hold");
+        assert_eq!(b.history_days, 3);
+        assert_eq!(b.portfolio.as_ref().unwrap().positions[0].qty, 10.0);
+        assert_eq!(b.alerts[0].kind, "gap");
+        let out = serde_json::to_value(&b).unwrap();
+        assert_eq!(out["items"][0]["expectedNet"], -0.08);
+        assert_eq!(out["portfolio"]["equityCurve"][0], 9990.5);
+        assert!(parse_cs2("[]").is_none());
+        assert!(parse_cs2("not json").is_none());
+    }
+
+    #[test]
+    fn reads_the_cs2_board_next_to_its_feed_header() {
+        let text = r#"{"title":"CS2 skins","status":"watch","headline":"1 skin worth a look by hand","updated_ms":5,
+            "items":[{"label":"Gap item","value":"+6.0 %","status":"watch","importance":68}],
+            "generated":"2026-10-15 12:05 UTC","generatedMs":5,"boardStatus":"ok","verdict":"v","historyDays":1,
+            "research":{"verdict":"Too early","historyDays":1},
+            "rows":[{"name":"Recoil Case","category":"case","price":0.3,"signal":"hold","sales7d":900,"listed":5000}]}"#;
+        let b = parse_cs2(text).unwrap();
+        assert_eq!(b.status, "ok");
+        assert_eq!(b.feed_status, "watch");
+        assert_eq!(b.headline, "1 skin worth a look by hand");
+        assert_eq!(b.items.len(), 1, "the board's rows, not the feed's items");
+        assert_eq!(b.items[0].name, "Recoil Case");
+        assert_eq!(b.research.as_ref().unwrap()["verdict"], "Too early");
+        let f = parse_feed("cs2", text, 0).unwrap();
+        assert_eq!(f.items.len(), 1);
+        assert_eq!(f.items[0].label, "Gap item");
     }
 
     #[test]

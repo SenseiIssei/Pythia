@@ -9,3 +9,4 @@ onnx>=1.18
 onnxmltools>=1.14
 onnxruntime>=1.22
 matplotlib>=3.10
+brotli>=1.1

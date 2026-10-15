@@ -956,6 +956,7 @@ async fn main() {
         .route("/api/ml/zoo", get(|| async { Json(pythia_core::labview::model_zoo()) }))
         .route("/api/tax", get(get_tax))
         .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
+        .route("/api/cs2", get(|| async { Json(pythia_core::labview::cs2_board()) }))
         .route("/api/lab/feeds", get(|| async { Json(pythia_core::labview::feeds()) }))
         .route("/api/lab/studies", get(|| async { Json(pythia_core::labview::studies()) }))
         .route("/api/forecast/ensemble", post(post_ensemble))
