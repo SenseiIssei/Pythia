@@ -535,8 +535,12 @@ pub fn parse_pokemon(text: &str) -> Option<Value> {
     (v.is_object() && v.get("cards").map(Value::is_array).unwrap_or(false)).then_some(v)
 }
 
+/// `pokemon/ui/latest.json`, else the copy the daily job keeps next to its
+/// report (`reports/pokemon/ui.json`) for a host that only sees reports/.
 fn read_pokemon(root: &Path) -> Option<Value> {
-    parse_pokemon(&std::fs::read_to_string(root.join("pokemon").join("ui").join("latest.json")).ok()?)
+    [root.join("pokemon").join("ui").join("latest.json"), root.join("reports").join("pokemon").join("ui.json")]
+        .iter()
+        .find_map(|p| parse_pokemon(&std::fs::read_to_string(p).ok()?))
 }
 
 pub fn pokemon() -> PokemonView {
@@ -1200,6 +1204,13 @@ mod tests {
         assert_eq!(read_pokemon(&dir).map(|v| v["cards"].as_array().map(Vec::len)), Some(Some(1)));
         let out = serde_json::to_value(PokemonView { found: true, data: read_pokemon(&dir) }).unwrap();
         assert_eq!(out["data"]["collection"]["equity"], 1000.0);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A host that only sees reports/ reads the copy next to the report.
+        let dir = std::env::temp_dir().join(format!("pythia-labview-pokemon-rep-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("reports").join("pokemon")).unwrap();
+        std::fs::write(dir.join("reports").join("pokemon").join("ui.json"), text).unwrap();
+        assert_eq!(read_pokemon(&dir).map(|v| v["cards"].as_array().map(Vec::len)), Some(Some(1)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -396,6 +396,13 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
     tmp = ui_path.with_name("latest.json.tmp")
     tmp.write_text(json.dumps(clean(ui), default=str, allow_nan=False), encoding="utf-8")
     os.replace(tmp, ui_path)
+    # A copy next to the report, for an app that only sees reports/. Not
+    # named latest.json, so the lab feeds do not list it as a feed.
+    rp = Path(report.REPORTS) / NAME / "ui.json"
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rtmp = rp.with_name("ui.json.tmp")
+    rtmp.write_text(json.dumps(clean(ui), default=str, allow_nan=False), encoding="utf-8")
+    os.replace(rtmp, rp)
     data = {"verdict": v, "generated": ui["generated"], "meta": meta, "model": mstat,
             "fair_value": fv, "studies": studies, "collection": {k: coll[k] for k in ("started", "equity", "returnPct")},
             "alerts": {"moves": len(al["moves"]), "undervalued": len(al["undervalued"])},
