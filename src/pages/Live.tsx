@@ -1,17 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Radio, Power, PlugZap, TriangleAlert, CheckCircle2, XCircle, Lock, RefreshCw } from "lucide-react";
+import { Badge, Button, Card, List, Notice, Page, Toggle, changeTone, inputCls, money, signedMoney } from "../design";
+import { KeyStats, More, Nothing, Row, Section, SwitchRow, plural } from "../pagekit";
 import {
-  Radio,
-  ShieldAlert,
-  Power,
-  PlugZap,
-  TriangleAlert,
-  CheckCircle2,
-  Circle,
-  DollarSign,
-  Timer,
-  Gauge,
-} from "lucide-react";
-import { Card, PageHeader, Badge, Button, EmptyState, Toggle, inputCls } from "../components/ui";
+  amountText,
+  canArmNow,
+  liveMood,
+  liveMoodWords,
+  readyCount,
+  realExposure,
+  secondsSince,
+  signedBps,
+} from "../pagekit/money";
 import { useStore } from "../store";
 import { DataHealthCard } from "../components/DataHealth";
 import {
@@ -39,8 +39,22 @@ const ROUTABLE: { venue: Venue; label: string; note: string }[] = [
   { venue: "crypto", label: "Crypto exchange", note: "24/7 spot, long only" },
 ];
 
+/** What arming and routing promise, shown under the arm step. */
+const GUARANTEES: ReactNode[] = [
+  "Arming runs a read-only key check first and refuses if a venue does not answer.",
+  <>
+    Only strategies set to <b>Live</b> (Strategies page) send entries; a position opened live also exits live.
+  </>,
+  "The kill switch, daily-loss, drawdown and position caps gate every order first.",
+  "Orders that cannot fill (market closed, no buying power) are refused before submission, not left hanging.",
+  "Alpaca entries are refused while the market is closed, the account is restricted, or the broker check is stale. Exits never are.",
+  "Whole-share Alpaca orders go out as marketable limits, so a thin or gapped book can't fill them at any price.",
+  "An order that doesn't fill is cancelled at the venue, then re-read, so nothing is ever left working after Pythia gives up on it.",
+  "Positions are reconciled against the broker every couple of minutes while armed; the broker is always treated as the source of truth.",
+];
+
 export function Live() {
-  const { live } = useStore();
+  const { live, positions } = useStore();
   const mode = liveMode();
   const [paper, setPaper] = useState(true);
   const [dryRun, setDryRun] = useState(false);
@@ -121,280 +135,256 @@ export function Live() {
 
   if (mode === "none") {
     return (
-      <div className="animate-fade-in mx-auto max-w-3xl">
-        <PageHeader title="Live Execution" subtitle="Send real orders to a broker: gated, and paper first." />
+      <Page title="Live trading" subtitle="Send real orders to a broker: gated, and paper first.">
         <Card>
-          <EmptyState icon={Radio} title="Live execution needs the desktop app or a connected server">
+          <Nothing icon={Radio} title="Live trading needs the desktop app or a connected server">
             Real orders need a connection to a broker. Use the desktop app (keys in the OS keychain) or a backend server
             (keys in its environment). This browser version can only practise.
-          </EmptyState>
+          </Nothing>
         </Card>
-      </div>
+      </Page>
     );
   }
 
-  const canArm = confirm.trim().toUpperCase() === ARM_PHRASE && !live.armed && venues.length > 0;
-  const realMoney = live.armed && !live.paper && !live.dryRun;
+  const canArm = canArmNow(confirm, ARM_PHRASE, live.armed, venues.length);
+  const state = liveMood(live);
+  const realMoney = state === "real";
+  const words = liveMoodWords(state);
+  const exposure = realExposure(positions);
+  const aboutToArmReal = !live.armed && !paper && !dryRun;
 
   return (
-    <div className="animate-fade-in mx-auto max-w-3xl">
-      <PageHeader
-        title="Live Execution"
-        subtitle="Send real orders to a broker. Each venue is armed separately, paper endpoint first, and every order still passes the risk limits."
-      />
-
-      {/* status banner */}
+    <Page
+      title="Live trading"
+      subtitle="Send real orders to a broker. Each venue is armed on its own, paper endpoint first, and every order still passes the risk limits."
+    >
+      {/* Where orders go right now. Real money is the loudest state on the page. */}
       {live.armed ? (
-        <div
-          role="status"
-          className={`mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-2.5 text-sm font-bold ${
-            realMoney
-              ? "border-danger/50 bg-danger/15 text-danger text-glow-red animate-pulse-red"
-              : "border-warning/40 bg-warning/10 text-warning"
-          }`}
+        <Notice
+          tone={realMoney ? "danger" : "warning"}
+          icon={Radio}
+          title={`Armed: ${live.dryRun ? "dry-run, nothing is sent" : live.paper ? "paper endpoint, no real money" : "real money"}`}
         >
-          <span className="flex flex-wrap items-center gap-x-2">
-            <Radio size={15} aria-hidden /> Armed:{" "}
-            {live.dryRun ? "dry-run, nothing is sent" : live.paper ? "paper endpoint, no real money" : "REAL MONEY"}
-            {live.venues.length > 0 && <span className="font-normal opacity-80">· {live.venues.join(", ")}</span>}
-          </span>
-          <span className="font-mono text-xs">{live.pending} pending</span>
-        </div>
+          {realMoney ? "Orders from Live strategies are sent to your live account and spend real money. " : ""}
+          {live.venues.length > 0 ? `Venues: ${live.venues.join(", ")}. ` : ""}
+          <span className="tabular">{plural(live.pending, "order")} pending.</span>
+        </Notice>
       ) : (
-        <div
-          role="status"
-          className="mb-4 flex items-center gap-2 rounded-xl border border-success/30 bg-success/[0.06] px-4 py-2.5 text-sm text-success"
-        >
-          <Power size={14} aria-hidden className="shrink-0" /> Disarmed: everything is simulated. No order leaves this
-          machine.
-        </div>
+        <Notice tone="success" icon={Power} title="Disarmed">
+          Everything is simulated. No order leaves this machine.
+        </Notice>
       )}
 
-      <DemoCard />
-      <PaperReconcileCard />
+      <KeyStats
+        items={[
+          {
+            label: "Live trading",
+            value: words.value,
+            sub: (
+              <span className="flex flex-wrap items-center gap-1.5">
+                <Badge tone={realMoney ? "bad" : state === "off" ? "good" : "warn"}>{words.badge}</Badge>
+                <span>{words.detail}</span>
+              </span>
+            ),
+            help: "Armed means orders from strategies set to Live are sent to the broker. Off means everything is simulated.",
+          },
+          {
+            label: "Real money at risk",
+            value: money(exposure.value),
+            sub: exposure.count > 0 ? `${plural(exposure.count, "real position")} at the venue` : "No real positions open",
+            help: "What the positions bought with real money are worth at the last price.",
+          },
+          {
+            label: "Real positions now",
+            value: signedMoney(exposure.unrealized),
+            tone: changeTone(exposure.unrealized),
+            sub: "gain or loss if they were sold now",
+            help: "The open result of the positions bought with real money, before costs to close them.",
+          },
+        ]}
+      />
 
       {/* Real positions cannot be closed by the simulator, so this is not a detail. */}
       {live.livePositions > 0 && !live.armed && (
-        <div className="mb-4 flex items-start gap-3 rounded-lg border border-danger/50 bg-danger/10 px-4 py-3 text-sm">
-          <TriangleAlert size={18} className="mt-0.5 shrink-0 text-danger" />
-          <div className="text-cyber-text-dim">
-            <div className="font-bold text-danger">
-              {live.livePositions} real position{live.livePositions > 1 ? "s" : ""} still open at the venue
-            </div>
-            Disarming does not close them, and stop-losses cannot fire while disarmed. Re-arm to manage them from
-            here, or flatten them in the venue's own dashboard.
-          </div>
-        </div>
+        <Notice tone="danger" title={`${plural(live.livePositions, "real position")} still open at the venue`}>
+          Disarming does not close them, and stop-losses cannot fire while disarmed. Re-arm to manage them from here, or
+          flatten them in the venue's own dashboard.
+        </Notice>
       )}
 
       {/*
         The most confusing state to be in is "armed, and nothing is happening".
         Almost always it is one of: the market is closed, the account is
         restricted, the day-trade ceiling is reached, or the broker check has
-        not landed yet. The engine already knows which — so say it plainly here
+        not landed yet. The engine already knows which, so say it plainly here
         rather than leaving the user to guess from an empty order book.
       */}
       {live.armed && live.blockedReason && (
-        <div className="mb-4 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning">
-          <TriangleAlert size={15} className="mt-0.5 shrink-0" />
-          <div>
-            <div className="font-bold">New entries are on hold</div>
-            <div className="text-cyber-text-dim">{live.blockedReason}</div>
-            <div className="mt-1 text-[11px] text-cyber-text-faint">
-              Exits are never blocked: an open position can always be closed.
-            </div>
-          </div>
-        </div>
+        <Notice tone="warning" title="New entries are on hold">
+          {live.blockedReason}
+          <span className="mt-1 block text-[13px]">Exits are never blocked: an open position can always be closed.</span>
+        </Notice>
       )}
 
-      <DataHealthCard />
       <ReadinessCard />
-      <DiagnosticsCard />
 
       {live.broker && (
-        <Card title="Broker session" className="mb-4">
-          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-            <Field
+        <Section title="Broker session" hint="What the broker says about the market and your account.">
+          <List>
+            <Row
               label="US market"
-              value={live.broker.marketOpen ? "open" : "closed"}
-              good={live.broker.marketOpen}
+              value={<Badge tone={live.broker.marketOpen ? "good" : "neutral"}>{live.broker.marketOpen ? "Open" : "Closed"}</Badge>}
+              sub={!live.broker.marketOpen && live.broker.nextOpen ? `Next open: ${live.broker.nextOpen}` : undefined}
             />
-            <Field label="Equity" value={`$${live.broker.equity.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} />
-            <Field
-              label="Buying power"
-              value={`$${live.broker.buyingPower.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-            />
-            <Field
+            <Row label="Equity" value={money(live.broker.equity)} />
+            <Row label="Buying power" value={money(live.broker.buyingPower)} />
+            <Row
               label="Day-trade cap"
-              value={live.broker.dayTradeLimitReached ? "reached" : "clear"}
-              good={!live.broker.dayTradeLimitReached}
+              value={
+                <Badge tone={live.broker.dayTradeLimitReached ? "bad" : "good"}>{live.broker.dayTradeLimitReached ? "Reached" : "Clear"}</Badge>
+              }
             />
-          </div>
-          {!live.broker.marketOpen && live.broker.nextOpen && (
-            <div className="mt-2 text-xs text-cyber-text-faint">Next open: {live.broker.nextOpen}</div>
-          )}
+          </List>
           {live.broker.restricted && (
-            <div className="mt-2 text-xs text-danger">Account restricted: {live.broker.restricted}</div>
+            <Notice tone="danger" className="mt-2" title="Account restricted">
+              {live.broker.restricted}
+            </Notice>
           )}
-          <div className="mt-2 text-[11px] text-cyber-text-faint">
-            Checked {Math.max(0, Math.round((Date.now() - live.broker.checkedAt) / 1000))}s ago · live entries block
-            once this is over 5 minutes old.
-          </div>
-        </Card>
+          <p className="mt-2 text-[13px] text-faint">
+            Checked {secondsSince(live.broker.checkedAt, Date.now())}s ago · live entries block once this is over 5 minutes old.
+          </p>
+        </Section>
       )}
 
-      <Card className="mb-4 border-danger/30 bg-danger/5">
-        <div className="flex items-start gap-3">
-          <ShieldAlert size={18} className="mt-0.5 shrink-0 text-danger" />
-          <div className="text-sm text-cyber-text-dim">
-            <div className="font-bold text-danger text-glow-red">Real orders, real risk</div>
-            When armed, orders from a <span className="text-accent">Live</span>-state strategy on an{" "}
-            <span className="text-accent">enabled venue</span> are sent for real. Everything else stays paper. The
-            global kill switch and every risk limit still gate each order. Start on the{" "}
-            <span className="text-accent">paper endpoint</span> (real API, fake money); flip to real money only once
-            you trust it. Not financial advice: read SAFETY.md.
-          </div>
-        </div>
-      </Card>
+      <Notice tone="danger" title="Real orders, real risk">
+        When armed, orders from a <b>Live</b>-state strategy on an <b>enabled venue</b> are sent for real. Everything else
+        stays paper. The global kill switch and every risk limit still gate each order. Start on the{" "}
+        <b>paper endpoint</b> (real API, fake money); flip to real money only once you trust it. Not financial advice:
+        read SAFETY.md.
+      </Notice>
 
-      {/* venues */}
-      <Card title="1 · Venues" className="mb-4">
-        <div className="mb-3 text-sm text-cyber-text-dim">
-          Each venue is armed separately. A venue you leave off keeps simulating even while the rest are live.
-        </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <Section
+        title="Step 1: Venues"
+        help="Where orders can go. Each venue is armed on its own."
+        hint="Each venue is armed separately. A venue you leave off keeps simulating even while the rest are live."
+      >
+        <List>
           {ROUTABLE.map(({ venue, label, note }) => {
             const connected = live.connected.includes(venue);
             return (
-              <div
-                key={venue}
-                className="flex items-center justify-between rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2"
-              >
-                <div>
-                  <div className="text-sm font-medium">{label}</div>
-                  <div className="text-[11px] text-cyber-text-faint">
-                    {connected ? note : "No keys yet: add them in Settings"}
-                  </div>
+              <div key={venue} className="flex items-center justify-between gap-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[15px] font-semibold text-ink">{label}</div>
+                  <div className="text-[13px] text-muted">{connected ? note : "No keys yet: add them in Settings"}</div>
                 </div>
-                <Toggle
-                  label={`Arm ${label}`}
-                  on={venues.includes(venue)}
-                  onChange={(v) => toggleVenue(venue, v)}
-                />
+                <Toggle label={`Arm ${label}`} on={venues.includes(venue)} onChange={(v) => toggleVenue(venue, v)} />
               </div>
             );
           })}
-        </div>
-        <div className="mt-2 text-[11px] text-cyber-text-faint">
-          Polymarket is not listed: its odds are read-only and it never routes an order.
-        </div>
-      </Card>
+        </List>
+        <p className="mt-2 text-[13px] text-faint">Polymarket is not listed: its odds are read-only and it never routes an order.</p>
+      </Section>
 
-      {/* connection test */}
-      <Card
-        title="2 · Connection"
-        className="mb-4"
+      <Section
+        title="Step 2: Connection"
+        help="A read-only check that your keys reach the broker. It places no order."
+        hint={
+          <>
+            Check that your keys reach the {paper ? "paper" : "live"} endpoint before arming. Read-only: it places no
+            order.{" "}
+            {mode === "native"
+              ? `Keys come from the OS keychain (Settings). Alpaca uses the ${paper ? "Alpaca paper account" : "Alpaca live account"} keys; the two accounts have separate key pairs.`
+              : "Keys come from the server environment (Alpaca: APCA_API_KEY_ID / APCA_API_SECRET_KEY, or APCA_LIVE_* for the live endpoint)."}
+          </>
+        }
         right={
-          <Badge tone={live.connected.length > 0 ? "green" : "neutral"}>
-            {live.connected.length > 0 ? `${live.connected.length} connected` : "check keys"}
+          <Badge tone={live.connected.length > 0 ? "good" : "neutral"}>
+            {live.connected.length > 0 ? `${live.connected.length} connected` : "Check keys"}
           </Badge>
         }
       >
-        <div className="mb-3 text-sm text-cyber-text-dim">
-          Check that your keys reach the {paper ? "paper" : "live"} endpoint before arming. Read-only: it places no
-          order.{" "}
-          {mode === "native"
-            ? `Keys come from the OS keychain (Settings). Alpaca uses the ${paper ? "Alpaca paper account" : "Alpaca live account"} keys; the two accounts have separate key pairs.`
-            : "Keys come from the server environment (Alpaca: APCA_API_KEY_ID / APCA_API_SECRET_KEY, or APCA_LIVE_* for the live endpoint)."}
-        </div>
-        <Button tone="cyan" icon={PlugZap} disabled={busy || venues.length === 0} onClick={testConn}>
+        <Button variant="secondary" icon={PlugZap} disabled={busy || venues.length === 0} onClick={testConn}>
           Test {paper ? "paper" : "live"} connection
         </Button>
         {Object.entries(checks).length > 0 && (
-          <div className="mt-3 space-y-1 rounded-lg border border-cyber-border bg-cyber-surface/50 p-3 text-xs">
+          <List className="mt-3">
             {Object.entries(checks).map(([v, r]) => (
-              <div key={v} className={`flex items-start gap-1.5 ${r.ok ? "text-success" : "text-danger"}`}>
-                {r.ok ? (
-                  <CheckCircle2 size={13} aria-label="works" className="mt-0.5 shrink-0" />
-                ) : (
-                  <TriangleAlert size={13} aria-label="failed" className="mt-0.5 shrink-0" />
-                )}
-                <span>
-                  <span className="font-mono uppercase tracking-widest text-cyber-text-faint">{v}</span>: {r.text}
-                </span>
+              <div key={v} className="py-3">
+                <Outcome ok={r.ok} okWord="Works" failWord="Failed">
+                  <span className="font-semibold text-ink">{venueName(v)}.</span> {r.text}
+                </Outcome>
               </div>
             ))}
-          </div>
+          </List>
         )}
         {acct && (
-          <div className="mt-3 grid grid-cols-2 gap-3 rounded-lg border border-cyber-border bg-cyber-surface/50 p-3 text-sm sm:grid-cols-4">
-            <Field label="Status" value={acct.status} good={acct.status === "ACTIVE"} />
-            <Field label="Endpoint" value={acct.paper ? "paper" : "live"} good={acct.paper} />
-            <Field label="Buying power" value={`$${fmt(acct.buyingPower)}`} />
-            <Field label="Day trades" value={String(acct.daytradeCount ?? 0)} />
-          </div>
+          <List className="mt-3">
+            <Row label="Status" value={<Badge tone={acct.status === "ACTIVE" ? "good" : "warn"}>{acct.status}</Badge>} />
+            <Row label="Endpoint" value={acct.paper ? <Badge tone="accent">Paper</Badge> : <Badge tone="bad">Live: real money</Badge>} />
+            <Row label="Buying power" value={amountText(acct.buyingPower)} />
+            <Row label="Day trades" value={String(acct.daytradeCount ?? 0)} />
+          </List>
         )}
-      </Card>
+      </Section>
 
-      {/* arm */}
-      <Card title="3 · Arm" right={<DollarSign size={14} className="text-danger" />}>
-        <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <Section title="Step 3: Arm" help="Turn on real order routing for the venues above." hint="Pick where orders go, then type the phrase to arm.">
+        {/*
+          The endpoint, dry-run and extended-hours switches are inert while
+          armed, and are shown that way. `setLiveConfig` is only sent by arm(),
+          so flipping these mid-flight changed a local value and nothing else:
+          the switch moved, the label said "Paper", and orders kept going to the
+          live endpoint. Requiring a disarm to change endpoint is also the right
+          safety behaviour: moving between fake and real money should be a
+          deliberate re-arm, not a tap.
+        */}
+        <List>
+          <LockRow
+            label="Endpoint"
+            locked={live.armed}
+            hint={paper ? "Paper: no real money" : "Live: real money"}
+            control={
+              <div className="flex items-center gap-2">
+                {paper ? <Badge tone="accent">Paper</Badge> : <Badge tone="bad">Live</Badge>}
+                <Toggle
+                  label="Use the live (real money) endpoint"
+                  on={!paper}
+                  disabled={live.armed}
+                  onChange={(v) => !live.armed && setPaper(!v)}
+                />
+              </div>
+            }
+          />
+          <LockRow
+            label="Dry-run"
+            locked={live.armed}
+            hint="Write down the orders it would send, send nothing"
+            control={<Toggle label="Dry-run" on={dryRun} disabled={live.armed} onChange={(v) => !live.armed && setDryRun(v)} />}
+          />
           {/*
-            Both toggles are inert while armed, and are shown that way.
-            `setLiveConfig` is only sent by arm(), so flipping these mid-flight
-            changed a local value and nothing else — the switch moved, the label
-            said "Paper", and orders kept going to the live endpoint. Requiring a
-            disarm to change endpoint is also the right safety behaviour: moving
-            between fake and real money should be a deliberate re-arm, not a tap.
+            Extended hours is the difference between "it trades" and "it trades
+            only between 15:30 and 22:00 CEST". Off by default: the session is
+            thin, spreads are wide, and no strategy here was validated on it.
           */}
-          <div
-            className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
-              live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
-            }`}
-          >
-            <div>
-              <div className="text-sm font-medium">Endpoint</div>
-              <div className="text-[11px] text-cyber-text-faint">
-                {live.armed
-                  ? "Locked while armed: disarm to change"
-                  : paper
-                    ? "Paper: no real money"
-                    : "LIVE: real money"}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-xs">
-              <span className={paper ? "text-accent" : "text-danger"}>{paper ? "Paper" : "Live"}</span>
-              <Toggle
-                label="Use the live (real money) endpoint"
-                on={!paper}
-                disabled={live.armed}
-                onChange={(v) => !live.armed && setPaper(!v)}
-              />
-            </div>
-          </div>
-          <div
-            className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
-              live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
-            }`}
-          >
-            <div>
-              <div className="text-sm font-medium">Dry-run</div>
-              <div className="text-[11px] text-cyber-text-faint">
-                {live.armed ? "Locked while armed: disarm to change" : "Write down the orders it would send, send nothing"}
-              </div>
-            </div>
-            <Toggle label="Dry-run" on={dryRun} disabled={live.armed} onChange={(v) => !live.armed && setDryRun(v)} />
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyber-border bg-cyber-surface/40 px-3 py-2 sm:col-span-2">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5 text-sm font-medium">
-                <Timer size={13} aria-hidden /> Order timeout
-              </div>
-              <div className="text-[11px] text-cyber-text-faint">
+          <LockRow
+            label="Extended hours"
+            locked={live.armed}
+            hint={
+              live.broker?.extendedOpen && !live.broker?.marketOpen
+                ? `Pre/after-market is open right now${live.broker.sessionEnd ? ` until ${live.broker.sessionEnd} ET` : ""}: few buyers and sellers, wide spreads`
+                : "Trade 04:00 to 20:00 ET instead of 09:30 to 16:00 · whole-share limit orders only"
+            }
+            control={
+              <Toggle label="Extended hours" on={extendedHours} disabled={live.armed} onChange={(v) => !live.armed && setExtendedHours(v)} />
+            }
+          />
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3">
+            <div className="min-w-0 flex-1 basis-48">
+              <div className="text-[15px] font-semibold text-ink">Order timeout</div>
+              <div className="text-[13px] leading-snug text-muted">
                 After this long, an unfilled order is <b>cancelled at the venue</b> and whatever filled is booked.
               </div>
             </div>
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-3">
               <input
                 type="range"
                 min={15}
@@ -404,110 +394,154 @@ export function Live() {
                 aria-label="Order timeout in seconds"
                 onChange={(e) => setTimeoutSec(Number(e.target.value))}
                 className="w-32"
+                style={{ accentColor: "var(--color-accent)" }}
               />
-              <span className="w-12 text-right font-mono">{timeoutSec}s</span>
+              <span className="tabular w-12 text-right text-[15px] font-semibold text-ink">{timeoutSec}s</span>
             </div>
           </div>
-        </div>
-
-        {/*
-          Extended hours is the difference between "it trades" and "it trades
-          only between 15:30 and 22:00 CEST". Off by default: the session is
-          thin, spreads are wide, and no strategy here was validated on it.
-        */}
-        <div
-          className={`mb-3 flex items-center justify-between rounded-lg border px-3 py-2 ${
-            live.armed ? "border-cyber-border/50 bg-cyber-surface/20 opacity-60" : "border-cyber-border bg-cyber-surface/40"
-          }`}
-        >
-          <div>
-            <div className="text-sm font-medium">Extended hours</div>
-            <div className="text-[11px] text-cyber-text-faint">
-              {live.armed
-                ? "Locked while armed: disarm to change"
-                : live.broker?.extendedOpen && !live.broker?.marketOpen
-                  ? `Pre/after-market is open right now${live.broker.sessionEnd ? ` until ${live.broker.sessionEnd} ET` : ""}: few buyers and sellers, wide spreads`
-                  : "Trade 04:00–20:00 ET instead of 09:30–16:00 · whole-share limit orders only"}
-            </div>
-          </div>
-          <Toggle
-            label="Extended hours"
-            on={extendedHours}
-            disabled={live.armed}
-            onChange={(v) => !live.armed && setExtendedHours(v)}
-          />
-        </div>
+        </List>
 
         {/* Switching to real money is a different decision from arming at all. */}
-        {!live.armed && !paper && !dryRun && (
-          <div className="mb-3 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
-            <TriangleAlert size={15} className="mt-0.5 shrink-0 text-danger" />
-            <div className="text-cyber-text-dim">
-              <span className="font-bold text-danger">Real money.</span> Arming now routes orders to your live
-              Alpaca account. This uses the <span className="text-accent">Alpaca live account</span> keys from Settings,
-              not the paper ones. Test them there first if you have not.
-            </div>
-          </div>
+        {aboutToArmReal && (
+          <Notice tone="danger" className="mt-3" title="Real money.">
+            Arming now routes orders to your live Alpaca account. This uses the <b>Alpaca live account</b> keys from
+            Settings, not the paper ones. Test them there first if you have not.
+          </Notice>
         )}
 
-        {!live.armed ? (
-          <>
-            <div className="mb-2 text-sm text-cyber-text-dim">
-              Type <span className="font-bold text-danger">{ARM_PHRASE}</span> to enable order routing
-              {!paper && !dryRun ? " with REAL MONEY" : ""}.
-            </div>
+        <div className="mt-4 border-t border-line pt-4">
+          {!live.armed ? (
+            <>
+              <label htmlFor="arm-phrase" className="mb-2 block text-[15px] text-ink">
+                Type <b className="text-down">{ARM_PHRASE}</b> to enable order routing
+                {aboutToArmReal ? (
+                  <>
+                    {" "}
+                    with <b className="text-down">REAL MONEY</b>
+                  </>
+                ) : (
+                  ""
+                )}
+                .
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  id="arm-phrase"
+                  value={confirm}
+                  onChange={(e) => setConfirm(e.target.value)}
+                  placeholder={ARM_PHRASE}
+                  aria-label={`Type ${ARM_PHRASE} to confirm`}
+                  spellCheck={false}
+                  autoComplete="off"
+                  className={`${inputCls} w-40`}
+                />
+                <Button variant="danger" icon={Radio} disabled={!canArm || busy} onClick={arm}>
+                  Arm live
+                </Button>
+                {msg && (
+                  <span role="status" className="text-[13px] text-muted">
+                    {msg}
+                  </span>
+                )}
+              </div>
+              {venues.length === 0 && <p className="mt-2 text-[13px] text-warn">Enable at least one venue above.</p>}
+            </>
+          ) : (
             <div className="flex flex-wrap items-center gap-2">
-              <input
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                placeholder={ARM_PHRASE}
-                aria-label={`Type ${ARM_PHRASE} to confirm`}
-                spellCheck={false}
-                className={`${inputCls} w-40 font-mono focus:border-danger`}
-              />
-              <Button tone="red" icon={Radio} disabled={!canArm || busy} onClick={arm}>
-                Arm live
+              <Button variant="primary" icon={Power} disabled={busy} onClick={disarm}>
+                Disarm: back to paper
               </Button>
-              {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
+              {msg && (
+                <span role="status" className="text-[13px] text-muted">
+                  {msg}
+                </span>
+              )}
             </div>
-            {venues.length === 0 && (
-              <div className="mt-2 text-xs text-warning">Enable at least one venue above.</div>
-            )}
-          </>
-        ) : (
-          <div className="flex items-center gap-2">
-            <Button tone="cyan" icon={Power} disabled={busy} onClick={disarm}>
-              Disarm: back to paper
-            </Button>
-            {msg && <span className="text-xs text-cyber-text-dim">{msg}</span>}
-          </div>
-        )}
-        {err && <div className="mt-2 text-xs text-danger">{err}</div>}
-
-        <ExecutionPolicyCard />
-
-        <div className="mt-4 space-y-1 text-[11px] leading-snug text-cyber-text-faint">
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Arming runs a read-only key check first and refuses if a venue does not answer.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Only strategies set to <b>Live</b> (Strategies page) send entries; a position opened live also exits live.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> The kill switch, daily-loss, drawdown &amp; position caps gate every order first.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Orders that cannot fill (market closed, no buying power) are refused before submission, not left hanging.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Alpaca entries are refused while the market is closed, the account is restricted, or the broker check is stale. Exits never are.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Whole-share Alpaca orders go out as marketable limits, so a thin or gapped book can't fill them at any price.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> An order that doesn't fill is cancelled at the venue, then re-read, so nothing is ever left working after Pythia gives up on it.</div>
-          <div className="flex items-center gap-1.5"><CheckCircle2 size={11} className="text-success" /> Positions are reconciled against the broker every couple of minutes while armed; the broker is always treated as the source of truth.</div>
+          )}
+          {err && (
+            <Notice tone="danger" className="mt-3" title="That did not work">
+              {err}
+            </Notice>
+          )}
         </div>
-      </Card>
+
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="text-[15px] font-semibold text-ink">What protects every order</div>
+          <ul className="mt-1 divide-y divide-line">
+            {GUARANTEES.map((g, i) => (
+              <li key={i} className="flex items-start gap-2.5 py-2.5 text-[13px] leading-snug text-muted">
+                <CheckCircle2 size={16} aria-hidden className="mt-px shrink-0 text-up" />
+                <span className="min-w-0">{g}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </Section>
+
+      <ExecutionPolicyCard />
+      <DiagnosticsCard />
+      <DataHealthCard />
+      <DemoCard />
+      <PaperReconcileCard />
+    </Page>
+  );
+}
+
+function venueName(v: string): string {
+  return ROUTABLE.find((r) => r.venue === v)?.label ?? v;
+}
+
+/**
+ * A pass or fail line: an icon, the word, and the message. Colour is never
+ * the only signal. `soft` shows a failure as a caution (amber) rather than an
+ * error (red).
+ */
+function Outcome({
+  ok,
+  okWord = "Done",
+  failWord = "Failed",
+  soft,
+  children,
+}: {
+  ok: boolean;
+  okWord?: string;
+  failWord?: string;
+  soft?: boolean;
+  children: ReactNode;
+}) {
+  const Icon = ok ? CheckCircle2 : soft ? TriangleAlert : XCircle;
+  const tone = ok ? "text-up" : soft ? "text-warn" : "text-down";
+  return (
+    <div className="flex items-start gap-2 text-[13px] leading-snug text-muted">
+      <Icon size={16} aria-hidden className={`mt-px shrink-0 ${tone}`} />
+      <div className="min-w-0 break-words">
+        <span className={`font-semibold ${tone}`}>{ok ? okWord : failWord}:</span> {children}
+      </div>
     </div>
   );
 }
 
-/**
- * Adaptive execution — the learned table, and the switch.
- *
- * Execution is the only alpha here that does not require being right about the
- * market, so this shows the one number that matters: what each style actually
- * cost, measured against the price at the moment the decision was made.
- */
+/** A setting that cannot change while armed: dimmed, with the lock said in words. */
+function LockRow({ label, hint, locked, control }: { label: string; hint: ReactNode; locked: boolean; control: ReactNode }) {
+  return (
+    <div className={`flex items-center justify-between gap-4 py-3 ${locked ? "opacity-60" : ""}`}>
+      <div className="min-w-0 flex-1">
+        <div className="text-[15px] font-semibold text-ink">{label}</div>
+        <div className="text-[13px] leading-snug text-muted">
+          {locked ? (
+            <span className="inline-flex items-center gap-1">
+              <Lock size={12} aria-hidden /> Locked while armed: disarm to change
+            </span>
+          ) : (
+            hint
+          )}
+        </div>
+      </div>
+      <div className="shrink-0">{control}</div>
+    </div>
+  );
+}
+
 /** Where each venue's demo connection test buys its minimum size. */
 const DEMO_TEST_MARKET: Record<string, string> = {
   crypto: "crypto:BTC/USD",
@@ -537,24 +571,20 @@ function DemoCard() {
     setBusy("");
   }
 
+  const count = live.demoPositions ?? 0;
+
   return (
-    <Card className="mb-4">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <Badge tone="purple">DEMO</Badge> Demo trading: real venue API, virtual money
-        </div>
-        <span className="font-mono text-xs text-cyber-text-faint">
-          {live.demoPositions ?? 0} demo position{(live.demoPositions ?? 0) === 1 ? "" : "s"}
+    <Section
+      title="Demo trading"
+      help="Real venue API with virtual money: signing, rejects and fills are real, the money is not."
+      hint="Real venue API, virtual money. No arming needed, the risk limits still apply, and demo fills never reach the tax record."
+      right={
+        <span className="tabular text-[13px] text-muted">
+          {count} demo position{count === 1 ? "" : "s"}
         </span>
-      </div>
-      <div className="mb-3 text-xs leading-snug text-cyber-text-dim">
-        A strategy set to Demo sends its orders to the venue's demo account with the demo keys from Settings (for
-        crypto: Bybit, OKX or Binance demo keys, or the Alpaca paper account with PYTHIA_DEMO_EXCHANGE=alpaca): signing,
-        size rules, rejects, latency and partial fills are all real, the money is not. No arming needed, the risk
-        limits still apply, and demo fills never reach the tax record. See docs/DEMO.md for which venues trade on real
-        prices.
-      </div>
-      <div className="space-y-2">
+      }
+    >
+      <List>
         {ROUTABLE.map(({ venue, label }) => {
           const on = ready.includes(venue);
           const demoName = cryptoDemoName(live);
@@ -568,28 +598,32 @@ function DemoCard() {
               : "Alpaca paper account";
           const apiOnly = venue === "crypto" && demoIsApiTestOnly(live);
           const notListed = venue === "crypto" && on ? (live.demoNotListed ?? []) : [];
+          const maker = venue === "crypto" && on && live.demoExchange === "alpaca" ? alpacaMaker(live) : undefined;
+          const makerStats = venue === "crypto" && on && live.demoExchange === "alpaca" ? alpacaMakerStats(live) : undefined;
           return (
-            <div key={venue} className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-sm">
-                  {label} <span className="text-xs text-cyber-text-faint">· {where}</span>
-                </span>
-                <Badge tone={on ? "purple" : "neutral"}>{on ? (apiOnly ? "API test only" : "demo ready") : "no demo keys"}</Badge>
-              </div>
-              {apiOnly && <div className="mt-1.5 text-xs text-warning">{demoApiTestNote(live)}</div>}
-              {notListed.length > 0 && (
-                <div className="mt-1.5 text-xs text-cyber-text-faint">
-                  Not listed on {demoName}, so demo skips them: {notListed.join(", ")}.
+            <div key={venue} className="py-3.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[15px] font-semibold text-ink">{label}</div>
+                  <div className="text-[13px] text-muted">{where}</div>
                 </div>
+                <Badge tone={on ? (apiOnly ? "warn" : "accent") : "neutral"}>{on ? (apiOnly ? "API test only" : "Demo ready") : "No demo keys"}</Badge>
+              </div>
+              {apiOnly && <p className="mt-1.5 text-[13px] text-warn">{demoApiTestNote(live)}</p>}
+              {notListed.length > 0 && (
+                <p className="mt-1.5 break-words text-[13px] text-muted">
+                  Not listed on {demoName}, so demo skips them: {notListed.join(", ")}.
+                </p>
               )}
-              {venue === "crypto" && on && live.demoExchange === "alpaca" && alpacaMaker(live) && (
-                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-cyber-text-faint">
+              {maker && (
+                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[13px] text-muted">
                   <span title="Alpaca crypto: 0.15 % maker, 0.25 % taker. Stops and exits that must not wait still cross.">
-                    Orders: {makerSummary(alpacaMaker(live))}.
+                    Orders: {makerSummary(maker)}.
                   </span>
                   {liveMode() === "server" && (
                     <Button
-                      tone="neutral"
+                      variant="secondary"
+                      size="sm"
                       disabled={busy !== ""}
                       onClick={() => {
                         const s = alpacaMaker(live)!;
@@ -599,24 +633,25 @@ function DemoCard() {
                         });
                       }}
                     >
-                      {alpacaMaker(live)!.enabled ? "Use market orders" : "Use maker limits"}
+                      {maker.enabled ? "Use market orders" : "Use maker limits"}
                     </Button>
                   )}
                 </div>
               )}
-              {venue === "crypto" && on && live.demoExchange === "alpaca" && alpacaMakerStats(live) && (
+              {makerStats && (
                 <div
-                  className="mt-1 text-xs text-cyber-text-faint"
+                  className="tabular mt-1 text-[13px] text-muted"
                   title="Maker orders on this route. Maker by qty: share of the filled amount that rested at our limit. Cost: realised slippage plus fee against what a market order was modelled to cost. Fallback: the rest went out as a marketable limit."
                 >
-                  <div>Maker {makerWindowLine(alpacaMakerStats(live)!.d7)}</div>
-                  <div>Maker {makerWindowLine(alpacaMakerStats(live)!.d30)}</div>
+                  <div>Maker {makerWindowLine(makerStats.d7)}</div>
+                  <div>Maker {makerWindowLine(makerStats.d30)}</div>
                 </div>
               )}
               {on && (
-                <div className="mt-2 flex flex-wrap gap-2">
+                <div className="mt-2.5 flex flex-wrap gap-2">
                   <Button
-                    tone="neutral"
+                    variant="secondary"
+                    size="sm"
                     icon={PlugZap}
                     disabled={busy !== ""}
                     onClick={() => void run(`${venue}:check`, () => verifyVenue(venue, true, true))}
@@ -624,7 +659,8 @@ function DemoCard() {
                     Check demo account
                   </Button>
                   <Button
-                    tone="purple"
+                    variant="accent"
+                    size="sm"
                     disabled={busy !== ""}
                     onClick={() => void run(`${venue}:test`, () => sendTestOrder(DEMO_TEST_MARKET[venue], 0, true))}
                   >
@@ -634,16 +670,25 @@ function DemoCard() {
               )}
               {[`${venue}:check`, `${venue}:test`, `${venue}:maker`].map((k) =>
                 out[k] ? (
-                  <div key={k} className={`mt-1.5 text-xs ${out[k].ok ? "text-success" : "text-danger"}`}>
-                    {out[k].text}
+                  <div key={k} className="mt-2">
+                    <Outcome ok={out[k].ok}>{out[k].text}</Outcome>
                   </div>
                 ) : null
               )}
             </div>
           );
         })}
-      </div>
-    </Card>
+      </List>
+      <More title="How demo trading works">
+        <p className="text-[13px] leading-relaxed text-muted">
+          A strategy set to Demo sends its orders to the venue's demo account with the demo keys from Settings (for
+          crypto: Bybit, OKX or Binance demo keys, or the Alpaca paper account with PYTHIA_DEMO_EXCHANGE=alpaca):
+          signing, size rules, rejects, latency and partial fills are all real, the money is not. No arming needed, the
+          risk limits still apply, and demo fills never reach the tax record. See docs/DEMO.md for which venues trade on
+          real prices.
+        </p>
+      </More>
+    </Section>
   );
 }
 
@@ -661,55 +706,70 @@ function PaperReconcileCard() {
   const fees = d.estimatedFees ?? [];
   const paused = live.demoPaused ?? [];
   return (
-    <Card className="mb-4">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <Badge tone="purple">DEMO</Badge> Alpaca paper reconcile
-        </div>
-        <Badge tone={d.mismatches > 0 ? "amber" : d.checkedAt > 0 ? "green" : "neutral"}>
-          {d.mismatches > 0 ? `${d.mismatches} to check` : d.checkedAt > 0 ? "in step" : "not yet"}
+    <Section
+      title="Alpaca paper check"
+      help="The Alpaca paper account compared with Pythia's demo book, pair by pair."
+      hint={reconcileHeadline(d, Date.now())}
+      right={
+        <Badge tone={d.mismatches > 0 ? "warn" : d.checkedAt > 0 ? "good" : "neutral"}>
+          {d.mismatches > 0 ? `${d.mismatches} to check` : d.checkedAt > 0 ? "In step" : "Not yet"}
         </Badge>
-      </div>
-      <div className="mb-2 text-xs text-cyber-text-dim">{reconcileHeadline(d, Date.now())}</div>
+      }
+    >
       {paused.map(([venue, until]) => (
-        <div key={venue} className="mb-2 text-xs text-warning">
+        <Notice key={venue} tone="warning" className="mb-2">
           The {venue} demo route answered 403 and sends nothing until {new Date(until).toLocaleTimeString()}. Check the
           paper keys in Settings.
-        </div>
+        </Notice>
       ))}
-      {rows.length > 0 && (
-        <div className="space-y-1.5">
+      {rows.length > 0 ? (
+        <List>
           {rows.map((p) => (
-            <div key={p.symbol} className="rounded-lg border border-cyber-border bg-cyber-bg/40 p-2 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-mono">{p.symbol}</span>
-                <Badge tone={PAIR_STATUS[p.status].attention ? "amber" : "neutral"}>{PAIR_STATUS[p.status].label}</Badge>
+            <div key={p.symbol} className="py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="break-all text-[15px] font-semibold text-ink">{p.symbol}</div>
+                  <div className="tabular break-words text-[13px] text-muted">
+                    Pythia {qty9(p.pythia)} · Alpaca {qty9(p.alpaca)}
+                    {p.markets.length > 1 ? ` · ${p.markets.join(" + ")}` : ""}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className="tabular text-[15px] font-semibold text-ink" title="Difference in dollars">
+                    {signedMoney(p.diffUsd)}
+                  </div>
+                  <Badge tone={PAIR_STATUS[p.status].attention ? "warn" : "neutral"}>{PAIR_STATUS[p.status].label}</Badge>
+                </div>
               </div>
-              <div className="mt-1 font-mono text-cyber-text-faint">
-                Pythia {qty9(p.pythia)} · Alpaca {qty9(p.alpaca)} · {p.diffUsd >= 0 ? "+" : "-"}$
-                {Math.abs(p.diffUsd).toFixed(2)}
-                {p.markets.length > 1 ? ` · ${p.markets.join(" + ")}` : ""}
-              </div>
-              {p.note && <div className="mt-1 text-cyber-text-dim">{p.note}</div>}
+              {p.note && <p className="mt-1 text-[13px] text-muted">{p.note}</p>}
             </div>
           ))}
-        </div>
+        </List>
+      ) : (
+        <p className="text-[13px] text-muted">No pairs to show.</p>
       )}
       {d.strayOrders.length > 0 && (
-        <div className="mt-2 text-xs text-warning">
-          Open at Alpaca, not followed by Pythia: {d.strayOrders.join("; ")}
-        </div>
+        <Notice tone="warning" className="mt-2" title="Open at Alpaca, not followed by Pythia">
+          <span className="break-words">{d.strayOrders.join("; ")}</span>
+        </Notice>
       )}
       {fees.length > 0 && (
-        <div className="mt-2 text-xs text-cyber-text-faint">
-          {fees.length} fee{fees.length === 1 ? "" : "s"} booked as estimates (${estimatedFeeTotal(d).toFixed(2)}): Alpaca
+        <p className="mt-2 text-[13px] text-muted">
+          {fees.length} fee{fees.length === 1 ? "" : "s"} booked as estimates ({money(estimatedFeeTotal(d))}): Alpaca
           posted no fee within 7 days, so the published tier 1 rate was booked in dollars. Not in the tax record.
-        </div>
+        </p>
       )}
-    </Card>
+    </Section>
   );
 }
 
+/**
+ * Adaptive execution: the learned table, and the switch.
+ *
+ * Execution is the only alpha here that does not require being right about the
+ * market, so this shows the one number that matters: what each style actually
+ * cost, measured against the price at the moment the decision was made.
+ */
 function ExecutionPolicyCard() {
   const { execution, adaptiveExecution, setAdaptiveExecution } = useStore();
 
@@ -720,72 +780,53 @@ function ExecutionPolicyCard() {
   };
 
   return (
-    <div className="mt-4 rounded-lg border border-cyber-border bg-cyber-surface/40 p-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5 text-sm font-medium">
-          <Gauge size={14} className="text-purple-neon" /> Adaptive execution
-        </div>
-        <div className="flex items-center gap-2 text-xs">
-          <span className={adaptiveExecution ? "text-purple-neon" : "text-cyber-text-faint"}>
-            {adaptiveExecution ? "learning" : "always cross"}
-          </span>
-          <Toggle label="Adaptive execution" on={adaptiveExecution} onChange={setAdaptiveExecution} />
-        </div>
-      </div>
-
-      <div className="mb-3 text-[11px] leading-snug text-cyber-text-faint">
-        Crossing the spread on a signal that stays valid for hours is pure waste. With this on,
-        orders may rest inside the spread instead, and the policy learns from what each choice
-        actually cost, measured against the price at decision time, not the fill. An order that never fills
-        is charged a penalty, because the signal was acted on late or not at all.
-        {!adaptiveExecution && " While off, every order crosses, but costs are still recorded, so turning it on starts with real data."}
-      </div>
+    <Section
+      title="Adaptive execution"
+      help="Lets orders rest inside the spread instead of always crossing it, and learns which way costs least."
+      hint="What each way of placing an order actually cost, measured against the price when it was decided."
+    >
+      <SwitchRow
+        label={adaptiveExecution ? "On: learning" : "Off: always cross"}
+        on={adaptiveExecution}
+        onChange={setAdaptiveExecution}
+        hint={
+          <>
+            Crossing the spread on a signal that stays valid for hours is pure waste. With this on, orders may rest inside
+            the spread instead, and the policy learns from what each choice actually cost, measured against the price at
+            decision time, not the fill. An order that never fills is charged a penalty, because the signal was acted on
+            late or not at all.
+            {!adaptiveExecution && " While off, every order crosses, but costs are still recorded, so turning it on starts with real data."}
+          </>
+        }
+      />
 
       {execution.length === 0 ? (
-        <div className="text-xs text-cyber-text-faint">
-          Nothing measured yet. Rows appear once live orders have completed.
-        </div>
+        <p className="border-t border-line pt-3 text-[13px] text-muted">Nothing measured yet. Rows appear once live orders have completed.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-[10px] uppercase tracking-widest text-cyber-text-faint">
-                <th className="py-1 text-left font-normal">Situation</th>
-                <th className="py-1 text-left font-normal">Style</th>
-                <th className="py-1 text-right font-normal">Cost</th>
-                <th className="py-1 text-right font-normal">Filled</th>
-                <th className="py-1 text-right font-normal">Missed</th>
-              </tr>
-            </thead>
-            <tbody>
-              {execution.map((r) => (
-                <tr key={`${r.context}-${r.style}`} className="border-t border-cyber-border/50">
-                  <td className="py-1 font-mono text-cyber-text-dim">{r.context}</td>
-                  <td className="py-1">{STYLE_LABEL[r.style] ?? r.style}</td>
-                  <td
-                    className={`py-1 text-right font-mono ${
-                      r.meanCostBps <= 0 ? "text-success" : "text-cyber-text"
-                    }`}
-                  >
-                    {r.meanCostBps > 0 ? "+" : ""}
-                    {r.meanCostBps.toFixed(1)}bps
-                  </td>
-                  <td className="py-1 text-right font-mono">{r.fills}</td>
-                  <td className={`py-1 text-right font-mono ${r.misses > 0 ? "text-warning" : ""}`}>
-                    {r.misses}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="mt-1.5 text-[10px] text-cyber-text-faint">
-            Cost is measured against the price when the order was created; negative means it beat
-            that price. Missed orders are charged a penalty, so a style that never fills does not
-            look cheap.
-          </div>
-        </div>
+        <>
+          <List className="border-t border-line">
+            {execution.map((r) => (
+              <div key={`${r.context}-${r.style}`} className="flex items-start justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <div className="text-[15px] font-semibold text-ink">{STYLE_LABEL[r.style] ?? r.style}</div>
+                  <div className="break-all text-[13px] text-muted">{r.context}</div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className={`tabular text-[15px] font-semibold ${r.meanCostBps < 0 ? "text-up" : "text-ink"}`}>{signedBps(r.meanCostBps)}</div>
+                  <div className="tabular text-[13px] text-muted">
+                    {r.fills} filled · <span className={r.misses > 0 ? "text-warn" : ""}>{r.misses} missed</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </List>
+          <p className="mt-2 text-[13px] text-faint">
+            Cost is measured against the price when the order was created; negative means it beat that price. Missed
+            orders are charged a penalty, so a style that never fills does not look cheap.
+          </p>
+        </>
       )}
-    </div>
+    </Section>
   );
 }
 
@@ -794,8 +835,8 @@ function ExecutionPolicyCard() {
  *
  * Live routing is a chain of independent gates, every one of which fails
  * silently: keys, arm, a strategy set Live, an Alpaca-market universe, real
- * candles, an open session. Break any link and the symptom is identical — an
- * armed cockpit and an empty Alpaca dashboard — so the chain is laid out here
+ * candles, an open session. Break any link and the symptom is identical (an
+ * armed cockpit and an empty Alpaca dashboard), so the chain is laid out here
  * with the fix attached to whichever link is actually broken.
  */
 function ReadinessCard() {
@@ -810,7 +851,7 @@ function ReadinessCard() {
   const firstPassport = equityStrategies[0] ? passports.get(equityStrategies[0].id) : undefined;
   const canArmFirst = firstPassport?.liveReady ?? false;
 
-  const steps = [
+  const steps: { label: string; ok: boolean; detail: string; fix?: { label: string; run: () => void } }[] = [
     {
       label: "Alpaca keys saved",
       ok: live.alpacaConnected,
@@ -819,9 +860,7 @@ function ReadinessCard() {
     {
       label: "Real equity candles loaded",
       ok: barsReady,
-      detail: barsReady
-        ? "indicators are running on real bars"
-        : "waiting for Alpaca bars: strategies skip any market with under 30",
+      detail: barsReady ? "indicators are running on real bars" : "waiting for Alpaca bars: strategies skip any market with under 30",
     },
     {
       label: "Live execution armed for Alpaca",
@@ -865,49 +904,52 @@ function ReadinessCard() {
     },
   ];
 
-  const done = steps.filter((s) => s.ok).length;
+  const ready = readyCount(steps);
 
   return (
-    <Card
-      className="mb-4"
+    <Section
       title="Why no orders yet?"
+      help="Every gate an order passes on its way to the broker. All of them must be done."
+      hint="Every link in the chain to the broker. A cross shows the one to fix."
       right={
-        <Badge tone={done === steps.length ? "green" : "neutral"}>
-          {done}/{steps.length} ready
+        <Badge tone={ready.all ? "good" : "neutral"}>
+          {ready.done}/{ready.total} ready
         </Badge>
       }
     >
-      <div className="space-y-1.5">
-        {steps.map((s) => (
-          <div key={s.label} className="flex items-start gap-2 text-sm">
-            {s.ok ? (
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-success" />
-            ) : (
-              <Circle size={14} className="mt-0.5 shrink-0 text-cyber-text-faint" />
-            )}
-            <div className="flex-1">
-              <span className={s.ok ? "text-cyber-text" : "text-cyber-text-dim"}>{s.label}</span>
-              <div className="text-[11px] text-cyber-text-faint">{s.detail}</div>
+      <List>
+        {steps.map((s) => {
+          const Icon = s.ok ? CheckCircle2 : XCircle;
+          return (
+            <div key={s.label} className="flex items-start gap-3 py-3">
+              <Icon size={20} aria-hidden className={`mt-0.5 shrink-0 ${s.ok ? "text-up" : "text-muted"}`} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[15px] font-semibold text-ink">{s.label}</span>
+                  <Badge tone={s.ok ? "good" : "neutral"}>{s.ok ? "Done" : "Not yet"}</Badge>
+                </div>
+                <div className="mt-0.5 break-words text-[13px] leading-snug text-muted">{s.detail}</div>
+                {s.fix && (
+                  <div className="mt-2">
+                    <Button variant="secondary" size="sm" onClick={s.fix.run}>
+                      {s.fix.label}
+                    </Button>
+                  </div>
+                )}
+              </div>
             </div>
-            {s.fix && (
-              <Button tone="cyan" className="!px-2 !py-1" onClick={s.fix.run}>
-                {s.fix.label}
-              </Button>
-            )}
-          </div>
-        ))}
-      </div>
+          );
+        })}
+      </List>
       {fixErr && (
-        <div role="alert" className="mt-2 text-xs text-danger">
+        <Notice tone="danger" className="mt-2">
           {fixErr}
-        </div>
+        </Notice>
       )}
-      {done === steps.length && (
-        <div className="mt-3 text-[11px] text-success">
-          Every gate is clear: the next signal on an Alpaca market routes to the broker.
-        </div>
+      {ready.all && (
+        <p className="mt-2 text-[13px] font-semibold text-up">Every gate is clear: the next signal on an Alpaca market routes to the broker.</p>
       )}
-    </Card>
+    </Section>
   );
 }
 
@@ -915,7 +957,7 @@ function ReadinessCard() {
  * Per-market trace of the routing chain, straight from the engine.
  *
  * The readiness card above covers the global gates; this covers the per-market
- * ones the checklist can't see — no candles, already holding, already acted on
+ * ones the checklist can't see: no candles, already holding, already acted on
  * this bar, signal fighting the trend, or simply no signal yet. Between them
  * there is no state where "nothing is happening" has no explanation.
  */
@@ -943,7 +985,12 @@ function DiagnosticsCard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function test(marketId: string) {
+  async function test(marketId: string, symbol: string) {
+    // A real order when real trading is armed: never on a single click.
+    const ok = window.confirm(
+      `Send one buy of ${symbol} at the venue's minimum size? If real trading is armed, this is a real order with real money.`,
+    );
+    if (!ok) return;
     setTestMsg("sending…");
     try {
       // 0 = the venue's minimum size: this proves the connection, not a strategy.
@@ -957,61 +1004,63 @@ function DiagnosticsCard() {
   const clear = rows.filter((r) => !r.suppressed);
 
   return (
-    <Card
-      className="mb-4"
+    <Section
       title="Per-market trace"
+      help="For each Alpaca market, the first thing that would stop an order right now."
+      hint={`${clear.length} of ${rows.length} markets are clear to route.`}
       right={
-        <Button tone="cyan" className="!px-2 !py-1" disabled={busy} onClick={() => void refresh()}>
+        <Button variant="secondary" size="sm" icon={RefreshCw} disabled={busy} onClick={() => void refresh()}>
           Refresh
         </Button>
       }
     >
-      {err && <div className="mb-2 text-xs text-danger">{err}</div>}
-      <div className="space-y-1.5">
-        {rows.map((r) => (
-          <div key={r.marketId} className="rounded border border-cyber-border bg-cyber-surface/40 px-2 py-1.5 text-xs">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-cyber-text">{r.symbol}</span>
-              <span className="text-cyber-text-faint">{r.price.toFixed(2)}</span>
-              <Badge tone={r.barBacked ? "green" : "neutral"}>{r.bars} bars</Badge>
-              {r.quoteAgeSec > 30 && <Badge tone="red">quote {r.quoteAgeSec}s old</Badge>}
-              {r.hasPosition && <Badge tone="purple">holding</Badge>}
-              <span className="flex-1" />
-              <Button tone="purple" className="!px-2 !py-0.5" onClick={() => void test(r.marketId)}>
-                Connection test
-              </Button>
+      {err && (
+        <Notice tone="danger" className="mb-2">
+          {err}
+        </Notice>
+      )}
+      {rows.length === 0 && !err ? (
+        <p className="text-[13px] text-muted">No Alpaca markets in the engine yet.</p>
+      ) : (
+        <List>
+          {rows.map((r) => (
+            <div key={r.marketId} className="py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="break-all text-[15px] font-semibold text-ink">{r.symbol}</span>
+                    <span className="tabular text-[13px] text-muted">{r.price.toFixed(2)}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    <Badge tone={r.barBacked ? "good" : "neutral"}>{r.bars} bars</Badge>
+                    {r.quoteAgeSec > 30 && <Badge tone="bad">Quote {r.quoteAgeSec}s old</Badge>}
+                    {r.hasPosition && <Badge tone="accent">Holding</Badge>}
+                  </div>
+                </div>
+                <Button variant="secondary" size="sm" onClick={() => void test(r.marketId, r.symbol)}>
+                  Connection test
+                </Button>
+              </div>
+              {r.signal && <p className="mt-1.5 break-words text-[13px] text-ink">Signal: {r.signal}</p>}
+              <div className="mt-1.5">
+                <Outcome ok={!r.suppressed} okWord="Clear" failWord="Held" soft>
+                  {r.suppressed ?? "the next signal routes to the broker"}
+                </Outcome>
+              </div>
             </div>
-            {r.signal && <div className="mt-1 text-success">signal · {r.signal}</div>}
-            <div className={`mt-0.5 ${r.suppressed ? "text-warning" : "text-success"}`}>
-              {r.suppressed ?? "Clear: the next signal routes to the broker"}
-            </div>
-          </div>
-        ))}
-        {rows.length === 0 && !err && (
-          <div className="text-xs text-cyber-text-faint">No Alpaca markets in the engine yet.</div>
-        )}
-      </div>
-      {testMsg && <div className="mt-2 text-xs text-cyber-text-dim">{testMsg}</div>}
-      <div className="mt-2 text-[11px] text-cyber-text-faint">
-        {clear.length} of {rows.length} markets are clear to route. <b>Connection test</b> sends one buy at the
-        venue's minimum size through the full path (risk manager, broker, fill), so a wrong key or a closed session
-        surfaces immediately. It is a connection test, not a strategy: it needs no Strategy Passport, it is the
-        only order that skips one, and no strategy is set live by it.
-      </div>
-    </Card>
+          ))}
+        </List>
+      )}
+      {testMsg && (
+        <p role="status" className="mt-2 break-words text-[13px] text-muted">
+          {testMsg}
+        </p>
+      )}
+      <p className="mt-2 text-[13px] leading-relaxed text-faint">
+        <b>Connection test</b> sends one buy at the venue's minimum size through the full path (risk manager, broker,
+        fill), so a wrong key or a closed session surfaces immediately. It is a connection test, not a strategy: it
+        needs no Strategy Passport, it is the only order that skips one, and no strategy is set live by it.
+      </p>
+    </Section>
   );
-}
-
-function Field({ label, value, good }: { label: string; value: string; good?: boolean }) {
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-widest text-cyber-text-faint">{label}</div>
-      <div className={`text-sm font-bold ${good ? "text-success" : "text-cyber-text"}`}>{value}</div>
-    </div>
-  );
-}
-
-function fmt(v: string): string {
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : v;
 }

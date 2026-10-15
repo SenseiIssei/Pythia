@@ -1,38 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  Wallet,
-  RefreshCw,
-  TriangleAlert,
-  Plus,
-  Trash2,
-  Landmark,
-  Building2,
-  Link2,
-  ShieldCheck,
-} from "lucide-react";
-import {
-  Card,
-  PageHeader,
-  Badge,
-  Button,
-  EmptyState,
-  Field,
-  Loading,
-  Notice,
-  Term,
-  fmtUsd,
-  inputCls,
-} from "../components/ui";
-import {
-  liveMode,
-  walletSnapshot,
-  walletAddresses,
-  saveWalletAddresses,
-} from "../live";
+import { Wallet, RefreshCw, TriangleAlert, Plus, Trash2, Landmark, Building2, Link2, ShieldCheck } from "lucide-react";
+import { Badge, Button, Card, Field, List, ListRow, Notice, Page, inputCls, money } from "../design";
+import { KeyStats, LoadingRows, Nothing, Section, Term, plural, useUndoNote } from "../pagekit";
+import { heldBalances, shortAddress, trimQty, walletCounts } from "../pagekit/money";
+import { liveMode, walletSnapshot, walletAddresses, saveWalletAddresses } from "../live";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
 import type { Chain, WalletAccount, WalletKind, WalletsSnapshot, WatchedAddress } from "../types";
-import { useUndo } from "../components/Confirm";
 
 const CHAINS: { id: Chain; label: string; asset: string }[] = [
   { id: "ethereum", label: "Ethereum", asset: "ETH" },
@@ -49,6 +23,12 @@ const KIND_ICON: Record<WalletKind, typeof Landmark> = {
   broker: Landmark,
   exchange: Building2,
   onchain: Link2,
+};
+
+const KIND_WORD: Record<WalletKind, string> = {
+  broker: "Broker",
+  exchange: "Exchange",
+  onchain: "Crypto address",
 };
 
 export function Wallets() {
@@ -74,80 +54,98 @@ export function Wallets() {
     if (mode !== "none") void refresh();
   }, [mode, refresh]);
 
-  const header = (
-    <PageHeader
-      title="Money"
-      subtitle={
-        advanced
-          ? "Broker, exchanges and watch-only addresses on one balance sheet."
-          : "Your real accounts in one place: what is in them, and whether Pythia could trade there."
-      }
-    />
-  );
+  const subtitle = advanced
+    ? "Broker, exchanges and watch-only addresses on one balance sheet."
+    : "Your real accounts in one place: what is in them, and whether Pythia could trade there.";
 
   if (mode === "none") {
     return (
-      <div className="animate-fade-in mx-auto max-w-4xl space-y-4">
-        {header}
+      <Page title="Money" subtitle={subtitle}>
+        <KeyStats
+          items={[
+            {
+              label: "Practice balance",
+              value: money(portfolio.equity),
+              sub: "Fake money. This is the only balance the browser version has.",
+              help: "The practice account's value. No real money is involved.",
+            },
+          ]}
+        />
         <Card>
-          <div className="text-sm text-cyber-text-dim">Practice balance</div>
-          <div className="mt-1 font-mono text-3xl font-bold tabular-nums">{fmtUsd(portfolio.equity)}</div>
-          <p className="mt-1 text-xs text-cyber-text-faint">Fake money. This is the only balance the browser version has.</p>
+          <Nothing icon={Wallet} title="Real account balances need the desktop app">
+            Reading a broker, an exchange or a crypto address needs either the desktop app (keys stay in your computer's
+            keychain) or a connected server. This browser version never sees a real account.
+          </Nothing>
         </Card>
-        <Card>
-          <EmptyState icon={Wallet} title="Real account balances need the desktop app">
-            Reading a broker, an exchange or a crypto address needs either the desktop app (keys stay in your
-            computer's keychain) or a connected server. This browser version never sees a real account.
-          </EmptyState>
-        </Card>
-      </div>
+      </Page>
     );
   }
 
   const accounts = snap?.accounts ?? [];
+  const counts = walletCounts(accounts);
+
   return (
-    <div className="animate-fade-in mx-auto max-w-4xl space-y-4">
-      {header}
+    <Page
+      title="Money"
+      subtitle={subtitle}
+      right={
+        <Button variant="secondary" size="sm" icon={RefreshCw} disabled={busy} onClick={() => void refresh()}>
+          {busy ? "Reading" : "Refresh"}
+        </Button>
+      }
+    >
+      {snap ? (
+        <KeyStats
+          items={[
+            {
+              label: "Total across your accounts",
+              value: money(snap.usdTotal),
+              sub: (
+                <>
+                  {plural(snap.accounts.length, "account")}
+                  {snap.updatedAt > 0 && `, read at ${new Date(snap.updatedAt).toLocaleTimeString()}`}
+                </>
+              ),
+              help: "Every connected broker, exchange and watched address added up in dollars. Coins without a dollar price are left out.",
+            },
+            {
+              label: "Pythia can trade",
+              value: String(counts.canTrade),
+              sub: counts.canTrade === 1 ? "account with a trading key" : "accounts with a trading key",
+              help: "Accounts where Pythia holds a key that can place orders. You can switch the key off at any time.",
+            },
+            {
+              label: "Watch only",
+              value: String(counts.watchOnly),
+              sub: "it sees the balance, cannot move it",
+              help: "Accounts Pythia can read but not trade in.",
+            },
+          ]}
+        />
+      ) : (
+        <Card label="Total across your accounts">
+          {busy ? (
+            <LoadingRows rows={1} label="Reading balances" />
+          ) : (
+            <p className="text-[15px] text-muted">Not read yet. Press Refresh to read the balances.</p>
+          )}
+        </Card>
+      )}
 
       <Notice tone="info" icon={ShieldCheck} title={advanced ? "Read-only, and self-custody stays self-custody" : "Pythia can look, not take"}>
         {advanced ? (
           <>
-            Pythia never asks for a seed phrase or a wallet private key. On-chain wallets are watched by public address: it can
-            see them, it cannot move them. Trading happens only at venues where you hold a{" "}
-            <span className="text-accent">revocable API key</span>, so a compromised Pythia costs you a key rotation,
-            not your coins.
+            Pythia never asks for a seed phrase or a wallet private key. On-chain wallets are watched by public address:
+            it can see them, it cannot move them. Trading happens only at venues where you hold a{" "}
+            <b className="text-ink">revocable API key</b>, so a compromised Pythia costs you a key rotation, not your coins.
           </>
         ) : (
           <>
-            It never asks for a seed phrase or a wallet private key. Crypto wallets are watched by their public address, which
-            lets it see a balance but never move it. Where it can trade, it uses a key you can switch off at any time.
+            It never asks for a seed phrase or a wallet private key. Crypto wallets are watched by their public address,
+            which lets it see a balance but never move it. Where it can trade, it uses a key you can switch off at any time.
           </>
         )}
       </Notice>
-
-      <Card>
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-sm text-cyber-text-dim">Total across your accounts</div>
-            {snap ? (
-              <>
-                <div className="mt-1 font-mono text-3xl font-bold tabular-nums">{fmtUsd(snap.usdTotal)}</div>
-                <div className="mt-0.5 text-xs text-cyber-text-faint">
-                  {snap.accounts.length} account{snap.accounts.length === 1 ? "" : "s"}
-                  {snap.updatedAt > 0 && `, read at ${new Date(snap.updatedAt).toLocaleTimeString()}`}
-                </div>
-              </>
-            ) : busy ? (
-              <Loading>Reading balances</Loading>
-            ) : (
-              <div className="mt-1 text-sm text-cyber-text-faint">Not read yet.</div>
-            )}
-          </div>
-          <Button tone="cyan" icon={RefreshCw} disabled={busy} onClick={() => void refresh()}>
-            {busy ? "Reading" : "Refresh"}
-          </Button>
-        </div>
-      </Card>
 
       {err && (
         <Notice tone="danger" icon={TriangleAlert} title="Could not read the balances">
@@ -157,87 +155,87 @@ export function Wallets() {
 
       {snap?.unpriced.length ? (
         <Notice tone="warning" title="Some coins have no dollar price">
-          {snap.unpriced.join(", ")} {snap.unpriced.length === 1 ? "is" : "are"} held but left out of the total rather
-          than counted as zero.
+          {snap.unpriced.join(", ")} {snap.unpriced.length === 1 ? "is" : "are"} held but left out of the total rather than
+          counted as zero.
         </Notice>
       ) : null}
 
-      {snap && accounts.length === 0 && (
-        <Card>
-          <EmptyState icon={Wallet} title="Nothing connected yet">
-            Add broker or exchange keys in Settings{mode === "native" ? ", or watch a crypto address below" : ""}. Until
-            then Pythia only trades with practice money.
-          </EmptyState>
-        </Card>
+      {snap && (
+        <Section title="Accounts" hint="Each account with what it holds. Tap Refresh above to read them again.">
+          {accounts.length === 0 ? (
+            <Nothing icon={Wallet} title="Nothing connected yet">
+              Add broker or exchange keys in Settings{mode === "native" ? ", or watch a crypto address below" : ""}. Until
+              then Pythia only trades with practice money.
+            </Nothing>
+          ) : (
+            <List>
+              {accounts.map((a) => (
+                <AccountRow key={a.id} account={a} />
+              ))}
+            </List>
+          )}
+        </Section>
       )}
-      {accounts.map((a) => (
-        <AccountCard key={a.id} account={a} />
-      ))}
 
       {mode === "native" && <AddressBook onSaved={() => void refresh()} />}
-    </div>
+    </Page>
   );
 }
 
-function AccountCard({ account }: { account: WalletAccount }) {
+function AccountRow({ account }: { account: WalletAccount }) {
   const Icon = KIND_ICON[account.kind];
-  const nonZero = account.balances.filter((b) => b.total > 0);
+  const held = heldBalances(account.balances);
   return (
-    <Card
-      title={account.label}
-      right={
-        <div className="flex items-center gap-2">
-          {account.canTrade ? (
-            <Badge tone="green" title="Pythia holds a key that can place orders here">
-              can trade
-            </Badge>
-          ) : (
-            <Badge tone="neutral" title="Pythia can see the balance but cannot move anything">
-              watch only
-            </Badge>
-          )}
-          <span className="font-mono text-sm font-bold">{fmtUsd(account.usdTotal)}</span>
-        </div>
-      }
-    >
-      <div className="mb-2 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-widest text-cyber-text-faint">
-        <Icon size={12} aria-hidden /> {account.provider}
-      </div>
+    <div className="pb-3">
+      <ListRow
+        icon={Icon}
+        title={account.label}
+        subtitle={
+          <span className="flex flex-wrap items-center gap-1.5">
+            <span>
+              {KIND_WORD[account.kind]} · {account.provider}
+            </span>
+            {account.canTrade ? (
+              <Badge tone="good" title="Pythia holds a key that can place orders here">
+                Can trade
+              </Badge>
+            ) : (
+              <Badge tone="neutral" title="Pythia can see the balance but cannot move anything">
+                Watch only
+              </Badge>
+            )}
+          </span>
+        }
+        right={money(account.usdTotal)}
+      />
       {account.error ? (
-        <div className="text-sm text-danger">{account.error}</div>
-      ) : nonZero.length === 0 ? (
-        <div className="text-sm text-cyber-text-faint">Empty: no balance in this account.</div>
+        <p className="break-words pl-[52px] text-[13px] text-down">{account.error}</p>
+      ) : held.length === 0 ? (
+        <p className="pl-[52px] text-[13px] text-muted">Empty: no balance in this account.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="font-mono text-[10px] uppercase tracking-widest text-cyber-text-faint">
-                <th className="py-1 text-left font-normal">Asset</th>
-                <th className="py-1 text-right font-normal"><Term>Free</Term></th>
-                <th className="py-1 text-right font-normal"><Term>Total</Term></th>
-                <th className="py-1 text-right font-normal"><Term>USD</Term></th>
-              </tr>
-            </thead>
-            <tbody>
-              {nonZero.map((b) => (
-                <tr key={b.asset} className="border-t border-cyber-border/50">
-                  <td className="py-1 font-medium">{b.asset}</td>
-                  <td className="py-1 text-right font-mono text-cyber-text-dim">{trim(b.free)}</td>
-                  <td className="py-1 text-right font-mono">{trim(b.total)}</td>
-                  <td className="py-1 text-right font-mono">
-                    {b.usdValue === undefined ? (
-                      <span className="text-cyber-text-faint" title="No dollar price available">-</span>
-                    ) : (
-                      fmtUsd(b.usdValue)
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ul className="ml-[52px] divide-y divide-line rounded-control bg-surface-2 px-3">
+          {held.map((b) => (
+            <li key={b.asset} className="flex items-start justify-between gap-3 py-2">
+              <div className="min-w-0">
+                <div className="break-all text-[15px] font-semibold text-ink">{b.asset}</div>
+                <div className="tabular text-[13px] text-muted">
+                  <Term>Free</Term> {trimQty(b.free)} · <Term>Total</Term> {trimQty(b.total)}
+                </div>
+              </div>
+              <div className="tabular shrink-0 text-right text-[15px] font-semibold text-ink">
+                {b.usdValue === undefined ? (
+                  <span className="text-[13px] font-normal text-muted" title="No dollar price available">
+                    No price
+                  </span>
+                ) : (
+                  money(b.usdValue)
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -248,7 +246,7 @@ function AddressBook({ onSaved }: { onSaved: () => void }) {
   const [address, setAddress] = useState("");
   const [label, setLabel] = useState("");
   const [err, setErr] = useState("");
-  const [undoNotice, offerUndo] = useUndo();
+  const [undoNotice, offerUndo] = useUndoNote();
 
   useEffect(() => {
     void walletAddresses().then(setList).catch(() => setList([]));
@@ -278,17 +276,17 @@ function AddressBook({ onSaved }: { onSaved: () => void }) {
   }
 
   return (
-    <Card
+    <Section
       title="Watch an address"
-      icon={Wallet}
-      subtitle={
+      help="A public address only shows a balance. It cannot be used to spend."
+      hint={
         <>
-          Paste a <b>public address</b>. Pythia reads the chain's own coin balance and nothing else: no key, no signing,
-          no way to spend.
+          Paste a <b className="text-ink">public address</b>. Pythia reads the chain's own coin balance and nothing else:
+          no key, no signing, no way to spend.
         </>
       }
     >
-      <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)_minmax(0,10rem)_auto] sm:items-end">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Network">
           <select value={chain} onChange={(e) => setChain(e.target.value as Chain)} className={inputCls}>
             {CHAINS.map((c) => (
@@ -298,65 +296,62 @@ function AddressBook({ onSaved }: { onSaved: () => void }) {
             ))}
           </select>
         </Field>
-        <Field label="Public address">
+        <Field label="Name (optional)">
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. cold wallet" className={inputCls} />
+        </Field>
+        <Field label="Public address" className="sm:col-span-2">
           <input
             value={address}
             onChange={(e) => setAddress(e.target.value)}
             placeholder="0x… / bc1… / base58"
             spellCheck={false}
-            className={`${inputCls} font-mono`}
+            autoComplete="off"
+            className={inputCls}
           />
         </Field>
-        <Field label="Name (optional)">
-          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. cold wallet" className={inputCls} />
-        </Field>
-        <Button tone="cyan" icon={Plus} onClick={() => void add()} disabled={!address.trim()}>
+      </div>
+      <div className="mt-3">
+        <Button variant="primary" icon={Plus} onClick={() => void add()} disabled={!address.trim()}>
           Add
         </Button>
       </div>
-      {err && <div className="mb-2 text-sm text-danger">{err}</div>}
-      {undoNotice}
-
-      {list.length === 0 ? (
-        <div className="text-sm text-cyber-text-faint">No addresses watched yet.</div>
-      ) : (
-        <div className="space-y-1.5">
-          {list.map((w, i) => (
-            <div
-              key={`${w.chain}:${w.address}`}
-              className="flex items-center justify-between gap-3 rounded-lg border border-cyber-border bg-cyber-bg/40 px-3 py-2 text-sm"
-            >
-              <div className="min-w-0">
-                <div className="truncate font-mono text-xs">{w.address}</div>
-                <div className="text-[11px] text-cyber-text-faint">
-                  {CHAINS.find((c) => c.id === w.chain)?.label ?? w.chain}
-                  {w.label && ` · ${w.label}`}
-                </div>
-              </div>
-              <Button
-                tone="red"
-                size="sm"
-                icon={Trash2}
-                ariaLabel={`Stop watching ${w.label || w.address}`}
-                onClick={() => {
-                  const before = list;
-                  void persist(list.filter((_, j) => j !== i));
-                  offerUndo(`Stopped watching ${w.label || w.address.slice(0, 10) + "…"}.`, () => void persist(before));
-                }}
-              >
-                Remove
-              </Button>
-            </div>
-          ))}
-        </div>
+      {err && (
+        <Notice tone="danger" className="mt-3">
+          {err}
+        </Notice>
       )}
-    </Card>
-  );
-}
+      {undoNotice && <div className="mt-3">{undoNotice}</div>}
 
-/** Crypto amounts need more decimals than money, but not eight zeros of noise. */
-function trim(n: number): string {
-  if (n === 0) return "0";
-  if (Math.abs(n) >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  return n.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+      <div className="mt-4 border-t border-line pt-1">
+        {list.length === 0 ? (
+          <p className="py-3 text-[13px] text-muted">No addresses watched yet.</p>
+        ) : (
+          <List>
+            {list.map((w, i) => (
+              <div key={`${w.chain}:${w.address}`} className="flex items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <div className="truncate text-[15px] font-semibold text-ink">{w.label || shortAddress(w.address)}</div>
+                  <div className="break-all text-[13px] text-muted">{w.address}</div>
+                  <div className="text-[13px] text-muted">{CHAINS.find((c) => c.id === w.chain)?.label ?? w.chain}</div>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={Trash2}
+                  ariaLabel={`Stop watching ${w.label || w.address}`}
+                  onClick={() => {
+                    const before = list;
+                    void persist(list.filter((_, j) => j !== i));
+                    offerUndo(`Stopped watching ${w.label || w.address.slice(0, 10) + "…"}.`, () => void persist(before));
+                  }}
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </List>
+        )}
+      </div>
+    </Section>
+  );
 }

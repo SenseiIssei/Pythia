@@ -273,6 +273,8 @@ pub fn run() {
             commands::tax_export,
             commands::lab_status,
             commands::cs2_board,
+            commands::lab_feeds,
+            commands::lab_studies,
             commands::tax_save_csv,
             commands::run_ensemble,
             commands::forecast_config,
