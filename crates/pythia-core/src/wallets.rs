@@ -556,6 +556,16 @@ pub async fn available_cash(creds: &crate::execution::Credentials, venue: &str, 
     }
 }
 
+/// Read the equity of the Alpaca paper account (play money) before a demo
+/// autopilot on it starts or gets more: the demo autopilots that share it
+/// may together be given no more than it holds. Read-only.
+pub async fn paper_account_equity(creds: &crate::execution::Credentials) -> Result<f64, String> {
+    let conn = creds.alpaca_connector(true, false)?;
+    let account = conn.account().await.map_err(|e| e.to_string())?;
+    let equity: f64 = account.equity.trim().parse().map_err(|_| format!("Alpaca reported an equity of \"{}\"", account.equity))?;
+    Ok(equity.max(0.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -32,6 +32,13 @@ export interface Market {
 export type Regime = "trending" | "ranging";
 
 export interface PositionView {
+  /** The position's key: the market id for the main book, `autopilot id|market`
+   *  for an autopilot's own book. Flatten takes it. Absent from older engines. */
+  key?: string;
+  /** The autopilot whose book holds it; absent for the main book. */
+  book?: string;
+  /** That autopilot's name. */
+  bookName?: string;
   marketId: string;
   venue: Venue;
   symbol: string;
@@ -82,6 +89,8 @@ export interface Order {
   realisedCostBps?: number;
   /** What the cost model charges the same order as a market order (slippage plus taker fee), bps. */
   modelledCostBps?: number;
+  /** The autopilot whose book the order was for; absent for the main book. */
+  book?: string;
 }
 
 // ── costs ────────────────────────────────────────────────────────────────────
@@ -1102,6 +1111,28 @@ export interface AutopilotStatus {
   btcReturnPct?: number | null;
   /** Market ids it holds right now. */
   held?: string[];
+  /** What it is held against: BTC buy and hold for crypto, SPY for US shares. */
+  benchmark?: AutopilotBenchmark | null;
+  /** The cash of its own book: equity less its positions and orders out. */
+  cash?: number;
+  /** The deepest fall from a peak over its equity history, percent. */
+  maxDrawdownPct?: number;
+}
+
+/** Buy and hold over the same period. Mirrors Rust `BenchmarkStatus`. */
+export interface AutopilotBenchmark {
+  /** "BTC/USD" or "SPY". */
+  symbol: string;
+  /** "BTC buy and hold". */
+  name: string;
+  /** Percent; null while a start price is still being looked for. */
+  returnPct: number | null;
+  /** The autopilot's return less the benchmark's, in points. */
+  excessPct: number | null;
+  /** When the comparison starts, if not at the autopilot's start. */
+  fromMs?: number | null;
+  /** How a start price was filled in after the fact. */
+  note?: string | null;
 }
 
 /** An autopilot's forward result held against its backtest's band. */

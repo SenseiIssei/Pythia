@@ -14,9 +14,16 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
+| 07:15 | model zoo: retrains the zoo models that are due, promotes a challenger only if better out of sample, shadow forecasts and scores, drift, the Models page report; posts promotions and drift (`lab.models.train --due`, about 5 minutes; longer on Sundays when M8, M8q and M10 retrain) | `/etc/cron.d/pythia-models` |
+| 07:05 | Pokemon cards: price snapshot (`lab.collect.pokemon`, 15 to 45 minutes keyless, the API is slow and retried), then studies, fair value, forecasts, the paper collection and card alerts (`lab.pokemon.daily`, seconds at first, up to about 20 minutes with a year of history). Data and play money only | `/etc/cron.d/pythia-pokemon` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
+| 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
+| Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
+| hourly :12 | CS2 skins: Skinport snapshots and sales history, Steam prices for the watchlist, then models (refit daily), alerts, the play-money portfolio (weekly) and the board for the app (`lab.collect.cs2`, then `lab.cs2.run`; 2 Skinport requests and up to 100 Steam requests, about 6 minutes) | `/etc/cron.d/pythia-cs2` |
+| every 15 min | trending watcher: DexScreener boosted tokens, Binance gainers and volume surges, surge alerts on coins Alpaca lists, a daily on-chain hype digest from 08:00 (`lab.ops.trending`, seconds; reads only) | `/etc/cron.d/pythia-trending` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
+| every 10 minutes | listings watcher: new pairs on Alpaca, Binance, Coinbase, Kraken and Binance listing announcements, posted to Telegram (`lab.ops.listings`, seconds); then the listings paper book, off unless the W6 rule passed (`lab.paper.listings_book`) | `/etc/cron.d/pythia-listings` |
 
 ## Health check
 
@@ -61,6 +68,42 @@ scp <exported>/forward/backtest/*.json pythia-vps:/srv/pythia-data/reports/forwa
 
 Re-export after an experiment is re-run. Books without a file fall back to an
 approximate band from their report (growth and volatility), marked as such.
+
+## Strategy factory
+
+`lab.factory` (see "Strategy factory" in `research/lab/README.md`) searches a
+fixed budget of new long-only strategies on the in-sample window, counts each
+one in `/srv/pythia-data/factory/ledger.jsonl` (a ledger that only grows, on
+top of the 377 hand-study trials), sends six a week to the held-back window,
+and runs the survivors 30 days as forward shadow books before anything can
+become a paper book. It reads the daily panel the paper-families job caches in
+`/srv/pythia-data/lab-cache`, so it runs after 04:15. It writes only
+`/srv/pythia-data/factory/` and `/srv/pythia-data/reports/factory/`; a
+promoted genome is listed in `factory/promoted.json`, which the paper-families
+job steps as one more paper book. It has no way to reach the engines, live
+settings or money. With `--notify` the weekly digest (what was tried, what
+survived the held-back window and why, the shadow books) goes to the webhook or
+Telegram chat in `/etc/pythia/alerts.env`; the daily step posts only when a
+shadow book is decided.
+
+The first run was made on the PC; its trials and its shadow book are in
+`research/lab/results/factory_seed/`, which every run merges into
+`/srv/pythia-data/factory/` first (only what is missing). `/opt/pythia-lab`
+must carry that folder, as it carries the rest of `research/lab`.
+
+`/etc/cron.d/pythia-factory`:
+
+```cron
+# Pythia: strategy factory. Daily forward shadow step, weekly search and held-back checks with a digest. Paper only; never touches live settings or money.
+0 5 * * * root docker run --rm --memory 2g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.factory shadow --notify >> /var/log/pythia-factory.log 2>&1
+30 7 * * 0 root docker run --rm --cpus 4 --memory 4g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.factory --notify >> /var/log/pythia-factory.log 2>&1
+```
+
+A larger or smaller week: `--budget N`. See the last digest without posting:
+
+```bash
+docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.factory digest --dry-run
+```
 
 ## Learning loop
 
@@ -139,6 +182,47 @@ to the autopilot engine's `docker run` and recreate the container (the cost
 file is read at start). Until a symbol has 30 demo market fills the learned
 file equals the base table for it.
 
+## Model zoo
+
+`lab.models.train --due` is the one entry point for every model the zoo
+trains itself (M8 direction, M8q return quantiles, M10 regime-aware daily
+volatility, M11 slippage of the demo fills, M12 BTC and SPY correlation
+regime). M1 and M2 stay with the learning loop above; the zoo only reports
+on them. Each run, per model:
+
+| Step | What it does | Writes |
+|---|---|---|
+| data | builds the model's panel from the recorder's history, the learning loop's fills ledger (M11, from 30 market fills) or Yahoo's daily chart (M12, cached a day) | `models/zoo/_data/` |
+| retrain | when due (M8, M8q, M10 Sundays, M11 Mondays, M12 every 28 days): purged walk-forward against the model's baseline, a challenger folder, the registry's champion and challenger decision. A challenger that does not beat its baseline (gate: lower loss, Diebold-Mariano p below 0.05) is never promoted; one that does replaces the champion only if it is also better on the rows the champion never saw | `models/registry/<name>/`, `models/<name>/<version>/` |
+| shadow | the champion (or, without one, the newest candidate, marked as such) writes down its forecast for the newest day before the outcome is known; forecasts whose outcome is now known are scored against the baseline | `models/zoo/<name>/shadow.jsonl` |
+| drift | the last 30 days of each input against its training deciles, the engine's rules | in the report |
+| report | every model with its score against its baseline over time, last retrain, drift and who uses it, with the lab feed header | `reports/models/latest.json`, `latest.md` |
+
+A promotion, or a model whose inputs leave their trained range, is posted
+once through `lab.ops.notify` (Telegram or webhook from
+`/etc/pythia/alerts.env`). It writes only through `lab/ops/guard.py`: its
+own folders, the registry and the zoo's published model folders. No book
+reads a zoo model today; a model may be offered to one only after it passes
+its gate.
+
+`/etc/cron.d/pythia-models` (after the learning loop, which fills the M11
+ledger; Yahoo needs outbound network, no engine access):
+
+```cron
+# Pythia: model zoo. Retrains what is due, promotes a challenger only if better out of sample; shadow, drift, report; posts promotions and drift.
+15 7 * * * root docker run --rm --cpus 4 --memory 8g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --due >> /var/log/pythia-models.log 2>&1
+```
+
+Retrain one now, or only shadow and report:
+
+```bash
+docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --force m8q,m12 --no-notify
+```
+
+```bash
+docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --status --no-notify
+```
+
 ## Market data in the engine
 
 The engine's crypto quotes, candles and books come from `pythia_core::feeds`,
@@ -163,64 +247,159 @@ Knobs, all optional, in the server's environment: `PYTHIA_FEED_QUOTES` and
 `PYTHIA_FEED_STREAM=0`, `PYTHIA_FEED_STALE_SEC`, `PYTHIA_FEED_RECOVER_SEC`,
 `PYTHIA_FEED_MAX_DEVIATION_PCT`, `PYTHIA_FEED_ALERT_MIN`.
 
+## Pokemon cards
+
+Data, forecasts, a paper collection and alerts. No order of any kind: the
+cards are physical and the owner trades them by hand. Sources and limits
+are in the docstring of `lab/collect/pokemon.py`; results in
+`research/lab/results/pokemon.md`.
+
+`/etc/cron.d/pythia-pokemon`:
+
+```cron
+# Pythia: Pokemon card prices into the lake, then studies, forecasts, the paper collection and card alerts. Never buys or sells.
+5 7 * * * root docker run --rm --cpus 2 --memory 6g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.pokemon --sealed && python -m lab.pokemon.daily' >> /var/log/pythia-pokemon.log 2>&1
+```
+
+- The Pokemon TCG API works without a key (about 30 requests a minute,
+  1,000 a day; a run is about 85 card pages). It is slow and has bad hours:
+  a page of 250 cards takes about 10 s, and on the first real run /sets
+  answered 500 and 502 for minutes and single card pages needed a minute of
+  retries, so plan on 15 to 45 minutes. The collector retries a page up to 8
+  times with backoff, then the whole run up to 3 times 5 minutes apart
+  (`--attempts`, `--pause`), each attempt continuing from the day cache; if
+  /sets never answers it rebuilds the sets from the cards. With a free key
+  from https://dev.pokemontcg.io add `POKEMONTCG_API_KEY=<key>` to
+  `/etc/pythia/alerts.env` (root-only); the collector then spaces requests
+  0.3 s instead of 2.1 s. The key is read from the environment only.
+- Cardmarket: the API stopped refreshing Cardmarket prices for most cards
+  in mid 2026 (TCGplayer is daily). Blocks older than 14 days are kept but
+  count for nothing; the report, the feed and the Cards page say so.
+- The daily job also writes `reports/pokemon/latest.json` with the lab feed
+  header (docs/LAB-FEEDS.md), so the Research page and Home insights pick
+  it up with the other feeds.
+- `--sealed` reads tcgcsv.com (TCGplayer's daily dump): sealed product and
+  the single cards of the 24 newest groups plus every main set of the last
+  two years and the next releases (about 100 requests). Keep it on: the
+  Pokemon TCG API has no price for any 2026 set, so the new-set study and
+  the Cards page's New sets come only from here. If it fails the card
+  snapshot is still written and the meta file says so.
+- Card alerts use the same Telegram bot or webhook as the digest, with
+  `<prefix> cards` as the first line.
+- Reprint announcements: list them by hand in
+  `/srv/pythia-data/pokemon/reprints.csv` (`name,announced`, one card name
+  and a YYYY-MM-DD date per line); the reprint study picks them up.
+- The Cards page reads `pokemon/ui/latest.json` through the engine. Add
+  `-v /srv/pythia-data/pokemon/ui:/data/pokemon/ui:ro -e PYTHIA_DATA=/data`
+  to the `docker run` of the engine that serves the app and recreate it; the
+  desktop app reads the synced folder as for the Lab page.
+- First run by hand, to see it work:
+
+```bash
+docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.pokemon --max-pages 2 --dry-run
+docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.pokemon --sealed && python -m lab.pokemon.daily --no-alerts'
+```
+
+The health check reports "pokemon cards" red when the paper collection has no
+row for today after 10:00 UTC, once `/srv/pythia-data/pokemon` exists.
+
 ## Alerts and the daily digest
 
-One webhook (Discord or Slack) gets three things; the full list and the
-behaviour are in `docs/ALERTS.md`:
+Everything goes to the owner's Telegram chat, one design for all of it (a
+card: bold title with one emoji, a short summary, aligned numbers with green
+and red circles); the full list, the look and the API are in `docs/ALERTS.md`:
 
-- the engine's operator alerts, as they happen: autopilot started, stopped,
-  stop rule or floor hit, kill switch, daily loss brake, orders refused again
-  and again, reconcile mismatch, market data stale for more than 10 minutes,
-  model drift
-- the daily digest after the learning loop: each running autopilot's equity
-  and P&L today and since start against BTC, trades and fees today, the
-  forward test per book, anything red in the health check
+- the engine's alerts, as they happen: autopilot events, the fills of an
+  autopilot (a rebalance as one message with a small table), big moves of a
+  held coin or an autopilot's equity, kill switch, floors, daily loss brake,
+  orders refused, reconcile mismatch, market data stale, model drift
+- lab posts: the factory, trending, and any job that posts a card through
+  `POST /api/alerts/event` or `lab.ops.notify`
+- the daily digest after the learning loop, with a chart of each autopilot's
+  equity against BTC, P&L per sleeve and positions
+- the weekly report on Sunday at 18:00 Europe/Berlin, with the week's chart
 - the health alarm: `system.json` not ok for two runs in a row, posted once,
   and once when green again
 
-Nothing is posted until the webhook is set. Keep it in one root-only env file
-on the server, outside the repo and outside every log:
+Each category has a switch in the app (Notifications, "What is sent"), and
+quiet hours (23:00 to 07:00 Europe/Berlin unless changed there) hold back all
+but urgent alerts and list them in one message after.
+
+Nothing is posted until the bot is set. Keep its token in one root-only env
+file on the server, outside the repo and outside every log:
 
 ```bash
 install -d -m 700 /etc/pythia
 install -m 600 /dev/null /etc/pythia/alerts.env
 cat > /etc/pythia/alerts.env <<'ENV'
-PYTHIA_ALERT_WEBHOOK=<your webhook URL>
-PYTHIA_ALERT_FORMAT=discord
+PYTHIA_TELEGRAM_BOT_TOKEN=<token from BotFather>
+PYTHIA_TELEGRAM_CHAT_ID=<your chat id>
 ENV
 ```
 
-`PYTHIA_ALERT_FORMAT=slack` for a Slack incoming webhook. For Telegram,
-leave the webhook out and set `PYTHIA_TELEGRAM_BOT_TOKEN` (from BotFather)
-and `PYTHIA_TELEGRAM_CHAT_ID` (the chat the bot writes to; send the bot
-any message, then read the id from its `getUpdates`). Optional:
-`PYTHIA_ALERT_PREFIX` (default `Pythia`), and for the engine
-`PYTHIA_ALERT_REJECTS` (3), `PYTHIA_ALERT_DEDUP_MIN` (30),
+The chat id: send the bot any message, then read it from the bot's
+`getUpdates`. Instead of Telegram, `PYTHIA_ALERT_WEBHOOK=<webhook URL>` with
+`PYTHIA_ALERT_FORMAT=discord` or `slack` posts the same cards in markdown.
+Optional: `PYTHIA_ALERT_PREFIX` (the footer, default `Pythia`), and for the
+engine `PYTHIA_ALERT_REJECTS` (3), `PYTHIA_ALERT_DEDUP_MIN` (30),
 `PYTHIA_ALERT_MAX_PER_HOUR` (20).
+
+**Lab image.** The charts need matplotlib, which is in
+`research/lab/requirements.txt`: rebuild the image once after copying the lab
+(`docker build -t pythia-lab /opt/pythia-lab`, or `research/lab` from a
+checkout). Without it the digest and the report go out as text.
 
 **Engine.** Add `--env-file /etc/pythia/alerts.env` to the `docker run` of the
 engine that runs the autopilots (and of the lab engine, if its alerts are
-wanted too, with a different `PYTHIA_ALERT_PREFIX` via `-e`) and recreate the
-container. The log says `operator alerts on (Discord format)` at start.
+wanted too, with a different `PYTHIA_ALERT_PREFIX` via `-e`), give it the
+notify folder with `-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
+(the last digest, digest requests, the settings file for the lab, event
+images), and recreate the container. The log says
+`operator alerts on (Telegram format)` at start. The switches, quiet hours and
+big-move sizes are saved in its state file and written to
+`/srv/pythia-data/reports/notify/settings.json`, which every lab job reads.
+
+Lab jobs in their own containers reach the engine's `127.0.0.1:8788` through
+Docker's port mapping, so the engine sees them from the bridge, not from
+127.0.0.1: to let them post through `POST /api/alerts/event`, add
+`-e PYTHIA_ALERT_EVENT_FROM=172.17.` (the bridge's prefix; `docker network
+inspect bridge` shows it) to the engine. Without that, lab jobs post straight
+to Telegram through `lab.ops.notify`, with the same design, switches and quiet
+hours, which is the default.
 
 **Daily digest.** It runs right after the learning loop, in the same cron
-line, so it always reads tonight's digest. `/etc/cron.d/pythia-learn` becomes:
+line, so it always reads tonight's report. `--network host` lets it read the
+engine's state on 127.0.0.1:8788 for the chart. `/etc/cron.d/pythia-learn`
+becomes:
 
 ```cron
-# Pythia: nightly learning loop, then the daily digest to the operator's webhook. Never touches live settings or money.
-30 6 * * * root docker run --rm --network host --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.learn >> /var/log/pythia-learn.log 2>&1; docker run --rm --memory 512m --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify >> /var/log/pythia-notify.log 2>&1
+# Pythia: nightly learning loop, then the daily digest with its chart to the owner's Telegram. Never touches live settings or money.
+30 6 * * * root docker run --rm --network host --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.learn >> /var/log/pythia-learn.log 2>&1; docker run --rm --network host --memory 1g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify >> /var/log/pythia-notify.log 2>&1
 ```
 
 See it without posting:
 
 ```bash
-docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify --dry-run
+docker run --rm --network host -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify --dry-run
 ```
+
+**Weekly report.** Sunday from 18:00 Europe/Berlin, once a week. The cron
+runs hourly on Sunday afternoons in UTC (16:05 to 21:05, which is 18:05 or
+17:05 Berlin and later, summer or winter); the job sends when it is 18:00 or
+later in Berlin and nothing went out this week yet. `/etc/cron.d/pythia-weekly`:
+
+```cron
+# Pythia: the weekly report with its chart, Sunday from 18:00 Europe/Berlin. Posts once a week.
+5 16-21 * * 0 root docker run --rm --network host --memory 1g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.notify --weekly >> /var/log/pythia-notify.log 2>&1
+```
+
+Now, whatever the day: `... python -m lab.ops.notify --weekly --force`.
 
 **Health alarm.** `system_health.sh` runs `/opt/pythia-ops/notify.py --health`
 after each check when that file and `/etc/pythia/alerts.env` exist
 (`PYTHIA_NOTIFY_PY` and `PYTHIA_ALERT_ENV` move them). It needs only
-`python3` on the host. Install with the health script:
+`python3` on the host. Install with the health script (and again after an
+update of `notify.py`):
 
 ```bash
 install -m 755 research/ops/system_health.sh /opt/pythia-ops/system_health.sh
@@ -229,19 +408,193 @@ install -m 644 research/lab/lab/ops/notify.py /opt/pythia-ops/notify.py
 
 The cron line of the health check stays as it is.
 
-**Digest on demand.** `POST /api/alerts/digest` on the engine writes
-`reports/notify/request.json`; this cron line sends the digest within five
-minutes, with the same `notify.py` the health alarm uses (stdlib only, no
-container start). Without a request it does nothing. `/etc/cron.d/pythia-notify-pending`:
+**Digest on demand, and after quiet hours.** `POST /api/alerts/digest` on the
+engine writes `reports/notify/request.json`; this cron line sends the digest
+within five minutes, with the same `notify.py` the health alarm uses (stdlib
+only, no container start, so without the chart). It also sends a daily digest
+that fell into quiet hours once they are over, and one note listing the lab
+posts quiet hours held back. Otherwise it does nothing.
+`/etc/cron.d/pythia-notify-pending`:
 
 ```cron
-# Pythia: a digest asked for through the engine API, if any. Posts nothing otherwise.
+# Pythia: a digest asked for through the engine API, and what quiet hours held back. Posts nothing otherwise.
 */5 * * * * root set -a; . /etc/pythia/alerts.env; PYTHIA_DATA=/srv/pythia-data python3 /opt/pythia-ops/notify.py --pending >> /var/log/pythia-notify.log 2>&1
 ```
 
 The engine that serves the API needs the same folder: add
 `-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
 to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
+
+**One card from a script.** `python3 /opt/pythia-ops/notify.py --event venue "Disk almost full" "12 GB left"`
+(after `set -a; . /etc/pythia/alerts.env` and with `PYTHIA_DATA=/srv/pythia-data`),
+in any of the categories listed in `docs/ALERTS.md`.
+
+## CS2 skins (W8)
+
+Market data, predictions, a play-money portfolio and alerts for the CS2 skins
+market. **Nothing buys or sells**: automated trading on the Steam Community
+Market or any skin marketplace breaks their terms and puts the account at
+risk, so the owner trades by hand, if at all. The sources are public and need
+no key: Skinport's `/v1/items` and `/v1/sales/history` (8 requests per 5
+minutes allowed, the job makes 2 an hour) and Steam's `priceoverview` (one
+request every 3.2 s, at most 100 a run, a 429 waits 60 s then 120 s and a
+third ends the Steam part of the run; the watchlist resumes where it stopped).
+After a run Steam refused outright, the next run knocks once and stops at the
+first 429 without waiting (`steam_cooling` in `cs2/collector.json`).
+
+Steam on the first real run (2026-10-15, from the PC): Skinport answered
+(25,143 items, 36,470 sales rows), Steam answered every `priceoverview`
+request from the collector with 429, from the first one on, while the same
+URL fetched with curl from the same machine at the same time was answered.
+Steam treats some clients differently; the collector does not try to look
+like another client. Check `steam_ok` in `cs2/collector.json` after the
+first runs on the lab machine: until it is above 0 the spread study, the gap
+alerts and the Steam column stay empty, and everything else works on
+Skinport alone.
+
+The image needs `brotli` (in `requirements.txt`): rebuild it once.
+
+```bash
+docker build -t pythia-lab /opt/pythia-lab
+```
+
+`/etc/cron.d/pythia-cs2` (default bridge network: it needs the internet, not
+the engines; the env file only for the Telegram alerts):
+
+```cron
+# Pythia: CS2 skins, hourly. Collects public prices, refits daily, alerts, paper portfolio. Never trades.
+12 * * * * root docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.cs2 >> /var/log/pythia-cs2.log 2>&1; docker run --rm --memory 4g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.cs2.run >> /var/log/pythia-cs2.log 2>&1
+```
+
+What it writes, under `/srv/pythia-data`:
+
+| Path | What |
+|---|---|
+| `cs2/skinport_items/date=*/HHMM.parquet` | every item each hour: lowest and highest ask, mean, median, listings |
+| `cs2/skinport_sales/date=*/HHMM.parquet` | 24 h, 7, 30 and 90-day sales min, max, average, median, volume |
+| `cs2/steam_prices/date=*/HHMM.parquet` | the watchlist (cases, popular skins, sticker capsules from `lab/collect/cs2_watchlist.json`, plus the 40 most traded Skinport items): lowest ask, median, 24 h volume |
+| `cs2/daily/{skinport,steam}/date=*.parquet` | the day's last snapshot per item, what the models read |
+| `cs2/model/` | today's predictions, how they were made and the research summary |
+| `cs2/paper/state.json`, `journal.csv` | the play-money portfolio (10,000 EUR) |
+| `cs2/alerts.jsonl`, `alerts_state.json` | alerts sent, 24 h cooldown per item and kind |
+| `reports/cs2/latest.json` | hourly: the lab feed (title, status, headline, items; `docs/LAB-FEEDS.md`) for the Research page and Home, and the board for the CS2 Skins page (`rows`, `portfolio`, `alerts`, `research`) |
+| `reports/cs2/<date>.json`, `latest.md` | the research report, daily (`results/cs2.md` in the repo) |
+| `reports/cs2_weekly/` | the weekly paper report, at each weekly look (a feed too) |
+
+About 1.5 MB a run (0.6 MB items, 0.9 MB sales history), so about 35 MB a
+day and 13 GB a year; the models read only `cs2/daily/` (about 1.5 MB a
+day), so the hourly folders can be thinned later without losing a model
+input. Alerts (cross-market gaps of 5 % or more after both
+venues' fees in items Steam trades 20 a day or more; liquid items 15 % under
+their 30-day median and 10 % down in 24 h) and the weekly summary go to the
+same Telegram chat or webhook as the digest. Drop pool changes and new
+operations go into `events` in `lab/collect/cs2_watchlist.json` as they
+happen, for the event study. Run once by hand, without posting:
+
+```bash
+docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.cs2 --steam-max 10
+docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.cs2.run --dry-run
+```
+
+The health check has a `cs2 collector` row (last run within three hours).
+
+## Trending watcher
+
+`lab.ops.trending` looks every 15 minutes at what the crowd is chasing and
+never trades: DexScreener's top boosted tokens and latest token profiles (with
+each token's most liquid pair and risk flags: thin liquidity, a pair under 3
+days old, FDV over 50x liquidity, volume over 20x liquidity, few sells), the
+24h tickers of every Binance USDT pair (top gainers) and, for the coins Alpaca
+lists, 24h quote volume and trade count against their 28-day median.
+
+- Every run writes one parquet file to the data lake,
+  `/srv/pythia-data/trending/snapshots/date=<day>/<HHMMSS>.parquet` (one row
+  per item, `kind` alpaca, gainer, market_surge or dex; read a range with
+  `pl.read_parquet(".../trending/snapshots/**/*.parquet", hive_partitioning=True)`),
+  and rewrites `reports/trending/latest.json` (title, updatedMs, status,
+  headline, items, then the full snapshot).
+- Rate limits: 3 to at most about 10 DexScreener calls (boosts, profiles,
+  one pair call per chain, at most 5 search fallbacks) and 1 Binance ticker
+  call per run;
+  the Alpaca coins' 28-day klines are fetched once per UTC day (32 calls at
+  weight 2) and cached in `trending/state.json`. Requests are spaced 250 ms
+  per host, and a 429 or 418 stops calls to that host for the rest of the run.
+- A strong surge on a coin Alpaca lists (volume 3x its 28-day median and up
+  8 % in 24 h, or 2x and up 20 %) is posted at once, at most once per coin per
+  20 hours, as "watch only".
+- At the first run from 08:00 UTC a short digest goes out: the Alpaca coins'
+  volume ratios, Binance's top gainers and volume surges, and the on-chain
+  hype, labelled high risk and read-only. On-chain tokens are not on Alpaca;
+  nothing here trades on a DEX or touches a wallet.
+
+It posts through the same settings as the digest (`/etc/pythia/alerts.env`,
+Telegram or webhook). `PYTHIA_ALPACA_COINS` (comma separated bases) overrides
+the list of coins Alpaca lists. `/etc/cron.d/pythia-trending`:
+
+```cron
+# Pythia: trending watcher. Public market data only; posts surge alerts and a daily watchlist; never trades.
+*/15 * * * * root docker run --rm --memory 512m --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.ops.trending >> /var/log/pythia-trending.log 2>&1
+```
+
+See it without posting or writing:
+
+```bash
+docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.trending --dry-run
+```
+
+The health check marks it red when `reports/trending/latest.json` is older
+than 45 minutes.
+
+## New listings (W6)
+
+`lab.ops.listings` diffs the asset lists of Alpaca (only with the paper key
+pair in the environment), Binance, Coinbase and Kraken, and reads Binance's
+listing announcements. The first run only seeds what exists; after that every
+new pair is a row in `/srv/pythia-data/listings/first_seen` (parquet, with
+its first-seen time), and every new coin, every new Alpaca pair and every new
+announcement goes out as its own message (venue, symbols, whether Alpaca lists
+the coin, first price; at most 10 a run, a burst beyond that in one) through
+the same Telegram or webhook settings as the digest (`/etc/pythia/alerts.env`,
+`PYTHIA_TELEGRAM_BOT_TOKEN` and `PYTHIA_TELEGRAM_CHAT_ID`). The cockpit feed
+is `reports/listings/latest.json` (title, updatedMs, status, headline, items,
+plus the last 90 days of events), which the engine serves in `/api/lab` and
+the Markets page shows as New listings. A venue that fails is skipped for that
+run and named on the page.
+
+Put the Alpaca paper pair (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, the same
+pair as for the demo) in its own env file, readable by root only, for example
+`/etc/pythia/alpaca-paper.env`; without it the watcher still runs and says
+"Alpaca: unknown". `/etc/cron.d/pythia-listings`:
+
+```cron
+# Pythia: new coin listings every 10 minutes, posted to Telegram; then the listings paper book (off unless W6 passed).
+*/10 * * * * root docker run --rm --memory 512m --env-file /etc/pythia/alerts.env --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.ops.listings && python -m lab.paper.listings_book' >> /var/log/pythia-listings.log 2>&1
+```
+
+Try it once by hand first (prints, writes and posts nothing):
+
+```bash
+docker run --rm --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.listings --dry-run
+```
+
+The study (`lab.experiments.listings`, pre-registered in
+`research/lab/results/listings.md`) runs once by hand; it reads the lake's
+hourly bars and the public APIs of Coinbase, Kraken and Alpaca (listing dates
+are cached in `hist/listings`), about 50 minutes the first time, mostly
+Coinbase's candles. It ran on 2026-10-15 on a copy of the lake: no rule
+passed, so the listings paper book stays off and the watcher only alerts.
+Running it again on the server is only needed to refresh the numbers:
+
+```bash
+docker run --rm --memory 4g --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.experiments.listings
+```
+
+It writes the results below the marker in `results/listings.md` (copy it back
+into the repo) and `reports/listing_effect/latest.json`, which turns the
+listings paper book on only if the pre-registered rule passed. The engine that
+serves `/api/lab` needs the listings folder if it does not mount the whole data
+folder: add `-v /srv/pythia-data/reports/listings:/data/reports/listings:ro`
+and `-e PYTHIA_DATA=/data` to its `docker run`.
 
 ## Extended crypto universe (W3)
 

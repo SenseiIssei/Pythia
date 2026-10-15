@@ -82,6 +82,26 @@ print('true|' + '; '.join('%s %s, %+.2f %% since %s' % (x['config']['name'], x['
     fi
   done
 
+  # Pokemon cards (07:05 UTC; a slow API day with retries can take until about
+  # 10:00): only once the job is installed, i.e. the lake exists
+  if [ -d "$data/pokemon" ]; then
+    local pj
+    pj=$(tail -1 "$data/pokemon/paper/journal.csv" 2>/dev/null | cut -d, -f1)
+    if [ "$pj" = "$today" ] || { [ "$hour" -lt 10 ] && [ "$pj" = "$(date -u -d yesterday +%F)" ]; }; then
+      add "pokemon cards" true "last run $pj"
+    else
+      add "pokemon cards" false "last run ${pj:-none}, expected $today"
+    fi
+  fi
+
+  # Trending watcher: a snapshot in the last 45 minutes (cron every 15)
+  local tj="$data/reports/trending/latest.json"
+  if [ -f "$tj" ] && [ $(( now - $(stat -c %Y "$tj") )) -lt 2700 ]; then
+    add "trending watcher" true "last snapshot $(date -u -d @"$(stat -c %Y "$tj")" +%H:%M) UTC"
+  else
+    add "trending watcher" false "no snapshot in the last 45 minutes"
+  fi
+
   # Shadow model service answers and is live
   local ml
   ml=$(curl -s -m 5 127.0.0.1:8787/api/ml/status | python3 -c "import json,sys;s=json.load(sys.stdin);print(s['state'], s['shadow']['scored'])" 2>/dev/null)
@@ -114,6 +134,23 @@ print('%s|%s' % ('true' if h.get('ok') else 'false', '; '.join(parts)))
     true\|*) add "market data" true "${md#true|}" ;;
     false\|*) add "market data" false "${md#false|}" ;;
     *) add "market data" false "no answer from the engine" ;;
+  esac
+
+  # CS2 collector (hourly at :12): the last run within three hours and both Skinport calls ok
+  local cs
+  cs=$(python3 -c "
+import json, sys, time
+from datetime import datetime, timezone
+s = json.load(open('$data/cs2/collector.json'))
+age = (time.time() - datetime.strptime(s['at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp()) / 3600
+ok = s.get('ok') and age < 3
+print('%s|last run %s UTC, %s items, Steam %s of %s%s' % ('true' if ok else 'false', s['at'][:16], s.get('skinport_items'),
+      s.get('steam_ok'), s.get('steam_requested'), ', rate limited' if s.get('steam_rate_limited') else ''))
+" 2>/dev/null)
+  case "$cs" in
+    true\|*) add "cs2 collector" true "${cs#true|}" ;;
+    false\|*) add "cs2 collector" false "${cs#false|}" ;;
+    *) add "cs2 collector" false "no collector.json" ;;
   esac
 
   local free

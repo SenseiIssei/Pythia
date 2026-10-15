@@ -44,6 +44,15 @@ tsmom_tranches' signal carries the combined target weights of all seven
 tranches after the decision close, and its evidence is
 results/tsmom_tranches.md (out of sample at Alpaca-like costs).
 
+Factory books. A genome the strategy factory promoted (lab.factory: held-back
+gates, deflation over every trial counted, 30 forward shadow days) is listed in
+<data>/factory/promoted.json and stepped here as one more paper book,
+factory_<key>, with the same fills. Its target on a rebalance day of its own
+cadence is what the factory's simulator holds after the decision close (band
+applied); on other days it is left as it is. Factory books write no engine
+signal: nothing the factory makes reaches an autopilot or live trading on its
+own.
+
   --dry-run        print the books' holdings and the signals; write nothing
   --signals-only   refresh the signal files without stepping the paper books
   --universe NAME  the same three rules choosing only among a universe
@@ -119,6 +128,33 @@ def targets(P: fc.Panel, member: np.ndarray | None = None) -> dict[str, np.ndarr
     }
 
 
+def factory_books() -> dict[str, dict]:
+    """Paper books the strategy factory promoted, by book name. Empty when there are none."""
+    try:
+        from ..factory import shadow
+        return dict(shadow.promoted().get("books") or {})
+    except (OSError, ValueError, KeyError, ImportError):
+        return {}
+
+
+def factory_row(P: fc.Panel, genome: dict, t: int, always: bool = False) -> np.ndarray:
+    """(N,) the factory book's target for the decision close t: its simulated holdings
+    on a rebalance day of its cadence, NaN ("leave it") on every other day. A book in
+    tranches rebalances one tranche every day, so its target is set daily. always:
+    the holdings whatever the day (where a new book starts)."""
+    from ..factory import build
+    row = np.full(P.N, np.nan)
+    r = genome["rebalance"]
+    if not always and r.get("tranches", 1) == 1 and (int(P.days[t]) // fc.DAY_US) % r["every"]:
+        return row
+    c = build.make_ctx(P)
+    held = build.holdings(c, genome, t)
+    row[:] = 0.0
+    for name, x in held.items():
+        row[P.col(name)] = x
+    return row
+
+
 def held_now(W: np.ndarray, t: int) -> np.ndarray:
     """The last decided weight of every column up to day t: what the backtest
     holds going into t, before drift. 0 where nothing was ever decided."""
@@ -135,7 +171,7 @@ def book_name(name: str, universe: str | None) -> str:
 def variant(name: str) -> str:
     """The journal's description of a book, `<book>@<universe>` included."""
     base, _, u = name.partition("@")
-    return BOOKS[base] + (f" · choosing only among universe {u}" if u else "")
+    return BOOKS.get(base, base) + (f" · choosing only among universe {u}" if u else "")
 
 
 def step(name: str, row_w: np.ndarray, P: fc.Panel, t: int, quotes: dict[str, tuple[float, float]],
@@ -571,7 +607,30 @@ def main() -> int:
             st = json.loads(f.read_text())
             held |= set(st.get("weights", {})) | {s for w in st.get("tranches", []) for s in w}
     wanted = {P.names[j] for w in W.values() for j in np.flatnonzero(np.nan_to_num(w[t], nan=1.0) != 0)}
+    frows = {}
+    # Factory books are no universe books: a --universe run leaves them alone.
+    for name, book in (factory_books() if universe is None else {}).items():
+        g = book["genome"]
+        try:
+            row = factory_row(P, g, t)
+            # A new book starts where the backtest stands, whatever the weekday.
+            start_row = factory_row(P, g, t, always=True)
+        except Exception as e:  # noqa: BLE001 - a broken factory book must not stop the others
+            print(f"{name}: factory book skipped ({type(e).__name__}: {e})", file=sys.stderr)
+            continue
+        frows[name] = (book, row, start_row)
+        f = ROOT / "paper" / name / "state.json"
+        if f.exists():
+            held |= set(json.loads(f.read_text()).get("weights", {}))
+        wanted |= {P.names[j] for j in np.flatnonzero(np.nan_to_num(start_row) > 0)}
     quotes = live_quotes(sorted((held | wanted) - {s for s in wanted if "~" in s}))
+
+    for name, (book, row, start_row) in frows.items():
+        if dry:
+            print(name, "factory book", book["name"], json.dumps(
+                {P.names[j]: round(float(start_row[j]), 4) for j in np.flatnonzero(start_row > 0)}))
+            continue
+        print(name, json.dumps(step(name, row, P, t, quotes, now_us, start_row)))
 
     for name, w in W.items():
         base = name.partition("@")[0]

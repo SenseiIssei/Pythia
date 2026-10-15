@@ -1,21 +1,5 @@
-@import "@fontsource/jetbrains-mono/400.css";
-@import "@fontsource/jetbrains-mono/500.css";
-@import "@fontsource/jetbrains-mono/700.css";
-
-:root {
-  --cyber-bg: #0a0a0f;
-  --cyber-surface: #13131a;
-  --cyber-surface-2: #1a1a24;
-  --cyber-border: #1e1e2a;
-  --cyber-border-bright: #2a2a3e;
-  --cyber-text: #e6e6ee;
-  --cyber-text-dim: #9a9ab2;
-  --cyber-text-faint: #7d7d93;
-  --accent-cyan: #00f0ff;
-  --accent-purple: #a855f7;
-  --danger: #ef4444;
-  color-scheme: dark;
-}
+/* Global look. Colours, radii and the font come from the token stylesheet
+   that src/design/theme.ts installs (see src/design/tokens.ts). */
 
 * {
   box-sizing: border-box;
@@ -30,17 +14,16 @@ body,
   background: transparent;
 }
 
-/* Running text in the system sans, which reads far more easily in paragraphs
-   and fits a phone; numbers, headings and labels opt into the monospace with
-   `font-mono`, which keeps Pythia's look. */
 body {
-  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: 15px;
   line-height: 1.5;
-  color: var(--cyber-text);
+  color: var(--color-text);
   overflow: hidden;
   user-select: none;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv11", "ss01";
 }
 
 /* Text people may want to copy stays selectable. */
@@ -52,19 +35,28 @@ code {
   user-select: text;
 }
 
-/* Frameless rounded window body */
+/* Real code keeps a monospace face. */
+pre,
+code,
+kbd,
+pre.font-mono,
+code.font-mono {
+  font-family: var(--font-code);
+}
+
+/* The window body: rounded in the desktop app, edge to edge in a browser tab
+   or an iframe. */
 .app-window {
   border-radius: 12px;
   overflow: hidden;
-  background: var(--cyber-bg);
-  border: 1px solid var(--cyber-border);
+  background: var(--color-bg);
+  border: 1px solid var(--color-line);
   height: 100vh;
   height: 100dvh;
   display: flex;
   flex-direction: column;
 }
 
-/* A phone has no window frame to round. */
 @media (max-width: 767px) {
   .app-window {
     border-radius: 0;
@@ -72,18 +64,20 @@ code {
   }
 }
 
-/* Numbers line up in columns wherever the monospace is used. */
-.font-mono {
+/* Numbers line up in columns. */
+.font-mono,
+.tabular {
   font-variant-numeric: tabular-nums;
 }
 
-/* Native form controls follow the dark theme. */
 select option {
-  background: var(--cyber-surface);
-  color: var(--cyber-text);
+  background: var(--color-surface);
+  color: var(--color-text);
 }
-input[type="range"] {
-  accent-color: var(--accent-cyan);
+input[type="range"],
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--color-accent);
 }
 
 /* Draggable custom titlebar */
@@ -91,66 +85,54 @@ input[type="range"] {
   -webkit-app-region: drag;
 }
 .titlebar button,
-.titlebar a {
+.titlebar a,
+.titlebar input {
   -webkit-app-region: no-drag;
 }
 
-/* Faint grid background */
+/* The neon effects of the old look are switched off here, so pages that
+   still carry the classes look calm without being edited. */
 .grid-bg {
-  background-image:
-    linear-gradient(rgba(30, 30, 42, 0.5) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(30, 30, 42, 0.5) 1px, transparent 1px);
-  background-size: 24px 24px;
+  background-image: none;
 }
-
-/* Glow utilities */
-.glow-cyan {
-  box-shadow: 0 0 12px rgba(0, 240, 255, 0.3), 0 0 4px rgba(0, 240, 255, 0.2);
-}
-.glow-cyan-strong {
-  box-shadow: 0 0 20px rgba(0, 240, 255, 0.5), 0 0 8px rgba(0, 240, 255, 0.3);
-}
-.glow-purple {
-  box-shadow: 0 0 12px rgba(168, 85, 247, 0.3), 0 0 4px rgba(168, 85, 247, 0.2);
-}
-.glow-green {
-  box-shadow: 0 0 12px rgba(34, 197, 94, 0.3);
-}
+.glow-cyan,
+.glow-cyan-strong,
+.glow-purple,
+.glow-green,
 .glow-red {
-  box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);
+  box-shadow: none;
 }
-.text-glow-cyan {
-  text-shadow: 0 0 8px rgba(0, 240, 255, 0.5);
-}
-.text-glow-purple {
-  text-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
-}
+.text-glow-cyan,
+.text-glow-purple,
 .text-glow-red {
-  text-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+  text-shadow: none;
+}
+.scan-overlay {
+  position: relative;
 }
 
-/* Scrollbars */
+/* Scrollbars: thin and quiet. */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a3e;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #3a3a5e;
+  background: var(--color-line-strong);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 ::selection {
-  background: rgba(0, 240, 255, 0.3);
+  background: rgb(var(--pt-accent) / 0.22);
 }
 
+/* One focus ring everywhere: the accent, offset from the control. */
 :focus-visible {
-  outline: 2px solid var(--accent-cyan);
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
@@ -164,18 +146,30 @@ input[type="range"] {
   }
 }
 
-/* Animated scan line overlay */
-.scan-overlay {
-  position: relative;
-  overflow: hidden;
+/* Skeleton shimmer */
+.pt-skeleton {
+  background: var(--color-surface-2);
+  border-radius: 10px;
+  animation: pt-pulse 1.4s ease-in-out infinite;
 }
-.scan-overlay::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.6), transparent);
-  animation: scan-line 3s linear infinite;
+@keyframes pt-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* Hide a scrollbar on chip rows that scroll sideways inside themselves. */
+.pt-noscrollbar {
+  scrollbar-width: none;
+}
+.pt-noscrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.pt-safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
