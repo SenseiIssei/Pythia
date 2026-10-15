@@ -29,5 +29,15 @@ describe("flow tokens", () => {
         }
       }
     });
+
+    it(`button labels read at AA in ${name}`, () => {
+      expect(contrastRatio(t["on-primary"], t.primary), "on-primary").toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(t["on-down"], t.down), "on-down").toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(t.text, t["surface-2"]), "secondary button").toBeGreaterThanOrEqual(4.5);
+    });
   }
+
+  it("keeps the media-query dark block in step with the explicit one", () => {
+    expect(block(':root:not([data-theme="light"]) .fl {')).toEqual(block(':root[data-theme="dark"] .fl,'));
+  });
 });

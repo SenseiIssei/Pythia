@@ -333,6 +333,39 @@ export function Empty({ icon: Icon, title, children, action }: { icon?: LucideIc
   );
 }
 
+export interface TabItem<T extends string> {
+  id: T;
+  label: string;
+  icon: LucideIcon;
+}
+
+/** The phone's bottom tab bar: icon over a short label, the active one in full colour. */
+export function TabBar<T extends string>({ items, active, onSelect, label = "Tabs" }: { items: TabItem<T>[]; active: T; onSelect: (id: T) => void; label?: string }) {
+  return (
+    <nav aria-label={label} className="fl fl-tabbar shrink-0">
+      <ul className="grid" style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
+        {items.map((t) => {
+          const on = t.id === active;
+          const Icon = t.icon;
+          return (
+            <li key={t.id}>
+              <button
+                type="button"
+                onClick={() => onSelect(t.id)}
+                aria-current={on ? "page" : undefined}
+                className={`fl-focus flex min-h-[52px] w-full flex-col items-center justify-center gap-0.5 px-1 text-[11px] font-semibold ${on ? "fl-text" : "fl-muted"}`}
+              >
+                <Icon size={22} strokeWidth={on ? 2.4 : 1.8} aria-hidden />
+                <span className="max-w-full truncate">{t.label}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
+  );
+}
+
 export function Skeleton({ className = "h-4 w-full" }: { className?: string }) {
   return <div className={`fl-skeleton ${className}`} aria-hidden />;
 }
