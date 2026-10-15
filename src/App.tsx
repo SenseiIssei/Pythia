@@ -31,6 +31,7 @@ import { Signals } from "./pages/Signals";
 import { Predictions } from "./pages/Predictions";
 import { Models } from "./pages/Models";
 import { Lab } from "./pages/Lab";
+import { Cs2 } from "./pages/Cs2";
 import { Research } from "./pages/Research";
 import { Live } from "./pages/Live";
 import { Risk } from "./pages/Risk";
@@ -55,6 +56,7 @@ const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
   optimizer: Optimizer,
   analytics: Analytics,
   correlation: Correlation,
+  cs2: Cs2,
   signals: Signals,
   predictions: Predictions,
   models: Models,

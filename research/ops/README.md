@@ -19,6 +19,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
+| hourly :12 | CS2 skins: Skinport snapshots and sales history, Steam prices for the watchlist, then models (refit daily), alerts, the play-money portfolio (weekly) and the board for the app (`lab.collect.cs2`, then `lab.cs2.run`; 2 Skinport requests and up to 100 Steam requests, about 6 minutes) | `/etc/cron.d/pythia-cs2` |
 | every 15 min | trending watcher: DexScreener boosted tokens, Binance gainers and volume surges, surge alerts on coins Alpaca lists, a daily on-chain hype digest from 08:00 (`lab.ops.trending`, seconds; reads only) | `/etc/cron.d/pythia-trending` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 | every 10 minutes | listings watcher: new pairs on Alpaca, Binance, Coinbase, Kraken and Binance listing announcements, posted to Telegram (`lab.ops.listings`, seconds); then the listings paper book, off unless the W6 rule passed (`lab.paper.listings_book`) | `/etc/cron.d/pythia-listings` |
@@ -366,6 +367,75 @@ posts quiet hours held back. Otherwise it does nothing.
 **One card from a script.** `python3 /opt/pythia-ops/notify.py --event venue "Disk almost full" "12 GB left"`
 (after `set -a; . /etc/pythia/alerts.env` and with `PYTHIA_DATA=/srv/pythia-data`),
 in any of the categories listed in `docs/ALERTS.md`.
+
+## CS2 skins (W8)
+
+Market data, predictions, a play-money portfolio and alerts for the CS2 skins
+market. **Nothing buys or sells**: automated trading on the Steam Community
+Market or any skin marketplace breaks their terms and puts the account at
+risk, so the owner trades by hand, if at all. The sources are public and need
+no key: Skinport's `/v1/items` and `/v1/sales/history` (8 requests per 5
+minutes allowed, the job makes 2 an hour) and Steam's `priceoverview` (one
+request every 3.2 s, at most 100 a run, a 429 waits 60 s then 120 s and a
+third ends the Steam part of the run; the watchlist resumes where it stopped).
+After a run Steam refused outright, the next run knocks once and stops at the
+first 429 without waiting (`steam_cooling` in `cs2/collector.json`).
+
+Steam on the first real run (2026-10-15, from the PC): Skinport answered
+(25,143 items, 36,470 sales rows), Steam answered every `priceoverview`
+request from the collector with 429, from the first one on, while the same
+URL fetched with curl from the same machine at the same time was answered.
+Steam treats some clients differently; the collector does not try to look
+like another client. Check `steam_ok` in `cs2/collector.json` after the
+first runs on the lab machine: until it is above 0 the spread study, the gap
+alerts and the Steam column stay empty, and everything else works on
+Skinport alone.
+
+The image needs `brotli` (in `requirements.txt`): rebuild it once.
+
+```bash
+docker build -t pythia-lab /opt/pythia-lab
+```
+
+`/etc/cron.d/pythia-cs2` (default bridge network: it needs the internet, not
+the engines; the env file only for the Telegram alerts):
+
+```cron
+# Pythia: CS2 skins, hourly. Collects public prices, refits daily, alerts, paper portfolio. Never trades.
+12 * * * * root docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.cs2 >> /var/log/pythia-cs2.log 2>&1; docker run --rm --memory 4g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.cs2.run >> /var/log/pythia-cs2.log 2>&1
+```
+
+What it writes, under `/srv/pythia-data`:
+
+| Path | What |
+|---|---|
+| `cs2/skinport_items/date=*/HHMM.parquet` | every item each hour: lowest and highest ask, mean, median, listings |
+| `cs2/skinport_sales/date=*/HHMM.parquet` | 24 h, 7, 30 and 90-day sales min, max, average, median, volume |
+| `cs2/steam_prices/date=*/HHMM.parquet` | the watchlist (cases, popular skins, sticker capsules from `lab/collect/cs2_watchlist.json`, plus the 40 most traded Skinport items): lowest ask, median, 24 h volume |
+| `cs2/daily/{skinport,steam}/date=*.parquet` | the day's last snapshot per item, what the models read |
+| `cs2/model/` | today's predictions, how they were made and the research summary |
+| `cs2/paper/state.json`, `journal.csv` | the play-money portfolio (10,000 EUR) |
+| `cs2/alerts.jsonl`, `alerts_state.json` | alerts sent, 24 h cooldown per item and kind |
+| `reports/cs2/latest.json` | hourly: the lab feed (title, status, headline, items; `docs/LAB-FEEDS.md`) for the Research page and Home, and the board for the CS2 Skins page (`rows`, `portfolio`, `alerts`, `research`) |
+| `reports/cs2/<date>.json`, `latest.md` | the research report, daily (`results/cs2.md` in the repo) |
+| `reports/cs2_weekly/` | the weekly paper report, at each weekly look (a feed too) |
+
+About 1.5 MB a run (0.6 MB items, 0.9 MB sales history), so about 35 MB a
+day and 13 GB a year; the models read only `cs2/daily/` (about 1.5 MB a
+day), so the hourly folders can be thinned later without losing a model
+input. Alerts (cross-market gaps of 5 % or more after both
+venues' fees in items Steam trades 20 a day or more; liquid items 15 % under
+their 30-day median and 10 % down in 24 h) and the weekly summary go to the
+same Telegram chat or webhook as the digest. Drop pool changes and new
+operations go into `events` in `lab/collect/cs2_watchlist.json` as they
+happen, for the event study. Run once by hand, without posting:
+
+```bash
+docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.cs2 --steam-max 10
+docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.cs2.run --dry-run
+```
+
+The health check has a `cs2 collector` row (last run within three hours).
 
 ## Trending watcher
 
