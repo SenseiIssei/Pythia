@@ -188,3 +188,5 @@ def test_a_burst_is_capped_and_the_feed_status_follows_the_venues(root):
     assert all(i["status"] == "ok" for i in rec["items"]) and len(rec["items"]) == 14
     assert L.feed_summary([], {"binance": {"ok": False}, "kraken": {"ok": False}}, T0)["status"] == "bad"
     assert L.feed_summary([], {"binance": {"ok": True}}, T0)["status"] == "ok"
+    s = L.feed_summary([], {"binance": {"ok": True}, "alpaca": {"ok": False, "error": "no Alpaca keys"}}, T0)
+    assert s["status"] == "ok" and s["headline"].endswith("Alpaca not watched (no keys).")
