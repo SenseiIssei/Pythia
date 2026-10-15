@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Hourly check of everything Pythia runs on the VPS, written to
-# /srv/pythia-data/_health/system.json for the Lab page. Read-only: it looks,
-# it never restarts anything.
+# /srv/pythia-data/_health/system.json for the Lab page: containers, streams,
+# every job of the job table (jobs.py checks), paper books, models, market
+# data, disk and data growth per dataset. It looks, it never restarts
+# anything; the only files it writes are the health and job status files.
 #
-#   install: copy to /opt/pythia-ops/ and add to cron (see research/ops/README.md)
+#   install: research/ops/deploy_ops.sh; runs as the job "health" of jobs.yaml
 set -uo pipefail
 
 main() {
-  local data=/srv/pythia-data
+  local data=${PYTHIA_HEALTH_DATA:-/srv/pythia-data}
   local out="$data/_health/system.json"
   local now today
   now=$(date -u +%s)
@@ -15,7 +17,8 @@ main() {
   local checks=()
 
   add() { # name ok detail
-    local d=${3//\"/\'}
+    local d=${3//\\/\/}
+    d=${d//\"/\'}
     checks+=("{\"name\":\"$1\",\"ok\":$2,\"detail\":\"$d\"}")
   }
 
@@ -57,13 +60,23 @@ print('true|' + '; '.join('%s %s, %+.2f %% since %s' % (x['config']['name'], x['
     add "recorder streams" false "no status file"
   fi
 
-  # Nightly backfill finished within the last 30 hours
-  local last_done
-  last_done=$(grep "done:" /var/log/pythia-backfill.log 2>/dev/null | tail -1 | cut -c1-19)
-  if [ -n "$last_done" ] && [ $(( now - $(date -u -d "$last_done" +%s) )) -lt 108000 ]; then
-    add "nightly backfill" true "last finished $last_done UTC"
+  # Every job of the table (research/ops/jobs.yaml): late, failing, blocked or
+  # stuck goes red. Also the disk and each dataset's size, growth and limit.
+  # jobs.py writes _health/jobs.json on the way, which the Lab page shows.
+  local jobs_py=${PYTHIA_JOBS_PY:-/opt/pythia-ops/jobs.py}
+  local have_jobs=false
+  if [ -f "$jobs_py" ]; then
+    local lines
+    if lines=$(python3 "$jobs_py" checks 2>&1); then
+      have_jobs=true
+      while IFS=$'\t' read -r name ok detail; do
+        [ -n "$name" ] && add "$name" "$ok" "$detail"
+      done <<< "$lines"
+    else
+      add "job table" false "jobs.py checks failed: $(printf '%s' "$lines" | tail -1)"
+    fi
   else
-    add "nightly backfill" false "last finished ${last_done:-never}"
+    add "job table" false "$jobs_py not installed"
   fi
 
   # Paper books: a row for today once their run time has passed (04:00, 04:15, 04:45 and 05:30 UTC + margin)
@@ -153,9 +166,11 @@ print('%s|last run %s UTC, %s items, Steam %s of %s%s' % ('true' if ok else 'fal
     *) add "cs2 collector" false "no collector.json" ;;
   esac
 
-  local free
-  free=$(df -BG --output=avail "$data" | tail -1 | tr -dc 0-9)
-  if [ "${free:-0}" -gt 20 ]; then add "disk" true "${free} GB free"; else add "disk" false "only ${free} GB free"; fi
+  if [ "$have_jobs" = false ]; then
+    local free
+    free=$(df -BG --output=avail "$data" | tail -1 | tr -dc 0-9)
+    if [ "${free:-0}" -gt 20 ]; then add "disk" true "${free} GB free"; else add "disk" false "only ${free} GB free"; fi
+  fi
 
   local all=true
   for c in "${checks[@]}"; do case $c in *'"ok":false'*) all=false ;; esac; done
@@ -168,6 +183,7 @@ print('%s|last run %s UTC, %s items, Steam %s of %s%s' % ('true' if ok else 'fal
   local notify=${PYTHIA_NOTIFY_PY:-/opt/pythia-ops/notify.py}
   local envfile=${PYTHIA_ALERT_ENV:-/etc/pythia/alerts.env}
   if [ -f "$notify" ] && [ -r "$envfile" ]; then
+    # shellcheck source=/dev/null
     ( set -a; . "$envfile"; set +a; python3 "$notify" --health "$out" ) || true
   fi
 }

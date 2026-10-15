@@ -25,19 +25,171 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 | every 10 minutes | listings watcher: new pairs on Alpaca, Binance, Coinbase, Kraken and Binance listing announcements, posted to Telegram (`lab.ops.listings`, seconds); then the listings paper book, off unless the W6 rule passed (`lab.paper.listings_book`) | `/etc/cron.d/pythia-listings` |
 
-## Health check
+Since W14 the schedules above live in one table, `research/ops/jobs.yaml`,
+and `/etc/cron.d/pythia-jobs` is rendered from it. The hand-written cron
+files named in the right column, and the cron lines quoted in the sections
+below, are what each job replaced; the table's `command` is the same command.
 
-`system_health.sh` looks at the containers, the recorder's streams, the last
-backfill, each paper book's last row, the model service and the engine's
-market data (`dataHealth` in `/api/state`), and writes
-`/srv/pythia-data/_health/system.json`. It never restarts anything. The Lab
-page shows it ("Is everything running?"); the PC gets it with the sync.
+## Bootstrap a fresh server
 
-Install or update:
+One command, as root, on a Linux server with internet access:
 
 ```bash
-scp research/ops/system_health.sh pythia-vps:/tmp/ && ssh pythia-vps 'install -m 755 /tmp/system_health.sh /opt/pythia-ops/system_health.sh'
+git clone https://github.com/SenseiIssei/Pythia.git /opt/pythia-src && /opt/pythia-src/research/ops/bootstrap.sh
 ```
+
+It installs what is missing (docker, rsync, python3, flock, curl), creates
+`/srv/pythia-data`, `/srv/pythia-backup`, `/var/log/pythia` and `/etc/pythia`
+(root only, with an empty `alerts.env`), builds the images `pythia-lab`,
+`pythia-recorder` and `pythia-server`, deploys the lab code and the ops tools,
+renders the cron file, starts the recorder and the two engines (an existing
+container is never replaced) and runs the health check once. Then fill in
+`/etc/pythia/alerts.env` (see "Alerts and the daily digest") and, for the
+listings watcher, `/etc/pythia/alpaca-paper.env`. Running it again is safe;
+`--no-install`, `--no-build` and `--no-engines` leave those steps out.
+
+Update after a pull: `cd /opt/pythia-src && git pull && research/ops/bootstrap.sh --no-install --no-engines`,
+or only the part that changed:
+
+```bash
+research/ops/deploy_lab.sh     # the lab code in /opt/pythia-lab
+research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, system_health.sh in /opt/pythia-ops, then render
+```
+
+## The job table
+
+`research/ops/jobs.yaml` lists every scheduled job once: name, schedule
+(UTC cron) or `depends_on` alone (runs right after its dependencies
+succeed), command (in the `pythia-lab` image with the lab code at `/app`,
+another image, or on the host), resources, timeout, lock, dependencies,
+`enabled`. The header of the file explains each field. `lab.ops.jobs`
+(installed as `/opt/pythia-ops/jobs.py`, standard library only, so the host's
+`python3` runs it) does the rest:
+
+| Command | What |
+|---|---|
+| `jobs.py validate` | checks the table and lists the jobs |
+| `jobs.py render [--dry-run] [--prune-legacy]` | writes `/etc/cron.d/pythia-jobs` |
+| `jobs.py run <job> [--force]` | runs one job the way cron does (`--force` runs a disabled one and skips the dependency check) |
+| `jobs.py status [--write]` | last run, next run, failures of every job, as JSON |
+| `jobs.py checks` | the health check's rows: every job, the disk, every dataset |
+| `jobs.py disk [--now]` | size and growth per dataset |
+| `jobs.py prune [--dry-run]` | the retention rules |
+| `jobs.py backup [--dry-run]` | archive the important state, rotate |
+
+Every cron line runs `jobs.py run <job>`, which wraps the job the same way
+each time:
+
+- **Lock.** An exclusive `flock` on `/run/lock/pythia/<lock>.lock` (the same
+  kernel lock `flock(1)` takes; it goes with the process, so a killed run
+  never leaves a stale lock). A run whose lock is busy waits up to
+  `lock_wait`, then is recorded as skipped. The heavy nightly jobs share the
+  lock `heavy`, so two of them never compete for memory.
+- **Dependencies.** A job with `depends_on` runs only when each dependency
+  succeeded within `depends_within` (20 h) and is not running; otherwise the
+  run is recorded as blocked and the job turns red.
+- **Timeout.** Past `timeout` the container is `docker kill`ed and the
+  process group stopped; the run is recorded as `timeout` (exit 124).
+- **Log.** Output goes to `/var/log/pythia/<job>.log`, rotated by size
+  (`log_max_mb`, `log_keep` in the table).
+- **Run record.** One JSON line per run in the data lake,
+  `/srv/pythia-data/_ops/runs/<YYYY-MM>.jsonl` (job, start, end, duration,
+  exit code, status, reason), read with
+  `pl.read_ndjson("/srv/pythia-data/_ops/runs/*.jsonl")`.
+- **Status.** `/srv/pythia-data/_health/jobs.json` is rewritten after every
+  run: each job's state (ok, running, never, disabled, legacy, failed,
+  timeout, late, blocked, stuck), last run, last success, next run and
+  failure streak. The engine serves it in `/api/lab` (`jobs`) and the Lab page
+  shows it as "Scheduled jobs".
+- **Alert.** A job's first failure, and its recovery, posts one line through
+  `notify.py` with the settings in `/etc/pythia/alerts.env` (`alert: false`
+  turns it off for a job).
+
+A job is **late** when its last scheduled fire is past its timeout plus
+`grace` (15 minutes) and no run started for it; fires before the job went
+live in the rendered file do not count.
+
+**Switching from the hand-written cron files.** Each job names the file it
+replaces (`replaces: pythia-learn`). While that file is still in
+`/etc/cron.d`, the job stays commented out in the rendered file (state
+`legacy`), so nothing ever runs twice. Compare first, then hand over:
+
+```bash
+research/ops/deploy_ops.sh                     # installs and renders; the replaced jobs are held
+python3 /opt/pythia-ops/jobs.py render --dry-run
+cat /etc/cron.d/pythia-*                       # the old lines, to compare with jobs.yaml
+research/ops/deploy_ops.sh --prune-legacy      # moves them to /etc/pythia/cron-legacy/, the table takes over
+```
+
+To undo, move a file back from `/etc/pythia/cron-legacy/` and render again.
+
+**Adding a job** (a new collector, a study): add an entry to `jobs.yaml`,
+`research/ops/deploy_ops.sh`, done. Its log, lock, run record, status row,
+health row and alert come with it. Try it first with
+`python3 /opt/pythia-ops/jobs.py run <job> --force`. Jobs whose module is not
+deployed yet are in the table with `enabled: false`.
+
+## Data growth and retention
+
+The `datasets` section of the table names each folder of the data lake. The
+health check measures them (at most every 6 hours, `_ops/disk/history.jsonl`)
+and turns red when free space is under `min_free_gb`, when the disk would be
+full within 14 days at the last week's growth, or when a dataset is over its
+`max_gb`. A dataset with `retention_days` loses files older than that (by
+modification time, only names matching its `pattern`, never through a
+symlink) in the nightly `prune` job; the others are never deleted from. See
+it first: `python3 /opt/pythia-ops/jobs.py prune --dry-run`.
+
+## Backup
+
+The nightly `backup` job archives the state that cannot be rebuilt from
+market data (both engines' state files, the model registry and published
+models, the paper books and the CS2 play-money portfolio, engine signals,
+the learning loop's ledgers, the learned costs, the factory's trial ledger,
+the forward evidence) into `/srv/pythia-backup/pythia-state-<UTC time>.tar.gz`,
+mode 600, with a `.sha256` and a `.json` manifest. Each archive is read back
+before it is kept. It keeps the newest of each of the last 7 days and of each
+of the last 4 weeks (`keep_daily`, `keep_weekly`). The list is `backup.include`
+in the table.
+
+The archives are on the same disk as the data: copy them off the server too,
+for example by adding `/srv/pythia-backup` to the PC sync. Restore one:
+
+```bash
+sha256sum -c /srv/pythia-backup/pythia-state-<time>.tar.gz.sha256
+docker stop pythia-server pythia-autopilot
+tar -xzf /srv/pythia-backup/pythia-state-<time>.tar.gz -C /srv/pythia-data
+docker start pythia-server pythia-autopilot
+```
+
+## Deploying the lab code
+
+`research/ops/deploy_lab.sh` copies `research/lab` to `/opt/pythia-lab`
+(the folder the lab image mounts at `/app`). It refuses while a job
+container runs, so no job sees half old, half new code (`--force` overrides). The code is synced with
+`--delete`; `results/` and every cache are excluded from that, so what the
+studies wrote on the server is never overwritten or deleted. New files under
+the repo's `results/` (a seed such as `results/factory_seed`, a new study's
+write-up) are added only where the server has none. Afterwards every deployed
+file is checked against a sha256 manifest (`.deploy-manifest`) and every file
+`results/` had before must still be there unchanged; otherwise the script
+fails. `.deploy-info` says which commit is deployed. `--dry-run` shows what
+would change. Rebuild the image only when `research/lab/requirements.txt`
+changed: `docker build -t pythia-lab /opt/pythia-lab`.
+
+## Health check
+
+`system_health.sh` looks at the containers, the recorder's streams, every job
+of the table (late, failing, blocked or stuck jobs go red, through
+`jobs.py checks`), the disk and every dataset's size and growth, each paper
+book's last row, the model service and the engine's market data
+(`dataHealth` in `/api/state`), and writes
+`/srv/pythia-data/_health/system.json`. It never restarts anything. The Lab
+page shows it ("Is everything running?"); the PC gets it with the sync. Red
+for two runs in a row posts once to Telegram (below, "Health alarm").
+
+It runs as the job `health` of the table. Install or update with
+`research/ops/deploy_ops.sh` on the server.
 
 ## Forward report
 
