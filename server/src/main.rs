@@ -952,6 +952,8 @@ async fn main() {
                 axum::http::StatusCode::ACCEPTED
             }),
         )
+        // The model zoo's daily report from the lab (null until it has run). Read-only.
+        .route("/api/ml/zoo", get(|| async { Json(pythia_core::labview::model_zoo()) }))
         .route("/api/tax", get(get_tax))
         .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
         .route("/api/lab/feeds", get(|| async { Json(pythia_core::labview::feeds()) }))

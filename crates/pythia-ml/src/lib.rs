@@ -12,6 +12,7 @@ pub mod picks;
 pub mod picks_shadow;
 pub mod shadow;
 pub mod vol;
+pub mod zoo;
 
 pub use card::Card;
 pub use gbdt::Gbdt;

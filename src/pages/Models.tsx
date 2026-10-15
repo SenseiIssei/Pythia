@@ -6,6 +6,8 @@ import { outlook } from "../pagekit/insight";
 import { liveMode } from "../live";
 import { mlStatus, type MlStatus } from "../ml";
 import { DriftRows, PicksPanel } from "../components/PicksPanel";
+import { ModelZoo } from "../components/ModelZoo";
+import { modelZoo, type ZooStatus } from "../zoo";
 
 const fmtVol = (v: number) => pct(v, 0);
 const NONE = "not yet";
@@ -16,6 +18,7 @@ export function Models() {
   const mode = liveMode();
   const [s, setS] = useState<MlStatus | null>(null);
   const [err, setErr] = useState("");
+  const [zoo, setZoo] = useState<ZooStatus | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -23,6 +26,12 @@ export function Models() {
       setErr("");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    }
+    // The zoo is the lab's daily report; an engine without it still shows the live models.
+    try {
+      setZoo(await modelZoo());
+    } catch {
+      setZoo(null);
     }
   }, []);
 
@@ -97,6 +106,8 @@ export function Models() {
           <LoadingRows label="Reading the models" />
         </Card>
       )}
+
+      {zoo && zoo.models.length > 0 && <ModelZoo z={zoo} />}
 
       {s && s.state !== "live" && (
         <Notice

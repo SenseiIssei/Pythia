@@ -14,6 +14,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
+| 07:15 | model zoo: retrains the zoo models that are due, promotes a challenger only if better out of sample, shadow forecasts and scores, drift, the Models page report; posts promotions and drift (`lab.models.train --due`, about 5 minutes; longer on Sundays when M8, M8q and M10 retrain) | `/etc/cron.d/pythia-models` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
@@ -178,6 +179,47 @@ are used only if the operator opts in: add
 to the autopilot engine's `docker run` and recreate the container (the cost
 file is read at start). Until a symbol has 30 demo market fills the learned
 file equals the base table for it.
+
+## Model zoo
+
+`lab.models.train --due` is the one entry point for every model the zoo
+trains itself (M8 direction, M8q return quantiles, M10 regime-aware daily
+volatility, M11 slippage of the demo fills, M12 BTC and SPY correlation
+regime). M1 and M2 stay with the learning loop above; the zoo only reports
+on them. Each run, per model:
+
+| Step | What it does | Writes |
+|---|---|---|
+| data | builds the model's panel from the recorder's history, the learning loop's fills ledger (M11, from 30 market fills) or Yahoo's daily chart (M12, cached a day) | `models/zoo/_data/` |
+| retrain | when due (M8, M8q, M10 Sundays, M11 Mondays, M12 every 28 days): purged walk-forward against the model's baseline, a challenger folder, the registry's champion and challenger decision. A challenger that does not beat its baseline (gate: lower loss, Diebold-Mariano p below 0.05) is never promoted; one that does replaces the champion only if it is also better on the rows the champion never saw | `models/registry/<name>/`, `models/<name>/<version>/` |
+| shadow | the champion (or, without one, the newest candidate, marked as such) writes down its forecast for the newest day before the outcome is known; forecasts whose outcome is now known are scored against the baseline | `models/zoo/<name>/shadow.jsonl` |
+| drift | the last 30 days of each input against its training deciles, the engine's rules | in the report |
+| report | every model with its score against its baseline over time, last retrain, drift and who uses it, with the lab feed header | `reports/models/latest.json`, `latest.md` |
+
+A promotion, or a model whose inputs leave their trained range, is posted
+once through `lab.ops.notify` (Telegram or webhook from
+`/etc/pythia/alerts.env`). It writes only through `lab/ops/guard.py`: its
+own folders, the registry and the zoo's published model folders. No book
+reads a zoo model today; a model may be offered to one only after it passes
+its gate.
+
+`/etc/cron.d/pythia-models` (after the learning loop, which fills the M11
+ledger; Yahoo needs outbound network, no engine access):
+
+```cron
+# Pythia: model zoo. Retrains what is due, promotes a challenger only if better out of sample; shadow, drift, report; posts promotions and drift.
+15 7 * * * root docker run --rm --cpus 4 --memory 8g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --due >> /var/log/pythia-models.log 2>&1
+```
+
+Retrain one now, or only shadow and report:
+
+```bash
+docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --force m8q,m12 --no-notify
+```
+
+```bash
+docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --status --no-notify
+```
 
 ## Market data in the engine
 

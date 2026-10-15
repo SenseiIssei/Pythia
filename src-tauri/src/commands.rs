@@ -752,6 +752,12 @@ pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::M
     ml.read().map(|s| s.clone()).unwrap_or_default()
 }
 
+/// The model zoo's daily report from the synced lab folder (None until it has run). Read-only.
+#[tauri::command]
+pub fn ml_zoo() -> Option<pythia_core::labview::ZooStatus> {
+    pythia_core::labview::model_zoo()
+}
+
 /// M2 ranks the latest complete day now instead of waiting for the week.
 /// Shadow mode: it records the ranking, it never trades.
 #[tauri::command]
