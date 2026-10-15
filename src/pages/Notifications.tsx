@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Bell, BellOff, FileText, Image as ImageIcon, Moon, Send } from "lucide-react";
-import { Button, Card, Chip, Empty, ListRow, Page, SectionTitle, Sheet, Skeleton, type ChipTone } from "../design";
+import { Button, Card, Chip, Empty, ListRow, Page, SectionTitle, Segmented, Sheet, Skeleton, type ChipTone } from "../design";
 import { shortLine, timeOfDay, dayLabel } from "../flows/activity";
 import {
+  ALERT_LANGUAGES,
   MUTE_CHOICES,
   alertTitle,
   alertsAvailable,
@@ -12,6 +13,7 @@ import {
   fetchAlerts,
   fetchSettings,
   groupCategories,
+  languageOf,
   muteText,
   plainText,
   quietLine,
@@ -20,6 +22,7 @@ import {
   setMute,
   validHhmm,
   type AlertCategoryView,
+  type AlertLanguage,
   type AlertSettingsPatch,
   type AlertSettingsView,
   type AlertsView,
@@ -232,6 +235,28 @@ function CategoryRow({ c, busy, onToggle }: { c: AlertCategoryView; busy: boolea
   );
 }
 
+/** The language of the messages to the chat; the app itself stays in English. */
+function LanguageCard({ s, busy, onPick }: { s: AlertSettingsView; busy: boolean; onPick: (l: AlertLanguage) => void }) {
+  const { lang, note } = languageOf(s);
+  return (
+    <Card label="Message language">
+      <p className="text-[15px] font-semibold">Message language</p>
+      <p className="fl-muted text-sm">The language of the messages to the chat: cards, digests and charts. The app stays in English.</p>
+      <div className="mt-3" aria-disabled={busy || note != null}>
+        <Segmented
+          label="Message language"
+          options={ALERT_LANGUAGES}
+          value={lang}
+          onChange={(l) => {
+            if (!busy && note == null && l !== lang) onPick(l);
+          }}
+        />
+      </div>
+      {note && <p className="fl-muted mt-2 text-sm">{note}</p>}
+    </Card>
+  );
+}
+
 /**
  * What is sent and when: one switch per category, quiet hours and the size of
  * a big move. Saved on the server with the engine state; the lab's digests
@@ -334,6 +359,8 @@ function AlertSettings() {
           </div>
         )}
       </Card>
+
+      <LanguageCard s={s} busy={busy} onPick={(language) => void save({ language })} />
 
       <Card label="Big moves">
         <p className="text-[15px] font-semibold">Big moves</p>
