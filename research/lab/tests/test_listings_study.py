@@ -149,7 +149,7 @@ def test_results_file_keeps_the_preregistration(tmp_path, monkeypatch):
     text = (tmp_path / "listings.md").read_text()
     assert text.startswith("# listings\n\nPre-registered text.") and "\nold\n" not in text
     assert "## Results" in text and "Not measured: Kraken listing dates (x)." in text
-    assert "—" not in text
+    assert "\u2014" not in text
     import json
     rep = json.loads((tmp_path / "reports" / "listing_effect" / "latest.json").read_text())
     assert rep["passed"] is False and rep["verdict"].startswith("No rule passes")
