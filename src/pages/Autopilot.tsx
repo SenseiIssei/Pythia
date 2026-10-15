@@ -168,6 +168,7 @@ export function Autopilot() {
   const api = useAutopilotApi();
   const { limits } = useStore();
   const [selected, setSelected] = useState<string | null>(null);
+  const [another, setAnother] = useState(false);
   const analysisRef = useRef<HTMLDivElement>(null);
 
   const active = api.autopilots.filter(isActive).sort((a, b) => b.startedMs - a.startedMs);
@@ -210,9 +211,24 @@ export function Autopilot() {
           {active.length === 0 ? (
             <Setup onStart={api.start} />
           ) : (
-            active.map((s) => (
-              <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />
-            ))
+            <>
+              {active.map((s) => (
+                <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />
+              ))}
+              {/* Several run side by side, each in a book of its own on the shared account. */}
+              {another ? (
+                <Setup
+                  onStart={async (c) => {
+                    await api.start(c);
+                    setAnother(false);
+                  }}
+                />
+              ) : (
+                <Button tone="neutral" icon={Plane} onClick={() => setAnother(true)}>
+                  Start another autopilot next to {active.length === 1 ? "this one" : `these ${active.length}`}
+                </Button>
+              )}
+            </>
           )}
 
           <div ref={analysisRef} className="scroll-mt-4">
