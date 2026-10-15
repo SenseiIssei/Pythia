@@ -147,10 +147,11 @@ def test_bad_parts_are_dropped_and_named(obj, problem):
 
 
 def test_reasons_and_summary_are_cleaned():
-    obj = {"predictions": [{"coin": "BTC", "pUp7d": 0.6, "reason": "up — because\n" + "x" * 400}],
-           "summary": ["one — two", "", 5, "three", "four", "five"]}
+    dash = chr(0x2014)
+    obj = {"predictions": [{"coin": "BTC", "pUp7d": 0.6, "reason": f"up {dash} because\n" + "x" * 400}],
+           "summary": [f"one {dash} two", "", 5, "three", "four", "five"]}
     preds, summary, problems = brief.parse_answer(obj, ["BTC"])
-    assert "—" not in preds["BTC"]["reason"] and "\n" not in preds["BTC"]["reason"]
+    assert dash not in preds["BTC"]["reason"] and "\n" not in preds["BTC"]["reason"]
     assert len(preds["BTC"]["reason"]) <= 200
     assert summary == ["one - two", "three", "four"]
 
@@ -285,7 +286,7 @@ def test_coins_come_from_running_autopilots_only():
 # ---------------------------------------------------------------- the digest
 
 def test_the_digest_quotes_a_fresh_brief_only():
-    b = {"generated_ms": NOW - 3_600_000, "summary": ["one — a", "two", "three"]}
+    b = {"generated_ms": NOW - 3_600_000, "summary": [f"one {chr(0x2014)} a", "two", "three"]}
     lines = notify.ai_lines(b, NOW)
     assert [ln.text for ln in lines] == ["one - a", "two", "three"]
     assert lines[0].lead == "AI brief (shadow)"

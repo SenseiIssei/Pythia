@@ -1001,6 +1001,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reads_the_ai_brief_its_scores_and_the_weekly_review() {
+        let dir = std::env::temp_dir().join(format!("pythia-labview-ai-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let empty = read_ai_report(&dir);
+        assert!(empty["brief"].is_null() && empty["scores"].is_null() && empty["weekly"].is_null());
+        std::fs::create_dir_all(dir.join("reports/ai_brief")).unwrap();
+        std::fs::create_dir_all(dir.join("reports/ai")).unwrap();
+        std::fs::write(dir.join("reports/ai_brief/latest.json"), r#"{"date":"2026-10-15","summary":["a","b","c"]}"#).unwrap();
+        std::fs::write(dir.join("reports/ai/scores.json"), r#"{"resolved":0,"verdict":"Too early"}"#).unwrap();
+        std::fs::write(dir.join("reports/ai/weekly.md"), "# Weekly AI review\n").unwrap();
+        let v = read_ai_report(&dir);
+        assert_eq!(v["brief"]["date"], "2026-10-15");
+        assert_eq!(v["scores"]["verdict"], "Too early");
+        assert!(v["weekly"]["markdown"].as_str().unwrap().starts_with("# Weekly AI review"));
+        assert!(v["weekly"]["updatedMs"].as_i64().unwrap() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn reads_the_model_zoo_and_names_it_in_the_report_list() {
         let dir = std::env::temp_dir().join(format!("pythia-zoo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
