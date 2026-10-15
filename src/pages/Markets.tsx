@@ -204,7 +204,7 @@ export function Markets() {
   );
 }
 
-/** What the lab's listings watcher saw in the last 90 days (reports/listings/recent.json). */
+/** What the lab's listings watcher saw in the last 90 days (reports/listings/latest.json). */
 function NewListings() {
   const [feed, setFeed] = useState<ListingsFeed | null>(null);
   const [err, setErr] = useState("");

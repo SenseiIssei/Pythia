@@ -60,7 +60,7 @@ pub struct LabStatus {
     /// changed, what was promoted or rejected and why, autopilots against BTC.
     /// `None` until the loop has run.
     pub learn: Option<LearnDigest>,
-    /// New coin listings the watcher saw (`reports/listings/recent.json`),
+    /// New coin listings the watcher saw (`reports/listings/latest.json`),
     /// shown on the Markets page. `None` until `lab.ops.listings` has run.
     pub listings: Option<ListingsFeed>,
 }
@@ -136,7 +136,7 @@ pub fn parse_listings(text: &str) -> Option<ListingsFeed> {
 }
 
 fn read_listings(root: &Path) -> Option<ListingsFeed> {
-    parse_listings(&std::fs::read_to_string(root.join("reports").join("listings").join("recent.json")).ok()?)
+    parse_listings(&std::fs::read_to_string(root.join("reports").join("listings").join("latest.json")).ok()?)
 }
 
 // ── learning loop digest ────────────────────────────────────────────────────
@@ -432,7 +432,11 @@ fn verdict_of(name: &str, v: &Value) -> String {
     if let Some(s) = v.get("verdict").and_then(Value::as_str) {
         return s.replace("**", "");
     }
-    let f = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
+    // The cockpit's common feed header (title, updatedMs, status, headline, items).
+    if let Some(s) = v.get("headline").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        return s.to_string();
+    }
+    let f =|v: &Value, k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
     match name {
         "carry" => {
             let c = v.get("chosen").cloned().unwrap_or(Value::Null);
@@ -673,6 +677,13 @@ mod tests {
         assert_eq!(j["listings"][0]["alpacaLists"], serde_json::json!(false));
         assert_eq!(j["generatedMs"], serde_json::json!(1791800000000i64));
         assert!(parse_listings("[]").is_none());
+        // The same file carries the common feed header; its headline is the report's verdict.
+        let v: Value = serde_json::from_str(
+            r#"{"title": "New listings", "updatedMs": 1, "status": "watch",
+                "headline": "1 new in the last 24 hours: Kraken NEW. 1 in 90 days.", "items": []}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict_of("listings", &v), "1 new in the last 24 hours: Kraken NEW. 1 in 90 days.");
     }
 
     #[test]

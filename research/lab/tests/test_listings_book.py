@@ -73,6 +73,6 @@ def test_reads_the_watchers_alpaca_rows(root):
            "new_base": False},
           {"event": "seed", "venue": "alpaca", "symbol": "BTC/USD", "base": "BTC", "quote": "USD", "status": "",
            "new_base": False}]
-    L.write_lake(ev, T0, root / "lake" / "listings" / "first_seen")
+    L.write_lake(ev, T0, root / "listings" / "first_seen")
     assert B.alpaca_listings(T0) == [{"ts_ms": T0, "symbol": "NEW/USD", "base": "NEW"}]
     assert B.alpaca_listings(T0 + 1) == []

@@ -249,13 +249,16 @@ to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
 `lab.ops.listings` diffs the asset lists of Alpaca (only with the paper key
 pair in the environment), Binance, Coinbase and Kraken, and reads Binance's
 listing announcements. The first run only seeds what exists; after that every
-new pair is a row in `/srv/pythia-data/lake/listings/first_seen` (parquet,
-with its first-seen time), and every new coin, every new Alpaca pair and every
-new announcement goes out in one message through the same Telegram or webhook
-settings as the digest (`/etc/pythia/alerts.env`). The last 90 days are in
-`reports/listings/recent.json`, which the engine serves in `/api/lab` and the
-Markets page shows as New listings. A venue that fails is skipped for that run
-and named on the page.
+new pair is a row in `/srv/pythia-data/listings/first_seen` (parquet, with
+its first-seen time), and every new coin, every new Alpaca pair and every new
+announcement goes out as its own message (venue, symbols, whether Alpaca lists
+the coin, first price; at most 10 a run, a burst beyond that in one) through
+the same Telegram or webhook settings as the digest (`/etc/pythia/alerts.env`,
+`PYTHIA_TELEGRAM_BOT_TOKEN` and `PYTHIA_TELEGRAM_CHAT_ID`). The cockpit feed
+is `reports/listings/latest.json` (title, updatedMs, status, headline, items,
+plus the last 90 days of events), which the engine serves in `/api/lab` and
+the Markets page shows as New listings. A venue that fails is skipped for that
+run and named on the page.
 
 Put the Alpaca paper pair (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, the same
 pair as for the demo) in its own env file, readable by root only, for example
