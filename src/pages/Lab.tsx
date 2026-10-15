@@ -11,6 +11,7 @@ import {
   signedPct,
   type ForwardReport,
   type ForwardRow,
+  type JobsStatus,
   type LabStatus,
   type LearnDigest,
   type PaperBook,
@@ -283,6 +284,64 @@ function ForwardSection({ f }: { f: ForwardReport }) {
   );
 }
 
+const JOB_TONE: Record<string, "green" | "red" | "neutral" | "purple"> = {
+  ok: "green",
+  running: "purple",
+  never: "neutral",
+  disabled: "neutral",
+};
+
+function when(iso: string | null | undefined): string {
+  return iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "-";
+}
+
+/** The job table's status: every scheduled job, its last and next run. */
+function JobsSection({ j }: { j: JobsStatus }) {
+  const jobs = [...j.jobs].sort((a, b) => Number(a.ok) - Number(b.ok) || Number(b.enabled) - Number(a.enabled));
+  return (
+    <Card
+      title="Scheduled jobs"
+      right={<Badge tone={j.ok ? "green" : "red"}>{j.ok ? "all on time" : `${j.failing.length} need a look`}</Badge>}
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-left text-xs text-cyber-text-faint">
+            <tr>
+              <th className="py-1 pr-3 font-normal">Job</th>
+              <th className="py-1 pr-3 font-normal">State</th>
+              <th className="py-1 pr-3 font-normal">Last run</th>
+              <th className="py-1 pr-3 font-normal">Next run</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobs.map((x) => (
+              <tr key={x.name} className={x.enabled ? "" : "opacity-50"}>
+                <td className="py-1 pr-3 align-top">
+                  <div className="text-cyber-text">{x.name}</div>
+                  <div className="text-xs text-cyber-text-faint">{x.description}</div>
+                </td>
+                <td className="py-1 pr-3 align-top">
+                  <Badge tone={JOB_TONE[x.state] ?? "red"} title={x.detail}>
+                    {x.state}
+                  </Badge>
+                  {!x.ok && <div className="text-xs text-cyber-text-faint">{x.detail}</div>}
+                </td>
+                <td className="py-1 pr-3 align-top text-xs">
+                  {x.last ? `${when(x.last.start)}, ${x.last.status}` : "-"}
+                </td>
+                <td className="py-1 pr-3 align-top text-xs">
+                  {x.nextRun ? when(x.nextRun) : x.after.length ? `after ${x.after.join(", ")}` : "-"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-2 text-xs text-cyber-text-faint">From the job table, updated {when(j.at)}.</div>
+    </Card>
+  );
+}
+
 function Book({ b }: { b: PaperBook }) {
   const longs = b.lastRebalance.longs?.split(" ").filter(Boolean) ?? [];
   const shorts = b.lastRebalance.shorts?.split(" ").filter(Boolean) ?? [];
@@ -408,6 +467,8 @@ export function Lab() {
           </div>
         </Card>
       )}
+
+      {s?.jobs && <JobsSection j={s.jobs} />}
 
       {s?.forward && <ForwardSection f={s.forward} />}
 

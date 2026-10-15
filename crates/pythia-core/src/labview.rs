@@ -60,6 +60,18 @@ pub struct LabStatus {
     /// changed, what was promoted or rejected and why, autopilots against BTC.
     /// `None` until the loop has run.
     pub learn: Option<LearnDigest>,
+    /// Every scheduled job of the job table (`_health/jobs.json`, written by
+    /// `research/ops/jobs.py` after each run and each health check): last
+    /// run, next run, failures. As written; `None` until the runner has run.
+    pub jobs: Option<Value>,
+}
+
+/// `_health/jobs.json`, if it is there and has a `jobs` list.
+fn read_jobs(root: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(root.join("_health").join("jobs.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("jobs").and_then(Value::as_array)?;
+    Some(v)
 }
 
 // ── learning loop digest ────────────────────────────────────────────────────
@@ -426,6 +438,7 @@ pub fn status() -> LabStatus {
         .and_then(|t| serde_json::from_str(&t).ok());
     out.forward = read_forward(&root);
     out.learn = read_learn(&root);
+    out.jobs = read_jobs(&root);
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));
@@ -583,6 +596,24 @@ mod tests {
         std::fs::create_dir_all(dir.join("reports").join("forward")).unwrap();
         std::fs::write(dir.join("reports").join("forward").join("latest.json"), FORWARD).unwrap();
         assert_eq!(read_forward(&dir).map(|f| f.books.len()), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_the_job_status_and_ignores_a_broken_one() {
+        let dir = std::env::temp_dir().join(format!("pythia-labview-jobs-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("_health")).unwrap();
+        assert!(read_jobs(&dir).is_none(), "no status yet");
+        std::fs::write(dir.join("_health").join("jobs.json"), "{\"at\": 1}").unwrap();
+        assert!(read_jobs(&dir).is_none(), "no jobs list");
+        std::fs::write(
+            dir.join("_health").join("jobs.json"),
+            r#"{"at":"2026-10-15T08:00:00Z","ok":false,"failing":["learn"],"jobs":[{"name":"learn","state":"failed","ok":false}]}"#,
+        )
+        .unwrap();
+        let v = read_jobs(&dir).unwrap();
+        assert_eq!(v["jobs"][0]["name"], "learn");
+        assert_eq!(v["failing"][0], "learn");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
