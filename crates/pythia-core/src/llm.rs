@@ -74,7 +74,7 @@ impl Provider {
 
     fn spec(self) -> Spec {
         match self {
-            // Anthropic — the one non-OpenAI dialect. The Claude 5 family:
+            // Anthropic, the one non-OpenAI dialect. The Claude 5 family:
             // Haiku for routine calls, Sonnet for the weekly review, Opus only
             // when asked for by name. Every call is metered (`ai_budget`).
             Provider::Anthropic => Spec {
@@ -755,7 +755,7 @@ fn settle(
     batch: bool,
 ) -> Result<ClaudeMessage, LlmError> {
     let usage = crate::ai_budget::Usage::from_api(json.get("usage"));
-    // Top-level `model` names whoever produced the message — which is the
+    // Top-level `model` names whoever produced the message, which is the
     // fallback model when one took over.
     let served_by = json.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string();
     // Check `stop_reason` BEFORE reading content: a refusal is a 200 whose
