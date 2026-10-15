@@ -2724,6 +2724,15 @@ impl Engine {
             ap.peak_equity = peak;
             ap.locked_floor = locked;
             ap.tp_steps = steps;
+            // The curve so far is rescaled to the new amount: a deposit or a
+            // withdrawal is no return, and an unscaled curve would show the
+            // cut as a crash (and a drawdown) and the raise as a gain.
+            if capital_changed && eq > EPS {
+                let f = (eq + delta) / eq;
+                for p in ap.history.iter_mut() {
+                    p.1 *= f;
+                }
+            }
         }
         if capital_changed {
             let mut s = format!("amount {} to {}", usd(old.capital_usd), usd(cfg.capital_usd));
