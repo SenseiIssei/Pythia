@@ -175,4 +175,4 @@ def test_run_on_a_synthetic_panel():
     assert not res["gates"]["Sharpe > 0 with fill models F1 and F2"]      # no bars, the gate cannot pass
     assert set(res["references"]) == {"U1 SPY", "U2 QQQ", "U3 IWM", "U4 SPY+QQQ+IWM"}
     md = on.markdown(res)
-    assert "Verdict" in md and "—" not in md
+    assert "Verdict" in md and chr(0x2014) not in md          # no long dashes in the report

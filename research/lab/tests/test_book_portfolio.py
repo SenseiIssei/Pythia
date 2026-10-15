@@ -98,4 +98,4 @@ def test_run_on_synthetic_books(monkeypatch):
     assert res["pool"]["n_total"] == bp.on.PRIOR_TRIALS + bp.A_TRIALS + 30
     assert set(res["gates"]) and res["best_book"] in bp.BOOKS
     md = bp.markdown(res)
-    assert "Verdict" in md and "—" not in md
+    assert "Verdict" in md and chr(0x2014) not in md          # no long dashes in the report
