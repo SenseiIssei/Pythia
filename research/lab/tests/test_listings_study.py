@@ -178,3 +178,51 @@ def test_offline_run_on_a_tiny_lake(tmp_path, monkeypatch):
     assert rep["passed"] is False
     assert rep["detail"]["n"]["A"] == 1
     assert "Not measured: B and C (run offline)." in (tmp_path / "listings.md").read_text()
+
+
+def test_a_coin_that_dies_inside_the_window_is_sold_at_its_last_close():
+    t0 = us(2024, 3, 1)
+    coin = flat(t0, 5)
+    coin.c[-1] = 40.0                                   # delisted on day 5 at 40
+    btc = flat(t0 - 10 * D, 400, 50.0)
+    r = S.event_returns(coin, btc, t0 + H, data_end=t0 + 300 * D)
+    assert r["ended_7"] and r["ended_30"] and not r["ended_1"]
+    assert r["net_30"] == pytest.approx(S.net(100, 40)) and r["excess_30"] == pytest.approx(S.net(100, 40))
+    # At the edge of the data the window is not over yet: no return.
+    r = S.event_returns(coin, btc, t0 + H, data_end=coin.end + D)
+    assert np.isnan(r["net_7"]) and not r["ended_7"]
+
+
+def test_early_tenfold_moves_do_not_split_a_new_listing(tmp_path, monkeypatch):
+    import polars as pl
+
+    from lab.experiments import picks
+    monkeypatch.setattr(picks, "ROOT", tmp_path)
+    t = np.arange(us(2024, 5, 1), us(2024, 5, 1) + 90 * D, H, dtype=np.int64)
+    c = np.full(len(t), 1.0)
+    c[3:] = 20.0                                        # a twentyfold opening pump in hour 3
+    c[t >= us(2024, 5, 1) + 60 * D] = 400.0             # a redenomination two months later
+    d = tmp_path / "hist" / "binance_spot" / "klines_1h" / "symbol=POPUSDT"
+    d.mkdir(parents=True)
+    pl.DataFrame({"open_time_us": t, "close": c}).write_parquet(d / "all.parquet")
+    segs, kept = S.lake_series("POPUSDT")
+    assert kept and len(segs) == 2
+    assert segs[0].start == us(2024, 5, 1) and segs[0].end == us(2024, 5, 1) + 60 * D
+    assert S.lake_series("NONEUSDT") == ([], False)
+
+
+def test_the_report_is_a_feed_without_nan(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setattr(S, "RESULTS", tmp_path)
+    monkeypatch.setattr(S, "REPORTS", tmp_path / "reports")
+    first, latest, btc, listed = synthetic(0.0, n_months=30, seed=3)
+    res = S.analyse(first, latest, btc, us(2026, 10, 1), listed, {}, {}, [])
+    S.save_report(res, now_ms=123)
+    text = (tmp_path / "reports" / "listing_effect" / "latest.json").read_text()
+    assert "NaN" not in text and "Infinity" not in text
+    rep = json.loads(text)
+    assert rep["title"] == "Listing effect (W6)" and rep["updatedMs"] == 123 and rep["status"] == "watch"
+    assert rep["headline"] == rep["verdict"] and rep["items"][0]["link"] == "study:listings"
+    assert S.clean({"a": float("nan"), 1: [np.float64(2.0), np.int64(3), np.bool_(True)]}) == {
+        "a": None, "1": [2.0, 3, True]}
