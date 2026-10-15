@@ -67,6 +67,10 @@ pub struct LabStatus {
     /// New coin listings the watcher saw (`reports/listings/latest.json`),
     /// shown on the Markets page. `None` until `lab.ops.listings` has run.
     pub listings: Option<ListingsFeed>,
+    /// The real money readiness check (`reports/readiness/latest.json`,
+    /// `lab.ops.readiness`): every autopilot against the pre-registered rule
+    /// of docs/LIVE-READINESS.md. As written; `None` until the check has run.
+    pub readiness: Option<Value>,
 }
 
 // ── new listings ────────────────────────────────────────────────────────────
@@ -788,6 +792,9 @@ pub fn status() -> LabStatus {
     out.learn = read_learn(&root);
     out.jobs = read_jobs(&root);
     out.listings = read_listings(&root);
+    out.readiness = std::fs::read_to_string(root.join("reports").join("readiness").join("latest.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));

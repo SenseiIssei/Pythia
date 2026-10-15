@@ -16,6 +16,8 @@
 //!   GET  /api/alerts/settings  → category switches, quiet hours, big-move sizes
 //!   POST /api/alerts/settings  → change them (saved with the engine state)
 //!   POST /api/alerts/event     → a lab job posts an alert (localhost only)
+//!   GET  /api/readiness/settings → the real money readiness check's risk step
+//!   POST /api/readiness/settings → change it (`{riskStep}`, 1 to 5); report only
 //!
 //! Paper-first, exactly like the desktop app: real money stays gated behind the
 //! same sovereign risk manager and vault. This process only ever runs the
@@ -475,6 +477,22 @@ async fn post_alert_settings(
     save_now(&st);
     write_settings_file(&st.alert_files, &s);
     Json(s.view(now_ms())).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadinessPatch {
+    risk_step: u8,
+}
+
+/// `POST /api/readiness/settings`: the risk step of the real money readiness
+/// check (docs/LIVE-READINESS.md), written for the lab. It changes what the
+/// daily check reports and nothing else; nothing is armed or traded.
+async fn post_readiness_settings(Json(patch): Json<ReadinessPatch>) -> axum::response::Response {
+    match pythia_core::readiness::set_settings(patch.risk_step) {
+        Ok(s) => Json(s).into_response(),
+        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+    }
 }
 
 /// One row of a posted event: `["Equity", "$1,234"]`, or with a sign for the
@@ -961,6 +979,10 @@ async fn main() {
         .route("/api/pokemon", get(|| async { Json(pythia_core::labview::pokemon()) }))
         .route("/api/lab/feeds", get(|| async { Json(pythia_core::labview::feeds()) }))
         .route("/api/lab/studies", get(|| async { Json(pythia_core::labview::studies()) }))
+        .route(
+            "/api/readiness/settings",
+            get(|| async { Json(pythia_core::readiness::settings()) }).post(post_readiness_settings),
+        )
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         .merge(alert_routes())

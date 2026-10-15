@@ -273,6 +273,8 @@ pub fn run() {
             commands::ml_picks_run,
             commands::tax_export,
             commands::lab_status,
+            commands::readiness_settings,
+            commands::set_readiness_settings,
             commands::cs2_board,
             commands::pokemon_status,
             commands::lab_feeds,
