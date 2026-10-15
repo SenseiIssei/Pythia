@@ -60,6 +60,83 @@ pub struct LabStatus {
     /// changed, what was promoted or rejected and why, autopilots against BTC.
     /// `None` until the loop has run.
     pub learn: Option<LearnDigest>,
+    /// New coin listings the watcher saw (`reports/listings/recent.json`),
+    /// shown on the Markets page. `None` until `lab.ops.listings` has run.
+    pub listings: Option<ListingsFeed>,
+}
+
+// ── new listings ────────────────────────────────────────────────────────────
+// Written every 10 minutes by `lab.ops.listings`: the last 90 days of new
+// pairs and Binance listing announcements, and how each venue answered.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct Listing {
+    pub ts_ms: i64,
+    /// alpaca · binance · coinbase · kraken · binance_news
+    pub venue: String,
+    /// listed · announced
+    pub event: String,
+    pub symbol: String,
+    pub base: String,
+    pub quote: Option<String>,
+    /// The venue had no pair of this coin before.
+    pub new_base: Option<bool>,
+    /// Whether Alpaca lists the coin; `None` without Alpaca keys.
+    pub alpaca_lists: Option<bool>,
+    pub price: Option<f64>,
+    /// The announcement's title (binance_news only).
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"), default)]
+pub struct ListingVenue {
+    pub ok: bool,
+    pub count: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingsFeed {
+    pub generated: String,
+    pub generated_ms: i64,
+    pub venues: BTreeMap<String, ListingVenue>,
+    pub listings: Vec<Listing>,
+}
+
+/// The watcher's file as written; `None` when it is not a JSON object. Rows
+/// and venues that do not parse are skipped.
+pub fn parse_listings(text: &str) -> Option<ListingsFeed> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let venues = v
+        .get("venues")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, x)| Some((k.clone(), serde_json::from_value(x.clone()).ok()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let listings = v
+        .get("listings")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect())
+        .unwrap_or_default();
+    Some(ListingsFeed {
+        generated: v.get("generated").and_then(Value::as_str).unwrap_or_default().to_string(),
+        generated_ms: v.get("generated_ms").and_then(Value::as_i64).unwrap_or(0),
+        venues,
+        listings,
+    })
+}
+
+fn read_listings(root: &Path) -> Option<ListingsFeed> {
+    parse_listings(&std::fs::read_to_string(root.join("reports").join("listings").join("recent.json")).ok()?)
 }
 
 // ── learning loop digest ────────────────────────────────────────────────────
@@ -426,6 +503,7 @@ pub fn status() -> LabStatus {
         .and_then(|t| serde_json::from_str(&t).ok());
     out.forward = read_forward(&root);
     out.learn = read_learn(&root);
+    out.listings = read_listings(&root);
     if let Ok(entries) = std::fs::read_dir(root.join("paper")) {
         let mut books: Vec<PaperBook> = entries.flatten().filter_map(|e| read_book(&e.path())).collect();
         books.sort_by(|a, b| a.name.cmp(&b.name));
@@ -567,6 +645,34 @@ mod tests {
         std::fs::write(dir.join("reports").join("learn").join("latest.json"), &text).unwrap();
         assert_eq!(read_learn(&dir).map(|d| d.decisions.len()), Some(1));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_the_listings_feed_and_skips_broken_rows() {
+        let f = parse_listings(
+            r#"{"generated": "2026-10-15 10:20 UTC", "generated_ms": 1791800000000,
+                "venues": {"binance": {"ok": true, "count": 3120, "error": null, "seeded": false},
+                           "alpaca": {"ok": false, "count": 0, "error": "no Alpaca keys"},
+                           "broken": "yes"},
+                "listings": [
+                  {"ts_ms": 1791800000000, "venue": "binance", "event": "listed", "symbol": "NEWUSDT",
+                   "base": "NEW", "quote": "USDT", "new_base": true, "alpaca_lists": false, "price": 0.0123,
+                   "title": null},
+                  {"ts_ms": "soon", "venue": "kraken"},
+                  {"ts_ms": 1791790000000, "venue": "binance_news", "event": "announced", "symbol": "ZED",
+                   "base": "ZED", "quote": "", "new_base": true, "alpaca_lists": null, "price": null,
+                   "title": "Binance Will List Zed (ZED)"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(f.venues.len(), 2);
+        assert!(!f.venues["alpaca"].ok);
+        assert_eq!(f.listings.len(), 2, "the row with ts_ms = \"soon\" is dropped");
+        assert_eq!(f.listings[0].price, Some(0.0123));
+        assert_eq!(f.listings[1].alpaca_lists, None);
+        let j = serde_json::to_value(&f).unwrap();
+        assert_eq!(j["listings"][0]["alpacaLists"], serde_json::json!(false));
+        assert_eq!(j["generatedMs"], serde_json::json!(1791800000000i64));
+        assert!(parse_listings("[]").is_none());
     }
 
     #[test]
