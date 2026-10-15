@@ -1,6 +1,20 @@
 /* Class names from the flows' stand-in kit, kept for pages and components
    that still use them. They are thin aliases of the design tokens now
    (src/design/tokens.ts), so they follow light and dark like everything else. */
+:root {
+  --fl-bg: var(--color-bg);
+  --fl-surface: var(--color-surface);
+  --fl-surface-2: var(--color-surface-2);
+  --fl-line: var(--color-line);
+  --fl-text: var(--color-text);
+  --fl-muted: var(--color-muted);
+  --fl-up: var(--color-up);
+  --fl-down: var(--color-down);
+  --fl-warn: var(--color-warn);
+  --fl-primary: var(--color-primary);
+  --fl-on-primary: var(--color-on-primary);
+  --fl-on-down: var(--color-on-down);
+}
 .fl { color: var(--color-text); font-family: var(--font-sans); }
 .fl-page { background: transparent; }
 .fl-card { background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-card); }

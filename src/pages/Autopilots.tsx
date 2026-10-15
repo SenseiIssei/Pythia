@@ -8,6 +8,7 @@ import {
   Chip,
   ConfirmSheet,
   Empty,
+  List,
   ListRow,
   MiniChart,
   Page,
@@ -17,7 +18,7 @@ import {
   money,
   signedPct,
   type ChipTone,
-} from "../design/flows";
+} from "../design";
 import {
   CARE,
   amountProblem,
@@ -98,8 +99,8 @@ export function Autopilots() {
       {api.mocked && <Chip tone="warn">Sample data ({api.mocked})</Chip>}
       {limits.killSwitch && t.count > 0 && (
         <Card>
-          <p className="fl-down text-[15px] font-semibold">Kill switch is on</p>
-          <p className="fl-muted text-sm">Nothing new is bought until you switch it off. Selling still works.</p>
+          <p className="text-down text-[15px] font-semibold">Kill switch is on</p>
+          <p className="text-muted text-sm">Nothing new is bought until you switch it off. Selling still works.</p>
         </Card>
       )}
 
@@ -148,7 +149,7 @@ export function Autopilots() {
       )}
       {advanced && details && (
         // The detailed page keeps real-money starts and the full analysis.
-        <div className="rounded-2xl bg-cyber-bg p-3">
+        <div className="rounded-card border border-line p-3 sm:p-5">
           <AutopilotDetails />
         </div>
       )}
@@ -188,73 +189,72 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
   return (
     <Card as="article" label={m.name}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="min-w-0 truncate text-base font-semibold">{m.name}</h2>
+        <h2 className="min-w-0 truncate text-[17px] font-semibold tracking-tight">{m.name}</h2>
         <div className="flex flex-wrap gap-1.5">
           <Chip tone={STATUS_TONE[m.status.tone]}>{m.status.label}</Chip>
           <Chip tone={mode.tone}>{mode.label}</Chip>
         </div>
       </div>
 
-      <div className="mt-2">
-        <BigNumber value={money(m.value)} />
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-          <Change usd={m.pnl} pct={m.pnlPct} tone={m.tone} />
-          <span className="fl-muted text-sm">of {money(m.amount, 0)}</span>
-        </div>
-      </div>
-
       <div className="mt-3">
-        <MiniChart data={m.chart} tone={m.tone} label={`Value of ${m.name} since it started`} />
+        <BigNumber value={money(m.value)} sub={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <Change usd={m.pnl} pct={m.pnlPct} tone={m.tone} />
+            <span className="text-[13px] text-muted">of {money(m.amount, 0)}</span>
+          </span>
+        } />
       </div>
 
-      <ul className="fl-line mt-2 divide-y border-t" style={{ borderColor: "var(--fl-line)" }}>
-        <li>
-          <ListRow
-            icon={Bitcoin}
-            title={vsBtcText(m.vsBtcPts)}
-            subtitle={m.btcPct != null ? `Bitcoin ${signedPct(m.btcPct, 1)} · this ${signedPct(m.pnlPct, 1)}` : "Needs a Bitcoin price from its start"}
-          />
-        </li>
-      </ul>
+      <div className="mt-4">
+        <MiniChart data={m.chart} tone={m.tone} height={64} label={`Value of ${m.name} since it started`} />
+      </div>
 
-      <h3 className="fl-muted mt-3 text-xs font-semibold uppercase tracking-wider">Holds</h3>
+      <List className="mt-3 border-t border-line">
+        <ListRow
+          icon={Bitcoin}
+          title={vsBtcText(m.vsBtcPts)}
+          subtitle={m.btcPct != null ? `Bitcoin ${signedPct(m.btcPct, 1)} · this ${signedPct(m.pnlPct, 1)}` : "Needs a Bitcoin price from its start"}
+        />
+      </List>
+
+      <h3 className="mt-4 text-[13px] font-semibold text-muted">Holds</h3>
       {m.holdings.length === 0 ? (
-        <p className="mt-1 text-sm">Cash</p>
+        <p className="mt-1 text-[15px]">Cash</p>
       ) : (
-        <ul className="mt-1 divide-y" style={{ borderColor: "var(--fl-line)" }}>
+        <List>
           {m.holdings.map((h) => (
-            <li key={h.marketId} className="flex items-center justify-between gap-3 py-2">
-              <span className="min-w-0 truncate text-[15px] font-semibold">{h.coin}</span>
-              <span className="text-right">
-                <span className="fl-num block text-[15px] font-semibold">{money(h.value)}</span>
-                <Change pct={h.pnlPct} tone={toneOf(h.pnl)} size="sm" />
-              </span>
-            </li>
+            <ListRow
+              key={h.marketId}
+              ticker={h.coin}
+              title={h.coin}
+              right={money(h.value)}
+              rightSub={<Change pct={h.pnlPct} tone={toneOf(h.pnl)} size="sm" />}
+            />
           ))}
-        </ul>
+        </List>
       )}
 
-      <h3 className="fl-muted mt-3 text-xs font-semibold uppercase tracking-wider">Strategies</h3>
+      <h3 className="mt-4 text-[13px] font-semibold text-muted">Strategies</h3>
       {m.strategies.length === 0 ? (
-        <p className="mt-1 text-sm">Pythia picks them when it starts.</p>
+        <p className="mt-1 text-[15px]">Pythia picks them when it starts.</p>
       ) : (
-        <ul className="mt-1 space-y-1.5">
+        <ul className="mt-2 space-y-2.5">
           {m.strategies.map((st) => (
-            <li key={st.id} className="text-sm">
+            <li key={st.id} className="text-[15px]">
               <div className="flex items-center justify-between gap-3">
                 <span className="min-w-0 truncate">{st.name}</span>
-                <span className="fl-num shrink-0 font-semibold">{st.pct}%</span>
+                <span className="tabular shrink-0 font-semibold">{st.pct}%</span>
               </div>
-              <div className="fl-surface-2 mt-1 h-1.5 overflow-hidden rounded-full" aria-hidden>
-                <div className="h-full rounded-full" style={{ width: `${st.pct}%`, background: "var(--fl-text)" }} />
+              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-surface-2" aria-hidden>
+                <div className="h-full rounded-full bg-ink" style={{ width: `${st.pct}%` }} />
               </div>
             </li>
           ))}
         </ul>
       )}
 
-      <p className="fl-muted mt-3 text-sm">{m.status.line}</p>
-      {m.active && s.forward && <p className="fl-muted mt-1 text-sm">{forwardLine(s.forward)?.text}</p>}
+      <p className="text-muted mt-3 text-sm">{m.status.line}</p>
+      {m.active && s.forward && <p className="text-muted mt-1 text-sm">{forwardLine(s.forward)?.text}</p>}
 
       {m.active && (
         <div className="mt-4 grid grid-cols-3 gap-2">
@@ -276,7 +276,7 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
         </div>
       )}
       {err && !asking && (
-        <p role="alert" className="fl-down mt-2 text-sm">
+        <p role="alert" className="text-down mt-2 text-sm">
           {err}
         </p>
       )}
@@ -305,7 +305,7 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
         <label className="mt-4 flex items-center justify-between gap-3 text-[15px]">
           <span>
             Sell what it holds
-            <span className="fl-muted block text-sm">{sell ? "Back to cash right away." : "Positions stay open."}</span>
+            <span className="text-muted block text-sm">{sell ? "Back to cash right away." : "Positions stay open."}</span>
           </span>
           <input type="checkbox" className="h-5 w-5 shrink-0" checked={sell} onChange={(e) => setSell(e.target.checked)} />
         </label>
@@ -329,11 +329,10 @@ function Choice({ on, title, detail, onClick, disabled }: { on: boolean; title: 
       aria-checked={on}
       disabled={disabled}
       onClick={onClick}
-      className={`fl-focus w-full rounded-2xl border-2 p-4 text-left transition-colors disabled:opacity-40 ${on ? "" : "fl-line"}`}
-      style={{ borderColor: on ? "var(--fl-text)" : "var(--fl-line)" }}
+      className={`w-full rounded-2xl border-2 p-4 text-left transition-colors disabled:opacity-40 ${on ? "border-ink" : "border-line hover:border-line-strong"}`}
     >
       <span className="block text-[15px] font-semibold">{title}</span>
-      <span className="fl-muted block text-sm">{detail}</span>
+      <span className="text-muted block text-sm">{detail}</span>
     </button>
   );
 }
@@ -393,21 +392,21 @@ function StartSheet({ open, onClose, onStart }: { open: boolean; onClose: () => 
     >
       <div className="mb-4 flex items-center gap-1.5" aria-label={`Step ${step} of 3`}>
         {[1, 2, 3].map((i) => (
-          <span key={i} className="h-1 flex-1 rounded-full" style={{ background: i <= step ? "var(--fl-text)" : "var(--fl-line)" }} />
+          <span key={i} className={`h-1 flex-1 rounded-full ${i <= step ? "bg-ink" : "bg-line"}`} />
         ))}
       </div>
 
       {step === 1 && (
         <div>
           <h3 className="text-lg font-semibold">How much?</h3>
-          <p className="fl-muted text-sm">Practice money. Nothing real moves.</p>
+          <p className="text-muted text-sm">Practice money. Nothing real moves.</p>
           <label className="mt-3 block">
             <span className="sr-only">Amount in US dollars</span>
             <div className="relative">
-              <span className="fl-muted pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-2xl font-bold">$</span>
+              <span className="text-muted pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-2xl font-bold">$</span>
               <input
                 inputMode="decimal"
-                className="fl-input fl-num text-2xl font-bold"
+                className="fl-input tabular text-2xl font-bold"
                 style={{ paddingLeft: 36 }}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
@@ -417,32 +416,32 @@ function StartSheet({ open, onClose, onStart }: { open: boolean; onClose: () => 
           </label>
           <div className="mt-3 flex flex-wrap gap-2">
             {AMOUNT_CHIPS.map((a) => (
-              <button key={a} type="button" onClick={() => setAmount(String(a))} className="fl-focus fl-surface-2 rounded-full px-3 py-1.5 text-sm font-semibold">
+              <button key={a} type="button" onClick={() => setAmount(String(a))} className="bg-surface-2 rounded-full px-3 py-1.5 text-sm font-semibold">
                 {money(a, 0)}
               </button>
             ))}
           </div>
-          {amountErr && amount.trim() !== "" && <p className="fl-down mt-2 text-sm">{amountErr}</p>}
+          {amountErr && amount.trim() !== "" && <p className="text-down mt-2 text-sm">{amountErr}</p>}
         </div>
       )}
 
       {step === 2 && (
         <div>
           <h3 className="text-lg font-semibold">How careful?</h3>
-          <p className="fl-muted text-sm">It stops itself when a limit is reached.</p>
+          <p className="text-muted text-sm">It stops itself when a limit is reached.</p>
           <div role="radiogroup" aria-label="How careful" className="mt-3 space-y-2">
             {CARE_ORDER.map((c) => (
               <Choice key={c} on={care === c} title={CARE[c].label} detail={CARE[c].detail} onClick={() => setCare(c)} />
             ))}
           </div>
-          {floor != null && <p className="fl-muted mt-3 text-sm">Lowest it can go before it stops: {money(floor, 0)}.</p>}
+          {floor != null && <p className="text-muted mt-3 text-sm">Lowest it can go before it stops: {money(floor, 0)}.</p>}
         </div>
       )}
 
       {step === 3 && (
         <div>
           <h3 className="text-lg font-semibold">Practice account</h3>
-          <p className="fl-muted text-sm">Where the practice trades happen.</p>
+          <p className="text-muted text-sm">Where the practice trades happen.</p>
           <div className="mt-3">
             <Segmented
               label="Markets"
@@ -464,15 +463,15 @@ function StartSheet({ open, onClose, onStart }: { open: boolean; onClose: () => 
               onClick={() => setAccount("demo")}
             />
           </div>
-          <div className="fl-surface-2 mt-4 rounded-2xl p-3 text-sm">
+          <div className="bg-surface-2 mt-4 rounded-2xl p-3 text-sm">
             <p>
-              <b className="fl-num">{Number.isFinite(n) ? money(n, 0) : "n/a"}</b>, {CARE[care].label.toLowerCase()} care,{" "}
+              <b className="tabular">{Number.isFinite(n) ? money(n, 0) : "n/a"}</b>, {CARE[care].label.toLowerCase()} care,{" "}
               {account === "paper" ? "Pythia practice" : "demo account"}.
             </p>
-            <p className="fl-muted">Pythia picks the strategies and checks them again every day.</p>
+            <p className="text-muted">Pythia picks the strategies and checks them again every day.</p>
           </div>
           {err && (
-            <p role="alert" className="fl-down mt-3 text-sm">
+            <p role="alert" className="text-down mt-3 text-sm">
               {err}
             </p>
           )}
@@ -546,7 +545,7 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
         </label>
         <label className="block">
           <span className="text-sm font-semibold">Amount</span>
-          <input inputMode="decimal" className="fl-input fl-num mt-1" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+          <input inputMode="decimal" className="fl-input tabular mt-1" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
         </label>
 
         <div>
@@ -564,7 +563,7 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
               ]}
             />
           </div>
-          <p className="fl-muted mt-1 text-sm">
+          <p className="text-muted mt-1 text-sm">
             {careValue === "custom"
               ? `Own limits: ${form.lossPct ? `${form.lossPct}% loss` : "no % limit"}${form.lossUsd ? `, $${form.lossUsd}` : ""}${form.trailing ? `, ${form.trailing}% from its best` : ""}.`
               : CARE[careValue].detail}
@@ -586,14 +585,14 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
           </div>
           {form.pick === "manual" && (
             <ul className="mt-2 space-y-2">
-              {ids.length === 0 && <li className="fl-muted text-sm">It has no fixed strategies yet. Pick them in the full setup.</li>}
+              {ids.length === 0 && <li className="text-muted text-sm">It has no fixed strategies yet. Pick them in the full setup.</li>}
               {ids.map((id) => (
                 <li key={id} className="flex items-center justify-between gap-3">
                   <span className="min-w-0 truncate text-sm">{s.bySleeve.find((b) => b.strategyId === id)?.name ?? id}</span>
                   <input
                     aria-label={`Share for ${id}`}
                     inputMode="decimal"
-                    className="fl-input fl-num w-24 text-right"
+                    className="fl-input tabular w-24 text-right"
                     style={{ minHeight: 40 }}
                     value={form.weights[id]}
                     onChange={(e) => setForm({ ...form, weights: { ...form.weights, [id]: e.target.value } })}
@@ -605,7 +604,7 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
         </div>
 
         {plan.problems.length > 0 && (
-          <ul className="fl-down space-y-0.5 text-sm">
+          <ul className="text-down space-y-0.5 text-sm">
             {plan.problems.map((p) => (
               <li key={p}>{p}</li>
             ))}
@@ -619,17 +618,17 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
         )}
         {live && (
           <label className="block text-sm">
-            <span className="fl-down font-semibold">Real money. Type {LIVE_EDIT_PHRASE} to confirm.</span>
+            <span className="text-down font-semibold">Real money. Type {LIVE_EDIT_PHRASE} to confirm.</span>
             <input className="fl-input mt-1" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
           </label>
         )}
-        {!plan.changed && <p className="fl-muted text-sm">Nothing changed yet.</p>}
+        {!plan.changed && <p className="text-muted text-sm">Nothing changed yet.</p>}
         {err && (
-          <p role="alert" className="fl-down text-sm">
+          <p role="alert" className="text-down text-sm">
             {err}
           </p>
         )}
-        {!isActive(s) && <p className="fl-muted text-sm">It has stopped and can no longer be changed.</p>}
+        {!isActive(s) && <p className="text-muted text-sm">It has stopped and can no longer be changed.</p>}
       </div>
     </Sheet>
   );
