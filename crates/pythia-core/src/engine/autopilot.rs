@@ -7,39 +7,57 @@
 //! minus the fees it paid. A sleeve's budget is its weight times the
 //! autopilot's equity, never a share of the whole account.
 //!
-//! # Ownership and the one-position-per-market rule
+//! # Every autopilot is a sub-account with a book of its own
 //!
-//! The engine holds one position per market. Two strategies that want the
-//! same coin therefore conflict, and the autopilot resolves that up front
-//! instead of at fill time:
+//! Several autopilots run side by side on one venue account (the Alpaca
+//! paper account, say), each testing a different strategy. Each one is a
+//! virtual sub-account: its positions are kept in a book of its own, under
+//! `autopilot id|market` (see [`super::pos_key`]); the main book (strategies
+//! no autopilot runs, manual orders) keeps its positions under the bare
+//! market id. So two autopilots can hold the same coin at once, each with
+//! its own quantity, average price, fills, fees, P&L, cash and equity curve.
 //!
-//! - **Strategies are exclusive.** A strategy belongs to at most one active
-//!   autopilot. While it does, it trades only for that autopilot: its entries
-//!   are sized from the autopilot's capital, routed by the autopilot's mode,
-//!   and its state can only be changed by pausing or stopping the autopilot.
-//!   It is not cloned, so the paper record it earns inside an autopilot is
-//!   the same forward-test evidence its Strategy Passport is judged on.
-//! - **Markets are exclusive.** At start every market is assigned to exactly
-//!   one sleeve. Strategies that trade a whole set at once (Pairs, lab books)
-//!   claim their full universe first, all or nothing; the other sleeves then
-//!   deal the remaining markets out in turn, highest weight first. The one
-//!   exception is lab books among themselves: they net their targets per
-//!   coin (below), so several of them share the crypto markets of one
-//!   autopilot. A market already assigned to another active autopilot is not
-//!   available. While an autopilot is active its markets are reserved:
-//!   strategies outside it do not open positions there.
-//! - **Positions belong to whoever opened them.** A fill that opens a
-//!   position for a sleeve strategy on one of its markets makes the position
-//!   the autopilot's; every later fill on it (the strategy's exit, an ATR
-//!   stop, a flatten from the Positions page) is booked to the autopilot, and
-//!   so is a broker correction from reconciliation: the quantity follows the
-//!   venue and the difference is realised at the mark, journaled, so the
-//!   correction itself never moves its equity past a stop unseen. A
-//!   position a sleeve strategy held from before the autopilot started stays
-//!   outside it: its P&L is not counted, and the autopilot trades that market
-//!   once it is closed. Lab books only trade by rebalancing, so a lab book
-//!   that already holds coins cannot join an autopilot: it would never start
-//!   flat.
+//! - **Orders and fills carry their book.** Every order an autopilot sends
+//!   names its book, and every fill the venue reports for it is booked there
+//!   and nowhere else, whichever strategy sent it and in whatever order the
+//!   venue answers. Each autopilot sends its own orders; nothing is netted
+//!   between autopilots. Two books trade one venue account, so an order on
+//!   the other side of a symbol from another book waits until that one is
+//!   done (the two could meet at the venue as a wash trade).
+//! - **The venue holds the sum.** The reconciliation compares what the
+//!   venue holds per symbol with the sum over every book; when the venue
+//!   wins, each book takes its share in proportion to what it held, and each
+//!   autopilot books its own difference at the mark, so a correction never
+//!   moves its equity past a stop unseen (`engine::demo_reconcile`).
+//! - **Strategies may be shared.** A paper or demo autopilot may run a
+//!   strategy (a lab book too) that other paper or demo autopilots run: each
+//!   trades it in its own book with its own money, and one signal is an
+//!   entry for each of them. A live autopilot keeps its strategies to itself
+//!   and takes none another autopilot runs. While any autopilot runs a
+//!   strategy, its state is the autopilots' to set; stopping one autopilot
+//!   pauses only the strategies no other one still runs.
+//! - **Markets are exclusive inside one autopilot.** Its book has one
+//!   position per market, so at start every market of its strategies is
+//!   assigned to exactly one of its sleeves. Strategies that trade a whole
+//!   set at once (Pairs, lab books) claim their full universe first, all or
+//!   nothing; the other sleeves then deal the remaining markets out in turn,
+//!   highest weight first. The one exception is lab books among themselves:
+//!   they net their targets per coin (below). Other autopilots take nothing
+//!   from it: their books are their own.
+//! - **Positions belong to the book they are in.** Every fill in an
+//!   autopilot's book (the strategy's exit, an ATR stop, a flatten from the
+//!   Positions page) is booked to the autopilot, and so is a broker
+//!   correction. A position a sleeve strategy holds elsewhere (the main
+//!   book, another autopilot) stays where it is: the new autopilot starts
+//!   with an empty book. A lab book that trades on its own and holds coins
+//!   in the main book cannot be claimed (those coins would be left
+//!   unmanaged); coins it holds in another autopilot's book do not matter.
+//!
+//! Saves from before books existed kept every position under its market id,
+//! with each autopilot's `owned` naming its markets. On restore they move into
+//! the autopilot's book exactly as they are, with the orders still at the
+//! venue and the fees still to be posted, and nothing is traded
+//! ([`Engine::migrate_to_books`]).
 //!
 //! # Lab books inside autopilots
 //!
@@ -112,10 +130,29 @@
 //! and a pick that fails the deflation test (or has no green passport) says
 //! that it is the best available evidence, not a proven edge. It picks up to
 //! `maxSleeves` (3 by default) with positive evidence, weighted by score.
-//! Candidates are taken best first and markets stay exclusive: lab books
-//! claim every crypto market together (they net), so built-ins only get
-//! crypto markets when they out-score every lab book. Whoever is passed over
-//! for that reason is named in the start message.
+//! Candidates are taken best first and markets stay exclusive inside the
+//! autopilot: lab books claim every crypto market together (they net), so
+//! built-ins only get crypto markets when they out-score every lab book.
+//! Whoever is passed over for that reason is named in the start message.
+//!
+//! # Benchmarks and the side-by-side view
+//!
+//! Every autopilot is held against buying and holding: BTC for crypto, SPY
+//! for US shares, from its start to now (or to its stop). An autopilot saved
+//! before the comparison existed gets its start price from the nearest
+//! candle at its start; with none in reach for [`BENCH_WAIT_MS`], the
+//! comparison starts at the price then, and its status says so. Each status
+//! also carries its own cash, its deepest drawdown and its equity history,
+//! which the Autopilot page sets side by side.
+//!
+//! # Capital on a shared account
+//!
+//! Paper autopilots share the engine's paper account: together they are
+//! given no more than it holds. Demo autopilots on the Alpaca paper account
+//! share that account the same way: the host reads its equity before a start
+//! or a raise ([`Engine::autopilot_needs_paper_equity`]), and the amounts of
+//! the demo autopilots there may not add up to more. Lowering one's amount
+//! frees the difference for another.
 //!
 //! # Stop rules
 //!
@@ -179,10 +216,6 @@ pub const REPICK_DEFAULT_HOURS: f64 = 24.0;
 pub const REPICK_MIN_SHIFT: f64 = 0.02;
 /// Stopped autopilots kept for the record, newest first.
 const KEEP_FINISHED: usize = 10;
-/// A live order still working when its autopilot stopped can fill until the
-/// order timeout cancels it, plus a poll or two. Its fill is still the
-/// autopilot's (and closed again when it flattened).
-const LATE_FILL_GRACE_MS: i64 = 120_000;
 /// An entry worth less than this is not worth its fee.
 pub(super) const MIN_ENTRY_USD: f64 = 1.0;
 
@@ -394,6 +427,77 @@ pub struct AutopilotStatus {
     /// Market ids it holds right now.
     #[serde(default)]
     pub held: Vec<String>,
+    /// What it is held against: BTC buy and hold for crypto, SPY buy and
+    /// hold for US shares, over the same period.
+    #[serde(default)]
+    pub benchmark: Option<BenchmarkStatus>,
+    /// The cash of its own book: equity less what its positions are worth
+    /// at the mark and what its orders still at the venue will cost.
+    #[serde(default)]
+    pub cash: f64,
+    /// The deepest fall from a peak over its equity history, in %.
+    #[serde(default)]
+    pub max_drawdown_pct: f64,
+}
+
+/// What an autopilot is held against, as the UI shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkStatus {
+    /// "BTC/USD" or "SPY".
+    pub symbol: String,
+    /// "BTC buy and hold", "SPY buy and hold".
+    pub name: String,
+    /// Buy and hold over the same period, in %. `None` while a start price
+    /// is still being looked for.
+    pub return_pct: Option<f64>,
+    /// The autopilot's return less the benchmark's, in points.
+    pub excess_pct: Option<f64>,
+    /// When the comparison starts, if not at the autopilot's start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_ms: Option<i64>,
+    /// How a start price was filled in after the fact, when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A benchmark start missing this long (no candle from the autopilot's
+/// start in sight) is taken from the price now, and the status says so.
+pub const BENCH_WAIT_MS: i64 = 10 * 60_000;
+/// A candle this far from the start time still prices the start.
+const BENCH_CANDLE_TOLERANCE_MS: i64 = 36 * 3_600_000;
+const BTC_SYMBOL: &str = "BTC/USD";
+/// The SPY market US shares are held against.
+pub const SPY_ID: &str = "alpaca:SPY";
+
+fn when(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
+}
+
+/// Buy and hold from `p0` to `p1`, in %.
+fn leg_return(p0: Option<f64>, p1: Option<f64>) -> Option<f64> {
+    let p0 = p0.filter(|p| *p > 0.0 && p.is_finite())?;
+    let p1 = p1.filter(|p| *p > 0.0 && p.is_finite())?;
+    Some((p1 / p0 - 1.0) * 100.0)
+}
+
+/// The deepest fall from a running peak over an equity history and the
+/// equity now, in %.
+pub fn max_drawdown_pct(history: &[(i64, f64)], now: f64) -> f64 {
+    let mut peak = f64::MIN;
+    let mut worst: f64 = 0.0;
+    for v in history.iter().map(|h| h.1).chain(std::iter::once(now)) {
+        if !v.is_finite() {
+            continue;
+        }
+        if v > peak {
+            peak = v;
+        }
+        if peak > 0.0 {
+            worst = worst.max((peak - v) / peak * 100.0);
+        }
+    }
+    worst
 }
 
 /// An autopilot's forward result against its backtest, for one plain line.
@@ -545,6 +649,26 @@ pub struct Autopilot {
     /// (a partial fill, another maker child) does not count again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_orders: Vec<(String, bool)>,
+    /// The SPY price when it started and when it stopped, for an autopilot
+    /// of US shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spy_start: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spy_end: Option<f64>,
+    /// When the BTC (or SPY) comparison starts, if not at its start: an
+    /// autopilot saved before the benchmark existed, with no candle from its
+    /// start, is compared from the first price known after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btc_from_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spy_from_ms: Option<i64>,
+    /// How a benchmark start was filled in after the fact, in plain words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bench_notes: Vec<String>,
+    /// Since when a benchmark start has been looked for. Not saved: a
+    /// restart looks again, candles first.
+    #[serde(skip)]
+    pub bench_wait_ms: Option<i64>,
 }
 
 /// How many venue orders an autopilot remembers for counting.
@@ -593,10 +717,6 @@ impl Autopilot {
 
     fn sleeve_mut(&mut self, sid: &str) -> Option<&mut Sleeve> {
         self.sleeves.iter_mut().find(|s| s.strategy_id == sid)
-    }
-
-    fn has_market(&self, market: &str) -> bool {
-        self.sleeves.iter().any(|s| s.markets.iter().any(|m| m == market))
     }
 
     fn label(&self) -> String {
@@ -1229,9 +1349,18 @@ impl Engine {
         self.autopilots.iter().position(|a| a.config.id == id)
     }
 
-    /// The active autopilot that runs this strategy.
-    fn ap_of_strategy(&self, sid: &str) -> Option<usize> {
-        self.autopilots.iter().position(|a| a.is_active() && a.sleeve(sid).is_some())
+    /// The active autopilots that run this strategy. Several may: each
+    /// trades it in its own book.
+    fn aps_of_strategy(&self, sid: &str) -> Vec<usize> {
+        (0..self.autopilots.len()).filter(|&i| self.autopilots[i].is_active() && self.autopilots[i].sleeve(sid).is_some()).collect()
+    }
+
+    /// The active autopilot whose book this is.
+    fn ap_of_book(&self, book: &str) -> Option<usize> {
+        if book.is_empty() {
+            return None;
+        }
+        self.autopilots.iter().position(|a| a.is_active() && a.config.id == book)
     }
 
     fn ap_mark(&self, market: &str, avg: f64) -> f64 {
@@ -1239,12 +1368,17 @@ impl Engine {
         if px > 0.0 { px } else { avg }
     }
 
+    /// The position the autopilot holds in `market`, in its own book.
+    fn ap_position(&self, ap: &Autopilot, market: &str) -> Option<&super::PositionInternal> {
+        self.positions.get(&super::pos_key(&ap.config.id, market))
+    }
+
     /// Unrealised P&L of what it owns, or of one sleeve's share of it.
     fn ap_unrealized(&self, ap: &Autopilot, sleeve: Option<&str>) -> f64 {
         ap.owned
             .keys()
             .filter_map(|m| {
-                let p = self.positions.get(m)?;
+                let p = self.ap_position(ap, m)?;
                 let share = sleeve.map_or(1.0, |s| ap.share(m, s));
                 Some((self.ap_mark(m, p.avg_price) - p.avg_price) * p.qty * share)
             })
@@ -1256,26 +1390,27 @@ impl Engine {
         ap.owned
             .keys()
             .filter_map(|m| {
-                let p = self.positions.get(m)?;
+                let p = self.ap_position(ap, m)?;
                 let share = sleeve.map_or(1.0, |s| ap.share(m, s));
                 Some((p.qty * self.ap_mark(m, p.avg_price)).abs() * share)
             })
             .sum()
     }
 
-    /// Notional of entries sent to a venue (demo or live) on the autopilot's
-    /// markets that have not filled yet. They become positions when the venue
-    /// says so; until then they still use up room, or every signal in the
-    /// meantime would be sized from the same budget again.
+    /// Notional of entries sent to a venue (demo or live) for the
+    /// autopilot's book that have not filled yet. They become positions when
+    /// the venue says so; until then they still use up room, or every signal
+    /// in the meantime would be sized from the same budget again.
     fn ap_pending(&self, ap: &Autopilot, sleeve: Option<&str>) -> f64 {
         self.inflight
             .values()
+            .filter(|f| f.book == ap.config.id)
             .filter(|f| sleeve.is_none_or(|s| s == f.strategy_id))
             .filter(|f| ap.sleeves.iter().any(|s| s.strategy_id == f.strategy_id && s.markets.contains(&f.market_id)))
             .filter(|f| {
                 // An entry, or the rest of one: not an exit of what is held.
                 let buy = f.side == crate::connectors::Side::Buy;
-                self.positions.get(&f.market_id).is_none_or(|p| p.qty.abs() < 1e-12 || (p.qty > 0.0) == buy)
+                self.ap_position(ap, &f.market_id).is_none_or(|p| p.qty.abs() < 1e-12 || (p.qty > 0.0) == buy)
             })
             .map(|f| {
                 let left = (f.qty - f.booked_qty).max(0.0);
@@ -1314,30 +1449,152 @@ impl Engine {
         ap.start_capital + ap.realized - ap.fees + ap.released + self.ap_unrealized(ap, None)
     }
 
-    /// The name of the autopilot that runs this strategy, if one does.
-    pub(super) fn autopilot_claimant(&self, sid: &str) -> Option<String> {
-        self.ap_of_strategy(sid).map(|i| self.autopilots[i].config.name.clone())
+    /// The SPY price, when it comes from a real feed.
+    pub(super) fn ap_spy_price(&self) -> Option<f64> {
+        self.markets
+            .iter()
+            .find(|m| m.id == SPY_ID && m.price > 0.0 && m.price.is_finite() && self.real_ids.contains(&m.id))
+            .map(|m| m.price)
     }
 
-    /// May this strategy open a position in this market now? A strategy in an
-    /// autopilot only on its own sleeve's markets and only while the
-    /// autopilot runs; every other strategy only outside the markets an
-    /// active autopilot reserved.
-    pub(super) fn autopilot_entry_allowed(&self, sid: &str, market: &str) -> bool {
-        if let Some(i) = self.ap_of_strategy(sid) {
-            let ap = &self.autopilots[i];
-            let live_ok = ap.config.mode != AutopilotMode::Live
-                || config_venue(&ap.config).is_some_and(|v| self.live_routable(v));
-            return ap.state == AutopilotState::Running
-                && live_ok
-                && ap.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market));
+    /// Is it held against SPY (an autopilot of US shares)?
+    fn ap_wants_spy(&self, ap: &Autopilot) -> bool {
+        config_venue(&ap.config) == Some(Venue::Alpaca)
+    }
+
+    /// The candle price of a benchmark at `t`: the close of the last candle
+    /// that opened at or before it, else the open of the first one after,
+    /// within a day and a half. With the time of that candle.
+    fn bench_candle(&self, btc: bool, t: i64) -> Option<(f64, i64)> {
+        let ids: Vec<String> = if btc {
+            self.markets.iter().filter(|m| m.symbol == BTC_SYMBOL).map(|m| m.id.clone()).collect()
+        } else {
+            vec![SPY_ID.to_string()]
+        };
+        let mut best: Option<(f64, i64, i64)> = None; // (price, ts, distance)
+        for id in &ids {
+            let Some(bars) = self.ohlc.get(id) else { continue };
+            let before = bars.iter().rev().find(|b| b.ts <= t && b.close > 0.0).map(|b| (b.close, b.ts, t - b.ts));
+            let after = bars.iter().find(|b| b.ts > t && b.open > 0.0).map(|b| (b.open, b.ts, b.ts - t));
+            for c in [before, after].into_iter().flatten() {
+                if c.2 <= BENCH_CANDLE_TOLERANCE_MS && best.is_none_or(|b| c.2 < b.2) {
+                    best = Some(c);
+                }
+            }
         }
-        !self.autopilots.iter().any(|a| a.is_active() && a.has_market(market))
+        best.map(|b| (b.0, b.1))
     }
 
-    /// Sizing for an entry by a strategy that runs in an autopilot.
-    pub(super) fn autopilot_sizing(&self, sid: &str) -> Option<SleeveSizing> {
-        let ap = &self.autopilots[self.ap_of_strategy(sid)?];
+    /// Fill in a benchmark start an autopilot does not have (one saved
+    /// before the field existed, or started before any price was known):
+    /// from the nearest candle at its start time, else, once
+    /// [`BENCH_WAIT_MS`] passed without one, from the price now, and its
+    /// status says so. A stopped one is only filled from candles, start and
+    /// end, never guessed.
+    pub(super) fn ap_bench_backfill(&mut self, i: usize, now: i64) {
+        let ap = &self.autopilots[i];
+        let need_btc = ap.btc_start.is_none();
+        let need_spy = ap.spy_start.is_none() && self.ap_wants_spy(ap);
+        if !need_btc && !need_spy {
+            return;
+        }
+        let active = ap.is_active();
+        let started = ap.started_ms;
+        let stopped = ap.stopped_ms;
+        let btc_now = self.ap_btc_price(ap);
+        let spy_now = self.ap_spy_price();
+        let wait_since = *self.autopilots[i].bench_wait_ms.get_or_insert(now);
+        let waited = now - wait_since >= BENCH_WAIT_MS;
+        for (btc, need) in [(true, need_btc), (false, need_spy)] {
+            if !need {
+                continue;
+            }
+            let sym = if btc { "BTC" } else { "SPY" };
+            let candle = self.bench_candle(btc, started);
+            let end = stopped.and_then(|t| self.bench_candle(btc, t)).map(|c| c.0);
+            let label = self.autopilots[i].label();
+            let ap = &mut self.autopilots[i];
+            let (start, from, stop_px) =
+                if btc { (&mut ap.btc_start, &mut ap.btc_from_ms, &mut ap.btc_end) } else { (&mut ap.spy_start, &mut ap.spy_from_ms, &mut ap.spy_end) };
+            let note = if let Some((px, ts)) = candle {
+                if !active && end.is_none() && stop_px.is_none() {
+                    continue;
+                }
+                *start = Some(px);
+                if !active && stop_px.is_none() {
+                    *stop_px = end;
+                }
+                format!("{sym} at its start is the price of the candle of {}, filled in after the fact.", when(ts))
+            } else if active && waited {
+                let Some(px) = (if btc { btc_now } else { spy_now }) else { continue };
+                *start = Some(px);
+                *from = Some(now);
+                format!(
+                    "No {sym} price or candle from its start ({}) is known, so its {sym} comparison starts {}, not at its start.",
+                    when(started),
+                    when(now)
+                )
+            } else {
+                continue;
+            };
+            ap.bench_notes.push(note.clone());
+            self.log(JournalKind::System, format!("{label}: {note}"), None, None);
+        }
+    }
+
+    /// What it is held against, and how that did over the same period.
+    /// `equity` is its equity now; when the comparison starts after its
+    /// start, its own return is measured from the same moment.
+    fn ap_benchmark(&self, ap: &Autopilot, equity: f64) -> Option<BenchmarkStatus> {
+        let active = ap.is_active();
+        let (symbol, ret, from) = if self.ap_wants_spy(ap) {
+            ("SPY", leg_return(ap.spy_start, if active { self.ap_spy_price() } else { ap.spy_end }), ap.spy_from_ms)
+        } else if config_venue(&ap.config) == Some(Venue::Crypto) {
+            (BTC_SYMBOL, self.ap_btc_return_pct(ap), ap.btc_from_ms)
+        } else {
+            return None;
+        };
+        let base = match from {
+            Some(t) => ap.history.iter().find(|h| h.0 >= t).map(|h| h.1).unwrap_or(equity),
+            None => ap.start_capital,
+        };
+        let own = if base > 0.0 { (equity / base - 1.0) * 100.0 } else { 0.0 };
+        let name = format!("{} buy and hold", symbol.split('/').next().unwrap_or(symbol));
+        let note = (!ap.bench_notes.is_empty()).then(|| ap.bench_notes.join(" "));
+        Some(BenchmarkStatus {
+            symbol: symbol.to_string(),
+            name,
+            return_pct: ret,
+            excess_pct: ret.map(|r| own - r),
+            from_ms: from,
+            note,
+        })
+    }
+
+    /// The names of the active autopilots that run this strategy, if any do.
+    pub(super) fn autopilot_claimant(&self, sid: &str) -> Option<String> {
+        let names: Vec<String> =
+            self.aps_of_strategy(sid).into_iter().map(|i| format!("\"{}\"", self.autopilots[i].config.name)).collect();
+        (!names.is_empty()).then(|| names.join(", "))
+    }
+
+    /// May this strategy open a position in this market for `book` now? In
+    /// an autopilot's book only on its own sleeve's markets and only while
+    /// the autopilot runs. The main book is open to every strategy no
+    /// autopilot runs: the books are separate, so nothing is reserved.
+    pub(super) fn autopilot_entry_allowed(&self, book: &str, sid: &str, market: &str) -> bool {
+        if book.is_empty() {
+            return self.aps_of_strategy(sid).is_empty();
+        }
+        let Some(i) = self.ap_of_book(book) else { return false };
+        let ap = &self.autopilots[i];
+        let live_ok = ap.config.mode != AutopilotMode::Live || config_venue(&ap.config).is_some_and(|v| self.live_routable(v));
+        ap.state == AutopilotState::Running && live_ok && ap.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market))
+    }
+
+    /// Sizing for an entry by a strategy in an autopilot's book.
+    pub(super) fn autopilot_sizing(&self, book: &str, sid: &str) -> Option<SleeveSizing> {
+        let ap = &self.autopilots[self.ap_of_book(book)?];
         let s = ap.sleeve(sid)?;
         let equity = self.ap_equity(ap).max(0.0);
         let capital = equity * s.weight;
@@ -1347,17 +1604,23 @@ impl Engine {
         Some(SleeveSizing { capital, slots: s.markets.len().max(1) as f64, equity, room })
     }
 
-    /// The route for an order by a strategy that runs in an autopilot: the
-    /// autopilot's mode decides, never the strategy's own switch.
-    pub(super) fn autopilot_route(&self, sid: &str) -> Option<RouteIntent> {
-        self.ap_of_strategy(sid).map(|i| self.autopilots[i].config.mode.route_intent())
+    /// The route for an order in an autopilot's book: the autopilot's mode
+    /// decides, never the strategy's own switch. `None` for the main book.
+    pub(super) fn autopilot_route(&self, book: &str) -> Option<RouteIntent> {
+        self.ap_of_book(book).map(|i| self.autopilots[i].config.mode.route_intent())
     }
 
-    /// The lab books of the autopilot that runs this lab book, as one group.
-    pub(super) fn autopilot_lab_group(&self, sid: &str) -> Option<LabGroup> {
-        let i = self.ap_of_strategy(sid)?;
+    /// The lab books of the autopilot at index `i`, as one group; `None`
+    /// when it is not active or runs no lab book.
+    pub(super) fn autopilot_lab_group(&self, i: usize) -> Option<LabGroup> {
         let ap = &self.autopilots[i];
+        if !ap.is_active() {
+            return None;
+        }
         let labs: Vec<&Sleeve> = ap.sleeves.iter().filter(|s| self.is_lab_book(&s.strategy_id)).collect();
+        if labs.is_empty() {
+            return None;
+        }
         let total: f64 = labs.iter().map(|s| s.weight.max(0.0)).sum();
         Some(LabGroup {
             ap: i,
@@ -1393,7 +1656,7 @@ impl Engine {
             .owned
             .keys()
             .filter_map(|m| {
-                let p = self.positions.get(m)?;
+                let p = self.ap_position(&self.autopilots[ap_i], m)?;
                 Some((m.clone(), (self.ap_mark(m, p.avg_price) - p.avg_price) * p.qty))
             })
             .collect();
@@ -1416,29 +1679,35 @@ impl Engine {
         ap.cash_note = cash_note;
     }
 
-    /// Book a fill to the autopilot that owns the position, or that opened it.
-    /// Called by `settle_fill` for every fill, paper or live. `existed` is
-    /// whether the market had a position before this fill.
-    pub(super) fn autopilot_on_fill(&mut self, sid: &str, market: &str, realized: f64, fee: f64, existed: bool, open_after: bool) {
-        let now = self.now();
-        let late = (self.live.timeout_sec as i64) * 1000 + LATE_FILL_GRACE_MS;
-        let opens = |a: &Autopilot| a.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market));
-        let i = match self.autopilots.iter().position(|a| a.owned.contains_key(market)) {
-            Some(i) => i,
-            None if !existed => {
-                let active = self.autopilots.iter().position(|a| a.is_active() && opens(a));
-                let recent = || {
-                    self.autopilots
-                        .iter()
-                        .position(|a| !a.is_active() && a.stopped_ms.is_some_and(|t| now - t <= late) && opens(a))
-                };
-                match active.or_else(recent) {
-                    Some(i) => i,
-                    None => return,
-                }
-            }
-            None => return,
-        };
+    /// Book a fill in an autopilot's book to that autopilot. Called by
+    /// `settle_fill_on` for every fill, paper, demo or live; a fill in the
+    /// main book (`book` empty) is no autopilot's. `existed` is whether the
+    /// book had a position in the market before this fill.
+    ///
+    /// The book says whose it is, so a fill can never land in another
+    /// autopilot's P&L, whichever strategy sent it. A stopped autopilot still
+    /// books what its own orders fill after the stop (an order at the venue
+    /// can fill until it is cancelled); a position it handed out when it
+    /// stopped without flattening is no longer its, and closing it later
+    /// books nothing to it (its P&L was counted at the stop).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn autopilot_on_fill(
+        &mut self,
+        book: &str,
+        sid: &str,
+        market: &str,
+        realized: f64,
+        fee: f64,
+        existed: bool,
+        open_after: bool,
+    ) {
+        if book.is_empty() {
+            return;
+        }
+        let Some(i) = self.autopilots.iter().position(|a| a.config.id == book) else { return };
+        if !self.autopilots[i].is_active() && !self.autopilots[i].owned.contains_key(market) && existed {
+            return;
+        }
         // A late fill on an autopilot that stopped and left its positions open
         // is handed out the same way: its P&L counted at the mark now, the
         // position no longer its own. Kept, it would hold the autopilot open
@@ -1446,7 +1715,10 @@ impl Engine {
         let order = self.fill_order.clone();
         let hand_out = open_after && !self.autopilots[i].is_active() && !self.autopilots[i].flatten_at_stop;
         let unreal = if hand_out {
-            self.positions.get(market).map(|p| (self.ap_mark(market, p.avg_price) - p.avg_price) * p.qty).unwrap_or(0.0)
+            self.positions
+                .get(&super::pos_key(book, market))
+                .map(|p| (self.ap_mark(market, p.avg_price) - p.avg_price) * p.qty)
+                .unwrap_or(0.0)
         } else {
             0.0
         };
@@ -1483,13 +1755,11 @@ impl Engine {
     /// is a cost of the trade that caused it, whenever it arrives.
     /// `open_after` is whether the position is still open once the fee's
     /// coins left it. Returns the autopilot's label, for the journal.
-    pub(super) fn autopilot_on_late_fee(&mut self, sid: &str, market: &str, fee: f64, open_after: bool) -> Option<String> {
-        let trades_it = |a: &Autopilot| a.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market));
-        let i = self
-            .autopilots
-            .iter()
-            .position(|a| a.owned.contains_key(market))
-            .or_else(|| self.autopilots.iter().rposition(trades_it))?;
+    pub(super) fn autopilot_on_late_fee(&mut self, book: &str, sid: &str, market: &str, fee: f64, open_after: bool) -> Option<String> {
+        if book.is_empty() {
+            return None;
+        }
+        let i = self.autopilots.iter().position(|a| a.config.id == book)?;
         let ap = &mut self.autopilots[i];
         let owner = ap.owned.get(market).cloned().unwrap_or_else(|| sid.to_string());
         let fee = fee.max(0.0);
@@ -1509,8 +1779,11 @@ impl Engine {
     /// before and just after, so a correction can never lift it over a stop,
     /// or drop a loss its stop rules were about to see. Journaled with the
     /// numbers. `before` and `after` are (quantity, average price).
-    pub(super) fn autopilot_on_correction(&mut self, market: &str, before: (f64, f64), after: (f64, f64), venue: &str) {
-        let Some(i) = self.autopilots.iter().position(|a| a.owned.contains_key(market)) else { return };
+    pub(super) fn autopilot_on_correction(&mut self, book: &str, market: &str, before: (f64, f64), after: (f64, f64), venue: &str) {
+        if book.is_empty() {
+            return;
+        }
+        let Some(i) = self.autopilots.iter().position(|a| a.config.id == book && a.owned.contains_key(market)) else { return };
         let mark = self.ap_mark(market, before.1);
         let open_after = after.0.abs() > 1e-12;
         let unreal = |(q, avg): (f64, f64)| if q.abs() > 1e-12 { (mark - avg) * q } else { 0.0 };
@@ -1561,6 +1834,14 @@ impl Engine {
                 return Err(format!("{} is still closing its positions. Start the new one once they are closed.", old.label()));
             }
             // A stopped one under the same id is replaced once this one starts.
+        }
+        // Its book must start empty: positions a stopped autopilot under the
+        // same id left open would otherwise be mixed into the new one.
+        if self.positions.values().any(|p| p.book == cfg.id) {
+            return Err(format!(
+                "The book \"{}\" still holds positions an earlier autopilot left open when it stopped. Close them on the Positions page first, or give the new one another id.",
+                cfg.id
+            ));
         }
 
         let Some(mut cv) = CostVenue::parse(&cfg.venue) else {
@@ -1640,15 +1921,11 @@ impl Engine {
             return Err("The kill switch is on, so every new entry would be refused. Release it first.".into());
         }
 
-        // Strategies and markets already taken by another active autopilot.
-        let busy: HashSet<String> =
-            self.autopilots.iter().filter(|a| a.is_active()).flat_map(|a| a.sleeves.iter().map(|s| s.strategy_id.clone())).collect();
-        let taken: HashSet<String> = self
-            .autopilots
-            .iter()
-            .filter(|a| a.is_active())
-            .flat_map(|a| a.sleeves.iter().flat_map(|s| s.markets.iter().cloned()))
-            .collect();
+        // Every autopilot trades in its own book, so markets are never taken
+        // by another one, and a strategy may run in several paper and demo
+        // autopilots at once. A live autopilot keeps its strategies to itself.
+        let busy = self.busy_strategies(cfg.mode, None);
+        let taken: HashSet<String> = HashSet::new();
 
         let auto = cfg.sleeves.is_empty();
         let mut passed_over: Vec<String> = Vec::new();
@@ -1702,13 +1979,13 @@ impl Engine {
                     continue;
                 }
                 return Err(format!(
-                    "{name} has no market of its own left: every market it trades already belongs to another sleeve or another autopilot. One position per market means two strategies cannot hold the same coin; drop one of them or pick strategies on different markets."
+                    "{name} has no market of its own left: every market it trades already belongs to another sleeve of this autopilot. One position per market in an autopilot's book means two of its strategies cannot hold the same coin; drop one of them, pick strategies on different markets, or run the other one in an autopilot of its own."
                 ));
             }
             chosen.push((sid, w, why, markets));
         }
         if chosen.is_empty() {
-            return Err("Auto found no strategy with a market of its own left: the others already belong to running autopilots.".into());
+            return Err("Auto found no strategy with a market of its own left in this autopilot.".into());
         }
         let total: f64 = chosen.iter().map(|c| c.1).sum();
 
@@ -1781,6 +2058,10 @@ impl Engine {
                 }
                 return Err(format!("The paper account holds {}; a paper autopilot cannot trade more than that.", usd(paper)));
             }
+        } else if cfg.mode == AutopilotMode::Demo && self.on_alpaca_paper_account(&cfg) {
+            // Demo autopilots on the Alpaca paper account share it: together
+            // they may not be given more than it holds.
+            self.paper_account_room(None, cfg.capital_usd, &cash)?;
         }
 
         // Go.
@@ -1822,15 +2103,27 @@ impl Engine {
             }
             // A lab book rebalances to its targets with the autopilot's money
             // now, not on its next signal.
-            self.lab_done.remove(&sl.strategy_id);
-            self.lab_retry.remove(&sl.strategy_id);
+            self.lab_done.remove(&super::pos_key(&id, &sl.strategy_id));
+            self.lab_retry.remove(&super::pos_key(&id, &sl.strategy_id));
         }
-        // Positions the sleeve strategies held from before stay theirs.
-        let outside: Vec<String> = sleeves
+        // Positions the sleeve strategies hold elsewhere (the main book,
+        // another autopilot's book) stay where they are: this one starts
+        // with an empty book of its own.
+        let elsewhere: Vec<String> = {
+            let mine: HashSet<&str> = sleeves.iter().map(|s| s.strategy_id.as_str()).collect();
+            let mut v: Vec<String> = self
+                .positions
+                .values()
+                .filter(|p| mine.contains(p.strategy_id.as_str()) && p.qty.abs() > 1e-12)
+                .map(|p| p.symbol.clone())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let sharing: Vec<String> = sleeves
             .iter()
-            .flat_map(|sl| sl.markets.iter())
-            .filter(|m| self.positions.get(*m).is_some_and(|p| p.qty.abs() > 1e-12))
-            .map(|m| self.markets.iter().find(|x| &x.id == m).map(|x| x.symbol.clone()).unwrap_or_else(|| m.clone()))
+            .filter_map(|sl| self.autopilot_claimant(&sl.strategy_id).map(|who| format!("{} (also in {who})", sl.name)))
             .collect();
 
         let mut msg = format!(
@@ -1852,7 +2145,7 @@ impl Engine {
         }
         if !passed_over.is_empty() {
             msg.push_str(&format!(
-                " Auto passed over {}: the markets they need already belong to a pick with better evidence or to another autopilot (one position per market).",
+                " Auto passed over {}: the markets they need already belong to a pick with better evidence in this autopilot (one position per market in its book).",
                 passed_over.join(", ")
             ));
         }
@@ -1862,10 +2155,17 @@ impl Engine {
                 pct(h)
             ));
         }
-        if !outside.is_empty() {
+        msg.push_str(" It trades in a book of its own: its cash, positions, fills, fees and P&L are its alone.");
+        if !sharing.is_empty() {
             msg.push_str(&format!(
-                " Already held from before and left outside the autopilot until closed: {}.",
-                outside.join(", ")
+                " Also running in other autopilots, each in its own book: {}.",
+                sharing.join(", ")
+            ));
+        }
+        if !elsewhere.is_empty() {
+            msg.push_str(&format!(
+                " Its strategies already hold {} elsewhere; those positions stay where they are and are not counted here.",
+                elsewhere.join(", ")
             ));
         }
         if cfg.mode == AutopilotMode::Demo {
@@ -1920,6 +2220,12 @@ impl Engine {
             btc_end: None,
             orders: 0,
             recent_orders: Vec::new(),
+            spy_start: None,
+            spy_end: None,
+            btc_from_ms: None,
+            spy_from_ms: None,
+            bench_notes: Vec::new(),
+            bench_wait_ms: None,
         });
         let i = self.autopilots.len() - 1;
         let x = self.autopilots[i].config.capital_usd;
@@ -1927,7 +2233,94 @@ impl Engine {
         self.autopilots[i].peak_equity = x;
         self.autopilots[i].history.push((now, x));
         self.autopilots[i].btc_start = self.ap_btc_price(&self.autopilots[i]);
+        if self.ap_wants_spy(&self.autopilots[i]) {
+            self.autopilots[i].spy_start = self.ap_spy_price();
+        }
         Ok(id)
+    }
+
+    /// Strategies an autopilot in `mode` may not take because another active
+    /// autopilot (other than `except`) runs them. Paper and demo autopilots
+    /// share strategies freely, each trading them in its own book; a live
+    /// autopilot keeps its strategies to itself and takes none another one
+    /// runs, so real money never trades a strategy two ways at once.
+    fn busy_strategies(&self, mode: AutopilotMode, except: Option<&str>) -> HashSet<String> {
+        self.autopilots
+            .iter()
+            .filter(|a| a.is_active() && except.is_none_or(|x| a.config.id != x))
+            .filter(|a| mode == AutopilotMode::Live || a.config.mode == AutopilotMode::Live)
+            .flat_map(|a| a.sleeves.iter().map(|s| s.strategy_id.clone()))
+            .collect()
+    }
+
+    /// Does an autopilot with this config trade on the Alpaca paper account?
+    /// Demo on US shares does, and so does crypto demo when crypto demo
+    /// orders go to Alpaca.
+    pub(super) fn on_alpaca_paper_account(&self, cfg: &AutopilotConfig) -> bool {
+        if cfg.mode != AutopilotMode::Demo {
+            return false;
+        }
+        match config_venue(cfg) {
+            Some(Venue::Alpaca) => true,
+            Some(Venue::Crypto) => self.crypto_demo_on_alpaca(),
+            _ => false,
+        }
+    }
+
+    /// For hosts: does a start with this config, or a change of the amount
+    /// of the autopilot `id`, have to read the Alpaca paper account's equity
+    /// first (see [`VenueCash`])? The host reads it with no engine lock held
+    /// and passes it in as `VenueCash::Read`.
+    pub fn autopilot_needs_paper_equity(&self, cfg: Option<&AutopilotConfig>, id: Option<&str>) -> bool {
+        match (cfg, id) {
+            (Some(c), _) => self.on_alpaca_paper_account(c),
+            (None, Some(id)) => self.autopilot_config(id).is_some_and(|c| self.on_alpaca_paper_account(&c)),
+            _ => false,
+        }
+    }
+
+    /// The amounts given to the active demo autopilots on the Alpaca paper
+    /// account, other than `except`.
+    fn paper_account_committed(&self, except: Option<&str>) -> f64 {
+        self.autopilots
+            .iter()
+            .filter(|a| a.is_active() && except.is_none_or(|x| a.config.id != x))
+            .filter(|a| self.on_alpaca_paper_account(&a.config))
+            .map(|a| a.config.capital_usd)
+            .sum()
+    }
+
+    /// Check that an amount `x` for this demo autopilot (`except`: its own
+    /// id on a change) fits in the Alpaca paper account together with what
+    /// the other demo autopilots there were given. `cash` is the account's
+    /// equity as the host read it; not read means the host has no way to
+    /// read it, and nothing is checked.
+    fn paper_account_room(&self, except: Option<&str>, x: f64, cash: &VenueCash) -> Result<(), String> {
+        let equity = match cash {
+            VenueCash::NotRead => return Ok(()),
+            VenueCash::Failed(why) => {
+                return Err(format!(
+                    "Could not read the Alpaca paper account ({why}), so the amount cannot be checked against what it holds. Try again in a moment."
+                ))
+            }
+            VenueCash::Read(c) => *c,
+        };
+        let committed = self.paper_account_committed(except);
+        let available = (equity - committed).max(0.0);
+        if x > available + EPS {
+            let others = if committed > 0.0 {
+                format!(", of which {} is already given to the other demo autopilots on it", usd(committed))
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "The Alpaca paper account holds {}{others}, so {} is left, not {}. Lower another autopilot's amount to make room, or give this one less.",
+                usd(equity),
+                usd(available),
+                usd(x)
+            ));
+        }
+        Ok(())
     }
 
     /// Stop an autopilot now. `flatten` overrides its `flattenOnStop`.
@@ -2122,6 +2515,8 @@ impl Engine {
                         usd(cfg.capital_usd)
                     ));
                 }
+            } else if self.on_alpaca_paper_account(&cfg) {
+                self.paper_account_room(Some(&old.id), cfg.capital_usd, &cash)?;
             }
         }
         let eq = self.ap_equity(&self.autopilots[i]);
@@ -2171,14 +2566,9 @@ impl Engine {
         if re_sleeve {
             let ap = &self.autopilots[i];
             let own: HashSet<String> = ap.sleeves.iter().map(|s| s.strategy_id.clone()).collect();
-            let busy: HashSet<String> =
-                self.autopilots.iter().filter(others).flat_map(|a| a.sleeves.iter().map(|s| s.strategy_id.clone())).collect();
-            let mut taken: HashSet<String> = self
-                .autopilots
-                .iter()
-                .filter(others)
-                .flat_map(|a| a.sleeves.iter().flat_map(|s| s.markets.iter().cloned()))
-                .collect();
+            let busy = self.busy_strategies(cfg.mode, Some(&old.id));
+            // Its own book: markets other autopilots trade are not taken.
+            let mut taken: HashSet<String> = HashSet::new();
             // What it holds stays where it is: a built-in's position is its
             // own, and a lab book's coins net only with other lab books.
             let mut builtin_held: BTreeMap<String, String> = BTreeMap::new();
@@ -2253,13 +2643,13 @@ impl Engine {
                         continue;
                     }
                     return Err(format!(
-                        "{name} has no market of its own left: every market it trades already belongs to another sleeve or another autopilot. One position per market means two strategies cannot hold the same coin; drop one of them or pick strategies on different markets."
+                        "{name} has no market of its own left: every market it trades already belongs to another sleeve of this autopilot. One position per market in an autopilot's book means two of its strategies cannot hold the same coin; drop one of them, pick strategies on different markets, or run the other one in an autopilot of its own."
                     ));
                 }
                 chosen.push((sid, w, why, markets));
             }
             if chosen.is_empty() {
-                return Err("Auto found no strategy with a market of its own left: the others already belong to running autopilots.".into());
+                return Err("Auto found no strategy with a market of its own left in this autopilot.".into());
             }
             plan = Some(chosen);
         }
@@ -2291,7 +2681,7 @@ impl Engine {
         if let Some(chosen) = plan {
             parts.push(self.ap_apply_sleeves(i, chosen, now));
             if !passed_over.is_empty() {
-                parts.push(format!("auto passed over {} (their markets belong to a better pick or another autopilot)", passed_over.join(", ")));
+                parts.push(format!("auto passed over {} (their markets belong to a better pick in this autopilot)", passed_over.join(", ")));
             }
             if auto {
                 self.autopilots[i].last_pick_ms = Some(now);
@@ -2393,7 +2783,7 @@ impl Engine {
             let lab = self.is_lab_book(&sid);
             let ap = &self.autopilots[i];
             let holds = ap.owned.iter().any(|(m, owner)| *owner == sid || ap.share(m, &sid) > 0.0)
-                || ap.owned.keys().any(|m| self.positions.get(m).is_some_and(|p| p.strategy_id == sid && p.qty.abs() > 1e-12));
+                || ap.owned.keys().any(|m| self.ap_position(ap, m).is_some_and(|p| p.strategy_id == sid && p.qty.abs() > 1e-12));
             let s = ap.sleeve(&sid).expect("listed sleeves exist");
             let record = s.trades > 0 || s.realized.abs() > EPS || s.fees > EPS;
             let (name, was, dropped_before) = (s.name.clone(), s.weight, s.dropped_ms.is_some());
@@ -2421,7 +2811,8 @@ impl Engine {
                 }
             } else {
                 self.autopilots[i].sleeves.retain(|s| s.strategy_id != sid);
-                if self.strategies.iter().any(|s| s.id == sid && s.state != StrategyState::Paused) {
+                // Paused unless another autopilot still runs it.
+                if self.aps_of_strategy(&sid).is_empty() && self.strategies.iter().any(|s| s.id == sid && s.state != StrategyState::Paused) {
                     self.apply_strategy_state(&sid, StrategyState::Paused);
                 }
                 if was > 0.0 {
@@ -2432,9 +2823,10 @@ impl Engine {
         // The netted target changes now, so the next rebalance runs now: it
         // trades only the difference per coin.
         let members: Vec<String> = self.autopilots[i].sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+        let book = self.autopilots[i].config.id.clone();
         for sid in &members {
-            self.lab_done.remove(sid);
-            self.lab_retry.remove(sid);
+            self.lab_done.remove(&super::pos_key(&book, sid));
+            self.lab_retry.remove(&super::pos_key(&book, sid));
         }
         if parts.is_empty() {
             "strategies as they were".into()
@@ -2510,6 +2902,9 @@ impl Engine {
                         .map(|h| ap.last_pick_ms.unwrap_or(ap.started_ms) + (h * 3_600_000.0) as i64),
                     btc_return_pct: self.ap_btc_return_pct(ap),
                     held: ap.owned.keys().cloned().collect(),
+                    benchmark: self.ap_benchmark(ap, equity),
+                    cash: equity - self.ap_gross(ap, None) - self.ap_pending(ap, None),
+                    max_drawdown_pct: max_drawdown_pct(&ap.history, equity),
                 }
             })
             .collect()
@@ -2596,6 +2991,7 @@ impl Engine {
     pub(super) fn autopilot_step(&mut self, now: i64) {
         for i in 0..self.autopilots.len() {
             self.ap_prune(i);
+            self.ap_bench_backfill(i, now);
             if self.autopilots[i].is_active() {
                 self.ap_check(i, now);
                 self.ap_repick(i, now);
@@ -2603,10 +2999,11 @@ impl Engine {
                 // A late fill after the stop, or a real position that could
                 // not be closed then: close it now.
                 let name = self.autopilots[i].config.name.clone();
+                let book = self.autopilots[i].config.id.clone();
                 let open: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
                 for m in open {
-                    if !self.ap_close_waits_for_price(&m) {
-                        self.close_position(&m, &format!("autopilot \"{name}\" stopped"));
+                    if !self.ap_close_waits_for_price(&book, &m) {
+                        self.close_position(&super::pos_key(&book, &m), &format!("autopilot \"{name}\" stopped"));
                     }
                 }
             }
@@ -2634,7 +3031,7 @@ impl Engine {
         let gone: Vec<String> = self.autopilots[i]
             .owned
             .keys()
-            .filter(|m| self.positions.get(*m).is_none_or(|p| p.qty.abs() < 1e-12))
+            .filter(|m| self.ap_position(&self.autopilots[i], m).is_none_or(|p| p.qty.abs() < 1e-12))
             .cloned()
             .collect();
         for m in gone {
@@ -2651,8 +3048,8 @@ impl Engine {
     /// waits for a fresh price like every other exit does (journaled once).
     /// Demo and live closes are filled by the venue at its own price.
     /// Measured on the engine's own clock, like the stop checks.
-    fn ap_close_waits_for_price(&mut self, market: &str) -> bool {
-        let paper = self.positions.get(market).is_some_and(|p| !p.live && !p.demo);
+    fn ap_close_waits_for_price(&mut self, book: &str, market: &str) -> bool {
+        let paper = self.positions.get(&super::pos_key(book, market)).is_some_and(|p| !p.live && !p.demo);
         match self.exit_price_stale(market, self.now()).filter(|_| paper) {
             Some(age) => {
                 self.note_exit_held(market, age, "Autopilot close");
@@ -2813,23 +3210,22 @@ impl Engine {
             ap.flatten_at_stop = flatten;
         }
         self.autopilots[i].btc_end = self.ap_btc_price(&self.autopilots[i]);
+        if self.autopilots[i].spy_start.is_some() {
+            self.autopilots[i].spy_end = self.ap_spy_price();
+        }
         let name = self.autopilots[i].config.name.clone();
+        let book = self.autopilots[i].config.id.clone();
         let word = if state == AutopilotState::Finished { "finished" } else { "stopped" };
         // Its maker orders resting at the venue are cancelled: a stopped
-        // autopilot leaves nothing working there.
-        let sids: HashSet<String> = self.autopilots[i]
-            .sleeves
-            .iter()
-            .map(|s| s.strategy_id.clone())
-            .chain(self.autopilots[i].owned.values().cloned())
-            .collect();
-        self.maker_stand_down_for(&sids, &format!("autopilot \"{name}\" {word}"));
+        // autopilot leaves nothing working there. Another autopilot that
+        // runs the same strategies keeps its own orders.
+        self.maker_stand_down_book(&book, &format!("autopilot \"{name}\" {word}"));
         let open: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
         let mut tail = String::new();
         if flatten {
             for m in &open {
-                if !self.ap_close_waits_for_price(m) {
-                    self.close_position(m, &format!("autopilot \"{name}\" {word}"));
+                if !self.ap_close_waits_for_price(&book, m) {
+                    self.close_position(&super::pos_key(&book, m), &format!("autopilot \"{name}\" {word}"));
                 }
             }
             let left: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
@@ -2841,9 +3237,9 @@ impl Engine {
                 // Say why each one is still open: they have different cures.
                 let (mut at_venue, mut stale, mut stuck) = (0, 0, 0);
                 for m in &left {
-                    if self.in_flight_markets.contains(m) {
+                    if self.in_flight_markets.contains(&super::pos_key(&book, m)) {
                         at_venue += 1;
-                    } else if self.ap_close_waits_for_price(m) {
+                    } else if self.ap_close_waits_for_price(&book, m) {
                         stale += 1;
                     } else {
                         stuck += 1;
@@ -2881,14 +3277,20 @@ impl Engine {
             ));
             if lab_open > 0 {
                 tail.push_str(&format!(
-                    " {lab_open} of them belong to a lab book, which carries no stops and does not trade on its own: close them on the Positions page, and until then the book cannot join another autopilot."
+                    " {lab_open} of them belong to a lab book, which carries no stops and does not trade on its own: close them on the Positions page. They stay in this autopilot's book, so a new autopilot under the same id waits until they are closed."
                 ));
             }
         }
         let sleeves: Vec<(String, String, StrategyState)> =
             self.autopilots[i].sleeves.iter().map(|s| (s.strategy_id.clone(), s.name.clone(), s.prior_state)).collect();
         let mut paused = Vec::new();
+        let mut still: Vec<String> = Vec::new();
         for (sid, sname, _) in &sleeves {
+            // Another autopilot that runs the same strategy keeps it running.
+            if let Some(who) = self.autopilot_claimant(sid) {
+                still.push(format!("{sname} (in {who})"));
+                continue;
+            }
             if self.strategies.iter().any(|s| &s.id == sid && s.state != StrategyState::Paused) {
                 self.apply_strategy_state(sid, StrategyState::Paused);
                 paused.push(sname.clone());
@@ -2897,8 +3299,17 @@ impl Engine {
         if !paused.is_empty() {
             tail.push_str(&format!(" Paused its strategies: {}.", paused.join(", ")));
         }
-        let idle: Vec<String> =
-            sleeves.iter().filter(|(sid, ..)| self.lab_book_autopilot_only(sid)).map(|(_, n, _)| n.clone()).collect();
+        if !still.is_empty() {
+            tail.push_str(&format!(
+                " Still running for the other autopilots, which are untouched: {}.",
+                still.join(", ")
+            ));
+        }
+        let idle: Vec<String> = sleeves
+            .iter()
+            .filter(|(sid, ..)| self.lab_book_autopilot_only(sid) && self.autopilot_claimant(sid).is_none())
+            .map(|(_, n, _)| n.clone())
+            .collect();
         if !idle.is_empty() {
             tail.push_str(&format!(
                 " Idle again, waiting for the next autopilot: {} (it keeps receiving the lab's signal and trades only inside an autopilot).",
@@ -2963,6 +3374,98 @@ impl Engine {
         }
     }
 
+    /// Move a save from before autopilots kept their own books into books.
+    ///
+    /// Before, every position was kept under its market in one shared book,
+    /// and an autopilot owned the markets in its `owned` map. Each of those
+    /// positions moves, exactly as it is (quantity, average price, stops,
+    /// live and demo flags, reference price), into the book of the autopilot
+    /// that owns it. Orders still at the venue, and Alpaca fees still to be
+    /// posted, follow the same rule the old fill booking used: an order or
+    /// fee in a market an autopilot owns is that autopilot's, and so is an
+    /// entry its sleeve sent in a market it did not hold yet. A lab book's
+    /// last rebalanced signal is kept for the autopilot that runs it, so the
+    /// restart does not rebalance it again. Nothing is sold or bought; the
+    /// cash and every P&L stay as they were. Running it on a save that is
+    /// already in books changes nothing.
+    pub(super) fn migrate_to_books(&mut self) {
+        let mut moved_total = 0usize;
+        for i in 0..self.autopilots.len() {
+            let id = self.autopilots[i].config.id.clone();
+            let label = self.autopilots[i].label();
+            let owned: Vec<String> = self.autopilots[i].owned.keys().cloned().collect();
+            let mut moved: Vec<String> = Vec::new();
+            for m in &owned {
+                let new_key = super::pos_key(&id, m);
+                if self.positions.contains_key(&new_key) {
+                    continue;
+                }
+                let Some(mut p) = self.positions.remove(m.as_str()) else { continue };
+                p.book = id.clone();
+                p.market = m.clone();
+                moved.push(p.symbol.clone());
+                self.positions.insert(new_key.clone(), p);
+                if let Some(r) = self.ref_prices.remove(m.as_str()) {
+                    self.ref_prices.insert(new_key, r);
+                }
+            }
+            // Orders out and fees to come in the markets it owns, or entries
+            // its sleeves sent while it was active.
+            let active = self.autopilots[i].is_active();
+            let sends = |a: &Autopilot, sid: &str, m: &str| a.sleeve(sid).is_some_and(|s| s.markets.iter().any(|x| x == m));
+            let ap = &self.autopilots[i];
+            let mut orders = 0usize;
+            for f in self.inflight.values_mut() {
+                if f.book.is_empty() && (ap.owned.contains_key(&f.market_id) || (active && sends(ap, &f.strategy_id, &f.market_id))) {
+                    f.book = id.clone();
+                    orders += 1;
+                }
+            }
+            for w in self.alpaca_fees.iter_mut() {
+                if w.book.is_empty() && (ap.owned.contains_key(&w.market_id) || sends(ap, &w.strategy_id, &w.market_id)) {
+                    w.book = id.clone();
+                }
+            }
+            // The order rows say whose they are too.
+            let order_ids: HashSet<String> =
+                self.inflight.iter().filter(|(_, f)| f.book == id).map(|(k, _)| k.clone()).collect();
+            for o in self.orders.iter_mut().filter(|o| order_ids.contains(&o.id)) {
+                o.book = Some(id.clone());
+            }
+            if active {
+                let sids: Vec<String> = self.autopilots[i].sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+                for sid in sids {
+                    let key = super::pos_key(&id, &sid);
+                    if let Some(done) = self.lab_done.get(&sid).copied() {
+                        self.lab_done.entry(key).or_insert(done);
+                    }
+                }
+            }
+            if !moved.is_empty() || orders > 0 {
+                moved_total += moved.len();
+                moved.sort();
+                let msg = format!(
+                    "{label} now keeps a book of its own: its {} open position(s) ({}) moved into it as they were{}. Nothing was sold or bought; its cash, P&L, peak and floor are unchanged.",
+                    moved.len(),
+                    moved.join(", "),
+                    if orders > 0 { format!(", with {orders} order(s) still at the venue") } else { String::new() }
+                );
+                self.autopilots[i].last_action = Some(msg.clone());
+                self.log(JournalKind::System, msg, None, None);
+            }
+        }
+        // One venue order per market and book.
+        self.in_flight_markets = self.inflight.values().map(|f| super::pos_key(&f.book, &f.market_id)).collect();
+        if moved_total > 0 {
+            self.log(
+                JournalKind::System,
+                format!("{moved_total} position(s) moved into their autopilots' own books; every autopilot is now a sub-account of its own"),
+                None,
+                None,
+            );
+        }
+    }
+
     // ── strategy choice ────────────────────────────────────────────────────
 
     /// Why a strategy cannot be a sleeve, if it cannot. `own` are the sleeves
@@ -2990,13 +3493,27 @@ impl Engine {
         }
         if busy.contains(&s.id) {
             let other = self.autopilot_claimant(&s.id).unwrap_or_default();
-            return Some(format!("{} already runs in the autopilot \"{other}\". A strategy runs for one autopilot at a time.", s.name));
+            return Some(if mode == AutopilotMode::Live {
+                format!(
+                    "{} already runs in the autopilot {other}. A live autopilot runs its strategies alone; stop the other one first.",
+                    s.name
+                )
+            } else {
+                format!(
+                    "{} runs live in the autopilot {other}, which keeps its strategies to itself while it trades real money.",
+                    s.name
+                )
+            });
         }
         if s.kind == StrategyKind::LabTargets && !own.contains(&s.id) {
             if !self.lab_signals.contains_key(&s.id) {
                 return Some(format!("{} has no signal from the lab yet.", s.name));
             }
-            let held = self.positions.values().any(|p| p.strategy_id == s.id && p.qty.abs() > 1e-12);
+            // Coins it holds in the main book from a run of its own: they
+            // would be left unmanaged once an autopilot claims it. Coins in
+            // another autopilot's book are that autopilot's and change
+            // nothing here: this one starts with an empty book.
+            let held = self.positions.values().any(|p| p.strategy_id == s.id && p.book.is_empty() && p.qty.abs() > 1e-12);
             if held && self.lab_book_autopilot_only(&s.id) {
                 return Some(format!(
                     "{} still holds coins, left open when an autopilot stopped without closing them (or from before it was idle). A lab book only trades by rebalancing, so it could never start flat inside the autopilot: close them on the Positions page first.",
@@ -3202,11 +3719,8 @@ impl Engine {
             return;
         }
         let own: HashSet<String> = current.iter().map(|c| c.0.clone()).collect();
-        let others = |a: &&Autopilot| a.is_active() && a.config.id != ap.config.id;
-        let busy: HashSet<String> =
-            self.autopilots.iter().filter(others).flat_map(|a| a.sleeves.iter().map(|s| s.strategy_id.clone())).collect();
-        let taken: HashSet<String> =
-            self.autopilots.iter().filter(others).flat_map(|a| a.sleeves.iter().flat_map(|s| s.markets.iter().cloned())).collect();
+        let busy = self.busy_strategies(mode, Some(&ap.config.id));
+        let taken: HashSet<String> = HashSet::new();
         let max = ap.config.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
         let picks = match self.auto_pick(venue, mode, &busy, &taken, &own, max) {
             Ok((p, _)) => p,
@@ -3290,9 +3804,10 @@ impl Engine {
         // The netted target changes now, so the next rebalance runs now:
         // it trades only the difference per coin.
         let members: Vec<String> = self.autopilots[i].sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+        let book = self.autopilots[i].config.id.clone();
         for sid in &members {
-            self.lab_done.remove(sid);
-            self.lab_retry.remove(sid);
+            self.lab_done.remove(&super::pos_key(&book, sid));
+            self.lab_retry.remove(&super::pos_key(&book, sid));
         }
         let msg = format!(
             "{label} re-ran its pick with fresh evidence and changed its lab books: {}. The new weights are netted into one target per coin at the next rebalance, which trades only the difference; nothing is sold off at once.",

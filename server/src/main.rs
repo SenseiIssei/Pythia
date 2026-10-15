@@ -1388,6 +1388,15 @@ async fn post_command(
             .map(|c| c.venue),
         _ => None,
     };
+    // Demo autopilots on the Alpaca paper account share it: a start, or a
+    // higher amount, is checked against the account's equity.
+    let paper_account = match &cmd {
+        Command::AutopilotStart { config, .. } => st.engine.lock().unwrap().autopilot_needs_paper_equity(Some(config), None),
+        Command::AutopilotUpdate { id, update, .. } if update.capital_usd.is_some() => {
+            st.engine.lock().unwrap().autopilot_needs_paper_equity(None, Some(id))
+        }
+        _ => false,
+    };
     let cash = match live_venue {
         Some(venue) => {
             let paper = st.engine.lock().unwrap().live_config().paper;
@@ -1396,6 +1405,10 @@ async fn post_command(
                 Err(why) => VenueCash::Failed(why),
             }
         }
+        None if paper_account => match wallets::paper_account_equity(&st.creds).await {
+            Ok(c) => VenueCash::Read(c),
+            Err(why) => VenueCash::Failed(why),
+        },
         None => VenueCash::NotRead,
     };
     let mut refused: Option<String> = None;
