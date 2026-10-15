@@ -117,3 +117,26 @@ export function isVisible(id: PageId, mode: UiMode): boolean {
   const to = resolvePage(id);
   return navFor(mode).some((n) => n.id === to);
 }
+
+/** The phone's bottom tabs, in order. Everything else sits behind "More". */
+export const TAB_IDS: PageId[] = ["home", "autopilot", "activity", "notifications"];
+
+/** Short tab labels: a phone has about 70 px per tab. */
+const TAB_LABEL: Partial<Record<PageId, string>> = { notifications: "Alerts" };
+
+export function tabsFor(mode: UiMode): NavItem[] {
+  const nav = navFor(mode);
+  return TAB_IDS.flatMap((id) => {
+    const n = nav.find((x) => x.id === id);
+    return n ? [{ ...n, label: TAB_LABEL[id] ?? n.label }] : [];
+  });
+}
+
+/**
+ * Which bottom tab is lit for a page: its own tab, or "more" for a page that
+ * only the menu reaches.
+ */
+export function activeTab(page: PageId): PageId | "more" {
+  const to = resolvePage(page);
+  return TAB_IDS.includes(to) ? to : "more";
+}

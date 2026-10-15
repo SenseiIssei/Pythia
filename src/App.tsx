@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Menu, Minus, X, Power, ShieldCheck, TriangleAlert } from "lucide-react";
-import { navFor, isVisible, resolvePage, type PageId } from "./nav";
+import { activeTab, navFor, isVisible, resolvePage, tabsFor, type PageId } from "./nav";
+import { TabBar } from "./design/flows";
 import { setUiMode, useUiMode, type UiMode } from "./uiMode";
 import { Home as HomePage } from "./pages/Home";
 import { StoreProvider, useStore } from "./store";
@@ -396,6 +397,16 @@ function Chrome() {
           })}
         </main>
       </div>
+
+      {/* a phone gets bottom tabs for the everyday pages; the rest sit behind More */}
+      {narrow && (
+        <TabBar<PageId | "more">
+          label="Main pages"
+          items={[...tabsFor(mode), { id: "more", label: "More", icon: Menu }]}
+          active={sidebar ? "more" : activeTab(current)}
+          onSelect={(id) => (id === "more" ? setSidebar((s) => !s) : go(id))}
+        />
+      )}
     </div>
   );
 }
