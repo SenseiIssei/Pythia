@@ -294,8 +294,20 @@ no key: Skinport's `/v1/items` and `/v1/sales/history` (8 requests per 5
 minutes allowed, the job makes 2 an hour) and Steam's `priceoverview` (one
 request every 3.2 s, at most 100 a run, a 429 waits 60 s then 120 s and a
 third ends the Steam part of the run; the watchlist resumes where it stopped).
+After a run Steam refused outright, the next run knocks once and stops at the
+first 429 without waiting (`steam_cooling` in `cs2/collector.json`).
 
-The image needs `brotli` (in `requirements.txt` now): rebuild it once.
+Steam on the first real run (2026-10-15, from the PC): Skinport answered
+(25,143 items, 36,470 sales rows), Steam answered every `priceoverview`
+request from the collector with 429, from the first one on, while the same
+URL fetched with curl from the same machine at the same time was answered.
+Steam treats some clients differently; the collector does not try to look
+like another client. Check `steam_ok` in `cs2/collector.json` after the
+first runs on the lab machine: until it is above 0 the spread study, the gap
+alerts and the Steam column stay empty, and everything else works on
+Skinport alone.
+
+The image needs `brotli` (in `requirements.txt`): rebuild it once.
 
 ```bash
 docker build -t pythia-lab /opt/pythia-lab
@@ -317,14 +329,17 @@ What it writes, under `/srv/pythia-data`:
 | `cs2/skinport_sales/date=*/HHMM.parquet` | 24 h, 7, 30 and 90-day sales min, max, average, median, volume |
 | `cs2/steam_prices/date=*/HHMM.parquet` | the watchlist (cases, popular skins, sticker capsules from `lab/collect/cs2_watchlist.json`, plus the 40 most traded Skinport items): lowest ask, median, 24 h volume |
 | `cs2/daily/{skinport,steam}/date=*.parquet` | the day's last snapshot per item, what the models read |
-| `cs2/model/` | today's predictions and how they were made |
+| `cs2/model/` | today's predictions, how they were made and the research summary |
 | `cs2/paper/state.json`, `journal.csv` | the play-money portfolio (10,000 EUR) |
 | `cs2/alerts.jsonl`, `alerts_state.json` | alerts sent, 24 h cooldown per item and kind |
-| `reports/cs2_board/latest.json` | the CS2 Skins page in the app |
-| `reports/cs2/` | the research report, daily (`results/cs2.md` in the repo) |
-| `reports/cs2_weekly/` | the weekly paper report, at each weekly look |
+| `reports/cs2/latest.json` | hourly: the lab feed (title, status, headline, items; `docs/LAB-FEEDS.md`) for the Research page and Home, and the board for the CS2 Skins page (`rows`, `portfolio`, `alerts`, `research`) |
+| `reports/cs2/<date>.json`, `latest.md` | the research report, daily (`results/cs2.md` in the repo) |
+| `reports/cs2_weekly/` | the weekly paper report, at each weekly look (a feed too) |
 
-About 5 to 10 MB a day. Alerts (cross-market gaps of 5 % or more after both
+About 1.5 MB a run (0.6 MB items, 0.9 MB sales history), so about 35 MB a
+day and 13 GB a year; the models read only `cs2/daily/` (about 1.5 MB a
+day), so the hourly folders can be thinned later without losing a model
+input. Alerts (cross-market gaps of 5 % or more after both
 venues' fees in items Steam trades 20 a day or more; liquid items 15 % under
 their 30-day median and 10 % down in 24 h) and the weekly summary go to the
 same Telegram chat or webhook as the digest. Drop pool changes and new

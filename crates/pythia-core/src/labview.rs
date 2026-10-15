@@ -746,8 +746,10 @@ pub fn status() -> LabStatus {
 }
 
 // ── CS2 skins board ─────────────────────────────────────────────────────────
-// Written hourly by `lab.cs2.run` to `reports/cs2_board/latest.json`. Prices,
-// predictions and a play-money portfolio; nothing in Pythia trades skins.
+// Written hourly by `lab.cs2.run` to `reports/cs2/latest.json`: the lab feed
+// header (title, status, headline, items; docs/LAB-FEEDS.md) for the Research
+// page, and the board under `rows`, `portfolio`, `alerts` and `research`.
+// Prices, predictions and a play-money portfolio; nothing in Pythia trades skins.
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -821,7 +823,12 @@ pub struct Cs2Model {
 pub struct Cs2Board {
     pub generated: String,
     pub generated_ms: i64,
+    /// "ok" when the board has rows, "no data" before the first collection.
     pub status: String,
+    /// The feed's own status: ok, watch (something to look at by hand) or bad (collector late or failing).
+    pub feed_status: String,
+    /// The feed's one sentence.
+    pub headline: String,
     pub verdict: String,
     pub currency: String,
     pub history_days: i64,
@@ -830,6 +837,8 @@ pub struct Cs2Board {
     pub model: Cs2Model,
     pub portfolio: Option<Cs2Portfolio>,
     pub alerts: Vec<Cs2Alert>,
+    /// The daily research summary (verdict, spread, momentum, bootstrap scores), as the lab wrote it.
+    pub research: Option<Value>,
     pub items: Vec<Cs2Item>,
 }
 
@@ -847,10 +856,15 @@ pub fn parse_cs2(text: &str) -> Option<Cs2Board> {
             .map(|a| a.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect())
             .unwrap_or_default()
     }
+    // The board's own status sits in `boardStatus` since it shares the file
+    // with the feed header; the first boards had it in `status`, rows in `items`.
+    let feed = v.get("boardStatus").is_some();
     Some(Cs2Board {
         generated: s("generated"),
         generated_ms: v.get("generatedMs").and_then(Value::as_i64).unwrap_or(0),
-        status: s("status"),
+        status: if feed { s("boardStatus") } else { s("status") },
+        feed_status: if feed { s("status") } else { String::new() },
+        headline: s("headline"),
         verdict: s("verdict"),
         currency: v.get("currency").and_then(Value::as_str).unwrap_or("EUR").to_string(),
         history_days: v.get("historyDays").and_then(Value::as_i64).unwrap_or(0),
@@ -859,14 +873,17 @@ pub fn parse_cs2(text: &str) -> Option<Cs2Board> {
         model: v.get("model").and_then(|m| serde_json::from_value(m.clone()).ok()).unwrap_or_default(),
         portfolio: v.get("portfolio").and_then(|p| serde_json::from_value(p.clone()).ok()),
         alerts: rows(&v, "alerts"),
-        items: rows(&v, "items"),
+        research: v.get("research").filter(|r| r.is_object()).cloned(),
+        items: if feed { rows(&v, "rows") } else { rows(&v, "items") },
     })
 }
 
 /// The CS2 board from the lab's data folder; `None` until `lab.cs2.run` has written one.
 pub fn cs2_board() -> Option<Cs2Board> {
-    let root = data_dir()?;
-    parse_cs2(&std::fs::read_to_string(root.join("reports").join("cs2_board").join("latest.json")).ok()?)
+    let reports = data_dir()?.join("reports");
+    ["cs2", "cs2_board"]
+        .iter()
+        .find_map(|d| std::fs::read_to_string(reports.join(d).join("latest.json")).ok().and_then(|t| parse_cs2(&t)))
 }
 
 #[cfg(test)]
@@ -897,6 +914,25 @@ mod tests {
         assert_eq!(out["portfolio"]["equityCurve"][0], 9990.5);
         assert!(parse_cs2("[]").is_none());
         assert!(parse_cs2("not json").is_none());
+    }
+
+    #[test]
+    fn reads_the_cs2_board_next_to_its_feed_header() {
+        let text = r#"{"title":"CS2 skins","status":"watch","headline":"1 skin worth a look by hand","updated_ms":5,
+            "items":[{"label":"Gap item","value":"+6.0 %","status":"watch","importance":68}],
+            "generated":"2026-10-15 12:05 UTC","generatedMs":5,"boardStatus":"ok","verdict":"v","historyDays":1,
+            "research":{"verdict":"Too early","historyDays":1},
+            "rows":[{"name":"Recoil Case","category":"case","price":0.3,"signal":"hold","sales7d":900,"listed":5000}]}"#;
+        let b = parse_cs2(text).unwrap();
+        assert_eq!(b.status, "ok");
+        assert_eq!(b.feed_status, "watch");
+        assert_eq!(b.headline, "1 skin worth a look by hand");
+        assert_eq!(b.items.len(), 1, "the board's rows, not the feed's items");
+        assert_eq!(b.items[0].name, "Recoil Case");
+        assert_eq!(b.research.as_ref().unwrap()["verdict"], "Too early");
+        let f = parse_feed("cs2", text, 0).unwrap();
+        assert_eq!(f.items.len(), 1);
+        assert_eq!(f.items[0].label, "Gap item");
     }
 
     #[test]

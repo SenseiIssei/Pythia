@@ -27,6 +27,10 @@ def _p(v, digits: int = 1) -> str:
     return "n/a" if v is None else f"{v * 100:+.{digits}f} %"
 
 
+def _days(n: int) -> str:
+    return f"{n} day" if n == 1 else f"{n} days"
+
+
 def _n(v, digits: int = 3) -> str:
     return "n/a" if v is None else f"{v:.{digits}f}"
 
@@ -51,15 +55,15 @@ def build(root: Path | None, today: date, snap: pl.DataFrame, meta: dict, mx: di
         verdict = (f"Walk-forward 7d rank IC {_n(w7.get('ic_independent'))} (t {_n(w7.get('ic_t'), 1)}) over "
                    f"{w7.get('independent_periods')} periods; top decile {_p(w7.get('top_decile_net_per_trade'))} per trade after fees.")
     elif b7.get("status") == "ok":
-        verdict = (f"Too early: {days} days of history. Bootstrap (one snapshot, cross-sectional): 7d rank IC "
+        verdict = (f"Too early: {_days(days)} of history. Bootstrap (one snapshot, cross-sectional): 7d rank IC "
                    f"{_n(b7.get('ic'))}, momentum alone {_n(b7.get('ic_momentum_alone'))}.")
     else:
-        verdict = f"Too early: {days} days of history and no usable bootstrap fit."
+        verdict = f"Too early: {_days(days)} of history and no usable bootstrap fit."
 
     L = [f"# CS2 skins market ({today.isoformat()})", "",
          "**Read this first.** Paper only: nothing here buys or sells, and nothing will "
          "(automated trading on Steam or a skin marketplace breaks their terms). "
-         f"History collected so far: **{days} days** (first {first}). The bootstrap numbers come from one "
+         f"History collected so far: **{_days(days)}** (first {first}). The bootstrap numbers come from one "
          "snapshot of Skinport's 90-day sales windows, cross-validated across items, so they are an "
          "in-sample cross-section, not a time-series backtest. The walk-forward numbers are backtests on the "
          "collector's own history and appear once there is enough of it. The paper portfolio is the only "
@@ -91,9 +95,17 @@ def build(root: Path | None, today: date, snap: pl.DataFrame, meta: dict, mx: di
                                ["name", "min_price", "steam_ask", "to_steam", "to_skinport", "steam_volume"])]
     else:
         L += [f"- {spread.get('status')}"]
+        col = market.read_json(market.cs2_root(root) / "collector.json") or {}
+        if col.get("steam_requested") is not None:
+            L += [f"- Steam in the last collector run ({col.get('at')}): {col.get('steam_ok', 0)} of "
+                  f"{col.get('steam_requested')} prices"
+                  + (f"; {'; '.join(col.get('errors') or [])}" if col.get("errors") else "")]
     L += ["", "## 2. Momentum or reversion", "",
           "Bootstrap: does the change from the 30-90 day average to the 7-30 day average predict the change to the "
-          "last 7 days? Positive rank IC is momentum, negative is reversion.", "",
+          "last 7 days? Positive rank IC is momentum, negative is reversion. Caution: the 7-30 day average is in "
+          "both the signal and the outcome, so noise in it alone makes the rank IC negative; a reversion number "
+          "here is an upper bound on real reversion until the walk-forward test, whose windows do not share days, "
+          "confirms it.", "",
           f"- All items: rank IC {_n(b7.get('ic_momentum_alone'))} over {b7.get('n', 'n/a')} items",
           f"- Liquid items (20+ sales in days 7-30): {_n(b7.get('ic_momentum_liquid'))} over {b7.get('liquid_items', 'n/a')}",
           f"- Walk-forward (collected history): {w7.get('status', 'not run')}"]
@@ -143,6 +155,29 @@ def build(root: Path | None, today: date, snap: pl.DataFrame, meta: dict, mx: di
             "paper": {"equity": eq, "return": ret, "positions": len(st.get("positions") or {}),
                       "trades": len(st.get("trades") or [])}}
     return md, data
+
+
+def summary(data: dict) -> dict:
+    """The few research numbers the CS2 page and the feed show, from build()'s data."""
+    sp, b7, b30 = data.get("spread") or {}, (data.get("bootstrap") or {}).get("h7") or {}, (data.get("bootstrap") or {}).get("h30") or {}
+    wf = data.get("walk_forward") or {}
+    cases = data.get("cases") or {}
+
+    def ok(d: dict, k: str):
+        return d.get(k) if d.get("status") == "ok" else None
+
+    return {
+        "date": data.get("date"), "verdict": data.get("verdict"), "historyDays": data.get("history_days"),
+        "firstDay": data.get("first_day"),
+        "spread": {"status": sp.get("status"), "itemsToday": sp.get("items_today"),
+                   "steamPremiumMedian": sp.get("steam_premium_median"), "toSteamMedian": sp.get("to_steam_median"),
+                   "toSkinportMedian": sp.get("to_skinport_median")},
+        "momentumIc": ok(b7, "ic_momentum_alone"), "momentumIcLiquid": ok(b7, "ic_momentum_liquid"),
+        "bootstrapIc7": ok(b7, "ic"), "bootstrapIc30": ok(b30, "ic"), "bootstrapItems": ok(b7, "n"),
+        "caseAgeIc": ok(cases, "ic_age_vs_change"),
+        "walkForward7": (wf.get("h7") or {}).get("status", "not run"),
+        "walkForward30": (wf.get("h30") or {}).get("status", "not run"),
+    }
 
 
 def main() -> int:
