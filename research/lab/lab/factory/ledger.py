@@ -19,7 +19,6 @@ are judged against the whole pool.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -32,6 +31,12 @@ from scipy import stats
 from ..data import ROOT
 from ..experiments import fam_common as fc
 from ..metrics import deflated_sharpe
+
+try:
+    import fcntl
+except ImportError:          # Windows, where the first real run was made
+    fcntl = None
+    import msvcrt
 
 # Every trial the hand studies counted up to alpaca_universe (C16), and the
 # bar it published: the best of 377 noise trials at an annual Sharpe of 2.43.
@@ -79,20 +84,41 @@ def write_json(p: Path, data) -> None:
     os.replace(tmp, p)
 
 
+def _try_lock(fh) -> bool:
+    if fcntl is not None:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+    try:   # Windows: lock the first byte of the file
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock(fh) -> None:
+    if fcntl is not None:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    else:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def lock():
     """One factory process at a time (the weekly run and the daily shadow step share the files)."""
     p = factory_dir() / ".lock"
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w") as fh:
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as e:
-            raise RuntimeError("another factory process holds the lock") from e
+    with p.open("a+") as fh:
+        fh.seek(0)
+        if not _try_lock(fh):
+            raise RuntimeError("another factory process holds the lock")
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            _unlock(fh)
 
 
 class Ledger:
