@@ -45,6 +45,22 @@ print('true|' + '; '.join('%s %s, %+.2f %% since %s' % (x['config']['name'], x['
     *) add "autopilot" false "no answer from the autopilot engine" ;;
   esac
 
+  # The engine of the second paper account (127.0.0.1:8789), only where it runs.
+  if docker inspect pythia-safe >/dev/null 2>&1; then
+    local safe
+    safe=$(curl -s -m 10 127.0.0.1:8789/api/state | python3 -c "
+import json, sys
+a = json.load(sys.stdin).get('autopilots') or []
+if not a:
+    print('true|no autopilot started'); sys.exit()
+print('true|' + '; '.join('%s %s, %+.2f %%' % (x['config']['name'], x['state'], x['pnlPct']) for x in a[:3]))
+" 2>/dev/null)
+    case "$safe" in
+      true\|*) add "safe account" true "${safe#true|}" ;;
+      *) add "safe account" false "no answer from the safe account's engine" ;;
+    esac
+  fi
+
   # Recorder: every stream fresh, status written in the last five minutes
   local st="$data/_health/status.json"
   if [ -f "$st" ]; then
