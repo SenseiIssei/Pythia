@@ -1,4 +1,6 @@
-"""The operator notifications: the daily digest and the health alarm, against a mock webhook.
+"""Messages to the owner: the card design, escaping, quiet hours, the switches,
+the daily digest, the weekly report and the health alarm, against a mock
+Telegram on 127.0.0.1.
 
 No network beyond 127.0.0.1. Run from research/lab:  python -m pytest tests
 """
@@ -6,6 +8,8 @@ No network beyond 127.0.0.1. Run from research/lab:  python -m pytest tests
 from __future__ import annotations
 
 import json
+import math
+import re
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -18,16 +22,33 @@ from lab.ops import notify
 NOW = int(datetime(2026, 10, 14, 6, 50, tzinfo=timezone.utc).timestamp() * 1000)
 
 
+def utc(*a) -> int:
+    return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1000)
+
+
 @pytest.fixture()
 def hook():
-    """A webhook on 127.0.0.1 that records each JSON body; `status` sets its answer."""
-    got: list[dict] = []
-    state = {"status": 204}
+    """A webhook on 127.0.0.1 that records each post as (path, JSON body or
+    the raw multipart bytes of a photo); `status` sets its answer, `status400`
+    answers 400 to the first post with parse_mode (an HTML Telegram refuses)."""
+    got: list[tuple[str, object]] = []
+    state = {"status": 204, "status400": False}
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             n = int(self.headers.get("Content-Length") or 0)
-            got.append(json.loads(self.rfile.read(n)))
+            raw = self.rfile.read(n)
+            if (self.headers.get("Content-Type") or "").startswith("multipart/"):
+                got.append((self.path, raw))
+            else:
+                body = json.loads(raw)
+                got.append((self.path, body))
+                if state["status400"] and "parse_mode" in body:
+                    state["status400"] = False
+                    self.send_response(400)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
             self.send_response(state["status"])
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -45,11 +66,28 @@ def hook():
 @pytest.fixture()
 def data(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHIA_DATA", str(tmp_path))
-    monkeypatch.delenv("PYTHIA_REPORTS", raising=False)
-    monkeypatch.delenv("PYTHIA_ALERT_FORMAT", raising=False)
-    monkeypatch.delenv("PYTHIA_ALERT_PREFIX", raising=False)
-    monkeypatch.delenv("PYTHIA_ALERT_WEBHOOK", raising=False)
+    for k in ("PYTHIA_REPORTS", "PYTHIA_ALERT_FORMAT", "PYTHIA_ALERT_PREFIX", "PYTHIA_ALERT_WEBHOOK",
+              "PYTHIA_TELEGRAM_BOT_TOKEN", "PYTHIA_TELEGRAM_CHAT_ID", "PYTHIA_ALERT_VIA", "PYTHIA_ALERT_EVENT_URL"):
+        monkeypatch.delenv(k, raising=False)
+    # No engine and no Binance in tests; quiet hours only where a test sets them.
+    monkeypatch.setenv("PYTHIA_AUTOPILOT_STATE_URL", "off")
+    monkeypatch.setenv("PYTHIA_QUIET_HOURS", "off")
+    monkeypatch.setattr(notify, "btc_closes", lambda a, b, timeout=15: [])
     return tmp_path
+
+
+@pytest.fixture()
+def telegram(hook, data, monkeypatch):
+    """The mock as a Telegram chat: HTML posts with the chat id."""
+    url, got, state = hook
+    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+    monkeypatch.setenv("PYTHIA_ALERT_FORMAT", "telegram")
+    monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "4242")
+    return url, got, state
+
+
+def texts(got) -> list[str]:
+    return [b["text"] if "text" in b else b.get("content") for _, b in got if isinstance(b, dict)]
 
 
 def learn_report(trades=12, fees=3.5, equity=1_030.0):
@@ -79,68 +117,129 @@ def health_bad(at: str) -> dict:
                                               {"name": "paper tsmom", "ok": False, "detail": "last row none"}]}
 
 
-def write(root: Path, rel: str, data: dict) -> None:
+def write(root: Path, rel: str, d) -> None:
     p = root / rel
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data))
+    p.write_text(json.dumps(d), encoding="utf-8")
 
 
-def test_digest_says_what_the_money_did():
-    text, snap = notify.digest(learn_report(), FORWARD, HEALTH_OK, {}, NOW)
-    assert text.startswith("Pythia daily 2026-10-14")
-    assert "Running autopilots: 1, together +$10.20 today." in text
-    assert "- Momentum (demo): equity $1,030.00, today +$10.20 (+1.00 %), since start +$30.00 (+3.00 %)" in text
-    assert "vs BTC +1.50 pts (BTC +1.50 %)" in text
-    assert "12 trades, fees $3.50 since start" in text, "no snapshot yet: totals, said as such"
-    assert "Old one" not in text, "only running autopilots"
-    assert "Forward test (2026-10-14 06:15 UTC): tsmom on track, m4_ls watch, picks_ls early." in text
-    assert "Health: all green." in text
-    assert "Learning loop: 2 cost updates" in text
-    assert snap == {"ap1": {"trades": 12, "fees": 3.5, "at": NOW}}
-    assert "\u2014" not in text and len(text) <= notify.MAX_CHARS
+def balanced(html: str) -> bool:
+    return all(html.count(f"<{t}>") == html.count(f"</{t}>") for t in ("b", "i", "pre"))
 
 
-def test_trades_and_fees_today_come_from_yesterdays_snapshot():
-    prev = {"ap1": {"trades": 9, "fees": 2.25, "at": NOW - 86_400_000}}
-    text, _ = notify.digest(learn_report(), FORWARD, HEALTH_OK, prev, NOW)
-    assert "today 3 trades, fees $1.25" in text
-    old = {"ap1": {"trades": 9, "fees": 2.25, "at": NOW - 3 * 86_400_000}}
-    assert "since start" in notify.digest(learn_report(), FORWARD, HEALTH_OK, old, NOW)[0].split("Momentum")[1]
+# ---------------------------------------------------------------- the card design
+
+def test_numbers_have_signs_separators_and_percent():
+    assert notify.money(12345.678) == "$12,345.68"
+    assert notify.money(-12.3) == "-$12.30"
+    assert notify.money(-0.001) == "$0.00", "no minus zero"
+    assert notify.signed_money(1234.5) == "+$1,234.50"
+    assert notify.signed_money(-87.654) == "-$87.65"
+    assert notify.signed_pct(1.234) == "+1.23 %"
+    assert notify.signed_pct(-0.004) == "+0.00 %"
+    assert notify.signed_pct(None) == "n/a"
+    assert (notify.dot(2), notify.dot(-2), notify.dot(0), notify.dot(None)) == ("🟢", "🔴", "⚪", "")
 
 
-def test_losses_red_health_and_a_stale_report_are_said():
-    rep = learn_report(equity=950.0)
-    rep["autopilots"][0]["pnl_day_pct"] = -2.0
-    rep["generated_ms"] = NOW - 2 * 86_400_000
-    text, _ = notify.digest(rep, None, health_bad("2026-10-14T06:07:00Z"), {}, NOW)
-    assert "today -$19.39 (-2.00 %), since start -$50.00 (-5.00 %)" in text
-    assert "not today's" in text
-    assert "Forward test: no report." in text
-    assert "Health: 1 red: paper tsmom (last row none)" in text
+def test_a_card_is_title_summary_aligned_numbers_and_footer():
+    card = notify.Card("🛑", "Momentum stopped", "Max loss reached.",
+                       [notify.Rows([("Equity", "$9,412.30"), ("P&L", "-$587.70 -5.88 %", -587.7), ("Trades", "14")])],
+                       footer="Pythia")
+    assert card.render() == ("<b>🛑 Momentum stopped</b>\nMax loss reached.\n"
+                             "<pre>Equity         $9,412.30\nP&amp;L     -$587.70 -5.88 % 🔴\nTrades                14</pre>\n"
+                             "<i>Pythia</i>")
+    assert card.render("discord").startswith("**🛑 Momentum stopped**\nMax loss reached.\n```\nEquity")
+    assert card.render("slack").endswith("```\n_Pythia_")
 
 
-def test_digest_is_clipped_under_the_limit():
-    rep = learn_report()
-    rep["autopilots"] = [dict(rep["autopilots"][0], id=f"a{i}", name=f"Autopilot number {i}") for i in range(40)]
-    text, _ = notify.digest(rep, FORWARD, HEALTH_OK, {}, NOW)
-    assert len(text) <= 1800
-    assert text.endswith("(more in the reports)")
+def test_everything_is_escaped_for_telegram_html():
+    card = notify.Card("🧪", "<script>&", "a < b & c > d",
+                       [notify.Rows([("A&B", "<1>")], "Head <x>"), notify.Line("x & y", "Lead <z>"),
+                        notify.Table(["<h>"], [["<c>"]])], footer="f & g")
+    html = card.render()
+    assert "<script>" not in html and "&lt;script&gt;&amp;" in html
+    assert "a &lt; b &amp; c &gt; d" in html
+    assert "<b>Head &lt;x&gt;</b>" in html and "<pre>A&amp;B  &lt;1&gt;</pre>" in html
+    assert "<b>Lead &lt;z&gt;</b> x &amp; y" in html
+    assert "<i>f &amp; g</i>" in html
+    # Only the card's own tags are left once the escaped text is taken out.
+    assert set(re.findall(r"</?[a-z]+>", html)) <= {"<b>", "</b>", "<i>", "</i>", "<pre>", "</pre>"}
 
 
-@pytest.mark.parametrize("fmt,key", [("discord", "content"), ("slack", "text")])
-def test_daily_posts_to_the_webhook_in_its_format(hook, data, monkeypatch, capsys, fmt, key):
-    url, got, _ = hook
-    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
-    monkeypatch.setenv("PYTHIA_ALERT_FORMAT", fmt)
-    write(data, "reports/learn/latest.json", learn_report())
-    write(data, "reports/forward/latest.json", FORWARD)
-    write(data, "_health/system.json", HEALTH_OK)
-    assert notify.daily(now_ms=NOW) == 0
-    assert len(got) == 1 and list(got[0]) == [key]
-    assert got[0][key].startswith("Pythia daily")
-    st = json.loads((data / "notify" / "state.json").read_text())
-    assert st["autopilots"]["ap1"]["trades"] == 12
-    assert "secret-token" not in capsys.readouterr().out + json.dumps(st)
+def test_tables_put_words_left_and_numbers_right_and_long_posts_fit():
+    t = notify.Table(["Coin", "Value"], [["BTC", "$1,220"], ["PEPE", "$80"]])
+    assert t.block() == "Coin  Value\nBTC  $1,220\nPEPE    $80"
+    big = notify.Card("🔁", "Rebalance", "60 trades", [notify.Table(["Coin", "Value"], [[f"C{i}", f"${i}"] for i in range(400)])])
+    many = [notify.Card("🔔", f"Note {i}", "x" * 300) for i in range(30)]
+    html = notify.render_post([big] + many)
+    assert len(html) <= notify.MAX_CHARS and balanced(html)
+    assert "more</pre>" in html and "more in the app" in html
+
+
+# ---------------------------------------------------------------- settings and quiet hours
+
+def test_quiet_hours_are_berlin_time_over_midnight(data, monkeypatch):
+    monkeypatch.delenv("PYTHIA_QUIET_HOURS")
+    s = notify.load_settings()
+    assert s["quiet"] == notify.DEFAULT_QUIET
+    # Summer time in October until the 25th: UTC+2.
+    assert notify.in_quiet(s, utc(2026, 10, 14, 21, 0)), "23:00 Berlin"
+    assert not notify.in_quiet(s, utc(2026, 10, 14, 20, 59)), "22:59 Berlin"
+    assert notify.in_quiet(s, utc(2026, 10, 15, 4, 59)), "06:59 Berlin"
+    assert not notify.in_quiet(s, utc(2026, 10, 15, 5, 0)), "07:00 Berlin"
+    # Winter time: UTC+1.
+    assert notify.in_quiet(s, utc(2026, 12, 1, 22, 0)) and not notify.in_quiet(s, utc(2026, 12, 1, 21, 30))
+    assert notify.local_time(utc(2026, 3, 29, 0, 59)).hour == 1 and notify.local_time(utc(2026, 3, 29, 1, 0)).hour == 3
+    # The engine's settings file, and the environment over it.
+    write(data, "reports/notify/settings.json", {
+        "categories": [{"id": "trending", "on": False}, {"id": "weekly", "on": True}],
+        "quietHours": {"enabled": True, "start": "12:00", "end": "14:00", "timezone": "Europe/Berlin"}})
+    s = notify.load_settings()
+    assert not notify.enabled(s, "trending") and notify.enabled(s, "weekly") and notify.enabled(s, "cs2")
+    assert notify.in_quiet(s, utc(2026, 10, 14, 10, 30)) and not notify.in_quiet(s, utc(2026, 10, 14, 21, 30))
+    monkeypatch.setenv("PYTHIA_QUIET_HOURS", "off")
+    assert not notify.in_quiet(notify.load_settings(), utc(2026, 10, 14, 10, 30))
+    monkeypatch.setenv("PYTHIA_QUIET_HOURS", "22:00-06:00")
+    assert notify.in_quiet(notify.load_settings(), utc(2026, 10, 14, 20, 30))
+
+
+def test_a_switched_off_category_is_not_sent(telegram, data):
+    _, got, _ = telegram
+    write(data, "reports/notify/settings.json", {"categories": [{"id": "cs2", "on": False}]})
+    res = notify.send("cs2", notify.Card("🎮", "AK-47 Redline +12 %"), now=NOW)
+    assert res["reason"] == "off" and not res["delivered"] and got == []
+    res = notify.send("cs2", notify.Card("🎮", "Urgent one"), now=NOW, urgent=True)
+    assert res["delivered"] and len(got) == 1
+
+
+def test_quiet_hours_hold_lab_posts_and_list_them_after(telegram, data, monkeypatch):
+    _, got, _ = telegram
+    monkeypatch.delenv("PYTHIA_QUIET_HOURS")
+    night = utc(2026, 10, 14, 22, 30)  # 00:30 Berlin
+    res = notify.send("trending", notify.Card("🔥", "BONK on Alpaca +25% in 24h"), now=night)
+    assert res["reason"] == "quiet" and got == []
+    notify.send("listings", notify.Card("🆕", "New on Kraken: ZK"), now=night + 3_600_000)
+    assert notify.pending(now_ms=night + 2 * 3_600_000) == 0
+    assert got == [], "still quiet"
+    morning = utc(2026, 10, 15, 5, 5)  # 07:05 Berlin
+    assert notify.pending(now_ms=morning) == 0
+    assert len(got) == 1
+    text = texts(got)[0]
+    assert text.startswith("<b>🌙 Quiet hours are over</b>\n2 lab posts were held back from 23:00 to 07:00."), text
+    assert "<pre>Time  Post\n00:30 BONK on Alpaca +25% in 24h\n01:30 New on Kraken: ZK</pre>" in text
+    assert not notify.held_path().exists()
+    assert notify.pending(now_ms=morning + 60_000) == 0 and len(got) == 1, "said once"
+
+
+def test_telegram_posts_html_and_a_refused_html_is_resent_as_plain_text(telegram):
+    _, got, state = telegram
+    state["status400"] = True
+    res = notify.send("studies", notify.Card("🧪", "Factory <run>", "a & b"), now=NOW)
+    assert res["delivered"]
+    assert len(got) == 2
+    assert got[0][1]["parse_mode"] == "HTML" and got[0][1]["chat_id"] == "4242"
+    assert got[0][1]["text"].startswith("<b>🧪 Factory &lt;run&gt;</b>")
+    assert "parse_mode" not in got[1][1] and got[1][1]["text"].startswith("🧪 Factory <run>\na & b")
 
 
 def test_telegram_needs_token_and_chat_and_carries_the_chat_id(monkeypatch):
@@ -151,13 +250,94 @@ def test_telegram_needs_token_and_chat_and_carries_the_chat_id(monkeypatch):
     monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "4242")
     url, fmt, _ = notify.config()
     assert fmt == "telegram" and url == "https://api.telegram.org/bot123:abc/sendMessage"
-    assert notify.body(fmt, "hi") == {"chat_id": "4242", "text": "hi"}
+    assert notify.body(fmt, "<b>hi</b>") == {"chat_id": "4242", "text": "<b>hi</b>", "parse_mode": "HTML",
+                                             "disable_web_page_preview": True}
 
 
-def test_a_failed_post_is_reported_without_the_url(hook, data, monkeypatch, capsys):
-    url, got, state = hook
-    state["status"] = 500
+def test_via_engine_posts_the_card_as_an_event(hook, data, monkeypatch):
+    url, got, _ = hook
+    monkeypatch.setenv("PYTHIA_ALERT_VIA", "engine")
+    monkeypatch.setenv("PYTHIA_ALERT_EVENT_URL", url)
+    card = notify.Card("🧪", "Factory 2026-10-17", "3 survived.",
+                       [notify.Rows([("Tried", "120"), ("Best", "+1.40", 1.4)]), notify.Table(["Name", "Sharpe"], [["a", "1.4"]])])
+    res = notify.send("studies", card, now=NOW)
+    assert res["delivered"]
+    ev = got[0][1]
+    assert ev["category"] == "studies" and ev["title"] == "Factory 2026-10-17" and ev["text"] == "3 survived."
+    assert ev["rows"] == [{"label": "Tried", "value": "120"}, {"label": "Best", "value": "+1.40", "sign": 1.4}]
+    assert ev["table"] == {"header": ["Name", "Sharpe"], "rows": [["a", "1.4"]]}
+    # A digest (several blocks, lines of words) is more than an event holds: straight to the chat.
+    digest, _ = notify.digest_card(learn_report(), FORWARD, HEALTH_OK, {}, NOW)
+    assert not notify.fits_event([digest]) and notify.fits_event([card])
+
+
+# ---------------------------------------------------------------- the daily digest
+
+def test_digest_says_what_the_money_did():
+    text, snap = notify.digest(learn_report(), FORWARD, HEALTH_OK, {}, NOW)
+    assert text.startswith("<b>📊 Daily · Wed 14 Oct</b>\n1 autopilot running, +$10.20 today 🟢 · BTC +0.50 %\n"), text
+    assert "<b>Momentum · demo</b>\n<pre>Equity" in text
+    assert "$1,030.00" in text
+    assert re.search(r"\nToday +\+\$10\.20 \+1\.00 % 🟢\n", text), text
+    assert re.search(r"\nSince start +\+\$30\.00 \+3\.00 % 🟢\n", text), text
+    assert "+1.50 pts 🟢" in text
+    assert "12 total · fees $3.50" in text, "no snapshot yet: totals, said as such"
+    assert "Old one" not in text, "only running autopilots"
+    assert "<b>Forward test</b> tsmom ✅ on track · m4_ls 👀 watch · picks_ls 🌱 early" in text
+    assert "<b>Health</b> ✅ all green" in text
+    assert "<b>Learning</b> 2 cost updates" in text
+    assert snap == {"ap1": {"trades": 12, "fees": 3.5, "at": NOW}}
+    assert "\u2014" not in text and len(text) <= notify.MAX_CHARS and balanced(text)
+
+
+def test_trades_and_fees_today_come_from_yesterdays_snapshot():
+    prev = {"ap1": {"trades": 9, "fees": 2.25, "at": NOW - 86_400_000}}
+    text, _ = notify.digest(learn_report(), FORWARD, HEALTH_OK, prev, NOW)
+    assert "Trades today   3 · fees $1.25" in text
+    old = {"ap1": {"trades": 9, "fees": 2.25, "at": NOW - 3 * 86_400_000}}
+    assert "12 total" in notify.digest(learn_report(), FORWARD, HEALTH_OK, old, NOW)[0]
+
+
+def test_losses_red_health_and_a_stale_report_are_said():
+    rep = learn_report(equity=950.0)
+    rep["autopilots"][0]["pnl_day_pct"] = -2.0
+    rep["generated_ms"] = NOW - 2 * 86_400_000
+    text, _ = notify.digest(rep, None, health_bad("2026-10-14T06:07:00Z"), {}, NOW)
+    assert "-$19.39 today 🔴" in text
+    assert "-$19.39 -2.00 % 🔴" in text and "-$50.00 -5.00 % 🔴" in text
+    assert "not today's" in text
+    assert "<b>Forward test</b> no report" in text
+    assert "<b>Health</b> 🔴 1 red: paper tsmom (last row none)" in text
+
+
+def test_many_autopilots_are_cut_to_a_phone_screen():
+    rep = learn_report()
+    rep["autopilots"] = [dict(rep["autopilots"][0], id=f"a{i}", name=f"Autopilot number {i}") for i in range(40)]
+    text, _ = notify.digest(rep, FORWARD, HEALTH_OK, {}, NOW)
+    assert len(text) <= notify.MAX_CHARS and balanced(text)
+    assert "34 more autopilots in the app" in text
+    assert "40 autopilots running" in text
+
+
+@pytest.mark.parametrize("fmt,key", [("discord", "content"), ("slack", "text")])
+def test_daily_posts_to_a_webhook_in_its_format(hook, data, monkeypatch, capsys, fmt, key):
+    url, got, _ = hook
     monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+    monkeypatch.setenv("PYTHIA_ALERT_FORMAT", fmt)
+    write(data, "reports/learn/latest.json", learn_report())
+    write(data, "reports/forward/latest.json", FORWARD)
+    write(data, "_health/system.json", HEALTH_OK)
+    assert notify.daily(now_ms=NOW) == 0
+    assert len(got) == 1 and list(got[0][1]) == [key]
+    assert "📊 Daily · Wed 14 Oct" in got[0][1][key] and "<b>" not in got[0][1][key]
+    st = json.loads((data / "notify" / "state.json").read_text())
+    assert st["autopilots"]["ap1"]["trades"] == 12
+    assert "secret-token" not in capsys.readouterr().out + json.dumps(st)
+
+
+def test_a_failed_post_is_reported_without_the_url(telegram, data, capsys):
+    url, got, state = telegram
+    state["status"] = 500
     assert notify.daily(now_ms=NOW) == 1
     err = capsys.readouterr().err
     assert "HTTP 500" in err and "secret-token" not in err
@@ -166,85 +346,59 @@ def test_a_failed_post_is_reported_without_the_url(hook, data, monkeypatch, caps
     assert not ok and "secret-token" not in why
 
 
-def test_without_a_webhook_it_only_prints(data, capsys):
+def test_without_a_destination_it_only_prints(data, capsys):
     assert notify.daily(now_ms=NOW) == 0
     out = capsys.readouterr().out
-    assert "Learning loop: no report found." in out and "printed only" in out
+    assert "No learning report found." in out and "printed only" in out
 
 
-def test_health_posts_once_after_two_bad_runs_and_once_when_green(hook, data, monkeypatch):
-    url, got, _ = hook
-    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
-    sysj = data / "_health" / "system.json"
-
-    def run(d):
-        write(data, "_health/system.json", d)
-        assert notify.main(["--health", str(sysj)]) == 0
-
-    run(HEALTH_OK)
-    run(health_bad("2026-10-14T07:07:00Z"))
-    assert got == [], "one bad run stays quiet"
-    assert notify.main(["--health", str(sysj)]) == 0
-    assert got == [], "the same run read twice counts once"
-    run(health_bad("2026-10-14T08:07:00Z"))
-    assert len(got) == 1
-    assert got[0]["content"].startswith("Pythia Health check not ok for 2 runs in a row")
-    assert "- paper tsmom: last row none" in got[0]["content"]
-    run(health_bad("2026-10-14T09:07:00Z"))
-    assert len(got) == 1, "posted once per episode"
-    run(dict(HEALTH_OK, at="2026-10-14T10:07:00Z"))
-    assert len(got) == 2 and "all green again" in got[1]["content"]
-    run(health_bad("2026-10-14T11:07:00Z"))
-    run(dict(HEALTH_OK, at="2026-10-14T12:07:00Z"))
-    assert len(got) == 2, "a single bad run and its recovery stay quiet"
-
-
-def test_health_retries_when_the_post_fails(hook, data, monkeypatch):
-    url, got, state = hook
-    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
-    sysj = data / "_health" / "system.json"
-    state["status"] = 503
-    for at in ("2026-10-14T07:07:00Z", "2026-10-14T08:07:00Z"):
-        write(data, "_health/system.json", health_bad(at))
-        notify.main(["--health", str(sysj)])
-    assert len(got) == 1
-    state["status"] = 204
-    write(data, "_health/system.json", health_bad("2026-10-14T09:07:00Z"))
-    assert notify.main(["--health", str(sysj)]) == 0
-    assert len(got) == 2, "not marked as posted until it went through"
-
-
-def test_every_digest_is_written_to_latest_json(hook, data, monkeypatch):
-    url, got, state = hook
-    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+def test_every_digest_is_written_to_latest_json(telegram, data):
+    url, got, state = telegram
     write(data, "reports/learn/latest.json", learn_report())
     assert notify.daily(now_ms=NOW) == 0
-    latest = json.loads((data / "reports/notify/latest.json").read_text())
-    assert latest == {"ts": NOW, "text": got[0]["content"], "delivered": True}
+    latest = json.loads((data / "reports/notify/latest.json").read_text(encoding="utf-8"))
+    assert latest["ts"] == NOW and latest["delivered"] is True and latest["photo"] is False
+    assert latest["html"] == got[0][1]["text"]
+    assert latest["text"] == notify.plain(latest["html"]) and latest["text"].startswith("📊 Daily · Wed 14 Oct")
     state["status"] = 500
     assert notify.daily(now_ms=NOW + 1) == 1
-    latest = json.loads((data / "reports/notify/latest.json").read_text())
+    latest = json.loads((data / "reports/notify/latest.json").read_text(encoding="utf-8"))
     assert latest["ts"] == NOW + 1 and latest["delivered"] is False
-    assert url not in (data / "reports/notify/latest.json").read_text()
+    assert url not in (data / "reports/notify/latest.json").read_text(encoding="utf-8")
 
 
-def test_a_dry_run_writes_no_latest_and_no_webhook_writes_undelivered(data):
+def test_a_dry_run_writes_no_latest_and_no_destination_writes_undelivered(data):
     assert notify.daily(dry_run=True, now_ms=NOW) == 0
     assert not (data / "reports/notify/latest.json").exists()
     assert notify.daily(now_ms=NOW) == 0
-    assert json.loads((data / "reports/notify/latest.json").read_text())["delivered"] is False
+    assert json.loads((data / "reports/notify/latest.json").read_text(encoding="utf-8"))["delivered"] is False
 
 
-def test_pending_sends_once_per_request_newer_than_the_last_digest(hook, data, monkeypatch, capsys):
-    url, got, _ = hook
-    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+def test_the_digest_follows_its_switch_and_waits_out_quiet_hours(telegram, data, monkeypatch):
+    _, got, _ = telegram
+    write(data, "reports/notify/settings.json", {"categories": [{"id": "dailyPnl", "on": False}]})
+    assert notify.daily(now_ms=NOW) == 0 and got == []
+    write(data, "reports/notify/settings.json", {"categories": []})
+    monkeypatch.delenv("PYTHIA_QUIET_HOURS")
+    write(data, "reports/learn/latest.json", learn_report())
+    assert notify.daily(now_ms=utc(2026, 10, 14, 23, 0)) == 0 and got == []
+    assert not (data / "notify" / "state.json").exists(), "the snapshot waits for a digest that went out"
+    assert notify.pending(now_ms=utc(2026, 10, 15, 2, 0)) == 0 and got == [], "still quiet"
+    # Quiet hours over: the next --pending sends it, and it counts as the daily one.
+    assert notify.pending(now_ms=utc(2026, 10, 15, 5, 5)) == 0
+    assert len(got) == 1 and texts(got)[0].startswith("<b>📊 Daily · Thu 15 Oct</b>")
+    assert json.loads((data / "notify" / "state.json").read_text())["autopilots"]["ap1"]["trades"] == 12
+
+
+def test_pending_sends_once_per_request_newer_than_the_last_digest(telegram, data, capsys):
+    _, got, _ = telegram
     write(data, "reports/learn/latest.json", learn_report())
     assert notify.pending(now_ms=NOW) == 0
     assert got == [] and "no digest request" in capsys.readouterr().out
 
     write(data, "reports/notify/request.json", {"ts": NOW - 60_000, "source": "api"})
     assert notify.pending(now_ms=NOW) == 0
-    assert len(got) == 1 and got[0]["content"].startswith("Pythia daily")
+    assert len(got) == 1 and texts(got)[0].startswith("<b>📊 Daily")
     assert notify.pending(now_ms=NOW + 300_000) == 0
     assert len(got) == 1, "the same request is answered once"
 
@@ -261,9 +415,7 @@ def test_pending_sends_once_per_request_newer_than_the_last_digest(hook, data, m
     assert len(got) == 3
 
 
-def test_an_on_demand_digest_leaves_the_daily_snapshot_alone(hook, data, monkeypatch):
-    url, _, _ = hook
-    monkeypatch.setenv("PYTHIA_ALERT_WEBHOOK", url)
+def test_an_on_demand_digest_leaves_the_daily_snapshot_alone(telegram, data):
     write(data, "reports/learn/latest.json", learn_report())
     assert notify.daily(now_ms=NOW) == 0
     before = (data / "notify/state.json").read_text()
@@ -271,3 +423,161 @@ def test_an_on_demand_digest_leaves_the_daily_snapshot_alone(hook, data, monkeyp
     write(data, "reports/notify/request.json", {"ts": NOW + 60_000})
     assert notify.main(["--pending"]) == 0
     assert (data / "notify/state.json").read_text() == before
+
+
+# ---------------------------------------------------------------- the chart goes with it
+
+def engine_state(now=NOW):
+    start = now - 9 * notify.DAY_MS
+    hist = [[start + i * (now - start) // 200, 1000 * (1 + 0.03 * i / 200 + 0.01 * math.sin(i / 13))] for i in range(200)]
+    return {
+        "autopilots": [
+            {"config": {"id": "ap1", "name": "Momentum", "mode": "demo"}, "state": "running", "startedMs": start,
+             "startCapital": 1000, "equity": hist[-1][1], "history": hist, "trades": 31, "drawdownPct": 1.2,
+             "btcReturnPct": 2.1, "held": ["crypto:BTC/USD", "crypto:ETH/USD"],
+             "bySleeve": [{"name": "tsmom", "pnl": 31.2}, {"name": "m4_ls", "pnl": -6.4}]},
+            {"config": {"id": "ap0", "name": "Old", "mode": "demo"}, "state": "stopped", "startedMs": start,
+             "startCapital": 1000, "equity": 900, "history": []},
+        ],
+        "positions": [
+            {"marketId": "crypto:BTC/USD", "symbol": "BTC/USD", "qty": 0.004, "lastPrice": 67234.1},
+            {"marketId": "crypto:ETH/USD", "symbol": "ETH/USD", "qty": 0.09, "lastPrice": 3412.0},
+            {"marketId": "crypto:DOGE/USD", "symbol": "DOGE/USD", "qty": 100, "lastPrice": 0.2},
+        ],
+    }
+
+
+def btc_series(a, b):
+    return [(a + i * (b - a) // 50, 60_000 * (1 + 0.02 * i / 50)) for i in range(51)]
+
+
+def test_chart_data_comes_from_the_engine_state():
+    d = notify.chart_data(engine_state(), None, NOW, btc_series(NOW - 9 * notify.DAY_MS, NOW))
+    assert [a["name"] for a in d["autopilots"]] == ["Momentum"], "only running ones"
+    pts = d["autopilots"][0]["points"]
+    assert pts[0][1] == pytest.approx(0.0) and pts[-1][0] == NOW
+    assert d["btc"][0][1] == pytest.approx(0.0) and d["btc"][-1][1] == pytest.approx(2.0)
+    assert d["sleeves"] == [("tsmom", 31.2), ("m4_ls", -6.4)]
+    assert [p[0] for p in d["positions"]] == ["ETH", "BTC"], "only what the autopilots hold, largest first"
+    # Without a price series, BTC is drawn from the engine's own number.
+    d = notify.chart_data(engine_state(), None, NOW, [])
+    assert d["btc"][-1] == (NOW, 2.1)
+    assert notify.chart_data({"autopilots": []}, None, NOW) is None
+
+
+def test_the_daily_digest_goes_with_its_chart_as_a_photo(telegram, data, monkeypatch):
+    pytest.importorskip("matplotlib")
+    _, got, _ = telegram
+    monkeypatch.setattr(notify, "engine_state", lambda timeout=15: engine_state())
+    monkeypatch.setattr(notify, "btc_closes", lambda a, b, timeout=15: btc_series(a, b))
+    write(data, "reports/learn/latest.json", learn_report())
+    write(data, "reports/forward/latest.json", FORWARD)
+    assert notify.daily(now_ms=NOW) == 0
+    photos = [(p, b) for p, b in got if isinstance(b, bytes)]
+    assert len(photos) == 1 and photos[0][0].endswith("/sendPhoto")
+    body = photos[0][1]
+    assert b'name="parse_mode"\r\n\r\nHTML' in body and b"\x89PNG" in body
+    assert "<b>📊 Daily · Wed 14 Oct</b>".encode() in body
+    # The digest fits in a caption, so the photo is the whole message.
+    assert texts(got) == []
+    latest = json.loads((data / "reports/notify/latest.json").read_text(encoding="utf-8"))
+    assert latest["photo"] is True and latest["delivered"] is True
+
+
+# ---------------------------------------------------------------- the weekly report
+
+def test_the_weekly_report_is_sunday_at_six_in_berlin_once(telegram, data):
+    _, got, _ = telegram
+    sunday_18 = utc(2026, 10, 18, 16, 5)  # 18:05 Berlin, summer time
+    assert notify.weekly_due(sunday_18) and notify.weekly_due(utc(2026, 10, 18, 19, 5))
+    assert not notify.weekly_due(utc(2026, 10, 18, 15, 5)) and not notify.weekly_due(utc(2026, 10, 17, 16, 5))
+    assert not notify.weekly_due(utc(2026, 10, 18, 22, 5)), "Monday 00:05 in Berlin"
+    st = engine_state(sunday_18)
+    assert notify.weekly(now=utc(2026, 10, 18, 15, 5), state=st, btc_fetch=None) == 0
+    assert got == [], "17:05 is not the time"
+    assert notify.weekly(now=sunday_18, state=st, btc_fetch=btc_series) == 0
+    assert len(got) == 1
+    text = texts(got)[0] if texts(got) else got[0][1].decode("utf-8", "replace")
+    assert "🗓️ Weekly · 11 to 18 Oct" in text
+    assert "<b>Momentum · demo</b>" in text and "This week" in text and "vs BTC" in text
+    assert "<b>Best sleeve</b> tsmom +$31.20 · worst m4_ls -$6.40" in text
+    assert notify.weekly(now=sunday_18 + 1_800_000, state=st, btc_fetch=None) == 0
+    assert len(got) == 1, "once a week"
+    assert notify.weekly(now=sunday_18 + 1_800_000, state=st, btc_fetch=None, force=True) == 0
+    assert len(got) == 2, "--force sends anyway"
+
+
+def test_the_weekly_card_counts_the_week():
+    now = utc(2026, 10, 18, 16, 0)
+    st = engine_state(now)
+    card, snap = notify.weekly_card(st, {"ap1": {"trades": 20, "at": now - notify.WEEK_MS}}, now, 1.0)
+    html = card.render()
+    assert card.title == "Weekly · 11 to 18 Oct"
+    assert re.search(r"\nTrades +11 this week</pre>", html), html
+    assert "Below peak" in html and "1.20 %" in html
+    assert snap == {"ap1": {"trades": 31, "at": now}}
+    assert notify.weekly_card(None, {}, now, None)[0].summary.startswith("The engine did not answer")
+
+
+# ---------------------------------------------------------------- the health alarm
+
+def test_health_posts_once_after_two_bad_runs_and_once_when_green(telegram, data):
+    _, got, _ = telegram
+    sysj = data / "_health" / "system.json"
+
+    def run(d):
+        write(data, "_health/system.json", d)
+        assert notify.main(["--health", str(sysj)]) == 0
+
+    run(HEALTH_OK)
+    run(health_bad("2026-10-14T07:07:00Z"))
+    assert got == [], "one bad run stays quiet"
+    assert notify.main(["--health", str(sysj)]) == 0
+    assert got == [], "the same run read twice counts once"
+    run(health_bad("2026-10-14T08:07:00Z"))
+    assert len(got) == 1
+    text = texts(got)[0]
+    assert text.startswith("<b>🩺 Health check red for 2 runs</b>\n1 check not ok at 2026-10-14T08:07:00Z."), text
+    assert "<b>paper tsmom</b> last row none" in text
+    run(health_bad("2026-10-14T09:07:00Z"))
+    assert len(got) == 1, "posted once per episode"
+    run(dict(HEALTH_OK, at="2026-10-14T10:07:00Z"))
+    assert len(got) == 2 and texts(got)[1].startswith("<b>✅ Health check all green again</b>")
+    run(health_bad("2026-10-14T11:07:00Z"))
+    run(dict(HEALTH_OK, at="2026-10-14T12:07:00Z"))
+    assert len(got) == 2, "a single bad run and its recovery stay quiet"
+
+
+def test_health_retries_when_the_post_fails(telegram, data):
+    _, got, state = telegram
+    sysj = data / "_health" / "system.json"
+    state["status"] = 503
+    for at in ("2026-10-14T07:07:00Z", "2026-10-14T08:07:00Z"):
+        write(data, "_health/system.json", health_bad(at))
+        notify.main(["--health", str(sysj)])
+    assert len(got) == 1
+    state["status"] = 204
+    write(data, "_health/system.json", health_bad("2026-10-14T09:07:00Z"))
+    assert notify.main(["--health", str(sysj)]) == 0
+    assert len(got) == 2, "not marked as posted until it went through"
+
+
+def test_health_waits_for_the_end_of_quiet_hours(telegram, data, monkeypatch):
+    _, got, _ = telegram
+    monkeypatch.delenv("PYTHIA_QUIET_HOURS")
+    sysj = data / "_health" / "system.json"
+    night, morning = utc(2026, 10, 14, 23, 0), utc(2026, 10, 15, 6, 0)
+    for i, at in enumerate(("2026-10-14T23:07:00Z", "2026-10-15T00:07:00Z", "2026-10-15T01:07:00Z")):
+        write(data, "_health/system.json", health_bad(at))
+        assert notify.health(sysj, now=night + i * 3_600_000) == 0
+    assert got == []
+    write(data, "_health/system.json", health_bad("2026-10-15T06:07:00Z"))
+    assert notify.health(sysj, now=morning) == 0
+    assert len(got) == 1 and "red for 4 runs" in texts(got)[0]
+
+
+def test_an_event_from_the_shell(telegram, data):
+    _, got, _ = telegram
+    assert notify.main(["--event", "venue", "Disk almost full", "12 GB left"]) == 0
+    assert texts(got)[0] == "<b>📡 Disk almost full</b>\n12 GB left\n<i>Pythia</i>"
+    assert notify.main(["--event", "weather", "x"]) == 2
