@@ -20,14 +20,17 @@ first successful look at a venue only seeds it: nothing is posted for the
 thousands of pairs that already exist. After that:
 
   - every new pair is a row in the data lake with its first-seen time,
-    <data>/lake/listings/first_seen/date=YYYY-MM-DD/<HHMMSS>-<venue>.parquet
+    <data>/listings/first_seen/date=YYYY-MM-DD/<HHMMSS>-<venue>.parquet
     (event listed, removed, returned, announced or seed);
-  - a new coin (a base the venue had no pair for), every new Alpaca pair and
-    every new Binance listing announcement goes out in one message per run
-    through lab.ops.notify (Telegram or the webhook): venue, symbols, whether
-    Alpaca lists the coin, the first price when the venue quotes one;
-  - <data>/reports/listings/recent.json keeps the last 90 days of events for
-    the engine's lab view (the Markets page shows them as New listings).
+  - every new listing goes out as its own message through lab.ops.notify
+    (Telegram or the webhook): a new coin (a base the venue had no pair for),
+    a new Alpaca pair, a new Binance listing announcement; with venue,
+    symbols, whether Alpaca lists the coin and the first price when the
+    venue quotes one. At most MAX_ALERTS messages a run, the rest in one;
+  - <data>/reports/listings/latest.json, the cockpit's feed (title,
+    updatedMs, status, headline, items) plus the last 90 days of events and
+    how each venue answered, for the engine's lab view (the Markets page
+    shows them as New listings).
 
 A venue that fails or answers with a list much shorter than the last one is
 skipped for this run, so an outage never reads as a mass delisting followed by
@@ -54,6 +57,9 @@ VENUES = ("alpaca", "binance", "coinbase", "kraken")
 NEWS = "binance_news"
 RECENT_DAYS = 90
 RECENT_MAX = 200
+MAX_ALERTS = 10             # messages per run; a burst beyond that goes out as one summary
+FEED_ITEMS = 50
+DOLLARS = ("USD", "USDT", "USDC")   # the first price is quoted in dollars when the venue has a dollar pair
 SHRINK_LIMIT = 0.8          # a list under 80 % of the known one is treated as a bad answer
 STATE_VERSION = 1
 TIMEOUT = 20
@@ -86,12 +92,12 @@ def listings_dir() -> Path:
     return notify.data_root() / "listings"
 
 
-def recent_path() -> Path:
-    return notify.reports_root() / "listings" / "recent.json"
+def latest_path() -> Path:
+    return notify.reports_root() / "listings" / "latest.json"
 
 
 def lake_dir() -> Path:
-    return notify.data_root() / "lake" / "listings" / "first_seen"
+    return listings_dir() / "first_seen"
 
 
 # ---------------------------------------------------------------- fetching
@@ -297,27 +303,41 @@ def alert_worthy(e: dict) -> bool:
     return e["venue"] == "alpaca" or e["new_base"]
 
 
-def alert_text(events: list[dict], prefix: str) -> str:
-    """One message for the run: one line per new coin per venue."""
+def alert_groups(events: list[dict]) -> list[list[dict]]:
+    """The run's alert-worthy events, one group per venue and coin, in order."""
     groups: dict[tuple[str, str], list[dict]] = {}
     for e in events:
         if alert_worthy(e):
             groups.setdefault((e["venue"], e["base"] if e["event"] != "announced" else e["symbol"]), []).append(e)
-    if not groups:
-        return ""
-    lines = [f"{prefix}: new listings"]
-    for (venue, base), es in groups.items():
-        e0 = es[0]
-        if e0["event"] == "announced":
-            lines.append(f"- {VENUE_NAMES[venue]}: {e0.get('title', '')}. Alpaca: {alpaca_word(e0)}.")
-            continue
-        syms = ", ".join(e["symbol"] for e in es[:6]) + (f" and {len(es) - 6} more" if len(es) > 6 else "")
-        px = next((e for e in es if e.get("price") is not None), None)
-        price = f" First price {px['price']:.8g} {px['quote']} ({px['symbol']})." if px else " No price yet."
-        what = "new pair" if venue == "alpaca" and not e0["new_base"] else "new coin"
-        lines.append(f"- {VENUE_NAMES[venue]} {what} {base}: {syms}. Alpaca: {alpaca_word(e0)}.{price}")
-    lines.append("Information only: nothing is bought.")
-    return notify.clip("\n".join(lines))
+    return list(groups.values())
+
+
+def alert_line(es: list[dict]) -> str:
+    """One listing in one sentence: venue, coin, symbols, Alpaca, first price."""
+    e0 = es[0]
+    venue = e0["venue"]
+    if e0["event"] == "announced":
+        return f"{VENUE_NAMES[venue]}: {e0.get('title', '')}. Alpaca: {alpaca_word(e0)}."
+    syms = ", ".join(e["symbol"] for e in es[:6]) + (f" and {len(es) - 6} more" if len(es) > 6 else "")
+    priced = [e for e in es if e.get("price") is not None]
+    px = min(priced, key=lambda e: DOLLARS.index(e["quote"]) if e["quote"] in DOLLARS else len(DOLLARS),
+             default=None)
+    price = f" First price {px['price']:.8g} {px['quote']} ({px['symbol']})." if px else " No price yet."
+    what = "new pair" if venue == "alpaca" and not e0["new_base"] else "new coin"
+    return f"{VENUE_NAMES[venue]} {what} {e0['base']}: {syms}. Alpaca: {alpaca_word(e0)}.{price}"
+
+
+def alert_texts(events: list[dict], prefix: str, limit: int = MAX_ALERTS) -> list[str]:
+    """One message per new listing; past `limit` the rest share one message."""
+    lines = [alert_line(es) for es in alert_groups(events)]
+    if len(lines) > limit:
+        lines = lines[:limit - 1] + ["\n".join([f"{len(lines) - limit + 1} more:"] + lines[limit - 1:])]
+    return [notify.clip(f"{prefix} new listing: {ln}\nInformation only: nothing is bought.") for ln in lines]
+
+
+def alert_text(events: list[dict], prefix: str) -> str:
+    """Every message of the run, one after the other (for the dry run and the logs)."""
+    return "\n\n".join(alert_texts(events, prefix))
 
 
 def alpaca_word(e: dict) -> str:
@@ -357,6 +377,8 @@ def write_lake(events: list[dict], now_ms: int, root: Path) -> list[Path]:
 
 
 def update_recent(prev: dict | None, events: list[dict], venues: dict, now_ms: int) -> dict:
+    """The feed file: the cockpit's common header (title, updatedMs, status,
+    headline, items) over the last 90 days of listings and each venue's answer."""
     keep = [e for e in (prev or {}).get("listings") or []
             if isinstance(e, dict) and now_ms - int(e.get("ts_ms") or 0) <= RECENT_DAYS * notify.DAY_MS]
     for e in events:
@@ -364,8 +386,49 @@ def update_recent(prev: dict | None, events: list[dict], venues: dict, now_ms: i
             keep.append({k: e.get(k) for k in ("venue", "event", "symbol", "base", "quote", "new_base",
                                                "alpaca_lists", "price", "title")} | {"ts_ms": now_ms})
     keep.sort(key=lambda e: -int(e.get("ts_ms") or 0))
-    return {"generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "generated_ms": now_ms, "venues": venues, "listings": keep[:RECENT_MAX]}
+    keep = keep[:RECENT_MAX]
+    return {"title": "New listings", "updatedMs": now_ms, **feed_summary(keep, venues, now_ms),
+            "generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "generated_ms": now_ms, "venues": venues, "listings": keep}
+
+
+def feed_summary(listings: list[dict], venues: dict, now_ms: int) -> dict:
+    """status, headline and items. watch: a new coin in the last day or a venue
+    did not answer; bad: no venue answered; ok otherwise."""
+    worthy = [e for e in listings if alert_worthy({"event": e.get("event") or "", "venue": e.get("venue") or "",
+                                                   "new_base": bool(e.get("new_base"))})]
+    day = [e for e in worthy if now_ms - int(e.get("ts_ms") or 0) <= notify.DAY_MS]
+    down = sorted(v for v, s in venues.items() if not (s or {}).get("ok"))
+    up = [v for v, s in venues.items() if (s or {}).get("ok")]
+    status = "bad" if venues and not up else ("watch" if day or down else "ok")
+    coins: list[str] = []
+    for e in day:
+        name = f"{VENUE_NAMES.get(e['venue'], e['venue'])} {e.get('base') or e.get('symbol')}"
+        if name not in coins:
+            coins.append(name)
+    head = (f"{len(coins)} new in the last 24 hours: {', '.join(coins[:5])}{' and more' if len(coins) > 5 else ''}."
+            if coins else "Nothing new in the last 24 hours.")
+    head += f" {len(worthy)} in 90 days."
+    if down:
+        head += " Not answering: " + ", ".join(VENUE_NAMES.get(v, v) for v in down) + "."
+    items, seen = [], set()
+    for e in worthy:
+        key = (e.get("venue"), e.get("base") or e.get("symbol"), e.get("event"))
+        if key in seen:
+            continue
+        seen.add(key)
+        fresh = now_ms - int(e.get("ts_ms") or 0) <= notify.DAY_MS
+        px = e.get("price")
+        items.append({
+            "label": f"{VENUE_NAMES.get(e['venue'], e['venue'])} {e.get('base') or e.get('symbol')}",
+            "value": f"{px:.8g} {e.get('quote') or ''}".strip() if isinstance(px, (int, float)) else None,
+            "status": "watch" if fresh else "ok",
+            "detail": (e.get("title") or e.get("symbol") or "") + f". Alpaca: {alpaca_word(e)}.",
+            "importance": 90 if fresh and e.get("alpaca_lists") else (70 if fresh else 20),
+            "atMs": int(e.get("ts_ms") or 0)})
+        if len(items) >= FEED_ITEMS:
+            break
+    return {"status": status, "headline": head, "items": items}
 
 
 # ---------------------------------------------------------------- one run
@@ -407,31 +470,37 @@ def run(dry_run: bool = False, now_ms: int | None = None, fetcher=fetch, news_fe
             e["price"] = pricer(e["venue"], e["symbol"])
 
     prefix = notify.config()[2]
-    text = alert_text(events, prefix)
+    texts = alert_texts(events, prefix)
+    text = "\n\n".join(texts)
     delivered = None
     if dry_run:
         print(json.dumps({"venues": venues, "new": [e for e in events if e["event"] != "seed"]}, indent=2))
         if text:
             print(text)
-        return {"events": events, "text": text, "venues": venues, "delivered": None}
+        return {"events": events, "text": text, "texts": texts, "venues": venues, "delivered": None}
 
     write_lake(events, now_ms, lake_dir())
     notify.write_json(state_p, state)
-    notify.write_json(recent_path(), update_recent(notify.read_json(recent_path()), events, venues, now_ms))
-    if text:
+    notify.write_json(latest_path(), update_recent(notify.read_json(latest_path()), events, venues, now_ms))
+    if texts:
         url, fmt, _ = notify.config()
-        if poster is not None:
-            delivered = bool(poster(text))
-        elif url is None:
-            print(text)
-        else:
-            delivered, err = notify.post(url, fmt, text)
-            if not delivered:
-                print(f"listings: alert not delivered: {err}", file=sys.stderr)
+        sent = 0
+        for t in texts:
+            if poster is not None:
+                ok = bool(poster(t))
+            elif url is None:
+                print(t)
+                continue
+            else:
+                ok, err = notify.post(url, fmt, t)
+                if not ok:
+                    print(f"listings: alert not delivered: {err}", file=sys.stderr)
+            sent += ok
+        delivered = None if poster is None and url is None else sent == len(texts)
     for v, s in venues.items():
         if not s["ok"]:
             print(f"listings: {v} skipped ({s['error']})", file=sys.stderr)
-    return {"events": events, "text": text, "venues": venues, "delivered": delivered}
+    return {"events": events, "text": text, "texts": texts, "venues": venues, "delivered": delivered}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -56,7 +56,7 @@ def verdict() -> dict | None:
 def alpaca_listings(since_ms: int) -> list[dict]:
     """New Alpaca coins the watcher recorded at or after since_ms, oldest first."""
     import polars as pl
-    files = sorted((ROOT / "lake" / "listings" / "first_seen").rglob("*-alpaca.parquet"))
+    files = sorted((ROOT / "listings" / "first_seen").rglob("*-alpaca.parquet"))
     if not files:
         return []
     df = pl.concat([pl.read_parquet(f) for f in files], how="vertical_relaxed")

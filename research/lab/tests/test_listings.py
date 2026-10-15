@@ -78,7 +78,7 @@ def test_first_run_seeds_quietly_then_alerts_new_coins(root):
     r = go(BASE, T0, posted=posted)
     assert r["text"] == "" and posted == []
     assert all(s["ok"] and s["seeded"] for v, s in r["venues"].items() if v in L.VENUES)
-    seeds = pl.read_parquet(sorted((root / "lake" / "listings" / "first_seen").rglob("*.parquet")))
+    seeds = pl.read_parquet(sorted((root / "listings" / "first_seen").rglob("*.parquet")))
     assert set(seeds["event"]) == {"seed"} and seeds.height == 5 + 1 + 1 + 3
 
     lists = dict(BASE)
@@ -90,13 +90,20 @@ def test_first_run_seeds_quietly_then_alerts_new_coins(root):
     assert {(e["venue"], e["symbol"], e["new_base"]) for e in listed} == {
         ("binance", "NEWCUSDT", True), ("binance", "NEWCBTC", True), ("binance", "SOLBTC", False),
         ("coinbase", "SOL-USD", True)}
-    text = posted[-1]
-    assert "Binance new coin NEWC: NEWCBTC, NEWCUSDT. Alpaca: does not list it." in text
-    assert "Coinbase new coin SOL: SOL-USD. Alpaca: lists it. First price 1.25 USD" in text
+    assert len(posted) == 2, "one message per new listing"
+    assert posted[0].startswith("Pythia new listing: Binance new coin NEWC: NEWCBTC, NEWCUSDT. "
+                                "Alpaca: does not list it. First price 1.25 USDT")
+    assert "Coinbase new coin SOL: SOL-USD. Alpaca: lists it. First price 1.25 USD" in posted[1]
+    text = "\n".join(posted)
     assert "SOLBTC" not in text, "a new pair of a coin the venue already had is recorded, not posted"
-    rec = json.loads((root / "reports" / "listings" / "recent.json").read_text())
+    rec = json.loads((root / "reports" / "listings" / "latest.json").read_text())
     assert {e["symbol"] for e in rec["listings"]} == {"NEWCUSDT", "NEWCBTC", "SOLBTC", "SOL-USD"}
     assert rec["venues"]["binance"]["count"] == 8
+    # The cockpit's common header.
+    assert rec["title"] == "New listings" and rec["updatedMs"] == T0 + 600_000 and rec["status"] == "watch"
+    assert rec["headline"].startswith("2 new in the last 24 hours: Binance NEWC, Coinbase SOL.")
+    assert [i["label"] for i in rec["items"]] == ["Binance NEWC", "Coinbase SOL"]
+    assert rec["items"][1]["detail"] == "SOL-USD. Alpaca: lists it." and rec["items"][1]["value"] == "1.25 USD"
 
     # Nothing changes: nothing is posted, nothing new recorded.
     n_before = len(posted)
@@ -129,7 +136,8 @@ def test_alpaca_pairs_and_announcements_are_posted(root):
                                **L.parse_alpaca([{"symbol": "ETH/USDT", "status": "active"}])})
     news2 = news + [{"id": "2", "title": "Binance Will List Zed (ZED)", "release_ms": T0 + 1, "bases": ["ZED"]}]
     r = go(lists, T0 + 600_000, news=news2, posted=posted)
-    text = posted[-1]
+    assert len(posted) == 3
+    text = "\n".join(posted)
     assert "Alpaca new coin ADA: ADA/USD. Alpaca: lists it. First price 1.25 USD (ADA/USD)." in text
     assert "Alpaca new pair ETH: ETH/USDT." in text
     assert "Binance announcement: Binance Will List Zed (ZED). Alpaca: does not list it." in text
@@ -161,4 +169,22 @@ def test_recent_keeps_ninety_days():
 
 def test_dry_run_writes_nothing(root, capsys):
     L.run(dry_run=True, now_ms=T0, fetcher=fetcher_of(BASE), news_fetcher=list, pricer=None)
-    assert not (root / "listings").exists() and not (root / "lake").exists()
+    assert not (root / "listings").exists() and not (root / "reports").exists()
+
+
+def test_a_burst_is_capped_and_the_feed_status_follows_the_venues(root):
+    go(BASE, T0)
+    posted = []
+    many = binance(*[(f"N{i:02d}", "USDT") for i in range(14)])
+    r = go(dict(BASE, binance={**BASE["binance"], **many}), T0 + 600_000, posted=posted)
+    assert len(r["texts"]) == L.MAX_ALERTS == len(posted)
+    assert posted[-1].startswith("Pythia new listing: 5 more:\nBinance new coin N09")
+    assert "Binance new coin N13" in posted[-1]
+    # A day later with one venue down: nothing fresh, the feed says watch and names the venue.
+    go(dict(BASE, binance={**BASE["binance"], **many}, kraken=OSError("x")), T0 + 2 * L.notify.DAY_MS)
+    rec = json.loads((root / "reports" / "listings" / "latest.json").read_text())
+    assert rec["status"] == "watch" and rec["headline"] == (
+        "Nothing new in the last 24 hours. 14 in 90 days. Not answering: Kraken.")
+    assert all(i["status"] == "ok" for i in rec["items"]) and len(rec["items"]) == 14
+    assert L.feed_summary([], {"binance": {"ok": False}, "kraken": {"ok": False}}, T0)["status"] == "bad"
+    assert L.feed_summary([], {"binance": {"ok": True}}, T0)["status"] == "ok"
