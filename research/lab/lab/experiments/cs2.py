@@ -74,7 +74,7 @@ def build(root: Path | None, today: date, snap: pl.DataFrame, meta: dict, mx: di
          f"{b7.get('n', 'n/a')}",
          f"- Steam price rows: {steam.height if not steam.is_empty() else 0} over "
          f"{steam['date'].n_unique() if not steam.is_empty() else 0} days",
-         f"- Daily panel for the walk-forward model: {wf.get('days', 0)} days, {wf.get('items', 0)} liquid items", "",
+         f"- Daily panel for the walk-forward model: {_days(wf.get('days', 0))}, {wf.get('items', 0)} liquid items", "",
          "## 1. Spread between Skinport and Steam, net of fees", "",
          "Fees: Steam keeps about 15 % of what the seller gets (5 % Steam, 10 % CS2, at least a cent each) and pays "
          f"in wallet funds that cannot be withdrawn; Skinport keeps {market.SKINPORT_SALE_FEE:.0%} of the sale and pays cash. "
@@ -123,7 +123,9 @@ def build(root: Path | None, today: date, snap: pl.DataFrame, meta: dict, mx: di
     L += ["", "## 4. Forecaster of 7 and 30-day returns", "",
           "Bootstrap LightGBM, 5-fold across items (same weeks in train and test, so a market-wide move is "
           "shared): 7 days from the earlier windows' change, sales rate and trend, level, category and case age; "
-          "30 days from static traits only.", "",
+          "30 days from static traits only. The 7-day model sees the 7-30 day average that is also the base of "
+          "its outcome, so part of its rank IC is the measurement effect of section 2; the walk-forward test "
+          "does not have it.", "",
           report.table([
               {"horizon": "7d bootstrap", "items": b7.get("n"), "rank IC": b7.get("ic"),
                "top decile minus all": b7.get("top_decile_minus_all"), "MSE model": b7.get("mse_model"),
@@ -146,7 +148,7 @@ def build(root: Path | None, today: date, snap: pl.DataFrame, meta: dict, mx: di
     L += ["", "## 5. Paper portfolio (forward, play money)", "",
           f"- Equity {eq:,.2f} EUR after the sale fee ({_p(ret, 2)}) since {(st.get('started') or '')[:10] or 'not started'}, "
           f"{len(st.get('positions') or {})} positions, {len(st.get('trades') or [])} paper trades, "
-          f"{len(j)} journal days.",
+          f"{len(j)} journal day{'' if len(j) == 1 else 's'}.",
           "- Rules: top 10 after fees, 10 % each, weekly look, 30-day minimum hold, Skinport prices and fee "
           "(see `lab/cs2/book.py`).", ""]
     md = "\n".join(L) + "\n"
