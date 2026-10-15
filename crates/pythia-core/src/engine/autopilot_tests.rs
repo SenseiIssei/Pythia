@@ -2315,6 +2315,10 @@ fn a_lower_amount_brings_targets_down_at_the_next_rebalance_and_keeps_the_pnl() 
     assert!((s.pnl - before.pnl).abs() < 1e-6, "the P&L it earned stays its own");
     assert!((s.equity - (before.equity - 5_000.0)).abs() < 1e-6);
     assert!((s.peak_equity - (before.peak_equity - 5_000.0)).abs() < 1e-6);
+    // The curve is rescaled with it: the cut is no crash and no drawdown.
+    assert!(s.max_drawdown_pct < 0.5, "{}", s.max_drawdown_pct);
+    let a = e.autopilots.iter().find(|a| a.config.id == id).unwrap();
+    assert!(a.history.iter().all(|p| p.1 < 6_000.0), "{:?}", a.history);
 
     // The next day's signal is rebalanced with the smaller amount: positions
     // are sold down, not closed.
