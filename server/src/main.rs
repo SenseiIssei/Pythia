@@ -13,6 +13,9 @@
 //!   POST /api/alerts/test      → send one test message (409 when alerts are off)
 //!   POST /api/alerts/mute      → mute for `{minutes}` (0 unmutes, at most 7 days)
 //!   POST /api/alerts/digest    → ask the lab's notify job for a digest now (202)
+//!   GET  /api/alerts/settings  → category switches, quiet hours, big-move sizes
+//!   POST /api/alerts/settings  → change them (saved with the engine state)
+//!   POST /api/alerts/event     → a lab job posts an alert (localhost only)
 //!
 //! Paper-first, exactly like the desktop app: real money stays gated behind the
 //! same sovereign risk manager and vault. This process only ever runs the
@@ -364,6 +367,23 @@ fn lab_books_idle() -> bool {
     std::env::var("PYTHIA_LAB_BOOKS").map(|v| v.trim().eq_ignore_ascii_case("idle")).unwrap_or(false)
 }
 
+/// Big moves for the operator alerts: every minute, each active autopilot's
+/// equity and the price of every coin they hold (see `alerts::MoveWatch`).
+async fn move_alert_loop(state: AppState) {
+    let mut watch = alerts::MoveWatch::default();
+    let mut every = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        every.tick().await;
+        let inputs = state.engine.lock().unwrap().move_inputs();
+        let s = state.alert_log.settings();
+        if let Some(sink) = &state.alert_sink {
+            for ev in watch.check(&inputs, s.big_moves.hour_pct, s.big_moves.day_pct, now_ms()) {
+                sink.send(ev);
+            }
+        }
+    }
+}
+
 /// Model drift for the operator alerts: every five minutes, whether a shadow
 /// model has inputs outside its trained range (see `alerts::DriftWatch`).
 async fn drift_alert_loop(state: AppState) {
@@ -388,8 +408,15 @@ struct AlertFiles {
     /// `<PYTHIA_DATA>/reports/notify`: the lab's `latest.json` (the last
     /// digest) and the `request.json` this API writes for a digest now.
     notify_dir: Option<std::path::PathBuf>,
-    /// The engine state file, saved right away when the mute changes.
+    /// The engine state file, saved right away when the mute or the settings change.
     state_file: Option<std::path::PathBuf>,
+    /// Besides 127.0.0.1 and ::1, who may post `POST /api/alerts/event`:
+    /// exact addresses, or prefixes ending in `.` or `:` (a Docker bridge such
+    /// as `172.17.`). From `PYTHIA_ALERT_EVENT_FROM`, comma separated.
+    event_from: Vec<String>,
+    /// Folders a posted event's image may come from: the data folder and
+    /// `PYTHIA_ALERT_IMAGE_DIR`.
+    image_roots: Vec<std::path::PathBuf>,
 }
 
 fn alert_routes() -> Router<AppState> {
@@ -398,6 +425,225 @@ fn alert_routes() -> Router<AppState> {
         .route("/api/alerts/test", post(post_alerts_test))
         .route("/api/alerts/mute", post(post_alerts_mute))
         .route("/api/alerts/digest", post(post_alerts_digest))
+        .route("/api/alerts/settings", get(get_alert_settings).post(post_alert_settings))
+        .route("/api/alerts/event", post(post_alert_event))
+}
+
+/// The settings as `GET /api/alerts/settings` answers them.
+async fn get_alert_settings(State(st): State<AppState>) -> impl IntoResponse {
+    Json(st.alert_log.settings().view(now_ms()))
+}
+
+/// Writes `<data>/reports/notify/settings.json`, which the lab's notify jobs
+/// read so the daily digest, the weekly report and every lab post follow the
+/// same switches and quiet hours as the engine.
+fn write_settings_file(files: &AlertFiles, s: &alerts::AlertSettings) {
+    let Some(dir) = &files.notify_dir else { return };
+    let body = serde_json::to_vec_pretty(&s.view(now_ms())).unwrap_or_default();
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join("settings.json.tmp");
+        std::fs::write(&tmp, &body)?;
+        std::fs::rename(&tmp, dir.join("settings.json"))
+    };
+    if let Err(e) = write() {
+        tracing::warn!("alert settings not written for the lab: {e}");
+    }
+}
+
+/// Save the engine state now, if there is a state file.
+fn save_now(st: &AppState) {
+    let Some(path) = &st.alert_files.state_file else { return };
+    let snapshot = st.engine.lock().unwrap().to_persisted();
+    if let Err(e) = pythia_core::persist::save(path, &snapshot) {
+        tracing::warn!("state not saved to {}: {e}", path.display());
+    }
+}
+
+/// Change the switches, quiet hours or big-move sizes: all or nothing,
+/// saved with the engine state at once and written for the lab.
+async fn post_alert_settings(
+    State(st): State<AppState>,
+    Json(patch): Json<alerts::AlertSettingsPatch>,
+) -> axum::response::Response {
+    let mut s = st.alert_log.settings();
+    if let Err(why) = s.apply(patch) {
+        return api_error(StatusCode::BAD_REQUEST, why);
+    }
+    st.alert_log.set_settings(s.clone());
+    st.engine.lock().unwrap().set_alert_settings(s.clone());
+    save_now(&st);
+    write_settings_file(&st.alert_files, &s);
+    Json(s.view(now_ms())).into_response()
+}
+
+/// One row of a posted event: `["Equity", "$1,234"]`, or with a sign for the
+/// circle: `{"label": "P&L", "value": "+$12", "sign": 12}`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EventRow {
+    Pair(String, String),
+    Full { label: String, value: String, #[serde(default)] sign: Option<f64> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EventTable {
+    #[serde(default)]
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+/// `POST /api/alerts/event`: what a lab job posts.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EventReq {
+    category: String,
+    title: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    rows: Vec<EventRow>,
+    #[serde(default)]
+    table: Option<EventTable>,
+    #[serde(default)]
+    footer: Option<String>,
+    /// A PNG or JPEG under the data folder (or `PYTHIA_ALERT_IMAGE_DIR`),
+    /// sent as a photo with the card as its caption.
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    urgent: bool,
+    #[serde(default)]
+    emoji: Option<String>,
+    /// Two events with the same key inside the dedup window send once.
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// The largest image an event may carry (Telegram takes 10 MB for a photo).
+const EVENT_IMAGE_MAX: u64 = 10 * 1024 * 1024;
+
+/// Whether this address may post events: loopback, or listed.
+fn event_source_allowed(ip: std::net::IpAddr, from: &[String]) -> bool {
+    let ip = ip.to_canonical();
+    if ip.is_loopback() {
+        return true;
+    }
+    let s = ip.to_string();
+    from.iter().any(|f| {
+        let f = f.trim();
+        !f.is_empty() && (s == f || ((f.ends_with('.') || f.ends_with(':')) && s.starts_with(f)))
+    })
+}
+
+/// Read an event's image: a PNG or JPEG under one of `roots`, at most
+/// [`EVENT_IMAGE_MAX`]. The error is for the caller and names no folder.
+fn read_event_image(path: &str, roots: &[std::path::PathBuf]) -> Result<Vec<u8>, String> {
+    let p = std::path::PathBuf::from(path);
+    let p = if p.is_relative() {
+        roots.first().map(|r| r.join(&p)).ok_or("a relative image path needs PYTHIA_DATA")?
+    } else {
+        p
+    };
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if !["png", "jpg", "jpeg"].contains(&ext.as_str()) {
+        return Err("image must be a .png or .jpg file".into());
+    }
+    let real = p.canonicalize().map_err(|_| "image not found".to_string())?;
+    let inside = roots.iter().filter_map(|r| r.canonicalize().ok()).any(|r| real.starts_with(r));
+    if !inside {
+        return Err("image must be inside the data folder or PYTHIA_ALERT_IMAGE_DIR".into());
+    }
+    let len = std::fs::metadata(&real).map_err(|_| "image not readable".to_string())?.len();
+    if len == 0 || len > EVENT_IMAGE_MAX {
+        return Err("image must be 1 byte to 10 MB".into());
+    }
+    let bytes = std::fs::read(&real).map_err(|_| "image not readable".to_string())?;
+    if !(bytes.starts_with(b"\x89PNG") || bytes.starts_with(&[0xFF, 0xD8])) {
+        return Err("image is not a PNG or JPEG".into());
+    }
+    Ok(bytes)
+}
+
+/// A lab job posts an alert into the engine's sender: same card design, same
+/// switches, quiet hours, mute and limits as the engine's own. Localhost only
+/// (and `PYTHIA_ALERT_EVENT_FROM`). 202 queued; 200 with `queued` false when
+/// its category is switched off; 400 for a bad event; 403 from elsewhere;
+/// 409 when alerts are off.
+async fn post_alert_event(
+    State(st): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Json(req): Json<EventReq>,
+) -> axum::response::Response {
+    if !event_source_allowed(addr.ip(), &st.alert_files.event_from) {
+        return api_error(StatusCode::FORBIDDEN, "events are taken from this machine only (see PYTHIA_ALERT_EVENT_FROM)");
+    }
+    let Some(sink) = &st.alert_sink else {
+        return api_error(StatusCode::CONFLICT, ALERTS_OFF);
+    };
+    let Some(category) = alerts::AlertCategory::parse(&req.category) else {
+        let ids: Vec<&str> = alerts::AlertCategory::ALL.iter().map(|c| c.id()).collect();
+        return api_error(StatusCode::BAD_REQUEST, format!("unknown category {}; one of {}", req.category, ids.join(", ")));
+    };
+    let title = req.title.trim();
+    if title.is_empty() || title.chars().count() > 120 {
+        return api_error(StatusCode::BAD_REQUEST, "title must be 1 to 120 characters");
+    }
+    if req.text.chars().count() > 1500 {
+        return api_error(StatusCode::BAD_REQUEST, "text must be at most 1500 characters");
+    }
+    if req.rows.len() > 20 || req.table.as_ref().is_some_and(|t| t.rows.len() > 60 || t.header.len() > 6) {
+        return api_error(StatusCode::BAD_REQUEST, "at most 20 rows and a table of 60 rows by 6 columns");
+    }
+    let image = match req.image.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(p) => match read_event_image(p, &st.alert_files.image_roots) {
+            Ok(b) => Some(b),
+            Err(why) => return api_error(StatusCode::BAD_REQUEST, why),
+        },
+        None => None,
+    };
+    let settings = st.alert_log.settings();
+    if !req.urgent && !settings.enabled(category) {
+        return Json(serde_json::json!({ "queued": false, "reason": "off" })).into_response();
+    }
+    let now = now_ms();
+    let key = req.key.clone().unwrap_or_else(|| format!("event:{}:{title}:{now}", category.id()));
+    let rows: Vec<alerts::Row> = req
+        .rows
+        .into_iter()
+        .map(|r| match r {
+            EventRow::Pair(l, v) => alerts::Row::new(l, v),
+            EventRow::Full { label, value, sign: Some(s) } => alerts::Row::toned(label, value, s),
+            EventRow::Full { label, value, sign: None } => alerts::Row::new(label, value),
+        })
+        .collect();
+    let mut ev = alerts::AlertEvent::new(alerts::AlertKind::Event, key, if req.text.is_empty() { title.to_string() } else { req.text.clone() })
+        .titled(title)
+        .with_rows(rows)
+        .in_category(category);
+    ev.summary = (!req.text.trim().is_empty()).then(|| req.text.clone());
+    if let Some(t) = req.table {
+        ev = ev.with_table(alerts::Table { header: t.header, rows: t.rows, more: 0 });
+    }
+    if let Some(f) = req.footer {
+        ev = ev.with_footer(f);
+    }
+    if let Some(e) = req.emoji.filter(|e| !e.trim().is_empty() && e.chars().count() <= 4) {
+        ev = ev.with_emoji(e);
+    }
+    if req.urgent {
+        ev = ev.urgent();
+    }
+    if let Some(b) = image {
+        ev = ev.with_image(b);
+    }
+    sink.send(ev);
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "queued": true, "quietNow": settings.quiet_hours.contains(now) && !req.urgent })),
+    )
+        .into_response()
 }
 
 fn now_ms() -> i64 {
@@ -606,6 +852,8 @@ async fn main() {
     // A mute set through the API holds across the restart.
     let alert_log = alerts::AlertLog::default();
     alert_log.set_muted_until(engine.lock().unwrap().alerts_muted_until());
+    // So are the category switches, quiet hours and big-move sizes.
+    alert_log.set_settings(engine.lock().unwrap().alert_settings().clone());
     let state = AppState {
         engine,
         tx: tx.clone(),
@@ -619,9 +867,18 @@ async fn main() {
         alert_files: Arc::new(AlertFiles {
             notify_dir: pythia_core::labview::data_dir().map(|d| d.join("reports").join("notify")),
             state_file: state_file(),
+            event_from: env_str("PYTHIA_ALERT_EVENT_FROM")
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default(),
+            image_roots: pythia_core::labview::data_dir()
+                .into_iter()
+                .chain(env_str("PYTHIA_ALERT_IMAGE_DIR").map(std::path::PathBuf::from))
+                .collect(),
         }),
         creds,
     };
+    // The lab reads the same switches and quiet hours.
+    write_settings_file(&state.alert_files, &state.alert_log.settings());
     if let Some(n) = env_str("PYTHIA_ALERT_REJECTS").and_then(|v| v.parse::<u32>().ok()) {
         state.engine.lock().unwrap().set_alert_reject_threshold(n);
     }
@@ -657,6 +914,7 @@ async fn main() {
     let _ = ML.set(pythia_core::ml::spawn());
     if state.alert_sink.is_some() {
         tokio::spawn(drift_alert_loop(state.clone()));
+        tokio::spawn(move_alert_loop(state.clone()));
     }
     // Lab strategies: pick up the research lab's daily target weights.
     tokio::spawn(lab_loop(state.clone()));
@@ -694,8 +952,13 @@ async fn main() {
                 axum::http::StatusCode::ACCEPTED
             }),
         )
+        // The model zoo's daily report from the lab (null until it has run). Read-only.
+        .route("/api/ml/zoo", get(|| async { Json(pythia_core::labview::model_zoo()) }))
         .route("/api/tax", get(get_tax))
         .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
+        .route("/api/cs2", get(|| async { Json(pythia_core::labview::cs2_board()) }))
+        .route("/api/lab/feeds", get(|| async { Json(pythia_core::labview::feeds()) }))
+        .route("/api/lab/studies", get(|| async { Json(pythia_core::labview::studies()) }))
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         .merge(alert_routes())
@@ -751,7 +1014,8 @@ async fn main() {
         tracing::info!("Wallets: watching {watched} on-chain address(es), read-only");
     }
 
-    axum::serve(listener, app).await.unwrap();
+    // With the peer address: `POST /api/alerts/event` takes events from this machine only.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
 }
 
 /// Tick the engine ~every 1.5s, refresh real read-only feeds periodically, and
@@ -1386,6 +1650,15 @@ async fn post_command(
             .map(|c| c.venue),
         _ => None,
     };
+    // Demo autopilots on the Alpaca paper account share it: a start, or a
+    // higher amount, is checked against the account's equity.
+    let paper_account = match &cmd {
+        Command::AutopilotStart { config, .. } => st.engine.lock().unwrap().autopilot_needs_paper_equity(Some(config), None),
+        Command::AutopilotUpdate { id, update, .. } if update.capital_usd.is_some() => {
+            st.engine.lock().unwrap().autopilot_needs_paper_equity(None, Some(id))
+        }
+        _ => false,
+    };
     let cash = match live_venue {
         Some(venue) => {
             let paper = st.engine.lock().unwrap().live_config().paper;
@@ -1394,6 +1667,10 @@ async fn post_command(
                 Err(why) => VenueCash::Failed(why),
             }
         }
+        None if paper_account => match wallets::paper_account_equity(&st.creds).await {
+            Ok(c) => VenueCash::Read(c),
+            Err(why) => VenueCash::Failed(why),
+        },
         None => VenueCash::NotRead,
     };
     let mut refused: Option<String> = None;

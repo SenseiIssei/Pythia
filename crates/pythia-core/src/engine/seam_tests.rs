@@ -65,10 +65,15 @@ fn owned_btc(stop: StopRules) -> (Engine, String, f64) {
     let m = e.markets.iter().find(|m| m.id == BTC).cloned().unwrap();
     let qty = 2_000.0 / m.price;
     e.fill(i, &m, Side::Buy, qty, m.price);
-    e.positions.get_mut(BTC).unwrap().live = true;
+    e.positions.get_mut(&pos_key(&id, BTC)).unwrap().live = true;
     assert_eq!(ap_status(&e, &id).open_positions, 1);
-    let held = e.positions[BTC].qty;
+    let held = e.positions[&pos_key(&id, BTC)].qty;
     (e, id, held)
+}
+
+/// The autopilot's own BTC position.
+fn rc_btc(e: &Engine) -> &PositionInternal {
+    &e.positions[&pos_key("rc", BTC)]
 }
 
 fn venue_has(qty: f64) -> Vec<BrokerPosition> {
@@ -78,7 +83,7 @@ fn venue_has(qty: f64) -> Vec<BrokerPosition> {
 #[test]
 fn a_correction_of_an_owned_position_is_booked_to_the_autopilot() {
     let (mut e, id, held) = owned_btc(StopRules::default());
-    let avg = e.positions[BTC].avg_price;
+    let avg = rc_btc(&e).avg_price;
     // The price falls 10 %: the autopilot is down on paper.
     set_price(&mut e, BTC, avg * 0.9);
     let before = ap_status(&e, &id);
@@ -89,11 +94,11 @@ fn a_correction_of_an_owned_position_is_booked_to_the_autopilot() {
     let after = ap_status(&e, &id);
     assert!((after.equity - before.equity).abs() < 1e-6, "the correction moves no equity: {} then {}", before.equity, after.equity);
     assert_eq!(after.open_positions, 1, "the rest is still the autopilot's");
-    assert!((e.positions[BTC].qty - held * 0.6).abs() < 1e-12, "the quantity follows the venue");
+    assert!((rc_btc(&e).qty - held * 0.6).abs() < 1e-12, "the quantity follows the venue");
     // What the correction changed (the 40 % that went, and the entry price
     // the book now has for the rest) is booked as realised, loss included.
     let mark = avg * 0.9;
-    let p = &e.positions[BTC];
+    let p = rc_btc(&e);
     let changed = (mark - avg) * held - (mark - p.avg_price) * p.qty;
     assert!(changed < -60.0, "at least the removed part's loss: {changed}");
     assert!((after.by_sleeve[0].pnl - before.by_sleeve[0].pnl).abs() < 1e-6, "the sleeve keeps it too");
@@ -110,10 +115,10 @@ fn a_correction_cannot_hide_a_stop() {
     // Max loss $150. The price falls until the autopilot is $200 down, and in
     // the same tick reconciliation finds the position gone at the venue.
     let (mut e, id, held) = owned_btc(StopRules { max_loss_usd: Some(150.0), ..StopRules::default() });
-    let avg = e.positions[BTC].avg_price;
+    let avg = rc_btc(&e).avg_price;
     set_price(&mut e, BTC, avg - 200.0 / held);
     assert_eq!(e.reconcile_positions(Venue::Crypto, &[], false), 1, "dropped from the book");
-    assert!(e.positions.get(BTC).is_none());
+    assert!(e.positions.get(&pos_key(&id, BTC)).is_none());
 
     let s = ap_status(&e, &id);
     assert!(s.pnl < -150.0, "the loss is still the autopilot's after the correction: {}", s.pnl);

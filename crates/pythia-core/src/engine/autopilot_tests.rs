@@ -75,7 +75,7 @@ fn set_price(e: &mut Engine, market: &str, price: f64) {
 /// Move `market` to the price at which the autopilot's equity is `target`.
 fn equity_to(e: &mut Engine, id: &str, market: &str, target: f64) {
     let eq = status(e, id).equity;
-    let qty = e.positions[market].qty;
+    let qty = e.positions[&pos_key(id, market)].qty;
     let p = e.price_of(market) + (target - eq) / qty;
     set_price(e, market, p);
     assert!((status(e, id).equity - target).abs() < 1e-7, "equity set to {target}");
@@ -94,8 +94,19 @@ fn market(e: &Engine, id: &str) -> Market {
     e.markets.iter().find(|m| m.id == id).cloned().unwrap()
 }
 
+/// Every book's position in `market` together, at the mark.
 fn notional(e: &Engine, market: &str) -> f64 {
-    e.positions.get(market).map(|p| p.qty * e.price_of(market)).unwrap_or(0.0)
+    e.positions.values().filter(|p| p.market == market).map(|p| p.qty * e.price_of(market)).sum()
+}
+
+/// Some book holds `market`.
+fn holds(e: &Engine, market: &str) -> bool {
+    e.positions.values().any(|p| p.market == market)
+}
+
+/// The quantity the book `book` holds in `market`.
+fn qty_in(e: &Engine, book: &str, market: &str) -> f64 {
+    e.positions.get(&pos_key(book, market)).map(|p| p.qty).unwrap_or(0.0)
 }
 
 fn journal_has(e: &Engine, needle: &str) -> bool {
@@ -154,15 +165,17 @@ fn an_autopilot_runs_its_strategies_and_a_stop_closes_everything_and_pauses_them
     assert_eq!(s.stop_reason.as_deref(), Some("stopped by you"));
     assert!(s.stopped_ms.is_some());
     assert_eq!(s.open_positions, 0);
-    assert!(!e.positions.contains_key(BTC), "flattened on stop by default");
+    assert!(!holds(&e, BTC), "flattened on stop by default");
     assert_eq!(s.trades, 1);
     assert!((s.pnl - (s.equity - 1_000.0)).abs() < 1e-9);
     assert!(s.pnl < 0.0, "a round trip at an unchanged price costs fees and spread");
     assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Paused, "a stop halts its strategies");
     assert!(journal_has(&e, "stopped: stopped by you. Equity $"));
     assert!(e.autopilot_stop(&id, None).unwrap_err().contains("already stopped"));
-    // Once stopped, nothing is reserved any more.
-    assert!(e.autopilot_entry_allowed("multi-tf-1", BTC));
+    // Once stopped, its book takes nothing new, and the strategy is the
+    // main book's again.
+    assert!(!e.autopilot_entry_allowed(&id, "ema-cross-1", BTC));
+    assert!(e.autopilot_entry_allowed("", "ema-cross-1", BTC));
 }
 
 #[test]
@@ -177,7 +190,7 @@ fn sleeve_budgets_are_fractions_of_the_autopilot_not_of_the_account() {
     assert_eq!((ema.markets.len(), mtf.markets.len()), (5, 4));
     assert!(ema.markets.iter().all(|m| !mtf.markets.contains(m)), "no market belongs to two sleeves");
 
-    let sz = e.autopilot_sizing("ema-cross-1").unwrap();
+    let sz = e.autopilot_sizing(&id, "ema-cross-1").unwrap();
     assert!((sz.capital - 1_500.0).abs() < 1e-9 && sz.slots == 5.0 && (sz.room - 1_500.0).abs() < 1e-9);
 
     // A full-strength signal is sized from the sleeve's 1,500 over its 5
@@ -185,15 +198,18 @@ fn sleeve_budgets_are_fractions_of_the_autopilot_not_of_the_account() {
     let target = ema.markets[0].clone();
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, &target);
-    e.place_from_intent(i, &m, &buy_intent(&target));
+    e.place_from_intent(&id, i, &m, &buy_intent(&target));
     let n = notional(&e, &target);
     assert!((n - 450.0).abs() < 1.0, "sized from the sleeve: {n}");
+    assert!(qty_in(&e, &id, &target) > 0.0, "in the autopilot's own book");
 
-    // A strategy may not trade another sleeve's market, and nobody else may
-    // trade the autopilot's markets.
-    assert!(!e.autopilot_entry_allowed("ema-cross-1", &mtf.markets[0]));
-    assert!(e.autopilot_entry_allowed("multi-tf-1", &mtf.markets[0]));
-    assert!(!e.autopilot_entry_allowed("rsi-1", &target));
+    // A strategy may not trade another sleeve's market in the autopilot's
+    // book. Strategies outside it trade the main book, which is separate.
+    assert!(!e.autopilot_entry_allowed(&id, "ema-cross-1", &mtf.markets[0]));
+    assert!(e.autopilot_entry_allowed(&id, "multi-tf-1", &mtf.markets[0]));
+    assert!(!e.autopilot_entry_allowed(&id, "rsi-1", &target));
+    assert!(e.autopilot_entry_allowed("", "rsi-1", &target));
+    assert!(!e.autopilot_entry_allowed("", "ema-cross-1", &target), "a strategy in an autopilot trades only there");
 }
 
 #[test]
@@ -201,20 +217,20 @@ fn an_entry_never_takes_the_sleeve_past_its_budget() {
     let mut e = engine();
     let id = start(&mut e, config("c", 100.0, &[("ema-cross-1", 1.0)], StopRules::default()));
     enter(&mut e, "ema-cross-1", BTC, 95.0);
-    let room = e.autopilot_sizing("ema-cross-1").unwrap().room;
+    let room = e.autopilot_sizing(&id, "ema-cross-1").unwrap().room;
     assert!(room < 6.0, "about 5 dollars left: {room}");
     let equity_before = status(&e, &id).equity;
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, ETH);
-    e.place_from_intent(i, &m, &buy_intent(ETH));
+    e.place_from_intent(&id, i, &m, &buy_intent(ETH));
     let n = notional(&e, ETH);
     assert!(n > 0.0 && n <= room + 1e-6, "capped at the room left: {n} of {room}");
     let gross: f64 = [BTC, ETH].iter().map(|m| notional(&e, m)).sum();
     assert!(gross <= equity_before + 1e-6, "never more exposure than its equity");
     // With no room left, nothing more is opened.
     let m = market(&e, "crypto:SOL/USD");
-    e.place_from_intent(i, &m, &buy_intent("crypto:SOL/USD"));
-    assert!(!e.positions.contains_key("crypto:SOL/USD"));
+    e.place_from_intent(&id, i, &m, &buy_intent("crypto:SOL/USD"));
+    assert!(!holds(&e, "crypto:SOL/USD"));
 }
 
 // ── stop rules ─────────────────────────────────────────────────────────────
@@ -235,7 +251,7 @@ fn max_loss_in_percent_fires_exactly_at_its_floor_and_flattens() {
     let s = status(&e, &id);
     assert_eq!(s.state, AutopilotState::Stopped);
     assert!(s.stop_reason.as_deref().unwrap().starts_with("max loss of 10 % reached (equity $900.00, floor $900.00"));
-    assert!(!e.positions.contains_key(BTC), "flattened");
+    assert!(!holds(&e, BTC), "flattened");
     assert!(s.equity < 900.0 && s.equity > 898.0, "the exit paid its costs: {}", s.equity);
     assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Paused);
     assert!(e.drain_alerts().iter().any(|a| a.contains("max loss of 10 %")), "the stop is pushed as an alert");
@@ -260,7 +276,7 @@ fn max_loss_in_dollars_fires_exactly_at_its_floor() {
     let s = status(&e, &id);
     assert_eq!(s.state, AutopilotState::Stopped);
     assert!(s.stop_reason.unwrap().starts_with("max loss of $50.00 reached"));
-    assert!(!e.positions.contains_key(BTC));
+    assert!(!holds(&e, BTC));
 }
 
 #[test]
@@ -278,7 +294,7 @@ fn a_take_profit_that_stops_finishes_exactly_at_the_target() {
     let s = status(&e, &id);
     assert_eq!(s.state, AutopilotState::Finished);
     assert!(s.stop_reason.unwrap().starts_with("take profit of 10 % reached"));
-    assert!(!e.positions.contains_key(BTC), "flattened");
+    assert!(!holds(&e, BTC), "flattened");
     assert!(s.pnl > 95.0, "the profit is booked: {}", s.pnl);
 }
 
@@ -348,7 +364,7 @@ fn the_trailing_floor_follows_the_peak_and_fires_at_it() {
     let s = status(&e, &id);
     assert_eq!(s.state, AutopilotState::Stopped);
     assert!(s.stop_reason.unwrap().starts_with("trailing floor reached"));
-    assert!(!e.positions.contains_key(BTC));
+    assert!(!holds(&e, BTC));
 }
 
 #[test]
@@ -364,7 +380,7 @@ fn the_end_time_finishes_it_on_the_millisecond() {
     assert_eq!(s.state, AutopilotState::Finished);
     assert_eq!(s.stop_reason.as_deref(), Some("end time reached"));
     assert_eq!(s.stopped_ms, Some(end));
-    assert!(!e.positions.contains_key(BTC));
+    assert!(!holds(&e, BTC));
 }
 
 #[test]
@@ -390,21 +406,21 @@ fn a_paused_autopilot_opens_nothing_but_its_stop_rules_still_apply() {
     let s = status(&e, &id);
     assert_eq!(s.state, AutopilotState::Paused);
     assert_eq!(s.paused_reason.as_deref(), Some("paused by you"));
-    assert!(!e.autopilot_entry_allowed("ema-cross-1", ETH), "no new entries while paused");
-    assert!(!e.autopilot_entry_allowed("multi-tf-1", ETH), "its markets stay reserved");
+    assert!(!e.autopilot_entry_allowed(&id, "ema-cross-1", ETH), "no new entries while paused");
+    assert!(!e.autopilot_entry_allowed("", "ema-cross-1", ETH), "and none outside it either");
     assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Paper, "pausing does not touch the strategy");
     assert!(e.autopilot_pause(&id).unwrap_err().contains("already paused"));
 
     e.autopilot_resume(&id).unwrap();
     assert_eq!(status(&e, &id).state, AutopilotState::Running);
-    assert!(e.autopilot_entry_allowed("ema-cross-1", ETH));
+    assert!(e.autopilot_entry_allowed(&id, "ema-cross-1", ETH));
 
     e.autopilot_pause(&id).unwrap();
     equity_to(&mut e, &id, BTC, 900.0);
     step(&mut e);
     let s = status(&e, &id);
     assert_eq!(s.state, AutopilotState::Stopped, "the floor protects a paused autopilot too");
-    assert!(!e.positions.contains_key(BTC));
+    assert!(!holds(&e, BTC));
     assert!(e.autopilot_resume(&id).unwrap_err().contains("stopped"));
 }
 
@@ -573,7 +589,10 @@ fn live_is_refused_above_the_free_cash_at_the_venue() {
     assert!(err.contains("of which $1,000.00 is already committed to other live autopilots"), "{err}");
     c2.capital_usd = 1_000.0;
     let id2 = e.autopilot_start(c2, true, VenueCash::Read(2_000.0)).unwrap();
-    assert_eq!(status(&e, &id2).by_sleeve[0].markets.len(), 7, "the seven markets Pairs does not hold");
+    assert_eq!(status(&e, &id2).by_sleeve[0].markets.len(), 9, "its own book: every market of its universe, BTC and ETH too");
+    // A live autopilot keeps its strategies to itself.
+    let err = e.autopilot_start(live_config("live3", 1.0, &[("pairs-1", 1.0)]), true, VenueCash::Read(5_000.0)).unwrap_err();
+    assert!(err.contains("A live autopilot runs its strategies alone"), "{err}");
 }
 
 #[test]
@@ -585,14 +604,14 @@ fn a_live_autopilot_sends_real_orders_and_pauses_when_live_is_disarmed() {
 
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, BTC);
-    e.place_from_intent(i, &m, &buy_intent(BTC));
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
     let out = e.drain_live_orders();
     assert_eq!(out.len(), 1, "the entry went to the venue");
-    assert!(!e.positions.contains_key(BTC), "and was not paper-filled");
+    assert!(!holds(&e, BTC), "and was not paper-filled");
     assert!(out[0].qty * out[0].ref_price <= 1_000.0 + 1e-6, "sized from the autopilot");
 
     e.set_live(LiveConfig { armed: false, ..armed_crypto() });
-    assert!(!e.autopilot_entry_allowed("ema-cross-1", ETH), "disarmed: no entry is even considered");
+    assert!(!e.autopilot_entry_allowed(&id, "ema-cross-1", ETH), "disarmed: no entry is even considered");
     step(&mut e);
     let s = status(&e, &id);
     assert_eq!(s.state, AutopilotState::Paused);
@@ -633,11 +652,11 @@ fn a_demo_autopilot_needs_demo_keys_and_then_sends_demo_orders() {
 
     // With demo keys the order goes out to the venue's demo account, not the live one.
     e.set_demo_venues([Venue::Crypto].into_iter().collect(), Some(e.crypto_venue), true);
-    start(&mut e, c);
+    let id = start(&mut e, c);
     assert!(journal_has(&e, "Orders go to the venue's demo account"));
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, BTC);
-    e.place_from_intent(i, &m, &buy_intent(BTC));
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
     let out = e.drain_live_orders();
     assert_eq!(out.len(), 1, "one demo order handed to the daemon");
     assert!(out[0].demo, "marked for the demo environment");
@@ -703,15 +722,20 @@ fn whole_set_strategies_claim_their_markets_first_and_the_rest_is_dealt_out() {
     assert_eq!(ema.markets.len(), 7);
     assert!(!ema.markets.contains(&BTC.to_string()));
 
-    // A second autopilot cannot reuse a strategy, or a market the first holds.
-    let err = e.autopilot_start(config("q", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default()), false, VenueCash::NotRead).unwrap_err();
-    assert!(err.contains("already runs in the autopilot \"Test p\""), "{err}");
-    let err = e.autopilot_start(config("q", 1_000.0, &[("multi-tf-1", 1.0)], StopRules::default()), false, VenueCash::NotRead).unwrap_err();
-    assert!(err.contains("no market of its own left"), "{err}");
+    // Inside one autopilot two sleeves cannot share a market (one position
+    // per market in its book): a second sleeve on the same set gets nothing.
+    let err = e
+        .autopilot_start(config("q", 1_000.0, &[("pairs-1", 2.0), ("ema-cross-1", 1.0), ("multi-tf-1", 1.0)], StopRules::default()), false, VenueCash::NotRead);
+    assert!(err.is_ok(), "the three deal the markets out: {err:?}");
+    // A second paper autopilot may run the same strategies on the same
+    // markets: it trades them in a book of its own.
+    let q = status(&e, "q");
+    assert_eq!(q.by_sleeve.iter().find(|x| x.strategy_id == "pairs-1").unwrap().markets, vec![BTC.to_string(), ETH.to_string()]);
+    assert!(journal_has(&e, "Also running in other autopilots, each in its own book"));
 
-    // The owner cannot flip a claimed strategy behind the autopilot's back.
+    // The owner cannot flip a claimed strategy behind the autopilots' backs.
     let err = e.set_strategy_state("ema-cross-1", StrategyState::Live).unwrap_err();
-    assert!(err.contains("runs in the autopilot \"Test p\""), "{err}");
+    assert!(err.contains("runs in the autopilot \"Test p\", \"Test q\""), "{err}");
 }
 
 #[test]
@@ -736,17 +760,21 @@ fn a_position_held_from_before_stays_outside_the_autopilot() {
     let mut e = engine();
     enter(&mut e, "ema-cross-1", ETH, 300.0);
     let id = start(&mut e, config("o", 1_000.0, &[("ema-cross-1", 1.0)], StopRules::default()));
-    assert!(journal_has(&e, "left outside the autopilot until closed: ETH/USD"));
+    assert!(journal_has(&e, "Its strategies already hold ETH/USD elsewhere"));
     assert_eq!(status(&e, &id).open_positions, 0);
-    let half = e.price_of(ETH) * 0.5;
-    set_price(&mut e, ETH, half);
-    assert!((status(&e, &id).equity - 1_000.0).abs() < 1e-9, "its loss is not the autopilot's");
-    e.flatten(ETH);
-    let s = status(&e, &id);
-    assert_eq!((s.trades, s.fees), (0, 0.0), "and neither is its exit");
-    // Once closed, the autopilot trades that market like any other.
+    // Its own book is empty, so it may trade ETH at once, next to the old one.
     enter(&mut e, "ema-cross-1", ETH, 100.0);
     assert_eq!(status(&e, &id).open_positions, 1);
+    assert!(qty_in(&e, "", ETH) > 0.0 && qty_in(&e, &id, ETH) > 0.0, "two positions, two books");
+    let before = status(&e, &id).equity;
+    let half = e.price_of(ETH) * 0.5;
+    set_price(&mut e, ETH, half);
+    let loss_main = 300.0 * 0.5;
+    assert!(before - status(&e, &id).equity < loss_main / 2.0, "the old position's loss is not the autopilot's");
+    let s0 = status(&e, &id);
+    e.flatten(ETH);
+    let s = status(&e, &id);
+    assert_eq!((s.trades, s.fees, s.open_positions), (s0.trades, s0.fees, 1), "and neither is its exit");
 }
 
 #[test]
@@ -768,7 +796,7 @@ fn stopping_without_flattening_hands_the_positions_back_at_their_price() {
     enter(&mut e, "ema-cross-1", BTC, 500.0);
     equity_to(&mut e, &id, BTC, 1_020.0);
     e.autopilot_stop(&id, Some(false)).unwrap();
-    assert!(e.positions.contains_key(BTC), "left open");
+    assert!(holds(&e, BTC), "left open");
     let s = status(&e, &id);
     assert_eq!(s.open_positions, 0);
     assert!((s.equity - 1_020.0).abs() < 1e-7, "counted at its price when it stopped");
@@ -849,9 +877,22 @@ fn a_lab_book_in_an_autopilot_rebalances_with_the_autopilots_money() {
     e.run_lab_books();
     assert!((notional(&e, BTC) - btc).abs() < 1e-9);
 
-    // A lab book that already holds coins cannot start flat inside an autopilot.
+    // Stopped without flattening, its coins stay in its own book. The lab
+    // book can join the next autopilot all the same: that one starts with an
+    // empty book of its own.
     e.autopilot_stop(&id, Some(false)).unwrap();
-    let err = e.autopilot_start(config("lab2", 10_000.0, &[("lab:tsmom", 1.0)], StopRules::default()), false, VenueCash::NotRead).unwrap_err();
+    let id2 = start(&mut e, config("lab2", 10_000.0, &[("lab:tsmom", 1.0)], StopRules::default()));
+    assert_eq!(status(&e, &id2).open_positions, 0);
+    assert!(qty_in(&e, &id, BTC) > 0.0, "the first one's coins stay where they were");
+    e.autopilot_stop(&id2, None).unwrap();
+
+    // A lab book that trades on its own and holds coins in the main book
+    // cannot be claimed: those coins would be left unmanaged.
+    e.set_strategy_state("lab:tsmom", StrategyState::Paper).unwrap();
+    e.lab_done.clear();
+    e.run_lab_books();
+    assert!(qty_in(&e, "", BTC) > 0.0, "the standalone run bought in the main book");
+    let err = e.autopilot_start(config("lab3", 10_000.0, &[("lab:tsmom", 1.0)], StopRules::default()), false, VenueCash::NotRead).unwrap_err();
     assert!(err.contains("still holds coins from its own run"), "{err}");
 }
 
@@ -1012,18 +1053,17 @@ fn an_autopilot_claims_an_idle_lab_book_rebalances_with_its_capital_and_stopping
     e.run_lab_books();
     assert!((notional(&e, BTC) - 600.0).abs() < 10.0, "30 % of 2,000: {}", notional(&e, BTC));
 
-    // Stopped without flattening, its coins stay open and unmanaged, and the
-    // flatten rule's consequence is said: it cannot join the next one.
+    // Stopped without flattening, its coins stay open and unmanaged in its
+    // book, and that is said. The next autopilot starts with a book of its
+    // own, so the coins left in the old one do not keep the lab book out.
     e.autopilot_stop(&id2, Some(false)).unwrap();
     assert_eq!(held_by(&e, "lab:tsmom_regime"), 1);
     assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused);
     assert!(journal_has(&e, "1 of them belong to a lab book, which carries no stops"));
-    let err = e
-        .autopilot_start(config("lab3", 2_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()), false, VenueCash::NotRead)
-        .unwrap_err();
-    assert!(err.contains("still holds coins, left open when an autopilot stopped without closing them"), "{err}");
-    e.flatten(BTC);
-    start(&mut e, config("lab3", 2_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()));
+    let id3 = start(&mut e, config("lab3", 2_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()));
+    e.run_lab_books();
+    assert!((qty_in(&e, &id3, BTC) * e.price_of(BTC) - 600.0).abs() < 10.0, "lab3 buys its own 30 %");
+    assert!(qty_in(&e, &id2, BTC) > 0.0, "and the coins lab2 left stay in lab2's book");
 }
 
 #[test]
@@ -1307,13 +1347,13 @@ fn orders_still_at_the_venue_count_against_the_sleeves_room() {
     let i = idx(&e, "ema-cross-1");
     for mk in &markets {
         let m = market(&e, mk);
-        e.place_from_intent(i, &m, &buy_intent(mk));
+        e.place_from_intent(&id, i, &m, &buy_intent(mk));
     }
     let out = e.drain_live_orders();
     assert!(out.len() > 1 && out.iter().all(|o| o.demo), "several demo entries went out: {}", out.len());
     let sent: f64 = out.iter().map(|o| o.qty * o.ref_price).sum();
     assert!(sent <= 1_000.0 + 1e-6, "orders in flight never commit more than the autopilot's $1,000: {sent}");
-    let room = e.autopilot_sizing("ema-cross-1").unwrap().room;
+    let room = e.autopilot_sizing(&id, "ema-cross-1").unwrap().room;
     assert!(room < 1_000.0 - sent + 1e-6, "what is in flight is not room any more: {room}");
 
     // A partial fill moves part of it from "in flight" to "held": the room
@@ -1326,7 +1366,7 @@ fn orders_still_at_the_venue_count_against_the_sleeves_room() {
         LiveUpdate { status: BrokerOrderStatus::PartiallyFilled, filled_qty: half, avg_price: Some(o.ref_price), fee: 0.0, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "partially_filled".into() },
     );
     assert_eq!(status(&e, &id).open_positions, 1, "the partial fill is the autopilot's");
-    let after = e.autopilot_sizing("ema-cross-1").unwrap().room;
+    let after = e.autopilot_sizing(&id, "ema-cross-1").unwrap().room;
     assert!((after - room).abs() < 1e-6, "no room appears out of a partial fill: {room} then {after}");
 }
 
@@ -1340,8 +1380,8 @@ fn an_entry_that_uses_the_last_room_leaves_exposure_within_equity_after_its_cost
     enter(&mut e, "ema-cross-1", BTC, 95.0);
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, ETH);
-    e.place_from_intent(i, &m, &buy_intent(ETH));
-    assert!(e.positions.contains_key(ETH), "the last room was used");
+    e.place_from_intent(&id, i, &m, &buy_intent(ETH));
+    assert!(holds(&e, ETH), "the last room was used");
     let gross: f64 = [BTC, ETH].iter().map(|m| notional(&e, m)).sum();
     let equity = status(&e, &id).equity;
     assert!(gross <= equity + 1e-9, "exposure {gross} within the equity left after costs {equity}");
@@ -1362,7 +1402,7 @@ fn a_stop_does_not_close_a_paper_position_at_a_stale_price() {
     enter(&mut e, "ema-cross-1", BTC, 500.0);
     make_stale(&mut e, BTC);
     e.autopilot_stop(&id, None).unwrap();
-    assert!(e.positions.contains_key(BTC), "not closed at a stale price");
+    assert!(holds(&e, BTC), "not closed at a stale price");
     let s = status(&e, &id);
     assert_eq!(s.open_positions, 1, "still the autopilot's, to be closed");
     let last = s.last_action.unwrap();
@@ -1370,11 +1410,11 @@ fn a_stop_does_not_close_a_paper_position_at_a_stale_price() {
     assert!(!last.contains("live routing"), "and does not blame live routing: {last}");
 
     step(&mut e);
-    assert!(e.positions.contains_key(BTC), "still waiting while the price is stale");
+    assert!(holds(&e, BTC), "still waiting while the price is stale");
     let p = e.price_of(BTC);
     set_price(&mut e, BTC, p);
     step(&mut e);
-    assert!(!e.positions.contains_key(BTC), "closed with the first fresh price");
+    assert!(!holds(&e, BTC), "closed with the first fresh price");
     assert_eq!(status(&e, &id).open_positions, 0);
 }
 
@@ -1383,7 +1423,7 @@ fn a_demo_stop_says_its_closes_are_at_the_venue_not_that_live_routing_is_off() {
     let (mut e, id) = demo_engine("dstop", 1_000.0);
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, BTC);
-    e.place_from_intent(i, &m, &buy_intent(BTC));
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
     let o = e.drain_live_orders().remove(0);
     e.apply_live_ack(&o.order_id, "venue-1");
     e.apply_live_update(
@@ -1416,7 +1456,7 @@ fn a_demo_entry_that_fills_after_the_stop_is_booked_and_closed_again() {
     let (mut e, id) = demo_engine("late", 1_000.0);
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, BTC);
-    e.place_from_intent(i, &m, &buy_intent(BTC));
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
     let o = e.drain_live_orders().remove(0);
     e.apply_live_ack(&o.order_id, "venue-1");
     e.autopilot_stop(&id, None).unwrap();
@@ -1636,10 +1676,11 @@ fn a_close_at_exactly_the_entry_price_is_a_closed_trade() {
     enter(&mut e, "ema-cross-1", BTC, 500.0);
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, BTC);
-    let (qty, avg) = (e.positions[BTC].qty, e.positions[BTC].avg_price);
+    let key = pos_key(&id, BTC);
+    let (qty, avg) = (e.positions[&key].qty, e.positions[&key].avg_price);
     // A fill at exactly the average entry price, as a venue can report it.
-    e.settle_fill(i, &m, Side::Sell, qty, avg, 0.05, avg, false, true);
-    assert!(!e.positions.contains_key(BTC));
+    e.settle_fill_on(&id, i, &m, Side::Sell, qty, avg, 0.05, avg, false, false, true);
+    assert!(!holds(&e, BTC));
     let s = status(&e, &id);
     assert_eq!((s.open_positions, s.trades), (0, 1), "nothing realised, still one round trip");
     assert_eq!(s.by_sleeve[0].trades, 1);
@@ -1684,7 +1725,7 @@ fn a_late_fill_after_a_stop_without_flattening_is_handed_out_too() {
     let (mut e, id) = demo_engine("lateopen", 1_000.0);
     let i = idx(&e, "ema-cross-1");
     let m = market(&e, BTC);
-    e.place_from_intent(i, &m, &buy_intent(BTC));
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
     let o = e.drain_live_orders().remove(0);
     e.apply_live_ack(&o.order_id, "venue-1");
     e.autopilot_stop(&id, Some(false)).unwrap();
@@ -1693,16 +1734,30 @@ fn a_late_fill_after_a_stop_without_flattening_is_handed_out_too() {
         &o.order_id,
         LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: o.qty, avg_price: Some(o.ref_price), fee: 0.1, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "filled".into() },
     );
-    assert!(e.positions.contains_key(BTC), "the position is left open, as asked");
+    assert!(holds(&e, BTC), "the position is left open, as asked");
     let s = status(&e, &id);
     assert_eq!(s.open_positions, 0, "but not kept by the stopped autopilot");
     assert!((s.fees - 0.1).abs() < 1e-9, "its fee is still the autopilot's: {}", s.fees);
     assert!(journal_has(&e, "filled after it stopped without closing its positions"));
     step(&mut e);
     assert!(e.drain_live_orders().is_empty(), "and nothing closes it behind the owner's back");
-    // The id is free again: it is not "still closing its positions".
+    // It is not "still closing its positions", but its book still holds the
+    // coin it left open: a new autopilot under the same id would mix it in.
     let mut c = config("lateopen", 1_000.0, &[("multi-tf-1", 1.0)], StopRules::default());
     c.mode = AutopilotMode::Demo;
+    let err = e.autopilot_start(c.clone(), false, VenueCash::NotRead).unwrap_err();
+    assert!(err.contains("still holds positions an earlier autopilot left open"), "{err}");
+    // Once the owner closes it, the id is free again.
+    e.flatten(&pos_key(&id, BTC));
+    let close = e.drain_live_orders().remove(0);
+    assert!(close.demo && close.side == Side::Sell, "closed at the demo venue");
+    e.apply_live_ack(&close.order_id, "venue-2");
+    e.apply_live_update(
+        &close.order_id,
+        LiveUpdate { status: BrokerOrderStatus::Filled, filled_qty: close.qty, avg_price: Some(o.ref_price), fee: 0.1, fee_base: 0.0, fee_unpriced: Vec::new(), raw_status: "filled".into() },
+    );
+    assert!(!holds(&e, BTC));
+    assert!((status(&e, &id).fees - 0.1).abs() < 1e-9, "the close of a position it handed out is not its");
     e.autopilot_start(c, false, VenueCash::NotRead).unwrap();
 }
 
@@ -1872,10 +1927,10 @@ fn two_lab_books_net_into_one_position_per_coin_and_split_exposure_and_pnl_by_sh
     let now = e.now();
     e.apply_lab_signal(book("tsmom_regime", now + 1, &[], regime_evidence(), false));
     e.run_lab_books();
-    assert!(!e.positions.contains_key(ETH), "ETH sold");
+    assert!(!holds(&e, ETH), "ETH sold");
     let eq = status(&e, &id).equity;
     assert!((notional(&e, BTC) - 0.4 * 0.5 * eq).abs() < 60.0, "BTC down to breakout's share: {}", notional(&e, BTC));
-    assert!(e.positions.contains_key(SOL), "SOL untouched");
+    assert!(holds(&e, SOL), "SOL untouched");
     let s = status(&e, &id);
     let r = sleeve(&s, "lab:tsmom_regime");
     assert!(r.exposure < 1e-6, "regime holds nothing now: {}", r.exposure);
@@ -2041,7 +2096,7 @@ fn a_repick_adds_and_drops_lab_books_gradually_and_says_why() {
     assert!((sleeve(&s, "lab:breakout_top10").weight - 1.0).abs() < 1e-9);
     assert!(s.last_action.unwrap().contains("Lab · tsmom_regime dropped"));
     e.run_lab_books();
-    assert!(!e.positions.contains_key(ETH), "ETH was regime's alone");
+    assert!(!holds(&e, ETH), "ETH was regime's alone");
     let eq = status(&e, &id).equity;
     assert!((notional(&e, BTC) - eq * 0.5).abs() < 80.0, "BTC kept at breakout's half: {}", notional(&e, BTC));
     let s = status(&e, &id);
@@ -2052,12 +2107,15 @@ fn a_repick_adds_and_drops_lab_books_gradually_and_says_why() {
     e.autopilot_step(now + 75 * 3_600_000);
     assert!(journal_has(&e, "the same strategies, no weight moving by more than 2 points, so nothing changes"));
 
-    // The dropped book is still the autopilot's: no other autopilot takes it.
-    let err = e
-        .autopilot_start(config("other", 1_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()), false, VenueCash::NotRead)
-        .unwrap_err();
-    assert!(err.contains("already runs in the autopilot"), "{err}");
+    // The dropped book is still listed in this autopilot, and another one may
+    // run it too, in its own book; stopping this one leaves the other alone.
+    let other = start(&mut e, config("other", 1_000.0, &[("lab:tsmom_regime", 1.0)], StopRules::default()));
     e.autopilot_stop(&id, None).unwrap();
+    assert!(e.positions.values().all(|p| p.book != id), "everything of its own closed");
+    assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paper, "still running for the other autopilot");
+    assert_eq!(status(&e, &other).state, AutopilotState::Running);
+    assert!(journal_has(&e, "Still running for the other autopilots, which are untouched"));
+    e.autopilot_stop(&other, None).unwrap();
     assert!(e.positions.is_empty());
     assert_eq!(state_of(&e, "lab:tsmom_regime"), StrategyState::Paused);
 }
@@ -2257,6 +2315,10 @@ fn a_lower_amount_brings_targets_down_at_the_next_rebalance_and_keeps_the_pnl() 
     assert!((s.pnl - before.pnl).abs() < 1e-6, "the P&L it earned stays its own");
     assert!((s.equity - (before.equity - 5_000.0)).abs() < 1e-6);
     assert!((s.peak_equity - (before.peak_equity - 5_000.0)).abs() < 1e-6);
+    // The curve is rescaled with it: the cut is no crash and no drawdown.
+    assert!(s.max_drawdown_pct < 0.5, "{}", s.max_drawdown_pct);
+    let a = e.autopilots.iter().find(|a| a.config.id == id).unwrap();
+    assert!(a.history.iter().all(|p| p.1 < 6_000.0), "{:?}", a.history);
 
     // The next day's signal is rebalanced with the smaller amount: positions
     // are sold down, not closed.

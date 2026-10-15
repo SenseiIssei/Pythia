@@ -13,8 +13,11 @@ import {
   SlidersHorizontal,
   TriangleAlert,
   Eye,
+  SunMoon,
 } from "lucide-react";
-import { Card, PageHeader, Badge, Button, Field, Notice, inputCls } from "../components/ui";
+import { Card, Badge, Button, Field, Notice, inputCls } from "../components/ui";
+import { Page, Segmented } from "../design";
+import { setThemePref, useThemePref, type ThemePref } from "../design/theme";
 import { ComfortZone } from "../components/ComfortZone";
 import { ConfirmButton } from "../components/Confirm";
 import { isTauri } from "../engine";
@@ -56,9 +59,9 @@ const VENUES: VenueCfg[] = [
 function Group({ title, children, intro }: { title: string; intro?: ReactNode; children: ReactNode }) {
   return (
     <section className="space-y-4">
-      <div className="border-b border-cyber-border pb-2 pt-2">
-        <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-cyber-text-dim">{title}</h2>
-        {intro && <p className="mt-1 text-sm text-cyber-text-faint">{intro}</p>}
+      <div className="px-1 pt-3">
+        <h2 className="text-xl font-semibold tracking-tight text-ink">{title}</h2>
+        {intro && <p className="mt-1 text-[15px] text-muted">{intro}</p>}
       </div>
       {children}
     </section>
@@ -85,18 +88,17 @@ export function Settings() {
   }, []);
 
   return (
-    <div className="animate-fade-in mx-auto max-w-5xl space-y-6">
-      <PageHeader
-        title="Settings"
-        subtitle={
-          advanced
-            ? "View, safety limits, venue connections and AI providers. Keys are stored in the OS keychain, never in code."
-            : "How much to show, how careful to be, and (only when you want it) connections to real accounts."
-        }
-      />
-
+    <Page
+      title="Settings"
+      subtitle={
+        advanced
+          ? "View, safety limits, venue connections and AI providers. Keys are stored in the OS keychain, never in code."
+          : "How much to show, how careful to be, and (only when you want it) connections to real accounts."
+      }
+    >
       <Group title="You">
         <ViewModeCard advanced={advanced} />
+        <AppearanceCard />
         <ComfortZone />
       </Group>
 
@@ -125,7 +127,7 @@ export function Settings() {
           )}
         </Notice>
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4">
           {VENUES.map((v) => (
             <VenueCard key={v.id} v={v} native={native} connected={!!status[v.id]} onChanged={refresh} />
           ))}
@@ -149,7 +151,27 @@ export function Settings() {
             needs in order to understand or use the app. */}
         {advanced && <AlertsCard native={native} />}
       </Group>
-    </div>
+    </Page>
+  );
+}
+
+/** Light, dark or follow the system. */
+function AppearanceCard() {
+  const pref = useThemePref();
+  return (
+    <Card title="Appearance" icon={SunMoon}>
+      <Segmented<ThemePref>
+        label="Appearance"
+        value={pref}
+        onChange={setThemePref}
+        options={[
+          { id: "system", label: "System" },
+          { id: "light", label: "Light" },
+          { id: "dark", label: "Dark" },
+        ]}
+      />
+      <p className="mt-2 text-[13px] text-faint">System follows your computer or phone. The choice is kept on this device.</p>
+    </Card>
   );
 }
 
@@ -184,29 +206,23 @@ function ViewModeCard({ advanced }: { advanced: boolean }) {
               role="radio"
               aria-checked={on}
               onClick={() => setUiMode(o.id)}
-              className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
-                on
-                  ? "border-accent/50 bg-accent/10"
-                  : "border-cyber-border bg-cyber-bg/40 hover:border-cyber-border-bright"
-              }`}
+              className={`rounded-2xl border-2 p-4 text-left transition-colors ${on ? "border-ink" : "border-line hover:border-line-strong"}`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5">
                 <span
                   aria-hidden
-                  className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border ${
-                    on ? "border-accent" : "border-cyber-text-faint"
-                  }`}
+                  className={`flex h-[18px] w-[18px] items-center justify-center rounded-full border-2 ${on ? "border-ink" : "border-line-strong"}`}
                 >
-                  {on && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}
+                  {on && <span className="h-2 w-2 rounded-full bg-ink" />}
                 </span>
-                <span className={`text-sm font-semibold ${on ? "text-accent" : "text-cyber-text"}`}>{o.label}</span>
+                <span className="text-[15px] font-semibold text-ink">{o.label}</span>
               </div>
-              <p className="mt-1 pl-5 text-xs leading-relaxed text-cyber-text-dim">{o.body}</p>
+              <p className="mt-1.5 pl-7 text-[13px] leading-relaxed text-muted">{o.body}</p>
             </button>
           );
         })}
       </div>
-      <p className="mt-2 text-xs text-cyber-text-faint">
+      <p className="mt-3 text-[13px] text-faint">
         This changes only what you can see and adjust, never how the app behaves. The same switch sits at the bottom of
         the menu.
       </p>
