@@ -582,11 +582,27 @@ def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str]
             "evidence": (results.get("evidence") or {}).get("strategies"),
             "engine": {"source": source, "reachable": engine is not None, "error": err}}
     data["headline"] = headline(changes, decisions, aps, steps)
+    data.update(feed(data, now_ms))
     guard.check_write(report.REPORTS / NAME / "latest.json")
     data["guardrails"] = {"written": sorted(set(guard.WRITTEN)), "refused": refused}
     data = guard.finite(data)
     report.write(NAME, markdown(data), data)
     return data
+
+
+def feed(d: dict, now_ms: int) -> dict:
+    """The common feed header (docs/LAB-FEEDS.md): bad when a step failed,
+    a promoted model first, then the other decisions and changes."""
+    items = [{"label": f"{x.get('model')}: {x.get('decision')}", "detail": x.get("why"),
+              "status": "ok" if x.get("decision") != "rejected" else "watch",
+              "importance": 80 if x.get("decision") == "promoted" else 30}
+             for x in d.get("decisions") or [] if x.get("model")]
+    items += [{"label": x.get("what"), "detail": x.get("why"), "value": x.get("area"), "importance": 20}
+              for x in d.get("changes") or [] if x.get("what")]
+    failed = [x.get("step") for x in d.get("steps") or [] if x.get("status") == "failed"]
+    items += [{"label": f"step {s} failed", "status": "bad", "importance": 60} for s in failed if s]
+    items.sort(key=lambda it: -it["importance"])
+    return report.feed_header("Learning loop", "bad" if failed else "ok", d.get("headline") or "", items, now_ms)
 
 
 def _names(flag: str) -> set[str]:
