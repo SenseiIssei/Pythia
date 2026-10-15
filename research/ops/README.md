@@ -279,7 +279,10 @@ docker run --rm --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/dat
 The study (`lab.experiments.listings`, pre-registered in
 `research/lab/results/listings.md`) runs once by hand; it reads the lake's
 hourly bars and the public APIs of Coinbase, Kraken and Alpaca (listing dates
-are cached in `hist/listings`), about 20 to 30 minutes the first time:
+are cached in `hist/listings`), about 50 minutes the first time, mostly
+Coinbase's candles. It ran on 2026-10-15 on a copy of the lake: no rule
+passed, so the listings paper book stays off and the watcher only alerts.
+Running it again on the server is only needed to refresh the numbers:
 
 ```bash
 docker run --rm --memory 4g --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.experiments.listings
