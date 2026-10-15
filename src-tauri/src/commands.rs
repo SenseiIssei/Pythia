@@ -236,9 +236,16 @@ pub async fn autopilot_start(app: AppHandle, config: AutopilotConfig, confirm: O
         let st = app.state::<AppState>();
         (st.engine.clone(), credentials(st.inner()))
     };
+    let paper_account = engine.lock().unwrap().autopilot_needs_paper_equity(Some(&config), None);
     let cash = if config.mode == AutopilotMode::Live {
         let paper = engine.lock().unwrap().live_config().paper;
         match wallets::available_cash(&creds, &config.venue, paper).await {
+            Ok(c) => VenueCash::Read(c),
+            Err(why) => VenueCash::Failed(why),
+        }
+    } else if paper_account {
+        // Demo autopilots on the Alpaca paper account share it.
+        match wallets::paper_account_equity(&creds).await {
             Ok(c) => VenueCash::Read(c),
             Err(why) => VenueCash::Failed(why),
         }
@@ -275,6 +282,7 @@ pub async fn autopilot_update(app: AppHandle, id: String, update: AutopilotUpdat
         (st.engine.clone(), credentials(st.inner()))
     };
     let live = engine.lock().unwrap().autopilot_config(&id).filter(|c| c.mode == AutopilotMode::Live);
+    let paper_account = update.capital_usd.is_some() && engine.lock().unwrap().autopilot_needs_paper_equity(None, Some(&id));
     let cash = match live {
         Some(c) if update.capital_usd.is_some() => {
             let paper = engine.lock().unwrap().live_config().paper;
@@ -283,6 +291,10 @@ pub async fn autopilot_update(app: AppHandle, id: String, update: AutopilotUpdat
                 Err(why) => VenueCash::Failed(why),
             }
         }
+        _ if paper_account => match wallets::paper_account_equity(&creds).await {
+            Ok(c) => VenueCash::Read(c),
+            Err(why) => VenueCash::Failed(why),
+        },
         _ => VenueCash::NotRead,
     };
     let msg = engine.lock().unwrap().autopilot_update(&id, update, confirm.unwrap_or(false), cash)?;
@@ -722,10 +734,34 @@ pub fn lab_status() -> pythia_core::labview::LabStatus {
     pythia_core::labview::status()
 }
 
+/// The CS2 skins board (prices, predictions, paper portfolio) from the synced data folder. Read-only.
+#[tauri::command]
+pub fn cs2_board() -> Option<pythia_core::labview::Cs2Board> {
+    pythia_core::labview::cs2_board()
+}
+
+/// Every lab job's `reports/<name>/latest.json`, by the feed convention (docs/LAB-FEEDS.md).
+#[tauri::command]
+pub fn lab_feeds() -> Vec<pythia_core::labview::LabFeed> {
+    pythia_core::labview::feeds()
+}
+
+/// The lab's study write-ups (`results/*.md`) from the synced data folder.
+#[tauri::command]
+pub fn lab_studies() -> Vec<pythia_core::labview::Study> {
+    pythia_core::labview::studies()
+}
+
 /// The volatility model in shadow mode: forecasts, live score, drift. Read-only.
 #[tauri::command]
 pub fn ml_status(ml: State<'_, pythia_core::ml::SharedMl>) -> pythia_core::ml::MlStatus {
     ml.read().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// The model zoo's daily report from the synced lab folder (None until it has run). Read-only.
+#[tauri::command]
+pub fn ml_zoo() -> Option<pythia_core::labview::ZooStatus> {
+    pythia_core::labview::model_zoo()
 }
 
 /// M2 ranks the latest complete day now instead of waiting for the week.

@@ -45,6 +45,8 @@ fn hold(e: &mut Engine, id: &str, notional: f64) {
     e.positions.insert(
         id.into(),
         PositionInternal {
+            market: id.into(),
+            book: String::new(),
             venue: Venue::Crypto,
             symbol: id.split(':').nth(1).unwrap_or(id).into(),
             qty: notional / price,
@@ -100,7 +102,7 @@ fn ten_crypto_longs_are_one_trade_and_the_next_one_is_refused() {
 
     let idx = strategy_idx(&e);
     let m = market(&e, CRYPTO[8]);
-    e.place_from_intent(idx, &m, &buy_intent(CRYPTO[8]));
+    e.place_from_intent("", idx, &m, &buy_intent(CRYPTO[8]));
     assert!(!e.positions.contains_key(CRYPTO[8]), "a ninth correlated long must not open");
     let o = &e.orders[0];
     assert_eq!(o.status, OrderStatus::Rejected);
@@ -119,7 +121,7 @@ fn the_same_book_of_unrelated_markets_still_has_room() {
     );
     let idx = strategy_idx(&e);
     let m = market(&e, CRYPTO[8]);
-    e.place_from_intent(idx, &m, &buy_intent(CRYPTO[8]));
+    e.place_from_intent("", idx, &m, &buy_intent(CRYPTO[8]));
     assert!(e.positions.contains_key(CRYPTO[8]), "{:?}", e.orders.first().and_then(|o| o.reject_reason.clone()));
 }
 
@@ -163,7 +165,7 @@ fn a_book_swinging_past_its_target_takes_no_new_correlated_long() {
     let mut e = candle_book(4_000.0);
     let idx = strategy_idx(&e);
     let m = market(&e, CRYPTO[8]);
-    e.place_from_intent(idx, &m, &buy_intent(CRYPTO[8]));
+    e.place_from_intent("", idx, &m, &buy_intent(CRYPTO[8]));
     assert!(!e.positions.contains_key(CRYPTO[8]));
     let why = e.orders[0].reject_reason.clone().unwrap_or_default();
     assert!(why.starts_with("volatility target"), "{why}");
@@ -175,7 +177,7 @@ fn turning_the_vol_target_off_lets_the_same_long_open() {
     e.limits.portfolio_vol_target_pct = 0.0;
     let idx = strategy_idx(&e);
     let m = market(&e, CRYPTO[8]);
-    e.place_from_intent(idx, &m, &buy_intent(CRYPTO[8]));
+    e.place_from_intent("", idx, &m, &buy_intent(CRYPTO[8]));
     assert!(e.positions.contains_key(CRYPTO[8]), "{:?}", e.orders.first().and_then(|o| o.reject_reason.clone()));
 }
 
@@ -204,7 +206,7 @@ fn intent_with(market: &str, confidence: f64) -> strategies::SignalIntent {
 fn entry_notional(e: &mut Engine, confidence: f64) -> f64 {
     let idx = ema_cross(e);
     let m = market(e, "crypto:BTC/USD");
-    e.place_from_intent(idx, &m, &intent_with("crypto:BTC/USD", confidence));
+    e.place_from_intent("", idx, &m, &intent_with("crypto:BTC/USD", confidence));
     e.positions.get("crypto:BTC/USD").map(|p| p.qty * m.price).unwrap_or(0.0)
 }
 
