@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   DAY_MS,
   analyse,
+  blendWords,
   breakdown,
+  classRows,
   compareWithHold,
   curve,
   editForm,
@@ -288,5 +290,39 @@ describe("editing a running autopilot", () => {
     expect(planEdit(live, { ...editForm(live), lossPct: "" }).problems).toContain("Real money needs a loss limit, in percent or in dollars.");
     expect(lossAllowance({ onTakeProfit: "stop", maxLossPct: 10, maxLossUsd: 500 }, 10_000)).toEqual({ usd: 500, pct: 5 });
     expect(loosensLoss({ onTakeProfit: "stop" }, 1_000, { onTakeProfit: "stop", maxLossPct: 50 }, 1_000)).toBe(false);
+  });
+});
+
+describe("portfolio across asset classes", () => {
+  const portfolio = status({
+    classes: [
+      { class: "crypto", label: "Crypto", weight: 0.62, pnl: 40, exposure: 3_100.4, books: 2 },
+      { class: "alpaca", label: "US shares", weight: 0.38, pnl: 0, exposure: 0, books: 1, note: "Rebalances only in the regular session: US regular session closed." },
+    ],
+    benchmark: {
+      symbol: "BTC/USD+SPY",
+      name: "Blend",
+      returnPct: 1,
+      excessPct: 0,
+      legs: [
+        { symbol: "BTC/USD", weight: 0.62, returnPct: 1.2 },
+        { symbol: "SPY", weight: 0.38, returnPct: 0.7 },
+      ],
+    },
+  });
+
+  it("lists each class with its share, what it holds and why it waits", () => {
+    expect(classRows(portfolio)).toEqual([
+      { key: "crypto", label: "Crypto", share: "62%", detail: "Holds $3,100 in 2 lab books", pnl: 40, note: null },
+      { key: "alpaca", label: "US shares", share: "38%", detail: "In cash, 1 lab book", pnl: 0, note: "Rebalances only in the regular session: US regular session closed." },
+    ]);
+    const none = status({ classes: [{ class: "alpaca", label: "US shares", weight: 0, pnl: 0, exposure: 0, books: 0 }] });
+    expect(classRows(none)[0].detail).toBe("No book with evidence");
+    expect(classRows(status())).toEqual([]);
+  });
+
+  it("says the blend in a few words, and nothing for a single benchmark", () => {
+    expect(blendWords(portfolio)).toBe("62% BTC, 38% SPY");
+    expect(blendWords(status({ benchmark: { symbol: "SPY", name: "SPY buy and hold", returnPct: 1, excessPct: 0 } }))).toBeNull();
   });
 });

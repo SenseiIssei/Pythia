@@ -313,6 +313,44 @@ export function sleeveExposure(b: AutopilotSleeveStatus): string {
   return `${share}, holds ${Math.round(usd).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })}${pct}`;
 }
 
+// ── portfolios across asset classes ────────────────────────────────────────
+
+/** One asset class of a portfolio, as the page lists it. */
+export interface ClassRow {
+  key: string;
+  label: string;
+  /** "62%" of the portfolio. */
+  share: string;
+  /** "Holds $3,100 in 2 lab books", or why it holds nothing. */
+  detail: string;
+  pnl: number;
+  /** Why it waits or holds nothing, from the engine. */
+  note: string | null;
+}
+
+/** A portfolio's asset classes, crypto first; empty for any other autopilot. */
+export function classRows(s: AutopilotStatus): ClassRow[] {
+  return (s.classes ?? []).map((c) => {
+    const books = `${c.books} lab book${c.books === 1 ? "" : "s"}`;
+    const usd = Math.round(c.exposure).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+    return {
+      key: c.class,
+      label: c.label,
+      share: `${(c.weight * 100).toFixed(0)}%`,
+      detail: c.books === 0 ? (c.exposure >= 0.5 ? `No book, ${usd} still to sell` : "No book with evidence") : c.exposure >= 0.5 ? `Holds ${usd} in ${books}` : `In cash, ${books}`,
+      pnl: c.pnl,
+      note: c.note ?? null,
+    };
+  });
+}
+
+/** "62% BTC, 38% SPY" for a portfolio's blended benchmark; null for any other. */
+export function blendWords(s: AutopilotStatus): string | null {
+  const legs = s.benchmark?.legs ?? [];
+  if (legs.length === 0) return null;
+  return legs.map((l) => `${(l.weight * 100).toFixed(0)}% ${l.symbol.split("/")[0]}`).join(", ");
+}
+
 // ── editing a running autopilot ────────────────────────────────────────────
 
 /** The phrase a change to a live autopilot is confirmed with. */

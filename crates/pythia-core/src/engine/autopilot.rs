@@ -506,7 +506,7 @@ pub struct ClassStatus {
     pub weight: f64,
     /// Realised and unrealised P&L of its books, net of fees.
     pub pnl: f64,
-    /// What it holds now, at the mark.
+    /// What it holds now, at the mark, plus its buys still at the venue.
     pub exposure: f64,
     /// Lab books of the class with weight.
     pub books: usize,
@@ -2599,6 +2599,10 @@ impl Engine {
     pub(super) fn on_alpaca_paper_account(&self, cfg: &AutopilotConfig) -> bool {
         if cfg.mode != AutopilotMode::Demo {
             return false;
+        }
+        // A demo portfolio trades both classes there, whatever venue it was sent with.
+        if cfg.portfolio {
+            return true;
         }
         match config_venue(cfg) {
             Some(Venue::Alpaca) => true,
