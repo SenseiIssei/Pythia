@@ -125,7 +125,7 @@ function Detail({ c, stale }: { c: PokemonCard; stale: boolean }) {
         />
         <Row
           label="Fair value"
-          sub="What cards like this one (rarity, Pokemon, set age, art) cost, valued without its own set. A description, not a promise."
+          sub="What cards like this one (rarity, Pokemon, printing, set age, how dear the rest of its set is) cost, from a model that never saw this card. A rough guide, not a promise: it misses by about half either way."
           value={usd(c.fairUsd)}
         />
         {c.cardmarketEur != null && (
@@ -168,7 +168,7 @@ function Collection({ d }: { d: PokemonData }) {
     >
       {!c.started ? (
         <Nothing icon={Layers} title="Starts with the first daily run">
-          The first month buys the ten best 90-day forecasts between $5 and $250.
+          The first month buys the ten best 90-day forecasts between $20 and $250, at most four copies each.
         </Nothing>
       ) : (
         <div className="space-y-4">
@@ -359,7 +359,7 @@ export function Cards() {
                   compares our own snapshots, so it starts empty and fills in day by day.
                 </p>
                 <p>
-                  Fair value is what similar cards cost: same rarity group, Pokemon, set age and art, learned from other sets only. Until the 30 and 90 day forecasts have passed a walk-forward test on our own
+                  Fair value is what similar cards cost: same rarity group, Pokemon, printing, art and set age, plus what the other cards of its set cost, learned from other sets only. Until the 30 and 90 day forecasts have passed a walk-forward test on our own
                   history, they are a fixed rule built from that gap, and this page says so.
                 </p>
                 <p>Updated {d.generated}.</p>

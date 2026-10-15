@@ -7,9 +7,9 @@ by hand.
 Rules
   start      1,000 play dollars, cash.
   monthly    on the first run of each calendar month: rank the cards with a
-             TCGplayer market price between $5 and $250 by the 90-day
+             TCGplayer market price between $20 and $250 by the 90-day
              forecast; the top 10 with a forecast above +5 % are the targets,
-             equal weight. A holding is sold when it has been held at least
+             equal weight, at most 4 copies a card. A holding is sold when it has been held at least
              90 days and is no longer in the top 30, or when its price has
              been missing for 14 days (sold at the last price). Hysteresis
              keeps turnover low; card trading costs are large.
@@ -36,7 +36,10 @@ import polars as pl
 
 START = 1_000.0
 TOP_N, KEEP_RANK = 10, 30
-MIN_PRICE, MAX_PRICE = 5.0, 250.0
+MIN_PRICE, MAX_PRICE = 20.0, 250.0
+# At most this many copies of one card: the first real run bought 13 Geodudes
+# at $5.51 (a collection, not a pallet), and per-copy postage ate a third.
+MAX_COPIES = 4
 MIN_PRED = 0.05
 MIN_HOLD_DAYS = 90
 STALE_DAYS = 14
@@ -129,7 +132,7 @@ def step(snap: pl.DataFrame, d: Path, today: str | None = None, model_src: str =
             budget = st["cash"] / min(slots, len(targets))
             for r in targets[:slots]:
                 unit = unit_buy(r["tp_market"])
-                qty = int(budget // unit)
+                qty = min(int(budget // unit), MAX_COPIES)
                 if qty < 1 or qty * unit > st["cash"]:
                     continue
                 st["cash"] -= qty * unit
