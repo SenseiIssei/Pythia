@@ -7,7 +7,7 @@
   python -m lab.models.train --list             print every model's spec
   --no-notify                                   do not post promotions and drift
 
-Per zoo model (M8, M10, M11, M12), every run:
+Per zoo model (M8, M8q, M10, M11, M12), every run:
 
   1. load its real data (a model whose data is not there yet is "waiting for
      data" and says why; M11 waits for enough demo fills)
@@ -24,13 +24,14 @@ Per zoo model (M8, M10, M11, M12), every run:
      with the engine's rules (pythia-ml drift.rs)
 
 M1 and M2 are retrained by the nightly learning loop; M7 is retired. The
-report covers them all: reports/model_zoo/latest.json (the Models page) and
+report covers them all: reports/models/latest.json (the Models page and,
+through its lab feed header, docs/LAB-FEEDS.md, Home and Research) and
 latest.md. A promotion, or a model whose inputs move outside their trained
 range, is posted to the operator's channel (Telegram or webhook, as
 lab.ops.notify), once per event.
 
 Writes only through lab.ops.guard: models/zoo, models/registry, the zoo's
-published model folders and reports/model_zoo. It reads the engine's demo
+published model folders and reports/models. It reads the engine's demo
 fills only from the learning loop's ledger. It cannot trade or change a book.
 """
 
@@ -50,7 +51,7 @@ from ..ops import guard, notify, registry
 from . import core, zoo
 from .core import DAY_MS, DataUnavailable
 
-NAME = "model_zoo"
+NAME = "models"
 HISTORY_DECISIONS = 12
 
 
@@ -317,9 +318,60 @@ def run(now_ms: int | None = None, force: set[str] | None = None, train: bool = 
     data = core.finite({"generated_ms": now_ms, "generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc)
                         .strftime("%Y-%m-%d %H:%M UTC"), "models": entries, "steps": steps, "alerts": alerts,
                         "delivery": delivery, "specs": [s.public() for s in zoo.all_specs()]})
+    data.update(feed(data))
     guard.check_write(report.REPORTS / NAME / "latest.json")
     report.write(NAME, markdown(data), data)
     return data
+
+
+# ---------------------------------------------------------------- the lab feed header (docs/LAB-FEEDS.md)
+
+def _gain(e: dict) -> str | None:
+    g = e.get("gain_pct")
+    if isinstance(g, (int, float)):
+        return f"{g:+.1f} %"
+    m, b = e.get("model_score"), e.get("baseline_score")
+    if e.get("higher_better") and isinstance(m, (int, float)) and isinstance(b, (int, float)):
+        return f"{m:.3f} vs {b:.3f}"
+    return None
+
+
+def feed(d: dict) -> dict:
+    """Title, status, one plain headline and a row per model, for Home and Research."""
+    own = [e for e in d["models"] if e["managed_by"] == "zoo"]
+    passing = [e for e in own if (e.get("gate") or {}).get("passed")]
+    failing = [e for e in own if e.get("gate") and not e["gate"].get("passed")]
+    waiting = [e for e in own if e.get("status") == "waiting for data"]
+    broken = [e for e in own if e.get("status") == "error" or e.get("last_status") == "failed"]
+    drifting = [e for e in d["models"] if (e.get("drift") or {}).get("level") == "drift"]
+    promoted = [s for s in d["steps"] if s.get("status") == "promoted"]
+    codes = lambda xs: ", ".join(x["code"] for x in xs)  # noqa: E731
+    parts = [f"{len(passing)} of {len(own)} zoo models beat their baseline out of sample"
+             + (f" ({codes(passing)})" if passing else "")]
+    if failing:
+        parts.append(f"{codes(failing)} do not, so nothing uses them" if len(failing) > 1
+                     else f"{codes(failing)} does not, so nothing uses it")
+    if waiting:
+        parts.append(f"{codes(waiting)} waits for data")
+    head = "; ".join(parts) + "."
+    if promoted:
+        head += f" Promoted today: {', '.join(s['model'] for s in promoted)}."
+    if drifting:
+        head += f" Inputs outside the trained range: {codes(drifting)}."
+    status = "bad" if broken or drifting else "watch" if promoted or waiting else "ok"
+    items = []
+    for e in d["models"]:
+        lvl = (e.get("drift") or {}).get("level")
+        passed = (e.get("gate") or {}).get("passed")
+        st = ("bad" if lvl == "drift" or e.get("status") == "error" else
+              "watch" if lvl == "shift" or e.get("status") == "waiting for data" else
+              "ok" if passed or e.get("status") in ("in use", "shadow") else None)
+        was_promoted = any(s.get("model") == e["code"] and s.get("status") == "promoted" for s in d["steps"])
+        imp = 75 if lvl == "drift" else 70 if was_promoted else 30 if passed else 10
+        items.append({"label": f"{e['code']} {e['title']}", "value": _gain(e) or e.get("status"), "status": st,
+                      "detail": f"{e.get('status')}; vs {e['baseline']}"[:240], "importance": imp,
+                      "link": "study:model_zoo"})
+    return report.feed_header("Models", status, head, items, updated_ms=d["generated_ms"])
 
 
 # ---------------------------------------------------------------- the report

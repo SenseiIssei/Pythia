@@ -1,6 +1,6 @@
 //! The model zoo's status, as the research lab writes it.
 //!
-//! `python -m lab.models.train` writes `reports/model_zoo/latest.json` every
+//! `python -m lab.models.train` writes `reports/models/latest.json` every
 //! day: each model with its spec, its score against its baseline (walk-forward
 //! per quarter, each retrain decision, live shadow per week), its last retrain,
 //! drift and who uses it. This module only reads that file: it parses
@@ -15,6 +15,8 @@ use serde_json::Value;
 pub struct ZooStatus {
     pub generated_ms: i64,
     pub generated: String,
+    /// The lab feed header's one sentence (docs/LAB-FEEDS.md).
+    pub headline: String,
     pub models: Vec<ZooModel>,
     /// What this run posted: promotions and models that drifted.
     pub alerts: Vec<String>,
@@ -45,6 +47,8 @@ pub struct ZooModel {
     pub notes: String,
     pub results: String,
     pub last_retrain_ms: Option<i64>,
+    /// ok or failed: how the last retrain attempt went.
+    pub last_status: Option<String>,
     pub next_due: Option<String>,
     pub champion: Option<Champion>,
     pub gate: Option<Gate>,
@@ -152,6 +156,7 @@ pub fn parse(text: &str) -> Option<ZooStatus> {
     let mut s: ZooStatus = serde_json::from_value(v.clone()).unwrap_or_else(|_| ZooStatus {
         generated_ms: v.get("generated_ms").and_then(Value::as_i64).unwrap_or(0),
         generated: v.get("generated").and_then(Value::as_str).unwrap_or_default().to_string(),
+        headline: v.get("headline").and_then(Value::as_str).unwrap_or_default().to_string(),
         // One malformed model must not hide the others.
         models: v["models"]
             .as_array()
@@ -169,6 +174,7 @@ impl ZooModel {
     pub fn needs_attention(&self) -> bool {
         self.drift.as_ref().is_some_and(|d| d.level == "drift")
             || self.status == "error"
+            || self.last_status.as_deref() == Some("failed")
             || self.live.as_ref().is_some_and(|l| l.error.is_some())
     }
 }
@@ -179,6 +185,8 @@ mod tests {
 
     const SAMPLE: &str = r#"{
       "generated_ms": 1760770800000, "generated": "2026-10-18 07:00 UTC", "alerts": ["M11 promoted"],
+      "title": "Models", "status": "ok", "headline": "1 of 1 zoo models beat their baseline out of sample (M11).",
+      "items": [{"label": "M11 Slippage", "value": "+69.4 %"}],
       "models": [
         {"code": "M11", "name": "m11_slippage", "title": "Slippage", "status": "shadow", "metric": "mae",
          "managed_by": "zoo", "every_days": 7, "used_by": [], "gain_pct": 69.4, "dm_p": 1e-70,
@@ -206,6 +214,7 @@ mod tests {
         assert_eq!(out["models"][0]["drift"]["features"][0]["outsidePct"], 40.0);
         assert_eq!(out["models"][0]["usedBy"], serde_json::json!([]));
         assert_eq!(out["generatedMs"], 1760770800000i64);
+        assert_eq!(out["headline"], "1 of 1 zoo models beat their baseline out of sample (M11).");
     }
 
     #[test]

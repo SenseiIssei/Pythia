@@ -1,12 +1,12 @@
 // The model zoo: every model the lab keeps, its score against its baseline over
 // time, last retrain, drift and who uses it. Written daily by the lab
-// (`python -m lab.models.train`, reports/model_zoo/latest.json), served by the
+// (`python -m lab.models.train`, reports/models/latest.json), served by the
 // engine at GET /api/ml/zoo. Read-only in every runtime.
 
 import { invoke } from "@tauri-apps/api/core";
 import { liveMode } from "./live";
 import { serverUrl } from "./engine/serverEngine";
-import type { Tone } from "./components/ui";
+import type { ChipTone } from "./design";
 
 export type ZooStatusWord =
   | "in use"
@@ -72,6 +72,7 @@ export interface ZooModel {
   notes: string;
   results: string;
   lastRetrainMs: number | null;
+  lastStatus?: string | null;
   nextDue: string | null;
   champion: { version: string; promotedMs: number | null; trainTo: string | null } | null;
   gate: { passed: boolean; why: string } | null;
@@ -91,6 +92,8 @@ export interface ZooModel {
 export interface ZooStatus {
   generatedMs: number;
   generated: string;
+  /** The lab feed header's one sentence; empty from older reports. */
+  headline?: string;
   models: ZooModel[];
   alerts: string[];
 }
@@ -110,23 +113,39 @@ export async function modelZoo(): Promise<ZooStatus | null> {
   }
 }
 
-export const STATUS_TONE: Record<string, Tone> = {
-  "in use": "green",
-  shadow: "cyan",
-  "failed its gate": "amber",
+export const STATUS_TONE: Record<string, ChipTone> = {
+  "in use": "good",
+  shadow: "accent",
+  "failed its gate": "warn",
   "waiting for data": "neutral",
   "never trained": "neutral",
   retired: "neutral",
   "not on this machine": "neutral",
-  error: "red",
+  error: "bad",
 };
 
-export function statusTone(s: string): Tone {
+export function statusTone(s: string): ChipTone {
   return STATUS_TONE[s] ?? "neutral";
 }
 
-export function driftTone(level: string | undefined): Tone {
-  return level === "drift" ? "red" : level === "shift" ? "purple" : level === "stable" ? "green" : "neutral";
+/** A status in the words the page uses. */
+export function statusWord(s: string): string {
+  if (s === "shadow") return "beats baseline, shadow";
+  if (s === "failed its gate") return "does not beat baseline";
+  return s;
+}
+
+/** Drift in words and colour, the engine's rules: outside the trained range is bad, a different spread is a note. */
+export function driftChip(level: string | undefined): { word: string; tone: ChipTone } {
+  if (level === "drift") return { word: "outside trained range", tone: "bad" };
+  if (level === "shift") return { word: "different regime", tone: "accent" };
+  if (level === "stable") return { word: "like training", tone: "good" };
+  return { word: "not checked", tone: "neutral" };
+}
+
+/** Inputs outside the trained range, a failed retrain or a broken shadow score. */
+export function needsAttention(m: ZooModel): boolean {
+  return m.drift?.level === "drift" || m.status === "error" || m.lastStatus === "failed" || !!m.live?.error;
 }
 
 /**
@@ -135,13 +154,22 @@ export function driftTone(level: string | undefined): Tone {
  * left out.
  */
 export function edgeSeries(points: { model: number | null; baseline: number | null }[], higherBetter: boolean): number[] {
-  const out: number[] = [];
+  return edgePoints(points, higherBetter).map((p) => p.edge);
+}
+
+/** Like edgeSeries, keeping each point's label (a quarter, a week, a retrain date). */
+export function edgePoints(
+  points: { model: number | null; baseline: number | null; label?: string | null; from?: string | null }[],
+  higherBetter: boolean,
+): { label: string; edge: number }[] {
+  const out: { label: string; edge: number }[] = [];
   for (const p of points) {
     if (p.model === null || p.baseline === null || !Number.isFinite(p.model) || !Number.isFinite(p.baseline)) continue;
+    const label = p.label ?? p.from ?? "";
     if (higherBetter) {
-      out.push((p.model - p.baseline) * 100);
+      out.push({ label, edge: (p.model - p.baseline) * 100 });
     } else if (p.baseline !== 0) {
-      out.push(((p.baseline - p.model) / Math.abs(p.baseline)) * 100);
+      out.push({ label, edge: ((p.baseline - p.model) / Math.abs(p.baseline)) * 100 });
     }
   }
   return out;
@@ -153,12 +181,41 @@ export function winShare(points: { model: number | null; baseline: number | null
   return e.length ? e.filter((x) => x > 0).length / e.length : null;
 }
 
+/**
+ * The model's edge over its baseline out of sample, in percent (positive =
+ * better), or null. For a higher-is-better metric (rank-IC) it is the gap in
+ * points.
+ */
+export function edgeNow(m: ZooModel): number | null {
+  if (m.higherBetter) {
+    return m.modelScore !== null && m.baselineScore !== null ? (m.modelScore - m.baselineScore) * 100 : null;
+  }
+  return m.gainPct !== null && Number.isFinite(m.gainPct) ? m.gainPct : null;
+}
+
 /** A metric value at a precision that suits it. */
 export function fmtScore(v: number | null | undefined, metric: string): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "n/a";
   if (metric === "mae") return `${v.toFixed(2)} bps`;
   return Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(4);
 }
+
+/** A p-value a reader can scan: "< 0.001" below that. */
+export function fmtP(p: number | null | undefined): string {
+  if (p === null || p === undefined || !Number.isFinite(p)) return "n/a";
+  return p < 0.001 ? "< 0.001" : p.toFixed(3);
+}
+
+/** What a metric measures, in plain words. */
+export const METRIC_WORDS: Record<string, string> = {
+  logloss: "log loss of the up-or-down probability",
+  qlike: "QLIKE, the standard volatility forecast error",
+  mae: "mean absolute error in bps",
+  mse_z: "squared error of the correlation (Fisher z)",
+  pinball: "pinball loss over the 10, 50 and 90 % quantiles",
+  rank_ic: "rank correlation with the realised returns",
+  sharpe: "Sharpe ratio",
+};
 
 /** Days since a timestamp, in words. */
 export function ago(ms: number | null | undefined, now = Date.now()): string {
