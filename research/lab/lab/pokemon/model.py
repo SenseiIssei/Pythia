@@ -46,7 +46,7 @@ CLIP = 0.5
 PRIOR = {30: (0.10, 0.30), 90: (0.25, 0.30)}
 STATIC = ["rarity_group", "character", "series", "supertype"]
 NUMERIC = ["alt_art", "secret", "set_age_days", "cm_mom_1_7", "cm_mom_7_30", "cm_trend_30", "dex"]
-DYNAMIC = ["ret_7d", "ret_30d", "fv_gap"]
+DYNAMIC = ["ret_7d", "ret_30d", "fv_gap", "tp_low_gap"]
 
 
 def _lgbm(n: int = 300):

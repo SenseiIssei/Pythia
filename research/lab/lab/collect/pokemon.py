@@ -65,6 +65,9 @@ POKEMON_CATEGORY = 3
 ECB = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
 PAGE_SIZE = 250
 MIN_USD = 2.0
+# A price block older than this at the snapshot is stale (see `fresh`).
+CM_FRESH_DAYS = 14
+TP_FRESH_DAYS = 7
 CACHE_DAYS = 3
 USER_AGENT = "pythia-lab-collector (data only)"
 CARD_FIELDS = ("id,name,supertype,subtypes,types,hp,attacks,abilities,number,rarity,artist,"
@@ -265,18 +268,33 @@ def card_row(card: dict, snap: str) -> dict:
     }
 
 
+def fresh(updated: str | None, snap: str, days: int) -> bool:
+    """A price block updated within `days` of the snapshot. The API stopped
+    refreshing Cardmarket for most cards in mid 2026 (TCGplayer is updated
+    daily), so a stale block must not pass for today's price."""
+    if not updated:
+        return False
+    try:
+        return (date.fromisoformat(snap) - date.fromisoformat(updated)).days <= days
+    except ValueError:
+        return False
+
+
 def usd_value(row: dict, eurusd: float | None) -> float | None:
-    """The card's price in USD: TCGplayer market, else Cardmarket trend converted."""
+    """The card's price in USD: TCGplayer market, else a fresh Cardmarket trend converted."""
     if row.get("tp_market"):
         return row["tp_market"]
-    if row.get("cm_trend") and eurusd:
+    if row.get("cm_trend") and eurusd and fresh(row.get("cm_updated"), row["date"], CM_FRESH_DAYS):
         return row["cm_trend"] * eurusd
     return None
 
 
 def keep(row: dict, min_usd: float, eurusd: float | None) -> bool:
+    """At or above the floor on TCGplayer, or on a fresh Cardmarket trend."""
     tp = row.get("tp_market") or 0.0
     cm = (row.get("cm_trend") or 0.0) * (eurusd or 0.0)
+    if not fresh(row.get("cm_updated"), row.get("date") or "", CM_FRESH_DAYS):
+        cm = 0.0
     return row.get("card_id") is not None and max(tp, cm) >= min_usd
 
 
@@ -287,6 +305,22 @@ def set_row(s: dict, snap: str) -> dict:
         "printed_total": s.get("printedTotal"), "total": s.get("total"),
         "release_date": _date(s.get("releaseDate")), "updated_at": s.get("updatedAt"),
         "ptcgo_code": s.get("ptcgoCode"), "symbol": imgs.get("symbol"), "logo": imgs.get("logo"),
+    }
+
+
+def freshness(rows: list[dict], snap: str) -> dict:
+    """How current the two price sources are on the kept cards."""
+    n = len(rows) or 1
+    tp = [r.get("tp_updated") for r in rows if r.get("tp_market")]
+    cm = [r.get("cm_updated") for r in rows if r.get("cm_trend")]
+    return {
+        "tcgplayer_cards": len(tp),
+        "tcgplayer_fresh": sum(fresh(u, snap, TP_FRESH_DAYS) for u in tp),
+        "tcgplayer_newest": max((u for u in tp if u), default=None),
+        "cardmarket_cards": len(cm),
+        "cardmarket_fresh": sum(fresh(u, snap, CM_FRESH_DAYS) for u in cm),
+        "cardmarket_newest": max((u for u in cm if u), default=None),
+        "cardmarket_fresh_share": round(sum(fresh(u, snap, CM_FRESH_DAYS) for u in cm) / n, 4),
     }
 
 
@@ -413,16 +447,31 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
         except (OSError, ValueError, KeyError, TypeError):
             eurusd, fx_source = None, "none"
         errors.append(f"EUR/USD: ECB unreachable, using {fx_source}")
-    sets = [set_row(s, snap) for s in fetch_sets(client)]
-    log(f"sets: {len(sets)}")
+    # /sets has answered 500 and 502 for hours at a time while /cards worked;
+    # every card carries its full set, so the sets are rebuilt from the cards then.
+    sets_src = "api"
+    try:
+        sets = [set_row(s, snap) for s in fetch_sets(client)]
+    except FetchError as e:
+        sets, sets_src = None, "cards"
+        errors.append(f"sets: {e}; rebuilt from the cards' set fields")
+    card_sets: dict[str, dict] = {}
     seen, rows, catalog = 0, [], []
     for c in fetch_cards(client, max_pages=max_pages, log=log):
         seen += 1
+        s = c.get("set") or {}
+        if s.get("id"):
+            card_sets.setdefault(s["id"], s)
         r = card_row(c, snap)
         catalog.append({k: r[k] for k in CATALOG_COLS})
         if keep(r, min_usd, eurusd):
             rows.append(r)
+    if sets is None:
+        sets = [set_row(s, snap) for s in sorted(card_sets.values(), key=lambda s: str(s.get("releaseDate") or ""))]
+    log(f"sets: {len(sets)} (from {sets_src})")
     log(f"cards: {seen} seen, {len(rows)} at or above ${min_usd:g}")
+    fresh_info = freshness(rows, snap)
+    log(f"freshness: {json.dumps(fresh_info)}")
     sealed_rows: list[dict] = []
     if sealed:
         try:
@@ -432,7 +481,8 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
         log(f"sealed: {len(sealed_rows)} products")
     meta = {
         "date": snap, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "cards_seen": seen, "cards_kept": len(rows), "min_usd": min_usd, "sets": len(sets),
+        "cards_seen": seen, "cards_kept": len(rows), "min_usd": min_usd, "sets": len(sets), "sets_source": sets_src,
+        "freshness": fresh_info,
         "sealed": len(sealed_rows) if sealed else None, "eurusd": eurusd, "fx_source": fx_source,
         "requests": client.requests, "cache_hits": client.cache_hits, "seconds": round(time.time() - t0, 1),
         "errors": errors, "complete": max_pages is None,

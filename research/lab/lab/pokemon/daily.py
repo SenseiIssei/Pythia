@@ -75,6 +75,7 @@ def ui_cards(snap: pl.DataFrame, hist: pl.DataFrame, extra_ids: set[str]) -> lis
             "image": r.get("image_small"), "imageLarge": r.get("image_large"),
             "priceUsd": _f(r["price"], 2), "priceSrc": r.get("price_src"), "variant": r.get("tp_variant"),
             "cardmarketEur": _f(r.get("cm_trend"), 2), "spreadPct": _chg(r.get("spread")),
+            "cardmarketUpdated": r.get("cm_updated"), "cardmarketFresh": bool(r.get("cm_fresh")),
             "tcgplayerUrl": r.get("tp_url"), "cardmarketUrl": r.get("cm_url"),
             "change1dPct": _chg(r.get("ret_1d")), "change7dPct": _chg(r.get("ret_7d")),
             "change30dPct": c30, "change30dSrc": c30_src,
@@ -115,6 +116,59 @@ def verdict(meta: dict, mstat: dict, fv: dict, coll: dict) -> str:
             f" Paper collection {coll['returnPct']:+.1f} % after modelled card costs." if coll.get("started") else "")
 
 
+def _usd(v) -> str:
+    return f"${v:,.2f}" if v is not None else "n/a"
+
+
+def feed(meta: dict, mstat: dict, coll: dict, al: dict, top: list[dict], now: datetime | None = None) -> dict:
+    """The common lab feed header (docs/LAB-FEEDS.md) for reports/pokemon/latest.json:
+    bad when the snapshot is more than two days old, watch when a card moved
+    strongly or looks cheap today, ok otherwise."""
+    now = now or datetime.now(timezone.utc)
+    age = (now.date() - datetime.fromisoformat(meta["snapshot"]).date()).days
+    moves, uv = al.get("moves") or [], al.get("undervalued") or []
+    status = "bad" if age > 2 else ("watch" if moves or uv else "ok")
+    fr = meta.get("freshness") or {}
+    items: list[dict] = []
+    for m in moves[:5]:
+        items.append({"label": f"{m['name']} ({m.get('set') or '?'})", "value": f"{m['move'] * 100:+.0f} %",
+                      "status": "watch", "detail": f"Moved {m['basis']}, now {_usd(m.get('price'))}. Information only.",
+                      "link": "study:pokemon", "importance": min(80, 50 + abs(m["move"]) * 50)})
+    for u in uv[:3]:
+        items.append({"label": f"{u['name']} ({u.get('set') or '?'})", "value": f"{u['gap'] * 100:+.0f} % to fair",
+                      "status": "ok", "detail": f"{_usd(u.get('price'))} against a fair value of {_usd(u.get('fair'))} "
+                                                "from similar cards; " + ("the forecast is validated." if mstat["validated"]
+                                                                          else "the forecast is not validated yet."),
+                      "link": "study:pokemon", "importance": 45})
+    if coll.get("started"):
+        items.append({"label": "Paper collection (play money)", "value": f"{coll['returnPct']:+.1f} %",
+                      "status": "ok" if coll["returnPct"] >= 0 else "watch",
+                      "detail": f"Worth {_usd(coll['equity'])} if sold today after card costs, from "
+                                f"${coll['start']:,.0f} on {coll['started']}.", "link": "study:pokemon", "importance": 25})
+    for c in top[:3]:
+        items.append({"label": f"{c['name']} ({c.get('set') or '?'})", "value": f"{(c.get('pred90dPct') or 0):+.0f} % in 90 d",
+                      "detail": f"Now {_usd(c.get('priceUsd'))}; " + ("model forecast." if c.get("predSrc") == "model"
+                                                                     else "a fixed rule, not a validated model."),
+                      "link": "study:pokemon", "importance": 15})
+    if fr.get("cardmarket_cards") and fr.get("cardmarket_fresh_share", 1) < 0.5:
+        items.append({"label": "Cardmarket prices are stale", "value": f"{fr['cardmarket_fresh_share'] * 100:.0f} % fresh",
+                      "status": "watch", "detail": f"The API last refreshed most Cardmarket prices on "
+                                                   f"{fr.get('cardmarket_newest') or '?'} or before; the EU side and its "
+                                                   "averages are left out until they update.",
+                      "link": "study:pokemon", "importance": 20})
+    n = len(moves)
+    if age > 2:
+        head = f"No new card prices since {meta['snapshot']}: the daily collector has not run for {age} days."
+    elif moves or uv:
+        head = (f"{n} card{'s' if n != 1 else ''} moved strongly" if n else "No strong moves") + (
+            f" and {len(uv)} look cheap next to similar cards" if uv else "") + \
+            f" on {meta['snapshot']}. Information only; you buy and sell by hand."
+    else:
+        head = (f"{meta['cards']:,} card prices on {meta['snapshot']}, nothing unusual. "
+                f"{mstat['history_days']} day{'s' if mstat['history_days'] != 1 else ''} of our own price history so far.")
+    return report.feed_header("Pokemon cards", status, head, items)
+
+
 def clean(v):
     """JSON-safe: NaN and infinities become null (the engine's reader rejects them)."""
     if isinstance(v, float):
@@ -126,6 +180,19 @@ def clean(v):
     if isinstance(v, np.generic):
         return clean(v.item())
     return v
+
+
+def _freshness_line(meta: dict) -> str:
+    fr = meta.get("freshness") or {}
+    if not fr:
+        return "- Price freshness: not recorded by this collector run."
+    return (f"- Price freshness: TCGplayer {fr.get('tcgplayer_fresh', 0):,} of {fr.get('tcgplayer_cards', 0):,} "
+            f"updated within a week (newest {fr.get('tcgplayer_newest') or 'n/a'}); Cardmarket "
+            f"{fr.get('cardmarket_fresh', 0):,} of {fr.get('cardmarket_cards', 0):,} within two weeks (newest "
+            f"{fr.get('cardmarket_newest') or 'n/a'}). Stale Cardmarket rows are left out of every Cardmarket "
+            "number below (trend, averages, spread)." + (
+                " Sets were rebuilt from the cards (the /sets endpoint failed)." if meta.get("sets_source") == "cards"
+                else ""))
 
 
 def _tbl(rows: list[dict], cols: list[str]) -> str:
@@ -142,7 +209,8 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
            f"- Our own price history: {mstat['history_days']} days over {meta['snapshots']} snapshots. "
            "Every return-based number below needs this history; the API itself keeps no history beyond "
            "Cardmarket's avg1 / avg7 / avg30.",
-           f"- Sealed product: {meta.get('sealed') if meta.get('sealed') is not None else 'not collected'}.", "",
+           f"- Sealed product: {meta.get('sealed') if meta.get('sealed') is not None else 'not collected'}.",
+           _freshness_line(meta), "",
            "## Model status", "", mstat["sentence"], ""]
     hz = []
     for h, e in mstat["horizons"].items():
@@ -182,10 +250,12 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
     else:
         out += [f"Event study from our snapshots: waiting for {rep['panel']['waiting_days']} more days.", ""]
     out += ["## TCGplayer against Cardmarket", "",
-            f"{spr['cards']} cards with both prices; TCGplayer over Cardmarket (in USD): median "
-            f"{spr.get('median_pct') or 0:+.1f} %, middle half {spr.get('p25_pct') or 0:+.1f} % to "
-            f"{spr.get('p75_pct') or 0:+.1f} %. Shipping, import duty and fees of 15 % or more a side make most "
-            "of this untradeable.", "",
+            (f"{spr['cards']} cards with both prices (Cardmarket fresh); TCGplayer over Cardmarket (in USD): median "
+             f"{spr.get('median_pct') or 0:+.1f} %, middle half {spr.get('p25_pct') or 0:+.1f} % to "
+             f"{spr.get('p75_pct') or 0:+.1f} %. Shipping, import duty and fees of 15 % or more a side make most "
+             "of this untradeable." if spr["cards"] else
+             "No card has both a TCGplayer price and a fresh Cardmarket price today, so there is no honest spread."),
+            "",
             _tbl(spr["rows"], ["tcgplayer_price", "cards", "median_pct", "share_us_30pct_dearer", "share_eu_30pct_dearer"]),
             "## Paper collection (play money)", "",
             (f"Started {coll['started']} with ${coll['start']:,.0f}. Worth ${coll['equity']:,.2f} if sold today after "
@@ -243,7 +313,8 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
         cmeta = {}
     meta = {"snapshot": today, "cards": snap.height, "snapshots": df["date"].n_unique(),
             "sets": snap["set_id"].n_unique(), "eurusd": cmeta.get("eurusd"), "fx_source": cmeta.get("fx_source"),
-            "sealed": cmeta.get("sealed")}
+            "sealed": cmeta.get("sealed"), "freshness": cmeta.get("freshness") or {},
+            "sets_source": cmeta.get("sets_source"), "collector_errors": cmeta.get("errors") or []}
     pdir = root / "paper"
     month_before = collection.load_state(pdir).get("last_rebalance")
     if not dry_run:
@@ -256,10 +327,13 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
                  key=lambda c: -(c["pred90dPct"] or -1e9))[:15]
     md = markdown(meta, studies, fv, mstat, coll, al, top)
     v = verdict(meta, mstat, fv, coll)
+    fr = meta["freshness"]
     ui = {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), "snapshot": today,
         "historyDays": mstat["history_days"], "snapshots": meta["snapshots"], "eurusd": meta["eurusd"],
         "verdict": v,
+        "freshness": {"cardmarketFreshShare": fr.get("cardmarket_fresh_share"),
+                      "cardmarketNewest": fr.get("cardmarket_newest"), "tcgplayerNewest": fr.get("tcgplayer_newest")},
         "model": {"validated": mstat["validated"], "sentence": mstat["sentence"],
                   "fairValueR2": fv.get("r2"),
                   "horizons": {h: {k: e.get(k) for k in ("validated", "test_months", "mean_rank_ic", "ic_t",
@@ -278,11 +352,12 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
     tmp = ui_path.with_name("latest.json.tmp")
     tmp.write_text(json.dumps(clean(ui), default=str, allow_nan=False), encoding="utf-8")
     os.replace(tmp, ui_path)
-    report.write(NAME, md, clean({"verdict": v, "generated": ui["generated"], "meta": meta, "model": mstat,
-                            "fair_value": fv, "studies": studies, "collection": {k: coll[k] for k in
-                                                                                ("started", "equity", "returnPct")},
-                            "alerts": {"moves": len(al["moves"]), "undervalued": len(al["undervalued"])},
-                            "seconds": round(time.time() - t0, 1)}))
+    data = {"verdict": v, "generated": ui["generated"], "meta": meta, "model": mstat,
+            "fair_value": fv, "studies": studies, "collection": {k: coll[k] for k in ("started", "equity", "returnPct")},
+            "alerts": {"moves": len(al["moves"]), "undervalued": len(al["undervalued"])},
+            "seconds": round(time.time() - t0, 1)}
+    data.update(feed(meta, mstat, coll, al, top))
+    report.write(NAME, md, clean(data))
     if month_before and month_before != today[:7]:
         monthly(pdir, report.REPORTS, today[:7], md)
     return ui
