@@ -985,7 +985,12 @@ function DiagnosticsCard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function test(marketId: string) {
+  async function test(marketId: string, symbol: string) {
+    // A real order when real trading is armed: never on a single click.
+    const ok = window.confirm(
+      `Send one buy of ${symbol} at the venue's minimum size? If real trading is armed, this is a real order with real money.`,
+    );
+    if (!ok) return;
     setTestMsg("sending…");
     try {
       // 0 = the venue's minimum size: this proves the connection, not a strategy.
@@ -1032,7 +1037,7 @@ function DiagnosticsCard() {
                     {r.hasPosition && <Badge tone="accent">Holding</Badge>}
                   </div>
                 </div>
-                <Button variant="secondary" size="sm" onClick={() => void test(r.marketId)}>
+                <Button variant="secondary" size="sm" onClick={() => void test(r.marketId, r.symbol)}>
                   Connection test
                 </Button>
               </div>
