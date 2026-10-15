@@ -109,6 +109,74 @@ def release_panel(df: pl.DataFrame, days: int) -> dict:
     return {"ready": True, "waiting_days": 0, "rows": rows}
 
 
+# ---------------------------------------------------------------- new sets (tcgcsv)
+
+TOP_BASKET = 10
+
+
+def _box_price(sealed: pl.DataFrame, group_id) -> float | None:
+    """The English booster box of a group, if TCGplayer lists one."""
+    if sealed.is_empty() or "group_id" not in sealed.columns:
+        return None
+    b = sealed.filter((pl.col("group_id") == group_id)
+                      & pl.col("name").str.contains(r"(?i)booster box")
+                      & ~pl.col("name").str.contains(r"(?i)case|half|japanese|display"))
+    return float(b["market"].min()) if b.height else None
+
+
+def new_sets_cross(singles: pl.DataFrame, sealed: pl.DataFrame) -> list[dict]:
+    """The main sets of the last two years and the next ones, newest first, on
+    the latest snapshot: how many singles are priced, the mean of the 10
+    dearest (the chase basket), the median single and the booster box. The
+    Pokemon TCG API prices none of the 2026 sets, so this is the only view of
+    a set in its first months. A cross-section of different sets, not one
+    set followed after release."""
+    if singles.is_empty() or "main_set" not in singles.columns:
+        return []
+    snap = singles["date"].max()
+    s = singles.filter((pl.col("date") == snap) & pl.col("main_set"))
+    sl = sealed.filter(pl.col("date") == sealed["date"].max()) if not sealed.is_empty() else sealed
+    rows = []
+    for (gid, name, pub), g in s.group_by("group_id", "group_name", "published_on"):
+        m = g["market"].drop_nulls().sort(descending=True)
+        age = (np.datetime64(snap) - np.datetime64(pub)).astype(int) if pub else None
+        rows.append({"set": name, "released": pub, "age_days": int(age) if age is not None else None,
+                     "singles": len(m), "top10_mean_usd": float(m.head(TOP_BASKET).mean()) if len(m) else None,
+                     "median_usd": float(m.median()) if len(m) else None,
+                     "dearest": g.sort("market", descending=True)["name"][0] if len(m) else None,
+                     "booster_box_usd": _box_price(sl, gid)})
+    return sorted(rows, key=lambda r: r["released"] or "", reverse=True)
+
+
+def new_sets_panel(singles: pl.DataFrame, days: int) -> dict:
+    """From our snapshots: the 30-day log change of each main set's chase
+    basket (its 10 dearest singles on the first day we saw the set), by the
+    set's age at the start. Needs PANEL_MIN_DAYS of singles history."""
+    if singles.is_empty() or days < PANEL_MIN_DAYS or "main_set" not in singles.columns:
+        return {"ready": False, "waiting_days": max(PANEL_MIN_DAYS - days, 0), "rows": []}
+    s = singles.filter(pl.col("main_set") & (pl.col("market") > 0)).with_columns(_d=pl.col("date").str.to_date())
+    first = s.group_by("group_id").agg(_d0=pl.col("_d").min())
+    base = (s.join(first, on="group_id").filter(pl.col("_d") == pl.col("_d0"))
+            .sort("market", descending=True).group_by("group_id").head(TOP_BASKET).select("group_id", "product_id"))
+    lvl = (s.join(base, on=["group_id", "product_id"]).group_by("group_id", "_d")
+           .agg(lp=pl.col("market").log().mean(), n=pl.len(), pub=pl.col("published_on").first())
+           .filter(pl.col("n") >= TOP_BASKET // 2).sort("group_id", "_d"))
+    fut = lvl.select("group_id", _fd=pl.col("_d"), _flp=pl.col("lp")).sort("_fd")
+    j = (lvl.with_columns(_t=pl.col("_d") + pl.duration(days=30)).sort("_t")
+         .join_asof(fut, left_on="_t", right_on="_fd", by="group_id", strategy="forward", tolerance="3d",
+                    check_sortedness=False)
+         .filter(pl.col("_flp").is_not_null())
+         .with_columns(r=pl.col("_flp") - pl.col("lp"),
+                       age=(pl.col("_d") - pl.col("pub").str.to_date(strict=False)).dt.total_days()))
+    rows = []
+    for lo, hi, name in [(-365, 0, "before release")] + AGE_BUCKETS[:5]:
+        b = j.filter((pl.col("age") >= lo) & (pl.col("age") < hi))
+        m, t = _mean_t(b["r"].to_numpy()) if b.height else (None, None)
+        rows.append({"set_age": name, "sets": b["group_id"].n_unique() if b.height else 0, "set_days": b.height,
+                     "mean_30d_pct": _pct(math.expm1(m)) if m is not None else None, "t": t})
+    return {"ready": True, "waiting_days": 0, "rows": rows}
+
+
 # ---------------------------------------------------------------- reprints
 
 def reprint_events(catalog: pl.DataFrame, announced: pl.DataFrame | None = None) -> pl.DataFrame:
@@ -288,15 +356,21 @@ def _pct(v):
     return None if v is None or not np.isfinite(v) else float(v) * 100.0
 
 
-def run(df: pl.DataFrame, catalog: pl.DataFrame, announced: pl.DataFrame | None, days: int) -> dict:
-    """All four studies on a featured frame (`data.features`)."""
+def run(df: pl.DataFrame, catalog: pl.DataFrame, announced: pl.DataFrame | None, days: int,
+        singles: pl.DataFrame | None = None, sealed: pl.DataFrame | None = None) -> dict:
+    """All studies on a featured frame (`data.features`), plus the new sets
+    from the tcgcsv singles when given."""
+    singles = singles if singles is not None else pl.DataFrame()
+    sealed = sealed if sealed is not None else pl.DataFrame()
+    sdays = singles["date"].n_unique() if not singles.is_empty() else 0
     snap = latest(df)
     if catalog.is_empty():
         catalog = df.select([c for c in ("card_id", "name", "text_key", "release_date") if c in df.columns]).unique()
     events = reprint_events(catalog, announced)
     snap = mark_reprints(snap, events)
     return {
-        "release": {"cross": release_cross(snap), "panel": release_panel(df, days)},
+        "release": {"cross": release_cross(snap), "panel": release_panel(df, days),
+                    "new_sets": new_sets_cross(singles, sealed), "new_sets_panel": new_sets_panel(singles, sdays)},
         "reprint": {"events": events.height, "reprinted_now": int(snap["reprinted"].sum()),
                     "cross": reprint_cross(snap), "panel": reprint_panel(df, events, days)},
         "premium": premiums(snap),

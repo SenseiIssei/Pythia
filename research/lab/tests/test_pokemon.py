@@ -176,6 +176,58 @@ def test_sealed_keeps_products_without_a_card_number():
     assert [r["name"] for r in rows] == ["Stellar Crown Booster Box"] and rows[0]["market"] == 160.5
 
 
+def test_new_sets_come_from_tcgcsv_singles_and_main_sets_are_always_taken():
+    groups = {"results": [
+        {"groupId": 1, "name": "SV08: Surging Sparks", "publishedOn": "2024-11-08T00:00:00"},
+        {"groupId": 2, "name": "POP Series 4", "publishedOn": "2026-10-14T00:00:00"},
+        {"groupId": 3, "name": "ME05: Pitch Black", "publishedOn": "2026-07-17T00:00:00"},
+        {"groupId": 4, "name": "XY: Evolutions", "publishedOn": "2016-11-02T00:00:00"}]}
+    prods = {g: {"results": [
+        {"productId": g * 10, "name": f"Box {g} Booster Box", "extendedData": []},
+        {"productId": g * 10 + 1, "name": f"Chase {g}", "extendedData": [{"name": "Number", "value": "200/190"},
+                                                                         {"name": "Rarity", "value": "SIR"}]}]}
+        for g in (1, 2, 3, 4)}
+    prices = {g: {"results": [{"productId": g * 10, "marketPrice": 150.0 + g},
+                              {"productId": g * 10 + 1, "marketPrice": 20.0 * g, "subTypeName": "Holofoil"},
+                              {"productId": g * 10 + 1, "marketPrice": 1.0, "subTypeName": "Normal"}]}
+              for g in (1, 2, 3, 4)}
+    asked = []
+
+    def opener(url, h, t):
+        asked.append(url)
+        if url.endswith("/groups"):
+            return 200, {}, json.dumps(groups).encode()
+        gid = int(url.rstrip("/").split("/")[-2])
+        return 200, {}, json.dumps(prods[gid] if url.endswith("/products") else prices[gid]).encode()
+
+    singles: list[dict] = []
+    sealed = col.fetch_sealed(col.Client(opener=opener, sleep=lambda s: None, spacing=0.0), "2026-10-15",
+                              groups_back=1, singles=singles)
+    taken = {r["group_id"] for r in singles}
+    assert taken == {1, 2, 3}, "the newest group plus the main sets of two years; not a 2016 set"
+    assert {r["group_id"]: r["main_set"] for r in singles} == {1: True, 2: False, 3: True}
+    assert all(r["market"] == 20.0 * r["group_id"] and r["sub_type"] == "Holofoil" for r in singles), "dearest printing"
+    assert len(sealed) == 3
+    s = pl.DataFrame(singles)
+    cross = study.new_sets_cross(s, pl.DataFrame(sealed))
+    assert [r["set"] for r in cross] == ["ME05: Pitch Black", "SV08: Surging Sparks"]
+    assert cross[0]["age_days"] == 90 and cross[0]["booster_box_usd"] == 153.0 and cross[0]["top10_mean_usd"] == 60.0
+    assert not study.new_sets_panel(s, 1)["ready"]
+
+
+def test_new_sets_panel_follows_the_chase_basket():
+    rows = []
+    for day in range(45):
+        d = (date(2026, 8, 1) + __import__("datetime").timedelta(days=day)).isoformat()
+        for k in range(12):
+            rows.append({"date": d, "group_id": 3, "group_name": "ME05", "published_on": "2026-07-17",
+                         "main_set": True, "product_id": k, "market": (100.0 - k) * math.exp(-0.01 * day)})
+    p = study.new_sets_panel(pl.DataFrame(rows), 45)
+    assert p["ready"]
+    young = {r["set_age"]: r for r in p["rows"]}["0-30 d"]
+    assert young["sets"] == 1 and young["mean_30d_pct"] == pytest.approx(math.expm1(-0.3) * 100, rel=1e-6)
+
+
 # ---------------------------------------------------------------- features and studies
 
 def test_feature_rules():
