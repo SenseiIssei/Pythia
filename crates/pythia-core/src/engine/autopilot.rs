@@ -1418,8 +1418,17 @@ impl Engine {
 
     /// Book a fill to the autopilot that owns the position, or that opened it.
     /// Called by `settle_fill` for every fill, paper or live. `existed` is
-    /// whether the market had a position before this fill.
-    pub(super) fn autopilot_on_fill(&mut self, sid: &str, market: &str, realized: f64, fee: f64, existed: bool, open_after: bool) {
+    /// whether the market had a position before this fill. Returns the
+    /// autopilot it was booked to, for the trade alert.
+    pub(super) fn autopilot_on_fill(
+        &mut self,
+        sid: &str,
+        market: &str,
+        realized: f64,
+        fee: f64,
+        existed: bool,
+        open_after: bool,
+    ) -> Option<usize> {
         let now = self.now();
         let late = (self.live.timeout_sec as i64) * 1000 + LATE_FILL_GRACE_MS;
         let opens = |a: &Autopilot| a.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market));
@@ -1432,12 +1441,9 @@ impl Engine {
                         .iter()
                         .position(|a| !a.is_active() && a.stopped_ms.is_some_and(|t| now - t <= late) && opens(a))
                 };
-                match active.or_else(recent) {
-                    Some(i) => i,
-                    None => return,
-                }
+                active.or_else(recent)?
             }
-            None => return,
+            None => return None,
         };
         // A late fill on an autopilot that stopped and left its positions open
         // is handed out the same way: its P&L counted at the mark now, the
@@ -1474,6 +1480,43 @@ impl Engine {
         } else {
             ap.release(market);
         }
+        Some(i)
+    }
+
+    /// The trade alert for one fill booked to autopilot `i`: one line of the
+    /// table the sender builds from the fills that arrive together.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn autopilot_trade_alert(
+        &mut self,
+        i: usize,
+        sid: &str,
+        symbol: &str,
+        buy: bool,
+        qty: f64,
+        price: f64,
+        fee: f64,
+        realized: f64,
+    ) {
+        let Some(ap) = self.autopilots.get(i) else { return };
+        let rebalance = self.strategies.iter().any(|s| s.id == sid && s.kind == StrategyKind::LabTargets);
+        let mode = match ap.config.mode {
+            AutopilotMode::Live => "live",
+            AutopilotMode::Demo => "demo",
+            AutopilotMode::Paper => "paper",
+        };
+        let line = crate::alerts::TradeLine {
+            book: ap.config.name.clone(),
+            buy,
+            symbol: symbol.split('/').next().unwrap_or(symbol).to_string(),
+            qty,
+            price,
+            fee: fee.max(0.0),
+            realized,
+            rebalance,
+            mode: mode.into(),
+        };
+        let key = format!("fill:{}:{symbol}:{}:{qty}", ap.config.id, self.now());
+        self.alert_event(crate::alerts::AlertEvent::trade(key, line));
     }
 
     /// A fee that reached the engine after its fill: Alpaca posts crypto fees
@@ -1890,7 +1933,25 @@ impl Engine {
         let kind = if cfg.mode == AutopilotMode::Live { JournalKind::Risk } else { JournalKind::System };
         self.log(kind, msg.clone(), None, None);
         self.pending_alerts.push(msg.clone());
-        self.alert(AlertKind::AutopilotStarted, format!("start:{id}:{now}"), started_alert);
+        {
+            use crate::alerts::{card, AlertEvent, Row};
+            let mut rows = vec![
+                Row::new("Capital", card::usd(cfg.capital_usd)),
+                Row::new("Mode", cfg.mode.word()),
+                Row::new("Venue", venue_label(cv)),
+            ];
+            let books: Vec<&str> = sleeves.iter().map(|s| s.name.as_str()).collect();
+            if !books.is_empty() {
+                rows.push(Row::new("Books", books.join(", ")));
+            }
+            let rules = describe_rules(&cfg);
+            self.alert_event(
+                AlertEvent::new(AlertKind::AutopilotStarted, format!("start:{id}:{now}"), started_alert)
+                    .titled(format!("{} started", cfg.name))
+                    .with_summary(format!("Rules: {rules}."))
+                    .with_rows(rows),
+            );
+        }
         self.autopilots.retain(|a| a.config.id != id);
         self.autopilots.push(Autopilot {
             config: cfg,
@@ -2446,6 +2507,38 @@ impl Engine {
         }
     }
 
+    /// What the big-move watch samples (`alerts::MoveWatch`): each active
+    /// autopilot's equity, and the price of each coin they hold, with who
+    /// holds it.
+    pub fn move_inputs(&self) -> Vec<crate::alerts::MoveInput> {
+        use crate::alerts::{MoveInput, MoveSubject};
+        let mut out = Vec::new();
+        let mut coins: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for ap in self.autopilots.iter().filter(|a| a.is_active()) {
+            out.push(MoveInput {
+                key: format!("ap:{}", ap.config.id),
+                label: ap.config.name.clone(),
+                held_by: String::new(),
+                subject: MoveSubject::Equity,
+                value: self.ap_equity(ap),
+            });
+            for m in ap.owned.keys() {
+                coins.entry(m.clone()).or_default().push(ap.config.name.clone());
+            }
+        }
+        for (id, names) in coins {
+            let Some(m) = self.markets.iter().find(|m| m.id == id) else { continue };
+            out.push(MoveInput {
+                key: id.clone(),
+                label: m.symbol.split('/').next().unwrap_or(&m.symbol).to_string(),
+                held_by: names.join(", "),
+                subject: MoveSubject::Coin,
+                value: m.price,
+            });
+        }
+        out
+    }
+
     /// Every autopilot as the UI shows it.
     pub fn autopilot_statuses(&self) -> Vec<AutopilotStatus> {
         self.autopilots
@@ -2920,7 +3013,32 @@ impl Engine {
         self.autopilots[i].last_action = Some(msg.clone());
         self.pending_alerts.push(msg.clone());
         let key = format!("halt:{}:{now}", self.autopilots[i].config.id);
-        self.alert(cause, key, msg.clone());
+        {
+            use crate::alerts::{card, AlertEvent, Row};
+            let ap = &self.autopilots[i];
+            let pnl = eq - x;
+            let pnl_pct = if x > 0.0 { pnl / x * 100.0 } else { 0.0 };
+            let mut rows = vec![
+                Row::new("Equity", card::usd(eq)),
+                Row::toned("P&L", format!("{} {}", card::signed_usd(pnl), card::signed_pct(pnl_pct, 2)), pnl),
+            ];
+            if let Some(b) = self.ap_btc_return_pct(ap) {
+                rows.push(Row::toned("vs BTC", format!("{:+.2} pts", pnl_pct - b), pnl_pct - b));
+            }
+            rows.push(Row::new("Trades", ap.trades.to_string()));
+            rows.push(Row::new("Fees", card::usd(ap.fees)));
+            // The first sentence of what happened to its positions, no more.
+            let tail = tail.trim();
+            let foot = tail.split_inclusive(". ").next().unwrap_or(tail).trim().to_string();
+            let title = format!("{} {word}", ap.config.name);
+            self.alert_event(
+                AlertEvent::new(cause, key, msg.clone())
+                    .titled(title)
+                    .with_summary(format!("{}.", reason.trim_end_matches('.')))
+                    .with_rows(rows)
+                    .with_footer(foot),
+            );
+        }
         self.log(JournalKind::Risk, msg, None, None);
         self.ap_sample(i, now, true);
     }

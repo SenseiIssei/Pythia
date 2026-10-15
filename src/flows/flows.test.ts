@@ -23,7 +23,7 @@ import {
   shortLine,
   timeline,
 } from "./activity";
-import { alertTitle, countsLine, deliveryOf, destinationName, muteText } from "./alerts";
+import { alertTitle, countsLine, deliveryOf, destinationName, groupCategories, muteText, plainText, quietLine, validHhmm } from "./alerts";
 import type { AutopilotSleeveStatus, AutopilotStatus, JournalEntry, PositionView } from "../types";
 
 function status(over: Partial<AutopilotStatus> = {}): AutopilotStatus {
@@ -285,11 +285,30 @@ describe("alerts", () => {
     expect(alertTitle({ kinds: ["floorHit"] })).toBe("Loss limit reached");
     expect(alertTitle({ kinds: ["killSwitch", "orderRejects"] })).toBe("Kill switch +1");
     expect(alertTitle({ kinds: [] })).toBe("Alert");
+    expect(alertTitle({ kinds: ["trade", "trade"], title: "Rebalance · Momentum" })).toBe("Rebalance · Momentum +1");
+    expect(alertTitle({ kinds: ["event"], title: "Factory 2026-10-17" })).toBe("Factory 2026-10-17");
+  });
+  it("shows a Telegram post without its markup", () => {
+    expect(plainText("<b>🚨 Kill &amp; switch</b>\n<pre>P&amp;L  -$5 &lt;x&gt;</pre>\n<i>Pythia</i>")).toBe("🚨 Kill & switch\nP&L  -$5 <x>\nPythia");
+    expect(plainText("**🛑 Floor hit**\n```\nEquity  $9\n```")).toBe("🛑 Floor hit\n\nEquity  $9\n");
+  });
+  it("checks and words quiet hours", () => {
+    expect(validHhmm("23:00") && validHhmm("7:05")).toBe(true);
+    expect(validHhmm("24:00") || validHhmm("9pm") || validHhmm("12:60")).toBe(false);
+    expect(quietLine({ enabled: true, start: "23:00", end: "07:00", timezone: "Europe/Berlin" })).toBe("23:00 to 07:00");
+    expect(quietLine({ enabled: false, start: "23:00", end: "07:00", timezone: "Europe/Berlin" })).toBe("Off");
+  });
+  it("groups the switches by who sends them", () => {
+    const c = (id: string, source: "engine" | "lab") => ({ id, label: id, emoji: "", about: "", source, on: true }) as never;
+    const g = groupCategories([c("trades", "engine"), c("weekly", "lab"), c("risk", "engine")]);
+    expect(g.engine.map((x: { id: string }) => x.id)).toEqual(["trades", "risk"]);
+    expect(g.lab.map((x: { id: string }) => x.id)).toEqual(["weekly"]);
   });
   it("says how it went", () => {
     expect(deliveryOf({ delivered: true, error: null }).label).toBe("Delivered");
     expect(deliveryOf({ delivered: false, error: null, reason: "muted" }).label).toBe("Muted");
     expect(deliveryOf({ delivered: false, error: null, reason: "hourlyLimit" }).tone).toBe("warn");
+    expect(deliveryOf({ delivered: false, error: null, reason: "quiet" }).label).toBe("Quiet hours");
     expect(deliveryOf({ delivered: false, error: "HTTP 500" }).label).toBe("Failed: HTTP 500");
   });
   it("says how long it is muted", () => {
