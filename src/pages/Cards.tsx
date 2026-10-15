@@ -33,11 +33,13 @@ import {
   pokemonView,
   predLabel,
   priceHistory,
+  releaseWords,
   rowFigure,
   sortCards,
   type CardSort,
   type PokemonCard,
   type PokemonData,
+  type PokemonNewSet,
 } from "../pokemon";
 
 const SORTS: ChipOption<CardSort>[] = [
@@ -125,7 +127,7 @@ function Detail({ c, stale }: { c: PokemonCard; stale: boolean }) {
         />
         <Row
           label="Fair value"
-          sub="What cards like this one (rarity, Pokemon, printing, set age, how dear the rest of its set is) cost, from a model that never saw this card. A rough guide, not a promise: it misses by about half either way."
+          sub="What cards like this one (rarity, Pokemon, printing, set age, how dear the rest of its set is) cost, from a model that never saw this card. A rough guide, not a promise: for a typical card it is off by a factor of about 1.7 either way."
           value={usd(c.fairUsd)}
         />
         {c.cardmarketEur != null && (
@@ -152,6 +154,55 @@ function Detail({ c, stale }: { c: PokemonCard; stale: boolean }) {
           )}
         </div>
       )}
+      <p className="text-[13px] text-faint">Prices only. Pythia never buys or sells a card; you do that by hand.</p>
+    </div>
+  );
+}
+
+function NewSets({ sets, onOpen }: { sets: PokemonNewSet[]; onOpen: (name: string) => void }) {
+  if (sets.length === 0) return null;
+  return (
+    <Section
+      title="New sets"
+      hint="The card database has no prices for the sets of the last year yet, so these come straight from TCGplayer. The chase number is the average of a set's ten dearest cards."
+    >
+      <List>
+        {sets.map((s) => (
+          <ListRow
+            key={s.set}
+            leading={<Thumb src={s.cards[0]?.image ?? null} alt="" />}
+            title={s.set}
+            subtitle={[releaseWords(s.ageDays), s.released, s.boosterBoxUsd != null ? `booster box ${usd(s.boosterBoxUsd)}` : null].filter(Boolean).join(" · ")}
+            right={usd(s.top10MeanUsd, 0)}
+            rightSub={<span className="text-[13px] text-muted">chase average</span>}
+            onClick={() => onOpen(s.set)}
+          />
+        ))}
+      </List>
+    </Section>
+  );
+}
+
+function SetDetail({ s }: { s: PokemonNewSet }) {
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-3">
+        <Stat label="Chase average" value={usd(s.top10MeanUsd, 0)} />
+        <Stat label="Booster box" value={usd(s.boosterBoxUsd, 0)} />
+        <Stat label="Cards priced" value={s.singles.toLocaleString("en-US")} />
+      </div>
+      <p className="text-[13px] text-muted">
+        {s.released ? `Released ${s.released}, ${releaseWords(s.ageDays)}.` : ""} The dearest cards on TCGplayer today. Prices of a set this new move a lot; our own daily snapshots will show how.
+      </p>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {s.cards.map((c) => (
+          <a key={`${c.name}-${c.number}`} href={c.url ?? undefined} target="_blank" rel="noreferrer" className="min-w-0 rounded-control p-1 hover:bg-surface-2">
+            {c.image ? <img src={c.image} alt={c.name} loading="lazy" className="aspect-[63/88] w-full rounded-lg bg-surface-2 object-cover" /> : <div className="aspect-[63/88] w-full rounded-lg bg-surface-2" aria-hidden />}
+            <div className="mt-1.5 truncate text-[13px] font-semibold text-ink">{c.name}</div>
+            <div className="tabular text-[13px] text-muted">{usd(c.priceUsd)}</div>
+          </a>
+        ))}
+      </div>
       <p className="text-[13px] text-faint">Prices only. Pythia never buys or sells a card; you do that by hand.</p>
     </div>
   );
@@ -236,6 +287,8 @@ export function Cards() {
 
   const all = useMemo(() => (d ? sortCards(filterCards(d.cards, q), sort) : []), [d, q, sort]);
   const selected = d?.cards.find((c) => c.id === open) ?? null;
+  const [openSet, setOpenSet] = useState<string | null>(null);
+  const openedSet = d?.newSets?.find((s) => s.set === openSet) ?? null;
   const stale = d ? cardmarketStale(d) : false;
 
   const title = "Cards";
@@ -349,6 +402,8 @@ export function Cards() {
             </Card>
           </Section>
 
+          <NewSets sets={d.newSets ?? []} onOpen={setOpenSet} />
+
           <Collection d={d} />
 
           <Card>
@@ -371,6 +426,9 @@ export function Cards() {
 
       <Sheet open={!!selected} onClose={() => setOpen(null)} title={selected?.name ?? "Card"} wide>
         {selected && <Detail c={selected} stale={stale} />}
+      </Sheet>
+      <Sheet open={!!openedSet} onClose={() => setOpenSet(null)} title={openedSet?.set ?? "Set"} wide>
+        {openedSet && <SetDetail s={openedSet} />}
       </Sheet>
     </Page>
   );

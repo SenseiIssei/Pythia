@@ -103,6 +103,28 @@ export interface PokemonAlertMove {
   basis: string;
 }
 
+/** A main set the card API does not price yet, from TCGplayer through tcgcsv. */
+export interface PokemonNewSet {
+  set: string;
+  released: string | null;
+  /** Negative for a set not out yet (pre-order prices). */
+  ageDays: number | null;
+  singles: number;
+  /** Mean of the 10 dearest singles. */
+  top10MeanUsd: number | null;
+  boosterBoxUsd: number | null;
+  cards: { name: string; number: string | null; rarity: string | null; priceUsd: number | null; image: string | null; url: string | null }[];
+}
+
+/** "out 29 days", "out in 22 days", "out today". */
+export function releaseWords(ageDays: number | null): string {
+  if (ageDays == null || !Number.isFinite(ageDays)) return "";
+  if (ageDays === 0) return "out today";
+  if (ageDays < 0) return `out in ${-ageDays} day${ageDays === -1 ? "" : "s"}`;
+  if (ageDays < 60) return `out ${ageDays} day${ageDays === 1 ? "" : "s"}`;
+  return `out ${Math.round(ageDays / 30.4)} months`;
+}
+
 export interface PokemonData {
   generated: string;
   snapshot: string;
@@ -112,6 +134,7 @@ export interface PokemonData {
   cards: PokemonCard[];
   collection: PokemonCollection;
   freshness?: PokemonFreshness;
+  newSets?: PokemonNewSet[];
   alerts?: { moves: PokemonAlertMove[]; undervalued: { card_id: string }[]; sent: boolean };
 }
 
