@@ -114,7 +114,7 @@ export function Segmented<T extends string>({
             tabIndex={on ? 0 : -1}
             onClick={() => onChange(o.id)}
             onKeyDown={(e) => arrowNav(e, options, value, onChange, refs.current)}
-            className={`min-h-[36px] truncate rounded-full px-2 text-sm font-semibold transition-colors ${on ? "bg-surface text-ink shadow-card" : "text-muted hover:text-ink"}`}
+            className={`min-h-[36px] truncate rounded-full px-2 text-sm font-semibold transition-colors ${on ? "bg-raised text-ink shadow-card" : "text-muted hover:text-ink"}`}
           >
             {o.label}
           </button>
