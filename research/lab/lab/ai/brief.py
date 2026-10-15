@@ -225,6 +225,10 @@ def run(now_ms: int | None = None, dry_run: bool = False, force: bool = False, s
         notify.say("no daily closes for any coin: no brief", err=True)
         return 1
     prompt = build_prompt(day, usable, closes, state, facts.funding_lines(usable, funding_loader), facts.feed_lines())
+    # The owner's messages are in German when the alert language says so; the
+    # reasons stay English for the record. In the prompt, not the cached system.
+    if notify.alert_lang() == "de":
+        prompt += "\n\nWrite the three summary lines in German (plain German, German number format)."
     if dry_run:
         notify.say(SYSTEM + "\n\n" + prompt)
         chars = len(SYSTEM) + len(prompt)
