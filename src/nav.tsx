@@ -20,7 +20,8 @@ import {
   Gauge,
   Microscope,
   Plane,
-  GraduationCap,
+  History,
+  Bell,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -29,6 +30,8 @@ export type PageId =
   | "home"
   | "practice"
   | "autopilot"
+  | "activity"
+  | "notifications"
   | "dashboard"
   | "markets"
   | "positions"
@@ -64,8 +67,9 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   // ── always visible ──
   { id: "home", label: "Home", icon: Home, section: "Overview" },
-  { id: "practice", label: "Practice", icon: GraduationCap, section: "Overview" },
   { id: "autopilot", label: "Autopilot", icon: Plane, section: "Overview" },
+  { id: "activity", label: "Activity", icon: History, section: "Overview" },
+  { id: "notifications", label: "Notifications", icon: Bell, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },
   { id: "wallets", label: "Money", icon: Coins, section: "Overview" },
 
@@ -91,11 +95,25 @@ export const NAV: NavItem[] = [
   { id: "about", label: "About", icon: Info, section: "Config" },
 ];
 
-/** The nav for one mode. Simple keeps seven entries; advanced keeps everything. */
+/**
+ * Pages that moved. Practice now lives on the Autopilot page; the old id
+ * still leads there, so a saved link or an old button keeps working.
+ */
+export const REDIRECTS: Partial<Record<PageId, PageId>> = {
+  practice: "autopilot",
+};
+
+/** Where a page id leads now. */
+export function resolvePage(id: PageId): PageId {
+  return REDIRECTS[id] ?? id;
+}
+
+/** The nav for one mode. Simple keeps the beginner entries; advanced keeps everything. */
 export function navFor(mode: UiMode): NavItem[] {
   return mode === "advanced" ? NAV : NAV.filter((n) => !n.advanced);
 }
 
 export function isVisible(id: PageId, mode: UiMode): boolean {
-  return navFor(mode).some((n) => n.id === id);
+  const to = resolvePage(id);
+  return navFor(mode).some((n) => n.id === to);
 }

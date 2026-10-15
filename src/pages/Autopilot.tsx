@@ -76,7 +76,7 @@ import type { AutopilotConfig, AutopilotStart, AutopilotStatus, AutopilotUpdate,
 
 // ── where the numbers come from ─────────────────────────────────────────────
 
-interface AutopilotApi {
+export interface AutopilotApi {
   loading: boolean;
   /** Set only in a dev build opened with `?mockAutopilot`: the page shows sample data. */
   mocked: MockScenario | null;
@@ -91,7 +91,7 @@ interface AutopilotApi {
   btc: { symbol: string; times?: number[]; closes?: number[] } | null;
 }
 
-function useAutopilotApi(): AutopilotApi {
+export function useAutopilotApi(): AutopilotApi {
   const store = useStore();
   const names = useMemo(
     () => Object.fromEntries(store.strategies.map((s) => [s.id, s.name])),

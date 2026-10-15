@@ -262,3 +262,14 @@ export function startConfig(
     flattenOnStop: true,
   };
 }
+
+/**
+ * Why the demo account cannot be used for these markets, or null. The
+ * engine checks again; this only saves a refused start.
+ */
+export function demoProblem(live: { demoVenues?: Venue[]; demoExchange?: string | null; demoRealPrices?: boolean | null }, assetClass: Venue): string | null {
+  if (assetClass === "crypto" && (live.demoVenues ?? []).includes("crypto") && !!live.demoExchange && live.demoRealPrices === false) {
+    return "This exchange's demo account uses its own prices. Use practice money instead.";
+  }
+  return null;
+}
