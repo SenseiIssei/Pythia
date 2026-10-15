@@ -70,6 +70,7 @@ import { explain } from "../glossary";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
 import { autopilotVenue, demoIsApiTestOnly, exchangeName } from "../venueNames";
+import { benchmark } from "../practice";
 import { useMockAutopilot, type MockScenario } from "../autopilotMock";
 import {
   LIVE_EDIT_PHRASE,
@@ -78,6 +79,8 @@ import {
   MEANINGFUL_TRADES,
   analyse,
   bitcoinMarket,
+  blendWords,
+  classRows,
   compareWithHold,
   curve,
   editForm,
@@ -392,6 +395,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
 
   const [mode, setMode] = useState<Mode>("paper");
   const [venue, setVenue] = useState<Venue>("crypto");
+  // A portfolio over crypto and US shares: paper or demo only, Pythia picks.
+  const [both, setBoth] = useState(false);
   const [amount, setAmount] = useState("1000");
   const [pick, setPick] = useState<"auto" | "manual">("auto");
   const [repick, setRepick] = useState(24);
@@ -415,7 +420,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
 
   const capital = parseInput(amount);
   // The exchange it would trade on, by its own name ("Bybit", not "crypto").
-  const target = autopilotVenue(mode, venue, live, cryptoCostVenue);
+  // A portfolio trades both classes on the Alpaca account.
+  const target = both ? "alpaca" : autopilotVenue(mode, venue, live, cryptoCostVenue);
   const targetName = exchangeName(target);
   const eligible = strategies.filter((s) => s.id !== "manual" && s.venueClass === venue);
   const chosen = eligible.map((s) => ({ s, w: parseInput(weights[s.id] ?? "") })).filter((x) => x.w > 0);
@@ -449,9 +455,15 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
     now: Date.now(),
   });
   // The engine refuses this too; saying it here saves a round trip.
-  if (mode === "demo" && venue === "crypto" && demoIsApiTestOnly(live)) {
+  if (!both && mode === "demo" && venue === "crypto" && demoIsApiTestOnly(live)) {
     problems.push(
       `${exchangeName(live.demoExchange)} runs its demo account on its own prices, so a demo autopilot there would be judged in a different price world than its stop rules watch. Use Bybit or Binance demo keys, Alpaca paper, or practice money.`,
+    );
+  }
+  const demoVenues = live.demoVenues ?? [];
+  if (both && mode === "demo" && (!demoVenues.includes("alpaca") || !demoVenues.includes("crypto") || live.demoExchange !== "alpaca")) {
+    problems.push(
+      "A demo portfolio trades crypto and US shares on the one Alpaca paper account, so it needs the Alpaca paper keys and crypto demo orders sent there too (PYTHIA_DEMO_EXCHANGE=alpaca on the backend). Or use practice money.",
     );
   }
 
@@ -497,24 +509,40 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
     setBusy(true);
     setErr("");
     const now = Date.now();
-    const config: AutopilotStart = {
-      id: `ap-${now.toString(36)}`,
-      name: name.trim() || `Autopilot ${new Date(now).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`,
-      mode,
-      // The engine wants the exchange, not the asset class: crypto demo runs
-      // on the demo exchange, other crypto on the one selected in Settings,
-      // US shares on Alpaca.
-      venue: target,
-      // Crypto demo on Alpaca paper is venue "alpaca" trading crypto, not shares.
-      assetClass: venue,
-      capitalUsd: capital,
-      sleeves: pick === "manual" ? chosen.map((x) => ({ strategyId: x.s.id, weight: x.w / weightSum })) : [],
-      // Re-picking applies only when Pythia chooses; 0 turns it off.
-      ...(pick === "auto" ? { repickEveryHours: repick } : {}),
-      stop,
-      flattenOnStop: flatten,
-      ...(mode === "live" ? { confirm: typed.trim().toUpperCase() } : {}),
-    };
+    const label = name.trim() || `${both ? "Portfolio" : "Autopilot"} ${new Date(now).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
+    const config: AutopilotStart = both
+      ? {
+          // Both classes on the Alpaca account, split by evidence; the engine
+          // picks the lab books of each class.
+          id: `ap-${now.toString(36)}`,
+          name: label,
+          mode,
+          venue: "alpaca",
+          capitalUsd: capital,
+          sleeves: [],
+          repickEveryHours: repick,
+          stop,
+          flattenOnStop: flatten,
+          portfolio: true,
+        }
+      : {
+          id: `ap-${now.toString(36)}`,
+          name: label,
+          mode,
+          // The engine wants the exchange, not the asset class: crypto demo runs
+          // on the demo exchange, other crypto on the one selected in Settings,
+          // US shares on Alpaca.
+          venue: target,
+          // Crypto demo on Alpaca paper is venue "alpaca" trading crypto, not shares.
+          assetClass: venue,
+          capitalUsd: capital,
+          sleeves: pick === "manual" ? chosen.map((x) => ({ strategyId: x.s.id, weight: x.w / weightSum })) : [],
+          // Re-picking applies only when Pythia chooses; 0 turns it off.
+          ...(pick === "auto" ? { repickEveryHours: repick } : {}),
+          stop,
+          flattenOnStop: flatten,
+          ...(mode === "live" ? { confirm: typed.trim().toUpperCase() } : {}),
+        };
     try {
       await onStart(config);
       setTyped("");
@@ -557,7 +585,11 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
             <Choice
               name="ap-mode"
               checked={mode === "live"}
-              onChange={() => setMode("live")}
+              onChange={() => {
+                setMode("live");
+                // A portfolio is paper or demo only.
+                setBoth(false);
+              }}
               icon={Lock}
               title="Real money"
               danger
@@ -569,8 +601,11 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
               <Choice
                 key={v.id}
                 name="ap-venue"
-                checked={venue === v.id}
-                onChange={() => setVenue(v.id)}
+                checked={!both && venue === v.id}
+                onChange={() => {
+                  setVenue(v.id);
+                  setBoth(false);
+                }}
                 title={
                   v.id === "crypto"
                     ? `${v.label} · ${exchangeName(autopilotVenue(mode, "crypto", live, cryptoCostVenue))}${mode === "demo" ? " demo" : ""}`
@@ -579,6 +614,18 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
                 detail={v.note}
               />
             ))}
+            {mode !== "live" && (
+              <Choice
+                name="ap-venue"
+                checked={both}
+                onChange={() => {
+                  setBoth(true);
+                  setPick("auto");
+                }}
+                title={`Crypto and US shares${mode === "demo" ? " · Alpaca paper" : ""}`}
+                detail="One amount over both, split by the evidence of each side's lab books. Crypto trades day and night, shares only while the US market is open. Practice money or demo only."
+              />
+            )}
           </div>
         </Step>
 
@@ -610,20 +657,31 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
               badge={<Badge tone="accent">Recommended</Badge>}
               detail="It picks the strategies with the best record after costs that suit the market right now, and tells you why."
             />
-            <Choice
-              name="ap-pick"
-              checked={pick === "manual"}
-              onChange={() => setPick("manual")}
-              title="I pick them"
-              detail="Choose strategies yourself and how much of the amount each may use."
-            />
+            {!both && (
+              <Choice
+                name="ap-pick"
+                checked={pick === "manual"}
+                onChange={() => setPick("manual")}
+                title="I pick them"
+                detail="Choose strategies yourself and how much of the amount each may use."
+              />
+            )}
           </div>
           {pick === "auto" && (
             <div className="mt-3 space-y-2 text-[13px] leading-relaxed text-muted">
-              <p>
-                For crypto it can run up to three of the lab's strategies together. Their targets are added up per coin, so
-                each coin is one position, and each strategy gets a share of the amount by the strength of its evidence.
-              </p>
+              {both ? (
+                <p>
+                  Each side runs the lab's strategies with real out-of-sample evidence. The amount is split between crypto
+                  and US shares by the evidence of each side's best strategy per unit of its worst fall, and a side with no
+                  evidence gets nothing. When it chooses again, the split moves by at most 10 points at a time. It is held
+                  against a blend of Bitcoin and SPY at the same split.
+                </p>
+              ) : (
+                <p>
+                  For crypto it can run up to three of the lab's strategies together. Their targets are added up per coin, so
+                  each coin is one position, and each strategy gets a share of the amount by the strength of its evidence.
+                </p>
+              )}
               <Field label="Choose again with fresh evidence" hint="A change is traded in at the next rebalance, only by the difference per coin. Nothing is sold off at once.">
                 <select value={repick} onChange={(e) => setRepick(Number(e.target.value))} aria-label="How often it chooses again" className={`${inputCls} sm:max-w-xs`}>
                   {REPICK_CHOICES.map((c) => (
@@ -899,6 +957,8 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
   const last = values[values.length - 1] ?? s.equity;
   const fees = feeShare(s.fees, s.pnl);
   const exchange = exchangeName(s.config.venue);
+  const classes = classRows(s);
+  const blend = blendWords(s);
 
   async function act(fn: () => Promise<void>) {
     setBusy(true);
@@ -941,7 +1001,9 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
 
         <p className="mt-4 text-[15px] leading-relaxed text-ink">
           {running
-            ? `Trading ${money(s.startCapital, 0)} on ${exchange}${s.config.mode === "demo" ? "'s demo account" : ""} on its own, for ${fmtDuration(now - s.startedMs)} now.`
+            ? `Trading ${money(s.startCapital, 0)} ${s.config.portfolio ? "across crypto and US shares" : `on ${exchange}`}${
+                s.config.mode === "demo" ? (s.config.portfolio ? " on the Alpaca paper account" : "'s demo account") : ""
+              } on its own, for ${fmtDuration(now - s.startedMs)} now.`
             : "Holding what it has and opening nothing new until you resume it."}
         </p>
         <p className="mt-1 text-[13px] text-muted">
@@ -1085,7 +1147,37 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
         {s.waiting && <p className="mt-3 rounded-2xl bg-surface-2 px-4 py-3 text-sm leading-relaxed text-muted">{s.waiting}</p>}
         {s.nextRepickMs != null && <p className="mt-2 text-[13px] text-muted">Chooses its strategies again with fresh evidence around {fmtWhen(s.nextRepickMs)}.</p>}
 
+        {classes.length > 0 && (
+          <div className="mt-4" data-testid="portfolio-classes">
+            <h3 className="text-[15px] font-semibold text-ink">Split between crypto and US shares</h3>
+            <p className="mt-0.5 text-[13px] leading-relaxed text-muted">
+              By evidence: a side whose strategies have none gets nothing. Crypto trades day and night, US shares only while the
+              US market is open.
+            </p>
+            <List className="mt-1">
+              {classes.map((c) => (
+                <div key={c.key} className="py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="min-w-0 text-[15px] font-semibold text-ink">
+                      {c.label} <span className="tabular font-normal text-muted">{c.share}</span>
+                    </span>
+                    <span className={`tabular shrink-0 text-[15px] font-semibold ${TONE_TEXT[changeTone(c.pnl)]}`}>{signedMoney(c.pnl)}</span>
+                  </div>
+                  <div className="mt-0.5 text-[13px] text-muted">{c.detail}</div>
+                  {c.note && <p className="mt-1 text-[13px] leading-relaxed text-muted">{c.note}</p>}
+                </div>
+              ))}
+            </List>
+            {blend && (
+              <p className="mt-2 text-[13px] text-muted">
+                Held against {blend} bought and held. The blend follows the split whenever it moves.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="mt-3">
+          {classes.length > 0 && s.bySleeve.length > 0 && <h3 className="mt-4 text-[15px] font-semibold text-ink">Its strategies</h3>}
           {s.bySleeve.length === 0 ? (
             <Nothing icon={Activity} title="Choosing its strategies">
               The strategies it picks, and why, show up here within a minute of starting.
@@ -1186,10 +1278,16 @@ function EditPanel({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
       </div>
 
       <h3 className="mt-5 text-[15px] font-semibold text-ink">Strategies</h3>
-      <div className="mt-2 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Who picks the strategies">
-        <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "auto"} onChange={() => set({ pick: "auto" })} title="Let Pythia choose" detail="It picks by evidence and checks again every day." />
-        <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "manual"} onChange={() => set({ pick: "manual" })} title="I choose" detail="Give each strategy a share. Empty means not used." />
-      </div>
+      {s.config.portfolio ? (
+        <p className="mt-1 text-[13px] leading-relaxed text-muted">
+          Pythia picks this portfolio's strategies by evidence, for crypto and US shares each, and checks again every day.
+        </p>
+      ) : (
+        <div className="mt-2 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Who picks the strategies">
+          <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "auto"} onChange={() => set({ pick: "auto" })} title="Let Pythia choose" detail="It picks by evidence and checks again every day." />
+          <Choice name={`edit-pick-${s.config.id}`} checked={f.pick === "manual"} onChange={() => set({ pick: "manual" })} title="I choose" detail="Give each strategy a share. Empty means not used." />
+        </div>
+      )}
       {f.pick === "manual" && (
         <div className="mt-2 max-h-72 overflow-y-auto pr-1">
           <List>
@@ -1379,7 +1477,12 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
           would have gone <b className={`tabular ${strong}`}>{signedPct(hold.holdPct, 1)}</b>; the autopilot went{" "}
           <b className={`tabular ${strong}`}>{signedPct(hold.runPct, 1)}</b>. That is{" "}
           <b className={`font-semibold ${diff >= 0 ? "text-up" : "text-warn"}`}>{pointsWord(diff)}</b> than doing nothing
-          {s.config.venue === "alpaca" ? " with Bitcoin, though this run traded shares" : ""}.
+          {s.config.portfolio
+            ? " with Bitcoin alone"
+            : venueClassOf(s.config) === "alpaca"
+              ? " with Bitcoin, though this run traded shares"
+              : ""}
+          .
         </>
       ),
     });
@@ -1392,6 +1495,26 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
         : !btc.times || btc.times.length < 2
           ? "Comparing with just holding Bitcoin needs Bitcoin prices with dates. The desktop app and a connected server keep those; this browser version does not, so the comparison is not available here."
           : "The Bitcoin prices in memory do not reach back to this run's dates, so the comparison with just holding is not available.",
+    });
+  }
+
+  // A portfolio against its own benchmark: Bitcoin and SPY at its split.
+  const blend = blendWords(s);
+  const mix = blend ? benchmark(s, now) : null;
+  if (blend) {
+    items.push({
+      icon: BarChart3,
+      tone: mix ? (mix.edgePct >= 0 ? "text-up" : "text-warn") : "text-faint",
+      text: mix ? (
+        <>
+          Its own benchmark, {blend} bought and held at the same split, went <b className={`tabular ${strong}`}>{signedPct(mix.btcPct, 1)}</b>
+          {mix.approximate ? " (from when a start price was known)" : ""}; the portfolio went{" "}
+          <b className={`tabular ${strong}`}>{signedPct(mix.runPct, 1)}</b>. That is{" "}
+          <b className={`font-semibold ${mix.edgePct >= 0 ? "text-up" : "text-warn"}`}>{pointsWord(mix.edgePct)}</b> than the blend.
+        </>
+      ) : (
+        `Its own benchmark is ${blend} bought and held; it shows once a start price for each part is known.`
+      ),
     });
   }
 

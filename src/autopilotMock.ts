@@ -13,7 +13,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { AutopilotStart, AutopilotStatus, AutopilotUpdate } from "./types";
 import { LIVE_PHRASE, floorAtStart } from "./autopilot";
 
-export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading" | "sidebyside";
+export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading" | "sidebyside" | "portfolio";
 
 export interface MockAutopilot {
   scenario: MockScenario;
@@ -33,7 +33,7 @@ function requested(): MockScenario | null {
   const q = new URLSearchParams(window.location.search);
   if (!q.has("mockAutopilot")) return null;
   const v = q.get("mockAutopilot");
-  return v === "paused" || v === "finished" || v === "empty" || v === "loading" || v === "sidebyside" ? v : "running";
+  return v === "paused" || v === "finished" || v === "empty" || v === "loading" || v === "sidebyside" || v === "portfolio" ? v : "running";
 }
 
 const H = 3_600_000;
@@ -299,7 +299,72 @@ function seed(scenario: MockScenario, names: Record<string, string>): State {
       list.push(s);
     });
   }
-  if (scenario !== "empty" && scenario !== "sidebyside") list.push(lost, won);
+  if (scenario === "portfolio") {
+    // One amount over crypto and US shares on the Alpaca paper account.
+    const start = now - 9 * DAY;
+    const hist = walk(41, start, now - H, H, 20_000, 0.0002, 0.003);
+    const p = summarise({
+      config: {
+        id: "mock-portfolio",
+        name: "Portfolio 6 Oct",
+        mode: "demo",
+        venue: "alpaca",
+        capitalUsd: 20_000,
+        sleeves: [],
+        stop: { maxLossPct: 10, onTakeProfit: "stop" },
+        flattenOnStop: true,
+        repickEveryHours: 24,
+        portfolio: true,
+      },
+      state: "running",
+      startedMs: start,
+      startCapital: 20_000,
+      equity: 0,
+      pnl: 0,
+      pnlPct: 0,
+      peakEquity: 20_000,
+      drawdownPct: 0,
+      floorEquity: 0,
+      trades: 14,
+      fees: 21.3,
+      bySleeve: [
+        { strategyId: "lab:tsmom_regime", name: n("lab:tsmom_regime"), weight: 0.72, pnl: 0, trades: 10, markets: [], why: "Auto pick, the best evidence of the 2 strategies it could run here; its class (Crypto) gets 72 % of the portfolio by evidence." },
+        { strategyId: "lab:etf_trend", name: n("lab:etf_trend"), weight: 0.28, pnl: 0, trades: 4, markets: [], why: "Auto pick, the only strategy it could run here; its class (US shares) gets 28 % of the portfolio by evidence." },
+      ],
+      lastAction: "Re-ran its pick with fresh evidence. Split by evidence: Crypto 72 % (was 82 %), US shares 28 % (was 18 %).",
+      history: hist,
+    });
+    const gain = p.pnl + p.fees;
+    p.bySleeve[0].pnl = gain * 0.7 - p.fees * 0.8;
+    p.bySleeve[1].pnl = gain * 0.3 - p.fees * 0.2;
+    p.classes = [
+      { class: "crypto", label: "Crypto", weight: 0.72, pnl: p.bySleeve[0].pnl, exposure: p.equity * 0.66, books: 1 },
+      {
+        class: "alpaca",
+        label: "US shares",
+        weight: 0.28,
+        pnl: p.bySleeve[1].pnl,
+        exposure: p.equity * 0.24,
+        books: 1,
+        note: "Rebalances only in the regular session: US regular session closed (next open 2026-10-16T09:30:00-04:00).",
+      },
+    ];
+    const i0 = btc.times.findIndex((t) => t >= start);
+    const btcPct = i0 >= 0 ? (btc.closes[btc.closes.length - 1] / btc.closes[i0] - 1) * 100 : 0;
+    const blendPct = 0.72 * btcPct + 0.28 * 1.1;
+    p.benchmark = {
+      symbol: "BTC/USD+SPY",
+      name: "Blend of 72 % BTC and 28 % SPY, bought and held",
+      returnPct: blendPct,
+      excessPct: p.pnlPct - blendPct,
+      legs: [
+        { symbol: "BTC/USD", weight: 0.72, returnPct: btcPct },
+        { symbol: "SPY", weight: 0.28, returnPct: 1.1 },
+      ],
+    };
+    list.push(p);
+  }
+  if (scenario !== "empty" && scenario !== "sidebyside" && scenario !== "portfolio") list.push(lost, won);
   return { scenario, list, btc, names };
 }
 
