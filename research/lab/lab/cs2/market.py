@@ -132,6 +132,8 @@ def category(name: str) -> str:
         return "case"
     if n.startswith("★"):
         return "knife_glove"
+    if n.startswith(("sealed graffiti", "graffiti |", "patch |", "charm |")):
+        return "other"
     if " | " in name and "(" in name:
         return "skin"
     if n.startswith("music kit"):
