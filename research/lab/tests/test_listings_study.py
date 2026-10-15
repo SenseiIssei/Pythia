@@ -153,3 +153,28 @@ def test_results_file_keeps_the_preregistration(tmp_path, monkeypatch):
     import json
     rep = json.loads((tmp_path / "reports" / "listing_effect" / "latest.json").read_text())
     assert rep["passed"] is False and rep["verdict"].startswith("No rule passes")
+
+
+def test_offline_run_on_a_tiny_lake(tmp_path, monkeypatch):
+    import json as js
+
+    import polars as pl
+
+    from lab.experiments import picks
+    monkeypatch.setattr(S, "ROOT", tmp_path)
+    monkeypatch.setattr(picks, "ROOT", tmp_path)
+    monkeypatch.setattr(S, "RESULTS", tmp_path)
+    monkeypatch.setattr(S, "REPORTS", tmp_path / "reports")
+    (tmp_path / "hist").mkdir()
+    (tmp_path / "hist" / "universe.json").write_text(js.dumps(["BTCUSDT", "NEWUSDT"]))
+    for sym, start, days in (("BTCUSDT", us(2020, 1, 1), 2300), ("NEWUSDT", us(2024, 5, 1), 60)):
+        t = np.arange(start, start + days * D, H, dtype=np.int64)
+        d = tmp_path / "hist" / "binance_spot" / "klines_1h" / f"symbol={sym}"
+        d.mkdir(parents=True)
+        pl.DataFrame({"open_time_us": t, "close": np.linspace(10, 12, len(t)),
+                      "quote_volume": np.ones(len(t))}).write_parquet(d / "all.parquet")
+    assert S.main(["--offline"]) == 0
+    rep = js.loads((tmp_path / "reports" / "listing_effect" / "latest.json").read_text())
+    assert rep["passed"] is False
+    assert rep["detail"]["n"]["A"] == 1
+    assert "Not measured: B and C (run offline)." in (tmp_path / "listings.md").read_text()

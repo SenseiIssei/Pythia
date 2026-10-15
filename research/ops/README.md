@@ -17,6 +17,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
+| every 10 minutes | listings watcher: new pairs on Alpaca, Binance, Coinbase, Kraken and Binance listing announcements, posted to Telegram (`lab.ops.listings`, seconds); then the listings paper book, off unless the W6 rule passed (`lab.paper.listings_book`) | `/etc/cron.d/pythia-listings` |
 
 ## Health check
 
@@ -242,3 +243,48 @@ container start). Without a request it does nothing. `/etc/cron.d/pythia-notify-
 The engine that serves the API needs the same folder: add
 `-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
 to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
+
+## New listings (W6)
+
+`lab.ops.listings` diffs the asset lists of Alpaca (only with the paper key
+pair in the environment), Binance, Coinbase and Kraken, and reads Binance's
+listing announcements. The first run only seeds what exists; after that every
+new pair is a row in `/srv/pythia-data/lake/listings/first_seen` (parquet,
+with its first-seen time), and every new coin, every new Alpaca pair and every
+new announcement goes out in one message through the same Telegram or webhook
+settings as the digest (`/etc/pythia/alerts.env`). The last 90 days are in
+`reports/listings/recent.json`, which the engine serves in `/api/lab` and the
+Markets page shows as New listings. A venue that fails is skipped for that run
+and named on the page.
+
+Put the Alpaca paper pair (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, the same
+pair as for the demo) in its own env file, readable by root only, for example
+`/etc/pythia/alpaca-paper.env`; without it the watcher still runs and says
+"Alpaca: unknown". `/etc/cron.d/pythia-listings`:
+
+```cron
+# Pythia: new coin listings every 10 minutes, posted to Telegram; then the listings paper book (off unless W6 passed).
+*/10 * * * * root docker run --rm --memory 512m --env-file /etc/pythia/alerts.env --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.ops.listings && python -m lab.paper.listings_book' >> /var/log/pythia-listings.log 2>&1
+```
+
+Try it once by hand first (prints, writes and posts nothing):
+
+```bash
+docker run --rm --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.listings --dry-run
+```
+
+The study (`lab.experiments.listings`, pre-registered in
+`research/lab/results/listings.md`) runs once by hand; it reads the lake's
+hourly bars and the public APIs of Coinbase, Kraken and Alpaca (listing dates
+are cached in `hist/listings`), about 20 to 30 minutes the first time:
+
+```bash
+docker run --rm --memory 4g --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.experiments.listings
+```
+
+It writes the results below the marker in `results/listings.md` (copy it back
+into the repo) and `reports/listing_effect/latest.json`, which turns the
+listings paper book on only if the pre-registered rule passed. The engine that
+serves `/api/lab` needs the listings folder if it does not mount the whole data
+folder: add `-v /srv/pythia-data/reports/listings:/data/reports/listings:ro`
+and `-e PYTHIA_DATA=/data` to its `docker run`.
