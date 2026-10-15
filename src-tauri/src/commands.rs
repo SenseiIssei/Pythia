@@ -734,6 +734,19 @@ pub fn lab_status() -> pythia_core::labview::LabStatus {
     pythia_core::labview::status()
 }
 
+/// The real money readiness check's risk step (docs/LIVE-READINESS.md).
+#[tauri::command]
+pub fn readiness_settings() -> pythia_core::readiness::ReadinessSettings {
+    pythia_core::readiness::settings()
+}
+
+/// Change the readiness check's risk step, 1 (careful) to 5 (bold). It changes
+/// what the daily check reports and nothing else; nothing is armed or traded.
+#[tauri::command]
+pub fn set_readiness_settings(risk_step: u8) -> Result<pythia_core::readiness::ReadinessSettings, String> {
+    pythia_core::readiness::set_settings(risk_step)
+}
+
 /// The CS2 skins board (prices, predictions, paper portfolio) from the synced data folder. Read-only.
 #[tauri::command]
 pub fn cs2_board() -> Option<pythia_core::labview::Cs2Board> {
