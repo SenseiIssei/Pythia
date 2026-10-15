@@ -1132,6 +1132,7 @@ def main_run(bar_min: int, resolution: bool) -> None:
     checks = []
     for pk in picks:
         tw = run_variant(tw_coins, pk.v, tw_ctx, from_day=SPLIT_D - 1, label_suffix=" · survivorship-free twin")
+        tw.row["is_base"] = float("nan")             # the twin is judged out of sample only
         late = run_variant(coins, pk.v, ctx, lag=LATENCY_BARS, label_suffix=" · one bar late")
         trials += [(tw.row["variant"], tw.mk.rets["base"][oos]), (late.row["variant"], late.mk.rets["base"][oos])]
         checks += [tw, late]
@@ -1353,7 +1354,37 @@ def write(res: dict) -> None:
         f"{pct(btc['cagr'])} a year, drawdown {pct(btc['dd'])}. Across the grid the maker fee a side at which "
         f"the average round trip would net zero has a median of {np.median(fees):.1f} bps (best "
         f"{fees.max():.1f}); Alpaca charges 15. Deflation pool {pool_['n_total']} trials, noise bar Sharpe "
-        f"{pool_['sr0_annual']:.2f} (registered pool {pool_['n_registered']}, bar {pool_['sr0_registered']:.2f}).\n\n")
+        f"{pool_['sr0_annual']:.2f} (registered pool {pool_['n_registered']}, bar {pool_['sr0_registered']:.2f}: "
+        f"fewer trials, but this study's own spread of Sharpes is wide, so its bar is not lower).\n\n")
+    fast = [r for r in grid if np.isfinite(r["hold_h"]) and r["hold_h"] < 48]
+    slow = [r for r in grid if np.isfinite(r["hold_h"]) and r["hold_h"] >= 48]
+    if fast:
+        fg = np.array([r["gross_bps_rt"] for r in fast])
+        ff = np.array([r["fee_needed_bps"] for r in fast])
+        fb = max(fast, key=lambda r: r["oos_base"])
+        md.append(
+            f"**The question asked: holds under two days.** {len(fast)} variants hold under 48 hours on average "
+            f"(families A and C, D's hours of day); {sum(r['oos_base'] > 0 for r in fast)} of them are positive "
+            f"out of sample in the base case and {sum(r['oos_taker'] > 0 for r in fast)} at taker cost. Their "
+            f"filled round trip earns a median {np.median(fg):.0f} bps before costs (best {fg.max():.0f}) against "
+            f"36 bps for two resting legs; the maker fee a side at which the median one breaks even is "
+            f"{np.median(ff):.1f} bps{' (below zero: it would need a rebate)' if np.median(ff) < 0 else ''}, and "
+            f"{int((ff > 15).sum())} of {len(fast)} clear Alpaca's 15. Against the same rules filled at the close, "
+            f"the resting fills change the gross per round trip by a median "
+            f"{np.median([r['gross_bps_rt'] - r['taker_gross_bps_rt'] for r in fast]):+.0f} bps: the fee saved is "
+            f"real, but a limit fills when the price comes to it, and the trades it misses are not the bad ones. "
+            f"The best of them out of sample (after the fact) is {fb['variant']} at {fb['oos_base']:.2f}, "
+            f"{fb['net_bps_rt']:.0f} bps net per round trip.")
+        bs = [r for r in slow if r["family"] == "B"]
+        if bs:
+            md.append(
+                f" The {len(slow)} variants that hold longer are not fast trades: family B (4h trend, pullback "
+                f"entries) holds a median {np.median([r['hold_h'] for r in bs]) / 24:.0f} days and "
+                f"{sum(r['oos_base'] > 0 for r in bs)} of its {len(bs)} variants are positive in the base case "
+                f"(median {np.median([r['oos_base'] for r in bs]):.2f}, at taker cost "
+                f"{np.median([r['oos_taker'] for r in bs]):.2f}); D's weekday and weekend windows hold 2 to 5 "
+                f"days.")
+        md.append("\n\n")
     md.append("### The picks against the pass rule\n\nPer family the best in-sample Sharpe in the base case. "
               "`rt_day` counts round trips across all coins per day out of sample, `fill_rate_orders` the share of "
               "entry orders with any fill, `net_bps_rt` the average round trip after the haircut, fees and fallback "
