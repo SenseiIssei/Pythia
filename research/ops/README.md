@@ -15,6 +15,8 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
+| 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
+| Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 
@@ -61,6 +63,42 @@ scp <exported>/forward/backtest/*.json pythia-vps:/srv/pythia-data/reports/forwa
 
 Re-export after an experiment is re-run. Books without a file fall back to an
 approximate band from their report (growth and volatility), marked as such.
+
+## Strategy factory
+
+`lab.factory` (see "Strategy factory" in `research/lab/README.md`) searches a
+fixed budget of new long-only strategies on the in-sample window, counts each
+one in `/srv/pythia-data/factory/ledger.jsonl` (a ledger that only grows, on
+top of the 377 hand-study trials), sends six a week to the held-back window,
+and runs the survivors 30 days as forward shadow books before anything can
+become a paper book. It reads the daily panel the paper-families job caches in
+`/srv/pythia-data/lab-cache`, so it runs after 04:15. It writes only
+`/srv/pythia-data/factory/` and `/srv/pythia-data/reports/factory/`; a
+promoted genome is listed in `factory/promoted.json`, which the paper-families
+job steps as one more paper book. It has no way to reach the engines, live
+settings or money. With `--notify` the weekly digest (what was tried, what
+survived the held-back window and why, the shadow books) goes to the webhook or
+Telegram chat in `/etc/pythia/alerts.env`; the daily step posts only when a
+shadow book is decided.
+
+The first run was made on the PC; its trials and its shadow book are in
+`research/lab/results/factory_seed/`, which every run merges into
+`/srv/pythia-data/factory/` first (only what is missing). `/opt/pythia-lab`
+must carry that folder, as it carries the rest of `research/lab`.
+
+`/etc/cron.d/pythia-factory`:
+
+```cron
+# Pythia: strategy factory. Daily forward shadow step, weekly search and held-back checks with a digest. Paper only; never touches live settings or money.
+0 5 * * * root docker run --rm --memory 2g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.factory shadow --notify >> /var/log/pythia-factory.log 2>&1
+30 7 * * 0 root docker run --rm --cpus 4 --memory 4g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.factory --notify >> /var/log/pythia-factory.log 2>&1
+```
+
+A larger or smaller week: `--budget N`. See the last digest without posting:
+
+```bash
+docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.factory digest --dry-run
+```
 
 ## Learning loop
 
