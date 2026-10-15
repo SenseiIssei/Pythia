@@ -215,6 +215,21 @@ def test_later_days_use_our_snapshots_and_find_new_cases_and_rising_ones(tmp_pat
     assert {"mover", "new_drop", "case_rise"} <= kinds
 
 
+def test_a_recent_operation_or_drop_pool_event_is_the_last_drop(tmp_path):
+    day = one_day(tmp_path)
+    watch = {"cases": [{"name": "Fever Case", "released": "2025-03-31"}],
+             "operations": [{"name": "Test Op", "start": "2026-10-05", "end": "2027-01-01", "case": "Op Case"}],
+             "events": [{"date": "2026-10-10", "kind": "left_drop_pool", "items": ["Fever Case"]},
+                        {"date": "not a date", "kind": "x"}]}
+    hist = trends.history(tmp_path)
+    df, _ = trends.frame(hist, market.latest_daily(tmp_path, "skinport"))
+    d = trends.drops(hist, df, day, watch)
+    assert [e["kind"] for e in d["recent"]] == ["operation start", "left_drop_pool"]
+    al = d["around_last"]
+    assert al["kind"] == "left_drop_pool" and al["items"] == ["Fever Case"] and al["days_ago"] == 5
+    assert al["other_cases_since"] is None and "no snapshot from before" in al["other_cases_since_basis"]
+
+
 def test_momentum_from_snapshots_finds_a_planted_trend(tmp_path):
     rng = np.random.default_rng(4)
     names = [f"AK-47 | Planted {i} (Field-Tested)" for i in range(120)]
@@ -283,6 +298,9 @@ def test_the_hourly_board_carries_the_trends(tmp_path):
     from lab.cs2 import run as cs2run
     one_day(tmp_path)
     trends.run(tmp_path, now_ms=NOW, send=False)
+    st = json.loads((tmp_path / "cs2" / "trends" / "alerts_state.json").read_text(encoding="utf-8"))
+    assert st.get("alerts") == {} and "last_summary" not in st, "--no-alerts marks nothing as said"
+    assert not (tmp_path / "cs2" / "trends" / "alerts.jsonl").exists()
     # the hourly job needs a Skinport hourly snapshot; the trends ride along on its board
     p = tmp_path / "cs2" / "skinport_items" / "date=2026-10-15" / "1405.parquet"
     p.parent.mkdir(parents=True, exist_ok=True)

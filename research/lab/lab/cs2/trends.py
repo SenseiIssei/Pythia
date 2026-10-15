@@ -386,6 +386,12 @@ def drops(hist: pl.DataFrame, df: pl.DataFrame, day: date, watch: dict | None = 
             events.append({"date": date.fromisoformat(c["released"]), "kind": "release", "items": [c["name"]]})
         except (KeyError, ValueError):
             continue
+    for o in watch.get("operations") or []:
+        try:
+            events.append({"date": date.fromisoformat(o["start"]), "kind": "operation start",
+                           "items": [o.get("case") or o.get("name") or "operation"]})
+        except (KeyError, ValueError, TypeError):
+            continue
     for e in watch.get("events") or []:
         try:
             events.append({"date": date.fromisoformat(e["date"]), "kind": e.get("kind") or "event",
@@ -733,19 +739,27 @@ def run(root: Path | None = None, now_ms: int | None = None, dry_run: bool = Fal
     st_path = base / "trends" / "alerts_state.json"
     state = market.read_json(st_path) or {}
     fresh, new_state = fresh_alerts(s["alerts"], state.get("alerts") or {}, s["date"])
+    live = send and not dry_run
     sent = []
+
+    def said(res: dict) -> bool:
+        """Posted, or nowhere to post to; not when held by quiet hours, not
+        delivered, or not meant to be sent (a dry run, --no-alerts)."""
+        return live and res["reason"] != "quiet" and not (res["reason"] is None and not res["delivered"])
+
+    alerts_said = False
     if fresh:
-        res = notify.send("cs2", [alert_card(fresh)], now=now_ms, dry_run=dry_run or not send, poster=poster)
+        res = notify.send("cs2", [alert_card(fresh)], now=now_ms, dry_run=not live, poster=poster)
         sent.append({"what": "alerts", "n": len(fresh), "delivered": res["delivered"], "reason": res["reason"]})
-        if res["reason"] == "quiet" or (res["reason"] is None and not res["delivered"]):
-            new_state = state.get("alerts") or {}  # not said: next run tries again
-    summary_due = state.get("last_summary") != s["date"]
-    if summary_due:
-        image = None if dry_run or not send else make_chart(s, base)
-        res = notify.send("cs2", [summary_card(s)], image=image, now=now_ms, dry_run=dry_run or not send,
+        alerts_said = said(res)
+    if not alerts_said:
+        new_state = state.get("alerts") or {}  # not said: the next run tries again
+    if state.get("last_summary") != s["date"]:
+        image = make_chart(s, base) if live else None
+        res = notify.send("cs2", [summary_card(s)], image=image, now=now_ms, dry_run=not live,
                           poster=poster, hold_in_quiet=False)
         sent.append({"what": "summary", "delivered": res["delivered"], "reason": res["reason"]})
-        if res["reason"] != "quiet" and not (res["reason"] is None and not res["delivered"]):
+        if said(res):
             state["last_summary"] = s["date"]
     s["sent"] = sent
     if dry_run:
@@ -753,7 +767,7 @@ def run(root: Path | None = None, now_ms: int | None = None, dry_run: bool = Fal
         return s
     state["alerts"] = new_state
     _write_json(st_path, state)
-    if fresh:
+    if alerts_said:
         with (base / "trends" / "alerts.jsonl").open("a", encoding="utf-8") as fh:
             for a in fresh:
                 fh.write(json.dumps(clean({"ts_ms": now_ms, **a})) + "\n")
