@@ -10,7 +10,7 @@ their next refresh.
 <PYTHIA_DATA>/reports/<name>/latest.json
 ```
 
-`<name>` is the job's folder name (`listings`, `trending`, `cs2`, `model_zoo`,
+`<name>` is the job's folder name (`listings`, `trending`, `cs2`, `models`,
 ...). Folders starting with `_` or `.` are private to the lab and skipped.
 `report.write(name, markdown, data)` in `research/lab/lab/report.py` already
 writes this file; dated copies next to it are ignored by the app.
