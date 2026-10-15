@@ -100,6 +100,22 @@ jobs:
     lock_wait: 2h
     replaces: pythia-paper-families
 
+  - name: paper-memes
+    description: EXPERIMENT memecoin paper books (rotation, tsmom) and their experimental engine signals
+    schedule: "30 4 * * *"
+    command: python -m lab.paper.memes
+    resources: {cpus: 1, memory: 1g}
+    timeout: 20m
+    grace: 30m
+
+  - name: paper-trend4h
+    description: EXPERIMENT 4h trend with pullback maker entries, hourly fills and exits, experimental signal
+    schedule: "7 * * * *"
+    command: python -m lab.paper.trend4h
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+    grace: 30m
+
   - name: paper-m4
     description: M4 shadow paper book, market-neutral on perps
     schedule: "45 4 * * *"
@@ -271,6 +287,25 @@ jobs:
     timeout: 10m
     grace: 20m
     replaces: pythia-trending
+
+  - name: pumpfun
+    description: pump.fun PAPER watcher, graduations via GeckoTerminal, marks via DexScreener, read only, no wallet
+    schedule: "*/5 * * * *"
+    command: python -m lab.paper.pumpfun
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 512m}
+    timeout: 4m
+    grace: 10m
+
+  - name: pumpfun-report
+    description: pump.fun paper books, daily report (reports/pumpfun) and its Telegram card
+    schedule: "40 6 * * *"
+    command: python -m lab.paper.pumpfun --report
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    lock: pumpfun
+    lock_wait: 5m
 
   - name: cs2-collect
     description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist

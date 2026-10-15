@@ -89,7 +89,17 @@ BOOKS: dict[str, str] = {
     "m4_ls": "M4 market-neutral (perps)",
     "picks_ls": "M2 market-neutral (perps)",
     "picks_ls_v2": "M2 v2 market-neutral (perps)",
+    # Experiments: failed the lab's bar, run on paper for forward evidence (lab.paper.experimental).
+    "memes_rotation": "EXPERIMENT: memecoins, top 1 by 28-day return, BTC gate",
+    "memes_tsmom": "EXPERIMENT: memecoins, momentum 28d, BTC gate",
+    "trend4h_pullback": "EXPERIMENT: 4h trend, pullback maker entries, Alpaca coins",
 }
+# Books that failed the bar and run anyway: their rows and evidence say so.
+EXPERIMENT_PREFIXES = ("memes_rotation", "memes_tsmom", "trend4h_pullback", "pumpfun_")
+
+
+def is_experiment(book: str) -> bool:
+    return book.startswith(EXPERIMENT_PREFIXES)
 # picks_ls journals book the modelled cost (10 bps per unit of turnover) as their fill cost.
 MODELLED_ONLY = {"picks_ls": 0.0010, "picks_ls_v2": 0.0010}
 PICKS_LS_ROW = "top 10 / bottom 10 of the 50 most liquid perps · no paying shorts"
@@ -293,6 +303,12 @@ def report_stats(book: str, root: Path | None = None) -> dict | None:
                 x for x in rep["picks"] if x["family"].startswith("slower"))
             return {"cagr": p["hold_cagr_15bps"], "vol": vol_from_sharpe(p["hold_cagr_15bps"], p["hold_sharpe_15bps"]),
                     "max_dd": p["hold_max_dd_15bps"], "source": "xs_daily report"}
+        if book in ("memes_rotation", "memes_tsmom", "trend4h_pullback"):
+            from .experimental import evidence as experiment_evidence
+            ev = experiment_evidence(book)
+            vol = ev.get("oos_vol") or vol_from_sharpe(ev["oos_cagr"], ev["oos_sharpe"])
+            return {"cagr": ev["oos_cagr"], "vol": vol, "max_dd": ev.get("oos_max_dd"),
+                    "source": f"{ev['report']} study (experiment, failed deflation)"}
         if book in ("picks_ls", "picks_ls_v2"):
             rep = _read_json(*(r / book / "latest.json" for r in reports))
             p = next(x for x in rep["rows"] if x["strategy"] == PICKS_LS_ROW)
@@ -356,7 +372,8 @@ def _rebalanced(r: dict) -> bool:
 
 def book_row(book: str, journal: list[dict], variant: str = "") -> dict:
     """Everything the report says about one paper book, from its journal."""
-    base = {"kind": "book", "name": book, "label": BOOKS.get(book, book), "variant": variant}
+    base = {"kind": "book", "name": book, "label": BOOKS.get(book, book), "variant": variant,
+            "experimental": is_experiment(book)}
     if not journal:
         status, text = book_verdict(0, 0, None, False, None, False, 0.0)
         return {**base, "days": 0, "status": status, "sentence": text,
@@ -833,6 +850,8 @@ def evidence_entry(row: dict) -> dict:
     if row.get("kind") == "autopilot":
         out["state"] = row.get("state")
         out["started_ms"] = row.get("started_ms")
+    if row.get("experimental"):
+        out["experimental"] = True
     return out
 
 
