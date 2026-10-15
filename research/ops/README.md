@@ -235,10 +235,12 @@ are in the docstring of `lab/collect/pokemon.py`; results in
 - The daily job also writes `reports/pokemon/latest.json` with the lab feed
   header (docs/LAB-FEEDS.md), so the Research page and Home insights pick
   it up with the other feeds.
-- `--sealed` adds sealed product from tcgcsv.com (TCGplayer's daily dump,
-  the 24 newest groups, about 50 requests). It is optional and was not
-  reachable from where this was built; if it fails the card snapshot is
-  still written and the meta file says so. Drop the flag to skip it.
+- `--sealed` reads tcgcsv.com (TCGplayer's daily dump): sealed product and
+  the single cards of the 24 newest groups plus every main set of the last
+  two years and the next releases (about 100 requests). Keep it on: the
+  Pokemon TCG API has no price for any 2026 set, so the new-set study and
+  the Cards page's New sets come only from here. If it fails the card
+  snapshot is still written and the meta file says so.
 - Card alerts use the same Telegram bot or webhook as the digest, with
   `<prefix> cards` as the first line.
 - Reprint announcements: list them by hand in
@@ -252,7 +254,7 @@ are in the docstring of `lab/collect/pokemon.py`; results in
 
 ```bash
 docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.pokemon --max-pages 2 --dry-run
-docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.pokemon && python -m lab.pokemon.daily --no-alerts'
+docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.pokemon --sealed && python -m lab.pokemon.daily --no-alerts'
 ```
 
 The health check reports "pokemon cards" red when the paper collection has no
