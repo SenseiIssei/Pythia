@@ -14,6 +14,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
+| 07:05 | Pokemon cards: price snapshot (`lab.collect.pokemon`, 3 to 5 minutes keyless), then studies, fair value, forecasts, the paper collection and card alerts (`lab.pokemon.daily`, seconds at first, up to about 20 minutes with a year of history). Data and play money only | `/etc/cron.d/pythia-pokemon` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
@@ -162,6 +163,48 @@ Knobs, all optional, in the server's environment: `PYTHIA_FEED_QUOTES` and
 `PYTHIA_FEED_CANDLES` (comma lists of `kraken-ws,kraken,binance,coinbase,bybit,okx`),
 `PYTHIA_FEED_STREAM=0`, `PYTHIA_FEED_STALE_SEC`, `PYTHIA_FEED_RECOVER_SEC`,
 `PYTHIA_FEED_MAX_DEVIATION_PCT`, `PYTHIA_FEED_ALERT_MIN`.
+
+## Pokemon cards
+
+Data, forecasts, a paper collection and alerts. No order of any kind: the
+cards are physical and the owner trades them by hand. Sources and limits
+are in the docstring of `lab/collect/pokemon.py`; results in
+`research/lab/results/pokemon.md`.
+
+`/etc/cron.d/pythia-pokemon`:
+
+```cron
+# Pythia: Pokemon card prices into the lake, then studies, forecasts, the paper collection and card alerts. Never buys or sells.
+5 7 * * * root docker run --rm --cpus 2 --memory 6g --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.pokemon --sealed && python -m lab.pokemon.daily' >> /var/log/pythia-pokemon.log 2>&1
+```
+
+- The Pokemon TCG API works without a key (about 30 requests a minute,
+  1,000 a day; a run is about 90). With a free key from
+  https://dev.pokemontcg.io add `POKEMONTCG_API_KEY=<key>` to
+  `/etc/pythia/alerts.env` (root-only); the collector then spaces requests
+  0.3 s instead of 2.1 s. The key is read from the environment only.
+- `--sealed` adds sealed product from tcgcsv.com (TCGplayer's daily dump,
+  the 24 newest groups, about 50 requests). It is optional and was not
+  reachable from where this was built; if it fails the card snapshot is
+  still written and the meta file says so. Drop the flag to skip it.
+- Card alerts use the same Telegram bot or webhook as the digest, with
+  `<prefix> cards` as the first line.
+- Reprint announcements: list them by hand in
+  `/srv/pythia-data/pokemon/reprints.csv` (`name,announced`, one card name
+  and a YYYY-MM-DD date per line); the reprint study picks them up.
+- The Cards page reads `pokemon/ui/latest.json` through the engine. Add
+  `-v /srv/pythia-data/pokemon/ui:/data/pokemon/ui:ro -e PYTHIA_DATA=/data`
+  to the `docker run` of the engine that serves the app and recreate it; the
+  desktop app reads the synced folder as for the Lab page.
+- First run by hand, to see it work:
+
+```bash
+docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.collect.pokemon --max-pages 2 --dry-run
+docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.pokemon && python -m lab.pokemon.daily --no-alerts'
+```
+
+The health check reports "pokemon cards" red when the paper collection has no
+row for today after 08:00 UTC, once `/srv/pythia-data/pokemon` exists.
 
 ## Alerts and the daily digest
 

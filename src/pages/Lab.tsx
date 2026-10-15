@@ -43,6 +43,7 @@ const REPORT_LABEL: Record<string, string> = {
   paper_review: "Paper books vs backtests",
   forward: "Forward tests, daily",
   learn: "Learning loop, nightly",
+  pokemon: "Pokemon cards, daily (data and play money)",
 };
 
 const usd = (v: number, digits: number) =>
