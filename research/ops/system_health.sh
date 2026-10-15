@@ -116,6 +116,23 @@ print('%s|%s' % ('true' if h.get('ok') else 'false', '; '.join(parts)))
     *) add "market data" false "no answer from the engine" ;;
   esac
 
+  # CS2 collector (hourly at :12): the last run within three hours and both Skinport calls ok
+  local cs
+  cs=$(python3 -c "
+import json, sys, time
+from datetime import datetime, timezone
+s = json.load(open('$data/cs2/collector.json'))
+age = (time.time() - datetime.strptime(s['at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp()) / 3600
+ok = s.get('ok') and age < 3
+print('%s|last run %s UTC, %s items, Steam %s of %s%s' % ('true' if ok else 'false', s['at'][:16], s.get('skinport_items'),
+      s.get('steam_ok'), s.get('steam_requested'), ', rate limited' if s.get('steam_rate_limited') else ''))
+" 2>/dev/null)
+  case "$cs" in
+    true\|*) add "cs2 collector" true "${cs#true|}" ;;
+    false\|*) add "cs2 collector" false "${cs#false|}" ;;
+    *) add "cs2 collector" false "no collector.json" ;;
+  esac
+
   local free
   free=$(df -BG --output=avail "$data" | tail -1 | tr -dc 0-9)
   if [ "${free:-0}" -gt 20 ]; then add "disk" true "${free} GB free"; else add "disk" false "only ${free} GB free"; fi
