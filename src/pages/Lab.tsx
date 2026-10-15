@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Microscope, RefreshCw } from "lucide-react";
 import { Badge, Button, Card, List, Notice, Page, Sparkline, changeTone, money, signedPct } from "../design";
-import { KeyStats, LoadingRows, Meter, Nothing, Row, Section, Term, num, pct, plural, type Stat } from "../pagekit";
+import { KeyStats, LoadingRows, Meter, Nothing, Row, Section, Term, num, pct, plural, type Stat, type StatTone } from "../pagekit";
 import { coinName, forwardTally, labChip } from "../pagekit/insight";
 import { liveMode } from "../live";
 import {
@@ -12,6 +12,7 @@ import {
   labStatus,
   type ForwardReport,
   type ForwardRow,
+  type JobsStatus,
   type LabStatus,
   type LearnDigest,
   type PaperBook,
@@ -296,6 +297,44 @@ function ForwardSection({ f }: { f: ForwardReport }) {
   );
 }
 
+function when(iso: string | null | undefined): string {
+  return iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "-";
+}
+
+const JOB_TONE: Record<string, StatTone> = { ok: "up", running: "flat", never: "plain", disabled: "plain", legacy: "plain" };
+
+/** The job table's status: every scheduled job, its last and next run. */
+function JobsSection({ j }: { j: JobsStatus }) {
+  const jobs = [...j.jobs].sort((a, b) => Number(a.ok) - Number(b.ok) || Number(b.enabled) - Number(a.enabled));
+  return (
+    <Section
+      title="Scheduled jobs"
+      hint={`From the job table on the lab machine, updated ${when(j.at)}.`}
+      right={<Badge tone={j.ok ? "good" : "bad"}>{j.ok ? "all on time" : `${j.failing.length} need a look`}</Badge>}
+    >
+      <List>
+        {jobs.map((x) => (
+          <Row
+            key={x.name}
+            label={<span className={x.enabled ? "" : "opacity-50"}>{x.name}</span>}
+            sub={
+              <span className="break-words">
+                {x.ok ? x.description : x.detail}
+                {" · "}
+                {x.last ? `last ${when(x.last.start)}, ${x.last.status}` : "no run yet"}
+                {" · "}
+                {x.nextRun ? `next ${when(x.nextRun)}` : x.after.length ? `after ${x.after.join(", ")}` : "by hand"}
+              </span>
+            }
+            value={x.state}
+            tone={JOB_TONE[x.state] ?? "down"}
+          />
+        ))}
+      </List>
+    </Section>
+  );
+}
+
 function BookRow({ b }: { b: PaperBook }) {
   const longs = b.lastRebalance.longs?.split(" ").filter(Boolean) ?? [];
   const shorts = b.lastRebalance.shorts?.split(" ").filter(Boolean) ?? [];
@@ -449,6 +488,8 @@ export function Lab() {
           </List>
         </Section>
       )}
+
+      {s?.jobs && <JobsSection j={s.jobs} />}
 
       {s?.forward && <ForwardSection f={s.forward} />}
 
