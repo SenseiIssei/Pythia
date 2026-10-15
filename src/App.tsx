@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Menu, Minus, X, Power, ShieldCheck, TriangleAlert } from "lucide-react";
-import { navFor, isVisible, type PageId } from "./nav";
+import { activeTab, navFor, isVisible, resolvePage, tabsFor, type PageId } from "./nav";
 import { onOpenPage } from "./navigate";
+import { TabBar } from "./design/flows";
 import { setUiMode, useUiMode, type UiMode } from "./uiMode";
 import { Home as HomePage } from "./pages/Home";
 import { StoreProvider, useStore } from "./store";
@@ -13,8 +14,9 @@ import { isTauri } from "./engine";
 import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
-import { Autopilot } from "./pages/Autopilot";
-import { Practice } from "./pages/Practice";
+import { Autopilots } from "./pages/Autopilots";
+import { Activity } from "./pages/Activity";
+import { Notifications } from "./pages/Notifications";
 import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Positions } from "./pages/Positions";
@@ -36,10 +38,13 @@ import { Journal } from "./pages/Journal";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 
-const PAGES: Record<PageId, () => ReactNode> = {
+// "practice" is not a page of its own any more: resolvePage sends it to the
+// Autopilot page, which shows what Practice showed.
+const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
   home: HomePage,
-  practice: Practice,
-  autopilot: Autopilot,
+  autopilot: Autopilots,
+  activity: Activity,
+  notifications: Notifications,
   dashboard: Dashboard,
   markets: Markets,
   positions: Positions,
@@ -202,7 +207,7 @@ function Chrome() {
   const sections = [...new Set(nav.map((n) => n.section))];
   // Leaving advanced mode while on an advanced page would strand the user on a
   // screen with no way back to it in the sidebar.
-  const current = isVisible(page, mode) ? page : "home";
+  const current = isVisible(page, mode) ? (resolvePage(page) as keyof typeof PAGES) : "home";
   const live = portfolio.mode === "live";
   const simple = mode === "simple";
 
@@ -384,7 +389,7 @@ function Chrome() {
 
         {/* page host: all pages mounted, inactive hidden, for instant switching */}
         <main ref={mainRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-          {(Object.keys(PAGES) as PageId[]).map((id) => {
+          {(Object.keys(PAGES) as (keyof typeof PAGES)[]).map((id) => {
             const Page = PAGES[id];
             return (
               <div
@@ -400,6 +405,16 @@ function Chrome() {
           })}
         </main>
       </div>
+
+      {/* a phone gets bottom tabs for the everyday pages; the rest sit behind More */}
+      {narrow && (
+        <TabBar<PageId | "more">
+          label="Main pages"
+          items={[...tabsFor(mode), { id: "more", label: "More", icon: Menu }]}
+          active={sidebar ? "more" : activeTab(current)}
+          onSelect={(id) => (id === "more" ? setSidebar((s) => !s) : go(id))}
+        />
+      )}
     </div>
   );
 }

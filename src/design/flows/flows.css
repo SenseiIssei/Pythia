@@ -1,0 +1,92 @@
+/* Stand-in tokens for the redesigned flows (Autopilot, Activity,
+   Notifications) until the shared design system in src/design lands. Calm
+   and mostly white, with a true black dark mode. Swap the variables for the
+   shared tokens and the flows follow. */
+.fl {
+  --fl-bg: #ffffff;
+  --fl-surface: #ffffff;
+  --fl-surface-2: #f3f3f5;
+  --fl-line: #e6e6ea;
+  --fl-text: #0b0b0d;
+  --fl-muted: #5f5f6b;
+  --fl-up: #0a7d3b;
+  --fl-down: #c8102e;
+  --fl-warn: #8a5a00;
+  --fl-primary: #0b0b0d;
+  --fl-on-primary: #ffffff;
+  --fl-on-down: #ffffff;
+  --fl-scrim: rgba(0, 0, 0, 0.35);
+  color: var(--fl-text);
+  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .fl {
+    --fl-bg: #000000;
+    --fl-surface: #111113;
+    --fl-surface-2: #1c1c1f;
+    --fl-line: #26262a;
+    --fl-text: #f5f5f7;
+    --fl-muted: #a1a1aa;
+    --fl-up: #3ddc84;
+    --fl-down: #ff6b6b;
+    --fl-warn: #f5b942;
+    --fl-primary: #f5f5f7;
+    --fl-on-primary: #000000;
+    --fl-on-down: #000000;
+    --fl-scrim: rgba(0, 0, 0, 0.6);
+  }
+}
+:root[data-theme="dark"] .fl,
+.dark .fl {
+  --fl-bg: #000000;
+  --fl-surface: #111113;
+  --fl-surface-2: #1c1c1f;
+  --fl-line: #26262a;
+  --fl-text: #f5f5f7;
+  --fl-muted: #a1a1aa;
+  --fl-up: #3ddc84;
+  --fl-down: #ff6b6b;
+  --fl-warn: #f5b942;
+  --fl-primary: #f5f5f7;
+  --fl-on-primary: #000000;
+  --fl-on-down: #000000;
+  --fl-scrim: rgba(0, 0, 0, 0.6);
+}
+
+.fl-page { background: var(--fl-bg); min-height: calc(100dvh - 96px); }
+.fl-sheet:focus, .fl-sheet:focus-visible { outline: none; box-shadow: none; }
+.fl-card { background: var(--fl-surface); border: 1px solid var(--fl-line); border-radius: 16px; }
+.fl-surface-2 { background: var(--fl-surface-2); }
+.fl-line { border-color: var(--fl-line); }
+.fl-text { color: var(--fl-text); }
+.fl-muted { color: var(--fl-muted); }
+.fl-up { color: var(--fl-up); }
+.fl-down { color: var(--fl-down); }
+.fl-warn { color: var(--fl-warn); }
+.fl-num { font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.fl-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 44px; padding: 0 18px; border-radius: 999px; font-weight: 600; font-size: 15px;
+  transition: opacity 0.15s ease;
+}
+.fl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.fl-btn:focus-visible, .fl-focus:focus-visible { outline: 2px solid var(--fl-text); outline-offset: 2px; }
+.fl-btn-primary { background: var(--fl-primary); color: var(--fl-on-primary); }
+.fl-btn-secondary { background: var(--fl-surface-2); color: var(--fl-text); }
+.fl-btn-danger { background: var(--fl-down); color: var(--fl-on-down); }
+.fl-tabbar {
+  background: var(--fl-surface); border-top: 1px solid var(--fl-line);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.fl-btn-ghost { background: transparent; color: var(--fl-text); }
+.fl-input {
+  width: 100%; min-height: 48px; padding: 0 14px; border-radius: 12px;
+  background: var(--fl-surface-2); color: var(--fl-text); border: 1px solid transparent;
+}
+.fl-input:focus { outline: none; border-color: var(--fl-text); }
+.fl-scrim { background: var(--fl-scrim); }
+.fl-sheet { background: var(--fl-surface); color: var(--fl-text); }
+.fl-skeleton { background: var(--fl-surface-2); border-radius: 8px; animation: fl-pulse 1.4s ease-in-out infinite; }
+@keyframes fl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@media (prefers-reduced-motion: reduce) { .fl-skeleton { animation: none; } }
