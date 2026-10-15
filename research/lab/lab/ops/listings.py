@@ -398,7 +398,8 @@ def feed_summary(listings: list[dict], venues: dict, now_ms: int) -> dict:
     worthy = [e for e in listings if alert_worthy({"event": e.get("event") or "", "venue": e.get("venue") or "",
                                                    "new_base": bool(e.get("new_base"))})]
     day = [e for e in worthy if now_ms - int(e.get("ts_ms") or 0) <= notify.DAY_MS]
-    down = sorted(v for v, s in venues.items() if not (s or {}).get("ok"))
+    nokeys = [v for v, s in venues.items() if (s or {}).get("error") == "no Alpaca keys"]
+    down = sorted(v for v, s in venues.items() if not (s or {}).get("ok") and v not in nokeys)
     up = [v for v, s in venues.items() if (s or {}).get("ok")]
     status = "bad" if venues and not up else ("watch" if day or down else "ok")
     coins: list[str] = []
@@ -411,6 +412,8 @@ def feed_summary(listings: list[dict], venues: dict, now_ms: int) -> dict:
     head += f" {len(worthy)} in 90 days."
     if down:
         head += " Not answering: " + ", ".join(VENUE_NAMES.get(v, v) for v in down) + "."
+    if nokeys:
+        head += " Alpaca not watched (no keys)."
     items, seen = [], set()
     for e in worthy:
         key = (e.get("venue"), e.get("base") or e.get("symbol"), e.get("event"))
