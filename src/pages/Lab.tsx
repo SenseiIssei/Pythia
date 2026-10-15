@@ -44,8 +44,7 @@ const REPORT_LABEL: Record<string, string> = {
   paper_review: "Paper books vs backtests",
   forward: "Forward tests, daily",
   learn: "Learning loop, nightly",
-  cs2: "CS2 skins, research",
-  cs2_board: "CS2 skins, hourly board",
+  cs2: "CS2 skins, hourly feed and board",
   cs2_weekly: "CS2 skins, weekly paper report",
 };
 

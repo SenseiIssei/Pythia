@@ -1,11 +1,12 @@
 // The CS2 skins board, read-only (pythia-core labview::Cs2Board, written
-// hourly by lab.cs2.run). Prices, predictions and a play-money portfolio;
-// nothing in Pythia buys or sells skins.
+// hourly by lab.cs2.run to reports/cs2/latest.json next to its lab feed
+// header). Prices, predictions and a play-money portfolio; nothing in Pythia
+// buys or sells skins.
 
 import { invoke } from "@tauri-apps/api/core";
 import { liveMode } from "./live";
 import { serverUrl } from "./engine/serverEngine";
-import type { Tone } from "./components/ui";
+import type { ChangeTone, ChipTone } from "./design";
 
 export type Cs2Signal = "buy" | "hold" | "avoid" | "gap" | "drop";
 
@@ -51,10 +52,31 @@ export interface Cs2Portfolio {
   equityCurve: number[];
 }
 
+/** The daily research summary (lab/experiments/cs2.py `summary`). Every field may be missing. */
+export interface Cs2Research {
+  date?: string;
+  verdict?: string;
+  historyDays?: number;
+  firstDay?: string;
+  spread?: { status?: string; itemsToday?: number | null; steamPremiumMedian?: number | null; toSteamMedian?: number | null; toSkinportMedian?: number | null };
+  momentumIc?: number | null;
+  momentumIcLiquid?: number | null;
+  bootstrapIc7?: number | null;
+  bootstrapIc30?: number | null;
+  bootstrapItems?: number | null;
+  caseAgeIc?: number | null;
+  walkForward7?: string;
+  walkForward30?: string;
+}
+
 export interface Cs2Board {
   generated: string;
   generatedMs: number;
+  /** "ok" with rows, "no data" before the first collection. */
   status: string;
+  /** The lab feed's status: ok, watch or bad (empty on boards from before the feed header). */
+  feedStatus: string;
+  headline: string;
   verdict: string;
   currency: string;
   historyDays: number;
@@ -63,6 +85,7 @@ export interface Cs2Board {
   model: { src7: string; src30: string; note: string };
   portfolio: Cs2Portfolio | null;
   alerts: { tsMs: number | null; kind: string; name: string; text: string }[];
+  research: Cs2Research | null;
   items: Cs2Item[];
 }
 
@@ -80,34 +103,64 @@ export async function cs2Board(): Promise<Cs2Board | null> {
   }
 }
 
-export const SIGNAL: Record<string, { label: string; tone: Tone; help: string }> = {
-  buy: { label: "Buy idea", tone: "green", help: "The model expects more than the fees over its horizon. Paper only." },
+export const SIGNAL: Record<string, { label: string; tone: ChipTone; help: string }> = {
+  buy: { label: "Buy idea", tone: "good", help: "The model expects at least 3 % more than the fees over its horizon. Paper only." },
   hold: { label: "Hold", tone: "neutral", help: "Nothing clears the fees either way." },
-  avoid: { label: "Avoid", tone: "red", help: "The model expects a drop of 5 % or more over 7 days." },
-  gap: { label: "Gap", tone: "cyan", help: "Skinport and Steam differ by more than the fees. Check it by hand." },
-  drop: { label: "Drop", tone: "amber", help: "A liquid item fell well below its 30-day median." },
+  avoid: { label: "Avoid", tone: "bad", help: "The model expects a drop of 5 % or more over 7 days." },
+  gap: { label: "Gap", tone: "accent", help: "Skinport and Steam differ by more than both venues' fees. Check it by hand." },
+  drop: { label: "Drop", tone: "warn", help: "A liquid item fell well below its 30-day median." },
 };
 
 export function signalInfo(s: string) {
-  return SIGNAL[s] ?? { label: s || "n/a", tone: "neutral" as Tone, help: "" };
+  return SIGNAL[s] ?? { label: s || "n/a", tone: "neutral" as ChipTone, help: "" };
 }
+
+const MINUS = "−";
 
 /** Euro with two decimals, "n/a" when missing. */
 export function eur(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "n/a";
-  return `${v.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+  const s = Math.abs(v).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${v < 0 && Number(Math.abs(v).toFixed(2)) !== 0 ? MINUS : ""}${s} €`;
 }
 
 /** A fraction as a signed percent: 0.052 -> "+5.2 %". */
 export function frac(v: number | null | undefined, digits = 1): string {
   if (v == null || !Number.isFinite(v)) return "n/a";
   const s = Math.abs(v * 100).toFixed(digits);
-  return `${v < 0 ? "−" : "+"}${s} %`;
+  return `${v < 0 ? MINUS : "+"}${s} %`;
 }
 
-export function changeTone(v: number | null | undefined): Tone {
-  if (v == null || !Number.isFinite(v) || Math.abs(v) < 0.005) return "neutral";
-  return v > 0 ? "green" : "red";
+/** Up, down or flat for a fraction, quiet within half a percent. */
+export function changeTone(v: number | null | undefined): ChangeTone {
+  if (v == null || !Number.isFinite(v) || Math.abs(v) < 0.005) return "flat";
+  return v > 0 ? "up" : "down";
+}
+
+/** The prediction a row shows: 30 days when there is one, else 7. */
+export function prediction(r: Cs2Item): { value: number | null; horizon: number | null } {
+  if (r.horizon === 30 && r.pred30d != null) return { value: r.pred30d, horizon: 30 };
+  if (r.pred7d != null) return { value: r.pred7d, horizon: 7 };
+  return { value: null, horizon: null };
+}
+
+/** "case" -> "Case", "knife_glove" -> "Knife or glove". */
+export function categoryLabel(c: string): string {
+  const named: Record<string, string> = { knife_glove: "Knife or glove", music_kit: "Music kit", other: "Other" };
+  return named[c] ?? (c ? c.charAt(0).toUpperCase() + c.slice(1).replace(/_/g, " ") : "Other");
+}
+
+/** The counts the top of the page shows. */
+export function boardCounts(b: Cs2Board): { buy: number; lookAt: number; avoid: number } {
+  let buy = 0;
+  let lookAt = 0;
+  let avoid = 0;
+  for (const r of b.items) {
+    if (r.signal === "buy") buy += 1;
+    else if (r.signal === "gap" || r.signal === "drop") lookAt += 1;
+    else if (r.signal === "avoid") avoid += 1;
+  }
+  return { buy, lookAt, avoid };
 }
 
 export type Cs2Filter = "all" | "signals" | "held" | "watch" | "case" | "skin" | "sticker";
