@@ -33,8 +33,11 @@ from here: they live in the engine's state and settings, which it only reads.
   python -m lab.ops.learn --skip sweep       leave these out tonight
   python -m lab.ops.learn --no-train         costs, evidence and digest only
 
-Environment: PYTHIA_AUTOPILOT_STATE_URL (default http://127.0.0.1:8788/api/state,
-"off" skips the engine), PYTHIA_LEARN_ORDERS_FILE (an exported /api/state or
+Environment: PYTHIA_AUTOPILOT_STATE_URLS (every autopilot engine, comma
+separated, default the main account on 8788 and the safe account on 8789; the
+costs come from the first, the digest lists the autopilots of all that
+answer), PYTHIA_AUTOPILOT_STATE_URL (the old single engine when the list is
+not set, "off" skips the engine), PYTHIA_LEARN_ORDERS_FILE (an exported /api/state or
 orders file, read instead of the engine), PYTHIA_COSTS_BASE (the base cost
 table, default <data>/costs/base.json), PYTHIA_AGENT_OUT (where the sweep's
 published reports live, as for the paper books).
@@ -133,21 +136,38 @@ def fetch_state(url: str, timeout: float = 15) -> tuple[dict | None, str | None]
         return None, f"{type(e).__name__}: {e}"
 
 
-def engine_state() -> tuple[dict | None, str, str | None]:
-    """(state, where it came from, error)."""
+def engines() -> list[dict]:
+    """Every autopilot engine as {"account", "url", "state", "error"}, read
+    only: an exported file (PYTHIA_LEARN_ORDERS_FILE) as the main account,
+    else every URL of notify.state_urls() (PYTHIA_AUTOPILOT_STATE_URLS, or
+    the old single PYTHIA_AUTOPILOT_STATE_URL). Empty when switched off."""
+    from . import notify
     f = os.environ.get("PYTHIA_LEARN_ORDERS_FILE")
     if f:
         try:
             v = json.loads(Path(f).read_text(encoding="utf-8"))
-            return (v if isinstance(v, dict) else {"orders": v}), f, None
+            return [{"account": notify.ACCOUNT_NAMES[0], "url": f, "state": v if isinstance(v, dict) else {"orders": v},
+                     "error": None}]
         except (OSError, ValueError):
             try:
-                return {"orders": fills.load_orders_file(Path(f))}, f, None
+                st = {"orders": fills.load_orders_file(Path(f))}
+                return [{"account": notify.ACCOUNT_NAMES[0], "url": f, "state": st, "error": None}]
             except OSError as e:
-                return None, f, f"{type(e).__name__}: {e}"
-    url = os.environ.get("PYTHIA_AUTOPILOT_STATE_URL", DEFAULT_STATE_URL)
-    st, err = fetch_state(url)
-    return st, url, err
+                return [{"account": notify.ACCOUNT_NAMES[0], "url": f, "state": None, "error": f"{type(e).__name__}: {e}"}]
+    out = []
+    for account, url in notify.state_urls():
+        st, err = fetch_state(url)
+        out.append({"account": account, "url": url, "state": st, "error": err})
+    return out
+
+
+def engine_state(rows: list[dict] | None = None) -> tuple[dict | None, str, str | None]:
+    """(state, where it came from, error) of the first engine, the main
+    account: its demo orders are what the cost step learns from."""
+    rows = engines() if rows is None else rows
+    if not rows:
+        return None, "off", "switched off (PYTHIA_AUTOPILOT_STATE_URL=off)"
+    return rows[0]["state"], rows[0]["url"], rows[0]["error"]
 
 
 # ---------------------------------------------------------------- step: costs
@@ -425,6 +445,7 @@ def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], flo
         btc_total = (b_end / b_start - 1) * 100 if b_start and b_end else None
         btc_day = (b_end / b_day0 - 1) * 100 if b_day0 and b_end else None
         rows.append({"id": cfg.get("id", "?"), "name": cfg.get("name", "Autopilot"), "mode": cfg.get("mode"),
+                     "account": ap.get("account"),
                      "state": ap.get("state"), "since": _date(start_ms), "days": (end_ms - start_ms) / DAY_MS,
                      "equity": equity, "start_capital": start, "fees": ap.get("fees"), "trades": ap.get("trades"),
                      "pnl_day_pct": day, "btc_day_pct": btc_day,
@@ -535,7 +556,11 @@ def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str]
     steps: list[dict] = []
     refused: list[str] = []
     results: dict = {}
-    engine, source, err = engine_state()
+    from . import notify
+    rows = engines()
+    engine, source, err = engine_state(rows)
+    # Every account's autopilots for the digest; an engine that does not answer is left out.
+    merged = notify.merge_states(rows)
 
     for step in STEPS:
         if step in skip or (step in HEAVY and not train and step not in force):
@@ -574,13 +599,15 @@ def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str]
             mark(st, step, now_ms, False, f"{type(e).__name__}: {e}")
             steps.append({"step": step, "status": "failed", "detail": f"{type(e).__name__}: {e}"[:400]})
 
-    aps = autopilot_pnl(engine, now_ms, price_at) if engine is not None else []
+    aps = autopilot_pnl(merged, now_ms, price_at) if merged is not None else []
     guard.write_json(learn_dir() / "state.json", st)
     data = {"generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "generated_ms": now_ms, "changes": changes, "decisions": decisions, "autopilots": aps,
             "steps": steps, "costs": results.get("costs"), "gates": results.get("sweep"),
             "evidence": (results.get("evidence") or {}).get("strategies"),
-            "engine": {"source": source, "reachable": engine is not None, "error": err}}
+            "engine": {"source": source, "reachable": engine is not None, "error": err,
+                       "accounts": [{"account": r["account"], "url": r["url"], "reachable": r["state"] is not None}
+                                    for r in rows]}}
     data["headline"] = headline(changes, decisions, aps, steps)
     data.update(feed(data, now_ms))
     guard.check_write(report.REPORTS / NAME / "latest.json")

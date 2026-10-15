@@ -476,6 +476,41 @@ def test_a_failed_delivery_is_tried_again_next_day(root):
     assert len(tries) == 2
 
 
+def test_the_alert_carries_the_numbers_and_the_owner_reminder(root):
+    posts: list[str] = []
+    run(root, autopilot(days=40, trades=30), posts=posts)
+    text = notify.plain(posts[0])
+    for word in ("40.0 days, 30 trades", "4 of 4", "7/7 days", "a year", "risk step 3, balanced",
+                 "Only the owner can arm live. Nothing was armed or changed."):
+        assert word in text, word
+    assert "—" not in text
+
+
+def test_an_engine_that_does_not_answer_judges_nothing_and_forgets_nothing(root, monkeypatch):
+    posts: list[str] = []
+    ap = autopilot()
+    run(root, ap, posts=posts)
+    assert len(posts) == 1
+    monkeypatch.setattr(readiness, "engines", lambda: [{"account": "main", "url": "http://engine", "state": None,
+                                                        "error": "URLError: refused"}])
+    rep = readiness.run(NOW + DAY_MS, forward=forward_for(ap), macro=MACRO,
+                        sender=lambda t: (posts.append(t) or True, None))
+    assert rep["status"] == "bad" and "No autopilot engine answered" in rep["headline"] and rep["autopilots"] == []
+    assert "No autopilot engine answered" in readiness.digest_text(rep)
+    # Back the next day and still ready: not announced again.
+    readiness.run(NOW + 2 * DAY_MS, state=state_of(ap, at=NOW + 2 * DAY_MS), forward=forward_for(ap, at=NOW + 2 * DAY_MS),
+                  macro=MACRO, sender=lambda t: (posts.append(t) or True, None))
+    assert len(posts) == 1
+
+
+def test_a_dry_run_writes_nothing(root):
+    settle(root)
+    readiness.run(NOW, state=state_of(autopilot()), forward=forward_for(autopilot()), macro=MACRO, dry_run=True,
+                  sender=lambda t: (True, None))
+    assert not readiness.history_path().exists()
+    assert not (root / "reports" / "readiness" / "latest.json").exists()
+
+
 def test_the_check_writes_only_its_own_files(root):
     run(root, autopilot())
     written = {str(p) for p in guard.WRITTEN}

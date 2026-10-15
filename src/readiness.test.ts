@@ -66,6 +66,24 @@ describe("readiness", () => {
     expect(ordered(r.items).map((i) => i.id)).toEqual(["ap-1", "lab:a"]);
   });
 
+  it("keeps the same autopilot id on two accounts apart", () => {
+    const two = {
+      ...file,
+      autopilots: [
+        { ...file.autopilots[1], key: "autopilot:main:ap-1:1", account: "main" },
+        { ...file.autopilots[1], key: "autopilot:safe:ap-1:2", account: "safe", name: "One (safe)" },
+        { ...file.autopilots[0], key: "sleeve:safe:ap-1:2:lab:a", account: "safe", parent_key: "autopilot:safe:ap-1:2" },
+      ],
+    };
+    const r = parseReadiness(two)!;
+    expect(ordered(r.items).map((i) => i.key)).toEqual([
+      "autopilot:main:ap-1:1",
+      "autopilot:safe:ap-1:2",
+      "sleeve:safe:ap-1:2:lab:a",
+    ]);
+    expect(r.items[1].account).toBe("safe");
+  });
+
   it("says days to go, what it waits on, or that it is ready", () => {
     const r = parseReadiness(file)!;
     const ap = r.items[1];

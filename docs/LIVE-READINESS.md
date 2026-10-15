@@ -18,6 +18,15 @@ of an autopilot with several sleeves (a sleeve has its own P&L and trade
 count). Only the paper record counts: mode demo, orders on the Alpaca paper
 account. Every number is after fees.
 
+There are two Alpaca paper accounts, each with its own autopilot engine: the
+main one and a small "safe" one. Every engine in `PYTHIA_AUTOPILOT_STATE_URLS`
+is read (default both; the old single `PYTHIA_AUTOPILOT_STATE_URL` still
+works), each autopilot is judged on its own account's record, and an engine
+that does not answer is left out that day without changing what was already
+announced. The forward report reads the main engine only, so an autopilot on
+another account has no backtest band to be judged by: rule 6 treats it as
+"no band" and rule 1 asks for the extra days.
+
 A restarted autopilot (stopped, then started again under the same id) is a new
 run: its days, weeks and drawdown start again from the new start. A sleeve's
 record starts when the check first saw it in the run, or at the run's start
@@ -48,7 +57,7 @@ reason to refuse, and rules 2, 3 and 5 still have to hold.
 
 Rule 7 is account wide: the reconciliation compares the whole Alpaca paper
 account with Pythia's books, so an unexplained difference holds back every
-autopilot on it.
+autopilot on that account, and only on that account.
 
 ## The risk slider
 

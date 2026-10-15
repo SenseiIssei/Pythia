@@ -89,7 +89,8 @@ losses.
 It goes as a Telegram photo (`sendPhoto`) whose caption is the card in HTML.
 When the card does not fit a caption (1024 characters), the photo carries the
 title and summary and the full card follows as a message. The data comes from
-the autopilot engine's `GET /api/state` (`PYTHIA_AUTOPILOT_STATE_URL`) and BTC
+every autopilot engine's `GET /api/state` (`PYTHIA_AUTOPILOT_STATE_URLS`, the
+main and the safe account, each autopilot labelled with its account) and BTC
 prices from Binance's public klines; without either, or without matplotlib, the
 digest goes out as text.
 
@@ -197,7 +198,8 @@ works again.
 | `PYTHIA_QUIET_HOURS` | unset | lab: `off`, or `HH:MM-HH:MM`, over the settings file |
 | `PYTHIA_ALERT_VIA` | unset | lab: `engine` posts lab cards through `POST /api/alerts/event` |
 | `PYTHIA_ALERT_EVENT_URL` | from the state URL | lab: where that endpoint is |
-| `PYTHIA_AUTOPILOT_STATE_URL` | `http://127.0.0.1:8788/api/state` | lab: the engine the charts are drawn from, `off` for none |
+| `PYTHIA_AUTOPILOT_STATE_URLS` | `http://127.0.0.1:8788/api/state,http://127.0.0.1:8789/api/state` | lab: every autopilot engine (main and safe Alpaca paper account), comma separated; `?name=` names an account, else main, safe by place; one that does not answer is skipped |
+| `PYTHIA_AUTOPILOT_STATE_URL` | unset | lab: the old single engine, read only when the list is unset; `off` for none |
 
 The category switches, quiet hours and big-move sizes are saved with the
 engine state (`PYTHIA_STATE_FILE`) and written for the lab to
