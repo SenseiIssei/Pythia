@@ -40,6 +40,41 @@ export interface LabStatus {
   forward?: ForwardReport | null;
   /** The nightly learning loop's digest. */
   learn?: LearnDigest | null;
+  /** Every scheduled job of the job table (research/ops/jobs.yaml). */
+  jobs?: JobsStatus | null;
+}
+
+// ── scheduled jobs (research/lab/lab/ops/jobs.py, _health/jobs.json) ───────
+
+export interface JobRun {
+  start: string;
+  end?: string;
+  duration_s?: number;
+  exit_code?: number | null;
+  status: string;
+  reason?: string | null;
+}
+
+export interface JobStatus {
+  name: string;
+  description: string;
+  enabled: boolean;
+  schedule: string | null;
+  after: string[];
+  state: "ok" | "running" | "never" | "disabled" | "failed" | "timeout" | "late" | "blocked" | "stuck";
+  ok: boolean;
+  detail: string;
+  nextRun: string | null;
+  lastOk: string | null;
+  last: JobRun | null;
+  consecutiveFailures: number;
+}
+
+export interface JobsStatus {
+  at: string;
+  ok: boolean;
+  failing: string[];
+  jobs: JobStatus[];
 }
 
 // ── learning loop digest (pythia-core labview::LearnDigest) ─────────────────
