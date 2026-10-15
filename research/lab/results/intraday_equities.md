@@ -256,7 +256,7 @@ bars, with the stock leg and 2021 onwards, needs the server run above.
 
 ## Proxy run (Oanda index CFDs as SPY, QQQ, IWM; no single stocks)
 
-Generated 2026-10-15T13:00:49+00:00. Data 2005-01-03 to 2020-05-13 (3827 sessions), in sample from 2005-01-01 (2244 days), out of sample from 2014-01-01 (1583 days), 3.0 symbols a day on average. SPY as SPX500_USD: 3556 valid days of 3967 with session quotes. QQQ as NAS100_USD: 3731 valid days of 3965 with session quotes. IWM as US2000_USD: 3787 valid days of 3957 with session quotes.
+Generated 2026-10-15T13:05:42+00:00. Data 2005-01-03 to 2020-05-13 (3827 sessions), in sample from 2005-01-01 (2244 days), out of sample from 2014-01-01 (1583 days), 3.0 symbols a day on average. SPY as SPX500_USD: 3556 valid days of 3967 with session quotes. QQQ as NAS100_USD: 3731 valid days of 3965 with session quotes. IWM as US2000_USD: 3787 valid days of 3957 with session quotes.
 
 **Verdict: nothing passes on the proxy (a pass here only marks it pending the Alpaca run).** Pick by in-sample Sharpe: Gap fade 1.5 L/S, out of sample Sharpe 0.05 (-0.08 with costs doubled, -0.20 filled a bar late), in sample 0.31; deflated p 0.00 over 46 trials.
 
