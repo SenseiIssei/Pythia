@@ -178,9 +178,9 @@ def feed(meta: dict, mstat: dict, coll: dict, al: dict, top: list[dict], now: da
     if age > 2:
         head = f"No new card prices since {meta['snapshot']}: the daily collector has not run for {age} days."
     elif moves or uv:
-        head = (f"{n} card{'s' if n != 1 else ''} moved strongly" if n else "No strong moves") + (
-            f" and {len(uv)} look cheap next to similar cards" if uv else "") + \
-            f" on {meta['snapshot']}. Information only; you buy and sell by hand."
+        parts = ([f"{n} card{'s' if n != 1 else ''} moved strongly"] if n else []) + (
+            [f"{len(uv)} {'look' if len(uv) != 1 else 'looks'} cheap next to similar cards"] if uv else [])
+        head = " and ".join(parts) + f" on {meta['snapshot']}. Information only; you buy and sell by hand."
     else:
         head = (f"{meta['cards']:,} card prices on {meta['snapshot']}, nothing unusual. "
                 f"{mstat['history_days']} day{'s' if mstat['history_days'] != 1 else ''} of our own price history so far.")
