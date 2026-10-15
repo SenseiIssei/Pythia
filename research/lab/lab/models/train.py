@@ -47,7 +47,7 @@ from typing import Callable
 
 from .. import report
 from ..data import ROOT
-from ..ops import guard, notify, registry
+from ..ops import guard, i18n, notify, registry
 from . import core, zoo
 from .core import DAY_MS, DataUnavailable
 
@@ -150,7 +150,9 @@ def shadow(mod, folder: Path, role: str, panel, now_ms: int) -> dict:
 
 
 def zoo_entry(mod, panel, st: dict, now_ms: int, alerts: list[str], prev_alerts: dict, new_alerts: dict,
-              load_error: str | None, retrain_rec: dict | None) -> dict:
+              load_error: str | None, retrain_rec: dict | None, infos: list[dict] | None = None) -> dict:
+    """One model's entry. Its alerts go to `alerts` in English (the report)
+    and, as data for the chat's language, to `infos`."""
     s = mod.SPEC
     e = base_entry(s, st)
     folder, role = model_folder(s.name)
@@ -192,13 +194,36 @@ def zoo_entry(mod, panel, st: dict, now_ms: int, alerts: list[str], prev_alerts:
         d = core.drift(card, panel, s.drift_days)
         e["drift"] = d
         if d["level"] == "drift" and prev_alerts.get(s.name, {}).get("drift") != "drift":
-            worst = ", ".join(f"{x['feature']} {x['outside_pct']:.0f} %" for x in d["features"][:3] if x["level"] == "drift")
-            alerts.append(f"{s.code} {s.title}: inputs outside the trained range ({worst}). {d['why']}. "
-                          f"Forecasts may be off until the next retrain ({e['next_due']}).")
+            info = {"kind": "drift", "code": s.code, "title": s.title, "why": d["why"], "next": e["next_due"],
+                    "worst": [(x["feature"], x["outside_pct"]) for x in d["features"][:3] if x["level"] == "drift"],
+                    "n": sum(x["level"] == "drift" for x in d["features"]), "total": len(d["features"]),
+                    "days": s.drift_days}
+            alerts.append(alert_line(info, "en"))
+            if infos is not None:
+                infos.append(info)
         new_alerts.setdefault(s.name, {})["drift"] = d["level"]
     if retrain_rec and retrain_rec.get("decision") == "promoted":
-        alerts.append(f"{s.code} {s.title}: challenger promoted as {retrain_rec.get('published')}. {retrain_rec.get('why')}")
+        info = {"kind": "promoted", "code": s.code, "title": s.title, "published": retrain_rec.get("published"),
+                "why": retrain_rec.get("why")}
+        alerts.append(alert_line(info, "en"))
+        if infos is not None:
+            infos.append(info)
     return e
+
+
+def alert_line(info: dict, lang: str = "en") -> str:
+    """One model alert for the chat, in `lang`. English keeps the lab's own
+    reasons; German says the drift with its numbers and translates the gate's."""
+    t = i18n.t
+    title = i18n.model_title(info["code"], info["title"], lang)
+    if info["kind"] == "drift":
+        worst = ", ".join(f"{f} {p:.0f} %" for f, p in info["worst"])
+        why = (t("md_drift_why", lang, n=info["n"], total=info["total"], days=info["days"]) if lang == "de"
+               else info["why"])
+        nxt = i18n.iso_day(str(info["next"]), lang) if info.get("next") else info.get("next")
+        return t("md_drift", lang, code=info["code"], title=title, worst=worst, why=why, next=nxt)
+    return t("md_promoted", lang, code=info["code"], title=title, published=info["published"],
+             why=i18n.reason(str(info.get("why") or ""), lang))
 
 
 def base_entry(s: core.Spec, st: dict) -> dict:
@@ -252,11 +277,17 @@ def retired_entry(s: core.Spec) -> dict:
 Poster = Callable[[str], tuple[bool, str | None]]
 
 
-def post_alerts(lines: list[str], poster: Poster | None) -> dict:
+def post_alerts(lines: list[str], poster: Poster | None, infos: list[dict] | None = None,
+                lang: str | None = None) -> dict:
+    """One message with every alert. With `infos` (the same alerts as data)
+    they are said in `lang` (None: the language of the messages)."""
     if not lines:
         return {"sent": 0}
     url, fmt, prefix = notify.config()
-    text = notify.clip(f"{prefix} models\n" + "\n".join(f"- {x}" for x in lines))
+    lang = lang or notify.alert_lang()
+    if infos and len(infos) == len(lines) and lang != "en":
+        lines = [alert_line(i, lang) for i in infos]
+    text = notify.clip(i18n.t("md_head", lang, prefix=prefix) + "\n" + "\n".join(f"- {x}" for x in lines), lang=lang)
     if poster is None:
         if url is None:
             print(text)
@@ -278,6 +309,7 @@ def run(now_ms: int | None = None, force: set[str] | None = None, train: bool = 
     prev_alerts = _read(zoo_dir() / "alerts.json") or {}
     new_alerts: dict = {}
     alerts: list[str] = []
+    infos: list[dict] = []
     entries, steps = [], []
     learn_state = _read(ROOT / "learn" / "state.json") or {}
     for s in (zoo.M1, zoo.M2):
@@ -306,7 +338,7 @@ def run(now_ms: int | None = None, force: set[str] | None = None, train: bool = 
             steps.append({"model": s.code, "step": "retrain", "status": "skipped",
                           "detail": err or ("left out (--status)" if not train else why)})
         try:
-            entries.append(zoo_entry(mod, panel, st, now_ms, alerts, prev_alerts, new_alerts, err, rec))
+            entries.append(zoo_entry(mod, panel, st, now_ms, alerts, prev_alerts, new_alerts, err, rec, infos))
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             x = base_entry(s, st)
@@ -314,7 +346,7 @@ def run(now_ms: int | None = None, force: set[str] | None = None, train: bool = 
             entries.append(x)
     guard.write_json(st_path, st)
     guard.write_json(zoo_dir() / "alerts.json", {**prev_alerts, **new_alerts})
-    delivery = post_alerts(alerts, poster) if send else {"sent": 0, "note": "--no-notify"}
+    delivery = post_alerts(alerts, poster, infos) if send else {"sent": 0, "note": "--no-notify"}
     data = core.finite({"generated_ms": now_ms, "generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc)
                         .strftime("%Y-%m-%d %H:%M UTC"), "models": entries, "steps": steps, "alerts": alerts,
                         "delivery": delivery, "specs": [s.public() for s in zoo.all_specs()]})

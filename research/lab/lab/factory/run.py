@@ -36,7 +36,7 @@ import numpy as np
 
 from .. import report
 from ..experiments import fam_common as fc
-from ..ops import notify
+from ..ops import i18n, notify
 from . import build, evaluate, grammar, search, shadow, writeup
 from .ledger import Ledger, append_jsonl, export_seed, factory_dir, import_seed, lock, write_json
 
@@ -233,8 +233,9 @@ def daily_shadow(do_notify: bool, log=print) -> dict:
     for x in decisions:
         log(f"decided {x['key']}: {x['status']} ({x['reason']})")
     if do_notify and decisions:
-        send("Factory shadow review:\n" + "\n".join(f"{x['status'].capitalize()}: {x['name']} ({x['reason']})"
-                                                     for x in decisions), dry_run=False)
+        lang = notify.alert_lang()
+        send(i18n.t("fa_review", lang) + "\n" + "\n".join(writeup.decision_line(x, lang) for x in decisions),
+             dry_run=False)
     return out
 
 
@@ -252,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         if d is None:
             print("no factory run yet", file=sys.stderr)
             return 1
-        send(writeup.digest(d), dry_run=a.dry_run)
+        send(writeup.digest(d, notify.alert_lang()), dry_run=a.dry_run)
         return 0
     with lock():
         if a.command == "export-seed":
@@ -264,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         d = weekly(a.budget, a.fresh, a.run_id)
         publish(d)
         if a.notify:
-            send(writeup.digest(d), dry_run=False)
+            send(writeup.digest(d, notify.alert_lang()), dry_run=False)
     return 0
 
 
