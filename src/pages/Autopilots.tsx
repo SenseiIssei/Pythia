@@ -407,7 +407,8 @@ function StartSheet({ open, onClose, onStart }: { open: boolean; onClose: () => 
               <span className="fl-muted pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-2xl font-bold">$</span>
               <input
                 inputMode="decimal"
-                className="fl-input fl-num pl-9 text-2xl font-bold"
+                className="fl-input fl-num text-2xl font-bold"
+                style={{ paddingLeft: 36 }}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 aria-invalid={!!amountErr}

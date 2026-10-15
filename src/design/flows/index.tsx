@@ -35,7 +35,7 @@ export function signedPct(n: number | null | undefined, dp = 2): string {
 /** The page frame: the flows' background, a narrow centred column. */
 export function Page({ title, subtitle, right, children }: { title: string; subtitle?: ReactNode; right?: ReactNode; children: ReactNode }) {
   return (
-    <div className="fl fl-page -mx-4 -mb-10 -mt-5 min-h-full px-4 pb-24 pt-5 sm:-mx-6 sm:-mt-6 sm:px-6 sm:pt-6">
+    <div className="fl fl-page -mx-4 -mb-10 -mt-5 px-4 pb-24 pt-5 sm:-mx-6 sm:-mt-6 sm:px-6 sm:pt-6">
       <div className="mx-auto w-full max-w-xl space-y-4">
         <header className="flex items-start justify-between gap-3">
           <div className="min-w-0">

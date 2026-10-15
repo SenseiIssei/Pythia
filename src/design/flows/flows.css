@@ -51,7 +51,8 @@
   --fl-scrim: rgba(0, 0, 0, 0.6);
 }
 
-.fl-page { background: var(--fl-bg); }
+.fl-page { background: var(--fl-bg); min-height: calc(100dvh - 96px); }
+.fl-sheet:focus, .fl-sheet:focus-visible { outline: none; box-shadow: none; }
 .fl-card { background: var(--fl-surface); border: 1px solid var(--fl-line); border-radius: 16px; }
 .fl-surface-2 { background: var(--fl-surface-2); }
 .fl-line { border-color: var(--fl-line); }
