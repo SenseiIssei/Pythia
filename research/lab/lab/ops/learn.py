@@ -54,7 +54,7 @@ from typing import Callable
 
 from .. import report
 from ..data import ROOT
-from . import fills, guard, registry
+from . import fills, guard, i18n, registry
 
 NAME = "learn"
 DAY_MS = 86_400_000
@@ -445,40 +445,36 @@ def _pct(v) -> str:
     return "n/a" if v is None else f"{v:+.2f} %"
 
 
-def headline(changes: list[dict], decisions: list[dict], aps: list[dict], steps: list[dict]) -> str:
+def headline(changes: list[dict], decisions: list[dict], aps: list[dict], steps: list[dict], lang: str = "en") -> str:
+    """What changed tonight in a sentence, in `lang` (the report keeps English;
+    the digest says it in the language of the messages)."""
+    t = i18n.t
     parts = []
     models = [d for d in decisions if d.get("model") != "families_sweep"]
     promoted = [d for d in models if d.get("decision") == "promoted"]
     rejected = [d for d in models if d.get("decision") in ("rejected", "kept")]
     for d in decisions:
         if d.get("model") == "families_sweep":
-            parts.append("published the refreshed family sweep" if d.get("decision") == "promoted"
-                         else "kept the published family sweep")
+            parts.append(t("ln_sweep_new" if d.get("decision") == "promoted" else "ln_sweep_kept", lang))
     if promoted:
-        parts.append("promoted " + ", ".join(d["model"] for d in promoted))
+        parts.append(t("ln_promoted", lang, models=", ".join(d["model"] for d in promoted)))
     if rejected:
-        parts.append("kept the champion for " + ", ".join(d["model"] for d in rejected))
-    cost = [c for c in changes if c["area"] == "costs"]
-    if cost:
-        parts.append(f"{len(cost)} cost update{'s' if len(cost) != 1 else ''}")
-    ev = [c for c in changes if c["area"] == "evidence"]
-    if ev:
-        parts.append(f"{len(ev)} evidence change{'s' if len(ev) != 1 else ''}")
-    gates = [c for c in changes if c["area"] == "gates"]
-    if gates:
-        parts.append(f"{len(gates)} gate change{'s' if len(gates) != 1 else ''}")
+        parts.append(t("ln_kept", lang, models=", ".join(d["model"] for d in rejected)))
+    for area, key in (("costs", "ln_costs"), ("evidence", "ln_evidence"), ("gates", "ln_gates")):
+        n = sum(1 for c in changes if c["area"] == area)
+        if n:
+            parts.append(t(key, lang, n=n))
     failed = [s["step"] for s in steps if s["status"] == "failed"]
     if failed:
-        parts.append("failed: " + ", ".join(failed))
+        parts.append(t("ln_failed", lang, steps=", ".join(failed)))
     running = [a for a in aps if a["state"] == "running"]
     if running:
         best = max(running, key=lambda a: a["vs_btc_total_pts"] if a["vs_btc_total_pts"] is not None else -1e9)
         if best["vs_btc_total_pts"] is not None:
-            parts.append(f"{len(running)} autopilot{'s' if len(running) != 1 else ''} running, best "
-                         f"{best['vs_btc_total_pts']:+.2f} points against BTC since start")
+            parts.append(t("ln_running_best", lang, n=len(running), pts=i18n.num(best["vs_btc_total_pts"], 2, lang, sign=True)))
         else:
-            parts.append(f"{len(running)} autopilot{'s' if len(running) != 1 else ''} running")
-    text = "; ".join(parts) if parts else "nothing changed"
+            parts.append(t("ln_running", lang, n=len(running)))
+    text = "; ".join(parts) if parts else t("ln_nothing", lang)
     return text[0].upper() + text[1:] + "."
 
 
@@ -582,6 +578,8 @@ def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str]
             "evidence": (results.get("evidence") or {}).get("strategies"),
             "engine": {"source": source, "reachable": engine is not None, "error": err}}
     data["headline"] = headline(changes, decisions, aps, steps)
+    # The digest to the chat says it in German when the messages are.
+    data["headlines"] = {"de": headline(changes, decisions, aps, steps, "de")}
     data.update(feed(data, now_ms))
     guard.check_write(report.REPORTS / NAME / "latest.json")
     data["guardrails"] = {"written": sorted(set(guard.WRITTEN)), "refused": refused}

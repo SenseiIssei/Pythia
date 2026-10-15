@@ -22,14 +22,20 @@ report come with a chart (lab.ops.charts, matplotlib) sent as a photo.
   python3 notify.py --event <category> <title> [text]
                                             one card from a shell job
 
-notify.py itself is standard library only, so the host can run it without the
-lab image; without matplotlib a digest goes out without its chart.
+notify.py itself is standard library only (with i18n.py next to it), so the
+host can run it without the lab image; without matplotlib a digest goes out
+without its chart.
 
 Every post has a category with a switch in the app (Settings, Notifications).
 The engine writes the switches and the quiet hours to
 reports/notify/settings.json; this file reads them. In quiet hours (23:00 to
 07:00 Europe/Berlin unless changed) a lab post is held back and listed in one
 note once they are over; the health alarm waits for the end of quiet hours.
+
+The messages are in English or German: "language" in the settings file (the
+app's Message language), PYTHIA_ALERT_LANG=de or en over it. The words live
+in i18n.py next to this file (lab.ops.i18n); the app and the reports stay in
+English.
 
 Environment: PYTHIA_TELEGRAM_BOT_TOKEN and PYTHIA_TELEGRAM_CHAT_ID (the
 owner's Telegram chat), or PYTHIA_ALERT_WEBHOOK with PYTHIA_ALERT_FORMAT
@@ -63,6 +69,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+try:  # inside the lab package
+    from . import i18n
+except ImportError:  # /opt/pythia-ops/notify.py, with i18n.py next to it
+    import i18n  # type: ignore[no-redef]
+
+tr = i18n.t
+
 DAY_MS = 86_400_000
 WEEK_MS = 7 * DAY_MS
 LIMITS = {"telegram": 4000, "discord": 1900, "slack": 3000}
@@ -88,8 +101,8 @@ CATEGORIES: dict[str, tuple[str, str]] = {
     "weekly": ("Weekly report", "🗓️"),
 }
 DEFAULT_QUIET = {"enabled": True, "start": "23:00", "end": "07:00", "timezone": "Europe/Berlin"}
-WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+WEEKDAYS = i18n.WEEKDAYS["en"]
+MONTHS = i18n.MONTHS["en"]
 
 
 def data_root() -> Path:
@@ -134,27 +147,19 @@ def esc(s) -> str:
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def money(v: float, dp: int = 2) -> str:
-    """$12,345.68, or -$12.30."""
-    s = f"{abs(v):,.{dp}f}"
-    neg = v < 0 and any(c not in "0.," for c in s)
-    return f"{'-' if neg else ''}${s}"
+def money(v: float, dp: int = 2, lang: str | None = None) -> str:
+    """$12,345.68, or -$12.30 (German: 12.345,68 $). `lang` None: the messages' language."""
+    return i18n.money(v, dp, lang or alert_lang())
 
 
-def signed_money(v: float, dp: int = 2) -> str:
+def signed_money(v: float, dp: int = 2, lang: str | None = None) -> str:
     """+$12.30 or -$12.30."""
-    m = money(v, dp)
-    return m if m.startswith("-") else f"+{m}"
+    return i18n.signed_money(v, dp, lang or alert_lang())
 
 
-def signed_pct(v: float | None, dp: int = 2) -> str:
+def signed_pct(v: float | None, dp: int = 2, lang: str | None = None) -> str:
     """+1.20 % or -0.45 %; n/a for nothing."""
-    if v is None:
-        return "n/a"
-    s = f"{v:+,.{dp}f}"
-    if s.startswith("-") and not any(c not in "-0.," for c in s):
-        s = "+" + s[1:]
-    return f"{s} %"
+    return i18n.signed_pct(v, dp, lang or alert_lang())
 
 
 def dot(v: float | None) -> str:
@@ -216,7 +221,7 @@ class Table:
         self.rows = [[str(c) for c in r] for r in rows]
         self.more = more
 
-    def block(self) -> str:
+    def block(self, lang: str = "en") -> str:
         n = max([len(self.header)] + [len(r) for r in self.rows])
         w = [0] * n
         for r in [self.header] + self.rows:
@@ -231,7 +236,7 @@ class Table:
 
         out = ([line(self.header)] if self.header else []) + [line(r) for r in self.rows]
         if self.more:
-            out.append(f"+{self.more} more")
+            out.append(tr("more_rows", lang, n=self.more))
         return "\n".join(out)
 
 
@@ -252,7 +257,7 @@ class Card:
         self.parts = list(parts or [])
         self.footer = footer
 
-    def render(self, fmt: str = "telegram") -> str:
+    def render(self, fmt: str = "telegram", lang: str = "en") -> str:
         head = f"{self.emoji} {self.title}".strip()
         out: list[str] = []
         if fmt == "telegram":
@@ -271,23 +276,27 @@ class Card:
                 continue
             if p.title:
                 out.append(bold(e(p.title)))
-            if isinstance(p, Rows) and p.rows or isinstance(p, Table) and p.rows:
+            if isinstance(p, Rows) and p.rows:
                 out.append(pre(e(p.block())))
+            elif isinstance(p, Table) and p.rows:
+                out.append(pre(e(p.block(lang))))
         if self.footer:
             out.append(ital(e(self.footer)))
         return "\n".join(out)
 
 
-def render_post(cards: list[Card], fmt: str = "telegram", limit: int | None = None) -> str:
+def render_post(cards: list[Card], fmt: str = "telegram", limit: int | None = None, lang: str | None = None) -> str:
     """Cards as one post under `limit` characters: tables are shortened first,
-    then words, then whole cards are left out with a count. Never cuts a tag."""
+    then words, then whole cards are left out with a count. Never cuts a tag.
+    `lang` (None: the messages' language) is for the post's own small words."""
     limit = limit or LIMITS.get(fmt, MAX_CHARS)
+    lang = lang or alert_lang()
     cards = [Card(c.emoji, c.title, c.summary, list(c.parts), c.footer) for c in cards]
 
     def join(cs, dropped=0):
-        s = [c.render(fmt) for c in cs]
+        s = [c.render(fmt, lang) for c in cs]
         if dropped:
-            more = f"+{dropped} more in the app"
+            more = tr("more_in_app", lang, n=dropped)
             s.append(f"<i>{more}</i>" if fmt == "telegram" else more)
         return "\n\n".join(s)
 
@@ -329,13 +338,13 @@ def plain(text: str) -> str:
     return "".join(out).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def clip(text: str, limit: int = MAX_CHARS) -> str:
+def clip(text: str, limit: int = MAX_CHARS, lang: str | None = None) -> str:
     """Plain text: keep whole lines while they fit, say so when some had to go."""
     text = nodash(text)
     if len(text) <= limit:
         return text
     out: list[str] = []
-    tail = "(more in the reports)"
+    tail = tr("more_in_reports", lang or alert_lang())
     for line in text.split("\n"):
         if len("\n".join(out + [line, tail])) > limit:
             break
@@ -386,6 +395,27 @@ def load_settings() -> dict:
         if _hhmm(a) is not None and _hhmm(b) is not None:
             quiet.update(enabled=True, start=a.strip(), end=b.strip())
     return {"on": on, "quiet": quiet}
+
+
+_LANG_CACHE: dict = {}
+
+
+def alert_lang() -> str:
+    """The language of the messages, en or de: PYTHIA_ALERT_LANG when it names
+    one, else "language" in the engine's settings.json (the app's Message
+    language), else English. The file is read again only when it changes."""
+    env = i18n.parse(os.environ.get(i18n.ENV))
+    if env:
+        return env
+    p = notify_dir() / "settings.json"
+    try:
+        key = (str(p), p.stat().st_mtime_ns)
+    except OSError:
+        return "en"
+    if _LANG_CACHE.get("key") != key:
+        raw = read_json(p)
+        _LANG_CACHE.update(key=key, lang=i18n.parse(raw.get("language") if isinstance(raw, dict) else None) or "en")
+    return _LANG_CACHE["lang"]
 
 
 def enabled(settings: dict, category: str | None) -> bool:
@@ -731,7 +761,7 @@ def make_chart(state: dict | None, since_ms: int | None, now: int, title: str, s
         return None
     path = notify_dir() / "charts" / f"chart-{now}.png"
     try:
-        ch.render(data, path, title, subtitle)
+        ch.render(data, path, title, subtitle, lang=alert_lang())
         img = path.read_bytes()
     except Exception as e:  # noqa: BLE001 - a chart never stops the digest
         say(f"chart not drawn: {type(e).__name__}: {e}", err=True)
@@ -746,16 +776,27 @@ def make_chart(state: dict | None, since_ms: int | None, now: int, title: str, s
 
 # ---------------------------------------------------------------- the daily digest
 
-def day_label(ms: int) -> str:
-    t = local_time(ms)
-    return f"{WEEKDAYS[t.weekday()]} {t.day} {MONTHS[t.month - 1]}"
+def day_label(ms: int, lang: str | None = None) -> str:
+    """Thu 15 Oct (Do 15. Okt), Europe/Berlin."""
+    return i18n.day_label(local_time(ms), lang or alert_lang())
+
+
+def when_label(ms: int, lang: str) -> str:
+    """Thu 15 Oct, 10:00 (Do 15. Okt, 10:00), Europe/Berlin."""
+    lt = local_time(ms)
+    return f"{i18n.day_label(lt, lang)}, {lt.hour:02d}:{lt.minute:02d}"
 
 
 FORWARD_WORDS = {"on_track": "✅ on track", "ok": "✅ ok", "watch": "👀 watch", "early": "🌱 early",
                  "below": "🔻 below", "behind": "🔻 behind"}
 
 
-def autopilot_parts(learn: dict | None, prev: dict, now: int) -> tuple[list[Rows], dict, list[float], list[str]]:
+def mode_word(mode, lang: str) -> str:
+    return i18n.word(str(mode), lang) if mode else "?"
+
+
+def autopilot_parts(learn: dict | None, prev: dict, now: int,
+                    lang: str = "en") -> tuple[list[Rows], dict, list[float], list[str]]:
     """One block per running autopilot, the snapshot for tomorrow, today's $
     per autopilot and the ones without numbers."""
     parts, snap, today, missing = [], {}, [], []
@@ -766,93 +807,108 @@ def autopilot_parts(learn: dict | None, prev: dict, now: int) -> tuple[list[Rows
         trades, fees = int(_num(a.get("trades")) or 0), _num(a.get("fees")) or 0.0
         key = str(a.get("id") or a.get("name"))
         snap[key] = {"trades": trades, "fees": fees, "at": now}
-        title = f"{a.get('name', 'Autopilot')} · {a.get('mode') or '?'}"
+        title = f"{a.get('name', 'Autopilot')} · {mode_word(a.get('mode'), lang)}"
         if eq is None:
             missing.append(title)
             continue
-        rows = [("Equity", money(eq))]
+        rows = [(tr("equity", lang), money(eq, lang=lang))]
         day_pct = _num(a.get("pnl_day_pct"))
         if day_pct is not None and day_pct > -100:
             d_usd = eq - eq / (1 + day_pct / 100)
             today.append(d_usd)
-            rows.append(("Today", f"{signed_money(d_usd)} {signed_pct(day_pct)}", d_usd))
+            rows.append((tr("today", lang), f"{signed_money(d_usd, lang=lang)} {signed_pct(day_pct, lang=lang)}", d_usd))
         tot_pct = _num(a.get("pnl_total_pct"))
         if start:
-            rows.append(("Since start", f"{signed_money(eq - start)} {signed_pct(tot_pct)}", eq - start))
+            rows.append((tr("since_start", lang), f"{signed_money(eq - start, lang=lang)} {signed_pct(tot_pct, lang=lang)}",
+                         eq - start))
         vs, btc = _num(a.get("vs_btc_total_pts")), _num(a.get("btc_total_pct"))
         if vs is not None:
-            rows.append(("vs BTC", f"{vs:+.2f} pts", vs))
+            rows.append((tr("vs_btc", lang), tr("pts", lang, v=i18n.num(vs, 2, lang, sign=True)), vs))
         if btc is not None:
-            rows.append(("BTC", signed_pct(btc)))
+            rows.append(("BTC", signed_pct(btc, lang=lang)))
         p = prev.get(key)
         if p and 0 < now - int(p.get("at") or 0) <= 36 * 3_600_000 and trades >= int(p.get("trades") or 0):
-            rows.append(("Trades today", f"{trades - int(p['trades'])} · fees {money(max(fees - float(p.get('fees') or 0), 0))}"))
+            fees_today = money(max(fees - float(p.get("fees") or 0), 0), lang=lang)
+            rows.append((tr("trades_today", lang), tr("trades_today_value", lang, n=trades - int(p["trades"]), fees=fees_today)))
         else:
-            rows.append(("Trades", f"{trades} total · fees {money(fees)}"))
+            rows.append((tr("trades", lang), tr("trades_total", lang, n=trades, fees=money(fees, lang=lang))))
         parts.append(Rows(rows, title))
     return parts, snap, today, missing
 
 
-def forward_line(forward: dict | None) -> Line:
+def forward_line(forward: dict | None, lang: str = "en") -> Line:
+    lead = tr("forward_test", lang)
     if not forward:
-        return Line("no report", "Forward test")
+        return Line(tr("no_report", lang), lead)
     books = [b for b in forward.get("books") or [] if b.get("name")]
     if not books:
-        return Line("no paper books", "Forward test")
-    words = " · ".join(f"{b['name']} {FORWARD_WORDS.get(str(b.get('status')), str(b.get('status') or 'unknown').replace('_', ' '))}"
-                       for b in books)
-    return Line(words, "Forward test")
+        return Line(tr("no_paper_books", lang), lead)
+
+    def status(s) -> str:
+        s = str(s or "unknown")
+        key = f"fw_{s}"
+        return tr(key, lang) if key in i18n.CATALOG["en"] else s.replace("_", " ")
+
+    return Line(" · ".join(f"{b['name']} {status(b.get('status'))}" for b in books), lead)
 
 
-def health_line(health: dict | None, now: int) -> Line:
+def health_line(health: dict | None, now: int, lang: str = "en") -> Line:
+    lead = tr("health", lang)
     if not health:
-        return Line("no health check found", "Health")
+        return Line(tr("no_health", lang), lead)
     red = [c for c in health.get("checks") or [] if not c.get("ok")]
     try:
         at = datetime.strptime(health.get("at"), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
         age_h = (now / 1000 - at) / 3600
     except (TypeError, ValueError):
         age_h = None
-    late = f" (last check {age_h:.0f} h ago)" if age_h is not None and age_h > 2 else ""
+    late = tr("last_check", lang, h=f"{age_h:.0f}") if age_h is not None and age_h > 2 else ""
     if not red:
-        return Line(f"✅ all green{late}", "Health")
+        return Line(tr("all_green", lang, late=late), lead)
     names = "; ".join(f"{c.get('name')} ({short(c.get('detail') or '', 60)})" for c in red)
-    return Line(f"🔴 {len(red)} red: {names}{late}", "Health")
+    return Line(tr("n_red", lang, n=len(red), names=names, late=late), lead)
 
 
-def digest_card(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int) -> tuple[Card, dict]:
-    parts, snap, today, missing = autopilot_parts(learn, prev, now)
+def learn_headline(learn: dict, lang: str) -> str:
+    """The learning loop's headline in the language, when its report has it."""
+    return ((learn.get("headlines") or {}).get(lang) if lang != "en" else None) or learn.get("headline") or ""
+
+
+def digest_card(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int,
+                lang: str | None = None) -> tuple[Card, dict]:
+    lang = lang or alert_lang()
+    parts, snap, today, missing = autopilot_parts(learn, prev, now, lang)
     if learn is None:
-        summary = "No learning report found."
+        summary = tr("no_learning", lang)
     elif parts or missing:
         n = len(parts) + len(missing)
-        word = "autopilot" if n == 1 else "autopilots"
         if today:
             total = sum(today)
-            summary = f"{n} {word} running, {signed_money(total)} today {dot(total)}"
+            summary = tr("running_today", lang, n=n, money=signed_money(total, lang=lang), dot=dot(total))
         else:
-            summary = f"{n} {word} running."
+            summary = tr("running", lang, n=n)
         btc_day = next((_num(a.get("btc_day_pct")) for a in learn.get("autopilots") or []
                         if a.get("state") == "running" and _num(a.get("btc_day_pct")) is not None), None)
         if btc_day is not None:
-            summary += f" · BTC {signed_pct(btc_day)}"
+            summary += tr("btc_suffix", lang, pct=signed_pct(btc_day, lang=lang))
     else:
         err = (learn.get("engine") or {}).get("error")
-        summary = f"No autopilot running{f' ({short(err, 80)})' if err else ''}."
+        summary = tr("none_running", lang, err=f" ({short(err, 80)})" if err else "")
     # A phone screen: six autopilots, the rest are in the app.
     lines: list = list(parts[:6])
     if len(parts) > 6:
-        lines.append(Line(f"{len(parts) - 6} more autopilots in the app"))
-    lines += [Line("no equity reported", m) for m in missing]
+        lines.append(Line(tr("more_autopilots", lang, n=len(parts) - 6)))
+    lines += [Line(tr("no_equity", lang), m) for m in missing]
     if learn is not None:
         gen = _num(learn.get("generated_ms"))
         if gen is not None and now - gen > 30 * 3_600_000:
-            lines.append(Line(f"the last report is from {learn.get('generated')}, not today's", "Learning"))
-    lines.append(forward_line(forward))
-    lines.append(health_line(health, now))
-    if learn and learn.get("headline"):
-        lines.append(Line(short(nodash(learn["headline"]), 220), "Learning"))
-    return Card("📊", f"Daily · {day_label(now)}", nodash(summary), lines), snap
+            when = learn.get("generated") if lang == "en" else when_label(int(gen), lang)
+            lines.append(Line(tr("stale_learning", lang, gen=when), tr("learning", lang)))
+    lines.append(forward_line(forward, lang))
+    lines.append(health_line(health, now, lang))
+    if learn and learn_headline(learn, lang):
+        lines.append(Line(short(nodash(learn_headline(learn, lang)), 220), tr("learning", lang)))
+    return Card("📊", tr("daily_title", lang, day=day_label(now, lang)), nodash(summary), lines), snap
 
 
 def digest(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int,
@@ -874,7 +930,8 @@ def daily(dry_run: bool = False, now_ms: int | None = None, keep_snapshot: bool 
                              read_json(data_root() / "_health" / "system.json"), st.get("autopilots") or {}, now)
     image = None
     if chart and not dry_run:
-        image = make_chart(engine_state(), None, now, "Equity since start", day_label(now))
+        lang = alert_lang()
+        image = make_chart(engine_state(), None, now, tr("chart_since_start", lang), day_label(now, lang))
     res = send("dailyPnl", [card], image=image, now=now, dry_run=dry_run, hold_in_quiet=False)
     if dry_run or res["reason"] == "off":
         return 0
@@ -909,23 +966,28 @@ def _equity_at(hist: list, ms: int) -> float | None:
     return best if best is not None else (float(sorted(hist)[0][1]) if hist else None)
 
 
-def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | None) -> tuple[Card, dict]:
+def week_span(now: int, lang: str) -> str:
+    """The week up to `now`: 9 to 15 Oct (9. bis 15. Okt)."""
+    return i18n.span(local_time(now - WEEK_MS + 3_600_000), local_time(now), lang)
+
+
+def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | None,
+                lang: str | None = None) -> tuple[Card, dict]:
+    lang = lang or alert_lang()
     t0 = now - WEEK_MS
-    a0, a1 = local_time(t0 + 3_600_000), local_time(now)
-    span = (f"{a0.day} to {a1.day} {MONTHS[a1.month - 1]}" if a0.month == a1.month
-            else f"{a0.day} {MONTHS[a0.month - 1]} to {a1.day} {MONTHS[a1.month - 1]}")
+    title = tr("weekly_title", lang, span=week_span(now, lang))
     aps = [a for a in (state or {}).get("autopilots") or [] if a.get("state") in ("running", "paused")]
     snap: dict = {}
     if state is None:
-        return Card("🗓️", f"Weekly · {span}", "The engine did not answer: no numbers this week."), snap
+        return Card("🗓️", title, tr("no_engine", lang)), snap
     if not aps:
-        return Card("🗓️", f"Weekly · {span}", "No autopilot is running."), snap
+        return Card("🗓️", title, tr("no_autopilot", lang)), snap
     parts: list = []
     week_total = 0.0
     sleeves: list[tuple[str, float]] = []
     for a in aps:
         cfg = a.get("config") or {}
-        name, mode = cfg.get("name") or "Autopilot", cfg.get("mode") or "?"
+        name, mode = cfg.get("name") or "Autopilot", mode_word(cfg.get("mode"), lang)
         eq = _num(a.get("equity")) or 0.0
         start = _num(a.get("startCapital")) or 0.0
         hist = [r for r in a.get("history") or [] if isinstance(r, (list, tuple)) and len(r) == 2]
@@ -934,34 +996,36 @@ def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | 
         wk = eq - e0
         wk_pct = (eq / e0 - 1) * 100 if e0 else None
         week_total += wk
-        rows = [("Equity", money(eq)), ("This week", f"{signed_money(wk)} {signed_pct(wk_pct)}", wk)]
+        rows = [(tr("equity", lang), money(eq, lang=lang)),
+                (tr("this_week", lang), f"{signed_money(wk, lang=lang)} {signed_pct(wk_pct, lang=lang)}", wk)]
         if start:
-            rows.append(("Since start", f"{signed_money(eq - start)} {signed_pct((eq / start - 1) * 100)}", eq - start))
+            rows.append((tr("since_start", lang),
+                         f"{signed_money(eq - start, lang=lang)} {signed_pct((eq / start - 1) * 100, lang=lang)}", eq - start))
         if wk_pct is not None and btc_week_pct is not None:
-            rows.append(("vs BTC", f"{wk_pct - btc_week_pct:+.2f} pts", wk_pct - btc_week_pct))
+            vs = wk_pct - btc_week_pct
+            rows.append((tr("vs_btc", lang), tr("pts", lang, v=i18n.num(vs, 2, lang, sign=True)), vs))
         dd = _num(a.get("drawdownPct"))
         if dd is not None:
-            rows.append(("Below peak", f"{dd:.2f} %"))
+            rows.append((tr("below_peak", lang), f"{i18n.num(dd, 2, lang)} %"))
         key = str(cfg.get("id") or name)
         trades = int(_num(a.get("trades")) or 0)
         snap[key] = {"trades": trades, "at": now}
         p = prev.get(key)
         if p and trades >= int(p.get("trades") or 0) and now - int(p.get("at") or 0) <= 8 * DAY_MS:
-            rows.append(("Trades", f"{trades - int(p['trades'])} this week"))
+            rows.append((tr("trades", lang), tr("trades_week", lang, n=trades - int(p["trades"]))))
         else:
-            rows.append(("Trades", f"{trades} since start"))
+            rows.append((tr("trades", lang), tr("trades_since", lang, n=trades)))
         parts.append(Rows(rows, f"{name} · {mode}"))
         for s in a.get("bySleeve") or []:
             sleeves.append((s.get("name") or "?", _num(s.get("pnl")) or 0.0))
     if len(sleeves) > 1:
         best, worst = max(sleeves, key=lambda x: x[1]), min(sleeves, key=lambda x: x[1])
-        parts.append(Line(f"{best[0]} {signed_money(best[1])} · worst {worst[0]} {signed_money(worst[1])}",
-                          "Best sleeve"))
-    n = len(aps)
-    summary = f"{n} {'autopilot' if n == 1 else 'autopilots'}: {signed_money(week_total)} this week {dot(week_total)}"
+        parts.append(Line(tr("best_worst", lang, best=best[0], best_money=signed_money(best[1], lang=lang),
+                             worst=worst[0], worst_money=signed_money(worst[1], lang=lang)), tr("best_sleeve", lang)))
+    summary = tr("weekly_summary", lang, n=len(aps), money=signed_money(week_total, lang=lang), dot=dot(week_total))
     if btc_week_pct is not None:
-        summary += f" · BTC {signed_pct(btc_week_pct)}"
-    return Card("🗓️", f"Weekly · {span}", summary, parts), snap
+        summary += tr("btc_suffix", lang, pct=signed_pct(btc_week_pct, lang=lang))
+    return Card("🗓️", title, summary, parts), snap
 
 
 def weekly_due(now: int) -> bool:
@@ -987,8 +1051,9 @@ def weekly(dry_run: bool = False, now: int | None = None, force: bool = False, s
     state = state if state is not None else engine_state()
     btc = btc_fetch(now - WEEK_MS, now) if btc_fetch else []
     btc_pct = (btc[-1][1] / btc[0][1] - 1) * 100 if len(btc) >= 2 and btc[0][1] else None
-    card, snap = weekly_card(state, st.get("weekly") or {}, now, btc_pct)
-    image = None if dry_run else make_chart(state, now - WEEK_MS, now, "Equity this week", card.title.split(" · ", 1)[-1],
+    lang = alert_lang()
+    card, snap = weekly_card(state, st.get("weekly") or {}, now, btc_pct, lang)
+    image = None if dry_run else make_chart(state, now - WEEK_MS, now, tr("chart_this_week", lang), week_span(now, lang),
                                             btc_fetch=lambda a, b: btc)
     res = send("weekly", [card], image=image, now=now, dry_run=dry_run, hold_in_quiet=False)
     if dry_run or res["reason"] in ("off", "quiet", "no destination"):
@@ -1012,14 +1077,14 @@ def flush_held(now: int | None = None) -> int:
     if in_quiet(settings, now):
         return 0
     q = settings["quiet"]
+    lang = alert_lang()
     rows = []
     for h in held[:30]:
-        t = local_time(int(h.get("ts") or now))
-        rows.append([f"{t.hour:02d}:{t.minute:02d}", short(h.get("title") or "?", 40)])
+        lt = local_time(int(h.get("ts") or now))
+        rows.append([f"{lt.hour:02d}:{lt.minute:02d}", short(h.get("title") or "?", 40)])
     n = len(held)
-    card = Card("🌙", "Quiet hours are over",
-                f"{n} lab {'post was' if n == 1 else 'posts were'} held back from {q['start']} to {q['end']}.",
-                [Table(["Time", "Post"], rows, more=max(n - 30, 0))])
+    card = Card("🌙", tr("quiet_over", lang), tr("held_summary", lang, n=n, start=q["start"], end=q["end"]),
+                [Table([tr("time", lang), tr("post", lang)], rows, more=max(n - 30, 0))])
     res = send(None, [card], now=now)
     if res["delivered"] or res["reason"] == "no destination":
         held_path().unlink(missing_ok=True)
@@ -1051,7 +1116,7 @@ def pending(now_ms: int | None = None) -> int:
 
 # ---------------------------------------------------------------- the health alarm
 
-def health_step(system: dict | None, st: dict) -> tuple[Card | None, dict]:
+def health_step(system: dict | None, st: dict, lang: str | None = None) -> tuple[Card | None, dict]:
     """(card to post or None, new state). Counts runs, not calls: the same
     system.json (same `at`) is counted once."""
     st = dict(st)
@@ -1061,19 +1126,21 @@ def health_step(system: dict | None, st: dict) -> tuple[Card | None, dict]:
     if at and at == st.get("last_at"):
         return None, st
     st["last_at"] = at
+    lang = lang or alert_lang()
+    when = i18n.when_iso(at, lang, local_time)
     if system.get("ok"):
         was = st.get("posted")
         st.update(bad_runs=0, posted=False)
         if was:
-            return Card("✅", "Health check all green again", f"Since the check at {at}."), st
+            return Card("✅", tr("health_green", lang), tr("since_check", lang, at=when)), st
         return None, st
     st["bad_runs"] = int(st.get("bad_runs") or 0) + 1
     if st["bad_runs"] >= 2 and not st.get("posted"):
         st["posted"] = True
         red = [c for c in system.get("checks") or [] if not c.get("ok")]
-        parts = [Line(short(c.get("detail") or "", 160), str(c.get("name"))) for c in red] or [Line("no check named")]
-        card = Card("🩺", f"Health check red for {st['bad_runs']} runs",
-                    f"{len(red)} {'check' if len(red) == 1 else 'checks'} not ok at {at}.", parts)
+        parts = ([Line(short(c.get("detail") or "", 160), str(c.get("name"))) for c in red]
+                 or [Line(tr("no_check_named", lang))])
+        card = Card("🩺", tr("health_red", lang, n=st["bad_runs"]), tr("checks_not_ok", lang, n=len(red), at=when), parts)
         return card, st
     return None, st
 

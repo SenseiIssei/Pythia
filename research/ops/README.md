@@ -53,7 +53,7 @@ or only the part that changed:
 
 ```bash
 research/ops/deploy_lab.sh     # the lab code in /opt/pythia-lab
-research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, system_health.sh in /opt/pythia-ops, then render
+research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, i18n.py, system_health.sh in /opt/pythia-ops, then render
 ```
 
 ## The job table
@@ -550,13 +550,20 @@ Now, whatever the day: `... python -m lab.ops.notify --weekly --force`.
 **Health alarm.** `system_health.sh` runs `/opt/pythia-ops/notify.py --health`
 after each check when that file and `/etc/pythia/alerts.env` exist
 (`PYTHIA_NOTIFY_PY` and `PYTHIA_ALERT_ENV` move them). It needs only
-`python3` on the host. Install with the health script (and again after an
-update of `notify.py`):
+`python3` on the host, and `i18n.py` next to it (the words of the messages in
+English and German). Install with the health script (and again after an
+update of `notify.py` or `i18n.py`):
 
 ```bash
 install -m 755 research/ops/system_health.sh /opt/pythia-ops/system_health.sh
 install -m 644 research/lab/lab/ops/notify.py /opt/pythia-ops/notify.py
+install -m 644 research/lab/lab/ops/i18n.py /opt/pythia-ops/i18n.py
 ```
+
+**Message language.** The messages follow the app's setting (Settings,
+Notifications, Message language). `PYTHIA_ALERT_LANG=de` in
+`/etc/pythia/alerts.env` (and the engine's environment) fixes German for every
+job and the engine whatever the app says.
 
 The cron line of the health check stays as it is.
 

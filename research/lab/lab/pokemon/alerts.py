@@ -27,7 +27,7 @@ from pathlib import Path
 
 import polars as pl
 
-from ..ops import notify
+from ..ops import i18n, notify
 
 MOVE_MIN_USD, MOVE_1D, MOVE_7D = 20.0, 0.20, 0.35
 CM_MOVE, CM_MIN_EUR = 0.30, 20.0
@@ -46,16 +46,16 @@ def strong_moves(snap: pl.DataFrame) -> list[dict]:
         r1, r7 = r.get("ret_1d"), r.get("ret_7d")
         move, basis = None, None
         if r1 is not None and abs(math.expm1(r1)) >= MOVE_1D:
-            move, basis = math.expm1(r1), "since the last snapshot"
+            move, key = math.expm1(r1), "last"
         elif r7 is not None and abs(math.expm1(r7)) >= MOVE_7D:
-            move, basis = math.expm1(r7), "over 7 days"
+            move, key = math.expm1(r7), "7d"
         elif r1 is None and r7 is None and (r.get("cm_trend") or 0) >= CM_MIN_EUR:
             m = r.get("cm_mom_1_7")
             if m is not None and abs(m) >= CM_MOVE:
-                move, basis = m, "Cardmarket 1-day vs 7-day average"
+                move, key = m, "cm"
         if move is not None:
             out.append({"card_id": r["card_id"], "name": r["name"], "set": r.get("set_name"), "price": r["price"],
-                        "move": move, "basis": basis})
+                        "move": move, "basis": i18n.t(f"pk_basis_{key}"), "basis_key": key})
     return sorted(out, key=lambda x: -abs(x["move"]))
 
 
@@ -73,19 +73,26 @@ def _cool(state: dict, kind: str, cid: str, today: str) -> bool:
     return last is None or (date.fromisoformat(today) - date.fromisoformat(last)).days >= COOLDOWN_DAYS
 
 
-def message(moves: list[dict], uv: list[dict], today: str, validated: bool, prefix: str = "Pythia") -> str:
-    lines = [f"{prefix} cards {today}"]
+def message(moves: list[dict], uv: list[dict], today: str, validated: bool, prefix: str = "Pythia",
+            lang: str = "en") -> str:
+    """The message to the chat, in `lang` (en or de)."""
+    t = i18n.t
+
+    def basis(m: dict) -> str:
+        return t(f"pk_basis_{m['basis_key']}", lang) if m.get("basis_key") else str(m.get("basis") or "")
+
+    lines = [t("pk_head", lang, prefix=prefix, today=i18n.iso_day(today, lang))]
     if moves:
-        lines.append("Strong moves:")
-        lines += [f"- {m['name']} ({m['set']}): {m['move'] * 100:+.0f} % {m['basis']}, now ${m['price']:,.2f}"
-                  for m in moves]
+        lines.append(t("pk_moves", lang))
+        lines += [t("pk_move_line", lang, name=m["name"], set=m["set"], move=i18n.signed_pct(m["move"] * 100, 0, lang),
+                    basis=basis(m), price=i18n.money(m["price"], 2, lang)) for m in moves]
     if uv:
-        lines.append("Cheap next to similar cards" + ("" if validated else
-                     " (fair-value model only; the return forecast is not validated yet)") + ":")
-        lines += [f"- {u['name']} ({u['set']}): ${u['price']:,.2f}, fair ${u['fair']:,.2f} ({u['gap'] * 100:+.0f} %), "
-                  f"90 d forecast {u['pred_90d'] * 100:+.0f} %" for u in uv]
-    lines.append("Data and paper only; nothing is bought or sold.")
-    return notify.clip("\n".join(lines))
+        lines.append(t("pk_cheap", lang, note="" if validated else t("pk_unvalidated", lang)))
+        lines += [t("pk_uv_line", lang, name=u["name"], set=u["set"], price=i18n.money(u["price"], 2, lang),
+                    fair=i18n.money(u["fair"], 2, lang), gap=i18n.signed_pct(u["gap"] * 100, 0, lang),
+                    pred=i18n.signed_pct(u["pred_90d"] * 100, 0, lang)) for u in uv]
+    lines.append(t("pk_foot", lang))
+    return notify.clip("\n".join(lines), lang=lang)
 
 
 def run(snap: pl.DataFrame, root: Path, today: str, validated: bool, dry_run: bool = False) -> dict:
@@ -100,7 +107,7 @@ def run(snap: pl.DataFrame, root: Path, today: str, validated: bool, dry_run: bo
     if not moves and not uv:
         return out
     url, fmt, prefix = notify.config()
-    text = message(moves, uv, today, validated, prefix)
+    text = message(moves, uv, today, validated, prefix, notify.alert_lang())
     out["text"] = text
     print(text)
     if dry_run:
