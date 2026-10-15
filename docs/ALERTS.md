@@ -9,6 +9,7 @@ webhook, a Slack incoming webhook, or anything else that takes the same JSON.
 | the engine (`pythia-server`) | as it happens | the operator alerts below |
 | `lab.ops.notify` | every morning, after the learning loop | the daily digest |
 | `system_health.sh` (via `notify.py --health`) | hourly, only on a change | health check not ok for two runs in a row, and green again |
+| `lab.ops.trending` | every 15 minutes; digest at the first run from 08:00 UTC | a strong volume surge on a coin Alpaca lists (watch only, once per coin per 20 h), and a daily watchlist: Alpaca coins' volume ratios, Binance gainers, on-chain hype labelled high risk (see `research/ops/README.md`, Trending watcher) |
 
 Nothing is posted unless `PYTHIA_ALERT_WEBHOOK` is set. The webhook URL is a
 secret: it is read from the environment only, never logged, never written to a
