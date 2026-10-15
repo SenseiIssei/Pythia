@@ -22,6 +22,7 @@ import {
   Plane,
   History,
   Bell,
+  BookOpen,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -45,6 +46,7 @@ export type PageId =
   | "signals"
   | "models"
   | "lab"
+  | "research"
   | "predictions"
   | "live"
   | "risk"
@@ -78,6 +80,7 @@ export const NAV: NavItem[] = [
   { id: "markets", label: "Markets", icon: LineChart, section: "Trading", advanced: true },
   { id: "positions", label: "Positions", icon: Wallet, section: "Trading", advanced: true },
   { id: "strategies", label: "Strategies", icon: Cpu, section: "Trading", advanced: true },
+  { id: "research", label: "Research", icon: BookOpen, section: "Research", advanced: true },
   { id: "composer", label: "Composer", icon: Blocks, section: "Research", advanced: true },
   { id: "backtest", label: "Backtest", icon: FlaskConical, section: "Research", advanced: true },
   { id: "optimizer", label: "Optimizer", icon: Sparkles, section: "Research", advanced: true },

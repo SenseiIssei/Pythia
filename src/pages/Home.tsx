@@ -15,6 +15,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Button, Card, EmptyState, Explain, Loading, Sparkline, fmtUsd, type Tone } from "../components/ui";
+import { InsightsCard } from "../components/Insights";
 import { explain } from "../glossary";
 import { liveMode } from "../live";
 import { useStore } from "../store";
@@ -103,6 +104,9 @@ export function Home() {
 
       {/* The week in one paragraph. */}
       <WeekReport />
+
+      {/* The lab's three most important things today (hidden without an engine). */}
+      <InsightsCard />
 
       {/* 4 · What does it think? */}
       <TopPredictions forecasts={forecasts} untrusted={forecastStats.trustedSources === 0} />
