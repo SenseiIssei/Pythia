@@ -30,6 +30,7 @@ from pathlib import Path
 
 import polars as pl
 
+from ..ops import i18n
 from . import market
 
 START_EQUITY = 10_000.0
@@ -231,11 +232,10 @@ def find_alerts(snap: pl.DataFrame, steam: pl.DataFrame, ago24: pl.DataFrame) ->
             g = market.gaps(r["min_price"], r["steam_ask"])
             for route, v in g.items():
                 if v is not None and v >= GAP_MIN:
-                    text = (f"buy on Skinport at {r['min_price']:.2f}, list on Steam at {r['steam_ask'] - 0.01:.2f}: "
-                            f"{v:+.1%} after fees, paid in Steam wallet funds" if route == "to_steam" else
-                            f"buy on Steam at {r['steam_ask']:.2f}, list on Skinport at {r['min_price'] - 0.01:.2f}: "
-                            f"{v:+.1%} after fees, cash after the 7-day trade lock")
-                    out.append({"kind": "gap", "route": route, "name": r["name"], "strength": v, "text": text})
+                    ask, lst = ((r["min_price"], r["steam_ask"] - 0.01) if route == "to_steam"
+                                else (r["steam_ask"], r["min_price"] - 0.01))
+                    a = {"kind": "gap", "route": route, "name": r["name"], "strength": v, "ask": ask, "list": lst}
+                    out.append({**a, "text": describe(a)})
     prev = {}
     if not ago24.is_empty() and "ref" in ago24.columns:
         prev = dict(zip(ago24["name"].to_list(), ago24["ref"].to_list()))
@@ -251,15 +251,35 @@ def find_alerts(snap: pl.DataFrame, steam: pl.DataFrame, ago24: pl.DataFrame) ->
             d24 = ref / p24 - 1
             if d24 > DROP_24H:
                 continue
-            why = f"{d24:+.1%} in 24 h"
+            change = {"d24": d24}
         else:
             if not m7 or ref / m7 - 1 > DROP_VS_7D:
                 continue
-            why = f"{ref / m7 - 1:+.1%} against its 7-day median"
-        out.append({"kind": "drop", "name": r["name"], "strength": -vs30,
-                    "text": f"now {ref:.2f}, {why}, {vs30:+.1%} against its 30-day median ({int(r['s7_volume'])} sales in 7 days)"})
+            change = {"d7": ref / m7 - 1}
+        a = {"kind": "drop", "name": r["name"], "strength": -vs30, "ref": ref, "vs30": vs30,
+             "sales7": int(r["s7_volume"]), **change}
+        out.append({**a, "text": describe(a)})
     out.sort(key=lambda a: -a["strength"])
     return out
+
+
+def describe(a: dict, lang: str = "en") -> str:
+    """What an alert found, in a sentence in `lang` (the app keeps the English
+    `text`). An alert written before the numbers were kept says its `text`."""
+    t = i18n.t
+
+    def money(v: float) -> str:  # EUR, as Skinport and Steam quote it
+        return i18n.num(v, 2, "de") if lang == "de" else f"{v:.2f}"
+
+    if a.get("kind") == "gap" and "ask" in a:
+        key = "cs2_to_steam" if a.get("route") == "to_steam" else "cs2_to_skinport"
+        return t(key, lang, ask=money(a["ask"]), list=money(a["list"]), v=i18n.frac_pct(a["strength"], 1, lang))
+    if a.get("kind") == "drop" and "ref" in a:
+        why = (t("cs2_why_24h", lang, d=i18n.frac_pct(a["d24"], 1, lang)) if "d24" in a
+               else t("cs2_why_7d", lang, d=i18n.frac_pct(a["d7"], 1, lang)))
+        return t("cs2_drop_text", lang, ref=money(a["ref"]), why=why, vs30=i18n.frac_pct(a["vs30"], 1, lang),
+                 n=a["sales7"])
+    return str(a.get("text") or "")
 
 
 def fresh_alerts(alerts: list[dict], state: dict, now_ms: int) -> tuple[list[dict], dict]:
@@ -275,13 +295,15 @@ def fresh_alerts(alerts: list[dict], state: dict, now_ms: int) -> tuple[list[dic
     return out, st
 
 
-def alert_text(alerts: list[dict], prefix: str = "Pythia", limit: int = 8) -> str:
-    lines = [f"{prefix} CS2: {len(alerts)} to look at (paper only, trade by hand if at all)"]
+def alert_text(alerts: list[dict], prefix: str = "Pythia", limit: int = 8, lang: str = "en") -> str:
+    """The message to the chat, in `lang` (en or de)."""
+    t = i18n.t
+    lines = [t("cs2_head", lang, prefix=prefix, n=len(alerts))]
     for a in alerts[:limit]:
-        tag = "Gap" if a["kind"] == "gap" else "Drop"
-        lines.append(f"- {tag}: {a['name']}: {a['text']}")
+        tag = t("cs2_gap" if a["kind"] == "gap" else "cs2_drop", lang)
+        lines.append(f"- {tag}: {a['name']}: {describe(a, lang)}")
     if len(alerts) > limit:
-        lines.append(f"... and {len(alerts) - limit} more on the CS2 page")
+        lines.append(t("cs2_more", lang, n=len(alerts) - limit))
     return "\n".join(lines)
 
 

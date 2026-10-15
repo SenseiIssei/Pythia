@@ -50,6 +50,9 @@ def allowed_roots() -> list[Path]:
     return [
         ROOT / "learn",
         report.REPORTS / "learn",
+        # The real money readiness check (lab.ops.readiness): its record and its report.
+        ROOT / "readiness",
+        report.REPORTS / "readiness",
         ROOT / "costs" / "learned.json",
         ROOT / "costs" / "learned.json.tmp",
         models / "registry",
