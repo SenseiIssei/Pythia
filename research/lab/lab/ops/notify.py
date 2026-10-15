@@ -820,7 +820,43 @@ def health_line(health: dict | None, now: int) -> Line:
     return Line(f"🔴 {len(red)} red: {names}{late}", "Health")
 
 
-def digest_card(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int) -> tuple[Card, dict]:
+# The real money readiness line (lab.ops.readiness), every word of it in one place.
+READINESS_TEXT = {
+    "lead": "Real money",
+    "missing": "no readiness report yet",
+    "stale": " (report from {date}, not today's)",
+    "none": "no autopilot on the Alpaca paper account",
+    "ready": "{names} ready for a real money proposal; only you can arm live",
+    "best": "none ready yet; closest {name}: {passed} of {total} rules, {togo}",
+    "days_to_go": "{n} days to go",
+    "waiting_on": "waiting on {rules}",
+}
+
+
+def readiness_text(rep: dict | None, now: int | None = None) -> str:
+    """One line on reports/readiness/latest.json: who is ready, or who is closest."""
+    t = READINESS_TEXT
+    if not rep:
+        return t["missing"]
+    gen = _num(rep.get("generated_ms"))
+    stale = (t["stale"].format(date=str(rep.get("generated") or "?")[:10])
+             if now is not None and gen is not None and now - gen > 30 * 3_600_000 else "")
+    items = [i for i in rep.get("autopilots") or [] if i.get("on_account")]
+    if not items:
+        return t["none"] + stale
+    ready = [i for i in items if i.get("ready")]
+    if ready:
+        return t["ready"].format(names=", ".join(str(i.get("name")) for i in ready)) + stale
+    best = max(items, key=lambda i: (i.get("passed") or 0, -(i.get("days_to_go") or 0)))
+    failing = [str(r.get("label", "")).lower() for r in best.get("rules") or [] if not r.get("pass")]
+    togo = (t["days_to_go"].format(n=best["days_to_go"]) if best.get("days_to_go")
+            else t["waiting_on"].format(rules=", ".join(failing[:3])))
+    return t["best"].format(name=best.get("name"), passed=best.get("passed"), total=best.get("total"),
+                            togo=togo) + stale
+
+
+def digest_card(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int,
+                readiness: dict | None = None) -> tuple[Card, dict]:
     parts, snap, today, missing = autopilot_parts(learn, prev, now)
     if learn is None:
         summary = "No learning report found."
@@ -849,6 +885,8 @@ def digest_card(learn: dict | None, forward: dict | None, health: dict | None, p
         if gen is not None and now - gen > 30 * 3_600_000:
             lines.append(Line(f"the last report is from {learn.get('generated')}, not today's", "Learning"))
     lines.append(forward_line(forward))
+    if readiness is not None:
+        lines.append(Line(short(nodash(readiness_text(readiness, now)), 220), READINESS_TEXT["lead"]))
     lines.append(health_line(health, now))
     if learn and learn.get("headline"):
         lines.append(Line(short(nodash(learn["headline"]), 220), "Learning"))
@@ -871,7 +909,8 @@ def daily(dry_run: bool = False, now_ms: int | None = None, keep_snapshot: bool 
     state_path = data_root() / "notify" / "state.json"
     st = read_json(state_path) or {}
     card, snap = digest_card(read_json(rep / "learn" / "latest.json"), read_json(rep / "forward" / "latest.json"),
-                             read_json(data_root() / "_health" / "system.json"), st.get("autopilots") or {}, now)
+                             read_json(data_root() / "_health" / "system.json"), st.get("autopilots") or {}, now,
+                             readiness=read_json(rep / "readiness" / "latest.json"))
     image = None
     if chart and not dry_run:
         image = make_chart(engine_state(), None, now, "Equity since start", day_label(now))
