@@ -2482,7 +2482,7 @@ impl Engine {
                     }
                     // On a bar-backed market, act at most once per closed candle
                     // in each book. The tick loop runs every 1.5s but the data
-                    // only changes when a bar closes — re-firing in between is
+                    // only changes when a bar closes; re-firing in between is
                     // the same signal resubmitted, and it is how a "signal"
                     // turns into a fee bill.
                     if let Some(bar_ts) = self.last_bar_ts.get(&intent.market_id).copied() {
@@ -2511,7 +2511,7 @@ impl Engine {
                     let whose = self.book_label(&book).map(|l| format!(" (for {l})")).unwrap_or_default();
                     self.log(
                         JournalKind::Signal,
-                        format!("{name}: {:?} {} — {}{whose}", intent.side, m.symbol, intent.reason),
+                        format!("{name}: {:?} {}: {}{whose}", intent.side, m.symbol, intent.reason),
                         Some(sid.clone()),
                         Some(intent.market_id.clone()),
                     );
@@ -3676,7 +3676,7 @@ impl Engine {
             return;
         }
 
-        // One venue order per market and book at a time — never double-send
+        // One venue order per market and book at a time: never double-send
         // while a prior order is still awaiting a broker response. An exit
         // that must not wait asks a maker order resting there to stand down;
         // the exit goes out once that order is done.
@@ -5272,13 +5272,13 @@ impl Engine {
                     );
                 }
                 // Otherwise someone else's position in a market we happen to
-                // watch. Not ours to manage — leave it entirely alone.
+                // watch. Not ours to manage: leave it entirely alone.
                 continue;
             }
             if (book_qty - bp.qty).abs() < 1e-6 {
                 for k in &holders {
                     if let Some(p) = self.positions.get_mut(k) {
-                        p.live = true; // agrees — just make sure it is flagged live
+                        p.live = true; // agrees: just make sure it is flagged live
                     }
                 }
                 continue;
@@ -5289,7 +5289,7 @@ impl Engine {
             self.log(
                 JournalKind::Risk,
                 format!(
-                    "Reconciled {}: book had {book_qty:.6}{}, {venue:?} has {:.6} — broker wins",
+                    "Reconciled {}: book had {book_qty:.6}{}, {venue:?} has {:.6}, broker wins",
                     bp.symbol,
                     if holders.len() > 1 { format!(" over {} books", holders.len()) } else { String::new() },
                     bp.qty
@@ -5345,7 +5345,7 @@ impl Engine {
             let whose = self.book_label(&p.book).map(|l| format!(" ({l})")).unwrap_or_default();
             self.log(
                 JournalKind::Risk,
-                format!("{market}{whose} is no longer held at {venue:?} — dropped from the book"),
+                format!("{market}{whose} is no longer held at {venue:?}, dropped from the book"),
                 None,
                 Some(market.clone()),
             );
