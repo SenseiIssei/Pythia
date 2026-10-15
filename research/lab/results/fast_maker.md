@@ -108,3 +108,57 @@ decide each family A and C entry order instead of the bars (filled when trades
 of at least the order's size print below the limit within the window); the
 share of orders where bars and trades disagree, and in which direction, is
 reported.
+
+## Addendum (2026-10-15, written before the first run)
+
+Nothing in the grid, the picks, the fill model or the pass rule changes. What
+changes is where and on what bars the first run is made, and the size of the
+pool, and both are stated here before any number exists.
+
+1. **Bars.** The registered bars are 5 minutes. The machine the first run is
+   made on holds Binance 1h archives for every USDT pair (683 symbols, to
+   2026-10-14) but no 5-minute bars, and this study does not download them
+   there. The first run therefore uses **1h bars** for all 33 coins and the
+   twin (`--bars 1h`); the registered **5-minute run** is the server command
+   `python -m lab.experiments.fast_maker --bars 5m` (after
+   `python -m lab.experiments.vision alpaca` and `... vision twin`) and writes
+   `results/fast_maker_5m.md`. On 1h bars: the latency is one bar (an hour);
+   family A is checked at hourly closes only (the trailing hour's return is
+   the bar's own return); entry windows under an hour round up to one bar, so
+   family D's two values of N give identical variants (they are still counted,
+   44 stays 44); exits are re-placed every hour, not every 15 minutes; "one
+   bar late" is an hour late. For orders decided at an hour close that rest
+   whole hours (families B and C, A and D at their 60-minute windows) the fill
+   rule gives the same answer on 1h and on 5-minute bars, because an hour's
+   low is the lowest of its twelve 5-minute lows; partial shares and the
+   volume cap match too. What differs is timing inside the hour.
+2. **Resolution check** (not a trial). 15 of the 33 coins have 1-minute
+   history on this machine (AAVE ADA AVAX BCH BTC DOGE DOT ETH FIL LINK LTC
+   PEPE SOL UNI XRP). All 44 variants are run on those 15 at 5-minute bars
+   built from the 1-minute bars and at 1h bars, and the out-of-sample Sharpes
+   and net bps per round trip are compared.
+3. **aggTrades check.** It needs downloads, so it is left to the server
+   (`python -m lab.experiments.fast_maker check-fills`). Its days are the two
+   days of each quarter with the most family A and C entry orders on the four
+   coins (chosen by order count, not by outcome).
+4. **Pool.** The registration says 430 (377 plus 53). Since C16 other work
+   was counted on the same 377 in parallel: the factory's first run (300, the
+   ledger now says 677), listings (16), memecoins (50) and equities_ranking
+   (45). Gate 3 is judged over all of them plus this study's 53: **841
+   trials**, the stricter count (the 111 hand trials enter with the prior's
+   variance, the factory's 300 with the variance of their in-sample Sharpes
+   from the ledger, this study's 53 with theirs, clipped at +-3). The p over
+   the registered 430 is reported next to it.
+5. **Accounting details** fixed now: the book is simulated in dollars from
+   100 000 USD; each entry is sized off the equity at the start of its
+   decision's UTC day; an order holds its full target against the 100 % limit
+   while it rests and target times the filled share until the exit is done;
+   orders decided at the same bar are queued by trailing 28-day quote volume,
+   largest first. A time exit is decided H after the close of the bar of the
+   first entry fill. Gross means the base fills without fees, haircut or
+   fallback cost. A coin is not re-entered while an exit of it is open; an
+   entry skipped by the 100 % limit does not free the coin for other signals
+   of the same family during the span the skipped trade would have held.
+   BTC buy and hold (no cost) is reported next to every pick.
+
+<!-- generated below by lab.experiments.fast_maker; edit above this line only -->
