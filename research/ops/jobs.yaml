@@ -250,6 +250,28 @@ jobs:
     lock_wait: 6h
     replaces: pythia-factory
 
+  # ---------------------------------------------------------------- AI (Claude API, metered by the engine)
+  # Both call through the autopilot engine's POST /api/ai/complete, which
+  # holds the key and the hard budget (docs/AI.md). Shadow only: nothing they
+  # write sizes, places or vetoes an order.
+  - name: ai-brief
+    description: daily AI brief (Haiku, batch), 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule
+    schedule: "50 6 * * *"
+    command: python -m lab.ai.brief
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 1g}
+    timeout: 45m
+
+  - name: ai-weekly
+    description: weekly AI review (Sonnet, batch) of every study and live result, three proposed experiments in reports/ai/weekly.md, never run by anything
+    schedule: "0 9 * * 0"
+    command: python -m lab.ai.weekly
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 1g}
+    timeout: 75m
+
   # ---------------------------------------------------------------- watchers and collectors
   - name: listings
     description: new listings on Alpaca, Binance, Coinbase, Kraken, then the listings paper book
@@ -394,6 +416,10 @@ datasets:
   - name: listings
     path: listings
     max_gb: 2
+  - name: ai
+    description: the Claude API ledger, caps and the AI brief's predictions; never deleted
+    path: ai
+    max_gb: 1
   - name: job-runs
     description: the runner's own run records, by month
     path: _ops/runs
@@ -419,6 +445,7 @@ backup:
     - costs
     - trials
     - factory
+    - ai
     - reports/forward/evidence.json
     - reports/forward/backtest
   # By file or folder name: caches the jobs rebuild (the zoo's panels, the

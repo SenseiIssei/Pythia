@@ -820,7 +820,20 @@ def health_line(health: dict | None, now: int) -> Line:
     return Line(f"🔴 {len(red)} red: {names}{late}", "Health")
 
 
-def digest_card(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int) -> tuple[Card, dict]:
+def ai_lines(brief: dict | None, now: int) -> list[Line]:
+    """The AI brief's three lines (reports/ai_brief/latest.json, lab.ai.brief),
+    when it is from the last 26 hours. Shadow only, and labelled so."""
+    if not isinstance(brief, dict):
+        return []
+    gen = _num(brief.get("generated_ms"))
+    if gen is None or not 0 <= now - gen <= 26 * 3_600_000:
+        return []
+    lines = [short(nodash(str(s)), 220) for s in brief.get("summary") or [] if isinstance(s, str) and s.strip()][:3]
+    return [Line(s, "AI brief (shadow)" if i == 0 else None) for i, s in enumerate(lines)]
+
+
+def digest_card(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int,
+                ai: dict | None = None) -> tuple[Card, dict]:
     parts, snap, today, missing = autopilot_parts(learn, prev, now)
     if learn is None:
         summary = "No learning report found."
@@ -852,6 +865,7 @@ def digest_card(learn: dict | None, forward: dict | None, health: dict | None, p
     lines.append(health_line(health, now))
     if learn and learn.get("headline"):
         lines.append(Line(short(nodash(learn["headline"]), 220), "Learning"))
+    lines += ai_lines(ai, now)
     return Card("📊", f"Daily · {day_label(now)}", nodash(summary), lines), snap
 
 
@@ -871,7 +885,8 @@ def daily(dry_run: bool = False, now_ms: int | None = None, keep_snapshot: bool 
     state_path = data_root() / "notify" / "state.json"
     st = read_json(state_path) or {}
     card, snap = digest_card(read_json(rep / "learn" / "latest.json"), read_json(rep / "forward" / "latest.json"),
-                             read_json(data_root() / "_health" / "system.json"), st.get("autopilots") or {}, now)
+                             read_json(data_root() / "_health" / "system.json"), st.get("autopilots") or {}, now,
+                             ai=read_json(rep / "ai_brief" / "latest.json"))
     image = None
     if chart and not dry_run:
         image = make_chart(engine_state(), None, now, "Equity since start", day_label(now))
