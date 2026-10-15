@@ -79,6 +79,8 @@ export const GLOSSARY: Record<string, string> = {
   "Trade Log": "Every filled order, newest first.",
 
   // Lab: forward tests
+  Backtest:
+    "Running the rules over past prices, fees included, judged only on the years the rules were not tuned on. Sharpe is return per unit of risk; above 1 is good.",
   "Forward test":
     "Trading with made-up money on real prices after the backtest was done, to see whether its promise holds on days it never saw.",
   "Expected range":
