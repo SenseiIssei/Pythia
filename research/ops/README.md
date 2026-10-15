@@ -253,8 +253,18 @@ days old, FDV over 50x liquidity, volume over 20x liquidity, few sells), the
 24h tickers of every Binance USDT pair (top gainers) and, for the coins Alpaca
 lists, 24h quote volume and trade count against their 28-day median.
 
-- Every run appends a line to `/srv/pythia-data/trending/<date>.jsonl` and
-  rewrites `reports/trending/latest.json`.
+- Every run writes one parquet file to the data lake,
+  `/srv/pythia-data/trending/snapshots/date=<day>/<HHMMSS>.parquet` (one row
+  per item, `kind` alpaca, gainer, market_surge or dex; read a range with
+  `pl.read_parquet(".../trending/snapshots/**/*.parquet", hive_partitioning=True)`),
+  and rewrites `reports/trending/latest.json` (title, updatedMs, status,
+  headline, items, then the full snapshot).
+- Rate limits: 3 to at most about 10 DexScreener calls (boosts, profiles,
+  one pair call per chain, at most 5 search fallbacks) and 1 Binance ticker
+  call per run;
+  the Alpaca coins' 28-day klines are fetched once per UTC day (32 calls at
+  weight 2) and cached in `trending/state.json`. Requests are spaced 250 ms
+  per host, and a 429 or 418 stops calls to that host for the rest of the run.
 - A strong surge on a coin Alpaca lists (volume 3x its 28-day median and up
   8 % in 24 h, or 2x and up 20 %) is posted at once, at most once per coin per
   20 hours, as "watch only".

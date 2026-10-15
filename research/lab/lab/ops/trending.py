@@ -19,8 +19,11 @@ Sources, all public and keyless:
 
 What it does with them:
 
-  store    every run appends one line to <data>/trending/<YYYY-MM-DD>.jsonl
-           and rewrites <reports>/trending/latest.json
+  store    every run writes one parquet file to the data lake,
+           <data>/trending/snapshots/date=<YYYY-MM-DD>/<HHMMSS>.parquet (one
+           row per item: kind alpaca, gainer, market_surge or dex), and
+           rewrites <reports>/trending/latest.json (title, updatedMs, status,
+           headline, items, then the full snapshot)
   alert    a strong surge on a coin Alpaca lists (actionable on the paper
            account) is posted at once: 24h quote volume at least 3x its
            28-day median and up at least 8 % in 24 h, or up at least 20 %
@@ -36,7 +39,15 @@ Delivery is lab.ops.notify's (PYTHIA_TELEGRAM_BOT_TOKEN and
 PYTHIA_TELEGRAM_CHAT_ID, or PYTHIA_ALERT_WEBHOOK); unset, it only prints.
 PYTHIA_ALPACA_COINS (comma separated bases) overrides the list of coins
 Alpaca lists. State (alert times, daily volumes, last digest) is
-<data>/trending/state.json. Standard library only.
+<data>/trending/state.json. Standard library plus polars for the parquet.
+
+Rate limits. DexScreener allows 60 requests a minute on the boost and
+profile endpoints and 300 on the pair endpoints; Binance weighs the full 24h
+ticker at 80 and a kline call at 2 of 6000 a minute. A run makes 2 boost and
+profile calls, at most 1 pair call per chain per 30 tokens and at most 5
+search fallbacks; the 28-day medians of the Alpaca coins are fetched once per
+UTC day and kept in the state. Real requests are spaced at least 250 ms apart
+per host, and a 429 or 418 answer stops further calls to that host for the run.
 """
 
 from __future__ import annotations
@@ -58,8 +69,10 @@ from . import notify
 
 DEX = "https://api.dexscreener.com"
 BINANCE_HOSTS = ("https://api.binance.com", "https://data-api.binance.vision")
-ALPACA_COINS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "LTC", "DOT", "BCH", "UNI", "AAVE",
-                "PEPE", "FIL", "SHIB", "BONK", "WIF", "TRUMP")
+# Every crypto asset Alpaca lists (2026-10).
+ALPACA_COINS = ("AAVE", "ADA", "ARB", "AVAX", "BAT", "BCH", "BONK", "BTC", "CRV", "DOGE", "DOT", "ETH", "FIL", "GRT",
+                "HYPE", "LDO", "LINK", "LTC", "ONDO", "PEPE", "POL", "RENDER", "SHIB", "SKY", "SOL", "SUSHI", "TRUMP",
+                "UNI", "WIF", "XRP", "XTZ", "YFI")
 MEMES = ("DOGE", "SHIB", "PEPE", "BONK", "WIF", "TRUMP")
 NOT_COINS = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "EUR", "AEUR", "EURI", "USD1", "XUSD", "BFUSD",
              "USDE", "RLUSD", "PYUSD", "PAXG", "XAUT", "WBTC", "WBETH", "U"}
@@ -71,6 +84,8 @@ DIGEST_HOUR = 8
 MIN_GAINER_QV = 5_000_000
 HISTORY_DAYS, HISTORY_MIN = 28, 7
 TOP_DEX = 15
+MAX_SEARCH = 5
+MIN_GAP_S = 0.25
 # On-chain risk flags.
 LOW_LIQ_USD = 50_000
 YOUNG_H = 72
@@ -92,10 +107,31 @@ def alpaca_coins() -> tuple[str, ...]:
     return ALPACA_COINS
 
 
+class RateLimited(OSError):
+    """The host said 429 or 418; no more calls to it in this run."""
+
+
+_last_call: dict[str, float] = {}
+_blocked: set[str] = set()
+
+
 def http_json(url: str, timeout: float = 15):
+    host = urllib.parse.urlsplit(url).netloc
+    if host in _blocked:
+        raise RateLimited(f"{host} rate limited earlier in this run")
+    wait = _last_call.get(host, 0.0) + MIN_GAP_S - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _last_call[host] = time.monotonic()
     req = urllib.request.Request(url, headers={"User-Agent": "pythia-trending", "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code in (418, 429):
+            _blocked.add(host)
+            raise RateLimited(f"{host} HTTP {e.code}") from e
+        raise
 
 
 def binance(get: Fetch, path: str):
@@ -181,6 +217,7 @@ def dex_enrich(get: Fetch, tokens: list[dict], now: int, limit: int = TOP_DEX) -
     for t in tokens:
         by_chain.setdefault(t["chain"], []).append(t)
     pairs: dict[tuple, dict] = {}
+    searches = 0
     for chain, ts in by_chain.items():
         for i in range(0, len(ts), 30):
             addrs = ",".join(t["address"] for t in ts[i:i + 30])
@@ -190,7 +227,8 @@ def dex_enrich(get: Fetch, tokens: list[dict], now: int, limit: int = TOP_DEX) -
                 got = []
             for t in ts[i:i + 30]:
                 p = best_pair(got if isinstance(got, list) else [], t["address"])
-                if p is None:
+                if p is None and searches < MAX_SEARCH:
+                    searches += 1
                     try:
                         s = get(f"{DEX}/latest/dex/search?q={urllib.parse.quote(t['address'])}")
                         p = best_pair((s or {}).get("pairs") or [], t["address"])
@@ -363,10 +401,13 @@ def state_path() -> Path:
     return notify.data_root() / "trending" / "state.json"
 
 
-def snapshot(get: Fetch, hist: dict, now: int) -> tuple[dict, dict]:
+def snapshot(get: Fetch, hist: dict, now: int, medians: dict | None = None) -> tuple[dict, dict, dict]:
+    """One look at the sources. `medians` caches the Alpaca coins' 28-day medians for one UTC day."""
     ts = datetime.fromtimestamp(now / 1000, timezone.utc)
     day = f"{ts:%Y-%m-%d}"
     snap: dict = {"ts": ts.isoformat(timespec="seconds"), "errors": []}
+    if not medians or medians.get("day") != day:
+        medians = {"day": day, "coins": {}}
     try:
         tick = tickers(get)
     except (urllib.error.URLError, OSError, ValueError, RuntimeError) as e:
@@ -375,7 +416,9 @@ def snapshot(get: Fetch, hist: dict, now: int) -> tuple[dict, dict]:
     al = {}
     for c in alpaca_coins():
         if c in tick:
-            al[c] = surge(tick[c], kline_medians(get, c))
+            if medians["coins"].get(c) is None:
+                medians["coins"][c] = kline_medians(get, c)
+            al[c] = surge(tick[c], medians["coins"][c])
     snap["alpaca"] = al
     snap["gainers"] = gainers(tick)
     if tick:
@@ -386,14 +429,95 @@ def snapshot(get: Fetch, hist: dict, now: int) -> tuple[dict, dict]:
     except (urllib.error.URLError, OSError, ValueError) as e:
         snap["dex"] = []
         snap["errors"].append(f"dexscreener: {type(e).__name__}")
-    return snap, hist
+    return snap, hist, medians
+
+
+def headline(snap: dict) -> tuple[str, str]:
+    """(status, headline) for the report header."""
+    got = bool(snap.get("alpaca") or snap.get("gainers") or snap.get("dex"))
+    if not got:
+        return "error", "No source answered: " + "; ".join(snap.get("errors") or ["nothing fetched"]) + "."
+    status = "degraded" if snap.get("errors") else "ok"
+    strong = sorted(((c, s) for c, s in (snap.get("alpaca") or {}).items() if is_strong(s)),
+                    key=lambda cs: -cs[1]["qv_ratio"])
+    if strong:
+        parts = ["Surge on Alpaca: " + ", ".join(f"{c} {s['qv_ratio']:.1f}x {pct(s['change'])}" for c, s in strong)]
+    else:
+        parts = ["No strong surge on the Alpaca coins"]
+    g = snap.get("gainers") or []
+    if g:
+        parts.append(f"top Binance gainer {g[0]['coin']} {pct(g[0]['change'])}")
+    dex = [r for r in snap.get("dex") or [] if r.get("symbol")]
+    if dex:
+        parts.append(f"{len(dex)} on-chain hype tokens (high risk, watch only)")
+    return status, "; ".join(parts) + "."
+
+
+def items(snap: dict) -> list[dict]:
+    """Every row of a snapshot, flat: what the report lists and what the parquet stores."""
+    al = set(alpaca_coins())
+    out = []
+    for c, s in sorted((snap.get("alpaca") or {}).items(), key=lambda cs: -(cs[1].get("qv_ratio") or 0)):
+        out.append({"kind": "alpaca", "name": c, "alpaca": True, "strong": is_strong(s), **s})
+    for kind, key in (("gainer", "gainers"), ("market_surge", "market_surges")):
+        for r in snap.get(key) or []:
+            out.append({"kind": kind, "name": r["coin"], "alpaca": r["coin"] in al,
+                        **{k: v for k, v in r.items() if k != "coin"}})
+    for r in snap.get("dex") or []:
+        out.append({**r, "kind": "dex", "name": r.get("symbol") or r.get("address"), "token_name": r.get("name"),
+                    "alpaca": False, "risk": "high"})
+    return out
+
+
+# The parquet schema is fixed so the day partitions concatenate.
+PARQUET_COLS = {"kind": "s", "name": "s", "alpaca": "b", "strong": "b", "change": "f", "qv": "f", "count": "f",
+                "qv_ratio": "f", "count_ratio": "f", "price": "f", "chain": "s", "address": "s", "token_name": "s", "source": "s",
+                "boost": "f", "dex": "s", "price_usd": "f", "change_h1": "f", "change_h24": "f",
+                "volume_h24": "f", "liquidity_usd": "f", "fdv": "f", "age_h": "f", "buys_h24": "f",
+                "sells_h24": "f", "flags": "s", "pair_url": "s"}
+
+
+def to_frame(snap: dict, now: int):
+    import polars as pl
+    types = {"s": pl.Utf8, "f": pl.Float64, "b": pl.Boolean}
+    rows = []
+    for it in items(snap):
+        r: dict = {"ts_ms": now}
+        for k, t in PARQUET_COLS.items():
+            v = it.get(k)
+            if isinstance(v, list):
+                v = "; ".join(map(str, v))
+            if v is not None:
+                v = num(v) if t == "f" else bool(v) if t == "b" else str(v)
+            r[k] = v
+        rows.append(r)
+    schema = {"ts_ms": pl.Int64, **{k: types[t] for k, t in PARQUET_COLS.items()}}
+    return pl.DataFrame(rows, schema=schema, orient="row") if rows else pl.DataFrame(schema=schema)
+
+
+def store(snap: dict, now: int) -> Path:
+    """One parquet file per run in the data lake, hive-partitioned by UTC day."""
+    ts = datetime.fromtimestamp(now / 1000, timezone.utc)
+    d = notify.data_root() / "trending" / "snapshots" / f"date={ts:%Y-%m-%d}"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{ts:%H%M%S}.parquet"
+    tmp = d / f".{ts:%H%M%S}.parquet.tmp"
+    to_frame(snap, now).write_parquet(tmp)
+    tmp.replace(p)
+    return p
+
+
+def report(snap: dict, now: int) -> dict:
+    status, head = headline(snap)
+    return {"title": "Trending watcher", "updatedMs": now, "status": status, "headline": head,
+            "items": items(snap), "caveat": CAVEAT, **snap}
 
 
 def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, force_digest: bool = False,
         poster=None) -> dict:
     now = now or now_ms()
     st = notify.read_json(state_path()) or {}
-    snap, hist = snapshot(get, st.get("history", {}), now)
+    snap, hist, medians = snapshot(get, st.get("history", {}), now, st.get("medians"))
     url, fmt, prefix = notify.config()
     post = poster or (lambda text: notify.post(url, fmt, text) if url else (False, "no webhook"))
     finding = w7_finding()
@@ -422,14 +546,12 @@ def run(get: Fetch = http_json, now: int | None = None, dry_run: bool = False, f
         if not dry_run:
             st["last_digest"] = day
     if dry_run:
-        print(json.dumps({k: v for k, v in snap.items() if k != "dex"}, indent=1)[:4000])
+        rep = report(snap, now)
+        print(json.dumps({k: v for k, v in rep.items() if k not in ("dex", "items")}, indent=1)[:4000])
         return snap
-    d = notify.data_root() / "trending"
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / f"{day}.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(snap) + "\n")
-    notify.write_json(notify.reports_root() / "trending" / "latest.json", snap)
-    st.update({"history": hist, "alerts": alerts, "last_run": snap["ts"]})
+    store(snap, now)
+    notify.write_json(notify.reports_root() / "trending" / "latest.json", report(snap, now))
+    st.update({"history": hist, "alerts": alerts, "medians": medians, "last_run": snap["ts"]})
     notify.write_json(state_path(), st)
     return snap
 
