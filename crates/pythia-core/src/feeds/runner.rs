@@ -7,9 +7,10 @@
 //! never across a request.
 //!
 //! Footprint with everything healthy: one websocket, one Binance reference
-//! request a minute, twenty candle requests a minute and twenty book requests
-//! every thirty seconds, the same as before minus the ticker poll every
-//! twelve seconds. Fallback sources are only asked while a market needs them.
+//! request a minute, one candle request per coin a minute and one book
+//! request per coin every thirty seconds (Alpaca answers for every coin it
+//! serves in one quote and one book request). Fallback sources are only asked
+//! while a market needs them, and only about the coins they list.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,7 +42,7 @@ pub async fn run(engine: Arc<Mutex<Engine>>, cfg: FeedConfig, bar_minutes: Arc<d
     let mut tasks = Vec::new();
     if cfg.stream && cfg.quotes.contains(&FeedSource::KrakenWs) {
         let shared = Arc::new(ws::Shared::default());
-        let symbols = sources::universe().map(String::from).collect();
+        let symbols = sources::listed(FeedSource::KrakenWs).map(String::from).collect();
         tasks.push(tokio::spawn(ws::run_kraken(shared.clone(), symbols)));
         tasks.push(tokio::spawn(drain_loop(engine.clone(), shared)));
     }

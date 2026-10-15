@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod alerts;
+pub mod coins;
 pub mod connectors;
 pub mod costs;
 pub mod engine;

@@ -573,6 +573,10 @@ posts quiet hours held back. Otherwise it does nothing.
 */5 * * * * root set -a; . /etc/pythia/alerts.env; PYTHIA_DATA=/srv/pythia-data python3 /opt/pythia-ops/notify.py --pending >> /var/log/pythia-notify.log 2>&1
 ```
 
+The engine that serves the API needs the same folder: add
+`-v /srv/pythia-data/reports/notify:/data/reports/notify -e PYTHIA_DATA=/data`
+to its `docker run` (see `docs/ALERTS.md`, section HTTP API).
+
 **One card from a script.** `python3 /opt/pythia-ops/notify.py --event venue "Disk almost full" "12 GB left"`
 (after `set -a; . /etc/pythia/alerts.env` and with `PYTHIA_DATA=/srv/pythia-data`),
 in any of the categories listed in `docs/ALERTS.md`.
@@ -743,3 +747,62 @@ listings paper book on only if the pre-registered rule passed. The engine that
 serves `/api/lab` needs the listings folder if it does not mount the whole data
 folder: add `-v /srv/pythia-data/reports/listings:/data/reports/listings:ro`
 and `-e PYTHIA_DATA=/data` to its `docker run`.
+
+## Extended crypto universe (W3)
+
+The engine quotes, charts and books every coin of its configured crypto
+universe. By default that is every pair the Alpaca paper account trades
+(stablecoins and gold left out, 32 coins) plus the lab's five coins Alpaca
+does not list, 37 in all. Alpaca's public crypto market data (v1beta3) is a
+keyless feed source next to Kraken, so coins Kraken or Binance do not list are
+still served; failover, sanity checks and `dataHealth` work per coin as
+before. Demo orders still go to the Alpaca paper account only.
+
+Choosing the coins, on both engines (the lab reads the same setting for the
+signals it writes, so set it for the lab container too):
+
+```bash
+# a list, presets or both: default, alpaca, lab20, memes; commas, spaces or lines
+PYTHIA_CRYPTO_UNIVERSE="alpaca"
+PYTHIA_CRYPTO_UNIVERSE="lab20 BONK WIF"
+# or a file in the same format, '#' starts a comment
+PYTHIA_CRYPTO_UNIVERSE_FILE=/path/to/universe.txt
+```
+
+Put it in the engine's environment (compose file or env file), restart the
+engine, and check the Data health card: every coin should show a source
+within a minute. Feed order can still be set with `PYTHIA_FEED_QUOTES` and
+`PYTHIA_FEED_CANDLES` (`kraken-ws,kraken,alpaca,binance,coinbase,bybit,okx`);
+a coin is only asked of the sources that list it. The data host the engine
+needs in addition: `data.alpaca.markets` (HTTPS, no key).
+
+The lab's history already covers the extended coins that trade on Binance
+(the backfill takes every USDT pair). To see what each coin has:
+
+```bash
+docker run --rm --memory 6g -v <data dir>:/data -v <lab checkout>:/app pythia-lab \
+  python -c "from lab import universe as u; from lab.experiments import fam_common as fc; \
+  [print(c) for c in u.coverage(fc.load_panel(), u.ALPACA)]"
+```
+
+The W3 study (`results/alpaca36.md`, pre-registered) runs where the daily
+panel is cached, in about the time of the C16 study:
+
+```bash
+docker run --rm --memory 6g -v <data dir>:/data -v <lab checkout>:/app pythia-lab \
+  python -m lab.experiments.alpaca36
+```
+
+It rewrites the part of `results/alpaca36.md` below the marker and writes
+`<agent-strategies>/reports/alpaca36.json`; commit the markdown. A paper book
+is added only if a candidate passes the pre-registered rules, in a separate
+change.
+
+The paper books can also be run on a universe as separate books, for a look
+at what they would hold (`--dry-run` writes nothing). They keep their own
+journals under `paper/<book>@<universe>/` and write no engine signal:
+
+```bash
+docker run --rm --memory 6g -v <data dir>:/data -v <lab checkout>:/app pythia-lab \
+  python -m lab.paper.families --universe alpaca --dry-run
+```
