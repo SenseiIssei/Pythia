@@ -268,6 +268,7 @@ fn a_late_fee_is_paid_by_the_autopilot_whose_trade_caused_it() {
         flatten_on_stop: true,
         max_sleeves: None,
         repick_every_hours: None,
+        portfolio: false,
     };
     let id = e.autopilot_start(cfg, false, VenueCash::NotRead).unwrap();
     let market = "crypto:BTC/USD";

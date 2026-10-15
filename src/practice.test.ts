@@ -210,6 +210,24 @@ describe("benchmark", () => {
   it("is null with nothing to compare", () => {
     expect(benchmark(ap(), T0)).toBeNull();
   });
+
+  it("names a portfolio's blend of Bitcoin and SPY", () => {
+    const blend = {
+      symbol: "BTC/USD+SPY",
+      name: "Blend of 60 % BTC and 40 % SPY, bought and held",
+      returnPct: 2,
+      excessPct: 1,
+      legs: [
+        { symbol: "BTC/USD", weight: 0.6, returnPct: 3 },
+        { symbol: "SPY", weight: 0.4, returnPct: 0.5 },
+      ],
+    };
+    const b = benchmark(ap({ benchmark: blend }), T0)!;
+    expect(b).toMatchObject({ btcPct: 2, runPct: 3, edgePct: 1, label: "BTC/SPY blend" });
+    expect(benchmarkLine(b)).toBe("Holding BTC/SPY blend would have made +2.00%; this is ahead by 1.00 points.");
+    // Still looking for a start price: no figure, and no Bitcoin-only stand-in.
+    expect(benchmark(ap({ benchmark: { ...blend, returnPct: null, excessPct: null }, btcReturnPct: 5 }), T0)).toBeNull();
+  });
 });
 
 describe("fills", () => {

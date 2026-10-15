@@ -1026,6 +1026,10 @@ export interface AutopilotConfig {
    *  pick only: absent means every 24 hours, 0 turns it off. The engine
    *  echoes what it uses (absent when off). */
   repickEveryHours?: number;
+  /** A portfolio across asset classes: one amount over crypto lab books and
+   *  lab books of US shares on the Alpaca account, split between the two by
+   *  evidence. Paper or demo only; sleeves stay empty (Pythia picks). */
+  portfolio?: boolean;
 }
 
 /**
@@ -1117,11 +1121,39 @@ export interface AutopilotStatus {
   cash?: number;
   /** The deepest fall from a peak over its equity history, percent. */
   maxDrawdownPct?: number;
+  /** A portfolio: each asset class with its budget and its own P&L. */
+  classes?: AutopilotClassStatus[];
+}
+
+/** One asset class of a portfolio. Mirrors Rust `ClassStatus`. */
+export interface AutopilotClassStatus {
+  /** "crypto" or "alpaca" (US shares). */
+  class: Venue;
+  /** "Crypto", "US shares". */
+  label: string;
+  /** Its share of the portfolio, 0..1. 0 when no book of it has evidence. */
+  weight: number;
+  pnl: number;
+  /** What it holds now, at the mark. */
+  exposure: number;
+  /** Lab books of the class with weight. */
+  books: number;
+  /** Why it holds nothing or waits, when it does. */
+  note?: string | null;
+}
+
+/** One leg of a blended benchmark. */
+export interface AutopilotBenchmarkLeg {
+  symbol: string;
+  /** Its weight in the blend now, 0..1. */
+  weight: number;
+  /** Buy and hold of this leg since the blend took these weights, percent. */
+  returnPct: number | null;
 }
 
 /** Buy and hold over the same period. Mirrors Rust `BenchmarkStatus`. */
 export interface AutopilotBenchmark {
-  /** "BTC/USD" or "SPY". */
+  /** "BTC/USD", "SPY", or "BTC/USD+SPY" for a portfolio's blend. */
   symbol: string;
   /** "BTC buy and hold". */
   name: string;
@@ -1133,6 +1165,8 @@ export interface AutopilotBenchmark {
   fromMs?: number | null;
   /** How a start price was filled in after the fact. */
   note?: string | null;
+  /** A blend (a portfolio): BTC and SPY with their weights. */
+  legs?: AutopilotBenchmarkLeg[];
 }
 
 /** An autopilot's forward result held against its backtest's band. */
