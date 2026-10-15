@@ -414,3 +414,17 @@ def test_seed_carries_trials_to_another_machine_once(home, tmp_path, monkeypatch
     d = run.weekly(20, False, "2026-10-17", log=lambda *_: None)
     assert d["pool_before"]["n_trials"] == ledger.PRIOR_TRIALS + 20
     assert d["pool_after"]["n_trials"] == ledger.PRIOR_TRIALS + 40
+
+
+def test_digest_goes_through_notify_post_to_telegram(home, monkeypatch):
+    from lab.ops import notify
+    P = synthetic_panel()
+    monkeypatch.setattr(fc, "load_panel", lambda fresh=False: P)
+    run.publish(run.weekly(20, False, "2026-10-17", log=lambda *_: None))
+    monkeypatch.setenv("PYTHIA_TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "42")
+    sent = []
+    monkeypatch.setattr(notify, "post", lambda url, fmt, text: sent.append((url, fmt, text)) or (True, None))
+    assert run.main(["digest"]) == 0
+    assert len(sent) == 1 and sent[0][1] == "telegram"
+    assert sent[0][2].startswith("Pythia Factory 2026-10-17") and len(sent[0][2]) <= notify.MAX_CHARS
