@@ -24,6 +24,10 @@ Lake (under $PYTHIA_DATA/pokemon):
                                         least --min-usd (default 2)
   sets/date=YYYY-MM-DD/sets.parquet     every set with its release date
   sealed/date=YYYY-MM-DD/sealed.parquet with --sealed
+  singles/date=YYYY-MM-DD/singles.parquet
+                                        with --sealed: the single cards of the
+                                        same newest TCGplayer groups, which
+                                        the API does not price yet
   catalog.parquet                       every card, cheap ones too (id, name,
                                         set, rarity, release date): reprints
                                         are found here; replaced each full run
@@ -72,6 +76,9 @@ from typing import Callable
 API = "https://api.pokemontcg.io/v2"
 TCGCSV = "https://tcgcsv.com/tcgplayer"
 POKEMON_CATEGORY = 3
+# TCGplayer group names of the main sets: "ME04: Chaos Rising", "SV: Black Bolt", "SWSH12: ...".
+MAIN_SET = re.compile(r"^(?:ME|SV|SWSH|SM|XY|BW)\d{0,3}[a-z]?:")
+MAIN_SET_DAYS = 730
 ECB = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
 PAGE_SIZE = 250
 MIN_USD = 2.0
@@ -376,12 +383,26 @@ def fetch_eurusd(client: Client) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def fetch_sealed(client: Client, snap: str, groups_back: int = 24, log=print) -> list[dict]:
-    """Sealed product (no card number) of the newest `groups_back` TCGplayer groups."""
+def fetch_sealed(client: Client, snap: str, groups_back: int = 24, log=print,
+                 singles: list[dict] | None = None) -> list[dict]:
+    """Sealed product (no card number) of the newest `groups_back` TCGplayer
+    groups. With `singles` given, the single cards of those groups are
+    appended to it too (dearest printing per card): the Pokemon TCG API had
+    no price for any set released in 2026 on the first real run, so this is
+    where new sets are priced.
+
+    publishedOn is the release date for the main sets but not for every
+    group (TCGplayer re-dated old POP Series and promo groups to 2026-10-14),
+    so the main sets of the last two years and the next releases (pre-order
+    prices) are always taken as well; `main_set` marks them."""
     g = client.get(f"{TCGCSV}/{POKEMON_CATEGORY}/groups", cache_key="tcgcsv_groups")
     groups = sorted(g.get("results") or [], key=lambda x: str(x.get("publishedOn") or ""), reverse=True)
+    since = (date.fromisoformat(snap) - timedelta(days=MAIN_SET_DAYS)).isoformat()
+    main_ids = {grp.get("groupId") for grp in groups if MAIN_SET.match(str(grp.get("name") or ""))
+                and (_date(grp.get("publishedOn")) or "") >= since}
+    pick = [grp for i, grp in enumerate(groups) if i < groups_back or grp.get("groupId") in main_ids]
     out = []
-    for grp in groups[:groups_back]:
+    for grp in pick:
         gid = grp.get("groupId")
         try:
             prods = client.get(f"{TCGCSV}/{POKEMON_CATEGORY}/{gid}/products", cache_key=f"tcgcsv_{gid}_products")
@@ -395,13 +416,27 @@ def fetch_sealed(client: Client, snap: str, groups_back: int = 24, log=print) ->
         for p in prods.get("results") or []:
             ext = {str(e.get("name")): e.get("value") for e in p.get("extendedData") or []}
             if "Number" in ext or "Rarity" in ext:
+                if singles is not None:
+                    best = max(((_num(pr.get("marketPrice")), pr) for pr in by_id.get(p.get("productId"), [])
+                                if _num(pr.get("marketPrice")) is not None), key=lambda x: x[0], default=None)
+                    if best is not None:
+                        pr = best[1]
+                        singles.append({
+                            "date": snap, "product_id": p.get("productId"), "group_id": gid,
+                            "group_name": grp.get("name"), "published_on": _date(grp.get("publishedOn")),
+                            "main_set": gid in main_ids,
+                            "name": p.get("name"), "number": str(ext.get("Number") or ""),
+                            "rarity": ext.get("Rarity"), "image_url": p.get("imageUrl"), "url": p.get("url"),
+                            "sub_type": pr.get("subTypeName"), "low": _num(pr.get("lowPrice")),
+                            "mid": _num(pr.get("midPrice")), "market": best[0],
+                        })
                 continue  # a single card
             for pr in by_id.get(p.get("productId"), []):
                 if _num(pr.get("marketPrice")) is None:
                     continue
                 out.append({
                     "date": snap, "product_id": p.get("productId"), "group_id": gid,
-                    "group_name": grp.get("name"), "published_on": _date(grp.get("publishedOn")),
+                    "group_name": grp.get("name"), "published_on": _date(grp.get("publishedOn")), "main_set": gid in main_ids,
                     "name": p.get("name"), "image_url": p.get("imageUrl"), "url": p.get("url"),
                     "sub_type": pr.get("subTypeName"), "low": _num(pr.get("lowPrice")),
                     "mid": _num(pr.get("midPrice")), "high": _num(pr.get("highPrice")),
@@ -467,7 +502,7 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
         sets, sets_src = None, "cards"
         errors.append(f"sets: {e}; rebuilt from the cards' set fields")
     card_sets: dict[str, dict] = {}
-    seen, rows, catalog = 0, [], []
+    seen, all_rows, catalog = 0, [], []
     for c in fetch_cards(client, max_pages=max_pages, log=log):
         seen += 1
         s = c.get("set") or {}
@@ -475,26 +510,35 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
             card_sets.setdefault(s["id"], s)
         r = card_row(c, snap)
         catalog.append({k: r[k] for k in CATALOG_COLS})
-        if keep(r, min_usd, eurusd):
-            rows.append(r)
+        all_rows.append(r)
     if sets is None:
         sets = [set_row(s, snap) for s in sorted(card_sets.values(), key=lambda s: str(s.get("releaseDate") or ""))]
+    if fx_source != "ECB":
+        # The ECB failed at the start of both attempts of the first real run
+        # and answered at once afterwards; one more try after the long card loop.
+        late = fetch_eurusd(client)
+        if late is not None:
+            eurusd, fx_source = late, "ECB"
+            errors = [e for e in errors if not e.startswith("EUR/USD")]
+    rows = [r for r in all_rows if keep(r, min_usd, eurusd)]
     log(f"sets: {len(sets)} (from {sets_src})")
     log(f"cards: {seen} seen, {len(rows)} at or above ${min_usd:g}")
     fresh_info = freshness(rows, snap)
     log(f"freshness: {json.dumps(fresh_info)}")
     sealed_rows: list[dict] = []
+    singles: list[dict] = []
     if sealed:
         try:
-            sealed_rows = fetch_sealed(client, snap, log=log)
+            sealed_rows = fetch_sealed(client, snap, log=log, singles=singles)
         except FetchError as e:
             errors.append(f"sealed: {e}")
-        log(f"sealed: {len(sealed_rows)} products")
+        log(f"sealed: {len(sealed_rows)} products, {len(singles)} singles of the newest groups")
     meta = {
         "date": snap, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "cards_seen": seen, "cards_kept": len(rows), "min_usd": min_usd, "sets": len(sets), "sets_source": sets_src,
         "freshness": fresh_info,
-        "sealed": len(sealed_rows) if sealed else None, "eurusd": eurusd, "fx_source": fx_source,
+        "sealed": len(sealed_rows) if sealed else None, "singles_new": len(singles) if sealed else None,
+        "eurusd": eurusd, "fx_source": fx_source,
         "requests": client.requests, "cache_hits": client.cache_hits, "seconds": round(time.time() - t0, 1),
         "errors": errors, "complete": max_pages is None,
     }
@@ -509,6 +553,8 @@ def collect(snap: str | None = None, min_usd: float = MIN_USD, sealed: bool = Fa
         write_parquet(catalog, root / "catalog.parquet")
     if sealed_rows:
         write_parquet(sealed_rows, root / "sealed" / f"date={snap}" / "sealed.parquet")
+    if singles:
+        write_parquet(singles, root / "singles" / f"date={snap}" / "singles.parquet")
     (root / "meta").mkdir(parents=True, exist_ok=True)
     (root / "meta" / f"{snap}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     if eurusd and fx_source == "ECB":

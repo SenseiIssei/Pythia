@@ -137,6 +137,20 @@ def with_freshness(df: pl.DataFrame) -> pl.DataFrame:
         cm_fresh=(pl.col("cm_age_days") <= CM_FRESH_DAYS).fill_null(False))
 
 
+def _load_daily(root: Path, kind: str) -> pl.DataFrame:
+    files = sorted((root / kind).glob(f"date=*/{kind}.parquet"))
+    return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed") if files else pl.DataFrame()
+
+
+def load_singles(root: Path | None = None) -> pl.DataFrame:
+    """TCGplayer singles of the newest groups (tcgcsv), every snapshot."""
+    return _load_daily(root or lake(), "singles")
+
+
+def load_sealed(root: Path | None = None) -> pl.DataFrame:
+    return _load_daily(root or lake(), "sealed")
+
+
 def load_catalog(root: Path | None = None) -> pl.DataFrame:
     p = (root or lake()) / "catalog.parquet"
     return pl.read_parquet(p) if p.exists() else pl.DataFrame()

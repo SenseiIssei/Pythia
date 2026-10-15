@@ -89,6 +89,24 @@ def ui_cards(snap: pl.DataFrame, hist: pl.DataFrame, extra_ids: set[str]) -> lis
     return out
 
 
+def ui_new_sets(rows: list[dict], singles: pl.DataFrame, top: int = 6) -> list[dict]:
+    """The newest main sets with their dearest singles, for the Cards page.
+    Prices from TCGplayer through tcgcsv; the API itself has none for them."""
+    if not rows or singles.is_empty():
+        return []
+    snap = singles["date"].max()
+    s = singles.filter((pl.col("date") == snap) & pl.col("main_set"))
+    out = []
+    for r in rows[:8]:
+        g = s.filter(pl.col("group_name") == r["set"]).sort("market", descending=True).head(top)
+        out.append({"set": r["set"], "released": r["released"], "ageDays": r["age_days"], "singles": r["singles"],
+                    "top10MeanUsd": _f(r["top10_mean_usd"], 2), "boosterBoxUsd": _f(r["booster_box_usd"], 2),
+                    "cards": [{"name": c["name"], "number": c["number"], "rarity": c["rarity"],
+                               "priceUsd": _f(c["market"], 2), "image": c["image_url"], "url": c["url"]}
+                              for c in g.to_dicts()]})
+    return out
+
+
 def ui_collection(d: Path) -> dict:
     st = collection.load_state(d)
     j = collection.journal(d)
@@ -206,7 +224,7 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
            "## Data", "",
            f"- Snapshot {meta['snapshot']}: {meta['cards']:,} cards at or above the collector's price floor, "
            f"{meta['sets']} sets, EUR/USD {meta.get('eurusd') or 'n/a'} ({meta.get('fx_source') or 'n/a'}).",
-           f"- Our own price history: {mstat['history_days']} days over {meta['snapshots']} snapshots. "
+           f"- Our own price history: {mstat['history_days']} day{'' if mstat['history_days'] == 1 else 's'} over {meta['snapshots']} snapshot{'' if meta['snapshots'] == 1 else 's'}. "
            "Every return-based number below needs this history; the API itself keeps no history beyond "
            "Cardmarket's avg1 / avg7 / avg30.",
            f"- Sealed product: {meta.get('sealed') if meta.get('sealed') is not None else 'not collected'}.",
@@ -233,12 +251,31 @@ def markdown(meta: dict, studies: dict, fv: dict, mstat: dict, coll: dict, al: d
     else:
         out += ["Who has been rising (the same features against Cardmarket's 30-day trend): not possible today, "
                 "no card has a fresh Cardmarket trend. Our own snapshots replace it after 30 days.", ""]
-    out += [
-            "## Around set release", "",
-            "Cross-section now: Cardmarket trend against its 30-day average, by set age. A description of the "
-            "last 30 days across sets of different ages, not one set followed over time.", "",
-            _tbl(rel["cross"], ["set_age", "sets", "cards", "median_trend_vs_avg30_pct", "median_avg7_vs_avg30_pct",
-                                "median_price_usd"])]
+    has_trend = any(r.get("median_trend_vs_avg30_pct") is not None for r in rel["cross"])
+    out += ["## Around set release", ""]
+    if has_trend:
+        out += ["Cross-section now: Cardmarket trend against its 30-day average, by set age. A description of the "
+                "last 30 days across sets of different ages, not one set followed over time.", "",
+                _tbl(rel["cross"], ["set_age", "sets", "cards", "median_trend_vs_avg30_pct",
+                                    "median_avg7_vs_avg30_pct", "median_price_usd"])]
+    else:
+        out += ["Cards the Pokemon TCG API prices at $2 or more, by set age (no fresh Cardmarket trend today, so "
+                "no recent direction). Note the API has no price for any set of the last months.", "",
+                _tbl(rel["cross"], ["set_age", "sets", "cards", "median_price_usd"])]
+    if rel.get("new_sets"):
+        out += ["New and coming main sets from TCGplayer (through tcgcsv.com), which the Pokemon TCG API does not "
+                "price yet. Chase basket = mean of the 10 dearest singles; a negative age is a set not out yet "
+                "(pre-order prices).", "",
+                _tbl([{**r, "age_days": r["age_days"]} for r in rel["new_sets"]],
+                     ["set", "released", "age_days", "singles", "top10_mean_usd", "median_usd", "booster_box_usd",
+                      "dearest"])]
+        nsp = rel.get("new_sets_panel") or {}
+        if nsp.get("ready"):
+            out += ["From our snapshots: 30-day change of each set's chase basket, by the set's age.", "",
+                    _tbl(nsp["rows"], ["set_age", "sets", "set_days", "mean_30d_pct", "t"])]
+        else:
+            out += [f"Release curve of new sets from our snapshots: waiting for {nsp.get('waiting_days', 30)} more days.",
+                    ""]
     if rel["panel"]["ready"]:
         out += ["From our snapshots: mean 30-day log return of a set's median card, by set age.", "",
                 _tbl(rel["panel"]["rows"], ["set_age", "sets", "set_days", "mean_30d_pct", "t"])]
@@ -310,7 +347,9 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
     df, fv = model.add_fair_value(df, None if dry_run else root / "_derived" / "fv")
     snap, mstat = model.predict(df, evaluate=evaluate)
     today = str(snap["date"].max())
-    studies = study.run(df, pdata.load_catalog(root), study.read_announced(root), mstat["history_days"])
+    singles, sealed = pdata.load_singles(root), pdata.load_sealed(root)
+    studies = study.run(df, pdata.load_catalog(root), study.read_announced(root), mstat["history_days"],
+                        singles, sealed)
     meta_f = root / "meta" / f"{today}.json"
     try:
         cmeta = json.loads(meta_f.read_text())
@@ -344,7 +383,7 @@ def run(dry_run: bool = False, send_alerts: bool = True, evaluate: bool = True) 
                   "horizons": {h: {k: e.get(k) for k in ("validated", "test_months", "mean_rank_ic", "ic_t",
                                                           "mae", "mae_zero")}
                                for h, e in mstat["horizons"].items()}},
-        "cards": cards, "collection": coll,
+        "cards": cards, "collection": coll, "newSets": ui_new_sets(studies["release"]["new_sets"], singles),
         "alerts": {"moves": al["moves"], "undervalued": al["undervalued"], "sent": al.get("sent", False)},
         "studies": {"premium": studies["premium"]["rows"], "release": studies["release"]["cross"],
                     "spread": {k: studies["spread"].get(k) for k in ("cards", "median_pct", "p25_pct", "p75_pct")}},
