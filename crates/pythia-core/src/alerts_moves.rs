@@ -9,8 +9,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::card::{price, signed_pct, usd, Row};
-use super::{AlertCategory, AlertEvent, AlertKind};
+use super::i18n::{MoveOf, Msg};
+use super::{AlertCategory, AlertEvent};
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
@@ -115,31 +115,19 @@ impl MoveWatch {
 fn move_event(inp: &MoveInput, window: &'static str, then: f64, pct: f64, threshold: f64) -> AlertEvent {
     let up = pct > 0.0;
     let emoji = if up { "📈" } else { "📉" };
-    let (title, summary, rows) = match inp.subject {
-        MoveSubject::Coin => (
-            format!("{} {} in {window}", inp.label, signed_pct(pct, 1)),
-            if inp.held_by.is_empty() { String::new() } else { format!("Held by {}.", inp.held_by) },
-            vec![
-                Row::new("Now", price(inp.value)),
-                Row::new(format!("{window} ago"), price(then)),
-                Row::toned("Change", signed_pct(pct, 2), pct),
-            ],
-        ),
-        MoveSubject::Equity => (
-            format!("{} equity {} in {window}", inp.label, signed_pct(pct, 1)),
-            "The autopilot's equity, positions at their price now.".to_string(),
-            vec![
-                Row::new("Equity", usd(inp.value)),
-                Row::new(format!("{window} ago"), usd(then)),
-                Row::toned("Change", format!("{} {}", super::card::signed_usd(inp.value - then), signed_pct(pct, 2)), pct),
-            ],
-        ),
+    let msg = Msg::BigMove {
+        of: match inp.subject {
+            MoveSubject::Coin => MoveOf::Coin,
+            MoveSubject::Equity => MoveOf::Equity,
+        },
+        label: inp.label.clone(),
+        held_by: inp.held_by.clone(),
+        window,
+        now: inp.value,
+        then,
+        pct,
     };
-    let text = format!("{title}. {summary}").trim().to_string();
-    let mut ev = AlertEvent::new(AlertKind::BigMove, format!("move:{}:{window}:{}", inp.key, if up { "up" } else { "down" }), text)
-        .titled(title)
-        .with_summary(summary)
-        .with_rows(rows)
+    let mut ev = AlertEvent::from_msg(format!("move:{}:{window}:{}", inp.key, if up { "up" } else { "down" }), msg)
         .in_category(AlertCategory::BigMoves)
         .with_emoji(emoji);
     // An autopilot's equity moving twice the threshold is worth waking up for.

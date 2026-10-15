@@ -7,6 +7,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | always | market data recorder | container `pythia-recorder` (`research/recorder`) |
 | always | headless engine: lab book, volatility model in shadow mode, `/api/lab` | container `pythia-server` on 127.0.0.1:8787 only |
 | always | a second engine for autopilots, kept apart so they never touch the lab book's markets or evidence; state in `/srv/pythia-data/autopilot` | container `pythia-autopilot` on 127.0.0.1:8788 only |
+| 00:40 | flow data: Coinbase BTC-USD 1h and Upbit KRW-BTC 1d (the exchange premiums), USD/KRW, DefiLlama stablecoin supply, Deribit BTC and ETH DVOL, a Deribit option snapshot with the 25-delta skew at 30 days (`lab.collect.flow`, under a minute daily; the first run fetches the history back to 2019 in about 4 minutes). Into `/srv/pythia-data/flow/`, read by the X6 study (`results/flow_overlays.md`) | `jobs.yaml` only |
 | 03:30 | history backfill: 20 lab coins, every USDT pair, every USDT perp | `/etc/cron.d/pythia-backfill` |
 | 04:00 | momentum paper books, engine signals, paper vs backtest review | `/etc/cron.d/pythia-paper` |
 | 04:15 | sweep candidates as paper books: survivorship-free momentum (daily, and in seven weekly tranches), Donchian breakout (about 10 minutes, rebuilds the daily panel into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-families` |
@@ -16,6 +17,8 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | 07:15 | model zoo: retrains the zoo models that are due, promotes a challenger only if better out of sample, shadow forecasts and scores, drift, the Models page report; posts promotions and drift (`lab.models.train --due`, about 5 minutes; longer on Sundays when M8, M8q and M10 retrain) | `/etc/cron.d/pythia-models` |
 | 07:05 | Pokemon cards: price snapshot (`lab.collect.pokemon`, 15 to 45 minutes keyless, the API is slow and retried), then studies, fair value, forecasts, the paper collection and card alerts (`lab.pokemon.daily`, seconds at first, up to about 20 minutes with a year of history). Data and play money only | `/etc/cron.d/pythia-pokemon` |
+| 06:20 | AI brief: one Haiku call through the autopilot engine's metered `POST /api/ai/complete` (batch, half price), 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule; three lines for the digest (`lab.ai.brief`, minutes; see `docs/AI.md`) | jobs.yaml `ai-brief` |
+| Sun 09:00 | AI weekly review: one Sonnet call (batch) over every study and live result, three proposed experiments in `reports/ai/weekly.md`, never run by anything (`lab.ai.weekly`) | jobs.yaml `ai-weekly` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
@@ -53,7 +56,7 @@ or only the part that changed:
 
 ```bash
 research/ops/deploy_lab.sh     # the lab code in /opt/pythia-lab
-research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, system_health.sh in /opt/pythia-ops, then render
+research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, i18n.py, system_health.sh in /opt/pythia-ops, then render
 ```
 
 ## The job table
@@ -550,13 +553,20 @@ Now, whatever the day: `... python -m lab.ops.notify --weekly --force`.
 **Health alarm.** `system_health.sh` runs `/opt/pythia-ops/notify.py --health`
 after each check when that file and `/etc/pythia/alerts.env` exist
 (`PYTHIA_NOTIFY_PY` and `PYTHIA_ALERT_ENV` move them). It needs only
-`python3` on the host. Install with the health script (and again after an
-update of `notify.py`):
+`python3` on the host, and `i18n.py` next to it (the words of the messages in
+English and German). Install with the health script (and again after an
+update of `notify.py` or `i18n.py`):
 
 ```bash
 install -m 755 research/ops/system_health.sh /opt/pythia-ops/system_health.sh
 install -m 644 research/lab/lab/ops/notify.py /opt/pythia-ops/notify.py
+install -m 644 research/lab/lab/ops/i18n.py /opt/pythia-ops/i18n.py
 ```
+
+**Message language.** The messages follow the app's setting (Settings,
+Notifications, Message language). `PYTHIA_ALERT_LANG=de` in
+`/etc/pythia/alerts.env` (and the engine's environment) fixes German for every
+job and the engine whatever the app says.
 
 The cron line of the health check stays as it is.
 

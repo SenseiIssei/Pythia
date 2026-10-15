@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use chrono::{TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::i18n::Lang;
+
 /// What an alert is about, for the switches in Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,6 +234,9 @@ pub struct AlertSettings {
     pub categories: BTreeMap<String, bool>,
     pub quiet_hours: QuietHours,
     pub big_moves: BigMoves,
+    /// The language of the messages to the chat (`en` or `de`). The app
+    /// stays in English. `PYTHIA_ALERT_LANG` overrides it.
+    pub language: Lang,
 }
 
 /// A change to the settings: what is left out stays.
@@ -244,6 +249,9 @@ pub struct AlertSettingsPatch {
     pub quiet_hours: Option<QuietHoursPatch>,
     #[serde(default)]
     pub big_moves: Option<BigMovesPatch>,
+    /// `en` or `de`.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -305,15 +313,30 @@ impl AlertSettings {
                 next.big_moves.day_pct = v;
             }
         }
+        if let Some(l) = p.language {
+            next.language = Lang::parse(&l).ok_or_else(|| format!("language must be en or de, not {l}"))?;
+        }
         // Only known ids are kept, so an old save never carries a stray key.
         next.categories.retain(|k, _| AlertCategory::parse(k).is_some());
         *self = next;
         Ok(())
     }
 
+    /// The language the messages go out in: `PYTHIA_ALERT_LANG` when it is
+    /// set (`env`), else the setting.
+    pub fn lang(&self, env: Option<Lang>) -> Lang {
+        env.unwrap_or(self.language)
+    }
+
     /// What `GET /api/alerts/settings` answers and the lab reads: every
-    /// category with its label, emoji, sentence, source and switch.
+    /// category with its label, emoji, sentence, source and switch, and the
+    /// language (with `languageEnv` when the environment overrides it).
     pub fn view(&self, now_ms: i64) -> serde_json::Value {
+        self.view_with(now_ms, Lang::from_env())
+    }
+
+    /// [`AlertSettings::view`] with the environment's language given.
+    pub fn view_with(&self, now_ms: i64, env: Option<Lang>) -> serde_json::Value {
         let cats: Vec<serde_json::Value> = AlertCategory::ALL
             .iter()
             .map(|c| {
@@ -332,6 +355,9 @@ impl AlertSettings {
             "quietHours": self.quiet_hours,
             "bigMoves": self.big_moves,
             "quietNow": self.quiet_hours.contains(now_ms),
+            "language": self.language,
+            "languageEnv": env,
+            "languages": Lang::ALL.iter().map(|l| serde_json::json!({"id": l.id(), "label": l.label()})).collect::<Vec<_>>(),
         })
     }
 }

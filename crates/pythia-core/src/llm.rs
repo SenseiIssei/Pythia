@@ -16,6 +16,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The cheap default for every routine call (the overlay, the daily brief).
+pub const CLAUDE_ROUTINE: &str = "claude-haiku-5-5";
+/// The weekly deeper call (the review of studies and live results).
+pub const CLAUDE_REVIEW: &str = "claude-sonnet-5-5";
+/// Only on explicit request: never a default anywhere.
+pub const CLAUDE_DEEP: &str = "claude-opus-5-5";
+
 /// Which wire protocol a provider speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wire {
@@ -67,21 +74,17 @@ impl Provider {
 
     fn spec(self) -> Spec {
         match self {
-            // Anthropic — the one non-OpenAI dialect. claude-opus-5 is current.
+            // Anthropic, the one non-OpenAI dialect. The Claude 5 family:
+            // Haiku for routine calls, Sonnet for the weekly review, Opus only
+            // when asked for by name. Every call is metered (`ai_budget`).
             Provider::Anthropic => Spec {
                 id: "anthropic",
                 label: "Anthropic (Claude)",
                 wire: Wire::Anthropic,
                 base_url: "https://api.anthropic.com",
                 env_key: "ANTHROPIC_API_KEY",
-                default_model: "claude-opus-5",
-                suggested: &[
-                    "claude-opus-5",
-                    "claude-sonnet-5",
-                    "claude-haiku-4-5",
-                    "claude-fable-5",
-                    "claude-opus-4-8",
-                ],
+                default_model: CLAUDE_ROUTINE,
+                suggested: &[CLAUDE_ROUTINE, CLAUDE_REVIEW, CLAUDE_DEEP],
                 needs_key: true,
             },
             Provider::OpenAI => Spec {
@@ -153,7 +156,7 @@ impl Provider {
                 default_model: "openai/gpt-5.6",
                 suggested: &[
                     "openai/gpt-5.6",
-                    "anthropic/claude-opus-4-8",
+                    "anthropic/claude-sonnet-5-5",
                     "x-ai/grok-4.5",
                     "z-ai/glm-5.2",
                     "deepseek/deepseek-v4-pro",
@@ -273,7 +276,7 @@ pub fn providers_with(configured: impl Fn(Provider) -> bool) -> Vec<ProviderInfo
 /// wanted inside a bar, and on the current Opus generation low effort is
 /// genuinely strong. Raise it for slow, high-stakes event markets where a few
 /// extra seconds cost nothing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     #[default]
@@ -311,6 +314,9 @@ pub struct LlmConfig {
     /// worse than no signal, and the caller is on a tick loop that must not
     /// stall — so this is a hard cap, not a suggestion.
     pub timeout: std::time::Duration,
+    /// What the call is for, as the AI budget's ledger records it
+    /// (`overlay`, `signal`, `forecast`, `brief`, ...).
+    pub job: String,
 }
 
 impl LlmConfig {
@@ -322,12 +328,30 @@ impl LlmConfig {
             base_url: String::new(),
             effort: Effort::default(),
             timeout: std::time::Duration::from_secs(45),
+            job: String::new(),
         }
     }
 
     pub fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = effort;
         self
+    }
+
+    pub fn with_job(mut self, job: impl Into<String>) -> Self {
+        self.job = job.into();
+        self
+    }
+
+    /// Point at another endpoint (a proxy, or a mock in tests).
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
+        self
+    }
+
+    /// Haiku: thinking can be switched off at effort high or below, which
+    /// keeps a routine call to the JSON it was asked for.
+    fn is_haiku(&self) -> bool {
+        self.resolved_model().starts_with("claude-haiku")
     }
 
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
@@ -381,6 +405,15 @@ pub enum LlmError {
     Refused(String),
     #[error("timed out after {0:?} — treated as no opinion")]
     Timeout(std::time::Duration),
+    /// The AI budget refused the call before anything was sent.
+    #[error("{0}")]
+    Budget(crate::ai_budget::Refusal),
+    #[error("{0}")]
+    Unsupported(String),
+    /// A batch did not finish in the time allowed. It was cancelled, and
+    /// counted at its worst case in the ledger.
+    #[error("batch {0} did not finish in time; cancelled")]
+    BatchTimeout(String),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -510,20 +543,34 @@ Respond with ONLY a JSON object:\n\
 /// compact, caller-built description (question/symbol, price or odds, recent
 /// moves, any news). Non-fatal to the engine — treat any `Err` as "no opinion".
 pub async fn signal(cfg: &LlmConfig, context: &str) -> Result<Signal, LlmError> {
-    ask(cfg, context, SYSTEM, signal_schema()).await
+    signal_in(crate::ai_budget::global(), cfg, context).await
+}
+
+/// [`signal`] against a given budget (tests use their own).
+pub async fn signal_in(
+    budget: &crate::ai_budget::Budget,
+    cfg: &LlmConfig,
+    context: &str,
+) -> Result<Signal, LlmError> {
+    ask(budget, cfg, context, SYSTEM, signal_schema(), 1024).await
 }
 
 /// Ask for a full forecast using the reference-class protocol above. Slower and
 /// more expensive than [`signal`]; this is what the ensemble uses.
 pub async fn forecast(cfg: &LlmConfig, context: &str) -> Result<Signal, LlmError> {
-    ask(cfg, context, SYSTEM_FORECAST, forecast_schema()).await
+    ask(crate::ai_budget::global(), cfg, context, SYSTEM_FORECAST, forecast_schema(), 2048).await
 }
 
+/// `haiku_max_tokens` is the output ceiling on Haiku, where thinking is off
+/// and the answer is only the JSON; other models think inside one shared,
+/// larger budget.
 async fn ask(
+    budget: &crate::ai_budget::Budget,
     cfg: &LlmConfig,
     context: &str,
     system: &str,
     schema: serde_json::Value,
+    haiku_max_tokens: u64,
 ) -> Result<Signal, LlmError> {
     if cfg.provider.needs_key() && cfg.api_key.trim().is_empty() {
         return Err(LlmError::NoKey(cfg.provider.id().to_string()));
@@ -532,7 +579,17 @@ async fn ask(
     let started = std::time::Instant::now();
     let call = async {
         match cfg.provider.spec().wire {
-            Wire::Anthropic => call_anthropic(cfg, context, system, schema).await,
+            Wire::Anthropic => {
+                let max_tokens = if cfg.is_haiku() { haiku_max_tokens } else { 8192 };
+                let user = format!("Analyze this market.\n\n{context}");
+                let msg = call_anthropic(budget, cfg, system, &user, Some(schema), max_tokens).await?;
+                let raw = parse_raw(&msg.text)?;
+                Ok((raw, CallMeta {
+                    input_tokens: msg.usage.input_tokens + msg.usage.cache_write_tokens + msg.usage.cache_read_tokens,
+                    output_tokens: msg.usage.output_tokens,
+                    served_by: msg.served_by,
+                }))
+            }
             Wire::OpenAi => call_openai(cfg, context, system).await,
         }
     };
@@ -575,6 +632,7 @@ pub type EnsembleResult = (String, Result<Signal, LlmError>);
 pub async fn ensemble(cfgs: Vec<LlmConfig>, context: &str) -> Vec<EnsembleResult> {
     let mut set = tokio::task::JoinSet::new();
     for cfg in cfgs {
+        let cfg = if cfg.job.is_empty() { cfg.with_job("forecast") } else { cfg };
         let ctx = context.to_string();
         set.spawn(async move {
             let id = cfg.provider.id().to_string();
@@ -609,65 +667,112 @@ fn http_client(cfg: &LlmConfig) -> Result<reqwest::Client, LlmError> {
         .map_err(LlmError::Http)
 }
 
-async fn call_anthropic(
+/// One answered Messages API call, already in the ledger.
+#[derive(Debug, Clone)]
+struct ClaudeMessage {
+    text: String,
+    usage: crate::ai_budget::Usage,
+    served_by: String,
+    cost_usd: f64,
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// The Messages API request body. `batch` leaves out what the Batches API
+/// rejects (the server-side fallback).
+fn anthropic_body(
     cfg: &LlmConfig,
-    context: &str,
     system: &str,
-    schema: serde_json::Value,
-) -> Result<(RawSignal, CallMeta), LlmError> {
-    let modern = cfg.is_modern_claude();
+    user: &str,
+    schema: Option<&serde_json::Value>,
+    max_tokens: u64,
+    batch: bool,
+) -> serde_json::Value {
+    let mut output_config = serde_json::json!({ "effort": cfg.effort.as_str() });
+    if let Some(s) = schema {
+        output_config["format"] = serde_json::json!({ "type": "json_schema", "schema": s });
+    }
+    // Haiku answers a routine question without thinking first, at effort
+    // high or below (the only levels where switching it off is accepted).
+    // Elsewhere thinking and the answer share `max_tokens`.
+    let thinking = if cfg.is_haiku() && cfg.effort <= Effort::High {
+        serde_json::json!({ "type": "disabled" })
+    } else {
+        serde_json::json!({ "type": "adaptive" })
+    };
     let mut body = serde_json::json!({
         "model": cfg.resolved_model(),
-        // Thinking and the answer share this budget. On Claude Opus 5 thinking
-        // is ON unless disabled, so a small ceiling can be spent entirely on
-        // reasoning and truncate the JSON we actually need, and the forecast
-        // protocol's answer is longer than a quick signal's.
-        "max_tokens": 8192,
-        "thinking": { "type": "adaptive" },
-        "output_config": {
-            "effort": cfg.effort.as_str(),
-            "format": {
-                "type": "json_schema",
-                "schema": schema
-            }
-        },
-        "system": system,
-        "messages": [{ "role": "user", "content": format!("Analyze this market.\n\n{context}") }]
+        "max_tokens": max_tokens,
+        "thinking": thinking,
+        "output_config": output_config,
+        // The fixed instructions are marked for the prompt cache: a call that
+        // repeats within five minutes (the overlay, a retry) reads them at a
+        // tenth of the input price. Below the model's minimum length the mark
+        // is simply ignored.
+        "system": [{ "type": "text", "text": system, "cache_control": { "type": "ephemeral" } }],
+        "messages": [{ "role": "user", "content": user }]
     });
-
-    let mut req = http_client(cfg)?
-        .post(format!("{}/v1/messages", cfg.resolved_base()))
-        .header("x-api-key", cfg.api_key.trim())
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json");
-
-    if modern {
+    if cfg.is_modern_claude() && !batch {
         // Safety classifiers on the current generation can decline a request
         // outright. Financial-market analysis is not a targeted category, but a
         // false positive would silently blind the overlay — so opt into the
         // server-side fallback, which re-runs the same request on Anthropic's
         // recommended substitute inside the same call.
-        req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
         body["fallbacks"] = serde_json::json!("default");
     }
+    body
+}
 
-    let resp = req.json(&body).send().await?;
+fn anthropic_request(
+    cfg: &LlmConfig,
+    method: reqwest::Method,
+    url: &str,
+) -> Result<reqwest::RequestBuilder, LlmError> {
+    Ok(http_client(cfg)?
+        .request(method, url)
+        .header("x-api-key", cfg.api_key.trim())
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json"))
+}
 
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(LlmError::Api {
-            provider: "anthropic".into(),
-            status: status.as_u16(),
-            body: resp.text().await.unwrap_or_default(),
-        });
+async fn api_error(resp: reqwest::Response) -> LlmError {
+    LlmError::Api {
+        provider: "anthropic".into(),
+        status: resp.status().as_u16(),
+        body: resp.text().await.unwrap_or_default().chars().take(600).collect(),
     }
+}
 
-    let json: serde_json::Value = resp.json().await?;
-
+/// Read one Messages API response into the ledger and out to the caller.
+/// Billed means recorded, whatever happens next: a refusal and an answer
+/// without text cost money too.
+fn settle(
+    reservation: crate::ai_budget::Reservation<'_>,
+    cfg: &LlmConfig,
+    json: &serde_json::Value,
+    batch: bool,
+) -> Result<ClaudeMessage, LlmError> {
+    let usage = crate::ai_budget::Usage::from_api(json.get("usage"));
+    // Top-level `model` names whoever produced the message, which is the
+    // fallback model when one took over.
+    let served_by = json.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string();
     // Check `stop_reason` BEFORE reading content: a refusal is a 200 whose
     // content array is empty or partial, and indexing it first turns a clear
     // "declined" into a confusing "no text content".
-    if json.get("stop_reason").and_then(|s| s.as_str()) == Some("refusal") {
+    let refused = json.get("stop_reason").and_then(|s| s.as_str()) == Some("refusal");
+    let text = json
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|b| b.iter().find(|x| x.get("type").and_then(|t| t.as_str()) == Some("text")))
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .map(str::to_string);
+    let ok = !refused && text.is_some();
+    let job = if cfg.job.is_empty() { "signal" } else { cfg.job.as_str() };
+    let entry = reservation.record(job, &cfg.resolved_model(), &served_by, usage, batch, ok, now_ms());
+    if refused {
         let why = json
             .get("stop_details")
             .and_then(|d| d.get("category"))
@@ -675,24 +780,244 @@ async fn call_anthropic(
             .unwrap_or("no category given");
         return Err(LlmError::Refused(why.to_string()));
     }
+    let text = text.ok_or_else(|| LlmError::NoContent("anthropic".into()))?;
+    Ok(ClaudeMessage { text, usage, served_by, cost_usd: entry.cost_usd })
+}
 
-    let usage = json.get("usage");
-    let meta = CallMeta {
-        input_tokens: usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
-        output_tokens: usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
-        // Top-level `model` names whoever produced the message — which is the
-        // fallback model when one took over.
-        served_by: json.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+/// One metered Messages API call. The budget is asked first, with the call's
+/// worst case; nothing is sent when it says no.
+async fn call_anthropic(
+    budget: &crate::ai_budget::Budget,
+    cfg: &LlmConfig,
+    system: &str,
+    user: &str,
+    schema: Option<serde_json::Value>,
+    max_tokens: u64,
+) -> Result<ClaudeMessage, LlmError> {
+    if cfg.api_key.trim().is_empty() {
+        return Err(LlmError::NoKey("anthropic".into()));
+    }
+    let body = anthropic_body(cfg, system, user, schema.as_ref(), max_tokens, false);
+    let chars = system.len() + user.len() + schema.as_ref().map(|s| s.to_string().len()).unwrap_or(0);
+    let worst = crate::ai_budget::estimate(&cfg.resolved_model(), chars, max_tokens, false);
+    let reservation = budget.reserve(worst, now_ms()).map_err(LlmError::Budget)?;
+
+    let mut req = anthropic_request(cfg, reqwest::Method::POST, &format!("{}/v1/messages", cfg.resolved_base()))?;
+    if body.get("fallbacks").is_some() {
+        req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
+    }
+    // An error before an answer (refused at the door, network) is not
+    // billed: the reservation is dropped and the room freed.
+    let resp = req.json(&body).send().await?;
+    if !resp.status().is_success() {
+        return Err(api_error(resp).await);
+    }
+    let json: serde_json::Value = resp.json().await?;
+    settle(reservation, cfg, &json, false)
+}
+
+/// A free-form request for the lab's scheduled jobs: fixed instructions, the
+/// day's facts, an optional JSON schema for the answer.
+#[derive(Debug, Clone)]
+pub struct CompleteRequest {
+    pub system: String,
+    pub user: String,
+    pub schema: Option<serde_json::Value>,
+    pub max_tokens: u64,
+    /// Send through the Message Batches API at half the price. For anything
+    /// that can wait minutes for its answer.
+    pub batch: bool,
+    /// How long to wait for a batch before cancelling it.
+    pub batch_wait: std::time::Duration,
+    pub poll_every: std::time::Duration,
+}
+
+impl CompleteRequest {
+    pub fn new(system: impl Into<String>, user: impl Into<String>, max_tokens: u64) -> Self {
+        CompleteRequest {
+            system: system.into(),
+            user: user.into(),
+            schema: None,
+            max_tokens,
+            batch: false,
+            batch_wait: std::time::Duration::from_secs(20 * 60),
+            poll_every: std::time::Duration::from_secs(20),
+        }
+    }
+}
+
+/// The answer to a [`CompleteRequest`], with what it cost.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Completion {
+    pub text: String,
+    /// The parsed answer when a schema was given and the text parsed.
+    pub json: Option<serde_json::Value>,
+    /// Why the text did not parse as JSON. The call was billed all the same.
+    pub parse_error: Option<String>,
+    pub model: String,
+    pub served_by: String,
+    pub usage: crate::ai_budget::Usage,
+    pub cost_usd: f64,
+    pub batch_id: Option<String>,
+    pub latency_ms: u64,
+}
+
+/// Run a [`CompleteRequest`] on Claude, metered by the process-wide budget.
+pub async fn complete(cfg: &LlmConfig, req: &CompleteRequest) -> Result<Completion, LlmError> {
+    complete_in(crate::ai_budget::global(), cfg, req).await
+}
+
+/// [`complete`] against a given budget.
+pub async fn complete_in(
+    budget: &crate::ai_budget::Budget,
+    cfg: &LlmConfig,
+    req: &CompleteRequest,
+) -> Result<Completion, LlmError> {
+    if cfg.provider != Provider::Anthropic {
+        return Err(LlmError::Unsupported("scheduled AI jobs run on Claude only".into()));
+    }
+    if cfg.api_key.trim().is_empty() {
+        return Err(LlmError::NoKey("anthropic".into()));
+    }
+    let started = std::time::Instant::now();
+    let (msg, batch_id) = if req.batch {
+        let (m, id) = complete_batch(budget, cfg, req).await?;
+        (m, Some(id))
+    } else {
+        let call = call_anthropic(budget, cfg, &req.system, &req.user, req.schema.clone(), req.max_tokens);
+        let m = tokio::time::timeout(cfg.timeout, call).await.map_err(|_| LlmError::Timeout(cfg.timeout))??;
+        (m, None)
     };
+    let (json, parse_error) = match &req.schema {
+        Some(_) => match parse_json_object(&msg.text) {
+            Ok(v) => (Some(v), None),
+            Err(e) => (None, Some(e)),
+        },
+        None => (None, None),
+    };
+    Ok(Completion {
+        text: msg.text,
+        json,
+        parse_error,
+        model: cfg.resolved_model(),
+        served_by: msg.served_by,
+        usage: msg.usage,
+        cost_usd: msg.cost_usd,
+        batch_id,
+        latency_ms: started.elapsed().as_millis() as u64,
+    })
+}
 
-    let text = json
-        .get("content")
-        .and_then(|c| c.as_array())
-        .and_then(|b| b.iter().find(|x| x.get("type").and_then(|t| t.as_str()) == Some("text")))
-        .and_then(|b| b.get("text"))
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| LlmError::NoContent("anthropic".into()))?;
-    Ok((parse_raw(text)?, meta))
+/// The first JSON object in a model's text, tolerating fences and prose.
+fn parse_json_object(text: &str) -> Result<serde_json::Value, String> {
+    let ok = |v: serde_json::Value| if v.is_object() { Some(v) } else { None };
+    if let Some(v) = serde_json::from_str(text.trim()).ok().and_then(ok) {
+        return Ok(v);
+    }
+    if let (Some(a), Some(b)) = (text.find('{'), text.rfind('}')) {
+        if b > a {
+            if let Some(v) = serde_json::from_str(&text[a..=b]).ok().and_then(ok) {
+                return Ok(v);
+            }
+        }
+    }
+    Err(format!("not a JSON object: {}", text.chars().take(160).collect::<String>()))
+}
+
+/// One request through the Message Batches API: submit, poll until it ends or
+/// `batch_wait` runs out, read the one result. Given up on, the batch is
+/// cancelled and counted at its worst case (it may have been processed).
+async fn complete_batch(
+    budget: &crate::ai_budget::Budget,
+    cfg: &LlmConfig,
+    req: &CompleteRequest,
+) -> Result<(ClaudeMessage, String), LlmError> {
+    let body = anthropic_body(cfg, &req.system, &req.user, req.schema.as_ref(), req.max_tokens, true);
+    let chars = req.system.len() + req.user.len() + req.schema.as_ref().map(|s| s.to_string().len()).unwrap_or(0);
+    let worst = crate::ai_budget::estimate(&cfg.resolved_model(), chars, req.max_tokens, true);
+    let reservation = budget.reserve(worst, now_ms()).map_err(LlmError::Budget)?;
+
+    let base = cfg.resolved_base();
+    let custom_id = "pythia-1";
+    let submit = serde_json::json!({ "requests": [{ "custom_id": custom_id, "params": body }] });
+    let resp = anthropic_request(cfg, reqwest::Method::POST, &format!("{base}/v1/messages/batches"))?
+        .json(&submit)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(api_error(resp).await);
+    }
+    let created: serde_json::Value = resp.json().await?;
+    let id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| LlmError::NoContent("anthropic batch id".into()))?
+        .to_string();
+    let job = if cfg.job.is_empty() { "batch" } else { cfg.job.as_str() };
+
+    let deadline = tokio::time::Instant::now() + req.batch_wait;
+    let mut status = created;
+    loop {
+        if status.get("processing_status").and_then(|v| v.as_str()) == Some("ended") {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = anthropic_request(cfg, reqwest::Method::POST, &format!("{base}/v1/messages/batches/{id}/cancel"))?
+                .send()
+                .await;
+            reservation.record_worst_case(job, &cfg.resolved_model(), true, now_ms());
+            return Err(LlmError::BatchTimeout(id));
+        }
+        tokio::time::sleep(req.poll_every.min(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
+        let r = anthropic_request(cfg, reqwest::Method::GET, &format!("{base}/v1/messages/batches/{id}"))?
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => status = r.json().await.unwrap_or(serde_json::Value::Null),
+            // A failed poll is retried until the deadline.
+            Ok(r) => tracing::warn!("batch {id}: poll answered HTTP {}", r.status().as_u16()),
+            Err(e) => tracing::warn!("batch {id}: poll failed: {e}"),
+        }
+    }
+
+    let url = status
+        .get("results_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{base}/v1/messages/batches/{id}/results"));
+    let resp = anthropic_request(cfg, reqwest::Method::GET, &url)?.send().await?;
+    if !resp.status().is_success() {
+        // The batch ended, so it may well have been billed: count the worst case.
+        reservation.record_worst_case(job, &cfg.resolved_model(), true, now_ms());
+        return Err(api_error(resp).await);
+    }
+    let lines = resp.text().await?;
+    let result = lines
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("custom_id").and_then(|c| c.as_str()) == Some(custom_id));
+    let Some(result) = result.and_then(|v| v.get("result").cloned()) else {
+        reservation.record_worst_case(job, &cfg.resolved_model(), true, now_ms());
+        return Err(LlmError::NoContent(format!("anthropic batch {id}")));
+    };
+    match result.get("type").and_then(|t| t.as_str()) {
+        Some("succeeded") => {
+            let message = result.get("message").cloned().unwrap_or(serde_json::Value::Null);
+            let msg = settle(reservation, cfg, &message, true)?;
+            Ok((msg, id))
+        }
+        // An errored, cancelled or expired request is not billed.
+        other => Err(LlmError::Api {
+            provider: "anthropic".into(),
+            status: 200,
+            body: format!(
+                "batch {id}: request {} ({})",
+                other.unwrap_or("unknown"),
+                result.get("error").map(|e| e.to_string()).unwrap_or_default().chars().take(300).collect::<String>()
+            ),
+        }),
+    }
 }
 
 async fn call_openai(cfg: &LlmConfig, context: &str, system: &str) -> Result<(RawSignal, CallMeta), LlmError> {
@@ -1002,19 +1327,47 @@ mod tests {
     }
 
     #[test]
-    fn opus_5_is_the_claude_default() {
-        assert_eq!(Provider::Anthropic.default_model(), "claude-opus-5");
+    fn haiku_5_5_is_the_claude_default_and_opus_is_never_a_default() {
+        assert_eq!(Provider::Anthropic.default_model(), "claude-haiku-5-5");
+        let info = providers_with(|_| false);
+        let a = info.iter().find(|p| p.id == "anthropic").unwrap();
+        assert_eq!(a.suggested_models, vec!["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
+        // Every suggested model is priced, so no call is costed at a guess.
+        for m in &a.suggested_models {
+            assert!(crate::ai_budget::prices().price(m).1, "{m} has no price");
+        }
     }
 
     #[test]
     fn modern_claude_detection_drives_the_fallback_opt_in() {
         let modern = |m: &str| LlmConfig::new(Provider::Anthropic, m, "k").is_modern_claude();
+        assert!(modern("claude-opus-5-5"));
+        assert!(modern("claude-sonnet-5-5"));
         assert!(modern("claude-opus-5"));
         assert!(modern("claude-fable-5"));
-        assert!(modern("claude-sonnet-5"));
-        assert!(modern("")); // empty → the provider default, which is Opus 5
+        // Haiku 5.5 has no server-side fallback, so it is never sent one.
+        assert!(!modern("claude-haiku-5-5"));
+        assert!(!modern("")); // empty → the provider default, Haiku 5.5
         assert!(!modern("claude-haiku-4-5"));
         assert!(!modern("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn a_haiku_body_has_no_thinking_a_cached_system_and_no_fallback() {
+        let cfg = LlmConfig::new(Provider::Anthropic, "", "k");
+        let b = anthropic_body(&cfg, "sys", "user", Some(&signal_schema()), 1024, false);
+        assert_eq!(b["model"], "claude-haiku-5-5");
+        assert_eq!(b["thinking"]["type"], "disabled");
+        assert_eq!(b["max_tokens"], 1024);
+        assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(b.get("fallbacks").is_none());
+        // Above high effort thinking cannot be switched off on Haiku.
+        let hard = LlmConfig::new(Provider::Anthropic, "", "k").with_effort(Effort::Max);
+        assert_eq!(anthropic_body(&hard, "s", "u", None, 10, false)["thinking"]["type"], "adaptive");
+        // Sonnet gets the fallback, except in a batch, which rejects it.
+        let sonnet = LlmConfig::new(Provider::Anthropic, CLAUDE_REVIEW, "k");
+        assert_eq!(anthropic_body(&sonnet, "s", "u", None, 10, false)["fallbacks"], "default");
+        assert!(anthropic_body(&sonnet, "s", "u", None, 10, true).get("fallbacks").is_none());
     }
 
     #[test]

@@ -8,6 +8,8 @@ import { mlStatus, type MlStatus } from "../ml";
 import { DriftRows, PicksPanel } from "../components/PicksPanel";
 import { ModelZoo } from "../components/ModelZoo";
 import { modelZoo, type ZooStatus } from "../zoo";
+import { LlmVsModels } from "../components/LlmVsModels";
+import { aiReport, type AiReport } from "../aiBudget";
 
 const fmtVol = (v: number) => pct(v, 0);
 const NONE = "not yet";
@@ -19,6 +21,7 @@ export function Models() {
   const [s, setS] = useState<MlStatus | null>(null);
   const [err, setErr] = useState("");
   const [zoo, setZoo] = useState<ZooStatus | null>(null);
+  const [ai, setAi] = useState<AiReport | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -32,6 +35,12 @@ export function Models() {
       setZoo(await modelZoo());
     } catch {
       setZoo(null);
+    }
+    // The AI brief's scores: the lab's files, absent on an engine without them.
+    try {
+      setAi(await aiReport());
+    } catch {
+      setAi(null);
     }
   }, []);
 
@@ -108,6 +117,8 @@ export function Models() {
       )}
 
       {zoo && zoo.models.length > 0 && <ModelZoo z={zoo} />}
+
+      {ai && <LlmVsModels r={ai} />}
 
       {s && s.state !== "live" && (
         <Notice

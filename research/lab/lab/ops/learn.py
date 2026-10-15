@@ -33,8 +33,11 @@ from here: they live in the engine's state and settings, which it only reads.
   python -m lab.ops.learn --skip sweep       leave these out tonight
   python -m lab.ops.learn --no-train         costs, evidence and digest only
 
-Environment: PYTHIA_AUTOPILOT_STATE_URL (default http://127.0.0.1:8788/api/state,
-"off" skips the engine), PYTHIA_LEARN_ORDERS_FILE (an exported /api/state or
+Environment: PYTHIA_AUTOPILOT_STATE_URLS (every autopilot engine, comma
+separated, default the main account on 8788 and the safe account on 8789; the
+costs come from the first, the digest lists the autopilots of all that
+answer), PYTHIA_AUTOPILOT_STATE_URL (the old single engine when the list is
+not set, "off" skips the engine), PYTHIA_LEARN_ORDERS_FILE (an exported /api/state or
 orders file, read instead of the engine), PYTHIA_COSTS_BASE (the base cost
 table, default <data>/costs/base.json), PYTHIA_AGENT_OUT (where the sweep's
 published reports live, as for the paper books).
@@ -54,7 +57,7 @@ from typing import Callable
 
 from .. import report
 from ..data import ROOT
-from . import fills, guard, registry
+from . import fills, guard, i18n, registry
 
 NAME = "learn"
 DAY_MS = 86_400_000
@@ -133,21 +136,38 @@ def fetch_state(url: str, timeout: float = 15) -> tuple[dict | None, str | None]
         return None, f"{type(e).__name__}: {e}"
 
 
-def engine_state() -> tuple[dict | None, str, str | None]:
-    """(state, where it came from, error)."""
+def engines() -> list[dict]:
+    """Every autopilot engine as {"account", "url", "state", "error"}, read
+    only: an exported file (PYTHIA_LEARN_ORDERS_FILE) as the main account,
+    else every URL of notify.state_urls() (PYTHIA_AUTOPILOT_STATE_URLS, or
+    the old single PYTHIA_AUTOPILOT_STATE_URL). Empty when switched off."""
+    from . import notify
     f = os.environ.get("PYTHIA_LEARN_ORDERS_FILE")
     if f:
         try:
             v = json.loads(Path(f).read_text(encoding="utf-8"))
-            return (v if isinstance(v, dict) else {"orders": v}), f, None
+            return [{"account": notify.ACCOUNT_NAMES[0], "url": f, "state": v if isinstance(v, dict) else {"orders": v},
+                     "error": None}]
         except (OSError, ValueError):
             try:
-                return {"orders": fills.load_orders_file(Path(f))}, f, None
+                st = {"orders": fills.load_orders_file(Path(f))}
+                return [{"account": notify.ACCOUNT_NAMES[0], "url": f, "state": st, "error": None}]
             except OSError as e:
-                return None, f, f"{type(e).__name__}: {e}"
-    url = os.environ.get("PYTHIA_AUTOPILOT_STATE_URL", DEFAULT_STATE_URL)
-    st, err = fetch_state(url)
-    return st, url, err
+                return [{"account": notify.ACCOUNT_NAMES[0], "url": f, "state": None, "error": f"{type(e).__name__}: {e}"}]
+    out = []
+    for account, url in notify.state_urls():
+        st, err = fetch_state(url)
+        out.append({"account": account, "url": url, "state": st, "error": err})
+    return out
+
+
+def engine_state(rows: list[dict] | None = None) -> tuple[dict | None, str, str | None]:
+    """(state, where it came from, error) of the first engine, the main
+    account: its demo orders are what the cost step learns from."""
+    rows = engines() if rows is None else rows
+    if not rows:
+        return None, "off", "switched off (PYTHIA_AUTOPILOT_STATE_URL=off)"
+    return rows[0]["state"], rows[0]["url"], rows[0]["error"]
 
 
 # ---------------------------------------------------------------- step: costs
@@ -425,6 +445,7 @@ def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], flo
         btc_total = (b_end / b_start - 1) * 100 if b_start and b_end else None
         btc_day = (b_end / b_day0 - 1) * 100 if b_day0 and b_end else None
         rows.append({"id": cfg.get("id", "?"), "name": cfg.get("name", "Autopilot"), "mode": cfg.get("mode"),
+                     "account": ap.get("account"),
                      "state": ap.get("state"), "since": _date(start_ms), "days": (end_ms - start_ms) / DAY_MS,
                      "equity": equity, "start_capital": start, "fees": ap.get("fees"), "trades": ap.get("trades"),
                      "pnl_day_pct": day, "btc_day_pct": btc_day,
@@ -445,40 +466,36 @@ def _pct(v) -> str:
     return "n/a" if v is None else f"{v:+.2f} %"
 
 
-def headline(changes: list[dict], decisions: list[dict], aps: list[dict], steps: list[dict]) -> str:
+def headline(changes: list[dict], decisions: list[dict], aps: list[dict], steps: list[dict], lang: str = "en") -> str:
+    """What changed tonight in a sentence, in `lang` (the report keeps English;
+    the digest says it in the language of the messages)."""
+    t = i18n.t
     parts = []
     models = [d for d in decisions if d.get("model") != "families_sweep"]
     promoted = [d for d in models if d.get("decision") == "promoted"]
     rejected = [d for d in models if d.get("decision") in ("rejected", "kept")]
     for d in decisions:
         if d.get("model") == "families_sweep":
-            parts.append("published the refreshed family sweep" if d.get("decision") == "promoted"
-                         else "kept the published family sweep")
+            parts.append(t("ln_sweep_new" if d.get("decision") == "promoted" else "ln_sweep_kept", lang))
     if promoted:
-        parts.append("promoted " + ", ".join(d["model"] for d in promoted))
+        parts.append(t("ln_promoted", lang, models=", ".join(d["model"] for d in promoted)))
     if rejected:
-        parts.append("kept the champion for " + ", ".join(d["model"] for d in rejected))
-    cost = [c for c in changes if c["area"] == "costs"]
-    if cost:
-        parts.append(f"{len(cost)} cost update{'s' if len(cost) != 1 else ''}")
-    ev = [c for c in changes if c["area"] == "evidence"]
-    if ev:
-        parts.append(f"{len(ev)} evidence change{'s' if len(ev) != 1 else ''}")
-    gates = [c for c in changes if c["area"] == "gates"]
-    if gates:
-        parts.append(f"{len(gates)} gate change{'s' if len(gates) != 1 else ''}")
+        parts.append(t("ln_kept", lang, models=", ".join(d["model"] for d in rejected)))
+    for area, key in (("costs", "ln_costs"), ("evidence", "ln_evidence"), ("gates", "ln_gates")):
+        n = sum(1 for c in changes if c["area"] == area)
+        if n:
+            parts.append(t(key, lang, n=n))
     failed = [s["step"] for s in steps if s["status"] == "failed"]
     if failed:
-        parts.append("failed: " + ", ".join(failed))
+        parts.append(t("ln_failed", lang, steps=", ".join(failed)))
     running = [a for a in aps if a["state"] == "running"]
     if running:
         best = max(running, key=lambda a: a["vs_btc_total_pts"] if a["vs_btc_total_pts"] is not None else -1e9)
         if best["vs_btc_total_pts"] is not None:
-            parts.append(f"{len(running)} autopilot{'s' if len(running) != 1 else ''} running, best "
-                         f"{best['vs_btc_total_pts']:+.2f} points against BTC since start")
+            parts.append(t("ln_running_best", lang, n=len(running), pts=i18n.num(best["vs_btc_total_pts"], 2, lang, sign=True)))
         else:
-            parts.append(f"{len(running)} autopilot{'s' if len(running) != 1 else ''} running")
-    text = "; ".join(parts) if parts else "nothing changed"
+            parts.append(t("ln_running", lang, n=len(running)))
+    text = "; ".join(parts) if parts else t("ln_nothing", lang)
     return text[0].upper() + text[1:] + "."
 
 
@@ -535,7 +552,11 @@ def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str]
     steps: list[dict] = []
     refused: list[str] = []
     results: dict = {}
-    engine, source, err = engine_state()
+    from . import notify
+    rows = engines()
+    engine, source, err = engine_state(rows)
+    # Every account's autopilots for the digest; an engine that does not answer is left out.
+    merged = notify.merge_states(rows)
 
     for step in STEPS:
         if step in skip or (step in HEAVY and not train and step not in force):
@@ -574,14 +595,18 @@ def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str]
             mark(st, step, now_ms, False, f"{type(e).__name__}: {e}")
             steps.append({"step": step, "status": "failed", "detail": f"{type(e).__name__}: {e}"[:400]})
 
-    aps = autopilot_pnl(engine, now_ms, price_at) if engine is not None else []
+    aps = autopilot_pnl(merged, now_ms, price_at) if merged is not None else []
     guard.write_json(learn_dir() / "state.json", st)
     data = {"generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "generated_ms": now_ms, "changes": changes, "decisions": decisions, "autopilots": aps,
             "steps": steps, "costs": results.get("costs"), "gates": results.get("sweep"),
             "evidence": (results.get("evidence") or {}).get("strategies"),
-            "engine": {"source": source, "reachable": engine is not None, "error": err}}
+            "engine": {"source": source, "reachable": engine is not None, "error": err,
+                       "accounts": [{"account": r["account"], "url": r["url"], "reachable": r["state"] is not None}
+                                    for r in rows]}}
     data["headline"] = headline(changes, decisions, aps, steps)
+    # The digest to the chat says it in German when the messages are.
+    data["headlines"] = {"de": headline(changes, decisions, aps, steps, "de")}
     data.update(feed(data, now_ms))
     guard.check_write(report.REPORTS / NAME / "latest.json")
     data["guardrails"] = {"written": sorted(set(guard.WRITTEN)), "refused": refused}
