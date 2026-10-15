@@ -101,4 +101,113 @@ run.
 
 ## Results
 
-Pending.
+Code: `lab/experiments/intraday_equities.py`, tests
+`tests/test_intraday_equities.py` (synthetic bars). Each run writes its own
+section below (proxy, alpaca) and leaves everything above as it was.
+
+### Implementation choices (made before the first real run; none adds a trial)
+
+The pre-registration left these open; they were fixed in the code and tested
+on synthetic bars before any real bar was loaded.
+
+- **Long-only ORB** is the long/short rule with the shorts dropped: the first
+  close outside the range decides the day either way, so a first break down
+  leaves the long-only book in cash for the day.
+- **Gap entries** need the gap still open at the first bar's close (a fade is
+  not entered when bar 0 has already closed through the previous close, a go
+  not when it has already failed). Exits are checked from the second bar on.
+- **VWAP** uses the bar's own VWAP times volume where the source has it
+  (Alpaca's `vw`), else (high + low + close) / 3 times volume (the proxy's tick
+  count). A long exited on a VWAP cross may flip short on the same close when
+  the short rule fires.
+- **Positions** are measured from their own entry price (shares bought once);
+  costs are charged on each change of position at the pre-registered rate per
+  side. Fees on every sell (a long exit or a short entry): SEC 27.80 USD per
+  million sold and FINRA TAF 0.000166 USD per share without its per-trade cap
+  (both conservative); on the proxy the share price is the index divided by
+  10 (SPX, RUT) or 40 (NDX). Fees are not doubled in the stress case.
+- **Fills one bar later** delays every entry and stop exit by one bar; the
+  forced exit stays at the 15:55 open.
+- **Alpaca calendar:** a market day is a SPY session with at least 70 bars and
+  one at 15:55. Half days (13:00 close) are left out entirely, as on the
+  proxy; a symbol counts on a day with at least 39 bars (missing bars repeat
+  the last close with zero volume).
+- **Universe:** on the first market day of each month, the 20 candidates with
+  the highest mean session dollar volume over the previous 20 market days
+  (at least 15 of them traded), held for the month.
+- **Deflation pool.** Gate 1 is over this study's 46 trials as registered.
+  The pooled figure is reported twice: with the 377 hand-study trials the
+  pre-registration named (published bar 2.43) and with the 677 of the global
+  ledger now (bar 2.45, `factory_first_run.md`), the prior variance backed out
+  of the published bar as `alpaca_universe` does. Studies that ran alongside
+  this one (memecoins, listings, equities_ranking) are not in the 677; adding
+  them only raises the bar.
+- **From 2024.** The out-of-sample windows stay as registered (proxy from
+  2014, Alpaca from 2021). The Sharpe from 2024 on is reported beside them
+  for the Alpaca run, as information, not as a gate.
+
+### Run it on the server (Alpaca data)
+
+The Alpaca keys exist only on the server. With the paper pair in
+`/etc/pythia/alpaca-paper.env` (as for `lab.experiments.listings`):
+
+```bash
+docker run --rm --cpus 4 --memory 8g --env-file /etc/pythia/alpaca-paper.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.experiments.intraday_equities --source alpaca
+```
+
+It reads `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` from the environment
+and nothing else, fetches 5-minute SIP bars from 2016 (about 5,000 requests,
+paced at 200 a minute, so roughly half an hour the first time; `--feed iex`
+if the plan refuses SIP), caches them under
+`/srv/pythia-data/intraday/alpaca-sip/<SYM>/<YYYY-MM>.parquet`, replaces the
+alpaca section below, and writes
+`/srv/pythia-data/reports/intraday_equities/alpaca-latest.{md,json}`. Copy the
+updated `results/intraday_equities.md` back into the repo. `--event-days
+FILE.csv` (one date per line) adds FOMC and CPI days to the macro filter.
+
+The keyless proxy runs anywhere:
+
+```bash
+PYTHIA_DATA=F:/PythiaData PYTHIA_INTRADAY_DATA=F:/PythiaData/agent-intraday/bars PYTHIA_REPORTS=F:/PythiaData/agent-intraday/reports python -m lab.experiments.intraday_equities --source proxy
+```
+
+### What a day book would need in the engine (note, no engine change)
+
+The engine can already trade a lab book of US shares on Alpaca in the regular
+session: `asset_class: "us_equity"` signals map to `alpaca:<SYM>`
+(`crates/pythia-core/src/lab.rs`), equity orders go out as `day` market or
+marketable limit orders, and lab books trade only while the broker clock says
+the market is open. A book that must be flat by the close is not supported
+yet. It would need:
+
+1. **A 5-minute signal cycle.** `lab_loop` reads `signals/*/latest.json`
+   every 300 s on a timer not aligned to bar closes, so a decision can wait up
+   to five minutes. Read every 15 to 30 s, or right after each bar close, and
+   let the lab writer run every five minutes (a cron or a small loop next to
+   the recorder).
+2. **Short validity.** The lab writers set `valid_until_ms` 36 hours ahead;
+   a day book's signal must expire within one bar (about 6 minutes), so a
+   stalled writer leaves the book flat instead of holding a stale intraday
+   position.
+3. **A forced flat time.** Nothing in the engine closes a position at a time
+   of day. Alpaca's clock gives `next_close` (parsed in `connectors/alpaca.rs`
+   but not passed on); a day book needs "flat at next_close minus 5 minutes",
+   which also covers half days (13:00 close), plus a check that refuses new
+   entries after the last entry time. Relying on the lab to publish zero
+   weights for the 15:55 bar is not enough: a late or missing signal would
+   carry the position overnight.
+4. **Shorts, only if a long/short rule were picked.** `lab::rebalance` clamps
+   weights at zero and caps sells at the holding, and Alpaca shorts are off by
+   default (`allow_shorts`) and need whole, shortable shares. The registered
+   rule is that only a long-only pick becomes a book, so this is not needed.
+5. **Pattern day trading.** Under 25,000 USD of equity a margin account may
+   make at most three day trades in five sessions; a day book makes one or
+   more a day per symbol. The engine already reads `day_trade_limit_reached`
+   from the account; the book must stop opening positions when it is set,
+   and the paper account should carry at least 25,000 USD.
+6. **Order size and the rebalance band.** `lab::rebalance` skips any
+   difference below the larger of 5 USD and 0.2 % of capital, a full exit
+   included, so a remnant under that size would stay overnight. The flat-time
+   exit must close the whole position whatever its size, and fills should be
+   logged against the bar open they were meant for, so realised and modelled
+   cost can be compared.
