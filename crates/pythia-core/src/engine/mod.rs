@@ -27,6 +27,8 @@ mod restart_tests;
 #[cfg(test)]
 mod seam_tests;
 pub mod strategies;
+#[cfg(test)]
+mod subaccount_tests;
 
 use crate::connectors::alpaca_crypto::{classify_reject, RejectKind};
 use crate::connectors::{BrokerOrder, BrokerOrderStatus, BrokerPosition, OrderType, Side, Venue};
@@ -171,6 +173,16 @@ pub struct PortfolioSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionView {
+    /// The position's key: the market id for the main book, `book|market`
+    /// for an autopilot's own book (see [`pos_key`]). Flatten takes it.
+    #[serde(default)]
+    pub key: String,
+    /// The autopilot whose book holds it; `None` for the main book.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book: Option<String>,
+    /// That autopilot's name, for the Positions page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book_name: Option<String>,
     pub market_id: String,
     pub venue: Venue,
     pub symbol: String,
@@ -252,6 +264,9 @@ pub struct Order {
     /// its modelled slippage plus the taker fee.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modelled_cost_bps: Option<f64>,
+    /// The autopilot whose book the order was for; `None` for the main book.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book: Option<String>,
 }
 
 fn paper_route() -> FillRoute {
@@ -900,6 +915,11 @@ pub struct InFlight {
     /// current one's. `booked_*` above stay totals over all of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     maker: Option<maker::MakerWork>,
+    /// The book the order trades for: an autopilot id, or empty for the
+    /// main book. Its fills are booked there and nowhere else, which is how
+    /// several autopilots share one venue account (see [`pos_key`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    book: String,
 }
 
 impl InFlight {
@@ -1034,6 +1054,37 @@ pub struct PersistedPosition {
     /// Opened with a demo-venue fill; its exits go back to the demo venue.
     #[serde(default)]
     pub demo: bool,
+    /// The book that holds it: an autopilot id, or empty for the main book.
+    /// Saves from before books existed have none; their positions load into
+    /// the main book and are moved into their autopilot's book on restore.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub book: String,
+    /// The market it is in. Empty in older saves, whose key is the market.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub market_id: String,
+}
+
+/// Separates the book from the market in a position key.
+pub const BOOK_SEP: char = '|';
+
+/// The key a position is kept under: the market id for the main book, and
+/// `book|market` for an autopilot's own book. Every autopilot is a virtual
+/// sub-account with its own positions, so two of them can hold the same coin
+/// on one venue account without either seeing the other's quantity.
+pub fn pos_key(book: &str, market: &str) -> String {
+    if book.is_empty() {
+        market.to_string()
+    } else {
+        format!("{book}{BOOK_SEP}{market}")
+    }
+}
+
+/// The book and the market of a position key (see [`pos_key`]).
+pub fn split_key(key: &str) -> (&str, &str) {
+    match key.split_once(BOOK_SEP) {
+        Some((b, m)) => (b, m),
+        None => ("", key),
+    }
 }
 
 /// The raw engine state written to disk so the daemon resumes exactly where it
@@ -1129,6 +1180,10 @@ pub struct Persisted {
 
 // ── internal engine state ──────────────────────────────────────────────────
 struct PositionInternal {
+    /// The market it is in (its key also names the book, see [`pos_key`]).
+    market: String,
+    /// The autopilot whose book holds it; empty for the main book.
+    book: String,
     venue: Venue,
     symbol: String,
     qty: f64,
@@ -1206,6 +1261,8 @@ pub struct Engine {
     /// strategies to at most one entry per candle.
     signalled_bar: HashMap<String, i64>,
     real_ids: std::collections::HashSet<String>, // markets whose price came from a live feed
+    /// Open positions by key ([`pos_key`]): one per market in the main book,
+    /// and one per market in each autopilot's own book.
     positions: HashMap<String, PositionInternal>,
     orders: Vec<Order>,
     journal: Vec<JournalEntry>,
@@ -1259,7 +1316,9 @@ pub struct Engine {
     crypto_demo_listed: Option<HashSet<String>>,
     pending_live: Vec<LiveOrderOut>,     // outbox drained by the async daemon
     inflight: HashMap<String, InFlight>, // engine order id → its state at the venue
-    in_flight_markets: HashSet<String>,  // one live order per market at a time
+    /// Position keys with a venue order out: one order per market and book
+    /// at a time (the main book's key is the market id).
+    in_flight_markets: HashSet<String>,
     /// Last time we complained that a live position cannot be closed, per market.
     /// Stops a stop-loss that keeps re-triggering from flooding the journal.
     live_warned_at: HashMap<String, i64>,
@@ -2416,27 +2475,33 @@ impl Engine {
                 }
             }
             for (idx, intent) in fires {
-                if let Some(m) = snapshot.get(&intent.market_id).cloned() {
+                let Some(m) = snapshot.get(&intent.market_id).cloned() else { continue };
+                // A strategy inside autopilots trades for each of them in its
+                // own book; one outside every autopilot trades the main book.
+                let sid = self.strategies[idx].id.clone();
+                for book in self.entry_books(&sid) {
+                    let key = pos_key(&book, &intent.market_id);
                     // only OPEN when flat in this market — exits are handled by the
                     // ATR stop-loss / take-profit / trailing, not by flipping on
                     // every opposing signal. This kills the fee-bleeding churn.
-                    if self.positions.contains_key(&intent.market_id) {
+                    if self.positions.contains_key(&key) {
                         continue;
                     }
-                    // An autopilot's strategies trade only its markets, only
-                    // while it runs; everyone else stays off the markets it reserved.
-                    if !self.autopilot_entry_allowed(&self.strategies[idx].id, &intent.market_id) {
+                    // An autopilot's strategies trade only its sleeve's markets,
+                    // only while it runs.
+                    if !self.autopilot_entry_allowed(&book, &sid, &intent.market_id) {
                         continue;
                     }
-                    // On a bar-backed market, act at most once per closed candle.
-                    // The tick loop runs every 1.5s but the data only changes when
-                    // a bar closes — re-firing in between is the same signal
-                    // resubmitted, and it is how a "signal" turns into a fee bill.
+                    // On a bar-backed market, act at most once per closed candle
+                    // in each book. The tick loop runs every 1.5s but the data
+                    // only changes when a bar closes; re-firing in between is
+                    // the same signal resubmitted, and it is how a "signal"
+                    // turns into a fee bill.
                     if let Some(bar_ts) = self.last_bar_ts.get(&intent.market_id).copied() {
-                        if self.signalled_bar.get(&intent.market_id) == Some(&bar_ts) {
+                        if self.signalled_bar.get(&key) == Some(&bar_ts) {
                             continue;
                         }
-                        self.signalled_bar.insert(intent.market_id.clone(), bar_ts);
+                        self.signalled_bar.insert(key.clone(), bar_ts);
                     }
                     // don't fight a clear primary trend (60-bar ROC)
                     if let Some(lt) = self.history.get(&intent.market_id).and_then(|h| indicators::roc(h, 60)) {
@@ -2455,14 +2520,14 @@ impl Engine {
                         continue;
                     }
                     let name = self.strategies[idx].name.clone();
-                    let sid = self.strategies[idx].id.clone();
+                    let whose = self.book_label(&book).map(|l| format!(" (for {l})")).unwrap_or_default();
                     self.log(
                         JournalKind::Signal,
-                        format!("{name}: {:?} {} — {}", intent.side, m.symbol, intent.reason),
-                        Some(sid),
+                        format!("{name}: {:?} {}: {}{whose}", intent.side, m.symbol, intent.reason),
+                        Some(sid.clone()),
                         Some(intent.market_id.clone()),
                     );
-                    self.place_from_intent(idx, &m, &intent);
+                    self.place_from_intent(&book, idx, &m, &intent);
                 }
             }
         }
@@ -2752,10 +2817,11 @@ impl Engine {
         // is not where the market is. Refused quotes never become the price,
         // so a bad tick lands here too once the last good one ages out.
         let now = self.now();
+        // Staleness is a market's, whichever books hold it.
         let stale: HashMap<String, i64> = self
             .positions
-            .keys()
-            .filter_map(|id| self.exit_price_stale(id, now).map(|age| (id.clone(), age)))
+            .values()
+            .filter_map(|p| self.exit_price_stale(&p.market, now).map(|age| (p.market.clone(), age)))
             .collect();
         let mut held: Vec<(String, i64)> = Vec::new();
         // A lab book is held to the lab's targets and nothing else: a stop on
@@ -2764,7 +2830,7 @@ impl Engine {
             self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
 
         for (id, pos) in self.positions.iter_mut() {
-            let price = *prices.get(id).unwrap_or(&0.0);
+            let price = *prices.get(&pos.market).unwrap_or(&0.0);
             if price <= 0.0 || pos.qty == 0.0 || pos.stop <= 0.0 && pos.target <= 0.0 {
                 continue;
             }
@@ -2773,8 +2839,10 @@ impl Engine {
                 pos.target = 0.0;
                 continue;
             }
-            if let Some(age) = stale.get(id) {
-                held.push((id.clone(), *age));
+            if let Some(age) = stale.get(&pos.market) {
+                if !held.iter().any(|h| h.0 == pos.market) {
+                    held.push((pos.market.clone(), *age));
+                }
                 continue;
             }
             let long = pos.qty > 0.0;
@@ -2812,7 +2880,7 @@ impl Engine {
             .collect();
         for id in resumed {
             self.feed_noted.remove(&format!("exit:{id}"));
-            if self.positions.contains_key(&id) {
+            if self.positions.values().any(|p| p.market == id) {
                 self.log(JournalKind::System, format!("Stop check on {id} resumed with a fresh price"), None, Some(id));
             }
         }
@@ -2822,19 +2890,22 @@ impl Engine {
         }
     }
 
-    /// Close a position attributing the fill to its owning strategy.
-    fn close_position(&mut self, id: &str, reason: &str) {
-        let (qty, side, sid, live, intent) = match self.positions.get(id) {
+    /// Close a position (by its key, see [`pos_key`]) attributing the fill
+    /// to its owning strategy and booking it to its own book.
+    fn close_position(&mut self, key: &str, reason: &str) {
+        let (qty, side, sid, live, intent, book, market) = match self.positions.get(key) {
             Some(p) if p.qty != 0.0 => (
                 p.qty.abs(),
                 if p.qty > 0.0 { Side::Sell } else { Side::Buy },
                 p.strategy_id.clone(),
                 p.live,
                 Self::exit_intent(p),
+                p.book.clone(),
+                p.market.clone(),
             ),
             _ => return,
         };
-        let Some(m) = self.markets.iter().find(|m| m.id == id).cloned() else { return };
+        let Some(m) = self.markets.iter().find(|m| m.id == market).cloned() else { return };
         let idx = self
             .strategies
             .iter()
@@ -2842,14 +2913,56 @@ impl Engine {
             .unwrap_or_else(|| self.ensure_manual_strategy());
         // A stop, a target or a halt never rests as a maker order.
         self.urgent_exit = true;
-        self.route_fill(idx, &m, side, qty, m.price, intent);
+        self.route_fill_in(&book, idx, &m, side, qty, m.price, intent);
         self.urgent_exit = false;
         // Only claim the exit happened if it actually did. A live exit that
         // could not route leaves the position open, and `route_fill` has
         // already explained why.
         if !live || self.live_routable(m.venue) {
-            self.log(JournalKind::System, format!("Exit {id}: {reason}"), Some(sid), Some(id.to_string()));
+            let whose = self.book_label(&book).map(|l| format!(" ({l})")).unwrap_or_default();
+            self.log(JournalKind::System, format!("Exit {market}{whose}: {reason}"), Some(sid), Some(market));
         }
+    }
+
+    /// The autopilot a book belongs to, in words; `None` for the main book.
+    pub(crate) fn book_label(&self, book: &str) -> Option<String> {
+        if book.is_empty() {
+            return None;
+        }
+        Some(match self.autopilots.iter().find(|a| a.config.id == book) {
+            Some(a) => format!("autopilot \"{}\"", a.config.name),
+            None => format!("autopilot {book}"),
+        })
+    }
+
+    /// The books a strategy's entries go to: the book of every active
+    /// autopilot that runs it (each checks its own sleeve's markets), or,
+    /// for a strategy no active autopilot runs, the main book.
+    pub(crate) fn entry_books(&self, sid: &str) -> Vec<String> {
+        let mine: Vec<String> = self
+            .autopilots
+            .iter()
+            .filter(|a| a.is_active())
+            .filter(|a| a.sleeves.iter().any(|s| s.strategy_id == sid))
+            .map(|a| a.config.id.clone())
+            .collect();
+        if mine.is_empty() {
+            vec![String::new()]
+        } else {
+            mine
+        }
+    }
+
+    /// The one book a fill of `sid` on `market` lands in when nothing else
+    /// says: the first active autopilot that runs it there, else the main
+    /// book. For code outside the strategy loop and for tests.
+    fn default_book(&self, sid: &str, market: &str) -> String {
+        self.autopilots
+            .iter()
+            .filter(|a| a.is_active())
+            .find(|a| a.sleeves.iter().any(|s| s.strategy_id == sid && s.markets.iter().any(|m| m == market)))
+            .map(|a| a.config.id.clone())
+            .unwrap_or_default()
     }
 
     /// Cut every open position to the same fraction once the book's
@@ -2869,13 +2982,14 @@ impl Engine {
             self.strategies.iter().filter(|s| s.kind == StrategyKind::LabTargets).map(|s| s.id.clone()).collect();
         let lab_ids: Vec<String> = self
             .positions
-            .iter()
-            .filter(|(_, p)| p.qty != 0.0 && lab.contains(&p.strategy_id))
-            .map(|(id, _)| id.clone())
+            .values()
+            .filter(|p| p.qty != 0.0 && lab.contains(&p.strategy_id))
+            .map(|p| p.market.clone())
             .collect();
         let vols = self.annual_vols(lab_ids.iter().map(String::as_str));
         let mut cold: Vec<String> = lab_ids.into_iter().filter(|id| !vols.contains_key(id)).collect();
         cold.sort();
+        cold.dedup();
         if k > 0.0 && target > 0.0 && !cold.is_empty() {
             self.vol_spike.above_since = None;
             if vol_pct > target * k.max(1.0) && self.feed_noted.insert("voltrim:cold".into()) {
@@ -2907,10 +3021,11 @@ impl Engine {
             .iter()
             .filter(|id| self.trim_needs_maker(id))
             .filter(|id| {
-                let side = if self.positions[*id].qty > 0.0 { Side::Sell } else { Side::Buy };
-                self.markets.iter().find(|m| &m.id == *id).is_none_or(|m| self.maker_plan(m, side).is_none())
+                let p = &self.positions[*id];
+                let side = if p.qty > 0.0 { Side::Sell } else { Side::Buy };
+                self.markets.iter().find(|m| m.id == p.market).is_none_or(|m| self.maker_plan(m, side).is_none())
             })
-            .cloned()
+            .map(|id| split_key(id).1.to_string())
             .collect();
         if !no_book.is_empty() {
             self.vol_spike = before;
@@ -2947,48 +3062,54 @@ impl Engine {
 
     /// A risk trim of this position must rest as a maker order: a lab-book
     /// position at the demo venue on a route with maker execution on.
-    fn trim_needs_maker(&self, id: &str) -> bool {
-        let Some(p) = self.positions.get(id) else { return false };
+    fn trim_needs_maker(&self, key: &str) -> bool {
+        let Some(p) = self.positions.get(key) else { return false };
         p.demo
             && self.strategies.iter().any(|s| s.id == p.strategy_id && s.kind == StrategyKind::LabTargets)
-            && self.markets.iter().find(|m| m.id == id).is_some_and(|m| self.maker_route_on(m))
+            && self.markets.iter().find(|m| m.id == p.market).is_some_and(|m| self.maker_route_on(m))
     }
 
-    /// Reduce a position to `keep` of its size, never past flat: a long is
-    /// sold and a short bought back. A real position is reduced at its venue
-    /// or not at all, like any other exit.
-    fn trim_position(&mut self, id: &str, keep: f64, reason: &str) {
+    /// Reduce a position (by key) to `keep` of its size, never past flat: a
+    /// long is sold and a short bought back. A real position is reduced at
+    /// its venue or not at all, like any other exit.
+    fn trim_position(&mut self, key: &str, keep: f64, reason: &str) {
         let keep = keep.clamp(0.0, 1.0);
-        let (qty, side, sid, live, intent) = match self.positions.get(id) {
+        let (qty, side, sid, live, intent, book, market) = match self.positions.get(key) {
             Some(p) if p.qty != 0.0 => (
                 p.qty.abs() * (1.0 - keep),
                 if p.qty > 0.0 { Side::Sell } else { Side::Buy },
                 p.strategy_id.clone(),
                 p.live,
                 Self::exit_intent(p),
+                p.book.clone(),
+                p.market.clone(),
             ),
             _ => return,
         };
         if qty <= 0.0 {
             return;
         }
-        if let Some(age) = self.exit_price_stale(id, self.now()) {
-            self.note_exit_held(id, age, "Trim");
+        if let Some(age) = self.exit_price_stale(&market, self.now()) {
+            self.note_exit_held(&market, age, "Trim");
             return;
         }
-        let Some(m) = self.markets.iter().find(|m| m.id == id).cloned() else { return };
+        let Some(m) = self.markets.iter().find(|m| m.id == market).cloned() else { return };
         let idx = self
             .strategies
             .iter()
             .position(|s| s.id == sid)
             .unwrap_or_else(|| self.ensure_manual_strategy());
-        self.route_fill(idx, &m, side, qty, m.price, intent);
+        self.route_fill_in(&book, idx, &m, side, qty, m.price, intent);
         if !live || self.live_routable(m.venue) {
+            let whose = self.book_label(&book).map(|l| format!(" ({l})")).unwrap_or_default();
             self.log(
                 JournalKind::Risk,
-                format!("Trim {id} by {:.0}%: {reason} (a risk-driven reduction, not a strategy signal)", (1.0 - keep) * 100.0),
+                format!(
+                    "Trim {market}{whose} by {:.0}%: {reason} (a risk-driven reduction, not a strategy signal)",
+                    (1.0 - keep) * 100.0
+                ),
                 Some(sid),
-                Some(id.to_string()),
+                Some(market),
             );
         }
     }
@@ -2996,13 +3117,13 @@ impl Engine {
     /// A sell sent to a venue never asks for more than the book holds there
     /// (the venue refuses a hair more as "insufficient balance"). The
     /// connector clamps again to what the account itself reports.
-    fn venue_sell_qty(&self, m: &Market, side: Side, qty: f64, demo: bool) -> f64 {
+    fn venue_sell_qty(&self, book: &str, m: &Market, side: Side, qty: f64, demo: bool) -> f64 {
         if side != Side::Sell {
             return qty;
         }
         let held = self
             .positions
-            .get(&m.id)
+            .get(&pos_key(book, &m.id))
             .filter(|p| p.qty > 0.0 && if demo { p.demo } else { p.live })
             .map(|p| p.qty);
         let q = held.map_or(qty, |h| qty.min(h));
@@ -3083,13 +3204,13 @@ impl Engine {
         (stop, target)
     }
 
-    fn place_from_intent(&mut self, strat_idx: usize, m: &Market, intent: &strategies::SignalIntent) {
+    fn place_from_intent(&mut self, book: &str, strat_idx: usize, m: &Market, intent: &strategies::SignalIntent) {
         let price = m.price;
         let equity = self.equity();
         let sid = self.strategies[strat_idx].id.clone();
         // A strategy inside an autopilot is sized from the autopilot's
         // capital: its sleeve's share of it, over the sleeve's own markets.
-        let sleeve = self.autopilot_sizing(&sid);
+        let sleeve = self.autopilot_sizing(book, &sid);
         let budget = match &sleeve {
             Some(s) => s.capital,
             None => (self.strategies[strat_idx].budget_pct / 100.0) * equity,
@@ -3168,21 +3289,22 @@ impl Engine {
             reduce_only: false,
             ioc: false,
         };
-        let ctx = self.risk_ctx(&m.id, &sid, price);
+        let ctx = self.risk_ctx(book, &m.id, &sid, price);
         let decision = risk::evaluate(&req, price, &self.limits, &ctx);
 
         if !decision.approved {
             let reason = decision.reason.unwrap_or_default();
-            let order = self.build_order(&sid, m, intent.side, qty_wanted, OrderStatus::Rejected, Some(reason.clone()));
+            let mut order = self.build_order(&sid, m, intent.side, qty_wanted, OrderStatus::Rejected, Some(reason.clone()));
+            order.book = (!book.is_empty()).then(|| book.to_string());
             self.orders.insert(0, order);
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return;
         }
         // Inside an autopilot its mode decides the route, not the strategy's switch.
         let route = self
-            .autopilot_route(&sid)
+            .autopilot_route(book)
             .unwrap_or_else(|| Self::entry_intent(self.strategies[strat_idx].state));
-        self.route_fill(strat_idx, m, intent.side, decision.qty, price, route);
+        self.route_fill_in(book, strat_idx, m, intent.side, decision.qty, price, route);
     }
 
     /// How a strategy in `state` routes a new entry.
@@ -3245,9 +3367,19 @@ impl Engine {
     /// real price the fill is also kept in the slippage record as a `paper`
     /// row: realised against the signal price, next to what the model
     /// expected, with the drift between signal and book.
+    /// [`Engine::fill_in`] in the book the strategy's fill lands in when
+    /// nothing else says ([`Engine::default_book`]).
+    #[cfg(test)]
     fn fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
+        let sid = self.strategies[strat_idx].id.clone();
+        let book = self.default_book(&sid, &m.id);
+        self.fill_in(&book, strat_idx, m, side, qty, price)
+    }
+
+    /// A paper fill in `book` (see [`pos_key`]).
+    fn fill_in(&mut self, book: &str, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64) {
         let pf = paper_fill_detail(&self.exec_cost(m, side), m.kind, side, qty, price);
-        self.settle_fill(strat_idx, m, side, qty, pf.price, pf.fee, price, false, true);
+        self.settle_fill_on(book, strat_idx, m, side, qty, pf.price, pf.fee, price, false, false, true);
         if let Some(o) = self.orders.first_mut().filter(|o| o.market_id == m.id && o.status == OrderStatus::Filled) {
             o.route = FillRoute::Paper;
             o.cost_source = Some(pf.source);
@@ -3280,8 +3412,12 @@ impl Engine {
         }
     }
 
-    /// Apply a fill (paper or live) to positions, cash, P&L and strategy stats.
+    /// Apply a fill (paper, demo or live) to the position of `book` in this
+    /// market, to cash, P&L and strategy stats, and to the autopilot whose
+    /// book it is.
     /// `live` marks a real fill — its position's exits must also route live.
+    /// `demo` marks a demo-venue fill: booked in the same ledger as paper,
+    /// flagged so its exits go back to the demo venue and the UI says what it is.
     /// `emit_order` inserts a fresh Filled order (the paper path); live fills
     /// instead update their existing pending order in [`Engine::apply_live_update`].
     /// `reference` is the price before execution costs: the quote a paper fill
@@ -3289,27 +3425,9 @@ impl Engine {
     /// tracked at reference prices alongside the real one, which is what makes
     /// the strategy's gross line (see [`StrategyLedger`]).
     #[allow(clippy::too_many_arguments)]
-    fn settle_fill(
-        &mut self,
-        strat_idx: usize,
-        m: &Market,
-        side: Side,
-        qty: f64,
-        fill_price: f64,
-        fee: f64,
-        reference: f64,
-        live: bool,
-        emit_order: bool,
-    ) {
-        self.settle_fill_on(strat_idx, m, side, qty, fill_price, fee, reference, live, false, emit_order)
-    }
-
-    /// [`Engine::settle_fill`] that can also mark the position as opened by a
-    /// demo-venue fill (`demo`): booked in the same ledger as paper, flagged so
-    /// its exits go back to the demo venue and the UI says what it is.
-    #[allow(clippy::too_many_arguments)]
     fn settle_fill_on(
         &mut self,
+        book: &str,
         strat_idx: usize,
         m: &Market,
         side: Side,
@@ -3345,7 +3463,7 @@ impl Engine {
         };
 
         // update / open position, realizing P&L on reductions
-        let key = m.id.clone();
+        let key = pos_key(book, &m.id);
         let mut realized = 0.0;
         // (qty, entry notional) of the part of a position this fill closed.
         let mut closed: Option<(f64, f64)> = None;
@@ -3368,6 +3486,8 @@ impl Engine {
                 self.positions.insert(
                     key.clone(),
                     PositionInternal {
+                        market: m.id.clone(),
+                        book: book.to_string(),
                         venue: m.venue,
                         symbol: m.symbol.clone(),
                         qty: signed,
@@ -3413,9 +3533,9 @@ impl Engine {
             self.realized_pnl += realized;
         }
         self.cash -= signed * fill_price + fee;
-        // The autopilot that owns this position, or that just opened it, books it.
+        // The autopilot whose book this is books it.
         let open_after = self.positions.contains_key(&key);
-        if let Some(ap) = self.autopilot_on_fill(&sid, &key, realized, fee, existed, open_after) {
+        if let Some(ap) = self.autopilot_on_fill(book, &sid, &m.id, realized, fee, existed, open_after) {
             self.autopilot_trade_alert(ap, &sid, &m.symbol, side == Side::Buy, qty, fill_price, fee, realized);
         }
         // The measured edge: net return on the closed notional. The entry fee
@@ -3510,7 +3630,8 @@ impl Engine {
         }
 
         if emit_order {
-            let order = self.build_order_filled(&sid, m, side, qty, fill_price);
+            let mut order = self.build_order_filled(&sid, m, side, qty, fill_price);
+            order.book = (!book.is_empty()).then(|| book.to_string());
             self.orders.insert(0, order);
             if self.orders.len() > 400 {
                 self.orders.pop();
@@ -3538,35 +3659,74 @@ impl Engine {
     /// fake exit would leave Pythia showing flat while the real position runs
     /// unmanaged. When it cannot route, it refuses and says so.
     fn route_fill(&mut self, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64, intent: RouteIntent) {
+        self.route_fill_in("", strat_idx, m, side, qty, price, intent)
+    }
+
+    /// [`Engine::route_fill`] for the position of `book` (an autopilot id,
+    /// or empty for the main book) in this market. Its fills are booked to
+    /// that book only, wherever the order goes.
+    #[allow(clippy::too_many_arguments)]
+    fn route_fill_in(&mut self, book: &str, strat_idx: usize, m: &Market, side: Side, qty: f64, price: f64, intent: RouteIntent) {
         let routable = self.live_routable(m.venue);
         let demo = intent == RouteIntent::Demo;
-        // One position per market: real, demo and paper fills must never be
-        // booked into each other's position. Exits are never refused here.
-        if let Some(why) = self.mixed_book_reason(m, intent) {
+        let key = pos_key(book, &m.id);
+        // One position per market and book: real, demo and paper fills must
+        // never be booked into each other's position. Exits are never refused here.
+        if let Some(why) = self.mixed_book_reason(book, m, intent) {
             self.refuse_mixed(strat_idx, m, &why);
             return;
         }
         match intent {
-            RouteIntent::Paper => return self.fill(strat_idx, m, side, qty, price),
-            RouteIntent::Live if !routable => return self.fill(strat_idx, m, side, qty, price),
+            RouteIntent::Paper => return self.fill_in(book, strat_idx, m, side, qty, price),
+            RouteIntent::Live if !routable => return self.fill_in(book, strat_idx, m, side, qty, price),
             RouteIntent::LiveExit if !routable => {
                 self.warn_stuck_live_position(m);
                 return;
             }
             _ => {}
         }
-        let qty = self.venue_sell_qty(m, side, qty, demo);
+        let qty = self.venue_sell_qty(book, m, side, qty, demo);
         if qty <= 0.0 {
             return;
         }
 
-        // One live order per market at a time — never double-send while a prior
-        // order is still awaiting a broker response. An exit that must not
-        // wait asks a maker order resting there to stand down; the exit goes
-        // out once that order is done.
-        if self.in_flight_markets.contains(&m.id) {
+        // One venue order per market and book at a time: never double-send
+        // while a prior order is still awaiting a broker response. An exit
+        // that must not wait asks a maker order resting there to stand down;
+        // the exit goes out once that order is done.
+        if self.in_flight_markets.contains(&key) {
             if self.urgent_exit {
                 self.maker_stand_down(&m.id, "an exit needs the market");
+            }
+            return;
+        }
+        // Several books share one venue account. An order on the other side
+        // of the same symbol from another book could meet ours at the venue
+        // (Alpaca refuses that as a potential wash trade), so it waits until
+        // that one is done, said once a minute. An urgent exit asks a resting
+        // maker order of the other book to stand down first.
+        if let Some(other) = self.opposite_order_elsewhere(book, m, side, demo) {
+            if self.urgent_exit {
+                self.maker_stand_down(&m.id, "an exit of another book needs the market");
+            }
+            let now = self.now();
+            let wkey = format!("wash:{key}");
+            if self.live_warned_at.get(&wkey).is_none_or(|&t| now - t >= 60_000) {
+                self.live_warned_at.insert(wkey, now);
+                let sid = self.strategies[strat_idx].id.clone();
+                let whose = self.book_label(book).unwrap_or_else(|| "the main book".into());
+                let theirs = self.book_label(&other).unwrap_or_else(|| "the main book".into());
+                self.log(
+                    JournalKind::Order,
+                    format!(
+                        "{side:?} {} for {whose} waits: {theirs} has a {} order in the same symbol at the venue, and the \
+                         two could meet as a wash trade. It goes out once that order is done",
+                        m.symbol,
+                        if side == Side::Buy { "sell" } else { "buy" }
+                    ),
+                    Some(sid),
+                    Some(m.id.clone()),
+                );
             }
             return;
         }
@@ -3584,7 +3744,7 @@ impl Engine {
                 // worse than a simulated exit that says what it is.
                 let closes_demo = self
                     .positions
-                    .get(&m.id)
+                    .get(&key)
                     .is_some_and(|p| p.demo && p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell));
                 if closes_demo {
                     self.log(
@@ -3597,13 +3757,14 @@ impl Engine {
                         Some(sid),
                         Some(m.id.clone()),
                     );
-                    if let Some(p) = self.positions.get_mut(&m.id) {
+                    if let Some(p) = self.positions.get_mut(&key) {
                         p.demo = false;
                     }
-                    return self.fill(strat_idx, m, side, qty, price);
+                    return self.fill_in(book, strat_idx, m, side, qty, price);
                 }
                 let mut order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
                 order.route = FillRoute::Demo;
+                order.book = (!book.is_empty()).then(|| book.to_string());
                 self.orders.insert(0, order);
                 self.live_backoff_until.insert(m.id.clone(), self.now() + LIVE_REJECT_BACKOFF_MS);
                 self.log(JournalKind::Reject, format!("DEMO order refused for {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
@@ -3625,7 +3786,7 @@ impl Engine {
         let reduces = intent == RouteIntent::LiveExit
             || self
                 .positions
-                .get(&m.id)
+                .get(&key)
                 .map(|p| (if demo { p.demo } else { p.live }) && p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell))
                 .unwrap_or(false);
         // Demo orders face the same session gate: an equity order queued
@@ -3640,6 +3801,7 @@ impl Engine {
                 if demo {
                     order.route = FillRoute::Demo;
                 }
+                order.book = (!book.is_empty()).then(|| book.to_string());
                 self.orders.insert(0, order);
                 self.log(
                     JournalKind::Reject,
@@ -3669,7 +3831,7 @@ impl Engine {
         // the book feed has loaded): a non-urgent order waits for one, said
         // once, rather than crossing. After `MAKER_BOOK_WAIT_MS` it goes out
         // the fallback way. An urgent exit never gets here.
-        let wait_key = format!("order:{}", m.id);
+        let wait_key = format!("order:{key}");
         if demo && maker_work.is_none() && self.maker_book_missing(m, side) {
             let wait = if self.maker_no_book_go { maker::BookWait::Expired } else { self.maker_book_wait(&wait_key) };
             match wait {
@@ -3737,6 +3899,7 @@ impl Engine {
 
         let mut order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
         order.route = if demo || self.live.paper { FillRoute::Demo } else { FillRoute::Live };
+        order.book = (!book.is_empty()).then(|| book.to_string());
         order.cost_source = Some(cost_source);
         order.drift_bps = drift_bps;
         if let Some(w) = &maker_work {
@@ -3750,7 +3913,7 @@ impl Engine {
             w.reduce_only = reduces;
         }
         self.orders.insert(0, order);
-        self.in_flight_markets.insert(m.id.clone());
+        self.in_flight_markets.insert(key.clone());
         self.inflight.insert(
             order_id.clone(),
             InFlight {
@@ -3780,6 +3943,7 @@ impl Engine {
                 drift_bps,
                 lookup: false,
                 maker: maker_work.clone(),
+                book: book.to_string(),
             },
         );
         self.pending_live.push(LiveOrderOut {
@@ -3826,8 +3990,8 @@ impl Engine {
     /// paper position (or a paper fill into a demo one, or anything into a
     /// real one) would leave a position that is neither. An order on the
     /// position's own route (which is how its exits are sent) never mixes.
-    fn mixed_book_reason(&self, m: &Market, intent: RouteIntent) -> Option<String> {
-        let p = self.positions.get(&m.id).filter(|p| p.qty.abs() > 1e-12)?;
+    fn mixed_book_reason(&self, book: &str, m: &Market, intent: RouteIntent) -> Option<String> {
+        let p = self.positions.get(&pos_key(book, &m.id)).filter(|p| p.qty.abs() > 1e-12)?;
         let held = if p.live {
             "a REAL position"
         } else if p.demo {
@@ -3858,6 +4022,16 @@ impl Engine {
                 }
             )
         })
+    }
+
+    /// Another book with an order out in the same market, on the other side
+    /// and in the same world (demo or not): the book it is for. Two books
+    /// trade one venue account, and opposite orders there could meet.
+    fn opposite_order_elsewhere(&self, book: &str, m: &Market, side: Side, demo: bool) -> Option<String> {
+        self.inflight
+            .values()
+            .find(|f| f.market_id == m.id && f.book != book && f.side != side && f.demo == demo)
+            .map(|f| f.book.clone())
     }
 
     /// Say once a minute per market that an order was refused for mixing
@@ -4038,18 +4212,21 @@ impl Engine {
         if !(m.price > 0.0) || !(notional > 0.0) || !notional.is_finite() {
             return Err(format!("nothing to size: price {} notional {notional}", m.price));
         }
+        // The book it is for: the autopilot that runs the strategy there, or
+        // the main book.
+        let book = self.default_book(strategy_id, market_id);
         if intent == RouteIntent::Demo {
             if let Some(why) = self.demo_block_reason(&m) {
                 return Err(why);
             }
-            if self.in_flight_markets.contains(&m.id) {
+            if self.in_flight_markets.contains(&pos_key(&book, &m.id)) {
                 return Err(format!("{} already has an order in flight", m.symbol));
             }
             if self.backing_off(&m, true) {
                 return Err(format!("{} was refused by the venue a moment ago; backing off", m.symbol));
             }
         }
-        if let Some(why) = self.mixed_book_reason(&m, intent) {
+        if let Some(why) = self.mixed_book_reason(&book, &m, intent) {
             return Err(why);
         }
         let qty = notional / m.price;
@@ -4064,7 +4241,7 @@ impl Engine {
             reduce_only: false,
             ioc: false,
         };
-        let ctx = self.risk_ctx(&m.id, strategy_id, m.price);
+        let ctx = self.risk_ctx(&book, &m.id, strategy_id, m.price);
         let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
         if !decision.approved {
             let reason = decision.reason.unwrap_or_default();
@@ -4072,11 +4249,12 @@ impl Engine {
             if intent == RouteIntent::Demo {
                 order.route = FillRoute::Demo;
             }
+            order.book = (!book.is_empty()).then(|| book.clone());
             self.orders.insert(0, order);
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(strategy_id.into()), Some(m.id.clone()));
             return Err(reason);
         }
-        self.route_fill(idx, &m, side, decision.qty, m.price, intent);
+        self.route_fill_in(&book, idx, &m, side, decision.qty, m.price, intent);
         Ok(decision.qty)
     }
 
@@ -4158,7 +4336,7 @@ impl Engine {
                     Some("no real candles yet — signals need a live bar feed".into())
                 } else if bars < 30 {
                     Some(format!("only {bars} candles; strategies need at least 30"))
-                } else if self.positions.contains_key(&m.id) {
+                } else if self.holds_market(&m.id) {
                     Some("already holding — entries only open when flat".into())
                 } else if self
                     .last_bar_ts
@@ -4191,7 +4369,7 @@ impl Engine {
                     bars,
                     bar_backed: self.bar_backed.contains(&m.id),
                     quote_age_sec: ((now - m.updated_at) / 1000).max(0) as u64,
-                    has_position: self.positions.contains_key(&m.id),
+                    has_position: self.holds_market(&m.id),
                     watchers: watchers.iter().map(|s| s.name.clone()).collect(),
                     live_watchers: live_watchers.len(),
                     signal,
@@ -4348,17 +4526,34 @@ impl Engine {
         let recent: Vec<String> =
             h.iter().rev().take(20).rev().map(|c| format!("{c:.4}")).collect();
         out.push_str(&format!("Last 20 closes (oldest→newest): {}\n", recent.join(", ")));
-        if let Some(p) = self.positions.get(market_id) {
+        // Every book's position in this market together, as the account holds it.
+        let (qty, cost) = self
+            .positions
+            .values()
+            .filter(|p| p.market == market_id)
+            .fold((0.0, 0.0), |(q, c), p| (q + p.qty, c + p.qty * p.avg_price));
+        if qty.abs() > 1e-12 {
+            let avg = cost / qty;
             out.push_str(&format!(
                 "Current position: {:+.4} @ {:.4} (unrealized {:+.2})\n",
-                p.qty,
-                p.avg_price,
-                (m.price - p.avg_price) * p.qty
+                qty,
+                avg,
+                (m.price - avg) * qty
             ));
         } else {
             out.push_str("Current position: flat\n");
         }
         Some(out)
+    }
+
+    /// Any book has a venue order out in this market.
+    fn order_out_in(&self, market_id: &str) -> bool {
+        self.inflight.values().any(|f| f.market_id == market_id)
+    }
+
+    /// Any book holds something in this market.
+    fn holds_market(&self, market_id: &str) -> bool {
+        self.positions.values().any(|p| p.market == market_id && p.qty.abs() > 1e-12)
     }
 
     /// Markets worth spending a model call on: tradable, bar-backed, and with
@@ -4646,7 +4841,7 @@ impl Engine {
 
     fn close_unacknowledged(&mut self, order_id: &str, reason: &str, kind: JournalKind) {
         let Some(f) = self.inflight.remove(order_id) else { return };
-        self.in_flight_markets.remove(&f.market_id);
+        self.in_flight_markets.remove(&pos_key(&f.book, &f.market_id));
         if let Some(ord) = self.orders.iter_mut().find(|o| o.id == order_id) {
             ord.status = OrderStatus::Rejected;
             ord.reject_reason = Some(reason.to_string());
@@ -4727,7 +4922,7 @@ impl Engine {
                     // A demo fill is booked like a paper one (no `live` flag,
                     // so the reconciler and the real-money guards ignore it)
                     // and marks its position demo.
-                    self.settle_fill_on(idx, &m, f.side, qty, price, fee_delta, reference, !f.demo, f.demo, false);
+                    self.settle_fill_on(&f.book, idx, &m, f.side, qty, price, fee_delta, reference, !f.demo, f.demo, false);
                     // The tax record: every REAL fill, for the host to append
                     // to fills.jsonl. Never a demo fill, and never one from
                     // Alpaca's paper endpoint: both are virtual money.
@@ -4831,7 +5026,7 @@ impl Engine {
 
     fn finish_live_order(&mut self, order_id: &str, update: &LiveUpdate) {
         let Some(f) = self.inflight.remove(order_id) else { return };
-        self.in_flight_markets.remove(&f.market_id);
+        self.in_flight_markets.remove(&pos_key(&f.book, &f.market_id));
 
         // A fee in a coin Pythia has no price for is not in the P&L; say so
         // instead of letting the fees look smaller than they were.
@@ -4924,7 +5119,7 @@ impl Engine {
             }
         }
         if let Some(f) = &f {
-            self.in_flight_markets.remove(&f.market_id);
+            self.in_flight_markets.remove(&pos_key(&f.book, &f.market_id));
             let backoff = if kind == RejectKind::Other { LIVE_REJECT_BACKOFF_MS } else { kind.backoff_ms() };
             self.live_backoff_until.insert(f.market_id.clone(), now + backoff);
             if kind.whole_route() {
@@ -5038,61 +5233,38 @@ impl Engine {
             // venue now and then booking the order's fill report would count
             // that fill twice. The order's own report settles it; the next
             // reconciliation after it is done checks the result.
-            if self.in_flight_markets.contains(&market_id) {
+            if self.order_out_in(&market_id) {
                 continue;
             }
-            // A demo position belongs to the demo account. Alpaca's paper
-            // account can be both the demo route and the live arm's paper
-            // endpoint, and its holdings must never turn a demo position into
-            // a "real" one.
-            if self.positions.get(&market_id).is_some_and(|p| p.demo) {
+            // Every book's position in this market that is not a demo one:
+            // the venue holds their sum. A demo position belongs to the demo
+            // account. Alpaca's paper account can be both the demo route and
+            // the live arm's paper endpoint, and its holdings must never turn
+            // a demo position into a "real" one.
+            let mut holders: Vec<String> =
+                self.positions.iter().filter(|(_, p)| p.market == market_id && !p.demo).map(|(k, _)| k.clone()).collect();
+            holders.sort();
+            if holders.is_empty() && self.positions.values().any(|p| p.market == market_id && p.demo) {
                 continue;
             }
+            let book_qty: f64 = holders.iter().filter_map(|k| self.positions.get(k)).map(|p| p.qty).sum();
             // Alpaca took a crypto buy's fee out of the coins and has not
             // posted it yet: the gap is that fee, not a stranger's trade.
-            let fee_gap = self
-                .positions
-                .get(&market_id)
-                .filter(|p| venue == Venue::Alpaca && p.live && p.qty > 0.0 && bp.qty >= 0.0 && p.qty > bp.qty + 1e-6)
-                .map(|p| p.qty - bp.qty);
-            if let Some(gap) = fee_gap {
+            let all_live = holders.iter().filter_map(|k| self.positions.get(k)).all(|p| p.live);
+            if venue == Venue::Alpaca && !holders.is_empty() && all_live && book_qty > 0.0 && bp.qty >= 0.0 && book_qty > bp.qty + 1e-6 {
                 let paper = self.live.paper;
-                if self.take_alpaca_fee_gap(&market_id, gap, paper, false, "the venue's position shows it") {
+                if self.take_alpaca_fee_gap(&market_id, None, book_qty - bp.qty, paper, false, "the venue's position shows it") {
                     continue;
                 }
             }
             let avg = if bp.avg_price > 0.0 { bp.avg_price } else { price };
-            match self.positions.get_mut(&market_id) {
-                Some(p) if (p.qty - bp.qty).abs() < 1e-6 => {
-                    p.live = true; // agrees — just make sure it is flagged live
-                }
-                Some(p) => {
-                    let was = p.qty;
-                    let was_avg = p.avg_price;
-                    p.qty = bp.qty;
-                    p.avg_price = avg;
-                    p.live = true;
-                    // Stops were sized for the old quantity; recompute on the
-                    // next tick rather than trusting stale levels.
-                    p.stop = 0.0;
-                    p.target = 0.0;
-                    p.trail_ref = avg;
-                    // The broker's average is the only entry we know now.
-                    self.ref_prices.remove(&market_id);
-                    changes += 1;
-                    self.log(
-                        JournalKind::Risk,
-                        format!("Reconciled {}: book had {was:.6}, {venue:?} has {:.6} — broker wins", bp.symbol, bp.qty),
-                        None,
-                        Some(market_id.clone()),
-                    );
-                    // An autopilot's position: the difference is its to book.
-                    self.autopilot_on_correction(&market_id, (was, was_avg), (bp.qty, avg), &format!("{venue:?}"));
-                }
-                None if adopt_unknown => {
+            if holders.is_empty() {
+                if adopt_unknown {
                     self.positions.insert(
                         market_id.clone(),
                         PositionInternal {
+                            market: market_id.clone(),
+                            book: String::new(),
                             venue,
                             symbol: bp.symbol.clone(),
                             qty: bp.qty,
@@ -5113,9 +5285,49 @@ impl Engine {
                         Some(market_id),
                     );
                 }
-                // Someone else's position in a market we happen to watch. Not
-                // ours to manage — leave it entirely alone.
-                None => {}
+                // Otherwise someone else's position in a market we happen to
+                // watch. Not ours to manage: leave it entirely alone.
+                continue;
+            }
+            if (book_qty - bp.qty).abs() < 1e-6 {
+                for k in &holders {
+                    if let Some(p) = self.positions.get_mut(k) {
+                        p.live = true; // agrees: just make sure it is flagged live
+                    }
+                }
+                continue;
+            }
+            // The venue wins. One book holding it takes the venue's number;
+            // several share the difference in proportion to what each holds.
+            changes += 1;
+            self.log(
+                JournalKind::Risk,
+                format!(
+                    "Reconciled {}: book had {book_qty:.6}{}, {venue:?} has {:.6}, broker wins",
+                    bp.symbol,
+                    if holders.len() > 1 { format!(" over {} books", holders.len()) } else { String::new() },
+                    bp.qty
+                ),
+                None,
+                Some(market_id.clone()),
+            );
+            for k in &holders {
+                let Some(p) = self.positions.get_mut(k) else { continue };
+                let (was, was_avg) = (p.qty, p.avg_price);
+                let new = if holders.len() == 1 || book_qty.abs() < 1e-12 { bp.qty } else { bp.qty * was / book_qty };
+                p.qty = new;
+                p.avg_price = avg;
+                p.live = true;
+                // Stops were sized for the old quantity; recompute on the
+                // next tick rather than trusting stale levels.
+                p.stop = 0.0;
+                p.target = 0.0;
+                p.trail_ref = avg;
+                let book = p.book.clone();
+                // The broker's average is the only entry we know now.
+                self.ref_prices.remove(k);
+                // An autopilot's position: the difference is its to book.
+                self.autopilot_on_correction(&book, &market_id, (was, was_avg), (new, avg), &format!("{venue:?}"));
             }
         }
 
@@ -5123,28 +5335,35 @@ impl Engine {
         let vanished: Vec<String> = self
             .positions
             .iter()
-            .filter(|(id, p)| p.venue == venue && p.live && !seen.contains(*id) && !self.in_flight_markets.contains(*id))
+            .filter(|(_, p)| p.venue == venue && p.live && !seen.contains(&p.market) && !self.order_out_in(&p.market))
             .map(|(id, _)| id.clone())
             .collect();
+        let mut fee_checked: HashSet<String> = HashSet::new();
+        let mut fee_taken: HashSet<String> = HashSet::new();
         for id in vanished {
+            let Some(market) = self.positions.get(&id).map(|p| p.market.clone()) else { continue };
             // All that was left was a fee Alpaca took in the coin.
-            let left = self.positions.get(&id).map(|p| p.qty).unwrap_or(0.0);
-            let paper = self.live.paper;
-            if venue == Venue::Alpaca && left > 0.0 && self.take_alpaca_fee_gap(&id, left, paper, false, "the venue holds none") {
+            if venue == Venue::Alpaca && fee_checked.insert(market.clone()) {
+                let left: f64 = self.positions.values().filter(|p| p.market == market && p.live).map(|p| p.qty).sum();
+                let paper = self.live.paper;
+                if left > 0.0 && self.take_alpaca_fee_gap(&market, None, left, paper, false, "the venue holds none") {
+                    fee_taken.insert(market.clone());
+                }
+            }
+            if fee_taken.contains(&market) {
                 continue;
             }
-            let gone = self.positions.remove(&id);
+            let Some(p) = self.positions.remove(&id) else { continue };
             self.ref_prices.remove(&id);
             changes += 1;
+            let whose = self.book_label(&p.book).map(|l| format!(" ({l})")).unwrap_or_default();
             self.log(
                 JournalKind::Risk,
-                format!("{id} is no longer held at {venue:?} — dropped from the book"),
+                format!("{market}{whose} is no longer held at {venue:?}, dropped from the book"),
                 None,
-                Some(id.clone()),
+                Some(market.clone()),
             );
-            if let Some(p) = gone {
-                self.autopilot_on_correction(&id, (p.qty, p.avg_price), (0.0, 0.0), &format!("{venue:?}"));
-            }
+            self.autopilot_on_correction(&p.book, &market, (p.qty, p.avg_price), (0.0, 0.0), &format!("{venue:?}"));
         }
 
         if changes > 0 {
@@ -5250,7 +5469,7 @@ impl Engine {
         if self.in_flight_markets.contains(&m.id) {
             return Some(format!("{} already has an order in flight", m.symbol));
         }
-        if let Some(why) = self.mixed_book_reason(m, RouteIntent::Demo) {
+        if let Some(why) = self.mixed_book_reason("", m, RouteIntent::Demo) {
             return Some(why);
         }
         if m.venue == Venue::Alpaca {
@@ -5321,7 +5540,7 @@ impl Engine {
             reduce_only: false,
             ioc: false,
         };
-        let ctx = self.risk_ctx(&m.id, "manual", m.price);
+        let ctx = self.risk_ctx("", &m.id, "manual", m.price);
         let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
         if !decision.approved {
             let reason = decision.reason.unwrap_or_default();
@@ -5422,9 +5641,9 @@ impl Engine {
             self.apply_strategy_state(&sid, StrategyState::Paused);
             let held: Vec<String> = self
                 .positions
-                .iter()
-                .filter(|(_, p)| p.strategy_id == sid && p.qty.abs() > 1e-12)
-                .map(|(m, _)| self.markets.iter().find(|x| &x.id == m).map(|x| x.symbol.clone()).unwrap_or_else(|| m.clone()))
+                .values()
+                .filter(|p| p.strategy_id == sid && p.qty.abs() > 1e-12)
+                .map(|p| self.markets.iter().find(|x| x.id == p.market).map(|x| x.symbol.clone()).unwrap_or_else(|| p.market.clone()))
                 .collect::<std::collections::BTreeSet<String>>()
                 .into_iter()
                 .collect();
@@ -5486,30 +5705,37 @@ impl Engine {
     /// fees and P&L by it. A book on its own is the same with one member.
     fn run_lab_books(&mut self) {
         let now = self.now();
-        let ids: Vec<String> = self
+        // Inside an autopilot: its capital, its own book, all its lab books
+        // together, and nothing while it is paused. The same lab book can run
+        // in several autopilots; each rebalances it in its own book.
+        let mut runs: Vec<(String, Option<autopilot::LabGroup>)> = Vec::new();
+        for i in 0..self.autopilots.len() {
+            if let Some(g) = self.autopilot_lab_group(i) {
+                if g.running && !g.members.is_empty() {
+                    runs.push((self.autopilots[i].config.id.clone(), Some(g)));
+                }
+            }
+        }
+        // A lab book no active autopilot runs trades on its own in the main
+        // book, unless it is idle (it never trades on its own, whatever its
+        // state says).
+        let standalone: Vec<String> = self
             .strategies
             .iter()
             .filter(|s| s.kind == StrategyKind::LabTargets && s.state != StrategyState::Paused)
             .map(|s| s.id.clone())
+            .filter(|sid| self.autopilot_claimant(sid).is_none() && !self.lab_book_autopilot_only(sid))
             .collect();
-        let mut groups_done: HashSet<usize> = HashSet::new();
-        for sid in ids {
-            // Inside an autopilot: its capital, its positions, all its lab
-            // books together, and nothing while it is paused.
-            let group = self.autopilot_lab_group(&sid);
-            if let Some(g) = &group {
-                if !groups_done.insert(g.ap) || !g.running {
-                    continue;
-                }
-            }
-            // An idle book never trades on its own, whatever its state says.
-            if group.is_none() && self.lab_book_autopilot_only(&sid) {
-                continue;
-            }
-            let members: Vec<(String, f64)> = match &group {
-                Some(g) => g.members.clone(),
-                None => vec![(sid.clone(), 1.0)],
+        runs.extend(standalone.into_iter().map(|sid| (sid, None)));
+        for (run_id, group) in runs {
+            // `owner` is the book it trades in (see `pos_key`); lab_done,
+            // lab_retry and the notes are kept per book and lab book.
+            let (owner, members): (String, Vec<(String, f64)>) = match &group {
+                Some(g) => (run_id.clone(), g.members.clone()),
+                None => (String::new(), vec![(run_id.clone(), 1.0)]),
             };
+            let sid = members.first().map(|m| m.0.clone()).unwrap_or_default();
+            let done_key = |m: &str| pos_key(&owner, m);
             // The book that places orders for coins nobody holds yet: the
             // heaviest one (a coin already held is traded by its holder).
             let lead = members
@@ -5530,13 +5756,14 @@ impl Engine {
             };
             // Due when a book with weight has a fresh signal not yet traded.
             let due = sigs.iter().any(|(m, scale, g)| {
-                (*scale > 0.0 || members.len() == 1) && g.is_fresh(now) && self.lab_done.get(m) != Some(&g.generated_ms)
+                (*scale > 0.0 || members.len() == 1) && g.is_fresh(now) && self.lab_done.get(&done_key(m)) != Some(&g.generated_ms)
             });
             let generated = sigs.iter().map(|x| x.2.generated_ms).max().unwrap_or(sig.generated_ms);
+            let retry_key = done_key(&lead);
             if !due {
                 // One book alone, with a signal past its window: said once.
-                if members.len() == 1 && !sig.is_fresh(now) && self.lab_done.get(&lead) != Some(&sig.generated_ms) {
-                    if self.lab_notes.insert(format!("stale:{lead}:{}", sig.generated_ms)) {
+                if members.len() == 1 && !sig.is_fresh(now) && self.lab_done.get(&retry_key) != Some(&sig.generated_ms) {
+                    if self.lab_notes.insert(format!("stale:{retry_key}:{}", sig.generated_ms)) {
                         self.log(
                             JournalKind::System,
                             "Lab signal is past its validity window; holding positions as they are until a fresh one arrives".into(),
@@ -5547,7 +5774,7 @@ impl Engine {
                 }
                 continue;
             }
-            let attempt = match self.lab_retry.get(&lead) {
+            let attempt = match self.lab_retry.get(&retry_key) {
                 Some(&(g, n, last)) if g == generated => {
                     if now - last < LAB_RETRY_EVERY_MS {
                         continue;
@@ -5560,7 +5787,7 @@ impl Engine {
             // Only real prices: a rebalance against the simulator is no evidence of anything.
             let book = self.lab_book_markets(equity);
             if !book.iter().any(|m| self.real_ids.contains(&m.id)) {
-                if self.lab_notes.insert(format!("noprices:{lead}")) {
+                if self.lab_notes.insert(format!("noprices:{retry_key}")) {
                     let what = if equity { "US share prices from Alpaca" } else { "crypto prices" };
                     self.log(JournalKind::System, format!("Lab book waits for real {what}"), Some(lead.clone()), None);
                 }
@@ -5569,7 +5796,7 @@ impl Engine {
             // US shares: queued until the regular session, then sent.
             if equity {
                 if let Some(why) = self.lab_equity_session_wait() {
-                    if self.lab_notes.insert(format!("session:{lead}:{}", sig.generated_ms)) {
+                    if self.lab_notes.insert(format!("session:{retry_key}:{}", sig.generated_ms)) {
                         self.log(
                             JournalKind::System,
                             format!("Lab rebalance queued: {why}. It goes out once the regular session is open"),
@@ -5587,33 +5814,34 @@ impl Engine {
             // keep their own weights; nothing is scaled up to fill the gap.
             let mut unlisted: Vec<String> = vec![];
             let demo_route =
-                self.autopilot_route(&lead).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state)) == RouteIntent::Demo;
+                self.autopilot_route(&owner).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state)) == RouteIntent::Demo;
             let mut prices = HashMap::new();
-            // A position is this book's when one of its books holds it and,
-            // inside an autopilot, the autopilot owns it.
-            let mine = |id: &str, p: &PositionInternal| {
-                member_ids.contains(&p.strategy_id) && group.as_ref().is_none_or(|g| g.owned.contains(id))
+            // A position is this run's when it is in its book, one of its lab
+            // books holds it and, inside an autopilot, the autopilot owns it.
+            let mine = |p: &PositionInternal| {
+                p.book == owner && member_ids.contains(&p.strategy_id) && group.as_ref().is_none_or(|g| g.owned.contains(&p.market))
             };
             for m in &book {
-                match self.positions.get(&m.id) {
-                    Some(p) if !mine(&m.id, p) && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
+                match self.positions.get(&pos_key(&owner, &m.id)) {
+                    Some(p) if !mine(p) && p.qty.abs() > 1e-12 => owned_elsewhere.push(m.symbol.clone()),
                     None if demo_route && !self.demo_lists(m) => unlisted.push(m.symbol.clone()),
-                    // A market an autopilot reserved for someone else.
-                    None if !self.autopilot_entry_allowed(&lead, &m.id) => owned_elsewhere.push(m.symbol.clone()),
+                    // A market this autopilot gave to another of its sleeves.
+                    None if !self.autopilot_entry_allowed(&owner, &lead, &m.id) => owned_elsewhere.push(m.symbol.clone()),
                     _ if self.real_ids.contains(&m.id) => {
                         prices.insert(m.id.clone(), m.price);
                     }
                     _ => {}
                 }
             }
+            // By market id, as the rebalance reads them.
             let holdings: HashMap<String, (f64, f64)> = self
                 .positions
-                .iter()
-                .filter(|(k, p)| mine(k, p))
-                .map(|(k, p)| (k.clone(), (p.qty, p.avg_price)))
+                .values()
+                .filter(|p| mine(p))
+                .map(|p| (p.market.clone(), (p.qty, p.avg_price)))
                 .collect();
             let holders: HashMap<String, String> =
-                self.positions.iter().filter(|(k, p)| mine(k, p)).map(|(k, p)| (k.clone(), p.strategy_id.clone())).collect();
+                self.positions.values().filter(|p| mine(p)).map(|p| (p.market.clone(), p.strategy_id.clone())).collect();
             let capital = match &group {
                 Some(g) => g.capital,
                 None => self.strategies[idx].budget_pct / 100.0 * self.equity(),
@@ -5643,7 +5871,7 @@ impl Engine {
             // seconds) the whole rebalance waits, said once, so sells and buys
             // stay together and nothing crosses the spread. After
             // `MAKER_BOOK_WAIT_MS` it goes out the fallback way.
-            let wait_key = format!("lab:{lead}:{generated}");
+            let wait_key = format!("lab:{retry_key}:{generated}");
             let mut no_book_go = false;
             if demo_route {
                 let mut missing: Vec<String> = orders
@@ -5732,7 +5960,7 @@ impl Engine {
                 // A coin already held is traded by the book that holds it.
                 let by = holders.get(&m.id).and_then(|h| self.strategies.iter().position(|s| &s.id == h)).unwrap_or(idx);
                 self.maker_no_book_go = no_book_go;
-                let placed = self.place_lab_order(by, &m, o.side, o.notional);
+                let placed = self.place_lab_order(&owner, by, &m, o.side, o.notional);
                 self.maker_no_book_go = false;
                 if !placed {
                     refused += 1;
@@ -5747,12 +5975,13 @@ impl Engine {
             // again later while the signal is still valid. The next attempt is
             // computed from the holdings as they are then, so whatever did fill
             // is not ordered twice.
+            let whose = self.book_label(&owner).map(|l| format!(" ({l})")).unwrap_or_default();
             if refused > 0 && attempt < LAB_RETRY_MAX {
-                self.lab_retry.insert(lead.clone(), (generated, attempt, now));
+                self.lab_retry.insert(retry_key.clone(), (generated, attempt, now));
                 self.log(
                     JournalKind::Risk,
                     format!(
-                        "Rebalance toward the lab's weights of {day}: {refused} of {n} orders refused, trying again in {} minutes (attempt {attempt} of {LAB_RETRY_MAX})",
+                        "Rebalance toward the lab's weights of {day}: {refused} of {n} orders refused, trying again in {} minutes (attempt {attempt} of {LAB_RETRY_MAX}){whose}",
                         LAB_RETRY_EVERY_MS / 60_000
                     ),
                     Some(lead),
@@ -5760,9 +5989,9 @@ impl Engine {
                 );
                 continue;
             }
-            self.lab_retry.remove(&lead);
+            self.lab_retry.remove(&retry_key);
             for (m, _, g) in &sigs {
-                self.lab_done.insert(m.clone(), g.generated_ms);
+                self.lab_done.insert(done_key(m), g.generated_ms);
             }
             let netted: Vec<(String, f64)> = members
                 .iter()
@@ -5810,6 +6039,7 @@ impl Engine {
             if !owned_elsewhere.is_empty() {
                 note.push_str(&format!("; left alone because another strategy holds them: {}", owned_elsewhere.join(", ")));
             }
+            note.push_str(&whose);
             self.log(JournalKind::Signal, note, Some(lead), None);
         }
     }
@@ -5819,7 +6049,7 @@ impl Engine {
     /// Lab positions carry no ATR stops: the backtest had none, and a stop the
     /// lab never tested would make this a different strategy from the one judged.
     /// `false` when the order did not go out (no price, or the risk check refused it).
-    fn place_lab_order(&mut self, idx: usize, m: &Market, side: Side, notional: f64) -> bool {
+    fn place_lab_order(&mut self, book: &str, idx: usize, m: &Market, side: Side, notional: f64) -> bool {
         if m.price <= 0.0 {
             return false;
         }
@@ -5836,20 +6066,21 @@ impl Engine {
             reduce_only: side == Side::Sell,
             ioc: false,
         };
-        let ctx = self.risk_ctx(&m.id, &sid, m.price);
+        let ctx = self.risk_ctx(book, &m.id, &sid, m.price);
         let decision = risk::evaluate(&req, m.price, &self.limits, &ctx);
         if !decision.approved {
             let reason = decision.reason.unwrap_or_default();
-            let order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+            let mut order = self.build_order(&sid, m, side, qty, OrderStatus::Rejected, Some(reason.clone()));
+            order.book = (!book.is_empty()).then(|| book.to_string());
             self.orders.insert(0, order);
             self.log(JournalKind::Reject, format!("Rejected {}: {reason}", m.symbol), Some(sid), Some(m.id.clone()));
             return false;
         }
         let route = self
-            .autopilot_route(&sid)
+            .autopilot_route(book)
             .unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state));
-        self.route_fill(idx, m, side, decision.qty, m.price, route);
-        if let Some(p) = self.positions.get_mut(&m.id) {
+        self.route_fill_in(book, idx, m, side, decision.qty, m.price, route);
+        if let Some(p) = self.positions.get_mut(&pos_key(book, &m.id)) {
             if p.strategy_id == sid {
                 p.stop = 0.0;
                 p.target = 0.0;
@@ -5858,19 +6089,41 @@ impl Engine {
         true
     }
 
-    pub fn flatten(&mut self, market_id: &str) {
-        let Some(pos) = self.positions.get(market_id) else { return };
+    /// Close a position from the Positions page. `id` is a position key
+    /// ([`pos_key`]): the market id closes the main book's position, and
+    /// `book|market` an autopilot's. A bare market id that only autopilot
+    /// books hold closes every one of them in that market. Each close is
+    /// booked to the book it closes.
+    pub fn flatten(&mut self, id: &str) {
+        let keys: Vec<String> = if self.positions.contains_key(id) {
+            vec![id.to_string()]
+        } else if !id.contains(BOOK_SEP) {
+            let mut k: Vec<String> = self.positions.iter().filter(|(_, p)| p.market == id).map(|(k, _)| k.clone()).collect();
+            k.sort();
+            k
+        } else {
+            Vec::new()
+        };
+        for key in keys {
+            self.flatten_key(&key);
+        }
+    }
+
+    fn flatten_key(&mut self, key: &str) {
+        let Some(pos) = self.positions.get(key) else { return };
         let qty = pos.qty.abs();
         let side = if pos.qty > 0.0 { Side::Sell } else { Side::Buy };
         let live = pos.live; // a live-opened position must be closed live too
         let intent = Self::exit_intent(pos); // and a demo one at the demo venue
+        let (book, market_id) = (pos.book.clone(), pos.market.clone());
         let Some(m) = self.markets.iter().find(|m| m.id == market_id).cloned() else { return };
         let idx = self.ensure_manual_strategy();
         self.urgent_exit = true;
-        self.route_fill(idx, &m, side, qty, m.price, intent);
+        self.route_fill_in(&book, idx, &m, side, qty, m.price, intent);
         self.urgent_exit = false;
         if !live || self.live_routable(m.venue) {
-            self.log(JournalKind::System, format!("Flattened {market_id}"), Some("manual".into()), Some(market_id.to_string()));
+            let whose = self.book_label(&book).map(|l| format!(" ({l})")).unwrap_or_default();
+            self.log(JournalKind::System, format!("Flattened {market_id}{whose}"), Some("manual".into()), Some(market_id));
         }
     }
 
@@ -5949,7 +6202,7 @@ impl Engine {
         // While an autopilot runs a strategy, the autopilot sets its state.
         if let Some(ap) = self.autopilot_claimant(id) {
             let name = self.strategies.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string());
-            return Err(format!("{name} runs in the autopilot \"{ap}\", which sets its state. Pause the autopilot to hold it, or stop it to change the strategy."));
+            return Err(format!("{name} runs in the autopilot {ap}, which sets its state. Pause the autopilot to hold it, or stop it to change the strategy."));
         }
         // An idle lab book only trades with an autopilot's money.
         if state != StrategyState::Paused && self.lab_book_autopilot_only(id) {
@@ -6095,21 +6348,25 @@ impl Engine {
         self.markets.iter().find(|m| m.id == id).map(|m| m.price).unwrap_or(0.0)
     }
     fn positions_value(&self) -> f64 {
-        self.positions.iter().map(|(id, p)| p.qty * self.price_of(id)).sum()
+        self.positions.values().map(|p| p.qty * self.price_of(&p.market)).sum()
     }
     fn unrealized(&self) -> f64 {
-        self.positions.iter().map(|(id, p)| (self.price_of(id) - p.avg_price) * p.qty).sum()
+        self.positions.values().map(|p| (self.price_of(&p.market) - p.avg_price) * p.qty).sum()
     }
     fn gross_exposure(&self) -> f64 {
-        self.positions.iter().map(|(id, p)| (p.qty * self.price_of(id)).abs()).sum()
+        self.positions.values().map(|p| (p.qty * self.price_of(&p.market)).abs()).sum()
     }
     fn equity(&self) -> f64 {
         self.cash + self.positions_value()
     }
-    /// Signed notional per open position (short is negative), for the
-    /// correlation-adjusted exposure.
+    /// Signed notional per market (short is negative), every book's position
+    /// there added up, for the correlation-adjusted exposure.
     fn exposure_book(&self) -> Vec<(String, f64)> {
-        self.positions.iter().map(|(id, p)| (id.clone(), p.qty * self.price_of(id))).collect()
+        let mut by: BTreeMap<String, f64> = BTreeMap::new();
+        for p in self.positions.values() {
+            *by.entry(p.market.clone()).or_insert(0.0) += p.qty * self.price_of(&p.market);
+        }
+        by.into_iter().collect()
     }
     /// Peak-to-now equity drawdown in %, against the same peak the breaker
     /// in `tick` uses.
@@ -6171,21 +6428,29 @@ impl Engine {
         }
     }
 
-    fn risk_ctx(&self, market_id: &str, strategy_id: &str, _price: f64) -> risk::RiskContext {
+    /// The risk manager's view of an order by `strategy_id` in `market_id`
+    /// for `book`. The account-wide numbers (equity, exposure, the position
+    /// in the market) are the whole account's: every book trades it. The
+    /// strategy's own exposure is its exposure in this book, since a strategy
+    /// that runs in several autopilots is sized by each of them separately.
+    fn risk_ctx(&self, book: &str, market_id: &str, strategy_id: &str, _price: f64) -> risk::RiskContext {
         let now = self.now();
         let cutoff = now - 60_000;
         let orders_last_min = self
             .orders
             .iter()
             .filter(|o| o.strategy_id == strategy_id && o.ts > cutoff && o.status != OrderStatus::Rejected)
+            .filter(|o| o.book.as_deref().unwrap_or("") == book)
             .count() as u32;
         // actual open exposure held by this strategy (not cumulative fills)
         let strategy_exposure: f64 = self
             .positions
-            .iter()
-            .filter(|(_, p)| p.strategy_id == strategy_id)
-            .map(|(id, p)| (p.qty * self.price_of(id)).abs())
+            .values()
+            .filter(|p| p.strategy_id == strategy_id && p.book == book)
+            .map(|p| (p.qty * self.price_of(&p.market)).abs())
             .sum();
+        let position_notional: f64 =
+            self.positions.values().filter(|p| p.market == market_id).map(|p| p.qty * self.price_of(market_id)).sum();
         let data_age_sec = self
             .markets
             .iter()
@@ -6211,7 +6476,7 @@ impl Engine {
             realized_pnl: self.realized_pnl,
             unrealized_pnl: self.unrealized(),
             gross_exposure: self.gross_exposure(),
-            position_notional: self.positions.get(market_id).map(|p| p.qty * self.price_of(market_id)).unwrap_or(0.0),
+            position_notional,
             strategy_exposure,
             orders_last_min,
             data_age_sec,
@@ -6242,6 +6507,8 @@ impl Engine {
                             trail_ref: p.trail_ref,
                             live: p.live,
                             demo: p.demo,
+                            book: p.book.clone(),
+                            market_id: p.market.clone(),
                         },
                     )
                 })
@@ -6296,7 +6563,7 @@ impl Engine {
         let now = self.now();
         for (order_id, mut f) in saved {
             if f.broker_id.is_some() {
-                self.in_flight_markets.insert(f.market_id.clone());
+                self.in_flight_markets.insert(pos_key(&f.book, &f.market_id));
                 self.inflight.insert(order_id, f);
                 followed += 1;
                 continue;
@@ -6319,11 +6586,11 @@ impl Engine {
                     Some(f.strategy_id.clone()),
                     Some(f.market_id.clone()),
                 );
-                self.in_flight_markets.insert(f.market_id.clone());
+                self.in_flight_markets.insert(pos_key(&f.book, &f.market_id));
                 self.inflight.insert(order_id, f);
                 continue;
             }
-            let at = if f.client_order_id.is_empty() { String::new() } else { format!(" (client id {})", f.client_order_id) };
+            let at =if f.client_order_id.is_empty() { String::new() } else { format!(" (client id {})", f.client_order_id) };
             let reason = format!(
                 "status unknown: Pythia restarted before {:?} acknowledged it{at}. Check the venue; \
                  reconciliation corrects the position if it filled",
@@ -6403,9 +6670,17 @@ impl Engine {
             .positions
             .into_iter()
             .map(|(id, pp)| {
+                // A save from before books keeps its positions under the
+                // market id: they load into the main book, and the ones an
+                // autopilot owns move into its book below.
+                let (key_book, key_market) = split_key(&id);
+                let market = if pp.market_id.is_empty() { key_market.to_string() } else { pp.market_id.clone() };
+                let book = if pp.book.is_empty() { key_book.to_string() } else { pp.book.clone() };
                 (
-                    id,
+                    pos_key(&book, &market),
                     PositionInternal {
+                        market,
+                        book,
                         venue: pp.venue,
                         symbol: pp.symbol,
                         qty: pp.qty,
@@ -6481,6 +6756,9 @@ impl Engine {
         self.alpaca_fees = p.alpaca_fees;
         self.alpaca_fee_seen = p.alpaca_fee_seen.into_iter().collect();
         self.alpaca_fee_estimates = p.alpaca_fee_estimates;
+        // A save from before autopilots kept their own books: what each one
+        // owns moves into its book, nothing is traded (see `autopilot`).
+        self.migrate_to_books();
         self.maker_routes = p.maker_routes;
         self.maker_records = p.maker_records;
         self.prune_maker_records();
@@ -6533,7 +6811,10 @@ impl Engine {
                 })
             })
             .collect();
-        let held: HashMap<String, f64> = self.positions.iter().map(|(id, p)| (id.clone(), p.qty)).collect();
+        let mut held: HashMap<String, f64> = HashMap::new();
+        for p in self.positions.values() {
+            *held.entry(p.market.clone()).or_insert(0.0) += p.qty;
+        }
         let trades = risk::replay_closed_trades(&fills, &held);
         for idx in empty {
             let s = &mut self.strategies[idx];
@@ -6584,9 +6865,12 @@ impl Engine {
             .positions
             .iter()
             .map(|(id, p)| {
-                let last = self.price_of(id);
+                let last = self.price_of(&p.market);
                 PositionView {
-                    market_id: id.clone(),
+                    key: id.clone(),
+                    book: (!p.book.is_empty()).then(|| p.book.clone()),
+                    book_name: self.autopilots.iter().find(|a| a.config.id == p.book).map(|a| a.config.name.clone()),
+                    market_id: p.market.clone(),
                     venue: p.venue,
                     symbol: p.symbol.clone(),
                     qty: p.qty,
@@ -6696,6 +6980,7 @@ impl Engine {
             taker_qty: None,
             realised_cost_bps: None,
             modelled_cost_bps: None,
+            book: None,
         }
     }
     fn build_order_filled(&mut self, strategy_id: &str, m: &Market, side: Side, qty: f64, fill_price: f64) -> Order {
@@ -7100,6 +7385,8 @@ mod tests {
         e.positions.insert(
             "crypto:BTC/USD".into(),
             PositionInternal {
+                market: "crypto:BTC/USD".into(),
+                book: String::new(),
                 venue: Venue::Crypto,
                 symbol: "BTC/USD".into(),
                 qty: 0.5,
@@ -7322,6 +7609,8 @@ mod tests {
         e.positions.insert(
             "crypto:BTC/USD".into(),
             PositionInternal {
+                market: "crypto:BTC/USD".into(),
+                book: String::new(),
                 venue: Venue::Crypto,
                 symbol: "BTC/USD".into(),
                 qty: 0.1,
@@ -7348,6 +7637,8 @@ mod tests {
         e.positions.insert(
             "crypto:BTC/USD".into(),
             PositionInternal {
+                market: "crypto:BTC/USD".into(),
+                book: String::new(),
                 venue: Venue::Crypto,
                 symbol: "BTC/USD".into(),
                 qty: 0.1,
@@ -8200,6 +8491,8 @@ mod tests {
         e.positions.insert(
             "alpaca:AAPL".into(),
             PositionInternal {
+                market: "alpaca:AAPL".into(),
+                book: String::new(),
                 venue: Venue::Alpaca,
                 symbol: "AAPL".into(),
                 qty: 5.0,
@@ -8656,6 +8949,8 @@ mod tests {
         e.positions.insert(
             "alpaca:AAPL".into(),
             PositionInternal {
+                market: "alpaca:AAPL".into(),
+                book: String::new(),
                 venue: Venue::Alpaca, symbol: "AAPL".into(), qty: 10.0, avg_price: 220.0,
                 strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 220.0, live: true, demo: false,
             },
@@ -8725,6 +9020,8 @@ mod tests {
         e.positions.insert(
             "alpaca:AAPL".into(),
             PositionInternal {
+                market: "alpaca:AAPL".into(),
+                book: String::new(),
                 venue: Venue::Alpaca, symbol: "AAPL".into(), qty: 3.0, avg_price: 227.0,
                 strategy_id: "manual".into(), stop: 0.0, target: 0.0, trail_ref: 227.0, live: true, demo: false,
             },
@@ -8785,6 +9082,8 @@ mod tests {
         e.positions.insert(
             "alpaca:AAPL".into(),
             PositionInternal {
+                market: "alpaca:AAPL".into(),
+                book: String::new(),
                 venue: Venue::Alpaca,
                 symbol: "AAPL".into(),
                 qty: 5.0,
@@ -9128,6 +9427,8 @@ mod tests {
             e.positions.insert(
                 format!("alpaca:{sym}"),
                 PositionInternal {
+                    market: format!("alpaca:{sym}"),
+                    book: String::new(),
                     venue: Venue::Alpaca,
                     symbol: sym.into(),
                     qty,
@@ -9293,6 +9594,8 @@ mod tests {
         e.positions.insert(
             "alpaca:AAPL".into(),
             PositionInternal {
+                market: "alpaca:AAPL".into(),
+                book: String::new(),
                 venue: Venue::Alpaca,
                 symbol: "AAPL".into(),
                 qty: 5.0,

@@ -41,6 +41,7 @@ import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
 import { autopilotVenue, exchangeName } from "../venueNames";
 import { Autopilot as AutopilotDetails, useAutopilotApi, type AutopilotApi } from "./Autopilot";
+import { AutopilotCompare } from "../components/AutopilotCompare";
 import type { AutopilotStatus, Venue } from "../types";
 
 const MODE_CHIP: Record<CardModel["mode"], { label: string; tone: ChipTone }> = {
@@ -87,7 +88,7 @@ export function Autopilots() {
   return (
     <Page
       title="Autopilot"
-      subtitle="It trades an amount for you, on practice money, until you stop it."
+      subtitle="It trades an amount for you, on practice money, until you stop it. Run several side by side: each keeps its own book."
       right={
         shown.length > 0 && (
           <Button onClick={() => setStarting(true)} icon={Plus}>
@@ -134,6 +135,7 @@ export function Autopilots() {
               </div>
             </Card>
           )}
+          {shown.length > 1 && <AutopilotCompare list={shown} now={now} />}
           {shown.map((s) => (
             <AutopilotCard key={s.config.id} s={s} model={cardModel(s, positions, now, btc, names)} api={api} />
           ))}
@@ -212,8 +214,12 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
       <List className="mt-3 border-t border-line">
         <ListRow
           icon={Bitcoin}
-          title={vsBtcText(m.vsBtcPts)}
-          subtitle={m.btcPct != null ? `Bitcoin ${signedPct(m.btcPct, 1)} · this ${signedPct(m.pnlPct, 1)}` : "Needs a Bitcoin price from its start"}
+          title={vsBtcText(m.vsBtcPts, m.benchLabel)}
+          subtitle={
+            m.btcPct != null
+              ? `${m.benchLabel} ${signedPct(m.btcPct, 1)} · this ${signedPct(m.pnlPct, 1)}`
+              : `Needs a ${m.benchLabel} price from its start`
+          }
         />
       </List>
 
