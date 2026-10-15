@@ -17,6 +17,7 @@
 
 use serde::Serialize;
 
+use super::i18n::Lang;
 use super::AlertFormat;
 
 /// Escape text for Telegram's HTML parse mode: `&`, `<` and `>` (quotes need
@@ -208,6 +209,9 @@ pub struct Card {
     /// The table above the numbers (a rebalance: the trades, then the totals).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub table_first: bool,
+    /// The language of its own small words ("+3 more").
+    #[serde(skip)]
+    pub lang: Lang,
 }
 
 /// Width in monospace cells. Emoji are two cells wide on a phone.
@@ -301,7 +305,7 @@ impl Card {
         }
         lines.extend(t.rows.iter().map(line));
         if t.more > 0 {
-            lines.push(format!("+{} more", t.more));
+            lines.push(super::i18n::more_rows(self.lang, t.more));
         }
         Some(lines.join("\n"))
     }
@@ -364,10 +368,11 @@ impl Card {
 /// are left out from the end with a line that says how many. Never cuts
 /// inside a tag.
 pub fn render_post(cards: &[Card], format: AlertFormat, limit: usize) -> String {
+    let lang = cards.first().map(|c| c.lang).unwrap_or_default();
     let join = |cs: &[Card], dropped: usize| -> String {
         let mut s: Vec<String> = cs.iter().map(|c| c.render(format)).collect();
         if dropped > 0 {
-            let line = format!("+{dropped} more alert(s) in the app");
+            let line = super::i18n::more_alerts(lang, dropped);
             s.push(match format {
                 AlertFormat::Telegram => format!("<i>{}</i>", esc(&line)),
                 AlertFormat::Discord => format!("*{line}*"),
