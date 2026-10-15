@@ -52,6 +52,58 @@ def ledger_path() -> Path:
     return factory_dir() / "ledger.jsonl"
 
 
+def seed_dir() -> Path:
+    """Factory state made elsewhere and committed (results/factory_seed): the first run was
+    made on the PC, and its trials must count on the server too, or the bar would start low."""
+    default = Path(__file__).resolve().parents[2] / "results" / "factory_seed"
+    return Path(os.environ.get("PYTHIA_FACTORY_SEED", str(default)))
+
+
+def import_seed(src: Path | None = None) -> dict:
+    """Merge a seed into the factory folder: ledger lines by key, holdout lines by
+    (run, key), shadow books whose file is not there yet. Idempotent; never removes
+    or rewrites anything already in the folder."""
+    src = src or seed_dir()
+    out = {"ledger": 0, "holdout": 0, "shadow": 0}
+    if not src.is_dir():
+        return out
+    out["ledger"] = len(Ledger().add(read_jsonl(src / "ledger.jsonl")))
+    hp = factory_dir() / "holdout.jsonl"
+    have = {(h.get("run"), h.get("key")) for h in read_jsonl(hp)}
+    new = [h for h in read_jsonl(src / "holdout.jsonl") if (h.get("run"), h.get("key")) not in have]
+    append_jsonl(hp, new)
+    out["holdout"] = len(new)
+    sd = factory_dir() / "shadow"
+    for f in sorted((src / "shadow").glob("*.json")) if (src / "shadow").is_dir() else []:
+        if not (sd / f.name).exists():
+            try:
+                write_json(sd / f.name, json.loads(f.read_text(encoding="utf-8")))
+                out["shadow"] += 1
+            except ValueError:
+                continue
+    return out
+
+
+def export_seed(dest: Path | None = None) -> dict:
+    """Write this folder's ledger, holdout log and shadow books (their definitions, not
+    their journals, which the server rebuilds from its own panel) as a seed."""
+    dest = dest or seed_dir()
+    (dest / "shadow").mkdir(parents=True, exist_ok=True)
+    rows = read_jsonl(ledger_path())
+    hold = read_jsonl(factory_dir() / "holdout.jsonl")
+    for name, data in (("ledger.jsonl", rows), ("holdout.jsonl", hold)):
+        (dest / name).write_text("".join(json.dumps(r, separators=(",", ":"), default=float) + "\n"
+                                         for r in data), encoding="utf-8")
+    n = 0
+    for f in sorted((factory_dir() / "shadow").glob("*.json")):
+        meta = json.loads(f.read_text(encoding="utf-8"))
+        if meta.get("status") == "active":
+            # The seed carries the definition; the status after review is the server's own.
+            write_json(dest / "shadow" / f.name, meta)
+            n += 1
+    return {"ledger": len(rows), "holdout": len(hold), "shadow": n}
+
+
 def read_jsonl(p: Path) -> list[dict]:
     if not p.exists():
         return []

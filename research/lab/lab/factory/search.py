@@ -2,8 +2,9 @@
 
 A run has a fixed budget of NEW genomes (default BUDGET). A genome already in
 the ledger is not evaluated again and does not use budget; it is not a new
-trial. The first part of the budget is random (all of it on the first run,
-when there is nothing to breed from), the rest breeds from the elite: the best
+trial. The first part of the budget is random (RANDOM_SHARE of it, or
+FIRST_RANDOM_SHARE on the first run, when the ledger has nothing to breed from
+yet), the rest breeds from the elite: the best
 ELITE genomes by fitness among everything ever tried plus this run so far,
 picked by tournament, mutated, sometimes crossed first. Every evaluation is a
 trial in the ledger. The random generator is seeded from the run id, so a run
@@ -20,6 +21,7 @@ from . import build, evaluate, grammar
 
 BUDGET = 300
 RANDOM_SHARE = 0.35
+FIRST_RANDOM_SHARE = 0.5
 ELITE = 20
 TOURNAMENT = 3
 CROSSOVER = 0.3
@@ -43,7 +45,7 @@ def search(c: build.Ctx, tried: set[str], elite_rows: list[dict], run_id: str, b
     seen = set(tried)
     origin = {"random": 0, "mutation": 0, "crossover": 0}
     dup = 0
-    n_random = budget if not elite_rows else max(1, int(budget * RANDOM_SHARE))
+    n_random = max(1, int(budget * (RANDOM_SHARE if elite_rows else FIRST_RANDOM_SHARE)))
 
     def evaluate_new(g: dict, how: str) -> bool:
         nonlocal dup

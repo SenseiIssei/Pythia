@@ -115,12 +115,15 @@ def factory_books() -> dict[str, dict]:
         return {}
 
 
-def factory_row(P: fc.Panel, genome: dict, t: int) -> np.ndarray:
+def factory_row(P: fc.Panel, genome: dict, t: int, always: bool = False) -> np.ndarray:
     """(N,) the factory book's target for the decision close t: its simulated holdings
-    on a rebalance day of its cadence, NaN ("leave it") on every other day."""
+    on a rebalance day of its cadence, NaN ("leave it") on every other day. A book in
+    tranches rebalances one tranche every day, so its target is set daily. always:
+    the holdings whatever the day (where a new book starts)."""
     from ..factory import build
     row = np.full(P.N, np.nan)
-    if (int(P.days[t]) // fc.DAY_US) % genome["rebalance"]["every"]:
+    r = genome["rebalance"]
+    if not always and r.get("tranches", 1) == 1 and (int(P.days[t]) // fc.DAY_US) % r["every"]:
         return row
     c = build.make_ctx(P)
     held = build.holdings(c, genome, t)
@@ -559,7 +562,7 @@ def main() -> int:
         try:
             row = factory_row(P, g, t)
             # A new book starts where the backtest stands, whatever the weekday.
-            start_row = factory_row(P, {**g, "rebalance": {**g["rebalance"], "every": 1}}, t)
+            start_row = factory_row(P, g, t, always=True)
         except Exception as e:  # noqa: BLE001 - a broken factory book must not stop the others
             print(f"{name}: factory book skipped ({type(e).__name__}: {e})", file=sys.stderr)
             continue

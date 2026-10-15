@@ -223,18 +223,18 @@ def weights(c: Ctx, g: dict, twin: bool = False) -> np.ndarray:
 # ---------------------------------------------------------------- simulation
 
 def simulate(c: Ctx, W: np.ndarray, every: int = 1, band: float = 0.0, start: int = 0,
-             keep_at: int | None = None):
+             keep_at: int | None = None, offset: int = 0):
     """Long-only, like fam_common.simulate, plus a rebalance cadence and a no-trade band.
 
-    Rebalance days are calendar days with (day number since 1970) % every == 0,
-    so the cadence does not depend on where the panel starts. On those days a
+    Rebalance days are calendar days with (day number since 1970 - offset) % every
+    == 0, so the cadence does not depend on where the panel starts. On those days a
     held coin whose target is within band * target of its drifted weight is
     left alone; exits always trade. Returns (gross, turnover, exposure), each
     (T,), and with keep_at also the weights held after the close of that day.
     """
     T, n = W.shape
     dayno = c.days // fc.DAY_US
-    reb = (dayno % every) == 0
+    reb = ((dayno - offset) % every) == 0
     w = np.zeros(n)
     kept = None
     gross, tov, expo = np.zeros(T), np.zeros(T), np.zeros(T)
@@ -269,13 +269,39 @@ def simulate(c: Ctx, W: np.ndarray, every: int = 1, band: float = 0.0, start: in
     return gross, tov, expo
 
 
+def simulate_tranches(c: Ctx, W: np.ndarray, every: int, band: float, n: int, keep_at: int | None = None):
+    """n sleeves, each a simulate() with its own rebalance day (offsets 0 to n-1),
+    together one book. Each sleeve starts with 1/n of the capital and keeps what
+    it earns, so a sleeve's share of the book drifts with its gross returns (the
+    way the tsmom_tranches paper book keeps its "alloc"). Turnover and exposure
+    are in units of the whole book. Same returns as simulate()."""
+    outs = [simulate(c, W, every, band, keep_at=keep_at, offset=i) for i in range(n)]
+    g = np.array([o[0] for o in outs])                 # (n, T)
+    eq = np.cumprod(1 + g, axis=1)                     # each sleeve's capital after each close
+    after = eq / eq.sum(0, keepdims=True)              # shares after the close of t
+    before = np.hstack([np.full((n, 1), 1 / n), after[:, :-1]])   # shares going into day t
+    gross = (before * g).sum(0)
+    tov = (after * np.array([o[1] for o in outs])).sum(0)
+    expo = (after * np.array([o[2] for o in outs])).sum(0)
+    if keep_at is None:
+        return gross, tov, expo
+    kept = sum(after[i, keep_at] * outs[i][3] for i in range(n))
+    return gross, tov, expo, kept
+
+
+def _sim(c: Ctx, W: np.ndarray, g: dict, keep_at: int | None = None):
+    r = g["rebalance"]
+    if r.get("tranches", 1) > 1:
+        return simulate_tranches(c, W, r["every"], r["band"], r["tranches"], keep_at=keep_at)
+    return simulate(c, W, r["every"], r["band"], keep_at=keep_at)
+
+
 def run(c: Ctx, g: dict, twin: bool = False, late: bool = False):
     """(gross, turnover, exposure) of a genome. late: every decision filled one close later."""
     W = weights(c, g, twin)
     if late:
         W = np.vstack([np.zeros((1, W.shape[1])), W[:-1]])
-    r = g["rebalance"]
-    return simulate(c, W, r["every"], r["band"])
+    return _sim(c, W, g)
 
 
 def net(gross: np.ndarray, tov: np.ndarray, cost: float) -> np.ndarray:
@@ -284,6 +310,5 @@ def net(gross: np.ndarray, tov: np.ndarray, cost: float) -> np.ndarray:
 
 def holdings(c: Ctx, g: dict, t: int) -> dict[str, float]:
     """What the genome's book holds after the decision close of day t (drifted, as simulated)."""
-    r = g["rebalance"]
-    *_, w = simulate(c, weights(c, g), r["every"], r["band"], keep_at=t)
+    *_, w = _sim(c, weights(c, g), g, keep_at=t)
     return {c.names[j]: float(w[j]) for j in np.flatnonzero(w > 1e-9)}

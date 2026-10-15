@@ -24,10 +24,12 @@ blocks the hand studies already use:
   select     at most K coins, ranked by the signal's strength, by liquidity or by low vol
   weight     equal or inverse vol; "slots" leaves empty slots in cash (1/K each, or 40 %
              annual vol over K), "full" spreads the whole book over what is held
-  rebalance  every 1, 3 or 7 days, with a no-trade band of 0, 25 or 50 % of the target
+  rebalance  every 1, 3 or 7 days, with a no-trade band of 0, 25 or 50 % of the target;
+             a weekly book may be split into 7 tranches, one rebalanced each day
+             (as tsmom_tranches): the same targets, a seventh of the timing luck
 
 Complexity counts the moving parts (signal 1, each filter 1, inverse vol 1, a
-band 1, a slower cadence 1, a non-default ranking 1); it is bounded by
+band 1, a slower cadence 1, tranches 1, a non-default ranking 1); it is bounded by
 MAX_COMPLEXITY and costs fitness. Everything here is pure: no data, no I/O.
 """
 
@@ -55,7 +57,7 @@ FILTERS = {
 }
 SELECT = {"k": [3, 5, 10, 20], "rank": ["signal", "liquidity", "lowvol"]}
 WEIGHT = {"scheme": ["equal", "invvol"], "fill": ["slots", "full"]}
-REBALANCE = {"every": [1, 3, 7], "band": [0.0, 0.25, 0.5]}
+REBALANCE = {"every": [1, 3, 7], "tranches": [1, 7], "band": [0.0, 0.25, 0.5]}
 MAX_FILTERS = 3
 MAX_COMPLEXITY = 7
 PARTS = ("universe", "signal", "filters", "select", "weight", "rebalance")
@@ -92,6 +94,8 @@ def random_genome(rng: random.Random) -> dict:
 def _repair(g: dict) -> dict:
     """Small fixes that keep a draw or a mutation inside the grammar."""
     s = g["signal"]
+    if g["rebalance"]["every"] != 7:
+        g["rebalance"]["tranches"] = 1
     if s["kind"] == "ma" and s["fast"] >= s["slow"]:
         s["fast"] = max(f for f in SIGNALS["ma"]["fast"] if f < s["slow"])
     if g["universe"]["kind"] != "top":
@@ -117,7 +121,7 @@ def key(g: dict) -> str:
 
 def complexity(g: dict) -> int:
     return (1 + len(g["filters"]) + (g["weight"]["scheme"] == "invvol") + (g["rebalance"]["band"] > 0)
-            + (g["rebalance"]["every"] > 1) + (g["select"]["rank"] != "signal"))
+            + (g["rebalance"]["every"] > 1) + (g["rebalance"]["tranches"] > 1) + (g["select"]["rank"] != "signal"))
 
 
 def valid(g: dict) -> tuple[bool, str]:
@@ -147,6 +151,8 @@ def valid(g: dict) -> tuple[bool, str]:
         for part, space in (("select", SELECT), ("weight", WEIGHT), ("rebalance", REBALANCE)):
             if set(g[part]) != set(space) or any(g[part][k] not in v for k, v in space.items()):
                 return False, f"{part} {g[part]}"
+        if g["rebalance"]["tranches"] > 1 and g["rebalance"]["every"] != 7:
+            return False, "tranches only for a weekly book"
         if u["kind"] != "top" and g["select"]["k"] > (20 if u["kind"] == "core" else 15):
             return False, "K larger than the list"
         if complexity(g) > MAX_COMPLEXITY:
@@ -224,7 +230,7 @@ def describe(g: dict) -> str:
                    "volume": lambda: f"volume 7/{f['slow']} >= {f['min']:g}",
                    "trend": lambda: f"coin > MA{f['ma']}"}[f["kind"]]())
     sel, w, r = g["select"], g["weight"], g["rebalance"]
-    cad = {1: "daily", 3: "every 3d", 7: "weekly"}[r["every"]]
+    cad = {1: "daily", 3: "every 3d", 7: "weekly"}[r["every"]] + (" in 7 tranches" if r["tranches"] > 1 else "")
     band = f" band {int(r['band'] * 100)} %" if r["band"] else ""
     parts = [sig, uni] + fl + [f"best {sel['k']} by {sel['rank']}", f"{w['scheme']} {w['fill']}", cad + band]
     return " · ".join(parts)
