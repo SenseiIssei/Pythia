@@ -24,6 +24,10 @@ export interface ReadinessItem {
   id: string;
   name: string;
   parent: string | null;
+  /** The parent autopilot's key: ids repeat across accounts, keys do not. */
+  parentKey: string | null;
+  /** The Alpaca paper account: "main", "safe", ... */
+  account: string;
   mode: string | null;
   onAccount: boolean;
   days: number;
@@ -111,6 +115,8 @@ export function parseReadiness(v: unknown): ReadinessReport | null {
       id: str(i.id),
       name: str(i.name, "Autopilot"),
       parent: typeof i.parent === "string" ? i.parent : null,
+      parentKey: typeof i.parent_key === "string" ? i.parent_key : null,
+      account: str(i.account, "main"),
       mode: typeof i.mode === "string" ? i.mode : null,
       onAccount: i.on_account === true,
       days: num(i.days) ?? 0,
@@ -170,15 +176,19 @@ export function profileFor(profiles: RiskProfile[], step: number): RiskProfile |
   return profiles.find((p) => p.step === step) ?? null;
 }
 
+function belongs(sleeve: ReadinessItem, ap: ReadinessItem): boolean {
+  return sleeve.parentKey != null ? sleeve.parentKey === ap.key : sleeve.parent === ap.id && sleeve.account === ap.account;
+}
+
 /** Autopilots first, each followed by its sleeves. */
 export function ordered(items: ReadinessItem[]): ReadinessItem[] {
   const aps = items.filter((i) => i.kind === "autopilot");
   const out: ReadinessItem[] = [];
   for (const a of aps) {
     out.push(a);
-    out.push(...items.filter((i) => i.kind === "sleeve" && i.parent === a.id));
+    out.push(...items.filter((i) => i.kind === "sleeve" && belongs(i, a)));
   }
-  out.push(...items.filter((i) => i.kind === "sleeve" && !aps.some((a) => a.id === i.parent)));
+  out.push(...items.filter((i) => i.kind === "sleeve" && !aps.some((a) => belongs(i, a))));
   return out;
 }
 

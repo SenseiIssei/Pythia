@@ -37,8 +37,11 @@ owner's Telegram chat), or PYTHIA_ALERT_WEBHOOK with PYTHIA_ALERT_FORMAT
 (the footer, default Pythia), PYTHIA_QUIET_HOURS (off, or 23:00-07:00, over
 the settings file), PYTHIA_ALERT_VIA=engine (post lab cards through the
 engine's POST /api/alerts/event instead of directly),
-PYTHIA_AUTOPILOT_STATE_URL (the engine's GET /api/state for the charts,
-default http://127.0.0.1:8788/api/state, off to skip), PYTHIA_DATA and
+PYTHIA_AUTOPILOT_STATE_URLS (every autopilot engine's GET /api/state for the
+charts, comma separated, default the main account's engine on 8788 and the
+safe account's on 8789; ?name=... names an account; an engine that does not
+answer is skipped), PYTHIA_AUTOPILOT_STATE_URL (the old single engine, used
+when the list is not set; off to skip), PYTHIA_DATA and
 PYTHIA_REPORTS as for the rest of the lab.
 
 Every digest (not a dry run) is written to reports/notify/latest.json as
@@ -62,6 +65,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 DAY_MS = 86_400_000
 WEEK_MS = 7 * DAY_MS
@@ -69,6 +73,12 @@ LIMITS = {"telegram": 4000, "discord": 1900, "slack": 3000}
 MAX_CHARS = LIMITS["telegram"]
 CAPTION_LIMIT = 1000
 DEFAULT_STATE_URL = "http://127.0.0.1:8788/api/state"
+# Every autopilot engine, one per Alpaca paper account: the main one and the
+# small "safe" one next to it. PYTHIA_AUTOPILOT_STATE_URLS (comma separated)
+# overrides it; a URL may name its account with ?name=...; without a name
+# the accounts are called by their place in the list.
+DEFAULT_STATE_URLS = "http://127.0.0.1:8788/api/state,http://127.0.0.1:8789/api/state"
+ACCOUNT_NAMES = ("main", "safe")
 
 # The same ids, labels and emoji as the engine (pythia-core alerts_settings.rs).
 CATEGORIES: dict[str, tuple[str, str]] = {
@@ -627,17 +637,77 @@ def via_engine(category: str, card: Card, image: bytes | None, urgent: bool) -> 
 
 # ---------------------------------------------------------------- reading the engine
 
-def engine_state(timeout: float = 15) -> dict | None:
-    """GET /api/state of the autopilot engine, read only; None when off or down."""
-    url = os.environ.get("PYTHIA_AUTOPILOT_STATE_URL", DEFAULT_STATE_URL).strip()
-    if not url or url.lower() == "off":
-        return None
+def state_urls() -> list[tuple[str, str]]:
+    """(account, URL) of every autopilot engine to read, in order.
+
+    PYTHIA_AUTOPILOT_STATE_URLS, comma separated; without it the old
+    PYTHIA_AUTOPILOT_STATE_URL (one engine, the main account; "off" for
+    none) when set, else both default engines. A `name` query parameter
+    names the account and is taken off the URL; otherwise the first is
+    "main", the second "safe", further ones "account 3" and on."""
+    many = (os.environ.get("PYTHIA_AUTOPILOT_STATE_URLS") or "").strip()
+    if many:
+        raw = many.split(",")
+    else:
+        one = os.environ.get("PYTHIA_AUTOPILOT_STATE_URL")
+        raw = [one] if one is not None else DEFAULT_STATE_URLS.split(",")
+    out = []
+    for i, u in enumerate(x.strip() for x in raw):
+        if not u or u.lower() == "off":
+            continue
+        p = urlparse(u)
+        q = parse_qsl(p.query)
+        name = next((v for k, v in q if k == "name" and v.strip()), None)
+        clean = urlunparse(p._replace(query=urlencode([(k, v) for k, v in q if k != "name"])))
+        out.append((name.strip() if name else (ACCOUNT_NAMES[i] if i < len(ACCOUNT_NAMES) else f"account {i + 1}"),
+                    clean))
+    return out
+
+
+def fetch_engine(url: str, timeout: float = 15) -> tuple[dict | None, str | None]:
+    """GET one engine's /api/state, read only: (state, error)."""
     try:
         with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=timeout) as r:
             v = json.load(r)
-        return v if isinstance(v, dict) else None
-    except Exception:  # noqa: BLE001 - the engine being down only costs the chart
+        return (v, None) if isinstance(v, dict) else (None, "not a state object")
+    except Exception as e:  # noqa: BLE001 - an engine that does not answer is skipped
+        return None, f"{type(e).__name__}: {e}"
+
+
+def engine_states(fetch=fetch_engine) -> list[dict]:
+    """Every engine as {"account", "url", "state", "error"}; state None when it did not answer."""
+    out = []
+    for account, url in state_urls():
+        st, err = fetch(url)
+        out.append({"account": account, "url": url, "state": st, "error": err})
+    return out
+
+
+def merge_states(rows: list[dict]) -> dict | None:
+    """The engines that answered as one state for the digest and the charts:
+    every autopilot with its account in `account`, the positions of all of
+    them. None when none answered."""
+    got = [r for r in rows if r.get("state")]
+    if not got:
         return None
+    aps, positions = [], []
+    for r in got:
+        for a in r["state"].get("autopilots") or []:
+            aps.append({**a, "account": r["account"]})
+        positions += r["state"].get("positions") or []
+    return {"autopilots": aps, "positions": positions, "accounts": [r["account"] for r in got]}
+
+
+def account_key(account: str | None, ap_id: str) -> str:
+    """An autopilot's key across engines: the id on the main account, account:id on the others."""
+    return ap_id if account in (None, "", ACCOUNT_NAMES[0]) else f"{account}:{ap_id}"
+
+
+def engine_state(timeout: float = 15) -> dict | None:
+    """Every autopilot engine's GET /api/state merged into one, read only;
+    None when all are off or down (an engine that does not answer only
+    costs its lines in the chart)."""
+    return merge_states(engine_states(lambda u: fetch_engine(u, timeout)))
 
 
 def btc_closes(start_ms: int, end_ms: int, timeout: float = 15) -> list[tuple[int, float]]:
@@ -678,8 +748,11 @@ def chart_data(state: dict | None, since_ms: int | None, now: int, btc: list[tup
         return None
     lines, sleeves, held = [], [], set()
     starts = []
+    several = len({a.get("account") for a in aps}) > 1
     for a in aps:
         name = (a.get("config") or {}).get("name") or "Autopilot"
+        if several and a.get("account"):
+            name = f"{name} ({a['account']})"
         hist = sorted((r for r in a.get("history") or [] if isinstance(r, (list, tuple)) and len(r) == 2),
                       key=lambda r: r[0])
         t0 = max(int(a.get("startedMs") or 0), since_ms or 0)
@@ -764,9 +837,10 @@ def autopilot_parts(learn: dict | None, prev: dict, now: int) -> tuple[list[Rows
             continue
         eq, start = _num(a.get("equity")), _num(a.get("start_capital"))
         trades, fees = int(_num(a.get("trades")) or 0), _num(a.get("fees")) or 0.0
-        key = str(a.get("id") or a.get("name"))
+        key = account_key(a.get("account"), str(a.get("id") or a.get("name")))
         snap[key] = {"trades": trades, "fees": fees, "at": now}
-        title = f"{a.get('name', 'Autopilot')} · {a.get('mode') or '?'}"
+        title = " · ".join([str(a.get("name", "Autopilot"))] + ([str(a["account"])] if a.get("account") else [])
+                           + [a.get("mode") or "?"])
         if eq is None:
             missing.append(title)
             continue
@@ -841,6 +915,8 @@ def readiness_text(rep: dict | None, now: int | None = None) -> str:
     gen = _num(rep.get("generated_ms"))
     stale = (t["stale"].format(date=str(rep.get("generated") or "?")[:10])
              if now is not None and gen is not None and now - gen > 30 * 3_600_000 else "")
+    if rep.get("status") == "bad" and rep.get("headline"):
+        return str(rep["headline"]) + stale
     items = [i for i in rep.get("autopilots") or [] if i.get("on_account")]
     if not items:
         return t["none"] + stale
@@ -981,7 +1057,7 @@ def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | 
         dd = _num(a.get("drawdownPct"))
         if dd is not None:
             rows.append(("Below peak", f"{dd:.2f} %"))
-        key = str(cfg.get("id") or name)
+        key = account_key(a.get("account"), str(cfg.get("id") or name))
         trades = int(_num(a.get("trades")) or 0)
         snap[key] = {"trades": trades, "at": now}
         p = prev.get(key)
@@ -989,7 +1065,7 @@ def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | 
             rows.append(("Trades", f"{trades - int(p['trades'])} this week"))
         else:
             rows.append(("Trades", f"{trades} since start"))
-        parts.append(Rows(rows, f"{name} · {mode}"))
+        parts.append(Rows(rows, f"{name} · {a['account']} · {mode}" if a.get("account") else f"{name} · {mode}"))
         for s in a.get("bySleeve") or []:
             sleeves.append((s.get("name") or "?", _num(s.get("pnl")) or 0.0))
     if len(sleeves) > 1:

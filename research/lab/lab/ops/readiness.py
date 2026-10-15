@@ -42,8 +42,12 @@ rule. Only the owner can arm live.
   python -m lab.ops.readiness             the daily check
   python -m lab.ops.readiness --dry-run   print the result and the alert, post nothing
 
-Environment as for lab.ops.learn: PYTHIA_AUTOPILOT_STATE_URL,
-PYTHIA_LEARN_ORDERS_FILE; and notify's for the alert.
+Every Alpaca paper account has its own engine (main on 8788, safe on 8789):
+all of PYTHIA_AUTOPILOT_STATE_URLS are read (lab.ops.notify.state_urls; the
+old single PYTHIA_AUTOPILOT_STATE_URL still works), each autopilot is judged
+on its own account, and an engine that does not answer is left out that day.
+PYTHIA_LEARN_ORDERS_FILE as for lab.ops.learn; notify's environment for the
+alert.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ from ..data import ROOT
 from . import guard, hurdles
 
 NAME = "readiness"
+MAIN = "main"  # notify.ACCOUNT_NAMES[0]: the account the forward report and the costs read
 DAY_MS = 86_400_000
 WEEK_MS = 7 * DAY_MS
 
@@ -104,7 +109,7 @@ RULES = [
 # Every sentence that goes to the phone, in one place (English).
 TEXT = {
     "alert_title": "Ready for a real money proposal",
-    "alert_summary": "{name} meets every real money rule on the Alpaca paper account (risk step {step}, {label}).",
+    "alert_summary": "{name} meets every real money rule on its Alpaca paper account (risk step {step}, {label}).",
     "alert_footer": "Only the owner can arm live. Nothing was armed or changed.",
     "sleeve_name": "{sleeve} (sleeve of {name})",
 }
@@ -248,15 +253,25 @@ def reconcile_today(live: dict | None, now_ms: int) -> dict:
             "fresh": bool(at) and now_ms - at <= RECONCILE_FRESH_H * 3_600_000, "error": d.get("error")}
 
 
-def reconcile_rule(history: list[dict], events: list[dict], now_ms: int) -> dict:
+def _reconcile_of(h: dict, account: str) -> dict:
+    """One account's reconciliation in a daily record (a record with one flat
+    entry is the main account's)."""
+    rec = h.get("reconcile") or {}
+    if "fresh" in rec:
+        return rec if account == MAIN else {}
+    return rec.get(account) or {}
+
+
+def reconcile_rule(history: list[dict], events: list[dict], now_ms: int, account: str = "main") -> dict:
     """Clean on each of the last RECONCILE_DAYS days (the daily records of this
-    job, today's included) and no unsettled finding in the engine's log."""
+    job, today's included) and no unsettled finding in the engine's log, for
+    one Alpaca paper account."""
     since = now_ms - RECONCILE_DAYS * DAY_MS
     days_clean, days_bad = set(), set()
     for h in history:
         if int(h.get("ts_ms") or 0) <= since:
             continue
-        r = h.get("reconcile") or {}
+        r = _reconcile_of(h, account)
         if r.get("fresh") and r.get("mismatches") == 0:
             days_clean.add(h["date"])
         elif r.get("fresh"):
@@ -294,26 +309,49 @@ def read_history() -> list[dict]:
     return out
 
 
-def snapshot(state: dict, now_ms: int) -> dict:
-    """Today's numbers of every autopilot and sleeve, for the weeks and
-    drawdowns of tomorrow, keyed by id with its start (a restart is a new run)."""
-    aps = {}
-    for ap in state.get("autopilots") or []:
-        cfg = ap.get("config") or {}
-        b = ap.get("benchmark") or {}
-        aps[str(cfg.get("id"))] = {
-            "started_ms": ap.get("startedMs"), "equity": _num(ap.get("equity")), "pnl": _num(ap.get("pnl")),
-            "trades": ap.get("trades"), "bench_pct": _num(b.get("returnPct")),
-            "sleeves": {str(s.get("strategyId")): {"pnl": _num(s.get("pnl")), "trades": s.get("trades"),
-                                                     "weight": _num(s.get("weight"))}
-                        for s in ap.get("bySleeve") or []}}
-    return {"date": _date(now_ms), "ts_ms": now_ms, "autopilots": aps,
-            "reconcile": reconcile_today(state.get("live"), now_ms)}
+def history_key(account: str, ap_id: str) -> str:
+    """The id on the main account, account:id on the others (notify.account_key)."""
+    return ap_id if account == MAIN else f"{account}:{ap_id}"
 
 
-def run_rows(history: list[dict], ap_id: str, started_ms: int) -> list[tuple[int, dict]]:
-    return [(int(h["ts_ms"]), h["autopilots"][ap_id]) for h in history
-            if ap_id in (h.get("autopilots") or {}) and h["autopilots"][ap_id].get("started_ms") == started_ms]
+def snapshot(engines: list[dict], now_ms: int) -> dict:
+    """Today's numbers of every autopilot and sleeve on every account that
+    answered, for the weeks and drawdowns of tomorrow, keyed by account and
+    id with its start (a restart is a new run); and each account's
+    reconciliation."""
+    aps, rec = {}, {}
+    for e in engines:
+        state = e.get("state")
+        if not state:
+            continue
+        rec[e["account"]] = reconcile_today(state.get("live"), now_ms)
+        for ap in state.get("autopilots") or []:
+            cfg = ap.get("config") or {}
+            b = ap.get("benchmark") or {}
+            aps[history_key(e["account"], str(cfg.get("id")))] = {
+                "account": e["account"],
+                "started_ms": ap.get("startedMs"), "equity": _num(ap.get("equity")), "pnl": _num(ap.get("pnl")),
+                "trades": ap.get("trades"), "bench_pct": _num(b.get("returnPct")),
+                "sleeves": {str(s.get("strategyId")): {"pnl": _num(s.get("pnl")), "trades": s.get("trades"),
+                                                         "weight": _num(s.get("weight"))}
+                            for s in ap.get("bySleeve") or []}}
+    return {"date": _date(now_ms), "ts_ms": now_ms, "autopilots": aps, "reconcile": rec}
+
+
+def merge_day(old: dict | None, new: dict) -> dict:
+    """Today's record over an earlier one of the same day: an account that
+    did not answer this time keeps what it had."""
+    if not old:
+        return new
+    aps = {k: v for k, v in (old.get("autopilots") or {}).items()
+           if (v.get("account") or MAIN) not in new["reconcile"]}
+    rec = {k: v for k, v in (old.get("reconcile") or {}).items() if k not in new["reconcile"] and "fresh" not in old["reconcile"]}
+    return {**new, "autopilots": {**aps, **new["autopilots"]}, "reconcile": {**rec, **new["reconcile"]}}
+
+
+def run_rows(history: list[dict], hkey: str, started_ms: int) -> list[tuple[int, dict]]:
+    return [(int(h["ts_ms"]), h["autopilots"][hkey]) for h in history
+            if hkey in (h.get("autopilots") or {}) and h["autopilots"][hkey].get("started_ms") == started_ms]
 
 
 # ---------------------------------------------------------------- the rule, one unit at a time
@@ -375,8 +413,9 @@ def judge(u: dict, prof: dict, ctx: dict) -> dict:
     rules.append(_rule("band", u["forward_ok"], u["band_status"], "inside" + (" or above" if BAND_ABOVE_PASSES else ""),
                        u.get("forward_detail") or ""))
 
-    rules.append(_rule("reconcile", ctx["reconcile"]["pass"], ctx["reconcile"]["value"], f"{RECONCILE_DAYS}/{RECONCILE_DAYS} days",
-                       ctx["reconcile"]["detail"]))
+    rc = ctx["reconcile"].get(u["account"]) or {"pass": False, "value": "n/a", "detail": "no record", "days_to_go": 0}
+    rules.append(_rule("reconcile", rc["pass"], rc["value"], f"{RECONCILE_DAYS}/{RECONCILE_DAYS} days",
+                       f"{u['account']} account: {rc['detail']}"))
 
     ann = annualised_pct(u["ret_pct"], days) if u["ret_pct"] is not None else None
     infl = ctx["inflation"]
@@ -395,13 +434,18 @@ def judge(u: dict, prof: dict, ctx: dict) -> dict:
     passed = sum(r["pass"] for r in rules)
     togo = max(0.0, need_days - days) if u["on_account"] else None
     if togo is not None:
-        togo = max(togo, ctx["reconcile"].get("days_to_go") or 0)
+        togo = max(togo, rc.get("days_to_go") or 0)
     return {"rules": rules, "passed": passed, "total": len(rules), "ready": passed == len(rules),
             "days_to_go": None if togo is None else int(math.ceil(togo)), "need_days": need_days,
             "annualised_pct": ann, "sp500_pct": idx, "max_dd_pct": dd, "positive_weeks": pos, "weeks": wk}
 
 
-def autopilot_unit(ap: dict, live: dict, forward: dict | None, history: list[dict], now_ms: int) -> dict:
+def autopilot_unit(ap: dict, live: dict, forward: dict | None, history: list[dict], now_ms: int,
+                   account: str = MAIN, forward_account: str | None = MAIN) -> dict:
+    """The numbers of one autopilot. `forward_account` is the account whose
+    engine the forward report read: an autopilot on another account has no
+    forward row to be judged by, so it is treated as having no band (and
+    rule 1 asks for the extra days), not as failing."""
     cfg = ap.get("config") or {}
     ap_id = str(cfg.get("id"))
     started = int(ap.get("startedMs") or now_ms)
@@ -420,7 +464,8 @@ def autopilot_unit(ap: dict, live: dict, forward: dict | None, history: list[dic
             continue
         if t >= started:
             pts.append((t, v))
-    pts += [(t, r["equity"]) for t, r in run_rows(history, ap_id, started) if r.get("equity") is not None]
+    pts += [(t, r["equity"]) for t, r in run_rows(history, history_key(account, ap_id), started)
+            if r.get("equity") is not None]
     if equity is not None:
         pts.append((end, equity))
     pts.sort(key=lambda p: p[0])
@@ -437,10 +482,15 @@ def autopilot_unit(ap: dict, live: dict, forward: dict | None, history: list[dic
                  "why": b.get("note") or ("the benchmark's start price is still being looked for" if r is None else None)}
 
     fwd_fresh = forward is not None and now_ms - int(forward.get("generated_ms") or 0) <= FORWARD_FRESH_H * 3_600_000
-    row = forward_row(forward, ap_id, started) if fwd_fresh else None
+    covered = account == forward_account
+    row = forward_row(forward, ap_id, started) if fwd_fresh and covered else None
     band = (row or {}).get("expected") or None
     position = (row or {}).get("position")
-    if not fwd_fresh:
+    if not covered:
+        f_ok, f_status = True, "no band"
+        f_detail = (f"the forward report does not read the {account} account; no band, so it needs "
+                    f"{NO_BAND_EXTRA_DAYS} more days instead")
+    elif not fwd_fresh:
         f_ok, f_status, f_detail = False, "no report", "no forward report from the last 36 hours"
     elif row is None:
         f_ok, f_status, f_detail = False, "not listed", "the forward report does not list this run"
@@ -450,8 +500,10 @@ def autopilot_unit(ap: dict, live: dict, forward: dict | None, history: list[dic
         f_ok = position == "inside" or (BAND_ABOVE_PASSES and position == "above")
         f_status = position or "unknown"
         f_detail = f"band {band.get('low_pct', 0):+.2f} to {band.get('high_pct', 0):+.2f} % ({band.get('method', '?')})"
-    return {"kind": "autopilot", "key": f"autopilot:{ap_id}:{started}", "id": ap_id,
-            "name": cfg.get("name") or "Autopilot", "parent": None, "mode": cfg.get("mode"), "state": ap.get("state"),
+    return {"kind": "autopilot", "key": f"autopilot:{account}:{ap_id}:{started}", "id": ap_id, "account": account,
+            "name": (cfg.get("name") or "Autopilot") + ("" if account == MAIN else f" ({account})"),
+            "parent": None, "parent_key": None, "mode": cfg.get("mode"),
+            "state": ap.get("state"),
             "started_ms": started, "since_ms": started, "days": max(end - started, 0) / DAY_MS,
             "trades": int(ap.get("trades") or 0), "on_account": on_alpaca_paper(ap, live),
             "capital": capital, "pnl": pnl, "ret_pct": ret, "fees": _num(ap.get("fees")), "bench": bench, "points": pts,
@@ -472,8 +524,8 @@ def sleeve_units(ap: dict, parent: dict, history: list[dict], now_ms: int) -> li
     sleeves = [s for s in ap.get("bySleeve") or [] if not s.get("dropped") and (_num(s.get("weight")) or 0) > 0]
     if len(sleeves) < 2:
         return []
-    started, ap_id = parent["started_ms"], parent["id"]
-    rows = run_rows(history, ap_id, started)
+    started, ap_id, account = parent["started_ms"], parent["id"], parent["account"]
+    rows = run_rows(history, history_key(account, ap_id), started)
     out = []
     for s in sleeves:
         sid = str(s.get("strategyId"))
@@ -499,9 +551,10 @@ def sleeve_units(ap: dict, parent: dict, history: list[dict], now_ms: int) -> li
         if pb.get("return") is not None and bench0 is not None and ret is not None:
             br = ((1 + pb["return"] / 100) / (1 + bench0 / 100) - 1) * 100
             bench = {"name": pb["name"], "return": br, "excess": ret - br}
-        out.append({"kind": "sleeve", "key": f"sleeve:{ap_id}:{started}:{sid}", "id": sid,
+        out.append({"kind": "sleeve", "key": f"sleeve:{account}:{ap_id}:{started}:{sid}", "id": sid,
+                    "account": account,
                     "name": TEXT["sleeve_name"].format(sleeve=s.get("name") or sid, name=parent["name"]),
-                    "parent": ap_id, "mode": parent["mode"], "state": parent["state"], "started_ms": started,
+                    "parent": ap_id, "parent_key": parent["key"], "mode": parent["mode"], "state": parent["state"], "started_ms": started,
                     "since_ms": since, "days": max(now_ms - since, 0) / DAY_MS, "trades": int(s.get("trades") or 0),
                     "on_account": parent["on_account"], "capital": budget, "pnl": pnl, "ret_pct": ret, "fees": None,
                     "bench": bench, "points": pts, "dd_engine": 0.0, "band": None, "band_status": "no band",
@@ -519,8 +572,11 @@ def alert_card(item: dict, prof: dict):
                        [notify.Rows(rows)], TEXT["alert_footer"])
 
 
-def announce(items: list[dict], prof: dict, st: dict, now_ms: int, dry_run: bool, sender=None) -> list[dict]:
-    """One post per unit that newly meets every rule; nothing else happens."""
+def announce(items: list[dict], prof: dict, st: dict, now_ms: int, dry_run: bool, sender=None,
+             answered: set[str] | None = None) -> list[dict]:
+    """One post per unit that newly meets every rule; nothing else happens.
+    What was ready on an account whose engine did not answer today stays
+    ready (it is not announced again when it is back)."""
     from . import notify
     sent = []
     prev = set(st.get("ready") or [])
@@ -538,7 +594,10 @@ def announce(items: list[dict], prof: dict, st: dict, now_ms: int, dry_run: bool
         sent.append({"key": it["key"], "name": it["name"], "delivered": bool(res.get("delivered")),
                      "reason": res.get("reason"), "error": res.get("error")})
     # Ready now and announced (or not newly ready): tomorrow it is not new.
-    st["ready"] = sorted(it["key"] for it in items if it["ready"] and (it["key"] in prev or it["key"] in alerted))
+    now_ready = {it["key"] for it in items if it["ready"] and (it["key"] in prev or it["key"] in alerted)}
+    if answered is not None:
+        now_ready |= {k for k in prev if k.split(":")[1] not in answered}
+    st["ready"] = sorted(now_ready)
     return sent
 
 
@@ -602,26 +661,49 @@ def markdown(d: dict) -> str:
 
 
 def _public(u: dict, verdict: dict) -> dict:
-    keep = ("kind", "key", "id", "name", "parent", "mode", "state", "started_ms", "since_ms", "days", "trades",
-            "on_account", "capital", "pnl", "ret_pct", "fees")
+    keep = ("kind", "key", "id", "account", "name", "parent", "parent_key", "mode", "state", "started_ms", "since_ms",
+            "days", "trades", "on_account", "capital", "pnl", "ret_pct", "fees")
     out = {k: u.get(k) for k in keep}
     out["benchmark"] = u.get("bench")
     out.update({k: v for k, v in verdict.items()})
     return out
 
 
-def engine_state() -> tuple[dict | None, str, str | None]:
-    from .learn import engine_state as f
+def engines() -> list[dict]:
+    """Every autopilot engine, one per Alpaca paper account (lab.ops.learn.engines)."""
+    from .learn import engines as f
     return f()
 
 
+def _norm(url: str | None) -> str:
+    return str(url or "").split("?", 1)[0].rstrip("/")
+
+
+def forward_account(forward: dict | None, rows: list[dict]) -> str | None:
+    """The account whose engine the forward report read (the main one when it does not say)."""
+    url = _norm(((forward or {}).get("engine") or {}).get("url"))
+    if url:
+        for r in rows:
+            if _norm(r["url"]) == url:
+                return r["account"]
+    return MAIN
+
+
 def run(now_ms: int | None = None, state: dict | None = None, forward: dict | None = None, macro: dict | None = None,
-        dry_run: bool = False, sender=None) -> dict:
+        dry_run: bool = False, sender=None, engines_: list[dict] | None = None) -> dict:
+    """The daily check. `state` (one engine, the main account) or `engines_`
+    (every account) stand in for reading the engines, for tests."""
     now_ms = now_ms or int(time.time() * 1000)
     guard.WRITTEN.clear()
-    source, err = "given", None
-    if state is None:
-        state, source, err = engine_state()
+    if engines_ is not None:
+        rows = engines_
+    elif state is not None:
+        rows = [{"account": MAIN, "url": "given", "state": state, "error": None}]
+    else:
+        rows = engines()
+    up = [r for r in rows if r.get("state") is not None]
+    answered = {r["account"] for r in up}
+    err = "; ".join(f"{r['account']}: {r['error']}" for r in rows if r.get("state") is None and r.get("error")) or None
     if forward is None:
         forward = _read_json(report.REPORTS / "forward" / "latest.json")
     if macro is None:
@@ -633,30 +715,38 @@ def run(now_ms: int | None = None, state: dict | None = None, forward: dict | No
             macro = {"inflation": hurdles.inflation(None, None), "sp500": None, "error": str(e)}
     prof = load_settings()
     history = read_history()
-    if state is not None:
-        snap = snapshot(state, now_ms)
-        history = [h for h in history if h.get("date") != snap["date"]] + [snap]
+    if up:
+        snap = snapshot(up, now_ms)
+        same = next((h for h in history if h.get("date") == snap["date"]), None)
+        history = [h for h in history if h.get("date") != snap["date"]] + [merge_day(same, snap)]
         history = history[-400:]
         if not dry_run:
             guard.write_text(history_path(), "".join(json.dumps(guard.finite(h), allow_nan=False) + "\n"
                                                       for h in history))
-    live = (state or {}).get("live") or {}
+    fwd_acc = forward_account(forward, rows)
     ctx = {"now_ms": now_ms, "inflation": macro.get("inflation") or {}, "sp500": macro.get("sp500"),
-           "reconcile": reconcile_rule(history, (state or {}).get("events") or [], now_ms)}
+           "reconcile": {r["account"]: reconcile_rule(history, r["state"].get("events") or [], now_ms, r["account"])
+                         for r in up}}
     units = []
-    for ap in (state or {}).get("autopilots") or []:
-        cfg = ap.get("config") or {}
-        if ap.get("state") not in ("running", "paused") or cfg.get("mode") == "live":
-            continue
-        u = autopilot_unit(ap, live, forward, history, now_ms)
-        units.append(u)
-        units += sleeve_units(ap, u, history, now_ms)
+    for r in up:
+        live = r["state"].get("live") or {}
+        for ap in r["state"].get("autopilots") or []:
+            cfg = ap.get("config") or {}
+            if ap.get("state") not in ("running", "paused") or cfg.get("mode") == "live":
+                continue
+            u = autopilot_unit(ap, live, forward, history, now_ms, r["account"], fwd_acc)
+            units.append(u)
+            units += sleeve_units(ap, u, history, now_ms)
     items = [_public(u, judge(u, prof, ctx)) for u in units]
-    items.sort(key=lambda i: (not i["on_account"], i["parent"] or i["id"], i["kind"] != "autopilot"))
+    order = {r["account"]: k for k, r in enumerate(rows)}
+    items.sort(key=lambda i: (not i["on_account"], order.get(i["account"], 99), i["parent"] or i["id"],
+                              i["kind"] != "autopilot"))
 
     st = _read_json(ROOT / NAME / "state.json") or {}
-    alerts = announce(items, prof, st, now_ms, dry_run, sender)
-    if not dry_run:
+    # Without any engine nothing was judged: what was ready yesterday stays so
+    # (no second post tomorrow), and nothing is announced.
+    alerts = announce(items, prof, st, now_ms, dry_run, sender, answered) if up else []
+    if not dry_run and up:
         guard.write_json(ROOT / NAME / "state.json", st)
 
     data = {"generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -665,11 +755,19 @@ def run(now_ms: int | None = None, state: dict | None = None, forward: dict | No
             "constants": {"min_closed_trades": MIN_CLOSED_TRADES, "no_band_extra_days": NO_BAND_EXTRA_DAYS,
                           "weeks_looked_at": WEEKS_LOOKED_AT, "reconcile_days": RECONCILE_DAYS},
             "inflation": ctx["inflation"], "reconcile": ctx["reconcile"], "autopilots": items, "alerts": alerts,
-            "engine": {"source": source, "reachable": state is not None, "error": err}}
-    data["headline"] = headline(items, prof)
+            "engine": {"reachable": bool(up), "error": err,
+                       "accounts": [{"account": r["account"], "url": r["url"], "reachable": r.get("state") is not None}
+                                    for r in rows]},
+            "forward_account": fwd_acc}
     ready = any(i["ready"] for i in items)
-    data.update(report.feed_header("Real money readiness", "ok" if ready or not items else "watch",
-                                   data["headline"], feed_items(items), now_ms))
+    if not up:
+        data["headline"] = (f"No autopilot engine answered ({err or 'none configured'}), so readiness was not "
+                            "judged today.")
+        status = "bad"
+    else:
+        data["headline"] = headline(items, prof)
+        status = "ok" if ready or not items else "watch"
+    data.update(report.feed_header("Real money readiness", status, data["headline"], feed_items(items), now_ms))
     data = guard.finite(data)
     if not dry_run:
         guard.check_write(report.REPORTS / NAME / "latest.json")
