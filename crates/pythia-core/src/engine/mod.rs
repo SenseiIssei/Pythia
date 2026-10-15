@@ -1121,6 +1121,10 @@ pub struct Persisted {
     /// so a mute set through the API survives a restart.
     #[serde(default)]
     pub alerts_muted_until_ms: i64,
+    /// The owner's alert switches, quiet hours and big-move sizes. A save
+    /// from before they existed gets the defaults.
+    #[serde(default)]
+    pub alert_settings: crate::alerts::AlertSettings,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -1229,6 +1233,8 @@ pub struct Engine {
     /// host's alert sender does the muting; the engine only keeps it so it is
     /// saved with the rest of the state.
     alerts_muted_until_ms: i64,
+    /// The owner's alert settings, kept here so they are saved with the state.
+    alert_settings: crate::alerts::AlertSettings,
     /// Market data stale for more than ten minutes was alerted this episode.
     data_stale_alerted: bool,
     /// UTC day the daily loss brake was last alerted.
@@ -1439,6 +1445,7 @@ impl Engine {
             reject_streak: [0; 2],
             alert_reject_after: 3,
             alerts_muted_until_ms: 0,
+            alert_settings: Default::default(),
             data_stale_alerted: false,
             daily_loss_alerted_day: None,
             live: LiveConfig::default(),
@@ -2011,7 +2018,12 @@ impl Engine {
         if !stale {
             if self.data_stale_alerted {
                 self.data_stale_alerted = false;
-                self.alert(crate::alerts::AlertKind::DataStale, "stale:off", "market data is fresh again.");
+                self.alert_event(
+                    crate::alerts::AlertEvent::new(crate::alerts::AlertKind::DataStale, "stale:off", "market data is fresh again.")
+                        .titled("Market data is fresh again")
+                        .with_summary("Entries and stops work on live prices again.")
+                        .with_emoji("✅"),
+                );
             }
         } else if !self.data_stale_alerted {
             let mins = since.map_or(0, |s| (now - s) / 60_000);
@@ -3403,7 +3415,9 @@ impl Engine {
         self.cash -= signed * fill_price + fee;
         // The autopilot that owns this position, or that just opened it, books it.
         let open_after = self.positions.contains_key(&key);
-        self.autopilot_on_fill(&sid, &key, realized, fee, existed, open_after);
+        if let Some(ap) = self.autopilot_on_fill(&sid, &key, realized, fee, existed, open_after) {
+            self.autopilot_trade_alert(ap, &sid, &m.symbol, side == Side::Buy, qty, fill_price, fee, realized);
+        }
         // The measured edge: net return on the closed notional. The entry fee
         // is not tracked per position, so the round trip is estimated as twice
         // this fill's fee on the closed quantity.
@@ -5915,7 +5929,11 @@ impl Engine {
         } else {
             ("kill:off", "released by hand.")
         };
-        self.alert(crate::alerts::AlertKind::KillSwitch, key, text);
+        let mut ev = crate::alerts::AlertEvent::new(crate::alerts::AlertKind::KillSwitch, key, text);
+        if !self.limits.kill_switch {
+            ev = ev.titled("Kill switch released").with_emoji("🟢");
+        }
+        self.alert_event(ev);
     }
     pub fn set_limits(&mut self, next: RiskLimits) {
         self.limits = next;
@@ -6257,6 +6275,7 @@ impl Engine {
             maker_routes: self.maker_routes.clone(),
             maker_records: self.maker_records.clone(),
             alerts_muted_until_ms: self.alerts_muted_until_ms,
+            alert_settings: self.alert_settings.clone(),
         }
     }
 
@@ -6466,6 +6485,7 @@ impl Engine {
         self.maker_records = p.maker_records;
         self.prune_maker_records();
         self.alerts_muted_until_ms = p.alerts_muted_until_ms.max(0);
+        self.alert_settings = p.alert_settings;
         if resolved > 0 {
             self.log(
                 JournalKind::System,
@@ -6740,6 +6760,24 @@ impl Engine {
         if self.alert_events.len() > 100 {
             self.alert_events.remove(0);
         }
+    }
+
+    /// Queue a typed operator alert built with its card (title, rows).
+    pub(crate) fn alert_event(&mut self, ev: crate::alerts::AlertEvent) {
+        self.alert_events.push(ev);
+        if self.alert_events.len() > 200 {
+            self.alert_events.remove(0);
+        }
+    }
+
+    /// The owner's alert settings (switches, quiet hours, big moves).
+    pub fn alert_settings(&self) -> &crate::alerts::AlertSettings {
+        &self.alert_settings
+    }
+
+    /// Replace the alert settings. Saved with the state.
+    pub fn set_alert_settings(&mut self, s: crate::alerts::AlertSettings) {
+        self.alert_settings = s;
     }
 
     /// Take and clear queued operator alerts (drained by the host into its
