@@ -450,9 +450,159 @@ pub fn status() -> LabStatus {
     out
 }
 
+// ── CS2 skins board ─────────────────────────────────────────────────────────
+// Written hourly by `lab.cs2.run` to `reports/cs2_board/latest.json`. Prices,
+// predictions and a play-money portfolio; nothing in Pythia trades skins.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Item {
+    pub name: String,
+    pub category: String,
+    /// Reference price in EUR (24h or 7-day Skinport sales median, else the lowest ask).
+    pub price: Option<f64>,
+    pub ask: Option<f64>,
+    pub steam_price: Option<f64>,
+    /// Fractions, not percent.
+    pub change7d: Option<f64>,
+    pub pred7d: Option<f64>,
+    pub pred30d: Option<f64>,
+    pub expected_net: Option<f64>,
+    pub horizon: Option<i64>,
+    pub gap: Option<f64>,
+    pub sales7d: i64,
+    pub listed: i64,
+    pub held: bool,
+    pub watch: bool,
+    /// buy · hold · avoid · gap · drop
+    pub signal: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Position {
+    pub name: String,
+    pub qty: f64,
+    pub cost: f64,
+    pub bought: String,
+    pub price: Option<f64>,
+    pub return_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Portfolio {
+    pub equity: f64,
+    pub start_equity: f64,
+    pub cash: f64,
+    pub return_pct: f64,
+    pub started: Option<String>,
+    pub last_rebalance: Option<String>,
+    pub positions: Vec<Cs2Position>,
+    pub last_trades: Vec<Value>,
+    pub dates: Vec<String>,
+    pub equity_curve: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Alert {
+    pub ts_ms: Option<i64>,
+    pub kind: String,
+    pub name: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cs2Model {
+    pub src7: String,
+    pub src30: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cs2Board {
+    pub generated: String,
+    pub generated_ms: i64,
+    pub status: String,
+    pub verdict: String,
+    pub currency: String,
+    pub history_days: i64,
+    pub change7_basis: String,
+    pub hurdle: Option<f64>,
+    pub model: Cs2Model,
+    pub portfolio: Option<Cs2Portfolio>,
+    pub alerts: Vec<Cs2Alert>,
+    pub items: Vec<Cs2Item>,
+}
+
+/// The CS2 board as the lab wrote it; `None` when it is not a JSON object.
+/// Rows that do not parse are skipped.
+pub fn parse_cs2(text: &str) -> Option<Cs2Board> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    fn rows<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Vec<T> {
+        v.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect())
+            .unwrap_or_default()
+    }
+    Some(Cs2Board {
+        generated: s("generated"),
+        generated_ms: v.get("generatedMs").and_then(Value::as_i64).unwrap_or(0),
+        status: s("status"),
+        verdict: s("verdict"),
+        currency: v.get("currency").and_then(Value::as_str).unwrap_or("EUR").to_string(),
+        history_days: v.get("historyDays").and_then(Value::as_i64).unwrap_or(0),
+        change7_basis: s("change7Basis"),
+        hurdle: v.get("hurdle").and_then(Value::as_f64),
+        model: v.get("model").and_then(|m| serde_json::from_value(m.clone()).ok()).unwrap_or_default(),
+        portfolio: v.get("portfolio").and_then(|p| serde_json::from_value(p.clone()).ok()),
+        alerts: rows(&v, "alerts"),
+        items: rows(&v, "items"),
+    })
+}
+
+/// The CS2 board from the lab's data folder; `None` until `lab.cs2.run` has written one.
+pub fn cs2_board() -> Option<Cs2Board> {
+    let root = data_dir()?;
+    parse_cs2(&std::fs::read_to_string(root.join("reports").join("cs2_board").join("latest.json")).ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_cs2_board_and_skips_broken_items() {
+        let text = r#"{"generated":"2026-10-15 12:05 UTC","generatedMs":1,"status":"ok","verdict":"v",
+            "currency":"EUR","historyDays":3,"change7Basis":"Skinport 7-day median","hurdle":0.1,
+            "model":{"src7":"bootstrap","src30":"bootstrap","note":"n"},
+            "portfolio":{"equity":9990.5,"startEquity":10000,"cash":5000,"returnPct":-0.1,"started":"2026-10-15",
+                "lastRebalance":"2026-10-15","positions":[{"name":"Recoil Case","qty":10,"cost":1.0,"bought":"2026-10-15",
+                "price":1.02,"returnPct":2.0}],"lastTrades":[],"dates":["2026-10-15"],"equityCurve":[9990.5]},
+            "alerts":[{"tsMs":1,"kind":"gap","name":"X","text":"t"}],
+            "items":[{"name":"Recoil Case","category":"case","price":1.02,"ask":1.03,"steamPrice":null,
+                "change7d":0.01,"pred7d":0.02,"pred30d":null,"expectedNet":-0.08,"horizon":7,"gap":null,
+                "sales7d":900,"listed":5000,"held":true,"watch":true,"signal":"hold"},
+                {"name":5}]}"#;
+        let b = parse_cs2(text).unwrap();
+        assert_eq!(b.items.len(), 1);
+        assert_eq!(b.items[0].signal, "hold");
+        assert_eq!(b.history_days, 3);
+        assert_eq!(b.portfolio.as_ref().unwrap().positions[0].qty, 10.0);
+        assert_eq!(b.alerts[0].kind, "gap");
+        let out = serde_json::to_value(&b).unwrap();
+        assert_eq!(out["items"][0]["expectedNet"], -0.08);
+        assert_eq!(out["portfolio"]["equityCurve"][0], 9990.5);
+        assert!(parse_cs2("[]").is_none());
+        assert!(parse_cs2("not json").is_none());
+    }
 
     #[test]
     fn csv_keeps_quoted_commas() {

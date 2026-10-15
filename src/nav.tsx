@@ -21,6 +21,7 @@ import {
   Microscope,
   Plane,
   GraduationCap,
+  Crosshair,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -39,6 +40,7 @@ export type PageId =
   | "optimizer"
   | "analytics"
   | "correlation"
+  | "cs2"
   | "signals"
   | "models"
   | "lab"
@@ -79,6 +81,7 @@ export const NAV: NavItem[] = [
   { id: "optimizer", label: "Optimizer", icon: Sparkles, section: "Research", advanced: true },
   { id: "analytics", label: "Analytics", icon: BarChart3, section: "Research", advanced: true },
   { id: "correlation", label: "Correlation", icon: Grid3x3, section: "Research", advanced: true },
+  { id: "cs2", label: "CS2 Skins", icon: Crosshair, section: "Research", advanced: true },
   { id: "signals", label: "AI Signals", icon: BrainCircuit, section: "AI", advanced: true },
   { id: "models", label: "Models", icon: Gauge, section: "AI", advanced: true },
   { id: "lab", label: "Lab", icon: Microscope, section: "AI", advanced: true },
