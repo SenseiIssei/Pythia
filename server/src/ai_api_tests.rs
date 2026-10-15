@@ -88,7 +88,8 @@ fn the_request_is_checked_before_anything_is_spent() {
 #[test]
 fn the_caller_token_proves_the_key_without_sending_it() {
     let t = pythia_core::ai_budget::caller_token("sk-test");
-    assert_eq!(t.len(), 64);
+    // The same value lab/ai/engine.py computes (tests/test_ai.py pins it too).
+    assert_eq!(t, "61fcf2d7f8fdb52a7489f7821d53c9e5250d5d42b0902a47a6c7b7fe3aefc224");
     assert!(!t.contains("sk-test"));
     assert_ne!(t, pythia_core::ai_budget::caller_token("sk-other"));
     assert_eq!(pythia_core::ai_budget::caller_token("  "), "");
