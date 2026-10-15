@@ -1,6 +1,8 @@
 """Judging a genome: the in-sample fitness the search sees, the holdout gates, the promotion bar.
 
-Windows are the hand studies' own: in sample from 2020-08-01 to 2023-12-31
+Fitness is the in-sample Sharpe at 35 bps (for a fixed list the worse of the
+list and its point-in-time twin) minus COMPLEXITY_COST per moving part, and a
+penalty for a book that is almost always cash. Windows are the hand studies' own: in sample from 2020-08-01 to 2023-12-31
 (split in two halves for a stability check), held back from 2024-01-01 to
 the last close. The search sees only the in-sample window. A genome reaches
 the holdout only when the search sends it there, and every holdout check is
@@ -73,7 +75,16 @@ def in_sample(c: build.Ctx, g: dict, run_id: str) -> dict:
         "is_turnover_yr": float(tov[w["is"]].sum() / years) if years else 0.0,
         "is_exposure": float(expo[w["is"]].mean()) if w["is"].any() else 0.0,
     }
-    f = row["is_sharpe"] - COMPLEXITY_COST * cx
+    # A fixed list (core, Alpaca) is today's survivors, which flatters every year before
+    # today. The search scores such a genome by the worse of the list and its
+    # point-in-time twin, so survivorship cannot win the in-sample race.
+    base = row["is_sharpe"]
+    row["is_twin"] = None
+    if g["universe"]["kind"] != "top":
+        tg, tt, _ = build.run(c, g, twin=True)
+        row["is_twin"] = sharpe(build.net(tg, tt, build.COSTS["35bps"])[w["is"]])
+        base = min(base, row["is_twin"])
+    f = base - COMPLEXITY_COST * cx
     if row["is_exposure"] < MIN_EXPOSURE:
         f -= 1.0
     row["fitness"] = f if math.isfinite(f) else -9.0

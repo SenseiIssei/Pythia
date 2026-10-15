@@ -66,12 +66,14 @@ def markdown(d: dict) -> str:
     md.append(table(tried_by(d["tried"], "signal"), ["Signal", "Tried", "Median IS Sharpe", "Best", "Positive"]))
     md.append("\n" + table(tried_by(d["tried"], "universe"), ["Universe", "Tried", "Median IS Sharpe", "Best",
                                                                "Positive"]))
-    md.append("\nBest of this run by fitness (in-sample Sharpe at 35 bps minus "
-              f"{evaluate.COMPLEXITY_COST} per moving part):\n")
-    md.append(table([[r["key"], r["name"], _f(r["is_sharpe"]), f"{_f(r['is_h1'])} / {_f(r['is_h2'])}",
+    md.append("\nBest of this run by fitness (in-sample Sharpe at 35 bps, for a fixed list the worse of the list "
+              f"and its point-in-time twin, minus {evaluate.COMPLEXITY_COST} per moving part):\n")
+    md.append(table([[r["key"], r["name"], _f(r["is_sharpe"]), _f(r.get("is_twin")),
+                      f"{_f(r['is_h1'])} / {_f(r['is_h2'])}",
                       _f(r["is_turnover_yr"], 1), _f(r["is_exposure"]), r["complexity"], _f(r["fitness"])]
                      for r in d["top"]],
-                    ["Key", "Genome", "IS Sharpe", "Halves", "Turnover/yr", "Exposure", "Parts", "Fitness"]))
+                    ["Key", "Genome", "IS Sharpe", "IS twin", "Halves", "Turnover/yr", "Exposure", "Parts",
+                     "Fitness"]))
     md.append("\n## Held back: what survived and why\n")
     md.append(f"The search sent {len(d['holdout'])} genomes (best fitness first, both in-sample halves "
               f"positive, held-back-unseen, in-sample returns correlated below "
