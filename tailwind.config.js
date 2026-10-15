@@ -1,62 +1,89 @@
 /** @type {import('tailwindcss').Config} */
+
+// Every colour is a CSS variable from src/design/tokens.ts, so light and dark
+// swap without a single `dark:` class. The old cyber/neon names stay as
+// aliases of the new roles: a page still written against them shows the calm
+// look without being touched.
+const v = (name) => `rgb(var(--pt-${name}) / <alpha-value>)`;
+
 export default {
-  darkMode: "class",
+  darkMode: ["selector", '[data-theme="dark"]'],
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        accent: { DEFAULT: "#00f0ff", hover: "#00d4e6", dim: "#00a8b5" },
-        purple: { neon: "#a855f7", dim: "#7c3aed" },
+        canvas: v("bg"),
+        surface: v("surface"),
+        "surface-2": v("surface-2"),
+        line: v("line"),
+        "line-strong": v("line-strong"),
+        ink: v("text"),
+        muted: v("muted"),
+        faint: v("faint"),
+        accent: { DEFAULT: v("accent"), hover: v("accent"), dim: v("accent") },
+        "on-accent": v("on-accent"),
+        up: v("up"),
+        down: v("down"),
+        warn: v("warn"),
+        primary: v("primary"),
+        "on-primary": v("on-primary"),
+        "on-down": v("on-down"),
+
+        // Old names, now aliases. New code uses the names above.
+        purple: { neon: v("accent"), dim: v("accent") },
         cyber: {
-          bg: "#0a0a0f",
-          surface: "#13131a",
-          "surface-2": "#1a1a24",
-          border: "#1e1e2a",
-          "border-bright": "#2a2a3e",
-          text: "#e6e6ee",
-          // Raised from #8888a0 / #555568: the faint grey failed WCAG AA on
-          // the card surface (2.6:1). These two read at about 6.7:1 and 4.6:1.
-          "text-dim": "#9a9ab2",
-          "text-faint": "#7d7d93",
+          bg: v("bg"),
+          surface: v("surface"),
+          "surface-2": v("surface-2"),
+          border: v("line"),
+          "border-bright": v("line-strong"),
+          text: v("text"),
+          "text-dim": v("muted"),
+          "text-faint": v("faint"),
         },
-        success: "#22c55e",
-        warning: "#f59e0b",
-        danger: "#ef4444",
+        success: v("up"),
+        warning: v("warn"),
+        danger: v("down"),
       },
       fontFamily: {
-        // Numbers, headings and labels stay in the monospace that gives Pythia
-        // its look; running text uses the system sans, which reads far more
-        // easily in paragraphs and fits a phone screen.
-        mono: ['"JetBrains Mono"', '"Fira Code"', "monospace"],
-        sans: ['"Inter"', '"Segoe UI Variable Text"', '"Segoe UI"', "system-ui", "-apple-system", "Roboto", "sans-serif"],
+        sans: ["var(--font-sans)"],
+        // `font-mono` used to switch to a terminal face. Numbers now stay in
+        // the sans with tabular figures (see App.css); real code uses font-code.
+        mono: ["var(--font-sans)"],
+        code: ["var(--font-code)"],
+      },
+      borderRadius: {
+        control: "var(--radius-control)",
+        card: "var(--radius-card)",
+        sheet: "var(--radius-sheet)",
+      },
+      boxShadow: {
+        card: "0 1px 2px rgb(0 0 0 / 0.04), 0 1px 1px rgb(0 0 0 / 0.02)",
+        sheet: "0 -8px 40px rgb(0 0 0 / 0.18)",
+        pop: "0 8px 30px rgb(0 0 0 / 0.14)",
       },
       keyframes: {
-        "glow-pulse": {
-          "0%, 100%": { boxShadow: "0 0 8px rgba(0,240,255,0.3)" },
-          "50%": { boxShadow: "0 0 20px rgba(0,240,255,0.6)" },
-        },
-        "pulse-red": {
-          "0%, 100%": { boxShadow: "0 0 8px rgba(239,68,68,0.4)" },
-          "50%": { boxShadow: "0 0 22px rgba(239,68,68,0.8)" },
-        },
+        // The old glow and scan animations are kept as names so classes in
+        // older pages still resolve, but they no longer move or glow.
+        "glow-pulse": { "0%, 100%": {} },
+        "pulse-red": { "0%, 100%": {} },
+        "scan-line": { "0%, 100%": {} },
         "spin-slow": { to: { transform: "rotate(360deg)" } },
         "fade-in": { from: { opacity: "0" }, to: { opacity: "1" } },
         "slide-up": {
-          from: { opacity: "0", transform: "translateY(10px)" },
+          from: { opacity: "0", transform: "translateY(8px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
-        "scan-line": {
-          "0%": { transform: "translateX(-100%)" },
-          "100%": { transform: "translateX(100%)" },
-        },
+        "sheet-up": { from: { transform: "translateY(24px)", opacity: "0" }, to: { transform: "translateY(0)", opacity: "1" } },
       },
       animation: {
-        "glow-pulse": "glow-pulse 2s ease-in-out infinite",
-        "pulse-red": "pulse-red 1.6s ease-in-out infinite",
+        "glow-pulse": "none",
+        "pulse-red": "none",
+        "scan-line": "none",
         "spin-slow": "spin-slow 3s linear infinite",
-        "fade-in": "fade-in 0.3s ease-out",
-        "slide-up": "slide-up 0.35s ease-out",
-        "scan-line": "scan-line 3s linear infinite",
+        "fade-in": "fade-in 0.2s ease-out",
+        "slide-up": "slide-up 0.25s ease-out",
+        "sheet-up": "sheet-up 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
       },
     },
   },
