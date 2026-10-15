@@ -384,3 +384,69 @@ def test_daily_job_writes_ui_report_collection_and_monthly(lake):
 
 def test_daily_without_a_snapshot_is_a_no_op(lake):
     assert daily.run() == {}
+
+
+# ---------------------------------------------------------------- stale sources (found on the first real run)
+
+def test_stale_cardmarket_does_not_count_as_todays_price():
+    card = {"id": "x-2", "tcgplayer": {}, "cardmarket": {"updatedAt": "2026/07/01", "prices": {"trendPrice": 30.0}},
+            "set": {"releaseDate": "2023/09/22"}}
+    r = col.card_row(card, "2026-10-15")
+    assert not col.fresh(r["cm_updated"], "2026-10-15", col.CM_FRESH_DAYS)
+    assert col.fresh("2026-10-05", "2026-10-15", col.CM_FRESH_DAYS) and not col.fresh(None, "2026-10-15", 14)
+    assert not col.keep(r, 2.0, 1.1), "a Cardmarket trend from July is not today's price"
+    assert col.usd_value(r, 1.1) is None
+    f = col.freshness([r, {**r, "cm_updated": "2026-10-14", "tp_market": 5.0, "tp_updated": "2026-10-15"}], "2026-10-15")
+    assert f["cardmarket_cards"] == 2 and f["cardmarket_fresh"] == 1 and f["cardmarket_newest"] == "2026-10-14"
+    assert f["tcgplayer_cards"] == 1 and f["tcgplayer_fresh"] == 1
+
+
+def test_stale_cardmarket_rows_have_no_cardmarket_features():
+    df = pl.DataFrame({
+        "date": ["2026-10-15", "2026-10-15"], "card_id": ["a", "b"], "name": ["A", "B"], "rarity": ["Rare"] * 2,
+        "number": ["1", "2"], "set_printed_total": [100, 100], "release_date": ["2025-01-01"] * 2,
+        "supertype": ["Pokémon"] * 2, "price": [10.0, 10.0], "tp_market": [10.0, 10.0], "tp_low": [8.0, 12.0],
+        "cm_trend": [9.0, 9.0], "cm_avg1": [9.0, 9.0], "cm_avg7": [8.0, 8.0], "cm_avg30": [7.0, 7.0],
+        "cm_updated": ["2026-10-14", "2026-07-01"], "eurusd": [1.1, 1.1]})
+    f = pdata.features(df)
+    assert f["cm_fresh"].to_list() == [True, False] and f["cm_age_days"].to_list() == [1, 106]
+    for c in ("cm_trend_30", "cm_mom_1_7", "cm_mom_7_30", "spread"):
+        assert f[c][0] is not None and f[c][1] is None, c
+    assert f["tp_low_gap"][0] == pytest.approx(math.log(0.8)) and f["tp_low_gap"][1] == pytest.approx(math.log(1.2))
+
+
+def test_sets_are_rebuilt_from_the_cards_when_the_sets_endpoint_fails(lake):
+    m = Market(date(2026, 3, 1), n_sets=3, per_set=10)
+    inner = m.opener()
+
+    def opener(url, h, t):
+        return (500, {}, b"") if "/sets" in url else inner(url, h, t)
+
+    meta = col.collect("2026-03-01", min_usd=0.0, client=col.Client(opener=opener, sleep=lambda s: None, spacing=0.0,
+                                                                    retries=2), log=lambda *a: None)
+    assert meta["sets_source"] == "cards" and any("sets" in e for e in meta["errors"])
+    sets = pl.read_parquet(lake / "sets" / "date=2026-03-01" / "sets.parquet")
+    assert sets.height == 3 and sets["release_date"].null_count() == 0
+    assert meta["freshness"]["tcgplayer_fresh"] == meta["cards_kept"]
+
+
+def test_feed_header_follows_the_lab_convention():
+    meta = {"snapshot": "2026-10-15", "cards": 1234,
+            "freshness": {"cardmarket_cards": 100, "cardmarket_fresh_share": 0.1, "cardmarket_newest": "2026-07-01"}}
+    mstat = {"validated": False, "history_days": 1}
+    coll = {"started": "2026-10-15", "returnPct": -24.0, "equity": 760.0, "start": 1000.0}
+    al = {"moves": [{"name": "Charizard ex", "set": "151", "move": 0.4, "basis": "over 7 days", "price": 120.0}],
+          "undervalued": []}
+    top = [{"name": "Pikachu", "set": "Base", "pred90dPct": 12.0, "priceUsd": 20.0, "predSrc": "prior"}]
+    now = daily.datetime(2026, 10, 15, 9, tzinfo=daily.timezone.utc)
+    h = daily.feed(meta, mstat, coll, al, top, now=now)
+    assert h["title"] == "Pokemon cards" and h["status"] == "watch" and h["updated_ms"] > 0
+    assert "moved strongly" in h["headline"] and "by hand" in h["headline"]
+    labels = [i["label"] for i in h["items"]]
+    assert labels[0].startswith("Charizard ex") and "Cardmarket prices are stale" in labels
+    assert all(0 <= i.get("importance", 0) <= 100 for i in h["items"])
+    quiet = daily.feed(meta, mstat, coll, {"moves": [], "undervalued": []}, top, now=now)
+    assert quiet["status"] == "ok" and "nothing unusual" in quiet["headline"]
+    late = daily.feed(meta, mstat, coll, al, top, now=daily.datetime(2026, 10, 20, tzinfo=daily.timezone.utc))
+    assert late["status"] == "bad" and "has not run for 5 days" in late["headline"]
+    assert "—" not in json.dumps(h)

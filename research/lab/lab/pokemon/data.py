@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from ..collect.pokemon import lake
+from ..collect.pokemon import CM_FRESH_DAYS, lake
 
 # Characters collectors pay up for. Matched as whole words in the card name.
 CHARACTERS: dict[str, list[str]] = {
@@ -111,11 +111,26 @@ def load_cards(root: Path | None = None) -> pl.DataFrame:
         last = fx.get(d, last)
         by_day[d] = last
     df = df.with_columns(eurusd=pl.col("date").replace_strict(by_day, default=None, return_dtype=pl.Float64))
+    df = with_freshness(df)
     return df.with_columns(
         price=pl.when(pl.col("tp_market") > 0).then(pl.col("tp_market"))
-        .otherwise(pl.col("cm_trend") * pl.col("eurusd")),
+        .when(pl.col("cm_fresh")).then(pl.col("cm_trend") * pl.col("eurusd")),
         price_src=pl.when(pl.col("tp_market") > 0).then(pl.lit("tcgplayer")).otherwise(pl.lit("cardmarket")),
     ).filter(pl.col("price") > 0).sort("card_id", "date")
+
+
+def with_freshness(df: pl.DataFrame) -> pl.DataFrame:
+    """`cm_fresh`: Cardmarket's block was updated within CM_FRESH_DAYS of the
+    snapshot. The API stopped refreshing Cardmarket for most cards in mid 2026
+    while TCGplayer stays daily; a months-old trend, avg1 or avg30 describes
+    those months, not today, so every Cardmarket feature and the spread use
+    fresh rows only. `cm_age_days` is how old the block was."""
+    if "cm_updated" not in df.columns:
+        return df.with_columns(cm_fresh=pl.lit(False), cm_age_days=pl.lit(None, pl.Int64))
+    age = (pl.col("date").str.to_date(strict=False)
+           - pl.col("cm_updated").cast(pl.Utf8).str.to_date(strict=False)).dt.total_days()
+    return df.with_columns(cm_age_days=age).with_columns(
+        cm_fresh=(pl.col("cm_age_days") <= CM_FRESH_DAYS).fill_null(False))
 
 
 def load_catalog(root: Path | None = None) -> pl.DataFrame:
@@ -131,6 +146,11 @@ def features(df: pl.DataFrame) -> pl.DataFrame:
     ch = [character(n) for n in df["name"].to_list()]
     sec = [is_secret(n, t) for n, t in zip(df["number"].to_list(), df["set_printed_total"].to_list())]
     alt = [is_alt_art(r, s) for r, s in zip(df["rarity"].to_list(), sec)]
+    if "cm_fresh" not in df.columns:
+        df = with_freshness(df)
+    # Stale Cardmarket numbers are not today's: every feature built on them is
+    # null for a stale row (the raw columns stay, for the record).
+    fresh = pl.col("cm_fresh")
     out = df.with_columns(
         rarity_group=pl.Series(rg, dtype=pl.Utf8),
         character=pl.Series(ch, dtype=pl.Utf8),
@@ -138,11 +158,15 @@ def features(df: pl.DataFrame) -> pl.DataFrame:
         alt_art=pl.Series(alt, dtype=pl.Boolean),
         set_age_days=(pl.col("date").str.to_date() - pl.col("release_date").str.to_date()).dt.total_days(),
         log_price=pl.col("price").log(),
-        cm_mom_1_7=pl.col("cm_avg1") / pl.col("cm_avg7") - 1,
-        cm_mom_7_30=pl.col("cm_avg7") / pl.col("cm_avg30") - 1,
-        cm_trend_30=pl.col("cm_trend") / pl.col("cm_avg30") - 1,
-        spread=(pl.col("tp_market") / (pl.col("cm_trend") * pl.col("eurusd"))).log(),
+        cm_mom_1_7=pl.when(fresh).then(pl.col("cm_avg1") / pl.col("cm_avg7") - 1),
+        cm_mom_7_30=pl.when(fresh).then(pl.col("cm_avg7") / pl.col("cm_avg30") - 1),
+        cm_trend_30=pl.when(fresh).then(pl.col("cm_trend") / pl.col("cm_avg30") - 1),
+        spread=pl.when(fresh).then((pl.col("tp_market") / (pl.col("cm_trend") * pl.col("eurusd"))).log()),
         is_pokemon=pl.col("supertype").str.starts_with("Pok"),
+        # Cheapest listing against recent sales on TCGplayer: sellers undercutting
+        # the market price, or not. Known today without any history.
+        tp_low_gap=pl.when((pl.col("tp_low") > 0) & (pl.col("tp_market") > 0))
+        .then((pl.col("tp_low") / pl.col("tp_market")).log().clip(-3.0, 1.0)),
     )
     # Clip the Cardmarket momentum: thin cards have wild averages.
     return out.with_columns([pl.col(c).clip(-0.9, 3.0).fill_nan(None) for c in ("cm_mom_1_7", "cm_mom_7_30",
