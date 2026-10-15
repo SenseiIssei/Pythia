@@ -12,6 +12,9 @@ and losses.
 
 lab.ops.notify builds the data from the engine's GET /api/state
 (notify.chart_data) and sends the file as a Telegram photo.
+
+render_trends draws the CS2 Steam market summary (lab.cs2.trends): the
+median 7-day change by item group, and the day's top movers, in percent.
 """
 
 from __future__ import annotations
@@ -158,6 +161,65 @@ def _bars(ax, items: list[tuple[str, float]], title: str, signed: bool, empty: s
         text = _money(v) if signed else f"{_plain_money(v)} · {abs(v) / total * 100:.0f} %"
         ax.annotate(text, (v, yi), xytext=(5 if v >= 0 else -5, 0), textcoords="offset points",
                     ha="left" if v >= 0 else "right", va="center", fontsize=9, color=INK)
+
+
+def _pct_bars(ax, items: list[tuple[str, float]], title: str, empty: str) -> None:
+    """Signed percent bars, green up and red down, the name above each bar."""
+    _style(ax)
+    ax.set_title(title, loc="left", fontsize=11, color=INK, fontweight="bold", pad=10)
+    if not items:
+        ax.axis("off")
+        ax.text(0.5, 0.5, empty, ha="center", va="center", fontsize=11, color=MUTED, transform=ax.transAxes)
+        return
+    items = items[:8]
+    labels = [lab if len(lab) <= 40 else lab[:39] + "…" for lab, _ in items][::-1]
+    vals = [v for _, v in items][::-1]
+    y = list(range(len(vals)))
+    ax.barh(y, vals, color=[UP if v >= 0 else DOWN for v in vals], height=0.42, alpha=0.9, zorder=2)
+    ax.set_yticks([])
+    ax.spines["left"].set_visible(False)
+    ax.grid(axis="x", color=GRID, linewidth=0.8, zorder=0)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: "0 %" if abs(v) < 1e-9 else f"{v:+.0f} %"))
+    ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
+    lo, hi = min(vals + [0.0]), max(vals + [0.0])
+    pad = (hi - lo) * 0.35 or 1.0
+    ax.set_xlim(lo - (pad if lo < 0 else 0), hi + pad)
+    ax.set_ylim(-0.6, len(vals) - 0.1)
+    ax.axvline(0, color=MUTED, linewidth=0.8, alpha=0.6)
+    x0 = ax.get_xlim()[0]
+    for yi, v, lab in zip(y, vals, labels):
+        ax.text(x0, yi + 0.27, lab, ha="left", va="bottom", fontsize=9, color=INK)
+        ax.annotate(f"{v:+.1f} %", (v, yi), xytext=(5 if v >= 0 else -5, 0), textcoords="offset points",
+                    ha="left" if v >= 0 else "right", va="center", fontsize=9, color=INK)
+
+
+TRENDS_SIZE_IN = (8.0, 8.0)
+
+
+def render_trends(data: dict, path: Path | str, title: str, subtitle: str = "") -> Path:
+    """The CS2 Steam market summary: median 7-day change by group on top,
+    the day's top movers below. `data`: {"groups": [(name, pct)], "movers":
+    [(name, pct)], "groups_title", "movers_title"}."""
+    if plt is None:
+        raise RuntimeError("matplotlib is not installed")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.rcParams.update({"font.family": "DejaVu Sans", "axes.titlesize": 11, "font.size": 10})
+    fig = plt.figure(figsize=TRENDS_SIZE_IN, dpi=DPI, facecolor="white")
+    try:
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.35, left=0.06, right=0.94, top=0.83, bottom=0.05)
+        fig.text(0.06, 0.965, title, fontsize=16, fontweight="bold", color=INK, ha="left", va="top")
+        if subtitle:
+            fig.text(0.06, 0.925, subtitle if len(subtitle) <= 95 else subtitle[:94] + "…", fontsize=9.5,
+                     color=MUTED, ha="left", va="top")
+        _pct_bars(fig.add_subplot(gs[0]), data.get("groups") or [], data.get("groups_title") or "By group",
+                  "No group with enough items")
+        _pct_bars(fig.add_subplot(gs[1]), data.get("movers") or [], data.get("movers_title") or "Top movers",
+                  "No liquid item moved")
+        fig.savefig(path, dpi=DPI, facecolor="white")
+    finally:
+        plt.close(fig)
+    return path
 
 
 def render(data: dict, path: Path | str, title: str, subtitle: str = "") -> Path:

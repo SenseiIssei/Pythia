@@ -21,6 +21,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
 | hourly :12 | CS2 skins: Skinport snapshots and sales history, Steam prices for the watchlist, then models (refit daily), alerts, the play-money portfolio (weekly) and the board for the app (`lab.collect.cs2`, then `lab.cs2.run`; 2 Skinport requests and up to 100 Steam requests, about 6 minutes) | `/etc/cron.d/pythia-cs2` |
+| 14:40, 20:40 | CS2 Steam market: the day's Steam price snapshot from csgotrader's public file, then trends, trend alerts with Steam and Skinport links, and a summary card with a chart (`lab.collect.cs2 --steam-market`, then `lab.cs2.trends`; 2 GETs, seconds; the second run only catches a late rebuild) | `jobs.yaml` only (`cs2-trends`) |
 | every 15 min | trending watcher: DexScreener boosted tokens, Binance gainers and volume surges, surge alerts on coins Alpaca lists, a daily on-chain hype digest from 08:00 (`lab.ops.trending`, seconds; reads only) | `/etc/cron.d/pythia-trending` |
 | hourly :07 | health check of all of the above; posts when not ok two runs in a row | `/etc/cron.d/pythia-health` |
 | every 10 minutes | listings watcher: new pairs on Alpaca, Binance, Coinbase, Kraken and Binance listing announcements, posted to Telegram (`lab.ops.listings`, seconds); then the listings paper book, off unless the W6 rule passed (`lab.paper.listings_book`) | `/etc/cron.d/pythia-listings` |
@@ -649,6 +650,51 @@ docker run --rm --memory 4g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app py
 ```
 
 The health check has a `cs2 collector` row (last run within three hours).
+
+### Steam market trends (daily, job `cs2-trends`)
+
+Steam's own endpoint refuses the collector (above), and that is left alone:
+no other user agent, no proxy, nothing that works around it. The Steam side
+comes instead from the public price files of the open-source CSGO Trader
+browser extension (`https://prices.csgotrader.app/latest/steam.json` and
+`exchange_rates.json`; the extension downloads the same files for every
+user). `steam.json` has, for about 34,000 items, the average Steam Community
+Market sale price in USD over the last 24 hours, 7, 30 and 90 days, rebuilt
+once a day (13:25 UTC on 2026-10-15); no volume. There are no published terms
+or limits for the files: the job takes them once a day (about 0.6 MB
+gzipped), names itself in the user agent, and the CS2 page and the reports
+name the source. Should the owner of the files object, switch the job off
+(`enabled: false` in `jobs.yaml`).
+
+The job (table entry `cs2-trends`, 14:40 and 20:40 UTC, the second one only
+catches a late rebuild) runs `python -m lab.collect.cs2 --steam-market` (the
+day's snapshot, dated by the file's Last-Modified day, stored once) and then
+`python -m lab.cs2.trends`: 1, 7 and 30-day changes (the source's windows
+until our own snapshots cover the span), momentum against mean reversion by
+group (cases, capsules, stickers, knives and gloves, skins by wear, price
+tiers as a stand-in for rarity), the Steam against Skinport spread after both
+fees (Steam keeps about 13 % and pays in wallet funds; Skinport 8 %, cash),
+new cases and capsules and the cases around the latest drop. It posts a trend
+alert when something is notable (top movers 15 % or more in a day, or 20 % off
+the weekly average before there is a day-old snapshot; cases up 15 % in a
+week; a new case or capsule; Steam to Skinport clearing 5 % after fees, or a
+Steam premium far above its group), each item with its Steam market listing
+and Skinport page, and once a day a summary card with a small chart (category
+`cs2` in the app's notification switches). Information only.
+
+| Path | What |
+|---|---|
+| `cs2/daily/steam_market/date=*.parquet` | the daily Steam snapshot (USD averages per window, EUR per USD), kept forever (about 1 MB a day) |
+| `cs2/steam_market.json` | the last snapshot run |
+| `cs2/trends/latest.json` | what the CS2 page shows; the hourly board carries it as `steamTrends` |
+| `cs2/trends/alerts_state.json`, `alerts.jsonl` | alerts sent, 3-day cooldown per item and kind; the last summary day |
+| `reports/cs2_trends/latest.{md,json}` | the daily report, also a lab feed |
+
+Run once by hand, without posting:
+
+```bash
+docker run --rm --memory 3g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab sh -c 'python -m lab.collect.cs2 --steam-market && python -m lab.cs2.trends --dry-run'
+```
 
 ## Trending watcher
 

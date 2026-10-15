@@ -205,7 +205,22 @@ it) run at 07:05 UTC, see `research/ops/README.md`. Data, forecasts, a
 paper collection and alerts only: nothing here can place an order. Lake under
 `<data>/pokemon/`; results and caveats in `results/pokemon.md`. The daily
 report `reports/pokemon/latest.json` carries the lab feed header, so the
-cards show up on the Research page and in the Home insights.
+cards show up on the Research page and in the Home insights. Every card
+alert carries what a buyer needs (prices with dates, a stale-Cardmarket
+warning, fair value, forecasts and how far to trust them) and links to the
+card on Cardmarket and TCGplayer (`lab.pokemon.links`).
+
+## CS2 Steam market trends
+
+Steam refuses the hourly collector's own price requests (429), and the lab
+does not work around that. `lab.collect.cs2 --steam-market` takes one daily
+snapshot of Steam Community Market average sale prices from the public price
+file of the open-source CSGO Trader extension, and `lab.cs2.trends` turns it
+into 1/7/30-day changes, momentum against mean reversion by group, the Steam
+against Skinport spread after fees, new cases and drops, trend alerts with
+Steam and Skinport links, and a daily summary card with a chart (job
+`cs2-trends`, see `research/ops/README.md`; results in `results/cs2.md`).
+Information only.
 
 ## Strategy factory (W10)
 
