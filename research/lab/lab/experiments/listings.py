@@ -112,14 +112,27 @@ def net(entry: float, exit_: float, cost: float = COST) -> float:
     return exit_ * (1 - cost) / (entry * (1 + cost)) - 1
 
 
-def event_returns(s: Series, btc: Series, entry_us: int, horizons=HORIZONS, cost: float = COST) -> dict:
-    """Net, gross and BTC returns from entry_us to entry_us + h days, for each h."""
+def event_returns(s: Series, btc: Series, entry_us: int, horizons=HORIZONS, cost: float = COST,
+                  data_end: int | None = None) -> dict:
+    """Net, gross and BTC returns from entry_us to entry_us + h days, for each h.
+
+    A series that stopped trading before the exit (delisted, or the ticker went
+    quiet for days) is sold at its last close, with BTC measured to the same
+    time, when the data runs on for two more days (`data_end`); so a coin that
+    died within the window counts as the loss it was instead of dropping out.
+    """
     e = s.at(entry_us)
     b0 = btc.at(entry_us)
     out = {"entry_us": entry_us, "entry_px": e}
     for h in horizons:
-        x = s.at(entry_us + h * DAY_US) if entry_us + h * DAY_US <= s.end + STALE_H * HOUR_US else float("nan")
-        bx = btc.at(entry_us + h * DAY_US)
+        t_x = entry_us + h * DAY_US
+        if t_x <= s.end + STALE_H * HOUR_US:
+            x, bx, ended = s.at(t_x), btc.at(t_x), False
+        elif data_end is not None and s.end + 2 * DAY_US <= data_end and s.end > entry_us:
+            x, bx, ended = float(s.c[-1]), btc.at(s.end), True
+        else:
+            x, bx, ended = float("nan"), float("nan"), False
+        out[f"ended_{h}"] = ended
         out[f"gross_{h}"] = x / e - 1 if e > 0 and x > 0 else float("nan")
         out[f"net_{h}"] = net(e, x, cost)
         out[f"stress_{h}"] = net(e, x, STRESS)
@@ -128,11 +141,33 @@ def event_returns(s: Series, btc: Series, entry_us: int, horizons=HORIZONS, cost
     return out
 
 
-def lake_series(symbol: str) -> list[Series]:
-    """The lake's hourly closes of a Binance pair, split into segments like picks.hourly_segments."""
-    from .picks import hourly_segments
-    return [Series(seg["open_time_us"].to_numpy().astype(np.int64), seg["close"].to_numpy().astype(float))
-            for seg in hourly_segments(symbol)]
+def lake_series(symbol: str) -> tuple[list[Series], bool]:
+    """The lake's hourly closes of a Binance pair, split into segments like
+    picks.hourly_segments (a gap over three days or a tenfold move inside one
+    hour starts a new coin), except that tenfold moves in the first 31 days
+    after the pair's first bar do not split: opening hours of a listing often
+    move that much, and no redenomination happens in a pair's first month.
+    Returns (segments, whether such an early tenfold move was kept)."""
+    import polars as pl
+
+    from . import picks
+    d = picks.ROOT / "hist" / "binance_spot" / "klines_1h" / f"symbol={symbol}"
+    files = sorted(d.glob("*.parquet"))
+    if not files:
+        return [], False
+    h = (pl.concat([pl.read_parquet(f, columns=["open_time_us", "close"]) for f in files], how="vertical_relaxed")
+         .unique("open_time_us").sort("open_time_us").filter(pl.col("close") > 0))
+    if h.is_empty():
+        return [], False
+    t0 = int(h["open_time_us"][0])
+    early = pl.col("open_time_us") < t0 + 31 * DAY_US
+    jump = ((pl.col("close").log() - pl.col("close").shift(1).log()).abs() > picks.JUMP_SPLIT).fill_null(False)
+    gap = (pl.col("open_time_us").diff() > picks.GAP_SPLIT_US).fill_null(False)
+    h = h.with_columns(brk=gap | (jump & ~early), kept=jump & early & ~gap).with_columns(seg=pl.col("brk").cum_sum())
+    kept = bool(h["kept"].any())
+    segs = [Series(g["open_time_us"].to_numpy().astype(np.int64), g["close"].to_numpy().astype(float))
+            for _, g in h.group_by("seg", maintain_order=True)]
+    return segs, kept
 
 
 def is_coin(base: str) -> bool:
@@ -153,7 +188,7 @@ def family_a(first: dict[str, Series], btc: Series, now_us: int) -> list[dict]:
         if s.start < FIRST_OK or not is_coin(base) or s.start > now_us - 31 * DAY_US:
             continue
         for label, hours in ENTRIES_A.items():
-            r = event_returns(s, btc, s.start + hours * HOUR_US)
+            r = event_returns(s, btc, s.start + hours * HOUR_US, data_end=min(btc.end, now_us))
             rows.append({"family": "A", "entry": label, "symbol": sym, "base": base, "listed_us": s.start, **r})
     return rows
 
@@ -175,7 +210,7 @@ def cross_rows(family: str, venue: str, listed: dict[str, int], first: dict[str,
         if t_l - f.start < MIN_PRIOR_DAYS * DAY_US or not (s.start <= t_l <= s.end):
             continue
         entry = (t_l // HOUR_US + 1) * HOUR_US
-        r = event_returns(s, btc, entry)
+        r = event_returns(s, btc, entry, data_end=min(btc.end, now_us))
         pre0, pre1 = s.at(t_l - DAY_US), s.at(t_l)
         btc_pre = btc.at(t_l) / btc.at(t_l - DAY_US) - 1
         r["pre_1"] = pre1 / pre0 - 1 if pre0 > 0 and pre1 > 0 else float("nan")
@@ -361,33 +396,48 @@ def _save(name: str, d: dict) -> None:
     os.replace(tmp, CACHE / f"{name}.json")
 
 
+def _coinbase_candles(pid: str, start: float, end: float, gran: int) -> list:
+    q = urllib.parse.urlencode({"granularity": gran,
+                                "start": datetime.fromtimestamp(start, timezone.utc).isoformat(),
+                                "end": datetime.fromtimestamp(end, timezone.utc).isoformat()})
+    time.sleep(0.15)
+    return get_json(f"https://api.exchange.coinbase.com/products/{pid}/candles?{q}") or []
+
+
 def coinbase_first(bases: set[str]) -> dict[str, int]:
-    """base -> first daily candle (us) of its USD pair on Coinbase. Delisted products are not in the list."""
-    known = _cache("coinbase_first")
+    """base -> start (us) of the first hourly candle of its USD pair on Coinbase.
+
+    The first daily candle finds the day, the hourly candles of that day the
+    hour: the first trade happened inside that hour, so an entry at the end of
+    it (the first full hour after) never trades before the listing did.
+    Products Coinbase dropped from its list are not found."""
+    known = _cache("coinbase_first_hour")
     prods = get_json("https://api.exchange.coinbase.com/products")
-    for p in prods:
-        base = str(p.get("base_currency") or "").upper()
-        if p.get("quote_currency") != "USD" or base not in bases or base in known:
-            continue
-        pid = p["id"]
+    todo = [p for p in prods if p.get("quote_currency") == "USD"
+            and str(p.get("base_currency") or "").upper() in bases
+            and str(p.get("base_currency") or "").upper() not in known]
+    for i, p in enumerate(todo):
+        base, pid = str(p["base_currency"]).upper(), p["id"]
         start = datetime(2015, 1, 1, tzinfo=timezone.utc).timestamp()
         end_all = time.time()
-        first = None
-        while start < end_all and first is None:
-            end = min(start + 299 * 86400, end_all)
-            q = urllib.parse.urlencode({"granularity": 86400,
-                                        "start": datetime.fromtimestamp(start, timezone.utc).isoformat(),
-                                        "end": datetime.fromtimestamp(end, timezone.utc).isoformat()})
-            try:
-                c = get_json(f"https://api.exchange.coinbase.com/products/{pid}/candles?{q}")
-            except urllib.error.HTTPError:
-                break
-            if c:
-                first = int(min(row[0] for row in c)) * 1_000_000
-            start = end
-            time.sleep(0.15)
+        first_day = None
+        try:
+            while start < end_all and first_day is None:
+                end = min(start + 299 * 86400, end_all)
+                c = _coinbase_candles(pid, start, end, 86400)
+                if c:
+                    first_day = int(min(row[0] for row in c))
+                start = end
+            first = None
+            if first_day is not None:
+                c = _coinbase_candles(pid, first_day, first_day + 86400, 3600)
+                first = int(min(row[0] for row in c)) * 1_000_000 if c else first_day * 1_000_000
+        except urllib.error.HTTPError:
+            first = None
         known[base] = first
-        _save("coinbase_first", known)
+        _save("coinbase_first_hour", known)
+        if i % 25 == 0:
+            print(f"  coinbase {i}/{len(todo)}", flush=True)
     return {b: t for b, t in known.items() if t}
 
 
@@ -417,29 +467,36 @@ def kraken_first(bases: set[str]) -> dict[str, int]:
     return {b: t for b, t in known.items() if t}
 
 
-def alpaca_first() -> dict[str, int]:
-    """base -> first daily bar (us) of every Alpaca crypto USD pair. Pairs Alpaca removed are not listed."""
+def alpaca_first(bases: set[str]) -> dict[str, int]:
+    """base -> first daily bar (us) of its Alpaca USD pair.
+
+    Alpaca's crypto bars need no key, so every coin of the lake is asked for,
+    which also finds pairs Alpaca has since removed. With the paper key pair in
+    the environment the asset list adds any coin the lake does not have. The
+    bars start in 2021-01, so the first ones are Alpaca's launch batch, not
+    listings (drop_launch)."""
     known = _cache("alpaca_first")
     k = (os.environ.get("APCA_API_KEY_ID") or "").strip()
     s = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("APCA_API_SECRET") or "").strip()
     h = {"APCA-API-KEY-ID": k, "APCA-API-SECRET-KEY": s} if k and s else {}
+    want = set(bases)
     if h:
         assets = get_json("https://paper-api.alpaca.markets/v2/assets?asset_class=crypto", h)
-        syms = [a["symbol"] for a in assets if str(a.get("symbol", "")).endswith("/USD")]
-    else:
-        syms = [f"{b}/USD" for b in known] or []
-    for sym in syms:
-        base = sym.split("/")[0]
-        if base in known:
-            continue
+        want |= {str(a["symbol"]).split("/")[0] for a in assets if str(a.get("symbol", "")).endswith("/USD")}
+    todo = sorted(b for b in want if b not in known and b.isascii() and b.isalnum())
+    for i, base in enumerate(todo):
+        sym = f"{base}/USD"
         q = urllib.parse.urlencode({"symbols": sym, "timeframe": "1Day", "start": "2020-01-01T00:00:00Z", "limit": 1})
         try:
             bars = (get_json(f"https://data.alpaca.markets/v1beta3/crypto/us/bars?{q}", h).get("bars") or {}).get(sym) or []
             known[base] = int(datetime.fromisoformat(bars[0]["t"].replace("Z", "+00:00")).timestamp() * 1e6) if bars else None
         except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError):
-            known[base] = None
-        _save("alpaca_first", known)
+            continue                        # asked again next run
+        if i % 50 == 0:
+            _save("alpaca_first", known)
+            print(f"  alpaca {i}/{len(todo)}", flush=True)
         time.sleep(0.3)
+    _save("alpaca_first", known)
     return {b: t for b, t in known.items() if t}
 
 
@@ -500,6 +557,12 @@ def write_results(res: dict) -> None:
           "(excess); the band is a bootstrap over listing months.", ""]
     if res.get("missing"):
         L += ["Not measured: " + "; ".join(res["missing"]) + ".", ""]
+    ended = {h: sum(bool(r.get(f"ended_{h}")) for r in res["rows_a"] + res["rows_b"] + res["rows_c"])
+             for h in HORIZONS}
+    if any(ended.values()) or res.get("early_jumps"):
+        L += [f"Coins that stopped trading inside the window were sold at their last close (events per horizon: "
+              + ", ".join(f"{h}d {n}" for h, n in ended.items()) + f"). {len(res.get('early_jumps') or [])} pairs "
+              "moved tenfold within one hour in their first month and were kept as one coin.", ""]
     L += ["### Every cell", ""] + cell_table(res["cells"], res["picks"]) + [""]
     if res.get("pre"):
         L += ["### The day before a cross-venue listing (not tradable on the alert)", "",
@@ -530,15 +593,50 @@ def headline(res: dict) -> str:
     return ("Rule passes: paper book on new Alpaca listings. " if v["passed"] else "No rule passes, alerts only. ") + s + "."
 
 
-def save_report(res: dict) -> None:
+def clean(v):
+    """JSON without NaN or infinity (the engine's parser rejects them)."""
+    if isinstance(v, dict):
+        return {str(k): clean(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [clean(x) for x in v]
+    if isinstance(v, (np.floating, float)):
+        return float(v) if math.isfinite(v) else None
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.bool_):
+        return bool(v)
+    return v
+
+
+def feed_items(res: dict) -> list[dict]:
+    """One item per family pick for the app's lab feeds."""
+    items = []
+    for fam, k in res["picks"].items():
+        if not k:
+            continue
+        c = res["cells"][k]
+        o = c["oos"]
+        good = o.get("n", 0) >= 10 and o.get("p025", -1) > 0
+        items.append({"label": k, "value": pct(o.get("mean")), "status": "ok" if good else "watch",
+                      "detail": f"{o.get('n', 0)} events out of sample, net of 35 bps a side and minus BTC; "
+                                f"bootstrap 95 % {pct(o.get('p025'))} to {pct(o.get('p975'))}, "
+                                f"Holm p {c.get('holm_p', 1):.2f}, deflated p {c.get('deflated_p', 0):.2f}",
+                      "link": "study:listings"})
+    return items
+
+
+def save_report(res: dict, now_ms: int | None = None) -> None:
     d = REPORTS / "listing_effect"
     d.mkdir(parents=True, exist_ok=True)
     slim = {k: v for k, v in res.items() if not k.startswith("rows")}
     slim["verdict_text"] = headline(res)
-    out = {"generated": res["generated"], "verdict": headline(res), "passed": res["verdict"]["passed"],
+    out = {"title": "Listing effect (W6)", "updatedMs": now_ms or int(time.time() * 1000),
+           "status": "ok" if res["verdict"]["passed"] else "watch", "headline": headline(res),
+           "items": feed_items(res),
+           "generated": res["generated"], "verdict": headline(res), "passed": res["verdict"]["passed"],
            "rule": res["verdict"]["rule"], "reasons": res["verdict"]["reasons"], "detail": slim}
     tmp = d / "latest.json.tmp"
-    tmp.write_text(json.dumps(out, indent=1, default=float))
+    tmp.write_text(json.dumps(clean(out), indent=1, allow_nan=False))
     os.replace(tmp, d / "latest.json")
 
 
@@ -569,20 +667,23 @@ def analyse(first: dict[str, Series], latest: dict[str, Series], btc: Series, no
             "rows_a": rows_a, "rows_b": rows_b, "rows_c": rows_c}
 
 
-def load_lake() -> tuple[dict[str, Series], dict[str, Series], Series]:
+def load_lake() -> tuple[dict[str, Series], dict[str, Series], Series, list[str]]:
+    """(first segment, last segment, BTC, pairs whose early tenfold move was kept in one segment)."""
     syms = json.loads((ROOT / "hist" / "universe.json").read_text(encoding="utf-8"))
-    first, latest = {}, {}
+    first, latest, kept = {}, {}, []
     for i, s in enumerate(syms):
         if not s.endswith("USDT") or not s.isascii():
             continue
-        segs = lake_series(s)
+        segs, k = lake_series(s)
         if not segs:
             continue
         first[s], latest[s] = segs[0], segs[-1]
+        if k:
+            kept.append(s)
         if i % 200 == 0:
             print(f"  lake {i}/{len(syms)}", flush=True)
     btc = latest["BTCUSDT"]
-    return first, latest, btc
+    return first, latest, btc, kept
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -590,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offline", action="store_true", help="family A only, no network")
     a = ap.parse_args(argv)
     print("listings: reading the lake", flush=True)
-    first, latest, btc = load_lake()
+    first, latest, btc, kept = load_lake()
     now_us = int(time.time() * 1e6)
     bases = {s[:-4] for s in first}
     missing: list[str] = []
@@ -600,7 +701,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for name, fn in (("Coinbase listing dates", lambda: coinbase_first(bases)),
                          ("Kraken listing dates", lambda: kraken_first(bases)),
-                         ("Alpaca listing dates", alpaca_first)):
+                         ("Alpaca listing dates", lambda: alpaca_first(bases))):
             try:
                 got = fn()
             except Exception as e:  # noqa: BLE001 - one venue down leaves the rest of the study
@@ -613,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 alp = got
     res = analyse(first, latest, btc, now_us, cb, kr, alp, missing)
+    res["early_jumps"] = sorted(kept)
     write_results(res)
     save_report(res)
     print(headline(res))

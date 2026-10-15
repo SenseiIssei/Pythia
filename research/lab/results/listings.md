@@ -24,19 +24,24 @@ pair in the lab's panel). Two separate things are measured:
   its listing time. Pairs whose history starts before 2020-02-01 are left out
   (listed before the archive starts), as are stablecoins, gold, wrapped
   duplicates and leveraged tokens. A reused ticker's later segments are not
-  counted as listings.
-- B: the first daily candle of each coin's USD pair on Coinbase (public
-  candles) and the first trade of its USD pair on Kraken (public Trades with
-  since=0). Only coins with a Binance USDT pair that has traded 30 days or
+  counted as listings. A tenfold move inside one hour in a pair's first 31
+  days does not split it (opening hours move that much; a redenomination
+  does not happen in the first month).
+- B: the first hourly candle of each coin's USD pair on Coinbase (public
+  candles; the first daily candle finds the day) and the first trade of its
+  USD pair on Kraken (public Trades with since=0). Only coins with a Binance USDT pair that has traded 30 days or
   more before that date. Prices are Binance's.
-- C: the first daily bar of every Alpaca crypto USD pair (market data API).
-  Pairs whose first bar is within 45 days of the earliest one are the launch
-  batch, not listings, and are left out. Prices are Binance's.
+- C: the first daily bar of each coin's USD pair in Alpaca's crypto market
+  data (no key needed; every coin of the lake is asked for, plus Alpaca's
+  asset list when the paper key pair is set, so pairs Alpaca has since
+  removed are found too). Pairs whose first bar is within 45 days of the
+  earliest one are the launch batch, not listings, and are left out. Prices
+  are Binance's.
 
-Known biases, stated up front: Coinbase and Alpaca only return products they
-still list, so coins they later removed (often the losers) are missing from B
-and C. Coinbase's first daily candle is a day-level time, so the B entry can
-be up to a day late against the real listing. Coinbase and Kraken usually
+Known biases, stated up front: Coinbase and Kraken only return products they
+still list, so coins they later removed (often the losers) are missing from
+B. Alpaca's bars before its own venue opened come from its data feed, so a
+first bar is a proxy for the listing date. Coinbase and Kraken usually
 announce a listing before it trades; the day before is reported but cannot be
 traded on the listing alert.
 
@@ -44,7 +49,9 @@ traded on the listing alert.
 
 - Long only (Alpaca cannot short crypto). 35 bps per side (Alpaca taker plus
   slippage), 70 bps reported as stress. Every return is per event, net, and
-  judged as excess over BTC across the same window.
+  judged as excess over BTC across the same window. A coin that stops
+  trading before the exit (delisted) is sold at its last close, with BTC to
+  the same time, so dead coins count as the losses they were.
 - A: entry at the close of the first hour or of the first day after the
   listing; B and C: entry at the Binance close of the first full hour after
   the listing time. Exits after 1, 3, 7 or 30 days. Cells: A 2 x 4, B 4
@@ -57,6 +64,14 @@ traded on the listing alert.
   month share a market). One-sided p is the share of draws with a mean at or
   below 0. Holm correction over every cell with out-of-sample events.
   Deflated Sharpe of the per-event excess returns over the whole pool.
+
+Amended on 2026-10-15 before the first run, after reading the code against
+the data sources (no result had been seen): the early tenfold moves in A
+(they would have cut the wildest listings out), the Coinbase hour instead of
+the day (the day's first candle starts at midnight, which would have entered
+before the listing traded), Alpaca's bars asked for every coin (less
+survivorship in C) and the last-close exit for dead coins (they would
+otherwise drop out). Cells, split, pick and pass rule are unchanged.
 
 ## Pass rule for a paper book on Alpaca listings
 
