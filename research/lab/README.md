@@ -67,6 +67,9 @@ panel for its breadth features, so run `xs_daily` first.
 | `regime_hmm` (M7) | A Gaussian HMM regime gate (2 to 4 states, price or full features incl. breadth and funding, filtered probabilities only, monthly expanding refits) against the BTC 200-day rule and no gate, for breakout_top10, tsmom_top20, tsmom_tranches and tsmom_regime. Pre-registered, 66 trials | No. The pick (3 states, full features, switch) beats the 200-day rule in 3 of 4 books but no difference survives deflation or the bootstrap, and it hurts the best book: breakout_top10 1.02 against 1.24 with the 200-day rule. The 200-day rule stays. Deflated p over 331 trials. See `results/regime_hmm.md`. (2026-10-14) |
 | `alpaca_universe` (C16) | What the books earn on what Alpaca lists: the original books, the same books with non-Alpaca coins left in cash (what the autopilot does), and the rules choosing only among the 15 Alpaca coins (top K 5 to 15). Pre-registered, 46 trials, 35 bps | No new book, but a useful answer: leaving the unlisted coins in cash is BETTER than the original books out of sample (breakout_top10 1.17 vs 1.06, tsmom_top20 0.54 vs 0.22, tsmom_tranches 0.65 vs 0.39), so the live autopilot is set up right. Choosing only among the 15 does not beat it for breakout (0.49 vs 1.17); for momentum it looks better (tranches 0.92 vs 0.65) but the bootstrap band of the difference includes 0 and deflated p is 0.01. See `results/alpaca_universe.md`. (2026-10-15) |
 | `pokemon` (W9) | Pokemon cards: daily price snapshots (Pokemon TCG API: TCGplayer USD and Cardmarket EUR per card, sets, optional sealed from tcgcsv), rarity, character, release, reprint and US/EU spread studies, a set-grouped fair value, 30 and 90 day forecasts, a $1,000 play-money collection, Telegram alerts, the Cards page. Data and paper only, no orders | Built, no real prices yet: the API was not reachable from the build machine, so the first snapshot is the server's first run. Forecasts are a labelled fixed rule until the walk-forward validates (about 225 days for 30 d, 345 for 90 d). On synthetic markets the walk-forward finds a planted signal (rank IC 0.37, t 9.3) and rejects noise (-0.03). Card costs need +24 to +36 % to break even. See `results/pokemon.md`. (2026-10-15) |
+| `factory` (W10) | Can the lab invent its own long-only daily strategies honestly? A typed grammar (momentum, Donchian, MA cross, reversal, low vol; BTC 200-day and momentum gates, vol cap, volume confirmation, coin trend; top N by liquidity, the core 20 or Alpaca's 15 with a point-in-time twin; equal or inverse vol; daily, 3-day, weekly or weekly in 7 tranches; no-trade bands), searched on 2020-08 to 2023 only, every genome a trial in a global ledger seeded with the 377 hand-study trials, six per run to the held-back window (35 and 70 bps, drawdown below BTC, one close late, twin), survivors 30 days as forward shadow books, promotion only through the hand studies' bar. First run, 300 genomes | No paper book. 95 % of genomes look good in sample (median Sharpe 1.55; the window holds 2021); the bred cluster (top-20 trend, BTC momentum gate, every 3 days) at 2.2 to 2.6 in sample makes -0.09 to 0.88 held back (median 0.19), five of six stop. One survivor, the 5 lowest-vol of the top 20 while BTC is above its 200-day and up over 28 days: 0.88 at 35 bps, 0.69 at 70, drawdown 35 % vs 53 %, but deflated p 0.00 over 677 trials (bar 2.45); it runs 30 days as a shadow book. Weekly on the server from now on. See `results/factory_first_run.md`. (2026-10-15) |
+| `memecoins` (W7) | Daily rules on the six memecoins Alpaca lists (DOGE SHIB PEPE BONK WIF TRUMP) with a small risk budget: Donchian breakout, time-series momentum, rotation, attention (volume and Binance trade-count surges), hype filters; a sleeve at 40 % vol over 6 slots; each also on a survivorship-free twin of 24 Binance memecoins. Pre-registered, 50 trials, 35 bps | No paper book. The memecoins themselves lose (equal weight -11 % a year from 2024, drawdown 91 %; every one of the 24 is 43 to 99 % off its peak), but rules that sit out most of the time are positive: the pick (tsmom 28d, BTC gate) 0.67, drawdown 19 %, below BTC's 0.74. Near miss: top-1 rotation with the BTC gate 1.15 (70 bps 0.94, drawdown 27 %, positive every year, twin 1.11, late 1.06) but deflated p 0.01 over 427 trials and 52 % of its P&L from PEPE. Buying volume surges pays only in 2024; fading them loses. See `results/memecoins.md`. (2026-10-15) |
+| `listings` (W6) | The listing effect: every first Binance listing since 2020 (first hour or first day, held 1, 3, 7, 30 days), the cross-venue pop (a coin on Binance newly listed on Coinbase or Kraken) and "buy the first Alpaca listing, hold N days", all net of 35 bps per side and against BTC. Pre-registered, 16 trials, month bootstrap, Holm and deflation | No. Buying a listing loses against BTC in every one of the 16 cells. 568 first Binance listings: from 2024 the best in-sample cell (first day, hold 1 day) makes -1.6 % per event vs BTC (252 events, band -4.7 % to +1.4 %), and holding longer only gets worse (first hour, 30 days: -18.7 %, hit 23 %). 306 cross-venue listings (141 Coinbase, 165 Kraken): bought the first hour after, -2.8 % at 3 days out of sample (114 events, band -4.5 % to -1.0 %), negative in 2024, 2025 and 2026. The pop is real but comes the day before, when the listing is announced (+5.3 % vs BTC for Coinbase, +1.7 % for Kraken), and cannot be traded on the listing alert. 22 Alpaca listings since its launch batch: $1,000 each would have lost $1,699 at 7 days. Holm p 1.00, deflated p 0.00 over 393 trials. No paper book; the watcher `lab.ops.listings` posts every new listing to Telegram, information only. See `results/listings.md`. (2026-10-15) |
 | `costs` | What does crossing the book really cost, per coin? | Spreads are far tighter than the guesses: BTC one tick on both venues, most coins under 2 bps a side. Fees are nearly all of it: a Kraken taker round trip is 80 bps, Binance 20. Weekly, report only (2026-10-07). |
 
 ## Strategy-family sweep (2026-10-07)
@@ -195,5 +198,43 @@ each: "on track", "below the backtest's range after N days, worth watching",
 it) run at 07:05 UTC, see `research/ops/README.md`. Data, forecasts, a
 paper collection and alerts only: nothing here can place an order. Lake under
 `<data>/pokemon/`; results and caveats in `results/pokemon.md`.
+
+## Strategy factory (W10)
+
+`python -m lab.factory` (weekly on the server, see `research/ops/README.md`)
+invents long-only daily strategies and holds them to the hand studies' bar.
+
+- **Grammar** (`factory/grammar.py`). A genome is universe (top N by
+  liquidity, the core 20, Alpaca's 15), signal (momentum, Donchian, MA cross,
+  short-term reversal, low vol), up to three filters (BTC 200-day or
+  momentum gate, vol cap, volume confirmation, coin above its own average),
+  selection (best K by signal, liquidity or low vol), weights (equal or
+  inverse vol, empty slots in cash or the whole book spread) and rebalance
+  (daily, every 3 days, weekly, weekly in 7 tranches; no-trade band 0, 25 or
+  50 %). At most 7 moving parts; each costs 0.03 of fitness.
+- **Search** (`factory/search.py`). A fixed budget of new genomes per run
+  (300 by default), half random on the first run and a third afterwards, the
+  rest mutation and crossover of the best ever tried. It sees only 2020-08
+  to 2023 at 35 bps. A fixed list is scored by the worse of the list and its
+  point-in-time twin (the same number of the most liquid coins at the start
+  of each year), so survivorship cannot win.
+- **Ledger** (`factory/ledger.py`). Every genome ever evaluated is one trial
+  in `<data>/factory/ledger.jsonl`, on top of the 377 hand-study trials (bar
+  Sharpe 2.43); the deflation pool only grows. `results/factory_seed/` holds
+  what was counted elsewhere (the first run was made on the PC) and every run
+  merges it first.
+- **Gates** (`factory/evaluate.py`). Six genomes per run (best fitness, both
+  in-sample halves positive, mutually uncorrelated) see 2024 onwards: Sharpe
+  above 0 at 35 bps and at 70 bps, drawdown below BTC's, still positive when
+  filled a close late, and for a fixed list its twin positive too. A survivor
+  runs 30 days as a forward shadow book (`factory/shadow.py`, at most 6 at a
+  time, 2 new per run). After 30 shadow days it is promoted only if every
+  gate holds again, deflated p is above 0.95 over the whole pool and the
+  forward month is not below the backtest's 5 % quantile; it then becomes a
+  paper book (`factory_<key>`) stepped by `lab.paper.families` with live
+  quotes. Nothing the factory does can reach live trading.
+- **Report.** `reports/factory/latest.{md,json}` (JSON with the common header:
+  title, updatedMs, status, headline, items) and, with `--notify`, a digest
+  to Telegram or the webhook through `lab.ops.notify.post`.
 
 Tests: `python -m pytest tests` from `research/lab`.

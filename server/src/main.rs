@@ -698,6 +698,8 @@ async fn main() {
         .route("/api/lab", get(|| async { Json(pythia_core::labview::status()) }))
         // Pokemon cards from the lab: prices, forecasts, the paper collection. Read-only.
         .route("/api/pokemon", get(|| async { Json(pythia_core::labview::pokemon()) }))
+        .route("/api/lab/feeds", get(|| async { Json(pythia_core::labview::feeds()) }))
+        .route("/api/lab/studies", get(|| async { Json(pythia_core::labview::studies()) }))
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         .merge(alert_routes())
