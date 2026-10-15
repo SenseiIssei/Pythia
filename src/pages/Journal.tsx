@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { ScrollText } from "lucide-react";
 import { useStore } from "../store";
-import { Card, Chip, FilterChips, KeyStats, Nothing, PageShell, Section, type ChipOption } from "../pagekit";
+import { Badge, Card, Chip, Page } from "../design";
+import { FilterChips, KeyStats, Nothing, Section, type ChipOption } from "../pagekit";
 import { JOURNAL_KINDS, filterJournal, isDemoLine, journalCounts, kindInfo, type JournalFilter } from "../pagekit/journal";
 import { TaxCard } from "../components/TaxCard";
 import type { JournalKind } from "../types";
@@ -24,7 +25,7 @@ export function Journal() {
   ];
 
   return (
-    <PageShell
+    <Page
       title="Journal"
       subtitle="A record of every signal, order, fill and refusal that is only ever added to, so anything that happened can be traced afterwards."
     >
@@ -38,7 +39,7 @@ export function Journal() {
 
       <TaxCard />
 
-      <Section title="Entries" hint="Tap a filter to see one kind. The newest is at the top." bare>
+      <Section title="Entries" hint="Pick a kind to see only that. The newest is at the top." bare>
         <FilterChips
           label="Show entries"
           options={options}
@@ -52,7 +53,7 @@ export function Journal() {
           {shown.length === 0 ? (
             <Nothing icon={ScrollText} title="No entries of this kind yet" />
           ) : (
-            <ul className="pk-rows">
+            <ul className="divide-y divide-line">
               {shown.slice(0, limit).map((e) => {
                 const k = kindInfo(e.kind);
                 return (
@@ -61,23 +62,23 @@ export function Journal() {
                       <Chip tone={k.tone} title={k.help}>
                         {k.label}
                       </Chip>
-                      {e.mode === "live" && <Chip tone="bad">Live</Chip>}
-                      {isDemoLine(e) && <Chip>Demo</Chip>}
-                      <span className="fl-muted fl-num ml-auto text-sm">{new Date(e.ts).toLocaleTimeString()}</span>
+                      {e.mode === "live" && <Badge tone="bad">Live</Badge>}
+                      {isDemoLine(e) && <Badge tone="accent">Demo</Badge>}
+                      <span className="tabular ml-auto text-[13px] text-faint">{new Date(e.ts).toLocaleTimeString()}</span>
                     </div>
-                    <p className="mt-1 break-words text-[15px]">{e.message}</p>
+                    <p className="mt-1 break-words text-[15px] text-ink">{e.message}</p>
                   </li>
                 );
               })}
             </ul>
           )}
           {shown.length > limit && (
-            <button type="button" onClick={() => setLimit((l) => l + PAGE)} className="fl-focus pk-link mt-2 w-full py-2 text-center text-[15px]">
+            <button type="button" onClick={() => setLimit((l) => l + PAGE)} className="mt-2 w-full rounded-control py-2.5 text-center text-[15px] font-semibold text-accent hover:bg-surface-2">
               Show {Math.min(PAGE, shown.length - limit)} more of {shown.length - limit}
             </button>
           )}
         </Card>
       </Section>
-    </PageShell>
+    </Page>
   );
 }
