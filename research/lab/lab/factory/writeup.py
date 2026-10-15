@@ -118,6 +118,49 @@ def markdown(d: dict) -> str:
     return "\n".join(md)
 
 
+TITLE = "Strategy factory"
+STATUS_OK, STATUS_WATCH = "ok", "watch"
+
+
+def status(d: dict) -> str:
+    """watch when something needs the owner's eye (a new shadow book, a promotion), else ok."""
+    new_shadow = any(h["decision"] == "shadow" for h in d["holdout"])
+    promoted = any(x["status"] == "promoted" for x in d["decisions"])
+    return STATUS_WATCH if new_shadow or promoted else STATUS_OK
+
+
+def header(d: dict, updated_ms: int) -> dict:
+    """The common report header (title, updatedMs, status, headline, items) the app's lab view reads.
+
+    Items: the pool, the best genome in sample, every held-back check with its
+    decision, every shadow book and every promotion, most important first."""
+    p = d["pool_after"]
+    items = [{"label": "Trials counted", "value": str(p["n_trials"]), "status": "ok",
+              "detail": f"{p['prior_trials']} hand-study trials plus {p['factory_trials']} factory trials; "
+                        f"noise bar Sharpe {p['sr0_annual']:.2f}", "importance": 30}]
+    for x in d["decisions"]:
+        items.append({"label": f"{x['status'].capitalize()}: {x['name']}", "value": x["key"],
+                      "status": "watch" if x["status"] == "promoted" else "ok", "detail": x["reason"],
+                      "importance": 95 if x["status"] == "promoted" else 60})
+    for h in d["holdout"]:
+        items.append({"label": h["name"], "value": f"OOS Sharpe {_f(h['oos_sharpe_35bps'])} at 35 bps, "
+                                                   f"deflated p {_f(h['deflated_p'])}",
+                      "status": "watch" if h["decision"] == "shadow" else "ok",
+                      "detail": f"{h['decision']}: {h['why']}", "importance": 80 if h["decision"] == "shadow" else 40})
+    for sh in d["shadows"]:
+        if sh["status"] != "active":
+            continue
+        items.append({"label": f"Shadow: {sh['name']}", "value": f"{sh['days']} of 30 days, {_pct(sh['return'])}",
+                      "status": "ok", "detail": f"entered {sh['entry_day']}", "importance": 50})
+    if d["top"]:
+        b = d["top"][0]
+        items.append({"label": f"Best in sample: {b['name']}", "value": f"IS Sharpe {_f(b['is_sharpe'])}",
+                      "status": "ok", "detail": "in-sample only; not evidence by itself", "importance": 20})
+    items.sort(key=lambda it: -it["importance"])
+    return {"title": TITLE, "updatedMs": int(updated_ms), "status": status(d), "headline": d["verdict"],
+            "items": items[:50], "verdict": d["verdict"]}
+
+
 def digest(d: dict) -> str:
     """Short text for Telegram or a webhook: what was tried, what survived, why."""
     p = d["pool_after"]

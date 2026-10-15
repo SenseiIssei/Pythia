@@ -62,6 +62,7 @@ def ctx():
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHIA_FACTORY_DIR", str(tmp_path / "factory"))
+    monkeypatch.setenv("PYTHIA_FACTORY_SEED", str(tmp_path / "no_seed"))
     monkeypatch.setattr(report, "REPORTS", tmp_path / "reports")
     monkeypatch.delenv("PYTHIA_RESULTS", raising=False)
     for k in ("PYTHIA_ALERT_WEBHOOK", "PYTHIA_TELEGRAM_BOT_TOKEN", "PYTHIA_TELEGRAM_CHAT_ID"):
@@ -97,7 +98,7 @@ def test_key_is_canonical_and_invalid_genomes_are_refused():
     g = {"universe": {"kind": "top", "n": 20}, "signal": {"kind": "mom", "lb": 28},
          "filters": [{"kind": "trend", "ma": 100}, {"kind": "regime", "ma": 200}],
          "select": {"k": 10, "rank": "signal"}, "weight": {"scheme": "equal", "fill": "slots"},
-         "rebalance": {"every": 1, "band": 0.0}}
+         "rebalance": {"every": 1, "tranches": 1, "band": 0.0}}
     g2 = dict(g, filters=list(reversed(g["filters"])))
     assert grammar.key(grammar.canonical(g)) == grammar.key(grammar.canonical(g2))
     assert grammar.valid(grammar.canonical(g))[0]
@@ -130,7 +131,7 @@ def test_simulator_matches_the_sweep_simulator(ctx):
 def test_cadence_and_band_cut_turnover(ctx):
     g = {"universe": {"kind": "top", "n": 20}, "signal": {"kind": "mom", "lb": 7}, "filters": [],
          "select": {"k": 10, "rank": "signal"}, "weight": {"scheme": "invvol", "fill": "full"},
-         "rebalance": {"every": 1, "band": 0.0}}
+         "rebalance": {"every": 1, "tranches": 1, "band": 0.0}}
     W = build.weights(ctx, g)
     daily = build.simulate(ctx, W)[1].sum()
     weekly = build.simulate(ctx, W, every=7)
@@ -326,7 +327,7 @@ def test_paper_families_steps_a_promoted_book_on_its_own_cadence(home, monkeypat
     P = synthetic_panel()
     g = {"universe": {"kind": "top", "n": 20}, "signal": {"kind": "mom", "lb": 28}, "filters": [],
          "select": {"k": 5, "rank": "signal"}, "weight": {"scheme": "equal", "fill": "full"},
-         "rebalance": {"every": 7, "band": 0.0}}
+         "rebalance": {"every": 7, "tranches": 1, "band": 0.0}}
     assert families.factory_books() == {}
     ledger.write_json(shadow.promoted_path(), {"books": {"factory_abc": {"key": "abc", "name": "x", "genome": g,
                                                                           "promoted": "2026-11-20"}}})
@@ -337,3 +338,79 @@ def test_paper_families_steps_a_promoted_book_on_its_own_cadence(home, monkeypat
     row = families.factory_row(P, g, on)
     assert np.isfinite(row).all() and row.sum() == pytest.approx(1.0, abs=1e-6) or row.sum() == 0
     assert np.isnan(families.factory_row(P, g, off)).all()
+    assert np.isfinite(families.factory_row(P, g, off, always=True)).all()
+    tr = dict(g, rebalance={"every": 7, "tranches": 7, "band": 0.0})
+    assert np.isfinite(families.factory_row(P, tr, off)).all()
+
+
+# ---------------------------------------------------------------- tranches, the report header, the seed
+
+def _weekly(tranches: int) -> dict:
+    return {"universe": {"kind": "top", "n": 20}, "signal": {"kind": "mom", "lb": 28}, "filters": [],
+            "select": {"k": 5, "rank": "signal"}, "weight": {"scheme": "equal", "fill": "full"},
+            "rebalance": {"every": 7, "tranches": tranches, "band": 0.0}}
+
+
+def test_tranches_only_for_a_weekly_book():
+    g = _weekly(7)
+    assert grammar.valid(g)[0] and grammar.complexity(g) == grammar.complexity(_weekly(1)) + 1
+    assert "7 tranches" in grammar.describe(g)
+    bad = dict(g, rebalance={"every": 3, "tranches": 7, "band": 0.0})
+    assert not grammar.valid(bad)[0]
+    rng = random.Random(15)
+    seen = [grammar.random_genome(rng)["rebalance"] for _ in range(400)]
+    assert any(r["tranches"] == 7 for r in seen)
+    assert all(r["every"] == 7 for r in seen if r["tranches"] == 7)
+
+
+def test_tranche_book_is_seven_sleeves_on_their_own_days(ctx):
+    g = _weekly(7)
+    W = build.weights(ctx, g)
+    gross, tov, expo = build.run(ctx, g)
+    sleeves = [build.simulate(ctx, W, 7, 0.0, offset=i) for i in range(7)]
+    # Day by day the book's return lies within its sleeves' returns.
+    lo = np.min([s[0] for s in sleeves], 0)
+    hi = np.max([s[0] for s in sleeves], 0)
+    assert ((gross >= lo - 1e-12) & (gross <= hi + 1e-12)).all()
+    # One sleeve trades each day: the book trades on most days, in smaller pieces than a weekly book.
+    weekly = build.simulate(ctx, W, 7, 0.0)
+    assert (tov > 0).mean() > 3 * (weekly[1] > 0).mean()
+    assert tov.max() < weekly[1].max()
+    # A one-sleeve tranche book is the plain book.
+    one = build.simulate_tranches(ctx, W, 7, 0.0, 1)
+    assert np.allclose(one[0], weekly[0]) and np.allclose(one[1], weekly[1])
+    t = ctx.T - 1
+    h = build.holdings(ctx, g, t)
+    assert sum(h.values()) == pytest.approx(expo[t], abs=1e-9)
+
+
+def test_report_json_carries_the_common_header(home, monkeypatch):
+    P = synthetic_panel()
+    monkeypatch.setattr(fc, "load_panel", lambda fresh=False: P)
+    d = run.weekly(20, False, "2026-10-17", log=lambda *_: None)
+    run.publish(d)
+    j = json.loads((report.REPORTS / "factory" / "latest.json").read_text(encoding="utf-8"))
+    assert list(j)[:5] == ["title", "updatedMs", "status", "headline", "items"]
+    assert j["title"] == "Strategy factory" and j["status"] in ("ok", "watch")
+    assert j["headline"] == d["verdict"] and isinstance(j["updatedMs"], int) and j["updatedMs"] > 0
+    assert all(it["label"] for it in j["items"]) and len(j["items"]) <= 50
+    assert j["items"][0]["importance"] == max(it["importance"] for it in j["items"])
+
+
+def test_seed_carries_trials_to_another_machine_once(home, tmp_path, monkeypatch):
+    P = synthetic_panel()
+    monkeypatch.setattr(fc, "load_panel", lambda fresh=False: P)
+    run.weekly(20, False, "2026-10-15", log=lambda *_: None)
+    seed = tmp_path / "seed"
+    out = ledger.export_seed(seed)
+    assert out["ledger"] == 20 and (seed / "ledger.jsonl").exists()
+    # A fresh machine: an empty factory folder that imports the seed.
+    monkeypatch.setenv("PYTHIA_FACTORY_DIR", str(tmp_path / "server"))
+    monkeypatch.setenv("PYTHIA_FACTORY_SEED", str(seed))
+    assert ledger.Ledger().n_trials() == ledger.PRIOR_TRIALS
+    first = ledger.import_seed()
+    assert first["ledger"] == 20 and first["shadow"] == out["shadow"]
+    assert ledger.import_seed() == {"ledger": 0, "holdout": 0, "shadow": 0}
+    d = run.weekly(20, False, "2026-10-17", log=lambda *_: None)
+    assert d["pool_before"]["n_trials"] == ledger.PRIOR_TRIALS + 20
+    assert d["pool_after"]["n_trials"] == ledger.PRIOR_TRIALS + 40

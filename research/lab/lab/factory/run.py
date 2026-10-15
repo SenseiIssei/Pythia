@@ -7,6 +7,13 @@
   python -m lab.factory shadow             daily: append the new days to each shadow book, review
                                            those with 30 days (posts only when one is decided, with --notify)
   python -m lab.factory digest --dry-run   print the last run's digest
+  python -m lab.factory export-seed        write the ledger, holdout log and active shadow
+                                           books to results/factory_seed (committed, so a
+                                           run made elsewhere counts on the server too)
+
+Every run first merges results/factory_seed into <data>/factory (only what is
+missing; see ledger.import_seed), so trials counted on another machine are
+never lost from the pool.
 
 Writes <data>/factory/ (ledger.jsonl, holdout.jsonl, shadow/, promoted.json,
 runs/<run>.json) and reports/factory/ (dated and latest markdown and JSON;
@@ -31,7 +38,7 @@ from .. import report
 from ..experiments import fam_common as fc
 from ..ops import notify
 from . import build, evaluate, grammar, search, shadow, writeup
-from .ledger import Ledger, append_jsonl, factory_dir, lock, write_json
+from .ledger import Ledger, append_jsonl, export_seed, factory_dir, import_seed, lock, write_json
 
 NAME = "factory"
 HOLDOUT_PER_RUN = 6
@@ -87,6 +94,9 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
     today = _day(int(P.days[-1]))
     run_id = run_id or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     log(f"factory {run_id}: panel {P.N} segments to {today}, {len(c.cols)} columns in play")
+    seeded = import_seed()
+    if any(seeded.values()):
+        log(f"  merged from the seed: {seeded}")
     ledger = Ledger()
     pool_before = ledger.pool()
     elite = sorted(ledger.rows, key=lambda r: r["fitness"], reverse=True)[: search.ELITE]
@@ -150,7 +160,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
                   "last": today},
         "windows": {"is": f"{_day(int(c.days[w['is']][0]))} to {_day(int(c.days[w['is']][-1]))}",
                     "oos": f"{_day(int(c.days[w['oos']][0]))} to {today}"},
-        "budget": budget, "pool_before": pool_before, "pool_after": pool,
+        "budget": budget, "seeded": seeded, "pool_before": pool_before, "pool_after": pool,
         "search": {"evaluated": len(res["rows"]), "origin": res["origin"], "duplicates": res["duplicates"],
                    "seconds": res["seconds"]},
         "tried": [{"key": r["key"], "genome": r["genome"], "is_sharpe": r["is_sharpe"]} for r in res["rows"]],
@@ -166,8 +176,14 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
     return d
 
 
+def published(d: dict) -> dict:
+    """The report JSON: the common header first, then the run itself."""
+    ms = int(datetime.fromisoformat(d["generated"]).timestamp() * 1000)
+    return {**writeup.header(d, ms), **{k: v for k, v in d.items() if k != "verdict"}}
+
+
 def publish(d: dict) -> None:
-    report.write(NAME, writeup.markdown(d), d)
+    report.write(NAME, writeup.markdown(d), published(d))
     results = os.environ.get("PYTHIA_RESULTS")
     if results:
         Path(results, f"{NAME}.json").write_text(json.dumps(_compact(d), indent=1, default=float),
@@ -176,7 +192,7 @@ def publish(d: dict) -> None:
 
 def _compact(d: dict) -> dict:
     """The JSON kept in the repo: everything but the full list of genomes tried."""
-    out = {k: v for k, v in d.items() if k != "tried"}
+    out = {k: v for k, v in published(d).items() if k != "tried"}
     out["tried_count"] = len(d["tried"])
     return out
 
@@ -205,6 +221,7 @@ def daily_shadow(do_notify: bool, log=print) -> dict:
     P = fc.load_panel()
     c = build.make_ctx(P)
     today = _day(int(P.days[-1]))
+    import_seed()
     pool = Ledger().pool()
     btc = evaluate.btc_benchmark(c)
     upd = shadow.update(c)
@@ -223,7 +240,7 @@ def daily_shadow(do_notify: bool, log=print) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m lab.factory")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "shadow", "digest"])
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "shadow", "digest", "export-seed"])
     ap.add_argument("--budget", type=int, default=search.BUDGET)
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--notify", action="store_true")
@@ -238,6 +255,9 @@ def main(argv: list[str] | None = None) -> int:
         send(writeup.digest(d), dry_run=a.dry_run)
         return 0
     with lock():
+        if a.command == "export-seed":
+            print(json.dumps(export_seed()))
+            return 0
         if a.command == "shadow":
             daily_shadow(a.notify)
             return 0
