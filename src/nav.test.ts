@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { NAV, isVisible, navFor } from "./nav";
+import { NAV, activeTab, isVisible, navFor, resolvePage, tabsFor } from "./nav";
 
 describe("navFor", () => {
-  it("keeps simple mode to the seven beginner destinations", () => {
-    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "practice", "autopilot", "predictions", "wallets", "settings", "about"]);
+  it("keeps simple mode to the beginner destinations", () => {
+    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "activity", "notifications", "predictions", "wallets", "settings", "about"]);
   });
 
   it("shows everything in advanced mode", () => {
@@ -18,9 +18,9 @@ describe("navFor", () => {
     }
   });
 
-  it("puts Practice first after Home", () => {
-    expect(navFor("simple").slice(0, 2).map((n) => n.id)).toEqual(["home", "practice"]);
-    expect(NAV.slice(0, 2).map((n) => n.id)).toEqual(["home", "practice"]);
+  it("puts Autopilot first after Home, Practice merged into it", () => {
+    expect(navFor("simple").slice(0, 2).map((n) => n.id)).toEqual(["home", "autopilot"]);
+    expect(NAV.some((n) => n.id === "practice")).toBe(false);
   });
 
   it("marks every simple-mode page as not advanced", () => {
@@ -36,9 +36,33 @@ describe("isVisible", () => {
   });
 
   it("shows the always-visible pages in both modes", () => {
-    for (const id of ["home", "practice", "autopilot", "predictions", "wallets", "settings", "about"] as const) {
+    for (const id of ["home", "practice", "autopilot", "activity", "notifications", "predictions", "wallets", "settings", "about"] as const) {
       expect(isVisible(id, "simple")).toBe(true);
       expect(isVisible(id, "advanced")).toBe(true);
     }
+  });
+});
+
+describe("resolvePage", () => {
+  it("sends the old Practice page to Autopilot", () => {
+    expect(resolvePage("practice")).toBe("autopilot");
+    expect(resolvePage("home")).toBe("home");
+  });
+});
+
+describe("bottom tabs", () => {
+  it("are the same four short tabs in both modes", () => {
+    for (const mode of ["simple", "advanced"] as const) {
+      expect(tabsFor(mode).map((t) => t.id)).toEqual(["home", "autopilot", "activity", "notifications"]);
+    }
+    expect(tabsFor("simple").find((t) => t.id === "notifications")?.label).toBe("Alerts");
+    expect(tabsFor("simple").every((t) => t.label.length <= 9)).toBe(true);
+  });
+
+  it("light the tab a page belongs to, and More for the rest", () => {
+    expect(activeTab("activity")).toBe("activity");
+    expect(activeTab("practice")).toBe("autopilot");
+    expect(activeTab("settings")).toBe("more");
+    expect(activeTab("strategies")).toBe("more");
   });
 });

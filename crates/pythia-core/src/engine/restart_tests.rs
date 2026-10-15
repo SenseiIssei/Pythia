@@ -65,6 +65,11 @@ fn bars(e: &Engine, px: f64) -> Vec<Ohlc> {
         .collect()
 }
 
+/// The key of the autopilot's own position in `market`.
+fn key(market: &str) -> String {
+    pos_key("top20", market)
+}
+
 fn set_price(e: &mut Engine, market: &str, price: f64) {
     let now = e.now();
     let m = e.markets.iter_mut().find(|m| m.id == market).unwrap();
@@ -134,7 +139,7 @@ fn holding_engine(trim_mult: f64) -> (Engine, String) {
         e.set_limits(limits);
     }
     for id in COINS {
-        let p = &e.positions[id];
+        let p = &e.positions[&key(id)];
         assert!(p.demo && p.qty > 0.0 && p.strategy_id == "lab:tsmom_top20", "{id}: {}", p.qty);
     }
     (e, id)
@@ -197,7 +202,7 @@ fn a_lab_position_filled_at_the_venue_carries_no_atr_stop() {
     // trailing stop.
     let (e, _) = holding_engine(0.0);
     for id in COINS {
-        let p = &e.positions[id];
+        let p = &e.positions[&key(id)];
         assert_eq!((p.stop, p.target), (0.0, 0.0), "{id} has a stop of {}", p.stop);
     }
 }
@@ -205,13 +210,13 @@ fn a_lab_position_filled_at_the_venue_carries_no_atr_stop() {
 #[test]
 fn a_restart_under_a_lab_autopilot_sells_nothing_in_the_next_hour() {
     let (e, id) = holding_engine(0.0);
-    let held: HashMap<String, f64> = COINS.iter().map(|m| (m.to_string(), e.positions[*m].qty)).collect();
+    let held: HashMap<String, f64> = COINS.iter().map(|m| (m.to_string(), e.positions[&key(m)].qty)).collect();
     let mut r = restart(&e);
     assert_eq!(r.autopilots[0].state, AutopilotState::Running);
     let sent = run_hour(&mut r, 0.06);
     assert!(lab_sells(&sent).is_empty(), "the restart sold the lab book: {:?}", lab_sells(&sent));
     for (m, q) in &held {
-        assert!((r.positions[m].qty - q).abs() < 1e-12, "{m} moved");
+        assert!((r.positions[&key(m)].qty - q).abs() < 1e-12, "{m} moved");
     }
     assert_eq!(r.autopilots.iter().find(|a| a.config.id == id).unwrap().state, AutopilotState::Running);
 }
@@ -223,13 +228,13 @@ fn an_old_state_file_with_stops_on_lab_positions_has_them_cleared_on_restore() {
     let (mut e, _) = holding_engine(0.0);
     for id in COINS {
         let px = e.price_of(id);
-        let p = e.positions.get_mut(id).unwrap();
+        let p = e.positions.get_mut(&key(id)).unwrap();
         p.stop = px * 0.97;
         p.trail_ref = px;
     }
     let mut r = restart(&e);
     for id in COINS {
-        assert_eq!(r.positions[id].stop, 0.0, "{id}");
+        assert_eq!(r.positions[&key(id)].stop, 0.0, "{id}");
     }
     let sent = run_hour(&mut r, 0.06);
     assert!(lab_sells(&sent).is_empty(), "{:?}", lab_sells(&sent));
@@ -315,6 +320,8 @@ fn a_sell_never_asks_the_venue_for_more_than_is_held_and_closes_without_dust() {
     e.positions.insert(
         SOL.into(),
         PositionInternal {
+            market: SOL.into(),
+            book: String::new(),
             venue: m.venue,
             symbol: m.symbol.clone(),
             qty: book_qty,
@@ -425,7 +432,7 @@ fn an_order_filled_in_parts_is_one_order_and_one_trade() {
     e.apply_live_update(&o.order_id, fill(BrokerOrderStatus::PartiallyFilled, o.qty * 0.3));
     e.apply_live_update(&o.order_id, fill(BrokerOrderStatus::PartiallyFilled, o.qty * 0.7));
     e.apply_live_update(&o.order_id, fill(BrokerOrderStatus::Filled, o.qty));
-    assert!(!e.positions.contains_key(BTC));
+    assert!(!e.positions.contains_key(&key(BTC)));
     assert_eq!((st(&e).orders, st(&e).trades), (4, 1), "three fills of one sell are one order and one closed trade");
     // Counted the same after a restart.
     let r = restart(&e);
@@ -539,12 +546,12 @@ fn an_urgent_exit_crosses_at_once_without_a_book_and_a_strategy_order_waits() {
     let (e, _) = holding_engine(0.0);
     let mut r = restart(&e);
     // A stop: urgent, it never waits.
-    r.close_position(BTC, "stop-loss");
+    r.close_position(&key(BTC), "stop-loss");
     let out = r.drain_live_orders();
     assert_eq!(out.len(), 1);
     assert!(out[0].limit_price.is_none() && out[0].style == bandit::ExecStyle::Cross, "the exit crosses: {:?}", out[0]);
-    // A hand-placed demo order on the maker route (part of the ETH lab
-    // position sold): not urgent, it waits.
+    // A hand-placed demo order on the maker route (in the main book): not
+    // urgent, it waits.
     let i = r.ensure_manual_strategy();
     let sid = r.strategies[i].id.clone();
     r.place_order(&sid, ETH, Side::Sell, 500.0, RouteIntent::Demo).unwrap();
