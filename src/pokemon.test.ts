@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cardmarketStale, filterCards, headlineChange, money, pct, predLabel, priceHistory, releaseWords, rowFigure, sortCards, type PokemonCard } from "./pokemon";
+import { CARDMARKET_SEARCH, TCGPLAYER_SEARCH, cardLinks, cardmarketAgeDays, cardmarketStale, filterCards, headlineChange, money, pct, predLabel, priceHistory, releaseWords, rowFigure, safeLink, searchName, sortCards, type PokemonCard } from "./pokemon";
 
 function card(over: Partial<PokemonCard>): PokemonCard {
   return {
@@ -78,5 +78,36 @@ describe("helpers", () => {
     expect(money(null)).toBe("n/a");
     expect(pct(-3.21)).toBe("−3.2 %");
     expect(pct(0)).toBe("+0.0 %");
+  });
+});
+
+describe("cardLinks", () => {
+  it("uses the card's own pages when the lab has them", () => {
+    const l = cardLinks(card({ cardmarketUrl: "https://prices.pokemontcg.io/cardmarket/base1-58", cardmarketLink: "product", tcgplayerUrl: "https://prices.pokemontcg.io/tcgplayer/base1-58", tcgplayerLink: "product" }));
+    expect(l.map((x) => x.label)).toEqual(["Cardmarket", "TCGplayer"]);
+    expect(l[0].url).toBe("https://prices.pokemontcg.io/cardmarket/base1-58");
+    expect(l.every((x) => !x.search)).toBe(true);
+  });
+  it("falls back to an encoded search for the exact name", () => {
+    const l = cardLinks(card({ name: "Pikachu & Zekrom-GX #1?x=<y>" }));
+    expect(l[0]).toEqual({ label: "Cardmarket search", url: `${CARDMARKET_SEARCH}?searchString=Pikachu%20%26%20Zekrom-GX%20%231%3Fx%3D%3Cy%3E`, search: true });
+    expect(l[1].url).toBe(`${TCGPLAYER_SEARCH}?productLineName=pokemon&q=Pikachu%20%26%20Zekrom-GX%20%231%3Fx%3D%3Cy%3E&view=grid`);
+  });
+  it("never opens a link that is not https", () => {
+    const l = cardLinks(card({ cardmarketUrl: "javascript:alert(1)", tcgplayerUrl: "http://example.org/x" }));
+    expect(l.map((x) => x.search)).toEqual([true, true]);
+    expect(l.every((x) => x.url.startsWith("https://www."))).toBe(true);
+  });
+  it("labels the lab's own search links as searches and drops a TCGplayer number suffix", () => {
+    const l = cardLinks({ name: "Mew ex - 152/128", url: "https://www.tcgplayer.com/product/717605/x", cardmarketUrl: `${CARDMARKET_SEARCH}?searchString=Mew%20ex` });
+    expect(l[0].label).toBe("Cardmarket search");
+    expect(l[1]).toEqual({ label: "TCGplayer", url: "https://www.tcgplayer.com/product/717605/x", search: false });
+    expect(searchName("Mew - R/RGB")).toBe("Mew");
+    expect(searchName("Porygon-Z")).toBe("Porygon-Z");
+    expect(safeLink("https://user:pw@example.org/")).toBeNull();
+  });
+  it("counts how old a Cardmarket price is on the snapshot day", () => {
+    expect(cardmarketAgeDays("2026-07-01", "2026-10-15")).toBe(106);
+    expect(cardmarketAgeDays(null, "2026-10-15")).toBeNull();
   });
 });

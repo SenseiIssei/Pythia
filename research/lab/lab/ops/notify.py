@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -132,6 +133,26 @@ def _num(v) -> float | None:
 def esc(s) -> str:
     """Escape for Telegram's HTML parse mode."""
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def esc_attr(s) -> str:
+    """Escape for an attribute value in double quotes (a link's href)."""
+    return esc(s).replace('"', "&quot;")
+
+
+def safe_url(u) -> str | None:
+    """`u` when it is a plain http(s) URL with a host and no spaces, quotes or
+    control characters; None otherwise. Links in a post come from data
+    (APIs, our own builders), so they are checked before they are rendered."""
+    if not isinstance(u, str):
+        return None
+    u = u.strip()
+    if not u.lower().startswith(("https://", "http://")) or len(u) > 2000:
+        return None
+    if any(ord(c) <= 32 or c in '"<>\\`' or ord(c) == 127 for c in u):
+        return None
+    host = u.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0]
+    return u if host and "@" not in host else None
 
 
 def money(v: float, dp: int = 2) -> str:
@@ -243,6 +264,30 @@ class Line:
         self.lead = lead
 
 
+class Links:
+    """One line of links, with an optional bold lead: Cardmarket · TCGplayer.
+    Each link is (label, url); a link whose URL is not a plain http(s) URL is
+    shown as its label only."""
+
+    def __init__(self, links: list[tuple[str, str | None]], lead: str | None = None):
+        self.links = [(str(label), safe_url(url)) for label, url in links]
+        self.lead = lead
+        self.title = None
+
+    def render(self, fmt: str) -> str:
+        out = []
+        for label, url in self.links:
+            if not url:
+                out.append(esc(label) if fmt == "telegram" else label)
+            elif fmt == "telegram":
+                out.append(f'<a href="{esc_attr(url)}">{esc(label)}</a>')
+            elif fmt == "slack":
+                out.append(f"<{url}|{label.replace('|', '/').replace('>', '')}>")
+            else:
+                out.append(f"[{label.replace('[', '(').replace(']', ')')}](<{url}>)")
+        return " · ".join(out)
+
+
 class Card:
     def __init__(self, emoji: str, title: str, summary: str | None = None, parts: list | None = None,
                  footer: str | None = None):
@@ -268,6 +313,9 @@ class Card:
         for p in self.parts:
             if isinstance(p, Line):
                 out.append((bold(e(p.lead)) + " " if p.lead else "") + e(p.text))
+                continue
+            if isinstance(p, Links):
+                out.append((bold(e(p.lead)) + " " if p.lead else "") + p.render(fmt))
                 continue
             if p.title:
                 out.append(bold(e(p.title)))
@@ -316,8 +364,13 @@ def render_post(cards: list[Card], fmt: str = "telegram", limit: int | None = No
     return join(cards, dropped)
 
 
+ANCHOR = re.compile(r'<a href="([^"]*)">(.*?)</a>', re.S)
+
+
 def plain(text: str) -> str:
-    """A post without markup, for the app and the log."""
+    """A post without markup, for the app and the log. A link keeps its URL
+    after its label, so the plain fallback still leads somewhere."""
+    text = ANCHOR.sub(lambda m: m.group(2) + " " + m.group(1).replace("&quot;", '"'), text)
     out, in_tag = [], False
     for ch in text:
         if ch == "<":
@@ -513,6 +566,50 @@ def post_photo(url: str, image: bytes, caption: str, timeout: float = 30) -> tup
     return _request(req, timeout)
 
 
+MEDIA_GROUP_MAX = 10
+
+
+def photos_body(chat: str, photos: list[tuple[str, str]]) -> tuple[str, dict] | None:
+    """(Telegram method, JSON body) for pictures given by URL: sendPhoto for
+    one, sendMediaGroup (an album) for two to ten. Telegram fetches the
+    pictures itself. Only the first picture's caption is kept, the album's
+    caption; it is HTML and cut to the caption limit. None without a usable
+    URL."""
+    ok = [(u, c) for u, c in ((safe_url(u), c) for u, c in photos) if u][:MEDIA_GROUP_MAX]
+    if not ok:
+        return None
+    cap = ok[0][1] or ""
+    if len(cap) > CAPTION_LIMIT:
+        cap = esc(short(plain(cap), CAPTION_LIMIT - 20))
+    if len(ok) == 1:
+        return "sendPhoto", {"chat_id": chat, "photo": ok[0][0], "caption": cap, "parse_mode": "HTML"}
+    media = [{"type": "photo", "media": u, **({"caption": cap, "parse_mode": "HTML"} if i == 0 and cap else {})}
+             for i, (u, _) in enumerate(ok)]
+    return "sendMediaGroup", {"chat_id": chat, "media": media}
+
+
+def post_photos(url: str, photos: list[tuple[str, str]], timeout: float = 30) -> tuple[bool, str | None]:
+    """Pictures by URL through the bot (url is its sendMessage URL). An album
+    Telegram refuses (one picture it cannot fetch fails the whole album) is
+    tried once more as the first picture alone."""
+    b = photos_body(chat_id(), photos)
+    if b is None:
+        return False, "no picture"
+
+    def go(method: str, body: dict):
+        req = urllib.request.Request(url.rsplit("/", 1)[0] + "/" + method, data=json.dumps(body).encode("utf-8"),
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "User-Agent": "pythia-notify"})
+        return _request(req, timeout)
+
+    ok, err = go(*b)
+    if not ok and b[0] == "sendMediaGroup":
+        one = photos_body(chat_id(), photos[:1])
+        if one is not None:
+            ok, err = go(*one)
+    return ok, err
+
+
 # ---------------------------------------------------------------- sending
 
 def held_path() -> Path:
@@ -528,8 +625,13 @@ def hold(category: str | None, cards: list[Card], ms: int) -> None:
 
 
 def send(category: str | None, cards: list[Card] | Card, image: bytes | None = None, urgent: bool = False,
-         now: int | None = None, dry_run: bool = False, poster=None, hold_in_quiet: bool = True) -> dict:
+         now: int | None = None, dry_run: bool = False, poster=None, hold_in_quiet: bool = True,
+         photos: list[tuple[str, str]] | None = None) -> dict:
     """Post cards in one message (a photo first when there is an image).
+
+    `photos` are pictures by URL with an HTML caption, (url, caption): on
+    Telegram they go first as one album (sendMediaGroup, or sendPhoto for
+    one), then the cards as the message; a webhook gets the cards only.
 
     `category` None is always sent. A category switched off is not sent
     (reason "off"); in quiet hours a post that is not urgent is held back
@@ -571,6 +673,11 @@ def send(category: str | None, cards: list[Card] | Card, image: bytes | None = N
         res["reason"] = "no destination"
         say("no destination set (PYTHIA_TELEGRAM_BOT_TOKEN and PYTHIA_TELEGRAM_CHAT_ID): printed only.")
         return res
+    if photos and fmt == "telegram" and not image:
+        ok, err = post_photos(url, photos)
+        res["photo"] = ok
+        if not ok:
+            say(f"pictures not delivered: {err}", err=True)
     if image and fmt == "telegram":
         cap = render_post(cards, fmt, CAPTION_LIMIT)
         whole = cap == text
@@ -596,7 +703,7 @@ def fits_event(cards: list[Card]) -> bool:
     if len(cards) != 1:
         return False
     parts = cards[0].parts
-    return (not any(isinstance(p, Line) for p in parts)
+    return (not any(isinstance(p, (Line, Links)) for p in parts)
             and sum(isinstance(p, Rows) for p in parts) <= 1 and sum(isinstance(p, Table) for p in parts) <= 1)
 
 
