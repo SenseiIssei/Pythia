@@ -639,3 +639,78 @@ def test_frequent_job_is_late_only_past_its_window(tmp_path):
     states = {m: jobs.build_status(t, datetime(2026, 10, 15, 8, m, tzinfo=UTC))["jobs"][0]["state"]
               for m in (4, 12, 16, 18)}
     assert states == {4: "ok", 12: "ok", 16: "ok", 18: "late"}
+
+
+# ---------------------------------------------------------------- the shell side
+
+OPS = REPO_TABLE.parent
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_deploy_lab_keeps_results_and_checks_the_manifest(tmp_path):
+    src = tmp_path / "src"
+    (src / "lab" / "__pycache__").mkdir(parents=True)
+    (src / "lab" / "__init__.py").write_text("")
+    (src / "lab" / "x.py").write_text("X = 1\n")
+    (src / "lab" / "__pycache__" / "x.pyc").write_text("cache")
+    (src / "results").mkdir()
+    (src / "results" / "from_repo.md").write_text("repo copy")
+    dest = tmp_path / "dest"
+    (dest / "results").mkdir(parents=True)
+    (dest / "results" / "study.md").write_text("written on the server")
+    (dest / "stale.py").write_text("old")
+    (dest / "cache").mkdir()
+    (dest / "cache" / "panel.parquet").write_text("big")
+
+    def deploy(*extra):
+        return subprocess.run(["bash", str(OPS / "deploy_lab.sh"), "--src", str(src), "--dest", str(dest), "--force",
+                               *extra], capture_output=True, text=True, timeout=60)
+
+    r = deploy()
+    assert r.returncode == 0, r.stderr
+    assert (dest / "results" / "study.md").read_text() == "written on the server"
+    assert not (dest / "results" / "from_repo.md").exists()
+    assert not (dest / "stale.py").exists()
+    assert (dest / "cache" / "panel.parquet").exists()  # caches are neither sent nor deleted
+    assert not (dest / "lab" / "__pycache__").exists()
+    man = (dest / ".deploy-manifest").read_text()
+    assert "lab/x.py" in man and "results" not in man and ".pyc" not in man
+    info = json.loads((dest / ".deploy-info").read_text())
+    assert info["files"] == 2
+    # a second deploy is a no-op and still passes
+    assert deploy().returncode == 0
+    # dry run changes nothing
+    (src / "lab" / "y.py").write_text("")
+    assert deploy("--dry-run").returncode == 0 and not (dest / "lab" / "y.py").exists()
+
+
+def test_deploy_lab_refuses_a_folder_without_lab_code(tmp_path):
+    r = subprocess.run(["bash", str(OPS / "deploy_lab.sh"), "--src", str(tmp_path), "--dest", str(tmp_path / "d"),
+                        "--force"], capture_output=True, text=True, timeout=30)
+    assert r.returncode != 0 and "no lab code" in r.stderr
+
+
+def test_system_health_includes_every_job(tmp_path):
+    t = table(tmp_path, """
+  - name: good
+    schedule: "0 * * * *"
+    command: echo ok
+  - name: bad
+    schedule: "0 * * * *"
+    command: echo 'say "quoted" \\\\ back'; exit 1
+""")
+    jobs.run_job(t, "good")
+    jobs.run_job(t, "bad")
+    (tmp_path / "data" / "_health").mkdir(exist_ok=True)
+    env = dict(os.environ, PYTHIA_HEALTH_DATA=str(tmp_path / "data"), PYTHIA_JOBS_PY=jobs.__file__,
+               PYTHIA_JOBS_TABLE=t.path, PYTHIA_NOTIFY_PY=str(tmp_path / "none.py"),
+               PATH=os.environ.get("PATH", ""))
+    r = subprocess.run(["bash", str(OPS / "system_health.sh")], env=env, capture_output=True, text=True,
+                       timeout=120)
+    assert r.returncode == 0, r.stderr
+    s = json.loads((tmp_path / "data" / "_health" / "system.json").read_text())
+    by = {c["name"]: c for c in s["checks"]}
+    assert by["job good"]["ok"] is True
+    assert by["job bad"]["ok"] is False and "exit 1" in by["job bad"]["detail"]
+    assert "disk" in by and not s["ok"]
+    assert (tmp_path / "data" / "_health" / "jobs.json").exists()
