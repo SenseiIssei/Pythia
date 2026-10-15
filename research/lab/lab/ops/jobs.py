@@ -859,7 +859,9 @@ def _job_env(t: Table, job: dict) -> dict[str, str]:
     return env
 
 
-def _alert(t: Table, text: str) -> None:
+def _alert(t: Table, key: str, **kw) -> None:
+    """A job alert (`job_failed`, `job_ok_again` of notify's i18n) in the
+    language of the messages."""
     if _notify is None:
         return
     saved = dict(os.environ)
@@ -868,12 +870,23 @@ def _alert(t: Table, text: str) -> None:
         url, fmt, prefix = _notify.config()
         if url is None:
             return
-        ok, err = _notify.post(url, fmt, _notify.clip(f"{prefix}: {text}"))
+        lang = _notify.alert_lang()
+        text = alert_text(key, lang, **kw)
+        ok, err = _notify.post(url, fmt, _notify.clip(f"{prefix}: {text}", lang=lang))
         if not ok:
             print(f"job alert not delivered: {err}", file=sys.stderr)
     finally:
         os.environ.clear()
         os.environ.update(saved)
+
+
+def alert_text(key: str, lang: str = "en", **kw) -> str:
+    """A job alert's words: job x failed (exit 1) after 12 s; log ..., or job x ok again."""
+    i18n = _notify.i18n
+    if "status" in kw:
+        k = f"job_status_{kw['status']}"
+        kw["status"] = i18n.t(k, lang) if k in i18n.CATALOG["en"] else kw["status"]
+    return i18n.t(key, lang, **kw)
 
 
 def _deps_ok(t: Table, job: dict, now: datetime) -> str | None:
@@ -951,9 +964,9 @@ def run_job(t: Table, name: str, force: bool = False, chain: bool = True, _depth
     r = finish(status, code, why if code == 127 else None)
     st = job_state(t, name)
     if job["alert"] and status != STATUS_OK and st.get("consecutive_failures") == 1:
-        _alert(t, f"job {name} {status} (exit {code}) after {r['duration_s']} s; log {log_path}")
+        _alert(t, "job_failed", name=name, status=status, code=code, s=r["duration_s"], log=log_path)
     elif job["alert"] and status == STATUS_OK and _was_failing(t, name):
-        _alert(t, f"job {name} ok again")
+        _alert(t, "job_ok_again", name=name)
     write_status(t)
     if status == STATUS_OK and chain and _depth < 8:
         for nxt in t.chained_after(name):
