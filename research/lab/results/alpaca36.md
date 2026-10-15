@@ -89,3 +89,14 @@ Nothing fails silently: if no pick passes, no book is added and the study
 says which rule each one broke.
 
 <!-- generated below by lab.experiments.alpaca36; edit above this line only -->
+
+## Status (2026-10-15): code ready, not run yet
+
+The study code (`lab.experiments.alpaca36`) and its tests are committed; the
+pre-registration above was committed before them and is unchanged. It has not
+been run: the machine the code was written on has no copy of the history
+files and no route to the exchanges' archives, so the panel could not be
+built there. Nothing below this line is a result yet, and no paper book has
+been added. The run is a single command where the panel lives (see
+`research/ops/README.md`, "Extended crypto universe"); it replaces this
+section with the generated results.

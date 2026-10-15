@@ -46,6 +46,19 @@ results/tsmom_tranches.md (out of sample at Alpaca-like costs).
 
   --dry-run        print the books' holdings and the signals; write nothing
   --signals-only   refresh the signal files without stepping the paper books
+  --universe NAME  the same three rules choosing only among a universe
+                   (lab.universe: alpaca, alpaca15, core, memes, lab20, default,
+                   or coins in the engine's format, `alpaca,TRX`): the top 10
+                   and top 20 by volume each day are taken within it. The
+                   books keep their definitions; these run as separate paper
+                   books, <book>@<universe>, write no engine signal (no study
+                   backs them) and never touch the books above
+
+Engine coins. The signal keeps the coins the engine has a live market for:
+its configured crypto universe (lab.universe.engine_coins, the same
+PYTHIA_CRYPTO_UNIVERSE setting the engine reads; by default every coin the
+Alpaca paper account lists plus the lab's 20). Before the engine's universe
+became configurable this was the lab's 20 coins.
 
 Per book: <data>/paper/<book>/state.json and journal.csv
 """
@@ -61,7 +74,9 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from ..data import ROOT, UNIVERSE
+from .. import universe as uni
+from ..data import ROOT
+from ..experiments import alpaca_universe as au
 from ..experiments import fam_breakout, fam_common as fc, fam_volmom
 from ..experiments import tsmom_tranches as tranches
 from .tsmom import COST, START_EQUITY, TAKER, live_quotes, save_signal
@@ -80,14 +95,21 @@ PICKS = {
 }
 REPORT = "families_summary"
 REGIME = {"tsmom_top20": True, "breakout_top10": False, "tsmom_tranches": True}
-# The engine's crypto markets are the lab's 20-coin universe (crypto:<coin>/USD,
-# engine::seed_markets in pythia-core). A coin outside it has no market there.
-ENGINE_COINS = frozenset(UNIVERSE)
+# The engine's crypto markets (crypto:<coin>/USD): its configured universe
+# (pythia-core coins.rs). A coin outside it has no live market there.
+ENGINE_COINS = frozenset(uni.engine_coins())
 SIGNAL_VALID_MS = 36 * 3600 * 1000
 
 
-def targets(P: fc.Panel) -> dict[str, np.ndarray]:
-    """Each book's full weight matrix, exactly as the sweep built it."""
+def targets(P: fc.Panel, member: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    """Each book's full weight matrix, exactly as the sweep built it. With `member`
+    ((N,) bool, a universe's columns) the same rules choose only among it: the
+    10 and 20 most liquid eligible members each day instead of the whole panel's."""
+    if member is not None:
+        W_t = au.tsmom_weights(P, au.top_within(P, member, 20))
+        return {"tsmom_top20": W_t,
+                "breakout_top10": au.breakout_on(P, au.top_within(P, member, 10), 20, 10),
+                "tsmom_tranches": W_t}
     top10 = P.top_liquid(10)
     cols = np.flatnonzero(top10.any(0))
     return {
@@ -105,6 +127,17 @@ def held_now(W: np.ndarray, t: int) -> np.ndarray:
     return np.where(fin.any(0), W[last, np.arange(W.shape[1])], 0.0)
 
 
+def book_name(name: str, universe: str | None) -> str:
+    """The paper book's directory name: `breakout_top10`, or `breakout_top10@alpaca`."""
+    return f"{name}@{universe.lower()}" if universe else name
+
+
+def variant(name: str) -> str:
+    """The journal's description of a book, `<book>@<universe>` included."""
+    base, _, u = name.partition("@")
+    return BOOKS[base] + (f" · choosing only among universe {u}" if u else "")
+
+
 def step(name: str, row_w: np.ndarray, P: fc.Panel, t: int, quotes: dict[str, tuple[float, float]],
          now_us: int, start_row: np.ndarray) -> dict:
     d = ROOT / "paper" / name
@@ -113,7 +146,7 @@ def step(name: str, row_w: np.ndarray, P: fc.Panel, t: int, quotes: dict[str, tu
     if state_file.exists():
         st = json.loads(state_file.read_text())
     else:
-        st = {"variant": BOOKS[name], "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        st = {"variant": variant(name), "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "equity": START_EQUITY, "weights": {}, "mid": {}}
         # A new book starts where the backtest stands, not flat: breakout only
         # writes a weight on the entry day, so "leave it" would never buy the
@@ -239,7 +272,7 @@ def step_tranches(P: fc.Panel, W: np.ndarray, t: int, quotes: dict[str, tuple[fl
         if expo > 1 + 1e-9:
             alloc = [a / expo for a in alloc]
     else:
-        st = {"variant": BOOKS[name], "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        st = {"variant": variant(name), "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "equity": START_EQUITY}
         equity, gross, before = START_EQUITY, 0.0, {}
         _, _, _, a0, inner, _ = tranches.simulate(P, W, until=t)
@@ -494,6 +527,16 @@ def main() -> int:
     yesterday = (now_us // fc.DAY_US - 1) * fc.DAY_US
     dry = "--dry-run" in sys.argv
     signals_only = "--signals-only" in sys.argv
+    universe = None
+    if "--universe" in sys.argv:
+        i = sys.argv.index("--universe")
+        if i + 1 >= len(sys.argv):
+            print("--universe needs a name (alpaca, core, memes, ...)", file=sys.stderr)
+            return 2
+        universe = sys.argv[i + 1]
+        if signals_only:
+            print("--universe books write no engine signal; nothing to refresh", file=sys.stderr)
+            return 2
     P = fc.load_panel(fresh=True)
     if P.days[-1] < yesterday:
         ends = f"{datetime.fromtimestamp(P.days[-1] / 1e6, timezone.utc):%Y-%m-%d}"
@@ -505,7 +548,15 @@ def main() -> int:
         t = P.T - 1
     else:
         t = int(np.flatnonzero(P.days == yesterday)[0])
-    W = targets(P)
+    if universe is None:
+        W = targets(P)
+    else:
+        member = uni.mask(P, uni.named(universe))
+        tag = universe.strip().lower().replace(" ", "")
+        W = {book_name(n, tag): w for n, w in targets(P, member).items()}
+        missing = [c["coin"] for c in uni.coverage(P, uni.named(universe)) if not c["in_panel"]]
+        print(f"universe {tag}: {int(member.sum())} coins in the panel"
+              + (f", no Binance USDT history for {', '.join(missing)}" if missing else ""), file=sys.stderr)
     if signals_only and not dry:
         for name, w in W.items():
             sig = signal(name, P, w, t, now_us)
@@ -514,7 +565,7 @@ def main() -> int:
         return 0
 
     held = set()
-    for name in BOOKS:
+    for name in W:
         f = ROOT / "paper" / name / "state.json"
         if f.exists():
             st = json.loads(f.read_text())
@@ -523,6 +574,17 @@ def main() -> int:
     quotes = live_quotes(sorted((held | wanted) - {s for s in wanted if "~" in s}))
 
     for name, w in W.items():
+        base = name.partition("@")[0]
+        if universe is not None:
+            if dry:
+                now = tranches.book_weights(P, w, t) if base == "tsmom_tranches" else held_now(w, t)
+                row = {P.names[j]: round(float(now[j]), 4) for j in np.flatnonzero(now > 0)}
+                print(name, "BTC above 200d" if P.btc_on[t] else "BTC below 200d", json.dumps(row))
+            elif base == "tsmom_tranches":
+                print(name, json.dumps(step_tranches(P, w, t, quotes, now_us, name=name)))
+            else:
+                print(name, json.dumps(step(name, w[t], P, t, quotes, now_us, held_now(w, t))))
+            continue
         sig = signal(name, P, w, t, now_us)
         if dry:
             now = tranches.book_weights(P, w, t) if name == "tsmom_tranches" else held_now(w, t)
