@@ -15,6 +15,7 @@ export default {
         canvas: v("bg"),
         surface: v("surface"),
         "surface-2": v("surface-2"),
+        raised: v("raised"),
         line: v("line"),
         "line-strong": v("line-strong"),
         ink: v("text"),

@@ -23,6 +23,11 @@ describe("design tokens", () => {
       }
     });
 
+    it(`the selected segment stands off its track and its label reads in ${theme}`, () => {
+      expect(contrast(p.text, p.raised)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(p.raised, p["surface-2"])).toBeGreaterThan(1.05);
+    });
+
     it(`button labels read at AA in ${theme}`, () => {
       expect(contrast(p["on-primary"], p.primary)).toBeGreaterThanOrEqual(4.5);
       expect(contrast(p["on-accent"], p.accent)).toBeGreaterThanOrEqual(4.5);

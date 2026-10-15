@@ -33,6 +33,7 @@ needed):
 | bg | `bg-canvas` | `--color-bg` | the page |
 | surface | `bg-surface` | `--color-surface` | cards, sheets, tab bar |
 | surface-2 | `bg-surface-2` | `--color-surface-2` | inputs, chips, segmented, hover |
+| raised | `bg-raised` | `--color-raised` | the selected pill in a segmented control |
 | line | `border-line`, `divide-line` | `--color-line` | hairlines |
 | line-strong | `border-line-strong` | `--color-line-strong` | hover borders, the scrub line |
 | text | `text-ink` | `--color-text` | body text and big numbers |

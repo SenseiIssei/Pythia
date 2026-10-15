@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { bandScale, costLine, forwardStatus, gatePct, signedPct } from "./lab";
+import {
+  bandScale,
+  costLine,
+  forwardStatus,
+  gatePct,
+  listingGaps,
+  listingRows,
+  signedPct,
+  type Listing,
+  type ListingsFeed,
+} from "./lab";
 
 describe("bandScale", () => {
   it("keeps the band, zero and the actual return on the track, in order", () => {
@@ -63,5 +73,63 @@ describe("forward words", () => {
     );
     expect(costLine({ paperPct: 0.1, modelPct: 0.1, ratio: null, modelledOnly: true })).toContain("modelled cost");
     expect(costLine(null)).toBeNull();
+  });
+});
+
+describe("listingRows", () => {
+  const l = (o: Partial<Listing>): Listing => ({
+    tsMs: 1000,
+    venue: "binance",
+    event: "listed",
+    symbol: "NEWUSDT",
+    base: "NEW",
+    quote: "USDT",
+    newBase: true,
+    alpacaLists: false,
+    price: null,
+    title: null,
+    ...o,
+  });
+  const feed = (listings: Listing[]): ListingsFeed => ({
+    generated: "",
+    generatedMs: 0,
+    venues: {
+      binance: { ok: true, count: 3000, error: null },
+      alpaca: { ok: false, count: 0, error: "no Alpaca keys" },
+    },
+    listings,
+  });
+
+  it("groups one coin's pairs, keeps new coins and Alpaca pairs, newest first", () => {
+    const rows = listingRows(
+      feed([
+        l({ symbol: "NEWUSDT", price: 0.012345 }),
+        l({ symbol: "NEWBTC", quote: "BTC" }),
+        l({ symbol: "SOLBTC", base: "SOL", newBase: false }),
+        l({ venue: "alpaca", symbol: "ETH/USDT", base: "ETH", newBase: false, tsMs: 2000 }),
+        l({
+          venue: "binance_news",
+          event: "announced",
+          symbol: "ZED",
+          base: "ZED",
+          alpacaLists: null,
+          tsMs: 500,
+          title: "Binance Will List Zed (ZED)",
+        }),
+      ]),
+    );
+    expect(rows.map((r) => [r.venue, r.coin, r.alpaca])).toEqual([
+      ["Alpaca", "ETH", "yes"],
+      ["Binance", "NEW", "no"],
+      ["Binance announcement", "ZED", "unknown"],
+    ]);
+    expect(rows[1].symbols).toEqual(["NEWUSDT", "NEWBTC"]);
+    expect(rows[1].price).toBe("0.01235 USDT");
+    expect(rows[2].title).toBe("Binance Will List Zed (ZED)");
+  });
+
+  it("is empty without a feed and names the venues it could not read", () => {
+    expect(listingRows(null)).toEqual([]);
+    expect(listingGaps(feed([]))).toEqual(["Alpaca: no Alpaca keys"]);
   });
 });

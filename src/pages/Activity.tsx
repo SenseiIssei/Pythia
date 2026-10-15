@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowDownLeft, ArrowUpRight, Bell, FileText, History, Plane, Repeat, ShieldAlert, XCircle, type LucideIcon } from "lucide-react";
-import { Card, Chip, Empty, ListRow, Page, Segmented, Skeleton } from "../design/flows";
+import { Card, Chip, Empty, ListRow, Page, SectionTitle, Segmented, Skeleton } from "../design";
 import { timeOfDay, timeline, type ActivityFilter, type ActivityKind } from "../flows/activity";
 import { alertsAvailable, fetchAlerts, fetchEvents, type AlertsView } from "../flows/alerts";
 import { useStore } from "../store";
@@ -91,12 +91,11 @@ export function Activity() {
       ) : (
         days.map((d) => (
           <section key={d.key} aria-label={d.label}>
-            <div className="flex items-baseline justify-between gap-2 px-1 pb-1 pt-2">
-              <h2 className="text-lg font-semibold tracking-tight">{d.label}</h2>
-              {d.summary && <span className="fl-muted text-sm">{d.summary}</span>}
+            <div className="mb-2">
+              <SectionTitle right={d.summary ? <span className="text-[13px] text-muted">{d.summary}</span> : undefined}>{d.label}</SectionTitle>
             </div>
             <Card className="py-1">
-              <ul className="divide-y divide-line">
+              <ul className="divide-y">
                 {d.items.map((it) => (
                   <li key={it.id}>
                     <ListRow
@@ -105,7 +104,7 @@ export function Activity() {
                       subtitle={it.detail}
                       right={it.amount}
                       rightSub={
-                        <span className="fl-muted inline-flex items-center gap-1.5">
+                        <span className="text-muted inline-flex items-center gap-1.5">
                           {it.real && <Chip tone="bad">Real</Chip>}
                           {timeOfDay(it.ts)}
                         </span>

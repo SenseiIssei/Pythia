@@ -39,6 +39,7 @@ import {
   type Range,
 } from "../design";
 import { InsightsCard } from "../components/Insights";
+import { AssetSheet } from "../components/AssetDetail";
 import { Explain } from "../components/ui";
 import { explain } from "../glossary";
 import { liveMode } from "../live";
@@ -84,6 +85,7 @@ export function Home() {
   const advanced = useAdvanced();
   const [range, setRange] = useState<Range>("1D");
   const [scrub, setScrub] = useState<number | null>(null);
+  const [asset, setAsset] = useState<string | null>(null);
   const now = Date.now();
 
   const realMoney = live.armed && !live.paper && !live.dryRun;
@@ -190,6 +192,7 @@ export function Home() {
                   subtitle={`${fmtQty(h.qty)} ${h.coin.split("/")[0]}`}
                   right={money(h.value)}
                   rightSub={<Change pct={h.pnlPct} tone={changeTone(h.pnl)} size="sm" />}
+                  onClick={() => setAsset(h.marketId)}
                 />
               ))}
             </List>
@@ -254,6 +257,7 @@ export function Home() {
       )}
 
       <Explainer />
+      <AssetSheet marketId={asset} onClose={() => setAsset(null)} />
     </div>
   );
 }
