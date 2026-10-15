@@ -19,6 +19,8 @@ export interface Palette {
   surface: string;
   /** Inputs, chips, segmented controls, skeletons, row hover. */
   "surface-2": string;
+  /** The selected pill inside a segmented control: lifted off surface-2. */
+  raised: string;
   /** Hairlines between rows and around cards. */
   line: string;
   /** A slightly stronger line, for inputs on hover and dividers that must show. */
@@ -51,6 +53,7 @@ export const PALETTES: Record<ThemeName, Palette> = {
     bg: "#ffffff",
     surface: "#ffffff",
     "surface-2": "#f3f3f5",
+    raised: "#ffffff",
     line: "#e8e8ec",
     "line-strong": "#d4d4da",
     text: "#0b0b0f",
@@ -69,6 +72,7 @@ export const PALETTES: Record<ThemeName, Palette> = {
     bg: "#000000",
     surface: "#111113",
     "surface-2": "#1c1c1f",
+    raised: "#2e2e33",
     line: "#232327",
     "line-strong": "#34343a",
     text: "#f5f5f7",
