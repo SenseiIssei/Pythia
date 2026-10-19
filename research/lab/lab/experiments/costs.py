@@ -84,8 +84,15 @@ def walk(px: np.ndarray, qty: np.ndarray, notional: float) -> np.ndarray:
 
 
 def measure(df: pl.DataFrame) -> dict | None:
+    """None when the sample is too thin to measure: under 1000 usable books, or
+    no recorded level at all (a symbol the venue lists but never sent a level
+    for, or one the recorder has no rows of, gives empty book arrays)."""
+    if df.is_empty():
+        return None
     bp, bq, ap, aq = (matrix(df[c]) for c in ("bid_px", "bid_qty", "ask_px", "ask_qty"))
-    ok = (bp[:, 0] > 0) & (ap[:, 0] > bp[:, 0])
+    if min(bp.shape[1], bq.shape[1], ap.shape[1], aq.shape[1]) == 0:
+        return None
+    ok =(bp[:, 0] > 0) & (ap[:, 0] > bp[:, 0])
     bp, bq, ap, aq = bp[ok], bq[ok], ap[ok], aq[ok]
     if len(bp) < 1000:
         return None
