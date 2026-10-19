@@ -296,6 +296,75 @@ def drift_check(bins: dict, values: np.ndarray, min_values: int = 48) -> dict | 
     return {"psi": psi, "outside_pct": outside, "level": level}
 
 
+CAL_STEP_DAYS = 7
+CAL_Q = 0.99           # a feature's cut: this quantile of its own training windows
+CAL_FALSE_ALARM = 0.05  # a model's k: at most this share of training windows reach k features
+CAL_MIN_WINDOWS = 20
+
+
+def drift_windows(bins: dict, panel: pl.DataFrame, days: int, step_days: int = CAL_STEP_DAYS,
+                  start_us: int | None = None, end_us: int | None = None) -> list[dict]:
+    """Every `days`-long window (stepping `step_days`) of the panel between start_us
+    and end_us, each input checked against its bins with drift_check:
+    [{"from": ts, "to": ts, "checks": {feature: check}}]."""
+    if panel.is_empty():
+        return []
+    ts = panel["ts_us"].to_numpy()
+    lo = int(ts.min()) if start_us is None else max(int(ts.min()), start_us)
+    hi = int(ts.max()) if end_us is None else min(int(ts.max()), end_us)
+    cols = {f: panel[f].fill_null(np.nan).to_numpy().astype(float) for f in bins if f in panel.columns}
+    out = []
+    t1 = lo + days * DAY_US
+    while t1 <= hi + DAY_US:
+        m = (ts >= t1 - days * DAY_US) & (ts < t1)
+        checks = {}
+        for f, b in bins.items():
+            if f in cols:
+                c = drift_check(b, cols[f][m])
+                if c:
+                    checks[f] = c
+        if checks:
+            out.append({"from": t1 - days * DAY_US, "to": t1, "checks": checks})
+        t1 += step_days * DAY_US
+    return out
+
+
+def exceeds(check: dict, cut: dict) -> bool:
+    return check["psi"] > cut["psi"] or check["outside_pct"] > cut["outside"]
+
+
+def drift_calibration(bins: dict, windows: list[dict], days: int, step_days: int = CAL_STEP_DAYS) -> dict | None:
+    """Per input, cuts at the CAL_Q quantile of its PSI and outside share over the
+    training windows (never below the plain rule's 0.25 and 2 %); per model, k is
+    the smallest number of inputs over their cuts that at most CAL_FALSE_ALARM of
+    the training windows reach. None with too few windows to calibrate."""
+    if len(windows) < CAL_MIN_WINDOWS:
+        return None
+    cuts = {}
+    for f in bins:
+        psi = [w["checks"][f]["psi"] for w in windows if f in w["checks"]]
+        out = [w["checks"][f]["outside_pct"] for w in windows if f in w["checks"]]
+        if len(psi) < CAL_MIN_WINDOWS:
+            continue
+        cuts[f] = {"psi": max(0.25, float(np.quantile(psi, CAL_Q))), "outside": max(2.0, float(np.quantile(out, CAL_Q)))}
+    if not cuts:
+        return None
+    counts = np.array([sum(exceeds(c, cuts[f]) for f, c in w["checks"].items() if f in cuts) for w in windows])
+    k = 1
+    while np.mean(counts >= k) > CAL_FALSE_ALARM:
+        k += 1
+    return {"window_days": days, "step_days": step_days, "windows": len(windows), "k": int(k),
+            "false_alarm_train": float(np.mean(counts >= k)), "quantile": CAL_Q, "cuts": cuts}
+
+
+def calibrated_level(checks: dict, cal: dict) -> tuple[str, int]:
+    """(level, inputs over their cuts) for one window under a calibration."""
+    n = sum(exceeds(c, cal["cuts"][f]) for f, c in checks.items() if f in cal["cuts"])
+    if any(c["level"] == "drift" for c in checks.values()):
+        return "drift", n
+    return ("shift" if n >= cal["k"] else "stable"), n
+
+
 def drift(card_: dict, panel: pl.DataFrame, days: int = DRIFT_DAYS) -> dict:
     """The champion's features over the last `days` days against its training bins."""
     if panel.is_empty():
