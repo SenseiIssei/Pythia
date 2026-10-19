@@ -48,6 +48,14 @@ async fn mock(status: u16) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
     (url, got)
 }
 
+/// A log with quiet hours off, so a test does not depend on the time of day
+/// (the default quiet hours, 23:00 to 07:00 Berlin, hold most events back).
+fn awake_log() -> AlertLog {
+    let log = AlertLog::default();
+    log.set_settings(AlertSettings { quiet_hours: QuietHours { enabled: false, ..Default::default() }, ..Default::default() });
+    log
+}
+
 fn quick(url: &str, format: AlertFormat) -> AlertConfig {
     let mut c = AlertConfig::new(url, format);
     c.batch_wait = Duration::from_millis(50);
@@ -66,7 +74,7 @@ async fn wait_for(got: &Arc<Mutex<Vec<serde_json::Value>>>, n: usize) {
 #[tokio::test]
 async fn discord_posts_content_and_batches_what_arrives_together() {
     let (url, got) = mock(204).await;
-    let sink = AlertSink::spawn(quick(&url, AlertFormat::Discord));
+    let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Discord), awake_log());
     sink.send(AlertEvent::new(AlertKind::KillSwitch, "kill", "engaged by you"));
     sink.send(AlertEvent::new(AlertKind::FloorHit, "floor:a", "Momentum stopped at its floor"));
     wait_for(&got, 1).await;
@@ -83,7 +91,7 @@ async fn discord_posts_content_and_batches_what_arrives_together() {
 #[tokio::test]
 async fn slack_posts_text() {
     let (url, got) = mock(200).await;
-    let sink = AlertSink::spawn(quick(&url, AlertFormat::Slack));
+    let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Slack), awake_log());
     sink.send(AlertEvent::new(AlertKind::DataStale, "stale", "quotes stale for 11 min"));
     wait_for(&got, 1).await;
     let got = got.lock().unwrap();
@@ -94,7 +102,7 @@ async fn slack_posts_text() {
 #[tokio::test]
 async fn the_same_key_is_sent_once_inside_the_window() {
     let (url, got) = mock(204).await;
-    let sink = AlertSink::spawn(quick(&url, AlertFormat::Discord));
+    let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Discord), awake_log());
     for _ in 0..3 {
         sink.send(AlertEvent::new(AlertKind::OrderRejects, "rejects:demo", "4 in a row"));
         tokio::time::sleep(Duration::from_millis(120)).await;
@@ -112,7 +120,7 @@ async fn the_hourly_cap_holds_back_and_counts() {
     let (url, got) = mock(204).await;
     let mut cfg = quick(&url, AlertFormat::Discord);
     cfg.max_per_hour = 1;
-    let sink = AlertSink::spawn(cfg);
+    let sink = AlertSink::spawn_with_log(cfg, awake_log());
     sink.send(AlertEvent::new(AlertKind::DataStale, "a", "one"));
     wait_for(&got, 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -128,13 +136,13 @@ async fn the_hourly_cap_holds_back_and_counts() {
 #[tokio::test]
 async fn a_failing_or_dead_webhook_never_blocks_the_sender() {
     let (url, _got) = mock(500).await;
-    let sink = AlertSink::spawn(quick(&url, AlertFormat::Discord));
+    let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Discord), awake_log());
     let t = std::time::Instant::now();
     for i in 0..500 {
         sink.send(AlertEvent::new(AlertKind::OrderRejects, format!("k{i}"), "x"));
     }
     // Nothing listens on port 9 on a test box: connection refused.
-    let dead = AlertSink::spawn(quick("http://127.0.0.1:9/hook", AlertFormat::Discord));
+    let dead = AlertSink::spawn_with_log(quick("http://127.0.0.1:9/hook", AlertFormat::Discord), awake_log());
     for i in 0..500 {
         dead.send(AlertEvent::new(AlertKind::OrderRejects, format!("k{i}"), "x"));
     }
@@ -246,7 +254,7 @@ async fn wait_log(log: &AlertLog, n: usize) {
 #[tokio::test]
 async fn every_post_is_recorded_with_todays_counts() {
     let (url, got) = mock(204).await;
-    let log = AlertLog::default();
+    let log = awake_log();
     let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Discord), log.clone());
     sink.send(AlertEvent::new(AlertKind::DataStale, "stale", "quotes stale"));
     sink.send(AlertEvent::new(AlertKind::ModelDrift, "drift", "vol model muted"));
@@ -268,7 +276,7 @@ async fn every_post_is_recorded_with_todays_counts() {
 #[tokio::test]
 async fn a_failed_post_is_recorded_without_the_url_or_token() {
     let (url, _got) = mock(500).await;
-    let log = AlertLog::default();
+    let log = awake_log();
     let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Discord), log.clone());
     sink.send(AlertEvent::new(AlertKind::OrderRejects, "r", "4 in a row"));
     wait_log(&log, 1).await;
@@ -280,7 +288,7 @@ async fn a_failed_post_is_recorded_without_the_url_or_token() {
     // Nothing listens on port 9: the connection error says so, never where.
     let mut cfg = quick("http://127.0.0.1:9/bot123456:SECRETTOKEN/sendMessage", AlertFormat::Telegram);
     cfg.chat_id = Some("-1009876543".into());
-    let log = AlertLog::default();
+    let log = awake_log();
     let sink = AlertSink::spawn_with_log(cfg, log.clone());
     let rec = sink.test().await;
     assert!(!rec.delivered);
@@ -301,7 +309,7 @@ fn scrub_takes_out_every_secret_part() {
 #[tokio::test]
 async fn muted_events_are_recorded_not_sent_but_the_kill_switch_and_floor_still_go_out() {
     let (url, got) = mock(204).await;
-    let log = AlertLog::default();
+    let log = awake_log();
     log.set_muted_until(now_ms() + 60_000);
     let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Discord), log.clone());
     sink.send(AlertEvent::new(AlertKind::DataStale, "stale", "quotes stale"));
@@ -334,7 +342,7 @@ async fn the_hourly_limit_is_recorded_as_suppressed() {
     let (url, got) = mock(204).await;
     let mut cfg = quick(&url, AlertFormat::Discord);
     cfg.max_per_hour = 1;
-    let log = AlertLog::default();
+    let log = awake_log();
     let sink = AlertSink::spawn_with_log(cfg, log.clone());
     sink.send(AlertEvent::new(AlertKind::KillSwitch, "a", "one"));
     wait_for(&got, 1).await;
@@ -348,7 +356,7 @@ async fn the_hourly_limit_is_recorded_as_suppressed() {
 
 #[test]
 fn the_log_keeps_the_last_hundred_newest_first_and_counts_per_utc_day() {
-    let log = AlertLog::default();
+    let log = awake_log();
     let day = 20_000 * 86_400_000_i64;
     for i in 0..105 {
         log.record(AlertRecord {
@@ -375,7 +383,7 @@ async fn the_test_message_goes_out_even_when_muted() {
     let (url, got) = mock(200).await;
     let mut cfg = quick(&url, AlertFormat::Telegram);
     cfg.chat_id = Some("42".into());
-    let log = AlertLog::default();
+    let log = awake_log();
     log.set_muted_until(now_ms() + 60_000);
     let sink = AlertSink::spawn_with_log(cfg, log.clone());
     let rec = sink.test().await;
@@ -385,7 +393,7 @@ async fn the_test_message_goes_out_even_when_muted() {
     assert_eq!(got[0]["chat_id"], "42");
     let text = got[0]["text"].as_str().unwrap();
     assert!(text.starts_with("<b>✅ Test message</b>\nAlerts from the engine reach this chat."), "{text}");
-    assert!(text.contains("Quiet hours") && text.contains("23:00 to 07:00"), "{text}");
+    assert!(text.contains("Quiet hours"), "{text}");
     assert_eq!(got[0]["parse_mode"], "HTML");
     assert_eq!(log.view(now_ms()).counts.sent_today, 1);
 }

@@ -131,6 +131,7 @@ jobs:
     description: market-neutral M2 paper book v1
     schedule: "30 5 * * *"
     command: python -m lab.paper.picks_ls
+    env: {PYTHIA_M2_LOWVOL_SHADOW: "1"}
     resources: {cpus: 3, memory: 10g}
     timeout: 1h
     lock: heavy
@@ -141,6 +142,7 @@ jobs:
     description: market-neutral M2 paper book v2, after v1
     depends_on: [paper-ls]
     command: python -m lab.paper.picks_ls --v2
+    env: {PYTHIA_M2_LOWVOL_SHADOW: "1"}
     resources: {cpus: 3, memory: 10g}
     timeout: 1h
     lock: heavy
