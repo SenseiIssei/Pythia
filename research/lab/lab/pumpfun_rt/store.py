@@ -24,9 +24,16 @@ Tables:
            between is known for it
   meta     socials and description flags from a token's metadata file, when fetched
 
-Times are the collector's receive time in ms (UTC). Trades of one transaction
-share the tx number, so the creator's buy in the creation transaction is the
-dev buy.
+`t` is the collector's receive time in ms (UTC), `slot` the Solana slot and
+`bts` the block time the program saw (seconds). Receive time is NOT event
+time: the public endpoint delivers a third of the curve trades more than a
+second after the first notification of their slot, a fifth more than five
+seconds, and some out of slot order. Every study therefore orders by slot and
+times an event by its slot (slot_times(): the earliest receive time of any
+event of that slot or a later one), never by its own receive time; a late
+delivery would otherwise look like a trade after our landing and hand us a
+stale, better price. Trades of one transaction share the tx number, so the
+creator's buy in the creation transaction is the dev buy.
 
 Budget: when the folder grows over BUDGET_GB (PYTHIA_PF_BUDGET_GB), whole days
 are deleted, oldest first, never today.
@@ -58,12 +65,12 @@ SCHEMAS: dict[str, pa.Schema] = {
                           ("cashback", BOOL), ("quote", STR), ("cfb", I32), ("bts", I64)]),
     "trades": pa.schema([("t", I64), ("slot", I64), ("tx", I64), ("mint", STR), ("buy", BOOL), ("sol", I64),
                          ("tok", I64), ("user", STR), ("vs", I64), ("vt", I64), ("rs", I64), ("rt", I64),
-                         ("fb", I32), ("cfb", I32), ("ix", STR), ("quote", STR)]),
+                         ("fb", I32), ("cfb", I32), ("ix", STR), ("quote", STR), ("bts", I64)]),
     "amm": pa.schema([("t", I64), ("slot", I64), ("tx", I64), ("pool", STR), ("mint", STR), ("buy", BOOL),
                       ("base", I64), ("quote", I64), ("user", STR), ("pb", I64), ("pq", I64), ("lpb", I32),
-                      ("pfb", I32), ("cfb", I32)]),
+                      ("pfb", I32), ("cfb", I32), ("bts", I64)]),
     "other": pa.schema([("kind", STR), ("t", I64), ("slot", I64), ("tx", I64), ("mint", STR), ("user", STR),
-                        ("pool", STR), ("sol", I64), ("tok", I64), ("t0", I64)]),
+                        ("pool", STR), ("sol", I64), ("tok", I64), ("t0", I64), ("bts", I64)]),
     "meta": pa.schema([("t", I64), ("mint", STR), ("ok", BOOL), ("twitter", BOOL), ("telegram", BOOL),
                        ("website", BOOL), ("desc_len", I32), ("image", BOOL)]),
 }
@@ -198,7 +205,57 @@ def read(table: str, day_list: list[str], root: Path | None = None):
             files += sorted(str(f) for f in d.glob("*.parquet"))
     if not files:
         return pl.from_arrow(SCHEMAS[table].empty_table())
-    return pl.concat([pl.read_parquet(f) for f in files], how="vertical_relaxed")
+    return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
+
+
+def slot_times(pairs) -> dict[int, int]:
+    """slot -> estimated time (ms) from (slot, receive ms) pairs: the earliest receive time of
+    the slot or of any later slot (the lower envelope), so a slot that was delivered late is
+    timed by the later slots that already arrived."""
+    first: dict[int, int] = {}
+    for s, t in pairs:
+        if s is None or t is None:
+            continue
+        v = first.get(s)
+        if v is None or t < v:
+            first[s] = t
+    out: dict[int, int] = {}
+    run = None
+    for s in sorted(first, reverse=True):
+        run = first[s] if run is None else min(run, first[s])
+        out[s] = run
+    return out
+
+
+def compact(day: str, root: Path | None = None) -> int:
+    """Merge a finished day's part files into one file per table. Returns files merged."""
+    root = root or base()
+    n = 0
+    for table in SCHEMAS:
+        d = root / table / f"date={day}"
+        if not d.is_dir():
+            continue
+        parts = sorted(d.glob("*.parquet"))
+        if len(parts) <= 1:
+            continue
+        tbls = [pq.read_table(p) for p in parts]
+        merged = pa.concat_tables([t.cast(SCHEMAS[table]) if t.schema.names == SCHEMAS[table].names
+                                   else _widen(t, table) for t in tbls])
+        tmp = d / "000000-all.parquet.tmp"
+        pq.write_table(merged, tmp, compression="zstd", compression_level=9)
+        for p in parts:
+            p.unlink()
+        tmp.replace(d / "000000-all.parquet")
+        n += len(parts)
+    return n
+
+
+def _widen(t: pa.Table, table: str) -> pa.Table:
+    """An older part without a later column: the column added as nulls."""
+    cols = []
+    for f in SCHEMAS[table]:
+        cols.append(t.column(f.name).cast(f.type) if f.name in t.schema.names else pa.nulls(t.num_rows, f.type))
+    return pa.Table.from_arrays(cols, schema=SCHEMAS[table])
 
 
 def write_json(path: Path, data) -> None:

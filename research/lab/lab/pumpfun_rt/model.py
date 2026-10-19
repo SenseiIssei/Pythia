@@ -1,0 +1,292 @@
+"""The learned model of the first seconds and minutes of a pump.fun token.
+
+Rows come from the engine (sim.Engine with decisions on): every plain token at
+3, 10, 30, 60, 120 and 300 s after creation while on its curve, with the
+features of tokens.Token.features (events before t only) and four labels:
+
+  dump60   the creator sells half or more of what it held at t within 60 s
+  mig      the curve completes within 6 h of creation
+  win30    a paper buy at t (latency, fees, slippage tolerance as in curve.py)
+           sold at t + 30 s ends above 0 after every cost
+  win300   the same, sold at t + 5 min
+
+Method (results/pumpfun_realtime_plan.md): LightGBM with fixed parameters,
+isotonic calibration on the last 20 % of each training window by time, purged
+walk-forward over FOLDS folds of decision time (a training row's label window
+must end EMBARGO before the fold starts), against the training base rate and
+a logistic regression on six plain features. Retrained daily on every row,
+the newest MAX_ROWS at most; the files go to <data>/models/pumpfun_rt/.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+
+from ..data import ROOT
+from . import strategies as S
+from .tokens import FEATURES
+
+LABELS = {"dump60": 60, "win30": 30, "win300": 300, "mig": 6 * 3600}
+EMBARGO_MS = 10 * 60_000
+FOLDS = 5
+MAX_ROWS = 3_000_000
+MIN_TRAIN, MIN_TEST = 500, 100
+SIMPLE = ["unique_buyers", "net_sol", "progress", "dev_sold", "age_s", "buys_10s"]
+PARAMS = dict(n_estimators=300, learning_rate=0.05, num_leaves=31, min_child_samples=200, colsample_bytree=0.8,
+              subsample=0.8, subsample_freq=1, verbose=-1, n_jobs=2)
+USEFUL_AUC = 0.55
+
+
+def model_dir() -> Path:
+    return ROOT / "models" / "pumpfun_rt"
+
+
+def matrix(rows: list[dict], features: list[str] = FEATURES) -> np.ndarray:
+    return np.array([[float(r.get(f, math.nan)) if r.get(f) is not None else math.nan for f in features]
+                     for r in rows], dtype=float)
+
+
+# ---------------------------------------------------------------- metrics
+
+def auc(p: np.ndarray, y: np.ndarray) -> float:
+    from scipy import stats
+    pos, neg = p[y == 1], p[y == 0]
+    if not len(pos) or not len(neg):
+        return math.nan
+    r = stats.rankdata(np.r_[pos, neg])
+    return float((r[:len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
+
+
+def brier(p: np.ndarray, y: np.ndarray) -> float:
+    return float(np.mean((p - y) ** 2)) if len(y) else math.nan
+
+
+def logloss(p: np.ndarray, y: np.ndarray) -> float:
+    q = np.clip(p, 1e-6, 1 - 1e-6)
+    return float(-np.mean(y * np.log(q) + (1 - y) * np.log(1 - q))) if len(y) else math.nan
+
+
+def ece(p: np.ndarray, y: np.ndarray, bins: int = 10) -> float:
+    if not len(y):
+        return math.nan
+    idx = np.minimum((p * bins).astype(int), bins - 1)
+    tot = 0.0
+    for b in range(bins):
+        m = idx == b
+        if m.any():
+            tot += m.sum() * abs(p[m].mean() - y[m].mean())
+    return float(tot / len(y))
+
+
+def reliability(p: np.ndarray, y: np.ndarray, bins: int = 10) -> list[dict]:
+    idx = np.minimum((p * bins).astype(int), bins - 1)
+    out = []
+    for b in range(bins):
+        m = idx == b
+        if m.sum():
+            out.append({"bin": f"{b / bins:.1f}-{(b + 1) / bins:.1f}", "n": int(m.sum()),
+                        "predicted": round(float(p[m].mean()), 4), "observed": round(float(y[m].mean()), 4)})
+    return out
+
+
+def scores(p: np.ndarray, y: np.ndarray, base: float) -> dict:
+    b = brier(p, y)
+    bb = brier(np.full(len(y), base), y)
+    return {"n": int(len(y)), "rate": float(y.mean()) if len(y) else math.nan, "auc": auc(p, y), "brier": b,
+            "brier_skill": 1 - b / bb if bb and bb > 0 else math.nan, "logloss": logloss(p, y), "ece": ece(p, y)}
+
+
+# ---------------------------------------------------------------- fitting
+
+class Fitted:
+    """A calibrated LightGBM classifier: booster text, isotonic knots, base rate."""
+
+    def __init__(self, booster, knots_x, knots_y, base: float, features: list[str]):
+        self.booster, self.kx, self.ky, self.base, self.features = booster, knots_x, knots_y, base, features
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.booster is None:
+            return np.full(len(X), self.base)
+        raw = self.booster.predict(X)
+        if self.kx is None or len(self.kx) < 2:
+            return np.clip(raw, 0, 1)
+        return np.interp(raw, self.kx, self.ky)
+
+    def to_json(self) -> dict:
+        return {"booster": self.booster.model_to_string() if self.booster is not None else None,
+                "knots_x": list(map(float, self.kx)) if self.kx is not None else None,
+                "knots_y": list(map(float, self.ky)) if self.ky is not None else None,
+                "base": self.base, "features": self.features}
+
+    @classmethod
+    def from_json(cls, d: dict) -> "Fitted":
+        booster = None
+        if d.get("booster"):
+            import lightgbm as lgb
+            booster = lgb.Booster(model_str=d["booster"])
+        kx = np.array(d["knots_x"]) if d.get("knots_x") else None
+        ky = np.array(d["knots_y"]) if d.get("knots_y") else None
+        return cls(booster, kx, ky, float(d["base"]), list(d["features"]))
+
+
+def fit(X: np.ndarray, y: np.ndarray, features: list[str] = FEATURES) -> Fitted:
+    """LightGBM on the first 80 % (rows in time order), isotonic on the last 20 %."""
+    import lightgbm as lgb
+    from sklearn.isotonic import IsotonicRegression
+    base = float(y.mean()) if len(y) else 0.0
+    if len(y) < MIN_TRAIN or y.min() == y.max():
+        return Fitted(None, None, None, base, features)
+    cut = int(len(y) * 0.8)
+    clf = lgb.LGBMClassifier(**PARAMS)
+    clf.fit(X[:cut], y[:cut])
+    booster = clf.booster_
+    raw = booster.predict(X[cut:])
+    kx = ky = None
+    if len(set(y[cut:].tolist())) == 2:
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(raw, y[cut:])
+        kx, ky = iso.X_thresholds_, iso.y_thresholds_
+    return Fitted(booster, kx, ky, base, features)
+
+
+def logistic(Xtr: np.ndarray, ytr: np.ndarray, Xte: np.ndarray) -> np.ndarray:
+    from sklearn.linear_model import LogisticRegression
+    med = np.nanmedian(Xtr, axis=0)
+    med = np.where(np.isfinite(med), med, 0.0)
+
+    def prep(X):
+        Z = np.where(np.isfinite(X), X, med)
+        return Z
+    A = prep(Xtr)
+    mu, sd = A.mean(axis=0), A.std(axis=0)
+    sd = np.where(sd > 0, sd, 1.0)
+    if ytr.min() == ytr.max():
+        return np.full(len(Xte), float(ytr.mean()))
+    lr = LogisticRegression(max_iter=500).fit((A - mu) / sd, ytr)
+    return lr.predict_proba((prep(Xte) - mu) / sd)[:, 1]
+
+
+def labelled(rows: list[dict], label: str) -> list[dict]:
+    return [r for r in rows if r.get(label) is not None and not (isinstance(r[label], float) and math.isnan(r[label]))]
+
+
+def evaluate(rows: list[dict], label: str, folds: int = FOLDS) -> dict:
+    """Purged walk-forward of the model and both baselines on one label."""
+    rs = sorted(labelled(rows, label), key=lambda r: r["t"])
+    out = {"label": label, "rows": len(rs), "folds": []}
+    if len(rs) < MIN_TRAIN + MIN_TEST:
+        out["verdict"] = f"too few labelled rows ({len(rs)})"
+        return out
+    t = np.array([r["t"] for r in rs])
+    y = np.array([r[label] for r in rs], dtype=float)
+    X = matrix(rs)
+    Xs = matrix(rs, SIMPLE)
+    horizon = LABELS[label] * 1000 + EMBARGO_MS
+    edges = np.quantile(t, np.linspace(0, 1, folds + 2))
+    pooled = {"model": [], "logistic": [], "base": [], "y": []}
+    beat = 0
+    for i in range(1, folds + 1):
+        lo, hi = edges[i], edges[i + 1]
+        te = (t >= lo) & ((t < hi) if i < folds else (t <= hi))
+        tr = t + horizon < lo
+        if tr.sum() < MIN_TRAIN or te.sum() < MIN_TEST:
+            continue
+        m = fit(X[tr], y[tr])
+        pm = m.predict(X[te])
+        pl_ = logistic(Xs[tr], y[tr], Xs[te])
+        base = float(y[tr].mean())
+        f = {"fold": i, "train": int(tr.sum()), "test": int(te.sum()), "model": scores(pm, y[te], base),
+             "logistic": scores(pl_, y[te], base), "base_rate": base}
+        if f["model"]["brier"] < f["logistic"]["brier"]:
+            beat += 1
+        out["folds"].append(f)
+        pooled["model"].append(pm)
+        pooled["logistic"].append(pl_)
+        pooled["base"].append(np.full(te.sum(), base))
+        pooled["y"].append(y[te])
+    if not out["folds"]:
+        out["verdict"] = "no fold had enough rows before its embargo"
+        return out
+    yy = np.concatenate(pooled["y"])
+    base_all = float(np.concatenate(pooled["base"]).mean())
+    pm, pl_ = np.concatenate(pooled["model"]), np.concatenate(pooled["logistic"])
+    out["pooled"] = {"model": scores(pm, yy, base_all), "logistic": scores(pl_, yy, base_all),
+                     "base": scores(np.concatenate(pooled["base"]), yy, base_all)}
+    out["reliability"] = reliability(pm, yy)
+    out["beats_logistic_folds"] = beat
+    pm_s = out["pooled"]["model"]
+    need = max(1, math.ceil(0.8 * len(out["folds"])))
+    useful = (pm_s["auc"] > USEFUL_AUC and pm_s["brier_skill"] > 0 and beat >= need)
+    out["useful"] = bool(useful)
+    out["verdict"] = (f"useful: AUC {pm_s['auc']:.3f}, Brier skill {pm_s['brier_skill']:+.3f}, beats the logistic "
+                      f"baseline in {beat} of {len(out['folds'])} folds" if useful else
+                      f"not useful: AUC {pm_s['auc']:.3f}, Brier skill {pm_s['brier_skill']:+.3f}, beats the "
+                      f"logistic baseline in {beat} of {len(out['folds'])} folds")
+    return out
+
+
+def importance(m: Fitted, top: int = 12) -> list[tuple[str, float]]:
+    if m.booster is None:
+        return []
+    g = m.booster.feature_importance(importance_type="gain")
+    tot = g.sum() or 1.0
+    return sorted(((f, float(v / tot)) for f, v in zip(m.features, g)), key=lambda x: -x[1])[:top]
+
+
+def train_all(rows: list[dict], until_ms: int | None = None) -> dict[str, Fitted]:
+    """One calibrated model per label on every labelled row (whose window ends before until_ms)."""
+    out = {}
+    for label, h in LABELS.items():
+        rs = labelled(rows, label)
+        if until_ms is not None:
+            rs = [r for r in rs if r["t"] + h * 1000 + EMBARGO_MS < until_ms]
+        rs = sorted(rs, key=lambda r: r["t"])[-MAX_ROWS:]
+        out[label] = fit(matrix(rs), np.array([r[label] for r in rs], dtype=float))
+    return out
+
+
+def save(models: dict[str, Fitted], meta: dict, d: Path | None = None) -> Path:
+    d = d or model_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    for label, m in models.items():
+        tmp = d / f"{label}.json.tmp"
+        tmp.write_text(json.dumps(m.to_json()), encoding="utf-8")
+        tmp.replace(d / f"{label}.json")
+    (d / "meta.json").write_text(json.dumps(meta, indent=1, default=str), encoding="utf-8")
+    return d
+
+
+def load(d: Path | None = None) -> dict[str, Fitted]:
+    d = d or model_dir()
+    out = {}
+    for label in LABELS:
+        p = d / f"{label}.json"
+        if p.exists():
+            try:
+                out[label] = Fitted.from_json(json.loads(p.read_text(encoding="utf-8")))
+            except (OSError, ValueError, KeyError):
+                pass
+    return out
+
+
+class Filter:
+    """The pre-registered model filter: enter only when the calibrated probability of the
+    rule's round-trip label is at least FILTER_LIFT times that label's training base rate."""
+
+    def __init__(self, models: dict[str, Fitted]):
+        self.models = models
+
+    @staticmethod
+    def label_for(rule: S.Rule) -> str:
+        return "win30" if rule.hold_s <= 60 else "win300"
+
+    def allow(self, rule: S.Rule, features: dict) -> tuple[bool, float | None]:
+        m = self.models.get(self.label_for(rule))
+        if m is None or m.booster is None:
+            return False, None
+        x = np.array([[float(features.get(f, math.nan)) for f in m.features]], dtype=float)
+        p = float(m.predict(x)[0])
+        return p >= S.FILTER_LIFT * m.base, p

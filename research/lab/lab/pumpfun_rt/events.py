@@ -218,14 +218,14 @@ def compact(name: str, ev: dict, t: int, slot: int, tx: int, sig: str = "") -> t
             "tok": ev["token_amount"], "user": ev["user"], "vs": ev["virtual_sol_reserves"],
             "vt": ev["virtual_token_reserves"], "rs": ev["real_sol_reserves"], "rt": ev["real_token_reserves"],
             "fb": ev.get("fee_basis_points"), "cfb": ev.get("creator_fee_basis_points"),
-            "ix": (ev.get("ix_name") or "")[:24], "quote": None if sol_quoted(q) else q}
+            "ix": (ev.get("ix_name") or "")[:24], "quote": None if sol_quoted(q) else q, "bts": ev.get("timestamp")}
     if name == "CompleteEvent":
         return "other", {"kind": "complete", "t": t, "slot": slot, "tx": tx, "mint": ev["mint"],
-                         "user": ev.get("user"), "pool": None, "sol": None, "tok": None}
+                         "user": ev.get("user"), "pool": None, "sol": None, "tok": None, "bts": ev.get("timestamp")}
     if name == "CompletePumpAmmMigrationEvent":
         return "other", {"kind": "migrate", "t": t, "slot": slot, "tx": tx, "mint": ev["mint"],
                          "user": ev.get("user"), "pool": ev["pool"], "sol": ev.get("sol_amount"),
-                         "tok": ev.get("mint_amount")}
+                         "tok": ev.get("mint_amount"), "bts": ev.get("timestamp")}
     if name in ("BuyEvent", "SellEvent"):
         buy = name == "BuyEvent"
         return "amm", {
@@ -234,5 +234,5 @@ def compact(name: str, ev: dict, t: int, slot: int, tx: int, sig: str = "") -> t
             "quote": ev.get("quote_amount_in") if buy else ev.get("quote_amount_out"),
             "user": ev.get("user"), "pb": ev.get("pool_base_token_reserves"), "pq": ev.get("pool_quote_token_reserves"),
             "lpb": ev.get("lp_fee_basis_points"), "pfb": ev.get("protocol_fee_basis_points"),
-            "cfb": ev.get("coin_creator_fee_basis_points")}
+            "cfb": ev.get("coin_creator_fee_basis_points"), "bts": ev.get("timestamp")}
     return None

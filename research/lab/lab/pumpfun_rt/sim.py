@@ -35,16 +35,28 @@ DUMP = 0.5                                    # "the dev dumps": sells half or m
 
 def model_rule(rule: S.Rule) -> S.Rule:
     """The same rule with the model filter in front (a separate book)."""
-    return dataclasses.replace(rule, name=rule.name + "+model", p={**rule.p, "model": True},
+    return dataclasses.replace(rule, name=rule.name + "+model", p={**rule.p, "model": True, "base": rule.name},
                                label=rule.label + "; model filter")
+
+
+def variant(rule: S.Rule, suffix: str) -> S.Rule:
+    """The same rule under another name (for a stress case with its own costs); its
+    latency draws are the base rule's, scaled."""
+    return dataclasses.replace(rule, name=f"{rule.name}@{suffix}", p={**rule.p, "base": rule.name})
+
+
+def base_name(r: S.Rule) -> str:
+    return r.p.get("base") or r.name
 
 
 class Engine:
     def __init__(self, rules: list[S.Rule] | None = None, costs: C.Costs | None = None,
                  book: CreatorBook | None = None, decisions: bool = False, model=None, on_close=None,
-                 entry_from: int | None = None, entry_until: int | None = None):
+                 entry_from: int | None = None, entry_until: int | None = None,
+                 rule_costs: dict[str, C.Costs] | None = None):
         self.rules = list(S.RULES if rules is None else rules)
         self.costs = costs or C.Costs()
+        self.rule_costs = rule_costs or {}
         self.book = book or CreatorBook()
         self.decisions_on = decisions
         self.model = model                               # .allow(rule, features) -> (bool, prob)
@@ -104,12 +116,12 @@ class Engine:
                 self.push(t + off * 1000, "decide", (mint, off))
         self.push(t + EVICT_AGE_MS, "evict", mint)
 
-    def trade(self, t, tx, mint, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb) -> None:
+    def trade(self, t, tx, mint, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, slot=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is None:
             return
-        tok.trade(t, tx, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, self.book)
+        tok.trade(t, tx, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, self.book, slot)
         if tok.tradeable():
             for r in self.by_entry.get("momentum", ()):
                 if r.wants_momentum(tok, t):
@@ -138,12 +150,12 @@ class Engine:
         for r in self.by_entry.get("migration", ()):
             self.push(t + r.p["delay_s"] * 1000, "signal_rule", (mint, r.name))
 
-    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb) -> None:
+    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is None:
             return
-        tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb)
+        tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb, slot)
         tok.last_t = t
         for pid in tuple(self.by_mint.get(mint, ())):
             self.check_exit(pid, t)
@@ -217,7 +229,7 @@ class Engine:
                 return
         pid = self.next_pid
         self.next_pid += 1
-        lat = self.costs.latency(r.name, tok.mint, "buy")
+        lat = self.cost_of(r.name).latency(base_name(r), tok.mint, "buy")
         self.positions[pid] = {"pid": pid, "rule": r.name, "family": r.family, "mint": tok.mint,
                                "name": tok.name, "symbol": tok.symbol, "created_ms": tok.t0, "signal_ms": int(t),
                                "signal_price": tok.price(), "lat_buy": lat, "state": "pending", "tokens": 0,
@@ -233,7 +245,8 @@ class Engine:
             return
         tok = self.tokens.get(p["mint"])
         r = self._rule(p["rule"])
-        tx = self.costs.tx_lamports()
+        c = self.cost_of(r.name)
+        tx = c.tx_lamports()
         why = None
         got = 0
         if tok is None:
@@ -243,18 +256,18 @@ class Engine:
                 why = "no pool state"
             else:
                 pr = C.price(tok.pq, tok.pb)
-                if pr > p["signal_price"] * (1 + self.costs.slip_tol):
+                if pr > p["signal_price"] * (1 + c.slip_tol):
                     why = "slippage"
                 else:
-                    got = C.pool_buy(STAKE, tok.pb, tok.pq, max(tok.amm_fee_bps, self.costs.fee_bps_floor))
+                    got = C.pool_buy(STAKE, tok.pb, tok.pq, max(tok.amm_fee_bps, c.fee_bps_floor))
         elif not tok.on_curve:
             why = "curve completed before the buy landed"
         else:
             pr = tok.price()
-            if pr > p["signal_price"] * (1 + self.costs.slip_tol):
+            if pr > p["signal_price"] * (1 + c.slip_tol):
                 why = "slippage"
             else:
-                got = C.curve_buy(STAKE, tok.vs, tok.vt, tok.rt, max(tok.fee_bps, self.costs.fee_bps_floor))
+                got = C.curve_buy(STAKE, tok.vs, tok.vt, tok.rt, max(tok.fee_bps, c.fee_bps_floor))
         if why is None and got <= 0:
             why = "nothing filled"
         if why is not None:
@@ -278,14 +291,18 @@ class Engine:
         self.open_n[p["rule"]] -= 1
 
     # ------------------------------------------------------------ exits
-    def sale_value(self, tok: Token | None, tokens: int) -> int | None:
+    def cost_of(self, rule_name: str) -> C.Costs:
+        return self.rule_costs.get(rule_name, self.costs)
+
+    def sale_value(self, tok: Token | None, tokens: int, c: C.Costs | None = None) -> int | None:
         """Lamports a sale of `tokens` would bring now (after the fee), None if it cannot be sold now."""
+        floor = (c or self.costs).fee_bps_floor
         if tok is None:
             return 0
         if tok.on_curve:
-            return C.curve_sell(tokens, tok.vs, tok.vt, max(tok.fee_bps, self.costs.fee_bps_floor))
+            return C.curve_sell(tokens, tok.vs, tok.vt, max(tok.fee_bps, floor))
         if tok.pq and tok.pb:
-            return C.pool_sell(tokens, tok.pb, tok.pq, max(tok.amm_fee_bps, self.costs.fee_bps_floor))
+            return C.pool_sell(tokens, tok.pb, tok.pq, max(tok.amm_fee_bps, floor))
         return None
 
     def check_exit(self, pid: int, t: float) -> None:
@@ -293,7 +310,7 @@ class Engine:
         if p is None or p["state"] != "open" or p["exiting"]:
             return
         r = self._rule(p["rule"])
-        v = self.sale_value(self.tokens.get(p["mint"]), p["tokens"])
+        v = self.sale_value(self.tokens.get(p["mint"]), p["tokens"], self.cost_of(r.name))
         if v is None:
             return
         p["mark_l"] = v
@@ -311,7 +328,9 @@ class Engine:
         p["exiting"] = True
         p["exit_why"] = why
         p["exit_signal_ms"] = int(t)
-        self.push(t + self.costs.latency(p["rule"], p["mint"], "sell"), "land_sell", (p["pid"], int(t)))
+        r = self._rule(p["rule"])
+        lat = self.cost_of(p["rule"]).latency(base_name(r) if r else p["rule"], p["mint"], "sell")
+        self.push(t + lat, "land_sell", (p["pid"], int(t)))
 
     def _a_land_sell(self, at, data) -> None:
         pid, t_sig = data
@@ -319,22 +338,22 @@ class Engine:
         if p is None:
             return
         tok = self.tokens.get(p["mint"])
-        v = self.sale_value(tok, p["tokens"])
+        c = self.cost_of(p["rule"])
+        v = self.sale_value(tok, p["tokens"], c)
         if v is None:
             if at - t_sig < STUCK_MAX_MS:                  # curve complete, pool not seen yet: try again
                 self.push(at + STUCK_RETRY_MS, "land_sell", (pid, t_sig))
                 return
             v, p["exit_why"] = 0, "stuck"
-        tx = self.costs.tx_lamports()
+        tx = c.tx_lamports()
         pnl = v - STAKE - 2 * tx
         rec = {k: p.get(k) for k in ("rule", "family", "mint", "name", "symbol", "created_ms", "signal_ms",
                                      "land_ms", "exit_signal_ms", "exit_why", "prob", "gap", "age_s", "progress",
                                      "signal_price", "entry_price")}
         rec.update(exit_ms=int(at), exit_price=tok.price() if tok else 0.0, proceeds_sol=v / C.LAMPORTS,
                    pnl_sol=pnl / C.LAMPORTS, ret=pnl / STAKE, hold_s=(at - p["land_ms"]) / 1000,
-                   dev_dumped=bool(tok and tok.dev_dumped and tok.dev_sell_t is not None
-                                   and tok.dev_sell_t <= at), migrated=bool(tok and tok.complete_t is not None
-                                                                           and tok.complete_t <= at),
+                   dev_dumped=bool(tok and tok.dev_dumped and not p.get("dev_dumped_at_entry")),
+                   migrated=bool(tok and tok.complete_t is not None and tok.complete_t <= at),
                    lat_buy_ms=p["lat_buy"], slip=(p["entry_price"] / p["signal_price"] - 1)
                    if p.get("signal_price") else None)
         self._drop(p)
@@ -457,7 +476,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
             if tok is not None:
                 tok.irregular = True
         eng.trade(r["t"], r["tx"], r["mint"], r["buy"], r["sol"] or 0, r["tok"] or 0, r["user"], r["vs"] or 0,
-                  r["vt"] or 0, r["rs"] or 0, r["rt"] or 0, r["fb"], r["cfb"])
+                  r["vt"] or 0, r["rs"] or 0, r["rt"] or 0, r["fb"], r["cfb"], r.get("slot"))
     elif table == "creates":
         eng.create(r["t"], r["tx"], r["mint"], r["creator"], r["vs"] or 0, r["vt"] or 0, r["rt"] or 0,
                    r.get("name") or "", r.get("symbol") or "", r.get("uri") or "", r.get("mayhem"),
@@ -473,7 +492,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
     elif table == "amm":
         if r.get("mint"):
             eng.amm(r["t"], r["mint"], r["buy"], r["base"], r["quote"], r["pb"], r["pq"], r["lpb"], r["pfb"],
-                    r["cfb"])
+                    r["cfb"], r.get("slot"))
     elif table == "meta":
         eng.meta(r["t"], r["mint"], {k: r.get(k) for k in ("ok", "twitter", "telegram", "website", "desc_len",
                                                              "image")})
@@ -483,45 +502,69 @@ ORDER = ("creates", "trades", "other", "amm", "meta")
 
 
 def day_events(day: str, root=None, chunk: int = 200_000):
-    """(table, row dict) of one recorded day in receive order: time, then the
-    collector's transaction number, then creation before trades before the rest."""
+    """(table, row dict) of one recorded day in CHAIN order: by slot, each event timed by its
+    slot (store.slot_times: the earliest receive time of that slot or a later one), then
+    receive time, the collector's transaction number, creation before trades before the
+    rest. A row's "t" is that slot time; its receive time is kept as "recv_t". Rows
+    without a slot (gaps, metadata) keep their receive time."""
     import polars as pl
     from . import store
     frames = {tb: store.read(tb, [day], root) for tb in ORDER}
+    pairs = pl.concat([frames[tb].select(pl.col("slot"), pl.col("t")) for tb in ORDER
+                       if frames[tb].height and "slot" in frames[tb].columns])
+    pairs = pairs.filter(pl.col("slot").is_not_null() & pl.col("t").is_not_null())
+    if pairs.height:
+        first = pairs.group_by("slot").agg(pl.col("t").min().alias("ct")).sort("slot", descending=True)
+        first = first.with_columns(pl.col("ct").cum_min()).with_columns(pl.col("slot").cast(pl.Int64))
+    else:
+        first = pl.DataFrame({"slot": [], "ct": []}, schema={"slot": pl.Int64, "ct": pl.Int64})
     keys = []
     for o, tb in enumerate(ORDER):
         df = frames[tb]
         if df.height == 0:
             continue
-        tx = pl.col("tx").fill_null(0) if "tx" in df.columns else pl.lit(0, dtype=pl.Int64)
-        keys.append(df.select(pl.col("t").fill_null(0).alias("t"), tx.cast(pl.Int64).alias("tx"),
-                              pl.lit(o, dtype=pl.Int32).alias("o"), pl.int_range(df.height, dtype=pl.Int64).alias("i")))
+        slot = pl.col("slot").cast(pl.Int64) if "slot" in df.columns else pl.lit(None, dtype=pl.Int64)
+        tx = pl.col("tx").fill_null(0).cast(pl.Int64) if "tx" in df.columns else pl.lit(0, dtype=pl.Int64)
+        k = df.select(pl.col("t").fill_null(0).alias("rt"), slot.alias("slot"), tx.alias("tx"),
+                      pl.lit(o, dtype=pl.Int32).alias("o"), pl.int_range(df.height, dtype=pl.Int64).alias("i"))
+        k = k.join(first, on="slot", how="left").with_columns(pl.coalesce("ct", "rt").alias("ct"))
+        keys.append(k)
+        frames[tb] = df.with_columns(pl.col("t").alias("recv_t"))
     if not keys:
         return
-    allk = pl.concat(keys).sort(["t", "tx", "o", "i"])
+    allk = pl.concat(keys).sort(["ct", "slot", "rt", "tx", "o", "i"], nulls_last=True)
     for s in range(0, allk.height, chunk):
         part = allk.slice(s, chunk)
-        os_, is_ = part["o"].to_list(), part["i"].to_list()
+        os_, is_, cts = part["o"].to_list(), part["i"].to_list(), part["ct"].to_list()
         got: dict[int, dict[int, dict]] = {}
         for o in set(os_):
             idx = [i for oo, i in zip(os_, is_) if oo == o]
             rows = frames[ORDER[o]][idx].to_dicts()
             got[o] = dict(zip(idx, rows))
-        for o, i in zip(os_, is_):
-            yield ORDER[o], got[o][i]
+        for o, i, ct in zip(os_, is_, cts):
+            row = got[o][i]
+            row["t"] = ct
+            yield ORDER[o], row
 
 
-def replay(day_list: list[str], eng: Engine, root=None, progress=None) -> Engine:
-    """Feed recorded days to the engine in order; settle at the end of the record."""
+def replay(day_list: list[str], eng: Engine, root=None, progress=None, until_ms: int | None = None) -> Engine:
+    """Feed recorded days to the engine in order (up to until_ms); settle at the end."""
     last = 0
+    done = False
     for day in day_list:
         n = 0
         for table, row in day_events(day, root):
+            t = row.get("t") or 0
+            if until_ms is not None and t > until_ms:
+                done = True
+                break
             feed_row(eng, table, row)
-            last = max(last, row.get("t") or 0)
+            last = max(last, t)
             n += 1
         if progress:
             progress(day, n)
+        if done:
+            break
     eng.finish(last + 1)
     eng.drop_gapped()
     return eng

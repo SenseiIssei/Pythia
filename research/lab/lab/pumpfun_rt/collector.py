@@ -11,17 +11,23 @@ pump.fun program and, on a second connection, on the PumpSwap program
 touches both programs arrives on both streams) and PumpSwap trades of pools
 it did not see a token migrate into. The endpoint is PYTHIA_SOLANA_WS
 (default: the public mainnet endpoint, which documents 40 connections, 100
-requests per 10 s and 100 MB per 30 s per IP; this uses two connections, two
-requests per connect and about 10 to 20 MB per 30 s).
+requests per 10 s and 100 MB per 30 s per IP; this uses five connections, one
+request per connect and about 30 to 40 MB per 30 s, roughly 1 MB/s or 90 GB a
+day inbound, most of it failed transactions the endpoint sends along and
+PumpSwap trades of old pools that are dropped; PYTHIA_PF_AMM=0 halves it).
 
 Why not PumpPortal: its free data websocket carries token creations and
 migrations, but trades of a token cost 0.01 SOL per 10,000 events and need an
 API key tied to a funded wallet. This project holds no wallet, so that is out.
 pump.fun's own frontend API is not used either: its terms forbid bots.
 
-Resilience: each stream reconnects with exponential backoff (1 s to 60 s, with
-jitter) and records a "gap" row (from, to) for the time it was down, so no
-study mistakes missing data for a quiet market. Memory is bounded: the write
+Resilience: the public endpoint drops connections every minute or two, so each
+program is streamed over several connections side by side (PYTHIA_PF_LINKS,
+default 3 for pump.fun, PYTHIA_PF_AMM_LINKS, default 2 for PumpSwap;
+duplicates are dropped by signature). Each connection reconnects
+with exponential backoff (0.5 s to 60 s, with jitter). Only when every
+connection of a program is down at once is a "gap" row (from, to) recorded,
+so no study mistakes missing data for a quiet market. Memory is bounded: the write
 buffers flush every 60 s or at 50,000 rows, the duplicate filter keeps the last
 200,000 signatures, the pool map at most 20,000 pools for 24 h, the metadata
 queue 2,000 tokens (more are dropped, and counted).
@@ -30,11 +36,16 @@ Every 30 s the collector writes <data>/pumpfun_rt/heartbeat.json (connected
 streams, messages, events per table, the last event time, reconnects,
 dropped metadata). `lab.pumpfun_rt.health` reads it for the job table.
 
-Metadata: a token's metadata uri (set at creation) is fetched once, at most
-META_PER_S a second, only from public IPFS or Arweave gateways (never pump.fun,
-never a host the creator picked otherwise), at most 64 KB, and reduced to
-flags (twitter, telegram, website, description length, image) in the table
-"meta" with the time it was known.
+Metadata (off by default, PYTHIA_PF_META=1 turns it on): a token's metadata uri
+(set at creation) is fetched once, at most META_PER_S a second, only from
+public IPFS or Arweave gateways (never pump.fun, never a host the creator
+picked otherwise), at most 64 KB, and reduced to flags (twitter, telegram,
+website, description length, image) in the table "meta" with the time it was
+known. Off because it does not work any more: on 2026-10-20 ipfs.io and
+dweb.link answered 429 to the first request and otherwise send a
+"service-worker gateway only" page, and about a third of the uris point at a
+launch tool's own host, which is not fetched. The uri's host itself is a
+creation-time feature (tokens.py).
 
 The live shadow book (live.py) gets every event as it is decoded; it is paper
 arithmetic and cannot trade.
@@ -44,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import bisect
 import collections
 import json
 import os
@@ -63,11 +75,16 @@ SIG_KEEP = 200_000
 POOLS_MAX = 20_000
 MIGRATED_KEEP_H = 24
 META_QUEUE = 2_000
-META_PER_S = 2.0
+META_PER_S = 1.0
+IPFS_IO = "https://ipfs.io/ipfs/"
+IPFS_GATEWAYS = ("https://ipfs.io/ipfs/", "https://dweb.link/ipfs/", "https://w3s.link/ipfs/")
+LINKS = max(1, int(os.environ.get("PYTHIA_PF_LINKS", "3")))            # pump.fun stream
+AMM_LINKS = max(1, int(os.environ.get("PYTHIA_PF_AMM_LINKS", "2")))    # PumpSwap stream
 META_MAX_BYTES = 64_000
 META_HOSTS = ("ipfs.io", "dweb.link", "cf-ipfs.com", "nftstorage.link", "arweave.net", "gateway.pinata.cloud",
               "mypinata.cloud", "w3s.link", "4everland.io", "ipfs.dweb.link")
 RECV_TIMEOUT_S = 90.0
+AMM_WAIT = 20_000          # PumpSwap trades of unknown pools kept while their migration may still arrive
 
 
 def now_ms() -> int:
@@ -111,6 +128,37 @@ def meta_flags(doc) -> dict:
             "image": has("image")}
 
 
+class SlotClock:
+    """Live time of a slot: its first receive time, or the first receive time of the next later
+    slot already seen when it arrives late (the live twin of store.slot_times)."""
+
+    def __init__(self, keep: int = 50_000):
+        self.keep = keep
+        self.first: dict[int, int] = {}
+        self.slots: list[int] = []
+
+    def stamp(self, slot: int | None, recv_ms: int) -> int:
+        if not slot:
+            return recv_ms
+        f = self.first.get(slot)
+        if f is not None:
+            return f
+        i = bisect.bisect_right(self.slots, slot)
+        if i < len(self.slots):
+            f = min(recv_ms, self.first[self.slots[i]])
+            self.slots.insert(i, slot)
+        else:
+            f = recv_ms
+            self.slots.append(slot)
+        self.first[slot] = f
+        if len(self.slots) > self.keep:
+            drop = self.slots[: self.keep // 2]
+            self.slots = self.slots[self.keep // 2:]
+            for s in drop:
+                self.first.pop(s, None)
+        return f
+
+
 class Collector:
     """Decodes stream messages into the store and hands each kept row to `on_row`."""
 
@@ -125,6 +173,10 @@ class Collector:
         self.counts: collections.Counter = collections.Counter()
         self.last_event_ms = 0
         self.connected: dict[str, bool] = {}
+        self.links: dict[str, set] = {}
+        self.clock = SlotClock()
+        self.amm_wait: collections.deque = collections.deque(maxlen=AMM_WAIT)
+        self.down_since: dict[str, int | None] = {}
         self.reconnects = 0
         self.meta_q: asyncio.Queue | None = None
         self.started_ms = now_ms()
@@ -162,6 +214,7 @@ class Collector:
             return 0
         self.tx += 1
         kept = 0
+        ct = self.clock.stamp(slot, recv_ms)
         for name, ev in evs:
             c = E.compact(name, ev, recv_ms, slot, self.tx, sig if name == "CreateEvent" else "")
             if c is None:
@@ -169,25 +222,34 @@ class Collector:
             table, row = c
             if table == "amm":
                 hit = self.pools.get(row["pool"])
-                if hit is None or recv_ms - hit[1] > MIGRATED_KEEP_H * 3_600_000:
+                if hit is None:
+                    self.amm_wait.append(row)               # its migration may still be on the way
+                    continue
+                if recv_ms - hit[1] > MIGRATED_KEEP_H * 3_600_000:
                     continue
                 row["mint"] = hit[0]
             elif table == "other" and row["kind"] == "migrate":
                 self.remember_pool(row["pool"], row["mint"], recv_ms)
-            kept += self.keep(table, row)
+                kept += self.keep(table, row, ct)
+                for early in [r for r in self.amm_wait if r["pool"] == row["pool"]]:
+                    early["mint"] = row["mint"]
+                    kept += self.keep("amm", early, self.clock.stamp(early["slot"], early["t"]))
+                continue
+            kept += self.keep(table, row, ct)
             if table == "creates" and self.meta:
                 self.queue_meta(row)
         if kept:
             self.last_event_ms = recv_ms
         return kept
 
-    def keep(self, table: str, row: dict) -> int:
+    def keep(self, table: str, row: dict, chain_ms: int | None = None) -> int:
+        """Store the row (receive time as is) and hand the shadow book a copy timed by its slot."""
         self.counts[table] += 1
         if self.writer is not None:
             self.writer.add(table, row)
         if self.on_row is not None:
             try:
-                self.on_row(table, row)
+                self.on_row(table, row if chain_ms is None else {**row, "t": chain_ms})
             except Exception as e:                        # the shadow book never stops the collector
                 self.counts["shadow_error"] += 1
                 if self.counts["shadow_error"] <= 5:
@@ -225,9 +287,13 @@ class Collector:
     async def meta_worker(self, session) -> None:
         import aiohttp
         gap = 1.0 / META_PER_S
+        k = 0
         while True:
             mint, url = await self.meta_q.get()
             t0 = time.monotonic()
+            if url.startswith(IPFS_IO):                  # spread the load over the public gateways
+                k += 1
+                url = IPFS_GATEWAYS[k % len(IPFS_GATEWAYS)] + url[len(IPFS_IO):]
             flags = {"ok": False}
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False,
@@ -246,44 +312,60 @@ class Collector:
             await asyncio.sleep(max(0.0, gap - (time.monotonic() - t0)))
 
     # ------------------------------------------------------------ streams
-    async def stream(self, session, url: str, program: str, stop: asyncio.Event) -> None:
+    def link_up(self, program: str, link: int) -> None:
+        live = self.links.setdefault(program, set())
+        if not live and self.down_since.get(program) is not None:
+            self.gap(program, self.down_since[program], now_ms())
+        self.down_since[program] = None
+        live.add(link)
+        self.connected[program] = True
+
+    def link_down(self, program: str, link: int) -> None:
+        live = self.links.setdefault(program, set())
+        was = link in live
+        live.discard(link)
+        if not live:
+            self.connected[program] = False
+            if was or self.down_since.get(program) is None:
+                self.down_since[program] = self.down_since.get(program) or now_ms()
+
+    async def stream(self, session, url: str, program: str, link: int, stop: asyncio.Event) -> None:
+        """One connection of a program's stream; LINKS of them run side by side, so the record has a
+        gap only when every one is down at once (duplicates are dropped by signature)."""
         import aiohttp
-        backoff = 1.0
-        down_since = None
+        if link:
+            await asyncio.sleep(2.0 * link)
+        backoff = 0.5
         while not stop.is_set():
+            t_conn = time.monotonic()
             try:
-                async with session.ws_connect(url, heartbeat=30, max_msg_size=16 << 20, compress=0) as ws:
+                # No websocket pings: the public endpoint does not answer them reliably and a
+                # missed pong closes the link (1006). Liveness is the receive timeout instead.
+                async with session.ws_connect(url, heartbeat=None, max_msg_size=16 << 20, compress=0) as ws:
                     await ws.send_str(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
                                                   "params": [{"mentions": [program]}, {"commitment": COMMITMENT}]}))
-                    self.connected[program] = True
-                    if down_since is not None:
-                        self.gap(program, down_since, now_ms())
-                    first = True
+                    self.link_up(program, link)
                     while not stop.is_set():
                         try:
                             msg = await asyncio.wait_for(ws.receive(), timeout=RECV_TIMEOUT_S)
                         except asyncio.TimeoutError:
-                            print(f"collector: {program[:4]} silent for {RECV_TIMEOUT_S:.0f} s, reconnecting",
+                            print(f"collector: {program[:4]}/{link} silent for {RECV_TIMEOUT_S:.0f} s, reconnecting",
                                   file=sys.stderr)
                             break
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             self.handle(msg.data, now_ms())
-                            if first:
-                                backoff, first = 1.0, False
                         elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                                           aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
-                            print(f"collector: {program[:4]} closed ({msg.type.name} {msg.data})", file=sys.stderr)
+                            self.counts["closed"] += 1
                             break
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-                print(f"collector: {program[:4]} {type(e).__name__}: {e}", file=sys.stderr)
-            if self.connected.get(program):
-                down_since = now_ms()
-            elif down_since is None:
-                down_since = now_ms()
-            self.connected[program] = False
+                print(f"collector: {program[:4]}/{link} {type(e).__name__}: {e}", file=sys.stderr)
+            self.link_down(program, link)
             if stop.is_set():
                 break
             self.reconnects += 1
+            if time.monotonic() - t_conn > 60:
+                backoff = 0.5
             await asyncio.sleep(backoff * (0.5 + random.random()))
             backoff = min(60.0, backoff * 2)
 
@@ -299,7 +381,7 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     import aiohttp
     url = os.environ.get("PYTHIA_SOLANA_WS") or DEFAULT_WS
     amm = os.environ.get("PYTHIA_PF_AMM", "1") != "0"
-    meta = os.environ.get("PYTHIA_PF_META", "1") != "0" and not dry_run
+    meta = os.environ.get("PYTHIA_PF_META", "0") == "1" and not dry_run
     writer = None if dry_run else store.Writer()
     shadow = None
     if not dry_run and os.environ.get("PYTHIA_PF_SHADOW", "1") != "0":
@@ -333,13 +415,14 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     t_end = time.monotonic() + seconds if seconds else None
     last_hb = last_prune = 0.0
     async with aiohttp.ClientSession() as session:
-        tasks = [asyncio.create_task(col.stream(session, url, E.PUMP, stop))]
-        if amm:
-            tasks.append(asyncio.create_task(col.stream(session, url, E.PUMP_AMM, stop)))
+        programs = [E.PUMP] + ([E.PUMP_AMM] if amm else [])
+        tasks = [asyncio.create_task(col.stream(session, url, p, k, stop)) for p in programs
+                 for k in range(LINKS if p == E.PUMP else AMM_LINKS)]
         if meta:
             tasks.append(asyncio.create_task(col.meta_worker(session)))
-        print(f"collector: streaming {'pump.fun and PumpSwap' if amm else 'pump.fun'} logs, "
-              f"{'dry run' if dry_run else 'writing to ' + str(store.base())}", flush=True)
+        print(f"collector: streaming pump.fun logs over {LINKS} connection(s)"
+              + (f", PumpSwap over {AMM_LINKS}" if amm else "")
+              + f", {'dry run' if dry_run else 'writing to ' + str(store.base())}", flush=True)
         try:
             while not stop.is_set():
                 await asyncio.sleep(1.0)

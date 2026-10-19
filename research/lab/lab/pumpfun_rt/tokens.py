@@ -18,6 +18,11 @@ SUPPLY = 1_000_000_000 * C.TOKEN_UNIT
 WINDOW_MS = 10_000
 CREATORS_MAX = 400_000
 DUMP_SHARE = 0.5
+# Metadata flags are not model features: the public IPFS gateways answer 429 or a
+# service-worker page since 2026 (see collector.py), so they would be missing for
+# nearly every token. "uri_ipfs" (uploaded the way pump.fun's site does it, or by
+# a launch tool with its own metadata host) is known at creation and stays.
+META_FEATURES = False
 
 
 class CreatorBook:
@@ -80,7 +85,7 @@ class Token:
                  "rs", "rt", "rt0", "p0", "fee_bps", "n_buys", "n_sells", "buy_l", "sell_l", "buyers", "traders",
                  "hold", "dev_buy_l", "dev_bought", "dev_sold", "dev_sell_t", "dev_dumped", "win", "peak", "last_t",
                  "complete_t", "migrate_t", "pool", "pb", "pq", "amm_fee_bps", "meta", "meta_t", "hist",
-                 "irregular", "first_buyers", "first_tok")
+                 "irregular", "first_buyers", "first_tok", "last_slot", "amm_slot")
 
     def __init__(self, mint: str, creator: str, t: int, tx: int, vs: int, vt: int, rt: int, hist: dict,
                  name: str = "", symbol: str = "", uri: str = "", mayhem: bool = False, cashback: bool = False,
@@ -114,13 +119,17 @@ class Token:
         self.irregular = False
         self.first_buyers: list[str] = []
         self.first_tok = 0
+        self.last_slot = 0
+        self.amm_slot = 0
 
     # ------------------------------------------------------------ events
     def trade(self, t: int, tx: int, buy: bool, sol: int, tok: int, user: str, vs: int, vt: int, rs: int, rt: int,
-              fb: int | None, cfb: int | None, book: CreatorBook | None = None) -> None:
+              fb: int | None, cfb: int | None, book: CreatorBook | None = None, slot: int | None = None) -> None:
         if vs and self.vs and fb == 0:
             self.irregular = True                         # fee-free trades with erratic reserves: not a plain curve
-        self.vs, self.vt, self.rs, self.rt = vs, vt, rs, rt
+        if not slot or slot >= self.last_slot:            # a late delivery of an older slot keeps the newer curve
+            self.vs, self.vt, self.rs, self.rt = vs, vt, rs, rt
+            self.last_slot = slot or self.last_slot
         if fb is not None:
             self.fee_bps = int(fb) + int(cfb or 0)
         self.last_t = t
@@ -154,7 +163,7 @@ class Token:
         self.win.append((t, buy, sol, user))
         while self.win and self.win[0][0] < t - WINDOW_MS:
             self.win.popleft()
-        p = C.price(vs, vt)
+        p = C.price(self.vs, self.vt)
         if p > self.peak:
             self.peak = p
 
@@ -170,8 +179,12 @@ class Token:
         if sol and tok:
             self.pb, self.pq = int(tok), int(sol)
 
-    def amm(self, buy: bool, base: int, quote: int, pb: int | None, pq: int | None, lpb, pfb, cfb) -> None:
+    def amm(self, buy: bool, base: int, quote: int, pb: int | None, pq: int | None, lpb, pfb, cfb,
+            slot: int | None = None) -> None:
         """A PumpSwap trade; the event's reserves are before it, so the state after is moved by it."""
+        if slot and slot < self.amm_slot:
+            return
+        self.amm_slot = slot or self.amm_slot
         if pb and pq:
             self.pb, self.pq = (pb - base, pq + quote) if buy else (pb + base, pq - quote)
         fee = sum(int(x) for x in (lpb, pfb, cfb) if x is not None)
@@ -258,12 +271,9 @@ class Token:
             "name_len": len(self.name), "symbol_len": len(self.symbol),
             "symbol_upper": float(self.symbol.isupper()), "uri_ipfs": float("ipfs" in self.uri),
             "cashback": float(self.cashback), "fee_bps": self.fee_bps,
-            "meta_known": float(m is not None),
-            "twitter": float(m["twitter"]) if m and m.get("ok") else nan,
-            "telegram": float(m["telegram"]) if m and m.get("ok") else nan,
-            "website": float(m["website"]) if m and m.get("ok") else nan,
-            "desc_len": float(m.get("desc_len") or 0) if m and m.get("ok") else nan,
             "hour_utc": (t // 3_600_000) % 24,
+            **({"meta_known": 1.0, "twitter": float(bool(m.get("twitter"))), "telegram": float(bool(m.get("telegram"))),
+                "website": float(bool(m.get("website")))} if m and m.get("ok") and META_FEATURES else {}),
         }
 
 

@@ -442,6 +442,28 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "pf_time": "time {h} h",
         "pf_rug_liq": "rug: liquidity {usd}",
         "pf_rug_gone": "rug: no pool left",
+        # the real-time pump.fun lab (lab.pumpfun_rt)
+        "prt_caveat": ("Paper only: no wallet, no key, no transaction. Fills are modelled with 0.4 to 3 s of "
+                       "latency after the signal; the fastest snipers land before that."),
+        "prt_footer": "Paper only · real-time lab",
+        "prt_win_title": "pump.fun live paper winner {name} {ret}",
+        "prt_win_summary": "Shadow book {rule}: {stake} became {got} in {secs} s ({why}).",
+        "prt_why_take": "take profit",
+        "prt_why_stop": "stop loss",
+        "prt_why_time": "time stop",
+        "prt_why_stuck": "curve done, no pool seen",
+        "prt_daily_title": "pump.fun real-time lab, {day}",
+        "prt_daily_record": "Recorded: {tokens} new tokens, {trades} curve trades, {done} completed curves.",
+        "prt_daily_book": "{book}: {n} closed, {hit} winners, {mean} mean per trade, {pnl} in all.",
+        "prt_daily_book_none": "{book}: nothing closed.",
+        "prt_daily_early": ("Too early to judge: {days} days of record; the bar needs 14 days and 300 trades out of "
+                            "sample."),
+        "prt_daily_study": "Study: {passed} of {rules} rules pass the out-of-sample bar; pick {pick}.",
+        "prt_daily_model": "Model: {useful} of {labels} labels beat their baselines.",
+        "prt_col_book": "Book",
+        "prt_col_closed": "Closed",
+        "prt_col_mean": "Mean",
+        "prt_col_pnl": "P&L",
         # the strategy factory
         "fa_head": ("Factory {run}: {n} new strategies tried, pool now {trials} trials (noise bar Sharpe {sr0})."),
         "fa_best": "Best in sample: {name}, Sharpe {sharpe} at 35 bps.",
@@ -752,6 +774,30 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "pf_time": "Zeit {h} h",
         "pf_rug_liq": "Rug: Liquidität {usd}",
         "pf_rug_gone": "Rug: kein Pool mehr",
+        "prt_caveat": ("Nur Paper: keine Wallet, kein Schlüssel, keine Transaktion. Ausführungen sind mit 0,4 bis "
+                       "3 s Verzögerung nach dem Signal modelliert; die schnellsten Sniper sind vorher drin."),
+        "prt_footer": "Nur Paper · Echtzeit-Labor",
+        "prt_win_title": "pump.fun Live-Paper-Gewinner {name} {ret}",
+        "prt_win_summary": "Schattenbuch {rule}: aus {stake} wurden {got} in {secs} s ({why}).",
+        "prt_why_take": "Gewinnmitnahme",
+        "prt_why_stop": "Stop-Loss",
+        "prt_why_time": "Zeitstopp",
+        "prt_why_stuck": "Kurve voll, kein Pool gesehen",
+        "prt_daily_title": "pump.fun Echtzeit-Labor, {day}",
+        "prt_daily_record": ("Aufgezeichnet: {tokens} neue Token, {trades} Käufe und Verkäufe auf der Kurve, "
+                             "{done} volle Kurven."),
+        "prt_daily_book": ("{book}: {n} geschlossen, {hit} Gewinner, {mean} im Mittel je Position, {pnl} "
+                           "insgesamt."),
+        "prt_daily_book_none": "{book}: nichts geschlossen.",
+        "prt_daily_early": ("Zu früh für ein Urteil: {days} Tage aufgezeichnet; die Schwelle braucht 14 Tage und "
+                            "300 Positionen außerhalb der Stichprobe."),
+        "prt_daily_study": ("Studie: {passed} von {rules} Regeln bestehen die Schwelle außerhalb der Stichprobe; "
+                            "Auswahl {pick}."),
+        "prt_daily_model": "Modell: {useful} von {labels} Zielen schlagen ihre Vergleichsmodelle.",
+        "prt_col_book": "Buch",
+        "prt_col_closed": "Geschl.",
+        "prt_col_mean": "Mittel",
+        "prt_col_pnl": "G/V",
         "fa_head": ("Fabrik {run}: {n} neue Strategien getestet, jetzt {trials} Versuche im Pool "
                     "(Rauschschwelle Sharpe {sr0})."),
         "fa_best": "Beste in der Stichprobe: {name}, Sharpe {sharpe} bei 35 Basispunkten.",

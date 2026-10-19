@@ -103,7 +103,11 @@ sells, unique buyers and traders, SOL in and out, the last 10 s of flow, curve
 progress, price against launch and peak, the dev buy, dev holding and selling,
 top holder shares, the first five buyers' share, the creator's earlier tokens,
 completions and dumps (as of the creation), market activity (creations in the
-last 10 minutes), name and symbol shape, metadata flags if known by t, hour.
+last 10 minutes), name and symbol shape, whether the metadata uri is an IPFS
+upload (pump.fun's site) or a launch tool's own host, hour. (Addendum the same
+day, before any computation: metadata flags such as socials were planned, but
+the public IPFS gateways answer 429 or a service-worker page, so they would be
+missing for nearly every token; they are not features.)
 
 Labels: `dump60` (the creator sells half or more of what it held at t within
 60 s), `mig` (the curve completes within 6 h of creation), `win30` and
