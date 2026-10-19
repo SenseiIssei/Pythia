@@ -63,4 +63,16 @@ Newest window: today's rule says drift, the calibrated rule drift (1 inputs over
 
 Newest window: today's rule says shift, the calibrated rule stable (0 inputs over their cuts, k 2).
 
+## Addendum, chosen after the registered form failed: one cut per input, Bonferroni, k = 1
+
+Each input's cut at the 1 - 0.05 / inputs quantile of its training windows (PSI and outside share), "shift" when any one input is over its cut, "drift" when an input is outside the trained range more often than in any such training window (at least 5 %). Judged by the same acceptance rule, but it was picked after seeing the first form's numbers, so it is a candidate for the next registration, not a result.
+
+| model | quantile | shift or worse IS | OOS | drift IS | OOS | power | newest window |
+|---|---|---|---|---|---|---|---|
+| M8 | 0.9977 | 13 % | 14 % | 5 % | 3 % | 57 % | stable |
+| M10 | 0.9983 | 14 % | 31 % | 4 % | 13 % | 58 % | shift |
+| M12 | 0.9950 | 7 % | 23 % | 2 % | 12 % | 57 % | stable |
+
+Addendum form passes the acceptance rule: no.
+
 **Verdict.** Miscalibrated (over 50% of in-sample windows shifted): M8, M10, M12. Fix accepted: no (needs out-of-sample shift at most 20% and power at least 90% for every model). Drift rule (over 10% false alarms in sample): M8, M10, M12.

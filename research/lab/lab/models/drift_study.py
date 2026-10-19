@@ -111,6 +111,16 @@ def study(name: str) -> dict:
         if last:
             out["newest_plain"] = plain_level(last[-1]["checks"])
             out["newest_calibrated"] = core.calibrated_level(last[-1]["checks"], cal)
+    # Addendum (after the registered form failed): Bonferroni cuts per input, k = 1.
+    cal2 = core.drift_calibration_per_input(bins, w_is, days)
+    if cal2:
+        out["calibration2"] = {k: v for k, v in cal2.items() if k != "cuts"}
+        out["cal2_is"] = rates([core.calibrated_level(w["checks"], cal2)[0] for w in w_is])
+        out["cal2_oos"] = rates([core.calibrated_level(w["checks"], cal2)[0] for w in w_oos])
+        out["power2"] = power(bins, panel, train, cal2, days)
+        last = core.drift_windows(bins, panel, days, start_us=int(panel["ts_us"].max()) - days * core.DAY_US)
+        if last:
+            out["newest_calibrated2"] = core.calibrated_level(last[-1]["checks"], cal2)
     return out
 
 
@@ -120,7 +130,11 @@ def verdict(res: list[dict]) -> dict:
     accept = bool(ok) and all(r["cal_oos"]["shift_or_worse"] <= ACCEPT_OOS_SHIFT for r in ok) and \
         all((r["power"]["calibrated"] or 0) >= ACCEPT_POWER for r in ok)
     review_drift = [r["model"] for r in res if r["plain_is"].get("drift", 0) > DRIFT_REVIEW]
-    return {"miscalibrated": mis, "accept_fix": accept and bool(mis), "drift_rule_review": review_drift}
+    ok2 = [r for r in res if "cal2_oos" in r]
+    accept2 = bool(ok2) and all(r["cal2_oos"]["shift_or_worse"] <= ACCEPT_OOS_SHIFT for r in ok2) and \
+        all((r["power2"]["calibrated"] or 0) >= ACCEPT_POWER for r in ok2)
+    return {"miscalibrated": mis, "accept_fix": accept and bool(mis), "drift_rule_review": review_drift,
+            "accept_fix2_addendum": accept2 and bool(mis)}
 
 
 def write(res: list[dict], v: dict) -> None:
@@ -153,12 +167,28 @@ def write(res: list[dict], v: dict) -> None:
             md.append(f"\nNewest window: today's rule says {r['newest_plain']}, the calibrated rule "
                       f"{r['newest_calibrated'][0]} ({r['newest_calibrated'][1]} inputs over their cuts, k "
                       f"{r['calibration']['k']}).\n")
+    md.append("\n## Addendum, chosen after the registered form failed: one cut per input, Bonferroni, k = 1\n\n"
+              "Each input's cut at the 1 - 0.05 / inputs quantile of its training windows (PSI and outside share), "
+              "\"shift\" when any one input is over its cut, \"drift\" when an input is outside the trained range "
+              "more often than in any such training window (at least 5 %). Judged by the same acceptance rule, "
+              "but it was picked after seeing the first form's numbers, so it is a candidate for the next "
+              "registration, not a result.\n\n"
+              "| model | quantile | shift or worse IS | OOS | drift IS | OOS | power | newest window |\n"
+              "|---|---|---|---|---|---|---|---|\n")
+    for r in res:
+        if "cal2_oos" not in r:
+            continue
+        nw = r.get("newest_calibrated2")
+        md.append(f"| {r['model']} | {r['calibration2']['quantile']:.4f} | {p(r['cal2_is']['shift_or_worse'])} | "
+                  f"{p(r['cal2_oos']['shift_or_worse'])} | {p(r['cal2_is']['drift'])} | {p(r['cal2_oos']['drift'])} | "
+                  f"{p(r['power2']['calibrated'])} | {nw[0] if nw else 'n/a'} |\n")
+    md.append(f"\nAddendum form passes the acceptance rule: {'yes' if v.get('accept_fix2_addendum') else 'no'}.\n")
     md.append(f"\n**Verdict.** Miscalibrated (over {MISCALIBRATED:.0%} of in-sample windows shifted): "
               f"{', '.join(v['miscalibrated']) or 'none'}. Fix accepted: {'yes' if v['accept_fix'] else 'no'} "
               f"(needs out-of-sample shift at most {ACCEPT_OOS_SHIFT:.0%} and power at least {ACCEPT_POWER:.0%} for every "
               f"model). Drift rule (over {DRIFT_REVIEW:.0%} false alarms in sample): "
               f"{', '.join(v['drift_rule_review']) or 'none'}.\n")
-    (RESULTS / "drift_study.md").write_text("".join(md), encoding="utf-8")
+    (RESULTS / "drift_study.md").write_text("".join(md), encoding="utf-8", newline="\n")
 
 
 def main() -> None:

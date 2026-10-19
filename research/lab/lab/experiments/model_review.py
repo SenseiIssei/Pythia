@@ -782,7 +782,7 @@ def write(res: dict) -> None:
         if not e["tests"]:
             md.append("\nNo ensemble could be formed.\n")
         md.append("\n")
-    (RESULTS / f"{NAME}_studies.md").write_text("".join(md), encoding="utf-8")
+    (RESULTS / f"{NAME}_studies.md").write_text("".join(md), encoding="utf-8", newline="\n")
     print("wrote", RESULTS / f"{NAME}_studies.md", flush=True)
 
 

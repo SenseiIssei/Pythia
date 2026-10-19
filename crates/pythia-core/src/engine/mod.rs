@@ -415,6 +415,21 @@ pub struct RiskLimits {
     /// (0 = off). Closing only. See [`risk::VolSpikeGuard`].
     #[serde(default)]
     pub vol_spike_trim_mult: f64,
+    /// Whether a lab book's own closed trades can rule it out of the auto
+    /// pick (true, the behaviour so far). A lab book trades by rebalancing
+    /// toward the lab's targets, and every trim is booked as a closed trade
+    /// charged a round trip of fees, so 30 such trims (a few days of a daily
+    /// book) can measure "no edge" on noise and fees alone. False leaves a lab
+    /// book's forward judgement to the lab's forward report (its paper book
+    /// against its backtest's band, see `Evidence::score`); its record is
+    /// still shown. Built-in strategies are not affected either way. See
+    /// `research/lab/results/model_review.md`.
+    #[serde(default = "default_lab_edge_from_trades")]
+    pub lab_edge_from_trades: bool,
+}
+
+fn default_lab_edge_from_trades() -> bool {
+    true
 }
 
 fn default_max_correlated_exposure_pct() -> f64 {
@@ -455,6 +470,7 @@ impl Default for RiskLimits {
             // Off: selling into a spike is a decision with a cost (it sells
             // after the move), so it is the operator's to switch on.
             vol_spike_trim_mult: 0.0,
+            lab_edge_from_trades: default_lab_edge_from_trades(),
         }
     }
 }

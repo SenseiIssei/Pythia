@@ -357,9 +357,38 @@ def drift_calibration(bins: dict, windows: list[dict], days: int, step_days: int
             "false_alarm_train": float(np.mean(counts >= k)), "quantile": CAL_Q, "cuts": cuts}
 
 
+def drift_calibration_per_input(bins: dict, windows: list[dict], days: int, alpha: float = CAL_FALSE_ALARM,
+                                step_days: int = CAL_STEP_DAYS) -> dict | None:
+    """The second form (X9 addendum, chosen after the first failed): one cut per input
+    at the 1 - alpha / inputs quantile of its training windows (Bonferroni over the
+    inputs), so any one input over its cut is a "shift" (k = 1), and "drift" when an
+    input sits outside the trained range more often than in any such training window
+    (its outside cut, at least today's 5 %). None with too few windows."""
+    if len(windows) < CAL_MIN_WINDOWS:
+        return None
+    feats = [f for f in bins if sum(f in w["checks"] for w in windows) >= CAL_MIN_WINDOWS]
+    if not feats:
+        return None
+    q = 1 - alpha / len(feats)
+    cuts = {}
+    for f in feats:
+        psi = [w["checks"][f]["psi"] for w in windows if f in w["checks"]]
+        out = [w["checks"][f]["outside_pct"] for w in windows if f in w["checks"]]
+        cuts[f] = {"psi": max(0.25, float(np.quantile(psi, q))), "outside": max(2.0, float(np.quantile(out, q))),
+                   "drift_outside": max(5.0, float(np.quantile(out, q)))}
+    cal = {"mode": "per_input", "window_days": days, "step_days": step_days, "windows": len(windows), "k": 1,
+           "quantile": q, "cuts": cuts}
+    cal["false_alarm_train"] = float(np.mean([calibrated_level(w["checks"], cal)[0] != "stable" for w in windows]))
+    return cal
+
+
 def calibrated_level(checks: dict, cal: dict) -> tuple[str, int]:
     """(level, inputs over their cuts) for one window under a calibration."""
     n = sum(exceeds(c, cal["cuts"][f]) for f, c in checks.items() if f in cal["cuts"])
+    if cal.get("mode") == "per_input":
+        if any(c["outside_pct"] > cal["cuts"][f]["drift_outside"] for f, c in checks.items() if f in cal["cuts"]):
+            return "drift", n
+        return ("shift" if n >= 1 else "stable"), n
     if any(c["level"] == "drift" for c in checks.values()):
         return "drift", n
     return ("shift" if n >= cal["k"] else "stable"), n
