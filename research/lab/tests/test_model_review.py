@@ -131,3 +131,26 @@ def test_shadow_is_off_by_default_and_records_before_it_scores(tmp_path, monkeyp
     fwd = -vol + 0.001 * rng.normal(size=40)                 # calm coins did better
     out = sh.score(tmp_path, pl.DataFrame({"day": [day] * 40, "symbol": syms, "fwd": fwd}))
     assert out["scored_days"] == 1 and out["mean_ic_ensemble"] > out["mean_ic_m2"]
+
+
+def test_kelly_shrunk_matches_the_engine_estimate():
+    # risk.rs: 2 wins of 1 %, 2 losses of 2 % -> p 0.5, b 0.5, raw -0.5, shrunk -0.5 * 4 / 34
+    assert math.isclose(mr.kelly_shrunk([0.01, 0.01, -0.02, -0.02]), -0.5 * 4 / 34)
+    assert math.isclose(mr.kelly_shrunk([0.01] * 3), 1.0 * 3 / 33)       # nothing lost: f = p
+    assert math.isclose(mr.kelly_shrunk([-0.01] * 3), -1.0 * 3 / 33)     # nothing won
+    assert math.isnan(mr.kelly_shrunk([]))
+
+
+class _P:
+    def __init__(self, px):
+        self.px = px
+
+
+def test_trim_returns_books_each_sale_against_the_average_entry_minus_fees():
+    px = np.array([[100.0], [110.0], [121.0], [121.0]])
+    held = np.array([[0.5], [0.6], [0.3], [0.0]])     # buy, top up, trim, exit
+    gross = np.zeros(4)
+    ev = mr.trim_returns(_P(px), held, gross, 0, 4)
+    assert [t for t, _ in ev] == [2, 3]
+    assert all(r < px[2, 0] / 100 - 1 for _, r in ev)   # the top-up at 110 raised the average entry
+    assert all(r > 0 for _, r in ev)

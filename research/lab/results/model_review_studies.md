@@ -105,3 +105,13 @@ All three books penalised on 0.0 % of days, at least one on 17.9 %.
 Joined M2 (positive selection-window IC with t above 2.0): lowvol30.
 
 - **m2 + lowvol30**: IC 0.158 against M2's 0.149, difference t 3.13, by year 2024 0.0035, 2025 0.0126, 2026 0.0109; bottom decile -3.64 % against -3.21 %. Passes.
+
+## Addendum to d (after the registration): the engine's "no edge" rule on lab books
+
+Found while checking d.1: on 2026-10-18 the main auto pick dropped breakout_top10 and tsmom_regime because their own records said "no edge" (30 or more closed trades, shrunk Kelly at or below 0). A lab book's closed trades are its rebalancing sales. Replayed here as the engine books them (each sale against the coin's average entry, minus twice the 25 bps fee), from an empty book at every quarter start since 2021, the first 92 days. Descriptive, not a trial.
+
+| book | quarter starts | rule fired | median days to fire | next 90 days after it fired | any 90 days |
+|---|---|---|---|---|---|
+| breakout_top10 | 24 | 0 | n/a | n/a % | 6.2 % |
+| tsmom_top20 | 24 | 4 | 16 | 3.5 % | 2.7 % |
+| tsmom_tranches | 24 | 9 | 24 | 1.9 % | 3.2 % |

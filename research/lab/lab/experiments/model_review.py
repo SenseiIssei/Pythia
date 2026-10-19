@@ -461,6 +461,102 @@ def part_d(P: fc.Panel, B: dict, rng: np.random.Generator) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# d addendum (after the registration): the engine's "no edge" rule on lab books
+# ---------------------------------------------------------------------------
+
+FEE = 0.0025          # Alpaca crypto taker, one side; the engine charges twice this on a close
+MIN_EDGE_TRADES = 30  # risk::MIN_EDGE_TRADES
+
+
+def trim_returns(P: fc.Panel, held: np.ndarray, gross: np.ndarray, start: int, end: int) -> list[tuple[int, float]]:
+    """(day, net return) of every closed trade the engine would book for a lab book
+    joining at `start` with an empty book: each sale (a trim or an exit) at that
+    day's close against the coin's average entry price, minus a round trip of
+    fees, as Engine::fill books it."""
+    N = held.shape[1]
+    units = np.zeros(N)
+    avg = np.full(N, np.nan)
+    eq = 1.0
+    out = []
+    for t in range(start, end):
+        if t > start:
+            eq *= 1 + gross[t]
+        px = P.px[t]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            want = np.where(np.isfinite(px) & (px > 0), held[t] * eq / px, 0.0)
+        du = want - units
+        for j in np.flatnonzero(np.abs(du) > 1e-9 * max(eq, 1e-9)):
+            if du[j] > 0:
+                a = avg[j] if np.isfinite(avg[j]) else px[j]
+                avg[j] = (units[j] * a + du[j] * px[j]) / (units[j] + du[j])
+            elif np.isfinite(avg[j]) and avg[j] > 0 and units[j] > 0:
+                out.append((t, float(px[j] / avg[j] - 1 - 2 * FEE)))
+                if want[j] <= 1e-12:
+                    avg[j] = np.nan
+        units = want
+    return out
+
+
+def kelly_shrunk(rets: list[float]) -> float:
+    """risk::EdgeRecord::estimate's shrunk Kelly: (p - (1-p)/b) * n / (n + 30)."""
+    r = np.asarray(rets, float)
+    n = len(r)
+    if n == 0:
+        return float("nan")
+    w, lo = r[r > 0], -r[r <= 0]
+    p = len(w) / n
+    avg_win = float(w.mean()) if len(w) else 0.0
+    avg_loss = float(lo.mean()) if len(lo) else 0.0
+    if avg_loss <= 0:
+        raw = p
+    elif avg_win <= 0:
+        raw = -1.0
+    else:
+        raw = max(p - (1 - p) / (avg_win / avg_loss), -1.0)
+    return raw * n / (n + 30)
+
+
+def addendum_edge(P: fc.Panel) -> dict:
+    """At every quarter start from 2021 a fresh record, as when a book joins an
+    autopilot: when does the engine's rule first say "no edge", and what did the
+    book do over the next 90 days, against its other quarter starts?"""
+    alp = au.alpaca_mask(P)
+    O = au.originals(P)
+    c35 = COSTS[BASE]
+    qs = [q for q in fo.quarter_starts(P) if P.days[q] >= int(np.datetime64("2021-01-01", "us").astype(np.int64))]
+    out = {}
+    for b in BOOKS:
+        g, tv, ex, held = au.simulate(P, b, au.cash_left(O[b], alp))
+        x = fo.net(g, tv, c35)
+        fired, rows = [], []
+        for q in qs:
+            end = min(q + 92, P.T - 1)
+            ev = trim_returns(P, held, g, q, end)
+            day = None
+            for k in range(MIN_EDGE_TRADES, len(ev) + 1):
+                if kelly_shrunk([r for _, r in ev[:k]]) <= 0:
+                    day = ev[k - 1][0]
+                    break
+            nxt = fo.forward_return(x, 90)
+            rows.append({"start": str(P.days[q].astype("datetime64[us]").astype("datetime64[D]")),
+                         "trades_in_quarter": len(ev),
+                         "fires_after_days": None if day is None else int(day - q + 1),
+                         "next90_after_fire": None if day is None or not np.isfinite(nxt[day]) else float(nxt[day])})
+            if day is not None:
+                fired.append(day)
+        all90 = fo.forward_return(x, 90)
+        ok = np.isfinite(all90) & (P.days >= qs[0] if qs else False)
+        out[b] = {"quarters": len(qs), "fired": len(fired),
+                  "median_days_to_fire": float(np.median([r["fires_after_days"] for r in rows if r["fires_after_days"]]))
+                  if fired else None,
+                  "mean_next90_after_fire": float(np.nanmean([r["next90_after_fire"] for r in rows
+                                                              if r["next90_after_fire"] is not None])) if fired else None,
+                  "mean_next90_any_day": float(np.mean(all90[ok])) if ok.any() else None,
+                  "rows": rows}
+    return out
+
+
+# ---------------------------------------------------------------------------
 # e. Ensembles, by rank IC
 # ---------------------------------------------------------------------------
 
@@ -591,7 +687,7 @@ def gates(P: fc.Panel, part: dict, refs: dict, rng: np.random.Generator,
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--part", default="abde")
+    ap.add_argument("--part", default="abdex")
     ap.add_argument("--refresh", action="store_true", help="rebuild the M8q holdout")
     args = ap.parse_args()
     rng = np.random.default_rng(20261020)
@@ -618,6 +714,9 @@ def main() -> None:
     if "e" in args.part:
         print("e: ensembles ...", flush=True)
         res["e"] = part_e(P)
+    if "x" in args.part:
+        print("addendum: the no-edge rule on lab books ...", flush=True)
+        res["x"] = addendum_edge(P)
 
     # Deflation over everything counted in this study (all three parts run together).
     counted = [r for k in ("a", "b") if k in parts for r in parts[k]["rows"]]
@@ -782,6 +881,19 @@ def write(res: dict) -> None:
         if not e["tests"]:
             md.append("\nNo ensemble could be formed.\n")
         md.append("\n")
+    if "x" in res:
+        md.append("\n## Addendum to d (after the registration): the engine's \"no edge\" rule on lab books\n\n"
+                  "Found while checking d.1: on 2026-10-18 the main auto pick dropped breakout_top10 and tsmom_regime "
+                  "because their own records said \"no edge\" (30 or more closed trades, shrunk Kelly at or below 0). "
+                  "A lab book's closed trades are its rebalancing sales. Replayed here as the engine books them (each "
+                  "sale against the coin's average entry, minus twice the 25 bps fee), from an empty book at every "
+                  "quarter start since 2021, the first 92 days. Descriptive, not a trial.\n\n"
+                  "| book | quarter starts | rule fired | median days to fire | next 90 days after it fired | "
+                  "any 90 days |\n|---|---|---|---|---|---|\n")
+        for b, v in res["x"].items():
+            md.append(f"| {ORIGINAL[b]} | {v['quarters']} | {v['fired']} | {_f(v['median_days_to_fire'], 0)} | "
+                      f"{_f((v['mean_next90_after_fire'] if v['mean_next90_after_fire'] is not None else float('nan')) * 100, 1)} % | "
+                      f"{_f((v['mean_next90_any_day'] if v['mean_next90_any_day'] is not None else float('nan')) * 100, 1)} % |\n")
     (RESULTS / f"{NAME}_studies.md").write_text("".join(md), encoding="utf-8", newline="\n")
     print("wrote", RESULTS / f"{NAME}_studies.md", flush=True)
 
