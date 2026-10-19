@@ -418,8 +418,9 @@ pub struct RiskLimits {
     /// Whether a lab book's own closed trades can rule it out of the auto
     /// pick (true, the behaviour so far). A lab book trades by rebalancing
     /// toward the lab's targets, and every trim is booked as a closed trade
-    /// charged a round trip of fees, so 30 such trims (a few days of a daily
-    /// book) can measure "no edge" on noise and fees alone. False leaves a lab
+    /// charged a round trip of fees. A daily book closes 30 of them within a
+    /// week or two, and they are not 30 independent bets: its coins rise and
+    /// fall together, so one bad week reads as "no edge". False leaves a lab
     /// book's forward judgement to the lab's forward report (its paper book
     /// against its backtest's band, see `Evidence::score`); its record is
     /// still shown. Built-in strategies are not affected either way. See

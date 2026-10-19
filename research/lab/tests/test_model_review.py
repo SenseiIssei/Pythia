@@ -106,3 +106,28 @@ def test_static_score_matches_the_engine_formula():
     # Evidence::score with no gates: 1 + min(oos, 2) + 0.5 min(2x cost, 2) + p.
     assert math.isclose(mr.static_score(1.163, 1.045, 0.0095), 1 + 1.163 + 0.5225 + 0.0095)
     assert math.isclose(mr.static_score(-1, -1, 0), 1.0)
+
+
+def test_shadow_is_off_by_default_and_records_before_it_scores(tmp_path, monkeypatch):
+    from lab.paper import m2_lowvol_shadow as sh
+    monkeypatch.delenv(sh.ENV, raising=False)
+    assert not sh.enabled()
+    monkeypatch.setenv(sh.ENV, "1")
+    assert sh.enabled()
+    rng = np.random.default_rng(4)
+    syms = [f"C{i}USDT" for i in range(40)]
+    score, vol = rng.normal(size=40), np.abs(rng.normal(0.03, 0.01, 40))
+    ranks = sh.rankings(syms, score, vol)
+    assert len(ranks) == 40 and all(0 <= a <= 1 and 0 <= b <= 1 for a, b in ranks.values())
+    calmest = syms[int(np.argmin(vol))]
+    loudest = syms[int(np.argmax(vol))]
+    assert ranks[calmest][1] - ranks[calmest][0] > ranks[loudest][1] - ranks[loudest][0]
+    day = 1_790_000_000_000_000 // 86_400_000_000 * 86_400_000_000
+    sh.record(tmp_path, day, ranks, 1)
+    sh.record(tmp_path, day, ranks, 2)                       # the same day is written once
+    assert len((tmp_path / "shadow_m2_lowvol.jsonl").read_text().splitlines()) == 1
+    assert sh.score(tmp_path, pl.DataFrame({"day": [], "symbol": [], "fwd": []},
+                                           schema={"day": pl.Int64, "symbol": pl.Utf8, "fwd": pl.Float64}))["scored_days"] == 0
+    fwd = -vol + 0.001 * rng.normal(size=40)                 # calm coins did better
+    out = sh.score(tmp_path, pl.DataFrame({"day": [day] * 40, "symbol": syms, "fwd": fwd}))
+    assert out["scored_days"] == 1 and out["mean_ic_ensemble"] > out["mean_ic_m2"]
