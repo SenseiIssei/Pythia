@@ -1,0 +1,133 @@
+"""The pre-registered rules of the real-time pump.fun study (results/pumpfun_realtime_plan.md).
+
+Written down on 2026-10-20 before any of them was computed on recorded data.
+A change is a new rule with a new name, never an edit; every rule here is one
+trial in the lab's global deflation pool, the model filter one more.
+
+Every rule stakes STAKE_SOL a trade, at most MAX_OPEN open at once (a signal
+while full is skipped and counted), trades only plain SOL-quoted curves
+(no mayhem mode, no other quote mint, no fee-free curve with erratic
+reserves), enters once per token, and exits on the first of: take profit
+(the position's sale value, net of the fee, at or above stake x (1 + tp)),
+stop loss (at or below stake x (1 - sl)), or the time stop (hold_s after the
+buy landed). Exits are checked on every trade of the token and the sale
+lands one latency draw later (curve.py), at whatever the curve then pays.
+
+Families (signal time in brackets):
+
+  A  snipe      [the creation transaction is received]  every new token, or a
+                filter known at creation: the dev buy, or a creator whose
+                earlier token completed its curve while we watched.
+  B  pressure   [creation + W s]  enough unique buyers (the dev not counted)
+                and net SOL inflow in the first W seconds, the dev not selling.
+  C  momentum   [the trade that makes it]  X unique buyers within Y seconds of
+                creation while the curve is under half done, the dev not selling.
+  D  premigrate [the trade that crosses]  curve progress crosses p; sold on the
+                curve or, if it completes first, into the PumpSwap pool.
+  E  postmigrate [migration + d s]  bought in the PumpSwap pool after migration.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+STAKE_SOL = 0.1
+MAX_OPEN = 50
+PLAN_DATE = "2026-10-20"
+
+
+@dataclass(frozen=True)
+class Rule:
+    name: str
+    family: str
+    entry: str                       # create | checkpoint | momentum | progress | migration
+    tp: float
+    sl: float
+    hold_s: float
+    p: dict = field(default_factory=dict, hash=False, compare=False)
+    label: str = ""
+
+    def wants_create(self, tok) -> bool:
+        """Family A filters, known at creation (the dev buy is in the same transaction)."""
+        f = self.p.get("filter")
+        if f == "all":
+            return True
+        if f == "devbuy":
+            return self.p["lo"] <= tok.dev_buy_l / 1e9 <= self.p["hi"]
+        if f == "creator_migrated":
+            return (tok.hist or {}).get("migrated", 0) >= 1
+        return False
+
+    def wants_checkpoint(self, tok, t: int) -> bool:
+        """Family B at creation + W s."""
+        buyers = len(tok.buyers) - (tok.creator in tok.buyers)
+        net = (tok.buy_l - tok.sell_l) / 1e9
+        return buyers >= self.p["buyers"] and net >= self.p["net_sol"] and tok.dev_sold == 0
+
+    def wants_momentum(self, tok, t: int) -> bool:
+        """Family C after each trade."""
+        if (t - tok.t0) > self.p["within_s"] * 1000 or tok.dev_sold > 0 or tok.progress() >= 0.5:
+            return False
+        return len(tok.buyers) - (tok.creator in tok.buyers) >= self.p["buyers"]
+
+    def wants_progress(self, tok, t: int) -> bool:
+        return tok.on_curve and tok.progress() >= self.p["at"]
+
+
+def _exits(a: tuple, b: tuple) -> list[tuple[str, float, float, float]]:
+    return [("x1", *a), ("x2", *b)]
+
+
+def _build() -> list[Rule]:
+    rules: list[Rule] = []
+    # A: snipe at creation
+    for fname, fp, flabel in (("all", {"filter": "all"}, "every new token"),
+                              ("dev", {"filter": "devbuy", "lo": 0.5, "hi": 5.0}, "dev buy 0.5 to 5 SOL"),
+                              ("cmig", {"filter": "creator_migrated"}, "creator had a token complete its curve")):
+        for x, tp, sl, hold in _exits((0.5, 0.3, 15), (1.0, 0.4, 60)):
+            rules.append(Rule(f"A_{fname}_{x}", "A", "create", tp, sl, hold, fp,
+                              f"snipe at creation, {flabel}; +{tp:.0%} / -{sl:.0%} / {hold:.0f} s"))
+    # B: pressure at creation + W
+    for w, buyers, net in ((3, 5, 1.0), (10, 10, 2.0)):
+        for x, tp, sl, hold in _exits((0.5, 0.3, 30), (1.0, 0.4, 120)):
+            rules.append(Rule(f"B_w{w}_{x}", "B", "checkpoint", tp, sl, hold,
+                              {"w_s": w, "buyers": buyers, "net_sol": net},
+                              f"at creation + {w} s: {buyers}+ unique buyers, {net:g}+ SOL net in, dev not sold; "
+                              f"+{tp:.0%} / -{sl:.0%} / {hold:.0f} s"))
+    # C: momentum
+    for buyers, within in ((20, 60), (50, 300)):
+        for x, tp, sl, hold in _exits((0.5, 0.25, 120), (1.0, 0.35, 600)):
+            rules.append(Rule(f"C_{buyers}in{within}_{x}", "C", "momentum", tp, sl, hold,
+                              {"buyers": buyers, "within_s": within},
+                              f"{buyers} unique buyers within {within} s, curve under half, dev not sold; "
+                              f"+{tp:.0%} / -{sl:.0%} / {hold:.0f} s"))
+    # D: pre-migration
+    for at in (0.8, 0.9):
+        for x, tp, sl, hold in _exits((0.3, 0.2, 300), (0.6, 0.3, 1800)):
+            rules.append(Rule(f"D_p{int(at * 100)}_{x}", "D", "progress", tp, sl, hold, {"at": at},
+                              f"curve progress crosses {at:.0%}; +{tp:.0%} / -{sl:.0%} / {hold:.0f} s"))
+    # E: post-migration
+    for d in (0, 60):
+        for x, tp, sl, hold in _exits((0.3, 0.2, 300), (1.0, 0.4, 1800)):
+            rules.append(Rule(f"E_d{d}_{x}", "E", "migration", tp, sl, hold, {"delay_s": d},
+                              f"PumpSwap pool, migration + {d} s; +{tp:.0%} / -{sl:.0%} / {hold:.0f} s"))
+    return rules
+
+
+RULES: list[Rule] = _build()
+BY_NAME = {r.name: r for r in RULES}
+# The model filter on the in-sample pick is one more trial.
+MODEL_FILTER_TRIALS = 1
+N_TRIALS = len(RULES) + MODEL_FILTER_TRIALS
+# The rule the shadow book runs until the study has picked one (pick.json).
+DEFAULT_PICK = "C_20in60_x1"
+# The model filter: enter only when the calibrated probability that this entry,
+# filled with latency and sold at the rule's horizon (30 s for holds up to a
+# minute, else 5 minutes), ends above zero after costs is at least
+# FILTER_LIFT times the training base rate.
+FILTER_LIFT = 1.25
+
+
+def checkpoints() -> list[tuple[str, float]]:
+    """(rule, offset s) of every checkpoint rule."""
+    return [(r.name, r.p["w_s"]) for r in RULES if r.entry == "checkpoint"]
