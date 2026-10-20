@@ -166,6 +166,123 @@ fn a_gap_the_unposted_fee_explains_is_booked_as_that_fee() {
     assert!(e.journal.iter().any(|j| j.message.contains("kept") && j.message.contains("crypto fee")));
 }
 
+/// A demo position of `book` (an autopilot id) in `market`, and the watch of
+/// the buy that opened it (`qty` filled `age_ms` ago, waiting for its fee).
+fn book_buy(e: &mut Engine, book: &str, market: &str, held: f64, bought: f64, age_ms: i64) {
+    let m = e.markets.iter().find(|m| m.id == market).cloned().unwrap();
+    let now = e.now();
+    if held > 0.0 {
+        e.positions.insert(
+            pos_key(book, market),
+            PositionInternal {
+                market: market.into(),
+                book: book.into(),
+                venue: m.venue,
+                symbol: m.symbol.clone(),
+                qty: held,
+                avg_price: PX,
+                strategy_id: "manual".into(),
+                stop: 0.0,
+                target: 0.0,
+                trail_ref: PX,
+                live: false,
+                demo: true,
+            },
+        );
+    }
+    e.alpaca_fees.push(super::alpaca_fees::AlpacaFeeWatch {
+        order_id: format!("o-{book}"),
+        market_id: market.into(),
+        symbol: "BTC/USD".into(),
+        side: Side::Buy,
+        strategy_id: "manual".into(),
+        qty: bought,
+        price: PX,
+        ts: now - age_ms,
+        paper: false,
+        demo: true,
+        taxed: false,
+        taken: 0.0,
+        posted_coins: 0.0,
+        posted_usd: 0.0,
+        maker: false,
+        book: book.into(),
+    });
+}
+
+#[test]
+fn a_shared_fee_gap_is_taken_once_from_the_newest_buy_of_a_book_that_holds_the_coin() {
+    // Three autopilots share the paper account. ap_a holds 1 BTC from an hour
+    // ago; ap_b bought 3 BTC two hours ago and has sold them since (its buy
+    // still waits for Alpaca's posting); ap_c bought 2 BTC ten minutes ago and
+    // Alpaca kept that buy's fee in coins.
+    let (mut e, _) = engine();
+    book_buy(&mut e, "ap_a", BTC, 1.0, 1.0, 3_600_000);
+    book_buy(&mut e, "ap_b", BTC, 0.0, 3.0, 7_200_000);
+    book_buy(&mut e, "ap_c", BTC, 2.0, 2.0, 600_000);
+    let fee = 2.0 * 0.0025;
+    let venue = 3.0 - fee;
+    let cash = e.cash;
+    let fees0 = e.strategy_config("manual").unwrap().ledger.fees;
+    e.apply_demo_reconcile(&[at_alpaca("BTC/USD", venue, PX)], &[]);
+    assert_eq!(check(&e, "BTC/USD").status, PairStatus::FeeTaken);
+    assert!((e.positions[&pos_key("ap_c", BTC)].qty - (2.0 - fee)).abs() < 1e-12, "the newest buy's coins paid it");
+    assert_eq!(e.positions[&pos_key("ap_a", BTC)].qty, 1.0, "an older buy's book is left alone");
+    assert!(!e.positions.contains_key(&pos_key("ap_b", BTC)));
+    assert!((e.cash - cash).abs() < 1e-9, "no cash leaves for coins nobody held");
+    let fees = e.strategy_config("manual").unwrap().ledger.fees - fees0;
+    assert!((fees - fee * PX).abs() < 1e-6, "booked once, at its size: {fees}");
+    let taken: Vec<f64> = e.alpaca_fees.iter().map(|w| w.taken).collect();
+    assert!(taken[0] == 0.0 && taken[1] == 0.0 && (taken[2] - fee).abs() < 1e-12, "{taken:?}");
+
+    // Ten minutes later the book and the venue agree: nothing is taken again,
+    // and nothing turns into a correction.
+    for _ in 0..3 {
+        e.apply_demo_reconcile(&[at_alpaca("BTC/USD", venue, PX)], &[]);
+        assert_eq!(check(&e, "BTC/USD").status, PairStatus::Ok);
+    }
+    let fees = e.strategy_config("manual").unwrap().ledger.fees - fees0;
+    assert!((fees - fee * PX).abs() < 1e-6, "{fees}");
+    assert_eq!(journal_count(&e, "as its crypto fee"), 1);
+    assert_eq!(journal_count(&e, "corrected"), 0);
+}
+
+#[test]
+fn a_fee_gap_bigger_than_what_the_holders_can_owe_is_a_correction_once() {
+    // The only buy waiting for its fee belongs to a book that holds nothing
+    // now: the gap cannot be its fee, so the holder follows the venue once.
+    let (mut e, _) = engine();
+    book_buy(&mut e, "ap_b", BTC, 0.0, 3.0, 600_000);
+    book_buy(&mut e, "ap_a", BTC, 1.0, 0.0, 3_600_000);
+    e.alpaca_fees.retain(|w| w.book != "ap_a");
+    let venue = 1.0 - 0.0075;
+    let cash = e.cash;
+    e.apply_demo_reconcile(&[at_alpaca("BTC/USD", venue, PX)], &[]);
+    assert_eq!(check(&e, "BTC/USD").status, PairStatus::Corrected);
+    assert!((e.positions[&pos_key("ap_a", BTC)].qty - venue).abs() < 1e-12);
+    assert!((e.cash - cash).abs() < 1e-9);
+    assert_eq!(e.alpaca_fees[0].taken, 0.0, "a book without the coin is not charged for them");
+    e.apply_demo_reconcile(&[at_alpaca("BTC/USD", venue, PX)], &[]);
+    assert_eq!(check(&e, "BTC/USD").status, PairStatus::Ok);
+}
+
+#[test]
+fn books_that_share_a_pair_keep_their_own_entry_price_when_corrected() {
+    let (mut e, _) = engine();
+    book_buy(&mut e, "ap_a", BTC, 1.0, 0.0, 0);
+    book_buy(&mut e, "ap_c", BTC, 3.0, 0.0, 0);
+    e.alpaca_fees.clear();
+    e.positions.get_mut(&pos_key("ap_a", BTC)).unwrap().avg_price = 50_000.0;
+    e.positions.get_mut(&pos_key("ap_c", BTC)).unwrap().avg_price = 70_000.0;
+    // Alpaca has a little more than the books and averages the two entries.
+    e.apply_demo_reconcile(&[at_alpaca("BTC/USD", 4.004, 65_000.0)], &[]);
+    assert_eq!(check(&e, "BTC/USD").status, PairStatus::Corrected);
+    let a = &e.positions[&pos_key("ap_a", BTC)];
+    let c = &e.positions[&pos_key("ap_c", BTC)];
+    assert!((a.qty - 1.001).abs() < 1e-12 && (c.qty - 3.003).abs() < 1e-12, "{} {}", a.qty, c.qty);
+    assert_eq!((a.avg_price, c.avg_price), (50_000.0, 70_000.0), "no open P&L moves between the books");
+}
+
 #[test]
 fn nine_decimals_of_rounding_are_not_a_mismatch() {
     let (mut e, _) = engine();

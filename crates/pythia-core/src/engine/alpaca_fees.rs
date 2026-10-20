@@ -211,14 +211,57 @@ impl Engine {
         });
     }
 
-    /// Coins the watched buys in this market, on this account and route (and
-    /// in `book` when one is named), can still have paid as a fee.
-    fn alpaca_fee_room(&self, market_id: &str, book: Option<&str>, paper: bool, demo: bool) -> f64 {
-        self.alpaca_fees
-            .iter()
-            .filter(|w| w.market_id == market_id && w.paper == paper && w.demo == demo && book.is_none_or(|b| w.book == b))
-            .map(AlpacaFeeWatch::room)
-            .sum()
+    /// Which watched buys a gap of `gap` coins in this market is taken from,
+    /// and how many coins each: `None` when their unposted fees cannot
+    /// explain it.
+    ///
+    /// Only a buy whose book still holds coins here can give coins up, and no
+    /// more than that book holds: the gap is in the positions, and a fee
+    /// booked against a book that holds nothing moves no position, so the
+    /// same gap was found again at the next reconcile and booked again (a
+    /// share smaller each time, every one of them a fee and cash leaving the
+    /// main book; see results/forward_audit.md). The newest buys come first:
+    /// the venue takes a buy's fee from the coins it credits, so a gap the
+    /// reconcile finds is the fee of the buys since the last one, and a fee
+    /// spread over older buys by size left the newest one's posting short
+    /// and its coins taken a second time when Alpaca posted it.
+    fn alpaca_fee_shares(&self, market_id: &str, book: Option<&str>, gap: f64, paper: bool, demo: bool) -> Option<Vec<(usize, f64)>> {
+        if gap.is_nan() || gap <= 0.0 {
+            return None;
+        }
+        let mut cands: Vec<usize> = (0..self.alpaca_fees.len())
+            .filter(|&i| {
+                let w = &self.alpaca_fees[i];
+                w.market_id == market_id && w.paper == paper && w.demo == demo && w.room() > 0.0 && book.is_none_or(|b| w.book == b)
+            })
+            .collect();
+        cands.sort_by_key(|&i| std::cmp::Reverse(self.alpaca_fees[i].ts));
+        let mut held: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+        for &i in &cands {
+            let b = self.alpaca_fees[i].book.as_str();
+            held.entry(b).or_insert_with(|| self.positions.get(&super::pos_key(b, market_id)).map_or(0.0, |p| p.qty.max(0.0)));
+        }
+        let mut left = gap;
+        let mut shares = Vec::new();
+        for &i in &cands {
+            let w = &self.alpaca_fees[i];
+            let cap = held.get_mut(w.book.as_str()).expect("every candidate's book was read");
+            let take = w.room().min(*cap).min(left);
+            if take > 0.0 {
+                *cap -= take;
+                left -= take;
+                shares.push((i, take));
+            }
+            if left <= 0.0 {
+                break;
+            }
+        }
+        if left > GAP_SLACK || shares.is_empty() {
+            return None;
+        }
+        // Rounding slack the rooms did not cover goes with the newest share.
+        shares[0].1 += left.max(0.0);
+        Some(shares)
     }
 
     /// The venue shows `gap` fewer coins than the book in an Alpaca crypto
@@ -226,7 +269,8 @@ impl Engine {
     /// as those fees (provisionally, until Alpaca posts them) and return
     /// true. Otherwise leave it to the caller's ordinary correction.
     /// `book` limits it to one book's fills (an exit that sold what one book
-    /// held); `None` takes every book's, for a gap in the account's sum.
+    /// held); `None` takes every book's that still holds coins here, for a
+    /// gap in the account's sum (see [`Engine::alpaca_fee_shares`]).
     pub(super) fn take_alpaca_fee_gap(
         &mut self,
         market_id: &str,
@@ -236,26 +280,19 @@ impl Engine {
         demo: bool,
         seen_by: &str,
     ) -> bool {
-        let room = self.alpaca_fee_room(market_id, book, paper, demo);
-        if gap.is_nan() || gap <= 0.0 || room <= 0.0 || gap > room + GAP_SLACK {
+        let Some(shares) = self.alpaca_fee_shares(market_id, book, gap, paper, demo) else {
             return false;
-        }
-        let shares: Vec<(usize, f64)> = self
-            .alpaca_fees
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| w.market_id == market_id && w.paper == paper && w.demo == demo && w.room() > 0.0)
-            .filter(|(_, w)| book.is_none_or(|b| w.book == b))
-            .map(|(i, w)| (i, gap * w.room() / room))
-            .collect();
+        };
         let mut value = 0.0;
-        let mut who = Vec::new();
+        let mut who: Vec<String> = Vec::new();
         for (i, coins) in shares {
             self.alpaca_fees[i].taken += coins;
             let w = self.alpaca_fees[i].clone();
             value += coins * w.price;
             if let Some(ap) = self.charge_late_fee(&w, coins, coins * w.price, 0.0) {
-                who.push(ap);
+                if !who.contains(&ap) {
+                    who.push(ap);
+                }
             }
         }
         let base = self.alpaca_fees.iter().find(|w| w.market_id == market_id).map(|w| w.symbol.clone()).unwrap_or_default();
