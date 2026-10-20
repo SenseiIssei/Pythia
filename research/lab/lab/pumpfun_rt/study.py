@@ -1,9 +1,13 @@
-"""The daily job of the real-time pump.fun lab: the pre-registered rules on the record,
-the model, the report, the pick for the shadow book and the daily card. PAPER ONLY.
+"""The daily job of the real-time pump.fun lab: the pre-registered rules and pipeline
+strategies on the record, live readiness, the report, the pick for the shadow book and
+the decision rows for the retrain. PAPER ONLY.
 
-    python -m lab.pumpfun_rt.study                 run, write reports/pumpfun_rt/, post the card
-    python -m lab.pumpfun_rt.study --no-notify     the same without the card
+    python -m lab.pumpfun_rt.study                 run, write reports/pumpfun_rt/ and the rows
+    python -m lab.pumpfun_rt.study --card          the same and post the daily card here
     python -m lab.pumpfun_rt.study --dry-run       print the report, write and post nothing
+
+The daily card normally comes from the retrain that runs right after (retrain.py),
+so it carries today's models.
 
 Steps (results/pumpfun_realtime_plan.md):
 
@@ -13,14 +17,17 @@ Steps (results/pumpfun_realtime_plan.md):
  3. The split: the first half of the record's time span is in sample, the rest out.
  4. Pass 1 replays the in-sample half with every rule and the model's decision rows;
     the pick is the rule with the best in-sample mean net return per trade (30+
-    trades), and a model for the filter is trained on in-sample rows only.
- 5. Pass 2 replays the whole record with every rule, every rule at doubled latency
-    and at tripled priority fee, and the pick with the model filter; out-of-sample
-    numbers are the trades signalled after the split.
- 6. The bar for every rule; deflation against the lab's global pool.
- 7. The model: purged walk-forward of every label on pass 2's rows, against the base
-    rate and a logistic regression; the daily model is trained on all rows and saved.
- 8. reports/pumpfun_rt/latest.{md,json} (lab feed header), pick.json, the card.
+    trades), and the models for the filters are trained on in-sample rows only.
+ 5. Pass 2 replays the whole record with every rule and every pipeline strategy
+    (pipeline.STRATEGIES, plan addendum 2), each also at doubled latency and at
+    tripled priority fee, and the pick with the model filter; out-of-sample numbers
+    are the trades signalled after the split. The wallet reputation and the name
+    categories are point in time.
+ 6. The bar for every rule and strategy; deflation against the lab's global pool.
+ 7. Readiness for live per strategy (the owner's gate: days, trades, positive with and
+    without broken slots, every gate, 30 days of the live paper shadow in the band).
+ 8. reports/pumpfun_rt/latest.{md,json} (lab feed header), pick.json, the decision
+    rows (<data>/pumpfun_rt/rows/latest.parquet) for retrain.py.
 """
 
 from __future__ import annotations

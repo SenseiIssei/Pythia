@@ -190,11 +190,15 @@ changed: `docker build -t pythia-lab /opt/pythia-lab`.
 
 ## Real-time pump.fun lab
 
-PAPER ONLY. `lab.pumpfun_rt` (see `research/lab/results/pumpfun_realtime.md`
+PAPER by default. `lab.pumpfun_rt` (see `research/lab/results/pumpfun_realtime.md`
 and the pre-registration `results/pumpfun_realtime_plan.md`) records pump.fun
-as it happens and trades it on paper. Nothing in it holds a wallet, reads a
-key, signs or sends anything; the only network it uses is a public Solana RPC
-websocket (`logsSubscribe`, read only) and, for the cards, Telegram.
+as it happens and trades it on paper through one trading pipeline (signal,
+filter, sizing, risk limits, entry, exits) that a live executor would share.
+The live executor (`live_exec.py`) exists but is LOCKED: unless the owner
+does every step under "Live trading (locked)" below, nothing holds a wallet,
+reads a key, signs or sends anything, and the only network used is a public
+Solana RPC websocket (`logsSubscribe`, read only), Telegram for the cards and
+the engine's metered AI endpoint for the name categories.
 
 The collector is a long-running container, not a job. The image needs
 `aiohttp` (in `research/lab/requirements.txt` since this lab), so rebuild it
@@ -234,11 +238,86 @@ the endpoint sends along and PumpSwap trades of old pools that are dropped.
 Disk: a day of record is a few hundred MB of parquet; the study merges a
 finished day's part files into one file per table.
 
-The two jobs (`pumpfun-rt-health`, `pumpfun-rt-study`) are in `jobs.yaml`.
-Try the study by hand without posting:
+The jobs are in `jobs.yaml`:
+
+| Job | When | What |
+|---|---|---|
+| `pumpfun-rt-health` | every 10 min | the collector wrote trades and its heartbeat in the last 10 minutes |
+| `pumpfun-rt-categories` | 06:20 | yesterday's new token names into six categories, Claude Haiku 5.5 through the engine's `POST /api/ai/complete` (Batches; the engine's budget applies, a refusal is not a failure); names classified before are not asked again; cache `pumpfun_rt/categories/cats.jsonl`, report `reports/pumpfun_rt/categories.json`; usually well under $0.20 a day, capped at $0.40 a run |
+| `pumpfun-rt-study` | 06:50 | the 22 rules and the 8 pipeline strategies replayed over the last 14 days (latency fills, doubled latency, tripled priority fee), the bar, live readiness per strategy, `reports/pumpfun_rt/latest.json`, the decision rows for the retrain (`pumpfun_rt/rows/latest.parquet`) |
+| `pumpfun-rt-retrain` | after the study | purged walk-forward per label and feature set (base, wallet reputation, name categories; a set only where it wins out of sample), the models for the shadow books, `reports/pumpfun_rt/models.md`, then the daily Telegram card |
+
+The collector re-reads the models, the pick and the categories every ten
+minutes; no restart. The shadow books (every pipeline strategy and the study's
+pick) write `paper/pumpfun_rt/ledger.csv`; a paper trade at +200 % or better
+is posted at once (at most one an hour).
+
+Try the study and the retrain by hand without posting:
 
 ```bash
-docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.study --dry-run
+docker run --rm --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.study --dry-run
+docker run --rm --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.retrain --dry-run
+docker run --rm --network host --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.categorize --dry-run
+```
+
+Kill switch (paper and live): `touch /srv/pythia-data/pumpfun_rt/KILL` (or
+`/etc/pythia/pumpfun-kill`, mounted into the container). While it is there no
+book buys and every open position is sold; remove the file to resume.
+
+### Live trading (locked)
+
+Nothing below is done, and nothing in the code does it. The live executor
+refuses unless every step holds; `live_exec.py check` says which do not.
+
+Read this first. pump.fun's own terms forbid bots and automatic access on
+its website and API (sections 6.1 and 21(h) as of 2026-10-08). This lab uses
+neither: it reads the public chain and would send plain buy and sell
+instructions of the public programs to a public RPC endpoint, which those
+terms do not speak to. The owner decides with that knowledge. Most new tokens
+go to zero within minutes, faster bots land first, and every position must
+be sized as a total loss. No bundles, tips, private relays or anything that
+front-runs other users are used or allowed (the executor refuses such
+endpoints).
+
+1. The strategy must be ready: `reports/pumpfun_rt/latest.json`, section
+   `readiness`, says `ready: true` for it (14+ days of record, 300+ trades out
+   of sample, positive with and without broken slots, every gate, 30+ days of
+   the live paper shadow with its mean inside the replay's band). The report
+   must be at most 36 hours old.
+2. Make a wallet yourself on the server, outside the code folders, fund it with
+   no more than you can lose, and lock the file down:
+   `solana-keygen new -o /etc/pythia/pumpfun-wallet.json` then
+   `chmod 600 /etc/pythia/pumpfun-wallet.json`. Never commit, copy or paste it
+   anywhere; the code reads it only after every other check passed and never
+   prints it.
+3. Put the program IDLs from github.com/pump-fun/pump-public-docs
+   (`idl/pump.json`, `idl/pump_amm.json`) into `/srv/pythia-data/pumpfun_rt/idl/`.
+   The executor compares them with what it builds and refuses on any difference.
+4. Rebuild the image once (`cryptography` signs; it is in `requirements.txt`).
+5. Write the confirmation, naming the strategy and a daily loss limit in SOL
+   (at most 1 SOL; the code caps it):
+   `printf 'rule=P_p90\nmax_daily_loss_sol=0.3\n' > /etc/pythia/pumpfun-live-ack`
+6. Dry run without sending: `live_exec simulate --pubkey <the wallet's public
+   key> --mint <a live token's mint>` must simulate without error.
+7. Add to the collector's environment `PYTHIA_PUMPFUN_LIVE=1`,
+   `PYTHIA_PUMPFUN_KEYPAIR=/etc/pythia/pumpfun-wallet.json` (mount `/etc/pythia`
+   read only into the container: `-v /etc/pythia:/etc/pythia:ro`) and
+   optionally `PYTHIA_PUMPFUN_RPC` (plain https), `PYTHIA_PUMPFUN_STAKE_SOL`,
+   `PYTHIA_PUMPFUN_MAX_OPEN`, `PYTHIA_PUMPFUN_MAX_EXPOSURE_SOL`,
+   `PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL` (these only lower the caps), then
+   recreate the container. Its log says "live: ON for ..." or lists every
+   reason it stays off.
+
+Hard caps in code: 0.1 SOL a trade, 5 open positions, 0.6 SOL exposure, the
+daily loss stop (no buys for the rest of the UTC day), the kill switch. The
+gate is checked again every minute; any failure stops new buys. Every live
+fill and failure goes to Telegram at once (category Trades, also in quiet
+hours) and to `/srv/pythia-data/live/pumpfun_rt/` (`orders.jsonl` with the
+signatures, `ledger.csv`, `state.json`). To stop: the kill switch, or remove
+`PYTHIA_PUMPFUN_LIVE` and recreate the container.
+
+```bash
+docker run --rm --env-file /etc/pythia/alerts.env -v /etc/pythia:/etc/pythia:ro -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.live_exec check
 ```
 
 ## Health check

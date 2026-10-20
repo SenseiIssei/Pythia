@@ -353,15 +353,39 @@ jobs:
     timeout: 2m
     grace: 10m
 
+  # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
+  # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,
+  # which posts the daily card. Paper research only: nothing here can trade.
+  - name: pumpfun-rt-categories
+    description: real-time pump.fun lab, yesterday's new token names into categories (Haiku, batch), cached per mint, model features only
+    schedule: "20 6 * * *"
+    command: python -m lab.pumpfun_rt.categorize
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 2g}
+    timeout: 45m
+    lock: pumpfun-rt-cat
+
   - name: pumpfun-rt-study
-    description: real-time pump.fun lab, PAPER, daily; pre-registered rules, model retrain, reports/pumpfun_rt, card
+    description: real-time pump.fun lab, PAPER, daily; 22 rules and 8 pipeline strategies replayed, the bar, live readiness, decision rows for the retrain
     schedule: "50 6 * * *"
     command: python -m lab.pumpfun_rt.study
     env_file: /etc/pythia/alerts.env
-    resources: {cpus: 2, memory: 6g}
-    timeout: 3h
+    resources: {cpus: 2, memory: 8g}
+    timeout: 4h
     lock: pumpfun-rt
     lock_wait: 10m
+
+  - name: pumpfun-rt-retrain
+    description: real-time pump.fun lab, daily retrain after the study; purged walk-forward per label and feature set, models for the shadow books, the daily card
+    depends_on: [pumpfun-rt-study]
+    depends_within: 6h
+    command: python -m lab.pumpfun_rt.retrain
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 2, memory: 8g}
+    timeout: 3h
+    lock: pumpfun-rt
+    lock_wait: 30m
 
   - name: cs2-collect
     description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist

@@ -515,9 +515,10 @@ def test_the_study_runs_end_to_end_and_reports_with_the_feed_header(tmp_path, mo
     monkeypatch.setattr(store, "base", lambda: tmp_path)
     monkeypatch.setattr("lab.pumpfun_rt.study.WARM_DAYS", 0)
     from lab.pumpfun_rt import study
-    res = study.run(now_ms=T0 + 3 * 86_400_000, root=tmp_path, log=lambda *a: None)
+    res = study.run(now_ms=T0 + 3 * 86_400_000, root=tmp_path, log=lambda *a: None, shadow={})
     assert res["pick"] in S.BY_NAME
-    assert len(res["results"]) == len(S.RULES) + 1
+    from lab.pumpfun_rt import pipeline as P
+    assert len(res["results"]) == len(S.RULES) + 1 + len(P.STRATEGIES)
     data, md = study.report(res)
     for k in ("title", "status", "headline", "updated_ms", "items"):
         assert k in data
@@ -525,9 +526,11 @@ def test_the_study_runs_end_to_end_and_reports_with_the_feed_header(tmp_path, mo
     assert "—" not in md and "—" not in data["headline"]
     json.dumps(data, default=str)
     from lab.ops import i18n
+    from lab.pumpfun_rt import card
     shadow = {res["pick"]: {"n": 3, "wins": 1, "mean": -0.2, "pnl_sol": -0.06}}
-    en = study.daily_card(res, shadow, "en").render("telegram", "en")
-    de = study.daily_card(res, shadow, "de").render("telegram", "de")
+    data = json.loads(json.dumps(data, default=str))
+    en = card.daily_card(data, None, shadow, None, res["now_ms"], "en").render("telegram", "en")
+    de = card.daily_card(data, None, shadow, None, res["now_ms"], "de").render("telegram", "de")
     assert "Paper only" in en and "Nur Paper" in de and en != de
     from test_i18n import no_english
     no_english(de)

@@ -32,8 +32,9 @@ from test_pumpfun_rt import BUYERS, DEV, MINT, SOL, T0, Curve, Fixed, key
 
 
 @pytest.fixture(autouse=True)
-def small_models(monkeypatch):
+def small_models(monkeypatch, tmp_path):
     monkeypatch.setitem(M.PARAMS, "n_estimators", 30)
+    monkeypatch.setattr(LX, "data_dir", lambda: tmp_path / "live")       # the live files stay in the test
 
 
 def strat(name="X", entry="create", ladder=((0.3, 0.5), (0.8, 1.0)), sl=0.3, trail=(None, None), time_s=60,
@@ -527,8 +528,9 @@ def test_a_feature_set_is_adopted_only_when_it_wins_out_of_sample():
     assert models["win30"].features == M.SETS["wallet"] and models["dump60"].features == list(T.FEATURES)
 
 
-def test_the_retrain_round_trips_the_rows_and_summarises(tmp_path):
+def test_the_retrain_round_trips_the_rows_and_summarises(tmp_path, monkeypatch):
     from lab.pumpfun_rt import retrain as R
+    monkeypatch.setattr(M, "LABELS", {"win30": 30, "sell10_10": 10})      # two labels: the method, quicker
     rows = synth(1500)
     table = M.as_frame(rows)
     p = R.save_rows(table, {"days": ["x"]}, tmp_path / "rows.parquet")
