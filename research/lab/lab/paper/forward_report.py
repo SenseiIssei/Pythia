@@ -100,6 +100,14 @@ EXPERIMENT_PREFIXES = ("memes_rotation", "memes_tsmom", "trend4h_pullback", "pum
 
 def is_experiment(book: str) -> bool:
     return book.startswith(EXPERIMENT_PREFIXES)
+# Forward records frozen by the forward audit's kill rule (results/forward_audit_prereg.md):
+# the rows through the date count toward no forward gate and no readiness rule; the fresh
+# record starts with the first run after it. book -> (last frozen date, why).
+FROZEN: dict[str, tuple[str, str]] = {
+    "breakout_top10": ("2026-10-20", "the forward audit found 3 of 15 coin-days off its backtest: the book "
+                                     "started from its coins' entry weights instead of the drifted weights "
+                                     "the backtest held, fixed in lab.paper.families"),
+}
 # picks_ls journals book the modelled cost (10 bps per unit of turnover) as their fill cost.
 MODELLED_ONLY = {"picks_ls": 0.0010, "picks_ls_v2": 0.0010}
 PICKS_LS_ROW = "top 10 / bottom 10 of the 50 most liquid perps · no paying shorts"
@@ -370,19 +378,44 @@ def _rebalanced(r: dict) -> bool:
     return t is not None and t > 0.01
 
 
+def fresh_record(book: str, journal: list[dict]) -> tuple[list[dict], float, dict | None]:
+    """The journal rows that count, the equity they start from, and the freeze note.
+
+    A book in FROZEN counts nothing up to and including its cut date; its fresh
+    record starts with the first run after it, measured from the equity the
+    book had at the cut. Any other book counts every row from START_EQUITY."""
+    f = FROZEN.get(book)
+    if f is None:
+        return journal, START_EQUITY, None
+    cut, why = f
+    before = [r for r in journal if (r.get("date") or "") <= cut]
+    after = [r for r in journal if (r.get("date") or "") > cut]
+    start = _f(before[-1], "equity") if before else None
+    return after, start or START_EQUITY, {"through": cut, "why": why, "frozen_days": len(before)}
+
+
 def book_row(book: str, journal: list[dict], variant: str = "") -> dict:
     """Everything the report says about one paper book, from its journal."""
     base = {"kind": "book", "name": book, "label": BOOKS.get(book, book), "variant": variant,
             "experimental": is_experiment(book)}
+    journal, start, frozen = fresh_record(book, journal)
+    if frozen is not None:
+        base["frozen"] = frozen
     if not journal:
         status, text = book_verdict(0, 0, None, False, None, False, 0.0)
+        if frozen is not None:
+            status, text = "early", (f"Its record through {frozen['through']} is frozen and counts toward nothing "
+                                     f"({frozen['why']}); a fresh record starts with the next run.")
         return {**base, "days": 0, "status": status, "sentence": text,
                 "gate7": {"days": 0, "days_needed": GATE_DAYS, "trades": 0, "trades_needed": GATE_TRADES,
                           "trades_label": "rebalances", "progress": 0.0, "ready": False}}
     equity = [e for e in (_f(r, "equity") for r in journal) if e is not None]
     dates = [datetime.strptime(r["date"], "%Y-%m-%d") for r in journal if r.get("date")]
+    if frozen is not None:
+        # A fresh record's first row already holds a day of returns since the cut.
+        dates = [datetime.strptime(frozen["through"], "%Y-%m-%d"), *dates]
     elapsed = float((dates[-1] - dates[0]).days) if len(dates) >= 2 else 0.0
-    ret_pct = (equity[-1] / START_EQUITY - 1) * 100 if equity else 0.0
+    ret_pct = (equity[-1] / start - 1) * 100 if equity else 0.0
     turnover = sum(_f(r, "turnover") or 0.0 for r in journal)
     rebalances = sum(_rebalanced(r) for r in journal)
     if book in MODELLED_ONLY:
@@ -397,12 +430,14 @@ def book_row(book: str, journal: list[dict], variant: str = "") -> dict:
         funding = sum(_f(r, "funding_pct") or 0.0 for r in journal)
     elif "funding_pnl" in journal[0]:
         funding = sum(_f(r, "funding_pnl") or 0.0 for r in journal) / START_EQUITY * 100
-    dd_pct = max_drawdown(equity) * 100
+    dd_pct = max_drawdown(equity, start) * 100
     exp = expectation(book, elapsed)
     pos = position(ret_pct, exp)
     dd_deeper = bool(exp and exp.get("dd_p95_pct") is not None and dd_pct > exp["dd_p95_pct"] and dd_pct > 0.5)
     ready = len(journal) >= GATE_DAYS and rebalances >= GATE_TRADES
     status, text = book_verdict(len(journal), elapsed, pos, dd_deeper, cost_ratio, ready, ret_pct)
+    if frozen is not None:
+        text = f"Fresh record since {frozen['through']} (the one before is frozen: {frozen['why']}). {text}"
     return {
         **base,
         "since": journal[0].get("date"),
@@ -852,6 +887,8 @@ def evidence_entry(row: dict) -> dict:
         out["started_ms"] = row.get("started_ms")
     if row.get("experimental"):
         out["experimental"] = True
+    if row.get("frozen"):
+        out["frozen"] = row["frozen"]
     return out
 
 
@@ -862,7 +899,7 @@ def evidence(data: dict) -> dict:
     return _finite({
         "generated_ms": data["generated_ms"],
         "min_days": EVIDENCE_MIN_DAYS,
-        "books": {b["name"]: evidence_entry(b) for b in data["books"] if b.get("days")},
+        "books": {b["name"]: evidence_entry(b) for b in data["books"] if b.get("days") or b.get("frozen")},
         "autopilots": {a["name"]: evidence_entry(a) for a in data["autopilots"]},
     })
 
