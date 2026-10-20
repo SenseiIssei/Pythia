@@ -12,3 +12,4 @@ matplotlib>=3.10
 brotli>=1.1
 aiohttp>=3.12
 cryptography>=44
+solders>=0.29
