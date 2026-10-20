@@ -36,7 +36,10 @@ import numpy as np
 
 from ..experiments import equities_ranking as er
 
-UA = os.environ.get("PYTHIA_SEC_UA", "Pythia research lab superwarper@t-online.de")
+# SEC's fair access policy asks for a contact in the User-Agent: set
+# PYTHIA_SEC_UA (for example "Pythia research lab you@example.com") where the
+# studies run. The default only names the tool.
+UA = os.environ.get("PYTHIA_SEC_UA", "Pythia research lab")
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/{}"
 MIN_INTERVAL = 0.2           # seconds between requests: 5 a second at most
