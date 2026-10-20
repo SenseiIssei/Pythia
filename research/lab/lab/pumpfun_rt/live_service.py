@@ -99,8 +99,12 @@ class Service:
         self.why = self.gate.check()
         self.address = self.gate.address
         if not self.why:
-            self.book = self._attach(self.engine, self.gate, rpc=self.rpc, alerts=self.alerts,
-                                     start=self.start_worker)
+            try:
+                self.book = self._attach(self.engine, self.gate, rpc=self.rpc, alerts=self.alerts,
+                                         start=self.start_worker)
+            except Exception as e:                          # e.g. an unreadable wallet file: nothing trades
+                self.book = None
+                self.why = [f"the live book could not start ({type(e).__name__})"]
             if self.book is not None:
                 self.rpc = self.book.exec.builder.rpc
                 self.address = self.book.exec.signer.pubkey
