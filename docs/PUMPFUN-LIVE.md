@@ -276,11 +276,94 @@ Der Dienst merkt es innerhalb einer Minute.
 Danach kannst du die Wallet auf dem Server stilllegen: Dienst gestoppt
 lassen, `PYTHIA_PUMPFUN_LIVE` aus `/etc/pythia/pumpfun-live.env` entfernen.
 
+## 10. Geschwindigkeit: schneller Datenstrom, schneller Pfad, Jito (deine Entscheidung)
+
+Du wolltest "immer direkt beim Release drin" sein. Was gemessen ist
+(results/pumpfun_speed.md):
+
+- **Heute sind wir spät.** Der öffentliche Datenstrom liefert uns eine neue
+  Token-Erstellung im Median 15 s nach ihrem Block (90. Perzentil 44 s), nur
+  3,7 % innerhalb einer Sekunde. Der Engpass ist der öffentliche Endpunkt,
+  nicht unser Code: Unser schneller Pfad braucht vom Empfang bis zur fertig
+  signierten Transaktion etwa 0,3 ms.
+- **Schneller allein bringt nichts.** In der Simulation verliert der Snipe von
+  "ein Slot nach der Erstellung" (216 ms) bis "15 s danach" gleich viel: 3 bis
+  5 % pro Trade nach Kosten. Wer im Erstellungs-Slot hinter den anderen
+  Snipern landet, verliert ebenfalls (2 bis 4 %, und jeder fünfte Kauf
+  scheitert am Preis).
+- **Bezahlt wird nur ganz vorne im Erstellungs-Slot.** Direkt nach der
+  Erstellung stehen aber meist Bundles, die die Transaktion des Erstellers
+  selbst enthalten. Davor kommt man mit einer eigenen Transaktion nicht, und
+  Pythia bündelt keine fremden Transaktionen (keine Bundles mit fremden
+  Transaktionen, kein Sandwich, kein Front-Running). Direkt hinter diesem
+  Block ist der Vorteil dünn: Er deckt ein Trinkgeld von höchstens etwa
+  0,007 SOL pro Runde, die Konkurrenz bietet im Median schon 0,003 SOL und in
+  einem Viertel der Fälle über 0,028 SOL.
+
+**Empfehlung:** Für das Sniping lohnt sich ein bezahlter Anbieter nach diesen
+Zahlen nicht. Er kann sich für die Qualität der Aufzeichnung lohnen (weniger
+Lücken, weniger fehlende Trades), das ist aber eine andere Frage. Die
+Entscheidung ist deine; nichts davon ist eingeschaltet.
+
+### Was ein Anbieter ungefähr kostet und was er ändert
+
+Richtwerte aus den öffentlichen Preislisten, nicht für heute geprüft; vor
+einem Kauf auf der Seite des Anbieters nachsehen:
+
+| Stufe | Beispiele | ungefähr pro Monat | was es ändert |
+|---|---|---|---|
+| bezahlter Websocket-RPC | Helius, QuickNode, Chainstack, Alchemy | 50 bis 250 $ | statt 15 s etwa 0,5 bis 2 s Verzögerung (mit `processed`), stabilere Verbindung, vollständigere Aufzeichnung. Laut Simulation: weiterhin minus 3 bis 5 % pro Snipe |
+| Yellowstone gRPC (Geyser), geteilt | Triton, Helius LaserStream, QuickNode, Shyft, Chainstack | 150 bis 1.000 $ | etwa 1 bis 2 Slots hinter dem Block. Gleiche Aussage für Snipes |
+| Shred-Daten plus Sender nahe den Leadern | Jito ShredStream (Freischaltung nötig) auf eigenem Server, Anbieter mit Shred-Feed, eigener Knoten | 300 bis 3.000 $ und mehr | erst damit ist der Erstellungs-Slot erreichbar; dazu kommen Trinkgelder pro Trade |
+
+Dazu kämen bei Jito die Trinkgelder pro Kauf und Verkauf (Konkurrenz: Median
+0,003 SOL, oberes Viertel ab 0,028 SOL).
+
+### Einrichten, falls du es trotzdem willst
+
+Datenstrom (der Collector, nur lesen; in eine Env-Datei wie
+`/etc/pythia/pumpfun-feed.env` mit Rechten 600 und beim Container
+`--env-file` ergänzen, research/ops/README.md):
+
+```bash
+PYTHIA_SOLANA_WS_URLS=wss://<anbieter>/?api-key={token}
+PYTHIA_SOLANA_TOKEN=<dein Schlüssel>
+PYTHIA_SOLANA_COMMITMENT=processed
+# oder zusätzlich gRPC (braucht das Paket grpcio im Image):
+# PYTHIA_SOLANA_GRPC_URL=https://<anbieter>:<port>
+# PYTHIA_SOLANA_GRPC_TOKEN=<dein Schlüssel>
+```
+
+Der Schlüssel steht nur in dieser Datei, nie im Repo; Logs zeigen nur
+Schema und Host. Der öffentliche Endpunkt läuft als Rückfallebene weiter
+(`PYTHIA_PF_PUBLIC_FALLBACK=0` schaltet ihn ab). Ob es wirkt, zeigt die
+tägliche Telegram-Karte ("Unser Datenstrom sah neue Token ... nach ihrem
+Block") und der Vergleich der Anbieter:
+
+```bash
+docker run --rm --env-file /etc/pythia/pumpfun-feed.env -v /opt/pythia-lab:/app \
+  pythia-lab python -m lab.pumpfun_rt.latency probe --seconds 120
+```
+
+Schneller Pfad und Jito (nur Trockenlauf, es wird nichts gesendet):
+
+```bash
+docker run --rm -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.fastpath bench
+docker run --rm -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.fastpath dryrun --seconds 60
+```
+
+Jito ist nur mit `PYTHIA_PUMPFUN_JITO=1` und `PYTHIA_PUMPFUN_JITO_URL`
+(Abschnitt 6) zugelassen, nur für deine eigene einzelne Transaktion mit
+einem Trinkgeld von höchstens 0,01 SOL an eines der veröffentlichten
+Jito-Trinkgeldkonten, nie der Bundle-Endpunkt. Den schnellen Pfad in den
+Echtgeld-Ausführer einzubauen ist ein eigener Schritt, den nur du anstößt.
+
 ## Was gesperrt bleibt
 
 - Ohne `PYTHIA_PUMPFUN_LIVE=1`, Wallet-Datei mit .pub-Adresse, gültige
   Bestätigungsdatei, frische Simulation, passende IDLs, https-RPC ohne
-  Bundle/Relay und ohne Notschalter handelt nichts.
+  Bundle/Relay (Jito nur mit `PYTHIA_PUMPFUN_JITO=1`) und ohne Notschalter
+  handelt nichts.
 - Der volle Echtgeld-Modus (`mode=full`, größere Grenzen) öffnet weiterhin
   nur, wenn der tägliche Bericht die Strategie als bereit meldet (14 Tage, 300
   Trades außerhalb der Stichprobe, alle Schwellen, 30 Tage Schattenbuch).
