@@ -443,7 +443,7 @@ jobs:
     lock: pumpfun-rt-cat
 
   - name: pumpfun-rt-study
-    description: real-time pump.fun lab, PAPER, daily; 22 rules and 8 pipeline strategies replayed, the bar, live readiness, decision rows for the retrain
+    description: real-time pump.fun lab, PAPER, daily; 22 rules and 12 pipeline strategies replayed, the bar, live readiness, capture, decision rows and X14 early/exit rows for the retrain
     schedule: "50 6 * * *"
     command: python -m lab.pumpfun_rt.study
     env_file: /etc/pythia/alerts.env
@@ -453,7 +453,7 @@ jobs:
     lock_wait: 10m
 
   - name: pumpfun-rt-retrain
-    description: real-time pump.fun lab, daily retrain after the study; purged walk-forward per label and feature set, models for the shadow books, the daily card
+    description: real-time pump.fun lab, daily retrain after the study; purged walk-forward per label and feature set, X14 early detection and exit policies, models for the shadow books, the daily card
     depends_on: [pumpfun-rt-study]
     depends_within: 6h
     command: python -m lab.pumpfun_rt.retrain

@@ -25,6 +25,7 @@ import {
   Bell,
   BookOpen,
   Layers,
+  QrCode,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -53,6 +54,7 @@ export type PageId =
   | "predictions"
   | "cards"
   | "live"
+  | "pumpfun"
   | "risk"
   | "journal"
   | "settings"
@@ -97,6 +99,8 @@ export const NAV: NavItem[] = [
   { id: "models", label: "Models", icon: Gauge, section: "AI", advanced: true },
   { id: "lab", label: "Lab", icon: Microscope, section: "AI", advanced: true },
   { id: "live", label: "Live", icon: Radio, section: "Control", advanced: true },
+  // The owner's real-money pump.fun test: funding address, balance, limits, kill switch (docs/PUMPFUN-LIVE.md).
+  { id: "pumpfun", label: "pump.fun wallet", icon: QrCode, section: "Control", advanced: true },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control", advanced: true },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control", advanced: true },
 

@@ -448,7 +448,8 @@ def test_models_save_and_load(tmp_path):
 
 def test_the_registered_rules_are_what_the_plan_says():
     from lab.pumpfun_rt import pipeline as P
-    assert len(S.RULES) == 22 and S.N_TRIALS == 31 and len(P.STRATEGIES) == S.PIPELINE_TRIALS == 8
+    assert len(S.RULES) == 22 and len(P.STRATEGIES) == S.PIPELINE_TRIALS == 12 and S.X14_TRIALS == 54
+    assert S.N_TRIALS == 22 + 1 + 12 + 54
     assert len({r.name for r in S.RULES}) == 22
     assert {r.family for r in S.RULES} == set("ABCDE")
     assert S.DEFAULT_PICK in S.BY_NAME and S.STAKE_SOL == 0.1
@@ -459,8 +460,8 @@ def test_the_registered_rules_are_what_the_plan_says():
 def test_nothing_here_can_touch_a_wallet_or_send_a_transaction():
     import lab.pumpfun_rt as pkg
     for m in pkgutil.iter_modules(pkg.__path__):
-        if m.name == "live_exec":                          # the LOCKED live executor (test_pumpfun_pipeline.py)
-            continue
+        if m.name in ("live_exec", "wallet"):              # the live executor and the owner's wallet tool,
+            continue                                       # checked in test_pumpfun_pipeline.py and test_pumpfun_live.py
         src = inspect.getsource(__import__(f"lab.pumpfun_rt.{m.name}", fromlist=["x"])).lower()
         for word in ("sendtransaction", "signtransaction", "keypair", "private_key", "privatekey", "secret_key",
                      "mnemonic", "seed phrase", "solana.rpc", "solders", "jupiter", "sendrawtransaction",

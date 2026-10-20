@@ -501,6 +501,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_why_dev": "the dev sold",
         "prt_why_pull": "liquidity pulled",
         "prt_why_risk": "risk model",
+        "prt_why_hazard": "hazard model",
         "prt_why_kill": "kill switch",
         "prt_all_books": "Every paper book",
         "prt_daily_books": "Paper books yesterday: {n} with closed trades, {pnl} in all.",
@@ -509,6 +510,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_ready": ("Closest to live: {rule}, {days} of 14 days, {trades} of 300 trades out of sample, "
                             "{shadow} of 30 shadow days, {gates}."),
         "prt_daily_ready_n": "{n} of {total} strategies are ready for live.",
+        "prt_daily_x14": ("Exits out of sample: {pick} keeps {cap} of the best possible gain (best simple rule "
+                          "{base}: {cap_base}). Early detection: the top 5 % by P(3x) reached it {prec} of the "
+                          "time against {rate} for all ({lift}x)."),
         "prt_gates_pass": "the gates pass",
         "prt_gates_fail": "the gates do not pass yet",
         "prt_live_locked": "Live: locked, nothing trades real money.",
@@ -525,6 +529,35 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prl_fail_summary": "{rule}: {why}.",
         "prl_caveat": "Real money. The kill switch file stops every buy and sells what is open.",
         "prl_footer": "LIVE · real money",
+        "prl_test_tag": "TEST",
+        "prl_test_caveat": ("Real money, live TEST: the owner's small budget to measure execution. The kill switch "
+                            "in the app stops every buy and sells what is open."),
+        "prl_measured": "Landed {lat} ms after the signal (paper assumes {assumed} ms), slippage {slip}.",
+        "prl_measured_noslip": "Landed {lat} ms after the signal (paper assumes {assumed} ms).",
+        "prl_stop_daily_title": "pump.fun LIVE daily loss stop",
+        "prl_stop_daily_summary": "{lost} lost today, the limit is {limit}. No more buys until tomorrow (UTC).",
+        "prl_stop_total_title": "pump.fun LIVE total budget stop",
+        "prl_stop_total_summary": ("{lost} lost since the first live trade, the budget is {limit}. No more buys. "
+                                   "Only a new confirmation file with a larger budget (at most 2 SOL) changes that."),
+        "prl_left_sold_title": "pump.fun LIVE leftover sold {name}",
+        "prl_left_sold_summary": "A position from before the restart was sold for {sol}.",
+        "prl_left_stuck_title": "pump.fun LIVE leftover NOT sold {name}",
+        "prl_left_stuck_summary": ("A position from before the restart could not be sold ({why}). Sell it in your "
+                                   "own wallet (the backup imported into Phantom)."),
+        "prl_daily_title": "pump.fun LIVE {day}",
+        "prl_daily_summary": "{rule}: {n} trades closed, {wins} won, {pnl} on the day, {total} in all.",
+        "prl_daily_balance": "Wallet balance {bal}.",
+        "prl_daily_balance_unknown": "Wallet balance not known.",
+        "prl_daily_latency": ("Measured: buys landed a median {lat} ms after the signal over {n} fills, the paper "
+                              "model assumes {assumed} ms."),
+        "prl_daily_latency_none": "Measured: no live fill yet, the paper model's latency is unchecked.",
+        "prl_daily_failed": "{n} orders failed.",
+        "prt_live_on_test": "Live TEST: ON for {rule}, {n} trades today, {pnl}.",
+        "prl_gate_shut_title": "pump.fun LIVE paused: no more buys",
+        "prl_gate_shut_summary": ("Why: {why}. Open positions are still managed. Buying resumes within a minute "
+                                  "once this is fixed."),
+        "prl_gate_open_title": "pump.fun LIVE buying again",
+        "prl_gate_open_summary": "Every condition holds again.",
         # the strategy factory
         "fa_head": ("Factory {run}: {n} new strategies tried, pool now {trials} trials (noise bar Sharpe {sr0})."),
         "fa_best": "Best in sample: {name}, Sharpe {sharpe} at 35 bps.",
@@ -896,6 +929,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_why_dev": "der Entwickler hat verkauft",
         "prt_why_pull": "Liquidität abgezogen",
         "prt_why_risk": "Risikomodell",
+        "prt_why_hazard": "Gefahrenmodell",
         "prt_why_kill": "Notschalter",
         "prt_all_books": "Alle Paper-Bücher",
         "prt_daily_books": "Paper-Bücher gestern: {n} mit geschlossenen Positionen, {pnl} insgesamt.",
@@ -904,6 +938,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_ready": ("Am nächsten an echtem Geld: {rule}, {days} von 14 Tagen, {trades} von 300 Positionen "
                             "außerhalb der Stichprobe, {shadow} von 30 Tagen im Schattenbuch, {gates}."),
         "prt_daily_ready_n": "{n} von {total} Strategien sind bereit für echtes Geld.",
+        "prt_daily_x14": ("Ausstiege außerhalb der Stichprobe: {pick} behält {cap} des bestmöglichen Gewinns "
+                          "(beste einfache Regel {base}: {cap_base}). Früherkennung: die obersten 5 % nach "
+                          "P(3x) erreichten das Dreifache in {prec} der Fälle, alle in {rate} ({lift}-fach)."),
         "prt_gates_pass": "die Schwellen sind bestanden",
         "prt_gates_fail": "die Schwellen sind noch nicht bestanden",
         "prt_live_locked": "Echtgeld: gesperrt, nichts handelt mit echtem Geld.",
@@ -919,6 +956,36 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prl_fail_summary": "{rule}: {why}.",
         "prl_caveat": "Echtes Geld. Die Notschalter-Datei stoppt jeden Kauf und verkauft alles Offene.",
         "prl_footer": "ECHTGELD",
+        "prl_test_tag": "TEST",
+        "prl_test_caveat": ("Echtes Geld, Echtgeld-TEST: das kleine Budget des Besitzers, um die Ausführung zu "
+                            "messen. Der Notschalter in der App stoppt jeden Kauf und verkauft alles Offene."),
+        "prl_measured": "{lat} ms nach dem Signal gelandet (Papier nimmt {assumed} ms an), Schlupf {slip}.",
+        "prl_measured_noslip": "{lat} ms nach dem Signal gelandet (Papier nimmt {assumed} ms an).",
+        "prl_stop_daily_title": "pump.fun ECHTGELD Tagesverluststopp",
+        "prl_stop_daily_summary": "Heute {lost} verloren, die Grenze ist {limit}. Keine Käufe mehr bis morgen (UTC).",
+        "prl_stop_total_title": "pump.fun ECHTGELD Gesamtbudget-Stopp",
+        "prl_stop_total_summary": ("{lost} verloren seit dem ersten Echtgeld-Abschluss, das Budget ist {limit}. "
+                                   "Keine Käufe mehr. Nur eine neue Bestätigungsdatei mit größerem Budget "
+                                   "(höchstens 2 SOL) ändert das."),
+        "prl_left_sold_title": "pump.fun ECHTGELD Rest verkauft {name}",
+        "prl_left_sold_summary": "Eine Position von vor dem Neustart wurde für {sol} verkauft.",
+        "prl_left_stuck_title": "pump.fun ECHTGELD Rest NICHT verkauft {name}",
+        "prl_left_stuck_summary": ("Eine Position von vor dem Neustart ließ sich nicht verkaufen ({why}). Verkaufe "
+                                   "sie in deiner eigenen Wallet (die Sicherung in Phantom importiert)."),
+        "prl_daily_title": "pump.fun ECHTGELD {day}",
+        "prl_daily_summary": "{rule}: {n} Abschlüsse, {wins} gewonnen, {pnl} am Tag, {total} insgesamt.",
+        "prl_daily_balance": "Guthaben der Wallet {bal}.",
+        "prl_daily_balance_unknown": "Guthaben der Wallet nicht bekannt.",
+        "prl_daily_latency": ("Gemessen: Käufe landeten im Median {lat} ms nach dem Signal über {n} Ausführungen, "
+                              "das Papiermodell nimmt {assumed} ms an."),
+        "prl_daily_latency_none": "Gemessen: noch keine Echtgeld-Ausführung, die Latenz des Papiermodells ist ungeprüft.",
+        "prl_daily_failed": "{n} Aufträge gescheitert.",
+        "prt_live_on_test": "Echtgeld-TEST: AN für {rule}, {n} Abschlüsse heute, {pnl}.",
+        "prl_gate_shut_title": "pump.fun ECHTGELD pausiert: keine Käufe mehr",
+        "prl_gate_shut_summary": ("Grund: {why}. Offene Positionen werden weiter verwaltet. Sobald das behoben "
+                                  "ist, kauft der Bot innerhalb einer Minute wieder."),
+        "prl_gate_open_title": "pump.fun ECHTGELD kauft wieder",
+        "prl_gate_open_summary": "Alle Bedingungen gelten wieder.",
         "fa_head": ("Fabrik {run}: {n} neue Strategien getestet, jetzt {trials} Versuche im Pool "
                     "(Rauschschwelle Sharpe {sr0})."),
         "fa_best": "Beste in der Stichprobe: {name}, Sharpe {sharpe} bei 35 Basispunkten.",

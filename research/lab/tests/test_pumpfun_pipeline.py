@@ -52,8 +52,9 @@ def paper(*strats, kill=None, models=None, **kw) -> sim.Engine:
 
 def test_the_registered_strategies_are_what_the_plan_says():
     assert [s.name for s in P.STRATEGIES] == ["P_snipe_dev", "P_snipe_cmig", "P_press10", "P_mom_model", "P_p90",
-                                              "P_p80_smart", "P_pool60", "P_cmig_model"]
-    assert S.N_TRIALS == len(S.RULES) + 1 + len(P.STRATEGIES)
+                                              "P_p80_smart", "P_pool60", "P_cmig_model", "P_early10", "P_early30",
+                                              "P_press10_hz", "P_pool60_hz"]
+    assert S.N_TRIALS == len(S.RULES) + 1 + len(P.STRATEGIES) + S.X14_TRIALS
     for s in P.STRATEGIES:
         assert isinstance(s, S.Rule) and P.is_strategy(s)
         assert s.exits.ladder[-1][1] == 1.0 and 0 < s.exits.sl < 1 and s.exits.time_s > 0
@@ -301,6 +302,7 @@ def full_gate(tmp_path, monkeypatch, **over):
     wallet.write_text("not a key: the gate only looks at the file, never reads it")
     if hasattr(wallet, "chmod"):
         wallet.chmod(0o600)
+    (tmp_path / "wallet-file.pub").write_text(FakeSigner.pubkey + "\n")
     env = {"PYTHIA_PUMPFUN_LIVE": "1", "PYTHIA_PUMPFUN_KEYPAIR": str(wallet),
            "PYTHIA_PUMPFUN_RPC": "https://rpc.example.org"}
     env.update(over.get("env", {}))
@@ -336,7 +338,8 @@ def test_the_gate_opens_only_when_everything_holds(tmp_path, monkeypatch):
 def test_the_ack_daily_loss_is_capped_and_attach_stays_off_without_the_switch(tmp_path, monkeypatch, capsys):
     ack = tmp_path / "ack"
     ack.write_text("# the owner's confirmation\nrule: P_p90\nmax_daily_loss_sol: 25\n")
-    assert LX.read_ack(ack) == ("P_p90", P.HARD_MAX_DAILY_LOSS_SOL, None)
+    a = LX.read_ack(ack)
+    assert (a.mode, a.rule, a.max_daily_loss_sol, a.problems) == ("full", "P_p90", P.HARD_MAX_DAILY_LOSS_SOL, ())
     monkeypatch.delenv("PYTHIA_PUMPFUN_LIVE", raising=False)
     assert LX.attach(sim.Engine([])) is None
     monkeypatch.setenv("PYTHIA_PUMPFUN_LIVE", "1")
@@ -360,10 +363,15 @@ def test_the_live_module_is_the_only_one_that_could_sign_or_send():
         src = inspect.getsource(__import__(f"lab.pumpfun_rt.{m.name}", fromlist=["x"])).lower()
         if m.name == "live_exec":
             continue
+        if m.name == "wallet":                              # the owner's wallet tool makes keys, never signs or sends
+            for w in ("sendtransaction", ".sign(", "urllib", "aiohttp", "notify", "simulatetransaction"):
+                assert w not in src, f"wallet: {w}"
+            continue
         for w in words:
             assert w not in src, f"{m.name}: {w}"
     src = inspect.getsource(LX)
     assert "Ed25519PrivateKey.generate" not in src and ".generate(" not in src     # never makes a key
+    assert "Keypair(" not in src and "solders" not in src
     for url in ("https://mainnet.block-engine.jito.wtf/api/v1/bundles", "https://x.example/relay"):
         assert LX.rpc_problems(url)                         # bundles and relays are refused
     assert LX.rpc_problems("https://api.mainnet-beta.solana.com") == []

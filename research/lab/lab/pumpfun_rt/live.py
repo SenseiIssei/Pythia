@@ -2,11 +2,10 @@
 the study's pick and the pick with the model filter in front, and every pipeline
 strategy (pipeline.STRATEGIES) through the same pipeline a live executor would use.
 
-Nothing here trades by itself: every fill of these books is the engine's curve
-arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The one
-exception is live_exec.attach(), which adds a live book next to the paper ones
-only when every gate of the LOCKED live executor holds (see live_exec.py); with
-any gate shut it adds nothing and says why. The pick comes from
+Nothing here trades: every fill of these books is the engine's curve
+arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The
+live book (real money) runs only in its own service, live_service.py, which the
+owner starts by hand; the collector never holds a wallet. The pick comes from
 <reports>/pumpfun_rt/pick.json (the daily study writes it; the default rule
 until then), the models from <data>/models/pumpfun_rt/ and the name categories
 from <data>/pumpfun_rt/categories/; all are re-read every RELOAD_S, so a new
@@ -19,6 +18,7 @@ Files under <data>/paper/pumpfun_rt/:
   state.json     what is open, counts, the books' totals since start
   creators.json  the creator history (written every SAVE_S, read on start)
   wallets.json   the wallet reputation (the same)
+  snipers.json   the sniper book of the X14 early features (the same)
 
 Alerts (category "trending", lab.ops.notify, English or German): a closed
 paper trade at +200 % or better, at most one an hour. Positions open when the
@@ -98,7 +98,7 @@ class Shadow:
                              wallets=wallets, cats=cats, models=self.models, kill=kill or P.KillSwitch())
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
-        self.live = None                                      # live_exec.LiveBook, only when every gate holds
+        self.live = None                                      # always None here: the live book is live_service.py's
         self.cats_mtime = 0.0
         self.closed: list[dict] = []
         self.failed_seen = 0
@@ -128,7 +128,7 @@ class Shadow:
             return 0.0
 
     @classmethod
-    def load(cls, live: bool = True) -> "Shadow":
+    def load(cls) -> "Shadow":
         from .categorize import BOOK_DAYS, CategoryIndex
         from .model import load
         book = None
@@ -144,9 +144,12 @@ class Shadow:
         sh = cls(read_pick(), load(), book, wallets=wallets,
                  cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS))
         sh.cats_mtime = cls._cats_mtime()
-        if live:
-            from . import live_exec
-            sh.live = live_exec.attach(sh.engine)            # None unless every gate of the live executor holds
+        try:                                                  # X14: the sniper book of the early features
+            from .early import SniperBook
+            sh.engine.early.snipers = SniperBook.from_json(
+                json.loads((paper_dir() / "snipers.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
         try:
             st = json.loads((paper_dir() / "state.json").read_text(encoding="utf-8"))
             lost = [dict(p, exit_why="restart", pnl_sol=None, ret=None) for p in st.get("open") or []]
@@ -239,8 +242,6 @@ class Shadow:
                 opened += [p for p in pipe.pos.values() if p["state"] == "open"]
         st = {"t": int(time.time() * 1000), "pick": self.pick, "started_ms": self.started_ms, "totals": self.totals,
               "open": [{k: p.get(k) for k in keep} for p in opened], "status": self.status()}
-        if self.live is not None:
-            self.live.save()
         tmp = d / "state.json.tmp"
         tmp.write_text(json.dumps(st, default=str), encoding="utf-8")
         tmp.replace(d / "state.json")
@@ -253,6 +254,9 @@ class Shadow:
             tmp = d / "wallets.json.tmp"
             tmp.write_text(json.dumps(self.engine.wallets.to_json(), separators=(",", ":")), encoding="utf-8")
             tmp.replace(d / "wallets.json")
+            tmp = d / "snipers.json.tmp"
+            tmp.write_text(json.dumps(self.engine.early.snipers.to_json(), separators=(",", ":")), encoding="utf-8")
+            tmp.replace(d / "snipers.json")
 
 
 def winner_card(rec: dict, lang: str = "en"):

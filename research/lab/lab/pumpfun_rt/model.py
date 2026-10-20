@@ -344,6 +344,8 @@ def load(d: Path | None = None) -> dict[str, Fitted]:
                 out[label] = Fitted.from_json(json.loads(p.read_text(encoding="utf-8")))
             except (OSError, ValueError, KeyError):
                 pass
+    from .exitpol import load_models                     # X14: the early and exit models, the hazard policy
+    out.update(load_models(d))
     return out
 
 

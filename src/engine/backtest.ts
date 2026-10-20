@@ -218,6 +218,9 @@ export function backtest(cfg: StrategyConfig, opts: BacktestOpts = {}): Backtest
   if (cfg.kind === "pairs" || cfg.kind === "prob-edge" || cfg.kind === "manual" || cfg.kind === "arb") {
     return { ok: false, message: `${cfg.kind} needs multi-asset/model inputs — not in the single-asset backtester`, ...empty };
   }
+  if (cfg.kind === "candles") {
+    return { ok: false, message: "candles needs real candles (open, high, low, close), not the closes-only backtester", ...empty };
+  }
   const bars = opts.bars ?? 1500;
   const marketId = cfg.universe[0] ?? "crypto:BTC/USD";
   const series = syntheticSeries(bars, opts.startPrice ?? 100, opts.drift ?? 0.0002, opts.vol ?? 0.015, opts.seed ?? 12345);

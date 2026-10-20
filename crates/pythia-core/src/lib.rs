@@ -26,6 +26,7 @@ pub mod orderbook;
 pub mod persist;
 pub mod predict;
 pub mod prefs;
+pub mod pumpfun_live;
 pub mod readiness;
 pub mod research;
 pub mod tax;

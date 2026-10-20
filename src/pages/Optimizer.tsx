@@ -15,7 +15,7 @@ const SHOWN = 10;
 
 export function Optimizer() {
   const { strategies } = useStore();
-  const testable = strategies.filter((s) => !["pairs", "prob-edge", "manual", "arb"].includes(s.kind));
+  const testable = strategies.filter((s) => !["pairs", "prob-edge", "manual", "arb", "candles"].includes(s.kind));
   const [stratId, setStratId] = useState(testable[0]?.id ?? "");
   const [seeds, setSeeds] = useState(12);
   const [bars, setBars] = useState(700);
