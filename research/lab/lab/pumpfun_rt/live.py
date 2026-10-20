@@ -18,6 +18,7 @@ Files under <data>/paper/pumpfun_rt/:
   state.json     what is open, counts, the books' totals since start
   creators.json  the creator history (written every SAVE_S, read on start)
   wallets.json   the wallet reputation (the same)
+  snipers.json   the sniper book of the X14 early features (the same)
 
 Alerts (category "trending", lab.ops.notify, English or German): a closed
 paper trade at +200 % or better, at most one an hour. Positions open when the
@@ -143,6 +144,12 @@ class Shadow:
         sh = cls(read_pick(), load(), book, wallets=wallets,
                  cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS))
         sh.cats_mtime = cls._cats_mtime()
+        try:                                                  # X14: the sniper book of the early features
+            from .early import SniperBook
+            sh.engine.early.snipers = SniperBook.from_json(
+                json.loads((paper_dir() / "snipers.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
         try:
             st = json.loads((paper_dir() / "state.json").read_text(encoding="utf-8"))
             lost = [dict(p, exit_why="restart", pnl_sol=None, ret=None) for p in st.get("open") or []]
@@ -247,6 +254,9 @@ class Shadow:
             tmp = d / "wallets.json.tmp"
             tmp.write_text(json.dumps(self.engine.wallets.to_json(), separators=(",", ":")), encoding="utf-8")
             tmp.replace(d / "wallets.json")
+            tmp = d / "snipers.json.tmp"
+            tmp.write_text(json.dumps(self.engine.early.snipers.to_json(), separators=(",", ":")), encoding="utf-8")
+            tmp.replace(d / "snipers.json")
 
 
 def winner_card(rec: dict, lang: str = "en"):

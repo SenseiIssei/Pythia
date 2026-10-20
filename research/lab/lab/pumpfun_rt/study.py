@@ -45,6 +45,8 @@ import numpy as np
 
 from .. import report as rep
 from . import curve as C
+from . import early as EA
+from . import exitpol as XP
 from . import model as M
 from . import pipeline as P
 from . import sim
@@ -69,6 +71,7 @@ DAY_MS = 86_400_000
 PRIOR_HAND = 907
 LAT_STRESS, PRIO_STRESS = 2.0, 3.0
 SHADOW_DAYS = 30                       # readiness: days of the live paper shadow (plan addendum 2)
+X14_KEEP_DAYS = 2.0                    # X14 paths and steps: about this many days' worth of tokens (a hash sample)
 
 
 def _day(ms: int) -> str:
@@ -260,8 +263,10 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
 
     # pass 1: in sample
     t0 = time.time()
+    keep = min(1.0, X14_KEEP_DAYS / max(1, len(days)))
     e1 = sim.Engine(S.RULES, book=warm_book(warm, root), decisions=True, entry_until=split,
-                    wallets=W.warm(warm, root), cats=cats)
+                    wallets=W.warm(warm, root), cats=cats, early_rows=True, snipers=EA.warm_snipers(warm, root))
+    e1.early.keep_frac = keep
     sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
     is_trades = [t for t in e1.closed if t["signal_ms"] < split]
     by_rule = defaultdict(list)
@@ -271,6 +276,12 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
              if len(v) >= MIN_IS_TRADES]
     pick = max(cands)[2] if cands else S.DEFAULT_PICK
     is_models = M.train_all(e1.table(), until_ms=split)
+    # X14: the early and exit models the new strategies use, from in-sample rows and steps only
+    try:
+        is_models.update(XP.fit_live(e1.early.tables(), until_ms=split, log=log))
+    except Exception as e:                                   # the study goes on; the X14 books then wait
+        log(f"{NAME}: X14 in-sample models failed ({type(e).__name__}: {e})")
+    del e1.early
     log(f"{NAME}: pass 1 in {time.time() - t0:.0f} s, {len(is_trades)} in-sample trades, pick {pick}"
         + ("" if cands else f" (no rule had {MIN_IS_TRADES} in-sample trades: the default)"))
 
@@ -293,7 +304,9 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
             strats.append(v)
             costs[v.name] = c
     e2 = sim.Engine(rules, book=warm_book(warm, root), decisions=True, model=M.Filter(is_models), rule_costs=costs,
-                    strategies=strats, wallets=W.warm(warm, root), cats=cats, models=is_models)
+                    strategies=strats, wallets=W.warm(warm, root), cats=cats, models=is_models, early_rows=True,
+                    snipers=EA.warm_snipers(warm, root))
+    e2.early.keep_frac = keep
     sim.replay(days, e2, root)
     log(f"{NAME}: pass 2 in {time.time() - t0:.0f} s, {len(e2.closed)} closed paper trades, {len(e2.rows)} model rows")
 
@@ -317,14 +330,17 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
                   base=trades[pick]["oos"] if r is mr else None)
         g.update(family=r.family, label=r.label, is_stats=trade_stats(trades[r.name]["is"], fails[r.name]["is"]),
                  stress={s: trade_stats(v) for s, v in stress.items()}, pipeline=P.is_strategy(r),
-                 exits=_exit_mix(trades[r.name]["oos"]) if P.is_strategy(r) else None)
+                 exits=_exit_mix(trades[r.name]["oos"]) if P.is_strategy(r) else None,
+                 capture=XP.pipeline_capture(trades[r.name]["oos"], e2.early.max_done, base.tx_lamports())
+                 if P.is_strategy(r) else None)
         results.append(g)
 
     table = e2.table()
     rec = record_stats(days, root)
+    x14 = e2.early.tables()
     return {"now_ms": now_ms, "days": days, "warm": warm, "split_ms": split, "span": (t_lo, t_hi), "pick": pick,
             "picked_by": "in-sample mean" if cands else "default", "results": results, "pool": pl_,
-            "table": table, "record": rec,
+            "table": table, "record": rec, "x14": x14, "x14_keep": keep,
             "counts": {"pass1": dict(e1.counts), "pass2": dict(e2.counts)},
             "skipped": {f"{k[0]}: {k[1]}": v for k, v in e2.skipped.items() if "@" not in k[0]},
             "failed_why": dict(sorted(((w, sum(1 for f in e2.failed if f["why"] == w and "@" not in f["rule"]))
@@ -527,10 +543,15 @@ def report(res: dict) -> tuple[dict, str]:
            f"{p['sr0_annual']:.2f}.", "", "Failed buys: " + ", ".join(f"{k} {v}" for k, v in res["failed_why"].items())]
     if strat_rows:
         md += ["", "## Pipeline strategies: how they exited (out of sample)", "",
-               "| strategy | " + " | ".join(EXIT_KINDS) + " |", "|---|" + "---|" * len(EXIT_KINDS)]
+               "Capture: realised P&L over the best possible result (every token sold at the highest value within "
+               "30 minutes of the landing), over the trades whose best was above their cost (X14).", "",
+               "| strategy | " + " | ".join(EXIT_KINDS) + " | capture | never above cost |",
+               "|---|" + "---|" * (len(EXIT_KINDS) + 2)]
         for r in strat_rows:
             mix = r.get("exits") or {}
-            md.append(f"| {r['rule']} | " + " | ".join(str(mix.get(k, 0)) for k in EXIT_KINDS) + " |")
+            cap = r.get("capture") or {}
+            md.append(f"| {r['rule']} | " + " | ".join(str(mix.get(k, 0)) for k in EXIT_KINDS)
+                      + f" | {pct(cap.get('ratio'))} | {pct(cap.get('never_above_cost'))} |")
     ex = data.get("execution")
     md += ["", "## Measured execution (live test)", "",
            "The fill model's assumptions against what the owner's live test measured "
@@ -564,7 +585,7 @@ def report(res: dict) -> tuple[dict, str]:
     return data, "\n".join(md) + "\n"
 
 
-EXIT_KINDS = ("take", "take_part", "stop", "trail", "dev_sell", "pull", "risk", "time", "kill", "stuck")
+EXIT_KINDS = ("take", "take_part", "stop", "trail", "dev_sell", "pull", "risk", "hazard", "time", "kill", "stuck")
 
 
 def pct_auc(x, signed: bool = False) -> str:
@@ -596,10 +617,13 @@ def models_summary() -> dict:
 # today's models as well as today's study.
 
 def save_outputs(res: dict, data: dict, md: str) -> None:
-    from .retrain import save_rows
+    from .retrain import rows_path, save_rows
     rep.write(NAME, md, data)
     if res.get("table") is not None and len(res["table"].get("t", [])):
         save_rows(res["table"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"]})
+    if res.get("x14") is not None:
+        EA.save(res["x14"], rows_path().parent, {"now_ms": res["now_ms"], "days": res["days"],
+                                                 "split_ms": res["split_ms"], "keep": res.get("x14_keep")})
     d = rep.REPORTS / NAME
     d.mkdir(parents=True, exist_ok=True)
     (d / "pick.json").write_text(json.dumps({"pick": res["pick"], "picked_by": res["picked_by"],

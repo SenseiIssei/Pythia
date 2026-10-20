@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -82,6 +83,15 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
         labels = models.get("labels") or {}
         lines.append(t("prt_daily_models", lang, useful=models.get("useful", 0), labels=len(labels),
                        wallet=models.get("wallet_adopted", 0), cat=models.get("cat_adopted", 0)))
+        x = models.get("x14") or {}
+        if x.get("pick"):
+            def pc(v, sign=True):
+                return i18n.frac_pct(v, 0, lang, sign) if v is not None and math.isfinite(v) else "n/a"
+            lift = x.get("lift5_peak3x")
+            lines.append(t("prt_daily_x14", lang, pick=x["pick"], cap=pc(x.get("capture_pick")),
+                           base=x.get("base_pick") or "?", cap_base=pc(x.get("capture_base")),
+                           prec=pc(x.get("prec5_peak3x"), False), rate=pc(x.get("rate_peak3x"), False),
+                           lift=i18n.num(lift, 1, lang) if lift is not None and math.isfinite(lift) else "n/a"))
     ready = data.get("readiness") or {}
     if ready:
         def progress(v):
@@ -238,4 +248,4 @@ def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: flo
 
 WHY = {"take": "prt_why_take", "take_part": "prt_why_take", "stop": "prt_why_stop", "time": "prt_why_time",
        "stuck": "prt_why_stuck", "trail": "prt_why_trail", "dev_sell": "prt_why_dev", "pull": "prt_why_pull",
-       "risk": "prt_why_risk", "kill": "prt_why_kill"}
+       "risk": "prt_why_risk", "hazard": "prt_why_hazard", "kill": "prt_why_kill"}

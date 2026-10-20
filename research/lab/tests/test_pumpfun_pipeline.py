@@ -52,8 +52,9 @@ def paper(*strats, kill=None, models=None, **kw) -> sim.Engine:
 
 def test_the_registered_strategies_are_what_the_plan_says():
     assert [s.name for s in P.STRATEGIES] == ["P_snipe_dev", "P_snipe_cmig", "P_press10", "P_mom_model", "P_p90",
-                                              "P_p80_smart", "P_pool60", "P_cmig_model"]
-    assert S.N_TRIALS == len(S.RULES) + 1 + len(P.STRATEGIES)
+                                              "P_p80_smart", "P_pool60", "P_cmig_model", "P_early10", "P_early30",
+                                              "P_press10_hz", "P_pool60_hz"]
+    assert S.N_TRIALS == len(S.RULES) + 1 + len(P.STRATEGIES) + S.X14_TRIALS
     for s in P.STRATEGIES:
         assert isinstance(s, S.Rule) and P.is_strategy(s)
         assert s.exits.ladder[-1][1] == 1.0 and 0 < s.exits.sl < 1 and s.exits.time_s > 0

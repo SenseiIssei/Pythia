@@ -22,6 +22,7 @@ from collections import Counter
 import numpy as np
 
 from . import curve as C
+from . import early as E
 from . import pipeline as P
 from . import strategies as S
 from . import wallets as W
@@ -64,7 +65,8 @@ class Engine:
                  book: CreatorBook | None = None, decisions: bool = False, model=None, on_close=None,
                  entry_from: int | None = None, entry_until: int | None = None,
                  rule_costs: dict[str, C.Costs] | None = None, strategies: list | None = None,
-                 wallets: W.WalletBook | None = None, cats=None, models: dict | None = None, kill=None):
+                 wallets: W.WalletBook | None = None, cats=None, models: dict | None = None, kill=None,
+                 early_rows: bool = False, snipers: E.SniperBook | None = None):
         self.rules = list(S.RULES if rules is None else rules)
         self.costs = costs or C.Costs()
         self.rule_costs = rule_costs or {}
@@ -96,6 +98,9 @@ class Engine:
         self.gaps: list[tuple[int, int]] = []
         self.counts: Counter = Counter()
         self.next_pid = 0
+        # X14: market activity, snipers and flow for the early and exit features (always); with early_rows the
+        # early-detection rows, the positions' paths and the exit models' step rows (the study)
+        self.early = E.Tracker(self, rows=early_rows, snipers=snipers)
 
     def _index_rules(self) -> None:
         """The rules and every pipe's strategies, by entry kind (a strategy signals once for all pipes)."""
@@ -167,6 +172,7 @@ class Engine:
         tok.early = W.EarlyBuyers()
         self.tokens[mint] = tok
         self.counts["tokens"] += 1
+        self.early.created(tok, t)
         self.push(t, "signal_create", mint)
         for r in self.by_entry.get("checkpoint", ()):
             self.push(t + r.p["w_s"] * 1000, "checkpoint", (mint, r.name))
@@ -187,6 +193,7 @@ class Engine:
                     tok.early.add(user, t, self.wallets, self.book)
             else:
                 tok.early.sold(user, t, self.wallets)
+        self.early.trade(tok, t, buy, sol, tok_amt, user, "curve")
         for pipe in self.pipes:
             pipe.exec.on_trade("trades", {"t": t, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
                                           "fee_bps": tok.fee_bps})
@@ -209,7 +216,10 @@ class Engine:
             if tok.complete_t is None and tok.early is not None:
                 for w in tok.early.wallets:
                     self.wallets.completed(w)
+            first = tok.complete_t is None
             tok.completed(t, self.book)
+            if first:
+                self.early.completed(tok, t)
 
     def migrate(self, t, mint, pool, sol, tok_amt) -> None:
         self.advance(t)
@@ -221,6 +231,7 @@ class Engine:
                 for w in tok.early.wallets:
                     self.wallets.completed(w)
             tok.completed(t, self.book)
+            self.early.completed(tok, t)
         tok.migrated(t, pool, sol, tok_amt)
         tok.last_t = t
         for r in self.by_entry.get("migration", ()):
@@ -233,6 +244,7 @@ class Engine:
             return
         tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb, slot, user, int(t))
         tok.last_t = t
+        self.early.trade(tok, t, buy, quote or 0, base or 0, user or "", "pool")
         for pipe in self.pipes:
             pipe.exec.on_trade("amm", {"t": t, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
                                        "user": user, "fee_bps": tok.amm_fee_bps})
@@ -247,10 +259,11 @@ class Engine:
         if tok is not None:
             tok.set_meta(t, flags)
 
-    def gap(self, t0, t1) -> None:
+    def gap(self, t0, t1, prog: str | None = None) -> None:
         """The stream was down from t0 to t1: everything open across it is marked."""
         self.advance(t1)
         self.gaps.append((t0, t1))
+        self.early.gap(t0, t1, prog)
         for p in self.positions.values():
             p["gap"] = True
         for pipe in self.pipes:
@@ -553,6 +566,7 @@ class Engine:
         self._settle_mig(tok, at)
         self._quality(tok)
         del self.tokens[mint]
+        self.early.evict(mint)
         self.entered.pop(mint, None)
         self.rows_by_mint.pop(mint, None)
 
@@ -578,6 +592,7 @@ class Engine:
             self._settle_mig(tok, t_end)
             self._quality(tok)
         self.rows.pack_all()
+        self.early.finish(t_end)
         self.counts["open_at_end"] = sum(1 for p in self.positions.values() if p["state"] == "open")
         self.counts["pending_at_end"] = sum(1 for p in self.positions.values() if p["state"] == "pending")
 
@@ -697,7 +712,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
         elif k == "migrate":
             eng.migrate(r["t"], r["mint"], r["pool"], r["sol"], r["tok"])
         elif k == "gap":                                 # either stream: whatever overlaps it is dropped
-            eng.gap(r["t0"] or r["t"], r["t"])
+            eng.gap(r["t0"] or r["t"], r["t"], r.get("user"))
     elif table == "amm":
         if r.get("mint"):
             eng.amm(r["t"], r["mint"], r["buy"], r["base"], r["quote"], r["pb"], r["pq"], r["lpb"], r["pfb"],

@@ -494,6 +494,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_why_dev": "the dev sold",
         "prt_why_pull": "liquidity pulled",
         "prt_why_risk": "risk model",
+        "prt_why_hazard": "hazard model",
         "prt_why_kill": "kill switch",
         "prt_all_books": "Every paper book",
         "prt_daily_books": "Paper books yesterday: {n} with closed trades, {pnl} in all.",
@@ -502,6 +503,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_ready": ("Closest to live: {rule}, {days} of 14 days, {trades} of 300 trades out of sample, "
                             "{shadow} of 30 shadow days, {gates}."),
         "prt_daily_ready_n": "{n} of {total} strategies are ready for live.",
+        "prt_daily_x14": ("Exits out of sample: {pick} keeps {cap} of the best possible gain (best simple rule "
+                          "{base}: {cap_base}). Early detection: the top 5 % by P(3x) reached it {prec} of the "
+                          "time against {rate} for all ({lift}x)."),
         "prt_gates_pass": "the gates pass",
         "prt_gates_fail": "the gates do not pass yet",
         "prt_live_locked": "Live: locked, nothing trades real money.",
@@ -912,6 +916,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_why_dev": "der Entwickler hat verkauft",
         "prt_why_pull": "Liquidität abgezogen",
         "prt_why_risk": "Risikomodell",
+        "prt_why_hazard": "Gefahrenmodell",
         "prt_why_kill": "Notschalter",
         "prt_all_books": "Alle Paper-Bücher",
         "prt_daily_books": "Paper-Bücher gestern: {n} mit geschlossenen Positionen, {pnl} insgesamt.",
@@ -920,6 +925,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_ready": ("Am nächsten an echtem Geld: {rule}, {days} von 14 Tagen, {trades} von 300 Positionen "
                             "außerhalb der Stichprobe, {shadow} von 30 Tagen im Schattenbuch, {gates}."),
         "prt_daily_ready_n": "{n} von {total} Strategien sind bereit für echtes Geld.",
+        "prt_daily_x14": ("Ausstiege außerhalb der Stichprobe: {pick} behält {cap} des bestmöglichen Gewinns "
+                          "(beste einfache Regel {base}: {cap_base}). Früherkennung: die obersten 5 % nach "
+                          "P(3x) erreichten das Dreifache in {prec} der Fälle, alle in {rate} ({lift}-fach)."),
         "prt_gates_pass": "die Schwellen sind bestanden",
         "prt_gates_fail": "die Schwellen sind noch nicht bestanden",
         "prt_live_locked": "Echtgeld: gesperrt, nichts handelt mit echtem Geld.",
@@ -1011,6 +1019,9 @@ MODEL_TITLES_DE = {
     "M10": "Tagesvolatilität mit Regime",
     "M11": "Slippage von Demo-Marktorders",
     "M12": "Korrelationsregime BTC ggü. US-Aktien",
+    "M13": "Frühsignale bei US-Aktien (20 Tage ggü. SPY)",
+    "M14": "Restrendite gehaltener Coins (Ausstiegsmodell, 10 Tage)",
+    "M15": "Restrendite gehaltener US-Aktien (Ausstiegsmodell, 10 Tage)",
 }
 
 # The factory's gates (lab.factory.writeup.GATE_LABEL) in German.

@@ -23,7 +23,8 @@ Per zoo model (M8, M8q, M10, M11, M12), every run:
   4. drift: the last 30 days of each input against the training deciles,
      with the engine's rules (pythia-ml drift.rs)
 
-M1 and M2 are retrained by the nightly learning loop; M7 is retired. The
+M1 and M2 are retrained by the nightly learning loop; M7 is retired, and X16's
+M13, M14 and M15 are records of failed gates (zoo.RECORDS). The
 report covers them all: reports/models/latest.json (the Models page and,
 through its lab feed header, docs/LAB-FEEDS.md, Home and Research) and
 latest.md. A promotion, or a model whose inputs move outside their trained
@@ -315,6 +316,8 @@ def run(now_ms: int | None = None, force: set[str] | None = None, train: bool = 
     for s in (zoo.M1, zoo.M2):
         entries.append(learn_entry(s, learn_state))
     entries.append(retired_entry(zoo.M7))
+    for s in zoo.record_specs():
+        entries.append(retired_entry(s))
     for mod in zoo.zoo_modules():
         s = mod.SPEC
         panel, err, rec = None, None, None

@@ -145,6 +145,38 @@ def save(res: dict, summ: dict, meta_rows: dict) -> None:
     (d / "models.md").write_text(report_md(summ, res["importance"]), encoding="utf-8")
 
 
+def run_x14(now_ms: int, dry: bool = False, log=print) -> dict | None:
+    """X14 (results/pumpfun_early_exit_plan.md): the early detection and exit study on the study's rows, paths
+    and steps; then the live models (e_<label>, hz_dump10, hz_up30, hz_policy with the in-sample k*) on all of
+    them, saved where the shadow books read them. Returns the card's summary, None without rows."""
+    from datetime import datetime, timezone
+
+    from . import early as EA
+    from . import exitpol as XP
+    try:
+        data = EA.load(rows_path().parent)
+    except (OSError, ValueError, KeyError) as e:
+        log(f"{NAME} retrain: no X14 rows ({type(e).__name__}: {e})")
+        return None
+    t0 = time.time()
+    res = XP.run(data, split_ms=data["meta"].get("split_ms"), log=log)
+    day = datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d")
+    md = XP.report_md(res, day)
+    summ = XP.summary(res)
+    if dry:
+        print(md)
+        return summ
+    models = XP.fit_live(data, k=(res["exit"]["judge"] or {}).get("k_star") or 1.0, log=log)
+    XP.save_models(models, M.model_dir())
+    d = rep.REPORTS / NAME
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "early_exit.json").write_text(json.dumps(XP.jsonable(res), indent=1, default=str), encoding="utf-8")
+    (d / "early_exit.md").write_text(md, encoding="utf-8")
+    log(f"{NAME} retrain: X14 in {time.time() - t0:.0f} s; exit pick {summ['pick']}, capture out of sample "
+        f"{summ['capture_pick']}; peak3x top 5 % precision {summ['prec5_peak3x']}")
+    return summ
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", action="store_true")
@@ -163,8 +195,17 @@ def main(argv: list[str] | None = None) -> int:
         summ = summary(res, now_ms)
         if a.dry_run:
             print(report_md(summ, res["importance"]))
-            return 0
-        save(res, summ, meta)
+        else:
+            save(res, summ, meta)
+    try:
+        x14 = run_x14(now_ms, dry=a.dry_run)
+    except Exception as e:                                  # X14 never stops the card or the other models
+        print(f"{NAME} retrain: X14 failed ({type(e).__name__}: {e})")
+        x14 = None
+    if x14 is not None and summ is not None:
+        summ["x14"] = x14
+        if not a.dry_run:
+            (rep.REPORTS / NAME / "models.json").write_text(json.dumps(summ, indent=1, default=str), encoding="utf-8")
     if a.dry_run or a.no_notify:
         return 0
     from . import card
