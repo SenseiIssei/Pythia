@@ -130,6 +130,21 @@ jobs:
     timeout: 15m
     grace: 30m
 
+  # Proposed by the gated_btc study (results/gated_btc.md): BTC only while it
+  # closes above its 200-day average, an experiment (failed deflation, below
+  # plain BTC on Sharpe from 2024). Added disabled; switch on (enabled: true,
+  # then deploy_ops.sh) once the owner wants its forward record. Its signal is
+  # experimental and autopilot-only either way: no autopilot runs it unless one
+  # names lab:btc_gated.
+  - name: paper-btc-gated
+    description: EXPERIMENT BTC above its 200-day average, full weight or cash, and its experimental engine signal
+    schedule: "35 4 * * *"
+    command: python -m lab.paper.btc_gated
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+    grace: 30m
+    enabled: false
+
   - name: paper-m4
     description: M4 shadow paper book, market-neutral on perps
     schedule: "45 4 * * *"
