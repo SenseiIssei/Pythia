@@ -132,7 +132,9 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
                   )}
                 </td>
                 <td className="tabular py-2 pr-2 text-right">
-                  <span className="block">{r.maxDrawdownPct.toFixed(1)}%</span>
+                  <span className="block" title={r.curveNote ?? undefined}>
+                    {r.maxDrawdownPct.toFixed(1)}%{r.curveNote ? " *" : ""}
+                  </span>
                   <span className="text-muted block text-xs">now {r.drawdownPct.toFixed(1)}%</span>
                 </td>
                 <td className="tabular py-2 pr-2 text-right">{r.trades}</td>
@@ -147,8 +149,15 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
       </div>
       <p className="text-muted mt-2 text-xs">
         Benchmark: buying and holding Bitcoin for crypto, SPY for US shares, over the same period. Points are the return less the
-        benchmark's.
+        benchmark's. Returns and fees are measured on the amount each one worked with, so changing an amount changes neither.
       </p>
+      {rows
+        .filter((r) => r.curveNote)
+        .map((r) => (
+          <p key={`note-${r.id}`} className="text-muted mt-1 text-xs">
+            * {r.name}: {r.curveNote}
+          </p>
+        ))}
     </Card>
   );
 }

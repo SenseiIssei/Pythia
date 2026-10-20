@@ -330,6 +330,15 @@ def test_the_weekly_review_without_budget_is_not_a_failure(lab, tmp_path):
     assert not (notify.reports_root() / "ai" / "weekly.md").exists()
 
 
+def test_an_evidence_line_keeps_the_status_date_apart_from_the_records_length():
+    v = {"status": "below", "since": "2026-10-17", "return_pct": -4.545, "days": 13.0}
+    line = weekly.evidence_line("book:tsmom_regime", v)
+    assert line == "book:tsmom_regime: below since 2026-10-17 (forward record -4.5 % over 13 days)"
+    assert "after 13 days since" not in line
+    short = weekly.evidence_line("autopilot:ap_1", {"status": "early", "return_pct": 0.1, "days": 0.25})
+    assert short == "autopilot:ap_1: early (forward record +0.1 % over 6 hours)"
+
+
 # ---------------------------------------------------------------- models per job
 
 def test_a_job_model_and_effort_can_be_changed_from_the_environment(monkeypatch):

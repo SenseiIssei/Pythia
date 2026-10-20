@@ -3,6 +3,8 @@
     python -m lab.paper.pumpfun              one watcher run (cron, every 5 minutes)
     python -m lab.paper.pumpfun --report     the daily report and its Telegram card
     python -m lab.paper.pumpfun --dry-run    one run, printed; nothing written or posted
+    python -m lab.paper.pumpfun --rebuild    replay the ledger with the funding and one-buy-per-token
+                                             rules; rewrite the journals and the state (--dry-run prints)
 
 Nothing in this module can trade. It holds no wallet, reads no key, signs and
 sends nothing; every "buy" and "sell" is arithmetic on public prices, written
@@ -55,6 +57,18 @@ changing one means a new rule with a new name, never an edit):
 Each rule is a paper book (<data>/paper/pumpfun_<rule>/journal.csv, one row
 per UTC day, from $10,000) that stakes a fixed $100 a token, at most 40 open
 at once (a token seen while 40 are open is skipped and journaled as skipped).
+A token is one graduation: a rule buys a mint once, however many PumpSwap
+pools of it a run sees.
+
+The book has the money it has. A position bought while the book's cash is
+under the stake is UNFUNDED: it is followed exactly like a funded one (its
+marks, its exit, its return), so the rule's per-token record stays complete,
+but it moves no cash and is not in the book's equity. The book's return is
+its equity (cash plus the funded positions at their marks) against $10,000,
+so it cannot fall below -100 %. Before 2026-10-21 the cash went negative and
+the "book return" was the sum of every trade's dollar result over $10,000
+(-965 % for migration); `--rebuild` replays the ledger under these rules and
+rewrites the journals and the state (see results/forward_audit.md).
 
 Fills. Entry at the pool price of the run that sees the graduation (up to 5
 minutes after it, so never the migration price itself), through constant
@@ -352,24 +366,43 @@ def open_positions(st: dict, rule: str | None = None) -> list[dict]:
     return [p for p in st["positions"] if p["open"] and (rule is None or p["rule"] == rule)]
 
 
-def enter(st: dict, rule: str, pool: dict, now: int, ledger: list) -> dict | None:
+def funded(p: dict) -> bool:
+    """Whether a position is in the book's money (positions from before funding existed are)."""
+    return p.get("funded", True)
+
+
+def why_not_enter(st: dict, rule: str, mint: str) -> str | None:
+    """Why a rule does not buy this token now: already bought (a token is one
+    graduation, whatever pools it has) or the open limit. None: it buys."""
+    if any(p["rule"] == rule and p["mint"] == mint for p in st["positions"]):
+        return "bought already"
     if len(open_positions(st, rule)) >= MAX_OPEN:
+        return f"{MAX_OPEN} open already"
+    return None
+
+
+def enter(st: dict, rule: str, pool: dict, now: int, ledger: list) -> dict | None:
+    if why_not_enter(st, rule, pool["mint"]):
         return None
     tx = tx_cost_usd(pool.get("sol_usd"))
     usd = STAKE_USD - tx
     tokens = amm_buy(usd, (pool["liq_usd"] or 0.0) / 2, pool["price_usd"])
     if tokens <= 0:
         return None
-    st["books"][rule]["cash"] -= STAKE_USD
+    # The book cannot spend money it does not have: without the stake in cash
+    # the position is followed unfunded (see the module docs).
+    has_cash = st["books"][rule]["cash"] >= STAKE_USD - 1e-9
+    if has_cash:
+        st["books"][rule]["cash"] -= STAKE_USD
     p = {"rule": rule, "mint": pool["mint"], "pool": pool.get("pool"), "name": pool.get("name"), "open": True,
          "entry_ms": now, "stake": STAKE_USD, "tokens": tokens, "entry_price": pool["price_usd"],
          "eff_price": STAKE_USD / tokens, "peak": pool["price_usd"], "last_price": pool["price_usd"],
          "last_liq": pool["liq_usd"], "sol_usd": pool.get("sol_usd"), "gone": 0, "gone_since": None,
-         "value": STAKE_USD, "exit": None}
+         "value": STAKE_USD, "exit": None, "funded": has_cash}
     st["positions"].append(p)
     ledger.append({"ts_ms": now, "rule": rule, "mint": pool["mint"], "name": pool.get("name"), "side": "buy",
                    "usd": STAKE_USD, "tokens": tokens, "price": pool["price_usd"], "liq_usd": pool["liq_usd"],
-                   "reason": "graduation"})
+                   "reason": "graduation" if has_cash else "graduation, unfunded (book cash under the stake)"})
     return p
 
 
@@ -387,7 +420,8 @@ def close(st: dict, p: dict, now: int, usd: float, reason: str, ledger: list, co
     p.update(open=False, exit={"ts_ms": now, "usd": usd, "reason": reason, "code": code, "arg": arg or {},
                                "ret": usd / p["stake"] - 1, "hours": (now - p["entry_ms"]) / HOUR_MS})
     p["value"] = usd
-    st["books"][p["rule"]]["cash"] += usd
+    if funded(p):
+        st["books"][p["rule"]]["cash"] += usd
     ledger.append({"ts_ms": now, "rule": p["rule"], "mint": p["mint"], "name": p.get("name"), "side": "sell",
                    "usd": usd, "tokens": p["tokens"], "price": p.get("last_price"), "liq_usd": p.get("last_liq"),
                    "reason": reason})
@@ -448,7 +482,9 @@ def reason_text(e: dict, lang: str = "en") -> str:
 
 
 def equity(st: dict, rule: str) -> float:
-    return st["books"][rule]["cash"] + sum(p["value"] for p in open_positions(st, rule))
+    """Cash plus the funded open positions at their marks. Never below zero: the
+    book only buys with cash it has, and a position is worth at least nothing."""
+    return st["books"][rule]["cash"] + sum(p["value"] for p in open_positions(st, rule) if funded(p))
 
 
 def run(get: Fetch, now: int, st: dict | None = None, info_budget: int = INFO_PER_RUN) -> dict:
@@ -480,11 +516,16 @@ def run(get: Fetch, now: int, st: dict | None = None, info_budget: int = INFO_PE
         g["info"] = info
         for rule in RULES:
             ok, why = passes(rule, g, info)
-            if ok and enter(st, rule, g, now, ledger):
-                bought.append((rule, g))
-                _count(st, day, f"bought_{rule}")
-            else:
-                skipped.append((rule, g, why if not ok else f"{MAX_OPEN} open already"))
+            if ok:
+                why = why_not_enter(st, rule, g["mint"]) or "no tokens at this price"
+                p = enter(st, rule, g, now, ledger)
+                if p is not None:
+                    bought.append((rule, g))
+                    _count(st, day, f"bought_{rule}")
+                    if not funded(p):
+                        _count(st, day, f"unfunded_{rule}")
+                    continue
+            skipped.append((rule, g, why))
     # Marks for every open position (the ones just bought too: their first mark).
     mints = sorted({p["mint"] for p in open_positions(st)})
     marks = dex_marks(get, mints) if mints else {}
@@ -535,13 +576,25 @@ def journal_rows(st: dict, now: int) -> dict[str, dict]:
     out = {}
     for rule in RULES:
         closed = [p for p in st["positions"] if p["rule"] == rule and not p["open"] and _day(p["exit"]["ts_ms"]) == day]
-        bought = st["counts"].get(day, {}).get(f"bought_{rule}", 0)
-        out[rule] = {"date": day, "equity": round(equity(st, rule), 2), "held": len(open_positions(st, rule)),
-                     "bought": bought, "closed": len(closed),
-                     "rugs": sum(p["exit"]["reason"].startswith("rug") for p in closed),
-                     "turnover": round((bought + len(closed)) * STAKE_USD / START_EQUITY, 4),
-                     "exposure": round(sum(p["value"] for p in open_positions(st, rule)) / max(equity(st, rule), 1e-9), 4)}
+        c = st["counts"].get(day, {})
+        bought = c.get(f"bought_{rule}", 0)
+        unfunded = c.get(f"unfunded_{rule}", 0)
+        held = [p for p in open_positions(st, rule) if funded(p)]
+        eq = equity(st, rule)
+        out[rule] = book_row(day, eq, len(held), bought - unfunded, sum(funded(p) for p in closed),
+                             sum(funded(p) and p["exit"]["reason"].startswith("rug") for p in closed),
+                             sum(p["value"] for p in held), unfunded)
     return out
+
+
+def book_row(day: str, eq: float, held: int, bought: int, closed: int, rugs: int, value: float,
+             unfunded: int) -> dict:
+    """One journal row. Counts are the book's funded positions; `unfunded` the buys the
+    rule made that day without the cash for them. Exposure is what the funded positions
+    are worth over the equity (0 for a book with nothing left)."""
+    return {"date": day, "equity": round(eq, 2), "held": held, "bought": bought, "closed": closed, "rugs": rugs,
+            "turnover": round((bought + closed) * STAKE_USD / START_EQUITY, 4),
+            "exposure": round(value / eq, 4) if eq > 1e-9 else 0.0, "unfunded": unfunded}
 
 
 def write_journal(rule: str, row: dict) -> None:
@@ -564,6 +617,130 @@ def write_journal(rule: str, row: dict) -> None:
     if not sf.exists():
         sf.write_text(json.dumps({"variant": f"EXPERIMENT, paper only · pump.fun {rule}: {RULES[rule]['label']}",
                                   "started": datetime.now(timezone.utc).isoformat(timespec="seconds")}, indent=1))
+
+
+def read_csv(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+def replay(ledger: list[dict], marks: list[dict], now: int) -> dict:
+    """The books from the ledger (every paper fill) under the rules as they are now: one buy
+    per token and rule, and a buy without the stake in cash is unfunded (it moves no cash).
+    The open positions are valued at their last hourly mark (marks.csv), else at the stake.
+
+    Returns {"rows": {rule: [journal row per UTC day]}, "cash": {rule: cash},
+    "funded": {(rule, mint): bool} for every token kept, "dupes": {rule: buys dropped}}."""
+    # Fills before the marks of the same run (a mark row is written after the run's fills).
+    events = [(int(r["ts_ms"]), 0, r) for r in ledger] + [(int(m["ts_ms"]), 1, m) for m in marks]
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    def next_day(d: str) -> str:
+        return _day(int(datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000) + DAY_MS)
+    cash = {r: START_EQUITY for r in RULES}
+    opened: dict[tuple[str, str], dict] = {}     # (rule, mint) -> {"funded", "value"}
+    kept: dict[tuple[str, str], bool] = {}
+    dupes = {r: 0 for r in RULES}
+    rows: dict[str, list[dict]] = {r: [] for r in RULES}
+    day_counts = {r: {"bought": 0, "unfunded": 0, "closed": 0, "rugs": 0} for r in RULES}
+
+    def close_day(day: str) -> None:
+        for rule in RULES:
+            held = [o for (r, _), o in opened.items() if r == rule and o["funded"]]
+            value = sum(o["value"] for o in held)
+            c = day_counts[rule]
+            rows[rule].append(book_row(day, cash[rule] + value, len(held), c["bought"], c["closed"], c["rugs"],
+                                       value, c["unfunded"]))
+            day_counts[rule] = {"bought": 0, "unfunded": 0, "closed": 0, "rugs": 0}
+
+    day = _day(events[0][0]) if events else _day(now)
+    for ts, kind, r in events:
+        while _day(ts) > day:
+            close_day(day)
+            day = next_day(day)
+        rule, mint = r.get("rule"), r.get("mint")
+        if rule not in RULES:
+            continue
+        key = (rule, mint)
+        if kind == 1:
+            if key in opened:
+                opened[key]["value"] = float(r["value"])
+            continue
+        usd = float(r["usd"])
+        if r["side"] == "buy":
+            if key in kept:
+                dupes[rule] += 1
+                continue
+            ok = cash[rule] >= STAKE_USD - 1e-9
+            if ok:
+                cash[rule] -= STAKE_USD
+                day_counts[rule]["bought"] += 1
+            else:
+                day_counts[rule]["unfunded"] += 1
+            kept[key] = ok
+            opened[key] = {"funded": ok, "value": STAKE_USD}
+        elif key in opened:
+            o = opened.pop(key)
+            if o["funded"]:
+                cash[rule] += usd
+                day_counts[rule]["closed"] += 1
+                day_counts[rule]["rugs"] += str(r.get("reason", "")).startswith("rug")
+    while day <= _day(now):
+        close_day(day)
+        day = next_day(day)
+    return {"rows": rows, "cash": cash, "funded": kept, "dupes": dupes}
+
+
+def rebuild_state(st: dict, res: dict) -> dict:
+    """The state brought in line with a replay: a second buy of a token by the same rule is
+    dropped, every position kept gets its funding, every book its replayed cash."""
+    seen: set[tuple[str, str]] = set()
+    keep = []
+    for p in sorted(st["positions"], key=lambda p: p["entry_ms"]):
+        key = (p["rule"], p["mint"])
+        if key in seen:
+            continue
+        seen.add(key)
+        p["funded"] = res["funded"].get(key, True)
+        keep.append(p)
+    st["positions"] = keep
+    for rule, cash in res["cash"].items():
+        st["books"][rule]["cash"] = cash
+    for rule, rows in res["rows"].items():
+        for row in rows:
+            c = st["counts"].get(row["date"])
+            if c is not None:
+                c[f"bought_{rule}"] = row["bought"] + row["unfunded"]
+                c[f"unfunded_{rule}"] = row["unfunded"]
+    return st
+
+
+def rebuild(now: int, dry: bool = False) -> dict:
+    """--rebuild: replay the ledger and rewrite the journals and the state."""
+    d = paper_dir()
+    res = replay(read_csv(d / "ledger.csv"), read_csv(d / "marks.csv"), now)
+    st = load_state()
+    if st is not None:
+        rebuild_state(st, res)
+    for rule, rows in res["rows"].items():
+        print(f"{rule}: {len(rows)} days, equity {rows[-1]['equity'] if rows else START_EQUITY:,.2f}, "
+              f"{res['dupes'][rule]} repeated buys of a token dropped, "
+              f"{sum(r['unfunded'] for r in rows)} buys without the cash for them")
+        if dry or not rows:
+            continue
+        p = book_dir(rule) / "journal.csv"
+        tmp = p.with_suffix(".csv.tmp")
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", newline="", encoding="utf-8") as fh:
+            wr = csv.DictWriter(fh, fieldnames=list(rows[0]))
+            wr.writeheader()
+            wr.writerows(rows)
+        tmp.replace(p)
+    if st is not None and not dry:
+        save_state(st)
+    return res
 
 
 def save_state(st: dict) -> None:
@@ -621,8 +798,9 @@ def alert_cards(closed: list[dict], st: dict, now: int, lang: str = "en") -> lis
 # ---------------------------------------------------------------- daily report
 
 def summary(st: dict, now: int, ledger_rows: list[dict] | None = None) -> dict:
-    """Per rule over every closed position in the state: count, rugs, median and mean return, hit rate,
-    and the best and worst; plus yesterday's counts."""
+    """Per rule over every closed position in the state (funded or not: the rule's record per
+    token): count, rugs, median and mean return per trade, hit rate, the best and worst; the
+    book's equity and return (funded positions only); plus yesterday's counts."""
     rules = {}
     for rule in RULES:
         closed = [p for p in st["positions"] if p["rule"] == rule and not p["open"]]
@@ -631,7 +809,9 @@ def summary(st: dict, now: int, ledger_rows: list[dict] | None = None) -> dict:
         rules[rule] = {
             "label": RULES[rule]["label"], "equity": round(equity(st, rule), 2),
             "return_pct": round((equity(st, rule) / START_EQUITY - 1) * 100, 2),
-            "open": len(open_positions(st, rule)), "closed": n,
+            "open": sum(funded(p) for p in open_positions(st, rule)),
+            "unfunded_open": sum(not funded(p) for p in open_positions(st, rule)),
+            "funded_closed": sum(funded(p) for p in closed), "closed": n,
             "rugs": sum(p["exit"]["reason"].startswith("rug") for p in closed),
             "median_ret": rets[n // 2] if n else None, "mean_ret": sum(rets) / n if n else None,
             "hit_rate": sum(r > 0 for r in rets) / n if n else None,
@@ -653,8 +833,8 @@ def report(st: dict, now: int) -> tuple[dict, str]:
              + (f" ({grads / launches * 100:.1f} %)" if launches else "")]
     for rule, r in s["rules"].items():
         if r["closed"]:
-            parts.append(f"{rule}: {r['closed']} closed, {r['rugs']} rugs, median {pct(r['median_ret'])}, "
-                         f"book {r['return_pct']:+.1f} %")
+            parts.append(f"{rule}: {r['closed']} closed, {r['rugs']} rugs, median {pct(r['median_ret'])} and mean "
+                         f"{pct(r['mean_ret'])} per trade, book {r['return_pct']:+.1f} %")
         else:
             parts.append(f"{rule}: nothing closed yet")
     headline = ("Paper only. " if not stale else "The watcher has not run for over 2 hours. ") + "; ".join(parts) + "."
@@ -662,9 +842,12 @@ def report(st: dict, now: int) -> tuple[dict, str]:
     for rule, r in s["rules"].items():
         items.append({"label": f"pump.fun {rule}", "value": f"{r['return_pct']:+.1f} %",
                       "status": "bad" if r["return_pct"] < -20 else "watch",
-                      "detail": f"{r['label']}. {r['open']} open, {r['closed']} closed, {r['rugs']} rugs"
-                                + (f", hit rate {r['hit_rate'] * 100:.0f} %, {r['zero_share'] * 100:.0f} % at -90 % "
-                                   f"or worse" if r["closed"] else ""),
+                      "detail": f"{r['label']}. Book: equity ${r['equity']:,.0f} from ${START_EQUITY:,.0f}, "
+                                f"{r['open']} open. Per trade: {r['closed']} closed, {r['rugs']} rugs"
+                                + (f", mean {pct(r['mean_ret'])}, hit rate {r['hit_rate'] * 100:.0f} %, "
+                                   f"{r['zero_share'] * 100:.0f} % at -90 % or worse" if r["closed"] else "")
+                                + (f"; {r['unfunded_open']} open without the book's money (its cash is under the "
+                                   f"${STAKE_USD:,.0f} stake)" if r["unfunded_open"] else ""),
                       "link": "study:experiments", "importance": 30})
         for tag, p in (("best", r["best"]), ("worst", r["worst"])):
             if p:
@@ -680,12 +863,14 @@ def report(st: dict, now: int) -> tuple[dict, str]:
     data = {**rep.feed_header("pump.fun paper watcher", status, headline, items, updated_ms=now),
             "caveat": CAVEAT, "summary": json.loads(json.dumps(s, default=str)), "rules": RULES}
     md = [f"# pump.fun paper watcher ({_day(now)})", "", CAVEAT, "", headline, "",
-          "| rule | equity | return | open | closed | rugs | median | hit rate |", "|---|---|---|---|---|---|---|---|"]
+          "Book: equity (cash plus the funded positions at their marks) against $10,000. Per trade: every "
+          "token the rule bought, funded or not, each against its own $100 stake.", "",
+          "| rule | book equity | book return | open | closed trades | rugs | median per trade | mean per trade "
+          "| hit rate |", "|---|---|---|---|---|---|---|---|---|"]
     for rule, r in s["rules"].items():
         md.append(f"| {rule} | ${r['equity']:,.0f} | {r['return_pct']:+.1f} % | {r['open']} | {r['closed']} | {r['rugs']} | "
-                  f"{pct(r['median_ret']) if r['median_ret'] is not None else 'n/a'} | "
-                  f"{(r['hit_rate'] * 100):.0f} % |" if r["closed"] else
-                  f"| {rule} | ${r['equity']:,.0f} | {r['return_pct']:+.1f} % | {r['open']} | 0 | 0 | n/a | n/a |")
+                  f"{pct(r['median_ret'])} | {pct(r['mean_ret'])} | {(r['hit_rate'] * 100):.0f} % |" if r["closed"] else
+                  f"| {rule} | ${r['equity']:,.0f} | {r['return_pct']:+.1f} % | {r['open']} | 0 | 0 | n/a | n/a | n/a |")
     return data, "\n".join(md) + "\n"
 
 
@@ -715,9 +900,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--rebuild", action="store_true")
     a = ap.parse_args(argv)
     from ..ops import notify
     now = int(time.time() * 1000)
+    if a.rebuild:
+        rebuild(now, dry=a.dry_run)
+        return 0
     st = load_state() or new_state()
     if a.report:
         data, md = report(st, now)

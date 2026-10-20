@@ -2394,6 +2394,94 @@ fn a_lower_amount_brings_targets_down_at_the_next_rebalance_and_keeps_the_pnl() 
 }
 
 #[test]
+fn a_return_and_a_fee_share_are_measured_on_the_amount_it_worked_with() {
+    let (mut e, id) = top20_running();
+    e.advance_clock_for_test(3 * 86_400_000);
+    update(&mut e, &id, AutopilotUpdate { capital_usd: Some(5_000.0), ..Default::default() }).unwrap();
+    e.advance_clock_for_test(86_400_000);
+    let a = e.autopilots.iter().find(|a| a.config.id == id).unwrap();
+    assert_eq!(a.capital_log.len(), 2, "{:?}", a.capital_log);
+    assert_eq!((a.capital_log[0].1, a.capital_log[1].1), (10_000.0, 5_000.0));
+    let s = status(&e, &id);
+    // Three days at $10,000, one at $5,000.
+    assert!((s.avg_capital - 8_750.0).abs() < 1.0, "{}", s.avg_capital);
+    assert!(s.curve_note.is_none());
+}
+
+/// ap_29742 as it was saved: started at $99,500, cut to $50,000 and then to
+/// $20,000 within three minutes before its stop, with a curve from before
+/// amounts rescaled it.
+fn unscaled_curve() -> Vec<(i64, f64)> {
+    let t0 = 1_791_847_382_430;
+    let cut = 1_792_067_411_489;
+    vec![
+        (t0, 99_500.0),
+        (t0 + 86_400_000, 98_099.0),
+        (cut - 60_000, 97_612.3),
+        (cut, 48_117.1),
+        (cut + 60_000, 47_993.1),
+        (cut + 120_000, 18_001.3),
+        (cut + 180_000, 18_009.3),
+    ]
+}
+
+#[test]
+fn a_curve_saved_before_amounts_rescaled_it_is_repaired_from_its_steps() {
+    let h = unscaled_curve();
+    assert!(max_drawdown_pct(&h, 18_009.3) > 81.0, "the figure the audit found");
+    let (fixed, log, note) = repair_curve(&h, 20_000.0, 20_000.0).expect("two steps no market makes");
+    let dd = max_drawdown_pct(&fixed, 18_009.3);
+    assert!(dd < 2.5, "the cut is no crash: {dd}");
+    // Returns on either side of each step are kept.
+    assert!((fixed[2].1 / fixed[0].1 - h[2].1 / h[0].1).abs() < 1e-12);
+    assert!((fixed[4].1 / fixed[3].1 - 47_993.1 / 48_117.1).abs() < 1e-12);
+    assert_eq!(log.len(), 3);
+    assert!((log[0].1 - 99_500.0).abs() < 100.0 && (log[1].1 - 50_000.0).abs() < 100.0 && log[2].1 == 20_000.0, "{log:?}");
+    assert_eq!((log[1].0, log[2].0), (h[3].0, h[5].0));
+    assert!(note.starts_with("Curve repaired after the fact: 2 amount change(s)"), "{note}");
+    // A curve without such a step, and in line with its peak, is left alone.
+    let calm: Vec<(i64, f64)> = (0..50).map(|k| (k * 60_000, 10_000.0 * (1.0 + 0.001 * ((k % 7) as f64 - 3.0)))).collect();
+    assert!(repair_curve(&calm, 10_000.0, 10_030.0).is_none());
+}
+
+#[test]
+fn a_first_point_on_an_earlier_amount_is_brought_to_the_current_one() {
+    // Started at $11,000, cut to $10,000 before the fix; thinning left only
+    // the first point from before the cut.
+    let h = vec![(0, 11_000.0), (5 * 86_400_000, 9_812.6), (5 * 86_400_000 + 60_000, 9_815.0)];
+    let (fixed, log, note) = repair_curve(&h, 10_000.0, 10_026.0).expect("a point above the peak");
+    assert_eq!(fixed[0].1, 10_000.0);
+    assert!(max_drawdown_pct(&fixed, 9_815.0) < 2.0);
+    assert_eq!(log, vec![(0, 10_000.0)]);
+    assert!(note.contains("first 1 point(s) were on an earlier amount ($11000)"), "{note}");
+}
+
+#[test]
+fn an_old_save_gets_its_curve_repaired_once_and_says_so() {
+    let (mut e, id) = top20_running();
+    let i = e.autopilots.iter().position(|a| a.config.id == id).unwrap();
+    {
+        let a = &mut e.autopilots[i];
+        a.capital_log.clear();
+        a.history = unscaled_curve();
+        a.started_ms = a.history[0].0;
+        a.start_capital = 20_000.0;
+        a.peak_equity = 20_000.0;
+        // Stopped a minute after the last cut, as ap_29742 was.
+        a.stopped_ms = a.history.last().map(|p| p.0);
+    }
+    e.autopilot_curves_after_restore();
+    let s = status(&e, &id);
+    assert!(s.max_drawdown_pct < 5.0, "{}", s.max_drawdown_pct);
+    assert!(s.curve_note.as_deref().is_some_and(|n| n.contains("rescaled after the fact")));
+    assert!(s.avg_capital > 90_000.0, "it traded with about $99,500 nearly all the time: {}", s.avg_capital);
+    assert!(e.journal.iter().any(|j| j.message.contains("Its worst drawdown reads")));
+    let again = e.autopilots[i].history.clone();
+    e.autopilot_curves_after_restore();
+    assert_eq!(e.autopilots[i].history, again, "once");
+}
+
+#[test]
 fn stop_rules_change_in_place_and_a_looser_max_loss_needs_confirmation() {
     let mut e = engine();
     let stop = StopRules { max_loss_pct: Some(10.0), ..Default::default() };

@@ -81,6 +81,29 @@ describe("compareRows", () => {
     expect(rb.maxDrawdownPct).toBeCloseTo((300 / 2_200) * 100);
   });
 
+  it("measures return and fees on the amount it worked with, so a cut amount is no loss", () => {
+    // ap_29742: $99,500 for nearly all of its run, cut to $20,000 minutes before its stop.
+    const cut = status("cut", {
+      startCapital: 20_000,
+      avgCapital: 99_424,
+      equity: 18_034.22,
+      pnl: -1_965.78,
+      pnlPct: -9.83,
+      fees: 145.67,
+      maxDrawdownPct: 2.15,
+      curveNote: "Curve repaired after the fact: 2 amount change(s).",
+    });
+    const [r] = compareRows([cut], DAY);
+    expect(r.returnPct).toBeCloseTo(-1.977, 3);
+    expect(r.feesPct).toBeCloseTo(0.1465, 4);
+    expect(r.curveNote).toContain("repaired");
+    // Unchanged amount, or an engine without the average: the engine's own figures.
+    const [plain] = compareRows([status("p", { pnl: 50, pnlPct: 5, fees: 2 })], DAY);
+    expect(plain.returnPct).toBe(5);
+    expect(plain.feesPct).toBeCloseTo(0.2);
+    expect(plain.curveNote).toBeNull();
+  });
+
   it("keeps an autopilot's colour by its start, whatever the list order", () => {
     const rows = compareRows([b, a], 10 * DAY);
     expect(rows.map((r) => [r.id, r.slot])).toEqual([
@@ -115,6 +138,14 @@ describe("combinedSeries", () => {
     expect(f.ticks).toContain(0);
     expect(valueAt(sb.points, DAY / 4)).toBeNull();
     expect(valueAt(sa.points, 1.5 * DAY)).toBeCloseTo(5, 9);
+  });
+
+  it("reads a curve rescaled for a changed amount from its own first point", () => {
+    // $99,500 cut to $20,000: the engine keeps the returns and moves the curve.
+    const cut = status("cut", { startCapital: 20_000, avgCapital: 99_424, equity: 18_009, history: [[0, 18_400], [DAY, 18_009]] });
+    const [s] = combinedSeries([cut], DAY);
+    expect(s.points[0][1]).toBeCloseTo(0, 9);
+    expect(s.points[1][1]).toBeCloseTo((18_009 / 18_400 - 1) * 100, 9);
   });
 
   it("rounds the axis to plain steps", () => {
