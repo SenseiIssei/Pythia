@@ -213,6 +213,32 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "best_worst": "{best} {best_money} · worst {worst} {worst_money}",
         "weekly_summary": ("{n} autopilot: {money} this week {dot}", "{n} autopilots: {money} this week {dot}"),
         "chart_this_week": "Equity this week",
+        "ai_week_lead": "Claude API",
+        "ai_week": "{money} this week, {avg} a day: {jobs}",
+        # the research director (lab.ai.director)
+        "dir_title": ("Research director: {n} study draft", "Research director: {n} study drafts"),
+        "dir_summary": "Pre-registration drafts for you to decide on; nothing runs them. Files in {where}. Cost {cost}.",
+        "dir_stop": "Stop doing",
+        # the strategy critic (lab.ai.critic)
+        "critic_title": ("Strategy check: {n} finding", "Strategy check: {n} findings"),
+        "critic_summary": "Yesterday's trades of each autopilot against its rules. Reply /real ID or /notreal ID to score a finding.",
+        "critic_confirmed": "the numbers confirm it",
+        "critic_unconfirmed": "the numbers do not confirm it",
+        "critic_unchecked": "not checkable from the numbers",
+        "critic_marked": "Finding {id} marked as {verdict}. It counts toward the critic's score.",
+        "critic_unknown": "There is no finding {id}.",
+        "critic_real": "real",
+        "critic_notreal": "not real",
+        # questions in the chat (lab.ai.chat)
+        "ask_help": ("Ask me anything about Pythia: the autopilots, the lab's reports, the market. I read the same "
+                     "facts as the daily brief and answer in your language. I never trade, change settings or show "
+                     "secrets. /real ID or /notreal ID scores a strategy check finding."),
+        "ask_refuse_trade": ("I only answer questions. I cannot place, change or cancel orders, start or stop an "
+                             "autopilot, or change any setting: that stays in the app, with you."),
+        "ask_refuse_secret": "I never show keys, tokens, passwords, chat ids or server details.",
+        "ask_limit": "That was the last of today's {n} questions. Ask again tomorrow (UTC).",
+        "ask_failed": "No answer this time ({why}). Nothing was changed.",
+        "ask_footer": "{model} · {cost} · {n} of {limit} today",
         # quiet hours and the health alarm
         "quiet_over": "Quiet hours are over",
         "held_summary": ("{n} lab post was held back from {start} to {end}.",
@@ -550,6 +576,33 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "best_worst": "{best} {best_money} · schwächstes {worst} {worst_money}",
         "weekly_summary": ("{n} Autopilot: diese Woche {money} {dot}", "{n} Autopiloten: diese Woche {money} {dot}"),
         "chart_this_week": "Wert diese Woche",
+        "ai_week_lead": "Claude-API",
+        "ai_week": "diese Woche {money}, {avg} am Tag: {jobs}",
+        "dir_title": ("Forschungsleitung: {n} Studienentwurf", "Forschungsleitung: {n} Studienentwürfe"),
+        "dir_summary": ("Entwürfe für Vorab-Registrierungen, über die du entscheidest; nichts startet sie. "
+                        "Dateien in {where}. Kosten {cost}."),
+        "dir_stop": "Lassen",
+        "critic_title": ("Strategie-Prüfung: {n} Befund", "Strategie-Prüfung: {n} Befunde"),
+        "critic_summary": ("Die Orders von gestern je Autopilot gegen seine Regeln. Antworte /real ID oder "
+                           "/notreal ID, um einen Befund zu bewerten."),
+        "critic_confirmed": "die Zahlen bestätigen es",
+        "critic_unconfirmed": "die Zahlen bestätigen es nicht",
+        "critic_unchecked": "aus den Zahlen nicht prüfbar",
+        "critic_marked": "Befund {id} als {verdict} markiert. Er zählt für die Trefferquote der Prüfung.",
+        "critic_unknown": "Es gibt keinen Befund {id}.",
+        "critic_real": "zutreffend",
+        "critic_notreal": "nicht zutreffend",
+        "ask_help": ("Frag mich alles zu Pythia: die Autopiloten, die Berichte des Labors, den Markt. Ich lese "
+                     "dieselben Fakten wie der tägliche Kurzbericht und antworte in deiner Sprache. Ich handle "
+                     "nie, ändere keine Einstellungen und zeige keine Geheimnisse. /real ID oder /notreal ID "
+                     "bewertet einen Befund der Strategie-Prüfung."),
+        "ask_refuse_trade": ("Ich beantworte nur Fragen. Ich kann keine Orders platzieren, ändern oder stornieren, "
+                             "keinen Autopiloten starten oder stoppen und keine Einstellung ändern: das bleibt in "
+                             "der App, bei dir."),
+        "ask_refuse_secret": "Schlüssel, Zugangsdaten, Passwörter, Chat-IDs und Serverdetails zeige ich nie.",
+        "ask_limit": "Das war die letzte der {n} Fragen für heute. Frag morgen wieder (UTC).",
+        "ask_failed": "Diesmal keine Antwort ({why}). Es wurde nichts geändert.",
+        "ask_footer": "{model} · {cost} · {n} von {limit} heute",
         "quiet_over": "Ruhezeit vorbei",
         "held_summary": ("{n} Labor-Meldung wurde von {start} bis {end} zurückgehalten.",
                          "{n} Labor-Meldungen wurden von {start} bis {end} zurückgehalten."),
@@ -855,6 +908,12 @@ WORDS_DE = {
     "promoted": "übernommen", "retired": "ausgemustert", "active": "aktiv", "shadow": "Schattenlauf",
     "stopped": "gestoppt", "already shadowed": "schon im Schattenlauf", "duplicate": "Doppelgänger",
     "waiting": "wartet",
+    # the Claude jobs in the weekly report's spend line
+    "brief": "Kurzbericht", "ask": "Fragen", "director": "Forschungsleitung", "critic": "Strategie-Prüfung",
+    "weekly": "Wochenrückblick", "other": "Sonstiges",
+    # what the strategy critic finds
+    "churn": "Hin und Her", "fees": "Gebühren", "sizing": "Positionsgröße", "drift": "Abweichung",
+    "rules": "Regelbruch",
     # trading modes
     "paper": "Paper", "demo": "Demo", "live": "Live",
     # trending risk flags

@@ -209,12 +209,14 @@ def test_the_brief_asks_once_and_keeps_shadow_predictions(lab):
     rc = brief.run(NOW, state=STATE, closes=closes_map(coins), poster=fake, funding_loader=lambda c: None)
     assert rc == 0 and len(fake.calls) == 1
     body = fake.calls[0]["body"]
-    assert body["job"] == "brief" and body["batch"] is True and body["model"] == "claude-haiku-5-5"
+    assert body["job"] == "brief" and body["batch"] is True and body["model"] == "claude-sonnet-5-5"
+    assert body["effort"] == "medium"
     assert body["schema"] == brief.SCHEMA and body["maxTokens"] == brief.MAX_TOKENS
     assert body["system"] == brief.SYSTEM, "the fixed system prompt never changes, so it can be cached"
     assert "PREDICT: BTC, ETH, SOL" in body["user"]
     assert "DOGE" not in body["user"].split("PREDICT:")[1], "a dropped sleeve's coin is not asked"
-    assert "Core (paper, alpaca)" in body["user"]
+    assert "Core (paper, alpaca, running)" in body["user"] and "rules: no stop rules" in body["user"]
+    assert "Gone" not in body["user"], "a stopped autopilot without a stop time is left out"
 
     rows = score.read_predictions()
     assert [r["coin"] for r in rows] == coins
@@ -326,3 +328,128 @@ def test_the_weekly_review_writes_proposals_and_runs_once_a_week(lab, tmp_path):
 def test_the_weekly_review_without_budget_is_not_a_failure(lab, tmp_path):
     assert weekly.run(NOW, state=None, results=tmp_path, poster=Fake((402, {"error": "lifetime cap"}))) == 0
     assert not (notify.reports_root() / "ai" / "weekly.md").exists()
+
+
+# ---------------------------------------------------------------- models per job
+
+def test_a_job_model_and_effort_can_be_changed_from_the_environment(monkeypatch):
+    assert engine.model_for("brief", engine.REVIEW) == "claude-sonnet-5-5"
+    monkeypatch.setenv("PYTHIA_AI_MODEL_BRIEF", "haiku")
+    monkeypatch.setenv("PYTHIA_AI_MODEL_ASK", "claude-opus-5-5")
+    monkeypatch.setenv("PYTHIA_AI_MODEL_CRITIC", "gpt-9")
+    monkeypatch.setenv("PYTHIA_AI_EFFORT_DIRECTOR", "max")
+    monkeypatch.setenv("PYTHIA_AI_EFFORT_ASK", "turbo")
+    assert engine.model_for("brief", engine.REVIEW) == "claude-haiku-5-5"
+    assert engine.model_for("ask", engine.REVIEW) == "claude-opus-5-5"
+    assert engine.model_for("critic", engine.ROUTINE) == "claude-haiku-5-5", "not a Claude model: the default"
+    assert engine.effort_for("director", "high") == "max"
+    assert engine.effort_for("ask", "low") == "low"
+
+
+# ---------------------------------------------------------------- the fact sheet
+
+def test_the_fact_sheet_reads_every_part_and_leaves_out_what_is_missing(lab):
+    rep = notify.reports_root()
+    notify.write_json(rep / "readiness" / "latest.json", {"title": "Real money readiness", "status": "watch",
+                                                          "headline": "none ready, closest Core 5 of 7", "items": []})
+    notify.write_json(rep / "cs2" / "latest.json", {"title": "CS2", "status": "ok", "headline": "3 movers",
+                                                    "items": [{"label": f"Skin {i}", "value": f"+{i} %"} for i in range(9)]})
+    data = notify.data_root()
+    notify.write_json(data / "pumpfun_rt" / "heartbeat.json",
+                      {"t": NOW - 60_000, "connected": {"a": True, "b": False}, "reconnects": 4, "pools": 12})
+    notify.write_json(data / "paper" / "pumpfun_rt" / "state.json",
+                      {"pick": "early_buyers", "open": [{}],
+                       "totals": {"early_buyers": {"n": 4, "wins": 1, "pnl_sol": -0.02, "ret_sum": -0.4}}})
+    stopped = {"state": "stopped", "stoppedMs": NOW - 2 * DAY_MS, "stopReason": "max loss 10 % reached",
+               "config": {"name": "Old", "mode": "demo", "venue": "alpaca", "stop": {"maxLossPct": 10}}}
+    long_ago = {"state": "stopped", "stoppedMs": NOW - 30 * DAY_MS, "config": {"name": "Ancient"}}
+    state = {"autopilots": STATE["autopilots"] + [stopped, long_ago]}
+    sheet = facts.fact_sheet("2026-10-15", ["BTC"], closes_map(["BTC"]), state, ["BTC: last +0.0100 % per 8h"],
+                             flow=[], now_ms=NOW)
+    assert "PRICES" in sheet and "BTC: close" in sheet and "FUNDING" in sheet
+    assert "FLOW AND POSITIONING" not in sheet, "an empty section is left out"
+    assert "Old (demo, alpaca, stopped)" in sheet and "rules: max loss 10 %" in sheet and "max loss 10 % reached" in sheet
+    assert "Ancient" not in sheet
+    assert "[Real money readiness] status watch" in sheet
+    assert "Skin 8 +8 %" in sheet, "a movers feed shows ten items"
+    assert "1 of 2 streams connected" in sheet and "early_buyers: 4 paper trades, 25 % winners" in sheet
+    assert chr(0x2014) not in sheet
+
+
+def test_flow_lines_read_the_flow_lake(lab, tmp_path):
+    import polars as pl
+    flow = tmp_path / "flow"
+    flow.mkdir()
+    day0 = int(datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp() * 1e6)
+    days = [day0 + i * 86_400_000_000 for i in range(44)]
+    pl.DataFrame({"day_us": days * 2, "currency": ["BTC"] * 44 + ["ETH"] * 44,
+                  "open": [1.0] * 88, "high": [1.0] * 88, "low": [1.0] * 88,
+                  "close": [40.0 + i * 0.1 for i in range(44)] + [60.0] * 44}).write_parquet(flow / "dvol.parquet")
+    pl.DataFrame({"day_us": days, "usdt": [1.0] * 44, "usdc": [1.0] * 44,
+                  "total": [200e9 * (1 + 0.001 * i) for i in range(44)]}).write_parquet(flow / "stables.parquet")
+    pl.DataFrame({"ts_us": [days[-1]] * 2, "currency": ["BTC", "BTC"], "days": [7.0, 29.0], "rr25": [0.01, 0.03],
+                  "atm_iv": [0.4, 0.45], "call25_iv": [0.5, 0.5], "put25_iv": [0.5, 0.5], "n_options": [10, 10]}
+                 ).write_parquet(flow / "skew.parquet")
+    btc_day = datetime.fromtimestamp(days[-1] / 1e6, timezone.utc).strftime("%Y-%m-%d")
+    pl.DataFrame({"ts_us": [days[-1] + 23 * 3_600_000_000], "open": [1.0], "high": [1.0], "low": [1.0],
+                  "close": [100_100.0], "volume": [1.0]}).write_parquet(flow / "coinbase_btcusd_1h.parquet")
+    lines = facts.flow_lines(flow, closes={"BTC": [(btc_day, 100_000.0)]})
+    text = "\n".join(lines)
+    assert "BTC DVOL (implied vol index) 44.3, 7d ago 43.6, 30d ago 41.3" in text
+    assert "ETH DVOL" in text
+    assert "BTC options 29d: 25-delta risk reversal +3.0 vol pts, ATM IV 45.0 %" in text, "the tenor nearest 30 days"
+    assert "stablecoin supply $208.6 bn" in text
+    assert "Coinbase premium over Binance at the daily close: +10.0 bps" in text
+    assert facts.flow_lines(tmp_path / "nothing") == []
+
+
+# ---------------------------------------------------------------- the brief in German
+
+def test_a_german_chat_gets_german_lines_and_the_app_keeps_english(lab, monkeypatch):
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "de")
+    coins = ["BTC", "ETH"]
+    a = answer_for(coins)
+    a["json"]["summaryDe"] = ["Markt ruhig.", "Core liegt 1,5 % vorn.", "Finanzierung beobachten."]
+    fake = Fake(a)
+    assert brief.run(NOW, state=None, closes=closes_map(coins), poster=fake, funding_loader=lambda c: None) == 0
+    body = fake.calls[0]["body"]
+    assert body["schema"] == brief.SCHEMA_DE and "summaryDe" in body["user"]
+    assert body["system"] == brief.SYSTEM, "the language goes into the prompt, never the cached system"
+    feed = notify.read_json(notify.reports_root() / "ai_brief" / "latest.json")
+    assert feed["summary"][0] == "Market flat." and feed["summary_de"][0] == "Markt ruhig."
+    assert [ln.text for ln in notify.ai_lines(feed, NOW, "de")][0] == "Markt ruhig."
+    assert [ln.text for ln in notify.ai_lines(feed, NOW, "en")][0] == "Market flat."
+
+
+def test_scores_are_split_by_model():
+    closes = {"BTC": closes_until("2026-10-14")}
+    by_day = dict(closes["BTC"])
+    rows = []
+    for i, model in enumerate(["claude-haiku-5-5"] * 3 + ["claude-sonnet-5-5"] * 2):
+        d = (date(2026, 9, 1) + timedelta(days=i)).isoformat()
+        rows.append({"date": d, "coin": "BTC", "ref_day": d, "ref_close": by_day[d],
+                     "resolve_day": score.resolve_day(d), "p_llm": 0.6, "p_base": 0.5, "p_momentum": 0.5,
+                     "model": model})
+    s = score.score(rows, closes, NOW)
+    assert [(m["model"], m["n"]) for m in s["by_model"]] == [("claude-haiku-5-5", 3), ("claude-sonnet-5-5", 2)]
+
+
+# ---------------------------------------------------------------- the weekly report's spend line
+
+def test_the_weekly_report_says_what_claude_cost_per_job(lab):
+    led = notify.data_root() / "ai" / "ledger.jsonl"
+    led.parent.mkdir(parents=True)
+    rows = [{"ts": NOW - DAY_MS, "job": "ask", "costUsd": 1.2}, {"ts": NOW - DAY_MS, "job": "ask", "costUsd": 0.8},
+            {"ts": NOW - 2 * DAY_MS, "job": "brief", "costUsd": 0.05},
+            {"ts": NOW - 2 * DAY_MS, "job": "brief-direct", "costUsd": 0.05},
+            {"ts": NOW - 3 * DAY_MS, "job": "director", "costUsd": 0.6},
+            {"ts": NOW - 9 * DAY_MS, "job": "ask", "costUsd": 50.0}]
+    led.write_text("\n".join(json.dumps(x) for x in rows) + "\nnot json\n", encoding="utf-8")
+    spend = notify.ai_spend_by_job(NOW - 7 * DAY_MS, NOW)
+    assert spend["ask"] == (2.0, 2) and spend["brief"] == (pytest.approx(0.1), 2), "a direct retry is its job"
+    ln = notify.ai_week_line(NOW, "en")
+    assert ln.lead == "Claude API" and ln.text.startswith("$2.70 this week, $0.39 a day: ask $2.00, director $0.60")
+    de = notify.ai_week_line(NOW, "de")
+    assert de.text.startswith("diese Woche 2,70 $") and "Fragen 2,00 $" in de.text and "Forschungsleitung" in de.text
+    led.unlink()
+    assert notify.ai_week_line(NOW, "en") is None
