@@ -44,14 +44,20 @@ What the stream turned out to be, measured on 2026-10-20:
   dropped by signature; a gap is written only when every connection of a
   program is down at once, and every paper trade or model row that overlaps a
   gap is left out.
-- **Completeness.** A single connection to the default endpoint delivered
-  every curve trade in two 2-minute tests (the reserves chain up trade by
-  trade); `solana-rpc.publicnode.com` delivered about 60 % of the same
-  transactions and is not used. On the collector's record about 1 % of
-  curve slots do not conserve SOL (the trades received for a token in a slot
-  do not add up to its next state); the engine counts them per token, takes
-  the received state, and every paper trade whose hold spans one is marked
-  ("broken"); the report shows each rule's mean with and without them.
+- **Completeness.** In short tests a connection to the default endpoint
+  delivered nearly every curve trade while it was connected (3 to 5 of about
+  2,000 trades' slots did not chain up); `solana-rpc.publicnode.com` delivered
+  about 60 % of the same transactions and is not used. Against a separate
+  capture the collector's record missed 107 of 4,174 trades (2.6 %), most
+  likely around the frequent reconnects. On the record about 1 % of curve
+  slots do not conserve SOL (the trades received for a token in a slot do not
+  add up to its next state), and 31 % of plain curves have at least one such
+  slot; the engine counts them, takes the received state (the next trade's
+  reserves are absolute, so the error does not carry on), and every paper
+  trade whose hold spans one is marked "broken"; the report shows each rule's
+  mean with and without them. They make no material difference so far. A paid
+  or dedicated endpoint would remove most of this; the owner decides whether
+  that is worth it.
 - **Universe.** About 45 % of new tokens are plain SOL curves. The rest are
   quoted in another token (USDC, stock tokens, other pump.fun tokens) or run in
   "mayhem mode" (fee-free trades with virtual reserves that jump without a
@@ -97,7 +103,66 @@ baseline. Details and the bar: the plan.
 
 ## Results so far
 
-FIRST_RESULTS
+**Little data: 2 hours 15 minutes of record**, collected on the PC
+(2026-10-19 23:04 to 2026-10-20 01:19 UTC; the PC then slept), not yet on
+the server. Nothing below is evidence of anything; every rule fails the bar,
+most of them on size alone. The full run is `results/pumpfun_rt.md`.
+
+| | |
+|---|---|
+| Tokens created | 3,459, of which 1,495 on plain SOL curves (43 %) |
+| Curve trades | 315,357 (94,804 on plain curves) |
+| Curves completed | 76 (about 2 % of all tokens, 2 to 5 % of the plain ones) |
+| Gaps | 25, 5.6 minutes in all (restarts of the PC run included) |
+| Slots that did not conserve | 1,093 of the plain curves' trades' slots, 31 % of plain curves have at least one |
+| Split | in sample to 2026-10-20 00:11 UTC, out of sample after |
+
+Out of sample (about 70 minutes), 0.1 SOL a trade, every cost in:
+
+| family | best rule out of sample | trades | mean per trade | median | hit rate | P&L SOL | doubled latency | tripled priority fee |
+|---|---|---|---|---|---|---|---|---|
+| A snipe every token | A_all_x1 | 600 | -4.8 % | -5.1 % | 12 % | -2.88 | -4.5 % | -8.8 % |
+| A snipe, dev buy 0.5 to 5 SOL | A_dev_x1 | 295 | -5.1 % | -5.3 % | 20 % | -1.50 | -5.6 % | -9.1 % |
+| A snipe, creator with a completed curve | A_cmig_x1 | 8 | +7.9 % | -5.0 % | 38 % | +0.06 | +11.1 % | +3.9 % |
+| B pressure at 3 s | B_w3_x1 | 107 | -9.0 % | -11.9 % | 20 % | -0.97 | -9.2 % | -13.0 % |
+| B pressure at 10 s (the in-sample pick) | B_w10_x1 | 42 | -11.4 % | -13.7 % | 31 % | -0.48 | -12.7 % | -15.4 % |
+| C momentum 20 buyers in 60 s | C_20in60_x1 | 41 | -14.3 % | -27.0 % | 22 % | -0.59 | -14.0 % | -18.3 % |
+| D curve past 90 % | D_p90_x2 | 2 | +61.3 % | +61.3 % | 100 % | +0.11 | +60.4 % | +57.3 % |
+| E pool, migration + 60 s | E_d60_x1 | 12 | -2.3 % | +1.4 % | 50 % | -0.03 | +0.3 % | -6.3 % |
+
+What the first hours say, with every caveat of 70 minutes:
+
+- **Sniping pays the costs and little else.** Buying every plain token as
+  soon as its creation is visible, 0.4 to 3 s later, and selling within 15 s
+  loses 5 % per trade with a median of exactly the round-trip cost (1.25 %
+  fee a side, 0.001 SOL priority fee a side on a 0.1 SOL stake, the impact
+  paid twice): most tokens do not move in the first 15 s after we land, and
+  the dev sold during 24 to 58 % of the holds.
+- **Momentum entries are worse, not better.** Waiting for buyers (B, C) means
+  buying after the first wave; the median trade loses 12 to 40 %. The live
+  shadow book ran the default rule `C_20in60_x1` on the stream for the same
+  two hours: 113 closed paper trades, 22 winners, mean -10.9 %, median
+  -25.2 %, -1.23 SOL on 11.3 SOL staked, best +135 %, worst -63 %.
+- **Late-curve and post-migration entries are positive in a handful of
+  trades** (D_p90 2 to 4 trades, A_cmig 8, E_d60 12). That is not a result;
+  these are the families to watch as the record grows.
+- **Failed buys** were common where it matters: 162 buys arrived after the
+  curve had completed, 61 above the 30 % slippage limit.
+- **The model** (rows at 3 s to 5 min, purged walk-forward, 3 to 4 folds) is
+  "not useful" on every label by the registered rule. It does rank "the dev
+  dumps within 60 s" (AUC 0.76, Brier skill +0.19 against the base rate of
+  27 %, but it beats the logistic baseline in 1 of 3 folds only), and the
+  round-trip labels (win rate 4 to 5 %) at AUC 0.64 to 0.71 without beating
+  the base rate's Brier score. The strongest inputs are the last 10 s of net
+  flow, whether the metadata was an IPFS upload (pump.fun's site) or a launch
+  tool's host, the dev buy, the first five buyers' share, and market activity.
+  The registered filter let every entry of the pick through (same 42 trades),
+  so it changed nothing.
+- **Deflation** is not computable under 5 days; the pool now stands at 1,230
+  trials (907 hand, 300 factory, these 23), a noise bar of Sharpe 2.85.
+
+The bar needs 14 days and 300 out-of-sample trades per rule; until the
+collector has run on the server for that long, the report says "too early".
 
 ## What would be needed before anyone even considered real money
 
