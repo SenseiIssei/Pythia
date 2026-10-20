@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { brierGap, capsNote, parseCap, usd, usedShare, vsRows, type AiScores } from "./aiBudget";
+import { brierGap, capsNote, jobSpendTable, parseCap, usd, usedShare, vsRows, type AiScores } from "./aiBudget";
+
+describe("jobSpendTable", () => {
+  it("puts each job's spend on its day, dearest job first, a direct retry under its job", () => {
+    const t = jobSpendTable(
+      [
+        { day: "2026-10-20", job: "ask", usd: 0.4, calls: 12 },
+        { day: "2026-10-19", job: "ask", usd: 0.3, calls: 9 },
+        { day: "2026-10-20", job: "brief", usd: 0.02, calls: 1 },
+        { day: "2026-10-19", job: "brief-direct", usd: 0.03, calls: 1 },
+        { day: "2026-10-18", job: "director", usd: 0.35, calls: 1 },
+        { day: "2026-10-01", job: "director", usd: 9, calls: 1 },
+      ],
+      "2026-10-20",
+    );
+    expect(t.days).toEqual(["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20"]);
+    expect(t.rows.map((r) => r.job)).toEqual(["ask", "director", "brief"]);
+    expect(t.rows[0].perDay.slice(5)).toEqual([0.3, 0.4]);
+    expect(t.rows[2].total).toBeCloseTo(0.05);
+    expect(t.rows[2].calls).toBe(2);
+    expect(t.dayTotals[6]).toBeCloseTo(0.42);
+    expect(t.total).toBeCloseTo(1.1, 6);
+  });
+  it("is empty for an engine that does not send the field", () => {
+    const t = jobSpendTable(undefined, "2026-03-01", 3);
+    expect(t.days).toEqual(["2026-02-27", "2026-02-28", "2026-03-01"]);
+    expect(t.rows).toEqual([]);
+    expect(t.total).toBe(0);
+  });
+});
 
 describe("usedShare", () => {
   it("is the share of the cap spent, clamped", () => {

@@ -24,8 +24,11 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:30 | learning loop: demo-fill costs, forward evidence, monthly sweep refresh, weekly vol and monthly M2 retrain as challengers, nightly digest (`lab.ops.learn`, seconds; up to a few hours when a retrain is due) | `/etc/cron.d/pythia-learn` |
 | 07:15 | model zoo: retrains the zoo models that are due, promotes a challenger only if better out of sample, shadow forecasts and scores, drift, the Models page report; posts promotions and drift (`lab.models.train --due`, about 5 minutes; longer on Sundays when M8, M8q and M10 retrain) | `/etc/cron.d/pythia-models` |
 | 07:05 | Pokemon cards: price snapshot (`lab.collect.pokemon`, 15 to 45 minutes keyless, the API is slow and retried), then studies, fair value, forecasts, the paper collection and card alerts (`lab.pokemon.daily`, seconds at first, up to about 20 minutes with a year of history). Data and play money only | `/etc/cron.d/pythia-pokemon` |
-| 06:20 | AI brief: one Haiku call through the autopilot engine's metered `POST /api/ai/complete` (batch, half price), 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule; three lines for the digest (`lab.ai.brief`, minutes; see `docs/AI.md`) | jobs.yaml `ai-brief` |
+| 06:20 | AI brief: one Sonnet call through the autopilot engine's metered `POST /api/ai/complete` (batch, half price) over the full fact sheet, 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule; three lines for the digest, in German too when the chat is German (`lab.ai.brief`, minutes; see `docs/AI.md`) | jobs.yaml `ai-brief` |
+| 06:40 | AI strategy critic: one Haiku call per autopilot (batch), its last 24 hours of orders against its rules; a card only for findings of medium or high severity, every finding logged and scored (`lab.ai.critic`, minutes) | jobs.yaml `ai-critic` |
 | Sun 09:00 | AI weekly review: one Sonnet call (batch) over every study and live result, three proposed experiments in `reports/ai/weekly.md`, never run by anything (`lab.ai.weekly`) | jobs.yaml `ai-weekly` |
+| Sun 11:00 | AI research director: one Opus call (effort high, batch) over every study summary and the trial ledger, 3 to 5 pre-registration drafts in `/opt/pythia-lab/proposals/` and a card, never run by anything (`lab.ai.director`, up to an hour) | jobs.yaml `ai-director` |
+| always | the owner's questions in Telegram, answered by Sonnet from the same fact sheet, at most 40 a day (`lab.ai.chat`; reads only) | container `pythia-ai-chat`, see "Questions in Telegram" |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
@@ -240,6 +243,46 @@ Try the study by hand without posting:
 ```bash
 docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.study --dry-run
 ```
+
+## Questions in Telegram
+
+`lab.ai.chat` lets the owner ask Pythia questions in the same Telegram chat
+the alerts go to. It reads only: the engine's `/api/state`, the lab's reports
+and the AI jobs' files, and it answers through the engine's metered
+`POST /api/ai/complete` (Sonnet 5.5, `job` "ask" in the ledger), so every
+answer is under the same budget caps as everything else. It cannot place,
+change or cancel an order, touch an autopilot or change a setting; a message
+asking for that, or for a key, token, password or server detail, is refused
+(`docs/AI.md`, "Questions in Telegram").
+
+It is a long-running container, not a job: it long-polls the bot's
+`getUpdates` and takes messages from `PYTHIA_TELEGRAM_CHAT_ID` only. Nothing
+else may consume the bot's updates (no webhook set on the bot, no second
+poller), or the two take each other's messages. It needs the engine on
+`127.0.0.1:8788`, hence the host network:
+
+```bash
+docker run -d --name pythia-ai-chat --restart unless-stopped --network host --cpus 0.5 --memory 768m \
+  --env-file /etc/pythia/alerts.env \
+  --log-opt max-size=10m --log-opt max-file=3 \
+  -v /srv/pythia-data:/data -v /opt/pythia-lab:/app \
+  pythia-lab python -m lab.ai.chat
+```
+
+After `research/ops/deploy_lab.sh`, `docker restart pythia-ai-chat` loads the
+new code. Logs: `docker logs --tail 50 pythia-ai-chat` (one line per answer
+with its cost, never the question text or the token). Files under
+`/srv/pythia-data/ai/`: `chat.jsonl` (every question, its answer, model and
+cost), `chat_state.json` (the update offset, saved before answering, so a
+restart never answers twice), `chat_heartbeat.json` (every 5 minutes).
+
+Settings (in `/etc/pythia/alerts.env` or with `-e`): `PYTHIA_AI_ASK_PER_DAY`
+(40 questions a UTC day; refusals, /help and /real do not count),
+`PYTHIA_AI_MODEL_ASK` (haiku, sonnet, opus), `PYTHIA_AI_EFFORT_ASK` (medium).
+In the chat: `/help`; `/real ID` and `/notreal ID` score a finding of the
+strategy critic. Without a container, `python -m lab.ai.chat --once` answers
+what is waiting and exits; a `*/1` cron line of that works too, at the cost
+of a container start a minute.
 
 ## Health check
 

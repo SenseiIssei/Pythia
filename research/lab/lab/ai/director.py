@@ -147,9 +147,9 @@ def study_summary(text: str, chars: int = STUDY_CHARS) -> tuple[str, str]:
     title = next((ln.lstrip("# ").strip() for ln in lines if ln.startswith("#")), "")
     sections: list[tuple[str, list[str]]] = [("", [])]
     for ln in lines:
-        if re.match(r"^#{1,4}\s", ln):
+        if re.match(r"^#{2,4}\s", ln):
             sections.append((ln.lstrip("# ").strip(), []))
-        else:
+        elif not re.match(r"^#\s", ln):
             sections[-1][1].append(ln)
 
     def body(rows: list[str]) -> str:

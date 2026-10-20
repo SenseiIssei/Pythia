@@ -48,7 +48,7 @@ from ..ops import i18n, notify
 from . import brief, critic, engine, facts, score
 
 DEFAULT_MODEL = engine.REVIEW
-DEFAULT_EFFORT = "low"
+DEFAULT_EFFORT = "medium"
 MAX_TOKENS = 6000
 PER_DAY = 40
 FACTS_TTL_S = 15 * 60
@@ -99,7 +99,9 @@ SECRET = re.compile(
     r"credential|zugangsdaten|schlüssel|schluessel",
     re.IGNORECASE)
 GERMAN = re.compile(r"[äöüß]|\b(?:ich|ist|und|nicht|wie|warum|wieso|weshalb|heute|gestern|der|das|mein|"
-                    r"meine|wird|wurde|gibt|kannst|bitte|danke|lief|welche|welcher|haben|hat|sind)\b", re.IGNORECASE)
+                    r"meine|wird|wurde|gibt|kannst|bitte|danke|lief|welche|welcher|haben|sind|alles|sofort|"
+                    r"zeig|zeige|mir|mit|noch|schon|jetzt|gerade|seit|wieviel|kaufe|verkaufe|stoppe|starte|"
+                    r"setze|ändere|aendere|erhöhe|erhoehe|senke)\b", re.IGNORECASE)
 
 
 def ai_dir() -> Path:
@@ -207,10 +209,23 @@ def extra_sections(now_ms: int) -> list[tuple[str, list[str]]]:
     return out
 
 
+_CLOSES: dict[tuple, dict] = {}
+
+
+def daily_closes(coins: list[str], now_ms: int) -> dict[str, score.Closes]:
+    """Daily closes end yesterday, so they are fetched once a UTC day, not at
+    every rebuild of the sheet (each fetch lists and downloads the archive)."""
+    key = (day_of(now_ms), tuple(sorted(set(coins))))
+    if key not in _CLOSES:
+        _CLOSES.clear()
+        _CLOSES[key] = score.closes_for(set(coins))
+    return _CLOSES[key]
+
+
 def build_sheet(now_ms: int) -> str:
     state = notify.engine_state()
     coins = brief.pick_coins(state)
-    closes = score.closes_for(set(coins))
+    closes = daily_closes(coins, now_ms)
     usable = [c for c in coins if len(closes.get(c) or []) >= 31]
     return facts.fact_sheet(day_of(now_ms), usable, closes, state, facts.funding_lines(usable), now_ms=now_ms,
                             extra=extra_sections(now_ms))
@@ -369,6 +384,7 @@ def run(once: bool = False) -> int:
     sheet = Sheet()
     offset = (notify.read_json(state_path()) or {}).get("offset")
     notify.say(f"listening to the owner's chat, at most {per_day()} questions a day")
+    beat = 0.0
     while True:
         updates: list[dict] = []
         try:
@@ -376,6 +392,12 @@ def run(once: bool = False) -> int:
             nxt = step(sheet, updates)
             if nxt is not None:
                 offset = nxt
+            if time.time() - beat >= 300:
+                # Proof of life for a look from outside: when it last polled.
+                beat = time.time()
+                notify.write_json(ai_dir() / "chat_heartbeat.json",
+                                  {"t": notify.clock_ms(), "offset": offset, "asked_today": asked_today(notify.clock_ms()),
+                                   "per_day": per_day()})
         except Exception as e:  # noqa: BLE001 - one bad update never stops the service
             notify.say(f"chat loop: {type(e).__name__}: {e}", err=True)
             time.sleep(5)
