@@ -261,6 +261,21 @@ pub struct Spend {
     pub in_flight_usd: f64,
 }
 
+/// One job's spend on one day, for the app's cost table.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobDaySpend {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    /// The ledger's `job` (`brief`, `director`, `critic`, `ask`, ...).
+    pub job: String,
+    pub usd: f64,
+    pub calls: u64,
+}
+
+/// How many days of per-job spend the app is given.
+pub const JOB_DAYS: u32 = 14;
+
 /// One step of the lifetime alert.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +323,8 @@ struct Inner {
     calls: u64,
     /// `YYYY-MM-DD` → (USD, calls).
     by_day: BTreeMap<String, (f64, u64)>,
+    /// (`YYYY-MM-DD`, job) → (USD, calls): what each job spends a day.
+    by_job_day: BTreeMap<(String, String), (f64, u64)>,
     recent: VecDeque<Entry>,
     reserved: f64,
     /// Caps when there is no folder to keep them in.
@@ -433,6 +450,7 @@ impl Budget {
         i.lifetime = 0.0;
         i.calls = 0;
         i.by_day.clear();
+        i.by_job_day.clear();
         i.recent.clear();
     }
 
@@ -440,7 +458,12 @@ impl Budget {
         let cost = if e.cost_usd.is_finite() && e.cost_usd > 0.0 { e.cost_usd } else { 0.0 };
         i.lifetime += cost;
         i.calls += 1;
-        let d = i.by_day.entry(day_of(e.ts)).or_default();
+        let day = day_of(e.ts);
+        let job = if e.job.trim().is_empty() { "other".to_string() } else { e.job.trim().to_string() };
+        let j = i.by_job_day.entry((day.clone(), job)).or_default();
+        j.0 += cost;
+        j.1 += 1;
+        let d = i.by_day.entry(day).or_default();
         d.0 += cost;
         d.1 += 1;
         i.recent.push_back(e);
@@ -478,6 +501,21 @@ impl Budget {
         let mut i = self.inner.lock().unwrap();
         self.refresh(&mut i);
         i.recent.iter().rev().take(n).cloned().collect()
+    }
+
+    /// What each job spent on each of the last `days` days up to `now`
+    /// (UTC), oldest day first, jobs by name within a day. Days without a
+    /// call are left out.
+    pub fn by_job_day(&self, now: i64, days: u32) -> Vec<JobDaySpend> {
+        let mut i = self.inner.lock().unwrap();
+        self.refresh(&mut i);
+        let last = day_of(now);
+        let first = day_of(now - (days.max(1) as i64 - 1) * 86_400_000);
+        i.by_job_day
+            .range((first, String::new())..)
+            .take_while(|((d, _), _)| *d <= last)
+            .map(|((day, job), (usd, calls))| JobDaySpend { day: day.clone(), job: job.clone(), usd: *usd, calls: *calls })
+            .collect()
     }
 
     /// The cap that would refuse a call of `usd` now, if any.
@@ -781,6 +819,8 @@ pub struct BudgetView {
     /// Which cap refuses a cheap call right now, if any.
     pub refusing: Option<String>,
     pub recent: Vec<Entry>,
+    /// What each job spent a day over the last [`JOB_DAYS`] days.
+    pub by_job_day: Vec<JobDaySpend>,
     pub prices_as_of: String,
     pub prices_estimate: bool,
     /// Whether the ledger is kept on disk.
@@ -801,6 +841,7 @@ impl Budget {
             spend,
             refusing,
             recent: self.recent(20),
+            by_job_day: self.by_job_day(now, JOB_DAYS),
             prices_as_of: prices().as_of.clone(),
             prices_estimate: prices().estimate,
             persisted: self.dir.is_some(),

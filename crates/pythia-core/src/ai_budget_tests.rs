@@ -320,6 +320,39 @@ fn the_view_says_what_is_left_and_what_refuses() {
     assert!(v.refusing.as_deref().unwrap_or_default().contains("daily"));
     assert!(v.persisted);
     assert_eq!(v.recent.len(), 1);
+    assert_eq!(v.by_job_day.len(), 1);
+    assert_eq!((v.by_job_day[0].day.as_str(), v.by_job_day[0].job.as_str()), ("2026-10-15", "brief"));
+}
+
+#[test]
+fn spend_per_job_and_day_covers_the_last_days_only() {
+    let d = tmp();
+    let job = |ts: i64, job: &str, cost: f64| Entry { job: job.into(), ..entry(ts, cost) };
+    write_ledger(
+        &d,
+        &[
+            job(NOW - 20 * DAY, "brief", 9.0),
+            job(NOW - DAY, "brief", 0.05),
+            job(NOW - DAY, "ask", 0.10),
+            job(NOW - DAY, "ask", 0.15),
+            job(NOW, "director", 0.40),
+            job(NOW, "", 0.01),
+        ],
+    );
+    let b = Budget::open(Some(d.clone()), "test");
+    let rows = b.by_job_day(NOW, JOB_DAYS);
+    let got: Vec<(&str, &str, u64)> = rows.iter().map(|r| (r.day.as_str(), r.job.as_str(), r.calls)).collect();
+    assert_eq!(
+        got,
+        vec![("2026-10-14", "ask", 2), ("2026-10-14", "brief", 1), ("2026-10-15", "director", 1), ("2026-10-15", "other", 1)],
+        "20 days ago is outside the window, an unnamed job is 'other'"
+    );
+    assert!((rows[0].usd - 0.25).abs() < 1e-12);
+    // A line appended by another process shows up on the next look.
+    let other = Budget::open(Some(d), "other");
+    other.reserve(0.01, NOW).unwrap().record("critic", "claude-haiku-5-5", "", usage(1_000, 100), true, true, NOW);
+    assert!(b.by_job_day(NOW, 1).iter().any(|r| r.job == "critic"));
+    assert_eq!(b.by_job_day(NOW, 1).len(), 3, "one day: today only");
 }
 
 // ── calls, with a mocked API ────────────────────────────────────────────────
