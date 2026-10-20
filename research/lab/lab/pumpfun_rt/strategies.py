@@ -116,9 +116,11 @@ def _build() -> list[Rule]:
 
 RULES: list[Rule] = _build()
 BY_NAME = {r.name: r for r in RULES}
-# The model filter on the in-sample pick is one more trial.
+# The model filter on the in-sample pick is one more trial; the pipeline strategies
+# (pipeline.STRATEGIES, plan addendum 2) are eight more.
 MODEL_FILTER_TRIALS = 1
-N_TRIALS = len(RULES) + MODEL_FILTER_TRIALS
+PIPELINE_TRIALS = 8
+N_TRIALS = len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS
 # The rule the shadow book runs until the study has picked one (pick.json).
 DEFAULT_PICK = "C_20in60_x1"
 # The model filter: enter only when the calibrated probability that this entry,
