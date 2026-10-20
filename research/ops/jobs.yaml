@@ -161,7 +161,6 @@ jobs:
     timeout: 2h
     lock: heavy
     lock_wait: 3h
-    enabled: false
 
   - name: forward
     description: forward report, every paper book and autopilot against its backtest
@@ -347,7 +346,6 @@ jobs:
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 2g}
     timeout: 75m
-    enabled: false
 
   - name: news-collect
     description: crypto headlines from publisher RSS feeds (titles only), kept per UTC day for the news sentiment
@@ -356,7 +354,6 @@ jobs:
     resources: {cpus: 1, memory: 512m}
     timeout: 10m
     alert: false
-    enabled: false
 
   - name: ai-news
     description: daily Claude news sentiment (Haiku, batch) per Alpaca coin from yesterday's headlines, tested against M2 on its ranking days
@@ -366,7 +363,6 @@ jobs:
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 45m
-    enabled: false
 
   # ---------------------------------------------------------------- watchers and collectors
   - name: listings
