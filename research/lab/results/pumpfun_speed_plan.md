@@ -144,6 +144,26 @@ creation transaction's index, the number of same-slot buyers ahead of a
 latecomer, and the distribution of the highest same-slot bid (priority fee
 plus tip) of a sniper.
 
+## Addendum 1 (2026-10-21, after the first run): the tier `S0r`
+
+Written after the first computation of the 120 trials and of the block
+sample, and disclosed as such. The block sample showed that about half of the
+outside buyers in a creation slot stand in an unbroken run of transactions
+directly behind the creation (the creator's own bundle, or bundles that
+include the creator's transaction). Nobody can step in front of that run with
+a transaction of his own, and this project sends no bundle that contains
+anyone else's transaction, so `S0f` is out of our reach by construction. The
+reachable front is right behind that run.
+
+- **`S0r`**: the creation slot, right after the creation transaction and the
+  unbroken run of the token's trades behind it, ahead of the later same-slot
+  buyers. The run is read from the record: the token's trades in the creation
+  slot whose collector transaction numbers follow the creation's without a gap
+  (the stream delivers a slot's transactions in block order; checked against
+  the block sample's own indices). Sales as `S0f`.
+- 5 filters x 3 exits = **15 more trials** (135 in all), added to
+  `strategies.N_TRIALS`. Everything else as above.
+
 ## 5. The fast path (engineering, no trial)
 
 Pre-built transaction templates per new mint (every account derived from the
