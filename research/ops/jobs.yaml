@@ -364,7 +364,7 @@ jobs:
     lock_wait: 5m
 
   # The real-time pump.fun collector is not a scheduled job but the always-on container
-  # pythia-pumpfun-rt (research/ops/README.md, "Real-time pump.fun lab"). These two watch it and use it.
+  # pythia-pumpfun-rt (research/ops/README.md, "Real-time pump.fun lab"). These jobs watch it and use it.
   - name: pumpfun-rt-health
     description: real-time pump.fun collector wrote curve trades and its heartbeat in the last 10 minutes
     schedule: "*/10 * * * *"
@@ -590,6 +590,8 @@ backup:
     - trials
     - factory
     - ai
+    - live
+    - pumpfun_rt/categories
     - reports/forward/evidence.json
     - reports/forward/backtest
   # By file or folder name: caches the jobs rebuild (the zoo's panels, the
