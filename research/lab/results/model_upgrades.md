@@ -27,7 +27,8 @@ and three jobs are added disabled.
 ## The pool
 
 Sharpe trials: 930 hand trials before this study, 600 in the factory ledger,
-18 here (c2): **1,548**, a noise bar of Sharpe 2.69. The IC and loss tests
+18 here (c2): **1,548**, a noise bar of Sharpe 2.69. The next study starts
+from 948 hand trials. The IC and loss tests
 (a: 3, b: 2, c1: 1, d: 1) are corrected inside their parts as registered.
 The addendum to a (below) looked at 7 variants after the fact; it is not a
 result and only its forward record will count.

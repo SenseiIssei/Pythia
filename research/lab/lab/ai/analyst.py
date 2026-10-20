@@ -399,8 +399,10 @@ def run(now_ms: int | None = None, dry_run: bool = False, force: bool = False, o
                 notify.say(f"\n[dry run] about {(len(SYSTEM) + len(prompt)) // 4:,} input tokens, at most {MAX_TOKENS} out")
                 return 0
             try:
-                ans = engine.complete("analyst", SYSTEM, prompt, MAX_TOKENS, model=engine.REVIEW, schema=SCHEMA,
-                                      effort="medium", batch=True, batch_wait_sec=BATCH_WAIT_SEC, poster=poster)
+                ans = engine.complete("analyst", SYSTEM, prompt, MAX_TOKENS,
+                                      model=engine.model_for("analyst", engine.REVIEW), schema=SCHEMA,
+                                      effort=engine.effort_for("analyst", "medium"), batch=True,
+                                      batch_wait_sec=BATCH_WAIT_SEC, poster=poster)
             except engine.AiError as e:
                 notify.say(f"no analyst call: {e}", err=e.kind not in ("budget", "nokey"))
                 return 0 if e.kind in ("budget", "nokey") else 1

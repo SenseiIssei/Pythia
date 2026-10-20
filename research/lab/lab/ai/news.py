@@ -231,7 +231,8 @@ def score_day(day: str, now: int, dry_run: bool = False, poster=None) -> tuple[i
         notify.say(SYSTEM + "\n\n" + prompt)
         notify.say(f"\n[dry run] about {(len(SYSTEM) + len(prompt)) // 4:,} input tokens, at most {MAX_TOKENS} out")
         return 0, 0.0
-    ans = engine.complete("news", SYSTEM, prompt, MAX_TOKENS, model=engine.ROUTINE, schema=SCHEMA, effort="low",
+    ans = engine.complete("news", SYSTEM, prompt, MAX_TOKENS, model=engine.model_for("news", engine.ROUTINE),
+                          schema=SCHEMA, effort=engine.effort_for("news", "low"),
                           batch=True, batch_wait_sec=BATCH_WAIT_SEC, poster=poster)
     got = parse_answer(ans.get("json"), cs)
     cost = float(ans.get("costUsd") or 0.0)
