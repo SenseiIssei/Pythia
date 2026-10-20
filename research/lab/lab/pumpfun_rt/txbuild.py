@@ -184,16 +184,45 @@ def create_ata(payer: str, owner: str, mint: str, token_program: str = TOKEN) ->
                             (mint, False, False), (SYSTEM, False, False), (token_program, False, False)], bytes([1]))
 
 
-def close_account(account: str, dest: str, owner: str, token_program: str = TOKEN) -> Ix:
-    return Ix(token_program, [(account, False, True), (dest, False, True), (owner, True, False)], bytes([9]))
+def close_own(account: str, user: str, token_program: str = TOKEN) -> Ix:
+    """Close one of the wallet's own token accounts; the rent goes back to the wallet itself."""
+    return Ix(token_program, [(account, False, True), (user, False, True), (user, True, False)], bytes([9]))
 
 
-def transfer(src: str, dst: str, lamports: int) -> Ix:
-    return Ix(SYSTEM, [(src, True, True), (dst, False, True)], struct.pack("<IQ", 2, lamports))
+def wrap_sol(user: str, lamports: int) -> Ix:
+    """Move SOL into the wallet's OWN wrapped-SOL account (the pool trades in wrapped SOL). There is
+    no other transfer here: the destination is derived from the wallet, never given."""
+    return Ix(SYSTEM, [(user, True, True), (ata(user, WSOL, TOKEN), False, True)], struct.pack("<IQ", 2, lamports))
 
 
 def sync_native(account: str) -> Ix:
     return Ix(TOKEN, [(account, False, True)], bytes([17]))
+
+
+ALLOWED_PROGRAMS = {COMPUTE_BUDGET, ATA_PROGRAM, TOKEN, TOKEN_2022, SYSTEM, PUMP, PUMP_AMM}
+
+
+def check_own(user: str, ixs: list[Ix]) -> None:
+    """Refuse anything but a buy or a sale for the wallet itself: only the programs a trade needs,
+    a system instruction only as the wrap into the wallet's own wrapped-SOL account, and a token
+    account closed only back to the wallet. Raises ValueError otherwise (nothing is signed)."""
+    for ix in ixs:
+        if ix.program not in ALLOWED_PROGRAMS:
+            raise ValueError(f"program {ix.program[:8]} is not part of a plain buy or sale")
+        if ix.program == SYSTEM:
+            ok = (len(ix.accounts) == 2 and ix.accounts[0][0] == user and ix.accounts[1][0] == ata(user, WSOL, TOKEN)
+                  and ix.data[:4] == struct.pack("<I", 2))
+            if not ok:
+                raise ValueError("a system instruction that is not the wrap into the wallet's own account")
+        if ix.program in (TOKEN, TOKEN_2022) and ix.data[:1] == bytes([9]):
+            if ix.accounts[1][0] != user or ix.accounts[2][0] != user:
+                raise ValueError("a token account closed to someone else")
+        if ix.program in (TOKEN, TOKEN_2022) and ix.data[:1] not in (bytes([9]), bytes([17])):
+            raise ValueError("a token instruction other than close or sync")
+        if ix.program == ATA_PROGRAM and ix.data != bytes([1]):
+            raise ValueError("an associated-account instruction other than create")
+        if ix.program in (PUMP, PUMP_AMM) and ix.data[:8] not in (discriminator("buy"), discriminator("sell")):
+            raise ValueError("a program instruction other than buy or sell")
 
 
 # ---------------------------------------------------------------- the IDL
@@ -399,7 +428,7 @@ def pump_sell(user: str, c: CurveInfo, tokens: int, min_out_l: int, priority_l: 
     data = (idl.disc("sell") if idl else discriminator("sell")) + struct.pack("<QQ", tokens, min_out_l)
     ixs = budget(UNITS, priority_l) + [Ix(PUMP, _pump_accounts("sell", user, c, idl), data)]
     if close:                                              # the rent of the token account comes back
-        ixs.append(close_account(ata(user, c.mint, c.token_program), user, user, c.token_program))
+        ixs.append(close_own(ata(user, c.mint, c.token_program), user, c.token_program))
     return ixs
 
 
@@ -407,9 +436,9 @@ def amm_buy(user: str, p: PoolInfo, tokens: int, max_quote_l: int, priority_l: i
     wsol = ata(user, WSOL, TOKEN)
     data = (idl.disc("buy") if idl else discriminator("buy")) + struct.pack("<QQ", tokens, max_quote_l) + b"\x00"
     return budget(UNITS + 100_000, priority_l) + [
-        create_ata(user, user, WSOL, TOKEN), transfer(user, wsol, max_quote_l), sync_native(wsol),
+        create_ata(user, user, WSOL, TOKEN), wrap_sol(user, max_quote_l), sync_native(wsol),
         create_ata(user, user, p.base_mint, p.base_token_program),
-        Ix(PUMP_AMM, _amm_accounts("buy", user, p, idl), data), close_account(wsol, user, user, TOKEN)]
+        Ix(PUMP_AMM, _amm_accounts("buy", user, p, idl), data), close_own(wsol, user, TOKEN)]
 
 
 def amm_sell(user: str, p: PoolInfo, tokens: int, min_out_l: int, priority_l: int, close: bool,
@@ -418,7 +447,15 @@ def amm_sell(user: str, p: PoolInfo, tokens: int, min_out_l: int, priority_l: in
     data = (idl.disc("sell") if idl else discriminator("sell")) + struct.pack("<QQ", tokens, min_out_l)
     ixs = budget(UNITS + 100_000, priority_l) + [create_ata(user, user, WSOL, TOKEN),
                                                  Ix(PUMP_AMM, _amm_accounts("sell", user, p, idl), data),
-                                                 close_account(wsol, user, user, TOKEN)]
+                                                 close_own(wsol, user, TOKEN)]
     if close:
-        ixs.append(close_account(ata(user, p.base_mint, p.base_token_program), user, user, p.base_token_program))
+        ixs.append(close_own(ata(user, p.base_mint, p.base_token_program), user, p.base_token_program))
     return ixs
+
+
+def round_trip(buy: list[Ix], sell: list[Ix], units: int = 3 * UNITS) -> list[Ix]:
+    """A buy followed by the sale of what it bought, in one message, for the dry run only
+    (live_exec simulate): the program checks both against the real accounts and nothing is sent.
+    Each side's compute budget is dropped for one budget over both (a duplicate is an error)."""
+    body = [ix for ix in buy + sell if ix.program != COMPUTE_BUDGET]
+    return [compute_limit(units)] + body
