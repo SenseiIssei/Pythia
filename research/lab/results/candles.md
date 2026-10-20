@@ -39,6 +39,15 @@ What the numbers say beyond the verdict:
   sample, ahead of random entries) are flat or negative out of sample and do
   not survive double costs.
 
+## The pool, with the studies run in parallel
+
+This study ran on 948 hand trials, 600 factory genomes and its own 47
+(1,595). X16 (`equities_training`, 120 trials) was published while it ran;
+counting it, the hand count after X15 is **1,115** (948 + 120 + 47). A larger
+pool only lowers a deflated p, and every part B rule is already at 0.00;
+part D is deflated over its own 5 trials as registered. X14 (pump.fun early
+exits, 58 trials) keeps its own pool as it reports.
+
 ## What is wired
 
 - Nothing in the lab: no shadow signal, no M2 feature, no breakout variant,
