@@ -99,6 +99,19 @@ def markdown(res: dict) -> str:
                       f"{s['fees']:,.0f}", _f(s.get("deflated_p"), 2)])
     out.append(table(["Forecast", "Margin", "Spread", "Trades", "Hit rate", "Mean per trade (95 %)", "P&L $",
                       "Return", "Sharpe", "Max DD", "Fees $", "Deflated p"], srows))
+    if res.get("checks"):
+        out.append("\n**Addendum checks** (declared after the test run, counted as trials):\n")
+        out.append(table(["Forecast", "Check", "Trades", "Hit rate", "Mean per trade (95 %)", "Return", "Sharpe",
+                          "Max DD", "Deflated p"],
+                         [[c["book"][2:], c["check"], c["trades"], _p(c["hit_rate"]),
+                           f"{_p(c['mean_ret'], 1, True)} ({_p(c['mean_ret_lo'], 1, True)} to "
+                           f"{_p(c['mean_ret_hi'], 1, True)})", _p(c["total_return"], 1, True), _f(c["sharpe"], 2),
+                           _p(c["max_dd"]), _f(c.get("deflated_p"), 2)] for c in res["checks"]]))
+        hs = res.get("half_spreads") or {}
+        if hs.get("by_age"):
+            out.append("\nMedian half-spread of the live record by market age: "
+                       + ", ".join(f"{a} {v * 100:.2f} cents ({hs['n_age'].get(a, 0):,} book sides)"
+                                   for a, v in hs["by_age"].items()) + ".\n")
     pl_ = res["pool"]
     out.append(f"\nPool: {pl_['hand_trials']:,} hand trials, {pl_['factory_trials']:,} factory trials, "
                f"{pl_['mine']} here: {pl_['n_total']:,} (noise bar Sharpe {pl_['sr0_annual']:.2f}).\n")

@@ -31,7 +31,7 @@ MARGINS = (0.02, 0.03, 0.05)
 HIST_MAX_USD = 500.0
 MIN_HALF_SPREAD = 0.005
 PRIOR_HAND = 1115          # hand trials after X15 with X16 (results/candles.md)
-HERE_TRIALS = 8            # 6 historical rule variants + 2 live books
+HERE_TRIALS = 12           # 6 historical rule variants, 4 addendum checks, 2 live books
 LOSS_TESTS = 4             # recal, gbm, Claude, ensemble against the market
 EPS = 0.001
 
@@ -124,7 +124,7 @@ def panel(refresh: bool = False) -> tuple[pl.DataFrame, pl.DataFrame]:
     if mk is None or hist is None:
         raise SystemExit("no resolved set: run python -m lab.polymarket.collect --history first")
     cache = store.path("cache", "panel.parquet")
-    stamp = f"{mk.height}-{hist.height}"
+    stamp = f"v{P.VERSION}-{mk.height}-{hist.height}"
     meta = store.read_json(store.path("cache", "panel.json"), {}) or {}
     if not refresh and cache.exists() and meta.get("stamp") == stamp:
         return pl.read_parquet(cache), mk
@@ -371,34 +371,58 @@ def half_spreads() -> dict:
     yes = bk.filter(pl.col("side") == "yes").with_columns(
         pl.col("bid_px").list.first().alias("b"), pl.col("ask_px").list.first().alias("a"))
     yes = yes.filter(pl.col("a").is_not_null() & pl.col("b").is_not_null() & (pl.col("a") > pl.col("b")))
-    yes = yes.join(lv.select(pl.col("id").alias("market_id"), "category", "ts_ms").unique(["market_id", "ts_ms"]),
-                   on=["market_id", "ts_ms"], how="left")
+    yes = yes.join(lv.select(pl.col("id").alias("market_id"), "category", "ts_ms", "created_ms")
+                   .unique(["market_id", "ts_ms"]), on=["market_id", "ts_ms"], how="left")
     mid = ((yes["a"] + yes["b"]) / 2).to_numpy()
     hs = ((yes["a"] - yes["b"]) / 2).to_numpy()
+    age = ((yes["ts_ms"] - yes["created_ms"].fill_null(0)) / 86_400_000).to_numpy().astype(float)
     b = P.price_bucket(mid)
-    cats = yes["category"].fill_null("other").to_list()
-    out: dict = {"by_bucket": {}, "by_bucket_cat": {}, "n": int(len(hs))}
+    cats = np.array(yes["category"].fill_null("other").to_list())
+    ages = np.array([age_label(a) for a in age])
+    out: dict = {"by_bucket": {}, "by_bucket_cat": {}, "by_bucket_age": {}, "n": int(len(hs)),
+                 "by_age": {a: float(np.median(hs[ages == a])) for a in AGE_LABELS if (ages == a).sum() >= 5},
+                 "n_age": {a: int((ages == a).sum()) for a in AGE_LABELS}}
     for i, lab in enumerate(P.PRICE_LABELS):
         k = b == i
         if k.sum() >= 5:
             out["by_bucket"][lab] = float(np.median(hs[k]))
-        for c in set(cats):
-            kc = k & np.array([x == c for x in cats])
+        for c in set(cats.tolist()):
+            kc = k & (cats == c)
             if kc.sum() >= 10:
                 out["by_bucket_cat"][f"{lab}|{c}"] = float(np.median(hs[kc]))
+        for a in AGE_LABELS:
+            ka = k & (ages == a)
+            if ka.sum() >= 5:
+                out["by_bucket_age"][f"{lab}|{a}"] = float(np.median(hs[ka]))
     return out
 
 
-def hs_for(hs: dict, p: float, cat: str, mult: float = 1.0) -> float:
+AGE_LABELS = ("<1d", "1-7d", ">7d")
+
+
+def age_label(days: float) -> str:
+    return "<1d" if days < 1 else "1-7d" if days < 7 else ">7d"
+
+
+def hs_for(hs: dict, p: float, cat: str, mult: float = 1.0, age_days: float | None = None) -> float:
     lab = P.PRICE_LABELS[int(P.price_bucket([p])[0])]
-    v = hs.get("by_bucket_cat", {}).get(f"{lab}|{cat}", hs.get("by_bucket", {}).get(lab, 0.01))
+    base = hs.get("by_bucket", {}).get(lab, 0.01)
+    if age_days is not None:
+        a = age_label(age_days)
+        v = hs.get("by_bucket_age", {}).get(f"{lab}|{a}", hs.get("by_age", {}).get(a, base))
+    else:
+        v = hs.get("by_bucket_cat", {}).get(f"{lab}|{cat}", base)
     return max(MIN_HALF_SPREAD, v) * mult
 
 
-def simulate(oos: pl.DataFrame, full: pl.DataFrame, col: str, margin: float, hs: dict, mult: float = 1.0) -> dict:
-    """The rule on the test states, day by day, marked daily at the history price."""
+def simulate(oos: pl.DataFrame, full: pl.DataFrame, col: str, margin: float, hs: dict, mult: float = 1.0,
+             min_age_days: float = 0.0, by_age: bool = False) -> dict:
+    """The rule on the test states, day by day, marked daily at the history price.
+    min_age_days and by_age are the addendum's checks (no first-day states; the half-spread
+    looked up by the market's age)."""
     bk = B.Book(f"{col}@{margin}", margin)
-    ent = oos.with_columns((pl.col("t_s") // 86400).alias("d")).sort("d")
+    ent = oos.filter(pl.col("days_since") >= min_age_days) if min_age_days else oos
+    ent = ent.with_columns((pl.col("t_s") // 86400).alias("d")).sort("d")
     marks = full.select("market_id", "t_s", "p").with_columns((pl.col("t_s") // 86400).alias("d"))
     closes = full.group_by("market_id").agg(pl.col("close_s").first(), pl.col("y").first())
     close_day = {r[0]: (int(r[1]) // 86400, float(r[2])) for r in closes.iter_rows()}
@@ -422,7 +446,7 @@ def simulate(oos: pl.DataFrame, full: pl.DataFrame, col: str, margin: float, hs:
             rows = g.to_dicts()
             for i in order:
                 r = rows[i]
-                h = hs_for(hs, r["p"], r["category"], mult)
+                h = hs_for(hs, r["p"], r["category"], mult, r["days_since"] if by_age else None)
                 end_ms = int((r["t_s"] + r["days_to_end"] * 86400) * 1000)
                 m = {"id": r["market_id"], "event_id": r["event_id"], "category": r["category"], "kind": r["kind"],
                      "end_ms": end_ms, "fee_rate": M.FEE_RATE.get(r["category"], 0.05), "fee_exponent": 1.0}
@@ -543,10 +567,21 @@ def run(refresh: bool = False) -> dict:
             log(f"  {col} m={m}: {sims[-1]['trades']} trades, return {sims[-1]['total_return']:+.1%}, "
                 f"Sharpe {sims[-1]['sharpe']:.2f}")
     stress = [simulate(oos, df, col, 0.03, hs, mult=2.0) for col in ("q_recal", "q_gbm")]
-    pl_ = pool([s["sharpe"] for s in sims])
-    for s in sims + stress:
+    checks = []
+    for col in ("q_recal", "q_gbm"):
+        c = simulate(oos, df, col, 0.03, hs, min_age_days=1.0)
+        c["check"] = "no first-day states"
+        checks.append(c)
+        c = simulate(oos, df, col, 0.03, hs, by_age=True)
+        c["check"] = "half-spread by age"
+        checks.append(c)
+    for c in checks:
+        log(f"  check {c['check']}, {c['book']}: {c['trades']} trades, return {c['total_return']:+.1%}, "
+            f"Sharpe {c['sharpe']:.2f}")
+    pl_ = pool([s["sharpe"] for s in sims + checks])
+    for s in sims + stress + checks:
         s["deflated_p"] = deflated_p(s.pop("_daily"), pl_)
-    res.update(sims=sims, stress=stress, pool=pl_)
+    res.update(sims=sims, stress=stress, checks=checks, pool=pl_)
     log("fitting the live model on every state")
     res["live_model"] = save_model(df)
     res["seconds"] = round(time.time() - t0)

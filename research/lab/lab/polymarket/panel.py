@@ -1,11 +1,12 @@
 """Point-in-time market states from the resolved set (results/polymarket_prereg.md, "Market states").
 
-A decision time is every 00:00 UTC while a market is open (every full hour for
-markets that lived under two days), from creation plus one hour to its close.
-The price is the last history point at or before the decision time, from the
-finest series that has one, at most 36 hours old. Every feature uses only
-points at or before the decision time; the scheduled end date is known from
-creation. Final volume and liquidity are not features (hindsight).
+A decision time is the first history sample of each UTC day while a market is
+open (of each hour for markets that lived under two days), from creation plus
+one hour to its close, so the price is the sample taken at that moment. Every
+feature uses only samples at or before the decision time (lags: the last
+sample at or before the same time 1 and 7 days earlier, at most 36 hours
+older); the scheduled end date is known from creation. Final volume and
+liquidity are not features (hindsight).
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from . import store
 
 DAY_S, HOUR_S = 86_400, 3_600
 MAX_AGE_S = 36 * HOUR_S
+LAG_TOL_S = 300
+VERSION = 2  # the panel cache is rebuilt when this changes
 SHORT_LIFE_S = 2 * DAY_S
 CLIP = 0.005
 PRICE_EDGES = [0.0, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50, 0.65, 0.80, 0.90, 0.95, 0.98, 1.0001]
@@ -80,14 +83,15 @@ def _at(t: np.ndarray, p: np.ndarray, when: np.ndarray) -> np.ndarray:
 
 
 def features(rec: dict, t: np.ndarray, p: np.ndarray, grid: np.ndarray, px: np.ndarray, created: int,
-             end: int) -> list[dict]:
-    """The feature rows at the decision times `grid` (seconds) with prices `px`, from the
+             end: int) -> dict[str, np.ndarray | list]:
+    """The feature columns at the decision times `grid` (seconds) with prices `px`, from the
     history (t, p) up to each time. Shared by the panel and the live book."""
-    p1 = _at(t, p, grid - DAY_S)
-    p7 = _at(t, p, grid - 7 * DAY_S)
+    # lags look a few minutes past the exact day: the samples drift by seconds from day to day
+    p1 = _at(t, p, grid - DAY_S + LAG_TOL_S)
+    p7 = _at(t, p, grid - 7 * DAY_S + LAG_TOL_S)
     lg = logit(px)
     # 7-day realised volatility of daily logit changes, from the price at each of the last 8 days
-    lags = np.stack([logit(_at(t, p, grid - k * DAY_S)) for k in range(8)], axis=1)
+    lags = np.stack([logit(px)] + [logit(_at(t, p, grid - k * DAY_S + LAG_TOL_S)) for k in range(1, 8)], axis=1)
     d = -np.diff(lags, axis=1)
     cnt = np.sum(~np.isnan(d), axis=1)
     with warnings.catch_warnings():
@@ -101,47 +105,61 @@ def features(rec: dict, t: np.ndarray, p: np.ndarray, grid: np.ndarray, px: np.n
     to_end = (end - grid) / DAY_S
     since = (grid - created) / DAY_S
     life = np.clip(since / np.maximum(since + np.maximum(to_end, 0), 1e-9), 0, 1)
-    rows = []
-    for k in range(len(grid)):
-        rows.append({
-            "market_id": rec["id"], "event_id": rec.get("event_id") or rec["id"], "t_s": int(grid[k]),
-            "p": float(px[k]), "logit_p": float(lg[k]),
-            "edge_dist": float(min(px[k], 1 - px[k])), "days_to_end": float(to_end[k]),
-            "days_since": float(since[k]), "life_frac": float(life[k]),
-            "chg_1d": float(lg[k] - logit(p1[k])) if not math.isnan(p1[k]) else math.nan,
-            "chg_7d": float(lg[k] - logit(p7[k])) if not math.isnan(p7[k]) else math.nan,
-            "vol_7d": float(vol[k]), "hi": float(hi[k]), "lo": float(lo[k]),
-            "neg_risk": float(bool(rec.get("neg_risk"))),
-            "category": rec["category"], "kind": rec["kind"],
-        })
-    return rows
+    n = len(grid)
+    return {
+        "market_id": [str(rec["id"])] * n, "event_id": [str(rec.get("event_id") or rec["id"])] * n,
+        "t_s": grid.astype(np.int64), "p": px.astype(float), "logit_p": lg,
+        "edge_dist": np.minimum(px, 1 - px), "days_to_end": to_end.astype(float),
+        "days_since": since.astype(float), "life_frac": life,
+        "chg_1d": lg - logit(p1), "chg_7d": lg - logit(p7),
+        "vol_7d": vol.astype(float), "hi": hi.astype(float), "lo": lo.astype(float),
+        "neg_risk": np.full(n, float(bool(rec.get("neg_risk")))),
+        "category": [rec["category"]] * n, "kind": [rec["kind"]] * n,
+    }
+
+
+def rows_of(cols: dict | None) -> list[dict]:
+    if not cols:
+        return []
+    n = len(cols["t_s"])
+    return [{k: (v[i].item() if isinstance(v, np.ndarray) else v[i]) for k, v in cols.items()} for i in range(n)]
 
 
 def _first(*vals):
     return next((v for v in vals if v is not None), None)
 
 
-def states_for(rec: dict, t: np.ndarray, p: np.ndarray) -> list[dict]:
+def state_cols(rec: dict, t: np.ndarray, p: np.ndarray) -> dict | None:
+    """The columns of every state of one resolved market, or None."""
     created = _first(rec.get("created_ms"), rec.get("start_ms"))
     close = _first(rec.get("closed_ms"), rec.get("end_ms"))
     end = _first(rec.get("end_ms"), rec.get("closed_ms"))
     if created is None or close is None or close <= created or not len(t):
-        return []
+        return None
     created, close, end = created // 1000, close // 1000, end // 1000
     created = max(created, int(t[0]) - HOUR_S)
     step = HOUR_S if close - created < SHORT_LIFE_S else DAY_S
-    first = ((created + HOUR_S) // step + 1) * step
-    grid = np.arange(first, close, step, dtype=np.int64)
-    if not len(grid):
-        return []
-    px = _at(t, p, grid)
-    keep = ~np.isnan(px)
-    if not keep.any():
-        return []
-    rows = features(rec, t, p, grid[keep], px[keep], created, end)
-    for r in rows:
-        r.update(close_s=int(close), y=float(rec["outcome"]), volume=float(rec.get("volume") or 0.0))
-    return rows
+    # Decision times are the history's own sample times, the first of each UTC day (each
+    # hour for short markets), so the price is the price at that moment, never an older
+    # one. (A fixed 00:00 grid used the previous day's sample, taken a few seconds after
+    # midnight, and the paper twin "bought" at prices a day old.)
+    ok = (t >= created + HOUR_S) & (t < close)
+    if not ok.any():
+        return None
+    idx = np.flatnonzero(ok)
+    b = t[idx] // step
+    first = np.concatenate([[True], b[1:] != b[:-1]])
+    idx = idx[first]
+    grid, px = t[idx].astype(np.int64), p[idx].astype(float)
+    cols = features(rec, t, p, grid, px, created, end)
+    n = len(grid)
+    cols.update(close_s=np.full(n, int(close), dtype=np.int64), y=np.full(n, float(rec["outcome"])),
+                volume=np.full(n, float(rec.get("volume") or 0.0)))
+    return cols
+
+
+def states_for(rec: dict, t: np.ndarray, p: np.ndarray) -> list[dict]:
+    return rows_of(state_cols(rec, t, p))
 
 
 def live_features(rec: dict, t: np.ndarray, p: np.ndarray, now_s: int, p_now: float) -> dict:
@@ -153,22 +171,31 @@ def live_features(rec: dict, t: np.ndarray, p: np.ndarray, now_s: int, p_now: fl
     keep = t < now_s
     t2 = np.append(t[keep], now_s).astype(np.int64)
     p2 = np.append(p[keep], p_now).astype(float)
-    return features(rec, t2, p2, np.array([now_s], dtype=np.int64), np.array([p_now]), created, end)[0]
+    return rows_of(features(rec, t2, p2, np.array([now_s], dtype=np.int64), np.array([float(p_now)]), created,
+                            end))[0]
 
 
 def build(markets: pl.DataFrame, hist: pl.DataFrame, log=print) -> pl.DataFrame:
     series = _series(hist)
-    rows: list[dict] = []
+    acc: dict[str, list] = {}
+    n = 0
     for i, rec in enumerate(markets.iter_rows(named=True)):
         s = series.get(str(rec["id"]))
         if s is None or rec.get("outcome") not in (0.0, 1.0):
             continue
-        rows.extend(states_for(rec, s[0], s[1]))
+        cols = state_cols(rec, s[0], s[1])
+        if not cols:
+            continue
+        for k, v in cols.items():
+            acc.setdefault(k, []).append(v)
+        n += len(cols["t_s"])
         if (i + 1) % 20000 == 0:
-            log(f"  panel: {i + 1} markets, {len(rows)} states")
-    if not rows:
+            log(f"  panel: {i + 1} markets, {n} states")
+    if not acc:
         return pl.DataFrame()
-    df = encode(pl.DataFrame(rows, infer_schema_length=None))
+    data = {k: (np.concatenate(v) if isinstance(v[0], np.ndarray) else [x for part in v for x in part])
+            for k, v in acc.items()}
+    df = encode(pl.DataFrame(data))
     return df.with_columns(
         pl.from_epoch("t_s", time_unit="s").dt.year().alias("year"),
         (pl.from_epoch("t_s", time_unit="s").dt.year().cast(pl.Utf8) + "Q"

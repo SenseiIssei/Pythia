@@ -46,11 +46,18 @@ per endpoint), backoff on 429 and 5xx.
 
 ## Market states (the panel)
 
-A decision time is every 00:00 UTC while a market is open (and every full
-hour for markets that lived under two days), from its creation plus one hour
-to its close. The price at a decision time is the last history point at or
-before it, from the finest series that has one, at most 36 hours old (else
-no state). Features, all known at the decision time:
+A decision time is the first history sample of each UTC day while a market
+is open (of each hour for markets that lived under two days), from its
+creation plus one hour to its close; the price is that sample. Lags (1 and 7
+days) are the last sample at or before the same time earlier, at most 36
+hours older. Features, all known at the decision time:
+
+(Changed on 2026-10-20 after a test run on the first 9,000 markets, before
+the full set existed: the registered grid was every 00:00 UTC with the last
+sample at or before it. Polymarket's daily samples are taken a few seconds
+after midnight, so that grid used the previous day's price, and the paper
+twin "bought" at prices up to a day old. Found because the twin's return was
+implausible while the model's Brier score was worse than the market's.)
 
 - price `p`, `logit(p)`, distance to the nearer edge `min(p, 1 - p)`
 - days to the scheduled end date (known from creation), days since creation,
@@ -197,6 +204,19 @@ before anything near money could be discussed a book needs at least 100
 resolved trades over at least 60 days, a positive mean return per trade
 with its event-bootstrap band above zero, a positive result in each of its
 two largest categories, and a deflated p above 0.95 over the pool.
+
+## Addendum (2026-10-20, after the test run, before the full run)
+
+The test run's paper twin made most of its money in the first hours of new
+markets, where the history price sits at 0.5 at creation and then drops to a
+mid of a thin book; the live record's median half-spread (taken from markets
+with $2,000 of liquidity) says nothing about those books. Two checks are
+added and counted as trials (4 more, 12 in all): the twin at m = 0.03 for
+recal and gbm (1) without states in a market's first 24 hours, and (2) with
+the half-spread looked up by the market's age as well (under 1 day, 1 to 7
+days, over 7 days) from the live record. Neither replaces the registered
+twin; the verdict is the registered rule's, and these say how far to trust
+it.
 
 ## Reports
 

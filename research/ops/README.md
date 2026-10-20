@@ -706,6 +706,44 @@ docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app py
 The health check reports "pokemon cards" red when the paper collection has no
 row for today after 10:00 UTC, once `/srv/pythia-data/pokemon` exists.
 
+## Polymarket (Y4)
+
+PAPER ONLY: Polymarket's public read-only endpoints (Gamma, CLOB), no
+account, no wallet, no key, no order. Three jobs in the table, added
+disabled (`polymarket-daily`, `polymarket-history`, `polymarket-study`);
+method and results in `research/lab/results/polymarket.md`.
+
+- `polymarket-daily` (05:15): snapshot of every open market with $1,000 of
+  liquidity and both books of up to 2,000 candidates, the Claude forecaster
+  (Sonnet 5.5 through the engine's metered endpoint, Batches, at most 300
+  markets and $3 a run; about $0.002 a market), settle and step the two
+  paper books, score Claude and the model against the market, the feed
+  `reports/polymarket/latest.json` and the card (category Studies, big
+  edges at most 3 a day). An engine that is down or a budget refusal only
+  skips the forecasts.
+- `polymarket-history` (Mondays 01:30) adds the markets resolved since the
+  last run with their price history, at 8 requests a second
+  (`PYTHIA_PM_RPS`), then `polymarket-study` refits the model the daily
+  book uses (`<data>/polymarket/model/`).
+- Data under `<data>/polymarket` (`PYTHIA_PM_DIR`); the daily job deletes
+  whole days of books, then of snapshots, oldest first, over
+  `PYTHIA_PM_BUDGET_GB` (6). The forecast ledgers, the paper books and the
+  model are in the backup and never deleted.
+- The resolved set is built on the PC once (several hours at 8 requests a
+  second) and copied up, so the weekly job only adds new markets:
+
+```bash
+tar -C F:/PythiaData/agent-y4/polymarket -cf - resolved state.json model | ssh pythia-vps 'mkdir -p /srv/pythia-data/polymarket && tar -xf - -C /srv/pythia-data/polymarket'
+```
+
+- Switch on after the lab code is deployed: `enabled: true` on the three
+  jobs, then `research/ops/deploy_ops.sh`. First run by hand, without a
+  card:
+
+```bash
+docker run --rm --network host --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.polymarket.daily --forecast --no-post
+```
+
 ## Alerts and the daily digest
 
 Everything goes to the owner's Telegram chat, one design for all of it (a
