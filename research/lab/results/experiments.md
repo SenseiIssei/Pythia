@@ -35,6 +35,7 @@ evidence accumulates, and they say so everywhere:
 | `lab:memes_rotation` | the best of Alpaca's six memecoins by 28-day return, BTC gate | daily, 04:30 UTC | 36 h |
 | `lab:memes_tsmom` | Alpaca's six memecoins while each is up over 28 days, BTC gate, 6 slots at 40 % vol | daily, 04:30 UTC | 36 h |
 | `lab:trend4h_pullback` | 4h EMA 24/96 trend with pullback limits, BTC gate, Alpaca coins | hourly run, decisions at every 4h close | 3 h |
+| `lab:btc_gated` | BTC at full weight while its close is above its 200-day average, cash otherwise (job added disabled) | daily, 04:35 UTC | 36 h |
 
 The pump.fun books have no engine signal: they are paper only, in the lab.
 
@@ -204,6 +205,38 @@ the first seconds, where most tokens are dumped, so the question moved to the
 real-time lab (`lab.pumpfun_rt`, `results/pumpfun_realtime.md`): every
 creation and curve trade recorded from the chain as it happens, fills with
 latency, 22 pre-registered rules and a model, paper only.
+
+## 5. BTC above its 200-day average (`btc_gated`)
+
+Added 2026-10-21 by the gated_btc study (`results/gated_btc_prereg.md`,
+`results/gated_btc.md`), which asked whether the four Alpaca books beat this
+rule at their own in-sample risk. None did with a bootstrap band above zero,
+and the rule's own record passed the registered gates G1 to G5, so the study
+proposed it as a paper book. It is listed here because it fails deflation.
+
+**Rule.** At each daily close, all of the book in BTC if BTC's close is above
+its 200-day average, all cash otherwise; traded at the next run (04:35 UTC).
+The same gate the lab's books use.
+
+**Backtest (out of sample 2024-01-01 to 2026-10-14, 35 bps per unit of
+turnover).** Sharpe 0.68 (0.58 at 70 bps), CAGR 20 %, drawdown 33 %; a close
+late 0.48; per year 1.44, -0.52, 1.19; in BTC on 61 % of days, about 10
+switches a year. BTC bought and held over the same days: 0.74, CAGR 27 %,
+drawdown 53 %.
+
+**Why it failed.** Deflated p 0.00 over 1,724 trials, and its Sharpe is below
+plain BTC's: it gives up return (20 % a year against 27 %) for a drawdown 20
+points smaller; it does not add return. 2025 was negative.
+
+**How the engine runs it.** `lab.paper.btc_gated` steps the paper book and
+writes an experimental, autopilot-only signal (BTC at 1.0 or empty). The job
+`paper-btc-gated` is in `research/ops/jobs.yaml` disabled; nothing runs it
+until the owner switches it on, and no autopilot trades it unless one names
+`lab:btc_gated`.
+
+**What would change the verdict.** A forward year in which its drawdown stays
+at most two thirds of BTC's over the same days and its Sharpe is not below
+BTC's.
 
 ## Where the numbers come from
 

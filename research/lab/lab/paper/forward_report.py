@@ -93,9 +93,10 @@ BOOKS: dict[str, str] = {
     "memes_rotation": "EXPERIMENT: memecoins, top 1 by 28-day return, BTC gate",
     "memes_tsmom": "EXPERIMENT: memecoins, momentum 28d, BTC gate",
     "trend4h_pullback": "EXPERIMENT: 4h trend, pullback maker entries, Alpaca coins",
+    "btc_gated": "EXPERIMENT: BTC only above its 200-day average",
 }
 # Books that failed the bar and run anyway: their rows and evidence say so.
-EXPERIMENT_PREFIXES = ("memes_rotation", "memes_tsmom", "trend4h_pullback", "pumpfun_")
+EXPERIMENT_PREFIXES = ("memes_rotation", "memes_tsmom", "trend4h_pullback", "btc_gated", "pumpfun_")
 
 
 def is_experiment(book: str) -> bool:
@@ -311,7 +312,7 @@ def report_stats(book: str, root: Path | None = None) -> dict | None:
                 x for x in rep["picks"] if x["family"].startswith("slower"))
             return {"cagr": p["hold_cagr_15bps"], "vol": vol_from_sharpe(p["hold_cagr_15bps"], p["hold_sharpe_15bps"]),
                     "max_dd": p["hold_max_dd_15bps"], "source": "xs_daily report"}
-        if book in ("memes_rotation", "memes_tsmom", "trend4h_pullback"):
+        if book in ("memes_rotation", "memes_tsmom", "trend4h_pullback", "btc_gated"):
             from .experimental import evidence as experiment_evidence
             ev = experiment_evidence(book)
             vol = ev.get("oos_vol") or vol_from_sharpe(ev["oos_cagr"], ev["oos_sharpe"])

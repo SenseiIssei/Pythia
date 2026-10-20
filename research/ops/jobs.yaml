@@ -130,6 +130,20 @@ jobs:
     timeout: 15m
     grace: 30m
 
+  # Proposed by the gated_btc study (results/gated_btc.md): BTC only while it
+  # closes above its 200-day average, an experiment (failed deflation, below
+  # plain BTC on Sharpe from 2024). Added disabled; switch on (enabled: true,
+  # then deploy_ops.sh) once the owner wants its forward record. Its signal is
+  # experimental and autopilot-only either way: no autopilot runs it unless one
+  # names lab:btc_gated.
+  - name: paper-btc-gated
+    description: EXPERIMENT BTC above its 200-day average, full weight or cash, and its experimental engine signal
+    schedule: "35 4 * * *"
+    command: python -m lab.paper.btc_gated
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+    grace: 30m
+
   - name: paper-m4
     description: M4 shadow paper book, market-neutral on perps
     schedule: "45 4 * * *"
@@ -306,10 +320,8 @@ jobs:
     lock: heavy
     lock_wait: 6h
     replaces: pythia-factory
-    # Paused 2026-10-20 on the research director's advice: every run raises the
-    # trial pool and the noise bar for every later study, and the last 600
-    # genomes all lost on the held-back data. The daily shadow step keeps going.
-    enabled: false
+    # The owner switched it back on 2026-10-21 after the research director had
+    # advised a pause: every run raises the trial pool and the noise bar.
 
   # ---------------------------------------------------------------- AI (Claude API, metered by the engine)
   # All of them call through the autopilot engine's POST /api/ai/complete,

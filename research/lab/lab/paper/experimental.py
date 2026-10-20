@@ -13,6 +13,10 @@ place they show up:
   trend4h_pullback   W15's only family that paid: 4h EMA 24/96 trend, entries
                      by resting buy limits half a 4h vol under the close, BTC
                      gate, holds about 8 days. results/fast_maker.md
+  btc_gated          BTC at full weight while its close is above its 200-day
+                     average, cash otherwise: the gate the books lean on, held
+                     alone (proposed by the gated_btc study; below plain BTC on
+                     Sharpe from 2024). results/gated_btc.md
 
 What makes them experimental, and what the engine does with it:
 
@@ -71,6 +75,16 @@ BOOKS: dict[str, dict] = {
                       "survivorship-free twin 0.40; bootstrap band -0.70 to 1.92",
         "would_change": "90 forward days with a maker fill rate near the backtest's 18 %, net per round "
                         "trip above 100 bps and a Sharpe above 0.5",
+    },
+    "btc_gated": {
+        "variant": f"{LABEL} · BTC only while its close is above its 200-day average · full weight · daily",
+        "study": "gated_btc",
+        "row": "BTC above its 200-day average, k = 1",
+        "why_failed": "deflated p 0.00 over 1,724 trials; out of sample from 2024 its Sharpe (0.68 at 35 bps) is "
+                      "below BTC bought and held (0.74): it halves the drawdown (33 % vs 53 %), it does not add "
+                      "return; 2025 negative (-0.52)",
+        "would_change": "a forward year in which its drawdown stays at most two thirds of BTC's over the same "
+                        "days and its Sharpe is not below BTC's",
     },
 }
 
@@ -171,12 +185,43 @@ def _trend4h_evidence(b: dict) -> dict | None:
     }
 
 
+def _gated_btc_evidence(b: dict) -> dict | None:
+    """G at full weight from results/gated_btc.md (the study that proposed the book)."""
+    row = next((r for r in _rows(b["study"]) if r.get("variant") == b["row"]), None)
+    if row is None:
+        return None
+    cagr, dd = _num(row.get("cagr_pct")), _num(row.get("dd_pct"))
+    return {
+        "is_sharpe": _num(row.get("is")),
+        "oos_sharpe": _num(row.get("oos_35")),
+        "sharpe_2x_cost": _num(row.get("oos_70")),
+        "oos_cagr": cagr / 100 if cagr is not None else None,
+        "oos_max_dd": dd / 100 if dd is not None else None,
+        "deflated_p": _num(row.get("deflated_p")),
+        "bootstrap_90": [_num(row.get("boot_p05")), _num(row.get("boot_p95"))],
+        "late_fill_sharpe": _num(row.get("late")),
+        "turnover_yr": _num(row.get("turnover_yr")),
+        "variants_tried": 1724,
+        "cost_note": "Sharpe at 35 bps per unit of turnover (Alpaca taker 25 bps plus about 10 bps slippage); "
+                     "sharpe_2x_cost at 70 bps",
+        "regime_filter": True,
+        "caveat": "Experiment: failed deflation, and below BTC bought and held on Sharpe from 2024. It is the BTC "
+                  "200-day gate the lab's books already depend on, held in BTC alone: a single coin, about ten "
+                  "switches a year.",
+    }
+
+
 def evidence(name: str) -> dict:
     """The study's numbers for an experimental book, as the engine reads them, with
     the experiment flag, the verdict and why it failed. `missing` when the study's
     write-up is not where it should be."""
     b = BOOKS[name]
-    ev = _trend4h_evidence(b) if name == "trend4h_pullback" else _memes_evidence(name, b)
+    if name == "trend4h_pullback":
+        ev = _trend4h_evidence(b)
+    elif name == "btc_gated":
+        ev = _gated_btc_evidence(b)
+    else:
+        ev = _memes_evidence(name, b)
     base = {"report": b["study"], "experimental": True, "experiment": LABEL, "why_failed": b["why_failed"],
             "would_change": b["would_change"], "notes": STUDY_NOTE}
     if ev is None:
