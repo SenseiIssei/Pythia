@@ -5,8 +5,15 @@ sends what this builds; the tests check it with a fake signer.
 
 Only the programs' own public buy and sell instructions, with a compute-unit
 limit and price, the associated token accounts they need, and (in the pool)
-wrapping and unwrapping SOL. No bundles, no tips, no private relays, nothing
-that front-runs, sandwiches or moves a price on purpose.
+wrapping and unwrapping SOL. No bundles, no private relays, nothing that
+front-runs, sandwiches or moves a price on purpose. The one exception, off
+unless the owner sets PYTHIA_PUMPFUN_JITO=1: a tip of at most
+MAX_TIP_LAMPORTS to a published Jito tip account inside our OWN single buy or
+sale (never a bundle with anyone else's transaction).
+
+`compile_template` compiles a message once with the places of the blockhash and
+of each instruction's data recorded, so the fast path (fastpath.py) only patches
+the amounts, the compute-unit price and the blockhash at the signal.
 
 The account lists and argument names are the ones in pump.fun's public IDLs
 (github.com/pump-fun/pump-public-docs, idl/pump.json and idl/pump_amm.json) as
@@ -19,6 +26,7 @@ account stops the executor instead of sending something wrong.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import struct
 from dataclasses import dataclass
@@ -76,17 +84,42 @@ def on_curve(b: bytes) -> bool:
     y2 = y * y % _P
     u = (y2 - 1) % _P
     v = (_D * y2 + 1) % _P
-    x2 = u * pow(v, _P - 2, _P) % _P
-    return x2 == 0 or pow(x2, (_P - 1) // 2, _P) == 1
+    # x^2 = u / v has a root when u / v is a square, i.e. when u * v is (Legendre(1/v) = Legendre(v)); the
+    # Jacobi symbol equals the Legendre symbol for the prime p and is four times faster than Euler's power
+    return u == 0 or _jacobi(u * v % _P, _P) == 1
+
+
+def _jacobi(a: int, n: int) -> int:
+    a %= n
+    r = 1
+    while a:
+        z = (a & -a).bit_length() - 1
+        a >>= z
+        if z & 1 and n & 7 in (3, 5):
+            r = -r
+        if a & 3 == 3 and n & 3 == 3:
+            r = -r
+        a, n = n % a, a
+    return r if n == 1 else 0
 
 
 def key(s: str | bytes) -> bytes:
-    return s if isinstance(s, bytes) else b58decode(s).rjust(32, b"\0")
+    return s if isinstance(s, bytes) else _key(s)
+
+
+@functools.lru_cache(maxsize=65_536)
+def _key(s: str) -> bytes:
+    return b58decode(s).rjust(32, b"\0")
 
 
 def pda(seeds: list[bytes | str], program: str) -> str:
-    """find_program_address: the first bump from 255 down whose hash is off the curve."""
-    raw = [s if isinstance(s, bytes) else key(s) for s in seeds]
+    """find_program_address: the first bump from 255 down whose hash is off the curve (memoised: the
+    fast path asks for the same program-wide addresses again and again)."""
+    return _pda(tuple(s if isinstance(s, bytes) else key(s) for s in seeds), program)
+
+
+@functools.lru_cache(maxsize=65_536)
+def _pda(raw: tuple, program: str) -> str:
     prog = key(program)
     for bump in range(255, -1, -1):
         h = hashlib.sha256(b"".join(raw) + bytes([bump]) + prog + b"ProgramDerivedAddress").digest()
@@ -160,6 +193,43 @@ def compile_message(payer: str, ixs: list[Ix], blockhash: str) -> bytes:
     return bytes(out)
 
 
+@dataclass
+class Compiled:
+    """A compiled message and where to patch it: the blockhash's offset and each instruction's data offset."""
+    message: bytes
+    blockhash_at: int
+    data_at: list[int]
+
+
+def compile_template(payer: str, ixs: list[Ix], blockhash: str = SYSTEM) -> Compiled:
+    """compile_message with the offsets of the blockhash and of every instruction's data recorded."""
+    msg = compile_message(payer, ixs, blockhash)
+    nkeys_at = 3
+    n = 0
+    shift = 0
+    pos = nkeys_at
+    while True:                                            # the shortvec of the key count
+        b = msg[pos]
+        n |= (b & 0x7F) << shift
+        pos += 1
+        if not b & 0x80:
+            break
+        shift += 7
+    bh = pos + 32 * n
+    pos = bh + 32
+    pos += len(shortvec(len(ixs)))
+    data_at = []
+    for ix in ixs:
+        pos += 1                                           # program index
+        pos += len(shortvec(len(ix.accounts))) + len(ix.accounts)
+        pos += len(shortvec(len(ix.data)))
+        data_at.append(pos)
+        pos += len(ix.data)
+    if pos != len(msg):                                    # pragma: no cover (a layout change here)
+        raise ValueError("template offsets do not add up")
+    return Compiled(msg, bh, data_at)
+
+
 def signers_of(message: bytes) -> int:
     return message[0]
 
@@ -201,14 +271,47 @@ def sync_native(account: str) -> Ix:
 
 ALLOWED_PROGRAMS = {COMPUTE_BUDGET, ATA_PROGRAM, TOKEN, TOKEN_2022, SYSTEM, PUMP, PUMP_AMM}
 
+# Jito's published tip accounts (its block engine's getTipAccounts). A tip is a plain SOL payment from the
+# wallet to one of them inside our OWN transaction; only the owner's PYTHIA_PUMPFUN_JITO=1 lets one through
+# (live_exec), never more than MAX_TIP_LAMPORTS, never more than one, never in a bundle with anyone else's.
+JITO_TIP_ACCOUNTS = frozenset({
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5", "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY", "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh", "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL", "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"})
+MAX_TIP_LAMPORTS = 10_000_000             # 0.01 SOL: a hard cap in code, whatever a setting says
 
-def check_own(user: str, ixs: list[Ix]) -> None:
+
+def tip(user: str, account: str, lamports: int) -> Ix:
+    """Our own transaction's tip to a Jito tip account (a system transfer). check_own refuses it unless the
+    caller says tips are allowed (the owner's flag), the account is a published tip account and the amount
+    is at most MAX_TIP_LAMPORTS."""
+    return Ix(SYSTEM, [(user, True, True), (account, False, True)], struct.pack("<IQ", 2, int(lamports)))
+
+
+def is_tip(user: str, ix: Ix) -> bool:
+    return (ix.program == SYSTEM and len(ix.accounts) == 2 and ix.accounts[0][0] == user
+            and ix.accounts[1][0] in JITO_TIP_ACCOUNTS and len(ix.data) == 12 and ix.data[:4] == struct.pack("<I", 2))
+
+
+def check_own(user: str, ixs: list[Ix], tip_ok: bool = False) -> None:
     """Refuse anything but a buy or a sale for the wallet itself: only the programs a trade needs,
-    a system instruction only as the wrap into the wallet's own wrapped-SOL account, and a token
-    account closed only back to the wallet. Raises ValueError otherwise (nothing is signed)."""
+    a system instruction only as the wrap into the wallet's own wrapped-SOL account (or, with tip_ok,
+    one tip of at most MAX_TIP_LAMPORTS to a published Jito tip account), and a token account closed
+    only back to the wallet. Raises ValueError otherwise (nothing is signed)."""
+    tips = 0
     for ix in ixs:
         if ix.program not in ALLOWED_PROGRAMS:
             raise ValueError(f"program {ix.program[:8]} is not part of a plain buy or sale")
+        if ix.program == SYSTEM and is_tip(user, ix):
+            if not tip_ok:
+                raise ValueError("a tip, and tips are not switched on (PYTHIA_PUMPFUN_JITO)")
+            if struct.unpack_from("<Q", ix.data, 4)[0] > MAX_TIP_LAMPORTS:
+                raise ValueError("a tip above the hard cap")
+            tips += 1
+            if tips > 1:
+                raise ValueError("more than one tip")
+            continue
         if ix.program == SYSTEM:
             ok = (len(ix.accounts) == 2 and ix.accounts[0][0] == user and ix.accounts[1][0] == ata(user, WSOL, TOKEN)
                   and ix.data[:4] == struct.pack("<I", 2))

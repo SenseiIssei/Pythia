@@ -19,8 +19,10 @@ den Echtgeld-Dienst.
   Abschnitte 6.1 und 21(h), Stand 08.10.2026). Pythia nutzt beides nicht: Es
   liest die öffentliche Blockchain und schickt einfache Kauf- und
   Verkaufstransaktionen der öffentlichen Programme an einen öffentlichen
-  RPC-Endpunkt. Keine Bundles, keine Tips, keine privaten Relays, kein
-  Front-Running, keine Umgehung irgendeiner Erkennung. Du entscheidest mit
+  RPC-Endpunkt. Keine Bundles, keine privaten Relays, kein Front-Running,
+  keine Umgehung irgendeiner Erkennung. Tips gibt es nur, wenn du selbst
+  `PYTHIA_PUMPFUN_JITO=1` setzt, und dann nur als Trinkgeld in deiner eigenen
+  einzelnen Kauf- oder Verkaufstransaktion (Abschnitt 10). Du entscheidest mit
   diesem Wissen.
 - **Steuern sind deine Sache.** Jeder Kauf und Verkauf eines Tokens ist ein
   steuerlich relevanter Vorgang. Die Abschlüsse stehen in
@@ -150,9 +152,20 @@ PYTHIA_PUMPFUN_LIVE=1
 PYTHIA_PUMPFUN_KEYPAIR=/etc/pythia/pumpfun-keypair.json
 # optional, nur https, kein Bundle- oder Relay-Dienst:
 # PYTHIA_PUMPFUN_RPC=https://...
+# optional, weitere https-RPCs für paralleles Senden (Abschnitt 10):
+# PYTHIA_PUMPFUN_RPC_URLS=https://...,https://...
+# optional, nur wenn du Jito willst (Abschnitt 10), beide Zeilen:
+# PYTHIA_PUMPFUN_JITO=1
+# PYTHIA_PUMPFUN_JITO_URL=https://<block-engine>/api/v1/transactions
 EOF
 chmod 600 /etc/pythia/pumpfun-live.env
 ```
+
+Der Ausführer selbst sendet weiterhin nur an `PYTHIA_PUMPFUN_RPC`. Die
+parallelen Endpunkte und Jito gehören zum schnellen Pfad (Abschnitt 10), der
+bisher nur als Trockenlauf existiert; die Prüfung (`live_exec check`) kontrolliert
+die Adressen trotzdem schon: eine Jito-Adresse ohne `PYTHIA_PUMPFUN_JITO=1`,
+eine Bundle-Adresse oder eine http-Adresse lässt das Tor zu.
 
 ## 7. Simulieren (Pflicht, gilt 24 Stunden)
 

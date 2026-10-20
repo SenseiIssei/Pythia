@@ -54,7 +54,7 @@ def test_the_registered_strategies_are_what_the_plan_says():
     assert [s.name for s in P.STRATEGIES] == ["P_snipe_dev", "P_snipe_cmig", "P_press10", "P_mom_model", "P_p90",
                                               "P_p80_smart", "P_pool60", "P_cmig_model", "P_early10", "P_early30",
                                               "P_press10_hz", "P_pool60_hz"]
-    assert S.N_TRIALS == len(S.RULES) + 1 + len(P.STRATEGIES) + S.X14_TRIALS
+    assert S.N_TRIALS == len(S.RULES) + 1 + len(P.STRATEGIES) + S.X14_TRIALS + S.SPEED_TRIALS
     for s in P.STRATEGIES:
         assert isinstance(s, S.Rule) and P.is_strategy(s)
         assert s.exits.ladder[-1][1] == 1.0 and 0 < s.exits.sl < 1 and s.exits.time_s > 0
@@ -327,7 +327,9 @@ def test_the_gate_opens_only_when_everything_holds(tmp_path, monkeypatch):
                         ({"ack": "rule=P_nothing\nmax_daily_loss_sol=1"}, "not a pipeline strategy"),
                         ({"ack": "rule=P_p90\n"}, "max_daily_loss_sol"),
                         ({"env": {"PYTHIA_PUMPFUN_LIVE": "0"}}, "is not 1"),
-                        ({"env": {"PYTHIA_PUMPFUN_RPC": "https://mainnet.block-engine.jito.wtf"}}, "relay"),
+                        ({"env": {"PYTHIA_PUMPFUN_RPC": "https://mainnet.block-engine.jito.wtf"}},
+                         "PYTHIA_PUMPFUN_JITO is not 1"),             # Y3: Jito only with the owner's switch
+                        ({"env": {"PYTHIA_PUMPFUN_RPC": "https://x.example/relay"}}, "relay"),
                         ({"env": {"PYTHIA_PUMPFUN_RPC": "http://rpc.example.org"}}, "https")):
         d = tmp_path / str(abs(hash(str(over))))
         d.mkdir()

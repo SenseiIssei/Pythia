@@ -122,7 +122,9 @@ BY_NAME = {r.name: r for r in RULES}
 MODEL_FILTER_TRIALS = 1
 PIPELINE_TRIALS = 12
 X14_TRIALS = 16 + 38
-N_TRIALS = len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS
+# Y3's speed tiers (results/pumpfun_speed_plan.md): 8 tiers x 5 filters x 3 exits, and addendum 1's tier S0r 15 more.
+SPEED_TRIALS = 8 * 5 * 3 + 15
+N_TRIALS = len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS + SPEED_TRIALS
 # The rule the shadow book runs until the study has picked one (pick.json).
 DEFAULT_PICK = "C_20in60_x1"
 # The model filter: enter only when the calibrated probability that this entry,

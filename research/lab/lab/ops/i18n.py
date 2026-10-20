@@ -510,6 +510,8 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_ready": ("Closest to live: {rule}, {days} of 14 days, {trades} of 300 trades out of sample, "
                             "{shadow} of 30 shadow days, {gates}."),
         "prt_daily_ready_n": "{n} of {total} strategies are ready for live.",
+        "prt_daily_latency": ("Our feed saw new tokens {med} s after their block (median; 90th percentile {p90} s), "
+                              "{fast} within a second, {slot2} within two slots."),
         "prt_daily_x14": ("Exits out of sample: {pick} keeps {cap} of the best possible gain (best simple rule "
                           "{base}: {cap_base}). Early detection: the top 5 % by P(3x) reached it {prec} of the "
                           "time against {rate} for all ({lift}x)."),
@@ -938,6 +940,8 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_ready": ("Am nächsten an echtem Geld: {rule}, {days} von 14 Tagen, {trades} von 300 Positionen "
                             "außerhalb der Stichprobe, {shadow} von 30 Tagen im Schattenbuch, {gates}."),
         "prt_daily_ready_n": "{n} von {total} Strategien sind bereit für echtes Geld.",
+        "prt_daily_latency": ("Unser Datenstrom sah neue Token {med} s nach ihrem Block (Median; 90. Perzentil "
+                              "{p90} s), {fast} innerhalb einer Sekunde, {slot2} innerhalb von zwei Slots."),
         "prt_daily_x14": ("Ausstiege außerhalb der Stichprobe: {pick} behält {cap} des bestmöglichen Gewinns "
                           "(beste einfache Regel {base}: {cap_base}). Früherkennung: die obersten 5 % nach "
                           "P(3x) erreichten das Dreifache in {prec} der Fälle, alle in {rate} ({lift}-fach)."),

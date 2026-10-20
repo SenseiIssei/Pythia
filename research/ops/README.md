@@ -230,6 +230,9 @@ Settings (environment, all optional; put them in an env file and add
 | Variable | Default | What |
 |---|---|---|
 | `PYTHIA_SOLANA_WS` | `wss://api.mainnet-beta.solana.com` | the websocket; the public endpoint documents 40 connections, 100 requests per 10 s and 100 MB per 30 s per IP and says it is not meant for production. A provider's URL (with its key) can replace it; the key then lives only in that env file |
+| `PYTHIA_SOLANA_WS_URLS`, `PYTHIA_SOLANA_TOKEN` | unset | a paid low-latency provider (the owner's decision, docs/PUMPFUN-LIVE.md section 10): comma-separated websocket URLs, a `{token}` in a URL is filled from `PYTHIA_SOLANA_TOKEN`; the links spread over them and the public endpoint stays on as a fallback link (`PYTHIA_PF_PUBLIC_FALLBACK=0` drops it). Only scheme and host are ever logged |
+| `PYTHIA_SOLANA_COMMITMENT` | confirmed | `processed` is faster (about 50 slots less behind on the public endpoint in a probe); a processed transaction is rarely dropped with its fork |
+| `PYTHIA_SOLANA_GRPC_URL`, `PYTHIA_SOLANA_GRPC_TOKEN` | unset | a Yellowstone gRPC (Geyser) feed next to the websockets (`lab/pumpfun_rt/geyser.py`); needs `grpcio` in the image, else the websockets go on alone. The heartbeat's `first_by_source` shows which feed was first |
 | `PYTHIA_PF_LINKS`, `PYTHIA_PF_AMM_LINKS` | 3, 2 | parallel connections per program; the public endpoint drops a connection every minute or two, the record has a gap only when all of a program's links are down at once |
 | `PYTHIA_PF_AMM` | 1 | 0 stops the PumpSwap stream (the post-migration rules then have no data) and halves the traffic |
 | `PYTHIA_PF_BUDGET_GB` | 40 | size budget of `pumpfun_rt/`; whole days go, oldest first |

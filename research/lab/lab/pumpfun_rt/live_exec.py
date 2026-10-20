@@ -33,7 +33,11 @@ and in both:
      outside the code, with its public address next to it (<file>.pub)
   6. the owner's copies of the program IDLs (PYTHIA_PUMPFUN_IDL_DIR, default
      <data>/pumpfun_rt/idl/pump.json and pump_amm.json) match what txbuild builds
-  7. the RPC endpoint (PYTHIA_PUMPFUN_RPC) is plain https, not a bundle or relay service
+  7. the RPC endpoint (PYTHIA_PUMPFUN_RPC) and every parallel one (PYTHIA_PUMPFUN_RPC_URLS) is plain https,
+     not a bundle or relay service; a Jito block engine (PYTHIA_PUMPFUN_JITO_URL) only when the owner set
+     PYTHIA_PUMPFUN_JITO=1, and only its single-transaction endpoint, never bundles. (The executor itself still
+     sends to PYTHIA_PUMPFUN_RPC alone; the parallel and Jito paths belong to the fast path, fastpath.py,
+     which is a dry run until the owner decides otherwise.)
   8. the `cryptography` package is installed (it signs; nothing here implements a signature)
 
 Otherwise it refuses with every reason. The wallet file is read only after every
@@ -49,8 +53,10 @@ since the first live trade reach it. A buy also needs the wallet to keep a fee
 reserve. The executor checks all of it itself, independently of the pipeline.
 
 Only the programs' public buy and sell, and txbuild.check_own refuses anything
-else before signing: no transfers out, no withdrawals, no bundles, no tips, no
-private relays, nothing that front-runs other users or moves a price on purpose.
+else before signing: no transfers out, no withdrawals, no bundles, no private
+relays, nothing that front-runs other users or moves a price on purpose, and no
+tips (the executor builds none; a tip inside our own transaction exists only in
+the fast path behind the owner's PYTHIA_PUMPFUN_JITO=1, see txbuild.tip).
 pump.fun's terms forbid bots on its website and API; this reads the public chain
 and sends to a public RPC endpoint, and the owner decides with that knowledge.
 
@@ -94,6 +100,12 @@ CONFIRM_MS = 30_000
 GIVE_UP_MS = 90_000
 BLOCKHASH_S = 20.0
 NOT_PUBLIC = ("jito", "bundle", "relay", "block-engine", "blockengine", "mev")
+# The owner's switch for a Jito block engine (our own single transactions with a tip, never bundles), its URL,
+# and further plain RPC endpoints for sending the same signed transaction in parallel.
+ENV_JITO = "PYTHIA_PUMPFUN_JITO"
+ENV_JITO_URL = "PYTHIA_PUMPFUN_JITO_URL"
+ENV_RPC_URLS = "PYTHIA_PUMPFUN_RPC_URLS"
+JITO_WORDS = ("jito", "block-engine", "blockengine")
 
 # The owner's live test: hard maxima in code, whatever the ack says (an ack above them is refused).
 ACCEPT_LINE = "I accept that I can lose all of it"
@@ -376,7 +388,7 @@ class LiveGate:
             why.append("the kill switch file is there")
         why += self._keypair_problems()
         why += self._idl_problems()
-        why += rpc_problems(self.env.get(ENV_RPC) or DEFAULT_RPC)
+        why += send_problems(self.env)
         if not crypto_ok():
             why.append("the cryptography package is not installed (it signs)")
         return why
@@ -439,17 +451,58 @@ def crypto_ok() -> bool:
     return True
 
 
-def rpc_problems(url: str) -> list[str]:
+def is_jito_engine(url: str) -> bool:
+    """A Jito block engine's URL (its host names it), whatever the path."""
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(w in host for w in JITO_WORDS)
+
+
+def rpc_problems(url: str, env=None) -> list[str]:
+    """Why an endpoint may not be sent to: not https, or a bundle, relay or MEV service. A Jito block engine is
+    allowed only when the owner set PYTHIA_PUMPFUN_JITO=1, and then only its single-transaction endpoint (our
+    own transaction with its tip inside; never the bundles endpoint, never anyone else's transaction)."""
+    env = os.environ if env is None else env
     try:
         u = urllib.parse.urlsplit(url)
     except ValueError:
         return ["the RPC endpoint is not a URL"]
     host = (u.hostname or "").lower()
+    path = (u.path or "").lower()
     if u.scheme != "https" or not host:
         return ["the RPC endpoint must be https"]
-    if any(w in host or w in (u.path or "").lower() for w in NOT_PUBLIC):
+    if is_jito_engine(url):
+        if env.get(ENV_JITO) != "1":
+            return [f"the endpoint is a Jito block engine and {ENV_JITO} is not 1 (the owner's switch)"]
+        if "bundle" in path or "bundle" in host or not path.rstrip("/").endswith("/transactions"):
+            return ["only the block engine's single-transaction endpoint (/api/v1/transactions) is allowed, "
+                    "never bundles"]
+        if any(w in host or w in path for w in ("relay", "mev")):
+            return ["the RPC endpoint looks like a relay or MEV service"]
+        return []
+    if any(w in host or w in path for w in NOT_PUBLIC):
         return ["the RPC endpoint looks like a bundle or relay service; only a plain public RPC is allowed"]
     return []
+
+
+def send_problems(env=None) -> list[str]:
+    """Every send endpoint the owner configured: PYTHIA_PUMPFUN_RPC, each of PYTHIA_PUMPFUN_RPC_URLS (parallel
+    sending) and PYTHIA_PUMPFUN_JITO_URL (only with PYTHIA_PUMPFUN_JITO=1)."""
+    env = os.environ if env is None else env
+    why = rpc_problems(env.get(ENV_RPC) or DEFAULT_RPC, env)
+    for u in [x.strip() for x in (env.get(ENV_RPC_URLS) or "").split(",") if x.strip()]:
+        why += [f"{ENV_RPC_URLS}: {w}" for w in rpc_problems(u, env)]
+    j = (env.get(ENV_JITO_URL) or "").strip()
+    if j:
+        if not is_jito_engine(j):
+            why.append(f"{ENV_JITO_URL} is not a Jito block engine")
+        else:
+            why += [f"{ENV_JITO_URL}: {w}" for w in rpc_problems(j, env)]
+    elif env.get(ENV_JITO) == "1" and not is_jito_engine(env.get(ENV_RPC) or ""):
+        why.append(f"{ENV_JITO}=1 but no block engine is configured ({ENV_JITO_URL})")
+    return why
 
 
 # ---------------------------------------------------------------- the signer
