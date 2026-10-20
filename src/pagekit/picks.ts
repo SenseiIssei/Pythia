@@ -165,6 +165,7 @@ const BLURB: Record<StrategyKind, string> = {
   arb: "Looks for prices that do not add up across markets and trades the gap when it beats the costs.",
   manual: "Orders you place by hand.",
   "lab-targets": "Holds the target weights decided in the research lab.",
+  candles: "Research only, no edge shown yet: buys when the chosen candlestick patterns appear on the last closed candle.",
 };
 
 /** What a strategy kind does, in one sentence. */

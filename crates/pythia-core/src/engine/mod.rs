@@ -13,6 +13,9 @@ pub mod allocator;
 pub mod autopilot;
 #[cfg(test)]
 mod autopilot_tests;
+pub mod candles;
+#[cfg(test)]
+mod candles_tests;
 #[cfg(test)]
 mod portfolio_tests;
 pub mod composed;
@@ -107,6 +110,10 @@ pub enum StrategyKind {
     Manual,
     /// Target weights decided in the research lab and executed here (see `crate::lab`).
     LabTargets,
+    /// Long on classic candlestick patterns ([`candles`]) on the last closed
+    /// candle. A research strategy that has shown no edge yet; needs real
+    /// candles and emits nothing on a market without them.
+    Candles,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2480,7 +2487,7 @@ impl Engine {
                         continue;
                     }
                 }
-                for intent in strategies::run_strategy(strat, &snapshot, &self.history) {
+                for intent in strategies::run_strategy_with_candles(strat, &snapshot, &self.history, &self.ohlc) {
                     fires.push((idx, intent));
                 }
             }
@@ -4341,7 +4348,9 @@ impl Engine {
                 // Ask the live strategies what they'd do right now.
                 let mut signal = None;
                 for s in &live_watchers {
-                    if let Some(i) = strategies::run_strategy(s, &snapshot, &self.history).into_iter().next() {
+                    if let Some(i) =
+                        strategies::run_strategy_with_candles(s, &snapshot, &self.history, &self.ohlc).into_iter().next()
+                    {
                         signal = Some(format!("{}: {:?} — {}", s.name, i.side, i.reason));
                         break;
                     }

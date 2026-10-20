@@ -413,7 +413,9 @@ export type StrategyKind =
   | "arb"
   | "manual"
   /** Target weights decided in the research lab, executed by the engine. */
-  | "lab-targets";
+  | "lab-targets"
+  /** Candlestick patterns on real candles, run by the Rust engine only. Research, no edge shown yet. */
+  | "candles";
 
 // ── composed (user-built rule) strategies ──────────────────────────────────
 export type IndKind = "price" | "rsi" | "ema" | "sma" | "zscore" | "roc" | "macdHist" | "atr";

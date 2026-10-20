@@ -3,9 +3,11 @@
 //! venue. Signals are computed from real technical indicators (see
 //! [`super::indicators`]) and mirrored 1:1 by the TypeScript engine.
 
+use super::candles::{self, CandleCtx, CandleParams, Pattern};
 use super::indicators as ind;
 use super::{Market, MarketKind, StrategyConfig, StrategyKind, StrategyParam, StrategyState};
 use crate::connectors::{Side, Venue};
+use crate::marketdata::Ohlc;
 use std::collections::HashMap;
 
 pub struct SignalIntent {
@@ -24,15 +26,30 @@ fn clamp01(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
 }
 
+/// Run a strategy on closes only. Kinds that need whole candles
+/// ([`StrategyKind::Candles`]) emit nothing here; the engine calls
+/// [`run_strategy_with_candles`] with its candle store.
 pub fn run_strategy(
     cfg: &StrategyConfig,
     markets: &HashMap<String, Market>,
     history: &HashMap<String, Vec<f64>>,
 ) -> Vec<SignalIntent> {
+    run_strategy_with_candles(cfg, markets, history, &HashMap::new())
+}
+
+/// Run a strategy with the engine's closed candles per market (`ohlc`, oldest
+/// first, the forming bar already dropped) next to the close history.
+pub fn run_strategy_with_candles(
+    cfg: &StrategyConfig,
+    markets: &HashMap<String, Market>,
+    history: &HashMap<String, Vec<f64>>,
+    ohlc: &HashMap<String, Vec<Ohlc>>,
+) -> Vec<SignalIntent> {
     if cfg.state == StrategyState::Paused {
         return vec![];
     }
     match cfg.kind {
+        StrategyKind::Candles => candle_patterns(cfg, markets, ohlc),
         StrategyKind::EmaCross => ema_cross(cfg, markets, history),
         StrategyKind::Bollinger => bollinger(cfg, markets, history),
         StrategyKind::RsiReversal => rsi_reversal(cfg, markets, history),
@@ -277,6 +294,94 @@ fn prob_edge(cfg: &StrategyConfig, markets: &HashMap<String, Market>) -> Vec<Sig
     out
 }
 
+/// Prefix of the parameters that switch single patterns on: `pat.hammer` with
+/// value 1 lets a hammer count towards an entry, 0 leaves it out.
+pub const CANDLE_PATTERN_PREFIX: &str = "pat.";
+
+/// The bullish patterns this strategy's parameters switch on, in registry order.
+/// Bearish and neutral names, and names the registry does not know, are ignored.
+pub fn candle_selection(cfg: &StrategyConfig) -> Vec<&'static Pattern> {
+    candles::bullish()
+        .filter(|p| {
+            cfg.params
+                .iter()
+                .any(|q| q.value >= 0.5 && q.key.strip_prefix(CANDLE_PATTERN_PREFIX) == Some(p.name))
+        })
+        .collect()
+}
+
+/// Candlestick patterns, long only. A research strategy with no edge shown yet.
+///
+/// Goes long a market when, on its last closed candle (or, with `holdBars` > 1,
+/// on one of that many most recent closed candles), at least `minBull` of the
+/// switched-on bullish patterns fire, and:
+///
+/// * `noBear` = 1: no bearish pattern fires on that candle;
+/// * `atSupport` = 1: one of the firing patterns sits at support (its low
+///   within `sr_near` x A of the 20-bar low before it, see
+///   [`CandleCtx::at_support`]);
+/// * `volume` = 1: that candle's volume is at least 1.5 x the 20-bar mean
+///   before it;
+/// * `exitOnBear` = 1: no bearish pattern has fired on a later candle.
+///
+/// Emits nothing otherwise (flat), nothing for a market without real candles
+/// and nothing when no pattern is switched on. Exits are the engine's stops and
+/// targets, as for every strategy: the engine only opens when flat.
+fn candle_patterns(cfg: &StrategyConfig, markets: &HashMap<String, Market>, ohlc: &HashMap<String, Vec<Ohlc>>) -> Vec<SignalIntent> {
+    let selected = candle_selection(cfg);
+    if selected.is_empty() {
+        return vec![];
+    }
+    let min_bull = param(cfg, "minBull", 1.0).max(1.0) as usize;
+    let no_bear = param(cfg, "noBear", 1.0) >= 0.5;
+    let need_support = param(cfg, "atSupport", 0.0) >= 0.5;
+    let need_volume = param(cfg, "volume", 0.0) >= 0.5;
+    let hold = param(cfg, "holdBars", 1.0).max(1.0) as usize;
+    let exit_on_bear = param(cfg, "exitOnBear", 1.0) >= 0.5;
+
+    let any_bear = |x: &CandleCtx, t: usize| candles::bearish().any(|p| x.fires(p, t));
+    let entry = |x: &CandleCtx, t: usize| -> Option<Vec<&'static str>> {
+        let fired: Vec<&'static Pattern> = selected.iter().copied().filter(|p| x.fires(p, t)).collect();
+        if fired.len() < min_bull
+            || (no_bear && any_bear(x, t))
+            || (need_support && !fired.iter().any(|p| x.at_support(t, p.bars)))
+            || (need_volume && !x.volume_confirmed(t))
+        {
+            return None;
+        }
+        Some(fired.iter().map(|p| p.name).collect())
+    };
+
+    let mut out = Vec::new();
+    for id in &cfg.universe {
+        let Some(m) = markets.get(id) else { continue };
+        if m.kind == MarketKind::Prediction {
+            continue;
+        }
+        let Some(bars) = ohlc.get(id).filter(|b| !b.is_empty()) else { continue };
+        let x = CandleCtx::from_ohlc(bars, CandleParams::default());
+        let last = x.len() - 1;
+        let first = last + 1 - hold.min(x.len());
+        let Some((t, names)) = (first..=last).rev().find_map(|t| entry(&x, t).map(|n| (t, n))) else { continue };
+        if exit_on_bear && (t + 1..=last).any(|u| any_bear(&x, u)) {
+            continue;
+        }
+        let when = match last - t {
+            0 => "on the last closed candle".to_string(),
+            1 => "1 candle ago".to_string(),
+            k => format!("{k} candles ago"),
+        };
+        out.push(SignalIntent {
+            market_id: id.clone(),
+            side: Side::Buy,
+            size: 0.8,
+            confidence: 0.5,
+            reason: format!("candles: {} {when}", names.join(" + ")),
+        });
+    }
+    out
+}
+
 // ── default strategy set ────────────────────────────────────────────────────
 fn p(key: &str, label: &str, value: f64, min: f64, max: f64, step: f64) -> StrategyParam {
     StrategyParam { key: key.into(), label: label.into(), value, min, max, step }
@@ -332,5 +437,34 @@ pub fn default_strategies() -> Vec<StrategyConfig> {
             vec![p("period", "Z period", 30.0, 10.0, 90.0, 5.0), p("k", "Z entry σ", 2.0, 1.0, 3.5, 0.1)], 12.0),
         strat("prob-edge-1", "Prob-Edge · Polymarket", StrategyKind::ProbEdge, Venue::Polymarket, StrategyState::Paper, &["polymarket:fed-cut-2026", "polymarket:btc-100k-2026"],
             vec![p("edgeThreshold", "Min edge (pp)", 0.05, 0.01, 0.3, 0.01)], 15.0),
+        // Ships PAUSED: a research strategy. The lab's candlestick study has
+        // shown no edge for these patterns yet; this is here so the engine can
+        // forward-test a pattern set on paper once someone switches it on.
+        strat("candles-1", "Candlestick Patterns · Crypto (research, no edge yet)", StrategyKind::Candles, Venue::Crypto, StrategyState::Paused, crypto,
+            candle_params(), 10.0),
     ]
+}
+
+/// The bullish patterns the default candle strategy starts with: the classic
+/// reversals. Every other bullish pattern is listed too, switched off.
+const DEFAULT_CANDLE_PATTERNS: [&str; 8] = [
+    "hammer", "engulfing_bull", "piercing", "morning_star", "morning_doji_star",
+    "three_white_soldiers", "three_inside_up", "three_outside_up",
+];
+
+fn candle_params() -> Vec<StrategyParam> {
+    let mut out = vec![
+        p("minBull", "Bullish patterns needed", 1.0, 1.0, 5.0, 1.0),
+        p("noBear", "No bearish pattern on the candle (1 = on)", 1.0, 0.0, 1.0, 1.0),
+        p("atSupport", "Only at support (1 = on)", 0.0, 0.0, 1.0, 1.0),
+        p("volume", "Only on high volume (1 = on)", 0.0, 0.0, 1.0, 1.0),
+        p("holdBars", "Signal stays on for candles", 1.0, 1.0, 20.0, 1.0),
+        p("exitOnBear", "Signal off after a bearish pattern (1 = on)", 1.0, 0.0, 1.0, 1.0),
+    ];
+    for pat in candles::bullish() {
+        let on = if DEFAULT_CANDLE_PATTERNS.contains(&pat.name) { 1.0 } else { 0.0 };
+        let key = format!("{CANDLE_PATTERN_PREFIX}{}", pat.name);
+        out.push(p(&key, &format!("Pattern: {}", pat.name.replace('_', " ")), on, 0.0, 1.0, 1.0));
+    }
+    out
 }

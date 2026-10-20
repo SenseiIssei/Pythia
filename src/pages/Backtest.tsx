@@ -10,7 +10,7 @@ import type { StrategyConfig } from "../types";
 
 export function Backtest() {
   const { strategies } = useStore();
-  const testable = strategies.filter((s) => !["pairs", "prob-edge", "manual", "arb"].includes(s.kind));
+  const testable = strategies.filter((s) => !["pairs", "prob-edge", "manual", "arb", "candles"].includes(s.kind));
   const [stratId, setStratId] = useState(testable[0]?.id ?? "");
   const [bars, setBars] = useState(1500);
   const [seed, setSeed] = useState(12345);
