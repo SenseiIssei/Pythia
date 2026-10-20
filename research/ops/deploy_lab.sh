@@ -8,11 +8,12 @@
 # next to this script, to /opt/pythia-lab). It
 #   1. refuses while a job container (pythia-job-*) is running, unless --force,
 #      so no job sees half old, half new code;
-#   2. rsyncs the code with --delete, excluding results/ and every cache
+#   2. rsyncs the code with --delete, excluding results/, proposals/ (the
+#      research director's drafts, lab.ai.director) and every cache
 #      (excluded paths are neither copied nor deleted on the destination);
-#   3. adds the repo's results/ files the destination does not have yet (a
-#      seed like results/factory_seed, a new study's write-up), never
-#      replacing or deleting one that is there;
+#   3. adds the repo's results/ and proposals/ files the destination does not
+#      have yet (a seed like results/factory_seed, a new study's write-up),
+#      never replacing or deleting one that is there;
 #   4. writes a sha256 manifest of the code sent (.deploy-manifest) and checks
 #      every file on the destination against it;
 #   5. checks that every file results/ had before is still there unchanged
@@ -52,6 +53,7 @@ case "$dest" in /|"") die "refusing destination '$dest'" ;; esac
 # studies wrote on the server; the rest are caches.
 excludes=(
   /results/
+  /proposals/
   /.deploy-manifest
   /.deploy-info
   .git/
@@ -90,11 +92,15 @@ manifest_of() {
 # server's, and nothing there is deleted.
 results_ex=()
 for e in "${excludes[@]}"; do
-  case $e in /results/|/.deploy-*) ;; *) results_ex+=(--exclude "$e") ;; esac
+  case $e in /results/|/proposals/|/.deploy-*) ;; *) results_ex+=(--exclude "$e") ;; esac
 done
 add_results() { # extra rsync flags
   if [ -d "$src/results" ]; then
     rsync -a --ignore-existing "$@" "${results_ex[@]}" "$src/results/" "$dest/results/"
+  fi
+  # The director's drafts the same way: the server's copy always wins.
+  if [ -d "$src/proposals" ]; then
+    rsync -a --ignore-existing "$@" "${results_ex[@]}" "$src/proposals/" "$dest/proposals/"
   fi
 }
 

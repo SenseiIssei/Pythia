@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { CreditCard, RefreshCw, ShieldCheck } from "lucide-react";
 import { Badge, Button, Card, Field, Meter, Notice, inputCls } from "./ui";
-import { aiBudget, capsNote, parseCap, setAiBudget, usd, usedShare, type AiBudget, type AiCaps } from "../aiBudget";
+import {
+  JOB_LABELS,
+  aiBudget,
+  capsNote,
+  jobSpendTable,
+  parseCap,
+  setAiBudget,
+  usd,
+  usedShare,
+  type AiBudget,
+  type AiCaps,
+} from "../aiBudget";
 import { liveMode } from "../live";
 
 type CapKey = keyof AiCaps;
@@ -69,6 +80,8 @@ export function AiBudgetCard() {
     setBusy(false);
   }
 
+  const perJob = b ? jobSpendTable(b.byJobDay, b.spend.day) : null;
+
   const meters = b
     ? [
         { label: "Lifetime", spent: b.spend.lifetimeUsd, cap: b.caps.lifetimeUsd, sub: `${b.spend.calls.toLocaleString("en-US")} calls` },
@@ -85,8 +98,9 @@ export function AiBudgetCard() {
       subtitle={
         b ? (
           <>
-            Own models first; Claude is called rarely: {b.models.routine} for routine calls, {b.models.review} for the weekly review,{" "}
-            {b.models.deep} only when asked for by name. Prices as of {b.pricesAsOf}
+            Own models first; Claude reads and writes for you: {b.models.routine} for the strategy critic and routine calls,{" "}
+            {b.models.review} for the daily brief, the weekly review and your Telegram questions, {b.models.deep} for the
+            weekly research director. Prices as of {b.pricesAsOf}
             {b.pricesEstimate ? " (estimates)" : ""}.
           </>
         ) : (
@@ -170,6 +184,56 @@ export function AiBudgetCard() {
           </span>
         )}
       </div>
+
+      {perJob && perJob.rows.length > 0 && (
+        <div className="mt-5">
+          <div className="mb-2 flex items-baseline justify-between gap-2">
+            <span className="text-[13px] font-semibold text-ink">Spend per job</span>
+            <span className="text-[12px] text-faint">
+              last 7 days (UTC): {usd(perJob.total)}, {usd(perJob.total / perJob.days.length)} a day
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[620px] text-left text-[13px]" aria-label="Claude API spend per job and day">
+              <thead className="text-muted">
+                <tr>
+                  <th className="py-1 pr-3 font-medium">Job</th>
+                  {perJob.days.map((d) => (
+                    <th key={d} className="py-1 pr-2 text-right font-medium">
+                      {d.slice(5)}
+                    </th>
+                  ))}
+                  <th className="py-1 text-right font-medium">7 days</th>
+                </tr>
+              </thead>
+              <tbody className="tabular text-ink">
+                {perJob.rows.map((r) => (
+                  <tr key={r.job} className="border-t border-line">
+                    <td className="py-1 pr-3 whitespace-nowrap" title={`${r.calls} calls`}>
+                      {JOB_LABELS[r.job] ?? r.job}
+                    </td>
+                    {r.perDay.map((v, i) => (
+                      <td key={perJob.days[i]} className={`py-1 pr-2 text-right ${v ? "" : "text-faint"}`}>
+                        {v ? usd(v) : "–"}
+                      </td>
+                    ))}
+                    <td className="py-1 text-right font-semibold">{usd(r.total)}</td>
+                  </tr>
+                ))}
+                <tr className="border-t border-line text-muted">
+                  <td className="py-1 pr-3">All jobs</td>
+                  {perJob.dayTotals.map((v, i) => (
+                    <td key={perJob.days[i]} className="py-1 pr-2 text-right">
+                      {v ? usd(v) : "–"}
+                    </td>
+                  ))}
+                  <td className="py-1 text-right font-semibold text-ink">{usd(perJob.total)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {b && b.recent.length > 0 && (
         <div className="mt-5">

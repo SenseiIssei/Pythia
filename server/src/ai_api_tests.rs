@@ -82,7 +82,10 @@ fn the_request_is_checked_before_anything_is_spent() {
     assert!(with(serde_json::json!({ "model": "claude-sonnet-5-5" })).is_ok());
     assert!(with(serde_json::json!({ "maxTokens": 0 })).is_err());
     assert!(with(serde_json::json!({ "maxTokens": 64000 })).is_err());
+    assert!(with(serde_json::json!({ "maxTokens": 32000, "model": "claude-opus-5-5" })).is_ok(), "the research director");
     assert!(with(serde_json::json!({ "user": "  " })).is_err());
+    assert!(with(serde_json::json!({ "user": "x".repeat(500_000) })).is_ok(), "every study summary fits");
+    assert!(with(serde_json::json!({ "user": "x".repeat(900_000) })).unwrap_err().contains("too long"));
 }
 
 #[test]

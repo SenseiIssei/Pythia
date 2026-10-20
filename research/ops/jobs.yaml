@@ -295,17 +295,37 @@ jobs:
     replaces: pythia-factory
 
   # ---------------------------------------------------------------- AI (Claude API, metered by the engine)
-  # Both call through the autopilot engine's POST /api/ai/complete, which
-  # holds the key and the hard budget (docs/AI.md). Shadow only: nothing they
-  # write sizes, places or vetoes an order.
+  # All of them call through the autopilot engine's POST /api/ai/complete,
+  # which holds the key and the hard budget (docs/AI.md). Shadow only: nothing
+  # they write sizes, places or vetoes an order or changes an autopilot. The
+  # owner's questions in Telegram are a long-running container, not a job
+  # (research/ops/README.md, "Questions in Telegram").
   - name: ai-brief
-    description: daily AI brief (Haiku, batch), 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule
+    description: daily AI brief (Sonnet, batch) over the full fact sheet, 7-day calls for BTC, ETH and the autopilots' coins, scored against a base rate and the momentum rule
     schedule: "20 6 * * *"
     command: python -m lab.ai.brief
     network: host
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 45m
+
+  - name: ai-critic
+    description: daily strategy critic (Haiku, batch), each autopilot's last 24 hours of orders against its rules; posts only findings of medium or high severity, every finding logged and scored
+    schedule: "40 6 * * *"
+    command: python -m lab.ai.critic
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 1g}
+    timeout: 45m
+
+  - name: ai-director
+    description: weekly research director (Opus, effort high, batch) over every study summary and the trial ledger, 3 to 5 pre-registration drafts in proposals/, never run by anything
+    schedule: "0 11 * * 0"
+    command: python -m lab.ai.director
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 2g}
+    timeout: 90m
 
   - name: ai-weekly
     description: weekly AI review (Sonnet, batch) of every study and live result, three proposed experiments in reports/ai/weekly.md, never run by anything
@@ -390,7 +410,7 @@ jobs:
     lock_wait: 5m
 
   # The real-time pump.fun collector is not a scheduled job but the always-on container
-  # pythia-pumpfun-rt (research/ops/README.md, "Real-time pump.fun lab"). These two watch it and use it.
+  # pythia-pumpfun-rt (research/ops/README.md, "Real-time pump.fun lab"). These jobs watch it and use it.
   - name: pumpfun-rt-health
     description: real-time pump.fun collector wrote curve trades and its heartbeat in the last 10 minutes
     schedule: "*/10 * * * *"
@@ -399,15 +419,39 @@ jobs:
     timeout: 2m
     grace: 10m
 
+  # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
+  # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,
+  # which posts the daily card. Paper research only: nothing here can trade.
+  - name: pumpfun-rt-categories
+    description: real-time pump.fun lab, yesterday's new token names into categories (Haiku, batch), cached per mint, model features only
+    schedule: "20 6 * * *"
+    command: python -m lab.pumpfun_rt.categorize
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 2g}
+    timeout: 45m
+    lock: pumpfun-rt-cat
+
   - name: pumpfun-rt-study
-    description: real-time pump.fun lab, PAPER, daily; pre-registered rules, model retrain, reports/pumpfun_rt, card
+    description: real-time pump.fun lab, PAPER, daily; 22 rules and 8 pipeline strategies replayed, the bar, live readiness, decision rows for the retrain
     schedule: "50 6 * * *"
     command: python -m lab.pumpfun_rt.study
     env_file: /etc/pythia/alerts.env
-    resources: {cpus: 2, memory: 6g}
-    timeout: 3h
+    resources: {cpus: 2, memory: 8g}
+    timeout: 4h
     lock: pumpfun-rt
     lock_wait: 10m
+
+  - name: pumpfun-rt-retrain
+    description: real-time pump.fun lab, daily retrain after the study; purged walk-forward per label and feature set, models for the shadow books, the daily card
+    depends_on: [pumpfun-rt-study]
+    depends_within: 6h
+    command: python -m lab.pumpfun_rt.retrain
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 2, memory: 8g}
+    timeout: 3h
+    lock: pumpfun-rt
+    lock_wait: 30m
 
   - name: cs2-collect
     description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist
@@ -592,6 +636,8 @@ backup:
     - trials
     - factory
     - ai
+    - live
+    - pumpfun_rt/categories
     - reports/forward/evidence.json
     - reports/forward/backtest
   # By file or folder name: caches the jobs rebuild (the zoo's panels, the

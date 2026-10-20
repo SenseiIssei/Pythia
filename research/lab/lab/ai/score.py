@@ -220,6 +220,15 @@ def score(rows: list[dict], closes: dict[str, Closes], now_ms: int) -> dict:
         y = [int(r["outcome"]) for r in sel]
         weeks.append({"week": w, "n": len(sel), **{s: metrics([_p(r, s) for r in sel], y)["brier"] for s in SOURCES}})
     models = sorted({str(r.get("model") or "") for r in rows if r.get("model")})
+    # The brief moved from Haiku to Sonnet on 2026-10-20: each model's calls
+    # scored on their own, next to the references on the same calls.
+    by_model = []
+    for m in sorted({str(r.get("model") or "?") for r in done}):
+        sel = [r for r in done if str(r.get("model") or "?") == m]
+        y = [int(r["outcome"]) for r in sel]
+        llm = [_p(r, "llm") for r in sel]
+        by_model.append({"model": m, "n": len(sel), **{s: metrics([_p(r, s) for r in sel], y)["brier"] for s in SOURCES},
+                         "vsMomentum": paired(llm, [_p(r, "momentum") for r in sel], y)["t"]})
     return notify_safe({
         "generated_ms": now_ms,
         "generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -233,6 +242,7 @@ def score(rows: list[dict], closes: dict[str, Closes], now_ms: int) -> dict:
         "verdict": verdict(len(done), vs["momentum"], vs["base"]),
         "reliability": reliability(ps["llm"], ys),
         "by_coin": by_coin,
+        "by_model": by_model,
         "weeks": weeks,
         "recent": [{k: r.get(k) for k in ("date", "coin", "p_llm", "p_base", "p_momentum", "outcome", "reason")}
                    for r in sorted(done, key=lambda r: (r["date"], r["coin"]))[-40:]],

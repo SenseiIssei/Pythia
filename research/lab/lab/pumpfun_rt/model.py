@@ -28,9 +28,22 @@ import numpy as np
 
 from ..data import ROOT
 from . import strategies as S
+from .categorize import CAT_FEATURES
 from .tokens import FEATURES
+from .wallets import WALLET_FEATURES
 
-LABELS = {"dump60": 60, "win30": 30, "win300": 300, "mig": 6 * 3600}
+# label -> how far its window reaches after the decision, in seconds (the purge horizon).
+# The first four are the registered ones; the rest are plan addendum 2's exit models
+# (a landing is at most 3 s after the decision).
+LABELS = {"dump60": 60, "win30": 30, "win300": 300, "mig": 6 * 3600,
+          "sell10_10": 10, "sell10_30": 30, "up10": 13, "up30": 33, "up120": 123}
+# Feature sets in the order they are tried (plan addendum 2): a larger set is adopted for a
+# label only if it beats the set before it out of sample by ADOPT_AUC and in ADOPT_FOLDS of the folds.
+SETS = {"base": list(FEATURES), "wallet": list(FEATURES) + WALLET_FEATURES,
+        "wallet+cat": list(FEATURES) + WALLET_FEATURES + CAT_FEATURES, "cat": list(FEATURES) + CAT_FEATURES}
+ALL_FEATURES = list(FEATURES) + WALLET_FEATURES + CAT_FEATURES
+ADOPT_AUC = 0.005
+ADOPT_FOLDS = 0.8
 EMBARGO_MS = 10 * 60_000
 FOLDS = 5
 MAX_ROWS = 3_000_000
@@ -49,7 +62,7 @@ def as_frame(rows) -> dict[str, np.ndarray]:
     """Columns as numpy arrays, from the engine's table or a list of row dicts."""
     if isinstance(rows, dict):
         return rows
-    cols = ["t"] + list(FEATURES) + list(LABELS)
+    cols = ["t"] + ALL_FEATURES + list(LABELS)
     return {c: np.array([float(r[c]) if r.get(c) is not None else math.nan for r in rows], dtype=float)
             for c in cols}
 
@@ -193,17 +206,21 @@ def labelled(rows, label: str) -> dict[str, np.ndarray]:
     return {k: v[order] for k, v in sub.items()}
 
 
-def evaluate(rows, label: str, folds: int = FOLDS) -> dict:
-    """Purged walk-forward of the model and both baselines on one label."""
+def evaluate(rows, label: str, folds: int = FOLDS, features: list[str] | None = None,
+             max_rows: int | None = None) -> dict:
+    """Purged walk-forward of the model and both baselines on one label (the newest max_rows rows)."""
+    features = list(features or FEATURES)
     rs = labelled(rows, label)
+    if max_rows:
+        rs = {k: v[-max_rows:] for k, v in rs.items()}
     n = len(rs["t"])
-    out = {"label": label, "rows": int(n), "folds": []}
+    out = {"label": label, "rows": int(n), "folds": [], "features": len(features)}
     if n < MIN_TRAIN + MIN_TEST:
         out["verdict"] = f"too few labelled rows ({n})"
         return out
     t = rs["t"]
     y = rs[label]
-    X = matrix(rs)
+    X = matrix(rs, features)
     Xs = matrix(rs, SIMPLE)
     horizon = LABELS[label] * 1000 + EMBARGO_MS
     edges = np.quantile(t, np.linspace(0, 1, folds + 2))
@@ -215,7 +232,7 @@ def evaluate(rows, label: str, folds: int = FOLDS) -> dict:
         tr = t + horizon < lo
         if tr.sum() < MIN_TRAIN or te.sum() < MIN_TEST:
             continue
-        m = fit(X[tr], y[tr])
+        m = fit(X[tr], y[tr], features)
         pm = m.predict(X[te])
         pl_ = logistic(Xs[tr], y[tr], Xs[te])
         base = float(y[tr].mean())
@@ -257,16 +274,53 @@ def importance(m: Fitted, top: int = 12) -> list[tuple[str, float]]:
     return sorted(((f, float(v / tot)) for f, v in zip(m.features, g)), key=lambda x: -x[1])[:top]
 
 
-def train_all(rows, until_ms: int | None = None) -> dict[str, Fitted]:
-    """One calibrated model per label on every labelled row (whose window ends before until_ms)."""
+def train_all(rows, until_ms: int | None = None, sets: dict[str, list[str]] | None = None) -> dict[str, Fitted]:
+    """One calibrated model per label on every labelled row (whose window ends before until_ms),
+    each with its adopted feature set (`sets`, the base features otherwise)."""
     out = {}
     for label, h in LABELS.items():
         rs = labelled(rows, label)
         if until_ms is not None:
             rs = subset(rs, rs["t"] + h * 1000 + EMBARGO_MS < until_ms)
         rs = {k: v[-MAX_ROWS:] for k, v in rs.items()}
-        out[label] = fit(matrix(rs), rs[label])
+        feats = list((sets or {}).get(label) or FEATURES)
+        out[label] = fit(matrix(rs, feats), rs[label], feats)
     return out
+
+
+def better(cand: dict, prev: dict) -> tuple[bool, str]:
+    """Plan addendum 2: a larger feature set is adopted only if its pooled out-of-sample AUC is
+    ADOPT_AUC above the smaller set's and its Brier score is lower in ADOPT_FOLDS of the folds."""
+    pc, pp = (cand.get("pooled") or {}).get("model"), (prev.get("pooled") or {}).get("model")
+    if not pc or not pp:
+        return False, "not enough rows"
+    prev_b = {f["fold"]: f["model"]["brier"] for f in prev.get("folds", [])}
+    both = [(f["model"]["brier"], prev_b[f["fold"]]) for f in cand.get("folds", []) if f["fold"] in prev_b]
+    wins = sum(1 for a, b in both if a < b)
+    d = pc["auc"] - pp["auc"]
+    ok = bool(both) and d >= ADOPT_AUC and wins >= math.ceil(ADOPT_FOLDS * len(both))
+    return ok, f"AUC {d:+.4f}, Brier lower in {wins} of {len(both)} folds"
+
+
+def select(rows, label: str, max_rows: int | None = None, folds: int = FOLDS) -> dict:
+    """Base, then base plus wallet features, then the adopted set plus categories (plan addendum 2).
+    Returns every evaluation, the adopted set's name and features, and the decisions."""
+    evs = {"base": evaluate(rows, label, folds, SETS["base"], max_rows)}
+    adopted = "base"
+    notes = {}
+    evs["wallet"] = evaluate(rows, label, folds, SETS["wallet"], max_rows)
+    ok, why = better(evs["wallet"], evs["base"])
+    notes["wallet"] = ("adopted: " if ok else "kept out: ") + why
+    if ok:
+        adopted = "wallet"
+    nxt = "wallet+cat" if adopted == "wallet" else "cat"
+    evs[nxt] = evaluate(rows, label, folds, SETS[nxt], max_rows)
+    ok, why = better(evs[nxt], evs[adopted])
+    notes["cat"] = ("adopted: " if ok else "kept out: ") + why
+    if ok:
+        adopted = nxt
+    return {"label": label, "evals": evs, "adopted": adopted, "features": SETS[adopted], "notes": notes,
+            "trials": len(evs)}
 
 
 def save(models: dict[str, Fitted], meta: dict, d: Path | None = None) -> Path:

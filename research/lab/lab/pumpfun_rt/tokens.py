@@ -86,7 +86,7 @@ class Token:
                  "hold", "dev_buy_l", "dev_bought", "dev_sold", "dev_sell_t", "dev_dumped", "win", "peak", "last_t",
                  "complete_t", "migrate_t", "pool", "pb", "pq", "amm_fee_bps", "meta", "meta_t", "hist",
                  "irregular", "first_buyers", "first_tok", "last_slot", "amm_slot", "slot_start", "slot_moves",
-                 "breaks", "slot_ok", "slot_flow", "devs")
+                 "breaks", "slot_ok", "slot_flow", "devs", "sold", "early", "amm_win")
 
     def __init__(self, mint: str, creator: str, t: int, tx: int, vs: int, vt: int, rt: int, hist: dict,
                  name: str = "", symbol: str = "", uri: str = "", mayhem: bool = False, cashback: bool = False,
@@ -130,6 +130,9 @@ class Token:
         self.slot_ok = True
         self.slot_flow = 0
         self.breaks = 0
+        self.sold: dict[str, int] = {}             # tokens each wallet sold so far (curve and pool)
+        self.early = None                          # wallets.EarlyBuyers, set by the engine
+        self.amm_win: collections.deque = collections.deque()   # (t, pool SOL after the trade), last 10 s
 
     # ------------------------------------------------------------ events
     def _move(self, slot, buy: bool, sol: int, vs: int, vt: int, rs: int, rt: int) -> None:
@@ -177,6 +180,7 @@ class Token:
             self.n_sells += 1
             self.sell_l += sol
             self.hold[user] = max(0, h - tok)
+            self.sold[user] = self.sold.get(user, 0) + tok
         if user in self.devs:
             if buy:
                 self.dev_bought += tok
@@ -211,13 +215,31 @@ class Token:
         self.pool = pool
 
     def amm(self, buy: bool, base: int, quote: int, pb: int | None, pq: int | None, lpb, pfb, cfb,
-            slot: int | None = None) -> None:
-        """A PumpSwap trade; the event's reserves are before it, so the state after is moved by it."""
+            slot: int | None = None, user: str | None = None, t: int | None = None) -> None:
+        """A PumpSwap trade; the event's reserves are before it, so the state after is moved by it.
+        The trader's holding moves with it (the dev selling in the pool is a dev sale)."""
+        if user:
+            h = self.hold.get(user, 0)
+            if buy:
+                self.hold[user] = h + base
+                if user in self.devs:
+                    self.dev_bought += base
+            else:
+                self.hold[user] = max(0, h - base)
+                self.sold[user] = self.sold.get(user, 0) + base
+                if user in self.devs:
+                    self.dev_sold += base
+                    if self.dev_sell_t is None and t is not None:
+                        self.dev_sell_t = t
         if slot and slot < self.amm_slot:
             return
         self.amm_slot = slot or self.amm_slot
         if pb and pq:
             self.pb, self.pq = (pb - base, pq + quote) if buy else (pb + base, pq - quote)
+            if t is not None:
+                self.amm_win.append((t, self.pq, pq))
+                while self.amm_win and self.amm_win[0][0] < t - WINDOW_MS:
+                    self.amm_win.popleft()
         fee = sum(int(x) for x in (lpb, pfb, cfb) if x is not None)
         if fee:
             self.amm_fee_bps = fee
@@ -264,6 +286,39 @@ class Token:
                 s += 1
                 net -= sol
         return b, s, net / C.LAMPORTS, len(users)
+
+    def net_out(self, t: int, window_ms: int) -> int:
+        """Lamports that left the curve (sells minus buys) in (t - window, t], the trade at t included."""
+        out = 0
+        for ts, buy, sol, _ in reversed(self.win):
+            if ts <= t - window_ms:
+                break
+            if ts <= t:
+                out += -sol if buy else sol
+        return out
+
+    def pool_drop(self, t: int, window_ms: int) -> float:
+        """How far the pool's SOL fell within (t - window, t]: 1 - now / the highest level before."""
+        if not self.amm_win or not self.pq:
+            return 0.0
+        hi = max((max(after, before) for ts, after, before in self.amm_win if t - window_ms < ts <= t), default=0)
+        return max(0.0, 1 - self.pq / hi) if hi > 0 else 0.0
+
+    def top_holders(self, k: int = 10, tok_amt_back: tuple | None = None) -> set:
+        """The k largest holders (the dev included); `tok_amt_back` = (wallet, tokens) ranks that
+        wallet with what it held before the sale just processed."""
+        hold = self.hold
+        if tok_amt_back is not None:
+            w, n = tok_amt_back
+            hold = dict(hold)
+            hold[w] = hold.get(w, 0) + n
+        return set(sorted(hold, key=hold.get, reverse=True)[:k])
+
+    def sell_watch(self) -> dict[str, tuple[int, int]]:
+        """The dev and the top-10 holders now, with (holding, sold so far): the snapshot the
+        sell10 labels compare against."""
+        ws = self.top_holders(10) | self.devs
+        return {w: (self.hold.get(w, 0), self.sold.get(w, 0)) for w in ws if self.hold.get(w, 0) > 0}
 
     def top_shares(self) -> tuple[float, float]:
         """The largest holder's share of the supply, and the top five's (the dev included)."""

@@ -1,9 +1,13 @@
-"""The daily job of the real-time pump.fun lab: the pre-registered rules on the record,
-the model, the report, the pick for the shadow book and the daily card. PAPER ONLY.
+"""The daily job of the real-time pump.fun lab: the pre-registered rules and pipeline
+strategies on the record, live readiness, the report, the pick for the shadow book and
+the decision rows for the retrain. PAPER ONLY.
 
-    python -m lab.pumpfun_rt.study                 run, write reports/pumpfun_rt/, post the card
-    python -m lab.pumpfun_rt.study --no-notify     the same without the card
+    python -m lab.pumpfun_rt.study                 run, write reports/pumpfun_rt/ and the rows
+    python -m lab.pumpfun_rt.study --card          the same and post the daily card here
     python -m lab.pumpfun_rt.study --dry-run       print the report, write and post nothing
+
+The daily card normally comes from the retrain that runs right after (retrain.py),
+so it carries today's models.
 
 Steps (results/pumpfun_realtime_plan.md):
 
@@ -13,14 +17,17 @@ Steps (results/pumpfun_realtime_plan.md):
  3. The split: the first half of the record's time span is in sample, the rest out.
  4. Pass 1 replays the in-sample half with every rule and the model's decision rows;
     the pick is the rule with the best in-sample mean net return per trade (30+
-    trades), and a model for the filter is trained on in-sample rows only.
- 5. Pass 2 replays the whole record with every rule, every rule at doubled latency
-    and at tripled priority fee, and the pick with the model filter; out-of-sample
-    numbers are the trades signalled after the split.
- 6. The bar for every rule; deflation against the lab's global pool.
- 7. The model: purged walk-forward of every label on pass 2's rows, against the base
-    rate and a logistic regression; the daily model is trained on all rows and saved.
- 8. reports/pumpfun_rt/latest.{md,json} (lab feed header), pick.json, the card.
+    trades), and the models for the filters are trained on in-sample rows only.
+ 5. Pass 2 replays the whole record with every rule and every pipeline strategy
+    (pipeline.STRATEGIES, plan addendum 2), each also at doubled latency and at
+    tripled priority fee, and the pick with the model filter; out-of-sample numbers
+    are the trades signalled after the split. The wallet reputation and the name
+    categories are point in time.
+ 6. The bar for every rule and strategy; deflation against the lab's global pool.
+ 7. Readiness for live per strategy (the owner's gate: days, trades, positive with and
+    without broken slots, every gate, 30 days of the live paper shadow in the band).
+ 8. reports/pumpfun_rt/latest.{md,json} (lab feed header), pick.json, the decision
+    rows (<data>/pumpfun_rt/rows/latest.parquet) for retrain.py.
 """
 
 from __future__ import annotations
@@ -32,15 +39,18 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
 from .. import report as rep
 from . import curve as C
 from . import model as M
+from . import pipeline as P
 from . import sim
 from . import store
 from . import strategies as S
+from . import wallets as W
 from .tokens import CreatorBook
 
 NAME = "pumpfun_rt"
@@ -58,6 +68,7 @@ DAY_MS = 86_400_000
 # X9's 29 (model_review, registered the same day); plus the factory's ledger.
 PRIOR_HAND = 907
 LAT_STRESS, PRIO_STRESS = 2.0, 3.0
+SHADOW_DAYS = 30                       # readiness: days of the live paper shadow (plan addendum 2)
 
 
 def _day(ms: int) -> str:
@@ -219,7 +230,16 @@ def gates(name: str, oos: list[dict], oos_failed: list[dict], stress: dict[str, 
 
 # ---------------------------------------------------------------- the run
 
-def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=print) -> dict:
+def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=print, shadow: dict | None = None) -> dict:
+    """Both passes, the bar for every rule and strategy, and the readiness of each strategy."""
+    res = _run(now_ms, window, root, log)
+    if not res.get("empty"):
+        res["shadow"] = shadow if shadow is not None else shadow_stats(res["now_ms"])
+        res["readiness"] = readiness(res["results"], len(res["days"]), res["shadow"])
+    return res
+
+
+def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=print) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     today = _day(now_ms)
     all_days = store.days(root)
@@ -235,9 +255,13 @@ def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pri
     log(f"{NAME}: {len(days)} day(s) {days[0]} to {days[-1]}, split at "
         f"{datetime.fromtimestamp(split / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC, warm-up {len(warm)} day(s)")
 
+    from .categorize import CategoryIndex
+    cats = CategoryIndex.load(None if root is None else Path(root) / "categories")
+
     # pass 1: in sample
     t0 = time.time()
-    e1 = sim.Engine(S.RULES, book=warm_book(warm, root), decisions=True, entry_until=split)
+    e1 = sim.Engine(S.RULES, book=warm_book(warm, root), decisions=True, entry_until=split,
+                    wallets=W.warm(warm, root), cats=cats)
     sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
     is_trades = [t for t in e1.closed if t["signal_ms"] < split]
     by_rule = defaultdict(list)
@@ -262,7 +286,14 @@ def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pri
             costs[v.name] = c
     mr = sim.model_rule(S.BY_NAME[pick])
     rules.append(mr)
-    e2 = sim.Engine(rules, book=warm_book(warm, root), decisions=True, model=M.Filter(is_models), rule_costs=costs)
+    strats = list(P.STRATEGIES)
+    for s in P.STRATEGIES:
+        for suffix, c in (("lat2x", base.scaled(latency=LAT_STRESS)), ("prio3x", base.scaled(priority=PRIO_STRESS))):
+            v = P.variant(s, suffix)
+            strats.append(v)
+            costs[v.name] = c
+    e2 = sim.Engine(rules, book=warm_book(warm, root), decisions=True, model=M.Filter(is_models), rule_costs=costs,
+                    strategies=strats, wallets=W.warm(warm, root), cats=cats, models=is_models)
     sim.replay(days, e2, root)
     log(f"{NAME}: pass 2 in {time.time() - t0:.0f} s, {len(e2.closed)} closed paper trades, {len(e2.rows)} model rows")
 
@@ -274,36 +305,90 @@ def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pri
         fails[f["rule"]]["oos" if f["signal_ms"] >= split else "is"].append(f)
     days_oos = [d for d in days if d >= _day(split)]
     sharpes = []
-    for r in S.RULES + [mr]:
+    judged = S.RULES + [mr] + list(P.STRATEGIES)
+    for r in judged:
         x = daily_pnl(trades[r.name]["is"], fails[r.name]["is"], [d for d in days if d <= _day(split)])
         sharpes.append(float(x.mean() / x.std() * math.sqrt(365)) if len(x) > 1 and x.std() > 0 else 0.0)
     pl_ = pool(sharpes)
     results = []
-    for r in S.RULES + [mr]:
+    for r in judged:
         stress = {} if r is mr else {s: trades[f"{r.name}@{s}"]["oos"] for s in ("lat2x", "prio3x")}
         g = gates(r.name, trades[r.name]["oos"], fails[r.name]["oos"], stress, days_oos, pl_,
                   base=trades[pick]["oos"] if r is mr else None)
         g.update(family=r.family, label=r.label, is_stats=trade_stats(trades[r.name]["is"], fails[r.name]["is"]),
-                 stress={s: trade_stats(v) for s, v in stress.items()})
+                 stress={s: trade_stats(v) for s, v in stress.items()}, pipeline=P.is_strategy(r),
+                 exits=_exit_mix(trades[r.name]["oos"]) if P.is_strategy(r) else None)
         results.append(g)
 
-    # the model
-    t0 = time.time()
     table = e2.table()
-    evals = {label: M.evaluate(table, label) for label in M.LABELS}
-    final = M.train_all(table)
-    imp = {label: M.importance(m) for label, m in final.items()}
-    log(f"{NAME}: model in {time.time() - t0:.0f} s; " + "; ".join(f"{k}: {v['verdict']}" for k, v in evals.items()))
-
     rec = record_stats(days, root)
     return {"now_ms": now_ms, "days": days, "warm": warm, "split_ms": split, "span": (t_lo, t_hi), "pick": pick,
             "picked_by": "in-sample mean" if cands else "default", "results": results, "pool": pl_,
-            "evals": evals, "importance": imp, "models": final, "record": rec,
+            "table": table, "record": rec,
             "counts": {"pass1": dict(e1.counts), "pass2": dict(e2.counts)},
             "skipped": {f"{k[0]}: {k[1]}": v for k, v in e2.skipped.items() if "@" not in k[0]},
             "failed_why": dict(sorted(((w, sum(1 for f in e2.failed if f["why"] == w and "@" not in f["rule"]))
                                        for w in {f["why"] for f in e2.failed}), key=lambda x: -x[1])),
             "rows": len(table["t"])}
+
+
+def _exit_mix(trades: list[dict]) -> dict:
+    out: dict[str, int] = {}
+    for t in trades:
+        out[t.get("exit_why") or "?"] = out.get(t.get("exit_why") or "?", 0) + 1
+    return out
+
+
+# ---------------------------------------------------------------- readiness for real money
+
+def shadow_stats(now_ms: int, path=None) -> dict[str, dict]:
+    """Per book in the live paper ledger (gaps and restarts left out): closed trades, mean return,
+    P&L, and the distinct UTC days with a closed trade."""
+    import csv
+    from .live import paper_dir
+    p = path or (paper_dir() / "ledger.csv")
+    by: dict[str, list] = defaultdict(list)
+    if p.exists():
+        with p.open(newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                if not r.get("exit_ms") or r.get("exit_why") == "restart" or r.get("gap") == "True" \
+                        or not r.get("ret"):
+                    continue
+                try:
+                    by[r["rule"]].append((int(float(r["exit_ms"])), float(r["ret"]), float(r["pnl_sol"])))
+                except ValueError:
+                    continue
+    out = {}
+    for k, v in by.items():
+        days = {_day(t) for t, _, _ in v}
+        out[k] = {"n": len(v), "mean": float(np.mean([x[1] for x in v])), "pnl_sol": float(sum(x[2] for x in v)),
+                  "days": len(days), "first": min(days), "last": max(days)}
+    return out
+
+
+def readiness(results: list[dict], n_days: int, shadow: dict[str, dict]) -> dict[str, dict]:
+    """Plan addendum 2: per pipeline strategy, every condition the live gate reads."""
+    out = {}
+    for r in results:
+        if not r.get("pipeline"):
+            continue
+        s = r["stats"]
+        lo, hi = r["band"]
+        sh = shadow.get(r["rule"]) or {"n": 0, "mean": None, "days": 0}
+        mean, clean = s.get("mean"), s.get("mean_clean")
+        core = [g for k, g in r["gates"].items() if k in ("g1_mean_band", "g2_size", "g3_stress", "g4_breadth",
+                                                           "g5_deflated")]
+        in_band = (sh["mean"] is not None and math.isfinite(lo) and math.isfinite(hi) and lo <= sh["mean"] <= hi)
+        c = {"days": n_days, "days_ok": n_days >= GATE_DAYS,
+             "trades": s["n"], "trades_ok": s["n"] >= GATE_TRADES,
+             "mean": mean, "mean_clean": clean,
+             "positive_ok": bool(mean is not None and mean > 0 and clean is not None and clean > 0),
+             "gates_ok": bool(core and all(core)),
+             "shadow_days": sh["days"], "shadow_trades": sh["n"], "shadow_mean": sh["mean"],
+             "shadow_ok": bool(sh["days"] >= SHADOW_DAYS and sh["mean"] is not None and sh["mean"] > 0 and in_band)}
+        c["ready"] = all(c[k] for k in ("days_ok", "trades_ok", "positive_ok", "gates_ok", "shadow_ok"))
+        out[r["rule"]] = c
+    return out
 
 
 def span_of(days: list[str], root=None) -> tuple[int, int]:
@@ -351,16 +436,24 @@ def report(res: dict) -> tuple[dict, str]:
     passed = [r for r in results if r["passes"]]
     pick = res["pick"]
     pick_row = next(r for r in results if r["rule"] == pick)
-    mrow = next(r for r in results if r["rule"].endswith("+model"))
-    useful = [k for k, v in res["evals"].items() if v.get("useful")]
     ps = pick_row["stats"]
+    msum = models_summary()
+    ready = res.get("readiness") or {}
+    strat_rows = [r for r in results if r.get("pipeline")]
+    best = max(strat_rows, key=lambda r: r["stats"].get("mean") if r["stats"].get("mean") is not None else -9,
+               default=None)
     head = (f"Paper only. {n_days} day(s) of record: {tok:,} tokens ({plain:,} on plain SOL curves), {trd:,} curve "
             f"trades, {done:,} completed curves. ")
     if early:
         head += (f"Too early to judge (the bar needs {GATE_DAYS} days and {GATE_TRADES} out-of-sample trades). ")
     head += (f"Out of sample the pick {pick} made {ps['n']} trades, mean {pct(ps.get('mean'))} per trade, "
-             f"{ps['pnl_sol']:+.2f} SOL; {len(passed)} of {len(results)} rules pass the bar. "
-             f"The model beats its baselines on {len(useful)} of {len(res['evals'])} labels.")
+             f"{ps['pnl_sol']:+.2f} SOL; {len(passed)} of {len(results)} rules and strategies pass the bar")
+    if best is not None:
+        bs = best["stats"]
+        head += (f"; the best pipeline strategy {best['rule']} {pct(bs.get('mean'))} per trade over {bs['n']} trades")
+    head += f"; {sum(1 for v in ready.values() if v['ready'])} of {len(ready)} strategies are ready for live."
+    if msum:
+        head += f" The models beat their baselines on {msum.get('useful', 0)} of {len(msum.get('labels', {}))} labels."
     status = "bad" if not passed else "watch"
     items = [{"label": "Record", "value": f"{n_days} d", "status": "watch" if early else "ok",
               "detail": f"{tok:,} tokens, {plain:,} plain, {trd:,} trades, {done:,} completed, gaps {gap_min:.0f} min",
@@ -373,17 +466,23 @@ def report(res: dict) -> tuple[dict, str]:
                                 f"{pct(s.get('median'))}, {s.get('rugs', 0)} at -90 % or worse, "
                                 f"{s['pnl_sol']:+.2f} SOL" + (" (the pick)" if r["rule"] == pick else ""),
                       "link": "study:pumpfun_realtime", "importance": 30 if r["rule"] == pick else 20})
-    for k, v in res["evals"].items():
-        pm = (v.get("pooled") or {}).get("model") or {}
-        items.append({"label": f"Model {k}", "value": f"AUC {pm.get('auc', float('nan')):.3f}" if pm else "n/a",
-                      "status": "ok" if v.get("useful") else "watch", "detail": v.get("verdict", ""),
-                      "importance": 15})
+    for k, v in (msum.get("labels") or {}).items():
+        items.append({"label": f"Model {k}", "value": f"AUC {v['auc']:.3f}" if v.get("auc") is not None else "n/a",
+                      "status": "ok" if v.get("useful") else "watch",
+                      "detail": f"{v.get('set')}: {v.get('verdict', '')}", "importance": 15})
+    for k, v in ready.items():
+        items.append({"label": f"Live readiness {k}", "value": "ready" if v["ready"] else "not ready",
+                      "status": "ok" if v["ready"] else "watch",
+                      "detail": f"{v['days']}/{GATE_DAYS} days, {v['trades']}/{GATE_TRADES} trades out of sample, "
+                                f"mean {pct(v['mean'])} (unbroken {pct(v['mean_clean'])}), gates "
+                                f"{'pass' if v['gates_ok'] else 'fail'}, shadow {v['shadow_days']}/{SHADOW_DAYS} days",
+                      "importance": 12})
     data = {**rep.feed_header("pump.fun real-time lab", status, head, items, updated_ms=res["now_ms"]),
             "caveat": "Paper only: no wallet, no key, no transaction. Fills are modelled with latency; real "
                       "snipers are faster.",
             "pick": pick, "split_ms": res["split_ms"], "days": days, "record": rec,
             "results": [{k: v for k, v in r.items()} for r in results], "pool": res["pool"],
-            "evals": res["evals"], "importance": res["importance"], "skipped": res["skipped"],
+            "readiness": ready, "shadow": res.get("shadow") or {}, "models": msum, "skipped": res["skipped"],
             "failed_why": res["failed_why"], "counts": res["counts"]}
     md = [f"# pump.fun real-time lab ({_day(res['now_ms'])})", "", data["caveat"], "", head, "",
           "## Record", "", "| day | tokens | plain SOL | curve trades | completed | migrated | gaps | gap min |",
@@ -424,79 +523,63 @@ def report(res: dict) -> tuple[dict, str]:
     p = res["pool"]
     md += ["", f"Deflation pool: {p['n_total']} trials ({p['hand_trials']} hand, {p['factory_trials']} factory, "
            f"{p['mine']} here); the best of that many noise strategies shows an annual Sharpe of about "
-           f"{p['sr0_annual']:.2f}.", "", "Failed buys: " + ", ".join(f"{k} {v}" for k, v in res["failed_why"].items()),
-           "", "## Model", "", "| label | rows | folds | model AUC | Brier skill | ECE | logistic AUC | base rate | "
-           "verdict |", "|---|---|---|---|---|---|---|---|---|"]
-    for k, v in res["evals"].items():
-        po = v.get("pooled") or {}
-        pm, plg = po.get("model") or {}, po.get("logistic") or {}
-        md.append(f"| {k} | {v['rows']} | {len(v.get('folds', []))} | {pm.get('auc', float('nan')):.3f} | "
-                  f"{pm.get('brier_skill', float('nan')):+.3f} | {pm.get('ece', float('nan')):.3f} | "
-                  f"{plg.get('auc', float('nan')):.3f} | {pm.get('rate', float('nan')):.3f} | {v.get('verdict', '')} |")
-    for k, imp in res["importance"].items():
-        if imp:
-            md.append(f"\n{k} top features (gain): " + ", ".join(f"{f} {g:.2f}" for f, g in imp[:8]))
+           f"{p['sr0_annual']:.2f}.", "", "Failed buys: " + ", ".join(f"{k} {v}" for k, v in res["failed_why"].items())]
+    if strat_rows:
+        md += ["", "## Pipeline strategies: how they exited (out of sample)", "",
+               "| strategy | " + " | ".join(EXIT_KINDS) + " |", "|---|" + "---|" * len(EXIT_KINDS)]
+        for r in strat_rows:
+            mix = r.get("exits") or {}
+            md.append(f"| {r['rule']} | " + " | ".join(str(mix.get(k, 0)) for k in EXIT_KINDS) + " |")
+    md += ["", "## Readiness for real money", "",
+           "The owner's gate (plan addendum 2): 14+ days, 300+ trades out of sample, mean above 0 with and without "
+           "broken slots, every gate g1 to g5, and 30+ days of the live paper shadow with its mean inside the "
+           "replay's band. Ready is necessary, not sufficient; the live executor stays locked without the owner's "
+           "switch and written confirmation.", "",
+           "| strategy | days | trades | mean | mean, unbroken | gates | shadow days | shadow trades | shadow mean | "
+           "ready |", "|---|---|---|---|---|---|---|---|---|---|"]
+    for k, v in ready.items():
+        md.append(f"| {k} | {v['days']} | {v['trades']} | {pct(v['mean'])} | {pct(v['mean_clean'])} | "
+                  f"{'pass' if v['gates_ok'] else 'fail'} | {v['shadow_days']} | {v['shadow_trades']} | "
+                  f"{pct(v['shadow_mean'])} | {'yes' if v['ready'] else 'no'} |")
+    md += ["", "## Model", "", "The daily retrain (reports/pumpfun_rt/models.md) runs after this study on its decision "
+           "rows; what it said last:", ""]
+    if msum:
+        md += ["| label | set | AUC | Brier skill | logistic AUC | verdict |", "|---|---|---|---|---|---|"]
+        for k, v in msum.get("labels", {}).items():
+            md.append(f"| {k} | {v.get('set')} | {pct_auc(v.get('auc'))} | {pct_auc(v.get('brier_skill'), True)} | "
+                      f"{pct_auc(v.get('logistic_auc'))} | {v.get('verdict', '')} |")
+    else:
+        md.append("No retrain yet.")
     return data, "\n".join(md) + "\n"
+
+
+EXIT_KINDS = ("take", "take_part", "stop", "trail", "dev_sell", "pull", "risk", "time", "kill", "stuck")
+
+
+def pct_auc(x, signed: bool = False) -> str:
+    if x is None or (isinstance(x, float) and not math.isfinite(x)):
+        return "n/a"
+    return f"{x:+.3f}" if signed else f"{x:.3f}"
+
+
+def models_summary() -> dict:
+    """The last retrain's summary (reports/pumpfun_rt/models.json), {} before the first."""
+    try:
+        return json.loads((rep.REPORTS / NAME / "models.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
 
 # ---------------------------------------------------------------- the daily card
 
-def shadow_yesterday(now_ms: int) -> dict[str, dict]:
-    """The live shadow books' trades closed yesterday (UTC), from the paper ledger."""
-    import csv
-    from .live import paper_dir
-    y = _day(now_ms - DAY_MS)
-    out: dict[str, list] = defaultdict(list)
-    p = paper_dir() / "ledger.csv"
-    if p.exists():
-        with p.open(newline="", encoding="utf-8") as fh:
-            for r in csv.DictReader(fh):
-                if not r.get("exit_ms") or r.get("exit_why") == "restart" or r.get("gap") == "True":
-                    continue
-                if _day(int(float(r["exit_ms"]))) == y:
-                    out[r["rule"]].append({"ret": float(r["ret"]), "pnl_sol": float(r["pnl_sol"])})
-    return {k: {"n": len(v), "wins": sum(t["ret"] > 0 for t in v), "mean": float(np.mean([t["ret"] for t in v])),
-                "pnl_sol": float(sum(t["pnl_sol"] for t in v))} for k, v in out.items()}
-
-
-def daily_card(res: dict, shadow: dict, lang: str = "en"):
-    from ..ops import i18n, notify
-    t = i18n.t
-    y = _day(res["now_ms"] - DAY_MS)
-    rec = res["record"].get(y) or {"tokens": 0, "trades": 0, "completed": 0}
-    lines = [t("prt_daily_record", lang, tokens=i18n.num(rec["tokens"], 0, lang),
-               trades=i18n.num(rec["trades"], 0, lang), done=i18n.num(rec["completed"], 0, lang))]
-    rows = []
-    for book in (res["pick"], res["pick"] + "+model"):
-        s = shadow.get(book)
-        if s and s["n"]:
-            lines.append(t("prt_daily_book", lang, book=book, n=s["n"], hit=s["wins"],
-                           mean=i18n.frac_pct(s["mean"], 1, lang), pnl=f"{i18n.num(s['pnl_sol'], 3, lang, True)} SOL"))
-            rows.append([book[:22], str(s["n"]), i18n.frac_pct(s["mean"], 1, lang),
-                         i18n.num(s["pnl_sol"], 3, lang, True)])
-        else:
-            lines.append(t("prt_daily_book_none", lang, book=book))
-    n_days = len(res["days"])
-    passed = sum(1 for r in res["results"] if r["passes"])
-    if n_days < GATE_DAYS:
-        lines.append(t("prt_daily_early", lang, days=n_days))
-    lines.append(t("prt_daily_study", lang, passed=passed, rules=len(res["results"]), pick=res["pick"]))
-    lines.append(t("prt_daily_model", lang, useful=sum(1 for v in res["evals"].values() if v.get("useful")),
-                   labels=len(res["evals"])))
-    parts = [notify.Line(" ".join(lines[1:]))]
-    if rows:
-        parts.insert(0, notify.Table([t("prt_col_book", lang), t("prt_col_closed", lang), t("prt_col_mean", lang),
-                                      t("prt_col_pnl", lang)], rows))
-    parts.append(notify.Line(t("prt_caveat", lang)))
-    return notify.Card("⚡", t("prt_daily_title", lang, day=i18n.iso_day(y, lang)), lines[0], parts,
-                       footer=t("prt_footer", lang))
-
+# The daily card is posted by the retrain right after this study (card.py), so it carries
+# today's models as well as today's study.
 
 def save_outputs(res: dict, data: dict, md: str) -> None:
+    from .retrain import save_rows
     rep.write(NAME, md, data)
-    M.save(res["models"], {"trained_ms": res["now_ms"], "rows": res["rows"], "days": res["days"],
-                           "evals": {k: {kk: vv for kk, vv in v.items() if kk != "folds"} for k, v in res["evals"].items()},
-                           "features": res["models"][next(iter(res["models"]))].features if res["models"] else []})
+    if res.get("table") is not None and len(res["table"].get("t", [])):
+        save_rows(res["table"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"]})
     d = rep.REPORTS / NAME
     d.mkdir(parents=True, exist_ok=True)
     (d / "pick.json").write_text(json.dumps({"pick": res["pick"], "picked_by": res["picked_by"],
@@ -507,7 +590,7 @@ def save_outputs(res: dict, data: dict, md: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--no-notify", action="store_true")
+    ap.add_argument("--card", action="store_true", help="post the daily card here (normally the retrain does)")
     ap.add_argument("--window", type=int, default=WINDOW_DAYS)
     a = ap.parse_args(argv)
     res = run(window=a.window)
@@ -519,9 +602,10 @@ def main(argv: list[str] | None = None) -> int:
         print(md)
         return 0
     save_outputs(res, data, md)
-    if not a.no_notify:
+    if a.card:
+        from . import card
         from ..ops import notify
-        notify.send("trending", [daily_card(res, shadow_yesterday(res["now_ms"]), notify.alert_lang())],
+        notify.send("trending", [card.daily_card_now(res["now_ms"], models_summary() or None, notify.alert_lang())],
                     now=res["now_ms"])
     return 0
 
