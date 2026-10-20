@@ -15,6 +15,9 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | hourly :07 | EXPERIMENT 4h trend with pullback maker entries: the hour's fills and exits, a decision at every 4h close, the signal when the holdings change (`lab.paper.trend4h`, about 67 public kline requests) | `jobs.yaml`: `paper-trend4h` |
 | every 5 min | pump.fun PAPER watcher: new Solana pools from GeckoTerminal, graduations bought on paper by three pre-registered rules, marks from DexScreener, rugs as total losses, winner and loser alerts (`lab.paper.pumpfun`, under a minute; at most 8 GeckoTerminal and 20 DexScreener calls; reads only, no wallet) | `jobs.yaml`: `pumpfun` |
 | 06:40 | pump.fun daily report, `reports/pumpfun/latest.json` and its card (`lab.paper.pumpfun --report`, seconds) | `jobs.yaml`: `pumpfun-report` |
+| always | real-time pump.fun collector, PAPER: every creation, curve trade, completion and migration from a public Solana RPC websocket into `/srv/pythia-data/pumpfun_rt/`, plus the live shadow book (`lab.pumpfun_rt.collector`; reads only, no wallet) | container `pythia-pumpfun-rt`, see "Real-time pump.fun lab" |
+| every 10 min | real-time pump.fun collector health: trades and heartbeat written in the last 10 minutes, else red and one alert (`lab.pumpfun_rt.health`, seconds) | `jobs.yaml`: `pumpfun-rt-health` |
+| 06:50 | real-time pump.fun study: the 22 pre-registered rules and the model filter replayed with latency fills, the model retrained, `reports/pumpfun_rt/latest.json`, the shadow book's pick and the daily card (`lab.pumpfun_rt.study`; minutes per recorded day, at most the last 14) | `jobs.yaml`: `pumpfun-rt-study` |
 | 04:45 | M4 shadow paper book, market-neutral on perps (`lab.paper.m4_ls`, 2 to 3 minutes, about 3 GB; rebuilds the xs_daily panel and retrains weekly into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-m4` |
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
 | 06:15 | forward report: every paper book and autopilot against its backtest (`lab.paper.forward_report`, seconds) | `/etc/cron.d/pythia-forward` |
@@ -184,6 +187,59 @@ file is checked against a sha256 manifest (`.deploy-manifest`) and every file
 fails. `.deploy-info` says which commit is deployed. `--dry-run` shows what
 would change. Rebuild the image only when `research/lab/requirements.txt`
 changed: `docker build -t pythia-lab /opt/pythia-lab`.
+
+## Real-time pump.fun lab
+
+PAPER ONLY. `lab.pumpfun_rt` (see `research/lab/results/pumpfun_realtime.md`
+and the pre-registration `results/pumpfun_realtime_plan.md`) records pump.fun
+as it happens and trades it on paper. Nothing in it holds a wallet, reads a
+key, signs or sends anything; the only network it uses is a public Solana RPC
+websocket (`logsSubscribe`, read only) and, for the cards, Telegram.
+
+The collector is a long-running container, not a job. The image needs
+`aiohttp` (in `research/lab/requirements.txt` since this lab), so rebuild it
+once, then start the container:
+
+```bash
+docker build -t pythia-lab /opt/pythia-lab
+docker run -d --name pythia-pumpfun-rt --restart unless-stopped --cpus 1 --memory 1g \
+  --env-file /etc/pythia/alerts.env \
+  --log-opt max-size=20m --log-opt max-file=3 \
+  -v /srv/pythia-data:/data -v /opt/pythia-lab:/app \
+  pythia-lab python -m lab.pumpfun_rt.collector
+```
+
+The lab code is bind-mounted, so after `research/ops/deploy_lab.sh` a
+`docker restart pythia-pumpfun-rt` loads the new code (the restart is a gap in
+the record, which is written down and left out of every number). Logs:
+`docker logs --tail 50 pythia-pumpfun-rt`; state:
+`/srv/pythia-data/pumpfun_rt/heartbeat.json` (streams connected, messages,
+rows per table, reconnects, gaps, the shadow book's totals).
+
+Settings (environment, all optional; put them in an env file and add
+`--env-file` to the run line):
+
+| Variable | Default | What |
+|---|---|---|
+| `PYTHIA_SOLANA_WS` | `wss://api.mainnet-beta.solana.com` | the websocket; the public endpoint documents 40 connections, 100 requests per 10 s and 100 MB per 30 s per IP and says it is not meant for production. A provider's URL (with its key) can replace it; the key then lives only in that env file |
+| `PYTHIA_PF_LINKS`, `PYTHIA_PF_AMM_LINKS` | 3, 2 | parallel connections per program; the public endpoint drops a connection every minute or two, the record has a gap only when all of a program's links are down at once |
+| `PYTHIA_PF_AMM` | 1 | 0 stops the PumpSwap stream (the post-migration rules then have no data) and halves the traffic |
+| `PYTHIA_PF_BUDGET_GB` | 40 | size budget of `pumpfun_rt/`; whole days go, oldest first |
+| `PYTHIA_PF_SHADOW` | 1 | 0 records only, without the live shadow book |
+| `PYTHIA_PF_META` | 0 | 1 fetches token metadata from public IPFS gateways (they refuse it at present) |
+| `PYTHIA_PF_PRIORITY_SOL`, `PYTHIA_PF_LAT_MEDIAN_MS`, `PYTHIA_PF_LAT_LO_MS`, `PYTHIA_PF_LAT_HI_MS` | 0.001, 1000, 400, 3000 | the fill model's priority fee and latency (changing them changes the study; the plan's numbers are the defaults) |
+
+Traffic: about 1 MB/s inbound (90 GB a day), most of it failed transactions
+the endpoint sends along and PumpSwap trades of old pools that are dropped.
+Disk: a day of record is a few hundred MB of parquet; the study merges a
+finished day's part files into one file per table.
+
+The two jobs (`pumpfun-rt-health`, `pumpfun-rt-study`) are in `jobs.yaml`.
+Try the study by hand without posting:
+
+```bash
+docker run --rm --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.study --dry-run
+```
 
 ## Health check
 

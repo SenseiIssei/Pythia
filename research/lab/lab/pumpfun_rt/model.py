@@ -45,9 +45,24 @@ def model_dir() -> Path:
     return ROOT / "models" / "pumpfun_rt"
 
 
-def matrix(rows: list[dict], features: list[str] = FEATURES) -> np.ndarray:
-    return np.array([[float(r.get(f, math.nan)) if r.get(f) is not None else math.nan for f in features]
-                     for r in rows], dtype=float)
+def as_frame(rows) -> dict[str, np.ndarray]:
+    """Columns as numpy arrays, from the engine's table or a list of row dicts."""
+    if isinstance(rows, dict):
+        return rows
+    cols = ["t"] + list(FEATURES) + list(LABELS)
+    return {c: np.array([float(r[c]) if r.get(c) is not None else math.nan for r in rows], dtype=float)
+            for c in cols}
+
+
+def matrix(rows, features: list[str] = FEATURES) -> np.ndarray:
+    fr = as_frame(rows)
+    n = len(fr["t"]) if "t" in fr else len(next(iter(fr.values())))
+    return np.column_stack([fr[f] if f in fr else np.full(n, math.nan) for f in features]) if n else \
+        np.zeros((0, len(features)))
+
+
+def subset(fr: dict[str, np.ndarray], mask: np.ndarray) -> dict[str, np.ndarray]:
+    return {k: v[mask] for k, v in fr.items()}
 
 
 # ---------------------------------------------------------------- metrics
@@ -169,19 +184,25 @@ def logistic(Xtr: np.ndarray, ytr: np.ndarray, Xte: np.ndarray) -> np.ndarray:
     return lr.predict_proba((prep(Xte) - mu) / sd)[:, 1]
 
 
-def labelled(rows: list[dict], label: str) -> list[dict]:
-    return [r for r in rows if r.get(label) is not None and not (isinstance(r[label], float) and math.isnan(r[label]))]
+def labelled(rows, label: str) -> dict[str, np.ndarray]:
+    """The rows with this label known, in time order."""
+    fr = as_frame(rows)
+    m = np.isfinite(fr[label])
+    sub = subset(fr, m)
+    order = np.argsort(sub["t"], kind="stable")
+    return {k: v[order] for k, v in sub.items()}
 
 
-def evaluate(rows: list[dict], label: str, folds: int = FOLDS) -> dict:
+def evaluate(rows, label: str, folds: int = FOLDS) -> dict:
     """Purged walk-forward of the model and both baselines on one label."""
-    rs = sorted(labelled(rows, label), key=lambda r: r["t"])
-    out = {"label": label, "rows": len(rs), "folds": []}
-    if len(rs) < MIN_TRAIN + MIN_TEST:
-        out["verdict"] = f"too few labelled rows ({len(rs)})"
+    rs = labelled(rows, label)
+    n = len(rs["t"])
+    out = {"label": label, "rows": int(n), "folds": []}
+    if n < MIN_TRAIN + MIN_TEST:
+        out["verdict"] = f"too few labelled rows ({n})"
         return out
-    t = np.array([r["t"] for r in rs])
-    y = np.array([r[label] for r in rs], dtype=float)
+    t = rs["t"]
+    y = rs[label]
     X = matrix(rs)
     Xs = matrix(rs, SIMPLE)
     horizon = LABELS[label] * 1000 + EMBARGO_MS
@@ -236,15 +257,15 @@ def importance(m: Fitted, top: int = 12) -> list[tuple[str, float]]:
     return sorted(((f, float(v / tot)) for f, v in zip(m.features, g)), key=lambda x: -x[1])[:top]
 
 
-def train_all(rows: list[dict], until_ms: int | None = None) -> dict[str, Fitted]:
+def train_all(rows, until_ms: int | None = None) -> dict[str, Fitted]:
     """One calibrated model per label on every labelled row (whose window ends before until_ms)."""
     out = {}
     for label, h in LABELS.items():
         rs = labelled(rows, label)
         if until_ms is not None:
-            rs = [r for r in rs if r["t"] + h * 1000 + EMBARGO_MS < until_ms]
-        rs = sorted(rs, key=lambda r: r["t"])[-MAX_ROWS:]
-        out[label] = fit(matrix(rs), np.array([r[label] for r in rs], dtype=float))
+            rs = subset(rs, rs["t"] + h * 1000 + EMBARGO_MS < until_ms)
+        rs = {k: v[-MAX_ROWS:] for k, v in rs.items()}
+        out[label] = fit(matrix(rs), rs[label])
     return out
 
 

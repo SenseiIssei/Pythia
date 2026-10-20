@@ -317,9 +317,12 @@ def test_a_completed_curve_sells_into_the_pool():
     cv.buy(T0 + 3_000, 30 * SOL, BUYERS[1])                 # and completes the curve
     eng.complete(T0 + 3_000, MINT)
     eng.migrate(T0 + 3_001, MINT, POOL, 85 * SOL, 206_900_000 * 10 ** 6)
+    eng.advance(T0 + 32_500)                                # the time stop fires; the pool is not seen yet
+    assert not eng.closed                                   # the sale waits for a pool state
+    eng.amm(T0 + 40_000, MINT, True, 10 ** 9, SOL // 100, 206_900_000 * 10 ** 6, 67 * SOL, 20, 5, 80, slot=2000)
     eng.advance(T0 + 60_000)
     t = eng.closed[0]
-    assert t["migrated"] and t["proceeds_sol"] > 0 and t["exit_why"] == "time"
+    assert t["migrated"] and t["proceeds_sol"] > 0 and t["exit_why"] == "time" and t["exit_ms"] > T0 + 40_000
 
 
 def test_a_late_delivery_does_not_rewind_the_curve():
@@ -329,6 +332,20 @@ def test_a_late_delivery_does_not_rewind_the_curve():
     tok.trade(T0 + 20, 3, True, SOL, 10, BUYERS[1], 35 * SOL, 1_030 * 10 ** 12, 5 * SOL, 750 * 10 ** 12, 95, 30,
               slot=15)
     assert tok.vs == 40 * SOL and tok.n_buys == 2 and len(tok.buyers) == 2
+
+
+def test_trades_of_one_slot_chain_up_in_any_order_and_a_missing_one_is_counted():
+    tok = T.Token(MINT, DEV, T0, 1, 30 * SOL, 1_073 * 10 ** 12, C.INITIAL_RT, {})
+    a = (True, SOL, 31 * SOL)                               # 30 -> 31
+    b = (True, 2 * SOL, 33 * SOL)                           # 31 -> 33
+    for buy, sol, vs in (b, a):                             # the later one arrives first
+        tok.trade(T0, 2, buy, sol, 1, BUYERS[0], vs, 1_000 * 10 ** 12, vs - 30 * SOL, 700 * 10 ** 12, 95, 30,
+                  slot=10)
+    assert tok.vs == 33 * SOL and tok.slot_ok
+    tok.trade(T0, 3, True, SOL, 1, BUYERS[1], 40 * SOL, 990 * 10 ** 12, 10 * SOL, 690 * 10 ** 12, 95, 30, slot=11)
+    assert tok.vs == 40 * SOL and not tok.slot_ok          # 33 -> 39 was never received
+    tok.trade(T0, 4, False, SOL, 1, BUYERS[1], 39 * SOL, 991 * 10 ** 12, 9 * SOL, 691 * 10 ** 12, 95, 30, slot=12)
+    assert tok.breaks == 1 and tok.slot_ok
 
 
 def test_gaps_drop_what_overlaps_them():
@@ -349,11 +366,11 @@ def test_decision_rows_and_labels():
     cv.sell(T0 + 12_000, dev_tok, DEV)                      # dumps between the 10 s and 70 s marks
     eng.advance(T0 + 400_000)
     eng.finish(T0 + 400_000)
-    rows = {r["off"]: r for r in eng.rows}
+    rows = {r["off"]: r for r in eng.row_dicts()}
     assert rows[10]["unique_buyers"] >= 12 and rows[10]["dump60"] == 1.0
     assert rows[3]["dev_hold_share"] > 0 and math.isnan(rows[30]["dump60"])   # nothing left to dump at 30 s
     assert rows[10]["win30"] in (0.0, 1.0) and rows[10]["net30"] < 0          # bought into a dump
-    assert all(set(T.FEATURES) <= set(r) for r in eng.rows)
+    assert all(set(T.FEATURES) <= set(r) for r in eng.row_dicts())
 
 
 def test_the_stream_order_is_chain_order(tmp_path, monkeypatch):

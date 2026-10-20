@@ -341,6 +341,26 @@ jobs:
     lock: pumpfun
     lock_wait: 5m
 
+  # The real-time pump.fun collector is not a scheduled job but the always-on container
+  # pythia-pumpfun-rt (research/ops/README.md, "Real-time pump.fun lab"). These two watch it and use it.
+  - name: pumpfun-rt-health
+    description: real-time pump.fun collector wrote curve trades and its heartbeat in the last 10 minutes
+    schedule: "*/10 * * * *"
+    command: python -m lab.pumpfun_rt.health
+    resources: {cpus: 1, memory: 256m}
+    timeout: 2m
+    grace: 10m
+
+  - name: pumpfun-rt-study
+    description: real-time pump.fun lab, PAPER, daily; pre-registered rules, model retrain, reports/pumpfun_rt, card
+    schedule: "50 6 * * *"
+    command: python -m lab.pumpfun_rt.study
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 2, memory: 6g}
+    timeout: 3h
+    lock: pumpfun-rt
+    lock_wait: 10m
+
   - name: cs2-collect
     description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist
     schedule: "12 * * * *"
@@ -493,6 +513,10 @@ datasets:
     description: daily flow data and the Deribit option snapshots; kept forever
     path: flow
     max_gb: 5
+  - name: pumpfun-rt
+    description: the real-time pump.fun record; the collector deletes whole days, oldest first, over PYTHIA_PF_BUDGET_GB (40)
+    path: pumpfun_rt
+    max_gb: 45
   - name: job-runs
     description: the runner's own run records, by month
     path: _ops/runs

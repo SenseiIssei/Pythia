@@ -85,7 +85,8 @@ class Token:
                  "rs", "rt", "rt0", "p0", "fee_bps", "n_buys", "n_sells", "buy_l", "sell_l", "buyers", "traders",
                  "hold", "dev_buy_l", "dev_bought", "dev_sold", "dev_sell_t", "dev_dumped", "win", "peak", "last_t",
                  "complete_t", "migrate_t", "pool", "pb", "pq", "amm_fee_bps", "meta", "meta_t", "hist",
-                 "irregular", "first_buyers", "first_tok", "last_slot", "amm_slot")
+                 "irregular", "first_buyers", "first_tok", "last_slot", "amm_slot", "slot_start", "slot_moves",
+                 "breaks", "slot_ok", "slot_flow")
 
     def __init__(self, mint: str, creator: str, t: int, tx: int, vs: int, vt: int, rt: int, hist: dict,
                  name: str = "", symbol: str = "", uri: str = "", mayhem: bool = False, cashback: bool = False,
@@ -121,15 +122,41 @@ class Token:
         self.first_tok = 0
         self.last_slot = 0
         self.amm_slot = 0
+        self.slot_start = (self.vs, self.vt, self.rs, self.rt)
+        self.slot_moves: dict[int, tuple] = {}
+        self.slot_ok = True
+        self.slot_flow = 0
+        self.breaks = 0
 
     # ------------------------------------------------------------ events
+    def _move(self, slot, buy: bool, sol: int, vs: int, vt: int, rs: int, rt: int) -> None:
+        """The curve after a trade. Trades of one slot may arrive in any order (and volume bots buy
+        and sell the same amount back and forth, so states repeat), so the state after the slot is
+        the received state whose virtual SOL equals the slot's starting SOL plus every received
+        trade's SOL: conservation, which holds in any order. When no received state matches, a
+        trade of the slot was missed: `breaks` counts it at the end of the slot and the latest
+        state is taken as is. A late delivery of an older slot never rewinds the curve."""
+        post = (vs, vt, rs, rt)
+        if slot and slot < self.last_slot:
+            return
+        if not slot or slot > self.last_slot:
+            if not self.slot_ok:
+                self.breaks += 1
+            self.slot_start = (self.vs, self.vt, self.rs, self.rt)
+            self.slot_moves = {}
+            self.slot_flow = 0
+            self.last_slot = slot or self.last_slot
+        self.slot_flow += sol if buy else -sol
+        self.slot_moves[vs] = post
+        hit = self.slot_moves.get(self.slot_start[0] + self.slot_flow)
+        self.slot_ok = hit is not None
+        self.vs, self.vt, self.rs, self.rt = hit if hit is not None else post
+
     def trade(self, t: int, tx: int, buy: bool, sol: int, tok: int, user: str, vs: int, vt: int, rs: int, rt: int,
               fb: int | None, cfb: int | None, book: CreatorBook | None = None, slot: int | None = None) -> None:
         if vs and self.vs and fb == 0:
             self.irregular = True                         # fee-free trades with erratic reserves: not a plain curve
-        if not slot or slot >= self.last_slot:            # a late delivery of an older slot keeps the newer curve
-            self.vs, self.vt, self.rs, self.rt = vs, vt, rs, rt
-            self.last_slot = slot or self.last_slot
+        self._move(slot, buy, sol, vs, vt, rs, rt)
         if fb is not None:
             self.fee_bps = int(fb) + int(cfb or 0)
         self.last_t = t
@@ -174,10 +201,11 @@ class Token:
                 book.migrated(self.creator)
 
     def migrated(self, t: int, pool: str, sol: int | None, tok: int | None) -> None:
+        """The curve moved into a PumpSwap pool. The pool's state comes only from its own trades:
+        the migration's amounts are before the migration fee (the pool opens with about 67 of the
+        85 SOL the event names), so they would overstate what a sale there pays."""
         self.migrate_t = t
         self.pool = pool
-        if sol and tok:
-            self.pb, self.pq = int(tok), int(sol)
 
     def amm(self, buy: bool, base: int, quote: int, pb: int | None, pq: int | None, lpb, pfb, cfb,
             slot: int | None = None) -> None:

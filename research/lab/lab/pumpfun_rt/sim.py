@@ -19,9 +19,11 @@ import heapq
 import math
 from collections import Counter
 
+import numpy as np
+
 from . import curve as C
 from . import strategies as S
-from .tokens import CreatorBook, Token
+from .tokens import FEATURES, CreatorBook, Token
 
 OFFSETS = (3, 10, 30, 60, 120, 300)          # model decision points, seconds after creation
 LABEL_HORIZONS = (30, 300)                    # the round-trip labels, seconds
@@ -77,7 +79,7 @@ class Engine:
         self.closed: list[dict] = []
         self.failed: list[dict] = []
         self.skipped: Counter = Counter()
-        self.rows: list[dict] = []
+        self.rows = Rows()
         self.rows_by_mint: dict[str, list[int]] = {}
         self.gaps: list[tuple[int, int]] = []
         self.counts: Counter = Counter()
@@ -212,8 +214,8 @@ class Engine:
         if r.family != "E" and not tok.tradeable():
             self.skipped[(r.name, "not a plain SOL curve")] += 1
             return
-        if r.family == "E" and (not tok.pq or tok.quote is not None):
-            self.skipped[(r.name, "no pool state")] += 1
+        if r.family == "E" and (tok.quote is not None or tok.mayhem or tok.irregular):
+            self.skipped[(r.name, "not a plain SOL pool")] += 1
             return
         if self.open_n[r.name] >= S.MAX_OPEN:
             self.skipped[(r.name, "book full")] += 1
@@ -277,7 +279,7 @@ class Engine:
             self.failed.append(f)
             return
         p.update(state="open", tokens=got, land_ms=int(at), entry_price=tok.price() if r.family != "E" else
-                 C.price(tok.pq, tok.pb), cost_l=STAKE + tx, exiting=False)
+                 C.price(tok.pq, tok.pb), cost_l=STAKE + tx, exiting=False, breaks0=tok.breaks)
         self.push(at + r.hold_s * 1000, "time_stop", pid)
         self.check_exit(pid, at)
 
@@ -353,6 +355,7 @@ class Engine:
         rec.update(exit_ms=int(at), exit_price=tok.price() if tok else 0.0, proceeds_sol=v / C.LAMPORTS,
                    pnl_sol=pnl / C.LAMPORTS, ret=pnl / STAKE, hold_s=(at - p["land_ms"]) / 1000,
                    dev_dumped=bool(tok and tok.dev_dumped and not p.get("dev_dumped_at_entry")),
+                   breaks=(tok.breaks - p.get("breaks0", 0)) if tok else 0,
                    migrated=bool(tok and tok.complete_t is not None and tok.complete_t <= at),
                    lat_buy_ms=p["lat_buy"], slip=(p["entry_price"] / p["signal_price"] - 1)
                    if p.get("signal_price") else None)
@@ -370,13 +373,7 @@ class Engine:
         f = tok.features(int(at))
         row = {"mint": mint, "t": int(at), "created_ms": tok.t0, "off": off, **f,
                "dev_hold_at": tok.dev_hold(), "dev_sold_at": tok.dev_sold, "price_at": tok.price()}
-        for h in LABEL_HORIZONS:
-            row[f"r{h}"] = float("nan")
-            row[f"win{h}"] = float("nan")
-        row["dump60"] = float("nan")
-        row["mig"] = float("nan")
-        idx = len(self.rows)
-        self.rows.append(row)
+        idx = self.rows.new(row)
         self.rows_by_mint.setdefault(mint, []).append(idx)
         lat = self.costs.latency("model", mint, off, "buy")
         self.push(at + lat, "label_buy", idx)
@@ -384,9 +381,13 @@ class Engine:
             self.push(at + h * 1000, "label_price", (idx, h))
             self.push(at + h * 1000 + self.costs.latency("model", mint, off, h, "sell"), "label_sell", (idx, h))
         self.push(at + 60_000, "label_dump", idx)
+        self.push(at + max(LABEL_HORIZONS) * 1000 + self.costs.lat_hi_ms + 1_000, "label_pack", idx)
+
+    def _a_label_pack(self, at, idx) -> None:
+        self.rows.pack(idx)
 
     def _a_label_buy(self, at, idx) -> None:
-        row = self.rows[idx]
+        row = self.rows.get(idx)
         tok = self.tokens.get(row["mint"])
         if tok is None or not tok.on_curve or tok.price() > row["price_at"] * (1 + self.costs.slip_tol):
             row["_tokens"] = 0                              # the buy fails: a loss of the transaction fee
@@ -395,14 +396,14 @@ class Engine:
 
     def _a_label_price(self, at, data) -> None:
         idx, h = data
-        row = self.rows[idx]
+        row = self.rows.get(idx)
         tok = self.tokens.get(row["mint"])
         if tok is not None and tok.price() > 0 and row["price_at"] > 0:
             row[f"r{h}"] = math.log(tok.price() / row["price_at"])
 
     def _a_label_sell(self, at, data) -> None:
         idx, h = data
-        row = self.rows[idx]
+        row = self.rows.get(idx)
         tx = self.costs.tx_lamports()
         n = row.get("_tokens", 0)
         if not n:
@@ -417,7 +418,7 @@ class Engine:
         row[f"win{h}"] = float(net > 0)
 
     def _a_label_dump(self, at, idx) -> None:
-        row = self.rows[idx]
+        row = self.rows.get(idx)
         tok = self.tokens.get(row["mint"])
         if tok is None or row["dev_hold_at"] <= 0:
             return
@@ -432,22 +433,33 @@ class Engine:
             self.push(at + IDLE_MS, "evict", mint)
             return
         self._settle_mig(tok, at)
+        self._quality(tok)
         del self.tokens[mint]
         self.entered.pop(mint, None)
         self.rows_by_mint.pop(mint, None)
+
+    def _quality(self, tok: Token) -> None:
+        """How complete the record of plain curves is: slots whose trades did not chain up."""
+        if tok.tradeable():
+            self.counts["curve_trades"] += tok.n_buys + tok.n_sells
+            self.counts["curve_breaks"] += tok.breaks + (0 if tok.slot_ok else 1)
+            self.counts["curve_tokens"] += 1
+            self.counts["curve_tokens_broken"] += int(tok.breaks > 0 or not tok.slot_ok)
 
     def _settle_mig(self, tok: Token, at: float) -> None:
         horizon = tok.t0 + MIG_LABEL_H * 3_600_000
         done = tok.complete_t is not None and tok.complete_t <= horizon
         known = done or at >= horizon
         for idx in self.rows_by_mint.get(tok.mint, ()):
-            self.rows[idx]["mig"] = float(done) if known else float("nan")
+            self.rows.set(idx, "mig", float(done) if known else float("nan"))
 
     def finish(self, t_end: float) -> None:
         """End of data: run what is due, settle what can be settled; open positions stay open."""
         self.advance(t_end)
         for tok in self.tokens.values():
             self._settle_mig(tok, t_end)
+            self._quality(tok)
+        self.rows.pack_all()
         self.counts["open_at_end"] = sum(1 for p in self.positions.values() if p["state"] == "open")
         self.counts["pending_at_end"] = sum(1 for p in self.positions.values() if p["state"] == "pending")
 
@@ -461,9 +473,87 @@ class Engine:
         before = len(self.closed)
         self.closed = [c for c in self.closed if not c.get("gap") and not hit(c["signal_ms"], c["exit_ms"])]
         self.counts["closed_dropped_gap"] += before - len(self.closed)
-        before = len(self.rows)
-        self.rows = [r for r in self.rows if not hit(r["created_ms"], r["t"] + 360_000)]
-        self.counts["rows_dropped_gap"] += before - len(self.rows)
+        self.counts["rows_dropped_gap"] += self.rows.drop(self.gaps, 360_000)
+
+    def table(self) -> dict:
+        """The decision rows as columns (numpy arrays), for the model."""
+        return self.rows.frame()
+
+    def row_dicts(self) -> list[dict]:
+        fr = self.rows.frame()
+        n = len(fr["t"])
+        return [{c: float(v[i]) for c, v in fr.items()} for i in range(n)]
+
+
+ROW_COLS = (["t", "created_ms", "off"] + FEATURES
+            + [f"{k}{h}" for h in LABEL_HORIZONS for k in ("r", "win", "net")] + ["dump60", "mig"])
+_COL = {c: i for i, c in enumerate(ROW_COLS)}
+CHUNK = 65_536
+
+
+class Rows:
+    """Decision rows: a dict while its labels come in (about five minutes), then packed into a
+    float array, so a fortnight of rows fits in a few hundred MB. The 6-hour completion label
+    is written into the packed row when the token settles."""
+
+    def __init__(self):
+        self.pending: dict[int, dict] = {}
+        self.chunks: list[np.ndarray] = []
+        self.n = 0
+        self.dropped: np.ndarray | None = None
+
+    def __len__(self) -> int:
+        return self.n
+
+    def new(self, row: dict) -> int:
+        idx = self.n
+        self.n += 1
+        self.pending[idx] = row
+        return idx
+
+    def get(self, idx: int) -> dict:
+        return self.pending.get(idx) or {}
+
+    def _arr(self, idx: int) -> np.ndarray:
+        k = idx // CHUNK
+        while len(self.chunks) <= k:
+            self.chunks.append(np.full((CHUNK, len(ROW_COLS)), np.nan))
+        return self.chunks[k]
+
+    def set(self, idx: int, col: str, v: float) -> None:
+        p = self.pending.get(idx)
+        if p is not None:
+            p[col] = v
+        else:
+            self._arr(idx)[idx % CHUNK, _COL[col]] = v
+
+    def pack(self, idx: int) -> None:
+        row = self.pending.pop(idx, None)
+        if row is None:
+            return
+        self._arr(idx)[idx % CHUNK] = [float(row[c]) if row.get(c) is not None else np.nan for c in ROW_COLS]
+
+    def pack_all(self) -> None:
+        for idx in list(self.pending):
+            self.pack(idx)
+
+    def drop(self, gaps: list[tuple[int, int]], tail_ms: int) -> int:
+        """Mark rows whose window [created, t + tail] overlaps a gap; returns how many."""
+        self.pack_all()
+        fr = self.frame(raw=True)
+        a, b = fr["created_ms"], fr["t"] + tail_ms
+        bad = np.zeros(len(a), dtype=bool)
+        for g0, g1 in gaps:
+            bad |= (g0 < b) & (a < g1)
+        self.dropped = bad if self.dropped is None else (self.dropped | bad)
+        return int(bad.sum())
+
+    def frame(self, raw: bool = False) -> dict[str, np.ndarray]:
+        self.pack_all()
+        A = np.vstack(self.chunks)[:self.n] if self.chunks else np.zeros((0, len(ROW_COLS)))
+        if not raw and self.dropped is not None:
+            A = A[~self.dropped[:len(A)]]
+        return {c: A[:, i] for c, i in _COL.items()}
 
 
 # ---------------------------------------------------------------- replaying the store

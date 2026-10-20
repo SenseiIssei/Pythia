@@ -50,6 +50,7 @@ BOOK_SOL = 10.0
 MIN_IS_TRADES = 30
 GATE_DAYS, GATE_TRADES = 14, 300
 BOOT_DRAWS = 5000
+MIN_BLOCKS = 10
 DAY_MS = 86_400_000
 # The lab's pool before this study (see the plan): 377 hand trials to C16 at the published
 # bar (Sharpe 2.43 over 377), 231 counted in parallel, overnight 39, book_portfolio 30,
@@ -107,6 +108,9 @@ def trade_stats(trades: list[dict], failed: list[dict] | None = None) -> dict:
                q05=float(np.quantile(rets, 0.05)), q95=float(np.quantile(rets, 0.95)), best=float(rets.max()),
                worst=float(rets.min()), rugs=int((rets <= -0.9).sum()),
                dev_dumped=float(np.mean([bool(t.get("dev_dumped")) for t in trades])),
+               broken=float(np.mean([bool(t.get("breaks")) for t in trades])),
+               mean_clean=float(np.mean([t["ret"] for t in trades if not t.get("breaks")]))
+               if any(not t.get("breaks") for t in trades) else None,
                hold_s=float(np.median([t["hold_s"] for t in trades])),
                why={w: sum(1 for t in trades if t.get("exit_why") == w) for w in ("take", "stop", "time", "stuck")})
     return out
@@ -130,6 +134,8 @@ def boot_mean(trades: list[dict], draws: int = BOOT_DRAWS, seed: int = 7) -> tup
     for t in trades:
         by[t["signal_ms"] // 3_600_000].append(t["ret"])
     blocks = [np.array(v) for v in by.values()]
+    if len(blocks) < MIN_BLOCKS:
+        return math.nan, math.nan                    # a band from a handful of hours means nothing
     sums = np.array([b.sum() for b in blocks])
     lens = np.array([len(b) for b in blocks])
     rng = np.random.default_rng(seed)
@@ -238,7 +244,7 @@ def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pri
     cands = [(trade_stats(v)["mean"], trade_stats(v)["pnl_sol"], r) for r, v in by_rule.items()
              if len(v) >= MIN_IS_TRADES]
     pick = max(cands)[2] if cands else S.DEFAULT_PICK
-    is_models = M.train_all(e1.rows, until_ms=split)
+    is_models = M.train_all(e1.table(), until_ms=split)
     log(f"{NAME}: pass 1 in {time.time() - t0:.0f} s, {len(is_trades)} in-sample trades, pick {pick}"
         + ("" if cands else f" (no rule had {MIN_IS_TRADES} in-sample trades: the default)"))
 
@@ -281,8 +287,9 @@ def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pri
 
     # the model
     t0 = time.time()
-    evals = {label: M.evaluate(e2.rows, label) for label in M.LABELS}
-    final = M.train_all(e2.rows)
+    table = e2.table()
+    evals = {label: M.evaluate(table, label) for label in M.LABELS}
+    final = M.train_all(table)
     imp = {label: M.importance(m) for label, m in final.items()}
     log(f"{NAME}: model in {time.time() - t0:.0f} s; " + "; ".join(f"{k}: {v['verdict']}" for k, v in evals.items()))
 
@@ -294,7 +301,7 @@ def run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pri
             "skipped": {f"{k[0]}: {k[1]}": v for k, v in e2.skipped.items() if "@" not in k[0]},
             "failed_why": dict(sorted(((w, sum(1 for f in e2.failed if f["why"] == w and "@" not in f["rule"]))
                                        for w in {f["why"] for f in e2.failed}), key=lambda x: -x[1])),
-            "rows": len(e2.rows)}
+            "rows": len(table["t"])}
 
 
 def span_of(days: list[str], root=None) -> tuple[int, int]:
@@ -382,18 +389,25 @@ def report(res: dict) -> tuple[dict, str]:
     for d, v in rec.items():
         md.append(f"| {d} | {v['tokens']:,} | {v['plain']:,} | {v['trades']:,} | {v['completed']} | {v['migrated']} | "
                   f"{v['gaps']} | {v['gap_min']:.1f} |")
+    q = res["counts"]["pass2"]
+    if q.get("curve_trades"):
+        md += ["", f"Completeness: {q['curve_trades']:,} trades on {q.get('curve_tokens', 0):,} plain curves; "
+               f"{q.get('curve_breaks', 0):,} slots did not chain up (a trade the stream missed), "
+               f"{q.get('curve_tokens_broken', 0) / max(1, q.get('curve_tokens', 1)):.0%} of the curves have at "
+               f"least one. A trade whose hold spans one is marked; their share is the \"broken\" column."]
     md += ["", f"Split at {datetime.fromtimestamp(res['split_ms'] / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC; "
            f"pick {pick} ({res['picked_by']}).", "",
            "## Rules out of sample", "",
            "| rule | trades | failed | hit | mean | median | 5 % | 95 % | worst | best | at -90 % | dev dumped | "
-           "P&L SOL | band of mean | lat 2x | prio 3x | in-sample mean (n) | passes |",
-           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+           "broken | mean, unbroken | P&L SOL | band of mean | lat 2x | prio 3x | in-sample mean (n) | passes |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         s, b, i = r["stats"], r["band"], r["is_stats"]
         stx = r.get("stress") or {}
         md.append(f"| {r['rule']} | {s['n']} | {s['failed']} | {pct(s.get('hit'))} | {pct(s.get('mean'))} | "
                   f"{pct(s.get('median'))} | {pct(s.get('q05'))} | {pct(s.get('q95'))} | {pct(s.get('worst'))} | "
-                  f"{pct(s.get('best'))} | {s.get('rugs', 0)} | {pct(s.get('dev_dumped'))} | {s['pnl_sol']:+.3f} | "
+                  f"{pct(s.get('best'))} | {s.get('rugs', 0)} | {pct(s.get('dev_dumped'))} | "
+                  f"{pct(s.get('broken'))} | {pct(s.get('mean_clean'))} | {s['pnl_sol']:+.3f} | "
                   f"{pct(b[0])} to {pct(b[1])} | {pct((stx.get('lat2x') or {}).get('mean'))} | "
                   f"{pct((stx.get('prio3x') or {}).get('mean'))} | {pct(i.get('mean'))} ({i['n']}) | "
                   f"{'yes' if r['passes'] else 'no'} |")

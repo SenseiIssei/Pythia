@@ -136,6 +136,7 @@ class SlotClock:
         self.keep = keep
         self.first: dict[int, int] = {}
         self.slots: list[int] = []
+        self.latest = 0                      # the newest slot time: the shadow book's clock
 
     def stamp(self, slot: int | None, recv_ms: int) -> int:
         if not slot:
@@ -151,6 +152,7 @@ class SlotClock:
             f = recv_ms
             self.slots.append(slot)
         self.first[slot] = f
+        self.latest = max(self.latest, f)
         if len(self.slots) > self.keep:
             drop = self.slots[: self.keep // 2]
             self.slots = self.slots[self.keep // 2:]
@@ -426,8 +428,8 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
         try:
             while not stop.is_set():
                 await asyncio.sleep(1.0)
-                if shadow is not None:
-                    shadow.tick(now_ms())
+                if shadow is not None:                     # the book runs on chain time, not the wall clock
+                    shadow.tick(col.clock.latest or now_ms())
                 if writer is not None and writer.due():
                     batches = writer.take()
                     await asyncio.to_thread(writer.write, batches)

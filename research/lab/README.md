@@ -172,6 +172,7 @@ prints both and writes nothing.
 | `memes_rotation`, `memes_tsmom` | `lab.paper.memes` | EXPERIMENTS (failed deflation): W7's memecoin rotation and momentum on Alpaca's six memecoins, Alpaca taker fills; signals marked experimental, autopilot-only | 04:30 |
 | `trend4h_pullback` | `lab.paper.trend4h` | EXPERIMENT (failed deflation): W15's 4h trend with pullback maker entries on the Alpaca coins, the study's fill model on live 1h bars; a new signal only when the holdings change | hourly, decisions every 4 h |
 | `pumpfun_migration`, `pumpfun_filtered`, `pumpfun_filtered_quick` | `lab.paper.pumpfun` | EXPERIMENT, paper only: pump.fun graduations from public data, AMM fills, rugs as total losses; no engine signal, no wallet | every 5 min, report 06:40 |
+| `<pick>` and `<pick>+model` (`paper/pumpfun_rt/ledger.csv`) | `lab.pumpfun_rt.live` | EXPERIMENT, paper only: the real-time pump.fun study's pick, with and without the model filter, traded on the live stream by the study's own fill model, in shadow; no engine signal, no wallet | always (inside the collector), study 06:50 |
 
 Experimental books (`lab.paper.experimental`) carry `"experimental": true`
 in their signal and evidence. The engine never runs them on its own, the
@@ -210,6 +211,47 @@ each: "on track", "below the backtest's range after N days, worth watching",
   (from one day on), and realised against modelled slippage per route from
   the orders the engine still keeps. An autopilot that runs a single lab book
   is held against that book's band.
+
+## Real-time pump.fun lab
+
+`lab.pumpfun_rt` asks whether any fast, very risky pump.fun rule has an edge
+once our fills are honest, which the 5-minute watcher cannot see. PAPER ONLY:
+no wallet, no key, nothing that signs or sends; a test checks the package.
+
+- **Collector** (`collector.py`, an always-on container, see
+  `research/ops/README.md`): a public Solana RPC websocket, `logsSubscribe` on
+  the pump.fun and PumpSwap programs, their Anchor events decoded
+  (`events.py`, layouts from pump.fun's public IDLs). Every creation (dev buy,
+  creator, metadata uri, flags), every curve trade (time, side, SOL, tokens,
+  trader, reserves, fees), completions, migrations, the first day of each
+  migrated pool, and gaps, as daily parquet under `<data>/pumpfun_rt/`
+  (`store.py`, size budget). Not PumpPortal (token trades need a key tied to a
+  funded wallet), not pump.fun's own API (its terms forbid bots).
+- **Chain time.** The endpoint delivers a third of the trades more than a
+  second late and some out of order, so everything is ordered by slot and
+  timed by the slot (the earliest receive time of that slot or a later one),
+  never by an event's own receive time.
+- **Fills** (`curve.py`, `sim.py`): our order lands 0.4 to 3 s after the
+  signal (lognormal, median 1 s), at the curve after every trade before it,
+  with the token's fee (1.25 %), 0.001 SOL priority fee and the curve's own
+  slippage; a buy fails above 30 % slippage or on a completed curve; a sale
+  takes whatever the curve or the pool pays when it lands.
+- **Rules** (`strategies.py`): 22 pre-registered rules in five families
+  (snipe at creation, first-seconds pressure, momentum, pre-migration,
+  post-migration) plus the model filter, 23 trials in the global pool.
+- **Model** (`model.py`): features at 3 s to 5 min after creation, labels
+  "creator dumps within 60 s", "completes within 6 h", "a paper round trip
+  over 30 s / 5 min wins after costs"; LightGBM, isotonic calibration, purged
+  walk-forward against the base rate and a logistic baseline; retrained daily
+  into `<data>/models/pumpfun_rt/`.
+- **Daily study** (`study.py`, job `pumpfun-rt-study`): both passes, the bar,
+  `reports/pumpfun_rt/latest.json` (lab feed header), `pick.json` for the
+  shadow book, and a daily card in English or German. Big paper winners
+  (+200 %, at most one an hour) are posted by the shadow book itself.
+
+See `results/pumpfun_realtime_plan.md` (pre-registration) and
+`results/pumpfun_realtime.md` (method, terms, first results, what would be
+needed before real money is even discussed).
 
 ## Pokemon cards
 
