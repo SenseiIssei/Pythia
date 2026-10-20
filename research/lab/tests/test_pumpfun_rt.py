@@ -447,7 +447,8 @@ def test_models_save_and_load(tmp_path):
 # ---------------------------------------------------------------- the plan
 
 def test_the_registered_rules_are_what_the_plan_says():
-    assert len(S.RULES) == 22 and S.N_TRIALS == 23
+    from lab.pumpfun_rt import pipeline as P
+    assert len(S.RULES) == 22 and S.N_TRIALS == 31 and len(P.STRATEGIES) == S.PIPELINE_TRIALS == 8
     assert len({r.name for r in S.RULES}) == 22
     assert {r.family for r in S.RULES} == set("ABCDE")
     assert S.DEFAULT_PICK in S.BY_NAME and S.STAKE_SOL == 0.1
@@ -458,6 +459,8 @@ def test_the_registered_rules_are_what_the_plan_says():
 def test_nothing_here_can_touch_a_wallet_or_send_a_transaction():
     import lab.pumpfun_rt as pkg
     for m in pkgutil.iter_modules(pkg.__path__):
+        if m.name == "live_exec":                          # the LOCKED live executor (test_pumpfun_pipeline.py)
+            continue
         src = inspect.getsource(__import__(f"lab.pumpfun_rt.{m.name}", fromlist=["x"])).lower()
         for word in ("sendtransaction", "signtransaction", "keypair", "private_key", "privatekey", "secret_key",
                      "mnemonic", "seed phrase", "solana.rpc", "solders", "jupiter", "sendrawtransaction",

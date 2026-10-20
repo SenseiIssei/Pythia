@@ -22,11 +22,19 @@ from collections import Counter
 import numpy as np
 
 from . import curve as C
+from . import pipeline as P
 from . import strategies as S
+from . import wallets as W
+from .categorize import CAT_FEATURES
+from .categorize import empty_features as no_cats
 from .tokens import FEATURES, CreatorBook, Token
 
 OFFSETS = (3, 10, 30, 60, 120, 300)          # model decision points, seconds after creation
 LABEL_HORIZONS = (30, 300)                    # the round-trip labels, seconds
+SELL10_HORIZONS = (10, 30)                    # creator or top-10 holder sells within N s (plan addendum 2)
+UP_HORIZONS = (10, 30, 120)                   # price N s after the landing above the landing price
+SELL10_SHARE = 0.25
+ALL_FEATURES = FEATURES + W.WALLET_FEATURES + CAT_FEATURES
 MIG_LABEL_H = 6                               # "completes its curve within 6 hours"
 EVICT_AGE_MS = (MIG_LABEL_H * 3600 + 120) * 1000
 IDLE_MS = 30 * 60_000
@@ -55,19 +63,23 @@ class Engine:
     def __init__(self, rules: list[S.Rule] | None = None, costs: C.Costs | None = None,
                  book: CreatorBook | None = None, decisions: bool = False, model=None, on_close=None,
                  entry_from: int | None = None, entry_until: int | None = None,
-                 rule_costs: dict[str, C.Costs] | None = None):
+                 rule_costs: dict[str, C.Costs] | None = None, strategies: list | None = None,
+                 wallets: W.WalletBook | None = None, cats=None, models: dict | None = None, kill=None):
         self.rules = list(S.RULES if rules is None else rules)
         self.costs = costs or C.Costs()
         self.rule_costs = rule_costs or {}
         self.book = book or CreatorBook()
+        self.wallets = wallets if wallets is not None else W.WalletBook()
+        self.cats = cats                                 # categorize.CategoryIndex or None
+        self.models = models or {}                       # label -> model.Fitted, for the pipeline's filters and exits
         self.decisions_on = decisions
         self.model = model                               # .allow(rule, features) -> (bool, prob)
         self.on_close = on_close
         self.entry_from, self.entry_until = entry_from, entry_until
-        self.rule_by = {r.name: r for r in self.rules}
-        self.by_entry: dict[str, list[S.Rule]] = {}
-        for r in self.rules:
-            self.by_entry.setdefault(r.entry, []).append(r)
+        self.pipes: list[P.Pipeline] = []
+        if strategies:
+            self.pipes.append(P.Pipeline(self, list(strategies), P.PaperExecutor(), name="paper", kill=kill))
+        self._index_rules()
         self.tokens: dict[str, Token] = {}
         self.entered: dict[str, set] = {}
         self.heap: list = []
@@ -84,6 +96,50 @@ class Engine:
         self.gaps: list[tuple[int, int]] = []
         self.counts: Counter = Counter()
         self.next_pid = 0
+
+    def _index_rules(self) -> None:
+        """The rules and every pipe's strategies, by entry kind (a strategy signals once for all pipes)."""
+        allr = list(self.rules)
+        names = {r.name for r in allr}
+        for pipe in self.pipes:
+            for s in pipe.strats.values():
+                if s.name not in names:
+                    allr.append(s)
+                    names.add(s.name)
+        self.rule_by = {r.name: r for r in allr}
+        self.by_entry: dict[str, list[S.Rule]] = {}
+        for r in allr:
+            self.by_entry.setdefault(r.entry, []).append(r)
+
+    def add_pipe(self, pipe: P.Pipeline) -> P.Pipeline:
+        self.pipes.append(pipe)
+        self._index_rules()
+        return pipe
+
+    def new_pid(self) -> int:
+        pid = self.next_pid
+        self.next_pid += 1
+        return pid
+
+    # ------------------------------------------------------------ what a decision may know
+    def features(self, tok: Token, t: int) -> dict:
+        """The token's own features, the wallet reputation of its early buyers and its name's
+        category, all as known at t."""
+        f = tok.features(t)
+        if tok.early is not None:
+            f.update(tok.early.features(self.wallets.get(tok.creator)))
+        else:
+            f.update(W.empty_features())
+        f.update(self.cats.features(tok.name, tok.symbol, t) if self.cats is not None else no_cats())
+        return f
+
+    def prob(self, label: str, f: dict) -> tuple[float, float] | None:
+        """(calibrated probability, training base rate) of a label, None without a trained model."""
+        m = self.models.get(label)
+        if m is None or m.booster is None:
+            return None
+        x = np.array([[float(f.get(k, math.nan)) for k in m.features]], dtype=float)
+        return float(m.predict(x)[0]), float(m.base)
 
     # ------------------------------------------------------------ scheduling
     def push(self, t: float, kind: str, data) -> None:
@@ -108,6 +164,7 @@ class Engine:
         hist = self.book.snapshot(creator, t)
         self.book.created(creator, t)
         tok = Token(mint, creator, t, tx, vs, vt, rt, hist, name, symbol, uri, mayhem, cashback, quote, user)
+        tok.early = W.EarlyBuyers()
         self.tokens[mint] = tok
         self.counts["tokens"] += 1
         self.push(t, "signal_create", mint)
@@ -124,6 +181,15 @@ class Engine:
         if tok is None:
             return
         tok.trade(t, tx, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, self.book, slot)
+        if tok.early is not None and user not in tok.devs:
+            if buy:
+                if t - tok.t0 <= W.EARLY_S * 1000:
+                    tok.early.add(user, t, self.wallets, self.book)
+            else:
+                tok.early.sold(user, t, self.wallets)
+        for pipe in self.pipes:
+            pipe.exec.on_trade("trades", {"t": t, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
+                                          "fee_bps": tok.fee_bps})
         if tok.tradeable():
             for r in self.by_entry.get("momentum", ()):
                 if r.wants_momentum(tok, t):
@@ -133,11 +199,16 @@ class Engine:
                     self.signal(r, tok, t)
         for pid in tuple(self.by_mint.get(mint, ())):
             self.check_exit(pid, t)
+        for pipe in self.pipes:
+            pipe.on_trade(tok, t, buy, user, tok_amt, "curve")
 
     def complete(self, t, mint) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is not None:
+            if tok.complete_t is None and tok.early is not None:
+                for w in tok.early.wallets:
+                    self.wallets.completed(w)
             tok.completed(t, self.book)
 
     def migrate(self, t, mint, pool, sol, tok_amt) -> None:
@@ -146,21 +217,29 @@ class Engine:
         if tok is None:
             return
         if tok.complete_t is None:
+            if tok.early is not None:
+                for w in tok.early.wallets:
+                    self.wallets.completed(w)
             tok.completed(t, self.book)
         tok.migrated(t, pool, sol, tok_amt)
         tok.last_t = t
         for r in self.by_entry.get("migration", ()):
             self.push(t + r.p["delay_s"] * 1000, "signal_rule", (mint, r.name))
 
-    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None) -> None:
+    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is None:
             return
-        tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb, slot)
+        tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb, slot, user, int(t))
         tok.last_t = t
+        for pipe in self.pipes:
+            pipe.exec.on_trade("amm", {"t": t, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
+                                       "user": user, "fee_bps": tok.amm_fee_bps})
         for pid in tuple(self.by_mint.get(mint, ())):
             self.check_exit(pid, t)
+        for pipe in self.pipes:
+            pipe.on_trade(tok, t, buy, user or "", base or 0, "pool")
 
     def meta(self, t, mint, flags: dict) -> None:
         self.advance(t)
@@ -174,6 +253,13 @@ class Engine:
         self.gaps.append((t0, t1))
         for p in self.positions.values():
             p["gap"] = True
+        for pipe in self.pipes:
+            pipe.mark_gap()
+
+    def _a_pipe(self, at, data) -> None:
+        """An action of a pipeline or its paper executor (a landing, a time stop)."""
+        obj, meth, arg = data
+        getattr(obj, meth)(at, arg)
 
     # ------------------------------------------------------------ entries
     def _a_signal_create(self, at, mint) -> None:
@@ -210,6 +296,11 @@ class Engine:
             return
         if self.entry_until is not None and t >= self.entry_until:
             return
+        if P.is_strategy(r):
+            for pipe in self.pipes:
+                if pipe.has(r.name):
+                    pipe.signal(r, tok, t)
+            return
         self.counts["signals"] += 1
         if r.family != "E" and not tok.tradeable():
             self.skipped[(r.name, "not a plain SOL curve")] += 1
@@ -225,7 +316,7 @@ class Engine:
             if self.model is None:
                 self.skipped[(r.name, "no model")] += 1
                 return
-            ok, prob = self.model.allow(r, tok.features(int(t)))
+            ok, prob = self.model.allow(r, self.features(tok, int(t)))
             if not ok:
                 self.skipped[(r.name, "model")] += 1
                 return
@@ -370,9 +461,10 @@ class Engine:
         tok = self.tokens.get(mint)
         if tok is None or not tok.on_curve or not tok.tradeable():
             return
-        f = tok.features(int(at))
+        f = self.features(tok, int(at))
         row = {"mint": mint, "t": int(at), "created_ms": tok.t0, "off": off, **f,
-               "dev_hold_at": tok.dev_hold(), "dev_sold_at": tok.dev_sold, "price_at": tok.price()}
+               "dev_hold_at": tok.dev_hold(), "dev_sold_at": tok.dev_sold, "price_at": tok.price(),
+               "_watch": tok.sell_watch()}
         idx = self.rows.new(row)
         self.rows_by_mint.setdefault(mint, []).append(idx)
         lat = self.costs.latency("model", mint, off, "buy")
@@ -380,8 +472,30 @@ class Engine:
         for h in LABEL_HORIZONS:
             self.push(at + h * 1000, "label_price", (idx, h))
             self.push(at + h * 1000 + self.costs.latency("model", mint, off, h, "sell"), "label_sell", (idx, h))
+        for h in SELL10_HORIZONS:
+            self.push(at + h * 1000, "label_sell10", (idx, h))
         self.push(at + 60_000, "label_dump", idx)
-        self.push(at + max(LABEL_HORIZONS) * 1000 + self.costs.lat_hi_ms + 1_000, "label_pack", idx)
+        last = max(max(LABEL_HORIZONS) * 1000 + self.costs.lat_hi_ms, max(UP_HORIZONS) * 1000 + self.costs.lat_hi_ms)
+        self.push(at + last + 1_000, "label_pack", idx)
+
+    def _a_label_sell10(self, at, data) -> None:
+        """The dev or a top-10 holder at t sold a quarter or more of what it held at t."""
+        idx, h = data
+        row = self.rows.get(idx)
+        tok = self.tokens.get(row.get("mint"))
+        watch = row.get("_watch") or {}
+        if tok is None or not watch:
+            return
+        hit = any(tok.sold.get(w, 0) - s0 >= SELL10_SHARE * h0 for w, (h0, s0) in watch.items())
+        row[f"sell10_{h}"] = float(hit)
+
+    def _a_label_up(self, at, data) -> None:
+        idx, h = data
+        row = self.rows.get(idx)
+        tok = self.tokens.get(row.get("mint"))
+        e = row.get("_entry_p")
+        if tok is not None and e and e > 0 and tok.price() > 0:
+            row[f"up{h}"] = float(tok.price() > e)
 
     def _a_label_pack(self, at, idx) -> None:
         self.rows.pack(idx)
@@ -389,6 +503,10 @@ class Engine:
     def _a_label_buy(self, at, idx) -> None:
         row = self.rows.get(idx)
         tok = self.tokens.get(row["mint"])
+        if tok is not None and tok.price() > 0:
+            row["_entry_p"] = tok.price()                   # the price at the landing, for the up labels
+            for h in UP_HORIZONS:
+                self.push(at + h * 1000, "label_up", (idx, h))
         if tok is None or not tok.on_curve or tok.price() > row["price_at"] * (1 + self.costs.slip_tol):
             row["_tokens"] = 0                              # the buy fails: a loss of the transaction fee
             return
@@ -429,7 +547,7 @@ class Engine:
         tok = self.tokens.get(mint)
         if tok is None:
             return
-        if mint in self.by_mint or at - tok.last_t < IDLE_MS:
+        if mint in self.by_mint or at - tok.last_t < IDLE_MS or any(mint in p.by_mint for p in self.pipes):
             self.push(at + IDLE_MS, "evict", mint)
             return
         self._settle_mig(tok, at)
@@ -485,8 +603,9 @@ class Engine:
         return [{c: float(v[i]) for c, v in fr.items()} for i in range(n)]
 
 
-ROW_COLS = (["t", "created_ms", "off"] + FEATURES
-            + [f"{k}{h}" for h in LABEL_HORIZONS for k in ("r", "win", "net")] + ["dump60", "mig"])
+ROW_COLS = (["t", "created_ms", "off"] + ALL_FEATURES
+            + [f"{k}{h}" for h in LABEL_HORIZONS for k in ("r", "win", "net")] + ["dump60", "mig"]
+            + [f"sell10_{h}" for h in SELL10_HORIZONS] + [f"up{h}" for h in UP_HORIZONS])
 _COL = {c: i for i, c in enumerate(ROW_COLS)}
 CHUNK = 65_536
 
@@ -582,7 +701,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
     elif table == "amm":
         if r.get("mint"):
             eng.amm(r["t"], r["mint"], r["buy"], r["base"], r["quote"], r["pb"], r["pq"], r["lpb"], r["pfb"],
-                    r["cfb"], r.get("slot"))
+                    r["cfb"], r.get("slot"), r.get("user"))
     elif table == "meta":
         eng.meta(r["t"], r["mint"], {k: r.get(k) for k in ("ok", "twitter", "telegram", "website", "desc_len",
                                                              "image")})

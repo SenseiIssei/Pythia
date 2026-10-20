@@ -1,18 +1,24 @@
-"""The live shadow book: the study's pick, and the pick with the model filter in front,
-traded on PAPER as the stream arrives, inside the collector process.
+"""The live shadow books, traded on PAPER as the stream arrives, inside the collector:
+the study's pick and the pick with the model filter in front, and every pipeline
+strategy (pipeline.STRATEGIES) through the same pipeline a live executor would use.
 
-Nothing here can trade: every fill is the engine's curve arithmetic (sim.py),
-written to a paper ledger. The pick comes from <reports>/pumpfun_rt/pick.json
-(the daily study writes it; the default rule until then) and the model from
-<data>/models/pumpfun_rt/; both are re-read every RELOAD_S, so a new day's
-pick or model takes over without a restart. A change of pick starts the books
-afresh (the ledger keeps every closed trade with its rule).
+Nothing here trades by itself: every fill of these books is the engine's curve
+arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The one
+exception is live_exec.attach(), which adds a live book next to the paper ones
+only when every gate of the LOCKED live executor holds (see live_exec.py); with
+any gate shut it adds nothing and says why. The pick comes from
+<reports>/pumpfun_rt/pick.json (the daily study writes it; the default rule
+until then), the models from <data>/models/pumpfun_rt/ and the name categories
+from <data>/pumpfun_rt/categories/; all are re-read every RELOAD_S, so a new
+day's pick or model takes over without a restart. A change of pick starts the
+pick's books afresh (the ledger keeps every closed trade with its rule).
 
 Files under <data>/paper/pumpfun_rt/:
   ledger.csv     every closed paper trade (rule, token, times, prices, return, P&L in SOL)
   failed.csv     every buy that did not fill (slippage, curve completed), with its fee
   state.json     what is open, counts, the books' totals since start
   creators.json  the creator history (written every SAVE_S, read on start)
+  wallets.json   the wallet reputation (the same)
 
 Alerts (category "trending", lab.ops.notify, English or German): a closed
 paper trade at +200 % or better, at most one an hour. Positions open when the
@@ -29,7 +35,9 @@ import time
 from pathlib import Path
 
 from ..data import ROOT
+from . import pipeline as P
 from . import strategies as S
+from . import wallets as W
 from .sim import Engine, feed_row, model_rule
 from .tokens import CreatorBook
 
@@ -77,14 +85,21 @@ def append_csv(path: Path, cols: list[str], rows: list[dict]) -> None:
 
 class Shadow:
     def __init__(self, pick: str, models: dict | None = None, book: CreatorBook | None = None,
-                 alerts: bool = True, now_ms: int | None = None):
+                 alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
+                 strategies: list | None = None, kill=None):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
         rule = S.BY_NAME[pick]
         self.models = models or {}
         self.engine = Engine([rule, model_rule(rule)], book=self.book, decisions=False,
-                             model=Filter(self.models) if self.models else None, on_close=self._closed)
+                             model=Filter(self.models) if self.models else None, on_close=self._closed,
+                             strategies=P.STRATEGIES if strategies is None else strategies,
+                             wallets=wallets, cats=cats, models=self.models, kill=kill or P.KillSwitch())
+        for pipe in self.engine.pipes:
+            pipe.on_close = self._closed
+        self.live = None                                      # live_exec.LiveBook, only when every gate holds
+        self.cats_mtime = 0.0
         self.closed: list[dict] = []
         self.failed_seen = 0
         self.alerts = alerts
@@ -104,15 +119,33 @@ class Shadow:
         except (ValueError, OSError):
             return 0.0
 
+    @staticmethod
+    def _cats_mtime() -> float:
+        from .categorize import cat_dir
+        try:
+            return (cat_dir() / "cats.jsonl").stat().st_mtime
+        except OSError:
+            return 0.0
+
     @classmethod
-    def load(cls) -> "Shadow":
+    def load(cls, live: bool = True) -> "Shadow":
+        from .categorize import CategoryIndex
         from .model import load
         book = None
         try:
             book = CreatorBook.from_json(json.loads((paper_dir() / "creators.json").read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
-        sh = cls(read_pick(), load(), book)
+        wallets = None
+        try:
+            wallets = W.WalletBook.from_json(json.loads((paper_dir() / "wallets.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+        sh = cls(read_pick(), load(), book, wallets=wallets, cats=CategoryIndex.load())
+        sh.cats_mtime = cls._cats_mtime()
+        if live:
+            from . import live_exec
+            sh.live = live_exec.attach(sh.engine)            # None unless every gate of the live executor holds
         try:
             st = json.loads((paper_dir() / "state.json").read_text(encoding="utf-8"))
             lost = [dict(p, exit_why="restart", pnl_sol=None, ret=None) for p in st.get("open") or []]
@@ -121,8 +154,9 @@ class Shadow:
                 sh.totals = st.get("totals") or {}
         except (OSError, ValueError):
             pass
-        print(f"shadow: paper books {sh.pick} and {sh.pick}+model"
-              + ("" if sh.models else " (no model yet: the filtered book skips every signal)"), flush=True)
+        print(f"shadow: paper books {sh.pick} and {sh.pick}+model, and the pipeline strategies "
+              + ", ".join(s.name for s in P.STRATEGIES)
+              + ("" if sh.models else " (no model yet: the model-filtered books skip every signal)"), flush=True)
         return sh
 
     # ------------------------------------------------------------ the stream
@@ -131,6 +165,8 @@ class Shadow:
 
     def tick(self, now_ms: int) -> None:
         self.engine.advance(now_ms)
+        for pipe in self.engine.pipes:                        # the live executor's results, the kill switch
+            pipe.poll(now_ms)
         mono = time.monotonic()
         if mono - self.last_reload >= RELOAD_S:
             self.last_reload = mono
@@ -147,15 +183,18 @@ class Shadow:
             self.pick = pick
             rule = S.BY_NAME[pick]
             self.engine.rules = [rule, model_rule(rule)]
-            self.engine.rule_by = {r.name: r for r in self.engine.rules}
-            self.engine.by_entry = {}
-            for r in self.engine.rules:
-                self.engine.by_entry.setdefault(r.entry, []).append(r)
-            self.totals = {}
+            self.engine._index_rules()
+            self.totals = {k: v for k, v in self.totals.items() if k in P.BY_NAME}
         if mt != self.model_mtime:
             self.model_mtime = mt
             self.models = load()
             self.engine.model = Filter(self.models) if self.models else None
+            self.engine.models = self.models
+        ct = self._cats_mtime()
+        if ct != self.cats_mtime:
+            from .categorize import CategoryIndex
+            self.cats_mtime = ct
+            self.engine.cats = CategoryIndex.load()
 
     def _closed(self, rec: dict) -> None:
         self.closed.append(rec)
@@ -175,6 +214,8 @@ class Shadow:
         e = self.engine
         return {"pick": self.pick, "model": bool(self.models), "open": len(e.positions), "tokens": len(e.tokens),
                 "closed": len(self.closed), "failed": len(e.failed), "totals": self.totals,
+                "pipes": [p.status() for p in e.pipes], "live": self.live is not None,
+                "wallets": len(e.wallets.rows), "categories": len(e.cats) if e.cats is not None else 0,
                 "skipped": {f"{k[0]}: {k[1]}": v for k, v in e.skipped.items()}}
 
     def save(self) -> None:
@@ -189,11 +230,16 @@ class Shadow:
         if len(self.engine.failed) > 10_000:
             self.engine.failed = []
             self.failed_seen = 0
+        keep = ("rule", "family", "mint", "name", "symbol", "created_ms", "signal_ms", "land_ms", "signal_price",
+                "entry_price")
+        opened = [p for p in self.engine.positions.values() if p["state"] == "open"]
+        for pipe in self.engine.pipes:
+            if pipe.name == "paper":
+                opened += [p for p in pipe.pos.values() if p["state"] == "open"]
         st = {"t": int(time.time() * 1000), "pick": self.pick, "started_ms": self.started_ms, "totals": self.totals,
-              "open": [{k: p.get(k) for k in ("rule", "family", "mint", "name", "symbol", "created_ms", "signal_ms",
-                                              "land_ms", "signal_price", "entry_price")}
-                       for p in self.engine.positions.values() if p["state"] == "open"],
-              "status": self.status()}
+              "open": [{k: p.get(k) for k in keep} for p in opened], "status": self.status()}
+        if self.live is not None:
+            self.live.save()
         tmp = d / "state.json.tmp"
         tmp.write_text(json.dumps(st, default=str), encoding="utf-8")
         tmp.replace(d / "state.json")
@@ -203,12 +249,15 @@ class Shadow:
             tmp = d / "creators.json.tmp"
             tmp.write_text(json.dumps(self.book.to_json()), encoding="utf-8")
             tmp.replace(d / "creators.json")
+            tmp = d / "wallets.json.tmp"
+            tmp.write_text(json.dumps(self.engine.wallets.to_json(), separators=(",", ":")), encoding="utf-8")
+            tmp.replace(d / "wallets.json")
 
 
 def winner_card(rec: dict, lang: str = "en"):
     from ..ops import i18n, notify
+    from .card import WHY as why
     t = i18n.t
-    why = {"take": "prt_why_take", "stop": "prt_why_stop", "time": "prt_why_time", "stuck": "prt_why_stuck"}
     name = rec.get("symbol") or rec.get("name") or rec["mint"][:8]
     return notify.Card(
         "🚀", t("prt_win_title", lang, name=str(name)[:20], ret=i18n.frac_pct(rec["ret"], 0, lang)),
