@@ -4,7 +4,11 @@
                    every shadow book, the study's bar, the models, the readiness of each
                    strategy for live, and the live executor's state
   (live.winner_card: a paper winner over +200 %, at most one an hour)
-  live_trade_card  every live order's fill or failure, if the live executor were ever on
+  live_trade_card  every live order's fill or failure (tagged TEST in test mode, with the
+                   measured landing time and slippage)
+  live_stop_card   the daily loss stop or the total budget stop fired
+  live_leftover_card  a position from before a restart sold, or not sellable
+  live_daily_card  the live service's day: balance, P&L, trades, measured latency vs assumed
 
 Paper unless a card says LIVE.
 """
@@ -99,7 +103,8 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
                                                            lang)))
         lines.append(t("prt_daily_ready_n", lang, n=sum(1 for v in ready.values() if v["ready"]), total=len(ready)))
     if live and live.get("on"):
-        lines.append(t("prt_live_on", lang, rule=live.get("rule") or "?", n=live.get("trades_today", 0),
+        lines.append(t("prt_live_on_test" if live.get("mode") == "test" else "prt_live_on", lang,
+                       rule=live.get("rule") or "?", n=live.get("trades_today", 0),
                        pnl=f"{i18n.num(live.get('pnl_today_sol', 0.0), 3, lang, True)} SOL"))
     elif live and live.get("asked"):
         lines.append(t("prt_live_refused", lang, why=(live.get("why") or ["?"])[0][:120]))
@@ -130,8 +135,31 @@ def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
     return daily_card(data, models, shadow_yesterday(now_ms), live, now_ms, lang)
 
 
-def live_trade_card(kind: str, p: dict, kw: dict, lang: str = "en", day_pnl_sol: float | None = None):
-    """One live order's outcome: bought, sold (a leg or the close), or a failure."""
+def _tagged(title: str, mode: str | None, lang: str) -> str:
+    from ..ops import i18n
+    return f"{title} · {i18n.t('prl_test_tag', lang)}" if mode == "test" else title
+
+
+def _measured_line(measured: dict | None, lang: str):
+    from ..ops import i18n, notify
+    if not measured or measured.get("lat_ms") is None:
+        return None
+    t = i18n.t
+    kw = {"lat": i18n.num(measured["lat_ms"], 0, lang), "assumed": i18n.num(C.Costs().lat_median_ms, 0, lang)}
+    if measured.get("slip") is None:
+        return notify.Line(t("prl_measured_noslip", lang, **kw))
+    return notify.Line(t("prl_measured", lang, slip=i18n.frac_pct(measured["slip"], 1, lang), **kw))
+
+
+def _caveat(mode: str | None, lang: str):
+    from ..ops import i18n, notify
+    return notify.Line(i18n.t("prl_test_caveat" if mode == "test" else "prl_caveat", lang))
+
+
+def live_trade_card(kind: str, p: dict, kw: dict, lang: str = "en", day_pnl_sol: float | None = None,
+                    mode: str | None = None, measured: dict | None = None):
+    """One live order's outcome: bought, sold (a leg or the close), or a failure. A test-mode trade
+    is tagged TEST and carries its measured landing time and slippage."""
     from ..ops import i18n, notify
     t = i18n.t
     name = str(p.get("symbol") or p.get("name") or p.get("mint", "")[:8])[:20]
@@ -152,7 +180,70 @@ def live_trade_card(kind: str, p: dict, kw: dict, lang: str = "en", day_pnl_sol:
     else:
         title = t("prl_fail_title", lang, name=name)
         summary = t("prl_fail_summary", lang, rule=p.get("rule", "?"), why=str(kw.get("why") or kind)[:120])
-    return notify.Card("🔴", title, summary, [notify.Line(t("prl_caveat", lang))], footer=t("prl_footer", lang))
+    parts = [x for x in (_measured_line(measured, lang), _caveat(mode, lang)) if x is not None]
+    return notify.Card("🔴", _tagged(title, mode, lang), summary, parts, footer=t("prl_footer", lang))
+
+
+def live_stop_card(kind: str, lost_sol: float, limit_sol: float, mode: str | None = None, lang: str = "en"):
+    """The daily loss stop or the total budget stop fired: no more buys."""
+    from ..ops import i18n, notify
+    t = i18n.t
+    k = "daily" if kind == "daily" else "total"
+    sol = lambda v: f"{i18n.num(v, 4, lang)} SOL"            # noqa: E731
+    return notify.Card("🛑", _tagged(t(f"prl_stop_{k}_title", lang), mode, lang),
+                       t(f"prl_stop_{k}_summary", lang, lost=sol(lost_sol), limit=sol(limit_sol)),
+                       [_caveat(mode, lang)], footer=t("prl_footer", lang))
+
+
+def live_gate_card(why: str | None, mode: str | None = None, lang: str = "en"):
+    """The running live book's gate shut (no more buys, with the reason) or opened again."""
+    from ..ops import i18n, notify
+    t = i18n.t
+    if why:
+        return notify.Card("🟠", _tagged(t("prl_gate_shut_title", lang), mode, lang),
+                           t("prl_gate_shut_summary", lang, why=str(why)[:200]), [_caveat(mode, lang)],
+                           footer=t("prl_footer", lang))
+    return notify.Card("🟢", _tagged(t("prl_gate_open_title", lang), mode, lang), t("prl_gate_open_summary", lang),
+                       [_caveat(mode, lang)], footer=t("prl_footer", lang))
+
+
+def live_leftover_card(what: str, info: dict, mode: str | None = None, lang: str = "en"):
+    """A position from before a restart: sold, or not sellable (the owner sells it himself)."""
+    from ..ops import i18n, notify
+    t = i18n.t
+    name = str(info.get("symbol") or str(info.get("mint", ""))[:8])[:20]
+    if what == "sold":
+        title = t("prl_left_sold_title", lang, name=name)
+        summary = t("prl_left_sold_summary", lang, sol=f"{i18n.num(info.get('got_l', 0) / C.LAMPORTS, 4, lang)} SOL")
+    else:
+        title = t("prl_left_stuck_title", lang, name=name)
+        summary = t("prl_left_stuck_summary", lang, why=str(info.get("why") or "?")[:120])
+    return notify.Card("🔴", _tagged(title, mode, lang), summary, [_caveat(mode, lang)], footer=t("prl_footer", lang))
+
+
+def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: float, execution: dict | None,
+                    mode: str | None, rule: str | None, lang: str = "en"):
+    """Once a day from the live service: the wallet's balance, the day's and the total P&L, the trades,
+    and the measured landing latency against the paper model's assumption."""
+    from ..ops import i18n, notify
+    t = i18n.t
+    d = _day(day * DAY_MS)
+    sol = lambda v, sign=False: f"{i18n.num(v, 4, lang, sign)} SOL"     # noqa: E731
+    summary = t("prl_daily_summary", lang, rule=rule or "?", n=stats.get("n", 0), wins=stats.get("wins", 0),
+                pnl=sol(stats.get("pnl_sol", 0.0), True), total=sol(total_sol, True))
+    lines = [t("prl_daily_balance", lang, bal=sol(balance_l / C.LAMPORTS)) if balance_l is not None
+             else t("prl_daily_balance_unknown", lang)]
+    lb = (execution or {}).get("lat_buy_ms") or {}
+    if lb.get("n"):
+        lines.append(t("prl_daily_latency", lang, lat=i18n.num(lb["median"], 0, lang), n=lb["n"],
+                       assumed=i18n.num((execution.get("assumed") or {}).get("lat_median_ms",
+                                                                              C.Costs().lat_median_ms), 0, lang)))
+    else:
+        lines.append(t("prl_daily_latency_none", lang))
+    if stats.get("failed"):
+        lines.append(t("prl_daily_failed", lang, n=stats["failed"]))
+    return notify.Card("💼", _tagged(t("prl_daily_title", lang, day=i18n.iso_day(d, lang)), mode, lang), summary,
+                       [notify.Line(" ".join(lines)), _caveat(mode, lang)], footer=t("prl_footer", lang))
 
 
 WHY = {"take": "prt_why_take", "take_part": "prt_why_take", "stop": "prt_why_stop", "time": "prt_why_time",

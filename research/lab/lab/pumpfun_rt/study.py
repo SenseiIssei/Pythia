@@ -499,6 +499,7 @@ def report(res: dict) -> tuple[dict, str]:
             "pick": pick, "split_ms": res["split_ms"], "days": days, "record": rec,
             "results": [{k: v for k, v in r.items()} for r in results], "pool": res["pool"],
             "readiness": ready, "shadow": res.get("shadow") or {}, "models": msum, "skipped": res["skipped"],
+            "execution": execution_summary(),
             "failed_why": res["failed_why"], "counts": res["counts"]}
     md = [f"# pump.fun real-time lab ({_day(res['now_ms'])})", "", data["caveat"], "", head, "",
           "## Record", "", "| day | tokens | plain SOL | curve trades | completed | migrated | gaps | gap min |",
@@ -551,6 +552,16 @@ def report(res: dict) -> tuple[dict, str]:
             cap = r.get("capture") or {}
             md.append(f"| {r['rule']} | " + " | ".join(str(mix.get(k, 0)) for k in EXIT_KINDS)
                       + f" | {pct(cap.get('ratio'))} | {pct(cap.get('never_above_cost'))} |")
+    ex = data.get("execution")
+    md += ["", "## Measured execution (live test)", "",
+           "The fill model's assumptions against what the owner's live test measured "
+           "(reports/pumpfun_rt/execution.md). The replays above keep the registered assumptions.", "",
+           ex["verdict"] if ex else "No live fills measured."]
+    if ex and ex.get("lat_buy_ms", {}).get("n"):
+        lb, a = ex["lat_buy_ms"], ex["assumed"]
+        md += ["", f"Buy latency median {lb['median']:.0f} ms (10 to 90 %: {lb['p10']:.0f} to {lb['p90']:.0f}) over "
+               f"{lb['n']} fills, assumed {a['lat_median_ms']:.0f} ms ({a['lat_lo_ms']:.0f} to {a['lat_hi_ms']:.0f})"
+               + (f"; ratio {ex['lat_ratio']:.2f}" if ex.get("lat_ratio") is not None else "") + "."]
     md += ["", "## Readiness for real money", "",
            "The owner's gate (plan addendum 2): 14+ days, 300+ trades out of sample, mean above 0 with and without "
            "broken slots, every gate g1 to g5, and 30+ days of the live paper shadow with its mean inside the "
@@ -581,6 +592,15 @@ def pct_auc(x, signed: bool = False) -> str:
     if x is None or (isinstance(x, float) and not math.isfinite(x)):
         return "n/a"
     return f"{x:+.3f}" if signed else f"{x:.3f}"
+
+
+def execution_summary() -> dict | None:
+    """The live test's measured execution (reports/pumpfun_rt/execution.json, measure.py), None before it."""
+    try:
+        d = json.loads((rep.REPORTS / NAME / "execution.json").read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) and "verdict" in d else None
+    except (OSError, ValueError):
+        return None
 
 
 def models_summary() -> dict:

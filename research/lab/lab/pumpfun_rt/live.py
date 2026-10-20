@@ -2,11 +2,10 @@
 the study's pick and the pick with the model filter in front, and every pipeline
 strategy (pipeline.STRATEGIES) through the same pipeline a live executor would use.
 
-Nothing here trades by itself: every fill of these books is the engine's curve
-arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The one
-exception is live_exec.attach(), which adds a live book next to the paper ones
-only when every gate of the LOCKED live executor holds (see live_exec.py); with
-any gate shut it adds nothing and says why. The pick comes from
+Nothing here trades: every fill of these books is the engine's curve
+arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The
+live book (real money) runs only in its own service, live_service.py, which the
+owner starts by hand; the collector never holds a wallet. The pick comes from
 <reports>/pumpfun_rt/pick.json (the daily study writes it; the default rule
 until then), the models from <data>/models/pumpfun_rt/ and the name categories
 from <data>/pumpfun_rt/categories/; all are re-read every RELOAD_S, so a new
@@ -99,7 +98,7 @@ class Shadow:
                              wallets=wallets, cats=cats, models=self.models, kill=kill or P.KillSwitch())
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
-        self.live = None                                      # live_exec.LiveBook, only when every gate holds
+        self.live = None                                      # always None here: the live book is live_service.py's
         self.cats_mtime = 0.0
         self.closed: list[dict] = []
         self.failed_seen = 0
@@ -129,7 +128,7 @@ class Shadow:
             return 0.0
 
     @classmethod
-    def load(cls, live: bool = True) -> "Shadow":
+    def load(cls) -> "Shadow":
         from .categorize import BOOK_DAYS, CategoryIndex
         from .model import load
         book = None
@@ -151,9 +150,6 @@ class Shadow:
                 json.loads((paper_dir() / "snipers.json").read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
-        if live:
-            from . import live_exec
-            sh.live = live_exec.attach(sh.engine)            # None unless every gate of the live executor holds
         try:
             st = json.loads((paper_dir() / "state.json").read_text(encoding="utf-8"))
             lost = [dict(p, exit_why="restart", pnl_sol=None, ret=None) for p in st.get("open") or []]
@@ -246,8 +242,6 @@ class Shadow:
                 opened += [p for p in pipe.pos.values() if p["state"] == "open"]
         st = {"t": int(time.time() * 1000), "pick": self.pick, "started_ms": self.started_ms, "totals": self.totals,
               "open": [{k: p.get(k) for k in keep} for p in opened], "status": self.status()}
-        if self.live is not None:
-            self.live.save()
         tmp = d / "state.json.tmp"
         tmp.write_text(json.dumps(st, default=str), encoding="utf-8")
         tmp.replace(d / "state.json")
