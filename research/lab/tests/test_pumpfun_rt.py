@@ -334,6 +334,15 @@ def test_a_late_delivery_does_not_rewind_the_curve():
     assert tok.vs == 40 * SOL and tok.n_buys == 2 and len(tok.buyers) == 2
 
 
+def test_the_dev_is_the_creator_and_the_payer_of_the_creation():
+    payer = key(99)
+    tok = T.Token(MINT, DEV, T0, 7, 30 * SOL, 1_073 * 10 ** 12, C.INITIAL_RT, {}, user=payer)
+    tok.trade(T0, 7, True, SOL, 10 ** 12, payer, 31 * SOL, 1_072 * 10 ** 12, SOL, 792 * 10 ** 12, 95, 30, slot=5)
+    tok.trade(T0, 8, True, SOL, 10 ** 12, BUYERS[0], 32 * SOL, 1_071 * 10 ** 12, 2 * SOL, 791 * 10 ** 12, 95, 30,
+              slot=6)
+    assert tok.dev_buy_l == SOL and tok.dev_hold() == 10 ** 12 and tok.outside_buyers() == 1
+
+
 def test_trades_of_one_slot_chain_up_in_any_order_and_a_missing_one_is_counted():
     tok = T.Token(MINT, DEV, T0, 1, 30 * SOL, 1_073 * 10 ** 12, C.INITIAL_RT, {})
     a = (True, SOL, 31 * SOL)                               # 30 -> 31

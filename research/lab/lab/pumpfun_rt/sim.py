@@ -101,13 +101,13 @@ class Engine:
 
     # ------------------------------------------------------------ events
     def create(self, t, tx, mint, creator, vs, vt, rt, name="", symbol="", uri="", mayhem=False, cashback=False,
-               quote=None) -> None:
+               quote=None, user=None) -> None:
         self.advance(t)
         if mint in self.tokens:
             return
         hist = self.book.snapshot(creator, t)
         self.book.created(creator, t)
-        tok = Token(mint, creator, t, tx, vs, vt, rt, hist, name, symbol, uri, mayhem, cashback, quote)
+        tok = Token(mint, creator, t, tx, vs, vt, rt, hist, name, symbol, uri, mayhem, cashback, quote, user)
         self.tokens[mint] = tok
         self.counts["tokens"] += 1
         self.push(t, "signal_create", mint)
@@ -570,7 +570,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
     elif table == "creates":
         eng.create(r["t"], r["tx"], r["mint"], r["creator"], r["vs"] or 0, r["vt"] or 0, r["rt"] or 0,
                    r.get("name") or "", r.get("symbol") or "", r.get("uri") or "", r.get("mayhem"),
-                   r.get("cashback"), r.get("quote"))
+                   r.get("cashback"), r.get("quote"), r.get("user"))
     elif table == "other":
         k = r["kind"]
         if k == "complete":

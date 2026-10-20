@@ -86,12 +86,15 @@ class Token:
                  "hold", "dev_buy_l", "dev_bought", "dev_sold", "dev_sell_t", "dev_dumped", "win", "peak", "last_t",
                  "complete_t", "migrate_t", "pool", "pb", "pq", "amm_fee_bps", "meta", "meta_t", "hist",
                  "irregular", "first_buyers", "first_tok", "last_slot", "amm_slot", "slot_start", "slot_moves",
-                 "breaks", "slot_ok", "slot_flow")
+                 "breaks", "slot_ok", "slot_flow", "devs")
 
     def __init__(self, mint: str, creator: str, t: int, tx: int, vs: int, vt: int, rt: int, hist: dict,
                  name: str = "", symbol: str = "", uri: str = "", mayhem: bool = False, cashback: bool = False,
-                 quote: str | None = None):
+                 quote: str | None = None, user: str | None = None):
         self.mint, self.creator, self.t0, self.tx0 = mint, creator, t, tx
+        # "The dev": the creator, and the wallet that paid for the creation when a launch tool set
+        # another creator (about a fifth of tokens; the dev buy then comes from the payer).
+        self.devs = {d for d in (creator, user) if d}
         self.name, self.symbol, self.uri = name or "", symbol or "", uri or ""
         self.mayhem, self.cashback, self.quote = bool(mayhem), bool(cashback), quote
         self.vs, self.vt, self.rs, self.rt = vs or 0, vt or 0, 0, rt or 0
@@ -167,14 +170,14 @@ class Token:
             self.buy_l += sol
             self.buyers.add(user)
             self.hold[user] = h + tok
-            if user != self.creator and len(self.first_buyers) < 5 and user not in self.first_buyers:
+            if user not in self.devs and len(self.first_buyers) < 5 and user not in self.first_buyers:
                 self.first_buyers.append(user)
                 self.first_tok += tok
         else:
             self.n_sells += 1
             self.sell_l += sol
             self.hold[user] = max(0, h - tok)
-        if user == self.creator:
+        if user in self.devs:
             if buy:
                 self.dev_bought += tok
                 if tx == self.tx0:
@@ -239,7 +242,11 @@ class Token:
         return self.quote is None and not self.mayhem and not self.irregular and self.vs > 0
 
     def dev_hold(self) -> int:
-        return self.hold.get(self.creator, 0)
+        return sum(self.hold.get(d, 0) for d in self.devs)
+
+    def outside_buyers(self) -> int:
+        """Unique buyers, the dev not counted."""
+        return len(self.buyers) - sum(1 for d in self.devs if d in self.buyers)
 
     def window(self, t: int) -> tuple[int, int, float, int]:
         """Buys, sells, net SOL and unique buyers in the last 10 s before t."""

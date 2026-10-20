@@ -71,10 +71,11 @@ def warm_book(days: list[str], root=None) -> CreatorBook:
     book = CreatorBook()
     if not days:
         return book
-    cr = store.read("creates", days, root).select("t", "mint", "creator").sort("t")
+    cr = store.read("creates", days, root).select("t", "mint", "creator", pl.col("user").alias("payer")).sort("t")
     ot = store.read("other", days, root).filter(pl.col("kind") == "complete").select("t", "mint")
     tr = store.read("trades", days, root).select("t", "mint", "user", "buy", "tok")
-    dev = tr.join(cr.select("mint", "creator"), on="mint").filter(pl.col("user") == pl.col("creator"))
+    dev = tr.join(cr.select("mint", "creator", "payer"), on="mint").filter(
+        (pl.col("user") == pl.col("creator")) | (pl.col("user") == pl.col("payer")))
     agg = dev.group_by("mint").agg((pl.col("tok") * pl.col("buy")).sum().alias("bought"),
                                    (pl.col("tok") * (~pl.col("buy"))).sum().alias("sold"),
                                    pl.col("t").filter(~pl.col("buy")).min().alias("sell_t"))

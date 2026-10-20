@@ -60,6 +60,11 @@ mode, no other quote mint, no fee-free trades with erratic reserves).
 Unique buyers never count the creator. Exits are checked on every trade of
 the token; the sale lands one latency draw after the exit signal.
 
+Addendum (2026-10-20, after a smoke run on the first hour of record that
+picked and judged nothing): "the creator" and "the dev" mean the creator and
+the wallet that paid for the creation. In about a fifth of creations a launch
+tool names another creator, and the dev buy then comes from the payer.
+
 ## What is reported per rule
 
 Closed trades, failed buys, hit rate, mean and median net return per trade,

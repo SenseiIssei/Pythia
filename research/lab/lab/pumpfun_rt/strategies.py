@@ -60,7 +60,7 @@ class Rule:
 
     def wants_checkpoint(self, tok, t: int) -> bool:
         """Family B at creation + W s."""
-        buyers = len(tok.buyers) - (tok.creator in tok.buyers)
+        buyers = tok.outside_buyers()
         net = (tok.buy_l - tok.sell_l) / 1e9
         return buyers >= self.p["buyers"] and net >= self.p["net_sol"] and tok.dev_sold == 0
 
@@ -68,7 +68,7 @@ class Rule:
         """Family C after each trade."""
         if (t - tok.t0) > self.p["within_s"] * 1000 or tok.dev_sold > 0 or tok.progress() >= 0.5:
             return False
-        return len(tok.buyers) - (tok.creator in tok.buyers) >= self.p["buyers"]
+        return tok.outside_buyers() >= self.p["buyers"]
 
     def wants_progress(self, tok, t: int) -> bool:
         return tok.on_curve and tok.progress() >= self.p["at"]
