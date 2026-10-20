@@ -281,13 +281,14 @@ def test_run_writes_the_ledger_and_drops_bad_answers(pmdir):
 
     def complete(job, system, user, max_tokens, **kw):
         seen.update(kw, user=user)
-        return {"json": {"items": [{"i": 0, "p": 0.3, "conf": "medium", "stale": False, "why": "base rate"},
-                                   {"i": 1, "p": 1.7, "conf": "low", "stale": True, "why": "x"},
-                                   {"i": 7, "p": 0.5, "conf": "low", "stale": True, "why": "x"}]},
+        return {"json": {"m0": {"p": 0.3, "conf": "medium", "stale": False, "why": "base rate"},
+                         "m1": {"p": 1.7, "conf": "low", "stale": True, "why": "x"},
+                         "m7": {"p": 0.5, "conf": "low", "stale": True, "why": "x"}},
                 "model": "claude-sonnet-5-5", "costUsd": 0.002, "batchId": "b1"}
 
     res = F.run(live, None, ts=ts, complete=complete)
-    assert res["written"] == 1 and seen["batch"] is True and seen["schema"] == F.SCHEMA
+    assert res["written"] == 1 and seen["batch"] is True
+    assert seen["schema"]["required"] == ["m0", "m1"] and "[m1] Question" in seen["user"]
     rows = store.read_jsonl(F.ledger_path())
     assert len(rows) == 1 and rows[0]["p_yes"] == 0.3 and rows[0]["ts_ms"] == ts and rows[0]["ask"] == 0.2
     assert rows[0]["mid"] == pytest.approx(0.19)

@@ -65,31 +65,34 @@ Rules:
 what you know. Most things that have not happened yet, with a short deadline, do not happen.
 - Your knowledge stops at your training cutoff. Set "stale" to true when the answer most likely depends \
 on events after it; still give your best probability.
-- p is between 0.01 and 0.99. conf is low, medium or high. why is one short sentence.
-Answer with the JSON object only, one item per market id, in the schema given."""
+- p is between 0.01 and 0.99. conf is low, medium or high. why is one sentence with the reason that \
+moved you most (a base rate, a fact you know, a detail of the rules).
+- Answer every market: the JSON object has one entry per market, keyed m0, m1, ... as numbered under \
+MARKETS. Judge each market on its own; markets of one event must still add up sensibly.
+Answer with the JSON object only, in the schema given."""
 
-SCHEMA = {
+ITEM = {
     "type": "object",
     "properties": {
-        "items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "i": {"type": "integer"},
-                    "p": {"type": "number"},
-                    "conf": {"type": "string", "enum": ["low", "medium", "high"]},
-                    "stale": {"type": "boolean"},
-                    "why": {"type": "string"},
-                },
-                "required": ["i", "p", "conf", "stale", "why"],
-                "additionalProperties": False,
-            },
-        },
+        "p": {"type": "number"},
+        "conf": {"type": "string", "enum": ["low", "medium", "high"]},
+        "stale": {"type": "boolean"},
+        "why": {"type": "string"},
     },
-    "required": ["items"],
+    "required": ["p", "conf", "stale", "why"],
     "additionalProperties": False,
 }
+
+
+def schema(n: int) -> dict:
+    """One required entry per market of the chunk (m0 .. m{n-1}): an answer cannot skip one.
+    (A first run with a free-length list got back one item for some chunks of eight.)"""
+    keys = [f"m{i}" for i in range(n)]
+    return {"type": "object", "properties": {k: ITEM for k in keys}, "required": keys,
+            "additionalProperties": False}
+
+
+SCHEMA = schema(8)
 
 
 def ledger_path():
@@ -176,7 +179,7 @@ def siblings(live: pl.DataFrame) -> dict[str, list[str]]:
 
 def market_text(i: int, r: dict, sib: dict[str, list[str]]) -> str:
     others = [q for q in sib.get(r.get("event_id") or "", []) if q != r["question"]][:12]
-    lines = [f"[{i}] Question: {clean(r['question'], 300)}",
+    lines = [f"[m{i}] Question: {clean(r['question'], 300)}",
              f"Outcomes: first = {clean(r.get('outcome_a') or 'Yes', 60)}, second = {clean(r.get('outcome_b') or 'No', 60)}",
              f"End date (UTC): {day_str(r['end_ms'])}",
              f"Category: {r['category']}"]
@@ -198,11 +201,15 @@ def input_hash(text: str) -> str:
 
 
 def parse(answer: dict, n: int) -> dict[int, dict]:
-    """Valid items by index; anything malformed or out of range is dropped."""
+    """Valid entries by index (keys m0 .. m{n-1}); anything malformed or out of range is dropped."""
     out = {}
-    for it in (answer or {}).get("items") or []:
+    for key, it in (answer or {}).items():
+        m = re.fullmatch(r"m(\d+)", str(key))
+        if not m or not isinstance(it, dict):
+            continue
+        i = int(m.group(1))
         try:
-            i, p = int(it["i"]), float(it["p"])
+            p = float(it["p"])
         except (KeyError, TypeError, ValueError):
             continue
         if not 0 <= i < n or not 0.0 < p < 1.0 or p != p:
@@ -222,7 +229,7 @@ def run(live: pl.DataFrame, books: pl.DataFrame | None, ts: int | None = None, d
     sib = siblings(live)
     chunks = [pick[i:i + CHUNK] for i in range(0, len(pick), CHUNK)]
     model = engine.model_for("pm_forecast", engine.REVIEW)
-    effort = engine.effort_for("pm_forecast", "low")
+    effort = engine.effort_for("pm_forecast", "medium")
     res = {"selected": len(pick), "chunks": len(chunks), "written": 0, "cost_usd": 0.0, "errors": [],
            "model": model, "ts_ms": ts}
     if dry_run or not pick:
@@ -238,7 +245,7 @@ def run(live: pl.DataFrame, books: pl.DataFrame | None, ts: int | None = None, d
             return chunk, None, "run cap reached", 0.0
         text = prompt(chunk, sib, ts)
         try:
-            ans = call(JOB, SYSTEM, text, MAX_TOKENS, model=model, schema=SCHEMA, effort=effort, batch=True,
+            ans = call(JOB, SYSTEM, text, MAX_TOKENS, model=model, schema=schema(len(chunk)), effort=effort, batch=True,
                        batch_wait_sec=BATCH_WAIT_SEC)
         except engine.AiError as e:
             spent[0] += e.cost_usd

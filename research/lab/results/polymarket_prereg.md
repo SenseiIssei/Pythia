@@ -134,9 +134,13 @@ they ended.
 - **What it gives.** A probability (0.01 to 0.99), a confidence (low,
   medium, high), whether its knowledge is likely out of date for this
   question, and one sentence of reasoning. JSON schema, Sonnet 5.5
-  (`claude-sonnet-5-5`), effort low, Batches API, 8 markets per request,
+  (`claude-sonnet-5-5`), effort medium, Batches API, 8 markets per request,
   through the engine's metered endpoint (`lab.ai.engine`, budget enforced
-  there).
+  there). (Changed after the first run on 2026-10-20, before anything
+  resolved: at effort low with a free-length list, 13 of 38 requests came
+  back with one item and a placeholder reason, so 194 of 300 markets got a
+  forecast. The schema now has one required entry per market and the effort
+  is medium. The 194 rows stay in the ledger and count like every other.)
 - **Ledger.** `<data>/polymarket/forecasts/ledger.jsonl`, append only: id,
   market, the time written, the model, the inputs' hash, the answer, the
   market's mid, bid and ask at that time, the cost. Never edited.
