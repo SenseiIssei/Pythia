@@ -13,13 +13,12 @@ of all three crypto books. Neither may be used before it passes here.
 
 The books are the three crypto paper books as the autopilot runs them on
 Alpaca, exactly as X16 B2 built them (`au.originals`, every coin Alpaca does
-not list held as cash, `au.simulate`). Four pairs, each a book with and
-without one overlay:
+not list held as cash, `au.simulate`). Two tests, each a book with and without
+one overlay:
 
-  tsmom_tranches  with the M14 exit
-  breakout_top10  with a 40-day time stop
-  tsmom_top20     with a 40-day time stop
-  tsmom_tranches  with a 40-day time stop
+  M14 exit         tsmom_tranches
+  40-day stop      breakout_top10, tsmom_top20 and tsmom_tranches in equal
+                   thirds (each book is also reported on its own, not judged)
 
 An overlay cuts a coin from the close on which it fires to the end of the
 book's spell in that coin (it comes back only when the book's own rule enters
@@ -37,11 +36,11 @@ close of D+1, a day after the record was written), with 35 bps per unit of
 turnover traded at the close of D+1, and appended to scores.jsonl once that
 day has closed. Both files are append-only; nothing rewrites a line.
 
-Each pair is judged once, on the first 90 scored days by which it has made 30
-exits (or failed after 365 scored days with fewer). verdicts.jsonl keeps each
-verdict once, state.json the statuses. reports/exit_shadow/latest.json carries
-the lab feed header (the Research page); a change of status is one line in the
-daily digest (lab.ops.notify).
+Each test is judged once, on the first 90 or more scored days by which it has
+made 30 exits (a fail after 730 scored days with fewer). verdicts.jsonl keeps
+each verdict once, state.json the statuses. reports/exit_shadow/latest.json
+carries the lab feed header (the Research page); a test changing status is one
+line in the daily digest (lab.ops.notify).
 """
 
 from __future__ import annotations
@@ -77,20 +76,23 @@ MODEL_SHA256 = "105bacba2a290b19aca8482bafb46018b6f1f7ad259da47abbc00c1cf61a78c6
 
 # The registered rules. Written out here rather than read from exit_overlays,
 # so a later change to the study cannot move them.
-M14_THRESHOLD = -0.0070      # forecast of the next 10 days' log return, a 35 bps round trip each side
+M14_THRESHOLD = -0.0070      # forecast of the next 10 days' log return: a 35 bps round trip each side
 M14_HORIZON = 10
 TIME_STOP = 40               # cut on the 40th close after the entry close
 OVERLAYS = {"m14": ("model", M14_THRESHOLD), "time40": ("time", TIME_STOP)}
-BOOKS = ("breakout", "tsmom_daily", "tsmom_tranches")
-PAIRS = (("tsmom_tranches", "m14"), ("breakout", "time40"), ("tsmom_daily", "time40"), ("tsmom_tranches", "time40"))
 OVERLAY_LABEL = {"m14": "M14 exit", "time40": "40-day time stop"}
+BOOKS = ("breakout", "tsmom_daily", "tsmom_tranches")
+BOOK_OVERLAYS = {"breakout": ("time40",), "tsmom_daily": ("time40",), "tsmom_tranches": ("m14", "time40")}
+# The judged tests: (id, books in equal shares, overlay, label).
+TESTS = (("tsmom_tranches:m14", ("tsmom_tranches",), "m14", "tsmom_tranches · M14 exit"),
+         ("three_books:time40", BOOKS, "time40", "three crypto books · 40-day time stop"))
 
 # Scoring and the pass rule.
 COST = 0.0035
 MIN_DAYS = 90
 MIN_EXITS = 30
-MAX_DAYS = 365
-BAND_PCT = 5.0 / len(PAIRS)  # one-sided 5 %, Bonferroni over the four pairs
+MAX_DAYS = 730
+BAND_PCT = 5.0 / len(TESTS)  # one-sided 5 %, Bonferroni over the two tests
 BOOT_DRAWS, BOOT_BLOCK = 4000, 20
 SEED = 20261020
 
@@ -109,14 +111,6 @@ def log(msg: str) -> None:
 
 def iso(day_us: int) -> str:
     return datetime.fromtimestamp(int(day_us) / 1e6, timezone.utc).strftime("%Y-%m-%d")
-
-
-def pair_id(book: str, overlay: str) -> str:
-    return f"{au.ORIGINAL[book]}:{overlay}"
-
-
-def pair_label(book: str, overlay: str) -> str:
-    return f"{au.ORIGINAL[book]} · {OVERLAY_LABEL[overlay]}"
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +203,7 @@ def decide(P: fc.Panel, held: dict[str, np.ndarray], t: int, predict: Predictor 
             continue
         h = held[b]
         sp = xo.spells(P, h)
-        ovs = [ov for bb, ov in PAIRS if bb == b]
+        ovs = BOOK_OVERLAYS[b]
         pred = None
         if "m14" in ovs:
             if predict is None:
@@ -357,22 +351,27 @@ def diff_band(x: np.ndarray, y: np.ndarray, pct: float = BAND_PCT, seed: int = S
     return float(np.percentile(v, pct)), float(np.percentile(v, 100 - pct))
 
 
-def pair_series(pair: tuple[str, str], decisions: list[dict], scores: list[dict]):
-    """Scored days of one pair in order: (days, overlay net, book net, exits per day)."""
-    book, ov = au.ORIGINAL[pair[0]], pair[1]
-    exits = {int(d["day_us"]): len(d["overlays"][ov]["new"]) for d in decisions
-             if d["book"] == book and ov in d.get("overlays", {})}
-    sc = sorted((s for s in scores if s["book"] == book and ov in s["net"]), key=lambda s: int(s["day_us"]))
-    days = [s["return_day"] for s in sc]
-    x = np.array([s["net"][ov] for s in sc], dtype=float)
-    y = np.array([s["net"]["base"] for s in sc], dtype=float)
-    e = np.array([exits.get(int(s["day_us"]), 0) for s in sc], dtype=int)
+def series(books: tuple[str, ...], ov: str, decisions: list[dict], scores: list[dict]):
+    """The scored days on which every one of the books is scored, in order: (return days,
+    overlaid net, book net, exits), the nets the books' equal-share mean, the exits their sum."""
+    names = [au.ORIGINAL[b] for b in books]
+    exits = {(int(d["day_us"]), d["book"]): len(d["overlays"][ov]["new"]) for d in decisions
+             if d["book"] in names and ov in d.get("overlays", {})}
+    by: dict[int, dict[str, dict]] = {}
+    for s in scores:
+        if s["book"] in names and ov in s["net"]:
+            by.setdefault(int(s["day_us"]), {})[s["book"]] = s
+    keys = sorted(k for k, v in by.items() if len(v) == len(names))
+    days = [by[k][names[0]]["return_day"] for k in keys]
+    x = np.array([np.mean([by[k][n]["net"][ov] for n in names]) for k in keys], dtype=float)
+    y = np.array([np.mean([by[k][n]["net"]["base"] for n in names]) for k in keys], dtype=float)
+    e = np.array([sum(exits.get((k, n), 0) for n in names) for k in keys], dtype=int)
     return days, x, y, e
 
 
 def judge(x: np.ndarray, y: np.ndarray, exits: np.ndarray) -> dict | None:
     """The registered rule, once: on the first n >= 90 scored days by which the overlay has
-    made 30 exits; a fail when 365 scored days pass with fewer; None while collecting."""
+    made 30 exits; a fail when 730 scored days pass with fewer; None while collecting."""
     ce = np.cumsum(exits)
     n = next((k for k in range(MIN_DAYS, min(len(x), MAX_DAYS) + 1) if ce[k - 1] >= MIN_EXITS), None)
     if n is None:
@@ -384,26 +383,24 @@ def judge(x: np.ndarray, y: np.ndarray, exits: np.ndarray) -> dict | None:
     sx, sy = sharpe(xs), sharpe(ys)
     lo, hi = diff_band(xs, ys)
     dx, dy = max_dd(xs), max_dd(ys)
-    gates = {"Sharpe above the book's": sx > sy, "bootstrap band of the difference above 0": lo > 0,
-             "drawdown not worse": dx <= dy}
+    gates = {"Sharpe above the book's": bool(sx > sy), "bootstrap band of the difference above 0": bool(lo > 0),
+             "drawdown not worse": bool(dx <= dy)}
     failed = [k for k, v in gates.items() if not v]
     return {"passed": not failed, "days": int(n), "exits": int(ce[n - 1]), "sharpe": sx, "sharpe_book": sy,
             "band": [lo, hi], "dd": dx, "dd_book": dy, "gates": gates,
             "why": "all three gates hold" if not failed else "failed: " + ", ".join(failed)}
 
 
-def summarise(pair: tuple[str, str], decisions: list[dict], scores: list[dict], prior: dict | None) -> dict:
-    days, x, y, e = pair_series(pair, decisions, scores)
-    out = {"pair": pair_id(*pair), "label": pair_label(*pair), "book": au.ORIGINAL[pair[0]], "overlay": pair[1],
+def summarise(tid: str, books: tuple[str, ...], ov: str, label: str, decisions: list[dict], scores: list[dict],
+              prior: dict | None, judged: bool = True) -> dict:
+    days, x, y, e = series(books, ov, decisions, scores)
+    out = {"id": tid, "label": label, "books": [au.ORIGINAL[b] for b in books], "overlay": ov, "judged": judged,
            "scored_days": len(x), "exits": int(e.sum()), "first_day": days[0] if days else None,
            "last_day": days[-1] if days else None, "sharpe": sharpe(x), "sharpe_book": sharpe(y),
            "return": float(np.prod(1 + x) - 1) if len(x) else 0.0,
-           "return_book": float(np.prod(1 + y) - 1) if len(y) else 0.0,
-           "dd": max_dd(x), "dd_book": max_dd(y),
-           "exposure_days": sum(1 for d in decisions if d["book"] == au.ORIGINAL[pair[0]]
-                                and d["overlays"].get(pair[1], {}).get("cut"))}
-    verdict = (prior or {}).get("verdict")
-    if verdict is None:
+           "return_book": float(np.prod(1 + y) - 1) if len(y) else 0.0, "dd": max_dd(x), "dd_book": max_dd(y)}
+    verdict = (prior or {}).get("verdict") if judged else None
+    if judged and verdict is None:
         verdict = judge(x, y, e)
     out["verdict"] = verdict
     out["status"] = ("waiting" if not len(x) else "collecting") if verdict is None else (
@@ -418,51 +415,56 @@ def summarise(pair: tuple[str, str], decisions: list[dict], scores: list[dict], 
 STATUS_FEED = {"waiting": "ok", "collecting": "ok", "passed": "watch", "failed": "bad"}
 
 
-def feed(pairs: list[dict], now_ms: int, error: str | None = None) -> dict:
-    items = []
-    for p in pairs:
-        v = p.get("verdict")
-        if v:
-            value = "passed" if v["passed"] else "failed"
-            detail = (f"judged on {v['days']} scored days, {v['exits']} exits: {v['why']}. "
-                      + ("A write-up and your decision come first; nothing trades on it." if v["passed"] else
-                         "It stays a record."))
-        elif p["scored_days"]:
-            value = f"day {p['scored_days']} of {MIN_DAYS} · {p['exits']} of {MIN_EXITS} exits"
-            detail = (f"so far (not a verdict): Sharpe {p['sharpe']:.2f} with the overlay, {p['sharpe_book']:.2f} "
-                      f"without; drawdown {p['dd'] * 100:.1f} % against {p['dd_book'] * 100:.1f} %")
-        else:
-            value = "waiting"
-            detail = "decisions are recorded; the first is scored two closes after it was written"
-        items.append({"label": p["label"], "value": value, "status": STATUS_FEED[p["status"]], "detail": detail,
-                      "link": "study:exit_shadow_prereg", "importance": 70 if p["status"] == "passed" else 30})
+def _item(p: dict) -> dict:
+    v = p.get("verdict")
+    if v:
+        value = "passed" if v["passed"] else "failed"
+        detail = (f"judged on {v['days']} scored days, {v['exits']} exits: {v['why']}. "
+                  + ("A write-up and your decision come first; nothing trades on it." if v["passed"]
+                     else "It stays a record."))
+    elif p["scored_days"]:
+        value = (f"day {p['scored_days']} of {MIN_DAYS} · {p['exits']} of {MIN_EXITS} exits" if p["judged"]
+                 else f"{p['scored_days']} days · {p['exits']} exits")
+        detail = (("so far (not a verdict)" if p["judged"] else "on its own, not judged")
+                  + f": Sharpe {p['sharpe']:.2f} with the overlay, {p['sharpe_book']:.2f} without; "
+                  f"drawdown {p['dd'] * 100:.1f} % against {p['dd_book'] * 100:.1f} %")
+    else:
+        value = "waiting"
+        detail = "decisions are recorded; each is scored two closes after it was written"
+    status = STATUS_FEED[p["status"]] if p["judged"] else "ok"
+    return {"label": p["label"], "value": value, "status": status, "detail": detail,
+            "link": "study:exit_shadow_prereg", "importance": 70 if p["status"] == "passed" else 30 if p["judged"] else 10}
+
+
+def feed(tests: list[dict], books: list[dict], now_ms: int, error: str | None = None) -> dict:
+    items = [_item(p) for p in tests + books]
+    n = max((p["scored_days"] for p in tests), default=0)
     if error:
         status, head = "bad", f"Exit shadow could not record today: {error}."
-    elif any(p["status"] == "passed" for p in pairs):
+    elif any(p["status"] == "passed" for p in tests):
         status = "watch"
-        head = ("An exit rule passed its pre-registered forward test: "
-                + ", ".join(p["label"] for p in pairs if p["status"] == "passed")
-                + ". Nothing trades on it until it is written up and you decide.")
+        head = ("An exit rule passed its pre-registered forward test ("
+                + ", ".join(p["label"] for p in tests if p["status"] == "passed")
+                + "). Nothing trades on it until it is written up and you decide.")
     else:
-        done = sum(1 for p in pairs if p["status"] == "failed")
-        n = max((p["scored_days"] for p in pairs), default=0)
-        head = (f"Two exit rules from X16 recorded before the outcome on the crypto books, day {n} of at least "
-                f"{MIN_DAYS}; nothing trades on them." + (f" {done} of {len(pairs)} failed." if done else ""))
+        done = sum(1 for p in tests if p["status"] == "failed")
         status = "ok"
+        head = (f"Two exit rules from X16 recorded on the crypto books before the outcome, day {n} of at least "
+                f"{MIN_DAYS}; nothing trades on them." + (f" {done} of {len(tests)} failed." if done else ""))
     return report.feed_header(TITLE, status, head, items, updated_ms=now_ms)
 
 
 def markdown(data: dict) -> str:
     out = [f"# {TITLE}\n\n{data['headline']}\n\n",
            "Pre-registered in `results/exit_shadow_prereg.md`. Scored on the return two closes after each "
-           "decision was written, 35 bps per unit of turnover.\n\n",
-           "| pair | status | scored days | exits | Sharpe | book | return | book | drawdown | book |\n",
+           "decision was written, 35 bps per unit of turnover. Only the first two rows are judged.\n\n",
+           "| test | status | scored days | exits | Sharpe | book | return | book | drawdown | book |\n",
            "|---|---|---|---|---|---|---|---|---|---|\n"]
-    for p in data["pairs"]:
-        out.append(f"| {p['label']} | {p['status']} | {p['scored_days']} | {p['exits']} | {p['sharpe']:.2f} | "
-                   f"{p['sharpe_book']:.2f} | {p['return'] * 100:.2f} % | {p['return_book'] * 100:.2f} % | "
-                   f"{p['dd'] * 100:.1f} % | {p['dd_book'] * 100:.1f} % |\n")
-    for p in data["pairs"]:
+    for p in data["tests"] + data["books"]:
+        out.append(f"| {p['label']} | {p['status'] if p['judged'] else 'not judged'} | {p['scored_days']} | "
+                   f"{p['exits']} | {p['sharpe']:.2f} | {p['sharpe_book']:.2f} | {p['return'] * 100:.2f} % | "
+                   f"{p['return_book'] * 100:.2f} % | {p['dd'] * 100:.1f} % | {p['dd_book'] * 100:.1f} % |\n")
+    for p in data["tests"]:
         if p.get("verdict"):
             out.append(f"\n**{p['label']}**: {'passed' if p['verdict']['passed'] else 'failed'} "
                        f"({p['verdict']['why']}).\n")
@@ -482,7 +484,7 @@ def run(now_ms: int | None = None, dry: bool = False, P: fc.Panel | None = None,
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         state = {}
-    prior = state.get("pairs") or {}
+    prior = state.get("tests") or {}
     decisions = read_jsonl(ledger / "decisions.jsonl")
     scores = read_jsonl(ledger / "scores.jsonl")
     error = None
@@ -505,13 +507,16 @@ def run(now_ms: int | None = None, dry: bool = False, P: fc.Panel | None = None,
     except ShadowError as e:
         error = str(e)
         log(error)
-    pairs = [summarise(p, decisions, scores, prior.get(pair_id(*p))) for p in PAIRS]
-    changes = [{"pair": p["pair"], "label": p["label"], "book": p["book"], "overlay": p["overlay"],
-                "from": (prior.get(p["pair"]) or {}).get("status", "waiting"), "to": p["status"]}
-               for p in pairs if p["status"] != (prior.get(p["pair"]) or {}).get("status", "waiting")]
-    data = {**feed(pairs, now, error), "date": datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d"),
+    tests = [summarise(tid, bs, ov, label, decisions, scores, prior.get(tid)) for tid, bs, ov, label in TESTS]
+    books = [summarise(f"{au.ORIGINAL[b]}:time40", (b,), "time40", f"{au.ORIGINAL[b]} · {OVERLAY_LABEL['time40']}",
+                       decisions, scores, None, judged=False) for b in BOOKS]
+    was = {p["id"]: (prior.get(p["id"]) or {}).get("status", "waiting") for p in tests}
+    changes = [{"id": p["id"], "label": p["label"], "overlay": p["overlay"], "from": was[p["id"]], "to": p["status"]}
+               for p in tests if p["status"] != was[p["id"]]]
+    data = {**feed(tests, books, now, error),
+            "date": datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d"),
             "registered": REGISTERED, "model_sha256": MODEL_SHA256, "recorded": len(new_dec), "scored": len(new_sc),
-            "decisions": len(decisions), "pairs": pairs, "changes": changes, "error": error,
+            "decisions": len(decisions), "tests": tests, "books": books, "changes": changes, "error": error,
             "rule": {"min_days": MIN_DAYS, "min_exits": MIN_EXITS, "max_days": MAX_DAYS, "band_pct": BAND_PCT,
                      "cost": COST, "m14_threshold": M14_THRESHOLD, "time_stop": TIME_STOP}}
     if dry:
@@ -519,11 +524,11 @@ def run(now_ms: int | None = None, dry: bool = False, P: fc.Panel | None = None,
         return data
     append_jsonl(ledger / "decisions.jsonl", new_dec)
     append_jsonl(ledger / "scores.jsonl", new_sc)
-    append_jsonl(ledger / "verdicts.jsonl", [{"pair": p["pair"], "at_ms": now, **p["verdict"]} for p in pairs
-                                              if p["verdict"] and not (prior.get(p["pair"]) or {}).get("verdict")])
+    append_jsonl(ledger / "verdicts.jsonl", [{"id": p["id"], "at_ms": now, **p["verdict"]} for p in tests
+                                              if p["verdict"] and not (prior.get(p["id"]) or {}).get("verdict")])
     ledger.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps({"updated_ms": now, "pairs": {p["pair"]: {
-        "status": p["status"], "verdict": p["verdict"]} for p in pairs}}, indent=1), encoding="utf-8", newline="\n")
+    state_path.write_text(json.dumps({"updated_ms": now, "tests": {p["id"]: {
+        "status": p["status"], "verdict": p["verdict"]} for p in tests}}, indent=1), encoding="utf-8", newline="\n")
     report.write(NAME, markdown(data), data)
     return data
 
@@ -538,7 +543,7 @@ def main() -> int:
         print(json.dumps(data, indent=1, default=str))
     else:
         log(f"recorded {data['recorded']}, scored {data['scored']}; "
-            + "; ".join(f"{p['pair']} {p['status']}" for p in data["pairs"]))
+            + "; ".join(f"{p['id']} {p['status']}" for p in data["tests"]))
     return 1 if data["error"] else 0
 
 

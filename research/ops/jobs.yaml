@@ -100,6 +100,20 @@ jobs:
     lock_wait: 2h
     replaces: pythia-paper-families
 
+  # Pre-registered forward shadow (results/exit_shadow_prereg.md): the M14 exit
+  # and a 40-day time stop on the crypto books, decided on the panel the paper
+  # books just rebuilt, written before the outcome and scored as days pass.
+  # Nothing reads it to trade. Deploy the lab code (deploy_lab.sh) first.
+  - name: exit-shadow
+    description: forward shadow of the M14 exit and the 40-day time stop on the crypto books, decisions written before the outcome, never traded
+    depends_on: [paper-families]
+    command: python -m lab.paper.exit_shadow
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 2, memory: 6g}
+    timeout: 30m
+    lock: heavy
+    lock_wait: 2h
+
   - name: paper-memes
     description: EXPERIMENT memecoin paper books (rotation, tsmom) and their experimental engine signals
     schedule: "30 4 * * *"

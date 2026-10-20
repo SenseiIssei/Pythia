@@ -133,8 +133,8 @@ not have (fundamentals, estimates, short interest) rather than more variants
 of the same. For the crypto books, the M14 exit is the one idea with a
 plausible mechanism and a striking out-of-sample record; it can only become
 evidence forward: a pre-registered shadow that writes the exit flags before
-the outcome and is judged after a fixed number of weeks. That is a proposal,
-not built here.
+the outcome and is judged after a fixed number of weeks. Built after X16 as
+`exit_shadow_prereg.md` (with the 40-day time stop), forward only.
 
 ## Running it
 

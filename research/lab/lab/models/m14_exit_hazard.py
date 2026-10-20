@@ -39,7 +39,9 @@ SPEC = Spec(
     status_note="Failed its gate in X16 (2026-10-20): squared error 1.090 vs 1.049 for the training mean "
                 "(3.9 % higher), DM p 0.27, 8 of 23 quarters better, 16,140 out-of-fold coin-days from 2021. It "
                 "times the market (BTC's 28-day return is 31 % of its gain) rather than the coin. Used by nothing.",
-    use_rule="Nothing reads it unless its gate and X16 B2 pass.", results="exit_overlays.md",
+    use_rule="Nothing trades on it. A frozen fit (lab/models/frozen/m14_exit_shadow.txt) is read only by the "
+             "pre-registered exit shadow (results/exit_shadow_prereg.md), which writes records, never orders.",
+    results="exit_overlays.md",
 )
 
 

@@ -59,8 +59,20 @@ earlier days, so a cut that started before registration carries on.
 **40-day time stop** (on breakout_top10, tsmom_top20 and tsmom_tranches): fires
 on the 40th close after the entry close (`days since the spell's first close >= 40`).
 
-So four pairs, each judged on its own: tsmom_tranches with M14, and each of the
-three books with the time stop.
+## The two tests
+
+1. **M14 exit**: tsmom_tranches with the M14 exit against tsmom_tranches.
+2. **40-day time stop**: the three books in equal thirds (the daily mean of their
+   net returns) with the stop on each against the same without it. The claim
+   from X16 is about the rule across the books, and only the three together
+   make enough exits to judge in a reasonable time: at X16's out-of-sample rates
+   (in 1,023 days the stop made 5 exits on breakout_top10, 26 on tsmom_top20
+   and 50 on tsmom_tranches) a single book would need years. Each book is also
+   reported with and without the stop on its own; those three rows are not
+   judged.
+
+At X16's rates the M14 test (127 exits in 1,023 days, with fold models) reaches
+30 exits in about 8 months, the time stop test in about 13.
 
 ## What is recorded each day
 
@@ -79,12 +91,14 @@ scored return was known when it was written. Turnover is traded at the close of
 D+1 from the record of D-1 drifted over day D+1 and costs **35 bps** per unit
 (not charged after a missing day, for either side). A dead coin earns 0. Each
 record is scored once, when day D+2 has closed, into `scores.jsonl`. Both files
-are append-only. The daily series of a pair are the book's and the overlaid
-book's net returns on the same scored days; a missed day is missing from both.
+are append-only. The daily series of a test are the overlaid and the plain
+net returns on the scored days on which every book of the test is scored; a
+missed day is missing from both.
 
-**An exit decision** is a coin cut first on a close (a new cut, the `new` list).
+**An exit decision** is a coin cut first on a close (a new cut, the `new` list),
+summed over the books of the test.
 
-## The pass rule (per pair, once)
+## The pass rule (per test, once)
 
 Judged on the first **n >= 90 scored days** by which the overlay has made at
 least **30 exit decisions**. On those n days:
@@ -92,12 +106,12 @@ least **30 exit decisions**. On those n days:
 1. the annual Sharpe (daily, sqrt 365) of the overlaid book is above the book's;
 2. the **bootstrap band of the difference** (Sharpe overlaid minus Sharpe book,
    the same resampled days, stationary bootstrap, mean block 20, 4,000 draws,
-   seed 20261020) is above 0 at its **1.25th percentile** (one-sided 5 %,
-   Bonferroni over the four pairs);
+   seed 20261020) is above 0 at its **2.5th percentile** (one-sided 5 %,
+   Bonferroni over the two tests);
 3. the maximum drawdown of the overlaid book is **not worse** than the book's.
 
-All three hold: passed. Otherwise: failed. A pair with fewer than 30 exit
-decisions after 365 scored days fails. The verdict is reached once, on that
+All three hold: passed. Otherwise: failed. A test with fewer than 30 exit
+decisions after 730 scored days fails. The verdict is reached once, on that
 prefix, and never revisited; later days are still recorded but do not change
 it. Interim numbers in the report are not a verdict.
 
@@ -110,5 +124,5 @@ and goes to the owner, who decides whether it becomes a separately registered
 paper overlay. A fail is a record, like the X16 trials.
 
 Shown in the app as the lab feed `reports/exit_shadow/latest.json` (Research
-page); the daily digest gets one line only on a day a pair changes status
+page); the daily digest gets one line only on a day a test changes status
 (started, passed, failed).

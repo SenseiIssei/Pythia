@@ -1066,6 +1066,25 @@ def ai_lines(brief: dict | None, now: int, lang: str = "en") -> list[Line]:
     return [Line(s, label if i == 0 else None) for i, s in enumerate(lines)]
 
 
+def exit_shadow_line(rep: dict | None, now: int, lang: str = "en") -> Line | None:
+    """One line on reports/exit_shadow/latest.json (lab.paper.exit_shadow), only when
+    today's run changed a test's status: started recording, passed or failed."""
+    if not isinstance(rep, dict):
+        return None
+    today = datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d")
+    if rep.get("date") != today:
+        return None
+    parts = []
+    for c in rep.get("changes") or []:
+        to, ov = c.get("to"), c.get("overlay")
+        if to not in ("collecting", "passed", "failed") or ov not in ("m14", "time40"):
+            continue
+        parts.append(tr(f"xs_{to}", lang, test=tr(f"xs_{ov}", lang)))
+    if not parts:
+        return None
+    return Line(short(nodash("; ".join(parts)), 300), tr("xs_lead", lang))
+
+
 def learn_headline(learn: dict, lang: str) -> str:
     """The learning loop's headline in the language, when its report has it."""
     return ((learn.get("headlines") or {}).get(lang) if lang != "en" else None) or learn.get("headline") or ""
@@ -1122,7 +1141,7 @@ def readiness_text(rep: dict | None, now: int | None = None, lang: str = "en") -
 
 def digest_card(learn: dict | None, forward: dict | None, health: dict | None, prev: dict, now: int,
                 lang: str | None = None, ai: dict | None = None,
-                readiness: dict | None = None) -> tuple[Card, dict]:
+                readiness: dict | None = None, exit_shadow: dict | None = None) -> tuple[Card, dict]:
     lang = lang or alert_lang()
     parts, snap, today, missing = autopilot_parts(learn, prev, now, lang)
     if learn is None:
@@ -1158,6 +1177,9 @@ def digest_card(learn: dict | None, forward: dict | None, health: dict | None, p
     lines.append(health_line(health, now, lang))
     if learn and learn_headline(learn, lang):
         lines.append(Line(short(nodash(learn_headline(learn, lang)), 220), tr("learning", lang)))
+    xs = exit_shadow_line(exit_shadow, now, lang)
+    if xs is not None:
+        lines.append(xs)
     lines += ai_lines(ai, now, lang)
     return Card("📊", tr("daily_title", lang, day=day_label(now, lang)), nodash(summary), lines), snap
 
@@ -1180,7 +1202,8 @@ def daily(dry_run: bool = False, now_ms: int | None = None, keep_snapshot: bool 
     card, snap = digest_card(read_json(rep / "learn" / "latest.json"), read_json(rep / "forward" / "latest.json"),
                              read_json(data_root() / "_health" / "system.json"), st.get("autopilots") or {}, now,
                              ai=read_json(rep / "ai_brief" / "latest.json"),
-                             readiness=read_json(rep / "readiness" / "latest.json"))
+                             readiness=read_json(rep / "readiness" / "latest.json"),
+                             exit_shadow=read_json(rep / "exit_shadow" / "latest.json"))
     image = None
     if chart and not dry_run:
         lang = alert_lang()
