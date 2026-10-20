@@ -92,7 +92,8 @@ A rule earns more paper time (not money) only if, out of sample:
 5. deflated p above 0.95 on the daily P&L series against the lab's global pool
    (878 hand trials at the published bar's variance: 377 to C16, 231 in
    parallel, overnight 39, book_portfolio 30, flow_overlays 198, the three
-   5-minute pump.fun rules; the factory's ledger; these 23);
+   5-minute pump.fun rules; the factory's ledger; these 23; and every study
+   counted since, at the time of writing X9's 29, so 907 hand trials);
 6. for the model filter in addition: its mean return per trade beats the pick
    without it, the bootstrap band of the difference above 0.
 

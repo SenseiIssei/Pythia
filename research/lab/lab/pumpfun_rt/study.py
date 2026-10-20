@@ -54,8 +54,9 @@ MIN_BLOCKS = 10
 DAY_MS = 86_400_000
 # The lab's pool before this study (see the plan): 377 hand trials to C16 at the published
 # bar (Sharpe 2.43 over 377), 231 counted in parallel, overnight 39, book_portfolio 30,
-# flow_overlays 198, the three 5-minute pump.fun rules; plus the factory's ledger.
-PRIOR_HAND = 878
+# flow_overlays 198 (875, the hand count X9 used), the three 5-minute pump.fun rules, and
+# X9's 29 (model_review, registered the same day); plus the factory's ledger.
+PRIOR_HAND = 907
 LAT_STRESS, PRIO_STRESS = 2.0, 3.0
 
 
