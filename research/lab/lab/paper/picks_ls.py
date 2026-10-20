@@ -32,6 +32,7 @@ import polars as pl
 from ..data import ROOT
 from ..experiments.picks import FEATURES, HORIZON, PARAMS, PERP_FEATURES, build
 from ..experiments.picks_ls import COST, perp_panel
+from . import m2_lowvol_shadow as shadow
 
 K, N = 10, 50
 START_EQUITY = 10_000.0
@@ -71,8 +72,18 @@ def pick_book() -> tuple[list[str], list[str], int]:
     _, group = np.unique(days[train][order], return_counts=True)
     model = lgb.LGBMRanker(**PARAMS).fit(X[train][order], y[train][order].astype(np.int32), group=group)
     today = days == last_day
-    scores = pl.DataFrame({"base": P["symbol"].to_numpy()[today], "score": model.predict(X[today])}).with_columns(
+    m2_today = model.predict(X[today])
+    scores = pl.DataFrame({"base": P["symbol"].to_numpy()[today], "score": m2_today}).with_columns(
         base=pl.col("base").str.strip_suffix("USDT"))
+    if shadow.enabled():
+        # Off by default; writes down a second ranking and scores old ones, the book is untouched.
+        try:
+            DIR.mkdir(parents=True, exist_ok=True)
+            ranks = shadow.rankings(list(P["symbol"].to_numpy()[today]), m2_today, P["vol28"].to_numpy()[today])
+            shadow.record(DIR, last_day, ranks, int(time.time() * 1000))
+            shadow.score(DIR, P.select("day", "symbol", "fwd"))
+        except (OSError, ValueError, KeyError) as e:
+            print(f"M2 low-vol shadow skipped: {type(e).__name__}: {e}", file=sys.stderr)
 
     perps = perp_panel()
     live = {s["symbol"] for s in get(f"{FAPI}/exchangeInfo")["symbols"]

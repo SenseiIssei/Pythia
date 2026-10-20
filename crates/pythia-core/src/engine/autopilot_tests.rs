@@ -1538,6 +1538,51 @@ fn a_forward_record_below_its_band_after_ten_days_halves_the_score_and_says_why(
 }
 
 #[test]
+fn a_lab_book_whose_rebalancing_trims_lost_is_left_out_by_default_and_judged_by_the_forward_report_when_set() {
+    // 35 trims each losing about a round trip of fees: "no edge" on the record,
+    // which is what took breakout_top10 out of the main auto pick after a week.
+    let mut e = two_books();
+    let i = idx(&e, "lab:breakout_top10");
+    for k in 0..35 {
+        e.strategies[i].ledger.edge.record(if k % 6 == 0 { 0.002 } else { -0.005 });
+    }
+    e.strategies[i].ledger.forward_trades = 35;
+    assert!(e.limits.lab_edge_from_trades, "on by default: the behaviour so far");
+    let ev = e.evidence("lab:breakout_top10");
+    assert!(ev.no_edge && ev.score().is_none());
+    let id = start(&mut e, config("auto", 10_000.0, &[], StopRules::default()));
+    let ids: Vec<String> = status(&e, &id).by_sleeve.into_iter().map(|b| b.strategy_id).collect();
+    assert!(!ids.contains(&"lab:breakout_top10".to_string()), "{ids:?}");
+    e.autopilot_stop(&id, None).unwrap();
+
+    // Off: the trims neither measure nor rule out an edge; the lab evidence and
+    // the forward report (here none yet) decide, and the record is still shown.
+    let mut limits = e.limits.clone();
+    limits.lab_edge_from_trades = false;
+    e.set_limits(limits);
+    let ev = e.evidence("lab:breakout_top10");
+    assert!(!ev.no_edge && !ev.measured);
+    assert!(ev.describe().contains("35 forward trades netting"), "{}", ev.describe());
+    let id = start(&mut e, config("auto2", 10_000.0, &[], StopRules::default()));
+    let ids: Vec<String> = status(&e, &id).by_sleeve.into_iter().map(|b| b.strategy_id).collect();
+    assert!(ids.contains(&"lab:breakout_top10".to_string()), "{ids:?}");
+    // A built-in strategy's record still counts: the setting is for lab books only.
+    let j = idx(&e, "ema-cross-1");
+    for _ in 0..35 {
+        e.strategies[j].ledger.edge.record(-0.005);
+    }
+    assert!(e.evidence("ema-cross-1").no_edge);
+    // A save from before the setting existed loads with it on.
+    let old: RiskLimits = serde_json::from_value({
+        let mut v = serde_json::to_value(RiskLimits::default()).unwrap();
+        v.as_object_mut().unwrap().remove("labEdgeFromTrades");
+        v
+    })
+    .unwrap();
+    assert!(old.lab_edge_from_trades);
+}
+
+#[test]
 fn under_ten_days_the_forward_record_changes_nothing() {
     let mut e = two_books();
     let base = e.evidence("lab:tsmom_regime").score().unwrap();

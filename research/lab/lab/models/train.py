@@ -427,6 +427,11 @@ def markdown(d: dict) -> str:
                      f"{(e.get('drift') or {}).get('level', 'n/a')} | {_date(e.get('last_retrain_ms')) or 'never'} | "
                      f"{', '.join(e.get('used_by') or []) or 'none'} |")
     lines.append("")
+    lines.append("Drift, read with care: on these daily panels \"shift\" (an input spread differently from training, "
+                 "PSI over 0.25) comes up in every 30-day window, the training years included, and \"drift\" (over "
+                 "5 % outside the trained range) in about a quarter to a third of them, because market-wide inputs "
+                 "such as breadth or the 200-day gap move slowly and fill one month with one regime. Neither is news "
+                 "by itself; see `results/drift_study.md`.\n")
     for e in d["models"]:
         lines.append(f"## {e['code']} {e['title']}\n")
         lines.append(f"Target: {e['target']}. Horizon: {e['horizon']}. Universe: {e['universe']}. "

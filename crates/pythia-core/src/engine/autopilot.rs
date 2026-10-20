@@ -3961,7 +3961,14 @@ impl Engine {
     pub(super) fn evidence(&self, sid: &str) -> Evidence {
         let Some(s) = self.strategies.iter().find(|s| s.id == sid) else { return Evidence::default() };
         let pp = self.passport_for(s);
-        let (mode, est) = super::risk::edge_sizing(&s.ledger.edge);
+        // A lab book's closed trades are rebalancing trims, each charged a
+        // round trip of fees; with `lab_edge_from_trades` off they neither
+        // measure an edge nor rule one out (see `RiskLimits`).
+        let (mode, est) = if s.kind == StrategyKind::LabTargets && !self.limits.lab_edge_from_trades {
+            (super::risk::SizingMode::Confidence, None)
+        } else {
+            super::risk::edge_sizing(&s.ledger.edge)
+        };
         let lab = self.lab_signals.get(sid).map(|l| &l.evidence);
         Evidence {
             passed: pp.gates.iter().filter(|g| g.status == GateStatus::Pass).count(),
