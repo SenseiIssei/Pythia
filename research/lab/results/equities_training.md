@@ -1,5 +1,161 @@
 # X16 equities training
 
+2026-10-20. More and better training for stocks, ETFs and the crypto books'
+exits, with the lab's usual honesty. Everything below was pre-registered in
+`equities_training_prereg.md` (committed before any number existed); the
+generated reports are this file's lower half and `exit_overlays.md`. Runs on
+the PC: the point-in-time S&P 500 dataset M9 reads (to 2026-10-16), SEC
+EDGAR for earnings dates (628 companies, 67,474 events, keyless with a
+descriptive User-Agent, 5 requests a second at most, 1,629 requests), the
+server's crypto mirror (to 2026-10-19). No Alpaca data is needed.
+
+## The short version
+
+| Part | Registered test | Result | Verdict |
+|---|---|---|---|
+| A1 breakout on volume (16 variants) | 7 gates against SPY and equal weight from 2016 | pick 55-day high, volume 2.5x, 40 days, regime: Sharpe 0.48 vs SPY 0.92, alpha -2.8 % | **Fails** |
+| A2 gap and go (8) | same | pick gap 2 %, 20 days: 0.38, alpha -5.9 % | **Fails** |
+| A3 post-earnings drift (8) | same, also against the equal weight of members with a CIK | pick z 1, volume 2x, 20 days: 0.54 vs 0.78 for the CIK equal weight, alpha -1.8 % | **Fails** |
+| A4 52-week-high momentum (4) | same | pick top 50, regime: 0.44, alpha -1.2 %, drawdown 22 % vs 32 % | **Fails** |
+| A5 sector ETF rotation (16) | same, against the equal-weight sectors (0.85) | pick 126 days, top 3, regime: 0.59, alpha +0.3 %, drawdown 23 % | **Fails** |
+| B1 exits on the five picks (30) | 6 gates against the pick's own time stop | no exit pick passes; best: gap pick with a 1-sigma target 0.44 vs 0.38 (bootstrap band -0.04 to 0.15) | **Fails** |
+| B2 exits on the crypto books (27) | X6's 6 gates | breakout_top10 target 3: 0.99 vs 1.17; tsmom_top20 ATR 2: 0.38 vs 0.53; tsmom_tranches model exit: 1.64 vs 0.64, passes gates 1 to 5, fails the deflated improvement (p 0.021) | **Fails** |
+| C M13 ranks the candidates (6) | B1's 6 gates | breakout 0.68 vs 0.48, gap 0.71 vs 0.38, PEAD 0.52 vs 0.54; deflated improvement p 0.47, 0.30, 0.09 | **Fails** |
+| M13, M14, M15 | squared error below the training mean, DM p through Holm over three | all three have a higher squared error than their baseline (1.9 %, 3.9 %, 1.2 %) | **Fail.** Zoo records, nothing reads them |
+
+**Nothing passes, so nothing is wired:** no paper book, no exit overlay
+setting, no daily retrain job (the registered rule gives one only to a model
+that passes). M2 keeps its weekly retrain in the learning loop. The three
+models are listed in the zoo as records with their gates (`zoo.RECORDS`, like
+M7), so the Models page shows what was tried and why nothing uses it.
+
+## The pool
+
+Sharpe trials: 948 hand trials before this study, 600 in the factory ledger,
+**120** here (A 57, B1 30, C 6, B2 27): **1,668**, a noise bar of about 2.19
+annual on trading days (2.64 on calendar days). The next study starts from
+**1,068** hand trials. The three model gates were corrected among themselves
+(Holm); none was lower than its baseline, so the correction never mattered.
+Every pick's deflated p over the pool is 0.00 for the equity books and at
+most 0.03 for the crypto overlays; over this study's own 57 part A trials
+the equity picks reach 0.15 to 0.36.
+
+## A. Early detection: no rule beats owning SPY
+
+From 2016, SPY made Sharpe 0.92 (15.2 % a year, drawdown 32 %) and the
+point-in-time equal weight 0.75. Not one of the 52 grid variants beats SPY's
+Sharpe out of sample at 5 bps a side (the best, sectors by 252-day strength,
+top 2, no regime filter, 0.89); the five family picks make 0.38 to 0.59 with
+negative alpha except the sector book (+0.3 %). Each fails at least four of
+the seven gates, always the first (Sharpe above SPY and equal weight), the
+bootstrap (Sharpe above SPY's in 0.6 to 7.5 % of draws against the 90 %
+required) and deflation.
+
+- **What the early-detection rules buy is beta at the wrong time.** The event
+  books carry beta 0.5 to 0.9 and lose 1.8 to 5.9 % a year of alpha; a day late
+  barely changes them, so there is no fast signal being missed by the fill.
+- **The regime filter was picked in sample and hurt out of sample.** The
+  selection window holds two bear markets (2000-02, 2008); from 2016 every A4
+  and A5 variant does better without it, because the years after 2016 punish
+  sitting out (2019, 2023).
+- **PEAD is there but small.** The 60-day holds out of sample make 0.54 to 0.68,
+  still below SPY; the pick (20 days, selected 2005 to 2015) makes 0.54. Its
+  CIK universe leans to survivors (55 % of members have a CIK in 2005, 82 % in
+  2016, 100 % today), which flatters it, and it still loses.
+- **Sector rotation is the closest**, as in the literature: alpha -1.4 to
+  +3.8 % a year, but a Sharpe below SPY's in every variant and at or below the
+  equal-weight sectors' (0.85) in all but one (252 days, top 2: 0.89).
+
+## B. Exit timing
+
+**Capture (no trials).** The current exits keep a median 33 to 54 % of the
+best close reached in an equity trade (MFE), and 30 to 37 % of trades that
+were up at some point end at a loss; the median name rises another 3 to 5 %
+within 20 days of the sale. The crypto books give more back: breakout_top10
+keeps a median 12 % of its MFE (median MFE 8 %, give-back 11 points),
+tsmom_tranches about none (give-back 18 points), and 31 to 43 % of their
+spells that were up end at a loss. So exits do leave money on the table; the
+question was whether any rule known in advance takes it.
+
+**B1 (equity picks): no.** The registered exit picks (by selection Sharpe):
+1-sigma target for breakouts (0.42 vs 0.48) and gaps (0.44 vs 0.38), the M15
+model for PEAD (0.57 vs 0.54), ATR 3 for the two rebalanced books (0.42 vs
+0.44, 0.50 vs 0.59). None clears the bootstrap or the deflated improvement;
+three of five are worse. After the fact (not a result): PEAD with an ATR 2
+trail made 0.79 with a 14 % drawdown, the best event book of the study,
+selected by nobody.
+
+**B2 (crypto books): no**, but one near miss worth a forward look. The
+in-sample picks: breakout_top10 a 3-sigma target (0.99 vs 1.17 out of
+sample), tsmom_top20 ATR 2 (0.38 vs 0.53), tsmom_tranches the M14 model exit
+(1.64 vs 0.64, drawdown 1.5 % vs 8.8 %, a day late 1.48, twin 1.34 vs 0.37).
+The last passes gates 1 to 5 and fails the sixth: the improvement series
+(overlay minus book) has a negative Sharpe (-0.20) and a deflated p of 0.021.
+The Sharpe gain is de-risking, not more money: the overlay cuts 86 % of the
+held days, holds 2 % of the capital on average instead of 9 % and makes 4 % a
+year instead of 6 %. The model exit looks good on all three books out of
+sample (2.19, 1.55, 1.64 against 1.17, 0.53, 0.64) because M14 mostly times
+BTC's 28-day momentum (31 % of its gain), a tighter regime switch; in sample
+it made breakout_top10 worse (1.16 vs 1.45), so it was not picked there.
+Also after the fact: a 40-day time stop beats every book out of sample (1.35,
+0.78, 1.19) and was picked for none.
+
+## C and the models: more training, no better forecasts
+
+- **M13** (20-day abnormal return of 105,016 out-of-fold candidates
+  2000-2026) ranks a little (daily rank IC 0.021, t 4.4) but its squared error
+  is 1.9 % above the per-family mean: the magnitudes are wrong, so it fails as
+  registered. Used as a ranking (C) it lifts the breakout and gap books out
+  of sample (0.68 and 0.71) but neither improvement survives deflation and
+  both stay below SPY.
+- **M15** (equity remaining return, 273,311 held days) and **M14** (crypto
+  remaining return, 16,140 coin-days from 2021) are worse than the mean (1.2 %
+  and 3.9 %). Both lean on the market (SPY's or BTC's recent return is their
+  largest input), not on the position.
+- **Walk-forward with purging**: the zoo's own quarterly folds with an
+  embargo of the label horizon (M13 107 fits from 2000, M15 108, M14 23 from
+  2021). **Importance stability**: the registered measure (consecutive fits)
+  is 0.96 to 0.99, high by construction because expanding windows share most
+  rows; fits five years apart still agree at 0.95 (M15) and 0.98 (M13), and
+  M14's first and last fit at 0.94, so the models are stable, just not useful.
+- **More history**: the equity panel starts in 1996 (point in time, 1,228
+  names ever in the index); before 2006 a quarter or more of member days have
+  no open or volume (the dataset's CRSP rows, mostly names that later left),
+  so those fills fall back to the close and those names cannot signal a
+  volume event. From 2016 that is under 0.2 %.
+
+## What would have to change
+
+The equity rules were tested where Pythia can trade them (S&P 500 members,
+next-open fills, Alpaca-like costs). They are known effects that the market
+has largely priced; a next attempt needs information the price panel does
+not have (fundamentals, estimates, short interest) rather than more variants
+of the same. For the crypto books, the M14 exit is the one idea with a
+plausible mechanism and a striking out-of-sample record; it can only become
+evidence forward: a pre-registered shadow that writes the exit flags before
+the outcome and is judged after a fixed number of weeks. That is a proposal,
+not built here.
+
+## Running it
+
+On the PC (data under F:/PythiaData, EDGAR cache in `equities/edgar`, 332 MB):
+
+```bash
+PYTHIA_DATA=F:/PythiaData PYTHIA_REPORTS=F:/PythiaData/agent-x16/reports PYTHIA_AGENT_OUT=F:/PythiaData/agent-x16 python -m lab.experiments.equities_training
+PYTHIA_DATA=F:/PythiaData PYTHIA_REPORTS=F:/PythiaData/agent-x16/reports PYTHIA_AGENT_OUT=F:/PythiaData/agent-x16 python -m lab.experiments.exit_overlays
+```
+
+On the server, after the code is deployed (both need outbound HTTPS to GitHub
+and SEC for the first run; `PYTHIA_SEC_UA` overrides the EDGAR User-Agent):
+
+```bash
+docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.experiments.exit_overlays
+docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -e PYTHIA_AGENT_OUT=/data/lab-cache pythia-lab python -m lab.experiments.equities_training
+```
+
+`--refresh` on `equities_training` downloads the dataset again and refetches
+every EDGAR company file.
+
 <!-- generated below by lab.experiments.equities_training; edit above this line only -->
 
 ## Results (generated 2026-10-20, data 1996-01-02 to 2026-10-16)
