@@ -197,6 +197,14 @@ a survivorship-free history of graduations (every one, from an on-chain
 source), out of sample, deflated over every trial, with these paper books as
 its forward test. Until then: paper only, and never a wallet.
 
+**Forward result and what came next.** After five days buying every
+graduation had lost badly (1,209 closed, median -96 %, 61 rugs, hit rate
+11 %) and the filtered books had barely traded. A 5-minute poller cannot see
+the first seconds, where most tokens are dumped, so the question moved to the
+real-time lab (`lab.pumpfun_rt`, `results/pumpfun_realtime.md`): every
+creation and curve trade recorded from the chain as it happens, fills with
+latency, 22 pre-registered rules and a model, paper only.
+
 ## Where the numbers come from
 
 The engine reads each experiment's evidence from the study's markdown
