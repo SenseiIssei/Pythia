@@ -328,7 +328,7 @@ class Tracker:
                 if prog < 1.0 and tok.on_curve:
                     self.decide(tok, t, f"p{int(MILESTONES[k] * 100)}", MILESTONES[k])
         flags = 0
-        if not buy:
+        if not buy and tok.mint in self.by_mint:              # the triggers only where a path records them
             if P.dev_sell_trigger(tok, user, amt):
                 flags |= 1
             elif P.pull_trigger(tok, t, user, amt, venue):
