@@ -35,6 +35,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from . import curve as C
 from . import strategies as S
 
@@ -169,6 +171,12 @@ class Exits:
     dev_sell: bool = True
     pull: bool = True
     risk: tuple | None = None             # (label, multiple of its base rate) for the risk-model exit
+    hazard: bool = False                  # X14: the hazard exit HZ(k*) replaces the price exits when its models exist
+
+
+# E0, the X14 plan's exit for the early books, and the hazard strategies' fallback before the first retrain.
+E0 = Exits(1800, 0.35, ((1.0, 0.5), (3.0, 1.0)), 0.50, 0.25)
+HZ_EXITS = dataclasses.replace(E0, hazard=True)
 
 
 @dataclass(frozen=True)
@@ -181,6 +189,14 @@ class Strategy(S.Rule):
 
     @property
     def pipeline(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class EarlyStrategy(Strategy):
+    """X14: a checkpoint at creation + w_s seconds with no rule of its own; the early models decide (flt "early")."""
+
+    def wants_checkpoint(self, tok, t: int) -> bool:
         return True
 
 
@@ -222,7 +238,21 @@ def _build() -> list[Strategy]:
     ]
 
 
-STRATEGIES: list[Strategy] = _build()
+def _build_x14() -> list[Strategy]:
+    """X14 (results/pumpfun_early_exit_plan.md, section 3): early entries and the hazard exit, paper and shadow."""
+    early = {"early": {"label": "peak3x", "top": 0.05, "alive": True}}
+    hz = "hazard exit HZ(k*) with the dev-sell and pull exits, 30 min (E0's price exits until the models exist)"
+    out = [EarlyStrategy(f"P_early{w}", "B", "checkpoint", HZ_EXITS.ladder[-1][0], HZ_EXITS.sl, HZ_EXITS.time_s,
+                         {"w_s": w}, f"creation + {w} s, P(peak3x) in the top 5 % of its training scores at that "
+                                     f"age and P(alive5m) at least its base rate; {hz}", exits=HZ_EXITS, flt=early)
+           for w in (10, 30)]
+    out.append(_strategy("P_press10_hz", "B", "checkpoint", {"w_s": 10, "buyers": 10, "net_sol": 2.0}, {}, HZ_EXITS,
+                         f"as P_press10; {hz}"))
+    out.append(_strategy("P_pool60_hz", "E", "migration", {"delay_s": 60}, {}, HZ_EXITS, f"as P_pool60; {hz}"))
+    return out
+
+
+STRATEGIES: list[Strategy] = _build() + _build_x14()
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -328,6 +358,24 @@ class PaperExecutor:
         pipe.sold(o.pid, at, o.tokens, v, tx)
 
 
+def dev_sell_trigger(tok, user: str, tok_amt: int) -> bool:
+    """The dev (creator or the creation's payer) sold 10 % or more of what it held (called after the sale)."""
+    return user in tok.devs and tok_amt >= DEV_SELL_FRAC * (tok.dev_hold() + tok_amt)
+
+
+def pull_trigger(tok, t: float, user: str, tok_amt: int, venue: str) -> bool:
+    """A liquidity pull (called after the sale): a top-10 holder sold 2 % of the supply at once, or the
+    curve's SOL (the pool's) fell 15 % within 2 s."""
+    from .tokens import SUPPLY
+    if tok_amt >= PULL_SUPPLY_SHARE * SUPPLY and user in tok.top_holders(10, tok_amt_back=(user, tok_amt)):
+        return True
+    if venue == "pool":
+        return tok.pool_drop(t, PULL_WINDOW_MS) >= PULL_SOL_DROP
+    out = tok.net_out(t, PULL_WINDOW_MS)
+    before = tok.rs + out
+    return out > 0 and before > 0 and out >= PULL_SOL_DROP * before
+
+
 def curve_cost(tokens: int, vs: int, vt: int, fee_bps: int) -> int:
     """Lamports (fee included) to buy exactly `tokens` from the curve; a huge number when it cannot."""
     if tokens <= 0:
@@ -414,6 +462,11 @@ class Pipeline:
             if not ok:
                 eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
                 return
+        if s.flt.get("early"):
+            ok, prob = self.early_ok(s.flt["early"], tok, t)
+            if not ok:
+                eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
+                return
         risk = self.risk[s.name]
         stake = int(min(s.stake_sol, risk.limits.stake_sol) * C.LAMPORTS)
         depth = tok.pq if pool else tok.vs
@@ -465,6 +518,33 @@ class Pipeline:
                 return False, first
         return True, first
 
+    def early_ok(self, spec: dict, tok, t: float) -> tuple[bool | None, float | None]:
+        """X14's early filter: P(label) at or above the top `top` threshold of the model's training scores at
+        this age, and (alive) P(alive5m) at or above its base rate. (None, None) without the models."""
+        eng = self.eng
+        pol = eng.models.get("hz_policy")
+        m = eng.models.get("e_" + spec["label"])
+        tracker = getattr(eng, "early", None)
+        if pol is None or m is None or m.booster is None or tracker is None:
+            return None, None
+        kind = f"t{int(round((t - tok.t0) / 1000))}"
+        thr = ((pol.thresholds.get(spec["label"]) or {}).get(str(spec["top"])) or {}).get(kind)
+        if thr is None:
+            return None, None
+        f = eng.features(tok, int(t))
+        f.update(tracker.early_features(tok, t, 0.0))
+        p = float(m.predict(np.array([[float(f.get(k, math.nan)) for k in m.features]], dtype=float))[0])
+        if p < thr:
+            return False, p
+        if spec.get("alive"):
+            a = eng.models.get("e_alive5m")
+            if a is None or a.booster is None:
+                return None, p
+            pa = float(a.predict(np.array([[float(f.get(k, math.nan)) for k in a.features]], dtype=float))[0])
+            if pa < a.base:
+                return False, p
+        return True, p
+
     # ------------------------------------------------------------ fills
     def bought(self, pid: int, at: float, tokens: int, cost_l: int, fee_l: int) -> None:
         p = self.pos.get(pid)
@@ -475,6 +555,9 @@ class Pipeline:
         p.update(state="open", tokens=tokens, left=tokens, cost_l=cost_l, fees_l=p["fees_l"] + fee_l,
                  land_ms=int(at), entry_price=(cost_l / C.LAMPORTS) / (tokens / C.TOKEN_UNIT))
         self.risk[s.name].hold(pid, cost_l + fee_l)
+        tracker = getattr(self.eng, "early", None)
+        if tracker is not None and tracker.rows_on:             # the study: the best exit afterwards (capture)
+            tracker.watch_max(self.name, pid, p["mint"], tokens, cost_l + fee_l, at)
         self._event("bought", p, tokens=tokens, cost_l=cost_l)
         self.eng.push(at + s.exits.time_s * 1000, "pipe", (self, "_time_stop", pid))
         if tok is not None:
@@ -546,22 +629,36 @@ class Pipeline:
         if not pids:
             return
         trigger = None
-        if not buy and user in tok.devs and tok_amt >= DEV_SELL_FRAC * (tok.dev_hold() + tok_amt):
+        if not buy and dev_sell_trigger(tok, user, tok_amt):
             trigger = "dev_sell"
-        elif not buy and self._pull(tok, t, user, tok_amt, venue):
+        elif not buy and pull_trigger(tok, t, user, tok_amt, venue):
             trigger = "pull"
         for pid in tuple(pids):
             self.check(pid, t, trigger)
 
     def _pull(self, tok, t: float, user: str, tok_amt: int, venue: str) -> bool:
-        from .tokens import SUPPLY
-        if tok_amt >= PULL_SUPPLY_SHARE * SUPPLY and user in tok.top_holders(10, tok_amt_back=(user, tok_amt)):
-            return True
-        if venue == "pool":
-            return tok.pool_drop(t, PULL_WINDOW_MS) >= PULL_SOL_DROP
-        out = tok.net_out(t, PULL_WINDOW_MS)
-        before = tok.rs + out
-        return out > 0 and before > 0 and out >= PULL_SOL_DROP * before
+        return pull_trigger(tok, t, user, tok_amt, venue)
+
+    def hazard(self, p: dict, s: Strategy, tok, t: float, v: int) -> bool | None:
+        """X14's HZ(k*): sell when the predicted upside over the next 30 s is below k* x P(a dump within
+        10 s) x |L|. None when its models are missing (the price exits then apply); asked at most once a
+        second, with the same step features the study's step rows carry (early.Tracker.step_features)."""
+        eng = self.eng
+        pol, md, mu = (eng.models.get(k) for k in ("hz_policy", "hz_dump10", "hz_up30"))
+        tracker = getattr(eng, "early", None)
+        if pol is None or md is None or mu is None or md.booster is None or mu.booster is None or tracker is None:
+            return None
+        tx = eng.cost_of(s.name).tx_lamports()
+        vn = v - tx
+        if vn > p.get("hz_peak", -1.0):
+            p["hz_peak"], p["hz_peak_ms"] = vn, t
+        if t - p.get("last_hz_ms", -1e18) < RISK_EVERY_MS:
+            return False
+        p["last_hz_ms"] = t
+        f = tracker.step_features(tok, t, vn, p["cost_l"] + tx, p["hz_peak"], p["land_ms"], p["hz_peak_ms"])
+        pd = float(md.predict(np.array([[float(f.get(k, math.nan)) for k in md.features]], dtype=float))[0])
+        pu = float(mu.predict(np.array([[float(f.get(k, math.nan)) for k in mu.features]], dtype=float))[0])
+        return pu < pol.k * pd * pol.loss
 
     def check(self, pid: int, t: float, trigger: str | None = None) -> None:
         p = self.pos.get(pid)
@@ -595,6 +692,12 @@ class Pipeline:
             pb = eng.prob(ex.risk[0], eng.features(tok, int(t)))
             if pb is not None and pb[0] >= ex.risk[1] * pb[1]:
                 return self._sell_all(p, t, "risk")
+        if ex.hazard and tok is not None and p["left"] == p["tokens"]:
+            hz = self.hazard(p, s, tok, t, v)
+            if hz:
+                return self._sell_all(p, t, "hazard")
+            if hz is not None:
+                return None                               # the models decide; no price exits (plan section 2)
         if mult <= 1 - ex.sl:
             return self._sell_all(p, t, "stop")
         if ex.trail_after is not None and p["peak"] >= 1 + ex.trail_after and mult <= p["peak"] * (1 - ex.trail_gap):
@@ -677,7 +780,7 @@ class Pipeline:
         stake = p["stake_l"] or 1
         rec = {k: p.get(k) for k in ("rule", "family", "mint", "name", "symbol", "created_ms", "signal_ms",
                                      "land_ms", "exit_signal_ms", "exit_why", "prob", "gap", "age_s", "progress",
-                                     "signal_price", "entry_price", "legs")}
+                                     "signal_price", "entry_price", "legs", "pid")}
         rec.update(exit_ms=int(at), exit_price=tok.price() if tok else 0.0, proceeds_sol=p["proceeds_l"] / C.LAMPORTS,
                    pnl_sol=pnl / C.LAMPORTS, ret=pnl / stake, hold_s=(at - p["land_ms"]) / 1000,
                    stake_sol=stake / C.LAMPORTS,
