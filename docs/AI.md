@@ -18,10 +18,11 @@ an autopilot or a setting.
 | Questions in Telegram (`lab.ai.chat`, container `pythia-ai-chat`) | when the owner asks, at most 40 a day | `claude-sonnet-5-5`, effort medium, direct | about 9,000 tokens of instructions and facts (cached), the question, 500 to 1,500 out | $0.01 to $0.04 a question |
 | AI overlay (Signals page) | only while switched on, one market every `PYTHIA_AI_INTERVAL_SEC` (120 s) | `claude-haiku-5-5` unless set otherwise | about 900 tokens in, under 100 out | about $0.09 a day while on |
 | One signal, an ensemble forecast, a key test | when asked for in the app | the provider's default (Haiku for Claude) | under 2,000 tokens | well under a cent |
+| pump.fun name categories (`lab.pumpfun_rt.categorize`, jobs.yaml `pumpfun-rt-categories`) | every day 06:20 | `claude-haiku-5-5`, effort low, Batches API, up to 4 chunks at once | per chunk of 800 new names about 10,000 tokens in, under 12,000 out; names seen before are never asked again | about $0.05 to $0.15 a day, capped at $0.40 a run |
 
-**Expected daily cost per job.** The scheduled jobs together: about $0.10 a
-day (brief $0.02, critic under $0.01, director $0.05 and weekly review $0.01
-averaged over the week). The questions are what moves the total: 10 a day
+**Expected daily cost per job.** The scheduled jobs together: about $0.20 a
+day (brief $0.02, critic under $0.01, pump.fun categories about $0.10, director
+$0.05 and weekly review $0.01 averaged over the week). The questions are what moves the total: 10 a day
 are about $0.25, the full 40 about $1.00 to $1.60. With the overlay off,
 a heavy day is therefore under $2.00, well inside the daily cap of $12.
 
