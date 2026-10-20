@@ -489,6 +489,72 @@ struct ReadinessPatch {
     risk_step: u8,
 }
 
+// ── the pump.fun wallet page (docs/PUMPFUN-LIVE.md) ─────────────────────────
+
+/// The pump.fun wallet page's routes over the lab's data folder `root`
+/// (`PYTHIA_DATA`). Reads: what the owner's live service writes (status,
+/// trades, measured execution) and the wallet tool's public address. Writes:
+/// lower limits (only ever below the confirmation file and the code's maxima)
+/// and the kill file. Nothing reads a key, signs, sends or moves money, and
+/// nothing here removes the kill file: that is done on the server by hand.
+fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
+    use pythia_core::pumpfun_live as pf;
+    let (r1, r2, r3, r4) = (root.clone(), root.clone(), root.clone(), root);
+    Router::new()
+        .route(
+            "/api/pumpfun/live",
+            get(move || {
+                let root = r1.clone();
+                async move {
+                    match root {
+                        Some(r) => Json(pf::view_in(&r, now_ms())).into_response(),
+                        None => Json(pf::view()).into_response(),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/pumpfun/live/trades",
+            get(move || {
+                let root = r2.clone();
+                async move { Json(root.map(|r| pf::view_in(&r, now_ms()).trades).unwrap_or_default()) }
+            }),
+        )
+        .route(
+            "/api/pumpfun/live/settings",
+            post(move |Json(patch): Json<pf::SettingsPatch>| {
+                let root = r3.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    match pf::write_settings_in(&r, patch, now_ms()) {
+                        Ok(s) => Json(s).into_response(),
+                        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/pumpfun/live/kill",
+            post(move || {
+                let root = r4.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    match pf::kill_in(&r, now_ms()) {
+                        Ok(k) => {
+                            tracing::warn!("pump.fun live kill switch set from the app");
+                            Json(k).into_response()
+                        }
+                        Err(why) => api_error(StatusCode::INTERNAL_SERVER_ERROR, why),
+                    }
+                }
+            }),
+        )
+}
+
 /// `POST /api/readiness/settings`: the risk step of the real money readiness
 /// check (docs/LIVE-READINESS.md), written for the lab. It changes what the
 /// daily check reports and nothing else; nothing is armed or traded.
@@ -992,6 +1058,8 @@ async fn main() {
         .route("/api/forecast/ensemble", post(post_ensemble))
         .route("/api/forecast/config", post(post_forecast_config))
         .merge(alert_routes())
+        // The pump.fun wallet page: the live service's status, lower limits, the kill switch.
+        .merge(pumpfun_routes(pythia_core::labview::data_dir()))
         // The dashboards are served from a different origin in dev; allow them.
         .layer(CorsLayer::permissive())
         .with_state(state.clone());
@@ -2591,3 +2659,7 @@ mod alerts_api_tests;
 #[cfg(test)]
 #[path = "ai_api_tests.rs"]
 mod ai_api_tests;
+
+#[cfg(test)]
+#[path = "pumpfun_api_tests.rs"]
+mod pumpfun_api_tests;

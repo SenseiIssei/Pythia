@@ -753,6 +753,13 @@ pub fn cs2_board() -> Option<pythia_core::labview::Cs2Board> {
     pythia_core::labview::cs2_board()
 }
 
+/// The pump.fun wallet page from the synced data folder. Read-only: the limits
+/// and the kill switch act on the server, so the desktop app only shows them.
+#[tauri::command]
+pub fn pumpfun_live() -> pythia_core::pumpfun_live::LiveView {
+    pythia_core::pumpfun_live::view()
+}
+
 /// Pokemon cards from the lab (prices, forecasts, the paper collection). Read-only.
 #[tauri::command]
 pub fn pokemon_status() -> pythia_core::labview::PokemonView {

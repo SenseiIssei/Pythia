@@ -288,6 +288,7 @@ pub fn run() {
             commands::readiness_settings,
             commands::set_readiness_settings,
             commands::cs2_board,
+            commands::pumpfun_live,
             commands::pokemon_status,
             commands::lab_feeds,
             commands::lab_studies,
