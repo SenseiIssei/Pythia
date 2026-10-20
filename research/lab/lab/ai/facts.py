@@ -151,7 +151,7 @@ def feed_lines(names=FEEDS, root: Path | None = None, items: int = 6) -> list[st
 # forward evidence and real money readiness first, then models and studies,
 # then the watchers (listings, trending, pump.fun) and the collectibles.
 SHEET_FEEDS = ("forward", "readiness", "learn", "models", "factory", "flow_overlays", "listings", "trending",
-               "pumpfun_rt", "memecoins", "cs2", "pokemon")
+               "pumpfun_rt", "memecoins", "cs2", "pokemon", "polymarket")
 # Feeds whose items are movers worth more than six lines.
 MOVER_FEEDS = ("cs2", "pokemon", "trending", "listings")
 RECENT_STOP_MS = 7 * 86_400_000

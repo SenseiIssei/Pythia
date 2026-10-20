@@ -512,6 +512,44 @@ jobs:
     timeout: 2h
     replaces: pythia-pokemon
 
+  # Polymarket (Y4, results/polymarket.md). PAPER ONLY: public read-only data, no wallet,
+  # no key, no order. Added disabled; switch on (enabled: true, then deploy_ops.sh) once
+  # lab/polymarket is deployed to /opt/pythia-lab. The daily run calls Claude Sonnet 5.5
+  # through the engine's metered POST /api/ai/complete (Batches, budget enforced there,
+  # about $0.30 a day at 300 markets); a refusal or an engine that is down only skips the
+  # forecasts, the books still run.
+  - name: polymarket-daily
+    description: Polymarket PAPER books, snapshot of the open markets and books, Claude forecasts (Sonnet, batch), settle, step, score, report and card
+    schedule: "15 5 * * *"
+    command: python -m lab.polymarket.daily --forecast
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 3g}
+    timeout: 2h
+    lock: polymarket
+    lock_wait: 30m
+    enabled: false
+
+  - name: polymarket-history
+    description: Polymarket resolved markets and their price history, weekly, only what is new
+    schedule: "30 1 * * 1"
+    command: python -m lab.polymarket.collect --history
+    resources: {cpus: 1, memory: 3g}
+    timeout: 8h
+    lock: polymarket-history
+    enabled: false
+
+  - name: polymarket-study
+    description: Polymarket study after the history, biases, the calibrated model against the market, the paper twin, the model the daily book uses
+    depends_on: [polymarket-history]
+    depends_within: 12h
+    command: python -m lab.polymarket.study
+    resources: {cpus: 4, memory: 10g}
+    timeout: 4h
+    lock: heavy
+    lock_wait: 4h
+    enabled: false
+
   - name: retrain
     description: weekly retrain of the volatility model (M1), promoted only if better
     schedule: "0 5 * * 0"
@@ -621,6 +659,10 @@ datasets:
     description: the real-time pump.fun record; the collector deletes whole days, oldest first, over PYTHIA_PF_BUDGET_GB (40)
     path: pumpfun_rt
     max_gb: 45
+  - name: polymarket
+    description: Polymarket resolved set, daily snapshots and books (the collector deletes book and snapshot days, oldest first, over PYTHIA_PM_BUDGET_GB, 6), the forecast ledgers and paper books (never deleted)
+    path: polymarket
+    max_gb: 8
   - name: job-runs
     description: the runner's own run records, by month
     path: _ops/runs
@@ -650,6 +692,9 @@ backup:
     - ai
     - live
     - pumpfun_rt/categories
+    - polymarket/forecasts
+    - polymarket/paper
+    - polymarket/model
     - reports/forward/evidence.json
     - reports/forward/backtest
   # By file or folder name: caches the jobs rebuild (the zoo's panels, the

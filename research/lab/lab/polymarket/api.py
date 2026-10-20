@@ -120,11 +120,13 @@ class Client:
 
     # ------------------------------------------------------------ Gamma
 
-    def markets(self, closed: bool, **filters):
-        """Every market matching the filters, page by page (keyset cursor). Yields dicts."""
+    def markets(self, closed, **filters):
+        """Every market matching the filters, page by page (keyset cursor). Yields dicts.
+        `closed` True, False or "any" (any needs an identifier filter such as id)."""
         cur = None
+        flag = closed if isinstance(closed, str) else ("true" if closed else "false")
         while True:
-            q = {"limit": PAGE, "closed": "true" if closed else "false", "include_tag": "true", **filters}
+            q = {"limit": PAGE, "closed": flag, "include_tag": "true", **filters}
             if cur:
                 q["after_cursor"] = cur
             d = self.get(f"{GAMMA}/markets/keyset", q) or {}

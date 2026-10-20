@@ -89,7 +89,7 @@ def sample(recs: list[dict], cap: dict | None = None) -> tuple[list[dict], dict]
         key = f"{r['category']}|{r['kind']}"
         c = counts.setdefault(key, {"all": 0, "resolved": 0, "taken": 0})
         c["all"] += 1
-        if r.get("outcome") is None or not r.get("yes_token"):
+        if r.get("outcome") not in (0.0, 1.0) or not r.get("yes_token"):
             continue
         c["resolved"] += 1
         strata.setdefault(key, []).append(r)
@@ -124,9 +124,12 @@ def histories(client: api.Client, rec: dict) -> list[dict]:
 HIST_SCHEMA = {"market_id": pl.Utf8, "res": pl.Utf8, "t_s": pl.Int64, "p": pl.Float64}
 
 
-def fetch_histories(client: api.Client, recs: list[dict], workers: int = 6, log=print) -> pl.DataFrame:
+def fetch_histories(client: api.Client, recs: list[dict], workers: int = 6,
+                    log=print) -> tuple[pl.DataFrame, set[str]]:
+    """The history rows of `recs`, and the ids whose fetch failed (an empty history,
+    as for the AMM markets before the order book, is an answer, not a failure)."""
     rows: list[dict] = []
-    failed = 0
+    failed: set[str] = set()
 
     def one(r):
         try:
@@ -135,16 +138,17 @@ def fetch_histories(client: api.Client, recs: list[dict], workers: int = 6, log=
             return None
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for i, out in enumerate(ex.map(one, recs)):
+        for i, (r, out) in enumerate(zip(recs, ex.map(one, recs))):
             if out is None:
-                failed += 1
+                failed.add(r["id"])
             else:
                 rows.extend(out)
             if (i + 1) % 500 == 0:
-                log(f"    {i + 1}/{len(recs)} histories, {len(rows)} points, {failed} failed")
+                log(f"    {i + 1}/{len(recs)} histories, {len(rows)} points, {len(failed)} failed")
     if failed:
-        log(f"    {failed} histories failed (left for the next run)")
-    return pl.DataFrame(rows, schema=HIST_SCHEMA) if rows else pl.DataFrame(schema=HIST_SCHEMA)
+        log(f"    {len(failed)} histories failed (left for the next run)")
+    df = pl.DataFrame(rows, schema=HIST_SCHEMA) if rows else pl.DataFrame(schema=HIST_SCHEMA)
+    return df, failed
 
 
 def _frame(recs: list[dict]) -> pl.DataFrame:
@@ -158,8 +162,7 @@ def backfill(client: api.Client | None = None, start: str = START_MONTH, only: l
     st = store.read_json(store.path("state.json"), {}) or {}
     done = set(st.get("months_done") or [])
     strata = store.read_json(store.path("resolved", "strata.json"), {}) or {}
-    this_month = now.strftime("%Y-%m")
-    prev = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    prev =(now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     summary = {"months": 0, "markets": 0, "new_histories": 0}
     for label, a, b in month_windows(start, now):
         if only and label not in only:
@@ -182,8 +185,11 @@ def backfill(client: api.Client | None = None, start: str = START_MONTH, only: l
         have = set(old_h["market_id"].unique().to_list()) if old_h is not None and old_h.height else set()
         todo = [r for r in taken if r["id"] not in have]
         log(f"{label}: {len(recs)} closed markets over ${VOL_MIN:,.0f}, {len(taken)} sampled, {len(todo)} to fetch")
-        new_h = fetch_histories(client, todo, workers, log) if todo else pl.DataFrame(schema=HIST_SCHEMA)
+        new_h, failed = fetch_histories(client, todo, workers, log) if todo \
+            else (pl.DataFrame(schema=HIST_SCHEMA), set())
         got = set(new_h["market_id"].unique().to_list()) if new_h.height else set()
+        counts["_no_history"] = {"all": 0, "resolved": 0,
+                                 "taken": len([r for r in todo if r["id"] not in got and r["id"] not in failed])}
         hist = pl.concat([x for x in (old_h, new_h) if x is not None and x.height], how="vertical") \
             if (old_h is not None and old_h.height) or new_h.height else new_h
         keep = [r for r in taken if r["id"] in have or r["id"] in got]
@@ -192,7 +198,7 @@ def backfill(client: api.Client | None = None, start: str = START_MONTH, only: l
         if hist.height:
             store.write_parquet(hist, hp)
         missing = len(taken) - len(keep)
-        if not redo and missing <= max(5, 0.02 * len(taken)):
+        if not redo and len(failed) <= max(5, 0.02 * len(taken)):
             done.add(label)
         st["months_done"] = sorted(done)
         st["updated_ms"] = now_ms()
@@ -201,9 +207,21 @@ def backfill(client: api.Client | None = None, start: str = START_MONTH, only: l
         summary["months"] += 1
         summary["markets"] += len(keep)
         summary["new_histories"] += len(got)
-        log(f"{label}: kept {len(keep)} with history ({missing} missing), {time.time() - t0:.0f} s, "
+        log(f"{label}: kept {len(keep)} with history ({missing} without: {len(failed)} failed, the rest "
+            f"have none), {time.time() - t0:.0f} s, "
             f"{client.calls} calls so far")
     return summary
+
+
+def lookup(client: api.Client, ids: list[str]) -> dict[str, dict]:
+    """The current record of the given markets, open or closed (100 ids a call)."""
+    out = {}
+    ids = sorted({str(i) for i in ids if i})
+    for i in range(0, len(ids), 100):
+        for m in client.markets("any", id=ids[i:i + 100]):
+            r = M.record(m, desc_chars=0)
+            out[r["id"]] = r
+    return out
 
 
 # ---------------------------------------------------------------- the daily snapshot

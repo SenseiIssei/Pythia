@@ -57,8 +57,12 @@ no state). Features, all known at the decision time:
   share of the life gone
 - price change over 1 and 7 days, the 7-day realised volatility of daily
   logit changes, the life-to-date high and low
-- category, kind, negative-risk flag, number of markets in the same event
-  in the sample
+- category, kind, negative-risk flag
+
+(Changed before anything was computed: "number of markets in the same event
+in the sample" is dropped. The sample caps strata, so the count in the
+sample is not the count a live market shows, and the live model would see a
+different feature than it was trained on.)
 
 Not a feature: final volume or liquidity (only known at the end; using them
 would select markets that turned out busy). Label: 1 when the first outcome
@@ -118,9 +122,11 @@ they ended.
   economics, tech, culture, mentions and other (where public information
   decides; not crypto, finance, weather or sports, which are prices, data
   feeds or games), scheduled to end within 2 to 60 days, liquidity at least
-  $5,000, YES ask between 3 and 97 cents. Up to 150 new markets a day, the
+  $5,000, YES ask between 3 and 97 cents. Up to 300 markets a day (479
+  qualified on the first day, at about $0.001 a market), new ones first,
   soonest-ending first; a market is forecast again after 7 days if it is
-  still open.
+  still open. (A first request of 8 markets checked the path on
+  2026-10-20; those 8 rows are in the ledger like every other.)
 - **What it sees.** Today's date, its own knowledge cutoff, the question, the
   rules (the market description), the end date, the category, the event's
   title and the other questions of the same event (no prices). **It never

@@ -166,7 +166,8 @@ def taker_fee(shares: float, price: float, rate: float, exponent: float = 1.0) -
 
 
 def outcome_yes(m: dict) -> float | None:
-    """1.0 when the first outcome won, 0.0 when the second did, None for 50-50 or open."""
+    """1.0 when the first outcome won, 0.0 when the second did, 0.5 for a 50-50
+    resolution, None while open or undecided. Only meaningful on a closed market."""
     px = _json_list(m.get("outcomePrices"))
     if len(px) != 2:
         return None
@@ -178,6 +179,8 @@ def outcome_yes(m: dict) -> float | None:
         return 1.0
     if b >= 0.99 and a <= 0.01:
         return 0.0
+    if abs(a - 0.5) < 0.01 and abs(b - 0.5) < 0.01:
+        return 0.5
     return None
 
 
