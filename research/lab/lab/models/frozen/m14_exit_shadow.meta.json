@@ -1,0 +1,26 @@
+{
+ "model": "M14",
+ "file": "m14_exit_shadow.txt",
+ "sha256": "105bacba2a290b19aca8482bafb46018b6f1f7ad259da47abbc00c1cf61a78c6",
+ "panel_end": "2026-10-19",
+ "rows": 19700,
+ "first_day": "2020-08-01",
+ "last_day": "2026-10-09",
+ "features": [
+  "days_held",
+  "ret_entry",
+  "dd_peak",
+  "dd_atr",
+  "mom7",
+  "mom28",
+  "vol30",
+  "vol_ratio",
+  "dist_ma50",
+  "qv_ratio",
+  "btc_mom28",
+  "btc_on"
+ ],
+ "target_mean": 0.044752979276352335,
+ "lightgbm": "4.7.0",
+ "fitted": "2026-10-20T20:42:24+00:00"
+}

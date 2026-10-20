@@ -11,3 +11,6 @@
 *.jpg binary
 *.jpeg binary
 *.gif binary
+
+# Frozen, pre-registered model files are checked by their sha256: never convert them.
+research/lab/lab/models/frozen/*.txt binary
