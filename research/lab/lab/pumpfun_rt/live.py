@@ -129,7 +129,7 @@ class Shadow:
 
     @classmethod
     def load(cls, live: bool = True) -> "Shadow":
-        from .categorize import CategoryIndex
+        from .categorize import BOOK_DAYS, CategoryIndex
         from .model import load
         book = None
         try:
@@ -141,7 +141,8 @@ class Shadow:
             wallets = W.WalletBook.from_json(json.loads((paper_dir() / "wallets.json").read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
-        sh = cls(read_pick(), load(), book, wallets=wallets, cats=CategoryIndex.load())
+        sh = cls(read_pick(), load(), book, wallets=wallets,
+                 cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS))
         sh.cats_mtime = cls._cats_mtime()
         if live:
             from . import live_exec
@@ -192,9 +193,9 @@ class Shadow:
             self.engine.models = self.models
         ct = self._cats_mtime()
         if ct != self.cats_mtime:
-            from .categorize import CategoryIndex
+            from .categorize import BOOK_DAYS, CategoryIndex
             self.cats_mtime = ct
-            self.engine.cats = CategoryIndex.load()
+            self.engine.cats = CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS)
 
     def _closed(self, rec: dict) -> None:
         self.closed.append(rec)

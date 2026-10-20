@@ -189,3 +189,77 @@ and consistent profit on paper. What the evidence would have to show first:
 What is known today points the other way: the fee is 1.25 % a side plus the
 priority fee, the dev is often the first seller, and a sale lands into
 whatever is left.
+
+## The trading pipeline (X10, 2026-10-20)
+
+The owner asked for pump.fun to be "implemented": a complete, automatic
+pipeline that could one day trade real money, built now with real money
+locked. Pre-registered in the plan's addendum 2 before anything below was
+computed.
+
+**What was built** (`lab/pumpfun_rt/`):
+
+| Part | Module | What |
+|---|---|---|
+| Pipeline | `pipeline.py` | signal, filter, sizing (0.1 SOL, never over 2 % of the curve's SOL), risk limits (5 open, 0.6 SOL exposure, 1 SOL daily loss stop, kill switch), entry with a cost limit, exits: take-profit ladder, stop, trailing stop, dev sell, liquidity pull, risk model, time stop. One decision layer; `PaperExecutor` and `LiveExecutor` take the same orders and report through the same four calls, so a paper book does what a live one would, its limits included |
+| Strategies | `pipeline.STRATEGIES` | 8 trials: snipe with dev buy, snipe of creators with a completed curve (with and without a model filter), pressure at 10 s, momentum with a model filter and a risk-model exit, the curve past 80 % with a smart early buyer, past 90 %, the pool 60 s after migration. The pool counts 31 trials here |
+| Wallets | `wallets.py` | point-in-time reputation: early buys, how many completed, flips; smart money, flippers, repeat dumpers |
+| Categories | `categorize.py` | each day's new names into six categories by Claude Haiku 5.5 (a data provider, through the engine's metered endpoint; cached per mint and per name, usable from the moment the answer was written) |
+| Models | `model.py`, `retrain.py` | five new labels for fast exits (the dev or a top-10 holder sells a quarter within 10 or 30 s; the price 10 s, 30 s, 2 min after a landing above it), every label tried with base, wallet and category features in a purged walk-forward; a set is used only where it wins out of sample. Daily, after the study |
+| Readiness | `study.py` | per strategy, the owner's gate: 14+ days, 300+ trades out of sample, positive with and without broken slots, every gate, 30+ days of the live paper shadow inside the replay's band |
+| Live | `live_exec.py`, `txbuild.py` | LOCKED. Plain pump.fun and PumpSwap buy and sell instructions to a public RPC; refuses unless the owner switches it on, makes his own wallet file, confirms the strategy and a daily loss limit in writing, the strategy is ready, the IDLs match and no kill switch is set. Hard caps in code. See `research/ops/README.md`, "Live trading (locked)" |
+| Cards | `card.py` | the daily card (paper P&L per book, the bar, the models, readiness, the live state) after the retrain; a paper winner over +200 % at once (at most one an hour); every live fill or failure, if live were ever on |
+
+On terms: pump.fun's terms forbid bots and automatic access on its website
+and API. The pipeline uses neither: it reads the public chain and would send
+the programs' own public instructions to a public RPC endpoint, which those
+terms do not cover. No bundles, tips, private relays or front-running of
+other users; the executor refuses such endpoints. The owner decides with
+that knowledge.
+
+**First numbers: 3 hours of the server's record** (2026-10-20 16:40 to 19:37
+UTC, 5,919 tokens, 2,910 on plain curves, 499,358 curve trades, 102
+completions; 51 gaps, 7 minutes), split at 18:08 UTC, so about 90 minutes
+out of sample. Nothing here is evidence; every rule and strategy fails the
+bar on size alone.
+
+| strategy | trades out of sample | mean | P&L SOL | how it exited |
+|---|---|---|---|---|
+| P_snipe_dev | 0 (97 in sample, -7.9 %) | n/a | 0 | the daily loss stop ended its day in sample |
+| P_snipe_cmig | 3 | +6.8 % | +0.02 | 2 pulls, 1 dev sell |
+| P_press10 | 24 | -19.0 % | -0.46 | 14 pulls, 6 time, 3 dev sells |
+| P_mom_model | 29 | -6.5 % | -0.19 | 18 pulls, 6 time, 3 risk model |
+| P_p90 | 15 (6 failed buys) | -23.8 % | -0.36 | 7 stops, 4 pulls, 3 trailing, 2 rugs |
+| P_p80_smart | 1 | -8.2 % | -0.01 | |
+| P_pool60 | 6 | +27.4 % | +0.16 | 3 trailing, 2 take, 1 stop |
+| P_cmig_model | 0 | n/a | 0 | the filter let nothing through |
+
+For comparison the registered rules on the same 90 minutes: sniping every
+token -5.4 % per trade (1,239 trades), the in-sample pick C_20in60_x2 -22.6 %
+(52), the pool rules E_d0_x1 +29.7 % (6) and E_d60_x1 +17.7 % (8). The
+pipeline's books replayed through the shadow (the collector's own code path)
+over the whole three hours: P_snipe_dev 100 closed, -8.3 % per trade; P_press10
+116, -5.7 %; P_p90 25, -13.6 %; P_pool60 19, -6.4 %; the old pick C_20in60_x1
+131, -11.6 %.
+
+What the first hours say:
+
+- **The exits act.** The liquidity-pull and dev-sell exits fire on most
+  early-curve positions, at the slot of the sale, and the losses there are
+  smaller than the registered rules' with plain stops (P_mom_model -6.5 %
+  against C_20in60 at -22.6 %), but still losses. An early holder of 2 % of
+  the supply selling is common, so "pull" is the usual way out.
+- **Only the pool stays positive**, in a handful of trades, as it did on the
+  PC's record. It is the family to watch.
+- **The daily loss stop binds**: a snipe book loses its 1 SOL before noon and
+  stops, exactly as live would.
+- **The models** (4,481 rows after gaps, 3 folds) are "not useful" on every
+  label by the registered rule. The exit models rank well (P(the dev or a
+  top-10 holder sells within 10 s) AUC 0.81, Brier skill +0.22, beating the
+  logistic baseline in 2 of 3 folds; the price-up labels AUC 0.66 to 0.78),
+  but the logistic baseline is as good or better. Wallet features did not win
+  on any label yet (the reputation needs days of history); the categories
+  have no answers yet (the first batch runs on the server).
+
+Everything waits for the record to grow (about 100,000 tokens a day). The
+daily card shows each strategy's progress toward the owner's live gate.

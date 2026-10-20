@@ -57,6 +57,7 @@ MAX_USD_PER_RUN = 0.40
 MAX_TOKENS = 12_000
 BATCH_WAIT_SEC = 1800
 JOB = "pumpfun-categories"
+BOOK_DAYS = 60                         # the books and the study load the names of the last 60 days
 TRENDING_N = 30
 
 SYSTEM = """You sort new pump.fun memecoin launches into categories for a research data set. \
@@ -140,17 +141,23 @@ class CategoryIndex:
         return len(self.keys)
 
     @classmethod
-    def load(cls, d: Path | None = None) -> "CategoryIndex":
+    def load(cls, d: Path | None = None, mints: bool = True, max_age_days: float | None = None) -> "CategoryIndex":
+        """The cache. The books need only the names of the last weeks (mints=False, max_age_days)
+        to stay small in memory; the daily job reads everything."""
         ix = cls()
         p = (d or cat_dir()) / "cats.jsonl"
+        since = int(time.time() * 1000 - max_age_days * 86_400_000) if max_age_days else None
         try:
             with p.open(encoding="utf-8") as fh:
                 for line in fh:
                     try:
                         r = json.loads(line)
-                        ix.add(r["mint"], r["key"], r["cat"], int(r["avail_ms"]))
+                        if since is not None and int(r["avail_ms"]) < since:
+                            continue
+                        ix.add(r["mint"] if mints else "", r["key"], r["cat"], int(r["avail_ms"]))
                     except (ValueError, KeyError, TypeError):
                         continue
+            ix.mints.pop("", None)
         except OSError:
             pass
         return ix
