@@ -185,6 +185,18 @@ def live_stop_card(kind: str, lost_sol: float, limit_sol: float, mode: str | Non
                        [_caveat(mode, lang)], footer=t("prl_footer", lang))
 
 
+def live_gate_card(why: str | None, mode: str | None = None, lang: str = "en"):
+    """The running live book's gate shut (no more buys, with the reason) or opened again."""
+    from ..ops import i18n, notify
+    t = i18n.t
+    if why:
+        return notify.Card("🟠", _tagged(t("prl_gate_shut_title", lang), mode, lang),
+                           t("prl_gate_shut_summary", lang, why=str(why)[:200]), [_caveat(mode, lang)],
+                           footer=t("prl_footer", lang))
+    return notify.Card("🟢", _tagged(t("prl_gate_open_title", lang), mode, lang), t("prl_gate_open_summary", lang),
+                       [_caveat(mode, lang)], footer=t("prl_footer", lang))
+
+
 def live_leftover_card(what: str, info: dict, mode: str | None = None, lang: str = "en"):
     """A position from before a restart: sold, or not sellable (the owner sells it himself)."""
     from ..ops import i18n, notify

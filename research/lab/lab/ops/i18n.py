@@ -542,6 +542,11 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prl_daily_latency_none": "Measured: no live fill yet, the paper model's latency is unchecked.",
         "prl_daily_failed": "{n} orders failed.",
         "prt_live_on_test": "Live TEST: ON for {rule}, {n} trades today, {pnl}.",
+        "prl_gate_shut_title": "pump.fun LIVE paused: no more buys",
+        "prl_gate_shut_summary": ("Why: {why}. Open positions are still managed. Buying resumes within a minute "
+                                  "once this is fixed."),
+        "prl_gate_open_title": "pump.fun LIVE buying again",
+        "prl_gate_open_summary": "Every condition holds again.",
         # the strategy factory
         "fa_head": ("Factory {run}: {n} new strategies tried, pool now {trials} trials (noise bar Sharpe {sr0})."),
         "fa_best": "Best in sample: {name}, Sharpe {sharpe} at 35 bps.",
@@ -955,6 +960,11 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prl_daily_latency_none": "Gemessen: noch keine Echtgeld-Ausführung, die Latenz des Papiermodells ist ungeprüft.",
         "prl_daily_failed": "{n} Aufträge gescheitert.",
         "prt_live_on_test": "Echtgeld-TEST: AN für {rule}, {n} Abschlüsse heute, {pnl}.",
+        "prl_gate_shut_title": "pump.fun ECHTGELD pausiert: keine Käufe mehr",
+        "prl_gate_shut_summary": ("Grund: {why}. Offene Positionen werden weiter verwaltet. Sobald das behoben "
+                                  "ist, kauft der Bot innerhalb einer Minute wieder."),
+        "prl_gate_open_title": "pump.fun ECHTGELD kauft wieder",
+        "prl_gate_open_summary": "Alle Bedingungen gelten wieder.",
         "fa_head": ("Fabrik {run}: {n} neue Strategien getestet, jetzt {trials} Versuche im Pool "
                     "(Rauschschwelle Sharpe {sr0})."),
         "fa_best": "Beste in der Stichprobe: {name}, Sharpe {sharpe} bei 35 Basispunkten.",

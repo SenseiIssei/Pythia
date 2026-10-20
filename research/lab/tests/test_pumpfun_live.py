@@ -316,6 +316,22 @@ def test_the_daily_and_the_total_stop_fire_once_and_refuse_buys(tmp_path):
     assert json.loads((LX.totals_path()).read_text())["total_alerted"] is True
 
 
+def test_the_owner_hears_when_the_running_gate_shuts_and_opens_again(tmp_path):
+    ex = executor(tmp_path)
+    heard = []
+    ex.on_gate = heard.append
+    assert ex.ready() is None and heard == []                  # open from the start: nothing to say
+    ex.gate.why = ["the last simulation is 25 h old (at most 24 h; run live_exec simulate)"]
+    ex.last_check = -1e18
+    assert "25 h old" in ex.ready() and "25 h old" in heard[-1]
+    ex.last_check = -1e18
+    ex.ready()
+    assert len(heard) == 1                                     # once per change, not every minute
+    ex.gate.why = []
+    ex.last_check = -1e18
+    assert ex.ready() is None and heard[-1] is None
+
+
 def test_a_buy_that_would_cross_the_budget_or_the_reserve_is_refused(tmp_path):
     ex = executor(tmp_path, total=0.1)
     ex.totals["pnl_l"] = -int(0.09 * SOL)
@@ -545,3 +561,6 @@ def test_every_new_live_card_in_english_and_german():
         assert "2" in text and "1" in text and "TEST" in c.title
         c = CARD.live_daily_card(T0 // 86_400_000, {"n": 0}, None, 0.0, None, "test", "P_pool60", lang)
         assert c.parts[0].text
+        c = CARD.live_gate_card("the kill switch file is there", "test", lang)
+        assert "kill switch" in c.summary and "TEST" in c.title
+        assert CARD.live_gate_card(None, "test", lang).title

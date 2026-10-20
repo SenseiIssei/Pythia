@@ -666,6 +666,7 @@ class LiveExecutor:
         self.leftovers: dict[int, dict] = {}          # pid (negative) -> a position from before a restart
         self.on_stop = on_stop                        # (kind, value_sol) once when a stop fires
         self.on_leftover = on_leftover                # (what, info) for the cards
+        self.on_gate = None                           # (reason or None) when the gate shuts or opens again
         self.closed_why: str | None = None
         self.last_check = -1e18
         self.worker = None
@@ -691,9 +692,12 @@ class LiveExecutor:
             why = self.gate.check()
             if self.rule is not None and not why and (self.gate.rule != self.rule or self.gate.mode != self.mode):
                 why = ["the confirmation file now names another strategy or mode; restart the live service"]
+            was = self.closed_why
             self.closed_why = "; ".join(why) if why else None
             if why:
                 print(f"live: refusing to buy: {self.closed_why}", flush=True)
+            if self.closed_why != was and self.on_gate is not None:
+                self.on_gate(self.closed_why)              # shut, or open again: the owner hears of it
         return f"live gate shut: {self.closed_why}" if self.closed_why else None
 
     def _roll(self) -> None:
@@ -1062,6 +1066,7 @@ class LiveBook:
         self.last_limits = -1e18
         executor.on_stop = self.on_stop
         executor.on_leftover = self.on_leftover
+        executor.on_gate = self.on_gate
 
     # ------------------------------------------------------------ the pipeline's hooks
     def on_close(self, rec: dict) -> None:
@@ -1093,6 +1098,9 @@ class LiveBook:
 
     def on_leftover(self, what: str, info: dict) -> None:
         self._post(lambda lang: [_leftover_card(what, info, self.exec.mode, lang)])
+
+    def on_gate(self, why: str | None) -> None:
+        self._post(lambda lang: [_gate_card(why, self.exec.mode, lang)])
 
     def _post(self, make) -> None:
         if not self.alerts:
@@ -1226,6 +1234,11 @@ def _stop_card(kind, lost_sol, limit_sol, mode, lang):
 def _leftover_card(what, info, mode, lang):
     from .card import live_leftover_card
     return live_leftover_card(what, info, mode, lang)
+
+
+def _gate_card(why, mode, lang):
+    from .card import live_gate_card
+    return live_gate_card(why, mode, lang)
 
 
 def _daily_card(day, stats, balance_l, total_sol, ex, mode, rule, lang):

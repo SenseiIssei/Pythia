@@ -171,7 +171,14 @@ neuesten Pool, den der Collector gesehen hat, und lässt beides per
 nichts gesendet**. Das Ergebnis steht in
 `/srv/pythia-data/live/pumpfun_rt/simulate.json`; der Testmodus öffnet nur mit
 einer erfolgreichen Simulation dieser Wallet aus den letzten 24 Stunden.
-Startest du den Dienst später neu, simuliere vorher wieder.
+
+Das gilt auch im laufenden Betrieb: Der Dienst prüft alle Bedingungen jede
+Minute, und ist die letzte Simulation älter als 24 Stunden, kauft er nichts
+mehr (offene Positionen werden weiter verwaltet und verkauft). Telegram
+meldet das ("pausiert: keine Käufe mehr", mit Grund). Dann einfach den
+Befehl oben wieder ausführen; innerhalb einer Minute kauft der Bot wieder,
+ohne Neustart. So prüfst du einmal am Tag, dass die Transaktionen gegen die
+aktuellen Programme noch sauber durchlaufen.
 
 Alle Bedingungen auf einmal prüfen:
 
