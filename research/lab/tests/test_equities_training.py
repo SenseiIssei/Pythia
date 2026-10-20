@@ -310,3 +310,68 @@ def test_importance_stability():
     imps = [{"a": 3.0, "b": 2.0, "c": 1.0}, {"a": 3.0, "b": 2.5, "c": 1.0}, {"a": 1.0, "b": 2.0, "c": 3.0}]
     s = fe.importance_stability(imps)
     assert s["fits"] == 3 and s["mean"] == pytest.approx(0.0) and s["min"] == pytest.approx(-1.0)
+
+
+# ---------------------------------------------------------------------------
+# B2: spells and cuts on the crypto books
+# ---------------------------------------------------------------------------
+
+class _P:
+    """The few crypto panel fields the exit helpers read."""
+
+    def __init__(self, px: np.ndarray):
+        T, N = px.shape
+        self.px = px
+        self.high = px * 1.01
+        self.low = px * 0.99
+        self.traded = np.ones((T, N), dtype=bool)
+        self.alive = np.ones((T, N), dtype=bool)
+        self.sigma = np.full((T, N), 0.02)
+        self.days = np.arange(T, dtype=np.int64) * 86_400_000_000
+        self.names = [f"C{j}USDT" for j in range(N)]
+        self.btc = 0
+        self.btc_on = np.ones(T, dtype=bool)
+        self.extra = {"rv": np.full((T, N), 0.0004), "qv": np.full((T, N), 1e6)}
+
+    @property
+    def T(self):
+        return self.px.shape[0]
+
+    @property
+    def N(self):
+        return self.px.shape[1]
+
+
+def test_spells_track_entry_and_peak_and_cuts_last_to_the_spell_end():
+    from lab.experiments import exit_overlays as xo
+    px = np.array([[100.0], [110.0], [120.0], [90.0], [95.0], [100.0], [105.0], [110.0]])
+    held = np.array([[0.0], [0.1], [0.1], [0.1], [0.1], [0.0], [0.1], [0.1]])
+    P = _P(px)
+    sp = xo.spells(P, held)
+    assert list(sp["start"][:, 0]) == [-1, 1, 1, 1, 1, -1, 6, 6]
+    assert sp["entry"][3, 0] == 110.0 and sp["peak"][3, 0] == 120.0 and sp["peak"][6, 0] == 105.0
+    fire = np.zeros((8, 1), dtype=bool)
+    fire[3, 0] = True
+    cut = xo.cut_from(fire, sp)
+    assert list(cut[:, 0]) == [False, False, False, True, True, False, False, False]
+    late = xo.cut_from(fire, sp, late=True)
+    assert list(late[:, 0]) == [False, False, False, False, True, False, False, False]
+    t20 = xo.fires(P, sp, "time", 2)
+    assert list(t20[:, 0]) == [False, False, False, True, True, False, False, False]
+
+
+def test_crypto_capture_counts_spells_from_close_to_close():
+    from lab.experiments import exit_overlays as xo
+    px = np.array([[100.0], [110.0], [120.0], [90.0], [95.0], [100.0]])
+    held = np.array([[0.1], [0.1], [0.1], [0.0], [0.0], [0.0]])
+    c = xo.capture(_P(px), held, np.ones(6, dtype=bool))
+    # bought at the close of day 0 (100), sold at the close of day 3 (90); MFE 20 %
+    assert c["trades"] == 1 and c["realised_q"][1] == pytest.approx(-0.10) and c["mfe_q"][1] == pytest.approx(0.20)
+
+
+def test_failed_models_are_zoo_records_with_a_use_rule():
+    from lab.models import zoo
+    codes = {s.code: s for s in zoo.record_specs()}
+    assert set(codes) == {"M13", "M14", "M15"}
+    assert all(s.managed_by == "retired" and s.every_days == 0 and s.use_rule for s in codes.values())
+    assert not set(zoo.RECORDS) & set(zoo.ZOO_MODULES)

@@ -32,7 +32,9 @@ SPEC = Spec(
     universe="S&P 500 members (point in time) with a breakout, gap or earnings candidate", metric="mse",
     baseline="the training mean per family", every_days=0, first_test="2000-01-01", min_rows=500, min_days=60,
     min_train=5000, embargo_h=30 * 24, managed_by="retired",
-    status_note="X16 C: see results/equities_training.md for its gate.",
+    status_note="Failed its gate in X16 (2026-10-20): squared error 0.792 vs 0.777 for the per-family mean "
+                "(1.9 % higher) over 105,016 out-of-fold candidates 2000-2026, 40 of 107 quarters better; it ranks a "
+                "little (daily rank IC 0.021) but is not calibrated. Used by nothing.",
     use_rule="Nothing reads it unless its gate and X16 C pass.", results="equities_training.md",
 )
 

@@ -211,8 +211,9 @@ def test_train_due_promotes_shadows_reports_and_alerts(root, coins):
     poster = lambda t: (posted.append(t) or True, None)  # noqa: E731
     d = train.run(now_ms=NOW, loaders=loaders(coins), poster=poster)
     by = {e["code"]: e for e in d["models"]}
-    assert set(by) == {"M1", "M2", "M7", "M8", "M8q", "M8u", "M10", "M11", "M12"}
+    assert set(by) == {"M1", "M2", "M7", "M8", "M8q", "M8u", "M10", "M11", "M12", "M13", "M14", "M15"}
     assert by["M7"]["status"] == "retired"
+    assert all(by[c]["status"] == "retired" and by[c]["notes"] for c in ("M13", "M14", "M15"))
     assert by["M1"]["status"] == "not on this machine"
     # M11 passes its gate and, with no champion, is promoted and published.
     assert by["M11"]["status"] == "shadow" and by["M11"]["champion"]

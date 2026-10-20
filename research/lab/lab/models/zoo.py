@@ -2,7 +2,8 @@
 
 M1 and M2 existed before the zoo: the nightly learning loop (lab.ops.learn)
 retrains them as challengers and the engine scores them live, so the zoo only
-reports on them. M7 failed as a gate and is kept here as a record. M8, M8q,
+reports on them. M7 failed as a gate and is kept here as a record, and so are
+X16's M13, M14 and M15, which failed their gates (RECORDS). M8, M8q,
 M10, M11 and M12 are the zoo's own: lab.models.train retrains them when due,
 judges every challenger against the champion, scores the champion in shadow
 every day and watches its inputs for drift.
@@ -48,6 +49,10 @@ M7 = Spec(
 )
 
 ZOO_MODULES = ("m8_direction", "m8_quantiles", "m8_upper", "m10_vol_regime", "m11_slippage", "m12_cross_asset")
+# X16 (results/equities_training.md): models with a module and a gate that failed it. Kept as
+# records like M7: listed in the report with their gate, never retrained or shadowed, used by nothing.
+# A record whose gate passes in a later study moves to ZOO_MODULES with every_days 1.
+RECORDS = ("m13_eq_events", "m14_exit_hazard", "m15_eq_exit")
 
 
 def module(name: str):
@@ -58,8 +63,12 @@ def zoo_modules() -> list:
     return [module(n) for n in ZOO_MODULES]
 
 
+def record_specs() -> list[Spec]:
+    return [module(n).SPEC for n in RECORDS]
+
+
 def all_specs() -> list[Spec]:
-    return [M1, M2, M7] + [m.SPEC for m in zoo_modules()]
+    return [M1, M2, M7] + [m.SPEC for m in zoo_modules()] + record_specs()
 
 
 def by_key(key: str):

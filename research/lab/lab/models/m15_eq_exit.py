@@ -32,7 +32,8 @@ SPEC = Spec(
     universe="names held by the X16 event books (A1, A2, A3 picks)", metric="mse",
     baseline="the training mean per family", every_days=0, first_test="2000-01-01", min_rows=500, min_days=60,
     min_train=5000, embargo_h=16 * 24, managed_by="retired",
-    status_note="X16 B1: see results/equities_training.md for its gate.",
+    status_note="Failed its gate in X16 (2026-10-20): squared error 0.821 vs 0.811 for the per-family mean "
+                "(1.2 % higher) over 273,311 out-of-fold held days 2000-2026, 34 of 108 quarters better. Used by nothing.",
     use_rule="Nothing reads it unless its gate and X16 B1 pass.", results="equities_training.md",
 )
 

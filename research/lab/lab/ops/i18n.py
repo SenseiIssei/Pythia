@@ -952,6 +952,9 @@ MODEL_TITLES_DE = {
     "M10": "Tagesvolatilität mit Regime",
     "M11": "Slippage von Demo-Marktorders",
     "M12": "Korrelationsregime BTC ggü. US-Aktien",
+    "M13": "Frühsignale bei US-Aktien (20 Tage ggü. SPY)",
+    "M14": "Restrendite gehaltener Coins (Ausstiegsmodell, 10 Tage)",
+    "M15": "Restrendite gehaltener US-Aktien (Ausstiegsmodell, 10 Tage)",
 }
 
 # The factory's gates (lab.factory.writeup.GATE_LABEL) in German.

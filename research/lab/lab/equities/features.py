@@ -232,6 +232,7 @@ def fold_for(folds: list[tuple[int, int, dict]], t_us: int) -> dict | None:
 def importance_stability(imps: list[dict]) -> dict:
     """Spearman correlation of each fit's gain ranks with the previous fit's."""
     from scipy import stats
+    imps = [d for d in imps if d]
     rs = []
     for a, b in zip(imps[:-1], imps[1:]):
         keys = sorted(set(a) & set(b))
@@ -242,7 +243,18 @@ def importance_stability(imps: list[dict]) -> dict:
         return {"fits": len(imps), "mean": None, "min": None, "stable": None}
     mean_gain = {k: float(np.mean([d.get(k, 0.0) for d in imps])) for k in imps[0]}
     tot = sum(mean_gain.values()) or 1.0
+
+    def rho(a: dict, b: dict) -> float:
+        keys = sorted(set(a) & set(b))
+        va, vb = [a[k] for k in keys], [b[k] for k in keys]
+        return float(stats.spearmanr(va, vb)[0]) if len(keys) > 2 and np.std(va) > 0 and np.std(vb) > 0 else float("nan")
+
+    # Consecutive expanding-window fits share almost all their rows, so the registered number is
+    # high by construction; fits 20 apart (five years of quarters) and the first against the
+    # last say more (reported, not registered).
+    far = [rho(imps[i], imps[i + 20]) for i in range(len(imps) - 20)]
     return {"fits": len(imps), "mean": float(np.mean(rs)), "min": float(np.min(rs)), "stable": bool(np.mean(rs) >= 0.5),
+            "lag20_mean": float(np.nanmean(far)) if far else None, "first_last": rho(imps[0], imps[-1]),
             "mean_gain_share": {k: v / tot for k, v in sorted(mean_gain.items(), key=lambda kv: -kv[1])}}
 
 

@@ -231,11 +231,19 @@ def pool(mine_obs: list[float]) -> dict:
     n2, v2 = len(fx), float(np.var(fx)) if len(fx) > 1 else 0.0
     x = np.clip(np.array(mine_obs) * math.sqrt(bk.YEAR_DAYS), -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(bk.YEAR_DAYS)
     n3, v3 = len(x), float(np.var(x)) if len(x) > 1 else 0.0
-    n = n1 + n2 + n3
-    v = (n1 * v1 + n2 * v2 + n3 * v3) / n
+    # B2's crypto trials (lab.experiments.exit_overlays), per calendar day, once it has run.
+    xc = np.array([])
+    try:
+        d = json.loads((report.REPORTS / "exit_overlays" / "latest.json").read_text(encoding="utf-8"))
+        xc = np.clip(np.array([r["sr_obs"] for r in d["rows"]]) * math.sqrt(365), -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(365)
+    except (OSError, ValueError, KeyError):
+        pass
+    n4, v4 = len(xc), float(np.var(xc)) if len(xc) > 1 else 0.0
+    n = n1 + n2 + n3 + n4
+    v = (n1 * v1 + n2 * v2 + n3 * v3 + n4 * v4) / n
     sr0 = fc._sr0(v, n)
-    return {"hand_trials": n1, "factory_trials": n2, "mine": n3, "n_total": n, "var": v, "sr0_obs": sr0,
-            "sr0_annual_equity": sr0 * math.sqrt(bk.YEAR_DAYS), "sr0_annual_crypto": sr0 * math.sqrt(365)}
+    return {"hand_trials": n1, "factory_trials": n2, "mine": n3, "crypto_trials": n4, "n_total": n, "var": v,
+            "sr0_obs": sr0, "sr0_annual_equity": sr0 * math.sqrt(bk.YEAR_DAYS), "sr0_annual_crypto": sr0 * math.sqrt(365)}
 
 
 def deflate_within(series: list[np.ndarray]) -> tuple[float, list[float]]:
@@ -624,7 +632,8 @@ def markdown(res: dict) -> str:
           f"{d['edgar']['pead_windows']} reaction windows. Selection 2000 to 2015 (PEAD 2005 to 2015), out of sample "
           f"from 2016-01-01. Costs 5 bps a side for stocks, 2 for ETFs, plus the SEC fee on sells; next-open fills.\n",
           f"Pool: {pl_['n_total']} trials ({pl_['hand_trials']} hand, {pl_['factory_trials']} factory, {pl_['mine']} "
-          f"here, B2's 27 counted in `exit_overlays`); the best noise trial sits at an annual Sharpe of about "
+          f"equity trials here, {pl_.get('crypto_trials', 0)} crypto trials of B2 in `exit_overlays.md`); the best "
+          "noise trial sits at an annual Sharpe of about "
           f"{pl_['sr0_annual_equity']:.2f} on trading days ({pl_['sr0_annual_crypto']:.2f} on calendar days).\n",
           "### Benchmarks\n",
           _table([{"name": k, "sel": res["benchmarks_sel"][k], **v} for k, v in res["benchmarks_oos"].items()],
@@ -691,14 +700,18 @@ def markdown(res: dict) -> str:
     for k in ("M13", "M15"):
         m = res["models"][k]
         st = m["stability"]
+        g = m.get("gain_pct")
+        gain = "n/a" if g is None else f"{abs(g):.1f} % {'lower' if g > 0 else 'higher'}"
         md.append(f"- **{k}**: squared error {_f(m.get('model_score'), 4)} vs {_f(m.get('baseline_score'), 4)} for the "
-                  f"baseline ({_f(m.get('gain_pct'), 2)} % lower), DM p {_f(m.get('dm_p'), 4)}, {m.get('folds_won')} of "
+                  f"baseline ({gain}), DM p {_f(m.get('dm_p'), 4)}, {m.get('folds_won')} of "
                   f"{m.get('folds')} quarters better, {m.get('rows_oos')} out-of-fold rows; zoo gate "
                   f"{'passed' if (m.get('gate') or {}).get('passed') else 'failed'}, Holm over the three "
                   f"{'passed' if m.get('holm_pass') else 'failed'}. Rank IC (pooled) {_f(m['rank_ic']['pooled'], 3)}, "
                   f"daily mean {_f(m['rank_ic']['daily_mean'], 3)} (t {_f(m['rank_ic']['t'])}); from 2016 "
                   f"{_f(m['rank_ic_from_2016']['pooled'], 3)}. Importance stability over {st['fits']} fits: mean "
-                  f"{_f(st['mean'])}, min {_f(st['min'])} ({'stable' if st['stable'] else 'unstable'}). Largest gain "
+                  f"{_f(st['mean'])}, min {_f(st['min'])} ({'stable' if st['stable'] else 'unstable'}; consecutive "
+                  f"expanding fits share most rows, so also: fits 20 quarters apart {_f(st.get('lag20_mean'))}, first "
+                  f"against last {_f(st.get('first_last'))}). Largest gain "
                   "shares: " + ", ".join(f"{a} {b * 100:.0f} %" for a, b in list((st.get('mean_gain_share') or {}).items())[:5])
                   + ".\n")
     md.append(f"\nHolm inputs (DM p, 1.0 where the model is not lower): {res['models']['holm_inputs']}.\n")
