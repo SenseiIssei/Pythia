@@ -321,10 +321,8 @@ jobs:
     lock: heavy
     lock_wait: 6h
     replaces: pythia-factory
-    # Paused 2026-10-20 on the research director's advice: every run raises the
-    # trial pool and the noise bar for every later study, and the last 600
-    # genomes all lost on the held-back data. The daily shadow step keeps going.
-    enabled: false
+    # The owner switched it back on 2026-10-21 after the research director had
+    # advised a pause: every run raises the trial pool and the noise bar.
 
   # ---------------------------------------------------------------- AI (Claude API, metered by the engine)
   # All of them call through the autopilot engine's POST /api/ai/complete,
