@@ -216,6 +216,19 @@ def test_autopilot_row_against_btc_and_its_lab_book(reports):
     assert row["gate7"]["trades_label"] == "closed trades" and row["gate7"]["days"] == 10
 
 
+def test_a_cut_amount_does_not_turn_dollars_into_a_bigger_return(reports):
+    # ap_29742: $99,500 for nearly all of its run, cut to $20,000 minutes before its stop.
+    ap = state(startCapital=20_000.0, equity=18_034.22, pnl=-1_965.78, fees=145.67, avgCapital=99_424.0,
+               state="stopped", stopReason="stopped by you", stoppedMs=2 * fr.DAY_MS, bySleeve=[],
+               curveNote="Curve repaired after the fact: 2 amount change(s).")
+    row = fr.autopilot_row(ap, [], 2 * fr.DAY_MS, price_at=lambda ms: None)
+    assert row["return_pct"] == pytest.approx(-1.977, abs=1e-3), "not -9.83 % of the new amount"
+    assert row["fees_pct_of_capital"] == pytest.approx(0.1465, abs=1e-4), "not 0.73 %"
+    assert "the $99,424 it worked with on average" in row["sentence"] and "Curve repaired" in row["sentence"]
+    plain = fr.autopilot_row(state(), [], 10 * fr.DAY_MS, price_at=lambda ms: None)
+    assert plain["return_pct"] == pytest.approx(1.0) and "worked with" not in plain["sentence"]
+
+
 def test_trades_per_day_counts_orders_not_maker_child_fills(reports):
     # 12 closed-trade ticks from child fills, but 7 orders over ten days.
     row = fr.autopilot_row(state(orders=7), ORDERS, 10 * fr.DAY_MS, price_at=lambda ms: None)

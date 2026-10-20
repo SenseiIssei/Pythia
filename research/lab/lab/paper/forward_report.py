@@ -541,9 +541,13 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
     elapsed = max(end_ms - start_ms, 0) / DAY_MS
     start = float(ap.get("startCapital") or cfg.get("capitalUsd") or 0) or 1.0
     equity = float(ap.get("equity") or start)
-    ret_pct = (equity / start - 1) * 100
     fees = float(ap.get("fees") or 0.0)
     pnl = float(ap.get("pnl") if ap.get("pnl") is not None else equity - start)
+    # Its dollars were made on the amount it worked with, weighted by time
+    # (the engine's avgCapital): after a cut, P&L over the new amount is not a
+    # return (ap_29742: -9.95 % of $20,000, -1.98 % of the $99,424 it traded).
+    base = float(ap.get("avgCapital") or 0.0) or start
+    ret_pct = pnl / base * 100
     gross = pnl + fees
     fees_share = fees_share_of_gross(fees, gross)
     trades = int(ap.get("trades") or 0)
@@ -570,6 +574,10 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
     state = ap.get("state", "running")
     status, text = autopilot_verdict(state, ap.get("stopReason"), elapsed, ret_pct, btc_pct, pos, floor_close,
                                      fees, gross)
+    if abs(base - start) > 0.005 * start:
+        text += (f" Measured on the ${base:,.0f} it worked with on average; its amount is ${start:,.0f} now.")
+    if ap.get("curveNote"):
+        text += f" {ap['curveNote']}"
     days = int(elapsed)
     return {
         "kind": "autopilot",
@@ -591,8 +599,9 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
         "btc_return_pct": btc_pct,
         "fees": fees,
         "fees_share_of_gross": fees_share,
-        "fees_pct_of_capital": fees / start * 100,
-        "gross_pct": gross / start * 100,
+        "fees_pct_of_capital": fees / base * 100,
+        "gross_pct": gross / base * 100,
+        "avg_capital": base,
         "trades": trades,
         "orders": int(orders_n) if orders_n is not None else None,
         # Orders per day, only once there is a day to divide by; three hours times eight says little.

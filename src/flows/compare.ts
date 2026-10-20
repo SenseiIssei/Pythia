@@ -37,8 +37,10 @@ export interface CompareRow {
   maxDrawdownPct: number;
   trades: number;
   fees: number;
-  /** Fees as a share of its amount, percent. */
+  /** Fees as a share of the amount it worked with, percent. */
   feesPct: number;
+  /** Its curve was repaired after the fact (the engine says how), or null. */
+  curveNote: string | null;
   /** Its own cash, when the engine reports it. */
   cash: number | null;
   /** Days it has run (until its stop). */
@@ -49,6 +51,18 @@ export interface CompareRow {
  *  autopilot keeps its colour while others come and go. */
 function byStart(list: AutopilotStatus[]): AutopilotStatus[] {
   return [...list].sort((a, b) => a.startedMs - b.startedMs || a.config.id.localeCompare(b.config.id));
+}
+
+/** The amount its dollars were made on: the engine's time-weighted average
+ *  amount, else its amount (an engine from before the average). */
+export function workedWith(s: AutopilotStatus): number {
+  const avg = s.avgCapital;
+  return avg != null && Number.isFinite(avg) && avg > 0 ? avg : s.startCapital;
+}
+
+/** Its amount changed while it ran: its P&L over today's amount is no return. */
+function amountChanged(s: AutopilotStatus): boolean {
+  return Math.abs(workedWith(s) - s.startCapital) > 0.005 * Math.max(s.startCapital, 1);
 }
 
 /** The deepest fall from a peak: the engine's figure, else the history's. */
@@ -72,7 +86,9 @@ export function compareRows(list: AutopilotStatus[], now: number): CompareRow[] 
       slot: slots.get(s.config.id) ?? null,
       amount: s.startCapital,
       equity: s.equity,
-      returnPct: s.pnlPct,
+      // A cut amount would turn the same dollars into a bigger return: they
+      // are measured on what it worked with.
+      returnPct: amountChanged(s) ? (s.pnl / workedWith(s)) * 100 : s.pnlPct,
       pnl: s.pnl,
       benchLabel: b?.label ?? benchLabel(s.benchmark?.symbol),
       benchPct: b ? b.btcPct : null,
@@ -81,7 +97,8 @@ export function compareRows(list: AutopilotStatus[], now: number): CompareRow[] 
       maxDrawdownPct: maxDrawdown(s, now),
       trades: s.trades,
       fees: s.fees,
-      feesPct: s.startCapital > 0 ? (s.fees / s.startCapital) * 100 : 0,
+      feesPct: workedWith(s) > 0 ? (s.fees / workedWith(s)) * 100 : 0,
+      curveNote: s.curveNote ?? null,
       cash: s.cash != null && Number.isFinite(s.cash) ? s.cash : null,
       days: Math.max(0, (end - s.startedMs) / 86_400_000),
     };
@@ -102,12 +119,16 @@ export function combinedSeries(list: AutopilotStatus[], now: number): CompareSer
   return byStart(list)
     .slice(0, MAX_SERIES)
     .map((s, slot) => {
-      const base = s.startCapital > 0 ? s.startCapital : 1;
+      const pts = curve(s, now);
+      // A changed amount rescales the curve so its returns are kept, which
+      // moves its first point off today's amount: it is read from that point.
+      const first = pts.length ? pts[0][1] : 0;
+      const base = amountChanged(s) && first > 0 ? first : s.startCapital > 0 ? s.startCapital : 1;
       return {
         id: s.config.id,
         name: s.config.name,
         slot,
-        points: curve(s, now).map(([t, v]) => [t, (v / base - 1) * 100] as [number, number]),
+        points: pts.map(([t, v]) => [t, (v / base - 1) * 100] as [number, number]),
       };
     });
 }

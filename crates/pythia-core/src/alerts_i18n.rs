@@ -619,7 +619,15 @@ pub enum HaltFoot {
     Closed(u64),
     AtVenue(u64),
     WaitPrice(u64),
+    /// Real positions, and live routing is not available.
     Stuck(u64),
+    /// Demo or real positions whose exit waits for another book's order on
+    /// the other side of the same symbol (a wash-trade guard).
+    WaitOtherBook(u64),
+    /// Positions whose route is waiting out a refusal from the venue.
+    Refused(u64),
+    /// Positions whose exit did not go out this tick for another reason.
+    Retrying(u64),
     LeftOpen(u64),
     Paused(Vec<String>),
     Still(Vec<String>),
@@ -638,6 +646,15 @@ impl HaltFoot {
             ),
             (Lang::En, HaltFoot::Stuck(n)) => format!(
                 "{n} real position(s) could not be closed yet because live routing is not available; they stay with the autopilot and are closed as soon as it is."
+            ),
+            (Lang::En, HaltFoot::WaitOtherBook(n)) => format!(
+                "{n} position(s) wait for another autopilot's order in the same coin to finish (two orders on opposite sides of one account could meet as a wash trade); their exits go out as soon as it is done."
+            ),
+            (Lang::En, HaltFoot::Refused(n)) => format!(
+                "{n} position(s) wait out a refusal from the venue before their exits are sent again; they stay with the autopilot until they are closed."
+            ),
+            (Lang::En, HaltFoot::Retrying(n)) => format!(
+                "{n} position(s) are not closed yet; their exits are sent again at the next tick and booked to the autopilot when they fill."
             ),
             (Lang::En, HaltFoot::LeftOpen(n)) => format!(
                 "Left its {n} position(s) open, now managed by their strategies' stops; its P&L counts them at their price now."
@@ -662,6 +679,18 @@ impl HaltFoot {
             (Lang::De, HaltFoot::Stuck(n)) => format!(
                 "{} noch nicht geschlossen werden, weil die Live-Anbindung nicht verfügbar ist; der Autopilot behält sie und schließt sie, sobald es geht.",
                 count(*n, "echte Position konnte", "echte Positionen konnten")
+            ),
+            (Lang::De, HaltFoot::WaitOtherBook(n)) => format!(
+                "{} auf die Order eines anderen Autopiloten in derselben Münze (zwei Orders auf entgegengesetzten Seiten eines Kontos könnten sich als Scheingeschäft treffen); ihre Ausstiege gehen raus, sobald sie fertig ist.",
+                count(*n, "Position wartet", "Positionen warten")
+            ),
+            (Lang::De, HaltFoot::Refused(n)) => format!(
+                "{} eine Ablehnung des Handelsplatzes ab, bevor ihre Ausstiege erneut gesendet werden; sie bleiben beim Autopiloten, bis sie geschlossen sind.",
+                count(*n, "Position wartet", "Positionen warten")
+            ),
+            (Lang::De, HaltFoot::Retrying(n)) => format!(
+                "{} noch nicht geschlossen; ihre Ausstiege werden beim nächsten Takt erneut gesendet und dem Autopiloten gebucht, sobald sie ausgeführt sind.",
+                count(*n, "Position ist", "Positionen sind")
             ),
             (Lang::De, HaltFoot::LeftOpen(n)) => format!(
                 "{} offen gelassen, jetzt unter den Stops ihrer Strategien; die GuV rechnet sie zum aktuellen Preis.",

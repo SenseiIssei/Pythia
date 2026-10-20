@@ -265,6 +265,21 @@ pub const PORTFOLIO_MAX_SHIFT: f64 = 0.10;
 
 // ── the wire contract ──────────────────────────────────────────────────────
 
+/// Why a stopped autopilot's position is still open after its close was
+/// tried (see `Engine::close_blocker`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseBlock {
+    /// A real position and no live routing.
+    LiveRouting,
+    /// Another book has an order on the other side of the same symbol at the
+    /// venue; the exit waits for it (a wash-trade guard).
+    OtherBook,
+    /// The venue refused an order a moment ago and the route waits it out.
+    Refused,
+    /// Anything else: the exit is sent again at the next tick.
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AutopilotMode {
@@ -493,6 +508,14 @@ pub struct AutopilotStatus {
     /// The deepest fall from a peak over its equity history, in %.
     #[serde(default)]
     pub max_drawdown_pct: f64,
+    /// The amount it worked with on average, weighted by time (its start
+    /// amount when it never changed): what a return or a fee share of its
+    /// dollars is measured on.
+    #[serde(default)]
+    pub avg_capital: f64,
+    /// Its curve was repaired after the fact, and how.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve_note: Option<String>,
     /// A portfolio: each asset class with its budget and its own P&L.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub classes: Vec<ClassStatus>,
@@ -793,6 +816,119 @@ pub struct Autopilot {
     /// "alpaca"), from its last netted target.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub class_notes: BTreeMap<String, String>,
+    /// `[epoch ms, amount from then on]`: its amount at the start and at
+    /// every change, so a return and a fee share are measured on the money it
+    /// actually worked with (see [`Autopilot::avg_capital`]). Empty in a save
+    /// from before it existed; filled in at the restore
+    /// (`Engine::autopilot_curves_after_restore`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capital_log: Vec<(i64, f64)>,
+    /// Its curve was repaired after the fact, and how, in plain words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve_note: Option<String>,
+}
+
+impl Autopilot {
+    /// The amount it worked with on average from its start to `end_ms` (now,
+    /// or its stop), weighted by time. Its P&L and fees in dollars were made
+    /// on that money: after a cut from $99,500 to $20,000 three minutes
+    /// before its stop, ap_29742's -$1,966 was -9.8 % of the new amount but
+    /// -2.0 % of what it traded with (results/forward_audit.md).
+    pub fn avg_capital(&self, end_ms: i64) -> f64 {
+        let log = &self.capital_log;
+        if log.is_empty() {
+            return self.start_capital;
+        }
+        let span = (end_ms - self.started_ms) as f64;
+        if span <= 0.0 {
+            return log.last().map(|c| c.1).unwrap_or(self.start_capital);
+        }
+        let mut sum = 0.0;
+        for (k, &(t, c)) in log.iter().enumerate() {
+            let from = t.max(self.started_ms);
+            let to = log.get(k + 1).map(|n| n.0).unwrap_or(end_ms).min(end_ms);
+            if to > from {
+                sum += c * (to - from) as f64;
+            }
+        }
+        if sum > 0.0 {
+            sum / span
+        } else {
+            self.start_capital
+        }
+    }
+}
+
+/// A one-minute move of the curve no market makes: past this, a step in a
+/// curve saved before amounts rescaled it is an amount change.
+const CURVE_STEP: f64 = 0.25;
+/// Points at most this far apart count as one step.
+const CURVE_STEP_MS: i64 = 5 * 60_000;
+
+/// Repair a curve saved before a changed amount rescaled it (see the
+/// capital change in `autopilot_update`). Returns the repaired curve, the
+/// amounts it had (estimated), and a note, or `None` when it needs nothing.
+///
+/// Two traces of an old amount are found. A step between points minutes
+/// apart larger than [`CURVE_STEP`] is an amount change: every point before
+/// it is scaled by the step, which keeps the returns on either side and
+/// makes the step flat (what the rescale does today); the amount before it
+/// is the amount after less the step in dollars. Points at the start above
+/// the peak the engine keeps (which moves with the amount) are on an earlier
+/// amount whose change the thinned curve no longer shows: they are scaled to
+/// the current amount, as if it changed right after them.
+pub fn repair_curve(history: &[(i64, f64)], start_capital: f64, peak: f64) -> Option<(Vec<(i64, f64)>, Vec<(i64, f64)>, String)> {
+    let mut h = history.to_vec();
+    if h.len() < 2 || !(start_capital > 0.0) {
+        return None;
+    }
+    let mut steps: Vec<(usize, f64, f64)> = Vec::new(); // (index after, value before, value after)
+    for k in 1..h.len() {
+        let (t0, v0) = h[k - 1];
+        let (t1, v1) = h[k];
+        if t1 - t0 <= CURVE_STEP_MS && v0 > 0.0 && v1 > 0.0 && ((v1 / v0) - 1.0).abs() > CURVE_STEP {
+            steps.push((k, v0, v1));
+        }
+    }
+    let mut log: Vec<(i64, f64)> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    if !steps.is_empty() {
+        let mut cap = start_capital;
+        for &(k, v0, v1) in steps.iter().rev() {
+            let f = v1 / v0;
+            for p in h[..k].iter_mut() {
+                p.1 *= f;
+            }
+            log.push((h[k].0, cap));
+            cap -= v1 - v0;
+        }
+        log.push((history[0].0, cap));
+        log.reverse();
+        notes.push(format!(
+            "{} amount change(s) from before the curve was rescaled with the amount (about ${:.0} to ${:.0}) were found as steps in the curve and rescaled after the fact; the earlier amounts are estimated from the steps",
+            steps.len(),
+            log[0].1,
+            start_capital
+        ));
+    }
+    let lead = h.iter().take_while(|p| p.1 > peak * 1.005 && peak > 0.0).count();
+    if lead > 0 && lead < h.len() {
+        let f = start_capital / h[0].1;
+        let was = h[0].1;
+        for p in h[..lead].iter_mut() {
+            p.1 *= f;
+        }
+        notes.push(format!(
+            "its first {lead} point(s) were on an earlier amount (${was:.0}) and are shown at the current one, as if it changed right after them"
+        ));
+    }
+    if notes.is_empty() {
+        return None;
+    }
+    if log.is_empty() {
+        log.push((history[0].0, start_capital));
+    }
+    Some((h, log, format!("Curve repaired after the fact: {}.", notes.join("; "))))
 }
 
 /// How many venue orders an autopilot remembers for counting.
@@ -2562,12 +2698,15 @@ impl Engine {
             bench_wait_ms: None,
             blend: None,
             class_notes: BTreeMap::new(),
+            capital_log: Vec::new(),
+            curve_note: None,
         });
         let i = self.autopilots.len() - 1;
         let x = self.autopilots[i].config.capital_usd;
         self.autopilots[i].start_capital = x;
         self.autopilots[i].peak_equity = x;
         self.autopilots[i].history.push((now, x));
+        self.autopilots[i].capital_log.push((now, x));
         self.autopilots[i].btc_start = self.ap_btc_price(&self.autopilots[i]);
         if self.ap_wants_spy(&self.autopilots[i]) {
             self.autopilots[i].spy_start = self.ap_spy_price();
@@ -3028,6 +3167,14 @@ impl Engine {
                     p.1 *= f;
                 }
             }
+            // The amount from now on, so its return and fee share are
+            // measured on what it worked with (`Autopilot::avg_capital`).
+            if capital_changed {
+                if ap.capital_log.is_empty() {
+                    ap.capital_log.push((ap.started_ms, old.capital_usd));
+                }
+                ap.capital_log.push((now, cfg.capital_usd));
+            }
         }
         if capital_changed {
             let mut s = format!("amount {} to {}", usd(old.capital_usd), usd(cfg.capital_usd));
@@ -3307,6 +3454,8 @@ impl Engine {
                     benchmark: self.ap_benchmark(ap, equity),
                     cash: equity - self.ap_gross(ap, None) - self.ap_pending(ap, None),
                     max_drawdown_pct: max_drawdown_pct(&ap.history, equity),
+                    avg_capital: ap.avg_capital(ap.stopped_ms.unwrap_or_else(|| self.now())),
+                    curve_note: ap.curve_note.clone(),
                     classes: self.ap_class_statuses(ap),
                 }
             })
@@ -3451,6 +3600,29 @@ impl Engine {
     /// waits for a fresh price like every other exit does (journaled once).
     /// Demo and live closes are filled by the venue at its own price.
     /// Measured on the engine's own clock, like the stop checks.
+    /// Why a position whose close did not go out is still open (when it is
+    /// neither at the venue nor waiting for a fresh price). Only a real
+    /// position can be held up by live routing; a demo one closes on the demo
+    /// route and waits for that route.
+    fn close_blocker(&self, book: &str, market: &str) -> CloseBlock {
+        let Some(p) = self.positions.get(&super::pos_key(book, market)) else { return CloseBlock::Other };
+        let Some(m) = self.markets.iter().find(|m| m.id == market) else { return CloseBlock::Other };
+        if p.live && !self.live_routable(m.venue) {
+            return CloseBlock::LiveRouting;
+        }
+        if !p.live && !p.demo {
+            return CloseBlock::Other;
+        }
+        let side = if p.qty > 0.0 { crate::connectors::Side::Sell } else { crate::connectors::Side::Buy };
+        if self.opposite_order_elsewhere(book, m, side, p.demo).is_some() {
+            CloseBlock::OtherBook
+        } else if self.backing_off(m, p.demo) {
+            CloseBlock::Refused
+        } else {
+            CloseBlock::Other
+        }
+    }
+
     fn ap_close_waits_for_price(&mut self, book: &str, market: &str) -> bool {
         let paper = self.positions.get(&super::pos_key(book, market)).is_some_and(|p| !p.live && !p.demo);
         match self.exit_price_stale(market, self.now()).filter(|_| paper) {
@@ -3629,14 +3801,22 @@ impl Engine {
                 }
             } else {
                 // Say why each one is still open: they have different cures.
-                let (mut at_venue, mut stale, mut stuck) = (0, 0, 0);
+                // A demo position never needs live routing: it closes on the
+                // demo route, and when it is still open it is waiting for
+                // something on that route, which is what is said.
+                let (mut at_venue, mut stale, mut stuck, mut other_book, mut refused, mut retry) = (0, 0, 0, 0, 0, 0);
                 for m in &left {
                     if self.in_flight_markets.contains(&super::pos_key(&book, m)) {
                         at_venue += 1;
                     } else if self.ap_close_waits_for_price(&book, m) {
                         stale += 1;
                     } else {
-                        stuck += 1;
+                        match self.close_blocker(&book, m) {
+                            CloseBlock::LiveRouting => stuck += 1,
+                            CloseBlock::OtherBook => other_book += 1,
+                            CloseBlock::Refused => refused += 1,
+                            CloseBlock::Other => retry += 1,
+                        }
                     }
                 }
                 if at_venue > 0 {
@@ -3656,6 +3836,17 @@ impl Engine {
                         " {stuck} real position(s) could not be closed yet because live routing is not available; they stay with the autopilot and are closed as soon as it is."
                     ));
                     first.get_or_insert(HaltFoot::Stuck(stuck));
+                }
+                for (n, foot) in [
+                    (other_book, HaltFoot::WaitOtherBook(other_book)),
+                    (refused, HaltFoot::Refused(refused)),
+                    (retry, HaltFoot::Retrying(retry)),
+                ] {
+                    if n > 0 {
+                        tail.push(' ');
+                        tail.push_str(&foot.text(Lang::En));
+                        first.get_or_insert(foot);
+                    }
                 }
             }
         } else if !open.is_empty() {
@@ -3771,10 +3962,37 @@ impl Engine {
         }
     }
 
+    /// A save from before autopilots kept their amounts (`capital_log`):
+    /// its amount log starts now, and a curve saved before a changed amount
+    /// rescaled it is repaired once, said in its status and the journal
+    /// ([`repair_curve`]). ap_29742's curve still held its $99,500 start
+    /// after a cut to $20,000, so its worst drawdown read 81.91 %.
+    pub(super) fn autopilot_curves_after_restore(&mut self) {
+        for i in 0..self.autopilots.len() {
+            let ap = &mut self.autopilots[i];
+            if !ap.capital_log.is_empty() {
+                continue;
+            }
+            match repair_curve(&ap.history, ap.start_capital, ap.peak_equity) {
+                Some((h, log, note)) => {
+                    let before = max_drawdown_pct(&ap.history, ap.history.last().map(|p| p.1).unwrap_or(0.0));
+                    let after = max_drawdown_pct(&h, h.last().map(|p| p.1).unwrap_or(0.0));
+                    ap.history = h;
+                    ap.capital_log = log;
+                    ap.curve_note = Some(note.clone());
+                    let msg = format!("{}: {note} Its worst drawdown reads {after:.2} % instead of {before:.2} %.", ap.label());
+                    self.log(JournalKind::System, msg, None, None);
+                }
+                None => ap.capital_log.push((ap.started_ms, ap.start_capital)),
+            }
+        }
+    }
+
     /// After a restart: a live autopilot does not trade until live routing is
     /// armed again and its strategies are still cleared, so it is paused with
     /// the reason. Its peak, floor and positions come back exactly as saved.
     pub(super) fn autopilots_after_restore(&mut self) {
+        self.autopilot_curves_after_restore();
         let now = self.now();
         for i in 0..self.autopilots.len() {
             let ap = &self.autopilots[i];
