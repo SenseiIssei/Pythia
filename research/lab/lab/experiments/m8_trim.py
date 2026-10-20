@@ -121,8 +121,19 @@ def trim_scale(U: np.ndarray, ret7: np.ndarray, rule: str, late: int = 0) -> np.
     return S
 
 
-def trimmed(W: np.ndarray, S: np.ndarray) -> np.ndarray:
-    return np.where(np.isfinite(W), W * S, W)
+def trimmed(W: np.ndarray, S: np.ndarray, held: np.ndarray | None = None) -> np.ndarray:
+    """The book's targets with the trim. An explicit target is scaled. A NaN target means
+    "keep what you hold" (breakout); there the trim acts on the day it starts or ends, with
+    the original book's holding after that close (`held`) times the day's scale."""
+    out = np.where(np.isfinite(W), W * S, W)
+    if held is None:
+        return out
+    change = np.zeros_like(S, dtype=bool)
+    change[1:] = S[1:] != S[:-1]
+    change[0] = S[0] != 1
+    fix = ~np.isfinite(W) & change & np.isfinite(held)
+    out[fix] = held[fix] * S[fix]
+    return out
 
 
 def prior_var() -> float:
@@ -181,11 +192,14 @@ def main() -> None:
         series[key] = ((g, tv, ex), ones, xo, xb)
         return r
 
+    # What each original book holds after every close (breakout keeps positions with NaN targets).
+    H = {b: au.simulate(P, b, au.cash_left(O[b], alp))[3] for b in BOOKS}
+    HT = {b: au.simulate(P, b, O[b])[3] for b in BOOKS}
     for b in BOOKS:
         for (src, rule), S in Ss.items():
-            r = add(f"{src} {rule} · {b}", trimmed(O[b], S), b, group="A", source=src, rule=rule)
+            r = add(f"{src} {rule} · {b}", trimmed(O[b], S, H[b]), b, group="A", source=src, rule=rule)
+            held = H[b][oos][:, alp] > 1e-12
             S_oos = S[oos][:, alp]
-            held = np.nan_to_num(O[b][oos][:, alp]) > 0
             r["trimmed_share_held"] = float((S_oos[held] < 1).mean()) if held.any() else 0.0
         print(f"  {b} done", flush=True)
     picks = []
@@ -193,9 +207,9 @@ def main() -> None:
         cand = [r for r in rows if r["book"] == b and r["source"] == "m8u" and r["group"] == "A"]
         pk = max(cand, key=lambda r: r[f"is_{BASE}"] if math.isfinite(r[f"is_{BASE}"]) else -1e9)
         picks.append(pk)
-        add(pk["variant"] + " · one day late", trimmed(O[b], trim_scale(U["m8u"], ret7, pk["rule"], late=1)), b,
+        add(pk["variant"] + " · one day late", trimmed(O[b], trim_scale(U["m8u"], ret7, pk["rule"], late=1), H[b]), b,
             group="L", source="m8u", rule=pk["rule"])
-        add(pk["variant"] + " · twin", trimmed(O[b], Ss[("m8u", pk["rule"])]), b, twin=True,
+        add(pk["variant"] + " · twin", trimmed(O[b], Ss[("m8u", pk["rule"])], HT[b]), b, twin=True,
             group="T", source="m8u", rule=pk["rule"])
     assert len(rows) == HERE_TRIALS, len(rows)
     pl_ = pool([r[f"oos_{BASE}"] for r in rows])

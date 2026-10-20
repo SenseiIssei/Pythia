@@ -37,7 +37,7 @@ COST_MAX_FACTOR = 4.0
 WRITTEN: list[str] = []
 
 # The model zoo's own published folders (lab.models); a new zoo model is added here on purpose.
-ZOO_MODELS = ("m8_direction", "m8_quantiles", "m10_vol_regime", "m11_slippage", "m12_cross_asset")
+ZOO_MODELS = ("m8_direction", "m8_quantiles", "m8_upper", "m10_vol_regime", "m11_slippage", "m12_cross_asset")
 
 
 class GuardError(RuntimeError):

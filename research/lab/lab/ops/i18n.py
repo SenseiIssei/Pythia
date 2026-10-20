@@ -840,6 +840,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
 MODEL_TITLES_DE = {
     "M8": "Richtung am nächsten Tag",
     "M8q": "Renditespanne am nächsten Tag (Quantile 10/50/90 %)",
+    "M8u": "Aufwärtsspielraum am nächsten Tag (90-%-Quantil)",
     "M10": "Tagesvolatilität mit Regime",
     "M11": "Slippage von Demo-Marktorders",
     "M12": "Korrelationsregime BTC ggü. US-Aktien",

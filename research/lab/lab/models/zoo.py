@@ -47,7 +47,7 @@ M7 = Spec(
     use_rule="Retired. The 200-day rule stays.", results="regime_hmm.md",
 )
 
-ZOO_MODULES = ("m8_direction", "m8_quantiles", "m10_vol_regime", "m11_slippage", "m12_cross_asset")
+ZOO_MODULES = ("m8_direction", "m8_quantiles", "m8_upper", "m10_vol_regime", "m11_slippage", "m12_cross_asset")
 
 
 def module(name: str):

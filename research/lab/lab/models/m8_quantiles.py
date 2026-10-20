@@ -46,8 +46,8 @@ SPEC = Spec(
     baseline="the training window's quantiles of the vol-scaled return, times today's 30-day vol",
     every_days=7, weekday=6, margin=0.0, first_test="2021-01-01", min_rows=300, min_days=21, min_train=2000,
     calendar=("dow_next",),
-    use_rule="Informational: a one-day range per coin. A book may use it only through its own pre-registered "
-             "study (sizing or stops); nothing reads it today.",
+    use_rule="Informational. Only the 90 % quantile has skill (X9: q10 DM p 0.91); never offer q10 or q50 to a "
+             "book. M8u (m8_upper) is the upper tail on its own; a trim on it failed (X11 c).",
     results="model_zoo.md",
 )
 

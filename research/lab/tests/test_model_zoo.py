@@ -200,6 +200,7 @@ def test_models_round_trip_through_their_files(tmp_path, coins):
 def loaders(coins, orders=400):
     led = {o["id"]: o for o in m11.synthetic_orders(orders)}
     return {"m8_direction": lambda: m8.panel_from(coins), "m8_quantiles": lambda: m8q.panel_from(coins),
+            "m8_upper": lambda: m8q.panel_from(coins),
             "m10_vol_regime": lambda: m10.panel_from(coins),
             "m11_slippage": lambda: m11.load(ledger=led, base=None),
             "m12_cross_asset": lambda: m12.panel_from(*m12.synthetic())}
@@ -210,7 +211,7 @@ def test_train_due_promotes_shadows_reports_and_alerts(root, coins):
     poster = lambda t: (posted.append(t) or True, None)  # noqa: E731
     d = train.run(now_ms=NOW, loaders=loaders(coins), poster=poster)
     by = {e["code"]: e for e in d["models"]}
-    assert set(by) == {"M1", "M2", "M7", "M8", "M8q", "M10", "M11", "M12"}
+    assert set(by) == {"M1", "M2", "M7", "M8", "M8q", "M8u", "M10", "M11", "M12"}
     assert by["M7"]["status"] == "retired"
     assert by["M1"]["status"] == "not on this machine"
     # M11 passes its gate and, with no champion, is promoted and published.

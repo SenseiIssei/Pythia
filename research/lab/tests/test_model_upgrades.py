@@ -149,6 +149,15 @@ def test_trim_cut_and_rules():
     assert np.allclose(m8_trim.trimmed(W, np.array([[0.5, 0.5, 1.0]])), [[0.25, np.nan, 0.2]], equal_nan=True)
 
 
+def test_a_held_position_is_trimmed_when_the_signal_starts_and_restored_when_it_ends():
+    W = np.array([[0.1], [np.nan], [np.nan], [np.nan], [0.0]])          # breakout: enter, hold, exit
+    held = np.array([[0.1], [0.11], [0.12], [0.1], [0.0]])
+    S = np.array([[1.0], [0.5], [0.5], [1.0], [1.0]])
+    out = m8_trim.trimmed(W, S, held)
+    assert np.allclose(out[:, 0], [0.1, 0.055, np.nan, 0.1, 0.0], equal_nan=True)
+    assert np.allclose(m8_trim.trimmed(W, np.ones_like(S), held), W, equal_nan=True)
+
+
 # ---------------------------------------------------------------- drift, form W
 
 def _windows(n=120, feats=("a", "b"), seed=3, shift=0.0):
