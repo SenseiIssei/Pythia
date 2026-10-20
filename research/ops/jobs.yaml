@@ -143,7 +143,6 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
     grace: 30m
-    enabled: false
 
   - name: paper-m4
     description: M4 shadow paper book, market-neutral on perps
