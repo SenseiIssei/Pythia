@@ -1052,14 +1052,16 @@ def health_line(health: dict | None, now: int, lang: str = "en") -> Line:
 
 def ai_lines(brief: dict | None, now: int, lang: str = "en") -> list[Line]:
     """The AI brief's three lines (reports/ai_brief/latest.json, lab.ai.brief),
-    when it is today's (UTC). Shadow only, and labelled so."""
+    when it is today's (UTC), in German when the brief has them in German.
+    Shadow only, and labelled so."""
     if not isinstance(brief, dict):
         return []
     gen = _num(brief.get("generated_ms"))
     today = datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d")
     if gen is None or not 0 <= now - gen <= 26 * 3_600_000 or brief.get("date") != today:
         return []
-    lines = [short(nodash(str(s)), 220) for s in brief.get("summary") or [] if isinstance(s, str) and s.strip()][:3]
+    src = (brief.get("summary_de") if lang == "de" else None) or brief.get("summary") or []
+    lines = [short(nodash(str(s)), 220) for s in src if isinstance(s, str) and s.strip()][:3]
     label = "KI-Kurzbericht (Schatten)" if lang == "de" else "AI brief (shadow)"
     return [Line(s, label if i == 0 else None) for i, s in enumerate(lines)]
 
@@ -1279,6 +1281,43 @@ def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | 
     return Card("🗓️", title, summary, parts), snap
 
 
+def ai_spend_by_job(since_ms: int, until_ms: int, path: Path | None = None) -> dict[str, tuple[float, int]]:
+    """What each Claude job cost between two times, from the engine's ledger
+    (<data>/ai/ledger.jsonl): {job: (USD, calls)}. Empty without a ledger."""
+    p = path or data_root() / "ai" / "ledger.jsonl"
+    out: dict[str, tuple[float, int]] = {}
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        ts, cost = _num(e.get("ts")) if isinstance(e, dict) else None, _num(e.get("costUsd")) if isinstance(e, dict) else None
+        if ts is None or not since_ms <= ts < until_ms:
+            continue
+        job = str(e.get("job") or "other").strip() or "other"
+        # A fallback ask and its retry are the same job for the owner.
+        job = job[:-len("-direct")] if job.endswith("-direct") else job
+        usd, n = out.get(job, (0.0, 0))
+        out[job] = (usd + max(cost or 0.0, 0.0), n + 1)
+    return out
+
+
+def ai_week_line(now: int, lang: str = "en", path: Path | None = None) -> Line | None:
+    """One line for the weekly report: what the Claude API cost this week, per job."""
+    spend = ai_spend_by_job(now - WEEK_MS, now, path)
+    if not spend:
+        return None
+    total = sum(v[0] for v in spend.values())
+    jobs = ", ".join(f"{i18n.word(j, lang)} {money(u, lang=lang)}"
+                     for j, (u, _) in sorted(spend.items(), key=lambda kv: -kv[1][0])[:6])
+    return Line(tr("ai_week", lang, money=money(total, lang=lang), avg=money(total / 7, lang=lang), jobs=jobs),
+                tr("ai_week_lead", lang))
+
+
 def weekly_due(now: int) -> bool:
     """Sunday from 18:00 Europe/Berlin (once a week: the state says whether
     it went out, so a run at 19:00 catches a missed or quiet 18:00)."""
@@ -1304,6 +1343,9 @@ def weekly(dry_run: bool = False, now: int | None = None, force: bool = False, s
     btc_pct = (btc[-1][1] / btc[0][1] - 1) * 100 if len(btc) >= 2 and btc[0][1] else None
     lang = alert_lang()
     card, snap = weekly_card(state, st.get("weekly") or {}, now, btc_pct, lang)
+    ai = ai_week_line(now, lang)
+    if ai is not None:
+        card.parts.append(ai)
     image = None if dry_run else make_chart(state, now - WEEK_MS, now, tr("chart_this_week", lang), week_span(now, lang),
                                             btc_fetch=lambda a, b: btc)
     res = send("weekly", [card], image=image, now=now, dry_run=dry_run, hold_in_quiet=False)

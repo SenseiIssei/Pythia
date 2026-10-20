@@ -39,6 +39,16 @@ export interface AiLedgerEntry {
   ok: boolean;
 }
 
+/** One job's spend on one UTC day, from the ledger. */
+export interface JobDaySpend {
+  /** YYYY-MM-DD, UTC. */
+  day: string;
+  /** brief, critic, director, ask, weekly, overlay, signal, ... */
+  job: string;
+  usd: number;
+  calls: number;
+}
+
 export interface AiBudget {
   caps: AiCaps;
   defaults: AiCaps;
@@ -49,6 +59,8 @@ export interface AiBudget {
   /** Why a cheap call would be refused right now, if it would. */
   refusing: string | null;
   recent: AiLedgerEntry[];
+  /** Spend per job and day over the last 14 days (an older engine leaves it out). */
+  byJobDay?: JobDaySpend[];
   pricesAsOf: string;
   pricesEstimate: boolean;
   /** Kept on disk (survives restarts) or in memory only. */
@@ -201,6 +213,63 @@ export function usd(v: number | null | undefined): string {
   if (v !== 0 && Math.abs(v) < 0.01) return `$${v.toFixed(4)}`;
   return `$${v.toFixed(2)}`;
 }
+
+export interface JobSpendRow {
+  job: string;
+  /** USD per day, in the order of `days`. */
+  perDay: number[];
+  calls: number;
+  total: number;
+}
+
+export interface JobSpendTable {
+  /** YYYY-MM-DD, oldest first, ending today. */
+  days: string[];
+  rows: JobSpendRow[];
+  /** USD per day over every job. */
+  dayTotals: number[];
+  total: number;
+}
+
+/** The YYYY-MM-DD `back` days before `day` (UTC). */
+function dayBefore(day: string, back: number): string {
+  const t = Date.parse(`${day}T00:00:00Z`) - back * 86_400_000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+/**
+ * Spend per job and day for the last `n` days ending `today`: one row per job,
+ * dearest first. A job's direct retry ("brief-direct") counts as the job.
+ */
+export function jobSpendTable(entries: JobDaySpend[] | undefined, today: string, n = 7): JobSpendTable {
+  const days = Array.from({ length: n }, (_, i) => dayBefore(today, n - 1 - i));
+  const at = new Map(days.map((d, i) => [d, i]));
+  const byJob = new Map<string, JobSpendRow>();
+  for (const e of entries ?? []) {
+    const i = at.get(e.day);
+    if (i === undefined || !Number.isFinite(e.usd)) continue;
+    const job = (e.job || "other").replace(/-direct$/, "");
+    const row = byJob.get(job) ?? { job, perDay: days.map(() => 0), calls: 0, total: 0 };
+    row.perDay[i] += e.usd;
+    row.calls += e.calls;
+    row.total += e.usd;
+    byJob.set(job, row);
+  }
+  const rows = [...byJob.values()].sort((a, b) => b.total - a.total || a.job.localeCompare(b.job));
+  const dayTotals = days.map((_, i) => rows.reduce((s, r) => s + r.perDay[i], 0));
+  return { days, rows, dayTotals, total: rows.reduce((s, r) => s + r.total, 0) };
+}
+
+/** What each job is, in a few words, for the spend table. */
+export const JOB_LABELS: Record<string, string> = {
+  brief: "Daily brief",
+  critic: "Strategy critic",
+  director: "Research director",
+  weekly: "Weekly review",
+  ask: "Telegram questions",
+  overlay: "AI overlay",
+  signal: "Signals",
+};
 
 export interface VsRow {
   key: "llm" | "momentum" | "base";

@@ -21,6 +21,24 @@ import urllib.request
 DEFAULT_URL = "http://127.0.0.1:8788/api/ai/complete"
 ROUTINE = "claude-haiku-5-5"
 REVIEW = "claude-sonnet-5-5"
+DEEP = "claude-opus-5-5"
+MODELS = (ROUTINE, REVIEW, DEEP)
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def model_for(job: str, default: str) -> str:
+    """The model a job calls: PYTHIA_AI_MODEL_<JOB> (brief, director, critic,
+    ask, weekly) when it names haiku, sonnet, opus or a full model id the
+    engine prices, else the job's default. The engine refuses an unpriced
+    model, so a typo fails loudly instead of costing more."""
+    v = (os.environ.get(f"PYTHIA_AI_MODEL_{job.upper().replace('-', '_')}") or "").strip().lower()
+    return {"haiku": ROUTINE, "sonnet": REVIEW, "opus": DEEP}.get(v, v if v.startswith("claude-") else default)
+
+
+def effort_for(job: str, default: str) -> str:
+    """PYTHIA_AI_EFFORT_<JOB> when it is one of low to max, else the default."""
+    v = (os.environ.get(f"PYTHIA_AI_EFFORT_{job.upper().replace('-', '_')}") or "").strip().lower()
+    return v if v in EFFORTS else default
 
 
 class AiError(Exception):

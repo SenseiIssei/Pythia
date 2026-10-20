@@ -2260,8 +2260,13 @@ struct AiCompleteReq {
     batch_wait_sec: Option<u64>,
 }
 
-/// The largest answer a lab job may ask for.
-const AI_MAX_TOKENS: u64 = 16_000;
+/// The largest answer a lab job may ask for. The research director (Opus,
+/// adaptive thinking at effort high, through a batch) needs room for its
+/// thinking and three to five pre-registration drafts.
+const AI_MAX_TOKENS: u64 = 32_000;
+/// The longest prompt a lab job may send, in characters (about 200K tokens):
+/// the research director reads every study summary and the trial ledger.
+const AI_MAX_PROMPT_CHARS: usize = 800_000;
 
 /// 200 with the completion (its `json` is null and `parseError` says why when
 /// the answer did not parse; it was billed all the same); 400 bad request;
@@ -2355,8 +2360,8 @@ fn check_ai_request(req: &AiCompleteReq) -> Result<(), String> {
     if req.system.trim().is_empty() || req.user.trim().is_empty() {
         return Err("system and user must not be empty".into());
     }
-    if req.system.len() + req.user.len() > 400_000 {
-        return Err("the prompt is too long (at most 400,000 characters)".into());
+    if req.system.len() + req.user.len() > AI_MAX_PROMPT_CHARS {
+        return Err(format!("the prompt is too long (at most {AI_MAX_PROMPT_CHARS} characters)"));
     }
     Ok(())
 }
