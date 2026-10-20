@@ -338,9 +338,10 @@ class Tracker:
     def gap(self, t0: int, t1: int, prog: str | None) -> None:
         from .events import PUMP_AMM
         self.gaps["pool" if prog == PUMP_AMM else "curve"].append((int(t0), int(t1)))
-        if prog != PUMP_AMM:
+        if prog != PUMP_AMM:                                  # a position whose 30-minute path it falls in
             for p in self.pos.values():
-                p.gap = True
+                if t0 < p.land + PATH_H_MS:
+                    p.gap = True
 
     # ------------------------------------------------------------ features
     def _flow(self, st: TokState, a: float, b: float) -> tuple[int, int, float, float]:

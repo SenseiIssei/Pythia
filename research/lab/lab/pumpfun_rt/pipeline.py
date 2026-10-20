@@ -531,10 +531,12 @@ class Pipeline:
         thr = ((pol.thresholds.get(spec["label"]) or {}).get(str(spec["top"])) or {}).get(kind)
         if thr is None:
             return None, None
+        from .exitpol import raw_score
         f = eng.features(tok, int(t))
         f.update(tracker.early_features(tok, t, 0.0))
-        p = float(m.predict(np.array([[float(f.get(k, math.nan)) for k in m.features]], dtype=float))[0])
-        if p < thr:
+        x = np.array([[float(f.get(k, math.nan)) for k in m.features]], dtype=float)
+        p = float(m.predict(x)[0])
+        if float(raw_score(m, x)[0]) <= thr:                 # the thresholds are on the uncalibrated score
             return False, p
         if spec.get("alive"):
             a = eng.models.get("e_alive5m")

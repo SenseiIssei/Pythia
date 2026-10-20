@@ -345,16 +345,44 @@ def fit_reg(X: np.ndarray, y: np.ndarray, features: list[str]) -> FittedReg:
 def logistic_cal(Xtr: np.ndarray, ytr: np.ndarray, Xte: np.ndarray) -> np.ndarray:
     """The baseline: logistic regression on the same features (medians for gaps, standardised), fitted on
     the first 80 % of the training rows and calibrated by isotonic regression on the last 20 %."""
+    return logistic_scores(Xtr, ytr, Xte)[0][0]
+
+
+def logistic_scores(Xtr: np.ndarray, ytr: np.ndarray, *Xs: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    """logistic_cal fitted once: (calibrated, raw) for each X. The raw score ranks without the isotonic
+    steps' ties (the top 1 % and 5 % are drawn on it)."""
     from sklearn.isotonic import IsotonicRegression
+    from sklearn.linear_model import LogisticRegression
     cut = int(len(ytr) * 0.8)
     if cut < 50 or ytr[:cut].min() == ytr[:cut].max():
-        return np.full(len(Xte), float(ytr.mean()) if len(ytr) else 0.0)
-    raw_cal = M.logistic(Xtr[:cut], ytr[:cut], Xtr[cut:])
-    raw_te = M.logistic(Xtr[:cut], ytr[:cut], Xte)
-    if len(set(ytr[cut:].tolist())) < 2:
-        return raw_te
-    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(raw_cal, ytr[cut:])
-    return iso.predict(raw_te)
+        c = float(ytr.mean()) if len(ytr) else 0.0
+        return [(np.full(len(X), c), np.full(len(X), c)) for X in Xs]
+    A = Xtr[:cut]
+    med = np.nanmedian(A, axis=0) if len(A) else np.zeros(A.shape[1])
+    med = np.where(np.isfinite(med), med, 0.0)
+    A = np.where(np.isfinite(A), A, med)
+    mu, sd = A.mean(axis=0), A.std(axis=0)
+    sd = np.where(sd > 0, sd, 1.0)
+    lr = LogisticRegression(max_iter=500).fit((A - mu) / sd, ytr[:cut])
+
+    def raw(X):
+        return lr.predict_proba((np.where(np.isfinite(X), X, med) - mu) / sd)[:, 1]
+    iso = None
+    if len(set(ytr[cut:].tolist())) == 2:
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(raw(Xtr[cut:]), ytr[cut:])
+    out = []
+    for X in Xs:
+        r = raw(X)
+        out.append((iso.predict(r) if iso is not None else r, r))
+    return out
+
+
+def raw_score(m, X: np.ndarray) -> np.ndarray:
+    """A fitted LightGBM classifier's score before calibration (monotone in its probability, without ties)."""
+    b = getattr(m, "booster", None)
+    if b is not None and hasattr(b, "predict"):
+        return np.asarray(b.predict(X), dtype=float)
+    return np.asarray(m.predict(X), dtype=float)
 
 
 def _x(fr: dict, features: list[str]) -> np.ndarray:
@@ -400,6 +428,7 @@ def evaluate_early(fr: dict, label: str, features: list[str], folds: int = FOLDS
     horizon = E.LABELS[label] * 1000 + EMBARGO_MS
     edges = np.quantile(t, np.linspace(0, 1, folds + 2))
     oof = {"gbm": np.full(n, np.nan), "logit": np.full(n, np.nan), "base": np.full(n, np.nan),
+           "gbm_raw": np.full(n, np.nan), "logit_raw": np.full(n, np.nan),
            "fold": np.zeros(n, dtype=int), "thr": {}, "at": np.flatnonzero(m)}
     beat = 0
     for i in range(1, folds + 1):
@@ -409,18 +438,21 @@ def evaluate_early(fr: dict, label: str, features: list[str], folds: int = FOLDS
         if tr.sum() < M.MIN_TRAIN or te.sum() < M.MIN_TEST or y[tr].min() == y[tr].max():
             continue
         fit = M.fit(X[tr], y[tr], features)
+        if fit.booster is None:                               # too few rows to fit: no ranking, no fold
+            continue
         pg = fit.predict(X[te])
-        pl_ = logistic_cal(X[tr], y[tr], X[te])
+        (pl_, rl_te), (_, rl_tr) = logistic_scores(X[tr], y[tr], X[te], X[tr])
         base = float(y[tr].mean())
         sg, sl = M.scores(pg, y[te], base), M.scores(pl_, y[te], base)
         if sg["brier"] < sl["brier"]:
             beat += 1
-        tr_g, tr_l = fit.predict(X[tr]), logistic_cal(X[tr], y[tr], X[tr])
-        thr = {"gbm": {q: float(np.quantile(tr_g, 1 - q)) for q in TOPS},
-               "logit": {q: float(np.quantile(tr_l, 1 - q)) for q in TOPS}}
+        rg_te, rg_tr = raw_score(fit, X[te]), raw_score(fit, X[tr])
+        thr = {"gbm": {q: float(np.quantile(rg_tr, 1 - q)) for q in TOPS},
+               "logit": {q: float(np.quantile(rl_tr, 1 - q)) for q in TOPS}}
         out["folds"].append({"fold": i, "train": int(tr.sum()), "test": int(te.sum()), "gbm": sg, "logit": sl,
                              "base_rate": base})
         oof["gbm"][te], oof["logit"][te], oof["base"][te], oof["fold"][te] = pg, pl_, base, i
+        oof["gbm_raw"][te], oof["logit_raw"][te] = rg_te, rl_te
         oof["thr"][i] = thr
     if not out["folds"]:
         out["verdict"] = "no fold had enough rows before its embargo"
@@ -436,7 +468,9 @@ def evaluate_early(fr: dict, label: str, features: list[str], folds: int = FOLDS
             rate_w = 0.0
             for f in out["folds"]:
                 sel = oof["fold"] == f["fold"]
-                pr, kk = precision_at(oof[name][sel], y[sel], q)
+                if np.ptp(oof[name + "_raw"][sel]) == 0:       # a flat model ranks nothing
+                    continue
+                pr, kk = precision_at(oof[name + "_raw"][sel], y[sel], q)
                 hits += pr * kk
                 ks += kk
                 rate_w += float(y[sel].mean()) * kk
@@ -447,7 +481,7 @@ def evaluate_early(fr: dict, label: str, features: list[str], folds: int = FOLDS
     for kid, kname in enumerate(E.KINDS):
         sel = k & (rs["kind"] == kid)
         if sel.sum() >= 20 and len(set(y[sel].tolist())) == 2:
-            pr, _ = precision_at(oof["gbm"][sel], y[sel], 0.05)
+            pr, _ = precision_at(oof["gbm_raw"][sel], y[sel], 0.05)
             r_ = float(y[sel].mean())
             by_kind[kname] = {"n": int(sel.sum()), "rate": r_, "auc": M.auc(oof["gbm"][sel], y[sel]),
                               "prec5": pr, "lift5": pr / r_ if r_ > 0 else math.nan}
@@ -468,7 +502,7 @@ def book_rows(fr: dict, oof: dict, name: str, q: float) -> list[int]:
     chosen = []
     for j in range(len(oof["at"])):
         f = int(oof["fold"][j])
-        if f and oof[name][j] >= oof["thr"][f][name][q]:
+        if f and oof[name + "_raw"][j] > oof["thr"][f][name][q]:       # strict: a flat model enters nothing
             chosen.append(int(oof["at"][j]))
     chosen.sort(key=lambda r: fr["t"][r])
     seen, out = set(), []
@@ -715,7 +749,8 @@ def run(data: dict, costs=None, split_ms: float | None = None, log=print) -> dic
         preds_oos = preds_by_pos(st, sel, md, mu, sfeat, pos_index)
         hz_eval = hazard_eval(st, step_land, split_ms, md, mu, sfeat)
     res["hazard_models"] = {"loss": loss, "eval": hz_eval, "is_positions": len(is_pos), "oos_positions": len(oos_pos),
-                            "is_with_preds": len(preds_is), "oos_with_preds": len(preds_oos)}
+                            "is_with_preds": len(set(preds_is) & set(is_pos)),
+                            "oos_with_preds": len(set(preds_oos) & set(oos_pos))}
     sim_is = run_policies(data, is_pos, GRID, costs, preds_is, loss)
     sim_oos = run_policies(data, oos_pos, GRID, costs, preds_oos, loss)
     best_is = {i: best_gain(PathView(pa, i), tx) for i in is_pos}
@@ -740,7 +775,11 @@ def run(data: dict, costs=None, split_ms: float | None = None, log=print) -> dic
             b = [{"ret": r["ret"], "signal_ms": r["signal_ms"]} for r in sim_oos.get(base_pick) or []]
             judge[f"diff_{a_name}"] = boot_diff(a, b) if a and b else (math.nan, math.nan)
     hz_diff = judge.get(f"diff_{hz_pick}") if hz_pick else None
+    # as the lab's boot_mean: a band from fewer than MIN_BLOCKS hours means nothing
+    from .study import MIN_BLOCKS
+    judge["oos_hours"] = len({int(land[i] // 3_600_000) for i in oos_pos})
     judge["hazard_better"] = bool(hz_diff is not None and math.isfinite(hz_diff[0]) and hz_diff[0] > 0
+                                  and judge["oos_hours"] >= MIN_BLOCKS
                                   and table[hz_pick]["oos"]["mean"] > table[base_pick]["oos"]["mean"])
     res["exit"] = {"table": table, "judge": judge}
     # the same policies on the top 5 % peak3x LightGBM entries that landed out of sample
@@ -802,7 +841,7 @@ def fit_live(data: dict, costs=None, until_ms: float | None = None, k: float | N
         out["e_" + label] = fit
         if fit.booster is None:
             continue
-        sc = fit.predict(_x(sub, feats))
+        sc = raw_score(fit, _x(sub, feats))                  # thresholds on the uncalibrated score (no ties)
         thresholds[label] = {str(q): {kind: float(np.quantile(sc[sub["kind"] == kid], 1 - q))
                                       for kid, kind in enumerate(E.KINDS) if (sub["kind"] == kid).sum() >= 20}
                              for q in TOPS}
@@ -947,7 +986,8 @@ def report_md(res: dict, day: str = "") -> str:
            f"predictions), out of sample {hm.get('oos_positions', 0):,} ({hm.get('oos_with_preds', 0):,}). |L| = "
            f"{_f(hm.get('loss'))}. In-sample pick {j.get('pick')}, best baseline {j.get('base_pick')}, hazard pick "
            f"{j.get('hz_pick')} (k* {j.get('k_star')}). Hazard better out of sample: "
-           f"{'yes' if j.get('hazard_better') else 'no'}.", ""]
+           f"{'yes' if j.get('hazard_better') else 'no'} ({j.get('oos_hours', 0)} hours out of sample; the bands "
+           f"need 10).", ""]
     ev_ = hm.get("eval") or {}
     if ev_.get("dump10"):
         d = ev_["dump10"]
@@ -958,7 +998,7 @@ def report_md(res: dict, day: str = "") -> str:
         u = ev_["up30"]
         md.append(f"up30 out of sample: R2 against the training mean {_f(u['r2_vs_train_mean'], '{:+.3f}')}, "
                   f"correlation {_f(u['corr'])}.")
-    for name in (j.get("pick"), j.get("hz_pick")):
+    for name in dict.fromkeys((j.get("pick"), j.get("hz_pick"))):
         if name and f"diff_{name}" in j:
             lo, hi = j[f"diff_{name}"]
             md.append(f"{name} minus {j.get('base_pick')} out of sample, 90 % band of the mean difference: "
