@@ -70,6 +70,8 @@ Z_WINDOW, Z_MIN = 365, 180
 SMOOTH = 7
 TOP_PERPS = 20
 SHADOW_DIR = ROOT / "paper" / "m2_v3_shadow"
+SHADOW_WEEKS = 26
+SHADOW_T = 2.0
 
 
 def v3_features(groups) -> list[str]:
@@ -587,6 +589,12 @@ def shadow_score(realised: pl.DataFrame) -> dict:
         for k in ("ic_v2", "ic_v3", "ic_v2_alpaca", "ic_v3_alpaca"):
             v = [w[k] for w in weeks if w[k] is not None]
             out[f"mean_{k}"] = float(np.mean(v)) if v else None
+    d = np.array([w["ic_v3"] - w["ic_v2"] for w in weeks if w["ic_v3"] is not None and w["ic_v2"] is not None])
+    t = float(d.mean() / (d.std(ddof=1) / math.sqrt(len(d)))) if len(d) > 2 and d.std(ddof=1) > 0 else None
+    out["t_v3_minus_v2"] = t
+    out["verdict"] = (f"Too early: {len(d)} scored weeks of {SHADOW_WEEKS}." if len(d) < SHADOW_WEEKS else
+                      "v3 passes its forward test." if d.mean() > 0 and (t or 0) > SHADOW_T else
+                      "v3 fails its forward test: v2 stays.")
     (SHADOW_DIR / "scores.json").write_text(json.dumps(out, indent=1), encoding="utf-8", newline="\n")
     return out
 

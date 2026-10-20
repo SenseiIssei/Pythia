@@ -149,6 +149,20 @@ jobs:
     lock_wait: 3h
     replaces: pythia-paper-ls
 
+  # X11 addendum: M2 without against M2 with the flow, positioning, trend and
+  # risk inputs, ranked weekly before the outcome (results/model_upgrades.md).
+  # Added disabled; switch on once lab.experiments.m2_v3 is deployed.
+  - name: m2-v3-shadow
+    description: weekly M2 v2 and v3 rankings written before the outcome and scored after 7 days, never traded
+    schedule: "30 8 * * 1"
+    command: python -m lab.experiments.m2_v3 --shadow
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 4, memory: 10g}
+    timeout: 2h
+    lock: heavy
+    lock_wait: 3h
+    enabled: false
+
   - name: forward
     description: forward report, every paper book and autopilot against its backtest
     schedule: "15 6 * * *"
@@ -301,6 +315,38 @@ jobs:
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 75m
+
+  # X11 (results/model_upgrades.md). Added disabled; switch on (enabled: true,
+  # then deploy_ops.sh) once the modules are deployed to /opt/pythia-lab.
+  # Shadow only: nothing they write sizes, places or vetoes an order.
+  - name: ai-analyst
+    description: weekly Claude analyst (Sonnet, batch), ranks the Alpaca coins on the M2 v2 book's rebalance day, scored by rank IC like M2
+    depends_on: [paper-ls-v2]
+    command: python -m lab.ai.analyst
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 2g}
+    timeout: 75m
+    enabled: false
+
+  - name: news-collect
+    description: crypto headlines from publisher RSS feeds (titles only), kept per UTC day for the news sentiment
+    schedule: "10 */4 * * *"
+    command: python -m lab.ai.news --collect
+    resources: {cpus: 1, memory: 512m}
+    timeout: 10m
+    alert: false
+    enabled: false
+
+  - name: ai-news
+    description: daily Claude news sentiment (Haiku, batch) per Alpaca coin from yesterday's headlines, tested against M2 on its ranking days
+    schedule: "25 0 * * *"
+    command: python -m lab.ai.news
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 1g}
+    timeout: 45m
+    enabled: false
 
   # ---------------------------------------------------------------- watchers and collectors
   - name: listings

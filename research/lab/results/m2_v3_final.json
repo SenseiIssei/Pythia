@@ -1,0 +1,6 @@
+{
+ "what": "The M2 v3 candidate the weekly shadow (python -m lab.experiments.m2_v3 --shadow) trains next to v2. Not the registered pick: the registered selection kept only the market group and failed (model_upgrades.md, a). This is v3 without the market group, chosen after seeing the 2024-26 numbers, so only its forward record counts.",
+ "groups": ["F", "P", "T", "V"],
+ "registered": "2026-10-20, model_upgrades.md, addendum to a",
+ "pass": "after 26 weekly rankings: mean weekly rank IC of v3 above v2's on the whole universe with a paired t above 2"
+}

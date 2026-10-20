@@ -81,6 +81,19 @@ def test_daily_ic_and_percentiles_are_within_the_day():
     assert m2_v3.daily_ic(day, x, x, np.zeros(60, bool)).height == 0
 
 
+def test_the_shadow_scores_recorded_weeks_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(m2_v3, "SHADOW_DIR", tmp_path)
+    syms = [f"C{i}USDT" for i in range(30)] + ["BTCUSDT"]
+    rec = {"day_us": 7 * DAY_US, "recorded_ms": 1, "groups": ["F"],
+           "scores": {s: [float(i), float(-i)] for i, s in enumerate(syms)}}
+    (tmp_path / "rankings.jsonl").write_text(json.dumps(rec) + "\n")
+    realised = pl.DataFrame({"day": [7 * DAY_US] * len(syms), "symbol": syms, "fwd": [float(i) for i in range(len(syms))]})
+    out = m2_v3.shadow_score(realised)
+    assert out["scored"] == 1 and out["weeks"][0]["ic_v2"] == pytest.approx(1.0)
+    assert out["weeks"][0]["ic_v3"] == pytest.approx(-1.0) and out["verdict"].startswith("Too early")
+    assert m2_v3.shadow_score(realised.with_columns(day=pl.lit(0)))["scored"] == 0
+
+
 def test_alpaca_mask_uses_current_tickers_only():
     m = m2_v3.alpaca_mask(np.array(["BTCUSDT", "BTCUSDT~0", "MATICUSDT", "POLUSDT"]))
     assert m.tolist() == [True, False, False, True]
