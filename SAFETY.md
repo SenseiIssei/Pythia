@@ -70,6 +70,24 @@ is why Polymarket order routing is not implemented: its CLOB is signed with a Po
 rather than a revocable credential, which is a different risk category and needs its own gates. See
 `PROFIT-PLAN.md` §7.3.
 
+## 3b-1. The one exception: the pump.fun test wallet on the server
+
+The pump.fun bot cannot trade with an API key: on Solana every trade is signed by a wallet key.
+At the owner's explicit request there is exactly one such wallet, with these lines
+(`docs/PUMPFUN-LIVE.md`):
+
+- **The owner makes it himself**, interactively on the server, with the lab's wallet tool. It is
+  the only code in Pythia that makes a key. The app has no field for it; the key never leaves the
+  server, is read only by the live executor's signer at runtime, and is never logged, shown or sent
+  (the backup is shown once, on the owner's terminal, after he types YES).
+- **Money only comes in from the owner.** He funds it by sending SOL to its address from his own
+  wallet or exchange. Nothing in Pythia withdraws or transfers; before signing, the executor refuses
+  any instruction that is not a plain pump.fun buy or sale for the wallet itself. He withdraws by
+  importing his backup into his own wallet.
+- **It is a small, capped test.** At most 2 SOL in all, 0.5 SOL a day, 0.05 SOL a trade (hard in
+  code), the owner's written confirmation, a passed mainnet simulation, a kill switch in the app
+  that only the server can undo, and a service he starts by hand. Expect to lose all of it.
+
 ## 3c. Crypto spot is long-only
 
 Spot exchanges cannot short. A strategy emitting a sell signal on an asset you do not hold is

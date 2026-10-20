@@ -117,7 +117,7 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
             sub={
               <>
                 {k !== "maxOpen" && <>file {fmt(k, ackOf[k])} · </>}
-                code max {fmt(k, k === "maxOpen" ? v.hard.maxOpen : c?.[k] ?? null)}
+                at most {fmt(k, k === "maxOpen" ? v.hard.maxOpen : c?.[k] ?? null)}
                 {v.settings[k] != null && <> · yours {fmt(k, v.settings[k])}</>}
               </>
             }
