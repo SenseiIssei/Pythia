@@ -382,8 +382,61 @@ def drift_calibration_per_input(bins: dict, windows: list[dict], days: int, alph
     return cal
 
 
+WINDOW_QS = (0.95, 0.96, 0.97, 0.98, 0.99, 0.995, 0.999)
+WINDOW_MIN_OUTSIDE = 0.5
+
+
+def _window_cuts(windows: list[dict], feats: list[str], q: float) -> dict:
+    cuts = {}
+    for f in feats:
+        psi = [w["checks"][f]["psi"] for w in windows if f in w["checks"]]
+        out = [w["checks"][f]["outside_pct"] for w in windows if f in w["checks"]]
+        if len(psi) >= CAL_MIN_WINDOWS:
+            cuts[f] = {"psi": float(np.quantile(psi, q)),
+                       "outside": max(WINDOW_MIN_OUTSIDE, float(np.quantile(out, q)))}
+    return cuts
+
+
+def window_score(checks: dict, cuts: dict) -> tuple[float, str | None]:
+    """max over inputs of max(PSI / its cut, outside share / its cut), and the input that sets it."""
+    best, who = 0.0, None
+    for f, c in checks.items():
+        if f not in cuts:
+            continue
+        s = max(c["psi"] / cuts[f]["psi"] if cuts[f]["psi"] > 0 else 0.0, c["outside_pct"] / cuts[f]["outside"])
+        if s > best:
+            best, who = s, f
+    return best, who
+
+
+def drift_calibration_window(bins: dict, windows: list[dict], days: int, step_days: int = CAL_STEP_DAYS,
+                             target: float = CAL_FALSE_ALARM) -> dict | None:
+    """X11 d, form W: per input, cuts at the q-quantiles of its PSI and outside share over the
+    training windows (outside at least 0.5 %); one q per model, the smallest of WINDOW_QS at
+    which at most `target` of the training windows have an input over a cut. None with too
+    few windows."""
+    if len(windows) < CAL_MIN_WINDOWS:
+        return None
+    feats = [f for f in bins if sum(f in w["checks"] for w in windows) >= CAL_MIN_WINDOWS]
+    if not feats:
+        return None
+    for q in WINDOW_QS:
+        cuts = _window_cuts(windows, feats, q)
+        rate = float(np.mean([window_score(w["checks"], cuts)[0] > 1 for w in windows]))
+        if rate <= target:
+            break
+    return {"mode": "window_max", "window_days": days, "step_days": step_days, "windows": len(windows),
+            "quantile": q, "false_alarm_train": rate, "cuts": cuts}
+
+
 def calibrated_level(checks: dict, cal: dict) -> tuple[str, int]:
     """(level, inputs over their cuts) for one window under a calibration."""
+    if cal.get("mode") == "window_max":
+        n = sum(window_score({f: c}, cal["cuts"])[0] > 1 for f, c in checks.items())
+        s, who = window_score(checks, cal["cuts"])
+        if s <= 1:
+            return "stable", 0
+        return ("drift" if checks[who]["outside_pct"] > 5 else "shift"), n
     n = sum(exceeds(c, cal["cuts"][f]) for f, c in checks.items() if f in cal["cuts"])
     if cal.get("mode") == "per_input":
         if any(c["outside_pct"] > cal["cuts"][f]["drift_outside"] for f, c in checks.items() if f in cal["cuts"]):
