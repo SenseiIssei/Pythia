@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -113,7 +114,61 @@ TEXT = {
     "alert_footer": "Only the owner can arm live. Nothing was armed or changed.",
     "sleeve_name": "{sleeve} (sleeve of {name})",
 }
+# The same in German, for the owner's chat when its language is German (the
+# report and the app stay in English).
+TEXT_DE = {
+    "alert_title": "Bereit für einen Echtgeld-Vorschlag",
+    "alert_summary": ("{name} erfüllt jede Echtgeld-Regel auf seinem Alpaca-Paper-Konto "
+                      "(Risikostufe {step}, {label})."),
+    "alert_footer": "Scharf schalten kann nur der Besitzer. Nichts wurde scharf geschaltet oder geändert.",
+}
+RULES_DE = {
+    "record": "Zeit und Abschlüsse auf dem Alpaca-Paper-Konto",
+    "profit": "Netto-GuV nach Gebühren über null",
+    "weeks": "Positive Wochen",
+    "benchmark": "Vor seinem Vergleichswert",
+    "drawdown": "Größter Rückgang",
+    "band": "Innerhalb seines Backtest-Bands",
+    "reconcile": "Alpaca-Abgleich sauber",
+    "inflation": "Schlägt die Inflation",
+    "etf": "Schlägt einen einfachen ETF",
+}
+# The rules' short names for the alert's rows, so they fit a phone screen
+# next to their values; the full names are in the report and the app.
+RULES_SHORT = {"record": "Time, trades", "profit": "Net P&L", "weeks": "Plus weeks", "benchmark": "vs benchmark",
+               "drawdown": "Max drawdown", "band": "Backtest band", "reconcile": "Reconcile",
+               "inflation": "Inflation", "etf": "ETF hurdle"}
+RULES_SHORT_DE = {"record": "Zeit, Abschlüsse", "profit": "Netto-GuV", "weeks": "Plus-Wochen",
+                  "benchmark": "Vergleichswert", "drawdown": "Rückgang", "band": "Backtest-Band",
+                  "reconcile": "Abgleich", "inflation": "Inflation", "etf": "ETF-Hürde"}
+PROFILE_DE = {"careful": "sehr vorsichtig", "cautious": "vorsichtig", "balanced": "ausgewogen", "brave": "mutig",
+              "bold": "kühn"}
+# The words in a rule's value ("40.0 days, 30 trades", "4 of 4", "+9.10 % a year").
+VALUE_WORDS_DE = [(" days", " Tage"), (" trades", " Abschlüsse"), (" of ", " von "), (" a year", " im Jahr"),
+                  (" pts", " Pkt."), ("unknown", "unbekannt"), ("inside", "innerhalb"), ("above", "darüber"),
+                  ("below", "darunter"), ("no band", "kein Band"), ("no report", "kein Bericht"),
+                  ("not listed", "nicht gelistet")]
+_NUMBER = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+")
 # The digest line's words are in notify.READINESS_TEXT, next to the rest of the digest.
+
+
+def rule_label(r: dict, lang: str = "en", short: bool = False) -> str:
+    """A rule's name in the language of the chat; `short` for a row on a phone."""
+    rid = str(r.get("id"))
+    if short:
+        return (RULES_SHORT_DE if lang == "de" else RULES_SHORT).get(rid) or rule_label(r, lang)
+    return RULES_DE.get(rid, r.get("label") or "?") if lang == "de" else str(r.get("label") or "?")
+
+
+def rule_value(v, lang: str = "en") -> str:
+    """A rule's value for the chat: German numbers and words in German."""
+    s = str(v)
+    if lang != "de":
+        return s
+    s = _NUMBER.sub(lambda m: m.group().replace(",", "\0").replace(".", ",").replace("\0", "."), s)
+    for en, de in VALUE_WORDS_DE:
+        s = s.replace(en, de)
+    return s
 
 
 def profile(step) -> dict:
@@ -564,12 +619,15 @@ def sleeve_units(ap: dict, parent: dict, history: list[dict], now_ms: int) -> li
 
 # ---------------------------------------------------------------- the alert
 
-def alert_card(item: dict, prof: dict):
+def alert_card(item: dict, prof: dict, lang: str | None = None):
+    """The post when a unit newly meets every rule, in the chat's language."""
     from . import notify
-    rows = [(r["label"], r["value"], 1) for r in item["rules"]]
-    return notify.Card("🟢", TEXT["alert_title"],
-                       TEXT["alert_summary"].format(name=item["name"], step=prof["step"], label=prof["label"]),
-                       [notify.Rows(rows)], TEXT["alert_footer"])
+    lang = lang or notify.alert_lang()
+    t = TEXT_DE if lang == "de" else TEXT
+    label = PROFILE_DE.get(prof["label"], prof["label"]) if lang == "de" else prof["label"]
+    rows = [(rule_label(r, lang, short=True), rule_value(r["value"], lang), 1) for r in item["rules"]]
+    return notify.Card("🟢", t["alert_title"], t["alert_summary"].format(name=item["name"], step=prof["step"], label=label),
+                       [notify.Rows(rows)], t["alert_footer"])
 
 
 def announce(items: list[dict], prof: dict, st: dict, now_ms: int, dry_run: bool, sender=None,

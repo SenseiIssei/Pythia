@@ -1242,6 +1242,7 @@ READINESS_TEXT = {
     "best": "none ready yet; closest {name}: {passed} of {total} rules, {togo}",
     "days_to_go": "{n} days to go",
     "waiting_on": "waiting on {rules}",
+    "bad": "no autopilot engine answered, nothing judged today",
 }
 
 
@@ -1253,7 +1254,21 @@ READINESS_TEXT_DE = {
     "ready": "{names} bereit für einen Echtgeld-Vorschlag; scharf schalten kannst nur du",
     "best": "noch keiner bereit; am nächsten {name}: {passed} von {total} Regeln, {togo}",
     "days_to_go": "noch {n} Tage",
-    "waiting_on": "wartet auf {rules}",
+    "waiting_on": "offen: {rules}",
+    "bad": "kein Autopilot-Server hat geantwortet, heute nichts beurteilt",
+}
+# The rules by id, as readiness.RULES_DE has them (notify.py runs without the
+# lab package on the host, so they are repeated here).
+READINESS_RULES_DE = {
+    "record": "Zeit und Abschlüsse",
+    "profit": "Gewinn nach Gebühren",
+    "weeks": "positive Wochen",
+    "benchmark": "Vergleichswert",
+    "drawdown": "Rückgang",
+    "band": "Backtest-Band",
+    "reconcile": "Alpaca-Abgleich",
+    "inflation": "Inflations-Hürde",
+    "etf": "ETF-Hürde",
 }
 
 
@@ -1266,7 +1281,7 @@ def readiness_text(rep: dict | None, now: int | None = None, lang: str = "en") -
     stale = (t["stale"].format(date=str(rep.get("generated") or "?")[:10])
              if now is not None and gen is not None and now - gen > 30 * 3_600_000 else "")
     if rep.get("status") == "bad" and rep.get("headline"):
-        return str(rep["headline"]) + stale
+        return (t["bad"] if lang == "de" else str(rep["headline"])) + stale
     items = [i for i in rep.get("autopilots") or [] if i.get("on_account")]
     if not items:
         return t["none"] + stale
@@ -1274,7 +1289,8 @@ def readiness_text(rep: dict | None, now: int | None = None, lang: str = "en") -
     if ready:
         return t["ready"].format(names=", ".join(str(i.get("name")) for i in ready)) + stale
     best = max(items, key=lambda i: (i.get("passed") or 0, -(i.get("days_to_go") or 0)))
-    failing = [str(r.get("label", "")).lower() for r in best.get("rules") or [] if not r.get("pass")]
+    failing = [READINESS_RULES_DE.get(str(r.get("id")), str(r.get("label", ""))) if lang == "de"
+               else str(r.get("label", "")).lower() for r in best.get("rules") or [] if not r.get("pass")]
     togo = (t["days_to_go"].format(n=best["days_to_go"]) if best.get("days_to_go")
             else t["waiting_on"].format(rules=", ".join(failing[:3])))
     return t["best"].format(name=best.get("name"), passed=best.get("passed"), total=best.get("total"),
@@ -1553,6 +1569,35 @@ def weekly(dry_run: bool = False, now: int | None = None, force: bool = False, s
 
 # ---------------------------------------------------------------- on demand, and after quiet hours
 
+CATEGORY_DE = {"trades": "Trades", "rebalances": "Umschichtungen", "dailyPnl": "Tagesbericht",
+               "bigMoves": "Starke Bewegungen", "autopilot": "Autopilot-Ereignisse", "risk": "Risiko",
+               "venue": "Handelsplatz und Daten", "models": "Modelle", "studies": "Studien und Fabrik",
+               "listings": "Neue Listungen", "trending": "Trends", "cs2": "CS2", "pokemon": "Pokémon",
+               "weekly": "Wochenbericht"}
+
+
+def category_label(category: str | None, lang: str) -> str:
+    if lang == "de" and category in CATEGORY_DE:
+        return CATEGORY_DE[category]
+    return CATEGORIES.get(category or "", (tr("other_posts", lang), ""))[0] if category in CATEGORIES else tr("other_posts", lang)
+
+
+def quiet_card(held: list[dict], quiet: dict, lang: str, now: int) -> Card:
+    """The note after quiet hours: how many lab posts were held, then one line
+    per switch (category) with its count and the newest title, in the order
+    they first came. However long the night, a line per switch."""
+    groups: dict[str | None, list[dict]] = {}
+    for h in held:
+        groups.setdefault(h.get("category"), []).append(h)
+    lines = []
+    for cat, hs in groups.items():
+        newest = max(hs, key=lambda h: int(_num(h.get("ts")) or 0))
+        title = nodash(" ".join(str(newest.get("title") or "?").split()))
+        lines.append(Line(tr("held_group", lang, n=len(hs), title=title), category_label(cat, lang)))
+    return Card("🌙", tr("quiet_over", lang),
+                tr("held_summary", lang, n=len(held), start=quiet["start"], end=quiet["end"]), lines)
+
+
 def flush_held(now: int | None = None) -> int:
     """After quiet hours: one note with what they held back."""
     now = now or clock_ms()
@@ -1562,15 +1607,7 @@ def flush_held(now: int | None = None) -> int:
     settings = load_settings()
     if in_quiet(settings, now):
         return 0
-    q = settings["quiet"]
-    lang = alert_lang()
-    rows = []
-    for h in held[:30]:
-        lt = local_time(int(h.get("ts") or now))
-        rows.append([f"{lt.hour:02d}:{lt.minute:02d}", short(h.get("title") or "?", 40)])
-    n = len(held)
-    card = Card("🌙", tr("quiet_over", lang), tr("held_summary", lang, n=n, start=q["start"], end=q["end"]),
-                [Table([tr("time", lang), tr("post", lang)], rows, more=max(n - 30, 0))])
+    card = quiet_card(held, settings["quiet"], alert_lang(), now)
     res = send(None, [card], now=now)
     if res["delivered"] or res["reason"] == "no destination":
         held_path().unlink(missing_ok=True)

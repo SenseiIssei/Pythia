@@ -254,7 +254,9 @@ def test_quiet_hours_note_and_health_alarm_in_german(reports, monkeypatch):
                         {"delivered": True, "reason": None})
     assert notify.flush_held(NOW) == 0
     assert "Ruhezeit vorbei" in sent[0] and "33 Labor-Meldungen wurden von 23:00 bis 07:00" in sent[0]
-    assert "Zeit" in sent[0] and "+3 weitere" in sent[0]
+    # One line per switch with its count and the newest title, never a list cut short.
+    assert "<b>Trends</b> 33, zuletzt Meldung 0" in sent[0], sent[0]
+    assert "weitere" not in sent[0] and "…" not in sent[0]
     no_english(sent[0])
     bad = {"at": "2026-10-15T08:00:00Z", "ok": False, "checks": [{"name": "Platte", "ok": False, "detail": "voll"}]}
     _, st = notify.health_step(bad, {})

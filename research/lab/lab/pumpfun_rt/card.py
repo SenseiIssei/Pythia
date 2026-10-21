@@ -77,8 +77,8 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     if lat.get("n") and lat.get("p50_ms") is not None:
         lines.append(t("prt_daily_latency", lang, med=i18n.num(lat["p50_ms"] / 1000, 1, lang),
                        p90=i18n.num((lat.get("p90_ms") or 0) / 1000, 1, lang),
-                       fast=i18n.frac_pct(lat.get("within_1s") or 0.0, 0, lang),
-                       slot2=i18n.frac_pct(lat.get("within_2_slots") or 0.0, 0, lang)))
+                       fast=i18n.frac_pct(lat.get("within_1s") or 0.0, 0, lang, sign=False),
+                       slot2=i18n.frac_pct(lat.get("within_2_slots") or 0.0, 0, lang, sign=False)))
     n_days = len(data.get("days") or [])
     results = data.get("results") or []
     if n_days < GATE_DAYS:
@@ -121,7 +121,8 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     if rows:
         parts.append(notify.Table([t("prt_col_book", lang), t("prt_col_closed", lang), t("prt_col_mean", lang),
                                    t("prt_col_pnl", lang)], rows))
-    parts.append(notify.Line(" ".join(lines)))
+    # One thought a line: a paragraph of eight sentences does not read on a phone.
+    parts += [notify.Line(ln) for ln in lines]
     parts.append(notify.Line(t("prt_caveat", lang)))
     return notify.Card("⚡", t("prt_daily_title", lang, day=i18n.iso_day(y, lang)), summary, parts,
                        footer=t("prt_footer", lang))
@@ -250,7 +251,7 @@ def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: flo
     if stats.get("failed"):
         lines.append(t("prl_daily_failed", lang, n=stats["failed"]))
     return notify.Card("💼", _tagged(t("prl_daily_title", lang, day=i18n.iso_day(d, lang)), mode, lang), summary,
-                       [notify.Line(" ".join(lines)), _caveat(mode, lang)], footer=t("prl_footer", lang))
+                       [notify.Line(ln) for ln in lines] + [_caveat(mode, lang)], footer=t("prl_footer", lang))
 
 
 WHY = {"take": "prt_why_take", "take_part": "prt_why_take", "stop": "prt_why_stop", "time": "prt_why_time",

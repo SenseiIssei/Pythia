@@ -557,8 +557,9 @@ def test_every_new_live_card_in_english_and_german():
                                  int(0.9 * SOL), -0.05, {"lat_buy_ms": {"n": 3, "median": 2000},
                                                          "assumed": {"lat_median_ms": 1000}}, "test", "P_pool60",
                                  lang)
-        text = c.parts[0].text
+        text = " ".join(p.text for p in c.parts[:3])
         assert "2" in text and "1" in text and "TEST" in c.title
+        assert [p.text.count(". ") for p in c.parts[:3]] == [0, 0, 0], "one sentence a line"
         c = CARD.live_daily_card(T0 // 86_400_000, {"n": 0}, None, 0.0, None, "test", "P_pool60", lang)
         assert c.parts[0].text
         c = CARD.live_gate_card("the kill switch file is there", "test", lang)

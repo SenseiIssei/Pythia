@@ -57,16 +57,12 @@ def daily_card(res: dict, lang: str = "en"):
     from ..ops import i18n, notify
     t = i18n.t
     rows = book_rows(res)
-    parts = []
-    for name, r in rows.items():
-        hit = t("pm_hit_value", lang, won=r["won"], n=r["resolved"]) if r["resolved"] else "-"
-        parts.append(notify.Rows([
-            (t("pm_equity", lang), i18n.money(r["equity"], 0, lang)),
-            (t("pm_since_start", lang), i18n.signed_money(r["pnl"], 0, lang), r["pnl"]),
-            (t("pm_open", lang), str(r["open"])),
-            (t("pm_resolved", lang), str(r["resolved"])),
-            (t("pm_hit", lang), hit),
-        ], title=t(f"pm_book_{name}", lang)))
+    # One row per book, so both fit a phone screen at a glance.
+    table = [[t(f"pm_book_{name}", lang), i18n.money(r["equity"], 0, lang), i18n.signed_money(r["pnl"], 0, lang),
+              str(r["open"]), f"{r['won']}/{r['resolved']}" if r["resolved"] else "0/0"]
+             for name, r in rows.items()]
+    parts: list = [notify.Table([t("pm_col_book", lang), t("pm_equity", lang), t("pm_col_start", lang),
+                                 t("pm_open", lang), t("pm_col_hit", lang)], table)]
     cs, ms = res.get("claude_score") or {}, res.get("model_score") or {}
     parts.append(notify.Line(t("pm_claude_line", lang, n=cs.get("forecasts", 0), r=cs.get("resolved", 0))
                              + score_text(cs, lang)))

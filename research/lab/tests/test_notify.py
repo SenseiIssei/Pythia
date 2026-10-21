@@ -226,7 +226,7 @@ def test_quiet_hours_hold_lab_posts_and_list_them_after(telegram, data, monkeypa
     assert len(got) == 1
     text = texts(got)[0]
     assert text.startswith("<b>🌙 Quiet hours are over</b>\n2 lab posts were held back from 23:00 to 07:00."), text
-    assert "<pre>Time  Post\n00:30 BONK on Alpaca +25% in 24h\n01:30 New on Kraken: ZK</pre>" in text
+    assert "\n<b>Trending</b> BONK on Alpaca +25% in 24h\n<b>Listings</b> New on Kraken: ZK" in text, text
     assert not notify.held_path().exists()
     assert notify.pending(now_ms=morning + 60_000) == 0 and len(got) == 1, "said once"
 

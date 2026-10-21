@@ -486,6 +486,31 @@ def test_the_alert_carries_the_numbers_and_the_owner_reminder(root):
     assert "—" not in text
 
 
+def test_the_alert_and_the_digest_line_in_german():
+    from test_i18n import no_english
+    item = {"name": "Momentum", "rules": [
+        {"id": "record", "label": "Time and trades on the Alpaca paper account", "value": "40.0 days, 30 trades", "pass": True},
+        {"id": "profit", "label": "Net P&L above zero after fees", "value": "+1,234.50 $", "pass": True},
+        {"id": "weeks", "label": "Positive weeks", "value": "4 of 4", "pass": True},
+        {"id": "band", "label": "Inside its backtest band", "value": "inside", "pass": True},
+        {"id": "etf", "label": "Beats a plain ETF", "value": "+12.40 % a year", "pass": True}]}
+    html = notify.render_post([readiness.alert_card(item, readiness.profile(3), "de")], lang="de")
+    text = notify.plain(html)
+    assert "Bereit für einen Echtgeld-Vorschlag" in text and "Risikostufe 3, ausgewogen" in text, text
+    assert "40,0 Tage, 30 Abschlüsse" in text and "+1.234,50 $" in text and "4 von 4" in text, text
+    assert "innerhalb" in text and "+12,40 % im Jahr" in text, text
+    no_english(html)
+    assert "Ready for a real money proposal" in notify.render_post([readiness.alert_card(item, readiness.profile(3), "en")])
+    # The digest's line names the missing rules in German.
+    rep = {"generated_ms": NOW, "autopilots": [{"name": "Momentum", "on_account": True, "passed": 7, "total": 9,
+                                                "days_to_go": 0, "rules": [dict(r, **{"pass": r["id"] != "etf"})
+                                                                           for r in item["rules"]]}]}
+    line = notify.readiness_text(rep, NOW, "de")
+    assert line == "noch keiner bereit; am nächsten Momentum: 7 von 9 Regeln, offen: ETF-Hürde", line
+    assert notify.readiness_text({"status": "bad", "headline": "No autopilot engine answered"}, NOW, "de").startswith(
+        "kein Autopilot-Server hat geantwortet")
+
+
 def test_an_engine_that_does_not_answer_judges_nothing_and_forgets_nothing(root, monkeypatch):
     posts: list[str] = []
     ap = autopilot()
