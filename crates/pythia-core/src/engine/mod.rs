@@ -1292,6 +1292,14 @@ fn is_event(kind: JournalKind, message: &str) -> bool {
     }
 }
 const LAB_RETRY_MAX: u32 = 6;
+/// A lab rebalance leaves a difference under this share of its capital alone
+/// (`lab::rebalance`'s band). A study of wider resize bands
+/// (`research/lab/results/autopilot_optimization.md`, part 2) found none that
+/// cut the books' cost by a quarter without moving their returns, so it stays.
+const LAB_BAND: f64 = 0.002;
+/// And never sends an order under this many dollars, nor under the route's
+/// venue minimum when that is higher (Alpaca crypto: $10).
+const LAB_MIN_ORDER_USD: f64 = 5.0;
 
 pub struct Engine {
     markets: Vec<Market>,
@@ -5689,7 +5697,7 @@ impl Engine {
     pub fn apply_lab_signal(&mut self, sig: crate::lab::LabSignal) {
         let id = format!("lab:{}", sig.strategy);
         // An experiment (failed the lab's bar) is autopilot-only whatever its signal says.
-        let idle = self.lab_books_idle || sig.autopilot_only || sig.is_experimental();
+        let idle = self.lab_books_idle || sig.autopilot_only || sig.is_experimental() || sig.is_explicit_only();
         let venue_class = Self::lab_class(&sig);
         if sig.is_perp() {
             // Perps markets exist only for coins in play: every coin this
@@ -5754,13 +5762,20 @@ impl Engine {
     /// Whether this lab book trades only inside an autopilot.
     pub fn lab_book_autopilot_only(&self, sid: &str) -> bool {
         let lab = self.strategies.iter().any(|s| s.id == sid && s.kind == StrategyKind::LabTargets);
-        lab && (self.lab_books_idle || self.lab_signals.get(sid).is_some_and(|s| s.autopilot_only || s.is_experimental()))
+        lab && (self.lab_books_idle
+            || self.lab_signals.get(sid).is_some_and(|s| s.autopilot_only || s.is_experimental() || s.is_explicit_only()))
     }
 
     /// Whether this lab book is an experiment: a rule that failed the lab's
     /// bar, which the auto pick never picks and a live autopilot never runs.
     pub fn lab_book_experimental(&self, sid: &str) -> bool {
         self.lab_signals.get(sid).is_some_and(|s| s.is_experimental())
+    }
+
+    /// Whether this lab book runs only where an autopilot names it as a
+    /// sleeve: the auto pick and a portfolio's allocator never pick it.
+    pub fn lab_book_explicit_only(&self, sid: &str) -> bool {
+        self.lab_signals.get(sid).is_some_and(|s| s.is_explicit_only())
     }
 
     /// Pause every autopilot-only lab book (or just `only`) that no active
@@ -6027,11 +6042,33 @@ impl Engine {
             let (weights, coin_shares) =
                 if perp { autopilot::net_lab_targets_signed(&books) } else { autopilot::net_lab_targets(&books) };
             let has_market = |key: &str| -> Option<String> { Some(sig.market_id(key)) };
+            // The smallest order the route's venue takes. Alpaca refuses a
+            // crypto order under $10 (403, "cost basis must be >= minimal
+            // amount of order 10"): such an order is named, never sent, so a
+            // small book does not collect refusals and retries every day.
             // A perps book holds shorts: its weights and holdings are signed.
-            let (orders, mut untradable) = if perp {
-                crate::lab::rebalance_signed(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002)
+            let (orders, mut untradable, below_min, min_order) = if perp {
+                let (o, u) = crate::lab::rebalance_signed(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+                (o, u, Vec::<String>::new(), 5.0)
             } else {
-                crate::lab::rebalance(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002)
+                let route = self.autopilot_route(&owner).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state));
+                let min_order = book
+                    .iter()
+                    .filter(|m| prices.contains_key(&m.id))
+                    .map(|m| match route {
+                        RouteIntent::Demo => costs::model_for(self.demo_cost_venue(m), &m.symbol).min_notional,
+                        RouteIntent::Live | RouteIntent::LiveExit => self.cost_model(m).min_notional,
+                        _ => 0.0,
+                    })
+                    .fold(LAB_MIN_ORDER_USD, f64::max);
+                let plan = crate::lab::rebalance_plan(&weights, has_market, &holdings, &prices, capital, min_order, LAB_BAND);
+                let mut below: Vec<String> = plan
+                    .below_min
+                    .iter()
+                    .filter_map(|(id, n)| book.iter().find(|m| &m.id == id).map(|m| format!("{} (${n:.2})", m.symbol)))
+                    .collect();
+                below.sort();
+                (plan.orders, plan.untradable, below, min_order)
             };
             // A coin held by another strategy is reported as that, not as missing.
             untradable.retain(|c| !owned_elsewhere.contains(&sig.market_symbol(c)));
@@ -6199,6 +6236,12 @@ impl Engine {
             }
             if !untradable.is_empty() {
                 note.push_str(&format!("; no market here for {}", untradable.join(", ")));
+            }
+            if !below_min.is_empty() {
+                note.push_str(&format!(
+                    "; under the venue's minimum order of ${min_order:.0}, so not sent and left as they are: {}",
+                    below_min.join(", ")
+                ));
             }
             if !skipped.is_empty() {
                 note.push_str(&format!(

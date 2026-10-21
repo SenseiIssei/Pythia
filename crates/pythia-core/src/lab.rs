@@ -106,6 +106,13 @@ pub struct LabEvidence {
     /// Why the experiment failed the bar, in the lab's words.
     #[serde(default)]
     pub why_failed: Option<String>,
+    /// The book runs only where an autopilot names it as a sleeve: the auto
+    /// pick, and with it a portfolio's allocator, never picks it, whatever
+    /// its numbers say. For a sleeve under a pre-registered forward test
+    /// (`spy_hold`, `research/lab/results/equity_sleeve_prereg.md`), whose
+    /// evidence must not move money into it anywhere else. Autopilot-only.
+    #[serde(default)]
+    pub explicit_only: bool,
 }
 
 // ── forward evidence ────────────────────────────────────────────────────────
@@ -168,6 +175,66 @@ pub struct ForwardFile {
     pub generated_ms: i64,
     pub books: BTreeMap<String, ForwardEvidence>,
     pub autopilots: BTreeMap<String, ForwardEvidence>,
+    /// BTC's 200-day gate per UTC day, for the second benchmark every crypto
+    /// autopilot is held against (BTC held only above its 200-day average).
+    #[serde(default)]
+    pub btc_gate: Option<BtcGate>,
+}
+
+const GATE_DAY_MS: i64 = 86_400_000;
+
+/// BTC held only while its close is above its 200-day average, the gate of
+/// `research/lab/results/gated_btc.md` (G at k = 1): decided at each UTC
+/// close, held over the next day, no costs. The forward report writes one
+/// row per UTC day; the last one is today, whose gate the previous close set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BtcGate {
+    pub sma_days: u32,
+    pub days: Vec<GateDay>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GateDay {
+    /// The UTC day's start, epoch ms.
+    pub day_ms: i64,
+    /// BTC is held that day: the close before it was above its 200-day average.
+    pub on: bool,
+    /// BTC's close at the end of the day; `None` for today.
+    pub close: Option<f64>,
+}
+
+impl BtcGate {
+    /// Gated BTC's return in % from `start_ms` (BTC at `p0`) to `end_ms`
+    /// (BTC at `p1`): BTC's own move over the stretches of days the gate was
+    /// on, cash (0 %) over the others. Inside the span, a day changes hands
+    /// at its close. `None` when a day of the span is not in the calendar.
+    pub fn return_pct(&self, start_ms: i64, p0: f64, end_ms: i64, p1: f64) -> Option<f64> {
+        if !(p0 > 0.0 && p1 > 0.0) {
+            return None;
+        }
+        if end_ms <= start_ms {
+            return Some(0.0);
+        }
+        let day = |d: i64| self.days.iter().find(|g| g.day_ms == d);
+        let mut growth = 1.0;
+        let mut d = start_ms.div_euclid(GATE_DAY_MS) * GATE_DAY_MS;
+        while d < end_ms {
+            let g = day(d)?;
+            if g.on {
+                let (from, to) = (start_ms.max(d), end_ms.min(d + GATE_DAY_MS));
+                let px_from = if from == start_ms { p0 } else { day(d - GATE_DAY_MS)?.close? };
+                let px_to = if to == end_ms { p1 } else { g.close? };
+                if !(px_from > 0.0 && px_to > 0.0) {
+                    return None;
+                }
+                growth *= px_to / px_from;
+            }
+            d += GATE_DAY_MS;
+        }
+        Some((growth - 1.0) * 100.0)
+    }
 }
 
 /// The forward evidence as the lab wrote it; `None` when it is not a JSON
@@ -189,6 +256,7 @@ pub fn parse_forward_evidence(text: &str) -> Option<ForwardFile> {
         generated_ms: obj.get("generated_ms").and_then(|g| g.as_i64()).unwrap_or(0),
         books: rows("books"),
         autopilots: rows("autopilots"),
+        btc_gate: obj.get("btc_gate").and_then(|g| serde_json::from_value(g.clone()).ok()),
     })
 }
 
@@ -240,6 +308,11 @@ impl LabSignal {
     /// its evidence.
     pub fn is_experimental(&self) -> bool {
         self.experimental || self.evidence.experimental
+    }
+
+    /// Run only where an autopilot names it ([`LabEvidence::explicit_only`]).
+    pub fn is_explicit_only(&self) -> bool {
+        self.evidence.explicit_only
     }
 
     /// A book of US shares and ETFs, traded on Alpaca.
@@ -428,6 +501,33 @@ pub fn rebalance(
     min_notional: f64,
     band: f64,
 ) -> (Vec<Rebalance>, Vec<String>) {
+    let p = rebalance_plan(weights, market_for, holdings, prices, capital, min_notional, band);
+    (p.orders, p.untradable)
+}
+
+/// [`rebalance`] with what it left out because the order would be under the
+/// venue's minimum (`min_notional`) although the difference is past the
+/// band: the engine names those instead of sending orders the venue refuses
+/// (Alpaca refuses a crypto order under $10).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RebalancePlan {
+    pub orders: Vec<Rebalance>,
+    pub untradable: Vec<String>,
+    /// (market id, the order's notional) for each difference past the band
+    /// whose order would be under `min_notional`.
+    pub below_min: Vec<(String, f64)>,
+}
+
+pub fn rebalance_plan(
+    weights: &BTreeMap<String, f64>,
+    market_for: impl Fn(&str) -> Option<String>,
+    holdings: &HashMap<String, (f64, f64)>,
+    prices: &HashMap<String, f64>,
+    capital: f64,
+    min_notional: f64,
+    band: f64,
+) -> RebalancePlan {
+    let mut below_min = vec![];
     let mut targets: BTreeMap<String, f64> = BTreeMap::new();
     let mut untradable = vec![];
     for (coin, w) in weights {
@@ -441,7 +541,7 @@ pub fn rebalance(
     for m in holdings.keys() {
         targets.entry(m.clone()).or_insert(0.0);
     }
-    let threshold = min_notional.max(band * capital);
+    let banded = band * capital;
     let mut out = vec![];
     for (m, w) in targets {
         let (qty, _) = holdings.get(&m).copied().unwrap_or((0.0, 0.0));
@@ -449,11 +549,14 @@ pub fn rebalance(
         let current = qty.max(0.0) * price;
         let target = w * capital;
         let diff = target - current;
-        if diff.abs() < threshold {
+        if diff.abs() < banded {
             continue;
         }
         let (side, notional) = if diff > 0.0 { (Side::Buy, diff) } else { (Side::Sell, (-diff).min(current)) };
         if notional < min_notional {
+            if notional > 1e-9 {
+                below_min.push((m, notional));
+            }
             continue;
         }
         out.push(Rebalance {
@@ -466,7 +569,7 @@ pub fn rebalance(
     }
     // Sells first: they free the cash the buys need.
     out.sort_by_key(|r| if r.side == Side::Sell { 0 } else { 1 });
-    (out, untradable)
+    RebalancePlan { orders: out, untradable, below_min }
 }
 
 /// [`rebalance`] for a book that may be short (perps): `weights` are signed
@@ -605,6 +708,25 @@ mod tests {
         assert!(orders.is_empty(), "a 10 $ gap on a 10 000 $ book is noise: {orders:?}");
     }
 
+    #[test]
+    fn an_order_under_the_venue_minimum_is_named_not_sent() {
+        // A $95 book: 6 % of it in BTC is a $5.70 order, under Alpaca's $10.
+        let w: BTreeMap<String, f64> = [("BTC", 0.06), ("ETH", 0.20)].into_iter().map(|(k, v)| (k.into(), v)).collect();
+        let p = rebalance_plan(&w, market, &HashMap::new(), &prices(), 95.0, 10.0, 0.002);
+        assert_eq!(p.orders.len(), 1, "{:?}", p.orders);
+        assert_eq!(p.orders[0].market_id, "crypto:ETH/USD");
+        assert_eq!(p.below_min.len(), 1);
+        assert_eq!(p.below_min[0].0, "crypto:BTC/USD");
+        assert!((p.below_min[0].1 - 5.70).abs() < 1e-9);
+        // The plain call is the same orders.
+        let (orders, _) = rebalance(&w, market, &HashMap::new(), &prices(), 95.0, 10.0, 0.002);
+        assert_eq!(orders, p.orders);
+        // A difference inside the band is not "below the minimum", it is nothing.
+        let held: HashMap<String, (f64, f64)> = [("crypto:ETH/USD".to_string(), (0.00475, 4_000.0))].into_iter().collect();
+        let p = rebalance_plan(&w, market, &held, &prices(), 95.0, 10.0, 0.002);
+        assert!(p.below_min.iter().all(|(m, _)| m != "crypto:ETH/USD"), "{:?}", p.below_min);
+    }
+
     fn evidence(oos: f64, is: f64, p: f64, filter: bool) -> LabEvidence {
         LabEvidence {
             report: "tsmom".into(),
@@ -722,6 +844,53 @@ mod tests {
         let only_evidence = j.replace(r#""autopilot_only":true,"experimental":true,"#, "");
         let s: LabSignal = serde_json::from_str(&only_evidence).unwrap();
         assert!(!s.experimental && s.is_experimental(), "the evidence alone is enough");
+    }
+
+    #[test]
+    fn gated_btc_earns_btcs_move_on_the_days_the_gate_is_on_and_nothing_on_the_others() {
+        const D: i64 = 86_400_000;
+        let d0 = 20_000 * D;
+        let day = |i: i64, on: bool, close: Option<f64>| GateDay { day_ms: d0 + i * D, on, close };
+        let g = BtcGate {
+            sma_days: 200,
+            days: vec![day(-1, true, Some(100.0)), day(0, true, Some(110.0)), day(1, false, Some(121.0)), day(2, true, Some(100.0)), day(3, true, None)],
+        };
+        // From noon of day 0 at 105 to 06:00 of day 3 at 99.
+        let r = g.return_pct(d0 + D / 2, 105.0, d0 + 3 * D + D / 4, 99.0).unwrap();
+        let want = (110.0 / 105.0 * (100.0 / 121.0) * (99.0 / 100.0) - 1.0) * 100.0;
+        assert!((r - want).abs() < 1e-9, "{r} against {want}");
+        // Inside one day that is off: cash.
+        assert_eq!(g.return_pct(d0 + D + 1, 120.0, d0 + 2 * D - 1, 125.0), Some(0.0));
+        assert_eq!(g.return_pct(d0, 100.0, d0, 100.0), Some(0.0));
+        // A day the calendar does not have: not known, never guessed.
+        assert_eq!(g.return_pct(d0, 100.0, d0 + 5 * D, 100.0), None);
+        // The forward report's JSON.
+        let f = parse_forward_evidence(
+            r#"{"generated_ms": 5, "books": {}, "autopilots": {},
+                "btc_gate": {"sma_days": 200, "days": [{"day_ms": 0, "on": true, "close": 1.5}, {"day_ms": 86400000, "on": false, "close": null}]}}"#,
+        )
+        .unwrap();
+        let g = f.btc_gate.unwrap();
+        assert_eq!(g.days.len(), 2);
+        assert!(g.days[0].on && g.days[1].close.is_none());
+        assert!(parse_forward_evidence(r#"{"generated_ms": 5}"#).unwrap().btc_gate.is_none());
+    }
+
+    #[test]
+    fn the_spy_sleeve_signal_of_the_forward_test_parses_as_explicit_only() {
+        // What lab.paper.spy_hold writes.
+        let j = r#"{"strategy":"spy_hold","variant":"SPY bought and held","as_of_ms":1,"generated_ms":2,
+            "valid_until_ms":3,"quote":"USD","asset_class":"us_equity","weights":{"SPY":1.0},"autopilot_only":true,
+            "evidence":{"report":"book_portfolio","explicit_only":true,"oos_sharpe":1.3,"oos_max_dd":0.188,
+            "caveat":"after the fact","verdict":"sleeve of a registered forward test","source":"x"},
+            "dropped":[],"dropped_weight":0.0,"lab_exposure":1.0,"cadence":"monthly","forward_test":"results/equity_sleeve_prereg.md"}"#;
+        let s: LabSignal = serde_json::from_str(j).unwrap();
+        assert!(s.is_explicit_only() && s.is_us_equity() && s.autopilot_only && !s.is_experimental());
+        assert_eq!(s.market_id("SPY"), "alpaca:SPY");
+        assert_eq!(s.evidence.oos_max_dd, Some(0.188));
+        // Every other signal so far: not explicit only.
+        let j = r#"{"strategy":"tsmom","variant":"28d","as_of_ms":1,"generated_ms":2,"valid_until_ms":3,"quote":"USD","weights":{}}"#;
+        assert!(!serde_json::from_str::<LabSignal>(j).unwrap().is_explicit_only());
     }
 
     #[test]

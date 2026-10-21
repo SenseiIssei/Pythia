@@ -1525,6 +1525,7 @@ fn forward_file(generated_ms: i64, books: &[(&str, crate::lab::ForwardEvidence)]
         generated_ms,
         books: books.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
         autopilots: Default::default(),
+        btc_gate: None,
     }
 }
 
@@ -2149,10 +2150,18 @@ fn a_repick_adds_and_drops_lab_books_gradually_and_says_why() {
     assert_eq!(state_of(&e, "lab:breakout_top10"), StrategyState::Paper, "claimed by the autopilot");
     let msg = s.last_action.clone().unwrap();
     assert!(msg.contains("re-ran its pick with fresh evidence and changed its lab books") && msg.contains("(new)"), "{msg}");
-    assert!(msg.contains("nothing is sold off at once"), "{msg}");
+    assert!(msg.contains("nothing is sold off at once") && msg.contains("rebalance of the next lab signal"), "{msg}");
     assert_eq!(s.next_repick_ms, Some(now + 49 * 3_600_000));
-    // The next rebalance nets the new weights in: ETH comes down, BTC stays, SOL arrives.
+    // No rebalance of its own on the signals already traded: the new weights,
+    // and the new book, wait for the next signal.
     let btc = notional(&e, BTC);
+    e.run_lab_books();
+    assert_eq!(e.orders.len(), orders, "the re-pick's weights wait for the next lab signal");
+    assert!(!holds(&e, SOL));
+    // The next signals: one rebalance nets the new weights in: ETH comes
+    // down, BTC stays, SOL arrives.
+    e.apply_lab_signal(book("tsmom_regime", now + 2, &[("BTC", 0.5), ("ETH", 0.5)], regime_evidence(), false));
+    e.apply_lab_signal(book("breakout_top10", now + 2, &[("BTC", 0.5), ("SOL", 0.5)], breakout_evidence(), false));
     e.run_lab_books();
     let wr = 1.0 - wb;
     assert!((notional(&e, ETH) - 10_000.0 * wr * 0.5).abs() < 80.0, "{}", notional(&e, ETH));
@@ -2164,13 +2173,14 @@ fn a_repick_adds_and_drops_lab_books_gradually_and_says_why() {
     // and its coins are sold down only where breakout does not want them.
     let mut bad = regime_evidence();
     bad.oos_sharpe = Some(-0.1);
-    e.apply_lab_signal(book("tsmom_regime", now + 1, &[("BTC", 0.5), ("ETH", 0.5)], bad, false));
+    e.apply_lab_signal(book("tsmom_regime", now + 3, &[("BTC", 0.5), ("ETH", 0.5)], bad, false));
     e.autopilot_step(now + 50 * 3_600_000);
     let s = status(&e, &id);
     let r = sleeve(&s, "lab:tsmom_regime");
     assert!(r.dropped && r.weight == 0.0, "{r:?}");
     assert!((sleeve(&s, "lab:breakout_top10").weight - 1.0).abs() < 1e-9);
     assert!(s.last_action.unwrap().contains("Lab · tsmom_regime dropped"));
+    e.apply_lab_signal(book("breakout_top10", now + 3, &[("BTC", 0.5), ("SOL", 0.5)], breakout_evidence(), false));
     e.run_lab_books();
     assert!(!holds(&e, ETH), "ETH was regime's alone");
     let eq = status(&e, &id).equity;

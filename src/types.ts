@@ -1170,6 +1170,10 @@ export interface AutopilotStatus {
   held?: string[];
   /** What it is held against: BTC buy and hold for crypto, SPY for US shares. */
   benchmark?: AutopilotBenchmark | null;
+  /** The harder benchmark for crypto and portfolios: BTC held only above its
+   *  200-day average over the same period (research/lab/results/gated_btc.md).
+   *  Absent while the lab's daily gate calendar is missing or stale. */
+  gatedBenchmark?: AutopilotBenchmark | null;
   /** The cash of its own book: equity less its positions and orders out. */
   cash?: number;
   /** The deepest fall from a peak over its equity history, percent. */

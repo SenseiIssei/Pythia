@@ -31,6 +31,10 @@ export interface CompareRow {
   benchPct: number | null;
   /** Points ahead of its benchmark (negative: behind); null when unknown. */
   vsBenchPts: number | null;
+  /** BTC held only above its 200-day average over the same period, percent,
+   *  and the points ahead of it; null for US shares or while unknown. */
+  gatedPct: number | null;
+  vsGatedPts: number | null;
   /** Below its peak now, percent. */
   drawdownPct: number;
   /** The deepest fall from a peak so far, percent. */
@@ -51,6 +55,10 @@ export interface CompareRow {
  *  autopilot keeps its colour while others come and go. */
 function byStart(list: AutopilotStatus[]): AutopilotStatus[] {
   return [...list].sort((a, b) => a.startedMs - b.startedMs || a.config.id.localeCompare(b.config.id));
+}
+
+function finite(n: number | null | undefined): number | null {
+  return n != null && Number.isFinite(n) ? n : null;
 }
 
 /** The amount its dollars were made on: the engine's time-weighted average
@@ -93,6 +101,8 @@ export function compareRows(list: AutopilotStatus[], now: number): CompareRow[] 
       benchLabel: b?.label ?? benchLabel(s.benchmark?.symbol),
       benchPct: b ? b.btcPct : null,
       vsBenchPts: b ? b.edgePct : null,
+      gatedPct: finite(s.gatedBenchmark?.returnPct),
+      vsGatedPts: finite(s.gatedBenchmark?.excessPct),
       drawdownPct: s.drawdownPct,
       maxDrawdownPct: maxDrawdown(s, now),
       trades: s.trades,

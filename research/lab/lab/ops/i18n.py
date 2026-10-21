@@ -175,7 +175,10 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "tbl_week": "Week",
         "tbl_start": "Start",
         "tbl_vs_btc": "±BTC",
+        "tbl_vs_gated": "±G",
         "tbl_legend": "Value in $, Today and Start in %, ±BTC in points against BTC since start",
+        "tbl_legend_gated": ("Value in $, Today and Start in %, ±BTC in points against BTC since start, "
+                             "±G against BTC held only above its 200-day average"),
         "tbl_legend_week": "Value in $, Week and Start in %, ±BTC in points against BTC this week",
         "tbl_all_mode": "; all {mode}",
         "tbl_account": "; account {account}: {names}",
@@ -642,7 +645,10 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "tbl_week": "Woche",
         "tbl_start": "Start",
         "tbl_vs_btc": "±BTC",
+        "tbl_vs_gated": "±G",
         "tbl_legend": "Wert in $, Heute und Start in %, ±BTC in Punkten gegenüber BTC seit Start",
+        "tbl_legend_gated": ("Wert in $, Heute und Start in %, ±BTC in Punkten gegenüber BTC seit Start, "
+                             "±G gegenüber BTC nur über seinem 200-Tage-Schnitt"),
         "tbl_legend_week": "Wert in $, Woche und Start in %, ±BTC in Punkten gegenüber BTC in dieser Woche",
         "tbl_all_mode": "; alle {mode}",
         "tbl_account": "; Konto {account}: {names}",

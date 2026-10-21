@@ -91,7 +91,9 @@
 //!
 //! An auto-pick autopilot re-runs its pick every `repickEveryHours` (24 by
 //! default, 0 = never; explicit sleeves are never re-picked) and re-weights,
-//! adds or drops lab books. A change is netted in at the next rebalance;
+//! adds or drops lab books. A change is netted in at the rebalance of the
+//! next lab signal, never by a rebalance of its own on signals already
+//! traded (a new book enters with its next signal too);
 //! a dropped book stays listed at weight zero (and stays the autopilot's),
 //! and its coins are sold down only where the other books do not want them.
 //! A live autopilot only re-weights or drops: it never adds a strategy the
@@ -179,6 +181,13 @@
 //!   regular session (the same wait every lab book of US shares has), so
 //!   their queued rebalance never holds the crypto books back, which trade
 //!   at any time.
+//! - **Or chosen by hand.** A portfolio whose sleeves are given at the start
+//!   runs exactly those lab books (crypto and US shares, nothing else) at
+//!   those weights: each class's budget is the sum of its sleeves' weights,
+//!   no allocator, no re-pick. This is how a lab book marked explicit only
+//!   (`lab::LabEvidence::explicit_only`, never auto-picked) gets money, for
+//!   instance the SPY sleeve of the registered Crypto + SPY forward test
+//!   (`research/lab/results/equity_sleeve_prereg.md`).
 //! - **Blended benchmark.** It is held against BTC and SPY bought and held
 //!   at its class budgets ([`BlendBench`]); when a re-pick moves the budgets
 //!   the blend is chain-linked and continues at the new weights.
@@ -391,7 +400,8 @@ pub struct AutopilotConfig {
     /// A portfolio across asset classes: one amount over crypto lab books
     /// and lab books of US shares in one book on the Alpaca account, split
     /// between the two classes by evidence (see "Portfolios across asset
-    /// classes" above). Paper or demo only, and Pythia picks the books.
+    /// classes" above). Paper or demo only. Pythia picks the books, unless
+    /// sleeves are given: then those lab books at those weights, never re-picked.
     /// Off: one asset class, as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub portfolio: bool,
@@ -501,6 +511,13 @@ pub struct AutopilotStatus {
     /// hold for US shares, over the same period.
     #[serde(default)]
     pub benchmark: Option<BenchmarkStatus>,
+    /// The harder benchmark for crypto (and portfolios): BTC held only while
+    /// its close is above its 200-day average (`results/gated_btc.md`), over
+    /// the same period. No book has beaten it out of sample, so every
+    /// crypto autopilot is shown against it as well as against plain BTC.
+    /// `None` while the lab's daily gate calendar is not there or is stale.
+    #[serde(default)]
+    pub gated_benchmark: Option<BenchmarkStatus>,
     /// The cash of its own book: equity less what its positions are worth
     /// at the mark and what its orders still at the venue will cost.
     #[serde(default)]
@@ -1328,6 +1345,9 @@ pub struct Evidence {
     /// Lab books: an experiment that failed the lab's bar
     /// ([`crate::lab::LabSignal::is_experimental`]). Never auto-picked.
     pub experimental: bool,
+    /// Lab books: runs only where an autopilot names it
+    /// ([`crate::lab::LabEvidence::explicit_only`]). Never auto-picked.
+    pub explicit_only: bool,
 }
 
 /// How an experimental lab book is named wherever it shows up: its sleeve,
@@ -1434,6 +1454,9 @@ impl Evidence {
         let mut parts = Vec::new();
         if self.experimental {
             parts.push("EXPERIMENT: it failed the lab's deflation test and runs on paper only because you named it".to_string());
+        }
+        if self.explicit_only {
+            parts.push("a sleeve of a registered forward test: no auto pick takes it, it runs only where you name it".to_string());
         }
         parts.push(format!("{} of 8 gates green", self.passed));
         if self.failed > 0 {
@@ -1940,6 +1963,38 @@ impl Engine {
             excess_pct: ret.map(|r| own - r),
             from_ms: from,
             note,
+            legs: Vec::new(),
+        })
+    }
+
+    /// Against BTC held only above its 200-day average, over the same period
+    /// as the plain BTC comparison (from its start, or from where that one
+    /// starts), from the lab's daily gate calendar in the forward report.
+    /// Crypto autopilots and portfolios; `None` for US shares alone, or while
+    /// the calendar is missing, stale or does not cover the period.
+    fn ap_gated_benchmark(&self, ap: &Autopilot, equity: f64) -> Option<BenchmarkStatus> {
+        if !(ap.config.portfolio || config_venue(&ap.config) == Some(Venue::Crypto)) {
+            return None;
+        }
+        let gate = self.lab_forward_fresh()?.btc_gate.as_ref()?;
+        let active = ap.is_active();
+        let from = ap.btc_from_ms;
+        let start = from.unwrap_or(ap.started_ms);
+        let end = if active { self.now() } else { ap.stopped_ms.unwrap_or_else(|| self.now()) };
+        let p1 = if active { self.ap_btc_price(ap) } else { ap.btc_end };
+        let ret = gate.return_pct(start, ap.btc_start?, end, p1?)?;
+        let base = match from {
+            Some(t) => ap.history.iter().find(|h| h.0 >= t).map(|h| h.1).unwrap_or(equity),
+            None => ap.start_capital,
+        };
+        let own = if base > 0.0 { (equity / base - 1.0) * 100.0 } else { 0.0 };
+        Some(BenchmarkStatus {
+            symbol: BTC_SYMBOL.to_string(),
+            name: format!("BTC held only above its {}-day average", gate.sma_days),
+            return_pct: Some(ret),
+            excess_pct: Some(own - ret),
+            from_ms: from,
+            note: None,
             legs: Vec::new(),
         })
     }
@@ -2507,7 +2562,31 @@ impl Engine {
         let auto = cfg.sleeves.is_empty();
         let mut passed_over: Vec<String> = Vec::new();
         let mut split: Option<PortfolioPick> = None;
-        let picks: Vec<(String, f64, String)> = if cfg.portfolio {
+        let picks: Vec<(String, f64, String)> = if cfg.portfolio && !auto {
+            // A portfolio chosen by hand: each sleeve in its own class, the
+            // classes' budgets are the sums of their sleeves' weights. A book
+            // the auto pick never takes (explicit only) runs only this way.
+            let total: f64 = cfg.sleeves.iter().map(|s| s.weight.max(0.0)).sum();
+            let mut out = Vec::new();
+            let mut budgets: Vec<(Venue, f64)> = PORTFOLIO_CLASSES.iter().map(|c| (*c, 0.0)).collect();
+            for sl in &cfg.sleeves {
+                let s = self.strategies.iter().find(|s| s.id == sl.strategy_id).expect("checked in the preflight");
+                if let Some(why) = self.sleeve_block(&s.id, s.venue_class, cfg.mode, &busy, &HashSet::new()) {
+                    return Err(why);
+                }
+                if let Some(b) = budgets.iter_mut().find(|(c, _)| *c == s.venue_class) {
+                    b.1 += if total > 0.0 { sl.weight.max(0.0) / total } else { 0.0 };
+                }
+                out.push((s.id.clone(), sl.weight, format!("Chosen by you; {}", self.evidence(&s.id).describe())));
+            }
+            let empty = budgets
+                .iter()
+                .filter(|(_, b)| *b <= 1e-9)
+                .map(|(c, _)| (*c, "no sleeve of it was chosen".to_string()))
+                .collect();
+            split = Some(PortfolioPick { picks: Vec::new(), budgets, empty, passed_over: Vec::new() });
+            out
+        } else if cfg.portfolio {
             let max = cfg.max_sleeves.unwrap_or(AUTO_MAX_SLEEVES);
             let mut pp = self.portfolio_pick(cfg.mode, &busy, &HashSet::new(), max, None)?;
             passed_over = std::mem::take(&mut pp.passed_over);
@@ -2733,11 +2812,18 @@ impl Engine {
             format!("{msg} Books: {}.", books.join(", "))
         };
         if let Some(pp) = &split {
-            msg.push_str(&format!(" A portfolio across asset classes, split by evidence: {}.", pp.split_words()));
-            for (c, why) in &pp.empty {
+            if auto {
+                msg.push_str(&format!(" A portfolio across asset classes, split by evidence: {}.", pp.split_words()));
+                for (c, why) in &pp.empty {
+                    msg.push_str(&format!(
+                        " Nothing goes to {} for now ({why}); a re-pick adds them once a book has evidence, never forced.",
+                        asset_words(*c)
+                    ));
+                }
+            } else {
                 msg.push_str(&format!(
-                    " Nothing goes to {} for now ({why}); a re-pick adds them once a book has evidence, never forced.",
-                    asset_words(*c)
+                    " A portfolio across asset classes, split as you chose it: {}. It keeps that split (no re-pick); each class is brought back to its share at its own rebalances.",
+                    pp.split_words()
                 ));
             }
             msg.push_str(" US shares rebalance only in the regular session; crypto at any time. It is held against a blend of BTC and SPY at the same split.");
@@ -3603,6 +3689,7 @@ impl Engine {
                     btc_return_pct: self.ap_btc_return_pct(ap),
                     held: ap.owned.keys().cloned().collect(),
                     benchmark: self.ap_benchmark(ap, equity),
+                    gated_benchmark: self.ap_gated_benchmark(ap, equity),
                     cash: equity - self.ap_gross(ap, None) - self.ap_pending(ap, None),
                     max_drawdown_pct: max_drawdown_pct(&ap.history, equity),
                     avg_capital: ap.avg_capital(ap.stopped_ms.unwrap_or_else(|| self.now())),
@@ -4395,6 +4482,7 @@ impl Engine {
                 None
             },
             experimental: s.kind == StrategyKind::LabTargets && self.lab_book_experimental(sid),
+            explicit_only: s.kind == StrategyKind::LabTargets && self.lab_book_explicit_only(sid),
         }
     }
 
@@ -4471,6 +4559,9 @@ impl Engine {
             // Experiments failed the lab's bar: they run only where an
             // autopilot names them as a sleeve, never by a pick or re-pick.
             .filter(|s| !(s.kind == StrategyKind::LabTargets && self.lab_book_experimental(&s.id)))
+            // So do books under a registered forward test (explicit only):
+            // their evidence must not move money into them anywhere else.
+            .filter(|s| !(s.kind == StrategyKind::LabTargets && self.lab_book_explicit_only(&s.id)))
             .filter(|s| s.state != StrategyState::Paused || self.lab_book_autopilot_only(&s.id))
             .filter(|s| {
                 s.kind != StrategyKind::LabTargets
@@ -4713,8 +4804,22 @@ impl Engine {
         if cfg.mode == AutopilotMode::Live {
             return Err("A portfolio across asset classes runs on paper or demo only. Live stays with autopilots of one asset class, behind every gate they have.".into());
         }
-        if !cfg.sleeves.is_empty() {
-            return Err("Pythia picks a portfolio's lab books by evidence, class by class: leave the strategies empty.".into());
+        // Chosen by hand: lab books only, crypto or US shares, and the split
+        // between the classes is the owner's weights (no allocator, no re-pick).
+        for sl in &cfg.sleeves {
+            match self.strategies.iter().find(|s| s.id == sl.strategy_id) {
+                None => return Err(format!("There is no strategy \"{}\".", sl.strategy_id)),
+                Some(s) if s.kind != StrategyKind::LabTargets => {
+                    return Err(format!(
+                        "A portfolio runs lab books only, crypto and US shares side by side: {} is not one.",
+                        s.name
+                    ))
+                }
+                Some(s) if !PORTFOLIO_CLASSES.contains(&s.venue_class) => {
+                    return Err(format!("{} trades neither crypto nor US shares.", s.name))
+                }
+                _ => {}
+            }
         }
         if cfg.mode == AutopilotMode::Demo {
             if !self.demo_venues.contains(&Venue::Alpaca) {
@@ -4890,16 +4995,22 @@ impl Engine {
             }
             parts.push(format!("{name} {:.0} % (new)", w * 100.0));
         }
-        // The netted target changes now, so the next rebalance runs now:
-        // it trades only the difference per coin.
-        let members: Vec<String> = self.autopilots[i].sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+        // The new weights wait for the next lab signal: its rebalance nets
+        // them in together with the books' new targets, so a re-pick never
+        // sends a rebalance of its own on the signals it already traded. The
+        // audit (`research/lab/results/autopilot_optimization.md`) found the
+        // re-pick's own rebalances were 40 % of the Auto-Pick's costs, half
+        // of their notional reversed within three days. A book added here
+        // waits too: it enters with its next signal, not on an old one.
         let book = self.autopilots[i].config.id.clone();
-        for sid in &members {
-            self.lab_done.remove(&super::pos_key(&book, sid));
-            self.lab_retry.remove(&super::pos_key(&book, sid));
+        let added: Vec<String> = target.keys().filter(|sid| !own.contains(*sid)).cloned().collect();
+        for sid in &added {
+            if let Some(g) = self.lab_signals.get(sid).map(|g| g.generated_ms) {
+                self.lab_done.insert(super::pos_key(&book, sid), g);
+            }
         }
         let mut msg = format!(
-            "{label} re-ran its pick with fresh evidence and changed its lab books: {}. The new weights are netted into one target per coin at the next rebalance, which trades only the difference; nothing is sold off at once.",
+            "{label} re-ran its pick with fresh evidence and changed its lab books: {}. The new weights are netted into one target per coin at the rebalance of the next lab signal, which trades only the difference; nothing is sold off at once.",
             parts.join(", ")
         );
         if portfolio {
