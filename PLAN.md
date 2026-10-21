@@ -4,8 +4,11 @@
 > Prediction markets (Polymarket) + crypto exchanges + equities (Alpaca), unified behind
 > one strategy engine, one risk manager, and one neon control panel.
 
-**Status:** Phase 0 scaffold (this repo). Paper-trading works end-to-end. Live connectors are
-stubbed and gated. **Read [`SAFETY.md`](SAFETY.md) before you flip anything to live.**
+**Status (0.5.0, October 2026):** this is the original design document. Paper trading, gated live
+execution, autopilots and the research lab are built; what changed in each release is in
+[`CHANGELOG.md`](CHANGELOG.md), and the lab's verdicts are in
+[`research/lab/README.md`](research/lab/README.md). **Read [`SAFETY.md`](SAFETY.md) before you flip
+anything to live.**
 
 ---
 

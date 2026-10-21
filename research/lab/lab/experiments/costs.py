@@ -1,4 +1,4 @@
-"""Calibrate the book half of config/costs.json from recorded order books (NEXT-STEPS §2).
+"""Calibrate the book half of config/costs.json from recorded order books.
 
 The shipped cost numbers are guesses from typical quoted spreads. The recorder has
 kept the 20 best levels of every Kraken and Binance book every 5 s since

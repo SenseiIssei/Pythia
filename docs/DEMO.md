@@ -232,7 +232,7 @@ reuses that connector; the asset list call is from Alpaca's reference
 (`get-v2-assets-1`) and was not called from this branch.
 
 Nothing in this branch has sent a request to any demo host: every response shape
-is from the docs, the same state as the live connectors (see `NEXT-STEPS.md` §1).
+is from the docs, the same state as the live connectors were in when they were written.
 The first demo connection test is the check.
 
 ## US shares and ETFs on the Alpaca paper account
