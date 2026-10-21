@@ -749,6 +749,8 @@ fn a_crypto_autopilot_is_also_held_against_btc_above_its_200_day_average() {
     let id = start(&mut e, config("g", 1_000.0, &["ema-cross-1"]));
     assert!(status(&e, &id).gated_benchmark.is_none(), "no gate calendar from the lab yet: not shown, never guessed");
     let p0 = e.price_of(BTC);
+    // A minute on: over no time at all gated BTC moves by nothing, whatever the price did.
+    e.advance_clock_for_test(60_000);
 
     // BTC closed below its 200-day average: gated BTC sits in cash while BTC rises 10 %.
     e.apply_lab_forward(gate_file(&e, false, p0));
@@ -762,8 +764,9 @@ fn a_crypto_autopilot_is_also_held_against_btc_above_its_200_day_average() {
 
     // Above it: gated BTC is BTC.
     e.apply_lab_forward(gate_file(&e, true, p0));
-    let g = status(&e, &id).gated_benchmark.unwrap();
-    assert!((g.return_pct.unwrap() - 10.0).abs() < 1e-6, "{:?}", g.return_pct);
+    let s = status(&e, &id);
+    let (g, plain) = (s.gated_benchmark.unwrap().return_pct.unwrap(), s.benchmark.unwrap().return_pct.unwrap());
+    assert!((g - plain).abs() < 1e-6 && g > 9.0, "on every day it is BTC: {g} against {plain}");
     let json = serde_json::to_value(status(&e, &id)).unwrap();
     assert!(json["gatedBenchmark"].get("excessPct").is_some(), "{json}");
 
