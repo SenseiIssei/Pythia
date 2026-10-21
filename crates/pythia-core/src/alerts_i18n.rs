@@ -16,7 +16,7 @@ use chrono::{Datelike, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 
 use super::card::{self, Row, Table};
-use super::AlertKind;
+use super::{AlertCategory, AlertKind};
 
 /// The variable that overrides the language in the settings.
 pub const LANG_ENV: &str = "PYTHIA_ALERT_LANG";
@@ -356,8 +356,9 @@ pub fn mode_footer(mode: &str, lang: Lang) -> String {
     }
 }
 
-/// `3 trades: bought $1,200, sold $800.` for a batch of fills.
-pub fn fills_summary(lang: Lang, n: usize, bought: f64, sold: f64) -> String {
+/// `3 fills in 2 coins: bought $1,200.00, sold $800.00.` for a batch of fills
+/// (`coins` the lines of its table: one per coin and side).
+pub fn fills_summary(lang: Lang, n: usize, coins: usize, bought: f64, sold: f64) -> String {
     let mut parts = Vec::new();
     match lang {
         Lang::En => {
@@ -367,7 +368,8 @@ pub fn fills_summary(lang: Lang, n: usize, bought: f64, sold: f64) -> String {
             if sold > 0.0 {
                 parts.push(format!("sold {}", usd(lang, sold)));
             }
-            format!("{n} {}: {}.", if n == 1 { "trade" } else { "trades" }, parts.join(", "))
+            let lines = if coins < n { format!(" in {coins} lines") } else { String::new() };
+            format!("{n} {}{lines}: {}.", if n == 1 { "fill" } else { "fills" }, parts.join(", "))
         }
         Lang::De => {
             if bought > 0.0 {
@@ -376,7 +378,8 @@ pub fn fills_summary(lang: Lang, n: usize, bought: f64, sold: f64) -> String {
             if sold > 0.0 {
                 parts.push(format!("verkauft für {}", usd(lang, sold)));
             }
-            format!("{}: {}.", count(n as u64, "Ausführung", "Ausführungen"), parts.join(", "))
+            let lines = if coins < n { format!(" in {coins} Zeilen") } else { String::new() };
+            format!("{}{lines}: {}.", count(n as u64, "Ausführung", "Ausführungen"), parts.join(", "))
         }
     }
 }
@@ -384,8 +387,119 @@ pub fn fills_summary(lang: Lang, n: usize, bought: f64, sold: f64) -> String {
 /// The title of a batch of fills that is not a rebalance.
 pub fn fills_title(lang: Lang, n: usize, book: &str) -> String {
     match lang {
-        Lang::En => format!("{n} trades · {book}"),
+        Lang::En => format!("{n} fills · {book}"),
         Lang::De => format!("{n} Ausführungen · {book}"),
+    }
+}
+
+/// How many alerts a morning note stands for: every fill and every other alert.
+pub fn overnight_count(fills: &[HeldFills], others: &[HeldGroup]) -> usize {
+    fills.iter().map(|f| f.buys + f.sells).sum::<usize>() + others.iter().map(|g| g.n).sum::<usize>()
+}
+
+/// A switch in Settings by its name in the language, for the morning note.
+pub fn category_label(c: AlertCategory, lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => c.label(),
+        Lang::De => match c {
+            AlertCategory::Trades => "Trades",
+            AlertCategory::Rebalances => "Umschichtungen",
+            AlertCategory::DailyPnl => "Tagesbericht",
+            AlertCategory::BigMoves => "Starke Bewegungen",
+            AlertCategory::Autopilot => "Autopilot-Ereignisse",
+            AlertCategory::Risk => "Risiko",
+            AlertCategory::Venue => "Handelsplatz und Daten",
+            AlertCategory::Models => "Modelle",
+            AlertCategory::Studies => "Studien und Fabrik",
+            AlertCategory::Listings => "Neue Listungen",
+            AlertCategory::Trending => "Trends",
+            AlertCategory::Cs2 => "CS2",
+            AlertCategory::Pokemon => "Pokémon",
+            AlertCategory::Weekly => "Wochenbericht",
+        },
+    }
+}
+
+/// The fills of one autopilot that quiet hours held back, added up.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeldFills {
+    /// The autopilot's name.
+    pub book: String,
+    /// Some of them were part of a rebalance.
+    pub rebalance: bool,
+    pub buys: usize,
+    pub sells: usize,
+    /// What the buys cost and the sells brought, in $.
+    pub bought: f64,
+    pub sold: f64,
+    pub fees: f64,
+    pub realized: f64,
+}
+
+impl HeldFills {
+    /// `Momentum: rebalance, 9 sells, 3 buys, sold $1,234, bought $567, fees $2.10`.
+    pub fn line(&self, lang: Lang) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.rebalance {
+            parts.push(match lang {
+                Lang::En => "rebalance".into(),
+                Lang::De => "Umschichtung".into(),
+            });
+        }
+        let (sells, buys) = match lang {
+            Lang::En => (count(self.sells as u64, "sell", "sells"), count(self.buys as u64, "buy", "buys")),
+            Lang::De => (count(self.sells as u64, "Verkauf", "Verkäufe"), count(self.buys as u64, "Kauf", "Käufe")),
+        };
+        if self.sells > 0 {
+            parts.push(sells);
+        }
+        if self.buys > 0 {
+            parts.push(buys);
+        }
+        let (sold, bought, fees, realised) = match lang {
+            Lang::En => ("sold", "bought", "fees", "realised"),
+            Lang::De => ("verkauft", "gekauft", "Gebühren", "realisiert"),
+        };
+        if self.sells > 0 {
+            parts.push(format!("{sold} {}", money(lang, self.sold, 0)));
+        }
+        if self.buys > 0 {
+            parts.push(format!("{bought} {}", money(lang, self.bought, 0)));
+        }
+        if self.fees > 0.0 {
+            parts.push(format!("{fees} {}", usd(lang, self.fees)));
+        }
+        if self.realized.abs() > 1e-9 {
+            parts.push(format!("{realised} {}", signed_usd(lang, self.realized)));
+        }
+        format!("{}: {}", self.book, parts.join(", "))
+    }
+}
+
+/// Other alerts quiet hours held back, of one kind (a lab post: of one
+/// switch): how many, and the title of the newest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldGroup {
+    pub kind: AlertKind,
+    pub category: Option<AlertCategory>,
+    pub n: usize,
+    pub last: String,
+}
+
+impl HeldGroup {
+    /// `Big move: 3, the last BTC +4.1 % in 1 h` or `Autopilot started: Momentum`.
+    pub fn line(&self, lang: Lang) -> String {
+        let label = match (self.kind, self.category) {
+            (AlertKind::Event, Some(c)) => category_label(c, lang),
+            (k, _) => kind_label(k, lang),
+        };
+        if self.n == 1 {
+            return format!("{label}: {}", self.last);
+        }
+        match lang {
+            Lang::En => format!("{label}: {}, the last {}", self.n, self.last),
+            Lang::De => format!("{label}: {}, zuletzt {}", self.n, self.last),
+        }
     }
 }
 
@@ -773,7 +887,9 @@ pub enum Msg {
     DriftOff { model: DriftModel },
     BigMove { of: MoveOf, label: String, held_by: String, window: &'static str, now: f64, then: f64, pct: f64 },
     Test { on: usize, total: usize, quiet: Option<(String, String)>, hour_pct: f64, day_pct: f64 },
-    Overnight { held: Vec<(i64, String)>, dropped: usize, start: String, end: String, timezone: String },
+    /// What quiet hours held back: the fills per autopilot, every other kind
+    /// with its count.
+    Overnight { fills: Vec<HeldFills>, others: Vec<HeldGroup>, start: String, end: String, timezone: String },
 }
 
 /// What a message puts on its card. `None` falls back: the title to the kind's
@@ -782,6 +898,7 @@ pub enum Msg {
 pub struct CardText {
     pub title: Option<String>,
     pub summary: Option<String>,
+    pub lines: Vec<String>,
     pub rows: Vec<Row>,
     pub table: Option<Table>,
     pub footer: Option<String>,
@@ -925,12 +1042,12 @@ impl Msg {
             }
             (Lang::En, Msg::Test { .. }) => "test message from the engine: alerts reach this destination.".into(),
             (Lang::De, Msg::Test { .. }) => "Testnachricht von Pythia: Meldungen kommen hier an.".into(),
-            (Lang::En, Msg::Overnight { held, dropped, .. }) => {
-                format!("{} alert(s) were held back in quiet hours.", held.len() + dropped)
+            (Lang::En, Msg::Overnight { fills, others, .. }) => {
+                format!("{} alert(s) were held back in quiet hours.", overnight_count(fills, others))
             }
-            (Lang::De, Msg::Overnight { held, dropped, .. }) => format!(
+            (Lang::De, Msg::Overnight { fills, others, .. }) => format!(
                 "{} in der Ruhezeit zurückgehalten.",
-                count((held.len() + dropped) as u64, "Meldung", "Meldungen")
+                count(overnight_count(fills, others) as u64, "Meldung", "Meldungen")
             ),
         }
     }
@@ -1132,9 +1249,8 @@ impl Msg {
                     ),
                 ];
             }
-            Msg::Overnight { held, dropped, start, end, timezone } => {
-                let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
-                let n = held.len() + dropped;
+            Msg::Overnight { fills, others, start, end, .. } => {
+                let n = overnight_count(fills, others);
                 c.title = Some(kind_label(AlertKind::Overnight, lang).into());
                 c.summary = Some(match lang {
                     Lang::En => format!(
@@ -1146,20 +1262,8 @@ impl Msg {
                         count(n as u64, "Meldung wurde", "Meldungen wurden")
                     ),
                 });
-                let rows: Vec<Vec<String>> = held
-                    .iter()
-                    .map(|(ts, title)| {
-                        let t = chrono::DateTime::from_timestamp_millis(*ts)
-                            .map(|d| d.with_timezone(&tz).format("%H:%M").to_string())
-                            .unwrap_or_default();
-                        vec![t, title.clone()]
-                    })
-                    .collect();
-                c.table = Some(Table {
-                    header: vec![word(Word::Time, lang).into(), word(Word::Alert, lang).into()],
-                    rows,
-                    more: *dropped,
-                });
+                // One line per autopilot for its fills, one per other kind.
+                c.lines = fills.iter().map(|f| f.line(lang)).chain(others.iter().map(|g| g.line(lang))).collect();
             }
             Msg::DataStale { .. }
             | Msg::DailyLoss { .. }

@@ -132,7 +132,7 @@ fn the_fills_of_a_rebalance_are_one_card_with_a_table() {
     assert_eq!(cards.len(), 2, "one trade card, one stale card");
     let t = &cards[0];
     assert_eq!(t.title, "Rebalance · Momentum");
-    assert_eq!(t.summary.as_deref(), Some("2 trades: bought $1,220.00, sold $1,500.00."));
+    assert_eq!(t.summary.as_deref(), Some("3 fills in 2 lines: bought $1,220.00, sold $1,500.00."));
     let table = t.table.as_ref().unwrap();
     assert_eq!(table.rows.len(), 2, "the two BTC buys are one line");
     assert_eq!(table.rows[0], vec!["Sell", "ETH", "$1,500", "$3,000.00"]);
@@ -283,13 +283,69 @@ fn sorting_follows_switches_mute_and_quiet_hours_and_urgent_always_goes() {
 }
 
 #[test]
-fn the_morning_note_lists_what_was_held() {
+fn the_morning_note_sums_up_what_was_held() {
     let s = AlertSettings::default();
-    let held = vec![(utc(2026, 10, 15, 22, 5), "Momentum started".to_string()), (utc(2026, 10, 16, 1, 40), "BTC +4.1 % in 1 h".into())];
-    let ev = overnight_event(&held, 2, &s);
-    let html = compose(&tg(""), &[ev], 0);
-    assert!(html.starts_with("<b>🌙 Quiet hours are over</b>\n4 alerts were held back from 23:00 to 07:00. Urgent ones went out at once."), "{html}");
-    assert!(html.contains("<pre>Time  Alert\n00:05 Momentum started\n03:40 BTC +4.1 % in 1 h\n+2 more</pre>"), "{html}");
+    let mut night = Overnight::default();
+    let t0 = utc(2026, 10, 15, 22, 5);
+    // A rebalance of 12 fills (9 sells, 3 buys) and two big moves.
+    for i in 0..12 {
+        let buy = i >= 9;
+        let t = TradeLine { fee: 0.175, ..line("Test · TSMOM tranches", buy, "ETH", 0.1, 1_000.0 + i as f64, true) };
+        night.hold(&AlertEvent::trade(i.to_string(), t), t0 + i * 60_000, Lang::En);
+    }
+    night.hold(&AlertEvent::new(AlertKind::BigMove, "m1", "x").titled("BTC +4.1 % in 1 h"), t0, Lang::En);
+    night.hold(&AlertEvent::new(AlertKind::BigMove, "m2", "x").titled("ETH -5.0 % in 1 h"), t0, Lang::En);
+    night.hold(&AlertEvent::new(AlertKind::Event, "e", "x").titled("New on Kraken: ZK").in_category(AlertCategory::Listings), t0, Lang::En);
+    assert_eq!(night.count(), 15);
+    let html = compose(&tg(""), &[overnight_event(&night, &s)], 0);
+    assert!(html.starts_with("<b>🌙 Quiet hours are over</b>\n15 alerts were held back from 23:00 to 07:00. Urgent ones went out at once.\n"), "{html}");
+    assert!(
+        html.contains("\nTest · TSMOM tranches: rebalance, 9 sells, 3 buys, sold $904, bought $303, fees $2.10, realised +$45.00\n"),
+        "{html}"
+    );
+    assert!(html.contains("\nBig move: 2, the last ETH -5.0 % in 1 h\n"), "{html}");
+    assert!(html.contains("\nListings: New on Kraken: ZK\n<i>Pythia</i>"), "{html}");
+    // In German.
+    let de = compose_in(&tg(""), &[overnight_event(&night, &s)], 0, Lang::De);
+    assert!(de.contains("Test · TSMOM tranches: Umschichtung, 9 Verkäufe, 3 Käufe, verkauft 904 $, gekauft 303 $, Gebühren 2,10 $"), "{de}");
+    assert!(de.contains("Starke Bewegung: 2, zuletzt ETH -5.0 % in 1 h") && de.contains("Neue Listungen: New on Kraken: ZK"), "{de}");
+}
+
+#[test]
+fn the_fills_of_one_autopilot_wait_until_it_is_quiet() {
+    let (quiet, max) = (150_000, 600_000);
+    let mut b = FillBuffer::default();
+    let t0 = utc(2026, 10, 21, 9, 12);
+    // 14 partial fills in 9 minutes, one every 40 s; another autopilot once.
+    for i in 0..14 {
+        b.add(AlertEvent::trade(i.to_string(), line("Tranches", i % 3 == 0, "ETH", 0.1, 1_000.0, true)), t0 + i * 40_000);
+        assert!(b.due(t0 + i * 40_000, quiet, max).is_empty(), "still coming");
+    }
+    b.add(AlertEvent::trade("x", line("Swing", true, "SOL", 1.0, 150.0, false)), t0 + 13 * 40_000);
+    let last = t0 + 13 * 40_000;
+    assert_eq!(b.next_due(quiet, max), Some(t0 + max), "the first book is due at ten minutes at the latest");
+    // Ten minutes after its first fill the first book goes, quiet or not.
+    let first = b.due(t0 + max, quiet, max);
+    assert_eq!(first.len(), 14);
+    assert_eq!(b.len(), 1);
+    assert!(b.due(last + quiet - 1, quiet, max).is_empty());
+    let second = b.due(last + quiet, quiet, max);
+    assert_eq!(second.len(), 1, "the other autopilot after its own quiet time");
+    assert!(b.is_empty());
+    // One card for the 14.
+    let cards = cards_of(&first);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].title, "Rebalance · Tranches");
+    assert!(cards[0].summary.as_deref().unwrap().starts_with("14 fills in 2 lines: bought $500.00, sold $900.00."));
+    // Nothing is lost: a full book goes out at once, the rest on shutdown.
+    for i in 0..FILLS_MAX {
+        b.add(AlertEvent::trade(i.to_string(), line("Busy", true, "BTC", 0.001, 60_000.0, true)), t0);
+    }
+    b.add(AlertEvent::trade("y", line("Calm", true, "BTC", 0.001, 60_000.0, true)), t0);
+    assert_eq!(b.due(t0, quiet, max).len(), FILLS_MAX);
+    assert_eq!(b.drain().len(), 1);
+    assert!(FillBuffer::takes(&AlertEvent::trade("z", line("A", true, "BTC", 1.0, 1.0, true))));
+    assert!(!FillBuffer::takes(&AlertEvent::new(AlertKind::KillSwitch, "k", "x")));
 }
 
 #[test]

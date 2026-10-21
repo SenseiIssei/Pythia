@@ -40,7 +40,7 @@ mod moves;
 mod settings;
 
 pub use card::{Card, Row, Table, Tone};
-pub use i18n::{Lang, Msg};
+pub use i18n::{HeldFills, HeldGroup, Lang, Msg};
 pub use moves::{MoveInput, MoveSubject, MoveWatch};
 pub use settings::{
     parse_hhmm, AlertCategory, AlertSettings, AlertSettingsPatch, BigMoves, BigMovesPatch, QuietHours, QuietHoursPatch,
@@ -388,6 +388,8 @@ impl AlertEvent {
                 emoji,
                 title: self.title_text_in(lang),
                 summary: Some(sentence(&summary)).filter(|s| !s.trim().is_empty()),
+                lines: c.lines,
+                more_lines: 0,
                 rows: c.rows,
                 table: c.table,
                 footer: c.footer,
@@ -399,6 +401,8 @@ impl AlertEvent {
             emoji,
             title: self.title_text_in(lang),
             summary: Some(sentence(self.summary.as_deref().unwrap_or(&self.text))).filter(|s| !s.trim().is_empty()),
+            lines: Vec::new(),
+            more_lines: 0,
             rows: self.rows.clone(),
             table: self.table.clone(),
             footer: self.footer.clone(),
@@ -480,10 +484,10 @@ pub fn trade_cards_in(trades: &[&TradeLine], lang: Lang) -> Vec<Card> {
         }
         let bought: f64 = lines.iter().filter(|l| l.0).map(|l| l.3).sum();
         let sold: f64 = lines.iter().filter(|l| !l.0).map(|l| l.3).sum();
-        let n = lines.len();
+        let n = fills.len();
         let title = if rebalance { format!("{} · {book}{tag}", w(Word::Rebalance)) } else { format!("{}{tag}", fills_title(lang, n, &book)) };
-        let mut c =
-            Card::new(if rebalance { "🔁" } else { "💱" }, title).summary(fills_summary(lang, n, bought, sold));
+        let mut c = Card::new(if rebalance { "🔁" } else { "💱" }, title)
+            .summary(fills_summary(lang, n, lines.len(), bought, sold));
         let mut rows: Vec<(bool, Vec<String>)> = lines
             .iter()
             .map(|(buy, sym, q, v)| {
@@ -592,6 +596,12 @@ pub struct AlertConfig {
     pub max_per_hour: usize,
     /// Events arriving within this time of each other go out as one post.
     pub batch_wait: Duration,
+    /// The fills of one autopilot are collected until none came for this
+    /// long, then go out as one card (a rebalance's partial maker fills
+    /// arrive minutes apart; each was a card of its own).
+    pub fill_quiet: Duration,
+    /// And at the latest this long after the first of them.
+    pub fill_max: Duration,
     /// Bounded queue between the engine and the sender.
     pub queue: usize,
     pub timeout: Duration,
@@ -626,6 +636,8 @@ impl AlertConfig {
             dedup: Duration::from_secs(30 * 60),
             max_per_hour: 20,
             batch_wait: Duration::from_secs(2),
+            fill_quiet: Duration::from_secs(150),
+            fill_max: Duration::from_secs(600),
             queue: 256,
             timeout: Duration::from_secs(15),
             prefix: "Pythia".into(),
@@ -646,6 +658,7 @@ impl AlertConfig {
     /// `PYTHIA_ALERT_FORMAT` (`discord`, the default, or `slack`). A webhook,
     /// when set, wins over Telegram. Neither: `None`. Optional:
     /// `PYTHIA_ALERT_DEDUP_MIN` (30), `PYTHIA_ALERT_MAX_PER_HOUR` (20),
+    /// `PYTHIA_ALERT_FILL_QUIET_S` (150) and `PYTHIA_ALERT_FILL_MAX_S` (600),
     /// `PYTHIA_ALERT_PREFIX` (`Pythia`), `PYTHIA_ALERT_LANG` (`en` or `de`,
     /// over the language in the settings).
     pub fn from_env() -> Option<Self> {
@@ -704,6 +717,12 @@ impl AlertConfig {
         let num = |k: &str| get(k).and_then(|v| v.trim().parse::<u64>().ok());
         if let Some(m) = num("PYTHIA_ALERT_DEDUP_MIN") {
             c.dedup = Duration::from_secs(m * 60);
+        }
+        if let Some(s) = num("PYTHIA_ALERT_FILL_QUIET_S") {
+            c.fill_quiet = Duration::from_secs(s);
+        }
+        if let Some(s) = num("PYTHIA_ALERT_FILL_MAX_S").filter(|s| *s > 0) {
+            c.fill_max = Duration::from_secs(s);
         }
         if let Some(n) = num("PYTHIA_ALERT_MAX_PER_HOUR").filter(|n| *n > 0) {
             c.max_per_hour = n as usize;
@@ -774,8 +793,6 @@ impl Throttle {
 pub const RECENT_POSTS: usize = 100;
 /// The longest mute the API accepts: seven days.
 pub const MAX_MUTE_MINUTES: u64 = 7 * 24 * 60;
-/// Held back in quiet hours and listed in the morning: at most this many.
-pub const OVERNIGHT_MAX: usize = 40;
 
 /// One post, or one batch of events held back, as the API reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1046,13 +1063,70 @@ pub fn sort_events(events: Vec<AlertEvent>, settings: &AlertSettings, muted: boo
     s
 }
 
-/// The morning note: what quiet hours held back, one line each.
-pub fn overnight_event(held: &[(i64, String)], dropped: usize, settings: &AlertSettings) -> AlertEvent {
+/// What quiet hours held back, added up for the morning note: the fills per
+/// autopilot, every other alert per kind (a lab post per switch). However
+/// long the night, the note stays a line per autopilot and per kind.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Overnight {
+    pub fills: Vec<HeldFills>,
+    pub others: Vec<HeldGroup>,
+    /// When the first was held, for the note's key.
+    pub first_ms: Option<i64>,
+}
+
+impl Overnight {
+    pub fn is_empty(&self) -> bool {
+        self.fills.is_empty() && self.others.is_empty()
+    }
+
+    /// How many alerts it holds: every fill and every other alert.
+    pub fn count(&self) -> usize {
+        i18n::overnight_count(&self.fills, &self.others)
+    }
+
+    /// Hold one more alert back.
+    pub fn hold(&mut self, ev: &AlertEvent, now: i64, lang: Lang) {
+        self.first_ms.get_or_insert(now);
+        if let Some(t) = &ev.trade {
+            let f = match self.fills.iter_mut().position(|f| f.book == t.book) {
+                Some(i) => &mut self.fills[i],
+                None => {
+                    self.fills.push(HeldFills { book: t.book.clone(), ..Default::default() });
+                    self.fills.last_mut().expect("just pushed")
+                }
+            };
+            f.rebalance |= t.rebalance;
+            if t.buy {
+                f.buys += 1;
+                f.bought += t.qty * t.price;
+            } else {
+                f.sells += 1;
+                f.sold += t.qty * t.price;
+            }
+            f.fees += t.fee;
+            f.realized += t.realized;
+            return;
+        }
+        let category = (ev.kind == AlertKind::Event).then(|| ev.category()).flatten();
+        let title = ev.title_text_in(lang);
+        match self.others.iter_mut().find(|g| g.kind == ev.kind && g.category == category) {
+            Some(g) => {
+                g.n += 1;
+                g.last = title;
+            }
+            None => self.others.push(HeldGroup { kind: ev.kind, category, n: 1, last: title }),
+        }
+    }
+}
+
+/// The morning note: what quiet hours held back, one line per autopilot for
+/// its fills and one per other kind of alert.
+pub fn overnight_event(night: &Overnight, settings: &AlertSettings) -> AlertEvent {
     AlertEvent::from_msg(
-        format!("overnight:{}", held.first().map_or(0, |h| h.0)),
+        format!("overnight:{}", night.first_ms.unwrap_or(0)),
         Msg::Overnight {
-            held: held.to_vec(),
-            dropped,
+            fills: night.fills.clone(),
+            others: night.others.clone(),
             start: settings.quiet_hours.start.clone(),
             end: settings.quiet_hours.end.clone(),
             timezone: settings.quiet_hours.timezone.clone(),
@@ -1060,21 +1134,104 @@ pub fn overnight_event(held: &[(i64, String)], dropped: usize, settings: &AlertS
     )
 }
 
+/// The fills of each autopilot, held until it has been quiet for a while,
+/// so that a rebalance worked through many partial maker fills is one card.
+/// Pure: the sender asks it what is due. Nothing is dropped: a book that
+/// collects [`FILLS_MAX`] fills goes out at once.
+#[derive(Debug, Default)]
+pub struct FillBuffer {
+    books: Vec<PendingFills>,
+}
+
+#[derive(Debug)]
+struct PendingFills {
+    book: String,
+    first_ms: i64,
+    last_ms: i64,
+    events: Vec<AlertEvent>,
+}
+
+/// One autopilot's fills are posted once this many have gathered.
+pub const FILLS_MAX: usize = 200;
+
+impl FillBuffer {
+    /// Whether an event waits here: a fill that is not urgent.
+    pub fn takes(ev: &AlertEvent) -> bool {
+        ev.trade.is_some() && !ev.is_urgent()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.books.is_empty()
+    }
+
+    /// Fills waiting, all books.
+    pub fn len(&self) -> usize {
+        self.books.iter().map(|b| b.events.len()).sum()
+    }
+
+    pub fn add(&mut self, ev: AlertEvent, now: i64) {
+        let book = ev.trade.as_ref().map(|t| t.book.clone()).unwrap_or_default();
+        match self.books.iter_mut().find(|b| b.book == book) {
+            Some(b) => {
+                b.last_ms = now;
+                b.events.push(ev);
+            }
+            None => self.books.push(PendingFills { book, first_ms: now, last_ms: now, events: vec![ev] }),
+        }
+    }
+
+    /// When the next book is due, epoch ms.
+    pub fn next_due(&self, quiet_ms: i64, max_ms: i64) -> Option<i64> {
+        self.books.iter().map(|b| (b.last_ms + quiet_ms).min(b.first_ms + max_ms)).min()
+    }
+
+    /// The fills of every book that is due: quiet for `quiet_ms`, waiting
+    /// for `max_ms` since its first fill, or full. In the order they came.
+    pub fn due(&mut self, now: i64, quiet_ms: i64, max_ms: i64) -> Vec<AlertEvent> {
+        let mut out = Vec::new();
+        let mut keep = Vec::new();
+        for b in self.books.drain(..) {
+            if now - b.last_ms >= quiet_ms || now - b.first_ms >= max_ms || b.events.len() >= FILLS_MAX {
+                out.extend(b.events);
+            } else {
+                keep.push(b);
+            }
+        }
+        self.books = keep;
+        out
+    }
+
+    /// Everything waiting, due or not (the sender is shutting down).
+    pub fn drain(&mut self) -> Vec<AlertEvent> {
+        self.books.drain(..).flat_map(|b| b.events).collect()
+    }
+}
+
 async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut rx: mpsc::Receiver<AlertEvent>) {
     let mut throttle = Throttle::new(cfg.dedup, cfg.max_per_hour);
     let mut failing = false;
-    // Held back in quiet hours: (when, title), and how many more.
-    let mut overnight: Vec<(i64, String)> = Vec::new();
-    let mut overnight_more = 0usize;
+    // Held back in quiet hours, added up for the morning note.
+    let mut overnight = Overnight::default();
+    // Fills wait here until their autopilot has been quiet for a while.
+    let mut fills = FillBuffer::default();
+    let quiet_ms = cfg.fill_quiet.as_millis() as i64;
+    let max_ms = cfg.fill_max.as_millis() as i64;
     let mut wake = tokio::time::interval(cfg.wake);
     wake.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut closing = false;
     loop {
+        // Wake for the next book of fills that falls due.
+        let due_in = fills.next_due(quiet_ms, max_ms).map(|t| Duration::from_millis((t - now_ms()).max(0) as u64));
         let batch = tokio::select! {
             ev = rx.recv() => match ev {
                 Some(first) => gather(first, &mut rx, cfg.batch_wait).await,
-                None => break,
+                None => {
+                    closing = true;
+                    Vec::new()
+                }
             },
             _ = wake.tick() => Vec::new(),
+            _ = tokio::time::sleep(due_in.unwrap_or(Duration::from_secs(3600))), if due_in.is_some() => Vec::new(),
         };
         let now = now_ms();
         let settings = log.settings();
@@ -1082,30 +1239,36 @@ async fn run(cfg: Arc<AlertConfig>, client: reqwest::Client, log: AlertLog, mut 
         let muted = log.is_muted(now);
         let mut out: Vec<AlertEvent> = Vec::new();
         // Quiet hours are over: say what they held back, once.
-        if (!overnight.is_empty() || overnight_more > 0) && !settings.quiet_hours.contains(now) && !muted {
-            out.push(overnight_event(&overnight, overnight_more, &settings));
-            overnight.clear();
-            overnight_more = 0;
+        if !overnight.is_empty() && !settings.quiet_hours.contains(now) && !muted {
+            out.push(overnight_event(&overnight, &settings));
+            overnight = Overnight::default();
         }
-        if !batch.is_empty() {
-            let fresh: Vec<AlertEvent> = batch.into_iter().filter(|e| throttle.fresh(&e.key, now)).collect();
-            let sorted = sort_events(fresh, &settings, muted, now);
+        let mut ready: Vec<AlertEvent> = Vec::new();
+        for e in batch.into_iter().filter(|e| throttle.fresh(&e.key, now)) {
+            if FillBuffer::takes(&e) {
+                fills.add(e, now);
+            } else {
+                ready.push(e);
+            }
+        }
+        ready.extend(if closing { fills.drain() } else { fills.due(now, quiet_ms, max_ms) });
+        if !ready.is_empty() {
+            let sorted = sort_events(ready, &settings, muted, now);
             if !sorted.muted.is_empty() {
                 log.record(held_back(&cfg, &sorted.muted, now, "muted", lang));
             }
             if !sorted.quiet.is_empty() {
                 log.record(held_back(&cfg, &sorted.quiet, now, "quiet", lang));
                 for e in &sorted.quiet {
-                    if overnight.len() < OVERNIGHT_MAX {
-                        overnight.push((now, e.title_text_in(lang)));
-                    } else {
-                        overnight_more += 1;
-                    }
+                    overnight.hold(e, now, lang);
                 }
             }
             out.extend(sorted.send);
         }
         if out.is_empty() {
+            if closing {
+                break;
+            }
             continue;
         }
         if out.iter().any(AlertEvent::is_urgent) {

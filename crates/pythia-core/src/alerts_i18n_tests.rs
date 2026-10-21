@@ -101,8 +101,17 @@ fn messages() -> Vec<Msg> {
         },
         Msg::Test { on: 12, total: 14, quiet: Some(("23:00".into(), "07:00".into())), hour_pct: 2.5, day_pct: 8.0 },
         Msg::Overnight {
-            held: vec![(day, "Momentum gestartet".into())],
-            dropped: 2,
+            fills: vec![HeldFills {
+                book: "Momentum".into(),
+                rebalance: true,
+                buys: 3,
+                sells: 9,
+                bought: 567.0,
+                sold: 1_234.0,
+                fees: 2.1,
+                realized: 12.3,
+            }],
+            others: vec![HeldGroup { kind: AlertKind::BigMove, category: None, n: 2, last: format!("BTC {day}") }],
             start: "23:00".into(),
             end: "07:00".into(),
             timezone: "Europe/Berlin".into(),
@@ -238,7 +247,7 @@ fn trades_and_rebalances_in_german() {
     assert!(english_words(&html).is_empty(), "{text}");
     // The English card reads as before.
     let en = plain(&compose_in(&tg(), &evs, 0, Lang::En));
-    assert!(en.contains("Rebalance · Momentum") && en.contains("2 trades: bought $1,500.00, sold $6,000.00."), "{en}");
+    assert!(en.contains("Rebalance · Momentum") && en.contains("2 fills: bought $1,500.00, sold $6,000.00."), "{en}");
 }
 
 #[test]
@@ -246,14 +255,30 @@ fn the_small_words_of_a_post_follow_the_language() {
     let ev = AlertEvent::from_msg("k", Msg::KillByHand);
     let html = compose_in(&tg(), std::slice::from_ref(&ev), 3, Lang::De);
     assert!(html.contains("3 weitere vom Stundenlimit zurückgehalten"), "{html}");
-    // A table that had to be shortened, and cards left out.
-    let mut held: Vec<(i64, String)> = (0..40).map(|i| (1_792_072_800_000 + i * 60_000, format!("Meldung {i}"))).collect();
-    held.truncate(40);
+    // Lines that had to be left out, and cards left out.
+    let mut night = super::Overnight::default();
+    for i in 0..150 {
+        let t = TradeLine {
+            book: format!("Autopilot mit einem langen Namen {i}"),
+            buy: i % 2 == 0,
+            symbol: "BTC".into(),
+            qty: 0.01,
+            price: 60_000.0,
+            fee: 0.12,
+            realized: 0.0,
+            rebalance: true,
+            mode: "demo".into(),
+            experiment: false,
+        };
+        night.hold(&AlertEvent::trade(i.to_string(), t), 1_792_072_800_000, Lang::De);
+    }
     let s = AlertSettings::default();
-    let night = overnight_event(&held, 5, &s);
-    let html = compose_in(&tg(), &[night], 0, Lang::De);
-    assert!(html.contains("Ruhezeit vorbei") && html.contains("45 Meldungen wurden von 23:00 bis 07:00"), "{html}");
-    assert!(html.contains("+5 weitere"), "{html}");
+    let html = compose_in(&tg(), &[overnight_event(&night, &s)], 0, Lang::De);
+    assert!(html.contains("Ruhezeit vorbei") && html.contains("150 Meldungen wurden von 23:00 bis 07:00"), "{html}");
+    assert!(html.chars().count() <= 4000, "{html}");
+    assert!(card::plain(&html).lines().any(|l| l.starts_with('+') && l.ends_with(" weitere")), "{html}");
+    let last = card::plain(&html).lines().filter(|l| l.starts_with("Autopilot mit")).last().unwrap().to_string();
+    assert!(last.ends_with("Gebühren 0,12 $"), "whole lines only: {last}");
     let many: Vec<Card> = (0..40).map(|_| ev.card_in(Lang::De)).map(|c| c.summary("x".repeat(200))).collect();
     let post = card::render_post(&many, AlertFormat::Telegram, 1000);
     assert!(post.contains("weitere in der App"), "{post}");

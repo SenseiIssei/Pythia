@@ -89,6 +89,40 @@ async fn discord_posts_content_and_batches_what_arrives_together() {
 }
 
 #[tokio::test]
+async fn the_partial_fills_of_a_rebalance_go_out_as_one_card() {
+    let (url, got) = mock(204).await;
+    let mut cfg = quick(&url, AlertFormat::Discord);
+    cfg.fill_quiet = Duration::from_millis(300);
+    cfg.fill_max = Duration::from_secs(5);
+    let sink = AlertSink::spawn_with_log(cfg, awake_log());
+    let fill = |i: usize, buy: bool| TradeLine {
+        book: "Tranches".into(),
+        buy,
+        symbol: if i % 2 == 0 { "ETH".into() } else { "BTC".into() },
+        qty: 0.1,
+        price: 1_000.0,
+        fee: 0.1,
+        realized: if buy { 0.0 } else { 1.0 },
+        rebalance: true,
+        mode: "demo".into(),
+        experiment: false,
+    };
+    // Seven fills, each after the sender's own batch window: one card all the same.
+    for i in 0..7 {
+        sink.send(AlertEvent::trade(format!("f{i}"), fill(i, i < 4)));
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    assert!(got.lock().unwrap().is_empty(), "still collecting");
+    wait_for(&got, 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let got = got.lock().unwrap();
+    assert_eq!(got.len(), 1, "one post: {got:?}");
+    let c = got[0]["content"].as_str().unwrap();
+    assert!(c.starts_with("**🔁 Rebalance · Tranches**\n7 fills in 4 lines: bought $400.00, sold $300.00."), "{c}");
+    assert!(c.contains("Realised  +$3.00") && c.contains("Fees       $0.70"), "{c}");
+}
+
+#[tokio::test]
 async fn slack_posts_text() {
     let (url, got) = mock(200).await;
     let sink = AlertSink::spawn_with_log(quick(&url, AlertFormat::Slack), awake_log());

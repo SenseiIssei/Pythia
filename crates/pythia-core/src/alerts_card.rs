@@ -178,6 +178,10 @@ fn is_none_tone(t: &Tone) -> bool {
     *t == Tone::None
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 impl Row {
     pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
         Self { label: label.into(), value: value.into(), tone: Tone::None }
@@ -203,6 +207,14 @@ pub struct Card {
     pub emoji: String,
     pub title: String,
     pub summary: Option<String>,
+    /// Lines of words under the summary, one thought each (the morning note:
+    /// one line per autopilot). A post too long for its destination leaves
+    /// whole lines out from the end and says how many, never half a line.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
+    /// Lines left out to fit; said under the last line.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub more_lines: usize,
     pub rows: Vec<Row>,
     pub table: Option<Table>,
     pub footer: Option<String>,
@@ -317,6 +329,23 @@ impl Card {
         both.into_iter().flatten().collect()
     }
 
+    pub fn line(mut self, s: impl Into<String>) -> Self {
+        let s = s.into();
+        if !s.trim().is_empty() {
+            self.lines.push(s);
+        }
+        self
+    }
+
+    /// The lines of words, with the count of those left out.
+    fn word_lines(&self) -> Vec<String> {
+        let mut out = self.lines.clone();
+        if self.more_lines > 0 {
+            out.push(super::i18n::more_rows(self.lang, self.more_lines));
+        }
+        out
+    }
+
     /// The card in one destination's markup.
     pub fn render(&self, format: AlertFormat) -> String {
         let head = if self.emoji.is_empty() { self.title.clone() } else { format!("{} {}", self.emoji, self.title) };
@@ -327,6 +356,7 @@ impl Card {
                 if let Some(s) = &self.summary {
                     parts.push(esc(s));
                 }
+                parts.extend(self.word_lines().iter().map(|l| esc(l)));
                 for block in self.blocks() {
                     parts.push(format!("<pre>{}</pre>", esc(&block)));
                 }
@@ -339,6 +369,7 @@ impl Card {
                 if let Some(s) = &self.summary {
                     parts.push(s.clone());
                 }
+                parts.extend(self.word_lines());
                 for block in self.blocks() {
                     parts.push(format!("```\n{block}\n```"));
                 }
@@ -351,6 +382,7 @@ impl Card {
                 if let Some(s) = &self.summary {
                     parts.push(s.clone());
                 }
+                parts.extend(self.word_lines());
                 for block in self.blocks() {
                     parts.push(format!("```{block}```"));
                 }
@@ -405,6 +437,18 @@ pub fn render_post(cards: &[Card], format: AlertFormat, limit: usize) -> String 
             return out;
         }
     }
+    // Then whole lines of words from the end of the card with the most,
+    // down to three, the count said under them.
+    loop {
+        let longest = cards.iter_mut().filter(|c| c.lines.len() > 3).max_by_key(|c| c.lines.len());
+        let Some(c) = longest else { break };
+        c.lines.pop();
+        c.more_lines += 1;
+        out = join(&cards, 0);
+        if fits(&out) {
+            return out;
+        }
+    }
     // Then leave cards out from the end.
     let mut dropped = 0;
     while cards.len() > 1 {
@@ -415,12 +459,13 @@ pub fn render_post(cards: &[Card], format: AlertFormat, limit: usize) -> String 
             return out;
         }
     }
-    // One card still too long: its summary and footer go, then its rows.
+    // One card still too long: its footer goes, then whole lines, then its
+    // rows and table rows; its summary is cut (at a word) only at the end.
     if let Some(c) = cards.first_mut() {
         c.footer = None;
-        if let Some(s) = c.summary.take() {
-            let short: String = s.chars().take(200).collect();
-            c.summary = Some(if short.len() < s.len() { format!("{short}…") } else { short });
+        while !fits(&join(&cards, dropped)) && !cards[0].lines.is_empty() {
+            cards[0].lines.pop();
+            cards[0].more_lines += 1;
         }
         while !fits(&join(&cards, dropped)) && !cards[0].rows.is_empty() {
             cards[0].rows.pop();
@@ -433,10 +478,27 @@ pub fn render_post(cards: &[Card], format: AlertFormat, limit: usize) -> String 
         }
         if !fits(&join(&cards, dropped)) {
             cards[0].table = None;
+        }
+        if !fits(&join(&cards, dropped)) {
+            if let Some(s) = cards[0].summary.take() {
+                cards[0].summary = Some(cut_at_word(&s, 200));
+            }
+        }
+        if !fits(&join(&cards, dropped)) {
             cards[0].summary = None;
         }
     }
     join(&cards, dropped)
+}
+
+/// At most `n` characters, cut after the last whole word with an ellipsis.
+pub fn cut_at_word(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(n.saturating_sub(1)).collect();
+    let cut = head.rfind(' ').filter(|i| *i > n / 2).map_or(head.as_str(), |i| &head[..i]);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', ' ']))
 }
 
 /// A post's text without markup, for the app's list of recent alerts.
