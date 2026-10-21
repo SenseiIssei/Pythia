@@ -114,10 +114,13 @@ if [ "$engines" = true ]; then
       -v "$data/_health:/data/_health:ro" -v "$data/paper:/data/paper:ro" -v "$data/reports:/data/reports:ro" \
       pythia-server
   fi
+  # The perps demo keys (docs/KRAKEN-FUTURES-DEMO.md), root-only, when present.
+  perps_env=()
+  [ -f /etc/pythia/perps-demo.env ] && perps_env=(--env-file /etc/pythia/perps-demo.env)
   if ! exists pythia-autopilot; then
     docker run -d --name pythia-autopilot --restart unless-stopped --memory 1g \
       -p 127.0.0.1:8788:8788 -e PYTHIA_BIND=0.0.0.0:8788 \
-      --env-file /etc/pythia/alerts.env \
+      --env-file /etc/pythia/alerts.env "${perps_env[@]}" \
       -e PYTHIA_MODELS=/models -e PYTHIA_DATA=/data -e PYTHIA_STATE_FILE=/state/state.json \
       -v "$data/models:/models:ro" -v "$data/autopilot:/state" -v "$data/ai:/data/ai" \
       -v "$data/_health:/data/_health:ro" -v "$data/paper:/data/paper:ro" -v "$data/reports:/data/reports:ro" \
