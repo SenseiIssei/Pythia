@@ -90,4 +90,4 @@ Kill rule (IR below 0.1): hit.
 
 Expected dates with an actual 8-K within two sessions: 65.8 % of 20844 out-of-sample candidates of the pick's entry rule.
 
-Pool: 1,140 hand trials, 600 factory genomes and the 33 trials registered with this study (27 of them run so far, standing for all): 1,773 trials; the best noise trial sits at an annual Sharpe of about 2.26 on trading days.
+Pool: 1,140 hand trials, 600 factory genomes and the 33 trials registered with this study (33 of them run so far, standing for all): 1,773 trials; the best noise trial sits at an annual Sharpe of about 2.26 on trading days.

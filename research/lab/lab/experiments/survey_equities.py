@@ -1239,7 +1239,7 @@ def turn_of_month(ctx: Ctx | None = None) -> dict:
     sleeve = None
     if first4:
         sleeve = tom_sleeve(dates, z["x"])
-        g["5 as a 20 % sleeve, book_portfolio's rule (run only if 1 to 4 hold)"] = bool(sleeve.get("pass"))
+        g["5 as a 20 % sleeve, book_portfolio's rule (run only if 1 to 4 hold)"] = sleeve.get("pass")
     # mean by session of the window, out of sample, SPY
     from . import overnight as on
     rank, _ = on.month_position(dates)
@@ -1268,8 +1268,10 @@ def turn_of_month(ctx: Ctx | None = None) -> dict:
 
 
 def tom_sleeve(dates: np.ndarray, x: np.ndarray) -> dict:
-    """The 20 % sleeve with the crypto books, book_portfolio's rule (registered as gate 5)."""
-    return {"pass": False, "note": "not run"}
+    """The 20 % sleeve with the crypto books, book_portfolio's rule (registered as gate 5).
+    Not built: it is reached only when gates 1 to 4 hold, which they did not on 2026-10-21.
+    If they ever do, the gate stays open (None) and the study says so instead of passing."""
+    return {"pass": None, "note": "sleeve test not built; run book_portfolio with this series as the sleeve"}
 
 
 def tom_markdown(r: dict) -> str:

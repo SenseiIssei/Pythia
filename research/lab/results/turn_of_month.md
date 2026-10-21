@@ -53,4 +53,4 @@ Mean return by session of the month, out of sample (pick's ETF): -2 19.2 bps (n 
 
 Pick's Sharpe by year: 2016 -0.09, 2017 1.04, 2018 -0.23, 2019 0.81, 2020 1.47, 2021 0.48, 2022 0.72, 2023 1.74, 2024 -0.99, 2025 -0.07, 2026 3.02.
 
-Pool: 1,140 hand trials, 600 factory genomes and the 33 trials registered with this study (10 of them run so far, standing for all): 1,773 trials; the best noise trial sits at an annual Sharpe of about 2.26 on trading days.
+Pool: 1,140 hand trials, 600 factory genomes and the 33 trials registered with this study (33 of them run so far, standing for all): 1,773 trials; the best noise trial sits at an annual Sharpe of about 2.26 on trading days.

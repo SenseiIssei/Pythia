@@ -44,4 +44,4 @@ Top 50 rows show the IR against the equal weight, long/short rows the book's Sha
 
 Top 50 active return by year: 2016 1.0 %, 2017 2.0 %, 2018 4.4 %, 2019 3.7 %, 2020 -6.9 %, 2021 1.2 %, 2022 -7.5 %, 2023 11.9 %, 2024 8.2 %, 2025 -12.5 %, 2026 2.1 %.
 
-Pool: 1,140 hand trials, 600 factory genomes and the 33 trials registered with this study (16 of them run so far, standing for all): 1,773 trials; the best noise trial sits at an annual Sharpe of about 2.26 on trading days.
+Pool: 1,140 hand trials, 600 factory genomes and the 33 trials registered with this study (33 of them run so far, standing for all): 1,773 trials; the best noise trial sits at an annual Sharpe of about 2.26 on trading days.
