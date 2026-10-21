@@ -54,7 +54,7 @@ from .flow import FLOW
 BASE = "https://data.binance.vision/data/futures/um/daily/metrics/{s}/{s}-metrics-{d}.zip"
 UA = "pythia-lab um metrics collector (research, public archive)"
 RATE = 25.0
-WORKERS = 10
+WORKERS = 24          # each thread waits on the archive; the threads, not RATE, set the pace below it
 LEAD_DAYS = 100
 FIRST_DAY = date(2021, 12, 1)
 DAY_US = 86_400_000_000
