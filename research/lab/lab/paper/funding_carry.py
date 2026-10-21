@@ -187,6 +187,12 @@ def main(argv: list[str] | None = None) -> int:
     intervals = {f["symbol"]: int(f["fundingIntervalHours"]) for f in m4.get(f"{m4.FAPI}/fundingInfo")}
     mid = {s: (b + a) / 2 for s, (b, a) in quotes.items()}
     c = candidates(E, decision_day, live & set(quotes), listing)
+    if c.height < 2 * K:
+        # The decision day's perp volume or funding has not arrived (backfill behind): an
+        # empty tranche would halve the book for three days, so nothing is traded today.
+        print(f"only {c.height} listed perps scoreable on the decision day; not rebalancing on stale data",
+              file=sys.stderr)
+        return 1
 
     if st is None:
         st = {"variant": VARIANT, "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
