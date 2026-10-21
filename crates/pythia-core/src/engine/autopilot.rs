@@ -91,7 +91,9 @@
 //!
 //! An auto-pick autopilot re-runs its pick every `repickEveryHours` (24 by
 //! default, 0 = never; explicit sleeves are never re-picked) and re-weights,
-//! adds or drops lab books. A change is netted in at the next rebalance;
+//! adds or drops lab books. A change is netted in at the rebalance of the
+//! next lab signal, never by a rebalance of its own on signals already
+//! traded (a new book enters with its next signal too);
 //! a dropped book stays listed at weight zero (and stays the autopilot's),
 //! and its coins are sold down only where the other books do not want them.
 //! A live autopilot only re-weights or drops: it never adds a strategy the
@@ -4736,16 +4738,22 @@ impl Engine {
             }
             parts.push(format!("{name} {:.0} % (new)", w * 100.0));
         }
-        // The netted target changes now, so the next rebalance runs now:
-        // it trades only the difference per coin.
-        let members: Vec<String> = self.autopilots[i].sleeves.iter().map(|s| s.strategy_id.clone()).collect();
+        // The new weights wait for the next lab signal: its rebalance nets
+        // them in together with the books' new targets, so a re-pick never
+        // sends a rebalance of its own on the signals it already traded. The
+        // audit (`research/lab/results/autopilot_optimization.md`) found the
+        // re-pick's own rebalances were 40 % of the Auto-Pick's costs, half
+        // of their notional reversed within three days. A book added here
+        // waits too: it enters with its next signal, not on an old one.
         let book = self.autopilots[i].config.id.clone();
-        for sid in &members {
-            self.lab_done.remove(&super::pos_key(&book, sid));
-            self.lab_retry.remove(&super::pos_key(&book, sid));
+        let added: Vec<String> = target.keys().filter(|sid| !own.contains(*sid)).cloned().collect();
+        for sid in &added {
+            if let Some(g) = self.lab_signals.get(sid).map(|g| g.generated_ms) {
+                self.lab_done.insert(super::pos_key(&book, sid), g);
+            }
         }
         let mut msg = format!(
-            "{label} re-ran its pick with fresh evidence and changed its lab books: {}. The new weights are netted into one target per coin at the next rebalance, which trades only the difference; nothing is sold off at once.",
+            "{label} re-ran its pick with fresh evidence and changed its lab books: {}. The new weights are netted into one target per coin at the rebalance of the next lab signal, which trades only the difference; nothing is sold off at once.",
             parts.join(", ")
         );
         if portfolio {
