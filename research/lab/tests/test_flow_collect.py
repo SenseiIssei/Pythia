@@ -152,3 +152,31 @@ def test_run_survives_one_failing_source(tmp_path, monkeypatch):
     res = flow.run({"fx", "stables"}, dry=False, fetch_for=fetch_for)
     assert "fx" in res["errors"] and "stables" not in res["errors"]
     assert (tmp_path / "stables.parquet").exists()
+
+
+def test_upbit_all_every_krw_market_continues_per_market(tmp_path, monkeypatch):
+    monkeypatch.setattr(flow, "FLOW", tmp_path)
+    today = flow.today()
+    asked = []
+
+    def fetch(url):
+        if "/market/all" in url:
+            return [{"market": "KRW-BTC", "market_event": {"warning": False, "caution": {"PRICE_FLUCTUATIONS": True}}},
+                    {"market": "KRW-XRP", "market_event": {"warning": True, "caution": {}}},
+                    {"market": "BTC-XRP", "market_event": {"warning": False, "caution": {}}}]
+        p = q(url)
+        asked.append(p["market"])
+        to = datetime.fromisoformat(p["to"].replace("Z", "")).date() if "to" in p else today + timedelta(days=1)
+        days = [today - timedelta(days=i) for i in range(0, 30)]
+        return [{"candle_date_time_utc": f"{d.isoformat()}T00:00:00", "opening_price": 1, "high_price": 2,
+                 "low_price": 0.5, "trade_price": 1.5, "candle_acc_trade_price": 9} for d in days if d < to][:200]
+
+    res = flow.run({"upbit_all"}, dry=False, fetch_for=lambda src: fetch)
+    assert not res["errors"]
+    mk = flow.read("upbit_markets")
+    assert sorted(mk["market"]) == ["KRW-BTC", "KRW-XRP"]
+    assert mk.filter(mk["market"] == "KRW-BTC")["caution"].item() == "PRICE_FLUCTUATIONS"
+    up = flow.read("upbit_krw_1d")
+    assert set(up["market"]) == {"KRW-BTC", "KRW-XRP"} and up.height == 2 * 29
+    assert up["day_us"].max() == flow.us_of(today - timedelta(days=1))
+    assert sorted(set(asked)) == ["KRW-BTC", "KRW-XRP"]

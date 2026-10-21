@@ -17,6 +17,14 @@ place they show up:
                      average, cash otherwise: the gate the books lean on, held
                      alone (proposed by the gated_btc study; below plain BTC on
                      Sharpe from 2024). results/gated_btc.md
+  tsmom_tranches_lowmax  tsmom_tranches without the coins in the worst third by
+                     28-day MAX among the 50 most liquid (the xs_factors study's
+                     only pass; its improvement failed deflation).
+                     results/xs_factors.md
+  tsmom_tranches_lowkr  tsmom_tranches without the coins in the worst third by
+                     their own Korean premium (kr_premium_xs; improvement failed
+                     deflation, Upbit history is survivors only).
+                     results/kr_premium_xs.md
 
 What makes them experimental, and what the engine does with it:
 
@@ -86,7 +94,29 @@ BOOKS: dict[str, dict] = {
         "would_change": "a forward year in which its drawdown stays at most two thirds of BTC's over the same "
                         "days and its Sharpe is not below BTC's",
     },
+    "tsmom_tranches_lowmax": {
+        "variant": f"{LABEL} · tsmom_tranches without the worst third by 28-day MAX among the 50 most liquid coins "
+                   "· seven weekly tranches · BTC regime",
+        "study": "xs_factors",
+        "row": ("tsmom_tranches", "max filter"),
+        "why_failed": "the improvement over tsmom_tranches has a deflated p of 0.01 over the 94 trials of its "
+                      "registration (0.95 needed); 1 of 18 factor and book picks passed, about what chance gives",
+        "would_change": "90 forward days in which it beats the tsmom_tranches paper book over the same days on "
+                        "Sharpe with a drawdown no larger",
+    },
+    "tsmom_tranches_lowkr": {
+        "variant": f"{LABEL} · tsmom_tranches without the worst third by own Korean premium (Upbit vs Binance, "
+                   "minus BTC's) · seven weekly tranches · BTC regime",
+        "study": "kr_premium_xs",
+        "row": ("tsmom_tranches", "KR premium filter"),
+        "why_failed": "the improvement over tsmom_tranches has a deflated p of 0.01 over the 94 trials of its "
+                      "registration (0.95 needed), and Upbit's history holds only the markets it lists today, so "
+                      "the backtest is not survivorship-free on the Upbit side",
+        "would_change": "90 forward days in which it beats the tsmom_tranches paper book over the same days on "
+                        "Sharpe with a drawdown no larger, on Upbit data recorded forward",
+    },
 }
+FILTER_BOOKS = ("tsmom_tranches_lowmax", "tsmom_tranches_lowkr")
 
 
 def is_experimental(name: str) -> bool:
@@ -211,6 +241,37 @@ def _gated_btc_evidence(b: dict) -> dict | None:
     }
 
 
+def _factor_evidence(b: dict) -> dict | None:
+    """The pick's row in results/xs_factors.md or results/kr_premium_xs.md (the study that proposed the book)."""
+    book, variant = b["row"]
+    row = next((r for r in _rows(b["study"]) if r.get("book") == book and r.get("variant") == variant
+                and "deflated_diff" in r), None)
+    if row is None:
+        return None
+    cagr, dd = _num(row.get("cagr_pct")), _num(row.get("dd_pct"))
+    return {
+        "is_sharpe": _num(row.get("is")),
+        "oos_sharpe": _num(row.get("oos")),
+        "book_oos_sharpe": _num(row.get("book_oos")),
+        "sharpe_2x_cost": _num(row.get("oos70")),
+        "oos_cagr": cagr / 100 if cagr is not None else None,
+        "oos_max_dd": dd / 100 if dd is not None else None,
+        "deflated_p": _num(row.get("deflated_pool")),
+        "deflated_p_improvement": _num(row.get("deflated_diff")),
+        "bootstrap_90_improvement": [_num(row.get("band_lo")), _num(row.get("band_hi"))],
+        "late_fill_sharpe": _num(row.get("late")),
+        "oos_sharpe_survivorship_free": _num(row.get("twin")),
+        "minus_gated_btc_sharpe": _num(row.get("dg")),
+        "variants_tried": 1836,
+        "cost_note": "Sharpe at 35 bps per unit of turnover (Alpaca taker 25 bps plus about 10 bps slippage), "
+                     "coins Alpaca does not list held as cash; sharpe_2x_cost at 70 bps",
+        "regime_filter": True,
+        "caveat": "Experiment: the improvement failed deflation, and only tsmom_tranches passed (2 of 24 "
+                  "filter picks in the registration), so a lucky pick is the plain reading; the forward record "
+                  "decides.",
+    }
+
+
 def evidence(name: str) -> dict:
     """The study's numbers for an experimental book, as the engine reads them, with
     the experiment flag, the verdict and why it failed. `missing` when the study's
@@ -220,6 +281,8 @@ def evidence(name: str) -> dict:
         ev = _trend4h_evidence(b)
     elif name == "btc_gated":
         ev = _gated_btc_evidence(b)
+    elif name in FILTER_BOOKS:
+        ev = _factor_evidence(b)
     else:
         ev = _memes_evidence(name, b)
     base = {"report": b["study"], "experimental": True, "experiment": LABEL, "why_failed": b["why_failed"],
