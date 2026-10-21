@@ -31,10 +31,9 @@ or monetised through personal data), this document has to be revisited first;
 the reporting obligations of Article 14 apply to manufacturers since
 11 September 2026 and the remaining obligations from 11 December 2027.
 
-**Open item for the maintainer:** the repository has no `LICENSE` file yet.
-Open source status in the CRA's sense (Article 3(48)) requires a licence that
-allows free access, use, modification and redistribution. Choosing and adding
-one is the owner's decision.
+Pythia is published under the MIT licence (`LICENSE`), which allows free
+access, use, modification and redistribution, as the CRA's definition of free
+and open-source software requires (Article 3(48)).
 
 ## Essential requirements (Annex I, Part I)
 

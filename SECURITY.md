@@ -7,7 +7,7 @@ reports are welcome and are treated with priority.
 
 | Version | Supported |
 | --- | --- |
-| 0.4.x (the latest release and the `main` branch) | yes |
+| 0.5.x (the latest release) | yes |
 | older releases | no, please update |
 
 Security fixes land on the newest release line only. There is no long-term
