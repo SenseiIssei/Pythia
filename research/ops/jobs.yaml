@@ -162,6 +162,19 @@ jobs:
     lock_wait: 2h
     enabled: false
 
+  # The SPY sleeve of the Crypto + SPY forward test (results/equity_sleeve_prereg.md):
+  # a lab book of US shares that is always 100 % SPY. It runs every weekday and
+  # publishes a new signal only on the first run in a calendar month, so the
+  # engine brings the sleeve back to its share once a month. Explicit only: no
+  # auto pick takes it, only an autopilot that names lab:spy_hold runs it.
+  - name: paper-spy-hold
+    description: SPY bought and held, the monthly signal of the forward test's equity sleeve
+    schedule: "20 14 * * 1-5"
+    command: python -m lab.paper.spy_hold
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    grace: 30m
+
   - name: paper-m4
     description: M4 shadow paper book, market-neutral on perps
     schedule: "45 4 * * *"
@@ -172,6 +185,45 @@ jobs:
     lock: heavy
     lock_wait: 2h
     replaces: pythia-paper-m4
+
+  # M4's registered pick reg7n (results/m4_residual.md), an experiment (passes
+  # the residual test, fails deflation), on the liquid perps Kraken Futures
+  # lists. The engine's perps demo autopilot ("M4 perps (demo)") trades this
+  # signal; it is experimental and autopilot-only, never live.
+  - name: paper-m4-perps
+    description: M4 reg7n perps book on the coins Kraken Futures lists, and its experimental engine signal (autopilot only)
+    schedule: "15 5 * * *"
+    command: python -m lab.paper.m4_perps
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 4, memory: 8g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+
+  # Funding carry on perps (results/funding_carry.md), an experiment (passes its
+  # registered gates and the residual after low vol and BTC, fails deflation),
+  # on the liquid perps Kraken Futures lists. Its signal is
+  # experimental and autopilot-only: no autopilot runs it unless one names
+  # lab:funding_carry.
+  - name: paper-funding-carry
+    description: EXPERIMENT funding carry perps book (long the lowest, short the highest 7-day funding) and its experimental engine signal (autopilot only)
+    schedule: "45 5 * * *"
+    command: python -m lab.paper.funding_carry
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 4, memory: 8g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+
+  # Kraken Futures hourly funding and mark prices (public, no key), kept beyond the
+  # endpoint's one-year window for kraken_funding_gap (results/kraken_funding_gap.md).
+  # Data only.
+  - name: kraken-futures-collect
+    description: Kraken Futures funding history and hourly marks for the Alpaca coins (data only)
+    schedule: "5 6 * * *"
+    command: python -m lab.collect.kraken_futures
+    resources: {cpus: 1, memory: 1g}
+    timeout: 30m
 
   - name: paper-ls
     description: market-neutral M2 paper book v1

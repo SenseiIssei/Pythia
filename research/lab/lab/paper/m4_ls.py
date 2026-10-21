@@ -125,11 +125,13 @@ def live_panel(decision_day: int) -> tuple[pl.DataFrame, dict]:
     return E, info
 
 
-def model_for(E: pl.DataFrame, decision_day: int):
+def model_for(E: pl.DataFrame, decision_day: int, cfg: dict | None = None, name: str = NAME):
     """The cached model if it is younger than RETRAIN_DAYS, else one trained on every
-    labelled row (labels known by the decision day), with the walk-forward's parameters."""
-    m = CONFIG["model"]
-    path, meta_path = CACHE / f"m4_ls_{m}.txt", CACHE / f"m4_ls_{m}.json"
+    labelled row (labels known by the decision day), with the walk-forward's parameters.
+    cfg and name default to this book's; another book passes its own so its cache
+    files (<name>_<model>.txt/.json) never collide with these."""
+    m = (cfg or CONFIG)["model"]
+    path, meta_path = CACHE / f"{name}_{m}.txt", CACHE / f"{name}_{m}.json"
     if path.exists() and meta_path.exists():
         meta = json.loads(meta_path.read_text())
         if meta.get("features") == xs.FEATURES and decision_day - meta["decision_day"] < RETRAIN_DAYS * DAY_US:
@@ -159,13 +161,13 @@ def model_for(E: pl.DataFrame, decision_day: int):
 
 # ---------------------------------------------------------------- book
 
-def candidates(E: pl.DataFrame, booster, decision_day: int, live: set[str]) -> pl.DataFrame:
+def candidates(E: pl.DataFrame, booster, decision_day: int, live: set[str], cfg: dict | None = None) -> pl.DataFrame:
     """Yesterday's scores on the n_liquid most liquid perps that trade right now, best first."""
     today = E.filter(pl.col("day") == decision_day)
     score = booster.predict(today.select(xs.FEATURES).to_numpy().astype(np.float32))
     return (today.with_columns(score=pl.Series(score))
             .filter(pl.col("perp").is_in(sorted(live)) & pl.col("perp_adv28").is_not_null())
-            .sort("perp_adv28", descending=True).head(CONFIG["n_liquid"])
+            .sort("perp_adv28", descending=True).head((cfg or CONFIG)["n_liquid"])
             .sort("score", descending=True)
             .select("symbol", "perp", "score", "perp_adv28", "fund7_raw"))
 
@@ -182,9 +184,9 @@ def new_tranche(c: pl.DataFrame) -> dict[str, float]:
     return out
 
 
-def buffer_target(c: pl.DataFrame, w: dict[str, float]) -> dict[str, float]:
+def buffer_target(c: pl.DataFrame, w: dict[str, float], cfg: dict | None = None) -> dict[str, float]:
     """xs_daily.book_buffer for one day, on the drifted weights w."""
-    k, frac = CONFIG["k"], CONFIG["exit_frac"]
+    k, frac = (cfg or CONFIG)["k"], (cfg or CONFIG)["exit_frac"]
     order = c["perp"].to_list()
     if len(order) < 2 * k:
         return {}

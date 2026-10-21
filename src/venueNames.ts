@@ -9,6 +9,8 @@ const NAMES: Record<string, string> = {
   coinbase: "Coinbase",
   alpaca: "Alpaca",
   polymarket: "Polymarket",
+  kraken_futures: "Kraken Futures",
+  bybit_perps: "Bybit perps",
 };
 
 /** "kraken" becomes "Kraken", "okx" becomes "OKX". An unknown id is shown as it is. */
@@ -17,7 +19,7 @@ export function exchangeName(id: string | undefined | null): string {
   return NAMES[id.trim().toLowerCase()] ?? id;
 }
 
-type DemoLive = Pick<LiveStatus, "demoVenues" | "demoExchange" | "demoRealPrices">;
+type DemoLive = Pick<LiveStatus, "demoVenues" | "demoExchange" | "demoRealPrices"> & Partial<Pick<LiveStatus, "perps">>;
 
 /**
  * Crypto demo orders go to an exchange whose demo account has its own
@@ -44,6 +46,8 @@ export function autopilotVenue(
   live: DemoLive,
   cryptoCostVenue: CostVenue,
 ): CostVenue {
+  // Perps follow the perps venue configured on the server, in any mode.
+  if (assetClass === "perps") return live.perps?.exchange ?? "kraken_futures";
   if (assetClass !== "crypto") return assetClass === "polymarket" ? "polymarket" : "alpaca";
   if (mode === "demo" && (live.demoVenues ?? []).includes("crypto") && live.demoExchange) return live.demoExchange;
   return cryptoCostVenue;

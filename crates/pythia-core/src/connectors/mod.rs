@@ -25,6 +25,7 @@ pub mod alpaca;
 pub mod alpaca_crypto;
 pub mod cex;
 pub mod paper;
+pub mod perps;
 pub mod polymarket;
 pub mod sign;
 
@@ -37,6 +38,11 @@ pub enum Venue {
     Polymarket,
     Crypto,
     Alpaca,
+    /// Perpetual futures (USD-margined), the only venue where a short can be
+    /// opened. Demo and paper only: a live (real-money) perps order is
+    /// refused everywhere it could be built (see [`perps`] and
+    /// `docs/KRAKEN-FUTURES-DEMO.md`).
+    Perps,
 }
 
 impl Venue {
@@ -46,6 +52,7 @@ impl Venue {
             Venue::Polymarket => "polymarket",
             Venue::Crypto => "crypto",
             Venue::Alpaca => "alpaca",
+            Venue::Perps => "perps",
         }
     }
 }

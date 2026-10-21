@@ -25,6 +25,9 @@ pub mod indicators;
 pub mod maker;
 #[cfg(test)]
 mod maker_tests;
+pub mod perps;
+#[cfg(test)]
+mod perps_tests;
 pub mod risk;
 #[cfg(test)]
 mod risk_engine_tests;
@@ -207,6 +210,14 @@ pub struct PositionView {
     /// same demo environment.
     #[serde(default)]
     pub demo: bool,
+    /// `long` or `short` (the sign of `qty`). Only perps and paper
+    /// strategies can hold a short.
+    #[serde(default)]
+    pub side: String,
+    /// Perps only: funding booked on this position so far, in dollars
+    /// (negative = paid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,6 +649,11 @@ pub struct LiveStatus {
     /// Maker execution statistics per route over 7 and 30 days.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub maker_stats: Vec<maker::MakerRouteStats>,
+    /// Perpetual futures: the venue, the demo account's margin, funding
+    /// booked and the last reconciliation ([`perps`]). Absent when no perps
+    /// venue is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perps: Option<perps::PerpsStatus>,
 }
 
 /// Why an order is being routed — and therefore what is allowed to happen to it
@@ -1203,6 +1219,10 @@ pub struct Persisted {
     /// from before they existed gets the defaults.
     #[serde(default)]
     pub alert_settings: crate::alerts::AlertSettings,
+    /// Perps markets in play and the funding booked per position
+    /// ([`perps`]). A save from before perps existed has none.
+    #[serde(default)]
+    pub perps: perps::PerpsSaved,
 }
 
 // ── internal engine state ──────────────────────────────────────────────────
@@ -1272,6 +1292,14 @@ fn is_event(kind: JournalKind, message: &str) -> bool {
     }
 }
 const LAB_RETRY_MAX: u32 = 6;
+/// A lab rebalance leaves a difference under this share of its capital alone
+/// (`lab::rebalance`'s band). A study of wider resize bands
+/// (`research/lab/results/autopilot_optimization.md`, part 2) found none that
+/// cut the books' cost by a quarter without moving their returns, so it stays.
+const LAB_BAND: f64 = 0.002;
+/// And never sends an order under this many dollars, nor under the route's
+/// venue minimum when that is higher (Alpaca crypto: $10).
+const LAB_MIN_ORDER_USD: f64 = 5.0;
 
 pub struct Engine {
     markets: Vec<Market>,
@@ -1483,6 +1511,9 @@ pub struct Engine {
     feed_noted: HashSet<String>,
     /// Capital sleeves that trade on their own (see [`autopilot`]).
     autopilots: Vec<autopilot::Autopilot>,
+    /// Perpetual futures: contracts, marks, funding, the demo account
+    /// ([`perps`]).
+    perps: perps::PerpsState,
     tick_count: u64,
     seq: u64,
     /// Random per process, part of every client order id sent to a venue. The
@@ -1597,6 +1628,7 @@ impl Engine {
             feeds: feeds::FeedHealth::default(),
             feed_noted: HashSet::new(),
             autopilots: Vec::new(),
+            perps: perps::PerpsState::default(),
             tick_count: 0,
             seq: 0,
             boot_tag: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
@@ -3160,7 +3192,9 @@ impl Engine {
     /// (the venue refuses a hair more as "insufficient balance"). The
     /// connector clamps again to what the account itself reports.
     fn venue_sell_qty(&self, book: &str, m: &Market, side: Side, qty: f64, demo: bool) -> f64 {
-        if side != Side::Sell {
+        // A perps sell past what is held opens a short: the one venue where
+        // that is allowed.
+        if side != Side::Sell || m.venue == Venue::Perps {
             return qty;
         }
         let held = self
@@ -3392,6 +3426,9 @@ impl Engine {
     /// The cost venue for a market: its own venue, or for crypto the exchange
     /// the host says executes.
     fn cost_venue(&self, m: &Market) -> CostVenue {
+        if m.venue == Venue::Perps {
+            return self.perp_cost_venue();
+        }
         CostVenue::for_venue(m.venue, Some(self.crypto_venue))
     }
 
@@ -3523,6 +3560,7 @@ impl Engine {
             self.ref_prices.insert(key.clone(), reference);
         }
         let existed = self.positions.contains_key(&key);
+        let was_qty = self.positions.get(&key).map(|p| p.qty).unwrap_or(0.0);
         match self.positions.get_mut(&key) {
             None => {
                 self.positions.insert(
@@ -3573,6 +3611,10 @@ impl Engine {
 
         if realized != 0.0 {
             self.realized_pnl += realized;
+        }
+        if m.venue == Venue::Perps {
+            let now_qty = self.positions.get(&key).map(|p| p.qty);
+            self.perp_note_fill(&key, was_qty, now_qty);
         }
         self.cash -= signed * fill_price + fee;
         // The autopilot whose book this is books it.
@@ -3718,6 +3760,25 @@ impl Engine {
             self.refuse_mixed(strat_idx, m, &why);
             return;
         }
+        // Perps: never live, sized to the contract step, and an order that
+        // grows a position must fit the margin checks (see `perps`).
+        let qty = if m.venue == Venue::Perps {
+            let sid = self.strategies[strat_idx].id.clone();
+            if let Some(why) = self.perp_order_block(book, m, side, qty, price, intent) {
+                self.refuse_perp_order(book, &sid, m, side, qty, &why, intent == RouteIntent::Demo);
+                if intent == RouteIntent::Demo {
+                    self.live_backoff_until.insert(m.id.clone(), self.now() + LIVE_REJECT_BACKOFF_MS);
+                }
+                return;
+            }
+            let q = self.perp_round_qty(m, qty);
+            if q <= 0.0 {
+                return;
+            }
+            q
+        } else {
+            qty
+        };
         match intent {
             RouteIntent::Paper => return self.fill_in(book, strat_idx, m, side, qty, price),
             RouteIntent::Live if !routable => return self.fill_in(book, strat_idx, m, side, qty, price),
@@ -3825,11 +3886,18 @@ impl Engine {
         // there is invisible to the broker.
         // A demo position is reduced at the demo venue, a real one at the
         // real venue; a paper one is invisible to both.
+        // On perps an order that goes through zero (long to short) is not
+        // reduce-only: the venue would cut it at zero.
         let reduces = intent == RouteIntent::LiveExit
             || self
                 .positions
                 .get(&key)
-                .map(|p| (if demo { p.demo } else { p.live }) && p.qty != 0.0 && (p.qty > 0.0) == (side == Side::Sell))
+                .map(|p| {
+                    (if demo { p.demo } else { p.live })
+                        && p.qty != 0.0
+                        && (p.qty > 0.0) == (side == Side::Sell)
+                        && (m.venue != Venue::Perps || qty <= p.qty.abs() + 1e-12)
+                })
                 .unwrap_or(false);
         // Demo orders face the same session gate: an equity order queued
         // overnight is a gamble on the gap whether the money is real or not,
@@ -4103,6 +4171,9 @@ impl Engine {
 
     /// Why a demo order on `m` cannot be sent right now, or `None`.
     fn demo_block_reason(&self, m: &Market) -> Option<String> {
+        if m.venue == Venue::Perps {
+            return self.perp_demo_block();
+        }
         if m.venue == Venue::Polymarket {
             return Some("Polymarket has no demo environment".into());
         }
@@ -4183,6 +4254,7 @@ impl Engine {
     fn demo_cost_venue(&self, m: &Market) -> CostVenue {
         match m.venue {
             Venue::Crypto => self.crypto_demo_venue.unwrap_or(self.crypto_venue),
+            Venue::Perps => self.perp_cost_venue(),
             v => CostVenue::for_venue(v, None),
         }
     }
@@ -4443,6 +4515,9 @@ impl Engine {
         let Some(m) = self.markets.iter().find(|m| m.id == market_id) else {
             return Some(format!("unknown market {market_id}"));
         };
+        if m.venue == Venue::Perps {
+            return Some(crate::connectors::perps::PERPS_LIVE_REFUSED.into());
+        }
         if !self.live.armed {
             return Some("live execution is disarmed: arm it first".into());
         }
@@ -4621,7 +4696,17 @@ impl Engine {
     /// action; disarming stops new live orders (in-flight ones still reconcile).
     pub fn set_live(&mut self, cfg: LiveConfig) {
         let was = self.live.armed;
-        let cfg = cfg.clamped();
+        let mut cfg = cfg.clamped();
+        // Perps never route live: the venue is dropped from the arm, said once.
+        if cfg.venues.contains(&Venue::Perps) {
+            cfg.venues.retain(|v| *v != Venue::Perps);
+            self.log(
+                JournalKind::Risk,
+                format!("Perps left out of the live arm. {}", crate::connectors::perps::PERPS_LIVE_REFUSED),
+                None,
+                None,
+            );
+        }
         let dest = if cfg.dry_run {
             "dry-run (nothing sent)".to_string()
         } else if cfg.paper {
@@ -5445,12 +5530,13 @@ impl Engine {
             demo_not_listed: self.demo_not_listed_symbols(),
             demo_positions: self.positions.values().filter(|p| p.demo && p.qty.abs() > 1e-9).count(),
             demo_reconcile: self.demo_reconcile_view(),
-            demo_paused: [Venue::Crypto, Venue::Alpaca]
+            demo_paused: [Venue::Crypto, Venue::Alpaca, Venue::Perps]
                 .into_iter()
                 .filter_map(|v| self.route_paused_until(v, true).map(|t| (v, t)))
                 .collect(),
             maker_routes: self.maker_routes.clone(),
             maker_stats: self.maker_stats(),
+            perps: self.perps_status(),
         }
     }
 
@@ -5611,10 +5697,22 @@ impl Engine {
     pub fn apply_lab_signal(&mut self, sig: crate::lab::LabSignal) {
         let id = format!("lab:{}", sig.strategy);
         // An experiment (failed the lab's bar) is autopilot-only whatever its signal says.
-        let idle = self.lab_books_idle || sig.autopilot_only || sig.is_experimental();
+        let idle = self.lab_books_idle || sig.autopilot_only || sig.is_experimental() || sig.is_explicit_only();
+        let venue_class = Self::lab_class(&sig);
+        if sig.is_perp() {
+            // Perps markets exist only for coins in play: every coin this
+            // book names gets one (once the venue's contract list is read).
+            let coins: Vec<String> = sig.weights.keys().cloned().collect();
+            for c in coins {
+                self.ensure_perp_market(&c);
+            }
+            let universe: Vec<String> = self.lab_markets_of(Venue::Perps).into_iter().map(|m| m.id).collect();
+            if let Some(s) = self.strategies.iter_mut().find(|s| s.id == id) {
+                s.universe = universe;
+            }
+        }
         if !self.strategies.iter().any(|s| s.id == id) {
-            let venue_class = if sig.is_us_equity() { Venue::Alpaca } else { Venue::Crypto };
-            let universe = self.lab_book_markets(sig.is_us_equity()).into_iter().map(|m| m.id).collect();
+            let universe = self.lab_markets_of(venue_class).into_iter().map(|m| m.id).collect();
             self.strategies.push(StrategyConfig {
                 id: id.clone(),
                 name: format!("Lab · {}", sig.variant),
@@ -5664,13 +5762,20 @@ impl Engine {
     /// Whether this lab book trades only inside an autopilot.
     pub fn lab_book_autopilot_only(&self, sid: &str) -> bool {
         let lab = self.strategies.iter().any(|s| s.id == sid && s.kind == StrategyKind::LabTargets);
-        lab && (self.lab_books_idle || self.lab_signals.get(sid).is_some_and(|s| s.autopilot_only || s.is_experimental()))
+        lab && (self.lab_books_idle
+            || self.lab_signals.get(sid).is_some_and(|s| s.autopilot_only || s.is_experimental() || s.is_explicit_only()))
     }
 
     /// Whether this lab book is an experiment: a rule that failed the lab's
     /// bar, which the auto pick never picks and a live autopilot never runs.
     pub fn lab_book_experimental(&self, sid: &str) -> bool {
         self.lab_signals.get(sid).is_some_and(|s| s.is_experimental())
+    }
+
+    /// Whether this lab book runs only where an autopilot names it as a
+    /// sleeve: the auto pick and a portfolio's allocator never pick it.
+    pub fn lab_book_explicit_only(&self, sid: &str) -> bool {
+        self.lab_signals.get(sid).is_some_and(|s| s.is_explicit_only())
     }
 
     /// Pause every autopilot-only lab book (or just `only`) that no active
@@ -5711,17 +5816,32 @@ impl Engine {
     /// The markets a lab book can hold: every crypto market for a coin book,
     /// every Alpaca equity market for a book of US shares and ETFs.
     pub(crate) fn lab_book_markets(&self, us_equity: bool) -> Vec<Market> {
+        self.lab_markets_of(if us_equity { Venue::Alpaca } else { Venue::Crypto })
+    }
+
+    /// The markets a lab book of this asset class can hold: Alpaca equities,
+    /// every crypto market, or every perps market the engine carries.
+    pub(crate) fn lab_markets_of(&self, class: Venue) -> Vec<Market> {
         self.markets
             .iter()
-            .filter(|m| {
-                if us_equity {
-                    m.venue == Venue::Alpaca && m.kind == MarketKind::Equity
-                } else {
-                    m.venue == Venue::Crypto
-                }
+            .filter(|m| match class {
+                Venue::Alpaca => m.venue == Venue::Alpaca && m.kind == MarketKind::Equity,
+                Venue::Perps => m.venue == Venue::Perps,
+                _ => m.venue == Venue::Crypto,
             })
             .cloned()
             .collect()
+    }
+
+    /// The asset class a lab signal trades.
+    pub(crate) fn lab_class(sig: &crate::lab::LabSignal) -> Venue {
+        if sig.is_us_equity() {
+            Venue::Alpaca
+        } else if sig.is_perp() {
+            Venue::Perps
+        } else {
+            Venue::Crypto
+        }
     }
 
     /// Why a lab book of US shares waits instead of trading now, or `None`.
@@ -5840,11 +5960,18 @@ impl Engine {
                 _ => 1,
             };
             let equity = sig.is_us_equity();
+            let perp = sig.is_perp();
             // Only real prices: a rebalance against the simulator is no evidence of anything.
-            let book = self.lab_book_markets(equity);
-            if !book.iter().any(|m| self.real_ids.contains(&m.id)) {
+            let book = self.lab_markets_of(Self::lab_class(&sig));
+            if !book.iter().any(|m| self.real_ids.contains(&m.id) && m.price > 0.0) {
                 if self.lab_notes.insert(format!("noprices:{retry_key}")) {
-                    let what = if equity { "US share prices from Alpaca" } else { "crypto prices" };
+                    let what = if equity {
+                        "US share prices from Alpaca"
+                    } else if perp {
+                        "perps marks from the perps venue"
+                    } else {
+                        "crypto prices"
+                    };
                     self.log(JournalKind::System, format!("Lab book waits for real {what}"), Some(lead.clone()), None);
                 }
                 continue;
@@ -5883,7 +6010,7 @@ impl Engine {
                     None if demo_route && !self.demo_lists(m) => unlisted.push(m.symbol.clone()),
                     // A market this autopilot gave to another of its sleeves.
                     None if !self.autopilot_entry_allowed(&owner, &lead, &m.id) => owned_elsewhere.push(m.symbol.clone()),
-                    _ if self.real_ids.contains(&m.id) => {
+                    _ if self.real_ids.contains(&m.id) && m.price > 0.0 => {
                         prices.insert(m.id.clone(), m.price);
                     }
                     _ => {}
@@ -5912,10 +6039,37 @@ impl Engine {
                 .collect();
             let books: Vec<(String, f64, &BTreeMap<String, f64>)> =
                 sigs.iter().map(|(m, scale, g)| (m.clone(), if members.len() == 1 { 1.0 } else { *scale }, &g.weights)).collect();
-            let (weights, coin_shares) = autopilot::net_lab_targets(&books);
+            let (weights, coin_shares) =
+                if perp { autopilot::net_lab_targets_signed(&books) } else { autopilot::net_lab_targets(&books) };
             let has_market = |key: &str| -> Option<String> { Some(sig.market_id(key)) };
-            let (orders, mut untradable) =
-                crate::lab::rebalance(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+            // The smallest order the route's venue takes. Alpaca refuses a
+            // crypto order under $10 (403, "cost basis must be >= minimal
+            // amount of order 10"): such an order is named, never sent, so a
+            // small book does not collect refusals and retries every day.
+            // A perps book holds shorts: its weights and holdings are signed.
+            let (orders, mut untradable, below_min, min_order) = if perp {
+                let (o, u) = crate::lab::rebalance_signed(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+                (o, u, Vec::<String>::new(), 5.0)
+            } else {
+                let route = self.autopilot_route(&owner).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state));
+                let min_order = book
+                    .iter()
+                    .filter(|m| prices.contains_key(&m.id))
+                    .map(|m| match route {
+                        RouteIntent::Demo => costs::model_for(self.demo_cost_venue(m), &m.symbol).min_notional,
+                        RouteIntent::Live | RouteIntent::LiveExit => self.cost_model(m).min_notional,
+                        _ => 0.0,
+                    })
+                    .fold(LAB_MIN_ORDER_USD, f64::max);
+                let plan = crate::lab::rebalance_plan(&weights, has_market, &holdings, &prices, capital, min_order, LAB_BAND);
+                let mut below: Vec<String> = plan
+                    .below_min
+                    .iter()
+                    .filter_map(|(id, n)| book.iter().find(|m| &m.id == id).map(|m| format!("{} (${n:.2})", m.symbol)))
+                    .collect();
+                below.sort();
+                (plan.orders, plan.untradable, below, min_order)
+            };
             // A coin held by another strategy is reported as that, not as missing.
             untradable.retain(|c| !owned_elsewhere.contains(&sig.market_symbol(c)));
             // An unlisted coin the lab wants is named once, as that.
@@ -5994,7 +6148,8 @@ impl Engine {
                 let targets: BTreeMap<String, f64> =
                     targets.into_iter().map(|(m, v)| (m, if equity > 0.0 { v / equity } else { 0.0 })).collect();
                 let wanted: Vec<String> = weights.keys().map(|c| sig.market_symbol(c)).collect();
-                let cash_note = if targets.values().sum::<f64>() > 1e-9 {
+                // Gross, not net: a market-neutral perps book nets to zero.
+                let cash_note = if targets.values().map(|v| v.abs()).sum::<f64>() > 1e-9 {
                     None
                 } else if wanted.is_empty() {
                     Some(if members.iter().filter(|m| m.1 > 0.0).count() > 1 {
@@ -6054,18 +6209,21 @@ impl Engine {
                 .filter(|m| m.1 > 0.0)
                 .filter_map(|(m, w)| self.strategies.iter().find(|s| &s.id == m).map(|s| (s.name.clone(), *w)))
                 .collect();
+            let invested = if perp {
+                let long: f64 = weights.values().filter(|w| **w > 0.0).sum();
+                let short: f64 = -weights.values().filter(|w| **w < 0.0).sum::<f64>();
+                format!("{:.0} % long and {:.0} % short", long * 100.0, short * 100.0)
+            } else {
+                format!("{:.0} %", weights.values().sum::<f64>() * 100.0)
+            };
             let mut note = if netted.len() > 1 {
                 format!(
-                    "Rebalanced toward the netted weights of {} lab books ({}) of {day}: {n} orders, {:.0} % of the lab share invested",
+                    "Rebalanced toward the netted weights of {} lab books ({}) of {day}: {n} orders, {invested} of the lab share invested",
                     netted.len(),
                     netted.iter().map(|(n, w)| format!("{n} {:.0} %", w * 100.0)).collect::<Vec<_>>().join(", "),
-                    weights.values().sum::<f64>() * 100.0
                 )
             } else {
-                format!(
-                    "Rebalanced toward the lab's weights of {day}: {n} orders, {:.0} % of the book invested",
-                    weights.values().sum::<f64>() * 100.0
-                )
+                format!("Rebalanced toward the lab's weights of {day}: {n} orders, {invested} of the book invested")
             };
             if refused > 0 {
                 note.push_str(&format!("; {refused} still refused after {attempt} attempts, left until the next signal"));
@@ -6078,6 +6236,12 @@ impl Engine {
             }
             if !untradable.is_empty() {
                 note.push_str(&format!("; no market here for {}", untradable.join(", ")));
+            }
+            if !below_min.is_empty() {
+                note.push_str(&format!(
+                    "; under the venue's minimum order of ${min_order:.0}, so not sent and left as they are: {}",
+                    below_min.join(", ")
+                ));
             }
             if !skipped.is_empty() {
                 note.push_str(&format!(
@@ -6274,6 +6438,7 @@ impl Engine {
             let venue = s.venue_class;
             let why = match venue {
                 Venue::Polymarket => Some("Polymarket has no demo environment".to_string()),
+                Venue::Perps => self.perp_demo_block(),
                 v if !self.demo_venues.contains(&v) => Some(format!(
                     "no demo keys for {v:?}: add {} in Settings first",
                     if v == Venue::Alpaca {
@@ -6294,6 +6459,12 @@ impl Engine {
             let Some(s) = self.strategies.iter().find(|s| s.id == id) else {
                 return Err(format!("unknown strategy {id}"));
             };
+            if s.venue_class == Venue::Perps {
+                let name = s.name.clone();
+                let why = crate::connectors::perps::PERPS_LIVE_REFUSED.to_string();
+                self.log(JournalKind::Reject, format!("{name} stays off live. {why}"), Some(id.to_string()), None);
+                return Err(why);
+            }
             let pp = self.passport_for(s);
             if !pp.live_ready {
                 let why = pp.blocked_reason.unwrap_or_else(|| "the validation gates are not green".into());
@@ -6596,6 +6767,7 @@ impl Engine {
             maker_records: self.maker_records.clone(),
             alerts_muted_until_ms: self.alerts_muted_until_ms,
             alert_settings: self.alert_settings.clone(),
+            perps: self.perps_saved(),
         }
     }
 
@@ -6710,6 +6882,9 @@ impl Engine {
             // A save from an earlier day gets its daily reset on the first tick.
             self.day = p.day;
         }
+        // Perps markets are created when needed, not seeded: the saved ones
+        // come back first, so their prices and positions have a market.
+        self.perps_restore(p.perps.clone());
         for (id, (price, at)) in &p.prices {
             if let Some(m) = self.markets.iter_mut().find(|m| &m.id == id).filter(|_| price.is_finite() && *price > 0.0) {
                 m.price = *price;
@@ -6935,6 +7110,8 @@ impl Engine {
                     mode: if p.live { Mode::Live } else { Mode::Paper },
                     live: p.live,
                     demo: p.demo,
+                    side: if p.qty < 0.0 { "short" } else { "long" }.into(),
+                    funding: (p.venue == Venue::Perps).then(|| self.perp_funding_of(id).unwrap_or(0.0)),
                 }
             })
             .collect();

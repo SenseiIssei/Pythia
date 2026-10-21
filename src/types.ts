@@ -2,7 +2,8 @@
 // Shared between the client-side paper engine and (eventually) the Rust core.
 // The Rust DTOs mirror these shapes so the IPC layer is a drop-in swap.
 
-export type Venue = "polymarket" | "crypto" | "alpaca";
+/** `perps`: perpetual futures, long and short, demo or paper only (never real money). */
+export type Venue = "polymarket" | "crypto" | "alpaca" | "perps";
 export type Mode = "paper" | "live";
 export type Side = "buy" | "sell";
 export type OrderType = "market" | "limit";
@@ -51,6 +52,10 @@ export interface PositionView {
   live: boolean;
   /** Opened with a demo-venue fill (virtual money); exits go back to the demo venue. */
   demo?: boolean;
+  /** "long" or "short", the sign of `qty`. Only perps (and paper strategies) can be short. */
+  side?: "long" | "short";
+  /** Perps only: funding booked on this position so far, in dollars (negative = paid). */
+  funding?: number;
 }
 
 export interface Order {
@@ -95,7 +100,16 @@ export interface Order {
 
 // ── costs ────────────────────────────────────────────────────────────────────
 /** A key in `config/costs.json`. Crypto is charged as the selected exchange. */
-export type CostVenue = "kraken" | "binance" | "bybit" | "okx" | "coinbase" | "alpaca" | "polymarket";
+export type CostVenue =
+  | "kraken"
+  | "binance"
+  | "bybit"
+  | "okx"
+  | "coinbase"
+  | "alpaca"
+  | "polymarket"
+  | "kraken_futures"
+  | "bybit_perps";
 
 /** Costs for one instrument on one venue. Mirrors Rust `costs::CostModel`. */
 export interface CostModel {
@@ -601,6 +615,40 @@ export interface LiveStatus {
   makerRoutes?: Record<string, MakerSettings>;
   /** Maker execution statistics per route over 7 and 30 days. */
   makerStats?: MakerRouteStats[];
+  /** Perpetual futures (the lab's long/short M4 book). Absent without a perps venue. */
+  perps?: PerpsStatus;
+}
+
+/** The perps route. Mirrors the Rust `PerpsStatus`. Demo or paper only. */
+export interface PerpsStatus {
+  /** "kraken_futures" or "bybit_perps". */
+  exchange: CostVenue;
+  label: string;
+  /** The demo route can take an order now. */
+  demoReady: boolean;
+  /** Why it cannot (no keys, Kraken's retired demo host). */
+  demoBlocked?: string;
+  listed: number;
+  markets: number;
+  tickersAt: number;
+  account?: { equity: number; availableMargin: number; initialMargin: number; unrealizedFunding: number };
+  accountAt: number;
+  accountError?: string;
+  /** Funding booked so far over every book, dollars (negative = paid). */
+  fundingTotal: number;
+  reconcile?: {
+    checkedAt: number;
+    symbols: { symbol: string; market?: string; pythia: number; venue: number; diff: number; diffUsd: number; status: string; note: string }[];
+    mismatches: number;
+    openOrders: number;
+    strayOrders?: string[];
+    error?: string;
+    failedAt: number;
+  };
+  longs: number;
+  shorts: number;
+  /** Always the same sentence: real-money perps are switched off. */
+  live: string;
 }
 
 /** Maker execution on one route over a window. Mirrors the Rust `MakerWindow`. */
@@ -1122,6 +1170,10 @@ export interface AutopilotStatus {
   held?: string[];
   /** What it is held against: BTC buy and hold for crypto, SPY for US shares. */
   benchmark?: AutopilotBenchmark | null;
+  /** The harder benchmark for crypto and portfolios: BTC held only above its
+   *  200-day average over the same period (research/lab/results/gated_btc.md).
+   *  Absent while the lab's daily gate calendar is missing or stale. */
+  gatedBenchmark?: AutopilotBenchmark | null;
   /** The cash of its own book: equity less its positions and orders out. */
   cash?: number;
   /** The deepest fall from a peak over its equity history, percent. */
@@ -1134,6 +1186,11 @@ export interface AutopilotStatus {
   curveNote?: string | null;
   /** A portfolio: each asset class with its budget and its own P&L. */
   classes?: AutopilotClassStatus[];
+  /** Perps: funding booked so far, already in the P&L (negative = paid). */
+  funding?: number;
+  /** What it holds long and short at the mark, dollars (short as a positive amount). */
+  longUsd?: number;
+  shortUsd?: number;
 }
 
 /** One asset class of a portfolio. Mirrors Rust `ClassStatus`. */

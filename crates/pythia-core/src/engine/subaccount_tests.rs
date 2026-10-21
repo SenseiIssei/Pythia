@@ -408,6 +408,32 @@ fn one_lab_book_runs_in_two_autopilots_each_with_its_own_money() {
     assert!(out.iter().any(|o| o.market_id == SOL && o.side == Side::Buy));
 }
 
+#[test]
+fn a_small_demo_book_names_orders_under_alpacas_minimum_instead_of_sending_them() {
+    // The safe account: $95 on Alpaca paper. 6 % in BTC is a $5.70 order,
+    // which Alpaca refuses (403, "cost basis must be >= minimal amount of
+    // order 10"); it is named once and not sent, the rest goes out.
+    let mut e = demo_engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal("tsmom_regime", now, &[("BTC", 0.06), ("ETH", 0.30)]));
+    let id = start(&mut e, demo_config("safe", 95.0, &["lab:tsmom_regime"]));
+    e.run_lab_books();
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].market_id, ETH);
+    assert!(journal_has(&e, "under the venue's minimum order of $10, so not sent and left as they are: BTC/USD ($5.70)"));
+    assert!(e.lab_done.contains_key(&pos_key(&id, "lab:tsmom_regime")), "the rebalance is done, not retried");
+    e.run_lab_books();
+    assert!(e.drain_live_orders().is_empty());
+    // On paper the floor stays at $5: nothing to name there.
+    let mut p = engine();
+    p.set_lab_books_idle(true);
+    p.apply_lab_signal(lab_signal("tsmom_regime", now, &[("BTC", 0.06), ("ETH", 0.30)]));
+    start(&mut p, config("paper", 95.0, &["lab:tsmom_regime"]));
+    p.run_lab_books();
+    assert!(!journal_has(&p, "under the venue's minimum order"));
+}
+
 // ── stop, restart, migration ───────────────────────────────────────────────
 
 #[test]
@@ -707,4 +733,46 @@ fn the_comparison_numbers_are_on_every_status() {
         assert!(json.get(k).is_some(), "{k} reaches the UI: {json}");
     }
     assert!(json["benchmark"].get("excessPct").is_some());
+}
+
+fn gate_file(e: &Engine, on: bool, close: f64) -> crate::lab::ForwardFile {
+    let now = e.now();
+    let day = 86_400_000;
+    let d = now.div_euclid(day) * day;
+    let days = (-2..=2).map(|i| crate::lab::GateDay { day_ms: d + i * day, on, close: Some(close) }).collect();
+    crate::lab::ForwardFile { generated_ms: now, btc_gate: Some(crate::lab::BtcGate { sma_days: 200, days }), ..Default::default() }
+}
+
+#[test]
+fn a_crypto_autopilot_is_also_held_against_btc_above_its_200_day_average() {
+    let mut e = engine();
+    let id = start(&mut e, config("g", 1_000.0, &["ema-cross-1"]));
+    assert!(status(&e, &id).gated_benchmark.is_none(), "no gate calendar from the lab yet: not shown, never guessed");
+    let p0 = e.price_of(BTC);
+    // A minute on: over no time at all gated BTC moves by nothing, whatever the price did.
+    e.advance_clock_for_test(60_000);
+
+    // BTC closed below its 200-day average: gated BTC sits in cash while BTC rises 10 %.
+    e.apply_lab_forward(gate_file(&e, false, p0));
+    set_price(&mut e, BTC, p0 * 1.1);
+    let s = status(&e, &id);
+    let g = s.gated_benchmark.clone().expect("the calendar covers its days");
+    assert_eq!(g.return_pct, Some(0.0));
+    assert!((s.benchmark.unwrap().return_pct.unwrap() - 10.0).abs() < 1e-6, "plain BTC still shows its 10 %");
+    assert!(g.name.contains("above its 200-day average"), "{}", g.name);
+    assert!((g.excess_pct.unwrap() - (s.equity / 1_000.0 - 1.0) * 100.0).abs() < 1e-9);
+
+    // Above it: gated BTC is BTC.
+    e.apply_lab_forward(gate_file(&e, true, p0));
+    let s = status(&e, &id);
+    let (g, plain) = (s.gated_benchmark.unwrap().return_pct.unwrap(), s.benchmark.unwrap().return_pct.unwrap());
+    assert!((g - plain).abs() < 1e-6 && g > 9.0, "on every day it is BTC: {g} against {plain}");
+    let json = serde_json::to_value(status(&e, &id)).unwrap();
+    assert!(json["gatedBenchmark"].get("excessPct").is_some(), "{json}");
+
+    // A calendar older than three days is not used.
+    let mut old = gate_file(&e, true, p0);
+    old.generated_ms -= 4 * 86_400_000;
+    e.apply_lab_forward(old);
+    assert!(status(&e, &id).gated_benchmark.is_none());
 }

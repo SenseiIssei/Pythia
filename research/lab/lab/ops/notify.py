@@ -1077,6 +1077,9 @@ def autopilot_parts(learn: dict | None, prev: dict, now: int, lang: str = "en") 
         return [], {}, [], 0
     prev = migrate_snapshot(prev or {}, aps)
     na = "k. A." if lang == "de" else "n/a"
+    # The harder benchmark, BTC held only above its 200-day average, gets a
+    # column as soon as the learning report has it for any autopilot.
+    gated = any(_num(a.get("vs_gated_total_pts")) is not None for a in aps)
     rows, snap, today, seen = [], {}, [], set()
     act = {"orders": 0, "trades": 0, "fees": 0.0, "orders_known": True, "today": True}
     modes: dict[str, list[str]] = {}
@@ -1103,7 +1106,7 @@ def autopilot_parts(learn: dict | None, prev: dict, now: int, lang: str = "en") 
         rows.append([name, money(eq, 0, lang).replace("$", "").strip() if eq is not None else na,
                      cell(d_pct, lang),
                      cell(tot, lang),
-                     cell(vs, lang)])
+                     cell(vs, lang)] + ([cell(_num(a.get("vs_gated_total_pts")), lang)] if gated else []))
         # The day's activity: since yesterday's snapshot, or since its start
         # for an autopilot younger than that; else the totals since start.
         age = now - int(_num(p.get("at")) or 0) if p else None
@@ -1133,9 +1136,9 @@ def autopilot_parts(learn: dict | None, prev: dict, now: int, lang: str = "en") 
         act["orders"] = sum(int(_num(a.get("orders")) or 0) for a in aps)
     more = max(len(rows) - TABLE_ROWS, 0)
     header = [tr("tbl_autopilot", lang), tr("tbl_value", lang), tr("tbl_today", lang), tr("tbl_start", lang),
-              tr("tbl_vs_btc", lang)]
+              tr("tbl_vs_btc", lang)] + ([tr("tbl_vs_gated", lang)] if gated else [])
     parts: list = [Table(header, rows[:TABLE_ROWS], more=more)]
-    parts.append(legend_line("tbl_legend", modes, accounts, lang))
+    parts.append(legend_line("tbl_legend_gated" if gated else "tbl_legend", modes, accounts, lang))
     fills = []
     if act["orders_known"]:
         fills.append(tr("act_orders", lang, n=act["orders"]))

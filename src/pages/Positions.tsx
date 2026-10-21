@@ -92,7 +92,15 @@ function PositionRow({ p, onFlatten }: { p: PositionView; onFlatten: () => void 
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[15px] font-semibold text-ink">{p.symbol}</span>
-            <Badge title={p.qty >= 0 ? "Bought: gains if the price rises" : "Sold short: gains if the price falls"}>{p.qty >= 0 ? "Long" : "Short"}</Badge>
+            <Badge
+              tone={p.qty < 0 ? "warn" : "neutral"}
+              title={p.qty >= 0 ? "Bought: gains if the price rises" : "Sold short: gains if the price falls"}
+            >
+              {p.qty >= 0 ? "Long" : "Short"}
+            </Badge>
+            {p.venue === "perps" && (
+              <Badge title="Perpetual future: pays or receives funding while held. Demo or practice money only">Perp</Badge>
+            )}
             {/* Real shares behave differently from simulated ones: they can
                 only be closed while live routing is armed. */}
             {p.live && (
@@ -111,6 +119,7 @@ function PositionRow({ p, onFlatten }: { p: PositionView; onFlatten: () => void 
           <div className="tabular mt-0.5 text-[13px] text-muted">
             <Term k="Qty">{num(p.qty, 4)}</Term> · <Term k="Avg">avg {p.avgPrice.toLocaleString()}</Term> ·{" "}
             <Term k="Last">last {p.lastPrice.toLocaleString()}</Term>
+            {p.funding != null && <> · funding {money(p.funding)}</>}
           </div>
         </div>
         <div className="shrink-0 text-right">
@@ -128,7 +137,7 @@ function PositionRow({ p, onFlatten }: { p: PositionView; onFlatten: () => void 
             p.live
               ? `Sell all ${Math.abs(p.qty).toFixed(4)} ${p.symbol} for real, at about ${money(value)}? This sends a real order and cannot be undone.`
               : p.demo
-                ? `Sell the demo position in ${p.symbol} at the demo venue, about ${money(value)} of virtual money?`
+                ? `${p.qty < 0 ? "Buy back the demo short" : "Sell the demo position"} in ${p.symbol} at the demo venue, about ${money(value)} of virtual money?`
                 : `Close the practice position in ${p.symbol} at today's price, about ${money(value)}?`
           }
           confirmLabel={p.live ? "Yes, sell for real" : "Close it"}

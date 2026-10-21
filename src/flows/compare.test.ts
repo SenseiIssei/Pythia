@@ -77,8 +77,22 @@ describe("compareRows", () => {
     expect(ra.feesPct).toBeCloseTo(0.25);
     expect(ra.days).toBeCloseTo(10);
     expect(rb).toMatchObject({ benchLabel: "SPY", benchPct: 1, vsBenchPts: -6, cash: null });
+    // No gate calendar from the lab (or US shares): not known, never guessed.
+    expect(ra).toMatchObject({ gatedPct: null, vsGatedPts: null });
     // No engine figure: the deepest fall comes from its own history.
     expect(rb.maxDrawdownPct).toBeCloseTo((300 / 2_200) * 100);
+  });
+
+  it("also holds a crypto autopilot against BTC held only above its 200-day average", () => {
+    const g = status("g", {
+      pnlPct: 0.4,
+      benchmark: { symbol: "BTC/USD", name: "BTC buy and hold", returnPct: 3.2, excessPct: -2.8 },
+      gatedBenchmark: { symbol: "BTC/USD", name: "BTC held only above its 200-day average", returnPct: 0, excessPct: 0.4 },
+    });
+    const [r] = compareRows([g], DAY);
+    expect(r).toMatchObject({ vsBenchPts: -2.8, gatedPct: 0, vsGatedPts: 0.4 });
+    const [nan] = compareRows([status("n", { gatedBenchmark: { symbol: "BTC/USD", name: "x", returnPct: Number.NaN, excessPct: null } })], DAY);
+    expect(nan).toMatchObject({ gatedPct: null, vsGatedPts: null });
   });
 
   it("measures return and fees on the amount it worked with, so a cut amount is no loss", () => {

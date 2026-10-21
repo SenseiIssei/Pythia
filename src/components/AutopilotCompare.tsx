@@ -23,6 +23,12 @@ function money(n: number): string {
   return `$${Math.round(n).toLocaleString("en-US")}`;
 }
 
+/** "+1.2 pts", "−0.4 pts" with a real minus sign; "n/a" when unknown. */
+function pts(n: number | null): string {
+  if (n == null) return "n/a";
+  return `${n > 0.05 ? "+" : n < -0.05 ? "−" : ""}${Math.abs(n).toFixed(1)} pts`;
+}
+
 /**
  * Every autopilot side by side: one row each (return, against its
  * benchmark, deepest drawdown, trades, fees) and their equity curves on one
@@ -63,6 +69,8 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
             <dl className="text-muted mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 pl-[18px] text-xs">
               <dt>vs {r.benchLabel}</dt>
               <dd className="tabular text-right">{r.vsBenchPts == null ? "n/a" : `${r.vsBenchPts >= 0 ? "+" : "−"}${Math.abs(r.vsBenchPts).toFixed(1)} pts`}</dd>
+              <dt>vs BTC above 200d</dt>
+              <dd className="tabular text-right">{pts(r.vsGatedPts)}</dd>
               <dt>Deepest drawdown</dt>
               <dd className="tabular text-right">{r.maxDrawdownPct.toFixed(1)}%</dd>
               <dt>Trades · fees</dt>
@@ -80,13 +88,20 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
       </ul>
 
       <div className="mt-3 hidden overflow-x-auto sm:block">
-        <table className="w-full min-w-[520px] text-sm">
+        <table className="w-full min-w-[600px] text-sm">
           <caption className="sr-only">Autopilots compared: return, against the benchmark, drawdown, trades and fees</caption>
           <thead>
             <tr className="text-muted text-left text-xs">
               <th scope="col" className="py-1.5 pr-2 font-semibold">Autopilot</th>
               <th scope="col" className="py-1.5 pr-2 text-right font-semibold">Return</th>
               <th scope="col" className="py-1.5 pr-2 text-right font-semibold">vs benchmark</th>
+              <th
+                scope="col"
+                className="py-1.5 pr-2 text-right font-semibold"
+                title="Bitcoin held only while its close is above its 200-day average, over the same period"
+              >
+                vs BTC above 200d
+              </th>
               <th scope="col" className="py-1.5 pr-2 text-right font-semibold" title="Deepest fall from a peak, and below the peak now">
                 Drawdown
               </th>
@@ -132,6 +147,16 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
                   )}
                 </td>
                 <td className="tabular py-2 pr-2 text-right">
+                  {r.vsGatedPts == null ? (
+                    <span className="text-muted">n/a</span>
+                  ) : (
+                    <>
+                      <span className="block">{pts(r.vsGatedPts)}</span>
+                      <span className="text-muted block text-xs">gated {fmtPct(r.gatedPct, 1)}</span>
+                    </>
+                  )}
+                </td>
+                <td className="tabular py-2 pr-2 text-right">
                   <span className="block" title={r.curveNote ?? undefined}>
                     {r.maxDrawdownPct.toFixed(1)}%{r.curveNote ? " *" : ""}
                   </span>
@@ -149,7 +174,9 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
       </div>
       <p className="text-muted mt-2 text-xs">
         Benchmark: buying and holding Bitcoin for crypto, SPY for US shares, over the same period. Points are the return less the
-        benchmark's. Returns and fees are measured on the amount each one worked with, so changing an amount changes neither.
+        benchmark's. "BTC above 200d" is the harder yardstick: Bitcoin held only while its close is above its 200-day average, cash
+        otherwise; no book the autopilots run has beaten it out of sample. Returns and fees are measured on the amount each one worked
+        with, so changing an amount changes neither.
       </p>
       {rows
         .filter((r) => r.curveNote)

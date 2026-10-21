@@ -289,6 +289,20 @@ def test_digest_says_what_the_money_did():
     assert "\u2014" not in text and len(text) <= notify.MAX_CHARS and balanced(text)
 
 
+def test_the_table_also_holds_each_autopilot_against_btc_above_its_200_day_average(monkeypatch):
+    rep = learn_report()
+    rep["autopilots"][0].update(btc_gated_total_pct=0.0, vs_gated_total_pts=3.0)
+    text, _ = notify.digest(rep, FORWARD, HEALTH_OK, {}, NOW)
+    assert "<pre>Autopilot Value Today Start  ±BTC    ±G\nMomentum  1,030 +1.00 +3.00 +1.50 +3.00</pre>" in text, text
+    assert "±G against BTC held only above its 200-day average; all demo" in text, text
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "de")
+    text, _ = notify.digest(rep, FORWARD, HEALTH_OK, {}, NOW)
+    assert "±G gegenüber BTC nur über seinem 200-Tage-Schnitt" in text, text
+    # A report without the number (older engine, no calendar): no column, as before.
+    text, _ = notify.digest(learn_report(), FORWARD, HEALTH_OK, {}, NOW)
+    assert "±G" not in text
+
+
 def test_today_and_its_trades_come_from_yesterdays_snapshot():
     prev = {"ap1": {"equity": 1_020.0, "start": 1_000.0, "trades": 9, "fees": 2.25, "orders": 20,
                     "at": NOW - 86_400_000}}

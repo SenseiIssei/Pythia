@@ -160,7 +160,7 @@ impl Engine {
             .filter(|m| match m.venue {
                 Venue::Crypto => self.crypto_demo_on_alpaca(),
                 Venue::Alpaca => self.demo_venues.contains(&Venue::Alpaca),
-                Venue::Polymarket => false,
+                Venue::Polymarket | Venue::Perps => false,
             })
             .map(|m| m.id.clone())
             .collect()

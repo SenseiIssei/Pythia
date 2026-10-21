@@ -312,10 +312,11 @@ fn a_portfolio_is_paper_or_demo_only_and_its_books_are_picked_by_evidence() {
     let err = e.autopilot_start(live, true, VenueCash::Read(5_000.0)).unwrap_err();
     assert!(err.contains("paper or demo only"), "{err}");
 
+    // Chosen by hand: lab books only.
     let mut chosen = portfolio("c", 1_000.0);
-    chosen.sleeves = vec![SleeveConfig { strategy_id: "lab:tsmom".into(), weight: 1.0 }];
+    chosen.sleeves = vec![SleeveConfig { strategy_id: "ema-cross-1".into(), weight: 1.0 }];
     let err = e.autopilot_start(chosen, false, VenueCash::NotRead).unwrap_err();
-    assert!(err.contains("leave the strategies empty"), "{err}");
+    assert!(err.contains("A portfolio runs lab books only"), "{err}");
 
     // Demo: both classes on the Alpaca paper account, or not at all.
     let mut demo = portfolio("d", 1_000.0);
@@ -345,4 +346,70 @@ fn a_portfolio_is_paper_or_demo_only_and_its_books_are_picked_by_evidence() {
     let upd = AutopilotUpdate { sleeves: Some(vec![SleeveConfig { strategy_id: "lab:tsmom".into(), weight: 1.0 }]), ..Default::default() };
     let err = e.autopilot_update(&id, upd, false, VenueCash::NotRead).unwrap_err();
     assert!(err.contains("is a portfolio"), "{err}");
+}
+
+#[test]
+fn a_portfolio_chosen_by_hand_keeps_its_split_and_an_explicit_only_book_is_never_auto_picked() {
+    // The Crypto + SPY forward test (research/lab/results/equity_sleeve_prereg.md).
+    let mut e = engine();
+    let now = e.now();
+    e.set_broker_status(session(&e, true));
+    e.apply_lab_signal(book("breakout_top10", now, &[("BTC", 0.5), ("ETH", 0.5)], evidence(Some(1.17), Some(0.16)), false));
+    let mut spy = evidence(Some(1.30), Some(0.188));
+    spy.explicit_only = true;
+    e.apply_lab_signal(book("spy_hold", now, &[("SPY", 1.0)], spy.clone(), true));
+    assert!(e.lab_book_explicit_only("lab:spy_hold") && e.lab_book_autopilot_only("lab:spy_hold"));
+    assert_eq!(state_of(&e, "lab:spy_hold"), StrategyState::Paused, "idle until an autopilot names it");
+
+    // Its numbers are good, and still no auto pick takes it: an auto
+    // portfolio puts everything in crypto, a one-class pick finds nothing.
+    let auto = e.autopilot_start(portfolio("auto", 10_000.0), false, VenueCash::NotRead).unwrap();
+    let s = status(&e, &auto);
+    assert!(s.by_sleeve.iter().all(|b| b.strategy_id != "lab:spy_hold"), "{:?}", s.by_sleeve);
+    assert_eq!(class(&s, Venue::Alpaca).weight, 0.0);
+    let mut shares = portfolio("shares", 1_000.0);
+    shares.portfolio = false;
+    shares.asset_class = Some(Venue::Alpaca);
+    let err = e.autopilot_start(shares, false, VenueCash::NotRead).unwrap_err();
+    assert!(err.starts_with("Auto found no strategy"), "{err}");
+
+    // Named as a sleeve: 80 % crypto and 20 % SPY, exactly as chosen.
+    let mut c = portfolio("fwd", 10_000.0);
+    c.name = "Crypto + SPY (forward test)".into();
+    c.sleeves = vec![
+        SleeveConfig { strategy_id: "lab:breakout_top10".into(), weight: 0.8 },
+        SleeveConfig { strategy_id: "lab:spy_hold".into(), weight: 0.2 },
+    ];
+    let id = e.autopilot_start(c, false, VenueCash::NotRead).unwrap();
+    let s = status(&e, &id);
+    assert!((class(&s, Venue::Crypto).weight - 0.8).abs() < 1e-9 && (class(&s, Venue::Alpaca).weight - 0.2).abs() < 1e-9);
+    assert_eq!(s.config.repick_every_hours, None, "chosen by hand: never re-picked");
+    assert_eq!(s.next_repick_ms, None);
+    let msg = s.last_action.clone().unwrap();
+    assert!(msg.contains("split as you chose it: Crypto 80 %, US shares 20 %"), "{msg}");
+    let why = &s.by_sleeve.iter().find(|b| b.strategy_id == "lab:spy_hold").unwrap().why;
+    assert!(why.contains("a sleeve of a registered forward test"), "{why}");
+    let b = s.benchmark.unwrap();
+    assert!((b.legs[0].weight - 0.8).abs() < 1e-9 && (b.legs[1].weight - 0.2).abs() < 1e-9);
+
+    // In the session both classes trade: the coins at half of 80 % each, SPY at 20 %.
+    e.run_lab_books();
+    assert!((notional(&e, &id, BTC) - 4_000.0).abs() < 60.0, "{}", notional(&e, &id, BTC));
+    assert!((notional(&e, &id, SPY) - 2_000.0).abs() < 20.0, "{}", notional(&e, &id, SPY));
+    // A day on, nothing re-picks it.
+    e.autopilot_step(now + 25 * 3_600_000);
+    assert!((class(&status(&e, &id), Venue::Alpaca).weight - 0.2).abs() < 1e-9);
+
+    // SPY drifts up; the month's new SPY signal brings the sleeve back to 20 %.
+    set_price(&mut e, SPY, 550.0);
+    e.run_lab_books();
+    assert!(notional(&e, &id, SPY) > 2_150.0, "no trade between the monthly signals");
+    e.apply_lab_signal(book("spy_hold", now + 1, &[("SPY", 1.0)], spy, true));
+    e.run_lab_books();
+    let eq = status(&e, &id).equity;
+    assert!((notional(&e, &id, SPY) - 0.2 * eq).abs() < eq * 0.003, "{} of {eq}", notional(&e, &id, SPY));
+}
+
+fn state_of(e: &Engine, sid: &str) -> StrategyState {
+    e.strategies.iter().find(|s| s.id == sid).map(|s| s.state).unwrap()
 }

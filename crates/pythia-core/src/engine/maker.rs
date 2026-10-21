@@ -356,6 +356,7 @@ impl Engine {
             Venue::Alpaca if m.symbol.contains('/') => "crypto",
             Venue::Alpaca => "equity",
             Venue::Polymarket => "prediction",
+            Venue::Perps => "perp",
         };
         format!("demo:{}:{kind}", self.demo_cost_venue(m).id())
     }
