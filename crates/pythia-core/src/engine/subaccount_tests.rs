@@ -408,6 +408,32 @@ fn one_lab_book_runs_in_two_autopilots_each_with_its_own_money() {
     assert!(out.iter().any(|o| o.market_id == SOL && o.side == Side::Buy));
 }
 
+#[test]
+fn a_small_demo_book_names_orders_under_alpacas_minimum_instead_of_sending_them() {
+    // The safe account: $95 on Alpaca paper. 6 % in BTC is a $5.70 order,
+    // which Alpaca refuses (403, "cost basis must be >= minimal amount of
+    // order 10"); it is named once and not sent, the rest goes out.
+    let mut e = demo_engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal("tsmom_regime", now, &[("BTC", 0.06), ("ETH", 0.30)]));
+    let id = start(&mut e, demo_config("safe", 95.0, &["lab:tsmom_regime"]));
+    e.run_lab_books();
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].market_id, ETH);
+    assert!(journal_has(&e, "under the venue's minimum order of $10, so not sent and left as they are: BTC/USD ($5.70)"));
+    assert!(e.lab_done.contains_key(&pos_key(&id, "lab:tsmom_regime")), "the rebalance is done, not retried");
+    e.run_lab_books();
+    assert!(e.drain_live_orders().is_empty());
+    // On paper the floor stays at $5: nothing to name there.
+    let mut p = engine();
+    p.set_lab_books_idle(true);
+    p.apply_lab_signal(lab_signal("tsmom_regime", now, &[("BTC", 0.06), ("ETH", 0.30)]));
+    start(&mut p, config("paper", 95.0, &["lab:tsmom_regime"]));
+    p.run_lab_books();
+    assert!(!journal_has(&p, "under the venue's minimum order"));
+}
+
 // ── stop, restart, migration ───────────────────────────────────────────────
 
 #[test]

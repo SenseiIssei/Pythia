@@ -1272,6 +1272,14 @@ fn is_event(kind: JournalKind, message: &str) -> bool {
     }
 }
 const LAB_RETRY_MAX: u32 = 6;
+/// A lab rebalance leaves a difference under this share of its capital alone
+/// (`lab::rebalance`'s band). A study of wider resize bands
+/// (`research/lab/results/autopilot_optimization.md`, part 2) found none that
+/// cut the books' cost by a quarter without moving their returns, so it stays.
+const LAB_BAND: f64 = 0.002;
+/// And never sends an order under this many dollars, nor under the route's
+/// venue minimum when that is higher (Alpaca crypto: $10).
+const LAB_MIN_ORDER_USD: f64 = 5.0;
 
 pub struct Engine {
     markets: Vec<Market>,
@@ -5914,8 +5922,28 @@ impl Engine {
                 sigs.iter().map(|(m, scale, g)| (m.clone(), if members.len() == 1 { 1.0 } else { *scale }, &g.weights)).collect();
             let (weights, coin_shares) = autopilot::net_lab_targets(&books);
             let has_market = |key: &str| -> Option<String> { Some(sig.market_id(key)) };
-            let (orders, mut untradable) =
-                crate::lab::rebalance(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
+            // The smallest order the route's venue takes. Alpaca refuses a
+            // crypto order under $10 (403, "cost basis must be >= minimal
+            // amount of order 10"): such an order is named, never sent, so a
+            // small book does not collect refusals and retries every day.
+            let route = self.autopilot_route(&owner).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state));
+            let min_order = book
+                .iter()
+                .filter(|m| prices.contains_key(&m.id))
+                .map(|m| match route {
+                    RouteIntent::Demo => costs::model_for(self.demo_cost_venue(m), &m.symbol).min_notional,
+                    RouteIntent::Live | RouteIntent::LiveExit => self.cost_model(m).min_notional,
+                    _ => 0.0,
+                })
+                .fold(LAB_MIN_ORDER_USD, f64::max);
+            let plan = crate::lab::rebalance_plan(&weights, has_market, &holdings, &prices, capital, min_order, LAB_BAND);
+            let (orders, mut untradable) = (plan.orders, plan.untradable);
+            let mut below_min: Vec<String> = plan
+                .below_min
+                .iter()
+                .filter_map(|(id, n)| book.iter().find(|m| &m.id == id).map(|m| format!("{} (${n:.2})", m.symbol)))
+                .collect();
+            below_min.sort();
             // A coin held by another strategy is reported as that, not as missing.
             untradable.retain(|c| !owned_elsewhere.contains(&sig.market_symbol(c)));
             // An unlisted coin the lab wants is named once, as that.
@@ -6078,6 +6106,12 @@ impl Engine {
             }
             if !untradable.is_empty() {
                 note.push_str(&format!("; no market here for {}", untradable.join(", ")));
+            }
+            if !below_min.is_empty() {
+                note.push_str(&format!(
+                    "; under the venue's minimum order of ${min_order:.0}, so not sent and left as they are: {}",
+                    below_min.join(", ")
+                ));
             }
             if !skipped.is_empty() {
                 note.push_str(&format!(

@@ -873,10 +873,12 @@ pub fn below_minimum(qty: f64, symbol: &str, min: f64) -> String {
 }
 
 /// A 403 body that refuses the order rather than the keys: not enough
-/// balance (cash, buying power, coins) or a wash trade.
+/// balance (cash, buying power, coins), a wash trade, or an order below
+/// Alpaca's minimum ("cost basis must be >= minimal amount of order 10",
+/// code 40310000: a crypto order under $10).
 fn refusal_403(body: &str) -> bool {
     let b = body.to_ascii_lowercase();
-    b.contains("insufficient") || b.contains("wash trade")
+    b.contains("insufficient") || b.contains("wash trade") || b.contains("cost basis must be") || b.contains("minimal amount of order")
 }
 
 /// One crypto fee Alpaca posted to the account.
@@ -2103,6 +2105,10 @@ mod tests {
         assert!(refusal_403(r#"{"message":"potential wash trade detected. use complex orders"}"#));
         assert!(!refusal_403(r#"{"message":"forbidden."}"#));
         assert!(!refusal_403(""));
+        // A crypto order under $10: Alpaca answers 403, and the keys are fine.
+        let small = r#"{"code":40310000,"message":"cost basis must be >= minimal amount of order 10"}"#;
+        assert!(refusal_403(small));
+        assert_eq!(alpaca_crypto::classify_reject(&format!("submit 403: {small}")), alpaca_crypto::RejectKind::BelowMinimum);
         let msg = below_minimum(0.00005, "BTC/USD", 0.0001);
         assert_eq!(msg, "0.00005 BTC/USD is below Alpaca's minimum order size of 0.0001; not sent");
         assert_eq!(alpaca_crypto::classify_reject(&msg), alpaca_crypto::RejectKind::BelowMinimum);

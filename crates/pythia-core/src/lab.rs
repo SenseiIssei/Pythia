@@ -416,6 +416,33 @@ pub fn rebalance(
     min_notional: f64,
     band: f64,
 ) -> (Vec<Rebalance>, Vec<String>) {
+    let p = rebalance_plan(weights, market_for, holdings, prices, capital, min_notional, band);
+    (p.orders, p.untradable)
+}
+
+/// [`rebalance`] with what it left out because the order would be under the
+/// venue's minimum (`min_notional`) although the difference is past the
+/// band: the engine names those instead of sending orders the venue refuses
+/// (Alpaca refuses a crypto order under $10).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RebalancePlan {
+    pub orders: Vec<Rebalance>,
+    pub untradable: Vec<String>,
+    /// (market id, the order's notional) for each difference past the band
+    /// whose order would be under `min_notional`.
+    pub below_min: Vec<(String, f64)>,
+}
+
+pub fn rebalance_plan(
+    weights: &BTreeMap<String, f64>,
+    market_for: impl Fn(&str) -> Option<String>,
+    holdings: &HashMap<String, (f64, f64)>,
+    prices: &HashMap<String, f64>,
+    capital: f64,
+    min_notional: f64,
+    band: f64,
+) -> RebalancePlan {
+    let mut below_min = vec![];
     let mut targets: BTreeMap<String, f64> = BTreeMap::new();
     let mut untradable = vec![];
     for (coin, w) in weights {
@@ -429,7 +456,7 @@ pub fn rebalance(
     for m in holdings.keys() {
         targets.entry(m.clone()).or_insert(0.0);
     }
-    let threshold = min_notional.max(band * capital);
+    let banded = band * capital;
     let mut out = vec![];
     for (m, w) in targets {
         let (qty, _) = holdings.get(&m).copied().unwrap_or((0.0, 0.0));
@@ -437,11 +464,14 @@ pub fn rebalance(
         let current = qty.max(0.0) * price;
         let target = w * capital;
         let diff = target - current;
-        if diff.abs() < threshold {
+        if diff.abs() < banded {
             continue;
         }
         let (side, notional) = if diff > 0.0 { (Side::Buy, diff) } else { (Side::Sell, (-diff).min(current)) };
         if notional < min_notional {
+            if notional > 1e-9 {
+                below_min.push((m, notional));
+            }
             continue;
         }
         out.push(Rebalance {
@@ -454,7 +484,7 @@ pub fn rebalance(
     }
     // Sells first: they free the cash the buys need.
     out.sort_by_key(|r| if r.side == Side::Sell { 0 } else { 1 });
-    (out, untradable)
+    RebalancePlan { orders: out, untradable, below_min }
 }
 
 #[cfg(test)]
@@ -502,6 +532,25 @@ mod tests {
             [("crypto:BTC/USD".to_string(), (0.0099, 100_000.0))].into_iter().collect();
         let (orders, _) = rebalance(&w, market, &holdings, &prices(), 10_000.0, 5.0, 0.002);
         assert!(orders.is_empty(), "a 10 $ gap on a 10 000 $ book is noise: {orders:?}");
+    }
+
+    #[test]
+    fn an_order_under_the_venue_minimum_is_named_not_sent() {
+        // A $95 book: 6 % of it in BTC is a $5.70 order, under Alpaca's $10.
+        let w: BTreeMap<String, f64> = [("BTC", 0.06), ("ETH", 0.20)].into_iter().map(|(k, v)| (k.into(), v)).collect();
+        let p = rebalance_plan(&w, market, &HashMap::new(), &prices(), 95.0, 10.0, 0.002);
+        assert_eq!(p.orders.len(), 1, "{:?}", p.orders);
+        assert_eq!(p.orders[0].market_id, "crypto:ETH/USD");
+        assert_eq!(p.below_min.len(), 1);
+        assert_eq!(p.below_min[0].0, "crypto:BTC/USD");
+        assert!((p.below_min[0].1 - 5.70).abs() < 1e-9);
+        // The plain call is the same orders.
+        let (orders, _) = rebalance(&w, market, &HashMap::new(), &prices(), 95.0, 10.0, 0.002);
+        assert_eq!(orders, p.orders);
+        // A difference inside the band is not "below the minimum", it is nothing.
+        let held: HashMap<String, (f64, f64)> = [("crypto:ETH/USD".to_string(), (0.00475, 4_000.0))].into_iter().collect();
+        let p = rebalance_plan(&w, market, &held, &prices(), 95.0, 10.0, 0.002);
+        assert!(p.below_min.iter().all(|(m, _)| m != "crypto:ETH/USD"), "{:?}", p.below_min);
     }
 
     fn evidence(oos: f64, is: f64, p: f64, filter: bool) -> LabEvidence {
