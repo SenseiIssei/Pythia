@@ -93,6 +93,9 @@ fn credentials_from_vault() -> Credentials {
         crypto_demo_alpaca: false,
         alpaca_slippage_bps: None,
         alpaca_allow_shorts: flag(&alpaca_fields, "allowShorts"),
+        // Perps demo (the lab's M4 book) is a backend option: its keys live
+        // in the server's root-only env file (docs/KRAKEN-FUTURES-DEMO.md).
+        perps_demo: None,
     }
 }
 

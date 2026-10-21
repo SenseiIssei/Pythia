@@ -61,10 +61,16 @@ pub enum CostVenue {
     Coinbase,
     Alpaca,
     Polymarket,
+    /// Kraken Futures linear perpetuals (`Venue::Perps`).
+    #[serde(rename = "kraken_futures")]
+    KrakenFutures,
+    /// Bybit USDT perpetuals (`Venue::Perps`).
+    #[serde(rename = "bybit_perps")]
+    BybitPerps,
 }
 
 impl CostVenue {
-    pub const ALL: [CostVenue; 7] = [
+    pub const ALL: [CostVenue; 9] = [
         CostVenue::Kraken,
         CostVenue::Binance,
         CostVenue::Bybit,
@@ -72,6 +78,8 @@ impl CostVenue {
         CostVenue::Coinbase,
         CostVenue::Alpaca,
         CostVenue::Polymarket,
+        CostVenue::KrakenFutures,
+        CostVenue::BybitPerps,
     ];
 
     /// The key this venue has in `config/costs.json`.
@@ -84,6 +92,27 @@ impl CostVenue {
             CostVenue::Coinbase => "coinbase",
             CostVenue::Alpaca => "alpaca",
             CostVenue::Polymarket => "polymarket",
+            CostVenue::KrakenFutures => "kraken_futures",
+            CostVenue::BybitPerps => "bybit_perps",
+        }
+    }
+
+    /// The perps venue this cost venue is, if it is one.
+    pub fn perp_exchange(self) -> Option<crate::connectors::perps::PerpExchange> {
+        use crate::connectors::perps::PerpExchange;
+        match self {
+            CostVenue::KrakenFutures => Some(PerpExchange::KrakenFutures),
+            CostVenue::BybitPerps => Some(PerpExchange::Bybit),
+            _ => None,
+        }
+    }
+
+    /// The cost venue of a perps venue.
+    pub fn for_perps(ex: crate::connectors::perps::PerpExchange) -> CostVenue {
+        use crate::connectors::perps::PerpExchange;
+        match ex {
+            PerpExchange::KrakenFutures => CostVenue::KrakenFutures,
+            PerpExchange::Bybit => CostVenue::BybitPerps,
         }
     }
 
@@ -100,6 +129,9 @@ impl CostVenue {
             crate::connectors::Venue::Alpaca => CostVenue::Alpaca,
             crate::connectors::Venue::Polymarket => CostVenue::Polymarket,
             crate::connectors::Venue::Crypto => exchange.unwrap_or(CostVenue::Kraken),
+            // The perps venue in use; Kraken Futures, whose contracts the
+            // lab's perps book is restricted to, when the caller does not say.
+            crate::connectors::Venue::Perps => exchange.filter(|c| c.perp_exchange().is_some()).unwrap_or(CostVenue::KrakenFutures),
         }
     }
 
@@ -438,6 +470,12 @@ mod tests {
         assert_eq!((y.taker_bps, y.maker_bps), (10.0, 10.0));
         let o = t.venue_model(CostVenue::Okx);
         assert_eq!((o.taker_bps, o.maker_bps), (10.0, 8.0));
+        let kf = t.venue_model(CostVenue::KrakenFutures);
+        assert_eq!((kf.taker_bps, kf.maker_bps), (5.0, 2.0), "Kraken Futures base tier");
+        let bp = t.venue_model(CostVenue::BybitPerps);
+        assert_eq!((bp.taker_bps, bp.maker_bps), (5.5, 2.0), "Bybit perps base tier");
+        assert_eq!(CostVenue::parse("kraken_futures"), Some(CostVenue::KrakenFutures));
+        assert_eq!(serde_json::to_string(&CostVenue::BybitPerps).unwrap(), "\"bybit_perps\"");
         let a = t.venue_model(CostVenue::Alpaca);
         assert_eq!((a.taker_bps, a.maker_bps), (0.0, 0.0), "equities are commission-free");
     }

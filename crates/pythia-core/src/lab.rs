@@ -63,6 +63,11 @@ pub struct LabSignal {
 /// [`LabSignal::asset_class`] of a book of US shares and ETFs.
 pub const US_EQUITY: &str = "us_equity";
 
+/// [`LabSignal::asset_class`] of a book of perpetual futures: weights may be
+/// negative (shorts), keys are coins, traded as `perp:<COIN>` on the perps
+/// venue (demo or paper only, see `engine::perps`).
+pub const PERP: &str = "perp";
+
 /// What the lab measured for the variant (reports/tsmom, reports/momentum2).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LabEvidence {
@@ -242,14 +247,21 @@ impl LabSignal {
         self.asset_class.as_deref() == Some(US_EQUITY)
     }
 
+    /// A book of perpetual futures, long and short.
+    pub fn is_perp(&self) -> bool {
+        self.asset_class.as_deref() == Some(PERP)
+    }
+
     /// The engine market a weight's key names: a key that is already a market
-    /// id (`alpaca:SPY`) as it is, else `alpaca:<KEY>` for a US equity book
-    /// and `crypto:<KEY>/USD` for a coin book.
+    /// id (`alpaca:SPY`) as it is, else `alpaca:<KEY>` for a US equity book,
+    /// `perp:<KEY>` for a perps book and `crypto:<KEY>/USD` for a coin book.
     pub fn market_id(&self, key: &str) -> String {
         if key.contains(':') {
             key.to_string()
         } else if self.is_us_equity() {
             format!("alpaca:{key}")
+        } else if self.is_perp() {
+            format!("perp:{}", crate::connectors::perps::alias(key))
         } else {
             format!("crypto:{key}/USD")
         }
@@ -457,6 +469,59 @@ pub fn rebalance(
     (out, untradable)
 }
 
+/// [`rebalance`] for a book that may be short (perps): `weights` are signed
+/// fractions of `capital`, `holdings` signed quantities. Each market's order
+/// moves its signed notional to the target, in one order even when that
+/// crosses zero (long to short). Orders that shrink a position go first:
+/// they free the margin the others need. `current_weight` is signed.
+pub fn rebalance_signed(
+    weights: &BTreeMap<String, f64>,
+    market_for: impl Fn(&str) -> Option<String>,
+    holdings: &HashMap<String, (f64, f64)>,
+    prices: &HashMap<String, f64>,
+    capital: f64,
+    min_notional: f64,
+    band: f64,
+) -> (Vec<Rebalance>, Vec<String>) {
+    let mut targets: BTreeMap<String, f64> = BTreeMap::new();
+    let mut untradable = vec![];
+    for (coin, w) in weights {
+        match market_for(coin) {
+            Some(m) if prices.contains_key(&m) && w.is_finite() => {
+                *targets.entry(m).or_insert(0.0) += *w;
+            }
+            _ => untradable.push(coin.clone()),
+        }
+    }
+    for m in holdings.keys() {
+        targets.entry(m.clone()).or_insert(0.0);
+    }
+    let threshold = min_notional.max(band * capital);
+    let mut out = vec![];
+    for (m, w) in targets {
+        let (qty, _) = holdings.get(&m).copied().unwrap_or((0.0, 0.0));
+        let Some(&price) = prices.get(&m) else { continue };
+        let current = qty * price;
+        let target = w * capital;
+        let diff = target - current;
+        // Closing what the target no longer wants always goes out, however small.
+        let closes = target == 0.0 && current != 0.0;
+        if diff.abs() < threshold && !closes {
+            continue;
+        }
+        out.push(Rebalance {
+            market_id: m,
+            side: if diff > 0.0 { Side::Buy } else { Side::Sell },
+            notional: diff.abs(),
+            target_weight: w,
+            current_weight: if capital > 0.0 { current / capital } else { 0.0 },
+        });
+    }
+    // Reductions first (the target is nearer zero than the position).
+    out.sort_by_key(|r| if r.target_weight.abs() < r.current_weight.abs() { 0 } else { 1 });
+    (out, untradable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +558,42 @@ mod tests {
         assert_eq!(orders[0].market_id, "crypto:SOL/USD");
         assert!((orders[0].notional - 1_000.0).abs() < 1e-9);
         assert_eq!(orders[1].side, Side::Buy);
+    }
+
+    #[test]
+    fn a_perps_book_goes_short_crosses_zero_in_one_order_and_shrinks_first() {
+        let w: BTreeMap<String, f64> =
+            [("BTC", 0.05), ("ETH", -0.05), ("SOL", -0.05), ("PEPE", 0.05)].into_iter().map(|(k, v)| (k.into(), v)).collect();
+        let s: LabSignal = serde_json::from_str(
+            r#"{"strategy":"m4_perps","variant":"x","as_of_ms":1,"generated_ms":2,"valid_until_ms":3,"quote":"USD",
+                "asset_class":"perp","weights":{"BTC":0.05,"ETH":-0.05,"XBT":0.0}}"#,
+        )
+        .unwrap();
+        assert!(s.is_perp());
+        assert_eq!(s.market_id("ETH"), "perp:ETH");
+        assert_eq!(s.market_id("XBT"), "perp:BTC", "one name per coin");
+        let prices: HashMap<String, f64> =
+            [("perp:BTC", 100_000.0), ("perp:ETH", 4_000.0), ("perp:SOL", 200.0)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let market = |c: &str| ["BTC", "ETH", "SOL"].contains(&c).then(|| format!("perp:{c}"));
+        // Long 10 SOL ($2,000) that the target wants short $500: one sell of
+        // $2,500 through zero. ETH new short $500. BTC long $500.
+        let holdings: HashMap<String, (f64, f64)> = [("perp:SOL".to_string(), (10.0, 200.0))].into_iter().collect();
+        let (orders, missing) = rebalance_signed(&w, market, &holdings, &prices, 10_000.0, 5.0, 0.002);
+        assert_eq!(missing, vec!["PEPE".to_string()]);
+        let sol = orders.iter().find(|o| o.market_id == "perp:SOL").unwrap();
+        assert_eq!(sol.side, Side::Sell);
+        assert!((sol.notional - 2_500.0).abs() < 1e-9);
+        assert_eq!(orders[0].market_id, "perp:SOL", "the shrinking order goes first");
+        let eth = orders.iter().find(|o| o.market_id == "perp:ETH").unwrap();
+        assert_eq!(eth.side, Side::Sell);
+        assert!((eth.notional - 500.0).abs() < 1e-9);
+        assert!((eth.target_weight + 0.05).abs() < 1e-12);
+        // A short held that the target drops is bought back, however small.
+        let holdings: HashMap<String, (f64, f64)> = [("perp:ETH".to_string(), (-0.0005, 4_000.0))].into_iter().collect();
+        let (orders, _) = rebalance_signed(&BTreeMap::new(), market, &holdings, &prices, 10_000.0, 5.0, 0.002);
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].side, Side::Buy);
+        assert!((orders[0].notional - 2.0).abs() < 1e-9);
     }
 
     #[test]

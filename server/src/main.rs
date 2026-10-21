@@ -46,6 +46,7 @@ use tower_http::cors::CorsLayer;
 
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
 use pythia_core::connectors::cex::{self, Exchange};
+use pythia_core::connectors::perps::PerpExchange;
 use pythia_core::connectors::{Environment, Side, Venue};
 use pythia_core::engine::autopilot::{AutopilotConfig, AutopilotMode, AutopilotUpdate, VenueCash};
 use pythia_core::engine::maker::MakerSettings;
@@ -135,15 +136,51 @@ fn credentials_from(get: &dyn Fn(&str) -> Option<String>) -> Credentials {
             let s = get("PYTHIA_DEMO_EXCHANGE_SECRET")?;
             Some((ex, k, s, get("PYTHIA_DEMO_EXCHANGE_PASSPHRASE").unwrap_or_default()))
         });
+    let perps_demo = perps_demo_from(get);
     Credentials {
         alpaca,
         alpaca_live,
         exchange,
         exchange_demo,
+        perps_demo,
         crypto_demo_alpaca,
         // Marketable-limit band for Alpaca market orders; 25bps when unset.
         alpaca_slippage_bps: get("PYTHIA_SLIPPAGE_BPS").and_then(|v| v.parse().ok()),
         alpaca_allow_shorts: matches!(get("PYTHIA_ALLOW_SHORTS").as_deref(), Some("1" | "true" | "TRUE" | "yes" | "on")),
+    }
+}
+
+/// The perps DEMO route's venue and demo keys (docs/KRAKEN-FUTURES-DEMO.md).
+/// `PYTHIA_PERPS_DEMO` picks the venue (`kraken_futures` or `bybit`); unset,
+/// the venue whose keys are present, Kraken Futures first. Kraken Futures
+/// keys: `KRAKEN_FUTURES_DEMO_KEY` / `KRAKEN_FUTURES_DEMO_SECRET`. Bybit:
+/// `BYBIT_DEMO_KEY` / `BYBIT_DEMO_SECRET`, else the crypto demo pair when
+/// `PYTHIA_DEMO_EXCHANGE=bybit` (one Bybit demo account trades spot and
+/// perps). There is no live perps key: real-money perps are refused.
+fn perps_demo_from(get: &dyn Fn(&str) -> Option<String>) -> Option<(PerpExchange, String, String)> {
+    let kraken = || Some((get("KRAKEN_FUTURES_DEMO_KEY")?, get("KRAKEN_FUTURES_DEMO_SECRET")?));
+    let bybit = || {
+        let own = get("BYBIT_DEMO_KEY").zip(get("BYBIT_DEMO_SECRET"));
+        let shared = || {
+            let ex = get("PYTHIA_DEMO_EXCHANGE")?;
+            (Exchange::parse(&ex) == Some(Exchange::Bybit))
+                .then(|| get("PYTHIA_DEMO_EXCHANGE_KEY").zip(get("PYTHIA_DEMO_EXCHANGE_SECRET")))
+                .flatten()
+        };
+        own.or_else(shared)
+    };
+    let with = |ex: PerpExchange, keys: Option<(String, String)>| keys.map(|(k, s)| (ex, k, s));
+    match get("PYTHIA_PERPS_DEMO").as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("none") => None,
+        Some(s) => match PerpExchange::parse(s) {
+            Some(PerpExchange::KrakenFutures) => with(PerpExchange::KrakenFutures, kraken()),
+            Some(PerpExchange::Bybit) => with(PerpExchange::Bybit, bybit()),
+            None => {
+                tracing::warn!("PYTHIA_PERPS_DEMO={s} is not a perps venue (kraken_futures or bybit); perps demo off");
+                None
+            }
+        },
+        None => with(PerpExchange::KrakenFutures, kraken()).or_else(|| with(PerpExchange::Bybit, bybit())),
     }
 }
 
@@ -294,6 +331,67 @@ async fn demo_reconcile_loop(state: AppState) {
     let every = Duration::from_millis(pythia_core::engine::demo_reconcile::DEMO_RECONCILE_EVERY_MS as u64);
     loop {
         execution::reconcile_demo(&state.engine, &state.creds).await;
+        tokio::time::sleep(every).await;
+    }
+}
+
+/// Perps marks every 15 seconds while perps are held or a perps autopilot
+/// runs (inside the risk manager's 30-second staleness limit), every five
+/// minutes otherwise, the contract list once a day, and the settled funding
+/// of what is held whenever the engine says it is due. Public data only.
+async fn perps_market_loop(state: AppState) {
+    let http = pythia_core::connectors::perps::data_client();
+    let mut every = tokio::time::interval(Duration::from_secs(15));
+    let mut failing = false;
+    let mut n: u64 = 0;
+    let mut marks_at: i64 = 0;
+    loop {
+        every.tick().await;
+        let gap = state.engine.lock().unwrap().perp_marks_every_ms();
+        let now = now_ms();
+        let marks = gap.is_some_and(|g| now - marks_at >= g - 1_000);
+        if marks {
+            marks_at = now;
+        }
+        match execution::perps::refresh_perps_market(&state.engine, &http, marks).await {
+            Ok(k) => {
+                if failing || n == 0 {
+                    tracing::info!("perps: {k} marks read");
+                }
+                failing = false;
+            }
+            Err(e) => {
+                if !failing {
+                    tracing::warn!("perps market data not read ({e}); retrying every 15 s");
+                }
+                failing = true;
+            }
+        }
+        // Funding: once a minute is plenty to notice a settlement.
+        if n % 4 == 0 {
+            execution::perps::book_perps_funding(&state.engine, &http).await;
+        }
+        n += 1;
+    }
+}
+
+/// The perps demo account's margin, every minute (the margin check needs a
+/// read under 30 minutes old).
+async fn perps_account_loop(state: AppState) {
+    let mut every = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        every.tick().await;
+        execution::perps::read_perps_account(&state.engine, &state.creds).await;
+    }
+}
+
+/// The perps demo account against the books, shortly after startup and then
+/// every ten minutes, like the Alpaca paper route.
+async fn perps_reconcile_loop(state: AppState) {
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let every = Duration::from_millis(pythia_core::engine::perps::PERP_RECONCILE_EVERY_MS as u64);
+    loop {
+        execution::perps::reconcile_perps(&state.engine, &state.creds).await;
         tokio::time::sleep(every).await;
     }
 }
@@ -904,6 +1002,10 @@ async fn main() {
         }
         e.set_connected(creds.connected_venues());
         e.set_demo_venues(creds.demo_venues(), creds.crypto_demo_venue(), creds.crypto_demo_real_prices());
+        // Perps: the venue whose marks and funding the perps markets follow,
+        // and whether its demo account can take orders. Never live.
+        let perps_ex = execution::perps::perps_exchange_from(env_str("PYTHIA_PERPS_DEMO").as_deref(), &creds);
+        e.set_perps_route(perps_ex, perps_ex.is_some() && creds.perps_exchange() == perps_ex);
         // A headless instance that only runs lab books (the VPS) pauses the
         // built-in indicator strategies, which would otherwise hold the same
         // coins and block the lab book from running its portfolio.
@@ -985,6 +1087,16 @@ async fn main() {
     // ten minutes, while demo orders go there.
     if state.creds.crypto_demo_on_alpaca() || state.creds.demo_venues().contains(&Venue::Alpaca) {
         tokio::spawn(demo_reconcile_loop(state.clone()));
+    }
+    // Perps (the lab's market-neutral M4 book): marks and funding from the
+    // perps venue's public data, the demo account's margin, and the demo
+    // account reconciled every ten minutes. Demo or paper only.
+    if state.engine.lock().unwrap().perps_exchange().is_some() {
+        tokio::spawn(perps_market_loop(state.clone()));
+        if state.creds.perps_demo.is_some() {
+            tokio::spawn(perps_account_loop(state.clone()));
+            tokio::spawn(perps_reconcile_loop(state.clone()));
+        }
     }
     // The engine daemon — the network analog of the desktop tick loop.
     tokio::spawn(tick_loop(state.clone()));
@@ -2480,6 +2592,36 @@ mod tests {
 
         // Unset: no crypto demo route at all.
         assert!(!creds(&paper).demo_venues().contains(&Venue::Crypto));
+    }
+
+    #[test]
+    fn perps_demo_keys_come_from_their_own_variables_and_never_make_a_live_connector() {
+        let kf = [("KRAKEN_FUTURES_DEMO_KEY", "KK"), ("KRAKEN_FUTURES_DEMO_SECRET", "KS")];
+        let by = [("BYBIT_DEMO_KEY", "BK"), ("BYBIT_DEMO_SECRET", "BS")];
+        // Kraken Futures keys alone: the Kraken Futures demo route.
+        let c = creds(&kf);
+        assert_eq!(c.perps_exchange(), Some(PerpExchange::KrakenFutures));
+        assert_eq!(c.connector_env(Venue::Perps, Environment::Demo, false, false).unwrap().label(), "Kraken Futures (demo)");
+        assert!(c.connector_env(Venue::Perps, Environment::Live, false, false).err().unwrap().contains("switched off"));
+        // Both, with Bybit chosen: Bybit, with its own keys.
+        let c = creds(&[kf[0], kf[1], by[0], by[1], ("PYTHIA_PERPS_DEMO", "bybit")]);
+        assert_eq!(c.perps_demo.as_ref().map(|p| (p.0, p.1.as_str())), Some((PerpExchange::Bybit, "BK")));
+        // Bybit chosen without its own pair: the crypto demo pair of the same Bybit demo account.
+        let c = creds(&[
+            ("PYTHIA_PERPS_DEMO", "bybit"),
+            ("PYTHIA_DEMO_EXCHANGE", "bybit"),
+            ("PYTHIA_DEMO_EXCHANGE_KEY", "DK"),
+            ("PYTHIA_DEMO_EXCHANGE_SECRET", "DS"),
+        ]);
+        assert_eq!(c.perps_demo.as_ref().map(|p| p.1.as_str()), Some("DK"));
+        // A venue chosen without its keys, or switched off: no demo route.
+        assert!(creds(&[("PYTHIA_PERPS_DEMO", "kraken_futures"), by[0], by[1]]).perps_demo.is_none());
+        assert!(creds(&[("PYTHIA_PERPS_DEMO", "off"), kf[0], kf[1]]).perps_demo.is_none());
+        // Without keys the engine still follows Kraken Futures for paper perps.
+        let none = creds(&[]);
+        assert_eq!(execution::perps::perps_exchange_from(None, &none), Some(PerpExchange::KrakenFutures));
+        assert_eq!(execution::perps::perps_exchange_from(Some("off"), &none), None);
+        assert!(!none.demo_venues().contains(&Venue::Perps));
     }
 
     fn with_lab_book() -> Engine {

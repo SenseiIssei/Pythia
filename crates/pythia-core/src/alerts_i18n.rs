@@ -559,6 +559,8 @@ pub enum AssetClass {
     Crypto,
     UsShares,
     Predictions,
+    /// Perpetual futures, long and short (demo or paper only).
+    Perps,
 }
 
 impl AssetClass {
@@ -568,9 +570,11 @@ impl AssetClass {
             (Lang::En, AssetClass::Crypto) => "Crypto",
             (Lang::En, AssetClass::UsShares) => "US shares",
             (Lang::En, AssetClass::Predictions) => "Prediction markets",
+            (Lang::En, AssetClass::Perps) => "Perps (long and short)",
             (Lang::De, AssetClass::Crypto) => "Krypto",
             (Lang::De, AssetClass::UsShares) => "US-Aktien",
             (Lang::De, AssetClass::Predictions) => "Prognosemärkte",
+            (Lang::De, AssetClass::Perps) => "Perps (long und short)",
         }
     }
 }

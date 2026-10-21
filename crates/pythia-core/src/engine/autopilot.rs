@@ -519,6 +519,15 @@ pub struct AutopilotStatus {
     /// A portfolio: each asset class with its budget and its own P&L.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub classes: Vec<ClassStatus>,
+    /// Perps: funding booked so far (in `pnl` already; negative = paid).
+    #[serde(default)]
+    pub funding: f64,
+    /// What it holds long and short at the mark, in dollars (short as a
+    /// positive amount). Only a perps book can be short.
+    #[serde(default)]
+    pub long_usd: f64,
+    #[serde(default)]
+    pub short_usd: f64,
 }
 
 /// One asset class of a portfolio autopilot, as the UI shows it.
@@ -852,6 +861,13 @@ pub struct Autopilot {
     /// Its curve was repaired after the fact, and how, in plain words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curve_note: Option<String>,
+    /// Perps: funding booked so far (already in `realized`; negative = paid).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub funding: f64,
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
 }
 
 impl Autopilot {
@@ -1515,6 +1531,7 @@ fn engine_venue(cv: CostVenue) -> Venue {
     match cv {
         CostVenue::Alpaca => Venue::Alpaca,
         CostVenue::Polymarket => Venue::Polymarket,
+        CostVenue::KrakenFutures | CostVenue::BybitPerps => Venue::Perps,
         _ => Venue::Crypto,
     }
 }
@@ -1524,6 +1541,7 @@ fn asset_words(v: Venue) -> &'static str {
         Venue::Alpaca => "US shares",
         Venue::Crypto => "crypto",
         Venue::Polymarket => "prediction markets",
+        Venue::Perps => "perps (long and short)",
     }
 }
 
@@ -1533,6 +1551,7 @@ fn class_key(v: Venue) -> &'static str {
         Venue::Alpaca => "alpaca",
         Venue::Crypto => "crypto",
         Venue::Polymarket => "polymarket",
+        Venue::Perps => "perps",
     }
 }
 
@@ -1547,6 +1566,7 @@ fn asset_class(v: Venue) -> i18n::AssetClass {
         Venue::Alpaca => i18n::AssetClass::UsShares,
         Venue::Crypto => i18n::AssetClass::Crypto,
         Venue::Polymarket => i18n::AssetClass::Predictions,
+        Venue::Perps => i18n::AssetClass::Perps,
     }
 }
 
@@ -1565,6 +1585,8 @@ pub(super) fn venue_label(cv: CostVenue) -> &'static str {
         CostVenue::Coinbase => "Coinbase",
         CostVenue::Alpaca => "Alpaca",
         CostVenue::Polymarket => "Polymarket",
+        CostVenue::KrakenFutures => "Kraken Futures",
+        CostVenue::BybitPerps => "Bybit perps",
     }
 }
 
@@ -1661,6 +1683,35 @@ pub fn net_lab_targets(books: &[(String, f64, &BTreeMap<String, f64>)]) -> (BTre
     (combined, shares)
 }
 
+/// [`net_lab_targets`] for perps books, which may be short: weights add up
+/// signed, and each book's share of a coin is its part of the coin's gross
+/// (the absolute contributions), so a long book and a short book that cancel
+/// each other out both keep a share of what is booked there.
+pub fn net_lab_targets_signed(books: &[(String, f64, &BTreeMap<String, f64>)]) -> (BTreeMap<String, f64>, BTreeMap<String, BTreeMap<String, f64>>) {
+    let mut parts: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for (sid, scale, weights) in books {
+        if !scale.is_finite() || *scale <= 0.0 {
+            continue;
+        }
+        for (coin, w) in weights.iter() {
+            if w.is_finite() && *w != 0.0 {
+                *parts.entry(coin.clone()).or_default().entry(sid.clone()).or_insert(0.0) += scale * w;
+            }
+        }
+    }
+    let mut combined = BTreeMap::new();
+    let mut shares = BTreeMap::new();
+    for (coin, by) in parts {
+        let gross: f64 = by.values().map(|v| v.abs()).sum();
+        if gross <= 0.0 {
+            continue;
+        }
+        combined.insert(coin.clone(), by.values().sum::<f64>());
+        shares.insert(coin, by.into_iter().map(|(k, v)| (k, v.abs() / gross)).collect());
+    }
+    (combined, shares)
+}
+
 impl Engine {
     fn ap_index(&self, id: &str) -> Option<usize> {
         self.autopilots.iter().position(|a| a.config.id == id)
@@ -1673,7 +1724,7 @@ impl Engine {
     }
 
     /// The active autopilot whose book this is.
-    fn ap_of_book(&self, book: &str) -> Option<usize> {
+    pub(super) fn ap_of_book(&self, book: &str) -> Option<usize> {
         if book.is_empty() {
             return None;
         }
@@ -1763,7 +1814,7 @@ impl Engine {
         Some((p1 / p0 - 1.0) * 100.0)
     }
 
-    fn ap_equity(&self, ap: &Autopilot) -> f64 {
+    pub(super) fn ap_equity(&self, ap: &Autopilot) -> f64 {
         ap.start_capital + ap.realized - ap.fees + ap.released + self.ap_unrealized(ap, None)
     }
 
@@ -1911,7 +1962,71 @@ impl Engine {
         let Some(i) = self.ap_of_book(book) else { return false };
         let ap = &self.autopilots[i];
         let live_ok = ap.config.mode != AutopilotMode::Live || config_venue(&ap.config).is_some_and(|v| self.live_routable(v));
-        ap.state == AutopilotState::Running && live_ok && ap.sleeve(sid).is_some_and(|s| s.markets.iter().any(|m| m == market))
+        // A perps lab book may name any coin the venue lists, and its markets
+        // are created as the signals name them (after the start): every perps
+        // market is its own.
+        let perps_lab = market.starts_with(super::perps::PERP_PREFIX)
+            && self.is_lab_book(sid)
+            && self.strategy_class(sid) == Some(Venue::Perps);
+        ap.state == AutopilotState::Running
+            && live_ok
+            && ap.sleeve(sid).is_some_and(|s| perps_lab || s.markets.iter().any(|m| m == market))
+    }
+
+    /// The perps checks of an autopilot start: never live, on the perps
+    /// venue configured on the server, and in demo only with a working demo
+    /// route and an amount the demo account holds.
+    fn perps_start_check(&self, cfg: &AutopilotConfig, cv: CostVenue) -> Result<(), String> {
+        if cfg.mode == AutopilotMode::Live {
+            return Err(crate::connectors::perps::PERPS_LIVE_REFUSED.to_string());
+        }
+        if cfg.portfolio {
+            return Err("A portfolio autopilot covers crypto and US shares; perps run in an autopilot of their own.".into());
+        }
+        let Some(ex) = self.perps.exchange else {
+            return Err("No perps venue is configured on the server (PYTHIA_PERPS_DEMO, docs/KRAKEN-FUTURES-DEMO.md).".into());
+        };
+        if cv.perp_exchange() != Some(ex) {
+            return Err(format!(
+                "Perps here follow {}, the perps venue configured on the server: its marks, funding and demo account. Pick {} for this autopilot.",
+                ex.label(),
+                ex.id()
+            ));
+        }
+        if cfg.sleeves.is_empty() {
+            return Err(
+                "Pythia does not pick perps books on its own: the M4 book is an experiment (it fails the deflation test). Name it as the strategy: lab:m4_perps."
+                    .into(),
+            );
+        }
+        if cfg.mode == AutopilotMode::Demo {
+            if let Some(why) = self.perp_demo_block() {
+                return Err(format!("A demo autopilot on perps cannot start: {why}."));
+            }
+            let Some(equity) = self.perp_account_equity() else {
+                return Err(format!(
+                    "The {} demo account has not been read yet, so its margin is unknown. Wait a minute and try again.",
+                    ex.label()
+                ));
+            };
+            let committed: f64 = self
+                .autopilots
+                .iter()
+                .filter(|a| a.is_active() && a.config.mode == AutopilotMode::Demo && config_venue(&a.config) == Some(Venue::Perps))
+                .map(|a| a.start_capital)
+                .sum();
+            let room = (equity - committed).max(0.0);
+            if cfg.capital_usd > room + EPS {
+                return Err(format!(
+                    "The {} demo account holds {}{}, so {} cannot be given to this autopilot.",
+                    ex.label(),
+                    usd(equity),
+                    if committed > 0.0 { format!(", of which {} is given to other perps demo autopilots", usd(committed)) } else { String::new() },
+                    usd(cfg.capital_usd)
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Sizing for an entry by a strategy in an autopilot's book.
@@ -1990,7 +2105,7 @@ impl Engine {
 
     /// Gross notional at the mark of what it owns in the classes `pick`
     /// accepts, plus its orders for them still at the venue.
-    fn ap_class_gross(&self, ap: &Autopilot, pick: impl Fn(Venue) -> bool) -> f64 {
+    pub(super) fn ap_class_gross(&self, ap: &Autopilot, pick: impl Fn(Venue) -> bool) -> f64 {
         let held: f64 = ap
             .owned
             .keys()
@@ -2313,6 +2428,9 @@ impl Engine {
         if venue != Venue::Crypto && venue != engine_venue(cv) {
             return Err(format!("{} does not trade {} here.", venue_label(cv), asset_words(venue)));
         }
+        if venue == Venue::Perps {
+            self.perps_start_check(&cfg, cv)?;
+        }
         if cfg.mode == AutopilotMode::Demo && venue == Venue::Crypto {
             // Crypto demo orders go to the exchange whose demo keys are in
             // Settings (or to the Alpaca paper account), whatever the live
@@ -2439,6 +2557,12 @@ impl Engine {
         let assigned = assign_markets(&wants, &taken);
         let mut chosen: Vec<(String, f64, String, Vec<String>)> = Vec::new();
         for ((sid, w, why), markets) in picks.into_iter().zip(assigned) {
+            if markets.is_empty() && self.strategy_class(&sid) == Some(Venue::Perps) {
+                let name = self.strategies.iter().find(|s| s.id == sid).map(|s| s.name.clone()).unwrap_or(sid);
+                return Err(format!(
+                    "{name} has no perps market here yet: the perps venue's contract list or marks have not been read. Wait a minute after the server starts and try again."
+                ));
+            }
             if markets.is_empty() {
                 let name = self.strategies.iter().find(|s| s.id == sid).map(|s| s.name.clone()).unwrap_or(sid);
                 if auto {
@@ -2726,6 +2850,7 @@ impl Engine {
             class_notes: BTreeMap::new(),
             capital_log: Vec::new(),
             curve_note: None,
+            funding: 0.0,
         });
         let i = self.autopilots.len() - 1;
         let x = self.autopilots[i].config.capital_usd;
@@ -3483,9 +3608,38 @@ impl Engine {
                     avg_capital: ap.avg_capital(ap.stopped_ms.unwrap_or_else(|| self.now())),
                     curve_note: ap.curve_note.clone(),
                     classes: self.ap_class_statuses(ap),
+                    funding: ap.funding,
+                    long_usd: self.ap_side_usd(ap, true),
+                    short_usd: self.ap_side_usd(ap, false),
                 }
             })
             .collect()
+    }
+
+    /// What an autopilot holds long (or short) at the mark, in dollars.
+    fn ap_side_usd(&self, ap: &Autopilot, long: bool) -> f64 {
+        ap.owned
+            .keys()
+            .filter_map(|m| {
+                let p = self.ap_position(ap, m)?;
+                ((p.qty > 0.0) == long && p.qty != 0.0).then(|| (p.qty * self.ap_mark(m, p.avg_price)).abs())
+            })
+            .sum()
+    }
+
+    /// Funding on a perps position in an autopilot's book: realised P&L of
+    /// the autopilot (split between its lab sleeves like any P&L there),
+    /// and counted on its own so the owner can see what funding did.
+    pub(super) fn autopilot_on_funding(&mut self, book: &str, market: &str, sid: &str, amount: f64) {
+        if book.is_empty() {
+            return;
+        }
+        let Some(i) = self.autopilots.iter().position(|a| a.config.id == book) else { return };
+        let ap = &mut self.autopilots[i];
+        let owner = ap.owned.get(market).cloned().unwrap_or_else(|| sid.to_string());
+        ap.realized += amount;
+        ap.funding += amount;
+        ap.book_split(market, &owner, amount, 0.0, false);
     }
 
     /// A running autopilot that holds nothing and has nothing at the venue is
@@ -4254,7 +4408,7 @@ impl Engine {
     fn sleeve_universe(&self, s: &super::StrategyConfig, mode: AutopilotMode) -> Vec<String> {
         let tradable = |m: &super::Market| mode != AutopilotMode::Demo || self.demo_lists(m);
         if s.kind == StrategyKind::LabTargets {
-            self.lab_book_markets(s.venue_class == Venue::Alpaca)
+            self.lab_markets_of(s.venue_class)
                 .into_iter()
                 .filter(|m| tradable(m))
                 .map(|m| m.id)

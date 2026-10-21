@@ -25,8 +25,10 @@
 //!    is a rejection; an unanswered poll is retried, never assumed.
 
 pub mod bandit;
+pub mod perps;
 
 use crate::connectors::cex::{CexConnector, Exchange};
+use crate::connectors::perps::{PerpConnector, PerpExchange, PERPS_LIVE_REFUSED};
 use crate::connectors::{
     alpaca::{AlpacaConnector, AlpacaCryptoDemo},
     alpaca_crypto::OpenOrder as CryptoOpenOrder,
@@ -66,6 +68,11 @@ pub struct Credentials {
     pub alpaca_slippage_bps: Option<f64>,
     /// Allow opening short equity positions (needs a margin account).
     pub alpaca_allow_shorts: bool,
+    /// The perps venue the perps DEMO route trades on and its demo (key,
+    /// secret), from `KRAKEN_FUTURES_DEMO_KEY` / `_SECRET` or
+    /// `BYBIT_DEMO_KEY` / `_SECRET` (see `docs/KRAKEN-FUTURES-DEMO.md`).
+    /// There is no live perps slot: real-money perps are refused.
+    pub perps_demo: Option<(PerpExchange, String, String)>,
 }
 
 impl Credentials {
@@ -132,6 +139,8 @@ impl Credentials {
             Venue::Polymarket => Err(
                 "Polymarket order routing is not implemented — its odds are read-only (see SAFETY.md)".into(),
             ),
+            // No live perps connector exists: there is nothing to build.
+            Venue::Perps => Err(PERPS_LIVE_REFUSED.into()),
         }
     }
 
@@ -198,12 +207,33 @@ impl Credentials {
                 Ok(Box::new(c))
             }
             Venue::Polymarket => Err("Polymarket has no demo environment and no order path".into()),
+            Venue::Perps => Ok(Box::new(self.perps_connector()?)),
         }
+    }
+
+    /// The perps demo connector: the configured perps venue's demo host with
+    /// its demo keys. Never a live host (there is no such connector).
+    pub fn perps_connector(&self) -> Result<PerpConnector, String> {
+        let (ex, k, s) = self.perps_demo.clone().ok_or_else(|| {
+            "No perps demo keys: set KRAKEN_FUTURES_DEMO_KEY / KRAKEN_FUTURES_DEMO_SECRET or BYBIT_DEMO_KEY / \
+             BYBIT_DEMO_SECRET (and PYTHIA_PERPS_DEMO) in the root-only env file, docs/KRAKEN-FUTURES-DEMO.md"
+                .to_string()
+        })?;
+        let c = PerpConnector::demo(ex, k, s);
+        if !c.is_live_ready() {
+            return Err(format!("{} demo keys are incomplete", ex.label()));
+        }
+        Ok(c)
+    }
+
+    /// The perps venue the demo route trades on, when keys are set.
+    pub fn perps_exchange(&self) -> Option<PerpExchange> {
+        self.perps_demo.as_ref().map(|p| p.0)
     }
 
     /// Venues whose demo route has usable keys, for the engine and the badges.
     pub fn demo_venues(&self) -> HashSet<Venue> {
-        [Venue::Alpaca, Venue::Crypto]
+        [Venue::Alpaca, Venue::Crypto, Venue::Perps]
             .into_iter()
             .filter(|v| self.connector_env(*v, Environment::Demo, true, false).is_ok())
             .collect()

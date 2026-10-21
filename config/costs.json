@@ -20,7 +20,10 @@
     "are not modelled); Alpaca crypto 0.15 % maker / 0.25 % taker, and its spread and depth are a guess from",
     "one look at Alpaca's public book on 2026-10-07, not a calibration (the pairs beyond BTC and ETH, there for",
     "the crypto demo route on Alpaca paper, are wider guesses still, unmeasured); Polymarket charges no trading fee",
-    "on most markets, so the spread is the cost."
+    "on most markets, so the spread is the cost.",
+    "Perps (the demo route for the lab's market-neutral M4 book): Kraken Futures base tier 0.02 % maker / 0.05 %",
+    "taker, Bybit USDT perps 0.02 / 0.055; their spreads and depths are guesses from typical quoted books, unmeasured.",
+    "Funding is not a cost here: the engine books it per position from the venue's published rates."
   ],
   "version": 1,
   "venues": {
@@ -181,6 +184,34 @@
       "minNotional": 1,
       "defaultDepth": 2000,
       "symbols": {}
+    },
+    "kraken_futures": {
+      "label": "Kraken Futures perps (demo route)",
+      "takerBps": 5,
+      "makerBps": 2,
+      "halfSpreadBps": 3,
+      "impactCoeff": 10,
+      "borrowBpsYr": 0,
+      "minNotional": 5,
+      "defaultDepth": 100000,
+      "symbols": {
+        "PF_XBTUSD": { "halfSpreadBps": 0.1, "impactCoeff": 1, "defaultDepth": 2000000 },
+        "PF_ETHUSD": { "halfSpreadBps": 0.3, "impactCoeff": 2, "defaultDepth": 1000000 }
+      }
+    },
+    "bybit_perps": {
+      "label": "Bybit USDT perps (demo route)",
+      "takerBps": 5.5,
+      "makerBps": 2,
+      "halfSpreadBps": 2,
+      "impactCoeff": 8,
+      "borrowBpsYr": 0,
+      "minNotional": 5,
+      "defaultDepth": 200000,
+      "symbols": {
+        "BTCUSDT": { "halfSpreadBps": 0.05, "impactCoeff": 0.5, "defaultDepth": 5000000 },
+        "ETHUSDT": { "halfSpreadBps": 0.1, "impactCoeff": 1, "defaultDepth": 3000000 }
+      }
     }
   }
 }

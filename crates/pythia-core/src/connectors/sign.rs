@@ -56,6 +56,38 @@ pub fn kraken_signature(secret_b64: &str, path: &str, nonce: &str, postdata: &st
     Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
 }
 
+/// Kraken Futures' `Authent` header
+/// (<https://docs.kraken.com/api/docs/guides/futures-rest>):
+/// `base64(HMAC-SHA512(base64decode(secret), SHA256(postData || nonce || endpointPath)))`.
+///
+/// Not the spot formula above: the order of the parts differs and the path is
+/// hashed, not prepended. `endpoint_path` is the request path without the
+/// leading `/derivatives` (`/api/v3/sendorder`), `post_data` the url-encoded
+/// `k=v&k=v` string exactly as sent (query or body, without the `?`), and
+/// `nonce` the `Nonce` header or empty when none is sent. The secret is
+/// decoded with or without its `=` padding.
+pub fn kraken_futures_signature(secret_b64: &str, endpoint_path: &str, nonce: &str, post_data: &str) -> Result<String, String> {
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    );
+    let key = LENIENT
+        .decode(secret_b64.trim())
+        .map_err(|_| "Kraken Futures API secret is not valid base64; copy it again from the API keys page".to_string())?;
+    let path = endpoint_path.strip_prefix("/derivatives").unwrap_or(endpoint_path);
+    let mut sha = Sha256::new();
+    sha.update(post_data.as_bytes());
+    sha.update(nonce.as_bytes());
+    sha.update(path.as_bytes());
+    let digest = sha.finalize();
+    let mut mac = HmacSha512::new_from_slice(&key).map_err(|e| e.to_string())?;
+    mac.update(&digest);
+    Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
+}
+
 /// Percent-encode one query/form value (RFC 3986 unreserved set kept as-is).
 pub fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -261,6 +293,31 @@ mod tests {
             kraken_signature(secret, path, nonce, postdata).unwrap(),
             "4/dpxb3iT4tp/ZCVEwSnEsLxx0bqyhLpdfOpc6fn7OR8+UClSV5n9E6aSS8MPtnRfp32bAb0nmbRn6H8ndwLUQ=="
         );
+    }
+
+    #[test]
+    fn kraken_futures_authent_follows_the_documented_recipe() {
+        // The docs' sample secret (87 characters, its padding left off) and
+        // nonce. Kraken publishes no expected Authent, so the expected values
+        // were computed with the documented recipe in Python
+        // (sha256(postData + nonce + path), HMAC-SHA512 with the decoded
+        // secret, base64), the same steps as Kraken's own reference client.
+        let secret = "rttp4AzwRfYEdQ7R7X8Z/04Y4TZPa97pqCypi3xXxAqftygftnI6H9yGV+OcUOOJeFtZkr8mVwbAndU3Kz4Q+eG";
+        assert_eq!(
+            kraken_futures_signature(secret, "/api/v3/orderbook", "1415957147987", "symbol=fi_xbtusd_180615").unwrap(),
+            "DqUyz8Wh/72af7dimSXHw91IFxrAriTgVodyg2s67PU2mVStwLDQak+uIoCtfb43XONq0xVAp+vm5dqnhFAB1Q=="
+        );
+        assert_eq!(
+            kraken_futures_signature(secret, "/api/v3/openpositions", "1415957147987", "").unwrap(),
+            "Te83uR/IcaVaB7NTDlwkcvPV1ZyKFGjnDZ2+63Rs5B0sELkWbXOPdoDKLsVzD+v/AgnmPpAJmtF8Le7ElEVMrw=="
+        );
+        // The `/derivatives` prefix of the URL is not part of the signed path,
+        // and a secret with its padding signs the same.
+        let body = "orderType=lmt&symbol=PF_XBTUSD&side=buy&size=0.0001&limitPrice=50000";
+        let want = "fljWnaPbBY/DFh+fuX0SXVtu12NsvEKE8hEGJEh/TVdMYj9v3R7qe9kdzFCsai5SR7A6T362SjKBnTU/nnDA+g==";
+        assert_eq!(kraken_futures_signature(secret, "/api/v3/sendorder", "", body).unwrap(), want);
+        assert_eq!(kraken_futures_signature(&format!("{secret}="), "/derivatives/api/v3/sendorder", "", body).unwrap(), want);
+        assert!(kraken_futures_signature("not base64 !", "/api/v3/accounts", "", "").is_err());
     }
 
     #[test]
