@@ -26,6 +26,12 @@
 //! Paper-first, exactly like the desktop app: real money stays gated behind the
 //! same sovereign risk manager and vault. This process only ever runs the
 //! simulated matching engine.
+//!
+//! The API has no login of its own. It listens on 127.0.0.1 unless
+//! `PYTHIA_BIND` says otherwise, refuses state-changing requests from foreign
+//! web origins and requests for foreign host names (`guard.rs`), and is meant
+//! to be reached from elsewhere only through an authenticating reverse proxy
+//! (SECURITY.md).
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -42,7 +48,8 @@ use axum::{
 };
 use serde::Deserialize;
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
+
+mod guard;
 
 use pythia_core::connectors::alpaca::{AlpacaAccount, AlpacaConnector};
 use pythia_core::connectors::cex::{self, Exchange};
@@ -760,9 +767,12 @@ fn read_event_image(path: &str, roots: &[std::path::PathBuf]) -> Result<Vec<u8>,
 async fn post_alert_event(
     State(st): State<AppState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<EventReq>,
 ) -> axum::response::Response {
-    if !event_source_allowed(addr.ip(), &st.alert_files.event_from) {
+    // Behind a reverse proxy every caller looks like 127.0.0.1: a proxied
+    // request is not from this machine, whatever its peer address says.
+    if guard::proxied(&headers) || !event_source_allowed(addr.ip(), &st.alert_files.event_from) {
         return api_error(StatusCode::FORBIDDEN, "events are taken from this machine only (see PYTHIA_ALERT_EVENT_FROM)");
     }
     let Some(sink) = &st.alert_sink else {
@@ -1123,7 +1133,44 @@ async fn main() {
         tokio::spawn(save_loop(state.clone()));
     }
 
-    let app = Router::new()
+    let guard_cfg = Arc::new(guard::GuardConfig::from_env());
+    if !guard_cfg.origins.is_empty() {
+        tracing::info!("browser origins allowed besides loopback: {}", guard_cfg.origins.join(", "));
+    }
+    let app = app(state.clone(), guard_cfg);
+
+    // Loopback by default: the API has no login of its own (SECURITY.md).
+    let addr = std::env::var("PYTHIA_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(
+                "cannot bind {addr}: {e}\n\
+                 → is another Pythia server already running? Stop it, or set \
+                 PYTHIA_BIND to a free port in .env"
+            );
+            std::process::exit(1);
+        }
+    };
+    tracing::info!("Pythia backend listening on http://{addr}");
+    if !addr.starts_with("127.") && !addr.starts_with("[::1]") && !addr.starts_with("localhost") {
+        tracing::warn!(
+            "{addr} is not a loopback address: the API has no login of its own, so only expose it behind \
+             an authenticating reverse proxy or inside a container published on 127.0.0.1 (see SECURITY.md)"
+        );
+    }
+    log_venue_preflight(&state);
+
+    // With the peer address: `POST /api/alerts/event` takes events from this machine only.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+}
+
+/// Where the API listens when `PYTHIA_BIND` is unset: this machine only.
+const DEFAULT_BIND: &str = "127.0.0.1:8787";
+
+/// The whole HTTP API over `state`, behind the request guards.
+fn app(state: AppState, guard_cfg: Arc<guard::GuardConfig>) -> Router {
+    Router::new()
         .route("/api/health", get(health))
         .route("/api/preflight", get(get_preflight))
         .route("/api/research/validate", get(get_validate))
@@ -1172,23 +1219,16 @@ async fn main() {
         .merge(alert_routes())
         // The pump.fun wallet page: the live service's status, lower limits, the kill switch.
         .merge(pumpfun_routes(pythia_core::labview::data_dir()))
-        // The dashboards are served from a different origin in dev; allow them.
-        .layer(CorsLayer::permissive())
-        .with_state(state.clone());
+        // The dashboards run on another port in development: CORS for the
+        // allowed origins only, never any web page (see guard.rs).
+        .layer(guard::cors(guard_cfg.clone()))
+        .layer(axum::middleware::from_fn_with_state(guard_cfg, guard::guard))
+        .with_state(state)
+}
 
-    let addr = std::env::var("PYTHIA_BIND").unwrap_or_else(|_| "0.0.0.0:8787".into());
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(
-                "cannot bind {addr}: {e}\n\
-                 → is another Pythia server already running? Stop it, or set \
-                 PYTHIA_BIND to a free port in .env"
-            );
-            std::process::exit(1);
-        }
-    };
-    tracing::info!("Pythia backend listening on http://{addr}");
+/// Which providers and venues this server has keys for, in the journal at
+/// startup. Names and the last four characters of a key id at most, never a secret.
+fn log_venue_preflight(state: &AppState) {
     let configured: Vec<&str> = Provider::ALL
         .iter()
         .filter(|p| p.needs_key() && p.configured_in_env())
@@ -1223,9 +1263,6 @@ async fn main() {
     if watched > 0 {
         tracing::info!("Wallets: watching {watched} on-chain address(es), read-only");
     }
-
-    // With the peer address: `POST /api/alerts/event` takes events from this machine only.
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
 }
 
 /// Tick the engine ~every 1.5s, refresh real read-only feeds periodically, and
@@ -2460,8 +2497,9 @@ async fn post_ai_complete(
 ) -> axum::response::Response {
     // This machine, or the addresses `PYTHIA_ALERT_EVENT_FROM` allows (an
     // engine in a container sees the host's jobs from its bridge network).
-    // The key token below is checked either way.
-    if !event_source_allowed(addr.ip(), &st.alert_files.event_from) {
+    // The key token below is checked either way. A proxied request is never
+    // from this machine (see `guard::proxied`).
+    if guard::proxied(&headers) || !event_source_allowed(addr.ip(), &st.alert_files.event_from) {
         return api_error(StatusCode::FORBIDDEN, "AI calls are taken from this machine only (see PYTHIA_ALERT_EVENT_FROM)");
     }
     let key = std::env::var(Provider::Anthropic.env_key()).unwrap_or_default();
@@ -2469,7 +2507,7 @@ async fn post_ai_complete(
         return api_error(StatusCode::SERVICE_UNAVAILABLE, "no Claude API key on this server (ANTHROPIC_API_KEY)");
     }
     let token = headers.get("x-pythia-ai-token").and_then(|v| v.to_str().ok()).unwrap_or_default();
-    if token.is_empty() || token != pythia_core::ai_budget::caller_token(&key) {
+    if token.is_empty() || !guard::same_secret(token, &pythia_core::ai_budget::caller_token(&key)) {
         return api_error(StatusCode::FORBIDDEN, "the caller does not hold this server's Claude API key");
     }
     if let Err(why) = check_ai_request(&req) {
@@ -2805,3 +2843,7 @@ mod ai_api_tests;
 #[cfg(test)]
 #[path = "pumpfun_api_tests.rs"]
 mod pumpfun_api_tests;
+
+#[cfg(test)]
+#[path = "guard_tests.rs"]
+mod guard_tests;
