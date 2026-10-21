@@ -92,6 +92,7 @@ def leg(P: fc.Panel, bk: dict, base: str, days: np.ndarray, t0: int, t1: int) ->
     p00 = vc.price_at(pair, starts)
     p0415 = vc.price_at(pair, starts + FILL_A_US)
     p24 = vc.price_at(pair, starts + vc.DAY_US)
+    rday = np.nan_to_num(P.ret[t0:t1 + 1, j])
     pnl_a, pnl_b, tov_a, tov_b = (np.zeros(T) for _ in range(4))
     on_etf = np.zeros(T, dtype=bool)
     hA = held[t0 - 1]
@@ -106,11 +107,14 @@ def leg(P: fc.Panel, bk: dict, base: str, days: np.ndarray, t0: int, t1: int) ->
         # A: crypto, trade at 04:15
         r1 = p0415[k] / p00[k] - 1
         r2 = p24[k] / p0415[k] - 1
+        # Weights as a share of the book drift from close to close by the coin's daily return
+        # against the book's (the simulator's own rule), for both fills alike, so a leg that
+        # does not trade carries no spurious drift turnover.
+        drift = (1 + rday[k]) / (1 + g) if 1 + g > 0 else 0.0
         pnl_a[k] = hA * r1
-        hA_mid = hA * (1 + r1)
-        tov_a[k] = abs(tgt - hA_mid)
+        tov_a[k] = abs(tgt - hA)
         pnl_a[k] += tgt * r2
-        hA = tgt * (1 + r2) / (1 + g) if 1 + g > 0 else 0.0
+        hA = tgt * drift
         # B: the same as A until the ETF's first session; the leg moves over at that day's
         # close at no cost (from then on the ETF leg starts from A's weight and that close).
         sess = S.get(day)
@@ -126,13 +130,13 @@ def leg(P: fc.Panel, bk: dict, base: str, days: np.ndarray, t0: int, t1: int) ->
             o, c = sess
             gap = o / prev_close - 1
             pnl_b[k] = hB * gap
-            tov_b[k] = abs(tgt - hB * (1 + gap))
+            tov_b[k] = abs(tgt - hB)
             ses = c / o - 1
             pnl_b[k] += tgt * ses
-            hB = tgt * (1 + ses) / (1 + g) if 1 + g > 0 else 0.0
+            hB = tgt * drift
             prev_close = c
         else:
-            hB = hB / (1 + g) if 1 + g > 0 else 0.0
+            hB = hB * drift
     return {"pnl_a": pnl_a, "pnl_b": pnl_b, "tov_a": tov_a, "tov_b": tov_b, "on_etf": on_etf,
             "first_etf": str(first_etf), "held": held[t0:t1 + 1]}
 

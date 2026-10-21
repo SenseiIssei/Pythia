@@ -187,8 +187,10 @@ def markdown(res: dict) -> str:
              f"{b['BTC']['sharpe']:.2f} / {pct(b['BTC']['cagr'])} / {pct(b['BTC']['max_dd'])}, gated BTC "
              f"{b['gated BTC']['sharpe']:.2f} / {pct(b['gated BTC']['cagr'])} / {pct(b['gated BTC']['max_dd'])}. "
              f"Bootstrap 90 % band of Sharpe(pick) - Sharpe(BTC) {res['band'][0]:.2f} to {res['band'][1]:.2f}. "
-             f"Break-even haircut out of sample {res['breakeven_h']:.1f} vol points. Deflated p "
-             f"{res['deflated_p']:.2f} over {res['pool']['n_total']:,}.")
+             + (f"The pick stays above 0 at every haircut up to 40 vol points (a covered call sold for nothing is "
+                f"BTC itself), so a break-even haircut does not exist for it. " if res["breakeven_h"] >= 40 else
+                f"Break-even haircut out of sample {res['breakeven_h']:.1f} vol points. ")
+             + f"Deflated p {res['deflated_p']:.2f} over {res['pool']['n_total']:,}.")
     fails = [k for k, v in res["rules"].items() if not v]
     if fails:
         L += ["", "Failed: " + "; ".join(fails) + "."]
@@ -198,7 +200,9 @@ def markdown(res: dict) -> str:
     L.append(dc.table(res["rows"], ["variant", "is_sharpe", "is_dd", "oos_sharpe", "oos_cagr", "oos_vol", "oos_dd",
                                     "oos_h6", "sold_share", "worst_month_pct"]))
     L += ["", f"In sample BTC {res['bench_is']['BTC']['sharpe']:.2f}, gated BTC "
-          f"{res['bench_is']['gated BTC']['sharpe']:.2f}.", "",
+          f"{res['bench_is']['gated BTC']['sharpe']:.2f}. P0 and CC are the same position: with zero rates and the "
+          "strike at spot, a cash-secured put equals a covered call (put-call parity), so their rows match; the "
+          "filtered rows differ because a filtered month holds cash (P0 F) or BTC (CC F).", "",
           "### The premium: DVOL minus the next 30 days' realised volatility", ""]
     L.append(dc.table([{"year": k, **v} for k, v in res["premium"].items()], ["year", "mean_pts", "share_pos"]))
     return "\n".join(L)

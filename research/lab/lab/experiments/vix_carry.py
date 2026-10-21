@@ -240,8 +240,8 @@ def instrument(D: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     vixy = ret_of(S["VIXY"]["adj"])
     m1 = np.isfinite(idx) & np.isfinite(vixy) & (cal >= np.datetime64("2011-01-05"))
     m2 = np.isfinite(idx) & np.isfinite(r_sv) & mid
-    win_pre = (cal >= SWITCH - 120) & (cal < SWITCH) & np.isfinite(idx) & (np.abs(np.nan_to_num(idx)) > 0.01)
-    win_post = (cal >= SWITCH) & (cal < SWITCH + 120) & np.isfinite(idx) & (np.abs(np.nan_to_num(idx)) > 0.01)
+    win_pre = (cal >= SWITCH - np.timedelta64(120, "D")) & (cal < SWITCH) & np.isfinite(idx) & (np.abs(np.nan_to_num(idx)) > 0.01)
+    win_post = (cal >= SWITCH) & (cal < SWITCH + np.timedelta64(120, "D")) & np.isfinite(idx) & (np.abs(np.nan_to_num(idx)) > 0.01)
     with np.errstate(invalid="ignore", divide="ignore"):
         ratio = r_sv / idx
     chk = {
@@ -581,8 +581,8 @@ def markdown(res: dict) -> str:
           f"so the in-sample window starts {res['is_start']}. Diagnosis: without February 2018 the correlation with "
           f"-SVXY is {c['corr_neg_svxy_ex_feb2018']:.3f}; rank correlations {c['spearman_vixy']:.3f} (VIXY) and "
           f"{c['spearman_neg_svxy']:.3f} (-SVXY). The rebuild settles at 16:15 and the ETFs close at 16:00, which "
-          f"on a few days (2018-02-05 and 06, 2012-12-28 and 31, 2014-10-15, 2016-06-28) moves the futures by 5 to "
-          f"60 points between the two prints."]
+          f"on a few days (2018-02-05 and 06, 2012-12-28 and 31, 2014-10-15, 2016-06-28) puts the two series 10 to "
+          f"60 percentage points of daily return apart."]
     return "\n".join(L)
 
 
