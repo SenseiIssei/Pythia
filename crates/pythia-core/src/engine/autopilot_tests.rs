@@ -1525,6 +1525,7 @@ fn forward_file(generated_ms: i64, books: &[(&str, crate::lab::ForwardEvidence)]
         generated_ms,
         books: books.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
         autopilots: Default::default(),
+        btc_gate: None,
     }
 }
 

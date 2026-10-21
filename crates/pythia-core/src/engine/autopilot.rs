@@ -503,6 +503,13 @@ pub struct AutopilotStatus {
     /// hold for US shares, over the same period.
     #[serde(default)]
     pub benchmark: Option<BenchmarkStatus>,
+    /// The harder benchmark for crypto (and portfolios): BTC held only while
+    /// its close is above its 200-day average (`results/gated_btc.md`), over
+    /// the same period. No book has beaten it out of sample, so every
+    /// crypto autopilot is shown against it as well as against plain BTC.
+    /// `None` while the lab's daily gate calendar is not there or is stale.
+    #[serde(default)]
+    pub gated_benchmark: Option<BenchmarkStatus>,
     /// The cash of its own book: equity less what its positions are worth
     /// at the mark and what its orders still at the venue will cost.
     #[serde(default)]
@@ -1897,6 +1904,38 @@ impl Engine {
             excess_pct: ret.map(|r| own - r),
             from_ms: from,
             note,
+            legs: Vec::new(),
+        })
+    }
+
+    /// Against BTC held only above its 200-day average, over the same period
+    /// as the plain BTC comparison (from its start, or from where that one
+    /// starts), from the lab's daily gate calendar in the forward report.
+    /// Crypto autopilots and portfolios; `None` for US shares alone, or while
+    /// the calendar is missing, stale or does not cover the period.
+    fn ap_gated_benchmark(&self, ap: &Autopilot, equity: f64) -> Option<BenchmarkStatus> {
+        if !(ap.config.portfolio || config_venue(&ap.config) == Some(Venue::Crypto)) {
+            return None;
+        }
+        let gate = self.lab_forward_fresh()?.btc_gate.as_ref()?;
+        let active = ap.is_active();
+        let from = ap.btc_from_ms;
+        let start = from.unwrap_or(ap.started_ms);
+        let end = if active { self.now() } else { ap.stopped_ms.unwrap_or_else(|| self.now()) };
+        let p1 = if active { self.ap_btc_price(ap) } else { ap.btc_end };
+        let ret = gate.return_pct(start, ap.btc_start?, end, p1?)?;
+        let base = match from {
+            Some(t) => ap.history.iter().find(|h| h.0 >= t).map(|h| h.1).unwrap_or(equity),
+            None => ap.start_capital,
+        };
+        let own = if base > 0.0 { (equity / base - 1.0) * 100.0 } else { 0.0 };
+        Some(BenchmarkStatus {
+            symbol: BTC_SYMBOL.to_string(),
+            name: format!("BTC held only above its {}-day average", gate.sma_days),
+            return_pct: Some(ret),
+            excess_pct: Some(own - ret),
+            from_ms: from,
+            note: None,
             legs: Vec::new(),
         })
     }
@@ -3517,6 +3556,7 @@ impl Engine {
                     btc_return_pct: self.ap_btc_return_pct(ap),
                     held: ap.owned.keys().cloned().collect(),
                     benchmark: self.ap_benchmark(ap, equity),
+                    gated_benchmark: self.ap_gated_benchmark(ap, equity),
                     cash: equity - self.ap_gross(ap, None) - self.ap_pending(ap, None),
                     max_drawdown_pct: max_drawdown_pct(&ap.history, equity),
                     avg_capital: ap.avg_capital(ap.stopped_ms.unwrap_or_else(|| self.now())),

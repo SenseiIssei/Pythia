@@ -734,3 +734,42 @@ fn the_comparison_numbers_are_on_every_status() {
     }
     assert!(json["benchmark"].get("excessPct").is_some());
 }
+
+fn gate_file(e: &Engine, on: bool, close: f64) -> crate::lab::ForwardFile {
+    let now = e.now();
+    let day = 86_400_000;
+    let d = now.div_euclid(day) * day;
+    let days = (-2..=2).map(|i| crate::lab::GateDay { day_ms: d + i * day, on, close: Some(close) }).collect();
+    crate::lab::ForwardFile { generated_ms: now, btc_gate: Some(crate::lab::BtcGate { sma_days: 200, days }), ..Default::default() }
+}
+
+#[test]
+fn a_crypto_autopilot_is_also_held_against_btc_above_its_200_day_average() {
+    let mut e = engine();
+    let id = start(&mut e, config("g", 1_000.0, &["ema-cross-1"]));
+    assert!(status(&e, &id).gated_benchmark.is_none(), "no gate calendar from the lab yet: not shown, never guessed");
+    let p0 = e.price_of(BTC);
+
+    // BTC closed below its 200-day average: gated BTC sits in cash while BTC rises 10 %.
+    e.apply_lab_forward(gate_file(&e, false, p0));
+    set_price(&mut e, BTC, p0 * 1.1);
+    let s = status(&e, &id);
+    let g = s.gated_benchmark.clone().expect("the calendar covers its days");
+    assert_eq!(g.return_pct, Some(0.0));
+    assert!((s.benchmark.unwrap().return_pct.unwrap() - 10.0).abs() < 1e-6, "plain BTC still shows its 10 %");
+    assert!(g.name.contains("above its 200-day average"), "{}", g.name);
+    assert!((g.excess_pct.unwrap() - (s.equity / 1_000.0 - 1.0) * 100.0).abs() < 1e-9);
+
+    // Above it: gated BTC is BTC.
+    e.apply_lab_forward(gate_file(&e, true, p0));
+    let g = status(&e, &id).gated_benchmark.unwrap();
+    assert!((g.return_pct.unwrap() - 10.0).abs() < 1e-6, "{:?}", g.return_pct);
+    let json = serde_json::to_value(status(&e, &id)).unwrap();
+    assert!(json["gatedBenchmark"].get("excessPct").is_some(), "{json}");
+
+    // A calendar older than three days is not used.
+    let mut old = gate_file(&e, true, p0);
+    old.generated_ms -= 4 * 86_400_000;
+    e.apply_lab_forward(old);
+    assert!(status(&e, &id).gated_benchmark.is_none());
+}

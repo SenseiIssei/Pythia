@@ -170,6 +170,66 @@ pub struct ForwardFile {
     pub generated_ms: i64,
     pub books: BTreeMap<String, ForwardEvidence>,
     pub autopilots: BTreeMap<String, ForwardEvidence>,
+    /// BTC's 200-day gate per UTC day, for the second benchmark every crypto
+    /// autopilot is held against (BTC held only above its 200-day average).
+    #[serde(default)]
+    pub btc_gate: Option<BtcGate>,
+}
+
+const GATE_DAY_MS: i64 = 86_400_000;
+
+/// BTC held only while its close is above its 200-day average, the gate of
+/// `research/lab/results/gated_btc.md` (G at k = 1): decided at each UTC
+/// close, held over the next day, no costs. The forward report writes one
+/// row per UTC day; the last one is today, whose gate the previous close set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BtcGate {
+    pub sma_days: u32,
+    pub days: Vec<GateDay>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GateDay {
+    /// The UTC day's start, epoch ms.
+    pub day_ms: i64,
+    /// BTC is held that day: the close before it was above its 200-day average.
+    pub on: bool,
+    /// BTC's close at the end of the day; `None` for today.
+    pub close: Option<f64>,
+}
+
+impl BtcGate {
+    /// Gated BTC's return in % from `start_ms` (BTC at `p0`) to `end_ms`
+    /// (BTC at `p1`): BTC's own move over the stretches of days the gate was
+    /// on, cash (0 %) over the others. Inside the span, a day changes hands
+    /// at its close. `None` when a day of the span is not in the calendar.
+    pub fn return_pct(&self, start_ms: i64, p0: f64, end_ms: i64, p1: f64) -> Option<f64> {
+        if !(p0 > 0.0 && p1 > 0.0) {
+            return None;
+        }
+        if end_ms <= start_ms {
+            return Some(0.0);
+        }
+        let day = |d: i64| self.days.iter().find(|g| g.day_ms == d);
+        let mut growth = 1.0;
+        let mut d = start_ms.div_euclid(GATE_DAY_MS) * GATE_DAY_MS;
+        while d < end_ms {
+            let g = day(d)?;
+            if g.on {
+                let (from, to) = (start_ms.max(d), end_ms.min(d + GATE_DAY_MS));
+                let px_from = if from == start_ms { p0 } else { day(d - GATE_DAY_MS)?.close? };
+                let px_to = if to == end_ms { p1 } else { g.close? };
+                if !(px_from > 0.0 && px_to > 0.0) {
+                    return None;
+                }
+                growth *= px_to / px_from;
+            }
+            d += GATE_DAY_MS;
+        }
+        Some((growth - 1.0) * 100.0)
+    }
 }
 
 /// The forward evidence as the lab wrote it; `None` when it is not a JSON
@@ -191,6 +251,7 @@ pub fn parse_forward_evidence(text: &str) -> Option<ForwardFile> {
         generated_ms: obj.get("generated_ms").and_then(|g| g.as_i64()).unwrap_or(0),
         books: rows("books"),
         autopilots: rows("autopilots"),
+        btc_gate: obj.get("btc_gate").and_then(|g| serde_json::from_value(g.clone()).ok()),
     })
 }
 
@@ -682,6 +743,36 @@ mod tests {
         let only_evidence = j.replace(r#""autopilot_only":true,"experimental":true,"#, "");
         let s: LabSignal = serde_json::from_str(&only_evidence).unwrap();
         assert!(!s.experimental && s.is_experimental(), "the evidence alone is enough");
+    }
+
+    #[test]
+    fn gated_btc_earns_btcs_move_on_the_days_the_gate_is_on_and_nothing_on_the_others() {
+        const D: i64 = 86_400_000;
+        let d0 = 20_000 * D;
+        let day = |i: i64, on: bool, close: Option<f64>| GateDay { day_ms: d0 + i * D, on, close };
+        let g = BtcGate {
+            sma_days: 200,
+            days: vec![day(-1, true, Some(100.0)), day(0, true, Some(110.0)), day(1, false, Some(121.0)), day(2, true, Some(100.0)), day(3, true, None)],
+        };
+        // From noon of day 0 at 105 to 06:00 of day 3 at 99.
+        let r = g.return_pct(d0 + D / 2, 105.0, d0 + 3 * D + D / 4, 99.0).unwrap();
+        let want = (110.0 / 105.0 * (100.0 / 121.0) * (99.0 / 100.0) - 1.0) * 100.0;
+        assert!((r - want).abs() < 1e-9, "{r} against {want}");
+        // Inside one day that is off: cash.
+        assert_eq!(g.return_pct(d0 + D + 1, 120.0, d0 + 2 * D - 1, 125.0), Some(0.0));
+        assert_eq!(g.return_pct(d0, 100.0, d0, 100.0), Some(0.0));
+        // A day the calendar does not have: not known, never guessed.
+        assert_eq!(g.return_pct(d0, 100.0, d0 + 5 * D, 100.0), None);
+        // The forward report's JSON.
+        let f = parse_forward_evidence(
+            r#"{"generated_ms": 5, "books": {}, "autopilots": {},
+                "btc_gate": {"sma_days": 200, "days": [{"day_ms": 0, "on": true, "close": 1.5}, {"day_ms": 86400000, "on": false, "close": null}]}}"#,
+        )
+        .unwrap();
+        let g = f.btc_gate.unwrap();
+        assert_eq!(g.days.len(), 2);
+        assert!(g.days[0].on && g.days[1].close.is_none());
+        assert!(parse_forward_evidence(r#"{"generated_ms": 5}"#).unwrap().btc_gate.is_none());
     }
 
     #[test]
