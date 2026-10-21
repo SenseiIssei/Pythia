@@ -266,6 +266,12 @@ def new_state(listing_cache: dict) -> dict:
             "equity": START_EQUITY, "weights": {}, "mid": {}, "last_run_ms": None, "kraken_listing": listing_cache}
 
 
+# How many days the decision may step back when the newest day is incomplete,
+# and how many perps a day needs to count as complete.
+MAX_LAG_DAYS = 2
+MIN_SCOREABLE = 20
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     t_start = time.time()
@@ -300,6 +306,15 @@ def main(argv: list[str] | None = None) -> int:
     intervals = {f["symbol"]: int(f["fundingIntervalHours"]) for f in m4.get(f"{m4.FAPI}/fundingInfo")}
     mid = {s: (b + a) / 2 for s, (b, a) in quotes.items()}
     c = m4.candidates(E, booster, decision_day, live & set(quotes), cfg=CONFIG)
+    # Binance's daily perps archive for yesterday often arrives after the morning
+    # backfill: the latest day with enough scoreable perps, at most two days back,
+    # decides instead.
+    for _ in range(MAX_LAG_DAYS):
+        if c.height >= MIN_SCOREABLE:
+            break
+        decision_day -= DAY_US
+        booster, meta = m4.model_for(E, decision_day, cfg=CONFIG, name=NAME)
+        c = m4.candidates(E, booster, decision_day, live & set(quotes), cfg=CONFIG)
     listed, dropped_unlisted = restrict(c, listing)
 
     if st is None:

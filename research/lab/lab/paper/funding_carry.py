@@ -101,6 +101,10 @@ def listing_for(cached: dict | None, now_ms: int) -> tuple[dict[str, str], dict,
     raise RuntimeError("Kraken Futures listing unavailable and no cached one")
 
 
+# How many days the decision may step back when the newest day is incomplete.
+MAX_LAG_DAYS = 2
+
+
 def candidates(E: pl.DataFrame, decision_day: int, live: set[str], listing: dict[str, str]) -> pl.DataFrame:
     """The decision day's perps that Kraken lists and that trade now, the N_LIQUID most
     liquid, sorted by score = minus F7 (best long first)."""
@@ -187,9 +191,16 @@ def main(argv: list[str] | None = None) -> int:
     intervals = {f["symbol"]: int(f["fundingIntervalHours"]) for f in m4.get(f"{m4.FAPI}/fundingInfo")}
     mid = {s: (b + a) / 2 for s, (b, a) in quotes.items()}
     c = candidates(E, decision_day, live & set(quotes), listing)
+    # Binance's daily perps archive for yesterday often arrives after the morning
+    # backfill: the latest complete day, at most two days back, decides instead.
+    for _ in range(MAX_LAG_DAYS):
+        if c.height >= 2 * K:
+            break
+        decision_day -= DAY_US
+        c = candidates(E, decision_day, live & set(quotes), listing)
     if c.height < 2 * K:
-        # The decision day's perp volume or funding has not arrived (backfill behind): an
-        # empty tranche would halve the book for three days, so nothing is traded today.
+        # Still nothing scoreable: an empty tranche would halve the book for three
+        # days, so nothing is traded today.
         print(f"only {c.height} listed perps scoreable on the decision day; not rebalancing on stale data",
               file=sys.stderr)
         return 1
