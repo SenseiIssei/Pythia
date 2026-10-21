@@ -2,7 +2,7 @@
 
 # Delisting hazard (survey O3): results
 
-Generated 2026-10-21T15:32:31+00:00. Registered in `results/crypto_own_prereg.md` before the run. Panel to 2026-10-20; out of sample from 2024-01-01; books at 35 bps, coins Alpaca does not list in cash.
+Generated 2026-10-21T15:53:22+00:00. Registered in `results/crypto_own_prereg.md` before the run. Panel to 2026-10-20; out of sample from 2024-01-01; books at 35 bps, coins Alpaca does not list in cash.
 
 ## Verdict
 
@@ -99,4 +99,4 @@ The most liquid events (swaps and rebrands among them):
 | DEGOUSDT | 2026-04-27 | 8.56 |
 | OMNIUSDT | 2025-09-28 | 8.24 |
 
-Pool: 1,836 trials (1,140 hand before this registration, 600 factory, 96 registered on 2026-10-21 with O9's 2 forward trials); the best noise trial sits at an annual Sharpe of about 2.69. Gate 6 deflates each improvement over the 94 trials of the registration at the variance of the 94 trial difference Sharpes computed in this run.
+Pool: 1,836 trials (1,140 hand before this registration, 600 factory, 96 registered on 2026-10-21 with O9's 2 forward trials); the best noise trial sits at an annual Sharpe of about 2.69. Gate 6 deflates each improvement over the 94 trials of the registration at the variance of the 93 book modifications computed in this run (the long/short trial has no book to differ from).

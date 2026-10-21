@@ -78,6 +78,13 @@ def signal(P: fc.Panel) -> dict:
             "dropped": dropped}
 
 
+def kr_flags(P: fc.Panel) -> np.ndarray:
+    """(T, N) bool: the worst third by s among the ranked coins each day, the filter the
+    shadow book tsmom_tranches_lowkr applies."""
+    sig = signal(P)
+    return co.worst_third(co.badness(sig["s"], sig["member"]))
+
+
 def daily_ic(P: fc.Panel, s: np.ndarray, member: np.ndarray, fwd: np.ndarray) -> np.ndarray:
     ic = np.full(P.T, np.nan)
     for t in range(P.T):

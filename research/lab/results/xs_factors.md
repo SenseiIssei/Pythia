@@ -2,7 +2,7 @@
 
 # Cross-sectional crypto factors as book filters and tilts: results
 
-Generated 2026-10-21T15:32:31+00:00. Registered in `results/crypto_own_prereg.md` before the run. Panel to 2026-10-20; out of sample from 2024-01-01; books at 35 bps, coins Alpaca does not list in cash; factors ranked among the 50 most liquid eligible coins each day, higher = worse.
+Generated 2026-10-21T15:53:22+00:00. Registered in `results/crypto_own_prereg.md` before the run. Panel to 2026-10-20; out of sample from 2024-01-01; books at 35 bps, coins Alpaca does not list in cash; factors ranked among the 50 most liquid eligible coins each day, higher = worse.
 
 ## Verdict per factor
 
@@ -129,4 +129,4 @@ The books alone and gated BTC:
 | tsmom_top20 | 1.68 | 0.53 | 4.28 | 8.99 | 0.21 | 0.19 | 0.70 | -0.06 |
 | tsmom_tranches | 1.85 | 0.65 | 5.83 | 8.79 | 0.39 | 0.20 | 0.72 | 0.11 |
 
-Pool: 1,836 trials (1,140 hand before this registration, 600 factory, 96 registered on 2026-10-21 with O9's 2 forward trials); the best noise trial sits at an annual Sharpe of about 2.69. Gate 6 deflates each improvement over the 94 trials of the registration at the variance of the 94 trial difference Sharpes computed in this run.
+Pool: 1,836 trials (1,140 hand before this registration, 600 factory, 96 registered on 2026-10-21 with O9's 2 forward trials); the best noise trial sits at an annual Sharpe of about 2.69. Gate 6 deflates each improvement over the 94 trials of the registration at the variance of the 93 book modifications computed in this run (the long/short trial has no book to differ from).

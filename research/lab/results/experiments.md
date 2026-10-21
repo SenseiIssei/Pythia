@@ -36,6 +36,8 @@ evidence accumulates, and they say so everywhere:
 | `lab:memes_tsmom` | Alpaca's six memecoins while each is up over 28 days, BTC gate, 6 slots at 40 % vol | daily, 04:30 UTC | 36 h |
 | `lab:trend4h_pullback` | 4h EMA 24/96 trend with pullback limits, BTC gate, Alpaca coins | hourly run, decisions at every 4h close | 3 h |
 | `lab:btc_gated` | BTC at full weight while its close is above its 200-day average, cash otherwise (job added disabled) | daily, 04:35 UTC | 36 h |
+| `lab:tsmom_tranches_lowmax` | tsmom_tranches without the worst third by 28-day MAX (job added disabled) | daily, 04:25 UTC | 36 h |
+| `lab:tsmom_tranches_lowkr` | tsmom_tranches without the worst third by own Korean premium (job added disabled) | daily, 04:25 UTC | 36 h |
 
 The pump.fun books have no engine signal: they are paper only, in the lab.
 
@@ -237,6 +239,48 @@ until the owner switches it on, and no autopilot trades it unless one names
 **What would change the verdict.** A forward year in which its drawdown stays
 at most two thirds of BTC's over the same days and its Sharpe is not below
 BTC's.
+
+## 6. Momentum tranches with a coin filter (`tsmom_tranches_lowmax`, `tsmom_tranches_lowkr`)
+
+Added 2026-10-21 by two studies registered together
+(`results/crypto_own_prereg.md`). Of 24 filter or tilt picks on the three
+Alpaca books, two passed every gate against the book alone and the gate
+against gated BTC, both on tsmom_tranches; both improvements fail deflation.
+
+**Rules.** tsmom_tranches as it runs (28-day momentum on the 20 most liquid
+coins of each day, BTC 200-day regime, seven weekly tranches, 50 % band), except
+that a coin flagged at the decision close gets a target of 0 and its weight
+stays in cash.
+
+- `tsmom_tranches_lowmax` (`results/xs_factors.md`): flagged when its largest
+  daily return over the last 28 days is in the worst third among the 50 most
+  liquid eligible coins.
+- `tsmom_tranches_lowkr` (`results/kr_premium_xs.md`): flagged when its own
+  Korean premium (Upbit against Binance, minus BTC's, 7-day mean) is in the
+  worst third of the coins on both venues.
+
+**Backtest (out of sample 2024-01-01 to 2026-10-20, 35 bps, coins Alpaca does
+not list in cash).** The book alone 0.65 (drawdown 9 %). lowmax 0.85 (0.75 at
+70 bps), band of the difference 0.05 to 0.35, better in each year, a day late
+0.83, twin 0.76 against 0.39, drawdown 8 %. lowkr 0.87 (0.75 at 70 bps), band
+0.08 to 0.34, a day late 0.87, twin 0.55 against 0.39, drawdown 7 %. Both stay
+above gated BTC at the book's risk (0.26 and 0.28 against 0.11 for the book),
+with bootstrap bands far below zero.
+
+**Why they failed.** Each improvement has a deflated p of 0.01 over the 94
+trials of the registration; the same filters do nothing for breakout_top10 or
+tsmom_top20, so a lucky pick is the plain reading. The Korean premium's Upbit
+history holds only the markets Upbit lists today.
+
+**How the engine runs them.** `lab.paper.tranches_filtered` steps both paper
+books (the tranche book's fills, journals next to tsmom_tranches') and writes
+experimental, autopilot-only signals. The job `paper-tranches-filtered` is in
+`research/ops/jobs.yaml` disabled; lowkr also needs flow-collect's Upbit
+markets (`upbit_all`, on by default in the collector).
+
+**What would change the verdict.** 90 forward days in which a filtered book
+beats the tsmom_tranches paper book over the same days on Sharpe with a
+drawdown no larger (for lowkr, on Upbit data recorded forward).
 
 ## Where the numbers come from
 

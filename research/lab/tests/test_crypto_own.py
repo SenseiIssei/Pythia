@@ -91,9 +91,10 @@ def test_trial_counts_add_up_to_the_registration():
     assert sum(co.STUDY_TRIALS.values()) == co.REG_TRIALS == 94
 
 
-# ---------------------------------------------------------------- the tsmom_tranches_lowmax shadow book
+# ---------------------------------------------------------------- the tsmom_tranches filter shadow books
 
 DAY_US = 86_400_000_000
+COINS = ("BTC", "AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH", "III", "JJJ", "KKK")
 
 
 def _panel(T: int = 400):
@@ -102,28 +103,57 @@ def _panel(T: int = 400):
     rng = np.random.default_rng(3)
     day0 = 1_700_000_000_000_000 // DAY_US * DAY_US
     frames = {}
-    for i, sym in enumerate(("BTCUSDT", "AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT")):
+    for i, c in enumerate(COINS):
         r = 0.003 + 0.01 * rng.standard_normal(T)
-        if sym == "AAAUSDT":
+        if c == "AAA":
             r[T - 10] = 0.6                         # one lottery day, ten days ago
         close = np.exp(np.cumsum(r))
-        frames[sym] = pl.DataFrame({"day": [day0 + k * DAY_US for k in range(T)], "open": close,
-                                    "high": close * 1.01, "low": close * 0.99, "close": close,
-                                    "volume": np.full(T, 1e9), "qv": np.full(T, 5e7 * (i + 1)),
-                                    "n": np.full(T, 1000, dtype=np.int64), "taker_qv": np.full(T, 2e7)})
+        frames[f"{c}USDT"] = pl.DataFrame({"day": [day0 + k * DAY_US for k in range(T)], "open": close,
+                                           "high": close * 1.01, "low": close * 0.99, "close": close,
+                                           "volume": np.full(T, 1e9), "qv": np.full(T, 5e7 * (i + 1)),
+                                           "n": np.full(T, 1000, dtype=np.int64), "taker_qv": np.full(T, 2e7)})
     return w7.build_panel(frames)
 
 
 def test_lowmax_book_drops_the_lottery_coin_and_its_signal_is_experimental():
     from lab.paper import experimental as ex
-    from lab.paper import tranches_lowmax as tl
+    from lab.paper import tranches_filtered as tf
     P = _panel()
     t = P.T - 1
-    W, flags = tl.targets(P)
+    W, flags = tf.targets(P, "tsmom_tranches_lowmax")
     a = P.names.index("AAAUSDT")
     assert flags[t, a] and W[t, a] == 0.0
-    assert flags[t].sum() == 2, "the worst third of six coins"
-    sig = tl.signal(P, W, t, 1)
+    assert flags[t].sum() == 4, "the worst third of twelve coins"
+    sig = tf.signal("tsmom_tranches_lowmax", P, W, t, 1)
     assert sig["experimental"] and sig["autopilot_only"] and sig["variant"].startswith(ex.LABEL)
     assert "AAA" not in sig["weights"]
-    assert sig["evidence"]["report"] == "xs_factors"
+    assert sig["evidence"]["report"] == "xs_factors" and not sig["evidence"].get("missing")
+
+
+def test_lowkr_book_drops_the_coin_hot_in_korea_and_guards_ticker_clashes(tmp_path, monkeypatch):
+    import polars as pl
+    from lab.collect import flow
+    from lab.experiments import kr_premium_xs as kr
+    from lab.paper import tranches_filtered as tf
+    monkeypatch.setattr(flow, "FLOW", tmp_path)
+    P = _panel()
+    fx = 1300.0
+    prem = {"BBB": 0.05, "CCC": -0.01, "KKK": 3.0}   # KKK on Upbit is another asset (a ticker clash)
+    rows = []
+    for c in COINS:
+        j = P.names.index(f"{c}USDT")
+        for t in range(P.T):
+            rows.append({"market": f"KRW-{c}", "day_us": int(P.days[t]),
+                         "close": float(P.close[t, j]) * fx * (1 + prem.get(c, 0.0)), "open": 0.0, "high": 0.0,
+                         "low": 0.0, "value_krw": 1.0})
+    pl.DataFrame(rows).write_parquet(tmp_path / "upbit_krw_1d.parquet")
+    pl.DataFrame({"day_us": [int(P.days[0])], "usdkrw": [fx]}).write_parquet(tmp_path / "fx_usdkrw.parquet")
+    sig = kr.signal(P)
+    assert sig["dropped"] == ["KKKUSDT"]
+    t = P.T - 1
+    b = P.names.index("BBBUSDT")
+    assert sig["s"][t, b] == pytest.approx(np.log(1.05), abs=1e-9)
+    W, flags = tf.targets(P, "tsmom_tranches_lowkr")
+    assert flags[t, b] and W[t, b] == 0.0
+    assert not flags[t, P.names.index("CCCUSDT")]
+    assert tf.signal("tsmom_tranches_lowkr", P, W, t, 1)["evidence"]["report"] == "kr_premium_xs"
