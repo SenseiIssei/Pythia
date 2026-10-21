@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" font-family="Segoe UI, -apple-system, Helvetica Neue, Arial, sans-serif">
+  <defs>
+    <filter id="soft" x="-5%" y="-5%" width="110%" height="120%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.06"/>
+    </filter>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="1" y="1" width="1198" height="698" rx="22" fill="#FAFAF8" stroke="#E4E4DE" stroke-width="2"/>
+
+  <text x="60" y="68" font-size="30" font-weight="700" fill="#1A1A1A">How Pythia fits together</text>
+  <text x="60" y="100" font-size="17" fill="#6B6B66">Four layers. Data flows up, decisions flow down to the venues, and nothing trades without evidence.</text>
+
+  <!-- layer labels -->
+  <g font-size="13" font-weight="700" fill="#9A9A93" letter-spacing="1.5">
+    <text x="60" y="166">YOU</text>
+    <text x="60" y="290">ENGINE</text>
+    <text x="60" y="440">RESEARCH</text>
+    <text x="60" y="590">MARKETS</text>
+  </g>
+
+  <!-- layer 1: interfaces -->
+  <g filter="url(#soft)">
+    <rect x="200" y="132" width="300" height="64" rx="14" fill="#FFFFFF" stroke="#E4E4DE"/>
+    <rect x="520" y="132" width="300" height="64" rx="14" fill="#FFFFFF" stroke="#E4E4DE"/>
+    <rect x="840" y="132" width="300" height="64" rx="14" fill="#FFFFFF" stroke="#E4E4DE"/>
+  </g>
+  <g font-size="17" font-weight="600" fill="#1A1A1A">
+    <text x="224" y="161">Desktop app</text>
+    <text x="544" y="161">Web cockpit</text>
+    <text x="864" y="161">Telegram</text>
+  </g>
+  <g font-size="14" fill="#6B6B66">
+    <text x="224" y="182">Tauri, one click per autopilot</text>
+    <text x="544" y="182">React UI over the HTTP server</text>
+    <text x="864" y="182">Alerts, daily report, questions</text>
+  </g>
+
+  <!-- layer 2: engine -->
+  <g filter="url(#soft)">
+    <rect x="200" y="226" width="940" height="128" rx="16" fill="#EEF4FF" stroke="#C9DAF8"/>
+  </g>
+  <text x="224" y="258" font-size="18" font-weight="700" fill="#1F4FB8">Rust engine</text>
+  <text x="352" y="258" font-size="14" fill="#5A6E96">pythia-core, pythia-ml, pythia-server</text>
+  <g filter="url(#soft)">
+    <rect x="224" y="276" width="214" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
+    <rect x="452" y="276" width="214" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
+    <rect x="680" y="276" width="214" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
+    <rect x="908" y="276" width="208" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
+  </g>
+  <g font-size="15" font-weight="600" fill="#1A1A1A">
+    <text x="242" y="299">Autopilots</text>
+    <text x="470" y="299">Risk and stops</text>
+    <text x="698" y="299">Execution</text>
+    <text x="926" y="299">Models</text>
+  </g>
+  <g font-size="13" fill="#6B6B66">
+    <text x="242" y="319">sub-accounts, auto pick</text>
+    <text x="470" y="319">floors, kill switch, gates</text>
+    <text x="698" y="319">maker orders, reconcile</text>
+    <text x="926" y="319">ONNX in shadow, drift</text>
+  </g>
+
+  <!-- layer 3: research -->
+  <g filter="url(#soft)">
+    <rect x="200" y="386" width="610" height="128" rx="16" fill="#F1F8F1" stroke="#CFE6CF"/>
+    <rect x="830" y="386" width="310" height="128" rx="16" fill="#FFF7EC" stroke="#F1DDBD"/>
+  </g>
+  <text x="224" y="418" font-size="18" font-weight="700" fill="#2E7D32">Research lab</text>
+  <text x="362" y="418" font-size="14" fill="#5E7D5F">Python, pre-registered, every trial counted</text>
+  <g filter="url(#soft)">
+    <rect x="224" y="436" width="180" height="56" rx="12" fill="#FFFFFF" stroke="#DDEEDD"/>
+    <rect x="416" y="436" width="180" height="56" rx="12" fill="#FFFFFF" stroke="#DDEEDD"/>
+    <rect x="608" y="436" width="180" height="56" rx="12" fill="#FFFFFF" stroke="#DDEEDD"/>
+  </g>
+  <g font-size="15" font-weight="600" fill="#1A1A1A">
+    <text x="240" y="459">Studies</text>
+    <text x="432" y="459">Paper books</text>
+    <text x="624" y="459">Model zoo</text>
+  </g>
+  <g font-size="13" fill="#6B6B66">
+    <text x="240" y="479">deflated Sharpe, bootstrap</text>
+    <text x="432" y="479">daily signals, forward test</text>
+    <text x="624" y="479">retrained, gated</text>
+  </g>
+  <text x="854" y="418" font-size="18" font-weight="700" fill="#B26A00">Data</text>
+  <g font-size="13" fill="#6B6B66">
+    <text x="854" y="443">Recorder: books, funding,</text>
+    <text x="854" y="462">open interest, every trade</text>
+    <text x="854" y="481">Parquet lake since 2020,</text>
+    <text x="854" y="500">delisted coins included</text>
+  </g>
+
+  <!-- layer 4: markets -->
+  <g filter="url(#soft)">
+    <rect x="200" y="550" width="940" height="88" rx="16" fill="#FFFFFF" stroke="#E4E4DE"/>
+  </g>
+  <g font-size="14" font-weight="600" fill="#3A3A36">
+    <rect x="222" y="568" width="92" height="30" rx="15" fill="#F2F2EE"/><text x="243" y="588">Alpaca</text>
+    <rect x="324" y="568" width="92" height="30" rx="15" fill="#F2F2EE"/><text x="341" y="588">Binance</text>
+    <rect x="426" y="568" width="80" height="30" rx="15" fill="#F2F2EE"/><text x="444" y="588">Kraken</text>
+    <rect x="516" y="568" width="74" height="30" rx="15" fill="#F2F2EE"/><text x="535" y="588">Bybit</text>
+    <rect x="600" y="568" width="70" height="30" rx="15" fill="#F2F2EE"/><text x="620" y="588">OKX</text>
+    <rect x="680" y="568" width="98" height="30" rx="15" fill="#F2F2EE"/><text x="697" y="588">Coinbase</text>
+    <rect x="788" y="568" width="86" height="30" rx="15" fill="#F2F2EE"/><text x="806" y="588">Deribit</text>
+    <rect x="884" y="568" width="116" height="30" rx="15" fill="#F2F2EE"/><text x="902" y="588">Polymarket</text>
+    <rect x="1010" y="568" width="110" height="30" rx="15" fill="#F2F2EE"/><text x="1027" y="588">SEC filings</text>
+  </g>
+  <text x="222" y="622" font-size="13" fill="#8A8A83">Paper and demo accounts first. Real money only when the owner arms it. No withdrawals, ever.</text>
+</svg>

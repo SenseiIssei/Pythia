@@ -52,39 +52,7 @@ Pythia is a trading cockpit that starts on paper and stays there until a strateg
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph venues["Venues"]
-        ALP["Alpaca<br/>paper and live<br/>crypto, shares, ETFs"]
-        CEX["Crypto spot<br/>Kraken, Binance, Bybit,<br/>OKX, Coinbase"]
-        PERP["Perps<br/>paper, Bybit demo,<br/>Kraken Futures"]
-        PM["Polymarket<br/>read only"]
-    end
-
-    subgraph rust["Rust workspace"]
-        CORE["pythia-core<br/>strategies, risk, autopilots,<br/>execution, forecasts"]
-        ML["pythia-ml<br/>LightGBM and ONNX inference"]
-        SRV["pythia-server<br/>axum HTTP and WebSocket"]
-        APP["src-tauri<br/>desktop app"]
-    end
-
-    UI["React UI<br/>shared by app and web"]
-    REC["Data recorder<br/>books, funding, OI"]
-    LAKE[("Parquet data lake")]
-    LAB["Research lab<br/>studies, models, paper books,<br/>factory, forward reports"]
-    TG["Telegram or webhook"]
-    LLM["Claude API and other LLMs<br/>optional, budgeted"]
-
-    REC --> LAKE --> LAB
-    LAB -- "signals, evidence, models" --> CORE
-    ML --> CORE
-    CORE --> SRV --> UI
-    CORE --> APP --> UI
-    CORE <--> venues
-    CORE --> TG
-    LAB --> TG
-    LLM -.-> CORE
-```
+<img src="docs/img/architecture.svg" alt="Pythia in four layers: you, the Rust engine, the research lab with its data, and the markets" width="100%">
 
 The engine never trusts a strategy on its word: a lab book reaches an autopilot only with its evidence attached, the auto pick ranks books by that evidence and the forward record, and an experimental book runs only where an autopilot names it.
 
