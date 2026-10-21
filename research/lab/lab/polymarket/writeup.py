@@ -77,6 +77,20 @@ def markdown(res: dict) -> str:
     out.append(table(["Model", "Markets", "Brier market", "Brier model", "Skill", "Brier gain (95 %)",
                       "Log loss market", "Log loss model", "Years better", "Categories better", "Holm p",
                       "Passes"], rows))
+    if res.get("slices"):
+        out.append("\n**Addendum slices** (same test, states where the history price is more likely a real "
+                   "price):\n")
+        rows = []
+        for name, sl in res["slices"].items():
+            for k in ("q_recal", "q_gbm"):
+                m = sl[k]
+                rows.append([name, k[2:], _p(sl["share_states"], 0), f"{m['markets']:,}", _f(m["brier_market"]),
+                             _f(m["brier_model"]), _p(m["skill"], 2, True),
+                             f"{_f(m['brier_diff'], 5, True)} ({_f(m['brier_diff_lo'], 5, True)} to "
+                             f"{_f(m['brier_diff_hi'], 5, True)})", f"{m['years_better']}/3",
+                             "yes" if m["passes"] else "no"])
+        out.append(table(["Slice", "Model", "Share of states", "Markets", "Brier market", "Brier model", "Skill",
+                          "Brier gain (95 %)", "Years better", "Rule met"], rows))
     for k, m in res["models"].items():
         out.append(f"\n**{k[2:]} by category** (Brier, market / model, markets):\n")
         out.append(table(["Category", "Market", "Model", "Markets"],

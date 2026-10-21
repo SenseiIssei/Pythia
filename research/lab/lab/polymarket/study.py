@@ -31,7 +31,13 @@ MARGINS = (0.02, 0.03, 0.05)
 HIST_MAX_USD = 500.0
 MIN_HALF_SPREAD = 0.005
 PRIOR_HAND = 1115          # hand trials after X15 with X16 (results/candles.md)
-HERE_TRIALS = 12           # 6 historical rule variants, 4 addendum checks, 2 live books
+HERE_TRIALS = 16           # 6 historical rule variants, 8 addendum checks, 2 live books
+# The addendum's slices of the same test: states whose history price is more likely a real price.
+SLICES = {
+    "after day one": pl.col("days_since") >= 1.0,
+    "price has moved": pl.col("hi") > pl.col("lo"),
+    "after day one and moved": (pl.col("days_since") >= 1.0) & (pl.col("hi") > pl.col("lo")),
+}
 LOSS_TESTS = 4             # recal, gbm, Claude, ensemble against the market
 EPS = 0.001
 
@@ -416,12 +422,15 @@ def hs_for(hs: dict, p: float, cat: str, mult: float = 1.0, age_days: float | No
 
 
 def simulate(oos: pl.DataFrame, full: pl.DataFrame, col: str, margin: float, hs: dict, mult: float = 1.0,
-             min_age_days: float = 0.0, by_age: bool = False) -> dict:
+             min_age_days: float = 0.0, by_age: bool = False, moved_only: bool = False) -> dict:
     """The rule on the test states, day by day, marked daily at the history price.
-    min_age_days and by_age are the addendum's checks (no first-day states; the half-spread
-    looked up by the market's age)."""
+    min_age_days, by_age and moved_only are the addendum's checks (no first-day states; the
+    half-spread looked up by the market's age; only states whose price has moved since the
+    market opened)."""
     bk = B.Book(f"{col}@{margin}", margin)
     ent = oos.filter(pl.col("days_since") >= min_age_days) if min_age_days else oos
+    if moved_only:
+        ent = ent.filter(pl.col("hi") > pl.col("lo"))
     ent = ent.with_columns((pl.col("t_s") // 86400).alias("d")).sort("d")
     marks = full.select("market_id", "t_s", "p").with_columns((pl.col("t_s") // 86400).alias("d"))
     closes = full.group_by("market_id").agg(pl.col("close_s").first(), pl.col("y").first())
@@ -555,8 +564,16 @@ def run(refresh: bool = False) -> dict:
     res["biases"] = biases(df, sw)
     log("M: walk-forward")
     oos = walk_forward(df)
+    store.write_parquet(oos, store.path("cache", "oos.parquet"))
     res["models"] = {c: score(oos, c) for c in ("q_recal", "q_gbm")}
     res["holm"] = holm({c: v["p_one_sided"] for c, v in res["models"].items()})
+    # addendum slices: where the history price is a real price (descriptive, same test)
+    res["slices"] = {}
+    for name, cond in SLICES.items():
+        s = oos.filter(cond)
+        if s.height > 1000:
+            res["slices"][name] = {c: score(s, c) for c in ("q_recal", "q_gbm")}
+            res["slices"][name]["share_states"] = s.height / oos.height
     log("P: historical twin")
     hs = half_spreads()
     res["half_spreads"] = hs
@@ -569,12 +586,12 @@ def run(refresh: bool = False) -> dict:
     stress = [simulate(oos, df, col, 0.03, hs, mult=2.0) for col in ("q_recal", "q_gbm")]
     checks = []
     for col in ("q_recal", "q_gbm"):
-        c = simulate(oos, df, col, 0.03, hs, min_age_days=1.0)
-        c["check"] = "no first-day states"
-        checks.append(c)
-        c = simulate(oos, df, col, 0.03, hs, by_age=True)
-        c["check"] = "half-spread by age"
-        checks.append(c)
+        for name, kw in (("no first-day states", {"min_age_days": 1.0}), ("half-spread by age", {"by_age": True}),
+                         ("price has moved", {"moved_only": True}),
+                         ("after day one and moved", {"min_age_days": 1.0, "moved_only": True})):
+            c = simulate(oos, df, col, 0.03, hs, **kw)
+            c["check"] = name
+            checks.append(c)
     for c in checks:
         log(f"  check {c['check']}, {c['book']}: {c['trades']} trades, return {c['total_return']:+.1%}, "
             f"Sharpe {c['sharpe']:.2f}")

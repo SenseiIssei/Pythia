@@ -197,7 +197,8 @@ At a decision time with a forecast `q` and the order books:
 
 ## Trials and the bar
 
-Sharpe trials: the 6 historical variants and the 2 live books (8), into the
+Sharpe trials: the 6 historical variants and the 2 live books (8; 16 with
+the addendum's checks), into the
 global pool (1,115 hand trials after X15 with X16, plus the factory
 ledger). Loss tests: 4 (Holm). The paper books are forward evidence only:
 before anything near money could be discussed a book needs at least 100
@@ -211,12 +212,22 @@ The test run's paper twin made most of its money in the first hours of new
 markets, where the history price sits at 0.5 at creation and then drops to a
 mid of a thin book; the live record's median half-spread (taken from markets
 with $2,000 of liquidity) says nothing about those books. Two checks are
-added and counted as trials (4 more, 12 in all): the twin at m = 0.03 for
-recal and gbm (1) without states in a market's first 24 hours, and (2) with
-the half-spread looked up by the market's age as well (under 1 day, 1 to 7
-days, over 7 days) from the live record. Neither replaces the registered
-twin; the verdict is the registered rule's, and these say how far to trust
-it.
+added and counted as trials: the twin at m = 0.03 for recal and gbm (1)
+without states in a market's first 24 hours, and (2) with the half-spread
+looked up by the market's age as well (under 1 day, 1 to 7 days, over 7
+days) from the live record.
+
+Second addendum (2026-10-21, after a preliminary run on the markets that
+ended up to 2026-01, before the full set): the twin returned thousands of
+percent for both models, and recal without first-day states only +0.6 % a
+trade. 4 % of all states have a price that never moved since the market
+opened (on average 0.39 against an outcome rate of 0.27): no one traded
+there, so the history shows a placeholder, not a quote. Two more checks per
+model, (3) only states whose price has moved since the market opened and (4)
+after day one and moved, so 8 checks and 16 Sharpe trials in all. The model
+scores are also reported on the same three slices (after day one, moved,
+both) of the registered test. None of this replaces the registered verdict;
+it says how far to trust it.
 
 ## Reports
 
