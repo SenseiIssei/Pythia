@@ -36,7 +36,7 @@ trials made so far. Nothing in this release trades real money unless you arm it.
 - The paper autopilots started on 15 October 2026. After six days the main Auto-Pick was up
   0.48 % while BTC rose 3.22 %. Far too early to judge; the record is public from day one.
 
-Charts and sources: the README's "Honest results" section and `research/lab/README.md`.
+Charts and sources: the "Results so far" section of the README and `research/lab/README.md`.
 
 ## Upgrade notes
 

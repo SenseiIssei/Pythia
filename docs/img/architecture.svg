@@ -1,110 +1,94 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" font-family="Segoe UI, -apple-system, Helvetica Neue, Arial, sans-serif">
-  <defs>
-    <filter id="soft" x="-5%" y="-5%" width="110%" height="120%">
-      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.06"/>
-    </filter>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" font-family="ui-monospace, SFMono-Regular, Consolas, Menlo, monospace">
+  <rect x="0.5" y="0.5" width="1199" height="559" rx="8" fill="#FFFFFF" stroke="#D0D7DE"/>
 
-  <!-- canvas -->
-  <rect x="1" y="1" width="1198" height="698" rx="22" fill="#FAFAF8" stroke="#E4E4DE" stroke-width="2"/>
-
-  <text x="60" y="68" font-size="30" font-weight="700" fill="#1A1A1A">How Pythia fits together</text>
-  <text x="60" y="100" font-size="17" fill="#6B6B66">Four layers. Data flows up, decisions flow down to the venues, and nothing trades without evidence.</text>
-
-  <!-- layer labels -->
-  <g font-size="13" font-weight="700" fill="#9A9A93" letter-spacing="1.5">
-    <text x="60" y="166">YOU</text>
-    <text x="60" y="290">ENGINE</text>
-    <text x="60" y="440">RESEARCH</text>
-    <text x="60" y="590">MARKETS</text>
+  <!-- row labels -->
+  <g font-size="14" fill="#8C959F">
+    <text x="40" y="66">ui</text>
+    <text x="40" y="148">engine</text>
+    <text x="40" y="324">lab</text>
+    <text x="40" y="482">markets</text>
   </g>
 
-  <!-- layer 1: interfaces -->
-  <g filter="url(#soft)">
-    <rect x="200" y="132" width="300" height="64" rx="14" fill="#FFFFFF" stroke="#E4E4DE"/>
-    <rect x="520" y="132" width="300" height="64" rx="14" fill="#FFFFFF" stroke="#E4E4DE"/>
-    <rect x="840" y="132" width="300" height="64" rx="14" fill="#FFFFFF" stroke="#E4E4DE"/>
+  <!-- ui -->
+  <g fill="none" stroke="#1F2328" stroke-width="1.2">
+    <rect x="140" y="40" width="320" height="56" rx="4"/>
+    <rect x="480" y="40" width="320" height="56" rx="4"/>
+    <rect x="820" y="40" width="340" height="56" rx="4"/>
   </g>
-  <g font-size="17" font-weight="600" fill="#1A1A1A">
-    <text x="224" y="161">Desktop app</text>
-    <text x="544" y="161">Web cockpit</text>
-    <text x="864" y="161">Telegram</text>
+  <g font-size="17" fill="#1F2328">
+    <text x="160" y="66">src-tauri</text>
+    <text x="500" y="66">src</text>
+    <text x="840" y="66">alerts</text>
   </g>
-  <g font-size="14" fill="#6B6B66">
-    <text x="224" y="182">Tauri, one click per autopilot</text>
-    <text x="544" y="182">React UI over the HTTP server</text>
-    <text x="864" y="182">Alerts, daily report, questions</text>
-  </g>
-
-  <!-- layer 2: engine -->
-  <g filter="url(#soft)">
-    <rect x="200" y="226" width="940" height="128" rx="16" fill="#EEF4FF" stroke="#C9DAF8"/>
-  </g>
-  <text x="224" y="258" font-size="18" font-weight="700" fill="#1F4FB8">Rust engine</text>
-  <text x="352" y="258" font-size="14" fill="#5A6E96">pythia-core, pythia-ml, pythia-server</text>
-  <g filter="url(#soft)">
-    <rect x="224" y="276" width="214" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
-    <rect x="452" y="276" width="214" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
-    <rect x="680" y="276" width="214" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
-    <rect x="908" y="276" width="208" height="56" rx="12" fill="#FFFFFF" stroke="#D6E2F7"/>
-  </g>
-  <g font-size="15" font-weight="600" fill="#1A1A1A">
-    <text x="242" y="299">Autopilots</text>
-    <text x="470" y="299">Risk and stops</text>
-    <text x="698" y="299">Execution</text>
-    <text x="926" y="299">Models</text>
-  </g>
-  <g font-size="13" fill="#6B6B66">
-    <text x="242" y="319">sub-accounts, auto pick</text>
-    <text x="470" y="319">floors, kill switch, gates</text>
-    <text x="698" y="319">maker orders, reconcile</text>
-    <text x="926" y="319">ONNX in shadow, drift</text>
+  <g font-size="14" fill="#656D76">
+    <text x="160" y="84">desktop app</text>
+    <text x="500" y="84">React UI, app and browser</text>
+    <text x="840" y="84">Telegram or any webhook</text>
   </g>
 
-  <!-- layer 3: research -->
-  <g filter="url(#soft)">
-    <rect x="200" y="386" width="610" height="128" rx="16" fill="#F1F8F1" stroke="#CFE6CF"/>
-    <rect x="830" y="386" width="310" height="128" rx="16" fill="#FFF7EC" stroke="#F1DDBD"/>
+  <!-- engine -->
+  <rect x="140" y="120" width="1020" height="152" rx="4" fill="#F6F8FA" stroke="#1F2328" stroke-width="1.2"/>
+  <text x="160" y="148" font-size="17" fill="#1F2328">pythia-core</text>
+  <text x="296" y="148" font-size="14" fill="#656D76">+ pythia-ml + server (axum, HTTP and WebSocket)</text>
+  <g fill="#FFFFFF" stroke="#8C959F">
+    <rect x="160" y="166" width="186" height="84" rx="3"/>
+    <rect x="358" y="166" width="186" height="84" rx="3"/>
+    <rect x="556" y="166" width="186" height="84" rx="3"/>
+    <rect x="754" y="166" width="186" height="84" rx="3"/>
+    <rect x="952" y="166" width="188" height="84" rx="3"/>
   </g>
-  <text x="224" y="418" font-size="18" font-weight="700" fill="#2E7D32">Research lab</text>
-  <text x="362" y="418" font-size="14" fill="#5E7D5F">Python, pre-registered, every trial counted</text>
-  <g filter="url(#soft)">
-    <rect x="224" y="436" width="180" height="56" rx="12" fill="#FFFFFF" stroke="#DDEEDD"/>
-    <rect x="416" y="436" width="180" height="56" rx="12" fill="#FFFFFF" stroke="#DDEEDD"/>
-    <rect x="608" y="436" width="180" height="56" rx="12" fill="#FFFFFF" stroke="#DDEEDD"/>
+  <g font-size="16" fill="#1F2328">
+    <text x="174" y="192">autopilots</text>
+    <text x="372" y="192">strategies</text>
+    <text x="570" y="192">risk</text>
+    <text x="768" y="192">execution</text>
+    <text x="966" y="192">models</text>
   </g>
-  <g font-size="15" font-weight="600" fill="#1A1A1A">
-    <text x="240" y="459">Studies</text>
-    <text x="432" y="459">Paper books</text>
-    <text x="624" y="459">Model zoo</text>
-  </g>
-  <g font-size="13" fill="#6B6B66">
-    <text x="240" y="479">deflated Sharpe, bootstrap</text>
-    <text x="432" y="479">daily signals, forward test</text>
-    <text x="624" y="479">retrained, gated</text>
-  </g>
-  <text x="854" y="418" font-size="18" font-weight="700" fill="#B26A00">Data</text>
-  <g font-size="13" fill="#6B6B66">
-    <text x="854" y="443">Recorder: books, funding,</text>
-    <text x="854" y="462">open interest, every trade</text>
-    <text x="854" y="481">Parquet lake since 2020,</text>
-    <text x="854" y="500">delisted coins included</text>
+  <g font-size="14" fill="#656D76">
+    <text x="174" y="214">sub-accounts</text>
+    <text x="174" y="232">auto pick</text>
+    <text x="372" y="214">lab books</text>
+    <text x="372" y="232">built-in rules</text>
+    <text x="570" y="214">kill switch</text>
+    <text x="570" y="232">loss and DD limits</text>
+    <text x="768" y="214">orders, fills</text>
+    <text x="768" y="232">reconcile</text>
+    <text x="966" y="214">LightGBM, ONNX</text>
+    <text x="966" y="232">shadow first</text>
   </g>
 
-  <!-- layer 4: markets -->
-  <g filter="url(#soft)">
-    <rect x="200" y="550" width="940" height="88" rx="16" fill="#FFFFFF" stroke="#E4E4DE"/>
+  <!-- lab -->
+  <g fill="none" stroke="#1F2328" stroke-width="1.2">
+    <rect x="140" y="296" width="660" height="128" rx="4"/>
+    <rect x="820" y="296" width="340" height="128" rx="4"/>
   </g>
-  <g font-size="14" font-weight="600" fill="#3A3A36">
-    <rect x="222" y="568" width="92" height="30" rx="15" fill="#F2F2EE"/><text x="243" y="588">Alpaca</text>
-    <rect x="324" y="568" width="92" height="30" rx="15" fill="#F2F2EE"/><text x="341" y="588">Binance</text>
-    <rect x="426" y="568" width="80" height="30" rx="15" fill="#F2F2EE"/><text x="444" y="588">Kraken</text>
-    <rect x="516" y="568" width="74" height="30" rx="15" fill="#F2F2EE"/><text x="535" y="588">Bybit</text>
-    <rect x="600" y="568" width="70" height="30" rx="15" fill="#F2F2EE"/><text x="620" y="588">OKX</text>
-    <rect x="680" y="568" width="98" height="30" rx="15" fill="#F2F2EE"/><text x="697" y="588">Coinbase</text>
-    <rect x="788" y="568" width="86" height="30" rx="15" fill="#F2F2EE"/><text x="806" y="588">Deribit</text>
-    <rect x="884" y="568" width="116" height="30" rx="15" fill="#F2F2EE"/><text x="902" y="588">Polymarket</text>
-    <rect x="1010" y="568" width="110" height="30" rx="15" fill="#F2F2EE"/><text x="1027" y="588">SEC filings</text>
+  <text x="160" y="324" font-size="17" fill="#1F2328">research/lab</text>
+  <text x="296" y="324" font-size="14" fill="#656D76">Python</text>
+  <g font-size="14" fill="#656D76">
+    <text x="160" y="354">studies</text><text x="296" y="354">pre-registered, out of sample, deflated Sharpe</text>
+    <text x="160" y="377">paper books</text><text x="296" y="377">daily signals the autopilots trade</text>
+    <text x="160" y="400">models</text><text x="296" y="400">trained here, served by pythia-ml</text>
   </g>
-  <text x="222" y="622" font-size="13" fill="#8A8A83">Paper and demo accounts first. Real money only when the owner arms it. No withdrawals, ever.</text>
+  <text x="840" y="324" font-size="17" fill="#1F2328">research/recorder</text>
+  <g font-size="14" fill="#656D76">
+    <text x="840" y="354">order books, funding, OI</text>
+    <text x="840" y="377">parquet lake since 2020</text>
+    <text x="840" y="400">delisted coins kept</text>
+  </g>
+
+  <!-- markets -->
+  <line x1="140" y1="448" x2="1160" y2="448" stroke="#D0D7DE"/>
+  <g font-size="15" fill="#1F2328">
+    <text x="140" y="482">Alpaca</text>
+    <text x="236" y="482">Binance</text>
+    <text x="342" y="482">Kraken</text>
+    <text x="438" y="482">Bybit</text>
+    <text x="522" y="482">OKX</text>
+    <text x="592" y="482">Coinbase</text>
+    <text x="706" y="482">Deribit</text>
+    <text x="806" y="482">Polymarket</text>
+    <text x="936" y="482">DefiLlama</text>
+    <text x="1054" y="482">SEC EDGAR</text>
+  </g>
+  <text x="140" y="516" font-size="14" fill="#656D76">paper and demo accounts by default, live only when the owner arms it</text>
 </svg>
