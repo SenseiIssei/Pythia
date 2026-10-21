@@ -1,3 +1,22 @@
+# etf_routing (survey O1) · BTC and ETH legs through IBIT and ETHA
+
+Pre-registered in `results/etf_routing_prereg.md` (committed before any
+number was computed). Code: `lab.experiments.etf_routing`.
+
+**Summary.** No book passes, so no design note for an engine routing option.
+The fee saving is real but small next to the noise of filling hours later:
+breakout_top10 saves 72 bps of book equity a year in fees and gives back 7 in
+timing, weekend gaps and tracking (net +64 bps, band -48 to +173), the
+momentum books net +12 and +25 bps with bands across zero, and the ETFs track
+spot at 2.8 to 3.0 % a year by the registered measure (above the 2 % rule;
+much of that is the 16:00 print against a Binance minute). For btc_gated,
+which is all BTC and switches about five times a year, waiting for the US
+open costs far more than the fee saves (-426 bps a year, Sharpe 0.46 against
+0.60): every switch waits for the next US open (a weekend one until Monday),
+and the BTC move in that wait decides the result (per year -1,796, +926,
+-446 bps). Routing would make sense only as a fee-only change for slow books, and
+the evidence does not show it pays even there.
+
 <!-- generated below by lab.experiments.etf_routing; edit above this line only -->
 
 ## Results (generated 2026-10-21, 2024-01-11 to 2026-10-14, 1008 days)

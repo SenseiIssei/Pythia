@@ -1,3 +1,16 @@
+# treasury_premium (survey O2) · MSTR premium to its BTC
+
+Pre-registered in `results/treasury_premium_prereg.md` (committed before any
+number was computed). Code: `lab.experiments.treasury_premium` (the
+registered feasibility check only).
+
+**Summary.** Not run: the registered feasibility rule fails on this machine.
+The weekly holdings sit in 8-K documents that SEC serves only to a
+User-Agent naming a contact (`PYTHIA_SEC_UA`, unset here); XBRL tags the BTC
+count only at quarter ends and only from the 10-K filed 2026-02-19. With the
+documents readable the 8-K route would cover 81 % of the out-of-sample weeks,
+so the study can run once the variable is set and an 8-K parser exists.
+
 <!-- generated below by lab.experiments.treasury_premium; edit above this line only -->
 
 ## Results (generated 2026-10-21)

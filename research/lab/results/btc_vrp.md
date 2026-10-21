@@ -1,3 +1,20 @@
+# btc_vrp (survey #9) · BTC volatility risk premium from DVOL
+
+Pre-registered in `results/btc_vrp_prereg.md` (committed before any number
+was computed). Code: `lab.experiments.btc_vrp`. Information only: no options
+code exists or was written.
+
+**Summary.** The premium exists (DVOL sits 8.4 vol points above the next 30
+days' realised volatility on average, above it 72 % of the time, but it fell
+from 18 points in 2021 to about 7 in 2023 to 2025 and about zero in 2026), yet selling it does not beat
+holding BTC per unit of risk: the in-sample pick, an at-the-money covered call
+written only when DVOL - RV30 exceeds 16.5 points, makes Sharpe 0.60 from 2024
+against BTC 0.74 and gated BTC 0.68 (killed: below BTC). The always-on put
+write (0.63, drawdown 33 %) and the filtered 10 % put (0.58, volatility 4 %)
+are the shape an options sleeve would take: lower risk, not more return per
+unit of it. For a later IBIT options sleeve: worth a forward paper record on
+real quotes only as a low-risk income sleeve, not as an edge.
+
 <!-- generated below by lab.experiments.btc_vrp; edit above this line only -->
 
 ## Results (generated 2026-10-21, first roll 2021-04-23, in sample to 2023-12-31, out of sample 2024-01-01 to 2026-10-19)

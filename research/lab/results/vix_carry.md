@@ -1,3 +1,20 @@
+# vix_carry (survey #2) · VIX term-structure short-volatility sleeve
+
+Pre-registered in `results/vix_carry_prereg.md` (committed before any number
+was computed). Code: `lab.experiments.vix_carry`. Run on the PC with
+`PYTHIA_DATA=F:/PythiaData PYTHIA_AGENT_OUT=<elsewhere> PYTHIA_REPORTS=<elsewhere>`.
+
+**Summary.** Killed by its own rule. The term-structure switch does what it
+promises in the tails (it was out of the market through February 2018 and
+March 2020, where holding the product lost 53 % and 51 %), but the premium it
+keeps after 2018 is small: the in-sample pick makes Sharpe 0.23 out of sample
+against SPY 0.81 and 60/40 0.84. The rebuilt pre-2011 index missed its
+registered correlation check by a hair (0.949 against 0.95, because the
+futures settle 15 minutes after the ETFs close), so selection used 2011-10 to
+2017 only. As a 10 or 20 % sleeve next to the crypto books it lowers their
+Sharpe (0.78 and 0.65 against 0.88 for the crypto mix alone); SPY as the
+sleeve does better (1.04, 1.19). No book, no job.
+
 <!-- generated below by lab.experiments.vix_carry; edit above this line only -->
 
 ## Results (generated 2026-10-21, in sample 2011-10-05 to 2017-12-31, out of sample 2018-01-01 to 2026-10-14)

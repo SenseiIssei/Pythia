@@ -1,3 +1,18 @@
+# crypto_open_gap (survey O6) · overnight BTC and the COIN / MSTR session
+
+Pre-registered in `results/crypto_open_gap_prereg.md` (committed before any
+number was computed). Code: `lab.experiments.crypto_open_gap`.
+
+**Summary.** No. The gap prices the overnight BTC move almost fully (its
+correlation with BTC's 16:00-to-09:30 move is 0.74 for COIN and 0.88 for MSTR
+out of sample). In sample the session leaned against the gap's surprise
+(slope t -2.6 COIN, -1.6 MSTR), out of sample the slope is t -0.6 and -1.1:
+COIN is killed (below 1), MSTR fails. Traded at the official open the rule
+looks fine for MSTR (0.86), but that needs the opening print it trades on;
+entered an hour later it loses on both (-0.69 COIN, -0.23 MSTR): what there
+is sits in the first hour after the open. No book (the engine also has no
+intraday lab book to run it).
+
 <!-- generated below by lab.experiments.crypto_open_gap; edit above this line only -->
 
 ## Results (generated 2026-10-21, out of sample 2023-01-01 to 2026-10-14)
