@@ -470,7 +470,10 @@ pub fn trade_cards_in(trades: &[&TradeLine], lang: Lang) -> Vec<Card> {
             let side = word(if buy { Word::Bought } else { Word::Sold }, lang);
             let mut c = Card::new(if buy { "🟢" } else { "🔴" }, format!("{book} {side} {sym}{tag}"))
                 .row(Row::new(w(Word::Amount), format!("{} {sym}", i18n::qty(lang, q))))
-                .row(Row::new(w(Word::Price), i18n::price(lang, if q > 0.0 { value / q } else { 0.0 })))
+                .row(Row::new(
+                    w(if fills.len() > 1 { Word::AvgPrice } else { Word::Price }),
+                    i18n::price(lang, if q > 0.0 { value / q } else { 0.0 }),
+                ))
                 .row(Row::new(w(Word::Value), i18n::usd(lang, value)));
             if fees > 0.0 {
                 c = c.row(Row::new(w(Word::Fee), i18n::usd(lang, fees)));
@@ -506,7 +509,7 @@ pub fn trade_cards_in(trades: &[&TradeLine], lang: Lang) -> Vec<Card> {
         rows.sort_by_key(|r| r.0);
         let rows: Vec<Vec<String>> = rows.into_iter().map(|(_, r)| r).collect();
         c.table = Some(Table {
-            header: vec![w(Word::Side), w(Word::Coin), w(Word::Value), w(Word::Price)],
+            header: vec![w(Word::Side), w(Word::Coin), w(Word::Value), w(Word::AvgPrice)],
             rows,
             more: 0,
         });

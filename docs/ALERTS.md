@@ -27,44 +27,50 @@ An autopilot stopped by its floor:
 🛑 Momentum stopped
 Max loss reached.
 Equity            $9,412.30
-P&L       -$587.70 -5.88 % 🔴
-vs BTC          -4.10 pts 🔴
-Trades                   14
-Fees                 $11.20
+P&L since start      -$587.70 -5.88 % 🔴
+vs BTC since start         -4.10 pts 🔴
+Closed so far                     14
+Fees                          $11.20
 Closed its 3 position(s). · Pythia
 ```
 
-The fills of one rebalance, as one message with a small table:
+The fills of one rebalance, as one message with a small table. A rebalance
+worked through partial maker fills sends them minutes apart: the sender holds
+an autopilot's fills until none came for 150 s (`PYTHIA_ALERT_FILL_QUIET_S`),
+at most 600 s after the first (`PYTHIA_ALERT_FILL_MAX_S`), and posts them as
+one card; 200 waiting fills go out at once, and nothing is dropped.
 
 ```
 🔁 Rebalance · Momentum
-3 trades: bought $1,220.00, sold $1,500.00.
-Side Coin  Value      Price
+4 fills in 3 lines: bought $1,630.00, sold $1,500.00.
+Side Coin  Value  Avg price
 Sell ETH  $1,500  $3,000.00
 Buy  BTC  $1,220 $61,000.00
 Buy  SOL    $410    $151.30
 Realised  +$5.00 🟢
-Fees       $0.30
+Fees       $0.40
 Demo: virtual money at the venue · Pythia
 ```
 
-The daily digest (with the chart as a photo, this text as its caption):
+The daily digest (with the chart as a photo, this text as its caption): one
+row per running autopilot, "Today" since yesterday's digest (its snapshot in
+`<data>/notify/state.json`; without one, the learning report's last 24 hours),
+"Start" since its start, "±BTC" points against BTC since its start:
 
 ```
 📊 Daily · Wed 14 Oct
-1 autopilot running, +$10.20 today 🟢 · BTC +0.50 %
-Momentum · demo
-Equity              $1,030.00
-Today         +$10.20 +1.00 % 🟢
-Since start   +$30.00 +3.00 % 🟢
-vs BTC              +1.50 pts 🟢
-BTC                   +1.50 %
-Trades today   3 · fees $1.25
+1 autopilot running, +$10.20 today 🟢 · BTC 24 h +0.50 %
+Autopilot Value Today Start  ±BTC
+Momentum  1,030 +1.00 +3.00 +1.50
+Value in $, Today and Start in %, ±BTC in points against BTC since start; all demo
+Today 9 orders filled · 3 positions closed · fees $1.25
 Forward test tsmom ✅ on track · m4_ls 👀 watch · picks_ls 🌱 early
 Health ✅ all green
 Learning 2 cost updates; 1 autopilot running, best +1.50 points against BTC since start.
 Pythia
 ```
+
+German samples of every card are in [telegram-samples.md](telegram-samples.md).
 
 On Telegram the title is bold, the numbers are in a `<pre>` block and the
 footer is in italics: posts go with `parse_mode: HTML`, and every piece of text
@@ -129,14 +135,17 @@ hours have no category and always go out.
 
 From 23:00 to 07:00 Europe/Berlin by default (summer and winter time alike),
 only urgent alerts go out. The rest are recorded (`reason: "quiet"` in
-`GET /api/alerts`) and listed in one message once quiet hours are over:
+`GET /api/alerts`) and summed up in one message once quiet hours are over: one
+line per autopilot for its fills, one per other kind of alert with its count
+and the newest title. A note too long for the chat leaves whole lines out from
+the end and says how many.
 
 ```
 🌙 Quiet hours are over
-2 alerts were held back from 23:00 to 07:00. Urgent ones went out at once.
-Time  Alert
-00:30 BTC +4.1 % in 1 h
-03:40 Momentum stopped
+15 alerts were held back from 23:00 to 07:00. Urgent ones went out at once.
+Test · TSMOM tranches: rebalance, 9 sells, 3 buys, sold $904, bought $303, fees $2.10, realised +$45.00
+Big move: 2, the last ETH -5.0 % in 1 h
+Listings: New on Kraken: ZK
 Pythia
 ```
 
@@ -269,9 +278,15 @@ still mirrors every fill, exit and risk line of the journal as plain text.
 `reports/forward/latest.json` and `_health/system.json`, and the engine's
 `GET /api/state` for the chart, and posts:
 
-- each running autopilot (at most six; the rest are counted): equity, today and
-  since start in $ and %, against BTC, trades and fees today (from the day
-  before's digest; the first digest gives the totals since start and says so)
+- one table, one row per running autopilot (at most twelve; the rest are
+  counted): a short name, its value, today and since start in %, points against
+  BTC since its start; "today" is the change since the day before's digest
+  (its snapshot, keys of older digests migrated), else the learning report's
+  last 24 hours, else "n/a", never the change since start
+- one line with the day's orders filled, positions closed and fees, summed
+  over the autopilots (without the day before's numbers: the totals since
+  start, and it says so)
+- the real money readiness line and the AI brief, when there are reports
 - the forward test status of every paper book
 - anything red in the last health check, and a check that has not run for
   more than two hours

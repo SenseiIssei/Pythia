@@ -279,6 +279,8 @@ pub enum Word {
     Sell,
     Amount,
     Price,
+    /// The average price of several fills.
+    AvgPrice,
     Value,
     Fee,
     Fees,
@@ -302,6 +304,8 @@ pub fn word(w: Word, lang: Lang) -> &'static str {
         (Lang::En, Word::Sell) => "Sell",
         (Lang::En, Word::Amount) => "Amount",
         (Lang::En, Word::Price) => "Price",
+        (Lang::En, Word::AvgPrice) => "Avg price",
+        (Lang::De, Word::AvgPrice) => "Ø Preis",
         (Lang::En, Word::Value) => "Value",
         (Lang::En, Word::Fee) => "Fee",
         (Lang::En, Word::Fees) => "Fees",
@@ -1093,15 +1097,17 @@ impl Msg {
                 c.rows = vec![
                     Row::new(l("Equity", "Wert"), usd(lang, *equity)),
                     Row::toned(
-                        l("P&L", "GuV"),
+                        l("P&L since start", "GuV seit Start"),
                         format!("{} {}", signed_usd(lang, *pnl), signed_pct(lang, *pnl_pct, 2)),
                         *pnl,
                     ),
                 ];
                 if let Some(b) = vs_btc {
-                    c.rows.push(Row::toned(l("vs BTC", "ggü. BTC"), pts(lang, pnl_pct - b), pnl_pct - b));
+                    c.rows.push(Row::toned(l("vs BTC since start", "ggü. BTC seit Start"), pts(lang, pnl_pct - b), pnl_pct - b));
                 }
-                c.rows.push(Row::new(l("Trades", "Abschlüsse"), trades.to_string()));
+                // Closed positions, not fills: fees are paid on every fill,
+                // so "0 trades, fees $11" would read as a contradiction.
+                c.rows.push(Row::new(l("Closed so far", "Bisher geschlossen"), trades.to_string()));
                 c.rows.push(Row::new(l("Fees", "Gebühren"), usd(lang, *fees)));
                 c.footer = foot.as_ref().map(|f| f.text(lang));
             }

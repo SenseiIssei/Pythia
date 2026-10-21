@@ -390,3 +390,51 @@ fn the_test_message_and_held_titles_use_the_language() {
     assert_eq!(lab.card_in(Lang::De).title, "Neu gelistet");
     assert_eq!(AlertEvent::new(AlertKind::DataStale, "s", "x").title_text_in(Lang::De), "Marktdaten veraltet");
 }
+
+/// Every engine card in German as plain text, for docs/telegram-samples.md:
+/// `cargo test -p pythia-core --lib print_german_samples -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn print_german_samples() {
+    let fill = |buy: bool, sym: &str, q: f64, p: f64, reb: bool| TradeLine {
+        book: "Test · TSMOM tranches".into(),
+        buy,
+        symbol: sym.into(),
+        qty: q,
+        price: p,
+        fee: 0.15,
+        realized: if buy { 0.0 } else { 1.2 },
+        rebalance: reb,
+        mode: "demo".into(),
+        experiment: false,
+    };
+    let show = |name: &str, evs: &[AlertEvent]| {
+        let html = compose_in(&tg(), evs, 0, Lang::De);
+        println!("=== {name} [{}]\n{}\n", html.chars().count(), plain(&html));
+    };
+    show("Einzelne Ausführung", &[AlertEvent::trade("1", fill(true, "BTC", 0.004, 108_250.0, false))]);
+    // One rebalance worked through 14 partial maker fills: one card.
+    let syms = [("ETH", 0.21, 3_905.0), ("SOL", 2.5, 186.4), ("AVAX", 9.0, 27.1), ("LINK", 12.0, 17.9)];
+    let evs: Vec<AlertEvent> = (0..14)
+        .map(|i| {
+            let (s, q, p) = syms[i % 4];
+            AlertEvent::trade(i.to_string(), fill(i % 4 == 0 || i % 4 == 3, s, q / 3.0, p, true))
+        })
+        .collect();
+    show("Umschichtung aus 14 Teilausführungen", &evs);
+    let mut night = super::Overnight::default();
+    for (i, e) in evs.iter().enumerate() {
+        night.hold(e, 1_792_440_000_000 + i as i64 * 40_000, Lang::De);
+    }
+    night.hold(&AlertEvent::trade("x", TradeLine { book: "Auto-Pick (main)".into(), ..fill(true, "BTC", 0.01, 108_000.0, true) }), 1, Lang::De);
+    for m in messages().into_iter().filter(|m| matches!(m, Msg::BigMove { .. })) {
+        night.hold(&AlertEvent::from_msg("m", m), 1, Lang::De);
+    }
+    night.hold(&AlertEvent::new(AlertKind::Event, "e", "x").titled("Neu bei Kraken: ZK").in_category(AlertCategory::Listings), 1, Lang::De);
+    show("Ruhezeit vorbei (Engine)", &[overnight_event(&night, &AlertSettings::default())]);
+    for m in messages().into_iter().filter(|m| !matches!(m, Msg::Overnight { .. })) {
+        let ev = AlertEvent::from_msg("k", m);
+        let name = ev.title_text_in(Lang::De);
+        show(&name, &[ev]);
+    }
+}

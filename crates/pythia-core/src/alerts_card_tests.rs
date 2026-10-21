@@ -138,7 +138,7 @@ fn the_fills_of_a_rebalance_are_one_card_with_a_table() {
     assert_eq!(table.rows[0], vec!["Sell", "ETH", "$1,500", "$3,000.00"]);
     assert_eq!(table.rows[1], vec!["Buy", "BTC", "$1,220", "$61,000.00"]);
     let html = render_post(&cards, AlertFormat::Telegram, 4000);
-    assert!(html.contains("<pre>Side Coin  Value      Price\nSell ETH  $1,500  $3,000.00\nBuy  BTC  $1,220 $61,000.00</pre>"), "{html}");
+    assert!(html.contains("<pre>Side Coin  Value  Avg price\nSell ETH  $1,500  $3,000.00\nBuy  BTC  $1,220 $61,000.00</pre>"), "{html}");
     assert!(html.contains("$61,000.00</pre>\n<pre>Realised  +$5.00 🟢\nFees       $0.30</pre>"), "the trades, then the totals: {html}");
     assert!(html.contains("<b>📡 Market data stale</b>\nQuotes stale for 11 min"));
 }
