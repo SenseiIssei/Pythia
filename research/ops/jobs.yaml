@@ -144,6 +144,19 @@ jobs:
     timeout: 15m
     grace: 30m
 
+  # The SPY sleeve of the Crypto + SPY forward test (results/equity_sleeve_prereg.md):
+  # a lab book of US shares that is always 100 % SPY. It runs every weekday and
+  # publishes a new signal only on the first run in a calendar month, so the
+  # engine brings the sleeve back to its share once a month. Explicit only: no
+  # auto pick takes it, only an autopilot that names lab:spy_hold runs it.
+  - name: paper-spy-hold
+    description: SPY bought and held, the monthly signal of the forward test's equity sleeve
+    schedule: "20 14 * * 1-5"
+    command: python -m lab.paper.spy_hold
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    grace: 30m
+
   - name: paper-m4
     description: M4 shadow paper book, market-neutral on perps
     schedule: "45 4 * * *"

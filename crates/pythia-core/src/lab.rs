@@ -776,6 +776,23 @@ mod tests {
     }
 
     #[test]
+    fn the_spy_sleeve_signal_of_the_forward_test_parses_as_explicit_only() {
+        // What lab.paper.spy_hold writes.
+        let j = r#"{"strategy":"spy_hold","variant":"SPY bought and held","as_of_ms":1,"generated_ms":2,
+            "valid_until_ms":3,"quote":"USD","asset_class":"us_equity","weights":{"SPY":1.0},"autopilot_only":true,
+            "evidence":{"report":"book_portfolio","explicit_only":true,"oos_sharpe":1.3,"oos_max_dd":0.188,
+            "caveat":"after the fact","verdict":"sleeve of a registered forward test","source":"x"},
+            "dropped":[],"dropped_weight":0.0,"lab_exposure":1.0,"cadence":"monthly","forward_test":"results/equity_sleeve_prereg.md"}"#;
+        let s: LabSignal = serde_json::from_str(j).unwrap();
+        assert!(s.is_explicit_only() && s.is_us_equity() && s.autopilot_only && !s.is_experimental());
+        assert_eq!(s.market_id("SPY"), "alpaca:SPY");
+        assert_eq!(s.evidence.oos_max_dd, Some(0.188));
+        // Every other signal so far: not explicit only.
+        let j = r#"{"strategy":"tsmom","variant":"28d","as_of_ms":1,"generated_ms":2,"valid_until_ms":3,"quote":"USD","weights":{}}"#;
+        assert!(!serde_json::from_str::<LabSignal>(j).unwrap().is_explicit_only());
+    }
+
+    #[test]
     fn an_equity_signal_maps_its_symbols_to_alpaca_markets() {
         let j = r#"{"strategy":"etf_trend","variant":"trend","as_of_ms":1,"generated_ms":2,"valid_until_ms":3,
             "quote":"USD","weights":{"SPY":0.3,"GLD":0.2},"asset_class":"us_equity","autopilot_only":true}"#;
