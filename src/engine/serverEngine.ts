@@ -293,7 +293,8 @@ export class ServerEngineClient implements EngineClient {
  * thin client of the standalone backend instead of running its own paper engine.
  */
 export function serverUrl(): string | null {
-  const env = (import.meta as unknown as { env?: Record<string, string> }).env;
-  const url = env?.VITE_PYTHIA_SERVER?.trim();
+  // Read the one variable by name: a reference to the whole `import.meta.env`
+  // object makes Vite inline every exposed variable into the bundle.
+  const url = (import.meta.env.VITE_PYTHIA_SERVER as string | undefined)?.trim();
   return url ? url : null;
 }

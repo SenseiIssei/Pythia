@@ -13,5 +13,8 @@ export default defineConfig({
     // holds a .pdb open.
     watch: { ignored: ["**/target/**", "**/src-tauri/target/**"] },
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  // Only what the bundle may carry. `TAURI_` would also match build secrets
+  // such as TAURI_SIGNING_PRIVATE_KEY; `TAURI_ENV_` is what the Tauri CLI sets
+  // for the frontend (platform, arch, debug).
+  envPrefix: ["VITE_", "TAURI_ENV_"],
 });
