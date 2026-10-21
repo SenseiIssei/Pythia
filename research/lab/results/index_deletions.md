@@ -24,6 +24,29 @@ in 2013 to 2026 on this panel. No paper book.
 Caveat: the panel has no delisting returns. The registered 30 % haircut for
 performance delistings touched no out-of-sample position.
 
+# S&P 500 discretionary deletions (survey candidate 4)
+
+Pre-registered as study 2 of `results/survey_equities_prereg.md` (5 trials).
+Code: `python -m lab.experiments.survey_equities index_deletions`.
+
+**Verdict: fails (both picks), and the small positive mean is a data
+artefact.** 352 deletions kept trading outside the index (163 from 2013),
+bought at the open six sessions after removal, at 10 bps a side. In the
+selection window (1996 to 2012) the 12-month hold shows a mean excess of 58 %
+per event over the equal weight, but the median is -1 % and the mean comes
+from a few price errors (PALM's +1,842 % day is an unadjusted reverse split).
+Out of sample (entries from 2013, 147 events) the 12-month pick makes a mean
+excess of +0.9 % (event bootstrap band -6.9 % to +9.2 %), positive in only
+one of three periods (+20.7 % in 2018-21, carried by the 2020 rebound), with
+a median of -6.1 % and a 5 % trimmed mean of -4.6 %. Two events carry the
+sign: FRC (2023, a cent-priced OTC remnant jumping eightfold in a day) and FTR
+(2017, a stale price followed by a +266 % day). Without them the mean is
+-0.2 % and the registered kill rule would be hit. The book makes Sharpe 0.65
+against 0.80 for the equal weight on the same days. Deletions minus additions
+(12 months) is no better: +0.7 % per event, band -8.4 % to +10.1 %. Arnott and
+others report about 22 % in the year after; among S&P 500 deletions from 2013
+the typical deleted name kept losing. No paper book.
+
 <!-- generated below by lab.experiments.survey_equities (index_deletions); edit above this line only -->
 
 # S&P 500 discretionary deletions: results (2026-10-21)

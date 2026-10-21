@@ -23,6 +23,28 @@ times purchases the lab would already make (buying a name a few days before
 its earnings rather than after) the gross premium is free; that is not a
 book and is not proposed here.
 
+# Earnings announcement premium on the point-in-time S&P 500 (survey candidate 3)
+
+Pre-registered as study 1 of `results/survey_equities_prereg.md` (6 trials).
+Code: `python -m lab.experiments.survey_equities earnings_premium`.
+
+**Verdict: killed by costs (IR -0.23 out of sample, the kill bar is 0.1).**
+The premium is there before costs and gone after them. Expected dates come
+from each company's own 8-K item 2.02 a year earlier plus 364 days; 66 % of
+them land within two sessions of the actual 8-K. Out of sample from 2016,
+holding the names from 5 sessions before the expected date to the open after
+it earns 6 % a year over the CIK equal weight before costs (IR 0.79), and every
+one of the 6 trials is positive before costs (IR 0.24 to 0.79). But the books
+turn over 60 to 100 times a year, and at 5 bps a side on the name and on the
+index it finances from (plus SEC fee and TAF) every trial is negative: the
+selection window's pick (the same window with the Frazzini and Lamont volume
+filter) makes IR -0.23, -0.64 with costs doubled, -0.27 a day late. The
+long-only form with SPY as the rest makes Sharpe 0.76 against SPY's 0.92. All
+five gates fail. The registered cost charges both legs of the tilt; a book
+that only adds names to cash would pay about half, which still leaves the
+best trial's 6 % gross against roughly 4 % of costs and the pick's 5 % against
+3 %, inside a bootstrap band that already includes zero. No paper book.
+
 <!-- generated below by lab.experiments.survey_equities (earnings_premium); edit above this line only -->
 
 # Earnings announcement premium: results (2026-10-21)

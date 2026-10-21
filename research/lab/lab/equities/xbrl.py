@@ -49,7 +49,10 @@ def fetch_company(client: edgar.Client, cik: int, refresh: bool = False) -> dict
     miss = d / (name + ".none")
     if not refresh:
         if f.exists():
-            return json.loads(gzip.decompress(f.read_bytes()).decode("utf-8"))
+            try:
+                return json.loads(gzip.decompress(f.read_bytes()).decode("utf-8"))
+            except (OSError, EOFError, ValueError):
+                f.unlink()                 # cut short when a run was killed: fetch it again
         if miss.exists():
             return None
     body = client.get(FACTS_URL.format(name))
