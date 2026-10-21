@@ -155,6 +155,28 @@ def decode(name: str, buf: bytes, pos: int = 8) -> dict:
     return out
 
 
+def encode(name: str, values: dict) -> bytes:
+    """An event's bytes from its fields (the inverse of decode; missing fields are zero), for synthetic
+    messages in benchmarks and tests."""
+    disc = next(d for d, (_, n) in DISC.items() if n == name)
+    out = bytearray(disc)
+    for field, kind in LAYOUTS[name]:
+        v = values.get(field)
+        if kind == PUBKEY:
+            out += b58decode(v or DEFAULT_KEY).rjust(32, b"\0")
+        elif kind == STRING:
+            b = (v or "").encode()
+            out += struct.pack("<I", len(b)) + b
+        elif kind == SHAREHOLDERS:
+            out += struct.pack("<I", 0)
+        elif kind == I128:
+            out += int(v or 0).to_bytes(16, "little", signed=True)
+        else:
+            size, fmt = _FIXED[kind]
+            out += struct.pack(fmt, v or 0)
+    return bytes(out)
+
+
 def program_data(logs: list[str]) -> list[tuple[str, bytes]]:
     """(program, bytes) of every "Program data:" line, attributed by the invoke stack."""
     stack: list[str] = []

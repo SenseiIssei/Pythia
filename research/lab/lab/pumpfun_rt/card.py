@@ -1,8 +1,9 @@
 """The real-time pump.fun lab's Telegram cards (English or German, lab.ops.i18n).
 
-  daily_card       once a day after the retrain: yesterday's record, the paper P&L of
-                   every shadow book, the study's bar, the models, the readiness of each
-                   strategy for live, and the live executor's state
+  daily_card       once a day after the retrain: yesterday's record, our measured detection
+                   latency (latency.py), the paper P&L of every shadow book, the study's bar,
+                   the models, the readiness of each strategy for live, and the live
+                   executor's state
   (live.winner_card: a paper winner over +200 %, at most one an hour)
   live_trade_card  every live order's fill or failure (tagged TEST in test mode, with the
                    measured landing time and slippage)
@@ -72,6 +73,12 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     else:
         tot = sum(s["pnl_sol"] for s in shadow.values())
         lines.append(t("prt_daily_books", lang, n=len(shadow), pnl=f"{i18n.num(tot, 3, lang, True)} SOL"))
+    lat = data.get("latency") or {}
+    if lat.get("n") and lat.get("p50_ms") is not None:
+        lines.append(t("prt_daily_latency", lang, med=i18n.num(lat["p50_ms"] / 1000, 1, lang),
+                       p90=i18n.num((lat.get("p90_ms") or 0) / 1000, 1, lang),
+                       fast=i18n.frac_pct(lat.get("within_1s") or 0.0, 0, lang),
+                       slot2=i18n.frac_pct(lat.get("within_2_slots") or 0.0, 0, lang)))
     n_days = len(data.get("days") or [])
     results = data.get("results") or []
     if n_days < GATE_DAYS:

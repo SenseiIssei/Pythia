@@ -103,16 +103,22 @@ def evidence_lines(root: Path | None = None) -> list[str]:
     for k, v in sorted((ev.get("strategies") or {}).items())[:30]:
         if not isinstance(v, dict):
             continue
-        ret, days = v.get("return_pct"), v.get("days")
-        bits = [f"{k}: {v.get('status')}"]
-        if isinstance(ret, (int, float)):
-            bits.append(f"{ret:+.1f} %")
-        if isinstance(days, (int, float)):
-            bits.append(f"after {days:.0f} days")
-        if v.get("since"):
-            bits.append(f"since {v.get('since')}")
-        out.append(" ".join(bits))
+        out.append(evidence_line(k, v))
     return out
+
+
+def evidence_line(key: str, v: dict) -> str:
+    """One strategy's forward evidence in words. `since` is when its STATUS last changed,
+    `days` how long its whole record runs: the two are said apart, because "-4.5 % after
+    13 days since 2026-10-17" read as 13 days counted from a date three days back."""
+    ret, days = v.get("return_pct"), v.get("days")
+    head = f"{key}: {v.get('status')}" + (f" since {v['since']}" if v.get("since") else "")
+    record = []
+    if isinstance(ret, (int, float)):
+        record.append(f"{ret:+.1f} %")
+    if isinstance(days, (int, float)):
+        record.append(f"over {days:.0f} days" if days >= 1 else f"over {days * 24:.0f} hours")
+    return head + (f" (forward record {' '.join(record)})" if record else "")
 
 
 def brief_score_line() -> str | None:

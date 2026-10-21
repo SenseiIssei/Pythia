@@ -337,10 +337,16 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
 
     table = e2.table()
     rec = record_stats(days, root)
+    try:                                                     # our detection latency over the last 24 hours
+        from . import latency as LT
+        lat = LT.summary(days[-2:], root, now_ms=now_ms, hours=24)
+    except Exception as e:                                   # the study goes on without it
+        log(f"{NAME}: latency failed ({type(e).__name__}: {e})")
+        lat = None
     x14 = e2.early.tables()
     return {"now_ms": now_ms, "days": days, "warm": warm, "split_ms": split, "span": (t_lo, t_hi), "pick": pick,
             "picked_by": "in-sample mean" if cands else "default", "results": results, "pool": pl_,
-            "table": table, "record": rec, "x14": x14, "x14_keep": keep,
+            "table": table, "record": rec, "x14": x14, "x14_keep": keep, "latency": lat,
             "counts": {"pass1": dict(e1.counts), "pass2": dict(e2.counts)},
             "skipped": {f"{k[0]}: {k[1]}": v for k, v in e2.skipped.items() if "@" not in k[0]},
             "failed_why": dict(sorted(((w, sum(1 for f in e2.failed if f["why"] == w and "@" not in f["rule"]))
@@ -500,6 +506,7 @@ def report(res: dict) -> tuple[dict, str]:
             "results": [{k: v for k, v in r.items()} for r in results], "pool": res["pool"],
             "readiness": ready, "shadow": res.get("shadow") or {}, "models": msum, "skipped": res["skipped"],
             "execution": execution_summary(),
+            "latency": latency_brief(res.get("latency")),
             "failed_why": res["failed_why"], "counts": res["counts"]}
     md = [f"# pump.fun real-time lab ({_day(res['now_ms'])})", "", data["caveat"], "", head, "",
           "## Record", "", "| day | tokens | plain SOL | curve trades | completed | migrated | gaps | gap min |",
@@ -582,6 +589,13 @@ def report(res: dict) -> tuple[dict, str]:
                       f"{pct_auc(v.get('logistic_auc'))} | {v.get('verdict', '')} |")
     else:
         md.append("No retrain yet.")
+    lat = res.get("latency")
+    if lat and lat.get("n"):
+        from . import latency as LT
+        md += ["", "## Detection latency (the last 24 hours)", "",
+               "How late our feed hands us a token's creation, against the chain's own block time "
+               "(lab/pumpfun_rt/latency.py; reports/pumpfun_rt/latency.md has the hours).", ""]
+        md += LT.report_md(lat).split("\n")[2:]
     return data, "\n".join(md) + "\n"
 
 
@@ -603,6 +617,16 @@ def execution_summary() -> dict | None:
         return None
 
 
+def latency_brief(lat: dict | None) -> dict | None:
+    """What the card and the feed need of the latency summary (latency.py), None without one."""
+    if not lat or not lat.get("n") or "lag_ms" not in lat:
+        return None
+    return {"n": lat["n"], "slot_ms": lat["slot_ms"], "p10_ms": lat["lag_ms"]["p10"], "p50_ms": lat["lag_ms"]["p50"],
+            "p90_ms": lat["lag_ms"]["p90"], "p50_slots": lat["lag_slots"]["p50"], "within_1s": lat["within_1s"],
+            "within_2_slots": sum(lat["shares"].get(k, 0.0) for k in ("slot", "+1", "+2")),
+            "from_ms": lat.get("from_ms"), "to_ms": lat.get("to_ms")}
+
+
 def models_summary() -> dict:
     """The last retrain's summary (reports/pumpfun_rt/models.json), {} before the first."""
     try:
@@ -619,6 +643,9 @@ def models_summary() -> dict:
 def save_outputs(res: dict, data: dict, md: str) -> None:
     from .retrain import rows_path, save_rows
     rep.write(NAME, md, data)
+    if res.get("latency"):
+        from . import latency as LT
+        LT.save(res["latency"])
     if res.get("table") is not None and len(res["table"].get("t", [])):
         save_rows(res["table"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"]})
     if res.get("x14") is not None:

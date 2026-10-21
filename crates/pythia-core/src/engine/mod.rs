@@ -2946,13 +2946,21 @@ impl Engine {
             .position(|s| s.id == sid)
             .unwrap_or_else(|| self.ensure_manual_strategy());
         // A stop, a target or a halt never rests as a maker order.
+        let was_out = self.in_flight_markets.contains(key);
+        let qty_before = self.positions.get(key).map(|p| p.qty);
         self.urgent_exit = true;
         self.route_fill_in(&book, idx, &m, side, qty, m.price, intent);
         self.urgent_exit = false;
-        // Only claim the exit happened if it actually did. A live exit that
-        // could not route leaves the position open, and `route_fill` has
-        // already explained why.
-        if !live || self.live_routable(m.venue) {
+        // Only claim the exit happened if it actually did: an order went out
+        // or the position moved. A live exit that could not route, or a demo
+        // exit that waits (another book's order in the symbol, a refusal
+        // being waited out, an order already at the venue), leaves the
+        // position as it was, and `route_fill` has already said why (once a
+        // minute). Saying "Exit" here regardless wrote the same line at every
+        // tick while a stopped autopilot's demo closes waited.
+        let sent = !was_out && self.in_flight_markets.contains(key);
+        let moved = self.positions.get(key).map(|p| p.qty) != qty_before;
+        if (sent || moved) && (!live || self.live_routable(m.venue)) {
             let whose = self.book_label(&book).map(|l| format!(" ({l})")).unwrap_or_default();
             self.log(JournalKind::System, format!("Exit {market}{whose}: {reason}"), Some(sid), Some(market));
         }

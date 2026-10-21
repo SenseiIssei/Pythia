@@ -16,6 +16,21 @@ request per connect and about 30 to 40 MB per 30 s, roughly 1 MB/s or 90 GB a
 day inbound, most of it failed transactions the endpoint sends along and
 PumpSwap trades of old pools that are dropped; PYTHIA_PF_AMM=0 halves it).
 
+A low-latency provider, when the owner pays for one (docs/PUMPFUN-LIVE.md; the
+public feed hands us a creation about 15 s after its block, latency.py):
+
+  PYTHIA_SOLANA_WS_URLS     comma-separated provider websocket URLs; a "{token}" in one is
+                            replaced by PYTHIA_SOLANA_TOKEN, so no key is in any file here.
+                            The links spread over them, and the public endpoint stays on as a
+                            fallback link (PYTHIA_PF_PUBLIC_FALLBACK=0 drops it)
+  PYTHIA_SOLANA_COMMITMENT  "confirmed" (default) or "processed" (faster, rarely a dropped fork)
+  PYTHIA_SOLANA_GRPC_URL    a Yellowstone gRPC (Geyser) endpoint, with PYTHIA_SOLANA_GRPC_TOKEN
+                            (geyser.py; needs grpcio, else the websockets go on alone)
+
+Duplicates across feeds are dropped by signature as before; the heartbeat counts
+which feed delivered each transaction first ("first_by_source", scheme and host
+only). No URL with its path or query is ever printed.
+
 Why not PumpPortal: its free data websocket carries token creations and
 migrations, but trades of a token cost 0.01 SOL per 10,000 events and need an
 API key tied to a funded wallet. This project holds no wallet, so that is out.
@@ -67,6 +82,7 @@ import urllib.parse
 
 from . import events as E
 from . import store
+from .latency import safe_url, ws_urls
 
 DEFAULT_WS = "wss://api.mainnet-beta.solana.com"
 COMMITMENT = "confirmed"
@@ -182,9 +198,10 @@ class Collector:
         self.reconnects = 0
         self.meta_q: asyncio.Queue | None = None
         self.started_ms = now_ms()
+        self.first_by: collections.Counter = collections.Counter()
 
     # ------------------------------------------------------------ decoding
-    def handle(self, text: str, recv_ms: int) -> int:
+    def handle(self, text: str, recv_ms: int, src: str = "ws") -> int:
         """One websocket message. Returns the number of rows kept."""
         try:
             d = json.loads(text)
@@ -195,23 +212,28 @@ class Collector:
         if not params:
             if isinstance(d, dict) and d.get("error"):
                 self.counts["rpc_error"] += 1
-                print(f"collector: rpc error {d.get('error')}", file=sys.stderr)
+                print(f"collector: rpc error {str(d.get('error'))[:200]}", file=sys.stderr)
             return 0
         res = params.get("result") or {}
         v = res.get("value") or {}
         slot = (res.get("context") or {}).get("slot") or 0
+        return self.handle_tx(slot, v.get("signature") or "", v.get("err") is not None, v.get("logs") or [],
+                              recv_ms, src)
+
+    def handle_tx(self, slot: int, sig: str, failed: bool, logs: list[str], recv_ms: int, src: str = "ws") -> int:
+        """One transaction's logs from any feed (websocket or gRPC). Returns the number of rows kept."""
         self.counts["messages"] += 1
-        if v.get("err") is not None:
+        if failed:
             self.counts["failed_tx"] += 1
             return 0
-        sig = v.get("signature") or ""
         if sig in self.sigs:
             self.counts["duplicate"] += 1
             return 0
         self.sigs[sig] = None
+        self.first_by[src] += 1                           # which feed delivered it first
         if len(self.sigs) > SIG_KEEP:
             self.sigs.popitem(last=False)
-        evs = E.events_of(v.get("logs") or [])
+        evs = E.events_of(logs)
         if not evs:
             return 0
         self.tx += 1
@@ -331,10 +353,12 @@ class Collector:
             if was or self.down_since.get(program) is None:
                 self.down_since[program] = self.down_since.get(program) or now_ms()
 
-    async def stream(self, session, url: str, program: str, link: int, stop: asyncio.Event) -> None:
+    async def stream(self, session, url: str, program: str, link: int, stop: asyncio.Event,
+                     commitment: str = COMMITMENT) -> None:
         """One connection of a program's stream; LINKS of them run side by side, so the record has a
         gap only when every one is down at once (duplicates are dropped by signature)."""
         import aiohttp
+        src = safe_url(url)
         if link:
             await asyncio.sleep(2.0 * link)
         backoff = 0.5
@@ -345,7 +369,7 @@ class Collector:
                 # missed pong closes the link (1006). Liveness is the receive timeout instead.
                 async with session.ws_connect(url, heartbeat=None, max_msg_size=16 << 20, compress=0) as ws:
                     await ws.send_str(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
-                                                  "params": [{"mentions": [program]}, {"commitment": COMMITMENT}]}))
+                                                  "params": [{"mentions": [program]}, {"commitment": commitment}]}))
                     self.link_up(program, link)
                     while not stop.is_set():
                         try:
@@ -355,13 +379,14 @@ class Collector:
                                   file=sys.stderr)
                             break
                         if msg.type == aiohttp.WSMsgType.TEXT:
-                            self.handle(msg.data, now_ms())
+                            self.handle(msg.data, now_ms(), src)
                         elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                                           aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
                             self.counts["closed"] += 1
                             break
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-                print(f"collector: {program[:4]}/{link} {type(e).__name__}: {e}", file=sys.stderr)
+                # the message of a failed connect can carry the URL, and a provider URL its key: never printed
+                print(f"collector: {program[:4]}/{link} {src} {type(e).__name__}", file=sys.stderr)
             self.link_down(program, link)
             if stop.is_set():
                 break
@@ -376,12 +401,39 @@ class Collector:
                 "last_event_ms": self.last_event_ms, "reconnects": self.reconnects, "counts": dict(self.counts),
                 "pools": len(self.pools), "rows_written": self.writer.rows_written if self.writer else 0,
                 "last_write_ms": self.writer.last_write_ms if self.writer else 0,
-                "meta_queue": self.meta_q.qsize() if self.meta_q is not None else None}
+                "meta_queue": self.meta_q.qsize() if self.meta_q is not None else None,
+                "first_by_source": dict(self.first_by)}
+
+
+def feed_urls(env=None) -> list[str]:
+    """The websocket endpoints the links spread over: the owner's providers (PYTHIA_SOLANA_WS_URLS, "{token}"
+    filled from PYTHIA_SOLANA_TOKEN) and, while providers are set, the public endpoint as a fallback (unless
+    PYTHIA_PF_PUBLIC_FALLBACK=0); without providers PYTHIA_SOLANA_WS or the public endpoint, as before."""
+    env = os.environ if env is None else env
+    urls = ws_urls(env)
+    public = (env.get("PYTHIA_SOLANA_WS") or "").strip() or DEFAULT_WS
+    providers = [u for u in urls if u != public]
+    if providers and env.get("PYTHIA_PF_PUBLIC_FALLBACK", "1") != "0" and public not in urls:
+        urls = urls + [public]
+    return urls
+
+
+def feed_commitment(env=None) -> str:
+    """PYTHIA_SOLANA_COMMITMENT: "confirmed" (the default) or "processed" (faster; a processed transaction can
+    still be dropped with its fork, rarely)."""
+    env = os.environ if env is None else env
+    c = (env.get("PYTHIA_SOLANA_COMMITMENT") or COMMITMENT).strip().lower()
+    return c if c in ("processed", "confirmed") else COMMITMENT
 
 
 async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     import aiohttp
-    url = os.environ.get("PYTHIA_SOLANA_WS") or DEFAULT_WS
+
+    from . import geyser
+    urls = feed_urls()
+    commitment = feed_commitment()
+    grpc_url = (os.environ.get("PYTHIA_SOLANA_GRPC_URL") or "").strip()
+    grpc_token = os.environ.get("PYTHIA_SOLANA_GRPC_TOKEN") or ""
     amm = os.environ.get("PYTHIA_PF_AMM", "1") != "0"
     meta = os.environ.get("PYTHIA_PF_META", "0") == "1" and not dry_run
     writer = None if dry_run else store.Writer()
@@ -418,12 +470,26 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     last_hb = last_prune = 0.0
     async with aiohttp.ClientSession() as session:
         programs = [E.PUMP] + ([E.PUMP_AMM] if amm else [])
-        tasks = [asyncio.create_task(col.stream(session, url, p, k, stop)) for p in programs
-                 for k in range(LINKS if p == E.PUMP else AMM_LINKS)]
+        tasks = [asyncio.create_task(col.stream(session, urls[k % len(urls)], p, k, stop, commitment))
+                 for p in programs for k in range(LINKS if p == E.PUMP else AMM_LINKS)]
+        if grpc_url:
+            if geyser.available():
+                for j, p in enumerate(programs):
+                    tasks.append(asyncio.create_task(geyser.stream(
+                        grpc_url, grpc_token, [p], commitment,
+                        lambda slot, sig, failed, logs, recv, index: col.handle_tx(slot, sig, failed, logs, recv,
+                                                                                    "grpc"),
+                        stop, on_up=lambda p=p, j=j: col.link_up(p, 100 + j),
+                        on_down=lambda p=p, j=j: col.link_down(p, 100 + j))))
+            else:
+                print("collector: PYTHIA_SOLANA_GRPC_URL is set but grpcio is not installed; websockets only",
+                      flush=True)
         if meta:
             tasks.append(asyncio.create_task(col.meta_worker(session)))
         print(f"collector: streaming pump.fun logs over {LINKS} connection(s)"
               + (f", PumpSwap over {AMM_LINKS}" if amm else "")
+              + f" from {', '.join(safe_url(u) for u in urls)} at {commitment}"
+              + (" plus a gRPC feed" if grpc_url and geyser.available() else "")
               + f", {'dry run' if dry_run else 'writing to ' + str(store.base())}", flush=True)
         try:
             while not stop.is_set():

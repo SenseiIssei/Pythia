@@ -304,6 +304,17 @@ fn an_order_of_another_book_on_the_other_side_of_the_symbol_waits_for_it() {
     assert!(e.drain_live_orders().is_empty(), "no sell next to b's working buy");
     assert!(journal_has(&e, "the two could meet as a wash trade"));
     assert_eq!(status(&e, &a).open_positions, 1, "still a's, to be closed");
+    // A demo position needs no live routing: the stop says what it waits for.
+    let said = status(&e, &a).last_action.unwrap_or_default();
+    assert!(!said.contains("real position"), "{said}");
+    assert!(said.contains("1 position(s) wait for another autopilot's order in the same coin"), "{said}");
+    // While it waits, no "Exit" is claimed at every tick.
+    let now = e.now();
+    for _ in 0..3 {
+        e.autopilot_step(now);
+    }
+    assert!(e.drain_live_orders().is_empty());
+    assert!(!journal_has(&e, "Exit crypto:BTC/USD"), "nothing went out, so no exit is claimed");
     // b's buy fills; the next step closes a.
     e.apply_live_update(&ob.order_id, filled(ob.qty, e.price_of(BTC), 0.0));
     let now = e.now();

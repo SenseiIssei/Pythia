@@ -359,7 +359,12 @@ impl Engine {
                     };
                     let was = *was;
                     let was_avg = p.avg_price;
-                    let avg = if venue_avg > 0.0 { venue_avg } else { was_avg };
+                    // Alpaca's average is the account's, over every book's
+                    // buys: a book that shares the pair keeps its own entry
+                    // price, or the correction would move open P&L from one
+                    // autopilot to another (+$6.34 to one, -$6.34 to the
+                    // other on FIL, 2026-10-16).
+                    let avg = if n == 1 && venue_avg > 0.0 { venue_avg } else { was_avg };
                     let new = if n == 1 || pythia.abs() < 1e-12 { alpaca } else { alpaca * was / pythia };
                     let book = p.book.clone();
                     if new.abs() < 1e-12 {

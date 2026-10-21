@@ -155,14 +155,6 @@ def factory_row(P: fc.Panel, genome: dict, t: int, always: bool = False) -> np.n
     return row
 
 
-def held_now(W: np.ndarray, t: int) -> np.ndarray:
-    """The last decided weight of every column up to day t: what the backtest
-    holds going into t, before drift. 0 where nothing was ever decided."""
-    fin = np.isfinite(W[: t + 1])
-    last = t - np.argmax(fin[::-1], axis=0)
-    return np.where(fin.any(0), W[last, np.arange(W.shape[1])], 0.0)
-
-
 def book_name(name: str, universe: str | None) -> str:
     """The paper book's directory name: `breakout_top10`, or `breakout_top10@alpaca`."""
     return f"{name}@{universe.lower()}" if universe else name
@@ -191,7 +183,10 @@ def step(name: str, row_w: np.ndarray, P: fc.Panel, t: int, quotes: dict[str, tu
               "equity": START_EQUITY, "weights": {}, "mid": {}}
         # A new book starts where the backtest stands, not flat: breakout only
         # writes a weight on the entry day, so "leave it" would never buy the
-        # coins it already holds.
+        # coins it already holds. `start_row` is what the backtest holds after
+        # the close (backtest_weights: drifted since each entry). The entry
+        # weights it used to be started breakout_top10 a third light on NEAR
+        # and SUI (results/forward_audit.md).
         row_w = np.where(np.isnan(row_w), start_row, row_w)
     equity = st["equity"]
     w: dict[str, float] = {s: float(x) for s, x in st["weights"].items()}
@@ -641,17 +636,17 @@ def main() -> int:
         base = name.partition("@")[0]
         if universe is not None:
             if dry:
-                now = tranches.book_weights(P, w, t) if base == "tsmom_tranches" else held_now(w, t)
+                now = tranches.book_weights(P, w, t) if base == "tsmom_tranches" else backtest_weights(P, w, t)
                 row = {P.names[j]: round(float(now[j]), 4) for j in np.flatnonzero(now > 0)}
                 print(name, "BTC above 200d" if P.btc_on[t] else "BTC below 200d", json.dumps(row))
             elif base == "tsmom_tranches":
                 print(name, json.dumps(step_tranches(P, w, t, quotes, now_us, name=name)))
             else:
-                print(name, json.dumps(step(name, w[t], P, t, quotes, now_us, held_now(w, t))))
+                print(name, json.dumps(step(name, w[t], P, t, quotes, now_us, backtest_weights(P, w, t))))
             continue
         sig = signal(name, P, w, t, now_us)
         if dry:
-            now = tranches.book_weights(P, w, t) if name == "tsmom_tranches" else held_now(w, t)
+            now = tranches.book_weights(P, w, t) if name == "tsmom_tranches" else backtest_weights(P, w, t)
             row = {P.names[j]: round(float(now[j]), 4) for j in np.flatnonzero(now > 0)}
             print(name, "BTC above 200d" if P.btc_on[t] else "BTC below 200d", json.dumps(row))
             ev = sig["evidence"]
@@ -664,7 +659,7 @@ def main() -> int:
         if name == "tsmom_tranches":
             print(name, json.dumps(step_tranches(P, w, t, quotes, now_us)))
         else:
-            print(name, json.dumps(step(name, w[t], P, t, quotes, now_us, held_now(w, t))))
+            print(name, json.dumps(step(name, w[t], P, t, quotes, now_us, backtest_weights(P, w, t))))
         save_signal(name, sig, now_us)
     return 0
 

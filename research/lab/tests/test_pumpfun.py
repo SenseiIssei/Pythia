@@ -7,6 +7,7 @@ Run from research/lab:  python -m pytest tests/test_pumpfun.py
 from __future__ import annotations
 
 import inspect
+import math
 from datetime import datetime, timezone
 
 import pytest
@@ -107,6 +108,77 @@ def test_a_run_buys_graduations_by_rule_and_counts_launches():
     # A second run sees the same pools again and buys nothing twice.
     res2 = pf.run(f, NOW + 5 * 60_000, st)
     assert res2["bought"] == []
+
+
+def test_a_token_is_bought_once_however_many_pools_a_run_sees():
+    f = Feed()
+    f.pools.append(pool("P1b", MINT, "pumpswap", NOW - 50_000, liq=35_000.0))   # a second PumpSwap pool of MINT
+    res = pf.run(f, NOW)
+    bought = sorted((r, g["mint"]) for r, g in res["bought"])
+    assert bought == [("filtered", MINT), ("filtered_quick", MINT), ("migration", MINT), ("migration", MINT2)]
+    assert any(w == "bought already" for _, g, w in res["skipped"] if g["pool"] == "P1b")
+    # A later pool of a token the rule bought before is no new graduation either.
+    f.pools = [pool("P1c", MINT, "pumpswap", NOW + 4 * 60_000)]
+    res2 = pf.run(f, NOW + 5 * 60_000, res["state"])
+    assert res2["bought"] == []
+
+
+def test_a_book_without_the_stake_follows_the_token_unfunded_and_never_goes_below_zero():
+    f = Feed()
+    st = pf.new_state()
+    st["books"]["migration"]["cash"] = 30.0                  # what is left of a book that lost nearly everything
+    res = pf.run(f, NOW, st)
+    st = res["state"]
+    mig = pf.open_positions(st, "migration")
+    assert len(mig) == 2 and not any(pf.funded(p) for p in mig), "followed, but not with money it does not have"
+    assert st["books"]["migration"]["cash"] == pytest.approx(30.0)
+    assert pf.equity(st, "migration") == pytest.approx(30.0)
+    assert all(pf.funded(p) for p in pf.open_positions(st, "filtered")), "the other books had the cash"
+    f.marks[MINT] = (0.0001, 100.0)                          # rugged: a total loss of a trade the book never paid for
+    res = pf.run(f, NOW + 10 * 60_000, st)
+    st = res["state"]
+    assert any(p["mint"] == MINT and p["exit"]["ret"] == -1.0 for p in res["closed"]), "its per-trade record is kept"
+    assert pf.equity(st, "migration") == pytest.approx(30.0)
+    row = pf.journal_rows(st, NOW + 10 * 60_000)["migration"]
+    assert row["equity"] == pytest.approx(30.0) and row["held"] == 0 and row["unfunded"] == 2
+    assert math.isfinite(row["exposure"]) and row["exposure"] == 0.0
+    data, md = pf.report(st, NOW + 12 * 60_000)
+    mig = data["summary"]["rules"]["migration"]
+    assert mig["return_pct"] == pytest.approx(-99.7) and mig["closed"] == 1 and mig["unfunded_open"] == 1
+    assert "mean per trade" in md
+
+
+def test_replay_keeps_one_buy_per_token_and_only_spends_the_cash_the_book_has():
+    t0 = NOW
+    ledger = []
+    # 101 different tokens bought at $100 each: the 101st finds $0 of cash.
+    for i in range(101):
+        ledger.append({"ts_ms": t0 + i, "rule": "migration", "mint": f"M{i}", "side": "buy", "usd": "100.0",
+                       "reason": "graduation"})
+    ledger.append({"ts_ms": t0 + 200, "rule": "migration", "mint": "M0", "side": "buy", "usd": "100.0",
+                   "reason": "graduation"})                   # a second pool of M0: dropped
+    ledger.append({"ts_ms": t0 + H, "rule": "migration", "mint": "M0", "side": "sell", "usd": "250.0",
+                   "reason": "time 24 h"})
+    ledger.append({"ts_ms": t0 + H + 1, "rule": "migration", "mint": "M100", "side": "sell", "usd": "900.0",
+                   "reason": "take profit"})                 # unfunded: its gain is not the book's
+    for i in range(1, 100):
+        ledger.append({"ts_ms": t0 + 2 * H + i, "rule": "migration", "mint": f"M{i}", "side": "sell", "usd": "0.0",
+                       "reason": "rug: no pool left"})
+    res = pf.replay(ledger, [], t0 + 3 * H)
+    assert res["dupes"]["migration"] == 1
+    assert res["funded"][("migration", "M99")] and not res["funded"][("migration", "M100")]
+    rows = res["rows"]["migration"]
+    assert res["cash"]["migration"] == pytest.approx(250.0)
+    assert rows[-1]["equity"] == pytest.approx(250.0) and all(r["equity"] >= 0 for r in rows)
+    assert sum(r["bought"] for r in rows) == 100 and sum(r["unfunded"] for r in rows) == 1
+    assert sum(r["rugs"] for r in rows) == 99
+    # The state follows the replay: the repeated buy goes, the funding is set, the cash replaced.
+    st = pf.new_state()
+    st["positions"] = [{"rule": "migration", "mint": m, "entry_ms": t, "open": True, "value": 100.0}
+                       for m, t in (("M0", t0), ("M0", t0 + 200), ("M100", t0 + 100))]
+    pf.rebuild_state(st, res)
+    assert [(p["mint"], p["funded"]) for p in st["positions"]] == [("M0", True), ("M100", False)]
+    assert st["books"]["migration"]["cash"] == pytest.approx(250.0)
 
 
 def test_vanished_liquidity_is_a_total_loss():

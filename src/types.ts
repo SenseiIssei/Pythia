@@ -1126,6 +1126,12 @@ export interface AutopilotStatus {
   cash?: number;
   /** The deepest fall from a peak over its equity history, percent. */
   maxDrawdownPct?: number;
+  /** The amount it worked with on average, weighted by time (its start
+   *  amount when that never changed): what its return and fee share are
+   *  measured on. Older engines leave it out. */
+  avgCapital?: number;
+  /** Its curve was repaired after the fact, and how, in plain words. */
+  curveNote?: string | null;
   /** A portfolio: each asset class with its budget and its own P&L. */
   classes?: AutopilotClassStatus[];
 }
