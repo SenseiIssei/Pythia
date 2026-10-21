@@ -77,11 +77,18 @@ def mark(sym: str, start_us: int, end_us: int) -> pl.DataFrame:
 
 
 def merge(path: Path, new: pl.DataFrame) -> pl.DataFrame:
+    """Merge with the file on disk (an unreadable one, left by an interrupted run, is
+    replaced) and write through a temporary file, so a cut run never leaves a broken one."""
     if path.exists():
-        new = pl.concat([pl.read_parquet(path), new], how="vertical_relaxed")
+        try:
+            new = pl.concat([pl.read_parquet(path), new], how="vertical_relaxed")
+        except Exception as e:  # noqa: BLE001 - a truncated file is rebuilt from the fresh answer
+            print(f"{path.name}: unreadable ({type(e).__name__}), replaced", file=sys.stderr)
     out = new.unique("ts_us", keep="last").sort("ts_us")
     path.parent.mkdir(parents=True, exist_ok=True)
-    out.write_parquet(path)
+    tmp = path.with_suffix(".tmp")
+    out.write_parquet(tmp)
+    tmp.replace(path)
     return out
 
 
@@ -98,7 +105,10 @@ def collect(out: Path, coins: list[str] | None = None) -> dict:
         start = int(f["ts_us"].min())
         mp = out / "mark_1h" / f"{sym}.parquet"
         if mp.exists():
-            start = max(start, int(pl.read_parquet(mp)["ts_us"].max()) - 2 * HOUR_US)
+            try:
+                start = max(start, int(pl.read_parquet(mp)["ts_us"].max()) - 2 * HOUR_US)
+            except Exception:  # noqa: BLE001 - unreadable: fetch the whole span again
+                pass
         m = merge(mp, mark(sym, start, now_us))
         done[c] = {"symbol": sym, "funding_hours": f.height, "mark_hours": m.height,
                    "from": datetime.fromtimestamp(int(f["ts_us"].min()) / 1e6, timezone.utc).isoformat()}
