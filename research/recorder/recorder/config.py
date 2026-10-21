@@ -30,7 +30,7 @@ BINANCE_SPOT_REST = "https://api.binance.com/api/v3"
 BINANCE_UM_WS = "wss://fstream.binance.com/market/ws"
 BINANCE_UM_REST = "https://fapi.binance.com/fapi/v1"
 
-# Books of the venues the cost model still guesses (NEXT-STEPS §2). Public
+# Books of the venues the cost model still guesses. Public
 # feeds, no keys. PYTHIA_BOOK_VENUES turns one off without a code change, for
 # example if the one CPU the container has is not enough.
 BOOK_VENUES = [v.strip() for v in os.environ.get("PYTHIA_BOOK_VENUES", "bybit,okx,coinbase").split(",") if v.strip()]

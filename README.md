@@ -1,338 +1,199 @@
 <div align="center">
 
-# Pythia
+<img src="docs/img/hero.png" alt="Pythia: a paper-first trading cockpit that counts every try" width="100%">
 
-### Autonomous multi-venue prediction &amp; trading cockpit — equities · 4 crypto exchanges · prediction markets, one neon control panel
+**A paper-first trading cockpit with a research lab that is allowed to say no.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge&logo=opensourceinitiative)](https://opensource.org/licenses/MIT)
-[![Tauri](https://img.shields.io/badge/Tauri-v2-orange?style=for-the-badge&logo=tauri&logoColor=white)](https://v2.tauri.app)
-[![React](https://img.shields.io/badge/React-19-61dafb?style=for-the-badge&logo=react&logoColor=white)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![Rust](https://img.shields.io/badge/Rust-1.85+-ce422b?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![axum](https://img.shields.io/badge/axum-server-000?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/tokio-rs/axum)
-[![TailwindCSS](https://img.shields.io/badge/Tailwind-cyber--neon-38bdf8?style=for-the-badge&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![Rust](https://img.shields.io/badge/Rust-1.85+-ce422b?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Tauri](https://img.shields.io/badge/Tauri-v2-24c8db?style=flat-square&logo=tauri&logoColor=white)](https://v2.tauri.app)
+[![React](https://img.shields.io/badge/React-19-61dafb?style=flat-square&logo=react&logoColor=black)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Python](https://img.shields.io/badge/lab-Python-3776ab?style=flat-square&logo=python&logoColor=white)](research/lab/README.md)
+[![Paper first](https://img.shields.io/badge/mode-paper%20first-0a7d3b?style=flat-square)](SAFETY.md)
+[![Version](https://img.shields.io/badge/version-0.5.0-2e55d6?style=flat-square)](CHANGELOG.md)
 
-<br>
-
-[![Tests](https://img.shields.io/badge/rust%20tests-189%20passing-brightgreen?style=flat-square&logo=rust)](#)
-[![Paper-first](https://img.shields.io/badge/mode-paper--first-brightgreen?style=flat-square)](SAFETY.md)
-[![AI providers](https://img.shields.io/badge/AI-10%20providers-a855f7?style=flat-square)](#-ai-signals--bring-any-model)
-[![Last commit](https://img.shields.io/github/last-commit/SenseiIssei/Pythia?style=flat-square&logo=git&label=last%20commit&color=blue)](https://github.com/SenseiIssei/Pythia)
-[![Repo size](https://img.shields.io/github/repo-size/SenseiIssei/Pythia?style=flat-square&logo=github&label=repo%20size&color=blue)](https://github.com/SenseiIssei/Pythia)
-[![Stars](https://img.shields.io/github/stars/SenseiIssei/Pythia?style=flat-square&logo=github&label=stars&color=yellow)](https://github.com/SenseiIssei/Pythia/stargazers)
-
-<br>
-
-<a href="https://ko-fi.com/senseiissei">
-  <img src="https://ko-fi.com/img/githubbutton_2.svg" alt="Support me on Ko-fi" height="40">
-</a>
-
-<br><br>
-
-<img src="docs/screenshots/dashboard.png" alt="Pythia dashboard" width="92%">
+[What it is](#what-it-is) · [Results](#honest-results) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Safety](#safety) · [Changelog](CHANGELOG.md)
 
 </div>
 
 ---
 
-Pythia forms an edge estimate for markets you choose, sizes a bet/trade with a disciplined risk
-model, and — only when you explicitly arm a strategy — routes real orders. **It ships in paper
-mode.** One engine core drives three runtimes (native desktop, web + backend server, browser paper),
-and any large-language-model of your choice can weigh in on a market.
+## What it is
 
-> ⚠️ **Before anything live, read [`SAFETY.md`](SAFETY.md) and [`PROFIT-PLAN.md`](PROFIT-PLAN.md).**
-> Automated trading and prediction-market betting can lose all your money. This is **not** financial
-> advice, and no strategy shipped here is known to be profitable — `PROFIT-PLAN.md` says exactly why,
-> and what a strategy has to prove before it deserves real capital.
+Pythia is a trading cockpit that starts on paper and stays there until a strategy has earned more.
 
----
+- **One Rust engine** (`pythia-core`) holds the strategies, the risk manager, the autopilots and the order lifecycle. The same engine runs inside the **Tauri desktop app** and behind a **standalone server** with a **React web UI**.
+- **Autopilots** trade an amount on their own until you stop them: on the **Alpaca paper account** for crypto, US shares and ETFs, and on **perps paper** (or a Bybit demo account) for the long/short books. Several run side by side, each with its own book, all held against BTC.
+- **A research lab** in Python decides what the autopilots may trade. Every study is **pre-registered** before its first number, judged **out of sample** after costs, and **deflated** for every try ever made. Most ideas fail, and the failures are kept.
+- **Models** (volatility, coin ranking, return quantiles and more) go from the lab to the engine with train/serve parity, in shadow first.
+- **Alerts** reach you on **Telegram** (or any webhook) as readable cards, in English or German.
 
-## ✨ Highlights
+> [!WARNING]
+> Pythia is not financial advice and no strategy in it is known to be profitable. It ships in paper mode. Read [`SAFETY.md`](SAFETY.md) before you connect a real account.
 
-- **One engine, three runtimes** — a shared Rust core (`crates/pythia-core`) runs as a native
-  desktop daemon, behind a standalone HTTP/WebSocket **backend server**, or as a pure-TypeScript
-  paper engine in the browser. All in lockstep, verified indicator-for-indicator.
-- **10 strategies** — EMA cross, Bollinger revert, RSI reversal, MACD trend, Donchian breakout,
-  multi-timeframe momentum, BTC/ETH pairs stat-arb, Prob-Edge (EWMA fair-value on live odds), plus a
-  visual **Strategy Composer** that compiles rule sets into live strategies.
-- **Sovereign risk manager** — global kill switch, max daily-loss &amp; drawdown breakers, per-strategy
-  budgets, fractional-Kelly &amp; volatility-targeted sizing, regime filter, adaptive capital
-  allocation, loss-streak cooldowns. Fails closed.
-- **🔬 `npm run validate`** — walk-forward validation on real daily candles, with a **deflated
-  Sharpe ratio** so a strategy that merely survived a parameter search is labelled as such. The
-  backtester fills on the *next* bar's open, checks stops against the bar's high/low, assumes the
-  stop beat the target when a bar contained both, and charges costs on both sides. Most strategies
-  fail; that's the point. Results and caveats: [`docs/VALIDATION.md`](docs/VALIDATION.md).
-- **Research suite** — backtester, Monte-Carlo optimizer, walk-forward validation, analytics, and a
-  return-correlation / concentration matrix.
-- **👋 Simple by default** — the app opens on a plain-language view built for
-  someone who has never traded: is real money at risk, am I up or down, what is it
-  doing, what does it think, and a big stop button. One switch in Settings reveals
-  the full instrument panel — markets, strategies, composer, backtests, optimizer,
-  correlation, risk limits. Simple mode hides jargon, **never** risk.
-- **🧠 AI Signals — bring any model** — Anthropic (Claude), OpenAI (GPT), xAI (Grok), z.ai (GLM),
-  DeepSeek, Google (Gemini), Groq, Mistral, OpenRouter, or a local Ollama. Your key, your choice.
-- **🎯 Scored prediction ensembles** — statistical hypotheses *and* every model you configure, asked
-  independently, pooled in log-odds, and weighted by a **measured Brier skill score against the
-  market on the same questions**. A source that hasn't beaten the market gets zero weight and cannot
-  move an order. Learned per-source recalibration, a live scoreboard, and coherence checks that catch
-  a market whose own outcomes don't price to 1. See [`docs/FORECASTING.md`](docs/FORECASTING.md).
-- **📡 Gated live execution — 5 venues** — Alpaca equities plus **Kraken · Binance · Bybit · OKX**
-  spot. Ships **disarmed**; each venue is armed *separately* behind a typed `ARM LIVE`, and arming
-  runs a read-only credential check that refuses if a venue doesn't answer. Orders that cannot fill
-  (market closed, no buying power, would open a short) are refused **before** submission, with the
-  reason in the journal.
-- **Alpaca, paper and live kept apart:** separate key slots for the paper and live accounts (each
-  pair only works against its own endpoint, and the order path never borrows the other one).
-  Entries are refused while the market is closed, the account is restricted, the PDT ceiling is
-  reached, or the broker check has gone stale, and **exits never are**. Opt-in **extended hours**
-  (04:00 to 20:00 ET, only while the broker reports the session open) sends whole-share limit
-  orders with a wider band. Entries go out in dollars, exits in shares, whole-share orders as
-  marketable limits, all with idempotent client order ids. A readiness checklist and a per-market
-  routing trace on the Live page say which gate is holding things up, and a one-click test order
-  proves the whole path.
-- **🩺 `npm run preflight`** — one command that names the actual problem, because every live-run
-  failure looks identical from the dashboard: keys, account, session, feed, candle depth, model
-  provider and the live gate, each checked and explained.
-- **An order lifecycle that can't desync** — submit → poll → *cancel at the venue* on timeout.
-  Partial fills book as they happen; a repeated poll can't double-book; the daemon reconciles
-  against the broker's own position list and **the broker always wins**. A position opened with real
-  money is tagged `REAL`, survives restarts, and the simulator will never close it.
-- **👛 Wallets — every account, one balance sheet** — broker cash, spot balances across all four
-  exchanges, and **watch-only** on-chain addresses on Ethereum, Polygon, Arbitrum, Optimism, Base,
-  BNB Chain, Solana and Bitcoin. Read-only by design: Pythia has no field that accepts a private key.
-- **Real market data, and it says which is which** — indicators run on genuine **OHLC candles**
-  (Kraken, no keys; Alpaca once yours are set), not on the tick loop's own random walk. Real quotes
-  don't drift between refreshes, strategies fire once per *closed* bar, stops use true ATR so an
-  overnight gap doesn't sweep them, and every market carries a `real bars` / `sim` badge so a
-  simulated equity curve can never be mistaken for a real one. Live Kraken crypto prices and
-  Polymarket odds need no keys; real **Alpaca equity quotes** (AAPL, NVDA, MSFT, AMZN, TSLA) arrive
-  once your Alpaca keys are set.
-- **Secure by default** — API keys live in the OS keychain (desktop) or the server's environment,
-  never in code, never logged, never returned to the UI. Grant them *trade* and not withdrawal, and
-  a leaked key costs you a rotation, not your coins. Discord/webhook alerts, persistent state,
-  system tray, first-run legal gate.
+## Highlights
 
----
+| | |
+|---|---|
+| 🧭 **Autopilots**<br>An amount that trades a lab book until a stop rule fires. Side-by-side view, re-pick by evidence, portfolio mode across crypto and US shares, every run held against BTC and BTC above its 200-day average. | 🔬 **Honest research lab**<br>Pre-registered studies, purged walk-forward, costs in every number, a deflated Sharpe over a pool of 1,836 trials, a strategy factory that breeds rules and holds them to the same bar. |
+| 🛡️ **Sovereign risk manager**<br>Kill switch, daily-loss and drawdown breakers, correlation-aware exposure caps, volatility targeting, sizing on measured edge. Fails closed. | 📈 **Paper and demo on real venues**<br>Alpaca paper (crypto, shares, ETFs), crypto demo routes, perps on paper or Bybit demo with funding per position, paper fills that walk the live order book. |
+| 🧠 **Models and forecasts**<br>LightGBM and ONNX inference in Rust, a model zoo with champion and challenger, scored prediction ensembles. Bring any LLM for signals; the Claude API can add a budgeted daily brief, news sentiment and a Polymarket forecaster. | 🔔 **Alerts and reports**<br>Telegram cards for fills, rebalances and readiness, a daily digest with charts, a weekly report, quiet hours, mute that survives a restart. |
+| 🗂️ **Data recorder**<br>Order books, funding, open interest and liquidations recorded 24/7, plus verified history backfills, into a parquet lake the lab reads. | 🖥️ **Calm UI**<br>A simple view for people who have never traded, an advanced view with every instrument, light and dark themes, phone layout. |
 
-## 📸 Screenshots
+## Screenshots
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/markets.png" alt="Markets"><br><sub><b>Markets</b> — live prices, odds &amp; regime badges</sub></td>
-    <td width="50%"><img src="docs/screenshots/strategies.png" alt="Strategies"><br><sub><b>Strategies</b> — deploy, pause, tune, arm</sub></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/signals.png" alt="AI Signals"><br><sub><b>AI Signals</b> — any LLM reasons over a market</sub></td>
-    <td><img src="docs/screenshots/settings.png" alt="Settings"><br><sub><b>Settings</b> — venue &amp; AI-provider keys (keychain)</sub></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/live.png" alt="Live Execution"><br><sub><b>Live</b> — gated arm flow, paper-first</sub></td>
-    <td><img src="docs/screenshots/analytics.png" alt="Analytics"><br><sub><b>Analytics</b> — drawdown, leaderboard, trade log</sub></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/correlation.png" alt="Correlation"><br><sub><b>Correlation</b> — return matrix &amp; concentration</sub></td>
-    <td><img src="docs/screenshots/optimizer.png" alt="Optimizer"><br><sub><b>Optimizer</b> — Monte-Carlo robustness sweep</sub></td>
+    <td width="50%"><img src="docs/img/app-home.png" alt="Home"><br><sub><b>Home</b>: what your autopilots are worth, and a big stop button.</sub></td>
+    <td width="50%"><img src="docs/img/app-autopilot.png" alt="Autopilot"><br><sub><b>Autopilot</b>: several side by side, each against BTC and gated BTC.</sub></td>
   </tr>
 </table>
+<sub>Captured from a development build with sample data (the page says so).</sub>
 
----
+## Architecture
 
-## 🧠 AI Signals — bring any model
+```mermaid
+flowchart LR
+    subgraph venues["Venues"]
+        ALP["Alpaca<br/>paper and live<br/>crypto, shares, ETFs"]
+        CEX["Crypto spot<br/>Kraken, Binance, Bybit,<br/>OKX, Coinbase"]
+        PERP["Perps<br/>paper, Bybit demo,<br/>Kraken Futures"]
+        PM["Polymarket<br/>read only"]
+    end
 
-Pythia's engine core speaks to **any** of these providers over your own API key. Anthropic uses the
-Messages API; everything else speaks the OpenAI-compatible Chat Completions dialect, so one code path
-covers the rest. Every model is overridable — type any model id you like.
+    subgraph rust["Rust workspace"]
+        CORE["pythia-core<br/>strategies, risk, autopilots,<br/>execution, forecasts"]
+        ML["pythia-ml<br/>LightGBM and ONNX inference"]
+        SRV["pythia-server<br/>axum HTTP and WebSocket"]
+        APP["src-tauri<br/>desktop app"]
+    end
 
-| Provider | id | Env var | Default model | Notes |
-|---|---|---|---|---|
-| Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` | Messages and Batches API · structured output · hard budget with a persisted ledger ([docs/AI.md](docs/AI.md)) · `claude-sonnet-5-5` for the weekly review, `claude-opus-5-5` only by name |
-| OpenAI (GPT) | `openai` | `OPENAI_API_KEY` | `gpt-5.6` | Sol; `-terra` / `-luna` tiers |
-| xAI (Grok) | `xai` | `XAI_API_KEY` | `grok-4.5` | |
-| z.ai (GLM) | `zai` | `ZAI_API_KEY` | `glm-5.2` | |
-| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` | also `-flash` |
-| Google (Gemini) | `google` | `GEMINI_API_KEY` | `gemini-3-pro` | OpenAI-compat endpoint |
-| Groq | `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Kimi K2, DeepSeek-R1 too |
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-5.6` | any model on OpenRouter |
-| Mistral | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` | Mistral Large 3 |
-| Ollama (local) | `ollama` | — | `llama3.3` | no key; runs on your box |
+    UI["React UI<br/>shared by app and web"]
+    REC["Data recorder<br/>books, funding, OI"]
+    LAKE[("Parquet data lake")]
+    LAB["Research lab<br/>studies, models, paper books,<br/>factory, forward reports"]
+    TG["Telegram or webhook"]
+    LLM["Claude API and other LLMs<br/>optional, budgeted"]
 
-<sub>Defaults track the current flagships (July 2026); every model is overridable — type any model id in the picker.</sub>
+    REC --> LAKE --> LAB
+    LAB -- "signals, evidence, models" --> CORE
+    ML --> CORE
+    CORE --> SRV --> UI
+    CORE --> APP --> UI
+    CORE <--> venues
+    CORE --> TG
+    LAB --> TG
+    LLM -.-> CORE
+```
 
-Each request returns a structured signal — `{ probability, direction, confidence, rationale }` —
-clamped and stamped with the provider, the model that answered, the round-trip latency and the
-tokens it cost.
+The engine never trusts a strategy on its word: a lab book reaches an autopilot only with its evidence attached, the auto pick ranks books by that evidence and the forward record, and an experimental book runs only where an autopilot names it.
 
-### The live overlay — what a model is actually allowed to do
+## Honest results
 
-Beyond the one-off *ask a model* panel, Pythia can run a **background overlay** (off by default)
-that polls your markets and attaches a current view to each one. Its authority is deliberately
-bounded:
+Every number below comes from the lab's result files or the engine's own records and is redrawn by [`scripts/readme_charts.py`](scripts/readme_charts.py), which names the source of each bar.
 
-| A model view can… | …and cannot |
-|---|---|
-| **Veto** an entry it confidently disagrees with | **Open** a position — ever |
-| **Shrink** an entry it mildly disagrees with | Touch an **exit**, stop or target |
-| **Boost** an agreeing entry, capped at ×1.25 | Bypass the risk manager or the kill switch |
+<img src="docs/img/scoreboard.png" alt="Out-of-sample Sharpe of the tested strategies against BTC, gated BTC and the noise bar" width="100%">
 
-Every order still originates from a rule you can backtest, and still passes the sovereign risk
-manager. That constraint isn't timidity — an LLM can't be walk-forward validated, its behaviour
-shifts between model versions, and it will answer confidently about a market it has no edge on.
-As a multiplier the worst case is a good trade made smaller. As a trigger the worst case is
-unbounded.
+- **The best book, a Donchian breakout on the ten most liquid coins, makes Sharpe 1.17 from 2024** against 0.74 for BTC bought and held. It still fails deflation: with 1,836 tries counted, the best pure-noise trial would show about 2.69.
+- **Two perps long/short studies passed their registered tests** (the M4 residual and a funding carry), but neither survives deflation, so both run only as experiments.
+- **Most of the momentum books are BTC's 200-day gate in disguise**: on the days the gate is off, every book loses money.
 
-Views expire (15 min by default), every call and veto is journaled, and token spend is on screen.
+<img src="docs/img/forward.png" alt="Forward record of the paper autopilots since 15 October 2026 against BTC" width="100%">
 
-> 🔒 **A model's opinion is advisory until it has earned otherwise.** No model reliably predicts
-> prices. On the Predictions page every source starts at *zero* weight and stays there until its
-> scored track record beats the market's — so on a fresh install the ensemble sits on the market
-> price and nothing trades. That is the design working, not a bug.
+The paper autopilots have run since 15 October 2026. Six days in, the main Auto-Pick is up 0.48 % while BTC rose 3.22 %. That is far too short to judge, and the daily forward report says so; the chart is here so the record is public from the start.
 
-**Where keys live:** the **desktop app** stores provider keys in the OS keychain (manage them in
-*Settings → AI providers*). The **backend server** reads keys from its own environment. The browser
-paper build can't reach model APIs and shows the feature as unavailable.
+<img src="docs/img/research_funnel.png" alt="Trial pool growth and the verdict of every study" width="100%">
 
----
+69 studies so far: 43 failed or were killed, 7 run on paper as labelled experiments, 2 passed as registered without confirmation, 5 produced a model that beats its baseline. The full list with every verdict is in [`research/lab/README.md`](research/lab/README.md).
 
-## 🚀 Run it
+<img src="docs/img/by_year.png" alt="Sharpe per year for the books that still run" width="100%">
 
-**One UI, three runtimes.** The cockpit auto-detects where it's running and wires itself up.
+<details>
+<summary>Redraw the charts</summary>
 
-### Native desktop app (recommended — real read-only market data)
+```bash
+pip install matplotlib
+PYTHIA_DATA=/path/to/lab/data python scripts/readme_charts.py
+```
+
+Without `PYTHIA_DATA` the forward chart is skipped and the others are drawn from the repository alone.
+</details>
+
+## Quickstart
+
+You need Node.js (current LTS), a stable Rust toolchain (1.85 or newer) and, for the lab, a recent Python 3.
+
+**Desktop app**
 
 ```bash
 npm install
-npm run tauri dev     # dev window with hot-reload (needs the Rust toolchain)
-npm run tauri build   # Windows installer + Pythia.exe → src-tauri/target/release/bundle/nsis/
+npm run tauri dev       # development window with hot reload
+npm run tauri build     # installer and executable under src-tauri/target/release/bundle/
 ```
 
-Runs a persistent Rust engine that fetches **live Kraken crypto prices** and **Polymarket odds**
-(read-only, no keys) and paper-trades against them.
-
-### Standalone backend server (for a web dashboard or phone app)
+**Server and web UI**
 
 ```bash
-cargo run -p pythia-server        # listens on http://0.0.0.0:8787
+cp .env.example .env    # keys are optional; without them everything stays on paper
+npm run server          # engine on http://localhost:8787 (PYTHIA_BIND to change)
 ```
 
-| Route | Purpose |
+```bash
+echo "VITE_PYTHIA_SERVER=http://localhost:8787" > .env.local
+npm run dev             # web UI on http://localhost:5174
+```
+
+Without `VITE_PYTHIA_SERVER` the web UI runs its own TypeScript paper engine in the browser, no keys needed.
+
+**Research lab**
+
+```bash
+cd research/lab
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m pytest tests
+PYTHIA_DATA=/path/to/data PYTHIA_REPORTS=/tmp/pythia-reports PYTHIA_RESULTS=results python -m lab.experiments.gated_btc
+```
+
+The data comes from the recorder (`research/recorder`, Docker) and its history backfill. See [`research/lab/README.md`](research/lab/README.md) for every study and [`research/ops/README.md`](research/ops/README.md) for the job table.
+
+**Checks**
+
+```bash
+npm run check           # cargo tests, vitest and the production build
+npm run preflight       # names what blocks a paper or live run
+```
+
+On Windows the npm scripts strip `CC` and `CXX` from the environment, because paths with spaces break native Rust builds.
+
+## Project layout
+
+| Path | What lives there |
 |---|---|
-| `GET /api/state` | current engine state (JSON) |
-| `GET /api/stream` | WebSocket — full state pushed every tick |
-| `POST /api/command` | mutate the engine (kill switch, limits, strategies, orders) |
-| `GET /api/llm/providers` | which providers have a key in the server env |
-| `POST /api/llm/signal` | ask a provider for a signal (`{provider, model, context}`) |
-| `POST /api/ai/config` | enable/tune the background AI overlay |
-| `POST /api/live/config` | arm/disarm live execution (`{armed, paper, dryRun, venues, timeoutSec, extendedHours}`) |
-| `GET /api/live/account` | Alpaca account check (buying power/status) |
-| `GET /api/live/verify` | read-only credential check for any venue (`?venue=&paper=`) |
-| `GET /api/live/diagnostics` | per-market trace of which live-routing gate stops an Alpaca order |
-| `POST /api/live/test-order` | send one small order through the real path (`{marketId, notional}`) |
-| `GET /api/exchanges` | supported crypto exchanges + which have keys |
-| `GET /api/wallets` | unified balance sheet (broker · exchanges · watched addresses) |
-| `POST /api/forecast/ensemble` | ask every configured model about one market (`{marketId, notes}`) |
-| `POST /api/forecast/config` | forecasting tunables (horizon, costs, bootstrap trust, …) |
-| `GET /api/preflight` | every go-live check in one response (`npm run preflight`) |
-| `GET /api/research/validate` | walk-forward validate every strategy (`npm run validate`) |
+| [`crates/pythia-core`](crates/pythia-core) | The engine: strategies, indicators, risk, autopilots, execution, venues, forecasts, alerts |
+| [`crates/pythia-ml`](crates/pythia-ml) | Model inference (LightGBM, ONNX) with parity tests against the lab |
+| [`server`](server) | Standalone backend: axum HTTP and WebSocket over the engine |
+| [`src-tauri`](src-tauri) | Desktop shell (Tauri v2) over the same engine |
+| [`src`](src) | React UI; [`src/design`](src/design/README.md) is the design system |
+| [`research/lab`](research/lab/README.md) | Studies, models, paper books, strategy factory, forward reports |
+| [`research/recorder`](research/recorder/README.md) | 24/7 market data recorder and history backfill |
+| [`research/ops`](research/ops/README.md) | Job table, health checks, deploy scripts |
+| [`docs`](docs) | Runbooks: [demo trading](docs/DEMO.md), [live run](docs/LIVE-RUN.md), [alerts](docs/ALERTS.md), [models](docs/MODELS.md), [forecasting](docs/FORECASTING.md), [Claude API use](docs/AI.md), [readiness rule](docs/LIVE-READINESS.md) |
+| [`scripts`](scripts) | Preflight, validation, screenshots, README charts |
+| [`PROFIT-PLAN.md`](PROFIT-PLAN.md) | What a strategy must prove before real money, gate by gate |
 
-Env: `PYTHIA_BIND` (default `0.0.0.0:8787`), `PYTHIA_WEBHOOK_URL`, `PYTHIA_TELEGRAM_BOT_TOKEN` and
-`PYTHIA_TELEGRAM_CHAT_ID`, or `PYTHIA_ALERT_WEBHOOK` and `PYTHIA_ALERT_FORMAT` (operator alerts, see
-`docs/ALERTS.md`), any provider key
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …), Alpaca for real equity quotes +
-live execution (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY` for the paper account, `APCA_LIVE_API_KEY_ID`
-/ `APCA_LIVE_API_SECRET_KEY` for the live one, which fall back to the paper pair when unset, and
-`APCA_FEED`: default `iex`, the free tier; paid plans can use `sip`), a crypto exchange
-(`PYTHIA_EXCHANGE` = `kraken|binance|bybit|okx` plus `PYTHIA_EXCHANGE_KEY` / `_SECRET` /
-`_PASSPHRASE`), and optional watch-only addresses in `PYTHIA_WALLETS`. Tuning:
-`PYTHIA_BAR_TIMEFRAME` (default `5Min`), `PYTHIA_SLIPPAGE_BPS` (default `25`),
-`PYTHIA_EXTENDED_HOURS` (default for the extended-hours opt-in when an arm request omits it), and
-the overlay's `PYTHIA_AI_PROVIDER` / `PYTHIA_AI_MODEL` / `PYTHIA_AI_EFFORT` /
-`PYTHIA_AI_INTERVAL_SEC`. See [`.env.example`](.env.example) for the annotated list.
+## Safety
 
-### Browser / web app (no Rust, no keys — explore the UI)
+- **Paper first.** A fresh install trades nothing real. Autopilots start on paper or a venue's demo account.
+- **Real money only when the owner arms it.** Live trading needs your own keys and a typed confirmation per venue; nothing arms itself. The pre-registered [readiness rule](docs/LIVE-READINESS.md) only tells the owner when a paper record qualifies for a proposal. The kill switch and every risk limit gate each order.
+- **No keys in the repository.** Keys live in the OS keychain (desktop) or the server's environment, are never logged and never returned to the UI. [`.env.example`](.env.example) lists the names, not the values.
+- **No withdrawals.** Pythia has no withdrawal, deposit or transfer function. Give API keys trade permission only, so a leaked key costs a rotation, not your money.
+- **Crypto spot is long-only**, shorts exist only on perps, and Polymarket is read only.
 
-```bash
-npm run dev           # http://localhost:5174 — paper mode
-```
+[`SAFETY.md`](SAFETY.md) is the full list, including the one capped, owner-only wallet exception.
 
-To make the browser build a thin client of the backend server, set
-`VITE_PYTHIA_SERVER=http://localhost:8787` (e.g. in `.env.local`) before `npm run dev`.
+## License and credits
 
-> **Windows Rust build note:** if `cargo` fails with `failed to find tool "C:\Program"`, unset the
-> machine `CC`/`CXX` env vars first: `unset CC CXX CFLAGS CXXFLAGS` (they contain spaces that break
-> `cc-rs`).
+[MIT](LICENSE). Built by [SenseiIssei](https://github.com/SenseiIssei). Market data from Alpaca, Binance, Kraken, Bybit, OKX, Coinbase, Deribit, DefiLlama, Polymarket and public SEC filings; each venue's terms apply to its data.
 
----
-
-## 🗂 Layout
-
-```
-Pythia/                     # Cargo workspace
-├─ PLAN.md · SAFETY.md      # the master plan · read before going live
-├─ NEXT-STEPS.md            # handover: what to do next, in order
-├─ PROFIT-PLAN.md           # where an edge could come from, and what it must prove first
-├─ docs/BREAKTHROUGH.md     # the next algorithms · and the case for a simple default view
-├─ docs/FORECASTING.md      # how predictions are pooled, scored and gated
-├─ crates/pythia-core/      # the shared engine brain (no UI)
-│  └─ src/
-│     ├─ engine/            #   strategies, indicators, risk, live order state machine
-│     ├─ connectors/        #   alpaca · cex/{kraken,binance,bybit,okx} · polymarket · paper
-│     ├─ forecast/          #   pooling, calibration, scoring, coherence, statistical sources
-│     ├─ predict.rs         #   the async side: model ensembles, fed back into the forecast
-│     ├─ execution.rs       #   the one place that sends an order (shared by both hosts)
-│     ├─ wallets.rs         #   unified balances incl. watch-only on-chain addresses
-│     └─ …                  #   market data, vault, alerts, llm (AI signals)
-├─ server/                  # standalone backend — axum HTTP + WebSocket over pythia-core
-├─ src-tauri/               # native desktop shell (Tauri v2) — thin layer over pythia-core
-└─ src/                     # React cockpit (also runs standalone via the TS paper engine)
-   ├─ engine/               #   TS mirror of the core + Tauri/Server/Paper clients
-   ├─ pages/                #   Dashboard, Markets, Positions, Wallets, Strategies, Composer,
-   │                        #   Backtest, Optimizer, Analytics, Correlation, AI Signals, Live, …
-   └─ components/           #   neon UI kit
-```
-
----
-
-## 🛡 Modes &amp; safety
-
-- **Paper (default):** a simulated matching engine fills orders against live/replayed prices with a
-  fake balance. Prove strategies here first.
-- **Live (gated):** requires your own API keys (OS keychain), a typed confirmation, and a venue you
-  enabled explicitly. The global kill switch and risk limits always apply. Polymarket is geoblocked
-  for US persons — confirm legality where you live.
-- **Real ≠ paper.** A position opened with a real fill is tagged `REAL`. Disarming does **not** close
-  it, and the simulator will never pretend to: Pythia refuses the fake exit and tells you the
-  position is still open at the venue.
-
-Read [`SAFETY.md`](SAFETY.md) in full before enabling anything live.
-
-### Going live (paper-first)
-
-📖 **Full step-by-step runbook: [`docs/LIVE-RUN.md`](docs/LIVE-RUN.md)** — keys, verification,
-arming, what the journal looks like, market hours, restarts, and how to stop.
-
-Live execution ships **disarmed**. The short version:
-
-1. Add keys — desktop: *Settings → Alpaca* and *Settings → Crypto exchanges* (OS keychain); server:
-   env vars. Equity markets immediately switch from the simulator to **real Alpaca quotes**.
-2. Open **Live** → enable the venues you want → *Test paper connection* (read-only).
-3. Keep the endpoint on **Paper**, type `ARM LIVE`, and arm. Set a strategy to **Live** on the
-   Strategies page. Use **Dry-run** for a rehearsal that submits nothing.
-4. Only once you trust it, flip the endpoint to **Live** and re-arm for real money.
-
-Each venue is armed separately — one left off keeps simulating while the others are live. Polymarket
-never routes an order at all: its CLOB signs with a wallet key rather than a revocable API key, which
-is a different risk category ([`PROFIT-PLAN.md`](PROFIT-PLAN.md) §7.3). The kill switch and every
-risk limit gate each order first, and the venue connector refuses the ones that cannot fill.
-
----
-
-<div align="center">
-
-Built by **SenseiIssei**. If Pythia is useful to you:
-
-<a href="https://ko-fi.com/senseiissei">
-  <img src="https://ko-fi.com/img/githubbutton_2.svg" alt="Support me on Ko-fi" height="36">
-</a>
-
-</div>
+If Pythia is useful to you, you can [support it on Ko-fi](https://ko-fi.com/senseiissei).

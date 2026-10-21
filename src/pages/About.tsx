@@ -48,7 +48,7 @@ export function About() {
     >
       <Section title="This copy" hint="Which version you run and how it is connected." help="The version and how this copy of Pythia runs.">
         <List>
-          <Row label="Version" value="v0.4" valueSub="Phase 1+" help="The app version and the phase of the plan it has reached." />
+          <Row label="Version" value="v0.5" valueSub="Phase 1+" help="The app version and the phase of the plan it has reached." />
           <Row label="Running as" value={runtime} help="Where the engine runs: the desktop app, a server, or inside this browser." />
           <Row label="Markets" value="Polymarket, crypto, equities" help="The kinds of markets Pythia watches and trades." />
           <Row label="Built as" value="One engine, three runtimes" sub="and your choice of AI" help="One engine core that runs on the desktop, on a server or in the browser." />
@@ -73,8 +73,8 @@ export function About() {
           ))}
         </List>
         <p className="mt-3 border-t border-line pt-3 text-[13px] leading-relaxed text-muted">
-          Next (Phase 2): gated live execution per venue. Real money stays behind your own keys and a per-strategy typed
-          confirmation. See PLAN.md.
+          Next: a paper record that passes the pre-registered readiness rule. Real money stays behind your own keys and a
+          typed confirmation. See PLAN.md.
         </p>
       </Section>
 
