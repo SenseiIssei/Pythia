@@ -88,6 +88,7 @@ panel for its breadth features, so run `xs_daily` first.
 | `pumpfun_rt` pipeline (X10) | One automatic pipeline for paper and a future live book: signal, filter, sizing, risk limits, ladders, trailing, dev-sell and liquidity-pull exits in the same slot window; 8 pre-registered strategies (31 trials in all); exit models (a top holder sells within 10/30 s, the price up after 10 s/30 s/2 min), wallet reputation and Claude Haiku name categories, each used only where it wins out of sample; readiness per strategy | Too early: on 3 h of the server's record every strategy fails on size; exits act (pulls and dev sells end most early positions), early-curve books lose 6 to 24 % per trade, the pool 60 s after migration +27 % over 6 trades. Exit model AUC 0.81 but not better than its logistic baseline. The live executor exists and is LOCKED (owner's switch, own wallet file, written confirmation, readiness, hard caps). See `results/pumpfun_realtime.md`. (2026-10-20) |
 | `pumpfun_rt` early and exits (X14) | From a token's first 5 to 60 s (and its curve at 25/50/75 %), can we tell whether it completes within the hour, reaches 3x or 10x from our realistic landing, or stays undumped for 5 minutes, and does entering the top 1 %/5 % pay? For every paper position, how much of the best possible exit do we capture, and does a hazard exit (LightGBM discrete-time hazard of a 25 % drop in 10 s against the expected 30-s upside) beat 30 pre-registered ladders, stops, trails and time stops? 58 trials, four new paper strategies | Too early: 3 h 48 min of record (not the two days assumed). Completion within the hour (AUC 0.77, top 5 % lift 8) and the 5-minute dump (AUC 0.87) are predictable, 3x weakly (lift 2.9, not useful by the rule), 10x not; every early book loses after honest fills (e.g. top 5 % P(3x) -11.4 % per trade). 84 % of positions are never worth their cost; the in-sample pick HZ4 loses least out of sample (-5.6 % against -6.3 % for the best simple rule) by selling early and captures +0.5 % of the best possible gain (best policy +6.7 %); 2 hours out of sample, not judged. P_early10/30, P_press10_hz, P_pool60_hz run on paper; daily retrain and a card line. See `results/pumpfun_early_exit.md`. (2026-10-20) |
 | `candles_study` (X15) | Do classic candlestick patterns predict returns after costs? A library of 74 patterns (doji family, hammer and shooting star, marubozu, engulfing, harami, stars, soldiers and crows, tasuki gaps, three methods, ladder bottom and more) plus confluence, support/resistance and volume-confirmed signals (`lab/candles`, numpy, no TA-Lib); forward returns at 1, 3, 5, 10 bars entered at the next open, against the drift and a random entry on the same bar, on crypto daily and 4h (31 Alpaca coins, survivorship-free top-30 twin), 25 US ETFs and point-in-time S&P 500 members; the best as long-only books, as M2 features and as a breakout entry filter. Pre-registered, 47 Sharpe trials | No. 3 of 1,280 cells pass the in-sample screen (t >= 3), none holds out of sample from 2024 (crypto) or 2016 (equities); more in-sample cells point against the pattern's name (23) than with it (3), and out of sample the count with t >= 2 is chance (14 against about 19). 12 long-only rules: best SP harami cross 5 days, Sharpe 0.27 against SPY 0.87; crypto 4h rules -1.06 to -2.55; deflated p 0.00 over 1,590. M2 + candle inputs: IC 0.148 vs 0.146 (t 1.48), Alpaca 0.127 vs 0.122 (t 1.58), fails. Breakout filter (no bearish pattern on the breakout day) 1.21 vs 1.17, band -0.00 to 0.11, fails 5 of 6 gates. Bullish high-volume candles rank worse over 7 days across the universe (IC -0.049), which M2 already knows. Gap patterns barely fire on 24/7 markets. Nothing wired in the lab; the engine has the patterns as a paused strategy kind `candles` labelled "no edge yet". Pool 1,595 when run; with X16 published in parallel (120) the hand count after X15 is 1,115. See `results/candles.md`. (2026-10-20) |
+| `polymarket` (Y4) | Can our own model, a Claude forecaster or a mix beat Polymarket's price after spread and taker fees? Public read-only data (Gamma, CLOB): 1.09 million closed markets listed, a hash sample of 75,554 with price history (74,751 in the panel, 2.4 million daily states, 2022-11 to 2026-10), a daily snapshot of every open market with $1,000 of liquidity and 2,000 order books; favourite/longshot, drift, category, volume and momentum biases; gradient boosting plus isotonic calibration and a logistic recalibration against the price, by quarter from 2024; a Claude Sonnet 5.5 forecaster that never sees a price, forward only, append-only ledger; two $10,000 paper books on real books. Pre-registered, 16 Sharpe trials, 4 loss tests. PAPER ONLY, no wallet | No evidence of money. Both models pass against the recorded price (Brier skill +1.0 % and +3.4 %), but only where nobody trades: +6.8 % in markets that ended under $5,000 of volume, -1.8 % from $100,000 and -3.4 % over $1 million (bands below zero). The recorded price is a midpoint, and open markets with a mid of 35 to 65 cents quote a median spread of 90 cents; the historical paper twin's +14,700 to +42,000 % is that midpoint, not evidence. Biases: YES too dear far from the end (intercept -0.40 beyond 30 days), longshots too dear in single games and busy markets (slope 0.67 to 0.90), weekly moves partly reverse (-0.21). 535 Claude forecasts (82 % flag stale knowledge) and both books (31 and 30 positions) wait for resolutions; first on 2026-10-23, the midterms on 2026-11-03. Claude cost $0.57. See `results/polymarket.md`. (2026-10-21) |
 | `costs` | What does crossing the book really cost, per coin? | Spreads are far tighter than the guesses: BTC one tick on both venues, most coins under 2 bps a side. Fees are nearly all of it: a Kraken taker round trip is 80 bps, Binance 20. Weekly, report only (2026-10-07). |
 
 ## Strategy-family sweep (2026-10-07)
@@ -261,6 +262,34 @@ no wallet, no key, nothing that signs or sends; a test checks the package.
 See `results/pumpfun_realtime_plan.md` (pre-registration) and
 `results/pumpfun_realtime.md` (method, terms, first results, what would be
 needed before real money is even discussed).
+
+## Polymarket (Y4)
+
+`lab.polymarket` asks whether a model can beat Polymarket's price after the
+spread and the taker fee. PAPER ONLY: public read-only endpoints, no
+account, no wallet, no key, nothing that signs or sends; a test checks the
+package.
+
+- **Collector** (`collect.py`): resolved markets per end month from Gamma's
+  keyset endpoint, a hash sample per month, category and kind, their YES
+  price history from the CLOB (daily, hourly for the last 14 days, 10-minute
+  for short markets); daily, every open market with $1,000 of liquidity and
+  both books of 2,000 candidates. `<data>/polymarket/`, 6 GB budget.
+- **Study** (`study.py`, weekly after the history): the biases, the
+  walk-forward of a logistic recalibration and LightGBM plus isotonic
+  calibration against the price, the historical twin and its checks, and
+  the fitted model the paper book uses.
+- **Claude forecaster** (`forecast.py`): Sonnet 5.5 through the engine's
+  metered endpoint, never shown a price, up to 300 markets a day; every
+  forecast in `forecasts/ledger.jsonl`, scored only on markets resolved after
+  it was written.
+- **Paper books** (`book.py`, `daily.py`): `pm_model` and `pm_claude`, edge
+  after the ask and the market's own fee schedule, quarter Kelly with caps,
+  fills walking the real book, held to resolution. Report
+  `reports/polymarket/latest.json` (lab feed header), a daily card and
+  big-edge alerts in English or German (`card.py`).
+
+See `results/polymarket_prereg.md` and `results/polymarket.md`.
 
 ## Pokemon cards
 

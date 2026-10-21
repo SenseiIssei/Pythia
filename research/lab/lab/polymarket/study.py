@@ -30,7 +30,7 @@ GBM_PARAMS = dict(objective="binary", n_estimators=300, learning_rate=0.03, num_
 MARGINS = (0.02, 0.03, 0.05)
 HIST_MAX_USD = 500.0
 MIN_HALF_SPREAD = 0.005
-PRIOR_HAND = 1115          # hand trials after X15 with X16 (results/candles.md)
+PRIOR_HAND = 1124          # hand trials after X15, X16 and the director studies (results/gated_btc_prereg.md)
 HERE_TRIALS = 16           # 6 historical rule variants, 8 addendum checks, 2 live books
 # The addendum's slices of the same test: states whose history price is more likely a real price.
 SLICES = {
@@ -403,6 +403,55 @@ def half_spreads() -> dict:
     return out
 
 
+VOLUME_FROM = (0, 5_000, 33_000, 100_000, 1_000_000)
+
+
+def by_volume(oos: pl.DataFrame) -> list[dict]:
+    """Skill against the market by the market's final volume, after day one and moved
+    (descriptive: final volume is hindsight, so this only says where the skill sits)."""
+    s0 = oos.filter((pl.col("days_since") >= 1.0) & (pl.col("hi") > pl.col("lo")))
+    out = []
+    for i, lo in enumerate(VOLUME_FROM):
+        hi = VOLUME_FROM[i + 1] if i + 1 < len(VOLUME_FROM) else math.inf
+        s = s0.filter((pl.col("volume") >= lo) & (pl.col("volume") < hi))
+        if s.height < 1000:
+            continue
+        w, y, ev = per_market(s), s["y"].to_numpy(), s["event_id"].to_numpy()
+        p = np.clip(s["p"].to_numpy(), EPS, 1 - EPS)
+        row = {"from": lo, "to": hi, "markets": s["market_id"].n_unique(), "brier_market": brier(p, y, w)}
+        for c in ("q_recal", "q_gbm"):
+            q = s[c].to_numpy()
+            d, dlo, dhi = event_boot((p - y) ** 2 - (q - y) ** 2, w, ev, seed=17)
+            row[c] = {"brier": brier(q, y, w), "skill": 1 - brier(q, y, w) / row["brier_market"], "gain": d,
+                      "lo": dlo, "hi": dhi}
+        out.append(row)
+    return out
+
+
+def live_spreads() -> list[dict]:
+    """Quoted spread of every open market in the live record (Gamma's best bid and ask), by
+    mid price bucket: how often a mid-range price is a quote anyone could trade."""
+    lv = store.read_all("live")
+    if lv is None or not lv.height:
+        return []
+    lv = lv.filter(pl.col("best_bid").is_not_null() & pl.col("best_ask").is_not_null() & (pl.col("kind") != "updown"))
+    lv = lv.with_columns(((pl.col("best_bid") + pl.col("best_ask")) / 2).alias("mid"),
+                         (pl.col("best_ask") - pl.col("best_bid")).alias("spr"))
+    b = P.price_bucket(lv["mid"].to_numpy())
+    spr, liq = lv["spr"].to_numpy(), lv["liquidity"].to_numpy()
+    out = []
+    for i, lab in enumerate(P.PRICE_LABELS):
+        k = b == i
+        if k.sum() < 20:
+            continue
+        kl = k & (liq >= 10_000)
+        out.append({"bucket": lab, "markets": int(k.sum()), "median_spread": float(np.median(spr[k])),
+                    "wide_share": float(np.mean(spr[k] > 0.10)),
+                    "liquid_markets": int(kl.sum()),
+                    "liquid_median_spread": float(np.median(spr[kl])) if kl.sum() else None})
+    return out
+
+
 AGE_LABELS = ("<1d", "1-7d", ">7d")
 
 
@@ -567,6 +616,8 @@ def run(refresh: bool = False) -> dict:
     store.write_parquet(oos, store.path("cache", "oos.parquet"))
     res["models"] = {c: score(oos, c) for c in ("q_recal", "q_gbm")}
     res["holm"] = holm({c: v["p_one_sided"] for c, v in res["models"].items()})
+    res["by_volume"] = by_volume(oos)
+    res["live_spreads"] = live_spreads()
     # addendum slices: where the history price is a real price (descriptive, same test)
     res["slices"] = {}
     for name, cond in SLICES.items():

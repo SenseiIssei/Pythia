@@ -91,6 +91,22 @@ def markdown(res: dict) -> str:
                              "yes" if m["passes"] else "no"])
         out.append(table(["Slice", "Model", "Share of states", "Markets", "Brier market", "Brier model", "Skill",
                           "Brier gain (95 %)", "Years better", "Rule met"], rows))
+    if res.get("by_volume"):
+        out.append("\n**By final volume** (after day one and moved; final volume is hindsight, so this only "
+                   "says where the skill sits):\n")
+        out.append(table(["Final volume", "Markets", "Brier market", "recal skill", "gbm skill", "gbm gain (95 %)"],
+                         [[f"${r['from']:,.0f}" + (f" to ${r['to']:,.0f}" if r["to"] != float("inf") else " and up"),
+                           f"{r['markets']:,}", _f(r["brier_market"]), _p(r["q_recal"]["skill"], 2, True),
+                           _p(r["q_gbm"]["skill"], 2, True),
+                           f"{_f(r['q_gbm']['gain'], 5, True)} ({_f(r['q_gbm']['lo'], 5, True)} to "
+                           f"{_f(r['q_gbm']['hi'], 5, True)})"] for r in res["by_volume"]]))
+    if res.get("live_spreads"):
+        out.append("\n**Quoted spreads of the open markets** (live record, Gamma's best bid and ask; every open "
+                   "market with $1,000 of liquidity, plus the first snapshot's every open market):\n")
+        out.append(table(["Mid bucket", "Markets", "Median spread", "Wider than 10 cents", "Markets with $10k+",
+                          "Their median spread"],
+                         [[r["bucket"], f"{r['markets']:,}", _f(r["median_spread"], 3), _p(r["wide_share"], 0),
+                           f"{r['liquid_markets']:,}", _f(r["liquid_median_spread"], 3)] for r in res["live_spreads"]]))
     for k, m in res["models"].items():
         out.append(f"\n**{k[2:]} by category** (Brier, market / model, markets):\n")
         out.append(table(["Category", "Market", "Model", "Markets"],

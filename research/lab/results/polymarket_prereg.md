@@ -200,7 +200,7 @@ At a decision time with a forecast `q` and the order books:
 Sharpe trials: the 6 historical variants and the 2 live books (8; 16 with
 the addendum's checks), into the
 global pool (1,115 hand trials after X15 with X16, plus the factory
-ledger). Loss tests: 4 (Holm). The paper books are forward evidence only:
+ledger; 1,124 once the director studies published in parallel are counted). Loss tests: 4 (Holm). The paper books are forward evidence only:
 before anything near money could be discussed a book needs at least 100
 resolved trades over at least 60 days, a positive mean return per trade
 with its event-bootstrap band above zero, a positive result in each of its
