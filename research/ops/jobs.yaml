@@ -155,6 +155,35 @@ jobs:
     lock_wait: 2h
     replaces: pythia-paper-m4
 
+  # Funding carry on perps (results/funding_carry.md), an experiment (passes its
+  # registered gates and the residual after low vol and BTC, fails deflation),
+  # on the liquid perps Kraken Futures lists. Added disabled; switch on (enabled:
+  # true, then deploy_ops.sh) once the perps demo route is deployed. Its signal is
+  # experimental and autopilot-only: no autopilot runs it unless one names
+  # lab:funding_carry.
+  - name: paper-funding-carry
+    description: EXPERIMENT funding carry perps book (long the lowest, short the highest 7-day funding) and its experimental engine signal (autopilot only)
+    schedule: "45 5 * * *"
+    command: python -m lab.paper.funding_carry
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 4, memory: 8g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+    enabled: false
+
+  # Kraken Futures hourly funding and mark prices (public, no key), kept beyond the
+  # endpoint's one-year window for kraken_funding_gap (results/kraken_funding_gap.md).
+  # Data only. Added disabled; switch on (enabled: true, then deploy_ops.sh) when
+  # the history should grow.
+  - name: kraken-futures-collect
+    description: Kraken Futures funding history and hourly marks for the Alpaca coins (data only)
+    schedule: "5 6 * * *"
+    command: python -m lab.collect.kraken_futures
+    resources: {cpus: 1, memory: 1g}
+    timeout: 30m
+    enabled: false
+
   - name: paper-ls
     description: market-neutral M2 paper book v1
     schedule: "30 5 * * *"
