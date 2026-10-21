@@ -164,7 +164,15 @@ export function useAutopilotApi(): AutopilotApi {
 const VENUES: { id: Venue; label: string; note: string }[] = [
   { id: "crypto", label: "Crypto exchange", note: "Open day and night. Buys and sells coins, never borrows to bet against them." },
   { id: "alpaca", label: "US shares (Alpaca)", note: "Trades only while the US market is open." },
+  {
+    id: "perps",
+    label: "Perps, long and short",
+    note: "Perpetual futures on a demo account (or practice money): the one place Pythia goes short. Never real money.",
+  },
 ];
+
+/** The lab's market-neutral M4 book on perps, the strategy the perps preset names. */
+export const M4_PERPS = "lab:m4_perps";
 
 function venueLabel(v: string): string {
   return VENUES.find((x) => x.id === v)?.label ?? v;
@@ -467,6 +475,15 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
       `${exchangeName(live.demoExchange)} runs its demo account on its own prices, so a demo autopilot there would be judged in a different price world than its stop rules watch. Use Bybit or Binance demo keys, Alpaca paper, or practice money.`,
     );
   }
+  if (!both && venue === "perps") {
+    if (mode === "live") problems.push(live.perps?.live ?? "Real-money perpetuals are switched off.");
+    if (mode === "demo" && !live.perps) {
+      problems.push("No perps venue is configured on the server (PYTHIA_PERPS_DEMO, docs/KRAKEN-FUTURES-DEMO.md). Practice money works without one.");
+    } else if (mode === "demo" && live.perps?.demoBlocked) {
+      problems.push(`The perps demo account cannot take orders: ${live.perps.demoBlocked}.`);
+    }
+    if (pick === "auto") problems.push("Pythia does not pick perps books on its own: choose \"I pick them\" and name the M4 book.");
+  }
   const demoVenues = live.demoVenues ?? [];
   if (both && mode === "demo" && (!demoVenues.includes("alpaca") || !demoVenues.includes("crypto") || live.demoExchange !== "alpaca")) {
     problems.push(
@@ -569,6 +586,30 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
 
   return (
     <Section title="Start an autopilot" help={explain("Autopilot")} hint="Four short questions. You can stop it at any moment, whatever you choose here.">
+      {live.perps && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-line px-3 py-2.5 text-[13px] text-muted">
+          <span className="min-w-0 flex-1 basis-64">
+            The lab's market-neutral M4 book (long and short perps) on the {live.perps.label} demo account. An experiment: it
+            fails the deflation test and runs for forward evidence. Never real money.
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setMode(live.perps?.demoReady ? "demo" : "paper");
+              setVenue("perps");
+              setBoth(false);
+              setPick("manual");
+              setWeights({ [M4_PERPS]: "1" });
+              setName(live.perps?.demoReady ? "M4 perps (demo)" : "M4 perps (paper)");
+              setLossPctOn(true);
+              setLossPct("20");
+            }}
+          >
+            Set up "M4 perps (demo)"
+          </Button>
+        </div>
+      )}
       <div className="divide-y divide-line">
         {/* 1 · which money */}
         <Step n={1} title="Which money" help="Practice money, a demo account at the venue, or real money in an account you funded.">
@@ -594,8 +635,9 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
               checked={mode === "live"}
               onChange={() => {
                 setMode("live");
-                // A portfolio is paper or demo only.
+                // A portfolio is paper or demo only, and perps never trade real money.
                 setBoth(false);
+                if (venue === "perps") setVenue("crypto");
               }}
               icon={Lock}
               title="Real money"
@@ -604,7 +646,7 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
             />
           </div>
           <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Where it trades">
-            {VENUES.map((v) => (
+            {VENUES.filter((v) => v.id !== "perps" || mode !== "live").map((v) => (
               <Choice
                 key={v.id}
                 name="ap-venue"
@@ -612,10 +654,16 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
                 onChange={() => {
                   setVenue(v.id);
                   setBoth(false);
+                  // Pythia never picks a perps book on its own (the M4 book is an
+                  // experiment): the perps choice names it.
+                  if (v.id === "perps") {
+                    setPick("manual");
+                    setWeights({ [M4_PERPS]: "1" });
+                  }
                 }}
                 title={
-                  v.id === "crypto"
-                    ? `${v.label} · ${exchangeName(autopilotVenue(mode, "crypto", live, cryptoCostVenue))}${mode === "demo" ? " demo" : ""}`
+                  v.id === "crypto" || v.id === "perps"
+                    ? `${v.label} · ${exchangeName(autopilotVenue(mode, v.id, live, cryptoCostVenue))}${mode === "demo" ? " demo" : ""}`
                     : v.label
                 }
                 detail={v.note}
@@ -1009,6 +1057,12 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
           <Notice tone="danger" title="Real money" className="mt-4">
             It buys and sells with real money in your {exchange} account and can lose it, also while you sleep.
           </Notice>
+        )}
+        {(s.config.assetClass === "perps" || (s.shortUsd ?? 0) > 0) && (
+          <p className="tabular mt-3 text-[13px] leading-relaxed text-muted" aria-label="Long, short and funding">
+            Long {money(s.longUsd ?? 0, 0)} · Short {money(s.shortUsd ?? 0, 0)} · Funding {signedMoney(s.funding ?? 0)} (in the
+            result already; a long pays positive funding, a short receives it)
+          </p>
         )}
 
         <p className="mt-4 text-[15px] leading-relaxed text-ink">

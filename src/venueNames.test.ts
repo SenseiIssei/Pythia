@@ -25,6 +25,13 @@ describe("autopilotVenue", () => {
   it("falls back to the selected exchange when no demo keys are saved", () => {
     expect(autopilotVenue("demo", "crypto", { demoVenues: [] }, "okx")).toBe("okx");
   });
+
+  it("puts perps on the perps venue the server follows, Kraken Futures when it says nothing", () => {
+    const perps = { exchange: "bybit_perps" as const, label: "Bybit perps", demoReady: true, listed: 400, markets: 20, tickersAt: 0, accountAt: 0, fundingTotal: 0, longs: 0, shorts: 0, live: "" };
+    expect(autopilotVenue("demo", "perps", { demoVenues: ["perps"], perps }, "kraken")).toBe("bybit_perps");
+    expect(autopilotVenue("paper", "perps", { demoVenues: [] }, "kraken")).toBe("kraken_futures");
+    expect(exchangeName("kraken_futures")).toBe("Kraken Futures");
+  });
 });
 
 describe("exchangeName", () => {

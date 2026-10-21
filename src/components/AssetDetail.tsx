@@ -30,6 +30,7 @@ export const VENUE_WORD: Record<Venue, string> = {
   polymarket: "Prediction",
   crypto: "Crypto",
   alpaca: "US share",
+  perps: "Perp",
 } as Record<Venue, string>;
 
 /** A prediction market's price is a chance; everything else is dollars. */
