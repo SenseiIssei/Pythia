@@ -13,6 +13,11 @@ Sources and their limits
   upbit      Upbit quotation API, KRW-BTC day candles (GET /v1/candles/days,
              200 a request; the quotation group allows 10 a second, we send
              about 4). The Upbit day runs 00:00 to 24:00 UTC.
+  upbit_all  the same day candles for every KRW market Upbit lists today, and
+             a daily snapshot of the market list with Upbit's warning and
+             caution flags. Upbit serves no candles for markets it has
+             delisted, so the history is today's survivors; from the first run
+             on, a market that is later delisted keeps what was stored.
   fx         USD/KRW ECB reference rates through frankfurter.dev (open source,
              no key, no published limit; one request per year of history).
   stables    DefiLlama stablecoins API, circulating USD of USDT (id 1), USDC
@@ -28,6 +33,8 @@ Sources and their limits
 Lake (under $PYTHIA_FLOW, default $PYTHIA_DATA/flow), each a single small file:
   coinbase_btcusd_1h.parquet   ts_us (hour open), open, high, low, close, volume
   upbit_krwbtc_1d.parquet      day_us, open, high, low, close, value_krw
+  upbit_krw_1d.parquet         market, day_us, open, high, low, close, value_krw
+  upbit_markets.parquet        day_us, market, warning, caution (the flags that are set, comma-separated)
   fx_usdkrw.parquet            day_us, usdkrw (ECB business days only)
   stables.parquet              day_us, usdt, usdc, total (USD)
   dvol.parquet                 day_us, currency, open, high, low, close
@@ -73,7 +80,7 @@ UPBIT = "https://api.upbit.com/v1"
 FRANKFURTER = "https://api.frankfurter.dev/v1"
 LLAMA = "https://stablecoins.llama.fi"
 DERIBIT = "https://www.deribit.com/api/v2/public"
-SOURCES = ("coinbase", "upbit", "fx", "stables", "dvol", "skew")
+SOURCES = ("coinbase", "upbit", "upbit_all", "fx", "stables", "dvol", "skew")
 SKEW_DAYS = 30.0
 
 Fetch = Callable[[str], object]
@@ -352,11 +359,46 @@ def options_snapshot(fetch: Fetch, currency: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+def upbit_markets(fetch: Fetch) -> pl.DataFrame:
+    """Today's KRW markets with their warning flag and the caution flags that are set."""
+    rows = fetch(f"{UPBIT}/market/all?is_details=true") or []
+    day = us_of(today())
+    out = []
+    for m in rows:
+        code = str(m.get("market") or "")
+        if not code.startswith("KRW-"):
+            continue
+        ev = m.get("market_event") or {}
+        caution = ev.get("caution") or {}
+        warn = ev.get("warning", m.get("market_warning") == "CAUTION")
+        out.append({"day_us": day, "market": code, "warning": bool(warn),
+                    "caution": ",".join(sorted(k for k, v in caution.items() if v))})
+    return pl.DataFrame(out, schema={"day_us": pl.Int64, "market": pl.Utf8, "warning": pl.Boolean,
+                                     "caution": pl.Utf8})
+
+
+def upbit_all(fetch: Fetch, old: pl.DataFrame | None, markets: list[str]) -> pl.DataFrame:
+    """Day candles of every market, each continuing from what is stored for it."""
+    frames = []
+    for i, mk in enumerate(markets):
+        prev = old.filter(pl.col("market") == mk) if old is not None and not old.is_empty() else None
+        df = upbit(fetch, resume_from(prev, "day_us", date(2019, 1, 1)), mk)
+        if df.height:
+            frames.append(df.with_columns(market=pl.lit(mk)).select("market", "day_us", "open", "high", "low",
+                                                                   "close", "value_krw"))
+        if i % 50 == 0:
+            print(f"  upbit_all {i}/{len(markets)}", flush=True)
+    if not frames:
+        return pl.DataFrame(schema={"market": pl.Utf8, "day_us": pl.Int64, "open": pl.Float64, "high": pl.Float64,
+                                    "low": pl.Float64, "close": pl.Float64, "value_krw": pl.Float64})
+    return pl.concat(frames)
+
+
 # Run
 # ---------------------------------------------------------------------------
 
 def run(only: set[str], dry: bool, fetch_for: Callable[[str], Fetch] | None = None) -> dict:
-    fetch_for = fetch_for or (lambda src: paced({"coinbase": 0.35, "upbit": 0.25}.get(src, 0.2)))
+    fetch_for = fetch_for or (lambda src: paced({"coinbase": 0.35, "upbit": 0.25, "upbit_all": 0.25}.get(src, 0.2)))
     end = today() - timedelta(days=1)
     counts: dict[str, object] = {}
     errors: dict[str, str] = {}
@@ -382,6 +424,13 @@ def run(only: set[str], dry: bool, fetch_for: Callable[[str], Fetch] | None = No
         fetch_for("coinbase"), resume_from(read("coinbase_btcusd_1h"), "ts_us"), end), ["ts_us"]))
     step("upbit", lambda: save("upbit_krwbtc_1d", upbit(
         fetch_for("upbit"), resume_from(read("upbit_krwbtc_1d"), "day_us")), ["day_us"]))
+    def do_upbit_all() -> None:
+        f = fetch_for("upbit_all")
+        mk = upbit_markets(f)
+        save("upbit_markets", mk, ["day_us", "market"])
+        save("upbit_krw_1d", upbit_all(f, read("upbit_krw_1d"), mk["market"].to_list()), ["market", "day_us"])
+
+    step("upbit_all", do_upbit_all)
     step("fx", lambda: save("fx_usdkrw", fx(
         fetch_for("fx"), resume_from(read("fx_usdkrw"), "day_us", START) - timedelta(days=7), end), ["day_us"]))
     step("stables", lambda: save("stables", stables(fetch_for("stables")), ["day_us"]))
