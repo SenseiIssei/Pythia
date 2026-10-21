@@ -194,6 +194,6 @@ On Windows the npm scripts strip `CC` and `CXX` from the environment, because pa
 
 ## License and credits
 
-MIT. Built by [SenseiIssei](https://github.com/SenseiIssei). Market data from Alpaca, Binance, Kraken, Bybit, OKX, Coinbase, Deribit, DefiLlama, Polymarket and public SEC filings; each venue's terms apply to its data.
+[MIT](LICENSE). Built by [SenseiIssei](https://github.com/SenseiIssei). Market data from Alpaca, Binance, Kraken, Bybit, OKX, Coinbase, Deribit, DefiLlama, Polymarket and public SEC filings; each venue's terms apply to its data.
 
 If Pythia is useful to you, you can [support it on Ko-fi](https://ko-fi.com/senseiissei).
