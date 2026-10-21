@@ -186,6 +186,7 @@ prints both and writes nothing.
 | `memes_rotation`, `memes_tsmom` | `lab.paper.memes` | EXPERIMENTS (failed deflation): W7's memecoin rotation and momentum on Alpaca's six memecoins, Alpaca taker fills; signals marked experimental, autopilot-only | 04:30 |
 | `trend4h_pullback` | `lab.paper.trend4h` | EXPERIMENT (failed deflation): W15's 4h trend with pullback maker entries on the Alpaca coins, the study's fill model on live 1h bars; a new signal only when the holdings change | hourly, decisions every 4 h |
 | `btc_gated` | `lab.paper.btc_gated` | EXPERIMENT (failed deflation, below plain BTC on Sharpe): BTC at full weight while its close is above its 200-day average, cash otherwise, proposed by `gated_btc`; experimental autopilot-only signal; job `paper-btc-gated` added disabled | 04:35 when enabled |
+| `tsmom_tranches_lowmax` | `lab.paper.tranches_lowmax` | EXPERIMENT (improvement failed deflation): tsmom_tranches with every coin in the worst third by 28-day MAX among the 50 most liquid at 0, proposed by `xs_factors`; the tranche book's fills, experimental autopilot-only signal; job `paper-tranches-lowmax` added disabled | 04:25 when enabled |
 | `pumpfun_migration`, `pumpfun_filtered`, `pumpfun_filtered_quick` | `lab.paper.pumpfun` | EXPERIMENT, paper only: pump.fun graduations from public data, AMM fills, rugs as total losses; no engine signal, no wallet | every 5 min, report 06:40 |
 | `<pick>` and `<pick>+model` (`paper/pumpfun_rt/ledger.csv`) | `lab.pumpfun_rt.live` | EXPERIMENT, paper only: the real-time pump.fun study's pick, with and without the model filter, traded on the live stream by the study's own fill model, in shadow; no engine signal, no wallet | always (inside the collector), study 06:50 |
 | `P_*` pipeline books (`paper/pumpfun_rt/ledger.csv`) | `lab.pumpfun_rt.pipeline` | EXPERIMENT, paper only: the 8 pipeline strategies with their risk limits and exits, on the live stream, by the code a live executor would share; the live executor is locked | always (inside the collector), categories 06:20, study 06:50, retrain after |
@@ -194,7 +195,7 @@ Experimental books (`lab.paper.experimental`) carry `"experimental": true`
 in their signal and evidence. The engine never runs them on its own, the
 auto pick never picks one, a live autopilot refuses one; they run only where
 an autopilot names them as a sleeve (`lab:memes_rotation`, `lab:memes_tsmom`,
-`lab:trend4h_pullback`, `lab:btc_gated`). See `results/experiments.md`.
+`lab:trend4h_pullback`, `lab:btc_gated`, `lab:tsmom_tranches_lowmax`). See `results/experiments.md`.
 
 ### Forward report
 

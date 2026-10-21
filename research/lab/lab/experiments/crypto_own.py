@@ -270,7 +270,7 @@ def finalize(results: dict) -> dict:
             row["deflated_diff"] = deflated(row.pop("_diff"), REG_TRIALS, dvar)
             row["deflated_pool"] = deflated(row.pop("_m35"), pl_["n_total"], pl_["var"])
             verdict(row)
-    return {"pool": pl_, "diff_var": dvar, "n_trials": len(trials)}
+    return {"pool": pl_, "diff_var": dvar, "n_trials": len(trials), "n_diffs": len(diffs)}
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,8 @@ def pool_line(fin: dict) -> str:
             f"{p['factory_trials']} factory, {p['registered_trials']} registered on 2026-10-21 with O9's 2 forward "
             f"trials); the best noise trial sits at an annual Sharpe of about {p['sr0_annual']:.2f}. Gate 6 deflates "
             f"each improvement over the {REG_TRIALS} trials of the registration at the variance of the "
-            f"{fin['n_trials']} trial difference Sharpes computed in this run.")
+            f"{fin['n_diffs']} book modifications computed in this run (the long/short trial has no book "
+            "to differ from).")
 
 
 def ref_rows(ctx: Ctx) -> list[dict]:
