@@ -16,6 +16,7 @@ Standard library only, thread-safe (the history backfill uses a few threads).
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import random
@@ -98,7 +99,9 @@ class Client:
                 self.calls += 1
             try:
                 status, raw = self.fetch(method, url, body, self.timeout)
-            except (urllib.error.URLError, OSError, TimeoutError) as e:
+            except (OSError, http.client.HTTPException) as e:
+                # A reset or refused connection, a timeout, a body cut short
+                # (IncompleteRead) or a hang-up before the status line.
                 status, raw, last = 0, b"", f"{type(e).__name__}"
             if status == 200:
                 try:

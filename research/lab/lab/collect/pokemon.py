@@ -38,7 +38,8 @@ Lake (under $PYTHIA_DATA/pokemon):
 
 Politeness: keyless the API allows about 30 requests a minute, so pages are
 spaced 2.1 s apart (0.3 s with a key); 429 and 5xx answers are retried with
-exponential backoff (up to 8 tries a page) and Retry-After is honoured. A
+exponential backoff (up to 8 tries a page) and Retry-After is honoured; so
+are a dropped connection and an answer cut short (IncompleteRead). A
 full run is about 85 pages. The API has bad hours: on 2026-10-15 /sets
 answered 500 and 502 for minutes and single card pages needed a minute of
 retries, so a keyless run took about 40 minutes. A run that still fails is
@@ -59,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import http.client
 import json
 import os
 import re
@@ -128,6 +130,15 @@ class FetchError(RuntimeError):
     pass
 
 
+# What a dropped or half-read answer raises: a connection reset or refused
+# (OSError, URLError is one), a timeout, a body cut short
+# (http.client.IncompleteRead) or a server that hung up before its status line
+# (RemoteDisconnected, BadStatusLine), all http.client.HTTPException or
+# OSError. Each is worth another try; on 2026-10-21 one IncompleteRead
+# stopped the whole run.
+TRANSIENT = (urllib.error.URLError, OSError, ValueError, http.client.HTTPException)
+
+
 @dataclass
 class Client:
     """GET with spacing between requests, retries with backoff, and a day cache."""
@@ -163,7 +174,7 @@ class Client:
             self.requests += 1
             try:
                 status, rh, data = self.opener(url, hdrs, self.timeout)
-            except (urllib.error.URLError, OSError, ValueError) as e:
+            except TRANSIENT as e:
                 status, rh, data = 0, {}, b""
                 last_err = type(e).__name__
             if status == 200:

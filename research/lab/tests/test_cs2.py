@@ -180,6 +180,53 @@ def test_collector_survives_a_skinport_failure(tmp_path):
     assert not rep["ok"] and len(rep["errors"]) == 2
 
 
+def test_a_cut_short_answer_is_tried_again(monkeypatch):
+    import http.client
+
+    class Resp:
+        status, headers = 200, {"X": "1"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"ok"
+
+    errors = [http.client.IncompleteRead(b"o", 1), ConnectionResetError(104, "reset")]
+
+    def urlopen(req, timeout):
+        if errors:
+            raise errors.pop(0)
+        return Resp()
+
+    monkeypatch.setattr(collect.urllib.request, "urlopen", urlopen)
+    slept = []
+    assert collect.http_fetch("https://example.invalid/x", {}, sleep=slept.append) == (200, b"ok", {"X": "1"})
+    assert slept == [2.0, 4.0]
+    errors[:] = [http.client.IncompleteRead(b"", 5)] * 3
+    with pytest.raises(http.client.IncompleteRead):
+        collect.http_fetch("https://example.invalid/x", {}, sleep=lambda s: None)
+
+
+def test_a_steam_item_cut_short_is_a_miss_not_the_end_of_the_run(tmp_path):
+    import http.client
+    items, sales = momentum_market(20)
+    net = FakeNet(items, sales)
+    first = {"done": False}
+
+    def fetch(url, headers):
+        if url.startswith(collect.STEAM_PRICE) and not first["done"]:
+            first["done"] = True
+            raise http.client.IncompleteRead(b"", 10)
+        return net(url, headers)
+
+    rep = collect.run(tmp_path, fetch=fetch, steam_max=5, now_ms=NOW, sleep=lambda s: None)
+    assert rep["steam_requested"] == 5 and rep["steam_ok"] == 4 and not rep["steam_rate_limited"]
+
+
 def test_rotate_wraps():
     assert collect.rotate(list("abcde"), 3, 4) == (["d", "e", "a", "b"], 2)
     assert collect.rotate([], 3, 4) == ([], 0)

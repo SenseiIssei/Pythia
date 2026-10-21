@@ -48,6 +48,29 @@ def test_client_retries_with_backoff_and_honours_retry_after(tmp_path):
     assert waits == [1.0, 1.0], "Retry-After 1 s beats the 0.5 s and 1.0 s backoff"
 
 
+def test_client_retries_a_cut_short_answer_and_a_reset_connection():
+    import http.client
+    m = Market(date(2026, 1, 1), n_sets=2, per_set=5)
+    ok = m.opener()
+    errors = [http.client.IncompleteRead(b"{\"data\": [", 4000), ConnectionResetError(10054, "reset"),
+              http.client.RemoteDisconnected("closed")]
+
+    def opener(url, headers, timeout):
+        if errors:
+            raise errors.pop(0)
+        return ok(url, headers, timeout)
+
+    waits = []
+    c = col.Client(opener=opener, sleep=waits.append, spacing=0.0, backoff=0.5)
+    d = c.get(f"{col.API}/sets?page=1&pageSize=250")
+    assert len(d["data"]) == 2 and c.requests == 4 and waits == [0.5, 1.0, 2.0]
+    # Every try cut short: a FetchError naming the kind, which the run's attempts handle.
+    c = col.Client(opener=lambda *a: (_ for _ in ()).throw(http.client.IncompleteRead(b"", 10)),
+                   sleep=lambda s: None, spacing=0.0, retries=3)
+    with pytest.raises(col.FetchError, match="IncompleteRead"):
+        c.get(f"{col.API}/sets")
+
+
 def test_client_gives_up_on_client_errors_and_never_leaks_the_query():
     calls = []
 

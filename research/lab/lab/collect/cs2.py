@@ -54,6 +54,7 @@ Writes under <data>/cs2/ (PYTHIA_DATA, as the rest of the lab):
 
 from __future__ import annotations
 
+import http.client
 import json
 import random
 import sys
@@ -90,13 +91,31 @@ def cs2_root(root: Path | None = None) -> Path:
     return (root or ROOT) / "cs2"
 
 
-def http_fetch(url: str, headers: dict, timeout: float = 30) -> tuple[int, bytes, dict]:
+# A dropped or half-read answer: a reset or refused connection, a timeout
+# (OSError), a body cut short or a server that hung up before its status line
+# (http.client.IncompleteRead, RemoteDisconnected). Worth another try.
+TRANSIENT = (OSError, http.client.HTTPException)
+
+
+def http_fetch(url: str, headers: dict, timeout: float = 30, tries: int = 3,
+               sleep: Callable[[float], None] = time.sleep) -> tuple[int, bytes, dict]:
+    """GET once more after a transient failure (2 s, then 4 s); the last one is raised."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **headers})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, r.read(), dict(r.headers)
-    except urllib.error.HTTPError as e:
-        return e.code, e.read() or b"", dict(e.headers or {})
+    for k in range(max(tries, 1)):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.read(), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read() or b""
+            except TRANSIENT:
+                body = b""
+            return e.code, body, dict(e.headers or {})
+        except TRANSIENT:
+            if k == max(tries, 1) - 1:
+                raise
+            sleep(2.0 * 2 ** k)
+    raise AssertionError("unreachable")
 
 
 def decode(body: bytes, headers: dict) -> bytes:
@@ -259,7 +278,13 @@ def fetch_steam(fetch: Fetch, names: list[str], ts_ms: int, sleep: Callable[[flo
         while True:
             if rows or hits:
                 sleep(interval + random.uniform(0, 0.4))
-            status, body, headers = fetch(STEAM_PRICE + urllib.parse.quote(name, safe=""), {"Accept": "application/json"})
+            try:
+                status, body, headers = fetch(STEAM_PRICE + urllib.parse.quote(name, safe=""),
+                                              {"Accept": "application/json"})
+            except TRANSIENT:
+                # Still cut short after its own retries: this item is a miss
+                # for the run, the next names go on.
+                status, body, headers = 0, b"", {}
             if status != 429:
                 break
             if hits >= len(backoff):

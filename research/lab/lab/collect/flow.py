@@ -42,6 +42,7 @@ Lake (under $PYTHIA_FLOW, default $PYTHIA_DATA/flow), each a single small file:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import os
@@ -98,7 +99,9 @@ def get_json(url: str, tries: int = 6, pause: float = 0.0) -> object:
                 raise
             wait = float(e.headers.get("Retry-After") or 0) or min(60.0, 2.0 ** k)
             time.sleep(wait)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        except (OSError, http.client.HTTPException, json.JSONDecodeError) as e:
+            # A reset or refused connection, a timeout (OSError, URLError is
+            # one), a body cut short (IncompleteRead) or bad JSON: try again.
             last = e
             time.sleep(min(60.0, 2.0 ** k))
     raise RuntimeError(f"{url}: no answer after {tries} tries ({last})")
