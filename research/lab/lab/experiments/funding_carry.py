@@ -353,7 +353,7 @@ def write(res: dict) -> None:
     md.append("\nDaily Spearman IC of the score (minus funding) with the next 3 days' funding-net return over all "
               "eligible perps; t on non-overlapping 3-day blocks.\n")
     if res.get("kraken_coins"):
-        md.append(f"\nRestricted to the {res['kraken_coins']} coins Kraken Futures lists today (not survivorship-free): "
+        md.append(f"\nRestricted to the coins of the {res['kraken_coins']} PF perpetuals Kraken Futures lists today (not survivorship-free): "
                   f"selection {res['kraken_sel_10bps']:.2f}, holdout {res['kraken_hold_10bps']:.2f} at 10 bps.\n")
     md.append("\n## Refitted on the holdout (information only)\n")
     md.append(dc.table(rows, ["cost", "refit_alpha_ann", "refit_alpha_t", "refit_b_lowvol", "refit_b_btc",

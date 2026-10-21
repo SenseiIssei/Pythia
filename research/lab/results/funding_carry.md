@@ -1,3 +1,56 @@
+# Cross-sectional funding carry on perpetuals (survey #1)
+
+Run 2026-10-21 as registered in `results/funding_carry_prereg.md` (committed
+first). Code: `lab.experiments.funding_carry`, on an `xs_daily` panel rebuilt
+from the PC's history into a separate cache (the 2026-10-07 cache that
+`m4_residual` used is untouched). The tables below the marker are generated.
+
+## What it says
+
+**Pass as registered, not confirmed: an experiment, not a strategy.** The
+selection window's pick, long the 10 perps with the lowest funding settled
+over the last 7 days and short the 10 with the highest, half the capital a
+side, three overlapping 3-day tranches, among the 100 most liquid USDT perps
+of each day (dead coins included):
+
+- holdout 2024-01-01 to 2026-10-18 Sharpe **0.74 at 10 bps** (Kraken taker
+  plus half-spread), 0.46 at 20, -0.11 at 41; CAGR 21 %, drawdown 35 %;
+  2024 0.75, 2025 1.46, **2026 -0.06**; 0.57 filled a day late;
+- it is not low vol in disguise: its beta to the low-vol book of the same
+  shape is **-0.17** (2022-23), BTC beta -0.05, and its fresh long list shares
+  5 % of its names with the low-vol book's (short list 17 %);
+- the residual with the betas frozen makes **1.08** at 10 bps, bootstrap band
+  0.15 to 2.03 (97 % of draws above 0); positive in 2022 to 2025, 0.03 in 2026;
+- deflated p 0.0026 (residual) and 0.0004 (the pick) over the pool of 1,777:
+  **not confirmed**.
+
+What tempers it:
+
+- The residual is higher than the pick only because the beta is negative:
+  R adds back 0.17 of the low-vol book, which made 1.23 in the holdout. The
+  pick on its own is 0.74, and the refitted holdout alpha is 42 % a year
+  with a t of 2.2.
+- The money is funding against price. The long leg (negative funding)
+  received 73 % of capital a year in funding in 2025 and 130 % in 2026, and
+  lost 99 % and 131 % in price: crowded shorts on falling small caps
+  (HOME, LSK, BARD...). The short leg earns little funding. The edge is the
+  small difference between two large numbers, and it was about zero in 2026.
+- It needs cheap fills: 93x turnover a year; at the lab's old perp cost
+  (41 bps) it loses. The 12 books' holdout median is 0.74 at 10 bps; the
+  28-day signal does not work at all (-0.05 to 0.13), the 1-day and 7-day
+  ones do (0.59 to 1.21). Signal IC is weak out of sample (F7 t 1.1).
+- The funding is Binance's. Kraken Futures sets its own, lower on most coins
+  (`results/kraken_funding_gap.md`), and lists fewer and thinner perps; the
+  pick restricted to today's Kraken listing makes 0.77 (not
+  survivorship-free, information only).
+
+**Book.** It passes every registered gate but deflation, so it runs as the
+experimental paper book `funding_carry` (`lab.paper.funding_carry`): the pick
+among the 100 most liquid perps Kraken Futures lists, marked and funded on
+Binance like `m4_ls`, signed weights with Kraken symbols, `experimental` and
+`autopilot_only`; job `paper-funding-carry` added disabled until the perps
+demo route is deployed.
+
 <!-- generated below by lab.experiments.funding_carry; edit above this line only -->
 
 # Funding carry on perpetuals: results
@@ -118,7 +171,7 @@ On an average holdout day the pick's fresh long list shares 5 % of its names wit
 Daily Spearman IC of the score (minus funding) with the next 3 days' funding-net return over all eligible perps; t on non-overlapping 3-day blocks.
 
 
-Restricted to the 209 coins Kraken Futures lists today (not survivorship-free): selection 1.21, holdout 0.77 at 10 bps.
+Restricted to the coins of the 209 PF perpetuals Kraken Futures lists today (not survivorship-free): selection 1.21, holdout 0.77 at 10 bps.
 
 
 ## Refitted on the holdout (information only)

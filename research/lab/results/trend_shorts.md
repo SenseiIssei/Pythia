@@ -1,3 +1,45 @@
+# Trend following with a short leg on perpetuals (survey #5)
+
+Run 2026-10-21 as registered in `results/trend_shorts_prereg.md` (committed
+first). Code: `lab.experiments.trend_shorts`, on the sweep's survivorship-free
+panel rebuilt to 2026-10-20 and cut at 2026-10-19. The tables below the
+marker are generated.
+
+## What it says
+
+**No. A short leg does not improve either book; no paper book.**
+
+- **tsmom_top20: kill.** The in-sample pick (short every top-20 coin with a
+  negative 28-day return, always on, half size) makes 0.27 from 2024 at
+  10 bps against 0.31 for the same book long-only on perps; its short leg
+  alone makes -0.04 (it lost in 2020, 2021, 2023, 2024 and 2026 and paid in
+  2022 and 2025). All six gates fail. The net-short forms (shorts only while
+  BTC is below its 200-day average) are worse (0.03 and 0.16) and the
+  dollar-neutral form is costs eaten (0.88 before costs, -0.04 at 10 bps).
+- **breakout_top10: fails, not killed.** The pick (mirror Donchian shorts
+  only while BTC is below its 200-day average, half size) makes 1.12 against
+  1.13 long-only on perps (band of the difference -0.25 to 0.28), drawdown
+  19 % against 20 %, 0.81 a close late; its short leg alone is slightly
+  positive (0.12, mostly 2022 and 2026) but adds nothing to the book.
+- Against BTC held above its 200-day average at the same in-sample
+  volatility: tsmom's pick -0.17 (band -1.06 to 0.69), breakout's 0.61 (band
+  -0.25 to 1.44); neither beats it.
+- The long-only books on perps (0.31 and 1.13 at 10 bps) are a little better
+  than as they run on spot at Alpaca's 35 bps (0.21 and 1.06): cheaper fills,
+  not a better rule.
+
+The 2022 bear market sits in sample and every short leg made its money
+there; out of sample shorts in downtrends were squeezed often enough to pay
+for nothing.
+
+**Correction before the write-up.** The first run had a bug in the
+dollar-neutral variant (V5) of breakout: a position scaled to zero on a day
+with one empty side stayed at zero, so the book was flat almost always
+(in sample 0.43, out of sample -0.73). The simulator now scales the rule's
+own book each day without changing it (in sample 0.85, out of sample 0.71,
+test `test_neutral_scales_without_forgetting_the_rule_book`). Neither pick
+changed; tsmom's V5 was not affected.
+
 <!-- generated below by lab.experiments.trend_shorts; edit above this line only -->
 
 # Trend following with a short leg on perpetuals: results

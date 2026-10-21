@@ -1,3 +1,36 @@
+# Kraken against Binance funding gaps (survey O7)
+
+Run 2026-10-21 as registered in `results/kraken_funding_gap_prereg.md`
+(committed first). Kraken's funding history is keyless (checked) but only
+from 2025-10-15, so the study has one year. Data collected by
+`lab.collect.kraken_futures` (31 PF perpetuals of the 32 Alpaca coins; SKY is
+not listed; HYPE dropped for gaps in its Binance spot history); code
+`lab.experiments.kraken_funding_gap`. Tables below the marker are generated.
+
+## What it says
+
+**Fails; nothing to trade, but a useful fact.**
+
+- Kraken's funding is **lower** than Binance's on 26 of 30 coins over the
+  year (median gap about -4 % a year; BAT, GRT and YFI 24 to 52 % a year
+  lower). Large positive gaps are rare and short-lived.
+- Three of the four registered variants lose in sample and out of sample:
+  every 90 bps round trip (35 bps a side on Alpaca spot, 10 on the Kraken
+  perp) eats more than the funding collected (fast 24-hour signals churn:
+  299 entries and -26 % a year on capital).
+- The pick (gap at least 50 % a year over 72 hours) is slightly positive
+  out of sample: 33 entries, 16 % a year on deployed capital (funding 71 %,
+  basis 7 %, costs -62 %), but 0.7 positions on average, so **1.2 % a year
+  on capital**; Sharpe 1.06 with a bootstrap band of -2.01 to 3.21, deflated
+  p 0.08. Gate 4 fails; not killed (enough entries, carry above 2 %).
+- With maker fills on both legs (Alpaca 15 bps, Kraken 0) the same pick
+  would make 57 % on deployed capital: the cost of the spot leg decides it.
+
+For the perp books this means Binance funding in a backtest overstates what
+a Kraken short receives on most coins (`funding_carry`, `m4_*`). The
+collector job `kraken-futures-collect` is added disabled, so the history can
+grow past the endpoint's one-year window.
+
 <!-- generated below by lab.experiments.kraken_funding_gap; edit above this line only -->
 
 # Kraken against Binance funding gaps: results

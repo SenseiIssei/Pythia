@@ -1,3 +1,32 @@
+# Buying after a deleveraging flush (survey O5)
+
+Run 2026-10-21 as registered in `results/flush_long_prereg.md` (committed
+first). Code: `lab.experiments.flush_long`. The tables below the marker are
+generated.
+
+## What it says
+
+**Fails: positive but not shown; no paper book.** A flush (open interest of
+the 20 major perps down 3 % or more over 3 days at constant prices, mean
+funding negative, BTC down 5 % or more over the same 3 days) happened 23
+times since 2022 (one per flush), 12 of them from 2024.
+
+- The in-sample pick, BTC perp held 7 days, beats entries on matched days
+  (same month, same BTC 200-day state) by **+147 bps per trade** out of
+  sample, but the event bootstrap band is -133 to +433 bps and 17 % of
+  random matched entry sets do as well. It makes +53 bps a trade in
+  absolute terms (the matched days lost 94), 7 of 12 events beat their
+  matched days; as a daily book Sharpe 0.17.
+- It holds a close late (+193 bps) and at Alpaca spot costs (+142 bps);
+  costs cancel in the excess (event and matched entries pay the same).
+- All 8 variants have a positive mean excess out of sample (+147 to +569
+  bps), and in sample 7 of 8. That consistency is the most interesting
+  thing here, but 6 to 12 events per variant, heavily overlapping between
+  variants, cannot separate it from luck; the shortest holds (3 days) did
+  best out of sample, the opposite of the in-sample pick.
+
+Worth re-reading once the metrics history doubles; nothing is wired.
+
 <!-- generated below by lab.experiments.flush_long; edit above this line only -->
 
 # Buying after a deleveraging flush: results
