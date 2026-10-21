@@ -214,6 +214,24 @@ jobs:
     lock: heavy
     lock_wait: 2h
 
+  # The three market-neutral perps books held as one (results/
+  # perps_neutral_portfolio.md), an experiment (passes its registered gates,
+  # fails deflation). Reads the m4_perps and funding_carry signals, adds the
+  # low-vol beta-neutral book from the sweep panel, ERC monthly. Its signal is
+  # experimental and autopilot-only. Added disabled: switch on (enabled: true,
+  # then deploy_ops.sh) only when the owner decides; nothing wires it into an
+  # autopilot.
+  - name: paper-perps-neutral
+    description: EXPERIMENT one book from the M4, funding carry and low-vol perps books (ERC monthly) and its experimental engine signal (autopilot only)
+    schedule: "15 6 * * *"
+    command: python -m lab.paper.perps_neutral
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 2, memory: 6g}
+    timeout: 30m
+    lock: heavy
+    lock_wait: 2h
+    enabled: false
+
   # Kraken Futures hourly funding and mark prices (public, no key), kept beyond the
   # endpoint's one-year window for kraken_funding_gap (results/kraken_funding_gap.md).
   # Data only.
@@ -595,6 +613,15 @@ jobs:
     command: python -m lab.collect.flow
     resources: {cpus: 1, memory: 1g}
     timeout: 1h
+
+  # attention_wiki's page views (Wikimedia REST API, keyless, about 360 small
+  # requests a run at most 4 a second, a User-Agent naming the public repo).
+  - name: wiki-collect
+    description: English Wikipedia page views of the coins' articles and their redirects (attention_wiki), continues from what is stored
+    schedule: "50 0 * * *"
+    command: python -m lab.collect.wiki
+    resources: {cpus: 1, memory: 1g}
+    timeout: 30m
 
   # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
   # module is deployed to /opt/pythia-lab and its command is confirmed.
