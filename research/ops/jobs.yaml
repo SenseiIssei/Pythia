@@ -155,6 +155,20 @@ jobs:
     lock_wait: 2h
     replaces: pythia-paper-m4
 
+  # M4's registered pick reg7n (results/m4_residual.md), an experiment (passes
+  # the residual test, fails deflation), on the liquid perps Kraken Futures
+  # lists. The engine's perps demo autopilot ("M4 perps (demo)") trades this
+  # signal; it is experimental and autopilot-only, never live.
+  - name: paper-m4-perps
+    description: M4 reg7n perps book on the coins Kraken Futures lists, and its experimental engine signal (autopilot only)
+    schedule: "15 5 * * *"
+    command: python -m lab.paper.m4_perps
+    env: {PYTHIA_CACHE: /data/lab-cache}
+    resources: {cpus: 4, memory: 8g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+
   - name: paper-ls
     description: market-neutral M2 paper book v1
     schedule: "30 5 * * *"
