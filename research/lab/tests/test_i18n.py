@@ -208,9 +208,10 @@ def test_the_daily_digest_in_german():
     html = notify.render_post([card], lang="de")
     text = notify.plain(html)
     assert card.title == "Tagesbericht · Do 15. Okt"
-    assert "1 Autopilot läuft, heute +10,20 $ 🟢 · BTC +0,50 %" in text, text
-    assert "Momentum · Demo" in text and "1.030,00 $" in text and "+1,50 Pkt." in text
-    assert "Abschlüsse heute" in text and "2 · Gebühren 0,50 $" in text
+    assert "1 Autopilot läuft, heute +10,20 $ 🟢 · BTC 24 h +0,50 %" in text, text
+    assert "Autopilot  Wert Heute Start  ±BTC\nMomentum  1.030 +1,00 +3,00 +1,50" in text, text
+    assert "Wert in $, Heute und Start in %, ±BTC in Punkten gegenüber BTC seit Start; alle Demo" in text
+    assert "Heute 2 Positionen geschlossen · Gebühren 0,50 $" in text, text
     assert "Vorwärtstest tsmom ✅ im Plan · m4_ls 👀 beobachten" in text
     assert "Systemzustand ✅ alles grün" in text and "Lernen 2 Kostenänderungen." in text
     no_english(html)
@@ -232,9 +233,10 @@ def test_the_weekly_report_in_german():
     html = notify.render_post([card], lang="de")
     assert card.title == "Wochenbericht · 8. bis 15. Okt"
     text = notify.plain(html)
-    assert "Diese Woche" in text and "11 diese Woche" in text and "Unter Höchststand" in text and "1,20 %" in text
+    assert "Autopilot  Wert Woche Start  ±BTC\nMomentum  1.031 +2,08 +3,10 +1,08" in text, text
+    assert "Diese Woche 11 Positionen geschlossen" in text and "Unter Höchststand am tiefsten Momentum 1,20 %" in text
     assert "Bestes Teilportfolio tsmom +31,20 $ · schwächstes m4 -6,40 $" in text
-    assert "1 Autopilot: diese Woche +21,00 $" in text
+    assert "1 Autopilot: diese Woche +21,00 $ 🟢 · BTC diese Woche +1,00 %" in text
     no_english(html)
     assert notify.weekly_card(None, {}, NOW, None, "de")[0].summary.startswith("Pythia hat nicht geantwortet")
 

@@ -275,27 +275,87 @@ def test_via_engine_posts_the_card_as_an_event(hook, data, monkeypatch):
 
 def test_digest_says_what_the_money_did():
     text, snap = notify.digest(learn_report(), FORWARD, HEALTH_OK, {}, NOW)
-    assert text.startswith("<b>📊 Daily · Wed 14 Oct</b>\n1 autopilot running, +$10.20 today 🟢 · BTC +0.50 %\n"), text
-    assert "<b>Momentum · demo</b>\n<pre>Equity" in text
-    assert "$1,030.00" in text
-    assert re.search(r"\nToday +\+\$10\.20 \+1\.00 % 🟢\n", text), text
-    assert re.search(r"\nSince start +\+\$30\.00 \+3\.00 % 🟢\n", text), text
-    assert "+1.50 pts 🟢" in text
-    assert "12 total · fees $3.50" in text, "no snapshot yet: totals, said as such"
+    assert text.startswith("<b>📊 Daily · Wed 14 Oct</b>\n1 autopilot running, +$10.20 today 🟢 · BTC 24 h +0.50 %\n"), text
+    # One table, one row per autopilot: value, today, since start, against BTC since start.
+    assert "<pre>Autopilot Value Today Start  ±BTC\nMomentum  1,030 +1.00 +3.00 +1.50</pre>" in text, text
+    assert "Value in $, Today and Start in %, ±BTC in points against BTC since start; all demo" in text
+    assert "<b>Since start</b> 12 positions closed · fees $3.50" in text, "no snapshot yet: totals, said as such"
     assert "Old one" not in text, "only running autopilots"
     assert "<b>Forward test</b> tsmom ✅ on track · m4_ls 👀 watch · picks_ls 🌱 early" in text
     assert "<b>Health</b> ✅ all green" in text
     assert "<b>Learning</b> 2 cost updates" in text
-    assert snap == {"ap1": {"trades": 12, "fees": 3.5, "at": NOW}}
+    assert snap == {"ap1": {"equity": 1030.0, "start": 1000.0, "trades": 12, "fees": 3.5, "at": NOW}}
+    assert text.count("\n") <= 12, "short enough for a phone"
     assert "\u2014" not in text and len(text) <= notify.MAX_CHARS and balanced(text)
 
 
-def test_trades_and_fees_today_come_from_yesterdays_snapshot():
-    prev = {"ap1": {"trades": 9, "fees": 2.25, "at": NOW - 86_400_000}}
-    text, _ = notify.digest(learn_report(), FORWARD, HEALTH_OK, prev, NOW)
-    assert "Trades today   3 · fees $1.25" in text
-    old = {"ap1": {"trades": 9, "fees": 2.25, "at": NOW - 3 * 86_400_000}}
-    assert "12 total" in notify.digest(learn_report(), FORWARD, HEALTH_OK, old, NOW)[0]
+def test_today_and_its_trades_come_from_yesterdays_snapshot():
+    prev = {"ap1": {"equity": 1_020.0, "start": 1_000.0, "trades": 9, "fees": 2.25, "orders": 20,
+                    "at": NOW - 86_400_000}}
+    rep = learn_report()
+    rep["autopilots"][0]["orders"] = 26
+    text, _ = notify.digest(rep, FORWARD, HEALTH_OK, prev, NOW)
+    assert "+$10.00 today" in text and "Momentum  1,030 +0.98 +3.00 +1.50" in text, text
+    assert "<b>Today</b> 6 orders filled · 3 positions closed · fees $1.25" in text, text
+    # An older snapshot without equity: today from the learning report, trades still from it.
+    old = {"ap1": {"trades": 9, "fees": 2.25, "at": NOW - 86_400_000}}
+    text = notify.digest(learn_report(), FORWARD, HEALTH_OK, old, NOW)[0]
+    assert "Momentum  1,030 +1.00 +3.00" in text and "<b>Today</b> 3 positions closed · fees $1.25" in text
+    # Three days old: the totals since start.
+    old = {"ap1": {"equity": 1_000.0, "trades": 9, "fees": 2.25, "at": NOW - 3 * 86_400_000}}
+    text = notify.digest(learn_report(), FORWARD, HEALTH_OK, old, NOW)[0]
+    assert "<b>Since start</b> 12 positions closed" in text and "Momentum  1,030 +1.00" in text
+    # The amount it works with changed since: no "today" from the snapshot.
+    moved = {"ap1": {"equity": 500.0, "start": 500.0, "trades": 9, "fees": 2.25, "at": NOW - 86_400_000}}
+    assert "Momentum  1,030 +1.00" in notify.digest(learn_report(), FORWARD, HEALTH_OK, moved, NOW)[0]
+    # Neither a snapshot nor a 24 h change: not known, not the change since start.
+    rep = learn_report()
+    rep["autopilots"][0]["pnl_day_pct"] = None
+    text = notify.digest(rep, FORWARD, HEALTH_OK, {}, NOW)[0]
+    assert "Momentum  1,030   n/a +3.00 +1.50" in text and "1 autopilot running · BTC 24 h +0.50 %" in text, text
+
+
+def test_today_is_not_since_start_over_two_days_with_two_engines(telegram, data, monkeypatch):
+    """2026-10-21: every autopilot read today equal to since start. Two digests
+    a day apart, the main and the safe engine, starting from a snapshot an
+    older digest wrote (the safe autopilot under its bare id, no equity)."""
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "de")
+    day1 = utc(2026, 10, 20, 5, 0)
+
+    def rep(at, main_eq, safe_eq, trades):
+        return {"generated": "x", "generated_ms": at - 600_000, "engine": {"reachable": True},
+                "autopilots": [
+                    {"id": "ap_autopick", "name": "Auto-Pick (main)", "account": "main", "mode": "demo",
+                     "state": "running", "days": 5.0, "equity": main_eq, "start_capital": 20_000.0,
+                     "fees": 8.0 + trades, "trades": trades, "orders": 3 * trades, "pnl_day_pct": None,
+                     "btc_day_pct": 1.15, "btc_total_pct": 2.29, "vs_btc_total_pts": -1.87},
+                    {"id": "ap_safe", "name": "Safe · BTC filter momentum", "account": "safe", "mode": "demo",
+                     "state": "running", "days": 5.0, "equity": safe_eq, "start_capital": 95.0, "fees": 0.0,
+                     "trades": 0, "orders": 0, "pnl_day_pct": None, "btc_day_pct": 1.15,
+                     "vs_btc_total_pts": -2.29}]}
+
+    notify.write_json(data / "notify" / "state.json",
+                      {"autopilots": {"ap_autopick": {"trades": 30, "fees": 38.0, "at": day1 - notify.DAY_MS},
+                                      "ap_safe": {"trades": 0, "fees": 0.0, "at": day1 - notify.DAY_MS}}})
+    write(data, "reports/learn/latest.json", rep(day1, 20_083.69, 95.5, 38))
+    assert notify.daily(now_ms=day1, chart=False) == 0
+    text = json.loads((data / "reports/notify/latest.json").read_text(encoding="utf-8"))["text"]
+    assert "2 Autopiloten laufen · BTC 24 h +1,15 %" in text, text
+    assert "Auto-Pick    20.084 k. A. +0,42 -1,87" in text, "no snapshot equity, no 24 h change: not the change since start"
+    assert "Heute 8 Positionen geschlossen · Gebühren 8,00 $" in text, "yesterday's old keys still count"
+    st = json.loads((data / "notify/state.json").read_text())["autopilots"]
+    assert set(st) == {"ap_autopick", "safe:ap_safe"}, "migrated to the keys of today"
+    assert st["ap_autopick"]["equity"] == 20_083.69 and st["safe:ap_safe"]["equity"] == 95.5
+
+    day2 = day1 + notify.DAY_MS
+    write(data, "reports/learn/latest.json", rep(day2, 20_123.85, 95.95, 41))
+    assert notify.daily(now_ms=day2, chart=False) == 0
+    text = json.loads((data / "reports/notify/latest.json").read_text(encoding="utf-8"))["text"]
+    assert "2 Autopiloten laufen, heute +40,61 $ 🟢 · BTC 24 h +1,15 %" in text, text
+    assert "Auto-Pick    20.124 +0,20 +0,62 -1,87" in text, text
+    assert "Safe BTC fi…     96 +0,47 +1,00 -2,29" in text, text
+    assert "Heute 9 Orders ausgeführt · 3 Positionen geschlossen · Gebühren 3,00 $" in text, text
+    assert "Konto safe: Safe BTC fi…" in text
 
 
 def test_losses_red_health_and_a_stale_report_are_said():
@@ -304,7 +364,7 @@ def test_losses_red_health_and_a_stale_report_are_said():
     rep["generated_ms"] = NOW - 2 * 86_400_000
     text, _ = notify.digest(rep, None, health_bad("2026-10-14T06:07:00Z"), {}, NOW)
     assert "-$19.39 today 🔴" in text
-    assert "-$19.39 -2.00 % 🔴" in text and "-$50.00 -5.00 % 🔴" in text
+    assert "Momentum    950 -2.00 -5.00 +1.50" in text, text
     assert "not today's" in text
     assert "<b>Forward test</b> no report" in text
     assert "<b>Health</b> 🔴 1 red: paper tsmom (last row none)" in text
@@ -315,8 +375,16 @@ def test_many_autopilots_are_cut_to_a_phone_screen():
     rep["autopilots"] = [dict(rep["autopilots"][0], id=f"a{i}", name=f"Autopilot number {i}") for i in range(40)]
     text, _ = notify.digest(rep, FORWARD, HEALTH_OK, {}, NOW)
     assert len(text) <= notify.MAX_CHARS and balanced(text)
-    assert "34 more autopilots in the app" in text
+    assert "+28 more</pre>" in text
     assert "40 autopilots running" in text
+
+
+def test_a_name_is_cut_for_the_table():
+    assert notify.short_name("Test · TSMOM tranches") == "TSMOM tranc…"
+    assert notify.short_name("Test · Memecoin rotation (experiment)") == "Memecoin ro…"
+    assert notify.short_name("Auto-Pick (main)") == "Auto-Pick"
+    assert notify.short_name("Safe · BTC filter momentum") == "Safe BTC fi…"
+    assert notify.short_name(None) == "Autopilot"
 
 
 @pytest.mark.parametrize("fmt,key", [("discord", "content"), ("slack", "text")])
@@ -499,7 +567,8 @@ def test_the_weekly_report_is_sunday_at_six_in_berlin_once(telegram, data):
     assert len(got) == 1
     text = texts(got)[0] if texts(got) else got[0][1].decode("utf-8", "replace")
     assert "🗓️ Weekly · 11 to 18 Oct" in text
-    assert "<b>Momentum · demo</b>" in text and "This week" in text and "vs BTC" in text
+    assert "Autopilot Value  Week Start  ±BTC\nMomentum" in text, text
+    assert "BTC this week +2.00 %" in text
     assert "<b>Best sleeve</b> tsmom +$31.20 · worst m4_ls -$6.40" in text
     assert notify.weekly(now=sunday_18 + 1_800_000, state=st, btc_fetch=None) == 0
     assert len(got) == 1, "once a week"
@@ -513,9 +582,15 @@ def test_the_weekly_card_counts_the_week():
     card, snap = notify.weekly_card(st, {"ap1": {"trades": 20, "at": now - notify.WEEK_MS}}, now, 1.0)
     html = card.render()
     assert card.title == "Weekly · 11 to 18 Oct"
-    assert re.search(r"\nTrades +11 this week</pre>", html), html
-    assert "Below peak" in html and "1.20 %" in html
+    assert "<b>This week</b> 11 positions closed" in html, html
+    assert "<b>Below peak</b> deepest Momentum 1.20 %" in html
     assert snap == {"ap1": {"trades": 31, "at": now}}
+    # An old key of the same autopilot (main:ap1) still counts the week.
+    card, _ = notify.weekly_card(st, {"main:ap1": {"trades": 20, "at": now - notify.WEEK_MS}}, now, 1.0)
+    assert "11 positions closed" in card.render()
+    # Without last week's numbers: the total since start, said as such.
+    card, _ = notify.weekly_card(st, {}, now, 1.0)
+    assert "<b>Since start</b> 31 positions closed" in card.render()
     assert notify.weekly_card(None, {}, now, None)[0].summary.startswith("The engine did not answer")
 
 

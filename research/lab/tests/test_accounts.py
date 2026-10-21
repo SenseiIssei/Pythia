@@ -125,8 +125,9 @@ def test_the_learning_loop_lists_both_accounts_for_the_digest(two):
     assert [r["account"] for r in rows] == ["main", "safe"] and all(r["state"] for r in rows)
     aps = learn.autopilot_pnl(notify.merge_states(rows), NOW, lambda ms: 60_000.0)
     assert sorted((a["account"], a["name"]) for a in aps) == [("main", "Autopilot ap-1"), ("safe", "Small and safe")]
-    parts, snap, _, _ = notify.autopilot_parts({"autopilots": aps}, {}, NOW)
-    assert sorted(p.title for p in parts) == ["Autopilot ap-1 · main · demo", "Small and safe · safe · demo"]
+    parts, snap, _, n = notify.autopilot_parts({"autopilots": aps}, {}, NOW)
+    assert n == 2 and sorted(r[0] for r in parts[0].rows) == ["Autopilot a…", "Small and s…"]
+    assert parts[1].text.endswith("; all demo; account safe: Small and s…"), parts[1].text
     # The same id on two accounts does not share tomorrow's snapshot.
     assert set(snap) == {"ap-1", "safe:ap-1"}
 
@@ -134,7 +135,8 @@ def test_the_learning_loop_lists_both_accounts_for_the_digest(two):
 def test_the_weekly_card_keeps_the_accounts_apart(two):
     card, snap = notify.weekly_card(notify.engine_state(), {}, NOW, 1.0)
     assert set(snap) == {"ap-1", "safe:ap-1"}
-    assert "Small and safe · safe · demo" in [p.title for p in card.parts if hasattr(p, "rows")]
+    assert [r[0] for r in card.parts[0].rows] == ["Autopilot a…", "Small and s…"]
+    assert "account safe: Small and s…" in card.parts[1].text
 
 
 # ---------------------------------------------------------------- readiness

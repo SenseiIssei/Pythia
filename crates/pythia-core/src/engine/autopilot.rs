@@ -621,6 +621,32 @@ fn leg_return(p0: Option<f64>, p1: Option<f64>) -> Option<f64> {
     Some((p1 / p0 - 1.0) * 100.0)
 }
 
+/// A full equity curve cut to about half of [`HISTORY_MAX`] points spread
+/// evenly over its whole span: the first and the last point stay, and in
+/// between a point is kept once at least `span / (HISTORY_MAX / 2)` has
+/// passed since the one kept before it.
+///
+/// The old rule kept every other point each time the curve was full, every
+/// 150 minutes; a point from the first days was halved again at every pass,
+/// so after five days only the start and the last 19 hours were left, and
+/// the lab's "today" (the equity 24 hours ago) read the start capital.
+pub fn thin_history(h: &[(i64, f64)]) -> Vec<(i64, f64)> {
+    let (Some(first), Some(last)) = (h.first(), h.last()) else { return Vec::new() };
+    if h.len() <= 2 {
+        return h.to_vec();
+    }
+    let step = ((last.0 - first.0) / (HISTORY_MAX as i64 / 2)).max(HISTORY_EVERY_MS);
+    let mut out = Vec::with_capacity(HISTORY_MAX / 2 + 2);
+    out.push(*first);
+    for p in &h[1..h.len() - 1] {
+        if p.0 - out.last().map_or(first.0, |q: &(i64, f64)| q.0) >= step && last.0 - p.0 >= step / 2 {
+            out.push(*p);
+        }
+    }
+    out.push(*last);
+    out
+}
+
 /// The deepest fall from a running peak over an equity history and the
 /// equity now, in %.
 pub fn max_drawdown_pct(history: &[(i64, f64)], now: f64) -> f64 {
@@ -3956,9 +3982,7 @@ impl Engine {
         }
         h.push((now, eq));
         if h.len() > HISTORY_MAX {
-            let last = h.len() - 1;
-            let kept: Vec<(i64, f64)> = h.iter().enumerate().filter(|(k, _)| k % 2 == 0 || *k == last).map(|(_, p)| *p).collect();
-            *h = kept;
+            *h = thin_history(h);
         }
     }
 

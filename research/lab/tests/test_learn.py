@@ -377,6 +377,27 @@ def test_autopilot_pnl_against_btc():
     assert a["pnl_day_pct"] == pytest.approx(50 / 1050 * 100) and a["btc_day_pct"] == pytest.approx(0.0)
 
 
+def test_today_is_unknown_when_the_curve_has_no_point_near_a_day_ago():
+    """The engine's curve of 2026-10-20 held its start and the last 19 hours:
+    the equity "a day ago" was the start capital, so today read the same as
+    since start. A point more than three hours before a day ago is no day ago."""
+    start = NOW - 5 * DAY_MS
+    hist = [[start, 20_000.0]] + [[NOW - h * 3_600_000, 20_050.0] for h in range(19, -1, -1)]
+    state = {"autopilots": [{"config": {"id": "ap1", "name": "Auto"}, "state": "running", "startedMs": start,
+                             "startCapital": 20_000.0, "equity": 20_059.0, "history": hist, "orders": 14}]}
+    a = learn.autopilot_pnl(state, NOW, lambda ms: 60_000.0)[0]
+    assert a["pnl_total_pct"] == pytest.approx(59 / 20_000 * 100)
+    assert a["pnl_day_pct"] is None, "not the change since start"
+    assert a["orders"] == 14
+    # A point two hours before a day ago still counts.
+    state["autopilots"][0]["history"] = [[start, 20_000.0], [NOW - DAY_MS - 2 * 3_600_000, 20_040.0], [NOW, 20_059.0]]
+    assert learn.autopilot_pnl(state, NOW, lambda ms: 60_000.0)[0]["pnl_day_pct"] == pytest.approx(19 / 20_040 * 100)
+    # Younger than a day: today is since start.
+    state["autopilots"][0].update(startedMs=NOW - 3_600_000, history=[[NOW - 3_600_000, 20_000.0]])
+    a = learn.autopilot_pnl(state, NOW, lambda ms: 60_000.0)[0]
+    assert a["pnl_day_pct"] == pytest.approx(a["pnl_total_pct"])
+
+
 # ---------------------------------------------------------------- the whole night
 
 def fake_runner(root: Path, t0: int):

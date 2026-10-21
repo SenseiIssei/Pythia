@@ -52,9 +52,12 @@ PYTHIA_REPORTS as for the rest of the lab.
 
 Every digest (not a dry run) is written to reports/notify/latest.json as
 {"ts", "text", "html", "delivered", "photo"}, which the engine's
-GET /api/alerts shows as the last digest. A digest asked for on demand does
-not move the snapshot the next daily digest counts today's trades and fees
-from.
+GET /api/alerts shows as the last digest. Each daily digest that went out
+leaves a snapshot per autopilot (equity, amount, closed positions, orders,
+fees) in <data>/notify/state.json; the next one counts "today" from it. A
+digest asked for on demand does not move it. The digest shows the
+autopilots as one table, one row each (value, today, since start, points
+against BTC since start), so six of them fit a phone screen.
 
 The bot token and the webhook URL are secrets: never printed, logged or
 written to a file.
@@ -243,6 +246,10 @@ class Rows:
         return "\n".join(out)
 
 
+# A number that is not known, in either language: right-aligned like one.
+NO_NUMBER = ("n/a", "k. A.")
+
+
 class Table:
     """A small table: words left-aligned, numbers right-aligned."""
 
@@ -258,7 +265,8 @@ class Table:
         for r in [self.header] + self.rows:
             for i, c in enumerate(r):
                 w[i] = max(w[i], _cells(c))
-        numeric = [i > 0 and all((not r[i:i + 1]) or not r[i] or r[i][0] in "+-$0123456789" for r in self.rows)
+        numeric = [i > 0 and all((not r[i:i + 1]) or not r[i] or r[i][0] in "+-$0123456789" or r[i] in NO_NUMBER
+                                 for r in self.rows)
                    for i in range(n)]
 
         def line(r):
@@ -277,6 +285,7 @@ class Line:
     def __init__(self, text: str, lead: str | None = None):
         self.text = text
         self.lead = lead
+        self.title = None
 
 
 class Links:
@@ -975,46 +984,179 @@ def mode_word(mode, lang: str) -> str:
     return i18n.word(str(mode), lang) if mode else "?"
 
 
-def autopilot_parts(learn: dict | None, prev: dict, now: int,
-                    lang: str = "en") -> tuple[list[Rows], dict, list[float], list[str]]:
-    """One block per running autopilot, the snapshot for tomorrow, today's $
-    per autopilot and the ones without numbers."""
-    parts, snap, today, missing = [], {}, [], []
-    for a in (learn or {}).get("autopilots") or []:
-        if a.get("state") != "running":
-            continue
+# The digest's table of autopilots: a name this long at most, this many rows.
+NAME_CELLS = 12
+TABLE_ROWS = 12
+# "Today" is the change since the last daily digest when that was 12 to 36
+# hours ago; otherwise the learning report's change over the last 24 hours.
+SNAP_MIN_AGE_MS = 12 * 3_600_000
+SNAP_MAX_AGE_MS = 36 * 3_600_000
+
+
+def short_name(name, n: int = NAME_CELLS) -> str:
+    """An autopilot's name for a table on a phone: without a note in brackets
+    ("(experiment)", "(main)") and the "Test · " in front of the lab's test
+    autopilots, cut to n characters."""
+    s = re.sub(r"\s*\([^)]*\)", "", nodash(str(name or "Autopilot"))).strip()
+    parts = [p.strip() for p in re.split(r"\s+·\s+", s) if p.strip()]
+    if len(parts) > 1 and parts[0].lower() == "test":
+        parts = parts[1:]
+    s = " ".join(parts) or "Autopilot"
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+def cell(v: float | None, lang: str, dp: int = 2) -> str:
+    """A signed number for a table cell (+0.42, German +0,42), never -0.00;
+    n/a (k. A.) for nothing."""
+    if v is None:
+        return NO_NUMBER[1] if lang == "de" else NO_NUMBER[0]
+    return i18n.num(0.0 if abs(v) < 0.5 * 10 ** -dp else v, dp, lang, sign=True)
+
+
+def snapshot_of(prev: dict, account: str | None, ap_id: str, name: str | None, claimed: set) -> dict | None:
+    """Yesterday's snapshot of one autopilot. Its key now (account_key), else
+    a key an older digest wrote: "main:id" for the main account, the bare id
+    for another account (before accounts had keys) or its name; an old key
+    another running autopilot owns now is not taken."""
+    key = account_key(account, ap_id)
+    olds = [f"{ACCOUNT_NAMES[0]}:{ap_id}"] if account in (None, "", ACCOUNT_NAMES[0]) else [ap_id]
+    if name:
+        olds += [str(name), account_key(account, str(name))]
+    for k in [key] + olds:
+        if isinstance(prev.get(k), dict) and (k == key or k not in claimed):
+            return prev[k]
+    return None
+
+
+def migrate_snapshot(prev: dict, aps: list[dict]) -> dict:
+    """The snapshot keyed the way this digest writes it, for every running
+    autopilot that has one under an old key (see snapshot_of)."""
+    claimed = {account_key(a.get("account"), str(a.get("id") or a.get("name"))) for a in aps}
+    out = {}
+    for a in aps:
+        ap_id = str(a.get("id") or a.get("name"))
+        p = snapshot_of(prev, a.get("account"), ap_id, a.get("name"), claimed)
+        if p is not None:
+            out[account_key(a.get("account"), ap_id)] = p
+    return out
+
+
+def today_change(a: dict, eq: float | None, p: dict | None, now: int) -> tuple[float | None, float | None]:
+    """($, %) since the last daily digest's snapshot when it is 12 to 36 hours
+    old and the amount it works with did not change since; else the learning
+    report's last 24 hours; (None, None) when neither is known."""
+    if eq is None:
+        return None, None
+    if p:
+        pe, ps, start = _num(p.get("equity")), _num(p.get("start")), _num(a.get("start_capital"))
+        age = now - int(_num(p.get("at")) or 0)
+        same_amount = ps is None or start is None or abs(ps - start) < 0.005
+        if pe and pe > 0 and SNAP_MIN_AGE_MS <= age <= SNAP_MAX_AGE_MS and same_amount:
+            return eq - pe, (eq / pe - 1) * 100
+    day_pct = _num(a.get("pnl_day_pct"))
+    if day_pct is not None and day_pct > -100:
+        return eq - eq / (1 + day_pct / 100), day_pct
+    return None, None
+
+
+def autopilot_parts(learn: dict | None, prev: dict, now: int, lang: str = "en") -> tuple[list, dict, list[float], int]:
+    """The running autopilots as one table (name, value, today, since start,
+    against BTC since start) with its legend and the day's orders, closed
+    positions and fees under it; the snapshot for tomorrow; today's $ per
+    autopilot; how many run."""
+    aps = [a for a in (learn or {}).get("autopilots") or [] if a.get("state") == "running"]
+    if not aps:
+        return [], {}, [], 0
+    prev = migrate_snapshot(prev or {}, aps)
+    na = "k. A." if lang == "de" else "n/a"
+    rows, snap, today, seen = [], {}, [], set()
+    act = {"orders": 0, "trades": 0, "fees": 0.0, "orders_known": True, "today": True}
+    modes: dict[str, list[str]] = {}
+    accounts: dict[str, list[str]] = {}
+    for a in aps:
         eq, start = _num(a.get("equity")), _num(a.get("start_capital"))
         trades, fees = int(_num(a.get("trades")) or 0), _num(a.get("fees")) or 0.0
+        orders = _num(a.get("orders"))
         key = account_key(a.get("account"), str(a.get("id") or a.get("name")))
-        snap[key] = {"trades": trades, "fees": fees, "at": now}
-        title = " · ".join([str(a.get("name", "Autopilot"))] + ([str(a["account"])] if a.get("account") else [])
-                           + [mode_word(a.get("mode"), lang)])
-        if eq is None:
-            missing.append(title)
-            continue
-        rows = [(tr("equity", lang), money(eq, lang=lang))]
-        day_pct = _num(a.get("pnl_day_pct"))
-        if day_pct is not None and day_pct > -100:
-            d_usd = eq - eq / (1 + day_pct / 100)
-            today.append(d_usd)
-            rows.append((tr("today", lang), f"{signed_money(d_usd, lang=lang)} {signed_pct(day_pct, lang=lang)}", d_usd))
-        tot_pct = _num(a.get("pnl_total_pct"))
-        if start:
-            rows.append((tr("since_start", lang), f"{signed_money(eq - start, lang=lang)} {signed_pct(tot_pct, lang=lang)}",
-                         eq - start))
-        vs, btc = _num(a.get("vs_btc_total_pts")), _num(a.get("btc_total_pct"))
-        if vs is not None:
-            rows.append((tr("vs_btc", lang), tr("pts", lang, v=i18n.num(vs, 2, lang, sign=True)), vs))
-        if btc is not None:
-            rows.append(("BTC", signed_pct(btc, lang=lang)))
         p = prev.get(key)
-        if p and 0 < now - int(p.get("at") or 0) <= 36 * 3_600_000 and trades >= int(p.get("trades") or 0):
-            fees_today = money(max(fees - float(p.get("fees") or 0), 0), lang=lang)
-            rows.append((tr("trades_today", lang), tr("trades_today_value", lang, n=trades - int(p["trades"]), fees=fees_today)))
+        snap[key] = {"equity": eq, "start": start, "trades": trades, "fees": fees, "at": now,
+                     **({"orders": int(orders)} if orders is not None else {})}
+        name = short_name(a.get("name"))
+        if name in seen:
+            name = short_name(a.get("name"), NAME_CELLS - 2) + f" {len(seen) + 1}"
+        seen.add(name)
+        modes.setdefault(mode_word(a.get("mode"), lang), []).append(name)
+        accounts.setdefault(a.get("account") or ACCOUNT_NAMES[0], []).append(name)
+        d_usd, d_pct = today_change(a, eq, p, now)
+        if d_usd is not None:
+            today.append(d_usd)
+        tot = (eq / start - 1) * 100 if eq is not None and start else _num(a.get("pnl_total_pct"))
+        vs = _num(a.get("vs_btc_total_pts"))
+        rows.append([name, money(eq, 0, lang).replace("$", "").strip() if eq is not None else na,
+                     cell(d_pct, lang),
+                     cell(tot, lang),
+                     cell(vs, lang)])
+        # The day's activity: since yesterday's snapshot, or since its start
+        # for an autopilot younger than that; else the totals since start.
+        age = now - int(_num(p.get("at")) or 0) if p else None
+        began = _start_ms(a, now)
+        young = began is not None and now - began <= SNAP_MAX_AGE_MS
+        if p and age is not None and 0 < age <= SNAP_MAX_AGE_MS and trades >= int(_num(p.get("trades")) or 0):
+            act["trades"] += trades - int(_num(p.get("trades")) or 0)
+            act["fees"] += max(fees - (_num(p.get("fees")) or 0.0), 0.0)
+            if orders is not None and _num(p.get("orders")) is not None:
+                act["orders"] += max(int(orders) - int(_num(p.get("orders"))), 0)
+            else:
+                act["orders_known"] = False
+        elif young:
+            act["trades"] += trades
+            act["fees"] += fees
+            if orders is not None:
+                act["orders"] += int(orders)
+            else:
+                act["orders_known"] = False
         else:
-            rows.append((tr("trades", lang), tr("trades_total", lang, n=trades, fees=money(fees, lang=lang))))
-        parts.append(Rows(rows, title))
-    return parts, snap, today, missing
+            act["today"] = False
+    if not act["today"]:
+        # Not every autopilot has yesterday's numbers: the totals since start.
+        act.update(trades=sum(int(_num(a.get("trades")) or 0) for a in aps),
+                   fees=sum(_num(a.get("fees")) or 0.0 for a in aps),
+                   orders_known=all(_num(a.get("orders")) is not None for a in aps))
+        act["orders"] = sum(int(_num(a.get("orders")) or 0) for a in aps)
+    more = max(len(rows) - TABLE_ROWS, 0)
+    header = [tr("tbl_autopilot", lang), tr("tbl_value", lang), tr("tbl_today", lang), tr("tbl_start", lang),
+              tr("tbl_vs_btc", lang)]
+    parts: list = [Table(header, rows[:TABLE_ROWS], more=more)]
+    parts.append(legend_line("tbl_legend", modes, accounts, lang))
+    fills = []
+    if act["orders_known"]:
+        fills.append(tr("act_orders", lang, n=act["orders"]))
+    fills.append(tr("act_closed", lang, n=act["trades"]))
+    fills.append(tr("act_fees", lang, fees=money(act["fees"], lang=lang)))
+    parts.append(Line(" · ".join(fills), tr("today" if act["today"] else "since_start", lang)))
+    return parts, snap, today, len(aps)
+
+
+def legend_line(key: str, modes: dict[str, list[str]], accounts: dict[str, list[str]], lang: str) -> Line:
+    """The line under a table of autopilots: what the columns mean, the mode
+    (one for all, else the names per mode) and, with several accounts, which
+    names are not on the main one."""
+    legend = tr(key, lang)
+    if len(modes) == 1:
+        legend += tr("tbl_all_mode", lang, mode=next(iter(modes)))
+    else:
+        legend += "; " + "; ".join(f"{m}: {', '.join(ns)}" for m, ns in modes.items())
+    if len(accounts) > 1:
+        legend += "".join(tr("tbl_account", lang, account=acc, names=", ".join(ns))
+                          for acc, ns in accounts.items() if acc != ACCOUNT_NAMES[0])
+    return Line(legend)
+
+
+def _start_ms(a: dict, now: int) -> int | None:
+    """When an autopilot of the learning report started, from its age in
+    days; None when the report does not say."""
+    days = _num(a.get("days"))
+    return int(now - days * DAY_MS) if days is not None else None
 
 
 def forward_line(forward: dict | None, lang: str = "en") -> Line:
@@ -1143,11 +1285,10 @@ def digest_card(learn: dict | None, forward: dict | None, health: dict | None, p
                 lang: str | None = None, ai: dict | None = None,
                 readiness: dict | None = None, exit_shadow: dict | None = None) -> tuple[Card, dict]:
     lang = lang or alert_lang()
-    parts, snap, today, missing = autopilot_parts(learn, prev, now, lang)
+    parts, snap, today, n = autopilot_parts(learn, prev, now, lang)
     if learn is None:
         summary = tr("no_learning", lang)
-    elif parts or missing:
-        n = len(parts) + len(missing)
+    elif n:
         if today:
             total = sum(today)
             summary = tr("running_today", lang, n=n, money=signed_money(total, lang=lang), dot=dot(total))
@@ -1156,15 +1297,12 @@ def digest_card(learn: dict | None, forward: dict | None, health: dict | None, p
         btc_day = next((_num(a.get("btc_day_pct")) for a in learn.get("autopilots") or []
                         if a.get("state") == "running" and _num(a.get("btc_day_pct")) is not None), None)
         if btc_day is not None:
-            summary += tr("btc_suffix", lang, pct=signed_pct(btc_day, lang=lang))
+            summary = summary.rstrip(".") + tr("btc_24h_suffix", lang, pct=signed_pct(btc_day, lang=lang))
     else:
         err = (learn.get("engine") or {}).get("error")
         summary = tr("none_running", lang, err=f" ({short(err, 80)})" if err else "")
-    # A phone screen: six autopilots, the rest are in the app.
-    lines: list = list(parts[:6])
-    if len(parts) > 6:
-        lines.append(Line(tr("more_autopilots", lang, n=len(parts) - 6)))
-    lines += [Line(tr("no_equity", lang), m) for m in missing]
+    # One table for every autopilot, then one line each for the rest.
+    lines: list = list(parts)
     if learn is not None:
         gen = _num(learn.get("generated_ms"))
         if gen is not None and now - gen > 30 * 3_600_000:
@@ -1258,12 +1396,27 @@ def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | 
         return Card("🗓️", title, tr("no_engine", lang)), snap
     if not aps:
         return Card("🗓️", title, tr("no_autopilot", lang)), snap
-    parts: list = []
+    na = "k. A." if lang == "de" else "n/a"
+    prev = migrate_snapshot(prev or {}, [{"id": (a.get("config") or {}).get("id"),
+                                          "name": (a.get("config") or {}).get("name") or "Autopilot",
+                                          "account": a.get("account")} for a in aps])
     week_total = 0.0
     sleeves: list[tuple[str, float]] = []
+    rows: list[list[str]] = []
+    seen: set[str] = set()
+    modes: dict[str, list[str]] = {}
+    accounts: dict[str, list[str]] = {}
+    deepest: tuple[str, float] | None = None
+    closed, orders_week, counted_since = 0, 0, False
+    orders_known = True
     for a in aps:
         cfg = a.get("config") or {}
-        name, mode = cfg.get("name") or "Autopilot", mode_word(cfg.get("mode"), lang)
+        name = short_name(cfg.get("name"))
+        if name in seen:
+            name = short_name(cfg.get("name"), NAME_CELLS - 2) + f" {len(seen) + 1}"
+        seen.add(name)
+        modes.setdefault(mode_word(cfg.get("mode"), lang), []).append(name)
+        accounts.setdefault(a.get("account") or ACCOUNT_NAMES[0], []).append(name)
         eq = _num(a.get("equity")) or 0.0
         start = _num(a.get("startCapital")) or 0.0
         hist = [r for r in a.get("history") or [] if isinstance(r, (list, tuple)) and len(r) == 2]
@@ -1272,35 +1425,52 @@ def weekly_card(state: dict | None, prev: dict, now: int, btc_week_pct: float | 
         wk = eq - e0
         wk_pct = (eq / e0 - 1) * 100 if e0 else None
         week_total += wk
-        rows = [(tr("equity", lang), money(eq, lang=lang)),
-                (tr("this_week", lang), f"{signed_money(wk, lang=lang)} {signed_pct(wk_pct, lang=lang)}", wk)]
-        if start:
-            rows.append((tr("since_start", lang),
-                         f"{signed_money(eq - start, lang=lang)} {signed_pct((eq / start - 1) * 100, lang=lang)}", eq - start))
-        if wk_pct is not None and btc_week_pct is not None:
-            vs = wk_pct - btc_week_pct
-            rows.append((tr("vs_btc", lang), tr("pts", lang, v=i18n.num(vs, 2, lang, sign=True)), vs))
+        vs = wk_pct - btc_week_pct if wk_pct is not None and btc_week_pct is not None else None
+        rows.append([name, money(eq, 0, lang).replace("$", "").strip(),
+                     cell(wk_pct, lang),
+                     cell((eq / start - 1) * 100 if start else None, lang),
+                     cell(vs, lang)])
         dd = _num(a.get("drawdownPct"))
-        if dd is not None:
-            rows.append((tr("below_peak", lang), f"{i18n.num(dd, 2, lang)} %"))
-        key = account_key(a.get("account"), str(cfg.get("id") or name))
-        trades = int(_num(a.get("trades")) or 0)
-        snap[key] = {"trades": trades, "at": now}
+        if dd is not None and (deepest is None or dd > deepest[1]):
+            deepest = (name, dd)
+        key = account_key(a.get("account"), str(cfg.get("id") or cfg.get("name") or "Autopilot"))
+        trades, orders = int(_num(a.get("trades")) or 0), _num(a.get("orders"))
+        snap[key] = {"trades": trades, "at": now, **({"orders": int(orders)} if orders is not None else {})}
         p = prev.get(key)
         if p and trades >= int(p.get("trades") or 0) and now - int(p.get("at") or 0) <= 8 * DAY_MS:
-            rows.append((tr("trades", lang), tr("trades_week", lang, n=trades - int(p["trades"]))))
+            closed += trades - int(p["trades"])
+            if orders is not None and _num(p.get("orders")) is not None:
+                orders_week += max(int(orders) - int(_num(p["orders"])), 0)
+            else:
+                orders_known = False
+        elif began >= t0:
+            closed += trades
+            orders_week += int(orders or 0)
+            orders_known &= orders is not None
         else:
-            rows.append((tr("trades", lang), tr("trades_since", lang, n=trades)))
-        parts.append(Rows(rows, f"{name} · {a['account']} · {mode}" if a.get("account") else f"{name} · {mode}"))
+            counted_since = True
         for s in a.get("bySleeve") or []:
             sleeves.append((s.get("name") or "?", _num(s.get("pnl")) or 0.0))
+    if counted_since:
+        closed = sum(int(_num(a.get("trades")) or 0) for a in aps)
+        orders_week = sum(int(_num(a.get("orders")) or 0) for a in aps)
+        orders_known = all(_num(a.get("orders")) is not None for a in aps)
+    more = max(len(rows) - TABLE_ROWS, 0)
+    parts: list = [Table([tr("tbl_autopilot", lang), tr("tbl_value", lang), tr("tbl_week", lang),
+                          tr("tbl_start", lang), tr("tbl_vs_btc", lang)], rows[:TABLE_ROWS], more=more)]
+    parts.append(legend_line("tbl_legend_week", modes, accounts, lang))
+    acts = ([tr("act_orders", lang, n=orders_week)] if orders_known else []) + [tr("act_closed", lang, n=closed)]
+    parts.append(Line(" · ".join(acts), tr("since_start" if counted_since else "this_week", lang)))
+    if deepest is not None:
+        parts.append(Line(tr("deepest", lang, name=deepest[0], pct=f"{i18n.num(deepest[1], 2, lang)} %"),
+                          tr("below_peak", lang)))
     if len(sleeves) > 1:
         best, worst = max(sleeves, key=lambda x: x[1]), min(sleeves, key=lambda x: x[1])
         parts.append(Line(tr("best_worst", lang, best=best[0], best_money=signed_money(best[1], lang=lang),
                              worst=worst[0], worst_money=signed_money(worst[1], lang=lang)), tr("best_sleeve", lang)))
     summary = tr("weekly_summary", lang, n=len(aps), money=signed_money(week_total, lang=lang), dot=dot(week_total))
     if btc_week_pct is not None:
-        summary += tr("btc_suffix", lang, pct=signed_pct(btc_week_pct, lang=lang))
+        summary += tr("btc_week_suffix", lang, pct=signed_pct(btc_week_pct, lang=lang))
     return Card("🗓️", title, summary, parts), snap
 
 

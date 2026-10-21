@@ -405,19 +405,31 @@ def step_model(name: str, now_ms: int, changes: list[dict], decisions: list[dict
 
 # ---------------------------------------------------------------- autopilots against BTC
 
-def equity_at(history: list, ms: int) -> float | None:
-    """The last recorded equity at or before ms (history is [(ts_ms, equity), ...])."""
+def point_at(history: list, ms: int) -> tuple[int, float] | None:
+    """The last recorded (ts_ms, equity) at or before ms (history is [(ts_ms, equity), ...])."""
     best = None
     for row in history or []:
         try:
             t, e = int(row[0]), float(row[1])
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError, KeyError):
             continue
         if t <= ms:
-            best = e
+            best = (t, e)
         else:
             break
     return best
+
+
+def equity_at(history: list, ms: int) -> float | None:
+    """The last recorded equity at or before ms."""
+    p = point_at(history, ms)
+    return p[1] if p else None
+
+
+# The equity "a day ago" must be a point at most this far before that time;
+# an older one (the engine's curve once kept only its start and the last
+# hours) would make today's change the change since the start.
+DAY_POINT_MAX_AGE_MS = 3 * 3_600_000
 
 
 def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], float | None]) -> list[dict]:
@@ -438,7 +450,11 @@ def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], flo
         equity = float(ap.get("equity") or 0) or None
         hist = sorted((ap.get("history") or []), key=lambda r: r[0] if r else 0)
         day0 = max(start_ms, end_ms - DAY_MS)
-        e0 = equity_at(hist, day0) or (start if day0 == start_ms else None)
+        p0 = point_at(hist, day0)
+        if day0 == start_ms:
+            e0 = (p0[1] if p0 else None) or start
+        else:
+            e0 = p0[1] if p0 and day0 - p0[0] <= DAY_POINT_MAX_AGE_MS else None
         total = (equity / start - 1) * 100 if start and equity else None
         day = (equity / e0 - 1) * 100 if e0 and equity else None
         b_start, b_day0, b_end = px(start_ms), px(day0), px(end_ms)
@@ -448,6 +464,7 @@ def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], flo
                      "account": ap.get("account"),
                      "state": ap.get("state"), "since": _date(start_ms), "days": (end_ms - start_ms) / DAY_MS,
                      "equity": equity, "start_capital": start, "fees": ap.get("fees"), "trades": ap.get("trades"),
+                     "orders": ap.get("orders"),
                      "pnl_day_pct": day, "btc_day_pct": btc_day,
                      "pnl_total_pct": total, "btc_total_pct": btc_total,
                      "vs_btc_total_pts": total - btc_total if total is not None and btc_total is not None else None})

@@ -484,6 +484,33 @@ fn the_equity_history_is_thinned_and_survives_a_restart() {
 }
 
 #[test]
+fn the_thinned_history_still_covers_every_day_of_a_long_run() {
+    // Five days of one point a minute, thinned as the engine does whenever
+    // the curve is full: the equity a day ago must still be in it.
+    let t0 = 1_792_067_549_994_i64;
+    let mut h: Vec<(i64, f64)> = vec![(t0, 10_000.0)];
+    let n = 5 * 1_440;
+    for k in 1..=n {
+        h.push((t0 + k * 60_000, 10_000.0 + k as f64));
+        if h.len() > 300 {
+            h = thin_history(&h);
+        }
+    }
+    let now = t0 + n * 60_000;
+    assert!(h.len() <= 300 && h.len() > 100, "{}", h.len());
+    assert_eq!(h.first().unwrap().0, t0, "the start stays");
+    assert_eq!(h.last().unwrap().0, now, "the newest point stays");
+    assert!(h.windows(2).all(|w| w[0].0 < w[1].0), "in time order");
+    let day_ago = now - 86_400_000;
+    let before = h.iter().rev().find(|p| p.0 <= day_ago).unwrap();
+    assert!(day_ago - before.0 <= 2 * 3_600_000, "a point within two hours before a day ago: {}", day_ago - before.0);
+    let biggest_gap = h.windows(2).map(|w| w[1].0 - w[0].0).max().unwrap();
+    assert!(biggest_gap <= 3 * 3_600_000, "no hole longer than three hours: {biggest_gap}");
+    assert_eq!(thin_history(&[]), vec![]);
+    assert_eq!(thin_history(&[(1, 1.0), (2, 2.0)]), vec![(1, 1.0), (2, 2.0)]);
+}
+
+#[test]
 fn it_is_held_against_bitcoin_over_its_own_run_and_lists_what_it_holds() {
     let mut e = engine();
     set_price(&mut e, BTC, 100_000.0);
