@@ -1,3 +1,23 @@
+# Turn of the month and pre-holiday in index ETFs (survey candidate 8)
+
+Pre-registered as study 5 of `results/survey_equities_prereg.md` (10
+trials). Code: `python -m lab.experiments.survey_equities turn_of_month`.
+
+**Verdict: fails, no sleeve, no paper book.** The selection window picks SPY
+held from the close two sessions before month end to the close of the third
+session of the new month. Out of sample from 2016 it makes Sharpe 0.65 at
+2 bps a side against 0.88 for SPY bought and held, with a quarter of the
+exposure and a 15 % drawdown instead of 34 %. Window sessions average 9.7 bps
+against 5.0 on the other sessions, but the difference is noise (Welch t
+0.96, the registered bar is 2). The book beats SPY's Sharpe in 23 % of
+bootstrap draws. Gates 1 to 3 fail, so the sleeve test (gate 5) never ran.
+The effect sits on the last-but-one session (19 bps) and the first session of
+the month (14 bps); the last session of the month adds nothing (1 bp).
+Pre-holiday sessions on SPY make 0.41 on 4 % exposure. None of the ten
+trials beats its own ETF held, and deflated p is 0.00 for all of them over
+1,773 trials. The literature calls this effect contested after 1990; in
+2016 to 2026 it is too small to beat simply holding the index.
+
 <!-- generated below by lab.experiments.survey_equities (turn_of_month); edit above this line only -->
 
 # Turn of the month and pre-holiday: results (2026-10-21)

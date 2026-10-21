@@ -1,3 +1,28 @@
+# Earnings announcement premium on predicted dates (survey candidate 3)
+
+Pre-registered as study 1 of `results/survey_equities_prereg.md` (6 trials).
+Code: `python -m lab.experiments.survey_equities earnings_premium`.
+
+**Verdict: killed (IR -0.23 out of sample, the kill bar is 0.1). The premium
+is there before costs and gone after them.** The expected date is last
+year's 8-K item 2.02 filing plus 364 days; 66 % of the out-of-sample expected
+dates have an actual 8-K within two sessions. Before costs every one of the
+six trials earns an active return against the CIK equal weight out of sample
+(IR 0.24 to 0.79, 2 to 6 % a year; the plain 5-sessions-before, 1-after window
+is the best at 0.79). But the book turns over 60 to 100 times a year, and at
+the registered 5 bps a side on the name and 5 on the equal-weight basket it
+finances the position from, every trial is negative after costs (-0.23 to
+-0.91). The selection window picked the volume-filtered variant (IR 0.30 in
+2005 to 2015, after costs); out of sample it makes -0.23 (-0.64 with costs
+doubled, -0.27 a day late, band -0.79 to 0.31). The long-only form with SPY
+as the rest makes Sharpe 0.76 against SPY's 0.92. Deflated p 0.00.
+
+What would change this: a cost below about 2 bps a side on both legs, which a
+book of large caps traded at the open does not get. As an overlay that only
+times purchases the lab would already make (buying a name a few days before
+its earnings rather than after) the gross premium is free; that is not a
+book and is not proposed here.
+
 <!-- generated below by lab.experiments.survey_equities (earnings_premium); edit above this line only -->
 
 # Earnings announcement premium: results (2026-10-21)

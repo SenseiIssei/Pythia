@@ -331,7 +331,8 @@ def write(name: str, md: str, data: dict) -> None:
         text = path.read_text(encoding="utf-8")
         if mk in text:
             above = text.split(mk)[0].rstrip() + "\n"
-    path.write_text((above + "\n" if above.strip() else "") + mk + "\n\n" + md.rstrip() + "\n", encoding="utf-8")
+    path.write_text((above + "\n" if above.strip() else "") + mk + "\n\n" + md.rstrip() + "\n", encoding="utf-8",
+                    newline="\n")
     d = report.REPORTS / name
     d.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")

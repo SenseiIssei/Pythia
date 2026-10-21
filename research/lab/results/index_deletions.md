@@ -1,3 +1,29 @@
+# S&P 500 discretionary deletions (survey candidate 4)
+
+Pre-registered as study 2 of `results/survey_equities_prereg.md` (5 trials).
+Code: `python -m lab.experiments.survey_equities index_deletions`.
+
+**Verdict: fails. Both picks (long deletions 12 months; deletions minus
+additions 12 months) fail gates 1 and 2.** In the selection window (1996 to
+2012, 187 deletions) the mean excess over the equal weight is huge (+58 %
+per event for 12 months) but the median is -1 %: a handful of events carry
+it, several of them data errors (PALM's unadjusted 1:20 reverse split in
+2002 alone is +1,842 % in a day). Out of sample (147 deletions entered from
+2013) the mean excess is +0.9 % per event with an event bootstrap band of
+-6.9 % to +9.2 %, positive only in 2018 to 2021 (+21 %, carried by the March
+2020 rebound: XEC, CPRI, COTY, KSS, M) and negative in 2013 to 2017 (-5 %) and
+from 2022 (-12 %). The median deleted name trails the equal weight by 6 % in
+the following year. Two of the five largest out-of-sample events are data
+artefacts (FTR's stale price before a +266 % day in 2018, FRC trading at a
+cent after its seizure); without them the mean is -0.2 %, which would hit the
+registered kill rule. The deletions-minus-additions book makes Sharpe 0.35,
+the long deletions book 0.65 against 0.80 for the equal weight on the same
+days. Deflated p 0.00. Arnott and co-authors' 22 % a year does not appear
+in 2013 to 2026 on this panel. No paper book.
+
+Caveat: the panel has no delisting returns. The registered 30 % haircut for
+performance delistings touched no out-of-sample position.
+
 <!-- generated below by lab.experiments.survey_equities (index_deletions); edit above this line only -->
 
 # S&P 500 discretionary deletions: results (2026-10-21)

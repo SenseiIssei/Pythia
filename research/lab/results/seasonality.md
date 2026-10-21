@@ -1,3 +1,18 @@
+# Same-calendar-month seasonality on the point-in-time S&P 500 (survey candidate 6)
+
+Pre-registered as study 3 of `results/survey_equities_prereg.md` (6 trials).
+Code: `python -m lab.experiments.survey_equities seasonality`.
+
+**Verdict: killed (rank IC t 0.33 out of sample, the kill bar is 1).** The
+selection window (2001 to 2015) picks the 1-to-20-year lag set, whose rank IC
+there is 0.012 (t 1.85), already weak. From 2016 the same signal has a rank
+IC of 0.003 (t 0.33 over 128 months); the decile long/short book makes Sharpe
+-0.24, and the top 50 book 0.66 against 0.75 for the equal weight and 0.92 for
+SPY (IR 0.10, bootstrap band -0.30 to 0.52, negative with costs doubled or a
+day late). The 1-to-5 and 1-to-10 lag sets are negative out of sample too.
+Heston and Sadka's effect is reported across all US stocks; among S&P 500
+members, and after 2015, it does not show. No paper book.
+
 <!-- generated below by lab.experiments.survey_equities (seasonality); edit above this line only -->
 
 # Same-calendar-month seasonality: results (2026-10-21)
