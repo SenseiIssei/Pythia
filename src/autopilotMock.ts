@@ -295,6 +295,14 @@ function seed(scenario: MockScenario, names: Record<string, string>): State {
       const i0 = btc.times.findIndex((t) => t >= start);
       const btcPct = i0 >= 0 ? (btc.closes[btc.closes.length - 1] / btc.closes[i0] - 1) * 100 : 0;
       s.benchmark = { symbol: "BTC/USD", name: "BTC buy and hold", returnPct: btcPct, excessPct: s.pnlPct - btcPct };
+      // The gate was on for part of the stretch: gated BTC caught some of the move.
+      const gatedPct = btcPct * 0.6;
+      s.gatedBenchmark = {
+        symbol: "BTC/USD",
+        name: "BTC held only above its 200-day average",
+        returnPct: gatedPct,
+        excessPct: s.pnlPct - gatedPct,
+      };
       s.btcReturnPct = btcPct;
       list.push(s);
     });
