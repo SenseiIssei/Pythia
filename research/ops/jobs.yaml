@@ -160,7 +160,6 @@ jobs:
     timeout: 1h
     lock: heavy
     lock_wait: 2h
-    enabled: false
 
   # The SPY sleeve of the Crypto + SPY forward test (results/equity_sleeve_prereg.md):
   # a lab book of US shares that is always 100 % SPY. It runs every weekday and
@@ -560,7 +559,6 @@ jobs:
     resources: {cpus: 1, memory: 4g}
     timeout: 30m
     lock: pumpfun-rt-activity
-    enabled: false
 
   - name: cs2-collect
     description: CS2 skins, Skinport snapshots and sales history, Steam prices for the watchlist
