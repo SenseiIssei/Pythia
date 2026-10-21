@@ -1,6 +1,6 @@
 # pump.fun mit echtem Geld: Runbook für den Besitzer
 
-Dieses Runbook ist für dich, Jakob, als Besitzer des Geldes. Es führt durch
+Dieses Runbook ist für den Besitzer des Geldes. Es führt durch
 den Echtgeld-TEST des pump.fun-Bots: eine eigene Wallet, ein kleines Budget,
 harte Grenzen, ein Notschalter, und vor allem Messwerte (Latenz, Schlupf,
 Gebühren), die eine Papierstudie nicht liefern kann.

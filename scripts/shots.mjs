@@ -7,10 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // A Chromium binary. Playwright's cached chromium launches headless reliably on
-// Windows where Edge hands off to a running instance. Override with CHROME_PATH.
-const EDGE =
-  process.env.CHROME_PATH ||
-  "C:/Users/USER/AppData/Local/ms-playwright/chromium-1228/chrome-win64/chrome.exe";
+// Windows where Edge hands off to a running instance. Set CHROME_PATH to it,
+// e.g. %LOCALAPPDATA%/ms-playwright/chromium-<build>/chrome-win64/chrome.exe.
+const EDGE = process.env.CHROME_PATH;
+if (!EDGE) {
+  console.error("Set CHROME_PATH to a Chromium or Chrome executable (see the comment in scripts/shots.mjs).");
+  process.exit(1);
+}
 const BASE = process.env.SHOT_URL || "http://localhost:5174";
 const OUT = "docs/screenshots";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

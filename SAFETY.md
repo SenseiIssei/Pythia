@@ -33,8 +33,8 @@ lose entirely.
    venue connector refuses orders that cannot fill (market closed, no buying power, would open a
    short) *before* submitting them.
 
-Claude (the assistant that built this) **never** enters your credentials, never funds an account,
-and never executes a trade for you. The software does it, under your control, with your keys.
+Nobody but you enters your credentials, funds an account, or decides to trade. The software
+places orders under your control, with your keys.
 
 ## 3a. Real positions are not simulated positions
 

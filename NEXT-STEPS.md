@@ -31,8 +31,8 @@ git config user.email "superwarper@t-online.de"
 git config user.name "SenseiIssei"
 ```
 
-Then verify with `git log -1 --pretty='%an <%ae>'`. Never commit as
-`jaho <owner@example.com>`, and never add a Co-Authored-By trailer.
+Then verify with `git log -1 --pretty='%an <%ae>'`. Never commit with a
+machine's default identity, and never add a Co-Authored-By trailer.
 
 ### Run it
 

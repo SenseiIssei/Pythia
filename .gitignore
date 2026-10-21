@@ -15,6 +15,26 @@ secrets.json
 pythia.db
 pythia.db-*
 *.log
+# keys and wallets (the pump.fun wallet tool writes a 64-number JSON array)
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*keypair*.json
+*keypair*.json.pub
+wallet*.json
+!research/lab/tests/**/wallet*.json
+credentials.json
+alerts.env
+# local data folders and run output
+/data/
+/PythiaData/
+/fills.jsonl
+/state.json
+# security scan reports (scripts/security-scan.sh writes here)
+/security-reports/
 
 # os / editor
 .DS_Store
