@@ -507,6 +507,75 @@ def btc_price_at(ms: int) -> float | None:
         return None
 
 
+# ---------------------------------------------------------------- BTC above its 200-day average
+
+GATE_SMA = 200
+GATE_KEEP_DAYS = 400
+
+
+def btc_daily_closes(limit: int = 700, timeout: float = 15) -> list[tuple[int, float]]:
+    """BTCUSDT's closed UTC days on Binance as (day start ms, close); [] when it does not answer."""
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit={int(limit)}"
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            k = json.load(r)
+        now = int(time.time() * 1000)
+        return [(int(x[0]), float(x[4])) for x in k if int(x[6]) < now]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def gate_calendar(closes: list[tuple[int, float]], now_ms: int, sma: int = GATE_SMA,
+                  keep: int = GATE_KEEP_DAYS) -> dict | None:
+    """BTC's 200-day gate per UTC day, the second benchmark of every crypto autopilot
+    (results/gated_btc.md, G at k = 1): a day is on when the close before it is above
+    the average of the `sma` closes up to and including that close (fam_common's rule),
+    and BTC is held over that day. One row per day up to today, today's close unknown.
+    None with fewer than sma closes or a gap in the days."""
+    xs = sorted((int(d), float(c)) for d, c in closes if c and c > 0)
+    if len(xs) < sma:
+        return None
+    if any(b[0] - a[0] != DAY_MS for a, b in zip(xs, xs[1:])):
+        return None
+    today = now_ms // DAY_MS * DAY_MS
+    days = []
+    for i in range(sma, len(xs) + 1):
+        prev_day, prev_close = xs[i - 1]
+        day = prev_day + DAY_MS
+        if day > today:
+            break
+        avg = sum(c for _, c in xs[i - sma:i]) / sma
+        days.append({"day_ms": day, "on": prev_close > avg, "close": xs[i][1] if i < len(xs) else None})
+    return {"sma_days": sma, "days": days[-keep:]} if days else None
+
+
+def gated_return_pct(gate: dict | None, start_ms: int, p0: float | None, end_ms: int, p1: float | None) -> float | None:
+    """Gated BTC's return in % from start_ms (BTC at p0) to end_ms (BTC at p1): BTC's move over
+    the days the gate is on, nothing over the others; None when a day is not in the calendar.
+    The engine computes the same (lab::BtcGate::return_pct)."""
+    if not gate or not p0 or not p1 or p0 <= 0 or p1 <= 0:
+        return None
+    if end_ms <= start_ms:
+        return 0.0
+    by = {int(g["day_ms"]): g for g in gate.get("days") or []}
+    growth = 1.0
+    d = start_ms // DAY_MS * DAY_MS
+    while d < end_ms:
+        g = by.get(d)
+        if g is None:
+            return None
+        if g.get("on"):
+            lo, hi = max(start_ms, d), min(end_ms, d + DAY_MS)
+            prev = by.get(d - DAY_MS)
+            px0 = p0 if lo == start_ms else (prev or {}).get("close")
+            px1 = p1 if hi == end_ms else g.get("close")
+            if not px0 or not px1:
+                return None
+            growth *= px1 / px0
+        d += DAY_MS
+    return (growth - 1) * 100
+
+
 def _median(xs: list[float]) -> float | None:
     return float(np.median(xs)) if xs else None
 
@@ -535,7 +604,7 @@ def slippage_by_route(orders: list[dict], strategies: set[str], start_ms: int, e
     return rows
 
 
-def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_at) -> dict:
+def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_at, gate: dict | None = None) -> dict:
     cfg = ap.get("config", {})
     start_ms = int(ap["startedMs"]) if ap.get("startedMs") is not None else now_ms
     end_ms = int(ap["stoppedMs"]) if ap.get("stoppedMs") is not None else now_ms
@@ -563,6 +632,7 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
 
     b0, b1 = price_at(start_ms), price_at(end_ms)
     btc_pct = (b1 / b0 - 1) * 100 if b0 and b1 else None
+    gated_pct = gated_return_pct(gate, start_ms, b0, end_ms, b1)
 
     sleeves = ap.get("bySleeve") or []
     strategies = {s.get("strategyId") for s in sleeves} | {s.get("strategyId") for s in cfg.get("sleeves", [])}
@@ -598,6 +668,7 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
         "return_pct": ret_pct,
         "max_dd_pct": float(ap.get("drawdownPct") or 0.0),
         "btc_return_pct": btc_pct,
+        "btc_gated_return_pct": gated_pct,
         "fees": fees,
         "fees_share_of_gross": fees_share,
         "fees_pct_of_capital": fees / base * 100,
@@ -620,7 +691,7 @@ def autopilot_row(ap: dict, orders: list[dict], now_ms: int, price_at=btc_price_
     }
 
 
-def autopilots(url: str, now_ms: int, price_at=btc_price_at) -> tuple[list[dict], dict]:
+def autopilots(url: str, now_ms: int, price_at=btc_price_at, gate: dict | None = None) -> tuple[list[dict], dict]:
     state, err = fetch_state(url)
     engine = {"url": url, "reachable": state is not None, "error": err, "slippage": []}
     if state is None:
@@ -632,7 +703,7 @@ def autopilots(url: str, now_ms: int, price_at=btc_price_at) -> tuple[list[dict]
     orders = state.get("orders") or []
     engine["orders_kept"] = len(orders)
     aps = sorted(state.get("autopilots") or [], key=lambda a: (a.get("state") != "running", -(a.get("startedMs") or 0)))
-    return [autopilot_row(a, orders, now_ms, price_at) for a in aps], engine
+    return [autopilot_row(a, orders, now_ms, price_at, gate) for a in aps], engine
 
 
 # ---------------------------------------------------------------- report
@@ -696,14 +767,17 @@ def markdown(data: dict) -> str:
                          "equity": f"{a['equity']:,.2f} of {a['start_equity']:,.0f}",
                          "floor": f"{a['floor_equity']:,.0f}" if a["floor_equity"] is not None else "none",
                          "return": _pct(a["return_pct"]), "btc": _pct(a["btc_return_pct"]),
+                         "btc_gated": _pct(a.get("btc_gated_return_pct")),
                          "fees": f"{a['fees_pct_of_capital']:.2f} % of capital"
                                  + (f", {a['fees_share_of_gross'] * 100:.0f} % of gross"
                                     if a["fees_share_of_gross"] is not None else f", gross {a['gross_pct']:+.2f} %"),
                          "trades_per_day": f"{a['trades_per_day']:.1f}" if a["trades_per_day"] is not None else "n/a",
                          "slippage_realised_vs_model": slip, "status": a["status"]})
         lines.append("\n" + report.table(rows, ["autopilot", "since", "days", "equity", "floor", "return", "btc",
-                                                "fees", "trades_per_day", "slippage_realised_vs_model",
+                                                "btc_gated", "fees", "trades_per_day", "slippage_realised_vs_model",
                                                 "status"]))
+        lines.append("`btc_gated`: BTC held only while its close is above its 200-day average (results/gated_btc.md), "
+                     "over the same period, no costs; n/a while the day calendar does not cover it.\n")
     if engine.get("slippage"):
         lines.append("Engine-wide fills, realised against modelled slippage:\n")
         lines.append(report.table([{**s, "ratio": s["ratio"] if s["ratio"] is not None else "n/a"}
@@ -715,15 +789,22 @@ def markdown(data: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build(now_ms: int | None = None, url: str | None = None, price_at=btc_price_at, root: Path | None = None) -> dict:
+def build(now_ms: int | None = None, url: str | None = None, price_at=btc_price_at, root: Path | None = None,
+          closes_fetch=None) -> dict:
+    """The report. closes_fetch gives BTC's daily closes for the 200-day gate; by default
+    Binance's, when the prices come from Binance too (a test that hands in prices hands in
+    closes or goes without)."""
     now_ms = now_ms or int(time.time() * 1000)
     url = url or os.environ.get("PYTHIA_AUTOPILOT_STATE_URL", DEFAULT_STATE_URL)
+    if closes_fetch is None and price_at is btc_price_at:
+        closes_fetch = btc_daily_closes
+    gate = gate_calendar(closes_fetch(), now_ms) if closes_fetch else None
     books = paper_books(root)
-    aps, engine = autopilots(url, now_ms, price_at)
+    aps, engine = autopilots(url, now_ms, price_at, gate)
     data = {"generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "generated_ms": now_ms, "gate7": {"days": GATE_DAYS, "trades": GATE_TRADES},
             "min_judge_days": MIN_JUDGE_DAYS, "band": list(BAND),
-            "books": books, "autopilots": aps, "engine": engine}
+            "books": books, "autopilots": aps, "engine": engine, "btc_gate": gate}
     data["verdict"] = summary(books, aps, engine)
     data.update(feed(books, aps, data["verdict"], now_ms))
     return _finite(data)
@@ -911,6 +992,8 @@ def evidence(data: dict) -> dict:
         "min_days": EVIDENCE_MIN_DAYS,
         "books": {b["name"]: evidence_entry(b) for b in data["books"] if b.get("days") or b.get("frozen")},
         "autopilots": {a["name"]: evidence_entry(a) for a in data["autopilots"]},
+        # The engine holds every crypto autopilot against BTC above its 200-day average with it.
+        "btc_gate": data.get("btc_gate"),
     })
 
 

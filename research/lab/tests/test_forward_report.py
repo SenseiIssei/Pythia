@@ -307,3 +307,48 @@ def test_evidence_is_strict_json(reports):
     text = json.dumps(fr.evidence(data), allow_nan=False)
     assert json.loads(text)["books"]["x"] == {"days": 11.0, "return_pct": None, "band_low_pct": None,
                                               "band_high_pct": None, "band_method": None, "status": "none"}
+
+
+# ---------------------------------------------------------------- BTC above its 200-day average
+
+def test_the_gate_calendar_holds_btc_on_a_day_after_a_close_above_its_200_day_average():
+    D = fr.DAY_MS
+    t0 = 20_000 * D
+    # 200 closes at 100, then 120 (above), then 90 (below), then today.
+    closes = [(t0 + i * D, 100.0) for i in range(200)] + [(t0 + 200 * D, 120.0), (t0 + 201 * D, 90.0)]
+    cal = fr.gate_calendar(closes, t0 + 202 * D + 3_600_000)
+    days = {d["day_ms"]: d for d in cal["days"]}
+    assert cal["sma_days"] == 200
+    assert days[t0 + 200 * D]["on"] is False, "100 is not above an average of 100"
+    assert days[t0 + 201 * D]["on"] is True and days[t0 + 201 * D]["close"] == 90.0
+    assert days[t0 + 202 * D]["on"] is False and days[t0 + 202 * D]["close"] is None, "today: set by yesterday's close"
+    assert max(days) == t0 + 202 * D, "nothing after today"
+    assert fr.gate_calendar(closes[:150], t0 + 202 * D) is None, "fewer than 200 closes"
+    assert fr.gate_calendar(closes[:100] + closes[101:], t0 + 202 * D) is None, "a gap in the days"
+
+    # On day 201 (gate on) from noon at 110 to its close at 90; day 202 off.
+    r = fr.gated_return_pct(cal, t0 + 201 * D + D // 2, 110.0, t0 + 202 * D + 3_600_000, 95.0)
+    assert r == pytest.approx((90.0 / 110.0 - 1) * 100)
+    assert fr.gated_return_pct(cal, t0 + 202 * D, 90.0, t0 + 202 * D + 60_000, 99.0) == 0.0, "off: cash"
+    assert fr.gated_return_pct(None, 0, 1.0, 1, 1.0) is None
+    assert fr.gated_return_pct(cal, t0 - 5 * D, 1.0, t0 + 202 * D, 1.0) is None, "a day the calendar does not have"
+
+
+def test_autopilots_carry_gated_btc_and_the_evidence_file_carries_the_calendar(reports, tmp_path):
+    D = fr.DAY_MS
+    now = 300 * D
+    closes = [(i * D, 100.0 + i) for i in range(300)]        # rising: the gate is on
+    f = tmp_path / "state.json"
+    ap = state(bySleeve=[])
+    ap.update(startedMs=now - D, stoppedMs=None)
+    f.write_text(json.dumps({"autopilots": [ap], "orders": []}))
+    data = fr.build(now_ms=now, url=f.as_uri(), price_at=lambda ms: 100.0 + ms / D, root=tmp_path,
+                    closes_fetch=lambda: closes)
+    row = data["autopilots"][0]
+    assert row["btc_gated_return_pct"] == pytest.approx(row["btc_return_pct"]), "on every day: gated BTC is BTC"
+    assert "btc_gated" in fr.markdown(data)
+    ev = json.loads(fr.write_evidence(data).read_text(encoding="utf-8"))
+    assert ev["btc_gate"]["sma_days"] == 200 and ev["btc_gate"]["days"][-1]["day_ms"] == now
+    # Without closes: no calendar, n/a, nothing guessed.
+    data = fr.build(now_ms=now, url=f.as_uri(), price_at=lambda ms: 100.0, root=tmp_path)
+    assert data["btc_gate"] is None and data["autopilots"][0]["btc_gated_return_pct"] is None

@@ -375,6 +375,15 @@ def test_autopilot_pnl_against_btc():
     assert a["pnl_total_pct"] == pytest.approx(10.0) and a["btc_total_pct"] == pytest.approx(4.0)
     assert a["vs_btc_total_pts"] == pytest.approx(6.0)
     assert a["pnl_day_pct"] == pytest.approx(50 / 1050 * 100) and a["btc_day_pct"] == pytest.approx(0.0)
+    assert a["vs_gated_total_pts"] is None, "no gate calendar: not known"
+    # BTC below its 200-day average on every day since the start: gated BTC is cash.
+    day0 = start // DAY_MS * DAY_MS
+    gate = {"sma_days": 200, "days": [{"day_ms": day0 + i * DAY_MS, "on": False, "close": 1.0} for i in range(-1, 5)]}
+    a = learn.autopilot_pnl(state, NOW, lambda ms: prices.get(ms), gate)[0]
+    assert a["btc_gated_total_pct"] == pytest.approx(0.0) and a["vs_gated_total_pts"] == pytest.approx(10.0)
+    assert "vs_gated" in learn.markdown({"generated": "x", "headline": "x", "changes": [], "decisions": [],
+                                         "autopilots": [a], "engine": {}, "steps": [],
+                                         "guardrails": {"written": [], "refused": []}})
 
 
 def test_today_is_unknown_when_the_curve_has_no_point_near_a_day_ago():

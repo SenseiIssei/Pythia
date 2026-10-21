@@ -432,7 +432,11 @@ def equity_at(history: list, ms: int) -> float | None:
 DAY_POINT_MAX_AGE_MS = 3 * 3_600_000
 
 
-def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], float | None]) -> list[dict]:
+def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], float | None],
+                  gate: dict | None = None) -> list[dict]:
+    """Each autopilot against BTC bought and held since its start, and against BTC held
+    only above its 200-day average (`gate`, forward_report.gate_calendar) when known."""
+    from ..paper.forward_report import gated_return_pct
     rows = []
     cache: dict[int, float | None] = {}
 
@@ -460,6 +464,7 @@ def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], flo
         b_start, b_day0, b_end = px(start_ms), px(day0), px(end_ms)
         btc_total = (b_end / b_start - 1) * 100 if b_start and b_end else None
         btc_day = (b_end / b_day0 - 1) * 100 if b_day0 and b_end else None
+        gated = gated_return_pct(gate, start_ms, b_start, end_ms, b_end) if gate else None
         rows.append({"id": cfg.get("id", "?"), "name": cfg.get("name", "Autopilot"), "mode": cfg.get("mode"),
                      "account": ap.get("account"),
                      "state": ap.get("state"), "since": _date(start_ms), "days": (end_ms - start_ms) / DAY_MS,
@@ -467,7 +472,9 @@ def autopilot_pnl(state: dict | None, now_ms: int, price_at: Callable[[int], flo
                      "orders": ap.get("orders"),
                      "pnl_day_pct": day, "btc_day_pct": btc_day,
                      "pnl_total_pct": total, "btc_total_pct": btc_total,
-                     "vs_btc_total_pts": total - btc_total if total is not None and btc_total is not None else None})
+                     "vs_btc_total_pts": total - btc_total if total is not None and btc_total is not None else None,
+                     "btc_gated_total_pct": gated,
+                     "vs_gated_total_pts": total - gated if total is not None and gated is not None else None})
     rows.sort(key=lambda r: (r["state"] != "running", r["id"]))
     return rows
 
@@ -535,10 +542,15 @@ def markdown(d: dict) -> str:
         lines.append(report.table([{"autopilot": a["name"], "mode": a["mode"], "state": a["state"], "since": a["since"],
                                     "today": _pct(a["pnl_day_pct"]), "btc_today": _pct(a["btc_day_pct"]),
                                     "since_start": _pct(a["pnl_total_pct"]), "btc_since_start": _pct(a["btc_total_pct"]),
-                                    "vs_btc": "n/a" if a["vs_btc_total_pts"] is None else f"{a['vs_btc_total_pts']:+.2f} pts"}
+                                    "vs_btc": "n/a" if a["vs_btc_total_pts"] is None else f"{a['vs_btc_total_pts']:+.2f} pts",
+                                    "gated_btc_since_start": _pct(a.get("btc_gated_total_pct")),
+                                    "vs_gated": "n/a" if a.get("vs_gated_total_pts") is None
+                                    else f"{a['vs_gated_total_pts']:+.2f} pts"}
                                    for a in d["autopilots"]],
                                   ["autopilot", "mode", "state", "since", "today", "btc_today", "since_start",
-                                   "btc_since_start", "vs_btc"]))
+                                   "btc_since_start", "vs_btc", "gated_btc_since_start", "vs_gated"]))
+        lines.append("Gated BTC: BTC held only while its close is above its 200-day average (results/gated_btc.md), "
+                     "the benchmark no Alpaca book has beaten out of sample.\n")
     else:
         lines.append(f"{d['engine'].get('error') or 'No autopilots.'}\n")
     costs = d.get("costs") or {}
@@ -559,7 +571,10 @@ def markdown(d: dict) -> str:
 
 
 def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str] | None = None,
-        train: bool = True, runner: Runner = run_module, price_at=btc_price_at, champion_predict=None) -> dict:
+        train: bool = True, runner: Runner = run_module, price_at=btc_price_at, champion_predict=None,
+        closes_fetch=None) -> dict:
+    """closes_fetch: BTC's daily closes for the 200-day gate (Binance's by default when the
+    prices are Binance's too)."""
     now_ms = now_ms or int(time.time() * 1000)
     force, skip = force or set(), skip or set()
     guard.WRITTEN.clear()
@@ -612,7 +627,11 @@ def run(now_ms: int | None = None, force: set[str] | None = None, skip: set[str]
             mark(st, step, now_ms, False, f"{type(e).__name__}: {e}")
             steps.append({"step": step, "status": "failed", "detail": f"{type(e).__name__}: {e}"[:400]})
 
-    aps = autopilot_pnl(merged, now_ms, price_at) if merged is not None else []
+    from ..paper import forward_report as fwd
+    if closes_fetch is None and price_at is btc_price_at:
+        closes_fetch = fwd.btc_daily_closes
+    gate = fwd.gate_calendar(closes_fetch(), now_ms) if closes_fetch and merged is not None else None
+    aps = autopilot_pnl(merged, now_ms, price_at, gate) if merged is not None else []
     guard.write_json(learn_dir() / "state.json", st)
     data = {"generated": datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "generated_ms": now_ms, "changes": changes, "decisions": decisions, "autopilots": aps,
