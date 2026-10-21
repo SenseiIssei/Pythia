@@ -15,6 +15,19 @@ No strategy in here is known to be profitable. Read [SAFETY.md](SAFETY.md) befor
 
 Screenshots from a development build with sample data.
 
+## Download
+
+The [latest release](https://github.com/SenseiIssei/Pythia/releases/latest) has:
+
+| Platform | File |
+|---|---|
+| Windows | `Pythia_<version>_x64-setup.exe` |
+| macOS (Apple silicon and Intel) | `Pythia_<version>_universal.dmg` |
+| Linux | `.AppImage`, `.deb` or `.rpm` |
+| Command line | `pythia-cli-<version>-<platform>`: `pythia` and the headless engine `pythia-server`, see [cli/README.md](cli/README.md) |
+
+The builds are not code-signed yet. Windows asks once (More info, then Run anyway); on macOS, right-click the app and choose Open the first time.
+
 ## What it does
 
 - An autopilot is an amount of money that trades one strategy on its own until you stop it or a stop rule fires. Several run side by side, each measured against BTC.
@@ -113,6 +126,7 @@ On Windows the npm scripts remove `CC` and `CXX` from the environment, because p
 | [`crates/pythia-core`](crates/pythia-core) | Engine: strategies, risk, autopilots, execution, venues, forecasts, alerts |
 | [`crates/pythia-ml`](crates/pythia-ml) | Model inference (LightGBM, ONNX) with parity tests against the lab |
 | [`server`](server) | HTTP and WebSocket server over the engine |
+| [`cli`](cli/README.md) | `pythia` command line |
 | [`src-tauri`](src-tauri) | Desktop app |
 | [`src`](src) | React UI |
 | [`research/lab`](research/lab/README.md) | Studies, models, paper books, strategy factory |

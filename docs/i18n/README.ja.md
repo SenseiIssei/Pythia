@@ -15,6 +15,19 @@ Pythia はペーパートレードから始まり、戦略が実力を示すま�
 
 サンプルデータを使った開発ビルドのスクリーンショットです。
 
+## ダウンロード
+
+[最新リリース](https://github.com/SenseiIssei/Pythia/releases/latest)には次のファイルがあります。
+
+| プラットフォーム | ファイル |
+|---|---|
+| Windows | `Pythia_<version>_x64-setup.exe` |
+| macOS（Apple シリコンと Intel） | `Pythia_<version>_universal.dmg` |
+| Linux | `.AppImage`、`.deb`、`.rpm` |
+| コマンドライン | `pythia-cli-<version>-<platform>`：`pythia` とウィンドウなしのエンジン `pythia-server`。[cli/README.md](../../cli/README.md)（英語）を参照 |
+
+ビルドはまだコード署名されていません。Windows では一度だけ確認が出ます（「詳細情報」から「実行」）。macOS では初回だけ、アプリを右クリックして「開く」を選んでください。
+
 ## できること
 
 - オートパイロットは、止めるかストップルールが発動するまで一つの戦略を自動で取引する資金枠です。複数を並べて動かせ、それぞれ BTC と比較して評価されます。
@@ -113,6 +126,7 @@ Windows では、スペースを含むパスが Rust のネイティブビルド
 | [`crates/pythia-core`](../../crates/pythia-core) | エンジン：戦略、リスク、オートパイロット、執行、取引所、予測、通知 |
 | [`crates/pythia-ml`](../../crates/pythia-ml) | モデル推論（LightGBM、ONNX）とラボとの一致テスト |
 | [`server`](../../server) | エンジン上の HTTP / WebSocket サーバー |
+| [`cli`](../../cli/README.md) | コマンドライン `pythia` |
 | [`src-tauri`](../../src-tauri) | デスクトップアプリ |
 | [`src`](../../src) | React UI |
 | [`research/lab`](../../research/lab/README.md) | 研究、モデル、ペーパーブック、戦略ファクトリー |

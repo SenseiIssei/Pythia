@@ -15,6 +15,19 @@ Pythia는 모의 거래로 시작해서, 전략이 실력을 증명할 때까지
 
 샘플 데이터를 사용한 개발 빌드의 스크린샷입니다.
 
+## 다운로드
+
+[최신 릴리스](https://github.com/SenseiIssei/Pythia/releases/latest)에는 다음 파일이 있습니다.
+
+| 플랫폼 | 파일 |
+|---|---|
+| Windows | `Pythia_<version>_x64-setup.exe` |
+| macOS(Apple 실리콘 및 Intel) | `Pythia_<version>_universal.dmg` |
+| Linux | `.AppImage`, `.deb`, `.rpm` |
+| 명령줄 | `pythia-cli-<version>-<platform>`: `pythia`와 창 없는 엔진 `pythia-server`, [cli/README.md](../../cli/README.md)(영어) 참고 |
+
+아직 코드 서명이 되지 않은 빌드입니다. Windows에서는 한 번 확인 창이 뜹니다(추가 정보, 실행). macOS에서는 처음 한 번 앱을 오른쪽 클릭하고 열기를 선택하세요.
+
 ## 하는 일
 
 - 오토파일럿은 사용자가 멈추거나 손절 규칙이 발동할 때까지 하나의 전략을 스스로 거래하는 자금입니다. 여러 개를 나란히 돌릴 수 있고, 각각 BTC와 비교해 평가합니다.
@@ -113,6 +126,7 @@ Windows에서는 공백이 있는 경로가 Rust 네이티브 빌드를 깨뜨�
 | [`crates/pythia-core`](../../crates/pythia-core) | 엔진: 전략, 리스크, 오토파일럿, 주문 실행, 거래소, 예측, 알림 |
 | [`crates/pythia-ml`](../../crates/pythia-ml) | 모델 추론(LightGBM, ONNX)과 연구실 대비 일치 테스트 |
 | [`server`](../../server) | 엔진 위의 HTTP 및 WebSocket 서버 |
+| [`cli`](../../cli/README.md) | 명령줄 `pythia` |
 | [`src-tauri`](../../src-tauri) | 데스크톱 앱 |
 | [`src`](../../src) | React UI |
 | [`research/lab`](../../research/lab/README.md) | 연구, 모델, 모의 북, 전략 팩토리 |

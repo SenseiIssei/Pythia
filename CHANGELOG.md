@@ -3,6 +3,15 @@
 All notable changes to Pythia. Versions follow [Semantic Versioning](https://semver.org); while the
 major version is 0, a minor release may change behaviour.
 
+## 0.5.1 (2026-10-21)
+
+- Installers for Windows (setup .exe), macOS (universal .dmg) and Linux (.AppImage, .deb, .rpm),
+  built by GitHub Actions from the version tag.
+- `pythia`, a command line over the engine's HTTP API: status, list and show autopilots, pause,
+  resume, stop, kill switch, preflight, watch, and `pythia serve` to start the headless engine.
+  Shipped per platform together with `pythia-server`.
+- README in eight languages with a plain architecture picture.
+
 ## 0.5.0 (2026-10-21)
 
 Everything since 0.4.0 (2026-07-22): the autopilots, the research lab and its first full round of

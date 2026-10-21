@@ -15,6 +15,19 @@ Aucune stratégie ici n'est connue pour être rentable. Lisez [SAFETY.md](../../
 
 Captures d'une version de développement avec des données d'exemple.
 
+## Téléchargement
+
+La [dernière version](https://github.com/SenseiIssei/Pythia/releases/latest) contient :
+
+| Plateforme | Fichier |
+|---|---|
+| Windows | `Pythia_<version>_x64-setup.exe` |
+| macOS (Apple silicon et Intel) | `Pythia_<version>_universal.dmg` |
+| Linux | `.AppImage`, `.deb` ou `.rpm` |
+| Ligne de commande | `pythia-cli-<version>-<plateforme>` : `pythia` et le moteur sans fenêtre `pythia-server`, voir [cli/README.md](../../cli/README.md) (en anglais) |
+
+Les versions ne sont pas encore signées. Windows demande une fois (Informations complémentaires, puis Exécuter quand même) ; sur macOS, la première fois, faites un clic droit sur l'application et choisissez Ouvrir.
+
 ## Ce qu'il fait
 
 - Un autopilote est un montant qui trade une stratégie tout seul jusqu'à ce que vous l'arrêtiez ou qu'une règle d'arrêt se déclenche. Plusieurs tournent côte à côte, chacun mesuré face au BTC.
@@ -113,6 +126,7 @@ Sous Windows, les scripts npm retirent `CC` et `CXX` de l'environnement, car les
 | [`crates/pythia-core`](../../crates/pythia-core) | Moteur : stratégies, risque, autopilotes, exécution, plateformes, prévisions, alertes |
 | [`crates/pythia-ml`](../../crates/pythia-ml) | Inférence des modèles (LightGBM, ONNX) avec tests de parité face au laboratoire |
 | [`server`](../../server) | Serveur HTTP et WebSocket au-dessus du moteur |
+| [`cli`](../../cli/README.md) | Ligne de commande `pythia` |
 | [`src-tauri`](../../src-tauri) | Application de bureau |
 | [`src`](../../src) | Interface React |
 | [`research/lab`](../../research/lab/README.md) | Études, modèles, portefeuilles papier, fabrique de stratégies |

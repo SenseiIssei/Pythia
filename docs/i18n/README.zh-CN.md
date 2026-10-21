@@ -15,6 +15,19 @@ Pythia 是一个从模拟盘起步的交易驾驶舱，在策略证明自己之�
 
 截图来自使用示例数据的开发版本。
 
+## 下载
+
+[最新版本](https://github.com/SenseiIssei/Pythia/releases/latest)中包含：
+
+| 平台 | 文件 |
+|---|---|
+| Windows | `Pythia_<version>_x64-setup.exe` |
+| macOS（Apple 芯片和 Intel） | `Pythia_<version>_universal.dmg` |
+| Linux | `.AppImage`、`.deb` 或 `.rpm` |
+| 命令行 | `pythia-cli-<version>-<platform>`：`pythia` 和无界面引擎 `pythia-server`，见 [cli/README.md](../../cli/README.md)（英文） |
+
+这些构建尚未签名。Windows 会提示一次（点击“更多信息”，再点“仍要运行”）；在 macOS 上首次打开时，请右键点击应用并选择“打开”。
+
 ## 功能
 
 - 自动驾驶（autopilot）是一笔资金，它独立执行一个策略，直到你停止它或止损规则触发。多个自动驾驶可以并行运行，每个都以 BTC 为基准衡量。
@@ -113,6 +126,7 @@ npm run security:scan
 | [`crates/pythia-core`](../../crates/pythia-core) | 引擎：策略、风险、自动驾驶、执行、交易所、预测、提醒 |
 | [`crates/pythia-ml`](../../crates/pythia-ml) | 模型推理（LightGBM、ONNX），带有与实验室对照的一致性测试 |
 | [`server`](../../server) | 基于引擎的 HTTP 和 WebSocket 服务器 |
+| [`cli`](../../cli/README.md) | `pythia` 命令行 |
 | [`src-tauri`](../../src-tauri) | 桌面应用 |
 | [`src`](../../src) | React 界面 |
 | [`research/lab`](../../research/lab/README.md) | 研究、模型、模拟组合、策略工厂 |
