@@ -1,0 +1,45 @@
+# gitleaks configuration for Pythia.
+#
+# The default rule set, plus allowlists for findings that were checked by hand
+# and proven harmless. Every entry names what it is and why it is safe. Do not
+# add an entry for a real key: rotate the key instead (SECURITY.md).
+
+title = "Pythia gitleaks config"
+
+[extend]
+useDefault = true
+
+# Kraken's own documented API signing examples. The secrets are published in
+# Kraken's API docs as worked examples and are used as test vectors for the
+# signature code (crates/pythia-core/src/connectors/sign.rs, kraken_futures.rs).
+[[allowlists]]
+description = "Kraken documented sample secrets used as signing test vectors"
+regexTarget = "secret"
+regexes = [
+  '''^kQH5HW/8p1uGOVjbgWA7''',
+  '''^rttp4AzwRfYEdQ7R7X8Z''',
+]
+
+# The PEM parser's error messages and doc comments name the BEGIN/END lines
+# of a key; they contain no key material.
+[[allowlists]]
+description = "PEM marker text in error messages and doc comments"
+targetRules = ["private-key"]
+regexTarget = "match"
+regexes = [
+  '''-----BEGIN (EC )?PRIVATE KEY-----(`|\s+and\s)''',
+]
+
+# The strategy factory's ledger keys every genome by a 12-hex-digit hash of
+# its parameters ({"key":"b39f...","run":...}). Not a credential.
+[[allowlists]]
+description = "Strategy factory ledger genome hashes"
+paths = ['''research/lab/results/factory_seed/ledger\.jsonl''']
+regexTarget = "line"
+regexes = ['''^\{"key":"[0-9a-f]{12}","run":''']
+
+# localStorage keys in the UI ("pythia.legal.ack.v1").
+[[allowlists]]
+description = "UI localStorage key names"
+regexTarget = "secret"
+regexes = ['''^pythia\.[a-z0-9.]+$''']

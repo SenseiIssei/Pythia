@@ -1,0 +1,82 @@
+#!/bin/sh
+# Pythia pre-commit hook: stop secrets and private data before they reach a commit.
+#
+# Install once per clone:   npm run hooks:install
+#                     (or)  git config core.hooksPath scripts/hooks
+#
+# 1. gitleaks on the staged changes, with the repo's .gitleaks.toml, when the
+#    gitleaks binary is on PATH (https://github.com/gitleaks/gitleaks/releases).
+# 2. A fast pattern check on the added lines, which needs nothing but git and
+#    grep: bot tokens, API keys, private keys, wallet key arrays, personal
+#    paths, public IP addresses, e-mail addresses, and secret files by name.
+#
+# A line that is a proven false positive can carry the marker
+# `secret-scan:allow` (and `gitleaks:allow` for gitleaks). Bypassing the hook
+# with --no-verify is for emergencies only; the history scan in
+# scripts/security-scan.sh will still find what slipped through.
+
+set -u
+fail=0
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+
+say() { printf '%s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------- 1. gitleaks
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks git --pre-commit --staged --redact --no-banner --config .gitleaks.toml . >&2; then
+    say "pre-commit: gitleaks found a secret in the staged changes (shown redacted above)."
+    fail=1
+  fi
+else
+  say "pre-commit: gitleaks is not installed; only the pattern check runs (see scripts/hooks/pre-commit)."
+fi
+
+# ---------------------------------------------------------------- 2. secret files by name
+bad_files=$(git diff --cached --name-only --diff-filter=ACR | grep -E \
+  '(^|/)\.env(\.|$)|\.pem$|\.key$|\.p12$|\.pfx$|(^|/)id_(rsa|ed25519)|keypair[^/]*\.json$|(^|/)alerts\.env$|(^|/)secrets\.json$' \
+  | grep -vE '(^|/)\.env\.example$')
+if [ -n "$bad_files" ]; then
+  say "pre-commit: these files look like secrets and must not be committed:"
+  say "$bad_files"
+  fail=1
+fi
+
+# ---------------------------------------------------------------- 3. patterns in added lines
+added=$(git diff --cached -U0 --no-color --diff-filter=ACMR -- . \
+  ':(exclude)package-lock.json' ':(exclude)Cargo.lock' ':(exclude)src-tauri/Cargo.lock' \
+  ':(exclude)*.png' ':(exclude)*.jpg' ':(exclude)*.ico' ':(exclude)*.parquet' \
+  | grep -E '^\+' | grep -vE '^\+\+\+ ' | grep -v 'secret-scan:allow')
+
+check() { # name, extended regex, [exclude regex]
+  hits=$(printf '%s\n' "$added" | grep -nE -- "$2")
+  if [ -n "${3:-}" ] && [ -n "$hits" ]; then
+    hits=$(printf '%s\n' "$hits" | grep -vE -- "$3")
+  fi
+  if [ -n "$hits" ]; then
+    say "pre-commit: possible $1 in the staged changes:"
+    # Show where, never the whole value: the first 60 characters of the line.
+    printf '%s\n' "$hits" | cut -c1-60 | sed 's/^/  /' >&2
+    fail=1
+  fi
+}
+
+check "Telegram bot token" '[0-9]{8,10}:AA[A-Za-z0-9_-]{33}'
+check "Anthropic API key" 'sk-ant-[A-Za-z0-9_-]{20,}'
+check "OpenAI-style API key" 'sk-(proj-)?[A-Za-z0-9]{32,}'
+check "Alpaca key id" '(^|[^A-Za-z0-9])(PK|AK|CK)[A-Z0-9]{16,24}([^A-Za-z0-9]|$)'
+check "GitHub token" 'gh[pousr]_[A-Za-z0-9]{30,}'
+check "private key block" '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----[A-Za-z0-9+/=]*$'
+check "wallet key array (64 numbers)" '\[ *([0-9]{1,3} *, *){63}[0-9]{1,3} *\]'
+check "personal Windows path" '[A-Za-z]:(\\\\|\\|/)+Users(\\\\|\\|/)+[A-Za-z0-9._-]+' '[A-Za-z]:(\\\\|\\|/)+Users(\\\\|\\|/)+(<[^>]*>|you|user|USER|USERNAME|%USERNAME%|Public|example)'
+check "personal home path" '/home/[a-z][a-z0-9_-]+/|/Users/[A-Za-z][A-Za-z0-9_-]+/' '/home/(user|you|example|runner|guides)/|/Users/(user|you|example|runner)/'
+check "public IP address" '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' '(^|[^0-9.])(127\.|10\.|0\.0\.0\.0|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.255\.|1\.1\.1\.1|8\.8\.8\.8)'
+check "e-mail address" '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' '@(example\.(com|org|net)|users\.noreply\.github\.com|noreply\.[a-z.]+|[0-9]+x\.png)|superwarper@t-online\.de|security@'
+
+if [ "$fail" -ne 0 ]; then
+  say ""
+  say "pre-commit: commit stopped. Remove the value (use an environment variable or a placeholder),"
+  say "or mark a proven false positive with 'secret-scan:allow' on that line."
+  exit 1
+fi
+exit 0
