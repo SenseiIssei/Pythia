@@ -542,7 +542,6 @@ jobs:
     timeout: 2h
     lock: polymarket
     lock_wait: 30m
-    enabled: false
 
   - name: polymarket-history
     description: Polymarket resolved markets and their price history, weekly, only what is new
@@ -551,7 +550,6 @@ jobs:
     resources: {cpus: 1, memory: 3g}
     timeout: 8h
     lock: polymarket-history
-    enabled: false
 
   - name: polymarket-study
     description: Polymarket study after the history, biases, the calibrated model against the market, the paper twin, the model the daily book uses
@@ -562,7 +560,6 @@ jobs:
     timeout: 4h
     lock: heavy
     lock_wait: 4h
-    enabled: false
 
   - name: retrain
     description: weekly retrain of the volatility model (M1), promoted only if better
