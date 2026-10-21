@@ -230,7 +230,7 @@ jobs:
     timeout: 30m
     lock: heavy
     lock_wait: 2h
-    enabled: false
+    enabled: true
 
   # Kraken Futures hourly funding and mark prices (public, no key), kept beyond the
   # endpoint's one-year window for kraken_funding_gap (results/kraken_funding_gap.md).
