@@ -5619,7 +5619,7 @@ impl Engine {
     pub fn apply_lab_signal(&mut self, sig: crate::lab::LabSignal) {
         let id = format!("lab:{}", sig.strategy);
         // An experiment (failed the lab's bar) is autopilot-only whatever its signal says.
-        let idle = self.lab_books_idle || sig.autopilot_only || sig.is_experimental();
+        let idle = self.lab_books_idle || sig.autopilot_only || sig.is_experimental() || sig.is_explicit_only();
         if !self.strategies.iter().any(|s| s.id == id) {
             let venue_class = if sig.is_us_equity() { Venue::Alpaca } else { Venue::Crypto };
             let universe = self.lab_book_markets(sig.is_us_equity()).into_iter().map(|m| m.id).collect();
@@ -5672,13 +5672,20 @@ impl Engine {
     /// Whether this lab book trades only inside an autopilot.
     pub fn lab_book_autopilot_only(&self, sid: &str) -> bool {
         let lab = self.strategies.iter().any(|s| s.id == sid && s.kind == StrategyKind::LabTargets);
-        lab && (self.lab_books_idle || self.lab_signals.get(sid).is_some_and(|s| s.autopilot_only || s.is_experimental()))
+        lab && (self.lab_books_idle
+            || self.lab_signals.get(sid).is_some_and(|s| s.autopilot_only || s.is_experimental() || s.is_explicit_only()))
     }
 
     /// Whether this lab book is an experiment: a rule that failed the lab's
     /// bar, which the auto pick never picks and a live autopilot never runs.
     pub fn lab_book_experimental(&self, sid: &str) -> bool {
         self.lab_signals.get(sid).is_some_and(|s| s.is_experimental())
+    }
+
+    /// Whether this lab book runs only where an autopilot names it as a
+    /// sleeve: the auto pick and a portfolio's allocator never pick it.
+    pub fn lab_book_explicit_only(&self, sid: &str) -> bool {
+        self.lab_signals.get(sid).is_some_and(|s| s.is_explicit_only())
     }
 
     /// Pause every autopilot-only lab book (or just `only`) that no active

@@ -101,6 +101,13 @@ pub struct LabEvidence {
     /// Why the experiment failed the bar, in the lab's words.
     #[serde(default)]
     pub why_failed: Option<String>,
+    /// The book runs only where an autopilot names it as a sleeve: the auto
+    /// pick, and with it a portfolio's allocator, never picks it, whatever
+    /// its numbers say. For a sleeve under a pre-registered forward test
+    /// (`spy_hold`, `research/lab/results/equity_sleeve_prereg.md`), whose
+    /// evidence must not move money into it anywhere else. Autopilot-only.
+    #[serde(default)]
+    pub explicit_only: bool,
 }
 
 // ── forward evidence ────────────────────────────────────────────────────────
@@ -235,6 +242,11 @@ impl LabSignal {
     /// its evidence.
     pub fn is_experimental(&self) -> bool {
         self.experimental || self.evidence.experimental
+    }
+
+    /// Run only where an autopilot names it ([`LabEvidence::explicit_only`]).
+    pub fn is_explicit_only(&self) -> bool {
+        self.evidence.explicit_only
     }
 
     /// A book of US shares and ETFs, traded on Alpaca.
