@@ -25,6 +25,24 @@ REF_TOP = 50
 FACTORS = ("ivol", "max", "skew", "vshock", "size", "rev7")
 
 
+def max28(P: fc.Panel) -> np.ndarray:
+    """MAX: the largest daily return over the 28 days up to and including t (at least 20 returns)."""
+    r = np.where(np.isfinite(P.ret), P.ret, -np.inf)
+    mx = np.full_like(P.ret, -np.inf)
+    for k in range(28):
+        sh = np.full_like(r, -np.inf)
+        sh[k:] = r[:r.shape[0] - k]
+        mx = np.maximum(mx, sh)
+    cnt = fc.rolling(np.where(np.isfinite(P.ret), 1.0, np.nan), 28, 1, how="sum")
+    return np.where(np.isfinite(mx) & (cnt >= 20), mx, np.nan)
+
+
+def max_flags(P: fc.Panel) -> np.ndarray:
+    """(T, N) bool: the worst third by MAX among the 50 most liquid eligible coins each day,
+    the filter the shadow book tsmom_tranches_lowmax applies."""
+    return co.worst_third(co.badness(max28(P), P.top_liquid(REF_TOP)))
+
+
 def factors(P: fc.Panel) -> dict[str, np.ndarray]:
     lr = np.log1p(P.ret)
     b = lr[:, [P.btc]]
@@ -38,15 +56,7 @@ def factors(P: fc.Panel) -> dict[str, np.ndarray]:
         vx, vy, cxy = exx - ex ** 2, eyy - ey ** 2, exy - ex * ey
         res_var = vx - np.where(vy > 0, cxy ** 2 / np.where(vy > 0, vy, 1.0), np.nan)
         out = {"ivol": np.sqrt(np.maximum(res_var, 0.0))}
-        # MAX: the largest daily return over the 28 days up to and including t.
-        r = np.where(np.isfinite(P.ret), P.ret, -np.inf)
-        mx = np.full_like(P.ret, -np.inf)
-        for k in range(28):
-            sh = np.full_like(r, -np.inf)
-            sh[k:] = r[:r.shape[0] - k]
-            mx = np.maximum(mx, sh)
-        cnt = fc.rolling(np.where(np.isfinite(P.ret), 1.0, np.nan), 28, 1, how="sum")
-        out["max"] = np.where(np.isfinite(mx) & (cnt >= 20), mx, np.nan)
+        out["max"] = max28(P)
         e1 = fc.rolling(lr, W, MIN)
         e2 = fc.rolling(lr ** 2, W, MIN)
         e3 = fc.rolling(lr ** 3, W, MIN)

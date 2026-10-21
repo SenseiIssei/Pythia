@@ -89,3 +89,41 @@ def test_fwd_log_return_keeps_a_dead_coins_last_close():
 
 def test_trial_counts_add_up_to_the_registration():
     assert sum(co.STUDY_TRIALS.values()) == co.REG_TRIALS == 94
+
+
+# ---------------------------------------------------------------- the tsmom_tranches_lowmax shadow book
+
+DAY_US = 86_400_000_000
+
+
+def _panel(T: int = 400):
+    import polars as pl
+    from lab.experiments import memecoins as w7
+    rng = np.random.default_rng(3)
+    day0 = 1_700_000_000_000_000 // DAY_US * DAY_US
+    frames = {}
+    for i, sym in enumerate(("BTCUSDT", "AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT")):
+        r = 0.003 + 0.01 * rng.standard_normal(T)
+        if sym == "AAAUSDT":
+            r[T - 10] = 0.6                         # one lottery day, ten days ago
+        close = np.exp(np.cumsum(r))
+        frames[sym] = pl.DataFrame({"day": [day0 + k * DAY_US for k in range(T)], "open": close,
+                                    "high": close * 1.01, "low": close * 0.99, "close": close,
+                                    "volume": np.full(T, 1e9), "qv": np.full(T, 5e7 * (i + 1)),
+                                    "n": np.full(T, 1000, dtype=np.int64), "taker_qv": np.full(T, 2e7)})
+    return w7.build_panel(frames)
+
+
+def test_lowmax_book_drops_the_lottery_coin_and_its_signal_is_experimental():
+    from lab.paper import experimental as ex
+    from lab.paper import tranches_lowmax as tl
+    P = _panel()
+    t = P.T - 1
+    W, flags = tl.targets(P)
+    a = P.names.index("AAAUSDT")
+    assert flags[t, a] and W[t, a] == 0.0
+    assert flags[t].sum() == 2, "the worst third of six coins"
+    sig = tl.signal(P, W, t, 1)
+    assert sig["experimental"] and sig["autopilot_only"] and sig["variant"].startswith(ex.LABEL)
+    assert "AAA" not in sig["weights"]
+    assert sig["evidence"]["report"] == "xs_factors"

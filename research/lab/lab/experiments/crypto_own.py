@@ -277,13 +277,13 @@ def finalize(results: dict) -> dict:
 # Writing helpers
 # ---------------------------------------------------------------------------
 
-PICK_COLS = ["book", "variant", "is", "book_is", "oos", "book_oos", "oos70", "book_oos70", "dd_pct", "book_dd_pct",
-             "years_better", "band_lo", "band_hi", "late", "twin", "twin_book", "deflated_diff", "dg", "dg_book",
-             "days_changed_pct", "verdict"]
+PICK_COLS = ["book", "variant", "is", "book_is", "oos", "book_oos", "oos70", "book_oos70", "cagr_pct", "dd_pct",
+             "book_dd_pct", "years_better", "band_lo", "band_hi", "late", "twin", "twin_book", "deflated_diff",
+             "deflated_pool", "dg", "dg_lo", "dg_hi", "dg_book", "days_changed_pct", "verdict"]
 
 
 def pick_table(rows: list[dict]) -> str:
-    tab = [{**r, "dd_pct": r["dd"] * 100, "book_dd_pct": r["book_dd"] * 100,
+    tab = [{**r, "dd_pct": r["dd"] * 100, "book_dd_pct": r["book_dd"] * 100, "cagr_pct": r["cagr"] * 100,
             "days_changed_pct": r["days_changed"] * 100} for r in rows]
     return dc.table(tab, PICK_COLS)
 
