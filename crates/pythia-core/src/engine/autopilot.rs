@@ -181,6 +181,13 @@
 //!   regular session (the same wait every lab book of US shares has), so
 //!   their queued rebalance never holds the crypto books back, which trade
 //!   at any time.
+//! - **Or chosen by hand.** A portfolio whose sleeves are given at the start
+//!   runs exactly those lab books (crypto and US shares, nothing else) at
+//!   those weights: each class's budget is the sum of its sleeves' weights,
+//!   no allocator, no re-pick. This is how a lab book marked explicit only
+//!   (`lab::LabEvidence::explicit_only`, never auto-picked) gets money, for
+//!   instance the SPY sleeve of the registered Crypto + SPY forward test
+//!   (`research/lab/results/equity_sleeve_prereg.md`).
 //! - **Blended benchmark.** It is held against BTC and SPY bought and held
 //!   at its class budgets ([`BlendBench`]); when a re-pick moves the budgets
 //!   the blend is chain-linked and continues at the new weights.
@@ -393,7 +400,8 @@ pub struct AutopilotConfig {
     /// A portfolio across asset classes: one amount over crypto lab books
     /// and lab books of US shares in one book on the Alpaca account, split
     /// between the two classes by evidence (see "Portfolios across asset
-    /// classes" above). Paper or demo only, and Pythia picks the books.
+    /// classes" above). Paper or demo only. Pythia picks the books, unless
+    /// sleeves are given: then those lab books at those weights, never re-picked.
     /// Off: one asset class, as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub portfolio: bool,

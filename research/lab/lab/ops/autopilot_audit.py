@@ -175,7 +175,7 @@ def audit_autopilot(ap: dict, orders: list[dict], now_ms: int, btc_now: float | 
     refused = [o for o in mine if o.get("status") == "rejected"]
     reasons: dict[str, int] = defaultdict(int)
     for o in refused:
-        reasons[str(o.get("rejectReason") or "?")[:90]] += 1
+        reasons[str(o.get("rejectReason") or "?").replace("—", ":").replace("â€”", ":")[:90]] += 1
     rt = round_trips(f)
     reb = rebalances(f)
     rp = at_repick(reb, start_ms, cfg.get("repickEveryHours") if not cfg.get("sleeves") else None)
