@@ -218,8 +218,16 @@ def _rjust(s: str, w: int) -> str:
 
 
 def short(s: str, n: int) -> str:
+    """At most n characters; a longer text is cut after its last whole word
+    (when that keeps most of it) and ends in an ellipsis."""
     s = " ".join(str(s).split())
-    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+    if len(s) <= n:
+        return s
+    head = s[: n - 1]
+    cut = head.rfind(" ")
+    if cut > n * 0.6:
+        head = head[:cut]
+    return head.rstrip(" ,;:") + "…"
 
 
 def nodash(s: str) -> str:
