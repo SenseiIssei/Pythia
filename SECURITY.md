@@ -151,5 +151,7 @@ Pythia as far as we know; each is re-checked on every scan.
   whole history, `cargo audit`, `npm audit`, `pip-audit` for the lab, and the
   CycloneDX SBOMs. Run it before every release.
 
-See also [docs/security/cra.md](docs/security/cra.md) for how Pythia maps to the
-EU Cyber Resilience Act, and [SAFETY.md](SAFETY.md) for the financial risks.
+See also [docs/security/practices.md](docs/security/practices.md) for the
+project's security practices (inspired by the essential requirements of the EU
+Cyber Resilience Act, without any claim of compliance or certification), and
+[SAFETY.md](SAFETY.md) for the financial risks.

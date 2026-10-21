@@ -1,10 +1,13 @@
-# Pythia and the EU Cyber Resilience Act
+# Security practices
 
-This note records how Pythia relates to the Cyber Resilience Act
-(Regulation (EU) 2024/2847, "CRA") and how its security work maps to the
-CRA's essential requirements. It is an engineering record, not legal advice.
+This note describes the security practices Pythia follows. They are inspired by
+the essential requirements of the EU Cyber Resilience Act
+(Regulation (EU) 2024/2847, "CRA"), which is a useful checklist for what secure
+software should do. Pythia does **not** claim compliance with the CRA, holds no
+certification, and has gone through no conformity assessment; the tables below
+are an engineering record of what the project does, not a legal statement.
 
-## Product and scope
+## What the practices cover
 
 **What Pythia is.** A trading and research cockpit: a Rust engine
 (`crates/pythia-core`), a desktop app (Tauri, `src-tauri/`, with the React UI in
@@ -13,29 +16,16 @@ CRA's essential requirements. It is an engineering record, not legal advice.
 default, and can route orders to brokers and exchanges with the user's own API
 keys.
 
-**Status under the CRA.** Pythia is free and open source software developed and
-published without any commercial activity: it is not sold, there is no paid
-version, no paid support, no hosting service, and no personal data is collected
-for monetisation. Software of this kind is not "made available on the market in
-the course of a commercial activity", so the manufacturer obligations of the CRA
-do not apply to it (recitals 18 and 19). Nor is there an open-source steward in
-the sense of Article 24 (an organisation that systematically supports the
-project's development for commercial use by others).
+**Why the CRA as a reference.** Pythia is free and open source software under
+the MIT licence (`LICENSE`), developed without any commercial activity: it is
+not sold, there is no paid version, support or hosting, and no personal data is
+collected. The CRA's essential requirements are used here as a well thought out
+list of good practices, so that the project's security is easy to review, and so
+that anyone who builds on Pythia can see what is already in place. Someone who
+puts Pythia into a commercial product carries their own responsibility for that
+product; nothing in this document transfers to them as an assurance.
 
-The obligations therefore apply **in a limited way, by choice**: the project
-follows the essential requirements of Annex I as good practice, so that anyone
-who integrates Pythia into a commercial product (and becomes a manufacturer
-with full obligations, Article 13(5)) starts from a well documented base. If the
-project ever becomes commercial (for example sold, offered as a paid service,
-or monetised through personal data), this document has to be revisited first;
-the reporting obligations of Article 14 apply to manufacturers since
-11 September 2026 and the remaining obligations from 11 December 2027.
-
-Pythia is published under the MIT licence (`LICENSE`), which allows free
-access, use, modification and redistribution, as the CRA's definition of free
-and open-source software requires (Article 3(48)).
-
-## Essential requirements (Annex I, Part I)
+## Product security practices (after CRA Annex I, Part I)
 
 | Requirement | What Pythia does | Status |
 | --- | --- | --- |
@@ -54,7 +44,7 @@ and open-source software requires (Article 3(48)).
 | (2l) Security-relevant logging | The engine journal records arming, refusals, kill switch, risk trips and every order; the server logs configuration changes (caps, mute, kill) without secrets; operator alerts for kill switch and floors. | done |
 | (2m) Secure deletion of data and settings | Settings remove each stored key from the keychain; all other data lives in the app data folder and the configured data folder, which the user can delete. | done (manual) |
 
-## Vulnerability handling (Annex I, Part II)
+## Vulnerability handling practices (after CRA Annex I, Part II)
 
 | Requirement | What Pythia does | Status |
 | --- | --- | --- |

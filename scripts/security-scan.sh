@@ -133,5 +133,6 @@ for s in "$out"/sbom/*.json; do
   fi
 done
 
-printf '\nPythia security scan, %s\n\n%s\n'"$(date -u +%Y-%m-%dT%H:%MZ)" "$summary" | tee "$out/summary.txt"
+stamp=$(date -u +%Y-%m-%dT%H:%MZ)
+printf '\nPythia security scan, %s\n\n%s\n' "$stamp" "$summary" | tee "$out/summary.txt"
 exit "$failed"
