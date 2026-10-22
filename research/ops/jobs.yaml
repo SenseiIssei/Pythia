@@ -378,7 +378,7 @@ jobs:
     command: /opt/pythia-ops/agent/run_agent.sh research
     timeout: 7h
     lock: agent
-    enabled: false               # off until the agent is hardened (audit 2026-10-22)
+    enabled: true
 
   - name: agent-care
     description: daily care by the agent, failed jobs fixed with tests, the live bot and the books checked, a short report
@@ -387,7 +387,7 @@ jobs:
     command: /opt/pythia-ops/agent/run_agent.sh care
     timeout: 2h
     lock: agent
-    enabled: false               # off until the agent is hardened (audit 2026-10-22)
+    enabled: true
 
   - name: backup
     description: archive of engine state, model registry, paper books and ledgers, rotated
