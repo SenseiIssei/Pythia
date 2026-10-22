@@ -46,3 +46,5 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+# SBOMs belong in security-reports/; one left next to a crate is never committed
+*.cdx.json

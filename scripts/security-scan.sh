@@ -103,7 +103,7 @@ done
 # ---------------------------------------------------------------- SBOM
 if cargo cyclonedx --version >/dev/null 2>&1; then
   if cargo cyclonedx --format json --spec-version 1.5 >"$out/cyclonedx.log" 2>&1; then
-    for f in crates/pythia-core server src-tauri crates/pythia-ml; do
+    for f in crates/pythia-core server src-tauri crates/pythia-ml cli; do
       for s in "$f"/*.cdx.json; do
         [ -f "$s" ] && mv "$s" "$out/sbom/$(basename "$f")-rust.cdx.json"
       done
