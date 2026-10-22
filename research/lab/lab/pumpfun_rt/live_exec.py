@@ -790,7 +790,9 @@ class LiveExecutor:
     def _roll(self) -> None:
         d = self.clock() // P.DAY_MS
         if d != self.day:
-            self.day, self.day_pnl_l = d, 0
+            # The day's closed trades from the ledger, so a restart does not forget today's losses
+            # (the daily stop counts them); a new day starts at 0.
+            self.day, self.day_pnl_l = d, day_pnl_from_ledger(d)
 
     def _caps(self, o: P.Order) -> str | None:
         lim = self.limits
@@ -1081,6 +1083,12 @@ def write_close(rec: dict) -> None:
             if new:
                 w.writeheader()
             w.writerow(rec)
+
+
+def day_pnl_from_ledger(day: int) -> int:
+    """The realised P&L (lamports) of the closed trades that ended on UTC day `day` (days since 1970)."""
+    return int(round(sum((r.get("pnl_sol") or 0.0) for r in read_ledger(10_000)
+                         if r.get("exit_ms") is not None and int(r["exit_ms"]) // P.DAY_MS == day) * C.LAMPORTS))
 
 
 def read_ledger(limit: int = 100) -> list[dict]:

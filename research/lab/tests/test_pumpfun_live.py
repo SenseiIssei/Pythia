@@ -825,3 +825,13 @@ def test_the_book_takes_the_chain_correction_into_its_stops(tmp_path):
     ex.results.put(("chain", None, -1_346_201))
     ex.poll(T0)
     assert ex.totals["pnl_l"] == -1_346_201 and ex.day_pnl_l == -1_346_201 and seen == [1]
+
+
+def test_a_restart_keeps_the_days_losses_for_the_daily_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(LX, "data_dir", lambda: tmp_path)
+    today, yesterday = T0 - T0 % P.DAY_MS + 1_000, T0 - T0 % P.DAY_MS - 1_000
+    for exit_ms, pnl in ((yesterday, -0.5), (today, -0.006174367), (today, -0.000672003)):
+        LX.write_close({"mint": "M", "exit_ms": exit_ms, "pnl_sol": pnl})
+    ex = executor(tmp_path)
+    ex._roll()
+    assert ex.day_pnl_l == -6_846_370
