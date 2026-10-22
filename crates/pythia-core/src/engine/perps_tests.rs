@@ -103,6 +103,7 @@ fn config(id: &str, mode: AutopilotMode, capital: f64) -> AutopilotConfig {
         max_sleeves: None,
         repick_every_hours: None,
         portfolio: false,
+        live_test: false,
     }
 }
 

@@ -548,6 +548,7 @@ fn stopping_the_autopilot_cancels_its_resting_order_and_places_nothing_new() {
         max_sleeves: None,
         repick_every_hours: None,
         portfolio: false,
+        live_test: false,
     };
     c.flatten_on_stop = false;
     let ap = e.autopilot_start(c, false, VenueCash::NotRead).expect("the autopilot starts");

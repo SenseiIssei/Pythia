@@ -405,6 +405,54 @@ pub struct AutopilotConfig {
     /// Off: one asset class, as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub portfolio: bool,
+    /// A capped real-money test: live, with strategies the owner names
+    /// although their Strategy Passport is not green. Only with mode live,
+    /// at most the live test cap (`PYTHIA_LIVE_TEST_MAX_USD`), a max-loss
+    /// rule of at most [`LIVE_TEST_MAX_LOSS_PCT`], one at a time. Every other
+    /// live gate still applies, experiments stay refused, and its trades
+    /// never count as readiness evidence. See "Capped live test" in SAFETY.md.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_test: bool,
+}
+
+impl AutopilotConfig {
+    /// A capped real-money test: the flag counts only with mode live.
+    pub fn is_live_test(&self) -> bool {
+        self.live_test && self.mode == AutopilotMode::Live
+    }
+
+    /// How the mode is said in messages: "paper", "demo", "LIVE" or "LIVE TEST".
+    fn mode_word(&self) -> &'static str {
+        if self.is_live_test() {
+            "LIVE TEST"
+        } else {
+            self.mode.word()
+        }
+    }
+}
+
+/// The live test cap when `PYTHIA_LIVE_TEST_MAX_USD` is unset, in USD.
+pub const LIVE_TEST_DEFAULT_MAX_USD: f64 = 120.0;
+/// The most a live test may ever be given, whatever the environment says.
+pub const LIVE_TEST_CEILING_USD: f64 = 300.0;
+/// The loosest max-loss rule a live test may have, in % of its amount.
+pub const LIVE_TEST_MAX_LOSS_PCT: f64 = 25.0;
+/// The variable the host reads the live test cap from.
+pub const LIVE_TEST_CAP_ENV: &str = "PYTHIA_LIVE_TEST_MAX_USD";
+
+/// The live test cap from the raw value of `PYTHIA_LIVE_TEST_MAX_USD`:
+/// unset, empty, unreadable, zero or below is the default; anything above
+/// [`LIVE_TEST_CEILING_USD`] is clamped to it.
+pub fn live_test_cap_from(raw: Option<&str>) -> f64 {
+    match raw.map(str::trim).filter(|s| !s.is_empty()).and_then(|s| s.parse::<f64>().ok()) {
+        Some(x) if x.is_finite() && x > 0.0 => x.min(LIVE_TEST_CEILING_USD),
+        _ => LIVE_TEST_DEFAULT_MAX_USD,
+    }
+}
+
+/// The live test cap from the process environment.
+pub fn live_test_cap_from_env() -> f64 {
+    live_test_cap_from(std::env::var(LIVE_TEST_CAP_ENV).ok().as_deref())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1039,7 +1087,22 @@ impl Autopilot {
     }
 
     fn label(&self) -> String {
-        format!("Autopilot \"{}\"", self.config.name)
+        let test = if self.is_live_test() { " (LIVE TEST)" } else { "" };
+        format!("Autopilot \"{}\"{test}", self.config.name)
+    }
+
+    /// A capped real-money test (see [`AutopilotConfig::live_test`]).
+    pub fn is_live_test(&self) -> bool {
+        self.config.is_live_test()
+    }
+
+    /// Its name as messages and alerts show it: a live test says so.
+    fn display_name(&self) -> String {
+        if self.is_live_test() {
+            format!("{} (LIVE TEST)", self.config.name)
+        } else {
+            self.config.name.clone()
+        }
     }
 
     /// This sleeve's share of the position in `market`.
@@ -1186,7 +1249,52 @@ pub fn validate(cfg: &AutopilotConfig, now: i64) -> Result<(), String> {
             return Err(format!("{} is listed twice.", sl.strategy_id));
         }
     }
+    if cfg.live_test {
+        if cfg.mode != AutopilotMode::Live {
+            return Err(format!(
+                "A capped live test is a real-money mode: choose live for it, or turn the test off for a {} autopilot.",
+                cfg.mode.word()
+            ));
+        }
+        if cfg.portfolio {
+            return Err("A capped live test cannot be a portfolio: name the strategy it runs.".into());
+        }
+        if cfg.sleeves.is_empty() {
+            return Err(
+                "A capped live test runs only strategies you name: choose them yourself. Pythia never picks a strategy without a green Strategy Passport for real money."
+                    .into(),
+            );
+        }
+    }
     Ok(())
+}
+
+/// The caps of a capped live test, for its amount and its max-loss rule.
+/// `cap` is the live test cap in USD. Plain sentences.
+pub fn live_test_limits(cfg: &AutopilotConfig, cap: f64) -> Result<(), String> {
+    if cfg.capital_usd > cap + EPS {
+        return Err(format!(
+            "A capped live test may trade at most {} ({LIVE_TEST_CAP_ENV}, never above {}), not {}.",
+            usd(cap),
+            usd(LIVE_TEST_CEILING_USD),
+            usd(cfg.capital_usd)
+        ));
+    }
+    match max_loss_allowance(&cfg.stop, cfg.capital_usd) {
+        (Some(_), Some(p)) if p <= LIVE_TEST_MAX_LOSS_PCT + 1e-9 => Ok(()),
+        (Some(u), Some(p)) => Err(format!(
+            "A capped live test needs a max-loss rule of at most {} % of the amount ({} of {}); this one allows {} ({} %).",
+            pct(LIVE_TEST_MAX_LOSS_PCT),
+            usd(cfg.capital_usd * LIVE_TEST_MAX_LOSS_PCT / 100.0),
+            usd(cfg.capital_usd),
+            usd(u),
+            pct(p)
+        )),
+        _ => Err(format!(
+            "A capped live test needs a max-loss rule of at most {} % of the amount, in % or in dollars.",
+            pct(LIVE_TEST_MAX_LOSS_PCT)
+        )),
+    }
 }
 
 /// The most the max-loss rules let an autopilot with capital `x` lose: in
@@ -2352,12 +2460,13 @@ impl Engine {
                 .get(&market)
                 .is_some_and(|sh| sh.iter().any(|(b, x)| *x > 1e-9 && self.lab_book_experimental(b)));
         let mode = match ap.config.mode {
+            AutopilotMode::Live if ap.is_live_test() => "live test",
             AutopilotMode::Live => "live",
             AutopilotMode::Demo => "demo",
             AutopilotMode::Paper => "paper",
         };
         let line = crate::alerts::TradeLine {
-            book: ap.config.name.clone(),
+            book: ap.display_name(),
             buy,
             symbol: symbol.split('/').next().unwrap_or(symbol).to_string(),
             qty,
@@ -2670,16 +2779,30 @@ impl Engine {
             if !self.live.venues.contains(&venue) {
                 return Err(format!("{} is not enabled for live routing. Enable it on the Live page first.", venue_label(cv)));
             }
+            let test = cfg.is_live_test();
+            if test {
+                if let Some(other) = self.autopilots.iter().find(|a| a.is_active() && a.is_live_test()) {
+                    return Err(format!(
+                        "{} is already a capped live test, and only one runs at a time. Stop it first.",
+                        other.label()
+                    ));
+                }
+            }
             for (sid, ..) in &chosen {
                 let s = self.strategies.iter().find(|s| &s.id == sid).expect("chosen strategies exist");
                 let pp = self.passport_for(s);
-                if !pp.live_ready {
+                // The one exception to the passport: a capped live test,
+                // which the owner named and confirmed as one.
+                if !pp.live_ready && !test {
                     let why = pp.blocked_reason.unwrap_or_else(|| "its validation gates are not green".into());
                     return Err(format!("{} is not cleared for live: {why}", s.name));
                 }
             }
             if cfg.stop.max_loss_pct.is_none() && cfg.stop.max_loss_usd.is_none() {
                 return Err("Live needs a max-loss rule, in % or in dollars, so there is always a level at which it stops.".into());
+            }
+            if test {
+                live_test_limits(&cfg, self.live_test_cap_usd)?;
             }
             let free = match cash {
                 VenueCash::Read(c) => c,
@@ -2800,11 +2923,15 @@ impl Engine {
         let mut msg = format!(
             "Autopilot \"{}\" started in {} on {} with {}: {}.",
             cfg.name,
-            cfg.mode.word(),
+            cfg.mode_word(),
             place,
             usd(cfg.capital_usd),
             describe_rules(&cfg)
         );
+        if cfg.is_live_test() {
+            msg.push(' ');
+            msg.push_str(&self.live_test_words(&sleeves));
+        }
         let started_alert = if sleeves.is_empty() {
             msg.clone()
         } else {
@@ -2881,10 +3008,11 @@ impl Engine {
         {
             use crate::alerts::{AlertEvent, Msg};
             let msg = Msg::AutopilotStarted {
-                name: cfg.name.clone(),
+                name: if cfg.is_live_test() { format!("{} (LIVE TEST)", cfg.name) } else { cfg.name.clone() },
                 mode: match cfg.mode {
                     AutopilotMode::Paper => i18n::ApMode::Paper,
                     AutopilotMode::Demo => i18n::ApMode::Demo,
+                    AutopilotMode::Live if cfg.is_live_test() => i18n::ApMode::LiveTest,
                     AutopilotMode::Live => i18n::ApMode::Live,
                 },
                 place: if cfg.portfolio { i18n::Place::Portfolio } else { i18n::Place::Venue(place.clone()) },
@@ -2952,6 +3080,31 @@ impl Engine {
         // BTC and SPY starts (filled in later when no price is known yet).
         self.ap_blend_relink(i, now);
         Ok(id)
+    }
+
+    /// What a capped live test is, said once at its start (journal, last
+    /// action, alert): the cap, the loss rule, which strategies are unproven.
+    fn live_test_words(&self, sleeves: &[Sleeve]) -> String {
+        let unproven: Vec<&str> = sleeves
+            .iter()
+            .filter(|sl| !self.passport(&sl.strategy_id).is_some_and(|p| p.live_ready))
+            .map(|sl| sl.name.as_str())
+            .collect();
+        let which = if unproven.is_empty() {
+            "Its strategies have passed their checks, and it still runs under the test's caps.".to_string()
+        } else {
+            format!(
+                "{} {} not passed {} checks (no green Strategy Passport): the strategy is unproven and the whole amount can be lost.",
+                unproven.join(", "),
+                if unproven.len() == 1 { "has" } else { "have" },
+                if unproven.len() == 1 { "its" } else { "their" }
+            )
+        };
+        format!(
+            "LIVE TEST: real money, capped at {} with a max loss of at most {} %. {which} Its trades never count as readiness evidence.",
+            usd(self.live_test_cap_usd),
+            pct(LIVE_TEST_MAX_LOSS_PCT)
+        )
     }
 
     /// Strategies an autopilot in `mode` may not take because another active
@@ -3168,6 +3321,10 @@ impl Engine {
             if cfg.stop.max_loss_pct.is_none() && cfg.stop.max_loss_usd.is_none() {
                 return Err("Live needs a max-loss rule, in % or in dollars, so there is always a level at which it stops.".into());
             }
+            // A capped live test keeps its caps through every change.
+            if cfg.is_live_test() {
+                live_test_limits(&cfg, self.live_test_cap_usd)?;
+            }
             if re_sleeve || cfg.capital_usd > old.capital_usd + EPS {
                 if !self.live.armed {
                     return Err("Live routing is not armed. Arm it on the Live page first; the autopilot never arms anything itself.".into());
@@ -3328,7 +3485,9 @@ impl Engine {
                 }
                 out
             };
-            if live {
+            // A capped live test may name strategies without a green
+            // passport (never an experiment: `sleeve_block` refuses those).
+            if live && !cfg.is_live_test() {
                 for (sid, ..) in &picks {
                     let s = self.strategies.iter().find(|s| &s.id == sid).expect("picked strategies exist");
                     let pp = self.passport_for(s);
@@ -3601,7 +3760,7 @@ impl Engine {
         for ap in self.autopilots.iter().filter(|a| a.is_active()) {
             out.push(MoveInput {
                 key: format!("ap:{}", ap.config.id),
-                label: ap.config.name.clone(),
+                label: ap.display_name(),
                 held_by: String::new(),
                 subject: MoveSubject::Equity,
                 value: self.ap_equity(ap),
@@ -3915,6 +4074,18 @@ impl Engine {
             let Some(s) = self.strategies.iter().find(|s| s.id == sl.strategy_id) else {
                 return Some(format!("{} no longer exists.", sl.name));
             };
+            // A capped live test runs strategies without a green passport;
+            // they still have to be set to live (a parameter change takes
+            // them off it, and the test pauses).
+            if ap.is_live_test() {
+                if s.state != StrategyState::Live {
+                    return Some(format!(
+                        "{} is no longer set to live (its parameters changed, or it was set to paper). Stop this live test and start a new one.",
+                        sl.name
+                    ));
+                }
+                continue;
+            }
             let pp = self.passport_for(s);
             if s.state != StrategyState::Live || !pp.live_ready {
                 let why = pp.blocked_reason.unwrap_or_else(|| "it is no longer set to live".into());
@@ -4198,7 +4369,7 @@ impl Engine {
             // The footer: the first sentence of what happened to its
             // positions, no more.
             let card = Msg::AutopilotHalted {
-                name: ap.config.name.clone(),
+                name: ap.display_name(),
                 finished: state == AutopilotState::Finished,
                 why,
                 equity: eq,

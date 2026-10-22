@@ -62,6 +62,7 @@ fn config(id: &str, capital: f64, sleeves: &[&str]) -> AutopilotConfig {
         max_sleeves: None,
         repick_every_hours: None,
         portfolio: false,
+        live_test: false,
     }
 }
 

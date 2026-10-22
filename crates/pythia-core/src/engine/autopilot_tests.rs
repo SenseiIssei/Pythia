@@ -40,6 +40,7 @@ fn config(id: &str, capital: f64, sleeves: &[(&str, f64)], stop: StopRules) -> A
         max_sleeves: None,
         repick_every_hours: None,
         portfolio: false,
+        live_test: false,
     }
 }
 
@@ -2725,4 +2726,304 @@ fn an_experiment_named_as_a_sleeve_runs_and_says_experiment() {
         .autopilot_start(live_config("live", 1_000.0, &[("lab:memes_rotation", 1.0)]), true, VenueCash::Read(1_000.0))
         .unwrap_err();
     assert!(err.contains("is an experiment") && err.contains("never with real money"), "{err}");
+}
+
+// ── capped live test ───────────────────────────────────────────────────────
+
+/// A capped live test of `capital` on Kraken with a 20 % max loss.
+fn live_test_config(id: &str, capital: f64, sleeves: &[(&str, f64)]) -> AutopilotConfig {
+    let mut c = live_config(id, capital, sleeves);
+    c.stop = StopRules { max_loss_pct: Some(20.0), ..Default::default() };
+    c.live_test = true;
+    c
+}
+
+fn filled(o: &LiveOrderOut, price: f64) -> LiveUpdate {
+    LiveUpdate {
+        status: BrokerOrderStatus::Filled,
+        filled_qty: o.qty,
+        avg_price: Some(price),
+        fee: 0.0,
+        fee_base: 0.0,
+        fee_unpriced: Vec::new(),
+        raw_status: "filled".into(),
+    }
+}
+
+#[test]
+fn the_live_test_cap_reads_the_variable_and_never_goes_above_300() {
+    assert_eq!(live_test_cap_from(None), 120.0);
+    assert_eq!(live_test_cap_from(Some("")), 120.0);
+    assert_eq!(live_test_cap_from(Some(" 50 ")), 50.0);
+    assert_eq!(live_test_cap_from(Some("300")), 300.0);
+    assert_eq!(live_test_cap_from(Some("1000")), 300.0, "a bigger value is clamped to the ceiling");
+    assert_eq!(live_test_cap_from(Some("lots")), 120.0);
+    assert_eq!(live_test_cap_from(Some("0")), 120.0);
+    assert_eq!(live_test_cap_from(Some("-5")), 120.0);
+    assert_eq!(live_test_cap_from(Some("inf")), 120.0);
+    let mut e = engine();
+    e.set_live_test_cap_usd(5_000.0);
+    assert_eq!(e.live_test_cap_usd(), 300.0);
+    e.set_live_test_cap_usd(80.0);
+    assert_eq!(e.state().live.live_test_cap_usd, 80.0, "the app reads the cap from the live status");
+}
+
+#[test]
+fn the_live_test_flag_reads_the_wire_and_is_off_by_default() {
+    let c: AutopilotConfig = serde_json::from_value(serde_json::json!({
+        "mode": "live", "venue": "kraken", "capitalUsd": 100.0, "liveTest": true,
+        "sleeves": [{ "strategyId": "ema-cross-1", "weight": 1.0 }]
+    }))
+    .unwrap();
+    assert!(c.live_test && c.is_live_test());
+    let c: AutopilotConfig = serde_json::from_value(serde_json::json!({ "mode": "live", "venue": "kraken", "capitalUsd": 100.0 })).unwrap();
+    assert!(!c.live_test, "older clients and saves are no test");
+    assert!(serde_json::to_value(&c).unwrap().get("liveTest").is_none(), "left out when off");
+}
+
+#[test]
+fn a_live_test_runs_a_strategy_without_a_green_passport_and_says_live_test_everywhere() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    assert!(!e.passport("ema-cross-1").unwrap().live_ready, "the strategy is unproven");
+    // A plain live start is refused for it, as before.
+    let err = e.autopilot_start(live_config("plain", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.starts_with("EMA Cross · Crypto is not cleared for live"), "{err}");
+
+    let id = e.autopilot_start(live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    let s = status(&e, &id);
+    assert!(s.config.live_test, "the app sees the flag on the status");
+    assert_eq!(s.config.mode, AutopilotMode::Live);
+    assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Live);
+    let last = s.last_action.unwrap();
+    assert!(last.starts_with("Autopilot \"Test t\" started in LIVE TEST on Kraken with $100.00"), "{last}");
+    assert!(last.contains("LIVE TEST: real money, capped at $120.00 with a max loss of at most 25 %"), "{last}");
+    assert!(last.contains("EMA Cross · Crypto has not passed its checks (no green Strategy Passport)"), "{last}");
+    assert!(last.contains("never count as readiness evidence"), "{last}");
+    assert!(e.journal.iter().any(|j| j.kind == JournalKind::Risk && j.message.contains("started in LIVE TEST")));
+    assert!(e.pending_alerts.iter().any(|a| a.contains("LIVE TEST")), "the plain alert says it");
+    let ev = e.alert_events.iter().find(|a| a.kind == crate::alerts::AlertKind::AutopilotStarted).unwrap();
+    assert!(ev.text.contains("LIVE TEST"), "{}", ev.text);
+
+    // Its orders are real and sized from the capped amount.
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, BTC);
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 1, "the entry went to the venue");
+    assert!(!out[0].demo);
+    assert!(out[0].qty * out[0].ref_price <= 100.0 + 1e-6, "sized from the capped amount");
+
+    // Every later line names the test.
+    e.autopilot_pause(&id).unwrap();
+    assert!(journal_has(&e, "Autopilot \"Test t\" (LIVE TEST)"), "the journal names the test");
+    e.autopilot_resume(&id).unwrap();
+    assert!(status(&e, &id).last_action.unwrap().contains("(LIVE TEST) resumed"));
+}
+
+#[test]
+fn a_live_test_can_run_the_best_lab_book() {
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal(now, &[("BTC", 0.5), ("ETH", 0.25)]));
+    e.set_live(armed_crypto());
+    assert!(!e.passport("lab:tsmom").unwrap().live_ready);
+    let id = e.autopilot_start(live_test_config("lab", 120.0, &[("lab:tsmom", 1.0)]), true, VenueCash::Read(500.0)).unwrap();
+    e.run_lab_books();
+    let out = e.drain_live_orders();
+    assert!(!out.is_empty() && out.iter().all(|o| !o.demo), "the lab book rebalances with real orders");
+    let sent: f64 = out.iter().map(|o| o.qty * o.ref_price).sum();
+    assert!(sent <= 120.0 + 1e-6, "never more than the test's amount: {sent}");
+    assert!(status(&e, &id).config.live_test);
+}
+
+#[test]
+fn a_live_test_keeps_every_other_live_gate() {
+    let mut e = engine();
+    let c = live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]);
+    let err = e.autopilot_start(c.clone(), false, VenueCash::Read(1_000.0)).unwrap_err();
+    assert_eq!(err, "Live trades real money: type the confirmation to start it.");
+    let err = e.autopilot_start(c.clone(), true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.starts_with("Live routing is not armed"), "{err}");
+    e.set_live(LiveConfig { venues: vec![Venue::Alpaca], ..armed_crypto() });
+    let err = e.autopilot_start(c.clone(), true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert_eq!(err, "Kraken is not enabled for live routing. Enable it on the Live page first.");
+    e.set_live(armed_crypto());
+    let mut no_floor = c.clone();
+    no_floor.stop = StopRules::default();
+    let err = e.autopilot_start(no_floor, true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert_eq!(err, "Live needs a max-loss rule, in % or in dollars, so there is always a level at which it stops.");
+    let err = e.autopilot_start(c.clone(), true, VenueCash::NotRead).unwrap_err();
+    assert_eq!(err, "The free cash at Kraken was not read, so live is refused.");
+    let err = e.autopilot_start(c.clone(), true, VenueCash::Read(50.0)).unwrap_err();
+    assert!(err.starts_with("Kraken holds $50.00 of free cash, so $100.00 cannot be given"), "{err}");
+    e.limits.kill_switch = true;
+    let err = e.autopilot_start(c, true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.starts_with("The kill switch is on"), "{err}");
+    assert!(e.autopilot_statuses().is_empty(), "nothing started");
+    assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Paper, "nothing changed");
+}
+
+#[test]
+fn a_live_test_is_refused_above_its_caps() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let go = |e: &mut Engine, c: AutopilotConfig| e.autopilot_start(c, true, VenueCash::Read(10_000.0)).unwrap_err();
+
+    // The amount: at most the cap, $120 by default.
+    let err = go(&mut e, live_test_config("t", 150.0, &[("ema-cross-1", 1.0)]));
+    assert_eq!(err, "A capped live test may trade at most $120.00 (PYTHIA_LIVE_TEST_MAX_USD, never above $300.00), not $150.00.");
+    e.set_live_test_cap_usd(1_000.0);
+    let err = go(&mut e, live_test_config("t", 301.0, &[("ema-cross-1", 1.0)]));
+    assert!(err.contains("at most $300.00"), "the ceiling holds whatever the variable says: {err}");
+    e.set_live_test_cap_usd(120.0);
+
+    // The max loss: at most 25 %, in % or in dollars.
+    let mut c = live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]);
+    c.stop.max_loss_pct = Some(30.0);
+    let err = go(&mut e, c.clone());
+    assert_eq!(err, "A capped live test needs a max-loss rule of at most 25 % of the amount ($25.00 of $100.00); this one allows $30.00 (30 %).");
+    c.stop = StopRules { max_loss_usd: Some(40.0), ..Default::default() };
+    let err = go(&mut e, c.clone());
+    assert!(err.contains("this one allows $40.00 (40 %)"), "{err}");
+    assert!(e.autopilot_statuses().is_empty());
+    // Two rules: the tighter one is what it may lose.
+    c.stop = StopRules { max_loss_pct: Some(50.0), max_loss_usd: Some(25.0), ..Default::default() };
+    e.autopilot_start(c, true, VenueCash::Read(10_000.0)).expect("$25 of $100 is 25 %");
+}
+
+#[test]
+fn a_live_test_is_refused_in_the_wrong_shape() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let go = |e: &mut Engine, c: AutopilotConfig| e.autopilot_start(c, true, VenueCash::Read(10_000.0)).unwrap_err();
+
+    // Only with mode live.
+    let mut c = live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]);
+    c.mode = AutopilotMode::Paper;
+    assert_eq!(
+        go(&mut e, c.clone()),
+        "A capped live test is a real-money mode: choose live for it, or turn the test off for a paper autopilot."
+    );
+    c.mode = AutopilotMode::Demo;
+    assert!(go(&mut e, c).contains("turn the test off for a demo autopilot"));
+
+    // Only strategies the owner names: no auto pick, no portfolio.
+    let auto = live_test_config("t", 100.0, &[]);
+    assert_eq!(
+        go(&mut e, auto),
+        "A capped live test runs only strategies you name: choose them yourself. Pythia never picks a strategy without a green Strategy Passport for real money."
+    );
+    let mut pf = live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]);
+    pf.portfolio = true;
+    assert_eq!(go(&mut e, pf), "A capped live test cannot be a portfolio: name the strategy it runs.");
+
+    // An experiment stays paper or demo, test or not.
+    let now = e.now();
+    e.apply_lab_signal(experiment("memes_rotation", now, &[("BTC", 0.4)]));
+    let err = go(&mut e, live_test_config("x", 100.0, &[("lab:memes_rotation", 1.0)]));
+    assert!(err.contains("is an experiment") && err.contains("never with real money"), "{err}");
+    assert!(e.autopilot_statuses().is_empty());
+}
+
+#[test]
+fn only_one_live_test_runs_at_a_time() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let first = e.autopilot_start(live_test_config("one", 100.0, &[("pairs-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    let err = e.autopilot_start(live_test_config("two", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert_eq!(err, "Autopilot \"Test one\" (LIVE TEST) is already a capped live test, and only one runs at a time. Stop it first.");
+    // A paused one still counts; a stopped one does not.
+    e.autopilot_pause(&first).unwrap();
+    assert!(e.autopilot_start(live_test_config("two", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).is_err());
+    e.autopilot_stop(&first, None).unwrap();
+    e.autopilot_start(live_test_config("two", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+}
+
+#[test]
+fn a_live_test_keeps_its_caps_through_a_change() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let id = e.autopilot_start(live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    let more = AutopilotUpdate { capital_usd: Some(200.0), ..Default::default() };
+    let err = e.autopilot_update(&id, more, true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.starts_with("A capped live test may trade at most $120.00"), "{err}");
+    let looser = AutopilotUpdate { stop: Some(StopRules { max_loss_pct: Some(50.0), ..Default::default() }), ..Default::default() };
+    let err = e.autopilot_update(&id, looser, true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.starts_with("A capped live test needs a max-loss rule of at most 25 %"), "{err}");
+    let auto = AutopilotUpdate { sleeves: Some(vec![]), ..Default::default() };
+    let err = e.autopilot_update(&id, auto, true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.starts_with("A capped live test runs only strategies you name"), "{err}");
+    // Another unproven strategy may be named, as at the start.
+    let other = AutopilotUpdate { sleeves: Some(vec![SleeveConfig { strategy_id: "pairs-1".into(), weight: 1.0 }]), ..Default::default() };
+    e.autopilot_update(&id, other, true, VenueCash::Read(1_000.0)).unwrap();
+    let less = AutopilotUpdate { capital_usd: Some(90.0), ..Default::default() };
+    e.autopilot_update(&id, less, true, VenueCash::Read(1_000.0)).unwrap();
+    assert!(status(&e, &id).config.live_test, "a change never turns the test off");
+}
+
+#[test]
+fn a_live_tests_trades_never_count_as_readiness_evidence() {
+    // One live round trip each: the plain live autopilot earns a live trade
+    // for its strategy's passport, the live test does not.
+    fn round_trip(e: &mut Engine, id: &str, sid: &str) {
+        let i = idx(e, sid);
+        let m = market(e, BTC);
+        e.place_from_intent(id, i, &m, &buy_intent(BTC));
+        let o = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&o.order_id, "venue-1");
+        e.apply_live_update(&o.order_id, filled(&o, o.ref_price));
+        e.autopilot_stop(id, Some(true)).unwrap();
+        let c = e.drain_live_orders().remove(0);
+        e.apply_live_ack(&c.order_id, "venue-2");
+        e.apply_live_update(&c.order_id, filled(&c, o.ref_price * 1.01));
+        assert_eq!(status(e, id).trades, 1, "one closed trade");
+    }
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let id = e.autopilot_start(live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    round_trip(&mut e, &id, "ema-cross-1");
+    assert_eq!(e.strategy_config("ema-cross-1").unwrap().ledger.live_trades, 0, "the test is not evidence");
+    let lines: Vec<_> = e.alert_events.iter().filter_map(|a| a.trade.clone()).collect();
+    assert!(!lines.is_empty() && lines.iter().all(|t| t.mode == "live test" && t.book.ends_with("(LIVE TEST)")), "{lines:?}");
+
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    make_live_ready(&mut e, "ema-cross-1");
+    let id = e.autopilot_start(live_config("p", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    round_trip(&mut e, &id, "ema-cross-1");
+    assert_eq!(e.strategy_config("ema-cross-1").unwrap().ledger.live_trades, 1, "a plain live run is");
+}
+
+#[test]
+fn a_live_test_pauses_when_its_strategy_leaves_live_and_survives_a_restart() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let id = e.autopilot_start(live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    step(&mut e);
+    assert_eq!(status(&e, &id).state, AutopilotState::Running, "no passport needed while it runs");
+
+    // A restart: the strategy stays live for the test, the test comes back
+    // paused until the owner arms again.
+    let mut r = Engine::new();
+    r.apply_persisted(e.to_persisted());
+    mark_real(&mut r);
+    assert_eq!(state_of(&r, "ema-cross-1"), StrategyState::Live);
+    let s = status(&r, &id);
+    assert!(s.config.live_test);
+    assert_eq!(s.state, AutopilotState::Paused);
+    assert!(s.paused_reason.unwrap().starts_with("Pythia restarted, and live routing is disarmed"));
+    r.set_live(armed_crypto());
+    r.autopilot_resume(&id).unwrap();
+
+    // A parameter change takes the unproven strategy off live: the test pauses.
+    let p = r.strategy_config("ema-cross-1").unwrap().params[0].clone();
+    r.set_strategy_param("ema-cross-1", &p.key, p.value + 1.0);
+    let now = r.now();
+    r.autopilot_step(now);
+    let s = status(&r, &id);
+    assert_eq!(s.state, AutopilotState::Paused);
+    assert!(s.paused_reason.unwrap().contains("is no longer set to live"));
+    let err = r.autopilot_resume(&id).unwrap_err();
+    assert!(err.starts_with("Cannot resume live: EMA Cross · Crypto is no longer set to live"), "{err}");
 }

@@ -351,6 +351,8 @@ pub fn experiment_footer(mode: &str, lang: Lang) -> String {
 pub fn mode_footer(mode: &str, lang: Lang) -> String {
     match (lang, mode) {
         (Lang::En, "live") => "Live: real money".into(),
+        (Lang::En, "live test") => "LIVE TEST: real money, capped, unproven strategy".into(),
+        (Lang::De, "live test") => "LIVE TEST: echtes Geld, gedeckelt, unbewiesene Strategie".into(),
         (Lang::En, "demo") => "Demo: virtual money at the venue".into(),
         (Lang::En, "paper") => "Paper".into(),
         (Lang::De, "live") => "Live: echtes Geld".into(),
@@ -539,6 +541,8 @@ pub enum ApMode {
     Paper,
     Demo,
     Live,
+    /// A capped real-money test with an unproven strategy.
+    LiveTest,
 }
 
 impl ApMode {
@@ -547,6 +551,8 @@ impl ApMode {
             (Lang::En, ApMode::Paper) => "paper",
             (Lang::En, ApMode::Demo) => "demo",
             (_, ApMode::Live) => "LIVE",
+            (Lang::En, ApMode::LiveTest) => "LIVE TEST (real money, capped)",
+            (Lang::De, ApMode::LiveTest) => "LIVE TEST (echtes Geld, gedeckelt)",
             (Lang::De, ApMode::Paper) => "Paper",
             (Lang::De, ApMode::Demo) => "Demo",
         }

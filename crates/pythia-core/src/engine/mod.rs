@@ -654,6 +654,10 @@ pub struct LiveStatus {
     /// venue is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perps: Option<perps::PerpsStatus>,
+    /// The most a capped live test autopilot may be given, in USD
+    /// (`PYTHIA_LIVE_TEST_MAX_USD`, clamped to the ceiling in code).
+    #[serde(default)]
+    pub live_test_cap_usd: f64,
 }
 
 /// Why an order is being routed — and therefore what is allowed to happen to it
@@ -1366,6 +1370,10 @@ pub struct Engine {
     /// modelled side of a demo fill), and whether it documents real prices.
     crypto_demo_venue: Option<CostVenue>,
     crypto_demo_real_prices: bool,
+    /// The most a capped live test autopilot may be given, in USD: read from
+    /// `PYTHIA_LIVE_TEST_MAX_USD` at start, never above the ceiling in code
+    /// (`autopilot::LIVE_TEST_CEILING_USD`). Not persisted.
+    live_test_cap_usd: f64,
     /// The Alpaca pairs (`BTC/USD`) the Alpaca paper account lists, when
     /// crypto demo orders go there; `None` until the host has read them.
     /// A crypto market Alpaca does not list is refused for demo and left out
@@ -1575,6 +1583,7 @@ impl Engine {
             demo_venues: HashSet::new(),
             crypto_demo_venue: None,
             crypto_demo_real_prices: false,
+            live_test_cap_usd: autopilot::live_test_cap_from_env(),
             crypto_demo_listed: None,
             pending_live: Vec::new(),
             inflight: HashMap::new(),
@@ -3532,6 +3541,9 @@ impl Engine {
         // Alpaca paper fills against the real NBBO; a crypto demo venue only
         // counts when it documents real prices (see `docs/DEMO.md`).
         let demo_real = m.venue != Venue::Crypto || self.crypto_demo_real_prices;
+        // A capped live test's trades are real, and still never evidence for
+        // a strategy's passport (its live trade count, gate 8).
+        let live_test_book = !book.is_empty() && self.autopilots.iter().any(|a| a.config.id == book && a.is_live_test());
         // Lab positions carry no ATR stops (see `place_lab_order`), whichever
         // route fills them. A demo or live fill is booked here, long after
         // `place_lab_order` returned, so the rule is applied here as well.
@@ -3639,7 +3651,9 @@ impl Engine {
                 let wins = s.win_rate * (s.trades - 1) as f64 + if realized >= 0.0 { 1.0 } else { 0.0 };
                 s.win_rate = wins / s.trades as f64;
                 if live {
-                    s.ledger.live_trades += 1;
+                    if !live_test_book {
+                        s.ledger.live_trades += 1;
+                    }
                 } else if demo {
                     s.ledger.demo_trades += 1;
                     // Forward evidence only where the demo venue documents
@@ -5537,7 +5551,19 @@ impl Engine {
             maker_routes: self.maker_routes.clone(),
             maker_stats: self.maker_stats(),
             perps: self.perps_status(),
+            live_test_cap_usd: self.live_test_cap_usd,
         }
+    }
+
+    /// The most a capped live test autopilot may be given, in USD.
+    pub fn live_test_cap_usd(&self) -> f64 {
+        self.live_test_cap_usd
+    }
+
+    /// Set the live test cap. Never above the ceiling in code; zero, below
+    /// or not a number is the default.
+    pub fn set_live_test_cap_usd(&mut self, usd: f64) {
+        self.live_test_cap_usd = autopilot::live_test_cap_from(Some(&usd.to_string()));
     }
 
     // ── manual actions (from the UI) ────────────────────────────────────────
@@ -6964,10 +6990,20 @@ impl Engine {
         // A strategy saved as Live keeps that switch only if its passport still
         // allows it. Saves from before the gates existed, or a strategy whose
         // parameters changed since its checks, go back to paper and say why.
+        // The one exception: a strategy of an active capped live test, which
+        // runs without a green passport by the owner's choice. It stays set
+        // to live; the test itself comes back paused until he arms again.
+        let in_live_test: HashSet<String> = p
+            .autopilots
+            .iter()
+            .filter(|a| a.is_active() && a.is_live_test())
+            .flat_map(|a| a.sleeves.iter().map(|s| s.strategy_id.clone()))
+            .collect();
         let demote: Vec<(String, String)> = self
             .strategies
             .iter()
             .filter(|s| s.state == StrategyState::Live)
+            .filter(|s| !in_live_test.contains(&s.id))
             .filter_map(|s| {
                 let pp = self.passport_for(s);
                 (!pp.live_ready).then(|| (s.id.clone(), pp.blocked_reason.unwrap_or_default()))

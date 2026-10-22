@@ -987,6 +987,13 @@ async fn main() {
     // the UI never shows a venue as armable that cannot route.
     {
         let mut e = engine.lock().unwrap();
+        // The cap of a capped live test autopilot (SAFETY.md, "Capped live test").
+        tracing::info!(
+            "capped live test: at most ${:.2} ({}, never above ${:.2})",
+            e.live_test_cap_usd(),
+            pythia_core::engine::autopilot::LIVE_TEST_CAP_ENV,
+            pythia_core::engine::autopilot::LIVE_TEST_CEILING_USD
+        );
         // Resume where the last run left off: positions, strategies and their
         // forward-test records. Without this every restart would reset gate 7.
         if let Some(path) = state_file() {
@@ -2831,6 +2838,37 @@ mod tests {
         let cmd: Command = serde_json::from_str(r#"{"cmd":"autopilotUpdate","id":"ap_1","update":{"sleeves":[]}}"#).unwrap();
         let Command::AutopilotUpdate { update, confirm, .. } = cmd else { panic!("not an update") };
         assert!(!confirm && update.sleeves.unwrap().is_empty(), "an empty list is the auto pick");
+    }
+
+    #[test]
+    fn the_autopilot_start_command_carries_a_capped_live_test_and_the_engine_holds_it_to_its_caps() {
+        let cmd: Command = serde_json::from_str(
+            r#"{"cmd":"autopilotStart","confirm":true,"config":{"id":"ap_t","name":"Test","mode":"live","venue":"kraken","capitalUsd":500,"liveTest":true,"sleeves":[{"strategyId":"ema-cross-1","weight":1}],"stop":{"maxLossPct":20,"onTakeProfit":"stop"},"flattenOnStop":true}}"#,
+        )
+        .unwrap();
+        let Command::AutopilotStart { config, confirm } = cmd else { panic!("not a start") };
+        assert!(confirm && config.live_test && config.is_live_test());
+        // The engine refuses it above the cap, whatever the venue holds.
+        let mut e = Engine::new();
+        e.set_live_test_cap_usd(120.0);
+        e.set_live(LiveConfig {
+            armed: true,
+            paper: false,
+            dry_run: false,
+            venues: vec![Venue::Crypto],
+            timeout_sec: 120,
+            extended_hours: false,
+        });
+        let err = e.autopilot_start(config, confirm, VenueCash::Read(10_000.0)).unwrap_err();
+        assert!(err.starts_with("A capped live test may trade at most $120.00"), "{err}");
+        assert_eq!(e.state().live.live_test_cap_usd, 120.0, "the app reads the cap from the state");
+        // Without the flag it is a plain start: no liveTest on the wire.
+        let cmd: Command = serde_json::from_str(
+            r#"{"cmd":"autopilotStart","config":{"mode":"paper","venue":"kraken","capitalUsd":100}}"#,
+        )
+        .unwrap();
+        let Command::AutopilotStart { config, confirm } = cmd else { panic!("not a start") };
+        assert!(!confirm && !config.live_test);
     }
 }
 
