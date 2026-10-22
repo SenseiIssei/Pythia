@@ -42,7 +42,15 @@ import {
 
 const REFRESH_MS = 15_000;
 /** The live socket's words in the header. */
-const SOCKET_WORDS: Record<SocketState, string> = { connecting: "connecting", live: "live", retrying: "reconnecting", off: "every 15 s" };
+const SOCKET_WORDS: Record<SocketState, string> = { connecting: "connecting", live: "live", polling: "live", retrying: "reconnecting", off: "every 15 s" };
+const SOCKET_HELP: Record<SocketState, string> = {
+  connecting: "Opening the live connection.",
+  live: "Live: every change the bot writes arrives at once over the socket.",
+  polling: "Live: read every 1.5 seconds (the panel passes no socket).",
+  retrying: "The connection dropped; trying again.",
+  off: "No server connection: read every 15 seconds.",
+};
+const isLive = (s: SocketState) => s === "live" || s === "polling";
 
 function AddressQr({ address }: { address: string }) {
   const { d, n } = useMemo(() => {
@@ -291,7 +299,7 @@ export function PumpfunWallet() {
     [],
   );
   useEffect(() => {
-    if (socket === "live") return;
+    if (isLive(socket)) return;
     void load();
     const id = window.setInterval(() => void load(), REFRESH_MS);
     return () => window.clearInterval(id);
@@ -323,11 +331,11 @@ export function PumpfunWallet() {
       subtitle="Real money, traded by the live service on the server under the limits you set. Paper results so far are negative; size everything as a total loss."
       right={
         <span className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 text-[13px] text-muted" title="How the page stays current">
-            <span className={`h-2 w-2 rounded-full ${socket === "live" ? "bg-up" : socket === "off" ? "bg-line-strong" : "bg-warn"}`} aria-hidden />
+          <span className="inline-flex items-center gap-1.5 text-[13px] text-muted" title={SOCKET_HELP[socket]}>
+            <span className={`h-2 w-2 rounded-full ${isLive(socket) ? "bg-up" : socket === "off" ? "bg-line-strong" : "bg-warn"}`} aria-hidden />
             {SOCKET_WORDS[socket]}
           </span>
-          {socket !== "live" && <Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => void load()}>Refresh</Button>}
+          {!isLive(socket) && <Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => void load()}>Refresh</Button>}
         </span>
       }
     >

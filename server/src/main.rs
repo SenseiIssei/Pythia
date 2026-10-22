@@ -604,8 +604,16 @@ struct ReadinessPatch {
 /// nothing here removes the kill file: that is done on the server by hand.
 fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
     use pythia_core::pumpfun_live as pf;
-    let (r1, r2, r3, r4, r5) = (root.clone(), root.clone(), root.clone(), root.clone(), root);
+    let (r1, r2, r3, r4, r5, r6) = (root.clone(), root.clone(), root.clone(), root.clone(), root.clone(), root);
     Router::new()
+        .route(
+            // The feed for a page that cannot hold the socket open (behind a proxy that passes no upgrade).
+            "/api/pumpfun/live/feed",
+            get(move || {
+                let root = r6.clone();
+                async move { Json(root.and_then(|r| pf::feed_in(&r))) }
+            }),
+        )
         .route(
             "/api/pumpfun/live/ws",
             get(move |ws: WebSocketUpgrade| {

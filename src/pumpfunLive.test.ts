@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   candles,
   ceilings,
   coinReturn,
   timeStopLeft,
+  watchPumpfun,
   type FeedCoin,
   type FeedPoint,
   eur,
@@ -180,5 +181,50 @@ describe("the live chart's numbers", () => {
     expect(timeStopLeft(coin(), T + 400_000)).toBe(0);
     expect(timeStopLeft(coin({ exit: { ms: T, price: 1, why: "time", ret: 0, pnl_sol: 0 } }), T)).toBeNull();
     expect(timeStopLeft(coin({ land_ms: null }), T)).toBeNull();
+  });
+});
+
+describe("keeping the page current", () => {
+  it("reads every 1.5 s when the socket never opens (a proxy without upgrades)", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("VITE_PYTHIA_SERVER", "/api/pythia");
+    vi.stubGlobal("location", { origin: "https://panel.example.com" });
+    const made: string[] = [];
+    class NoSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(url: string) {
+        made.push(url);
+        setTimeout(() => this.onclose?.(), 10);           // refused before it ever opens
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", NoSocket);
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", async (u: string) => {
+      asked.push(String(u));
+      const body = String(u).endsWith("/feed") ? { t: asked.length, coins: [] } : { running: true, status: null, trades: [] };
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    const states: string[] = [];
+    const feeds: unknown[] = [];
+    const stop = watchPumpfun({ onView: () => {}, onFeed: (f) => feeds.push(f), onState: (s) => states.push(s) });
+    await vi.advanceTimersByTimeAsync(50);                  // try 1 fails at once
+    await vi.advanceTimersByTimeAsync(1_100);               // try 2 after 1 s, fails: polling starts
+    expect(made).toEqual(["wss://panel.example.com/api/pythia/api/pumpfun/live/ws", expect.any(String)]);
+    expect(asked.some((u) => u.endsWith("/api/pythia/api/pumpfun/live/feed"))).toBe(true);
+    expect(states).toContain("polling");
+    const n = asked.length;
+    await vi.advanceTimersByTimeAsync(1_600);
+    expect(asked.length).toBeGreaterThan(n);                 // and keeps reading
+    expect(feeds.length).toBeGreaterThan(1);                 // each new feed handed on
+    stop();
+    const m = asked.length;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(asked.length).toBe(m);                            // stopped with the page
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
   });
 });

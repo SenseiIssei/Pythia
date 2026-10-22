@@ -511,20 +511,32 @@ export function dexscreener(mint: string): string {
   return `https://dexscreener.com/solana/${encodeURIComponent(mint)}`;
 }
 
-export type SocketState = "connecting" | "live" | "retrying" | "off";
+/** How the page stays current: the socket, or reading every POLL_MS where it cannot be held open. */
+export type SocketState = "connecting" | "live" | "polling" | "retrying" | "off";
+
+/** Reading interval without a socket, and while the tab is hidden. */
+export const POLL_MS = 1_500;
+const HIDDEN_POLL_MS = 6_000;
+/** Socket attempts that never opened before the page reads instead (a proxy that passes no upgrade). */
+const SOCKET_TRIES = 2;
+
+export async function pumpfunFeed(): Promise<PumpfunFeed | null> {
+  return asJson<PumpfunFeed | null>(await fetch(`${serverUrl()}/api/pumpfun/live/feed`, { cache: "no-store" }));
+}
 
 /** The page's WebSocket, or null where there is no server (the desktop app polls instead). */
 export function pumpfunSocketUrl(): string | null {
   if (liveMode() !== "server") return null;
   const base = serverUrl();
   if (!base) return null;
-  const abs = /^https?:\/\//.test(base) ? base : `${window.location.origin}${base.startsWith("/") ? "" : "/"}${base}`;
+  const abs = /^https?:\/\//.test(base) ? base : `${globalThis.location?.origin ?? ""}${base.startsWith("/") ? "" : "/"}${base}`;
   return `${abs.replace(/\/$/, "").replace(/^http/, "ws")}/api/pumpfun/live/ws`;
 }
 
 /**
- * Keeps one socket open while the page is: every new view and feed is handed on as it comes,
- * and a dropped connection is tried again (1 s, doubling to 30 s). Returns the closer.
+ * Keeps the page current while it is open: one socket that hands on every new view and feed as it
+ * comes, tried again when it drops (1 s, doubling to 30 s). Where the socket never opens (the panel's
+ * proxy passes no upgrade), it reads the view and the feed every POLL_MS instead. Returns the closer.
  */
 export function watchPumpfun(handlers: {
   onView: (v: PumpfunView) => void;
@@ -539,12 +551,41 @@ export function watchPumpfun(handlers: {
   let ws: WebSocket | null = null;
   let closed = false;
   let wait = 1_000;
-  let timer: number | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let neverOpened = 0;
+  let lastView = "";
+  let lastFeed = "";
+
+  const poll = async () => {
+    if (closed) return;
+    try {
+      const [view, feed] = await Promise.all([pumpfunLive(), pumpfunFeed()]);
+      if (closed) return;
+      const vt = JSON.stringify(view);
+      if (vt !== lastView) {
+        lastView = vt;
+        handlers.onView(view);
+      }
+      const ft = JSON.stringify(feed);
+      if (ft !== lastFeed) {
+        lastFeed = ft;
+        handlers.onFeed(feed);
+      }
+      handlers.onState("polling");
+    } catch {
+      if (!closed) handlers.onState("retrying");
+    }
+    if (!closed) timer = setTimeout(() => void poll(), globalThis.document?.hidden ? HIDDEN_POLL_MS : POLL_MS);
+  };
+
   const open = () => {
     if (closed) return;
     handlers.onState("connecting");
+    let opened = false;
     ws = new WebSocket(url);
     ws.onopen = () => {
+      opened = true;
+      neverOpened = 0;
       wait = 1_000;
       handlers.onState("live");
     };
@@ -559,15 +600,19 @@ export function watchPumpfun(handlers: {
     };
     ws.onclose = () => {
       if (closed) return;
+      if (!opened && ++neverOpened >= SOCKET_TRIES) {
+        void poll();
+        return;
+      }
       handlers.onState("retrying");
-      timer = window.setTimeout(open, wait);
+      timer = setTimeout(open, wait);
       wait = Math.min(wait * 2, 30_000);
     };
   };
   open();
   return () => {
     closed = true;
-    if (timer != null) window.clearTimeout(timer);
+    if (timer != null) clearTimeout(timer);
     ws?.close();
   };
 }

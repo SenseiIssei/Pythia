@@ -112,3 +112,18 @@ async fn there_is_no_withdraw_or_transfer_route() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[tokio::test]
+async fn the_feed_is_there_without_the_socket_too() {
+    let d = root("feed");
+    let (code, v) = call(&d, "GET", "/api/pumpfun/live/feed", None).await;
+    assert_eq!((code, v), (StatusCode::OK, serde_json::Value::Null));
+    let feed = serde_json::json!({"t": 1, "coins": [{"mint": "M", "points": [[1, 2e-6, 0.5, 1]], "exit": null}]});
+    std::fs::write(d.join("reports").join("pumpfun_rt").join("live_feed.json"), feed.to_string()).unwrap();
+    let (code, v) = call(&d, "GET", "/api/pumpfun/live/feed", None).await;
+    assert_eq!((code, v), (StatusCode::OK, feed));
+    // A plain GET of the socket's path (what a proxy without upgrades sends) is refused, not hung.
+    let (code, _) = call(&d, "GET", "/api/pumpfun/live/ws", None).await;
+    assert!(code.is_client_error(), "{code}");
+    let _ = std::fs::remove_dir_all(&d);
+}
