@@ -12,6 +12,7 @@ import {
   ListRow,
   MiniChart,
   Page,
+  SectionTitle,
   Segmented,
   Sheet,
   Skeleton,
@@ -41,12 +42,15 @@ import {
   LIVE_TEST_LABEL,
   editForm,
   forwardLine,
+  groupByMoney,
   isActive,
   isExperiment,
   isLiveTest,
   liveTestCap,
   planEdit,
+  realMoneyRows,
   type EditForm,
+  type RealMoneyRow,
 } from "../autopilot";
 import { practiceAutopilots } from "../practice";
 import { useStore } from "../store";
@@ -86,7 +90,7 @@ function useNow(every = 30_000): number {
  */
 export function Autopilots() {
   const api = useAutopilotApi();
-  const { positions, strategies, limits } = useStore();
+  const { positions, strategies, limits, live } = useStore();
   const advanced = useAdvanced();
   const now = useNow();
   const [starting, setStarting] = useState(false);
@@ -94,13 +98,25 @@ export function Autopilots() {
 
   const names = useMemo(() => Object.fromEntries(strategies.map((s) => [s.id, s.name])), [strategies]);
   const shown = practiceAutopilots(api.autopilots, now);
-  const t = totals(api.autopilots);
+  // Real money first and on its own, so what trades real money is never
+  // mixed into the practice runs; stopped runs split the same way.
+  const running = groupByMoney(shown.filter(isActive));
+  const stopped = groupByMoney(shown.filter((s) => !isActive(s)));
+  const t = totals(running.practice);
+  const realRows = realMoneyRows(running.real, live);
   const btc = api.btc ? { times: api.btc.times, closes: api.btc.closes } : null;
+  const card = (s: AutopilotStatus) => (
+    <AutopilotCard key={s.config.id} s={s} model={cardModel(s, positions, now, btc, names)} api={api} />
+  );
 
   return (
     <Page
       title="Autopilot"
-      subtitle="It trades an amount for you, on practice money, until you stop it. Run several side by side: each keeps its own book."
+      subtitle={
+        running.real.length > 0
+          ? "It trades an amount for you until you stop it. Real money is listed apart from practice money; each autopilot keeps its own book."
+          : "It trades an amount for you, on practice money, until you stop it. Run several side by side: each keeps its own book."
+      }
       right={
         shown.length > 0 && (
           <Button onClick={() => setStarting(true)} icon={Plus}>
@@ -110,7 +126,7 @@ export function Autopilots() {
       }
     >
       {api.mocked && <Chip tone="warn">Sample data ({api.mocked})</Chip>}
-      {limits.killSwitch && t.count > 0 && (
+      {limits.killSwitch && running.real.length + running.practice.length > 0 && (
         <Card>
           <p className="text-down text-[15px] font-semibold">Kill switch is on</p>
           <p className="text-muted text-sm">Nothing new is bought until you switch it off. Selling still works.</p>
@@ -139,18 +155,54 @@ export function Autopilots() {
         </Card>
       ) : (
         <>
-          {t.count > 1 && (
-            <Card>
-              <BigNumber label={`${t.count} autopilots together`} value={money(t.value)} />
-              <div className="mt-1">
-                <Change usd={t.pnl} pct={t.pnlPct} tone={toneOf(t.pnl)} />
-              </div>
-            </Card>
+          {(running.real.length > 0 || advanced) && (
+            <section aria-label="Real money" className="space-y-3">
+              <SectionTitle>Real money</SectionTitle>
+              {running.real.length === 0 ? (
+                <p className="px-1 text-[15px] text-muted">No real-money autopilot running</p>
+              ) : (
+                <>
+                  <RealMoneySummary rows={realRows} />
+                  {running.real.map(card)}
+                </>
+              )}
+            </section>
           )}
+
+          {running.practice.length > 0 && (
+            <section aria-label="Practice (paper and demo)" className="space-y-3">
+              <SectionTitle>Practice (paper and demo)</SectionTitle>
+              {t.count > 1 && (
+                <Card>
+                  <BigNumber label={`${t.count} practice autopilots together`} value={money(t.value)} />
+                  <div className="mt-1">
+                    <Change usd={t.pnl} pct={t.pnlPct} tone={toneOf(t.pnl)} />
+                  </div>
+                </Card>
+              )}
+              {running.practice.map(card)}
+            </section>
+          )}
+
           {shown.length > 1 && <AutopilotCompare list={shown} now={now} />}
-          {shown.map((s) => (
-            <AutopilotCard key={s.config.id} s={s} model={cardModel(s, positions, now, btc, names)} api={api} />
-          ))}
+
+          {stopped.real.length + stopped.practice.length > 0 && (
+            <section aria-label="Stopped this week" className="space-y-3">
+              <SectionTitle>Stopped this week</SectionTitle>
+              {stopped.real.length > 0 && (
+                <>
+                  <h3 className="px-1 text-[13px] font-semibold text-muted">Real money</h3>
+                  {stopped.real.map(card)}
+                </>
+              )}
+              {stopped.practice.length > 0 && (
+                <>
+                  <h3 className="px-1 text-[13px] font-semibold text-muted">Practice (paper and demo)</h3>
+                  {stopped.practice.map(card)}
+                </>
+              )}
+            </section>
+          )}
         </>
       )}
 
@@ -170,6 +222,57 @@ export function Autopilots() {
 
       <StartSheet open={starting} onClose={() => setStarting(false)} onStart={api.start} />
     </Page>
+  );
+}
+
+// ── real money at a glance ─────────────────────────────────────────────────
+
+const STATE_TONE: Record<RealMoneyRow["state"]["tone"], ChipTone> = { good: "good", warn: "warn", bad: "bad" };
+
+/**
+ * Every real-money autopilot in one list: where it trades, what it was
+ * given, what it is worth and its P&L in US dollars, the TEST badge of a
+ * capped live test, and whether live trading is armed for it. Under it, the
+ * venue's own cash as Pythia last read it, never the paper account's.
+ */
+function RealMoneySummary({ rows }: { rows: RealMoneyRow[] }) {
+  const cash = rows
+    .map((r) => r.venueCash)
+    .filter((c): c is NonNullable<RealMoneyRow["venueCash"]> => !!c)
+    .filter((c, i, all) => all.findIndex((x) => x.venue === c.venue) === i);
+  return (
+    <Card label="Real money at a glance">
+      <List>
+        {rows.map((r) => (
+          <ListRow
+            key={r.id}
+            title={
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span className="min-w-0 truncate">{r.name}</span>
+                {r.liveTest && <Chip tone="bad">{LIVE_TEST_LABEL}</Chip>}
+              </span>
+            }
+            subtitle={
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span>
+                  {exchangeName(r.exchange)} · {money(r.amount, 0)} given · USD
+                </span>
+                <Chip tone={STATE_TONE[r.state.tone]}>{r.state.text}</Chip>
+              </span>
+            }
+            right={money(r.equity)}
+            rightSub={<Change usd={r.pnl} pct={r.pnlPct} tone={toneOf(r.pnl)} size="sm" />}
+          />
+        ))}
+      </List>
+      {cash.length > 0 && (
+        <p className="mt-2 text-[13px] text-muted">
+          {cash
+            .map((c) => `Free cash at ${exchangeName(c.exchange)}: ${money(c.cash)} (read ${new Date(c.readMs).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })})`)
+            .join(" · ")}
+        </p>
+      )}
+    </Card>
   );
 }
 

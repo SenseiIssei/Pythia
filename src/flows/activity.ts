@@ -101,7 +101,9 @@ export function fromJournal(e: JournalEntry, symbols: Map<string, string> = new 
     const f = parseFill(e.message);
     if (!f) return { ...base, kind: "buy", title: "Trade filled", detail: shortLine(e.message) };
     const asset = assetName(f.marketId, symbols);
-    const real2 = real || /^live$/i.test(f.mode);
+    // The line's own tag says where the fill went (Paper, DEMO or LIVE): a
+    // paper fill is no real-money row because something else trades live.
+    const real2 = /^live$/i.test(f.mode);
     return {
       ...base,
       real: real2,

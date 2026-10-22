@@ -13,7 +13,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { AutopilotStart, AutopilotStatus, AutopilotUpdate } from "./types";
 import { floorAtStart, liveConfirmed, startPhrase } from "./autopilot";
 
-export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading" | "sidebyside" | "portfolio";
+export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading" | "sidebyside" | "portfolio" | "live";
 
 export interface MockAutopilot {
   scenario: MockScenario;
@@ -33,7 +33,9 @@ function requested(): MockScenario | null {
   const q = new URLSearchParams(window.location.search);
   if (!q.has("mockAutopilot")) return null;
   const v = q.get("mockAutopilot");
-  return v === "paused" || v === "finished" || v === "empty" || v === "loading" || v === "sidebyside" || v === "portfolio" ? v : "running";
+  return v === "paused" || v === "finished" || v === "empty" || v === "loading" || v === "sidebyside" || v === "portfolio" || v === "live"
+    ? v
+    : "running";
 }
 
 const H = 3_600_000;
@@ -208,7 +210,42 @@ function seed(scenario: MockScenario, names: Record<string, string>): State {
   });
 
   const list: AutopilotStatus[] = [];
-  if (scenario === "running" || scenario === "paused") {
+  if (scenario === "live") {
+    // A capped live test on Kraken, paused because live trading was
+    // disarmed, next to a practice run: the real-money section on its own.
+    const start = now - 3 * DAY;
+    const test = summarise({
+      config: {
+        id: "mock-live-test",
+        name: "Lab book test",
+        mode: "live",
+        venue: "kraken",
+        assetClass: "crypto",
+        capitalUsd: 120,
+        sleeves: [{ strategyId: "lab:tsmom_regime", weight: 1 }],
+        stop: { maxLossPct: 20, onTakeProfit: "stop" },
+        flattenOnStop: true,
+        liveTest: true,
+      },
+      state: "paused",
+      pausedReason: "live routing is disarmed. Arm it on the Live page, then resume the autopilot.",
+      startedMs: start,
+      startCapital: 120,
+      equity: 0,
+      pnl: 0,
+      pnlPct: 0,
+      peakEquity: 120,
+      drawdownPct: 0,
+      floorEquity: 96,
+      trades: 4,
+      fees: 0.9,
+      bySleeve: [{ strategyId: "lab:tsmom_regime", name: n("lab:tsmom_regime"), weight: 1, pnl: 0, trades: 4, markets: [], why: "You picked it." }],
+      lastAction: "Autopilot \"Lab book test\" (LIVE TEST) paused: live routing is disarmed.",
+      history: walk(51, start, now - H, H, 120, -0.0001, 0.004),
+    });
+    list.push(test);
+  }
+  if (scenario === "running" || scenario === "paused" || scenario === "live") {
     const start = now - 12 * DAY - 5 * H;
     const hist = walk(5, start, now - H, H, 10_000, 0.00025, 0.004);
     const run = summarise({
@@ -222,7 +259,7 @@ function seed(scenario: MockScenario, names: Record<string, string>): State {
         stop: { maxLossPct: 15, takeProfitPct: 25, onTakeProfit: "lock", trailingPct: 10 },
         flattenOnStop: true,
       },
-      state: scenario,
+      state: scenario === "paused" ? "paused" : "running",
       startedMs: start,
       startCapital: 10_000,
       equity: 0,

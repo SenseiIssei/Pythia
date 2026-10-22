@@ -13,8 +13,11 @@ import type {
   AutopilotSleeveStatus,
   AutopilotStatus,
   AutopilotUpdate,
+  LiveCashRead,
+  LiveStatus,
   Market,
   PnlBreakdown,
+  Venue,
 } from "./types";
 
 export const DAY_MS = 86_400_000;
@@ -277,6 +280,93 @@ export function analyse(s: AutopilotStatus, now: number): Analysis {
 
 export function isActive(s: AutopilotStatus): boolean {
   return s.state === "running" || s.state === "paused";
+}
+
+// ── real money apart from practice ─────────────────────────────────────────
+
+/** Real money: a live autopilot, a capped live test included. Paper and demo are practice. */
+export function isRealMoney(s: { config: Pick<AutopilotConfig, "mode"> }): boolean {
+  return s.config.mode === "live";
+}
+
+/** Autopilots split into real money and practice (paper and demo), each in the order given. */
+export function groupByMoney<T extends { config: Pick<AutopilotConfig, "mode"> }>(list: T[]): { real: T[]; practice: T[] } {
+  const real: T[] = [];
+  const practice: T[] = [];
+  for (const s of list) (isRealMoney(s) ? real : practice).push(s);
+  return { real, practice };
+}
+
+/** The asset class an autopilot trades: its own, or what its venue means. */
+export function autopilotClass(c: Pick<AutopilotConfig, "assetClass" | "venue">): Venue {
+  if (c.assetClass) return c.assetClass;
+  return c.venue === "alpaca" ? "alpaca" : c.venue === "polymarket" ? "polymarket" : "crypto";
+}
+
+/**
+ * The free cash last read from the live venue of this asset class: the real
+ * account's cash, never the paper account's. `undefined` until Pythia has read
+ * it (it does at every live start).
+ */
+export function liveVenueCash(live: Pick<LiveStatus, "liveCash"> | null | undefined, venue: Venue): LiveCashRead | undefined {
+  return live?.liveCash?.find((r) => r.venue === venue && Number.isFinite(r.cash));
+}
+
+/** How live routing stands for one real-money autopilot, in a few words. */
+export interface LiveRouteState {
+  tone: "good" | "warn" | "bad";
+  text: string;
+}
+
+export function realMoneyState(
+  s: Pick<AutopilotStatus, "state" | "pausedReason"> & { config: Pick<AutopilotConfig, "assetClass" | "venue"> },
+  live: Pick<LiveStatus, "armed" | "venues" | "dryRun" | "paper">,
+): LiveRouteState {
+  const venue = autopilotClass(s.config);
+  const armed = live.armed && live.venues.includes(venue);
+  const active = s.state === "running" || s.state === "paused";
+  if (!active) return { tone: "warn", text: "Stopped" };
+  if (!armed) {
+    return s.state === "paused"
+      ? { tone: "bad", text: "Paused: live trading is disarmed" }
+      : { tone: "bad", text: "Live trading is disarmed" };
+  }
+  if (live.dryRun) return { tone: "warn", text: "Armed, dry run: orders are logged, not sent" };
+  if (venue === "alpaca" && live.paper) return { tone: "warn", text: "Armed on the Alpaca paper endpoint" };
+  if (s.state === "paused") return { tone: "warn", text: "Armed, paused" };
+  return { tone: "good", text: "Armed" };
+}
+
+/** One real-money autopilot at a glance. Amounts are US dollars, the cash
+ *  currency of every live venue Pythia routes to (Kraken USD, Alpaca). */
+export interface RealMoneyRow {
+  id: string;
+  name: string;
+  liveTest: boolean;
+  /** The exchange id it trades on ("kraken", "alpaca"). */
+  exchange: string;
+  amount: number;
+  equity: number;
+  pnl: number;
+  pnlPct: number;
+  state: LiveRouteState;
+  /** That venue's own free cash as last read, if Pythia has read it. */
+  venueCash?: LiveCashRead;
+}
+
+export function realMoneyRows(list: AutopilotStatus[], live: Pick<LiveStatus, "armed" | "venues" | "dryRun" | "paper" | "liveCash">): RealMoneyRow[] {
+  return list.filter(isRealMoney).map((s) => ({
+    id: s.config.id,
+    name: s.config.name,
+    liveTest: isLiveTest(s.config),
+    exchange: s.config.venue,
+    amount: s.startCapital,
+    equity: s.equity,
+    pnl: s.pnl,
+    pnlPct: s.pnlPct,
+    state: realMoneyState(s, live),
+    venueCash: liveVenueCash(live, autopilotClass(s.config)),
+  }));
 }
 
 /** "12 days", "5 h 20 min", "3 min". */

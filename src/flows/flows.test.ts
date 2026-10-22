@@ -256,6 +256,12 @@ describe("activity", () => {
     const it = fromJournal(entry({ kind: "fill", message: "LIVE FILL Sell 1 crypto:SOL/USD @ 150.0000", mode: "live" }));
     expect(it).toMatchObject({ kind: "sell", title: "Sold SOL", real: true });
   });
+  it("never marks a paper or demo fill as real money, whatever else trades live", () => {
+    const paper = fromJournal(entry({ kind: "fill", message: "Paper FILL Buy 0.5 crypto:ETH/USD @ 3000.0000", mode: "live" }));
+    expect(paper).toMatchObject({ kind: "buy", real: false });
+    const demo = fromJournal(entry({ kind: "fill", message: "DEMO FILL Buy 0.5 crypto:ETH/USD @ 3000.0000", mode: "live" }));
+    expect(demo).toMatchObject({ real: false });
+  });
   it("skips placed orders, the fill is the row", () => {
     expect(fromJournal(entry({ kind: "order", message: "Paper order Buy" }))).toBeNull();
   });

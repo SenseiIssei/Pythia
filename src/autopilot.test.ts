@@ -10,8 +10,13 @@ import {
   editForm,
   floorAtStart,
   forwardLine,
+  groupByMoney,
   isExperiment,
   isLiveTest,
+  isRealMoney,
+  liveVenueCash,
+  realMoneyRows,
+  realMoneyState,
   LIVE_PHRASE,
   LIVE_TEST_PHRASE,
   liveConfirmed,
@@ -410,5 +415,47 @@ describe("a capped live test", () => {
     expect(planEdit(c, { ...f, pick: "auto" }).problems).toContain("A capped live test runs only strategies you name.");
     // A plain live autopilot has no such caps.
     expect(planEdit(live({ liveTest: false }), { ...f, amount: "5000", lossPct: "40" }).problems).toEqual([]);
+  });
+});
+
+describe("real money apart from practice", () => {
+  const cfg = (id: string, mode: AutopilotConfig["mode"], over: Partial<AutopilotConfig> = {}) =>
+    status({ config: { ...status().config, id, name: id, mode, ...over } });
+  const armed = { armed: true, venues: ["crypto" as const], dryRun: false, paper: false };
+
+  it("groups live and live tests as real money and keeps the order inside each group", () => {
+    const list = [cfg("p1", "paper"), cfg("l1", "live"), cfg("d1", "demo"), cfg("t1", "live", { liveTest: true }), cfg("p2", "paper")];
+    const g = groupByMoney(list);
+    expect(g.real.map((s) => s.config.id)).toEqual(["l1", "t1"]);
+    expect(g.practice.map((s) => s.config.id)).toEqual(["p1", "d1", "p2"]);
+    expect(isRealMoney(cfg("x", "demo"))).toBe(false);
+    expect(groupByMoney([])).toEqual({ real: [], practice: [] });
+  });
+
+  it("says whether live trading is armed for it, and why it is paused", () => {
+    const s = cfg("l", "live");
+    expect(realMoneyState(s, armed)).toEqual({ tone: "good", text: "Armed" });
+    expect(realMoneyState(s, { ...armed, armed: false }).text).toBe("Live trading is disarmed");
+    expect(realMoneyState(s, { ...armed, venues: ["alpaca"] }).tone).toBe("bad");
+    const paused = { ...s, state: "paused" as const };
+    expect(realMoneyState(paused, { ...armed, armed: false })).toEqual({ tone: "bad", text: "Paused: live trading is disarmed" });
+    expect(realMoneyState(paused, armed).text).toBe("Armed, paused");
+    expect(realMoneyState(s, { ...armed, dryRun: true }).tone).toBe("warn");
+    const shares = cfg("a", "live", { venue: "alpaca" });
+    expect(realMoneyState(shares, { ...armed, venues: ["alpaca"], paper: true }).text).toBe("Armed on the Alpaca paper endpoint");
+  });
+
+  it("uses the live venue's own cash, never the paper account's", () => {
+    const live = { liveCash: [{ venue: "crypto" as const, exchange: "kraken" as const, cash: 412.5, readMs: 1 }] };
+    expect(liveVenueCash(live, "crypto")?.cash).toBe(412.5);
+    expect(liveVenueCash(live, "alpaca")).toBeUndefined();
+    expect(liveVenueCash({}, "crypto")).toBeUndefined();
+    expect(liveVenueCash(undefined, "crypto")).toBeUndefined();
+
+    const t = { ...cfg("t", "live", { liveTest: true }), startCapital: 100, equity: 92, pnl: -8, pnlPct: -8 };
+    const rows = realMoneyRows([cfg("p", "paper"), t], { ...armed, ...live });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "t", liveTest: true, exchange: "kraken", amount: 100, equity: 92, pnl: -8, state: { text: "Armed" } });
+    expect(rows[0].venueCash?.cash).toBe(412.5);
   });
 });

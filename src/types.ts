@@ -620,6 +620,20 @@ export interface LiveStatus {
   /** The most a capped live test autopilot may be given, in USD
    *  (PYTHIA_LIVE_TEST_MAX_USD on the server, never above 300). */
   liveTestCapUsd?: number;
+  /** The free cash last read from each live venue (at a live autopilot's
+   *  start or a higher amount): the real account's cash, never the paper
+   *  account's. Absent until a read since the server started. */
+  liveCash?: LiveCashRead[];
+}
+
+/** The free cash Pythia last read from a live venue. Mirrors the Rust `LiveCashRead`. */
+export interface LiveCashRead {
+  /** The asset class it was read for: "crypto" or "alpaca". */
+  venue: Venue;
+  /** The exchange it was read from. */
+  exchange: CostVenue;
+  cash: number;
+  readMs: number;
 }
 
 /** The perps route. Mirrors the Rust `PerpsStatus`. Demo or paper only. */

@@ -32,6 +32,7 @@ import {
   Field,
   List,
   Notice,
+  SectionTitle,
   Sheet,
   Toggle,
   changeTone,
@@ -105,6 +106,10 @@ import {
   EXPERIMENT_LABEL,
   isExperiment,
   sleeveExposure,
+  autopilotClass,
+  groupByMoney,
+  liveVenueCash,
+  realMoneyState,
   type EditForm,
   type Stop,
 } from "../autopilot";
@@ -211,6 +216,8 @@ export function Autopilot() {
     .filter((a) => !isActive(a))
     .sort((a, b) => (b.stoppedMs ?? b.startedMs) - (a.stoppedMs ?? a.startedMs));
   const shown = api.autopilots.find((a) => a.config.id === selected) ?? active[0] ?? past[0];
+  const groups = groupByMoney(active);
+  const advanced = useAdvanced();
 
   function analyseRun(id: string) {
     setSelected(id);
@@ -245,13 +252,30 @@ export function Autopilot() {
         </Card>
       ) : (
         <>
+          {/* Real money first and apart: in the advanced view it is always
+              there, with one quiet line when nothing trades real money. */}
+          {(groups.real.length > 0 || advanced) && (
+            <section aria-label="Real money" className="space-y-3">
+              <SectionTitle>Real money</SectionTitle>
+              {groups.real.length === 0 ? (
+                <p className="px-1 text-[15px] text-muted">No real-money autopilot running</p>
+              ) : (
+                groups.real.map((s) => <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />)
+              )}
+            </section>
+          )}
           {active.length === 0 ? (
             <Setup onStart={api.start} />
           ) : (
             <>
-              {active.map((s) => (
-                <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />
-              ))}
+              {groups.practice.length > 0 && (
+                <section aria-label="Practice (paper and demo)" className="space-y-3">
+                  <SectionTitle>Practice (paper and demo)</SectionTitle>
+                  {groups.practice.map((s) => (
+                    <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />
+                  ))}
+                </section>
+              )}
               {/* Several run side by side, each in a book of its own on the shared account. */}
               {another ? (
                 <Setup
@@ -410,7 +434,7 @@ function localInput(ms: number): string {
 }
 
 function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
-  const { strategies, passports, live, portfolio, cryptoCostVenue, autopilots } = useStore();
+  const { strategies, passports, live, cryptoCostVenue, autopilots } = useStore();
   const advanced = useAdvanced();
   const simple = !advanced;
 
@@ -501,7 +525,10 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   }
 
   // Real money: every requirement spelled out, checked here and again by the engine.
-  const liveCash = portfolio.balances.find((b) => b.venue === venue && b.mode === "live")?.cash;
+  // The live venue's own cash as Pythia last read it, never the paper account's.
+  const cashRead = liveVenueCash(live, venue);
+  const liveCash = cashRead?.cash;
+  const cashFrom = cashRead ? `${exchangeName(cashRead.exchange)}, read ${fmtWhen(cashRead.readMs)}` : "";
   const armedHere = live.armed && !live.paper && !live.dryRun && live.venues.includes(venue);
   const ready = (id: string) => passports.get(id)?.liveReady ?? false;
   const readyCount = eligible.filter((s) => ready(s.id)).length;
@@ -564,8 +591,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
         liveCash === undefined
           ? "The amount may not be more than the cash in the account. Pythia checks that with the exchange when it starts."
           : capital <= liveCash
-            ? `The amount is within the account's cash (${money(liveCash, 0)}).`
-            : `The amount is more than the account's cash (${money(liveCash, 0)}).`,
+            ? `The amount is within the account's cash (${money(liveCash, 0)} at ${cashFrom}). Pythia checks it again when it starts.`
+            : `The amount is more than the account's cash (${money(liveCash, 0)} at ${cashFrom}).`,
     },
   ];
   const liveBlocked = mode === "live" && (requirements.some((r) => r.ok === false) || typed.trim().toUpperCase() !== phrase);
@@ -619,7 +646,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
           // Re-picking applies only when Pythia chooses; 0 turns it off.
           ...(pick === "auto" ? { repickEveryHours: repick } : {}),
           stop,
-          flattenOnStop: flatten,
+          // A live test always sells everything when it stops (the engine forces it too).
+          flattenOnStop: flatten || liveTest,
           ...(mode === "live" ? { confirm: typed.trim().toUpperCase() } : {}),
           ...(liveTest ? { liveTest: true } : {}),
         };
@@ -906,12 +934,15 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
           <div className="mt-2">
             <SwitchRow
               label="When it stops on its own, sell everything it bought"
-              on={flatten}
+              on={flatten || liveTest}
               onChange={setFlatten}
+              disabled={liveTest}
               hint={
-                flatten
-                  ? "It ends in cash. You can still choose differently when you stop it yourself."
-                  : "What it bought stays in the account, and from then on you look after it yourself."
+                liveTest
+                  ? "A capped live test always does: when a loss limit or its floor stops it, it sells everything, so no real coin is left without anyone looking after it."
+                  : flatten
+                    ? "It ends in cash. You can still choose differently when you stop it yourself."
+                    : "What it bought stays in the account, and from then on you look after it yourself."
               }
             />
           </div>
@@ -1095,7 +1126,7 @@ const FWD_TONE = { neutral: "text-muted", good: "text-up", warn: "text-warn", ba
 const ROOM_TONE: Record<"off" | "ok" | "near" | "over", StatTone> = { off: "plain", ok: "plain", near: "warn", over: "down" };
 
 function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi; onAnalyse: () => void }) {
-  const { journal } = useStore();
+  const { journal, live: liveStatus } = useStore();
   const advanced = useAdvanced();
   const simple = !advanced;
   const [err, setErr] = useState("");
@@ -1107,6 +1138,8 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
   const id = s.config.id;
   const running = s.state === "running";
   const live = s.config.mode === "live";
+  // Armed or disarmed for this venue, and paused because live is disarmed.
+  const liveRoute = live ? realMoneyState(s, liveStatus) : null;
   const badge = modeLabel(s.config.mode, simple, isLiveTest(s.config));
   const plan = floorAtStart(s.startCapital, s.config.stop);
   // No loss or trailing rule means no floor (the engine sends null).
@@ -1147,6 +1180,7 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xl font-semibold leading-tight text-ink">{running ? "Running" : "Paused"}</span>
               <Badge tone={badge.tone}>{badge.text}</Badge>
+              {live && liveRoute && <Badge tone={liveRoute.tone}>{liveRoute.text}</Badge>}
             </div>
             <div className="mt-0.5 break-words text-[15px] text-muted">{s.config.name}</div>
           </div>
@@ -1402,8 +1436,7 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
 
 /** The markets an autopilot trades, for the strategies it may run. */
 function venueClassOf(c: AutopilotConfig): Venue {
-  if (c.assetClass) return c.assetClass;
-  return c.venue === "alpaca" ? "alpaca" : c.venue === "polymarket" ? "polymarket" : "crypto";
+  return autopilotClass(c);
 }
 
 /**
@@ -1828,6 +1861,8 @@ function AnalysisCard({ s, btc }: { s: AutopilotStatus; btc: AutopilotApi["btc"]
 
 function PastList({ past, shownId, onAnalyse }: { past: AutopilotStatus[]; shownId?: string; onAnalyse: (id: string) => void }) {
   const simple = !useAdvanced();
+  // Real-money runs and practice runs are listed apart, like the running ones.
+  const groups = groupByMoney(past);
   return (
     <Section
       title="Past autopilots"
@@ -1839,49 +1874,72 @@ function PastList({ past, shownId, onAnalyse }: { past: AutopilotStatus[]; shown
           When an autopilot stops or finishes, it is listed here with its result.
         </Nothing>
       ) : (
-        <List>
-          {past.map((p) => {
-            const badge = modeLabel(p.config.mode, simple, isLiveTest(p.config));
-            const end = p.stoppedMs ?? p.startedMs;
-            const shown = p.config.id === shownId;
-            const Icon = p.state === "finished" ? Flag : Square;
-            return (
-              <button
-                key={p.config.id}
-                type="button"
-                onClick={() => onAnalyse(p.config.id)}
-                aria-current={shown ? "true" : undefined}
-                className={`-mx-2 block w-[calc(100%+1rem)] rounded-control px-2 py-3.5 text-left transition-colors hover:bg-surface-2 ${shown ? "bg-surface-2" : ""}`}
-              >
-                <span className="flex items-start justify-between gap-3">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <Icon size={15} aria-hidden className="shrink-0 text-muted" />
-                    <span className="min-w-0 break-words text-[15px] font-semibold text-ink">{p.config.name}</span>
-                  </span>
-                  <span className="shrink-0 text-right">
-                    <span className={`tabular block text-[15px] font-semibold ${TONE_TEXT[changeTone(p.pnl)]}`}>{signedMoney(p.pnl)}</span>
-                    <span className="tabular block text-[13px] text-muted">
-                      {signedPct(p.pnlPct, 1)} of {money(p.startCapital, 0)}
-                    </span>
-                  </span>
-                </span>
-                <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                  <Badge tone={badge.tone}>{badge.text}</Badge>
-                  <Badge>{p.state === "finished" ? "Finished" : "Stopped"}</Badge>
-                  {shown && <Badge tone="accent">Showing its report</Badge>}
-                </span>
-                <span className="mt-1.5 flex items-start gap-1.5 text-[13px] text-muted">
-                  <CalendarClock size={13} aria-hidden className="mt-0.5 shrink-0" />
-                  <span className="min-w-0">
-                    {fmtWhen(p.startedMs)} to {fmtWhen(end)}, {fmtDuration(end - p.startedMs)}, {plural(p.trades, "trade")}
-                  </span>
-                </span>
-                {p.stopReason && <span className="mt-1 block break-words text-[13px] leading-snug text-muted">{p.stopReason}</span>}
-              </button>
-            );
-          })}
-        </List>
+        (["real", "practice"] as const).map((g) =>
+          groups[g].length === 0 ? null : (
+            <div key={g} className={g === "practice" && groups.real.length > 0 ? "mt-4" : ""}>
+              <h3 className="text-[13px] font-semibold text-muted">{g === "real" ? "Real money" : "Practice (paper and demo)"}</h3>
+              <PastRuns past={groups[g]} shownId={shownId} onAnalyse={onAnalyse} simple={simple} />
+            </div>
+          ),
+        )
       )}
     </Section>
+  );
+}
+
+function PastRuns({
+  past,
+  shownId,
+  onAnalyse,
+  simple,
+}: {
+  past: AutopilotStatus[];
+  shownId?: string;
+  onAnalyse: (id: string) => void;
+  simple: boolean;
+}) {
+  return (
+    <List>
+      {past.map((p) => {
+        const badge = modeLabel(p.config.mode, simple, isLiveTest(p.config));
+        const end = p.stoppedMs ?? p.startedMs;
+        const shown = p.config.id === shownId;
+        const Icon = p.state === "finished" ? Flag : Square;
+        return (
+          <button
+            key={p.config.id}
+            type="button"
+            onClick={() => onAnalyse(p.config.id)}
+            aria-current={shown ? "true" : undefined}
+            className={`-mx-2 block w-[calc(100%+1rem)] rounded-control px-2 py-3.5 text-left transition-colors hover:bg-surface-2 ${shown ? "bg-surface-2" : ""}`}
+          >
+            <span className="flex items-start justify-between gap-3">
+              <span className="flex min-w-0 items-center gap-2">
+                <Icon size={15} aria-hidden className="shrink-0 text-muted" />
+                <span className="min-w-0 break-words text-[15px] font-semibold text-ink">{p.config.name}</span>
+              </span>
+              <span className="shrink-0 text-right">
+                <span className={`tabular block text-[15px] font-semibold ${TONE_TEXT[changeTone(p.pnl)]}`}>{signedMoney(p.pnl)}</span>
+                <span className="tabular block text-[13px] text-muted">
+                  {signedPct(p.pnlPct, 1)} of {money(p.startCapital, 0)}
+                </span>
+              </span>
+            </span>
+            <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <Badge tone={badge.tone}>{badge.text}</Badge>
+              <Badge>{p.state === "finished" ? "Finished" : "Stopped"}</Badge>
+              {shown && <Badge tone="accent">Showing its report</Badge>}
+            </span>
+            <span className="mt-1.5 flex items-start gap-1.5 text-[13px] text-muted">
+              <CalendarClock size={13} aria-hidden className="mt-0.5 shrink-0" />
+              <span className="min-w-0">
+                {fmtWhen(p.startedMs)} to {fmtWhen(end)}, {fmtDuration(end - p.startedMs)}, {plural(p.trades, "trade")}
+              </span>
+            </span>
+            {p.stopReason && <span className="mt-1 block break-words text-[13px] leading-snug text-muted">{p.stopReason}</span>}
+          </button>
+        );
+      })}
+    </List>
   );
 }
