@@ -1381,10 +1381,26 @@ async fn tick_loop(state: AppState) {
     }
 }
 
+/// Which Alpaca endpoint the broker status is read from: the live one only
+/// when Alpaca itself is armed for live routing on the live endpoint. Live
+/// armed for crypto alone (or not at all) leaves Alpaca on its paper account,
+/// so the status comes from there; asking the live endpoint without live keys
+/// failed every minute and held every US-share rebalance on the demo route.
+/// With no paper keys and live keys only, the live account answers the same
+/// read-only questions (clock and account), and nothing is sent there.
+fn broker_status_paper(live: &LiveConfig,has_paper_keys: bool, has_live_keys: bool) -> bool {
+    let alpaca_live = live.armed && !live.paper && live.venues.contains(&Venue::Alpaca);
+    if alpaca_live {
+        return false;
+    }
+    has_paper_keys || !has_live_keys
+}
+
 /// Ask Alpaca whether the market is open and whether the account may trade.
-/// Uses the keys for whichever endpoint is currently selected.
+/// Uses the keys of the endpoint [`broker_status_paper`] picks.
 async fn refresh_broker_status(state: &AppState) {
-    let paper = { state.engine.lock().unwrap().live_config().paper };
+    let live = { state.engine.lock().unwrap().live_config() };
+    let paper = broker_status_paper(&live, state.creds.alpaca_keys(true).is_some(), state.creds.alpaca_keys(false).is_some());
     let conn = alpaca_conn(&state.creds, paper);
     let (session, account) = tokio::join!(conn.session(), conn.account());
 
@@ -2602,6 +2618,24 @@ mod tests {
         let map: std::collections::HashMap<String, String> =
             vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         credentials_from(&move |k: &str| map.get(k).cloned())
+    }
+
+    /// Live armed for crypto alone leaves Alpaca on its paper account: the
+    /// broker status (and with it the session check every US-share lab
+    /// rebalance waits for) is read there, not from the live endpoint.
+    #[test]
+    fn the_broker_status_reads_the_live_endpoint_only_when_alpaca_is_armed_live() {
+        let base = LiveConfig { armed: true, paper: false, dry_run: false, venues: vec![Venue::Crypto], timeout_sec: 120, extended_hours: false };
+        assert!(broker_status_paper(&base, true, true), "live armed for crypto only: Alpaca stays paper");
+        assert!(broker_status_paper(&LiveConfig { armed: false, ..base.clone() }, true, true), "disarmed: paper");
+        let alpaca = LiveConfig { venues: vec![Venue::Crypto, Venue::Alpaca], ..base.clone() };
+        assert!(!broker_status_paper(&alpaca, true, true), "Alpaca itself armed live: the live endpoint");
+        assert!(broker_status_paper(&LiveConfig { paper: true, ..alpaca.clone() }, true, true), "armed on the paper endpoint: paper");
+        assert!(broker_status_paper(&LiveConfig { armed: false, ..alpaca }, true, false));
+        // Only live keys and Alpaca not armed: the read-only status still
+        // comes from the account that has keys.
+        assert!(!broker_status_paper(&base, false, true));
+        assert!(broker_status_paper(&base, false, false), "no keys at all: paper, as before");
     }
 
     #[test]
