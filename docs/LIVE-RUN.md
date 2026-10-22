@@ -268,6 +268,42 @@ Before you do, read [`../PROFIT-PLAN.md`](../PROFIT-PLAN.md). The shipped strate
 indicators, and the arithmetic in §1 of that document explains why a high-turnover bot loses to costs
 even with a signal that "works". A good paper result is necessary, not sufficient.
 
+### Capped live test
+
+A live autopilot needs a green Strategy Passport for every strategy in it. A capped live test is
+the one exception: it trades a small amount of real money with a strategy you name, for example
+the best lab book, before it has passed its checks. See [`SAFETY.md`](../SAFETY.md) §3f.
+
+What it allows and what it keeps:
+
+- It drops only the passport gate. The confirmation, live routing armed for the venue, the venue
+  enabled for live, a max-loss rule, the free cash check, the kill switch, the daily loss breakers,
+  reconciliation, the order lifecycle and the maker settings all still apply.
+- The amount is at most `PYTHIA_LIVE_TEST_MAX_USD` (default 120 USD). The code clamps a bigger
+  value to 300 USD.
+- The max-loss rule must allow at most 25 % of the amount.
+- One live test at a time. You name its strategies; there is no auto pick and no portfolio.
+  Experimental lab books stay refused.
+- Its trades never count as readiness evidence: not toward the passport's live trade count, and
+  not in the readiness check.
+
+To start one:
+
+1. Arm live on the **Live** page as above, on the real endpoint, with the venue (for example Kraken)
+   enabled.
+2. **Autopilot** page, *Start an autopilot*: choose **Real money** and the crypto exchange.
+3. Step 3: choose **I pick them** and tick the strategy, for example the lab book you want to test.
+   Its badge says *Checks not passed*.
+4. A notice *Start as capped live test* appears with the cap and the rules. Press it. The amount is
+   brought down to the cap and a 20 % loss limit is set if you had none.
+5. Check the list in the red box: armed, amount within the cap, loss limit at most 25 %, no other
+   live test running, cash in the account.
+6. Type `START LIVE TEST` (not `START LIVE`) and press **Start the capped live test**.
+
+The journal line, the autopilot's last action and the alerts say LIVE TEST, and the app shows the
+autopilot as a real money TEST on its card, its detail view and in the comparison. Stop it like
+any other autopilot.
+
 ### What a restart does now
 
 An order in flight during a restart is no longer lost. Its position is persisted with its **REAL**

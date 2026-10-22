@@ -119,7 +119,8 @@ and nothing more:
 - **Live is gated harder than anything else.** A live autopilot starts only when live routing is
   armed for its venue, every strategy in it has a green Strategy Passport, it has a max-loss rule,
   you typed the confirmation, and its amount fits in the free cash the venue reports (minus what
-  other live autopilots there already committed). It never arms anything itself.
+  other live autopilots there already committed). It never arms anything itself. The one exception
+  to the passport is the capped live test below (§3f).
 - **It stops safely.** A paused autopilot opens nothing new, but its stop rules still apply. On a
   stop it closes its positions (unless you said not to) and pauses its strategies. If live routing
   is disarmed while it runs, or after a restart, it pauses and says why; real positions it could not
@@ -127,6 +128,34 @@ and nothing more:
   restart can never reset a stop rule.
 - **Demo** mode trades the venue's demo account with demo keys, exactly as a strategy set to Demo
   does (§3d): virtual money through the real API, never in the tax record.
+
+## 3f. Capped live test
+
+A capped live test lets you trade a small amount of real money with a strategy you name (for
+example the best lab book) before it has a green Strategy Passport. It is the only way real money
+reaches a strategy without one, and it is narrow on purpose:
+
+- **It drops one gate, the passport.** Everything else about live stays: your typed confirmation,
+  live routing armed on the Live page, the venue enabled for live, a max-loss rule, the free cash
+  read from the venue, the kill switch, the daily loss breakers, reconciliation, the order
+  lifecycle and the maker settings.
+- **It is capped.** At most `PYTHIA_LIVE_TEST_MAX_USD` dollars (default 120). The code never allows
+  more than 300, whatever the variable says. Its max-loss rule must allow at most 25 % of the
+  amount, in % or in dollars. Only one live test runs at a time, and a change to it keeps the same
+  caps.
+- **You name the strategy.** Pythia never picks one for a test, a test is never a portfolio, and an
+  experimental lab book (one that failed the lab's deflation test) stays refused for real money,
+  test or not.
+- **It says so everywhere.** You confirm it with its own phrase, `START LIVE TEST`. The journal,
+  the autopilot's last action, the alerts and every view of it in the app say LIVE TEST or TEST.
+- **It is not evidence.** Its trades never count toward a strategy's passport (the live trade
+  count), and the readiness check never judges it. A good test result does not make a strategy
+  ready; only the passport and the readiness rule do.
+- **It is unproven.** Expect to lose the whole amount.
+
+After a restart a live test comes back paused, like every live autopilot, until you arm live again.
+Its strategy stays set to live for it. If you change one of the strategy's parameters, the strategy
+goes back to paper and the test pauses; stop it and start a new one.
 
 ## 4. Your responsibilities
 
