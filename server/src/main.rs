@@ -611,10 +611,12 @@ fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
             get(move || {
                 let root = r1.clone();
                 async move {
-                    match root {
-                        Some(r) => Json(pf::view_in(&r, now_ms())).into_response(),
-                        None => Json(pf::view()).into_response(),
-                    }
+                    let mut v = match root {
+                        Some(r) => pf::view_in(&r, now_ms()),
+                        None => pf::view(),
+                    };
+                    v.sol_eur = pf::sol_eur(now_ms()).await;
+                    Json(v).into_response()
                 }
             }),
         )

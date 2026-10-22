@@ -134,6 +134,17 @@ export interface PumpfunView {
   execution: PumpfunExecution | null;
   hard: PumpfunHard;
   nowMs: number;
+  /** One SOL in euro from Kraken's public ticker, read by the backend; null when it could not be read. */
+  solEur?: SolEur | null;
+}
+
+export interface SolEur {
+  /** The last trade, euro per SOL. */
+  price: number;
+  /** Today's opening price (00:00 UTC). */
+  open: number;
+  /** When it was read (ms). */
+  t: number;
 }
 
 export type SettingsPatch = Partial<Record<"maxTotalSol" | "maxDailyLossSol" | "maxTradeSol" | "maxOpen", number | null>>;
@@ -190,6 +201,20 @@ export function sol(v: number | null | undefined, signed = false, dp = 4): strin
   if (v == null || !Number.isFinite(v)) return "n/a";
   const s = Math.abs(v).toFixed(dp);
   return `${signed ? (v > 0 ? "+" : v < 0 ? "-" : "") : v < 0 ? "-" : ""}${s} SOL`;
+}
+
+/** A SOL amount in euro at the given rate, in the reader's locale ("9,87 €"); "" without a rate. */
+export function eur(v: number | null | undefined, rate: SolEur | null | undefined, signed = false): string {
+  if (v == null || !Number.isFinite(v) || !rate || !(rate.price > 0)) return "";
+  const x = v * rate.price;
+  const abs = Math.abs(x) < 0.005 ? 0 : x;
+  const s = Math.abs(abs).toLocaleString(undefined, { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${signed ? (abs > 0 ? "+" : abs < 0 ? "-" : "") : abs < 0 ? "-" : ""}${s}`;
+}
+
+/** SOL's move in euro since today's open, as a share (0.034 = +3.4 %); null without a rate. */
+export function solEurChange(rate: SolEur | null | undefined): number | null {
+  return rate && rate.open > 0 ? rate.price / rate.open - 1 : null;
 }
 
 export type Tone = "up" | "down" | "flat";

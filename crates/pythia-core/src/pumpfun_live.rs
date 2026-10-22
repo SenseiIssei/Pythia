@@ -259,6 +259,62 @@ pub struct LiveView {
     pub execution: Option<Execution>,
     pub hard: Hard,
     pub now_ms: i64,
+    /// SOL in euro right now, for the page's euro figures; none when the ticker
+    /// could not be read (the page then shows SOL only).
+    pub sol_eur: Option<SolEur>,
+}
+
+/// The price of one SOL in euro from Kraken's public ticker (pair SOLEUR, no key).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SolEur {
+    /// The last trade.
+    pub price: f64,
+    /// Today's opening price (00:00 UTC), for the change since.
+    pub open: f64,
+    /// When it was read (ms).
+    pub t: i64,
+}
+
+const SOL_EUR_URL: &str = "https://api.kraken.com/0/public/Ticker?pair=SOLEUR";
+/// Read the ticker at most this often; the page refreshes every 15 s.
+const SOL_EUR_TTL_MS: i64 = 15_000;
+/// Keep showing the last good price this long when a read fails, then show none.
+const SOL_EUR_KEEP_MS: i64 = 600_000;
+
+/// The SOLEUR entry of a Kraken ticker answer: `c[0]` is the last trade, `o` today's open.
+pub fn parse_sol_eur(body: &serde_json::Value, now_ms: i64) -> Option<SolEur> {
+    let t = body.get("result")?.as_object()?.values().next()?;
+    let num = |v: &serde_json::Value| v.as_str().and_then(|s| s.parse::<f64>().ok()).filter(|x| x.is_finite() && *x > 0.0);
+    Some(SolEur { price: num(t.get("c")?.get(0)?)?, open: num(t.get("o")?)?, t: now_ms })
+}
+
+/// SOL in euro, from a 15 s cache in front of Kraken's public ticker. A failed read
+/// keeps the last good price for ten minutes, so one hiccup does not blank the page.
+pub async fn sol_eur(now_ms: i64) -> Option<SolEur> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<SolEur>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let last = cache.lock().ok().and_then(|c| c.clone());
+    if let Some(p) = &last {
+        if now_ms - p.t < SOL_EUR_TTL_MS {
+            return last;
+        }
+    }
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().ok()?;
+    let fresh = match client.get(SOL_EUR_URL).send().await {
+        Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|b| parse_sol_eur(&b, now_ms)),
+        Err(_) => None,
+    };
+    match fresh {
+        Some(p) => {
+            if let Ok(mut c) = cache.lock() {
+                *c = Some(p.clone());
+            }
+            Some(p)
+        }
+        None => last.filter(|p| now_ms - p.t < SOL_EUR_KEEP_MS),
+    }
 }
 
 /// What the page shows, read from `root` (the lab's data folder).
@@ -281,6 +337,7 @@ pub fn view_in(root: &Path, now_ms: i64) -> LiveView {
         execution: read(&d.join("execution.json")),
         hard: Hard::default(),
         now_ms,
+        sol_eur: None,
     }
 }
 
@@ -299,6 +356,7 @@ pub fn view() -> LiveView {
             execution: None,
             hard: Hard::default(),
             now_ms: now,
+            sol_eur: None,
         },
     }
 }

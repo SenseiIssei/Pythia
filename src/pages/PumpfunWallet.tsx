@@ -14,6 +14,7 @@ import {
   LIMIT_LABEL,
   canControl,
   ceilings,
+  eur,
   exitWords,
   holdWords,
   limitInput,
@@ -23,6 +24,7 @@ import {
   savePumpfunLimits,
   short,
   sol,
+  solEurChange,
   solscanToken,
   stateLine,
   tone,
@@ -31,6 +33,7 @@ import {
   type LimitKey,
   type PumpfunTrade,
   type PumpfunView,
+  type SolEur,
 } from "../pumpfunLive";
 
 const REFRESH_MS = 15_000;
@@ -160,15 +163,17 @@ const pctText = (r: number | null | undefined) => (r == null || !Number.isFinite
 const tradeName = (t: PumpfunTrade) => t.symbol || t.name || short(t.mint);
 
 /** How the bot did over the closed trades the service keeps: the running P&L and what it adds up to. */
-function Performance({ trades }: { trades: PumpfunTrade[] }) {
+function Performance({ trades, rate }: { trades: PumpfunTrade[]; rate: SolEur | null }) {
   const s = useMemo(() => tradeStats(trades), [trades]);
   const [at, setAt] = useState<number | null>(null);
   const oldest = useMemo(() => [...trades].sort((a, b) => (a.exitMs ?? 0) - (b.exitMs ?? 0)), [trades]);
   const shown = at == null ? s.pnlSol : s.curve[at];
   return (
-    <Section title="Performance" hint="Every closed trade added up in order, fees included. The line is the running profit or loss in SOL.">
+    <Section title="Performance" hint="Every closed trade added up in order, fees included. The line is the running profit or loss in SOL; euro at today's SOL price.">
       <div className="mb-2 flex items-baseline justify-between gap-3">
-        <div className={`tabular text-2xl font-semibold ${tone(shown) === "up" ? "text-up" : tone(shown) === "down" ? "text-down" : "text-ink"}`}>{sol(shown, true)}</div>
+        <div className={`tabular text-2xl font-semibold ${tone(shown) === "up" ? "text-up" : tone(shown) === "down" ? "text-down" : "text-ink"}`}>{sol(shown, true)}
+          {rate && <span className="ml-2 text-base font-medium">{eur(shown, rate, true)}</span>}
+        </div>
         <div className="text-[13px] text-muted">{at == null || at === 0 ? `${plural(s.n, "trade")}` : `after trade ${at}: ${tradeName(oldest[at - 1])}`}</div>
       </div>
       <AreaChart
@@ -184,9 +189,9 @@ function Performance({ trades }: { trades: PumpfunTrade[] }) {
           <Row label="Trades" value={String(s.n)} valueSub={`${s.wins} won, ${s.n - s.wins} lost`} help="Closed trades the live service keeps for the app (its newest ones)." />
           <Row label="Won" value={s.winRate == null ? "n/a" : `${Math.round(s.winRate * 100)} %`} help="Share of trades that ended with more SOL than they cost." />
           <Row label="Average per trade" value={pctText(s.avgRet)} tone={tone(s.avgRet)} help="The mean return of a trade on its stake, after fees." />
-          <Row label="Staked, got back" value={sol(s.proceedsSol, false, 4)} valueSub={`of ${sol(s.stakeSol, false, 4)}`} help="SOL put into these trades and SOL that came back out of them." />
-          {s.best && <Row label="Best trade" value={sol(s.best.pnlSol, true)} tone="up" sub={`${tradeName(s.best)} · ${pctText(s.best.ret)}`} />}
-          {s.worst && <Row label="Worst trade" value={sol(s.worst.pnlSol, true)} tone="down" sub={`${tradeName(s.worst)} · ${pctText(s.worst.ret)}`} />}
+          <Row label="Staked, got back" value={sol(s.proceedsSol, false, 4)} valueSub={`of ${sol(s.stakeSol, false, 4)}${rate ? ` (${eur(s.proceedsSol, rate)} of ${eur(s.stakeSol, rate)})` : ""}`} help="SOL put into these trades and SOL that came back out of them." />
+          {s.best && <Row label="Best trade" value={sol(s.best.pnlSol, true)} valueSub={eur(s.best.pnlSol, rate, true) || undefined} tone="up" sub={`${tradeName(s.best)} · ${pctText(s.best.ret)}`} />}
+          {s.worst && <Row label="Worst trade" value={sol(s.worst.pnlSol, true)} valueSub={eur(s.worst.pnlSol, rate, true) || undefined} tone="down" sub={`${tradeName(s.worst)} · ${pctText(s.worst.ret)}`} />}
           <Row label="Average holding time" value={holdWords(s.avgHoldS)} help="From the buy landing to the sale." />
         </div>
       )}
@@ -197,7 +202,7 @@ function Performance({ trades }: { trades: PumpfunTrade[] }) {
 type TradeFilter = "all" | "won" | "lost";
 
 /** Every closed trade the service keeps, newest first, with what it cost, what came back and a link to the token. */
-function TradeList({ trades }: { trades: PumpfunTrade[] }) {
+function TradeList({ trades, rate }: { trades: PumpfunTrade[]; rate: SolEur | null }) {
   const [filter, setFilter] = useState<TradeFilter>("all");
   const rows = trades.filter((t) => filter === "all" || (filter === "won" ? (t.pnlSol ?? 0) > 0 : (t.pnlSol ?? 0) <= 0));
   return (
@@ -237,7 +242,7 @@ function TradeList({ trades }: { trades: PumpfunTrade[] }) {
                   .filter(Boolean)
                   .join(" · ")}
                 right={<span className={tone(t.pnlSol) === "up" ? "text-up" : tone(t.pnlSol) === "down" ? "text-down" : "text-ink"}>{sol(t.pnlSol, true)}</span>}
-                rightSub={t.ret == null ? undefined : pctText(t.ret)}
+                rightSub={[eur(t.pnlSol, rate, true), t.ret == null ? "" : pctText(t.ret)].filter(Boolean).join(" · ") || undefined}
               />
             ))}
           </List>
@@ -280,6 +285,7 @@ export function PumpfunWallet() {
 
   const s = v?.status ?? null;
   const st = v ? stateLine(v) : null;
+  const rate = v?.solEur ?? null;
   return (
     <Page
       title="pump.fun live"
@@ -304,12 +310,15 @@ export function PumpfunWallet() {
           <KeyStats
             items={[
               { label: "Wallet balance", value: sol(s?.balanceSol ?? null), sub: s?.balanceT ? `read ${new Date(s.balanceT).toLocaleTimeString()}` : "not read yet", help: "The SOL in the bot's wallet, read from the chain by the live service." },
-              { label: "Today", value: sol(s?.pnlTodaySol ?? 0, true), tone: tone(s?.pnlTodaySol), sub: s ? `${plural(s.tradesToday, "trade")}, ${s.winsToday} won` : undefined, help: "Realised profit or loss of the bot today (UTC), fees included." },
-              { label: "Since the first live trade", value: sol(s?.pnlTotalSol ?? 0, true), tone: tone(s?.pnlTotalSol), sub: s ? plural(s.tradesTotal, "trade") : undefined, help: "Everything the bot has won or lost since its first live trade. The total budget stop counts this." },
+              ...(rate
+                ? [{ label: "Worth in euro", value: eur(s?.balanceSol ?? null, rate) || "n/a", sub: `1 SOL = ${eur(1, rate)} · ${pctText(solEurChange(rate))} today`, help: "The wallet's SOL at the live SOL/EUR price (Kraken, refreshed every 15 seconds). It moves with SOL even when the bot does nothing." }]
+                : []),
+              { label: "Today", value: sol(s?.pnlTodaySol ?? 0, true), tone: tone(s?.pnlTodaySol), sub: s ? `${eur(s.pnlTodaySol, rate, true) ? `${eur(s.pnlTodaySol, rate, true)} · ` : ""}${plural(s.tradesToday, "trade")}, ${s.winsToday} won` : undefined, help: "Realised profit or loss of the bot today (UTC), fees included." },
+              { label: "Since the first live trade", value: sol(s?.pnlTotalSol ?? 0, true), tone: tone(s?.pnlTotalSol), sub: s ? `${eur(s.pnlTotalSol, rate, true) ? `${eur(s.pnlTotalSol, rate, true)} · ` : ""}${plural(s.tradesTotal, "trade")}` : undefined, help: "Everything the bot has won or lost since its first live trade. The total budget stop counts this." },
             ]}
           />
 
-          <Performance trades={v.trades} />
+          <Performance trades={v.trades} rate={rate} />
 
           <Section title="Fund the wallet" hint="Send SOL from your own wallet or exchange to this address. That is the only way money gets in.">
             {v.address ? (
@@ -359,7 +368,7 @@ export function PumpfunWallet() {
                     title={p.symbol || p.name || short(p.mint)}
                     subtitle={`${p.venue ?? "?"} · ${p.state ?? "?"} · ${short(p.mint)}`}
                     right={sol(p.markSol ?? p.costSol)}
-                    rightSub={`cost ${sol(p.costSol)}`}
+                    rightSub={`${eur(p.markSol ?? p.costSol, rate) ? `${eur(p.markSol ?? p.costSol, rate)} · ` : ""}cost ${sol(p.costSol)}`}
                   />
                 ))}
               </List>
@@ -394,7 +403,7 @@ export function PumpfunWallet() {
             )}
           </Section>
 
-          <TradeList trades={v.trades} />
+          <TradeList trades={v.trades} rate={rate} />
 
           <More title="How this works">
             <div className="space-y-2 text-sm leading-relaxed text-muted">

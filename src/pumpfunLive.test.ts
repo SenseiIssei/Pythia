@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   ceilings,
+  eur,
   exitWords,
   holdWords,
   limitInput,
   parseLimits,
   short,
   sol,
+  solEurChange,
   solscanToken,
   stateLine,
   tradeStats,
@@ -45,6 +47,24 @@ describe("tradeStats", () => {
   it("is empty without trades", () => {
     const s = tradeStats([]);
     expect(s).toMatchObject({ n: 0, wins: 0, winRate: null, avgRet: null, best: null, worst: null, avgHoldS: null, curve: [0] });
+  });
+});
+
+describe("eur", () => {
+  const rate = { price: 93.08, open: 90, t: 0 };
+  it("turns SOL into euro at the live rate, signed when asked", () => {
+    const plain = (s: string) => s.replace(/[^0-9,.+-]/g, "");
+    expect(plain(eur(0.1, rate))).toMatch(/^9[.,]31$/);
+    expect(plain(eur(-0.0063, rate, true))).toMatch(/^-0[.,]59$/);
+    expect(plain(eur(0.0109, rate, true))).toMatch(/^\+1[.,]01$/);
+    expect(plain(eur(0.00001, rate, true))).toMatch(/^0[.,]00$/);
+    expect(eur(0.1, null)).toBe("");
+    expect(eur(null, rate)).toBe("");
+  });
+
+  it("knows the move since today's open", () => {
+    expect(solEurChange(rate)).toBeCloseTo(0.0342, 3);
+    expect(solEurChange(null)).toBeNull();
   });
 });
 

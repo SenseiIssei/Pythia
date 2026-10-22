@@ -153,3 +153,13 @@ fn addresses_are_base58_only() {
     assert!(!is_address(&"1".repeat(45)));
     assert!(!is_address("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAs0"));
 }
+
+#[test]
+fn reads_sol_in_euro_from_krakens_ticker() {
+    let body = serde_json::json!({"error": [], "result": {"SOLEUR": {
+        "a": ["93.10", "1", "1.000"], "b": ["93.05", "4", "4.000"], "c": ["93.08", "0.5"], "o": "90.00"}}});
+    let p = parse_sol_eur(&body, 5).unwrap();
+    assert_eq!((p.price, p.open, p.t), (93.08, 90.0, 5));
+    assert!(parse_sol_eur(&serde_json::json!({"error": ["EQuery:Unknown asset pair"], "result": {}}), 5).is_none());
+    assert!(parse_sol_eur(&serde_json::json!({"result": {"SOLEUR": {"c": ["0", "1"], "o": "90"}}}), 5).is_none());
+}
