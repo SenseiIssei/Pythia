@@ -118,7 +118,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from ..ops import i18n as _i18n
 
 NAME = "pumpfun"
@@ -213,11 +213,11 @@ def iso_ms(s: str | None) -> int | None:
 
 
 def paper_dir() -> Path:
-    return ROOT / "paper" / NAME
+    return WRITE_ROOT / "paper" / NAME
 
 
 def book_dir(rule: str) -> Path:
-    return ROOT / "paper" / f"{NAME}_{rule}"
+    return WRITE_ROOT / "paper" / f"{NAME}_{rule}"
 
 
 # ---------------------------------------------------------------- AMM arithmetic

@@ -54,7 +54,7 @@ from datetime import datetime, timezone
 
 import polars as pl
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from ..experiments import xs_daily as xs
 from . import m4_ls as m4
 from .experimental import LABEL
@@ -75,7 +75,7 @@ START_EQUITY = 10_000.0
 MODEL_COST = xs.COSTS["41bps"]      # the cost the evidence below is quoted at
 SIGNAL_VALID_MS = 36 * 3600 * 1000
 DAY_US = xs.DAY_US
-DIR = ROOT / "paper" / NAME
+DIR = WRITE_ROOT / "paper" / NAME
 KRAKEN_INSTRUMENTS = "https://futures.kraken.com/derivatives/api/v3/instruments"
 LISTED_ON = "kraken_futures"
 

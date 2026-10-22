@@ -8,6 +8,11 @@ from pathlib import Path
 import polars as pl
 
 ROOT = Path(os.environ.get("PYTHIA_DATA", "/data"))
+# Where the paper books, their engine signals and the models a study saves are written:
+# the data root unless PYTHIA_WRITE_ROOT says otherwise. The research agent's container
+# mounts the data root read only and sets PYTHIA_WRITE_ROOT=/out/data, so a book or study
+# it runs writes into its own folder and never next to what the engines read.
+WRITE_ROOT = Path(os.environ.get("PYTHIA_WRITE_ROOT") or ROOT)
 HOUR_US = 3_600_000_000
 
 UNIVERSE = [

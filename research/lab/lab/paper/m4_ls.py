@@ -48,7 +48,7 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from ..experiments import xs_daily as xs
 
 CONFIG = {
@@ -69,7 +69,7 @@ RETRAIN_DAYS = 7
 FAPI = "https://fapi.binance.com/fapi/v1"
 DAY_US = xs.DAY_US
 CACHE = Path(os.environ.get("PYTHIA_CACHE", str(ROOT / "lab-cache")))
-DIR = ROOT / "paper" / NAME
+DIR = WRITE_ROOT / "paper" / NAME
 
 
 def get(url: str):

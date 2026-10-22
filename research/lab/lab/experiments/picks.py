@@ -32,7 +32,7 @@ import polars as pl
 
 from .. import report
 from ..cv import walk_forward
-from ..data import HOUR_US, ROOT
+from ..data import HOUR_US, ROOT, WRITE_ROOT
 from ..metrics import deflated_sharpe
 
 DAY_US = 24 * HOUR_US
@@ -220,7 +220,7 @@ def main() -> None:
     import sys
     v2 = "--perp-features" in sys.argv
     report_name = "picks_v2" if v2 else "picks"
-    (ROOT / "reports" / report_name).mkdir(parents=True, exist_ok=True)
+    (WRITE_ROOT / "reports" / report_name).mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     feats = FEATURES + PERP_FEATURES if v2 else FEATURES
     raw = build_raw(with_perp=v2)
@@ -252,7 +252,7 @@ def main() -> None:
     has_score = np.isfinite(score)
     pl.DataFrame({"day": days[has_score], "symbol": sym[has_score], "score": score[has_score],
                   "fwd": fwd[has_score], "adv_rank": P["adv28"].to_numpy()[has_score]}).write_parquet(
-        ROOT / "reports" / report_name / "scores.parquet")
+        WRITE_ROOT / "reports" / report_name / "scores.parquet")
 
     oos = np.isfinite(score) & np.isfinite(fwd)
     d_o, s_o, f_o, sy_o = days[oos], score[oos], fwd[oos], sym[oos]

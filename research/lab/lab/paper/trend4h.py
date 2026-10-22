@@ -65,7 +65,7 @@ from typing import Callable
 import numpy as np
 
 from .. import universe as uni
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from . import experimental as ex
 
 NAME = "trend4h_pullback"
@@ -439,7 +439,7 @@ def write_journal(path: Path, row: dict) -> None:
 
 def main() -> int:
     dry = "--dry-run" in sys.argv
-    d = ROOT / "paper" / NAME
+    d = WRITE_ROOT / "paper" / NAME
     f = d / "state.json"
     st = json.loads(f.read_text()) if f.exists() else None
     st, sig, trades, words = run(st=st)

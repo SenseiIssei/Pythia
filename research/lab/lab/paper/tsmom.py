@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from ..experiments.tsmom import COST, DAY_US, daily_matrix, rolling_mean, target_weights
 
 BOOKS = {
@@ -49,7 +49,7 @@ def live_quotes(symbols: list[str]) -> dict[str, tuple[float, float]]:
 
 def step(name: str, cfg: dict, tgt: np.ndarray, names: list[str], bid: np.ndarray, ask: np.ndarray,
          close_t: np.ndarray, now_us: int) -> dict:
-    d = ROOT / "paper" / name
+    d = WRITE_ROOT / "paper" / name
     d.mkdir(parents=True, exist_ok=True)
     mid = (bid + ask) / 2
     state_file = d / "state.json"
@@ -216,7 +216,7 @@ def write_signal(name: str, cfg: dict, tgt: np.ndarray, names: list[str], as_of_
 
 def save_signal(name: str, sig: dict, now_us: int, root=None) -> None:
     """<root>/signals/<name>/latest.json, replaced atomically, plus a dated copy."""
-    d = (ROOT if root is None else root) / "signals" / name
+    d = (WRITE_ROOT if root is None else root) / "signals" / name
     d.mkdir(parents=True, exist_ok=True)
     tmp = d / "latest.json.tmp"
     tmp.write_text(json.dumps(sig, indent=2))

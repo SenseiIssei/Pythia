@@ -32,7 +32,7 @@ import time
 from datetime import datetime, timezone
 
 from ..experiments import fam_common as fc
-from ..data import ROOT
+from ..data import WRITE_ROOT
 from .tsmom import save_signal
 
 NAME = "spy_hold"
@@ -101,7 +101,7 @@ def signal(now_ms: int, ev: dict | None = None) -> dict:
 
 
 def read_latest(root=None) -> dict | None:
-    p = (ROOT if root is None else root) / "signals" / NAME / "latest.json"
+    p = (WRITE_ROOT if root is None else root) / "signals" / NAME / "latest.json"
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):

@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 
 import polars as pl
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from ..experiments import perps_common as pc
 from ..experiments import xs_daily as xs
 from . import m4_ls as m4
@@ -60,7 +60,7 @@ START_EQUITY = 10_000.0
 MODEL_COST = pc.JUDGED
 SIGNAL_VALID_MS = 36 * 3600 * 1000
 DAY_US = xs.DAY_US
-DIR = ROOT / "paper" / NAME
+DIR = WRITE_ROOT / "paper" / NAME
 LISTED_ON = "kraken_futures"
 
 # Source: results/funding_carry.md (pick F7 · 10/10 · 3-day tranches, 10 bps per unit of

@@ -28,7 +28,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 
 NAME = "listings"
 START_EQUITY = 10_000.0
@@ -112,7 +112,7 @@ def step(now_ms: int | None = None, rule: dict | None = None, listings=None, pri
     if rule is None:
         return None
     now_ms = now_ms or int(time.time() * 1000)
-    d = ROOT / "paper" / NAME
+    d = WRITE_ROOT / "paper" / NAME
     d.mkdir(parents=True, exist_ok=True)
     sp = d / "state.json"
     if sp.exists():

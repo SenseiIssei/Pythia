@@ -43,7 +43,7 @@ import polars as pl
 
 from .. import report, universe
 from ..cv import walk_forward
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from . import picks
 from .picks import DAY_US, FEATURES, FIRST_TEST, HORIZON, MIN_ADV_USD, MIN_HISTORY_D, PARAMS, PERP_FEATURES
 from .picks_ls import perp_base, perp_panel
@@ -69,7 +69,7 @@ MIN_ALPACA = 8
 Z_WINDOW, Z_MIN = 365, 180
 SMOOTH = 7
 TOP_PERPS = 20
-SHADOW_DIR = ROOT / "paper" / "m2_v3_shadow"
+SHADOW_DIR = WRITE_ROOT / "paper" / "m2_v3_shadow"
 SHADOW_WEEKS = 26
 SHADOW_T = 2.0
 

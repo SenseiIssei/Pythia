@@ -43,7 +43,7 @@ from typing import Callable
 
 import numpy as np
 
-from ..data import ROOT
+from ..data import WRITE_ROOT
 from ..experiments import crypto_own as co
 from ..experiments import fam_common as fc
 from ..experiments import kr_premium_xs
@@ -136,7 +136,7 @@ def main() -> int:
                 "missing")}))
             continue
         held = set()
-        f = ROOT / "paper" / name / "state.json"
+        f = WRITE_ROOT / "paper" / name / "state.json"
         if f.exists():
             st = json.loads(f.read_text())
             held |= {s for w in st.get("tranches", []) for s in w}

@@ -29,7 +29,7 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from ..experiments.picks import FEATURES, HORIZON, PARAMS, PERP_FEATURES, build
 from ..experiments.picks_ls import COST, perp_panel
 from . import m2_lowvol_shadow as shadow
@@ -41,7 +41,7 @@ FAPI = "https://fapi.binance.com/fapi/v1"
 # --v2 runs the same book on M2 v2 (with perpetual features) in its own folder,
 # so both versions earn their gate-7 record side by side.
 V2 = "--v2" in sys.argv
-DIR = ROOT / "paper" / ("picks_ls_v2" if V2 else "picks_ls")
+DIR = WRITE_ROOT / "paper" / ("picks_ls_v2" if V2 else "picks_ls")
 
 
 def get(url: str):

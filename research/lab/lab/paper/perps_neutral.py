@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from ..data import ROOT
+from ..data import ROOT, WRITE_ROOT
 from ..experiments import fam_common as fc
 from ..experiments import perps_common as pc
 from ..experiments.perps_neutral_portfolio import erc
@@ -63,7 +63,7 @@ VARIANT = (f"{LABEL} · M4 reg7n, funding carry and low-vol beta-neutral perps b
 START_EQUITY = 10_000.0
 MODEL_COST = pc.JUDGED
 SIGNAL_VALID_MS = 36 * 3600 * 1000
-DIR = ROOT / "paper" / NAME
+DIR = WRITE_ROOT / "paper" / NAME
 LISTED_ON = "kraken_futures"
 MAX_LAG_DAYS = 2
 

@@ -19,6 +19,7 @@ RULE = {"entry": "first full hour after the listing", "horizon_days": 7, "cell":
 @pytest.fixture()
 def root(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "ROOT", tmp_path)
+    monkeypatch.setattr(B, "WRITE_ROOT", tmp_path)
     monkeypatch.setenv("PYTHIA_REPORTS", str(tmp_path / "reports"))
     return tmp_path
 

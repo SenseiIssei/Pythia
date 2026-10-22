@@ -29,7 +29,7 @@ import polars as pl
 
 from .. import report
 from ..cv import HOUR_US, walk_forward
-from ..data import ROOT, UNIVERSE, hourly
+from ..data import ROOT, UNIVERSE, WRITE_ROOT, hourly
 from ..metrics import diebold_mariano, qlike, r2
 
 EPS = 1e-10
@@ -231,7 +231,7 @@ def export_model(model, X, resid_var, summary, gain, dm_p, ts, har_beta, har_res
     from onnxmltools.convert.common.data_types import FloatTensorType
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    d = (Path(dest) if dest is not None else ROOT / "models" / folder) / stamp
+    d = (Path(dest) if dest is not None else WRITE_ROOT / "models" / folder) / stamp
     d.mkdir(parents=True, exist_ok=True)
     onx = convert_lightgbm(model, initial_types=[("features", FloatTensorType([None, X.shape[1]]))],
                            target_opset=15)
