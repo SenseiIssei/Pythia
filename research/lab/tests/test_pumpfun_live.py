@@ -757,3 +757,16 @@ def test_every_new_live_card_in_english_and_german():
         c = CARD.live_gate_card("the kill switch file is there", "test", lang)
         assert "kill switch" in c.summary and "TEST" in c.title
         assert CARD.live_gate_card(None, "test", lang).title
+
+
+def test_the_dry_run_finds_a_fresh_curve_by_itself(tmp_path):
+    import polars as pl
+    now = 1_792_687_800_000
+    day = "2026-10-22"
+    (tmp_path / "creates" / f"date={day}").mkdir(parents=True)
+    pl.DataFrame({"t": [now - 900_000, now - 60_000, now - 30_000, now - 20_000],
+                  "mint": ["OLDpump", "OKpump", "NEWESTpump", "CASHpump"],
+                  "cashback": [False, False, False, True]}).write_parquet(tmp_path / "creates" / f"date={day}" / "a.parquet")
+    assert LX.newest_create(tmp_path, now_ms=now) == "NEWESTpump"         # the newest, cashback left out
+    assert LX.newest_create(tmp_path, now_ms=now + 3_600_000) is None     # nothing in the last ten minutes
+    assert LX.newest_create(tmp_path / "empty", now_ms=now) is None

@@ -1373,6 +1373,23 @@ def newest_pool(path: Path | None = None) -> tuple[str, str] | None:
     return best[0], best[1][0]
 
 
+def newest_create(root: Path | None = None, now_ms: int | None = None, max_age_ms: int = 600_000) -> str | None:
+    """The mint of the newest token the collector saw created in the last ten minutes, cashback coins
+    left out (the v3 trades refuse them): a curve that is almost surely still open, for the dry run."""
+    import datetime as dt
+    from . import store
+    now_ms = now_ms or int(time.time() * 1000)
+    days = [(dt.datetime.fromtimestamp(now_ms / 1000, dt.timezone.utc) - dt.timedelta(days=k)).strftime("%Y-%m-%d")
+            for k in (1, 0)]
+    df = store.read("creates", days, root)
+    if df.is_empty():
+        return None
+    if "cashback" in df.columns:
+        df = df.filter(~df["cashback"].fill_null(False))
+    df = df.filter(df["t"] >= now_ms - max_age_ms).sort("t")
+    return str(df["mint"][-1]) if len(df) else None
+
+
 def venue_of(rule: str) -> str:
     return "pool" if P.BY_NAME[rule].family == "E" else "curve"
 
@@ -1416,7 +1433,10 @@ def simulate(gate: LiveGate, rpc: Rpc, pubkey: str, mint: str | None = None, poo
             sell = X.amm_sell(pubkey, info, least, 0, b.priority_l, False, b.idl_amm)
         else:
             if not mint:
-                raise RuntimeError("a curve strategy needs --mint (a live token's mint)")
+                mint = newest_create(now_ms=now_ms)
+                if not mint:
+                    raise RuntimeError("no token created in the last ten minutes (run the collector, or pass --mint)")
+                rec.update(mint=mint)
             data, _ = rpc.account(X.pda([b"bonding-curve", X.key(mint)], X.PUMP))
             vt, vs = int.from_bytes(data[8:16], "little"), int.from_bytes(data[16:24], "little")
             rt, done = int.from_bytes(data[24:32], "little"), bool(data[48])
