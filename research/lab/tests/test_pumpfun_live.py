@@ -924,3 +924,19 @@ def test_a_sold_leftover_lands_in_the_ledger(tmp_path, monkeypatch):
     assert row["mint"] == "Bundlepump" and row["exit_why"] == "leftover"
     assert row["pnl_sol"] == (25_000_000 - 30_000_000 - ex._fee()) / C.LAMPORTS
     assert ex.totals["trades"] == 1 and book.recent[0]["mint"] == "Bundlepump"
+
+
+def test_a_leftover_whose_own_sale_landed_unseen_is_booked_not_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(LX, "data_dir", lambda: tmp_path)
+    ex = executor(tmp_path)
+    book = LX.LiveBook(None, ex, "P_cmig_model", alerts=False)
+    o = P.Order(-1000, "sell", "Bundlepump", "curve", 577, 0, T0, "leftover")
+    pend = {"side": "sell", "order": o, "sig": None, "sent_ms": T0, "leftover": True}
+    ex.leftovers[-1000] = {"mint": "Bundlepump", "tokens": 577, "tries": 1, "cost_l": 30_000_000}
+    ex.sell_sigs[-1000] = ["SOLD"]
+    ex.verifying[-1000] = (pend, "not landed", 0)
+    ex._holds(-1000, 0, T0)
+    assert -1000 not in ex.leftovers
+    lines = [json.loads(x) for x in (tmp_path / "orders.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert lines[-1]["what"] == "filled" and lines[-1]["sig"] == "SOLD"
+    assert LX.read_ledger(1)[0]["mint"] == "Bundlepump"

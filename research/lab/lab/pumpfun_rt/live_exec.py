@@ -666,7 +666,9 @@ class Rpc:
                                                   "replaceRecentBlockhash": True, "commitment": "processed"}])
 
     def statuses(self, sigs: list[str]) -> list:
-        return self.call("getSignatureStatuses", [sigs, {"searchTransactionHistory": False}])["value"]
+        # With the history: the node's recent status cache covers only about a minute, so a transaction
+        # that landed before the check came back as unknown and was given up as "not landed" (CCC, Bundle).
+        return self.call("getSignatureStatuses", [sigs, {"searchTransactionHistory": True}])["value"]
 
 
 # ---------------------------------------------------------------- the executor
@@ -1076,10 +1078,17 @@ class LiveExecutor:
         if amount == 0 and (sigs or pend.get("leftover")):
             o = pend["order"]
             if pend.get("leftover"):
-                self.leftovers.pop(pid, None)
-                log_order({**pend, "sig": sigs[-1] if sigs else None}, "gone", mode=self.mode,
-                          why="sold before, seen on chain")
-                print(f"live: leftover {o.mint} is already sold on chain; dropped", flush=True)
+                lo = self.leftovers.pop(pid, None) or {}
+                if sigs:
+                    # Its own sale landed unseen: book it, so the ledger has it and chain_pnl settles it.
+                    log_order({**pend, "sig": sigs[-1]}, "filled", sol=0, tokens=o.tokens, mode=self.mode,
+                              onchain=True)
+                    if self.on_leftover is not None:
+                        self.on_leftover("sold", {**lo, "got_l": 0})
+                else:
+                    log_order(pend, "gone", mode=self.mode, why="sold before, seen on chain")
+                print(f"live: leftover {o.mint} is already sold on chain; "
+                      + ("booked from the chain" if sigs else "dropped"), flush=True)
                 return
             p = self.pipe.pos.get(pid) or {}
             left = int(p.get("left") or o.tokens)
