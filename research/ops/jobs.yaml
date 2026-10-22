@@ -89,10 +89,15 @@ jobs:
     timeout: 15m
     replaces: pythia-paper
 
+  # paper-families writes breakout_top10, the book whose live twin trades real money, so it and
+  # paper-live-copy run from the owner's own copy of the lab (/opt/pythia-live, research/ops/
+  # deploy_live.sh, read only), never from /opt/pythia-lab, which the research agent's rounds deploy.
   - name: paper-families
     description: sweep candidates as paper books (momentum, tranches, breakout)
     schedule: "15 4 * * *"
     command: python -m lab.paper.families
+    code: false
+    volumes: [/opt/pythia-live:/app:ro]
     env: {PYTHIA_AGENT_OUT: /data/lab-cache}
     resources: {cpus: 2, memory: 6g}
     timeout: 1h
@@ -106,6 +111,8 @@ jobs:
     description: live twins of the books a real-money autopilot runs, after the books are written
     depends_on: [paper-families]
     command: python -m lab.paper.live_copy
+    code: false
+    volumes: [/opt/pythia-live:/app:ro]
     timeout: 5m
 
   # Pre-registered forward shadow (results/exit_shadow_prereg.md): the M14 exit
@@ -359,10 +366,11 @@ jobs:
     replaces: pythia-notify-pending
 
   # The research agent (research/ops/agent/, README "Research agent"): Claude Code in its own
-  # container on the Claude API, no key, no Docker socket, no /etc/pythia. Its commits come out
-  # as patches, guard.py holds back anything that touches the engines, the app, the host
-  # scripts or the pump.fun live code, and only a clean round is merged and deployed. The
-  # weekly round runs the director's fresh drafts; the daily care fixes failed jobs.
+  # container on the Claude API, as an unprivileged user, no git key, no Docker socket, no
+  # /etc/pythia, the data folder read only, one output folder of its own. Its commits come out
+  # as patches; guard.py lets through only the research folders on its allow list, and only a
+  # round that passes every check is pushed, merged and deployed. A held round stays root-only
+  # on the server. The weekly round runs the director's fresh drafts; the daily care fixes failed jobs.
   - name: agent-research
     description: weekly research round by the agent, director drafts to registered studies, merged and deployed when the guard passes
     schedule: "0 13 * * 0"
@@ -567,12 +575,15 @@ jobs:
   # (docs/PUMPFUN-LIVE.md, step 7). This keeps it fresh: simulateTransaction only, nothing is
   # signed or sent, and the wallet file is never opened (the address comes from its .pub). A
   # failure (pump.fun changed its programs again) alerts, and the gate shuts buying by itself.
+  # It runs the owner's live code copy (/opt/pythia-live, deploy_live.sh) and sees only the two
+  # files it reads from /etc/pythia, the confirmation and the public address, never the folder.
   - name: pumpfun-live-simulate
     description: dry run of a buy and a buy-then-sell for the pump.fun live wallet (nothing signed or sent) so the live gate stays current
     schedule: "7 */6 * * *"
     command: python -m lab.pumpfun_rt.live_exec simulate
     env_file: /etc/pythia/pumpfun-live.env?
-    volumes: [/etc/pythia:/etc/pythia:ro]
+    code: false
+    volumes: [/opt/pythia-live:/app:ro, /etc/pythia/pumpfun-live-ack:/etc/pythia/pumpfun-live-ack:ro, /etc/pythia/pumpfun-keypair.json.pub:/etc/pythia/pumpfun-keypair.json.pub:ro]
     resources: {cpus: 1, memory: 512m}
     timeout: 5m
     grace: 6h

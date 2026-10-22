@@ -306,6 +306,71 @@ def test_docker_argv(tmp_path):
     assert f"{tmp_path}/code:/app" not in b and b[-4] == "pythia-recorder"
 
 
+def _ro_mounts(argv: list[str]) -> set[str]:
+    return {argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-v" and argv[i + 1].endswith(":ro")}
+
+
+def test_plain_lab_jobs_see_the_real_money_controls_read_only(tmp_path):
+    (tmp_path / "alerts.env").write_text("")
+    (tmp_path / "live-code").mkdir()
+    t = table(tmp_path, f"""
+  - name: book
+    kind: lab
+    schedule: "0 5 * * *"
+    command: python -m lab.paper.book
+  - name: digest
+    kind: lab
+    schedule: "0 6 * * *"
+    command: python -m lab.ops.notify
+    env_file: {tmp_path}/alerts.env
+  - name: twin
+    kind: lab
+    schedule: "0 7 * * *"
+    command: python -m lab.paper.live_copy
+    code: false
+    volumes: [{tmp_path}/live-code:/app:ro]
+""")
+    data = tmp_path / "data"
+    for d in ("autopilot", "live/pumpfun_rt", "pumpfun_rt/idl", "signals/breakout_top10",
+              "signals/breakout_top10_live", "signals/tsmom_top20", "reports/pumpfun_rt", "lab-cache/reports"):
+        (data / d).mkdir(parents=True)
+    (data / "signals/breakout_top10_live/latest.json").write_text(json.dumps({"live_copy_of": "breakout_top10"}))
+    (data / "reports/pumpfun_rt/KILL").write_text("")
+    (data / "lab-cache/reports/families_summary.json").write_text("{}")
+    ro = _ro_mounts(jobs.build_argv(t, t.job("book")))
+    for p in ("autopilot", "live", "pumpfun_rt/idl", "signals/breakout_top10_live", "signals/breakout_top10",
+              "reports/pumpfun_rt/KILL", "lab-cache/reports/families_summary.json"):
+        assert f"{data}/{p}:/data/{p}:ro" in ro, p
+    assert not any("tsmom_top20" in v or "autopilot-safe" in v for v in ro)
+    # Jobs whose code the agent cannot change see the folder as before.
+    assert _ro_mounts(jobs.build_argv(t, t.job("digest"))) == set()
+    assert _ro_mounts(jobs.build_argv(t, t.job("twin"))) == {f"{tmp_path}/live-code:/app:ro"}
+
+
+def test_a_lock_is_never_taken_through_a_symlink(tmp_path):
+    (tmp_path / "locks").mkdir()
+    target = tmp_path / "target"
+    target.write_text("keep me")
+    (tmp_path / "locks" / "a.lock").symlink_to(target)
+    with pytest.raises(OSError):
+        jobs.Locks(tmp_path / "locks", ["a"]).acquire()
+    assert target.read_text() == "keep me"
+
+
+def test_a_missing_volume_source_stops_the_run(tmp_path):
+    t = table(tmp_path, f"""
+  - name: sim
+    kind: lab
+    schedule: "0 5 * * *"
+    command: python -m lab.pumpfun_rt.live_exec simulate
+    code: false
+    volumes: [{tmp_path}/missing-ack:/etc/pythia/pumpfun-live-ack:ro]
+""")
+    with pytest.raises(FileNotFoundError):
+        jobs.build_argv(t, t.job("sim"))
+    assert not (tmp_path / "missing-ack").exists()
+
+
 # ---------------------------------------------------------------- running, records, logs
 
 def test_run_records_success_and_failure(tmp_path, no_alerts):
@@ -775,6 +840,38 @@ def test_deploy_lab_keeps_results_and_checks_the_manifest(tmp_path):
     # dry run changes nothing
     (src / "lab" / "y.py").write_text("")
     assert deploy("--dry-run").returncode == 0 and not (dest / "lab" / "y.py").exists()
+
+
+@pytest.mark.skipif(not shutil.which("rsync") or getattr(os, "geteuid", lambda: 1)() != 0,
+                    reason="rsync and root needed")
+def test_deploy_live_copies_a_committed_lab_and_checks_it(tmp_path):
+    repo = tmp_path / "repo"
+    lab = repo / "research" / "lab"
+    for p, text in (("lab/__init__.py", ""), ("lab/x.py", "X = 1\n"), ("tests/test_x.py", ""),
+                    ("results/r.md", "r\n"), ("proposals/p.md", "p\n")):
+        (lab / p).parent.mkdir(parents=True, exist_ok=True)
+        (lab / p).write_text(text)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "x"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, capture_output=True)
+    dest = tmp_path / "live"
+
+    def deploy(*extra, d=dest):
+        return subprocess.run(["bash", str(OPS / "deploy_live.sh"), "--src", str(lab), "--dest", str(d), "--force",
+                               *extra], capture_output=True, text=True, timeout=60)
+
+    r = deploy()
+    assert r.returncode == 0, r.stderr
+    assert (dest / "lab" / "x.py").exists() and (dest / "results" / "r.md").exists()
+    assert not (dest / "tests").exists() and not (dest / "proposals").exists()
+    assert oct((dest / "lab" / "x.py").stat().st_mode)[-3:] == "644"
+    assert json.loads((dest / ".deploy-info").read_text())["files"] == 3
+    (lab / "lab" / "x.py").write_text("X = 2\n")                        # not committed
+    r = deploy()
+    assert r.returncode != 0 and "uncommitted" in r.stderr
+    assert (dest / "lab" / "x.py").read_text() == "X = 1\n"
+    assert "refusing" in deploy(d=Path("/opt/pythia-lab")).stderr
 
 
 def test_deploy_lab_refuses_a_folder_without_lab_code(tmp_path):

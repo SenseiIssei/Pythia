@@ -704,7 +704,8 @@ class Locks:
         self.dir.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + wait_s
         for n in self.names:
-            fd = os.open(self.dir / f"{n}.lock", os.O_RDWR | os.O_CREAT, 0o644)
+            # Never through a symlink: the runner is root and a container may see this folder.
+            fd = os.open(self.dir / f"{n}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o644)
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -733,7 +734,7 @@ def lock_busy(directory: Path, name: str) -> bool:
     p = directory / f"{name}.lock"
     if not p.exists():
         return False
-    fd = os.open(p, os.O_RDWR)
+    fd = os.open(p, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -829,11 +830,57 @@ def build_argv(t: Table, job: dict) -> list[str]:
     argv += ["-v", f"{t.data}:/data"]
     if job["code"]:
         argv += ["-v", f"{t.code}:/app"]
+    if plain_lab_job(job):
+        for p in live_controls(t.data):
+            argv += ["-v", f"{t.data}/{p}:/data/{p}:ro"]
     for v in job["volumes"]:
+        src = v.split(":", 1)[0]
+        if src.startswith("/") and not os.path.lexists(src):
+            # docker run -v would create it as an empty root folder (a missing ack file
+            # would become a directory); stop the run instead.
+            raise FileNotFoundError(errno.ENOENT, "volume source missing", src)
         argv += ["-v", v]
     argv.append(job["image"])
     argv += shlex.split(job["command"])
     return argv
+
+
+# What a plain lab job may never write although it mounts the whole data folder: the
+# real-money controls. A plain lab job (the only kind the research agent may add or change,
+# research/ops/agent/guard.py) runs code from paths.code, which the agent's rounds deploy; each
+# of these that exists is mounted again read only on top of /data, so such code cannot arm,
+# feed or unlock real money. Jobs with env files, a network, volumes or no code mount run code
+# the agent cannot change (the guard holds every module they import) and see the folder as before.
+LIVE_CONTROLS = (
+    "autopilot", "autopilot-safe", "engine",                     # the engines' own state
+    "live",                                                      # the pump.fun live ledger, totals, dry run
+    "pumpfun_rt/idl", "pumpfun_rt/KILL",                         # the owner's IDL copies, a kill switch
+    "reports/pumpfun_rt/KILL", "reports/pumpfun_rt/live_settings.json",
+    "lab-cache/reports/families_summary.json",                   # the sweep's pick, which shapes the book
+    "lab-cache/reports/tsmom_tranches.json",                     # the live twin copies
+)
+
+
+def plain_lab_job(job: dict) -> bool:
+    return (job["kind"] == "lab" and bool(job["code"])
+            and not (job["env_files"] or job["volumes"] or job.get("network")))
+
+
+def live_controls(data: Path) -> list[str]:
+    """The LIVE_CONTROLS that exist under `data`, every live twin's signal folder
+    (signals/*_live) and the folder of the book each twin copies (its live_copy_of)."""
+    out = [p for p in LIVE_CONTROLS if (data / p).exists() and not (data / p).is_symlink()]
+    sig = data / "signals"
+    for d in sorted(sig.glob("*_live")) if sig.is_dir() else []:
+        if d.is_symlink() or not d.is_dir():
+            continue
+        out.append(f"signals/{d.name}")
+        rec = _read_json(d / "latest.json")
+        src = rec.get("live_copy_of") if isinstance(rec, dict) else None
+        if isinstance(src, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", src) and src not in (".", "..") \
+                and (sig / src).is_dir() and not (sig / src).is_symlink():
+            out.append(f"signals/{src}")
+    return list(dict.fromkeys(out))
 
 
 def env_files(job: dict) -> list[str]:
