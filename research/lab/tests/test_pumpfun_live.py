@@ -530,6 +530,8 @@ def test_a_test_fill_is_measured_tagged_and_its_fee_asked_for(tmp_path):
                                    name="live", record=False))
     book = LX.LiveBook(pipe, ex, "X", alerts=False)
     pipe.on_close = book.on_close
+    day_at_close = []
+    pipe.on_event = lambda kind, p, kw: day_at_close.append(ex.day_pnl_l) if kind == "closed" else None
     cv = Curve(eng)
     eng.advance(T0 + 1)
     ex.drain()
@@ -552,6 +554,7 @@ def test_a_test_fill_is_measured_tagged_and_its_fee_asked_for(tmp_path):
     led = LX.read_ledger()
     assert led[0]["mode"] == "test" and led[0]["lat_buy_ms"] == fill["lat_ms"]
     assert ex.totals["trades"] == 1 and ex.totals["pnl_l"] != 0
+    assert day_at_close == [ex.totals["pnl_l"]]                # the closed card's "today" holds this trade
     orders = [json.loads(x) for x in (LX.data_dir() / "orders.jsonl").read_text().splitlines()]
     assert all(o.get("mode") == "test" for o in orders)
 
@@ -763,6 +766,10 @@ def test_every_new_live_card_in_english_and_german():
                                  {"cost_l": SOL // 50, "tokens": 10 ** 9}, lang, 0.0, mode="test",
                                  measured={"lat_ms": 1500, "slip": 0.03})
         assert "TEST" in c.title and "1" in c.parts[0].text
+        c = CARD.live_trade_card("sold", {"rule": "P_pool0", "symbol": "TST", "mint": MINT},
+                                 {"proceeds_l": SOL // 10, "why": "time"}, lang, 0.0, mode="test",
+                                 measured={"lat_ms": -73, "slip": 0.045})
+        assert "-73" not in " ".join(p.text for p in c.parts)   # a chain block time a hair before the signal
         c = CARD.live_stop_card("daily", 0.31, 0.3, "test", lang)
         assert "TEST" in c.title and "0" in c.summary
         c = CARD.live_stop_card("total", 1.0, 1.0, "test", lang)

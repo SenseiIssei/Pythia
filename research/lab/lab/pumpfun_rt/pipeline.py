@@ -815,9 +815,9 @@ class Pipeline:
         self.closed.append(rec)
         if self.record:
             eng.closed.append(rec)
-        self._event("closed", p, rec=rec)
-        if self.on_close is not None:
+        if self.on_close is not None:                      # booked first, so the card's day P&L holds this trade
             self.on_close(rec)
+        self._event("closed", p, rec=rec)
 
     def mark_gap(self) -> None:
         for p in self.pos.values():

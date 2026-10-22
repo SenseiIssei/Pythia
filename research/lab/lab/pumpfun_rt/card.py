@@ -153,7 +153,8 @@ def _measured_line(measured: dict | None, lang: str):
     if not measured or measured.get("lat_ms") is None:
         return None
     t = i18n.t
-    kw = {"lat": i18n.num(measured["lat_ms"], 0, lang), "assumed": i18n.num(C.Costs().lat_median_ms, 0, lang)}
+    # A fill booked from the chain has the block's whole-second time, so it can read a hair before the signal.
+    kw = {"lat": i18n.num(max(0, measured["lat_ms"]), 0, lang), "assumed": i18n.num(C.Costs().lat_median_ms, 0, lang)}
     if measured.get("slip") is None:
         return notify.Line(t("prl_measured_noslip", lang, **kw))
     return notify.Line(t("prl_measured", lang, slip=i18n.frac_pct(measured["slip"], 1, lang), **kw))
