@@ -53,7 +53,7 @@ AMM_COMMON = ["pool", "user", "global_config", "base_mint", "quote_mint", "user_
               "coin_creator_vault_ata", "coin_creator_vault_authority"]
 AMM_BUY = AMM_COMMON + ["global_volume_accumulator", "user_volume_accumulator", "fee_config", "fee_program"]
 AMM_SELL = AMM_COMMON + ["fee_config", "fee_program"]
-ARGS = {("pump", "buy"): ["amount", "max_sol_cost", "track_volume"],
+ARGS = {("pump", "buy"): ["amount", "max_sol_cost", "track_volume", "partial_fill"],
         ("pump", "sell"): ["amount", "min_sol_output"],
         ("amm", "buy"): ["base_amount_out", "max_quote_amount_in", "track_volume"],
         ("amm", "sell"): ["base_amount_in", "min_quote_amount_out"]}
@@ -521,7 +521,9 @@ UNITS = 200_000
 
 
 def pump_buy(user: str, c: CurveInfo, tokens: int, max_cost_l: int, priority_l: int, idl: Idl | None = None) -> list[Ix]:
-    data = (idl.disc("buy") if idl else discriminator("buy")) + struct.pack("<QQ", tokens, max_cost_l) + b"\x00"
+    # track_volume and partial_fill are OptionBool (one byte each), both off: a buy fills
+    # completely within max_cost or fails, never a part of it.
+    data = (idl.disc("buy") if idl else discriminator("buy")) + struct.pack("<QQ", tokens, max_cost_l) + b"\x00\x00"
     return budget(UNITS, priority_l) + [create_ata(user, user, c.mint, c.token_program),
                                         Ix(PUMP, _pump_accounts("buy", user, c, idl), data)]
 

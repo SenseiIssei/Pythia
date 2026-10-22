@@ -134,7 +134,8 @@ def idl_dir() -> Path:
 
 
 def code_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    """The folder that holds the `lab` package (research/lab, or /app in the lab image), as in wallet.py."""
+    return Path(__file__).resolve().parents[2]
 
 
 def live_kill_paths() -> list[Path]:

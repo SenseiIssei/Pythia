@@ -44,7 +44,9 @@ def address_path(keypair: Path) -> Path:
 
 
 def code_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    """The folder that holds the `lab` package: research/lab in a checkout, /app in the lab image.
+    One level higher would be / in the image, and every folder would count as inside the code."""
+    return Path(__file__).resolve().parents[2]
 
 
 def _mode(p: Path) -> int:

@@ -260,6 +260,14 @@ def test_a_patched_template_is_byte_for_byte_the_freshly_built_transaction():
     assert sold is not None and sold[1] >= 0
 
 
+def test_pump_buy_data_matches_the_programs_argument_layout():
+    # amount u64, max_sol_cost u64, track_volume and partial_fill as one-byte OptionBool, both off
+    info = X.CurveInfo(key(1), X.TOKEN, key(5), key(6))
+    ix = next(i for i in X.pump_buy(key(77), info, 123, 456, 789) if i.program == X.PUMP)
+    assert ix.data == X.discriminator("buy") + struct.pack("<QQ", 123, 456) + b"\x00\x00"
+    assert X.ARGS[("pump", "buy")] == ["amount", "max_sol_cost", "track_volume", "partial_fill"]
+
+
 def test_compile_template_knows_where_the_blockhash_and_the_data_are():
     user = key(77)
     info = X.CurveInfo(key(1), X.TOKEN, key(5), key(6))
