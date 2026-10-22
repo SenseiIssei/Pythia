@@ -71,7 +71,9 @@ check "wallet key array (64 numbers)" '\[ *([0-9]{1,3} *, *){63}[0-9]{1,3} *\]'
 check "personal Windows path" '[A-Za-z]:(\\\\|\\|/)+Users(\\\\|\\|/)+[A-Za-z0-9._-]+' '[A-Za-z]:(\\\\|\\|/)+Users(\\\\|\\|/)+(<[^>]*>|you|user|USER|USERNAME|%USERNAME%|Public|example)'
 check "personal home path" '/home/[a-z][a-z0-9_-]+/|/Users/[A-Za-z][A-Za-z0-9_-]+/' '/home/(user|you|example|runner|guides)/|/Users/(user|you|example|runner)/'
 check "public IP address" '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' '(^|[^0-9.])(127\.|10\.|0\.0\.0\.0|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.255\.|1\.1\.1\.1|8\.8\.8\.8)'
-check "e-mail address" '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' '@(example\.(com|org|net)|users\.noreply\.github\.com|noreply\.[a-z.]+|[0-9]+x\.png)|superwarper@t-online\.de|security@'
+# The committer's own address (from git config, never written here) is allowed.
+self_mail=$(git config user.email 2>/dev/null | sed 's/[][\.*^$+?(){}|]/\\&/g')
+check "e-mail address" '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' "@(example\.(com|org|net)|users\.noreply\.github\.com|noreply\.[a-z.]+|[0-9]+x\.png)|security@${self_mail:+|$self_mail}"
 
 if [ "$fail" -ne 0 ]; then
   say ""

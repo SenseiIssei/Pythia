@@ -31,9 +31,11 @@ envf=/etc/pythia/agent.env
 # Models and turn limits may be set in the env file; nothing else is read from it here.
 if [ -r "$envf" ]; then
   while IFS='=' read -r k v; do
-    case $k in PYTHIA_AGENT_MODEL_RESEARCH|PYTHIA_AGENT_MODEL_CARE|PYTHIA_AGENT_TURNS_RESEARCH|PYTHIA_AGENT_TURNS_CARE) export "$k=$v" ;; esac
+    case $k in PYTHIA_AGENT_MODEL_RESEARCH|PYTHIA_AGENT_MODEL_CARE|PYTHIA_AGENT_TURNS_RESEARCH|PYTHIA_AGENT_TURNS_CARE|PYTHIA_AGENT_GIT_EMAIL) export "$k=$v" ;; esac
   done < "$envf"
 fi
+# The commit identity's address lives in the env file only, never in this public repository.
+git_email=${PYTHIA_AGENT_GIT_EMAIL:?set PYTHIA_AGENT_GIT_EMAIL in /etc/pythia/agent.env}
 case $mode in
   research) model=${PYTHIA_AGENT_MODEL_RESEARCH:-claude-opus-5-5}; turns=${PYTHIA_AGENT_TURNS_RESEARCH:-400}; limit=6h ;;
   care) model=${PYTHIA_AGENT_MODEL_CARE:-claude-sonnet-5-5}; turns=${PYTHIA_AGENT_TURNS_CARE:-120}; limit=90m ;;
@@ -80,12 +82,12 @@ tgit checkout -q -B main origin/main
 tgit reset -q --hard origin/main
 tgit clean -qfdx
 tgit config user.name SenseiIssei
-tgit config user.email superwarper@t-online.de
+tgit config user.email "$git_email"
 base=$(tgit rev-parse HEAD)
 rm -rf "$work" "$patches"
 git clone -q --no-hardlinks "$trusted" "$work"
 git -C "$work" config user.name SenseiIssei
-git -C "$work" config user.email superwarper@t-online.de
+git -C "$work" config user.email "$git_email"
 # Commits carry the owner's name and no attribution lines (the repository's rule).
 cat > "$home/.claude/settings.json" <<'EOF'
 {"includeCoAuthoredBy": false, "attribution": {"commit": "", "pr": ""}, "permissions": {"defaultMode": "bypassPermissions"}}
