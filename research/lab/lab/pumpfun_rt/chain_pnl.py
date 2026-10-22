@@ -33,6 +33,7 @@ LAMPORTS = 1_000_000_000
 LEDGER_LOCK = threading.Lock()          # write_close and the rewrite here never overlap
 EARLY_MS, LATE_MS = 60_000, 1_800_000   # a row's transactions: from its signal to half an hour after its exit
 GONE_MS = 600_000                       # a signature the node does not know after ten minutes never landed
+PACE_S = 0.4                            # between two reads: the public node answers 429 to bursts
 
 
 def wallet_delta(rpc, sig: str, wallet: str) -> int | None:
@@ -92,7 +93,7 @@ def reconcile(rpc, wallet: str, d: Path, now_ms: int | None = None) -> tuple[int
             return 0, False
     fills = _fills(orders)
     now = now_ms if now_ms is not None else time.time() * 1000
-    adjust, updates = 0, {}
+    adjust, updates, throttled = 0, {}, False
     for row in rows:
         key = row_key(row)
         if key in done:
@@ -107,8 +108,13 @@ def reconcile(rpc, wallet: str, d: Path, now_ms: int | None = None) -> tuple[int
         if not any(f.get("side") == "buy" and f.get("what") == "filled" for f in mine)                 or not any(f.get("side") == "sell" and f.get("what") == "filled" for f in mine):
             continue
         for f in mine:
-            if f["sig"] not in deltas:
-                v = wallet_delta(rpc, f["sig"], wallet)
+            if f["sig"] not in deltas and not throttled:
+                try:
+                    v = wallet_delta(rpc, f["sig"], wallet)
+                except Exception:                         # a rate limit or a timeout: try again next round,
+                    throttled = True                      # and never take it for "never landed"
+                    continue
+                time.sleep(PACE_S)
                 if v is None and now - float(f.get("t") or 0) > GONE_MS:
                     v = 0                                 # never landed: it cost nothing
                 if v is not None:

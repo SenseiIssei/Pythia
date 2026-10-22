@@ -873,3 +873,26 @@ def test_a_leftover_already_sold_on_chain_is_dropped_not_retried(tmp_path, monke
     ex.verifying[-2] = ({**pend, "order": P.Order(-2, "sell", MINT, "curve", 1_000, 0, T0, "leftover")}, "x", 0)
     ex._holds(-2, 1_000, T0)                                                       # still held: sell it again
     assert -2 in ex.pending and ex.leftovers[-2]["tries"] == 2
+
+
+def test_a_rate_limited_read_waits_for_the_next_round_and_is_never_taken_for_never_landed(tmp_path, monkeypatch):
+    from lab.pumpfun_rt import chain_pnl as CP
+    monkeypatch.setattr(CP, "PACE_S", 0)
+    wallet = "W" * 44
+    deltas = {"BUY": -10_000_000, "SELL": 9_000_000, "FAILED": -1_005_000}
+    state = {"limited": True}
+
+    class Rpc:
+        def call(self, method, params):
+            if params[0] == "FAILED" and state["limited"]:
+                raise RuntimeError("HTTP Error 429: Too Many Requests")
+            return {"meta": {"preBalances": [10**10], "postBalances": [10**10 + deltas[params[0]]]},
+                    "transaction": {"message": {"accountKeys": [wallet]}}}
+    (tmp_path / "ledger.csv").write_text("mint,signal_ms,exit_ms,pnl_sol\nXpump,1000,9000,0\n", encoding="utf-8")
+    lines = [{"what": "filled", "side": "buy", "mint": "Xpump", "sig": "BUY", "t": 5000},
+             {"what": "filled", "side": "sell", "mint": "Xpump", "sig": "SELL", "t": 9000},
+             {"what": "failed", "side": "sell", "mint": "Xpump", "sig": "FAILED", "t": 20_000}]
+    (tmp_path / "orders.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (0, False)
+    state["limited"] = False
+    assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (-10_000_000 + 9_000_000 - 1_005_000, True)
