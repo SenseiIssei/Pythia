@@ -283,6 +283,20 @@ Das Log sagt `live: ON (test) for P_pool60 ...` oder listet jeden Grund,
 warum nichts gehandelt wird. Der Dienst läuft auch dann weiter und zeigt die
 Gründe in der App; nach dem Beheben `docker restart pythia-pumpfun-live`.
 
+**Wichtig bei einer Änderung in `/etc/pythia/pumpfun-live.env`** (oder
+`alerts.env`): `docker restart` behält die alte Umgebung, denn Docker liest
+`--env-file` nur beim Anlegen des Containers. Den Container deshalb neu
+anlegen:
+
+```bash
+docker stop pythia-pumpfun-live        # lässt ihn die offenen Positionen sichern
+docker rm -f pythia-pumpfun-live
+# dann den docker-run-Befehl von oben noch einmal ausführen
+```
+
+Ob die neue Einstellung angekommen ist, zeigt das Log beim Start (zum Beispiel
+`live: sending through Helius Sender ...`).
+
 Beobachten:
 
 - App, Seite **pump.fun wallet**: Adresse, Guthaben, heute und gesamt,
@@ -294,7 +308,9 @@ Beobachten:
   Tageskarte mit Guthaben, Ergebnis, Abschlüssen und gemessener gegen
   angenommene Latenz.
 - Dateien: `/srv/pythia-data/live/pumpfun_rt/` (`orders.jsonl`,
-  `ledger.csv`, `measured.jsonl`, `totals.json`) und
+  `ledger.csv`, `measured.jsonl`, `totals.json`, `journal.jsonl` mit den
+  Gebühren fehlgeschlagener Transaktionen; Tages- und Gesamtergebnis werden
+  aus `ledger.csv` und `journal.jsonl` neu berechnet, nie hochgezählt) und
   `/srv/pythia-data/reports/pumpfun_rt/execution.md` (gemessen gegen das
   Papiermodell; die tägliche Studie übernimmt die Zusammenfassung).
 
@@ -313,6 +329,12 @@ nur Token, deren Erstellung er selbst gesehen hat.
 Positionen, die bei einem Stopp oder Neustart noch offen waren, verkauft der
 Dienst beim nächsten Start als Erstes (Telegram meldet es); was er nicht
 verkaufen kann, meldet er, dann verkaufst du es selbst in deiner Wallet.
+
+Schlägt ein Verkauf fehl, versucht der Bot es nach 1, 2, 4 ... höchstens 60
+Sekunden erneut, und nach 6 Fehlschlägen hintereinander gar nicht mehr: Die
+Position steht dann in der App als `stuck`, Telegram meldet es einmal, und du
+verkaufst sie selbst oder legst den Dienst neu an (dann verkauft er sie als
+Rest von vorher).
 
 **Notschalter wieder lösen:** Das geht absichtlich nicht über die App. Auf
 dem Server die Datei löschen:
@@ -348,13 +370,18 @@ SOL (änderbar bis höchstens 0,0001 SOL) an eines der zehn veröffentlichten Se
 echo 'PYTHIA_PUMPFUN_SENDER=https://sender.helius-rpc.com/fast?swqos_only=true' >> /etc/pythia/pumpfun-live.env
 # optional, Standard 0.000005, nie über 0.0001:
 # echo 'PYTHIA_PUMPFUN_SENDER_TIP_SOL=0.00001' >> /etc/pythia/pumpfun-live.env
-docker restart pythia-pumpfun-live
+docker stop pythia-pumpfun-live
+docker rm -f pythia-pumpfun-live
+# dann den docker-run-Befehl aus Abschnitt 8 (docker restart behält die alte Umgebung)
 ```
 
 Der Executor nimmt nur diese Adresse (https, `/fast`, `swqos_only=true`), hängt genau ein
-Trinkgeld an und verweigert jedes andere. Antwortet Sender nicht, sendet der normale RPC dieselbe
-Transaktion. Die Simulation prüft die Transaktion mit Trinkgeld. Ausschalten: die Zeile löschen und
-neu starten.
+Trinkgeld an und verweigert jedes andere. Antwortet Sender mit einem Fehler, fragt er erst den
+Status der Signatur ab (Sender kann sie trotzdem weitergegeben haben) und schickt nur dann dieselbe
+signierte Transaktion an den normalen RPC. Die Simulation prüft die Transaktion mit genau einem
+Trinkgeld; ist Sender an, öffnet das Tor nur mit einer Simulation, die das Trinkgeld trug (nach dem
+Einschalten also `live_exec simulate` erneut ausführen). Ausschalten: die Zeile löschen und den
+Container wie oben neu anlegen.
 
 Du wolltest "immer direkt beim Release drin" sein. Was gemessen ist
 (results/pumpfun_speed.md):
