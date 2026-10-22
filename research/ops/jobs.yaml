@@ -532,6 +532,20 @@ jobs:
     timeout: 2m
     grace: 10m
 
+  # The live gate wants a successful dry run of the live strategy's venue within 24 hours
+  # (docs/PUMPFUN-LIVE.md, step 7). This keeps it fresh: simulateTransaction only, nothing is
+  # signed or sent, and the wallet file is never opened (the address comes from its .pub). A
+  # failure (pump.fun changed its programs again) alerts, and the gate shuts buying by itself.
+  - name: pumpfun-live-simulate
+    description: dry run of a buy and a buy-then-sell for the pump.fun live wallet (nothing signed or sent) so the live gate stays current
+    schedule: "7 */6 * * *"
+    command: python -m lab.pumpfun_rt.live_exec simulate
+    env_file: /etc/pythia/pumpfun-live.env?
+    volumes: [/etc/pythia:/etc/pythia:ro]
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    grace: 6h
+
   # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
   # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,
   # which posts the daily card. Paper research only: nothing here can trade.
