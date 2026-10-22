@@ -126,7 +126,7 @@ DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 REPORT_MAX_AGE_MS = 36 * 3_600_000
 RECHECK_S = 60.0
 CONFIRM_MS = 30_000
-GIVE_UP_MS = 90_000
+GIVE_UP_MS = 150_000                     # longer than a 20 s cached blockhash plus its ~60 to 90 s validity
 BLOCKHASH_S = 20.0
 NOT_PUBLIC = ("jito", "bundle", "relay", "block-engine", "blockengine", "mev")
 # The owner's switch for a Jito block engine (our own single transactions with a tip, never bundles), its URL,
