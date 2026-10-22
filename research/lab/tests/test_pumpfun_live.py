@@ -940,3 +940,22 @@ def test_a_leftover_whose_own_sale_landed_unseen_is_booked_not_dropped(tmp_path,
     lines = [json.loads(x) for x in (tmp_path / "orders.jsonl").read_text(encoding="utf-8").splitlines()]
     assert lines[-1]["what"] == "filled" and lines[-1]["sig"] == "SOLD"
     assert LX.read_ledger(1)[0]["mint"] == "Bundlepump"
+
+
+def test_a_fill_line_wins_over_an_earlier_failure_line_of_the_same_signature(tmp_path, monkeypatch):
+    from lab.pumpfun_rt import chain_pnl as CP
+    monkeypatch.setattr(CP, "PACE_S", 0)
+    wallet = "W" * 44
+    deltas = {"BUY": -10_000_000, "SELL": 9_500_000}
+
+    class Rpc:
+        def call(self, method, params):
+            return {"meta": {"preBalances": [10**10], "postBalances": [10**10 + deltas[params[0]]]},
+                    "transaction": {"message": {"accountKeys": [wallet]}}}
+    (tmp_path / "ledger.csv").write_text("mint,signal_ms,exit_ms,pnl_sol\nYpump,1000,9000,0\n", encoding="utf-8")
+    lines = [{"what": "failed", "side": "buy", "mint": "Ypump", "sig": "BUY", "t": 4000, "why": "not landed"},
+             {"what": "filled", "side": "buy", "mint": "Ypump", "sig": "BUY", "t": 5000},
+             {"what": "failed", "side": "sell", "mint": "Ypump", "sig": "SELL", "t": 8000, "why": "not landed"},
+             {"what": "filled", "side": "sell", "mint": "Ypump", "sig": "SELL", "t": 9000}]
+    (tmp_path / "orders.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (-500_000, True)

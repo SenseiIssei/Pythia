@@ -100,11 +100,12 @@ def reconcile(rpc, wallet: str, d: Path, now_ms: int | None = None) -> tuple[int
             continue
         lo = float(row.get("signal_ms") or row.get("land_ms") or 0) - EARLY_MS
         hi = float(row.get("exit_ms") or 0) + LATE_MS
-        seen, mine = set(), []
-        for f in fills:                                   # each signature once (sent, then filled or failed)
-            if f["mint"] == row.get("mint") and lo <= float(f.get("t") or 0) <= hi and f["sig"] not in seen:
-                seen.add(f["sig"])
-                mine.append(f)
+        by_sig: dict = {}
+        for f in fills:                                   # each signature once; a fill beats a failure line
+            if f["mint"] == row.get("mint") and lo <= float(f.get("t") or 0) <= hi:
+                if f["sig"] not in by_sig or (f.get("what") == "filled" and by_sig[f["sig"]].get("what") != "filled"):
+                    by_sig[f["sig"]] = f
+        mine = list(by_sig.values())
         if not any(f.get("side") == "buy" and f.get("what") == "filled" for f in mine)                 or not any(f.get("side") == "sell" and f.get("what") == "filled" for f in mine):
             continue
         for f in mine:
