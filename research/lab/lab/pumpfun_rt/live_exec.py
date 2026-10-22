@@ -85,6 +85,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import chain_pnl as CP
 from . import curve as C
 from . import pipeline as P
 from . import txbuild as X
@@ -93,6 +94,7 @@ ACK_PATH = Path("/etc/pythia/pumpfun-live-ack")
 ENV_LIVE = "PYTHIA_PUMPFUN_LIVE"
 ENV_KEYPAIR = "PYTHIA_PUMPFUN_KEYPAIR"
 ENV_RPC = "PYTHIA_PUMPFUN_RPC"
+CHAIN_EVERY_S = 60.0                     # how often closed trades are checked against the chain
 ENV_IDL = "PYTHIA_PUMPFUN_IDL_DIR"
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 REPORT_MAX_AGE_MS = 36 * 3_600_000
@@ -751,10 +753,13 @@ class LiveExecutor:
         self.on_gate = None                           # (reason or None) when the gate shuts or opens again
         self.closed_why: str | None = None
         self.last_check = -1e18
+        self.on_chain = None                          # () after the ledger was corrected from the chain
         self.worker = None
         if start:
             self.worker = threading.Thread(target=self._work, name="pumpfun-live", daemon=True)
             self.worker.start()
+            if signer is not None:
+                threading.Thread(target=self._chain_loop, name="pumpfun-live-chain", daemon=True).start()
 
     def attach(self, pipe) -> None:
         self.pipe = pipe
@@ -867,6 +872,22 @@ class LiveExecutor:
         return tok.pool if tok is not None else None
 
     # ------------------------------------------------------------ the worker thread (network and signing only)
+    def _chain_loop(self, every_s: float = CHAIN_EVERY_S) -> None:
+        """Every minute: the closed trades against what the wallet really saw (chain_pnl). Its own
+        thread, so reading transactions never delays a send."""
+        while True:
+            self.chain_once()
+            time.sleep(every_s)
+
+    def chain_once(self) -> None:
+        try:
+            adjust, changed = CP.reconcile(self.builder.rpc, self.signer.pubkey, data_dir())
+        except Exception as e:                               # the next round tries again
+            print(f"live: chain check failed ({type(e).__name__}: {e})"[:200], flush=True)
+            return
+        if changed:
+            self.results.put(("chain", None, adjust))
+
     def _work(self) -> None:
         while True:
             item = self.q.get()
@@ -914,6 +935,12 @@ class LiveExecutor:
             except queue.Empty:
                 break
             kind, pid = r[0], r[1]
+            if kind == "chain":
+                if r[2]:
+                    self.booked(r[2])                        # the day's and the total's P&L as the wallet saw it
+                if self.on_chain is not None:
+                    self.on_chain()
+                continue
             if kind == "fee":
                 if r[3] is not None:
                     write_measure({"t": self.clock(), "what": "fee", "mode": self.mode, "sig": r[2], "fee_l": r[3]})
@@ -1047,12 +1074,13 @@ def write_close(rec: dict) -> None:
     d = data_dir()
     d.mkdir(parents=True, exist_ok=True)
     p = d / "ledger.csv"
-    new = not p.exists()
-    with p.open("a", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=LEDGER_COLS, extrasaction="ignore")
-        if new:
-            w.writeheader()
-        w.writerow(rec)
+    with CP.LEDGER_LOCK:
+        new = not p.exists()
+        with p.open("a", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=LEDGER_COLS, extrasaction="ignore")
+            if new:
+                w.writeheader()
+            w.writerow(rec)
 
 
 def read_ledger(limit: int = 100) -> list[dict]:
@@ -1148,9 +1176,14 @@ class LiveBook:
         self.last_limits = -1e18
         executor.on_stop = self.on_stop
         executor.on_leftover = self.on_leftover
+        executor.on_chain = self.on_chain
         executor.on_gate = self.on_gate
 
     # ------------------------------------------------------------ the pipeline's hooks
+    def on_chain(self) -> None:
+        """The ledger now holds what the wallet really saw: the app's list follows it."""
+        self.recent = read_ledger(100)
+
     def on_close(self, rec: dict) -> None:
         rec = {**rec, "mode": self.exec.mode}
         write_close(rec)

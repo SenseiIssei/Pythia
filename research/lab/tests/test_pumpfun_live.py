@@ -770,3 +770,58 @@ def test_the_dry_run_finds_a_fresh_curve_by_itself(tmp_path):
     assert LX.newest_create(tmp_path, now_ms=now) == "NEWESTpump"         # the newest, cashback left out
     assert LX.newest_create(tmp_path, now_ms=now + 3_600_000) is None     # nothing in the last ten minutes
     assert LX.newest_create(tmp_path / "empty", now_ms=now) is None
+
+
+def test_closed_trades_are_corrected_to_what_the_wallet_really_saw(tmp_path, monkeypatch):
+    from lab.pumpfun_rt import chain_pnl as CP
+    wallet = "W" * 44
+    # The first live trade: booked at +0.000674 SOL, the wallet lost 0.000672 SOL.
+    deltas = {"BUY": -11_775_858, "SELL": 11_103_855}
+    asked = []
+
+    class Rpc:
+        def call(self, method, params):
+            asked.append(params[0])
+            return {"meta": {"preBalances": [10_000_000_000, 5], "postBalances": [10_000_000_000 + deltas[params[0]], 5],
+                             "fee": 1_005_000}, "transaction": {"message": {"accountKeys": [wallet, "X"]}}}
+
+    monkeypatch.setattr(LX, "data_dir", lambda: tmp_path)
+    LX.write_close({"mode": "test", "rule": "P_cmig_model", "mint": "DLMpump", "symbol": "DLM",
+                    "signal_ms": 1_000, "land_ms": 9_000, "exit_ms": 18_000, "stake_sol": 0.01,
+                    "proceeds_sol": 0.010595, "pnl_sol": 0.000674198, "ret": 0.067})
+    with (tmp_path / "orders.jsonl").open("w", encoding="utf-8") as fh:
+        for side, sig, t in (("buy", "BUY", 9_000), ("sell", "SELL", 18_000)):
+            fh.write(json.dumps({"what": "sent", "side": side, "mint": "DLMpump", "sig": sig, "t": t - 10}) + "\n")
+            fh.write(json.dumps({"what": "filled", "side": side, "mint": "DLMpump", "sig": sig, "t": t}) + "\n")
+    adjust, changed = CP.reconcile(Rpc(), wallet, tmp_path)
+    assert changed and adjust == -672_003 - 674_198
+    row = LX.read_ledger(1)[0]
+    assert row["pnl_sol"] == -0.000672003 and row["stake_sol"] == 0.011775858
+    assert row["proceeds_sol"] == 0.011103855 and row["ret"] < 0
+    n = len(asked)
+    assert CP.reconcile(Rpc(), wallet, tmp_path) == (0, False)           # checked once, read once
+    assert len(asked) == n
+
+
+def test_a_trade_the_node_has_not_got_yet_waits_for_the_next_round(tmp_path):
+    from lab.pumpfun_rt import chain_pnl as CP
+
+    class Rpc:
+        def call(self, method, params):
+            return None
+    (tmp_path / "ledger.csv").write_text("mint,signal_ms,exit_ms,pnl_sol\nAAApump,1000,5000,0.001\n", encoding="utf-8")
+    (tmp_path / "orders.jsonl").write_text(
+        json.dumps({"what": "filled", "side": "buy", "mint": "AAApump", "sig": "B", "t": 2000}) + "\n"
+        + json.dumps({"what": "filled", "side": "sell", "mint": "AAApump", "sig": "S", "t": 5000}) + "\n",
+        encoding="utf-8")
+    assert CP.reconcile(Rpc(), "W", tmp_path) == (0, False)
+    assert "0.001" in (tmp_path / "ledger.csv").read_text(encoding="utf-8")
+
+
+def test_the_book_takes_the_chain_correction_into_its_stops(tmp_path):
+    ex = executor(tmp_path)
+    seen = []
+    ex.on_chain = lambda: seen.append(1)
+    ex.results.put(("chain", None, -1_346_201))
+    ex.poll(T0)
+    assert ex.totals["pnl_l"] == -1_346_201 and ex.day_pnl_l == -1_346_201 and seen == [1]
