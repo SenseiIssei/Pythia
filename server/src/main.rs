@@ -1388,7 +1388,7 @@ async fn tick_loop(state: AppState) {
 /// failed every minute and held every US-share rebalance on the demo route.
 /// With no paper keys and live keys only, the live account answers the same
 /// read-only questions (clock and account), and nothing is sent there.
-fn broker_status_paper(live: &LiveConfig,has_paper_keys: bool, has_live_keys: bool) -> bool {
+fn broker_status_paper(live: &LiveConfig, has_paper_keys: bool, has_live_keys: bool) -> bool {
     let alpaca_live = live.armed && !live.paper && live.venues.contains(&Venue::Alpaca);
     if alpaca_live {
         return false;
