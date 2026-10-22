@@ -96,6 +96,7 @@ ENV_KEYPAIR = "PYTHIA_PUMPFUN_KEYPAIR"
 ENV_RPC = "PYTHIA_PUMPFUN_RPC"
 CHAIN_EVERY_S = 60.0                     # how often closed trades are checked against the chain
 FAIL_CARD_EVERY_S = 60.0                 # at most one failure card a minute per position
+ORPHAN_AFTER_MS = 600_000                # an unknown token held this long is a late buy: sell it
 ENV_IDL = "PYTHIA_PUMPFUN_IDL_DIR"
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 REPORT_MAX_AGE_MS = 36 * 3_600_000
@@ -1146,6 +1147,22 @@ def write_close(rec: dict) -> None:
             w.writerow(rec)
 
 
+def last_buy_order(mint: str) -> dict | None:
+    """The newest buy order line for a mint in orders.jsonl (sent, filled or failed)."""
+    try:
+        lines = (data_dir() / "orders.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if o.get("mint") == mint and o.get("side") == "buy":
+            return o
+    return None
+
+
 def day_pnl_from_ledger(day: int) -> int:
     """The realised P&L (lamports) of the closed trades that ended on UTC day `day` (days since 1970)."""
     return int(round(sum((r.get("pnl_sol") or 0.0) for r in read_ledger(10_000)
@@ -1243,6 +1260,8 @@ class LiveBook:
         self.card_day = None
         self.day_stats = {"n": 0, "wins": 0, "pnl_sol": 0.0, "failed": 0}
         self.fail_posted: dict[tuple, float] = {}
+        self.orphan_seen: dict[str, int] = {}          # mint -> when it was first held by no position
+        self.orphan_pid = -1000                        # leftover ids for orphans, below the restart's
         self.last_limits = -1e18
         executor.on_stop = self.on_stop
         executor.on_leftover = self.on_leftover
@@ -1287,6 +1306,21 @@ class LiveBook:
         self._post(lambda lang: [_stop_card(kind, lost_sol, lim, self.exec.mode, lang)])
 
     def on_leftover(self, what: str, info: dict) -> None:
+        if what == "sold":
+            # A position from before a restart or a buy that landed unseen: in the ledger like any
+            # trade, so the list shows it and chain_pnl settles it from the wallet.
+            cost, got, fee = int(info.get("cost_l") or 0), int(info.get("got_l") or 0), self.exec._fee()
+            now = int(time.time() * 1000)
+            rec = {"mode": self.exec.mode, "rule": info.get("rule") or self.rule, "mint": info.get("mint"),
+                   "name": info.get("name"), "symbol": info.get("symbol"),
+                   "signal_ms": info.get("signal_ms") or now, "land_ms": info.get("signal_ms") or now,
+                   "exit_ms": now, "exit_why": "leftover", "legs": 1, "stake_sol": cost / C.LAMPORTS,
+                   "proceeds_sol": got / C.LAMPORTS, "pnl_sol": (got - cost - fee) / C.LAMPORTS,
+                   "ret": (got - cost - fee) / cost if cost else None}
+            write_close(rec)
+            self.exec.totals["trades"] += 1
+            self.recent.insert(0, {k: rec.get(k) for k in LEDGER_COLS})
+            del self.recent[100:]
         self._post(lambda lang: [_leftover_card(what, info, self.exec.mode, lang)])
 
     def on_gate(self, why: str | None) -> None:
@@ -1379,6 +1413,47 @@ class LiveBook:
                          int(p.get("limit_l") or 0)})
         rows += [dict(v, tries=0) for v in self.exec.leftovers.values()]
         write_json(data_dir() / "open.json", rows)
+
+    def adopt_orphans(self, holdings: dict[str, int] | None, now_ms: int | None = None) -> int:
+        """Tokens in the wallet that no position, order or leftover knows, still there after
+        ORPHAN_AFTER_MS: a buy the executor gave up on as not landed that landed late (Bundle,
+        2026-10-22). Its buy is logged as filled (so chain_pnl can settle it) and it is sold
+        like a leftover. Runs on the stream's thread with the service's last holdings read."""
+        if not holdings:
+            self.orphan_seen.clear()
+            return 0
+        now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+        ex = self.exec
+        known = {p["mint"] for p in (ex.pipe.pos.values() if ex.pipe is not None else [])}
+        known |= {pend["order"].mint for pend in ex.pending.values()}
+        known |= {lo.get("mint") for lo in ex.leftovers.values()}
+        for m in list(self.orphan_seen):
+            if m not in holdings or m in known:
+                self.orphan_seen.pop(m)
+        n = 0
+        for mint, amt in holdings.items():
+            if amt <= 0 or mint in known:
+                continue
+            first = self.orphan_seen.setdefault(mint, now_ms)
+            if now_ms - first < ORPHAN_AFTER_MS:
+                continue
+            buy = last_buy_order(mint)
+            if buy and buy.get("sig") and buy.get("what") != "filled":
+                log_order({"order": P.Order(int(buy.get("pid") or 0), "buy", mint, buy.get("venue") or "curve",
+                                            int(buy.get("tokens") or amt), int(buy.get("limit_l") or 0), now_ms),
+                           "sig": buy["sig"]}, "filled", sol=int(buy.get("limit_l") or 0), tokens=amt,
+                          mode=ex.mode, onchain=True, note="landed after the executor gave up on it")
+            tok = ex.pipe.eng.tokens.get(mint) if ex.pipe is not None else None
+            pool = tok.pool if tok is not None else None
+            info = {"mint": mint, "venue": "pool" if pool else "curve", "pool": pool, "rule": self.rule,
+                    "symbol": getattr(tok, "symbol", None), "cost_l": int((buy or {}).get("limit_l") or 0),
+                    "signal_ms": int((buy or {}).get("t") or now_ms)}
+            self.orphan_pid -= 1
+            ex.sell_leftover(self.orphan_pid, info, amt)
+            self.orphan_seen.pop(mint, None)
+            print(f"live: {mint} is in the wallet but in no position (a late buy); selling it", flush=True)
+            n += 1
+        return n
 
     def adopt_leftovers(self, holdings: dict[str, int] | None = None) -> int:
         """At start: every position the last run left open whose tokens are still in the wallet is sold."""

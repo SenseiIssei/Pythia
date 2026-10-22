@@ -896,3 +896,31 @@ def test_a_rate_limited_read_waits_for_the_next_round_and_is_never_taken_for_nev
     assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (0, False)
     state["limited"] = False
     assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (-10_000_000 + 9_000_000 - 1_005_000, True)
+
+
+def test_a_late_buy_in_the_wallet_is_sold_after_ten_minutes_and_its_buy_counted(tmp_path, monkeypatch):
+    monkeypatch.setattr(LX, "data_dir", lambda: tmp_path)
+    ex = executor(tmp_path)
+    book = LX.LiveBook(None, ex, "P_cmig_model", alerts=False)
+    (tmp_path / "orders.jsonl").write_text(json.dumps(
+        {"t": T0 - 60_000, "what": "failed", "pid": 7, "side": "buy", "mint": "Bundlepump", "venue": "curve",
+         "tokens": 500, "limit_l": 30_000_000, "sig": "LATE", "why": "not landed"}) + "\n", encoding="utf-8")
+    assert book.adopt_orphans({"Bundlepump": 577}, now_ms=T0) == 0                 # maybe a fill still coming
+    assert book.adopt_orphans({"Bundlepump": 577}, now_ms=T0 + 300_000) == 0
+    assert book.adopt_orphans({"Bundlepump": 577}, now_ms=T0 + 600_000) == 1
+    sold = [p for p in ex.pending.values() if p.get("leftover")]
+    assert len(sold) == 1 and sold[0]["order"].mint == "Bundlepump" and sold[0]["order"].tokens == 577
+    filled = [json.loads(x) for x in (tmp_path / "orders.jsonl").read_text(encoding="utf-8").splitlines()][-1]
+    assert filled["what"] == "filled" and filled["sig"] == "LATE" and filled["side"] == "buy"
+    assert book.adopt_orphans({"Bundlepump": 577}, now_ms=T0 + 900_000) == 0      # now a leftover: known
+
+
+def test_a_sold_leftover_lands_in_the_ledger(tmp_path, monkeypatch):
+    monkeypatch.setattr(LX, "data_dir", lambda: tmp_path)
+    ex = executor(tmp_path)
+    book = LX.LiveBook(None, ex, "P_cmig_model", alerts=False)
+    book.on_leftover("sold", {"mint": "Bundlepump", "cost_l": 30_000_000, "got_l": 25_000_000, "signal_ms": T0})
+    row = LX.read_ledger(1)[0]
+    assert row["mint"] == "Bundlepump" and row["exit_why"] == "leftover"
+    assert row["pnl_sol"] == (25_000_000 - 30_000_000 - ex._fee()) / C.LAMPORTS
+    assert ex.totals["trades"] == 1 and book.recent[0]["mint"] == "Bundlepump"

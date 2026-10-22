@@ -187,6 +187,7 @@ class Service:
         trades = self.book.recent if self.book is not None else LX.read_ledger(100)
         LX.write_json(d / "live_trades.json", {"t": int(time.time() * 1000), "trades": trades})
         if self.book is not None:
+            self.book.adopt_orphans(self.holdings)        # a buy that landed after it was given up
             self.book.save_open()
 
     def stopped(self) -> None:
