@@ -2204,6 +2204,8 @@ def newest_create(root: Path | None = None, now_ms: int | None = None, max_age_m
         return None
     if "cashback" in df.columns:
         df = df.filter(~df["cashback"].fill_null(False))
+    if "quote" in df.columns:                                 # only coins quoted in SOL are traded (no USDC pairs)
+        df = df.filter(df["quote"].is_null() | (df["quote"] == X.WSOL))
     df = df.filter(df["t"] >= now_ms - max_age_ms).sort("t")
     return str(df["mint"][-1]) if len(df) else None
 
