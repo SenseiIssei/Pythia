@@ -1159,3 +1159,45 @@ journals under `paper/<book>@<universe>/` and write no engine signal:
 docker run --rm --memory 6g -v <data dir>:/data -v <lab checkout>:/app pythia-lab \
   python -m lab.paper.families --universe alpaca --dry-run
 ```
+
+## Research agent
+
+The lab keeps researching without the owner's PC: the jobs `agent-research` (Sunday
+13:00 UTC, two hours after the research director's drafts) and `agent-care` (daily
+08:15 UTC) run `research/ops/agent/run_agent.sh`, which starts Claude Code headless in
+its own container (image `pythia-agent`, built from `research/ops/agent/Dockerfile` on
+top of the lab image) and pays for it from the Claude API key in `/etc/pythia/agent.env`.
+
+What the agent gets: a fresh clone of main at `/work`, the data folder at `/data`, the
+job locks, the director's drafts at `/proposals` (read only) and a snapshot of the host
+(`reports/agent/snapshot.md`). What it does not get: a git key, the Docker socket,
+`/etc/pythia`, the wallet or the engines. Its prompts are `research.md` (weekly: up to
+three pre-registered studies, paper books for what passes, fixes) and `care.md` (daily:
+failed jobs fixed with tests, the books and the live bot checked).
+
+After the run the host turns the agent's commits into patches inside the container,
+applies them in its own clone (`/opt/pythia-agent/trusted`) and runs `guard.py`. A round
+that touches the engines, the app, the build, the host scripts, the job runner, the
+pump.fun live executor or wallet code, or a job that reaches beyond the lab container,
+is pushed to a branch `agent/<mode>-<date>` for the owner and not deployed. A clean
+round goes to main, into `/opt/pythia-src`, and through `deploy_lab.sh` (and
+`deploy_ops.sh` when the job table changed). The report goes to Telegram (category
+Studies and factory) and stays in `reports/agent/<mode>.md`, the full run log in
+`reports/agent/<mode>-run.log`.
+
+Setup once, on the server as root:
+
+```bash
+umask 077
+grep '^ANTHROPIC_API_KEY=' /etc/pythia/alerts.env > /etc/pythia/agent.env
+ssh-keygen -t ed25519 -N '' -C pythia-agent -f /etc/pythia/agent-deploy-key
+# add /etc/pythia/agent-deploy-key.pub to the repository as a deploy key with write access
+bash /opt/pythia-src/research/ops/deploy_ops.sh
+```
+
+Models and limits can be changed in `/etc/pythia/agent.env` without a deploy
+(`PYTHIA_AGENT_MODEL_RESEARCH`, `PYTHIA_AGENT_MODEL_CARE`, `PYTHIA_AGENT_TURNS_RESEARCH`,
+`PYTHIA_AGENT_TURNS_CARE`); a spend limit on the API key in the Anthropic console caps
+what the agent can cost. Run one by hand: `python3 /opt/pythia-ops/jobs.py --table
+/opt/pythia-ops/jobs.yaml run agent-care --force`. Switch it off: `enabled: false` on
+both jobs and `deploy_ops.sh`.

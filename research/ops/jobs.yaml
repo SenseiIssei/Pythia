@@ -350,6 +350,27 @@ jobs:
     alert: false
     replaces: pythia-notify-pending
 
+  # The research agent (research/ops/agent/, README "Research agent"): Claude Code in its own
+  # container on the Claude API, no key, no Docker socket, no /etc/pythia. Its commits come out
+  # as patches, guard.py holds back anything that touches the engines, the app, the host
+  # scripts or the pump.fun live code, and only a clean round is merged and deployed. The
+  # weekly round runs the director's fresh drafts; the daily care fixes failed jobs.
+  - name: agent-research
+    description: weekly research round by the agent, director drafts to registered studies, merged and deployed when the guard passes
+    schedule: "0 13 * * 0"
+    kind: host
+    command: /opt/pythia-ops/agent/run_agent.sh research
+    timeout: 7h
+    lock: agent
+
+  - name: agent-care
+    description: daily care by the agent, failed jobs fixed with tests, the live bot and the books checked, a short report
+    schedule: "15 8 * * *"
+    kind: host
+    command: /opt/pythia-ops/agent/run_agent.sh care
+    timeout: 2h
+    lock: agent
+
   - name: backup
     description: archive of engine state, model registry, paper books and ledgers, rotated
     schedule: "20 2 * * *"

@@ -41,6 +41,9 @@ install -m 644 "$lab/i18n.py" "$dest/i18n.py"
 install -m 644 "$here/jobs.yaml" "$dest/jobs.yaml"
 install -m 755 "$here/system_health.sh" "$dest/system_health.sh"
 install -m 755 "$here/deploy_lab.sh" "$dest/deploy_lab.sh"
+install -d -m 755 "$dest/agent"
+install -m 755 "$here/agent/run_agent.sh" "$dest/agent/run_agent.sh"
+install -m 644 "$here/agent/guard.py" "$here/agent/Dockerfile" "$here/agent/research.md" "$here/agent/care.md" "$dest/agent/"
 
 # 3. cron
 if [ "$cron" = true ]; then
