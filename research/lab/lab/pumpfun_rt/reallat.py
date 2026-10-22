@@ -198,7 +198,8 @@ def books(pick: str) -> tuple[list, list, dict, list]:
     from . import strategies as S
     sc_costs = scenarios()
     mr = sim.model_rule(S.BY_NAME[pick])
-    judged = list(S.RULES) + [mr] + [dataclasses.replace(s, stake_sol=STAKE_SOL) for s in P.STRATEGIES]
+    judged = list(S.RULES) + [mr] + [dataclasses.replace(s, stake_sol=STAKE_SOL)
+                                     for s in P.STRATEGIES[:S.PIPELINE_TRIALS]]   # the 12 registered
     rules, strats, costs = [], [], {}
     for sc in SCENARIOS:
         for r in judged:

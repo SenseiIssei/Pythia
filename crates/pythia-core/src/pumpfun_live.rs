@@ -34,7 +34,7 @@ use crate::labview::data_dir;
 /// Hard maxima of the live test, the same numbers as the lab's `live_exec.TEST_MAX_*`.
 pub const TEST_MAX_TOTAL_SOL: f64 = 2.0;
 pub const TEST_MAX_DAILY_LOSS_SOL: f64 = 0.5;
-pub const TEST_MAX_TRADE_SOL: f64 = 0.05;
+pub const TEST_MAX_TRADE_SOL: f64 = 0.1;
 /// The full (readiness) mode's caps, the lab's `pipeline.HARD_*`.
 pub const FULL_MAX_DAILY_LOSS_SOL: f64 = 1.0;
 pub const FULL_MAX_TRADE_SOL: f64 = 0.1;

@@ -252,7 +252,15 @@ def _build_x14() -> list[Strategy]:
     return out
 
 
-STRATEGIES: list[Strategy] = _build() + _build_x14()
+def _build_y6() -> list[Strategy]:
+    """Y6 (results/pumpfun_pool0_prereg.md): Y5's least-bad rule E_d0_x1 as a strategy the executor can run,
+    its exits exactly the rule's (no ladder step, trail, dev-sell or pull exit the rule did not have)."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    return [_strategy("P_pool0", "E", "migration", {"delay_s": 0}, {}, pool0,
+                      "PumpSwap, at the migration (as E_d0_x1); +30 %, stop -20 %, 300 s")]
+
+
+STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6()
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 

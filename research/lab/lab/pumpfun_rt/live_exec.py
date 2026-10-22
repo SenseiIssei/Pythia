@@ -19,7 +19,7 @@ FULL (the readiness path): every one of
 TEST (the owner's small real-money test of the execution, docs/PUMPFUN-LIVE.md):
   1. env PYTHIA_PUMPFUN_LIVE=1
   2. the ack file with mode=test, strategy=<P_... or auto>, max_total_sol (at most
-     2.0), max_daily_loss_sol (at most 0.5), max_trade_sol (at most 0.05) and the
+     2.0), max_daily_loss_sol (at most 0.5), max_trade_sol (at most 0.1) and the
      line "I accept that I can lose all of it"
   3. a successful `live_exec simulate` for this wallet within the last 24 hours
   The readiness gate is skipped; every trade is tagged test, posted at once, and
@@ -146,7 +146,7 @@ SENDER_HOST_SUFFIX = ".helius-rpc.com"
 ACCEPT_LINE = "I accept that I can lose all of it"
 TEST_MAX_TOTAL_SOL = 2.0
 TEST_MAX_DAILY_LOSS_SOL = 0.5
-TEST_MAX_TRADE_SOL = 0.05
+TEST_MAX_TRADE_SOL = 0.1                  # the owner raised it from 0.05 on 2026-10-22: fixed fees are 6.7 % of 0.03
 SIMULATE_MAX_AGE_MS = 24 * 3_600_000
 DEFAULT_TEST_RULE = "P_pool60"            # the least-bad post-migration pool rule until a report says otherwise
 RESERVE_SOL = 0.01                        # left in the wallet so every open position can still be sold

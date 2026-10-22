@@ -113,7 +113,7 @@ def test_the_registered_measurements_are_the_executors_file():
 
 def test_every_rule_and_strategy_once_per_scenario_at_the_measured_stake():
     rules, strats, costs, judged = RL.books("E_d0_x1")
-    assert len(judged) == len(S.RULES) + 1 + len(P.STRATEGIES) == 35
+    assert len(judged) == len(S.RULES) + 1 + S.PIPELINE_TRIALS == 35          # P_pool0 came after the study
     assert len(rules) + len(strats) == len(costs) == len(RL.SCENARIOS) * len(judged) == S.REAL_LATENCY_TRIALS
     assert all(s.stake_sol == RL.STAKE_SOL for s in strats)
     mr = next(r for r in rules if r.name == "E_d0_x1+model@B")

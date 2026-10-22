@@ -54,13 +54,14 @@ def paper(*strats, kill=None, models=None, **kw) -> sim.Engine:
 def test_the_registered_strategies_are_what_the_plan_says():
     assert [s.name for s in P.STRATEGIES] == ["P_snipe_dev", "P_snipe_cmig", "P_press10", "P_mom_model", "P_p90",
                                               "P_p80_smart", "P_pool60", "P_cmig_model", "P_early10", "P_early30",
-                                              "P_press10_hz", "P_pool60_hz"]
+                                              "P_press10_hz", "P_pool60_hz", "P_pool0"]
     assert S.N_TRIALS == (len(S.RULES) + 1 + len(P.STRATEGIES) + S.X14_TRIALS + S.SPEED_TRIALS
                           + S.REAL_LATENCY_TRIALS)
     for s in P.STRATEGIES:
         assert isinstance(s, S.Rule) and P.is_strategy(s)
         assert s.exits.ladder[-1][1] == 1.0 and 0 < s.exits.sl < 1 and s.exits.time_s > 0
-        assert s.exits.dev_sell and s.exits.pull and s.stake_sol == P.HARD_STAKE_SOL
+        # P_pool0 copies E_d0_x1's exits exactly, without the dev-sell and pull exits
+        assert (s.exits.dev_sell and s.exits.pull) != (s.name == "P_pool0") and s.stake_sol == P.HARD_STAKE_SOL
         gains = [g for g, _ in s.exits.ladder]
         assert gains == sorted(gains)
     assert P.BY_NAME["P_mom_model"].exits.risk == ("sell10_10", 2.0)
@@ -707,3 +708,11 @@ def test_the_study_judges_the_strategies_and_writes_readiness(tmp_path, monkeypa
     assert "Readiness for real money" in md and "—" not in md and "readiness" in data
     json.dumps(data, default=str)
     assert "sell10_10" in res["table"] and len(res["table"]["t"]) == res["rows"]
+
+
+def test_pool0_is_y5s_e_d0_x1_and_nothing_more():
+    s, r = P.BY_NAME["P_pool0"], S.BY_NAME["E_d0_x1"]
+    assert (s.family, s.entry, s.p) == (r.family, r.entry, r.p) == ("E", "migration", {"delay_s": 0})
+    assert (s.exits.ladder, s.exits.sl, s.exits.time_s) == (((r.tp, 1.0),), r.sl, r.hold_s)
+    assert not s.exits.dev_sell and not s.exits.pull and s.exits.trail_after is None and not s.flt
+    assert s.stake_sol == P.HARD_STAKE_SOL == 0.1

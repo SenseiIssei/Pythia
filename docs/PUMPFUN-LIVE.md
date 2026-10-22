@@ -43,7 +43,7 @@ steht (eine Bestätigungsdatei darüber wird abgelehnt):
 |---|---|---|
 | `max_total_sol` | 2,0 SOL | Gesamtbudget: Sind seit dem ersten Echtgeld-Abschluss so viel SOL verloren, kauft der Bot nichts mehr. Offene Positionen und ein neuer Kauf zählen schon vorher mit. |
 | `max_daily_loss_sol` | 0,5 SOL | Tagesverluststopp: keine Käufe mehr bis zum nächsten UTC-Tag. |
-| `max_trade_sol` | 0,05 SOL | höchstens so viel pro Kauf (plus 30 % Schlupftoleranz als Preisgrenze). |
+| `max_trade_sol` | 0,1 SOL | höchstens so viel pro Kauf (plus 30 % Schlupftoleranz als Preisgrenze). |
 | offene Positionen | 5 | gleichzeitig offen. |
 | Reserve | 0,01 SOL | bleibt immer für Gebühren, damit offene Positionen verkauft werden können. |
 
