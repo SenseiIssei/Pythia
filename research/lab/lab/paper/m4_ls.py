@@ -116,13 +116,24 @@ def live_panel(decision_day: int) -> tuple[pl.DataFrame, dict]:
     P = P.with_columns(eligible=pl.when(last).then(base).otherwise(pl.col("eligible")))
     disp = P.filter(last & pl.col("eligible"))["r1"].std()
     P = P.with_columns(disp1=pl.when(last).then(pl.lit(disp)).otherwise(pl.col("disp1")))
-    # Funding features are only as fresh as the funding backfill: report it, the model
-    # sees zeros where the files stop.
-    perps = P.filter(last & pl.col("perp").is_not_null())
     info = {"fund_end": datetime.fromtimestamp(fund_end / 1e6, timezone.utc).strftime("%Y-%m-%d"),
-            "funding_fresh": bool(perps.height and (perps["fund1"].fill_null(0) != 0).mean() >= 0.5)}
+            **funding_fresh(P)}
     E = xs.ranked(P.with_columns(adv28_raw=pl.col("adv28"), fund7_raw=pl.col("fund7")))
     return E, info
+
+
+def funding_fresh(P: pl.DataFrame) -> dict:
+    """Funding features are only as fresh as the funding backfill: report it, the model
+    sees zeros where the files stop. Judged on the newest day that has perps at all,
+    the day a book falls back to when Binance's archive for yesterday is still missing
+    (judging yesterday then would always say stale)."""
+    perps = P.filter(pl.col("perp").is_not_null())
+    if not perps.height:
+        return {"funding_fresh": False, "perp_day": None}
+    day = perps["day"].max()
+    perps = perps.filter(pl.col("day") == day)
+    return {"funding_fresh": bool((perps["fund1"].fill_null(0) != 0).mean() >= 0.5),
+            "perp_day": datetime.fromtimestamp(day / 1e6, timezone.utc).strftime("%Y-%m-%d")}
 
 
 def model_for(E: pl.DataFrame, decision_day: int, cfg: dict | None = None, name: str = NAME):

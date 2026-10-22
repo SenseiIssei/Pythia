@@ -211,3 +211,15 @@ def test_configs():
     assert mp.CONFIG == {"model": "reg7n", "k": 10, "n_liquid": 100, "mode": "buffer", "hold": None,
                          "exit_frac": 0.5}
     assert mp.NAME != m4_ls.NAME, "model cache files are named per book"
+
+
+def test_funding_freshness_is_judged_on_the_newest_day_with_perps():
+    d0 = NOW_US // DAY_US * DAY_US - 2 * DAY_US
+    # The day before yesterday has perps with funding; yesterday's perp archive is not in yet.
+    P = pl.DataFrame({"day": [d0, d0, d0, d0 + DAY_US, d0 + DAY_US],
+                      "perp": ["AUSDT", "BUSDT", None, None, None],
+                      "fund1": [0.0001, -0.0002, None, None, None]})
+    assert m4_ls.funding_fresh(P) == {"funding_fresh": True, "perp_day": "2026-10-12"}
+    stale = P.with_columns(fund1=pl.lit(0.0))
+    assert m4_ls.funding_fresh(stale)["funding_fresh"] is False
+    assert m4_ls.funding_fresh(P.with_columns(perp=pl.lit(None, pl.Utf8))) == {"funding_fresh": False, "perp_day": None}
