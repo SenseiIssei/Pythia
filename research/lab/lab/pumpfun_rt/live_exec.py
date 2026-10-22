@@ -111,6 +111,12 @@ ENV_JITO = "PYTHIA_PUMPFUN_JITO"
 ENV_JITO_URL = "PYTHIA_PUMPFUN_JITO_URL"
 ENV_RPC_URLS = "PYTHIA_PUMPFUN_RPC_URLS"
 JITO_WORDS = ("jito", "block-engine", "blockengine")
+# The owner's switch for Helius Sender (our own single transaction with a tiny tip, sent through the stake-
+# weighted path; docs/PUMPFUN-LIVE.md section 10): its https URL with swqos_only=true, and the tip in SOL
+# (Sender's minimum 0.000005 by default, never above txbuild.HELIUS_MAX_TIP_LAMPORTS).
+ENV_SENDER = "PYTHIA_PUMPFUN_SENDER"
+ENV_SENDER_TIP = "PYTHIA_PUMPFUN_SENDER_TIP_SOL"
+SENDER_HOST_SUFFIX = ".helius-rpc.com"
 
 # The owner's live test: hard maxima in code, whatever the ack says (an ack above them is refused).
 ACCEPT_LINE = "I accept that I can lose all of it"
@@ -497,6 +503,37 @@ def rpc_problems(url: str, env=None) -> list[str]:
     return []
 
 
+def sender_problems(url: str) -> list[str]:
+    """Why a Sender URL may not be used: only Helius Sender over https, its /fast path, swqos_only=true
+    (the single stake-weighted path with the smallest tip; never the dual route through a bundle engine)."""
+    try:
+        u = urllib.parse.urlsplit(url)
+    except ValueError:
+        return [f"{ENV_SENDER} is not a URL"]
+    host = (u.hostname or "").lower()
+    query = urllib.parse.parse_qs(u.query)
+    out = []
+    if u.scheme != "https":
+        out.append(f"{ENV_SENDER} must be https")
+    if not (host.endswith(SENDER_HOST_SUFFIX) and "sender" in host):
+        out.append(f"{ENV_SENDER} is not a Helius Sender endpoint")
+    if (u.path or "").rstrip("/") != "/fast":
+        out.append(f"{ENV_SENDER} must be the /fast endpoint")
+    if query.get("swqos_only") != ["true"]:
+        out.append(f"{ENV_SENDER} needs swqos_only=true (the single stake-weighted path, no bundle route)")
+    return out
+
+
+def sender_tip_lamports(env=None) -> int:
+    """The tip each Sender transaction carries: the setting, kept inside Sender's minimum and our hard cap."""
+    env = os.environ if env is None else env
+    try:
+        sol = float(env.get(ENV_SENDER_TIP) or 0.000005)
+    except ValueError:
+        sol = 0.000005
+    return max(X.HELIUS_MIN_TIP_LAMPORTS, min(int(round(sol * C.LAMPORTS)), X.HELIUS_MAX_TIP_LAMPORTS))
+
+
 def send_problems(env=None) -> list[str]:
     """Every send endpoint the owner configured: PYTHIA_PUMPFUN_RPC, each of PYTHIA_PUMPFUN_RPC_URLS (parallel
     sending) and PYTHIA_PUMPFUN_JITO_URL (only with PYTHIA_PUMPFUN_JITO=1)."""
@@ -512,6 +549,9 @@ def send_problems(env=None) -> list[str]:
             why += [f"{ENV_JITO_URL}: {w}" for w in rpc_problems(j, env)]
     elif env.get(ENV_JITO) == "1" and not is_jito_engine(env.get(ENV_RPC) or ""):
         why.append(f"{ENV_JITO}=1 but no block engine is configured ({ENV_JITO_URL})")
+    sender = (env.get(ENV_SENDER) or "").strip()
+    if sender:
+        why += sender_problems(sender)
     return why
 
 
@@ -615,10 +655,10 @@ class Rpc:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def send(self, tx: bytes) -> str:
-        return self.call("sendTransaction", [base64.b64encode(tx).decode(),
-                                             {"encoding": "base64", "skipPreflight": False,
-                                              "preflightCommitment": "processed", "maxRetries": 2}])
+    def send(self, tx: bytes, skip_preflight: bool = False) -> str:
+        opts = ({"encoding": "base64", "skipPreflight": True, "maxRetries": 0} if skip_preflight else
+                {"encoding": "base64", "skipPreflight": False, "preflightCommitment": "processed", "maxRetries": 2})
+        return self.call("sendTransaction", [base64.b64encode(tx).decode(), opts])
 
     def simulate(self, tx: bytes) -> dict:
         return self.call("simulateTransaction", [base64.b64encode(tx).decode(),
@@ -641,6 +681,8 @@ class Builder:
         self.priority_l = int(priority_sol * C.LAMPORTS)
         self.cache: dict[str, tuple[float, object]] = {}
         self.hash: tuple[float, str] | None = None
+        self.sender: Rpc | None = None                # Helius Sender, when the owner switched it on
+        self.sender_tip_l = 0                         # the tip each transaction then carries
 
     def _cached(self, k: str, ttl: float, fn):
         hit = self.cache.get(k)
@@ -694,8 +736,22 @@ class Builder:
                 raise RuntimeError("the curve takes no v3 trade (a cashback coin); refused, legacy is never sent")
             ixs = (X.pump_buy(user, info, o.tokens, o.limit_l, self.priority_l, self.idl_pump) if o.side == "buy" else
                    X.pump_sell(user, info, o.tokens, o.limit_l, self.priority_l, close, self.idl_pump))
-        X.check_own(user, ixs)                                # a plain buy or sale for this wallet, nothing else
+        if self.sender is not None and self.sender_tip_l:
+            # Sender takes a transaction only with a compute-unit price (budget() adds it) and a tip.
+            ixs = ixs + [X.tip(user, random.choice(sorted(X.HELIUS_TIP_ACCOUNTS)), self.sender_tip_l)]
+        X.check_own(user, ixs, sender_tip_ok=self.sender is not None)   # a plain buy or sale for this wallet
         return ixs
+
+    def send(self, tx: bytes) -> str:
+        """Through Sender when it is on (no preflight, as Sender recommends; the holdings check catches a sale
+        of what is gone), else, or when Sender does not answer, through the plain RPC with its preflight."""
+        if self.sender is not None:
+            try:
+                return self.sender.send(tx, skip_preflight=True)
+            except Exception as e:
+                print(f"live: Sender did not take it ({type(e).__name__}: {e}); the plain RPC sends it"[:220],
+                      flush=True)
+        return self.rpc.send(tx)
 
     def build(self, user: str, o: P.Order, pool: str | None, close: bool) -> bytes:
         return X.compile_message(user, self.ixs(user, o, pool, close), self.blockhash())
@@ -914,7 +970,7 @@ class LiveExecutor:
                 # node does not prove it never landed, so the failure keeps it (chain_pnl reads it).
                 local_sig = X.b58(tx[1:65])
                 try:
-                    sig = self.builder.rpc.send(tx)
+                    sig = (getattr(self.builder, "send", None) or self.builder.rpc.send)(tx)
                 except Exception as e:
                     self.results.put(("error", o.pid, f"{type(e).__name__}: {e}"[:200], local_sig))
                     return
@@ -994,7 +1050,7 @@ class LiveExecutor:
                 pend["asked"] = None
 
     def _fee(self) -> int:
-        return self.builder.priority_l + C.BASE_FEE_LAMPORTS
+        return self.builder.priority_l + C.BASE_FEE_LAMPORTS + getattr(self.builder, "sender_tip_l", 0)
 
     def _failed(self, pid: int, pend: dict, now: float, why: str, fee: int) -> None:
         self.pending.pop(pid, None)
@@ -1530,7 +1586,14 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
         return None
     rpc = rpc or Rpc(env.get(ENV_RPC) or DEFAULT_RPC)
     lim, total = effective(gate.ack, read_settings(), env)
-    ex = LiveExecutor(gate, signer, Builder(rpc, gate.idls), lim, mode=gate.ack.mode, max_total_sol=total,
+    builder = Builder(rpc, gate.idls)
+    sender_url = (env.get(ENV_SENDER) or "").strip()
+    if sender_url and not sender_problems(sender_url):
+        builder.sender = Rpc(sender_url)
+        builder.sender_tip_l = sender_tip_lamports(env)
+        print(f"live: sending through Helius Sender (stake-weighted, tip {builder.sender_tip_l} lamports), "
+              "the plain RPC if it does not answer", flush=True)
+    ex = LiveExecutor(gate, signer, builder, lim, mode=gate.ack.mode, max_total_sol=total,
                       rule=gate.rule, start=start)
     s = P.BY_NAME[gate.rule]
     book = LiveBook(None, ex, gate.rule, alerts=alerts)
@@ -1632,8 +1695,15 @@ def simulate(gate: LiveGate, rpc: Rpc, pubkey: str, mint: str | None = None, poo
                 raise RuntimeError("the curve takes no v3 trade (a cashback coin); pass another --mint")
             buy = X.pump_buy(pubkey, info, tokens, limit, b.priority_l, b.idl_pump)
             sell = X.pump_sell(pubkey, info, tokens, 0, b.priority_l, True, b.idl_pump)
-        X.check_own(pubkey, buy)
-        X.check_own(pubkey, sell)
+        sender = (gate.env.get(ENV_SENDER) or "").strip() if getattr(gate, "env", None) else ""
+        if sender and not sender_problems(sender):
+            # The live transactions then carry Sender's tip: the dry run carries it too.
+            t = sender_tip_lamports(gate.env)
+            buy = buy + [X.tip(pubkey, sorted(X.HELIUS_TIP_ACCOUNTS)[0], t)]
+            sell = sell + [X.tip(pubkey, sorted(X.HELIUS_TIP_ACCOUNTS)[0], t)]
+            rec["sender_tip_l"] = t
+        X.check_own(pubkey, buy, sender_tip_ok=bool(sender))
+        X.check_own(pubkey, sell, sender_tip_ok=bool(sender))
         bh = b.blockhash()
         for name, ixs in (("buy", buy), ("round_trip", X.round_trip(buy, sell))):
             msg = X.compile_message(pubkey, ixs, bh)

@@ -424,3 +424,55 @@ def test_the_daily_card_says_how_late_we_see_new_tokens_in_both_languages():
     assert "14.9 s after their block" in en and "4% within a second" in en
     assert "14,9 s nach ihrem Block" in de
     no_english(de)
+
+
+def test_a_sender_tip_needs_the_owners_switch_and_stays_under_its_cap():
+    user = key(77)
+    info = X.CurveInfo(key(1), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0])
+    buy = X.pump_buy(user, info, 123, 456, 789)
+    helius = sorted(X.HELIUS_TIP_ACCOUNTS)[0]
+    with pytest.raises(ValueError, match="Sender is not switched on"):
+        X.check_own(user, buy + [X.tip(user, helius, 5_000)])
+    X.check_own(user, buy + [X.tip(user, helius, 5_000)], sender_tip_ok=True)
+    with pytest.raises(ValueError, match="above the hard cap"):
+        X.check_own(user, buy + [X.tip(user, helius, X.HELIUS_MAX_TIP_LAMPORTS + 1)], sender_tip_ok=True)
+    with pytest.raises(ValueError, match="more than one tip"):
+        X.check_own(user, buy + [X.tip(user, helius, 5_000)] * 2, sender_tip_ok=True)
+    jito = sorted(X.JITO_TIP_ACCOUNTS)[0]
+    with pytest.raises(ValueError, match="PYTHIA_PUMPFUN_JITO"):                 # Sender does not open Jito
+        X.check_own(user, buy + [X.tip(user, jito, 5_000)], sender_tip_ok=True)
+    assert len(X.HELIUS_TIP_ACCOUNTS) == 10 and all(len(X.b58decode(a)) == 32 for a in X.HELIUS_TIP_ACCOUNTS)
+
+
+def test_only_the_https_swqos_only_sender_endpoint_is_accepted_and_the_tip_is_clamped():
+    from lab.pumpfun_rt import live_exec as LX
+    assert LX.sender_problems("https://sender.helius-rpc.com/fast?swqos_only=true") == []
+    assert LX.sender_problems("http://fra-sender.helius-rpc.com/fast?swqos_only=true")      # not https
+    assert LX.sender_problems("https://sender.helius-rpc.com/fast")                          # dual route
+    assert LX.sender_problems("https://sender.example.com/fast?swqos_only=true")             # not Helius
+    assert LX.sender_problems("https://sender.helius-rpc.com/bundle?swqos_only=true")        # not /fast
+    assert LX.sender_tip_lamports({}) == 5_000
+    assert LX.sender_tip_lamports({"PYTHIA_PUMPFUN_SENDER_TIP_SOL": "0.00002"}) == 20_000
+    assert LX.sender_tip_lamports({"PYTHIA_PUMPFUN_SENDER_TIP_SOL": "1"}) == X.HELIUS_MAX_TIP_LAMPORTS
+    assert LX.sender_tip_lamports({"PYTHIA_PUMPFUN_SENDER_TIP_SOL": "0"}) == X.HELIUS_MIN_TIP_LAMPORTS
+    bad = {"PYTHIA_PUMPFUN_SENDER": "https://sender.helius-rpc.com/fast"}
+    assert any("swqos_only" in w for w in LX.send_problems(bad))
+
+
+def test_the_builder_falls_back_to_the_plain_rpc_when_sender_does_not_answer():
+    from lab.pumpfun_rt import live_exec as LX
+    sent = []
+
+    class Plain:
+        def send(self, tx, skip_preflight=False):
+            sent.append(("plain", skip_preflight))
+            return "SIGPLAIN"
+
+    class Down:
+        def send(self, tx, skip_preflight=False):
+            sent.append(("sender", skip_preflight))
+            raise RuntimeError("HTTP Error 503")
+    b = LX.Builder(Plain(), (None, None))
+    assert b.send(b"tx") == "SIGPLAIN" and sent == [("plain", False)]
+    b.sender = Down()
+    assert b.send(b"tx") == "SIGPLAIN" and sent[1:] == [("sender", True), ("plain", False)]

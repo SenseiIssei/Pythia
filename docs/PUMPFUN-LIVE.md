@@ -337,6 +337,25 @@ lassen, `PYTHIA_PUMPFUN_LIVE` aus `/etc/pythia/pumpfun-live.env` entfernen.
 
 ## 10. Geschwindigkeit: schneller Datenstrom, schneller Pfad, Jito (deine Entscheidung)
 
+**Helius Sender (eingeschaltet am 22.10.2026, kostenlos bis auf ein Mini-Trinkgeld).** Die echten
+Trades zeigten: Vom Signal bis zum Senden vergehen 0 bis 1,8 s, vom Senden bis zur Landung aber 2
+bis 16 s. Der Engpass ist der öffentliche Endpunkt beim Senden. Helius Sender liefert unsere eigene
+Transaktion über einen bevorzugten Weg zu den Validatoren (stake-weighted QoS), ohne Bundle, ohne
+fremde Transaktionen, ohne API-Schlüssel. Jede Transaktion trägt dafür ein Trinkgeld von 0,000005
+SOL (änderbar bis höchstens 0,0001 SOL) an eines der zehn veröffentlichten Sender-Konten.
+
+```bash
+echo 'PYTHIA_PUMPFUN_SENDER=https://sender.helius-rpc.com/fast?swqos_only=true' >> /etc/pythia/pumpfun-live.env
+# optional, Standard 0.000005, nie über 0.0001:
+# echo 'PYTHIA_PUMPFUN_SENDER_TIP_SOL=0.00001' >> /etc/pythia/pumpfun-live.env
+docker restart pythia-pumpfun-live
+```
+
+Der Executor nimmt nur diese Adresse (https, `/fast`, `swqos_only=true`), hängt genau ein
+Trinkgeld an und verweigert jedes andere. Antwortet Sender nicht, sendet der normale RPC dieselbe
+Transaktion. Die Simulation prüft die Transaktion mit Trinkgeld. Ausschalten: die Zeile löschen und
+neu starten.
+
 Du wolltest "immer direkt beim Release drin" sein. Was gemessen ist
 (results/pumpfun_speed.md):
 

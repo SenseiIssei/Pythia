@@ -87,6 +87,11 @@ At the owner's explicit request there is exactly one such wallet, with these lin
 - **It is a small, capped test.** At most 2 SOL in all, 0.5 SOL a day, 0.05 SOL a trade (hard in
   code), the owner's written confirmation, a passed mainnet simulation, a kill switch in the app
   that only the server can undo, and a service he starts by hand. Expect to lose all of it.
+- **One faster path, the owner's switch.** With `PYTHIA_PUMPFUN_SENDER` set, our own single
+  transaction goes out through Helius Sender's stake-weighted path (`swqos_only=true`, never a
+  bundle) and carries one tip of at most 0.0001 SOL to one of Sender's ten published tip accounts.
+  The executor refuses any other tip, any other Sender route, and a second tip; when Sender does not
+  answer, the plain RPC sends the same transaction.
 
 ## 3c. Crypto spot is long-only
 

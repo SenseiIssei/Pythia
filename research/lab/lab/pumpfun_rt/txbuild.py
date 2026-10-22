@@ -306,6 +306,18 @@ JITO_TIP_ACCOUNTS = frozenset({
     "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL", "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"})
 MAX_TIP_LAMPORTS = 10_000_000             # 0.01 SOL: a hard cap in code, whatever a setting says
 
+# Helius Sender's tip accounts (docs: sending-transactions/sender-swqos-only, 2026-10-22). With the owner's
+# PYTHIA_PUMPFUN_SENDER our own single transaction carries one tip to one of them and goes out through Sender's
+# stake-weighted path (swqos_only): a faster delivery to the validators, no bundle, nobody else's transaction.
+HELIUS_TIP_ACCOUNTS = frozenset({
+    "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE", "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ",
+    "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta", "5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn",
+    "2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD", "2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ",
+    "wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF", "3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT",
+    "4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey", "4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or"})
+HELIUS_MIN_TIP_LAMPORTS = 5_000           # 0.000005 SOL, Sender's swqos_only minimum
+HELIUS_MAX_TIP_LAMPORTS = 100_000         # 0.0001 SOL: a hard cap in code, whatever a setting says
+
 
 def tip(user: str, account: str, lamports: int) -> Ix:
     """Our own transaction's tip to a Jito tip account (a system transfer). check_own refuses it unless the
@@ -316,7 +328,8 @@ def tip(user: str, account: str, lamports: int) -> Ix:
 
 def is_tip(user: str, ix: Ix) -> bool:
     return (ix.program == SYSTEM and len(ix.accounts) == 2 and ix.accounts[0][0] == user
-            and ix.accounts[1][0] in JITO_TIP_ACCOUNTS and len(ix.data) == 12 and ix.data[:4] == struct.pack("<I", 2))
+            and ix.accounts[1][0] in JITO_TIP_ACCOUNTS | HELIUS_TIP_ACCOUNTS and len(ix.data) == 12
+            and ix.data[:4] == struct.pack("<I", 2))
 
 
 def _check_trade(user: str, ix: Ix) -> None:
@@ -351,10 +364,11 @@ def _check_trade(user: str, ix: Ix) -> None:
 TRADES = {PUMP: (PUMP_BUY_IX, PUMP_SELL_IX), PUMP_AMM: (AMM_BUY_IX, AMM_SELL_IX)}
 
 
-def check_own(user: str, ixs: list[Ix], tip_ok: bool = False) -> None:
+def check_own(user: str, ixs: list[Ix], tip_ok: bool = False, sender_tip_ok: bool = False) -> None:
     """Refuse anything but a buy or a sale for the wallet itself: only the programs a trade needs,
     a system instruction only as the wrap into the wallet's own wrapped-SOL account (or, with tip_ok,
-    one tip of at most MAX_TIP_LAMPORTS to a published Jito tip account), an associated account only
+    one tip of at most MAX_TIP_LAMPORTS to a published Jito tip account; with sender_tip_ok, one tip of at
+    most HELIUS_MAX_TIP_LAMPORTS to a Helius Sender tip account), an associated account only
     created for the wallet itself, a token account closed only back to the wallet, and the programs'
     own trade instructions only with the wallet as the trader and its own token accounts (a pool trade
     only as v2, its buyback fee only to a listed recipient). Raises ValueError otherwise (nothing is
@@ -364,10 +378,17 @@ def check_own(user: str, ixs: list[Ix], tip_ok: bool = False) -> None:
         if ix.program not in ALLOWED_PROGRAMS:
             raise ValueError(f"program {ix.program[:8]} is not part of a plain buy or sale")
         if ix.program == SYSTEM and is_tip(user, ix):
-            if not tip_ok:
-                raise ValueError("a tip, and tips are not switched on (PYTHIA_PUMPFUN_JITO)")
-            if struct.unpack_from("<Q", ix.data, 4)[0] > MAX_TIP_LAMPORTS:
-                raise ValueError("a tip above the hard cap")
+            amount = struct.unpack_from("<Q", ix.data, 4)[0]
+            if ix.accounts[1][0] in HELIUS_TIP_ACCOUNTS:
+                if not sender_tip_ok:
+                    raise ValueError("a Sender tip, and Sender is not switched on (PYTHIA_PUMPFUN_SENDER)")
+                if amount > HELIUS_MAX_TIP_LAMPORTS:
+                    raise ValueError("a Sender tip above the hard cap")
+            else:
+                if not tip_ok:
+                    raise ValueError("a tip, and tips are not switched on (PYTHIA_PUMPFUN_JITO)")
+                if amount > MAX_TIP_LAMPORTS:
+                    raise ValueError("a tip above the hard cap")
             tips += 1
             if tips > 1:
                 raise ValueError("more than one tip")
