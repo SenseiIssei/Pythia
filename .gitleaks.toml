@@ -29,7 +29,6 @@ regexTarget = "match"
 regexes = [
   '''-----BEGIN (EC )?PRIVATE KEY-----(`|\s+and\s)''',
 ]
-
 # The strategy factory's ledger keys every genome by a 12-hex-digit hash of
 # its parameters ({"key":"b39f...","run":...}). Not a credential.
 [[allowlists]]

@@ -1,0 +1,9 @@
+# Findings checked by hand and proven harmless, by gitleaks fingerprint
+# (commit:file:rule:line). Each names what it is. Never add a real key here:
+# rotate it instead (SECURITY.md).
+#
+# The PEM parser's error message and doc comment name the BEGIN/END marker lines
+# of a Coinbase key; the private-key rule's match runs from one to the other
+# across lines. No key material: sign.rs's tests generate their keys at run time.
+30750c94957d64ac0b59e96891905afd0d78d3a1:crates/pythia-core/src/connectors/sign.rs:private-key:137
+30750c94957d64ac0b59e96891905afd0d78d3a1:crates/pythia-core/src/connectors/sign.rs:private-key:169
