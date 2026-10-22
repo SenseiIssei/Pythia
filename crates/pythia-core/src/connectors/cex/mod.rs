@@ -28,6 +28,10 @@ mod coinbase;
 mod kraken;
 mod okx;
 
+/// Kraken's lot decimals and minimum volume per pair, and its minimum order
+/// value: what a sale there can and cannot be (see `kraken::PAIRS`).
+pub use kraken::{pair_limits as kraken_pair_limits, COST_MIN_USD as KRAKEN_COST_MIN_USD};
+
 use super::{
     Balance, BrokerOrder, BrokerPosition, ConnectorError, Environment, MarketConnector, OrderRequest, Venue,
 };

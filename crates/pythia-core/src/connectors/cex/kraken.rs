@@ -85,13 +85,90 @@ pub(super) async fn submit(c: &CexConnector, req: OrderRequest) -> Result<Broker
     Ok(BrokerOrder::acknowledged(txid, req.client_order_id))
 }
 
+/// What Kraken's public `AssetPairs` says about one USD pair Pythia trades:
+/// the decimals an order volume may have (`lot_decimals`) and the smallest
+/// volume it accepts (`ordermin`, in the base coin). Read from
+/// <https://api.kraken.com/0/public/AssetPairs> on 2026-10-22. Kraken also
+/// has a `costmin` of 0.5 USD on every one of them.
+///
+/// Newer listings (most memecoins) take only 5 decimals: a volume with 8 is
+/// refused there, so an order for PEPE or BONK sized to the satoshi never
+/// goes through.
+const PAIRS: &[(&str, u32, f64)] = &[
+    ("XBTUSD", 8, 0.00006),
+    ("ETHUSD", 8, 0.002),
+    ("SOLUSD", 8, 0.05),
+    ("XRPUSD", 8, 4.0),
+    ("XDGUSD", 8, 50.0),
+    ("ADAUSD", 8, 20.0),
+    ("AVAXUSD", 8, 0.5),
+    ("LINKUSD", 8, 0.35),
+    ("LTCUSD", 8, 0.08),
+    ("DOTUSD", 8, 3.9),
+    ("BCHUSD", 8, 0.018),
+    ("TRXUSD", 8, 16.0),
+    ("SUIUSD", 5, 5.0),
+    ("NEARUSD", 8, 1.0),
+    ("ATOMUSD", 8, 3.0),
+    ("UNIUSD", 8, 0.7),
+    ("AAVEUSD", 8, 0.03),
+    ("XLMUSD", 8, 25.0),
+    ("PEPEUSD", 5, 1_100_000.0),
+    ("FILUSD", 8, 5.0),
+    ("ARBUSD", 5, 25.0),
+    ("BATUSD", 8, 50.0),
+    ("BONKUSD", 5, 1_300_000.0),
+    ("CRVUSD", 8, 15.0),
+    ("GRTUSD", 8, 170.0),
+    ("LDOUSD", 8, 11.0),
+    ("ONDOUSD", 5, 10.0),
+    ("POLUSD", 5, 50.0),
+    ("RENDERUSD", 5, 2.5),
+    ("SHIBUSD", 5, 770_000.0),
+    ("SUSHIUSD", 8, 20.0),
+    ("TRUMPUSD", 5, 2.5),
+    ("WIFUSD", 5, 20.0),
+    ("XTZUSD", 8, 13.0),
+    ("YFIUSD", 8, 0.0022),
+];
+
+/// Kraken's smallest order value on every USD pair, in USD (`costmin`).
+pub const COST_MIN_USD: f64 = 0.5;
+
+/// Volume decimals for a pair not in [`PAIRS`]: 5, what most Kraken USD
+/// pairs take (477 of 680 on 2026-10-22). A volume rounded to 5 is accepted
+/// on a pair that allows 8; the other way round it is refused.
+const DEFAULT_LOT_DECIMALS: u32 = 5;
+
+/// (`lot_decimals`, `ordermin`) of a Kraken pair (`XBTUSD`), if known.
+pub fn pair_limits(pair: &str) -> Option<(u32, f64)> {
+    PAIRS.iter().find(|(p, ..)| *p == pair).map(|(_, d, m)| (*d, *m))
+}
+
+/// The volume decimals Kraken accepts on `pair`.
+pub fn lot_decimals(pair: &str) -> u32 {
+    pair_limits(pair).map_or(DEFAULT_LOT_DECIMALS, |l| l.0)
+}
+
+/// `qty` rounded down to the pair's volume decimals: never more than was
+/// asked for, so a sale of the whole holding never asks for coins the
+/// account does not have. A hair of float noise is forgiven first, so
+/// 0.3 stays 0.3 and does not become 0.29999.
+pub fn lot_volume(pair: &str, qty: f64) -> String {
+    let d = lot_decimals(pair) as usize;
+    let f = 10f64.powi(d as i32);
+    let v = ((qty * f) + 1e-6).floor() / f;
+    sign::trim_decimals(v.max(0.0), d)
+}
+
 /// The `AddOrder` form for one order on Kraken's `pair`.
 fn add_order_params(pair: String, req: &OrderRequest) -> Vec<(&'static str, String)> {
+    let volume = lot_volume(&pair, req.qty);
     let mut params: Vec<(&'static str, String)> = vec![
         ("ordertype", if req.order_type == OrderType::Limit { "limit".into() } else { "market".into() }),
         ("pair", pair),
         ("type", req.side.as_str().to_string()),
-        ("volume", sign::trim_decimals(req.qty, 8)),
+        ("volume", volume),
     ];
     if let (OrderType::Limit, Some(p)) = (req.order_type, req.limit_price) {
         params.push(("price", sign::trim_decimals(p, 8)));
@@ -220,6 +297,39 @@ mod tests {
         assert_eq!(map_status("closed"), BrokerOrderStatus::Filled);
         assert_eq!(map_status("canceled"), BrokerOrderStatus::Canceled);
         assert!(!map_status("pending").is_terminal());
+    }
+
+    /// Kraken's AssetPairs (2026-10-22): PEPE, BONK and SHIB take 5 volume
+    /// decimals, BTC and NEAR 8. A volume with more decimals than the pair
+    /// allows is refused, so the order is rounded down to the pair's lot.
+    #[test]
+    fn the_volume_is_rounded_down_to_the_pairs_lot_decimals() {
+        assert_eq!(lot_decimals("PEPEUSD"), 5);
+        assert_eq!(lot_decimals("BONKUSD"), 5);
+        assert_eq!(lot_decimals("SHIBUSD"), 5);
+        assert_eq!(lot_decimals("XBTUSD"), 8);
+        assert_eq!(lot_decimals("NEARUSD"), 8);
+        assert_eq!(lot_decimals("NEWCOINUSD"), 5, "an unknown pair gets the decimals most pairs take");
+        assert_eq!(pair_limits("PEPEUSD"), Some((5, 1_100_000.0)));
+        assert_eq!(pair_limits("XBTUSD"), Some((8, 0.00006)));
+
+        let order = |pair: &str, qty: f64| {
+            let req = OrderRequest::market("X/USD", super::super::super::Side::Sell, qty);
+            let p = add_order_params(pair.into(), &req);
+            p.iter().find(|(k, _)| *k == "volume").unwrap().1.clone()
+        };
+        assert_eq!(order("PEPEUSD", 2_345_678.123456789), "2345678.12345");
+        assert_eq!(order("BONKUSD", 1_300_000.999999), "1300000.99999", "rounded down, never up");
+        assert_eq!(order("SHIBUSD", 770_000.0), "770000");
+        assert_eq!(order("XBTUSD", 0.00123456789), "0.00123456");
+        assert_eq!(order("NEARUSD", 12.3456789012), "12.3456789");
+        assert_eq!(order("NEARUSD", 0.3), "0.3", "float noise does not cost a lot");
+        // Every pair in the table is one Pythia trades and has a real lot size.
+        for (pair, d, min) in PAIRS {
+            assert!(*d == 5 || *d == 8, "{pair}");
+            assert!(*min > 0.0, "{pair}");
+            assert!(crate::coins::by_kraken_key(pair).is_some(), "{pair} is a coin Pythia knows");
+        }
     }
 
     #[test]
