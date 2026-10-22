@@ -389,8 +389,13 @@ endpoints).
    `-v /srv/pythia-data/reports/pumpfun_rt:/data/reports/pumpfun_rt` to its
    `docker run` (the reports folder stays read only otherwise) and recreate it.
 8. Start the live service by hand. It is a long-running container like the
-   collector's, but deliberately with `--restart no` and in no job, script or
-   compose file: after a reboot it stays down until the owner starts it again.
+   collector's, in no job, script or compose file. Since 2026-10-23 it runs
+   with `--restart unless-stopped` (the owner's call): after a crash or a reboot
+   docker starts it again, it adopts and sells whatever it held, and the gate
+   decides as at every start; a `docker stop` keeps it down. The job
+   `pumpfun-live-watch` (research/ops/pumpfun_live_watch.py) checks it every two
+   minutes and posts at once when it is down, hangs, does not buy and why, when
+   the 24 h test gate is about to shut, or when a position is stuck.
    It runs the owner's live copy of the code (`/opt/pythia-live`, read only,
    `deploy_live.sh`), never `/opt/pythia-lab`, which the research agent's rounds
    deploy, and sees exactly three files of `/etc/pythia`, read only: the wallet
@@ -398,7 +403,7 @@ endpoints).
    the host and never mounted).
 
    ```bash
-   docker run -d --name pythia-pumpfun-live --restart no --cpus 1 --memory 1g \
+   docker run -d --name pythia-pumpfun-live --restart unless-stopped --cpus 1 --memory 1g \
      --env-file /etc/pythia/alerts.env --env-file /etc/pythia/pumpfun-live.env \
      --log-opt max-size=20m --log-opt max-file=3 \
      -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \

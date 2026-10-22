@@ -267,17 +267,27 @@ ankommen. Beim Engine-Container, der die App bedient, einmalig
 `-v /srv/pythia-data/reports/pumpfun_rt:/data/reports/pumpfun_rt` ergänzen und
 ihn neu anlegen (research/ops/README.md, "Live trading").
 
-Starten (ein langlaufender Container wie der Collector, aber **ohne**
-Autostart: nach einem Neustart des Servers läuft er nicht von selbst wieder):
+Starten (ein langlaufender Container wie der Collector). Er startet nach einem
+Absturz oder Server-Neustart von selbst wieder, übernimmt dann, was er noch
+hält, und verkauft es; nur ein `docker stop` hält ihn an. Er sieht von
+`/etc/pythia` nur die Wallet-Datei, ihre `.pub` und die Bestätigung und läuft
+aus deiner eigenen Kopie des Codes (`/opt/pythia-live`, `deploy_live.sh`):
 
 ```bash
-docker run -d --name pythia-pumpfun-live --restart no --cpus 1 --memory 1g \
+docker run -d --name pythia-pumpfun-live --restart unless-stopped --cpus 1 --memory 1g \
   --env-file /etc/pythia/alerts.env --env-file /etc/pythia/pumpfun-live.env \
   --log-opt max-size=20m --log-opt max-file=3 \
-  -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -v /etc/pythia:/etc/pythia:ro \
+  -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+  -v /etc/pythia/pumpfun-keypair.json:/etc/pythia/pumpfun-keypair.json:ro \
+  -v /etc/pythia/pumpfun-keypair.json.pub:/etc/pythia/pumpfun-keypair.json.pub:ro \
+  -v /etc/pythia/pumpfun-live-ack:/etc/pythia/pumpfun-live-ack:ro \
   pythia-lab python -m lab.pumpfun_rt.live_service
 docker logs --tail 30 pythia-pumpfun-live
 ```
+
+Der Job `pumpfun-live-watch` prüft ihn alle zwei Minuten und schreibt dir sofort
+auf Telegram, wenn er nicht läuft, hängt, nicht kauft (mit Grund), die
+24-Stunden-Freigabe des Testlaufs bald abläuft oder eine Position festhängt.
 
 Das Log sagt `live: ON (test) for P_pool60 ...` oder listet jeden Grund,
 warum nichts gehandelt wird. Der Dienst läuft auch dann weiter und zeigt die

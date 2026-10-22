@@ -345,6 +345,14 @@ jobs:
     replaces: pythia-costs
 
   # ---------------------------------------------------------------- host jobs
+  - name: pumpfun-live-watch
+    description: watches the real-money pump.fun bot every two minutes (container, status, gate, test gate, stuck positions) and posts at once when it does not trade as it should
+    schedule: "*/2 * * * *"
+    kind: host
+    command: /usr/bin/python3 /opt/pythia-ops/pumpfun_live_watch.py
+    timeout: 2m
+    alert: false
+
   - name: health
     description: health check of every job, container, stream, book and the disk
     schedule: "7 * * * *"

@@ -22,7 +22,7 @@ main() {
     checks+=("{\"name\":\"$1\",\"ok\":$2,\"detail\":\"$d\"}")
   }
 
-  for c in pythia-recorder pythia-server pythia-autopilot; do
+  for c in pythia-recorder pythia-server pythia-autopilot pythia-pumpfun-live; do
     if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = "true" ]; then
       add "$c" true "running since $(docker inspect -f '{{.State.StartedAt}}' "$c" | cut -c1-16)"
     else
