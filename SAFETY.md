@@ -195,3 +195,41 @@ decades; what remains of it is easily given back in trading costs. [`PROFIT-PLAN
 sets out honestly where an edge could actually come from, what a strategy has to prove before it
 deserves real money, and the arithmetic that makes high-turnover bots lose. Read it before you
 believe a backtest.
+
+## 6. Research agent
+
+On the lab server an optional research agent (`research/ops/agent/`, off until the owner switches
+its jobs on) runs studies and fixes failed jobs on its own and may deploy its work
+without the owner looking at it first. It is fenced so that it never reaches real money, root on
+the host, a secret, or the public repository with anything private.
+
+**What it can change.** Only research: `research/lab/lab/experiments`, `paper`, `factory` and
+`collect`, `research/lab/results`, `tests` and `proposals`, `research/lab/README.md`, and plain lab
+jobs in `research/ops/jobs.yaml` (command `python -m lab.<module>`, no volumes, env files, network,
+image or host kind). Inside those folders it still may not change the live twin
+(`paper/live_copy.py`), the book the twin copies (`paper/families.py`) and the results that book
+reads, or any module that the pump.fun live code, the ops code, the AI code, the live twin or a job
+with secrets, the host network or volumes imports. Everything else, the engines, the app, the
+build, the host scripts, the job runner, the live executor, the wallet code and this file
+included, is outside its reach: a round that touches it is held.
+
+**What it cannot reach.** It runs in its own container as an unprivileged user, without
+capabilities, on its own network, with a fresh empty home every run. It sees the data folder read
+only (every real-money control in it: the engines' state, the live ledger and totals, the KILL
+files, the pump.fun IDLs, the live signals) and writes only its clone and one output folder. It
+gets no git key, no Docker socket, nothing of `/etc/pythia` (the wallet, its confirmation, the alert
+keys) and nothing of the agent's own secrets but the Claude API key. Real money runs from the
+owner's own code copy (`/opt/pythia-live`, deployed only by the owner with `deploy_live.sh`): the
+pump.fun live service, its dry run, the live twin and its book. The scheduled jobs that could run
+the agent's code see the same real-money controls read only.
+
+**How its rounds are checked.** The host takes the agent's commits out of a container without
+network, applies them in its own clone and checks them: main has not moved; every path is on the
+allow list above; no added line, file name or commit message looks private (addresses, keys, key
+arrays, wallet secrets, personal paths, the owner's own private strings from a root-only file); no
+file is binary, larger than 1 MB, a symlink or named like live data or a secret; no allow marker for
+the secret scanners; every commit carries the owner's identity and no attribution; the job rules
+hold; gitleaks finds nothing. Only a round that passes all of it is pushed, merged and deployed;
+each deploy step is checked and a failure is reported. A round that fails any check is held on the
+server, root only, nothing of it is pushed, and the owner gets a notice with the reasons. What the
+fence leaves open, and why it is bounded, is in `research/ops/README.md`, "Research agent".

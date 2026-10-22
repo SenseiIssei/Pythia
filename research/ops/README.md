@@ -119,6 +119,18 @@ each time:
 - **Alert.** A job's first failure, and its recovery, posts one line through
   `notify.py` with the settings in `/etc/pythia/alerts.env` (`alert: false`
   turns it off for a job).
+- **Real-money controls read only.** A plain lab job (lab kind, the code at
+  `/opt/pythia-lab`, no env file, network or volumes: the only kind the research
+  agent may add) still mounts the whole data folder, but every real-money control
+  that exists is mounted again read only on top of it (`LIVE_CONTROLS` in
+  `lab/ops/jobs.py`): `autopilot/`, `autopilot-safe/`, `engine/`, `live/`,
+  `pumpfun_rt/idl/`, the KILL files, `reports/pumpfun_rt/live_settings.json`, the
+  sweep's `families_summary.json` and `tsmom_tranches.json`, every `signals/*_live/`
+  and the signal folder each twin copies. Jobs with env files, a network,
+  volumes or their own code mount run code the agent cannot change and are left
+  as they are.
+- **Volumes.** A volume whose host path does not exist stops the run before it
+  starts (docker would create it as an empty folder).
 
 A job is **late** when its last scheduled fire is past its timeout plus
 `grace` (15 minutes) and no run started for it; fires before the job went
@@ -191,6 +203,23 @@ file is checked against a sha256 manifest (`.deploy-manifest`) and every file
 fails. `.deploy-info` says which commit is deployed. `--dry-run` shows what
 would change. Rebuild the image only when `research/lab/requirements.txt`
 changed: `docker build -t pythia-lab /opt/pythia-lab`.
+
+**The live copy.** What real money runs does not come from `/opt/pythia-lab`,
+which the research agent's rounds deploy, but from `/opt/pythia-live`, which
+only the owner deploys, by hand: `research/ops/deploy_live.sh` copies
+`research/lab` of a clean checkout (default `/opt/pythia-src`) there, owned by
+root, with the same sha256 manifest check, and first lists the commits since the
+live copy that touched `research/lab`. It refuses while something runs from the
+copy (`--force` overrides); stop the live service first and start it again after.
+The jobs `paper-families`, `paper-live-copy` and `pumpfun-live-simulate` mount it
+read only at `/app` (`code: false` plus `volumes` in the table), and so does the
+live service (below). Deploy it before `deploy_ops.sh` installs a table that
+mounts it: a missing `/opt/pythia-live` stops those jobs.
+
+```bash
+bash /opt/pythia-src/research/ops/deploy_live.sh --dry-run
+bash /opt/pythia-src/research/ops/deploy_live.sh
+```
 
 ## Real-time pump.fun lab
 
@@ -304,7 +333,7 @@ endpoints).
    and `reports/pumpfun_rt/wallet.json`, and shows the backup once after YES:
 
    ```bash
-   docker run --rm -it -v /etc/pythia:/etc/pythia -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.wallet new --out /etc/pythia/pumpfun-keypair.json
+   docker run --rm -it -v /etc/pythia:/etc/pythia -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro pythia-lab python -m lab.pumpfun_rt.wallet new --out /etc/pythia/pumpfun-keypair.json
    ```
 
    Fund it by sending SOL to the address (the app's "pump.fun wallet" page
@@ -344,8 +373,15 @@ endpoints).
    `--venue curve --mint <mint>` looks at the curve path):
 
    ```bash
-   docker run --rm --env-file /etc/pythia/pumpfun-live.env -v /etc/pythia:/etc/pythia:ro -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.live_exec simulate
-   docker run --rm --env-file /etc/pythia/pumpfun-live.env -v /etc/pythia:/etc/pythia:ro -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.live_exec check
+   docker run --rm --env-file /etc/pythia/pumpfun-live.env -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     -v /etc/pythia/pumpfun-live-ack:/etc/pythia/pumpfun-live-ack:ro \
+     -v /etc/pythia/pumpfun-keypair.json.pub:/etc/pythia/pumpfun-keypair.json.pub:ro \
+     pythia-lab python -m lab.pumpfun_rt.live_exec simulate
+   docker run --rm --env-file /etc/pythia/pumpfun-live.env -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     -v /etc/pythia/pumpfun-keypair.json:/etc/pythia/pumpfun-keypair.json:ro \
+     -v /etc/pythia/pumpfun-keypair.json.pub:/etc/pythia/pumpfun-keypair.json.pub:ro \
+     -v /etc/pythia/pumpfun-live-ack:/etc/pythia/pumpfun-live-ack:ro \
+     pythia-lab python -m lab.pumpfun_rt.live_exec check
    ```
 
 7. Give the engine that serves the app write access to the live page's folder
@@ -355,14 +391,30 @@ endpoints).
 8. Start the live service by hand. It is a long-running container like the
    collector's, but deliberately with `--restart no` and in no job, script or
    compose file: after a reboot it stays down until the owner starts it again.
+   It runs the owner's live copy of the code (`/opt/pythia-live`, read only,
+   `deploy_live.sh`), never `/opt/pythia-lab`, which the research agent's rounds
+   deploy, and sees exactly three files of `/etc/pythia`, read only: the wallet
+   file, its `.pub` and the confirmation (the env files are read by docker on
+   the host and never mounted).
 
    ```bash
    docker run -d --name pythia-pumpfun-live --restart no --cpus 1 --memory 1g \
      --env-file /etc/pythia/alerts.env --env-file /etc/pythia/pumpfun-live.env \
      --log-opt max-size=20m --log-opt max-file=3 \
-     -v /srv/pythia-data:/data -v /opt/pythia-lab:/app -v /etc/pythia:/etc/pythia:ro \
+     -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     -v /etc/pythia/pumpfun-keypair.json:/etc/pythia/pumpfun-keypair.json:ro \
+     -v /etc/pythia/pumpfun-keypair.json.pub:/etc/pythia/pumpfun-keypair.json.pub:ro \
+     -v /etc/pythia/pumpfun-live-ack:/etc/pythia/pumpfun-live-ack:ro \
      pythia-lab python -m lab.pumpfun_rt.live_service
    ```
+
+   Switching a running service over (from the older command that mounted
+   `/opt/pythia-lab` and all of `/etc/pythia`): kill switch, wait until nothing
+   is open, `docker stop pythia-pumpfun-live && docker rm pythia-pumpfun-live`,
+   `deploy_live.sh`, the command above, remove the kill files. Because the folder
+   is no longer mounted, `/etc/pythia/pumpfun-kill` does not reach this
+   container; use `touch /srv/pythia-data/pumpfun_rt/KILL` or the app's button
+   (`reports/pumpfun_rt/KILL`), which it reads.
 
    It streams the two programs over its own connections
    (`PYTHIA_PF_LIVE_LINKS`, `PYTHIA_PF_LIVE_AMM_LINKS`, 2 each) and records
@@ -395,9 +447,11 @@ landing time; the daily loss and total budget stops; positions from before a
 restart sold or not sellable; a daily card with the balance, P&L, trades and
 measured against assumed latency.
 
-To stop: the kill switch (app button, or `touch /etc/pythia/pumpfun-kill`),
-wait until nothing is open, then `docker stop pythia-pumpfun-live`. To allow
-buys again: `rm /srv/pythia-data/reports/pumpfun_rt/KILL` (and
+To stop: the kill switch (app button, or `touch /srv/pythia-data/pumpfun_rt/KILL`;
+`/etc/pythia/pumpfun-kill` reaches only a service started with the older command
+that mounted all of `/etc/pythia`), wait until nothing is open, then
+`docker stop pythia-pumpfun-live`. To allow buys again:
+`rm /srv/pythia-data/reports/pumpfun_rt/KILL /srv/pythia-data/pumpfun_rt/KILL` (and
 `/etc/pythia/pumpfun-kill`) on the server; the app cannot.
 
 ## Questions in Telegram
@@ -1166,38 +1220,144 @@ The lab keeps researching without the owner's PC: the jobs `agent-research` (Sun
 13:00 UTC, two hours after the research director's drafts) and `agent-care` (daily
 08:15 UTC) run `research/ops/agent/run_agent.sh`, which starts Claude Code headless in
 its own container (image `pythia-agent`, built from `research/ops/agent/Dockerfile` on
-top of the lab image) and pays for it from the Claude API key in `/etc/pythia/agent.env`.
-
-What the agent gets: a fresh clone of main at `/work`, the data folder at `/data`, the
-job locks, the director's drafts at `/proposals` (read only) and a snapshot of the host
-(`reports/agent/snapshot.md`). What it does not get: a git key, the Docker socket,
-`/etc/pythia`, the wallet or the engines. Its prompts are `research.md` (weekly: up to
+top of the lab image) and pays for it from the Claude API key in
+`/root/pythia-agent-secrets/agent.env`. Its prompts are `research.md` (weekly: up to
 three pre-registered studies, paper books for what passes, fixes) and `care.md` (daily:
-failed jobs fixed with tests, the books and the live bot checked).
+failed jobs fixed with tests, the books and the live bot checked). Both jobs are off
+(`enabled: false`) until the owner switches them on.
 
-After the run the host turns the agent's commits into patches inside the container,
-applies them in its own clone (`/opt/pythia-agent/trusted`) and runs `guard.py`. A round
-that touches the engines, the app, the build, the host scripts, the job runner, the
-pump.fun live executor or wallet code, or a job that reaches beyond the lab container,
-is pushed to a branch `agent/<mode>-<date>` for the owner and not deployed. A clean
-round goes to main, into `/opt/pythia-src`, and through `deploy_lab.sh` (and
-`deploy_ops.sh` when the job table changed). The report goes to Telegram (category
-Studies and factory) and stays in `reports/agent/<mode>.md`, the full run log in
-`reports/agent/<mode>-run.log`.
+**What the agent can reach.** It runs as the unprivileged user `agent` (uid 10001),
+every capability dropped, `no-new-privileges`, on its own Docker network
+(`pythia-agent`, so not on the default bridge with the engines and the live bot), with:
+
+| In the container | What | Access |
+|---|---|---|
+| `/work` | a fresh clone of main, made for this run | read and write |
+| `/out` | `/srv/pythia-agent-out`, its only other writable folder: the report `/out/<mode>.md`, the rerun list `/out/rerun.txt`, `PYTHIA_REPORTS=/out/reports`, `PYTHIA_CACHE=/out/cache`, `PYTHIA_AGENT_OUT=/out/agent`, `PYTHIA_WRITE_ROOT=/out/data` (paper books, signals, models a study saves; `lab/data.py`) | read and write |
+| `/data` | `/srv/pythia-data`, with every real-money control in it | read only |
+| `/home/agent` | an empty tmpfs, gone after the run, so nothing it leaves there reaches a later run | read and write |
+| `/snapshot/snapshot.md` | the host snapshot (failed jobs, containers, autopilots, the live bot's log), written by root outside every agent folder | read only |
+| `/proposals` | the research director's drafts | read only |
+| `/run/lock/pythia` | the job locks, to wait for `heavy` | read only |
+| `/etc/claude-code/managed-settings.json` | no attribution lines in commits | read only |
+
+What it cannot reach: the Docker socket, a git key, `/etc/pythia` (the wallet, its
+confirmation, `alerts.env`), `/root/pythia-agent-secrets` (only `ANTHROPIC_API_KEY` is
+passed in), `/opt/pythia-live`, `/opt/pythia-lab`, the engines' API ports (other
+networks, or bound to the host's 127.0.0.1) and the pump.fun live container. Network: it
+needs the Claude API (`api.anthropic.com`) and, for the care round's IDL comparison,
+`github.com` and `raw.githubusercontent.com`; packages are baked into the image, so
+no package mirror is needed at run time. Its network is a plain Docker bridge with
+internet access; an egress allow list for those hosts would need a proxy in front
+of it and is not set up. A spend limit on the API key in the Anthropic console caps
+what it can cost.
+
+**How a round is checked.** After the run, a container without network prints the
+agent's commits as one mbox (`git format-patch --stdout`), which this shell writes into
+the root-only `/opt/pythia-agent/run/`; no git runs on the host in the agent's clone.
+The host applies the mbox in its own clone (`/opt/pythia-agent/trusted`) and checks, in
+this order: main has not moved since the start; `guard.py`; gitleaks (pinned image, no
+network) with the base's `.gitleaks.toml` and `.gitleaksignore`. Only when all of them
+pass is the round pushed to main, merged into `/opt/pythia-src` and deployed:
+`deploy_lab.sh` (retried while jobs run), then `deploy_ops.sh` when the job table
+changed, each checked; a failed merge or deploy posts a clear notice and nothing after
+it runs. The jobs in `/out/rerun.txt` (at most five, lab jobs) run only after a clean
+deploy. **A round that fails any check is held: nothing is pushed anywhere.** Its mbox,
+the reasons, the run log and the report stay root-only in
+`/root/pythia-agent-held/<mode>-<stamp>/`, and Telegram gets a notice with the reasons
+(paths and kinds, never the content). To take a held round after reading it:
+`git am /root/pythia-agent-held/<mode>-<stamp>/round.mbox` in a clone, review, push by
+hand.
+
+`guard.py` (its docstring has the full rule) holds a round unless every changed path is
+on its ALLOW list: `research/lab/lab/{experiments,paper,factory,collect}/**`,
+`research/lab/results/**`, `research/lab/tests/**`, `research/lab/proposals/**`,
+`research/lab/README.md` and `research/ops/jobs.yaml` under the job rules. Inside those it
+still refuses `paper/live_copy.py`, `paper/families.py`, the results the families job
+reads (`families_summary.md`, `family_*.md`, `tsmom_tranches.md`), git and scanner
+control files, and every module that real money or a job with secrets runs: the import
+closure (computed from the code on every run, `python3 guard.py --closure <repo> <rev>`
+lists it) of every module in `lab/pumpfun_rt`, `lab/ops` and `lab/ai`, of the live
+twin's two modules, and of the command of every job that is not a plain lab job (env
+file, network, volumes, its own image, host kind, no code mount). On 2026-10-22 that
+closure takes, out of the allowed folders: in `collect/` `__init__`, `cs2`, `flow`,
+`pokemon` (the cs2-trends and pokemon jobs pass `alerts.env`); in `experiments/`
+`__init__`, `alpaca_universe`, `cs2`, `equities_ranking`, `equities_training`,
+`etf_trend`, `exit_overlays`, `families` and every `fam_*`, `flow_overlays`,
+`intraday_equities`, `m2_v3`, `momentum2`, `overnight`, `picks`, `picks_ls`, `tsmom`,
+`tsmom_tranches`, `vol`, `vol_daily` (the live twin's book, the learning loop on the
+host network, the AI jobs, the model zoo); all of `factory/` (factory-shadow and
+factory-weekly pass `alerts.env`; to give the factory back to the agent, run them
+without the env file and post their digest from another job); in `paper/`
+`__init__`, `experimental`, `families`, `forward_report`, `listings_book`, `live_copy`,
+`pumpfun`, `tsmom` (the live twin, the forward report on the host network, the
+listings and pump.fun paper jobs with `alerts.env`).
+
+Why what remains cannot reach real money: (1) the agent's container sees `/data` read
+only and holds no key; (2) code from the allowed folders is deployed only to
+`/opt/pythia-lab`, while real money runs from `/opt/pythia-live`, which only the owner
+deploys (`deploy_live.sh`): the live service, `paper-families`, `paper-live-copy` and
+`pumpfun-live-simulate`; (3) no module that real money, a secret, the host network or a
+volume runs may change (the closure above), so allowed code runs only in plain lab
+jobs; (4) a plain lab job sees every real-money control read only (`LIVE_CONTROLS` in
+`lab/ops/jobs.py`, "The job table" above); (5) the agent can add or change only plain
+lab jobs running `python -m lab.<module>` of a module it may change, and can change no
+job with volumes, env files, a network, a host kind or an image, nor `paper-families` or
+`paper-live-copy`. What is left: a plain lab job running the agent's code can still
+write the market data, caches and paper books the families job reads, so it could feed
+the live twin's book wrong inputs; the engine's live caps (amount and maximum loss in
+SAFETY.md) bound that, and the owner sees every deployed round in the git log.
+
+The guard also holds a round for: a symlink or submodule, a file over 1 MB, a binary
+file, a file named like live data or a secret (`orders.jsonl`, `ledger.csv`,
+`measured.jsonl`, `state.json`, `*.env`, `*keypair*` and the like); an added line, a file
+name or a commit message that looks private (public IPv4 and IPv6 addresses, e-mail
+addresses also as `%40`, keys and tokens, `api-key=` values, any PEM `BEGIN` line, a
+64-number key array also across lines, a 64 to 88 character base58 string, Windows,
+`/mnt/c`, `/home/<name>` and `/Users/<name>` paths, and the owner's own patterns); an
+allow marker (`gitleaks:allow`, `secret-scan:allow`) or an em dash in an added line; an
+attribution line or an assistant's name in a commit message; an author or committer
+that is not the owner's identity. The diff is read with `--text --no-renames
+--no-ext-diff --no-textconv`, so neither `.gitattributes` nor a rename hides a line or
+a path. Its tests: `python -m pytest -q research/ops/agent/test_guard.py` (Linux, git;
+`scripts/security-scan.sh` runs them too). On the server,
+`bash /opt/pythia-src/research/ops/agent/audit_cases.sh` proves every audit case against
+a throwaway clone and the agent's container with temporary folders only (no round, no
+push, no job): each case held, a clean round passing guard and gitleaks, the report never
+read through a symlink or FIFO, `/data` readable and not writable.
 
 Setup once, on the server as root:
 
 ```bash
 umask 077
-grep '^ANTHROPIC_API_KEY=' /etc/pythia/alerts.env > /etc/pythia/agent.env
-ssh-keygen -t ed25519 -N '' -C pythia-agent -f /etc/pythia/agent-deploy-key
-# add /etc/pythia/agent-deploy-key.pub to the repository as a deploy key with write access
+install -d -m 700 /root/pythia-agent-secrets /root/pythia-agent-held
+# agent.env: the Claude API key and the commit identity's address (never in this repository)
+grep '^ANTHROPIC_API_KEY=' /etc/pythia/alerts.env > /root/pythia-agent-secrets/agent.env
+echo 'PYTHIA_AGENT_GIT_EMAIL=<the owner address>' >> /root/pythia-agent-secrets/agent.env
+ssh-keygen -t ed25519 -N '' -C pythia-agent -f /root/pythia-agent-secrets/agent-deploy-key
+# add agent-deploy-key.pub to the repository as a deploy key with write access
+$EDITOR /root/pythia-agent-secrets/private-patterns.txt     # format below
+chmod 600 /root/pythia-agent-secrets/*
+install -d -m 700 -o 10001 -g 10001 /srv/pythia-agent-out
+bash /opt/pythia-src/research/ops/deploy_live.sh               # before the table that mounts it
 bash /opt/pythia-src/research/ops/deploy_ops.sh
 ```
 
-Models and limits can be changed in `/etc/pythia/agent.env` without a deploy
+`private-patterns.txt` holds what is private to the owner and must never be written into
+this public repository: one pattern per line, a plain line is matched literally and
+case-insensitively anywhere in an added line, a file name or a commit message, a line
+starting with `re:` is a Python regular expression (case-insensitive), `#` starts a
+comment. Put in at least the server's domain and IP address, the panel's path, the
+pump.fun wallet's address and the owner's e-mail address, each on its own line. The
+guard holds every round while the file is missing or empty.
+
+`PYTHIA_AGENT_GIT_EMAIL` (and optionally `PYTHIA_AGENT_GIT_NAME`, default `SenseiIssei`)
+is the identity the agent's commits must carry; a commit by anyone else holds the
+round. Models and limits can be changed in `agent.env` without a deploy
 (`PYTHIA_AGENT_MODEL_RESEARCH`, `PYTHIA_AGENT_MODEL_CARE`, `PYTHIA_AGENT_TURNS_RESEARCH`,
-`PYTHIA_AGENT_TURNS_CARE`); a spend limit on the API key in the Anthropic console caps
-what the agent can cost. Run one by hand: `python3 /opt/pythia-ops/jobs.py --table
-/opt/pythia-ops/jobs.yaml run agent-care --force`. Switch it off: `enabled: false` on
-both jobs and `deploy_ops.sh`.
+`PYTHIA_AGENT_TURNS_CARE`). Run logs: `/opt/pythia-agent/logs/` (root only, the last 40).
+Run one by hand: `python3 /opt/pythia-ops/jobs.py --table /opt/pythia-ops/jobs.yaml run
+agent-care --force`. Switch it on or off: `enabled` on both jobs and `deploy_ops.sh`.
+
+The owner's own commits are checked by the pre-commit hook: install it once per clone
+with `git config core.hooksPath scripts/hooks` (or `npm run hooks:install`).
