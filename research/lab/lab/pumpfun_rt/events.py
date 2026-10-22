@@ -4,7 +4,7 @@ Both programs publish their events as Anchor events: a log line
 "Program data: <base64>" whose first 8 bytes are the event's discriminator
 (sha256("event:<Name>")[:8]) and whose rest is the event's fields in Borsh.
 The layouts are the public IDLs (github.com/pump-fun/pump-public-docs,
-idl/pump.json and idl/pump_amm.json, as of 2026-10-20). Fields are only ever
+idl/pump.json and idl/pump_amm.json, as of 2026-10-22). Fields are only ever
 appended to an event, so the decoder reads them in order and stops where the
 bytes end: an older, shorter event decodes to its prefix, a newer, longer one
 to the fields known here.
@@ -70,7 +70,8 @@ LAYOUTS: dict[str, list[tuple[str, str]]] = {
         ("ix_name", STRING), ("mayhem_mode", BOOL), ("cashback_fee_basis_points", U64), ("cashback", U64),
         ("buyback_fee_basis_points", U64), ("buyback_fee", U64), ("shareholders", SHAREHOLDERS),
         ("quote_mint", PUBKEY), ("quote_amount", U64), ("virtual_quote_reserves", U64),
-        ("real_quote_reserves", U64)],
+        ("real_quote_reserves", U64), ("holder_rewards_bps", U64), ("holder_rewards", U64),
+        ("creator_fee_unclaimed", U64)],
     "CompleteEvent": [("user", PUBKEY), ("mint", PUBKEY), ("bonding_curve", PUBKEY), ("timestamp", I64),
                       ("quote_mint", PUBKEY)],
     "CompletePumpAmmMigrationEvent": [
@@ -84,7 +85,12 @@ LAYOUTS: dict[str, list[tuple[str, str]]] = {
         ("user_quote_amount_in", U64), ("pool", PUBKEY), ("user", PUBKEY), ("user_base_token_account", PUBKEY),
         ("user_quote_token_account", PUBKEY), ("protocol_fee_recipient", PUBKEY),
         ("protocol_fee_recipient_token_account", PUBKEY), ("coin_creator", PUBKEY),
-        ("coin_creator_fee_basis_points", U64), ("coin_creator_fee", U64)],
+        ("coin_creator_fee_basis_points", U64), ("coin_creator_fee", U64), ("track_volume", BOOL),
+        ("total_unclaimed_tokens", U64), ("total_claimed_tokens", U64), ("current_sol_volume", U64),
+        ("last_update_timestamp", I64), ("min_base_amount_out", U64), ("ix_name", STRING),
+        ("cashback_fee_basis_points", U64), ("cashback", U64), ("buyback_fee_basis_points", U64),
+        ("buyback_fee", U64), ("virtual_quote_reserves", I128), ("can_boost", BOOL), ("base_supply", U64),
+        ("holder_rewards_bps", U64), ("holder_rewards", U64), ("creator_fee_unclaimed", U64)],
     "SellEvent": [
         ("timestamp", I64), ("base_amount_in", U64), ("min_quote_amount_out", U64),
         ("user_base_token_reserves", U64), ("user_quote_token_reserves", U64), ("pool_base_token_reserves", U64),
@@ -93,7 +99,10 @@ LAYOUTS: dict[str, list[tuple[str, str]]] = {
         ("user_quote_amount_out", U64), ("pool", PUBKEY), ("user", PUBKEY), ("user_base_token_account", PUBKEY),
         ("user_quote_token_account", PUBKEY), ("protocol_fee_recipient", PUBKEY),
         ("protocol_fee_recipient_token_account", PUBKEY), ("coin_creator", PUBKEY),
-        ("coin_creator_fee_basis_points", U64), ("coin_creator_fee", U64)],
+        ("coin_creator_fee_basis_points", U64), ("coin_creator_fee", U64), ("cashback_fee_basis_points", U64),
+        ("cashback", U64), ("buyback_fee_basis_points", U64), ("buyback_fee", U64),
+        ("virtual_quote_reserves", I128), ("can_boost", BOOL), ("base_supply", U64), ("holder_rewards_bps", U64),
+        ("holder_rewards", U64), ("creator_fee_unclaimed", U64)],
 }
 
 # Discriminators from the IDLs (sha256("event:<Name>")[:8]).
@@ -250,11 +259,19 @@ def compact(name: str, ev: dict, t: int, slot: int, tx: int, sig: str = "") -> t
                          "tok": ev.get("mint_amount"), "bts": ev.get("timestamp")}
     if name in ("BuyEvent", "SellEvent"):
         buy = name == "BuyEvent"
+        quote = ev.get("quote_amount_out")
+        if buy:
+            # the quote before the fees: a buy for exact base (buy, buy_v2) has it in quote_amount_in and the
+            # total paid in user_quote_amount_in; a buy for exact quote (buy_exact_quote_in, ..._v2) the other
+            # way round (checked on mainnet), so the smaller of the two is the net amount either way
+            quote = ev.get("quote_amount_in")
+            if quote and ev.get("user_quote_amount_in"):
+                quote = min(quote, ev["user_quote_amount_in"])
         return "amm", {
             "t": t, "slot": slot, "tx": tx, "pool": ev.get("pool"), "mint": None, "buy": buy,
-            "base": ev.get("base_amount_out") if buy else ev.get("base_amount_in"),
-            "quote": ev.get("quote_amount_in") if buy else ev.get("quote_amount_out"),
+            "base": ev.get("base_amount_out") if buy else ev.get("base_amount_in"), "quote": quote,
             "user": ev.get("user"), "pb": ev.get("pool_base_token_reserves"), "pq": ev.get("pool_quote_token_reserves"),
             "lpb": ev.get("lp_fee_basis_points"), "pfb": ev.get("protocol_fee_basis_points"),
-            "cfb": ev.get("coin_creator_fee_basis_points"), "bts": ev.get("timestamp")}
+            "cfb": ev.get("coin_creator_fee_basis_points"), "bts": ev.get("timestamp"),
+            "vq": ev.get("virtual_quote_reserves")}
     return None

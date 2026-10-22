@@ -12,9 +12,10 @@ a side), DEFAULT_FEE_BPS when no trade shows it yet. The trades' recorded
 reserves are the curve AFTER each trade (checked against consecutive trades:
 the virtual SOL reserve moves by exactly the trade's SOL amount).
 
-PumpSwap pools are a constant product on real reserves; their events carry
-the reserves BEFORE the trade (also checked). Fees there are the LP,
-protocol and creator basis points of the pool's trades.
+PumpSwap pools are a constant product on the base vault and the EFFECTIVE
+quote reserves (the quote vault plus the pool's signed virtual_quote_reserves,
+effective_quote); their events carry both BEFORE the trade (also checked).
+Fees there are the LP, protocol and creator basis points of the pool's trades.
 
 The execution model (we are not first):
 
@@ -132,6 +133,13 @@ def curve_sell(tokens: int, vs: int, vt: int, fee_bps: int) -> int:
         return 0
     gross = vs * tokens / (vt + tokens)
     return int(gross * (1 - fee_bps / 10_000))
+
+
+def effective_quote(vault: int, virtual: int | None) -> int:
+    """A PumpSwap pool's effective quote reserves, what every pool price uses: the quote vault's balance
+    plus Pool::virtual_quote_reserves, a signed sum (negative while fees kept by v2 trades wait in the
+    vault, positive on a boosted pool). pump.fun guarantees it is never below zero; clipped all the same."""
+    return max(0, int(vault) + int(virtual or 0))
 
 
 def pool_buy(lamports_in: int, base: int, quote: int, fee_bps: int) -> int:

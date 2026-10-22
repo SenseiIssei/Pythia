@@ -18,7 +18,9 @@ Tables:
            and creator fee in basis points, the instruction name
   amm      PumpSwap trades of pools that a token migrated into while the collector
            watched, for MIGRATED_KEEP_H hours: time, pool, mint, side, base and quote
-           amounts, trader, the pool's reserves before the trade, fees
+           amounts, trader, the pool's reserves before the trade, fees, and the pool's
+           virtual_quote_reserves before the trade (vq, signed; null in parts written
+           before it was recorded)
   other    curve completions, migrations (pool, SOL and tokens moved), and "gap" rows:
            a stream (program in `user`) was not connected from t0 to t, so nothing
            between is known for it
@@ -68,7 +70,7 @@ SCHEMAS: dict[str, pa.Schema] = {
                          ("fb", I32), ("cfb", I32), ("ix", STR), ("quote", STR), ("bts", I64)]),
     "amm": pa.schema([("t", I64), ("slot", I64), ("tx", I64), ("pool", STR), ("mint", STR), ("buy", BOOL),
                       ("base", I64), ("quote", I64), ("user", STR), ("pb", I64), ("pq", I64), ("lpb", I32),
-                      ("pfb", I32), ("cfb", I32), ("bts", I64)]),
+                      ("pfb", I32), ("cfb", I32), ("bts", I64), ("vq", I64)]),
     "other": pa.schema([("kind", STR), ("t", I64), ("slot", I64), ("tx", I64), ("mint", STR), ("user", STR),
                         ("pool", STR), ("sol", I64), ("tok", I64), ("t0", I64), ("bts", I64)]),
     "meta": pa.schema([("t", I64), ("mint", STR), ("ok", BOOL), ("twitter", BOOL), ("telegram", BOOL),

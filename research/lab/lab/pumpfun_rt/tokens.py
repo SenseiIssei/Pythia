@@ -215,9 +215,13 @@ class Token:
         self.pool = pool
 
     def amm(self, buy: bool, base: int, quote: int, pb: int | None, pq: int | None, lpb, pfb, cfb,
-            slot: int | None = None, user: str | None = None, t: int | None = None) -> None:
+            slot: int | None = None, user: str | None = None, t: int | None = None, vq: int | None = None) -> None:
         """A PumpSwap trade; the event's reserves are before it, so the state after is moved by it.
-        The trader's holding moves with it (the dev selling in the pool is a dev sale)."""
+        The quote side is the pool's EFFECTIVE quote reserves, the vault's balance plus the event's
+        virtual_quote_reserves (signed, before the trade like the balance; checked against mainnet
+        trades), which is what the program prices against. Rows recorded before the events were read
+        that far have no vq and count the vault alone. The trader's holding moves with it (the dev
+        selling in the pool is a dev sale)."""
         if user:
             h = self.hold.get(user, 0)
             if buy:
@@ -235,6 +239,7 @@ class Token:
             return
         self.amm_slot = slot or self.amm_slot
         if pb and pq:
+            pq = C.effective_quote(pq, vq)
             self.pb, self.pq = (pb - base, pq + quote) if buy else (pb + base, pq - quote)
             if t is not None:
                 self.amm_win.append((t, self.pq, pq))
