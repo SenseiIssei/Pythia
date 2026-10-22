@@ -281,6 +281,7 @@ class Order:
     signal_ms: int
     why: str = ""                   # sell: the exit that sent it
     leg: int = 0                    # sell number of the position
+    stake_l: int = 0                # buy: the lamports to spend (a pool buy spends exactly this)
 
 
 # ---------------------------------------------------------------- paper executor
@@ -326,10 +327,17 @@ class PaperExecutor:
         if tok is None:
             return pipe.buy_failed(o.pid, at, "token gone", tx)
         if o.venue == "pool":
+            # as the live pool buy (buy_exact_quote_in_v2): the stake is spent exactly, on the pool's
+            # effective quote reserves, and the buy fails below the signal's quote less the tolerance
             if not tok.pq or not tok.pb:
                 return pipe.buy_failed(o.pid, at, "no pool state", tx)
-            want = min(o.tokens, tok.pb - 1)
-            cost = pool_cost(want, tok.pb, tok.pq, max(tok.amm_fee_bps, c.fee_bps_floor))
+            stake = o.stake_l or int(o.limit_l / (1 + C.SLIP_TOL))
+            got = C.pool_buy(stake, tok.pb, tok.pq, max(tok.amm_fee_bps, c.fee_bps_floor))
+            if got <= 0:
+                return pipe.buy_failed(o.pid, at, "nothing filled", tx)
+            if got < o.tokens / (1 + C.SLIP_TOL):
+                return pipe.buy_failed(o.pid, at, "slippage", tx)
+            return pipe.bought(o.pid, at, got, stake, tx)
         else:
             if not tok.on_curve:
                 return pipe.buy_failed(o.pid, at, "curve completed before the buy landed", tx)
@@ -498,7 +506,7 @@ class Pipeline:
         self.by_mint.setdefault(tok.mint, set()).add(pid)
         risk.hold(pid, limit)
         eng.counts["pipe_signals"] += 1
-        o = Order(pid, "buy", tok.mint, self.pos[pid]["venue"], want, limit, int(t))
+        o = Order(pid, "buy", tok.mint, self.pos[pid]["venue"], want, limit, int(t), stake_l=stake)
         self._event("buy_sent", self.pos[pid], order=o)
         self.exec.buy(o)
 

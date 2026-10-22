@@ -176,13 +176,13 @@ class FeeEstimator:
 class Static:
     """The wallet and the programs' fixed accounts, derived once."""
     user: str
-    fee_recipient: str
+    buyback_recipient: str = X.BUYBACK_FEE_RECIPIENTS[0]     # a listed one (pump.fun's Global names them)
 
     def __post_init__(self):
-        for seeds in ([b"global"], [b"__event_authority"], [b"global_volume_accumulator"],
-                      [b"user_volume_accumulator", X.key(self.user)]):
+        for seeds in ([b"global"], [b"__event_authority"], [b"user_volume_accumulator", X.key(self.user)]):
             X.pda(seeds, X.PUMP)
         X.pda([b"fee_config", X.key(X.PUMP)], X.FEE_PROGRAM)
+        X.ata(self.user, X.WSOL, X.TOKEN)
 
 
 @dataclass
@@ -197,8 +197,8 @@ class MintTemplate:
     @classmethod
     def from_create(cls, ev: dict, st: Static, tip_account: str | None = None, tip_ok: bool = False) -> "MintTemplate":
         """Both trades of a new mint from its creation event alone (nothing read over RPC)."""
-        info = X.CurveInfo(ev["mint"], ev.get("token_program") or X.TOKEN, st.fee_recipient,
-                           ev.get("creator") or ev.get("user"))
+        info = X.CurveInfo(ev["mint"], ev.get("token_program") or X.TOKEN, st.buyback_recipient,
+                           cashback=bool(ev.get("is_cashback_enabled")))
         buy = X.pump_buy(st.user, info, 1, 1, 1)
         tip_at = None
         if tip_account is not None:
@@ -304,7 +304,8 @@ class FastPath:
         if create is None:
             return None
         mint = create["mint"]
-        if create.get("is_mayhem_mode") or not E.sol_quoted(create.get("quote_mint")):
+        if create.get("is_mayhem_mode") or create.get("is_cashback_enabled") or \
+                not E.sol_quoted(create.get("quote_mint")):
             self._skip("not a plain SOL curve")
             return None
         vs, vt, rt = (create.get("virtual_sol_reserves") or 0, create.get("virtual_token_reserves") or 0,
@@ -415,7 +416,7 @@ def _fixed_rpc():
 def bench_path(user: str | None = None, tip: bool = False) -> FastPath:
     user = user or E.b58(hashlib.sha256(b"bench-wallet").digest())
     call = _fixed_rpc()
-    st = Static(user, E.b58(hashlib.sha256(b"fee-recipient").digest()))
+    st = Static(user)
     tip_acct = sorted(X.JITO_TIP_ACCOUNTS)[0] if tip else None
     return FastPath(st, FakeSigner(user), BlockhashCache(call), FeeEstimator(call, [E.PUMP], cap_sol=0.005),
                     tip_account=tip_acct, tip_l=100_000 if tip else 0, jito=tip)
@@ -470,10 +471,10 @@ def dryrun(seconds: float, rpc_url: str = "https://api.mainnet-beta.solana.com",
     user = E.b58(hashlib.sha256(b"dry-run-wallet").digest())
     try:
         glob = call("getAccountInfo", [X.pda([b"global"], X.PUMP), {"encoding": "base64"}])
-        fee_recipient = X.read_key(base64.b64decode(glob["value"]["data"][0]), X.OFFSETS[("Global", "fee_recipient")])
+        buyback = X.buyback_recipients(base64.b64decode(glob["value"]["data"][0]), "Global")[0]
     except Exception:
-        fee_recipient = E.b58(hashlib.sha256(b"fee-recipient").digest())
-    fp = FastPath(Static(user, fee_recipient), FakeSigner(user), BlockhashCache(call),
+        buyback = X.BUYBACK_FEE_RECIPIENTS[0]
+    fp = FastPath(Static(user, buyback), FakeSigner(user), BlockhashCache(call),
                   FeeEstimator(call, [E.PUMP, X.pda([b"global"], X.PUMP)]))
     sender = DryRunSender(send_endpoints(), os.environ.get("PYTHIA_PUMPFUN_JITO_URL"))
     out = {"ready_us": [], "behind_block_ms": []}

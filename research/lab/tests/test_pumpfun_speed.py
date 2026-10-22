@@ -250,7 +250,7 @@ def test_a_patched_template_is_byte_for_byte_the_freshly_built_transaction():
     assert r is not None and r.tokens > 0 and r.max_cost_l == int(0.1 * SOL * 1.3)
     ev = next(e for n, e in E.events_of(json.loads(F.synthetic_message(1))["params"]["result"]["value"]["logs"])
               if n == "CreateEvent")
-    info = X.CurveInfo(ev["mint"], X.TOKEN, fp.st.fee_recipient, ev["creator"])
+    info = X.CurveInfo(ev["mint"], X.TOKEN, fp.st.buyback_recipient)
     micro = fp.fees.micro()
     ixs = X.pump_buy(user, info, r.tokens, r.max_cost_l, micro * X.UNITS // 1_000_000)
     fresh = X.compile_message(user, ixs, fp.bh.text)
@@ -277,16 +277,17 @@ def test_program_ids_are_the_ones_on_chain():
 
 
 def test_pump_buy_data_matches_the_programs_argument_layout():
-    # amount u64, max_sol_cost u64, track_volume and partial_fill as one-byte OptionBool, both off
-    info = X.CurveInfo(key(1), X.TOKEN, key(5), key(6))
+    # buy_v3: amount u64, max_sol_cost u64, partial_fill as a one-byte OptionBool, off
+    info = X.CurveInfo(key(1), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0])
     ix = next(i for i in X.pump_buy(key(77), info, 123, 456, 789) if i.program == X.PUMP)
-    assert ix.data == X.discriminator("buy") + struct.pack("<QQ", 123, 456) + b"\x00\x00"
-    assert X.ARGS[("pump", "buy")] == ["amount", "max_sol_cost", "track_volume", "partial_fill"]
+    assert ix.data == bytes([7, 5, 29, 196, 245, 23, 101, 80]) + struct.pack("<QQ", 123, 456) + b"\x00"
+    assert ix.data[:8] == X.discriminator("buy_v3")
+    assert X.ARGS[("pump", "buy_v3")] == ["amount", "max_sol_cost", "partial_fill"]
 
 
 def test_compile_template_knows_where_the_blockhash_and_the_data_are():
     user = key(77)
-    info = X.CurveInfo(key(1), X.TOKEN, key(5), key(6))
+    info = X.CurveInfo(key(1), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0])
     ixs = X.pump_buy(user, info, 123, 456, 789)
     c = X.compile_template(user, ixs, key(44))
     assert c.message[c.blockhash_at:c.blockhash_at + 32] == X.key(key(44))
@@ -297,7 +298,7 @@ def test_compile_template_knows_where_the_blockhash_and_the_data_are():
 def test_tips_only_with_the_owners_flag_to_a_jito_account_and_under_the_cap():
     user = key(77)
     jito = sorted(X.JITO_TIP_ACCOUNTS)[0]
-    buy = X.pump_buy(user, X.CurveInfo(key(1), X.TOKEN, key(5), key(6)), 1, 1, 1)
+    buy = X.pump_buy(user, X.CurveInfo(key(1), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0]), 1, 1, 1)
     X.check_own(user, buy + [X.tip(user, jito, 100_000)], tip_ok=True)
     with pytest.raises(ValueError):
         X.check_own(user, buy + [X.tip(user, jito, 100_000)])                     # the flag is off
@@ -308,7 +309,7 @@ def test_tips_only_with_the_owners_flag_to_a_jito_account_and_under_the_cap():
     with pytest.raises(ValueError):
         X.check_own(user, buy + [X.tip(user, jito, 1), X.tip(user, jito, 1)], tip_ok=True)
     call, _ = fixed_rpc()
-    st = F.Static(user, key(5))
+    st = F.Static(user)
     with pytest.raises(ValueError):
         F.FastPath(st, F.FakeSigner(user), F.BlockhashCache(call), F.FeeEstimator(call, [E.PUMP]), tip_account=jito,
                    tip_l=1_000, jito=False)

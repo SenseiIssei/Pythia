@@ -74,6 +74,7 @@ import json
 import math
 import os
 import queue
+import random
 import stat
 import sys
 import threading
@@ -330,10 +331,13 @@ def address_of(keypair: str | Path | None) -> str | None:
     return a or None
 
 
-def simulate_problems(rec, address: str | None, now_ms: int) -> list[str]:
+def simulate_problems(rec, address: str | None, now_ms: int, rule: str | None = None) -> list[str]:
     if not isinstance(rec, dict):
         return ["no successful simulation yet (live_exec simulate)"]
     out = []
+    if rule in P.BY_NAME and rec.get("venue") != venue_of(rule):
+        out.append(f"the last simulation was on the {rec.get('venue')}, {rule} trades the {venue_of(rule)} "
+                   "(run live_exec simulate without --venue)")
     age = now_ms - int(rec.get("t") or 0)
     if age > SIMULATE_MAX_AGE_MS:
         out.append(f"the last simulation is {age / 3_600_000:.0f} h old (at most 24 h; run live_exec simulate)")
@@ -381,7 +385,8 @@ class LiveGate:
             self.rule = resolve_rule(ack.rule, rep if isinstance(rep, dict) else None)
             if self.rule not in P.BY_NAME:
                 why.append(f"the test strategy {self.rule} is not a pipeline strategy")
-            why += simulate_problems(read_json(self.simulate_file or simulate_path()), self.address, self.now_ms())
+            why += simulate_problems(read_json(self.simulate_file or simulate_path()), self.address, self.now_ms(),
+                                     self.rule)
         else:
             self.rule = ack.rule
             why += self._readiness(rep, ack.rule)
@@ -651,23 +656,38 @@ class Builder:
         owner = self._cached("owner:" + mint, 3600, lambda: self.rpc.account(mint)[1])
         bc = self._cached("bc:" + mint, 600,
                           lambda: self.rpc.account(X.pda([b"bonding-curve", X.key(mint)], X.PUMP))[0])
-        return X.curve_info(mint, owner, glob, bc, self.idl_pump)
+        return X.curve_info(mint, owner, glob, bc, self.idl_pump, pick=random.choice)
 
-    def pool(self, pool: str, mint: str) -> X.PoolInfo:
+    def pool(self, pool: str, mint: str, fresh: bool = False) -> X.PoolInfo:
+        """The pool's accounts and flags; a random listed buyback fee recipient each time (as the SDK
+        does, so our trades do not all lock the same account). `fresh` reads the pool account again
+        (its virtual_quote_reserves moves with every v2 trade)."""
         cfg = self._cached("config", 600, lambda: self.rpc.account(X.pda([b"global_config"], X.PUMP_AMM))[0])
         owner = self._cached("owner:" + mint, 3600, lambda: self.rpc.account(mint)[1])
+        if fresh:
+            self.cache.pop("pool:" + pool, None)
         data = self._cached("pool:" + pool, 600, lambda: self.rpc.account(pool)[0])
-        return X.pool_info(pool, data, cfg, owner, self.idl_amm)
+        info = X.pool_info(pool, data, cfg, owner, self.idl_amm, pick=random.choice)
+        if info.base_mint != mint:
+            raise RuntimeError("the pool is not this token's")
+        return info
 
     def ixs(self, user: str, o: P.Order, pool: str | None, close: bool) -> list[X.Ix]:
         if o.venue == "pool":
             if not pool:
                 raise RuntimeError("no pool known for this token")
             info = self.pool(pool, o.mint)
-            ixs = (X.amm_buy(user, info, o.tokens, o.limit_l, self.priority_l, self.idl_amm) if o.side == "buy" else
-                   X.amm_sell(user, info, o.tokens, o.limit_l, self.priority_l, close, self.idl_amm))
+            if not info.supports_v2():
+                raise RuntimeError("the pool takes no v2 trade (a cashback coin); refused, v1 is never sent")
+            if o.side == "buy":
+                spend, least = pool_buy_amounts(o)
+                ixs = X.amm_buy(user, info, spend, least, self.priority_l, self.idl_amm)
+            else:
+                ixs = X.amm_sell(user, info, o.tokens, o.limit_l, self.priority_l, close, self.idl_amm)
         else:
             info = self.curve(o.mint)
+            if not info.supports_v3():
+                raise RuntimeError("the curve takes no v3 trade (a cashback coin); refused, legacy is never sent")
             ixs = (X.pump_buy(user, info, o.tokens, o.limit_l, self.priority_l, self.idl_pump) if o.side == "buy" else
                    X.pump_sell(user, info, o.tokens, o.limit_l, self.priority_l, close, self.idl_pump))
         X.check_own(user, ixs)                                # a plain buy or sale for this wallet, nothing else
@@ -675,6 +695,14 @@ class Builder:
 
     def build(self, user: str, o: P.Order, pool: str | None, close: bool) -> bytes:
         return X.compile_message(user, self.ixs(user, o, pool, close), self.blockhash())
+
+
+def pool_buy_amounts(o: P.Order) -> tuple[int, int]:
+    """A pool buy spends exactly the stake (buy_exact_quote_in_v2) and accepts no fewer tokens than the
+    signal's quote on the effective reserves less the slippage tolerance: the same bound as the paper
+    model's, which fails a buy whose cost for those tokens is more than SLIP_TOL above the stake."""
+    spend = o.stake_l or int(o.limit_l / (1 + C.SLIP_TOL))
+    return spend, max(1, int(o.tokens / (1 + C.SLIP_TOL)))
 
 
 def totals_path() -> Path:
@@ -1345,14 +1373,20 @@ def newest_pool(path: Path | None = None) -> tuple[str, str] | None:
     return best[0], best[1][0]
 
 
+def venue_of(rule: str) -> str:
+    return "pool" if P.BY_NAME[rule].family == "E" else "curve"
+
+
 def simulate(gate: LiveGate, rpc: Rpc, pubkey: str, mint: str | None = None, pool: str | None = None,
-             sol: float = 0.01, now_ms: int | None = None, pools_file: Path | None = None) -> dict:
+             sol: float = 0.01, now_ms: int | None = None, pools_file: Path | None = None,
+             venue: str | None = None) -> dict:
     """A buy, and a buy followed by the sale of what it bought, built by txbuild for this wallet and run
-    through simulateTransaction on mainnet (no signature, nothing sent). The record is what the test
-    gate reads; it holds no secret."""
+    through simulateTransaction on mainnet (no signature, nothing sent). The venue is the strategy's
+    unless `venue` names the other one (the gate accepts only a simulation of the strategy's own venue).
+    The record is what the test gate reads; it holds no secret."""
     gate.check()
     rule = gate.rule if gate.rule in P.BY_NAME else DEFAULT_TEST_RULE
-    venue = "pool" if P.BY_NAME[rule].family == "E" else "curve"
+    venue = venue or venue_of(rule)
     b = Builder(rpc, gate.idls)
     lam = int(min(sol, TEST_MAX_TRADE_SOL, P.HARD_STAKE_SOL) * C.LAMPORTS)
     limit = int(lam * (1 + C.SLIP_TOL))
@@ -1368,18 +1402,31 @@ def simulate(gate: LiveGate, rpc: Rpc, pubkey: str, mint: str | None = None, poo
             if not mint:
                 raise RuntimeError("--pool needs --mint")
             rec.update(pool=pool, mint=mint)
-            info = b.pool(pool, mint)
+            info = b.pool(pool, mint, fresh=True)
+            if not info.supports_v2():
+                raise RuntimeError("the pool takes no v2 trade (a cashback coin); pass another --pool")
             pb, pq = rpc.token_balance(info.pool_base), rpc.token_balance(info.pool_quote)
-            tokens = C.pool_buy(lam, pb, pq, C.DEFAULT_FEE_BPS)
-            buy = X.amm_buy(pubkey, info, tokens, limit, b.priority_l, b.idl_amm)
-            sell = X.amm_sell(pubkey, info, tokens, 0, b.priority_l, True, b.idl_amm)
+            eff = info.effective_quote(pq)
+            rec["reserves"] = {"base": pb, "quote_vault": pq, "virtual_quote": info.virtual_quote, "effective": eff}
+            quote = C.pool_buy(lam, pb, eff, C.DEFAULT_FEE_BPS)
+            spend, least = pool_buy_amounts(P.Order(0, "buy", mint, "pool", quote, limit, 0, stake_l=lam))
+            buy = X.amm_buy(pubkey, info, spend, least, b.priority_l, b.idl_amm)
+            # the round trip sells the least the buy may give, so the sale never asks for more than it got
+            # (the token account keeps the rest and stays open); the emptied account is closed live
+            sell = X.amm_sell(pubkey, info, least, 0, b.priority_l, False, b.idl_amm)
         else:
             if not mint:
                 raise RuntimeError("a curve strategy needs --mint (a live token's mint)")
             data, _ = rpc.account(X.pda([b"bonding-curve", X.key(mint)], X.PUMP))
             vt, vs = int.from_bytes(data[8:16], "little"), int.from_bytes(data[16:24], "little")
-            tokens = C.curve_buy(lam, vs, vt, vt, C.DEFAULT_FEE_BPS)
+            rt, done = int.from_bytes(data[24:32], "little"), bool(data[48])
+            if done:
+                raise RuntimeError("the curve is complete (pass a live token's --mint)")
+            rec["reserves"] = {"virtual_token": vt, "virtual_sol": vs, "real_token": rt}
+            tokens = C.curve_buy(lam, vs, vt, rt, C.DEFAULT_FEE_BPS)
             info = b.curve(mint)
+            if not info.supports_v3():
+                raise RuntimeError("the curve takes no v3 trade (a cashback coin); pass another --mint")
             buy = X.pump_buy(pubkey, info, tokens, limit, b.priority_l, b.idl_pump)
             sell = X.pump_sell(pubkey, info, tokens, 0, b.priority_l, True, b.idl_pump)
         X.check_own(pubkey, buy)
@@ -1408,6 +1455,8 @@ def main(argv: list[str] | None = None) -> int:
     sim.add_argument("--mint")
     sim.add_argument("--pool", help="a PumpSwap pool (default: the newest migration the collector saw)")
     sim.add_argument("--sol", type=float, default=0.01)
+    sim.add_argument("--venue", choices=("pool", "curve"),
+                     help="default: the strategy's; the other venue is simulated for a look, the gate ignores it")
     a = ap.parse_args(argv)
     gate = LiveGate()
     if a.cmd == "check":
@@ -1424,9 +1473,9 @@ def main(argv: list[str] | None = None) -> int:
         print("no wallet address: make the wallet first (python -m lab.pumpfun_rt.wallet new) or pass --pubkey")
         return 1
     rpc = Rpc(os.environ.get(ENV_RPC) or DEFAULT_RPC)
-    rec = simulate(gate, rpc, pubkey, a.mint, a.pool, a.sol)
-    print(json.dumps({k: rec[k] for k in ("ok", "rule", "venue", "mint", "pool", "sol", "buy", "round_trip", "error")},
-                     indent=1))
+    rec = simulate(gate, rpc, pubkey, a.mint, a.pool, a.sol, venue=a.venue)
+    print(json.dumps({k: rec.get(k) for k in ("ok", "rule", "venue", "mint", "pool", "sol", "reserves", "buy",
+                                              "round_trip", "error")}, indent=1))
     print("simulation OK: recorded for the test gate (valid 24 h)" if rec["ok"] else
           "simulation FAILED: the test gate stays shut")
     return 0 if rec["ok"] else 1

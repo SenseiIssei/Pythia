@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import struct
 from datetime import datetime, timezone
 
 import numpy as np
@@ -280,13 +281,37 @@ def ready_report(tmp_path, rule="P_p90", ready=True, age_h=1):
     return p
 
 
+FIELD_TYPES = {"buyback_fee_recipients": {"array": ["pubkey", 8]}, "is_mayhem_mode": "bool",
+               "is_cashback_coin": "bool", "quote_mint": "pubkey", "base_mint": "pubkey",
+               "pool_base_token_account": "pubkey", "pool_quote_token_account": "pubkey",
+               "virtual_quote_reserves": "i128"}
+
+
+def idl_types(prog):
+    """The account types the builder reads, each field at its offset (padding between), as an IDL has them."""
+    out = {}
+    for type_name, fld in X.READS[prog]:
+        out.setdefault(type_name, []).append((X.OFFSETS[(type_name, fld)], fld))
+    types = []
+    for type_name, fields in out.items():
+        pos, rows = 8, []
+        for off, fld in sorted(fields):
+            if off > pos:
+                rows.append({"name": f"pad_{off}", "type": {"array": ["u8", off - pos]}})
+            rows.append({"name": fld, "type": FIELD_TYPES[fld]})
+            pos = off + X._size(FIELD_TYPES[fld])
+        types.append({"name": type_name, "type": {"kind": "struct", "fields": rows}})
+    return types
+
+
 def idl_docs():
     def doc(prog):
-        return {"instructions": [{"name": side, "accounts": [{"name": n, "writable": n in X.WRITABLE,
-                                                              "signer": n in X.SIGNERS}
-                                                             for n in X.ACCOUNTS[(prog, side)]],
-                                  "args": [{"name": a, "type": "u64"} for a in X.ARGS[(prog, side)]]}
-                                 for side in ("buy", "sell")]}
+        return {"instructions": [{"name": ix, "discriminator": list(X.discriminator(ix)),
+                                  "accounts": [{"name": n, "writable": n in X.WRITABLE, "signer": n in X.SIGNERS}
+                                               for n in X.ACCOUNTS[(p, ix)]],
+                                  "args": [{"name": a, "type": "u64"} for a in X.ARGS[(p, ix)]]}
+                                 for (p, ix) in X.ACCOUNTS if p == prog],
+                "types": idl_types(prog)}
     return doc("pump"), doc("amm")
 
 
@@ -385,14 +410,14 @@ def test_program_addresses_and_the_message_layout():
     assert X.pda([b"global"], X.PUMP) == "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"
     assert X.pda([b"__event_authority"], X.PUMP) == "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"
     user = key(77)
-    info = X.CurveInfo(MINT, X.TOKEN, key(8), DEV)
+    info = X.CurveInfo(MINT, X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[2])
     ixs = X.pump_buy(user, info, 1_000, 2_000, 1_000_000)
     msg = X.compile_message(user, ixs, key(5))
     assert msg[0] == 1 and msg[1] == 0                    # one signer, the payer, writable
     n = msg[3]
     keys = [X.b58(msg[4 + 32 * i: 36 + 32 * i]) for i in range(n)]
     assert keys[0] == user and X.PUMP in keys and X.COMPUTE_BUDGET in keys
-    assert X.discriminator("buy") in msg
+    assert X.discriminator("buy_v3") in msg
     tx = X.transaction(msg, [b"\x02" * 64])
     assert tx[0] == 1 and tx.endswith(msg)
     with pytest.raises(ValueError):
@@ -407,21 +432,87 @@ def test_the_idl_check_and_offsets_come_from_the_owners_copy():
     bad["instructions"][0]["accounts"].append({"name": "newAccount"})
     assert any("accounts differ" in w for w in X.check_idl(bad, amm))
     idl = X.Idl({"types": [{"name": "BondingCurve", "type": {"kind": "struct", "fields": [
-        {"name": "virtual_token_reserves", "type": "u64"}, {"name": "virtual_sol_reserves", "type": "u64"},
-        {"name": "real_token_reserves", "type": "u64"}, {"name": "real_sol_reserves", "type": "u64"},
+        {"name": "virtual_token_reserves", "type": "u64"}, {"name": "virtual_quote_reserves", "type": "u64"},
+        {"name": "real_token_reserves", "type": "u64"}, {"name": "real_quote_reserves", "type": "u64"},
         {"name": "token_total_supply", "type": "u64"}, {"name": "complete", "type": "bool"},
-        {"name": "creator", "type": "pubkey"}]}}]})
-    assert idl.offset("BondingCurve", "creator") == X.OFFSETS[("BondingCurve", "creator")] == 49
-    data = bytes(49) + X.key(DEV) + bytes(10)
-    assert X.read_key(data, idl.offset("BondingCurve", "creator")) == DEV
+        {"name": "creator", "type": "pubkey"}, {"name": "is_mayhem_mode", "type": "bool"},
+        {"name": "is_cashback_coin", "type": "bool"}, {"name": "quote_mint", "type": "pubkey"}]}}]})
+    assert idl.offset("BondingCurve", "quote_mint") == X.OFFSETS[("BondingCurve", "quote_mint")] == 83
+    data = bytes(83) + X.key(DEV) + bytes(10)
+    assert X.read_key(data, idl.offset("BondingCurve", "quote_mint")) == DEV
+
+
+def test_the_gate_compares_every_instruction_the_builder_uses_with_the_idl():
+    pump, amm = idl_docs()
+    assert {i["name"] for i in amm["instructions"]} == {"buy_exact_quote_in_v2", "sell_v2"}
+    assert {i["name"] for i in pump["instructions"]} == {"buy_v3", "sell_v3"}
+
+    def broken(doc, ix, how):
+        d = json.loads(json.dumps(doc))
+        i = next(x for x in d["instructions"] if x["name"] == ix)
+        how(i, d)
+        return d
+
+    cases = [
+        (broken(amm, "sell_v2", lambda i, d: i["accounts"].insert(14, {"name": "protocol_fee_recipient"})),
+         "amm sell_v2: the IDL's accounts differ"),
+        (broken(amm, "buy_exact_quote_in_v2", lambda i, d: i["args"].append({"name": "track_volume"})),
+         "amm buy_exact_quote_in_v2: the IDL's arguments"),
+        (broken(amm, "sell_v2", lambda i, d: i.update(discriminator=[0] * 8)), "discriminator"),
+        (broken(amm, "sell_v2", lambda i, d: i.update(name="sell")), "amm sell_v2: not in the IDL"),
+        (broken(amm, "sell_v2", lambda i, d: d["types"].pop()), "no fixed offset"),
+    ]
+    for doc, words in cases:
+        why = " | ".join(X.check_idl(pump, doc))
+        assert words in why, (words, why)
+    order = broken(pump, "buy_v3", lambda i, d: i["accounts"].reverse())
+    assert any("pump buy_v3: the IDL's accounts differ" in w for w in X.check_idl(order, amm))
+    # the pool's virtual_quote_reserves must sit at a fixed offset (an i128 after fixed fields)
+    t = next(x for x in amm["types"] if x["name"] == "Pool")
+    t["type"]["fields"].insert(0, {"name": "label", "type": "string"})
+    assert any("Pool.base_mint" in w for w in X.check_idl(pump, amm))
+
+
+def test_pool_events_carry_the_signed_virtual_quote_reserves():
+    from lab.pumpfun_rt import events as E
+    ev = {"timestamp": 1, "base_amount_out": 5, "quote_amount_in": 7, "pool_base_token_reserves": 10 ** 15,
+          "pool_quote_token_reserves": 80 * SOL, "pool": key(60), "user": key(77), "ix_name": "buy_exact_quote_in_v2",
+          "virtual_quote_reserves": -1_234_567, "creator_fee_unclaimed": 9}
+    for name in ("BuyEvent", "SellEvent"):
+        raw = E.encode(name, ev)
+        got = E.decode(name, raw)
+        assert got["virtual_quote_reserves"] == -1_234_567 and got["creator_fee_unclaimed"] == 9
+        assert E.REQUIRED[name] in got
+        table, row = E.compact(name, got, T0, 1, 1)
+        assert table == "amm" and row["vq"] == -1_234_567 and row["pq"] == 80 * SOL
+        old = E.decode(name, raw[:8 + 8 * 14 + 32 * 2])                # an event from before the appended fields
+        assert "virtual_quote_reserves" not in old and E.compact(name, old, T0, 1, 1)[1]["vq"] is None
+    assert E.decode("BuyEvent", E.encode("BuyEvent", ev))["ix_name"] == "buy_exact_quote_in_v2"
+    # the pool row's quote is the amount before fees, whichever field the buy instruction put it in
+    exact_in = dict(ev, quote_amount_in=10_000_000, user_quote_amount_in=9_896_089)
+    exact_out = dict(ev, ix_name="buy_v2", quote_amount_in=9_896_089, user_quote_amount_in=10_000_000)
+    for e in (exact_in, exact_out):
+        got = E.decode("BuyEvent", E.encode("BuyEvent", e))
+        assert E.compact("BuyEvent", got, T0, 1, 1)[1]["quote"] == 9_896_089
+    eng = sim.Engine([], costs=Fixed())
+    cv = Curve(eng)
+    eng.complete(T0 + 30_000, MINT)
+    eng.migrate(T0 + 31_000, MINT, key(66), 85 * SOL, 206_900_000 * 10 ** 6)
+    sim.feed_row(eng, "amm", {"t": T0 + 40_000, "mint": MINT, "buy": True, "base": 10 ** 9, "quote": SOL // 100,
+                              "pb": 206_900_000 * 10 ** 6, "pq": 67 * SOL, "lpb": 20, "pfb": 5, "cfb": 5, "slot": 2000,
+                              "user": key(77), "vq": -2 * SOL})
+    tok = eng.tokens[MINT]
+    assert tok.pq == 65 * SOL + SOL // 100 and cv is not None
 
 
 def test_pool_trades_wrap_and_unwrap_sol():
     user = key(77)
-    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), DEV, X.TOKEN, key(63))
-    ixs = X.amm_buy(user, p, 1_000, 5_000, 1_000)
+    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[1])
+    ixs = X.amm_buy(user, p, 5_000, 1_000, 1_000)
     progs = [ix.program for ix in ixs]
     assert progs.count(X.PUMP_AMM) == 1 and X.SYSTEM in progs and progs[-1] == X.TOKEN   # unwrapped at the end
+    wrap = next(ix for ix in ixs if ix.program == X.SYSTEM)
+    assert wrap.data == struct.pack("<IQ", 2, 5_000)                  # exactly the stake is wrapped
     msg = X.compile_message(user, ixs, key(5))
     assert msg[0] == 1
 

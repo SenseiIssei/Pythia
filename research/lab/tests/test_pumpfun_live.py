@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from lab.pumpfun_rt import live_service as LS
 from lab.pumpfun_rt import measure as MS
 from lab.pumpfun_rt import pipeline as P
 from lab.pumpfun_rt import sim
+from lab.pumpfun_rt import tokens as T
 from lab.pumpfun_rt import txbuild as X
 from lab.pumpfun_rt import wallet as WT
 from test_pumpfun_pipeline import FakeBuilder, FakeSigner, OpenGate, idl_docs, strat
@@ -155,10 +157,10 @@ def test_nothing_transfers_or_withdraws():
 
 def test_check_own_refuses_anything_but_a_plain_trade():
     user = key(77)
-    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), key(2), X.TOKEN, key(63))
-    X.check_own(user, X.amm_buy(user, p, 1_000, 5_000, 1_000))
+    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0])
+    X.check_own(user, X.amm_buy(user, p, 5_000, 1_000, 1_000))
     X.check_own(user, X.amm_sell(user, p, 1_000, 0, 1_000, True))
-    X.check_own(user, X.round_trip(X.amm_buy(user, p, 1_000, 5_000, 1_000), X.amm_sell(user, p, 1_000, 0, 1, True)))
+    X.check_own(user, X.round_trip(X.amm_buy(user, p, 5_000, 1_000, 1_000), X.amm_sell(user, p, 1_000, 0, 1, True)))
     import struct
     away = X.Ix(X.SYSTEM, [(user, True, True), (key(99), False, True)], struct.pack("<IQ", 2, 10 ** 9))
     with pytest.raises(ValueError, match="system instruction"):
@@ -172,8 +174,183 @@ def test_check_own_refuses_anything_but_a_plain_trade():
         X.check_own(user, [X.Ix(key(42), [], b"")])
     with pytest.raises(ValueError, match="buy or sell"):
         X.check_own(user, [X.Ix(X.PUMP, [], X.discriminator("withdraw"))])
-    rt = X.round_trip(X.amm_buy(user, p, 1, 5, 1), X.amm_sell(user, p, 1, 0, 1, True))
+    rt = X.round_trip(X.amm_buy(user, p, 5, 1, 1), X.amm_sell(user, p, 1, 0, 1, True))
     assert sum(ix.program == X.COMPUTE_BUDGET for ix in rt) == 1
+
+
+def _swap(ixs, program=X.PUMP_AMM):
+    return next(i for i, ix in enumerate(ixs) if ix.program == program)
+
+
+def test_check_own_takes_the_v2_and_v3_trades_only_as_the_wallets_own():
+    user = key(77)
+    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), X.TOKEN_2022, X.BUYBACK_FEE_RECIPIENTS[3])
+    c = X.CurveInfo(MINT, X.TOKEN_2022, X.BUYBACK_FEE_RECIPIENTS[4])
+    for ixs in (X.amm_buy(user, p, 5_000, 1_000, 1), X.amm_sell(user, p, 1_000, 0, 1, True),
+                X.pump_buy(user, c, 1_000, 5_000, 1), X.pump_sell(user, c, 1_000, 0, 1, True)):
+        X.check_own(user, ixs)
+
+    def changed(ixs, name, value, program=X.PUMP_AMM):
+        """A copy of the trade with one named account replaced."""
+        ixs = list(ixs)
+        k = _swap(ixs, program)
+        names = X.AMM_V2 if program == X.PUMP_AMM else X.PUMP_V3
+        accts = list(ixs[k].accounts)
+        i = names.index(name)
+        accts[i] = (value, *accts[i][1:])
+        ixs[k] = X.Ix(program, accts, ixs[k].data)
+        return ixs
+
+    buy = X.amm_buy(user, p, 5_000, 1_000, 1)
+    with pytest.raises(ValueError, match="buyback fee account"):
+        X.check_own(user, changed(buy, "buyback_fee_recipient", key(99)))
+    with pytest.raises(ValueError, match="buyback fee account"):       # the wallet itself, not its token account
+        X.check_own(user, changed(buy, "buyback_fee_recipient", X.BUYBACK_FEE_RECIPIENTS[3]))
+    with pytest.raises(ValueError, match="not the wallet's own"):
+        X.check_own(user, changed(buy, "user_base_token_account", X.ata(key(98), MINT, X.TOKEN_2022)))
+    with pytest.raises(ValueError, match="not the wallet's own"):
+        X.check_own(user, changed(buy, "user", key(98)))
+    sell = X.pump_sell(user, c, 1_000, 0, 1, False)
+    with pytest.raises(ValueError, match="not the wallet's own"):
+        X.check_own(user, changed(sell, "associated_base_user", X.ata(key(98), MINT, X.TOKEN_2022), X.PUMP))
+    with pytest.raises(ValueError, match="buyback fee account"):
+        X.check_own(user, changed(sell, "buyback_fee_recipient", key(99), X.PUMP))
+    # the v1 pool trades and the legacy curve trades are refused, whatever their accounts
+    v1 = list(buy)
+    k = _swap(v1)
+    v1[k] = X.Ix(X.PUMP_AMM, v1[k].accounts, X.discriminator("buy") + v1[k].data[8:])
+    with pytest.raises(ValueError, match="must be v2"):
+        X.check_own(user, v1)
+    legacy = X.pump_buy(user, c, 1, 1, 1)
+    k = _swap(legacy, X.PUMP)
+    legacy[k] = X.Ix(X.PUMP, legacy[k].accounts, X.discriminator("buy") + legacy[k].data[8:])
+    with pytest.raises(ValueError, match="must be v3"):
+        X.check_own(user, legacy)
+    with pytest.raises(ValueError, match="for someone else"):
+        X.check_own(user, [X.create_ata(user, key(98), MINT)])
+
+
+def test_v2_and_v3_instruction_data_and_accounts_follow_the_docs():
+    user = key(77)
+    # PUMP_SWAP_TRADE_V2.md and TRADE_V3.md, the account tables in order
+    assert X.AMM_V2 == ["pool", "user", "global_config", "base_mint", "quote_mint", "user_base_token_account",
+                        "user_quote_token_account", "pool_base_token_account", "pool_quote_token_account",
+                        "base_token_program", "quote_token_program", "system_program", "user_volume_accumulator",
+                        "fee_config", "buyback_fee_recipient", "event_authority", "program"]
+    assert X.PUMP_V3 == ["global", "base_mint", "quote_mint", "base_token_program", "quote_token_program",
+                         "bonding_curve", "associated_base_bonding_curve", "associated_quote_bonding_curve", "user",
+                         "associated_base_user", "associated_quote_user", "user_volume_accumulator", "fee_config",
+                         "buyback_fee_recipient", "system_program", "event_authority", "program"]
+    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), X.TOKEN_2022, X.BUYBACK_FEE_RECIPIENTS[5])
+    buy = X.amm_buy(user, p, 10_000_000, 2_000, 1)
+    ix = buy[_swap(buy)]
+    assert ix.data == bytes([194, 171, 28, 70, 104, 77, 91, 47]) + struct.pack("<QQ", 10_000_000, 2_000)
+    a = dict(zip(X.AMM_V2, [k for k, _, _ in ix.accounts]))
+    assert len(ix.accounts) == 17
+    assert a["global_config"] == "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"        # the docs' addresses
+    assert a["fee_config"] == "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
+    assert a["buyback_fee_recipient"] == X.ata(X.BUYBACK_FEE_RECIPIENTS[5], X.WSOL, X.TOKEN)
+    assert a["user_base_token_account"] == X.ata(user, MINT, X.TOKEN_2022)            # the coin's token program
+    assert a["user_quote_token_account"] == X.ata(user, X.WSOL, X.TOKEN)
+    assert (a["base_token_program"], a["quote_token_program"], a["program"]) == (X.TOKEN_2022, X.TOKEN, X.PUMP_AMM)
+    flags = {n: (s, w) for n, (_, s, w) in zip(X.AMM_V2, ix.accounts)}
+    assert flags["user"] == (True, True) and flags["buyback_fee_recipient"] == (False, True)
+    # the user's accounts exist before the trade: the base account made with the right program, SOL wrapped
+    creates = [x for x in buy if x.program == X.ATA_PROGRAM]
+    assert {x.accounts[1][0] for x in creates} == {X.ata(user, X.WSOL, X.TOKEN), X.ata(user, MINT, X.TOKEN_2022)}
+    assert next(x for x in creates if x.accounts[3][0] == MINT).accounts[5][0] == X.TOKEN_2022
+    order = [x.program for x in buy]
+    assert order.index(X.SYSTEM) < order.index(X.PUMP_AMM) and buy[-1].data == bytes([9])   # wrap first, close last
+    sell = X.amm_sell(user, p, 3_000, 4_000, 1, True)
+    six = sell[_swap(sell)]
+    assert six.data == bytes([93, 246, 130, 60, 231, 233, 64, 178]) + struct.pack("<QQ", 3_000, 4_000)
+    assert [k for k, _, _ in six.accounts] == [k for k, _, _ in ix.accounts]
+    assert sell[-1].accounts[0][0] == X.ata(user, MINT, X.TOKEN_2022)               # the emptied account closed
+    c = X.CurveInfo(MINT, X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[6])
+    cb = X.pump_buy(user, c, 123, 456, 1)
+    cix = cb[_swap(cb, X.PUMP)]
+    assert cix.data == bytes([7, 5, 29, 196, 245, 23, 101, 80]) + struct.pack("<QQ", 123, 456) + b"\x00"
+    a = dict(zip(X.PUMP_V3, [k for k, _, _ in cix.accounts]))
+    assert a["fee_config"] == "8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt"
+    assert a["buyback_fee_recipient"] == X.BUYBACK_FEE_RECIPIENTS[6]                 # a SOL coin pays the wallet
+    assert a["quote_mint"] == X.WSOL and a["associated_quote_user"] == X.ata(user, X.WSOL, X.TOKEN)
+    cs = X.pump_sell(user, c, 123, 7, 1, False)
+    assert cs[_swap(cs, X.PUMP)].data == bytes([28, 146, 222, 119, 38, 196, 105, 213]) + struct.pack("<QQ", 123, 7)
+
+
+def test_cashback_coins_are_refused_and_never_traded_with_the_old_instructions():
+    user = key(77)
+    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0], cashback=True)
+    assert not p.supports_v2()
+    with pytest.raises(ValueError, match="cashback"):
+        X.amm_buy(user, p, 5_000, 1_000, 1)
+    with pytest.raises(ValueError, match="cashback"):
+        X.amm_sell(user, p, 1_000, 0, 1, True)
+    c = X.CurveInfo(MINT, X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0], cashback=True)
+    with pytest.raises(ValueError, match="cashback"):
+        X.pump_buy(user, c, 1, 1, 1)
+    with pytest.raises(ValueError, match="quoted in SOL"):
+        X.amm_buy(user, X.PoolInfo(key(60), MINT, key(9), key(61), key(62), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0]),
+                  5_000, 1_000, 1)
+    rpc = SimRpc(cashback=True)
+    b = LX.Builder(rpc, (None, None))
+    o = P.Order(1, "buy", MINT, "pool", 1_000, 1_300, T0, stake_l=1_000)
+    with pytest.raises(RuntimeError, match="no v2 trade"):
+        b.ixs(user, o, POOL, False)
+    gate = LX.LiveGate(Path("none"), Path("none.json"), env={}, kill=lambda: False, now_ms=lambda: T0,
+                       idl_path=Path("none"))
+    rec = LX.simulate(gate, rpc, user, mint=MINT, pool=POOL, now_ms=T0)
+    assert not rec["ok"] and "no v2 trade" in rec["error"] and not rpc.simulated
+
+
+def test_a_pool_buy_spends_the_stake_and_wants_the_quote_less_the_tolerance():
+    o = P.Order(1, "buy", MINT, "pool", 1_300_000, int(0.13 * SOL), T0, stake_l=int(0.1 * SOL))
+    spend, least = LX.pool_buy_amounts(o)
+    assert spend == int(0.1 * SOL) and least == int(1_300_000 / (1 + C.SLIP_TOL))
+    old = P.Order(1, "buy", MINT, "pool", 1_300_000, int(0.13 * SOL), T0)              # without the stake
+    assert LX.pool_buy_amounts(old)[0] == int(0.13 * SOL / (1 + C.SLIP_TOL))
+
+
+def test_the_pool_account_gives_its_signed_virtual_quote_reserves_and_flags():
+    pool = bytearray(300)
+    for off, k in ((43, MINT), (75, X.WSOL), (139, key(61)), (171, key(62))):
+        pool[off:off + 32] = X.key(k)
+    pool[245:261] = (-1_234_567).to_bytes(16, "little", signed=True)
+    cfg = bytearray(1000)
+    cfg[643 + 32:643 + 64] = X.key(X.BUYBACK_FEE_RECIPIENTS[7])                     # one listed, the rest unknown
+    info = X.pool_info(POOL, bytes(pool), bytes(cfg), X.TOKEN)
+    assert info.virtual_quote == -1_234_567 and not info.cashback and info.supports_v2()
+    assert info.buyback_recipient == X.BUYBACK_FEE_RECIPIENTS[7]
+    assert info.effective_quote(80 * SOL) == 80 * SOL - 1_234_567
+    pool[244] = 1
+    assert X.pool_info(POOL, bytes(pool), bytes(cfg), X.TOKEN).cashback
+    short = X.pool_info(POOL, bytes(pool[:243]), bytes(cfg), X.TOKEN)              # written before the fields
+    assert short.virtual_quote == 0 and not short.cashback
+    with pytest.raises(ValueError, match="buyback"):
+        X.pool_info(POOL, bytes(pool), bytes(1000), X.TOKEN)
+    glob = bytearray(1100)
+    glob[741:741 + 32] = X.key(X.BUYBACK_FEE_RECIPIENTS[2])
+    curve = bytearray(200)
+    curve[83:115] = X.key(X.SYSTEM)                                                  # a SOL coin: the default key
+    ci = X.curve_info(MINT, X.TOKEN_2022, bytes(glob), bytes(curve))
+    assert (ci.quote_mint, ci.buyback_recipient, ci.token_program, ci.cashback) == \
+        (X.WSOL, X.BUYBACK_FEE_RECIPIENTS[2], X.TOKEN_2022, False)
+
+
+def test_effective_quote_reserves_price_every_pool_quote():
+    base, vault = 200_000_000 * 10 ** 6, 80 * SOL
+    assert C.effective_quote(vault, -2 * SOL) == 78 * SOL and C.effective_quote(vault, None) == vault
+    assert C.effective_quote(SOL, -2 * SOL) == 0                                     # never below zero
+    raw = C.pool_buy(SOL, base, vault, 30)
+    eff = C.pool_buy(SOL, base, C.effective_quote(vault, -2 * SOL), 30)
+    assert eff > raw                       # fees waiting in the vault are not liquidity: less quote, more tokens
+    assert C.pool_sell(10 ** 12, base, C.effective_quote(vault, -2 * SOL), 30) < C.pool_sell(10 ** 12, base, vault, 30)
+    tok = T.Token(MINT, key(3), T0, 1, 30 * SOL, 10 ** 15, 8 * 10 ** 14, {})
+    tok.amm(True, 10 ** 9, SOL // 100, base, vault, 20, 5, 5, slot=1, vq=-2 * SOL)
+    assert tok.pq == 78 * SOL + SOL // 100 and tok.pb == base - 10 ** 9
+    tok.amm(False, 10 ** 9, SOL // 100, base, vault, 20, 5, 5, slot=2)                # an old row: no vq
+    assert tok.pq == vault - SOL // 100
+    assert C.price(tok.pq, tok.pb) == pytest.approx((tok.pq / SOL) / (tok.pb / 10 ** 6))
 
 
 # ---------------------------------------------------------------- the test-mode confirmation
@@ -224,7 +401,7 @@ def make_gate(tmp_path, ack=None, sim_rec="ok", env=None, kill=False) -> LX.Live
     WT.address_path(wallet).write_text(FakeSigner.pubkey)
     simf = tmp_path / "simulate.json"
     if sim_rec == "ok":
-        simf.write_text(json.dumps({"t": T0 - 3_600_000, "ok": True, "pubkey": FakeSigner.pubkey}))
+        simf.write_text(json.dumps({"t": T0 - 3_600_000, "ok": True, "pubkey": FakeSigner.pubkey, "venue": "pool"}))
     elif sim_rec is not None:
         simf.write_text(json.dumps(sim_rec))
     e = {"PYTHIA_PUMPFUN_LIVE": "1", "PYTHIA_PUMPFUN_KEYPAIR": str(wallet),
@@ -241,6 +418,8 @@ def test_the_test_gate_skips_readiness_but_needs_a_fresh_simulation_for_this_wal
                       ({"sim_rec": {"t": T0 - 25 * 3_600_000, "ok": True, "pubkey": FakeSigner.pubkey}}, "25 h old"),
                       ({"sim_rec": {"t": T0, "ok": False, "pubkey": FakeSigner.pubkey}}, "simulation failed"),
                       ({"sim_rec": {"t": T0, "ok": True, "pubkey": key(9)}}, "another wallet"),
+                      ({"sim_rec": {"t": T0, "ok": True, "pubkey": FakeSigner.pubkey, "venue": "curve"}},
+                       "simulation was on the curve"),
                       ({"env": {"PYTHIA_PUMPFUN_LIVE": "0"}}, "is not 1"), ({"kill": True}, "kill switch")):
         d = tmp_path / str(abs(hash(str(kw))))
         d.mkdir()
@@ -414,14 +593,21 @@ def test_leftovers_from_before_a_restart_are_sold(tmp_path):
 # ---------------------------------------------------------------- the simulation (mocked RPC, nothing sent)
 
 class SimRpc:
-    def __init__(self, err=None):
+    """Every account read gets the same bytes: a pool (and GlobalConfig's buyback list) at their offsets."""
+
+    def __init__(self, err=None, cashback=False, vq=0):
         self.err = err
         self.simulated = []
+        self.cashback, self.vq = cashback, vq
 
     def account(self, pubkey):
-        data = bytearray(400)
-        for off, k in ((43, MINT), (75, X.WSOL), (139, key(61)), (171, key(62)), (211, key(2)), (57, key(63))):
+        data = bytearray(1000)
+        for off, k in ((43, MINT), (75, X.WSOL), (139, key(61)), (171, key(62))):
             data[off:off + 32] = X.key(k)
+        data[244] = int(self.cashback)
+        data[245:261] = self.vq.to_bytes(16, "little", signed=True)
+        for i, r in enumerate(X.BUYBACK_FEE_RECIPIENTS):
+            data[643 + 32 * i:675 + 32 * i] = X.key(r)
         return bytes(data), X.TOKEN
 
     def token_balance(self, acct):
@@ -444,9 +630,15 @@ def test_simulate_builds_a_buy_and_a_round_trip_and_records_the_result(tmp_path,
     pools.write_text(json.dumps({POOL: [MINT, T0 - 60_000], key(66): [key(67), T0 - 600_000]}))
     gate = LX.LiveGate(tmp_path / "none", tmp_path / "none.json", env={}, kill=lambda: False, now_ms=lambda: T0,
                        idl_path=tmp_path)
-    rpc = SimRpc()
+    rpc = SimRpc(vq=-SOL)
     rec = LX.simulate(gate, rpc, FakeSigner.pubkey, sol=0.5, now_ms=T0, pools_file=pools)
     assert rec["ok"] and rec["venue"] == "pool" and rec["pool"] == POOL and rec["mint"] == MINT
+    assert rec["reserves"] == {"base": 200_000_000 * 10 ** 6, "quote_vault": 80 * SOL, "virtual_quote": -SOL,
+                               "effective": 79 * SOL}                               # priced on the effective reserves
+    assert X.discriminator("buy_exact_quote_in_v2") in rpc.simulated[0]
+    assert X.discriminator("sell_v2") in rpc.simulated[1] and X.discriminator("buy") not in rpc.simulated[1]
+    assert LX.simulate_problems(rec, FakeSigner.pubkey, T0, "P_pool60") == []
+    assert "on the pool" in LX.simulate_problems(rec, FakeSigner.pubkey, T0, "P_p90")[0]   # a curve strategy
     assert rec["sol"] == LX.TEST_MAX_TRADE_SOL and len(rpc.simulated) == 2       # capped; buy, then the round trip
     assert all(tx[1:65] == bytes(64) for tx in rpc.simulated)                  # unsigned
     assert json.loads(LX.simulate_path().read_text())["ok"] is True
