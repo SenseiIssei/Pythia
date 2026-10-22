@@ -305,6 +305,77 @@ export function exitWords(why: string | null | undefined): string {
   return why ? EXIT[why] ?? why : "";
 }
 
+export interface TradeStats {
+  n: number;
+  wins: number;
+  /** Share of trades that made money, 0 to 1; null without trades. */
+  winRate: number | null;
+  stakeSol: number;
+  proceedsSol: number;
+  pnlSol: number;
+  /** Mean return per trade (0.1 = +10 %); null without returns. */
+  avgRet: number | null;
+  best: PumpfunTrade | null;
+  worst: PumpfunTrade | null;
+  avgHoldS: number | null;
+  /** Running P&L after each trade, oldest first, starting at 0. */
+  curve: number[];
+}
+
+/** What the closed trades add up to. The trades come newest first, as the service writes them. */
+export function tradeStats(trades: readonly PumpfunTrade[]): TradeStats {
+  const oldest = [...trades].sort((a, b) => (a.exitMs ?? 0) - (b.exitMs ?? 0));
+  const curve = [0];
+  let pnl = 0;
+  let stake = 0;
+  let proceeds = 0;
+  let wins = 0;
+  let best: PumpfunTrade | null = null;
+  let worst: PumpfunTrade | null = null;
+  const rets: number[] = [];
+  const holds: number[] = [];
+  for (const t of oldest) {
+    const p = t.pnlSol ?? 0;
+    pnl += p;
+    curve.push(pnl);
+    stake += t.stakeSol ?? 0;
+    proceeds += t.proceedsSol ?? 0;
+    if (p > 0) wins += 1;
+    if (best == null || p > (best.pnlSol ?? 0)) best = t;
+    if (worst == null || p < (worst.pnlSol ?? 0)) worst = t;
+    if (t.ret != null && Number.isFinite(t.ret)) rets.push(t.ret);
+    if (t.holdS != null && Number.isFinite(t.holdS)) holds.push(t.holdS);
+  }
+  const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  return {
+    n: oldest.length,
+    wins,
+    winRate: oldest.length ? wins / oldest.length : null,
+    stakeSol: stake,
+    proceedsSol: proceeds,
+    pnlSol: pnl,
+    avgRet: mean(rets),
+    best,
+    worst,
+    avgHoldS: mean(holds),
+    curve,
+  };
+}
+
+/** A holding time in words: "45 s", "12 min", "3 h 05 min". */
+export function holdWords(s: number | null | undefined): string {
+  if (s == null || !Number.isFinite(s) || s < 0) return "n/a";
+  if (s < 60) return `${Math.round(s)} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`;
+}
+
+/** The token's page on Solscan, a public block explorer. */
+export function solscanToken(mint: string): string {
+  return `https://solscan.io/token/${encodeURIComponent(mint)}`;
+}
+
 /** A mint or address shortened for a row: first and last four characters. */
 export function short(a: string | null | undefined): string {
   if (!a) return "";

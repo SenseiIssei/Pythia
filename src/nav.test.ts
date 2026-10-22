@@ -3,7 +3,7 @@ import { NAV, activeTab, isVisible, navFor, resolvePage, tabsFor } from "./nav";
 
 describe("navFor", () => {
   it("keeps simple mode to the beginner destinations", () => {
-    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "activity", "notifications", "predictions", "wallets", "cards", "settings", "about"]);
+    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "activity", "notifications", "predictions", "wallets", "pumpfun", "cards", "settings", "about"]);
   });
 
   it("shows everything in advanced mode", () => {

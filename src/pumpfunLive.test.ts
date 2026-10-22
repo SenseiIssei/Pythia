@@ -1,5 +1,62 @@
 import { describe, expect, it } from "vitest";
-import { ceilings, exitWords, limitInput, parseLimits, short, sol, stateLine, type PumpfunHard, type PumpfunView } from "./pumpfunLive";
+import {
+  ceilings,
+  exitWords,
+  holdWords,
+  limitInput,
+  parseLimits,
+  short,
+  sol,
+  solscanToken,
+  stateLine,
+  tradeStats,
+  type PumpfunHard,
+  type PumpfunTrade,
+  type PumpfunView,
+} from "./pumpfunLive";
+
+function trade(over: Partial<PumpfunTrade>): PumpfunTrade {
+  return {
+    mode: "test", rule: "P_pool60", mint: "MINT", name: null, symbol: "AAA", signalMs: null, landMs: null, exitMs: 0, exitWhy: "trail",
+    stakeSol: 0.01, proceedsSol: 0.01, pnlSol: 0, ret: 0, holdS: 60, latBuyMs: null, slip: null, ...over,
+  };
+}
+
+describe("tradeStats", () => {
+  it("adds the trades up oldest first, whatever order they come in", () => {
+    const s = tradeStats([
+      trade({ exitMs: 3, pnlSol: -0.004, proceedsSol: 0.006, ret: -0.4, holdS: 300 }),
+      trade({ exitMs: 1, pnlSol: 0.01, proceedsSol: 0.02, ret: 1, holdS: 60, symbol: "WIN" }),
+      trade({ exitMs: 2, pnlSol: -0.002, proceedsSol: 0.008, ret: -0.2, holdS: 120, symbol: "LOSS" }),
+    ]);
+    expect(s.n).toBe(3);
+    expect(s.wins).toBe(1);
+    expect(s.winRate).toBeCloseTo(1 / 3);
+    expect(s.curve.map((x) => Number(x.toFixed(3)))).toEqual([0, 0.01, 0.008, 0.004]);
+    expect(s.pnlSol).toBeCloseTo(0.004);
+    expect(s.stakeSol).toBeCloseTo(0.03);
+    expect(s.proceedsSol).toBeCloseTo(0.034);
+    expect(s.avgRet).toBeCloseTo(0.4 / 3);
+    expect(s.best?.symbol).toBe("WIN");
+    expect(s.worst?.exitMs).toBe(3);
+    expect(s.avgHoldS).toBeCloseTo(160);
+  });
+
+  it("is empty without trades", () => {
+    const s = tradeStats([]);
+    expect(s).toMatchObject({ n: 0, wins: 0, winRate: null, avgRet: null, best: null, worst: null, avgHoldS: null, curve: [0] });
+  });
+});
+
+describe("holdWords and solscanToken", () => {
+  it("read like a person would say them", () => {
+    expect(holdWords(42)).toBe("42 s");
+    expect(holdWords(720)).toBe("12 min");
+    expect(holdWords(3 * 3600 + 5 * 60)).toBe("3 h 05 min");
+    expect(holdWords(null)).toBe("n/a");
+    expect(solscanToken("88cjts6PyeAmnVmngQGaW23UDyTQUKKqjtNnynQMpump")).toBe("https://solscan.io/token/88cjts6PyeAmnVmngQGaW23UDyTQUKKqjtNnynQMpump");
+  });
+});
 
 const HARD: PumpfunHard = { testMaxTotalSol: 2, testMaxDailyLossSol: 0.5, testMaxTradeSol: 0.05, fullMaxDailyLossSol: 1, fullMaxTradeSol: 0.1, maxOpen: 5 };
 const ACK = { mode: "test" as const, strategy: "auto", maxTotalSol: 1, maxDailyLossSol: 0.3, maxTradeSol: 0.02 };

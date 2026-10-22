@@ -80,6 +80,8 @@ export const NAV: NavItem[] = [
   { id: "notifications", label: "Notifications", icon: Bell, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },
   { id: "wallets", label: "Money", icon: Coins, section: "Overview" },
+  // The owner's real-money pump.fun bot: balance, P&L, every trade, limits, kill switch (docs/PUMPFUN-LIVE.md).
+  { id: "pumpfun", label: "pump.fun live", icon: QrCode, section: "Overview" },
   // Pokemon cards: prices and forecasts, paper only. Plain enough for simple mode.
   { id: "cards", label: "Cards", icon: Layers, section: "Overview" },
 
@@ -99,8 +101,6 @@ export const NAV: NavItem[] = [
   { id: "models", label: "Models", icon: Gauge, section: "AI", advanced: true },
   { id: "lab", label: "Lab", icon: Microscope, section: "AI", advanced: true },
   { id: "live", label: "Live", icon: Radio, section: "Control", advanced: true },
-  // The owner's real-money pump.fun test: funding address, balance, limits, kill switch (docs/PUMPFUN-LIVE.md).
-  { id: "pumpfun", label: "pump.fun wallet", icon: QrCode, section: "Control", advanced: true },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control", advanced: true },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control", advanced: true },
 

@@ -6,8 +6,8 @@
 // the owner withdraws with his own wallet and his backup.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Copy, OctagonX, QrCode, RefreshCw, Save } from "lucide-react";
-import { Badge, Button, Field, List, ListRow, Notice, Page, inputCls } from "../design";
+import { Check, Copy, ExternalLink, OctagonX, QrCode, RefreshCw, Save } from "lucide-react";
+import { AreaChart, Badge, Button, Field, List, ListRow, Notice, Page, inputCls } from "../design";
 import { ConfirmAction, KeyStats, LoadingRows, More, Nothing, Row, Section, plural } from "../pagekit";
 import { encodeQr, qrPath } from "../qr";
 import {
@@ -15,6 +15,7 @@ import {
   canControl,
   ceilings,
   exitWords,
+  holdWords,
   limitInput,
   parseLimits,
   pumpfunKill,
@@ -22,10 +23,13 @@ import {
   savePumpfunLimits,
   short,
   sol,
+  solscanToken,
   stateLine,
   tone,
+  tradeStats,
   type LimitInput,
   type LimitKey,
+  type PumpfunTrade,
   type PumpfunView,
 } from "../pumpfunLive";
 
@@ -152,6 +156,100 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
   );
 }
 
+const pctText = (r: number | null | undefined) => (r == null || !Number.isFinite(r) ? "n/a" : `${r > 0 ? "+" : ""}${(r * 100).toFixed(1)} %`);
+const tradeName = (t: PumpfunTrade) => t.symbol || t.name || short(t.mint);
+
+/** How the bot did over the closed trades the service keeps: the running P&L and what it adds up to. */
+function Performance({ trades }: { trades: PumpfunTrade[] }) {
+  const s = useMemo(() => tradeStats(trades), [trades]);
+  const [at, setAt] = useState<number | null>(null);
+  const oldest = useMemo(() => [...trades].sort((a, b) => (a.exitMs ?? 0) - (b.exitMs ?? 0)), [trades]);
+  const shown = at == null ? s.pnlSol : s.curve[at];
+  return (
+    <Section title="Performance" hint="Every closed trade added up in order, fees included. The line is the running profit or loss in SOL.">
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <div className={`tabular text-2xl font-semibold ${tone(shown) === "up" ? "text-up" : tone(shown) === "down" ? "text-down" : "text-ink"}`}>{sol(shown, true)}</div>
+        <div className="text-[13px] text-muted">{at == null || at === 0 ? `${plural(s.n, "trade")}` : `after trade ${at}: ${tradeName(oldest[at - 1])}`}</div>
+      </div>
+      <AreaChart
+        data={s.curve}
+        height={170}
+        baseline={0}
+        label={`Running profit or loss over ${s.n} trades, now ${sol(s.pnlSol, true)}`}
+        onScrub={(x) => setAt(x ? x.index : null)}
+        empty="The line starts with the first closed trade."
+      />
+      {s.n > 0 && (
+        <div className="mt-3 divide-y divide-line">
+          <Row label="Trades" value={String(s.n)} valueSub={`${s.wins} won, ${s.n - s.wins} lost`} help="Closed trades the live service keeps for the app (its newest ones)." />
+          <Row label="Won" value={s.winRate == null ? "n/a" : `${Math.round(s.winRate * 100)} %`} help="Share of trades that ended with more SOL than they cost." />
+          <Row label="Average per trade" value={pctText(s.avgRet)} tone={tone(s.avgRet)} help="The mean return of a trade on its stake, after fees." />
+          <Row label="Staked, got back" value={sol(s.proceedsSol, false, 4)} valueSub={`of ${sol(s.stakeSol, false, 4)}`} help="SOL put into these trades and SOL that came back out of them." />
+          {s.best && <Row label="Best trade" value={sol(s.best.pnlSol, true)} tone="up" sub={`${tradeName(s.best)} · ${pctText(s.best.ret)}`} />}
+          {s.worst && <Row label="Worst trade" value={sol(s.worst.pnlSol, true)} tone="down" sub={`${tradeName(s.worst)} · ${pctText(s.worst.ret)}`} />}
+          <Row label="Average holding time" value={holdWords(s.avgHoldS)} help="From the buy landing to the sale." />
+        </div>
+      )}
+    </Section>
+  );
+}
+
+type TradeFilter = "all" | "won" | "lost";
+
+/** Every closed trade the service keeps, newest first, with what it cost, what came back and a link to the token. */
+function TradeList({ trades }: { trades: PumpfunTrade[] }) {
+  const [filter, setFilter] = useState<TradeFilter>("all");
+  const rows = trades.filter((t) => filter === "all" || (filter === "won" ? (t.pnlSol ?? 0) > 0 : (t.pnlSol ?? 0) <= 0));
+  return (
+    <Section title="Live trades" hint="Every closed trade of the bot, newest first. Each one also went to Telegram.">
+      {trades.length > 0 ? (
+        <>
+          <div className="mb-3 flex gap-2" role="group" aria-label="Show trades">
+            {(["all", "won", "lost"] as TradeFilter[]).map((f) => (
+              <Button key={f} size="sm" variant={filter === f ? "primary" : "secondary"} onClick={() => setFilter(f)} aria-pressed={filter === f}>
+                {f === "all" ? `All ${trades.length}` : f === "won" ? "Won" : "Lost"}
+              </Button>
+            ))}
+          </div>
+          <List>
+            {rows.map((t, i) => (
+              <ListRow
+                key={`${t.exitMs}-${t.mint}-${i}`}
+                title={
+                  <span className="flex items-center gap-2">
+                    {tradeName(t)}
+                    {t.mode === "test" && <Badge tone="warn">test</Badge>}
+                    {t.mint && (
+                      <a href={solscanToken(t.mint)} target="_blank" rel="noreferrer noopener" className="fl-focus text-muted hover:text-ink" aria-label={`${tradeName(t)} on Solscan`}>
+                        <ExternalLink size={14} />
+                      </a>
+                    )}
+                  </span>
+                }
+                subtitle={[
+                  t.exitMs ? new Date(t.exitMs).toLocaleString() : null,
+                  `${sol(t.stakeSol, false, 4)} in, ${sol(t.proceedsSol, false, 4)} out`,
+                  `held ${holdWords(t.holdS)}`,
+                  exitWords(t.exitWhy) || null,
+                  t.rule,
+                  t.latBuyMs != null ? `landed ${Math.round(t.latBuyMs)} ms` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+                right={<span className={tone(t.pnlSol) === "up" ? "text-up" : tone(t.pnlSol) === "down" ? "text-down" : "text-ink"}>{sol(t.pnlSol, true)}</span>}
+                rightSub={t.ret == null ? undefined : pctText(t.ret)}
+              />
+            ))}
+          </List>
+          {rows.length === 0 && <p className="text-sm text-muted">No {filter} trade yet.</p>}
+        </>
+      ) : (
+        <p className="text-sm text-muted">No live trade yet.</p>
+      )}
+    </Section>
+  );
+}
+
 export function PumpfunWallet() {
   const [v, setV] = useState<PumpfunView | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -184,7 +282,7 @@ export function PumpfunWallet() {
   const st = v ? stateLine(v) : null;
   return (
     <Page
-      title="pump.fun wallet"
+      title="pump.fun live"
       subtitle="Real money, traded by the live service on the server under the limits you set. Paper results so far are negative; size everything as a total loss."
       right={<Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => void load()}>Refresh</Button>}
     >
@@ -210,6 +308,8 @@ export function PumpfunWallet() {
               { label: "Since the first live trade", value: sol(s?.pnlTotalSol ?? 0, true), tone: tone(s?.pnlTotalSol), sub: s ? plural(s.tradesTotal, "trade") : undefined, help: "Everything the bot has won or lost since its first live trade. The total budget stop counts this." },
             ]}
           />
+
+          <Performance trades={v.trades} />
 
           <Section title="Fund the wallet" hint="Send SOL from your own wallet or exchange to this address. That is the only way money gets in.">
             {v.address ? (
@@ -294,28 +394,7 @@ export function PumpfunWallet() {
             )}
           </Section>
 
-          <Section title="Live trades" hint="Every closed trade of the bot, newest first. Each one also went to Telegram.">
-            {v.trades.length > 0 ? (
-              <List>
-                {v.trades.slice(0, 50).map((t, i) => (
-                  <ListRow
-                    key={`${t.exitMs}-${t.mint}-${i}`}
-                    title={
-                      <span className="flex items-center gap-2">
-                        {t.symbol || t.name || short(t.mint)}
-                        {t.mode === "test" && <Badge tone="warn">test</Badge>}
-                      </span>
-                    }
-                    subtitle={`${t.rule ?? "?"} · ${exitWords(t.exitWhy)}${t.exitMs ? ` · ${new Date(t.exitMs).toLocaleString()}` : ""}${t.latBuyMs != null ? ` · landed ${Math.round(t.latBuyMs)} ms` : ""}`}
-                    right={<span className={tone(t.pnlSol) === "up" ? "text-up" : tone(t.pnlSol) === "down" ? "text-down" : "text-ink"}>{sol(t.pnlSol, true)}</span>}
-                    rightSub={t.ret == null ? undefined : `${(t.ret * 100).toFixed(1)} %`}
-                  />
-                ))}
-              </List>
-            ) : (
-              <p className="text-sm text-muted">No live trade yet.</p>
-            )}
-          </Section>
+          <TradeList trades={v.trades} />
 
           <More title="How this works">
             <div className="space-y-2 text-sm leading-relaxed text-muted">
