@@ -13,9 +13,12 @@ stake_sol as what the buys took, proceeds_sol as what the sales gave back, ret),
 the difference to what was booked goes back into the day's and the total's P&L, so
 the daily loss stop and the total budget stop count what was really lost.
 
-Read only: nothing here signs or sends anything. The fills come from orders.jsonl
-(the executor's "filled" lines, with their signatures); chain.json keeps every
-transaction's delta and every row already checked, so each signature is read once.
+Read only: nothing here signs or sends anything. The transactions come from
+orders.jsonl: the executor's "filled" lines and every "failed" line that carries a
+signature (a sale the node refused can still land on chain and pay its fee; CCC,
+2026-10-22, paid ten). A signature the node still does not know after ten minutes
+never landed and counts 0. chain.json keeps every transaction's delta and every row
+already checked, so each signature is read once.
 """
 
 from __future__ import annotations
@@ -23,11 +26,13 @@ from __future__ import annotations
 import csv
 import json
 import threading
+import time
 from pathlib import Path
 
 LAMPORTS = 1_000_000_000
 LEDGER_LOCK = threading.Lock()          # write_close and the rewrite here never overlap
-EARLY_MS, LATE_MS = 60_000, 180_000     # a row's fills lie between its signal and its exit
+EARLY_MS, LATE_MS = 60_000, 1_800_000   # a row's transactions: from its signal to half an hour after its exit
+GONE_MS = 600_000                       # a signature the node does not know after ten minutes never landed
 
 
 def wallet_delta(rpc, sig: str, wallet: str) -> int | None:
@@ -61,12 +66,13 @@ def _fills(orders_path: Path) -> list[dict]:
             o = json.loads(line)
         except ValueError:
             continue
-        if o.get("what") == "filled" and o.get("sig") and o.get("mint"):
+        # Fills, and failures that carry a signature: a failed sale can still land and pay its fee.
+        if o.get("what") in ("filled", "failed") and o.get("sig") and o.get("mint"):
             out.append(o)
     return out
 
 
-def reconcile(rpc, wallet: str, d: Path) -> tuple[int, bool]:
+def reconcile(rpc, wallet: str, d: Path, now_ms: int | None = None) -> tuple[int, bool]:
     """Check every ledger row not yet checked against the chain and rewrite the ledger with what
     the wallet really saw. Returns (the correction to book in lamports, chain minus booked, over
     the rows checked now; whether the ledger changed)."""
@@ -85,6 +91,7 @@ def reconcile(rpc, wallet: str, d: Path) -> tuple[int, bool]:
         except OSError:
             return 0, False
     fills = _fills(orders)
+    now = now_ms if now_ms is not None else time.time() * 1000
     adjust, updates = 0, {}
     for row in rows:
         key = row_key(row)
@@ -92,12 +99,18 @@ def reconcile(rpc, wallet: str, d: Path) -> tuple[int, bool]:
             continue
         lo = float(row.get("signal_ms") or row.get("land_ms") or 0) - EARLY_MS
         hi = float(row.get("exit_ms") or 0) + LATE_MS
-        mine = [f for f in fills if f["mint"] == row.get("mint") and lo <= float(f.get("t") or 0) <= hi]
-        if not any(f.get("side") == "buy" for f in mine) or not any(f.get("side") == "sell" for f in mine):
+        seen, mine = set(), []
+        for f in fills:                                   # each signature once (sent, then filled or failed)
+            if f["mint"] == row.get("mint") and lo <= float(f.get("t") or 0) <= hi and f["sig"] not in seen:
+                seen.add(f["sig"])
+                mine.append(f)
+        if not any(f.get("side") == "buy" and f.get("what") == "filled" for f in mine)                 or not any(f.get("side") == "sell" and f.get("what") == "filled" for f in mine):
             continue
         for f in mine:
             if f["sig"] not in deltas:
                 v = wallet_delta(rpc, f["sig"], wallet)
+                if v is None and now - float(f.get("t") or 0) > GONE_MS:
+                    v = 0                                 # never landed: it cost nothing
                 if v is not None:
                     deltas[f["sig"]] = v
         if any(f["sig"] not in deltas for f in mine):

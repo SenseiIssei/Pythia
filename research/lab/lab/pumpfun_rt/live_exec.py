@@ -95,6 +95,7 @@ ENV_LIVE = "PYTHIA_PUMPFUN_LIVE"
 ENV_KEYPAIR = "PYTHIA_PUMPFUN_KEYPAIR"
 ENV_RPC = "PYTHIA_PUMPFUN_RPC"
 CHAIN_EVERY_S = 60.0                     # how often closed trades are checked against the chain
+FAIL_CARD_EVERY_S = 60.0                 # at most one failure card a minute per position
 ENV_IDL = "PYTHIA_PUMPFUN_IDL_DIR"
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 REPORT_MAX_AGE_MS = 36 * 3_600_000
@@ -754,6 +755,9 @@ class LiveExecutor:
         self.closed_why: str | None = None
         self.last_check = -1e18
         self.on_chain = None                          # () after the ledger was corrected from the chain
+        self.sell_sigs: dict[int, list[str]] = {}     # pid -> signatures of its sales that were sent
+        self.verifying: dict[int, tuple] = {}         # pid -> (pend, why, fee) while its holding is read
+        self.verify_sales = start                     # a failed sale reads the wallet's holding first
         self.worker = None
         if start:
             self.worker = threading.Thread(target=self._work, name="pumpfun-live", daemon=True)
@@ -905,7 +909,14 @@ class LiveExecutor:
                 _, o, pool, close = item
                 msg = self.builder.build(self.signer.pubkey, o, pool, close)
                 tx = X.transaction(msg, [self.signer.sign(msg)])
-                sig = self.builder.rpc.send(tx)
+                # The signature is the transaction's id, known before it is sent: an error from the
+                # node does not prove it never landed, so the failure keeps it (chain_pnl reads it).
+                local_sig = X.b58(tx[1:65])
+                try:
+                    sig = self.builder.rpc.send(tx)
+                except Exception as e:
+                    self.results.put(("error", o.pid, f"{type(e).__name__}: {e}"[:200], local_sig))
+                    return
                 self.results.put(("sent", o.pid, sig))
             elif kind == "status":
                 _, pid, sig = item
@@ -914,8 +925,14 @@ class LiveExecutor:
             elif kind == "fee":
                 _, pid, sig = item
                 self.results.put(("fee", pid, sig, self.builder.rpc.fee_of(sig)))
+            elif kind == "holds":
+                _, pid, mint = item
+                self.results.put(("holds", pid, self.builder.rpc.holdings(self.signer.pubkey).get(mint, 0)))
         except Exception as e:                               # every failure goes back to the book
             if kind == "fee":
+                return
+            if kind == "holds":                              # not readable: the sale counts as failed
+                self.results.put(("holds", item[1], None))
                 return
             self.results.put(("error", item[1].pid if kind == "send" else item[1], f"{type(e).__name__}: {e}"[:200]))
 
@@ -943,6 +960,9 @@ class LiveExecutor:
                 if self.on_chain is not None:
                     self.on_chain()
                 continue
+            if kind == "holds":
+                self._holds(pid, r[2], now)
+                continue
             if kind == "fee":
                 if r[3] is not None:
                     write_measure({"t": self.clock(), "what": "fee", "mode": self.mode, "sig": r[2], "fee_l": r[3]})
@@ -952,8 +972,12 @@ class LiveExecutor:
                 continue
             if kind == "sent":
                 pend["sig"] = r[2]
+                if pend["side"] == "sell":
+                    self.sell_sigs.setdefault(pid, []).append(r[2])
                 log_order(pend, "sent", mode=self.mode)
             elif kind == "error":
+                if len(r) > 3 and r[3] and not pend.get("sig"):
+                    pend["sig"] = r[3]
                 self._failed(pid, pend, now, r[2], 0)
             elif kind == "status":
                 st = r[3]
@@ -976,6 +1000,43 @@ class LiveExecutor:
         log_order(pend, "failed", why=why, mode=self.mode)
         write_measure({"t": self.clock(), "what": "failed", "mode": self.mode, "side": pend["side"],
                        "venue": pend["order"].venue, "why": why, "fee_l": fee})
+        if pend["side"] == "sell" and self.verify_sales:
+            # An earlier sale may have landed while the stream missed its fill (CCC, 2026-10-22: sold
+            # on chain, then retried every second against an empty account). Read the holding first.
+            self.verifying[pid] = (pend, why, fee)
+            self.q.put(("holds", pid, pend["order"].mint))
+            return
+        self._settle_failure(pid, pend, now, why, fee)
+
+    def _holds(self, pid: int, amount: int | None, now: float) -> None:
+        """The wallet's holding of a token whose sale just failed: none left means an earlier sale
+        landed unseen, and the position is closed with it; else the failure stands."""
+        v = self.verifying.pop(pid, None)
+        if v is None:
+            return
+        pend, why, fee = v
+        sigs = self.sell_sigs.get(pid) or []
+        if amount == 0 and (sigs or pend.get("leftover")):
+            o = pend["order"]
+            if pend.get("leftover"):
+                self.leftovers.pop(pid, None)
+                log_order({**pend, "sig": sigs[-1] if sigs else None}, "gone", mode=self.mode,
+                          why="sold before, seen on chain")
+                print(f"live: leftover {o.mint} is already sold on chain; dropped", flush=True)
+                return
+            p = self.pipe.pos.get(pid) or {}
+            left = int(p.get("left") or o.tokens)
+            got = int(pend.get("expect_l") or 0)
+            log_order({**pend, "sig": sigs[-1]}, "filled", sol=got, tokens=left, mode=self.mode, onchain=True)
+            print(f"live: {o.mint} was sold on chain ({sigs[-1][:12]}...) though the stream missed it; closed",
+                  flush=True)
+            self.pipe.sold(pid, now, left, got, 0)                  # chain_pnl books what really came back
+            if pid not in self.pipe.pos:
+                self.exposure.pop(pid, None)
+            return
+        self._settle_failure(pid, pend, now, why, fee)
+
+    def _settle_failure(self, pid: int, pend: dict, now: float, why: str, fee: int) -> None:
         if pend.get("leftover"):
             self.booked(-fee)
             lo = self.leftovers.get(pid) or {}
@@ -1181,6 +1242,7 @@ class LiveBook:
         self.recent: list[dict] = read_ledger(100)
         self.card_day = None
         self.day_stats = {"n": 0, "wins": 0, "pnl_sol": 0.0, "failed": 0}
+        self.fail_posted: dict[tuple, float] = {}
         self.last_limits = -1e18
         executor.on_stop = self.on_stop
         executor.on_leftover = self.on_leftover
@@ -1211,6 +1273,11 @@ class LiveBook:
             return                                         # a refusal by the caps is not a trade
         if kind in ("buy_failed", "sell_failed"):
             self.day_stats["failed"] += 1
+            key = (kind, p.get("pid"))
+            now = time.monotonic()
+            if now - self.fail_posted.get(key, -1e18) < FAIL_CARD_EVERY_S:
+                return                                     # one card a minute per position, not one a try
+            self.fail_posted[key] = now
         meas = dict(self.exec.meas.get(p.get("pid")) or {}) if kind in ("bought", "sold") else None
         self._post(lambda lang: [_trade_card(kind, dict(p), dict(kw), lang, self.exec.day_pnl_l / C.LAMPORTS,
                                              self.exec.mode, meas)])

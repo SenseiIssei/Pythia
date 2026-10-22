@@ -814,7 +814,7 @@ def test_a_trade_the_node_has_not_got_yet_waits_for_the_next_round(tmp_path):
         json.dumps({"what": "filled", "side": "buy", "mint": "AAApump", "sig": "B", "t": 2000}) + "\n"
         + json.dumps({"what": "filled", "side": "sell", "mint": "AAApump", "sig": "S", "t": 5000}) + "\n",
         encoding="utf-8")
-    assert CP.reconcile(Rpc(), "W", tmp_path) == (0, False)
+    assert CP.reconcile(Rpc(), "W", tmp_path, now_ms=6_000) == (0, False)     # fresh: the node may still get it
     assert "0.001" in (tmp_path / "ledger.csv").read_text(encoding="utf-8")
 
 
@@ -835,3 +835,41 @@ def test_a_restart_keeps_the_days_losses_for_the_daily_stop(tmp_path, monkeypatc
     ex = executor(tmp_path)
     ex._roll()
     assert ex.day_pnl_l == -6_846_370
+
+
+def test_a_failed_sale_that_landed_counts_its_fee_and_one_that_never_landed_counts_nothing(tmp_path):
+    from lab.pumpfun_rt import chain_pnl as CP
+    wallet = "W" * 44
+    deltas = {"BUY": -37_823_278, "SELL": 34_759_695, "FAILED": -1_005_000}
+
+    class Rpc:
+        def call(self, method, params):
+            if params[0] not in deltas:
+                return None
+            return {"meta": {"preBalances": [10**10], "postBalances": [10**10 + deltas[params[0]]]},
+                    "transaction": {"message": {"accountKeys": [wallet]}}}
+    (tmp_path / "ledger.csv").write_text("mint,signal_ms,exit_ms,pnl_sol\nCCCpump,1000,9000,0\n", encoding="utf-8")
+    lines = [{"what": "filled", "side": "buy", "mint": "CCCpump", "sig": "BUY", "t": 5000},
+             {"what": "filled", "side": "sell", "mint": "CCCpump", "sig": "SELL", "t": 9000},
+             {"what": "failed", "side": "sell", "mint": "CCCpump", "sig": "FAILED", "t": 20_000},
+             {"what": "failed", "side": "sell", "mint": "CCCpump", "sig": "NEVER", "t": 21_000},
+             {"what": "failed", "side": "sell", "mint": "CCCpump", "sig": None, "t": 22_000}]
+    (tmp_path / "orders.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=100_000) == (0, False)        # NEVER: too fresh to judge
+    adjust, changed = CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000)
+    assert changed and adjust == -37_823_278 + 34_759_695 - 1_005_000
+
+
+def test_a_leftover_already_sold_on_chain_is_dropped_not_retried(tmp_path, monkeypatch):
+    monkeypatch.setattr(LX, "data_dir", lambda: tmp_path)
+    ex = executor(tmp_path)
+    o = P.Order(-1, "sell", MINT, "curve", 1_000, 0, T0, "leftover")
+    pend = {"side": "sell", "order": o, "sig": None, "sent_ms": T0, "leftover": True}
+    ex.leftovers[-1] = {"mint": MINT, "tokens": 1_000, "tries": 1}
+    ex.verifying[-1] = (pend, "simulation failed", 0)
+    ex._holds(-1, 0, T0)
+    assert -1 not in ex.leftovers and not ex.pending
+    ex.leftovers[-2] = {"mint": MINT, "tokens": 1_000, "tries": 1}
+    ex.verifying[-2] = ({**pend, "order": P.Order(-2, "sell", MINT, "curve", 1_000, 0, T0, "leftover")}, "x", 0)
+    ex._holds(-2, 1_000, T0)                                                       # still held: sell it again
+    assert -2 in ex.pending and ex.leftovers[-2]["tries"] == 2
