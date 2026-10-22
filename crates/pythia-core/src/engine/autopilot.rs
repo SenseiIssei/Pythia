@@ -421,6 +421,13 @@ impl AutopilotConfig {
         self.live_test && self.mode == AutopilotMode::Live
     }
 
+    /// Does a stop rule or its floor close its positions? A capped live test
+    /// always does, whatever `flatten_on_stop` says: real coins released by a
+    /// stopped test would be managed by nothing.
+    pub fn closes_on_stop(&self) -> bool {
+        self.flatten_on_stop || self.is_live_test()
+    }
+
     /// How the mode is said in messages: "paper", "demo", "LIVE" or "LIVE TEST".
     fn mode_word(&self) -> &'static str {
         if self.is_live_test() {
@@ -1086,7 +1093,7 @@ impl Autopilot {
         self.sleeves.iter_mut().find(|s| s.strategy_id == sid)
     }
 
-    fn label(&self) -> String {
+    pub(super) fn label(&self) -> String {
         let test = if self.is_live_test() { " (LIVE TEST)" } else { "" };
         format!("Autopilot \"{}\"{test}", self.config.name)
     }
@@ -2658,6 +2665,11 @@ impl Engine {
         if !cfg.portfolio {
             cfg.asset_class = Some(venue);
         }
+        // The real account's cash, kept for the setup's cash row whether or
+        // not this start goes ahead.
+        if let (AutopilotMode::Live, VenueCash::Read(c)) = (cfg.mode, &cash) {
+            self.note_live_cash(venue, cv, *c);
+        }
         if self.limits.kill_switch {
             return Err("The kill switch is on, so every new entry would be refused. Release it first.".into());
         }
@@ -2803,6 +2815,9 @@ impl Engine {
             }
             if test {
                 live_test_limits(&cfg, self.live_test_cap_usd)?;
+                // A live test always ends in cash: its stop rules and floor
+                // close what it bought, so no real coin is left unmanaged.
+                cfg.flatten_on_stop = true;
             }
             let free = match cash {
                 VenueCash::Read(c) => c,
@@ -3101,7 +3116,7 @@ impl Engine {
             )
         };
         format!(
-            "LIVE TEST: real money, capped at {} with a max loss of at most {} %. {which} Its trades never count as readiness evidence.",
+            "LIVE TEST: real money, capped at {} with a max loss of at most {} %. {which} Whenever a stop rule or its floor stops it, it closes all its positions (always, for a live test). Its trades never count as readiness evidence.",
             usd(self.live_test_cap_usd),
             pct(LIVE_TEST_MAX_LOSS_PCT)
         )
@@ -3201,7 +3216,7 @@ impl Engine {
         if !self.autopilots[i].is_active() {
             return Err(format!("{} is already stopped.", self.autopilots[i].label()));
         }
-        let flatten = flatten.unwrap_or(self.autopilots[i].config.flatten_on_stop);
+        let flatten = flatten.unwrap_or(self.autopilots[i].config.closes_on_stop());
         let now = self.now();
         self.ap_halt(i, AutopilotState::Stopped, i18n::StopWhy::ByYou, flatten, now, AlertKind::AutopilotStopped);
         Ok(())
@@ -3321,9 +3336,17 @@ impl Engine {
             if cfg.stop.max_loss_pct.is_none() && cfg.stop.max_loss_usd.is_none() {
                 return Err("Live needs a max-loss rule, in % or in dollars, so there is always a level at which it stops.".into());
             }
-            // A capped live test keeps its caps through every change.
+            // A capped live test keeps its caps through every change, and
+            // always closes its positions when it stops.
             if cfg.is_live_test() {
                 live_test_limits(&cfg, self.live_test_cap_usd)?;
+                if upd.flatten_on_stop == Some(false) {
+                    return Err(
+                        "A capped live test always closes its positions when a stop rule or its floor stops it, so this cannot be turned off. Stop it with the Stop button if you want to keep what it holds."
+                            .into(),
+                    );
+                }
+                cfg.flatten_on_stop = true;
             }
             if re_sleeve || cfg.capital_usd > old.capital_usd + EPS {
                 if !self.live.armed {
@@ -3359,6 +3382,7 @@ impl Engine {
                         return Err(format!("The free cash at {} was not read, so the higher amount is refused.", venue_label(cv)))
                     }
                 };
+                self.note_live_cash(venue, cv, free);
                 let committed: f64 = self
                     .autopilots
                     .iter()
@@ -4074,6 +4098,15 @@ impl Engine {
             let Some(s) = self.strategies.iter().find(|s| s.id == sl.strategy_id) else {
                 return Some(format!("{} no longer exists.", sl.name));
             };
+            // An experiment never trades real money, test or not: a lab book
+            // the lab marks as one while it runs live pauses the autopilot
+            // (the check at the start only saw the book as it was then).
+            if s.kind == StrategyKind::LabTargets && sl.weight > 0.0 && self.lab_book_experimental(&s.id) {
+                return Some(format!(
+                    "{} is now an experiment (it failed the lab's deflation test), and an experiment never trades real money. Stop this live autopilot; the book can still run in a paper or demo one.",
+                    sl.name
+                ));
+            }
             // A capped live test runs strategies without a green passport;
             // they still have to be set to live (a parameter change takes
             // them off it, and the test pauses).
@@ -4102,7 +4135,7 @@ impl Engine {
             }
         }
         let eq = self.ap_equity(&self.autopilots[i]);
-        let flatten = self.autopilots[i].config.flatten_on_stop;
+        let flatten = self.autopilots[i].config.closes_on_stop();
         // A stale price never raises the peak (and with it the trailing
         // floor), locks in a profit or finishes on one: the last price of a
         // dead feed, or of the moments before a restart, is not where the

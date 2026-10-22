@@ -658,6 +658,23 @@ pub struct LiveStatus {
     /// (`PYTHIA_LIVE_TEST_MAX_USD`, clamped to the ceiling in code).
     #[serde(default)]
     pub live_test_cap_usd: f64,
+    /// The free cash last read from each live venue, at a live autopilot's
+    /// start or a higher amount for one: the real account's cash, never the
+    /// paper account's. Empty until a read since the server started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_cash: Vec<LiveCashRead>,
+}
+
+/// The free cash Pythia last read from a live venue, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCashRead {
+    /// The engine venue (asset class) it was read for: `crypto` or `alpaca`.
+    pub venue: Venue,
+    /// The exchange it was read from.
+    pub exchange: CostVenue,
+    pub cash: f64,
+    pub read_ms: i64,
 }
 
 /// Why an order is being routed — and therefore what is allowed to happen to it
@@ -1374,6 +1391,9 @@ pub struct Engine {
     /// `PYTHIA_LIVE_TEST_MAX_USD` at start, never above the ceiling in code
     /// (`autopilot::LIVE_TEST_CEILING_USD`). Not persisted.
     live_test_cap_usd: f64,
+    /// The free cash last read from each live venue ([`LiveCashRead`]).
+    /// Not persisted: a read from before a restart is not worth showing.
+    live_cash: Vec<LiveCashRead>,
     /// The Alpaca pairs (`BTC/USD`) the Alpaca paper account lists, when
     /// crypto demo orders go there; `None` until the host has read them.
     /// A crypto market Alpaca does not list is refused for demo and left out
@@ -1584,6 +1604,7 @@ impl Engine {
             crypto_demo_venue: None,
             crypto_demo_real_prices: false,
             live_test_cap_usd: autopilot::live_test_cap_from_env(),
+            live_cash: Vec::new(),
             crypto_demo_listed: None,
             pending_live: Vec::new(),
             inflight: HashMap::new(),
@@ -1682,8 +1703,13 @@ impl Engine {
         self.seq += 1;
         format!("{prefix}_{}", self.seq)
     }
+    /// Does anything here route to a real venue right now: a position opened
+    /// by a real fill, or an order at a real venue (not a demo one)? A
+    /// strategy merely set to live is not: a live autopilot's twin is set to
+    /// live while the paper engine and every other book keep trading paper,
+    /// and calling all of that live would label paper fills as real ones.
     fn any_live(&self) -> bool {
-        self.strategies.iter().any(|s| s.state == StrategyState::Live)
+        self.positions.values().any(|p| p.live && p.qty.abs() > 1e-12) || self.inflight.values().any(|f| !f.demo)
     }
     fn mode(&self) -> Mode {
         if self.any_live() { Mode::Live } else { Mode::Paper }
@@ -3730,16 +3756,27 @@ impl Engine {
         if emit_order {
             let mut order = self.build_order_filled(&sid, m, side, qty, fill_price);
             order.book = (!book.is_empty()).then(|| book.to_string());
+            // The fill's own route, never the engine-wide mode: a paper fill
+            // is a paper fill while a live autopilot trades next to it.
+            let mode = if live { Mode::Live } else { Mode::Paper };
+            order.mode = mode;
             self.orders.insert(0, order);
             if self.orders.len() > 400 {
                 self.orders.pop();
             }
-            let mode = self.mode();
-            self.log(
+            let tag = if live {
+                "LIVE"
+            } else if demo {
+                "DEMO"
+            } else {
+                "Paper"
+            };
+            self.log_mode(
                 JournalKind::Fill,
-                format!("{mode:?} FILL {side:?} {qty:.4} {} @ {fill_price:.4}", m.id),
+                format!("{tag} FILL {side:?} {qty:.4} {} @ {fill_price:.4}", m.id),
                 Some(sid),
                 Some(m.id.clone()),
+                mode,
             );
         }
     }
@@ -4022,6 +4059,8 @@ impl Engine {
         let drift_bps = cost.book.and_then(|b| b.drift_bps(side, price));
 
         let mut order = self.build_order(&sid, m, side, qty, OrderStatus::Pending, None);
+        // A demo order stays in the paper book; a real one is live from the start.
+        order.mode = if demo { Mode::Paper } else { Mode::Live };
         order.route = if demo || self.live.paper { FillRoute::Demo } else { FillRoute::Live };
         order.book = (!book.is_empty()).then(|| book.to_string());
         order.cost_source = Some(cost_source);
@@ -5098,7 +5137,7 @@ impl Engine {
                     } else {
                         String::new()
                     };
-                    self.log(
+                    self.log_mode(
                         JournalKind::Fill,
                         format!(
                             "{} FILL {:?} {delta:.6} {} @ {price:.4}{coin_note}",
@@ -5108,6 +5147,7 @@ impl Engine {
                         ),
                         Some(f.strategy_id.clone()),
                         Some(f.market_id.clone()),
+                        if f.demo { Mode::Paper } else { Mode::Live },
                     );
                     if let Some(g) = self.inflight.get_mut(order_id) {
                         g.booked_qty = update.filled_qty;
@@ -5552,7 +5592,19 @@ impl Engine {
             maker_stats: self.maker_stats(),
             perps: self.perps_status(),
             live_test_cap_usd: self.live_test_cap_usd,
+            live_cash: self.live_cash.clone(),
         }
+    }
+
+    /// Keep the free cash just read from a live venue, for the setup's cash
+    /// row (see [`LiveStatus::live_cash`]).
+    pub(super) fn note_live_cash(&mut self, venue: Venue, exchange: CostVenue, cash: f64) {
+        if !cash.is_finite() {
+            return;
+        }
+        let read = LiveCashRead { venue, exchange, cash, read_ms: self.now() };
+        self.live_cash.retain(|r| r.venue != venue);
+        self.live_cash.push(read);
     }
 
     /// The most a capped live test autopilot may be given, in USD.
@@ -5891,6 +5943,27 @@ impl Engine {
         None
     }
 
+    /// The smallest order the exchange behind `route` itself accepts in this
+    /// market, in USD: below it a sale cannot happen at all. 0 on paper. On
+    /// Kraken it is the pair's own minimum volume at the price (and Kraken's
+    /// minimum order value), from its AssetPairs; elsewhere the cost table's
+    /// minimum order.
+    fn venue_min_order(&self, m: &Market, route: RouteIntent) -> f64 {
+        match route {
+            RouteIntent::Paper => 0.0,
+            RouteIntent::Demo => costs::model_for(self.demo_cost_venue(m), &m.symbol).min_notional,
+            RouteIntent::Live | RouteIntent::LiveExit => {
+                if m.venue == Venue::Crypto && self.crypto_venue == CostVenue::Kraken {
+                    let pair = crate::connectors::cex::Exchange::Kraken.symbol(&m.symbol);
+                    if let Some((_, least)) = crate::connectors::cex::kraken_pair_limits(&pair) {
+                        return (least * m.price).max(crate::connectors::cex::KRAKEN_COST_MIN_USD);
+                    }
+                }
+                self.cost_model(m).min_notional
+            }
+        }
+    }
+
     /// Move every lab book to its latest targets, once per signal.
     ///
     /// The lab books of one autopilot are one netted book: their targets are
@@ -6065,19 +6138,35 @@ impl Engine {
                 .collect();
             let books: Vec<(String, f64, &BTreeMap<String, f64>)> =
                 sigs.iter().map(|(m, scale, g)| (m.clone(), if members.len() == 1 { 1.0 } else { *scale }, &g.weights)).collect();
-            let (weights, coin_shares) =
+            let (mut weights, coin_shares) =
                 if perp { autopilot::net_lab_targets_signed(&books) } else { autopilot::net_lab_targets(&books) };
+            let route = self.autopilot_route(&owner).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state));
+            let live_route = matches!(route, RouteIntent::Live | RouteIntent::LiveExit);
+            // Real money never holds more than the book: on a live route the
+            // netted weights of a long-only book add up to at most 100 %.
+            let mut scaled_from: Option<f64> = None;
+            if live_route && !perp {
+                let sum: f64 = weights.values().sum();
+                if sum > 1.0 + 1e-9 {
+                    for w in weights.values_mut() {
+                        *w /= sum;
+                    }
+                    scaled_from = Some(sum);
+                }
+            }
             let has_market = |key: &str| -> Option<String> { Some(sig.market_id(key)) };
             // The smallest order the route's venue takes. Alpaca refuses a
             // crypto order under $10 (403, "cost basis must be >= minimal
             // amount of order 10"): such an order is named, never sent, so a
             // small book does not collect refusals and retries every day.
+            // A sale that empties a holding is the exception: it goes out
+            // down to the exchange's own minimum, and below that the holding
+            // is dust (see `lab::rebalance_plan`).
             // A perps book holds shorts: its weights and holdings are signed.
-            let (orders, mut untradable, below_min, min_order) = if perp {
+            let (orders, mut untradable, below_min, min_order, dust) = if perp {
                 let (o, u) = crate::lab::rebalance_signed(&weights, has_market, &holdings, &prices, capital, 5.0, 0.002);
-                (o, u, Vec::<String>::new(), 5.0)
+                (o, u, Vec::<String>::new(), 5.0, Vec::<(String, f64, f64)>::new())
             } else {
-                let route = self.autopilot_route(&owner).unwrap_or_else(|| Self::entry_intent(self.strategies[idx].state));
                 let min_order = book
                     .iter()
                     .filter(|m| prices.contains_key(&m.id))
@@ -6087,15 +6176,33 @@ impl Engine {
                         _ => 0.0,
                     })
                     .fold(LAB_MIN_ORDER_USD, f64::max);
-                let plan = crate::lab::rebalance_plan(&weights, has_market, &holdings, &prices, capital, min_order, LAB_BAND);
+                let venue_min = |id: &str| book.iter().find(|m| m.id == id).map_or(0.0, |m| self.venue_min_order(m, route));
+                let plan = crate::lab::rebalance_plan(&weights, has_market, &holdings, &prices, capital, min_order, LAB_BAND, venue_min);
                 let mut below: Vec<String> = plan
                     .below_min
                     .iter()
                     .filter_map(|(id, n)| book.iter().find(|m| &m.id == id).map(|m| format!("{} (${n:.2})", m.symbol)))
                     .collect();
                 below.sort();
-                (plan.orders, plan.untradable, below, min_order)
+                let dust: Vec<(String, f64, f64)> = plan.dust.iter().map(|(id, v)| (id.clone(), *v, venue_min(id))).collect();
+                (plan.orders, plan.untradable, below, min_order, dust)
             };
+            // A holding the lab dropped that the exchange's own minimum makes
+            // impossible to sell: said once, never sent, never retried.
+            for (id, value, least) in &dust {
+                if self.lab_notes.insert(format!("dust:{owner}:{id}")) {
+                    let sym = book.iter().find(|m| &m.id == id).map(|m| m.symbol.clone()).unwrap_or_else(|| id.clone());
+                    let whose = self.book_label(&owner).map(|l| format!(" ({l})")).unwrap_or_default();
+                    self.log(
+                        JournalKind::Risk,
+                        format!(
+                            "Stuck dust: {sym} (${value:.2}) has to be sold for the lab's target, but it is under the smallest order the exchange itself takes (${least:.2}), so it cannot be sold. Left as it is and not retried{whose}"
+                        ),
+                        Some(lead.clone()),
+                        Some(id.clone()),
+                    );
+                }
+            }
             // A coin held by another strategy is reported as that, not as missing.
             untradable.retain(|c| !owned_elsewhere.contains(&sig.market_symbol(c)));
             // An unlisted coin the lab wants is named once, as that.
@@ -6192,15 +6299,67 @@ impl Engine {
             }
             let n = orders.len();
             let mut refused = 0;
+            // What actually went out, for the journal line.
+            let (mut sent, mut bought, mut sold) = (0usize, 0.0f64, 0.0f64);
+            // On a live route an autopilot's holdings never exceed its own
+            // equity (its cash plus its positions), whatever the weights say
+            // and whatever the paper account's risk numbers allow. Measured
+            // once before the orders, then moved by what this rebalance sends
+            // (its sales are still at the venue when its buys go out).
+            let live_cap = match &group {
+                Some(g) if live_route && !perp => {
+                    let ap = &self.autopilots[g.ap];
+                    Some((g.ap, self.ap_equity(ap).max(0.0), self.ap_class_gross(ap, |_| true)))
+                }
+                _ => None,
+            };
             for o in orders {
                 let Some(m) = book.iter().find(|m| m.id == o.market_id).cloned() else { continue };
                 // A coin already held is traded by the book that holds it.
                 let by = holders.get(&m.id).and_then(|h| self.strategies.iter().position(|s| &s.id == h)).unwrap_or(idx);
+                let mut notional = o.notional;
+                if let (Some((ap_i, equity, held)), Side::Buy) = (live_cap, o.side) {
+                    let room = (equity - (held - sold + bought)).max(0.0);
+                    if notional > room + 1e-9 {
+                        let label = self.autopilots[ap_i].label();
+                        if room < self.venue_min_order(&m, route).max(1e-6) {
+                            self.log(
+                                JournalKind::Risk,
+                                format!(
+                                    "{label}: buy of {} (${notional:.2}) refused: the autopilot already holds ${:.2} of its equity of ${equity:.2}, and real money never holds more than that",
+                                    m.symbol,
+                                    held - sold + bought
+                                ),
+                                Some(self.strategies[by].id.clone()),
+                                Some(m.id.clone()),
+                            );
+                            refused += 1;
+                            continue;
+                        }
+                        self.log(
+                            JournalKind::Risk,
+                            format!(
+                                "{label}: buy of {} cut from ${notional:.2} to ${room:.2} so its holdings stay within its equity of ${equity:.2}",
+                                m.symbol
+                            ),
+                            Some(self.strategies[by].id.clone()),
+                            Some(m.id.clone()),
+                        );
+                        notional = room;
+                    }
+                }
                 self.maker_no_book_go = no_book_go;
-                let placed = self.place_lab_order(&owner, by, &m, o.side, o.notional);
+                let placed = self.place_lab_order(&owner, by, &m, o.side, notional);
                 self.maker_no_book_go = false;
                 if !placed {
                     refused += 1;
+                    continue;
+                }
+                sent += 1;
+                if o.side == Side::Buy {
+                    bought += notional;
+                } else {
+                    sold += notional;
                 }
             }
             let day = chrono::DateTime::from_timestamp_millis(sig.as_of_ms)
@@ -6242,15 +6401,36 @@ impl Engine {
             } else {
                 format!("{:.0} %", weights.values().sum::<f64>() * 100.0)
             };
+            // What went out, never the target alone: a rebalance whose orders
+            // were all held back invested nothing.
+            let what = if sent == 0 {
+                format!("no order sent, so nothing changed (the target has {invested} of the book invested)")
+            } else {
+                let mut parts = Vec::new();
+                if sold > 0.0 {
+                    parts.push(format!("sold ${sold:.2}"));
+                }
+                if bought > 0.0 {
+                    parts.push(format!("bought ${bought:.2}"));
+                }
+                format!("{sent} of {n} orders sent ({}), toward a target of {invested} of the book invested", parts.join(", "))
+            };
+            let head = if sent == 0 { "Rebalance" } else { "Rebalanced" };
             let mut note = if netted.len() > 1 {
                 format!(
-                    "Rebalanced toward the netted weights of {} lab books ({}) of {day}: {n} orders, {invested} of the lab share invested",
+                    "{head} toward the netted weights of {} lab books ({}) of {day}: {what}",
                     netted.len(),
                     netted.iter().map(|(n, w)| format!("{n} {:.0} %", w * 100.0)).collect::<Vec<_>>().join(", "),
                 )
             } else {
-                format!("Rebalanced toward the lab's weights of {day}: {n} orders, {invested} of the book invested")
+                format!("{head} toward the lab's weights of {day}: {what}")
             };
+            if let Some(sum) = scaled_from {
+                note.push_str(&format!(
+                    "; the lab's weights add up to {:.0} %, scaled down to 100 % because real money never holds more than the book",
+                    sum * 100.0
+                ));
+            }
             if refused > 0 {
                 note.push_str(&format!("; {refused} still refused after {attempt} attempts, left until the next signal"));
             }
@@ -7122,7 +7302,9 @@ impl Engine {
                 connected: self.connected.contains(&venue),
                 cash: self.cash / 3.0,
                 equity: equity / 3.0,
-                mode,
+                // These are the paper account's numbers whatever routes live;
+                // a live venue's own cash is `LiveStatus::live_cash`.
+                mode: Mode::Paper,
             })
             .collect();
         let positions = self
@@ -7256,6 +7438,13 @@ impl Engine {
         o
     }
     fn log(&mut self, kind: JournalKind, message: String, strategy_id: Option<String>, market_id: Option<String>) {
+        let mode = self.mode();
+        self.log_mode(kind, message, strategy_id, market_id, mode);
+    }
+
+    /// [`Engine::log`] with the line's mode given: a fill says the route it
+    /// took, not what the rest of the engine does.
+    fn log_mode(&mut self, kind: JournalKind, message: String, strategy_id: Option<String>, market_id: Option<String>, mode: Mode) {
         // mirror notable events (fills, risk actions, position exits) to the alert queue
         let alertable = matches!(kind, JournalKind::Fill | JournalKind::Risk)
             || (matches!(kind, JournalKind::System) && message.starts_with("Exit"));
@@ -7266,7 +7455,6 @@ impl Engine {
             }
         }
         let id = self.next_id("j");
-        let mode = self.mode();
         let entry = JournalEntry { id, ts: self.now(), kind, strategy_id, market_id, message, mode };
         if is_event(kind, &entry.message) {
             self.events.insert(0, entry.clone());

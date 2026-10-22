@@ -3027,3 +3027,233 @@ fn a_live_test_pauses_when_its_strategy_leaves_live_and_survives_a_restart() {
     let err = r.autopilot_resume(&id).unwrap_err();
     assert!(err.starts_with("Cannot resume live: EMA Cross · Crypto is no longer set to live"), "{err}");
 }
+
+// ── live test fixes: close on stop, experiments, live caps, display ────────
+
+/// Fill every live order out so far at its reference price.
+fn fill_all(e: &mut Engine) -> Vec<LiveOrderOut> {
+    let out = e.drain_live_orders();
+    for (n, o) in out.iter().enumerate() {
+        e.apply_live_ack(&o.order_id, &format!("venue-{n}-{}", o.order_id));
+        e.apply_live_update(&o.order_id, filled(o, o.ref_price));
+    }
+    out
+}
+
+#[test]
+fn a_live_test_always_closes_its_positions_when_a_stop_rule_or_its_floor_stops_it() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let mut c = live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]);
+    c.flatten_on_stop = false;
+    c.stop.max_loss_pct = Some(5.0);
+    let id = e.autopilot_start(c, true, VenueCash::Read(1_000.0)).unwrap();
+    let s = status(&e, &id);
+    assert!(s.config.flatten_on_stop, "forced on for a live test");
+    let last = s.last_action.unwrap();
+    assert!(last.contains("Whenever a stop rule or its floor stops it, it closes all its positions"), "{last}");
+
+    // An edit cannot turn it off.
+    let off = AutopilotUpdate { flatten_on_stop: Some(false), ..Default::default() };
+    let err = e.autopilot_update(&id, off, true, VenueCash::Read(1_000.0)).unwrap_err();
+    assert!(err.starts_with("A capped live test always closes its positions"), "{err}");
+    assert!(status(&e, &id).config.flatten_on_stop);
+
+    // A real position, then a save from before this rule with the flag off:
+    // the floor still closes it at the venue instead of releasing it.
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, BTC);
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
+    let entry = fill_all(&mut e);
+    assert_eq!(entry.len(), 1);
+    assert!(e.positions[&pos_key(&id, BTC)].live);
+    e.autopilots.iter_mut().find(|a| a.config.id == id).unwrap().config.flatten_on_stop = false;
+    let px = e.price_of(BTC);
+    set_price(&mut e, BTC, px * 0.01);
+    assert!(status(&e, &id).equity < 95.0, "under the 5 % floor: {}", status(&e, &id).equity);
+    step(&mut e);
+    let s = status(&e, &id);
+    assert_eq!(s.state, AutopilotState::Stopped);
+    let out = e.drain_live_orders();
+    assert_eq!(out.len(), 1, "the close went to the venue: {out:?}");
+    assert_eq!(out[0].side, Side::Sell);
+    assert!(out[0].reduce_only && !out[0].demo);
+    assert!(!journal_has(&e, "Left its 1 position(s) open"), "nothing is released unmanaged");
+    assert_eq!(s.open_positions, 1, "it stays with the autopilot until the venue fills the close");
+}
+
+#[test]
+fn a_live_autopilot_pauses_when_its_lab_book_becomes_an_experiment() {
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal(now, &[("BTC", 0.5)]));
+    e.set_live(armed_crypto());
+    let id = e.autopilot_start(live_test_config("lab", 120.0, &[("lab:tsmom", 1.0)]), true, VenueCash::Read(500.0)).unwrap();
+    step(&mut e);
+    assert_eq!(status(&e, &id).state, AutopilotState::Running);
+
+    // The lab marks the book as an experiment mid-run.
+    e.apply_lab_signal(experiment("tsmom", now + 1, &[("BTC", 0.5)]));
+    assert!(e.lab_book_experimental("lab:tsmom"));
+    step(&mut e);
+    let s = status(&e, &id);
+    assert_eq!(s.state, AutopilotState::Paused, "real money never runs an experiment");
+    let why = s.paused_reason.unwrap();
+    assert!(why.contains("is now an experiment") && why.contains("never trades real money"), "{why}");
+    assert!(s.last_action.unwrap().contains("is now an experiment"), "the card says why");
+    assert!(e.pending_alerts.iter().any(|a| a.contains("is now an experiment")), "an alert says it");
+    let err = e.autopilot_resume(&id).unwrap_err();
+    assert!(err.starts_with("Cannot resume live:") && err.contains("experiment"), "{err}");
+    // Paused, it sends nothing for the experiment's targets.
+    e.run_lab_books();
+    assert!(e.drain_live_orders().is_empty());
+}
+
+#[test]
+fn a_live_lab_book_never_holds_more_than_the_autopilots_equity() {
+    // Weights that add up to 140 %: scaled to 100 % on a live route.
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal(now, &[("BTC", 0.8), ("ETH", 0.6)]));
+    e.set_live(armed_crypto());
+    e.autopilot_start(live_test_config("lab", 120.0, &[("lab:tsmom", 1.0)]), true, VenueCash::Read(500.0)).unwrap();
+    e.run_lab_books();
+    let out = e.drain_live_orders();
+    let sent: f64 = out.iter().map(|o| o.qty * o.ref_price).sum();
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(sent <= 120.0 + 1e-6, "never more than its equity: {sent}");
+    assert!(sent > 119.0, "the whole amount, scaled: {sent}");
+    assert!(journal_has(&e, "the lab's weights add up to 140 %, scaled down to 100 %"));
+
+    // A buy while its first buy is still at the venue: what is pending
+    // already uses the whole equity, so the new buy is refused and said.
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal(now, &[("BTC", 1.0)]));
+    e.set_live(armed_crypto());
+    let id = e.autopilot_start(live_test_config("lab", 120.0, &[("lab:tsmom", 1.0)]), true, VenueCash::Read(500.0)).unwrap();
+    e.run_lab_books();
+    assert_eq!(e.drain_live_orders().len(), 1);
+    e.advance_clock_for_test(60_000);
+    mark_real(&mut e);
+    let later = e.now();
+    e.apply_lab_signal(lab_signal(later, &[("ETH", 1.0)]));
+    e.run_lab_books();
+    assert!(e.drain_live_orders().is_empty(), "no second $120 on top of the first");
+    assert!(
+        journal_has(&e, "buy of ETH/USD ($120.00) refused: the autopilot already holds $120.00 of its equity of $120.00"),
+        "{:?}",
+        e.journal.iter().take(5).map(|j| j.message.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(status(&e, &id).state, AutopilotState::Running);
+}
+
+#[test]
+fn a_lab_close_under_the_order_minimum_still_goes_out_and_dust_is_said_once() {
+    fn holding(qty: f64) -> (Engine, String) {
+        let mut e = engine();
+        set_price(&mut e, BTC, 100_000.0);
+        let now = e.now();
+        e.apply_lab_signal(lab_signal(now, &[("BTC", 0.5)]));
+        e.set_live(armed_crypto());
+        let id = e.autopilot_start(live_test_config("lab", 120.0, &[("lab:tsmom", 1.0)]), true, VenueCash::Read(500.0)).unwrap();
+        e.run_lab_books();
+        fill_all(&mut e);
+        let key = pos_key(&id, BTC);
+        assert!(e.positions[&key].live);
+        e.positions.get_mut(&key).unwrap().qty = qty;
+        (e, id)
+    }
+    fn next_signal(e: &mut Engine) -> Vec<LiveOrderOut> {
+        e.advance_clock_for_test(60_000);
+        mark_real(e);
+        set_price(e, BTC, 100_000.0);
+        let t = e.now();
+        e.apply_lab_signal(lab_signal(t, &[("ETH", 0.5)]));
+        e.run_lab_books();
+        e.drain_live_orders()
+    }
+
+    // $7 of BTC: under the $10 order minimum, over Kraken's own (0.00006
+    // BTC, $6). The lab drops BTC: the whole $7 is sold, not left.
+    let (mut e, _) = holding(0.00007);
+    let out = next_signal(&mut e);
+    let close = out.iter().find(|o| o.market_id == BTC).expect("the close is sent");
+    assert_eq!(close.side, Side::Sell);
+    assert!((close.qty - 0.00007).abs() < 1e-12, "the whole holding: {}", close.qty);
+
+    // $3 of BTC is under Kraken's own minimum: it cannot be sold. Said once
+    // as stuck dust, never sent, never retried.
+    let (mut e, _) = holding(0.00003);
+    for k in 1..=2 {
+        let out = next_signal(&mut e);
+        assert!(out.iter().all(|o| o.market_id != BTC), "round {k}: dust is never sent: {out:?}");
+        for (n, o) in out.iter().enumerate() {
+            e.apply_live_ack(&o.order_id, &format!("v{k}-{n}"));
+            e.apply_live_update(&o.order_id, filled(o, o.ref_price));
+        }
+    }
+    let dust = e.journal.iter().filter(|j| j.message.starts_with("Stuck dust: BTC/USD ($3.00)")).count();
+    assert_eq!(dust, 1, "said once");
+}
+
+#[test]
+fn the_engine_says_live_only_for_what_routes_live_and_shows_the_real_cash() {
+    let mut e = engine();
+    e.set_live(armed_crypto());
+    let id = e.autopilot_start(live_test_config("t", 100.0, &[("ema-cross-1", 1.0)]), true, VenueCash::Read(1_000.0)).unwrap();
+    assert_eq!(state_of(&e, "ema-cross-1"), StrategyState::Live, "its twin is set to live");
+
+    // Set to live is not trading live: the paper account and its fills stay paper.
+    let st = e.state();
+    assert_eq!(st.portfolio.mode, Mode::Paper);
+    assert!(st.portfolio.balances.iter().all(|b| b.mode == Mode::Paper), "the balances are the paper account's");
+    enter(&mut e, "multi-tf-1", ETH, 500.0);
+    let fill = e.journal.iter().find(|j| j.kind == JournalKind::Fill).unwrap();
+    assert!(fill.message.starts_with("Paper FILL"), "{}", fill.message);
+    assert_eq!(fill.mode, Mode::Paper);
+    assert_eq!(e.orders[0].mode, Mode::Paper);
+
+    // The live venue's own cash, as read at the start.
+    let cash = e.state().live.live_cash;
+    assert_eq!(cash.len(), 1);
+    assert_eq!((cash[0].venue, cash[0].exchange, cash[0].cash), (Venue::Crypto, CostVenue::Kraken, 1_000.0));
+
+    // A real order and a real position are live.
+    let i = idx(&e, "ema-cross-1");
+    let m = market(&e, BTC);
+    e.place_from_intent(&id, i, &m, &buy_intent(BTC));
+    assert_eq!(e.orders[0].mode, Mode::Live, "the pending real order");
+    assert_eq!(e.state().portfolio.mode, Mode::Live, "an order at a real venue");
+    fill_all(&mut e);
+    let fill = e.journal.iter().find(|j| j.kind == JournalKind::Fill).unwrap();
+    assert!(fill.message.starts_with("LIVE FILL"), "{}", fill.message);
+    assert_eq!(fill.mode, Mode::Live);
+    assert_eq!(e.state().portfolio.mode, Mode::Live, "a real position");
+    // A paper fill next to it is still paper.
+    enter(&mut e, "multi-tf-1", ETH, 100.0);
+    let fill = e.journal.iter().find(|j| j.kind == JournalKind::Fill).unwrap();
+    assert!(fill.message.starts_with("Paper FILL") && fill.mode == Mode::Paper, "{}", fill.message);
+}
+
+#[test]
+fn the_rebalance_line_says_what_was_sent() {
+    // Every order under the minimum: nothing went out, and the line says so.
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal(now, &[("BTC", 0.5)]));
+    start(&mut e, config("small", 8.0, &[("lab:tsmom", 1.0)], StopRules::default()));
+    e.run_lab_books();
+    let line = e.journal.iter().find(|j| j.message.contains("toward the lab's weights")).unwrap().message.clone();
+    assert!(line.starts_with("Rebalance toward the lab's weights of"), "{line}");
+    assert!(line.contains("no order sent, so nothing changed (the target has 50 % of the book invested)"), "{line}");
+
+    let mut e = engine();
+    let now = e.now();
+    e.apply_lab_signal(lab_signal(now, &[("BTC", 0.5)]));
+    start(&mut e, config("big", 1_000.0, &[("lab:tsmom", 1.0)], StopRules::default()));
+    e.run_lab_books();
+    let line = e.journal.iter().find(|j| j.message.contains("toward the lab's weights")).unwrap().message.clone();
+    assert!(line.starts_with("Rebalanced toward the lab's weights of"), "{line}");
+    assert!(line.contains("1 of 1 orders sent (bought $500.00), toward a target of 50 % of the book invested"), "{line}");
+}

@@ -501,7 +501,7 @@ pub fn rebalance(
     min_notional: f64,
     band: f64,
 ) -> (Vec<Rebalance>, Vec<String>) {
-    let p = rebalance_plan(weights, market_for, holdings, prices, capital, min_notional, band);
+    let p = rebalance_plan(weights, market_for, holdings, prices, capital, min_notional, band, |_| 0.0);
     (p.orders, p.untradable)
 }
 
@@ -516,8 +516,23 @@ pub struct RebalancePlan {
     /// (market id, the order's notional) for each difference past the band
     /// whose order would be under `min_notional`.
     pub below_min: Vec<(String, f64)>,
+    /// (market id, what it holds there) for each holding that has to be sold
+    /// whole (a close, or a trim that would leave less than `min_notional`)
+    /// but is worth less than the smallest order the exchange itself takes
+    /// (`venue_min`): it cannot be sold at all, and is left as dust.
+    pub dust: Vec<(String, f64)>,
 }
 
+/// [`rebalance`] with the orders it leaves out named (see [`RebalancePlan`]).
+///
+/// `min_notional` is the smallest order the engine sends for a rebalance;
+/// `venue_min` is, per market id, the smallest order the exchange accepts at
+/// all (0 on paper). A sale is never kept back by `min_notional` when it
+/// empties the holding: a close (the target no longer wants the coin) goes
+/// out whatever its size and however small against the band, and a trim
+/// under `min_notional` that would leave a holding under it sells the whole
+/// holding instead. Only a holding worth less than `venue_min` stays, as dust.
+#[allow(clippy::too_many_arguments)]
 pub fn rebalance_plan(
     weights: &BTreeMap<String, f64>,
     market_for: impl Fn(&str) -> Option<String>,
@@ -526,8 +541,10 @@ pub fn rebalance_plan(
     capital: f64,
     min_notional: f64,
     band: f64,
+    venue_min: impl Fn(&str) -> f64,
 ) -> RebalancePlan {
     let mut below_min = vec![];
+    let mut dust = vec![];
     let mut targets: BTreeMap<String, f64> = BTreeMap::new();
     let mut untradable = vec![];
     for (coin, w) in weights {
@@ -549,11 +566,21 @@ pub fn rebalance_plan(
         let current = qty.max(0.0) * price;
         let target = w * capital;
         let diff = target - current;
-        if diff.abs() < banded {
+        // Closing what the target no longer wants always goes out, however small.
+        let closes = target <= 0.0 && current > 1e-9;
+        if diff.abs() < banded && !closes {
             continue;
         }
-        let (side, notional) = if diff > 0.0 { (Side::Buy, diff) } else { (Side::Sell, (-diff).min(current)) };
-        if notional < min_notional {
+        let (side, mut notional) = if diff > 0.0 { (Side::Buy, diff) } else { (Side::Sell, (-diff).min(current)) };
+        if side == Side::Sell && (closes || (notional < min_notional && current - notional < min_notional)) {
+            // The whole holding: a close, or a trim too small to send that
+            // would leave a holding too small to trade.
+            notional = current;
+            if notional < min_notional && notional < venue_min(&m) {
+                dust.push((m, notional));
+                continue;
+            }
+        } else if notional < min_notional {
             if notional > 1e-9 {
                 below_min.push((m, notional));
             }
@@ -569,7 +596,7 @@ pub fn rebalance_plan(
     }
     // Sells first: they free the cash the buys need.
     out.sort_by_key(|r| if r.side == Side::Sell { 0 } else { 1 });
-    RebalancePlan { orders: out, untradable, below_min }
+    RebalancePlan { orders: out, untradable, below_min, dust }
 }
 
 /// [`rebalance`] for a book that may be short (perps): `weights` are signed
@@ -712,7 +739,7 @@ mod tests {
     fn an_order_under_the_venue_minimum_is_named_not_sent() {
         // A $95 book: 6 % of it in BTC is a $5.70 order, under Alpaca's $10.
         let w: BTreeMap<String, f64> = [("BTC", 0.06), ("ETH", 0.20)].into_iter().map(|(k, v)| (k.into(), v)).collect();
-        let p = rebalance_plan(&w, market, &HashMap::new(), &prices(), 95.0, 10.0, 0.002);
+        let p = rebalance_plan(&w, market, &HashMap::new(), &prices(), 95.0, 10.0, 0.002, |_| 10.0);
         assert_eq!(p.orders.len(), 1, "{:?}", p.orders);
         assert_eq!(p.orders[0].market_id, "crypto:ETH/USD");
         assert_eq!(p.below_min.len(), 1);
@@ -723,8 +750,57 @@ mod tests {
         assert_eq!(orders, p.orders);
         // A difference inside the band is not "below the minimum", it is nothing.
         let held: HashMap<String, (f64, f64)> = [("crypto:ETH/USD".to_string(), (0.00475, 4_000.0))].into_iter().collect();
-        let p = rebalance_plan(&w, market, &held, &prices(), 95.0, 10.0, 0.002);
+        let p = rebalance_plan(&w, market, &held, &prices(), 95.0, 10.0, 0.002, |_| 10.0);
         assert!(p.below_min.iter().all(|(m, _)| m != "crypto:ETH/USD"), "{:?}", p.below_min);
+    }
+
+    #[test]
+    fn a_close_goes_out_whatever_its_size_and_a_small_trim_sells_the_rest() {
+        let w = |pairs: &[(&str, f64)]| -> BTreeMap<String, f64> { pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect() };
+        // SOL at $200: 0.04 SOL is an $8 holding, under the $10 order minimum.
+        let held: HashMap<String, (f64, f64)> = [("crypto:SOL/USD".to_string(), (0.04, 200.0))].into_iter().collect();
+
+        // The signal drops SOL: the whole $8 is sold, since the exchange
+        // itself takes orders from $5 here.
+        let p = rebalance_plan(&w(&[("BTC", 0.5)]), market, &held, &prices(), 100.0, 10.0, 0.002, |_| 5.0);
+        let sol = p.orders.iter().find(|o| o.market_id == "crypto:SOL/USD").expect("the close is sent");
+        assert_eq!(sol.side, Side::Sell);
+        assert!((sol.notional - 8.0).abs() < 1e-9, "the whole holding: {}", sol.notional);
+        assert_eq!(p.orders[0].market_id, "crypto:SOL/USD", "sells first");
+        assert!(p.below_min.is_empty() && p.dust.is_empty(), "{p:?}");
+
+        // A close is not "inside the band" either: $8 of a $10,000 book.
+        let p = rebalance_plan(&w(&[]), market, &held, &prices(), 10_000.0, 10.0, 0.002, |_| 5.0);
+        assert_eq!(p.orders.len(), 1);
+        assert!((p.orders[0].notional - 8.0).abs() < 1e-9);
+
+        // Under the exchange's own minimum it cannot be sold at all: dust,
+        // named once by the engine, never sent and never retried.
+        let p = rebalance_plan(&w(&[]), market, &held, &prices(), 100.0, 10.0, 0.002, |_| 10.0);
+        assert!(p.orders.is_empty(), "{:?}", p.orders);
+        assert_eq!(p.dust, vec![("crypto:SOL/USD".to_string(), 8.0)]);
+        assert!(p.below_min.is_empty());
+
+        // A trim under the minimum that would leave less than the minimum:
+        // the whole $14 is sold, not $6 of it, and not left alone.
+        let held14: HashMap<String, (f64, f64)> = [("crypto:SOL/USD".to_string(), (0.07, 200.0))].into_iter().collect();
+        let p = rebalance_plan(&w(&[("SOL", 0.08)]), market, &held14, &prices(), 100.0, 10.0, 0.002, |_| 5.0);
+        assert_eq!(p.orders.len(), 1, "{p:?}");
+        assert_eq!(p.orders[0].side, Side::Sell);
+        assert!((p.orders[0].notional - 14.0).abs() < 1e-9, "{}", p.orders[0].notional);
+
+        // A trim under the minimum that leaves a tradable holding is named
+        // and left, as before.
+        let held30: HashMap<String, (f64, f64)> = [("crypto:SOL/USD".to_string(), (0.15, 200.0))].into_iter().collect();
+        let p = rebalance_plan(&w(&[("SOL", 0.25)]), market, &held30, &prices(), 100.0, 10.0, 0.002, |_| 5.0);
+        assert!(p.orders.is_empty(), "{:?}", p.orders);
+        assert_eq!(p.below_min.len(), 1);
+        assert!((p.below_min[0].1 - 5.0).abs() < 1e-9);
+
+        // On paper (no exchange minimum) the plain call closes it too.
+        let (orders, _) = rebalance(&w(&[]), market, &held, &prices(), 100.0, 10.0, 0.002);
+        assert_eq!(orders.len(), 1);
+        assert!((orders[0].notional - 8.0).abs() < 1e-9);
     }
 
     fn evidence(oos: f64, is: f64, p: f64, filter: bool) -> LabEvidence {
