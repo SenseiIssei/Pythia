@@ -260,6 +260,22 @@ def test_a_patched_template_is_byte_for_byte_the_freshly_built_transaction():
     assert sold is not None and sold[1] >= 0
 
 
+def test_program_ids_are_the_ones_on_chain():
+    # Checked with getAccountInfo on mainnet (2026-10-22). One wrong letter in TOKEN once made every
+    # transaction fail with ProgramAccountNotFound; only the simulation caught it.
+    assert X.TOKEN == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    assert X.TOKEN_2022 == "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+    assert X.ATA_PROGRAM == "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+    assert X.COMPUTE_BUDGET == "ComputeBudget111111111111111111111111111111"
+    assert X.FEE_PROGRAM == "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+    assert X.SYSTEM == "11111111111111111111111111111111"
+    assert X.PUMP == "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    assert X.PUMP_AMM == "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+    assert X.WSOL == "So11111111111111111111111111111111111111112"
+    for k in (X.TOKEN, X.TOKEN_2022, X.ATA_PROGRAM, X.FEE_PROGRAM, X.PUMP, X.PUMP_AMM):
+        assert len(X.b58decode(k)) == 32
+
+
 def test_pump_buy_data_matches_the_programs_argument_layout():
     # amount u64, max_sol_cost u64, track_volume and partial_fill as one-byte OptionBool, both off
     info = X.CurveInfo(key(1), X.TOKEN, key(5), key(6))
