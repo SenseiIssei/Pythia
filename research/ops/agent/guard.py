@@ -64,9 +64,11 @@ def table_problems(old: jobs.Table, new: jobs.Table) -> list[str]:
     for section in ("paths", "defaults", "datasets", "backup"):
         if old.raw.get(section) != new.raw.get(section):
             out.append(f"the job table's {section} section changed")
+    written = {str(j.get("name")): j for j in new.raw.get("jobs") or []}     # each job as the table states it
     for name, before in old.jobs.items():
         sensitive = before["kind"] == "host" or before["volumes"] or before["env_files"] or before.get("network")
-        if sensitive and new.jobs.get(name) != before:
+        was = next(j for j in old.raw.get("jobs") or [] if str(j.get("name")) == name)
+        if sensitive and written.get(name) != was:
             out.append(f"job {name}: it reaches beyond the lab container, so the agent may not change or remove it")
     for name, job in new.jobs.items():
         before = old.jobs.get(name)
