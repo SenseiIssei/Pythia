@@ -9,7 +9,11 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _p = Path(__file__).resolve().parents[2] / "ops" / "pumpfun_live_watch.py"
+if not _p.exists():                                     # the lab code alone (a deploy), without research/ops
+    pytest.skip("research/ops is not next to the lab", allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("pumpfun_live_watch", _p)
 W = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(W)

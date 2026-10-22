@@ -181,6 +181,22 @@ class Engine:
                 self.push(t + off * 1000, "decide", (mint, off))
         self.push(t + EVICT_AGE_MS, "evict", mint)
 
+    def adopt(self, r: dict, now_ms: int) -> bool:
+        """A token created before this engine started, from a recorded create row: known from now on, so its
+        migration and trades count, but nothing is signalled, decided or booked for it (the creator book
+        loaded at start already holds its creation). It stays at least IDLE_MS to show it is still alive."""
+        mint = r.get("mint")
+        if not mint or mint in self.tokens:
+            return False
+        t = int(r["t"])
+        tok = Token(mint, r.get("creator") or "", t, r.get("tx") or 0, r.get("vs") or 0, r.get("vt") or 0,
+                    r.get("rt") or 0, self.book.snapshot(r.get("creator") or "", t), r.get("name") or "",
+                    r.get("symbol") or "", r.get("uri") or "", r.get("mayhem"), r.get("cashback"), r.get("quote"),
+                    r.get("user"))
+        self.tokens[mint] = tok
+        self.push(max(t + EVICT_AGE_MS, now_ms + IDLE_MS), "evict", mint)
+        return True
+
     def trade(self, t, tx, mint, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, slot=None, sig=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)

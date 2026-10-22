@@ -47,6 +47,7 @@ STATUS_S = 30.0
 BALANCE_S = 30.0
 HOLDINGS_S = 300.0
 REPORT_S = 600.0
+WARM_H = 12                                             # coins created this long before a start are adopted
 LINKS = max(1, int(os.environ.get("PYTHIA_PF_LIVE_LINKS", "2")))
 AMM_LINKS = max(1, int(os.environ.get("PYTHIA_PF_LIVE_AMM_LINKS", "2")))
 
@@ -79,6 +80,20 @@ def load_engine():
     except Exception:
         pass
     return Engine([], book=book, wallets=wallets, cats=cats, models=models, decisions=False)
+
+
+def warm_tokens(engine, now_ms: int, hours: float = WARM_H, root=None) -> int:
+    """Adopt every coin the collector recorded as created in the last `hours`: the engine only knows coins
+    it saw created, so after a restart it would not see the migration of an older one (P_pool0 buys at
+    the migration, mostly of coins made hours before). Returns how many were adopted."""
+    import datetime as dt
+    days = sorted({(dt.datetime.fromtimestamp(now_ms / 1000, dt.timezone.utc) - dt.timedelta(hours=h))
+                   .strftime("%Y-%m-%d") for h in (hours, 0)})
+    df = store.read("creates", days, root)
+    if df.is_empty():
+        return 0
+    df = df.filter(df["t"] >= now_ms - int(hours * 3_600_000)).sort("t")
+    return sum(1 for r in df.iter_rows(named=True) if engine.adopt(r, now_ms))
 
 
 class Service:
@@ -116,6 +131,12 @@ class Service:
                 self.book = None
                 self.why = [f"the live book could not start ({type(e).__name__})"]
             if self.book is not None:
+                try:
+                    n = warm_tokens(self.engine, int(time.time() * 1000))
+                    print(f"live service: {n:,} coins from the last {WARM_H} h adopted, their migrations count",
+                          flush=True)
+                except Exception as e:                      # without them it still trades the coins it sees made
+                    print(f"live service: older coins not adopted ({type(e).__name__}: {e})", flush=True)
                 self.rpc = self.book.exec.builder.rpc
                 self.address = self.book.exec.signer.pubkey
                 self.refresh_holdings()
