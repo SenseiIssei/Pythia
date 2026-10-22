@@ -16,7 +16,7 @@ when it
   job, an image other than the lab's, extra volumes, env files or a network,
   or a change to the table's paths, defaults, datasets or backup sections;
 - is not a fast-forward of the base (the agent has to rebase first);
-- adds a line that looks private: a public IP address, an e-mail address, a key or
+- adds a line that looks private (run_agent.sh also runs gitleaks over the commits): a public IP address, an e-mail address, a key or
   token, a private key block, a wallet key array, a personal path, the owner's
   server or panel. The repository is public; such a line never goes out
   automatically.

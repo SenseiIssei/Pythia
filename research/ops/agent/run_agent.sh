@@ -54,6 +54,8 @@ patches=$root/patches
 src=/opt/pythia-src
 key=/etc/pythia/agent-deploy-key
 remote=git@github.com:SenseiIssei/Pythia.git
+# The secret scanner every agent round has to pass before anything is pushed (pinned).
+gitleaks=ghcr.io/gitleaks/gitleaks:v8.28.0
 stamp=$(date -u +%Y%m%d-%H%M)
 export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 
@@ -153,7 +155,10 @@ if [ -e "$1" ]; then
     if [ "$(tgit rev-parse origin/main)" != "$base" ]; then
       tgit push -q origin "HEAD:refs/heads/agent/$mode-$stamp"
       status="held: main moved during the run, branch agent/$mode-$stamp is for the owner"
-    elif why=$(python3 "$here/guard.py" "$trusted" "$base" "$head"); then
+    elif why=$(python3 "$here/guard.py" "$trusted" "$base" "$head") \
+      && why=$(docker run --rm -v "$trusted:/repo:ro" "$gitleaks" git /repo --config /repo/.gitleaks.toml \
+               --gitleaks-ignore-path /repo/.gitleaksignore --log-opts="$base..$head" --redact --no-banner 2>&1 \
+               || { echo "gitleaks found something in the agent's commits"; false; }); then
       tgit push -q origin "HEAD:refs/heads/main"
       git -C "$src" fetch -q && git -C "$src" merge -q --ff-only '@{u}'
       for _ in $(seq 1 30); do bash "$src/research/ops/deploy_lab.sh" >/dev/null 2>&1 && break; sleep 30; done
