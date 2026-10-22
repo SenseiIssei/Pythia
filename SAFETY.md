@@ -142,15 +142,30 @@ reaches a strategy without one, and it is narrow on purpose:
 
 - **It drops one gate, the passport.** Everything else about live stays: your typed confirmation,
   live routing armed on the Live page, the venue enabled for live, a max-loss rule, the free cash
-  read from the venue, the kill switch, the daily loss breakers, reconciliation, the order
-  lifecycle and the maker settings.
+  read from the venue, the kill switch, reconciliation, the order lifecycle and the maker settings.
+  The daily loss breakers of the risk limits still run on its orders, but they measure the paper
+  account's equity, not the test's, so they do not protect it: what bounds its loss is its own
+  max-loss rule (its floor) and its cap.
+- **It always ends in cash.** When a stop rule or its floor stops it, it closes every position it
+  holds at the venue, whatever "sell everything when it stops" says: the setting is forced on at
+  the start and an edit cannot turn it off, so no real coin is left without anything managing it.
+  Only the Stop button lets you choose to keep what it holds.
+- **It never holds more than its money.** On a live route the lab's weights are scaled to add up to
+  at most 100 %, and every buy is cut so the autopilot's holdings (with its orders still at the
+  venue) never exceed its own equity; a buy with no room left is refused and journaled.
+- **A sale that empties a holding always goes out.** A coin the lab drops is sold whatever its
+  size, down to the smallest order the exchange itself takes (on Kraken the pair's minimum volume);
+  a trim too small to send that would leave too little to trade sells the whole holding. A holding
+  under the exchange's own minimum cannot be sold at all: it is named once as stuck dust and never
+  retried.
 - **It is capped.** At most `PYTHIA_LIVE_TEST_MAX_USD` dollars (default 120). The code never allows
   more than 300, whatever the variable says. Its max-loss rule must allow at most 25 % of the
   amount, in % or in dollars. Only one live test runs at a time, and a change to it keeps the same
   caps.
 - **You name the strategy.** Pythia never picks one for a test, a test is never a portfolio, and an
   experimental lab book (one that failed the lab's deflation test) stays refused for real money,
-  test or not.
+  test or not. A book the lab marks as an experiment while it runs pauses the live autopilot (a
+  test or not) with the reason on its card and in an alert; it cannot be resumed.
 - **It says so everywhere.** You confirm it with its own phrase, `START LIVE TEST`. The journal,
   the autopilot's last action, the alerts and every view of it in the app say LIVE TEST or TEST.
 - **It is not evidence.** Its trades never count toward a strategy's passport (the live trade

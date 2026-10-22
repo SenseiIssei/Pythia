@@ -150,6 +150,10 @@ That's the one strategy whose universe is the Alpaca tickers. From here:
 US regular hours are **9:30–16:00 ET** (= **15:30–22:00 CEST**). Pythia asks Alpaca's own clock
 rather than guessing, so holidays and half-days are handled.
 
+That clock and account check reads Alpaca's **live** endpoint only while Alpaca itself is armed for
+live on the live endpoint. With live armed for crypto alone (or not at all) it reads the paper
+account, so the session check that US-share lab rebalances on the demo route wait for keeps working.
+
 Outside that window, **new Alpaca entries are refused up front** with a readable reason
 (`Live entry blocked for AAPL: US equity market closed (next open …)`) instead of being submitted
 and left to time out. The Live page shows the same reason in an amber banner, and a readiness
@@ -277,8 +281,16 @@ the best lab book, before it has passed its checks. See [`SAFETY.md`](../SAFETY.
 What it allows and what it keeps:
 
 - It drops only the passport gate. The confirmation, live routing armed for the venue, the venue
-  enabled for live, a max-loss rule, the free cash check, the kill switch, the daily loss breakers,
-  reconciliation, the order lifecycle and the maker settings all still apply.
+  enabled for live, a max-loss rule, the free cash check, the kill switch, reconciliation, the
+  order lifecycle and the maker settings all still apply. The daily loss breakers measure the
+  paper account's equity, so they do not limit the test; its own max-loss rule does.
+- It always sells everything when a stop rule or its floor stops it. The switch is forced on and
+  an edit that turns it off is refused; only the Stop button can keep what it holds.
+- It never holds more than its own equity: the lab's weights are scaled to at most 100 % and a buy
+  is cut, or refused with a journal line, when the holdings and orders at the venue would exceed it.
+- A coin the lab drops is sold whatever its size, down to the exchange's own minimum (on Kraken the
+  pair's minimum volume, about $5). Below that it is named once as stuck dust and left alone.
+- A lab book the lab marks as an experiment while it runs pauses the test for good.
 - The amount is at most `PYTHIA_LIVE_TEST_MAX_USD` (default 120 USD). The code clamps a bigger
   value to 300 USD.
 - The max-loss rule must allow at most 25 % of the amount.
