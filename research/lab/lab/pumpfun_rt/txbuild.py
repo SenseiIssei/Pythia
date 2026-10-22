@@ -741,6 +741,21 @@ def amm_sell(user: str, p: PoolInfo, tokens: int, min_out_l: int, priority_l: in
 def round_trip(buy: list[Ix], sell: list[Ix], units: int = 3 * UNITS) -> list[Ix]:
     """A buy followed by the sale of what it bought, in one message, for the dry run only
     (live_exec simulate): the program checks both against the real accounts and nothing is sent.
-    Each side's compute budget is dropped for one budget over both (a duplicate is an error)."""
-    body = [ix for ix in buy + sell if ix.program != COMPUTE_BUDGET]
-    return [compute_limit(units)] + body
+    Each side's compute budget is dropped for one budget over both (a duplicate is an error): one
+    unit limit and the buy's unit price, as a live transaction carries. Each side's tip (Sender) is
+    dropped for one tip at the end, as a live transaction carries one."""
+    both = buy + sell
+    price = next((ix for ix in both if ix.program == COMPUTE_BUDGET and ix.data[:1] == bytes([3])), None)
+    tips = [ix for ix in both if ix.program == SYSTEM and len(ix.accounts) == 2 and len(ix.data) == 12
+            and ix.data[:4] == struct.pack("<I", 2) and ix.accounts[1][0] in JITO_TIP_ACCOUNTS | HELIUS_TIP_ACCOUNTS]
+    skip = {id(ix) for ix in tips}
+    body = [ix for ix in both if ix.program != COMPUTE_BUDGET and id(ix) not in skip]
+    return [compute_limit(units)] + ([price] if price is not None else []) + body + tips[:1]
+
+
+def canonical_pool(mint: str) -> str:
+    """The PumpSwap pool a completed curve migrates into: index 0, owned by the pump program's pool
+    authority for the mint, quoted in wrapped SOL. Builder.pool reads it and refuses it unless its
+    base mint is this token, so a wrong address never trades."""
+    auth = pda([b"pool-authority", key(mint)], PUMP)
+    return pda([b"pool", (0).to_bytes(2, "little"), key(auth), key(mint), key(WSOL)], PUMP_AMM)

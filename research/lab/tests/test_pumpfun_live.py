@@ -175,7 +175,7 @@ def test_check_own_refuses_anything_but_a_plain_trade():
     with pytest.raises(ValueError, match="buy or sell"):
         X.check_own(user, [X.Ix(X.PUMP, [], X.discriminator("withdraw"))])
     rt = X.round_trip(X.amm_buy(user, p, 5, 1, 1), X.amm_sell(user, p, 1, 0, 1, True))
-    assert sum(ix.program == X.COMPUTE_BUDGET for ix in rt) == 1
+    assert [ix.data[:1] for ix in rt if ix.program == X.COMPUTE_BUDGET] == [bytes([2]), bytes([3])]  # one limit, one price
 
 
 def _swap(ixs, program=X.PUMP_AMM):
@@ -818,13 +818,41 @@ def test_a_trade_the_node_has_not_got_yet_waits_for_the_next_round(tmp_path):
     assert "0.001" in (tmp_path / "ledger.csv").read_text(encoding="utf-8")
 
 
-def test_the_book_takes_the_chain_correction_into_its_stops(tmp_path):
+def test_the_book_takes_the_chain_correction_into_its_stops_once_even_across_a_restart(tmp_path):
+    """Finding 6: the totals are recomputed from the ledger (corrected in place) and the journal, so a
+    correction is counted once, the same message twice adds nothing, and a restart reads the same."""
+    from lab.pumpfun_rt import chain_pnl as CP
+    wallet = FakeSigner.pubkey
+    deltas = {"BUY": -11_775_858, "SELL": 11_103_855, "FAILED": -1_005_000}
+
+    class Rpc:
+        def call(self, method, params):
+            return {"meta": {"preBalances": [10**10], "postBalances": [10**10 + deltas[params[0]]]},
+                    "transaction": {"message": {"accountKeys": [wallet]}}}
     ex = executor(tmp_path)
     seen = []
     ex.on_chain = lambda: seen.append(1)
-    ex.results.put(("chain", None, -1_346_201))
+    LX.write_close({"mode": "test", "mint": "DLMpump", "signal_ms": T0 - 60_000, "land_ms": T0 - 50_000,
+                    "exit_ms": T0 - 1_000, "pnl_sol": 0.000674198, "pid": 7})
+    with (LX.data_dir() / "orders.jsonl").open("w", encoding="utf-8") as fh:
+        for side, what, sig in (("buy", "filled", "BUY"), ("sell", "failed", "FAILED"), ("sell", "filled", "SELL")):
+            fh.write(json.dumps({"what": what, "run": LX.RUN_ID, "pid": 7, "side": side, "mint": "DLMpump",
+                                 "sig": sig, "t": T0 - 2_000}) + "\n")
+    ex.recompute()
+    ex.booked(-1_005_000, sig="FAILED")                       # the failed sale's fee, at once
+    assert ex.totals["pnl_l"] == ex.day_pnl_l == 674_198 - 1_005_000
+    adjust, changed = CP.reconcile(Rpc(), wallet, LX.data_dir())
+    assert changed
+    chain = -11_775_858 + 11_103_855 - 1_005_000
+    ex.results.put(("chain", None, adjust))
     ex.poll(T0)
-    assert ex.totals["pnl_l"] == -1_346_201 and ex.day_pnl_l == -1_346_201 and seen == [1]
+    assert ex.totals["pnl_l"] == ex.day_pnl_l == chain and seen == [1]   # the fee once (inside the row now)
+    ex.results.put(("chain", None, adjust))                  # the same message again: nothing is added
+    ex.poll(T0)
+    assert ex.totals["pnl_l"] == chain
+    again = executor(tmp_path)                               # a restart reads the same
+    assert again.totals["pnl_l"] == again.day_pnl_l == chain
+    assert json.loads(LX.totals_path().read_text())["pnl_l"] == chain
 
 
 def test_a_restart_keeps_the_days_losses_for_the_daily_stop(tmp_path, monkeypatch):
@@ -862,7 +890,8 @@ def test_a_failed_sale_that_landed_counts_its_fee_and_one_that_never_landed_coun
 
 def test_a_leftover_already_sold_on_chain_is_dropped_not_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(LX, "data_dir", lambda: tmp_path)
-    ex = executor(tmp_path)
+    now = [T0]
+    ex = executor(tmp_path, clock=lambda: now[0])
     o = P.Order(-1, "sell", MINT, "curve", 1_000, 0, T0, "leftover")
     pend = {"side": "sell", "order": o, "sig": None, "sent_ms": T0, "leftover": True}
     ex.leftovers[-1] = {"mint": MINT, "tokens": 1_000, "tries": 1}
@@ -871,7 +900,10 @@ def test_a_leftover_already_sold_on_chain_is_dropped_not_retried(tmp_path, monke
     assert -1 not in ex.leftovers and not ex.pending
     ex.leftovers[-2] = {"mint": MINT, "tokens": 1_000, "tries": 1}
     ex.verifying[-2] = ({**pend, "order": P.Order(-2, "sell", MINT, "curve", 1_000, 0, T0, "leftover")}, "x", 0)
-    ex._holds(-2, 1_000, T0)                                                       # still held: sell it again
+    ex._holds(-2, 1_000, T0)                                                       # still held: sell it again,
+    assert -2 not in ex.pending and -2 in ex.deferred                              # after the backoff
+    now[0] += LX.backoff_ms(1)
+    ex.poll(T0)
     assert -2 in ex.pending and ex.leftovers[-2]["tries"] == 2
 
 
@@ -959,3 +991,541 @@ def test_a_fill_line_wins_over_an_earlier_failure_line_of_the_same_signature(tmp
              {"what": "filled", "side": "sell", "mint": "Ypump", "sig": "SELL", "t": 9000}]
     (tmp_path / "orders.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
     assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (-500_000, True)
+
+
+# ---------------------------------------------------------------- the audit of 2026-10-22: settling every order
+
+class CountingSigner:
+    """A different signature for every transaction (the real ones differ too), so each try has its own id."""
+    pubkey = FakeSigner.pubkey
+
+    def __init__(self, start: int = 0):
+        self.n = start
+
+    def sign(self, msg: bytes) -> bytes:
+        self.n += 1
+        return self.n.to_bytes(64, "big")
+
+
+def sig_no(n: int) -> str:
+    return X.b58(n.to_bytes(64, "big"))
+
+
+class ChainRpc:
+    """A node that answers what the test set: statuses, landed transactions, the wallet's tokens."""
+
+    def __init__(self):
+        self.sent, self.status, self.txs, self.held = [], {}, {}, {}
+        self.answer = "node-answer"
+        self.send_error = self.status_error = None
+
+    def send(self, tx, skip_preflight=False):
+        self.sent.append(tx)
+        if self.send_error is not None:
+            raise self.send_error
+        return self.answer
+
+    def statuses(self, sigs):
+        if self.status_error is not None:
+            raise self.status_error
+        return [self.status.get(s) for s in sigs]
+
+    def transaction(self, sig):
+        return self.txs.get(sig)
+
+    def holdings(self, owner):
+        return dict(self.held)
+
+    def fee_of(self, sig):
+        return None
+
+
+LANDED = {"err": None, "confirmationStatus": "confirmed"}
+
+
+def own_tx(delta: int, tok_pre: int, tok_post: int, fee: int = 1_005_000, err=None, mint: str = MINT) -> dict:
+    """A getTransaction result of our own trade: the wallet's SOL change and its token balances."""
+    def bal(n):
+        return [{"accountIndex": 1, "mint": mint, "owner": FakeSigner.pubkey, "uiTokenAmount": {"amount": str(n)}}] \
+            if n else []
+    return {"blockTime": (T0 + 3_000) // 1000, "transaction": {"message": {"accountKeys": [FakeSigner.pubkey, "X"]}},
+            "meta": {"err": err, "fee": fee, "preBalances": [10 ** 10, 0], "postBalances": [10 ** 10 + delta, 0],
+                     "preTokenBalances": bal(tok_pre), "postTokenBalances": bal(tok_post)}}
+
+
+def chain_book(now, builder=None, verify=False, start_sig=0):
+    """A live book on a curve with a node the test controls; the buy of the curve is pending."""
+    gate = OpenGate()
+    gate.rule, gate.mode = "X", "test"
+    b = builder or FakeBuilder()
+    b.rpc = ChainRpc()
+    ex = LX.LiveExecutor(gate, CountingSigner(start_sig), b, LIMITS, clock=lambda: now[0], start=False, mode="test",
+                         max_total_sol=1.0, rule="X", totals={"pnl_l": 0, "since_ms": None, "trades": 0,
+                                                              "total_alerted": False})
+    ex.verify_sales = verify
+    eng = sim.Engine([], costs=Fixed())
+    pipe = eng.add_pipe(P.Pipeline(eng, [strat(sl=0.99, ladder=((0.3, 1.0),), time_s=600)], ex, limits=LIMITS,
+                                   name="live", record=False))
+    book = LX.LiveBook(pipe, ex, "X", alerts=False)
+    pipe.on_close = book.on_close
+    cards = []
+    book._post = lambda make: cards.extend(make("en"))
+    cv = Curve(eng)
+    eng.advance(T0 + 1)
+    return ex, b.rpc, pipe, cv, book, cards
+
+
+def settle(ex, pipe, t):
+    """One round of the worker and the stream's poll."""
+    ex.drain()
+    pipe.poll(t)
+    ex.drain()
+    pipe.poll(t)
+
+
+def open_position(ex, pipe, cv):
+    settle(ex, pipe, T0 + 100)
+    cv.buy(T0 + 1_400, int(0.05 * SOL), FakeSigner.pubkey)          # the stream's fill of our buy
+    return pipe.pos[0]
+
+
+def order_lines():
+    return [json.loads(x) for x in (LX.data_dir() / "orders.jsonl").read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_landed_order_whose_stream_fill_never_came_is_read_back_from_the_chain(tmp_path):
+    """Finding 1: a buy and a sale that landed while the stream missed their fills are booked from the
+    transaction itself, so the buy gets its exits and the sale closes the position."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now)
+    settle(ex, pipe, T0 + 100)
+    want = pipe.pos[0]["want"]
+    sig = ex.pending[0]["sig"]
+    rpc.status[sig] = LANDED
+    rpc.txs[sig] = own_tx(-int(0.05 * SOL) - 1_005_000, 0, want)
+    now[0] += LX.CONFIRM_MS + 1
+    settle(ex, pipe, T0 + 200)                                       # asked, landed; the stream gets a grace
+    assert 0 in ex.pending and pipe.pos[0]["state"] == "pending"
+    now[0] += LX.LANDED_GRACE_MS
+    settle(ex, pipe, T0 + 300)
+    p = pipe.pos[0]
+    assert p["state"] == "open" and p["tokens"] == want and p["cost_l"] == int(0.05 * SOL) and not ex.pending
+    assert any(o["what"] == "filled" and o["sig"] == sig and o.get("onchain") for o in order_lines())
+    cv.buy(T0 + 1_400, int(0.05 * SOL), FakeSigner.pubkey)          # the stream's late copy: not booked twice
+    assert pipe.pos[0]["tokens"] == want and not ex.pending and not ex.leftovers
+    cv.buy(T0 + 2_000, 15 * SOL, BUYERS[0])                          # the take-profit sale goes out
+    settle(ex, pipe, T0 + 2_100)
+    sale = ex.pending[0]["sig"]
+    rpc.status[sale] = {"err": None, "confirmationStatus": "finalized"}
+    rpc.txs[sale] = own_tx(int(0.07 * SOL) - 1_005_000, want, 0)
+    now[0] += LX.CONFIRM_MS + LX.LANDED_GRACE_MS + 2
+    settle(ex, pipe, T0 + 2_200)
+    now[0] += LX.LANDED_GRACE_MS
+    settle(ex, pipe, T0 + 2_300)
+    assert not pipe.pos and not ex.pending and not ex.exposure
+    row = LX.read_ledger(1)[0]
+    assert row["proceeds_sol"] == pytest.approx(0.07) and row["mint"] == MINT
+
+
+def test_a_failed_sale_backs_off_books_its_fee_at_once_and_is_given_up_after_the_cap(tmp_path):
+    """Finding 2: a failed exit is not sent again at once but after 1, 2, 4 ... s, each landed failure's fee
+    counts in the day's and the total's figures at once, and after SELL_MAX_FAILS the position is stuck."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, cards = chain_book(now)
+    p = open_position(ex, pipe, cv)
+    pipe._sell_all(p, T0 + 2_000, "stop")
+    fee = ex._fee(failed=True)
+    for n in range(1, LX.SELL_MAX_FAILS + 1):
+        settle(ex, pipe, T0 + 2_000)
+        sig = ex.pending[0]["sig"]
+        rpc.status[sig] = {"err": {"InstructionError": [3, {"Custom": 6003}]}, "confirmationStatus": "confirmed"}
+        now[0] += LX.CONFIRM_MS + 1
+        settle(ex, pipe, T0 + 2_000)
+        assert 0 not in ex.pending                                   # not sent again at once
+        assert ex.day_pnl_l == ex.totals["pnl_l"] == -n * fee        # the fee counted at once
+        if n < LX.SELL_MAX_FAILS:
+            assert 0 in ex.deferred and ex.retry_at[0] - now[0] == LX.backoff_ms(n) == min(60, 2 ** (n - 1)) * 1000
+            now[0] = ex.retry_at[0]
+            pipe.poll(T0 + 2_000)
+            assert 0 in ex.pending                                   # the backoff is over: sent again
+    assert ex.stuck.get(0) and not ex.deferred and 0 in pipe.pos
+    sent = len(rpc.sent)
+    now[0] += 3_600_000
+    settle(ex, pipe, T0 + 9_000)
+    assert len(rpc.sent) == sent == 1 + LX.SELL_MAX_FAILS            # the buy and the tries, no more
+    assert book.positions()[0]["state"] == "stuck"
+    assert sum(1 for c in cards if "given up" in c.title) == 1       # the owner hears it once
+
+
+def test_a_retry_sells_what_the_wallet_holds_and_closes_the_account_only_when_it_sells_all(tmp_path):
+    """Finding 2: the wallet holds more than the position (the close would fail every time): the retry
+    sells the position's tokens and leaves the account open."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now, verify=True)
+    p = open_position(ex, pipe, cv)
+    left = p["left"]
+    pipe._sell_all(p, T0 + 2_000, "stop")
+    settle(ex, pipe, T0 + 2_000)
+    assert ex.builder.built[-1] == ("sell", left, 0, True)
+    rpc.held = {MINT: left + 500}
+    ex._failed(0, ex.pending[0], T0 + 3_000, "failed on chain: the account is not empty", 0)
+    settle(ex, pipe, T0 + 3_000)
+    assert 0 not in ex.pending and 0 in ex.deferred
+    now[0] = ex.retry_at[0]
+    settle(ex, pipe, T0 + 4_000)
+    assert ex.builder.built[-1] == ("sell", left, 0, False)
+
+
+def test_a_partial_sale_the_stream_missed_is_booked_and_the_rest_sold_after_the_backoff(tmp_path):
+    """Finding 2: a sale that landed only in part (or unseen) is not taken for a failure of the whole."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now, verify=True)
+    p = open_position(ex, pipe, cv)
+    left = p["left"]
+    pipe._sell_all(p, T0 + 2_000, "stop")
+    settle(ex, pipe, T0 + 2_000)
+    sig = ex.pending[0]["sig"]
+    rpc.held = {MINT: left // 4}
+    rpc.status[sig] = LANDED
+    rpc.txs[sig] = own_tx(int(0.03 * SOL), left, left // 4)
+    ex._failed(0, ex.pending[0], T0 + 3_000, "not landed", 0)
+    settle(ex, pipe, T0 + 3_000)
+    assert pipe.pos[0]["left"] == left // 4 and pipe.pos[0]["proceeds_l"] == int(0.03 * SOL) + 1_005_000
+    assert 0 in ex.deferred
+    now[0] = ex.retry_at[0]
+    settle(ex, pipe, T0 + 4_000)
+    assert ex.builder.built[-1] == ("sell", left // 4, 0, True)     # all the wallet holds: the account closes
+
+
+def test_a_retried_curve_sale_goes_to_the_pool_when_the_curve_completed(tmp_path):
+    """Finding 2: a migration the stream missed leaves the sale on the curve, failing forever; the retry
+    reads the curve again and sells in the pool."""
+    class VenueBuilder(FakeBuilder):
+        def __init__(self):
+            super().__init__()
+            self.venues = []
+
+        def curve_complete(self, mint):
+            return True
+
+        def build(self, user, o, pool, close):
+            self.venues.append((o.venue, pool))
+            return super().build(user, o, pool, close)
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now, builder=VenueBuilder())
+    p = open_position(ex, pipe, cv)
+    pipe._sell_all(p, T0 + 2_000, "stop")
+    settle(ex, pipe, T0 + 2_000)
+    assert ex.builder.venues[-1] == ("curve", None)
+    ex._failed(0, ex.pending[0], T0 + 3_000, "failed on chain: the curve is complete", 0)
+    now[0] = ex.retry_at[0]
+    settle(ex, pipe, T0 + 4_000)
+    assert ex.builder.venues[-1] == ("pool", X.canonical_pool(MINT))
+    assert ex.pending[0]["order"].venue == "pool"
+
+
+def test_a_send_that_raises_keeps_its_signature_and_its_status_decides(tmp_path):
+    """Finding 3: an exception while sending is "sent, outcome unknown": the signature is kept (in the
+    buy's and the sale's lists), nothing is failed or freed, and the status settles it."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now)
+    rpc.send_error = RuntimeError("timed out")
+    settle(ex, pipe, T0 + 100)
+    sig = ex.pending[0]["sig"]
+    assert sig == sig_no(1) and ex.buy_sigs[0] == [sig] and pipe.pos[0]["state"] == "pending" and ex.exposure[0]
+    rpc.send_error = None
+    cv.buy(T0 + 1_400, int(0.05 * SOL), FakeSigner.pubkey)          # it had landed
+    p = pipe.pos[0]
+    rpc.send_error = RuntimeError("HTTP Error 502")
+    pipe._sell_all(p, T0 + 2_000, "stop")
+    settle(ex, pipe, T0 + 2_000)
+    sale = ex.pending[0]["sig"]
+    assert ex.sell_sigs[0] == [sale] and 0 in pipe.pos
+    now[0] += LX.GIVE_UP_MS + 1                                      # the node never saw it: now it failed
+    settle(ex, pipe, T0 + 2_000)
+    assert any(o["what"] == "failed" and o["sig"] == sale and o["why"] == "not landed" for o in order_lines())
+
+
+def test_the_builder_asks_the_status_before_it_falls_back_after_a_sender_error():
+    """Finding 3: Sender may have forwarded a transaction although it answered with an error; the same
+    signed bytes go to the plain RPC only when the node does not know the signature."""
+    class Down:
+        def send(self, tx, skip_preflight=False):
+            raise RuntimeError("HTTP Error 503")
+    rpc = ChainRpc()
+    b = LX.Builder(rpc, (None, None))
+    b.sender = Down()
+    tx = X.transaction(X.compile_message(key(77), [X.compute_limit(1)], key(5)), [bytes([7]) * 64])
+    local = X.b58(bytes([7]) * 64)
+    rpc.status[local] = {"err": None, "confirmationStatus": "processed"}
+    assert b.send(tx) == local and rpc.sent == []                   # known: not sent again
+    rpc.status.clear()
+    assert b.send(tx) == "node-answer" and rpc.sent == [tx]          # unknown: the same bytes to the plain RPC
+
+
+def test_a_status_read_error_neither_fails_nor_frees_a_buy(tmp_path):
+    """Finding 4: a 429 on the status read is no answer, not a failure: the buy stays, its exposure held."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now)
+    settle(ex, pipe, T0 + 100)
+    rpc.status_error = RuntimeError("HTTP Error 429: Too Many Requests")
+    now[0] += LX.CONFIRM_MS + 1
+    settle(ex, pipe, T0 + 200)
+    assert 0 in ex.pending and pipe.pos[0]["state"] == "pending" and ex.exposure[0] > 0
+    assert not pipe.failed and not [o for o in order_lines() if o["what"] == "failed"]
+
+
+def test_the_transactions_own_signature_is_kept_whatever_the_endpoint_answers(tmp_path):
+    """Finding 5: an answer of {"result": null} (None) or another string never replaces the signature."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now)
+    rpc.answer = None
+    settle(ex, pipe, T0 + 100)
+    assert ex.pending[0]["sig"] == sig_no(1)
+    now[0] += LX.CONFIRM_MS + 1
+    pipe.poll(T0 + 200)
+    assert ("status", 0, sig_no(1)) in list(ex.q.queue)              # so its status is asked for
+
+
+def test_one_unreadable_signature_never_blocks_the_rows_after_it(tmp_path, monkeypatch, capsys):
+    """Finding 7: an error other than a rate limit is logged and counted per signature; the next rows are
+    read in the same round, and after MAX_TRIES the row with it is skipped with a log line."""
+    from lab.pumpfun_rt import chain_pnl as CP
+    monkeypatch.setattr(CP, "PACE_S", 0)
+    wallet = "W" * 44
+    deltas = {"ABUY": -10_000_000, "BBUY": -10_000_000, "BSELL": 9_000_000}
+
+    class Rpc:
+        def call(self, method, params):
+            if params[0] == "ASELL":
+                raise ValueError("Transaction version (1) is not supported")
+            return {"meta": {"preBalances": [10**10], "postBalances": [10**10 + deltas[params[0]]]},
+                    "transaction": {"message": {"accountKeys": [wallet]}}}
+    (tmp_path / "ledger.csv").write_text("mint,signal_ms,exit_ms,pnl_sol\nApump,1000,9000,0\nBpump,1000,9000,0\n",
+                                         encoding="utf-8")
+    lines = [{"what": "filled", "side": s, "mint": m, "sig": f"{m[0]}{s.upper()}", "t": 5000}
+             for m in ("Apump", "Bpump") for s in ("buy", "sell")]
+    (tmp_path / "orders.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (-1_000_000, True)
+    assert "ASELL" in capsys.readouterr().out
+    for _ in range(CP.MAX_TRIES - 1):
+        CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000)
+    rows = json.loads((tmp_path / "chain.json").read_text())["rows"]
+    assert "skipped" in rows["Apump|9000"] and "skipped" in capsys.readouterr().out
+    assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (0, False)
+
+
+def test_two_trades_of_the_same_token_close_together_are_not_mixed_up(tmp_path, monkeypatch):
+    """Finding 8: the rows are matched by run id and position id, not by token and a half-hour window."""
+    from lab.pumpfun_rt import chain_pnl as CP
+    monkeypatch.setattr(CP, "PACE_S", 0)
+    wallet = "W" * 44
+    deltas = {"B1": -10_000_000, "S1": 12_000_000, "B2": -10_000_000, "S2": 7_000_000}
+
+    class Rpc:
+        def call(self, method, params):
+            return {"meta": {"preBalances": [10**10], "postBalances": [10**10 + deltas[params[0]]]},
+                    "transaction": {"message": {"accountKeys": [wallet]}}}
+    (tmp_path / "ledger.csv").write_text("mint,signal_ms,exit_ms,pnl_sol,pid,run\nMpump,1000,9000,0,1,R\n"
+                                         "Mpump,20000,30000,0,2,R\n", encoding="utf-8")
+    lines = [{"what": "filled", "run": "R", "pid": pid, "side": side, "mint": "Mpump", "sig": sig, "t": t}
+             for pid, side, sig, t in ((1, "buy", "B1", 2000), (1, "sell", "S1", 9000), (2, "buy", "B2", 21_000),
+                                       (2, "sell", "S2", 30_000))]
+    (tmp_path / "orders.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    assert CP.reconcile(Rpc(), wallet, tmp_path, now_ms=10_000_000) == (2_000_000 - 3_000_000, True)
+    with (tmp_path / "ledger.csv").open(encoding="utf-8") as fh:
+        import csv
+        got = {r["exit_ms"]: float(r["pnl_sol"]) for r in csv.DictReader(fh)}
+    assert got == {"9000": 0.002, "30000": -0.003}
+
+
+def test_open_positions_are_saved_with_their_signal_buy_signature_and_real_cost_and_settle_after_a_restart(
+        tmp_path, monkeypatch):
+    """Finding 9: open.json carries the signal time, the buy's signature and the real cost (a buy in flight
+    its stake, not its 30 % higher limit), so a leftover sold after a restart reconciles with the chain."""
+    from lab.pumpfun_rt import chain_pnl as CP
+    monkeypatch.setattr(CP, "PACE_S", 0)
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now)
+    p = open_position(ex, pipe, cv)
+    Curve(pipe.eng, mint=key(40), t=T0 + 1_500, slot=5_000)
+    pipe.eng.advance(T0 + 1_600)                                     # a second buy, still in flight
+    settle(ex, pipe, T0 + 1_700)
+    book.save_open()
+    rows = {r["mint"]: r for r in json.loads((LX.data_dir() / "open.json").read_text())}
+    r = rows[MINT]
+    assert r["signal_ms"] == p["signal_ms"] and r["buy_sig"] == sig_no(1)
+    assert r["cost_l"] == p["cost_l"] + p["fees_l"]
+    q = rows[key(40)]
+    pending = next(x for x in pipe.pos.values() if x["mint"] == key(40))
+    assert q["pending"] and q["buy_sig"] == sig_no(2) and q["cost_l"] == pending["stake_l"] < pending["limit_l"]
+    # the restart: a new book sells what is left and its ledger row settles from the chain
+    ex2, rpc2, pipe2, cv2, book2, _ = chain_book(now, start_sig=100)
+    ex2.pending.clear()
+    pipe2.pos.clear()
+    assert book2.adopt_leftovers({MINT: p["left"]}) == 1
+    settle(ex2, pipe2, T0 + 5_000)
+    sale = ex2.pending[-1]["sig"]
+    ex2.on_trade("trades", {"t": T0 + 6_000, "mint": MINT, "buy": False, "sol": int(0.04 * SOL), "tok": p["left"],
+                            "user": FakeSigner.pubkey, "fee_bps": 100, "sig": sale})
+    row = LX.read_ledger(1)[0]
+    assert row["exit_why"] == "leftover" and row["buy_sig"] == sig_no(1) and row["signal_ms"] == p["signal_ms"]
+    deltas = {sig_no(1): -int(0.051 * SOL), sale: int(0.0395 * SOL)}
+
+    class Rpc:
+        def call(self, method, params):
+            return {"meta": {"preBalances": [10**10], "postBalances": [10**10 + deltas[params[0]]]},
+                    "transaction": {"message": {"accountKeys": [FakeSigner.pubkey]}}}
+    adjust, changed = CP.reconcile(Rpc(), FakeSigner.pubkey, LX.data_dir())
+    assert changed and LX.read_ledger(1)[0]["pnl_sol"] == pytest.approx((0.0395 - 0.051))
+
+
+def test_a_leftover_sold_unseen_is_booked_with_the_signature_that_landed(tmp_path):
+    """Finding 10: the leftover's unseen sale is booked (the totals follow its ledger row) with the try that
+    landed, not with the last try (a failed retry)."""
+    now = [T0]
+    gate = OpenGate()
+    gate.rule, gate.mode = "X", "test"
+    b = FakeBuilder()
+    b.rpc = rpc = ChainRpc()
+    ex = LX.LiveExecutor(gate, CountingSigner(), b, LIMITS, clock=lambda: now[0], start=False, mode="test",
+                         max_total_sol=1.0, rule="X", totals={"pnl_l": 0, "since_ms": None, "trades": 0,
+                                                              "total_alerted": False})
+    ex.verify_sales = True
+    book = LX.LiveBook(None, ex, "P_cmig_model", alerts=False)
+    ex.sell_leftover(-1000, {"mint": "Bundlepump", "venue": "curve", "cost_l": 30_000_000, "signal_ms": T0,
+                             "buy_sig": "BUYSIG"}, 577)
+    rpc.held = {"Bundlepump": 577}                                   # the node does not show the sale yet
+    for _ in range(2):
+        ex.drain()
+        ex.poll(T0)
+        ex._failed(-1000, ex.pending[-1000], T0, "not landed", 0)
+        if _ == 1:
+            rpc.held = {}
+            rpc.status = {sig_no(1): LANDED, sig_no(2): {"err": {"x": 1}, "confirmationStatus": "confirmed"}}
+            rpc.txs[sig_no(1)] = own_tx(25_000_000 - 1_005_000, 577, 0, mint="Bundlepump")
+        ex.drain()
+        ex.poll(T0)
+        now[0] = ex.retry_at.get(-1000, now[0])
+        ex.poll(T0)
+    filled = [o for o in order_lines() if o["what"] == "filled"]
+    assert filled[-1]["sig"] == sig_no(1)
+    row = LX.read_ledger(1)[0]
+    assert row["mint"] == "Bundlepump" and row["buy_sig"] == "BUYSIG"
+    assert ex.totals["pnl_l"] == 25_000_000 - 30_000_000 - ex._fee() and -1000 not in ex.leftovers
+
+
+def test_orphans_are_adopted_only_from_a_fresh_holdings_read_at_their_real_cost(tmp_path):
+    """Finding 11: a holdings snapshot older than a minute (a failed read keeps the old one) decides
+    nothing, and an orphan's cost is what the chain says its buy took."""
+    ex = executor(tmp_path)
+    book = LX.LiveBook(None, ex, "P_cmig_model", alerts=False)
+    (LX.data_dir()).mkdir(parents=True, exist_ok=True)
+    (LX.data_dir() / "orders.jsonl").write_text(json.dumps(
+        {"t": T0 - 60_000, "what": "failed", "pid": 7, "side": "buy", "mint": "Bundlepump", "venue": "curve",
+         "tokens": 500, "limit_l": 30_000_000, "sig": "LATE", "why": "not landed"}) + "\n", encoding="utf-8")
+    (LX.data_dir() / "chain.json").write_text(json.dumps({"deltas": {"LATE": -26_123_456}}), encoding="utf-8")
+    assert book.adopt_orphans({"Bundlepump": 577}, now_ms=T0, read_ms=T0) == 0
+    assert book.adopt_orphans({"Bundlepump": 577}, now_ms=T0 + 600_000, read_ms=T0 + 30_000) == 0   # stale
+    assert not ex.pending
+    assert book.adopt_orphans({"Bundlepump": 577}, now_ms=T0 + 600_000, read_ms=T0 + 600_000) == 1
+    lo = next(iter(ex.leftovers.values()))
+    assert lo["cost_l"] == 26_123_456 and lo["buy_sig"] == "LATE"
+
+    class Flaky:
+        n = 0
+
+        def holdings(self, owner):
+            Flaky.n += 1
+            if Flaky.n > 1:
+                raise RuntimeError("HTTP Error 429")
+            return {MINT: 5}
+    svc = LS.Service(gate=make_gate(tmp_path), engine=sim.Engine([]), rpc=Flaky(), alerts=False, start_worker=False)
+    svc.address = FakeSigner.pubkey
+    svc.refresh_holdings()
+    t = svc.holdings_t
+    svc.refresh_holdings()
+    assert svc.holdings == {MINT: 5} and svc.holdings_t == t      # the old snapshot keeps its old time
+
+
+def test_an_own_fill_no_pending_order_claims_is_adopted_at_once(tmp_path):
+    """Finding 12: a buy given up as not landed whose fill comes later is adopted at once and sold,
+    its buy logged as filled with its signature (so the chain check settles it)."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now)
+    settle(ex, pipe, T0 + 100)
+    sig = ex.pending[0]["sig"]
+    now[0] += LX.GIVE_UP_MS + 1
+    settle(ex, pipe, T0 + 200)
+    assert not pipe.pos and not ex.pending                           # given up
+    cv.buy(T0 + 95_000, int(0.05 * SOL), FakeSigner.pubkey)         # its fill on the stream after all
+    sells = [p for p in ex.pending.values() if p.get("leftover")]
+    assert len(sells) == 1 and sells[0]["order"].mint == MINT and sells[0]["order"].tokens > 0
+    assert any(o["what"] == "filled" and o["side"] == "buy" and o["sig"] == sig for o in order_lines())
+    lo = next(iter(ex.leftovers.values()))
+    assert lo["buy_sig"] == sig and lo["cost_l"] > 0
+
+
+def test_a_fill_is_matched_by_its_signature(tmp_path):
+    """Finding 12: with the signature on the stream's row a fill finds its own order, and one already
+    booked is never booked again."""
+    now = [T0]
+    ex, rpc, pipe, cv, book, _ = chain_book(now)
+    settle(ex, pipe, T0 + 100)
+    sig = ex.pending[0]["sig"]
+    row = {"t": T0 + 900, "mint": MINT, "buy": True, "sol": int(0.05 * SOL), "tok": pipe.pos[0]["want"],
+           "user": FakeSigner.pubkey, "fee_bps": 100}
+    ex.on_trade("trades", {**row, "sig": sig})
+    assert pipe.pos[0]["state"] == "open" and ex.buy_sig[0] == sig
+    ex.on_trade("trades", {**row, "sig": sig, "tok": 1})            # the same signature again: ignored
+    assert pipe.pos[0]["tokens"] == row["tok"] and not ex.leftovers
+
+
+def test_the_executor_times_its_orders_by_wall_time_not_by_the_streams_clock(tmp_path):
+    """Finding 13: the stream's clock can lag; the status is asked CONFIRM_MS after the send by wall time."""
+    now = [T0 + 40_000]
+    ex = executor(tmp_path, clock=lambda: now[0])
+    ex.pending[1] = {"side": "buy", "order": P.Order(1, "buy", MINT, "curve", 10, 1_000, T0), "sig": "S", "sent_ms": T0}
+    ex.poll(T0 + 5_000)                                              # the stream is 35 s behind
+    assert ("status", 1, "S") in list(ex.q.queue)
+
+
+def test_the_simulated_round_trip_carries_one_tip_and_a_unit_price():
+    user = key(77)
+    p = X.PoolInfo(key(60), MINT, X.WSOL, key(61), key(62), X.TOKEN, X.BUYBACK_FEE_RECIPIENTS[0])
+    helius = sorted(X.HELIUS_TIP_ACCOUNTS)[0]
+    buy = X.amm_buy(user, p, 5_000, 1_000, 1_000) + [X.tip(user, helius, 5_000)]
+    sell = X.amm_sell(user, p, 1_000, 0, 1_000, True) + [X.tip(user, helius, 5_000)]
+    rt = X.round_trip(buy, sell)
+    assert sum(X.is_tip(user, ix) for ix in rt) == 1
+    assert [ix.data[:1] for ix in rt if ix.program == X.COMPUTE_BUDGET] == [bytes([2]), bytes([3])]
+    X.check_own(user, rt, sender_tip_ok=True)
+
+
+def test_with_sender_on_the_gate_wants_a_simulation_that_carried_the_tip(tmp_path):
+    env = {"PYTHIA_PUMPFUN_SENDER": "https://sender.helius-rpc.com/fast?swqos_only=true"}
+    g = make_gate(tmp_path, env=env)
+    assert any("no Sender tip" in w for w in g.check())
+    d = tmp_path / "tipped"
+    d.mkdir()
+    g = make_gate(d, env=env, sim_rec={"t": T0 - 3_600_000, "ok": True, "pubkey": FakeSigner.pubkey, "venue": "pool",
+                                       "sender_tip_l": 5_000})
+    assert g.check() == []
+
+
+def test_a_failed_transaction_does_not_pay_the_reverted_tip(tmp_path):
+    ex = executor(tmp_path)
+    ex.builder.sender_tip_l = 5_000
+    assert ex._fee() - ex._fee(failed=True) == 5_000
+
+
+def test_trades_today_and_in_total_come_from_the_ledger_after_a_restart(tmp_path):
+    for exit_ms, pnl in ((T0 - P.DAY_MS, -0.01), (T0 - 2_000, 0.001), (T0 - 1_000, -0.002)):
+        LX.write_close({"mint": "M", "exit_ms": exit_ms, "pnl_sol": pnl, "pid": 1})
+    ex = executor(tmp_path)
+    ex.gate = make_gate(tmp_path)
+    ex.gate.check()
+    book = LX.LiveBook(None, ex, "P_pool60", alerts=False)
+    st = book.status(FakeSigner.pubkey, None, None, [])
+    assert (st["trades_today"], st["wins_today"], st["trades_total"]) == (2, 1, 3)
+    assert st["pnl_total_sol"] == pytest.approx(-0.011)

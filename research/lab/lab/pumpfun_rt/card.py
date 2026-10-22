@@ -223,6 +223,9 @@ def live_leftover_card(what: str, info: dict, mode: str | None = None, lang: str
     if what == "sold":
         title = t("prl_left_sold_title", lang, name=name)
         summary = t("prl_left_sold_summary", lang, sol=f"{i18n.num(info.get('got_l', 0) / C.LAMPORTS, 4, lang)} SOL")
+    elif info.get("fails"):                                  # a running position whose sale was given up
+        title = t("prl_stuck_title", lang, name=name)
+        summary = t("prl_stuck_summary", lang, n=info["fails"], why=str(info.get("why") or "?")[:120])
     else:
         title = t("prl_left_stuck_title", lang, name=name)
         summary = t("prl_left_stuck_summary", lang, why=str(info.get("why") or "?")[:120])

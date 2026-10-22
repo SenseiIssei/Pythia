@@ -259,21 +259,26 @@ class Collector:
                     early["mint"] = row["mint"]
                     kept += self.keep("amm", early, self.clock.stamp(early["slot"], early["t"]))
                 continue
-            kept += self.keep(table, row, ct)
+            kept += self.keep(table, row, ct, sig if table in ("trades", "amm") else None)
             if table == "creates" and self.meta:
                 self.queue_meta(row)
         if kept:
             self.last_event_ms = recv_ms
         return kept
 
-    def keep(self, table: str, row: dict, chain_ms: int | None = None) -> int:
-        """Store the row (receive time as is) and hand the shadow book a copy timed by its slot."""
+    def keep(self, table: str, row: dict, chain_ms: int | None = None, sig: str | None = None) -> int:
+        """Store the row (receive time as is) and hand the shadow book a copy timed by its slot. A trade's
+        copy also carries its transaction's signature (the live book matches its own fills by it); the
+        stored row does not."""
         self.counts[table] += 1
         if self.writer is not None:
             self.writer.add(table, row)
         if self.on_row is not None:
             try:
-                self.on_row(table, row if chain_ms is None else {**row, "t": chain_ms})
+                out = row if chain_ms is None else {**row, "t": chain_ms}
+                if sig:
+                    out = {**out, "sig": sig}
+                self.on_row(table, out)
             except Exception as e:                        # the shadow book never stops the collector
                 self.counts["shadow_error"] += 1
                 if self.counts["shadow_error"] <= 5:

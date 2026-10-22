@@ -244,7 +244,8 @@ def test_the_live_executor_takes_its_fills_from_our_own_trades():
     assert len(pipe.pos) == 1 and ex.pending
     ex.drain()
     pipe.poll(T0 + 100)
-    assert ex.pending[0]["sig"] == "sig1" and ex.builder.built[0][0] == "buy"
+    # the transaction's own signature, whatever the endpoint answered ("sig1")
+    assert ex.pending[0]["sig"] == X.b58(b"\x01" * 64) and ex.builder.built[0][0] == "buy"
     cv.buy(T0 + 900, int(0.1 * SOL), FakeSigner.pubkey)     # our own buy lands on the curve
     p = pipe.pos[0]
     assert p["state"] == "open" and p["tokens"] > 0 and not ex.pending

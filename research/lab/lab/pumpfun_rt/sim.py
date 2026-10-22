@@ -181,7 +181,7 @@ class Engine:
                 self.push(t + off * 1000, "decide", (mint, off))
         self.push(t + EVICT_AGE_MS, "evict", mint)
 
-    def trade(self, t, tx, mint, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, slot=None) -> None:
+    def trade(self, t, tx, mint, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, slot=None, sig=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is None:
@@ -196,7 +196,7 @@ class Engine:
         self.early.trade(tok, t, buy, sol, tok_amt, user, "curve")
         for pipe in self.pipes:
             pipe.exec.on_trade("trades", {"t": t, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
-                                          "fee_bps": tok.fee_bps})
+                                          "fee_bps": tok.fee_bps, "sig": sig})
         if tok.tradeable():
             for r in self.by_entry.get("momentum", ()):
                 if r.wants_momentum(tok, t):
@@ -237,7 +237,7 @@ class Engine:
         for r in self.by_entry.get("migration", ()):
             self.push(t + r.p["delay_s"] * 1000, "signal_rule", (mint, r.name))
 
-    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None, vq=None) -> None:
+    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None, vq=None, sig=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is None:
@@ -247,7 +247,7 @@ class Engine:
         self.early.trade(tok, t, buy, quote or 0, base or 0, user or "", "pool")
         for pipe in self.pipes:
             pipe.exec.on_trade("amm", {"t": t, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
-                                       "user": user, "fee_bps": tok.amm_fee_bps})
+                                       "user": user, "fee_bps": tok.amm_fee_bps, "sig": sig})
         for pid in tuple(self.by_mint.get(mint, ())):
             self.check_exit(pid, t)
         for pipe in self.pipes:
@@ -700,7 +700,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
             if tok is not None:
                 tok.irregular = True
         eng.trade(r["t"], r["tx"], r["mint"], r["buy"], r["sol"] or 0, r["tok"] or 0, r["user"], r["vs"] or 0,
-                  r["vt"] or 0, r["rs"] or 0, r["rt"] or 0, r["fb"], r["cfb"], r.get("slot"))
+                  r["vt"] or 0, r["rs"] or 0, r["rt"] or 0, r["fb"], r["cfb"], r.get("slot"), sig=r.get("sig"))
     elif table == "creates":
         eng.create(r["t"], r["tx"], r["mint"], r["creator"], r["vs"] or 0, r["vt"] or 0, r["rt"] or 0,
                    r.get("name") or "", r.get("symbol") or "", r.get("uri") or "", r.get("mayhem"),
@@ -716,7 +716,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
     elif table == "amm":
         if r.get("mint"):
             eng.amm(r["t"], r["mint"], r["buy"], r["base"], r["quote"], r["pb"], r["pq"], r["lpb"], r["pfb"],
-                    r["cfb"], r.get("slot"), r.get("user"), r.get("vq"))
+                    r["cfb"], r.get("slot"), r.get("user"), r.get("vq"), sig=r.get("sig"))
     elif table == "meta":
         eng.meta(r["t"], r["mint"], {k: r.get(k) for k in ("ok", "twitter", "telegram", "website", "desc_len",
                                                              "image")})

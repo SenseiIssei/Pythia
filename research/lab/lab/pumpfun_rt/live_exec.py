@@ -54,9 +54,26 @@ reserve. The executor checks all of it itself, independently of the pipeline.
 
 Only the programs' public buy and sell, and txbuild.check_own refuses anything
 else before signing: no transfers out, no withdrawals, no bundles, no private
-relays, nothing that front-runs other users or moves a price on purpose, and no
-tips (the executor builds none; a tip inside our own transaction exists only in
-the fast path behind the owner's PYTHIA_PUMPFUN_JITO=1, see txbuild.tip).
+relays, nothing that front-runs other users or moves a price on purpose. The only
+tip is Helius Sender's: with the owner's PYTHIA_PUMPFUN_SENDER every transaction
+carries exactly one, to one of Sender's listed tip accounts, at most
+txbuild.HELIUS_MAX_TIP_LAMPORTS (check_own refuses more than one, a larger one, or
+one without the switch). A Jito tip exists only in the fast path behind the owner's
+PYTHIA_PUMPFUN_JITO=1 (see txbuild.tip).
+
+Settling an order: the stream's trade event of our wallet is the fill. When the
+stream misses it, the signature's status settles it: a transaction that landed is
+read back with getTransaction and booked from the wallet's own SOL and token
+changes; one that landed with an error is a failure that paid its fee; one the
+node never saw is given up after GIVE_UP_MS. A send that raised is never taken as
+a failure by itself (Sender or the node may have forwarded it); its status decides.
+A failed sale is sent again after 1, 2, 4 ... 60 s and given up after
+SELL_MAX_FAILS failures in a row (the position is marked stuck and the owner told).
+
+The day's and the total's realised P&L, which the stops count, are not counters:
+they are recomputed from the ledger (whose rows the chain check corrects in place)
+plus a journal of the fees of failed transactions (journal.jsonl), so a restart or
+a chain correction can never count anything twice.
 pump.fun's terms forbid bots on its website and API; this reads the public chain
 and sends to a public RPC endpoint, and the owner decides with that knowledge.
 
@@ -69,7 +86,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import csv
+import dataclasses
 import json
 import math
 import os
@@ -97,6 +116,11 @@ ENV_RPC = "PYTHIA_PUMPFUN_RPC"
 CHAIN_EVERY_S = 60.0                     # how often closed trades are checked against the chain
 FAIL_CARD_EVERY_S = 60.0                 # at most one failure card a minute per position
 ORPHAN_AFTER_MS = 600_000                # an unknown token held this long is a late buy: sell it
+HOLDINGS_FRESH_MS = 60_000               # orphans are adopted only from a holdings read this young
+LANDED_GRACE_MS = 5_000                  # a landed order whose stream fill has not come this long is read back
+SELL_MAX_FAILS = 6                       # failed sales in a row before a position is given up as stuck
+SELL_BACKOFF_MAX_S = 60                  # the wait before the next try: 1, 2, 4 ... 60 s
+RUN_ID = f"{int(time.time())}-{os.getpid()}"   # this process: order lines and ledger rows carry it with the pid
 ENV_IDL = "PYTHIA_PUMPFUN_IDL_DIR"
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 REPORT_MAX_AGE_MS = 36 * 3_600_000
@@ -126,7 +150,16 @@ TEST_MAX_TRADE_SOL = 0.05
 SIMULATE_MAX_AGE_MS = 24 * 3_600_000
 DEFAULT_TEST_RULE = "P_pool60"            # the least-bad post-migration pool rule until a report says otherwise
 RESERVE_SOL = 0.01                        # left in the wallet so every open position can still be sold
-LEFTOVER_TRIES = 3
+
+
+def backoff_ms(fails: int) -> int:
+    """The wait before the next try of a sale that failed `fails` times in a row: 1, 2, 4 ... 60 s."""
+    return int(min(SELL_BACKOFF_MAX_S, 2 ** max(0, fails - 1)) * 1000)
+
+
+def landed(st) -> bool:
+    """A signature status that says the transaction is in a confirmed block (with or without an error)."""
+    return isinstance(st, dict) and st.get("confirmationStatus") in ("confirmed", "finalized")
 
 
 def data_dir() -> Path:
@@ -341,10 +374,13 @@ def address_of(keypair: str | Path | None) -> str | None:
     return a or None
 
 
-def simulate_problems(rec, address: str | None, now_ms: int, rule: str | None = None) -> list[str]:
+def simulate_problems(rec, address: str | None, now_ms: int, rule: str | None = None,
+                      sender: bool = False) -> list[str]:
     if not isinstance(rec, dict):
         return ["no successful simulation yet (live_exec simulate)"]
     out = []
+    if sender and not rec.get("sender_tip_l"):
+        out.append("Sender is on but the last simulation carried no Sender tip (run live_exec simulate again)")
     if rule in P.BY_NAME and rec.get("venue") != venue_of(rule):
         out.append(f"the last simulation was on the {rec.get('venue')}, {rule} trades the {venue_of(rule)} "
                    "(run live_exec simulate without --venue)")
@@ -395,8 +431,9 @@ class LiveGate:
             self.rule = resolve_rule(ack.rule, rep if isinstance(rep, dict) else None)
             if self.rule not in P.BY_NAME:
                 why.append(f"the test strategy {self.rule} is not a pipeline strategy")
+            sender = (self.env.get(ENV_SENDER) or "").strip()
             why += simulate_problems(read_json(self.simulate_file or simulate_path()), self.address, self.now_ms(),
-                                     self.rule)
+                                     self.rule, sender=bool(sender) and not sender_problems(sender))
         else:
             self.rule = ack.rule
             why += self._readiness(rep, ack.rule)
@@ -646,10 +683,14 @@ class Rpc:
                     out[info["mint"]] = out.get(info["mint"], 0) + amt
         return out
 
+    def transaction(self, sig: str):
+        """A landed transaction as the node has it (read only), None while it does not have it."""
+        return self.call("getTransaction", [sig, {"encoding": "json", "commitment": "confirmed",
+                                                  "maxSupportedTransactionVersion": 0}])
+
     def fee_of(self, sig: str) -> int | None:
         """The network fee a landed transaction paid (lamports), None when not known yet."""
-        res = self.call("getTransaction", [sig, {"encoding": "json", "commitment": "confirmed",
-                                                 "maxSupportedTransactionVersion": 0}])
+        res = self.transaction(sig)
         try:
             return int(res["meta"]["fee"])
         except (KeyError, TypeError, ValueError):
@@ -706,6 +747,14 @@ class Builder:
                           lambda: self.rpc.account(X.pda([b"bonding-curve", X.key(mint)], X.PUMP))[0])
         return X.curve_info(mint, owner, glob, bc, self.idl_pump, pick=random.choice)
 
+    def curve_complete(self, mint: str) -> bool:
+        """The bonding curve read again (not from the cache): True when it is complete, so the token
+        trades only in its pool now (a migration the stream may have missed)."""
+        self.cache.pop("bc:" + mint, None)
+        data = self._cached("bc:" + mint, 600,
+                            lambda: self.rpc.account(X.pda([b"bonding-curve", X.key(mint)], X.PUMP))[0])
+        return len(data) > 48 and bool(data[48])
+
     def pool(self, pool: str, mint: str, fresh: bool = False) -> X.PoolInfo:
         """The pool's accounts and flags; a random listed buyback fee recipient each time (as the SDK
         does, so our trades do not all lock the same account). `fresh` reads the pool account again
@@ -746,13 +795,25 @@ class Builder:
 
     def send(self, tx: bytes) -> str:
         """Through Sender when it is on (no preflight, as Sender recommends; the holdings check catches a sale
-        of what is gone), else, or when Sender does not answer, through the plain RPC with its preflight."""
+        of what is gone), else, or when Sender does not answer, through the plain RPC with its preflight.
+        Sender may have forwarded a transaction even when it answers with an error: its signature's status
+        is asked first, and the same signed bytes go to the plain RPC only when the node does not know it.
+        The caller keeps the transaction's own signature whatever this returns, and treats an exception as
+        "sent, outcome unknown" (the status settles it)."""
         if self.sender is not None:
             try:
                 return self.sender.send(tx, skip_preflight=True)
             except Exception as e:
-                print(f"live: Sender did not take it ({type(e).__name__}: {e}); the plain RPC sends it"[:220],
-                      flush=True)
+                print(f"live: Sender did not take it ({type(e).__name__}: {e})"[:220], flush=True)
+                local = X.b58(tx[1:65])
+                try:
+                    st = self.rpc.statuses([local])[0]
+                except Exception:
+                    st = None
+                if st is not None:
+                    print(f"live: the node already knows {local[:12]}...; not sent again", flush=True)
+                    return local
+                print("live: the plain RPC sends the same transaction", flush=True)
         return self.rpc.send(tx)
 
     def build(self, user: str, o: P.Order, pool: str | None, close: bool) -> bytes:
@@ -779,9 +840,73 @@ def load_totals() -> dict:
             "total_alerted": bool(d.get("total_alerted"))}
 
 
+def journal_path() -> Path:
+    return data_dir() / "journal.jsonl"
+
+
+def journal(rec: dict) -> None:
+    """One realised amount that is in no ledger row (the fee of a failed transaction, a carried-over sum)."""
+    try:
+        d = data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with journal_path().open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except OSError as e:
+        print(f"live: journal not written ({e})", flush=True)
+
+
+def read_journal() -> list[dict]:
+    try:
+        lines = journal_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(j, dict) and isinstance(j.get("pnl_l"), (int, float)):
+            out.append(j)
+    return out
+
+
+def realised(day: int) -> dict:
+    """The realised P&L the stops count, recomputed (never incremented): every ledger row (the chain check
+    corrects them in place) plus every journal amount whose signature no settled row holds yet (a settled
+    row's chain value already contains the fees of its failed transactions). For `day` (days since 1970,
+    UTC) the same over the rows that closed that day and the amounts booked that day."""
+    rows = read_ledger(10 ** 9)
+    done = CP.absorbed(data_dir())
+    out = {"total_l": 0, "day_l": 0, "trades": 0, "trades_day": 0, "wins_day": 0, "first_ms": None}
+    for r in rows:
+        pnl = int(round((r.get("pnl_sol") or 0.0) * C.LAMPORTS))
+        out["total_l"] += pnl
+        out["trades"] += 1
+        ex = r.get("exit_ms")
+        if ex is not None:
+            out["first_ms"] = int(ex) if out["first_ms"] is None else min(out["first_ms"], int(ex))
+            if int(ex) // P.DAY_MS == day:
+                out["day_l"] += pnl
+                out["trades_day"] += 1
+                out["wins_day"] += int(pnl > 0)
+    for j in read_journal():
+        if j.get("sig") and j["sig"] in done:
+            continue
+        v, t = int(j["pnl_l"]), int(j.get("t") or 0)
+        out["total_l"] += v
+        if t // P.DAY_MS == day:
+            out["day_l"] += v
+        if t:
+            out["first_ms"] = t if out["first_ms"] is None else min(out["first_ms"], t)
+    return out
+
+
 class LiveExecutor:
     """Same interface as pipeline.PaperExecutor. Sends from a worker thread; every result and
-    fill is handed to the pipeline on the stream's own thread (poll, on_trade)."""
+    fill is handed to the pipeline on the stream's own thread (poll, on_trade). Its own timers
+    (when to ask for a status, when to give up, when to try a failed sale again) run on wall
+    time (self.clock), never on the stream's clock, which can lag behind."""
 
     kind = "live"
 
@@ -815,8 +940,23 @@ class LiveExecutor:
         self.last_check = -1e18
         self.on_chain = None                          # () after the ledger was corrected from the chain
         self.sell_sigs: dict[int, list[str]] = {}     # pid -> signatures of its sales that were sent
+        self.buy_sigs: dict[int, list[str]] = {}      # pid -> signatures of its buys that were sent
+        self.buy_sig: dict[int, str] = {}             # pid -> the buy that filled (save_open, the ledger row)
         self.verifying: dict[int, tuple] = {}         # pid -> (pend, why, fee) while its holding is read
         self.verify_sales = start                     # a failed sale reads the wallet's holding first
+        self.filled_sigs: collections.OrderedDict = collections.OrderedDict()   # booked fills, newest last
+        self.recent_fills: collections.deque = collections.deque(maxlen=64)      # (mint, side, tokens, wall ms)
+        self.sell_fails: dict[int, int] = {}          # pid -> failed sales in a row
+        self.retry_at: dict[int, int] = {}            # pid -> wall ms before which no sale of it is sent
+        self.deferred: dict[int, tuple] = {}          # pid -> a sale waiting for its retry time
+        self.stuck: dict[int, str] = {}               # pid -> why its sale was given up (the owner sells it)
+        self.held: dict[str, int] = {}                # mint -> the wallet's holding read after a failed sale
+        self.given_up: dict[str, dict] = {}           # mint -> the last buy given up as not landed
+        self.orphan_pid = -1000                       # leftover ids for orphans, below the restart's
+        self.trades_today = 0
+        self.wins_today = 0
+        self._carry()
+        self._roll()                                  # the day and its P&L are set before anything books
         self.worker = None
         if start:
             self.worker = threading.Thread(target=self._work, name="pumpfun-live", daemon=True)
@@ -853,9 +993,52 @@ class LiveExecutor:
     def _roll(self) -> None:
         d = self.clock() // P.DAY_MS
         if d != self.day:
-            # The day's closed trades from the ledger, so a restart does not forget today's losses
-            # (the daily stop counts them); a new day starts at 0.
-            self.day, self.day_pnl_l = d, day_pnl_from_ledger(d)
+            # The day's closed trades from the ledger and the day's journal, so a restart does not forget
+            # today's losses (the daily stop counts them); a new day starts with what it already has.
+            self.day = d
+            self.recompute()
+
+    def _carry(self) -> None:
+        """Once, before the journal exists: whatever loss totals.json counted beyond the ledger (the fees of
+        failed transactions booked before the journal) is carried into the journal, so the total budget
+        forgets nothing. Only a loss is carried, never a gain."""
+        if journal_path().exists() or not self.totals.get("pnl_l"):
+            return
+        extra = int(self.totals["pnl_l"]) - realised(0)["total_l"]
+        if extra < 0:
+            journal({"t": int(self.totals.get("since_ms") or self.clock()), "pnl_l": extra, "sig": None,
+                     "why": "carried over from totals.json"})
+            print(f"live: {-extra / C.LAMPORTS:.6f} SOL of losses outside the ledger carried into the journal",
+                  flush=True)
+
+    def recompute(self) -> None:
+        """The day's and the total's realised P&L from the ledger and the journal (never incremented, so a
+        correction or a restart cannot count anything twice), and the two stops."""
+        if self.day is None:
+            self.day = self.clock() // P.DAY_MS
+        r = realised(self.day)
+        self.day_pnl_l, self.trades_today, self.wins_today = r["day_l"], r["trades_day"], r["wins_day"]
+        t = self.totals
+        t["pnl_l"], t["trades"] = r["total_l"], r["trades"]
+        if t.get("since_ms") is None and r["first_ms"] is not None:
+            t["since_ms"] = r["first_ms"]
+        fired = []
+        if self.day_pnl_l < 0 and -self.day_pnl_l >= self.limits.max_daily_loss_sol * C.LAMPORTS \
+                and self.stop_day != self.day:
+            self.stop_day = self.day
+            fired.append(("daily", -self.day_pnl_l / C.LAMPORTS))
+        if self.max_total_l is not None and t["pnl_l"] < 0 and -t["pnl_l"] >= self.max_total_l \
+                and not t.get("total_alerted"):
+            t["total_alerted"] = True
+            fired.append(("total", -t["pnl_l"] / C.LAMPORTS))
+        try:
+            write_json(totals_path(), t)
+        except OSError as e:
+            print(f"live: totals not written ({e})", flush=True)
+        for kind, v in fired:
+            print(f"live: the {kind} stop fired at {v:.4f} SOL lost; no more buys", flush=True)
+            if self.on_stop is not None:
+                self.on_stop(kind, v)
 
     def _caps(self, o: P.Order) -> str | None:
         lim = self.limits
@@ -882,31 +1065,12 @@ class LiveExecutor:
             return "kill switch"
         return None
 
-    def booked(self, pnl_l: int) -> None:
-        """A realised result: the day's and the total's P&L, and the two stops."""
+    def booked(self, pnl_l: int, sig: str | None = None, **info) -> None:
+        """A realised amount that no ledger row carries (the fee of a failed transaction): into the journal at
+        once, then the day's and the total's P&L recomputed, and the two stops with them."""
         self._roll()
-        self.day_pnl_l += int(pnl_l)
-        t = self.totals
-        t["pnl_l"] += int(pnl_l)
-        if t.get("since_ms") is None:
-            t["since_ms"] = self.clock()
-        fired = []
-        if self.day_pnl_l < 0 and -self.day_pnl_l >= self.limits.max_daily_loss_sol * C.LAMPORTS \
-                and self.stop_day != self.day:
-            self.stop_day = self.day
-            fired.append(("daily", -self.day_pnl_l / C.LAMPORTS))
-        if self.max_total_l is not None and t["pnl_l"] < 0 and -t["pnl_l"] >= self.max_total_l \
-                and not t.get("total_alerted"):
-            t["total_alerted"] = True
-            fired.append(("total", -t["pnl_l"] / C.LAMPORTS))
-        try:
-            write_json(totals_path(), t)
-        except OSError as e:
-            print(f"live: totals not written ({e})", flush=True)
-        for kind, v in fired:
-            print(f"live: the {kind} stop fired at {v:.4f} SOL lost; no more buys", flush=True)
-            if self.on_stop is not None:
-                self.on_stop(kind, v)
+        journal({"t": int(self.clock()), "pnl_l": int(pnl_l), "sig": sig, "run": RUN_ID, **info})
+        self.recompute()
 
     # ------------------------------------------------------------ orders (the stream's thread)
     def buy(self, o: P.Order) -> None:
@@ -919,22 +1083,57 @@ class LiveExecutor:
         self.q.put(("send", o, self._pool_of(o.mint), False))
 
     def sell(self, o: P.Order) -> None:
+        """A sale of a position. Never while its last failure's backoff runs (it waits in `deferred`), never
+        once it was given up (stuck). It sells at most what the wallet was last seen to hold, and closes the
+        token account only when it sells everything the wallet holds."""
+        if o.pid in self.stuck:
+            return
+        if self.clock() < self.retry_at.get(o.pid, 0):
+            self.deferred[o.pid] = ("sell", o)
+            return
         p = self.pipe.pos.get(o.pid) or {}
-        left = p.get("left", 0)
-        expect = int(p["mark_l"] * o.tokens / left) if p.get("mark_l") and left else None
+        left = int(p.get("left") or 0) or o.tokens
+        held = self.held.get(o.mint)
+        tokens = o.tokens if not held else min(o.tokens, held)
+        if tokens != o.tokens:
+            o = dataclasses.replace(o, tokens=tokens)
+        close = tokens >= (held if held else left)
+        expect = int(p["mark_l"] * tokens / p["left"]) if p.get("mark_l") and p.get("left") else None
         self.pending[o.pid] = {"side": "sell", "order": o, "sig": None, "sent_ms": self.clock(), "expect_l": expect}
-        self.q.put(("send", o, self._pool_of(o.mint), o.tokens >= left))
+        self.q.put(("send", o, self._pool_of(o.mint), close, self.sell_fails.get(o.pid, 0) > 0))
 
     def sell_leftover(self, pid: int, info: dict, tokens: int) -> None:
-        """Sell everything of a position from before a restart (its book is gone): no floor, close."""
-        o = P.Order(pid, "sell", info["mint"], info.get("venue") or "pool", int(tokens), 0, self.clock(), "leftover")
-        self.leftovers[pid] = {**info, "tokens": int(tokens), "tries": self.leftovers.get(pid, {}).get("tries", 0) + 1}
+        """Sell everything of a position from before a restart (its book is gone): no floor, close. After a
+        failure it waits for the backoff like any sale."""
+        lo = self.leftovers[pid] = {**info, "tokens": int(tokens), "tries": self.leftovers.get(pid, {}).get("tries", 0)}
+        if pid in self.stuck:
+            return
+        if self.clock() < self.retry_at.get(pid, 0):
+            self.deferred[pid] = ("leftover", pid, info, int(tokens))
+            return
+        held = self.held.get(info["mint"])
+        amount = int(tokens) if not held else min(int(tokens), held)
+        lo["tries"] += 1
+        o = P.Order(pid, "sell", info["mint"], info.get("venue") or "pool", amount, 0, self.clock(), "leftover")
         self.pending[pid] = {"side": "sell", "order": o, "sig": None, "sent_ms": self.clock(), "leftover": True}
-        self.q.put(("send", o, info.get("pool"), True))
+        self.q.put(("send", o, info.get("pool"), True, self.sell_fails.get(pid, 0) > 0))
+
+    def new_orphan_pid(self) -> int:
+        self.orphan_pid -= 1
+        return self.orphan_pid
 
     def _pool_of(self, mint: str) -> str | None:
+        if self.pipe is None:
+            return None
         tok = self.pipe.eng.tokens.get(mint)
         return tok.pool if tok is not None else None
+
+    def _known(self, mint: str) -> bool:
+        """A token some position, order, waiting sale or leftover of this book holds or buys."""
+        if self.pipe is not None and any(p["mint"] == mint for p in self.pipe.pos.values()):
+            return True
+        return any(pend["order"].mint == mint for pend in self.pending.values()) \
+            or any(lo.get("mint") == mint for lo in self.leftovers.values())
 
     # ------------------------------------------------------------ the worker thread (network and signing only)
     def _chain_loop(self, every_s: float = CHAIN_EVERY_S) -> None:
@@ -961,39 +1160,109 @@ class LiveExecutor:
             self.step(item)
 
     def step(self, item) -> None:
-        """One queued job: build, sign and send an order, ask for a signature's status or its fee."""
+        """One queued job: build, sign and send an order; ask for a signature's status, read a landed
+        transaction back, read the wallet's holding after a failed sale, or ask for a fee."""
         kind = item[0]
         try:
             if kind == "send":
-                _, o, pool, close = item
+                o, pool, close = item[1], item[2], item[3]
+                if len(item) > 4 and item[4] and o.side == "sell" and o.venue == "curve":
+                    o, pool = self._recheck_venue(o, pool)    # a retry: the curve may have completed meanwhile
                 msg = self.builder.build(self.signer.pubkey, o, pool, close)
                 tx = X.transaction(msg, [self.signer.sign(msg)])
-                # The signature is the transaction's id, known before it is sent: an error from the
-                # node does not prove it never landed, so the failure keeps it (chain_pnl reads it).
+                # The signature is the transaction's id, known before it is sent, and it is the one kept
+                # whatever the endpoint answers. An exception while sending does not prove it never went out
+                # (Sender may have forwarded it): it is "sent, outcome unknown", and its status settles it.
                 local_sig = X.b58(tx[1:65])
                 try:
-                    sig = (getattr(self.builder, "send", None) or self.builder.rpc.send)(tx)
+                    answer, err = (getattr(self.builder, "send", None) or self.builder.rpc.send)(tx), None
                 except Exception as e:
-                    self.results.put(("error", o.pid, f"{type(e).__name__}: {e}"[:200], local_sig))
-                    return
-                self.results.put(("sent", o.pid, sig))
+                    answer, err = None, f"{type(e).__name__}: {e}"[:200]
+                self.results.put(("sent", o.pid, local_sig, answer, err, o))
             elif kind == "status":
                 _, pid, sig = item
-                st = self.builder.rpc.statuses([sig])[0]
+                try:
+                    st = self.builder.rpc.statuses([sig])[0]
+                except Exception as e:                       # e.g. a 429: no answer is not "not landed"
+                    print(f"live: status of {sig[:12]}... not read ({type(e).__name__}: {e}); asked again later"[:220],
+                          flush=True)
+                    return
                 self.results.put(("status", pid, sig, st))
+            elif kind == "landed":
+                _, pid, sig, mint = item
+                self.results.put(("landed", pid, sig, self._read_landed(sig, mint)))
             elif kind == "fee":
                 _, pid, sig = item
                 self.results.put(("fee", pid, sig, self.builder.rpc.fee_of(sig)))
             elif kind == "holds":
-                _, pid, mint = item
-                self.results.put(("holds", pid, self.builder.rpc.holdings(self.signer.pubkey).get(mint, 0)))
+                _, pid, mint = item[:3]
+                self.results.put(("holds", pid, *self._read_holds(mint, list(item[3]) if len(item) > 3 else [])))
         except Exception as e:                               # every failure goes back to the book
             if kind == "fee":
                 return
             if kind == "holds":                              # not readable: the sale counts as failed
-                self.results.put(("holds", item[1], None))
+                self.results.put(("holds", item[1], None, None, None))
                 return
+            if kind == "landed":
+                self.results.put(("landed", item[1], item[2], None))
+                return
+            # Building or signing failed: nothing was sent, a plain failure without a fee.
             self.results.put(("error", item[1].pid if kind == "send" else item[1], f"{type(e).__name__}: {e}"[:200]))
+
+    def _tip(self) -> int:
+        return int(getattr(self.builder, "sender_tip_l", 0) or 0)
+
+    def _recheck_venue(self, o: P.Order, pool: str | None) -> tuple[P.Order, str | None]:
+        """Before a curve sale is tried again: is the curve complete (a migration the stream missed)? Then the
+        sale goes to the token's pool (the one the engine knows, else the canonical PumpSwap pool)."""
+        fn = getattr(self.builder, "curve_complete", None)
+        if fn is None:
+            return o, pool
+        try:
+            done = fn(o.mint)
+        except Exception as e:
+            print(f"live: curve of {o.mint} not read ({type(e).__name__}: {e})"[:200], flush=True)
+            return o, pool
+        if not done:
+            return o, pool
+        pool = pool or X.canonical_pool(o.mint)
+        print(f"live: the curve of {o.mint} is complete; the sale goes to its pool", flush=True)
+        return dataclasses.replace(o, venue="pool"), pool
+
+    def _read_landed(self, sig: str, mint: str) -> dict | None:
+        """A landed transaction read back: the wallet's SOL and token change (chain_pnl.tx_effect), else a
+        fresh read of the wallet's holding of the token; None when neither can be read now."""
+        try:
+            info = CP.tx_effect(self.builder.rpc.transaction(sig), self.signer.pubkey, mint)
+            if info is not None:
+                return info
+        except Exception as e:
+            print(f"live: {sig[:12]}... not read back ({type(e).__name__}: {e})"[:200], flush=True)
+        try:
+            return {"held": int(self.builder.rpc.holdings(self.signer.pubkey).get(mint, 0))}
+        except Exception as e:
+            print(f"live: holdings not read ({type(e).__name__}: {e})"[:200], flush=True)
+        return None
+
+    def _read_holds(self, mint: str, sigs: list[str]) -> tuple[int, list | None, int | None]:
+        """After a failed sale: the wallet's holding of the token, which of the position's sales really
+        landed (None when the statuses cannot be read), and what the last of those brought back."""
+        amount = int(self.builder.rpc.holdings(self.signer.pubkey).get(mint, 0))
+        ok, got = None, None
+        if sigs:
+            try:
+                sts = self.builder.rpc.statuses(sigs)
+                ok = [s for s, st in zip(sigs, sts) if landed(st) and st.get("err") is None]
+            except Exception as e:
+                print(f"live: statuses not read ({type(e).__name__}: {e})"[:200], flush=True)
+            if ok:
+                try:
+                    e = CP.tx_effect(self.builder.rpc.transaction(ok[-1]), self.signer.pubkey, mint)
+                    if e is not None and e.get("err") is None:
+                        got = int(e["delta_l"]) + int(e["fee_l"]) + self._tip()
+                except Exception:
+                    got = None
+        return amount, ok, got
 
     def drain(self) -> None:
         """Run what is queued on this thread (a test, or an executor made with start=False)."""
@@ -1007,6 +1276,9 @@ class LiveExecutor:
 
     # ------------------------------------------------------------ results (the stream's thread)
     def poll(self, now: float) -> None:
+        """The results of the worker, on the stream's thread. `now` is the stream's time (what the pipeline
+        books with); the executor's own timers use wall time (self.clock)."""
+        wall = self.clock()
         while True:
             try:
                 r = self.results.get_nowait()
@@ -1014,13 +1286,12 @@ class LiveExecutor:
                 break
             kind, pid = r[0], r[1]
             if kind == "chain":
-                if r[2]:
-                    self.booked(r[2])                        # the day's and the total's P&L as the wallet saw it
+                self.recompute()                             # the corrected ledger is the truth: nothing is added
                 if self.on_chain is not None:
                     self.on_chain()
                 continue
             if kind == "holds":
-                self._holds(pid, r[2], now)
+                self._holds(pid, r[2], now, *r[3:5])
                 continue
             if kind == "fee":
                 if r[3] is not None:
@@ -1028,152 +1299,395 @@ class LiveExecutor:
                 continue
             pend = self.pending.get(pid)
             if pend is None:
+                if kind == "sent" and len(r) > 5 and r[5] is not None:
+                    self._sent_after_fill(pid, r[2], r[5])   # the stream's fill came before the send's result
                 continue
             if kind == "sent":
-                pend["sig"] = r[2]
-                if pend["side"] == "sell":
-                    self.sell_sigs.setdefault(pid, []).append(r[2])
-                log_order(pend, "sent", mode=self.mode)
+                self._sent(pid, pend, r)
             elif kind == "error":
-                if len(r) > 3 and r[3] and not pend.get("sig"):
-                    pend["sig"] = r[3]
                 self._failed(pid, pend, now, r[2], 0)
             elif kind == "status":
+                if pend.get("sig") != r[2] or pend.get("landed_at"):
+                    continue
                 st = r[3]
-                if st and st.get("err"):
-                    self._failed(pid, pend, now, f"failed on chain: {st['err']}"[:200], self._fee())
-                elif st is None and now - pend["sent_ms"] > GIVE_UP_MS:
-                    self._failed(pid, pend, now, "not landed", 0)
+                if st is None:
+                    if wall - pend["sent_ms"] > GIVE_UP_MS:
+                        self._failed(pid, pend, now, "not landed", 0)
+                elif st.get("err") is not None:
+                    self._failed(pid, pend, now, f"failed on chain: {st['err']}"[:200], self._fee(failed=True))
+                elif landed(st):
+                    pend["landed_at"] = wall                 # landed; its fill is read back unless the stream's comes
+            elif kind == "landed":
+                if pend.get("sig") == r[2]:
+                    self._landed(pid, pend, now, wall, r[3])
         for pid, pend in list(self.pending.items()):
-            if pend["sig"] and now - pend["sent_ms"] > CONFIRM_MS and not pend.get("asked"):
-                pend["asked"] = now
+            if pend.get("landed_at"):
+                if not pend.get("reading") and wall - pend["landed_at"] >= LANDED_GRACE_MS:
+                    pend["reading"] = True
+                    self.q.put(("landed", pid, pend["sig"], pend["order"].mint))
+                continue
+            if pend["sig"] and wall - pend["sent_ms"] > CONFIRM_MS and not pend.get("asked"):
+                pend["asked"] = wall
                 self.q.put(("status", pid, pend["sig"]))
-            elif pend.get("asked") and now - pend["asked"] > CONFIRM_MS:
+            elif pend.get("asked") and wall - pend["asked"] > CONFIRM_MS:
                 pend["asked"] = None
+        for pid, d in list(self.deferred.items()):
+            if wall < self.retry_at.get(pid, 0):
+                continue
+            self.deferred.pop(pid, None)
+            if d[0] == "leftover":
+                self.sell_leftover(*d[1:])
+                continue
+            p = self.pipe.pos.get(pid) if self.pipe is not None else None
+            if p is None or p.get("left", 0) <= 0:
+                continue                                     # closed meanwhile (a late fill)
+            self.sell(dataclasses.replace(d[1], tokens=min(d[1].tokens, p["left"])))
 
-    def _fee(self) -> int:
-        return self.builder.priority_l + C.BASE_FEE_LAMPORTS + getattr(self.builder, "sender_tip_l", 0)
+    def _sent(self, pid: int, pend: dict, r: tuple) -> None:
+        """The worker sent it (or tried): the transaction's own signature is the order's, always."""
+        sig = r[2]
+        answer = r[3] if len(r) > 3 else sig
+        err = r[4] if len(r) > 4 else None
+        if len(r) > 5 and r[5] is not None:
+            pend["order"] = r[5]                             # the venue may have been switched to the pool
+        pend["sig"] = sig
+        (self.sell_sigs if pend["side"] == "sell" else self.buy_sigs).setdefault(pid, []).append(sig)
+        if answer is not None and answer != sig:
+            print(f"live: the endpoint answered {str(answer)[:24]!r}, not the transaction's signature "
+                  f"{sig[:12]}...; the signature is kept", flush=True)
+        if err:
+            print(f"live: sending {sig[:12]}... raised ({err}); outcome unknown, its status decides"[:220],
+                  flush=True)
+            log_order(pend, "sent", mode=self.mode, error=err)
+        else:
+            log_order(pend, "sent", mode=self.mode)
+
+    def _sent_after_fill(self, pid: int, sig: str, o: P.Order) -> None:
+        """A send's result that arrives after its fill was booked: the signature is still recorded (the
+        position's lists, its buy for save_open and the ledger row, a sent line for the chain check)."""
+        (self.buy_sigs if o.side == "buy" else self.sell_sigs).setdefault(pid, []).append(sig)
+        if o.side == "buy" and self.pipe is not None and pid in self.pipe.pos and pid not in self.buy_sig:
+            self.buy_sig[pid] = sig
+        log_order({"order": o, "sig": sig}, "sent", mode=self.mode, note="its fill came first")
+
+    def _fee(self, failed: bool = False) -> int:
+        """The fee a transaction pays: priority and base fee, and Sender's tip, which a failed transaction
+        does not pay (its transfer is reverted with the rest)."""
+        return self.builder.priority_l + C.BASE_FEE_LAMPORTS + (0 if failed else self._tip())
 
     def _failed(self, pid: int, pend: dict, now: float, why: str, fee: int) -> None:
         self.pending.pop(pid, None)
-        log_order(pend, "failed", why=why, mode=self.mode)
+        o = pend["order"]
+        log_order(pend, "failed", why=why, mode=self.mode, fee_l=fee)
         write_measure({"t": self.clock(), "what": "failed", "mode": self.mode, "side": pend["side"],
-                       "venue": pend["order"].venue, "why": why, "fee_l": fee})
+                       "venue": o.venue, "why": why, "fee_l": fee})
+        if fee:
+            # Paid at once (a failed transaction that landed): into the day's and the total's figures now,
+            # not with the position's close (a stuck sale may never close).
+            self.booked(-int(fee), sig=pend.get("sig"), pid=pid, mint=o.mint, why=why[:80])
+        if pend["side"] == "buy" and why == "not landed" and pend.get("sig"):
+            self.given_up[o.mint] = {"order": o, "sig": pend["sig"], "run": RUN_ID}
         if pend["side"] == "sell" and self.verify_sales:
             # An earlier sale may have landed while the stream missed its fill (CCC, 2026-10-22: sold
             # on chain, then retried every second against an empty account). Read the holding first.
             self.verifying[pid] = (pend, why, fee)
-            self.q.put(("holds", pid, pend["order"].mint))
+            self.q.put(("holds", pid, o.mint, list(self.sell_sigs.get(pid) or [])))
             return
         self._settle_failure(pid, pend, now, why, fee)
 
-    def _holds(self, pid: int, amount: int | None, now: float) -> None:
-        """The wallet's holding of a token whose sale just failed: none left means an earlier sale
-        landed unseen, and the position is closed with it; else the failure stands."""
+    def _landed(self, pid: int, pend: dict, now: float, wall: int, info: dict | None) -> None:
+        """A landed order whose stream fill never came: booked from the transaction itself (the wallet's SOL and
+        token change), else from a fresh holdings read; a landed transaction with an error is a failure that
+        paid its fee."""
+        o = pend["order"]
+        if info is None:
+            pend["landed_at"], pend["reading"] = wall, False         # not readable now: again after the grace
+            return
+        if info.get("err") is not None:
+            fee = int(info.get("fee_l") or 0) or self._fee(failed=True)
+            self._failed(pid, pend, now, f"failed on chain: {info['err']}"[:200], fee)
+            return
+        if "delta_l" in info:
+            fee = int(info["fee_l"]) + self._tip()
+            tok = int(info.get("tok") or 0)
+            if pend["side"] == "buy":
+                tokens, amount = tok, -int(info["delta_l"]) - fee
+            else:
+                tokens, amount = -tok, int(info["delta_l"]) + fee
+        else:
+            held, fee = int(info["held"]), self._fee()
+            if pend["side"] == "buy":
+                tokens, amount = held, int(o.stake_l or o.limit_l)
+            else:
+                p = (self.pipe.pos.get(pid) if self.pipe is not None else None) or {}
+                left = int(p.get("left") or o.tokens)
+                tokens = max(0, left - held)
+                amount = int((pend.get("expect_l") or 0) * tokens / o.tokens) if o.tokens else 0
+        if tokens <= 0:
+            n = pend["reads"] = pend.get("reads", 0) + 1
+            print(f"live: {o.mint} {pend['side']} landed but no token change is readable yet; again later", flush=True)
+            pend["landed_at"], pend["reading"] = wall + LANDED_GRACE_MS * n, False
+            return
+        print(f"live: {o.mint} {pend['side']} landed ({str(pend.get('sig'))[:12]}...) though the stream missed its "
+              "fill; booked from the chain", flush=True)
+        self._book_fill(pid, pend, info.get("block_ms") or now, tokens, amount, fee, amount, None, onchain=True)
+
+    def _holds(self, pid: int, amount: int | None, now: float, ok: list | None = None,
+               got: int | None = None) -> None:
+        """The wallet's holding of a token whose sale just failed, and which of the position's sales
+        really landed (`ok`, None when unknown). Nothing left: the position is closed with the sale that
+        landed (a leftover with none of its own is dropped). Less left than the position thinks, with a
+        sale that landed: that part is booked and the rest sold after the backoff. Else the failure stands,
+        and the next try sells what the wallet holds (and closes the account only then)."""
         v = self.verifying.pop(pid, None)
         if v is None:
             return
         pend, why, fee = v
+        o = pend["order"]
         sigs = self.sell_sigs.get(pid) or []
-        if amount == 0 and (sigs or pend.get("leftover")):
-            o = pend["order"]
-            if pend.get("leftover"):
-                lo = self.leftovers.pop(pid, None) or {}
-                if sigs:
-                    # Its own sale landed unseen: book it, so the ledger has it and chain_pnl settles it.
-                    log_order({**pend, "sig": sigs[-1]}, "filled", sol=0, tokens=o.tokens, mode=self.mode,
-                              onchain=True)
-                    if self.on_leftover is not None:
-                        self.on_leftover("sold", {**lo, "got_l": 0})
-                else:
-                    log_order(pend, "gone", mode=self.mode, why="sold before, seen on chain")
-                print(f"live: leftover {o.mint} is already sold on chain; "
-                      + ("booked from the chain" if sigs else "dropped"), flush=True)
+        if amount is not None:
+            self.held[o.mint] = int(amount)
+        sold_sig = ok[-1] if ok else (sigs[-1] if ok is None and sigs else None)
+        if pend.get("leftover"):
+            if amount != 0:
+                self._settle_failure(pid, pend, now, why, fee)
                 return
-            p = self.pipe.pos.get(pid) or {}
-            left = int(p.get("left") or o.tokens)
-            got = int(pend.get("expect_l") or 0)
-            log_order({**pend, "sig": sigs[-1]}, "filled", sol=got, tokens=left, mode=self.mode, onchain=True)
-            print(f"live: {o.mint} was sold on chain ({sigs[-1][:12]}...) though the stream missed it; closed",
-                  flush=True)
-            self.pipe.sold(pid, now, left, got, 0)                  # chain_pnl books what really came back
+            lo = self.leftovers.pop(pid, None) or {}
+            self.held.pop(o.mint, None)
+            self.sell_fails.pop(pid, None)
+            self.retry_at.pop(pid, None)
+            if sold_sig:
+                # Its own sale landed unseen: into the ledger (the book's on_leftover writes the row, which
+                # the totals are recomputed from), with the signature that landed; chain_pnl settles it.
+                self.filled_sigs[sold_sig] = None
+                self.recent_fills.append((o.mint, "sell", int(o.tokens), int(self.clock())))
+                log_order({**pend, "sig": sold_sig}, "filled", sol=int(got or 0), tokens=o.tokens, mode=self.mode,
+                          onchain=True)
+                if self.on_leftover is not None:
+                    self.on_leftover("sold", {**lo, "pid": pid, "got_l": int(got or 0), "sig": sold_sig})
+            else:
+                log_order(pend, "gone", mode=self.mode, why="sold before, seen on chain")
+            print(f"live: leftover {o.mint} is already sold on chain; "
+                  + (f"booked from {sold_sig[:12]}..." if sold_sig else "dropped"), flush=True)
+            return
+        p = (self.pipe.pos.get(pid) if self.pipe is not None else None) or {}
+        left = int(p.get("left") or o.tokens)
+        if amount is not None and (amount == 0 or (amount < left and sold_sig)):
+            sold = left - int(amount)
+            if got is not None:
+                got_l = int(got)
+            elif sold_sig:                                  # landed, not readable: the expected proceeds
+                got_l = int((pend.get("expect_l") or 0) * sold / max(1, o.tokens))
+            else:                                           # gone, and none of our sales landed: nothing came back
+                got_l = 0
+            if sold_sig:
+                self.filled_sigs[sold_sig] = None
+            self.recent_fills.append((o.mint, "sell", int(sold), int(self.clock())))
+            log_order({**pend, "sig": sold_sig}, "filled", sol=got_l, tokens=sold, mode=self.mode, onchain=True)
+            print(f"live: {sold} of {o.mint} were sold on chain ({str(sold_sig)[:12]}...) though the stream missed "
+                  "it" + ("; closed" if amount == 0 else f"; {amount} left, sold after the backoff"), flush=True)
+            if amount == 0:
+                self.held.pop(o.mint, None)
+                self.sell_fails.pop(pid, None)
+                self.retry_at.pop(pid, None)
+            else:
+                self._note_fail(pid)                        # the rest goes after the backoff
+            self.pipe.sold(pid, now, sold, got_l, 0)        # chain_pnl books what really came back
             if pid not in self.pipe.pos:
                 self.exposure.pop(pid, None)
             return
         self._settle_failure(pid, pend, now, why, fee)
 
+    def _note_fail(self, pid: int) -> int:
+        n = self.sell_fails[pid] = self.sell_fails.get(pid, 0) + 1
+        self.retry_at[pid] = int(self.clock()) + backoff_ms(n)
+        return n
+
     def _settle_failure(self, pid: int, pend: dict, now: float, why: str, fee: int) -> None:
-        if pend.get("leftover"):
-            self.booked(-fee)
-            lo = self.leftovers.get(pid) or {}
-            if lo.get("tries", 0) < LEFTOVER_TRIES:
-                self.sell_leftover(pid, lo, lo.get("tokens", pend["order"].tokens))
-            elif self.on_leftover is not None:
-                self.on_leftover("stuck", {**lo, "why": why})
-            return
+        """A failure that stands. Its fee is in the journal already (_failed). A buy is over; a sale is tried
+        again after the backoff, and given up after SELL_MAX_FAILS failures in a row."""
+        o = pend["order"]
         if pend["side"] == "buy":
             self.exposure.pop(pid, None)
-            self.booked(-fee)
             self.pipe.buy_failed(pid, now, why, fee)
+            return
+        n = self._note_fail(pid)
+        if n >= SELL_MAX_FAILS:
+            self._give_up(pid, pend, why, n)
+            return
+        print(f"live: the sale of {o.mint} failed ({why}); try {n + 1} in {backoff_ms(n) // 1000} s"[:220], flush=True)
+        if pend.get("leftover"):
+            lo = self.leftovers.get(pid) or {}
+            self.sell_leftover(pid, lo, self.held.get(o.mint) or lo.get("tokens", o.tokens))
+            return
+        self.pipe.sell_failed(pid, now, why, 0)             # resent by the pipeline, held back by sell()
+
+    def _give_up(self, pid: int, pend: dict, why: str, n: int) -> None:
+        """No more tries: the position stays, marked stuck, and the owner hears of it once."""
+        o = pend["order"]
+        self.stuck[pid] = why
+        self.deferred.pop(pid, None)
+        print(f"live: the sale of {o.mint} failed {n} times in a row ({why}); given up, marked stuck"[:220],
+              flush=True)
+        if pend.get("leftover"):
+            lo = self.leftovers.get(pid) or {}
+            lo["stuck"] = why
+            info = {**lo, "why": why}
         else:
-            self.pipe.sell_failed(pid, now, why, fee)
+            p = (self.pipe.pos.get(pid) if self.pipe is not None else None) or {}
+            p["selling"] = True                             # nothing sends it again in this run
+            info = {"mint": o.mint, "symbol": p.get("symbol"), "why": why, "fails": n}
+        if self.on_leftover is not None:
+            self.on_leftover("stuck", info)
+
+    def _book_fill(self, pid: int, pend: dict, t: float, tokens: int, amount_l: int, fee: int, sol_l: int,
+                   fee_bps: int | None, onchain: bool = False) -> None:
+        """One fill (from the stream, or read back from the chain): the pipeline books it, it is measured,
+        its fee asked for. `amount_l` is a buy's cost or a sale's proceeds, after the programs' fees."""
+        self.pending.pop(pid, None)
+        o = pend["order"]
+        sig = pend.get("sig")
+        if sig:
+            self.filled_sigs[sig] = None
+            while len(self.filled_sigs) > 512:
+                self.filled_sigs.popitem(last=False)
+        if onchain:                                          # a stream copy of it may still come (no signature)
+            self.recent_fills.append((o.mint, pend["side"], int(tokens), int(self.clock())))
+        self.held.pop(o.mint, None)
+        if pend["side"] == "sell":
+            self.sell_fails.pop(pid, None)
+            self.retry_at.pop(pid, None)
+            self.deferred.pop(pid, None)
+        log_order(pend, "filled", sol=int(sol_l), tokens=int(tokens), mode=self.mode,
+                  **({"onchain": True} if onchain else {}))
+        m = {"t": self.clock(), "what": "fill", "mode": self.mode, "pid": pid, "side": pend["side"],
+             "venue": o.venue, "mint": o.mint, "rule": self.rule, "sig": sig,
+             "signal_ms": o.signal_ms, "land_ms": int(t), "lat_ms": int(t) - o.signal_ms,
+             "send_to_land_ms": int(t) - int(pend["sent_ms"]), "sol_l": int(sol_l),
+             "tokens": int(tokens), "fee_bps": fee_bps, "fee_assumed_l": fee, "slip": None, "onchain": onchain}
+        if pend.get("leftover"):
+            lo = self.leftovers.pop(pid, {})
+            write_measure(m)
+            if sig:
+                self.q.put(("fee", pid, sig))
+            if self.on_leftover is not None:                 # the book writes its ledger row
+                self.on_leftover("sold", {**lo, "pid": pid, "got_l": int(amount_l), "sig": sig})
+            return
+        if pend["side"] == "buy":
+            if sig:
+                self.buy_sig[pid] = sig
+            p = self.pipe.pos.get(pid) or {}
+            if p.get("signal_price") and tokens:
+                m["slip"] = ((amount_l / C.LAMPORTS) / (tokens / C.TOKEN_UNIT)) / p["signal_price"] - 1
+            self.meas[pid] = m
+            self.pipe.lat[pid] = m["lat_ms"]                  # the closed trade's lat_buy_ms, as on paper
+            self.exposure[pid] = int(amount_l) + fee
+            self.pipe.bought(pid, t, int(tokens), int(amount_l), fee)
+        else:
+            if pend.get("expect_l"):
+                m["slip"] = amount_l / pend["expect_l"] - 1
+            self.meas[pid] = m
+            self.pipe.sold(pid, t, int(tokens), int(amount_l), fee)
+            if pid not in self.pipe.pos:
+                self.exposure.pop(pid, None)
+        write_measure(m)
+        if sig:
+            self.q.put(("fee", pid, sig))
+
+    def _seen(self, mint: str, side: str, tokens: int) -> bool:
+        """A fill of this token, side and amount booked in the last ten minutes (a stream fill without a
+        signature that arrives after the chain's read-back already booked it)."""
+        now = int(self.clock())
+        return any(m == mint and s == side and k == tokens and now - t < 600_000 for m, s, k, t in self.recent_fills)
+
+    def _match(self, mint: str, side: str, sig: str | None) -> int | None:
+        """The pending order a fill belongs to: by its signature (the order's, or an earlier try of the same
+        position's), else by token and side when the fill has no signature or the order's send result is
+        not back yet."""
+        cands = [pid for pid, pend in self.pending.items() if pend["order"].mint == mint and pend["side"] == side]
+        if sig:
+            sent = self.buy_sigs if side == "buy" else self.sell_sigs
+            for pid in cands:
+                if sig == self.pending[pid].get("sig") or sig in sent.get(pid, ()):
+                    return pid
+            cands = [pid for pid in cands if not self.pending[pid].get("sig")]
+        return cands[0] if cands else None
 
     def on_trade(self, table: str, row: dict) -> None:
         """Our own wallet's trade on the stream is the fill; its timing and price are measured."""
         if self.signer is None or row.get("user") != self.signer.pubkey:
             return
-        for pid, pend in list(self.pending.items()):
-            o = pend["order"]
-            if o.mint != row["mint"] or (pend["side"] == "buy") != bool(row["buy"]):
-                continue
-            self.pending.pop(pid, None)
-            fee_bps = int(row.get("fee_bps") or C.DEFAULT_FEE_BPS)
-            fee = self._fee()
-            log_order(pend, "filled", sol=row["sol"], tokens=row["tok"], mode=self.mode)
-            m = {"t": self.clock(), "what": "fill", "mode": self.mode, "pid": pid, "side": pend["side"],
-                 "venue": o.venue, "mint": o.mint, "rule": self.rule, "sig": pend.get("sig"),
-                 "signal_ms": o.signal_ms, "land_ms": int(row["t"]), "lat_ms": int(row["t"]) - o.signal_ms,
-                 "send_to_land_ms": int(row["t"]) - int(pend["sent_ms"]), "sol_l": int(row["sol"]),
-                 "tokens": int(row["tok"]), "fee_bps": fee_bps, "fee_assumed_l": fee, "slip": None}
-            if pend.get("leftover"):
-                got = int(row["sol"] * (1 - fee_bps / 10_000))
-                lo = self.leftovers.pop(pid, {})
-                self.booked(got - int(lo.get("cost_l") or 0) - fee)
-                write_measure(m)
-                if pend.get("sig"):
-                    self.q.put(("fee", pid, pend["sig"]))
-                if self.on_leftover is not None:
-                    self.on_leftover("sold", {**lo, "got_l": got})
-                return
-            if pend["side"] == "buy":
-                cost = int(row["sol"] * (1 + fee_bps / 10_000))
-                p = self.pipe.pos.get(pid) or {}
-                if p.get("signal_price") and row["tok"]:
-                    m["slip"] = ((cost / C.LAMPORTS) / (row["tok"] / C.TOKEN_UNIT)) / p["signal_price"] - 1
-                self.meas[pid] = m
-                self.pipe.lat[pid] = m["lat_ms"]                  # the closed trade's lat_buy_ms, as on paper
-                self.exposure[pid] = cost + fee
-                self.pipe.bought(pid, row["t"], int(row["tok"]), cost, fee)
-            else:
-                got = int(row["sol"] * (1 - fee_bps / 10_000))
-                if pend.get("expect_l"):
-                    m["slip"] = got / pend["expect_l"] - 1
-                self.meas[pid] = m
-                self.pipe.sold(pid, row["t"], int(row["tok"]), got, fee)
-                if pid not in self.pipe.pos:
-                    self.exposure.pop(pid, None)
-            write_measure(m)
-            if pend.get("sig"):
-                self.q.put(("fee", pid, pend["sig"]))
+        side = "buy" if row["buy"] else "sell"
+        sig = row.get("sig") or None
+        tokens = int(row["tok"])
+        if (sig and sig in self.filled_sigs) or (not sig and self._seen(row["mint"], side, tokens)):
+            return                                           # booked already (read back from the chain first)
+        fee_bps = int(row.get("fee_bps") or C.DEFAULT_FEE_BPS)
+        amount = int(row["sol"] * (1 + fee_bps / 10_000)) if side == "buy" else int(row["sol"] * (1 - fee_bps / 10_000))
+        pid = self._match(row["mint"], side, sig)
+        if pid is not None:
+            pend = self.pending[pid]
+            if sig and pend.get("sig") != sig:
+                pend = {**pend, "sig": sig}                  # an earlier try of the same order is the one that landed
+            self._book_fill(pid, pend, row["t"], tokens, amount, self._fee(), row["sol"], fee_bps)
             return
+        self._unmatched(table, row, side, sig, tokens, amount, fee_bps)
+
+    def _unmatched(self, table: str, row: dict, side: str, sig: str | None, tokens: int, amount: int,
+                   fee_bps: int) -> None:
+        """An own fill no pending order claims. A buy (one given up as not landed, or never known) is adopted at
+        once and sold like a leftover; a sale goes to the open position or leftover of that token whose
+        retry is waiting; anything else is left to the chain check."""
+        mint = row["mint"]
+        if side == "buy":
+            if self._known(mint):
+                print(f"live: an own buy of {mint} matches no order; the token is held by a known position, the "
+                      "orphan check looks at it", flush=True)
+                return
+            g = self.given_up.pop(mint, None)
+            buy_sig = sig or (g or {}).get("sig")
+            old = (g or {}).get("order") or P.Order(0, "buy", mint, "pool" if table == "amm" else "curve", tokens,
+                                                    amount, int(row["t"]))
+            if buy_sig:
+                self.filled_sigs[buy_sig] = None
+                log_order({"order": old, "sig": buy_sig, "run": (g or {}).get("run") or "unmatched"}, "filled",
+                          sol=int(row["sol"]), tokens=tokens, mode=self.mode, note="a fill no pending order claimed")
+            info = {"mint": mint, "venue": "pool" if table == "amm" else "curve", "pool": self._pool_of(mint),
+                    "rule": self.rule, "cost_l": amount + self._fee(), "signal_ms": int(row["t"]), "buy_sig": buy_sig}
+            tok = self.pipe.eng.tokens.get(mint) if self.pipe is not None else None
+            info["symbol"] = getattr(tok, "symbol", None)
+            pid = self.new_orphan_pid()
+            print(f"live: an own buy of {mint} matches no order (given up as not landed?); adopted and sold now",
+                  flush=True)
+            self.sell_leftover(pid, info, tokens)
+            return
+        for pid, p in (list(self.pipe.pos.items()) if self.pipe is not None else []):
+            if p["mint"] == mint and p.get("state") == "open" and pid not in self.pending:
+                print(f"live: an own sale of {mint} matches no order (a try thought failed landed); booked", flush=True)
+                self.stuck.pop(pid, None)
+                pend = {"side": "sell", "order": P.Order(pid, "sell", mint, p.get("venue") or "curve", tokens, 0,
+                                                         int(row["t"]), "unmatched"), "sig": sig,
+                        "sent_ms": int(row["t"]), "expect_l": None}
+                self._book_fill(pid, pend, row["t"], tokens, amount, self._fee(), row["sol"], fee_bps)
+                return
+        for pid, lo in list(self.leftovers.items()):
+            if lo.get("mint") == mint and pid not in self.pending:
+                self.stuck.pop(pid, None)
+                pend = {"side": "sell", "order": P.Order(pid, "sell", mint, lo.get("venue") or "pool", tokens, 0,
+                                                         int(row["t"]), "leftover"), "sig": sig,
+                        "sent_ms": int(row["t"]), "leftover": True}
+                self._book_fill(pid, pend, row["t"], tokens, amount, self._fee(), row["sol"], fee_bps)
+                return
+        print(f"live: an own sale of {mint} matches nothing open; left to the chain check", flush=True)
 
 
 # ---------------------------------------------------------------- files, alerts, status
 
 def log_order(pend: dict, what: str, **kw) -> None:
     o = pend["order"]
-    rec = {"t": int(time.time() * 1000), "what": what, "pid": o.pid, "side": o.side, "mint": o.mint, "venue": o.venue,
-           "tokens": o.tokens, "limit_l": o.limit_l, "why": o.why, "sig": pend.get("sig"), **kw}
+    rec = {"t": int(time.time() * 1000), "what": what, "run": pend.get("run") or RUN_ID, "pid": o.pid, "side": o.side,
+           "mint": o.mint, "venue": o.venue, "tokens": o.tokens, "limit_l": o.limit_l, "why": o.why,
+           "sig": pend.get("sig"), **kw}
     try:
         d = data_dir()
         d.mkdir(parents=True, exist_ok=True)
@@ -1196,20 +1710,40 @@ def write_measure(rec: dict) -> None:
 
 LEDGER_COLS = ["mode", "rule", "mint", "name", "symbol", "signal_ms", "land_ms", "exit_ms", "exit_why", "legs",
                "entry_price", "exit_price", "stake_sol", "proceeds_sol", "pnl_sol", "ret", "hold_s", "lat_buy_ms",
-               "slip"]
+               "slip", "pid", "run", "buy_sig"]
+LEDGER_TEXT = ("mode", "rule", "mint", "name", "symbol", "exit_why", "run", "buy_sig")
 
 
 def write_close(rec: dict) -> None:
+    """One closed trade into ledger.csv. The row carries the run id and position id (and a leftover's buy
+    signature), which the chain check matches its transactions by. A ledger written before those columns
+    existed is rewritten once with the full header."""
     d = data_dir()
     d.mkdir(parents=True, exist_ok=True)
     p = d / "ledger.csv"
     with CP.LEDGER_LOCK:
         new = not p.exists()
+        cols = LEDGER_COLS
+        if not new:
+            with p.open(newline="", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                old = list(reader.fieldnames or [])
+                rows = list(reader) if any(c not in old for c in LEDGER_COLS) else None
+            if rows is not None:
+                cols = LEDGER_COLS + [c for c in old if c not in LEDGER_COLS]
+                tmp = p.with_suffix(".tmp")
+                with tmp.open("w", newline="", encoding="utf-8") as fh:
+                    w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+                    w.writeheader()
+                    w.writerows(rows)
+                tmp.replace(p)
+            else:
+                cols = old
         with p.open("a", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=LEDGER_COLS, extrasaction="ignore")
+            w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
             if new:
                 w.writeheader()
-            w.writerow(rec)
+            w.writerow({**rec, "run": rec.get("run") or RUN_ID})
 
 
 def last_buy_order(mint: str) -> dict | None:
@@ -1229,9 +1763,9 @@ def last_buy_order(mint: str) -> dict | None:
 
 
 def day_pnl_from_ledger(day: int) -> int:
-    """The realised P&L (lamports) of the closed trades that ended on UTC day `day` (days since 1970)."""
-    return int(round(sum((r.get("pnl_sol") or 0.0) for r in read_ledger(10_000)
-                         if r.get("exit_ms") is not None and int(r["exit_ms"]) // P.DAY_MS == day) * C.LAMPORTS))
+    """The realised P&L (lamports) of UTC day `day` (days since 1970): the trades that closed that day and
+    the journal's amounts of that day (realised)."""
+    return realised(day)["day_l"]
 
 
 def read_ledger(limit: int = 100) -> list[dict]:
@@ -1245,7 +1779,9 @@ def read_ledger(limit: int = 100) -> list[dict]:
     for r in rows[-limit:][::-1]:
         rec = {}
         for k, v in r.items():
-            if k in ("mode", "rule", "mint", "name", "symbol", "exit_why"):
+            if k is None:
+                continue
+            if k in LEDGER_TEXT:
                 rec[k] = v or None
             else:
                 try:
@@ -1325,8 +1861,7 @@ class LiveBook:
         self.card_day = None
         self.day_stats = {"n": 0, "wins": 0, "pnl_sol": 0.0, "failed": 0}
         self.fail_posted: dict[tuple, float] = {}
-        self.orphan_seen: dict[str, int] = {}          # mint -> when it was first held by no position
-        self.orphan_pid = -1000                        # leftover ids for orphans, below the restart's
+        self.orphan_seen: dict[str, int] = {}          # mint -> the holdings read that first showed it unknown
         self.last_limits = -1e18
         executor.on_stop = self.on_stop
         executor.on_leftover = self.on_leftover
@@ -1339,10 +1874,9 @@ class LiveBook:
         self.recent = read_ledger(100)
 
     def on_close(self, rec: dict) -> None:
-        rec = {**rec, "mode": self.exec.mode}
+        rec = {**rec, "mode": self.exec.mode, "run": RUN_ID, "buy_sig": self.exec.buy_sig.pop(rec.get("pid"), None)}
         write_close(rec)
-        self.exec.totals["trades"] += 1
-        self.exec.booked(int(rec["pnl_sol"] * C.LAMPORTS))
+        self.exec.recompute()                              # the day's and the total's P&L from the ledger
         self.closed_today.append(rec)
         self.recent.insert(0, {k: rec.get(k) for k in LEDGER_COLS})
         del self.recent[100:]
@@ -1381,9 +1915,10 @@ class LiveBook:
                    "signal_ms": info.get("signal_ms") or now, "land_ms": info.get("signal_ms") or now,
                    "exit_ms": now, "exit_why": "leftover", "legs": 1, "stake_sol": cost / C.LAMPORTS,
                    "proceeds_sol": got / C.LAMPORTS, "pnl_sol": (got - cost - fee) / C.LAMPORTS,
-                   "ret": (got - cost - fee) / cost if cost else None}
+                   "ret": (got - cost - fee) / cost if cost else None, "pid": info.get("pid"), "run": RUN_ID,
+                   "buy_sig": info.get("buy_sig")}
             write_close(rec)
-            self.exec.totals["trades"] += 1
+            self.exec.recompute()                          # booked: the totals follow the ledger
             self.recent.insert(0, {k: rec.get(k) for k in LEDGER_COLS})
             del self.recent[100:]
         self._post(lambda lang: [_leftover_card(what, info, self.exec.mode, lang)])
@@ -1436,7 +1971,8 @@ class LiveBook:
             cost = p.get("cost_l") or 0
             mark = p.get("mark_l")
             out.append({"pid": p["pid"], "mint": p["mint"], "symbol": p.get("symbol"), "name": p.get("name"),
-                        "venue": p.get("venue"), "state": p.get("state"), "tokens": p.get("left"),
+                        "venue": p.get("venue"), "state": "stuck" if p["pid"] in self.exec.stuck else p.get("state"),
+                        "tokens": p.get("left"),
                         "cost_sol": cost * (p["left"] / p["tokens"]) / C.LAMPORTS if p.get("tokens") else
                         p.get("limit_l", 0) / C.LAMPORTS,
                         "mark_sol": None if mark is None else mark / C.LAMPORTS,
@@ -1454,8 +1990,8 @@ class LiveBook:
                   and not (ex.max_total_l is not None and -ex.totals["pnl_l"] >= ex.max_total_l),
                   mode=ex.mode, rule=self.rule, positions=self.positions(),
                   leftovers=[{"pid": k, **v} for k, v in ex.leftovers.items()],
-                  pnl_today_sol=ex.day_pnl_l / C.LAMPORTS, trades_today=len(self.closed_today),
-                  wins_today=sum(1 for r in self.closed_today if r["pnl_sol"] > 0),
+                  pnl_today_sol=ex.day_pnl_l / C.LAMPORTS, trades_today=ex.trades_today,
+                  wins_today=ex.wins_today,
                   pnl_total_sol=ex.totals["pnl_l"] / C.LAMPORTS, trades_total=ex.totals["trades"],
                   since_ms=ex.totals.get("since_ms"), limits=limits_view(ex.limits, None if ex.max_total_l is None
                                                                          else ex.max_total_l / C.LAMPORTS),
@@ -1471,23 +2007,42 @@ class LiveBook:
     def save_open(self) -> None:
         """Positions and buys in flight, so a restart can sell what is left (adopt_leftovers)."""
         rows = []
+        ex = self.exec
         for p in (self.pipe.pos.values() if self.pipe is not None else []):
-            rows.append({"mint": p["mint"], "venue": p.get("venue"), "pool": self.exec._pool_of(p["mint"]),
-                         "symbol": p.get("symbol"), "rule": p.get("rule"),
-                         "cost_l": int(p.get("cost_l") * p["left"] / p["tokens"]) if p.get("tokens") else
-                         int(p.get("limit_l") or 0)})
-        rows += [dict(v, tries=0) for v in self.exec.leftovers.values()]
+            pid = p["pid"]
+            pend = ex.pending.get(pid) or {}
+            pending = p.get("state") == "pending"
+            # The real cost: what the fill took (with its fee), for the part still held. A buy still in flight
+            # has no fill yet: the stake it spends (not the 30 % higher limit); its signature lets the chain
+            # check settle what it really took.
+            if p.get("tokens"):
+                cost = int((p.get("cost_l") or 0) + (p.get("fees_l") or 0)) * p["left"] // p["tokens"]
+            else:
+                cost = int(p.get("stake_l") or p.get("limit_l") or 0)
+            buy_sig = ex.buy_sig.get(pid) or (pend.get("sig") if pending else None) \
+                or ((ex.buy_sigs.get(pid) or [None])[-1])
+            rows.append({"mint": p["mint"], "venue": p.get("venue"), "pool": ex._pool_of(p["mint"]),
+                         "symbol": p.get("symbol"), "name": p.get("name"), "rule": p.get("rule"),
+                         "signal_ms": p.get("signal_ms"), "buy_sig": buy_sig, "cost_l": cost, "pending": pending,
+                         "stuck": ex.stuck.get(pid)})
+        rows += [dict(v, tries=0) for v in ex.leftovers.values()]
         write_json(data_dir() / "open.json", rows)
 
-    def adopt_orphans(self, holdings: dict[str, int] | None, now_ms: int | None = None) -> int:
-        """Tokens in the wallet that no position, order or leftover knows, still there after
-        ORPHAN_AFTER_MS: a buy the executor gave up on as not landed that landed late (Bundle,
-        2026-10-22). Its buy is logged as filled (so chain_pnl can settle it) and it is sold
-        like a leftover. Runs on the stream's thread with the service's last holdings read."""
+    def adopt_orphans(self, holdings: dict[str, int] | None, now_ms: int | None = None,
+                      read_ms: int | None = None) -> int:
+        """Tokens in the wallet that no position, order or leftover knows, seen in two holdings reads at
+        least ORPHAN_AFTER_MS apart: a buy the executor gave up on as not landed that landed late (Bundle,
+        2026-10-22). Its buy is logged as filled (so chain_pnl can settle it) and it is sold like a
+        leftover. Runs on the stream's thread with the service's last holdings read, and only when that
+        read (taken at `read_ms`) is at most HOLDINGS_FRESH_MS old: a stale snapshot may still show a
+        token that was sold since."""
+        now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+        read_ms = now_ms if read_ms is None else int(read_ms)
+        if now_ms - read_ms > HOLDINGS_FRESH_MS:
+            return 0                                       # an old snapshot: decide nothing on it
         if not holdings:
             self.orphan_seen.clear()
             return 0
-        now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
         ex = self.exec
         known = {p["mint"] for p in (ex.pipe.pos.values() if ex.pipe is not None else [])}
         known |= {pend["order"].mint for pend in ex.pending.values()}
@@ -1495,26 +2050,34 @@ class LiveBook:
         for m in list(self.orphan_seen):
             if m not in holdings or m in known:
                 self.orphan_seen.pop(m)
+        deltas = {}
+        try:
+            deltas = (json.loads((data_dir() / "chain.json").read_text(encoding="utf-8")) or {}).get("deltas") or {}
+        except (OSError, ValueError, AttributeError):
+            pass
         n = 0
         for mint, amt in holdings.items():
             if amt <= 0 or mint in known:
                 continue
-            first = self.orphan_seen.setdefault(mint, now_ms)
-            if now_ms - first < ORPHAN_AFTER_MS:
+            first = self.orphan_seen.setdefault(mint, read_ms)
+            if read_ms - first < ORPHAN_AFTER_MS:
                 continue
             buy = last_buy_order(mint)
+            # The real cost where the chain check has read the buy already, else its cost limit.
+            cost = int((buy or {}).get("limit_l") or 0)
+            if buy and buy.get("sig") in deltas and int(deltas[buy["sig"]]) < 0:
+                cost = -int(deltas[buy["sig"]])
             if buy and buy.get("sig") and buy.get("what") != "filled":
                 log_order({"order": P.Order(int(buy.get("pid") or 0), "buy", mint, buy.get("venue") or "curve",
                                             int(buy.get("tokens") or amt), int(buy.get("limit_l") or 0), now_ms),
-                           "sig": buy["sig"]}, "filled", sol=int(buy.get("limit_l") or 0), tokens=amt,
+                           "sig": buy["sig"], "run": buy.get("run") or "old"}, "filled", sol=cost, tokens=amt,
                           mode=ex.mode, onchain=True, note="landed after the executor gave up on it")
             tok = ex.pipe.eng.tokens.get(mint) if ex.pipe is not None else None
             pool = tok.pool if tok is not None else None
             info = {"mint": mint, "venue": "pool" if pool else "curve", "pool": pool, "rule": self.rule,
-                    "symbol": getattr(tok, "symbol", None), "cost_l": int((buy or {}).get("limit_l") or 0),
-                    "signal_ms": int((buy or {}).get("t") or now_ms)}
-            self.orphan_pid -= 1
-            ex.sell_leftover(self.orphan_pid, info, amt)
+                    "symbol": getattr(tok, "symbol", None), "cost_l": cost,
+                    "signal_ms": int((buy or {}).get("t") or now_ms), "buy_sig": (buy or {}).get("sig")}
+            ex.sell_leftover(ex.new_orphan_pid(), info, amt)
             self.orphan_seen.pop(mint, None)
             print(f"live: {mint} is in the wallet but in no position (a late buy); selling it", flush=True)
             n += 1

@@ -605,6 +605,8 @@ class Pipeline:
         self._event("sold", p, tokens=tokens, got_l=got_l)
         if p["left"] <= 0:
             self._close(p, at)
+        elif p.get("exiting"):                                # a protective exit sold only part: the rest goes too
+            self._sell_all(p, at, p["exit_why"] or "stop")
         else:
             self._after_leg(p, at)
 
@@ -616,7 +618,9 @@ class Pipeline:
         p["selling"] = False
         p["sell_fails"] = p.get("sell_fails", 0) + 1
         self._event("sell_failed", p, why=why, fee_l=fee_l)
-        if p.get("exiting"):                                  # a protective exit must go through: send again
+        if p.get("exiting"):
+            # A protective exit must go through: it is sent again at once. The live executor holds it back
+            # for its backoff (1, 2, 4 ... 60 s) and gives up after a cap; the paper executor fills it.
             self._sell_all(p, at, p["exit_why"] or "stop")
             return
         p["step"] = max(0, p["step"] - 1)                     # the take-profit step was not taken: it stays due

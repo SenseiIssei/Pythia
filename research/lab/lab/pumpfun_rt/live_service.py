@@ -91,6 +91,7 @@ class Service:
         self.balance_l: int | None = None
         self.balance_t: int | None = None
         self.holdings: dict | None = None
+        self.holdings_t: int | None = None                  # when the holdings above were read (wall ms)
         self.last = {"balance": -1e18, "holdings": -1e18, "report": -1e18, "gate": -1e18}
 
     def start(self) -> None:
@@ -150,10 +151,13 @@ class Service:
             print(f"live service: balance not read ({type(e).__name__}: {e})", flush=True)
 
     def refresh_holdings(self) -> None:
+        """The wallet's tokens. A failed read keeps the last snapshot for the app, but not its time: the
+        orphan check acts only on a read younger than a minute (live_exec.HOLDINGS_FRESH_MS)."""
         if self.rpc is None or not self.address:
             return
         try:
             self.holdings = self.rpc.holdings(self.address)
+            self.holdings_t = int(time.time() * 1000)
         except Exception as e:
             print(f"live service: token holdings not read ({type(e).__name__}: {e})", flush=True)
 
@@ -187,7 +191,8 @@ class Service:
         trades = self.book.recent if self.book is not None else LX.read_ledger(100)
         LX.write_json(d / "live_trades.json", {"t": int(time.time() * 1000), "trades": trades})
         if self.book is not None:
-            self.book.adopt_orphans(self.holdings)        # a buy that landed after it was given up
+            if self.holdings_t is not None:               # a buy that landed after it was given up
+                self.book.adopt_orphans(self.holdings, int(time.time() * 1000), read_ms=self.holdings_t)
             self.book.save_open()
 
     def stopped(self) -> None:

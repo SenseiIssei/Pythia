@@ -554,6 +554,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prl_left_stuck_title": "pump.fun LIVE leftover NOT sold {name}",
         "prl_left_stuck_summary": ("A position from before the restart could not be sold ({why}). Sell it in your "
                                    "own wallet (the backup imported into Phantom)."),
+        "prl_stuck_title": "pump.fun LIVE sale given up {name}",
+        "prl_stuck_summary": ("The sale failed {n} times in a row ({why}). The bot stops trying and keeps the "
+                              "position marked stuck. Sell it in your own wallet, or restart the service."),
         "prl_daily_title": "pump.fun LIVE {day}",
         "prl_daily_summary": "{rule}: {n} trades closed, {wins} won, {pnl} on the day, {total} in all.",
         "prl_daily_balance": "Wallet balance {bal}.",
@@ -1020,6 +1023,10 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prl_left_stuck_title": "pump.fun ECHTGELD Rest NICHT verkauft {name}",
         "prl_left_stuck_summary": ("Eine Position von vor dem Neustart ließ sich nicht verkaufen ({why}). Verkaufe "
                                    "sie in deiner eigenen Wallet (die Sicherung in Phantom importiert)."),
+        "prl_stuck_title": "pump.fun ECHTGELD Verkauf aufgegeben {name}",
+        "prl_stuck_summary": ("Der Verkauf schlug {n} Mal hintereinander fehl ({why}). Der Bot versucht es nicht "
+                              "weiter und markiert die Position als festgefahren. Verkaufe sie in deiner eigenen "
+                              "Wallet oder starte den Dienst neu."),
         "prl_daily_title": "pump.fun ECHTGELD {day}",
         "prl_daily_summary": "{rule}: {n} Abschlüsse, {wins} gewonnen, {pnl} am Tag, {total} insgesamt.",
         "prl_daily_balance": "Guthaben der Wallet {bal}.",
