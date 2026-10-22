@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Watches the pump.fun live service every two minutes and tells the owner at once when it is not
-trading as it should. Standard library only; runs on the host as the job "pumpfun-live-watch".
+trading as it should, quiet hours or not. Standard library only; runs on the host as the job
+"pumpfun-live-watch".
 
 It reads what the service writes (reports/pumpfun_rt/live_status.json) and asks docker whether the
 container runs. Problems, each posted once when it starts and once an hour while it lasts, and a
@@ -117,8 +118,9 @@ def post(title: str, text: str, dry: bool) -> None:
         print(f"[dry-run] {title}: {text}")
         return
     try:
-        subprocess.run([sys.executable, str(NOTIFY), "--event", "risk", title, text], env=read_env(ALERT_ENV),
-                       capture_output=True, timeout=60)
+        # urgent: real money is at stake, so quiet hours do not hold it back (like the live trade cards)
+        subprocess.run([sys.executable, str(NOTIFY), "--urgent", "--event", "risk", title, text],
+                       env=read_env(ALERT_ENV), capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"pumpfun-live-watch: not posted ({type(e).__name__})", file=sys.stderr)
 

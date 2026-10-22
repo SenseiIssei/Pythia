@@ -68,3 +68,11 @@ def test_a_dry_run_posts_nothing_and_writes_nothing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[dry-run] pump.fun Live-Bot: Achtung" in out
     assert not (tmp_path / "_health").exists()
+
+
+def test_a_post_is_urgent_so_quiet_hours_never_hold_it(monkeypatch):
+    calls = []
+    monkeypatch.setattr(W.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    W.post("t", "x", dry=False)
+    cmd = calls[0]
+    assert cmd[2:] == ["--urgent", "--event", "risk", "t", "x"]
