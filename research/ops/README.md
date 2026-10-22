@@ -313,6 +313,12 @@ endpoints).
 3. Put the program IDLs from github.com/pump-fun/pump-public-docs
    (`idl/pump.json`, `idl/pump_amm.json`) into `/srv/pythia-data/pumpfun_rt/idl/`.
    The executor compares them with what it builds and refuses on any difference.
+   It builds only the documented 17-account trades: `buy_v3` and `sell_v3` on
+   the bonding curve, `buy_exact_quote_in_v2` and `sell_v2` on PumpSwap (the
+   legacy and v1 trades now need undocumented remaining accounts and are
+   never sent; cashback coins, which take neither, are refused). Pool prices
+   use the effective quote reserves (vault plus the pool's signed
+   `virtual_quote_reserves`) everywhere, live and on paper.
 4. Write the confirmation `/etc/pythia/pumpfun-live-ack` (mode 600).
    - TEST mode (docs/PUMPFUN-LIVE.md, step 5, has the exact template):
      `mode=test`, `strategy=auto` (the least-bad post-migration pool rule of
@@ -333,7 +339,9 @@ endpoints).
    lower) into `/etc/pythia/pumpfun-live.env` (mode 600).
 6. TEST mode: simulate (nothing is signed or sent; a buy and a buy-then-sell
    for the funded wallet against the newest pool the collector saw, through
-   `simulateTransaction` on mainnet; the gate needs a success within 24 hours):
+   `simulateTransaction` on mainnet; the gate needs a success within 24 hours,
+   on the strategy's own venue; `--pool` and `--mint` pick another pool,
+   `--venue curve --mint <mint>` looks at the curve path):
 
    ```bash
    docker run --rm --env-file /etc/pythia/pumpfun-live.env -v /etc/pythia:/etc/pythia:ro -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.live_exec simulate

@@ -120,7 +120,49 @@ als dein `max_total_sol` plus etwa 0,05 SOL für Gebühren und Kontomieten.
 Wie bisher: die IDLs aus github.com/pump-fun/pump-public-docs
 (`idl/pump.json`, `idl/pump_amm.json`) nach
 `/srv/pythia-data/pumpfun_rt/idl/`. Der Executor vergleicht sie mit dem, was er
-baut, und verweigert bei jeder Abweichung.
+baut, und verweigert bei jeder Abweichung. Geprüft werden genau die
+Instruktionen, die er sendet (siehe unten): Name, Reihenfolge der Konten,
+Argumente und Diskriminator, dazu die festen Positionen der Felder, die er aus
+den Programmkonten liest (zum Beispiel `Pool.virtual_quote_reserves` und die
+Liste der Buyback-Empfänger). Fehlt eine Instruktion oder hat pump.fun sie
+geändert, bleibt das Tor zu.
+
+### Welche Instruktionen der Bot sendet
+
+pump.fun hat die Handelsinstruktionen umgebaut. Die alten Kauf- und
+Verkaufsbefehle verlangen inzwischen zusätzliche Konten, die nicht
+dokumentiert sind; in der Simulation scheiterten sie mit `InvalidPoolV2`
+(6062, PumpSwap) und `BuybackFeeRecipientMissing` (6062, Bonding Curve).
+Pythia sendet deshalb nur noch die dokumentierten Befehle mit festen 17
+Konten:
+
+- **PumpSwap (nach der Migration, die Standardstrategie):**
+  `buy_exact_quote_in_v2` und `sell_v2`. Ein Kauf gibt genau den Einsatz aus
+  und verlangt mindestens die Tokenmenge des Signals geteilt durch 1,3 (die
+  30 % Schlupftoleranz); weniger, und der Kauf scheitert. Vor dem Kauf legt
+  die Transaktion dein Tokenkonto an (mit dem richtigen Tokenprogramm,
+  Token-2022 bei neuen Coins) und dein Wrapped-SOL-Konto, legt genau den
+  Einsatz hinein und schließt das Wrapped-SOL-Konto danach wieder. Ein
+  Verkauf legt das Wrapped-SOL-Konto an, verkauft und schließt es, damit der
+  Erlös als SOL ankommt.
+- **Bonding Curve (vor der Migration):** `buy_v3` und `sell_v3`, wie bisher
+  genau die Tokenmenge zu einem Höchstpreis.
+- **Cashback-Coins** unterstützen diese Befehle nicht. Solche Pools und Kurven
+  lehnt der Bot ab; die alten Befehle sendet er nie.
+- Die Gebühr für den Buyback geht an eines der acht Buyback-Konten aus
+  pump.funs Liste (docs/FEE_RECIPIENTS.md); `txbuild.check_own` lehnt jedes
+  andere Konto an dieser Stelle ab, ebenso jedes Tokenkonto, das nicht deiner
+  Wallet gehört.
+
+Preise im Pool rechnet Pythia jetzt überall mit den **effektiven
+Quote-Reserven**: Guthaben des SOL-Tresors des Pools plus
+`Pool::virtual_quote_reserves` (mit Vorzeichen, kann negativ sein). Das gilt
+für den Echtgeld-Kauf, die Simulation und das Papiermodell. Bei frisch
+migrierten Pools ist dieser Wert heute oft deutlich positiv (in Stichproben
+am 22.10. etwa 16 bis 18 SOL bei 225 bis 250 SOL im Tresor); vorher hat das
+Papiermodell solche Pools also zu billig gerechnet. Ältere Aufzeichnungen
+haben den Wert nicht; für sie rechnet das Papiermodell weiter mit dem Tresor
+allein.
 
 ## 5. Bestätigungsdatei schreiben
 
@@ -181,9 +223,26 @@ docker run --rm --env-file /etc/pythia/pumpfun-live.env \
 Das baut einen Kauf und einen Kauf mit anschließendem Verkauf gegen den
 neuesten Pool, den der Collector gesehen hat, und lässt beides per
 `simulateTransaction` auf Mainnet durchrechnen. Es wird **nichts signiert und
-nichts gesendet**. Das Ergebnis steht in
+nichts gesendet**. Die Ausgabe zeigt auch die Reserven des Pools (Tresor,
+`virtual_quote_reserves` und die effektive Summe, mit der gerechnet wird).
+Ist der neueste Pool ein Cashback-Pool, scheitert die Simulation mit diesem
+Grund; dann einen anderen Pool nennen (`--pool <pool> --mint <mint>`, zum
+Beispiel aus `/srv/pythia-data/pumpfun_rt/pools.json`). Das Ergebnis steht in
 `/srv/pythia-data/live/pumpfun_rt/simulate.json`; der Testmodus öffnet nur mit
-einer erfolgreichen Simulation dieser Wallet aus den letzten 24 Stunden.
+einer erfolgreichen Simulation dieser Wallet aus den letzten 24 Stunden, und
+nur wenn sie auf dem Handelsplatz der Strategie lief (Pool oder Kurve).
+
+Die Kurve lässt sich zum Ansehen ebenfalls simulieren, mit einem Token, das
+noch auf der Kurve ist:
+
+```bash
+docker run --rm --env-file /etc/pythia/pumpfun-live.env \
+  -v /etc/pythia:/etc/pythia:ro -v /srv/pythia-data:/data -v /opt/pythia-lab:/app \
+  pythia-lab python -m lab.pumpfun_rt.live_exec simulate --venue curve --mint <mint>
+```
+
+Das überschreibt `simulate.json`. Für eine Pool-Strategie zählt es nicht; danach
+den Befehl ohne `--venue` noch einmal ausführen, sonst bleibt das Tor zu.
 
 Das gilt auch im laufenden Betrieb: Der Dienst prüft alle Bedingungen jede
 Minute, und ist die letzte Simulation älter als 24 Stunden, kauft er nichts
