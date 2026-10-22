@@ -37,6 +37,8 @@ def twin(sig: dict) -> dict:
     out["strategy"] = f"{sig['strategy']}{SUFFIX}"
     out["variant"] = f"{sig.get('variant') or sig['strategy']} (live copy)"
     out["live_copy_of"] = sig["strategy"]
+    # Only an autopilot that names it runs it: an auto pick never adds the twin next to its original.
+    out["evidence"] = {**(sig.get("evidence") or {}), "explicit_only": True}
     return out
 
 

@@ -21,8 +21,9 @@ def test_the_twin_carries_the_same_book_under_its_own_id(tmp_path):
     t = json.loads((tmp_path / "signals" / "breakout_top10_live" / "latest.json").read_text(encoding="utf-8"))
     assert t["strategy"] == "breakout_top10_live" and t["live_copy_of"] == "breakout_top10"
     assert t["variant"].endswith("(live copy)")
-    for k in ("weights", "evidence", "valid_until_ms", "autopilot_only", "quote"):
+    for k in ("weights", "valid_until_ms", "autopilot_only", "quote"):
         assert t[k] == SIG[k]
+    assert t["evidence"] == {**SIG["evidence"], "explicit_only": True}       # never auto-picked
 
 
 def test_a_stale_or_missing_original_writes_no_twin(tmp_path):
