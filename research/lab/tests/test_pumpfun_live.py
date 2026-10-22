@@ -650,6 +650,31 @@ def test_simulate_builds_a_buy_and_a_round_trip_and_records_the_result(tmp_path,
     assert not none["ok"] and "no recent pool" in none["error"]
 
 
+class UsdcPoolRpc(SimRpc):
+    """The pool at key(68) is quoted in USDC; every other one in SOL."""
+
+    def account(self, pubkey):
+        data, owner = super().account(pubkey)
+        if pubkey == key(68):
+            data = bytearray(data)
+            data[43:75] = X.key(key(70))                                # its own coin, so only the quote differs
+            data[75:107] = X.key(key(69))
+        return bytes(data), owner
+
+
+def test_simulate_skips_a_newest_pool_not_quoted_in_sol(tmp_path, folders):
+    pools = tmp_path / "pools.json"
+    pools.write_text(json.dumps({key(68): [key(70), T0 - 1_000], POOL: [MINT, T0 - 60_000]}))
+    gate = LX.LiveGate(tmp_path / "none", tmp_path / "none.json", env={}, kill=lambda: False, now_ms=lambda: T0,
+                       idl_path=tmp_path)
+    rec = LX.simulate(gate, UsdcPoolRpc(vq=-SOL), FakeSigner.pubkey, now_ms=T0, pools_file=pools)
+    assert rec["ok"] and rec["pool"] == POOL and rec["mint"] == MINT        # the USDC pair is passed over
+    only = tmp_path / "only.json"
+    only.write_text(json.dumps({key(68): [key(70), T0 - 1_000]}))
+    bad = LX.simulate(gate, UsdcPoolRpc(), FakeSigner.pubkey, now_ms=T0, pools_file=only)
+    assert not bad["ok"] and "quoted in SOL" in bad["error"]
+
+
 # ---------------------------------------------------------------- the service and its status file
 
 class BalanceRpc:

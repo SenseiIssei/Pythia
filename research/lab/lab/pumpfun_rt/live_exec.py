@@ -2181,14 +2181,15 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
 
 # ---------------------------------------------------------------- the simulation (nothing is signed or sent)
 
-def newest_pool(path: Path | None = None) -> tuple[str, str] | None:
-    """(pool, mint) of the newest migration the collector has seen (its pools.json)."""
+def newest_pools(path: Path | None = None, n: int = 10) -> list[tuple[str, str]]:
+    """(pool, mint) of the newest migrations the collector has seen (its pools.json), newest first."""
     from . import store
     d = read_json(path or (store.base() / "pools.json"))
     if not isinstance(d, dict) or not d:
-        return None
-    best = max(d.items(), key=lambda kv: int(kv[1][1]) if isinstance(kv[1], list) and len(kv[1]) > 1 else 0)
-    return best[0], best[1][0]
+        return []
+    seen = [(k, v) for k, v in d.items() if isinstance(v, list) and len(v) > 1]
+    seen.sort(key=lambda kv: -int(kv[1][1]))
+    return [(k, v[0]) for k, v in seen[:n]]
 
 
 def newest_create(root: Path | None = None, now_ms: int | None = None, max_age_ms: int = 600_000) -> str | None:
@@ -2231,17 +2232,31 @@ def simulate(gate: LiveGate, rpc: Rpc, pubkey: str, mint: str | None = None, poo
            "mint": mint, "pool": pool, "sol": lam / C.LAMPORTS, "buy": None, "round_trip": None, "error": None}
     try:
         if venue == "pool":
-            if not pool:
-                hit = newest_pool(pools_file)
-                if hit is None:
-                    raise RuntimeError("no recent pool known (run the collector, or pass --pool and --mint)")
-                pool, mint = hit
-            if not mint:
-                raise RuntimeError("--pool needs --mint")
-            rec.update(pool=pool, mint=mint)
-            info = b.pool(pool, mint, fresh=True)
-            if not info.supports_v2():
-                raise RuntimeError("the pool takes no v2 trade (a cashback coin); pass another --pool")
+            if pool:
+                if not mint:
+                    raise RuntimeError("--pool needs --mint")
+                rec.update(pool=pool, mint=mint)
+                info = b.pool(pool, mint, fresh=True)
+                if not info.supports_v2():
+                    raise RuntimeError("the pool takes no v2 trade (a cashback coin); pass another --pool")
+                if info.quote_mint != X.WSOL:
+                    raise RuntimeError("the pool is not quoted in SOL; pass another --pool")
+            else:
+                # pools.json does not say a pool's quote: the newest pool quoted in SOL that takes a v2 trade
+                # (a USDC pair or a cashback coin is refused by the executor, so it proves nothing here)
+                info = None
+                for pool_c, mint_c in newest_pools(pools_file):
+                    try:
+                        cand = b.pool(pool_c, mint_c, fresh=True)
+                    except (RuntimeError, ValueError):
+                        continue
+                    if cand.quote_mint == X.WSOL and cand.supports_v2():
+                        info, pool, mint = cand, pool_c, mint_c
+                        break
+                if info is None:
+                    raise RuntimeError("no recent pool quoted in SOL that takes a v2 trade (run the collector, "
+                                       "or pass --pool and --mint)")
+                rec.update(pool=pool, mint=mint)
             pb, pq = rpc.token_balance(info.pool_base), rpc.token_balance(info.pool_quote)
             eff = info.effective_quote(pq)
             rec["reserves"] = {"base": pb, "quote_vault": pq, "virtual_quote": info.virtual_quote, "effective": eff}
