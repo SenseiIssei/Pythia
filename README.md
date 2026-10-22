@@ -117,6 +117,8 @@ npm run preflight
 npm run security:scan
 ```
 
+Install the pre-commit hook once per clone, so no secret, address or personal path reaches a commit: `git config core.hooksPath scripts/hooks` (or `npm run hooks:install`).
+
 On Windows the npm scripts remove `CC` and `CXX` from the environment, because paths with spaces break native Rust builds.
 
 ## Layout

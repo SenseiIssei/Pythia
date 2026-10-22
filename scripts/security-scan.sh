@@ -8,7 +8,8 @@
 # Runs, each only when its tool is installed (a missing tool is reported as
 # SKIPPED, never as a pass):
 #   gitleaks        whole git history (every local and remote ref), .gitleaks.toml
-#   cargo audit     Cargo.lock against the RustSec advisory database
+#   pytest          the research agent's guard tests (research/ops/agent/test_guard.py)
+#   cargo audit    Cargo.lock against the RustSec advisory database
 #   npm audit       the shipped npm dependencies (--omit=dev), then all of them
 #   pip-audit       research/lab and research/recorder requirements
 #   SBOM            CycloneDX for the Rust crates (cargo-cyclonedx) and npm (npm sbom)
@@ -46,6 +47,19 @@ if have gitleaks; then
   fi
 else
   note "gitleaks (all history)" "SKIPPED (gitleaks not installed)"
+fi
+
+# ---------------------------------------------------------------- the research agent's guard
+# Its patterns and rules against every case of the 2026-10-22 audit (research/ops/README.md).
+if have python3 && python3 -c "import pytest, fcntl" >/dev/null 2>&1; then
+  if python3 -m pytest -q -p no:cacheprovider research/ops/agent/test_guard.py >"$out/guard-tests.txt" 2>&1; then
+    note "agent guard tests" "PASS"
+  else
+    note "agent guard tests" "FAIL, see $out/guard-tests.txt"
+    failed=1
+  fi
+else
+  note "agent guard tests" "SKIPPED (needs python3 with pytest, Linux or macOS)"
 fi
 
 # ---------------------------------------------------------------- Rust
