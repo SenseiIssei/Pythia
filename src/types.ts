@@ -617,6 +617,9 @@ export interface LiveStatus {
   makerStats?: MakerRouteStats[];
   /** Perpetual futures (the lab's long/short M4 book). Absent without a perps venue. */
   perps?: PerpsStatus;
+  /** The most a capped live test autopilot may be given, in USD
+   *  (PYTHIA_LIVE_TEST_MAX_USD on the server, never above 300). */
+  liveTestCapUsd?: number;
 }
 
 /** The perps route. Mirrors the Rust `PerpsStatus`. Demo or paper only. */
@@ -1080,6 +1083,11 @@ export interface AutopilotConfig {
    *  lab books of US shares on the Alpaca account, split between the two by
    *  evidence. Paper or demo only; sleeves stay empty (Pythia picks). */
   portfolio?: boolean;
+  /** A capped real-money test: mode live with strategies the owner names
+   *  although their Strategy Passport is not green. At most the live test
+   *  cap, a loss limit of at most 25 %, one at a time; never readiness
+   *  evidence. Absent: no test. */
+  liveTest?: boolean;
 }
 
 /**

@@ -4,7 +4,7 @@
 // curves are put on one scale as a return in percent from each one's own
 // amount: one axis, never two. Pure functions, tested in compare.test.ts.
 
-import { curve, isActive, worstDip } from "../autopilot";
+import { curve, isActive, isLiveTest, worstDip } from "../autopilot";
 import { benchLabel, benchmark } from "../practice";
 import type { AutopilotStatus } from "../types";
 
@@ -17,6 +17,8 @@ export interface CompareRow {
   id: string;
   name: string;
   mode: AutopilotStatus["config"]["mode"];
+  /** A capped live test, shown as TEST. */
+  liveTest: boolean;
   active: boolean;
   /** Its colour slot in the chart (0..5), by when it started, or null when
    *  it is in the table only. */
@@ -90,6 +92,7 @@ export function compareRows(list: AutopilotStatus[], now: number): CompareRow[] 
       id: s.config.id,
       name: s.config.name,
       mode: s.config.mode,
+      liveTest: isLiveTest(s.config),
       active: isActive(s),
       slot: slots.get(s.config.id) ?? null,
       amount: s.startCapital,

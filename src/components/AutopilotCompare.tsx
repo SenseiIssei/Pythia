@@ -15,6 +15,11 @@ import type { AutopilotStatus } from "../types";
 
 const MODE: Record<CompareRow["mode"], string> = { paper: "Practice", demo: "Demo", live: "Real money" };
 
+/** The mode as the row says it: a capped live test always says TEST. */
+function modeWord(r: CompareRow): string {
+  return r.liveTest && r.mode === "live" ? "Real money TEST" : MODE[r.mode];
+}
+
 function seriesColor(slot: number): string {
   return `var(--color-series-${slot + 1})`;
 }
@@ -77,7 +82,7 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
               <dd className="tabular text-right">
                 {r.trades} · ${r.fees.toFixed(2)}
               </dd>
-              <dt>{MODE[r.mode]}</dt>
+              <dt>{modeWord(r)}</dt>
               <dd className="tabular text-right">
                 {money(r.amount)}
                 {!r.active ? " · stopped" : ""}
@@ -122,7 +127,7 @@ export function AutopilotCompare({ list, now }: { list: AutopilotStatus[]; now: 
                     <span className="min-w-0">
                       <span className="block truncate font-semibold">{r.name}</span>
                       <span className="text-muted block text-xs">
-                        {MODE[r.mode]} · {money(r.amount)}
+                        {modeWord(r)} · {money(r.amount)}
                         {!r.active ? " · stopped" : ""}
                       </span>
                     </span>

@@ -2,7 +2,7 @@
 // functions over the engine's AutopilotStatus, so the numbers on the card are
 // tested rather than eyeballed.
 
-import { curve, floorAtStart, isActive, type Stop } from "../autopilot";
+import { curve, floorAtStart, isActive, isLiveTest, type Stop } from "../autopilot";
 import { benchLabel, benchmark, holdings, type Holding } from "../practice";
 import type { AutopilotConfig, AutopilotStart, AutopilotStatus, PositionView, Venue } from "../types";
 
@@ -33,6 +33,8 @@ export interface CardModel {
   id: string;
   name: string;
   mode: AutopilotConfig["mode"];
+  /** A capped live test: real money with an unproven strategy, shown as TEST. */
+  liveTest: boolean;
   active: boolean;
   /** What it is worth now. */
   value: number;
@@ -126,6 +128,7 @@ export function cardModel(
     id: s.config.id,
     name: s.config.name,
     mode: s.config.mode,
+    liveTest: isLiveTest(s.config),
     active: isActive(s),
     value: s.equity,
     amount: s.startCapital,

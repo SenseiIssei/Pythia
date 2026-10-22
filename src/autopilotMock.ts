@@ -11,7 +11,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import type { AutopilotStart, AutopilotStatus, AutopilotUpdate } from "./types";
-import { LIVE_PHRASE, floorAtStart } from "./autopilot";
+import { floorAtStart, liveConfirmed, startPhrase } from "./autopilot";
 
 export type MockScenario = "running" | "paused" | "finished" | "empty" | "loading" | "sidebyside" | "portfolio";
 
@@ -425,8 +425,8 @@ function ensureTimer() {
 const api = {
   start(config: AutopilotStart): Promise<void> {
     if (!state) return Promise.reject(new Error("The sample autopilot is not loaded."));
-    if (config.mode === "live" && config.confirm !== LIVE_PHRASE) {
-      return Promise.reject(new Error(`A real-money start has to be confirmed by typing ${LIVE_PHRASE}.`));
+    if (config.mode === "live" && !liveConfirmed(config, config.confirm)) {
+      return Promise.reject(new Error(`A real-money start has to be confirmed by typing ${startPhrase(config)}.`));
     }
     if (!(config.capitalUsd > 0)) return Promise.reject(new Error("The amount has to be more than zero."));
     const now = Date.now();

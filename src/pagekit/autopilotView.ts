@@ -18,9 +18,10 @@ export function parseInput(s: string): number {
 
 /**
  * The label for where the money comes from. Real money is always said in
- * words and always red, in both views.
+ * words and always red, in both views; a capped live test always says TEST.
  */
-export function modeLabel(mode: ApMode, simple: boolean): { tone: ApChipTone; text: string } {
+export function modeLabel(mode: ApMode, simple: boolean, liveTest = false): { tone: ApChipTone; text: string } {
+  if (mode === "live" && liveTest) return { tone: "bad", text: simple ? "Real money TEST" : "LIVE TEST, real money" };
   if (mode === "live") return { tone: "bad", text: simple ? "Real money" : "Live, real money" };
   if (mode === "demo") return { tone: "accent", text: "Demo account" };
   return { tone: "neutral", text: simple ? "Practice money" : "Paper" };

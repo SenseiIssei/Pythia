@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Circle,
   Clock,
+  FlaskConical,
   Flag,
   History,
   Lock,
@@ -76,6 +77,12 @@ import { useMockAutopilot, type MockScenario } from "../autopilotMock";
 import {
   LIVE_EDIT_PHRASE,
   LIVE_PHRASE,
+  LIVE_TEST_MAX_LOSS_PCT,
+  LIVE_TEST_PHRASE,
+  isLiveTest,
+  liveConfirmed,
+  liveTestCap,
+  lossAllowance,
   MEANINGFUL_DAYS,
   MEANINGFUL_TRADES,
   analyse,
@@ -148,9 +155,9 @@ export function useAutopilotApi(): AutopilotApi {
     loading: store.portfolio.equity <= 0 && store.markets.length === 0,
     mocked: null,
     autopilots: store.autopilots,
-    // The page checks the typed phrase; the engine only takes a flag, and
-    // refuses live without it.
-    start: ({ confirm, ...config }: AutopilotStart) => store.startAutopilot(config, confirm === LIVE_PHRASE),
+    // The page checks the typed phrase (a capped live test has its own); the
+    // engine only takes a flag, and refuses live without it.
+    start: ({ confirm, ...config }: AutopilotStart) => store.startAutopilot(config, liveConfirmed(config, confirm)),
     stop: store.stopAutopilot,
     pause: store.pauseAutopilot,
     resume: store.resumeAutopilot,
@@ -403,7 +410,7 @@ function localInput(ms: number): string {
 }
 
 function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
-  const { strategies, passports, live, portfolio, cryptoCostVenue } = useStore();
+  const { strategies, passports, live, portfolio, cryptoCostVenue, autopilots } = useStore();
   const advanced = useAdvanced();
   const simple = !advanced;
 
@@ -429,6 +436,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   const [flatten, setFlatten] = useState(true);
   const [name, setName] = useState("");
   const [typed, setTyped] = useState("");
+  // The owner chose a capped live test for strategies without a green passport.
+  const [testOn, setTestOn] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -497,6 +506,49 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
   const ready = (id: string) => passports.get(id)?.liveReady ?? false;
   const readyCount = eligible.filter((s) => ready(s.id)).length;
   const checksOk = pick === "manual" ? chosen.length > 0 && chosen.every((x) => ready(x.s.id)) : readyCount > 0;
+  // Strategies picked by hand without a green passport: a normal live start
+  // is refused, a capped live test is offered instead.
+  const unproven = mode === "live" && pick === "manual" ? chosen.filter((x) => !ready(x.s.id)).map((x) => x.s.name) : [];
+  const liveTest = testOn && unproven.length > 0;
+  const cap = liveTestCap(live);
+  const otherTest = autopilots.find((a) => isActive(a) && isLiveTest(a.config))?.config.name ?? null;
+  const testLoss = lossAllowance(stop, capital > 0 ? capital : 0);
+  const phrase = liveTest ? LIVE_TEST_PHRASE : LIVE_PHRASE;
+  const passportRow: { ok: boolean | null; text: ReactNode } = liveTest
+    ? {
+        ok: null,
+        text: `Not passed its checks: ${unproven.join(", ")}. It runs as a capped live test, so this is allowed and the strategy stays unproven.`,
+      }
+    : {
+        ok: checksOk,
+        text:
+          pick === "manual"
+            ? checksOk
+              ? "Every strategy you picked has passed its checks."
+              : "Every strategy you pick has to have passed its checks (the Strategy Passport), or you start it as a capped live test (above)."
+            : readyCount > 0
+              ? `Pythia only chooses among strategies that passed their checks: ${readyCount} of ${eligible.length} here have.`
+              : `None of the ${eligible.length} strategies for ${venueLabel(venue)} has passed its checks yet, so there is nothing Pythia may choose. To try one with a small amount anyway, choose "I pick them": a capped live test is offered there.`,
+      };
+  const testRows: { ok: boolean | null; text: ReactNode }[] = liveTest
+    ? [
+        {
+          ok: capital > 0 && capital <= cap + 1e-9,
+          text: `The amount is at most ${money(cap, 2)}, the cap for a live test.`,
+        },
+        {
+          ok: testLoss.pct !== undefined && testLoss.pct <= LIVE_TEST_MAX_LOSS_PCT + 1e-9,
+          text:
+            testLoss.pct === undefined
+              ? `A loss limit of at most ${LIVE_TEST_MAX_LOSS_PCT}% of the amount is set (step 4).`
+              : `The loss limit is ${money(testLoss.usd ?? 0, 2)} (${testLoss.pct.toFixed(0)}%); a live test allows at most ${LIVE_TEST_MAX_LOSS_PCT}%.`,
+        },
+        {
+          ok: !otherTest,
+          text: otherTest ? `"${otherTest}" is already a live test, and only one runs at a time. Stop it first.` : "No other live test is running.",
+        },
+      ]
+    : [];
   const requirements: { ok: boolean | null; text: ReactNode }[] = [
     {
       ok: armedHere,
@@ -504,17 +556,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
         ? `Real-money trading is armed for ${targetName}.`
         : `Real-money trading has to be armed for ${targetName} on the Live page (advanced view), on the real endpoint, not dry-run.`,
     },
-    {
-      ok: checksOk,
-      text:
-        pick === "manual"
-          ? checksOk
-            ? "Every strategy you picked has passed its checks."
-            : "Every strategy you pick has to have passed its checks (the Strategy Passport)."
-          : readyCount > 0
-            ? `Pythia only chooses among strategies that passed their checks: ${readyCount} of ${eligible.length} here have.`
-            : `None of the ${eligible.length} strategies for ${venueLabel(venue)} has passed its checks yet, so there is nothing Pythia may choose.`,
-    },
+    passportRow,
+    ...testRows,
     {
       ok: liveCash === undefined ? null : capital > 0 && capital <= liveCash,
       text:
@@ -525,7 +568,19 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
             : `The amount is more than the account's cash (${money(liveCash, 0)}).`,
     },
   ];
-  const liveBlocked = mode === "live" && (requirements.some((r) => r.ok === false) || typed.trim().toUpperCase() !== LIVE_PHRASE);
+  const liveBlocked = mode === "live" && (requirements.some((r) => r.ok === false) || typed.trim().toUpperCase() !== phrase);
+
+  function chooseTest(on: boolean) {
+    setTestOn(on);
+    setTyped("");
+    if (!on) return;
+    // Bring the form inside the caps; the owner still reads and confirms it.
+    if (!(capital > 0) || capital > cap) setAmount(String(cap));
+    if (!lossPctOn && !lossUsdOn) {
+      setLossPctOn(true);
+      setLossPct("20");
+    }
+  }
   const canStart = problems.length === 0 && !liveBlocked && !busy;
 
   async function start() {
@@ -566,6 +621,7 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
           stop,
           flattenOnStop: flatten,
           ...(mode === "live" ? { confirm: typed.trim().toUpperCase() } : {}),
+          ...(liveTest ? { liveTest: true } : {}),
         };
     try {
       await onStart(config);
@@ -582,6 +638,8 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
       ? "Virtual money. Pythia sets this much practice money aside for the autopilot. Nothing real is involved and nothing can be lost."
       : mode === "demo"
         ? `Comes from ${targetName}'s demo account: a practice balance kept by ${targetName} itself. Orders really go there, but no real money moves.`
+        : liveTest
+        ? `Comes from the ${targetName} account you funded yourself. A capped live test: at most ${money(cap, 0)}, and it can lose all of it.`
         : `Comes from the ${targetName} account you funded yourself. The autopilot buys and sells inside that account and can lose this money.`;
 
   return (
@@ -865,9 +923,42 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
           )}
         </Step>
 
+        {unproven.length > 0 && (
+          <div className="py-5">
+            <Notice tone="warning" icon={FlaskConical} title={liveTest ? "Capped live test chosen" : "Start as capped live test"}>
+              <p className="mt-2 text-sm leading-relaxed text-ink">
+                {unproven.join(", ")} {unproven.length === 1 ? "has" : "have"} not passed {unproven.length === 1 ? "its" : "their"} checks
+                (the Strategy Passport), so a normal real-money start is refused. You can start a small, capped live test instead:
+              </p>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-relaxed text-ink">
+                <li>At most {money(cap, 0)} of real money.</li>
+                <li>A loss limit of at most {LIVE_TEST_MAX_LOSS_PCT}% of the amount is required.</li>
+                <li>Only one live test runs at a time. Every other real-money rule still applies.</li>
+                <li>
+                  The strategy is unproven. It may lose, and you can lose the whole amount. Its trades never count as evidence
+                  that it is ready.
+                </li>
+              </ul>
+              <div className="mt-3">
+                <Button variant={liveTest ? "secondary" : "danger"} size="sm" icon={liveTest ? undefined : FlaskConical} onClick={() => chooseTest(!liveTest)}>
+                  {liveTest ? "Back to a normal real-money start" : "Start as capped live test"}
+                </Button>
+              </div>
+            </Notice>
+          </div>
+        )}
+
         {mode === "live" && (
           <div className="py-5">
-            <Notice tone="danger" icon={TriangleAlert} title="Real money: this autopilot can lose the whole amount, also while you sleep.">
+            <Notice
+              tone="danger"
+              icon={TriangleAlert}
+              title={
+                liveTest
+                  ? "LIVE TEST with real money: an unproven strategy that can lose the whole amount, also while you sleep."
+                  : "Real money: this autopilot can lose the whole amount, also while you sleep."
+              }
+            >
               <ul className="mt-3 space-y-2">
                 {requirements.map((r, i) => (
                   <li key={i} className="flex items-start gap-2 text-sm text-ink">
@@ -883,13 +974,13 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
                 ))}
               </ul>
               <label className="mt-3 block text-sm text-ink">
-                Type <b className="text-down">{LIVE_PHRASE}</b> to confirm
+                Type <b className="text-down">{phrase}</b> to confirm
                 <input
                   value={typed}
                   onChange={(e) => setTyped(e.target.value)}
-                  placeholder={LIVE_PHRASE}
+                  placeholder={phrase}
                   autoComplete="off"
-                  aria-label={`Type ${LIVE_PHRASE} to confirm`}
+                  aria-label={`Type ${phrase} to confirm`}
                   className={`${inputCls} mt-1.5 bg-surface focus:border-down sm:max-w-xs`}
                 />
               </label>
@@ -919,7 +1010,15 @@ function Setup({ onStart }: { onStart: (c: AutopilotStart) => Promise<void> }) {
 
         <div className="flex flex-wrap items-center gap-3 pt-5">
           <Button variant={mode === "live" ? "danger" : "primary"} icon={Play} onClick={() => void start()} disabled={!canStart}>
-            {busy ? "Starting" : mode === "live" ? "Start with real money" : mode === "demo" ? "Start on the demo account" : "Start the autopilot"}
+            {busy
+              ? "Starting"
+              : liveTest
+                ? "Start the capped live test"
+                : mode === "live"
+                  ? "Start with real money"
+                  : mode === "demo"
+                    ? "Start on the demo account"
+                    : "Start the autopilot"}
           </Button>
           <span className="text-[13px] text-muted">{mode === "paper" ? "Practice money: nothing can be lost." : "You can pause or stop it at any moment."}</span>
         </div>
@@ -1008,7 +1107,7 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
   const id = s.config.id;
   const running = s.state === "running";
   const live = s.config.mode === "live";
-  const badge = modeLabel(s.config.mode, simple);
+  const badge = modeLabel(s.config.mode, simple, isLiveTest(s.config));
   const plan = floorAtStart(s.startCapital, s.config.stop);
   // No loss or trailing rule means no floor (the engine sends null).
   const room = floorRoom(s.equity, s.floorEquity, s.peakEquity);
@@ -1054,8 +1153,10 @@ function Running({ s, api, onAnalyse }: { s: AutopilotStatus; api: AutopilotApi;
         </div>
 
         {live && (
-          <Notice tone="danger" title="Real money" className="mt-4">
-            It buys and sells with real money in your {exchange} account and can lose it, also while you sleep.
+          <Notice tone="danger" title={isLiveTest(s.config) ? "LIVE TEST with real money" : "Real money"} className="mt-4">
+            {isLiveTest(s.config)
+              ? `A capped live test: it buys and sells with real money in your ${exchange} account with a strategy that has not passed its checks, and can lose the whole amount, also while you sleep. Its trades never count as evidence that the strategy is ready.`
+              : `It buys and sells with real money in your ${exchange} account and can lose it, also while you sleep.`}
           </Notice>
         )}
         {(s.config.assetClass === "perps" || (s.shortUsd ?? 0) > 0) && (
@@ -1311,14 +1412,14 @@ function venueClassOf(c: AutopilotConfig): Venue {
  * again and says why when it refuses.
  */
 function EditPanel({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi; onClose: () => void }) {
-  const { strategies } = useStore();
+  const { strategies, live: liveStatus } = useStore();
   const [f, setF] = useState<EditForm>(() => editForm(s.config));
   const [accept, setAccept] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const live = s.config.mode === "live";
-  const plan = planEdit(s.config, f);
+  const plan = planEdit(s.config, f, liveTestCap(liveStatus));
   const venue = venueClassOf(s.config);
   const listed = new Set(s.config.sleeves.map((x) => x.strategyId));
   const eligible = strategies
@@ -1419,7 +1520,7 @@ function EditPanel({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
         </label>
       )}
       {live && (
-        <Notice tone="danger" title="Real money" className="mt-3">
+        <Notice tone="danger" title={isLiveTest(s.config) ? "LIVE TEST with real money" : "Real money"} className="mt-3">
           <label className="block text-sm text-ink">
             Type <b className="text-down">{LIVE_EDIT_PHRASE}</b> to confirm
             <input
@@ -1740,7 +1841,7 @@ function PastList({ past, shownId, onAnalyse }: { past: AutopilotStatus[]; shown
       ) : (
         <List>
           {past.map((p) => {
-            const badge = modeLabel(p.config.mode, simple);
+            const badge = modeLabel(p.config.mode, simple, isLiveTest(p.config));
             const end = p.stoppedMs ?? p.startedMs;
             const shown = p.config.id === shownId;
             const Icon = p.state === "finished" ? Flag : Square;

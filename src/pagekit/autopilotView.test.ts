@@ -18,6 +18,11 @@ describe("modeLabel", () => {
     expect(modeLabel("live", false).tone).toBe("bad");
     expect(modeLabel("live", false).text).toMatch(/real money/i);
   });
+  it("says TEST for a capped live test, in both views, and only for live", () => {
+    expect(modeLabel("live", true, true)).toEqual({ tone: "bad", text: "Real money TEST" });
+    expect(modeLabel("live", false, true)).toEqual({ tone: "bad", text: "LIVE TEST, real money" });
+    expect(modeLabel("paper", true, true).text).toBe("Practice money");
+  });
   it("names demo and practice", () => {
     expect(modeLabel("demo", true).text).toBe("Demo account");
     expect(modeLabel("paper", true).text).toBe("Practice money");

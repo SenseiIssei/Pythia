@@ -158,6 +158,12 @@ describe("cardModel", () => {
   it("has no Bitcoin comparison when none is known", () => {
     expect(cardModel(status(), [], 20).vsBtcPts).toBeNull();
   });
+  it("marks a capped live test, and only a live one", () => {
+    const base = status().config;
+    expect(cardModel(status({ config: { ...base, mode: "live", liveTest: true } }), [], 20).liveTest).toBe(true);
+    expect(cardModel(status({ config: { ...base, mode: "live" } }), [], 20).liveTest).toBe(false);
+    expect(cardModel(status({ config: { ...base, liveTest: true } }), [], 20).liveTest).toBe(false);
+  });
 });
 
 describe("words", () => {

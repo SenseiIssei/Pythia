@@ -32,6 +32,65 @@ export const LIVE_PHRASE = "START LIVE";
 
 export type Stop = AutopilotConfig["stop"];
 
+// ── capped live test ───────────────────────────────────────────────────────
+// Real money with a strategy that has no green Strategy Passport yet, under
+// hard caps. The engine checks every one of them again (SAFETY.md, "Capped
+// live test"); these helpers only say it before a refused start.
+
+/** The phrase a capped live test is started with: distinct from a normal live start. */
+export const LIVE_TEST_PHRASE = "START LIVE TEST";
+/** The cap when the server does not say (PYTHIA_LIVE_TEST_MAX_USD unset). */
+export const LIVE_TEST_DEFAULT_CAP_USD = 120;
+/** The engine never lets a live test have more, whatever the variable says. */
+export const LIVE_TEST_CEILING_USD = 300;
+/** The loosest max-loss rule a live test may have, in % of its amount. */
+export const LIVE_TEST_MAX_LOSS_PCT = 25;
+/** The badge every view shows on a live test. */
+export const LIVE_TEST_LABEL = "TEST";
+
+/** The live test cap the engine reports, or the default; never above the ceiling. */
+export function liveTestCap(live: { liveTestCapUsd?: number | null } | null | undefined): number {
+  const x = live?.liveTestCapUsd;
+  return x != null && Number.isFinite(x) && x > 0 ? Math.min(x, LIVE_TEST_CEILING_USD) : LIVE_TEST_DEFAULT_CAP_USD;
+}
+
+/** A capped live test: the flag counts only with mode live. */
+export function isLiveTest(c: Pick<AutopilotConfig, "mode" | "liveTest"> | null | undefined): boolean {
+  return !!c && c.mode === "live" && c.liveTest === true;
+}
+
+/** The phrase this start has to be confirmed with. */
+export function startPhrase(c: Pick<AutopilotConfig, "mode" | "liveTest">): string {
+  return isLiveTest(c) ? LIVE_TEST_PHRASE : LIVE_PHRASE;
+}
+
+/** Did the owner type the right phrase for this start? A live test needs its own. */
+export function liveConfirmed(c: Pick<AutopilotConfig, "mode" | "liveTest">, typed: string | undefined): boolean {
+  return (typed ?? "").trim().toUpperCase() === startPhrase(c);
+}
+
+/**
+ * What stops a capped live test from starting, in plain sentences: the
+ * amount over the cap, no or a too loose max-loss rule, another live test
+ * running. Mirrors the engine's refusals.
+ */
+export function liveTestProblems(a: { capital: number; cap: number; stop: Stop; otherTest?: string | null }): string[] {
+  const out: string[] = [];
+  if (a.capital > a.cap + 1e-9) {
+    out.push(`A capped live test may trade at most $${a.cap.toFixed(2)}, not $${(Number.isFinite(a.capital) ? a.capital : 0).toFixed(2)}.`);
+  }
+  const loss = lossAllowance(a.stop, a.capital);
+  if (loss.pct === undefined) {
+    out.push(`A capped live test needs a loss limit of at most ${LIVE_TEST_MAX_LOSS_PCT}% of the amount.`);
+  } else if (loss.pct > LIVE_TEST_MAX_LOSS_PCT + 1e-9) {
+    out.push(
+      `A capped live test needs a loss limit of at most ${LIVE_TEST_MAX_LOSS_PCT}% of the amount; this one allows $${loss.usd!.toFixed(2)} (${loss.pct.toFixed(0)}%).`,
+    );
+  }
+  if (a.otherTest) out.push(`"${a.otherTest}" is already a capped live test, and only one runs at a time. Stop it first.`);
+  return out;
+}
+
 /** Positive, finite, or nothing: an empty or zero field means "no limit". */
 export function limit(n: number | null | undefined): number | undefined {
   return n != null && Number.isFinite(n) && n > 0 ? n : undefined;
@@ -443,7 +502,7 @@ function sameSleeves(a: AutopilotSleeveConfig[], b: AutopilotSleeveConfig[]): bo
 }
 
 /** Turn the form into the change to send, checked the way the engine checks it. */
-export function planEdit(c: AutopilotConfig, f: EditForm): EditPlan {
+export function planEdit(c: AutopilotConfig, f: EditForm, liveTestCapUsd = LIVE_TEST_DEFAULT_CAP_USD): EditPlan {
   const problems: string[] = [];
   const update: AutopilotUpdate = {};
   const name = f.name.trim();
@@ -477,6 +536,13 @@ export function planEdit(c: AutopilotConfig, f: EditForm): EditPlan {
   const same = (a: number | null | undefined, b: number | null | undefined) => (a ?? null) === (b ?? null);
   if (!same(stop.maxLossPct, c.stop.maxLossPct) || !same(stop.maxLossUsd, c.stop.maxLossUsd) || !same(stop.trailingPct, c.stop.trailingPct)) {
     update.stop = stop;
+  }
+  // A capped live test keeps its caps, and runs only strategies the owner names.
+  if (isLiveTest(c)) {
+    if (f.pick === "auto") problems.push("A capped live test runs only strategies you name.");
+    if (lossPct !== undefined || lossUsd !== undefined) {
+      problems.push(...liveTestProblems({ capital: x, cap: liveTestCapUsd, stop }));
+    }
   }
   const changed = Object.keys(update).length > 0;
   return { update, changed, problems, looser: loosensLoss(c.stop, c.capitalUsd, stop, x) };

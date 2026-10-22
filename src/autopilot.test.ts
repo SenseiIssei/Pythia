@@ -11,8 +11,15 @@ import {
   floorAtStart,
   forwardLine,
   isExperiment,
+  isLiveTest,
+  LIVE_PHRASE,
+  LIVE_TEST_PHRASE,
+  liveConfirmed,
+  liveTestCap,
+  liveTestProblems,
   lossAllowance,
   loosensLoss,
+  startPhrase,
   maturity,
   planEdit,
   sleeveExposure,
@@ -335,5 +342,73 @@ describe("isExperiment", () => {
     expect(isExperiment({ name: "Lab · Donchian 20/10" })).toBe(false);
     expect(isExperiment({ experimental: false, name: "an experimental idea" })).toBe(false);
     expect(isExperiment(undefined)).toBe(false);
+  });
+});
+
+describe("a capped live test", () => {
+  const live = (over: Partial<AutopilotConfig> = {}): AutopilotConfig => ({
+    id: "t",
+    name: "Test",
+    mode: "live",
+    venue: "kraken",
+    capitalUsd: 100,
+    sleeves: [{ strategyId: "lab:tsmom_top20", weight: 1 }],
+    stop: { onTakeProfit: "stop", maxLossPct: 20 },
+    flattenOnStop: true,
+    liveTest: true,
+    ...over,
+  });
+
+  it("reads the cap from the engine, falls back to 120 and never goes above 300", () => {
+    expect(liveTestCap(undefined)).toBe(120);
+    expect(liveTestCap({})).toBe(120);
+    expect(liveTestCap({ liveTestCapUsd: 0 })).toBe(120);
+    expect(liveTestCap({ liveTestCapUsd: 80 })).toBe(80);
+    expect(liveTestCap({ liveTestCapUsd: 1_000 })).toBe(300);
+  });
+
+  it("is a test only in live mode", () => {
+    expect(isLiveTest(live())).toBe(true);
+    expect(isLiveTest(live({ mode: "paper" }))).toBe(false);
+    expect(isLiveTest(live({ liveTest: undefined }))).toBe(false);
+    expect(isLiveTest(undefined)).toBe(false);
+  });
+
+  it("is confirmed with its own phrase, distinct from a normal live start", () => {
+    expect(LIVE_TEST_PHRASE).not.toBe(LIVE_PHRASE);
+    expect(startPhrase(live())).toBe("START LIVE TEST");
+    expect(startPhrase(live({ liveTest: false }))).toBe("START LIVE");
+    expect(liveConfirmed(live(), " start live test ")).toBe(true);
+    expect(liveConfirmed(live(), LIVE_PHRASE)).toBe(false);
+    expect(liveConfirmed(live({ liveTest: false }), LIVE_TEST_PHRASE)).toBe(false);
+    expect(liveConfirmed(live({ liveTest: false }), LIVE_PHRASE)).toBe(true);
+    expect(liveConfirmed(live(), undefined)).toBe(false);
+  });
+
+  it("names every cap it breaks, as the engine does", () => {
+    const stop = { onTakeProfit: "stop" as const, maxLossPct: 20 };
+    expect(liveTestProblems({ capital: 100, cap: 120, stop })).toEqual([]);
+    expect(liveTestProblems({ capital: 150, cap: 120, stop })).toEqual(["A capped live test may trade at most $120.00, not $150.00."]);
+    expect(liveTestProblems({ capital: 100, cap: 120, stop: { onTakeProfit: "stop" } })[0]).toMatch(/needs a loss limit of at most 25%/);
+    expect(liveTestProblems({ capital: 100, cap: 120, stop: { onTakeProfit: "stop", maxLossPct: 30 } })).toEqual([
+      "A capped live test needs a loss limit of at most 25% of the amount; this one allows $30.00 (30%).",
+    ]);
+    // The tighter of two rules is what it may lose.
+    expect(liveTestProblems({ capital: 100, cap: 120, stop: { onTakeProfit: "stop", maxLossPct: 50, maxLossUsd: 25 } })).toEqual([]);
+    expect(liveTestProblems({ capital: 100, cap: 120, stop, otherTest: "First" })).toEqual([
+      '"First" is already a capped live test, and only one runs at a time. Stop it first.',
+    ]);
+  });
+
+  it("keeps its caps when it is changed", () => {
+    const c = live();
+    const f = editForm(c);
+    expect(planEdit(c, f).problems).toEqual([]);
+    expect(planEdit(c, { ...f, amount: "200" }).problems).toContain("A capped live test may trade at most $120.00, not $200.00.");
+    expect(planEdit(c, { ...f, amount: "200" }, 300).problems).toEqual([]);
+    expect(planEdit(c, { ...f, lossPct: "40" }).problems[0]).toMatch(/at most 25%/);
+    expect(planEdit(c, { ...f, pick: "auto" }).problems).toContain("A capped live test runs only strategies you name.");
+    // A plain live autopilot has no such caps.
+    expect(planEdit(live({ liveTest: false }), { ...f, amount: "5000", lossPct: "40" }).problems).toEqual([]);
   });
 });

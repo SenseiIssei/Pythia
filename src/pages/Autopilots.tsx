@@ -38,10 +38,13 @@ import {
 import {
   EXPERIMENT_LABEL,
   LIVE_EDIT_PHRASE,
+  LIVE_TEST_LABEL,
   editForm,
   forwardLine,
   isActive,
   isExperiment,
+  isLiveTest,
+  liveTestCap,
   planEdit,
   type EditForm,
 } from "../autopilot";
@@ -178,7 +181,8 @@ function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardMo
   const [sell, setSell] = useState(s.config.flattenOnStop);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const mode = MODE_CHIP[m.mode];
+  // A capped live test always says TEST, next to the real-money colour.
+  const mode = m.liveTest && m.mode === "live" ? { label: `Real money ${LIVE_TEST_LABEL}`, tone: MODE_CHIP.live.tone } : MODE_CHIP[m.mode];
 
   async function run(fn: () => Promise<void>) {
     setBusy(true);
@@ -505,7 +509,8 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const live = s.config.mode === "live";
-  const plan = planEdit(s.config, form);
+  const { live: liveStatus } = useStore();
+  const plan = planEdit(s.config, form, liveTestCap(liveStatus));
   const currentCare = careOf({
     onTakeProfit: "stop",
     maxLossPct: form.lossPct ? Number(form.lossPct) : null,
@@ -634,7 +639,9 @@ function EditSheet({ s, api, onClose }: { s: AutopilotStatus; api: AutopilotApi;
         )}
         {live && (
           <label className="block text-sm">
-            <span className="text-down font-semibold">Real money. Type {LIVE_EDIT_PHRASE} to confirm.</span>
+            <span className="text-down font-semibold">
+              {isLiveTest(s.config) ? "LIVE TEST with real money" : "Real money"}. Type {LIVE_EDIT_PHRASE} to confirm.
+            </span>
             <input className="fl-input mt-1" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
           </label>
         )}
