@@ -604,8 +604,15 @@ struct ReadinessPatch {
 /// nothing here removes the kill file: that is done on the server by hand.
 fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
     use pythia_core::pumpfun_live as pf;
-    let (r1, r2, r3, r4) = (root.clone(), root.clone(), root.clone(), root);
+    let (r1, r2, r3, r4, r5) = (root.clone(), root.clone(), root.clone(), root.clone(), root);
     Router::new()
+        .route(
+            "/api/pumpfun/live/ws",
+            get(move |ws: WebSocketUpgrade| {
+                let root = r5.clone();
+                async move { ws.on_upgrade(move |socket| pumpfun_live_ws(socket, root)) }
+            }),
+        )
         .route(
             "/api/pumpfun/live",
             get(move || {
@@ -660,6 +667,62 @@ fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
                 }
             }),
         )
+}
+
+/// How often the live socket looks at the live service's files, and how often it sends
+/// the view anyway (the euro price and the running flag move without a file changing).
+const PUMPFUN_WS_POLL: Duration = Duration::from_millis(500);
+const PUMPFUN_WS_VIEW_EVERY: Duration = Duration::from_secs(15);
+
+/// `GET /api/pumpfun/live/ws`: the pump.fun page without reloading. Sends
+/// `{"kind": "view", "data": <the /api/pumpfun/live view>}` and
+/// `{"kind": "feed", "data": <live_feed.json>}` at once, then again whenever the
+/// live service rewrites one of their files. Read only, like the GET routes.
+async fn pumpfun_live_ws(mut socket: WebSocket, root: Option<std::path::PathBuf>) {
+    use pythia_core::pumpfun_live as pf;
+    let Some(root) = root else {
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({"kind": "error", "data": "No lab data folder is set (PYTHIA_DATA)."}).to_string(),
+            ))
+            .await;
+        return;
+    };
+    let mut tick = tokio::time::interval(PUMPFUN_WS_POLL);
+    let mut seen: Option<(Vec<Option<std::time::SystemTime>>, Option<std::time::SystemTime>)> = None;
+    let mut view_sent = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let (view_st, feed_st) = pf::stamps_in(&root);
+                let first = seen.is_none();
+                let view_moved = first
+                    || seen.as_ref().is_some_and(|s| s.0 != view_st)
+                    || view_sent.elapsed() >= PUMPFUN_WS_VIEW_EVERY;
+                let feed_moved = first || seen.as_ref().is_some_and(|s| s.1 != feed_st);
+                seen = Some((view_st, feed_st));
+                if view_moved {
+                    let mut v = pf::view_in(&root, now_ms());
+                    v.sol_eur = pf::sol_eur(now_ms()).await;
+                    view_sent = std::time::Instant::now();
+                    let msg = serde_json::json!({"kind": "view", "data": v}).to_string();
+                    if socket.send(Message::Text(msg)).await.is_err() {
+                        break;
+                    }
+                }
+                if feed_moved {
+                    let msg = serde_json::json!({"kind": "feed", "data": pf::feed_in(&root)}).to_string();
+                    if socket.send(Message::Text(msg)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            inbound = socket.recv() => match inbound {
+                Some(Ok(_)) => {}
+                _ => break,
+            },
+        }
+    }
 }
 
 /// `POST /api/readiness/settings`: the risk step of the real money readiness

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  candles,
   ceilings,
+  coinReturn,
+  timeStopLeft,
+  type FeedCoin,
+  type FeedPoint,
   eur,
   exitWords,
   holdWords,
@@ -141,5 +146,39 @@ describe("words", () => {
     expect(sol(null)).toBe("n/a");
     expect(exitWords("pull")).toBe("liquidity pulled");
     expect(short("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU")).toBe("7xKX...gAsU");
+  });
+});
+
+describe("the live chart's numbers", () => {
+  const T = 1_792_700_000_000;
+  const coin = (over: Partial<FeedCoin> = {}): FeedCoin => ({
+    mint: "Coin1pump", pid: 1, rule: "P_pool0", symbol: "TST", name: "Test", venue: "pool", state: "open",
+    signal_ms: T - 500, land_ms: T, entry_price: 2e-6, signal_price: 1.9e-6, cost_sol: 0.1, mark_sol: 0.11,
+    tp: 0.3, sl: 0.2, time_s: 300, exit: null, points: [], ...over,
+  });
+
+  it("makes candles that open at the previous close and stay flat without trades", () => {
+    const pts: FeedPoint[] = [[T + 1_000, 2, 0.5, 1], [T + 2_000, 3, 0.1, 0], [T + 3_000, 1.5, 0.2, 1], [T + 11_000, 4, 1, 1]];
+    const c = candles(pts, 5_000);
+    expect(c.map((b) => b.t)).toEqual([T, T + 5_000, T + 10_000]);
+    expect(c[0]).toMatchObject({ open: 2, high: 3, low: 1.5, close: 1.5, buys: 0.7, sells: 0.1 });
+    expect(c[1]).toMatchObject({ open: 1.5, high: 1.5, low: 1.5, close: 1.5, buys: 0, sells: 0 });
+    expect(c[2]).toMatchObject({ open: 1.5, high: 4, low: 1.5, close: 4 });
+    expect(candles(pts, 5_000, T + 21_000)).toHaveLength(5);                  // runs on to now
+    expect(candles([], 5_000)).toEqual([]);
+  });
+
+  it("reads the return from the mark, the exit or the last trade", () => {
+    expect(coinReturn(coin())).toBeCloseTo(0.1);
+    expect(coinReturn(coin({ exit: { ms: T, price: 1, why: "tp", ret: 0.32, pnl_sol: 0.032 } }))).toBe(0.32);
+    expect(coinReturn(coin({ mark_sol: null, points: [[T, 2.5e-6, 0.1, 1]] }))).toBeCloseTo(0.25);
+    expect(coinReturn(coin({ mark_sol: null }))).toBeNull();
+  });
+
+  it("counts the time stop down and stops counting once sold", () => {
+    expect(timeStopLeft(coin(), T + 60_000)).toBe(240);
+    expect(timeStopLeft(coin(), T + 400_000)).toBe(0);
+    expect(timeStopLeft(coin({ exit: { ms: T, price: 1, why: "time", ret: 0, pnl_sol: 0 } }), T)).toBeNull();
+    expect(timeStopLeft(coin({ land_ms: null }), T)).toBeNull();
   });
 });

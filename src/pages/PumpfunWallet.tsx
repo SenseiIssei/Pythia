@@ -10,6 +10,7 @@ import { Check, Copy, ExternalLink, OctagonX, QrCode, RefreshCw, Save } from "lu
 import { AreaChart, Badge, Button, Field, List, ListRow, Notice, Page, inputCls } from "../design";
 import { ConfirmAction, KeyStats, LoadingRows, More, Nothing, Row, Section, plural } from "../pagekit";
 import { encodeQr, qrPath } from "../qr";
+import { CoinCandles } from "../components/CoinCandles";
 import {
   LIMIT_LABEL,
   canControl,
@@ -29,6 +30,9 @@ import {
   stateLine,
   tone,
   tradeStats,
+  watchPumpfun,
+  type PumpfunFeed,
+  type SocketState,
   type LimitInput,
   type LimitKey,
   type PumpfunTrade,
@@ -37,6 +41,8 @@ import {
 } from "../pumpfunLive";
 
 const REFRESH_MS = 15_000;
+/** The live socket's words in the header. */
+const SOCKET_WORDS: Record<SocketState, string> = { connecting: "connecting", live: "live", retrying: "reconnecting", off: "every 15 s" };
 
 function AddressQr({ address }: { address: string }) {
   const { d, n } = useMemo(() => {
@@ -259,6 +265,9 @@ export function PumpfunWallet() {
   const [v, setV] = useState<PumpfunView | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [killMsg, setKillMsg] = useState<string | null>(null);
+  const [feed, setFeed] = useState<PumpfunFeed | null>(null);
+  const [socket, setSocket] = useState<SocketState>("connecting");
+  const [now, setNow] = useState(() => Date.now());
   const load = useCallback(async () => {
     try {
       setV(await pumpfunLive());
@@ -267,11 +276,33 @@ export function PumpfunWallet() {
       setErr(e instanceof Error ? e.message : String(e));
     }
   }, []);
+  // On the server the page lives on the socket: every change the live service writes arrives at once.
+  // Without one (the desktop app), or while it is down, it reads every REFRESH_MS as before.
+  useEffect(
+    () =>
+      watchPumpfun({
+        onView: (nv) => {
+          setV(nv);
+          setErr(null);
+        },
+        onFeed: setFeed,
+        onState: setSocket,
+      }),
+    [],
+  );
   useEffect(() => {
+    if (socket === "live") return;
     void load();
     const id = window.setInterval(() => void load(), REFRESH_MS);
     return () => window.clearInterval(id);
-  }, [load]);
+  }, [load, socket]);
+  const coins = feed?.coins ?? [];
+  const anyOpen = coins.some((c) => !c.exit);
+  useEffect(() => {
+    if (!anyOpen) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [anyOpen]);
 
   const kill = async () => {
     try {
@@ -290,7 +321,15 @@ export function PumpfunWallet() {
     <Page
       title="pump.fun live"
       subtitle="Real money, traded by the live service on the server under the limits you set. Paper results so far are negative; size everything as a total loss."
-      right={<Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => void load()}>Refresh</Button>}
+      right={
+        <span className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 text-[13px] text-muted" title="How the page stays current">
+            <span className={`h-2 w-2 rounded-full ${socket === "live" ? "bg-up" : socket === "off" ? "bg-line-strong" : "bg-warn"}`} aria-hidden />
+            {SOCKET_WORDS[socket]}
+          </span>
+          {socket !== "live" && <Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => void load()}>Refresh</Button>}
+        </span>
+      }
     >
       {err && <Notice tone="danger" title="Could not read the live service">{err}</Notice>}
       {!v && !err && <LoadingRows rows={4} label="Reading the live service" />}
@@ -317,6 +356,18 @@ export function PumpfunWallet() {
               { label: "Since the first live trade", value: sol(s?.pnlTotalSol ?? 0, true), tone: tone(s?.pnlTotalSol), sub: s ? `${eur(s.pnlTotalSol, rate, true) ? `${eur(s.pnlTotalSol, rate, true)} · ` : ""}${plural(s.tradesTotal, "trade")}` : undefined, help: "Everything the bot has won or lost since its first live trade. The total budget stop counts this." },
             ]}
           />
+
+          <Section title="Live chart" hint="Every trade on the coins the bot holds or sold in the last 15 minutes, in 5 second candles, as the live service sees them. The lines are what it paid and where it takes profit or stops out.">
+            {coins.length > 0 ? (
+              <div className="space-y-6">
+                {coins.map((c) => (
+                  <CoinCandles key={`${c.mint}-${c.land_ms ?? c.signal_ms}`} coin={c} nowMs={now} rate={rate} />
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted">{socket === "off" ? "The live chart needs the connected backend on the server." : "Nothing held right now. The next buy shows up here as it happens."}</p>
+            )}
+          </Section>
 
           <Performance trades={v.trades} rate={rate} />
 

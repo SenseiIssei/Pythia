@@ -19,6 +19,10 @@ Every STATUS_S it writes, for the engine's read-only endpoints and the app:
   reports/pumpfun_rt/live_trades.json   the newest closed live trades
   reports/pumpfun_rt/execution.json     measured latency, slippage, fees against the paper model
                                         (measure.py; every ten minutes and with the daily card)
+and at once when a position opens, changes or closes (the balance read again first). Every
+second, when something moved, it writes
+  reports/pumpfun_rt/live_feed.json     every trade on the coins the bot holds or just closed,
+                                        for the app's live chart (live_feed.py)
 It reads reports/pumpfun_rt/live_settings.json (the app's lower limits) every
 minute. It never opens the wallet file itself (live_exec does, once, after
 every gate holds); it never sends money anywhere.
@@ -37,6 +41,7 @@ import time
 from . import events as E
 from . import live_exec as LX
 from . import store
+from .live_feed import LiveFeed
 
 STATUS_S = 30.0
 BALANCE_S = 30.0
@@ -93,6 +98,10 @@ class Service:
         self.holdings: dict | None = None
         self.holdings_t: int | None = None                  # when the holdings above were read (wall ms)
         self.last = {"balance": -1e18, "holdings": -1e18, "report": -1e18, "gate": -1e18}
+        self.feed = LiveFeed()
+        self.feed_status: dict | None = None
+        self.book_sig = None
+        self.feed_err = False
 
     def start(self) -> None:
         if self.engine is None:
@@ -126,6 +135,15 @@ class Service:
             return
         from .sim import feed_row
         feed_row(self.engine, table, row)
+        try:
+            self.feed.observe(table, row, self.engine)
+        except Exception as e:                              # the chart's problem, never the book's
+            self._feed_failed(e)
+
+    def _feed_failed(self, e: Exception) -> None:
+        if not self.feed_err:
+            self.feed_err = True
+            print(f"live service: live feed {type(e).__name__}: {e}", flush=True)
 
     def tick(self, now_ms: int) -> None:
         if self.book is None:
@@ -137,6 +155,35 @@ class Service:
         for pipe in self.engine.pipes:
             pipe.poll(now_ms)
         self.book.tick(now_ms)
+
+    def book_changed(self) -> bool:
+        """A position opened, changed state or closed since the last call."""
+        if self.book is None or self.book.pipe is None:
+            return False
+        recent = self.book.recent[0] if self.book.recent else {}
+        sig = (tuple(sorted((p["pid"], p.get("state"), p.get("left")) for p in self.book.pipe.pos.values())),
+               len(self.book.recent), recent.get("exit_ms"), tuple(sorted(self.book.exec.leftovers)))
+        changed, self.book_sig = sig != self.book_sig, sig
+        return changed
+
+    def feed_tick(self, now_ms: int) -> None:
+        if self.book is None:
+            return
+        try:
+            self.feed.sync(self.book, now_ms)
+            st = self.light_status()
+            if self.feed.dirty or st != self.feed_status:          # a trade on a held coin, the wallet, the P&L
+                self.feed.dirty, self.feed_status = False, st
+                LX.write_json(LX.reports_dir() / "live_feed.json", self.feed.snapshot(st))
+        except Exception as e:
+            self._feed_failed(e)
+
+    def light_status(self) -> dict:
+        ex = self.book.exec
+        return {"on": ex.closed_why is None, "balance_sol": None if self.balance_l is None else self.balance_l / 1e9,
+                "balance_t": self.balance_t, "pnl_today_sol": ex.day_pnl_l / 1e9, "trades_today": ex.trades_today,
+                "wins_today": ex.wins_today, "pnl_total_sol": ex.totals["pnl_l"] / 1e9,
+                "trades_total": ex.totals["trades"], "exposure_sol": sum(ex.exposure.values()) / 1e9}
 
     # ------------------------------------------------------------ the wallet, read only
     def refresh_balance(self) -> None:
@@ -245,6 +292,10 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
                 await asyncio.sleep(1.0)
                 svc.tick(col.clock.latest or int(time.time() * 1000))
                 mono = time.monotonic()
+                if svc.book_changed():                     # a fill or a close: the app sees it at once
+                    svc.last["balance"] = -1e18
+                    last = -1e18
+                svc.feed_tick(int(time.time() * 1000))
                 if mono - last >= STATUS_S:
                     last = mono
                     await asyncio.to_thread(svc.periodic)

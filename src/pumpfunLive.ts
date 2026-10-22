@@ -406,3 +406,168 @@ export function short(a: string | null | undefined): string {
   if (!a) return "";
   return a.length > 12 ? `${a.slice(0, 4)}...${a.slice(-4)}` : a;
 }
+
+// ── the live feed (GET /api/pumpfun/live/ws; the lab's live_feed.py) ──
+
+/** One trade on a coin the bot holds: time (ms), price (SOL per token), SOL traded, 1 for a buy. */
+export type FeedPoint = [number, number, number, 0 | 1];
+
+export interface FeedExit {
+  ms: number | null;
+  price: number | null;
+  why: string | null;
+  ret: number | null;
+  pnl_sol: number | null;
+}
+
+/** A coin the bot holds now or closed in the last minutes (snake_case: the service's file as written). */
+export interface FeedCoin {
+  mint: string;
+  pid: number | null;
+  rule: string | null;
+  symbol: string | null;
+  name: string | null;
+  venue: string | null;
+  state: string | null;
+  signal_ms: number | null;
+  land_ms: number | null;
+  entry_price: number | null;
+  signal_price: number | null;
+  cost_sol: number;
+  mark_sol: number | null;
+  tp: number | null;
+  sl: number | null;
+  time_s: number | null;
+  exit: FeedExit | null;
+  points: FeedPoint[];
+}
+
+export interface PumpfunFeed {
+  t: number;
+  coins: FeedCoin[];
+  on: boolean | null;
+  balance_sol: number | null;
+  balance_t: number | null;
+  pnl_today_sol: number | null;
+  trades_today: number | null;
+  wins_today: number | null;
+  pnl_total_sol: number | null;
+  trades_total: number | null;
+  exposure_sol: number | null;
+}
+
+export interface Candle {
+  t: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  /** SOL bought and sold in the candle. */
+  buys: number;
+  sells: number;
+}
+
+/** Trades into candles of `bucketMs`. Each opens at the previous close (the first at its first trade);
+ *  a bucket without trades is flat at the last price. */
+export function candles(points: readonly FeedPoint[], bucketMs: number, untilMs?: number): Candle[] {
+  if (points.length === 0 || bucketMs <= 0) return [];
+  const pts = [...points].sort((a, b) => a[0] - b[0]);
+  const first = Math.floor(pts[0][0] / bucketMs) * bucketMs;
+  const last = Math.floor(Math.max(pts[pts.length - 1][0], untilMs ?? 0) / bucketMs) * bucketMs;
+  const out: Candle[] = [];
+  let i = 0;
+  let prev = pts[0][1];
+  for (let t = first; t <= last && out.length < 2_000; t += bucketMs) {
+    const c: Candle = { t, open: prev, high: prev, low: prev, close: prev, buys: 0, sells: 0 };
+    for (; i < pts.length && pts[i][0] < t + bucketMs; i++) {
+      const [, price, solAmt, buy] = pts[i];
+      c.high = Math.max(c.high, price);
+      c.low = Math.min(c.low, price);
+      c.close = price;
+      if (buy) c.buys += solAmt;
+      else c.sells += solAmt;
+    }
+    prev = c.close;
+    out.push(c);
+  }
+  return out;
+}
+
+/** The return a coin's price stands at against what the bot paid per token (fees included). */
+export function coinReturn(c: FeedCoin): number | null {
+  const last = c.points.length ? c.points[c.points.length - 1][1] : null;
+  if (c.exit?.ret != null) return c.exit.ret;
+  if (c.mark_sol != null && c.cost_sol > 0) return c.mark_sol / c.cost_sol - 1;
+  return last != null && c.entry_price ? last / c.entry_price - 1 : null;
+}
+
+/** Seconds left before the time stop sells, or null when it does not apply. */
+export function timeStopLeft(c: FeedCoin, nowMs: number): number | null {
+  if (c.exit || c.land_ms == null || c.time_s == null) return null;
+  return Math.max(0, Math.round((c.land_ms + c.time_s * 1000 - nowMs) / 1000));
+}
+
+export function dexscreener(mint: string): string {
+  return `https://dexscreener.com/solana/${encodeURIComponent(mint)}`;
+}
+
+export type SocketState = "connecting" | "live" | "retrying" | "off";
+
+/** The page's WebSocket, or null where there is no server (the desktop app polls instead). */
+export function pumpfunSocketUrl(): string | null {
+  if (liveMode() !== "server") return null;
+  const base = serverUrl();
+  if (!base) return null;
+  const abs = /^https?:\/\//.test(base) ? base : `${window.location.origin}${base.startsWith("/") ? "" : "/"}${base}`;
+  return `${abs.replace(/\/$/, "").replace(/^http/, "ws")}/api/pumpfun/live/ws`;
+}
+
+/**
+ * Keeps one socket open while the page is: every new view and feed is handed on as it comes,
+ * and a dropped connection is tried again (1 s, doubling to 30 s). Returns the closer.
+ */
+export function watchPumpfun(handlers: {
+  onView: (v: PumpfunView) => void;
+  onFeed: (f: PumpfunFeed | null) => void;
+  onState: (s: SocketState) => void;
+}): () => void {
+  const url = pumpfunSocketUrl();
+  if (!url) {
+    handlers.onState("off");
+    return () => {};
+  }
+  let ws: WebSocket | null = null;
+  let closed = false;
+  let wait = 1_000;
+  let timer: number | null = null;
+  const open = () => {
+    if (closed) return;
+    handlers.onState("connecting");
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      wait = 1_000;
+      handlers.onState("live");
+    };
+    ws.onmessage = (e) => {
+      try {
+        const m = JSON.parse(String(e.data)) as { kind: string; data: unknown };
+        if (m.kind === "view") handlers.onView(m.data as PumpfunView);
+        else if (m.kind === "feed") handlers.onFeed((m.data as PumpfunFeed | null) ?? null);
+      } catch {
+        /* a broken frame: the next one replaces it */
+      }
+    };
+    ws.onclose = () => {
+      if (closed) return;
+      handlers.onState("retrying");
+      timer = window.setTimeout(open, wait);
+      wait = Math.min(wait * 2, 30_000);
+    };
+  };
+  open();
+  return () => {
+    closed = true;
+    if (timer != null) window.clearTimeout(timer);
+    ws?.close();
+  };
+}

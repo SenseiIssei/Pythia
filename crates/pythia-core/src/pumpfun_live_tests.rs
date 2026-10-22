@@ -163,3 +163,21 @@ fn reads_sol_in_euro_from_krakens_ticker() {
     assert!(parse_sol_eur(&serde_json::json!({"error": ["EQuery:Unknown asset pair"], "result": {}}), 5).is_none());
     assert!(parse_sol_eur(&serde_json::json!({"result": {"SOLEUR": {"c": ["0", "1"], "o": "90"}}}), 5).is_none());
 }
+
+#[test]
+fn the_feed_is_passed_on_and_every_file_moves_its_stamp() {
+    let d = temp("feed");
+    assert!(feed_in(&d).is_none());
+    let (view0, feed0) = stamps_in(&d);
+    assert!(view0.iter().all(Option::is_none) && feed0.is_none());
+    let feed = serde_json::json!({"t": NOW, "coins": [{"mint": "M", "points": [[NOW, 2e-6, 0.5, 1]], "exit": null}],
+                                  "balance_sol": 0.7});
+    std::fs::write(dir_in(&d).join("live_feed.json"), feed.to_string()).unwrap();
+    assert_eq!(feed_in(&d), Some(feed));
+    status(&d, "test", NOW);
+    let (view1, feed1) = stamps_in(&d);
+    assert!(view1[0].is_some() && feed1.is_some());
+    std::fs::write(kill_path_in(&d), "x").unwrap();
+    assert!(stamps_in(&d).0[4].is_some(), "the kill file changes the view");
+    let _ = std::fs::remove_dir_all(&d);
+}

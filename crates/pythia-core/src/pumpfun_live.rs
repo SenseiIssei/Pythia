@@ -341,6 +341,24 @@ pub fn view_in(root: &Path, now_ms: i64) -> LiveView {
     }
 }
 
+/// The live chart's feed (`live_feed.json`, the lab's `live_feed.py`): the coins the bot holds or
+/// just closed, with every trade on them. Passed on as written; the page reads its fields.
+pub fn feed_in(root: &Path) -> Option<serde_json::Value> {
+    read(&dir_in(root).join("live_feed.json"))
+}
+
+/// When the files behind the view and behind the feed last changed: the live socket pushes a
+/// new view or a new feed when its stamp moves.
+pub fn stamps_in(root: &Path) -> (Vec<Option<std::time::SystemTime>>, Option<std::time::SystemTime>) {
+    let d = dir_in(root);
+    let m = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let view = ["live_status.json", "live_trades.json", "execution.json", "live_settings.json", "KILL"]
+        .into_iter()
+        .map(|f| m(d.join(f)))
+        .collect();
+    (view, m(d.join("live_feed.json")))
+}
+
 /// The view from the lab's data folder (`PYTHIA_DATA`), or an empty one without it.
 pub fn view() -> LiveView {
     let now = chrono::Utc::now().timestamp_millis();
