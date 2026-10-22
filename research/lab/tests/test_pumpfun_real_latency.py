@@ -1,4 +1,4 @@
-"""Y4, the pump.fun rules at the measured live latency: the latency models (the study's lognormal, the
+"""Y5, the pump.fun rules at the measured live latency: the latency models (the study's lognormal, the
 measured buys and sales as a kernel density in log space, the 1.5 s send path), one draw per key coupled
 across scenarios, the fees and the stake, the books per scenario, the entries and the positive rule, and the
 replay end to end on a synthetic record. No network, no wallet.

@@ -1,4 +1,4 @@
-"""Y4: the pump.fun rules and pipeline strategies at the latency the live test measured. PAPER ONLY.
+"""Y5: the pump.fun rules and pipeline strategies at the latency the live test measured. PAPER ONLY.
 
     python -m lab.pumpfun_rt.reallat                    replay, print the report, write reallat.{json,md}
     python -m lab.pumpfun_rt.reallat --out DIR          the same, written into DIR
@@ -412,7 +412,7 @@ def pct(x) -> str:
 def report_md(res: dict, ev: dict, lat: dict) -> str:
     def ms(d):
         return f"{d['p50'] / 1000:.1f} s ({d['p10'] / 1000:.1f} to {d['p90'] / 1000:.1f})"
-    md = ["# pump.fun rules at the measured latency (Y4)", "",
+    md = ["# pump.fun rules at the measured latency (Y5)", "",
           f"Record {res['days'][0]} to {datetime.fromtimestamp(res['span'][1] / 1000, timezone.utc):%Y-%m-%d %H:%M} "
           f"UTC, split {datetime.fromtimestamp(res['split_ms'] / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC, pick "
           f"{res['pick']}. Stake {STAKE_SOL} SOL. Out of sample.", "",

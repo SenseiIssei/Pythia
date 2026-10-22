@@ -124,7 +124,7 @@ PIPELINE_TRIALS = 12
 X14_TRIALS = 16 + 38
 # Y3's speed tiers (results/pumpfun_speed_plan.md): 8 tiers x 5 filters x 3 exits, and addendum 1's tier S0r 15 more.
 SPEED_TRIALS = 8 * 5 * 3 + 15
-# Y4 (results/pumpfun_real_latency_prereg.md): the 22 rules, the model filter and the 12 pipeline strategies at
+# Y5 (results/pumpfun_real_latency_prereg.md): the 22 rules, the model filter and the 12 pipeline strategies at
 # four fill scenarios (the study's latency, the measured one, a 1.5 s send path, the same with a tip).
 REAL_LATENCY_TRIALS = 35 * 4
 N_TRIALS = (len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS + SPEED_TRIALS

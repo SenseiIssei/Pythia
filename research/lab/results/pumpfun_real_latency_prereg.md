@@ -1,4 +1,4 @@
-# pump.fun rules at the measured latency (Y4): pre-registration (2026-10-22)
+# pump.fun rules at the measured latency (Y5): pre-registration (2026-10-22)
 
 Written and committed before any replay below was computed. Code:
 `lab/pumpfun_rt/reallat.py` (the latency models and the run). Paper only:
