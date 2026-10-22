@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { change, combinedCurve, combinedHoldings, inRange, positionHoldings, usefulRanges, type Point } from "./homeView";
+import { autopilotsWords, change, combinedCurve, combinedHoldings, inRange, positionHoldings, usefulRanges, type Point } from "./homeView";
 import type { AutopilotStatus, PositionView } from "../types";
 
 const H = 3_600_000;
@@ -114,5 +114,14 @@ describe("holdings", () => {
     expect(list).toHaveLength(1);
     expect(list[0].value).toBe(220);
     expect(list[0].pnlPct).toBeCloseTo(5);
+  });
+});
+
+describe("the home portfolio's label", () => {
+  it("says practice once real money runs beside it", () => {
+    expect(autopilotsWords(1, false)).toBe("Your autopilot");
+    expect(autopilotsWords(3, false)).toBe("Your 3 autopilots");
+    expect(autopilotsWords(1, true)).toBe("Your practice autopilot");
+    expect(autopilotsWords(2, true)).toBe("Your 2 practice autopilots");
   });
 });

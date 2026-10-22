@@ -47,7 +47,8 @@ import { openPage } from "../navigate";
 import { useStore } from "../store";
 import { setUiMode, useAdvanced } from "../uiMode";
 import { useAutopilotApi } from "./Autopilot";
-import { change, combinedCurve, combinedHoldings, inRange, positionHoldings, usefulRanges, type Point } from "../flows/homeView";
+import { groupByMoney } from "../autopilot";
+import { autopilotsWords, change, combinedCurve, combinedHoldings, inRange, positionHoldings, usefulRanges, type Point } from "../flows/homeView";
 import { totals } from "../flows/autopilotView";
 import { timeOfDay, timeline, type ActivityKind } from "../flows/activity";
 
@@ -94,9 +95,12 @@ export function Home() {
   const loading = api.loading || (portfolio.equity <= 0 && markets.length === 0);
 
   // With autopilots the portfolio is theirs; without, it is the practice account.
-  const t = totals(api.autopilots);
+  // Real money never adds into the practice total: it has its own line below.
+  const byMoney = groupByMoney(api.autopilots);
+  const t = totals(byMoney.practice);
+  const tReal = totals(byMoney.real);
   const viaAutopilots = t.count > 0;
-  const full: Point[] = combinedCurve(api.autopilots, now);
+  const full: Point[] = combinedCurve(byMoney.practice, now);
   const ranges = usefulRanges(full, now);
   const shownRange: Range = ranges.includes(range) ? range : "Max";
   const pts = viaAutopilots ? inRange(full, shownRange, now) : [];
@@ -131,7 +135,7 @@ export function Home() {
               size="xl"
               label={
                 <span className="inline-flex items-center gap-1.5">
-                  {viaAutopilots ? (t.count === 1 ? "Your autopilot" : `Your ${t.count} autopilots`) : realMoney ? "Your account" : "Practice balance"}
+                  {viaAutopilots ? autopilotsWords(t.count, tReal.count > 0) : realMoney ? "Your account" : "Practice balance"}
                   <Explain text={explain("Equity")!} label="balance" />
                 </span>
               }
@@ -157,13 +161,20 @@ export function Home() {
         )}
       </section>
 
+      {/* Real money, apart from practice */}
+      {!loading && tReal.count > 0 && (
+        <Card title={tReal.count === 1 ? "Real money, one autopilot" : `Real money, ${tReal.count} autopilots`}>
+          <BigNumber size="md" value={money(tReal.value)} sub={<Change usd={tReal.pnl} pct={tReal.pnlPct} tone={changeTone(tReal.pnl)} suffix="since start" />} />
+        </Card>
+      )}
+
       {/* Is it running, is real money at risk, how do I stop it */}
       <StatusCard
         realMoney={realMoney}
         practiceArmed={live.armed && !realMoney}
         killed={limits.killSwitch}
         running={running}
-        autopilots={t.count}
+        autopilots={t.count + tReal.count}
         loading={loading}
         realPositions={realPositions}
         blockedReason={live.armed ? live.blockedReason : undefined}

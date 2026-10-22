@@ -118,3 +118,9 @@ export function positionHoldings(positions: PositionView[]): Holding[] {
     })
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
 }
+
+/** The portfolio's label: "practice" once real money runs beside it. */
+export function autopilotsWords(count: number, realBeside: boolean): string {
+  const kind = realBeside ? "practice " : "";
+  return count === 1 ? `Your ${kind}autopilot` : `Your ${count} ${kind}autopilots`;
+}
