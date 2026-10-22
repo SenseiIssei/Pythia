@@ -100,6 +100,14 @@ jobs:
     lock_wait: 2h
     replaces: pythia-paper-families
 
+  # The live twins of the books a real-money autopilot runs (lab/paper/live_copy.py): the same
+  # signal under a strategy id of its own, so paper autopilots keep the original.
+  - name: paper-live-copy
+    description: live twins of the books a real-money autopilot runs, after the books are written
+    depends_on: [paper-families]
+    command: python -m lab.paper.live_copy
+    timeout: 5m
+
   # Pre-registered forward shadow (results/exit_shadow_prereg.md): the M14 exit
   # and a 40-day time stop on the crypto books, decided on the panel the paper
   # books just rebuilt, written before the outcome and scored as days pass.
