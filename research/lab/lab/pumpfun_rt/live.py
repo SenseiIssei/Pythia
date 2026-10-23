@@ -95,7 +95,8 @@ class Shadow:
         self.engine = Engine([rule, model_rule(rule)], book=self.book, decisions=False,
                              model=Filter(self.models) if self.models else None, on_close=self._closed,
                              strategies=P.STRATEGIES if strategies is None else strategies,
-                             wallets=wallets, cats=cats, models=self.models, kill=kill or P.KillSwitch())
+                             wallets=wallets, cats=cats, models=self.models, kill=kill or P.KillSwitch(),
+                             select=True)
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
         self.live = None                                      # always None here: the live book is live_service.py's

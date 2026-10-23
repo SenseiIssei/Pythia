@@ -135,8 +135,11 @@ EXIT_RUNNER_TRIALS = 6
 # Y8 (results/pumpfun_exits_y8_prereg.md): P_pool0 with a -10 % stop, a sell-pressure exit, an entry that waits up to
 # 5 s for the pool's state, and the two combinations (pipeline._build_y8), five more.
 EXITS_Y8_TRIALS = 5
+# Y9 (results/pumpfun_select_y9_prereg.md): five filters on P_pool0's migrations (pipeline._build_y9), each judged under
+# the live daily loss limit of 0.25 SOL and under the code's cap of 1.0 SOL, ten more.
+SELECT_Y9_TRIALS = 5 * 2
 N_TRIALS = (len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS + SPEED_TRIALS
-            + REAL_LATENCY_TRIALS + POOL0_TRIALS + EXIT_RUNNER_TRIALS + EXITS_Y8_TRIALS)
+            + REAL_LATENCY_TRIALS + POOL0_TRIALS + EXIT_RUNNER_TRIALS + EXITS_Y8_TRIALS + SELECT_Y9_TRIALS)
 # The rule the shadow book runs until the study has picked one (pick.json).
 DEFAULT_PICK = "C_20in60_x1"
 # The model filter: enter only when the calibrated probability that this entry,

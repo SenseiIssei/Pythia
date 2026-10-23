@@ -19,6 +19,10 @@ A larger set is adopted only when it beats the smaller one out of sample
 adopted set and saved to <data>/models/pumpfun_rt/, where the shadow book and
 the pipeline's filters and exits pick it up within ten minutes.
 
+Y9 (results/pumpfun_select_y9_prereg.md, run_y9): the select models on the study's
+label rows (rows/select.parquet), walk-forward by day for reports/pumpfun_rt/select.md,
+then on every row for the paper books (sel_<label>.json, sel_policy.json).
+
 Writes reports/pumpfun_rt/models.{md,json} and posts the lab's daily card
 (card.py), which needs both the study's report and this one.
 """
@@ -177,6 +181,55 @@ def run_x14(now_ms: int, dry: bool = False, log=print) -> dict | None:
     return summ
 
 
+def run_y9(now_ms: int, dry: bool = False, log=print) -> dict | None:
+    """Y9 (results/pumpfun_select_y9_prereg.md): the select models on the study's label rows, walk-forward by day
+    (the report) and on every row (the paper books' models, sel_<label>.json and sel_policy.json). None without
+    rows."""
+    from . import selmodel as SM
+    try:
+        table, meta = SM.load_rows()
+    except Exception as e:                                  # no rows yet
+        log(f"{NAME} retrain: no Y9 rows ({type(e).__name__}: {e})")
+        return None
+    if not len(table.get("t", [])):
+        return None
+    wf = SM.walk_forward(table)
+    models = SM.train(table)
+    summ = {"updated_ms": now_ms, "rows": models["sel_rows"], "days": meta.get("days"),
+            "models": {k: bool(models["sel_" + k].booster is not None) for k in SM.LABELS},
+            "walk_forward": {k: {x: v.get(x) for x in ("n", "rate", "model", "logistic", "ret_all", "ret_top", "n_top",
+                                                       "ret_below_base", "n_below_base")}
+                             for k, v in wf.items()}}
+    md = select_md(summ)
+    if dry:
+        print(md)
+        return summ
+    SM.save(models)
+    d = rep.REPORTS / NAME
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "select.json").write_text(json.dumps(summ | {"days_detail": {k: v["days"] for k, v in wf.items()}},
+                                              indent=1, default=str), encoding="utf-8")
+    (d / "select.md").write_text(md, encoding="utf-8")
+    log(f"{NAME} retrain: Y9 select models on {summ['rows']} rows, trained: {summ['models']}")
+    return summ
+
+
+def select_md(summ: dict) -> str:
+    md = ["# pump.fun real-time lab: Y9 select models", "",
+          "Paper research only. Walk-forward by UTC day (each day tested by a model trained on the days before), "
+          "LightGBM against the logistic regression on the same features and the training base rate.", "",
+          "| label | rows | out of sample | rate | AUC | logistic AUC | Brier skill | mean return, all | top 30 % | "
+          "under the base rate |", "|---|---|---|---|---|---|---|---|---|---|"]
+    for k, v in summ["walk_forward"].items():
+        pm, plg = v.get("model") or {}, v.get("logistic") or {}
+        md.append(f"| {k} | {summ['rows'].get(k, 0)} | {v.get('n') or 0} | {_f(v.get('rate'))} | {_f(pm.get('auc'))} | "
+                  f"{_f(plg.get('auc'))} | {_f(pm.get('brier_skill'), '{:+.3f}')} | "
+                  f"{_f(v.get('ret_all'), '{:+.3f}')} | "
+                  f"{_f(v.get('ret_top'), '{:+.3f}')} ({v.get('n_top') or 0}) | "
+                  f"{_f(v.get('ret_below_base'), '{:+.3f}')} ({v.get('n_below_base') or 0}) |")
+    return "\n".join(md) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dry-run", action="store_true")
@@ -202,8 +255,16 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:                                  # X14 never stops the card or the other models
         print(f"{NAME} retrain: X14 failed ({type(e).__name__}: {e})")
         x14 = None
-    if x14 is not None and summ is not None:
-        summ["x14"] = x14
+    try:
+        y9 = run_y9(now_ms, dry=a.dry_run)
+    except Exception as e:                                  # Y9 never stops the card or the other models
+        print(f"{NAME} retrain: Y9 failed ({type(e).__name__}: {e})")
+        y9 = None
+    if y9 is not None and summ is not None:
+        summ["y9"] = {"rows": y9["rows"], "models": y9["models"]}
+    if (x14 is not None or y9 is not None) and summ is not None:
+        if x14 is not None:
+            summ["x14"] = x14
         if not a.dry_run:
             (rep.REPORTS / NAME / "models.json").write_text(json.dumps(summ, indent=1, default=str), encoding="utf-8")
     if a.dry_run or a.no_notify:

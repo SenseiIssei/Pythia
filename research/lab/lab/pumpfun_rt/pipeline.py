@@ -312,7 +312,31 @@ def _build_y8() -> list[Strategy]:
     ]
 
 
-STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6() + _build_y7() + _build_y8()
+def _build_y9() -> list[Strategy]:
+    """Y9 (results/pumpfun_select_y9_prereg.md): P_pool0's exits on the migrations its models pick: P(rug0) at most
+    its base rate, P(win0) in its top 30 %, both, the entry 5 s after the migration with P(win5) in its top 30 %, and
+    two or more smart early buyers (no model); 0.1 SOL each."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    at, at5 = {"delay_s": 0}, {"delay_s": 5}
+    x = "+30 %, stop -20 %, 300 s"
+    return [
+        _strategy("P_pool0_norug", "E", "migration", at, {"select": {"rug0": ("max", 1.0)}}, pool0,
+                  f"PumpSwap at the migration where P(rug within 60 s) is at most its base rate; {x}", stake_sol=0.1),
+        _strategy("P_pool0_top30", "E", "migration", at, {"select": {"win0": ("top", 0.3)}}, pool0,
+                  f"PumpSwap at the migration where P(win) is in its top 30 %; {x}", stake_sol=0.1),
+        _strategy("P_pool0_norug_top30", "E", "migration", at,
+                  {"select": {"rug0": ("max", 1.0), "win0": ("top", 0.3)}}, pool0,
+                  f"PumpSwap at the migration where P(rug) is at most its base rate and P(win) in its top 30 %; {x}",
+                  stake_sol=0.1),
+        _strategy("P_pool5_top30", "E", "migration", at5, {"select": {"win5": ("top", 0.3)}}, pool0,
+                  f"PumpSwap 5 s after the migration where P(win), with the pool's first seconds, is in its top "
+                  f"30 %; {x}", stake_sol=0.1),
+        _strategy("P_pool0_smart2", "E", "migration", at, {"smart_min": 2}, pool0,
+                  f"PumpSwap at the migration where 2+ of the early buyers are smart wallets; {x}", stake_sol=0.1),
+    ]
+
+
+STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -547,6 +571,11 @@ class Pipeline:
             if not ok:
                 eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
                 return
+        if s.flt.get("select"):
+            ok, prob = self.select_ok(s.flt["select"], tok, t)
+            if not ok:
+                eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
+                return
         risk = self.risk[s.name]
         stake = int(min(s.stake_sol, risk.limits.stake_sol) * C.LAMPORTS)
         depth = tok.pq if pool else tok.vs
@@ -642,6 +671,34 @@ class Pipeline:
             if pa < a.base:
                 return False, p
         return True, p
+
+    def select_ok(self, spec: dict, tok, t: float) -> tuple[bool | None, float | None]:
+        """Y9's select filter on the Y9 models (selmodel.py, as sel_<label>): ("max", k) needs P(label) at most k x
+        its training base rate, ("top", q) P(label) at or above the threshold of the top q of its scores
+        (sel_policy). (None, None) without the engine's select tracker, a model or its threshold."""
+        eng = self.eng
+        if getattr(eng, "sel", None) is None:
+            return None, None
+        from .selfeat import decision_features
+        f = None
+        first = None
+        for label, (how, k) in spec.items():
+            m = eng.models.get("sel_" + label)
+            if m is None or m.booster is None:
+                return None, None
+            thr = None
+            if how == "top":
+                thr = ((eng.models.get("sel_policy") or {}).get(label) or {}).get(str(k))
+                if thr is None:
+                    return None, None
+            f = f if f is not None else decision_features(eng, tok, t)
+            p = float(m.predict(np.array([[float(f.get(c, math.nan)) for c in m.features]], dtype=float))[0])
+            first = p if first is None else first
+            if how == "max" and p > k * m.base:
+                return False, first
+            if how == "top" and p < thr:
+                return False, first
+        return True, first
 
     # ------------------------------------------------------------ fills
     def bought(self, pid: int, at: float, tokens: int, cost_l: int, fee_l: int) -> None:

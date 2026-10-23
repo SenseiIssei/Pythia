@@ -52,7 +52,8 @@ class LatePool(Pool):
 def test_the_y8_strategies_are_what_the_prereg_says():
     names = [n for _, n in X8.VARIANTS]
     all_names = [s.name for s in P.STRATEGIES]
-    assert names[0] == "P_pool0" and all_names[-5:] == names[1:]
+    i = all_names.index(names[1])
+    assert names[0] == "P_pool0" and all_names[i:i + 5] == names[1:]
     base = P.BY_NAME["P_pool0"]
     for n in names[1:]:
         s = P.BY_NAME[n]
@@ -69,7 +70,7 @@ def test_the_y8_strategies_are_what_the_prereg_says():
 
 def test_the_trials_are_counted():
     assert S.EXITS_Y8_TRIALS == 5 == len(X8.VARIANTS) - 1
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10
 
 
 # ---------------------------------------------------------------- the press exit

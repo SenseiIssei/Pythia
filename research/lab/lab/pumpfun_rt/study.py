@@ -17,7 +17,8 @@ Steps (results/pumpfun_realtime_plan.md):
  3. The split: the first half of the record's time span is in sample, the rest out.
  4. Pass 1 replays the in-sample half with every rule and the model's decision rows;
     the pick is the rule with the best in-sample mean net return per trade (30+
-    trades), and the models for the filters are trained on in-sample rows only.
+    trades), and the models for the filters are trained on in-sample rows only (Y9's
+    select models too, from its label book's rows, selfeat.LabelPipe).
  5. Pass 2 replays the whole record with every rule and every pipeline strategy
     (pipeline.STRATEGIES, plan addendum 2), each also at doubled latency and at
     tripled priority fee, and the pick with the model filter; out-of-sample numbers
@@ -27,7 +28,8 @@ Steps (results/pumpfun_realtime_plan.md):
  7. Readiness for live per strategy (the owner's gate: days, trades, positive with and
     without broken slots, every gate, 30 days of the live paper shadow in the band).
  8. reports/pumpfun_rt/latest.{md,json} (lab feed header), pick.json, the decision
-    rows (<data>/pumpfun_rt/rows/latest.parquet) for retrain.py.
+    rows (<data>/pumpfun_rt/rows/latest.parquet) and Y9's rows (rows/select.parquet)
+    for retrain.py.
 """
 
 from __future__ import annotations
@@ -49,6 +51,8 @@ from . import early as EA
 from . import exitpol as XP
 from . import model as M
 from . import pipeline as P
+from . import selfeat as SF
+from . import selmodel as SM
 from . import sim
 from . import store
 from . import strategies as S
@@ -72,6 +76,12 @@ PRIOR_HAND = 907
 LAT_STRESS, PRIO_STRESS = 2.0, 3.0
 SHADOW_DAYS = 30                       # readiness: days of the live paper shadow (plan addendum 2)
 X14_KEEP_DAYS = 2.0                    # X14 paths and steps: about this many days' worth of tokens (a hash sample)
+
+
+def select_costs():
+    """Y9's label book fills at the latency the live executor measured (select9.SENDER_BUY_MS, SENDER_SELL_MS)."""
+    from . import select9
+    return select9.scenarios()["B"]
 
 
 def _day(ms: int) -> str:
@@ -265,8 +275,10 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
     t0 = time.time()
     keep = min(1.0, X14_KEEP_DAYS / max(1, len(days)))
     e1 = sim.Engine(S.RULES, book=warm_book(warm, root), decisions=True, entry_until=split,
-                    wallets=W.warm(warm, root), cats=cats, early_rows=True, snipers=EA.warm_snipers(warm, root))
+                    wallets=W.warm(warm, root), cats=cats, early_rows=True, snipers=EA.warm_snipers(warm, root),
+                    select=True)
     e1.early.keep_frac = keep
+    lab1 = e1.add_pipe(SF.LabelPipe(e1, select_costs()))   # Y9: the select models' rows, at the measured latency
     sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
     is_trades = [t for t in e1.closed if t["signal_ms"] < split]
     by_rule = defaultdict(list)
@@ -281,6 +293,10 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
         is_models.update(XP.fit_live(e1.early.tables(), until_ms=split, log=log))
     except Exception as e:                                   # the study goes on; the X14 books then wait
         log(f"{NAME}: X14 in-sample models failed ({type(e).__name__}: {e})")
+    try:                                                     # Y9: the select models from in-sample rows only
+        is_models.update(SM.train(lab1.table(), until_ms=split))
+    except Exception as e:                                   # the study goes on; the Y9 books then wait
+        log(f"{NAME}: Y9 in-sample models failed ({type(e).__name__}: {e})")
     del e1.early
     log(f"{NAME}: pass 1 in {time.time() - t0:.0f} s, {len(is_trades)} in-sample trades, pick {pick}"
         + ("" if cands else f" (no rule had {MIN_IS_TRADES} in-sample trades: the default)"))
@@ -305,8 +321,9 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
             costs[v.name] = c
     e2 = sim.Engine(rules, book=warm_book(warm, root), decisions=True, model=M.Filter(is_models), rule_costs=costs,
                     strategies=strats, wallets=W.warm(warm, root), cats=cats, models=is_models, early_rows=True,
-                    snipers=EA.warm_snipers(warm, root))
+                    snipers=EA.warm_snipers(warm, root), select=True)
     e2.early.keep_frac = keep
+    lab2 = e2.add_pipe(SF.LabelPipe(e2, select_costs()))   # Y9: every row of the record, for the retrain
     sim.replay(days, e2, root)
     log(f"{NAME}: pass 2 in {time.time() - t0:.0f} s, {len(e2.closed)} closed paper trades, {len(e2.rows)} model rows")
 
@@ -347,6 +364,7 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
     return {"now_ms": now_ms, "days": days, "warm": warm, "split_ms": split, "span": (t_lo, t_hi), "pick": pick,
             "picked_by": "in-sample mean" if cands else "default", "results": results, "pool": pl_,
             "table": table, "record": rec, "x14": x14, "x14_keep": keep, "latency": lat,
+            "select_rows": lab2.table(),
             "counts": {"pass1": dict(e1.counts), "pass2": dict(e2.counts)},
             "skipped": {f"{k[0]}: {k[1]}": v for k, v in e2.skipped.items() if "@" not in k[0]},
             "failed_why": dict(sorted(((w, sum(1 for f in e2.failed if f["why"] == w and "@" not in f["rule"]))
@@ -648,6 +666,8 @@ def save_outputs(res: dict, data: dict, md: str) -> None:
         LT.save(res["latency"])
     if res.get("table") is not None and len(res["table"].get("t", [])):
         save_rows(res["table"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"]})
+    if res.get("select_rows") is not None and len(res["select_rows"].get("t", [])):
+        SM.save_rows(res["select_rows"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"]})
     if res.get("x14") is not None:
         EA.save(res["x14"], rows_path().parent, {"now_ms": res["now_ms"], "days": res["days"],
                                                  "split_ms": res["split_ms"], "keep": res.get("x14_keep")})

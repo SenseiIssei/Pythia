@@ -24,6 +24,7 @@ import numpy as np
 from . import curve as C
 from . import early as E
 from . import pipeline as P
+from . import selfeat as SF
 from . import strategies as S
 from . import wallets as W
 from .categorize import CAT_FEATURES
@@ -66,7 +67,7 @@ class Engine:
                  entry_from: int | None = None, entry_until: int | None = None,
                  rule_costs: dict[str, C.Costs] | None = None, strategies: list | None = None,
                  wallets: W.WalletBook | None = None, cats=None, models: dict | None = None, kill=None,
-                 early_rows: bool = False, snipers: E.SniperBook | None = None):
+                 early_rows: bool = False, snipers: E.SniperBook | None = None, select: bool = False):
         self.rules = list(S.RULES if rules is None else rules)
         self.costs = costs or C.Costs()
         self.rule_costs = rule_costs or {}
@@ -101,6 +102,8 @@ class Engine:
         # X14: market activity, snipers and flow for the early and exit features (always); with early_rows the
         # early-detection rows, the positions' paths and the exit models' step rows (the study)
         self.early = E.Tracker(self, rows=early_rows, snipers=snipers)
+        # Y9: the migration features of the select filters (the paper books and the study; not the live service)
+        self.sel = SF.Tracker() if select else None
 
     def _index_rules(self) -> None:
         """The rules and every pipe's strategies, by entry kind (a strategy signals once for all pipes)."""
@@ -210,6 +213,8 @@ class Engine:
             else:
                 tok.early.sold(user, t, self.wallets)
         self.early.trade(tok, t, buy, sol, tok_amt, user, "curve")
+        if self.sel is not None:
+            self.sel.trade(tok, t, buy, sol, user)
         for pipe in self.pipes:
             pipe.exec.on_trade("trades", {"t": t, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
                                           "fee_bps": tok.fee_bps, "sig": sig})
@@ -236,6 +241,8 @@ class Engine:
             tok.completed(t, self.book)
             if first:
                 self.early.completed(tok, t)
+                if self.sel is not None:
+                    self.sel.completed(tok, t)
 
     def migrate(self, t, mint, pool, sol, tok_amt) -> None:
         self.advance(t)
@@ -248,6 +255,8 @@ class Engine:
                     self.wallets.completed(w)
             tok.completed(t, self.book)
             self.early.completed(tok, t)
+            if self.sel is not None:
+                self.sel.completed(tok, t)
         tok.migrated(t, pool, sol, tok_amt)
         tok.last_t = t
         for r in self.by_entry.get("migration", ()):
@@ -261,6 +270,8 @@ class Engine:
         tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb, slot, user, int(t), vq)
         tok.last_t = t
         self.early.trade(tok, t, buy, quote or 0, base or 0, user or "", "pool")
+        if self.sel is not None:
+            self.sel.amm(tok, int(t), buy, quote or 0)
         for pipe in self.pipes:
             pipe.exec.on_trade("amm", {"t": t, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
                                        "user": user, "fee_bps": tok.amm_fee_bps, "sig": sig})
@@ -583,6 +594,8 @@ class Engine:
         self._quality(tok)
         del self.tokens[mint]
         self.early.evict(mint)
+        if self.sel is not None:
+            self.sel.evict(mint)
         self.entered.pop(mint, None)
         self.rows_by_mint.pop(mint, None)
 

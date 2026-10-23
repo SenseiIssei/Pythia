@@ -346,6 +346,8 @@ def load(d: Path | None = None) -> dict[str, Fitted]:
                 pass
     from .exitpol import load_models                     # X14: the early and exit models, the hazard policy
     out.update(load_models(d))
+    from .selmodel import load_models as sel_models      # Y9: the select models and their thresholds
+    out.update(sel_models(d))
     return out
 
 
