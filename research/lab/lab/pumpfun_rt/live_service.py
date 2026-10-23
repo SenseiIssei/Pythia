@@ -37,6 +37,13 @@ engine does not know yet waits HOLD_MS for the coin's creation (the links race: 
 slot often has its migration first); the coins the collector wrote after the start are adopted once more after
 REWARM_S. Every coin the live strategy does not buy has its reason in the status ("skipped") and one log line
 (live_exec.LiveBook.on_skip, data/live/pumpfun_rt/skipped.jsonl).
+
+Its own latency (measure.py, "Per step, by day"): every row keeps its message's receive time, and an order carries
+the receive time of the row that decided it and when the engine took that row (after a wait for the creation); the
+gate's files and a new day are read on the tick, not at a signal; with prefetch a migration's pool accounts are read
+as the migration comes in (LiveExecutor.warm_pool), so the pool buy builds without a read. The loop itself is idle
+nearly all the time (a recorded day's rows cost about 0.04 % of it); what is left of signal to order is the
+stream delivering the deciding event late, and the wait for a coin's creation.
 """
 
 from __future__ import annotations
@@ -153,6 +160,12 @@ class LiveCollector(Collector):
         self.sigs[sig] = (lines, tx0, first)
         return kept
 
+    def keep(self, table: str, row: dict, chain_ms: int | None = None, sig: str | None = None) -> int:
+        """As the collector's, and the live copy keeps its message's receive time (`recv_ms`, wall ms) next to
+        its slot time: an order this row decides carries both (measure.split, the receive step)."""
+        row["recv_ms"] = row.get("t")
+        return super().keep(table, row, chain_ms, sig)
+
 
 class Service:
     def __init__(self, gate: LX.LiveGate | None = None, engine=None, rpc=None, attach=LX.attach,
@@ -241,12 +254,19 @@ class Service:
         if self.book is None:
             return
         mint = row.get("mint")
+        if table == "other" and row.get("kind") == "migrate" and self.pool_rule():
+            self.book.exec.warm_pool(mint, row.get("pool"))  # with prefetch: its buy then builds without a read
         if table in HOLD_TABLES and mint and mint not in self.engine.tokens:
             self.held.setdefault(mint, []).append((time.monotonic(), table, row))
             return
         self._feed(table, row)
         if table == "creates" and mint in self.held:
             self.release([mint])
+
+    def pool_rule(self) -> bool:
+        """The live strategy buys pools at their migration (P_pool0, P_pool0_wait)."""
+        s = P.BY_NAME.get(getattr(self.book, "rule", None))
+        return s is not None and s.family == "E" and s.entry == "migration" and hasattr(self.book, "exec")
 
     def release(self, mints) -> None:
         """The held rows of these coins, in the order they came, once the engine knows the coin."""
@@ -280,7 +300,14 @@ class Service:
 
     def _feed(self, table: str, row: dict) -> None:
         from .sim import feed_row
-        feed_row(self.engine, table, row)
+        ex = getattr(self.book, "exec", None)
+        if ex is not None:                                  # an order this row decides: its receive and engine time
+            ex.cause = (row.get("recv_ms"), int(ex.clock()))
+        try:
+            feed_row(self.engine, table, row)
+        finally:
+            if ex is not None:
+                ex.cause = None
         try:
             self.feed.observe(table, row, self.engine)
         except Exception as e:                              # the chart's problem, never the book's
@@ -298,10 +325,15 @@ class Service:
                 self.why = self.gate.check()
             return
         self.purge()
-        self.engine.advance(now_ms)
-        for pipe in self.engine.pipes:
-            pipe.poll(now_ms)
-        self.book.tick(now_ms)
+        ex = self.book.exec
+        ex.cause = (None, int(ex.clock()))                  # an order from a timer: no stream row behind it
+        try:
+            self.engine.advance(now_ms)
+            for pipe in self.engine.pipes:
+                pipe.poll(now_ms)
+            self.book.tick(now_ms)
+        finally:
+            ex.cause = None
 
     def book_changed(self) -> bool:
         """A position opened, changed state or closed since the last call."""

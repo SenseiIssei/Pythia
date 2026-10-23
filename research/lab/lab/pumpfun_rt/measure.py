@@ -63,6 +63,9 @@ def read_orders(path=None) -> list[dict]:
 
 
 STEPS = (("signal_to_queued", "signal to order (the decision; the stream's lag behind the slot's first event)"),
+         ("signal_to_received", "signal to received (the deciding event's own lag on our stream)"),
+         ("received_to_fed", "received to the engine (held until the coin's creation came)"),
+         ("fed_to_queued", "engine to order (the strategy's checks, the gates and the sizing)"),
          ("queued_to_built", "order to built and signed"),
          ("built_to_sent", "built to the send's answer"),
          ("queued_to_sent", "order to sent (older fills: to the sent line, which waited for the next second)"),
@@ -108,6 +111,9 @@ def split(rows: list[dict], orders: list[dict] | None = None) -> dict:
                 if a is not None and b is not None:
                     steps[k].append(float(a) - float(b))
             add("signal_to_queued", queued, sig_ms)
+            add("signal_to_received", r.get("recv_ms"), sig_ms)
+            add("received_to_fed", r.get("fed_ms"), r.get("recv_ms"))
+            add("fed_to_queued", queued, r.get("fed_ms"))
             add("queued_to_built", built, queued)
             add("built_to_sent", r.get("sent_at_ms"), built)
             add("queued_to_sent", sent, queued)
@@ -139,6 +145,50 @@ def split_markdown(sp: dict) -> list[str]:
             if d.get("n"):
                 lines.append(f"| {side} | landed to booked, fill from the {how} | {d['n']} | {s(d, 'p25')} | "
                              f"{s(d, 'median')} | {s(d, 'p75')} | {s(d, 'p90')} |")
+    return lines
+
+
+# The per-step breakdown the owner follows day by day: receive (the deciding event reaches us), decide (our
+# own time from receiving it to the order, a wait for the coin's creation included), build, send, land.
+PHASES = (("receive", "signal_ms", "recv_ms"), ("decide", "recv_ms", "queued_ms"), ("build", "queued_ms", "built_ms"),
+          ("send", "built_ms", "sent_at_ms"), ("land", "sent_at_ms", "land_ms"))
+
+
+def phases(rows: list[dict]) -> dict:
+    """Every live fill's steps per UTC day of its signal and side, in ms: {day: {side: {step: quartiles}}}. A
+    fill from before a step was stamped has no value for it; "order" (signal to order: receive and decide
+    together) is there for every fill, so the days before the stamps compare too."""
+    import datetime as dt
+    raw: dict = {}
+    for r in rows:
+        if r.get("what") != "fill" or r.get("signal_ms") is None or r.get("side") not in ("buy", "sell"):
+            continue
+        day = dt.datetime.fromtimestamp(r["signal_ms"] / 1000, dt.timezone.utc).strftime("%Y-%m-%d")
+        d = raw.setdefault(day, {}).setdefault(r["side"], {k: [] for k in ("order",) + tuple(p[0] for p in PHASES)})
+        at = dict(r)
+        if at.get("queued_ms") is None and r.get("send_to_land_ms") is not None and r.get("land_ms") is not None:
+            at["queued_ms"] = r["land_ms"] - r["send_to_land_ms"]
+        for k, a, b in (("order", "signal_ms", "queued_ms"),) + PHASES:
+            if at.get(a) is not None and at.get(b) is not None:
+                d[k].append(float(at[b]) - float(at[a]))
+    return {day: {side: {k: _quart(v) for k, v in steps.items()} for side, steps in sides.items()}
+            for day, sides in raw.items()}
+
+
+def phases_markdown(ph: dict) -> list[str]:
+    """Median (p90) seconds of each step, one row per day and side: the next days show what changed."""
+    def cell(d):
+        return "" if not d or not d.get("n") else f"{d['median'] / 1000:.2f} ({d['p90'] / 1000:.2f})"
+    lines = ["| day | side | fills | signal to order | receive | decide | build | send | land |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for day in sorted(ph):
+        for side in ("buy", "sell"):
+            d = ph[day].get(side)
+            if not d:
+                continue
+            n = max(v.get("n") or 0 for v in d.values())
+            lines.append(f"| {day} | {side} | {n} | {cell(d.get('order'))} | "
+                         + " | ".join(cell(d.get(k)) for k, _, _ in PHASES) + " |")
     return lines
 
 
@@ -250,6 +300,14 @@ def markdown(s: dict) -> str:
              f"{s['fee_sol'].get('n', 0)} | {a['tx_fee_sol']:.6f} |", "",
              f"Failed orders: {s['failed']}" + ("" if not s["failed_why"] else " (" + ", ".join(
                  f"{k} {v}" for k, v in s["failed_why"].items()) + ")"), ""]
+    if s.get("phases"):
+        lines += ["## Per step, by day", "",
+                  "Median (p90) in seconds. Receive: the signal (the slot's first event on our stream) to the moment "
+                  "the deciding event reached the bot. Decide: from then to the order (a wait for the coin's "
+                  "creation, the strategy's checks, gates and sizing). Build: built and signed. Send: the "
+                  "endpoint's answer. Land: the slot's time of our fill. Fills from before a step was stamped leave it "
+                  "empty; signal to order is receive and decide together.", ""] + phases_markdown(s["phases"]) \
+            + [""]
     if s.get("split"):
         lines += ["## Where the time goes", ""] + split_markdown(s["split"]) + [""]
     return "\n".join(lines)
@@ -261,6 +319,7 @@ def write_report(rows: list[dict] | None = None) -> dict:
     rule = next((r.get("rule") for r in reversed(rows) if r.get("rule")), None)
     s = summarise(rows, paper=paper_slip(rule))
     s["split"] = split(rows, read_orders())
+    s["phases"] = phases(rows)
     d = reports_dir()
     write_json(d / "execution.json", s)
     (d / "execution.md").write_text(markdown(s), encoding="utf-8")

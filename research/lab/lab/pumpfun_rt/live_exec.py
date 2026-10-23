@@ -92,8 +92,9 @@ SELL_MAX_FAILS failures in a row (the position is marked stuck and the owner tol
 Speed (docs/LATENCY.md, each behind its own switch, all off unless the owner sets PYTHIA_PUMPFUN_FAST=1 or
 the single one): the landing from signatureSubscribe and an early status poll, read back at once; reads on their
 own thread behind the sends; a prepared sale per open position; the blockhash and a capped fee from recent
-prioritization fees in the background; Sender and the plain RPC in parallel; kept connections. None of them
-changes a decision, and every transaction still passes check_own.
+prioritization fees in the background, and a migrated token's pool accounts read as its migration comes in;
+Sender and the plain RPC in parallel; kept connections. None of them changes a decision, and every transaction
+still passes check_own.
 
 The day's and the total's realised P&L, which the stops count, are not counters:
 they are recomputed from the ledger (whose rows the chain check corrects in place)
@@ -153,6 +154,8 @@ ENV_IDL = "PYTHIA_PUMPFUN_IDL_DIR"
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
 REPORT_MAX_AGE_MS = 36 * 3_600_000
 RECHECK_S = 60.0
+GATE_LEAD_S = 2.0                        # the service's tick checks the gate this much before a signal would have to
+WARM_KEEP = 2_000                        # pools whose accounts were asked for ahead of a buy (prefetch)
 CONFIRM_MS = 30_000
 GIVE_UP_MS = 150_000                     # longer than a 20 s cached blockhash plus its ~60 to 90 s validity
 BLOCKHASH_S = 20.0
@@ -212,7 +215,8 @@ class Speed:
     """The free latency fixes, each behind its own switch (all off by default: the executor then works exactly
     as before)."""
     prepare: bool = False                 # a prepared sale per open position, refreshed with the blockhash
-    prefetch: bool = False                # the blockhash (and the fee estimate) refreshed in the background
+    prefetch: bool = False                # the blockhash (and the fee estimate) refreshed in the background, and a
+                                          # migration's pool accounts read before its buy (warm_pool)
     dynamic_fee: bool = False             # the priority fee from recent prioritization fees, capped
     parallel: bool = False                # Sender and the plain RPC get the same signed bytes at once
     keepalive: bool = False               # persistent HTTPS connections, Sender's /ping every 5 s
@@ -1233,6 +1237,12 @@ class Builder:
             raise RuntimeError("the pool is not this token's")
         return info
 
+    def warm(self, mint: str, pool: str) -> None:
+        """A migrated token's pool read into the cache ahead of a buy (prefetch, LiveExecutor.warm_pool): the
+        build then reads nothing. Only what a build reads itself, and only fields that never change (accounts,
+        mints, the cashback flag); the buy's amounts come from the order, never from these bytes."""
+        self.pool(pool, mint)
+
     def ixs(self, user: str, o: P.Order, pool: str | None, close: bool) -> list[X.Ix]:
         if o.venue == "pool":
             if not pool:
@@ -1547,6 +1557,10 @@ class LiveExecutor:
         self.want_sales: dict[int, tuple] = {}        # pid -> (order, pool, close): the sales to keep prepared
         self.last_ping = 0.0
         self.prep_failed: dict[int, float] = {}       # pid -> when its sale last failed to prepare
+        self.cause: tuple | None = None               # (receive ms, engine ms) of the stream row being handled now
+        self.warm_q: queue.Queue = queue.Queue()      # (mint, pool) of migrations: their accounts read ahead of a buy
+        self.warmed: collections.OrderedDict = collections.OrderedDict()
+        self.warm_failed = 0
         self._carry()
         self._roll()                                  # the day and its P&L are set before anything books
         self.worker = None
@@ -1581,21 +1595,8 @@ class LiveExecutor:
 
     # ------------------------------------------------------------ gate and caps
     def ready(self) -> str | None:
-        now = time.monotonic()
-        if now - self.last_check >= RECHECK_S:
-            self.last_check = now
-            why = self.gate.check()
-            if self.rule is not None and not why and (self.gate.rule != self.rule or self.gate.mode != self.mode):
-                why = ["the confirmation file now names another strategy or mode; restart the live service"]
-            elif self.rule is not None and not why and bool(getattr(getattr(self.gate, "ack", None), "wallet", False)) \
-                    != self.wallet:
-                why = ["the confirmation file now sets other limits (limits=wallet or not); restart the live service"]
-            was = self.closed_why
-            self.closed_why = "; ".join(why) if why else None
-            if why:
-                print(f"live: refusing to buy: {self.closed_why}", flush=True)
-            if self.closed_why != was and self.on_gate is not None:
-                self.on_gate(self.closed_why)              # shut, or open again: the owner hears of it
+        if time.monotonic() - self.last_check >= RECHECK_S:
+            self._check_gate()
         if self.closed_why:
             return f"live gate shut: {self.closed_why}"
         if self.paused_ms is not None:
@@ -1603,6 +1604,29 @@ class LiveExecutor:
         if self.limits.stake_sol <= 0:
             return (self.stake or {}).get("why") or "stake paused"
         return None
+
+    def recheck(self) -> None:
+        """The service's tick: the gate's files read again GATE_LEAD_S before ready() would have to (every
+        RECHECK_S as before, never less often), and a new UTC day rolled (its P&L from the ledger), so a signal
+        never waits for either. ready() still checks itself when nothing ticked."""
+        self._roll()
+        if time.monotonic() - self.last_check >= RECHECK_S - GATE_LEAD_S:
+            self._check_gate()
+
+    def _check_gate(self) -> None:
+        self.last_check = time.monotonic()
+        why = self.gate.check()
+        if self.rule is not None and not why and (self.gate.rule != self.rule or self.gate.mode != self.mode):
+            why = ["the confirmation file now names another strategy or mode; restart the live service"]
+        elif self.rule is not None and not why and bool(getattr(getattr(self.gate, "ack", None), "wallet", False)) \
+                != self.wallet:
+            why = ["the confirmation file now sets other limits (limits=wallet or not); restart the live service"]
+        was = self.closed_why
+        self.closed_why = "; ".join(why) if why else None
+        if why:
+            print(f"live: refusing to buy: {self.closed_why}", flush=True)
+        if self.closed_why != was and self.on_gate is not None:
+            self.on_gate(self.closed_why)                  # shut, or open again: the owner hears of it
 
     def sized(self, lim: P.Limits) -> P.Limits:
         """The limits with the stake the wallet allows (sizing.py) under lim's stake as the ceiling, and the
@@ -1729,7 +1753,7 @@ class LiveExecutor:
             self.pipe.buy_failed(o.pid, self.clock(), f"refused: {why}", 0)
             return
         self.exposure[o.pid] = o.limit_l
-        self.pending[o.pid] = {"side": "buy", "order": o, "sig": None, "sent_ms": self.clock()}
+        self.pending[o.pid] = {"side": "buy", "order": o, "sig": None, "sent_ms": self.clock(), **self._stamps()}
         self.q.put(("send", o, self._pool_of(o.mint), False))
 
     def sell(self, o: P.Order) -> None:
@@ -1749,8 +1773,35 @@ class LiveExecutor:
             o = dataclasses.replace(o, tokens=tokens)
         close = tokens >= (held if held else left)
         expect = int(p["mark_l"] * tokens / p["left"]) if p.get("mark_l") and p.get("left") else None
-        self.pending[o.pid] = {"side": "sell", "order": o, "sig": None, "sent_ms": self.clock(), "expect_l": expect}
+        self.pending[o.pid] = {"side": "sell", "order": o, "sig": None, "sent_ms": self.clock(), "expect_l": expect,
+                               **self._stamps()}
         self.q.put(("send", o, self._pool_of(o.mint), close, self.sell_fails.get(o.pid, 0) > 0))
+
+    def _stamps(self) -> dict:
+        """The receive and engine times of the stream row that decided this order (the service sets `cause`
+        around each row, and around its tick with no receive time): measure.split's receive and decide steps."""
+        c = self.cause
+        return {} if c is None else {"recv_ms": c[0], "fed_ms": c[1]}
+
+    def warm_pool(self, mint: str, pool: str | None) -> None:
+        """A migration on the stream (the stream's thread): with prefetch, the pool's accounts (its config, the
+        token's program, the pool account) are read on the prefetch thread now, so a buy of it builds without a
+        read. Each pool once; only the cache fills, nothing is decided or sent."""
+        if not self.speed.prefetch or not pool or not mint or pool in self.warmed or not hasattr(self.builder, "warm"):
+            return
+        self.warmed[pool] = None
+        while len(self.warmed) > WARM_KEEP:
+            self.warmed.popitem(last=False)
+        self.warm_q.put((mint, pool))
+
+    def warm_once(self, item) -> None:
+        mint, pool = item
+        try:
+            self.builder.warm(mint, pool)
+        except Exception as e:                               # the buy then reads them itself, as before
+            self.warm_failed += 1
+            if self.warm_failed <= 3:
+                print(f"live: pool of {mint} not read ahead ({type(e).__name__}: {e})"[:200], flush=True)
 
     def sell_leftover(self, pid: int, info: dict, tokens: int) -> None:
         """Sell everything of a position from before a restart (its book is gone): no floor, close. After a
@@ -1830,7 +1881,12 @@ class LiveExecutor:
     def _prefetch_loop(self) -> None:
         while True:
             self.prefetch_once()
-            time.sleep(PREFETCH_EVERY_S)
+            end = time.monotonic() + PREFETCH_EVERY_S
+            while (left := end - time.monotonic()) > 0:       # a migration's pool is read at once, not next round
+                try:
+                    self.warm_once(self.warm_q.get(timeout=left))
+                except queue.Empty:
+                    break
 
     def prefetch_once(self) -> None:
         """The background round: the blockhash and the fee (Builder.refresh), every wanted sale prepared, and
@@ -1978,6 +2034,8 @@ class LiveExecutor:
             item = q.get_nowait()
             if item is not None:
                 self.step(item)
+        while not self.warm_q.empty():
+            self.warm_once(self.warm_q.get_nowait())
 
     def stop(self) -> None:
         self.q.put(None)
@@ -2314,7 +2372,9 @@ class LiveExecutor:
              # wall times of each step (measure.split): queued at buy()/sell(), built and signed, the send's
              # answer, the node's confirmation (websocket or status), booked here
              "queued_ms": int(pend["sent_ms"]), "built_ms": pend.get("built_ms"), "sent_at_ms": pend.get("sent_at_ms"),
-             "confirmed_ms": pend.get("confirmed_ms"), "seen_ms": int(self.clock()), "prepared": pend.get("prepared")}
+             "confirmed_ms": pend.get("confirmed_ms"), "seen_ms": int(self.clock()), "prepared": pend.get("prepared"),
+             # the deciding stream row's receive time and when the engine took it (after a wait for the creation)
+             "recv_ms": pend.get("recv_ms"), "fed_ms": pend.get("fed_ms")}
         if self.watcher is not None:
             self.watcher.forget(sig)
         if pend.get("leftover"):
@@ -2834,6 +2894,7 @@ class LiveBook:
     def tick(self, now_ms: int, wall_ms: int | None = None) -> None:
         wall_ms = wall_ms or int(time.time() * 1000)
         self.poll_control()
+        self.exec.recheck()                                # the gate's files and a new day: off the signal's path
         if time.monotonic() - self.last_limits >= RECHECK_S or self.exec.balance_l != self.exec.stake_bal_l:
             self.last_limits = time.monotonic()            # every minute, and with every new balance read
             self.refresh_limits()
