@@ -115,6 +115,28 @@ jobs:
     volumes: [/opt/pythia-live:/app:ro]
     timeout: 5m
 
+  # EXPERIMENT, paper only (docs/ONCHAIN.md): breakout_top10_live's weights held in a Solana
+  # wallet on paper, filled through Jupiter's public quotes, against Kraken's costs. Reads the
+  # twin's signal, signs and sends nothing. The hourly mark only marks.
+  - name: onchain-paper
+    description: EXPERIMENT on-chain paper book, breakout_top10_live through Jupiter quotes, after its twin is written
+    depends_on: [paper-live-copy]
+    command: python -m lab.onchain.book
+    resources: {cpus: 1, memory: 1g}
+    timeout: 20m
+    lock: onchain
+    lock_wait: 10m
+
+  - name: onchain-mark
+    description: EXPERIMENT on-chain paper book, hourly mark at Jupiter prices, no trade
+    schedule: "40 * * * *"
+    command: python -m lab.onchain.book --mark
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    grace: 30m
+    lock: onchain
+    alert: false
+
   # Pre-registered forward shadow (results/exit_shadow_prereg.md): the M14 exit
   # and a 40-day time stop on the crypto books, decided on the panel the paper
   # books just rebuilt, written before the outcome and scored as days pass.
