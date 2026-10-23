@@ -172,6 +172,7 @@ class Exits:
     pull: bool = True
     risk: tuple | None = None             # (label, multiple of its base rate) for the risk-model exit
     hazard: bool = False                  # X14: the hazard exit HZ(k*) replaces the price exits when its models exist
+    time_after_step_s: float | None = None  # Y7: once a ladder step has filled, the time stop is landing + this
 
 
 # E0, the X14 plan's exit for the early books, and the hazard strategies' fallback before the first retrain.
@@ -260,7 +261,32 @@ def _build_y6() -> list[Strategy]:
                       "PumpSwap, at the migration (as E_d0_x1); +30 %, stop -20 %, 300 s")]
 
 
-STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6()
+def _build_y7() -> list[Strategy]:
+    """Y7 (results/pumpfun_exit_runners_prereg.md): P_pool0's entry with exits that let a run go on. trail_after
+    is the gain over the entry that arms the trail, trail_gap the fall from the peak that sells; a last ladder
+    step at +5,000 % means no further take profit. No dev-sell or pull exit except in the guard variant."""
+    half = Exits(1800, 0.20, ((0.30, 0.5), (50.0, 1.0)), 0.30, 0.30, dev_sell=False, pull=False)
+    ladder3 = Exits(3600, 0.20, ((0.30, 0.34), (1.00, 0.67), (50.0, 1.0)), 0.30, 0.35, dev_sell=False, pull=False)
+    trail = Exits(1800, 0.20, ((50.0, 1.0),), 0.20, 0.25, dev_sell=False, pull=False)
+    guard = dataclasses.replace(half, dev_sell=True, pull=True)
+    ext = dataclasses.replace(half, time_s=300, time_after_step_s=3600)
+    at = "PumpSwap, at the migration (as P_pool0); stop -20 %"
+    return [
+        _strategy("P_pool0_half_trail", "E", "migration", {"delay_s": 0}, {}, half,
+                  f"{at}; half at +30 %, the rest on a trail 30 % under the peak once +30 %, 1800 s"),
+        _strategy("P_pool0_ladder3", "E", "migration", {"delay_s": 0}, {}, ladder3,
+                  f"{at}; a third at +30 %, a third at +100 %, the rest on a trail 35 % under the peak once +30 %, "
+                  "3600 s"),
+        _strategy("P_pool0_trail", "E", "migration", {"delay_s": 0}, {}, trail,
+                  f"{at}; no take profit, all on a trail 25 % under the peak once +20 %, 1800 s"),
+        _strategy("P_pool0_half_trail_guard", "E", "migration", {"delay_s": 0}, {}, guard,
+                  "as P_pool0_half_trail with the dev-sell and pull exits"),
+        _strategy("P_pool0_half_trail_ext", "E", "migration", {"delay_s": 0}, {}, ext,
+                  "as P_pool0_half_trail; time stop 300 s until the half at +30 % has sold, then 3600 s"),
+    ]
+
+
+STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6() + _build_y7()
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -639,7 +665,7 @@ class Pipeline:
         due = p.pop("due", None)
         if due is not None:
             self._sell_all(p, at, due)
-        elif p.pop("time_due", False):
+        elif p.pop("time_due", False) and not self._time_moved(p, at):
             self._sell_all(p, at, "time")
         else:
             self.check(p["pid"], at)
@@ -686,12 +712,15 @@ class Pipeline:
         p = self.pos.get(pid)
         if p is None or p["state"] != "open" or p["left"] <= 0:
             return
-        if p["selling"]:
-            if trigger is not None and not p.get("exiting"):
-                p["due"] = trigger                            # acted on as soon as the sale in flight is back
-            return
         s = self.strats[p["rule"]]
         ex = s.exits
+        if p["selling"]:
+            # a trigger the strategy acts on (a dev sale or pull only where its exits have them) is acted on as
+            # soon as the sale in flight is back
+            if not p.get("exiting") and (trigger == "kill" or (trigger == "dev_sell" and ex.dev_sell)
+                                         or (trigger == "pull" and ex.pull)):
+                p["due"] = trigger
+            return
         eng = self.eng
         tok = eng.tokens.get(p["mint"])
         if self.kill():
@@ -744,7 +773,22 @@ class Pipeline:
                 if not p.get("exiting"):
                     p["time_due"] = True
                 return
+            if self._time_moved(p, at):
+                return
             self._sell_all(p, at, "time")
+
+    def _time_moved(self, p: dict, at: float) -> bool:
+        """Y7's later time stop (Exits.time_after_step_s): once a ladder step has filled (a sale landed while
+        the position is still open), the time stop is landing + time_after_step_s; True when that is still
+        ahead, and the time stop is then set for it."""
+        after = self.strats[p["rule"]].exits.time_after_step_s
+        if after is None or p["legs"] == 0:
+            return False
+        due = p["land_ms"] + after * 1000
+        if at >= due:
+            return False
+        self.eng.push(due, "pipe", (self, "_time_stop", p["pid"]))
+        return True
 
     def _sell_all(self, p: dict, t: float, why: str) -> None:
         p["exiting"] = True

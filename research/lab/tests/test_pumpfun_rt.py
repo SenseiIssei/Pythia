@@ -448,9 +448,10 @@ def test_models_save_and_load(tmp_path):
 
 def test_the_registered_rules_are_what_the_plan_says():
     from lab.pumpfun_rt import pipeline as P
-    assert len(S.RULES) == 22 and len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS == 13
+    assert len(S.RULES) == 22 and len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS + 5 == 18   # 5: Y7's
     assert S.X14_TRIALS == 54
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1       # 135: Y3's speed tiers, 140: Y5's fill scenarios, 1: P_pool0
+    # 135: Y3's speed tiers, 140: Y5's fill scenarios, 1: P_pool0, 6: Y7's exits (five new, P_pool0 judged again)
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6
     assert len({r.name for r in S.RULES}) == 22
     assert {r.family for r in S.RULES} == set("ABCDE")
     assert S.DEFAULT_PICK in S.BY_NAME and S.STAKE_SOL == 0.1
