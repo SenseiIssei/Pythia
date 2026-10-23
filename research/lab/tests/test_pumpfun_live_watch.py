@@ -80,3 +80,13 @@ def test_a_post_is_urgent_so_quiet_hours_never_hold_it(monkeypatch):
     W.post("t", "x", dry=False)
     cmd = calls[0]
     assert cmd[2:] == ["--urgent", "--event", "risk", "t", "x"]
+
+
+def test_on_but_every_buy_refused_by_the_daily_limit_is_a_problem():
+    s = status(pnl_today_sol=-0.1276, stake={"sol": 0.05}, limits={"max_daily_loss_sol": 0.1854})
+    assert "Tageslimit" in W.problems(s, True, NOW)["daylimit"]
+    assert "daylimit" not in W.problems(status(pnl_today_sol=-0.05, stake={"sol": 0.05},
+                                               limits={"max_daily_loss_sol": 0.1854}), True, NOW)
+    held = status(pnl_today_sol=-0.1276, stake={"sol": 0.05}, limits={"max_daily_loss_sol": 0.1854},
+                  positions=[{"state": "open"}])
+    assert "daylimit" not in W.problems(held, True, NOW), "with a position open it is only waiting"

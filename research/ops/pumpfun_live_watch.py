@@ -78,6 +78,16 @@ def problems(status: dict | None, running: bool | None, now: float) -> dict[str,
     if stuck:
         out["stuck"] = f"{len(stuck)} Position(en) lassen sich nicht verkaufen: " + \
             ", ".join(p.get("symbol") or (p.get("mint") or "?")[:6] for p in stuck)
+    # "on" with every buy refused: the day's loss plus one stake (with the executor's 30 % slippage room)
+    # already reaches the daily loss limit, so nothing is bought until 00:00 UTC
+    lim = (status.get("limits") or {}).get("max_daily_loss_sol")
+    stake = (status.get("stake") or {}).get("sol") or (status.get("limits") or {}).get("max_trade_sol")
+    loss = max(0.0, -(status.get("pnl_today_sol") or 0.0))
+    if status.get("on") and lim and stake and not status.get("positions") \
+            and loss + stake * 1.3 > lim:
+        out["daylimit"] = (f"Der Live-Bot kauft heute nicht mehr: {loss:.3f} SOL Tagesverlust plus ein Einsatz "
+                           f"({stake:.2f} SOL mit Puffer) übersteigen das Tageslimit von {lim:.3f} SOL. "
+                           "Ab 02:00 Uhr (00:00 UTC) kauft er wieder.")
     if status.get("leftovers"):
         out["leftovers"] = f"{len(status['leftovers'])} Position(en) von vor einem Neustart werden verkauft."
     return out
