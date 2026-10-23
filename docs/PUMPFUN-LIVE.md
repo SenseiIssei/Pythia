@@ -547,7 +547,19 @@ PYTHIA_SOLANA_COMMITMENT=processed
 
 Der Schlüssel steht nur in dieser Datei, nie im Repo; Logs zeigen nur
 Schema und Host. Der öffentliche Endpunkt läuft als Rückfallebene weiter
-(`PYTHIA_PF_PUBLIC_FALLBACK=0` schaltet ihn ab). Der echte Bot liest dieselben Variablen (`PYTHIA_SOLANA_WS_URLS`, `PYTHIA_SOLANA_TOKEN` in seiner Env-Datei): Verbindung 0 von pump.fun und von PumpSwap geht zum Anbieter, beim Start steht `live service: feeds ...` mit Schema und Host im Log. Ob es wirkt, zeigt die
+(`PYTHIA_PF_PUBLIC_FALLBACK=0` schaltet ihn ab). Der echte Bot liest dieselben Variablen (`PYTHIA_SOLANA_WS_URLS`, `PYTHIA_SOLANA_TOKEN` in seiner Env-Datei),
+nutzt den Anbieter aber nur für die Coins, auf die er gerade wartet, die er hält oder für die eine Order
+läuft: je Coin ein `logsSubscribe` auf dessen Pool (oder Bonding Curve) über eine einzige Verbindung, wieder
+abgemeldet, sobald der Coin fällt, verkauft ist oder die Wartezeit endet. Die programmweiten Datenströme
+(der PumpSwap-Strom allein etwa 490 Ereignisse pro Sekunde, er leerte das kostenlose Monatskontingent in
+etwa 11 Stunden) laufen über den öffentlichen Endpunkt. Drei Einstellungen in seiner Env-Datei:
+`PYTHIA_PF_PROVIDER_MAX_SUBS` (Standard 20) begrenzt die gleichzeitigen Abos, der am längsten beobachtete
+Coin fällt zuerst heraus, gehaltene Coins behalten ihres immer; `PYTHIA_PF_PROVIDER_MB_DAY` (Standard 40)
+ist das Tagesbudget in MB, darüber pausieren die Abos beobachteter Coins bis 00:00 UTC (gehaltene bleiben),
+der Status zeigt es unter `provider`; `PYTHIA_PF_PROVIDER_FIREHOSE=1` legt wie bisher Verbindung 0 von
+pump.fun und PumpSwap auf den Anbieter (teuer). Beim Start stehen `live service: feeds ...` und `watched and
+held coins also from ...` mit Schema und Host im Log; wer zuerst lieferte und um wie viele ms, und die MB pro
+Tag, stehen in `reports/pumpfun_rt/latency.md` ("provider vs public, watched coins"). Ob es wirkt, zeigt die
 tägliche Telegram-Karte ("Unser Datenstrom sah neue Token ... nach ihrem
 Block") und der Vergleich der Anbieter:
 

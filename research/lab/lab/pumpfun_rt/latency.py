@@ -27,6 +27,10 @@ provider". Endpoints: PYTHIA_SOLANA_WS_URLS (comma separated, a "{token}"
 in a URL is replaced by PYTHIA_SOLANA_TOKEN, so no key is ever written into
 a file of this repository), else PYTHIA_SOLANA_WS, else the public endpoint.
 Only scheme and host are ever printed.
+
+The live service's targeted provider stream (live_service.ProviderWatch) counts, per transaction of a watched or held
+coin that came over the provider and over a public link, which was first and by how many ms, and the bytes the
+provider sent per day (data/live/pumpfun_rt/provider.json); save() adds them as "provider vs public, watched coins".
 """
 
 from __future__ import annotations
@@ -253,11 +257,53 @@ def summary(days: list[str], root=None, now_ms: int | None = None, hours: float 
     return res
 
 
+def provider_summary(path=None) -> list[dict] | None:
+    """Per UTC day of the live service's provider file: transactions over both, the provider's share first, its
+    median and p90 lead (ms; negative: the public copy was first) and the MB received. None without the file."""
+    if path is None:
+        from . import live_exec as LX
+        path = LX.data_dir() / "provider.json"
+    try:
+        days = json.loads(path.read_text(encoding="utf-8")).get("days") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    out = []
+    for day, v in sorted(days.items()):
+        if not isinstance(v, dict):
+            continue
+        leads = [x for x in v.get("leads") or [] if isinstance(x, (int, float))]
+        n = int(v.get("n") or 0)
+        out.append({"day": day, "n": n, "share_first": (v.get("first") or 0) / n if n else None,
+                    "median_lead_ms": float(np.median(leads)) if leads else None,
+                    "p90_lead_ms": float(np.percentile(leads, 90)) if leads else None,
+                    "mb": round((v.get("bytes") or 0) / 1e6, 2)})
+    return out
+
+
+def provider_md(rows: list[dict] | None) -> list[str]:
+    if rows is None:
+        return []
+    md = ["", "## provider vs public, watched coins", "",
+          "Transactions of the coins the live bot watched or held that came over the provider and a public link "
+          "(lead: how much earlier the provider's copy was; negative, the public one was first).", ""]
+    if not rows:
+        return md + ["Nothing measured yet."]
+    md += ["| day (UTC) | n | provider first | median lead | p90 lead | provider MB |", "|---|---|---|---|---|---|"]
+    for r in rows:
+        def ms(x):
+            return "n/a" if x is None else f"{x:.0f} ms"
+        first = "n/a" if r["share_first"] is None else f"{r['share_first']:.0%}"
+        md.append(f"| {r['day']} | {r['n']:,} | {first} | {ms(r['median_lead_ms'])} | {ms(r['p90_lead_ms'])} "
+                  f"| {r['mb']:.1f} |")
+    return md
+
+
 def report_md(res: dict) -> str:
     def s(x):
         return "n/a" if x is None else f"{x / 1000:.1f} s"
     if not res.get("n") or "lag_ms" not in res:
-        return "# pump.fun detection latency\n\nNo creations in the window.\n"
+        return "\n".join(["# pump.fun detection latency", "", "No creations in the window."]
+                         + provider_md(res.get("provider"))) + "\n"
     lm, ls = res["lag_ms"], res["lag_slots"]
     md = ["# pump.fun detection latency", "",
           f"{res['n']:,} creations; slot length {res['slot_ms']:.0f} ms (fitted from the block timestamps).", "",
@@ -276,11 +322,17 @@ def report_md(res: dict) -> str:
                f"{res['within_5s']:.1%}.", "", "| hour (UTC) | creations | p10 | p50 | p90 |", "|---|---|---|---|---|"]
     for h in res["hours"]:
         md.append(f"| {h['hour']} | {h['n']:,} | {s(h['p10'])} | {s(h['p50'])} | {s(h['p90'])} |")
-    return "\n".join(md) + "\n"
+    return "\n".join(md + provider_md(res.get("provider"))) + "\n"
 
 
 def save(res: dict) -> None:
     from .. import report as rep
+    try:                                                     # the live service's provider stream, when it has one
+        prov = provider_summary()
+    except Exception:
+        prov = None
+    if prov is not None:
+        res = {**res, "provider": prov}
     d = rep.REPORTS / "pumpfun_rt"
     d.mkdir(parents=True, exist_ok=True)
     (d / "latency.json").write_text(json.dumps(res, indent=1, default=float), encoding="utf-8")
