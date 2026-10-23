@@ -68,8 +68,10 @@ the wallet can be lost completely.
 The owner's master controls (reports/pumpfun_rt/control.json, written by the engine from the app, read
 every CONTROL_S): a share of the base for the stake (with limits=wallet from 1 % to
 sizing.WALLET_MAX_SHARE, overriding the ack's stake_share; without it only lower than sizing.SHARE) and
-a pause: no new buys from that moment while open positions keep their exits. It is not the kill switch
-and changes none of the gates, check_own or the kill switch.
+a pause: no new buys from that moment while open positions keep their exits; with limits=wallet also the
+drawdown brake off (brake false) and the pause under floor_sol instead of sizing.PAUSE_BELOW_SOL (the
+owner's all-in, 2026-10-23; the minimum stake, the fee reserve and the ceiling stay). It is not the kill
+switch and changes none of the gates, check_own or the kill switch.
 
 Only the programs' public buy and sell, and txbuild.check_own refuses anything
 else before signing: no transfers out, no withdrawals, no bundles, no private
@@ -521,6 +523,7 @@ def _env_limits(env) -> P.Limits:
 # ---------------------------------------------------------------- the owner's master controls from the app
 
 SHARE_MIN, SHARE_MAX = 0.01, 1.0
+FLOOR_MAX_SOL = 10.0                                         # the owner's floor_sol, as the server allows it
 
 
 def control_path() -> Path:
@@ -528,22 +531,34 @@ def control_path() -> Path:
 
 
 def parse_control(d) -> dict | None:
-    """The owner's control file as the engine writes it ({share, paused, set_at, share_set_at, paused_at}),
-    checked; None when it is malformed (a share outside SHARE_MIN..SHARE_MAX, a paused that is no bool)."""
+    """The owner's control file as the engine writes it ({share, paused, set_at, share_set_at, paused_at, brake,
+    brake_set_at, floor_sol, floor_sol_set_at}), checked; None when it is malformed (a share outside
+    SHARE_MIN..SHARE_MAX, a paused or brake that is no bool, a floor_sol outside 0..FLOOR_MAX_SOL). No brake
+    is true, no floor_sol is None (sizing.PAUSE_BELOW_SOL)."""
     if not isinstance(d, dict):
         return None
     share = d.get("share")
     if share is not None and not (isinstance(share, (int, float)) and not isinstance(share, bool)
                                   and math.isfinite(share) and SHARE_MIN <= share <= SHARE_MAX):
         return None
-    paused = d.get("paused", False)
-    if not isinstance(paused, bool):
+    paused, brake, floor = d.get("paused", False), d.get("brake", True), d.get("floor_sol")
+    if not isinstance(paused, bool) or not isinstance(brake, bool):
+        return None
+    if floor is not None and not (isinstance(floor, (int, float)) and not isinstance(floor, bool)
+                                  and math.isfinite(floor) and 0 <= floor <= FLOOR_MAX_SOL):
         return None
     ms = lambda k: int(d[k]) if isinstance(d.get(k), (int, float)) and not isinstance(d.get(k), bool) \
         and math.isfinite(d[k]) else None
     return {"share": None if share is None else float(share), "paused": paused, "set_at": ms("set_at"),
             "share_set_at": ms("share_set_at") if share is not None else None,
-            "paused_at": ms("paused_at") if paused else None}
+            "paused_at": ms("paused_at") if paused else None, "brake": brake,
+            "brake_set_at": ms("brake_set_at") if "brake" in d else None,
+            "floor_sol": None if floor is None else float(floor),
+            "floor_sol_set_at": ms("floor_sol_set_at") if floor is not None else None}
+
+
+NO_CONTROL = {"share": None, "paused": False, "set_at": None, "share_set_at": None, "paused_at": None,
+              "brake": True, "brake_set_at": None, "floor_sol": None, "floor_sol_set_at": None}
 
 
 class Control:
@@ -555,7 +570,7 @@ class Control:
     def __init__(self, path: Path | None = None, clock=time.monotonic, every_s: float = CONTROL_S, name: str = "live"):
         self.path = path
         self.clock, self.every_s, self.name = clock, every_s, name
-        self.good = {"share": None, "paused": False, "set_at": None, "share_set_at": None, "paused_at": None}
+        self.good = dict(NO_CONTROL)
         self.ok = True
         self.bad = None                                      # the malformed text last warned about
         self.last = -1e18
@@ -564,7 +579,7 @@ class Control:
         return self.path if self.path is not None else control_path()
 
     def poll(self, force: bool = False) -> list[str]:
-        """The changes since the last good read: "paused", "resumed", "share". The file is tiny: it is read
+        """The changes since the last good read: "paused", "resumed", "share", "brake", "floor". The file is tiny: it is read
         every CONTROL_S (a time stamp can miss two writes in one tick)."""
         if not force and self.clock() - self.last < self.every_s:
             return []
@@ -575,7 +590,7 @@ class Control:
         except OSError:
             text = None
         if text is None:
-            new = {"share": None, "paused": False, "set_at": None, "share_set_at": None, "paused_at": None}
+            new = dict(NO_CONTROL)
         else:
             try:
                 new = parse_control(json.loads(text))
@@ -584,7 +599,8 @@ class Control:
             if new is None:
                 if self.ok or text != self.bad:
                     print(f"{self.name}: the owner's control file {p.name} is malformed; the last good values stay "
-                          f"(share {self.good['share']}, paused {self.good['paused']})", flush=True)
+                          f"(share {self.good['share']}, paused {self.good['paused']}, brake {self.good['brake']}, "
+                          f"floor {self.good['floor_sol']})", flush=True)
                 self.ok, self.bad = False, text
                 return []
         self.ok, self.bad = True, None
@@ -593,6 +609,10 @@ class Control:
             out.append("paused" if new["paused"] else "resumed")
         if new["share"] != self.good["share"]:
             out.append("share")
+        if new["brake"] != self.good["brake"]:
+            out.append("brake")
+        if new["floor_sol"] != self.good["floor_sol"]:
+            out.append("floor")
         self.good = new
         return out
 
@@ -603,6 +623,14 @@ class Control:
     @property
     def paused(self) -> bool:
         return bool(self.good["paused"])
+
+    @property
+    def brake(self) -> bool:
+        return self.good["brake"] is not False
+
+    @property
+    def floor_sol(self) -> float | None:
+        return self.good["floor_sol"]
 
     def paused_since(self) -> int | None:
         return self.good["paused_at"] or self.good["set_at"] if self.paused else None
@@ -650,6 +678,12 @@ CONTROL_WORDS = {
                              "liegen (außer du tauschst selbst um). Der Notschalter ist davon unabhängig.",
            "resumed_text": "Du hast {bot} wieder gestartet: er handelt wieder nach seinen Regeln.",
            "share_text": "Anteil der Wallet für den Handel jetzt {share} ({src}). Grenzen: {limits}.",
+           "brake": "{bot}: Bremse geändert", "floor": "{bot}: Untergrenze geändert",
+           "brake_on": "Die Drawdown-Bremse ist wieder an.",
+           "brake_off": "Die Drawdown-Bremse ist aus (deine Vorgabe): der Einsatz bleibt der Anteil der Wallet. "
+                        "Gilt nur mit Grenzen nach Wallet.",
+           "floor_text": "Pause unter {floor} (Wallet mit offenen Positionen). Gilt nur mit Grenzen nach Wallet; "
+                         "Mindesteinsatz und Gebührenreserve bleiben.",
            "owner": "deine Vorgabe", "ack": "Freigabedatei", "default": "Standard",
            "wallet": "nach Wallet", "fixed": "fest"},
     "en": {"paused": "{bot}: paused", "resumed": "{bot}: running again", "share": "{bot}: share changed",
@@ -659,6 +693,12 @@ CONTROL_WORDS = {
                              "convert). The kill switch is separate.",
            "resumed_text": "You started {bot} again: it trades by its rules again.",
            "share_text": "Share of the wallet for trading now {share} ({src}). Limits: {limits}.",
+           "brake": "{bot}: brake changed", "floor": "{bot}: floor changed",
+           "brake_on": "The drawdown brake is on again.",
+           "brake_off": "The drawdown brake is off (your setting): the stake stays the share of the wallet. "
+                        "Only with wallet limits.",
+           "floor_text": "Pause under {floor} (wallet with open positions). Only with wallet limits; the minimum "
+                         "stake and the fee reserve stay.",
            "owner": "your setting", "ack": "confirmation file", "default": "default",
            "wallet": "wallet", "fixed": "fixed"},
 }
@@ -666,7 +706,8 @@ BOT_NAMES = {"pumpfun": "pump.fun bot", "onchain": "On-chain wallet"}
 
 
 def control_cards(bot: str, changes: list[str], ctl: dict, lang: str) -> list:
-    """The cards of the owner's changes (`ctl`: the status's control block): a pause, a start, a new share."""
+    """The cards of the owner's changes (`ctl`: the status's control block): a pause, a start, a new share, the
+    brake and the floor (`ctl` brake and floor_sol, from the bot's Control)."""
     from ..ops import notify
     w = CONTROL_WORDS.get(lang, CONTROL_WORDS["en"])
     name = BOT_NAMES.get(bot, bot)
@@ -676,6 +717,11 @@ def control_cards(bot: str, changes: list[str], ctl: dict, lang: str) -> list:
             text = w[f"paused_{bot}"].format(t=hhmm(ctl.get("paused_since")))
         elif c == "resumed":
             text = w["resumed_text"].format(bot=name)
+        elif c == "brake":
+            text = w["brake_on" if ctl.get("brake", True) else "brake_off"]
+        elif c == "floor":
+            f = ctl.get("floor_sol")
+            text = w["floor_text"].format(floor=f"{Z.PAUSE_BELOW_SOL if f is None else f:.2f} SOL")
         else:
             sh = ctl.get("share")
             text = w["share_text"].format(share="n/a" if sh is None else f"{sh * 100:g} %",
@@ -1549,6 +1595,8 @@ class LiveExecutor:
         self.owner_share: float | None = None         # the owner's share from the app (control.json)
         self.owner_share_t: int | None = None         # when the owner set it
         self.paused_ms: int | None = None             # the owner's pause from the app: since when (no buys)
+        self.owner_brake = True                       # limits=wallet: the owner's drawdown brake (control.json)
+        self.owner_floor: float | None = None         # limits=wallet: the owner's pause floor, None: sizing's
         self.speed = speed or Speed()
         if hasattr(builder, "speed"):
             builder.speed = self.speed
@@ -1647,7 +1695,8 @@ class LiveExecutor:
             base = bal + open_l / C.LAMPORTS
             room = max(0.0, bal - RESERVE_SOL) / (1 + C.SLIP_TOL)
             sol, why = Z.sized(balance_sol=bal, open_cost_sol=open_l / C.LAMPORTS, ceiling_sol=lim.stake_sol,
-                               share=sh["share"], wallet=True, room_sol=room, **Z.from_ledger(self.rule))
+                               share=sh["share"], wallet=True, room_sol=room, brake=self.owner_brake,
+                               floor_sol=self.owner_floor, **Z.from_ledger(self.rule))
             self.stake = {"sol": sol, "why": why, "share": sh["share"]}
             return dataclasses.replace(lim, stake_sol=sol,
                                        max_exposure_sol=min(lim.max_exposure_sol, max(0.0, base - RESERVE_SOL)))
@@ -2753,17 +2802,19 @@ def limits_view(lim: P.Limits, total: float | None, wallet: bool = False) -> dic
             "kind": "wallet" if wallet else "fixed"}
 
 
-def wallet_need_sol() -> float:
-    """limits=wallet: the least base one trade needs (the pause under sizing.PAUSE_BELOW_SOL, the minimum stake
-    with its slippage room and the fee reserve)."""
-    return max(Z.PAUSE_BELOW_SOL, Z.MIN_STAKE_SOL * (1 + C.SLIP_TOL) + RESERVE_SOL)
+def wallet_need_sol(floor_sol: float | None = None) -> float:
+    """limits=wallet: the least base one trade needs (the pause under sizing.PAUSE_BELOW_SOL or the owner's
+    floor_sol, the minimum stake with its slippage room and the fee reserve)."""
+    floor = Z.PAUSE_BELOW_SOL if floor_sol is None else max(0.0, floor_sol)
+    return max(floor, Z.MIN_STAKE_SOL * (1 + C.SLIP_TOL) + RESERVE_SOL)
 
 
-def low_view(wallet: bool, base_sol: float | None, stake_sol: float | None) -> dict | None:
+def low_view(wallet: bool, base_sol: float | None, stake_sol: float | None,
+             floor_sol: float | None = None) -> dict | None:
     """limits=wallet: the wallet is below what one trade needs (for the app and the watcher), else None."""
     if not wallet or base_sol is None:
         return None
-    need = wallet_need_sol()
+    need = wallet_need_sol(floor_sol)
     if base_sol < need or stake_sol == 0.0:
         return {"have": round(base_sol, 6), "need": round(need, 6), "unit": "SOL"}
     return None
@@ -2796,7 +2847,7 @@ def base_status(gate: LiveGate, why: list[str], address: str | None, balance_l: 
             "exposure_sol": 0.0, "skipped": {}, "stake": None,
             "control": control_view(ack.wallet, share_of(ack.wallet, ack.stake_share, ctl.share,
                                                          ctl.good["share_set_at"] or ctl.good["set_at"]), ctl),
-            "low": low_view(ack.wallet, None if balance_l is None else balance_l / C.LAMPORTS, None)}
+            "low": low_view(ack.wallet, None if balance_l is None else balance_l / C.LAMPORTS, None, ctl.floor_sol)}
 
 
 class LiveBook:
@@ -2829,6 +2880,7 @@ class LiveBook:
         ex, c = self.exec, self.control
         ex.owner_share, ex.owner_share_t = c.share, c.good["share_set_at"] or c.good["set_at"]
         ex.paused_ms = c.paused_since() if c.paused else None
+        ex.owner_brake, ex.owner_floor = c.brake, c.floor_sol
 
     def poll_control(self) -> list[str]:
         """control.json every CONTROL_S: a pause stops new buys at once (open positions keep their exits), a new
@@ -2840,8 +2892,10 @@ class LiveBook:
         self.refresh_limits()
         sh = self.exec.share()
         print(f"live: the owner's control: {', '.join(changes)} (share {sh['share']:g} from {sh['source']}, "
-              f"{'paused' if self.control.paused else 'not paused'})", flush=True)
-        ctl = control_view(self.exec.wallet, sh, self.control)
+              f"{'paused' if self.control.paused else 'not paused'}, brake {'on' if self.control.brake else 'off'}, "
+              f"floor {self.control.floor_sol})", flush=True)
+        ctl = {**control_view(self.exec.wallet, sh, self.control), "brake": self.control.brake,
+               "floor_sol": self.control.floor_sol}
         self._post(lambda lang: control_cards("pumpfun", changes, ctl, lang))
         return changes
 
@@ -3008,7 +3062,7 @@ class LiveBook:
                   control=control_view(ex.wallet, ex.share(), self.control),
                   low=low_view(ex.wallet, None if ex.balance_l is None else
                                (ex.balance_l + sum(ex.exposure.values())) / C.LAMPORTS,
-                               (ex.stake or {}).get("sol")))
+                               (ex.stake or {}).get("sol"), self.control.floor_sol))
         if self.pipe is not None:
             sk = {k[1]: v for k, v in self.pipe.eng.skipped.items() if k[0] == self.rule}
             st["skipped"] = dict(sorted(sk.items(), key=lambda kv: -kv[1])[:8])

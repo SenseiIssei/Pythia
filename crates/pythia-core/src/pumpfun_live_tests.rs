@@ -244,7 +244,7 @@ fn the_share_is_taken_from_one_to_a_hundred_percent_only() {
         assert!(e.contains("0.01 to 1.0"), "{bad}: {e}");
     }
     assert_eq!(control_in(&d).file.share, Some(1.0)); // a refused write changes nothing
-    let both = ControlPatch { share: Some(0.5), reset_share: Some(true), paused: None };
+    let both = ControlPatch { share: Some(0.5), reset_share: Some(true), ..ControlPatch::default() };
     assert!(write_control_in(&d, both, NOW).unwrap_err().contains("not both"));
     assert!(write_control_in(&d, ControlPatch::default(), NOW).unwrap_err().contains("Nothing to change"));
     let no_reset = ControlPatch { reset_share: Some(false), ..ControlPatch::default() };
@@ -283,9 +283,10 @@ fn missing_fields_keep_their_value_and_the_times_follow_the_changes() {
 #[test]
 fn a_missing_or_malformed_control_file_reads_as_no_override() {
     let d = temp("control-bad");
-    assert_eq!(control_in(&d), ControlView::default());
+    let none = ControlFile { brake: Some(true), floor_sol: Some(PAUSE_BELOW_SOL), ..ControlFile::default() };
+    assert_eq!(control_in(&d), ControlView { file: none.clone(), effective: None });
     std::fs::write(dir_in(&d).join("control.json"), "{not json").unwrap();
-    assert_eq!(control_in(&d).file, ControlFile::default());
+    assert_eq!(control_in(&d).file, none);
     assert_eq!(view_in(&d, NOW).control, ControlFile::default());
     // A write over a malformed file starts from none.
     let v = write_control_in(&d, paused(true), NOW).unwrap();
@@ -325,6 +326,41 @@ fn unknown_control_fields_are_refused() {
     assert!(serde_json::from_str::<ControlPatch>(r#"{"share": 0.5, "maxShare": 2}"#).is_err());
     let p: ControlPatch = serde_json::from_str(r#"{"resetShare": true}"#).unwrap();
     assert_eq!((p.share, p.reset_share, p.paused), (None, Some(true), None));
+    let p: ControlPatch = serde_json::from_str(r#"{"brake": false, "floor_sol": 0}"#).unwrap();
+    assert_eq!((p.brake, p.floor_sol), (Some(false), Some(0.0)));
+    let p: ControlPatch = serde_json::from_str(r#"{"floorSol": 1.5}"#).unwrap();
+    assert_eq!(p.floor_sol, Some(1.5));
+    assert!(serde_json::from_str::<ControlPatch>(r#"{"brake": "off"}"#).is_err());
+}
+
+#[test]
+fn the_brake_and_the_floor_are_saved_with_their_times_and_bad_floors_are_refused() {
+    let d = temp("control-allin");
+    let v = control_in(&d);
+    assert_eq!((v.file.brake, v.file.floor_sol, v.file.brake_set_at, v.file.floor_sol_set_at), (Some(true), Some(0.25), None, None));
+    write_control_in(&d, share(1.0), NOW).unwrap();
+    let allin = ControlPatch { brake: Some(false), floor_sol: Some(0.0), ..ControlPatch::default() };
+    let v = write_control_in(&d, allin.clone(), NOW + 10).unwrap();
+    assert_eq!((v.file.brake, v.file.brake_set_at, v.file.floor_sol, v.file.floor_sol_set_at), (Some(false), Some(NOW + 10), Some(0.0), Some(NOW + 10)));
+    assert_eq!((v.file.share, v.file.share_set_at, v.file.paused), (Some(1.0), Some(NOW), false)); // the rest stays
+    let v = write_control_in(&d, allin, NOW + 20).unwrap(); // the same again keeps the times
+    assert_eq!((v.file.brake_set_at, v.file.floor_sol_set_at, v.file.set_at), (Some(NOW + 10), Some(NOW + 10), Some(NOW + 20)));
+    let v = write_control_in(&d, paused(true), NOW + 30).unwrap(); // other changes keep them
+    assert_eq!((v.file.brake, v.file.floor_sol), (Some(false), Some(0.0)));
+    let disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir_in(&d).join("control.json")).unwrap()).unwrap();
+    assert_eq!((disk["brake"].clone(), disk["brake_set_at"].clone(), disk["floor_sol"].clone(), disk["floor_sol_set_at"].clone()),
+               (serde_json::json!(false), serde_json::json!(NOW + 10), serde_json::json!(0.0), serde_json::json!(NOW + 10)));
+    for ok in [0.0, 0.25, 10.0] {
+        assert_eq!(write_control_in(&d, ControlPatch { floor_sol: Some(ok), ..ControlPatch::default() }, NOW).unwrap().file.floor_sol, Some(ok));
+    }
+    for bad in [-0.01, 10.01, f64::NAN, f64::INFINITY] {
+        let e = write_control_in(&d, ControlPatch { floor_sol: Some(bad), ..ControlPatch::default() }, NOW).unwrap_err();
+        assert!(e.contains("0 to 10"), "{bad}: {e}");
+    }
+    assert_eq!(control_in(&d).file.floor_sol, Some(10.0)); // a refused write changes nothing
+    let v = write_control_in(&d, ControlPatch { brake: Some(true), ..ControlPatch::default() }, NOW + 40).unwrap();
+    assert_eq!((v.file.brake, v.file.brake_set_at), (Some(true), Some(NOW + 40)));
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]

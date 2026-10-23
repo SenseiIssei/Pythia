@@ -653,7 +653,7 @@ fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
             }),
         )
         .route(
-            // The owner's controls: Stop (paused) and the stake's share, with what the service applies.
+            // The owner's controls: Stop (paused), the stake's share, the brake and the floor (floor_sol), with what the service applies.
             "/api/pumpfun/live/control",
             get(move || {
                 let root = r8.clone();

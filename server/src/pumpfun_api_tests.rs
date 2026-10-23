@@ -155,7 +155,7 @@ async fn the_owners_controls_round_trip_and_bad_input_is_refused() {
     let d = root("control");
     let (code, v) = call(&d, "GET", "/api/pumpfun/live/control", None).await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(v, serde_json::json!({"share": null, "paused": false, "setAt": null, "shareSetAt": null, "pausedAt": null, "effective": null}));
+    assert_eq!(v, serde_json::json!({"share": null, "paused": false, "setAt": null, "shareSetAt": null, "pausedAt": null, "brake": true, "floorSol": 0.25, "effective": null}));
     let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"paused": true, "share": 0.05}))).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!((v["paused"].clone(), v["share"].clone()), (serde_json::json!(true), serde_json::json!(0.05)));
@@ -174,12 +174,14 @@ async fn the_owners_controls_round_trip_and_bad_input_is_refused() {
         serde_json::json!({"share": 0.0099}),
         serde_json::json!({"share": 1.01}),
         serde_json::json!({"share": 0.5, "resetShare": true}),
+        serde_json::json!({"floor_sol": -0.1}),
+        serde_json::json!({"floor_sol": 10.5}),
     ] {
         let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(body.clone())).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{body} {v}");
         assert!(v["error"].is_string(), "{body} {v}");
     }
-    for body in [serde_json::json!({"paused": true, "kill": false}), serde_json::json!({"share": "all"})] {
+    for body in [serde_json::json!({"paused": true, "kill": false}), serde_json::json!({"share": "all"}), serde_json::json!({"brake": "off"})] {
         let (code, _) = call(&d, "POST", "/api/pumpfun/live/control", Some(body.clone())).await;
         assert!(code.is_client_error(), "{body}");
     }
@@ -188,6 +190,16 @@ async fn the_owners_controls_round_trip_and_bad_input_is_refused() {
     let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"resetShare": true}))).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert!(v["share"].is_null() && v["shareSetAt"].is_null());
+    // The owner's all-in switches: the brake off and the floor at 0, kept next to the share and Stop.
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"brake": false, "floor_sol": 0}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!((v["brake"].clone(), v["floorSol"].clone(), v["paused"].clone()), (serde_json::json!(false), serde_json::json!(0.0), serde_json::json!(false)));
+    assert!(v["brakeSetAt"].is_i64() && v["floorSolSetAt"].is_i64());
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/control", None).await;
+    assert_eq!((v["brake"].clone(), v["floorSol"].clone()), (serde_json::json!(false), serde_json::json!(0.0)));
+    let disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("reports/pumpfun_rt/control.json")).unwrap()).unwrap();
+    assert_eq!((disk["brake"].clone(), disk["floor_sol"].clone()), (serde_json::json!(false), serde_json::json!(0.0)));
     let _ = std::fs::remove_dir_all(&d);
 }
 

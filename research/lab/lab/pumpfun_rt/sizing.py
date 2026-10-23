@@ -13,7 +13,10 @@ With the ack's limits=wallet (test mode only, the owner's decision 2026-10-23) t
 wallet instead: SHARE (or the ack's stake_share, at most ACK_MAX_SHARE; the owner's share from the app at
 most WALLET_MAX_SHARE) of the base, at least MIN_STAKE_SOL, rounded down to 0.01 SOL, the drawdown brake and
 the pause under PAUSE_BELOW_SOL as above; no proof cap, no MAX_STAKE_SOL, no daily loss rule, and never more
-than `room_sol` (what the wallet can pay with the fee reserve and the slippage room kept).
+than `room_sol` (what the wallet can pay with the fee reserve and the slippage room kept). There the owner's
+control file can switch the brake off (`brake=False`, "brake off (owner)") and move the pause to `floor_sol`
+(0 included, "floor 0.00 SOL (owner)"): all in until the wallet cannot pay MIN_STAKE_SOL (the owner's decision,
+2026-10-23). Without limits=wallet both are ignored.
 """
 
 from __future__ import annotations
@@ -36,14 +39,17 @@ WALLET_MAX_SHARE = 1.00                  # the owner's share from the app (the f
 
 def sized(*, balance_sol: float, open_cost_sol: float, peak_pnl_sol: float, pnl_sol: float, live_trades: int,
           live_mean: float | None, ceiling_sol: float, share: float = SHARE, wallet: bool = False,
-          room_sol: float | None = None) -> tuple[float, str]:
+          room_sol: float | None = None, brake: bool = True, floor_sol: float | None = None) -> tuple[float, str]:
     """The stake in SOL for the next buy (0.0: pause) and why, in a few words for the app. `share` below
-    SHARE lowers it (the owner's share from the app without limits=wallet); `wallet`: limits=wallet."""
+    SHARE lowers it (the owner's share from the app without limits=wallet); `wallet`: limits=wallet, only
+    there `brake=False` skips the drawdown brake and `floor_sol` replaces PAUSE_BELOW_SOL (the owner's)."""
     base = balance_sol + open_cost_sol
-    if base < PAUSE_BELOW_SOL:
-        return 0.0, f"stake paused: wallet under {PAUSE_BELOW_SOL:.2f} SOL"
+    floor, own = (max(0.0, floor_sol), " (owner)") if wallet and floor_sol is not None else (PAUSE_BELOW_SOL, "")
+    if base < floor:
+        return 0.0, f"stake paused: wallet under {floor:.2f} SOL{own}"
     if wallet:
-        return _wallet(base, balance_sol, peak_pnl_sol, pnl_sol, ceiling_sol, share, room_sol)
+        stake, why = _wallet(base, balance_sol, peak_pnl_sol, pnl_sol, ceiling_sol, share, room_sol, brake)
+        return stake, why + (f", floor {floor:.2f} SOL (owner)" if own else "")
     share = min(SHARE, max(0.0, share))
     if base < MIN_BELOW_SOL:
         stake, why = MIN_STAKE_SOL, f"minimum {MIN_STAKE_SOL:.2f} SOL: wallet {base:.2f} SOL under {MIN_BELOW_SOL:g}"
@@ -74,12 +80,15 @@ def _brake(stake: float, why: str, balance_sol: float, peak_pnl_sol: float, pnl_
 
 
 def _wallet(base: float, balance_sol: float, peak_pnl_sol: float, pnl_sol: float, ceiling_sol: float, share: float,
-            room_sol: float | None) -> tuple[float, str]:
-    """limits=wallet: the share of the base, the brake, at least the minimum, under the owner's ceiling and what
-    the wallet can pay."""
+            room_sol: float | None, brake: bool = True) -> tuple[float, str]:
+    """limits=wallet: the share of the base, the brake (unless the owner switched it off), at least the minimum,
+    under the owner's ceiling and what the wallet can pay."""
     share = min(WALLET_MAX_SHARE, max(0.0, share))
     stake, why = max(share * base, MIN_STAKE_SOL), f"{share * 100:g} % of {base:.2f} SOL (limits: wallet)"
-    stake, why = _brake(stake, why, balance_sol, peak_pnl_sol, pnl_sol)
+    if brake:
+        stake, why = _brake(stake, why, balance_sol, peak_pnl_sol, pnl_sol)
+    else:
+        why += ", brake off (owner)"
     if stake > ceiling_sol:
         stake, why = ceiling_sol, why + f", the owner's ceiling {ceiling_sol:g}"
     if room_sol is not None and stake > room_sol:

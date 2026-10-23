@@ -454,8 +454,11 @@ fn the_controls_take_a_share_from_one_to_a_hundred_percent_and_stop_both_ways() 
         assert!(write_control_in(&d, share(bad), NOW + 1).unwrap_err().contains("0.01 to 1.0"), "{bad}");
     }
     assert!(write_control_in(&d, ControlPatch::default(), NOW).is_err());
-    let both = ControlPatch { share: Some(0.5), reset_share: Some(true), paused: None };
+    let both = ControlPatch { share: Some(0.5), reset_share: Some(true), ..ControlPatch::default() };
     assert!(write_control_in(&d, both, NOW).is_err());
+    for p in [ControlPatch { brake: Some(false), ..ControlPatch::default() }, ControlPatch { floor_sol: Some(0.0), ..ControlPatch::default() }] {
+        assert!(write_control_in(&d, p, NOW).unwrap_err().contains("pump.fun"));
+    }
     let stop = |p: bool| ControlPatch { paused: Some(p), ..ControlPatch::default() };
     let v = write_control_in(&d, stop(true), NOW + 10).unwrap();
     assert_eq!((v.file.share, v.file.share_set_at, v.file.paused, v.file.paused_at), (Some(1.0), Some(NOW), true, Some(NOW + 10)));

@@ -579,6 +579,10 @@ pub const CONTROL_MIN_SHARE: f64 = 0.01;
 pub const CONTROL_MAX_SHARE: f64 = 1.0;
 /// pump.fun without `limits=wallet` in the confirmation file: the share can only go this high.
 pub const FIXED_MAX_SHARE: f64 = 0.10;
+/// pump.fun with `limits=wallet`: the owner's pause floor may go from 0 to this (SOL).
+pub const CONTROL_MAX_FLOOR_SOL: f64 = 10.0;
+/// The lab's sizing.PAUSE_BELOW_SOL: the floor the bot uses while the owner set none (shown only).
+pub const PAUSE_BELOW_SOL: f64 = 0.25;
 
 /// The owner's `control.json` (snake_case on disk, camelCase to the app). Missing or
 /// malformed reads as no override and not paused.
@@ -592,6 +596,17 @@ pub struct ControlFile {
     pub set_at: Option<i64>,
     pub share_set_at: Option<i64>,
     pub paused_at: Option<i64>,
+    /// pump.fun with `limits=wallet` only: false switches the drawdown brake off; missing is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brake: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brake_set_at: Option<i64>,
+    /// pump.fun with `limits=wallet` only: no buys under this base in SOL (0 to 10); missing is
+    /// PAUSE_BELOW_SOL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub floor_sol: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub floor_sol_set_at: Option<i64>,
 }
 
 /// The same file as written to disk.
@@ -602,16 +617,28 @@ struct ControlDisk {
     set_at: Option<i64>,
     share_set_at: Option<i64>,
     paused_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brake: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brake_set_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    floor_sol: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    floor_sol_set_at: Option<i64>,
 }
 
 /// What the app posts. A missing field keeps the current value; `resetShare` sets the share
-/// back to null (the confirmation file's value).
+/// back to null (the confirmation file's value). `brake` and `floorSol` (also `floor_sol`) are
+/// the pump.fun bot's all-in switches; the on-chain trader refuses them.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControlPatch {
     pub share: Option<f64>,
     pub reset_share: Option<bool>,
     pub paused: Option<bool>,
+    pub brake: Option<bool>,
+    #[serde(alias = "floor_sol")]
+    pub floor_sol: Option<f64>,
 }
 
 impl ControlPatch {
@@ -626,6 +653,12 @@ impl ControlPatch {
         }
         if self.reset_share == Some(true) {
             out.push("share back to the confirmation file".to_string());
+        }
+        if let Some(b) = self.brake {
+            out.push(if b { "brake on".to_string() } else { "brake off".to_string() });
+        }
+        if let Some(f) = self.floor_sol {
+            out.push(format!("floor {f:.2} SOL"));
         }
         out.join(", ")
     }
@@ -681,11 +714,16 @@ pub fn read_control(dir: &Path) -> ControlFile {
 }
 
 /// The bounds every bot shares: something to change, not share and reset at once, a share
-/// from 1 % to 100 %.
+/// from 1 % to 100 %, a floor from 0 to 10 SOL.
 pub fn check_control(patch: &ControlPatch) -> Result<(), String> {
     let reset = patch.reset_share == Some(true);
-    if patch.share.is_none() && !reset && patch.paused.is_none() {
-        return Err("Nothing to change: send share, resetShare or paused.".into());
+    if patch.share.is_none() && !reset && patch.paused.is_none() && patch.brake.is_none() && patch.floor_sol.is_none() {
+        return Err("Nothing to change: send share, resetShare, paused, brake or floor_sol.".into());
+    }
+    if let Some(f) = patch.floor_sol {
+        if !f.is_finite() || !(0.0..=CONTROL_MAX_FLOOR_SOL).contains(&f) {
+            return Err("The floor must be a number from 0 to 10 SOL.".into());
+        }
     }
     if reset && patch.share.is_some() {
         return Err("Send a share or resetShare, not both.".into());
@@ -700,7 +738,8 @@ pub fn check_control(patch: &ControlPatch) -> Result<(), String> {
 
 /// Check `patch`, then write it over `control.json` in `dir` (temp file, then rename). Missing
 /// fields keep their value; `share_set_at` moves when the share changes (null after a reset),
-/// `paused_at` when Stop turns on (kept while it stays on, null when it is off).
+/// `paused_at` when Stop turns on (kept while it stays on, null when it is off), `brake_set_at`
+/// and `floor_sol_set_at` when their value changes.
 pub fn write_control(dir: &Path, patch: &ControlPatch, now_ms: i64) -> Result<ControlFile, String> {
     check_control(patch)?;
     let old = read_control(dir);
@@ -720,8 +759,26 @@ pub fn write_control(dir: &Path, patch: &ControlPatch, now_ms: i64) -> Result<Co
     if let Some(p) = patch.paused {
         c.paused = p;
     }
+    if let Some(b) = patch.brake {
+        c.brake = Some(b);
+        c.brake_set_at = if old.brake == Some(b) { old.brake_set_at.or(Some(now_ms)) } else { Some(now_ms) };
+    }
+    if let Some(f) = patch.floor_sol {
+        c.floor_sol = Some(f);
+        c.floor_sol_set_at = if old.floor_sol == Some(f) { old.floor_sol_set_at.or(Some(now_ms)) } else { Some(now_ms) };
+    }
     c.set_at = Some(now_ms);
-    let disk = ControlDisk { share: c.share, paused: c.paused, set_at: c.set_at, share_set_at: c.share_set_at, paused_at: c.paused_at };
+    let disk = ControlDisk {
+        share: c.share,
+        paused: c.paused,
+        set_at: c.set_at,
+        share_set_at: c.share_set_at,
+        paused_at: c.paused_at,
+        brake: c.brake,
+        brake_set_at: c.brake_set_at,
+        floor_sol: c.floor_sol,
+        floor_sol_set_at: c.floor_sol_set_at,
+    };
     let body = serde_json::to_vec_pretty(&disk).map_err(|e| e.to_string())?;
     let p = dir.join("control.json");
     let write = || -> std::io::Result<()> {
@@ -734,10 +791,14 @@ pub fn write_control(dir: &Path, patch: &ControlPatch, now_ms: i64) -> Result<Co
     Ok(c)
 }
 
-/// The pump.fun bot's controls and what its last status says it applies.
+/// The pump.fun bot's controls and what its last status says it applies; the brake and the floor
+/// always (on and PAUSE_BELOW_SOL while the owner set none: their `*SetAt` stay null).
 pub fn control_in(root: &Path) -> ControlView {
     let d = dir_in(root);
-    ControlView { file: read_control(&d), effective: read::<LiveStatus>(&d.join("live_status.json")).and_then(|s| s.control) }
+    let mut file = read_control(&d);
+    file.brake.get_or_insert(true);
+    file.floor_sol.get_or_insert(PAUSE_BELOW_SOL);
+    ControlView { file, effective: read::<LiveStatus>(&d.join("live_status.json")).and_then(|s| s.control) }
 }
 
 /// Save the pump.fun bot's controls. While a status exists whose confirmation file does not say

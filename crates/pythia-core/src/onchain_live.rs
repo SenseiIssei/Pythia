@@ -722,8 +722,11 @@ pub fn control_in(root: &Path) -> ControlView {
     ControlView { file: read_control(&d), effective: read::<Status>(&d.join("status.json")).and_then(|s| s.control) }
 }
 
-/// Save the trader's controls (the shared bounds; the trader keeps its own caps).
+/// Save the trader's controls (the shared bounds, no brake or floor; the trader keeps its own caps).
 pub fn write_control_in(root: &Path, patch: ControlPatch, now_ms: i64) -> Result<ControlView, String> {
+    if patch.brake.is_some() || patch.floor_sol.is_some() {
+        return Err("brake and floor_sol are the pump.fun bot's; the on-chain trader has neither.".into());
+    }
     check_control(&patch)?;
     write_control(&dir_in(root), &patch, now_ms)?;
     Ok(control_in(root))

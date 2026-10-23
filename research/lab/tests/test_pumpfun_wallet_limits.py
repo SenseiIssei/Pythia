@@ -33,9 +33,9 @@ def wallet_ack(tmp_path, extra: str = "", line: bool = True):
     return p
 
 
-def wstake(balance, share=Z.SHARE, open_cost=0.0, peak=0.0, pnl=0.0, ceiling=math.inf, room=None):
+def wstake(balance, share=Z.SHARE, open_cost=0.0, peak=0.0, pnl=0.0, ceiling=math.inf, room=None, **kw):
     return Z.sized(balance_sol=balance, open_cost_sol=open_cost, peak_pnl_sol=peak, pnl_sol=pnl, live_trades=0,
-                   live_mean=None, ceiling_sol=ceiling, share=share, wallet=True, room_sol=room)
+                   live_mean=None, ceiling_sol=ceiling, share=share, wallet=True, room_sol=room, **kw)
 
 
 # ---------------------------------------------------------------- the ack
@@ -97,6 +97,30 @@ def test_a_drawdown_still_brakes_the_wallet_stake():
     assert sol == 0.1 and "drawdown 17 %: half" in why
     assert wstake(2.0, share=0.5, peak=0.4, pnl=0.0)[0] == 0.5        # half of 1.0
     assert wstake(2.0, share=0.5, peak=1.0, pnl=0.0)[0] == Z.MIN_STAKE_SOL   # 33 %: the minimum
+
+
+def test_the_owners_all_in_switches_skip_the_brake_and_move_the_pause_only_with_limits_wallet():
+    deep = {"peak": 1.0, "pnl": 0.0}                                  # 33 %: the brake would give the minimum
+    assert wstake(2.0, share=1.0, brake=True, **deep)[0] == Z.MIN_STAKE_SOL
+    sol, why = wstake(2.0, share=1.0, brake=False, **deep)
+    assert sol == 2.0 and "brake off (owner)" in why and "drawdown" not in why
+    room = (2.0 - LX.RESERVE_SOL) / 1.3
+    assert wstake(2.0, share=1.0, brake=False, room=room, **deep)[0] == 1.53   # the fee reserve and the room stay
+    assert wstake(2.0, share=1.0, brake=False, ceiling=0.3, **deep)[0] == 0.3  # the ceiling stays
+    assert wstake(0.2) == (0.0, "stake paused: wallet under 0.25 SOL")   # no floor: today's pause
+    sol, why = wstake(0.2, share=1.0, floor_sol=0.0)
+    assert sol == 0.2 and why.endswith(", floor 0.00 SOL (owner)")
+    assert wstake(0.2, floor_sol=0.1)[0] == Z.MIN_STAKE_SOL             # the minimum stake stays
+    assert wstake(0.2, floor_sol=0.5) == (0.0, "stake paused: wallet under 0.50 SOL (owner)")
+    sol, why = wstake(0.06, share=1.0, floor_sol=0.0, room=(0.06 - LX.RESERVE_SOL) / 1.3)
+    assert sol == 0.0 and "cannot pay one trade of 0.05 SOL" in why     # empty: no trade under the minimum
+    fixed = dict(balance_sol=2.0, open_cost_sol=0.0, peak_pnl_sol=1.0, pnl_sol=0.0, live_trades=60, live_mean=0.1,
+                 ceiling_sol=0.25)
+    assert Z.sized(**fixed, brake=False)[0] == Z.sized(**fixed)[0] == Z.MIN_STAKE_SOL   # without limits=wallet
+    low = {**fixed, "balance_sol": 0.2, "peak_pnl_sol": 0.0}
+    assert Z.sized(**low, floor_sol=0.0) == Z.sized(**low) == (0.0, "stake paused: wallet under 0.25 SOL")
+    assert LX.wallet_need_sol() == 0.25 and LX.wallet_need_sol(0.5) == 0.5
+    assert LX.wallet_need_sol(0.0) == pytest.approx(Z.MIN_STAKE_SOL * 1.3 + LX.RESERVE_SOL)
 
 
 def test_without_the_key_the_stake_is_unchanged_and_a_share_can_only_lower_it():
@@ -235,7 +259,8 @@ def test_the_control_file_is_checked_and_a_malformed_one_keeps_the_last_good_val
                 {"paused": "yes"}, {"paused": 1}, [], "x", None):
         assert LX.parse_control(bad) is None, bad
     got = LX.parse_control({"share": 0.5, "paused": True, "set_at": 5, "share_set_at": 4, "paused_at": 3})
-    assert got == {"share": 0.5, "paused": True, "set_at": 5, "share_set_at": 4, "paused_at": 3}
+    assert got == {"share": 0.5, "paused": True, "set_at": 5, "share_set_at": 4, "paused_at": 3, "brake": True,
+                   "brake_set_at": None, "floor_sol": None, "floor_sol_set_at": None}
     assert LX.parse_control({"share": None, "paused": False, "paused_at": 3})["paused_at"] is None
     now = [0.0]
     p = tmp_path / "control.json"
@@ -259,6 +284,47 @@ def test_the_control_file_is_checked_and_a_malformed_one_keeps_the_last_good_val
     p.unlink()                                                        # no file: no share, no pause
     now[0] = 12.0
     assert c.poll() == ["resumed", "share"] and c.share is None and not c.paused
+
+
+def test_the_brake_and_floor_in_the_control_file_default_to_today_and_malformed_keeps_the_last(tmp_path):
+    d = LX.parse_control({})
+    assert d["brake"] is True and d["floor_sol"] is None and d["brake_set_at"] is None
+    got = LX.parse_control({"brake": False, "brake_set_at": 7, "floor_sol": 0, "floor_sol_set_at": 8})
+    assert (got["brake"], got["brake_set_at"], got["floor_sol"], got["floor_sol_set_at"]) == (False, 7, 0.0, 8)
+    assert LX.parse_control({"floor_sol": 10})["floor_sol"] == 10.0
+    for bad in ({"brake": "off"}, {"brake": 0}, {"brake": None}, {"floor_sol": -0.01}, {"floor_sol": 10.5},
+                {"floor_sol": True}, {"floor_sol": "0"}, {"floor_sol": float("inf")}):
+        assert LX.parse_control(bad) is None, bad
+    now = [0.0]
+    p = tmp_path / "control.json"
+    c = LX.Control(p, clock=lambda: now[0])
+    assert c.poll(force=True) == [] and c.brake and c.floor_sol is None
+    p.write_text(json.dumps({"share": 1.0, "brake": False, "floor_sol": 0}))
+    assert c.poll(force=True) == ["share", "brake", "floor"] and not c.brake and c.floor_sol == 0.0
+    p.write_text(json.dumps({"share": 1.0, "brake": "no", "floor_sol": 0}))
+    assert c.poll(force=True) == [] and not c.ok and not c.brake and c.floor_sol == 0.0   # the last good stay
+    p.unlink()
+    assert c.poll(force=True) == ["share", "brake", "floor"] and c.brake and c.floor_sol is None
+
+
+def test_the_owners_brake_off_and_floor_zero_reach_the_live_stake_and_its_reason(tmp_path, folders):
+    eng, pipe, book, ex = live(tmp_path, 0.2)
+    book.refresh_limits()
+    assert ex.limits.stake_sol == 0.0
+    write_control(share=1.0, share_set_at=T0, brake=False, brake_set_at=T0, floor_sol=0, floor_sol_set_at=T0)
+    book.control.last = -1e18
+    assert book.poll_control() == ["share", "brake", "floor"]
+    assert ex.limits.stake_sol == 0.14                                # all the wallet can pay: (0.2 - 0.01) / 1.3
+    st = book.status(None, None, None, [])
+    assert "brake off (owner)" in st["stake"]["why"] and "floor 0.00 SOL (owner)" in st["stake"]["why"]
+    assert st["low"] is None
+    base = LX.base_status(ex.gate, [], None, int(0.05 * SOL), None)
+    assert base["low"]["need"] == pytest.approx(Z.MIN_STAKE_SOL * 1.3 + LX.RESERVE_SOL)
+    cards = LX.control_cards("pumpfun", ["brake", "floor"], {"brake": False, "floor_sol": 0.0}, "de")
+    assert len(cards) == 2
+    write_control(share=1.0)                                          # the fields gone: today's rules again
+    book.control.last = -1e18
+    assert book.poll_control() == ["brake", "floor"] and ex.limits.stake_sol == 0.0
 
 
 def write_control(**kw):
