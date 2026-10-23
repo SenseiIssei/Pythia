@@ -277,6 +277,65 @@ export async function pumpfunControl(patch: ControlPatch): Promise<ControlAnswer
   );
 }
 
+/** The owner's block list (<data>/pumpfun_rt/blocked-mints.txt): coins the live bot and its paper twin never buy. */
+export type BlockKind = "mint" | "creator" | "symbol" | "name";
+
+export interface BlockEntry {
+  entry: string;
+  kind: BlockKind;
+  value: string;
+}
+
+export interface BlockList {
+  path: string;
+  entries: BlockEntry[];
+  /** Lines the bot ignores (not a mint, creator:, symbol: or name: entry). */
+  ignored: string[];
+}
+
+export const BLOCK_KIND_LABEL: Record<BlockKind, string> = { mint: "Mint", creator: "Creator", symbol: "Symbol", name: "Name" };
+const BLOCK_TEXT_MAX = 64;
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** Letters and digits only, lower case, as the bot compares symbols and names ("$SHEKEL" is "shekel"). */
+export function blockNorm(s: string): string {
+  return Array.from(s)
+    .filter((c) => /[\p{L}\p{N}]/u.test(c))
+    .join("")
+    .toLowerCase();
+}
+
+/** The line one entry is written as, or why it is not one (the server checks again). */
+export function blockLine(kind: BlockKind, raw: string): { line: string } | { error: string } {
+  const v = raw.trim();
+  if (!v) return { error: "Enter a value." };
+  if (/[#\u0000-\u001f\u007f]/.test(v)) return { error: "No # and no line break." };
+  if (kind === "mint" || kind === "creator") {
+    if (!BASE58.test(v)) return { error: `Not a ${kind === "mint" ? "mint" : "wallet"} address (base58, 32 to 44 characters).` };
+    return { line: kind === "mint" ? v : `creator:${v}` };
+  }
+  if (!blockNorm(v)) return { error: `A ${kind} needs at least one letter or digit.` };
+  if (Array.from(v).length > BLOCK_TEXT_MAX) return { error: `A ${kind} has at most ${BLOCK_TEXT_MAX} characters.` };
+  return { line: `${kind}:${v}` };
+}
+
+export async function pumpfunBlocked(): Promise<BlockList> {
+  if (!canControl()) throw new Error("The block list works through the connected backend on the server.");
+  return asJson<BlockList>(await fetch(`${serverUrl()}/api/pumpfun/live/blocked`));
+}
+
+/** Add or remove one entry; the server writes the file atomically and answers with the list. */
+export async function changePumpfunBlocked(change: { add: string } | { remove: string }): Promise<BlockList> {
+  if (!canControl()) throw new Error("The block list works through the connected backend on the server.");
+  return asJson<BlockList>(
+    await fetch(`${serverUrl()}/api/pumpfun/live/blocked`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(change),
+    }),
+  );
+}
+
 // ── what the page says ──
 
 export function sol(v: number | null | undefined, signed = false, dp = 4): string {

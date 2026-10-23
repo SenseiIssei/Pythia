@@ -90,7 +90,7 @@ def append_csv(path: Path, cols: list[str], rows: list[dict]) -> None:
 class Shadow:
     def __init__(self, pick: str, models: dict | None = None, book: CreatorBook | None = None,
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
-                 strategies: list | None = None, kill=None, trends: bool = False):
+                 strategies: list | None = None, kill=None, trends: bool = False, blocked=None):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
@@ -103,6 +103,7 @@ class Shadow:
                              select=True, trend=True)
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
+            pipe.blocked = blocked                            # the owner's block list (blocklist.PAPER_RULES)
         self.live = None                                      # always None here: the live book is live_service.py's
         self.cats_mtime = 0.0
         self.closed: list[dict] = []
@@ -138,6 +139,7 @@ class Shadow:
 
     @classmethod
     def load(cls) -> "Shadow":
+        from .blocklist import PAPER_RULES, BlockWatch
         from .categorize import BOOK_DAYS, CategoryIndex
         from .model import load
         book = None
@@ -151,7 +153,8 @@ class Shadow:
         except (OSError, ValueError):
             pass
         sh = cls(read_pick(), load(), book, wallets=wallets,
-                 cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS), trends=True)
+                 cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS), trends=True,
+                 blocked=BlockWatch(rules=PAPER_RULES))
         sh.cats_mtime = cls._cats_mtime()
         try:                                                  # X14: the sniper book of the early features
             from .early import SniperBook

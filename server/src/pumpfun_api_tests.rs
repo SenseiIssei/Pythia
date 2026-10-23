@@ -219,3 +219,60 @@ async fn the_share_goes_above_ten_percent_only_with_wallet_limits_and_effective_
     assert_eq!(v["control"]["share"], 0.5);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[tokio::test]
+async fn the_block_list_is_read_added_to_and_removed_from_atomically() {
+    let d = root("blocked");
+    let mint = format!("Mint{}", "1".repeat(36));
+    let dev = format!("Dev{}", "1".repeat(37));
+    let (code, v) = call(&d, "GET", "/api/pumpfun/live/blocked", None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["entries"], serde_json::json!([]));                    // no file: an empty list
+    std::fs::create_dir_all(d.join("pumpfun_rt")).unwrap();
+    std::fs::write(d.join("pumpfun_rt/blocked-mints.txt"), "# the owner's list\nsymbol:SHEKEL  # relaunches\nnot a mint\n").unwrap();
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/blocked", None).await;
+    assert_eq!(v["entries"], serde_json::json!([{"entry": "symbol:SHEKEL", "kind": "symbol", "value": "SHEKEL"}]));
+    assert_eq!(v["ignored"], serde_json::json!(["not a mint"]));
+    for add in [mint.clone(), format!("creator:{dev}"), "name: Moon Dog ".into(), "SYMBOL:$shekel".into()] {
+        let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": add.clone()}))).await;
+        assert_eq!(code, StatusCode::OK, "{add} {v}");
+    }
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/blocked", None).await;
+    let entries: Vec<String> = v["entries"].as_array().unwrap().iter().map(|e| e["entry"].as_str().unwrap().to_string()).collect();
+    assert_eq!(entries, vec!["symbol:SHEKEL".to_string(), mint.clone(), format!("creator:{dev}"), "name:Moon Dog".into()]); // $shekel is SHEKEL
+    let text = std::fs::read_to_string(d.join("pumpfun_rt/blocked-mints.txt")).unwrap();
+    assert!(text.starts_with("# the owner's list\n") && text.contains("not a mint\n") && text.ends_with("name:Moon Dog\n"), "{text}");
+    assert!(!d.join("pumpfun_rt/blocked-mints.txt.tmp").exists());
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": "symbol:shekel"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["entries"].as_array().unwrap().len(), 3);
+    let text = std::fs::read_to_string(d.join("pumpfun_rt/blocked-mints.txt")).unwrap();
+    assert!(!text.contains("SHEKEL") && text.contains("# the owner's list"), "{text}");
+    let (code, _) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": "symbol:shekel"}))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn the_block_list_takes_only_valid_entries() {
+    let d = root("blocked-bad");
+    for body in [
+        serde_json::json!({"add": "not a mint"}),
+        serde_json::json!({"add": "creator:short"}),
+        serde_json::json!({"add": format!("Mint0{}", "1".repeat(35))}),   // 0 is not base58
+        serde_json::json!({"add": "symbol:$$$"}),
+        serde_json::json!({"add": format!("name:{}", "a".repeat(65))}),
+        serde_json::json!({"add": "wallet:abc"}),
+        serde_json::json!({"add": "symbol:A # B"}),
+        serde_json::json!({"add": "symbol:A\nsymbol:B"}),
+        serde_json::json!({"add": ""}),
+        serde_json::json!({"add": "symbol:A", "remove": "symbol:B"}),
+        serde_json::json!({}),
+        serde_json::json!({"add": "symbol:A", "all": true}),
+    ] {
+        let (code, _) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(body.clone())).await;
+        assert!(code.is_client_error(), "{body}");
+    }
+    assert!(!d.join("pumpfun_rt/blocked-mints.txt").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

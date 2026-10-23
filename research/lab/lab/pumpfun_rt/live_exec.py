@@ -131,6 +131,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import blocklist as BL
 from . import chain_pnl as CP
 from . import curve as C
 from . import pipeline as P
@@ -3146,7 +3147,7 @@ def _daily_card(day, stats, balance_l, total_sol, ex, mode, rule, lang, ledger=N
 # ---------------------------------------------------------------- attaching the book
 
 def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=load_signer, alerts: bool = True,
-           start: bool = True) -> LiveBook | None:
+           start: bool = True, blocked=None) -> LiveBook | None:
     """Called by the live service at start. None (and nothing trades) unless every gate holds."""
     env = gate.env if gate is not None else os.environ
     if env.get(ENV_LIVE) != "1":
@@ -3194,6 +3195,7 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
                       on_event=book.on_event, kill=P.KillSwitch(live_kill_paths()))
     book.pipe = pipe
     pipe.on_skip = book.on_skip                            # every coin not bought: a reason and a log line
+    pipe.blocked = blocked or BL.BlockWatch()              # the owner's block list, before every buy
     engine.add_pipe(pipe)
     if wallet:
         ex.set_limits(lim, total)                          # the pipeline's Risk takes them uncapped too

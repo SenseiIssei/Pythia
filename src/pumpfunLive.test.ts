@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ALPHA_PHASE,
+  blockLine,
+  blockNorm,
+  changePumpfunBlocked,
+  pumpfunBlocked,
   modeWords,
   candles,
   ceilings,
@@ -244,5 +248,49 @@ describe("modeWords", () => {
     expect(ALPHA_PHASE).toBe("Alpha phase");
     expect(modeWords("full")).toBe("Full");
     expect(modeWords(null)).toBe("");
+  });
+});
+
+describe("the block list", () => {
+  const mint = `Mint${"1".repeat(36)}`;
+
+  it("matches symbols and names as the bot does: letters and digits, any case", () => {
+    expect(["SHEKEL", "$SHEKEL", "shekel ", " $she-kel"].map(blockNorm)).toEqual(["shekel", "shekel", "shekel", "shekel"]);
+    expect(blockNorm("שקל $")).toBe("שקל");
+    expect(blockNorm("$$$")).toBe("");
+  });
+
+  it("writes one valid line per entry and says why not", () => {
+    expect(blockLine("symbol", " $SHEKEL ")).toEqual({ line: "symbol:$SHEKEL" });
+    expect(blockLine("name", "Moon Dog")).toEqual({ line: "name:Moon Dog" });
+    expect(blockLine("mint", mint)).toEqual({ line: mint });
+    expect(blockLine("creator", mint)).toEqual({ line: `creator:${mint}` });
+    for (const [kind, v] of [["mint", "short"], ["mint", `Mint0${"1".repeat(35)}`], ["creator", "x"], ["symbol", "$$$"], ["symbol", "A # B"], ["name", "a".repeat(65)], ["symbol", " "]] as const) {
+      expect("error" in blockLine(kind, v), `${kind} ${v}`).toBe(true);
+    }
+  });
+
+  it("reads and changes the list through the server only", async () => {
+    vi.stubEnv("VITE_PYTHIA_SERVER", "/api/pythia");
+    const asked: { url: string; method: string; body: unknown }[] = [];
+    const list = { path: "pumpfun_rt/blocked-mints.txt", entries: [{ entry: "symbol:SHEKEL", kind: "symbol", value: "SHEKEL" }], ignored: [] };
+    vi.stubGlobal("fetch", async (u: string, init?: RequestInit) => {
+      asked.push({ url: String(u), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(JSON.stringify(list), { status: 200 });
+    });
+    expect(await pumpfunBlocked()).toEqual(list);
+    expect(await changePumpfunBlocked({ add: "symbol:SHEKEL" })).toEqual(list);
+    await changePumpfunBlocked({ remove: "symbol:SHEKEL" });
+    expect(asked).toEqual([
+      { url: "/api/pythia/api/pumpfun/live/blocked", method: "GET", body: null },
+      { url: "/api/pythia/api/pumpfun/live/blocked", method: "POST", body: { add: "symbol:SHEKEL" } },
+      { url: "/api/pythia/api/pumpfun/live/blocked", method: "POST", body: { remove: "symbol:SHEKEL" } },
+    ]);
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: "Not a mint address (base58, 32 to 44 characters)." }), { status: 400 }));
+    await expect(changePumpfunBlocked({ add: "x" })).rejects.toThrow("Not a mint address");
+    vi.stubEnv("VITE_PYTHIA_SERVER", "");
+    await expect(pumpfunBlocked()).rejects.toThrow("connected backend");
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 });

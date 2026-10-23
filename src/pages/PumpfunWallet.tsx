@@ -7,7 +7,7 @@
 // the owner withdraws with his own wallet and his backup.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Copy, ExternalLink, OctagonX, QrCode, RefreshCw, Save } from "lucide-react";
+import { Ban, Check, Copy, ExternalLink, OctagonX, Plus, QrCode, RefreshCw, Save, Trash2 } from "lucide-react";
 import { AreaChart, Badge, Button, Field, List, ListRow, Notice, Page, inputCls } from "../design";
 import { ConfirmAction, KeyStats, LoadingRows, More, Nothing, Row, Section, plural } from "../pagekit";
 import { encodeQr, qrPath } from "../qr";
@@ -16,8 +16,11 @@ import { PumpfunMaster, WALLET_LIMIT } from "../components/MasterPanel";
 import { limitsKind, limitsText } from "../masterControl";
 import {
   ALPHA_PHASE,
+  BLOCK_KIND_LABEL,
   LIMIT_LABEL,
+  blockLine,
   canControl,
+  changePumpfunBlocked,
   ceilings,
   eur,
   exitWords,
@@ -25,6 +28,7 @@ import {
   limitInput,
   parseLimits,
   pumpfunKill,
+  pumpfunBlocked,
   pumpfunLive,
   savePumpfunLimits,
   short,
@@ -35,6 +39,8 @@ import {
   tone,
   tradeStats,
   watchPumpfun,
+  type BlockKind,
+  type BlockList,
   type FeedCoin,
   type PumpfunFeed,
   type SocketState,
@@ -178,6 +184,88 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
         </div>
       ) : (
         <p className="mt-3 text-sm text-muted">Limits are set through the connected backend on the server; the desktop app only shows them.</p>
+      )}
+    </Section>
+  );
+}
+
+/** The owner's block list: coins (mint), creators, symbols and names the bot and its paper twin never buy. */
+function Blocked() {
+  const control = canControl();
+  const [list, setList] = useState<BlockList | null>(null);
+  const [kind, setKind] = useState<BlockKind>("symbol");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    if (!control) return;
+    pumpfunBlocked().then(setList, (e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  }, [control]);
+  const checked = value.trim() ? blockLine(kind, value) : null;
+  const change = async (c: { add: string } | { remove: string }) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setList(await changePumpfunBlocked(c));
+      if ("add" in c) setValue("");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section
+      title="Gesperrt"
+      hint="Coins the bot never buys, and its paper twin neither: a mint, every coin of a creator, or every coin whose symbol or name matches (upper and lower case, $ and spaces do not count). The bot reads the list within seconds; positions it already holds are sold by their exits as usual."
+    >
+      {!control ? (
+        <p className="text-sm text-muted">The block list is edited through the connected backend on the server.</p>
+      ) : (
+        <div className="space-y-3">
+          {list && list.entries.length > 0 ? (
+            <List>
+              {list.entries.map((e) => (
+                <ListRow
+                  key={e.entry}
+                  icon={Ban}
+                  title={e.kind === "mint" || e.kind === "creator" ? short(e.value) : e.value}
+                  subtitle={BLOCK_KIND_LABEL[e.kind]}
+                  right={
+                    <Button size="sm" variant="secondary" icon={Trash2} disabled={busy} ariaLabel={`Remove ${e.entry}`} onClick={() => void change({ remove: e.entry })}>
+                      Remove
+                    </Button>
+                  }
+                />
+              ))}
+            </List>
+          ) : (
+            list && <p className="text-sm text-muted">Nothing blocked.</p>
+          )}
+          {list && list.ignored.length > 0 && (
+            <Notice tone="warning" title="Lines the bot ignores">
+              {list.ignored.join(", ")}
+            </Notice>
+          )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr]">
+            <Field label="Kind">
+              <select value={kind} aria-label="Kind" onChange={(e) => setKind(e.target.value as BlockKind)} className={inputCls}>
+                {(Object.keys(BLOCK_KIND_LABEL) as BlockKind[]).map((k) => (
+                  <option key={k} value={k}>
+                    {BLOCK_KIND_LABEL[k]}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Value" error={checked && "error" in checked ? checked.error : undefined}>
+              <input className={inputCls} value={value} placeholder={kind === "symbol" ? "SHEKEL" : kind === "name" ? "coin name" : "address"} onChange={(e) => setValue(e.target.value)} aria-label="Value to block" />
+            </Field>
+          </div>
+          {err && <Notice tone="danger">{err}</Notice>}
+          <Button icon={Plus} variant="secondary" disabled={busy || !checked || "error" in checked} onClick={() => checked && "line" in checked && void change({ add: checked.line })}>
+            Block
+          </Button>
+        </div>
       )}
     </Section>
   );
@@ -462,6 +550,8 @@ export function PumpfunWallet() {
           </Section>
 
           <Limits key={v.settings.updatedMs} v={v} onSaved={() => void load()} />
+
+          <Blocked />
 
           <Section title="Open positions" hint="What the bot holds now, from its own book.">
             {s && s.positions.length > 0 ? (

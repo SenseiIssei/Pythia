@@ -620,8 +620,38 @@ fn lab_pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
 fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
     use pythia_core::pumpfun_live as pf;
     let (r1, r2, r3, r4, r5, r6) = (root.clone(), root.clone(), root.clone(), root.clone(), root.clone(), root.clone());
-    let (r7, r8, r9) = (root.clone(), root.clone(), root);
+    let (r7, r8, r9) = (root.clone(), root.clone(), root.clone());
+    let (r10, r11) = (root.clone(), root);
     Router::new()
+        .route(
+            // The owner's block list (<data>/pumpfun_rt/blocked-mints.txt): coins the live bot and its paper twin
+            // never buy. One entry added or removed per call, validated, the file written atomically.
+            "/api/pumpfun/live/blocked",
+            get(move || {
+                let root = r10.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    Json(blocked_view(&r)).into_response()
+                }
+            })
+            .post(move |Json(patch): Json<BlockPatch>| {
+                let root = r11.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    match write_blocked(&r, patch) {
+                        Ok((what, v)) => {
+                            tracing::warn!("pump.fun block list changed from the app: {what}");
+                            Json(v).into_response()
+                        }
+                        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+                    }
+                }
+            }),
+        )
         .route(
             // The owner's controls: Stop (paused) and the stake's share, with what the service applies.
             "/api/pumpfun/live/control",
@@ -731,6 +761,147 @@ fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
                 }
             }),
         )
+}
+
+// ── the owner's block list (research/lab/lab/pumpfun_rt/blocklist.py reads the same file) ──
+
+/// The block list's file under the lab's data folder, the one the live bot, the paper twin,
+/// trends.py and the meme module read.
+fn blocked_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("pumpfun_rt").join("blocked-mints.txt")
+}
+
+/// The longest symbol or name entry, as written (blocklist.TEXT_MAX).
+const BLOCK_TEXT_MAX: usize = 64;
+
+/// Letters and digits only, lower case: "$SHEKEL", "shekel " and "SHEKEL" are one (blocklist.norm).
+fn block_norm(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
+}
+
+fn is_address(s: &str) -> bool {
+    (32..=44).contains(&s.len())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() && !matches!(c, '0' | 'O' | 'I' | 'l'))
+}
+
+/// One entry: (kind, value) as the bot reads it, or why it is not one. A mint bare,
+/// `creator:<wallet>`, `symbol:<SYMBOL>` or `name:<text>`; `#` and line breaks never.
+fn block_entry(raw: &str) -> Result<(String, String), String> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return Err("Empty entry.".into());
+    }
+    let Some((kind, rest)) = v.split_once(':') else {
+        return if is_address(v) {
+            Ok(("mint".into(), v.into()))
+        } else {
+            Err("Not a mint address (base58, 32 to 44 characters).".into())
+        };
+    };
+    let (kind, rest) = (kind.trim().to_lowercase(), rest.trim());
+    match kind.as_str() {
+        "creator" if is_address(rest) => Ok((kind.clone(), rest.into())),
+        "creator" => Err("Not a wallet address (base58, 32 to 44 characters).".into()),
+        "symbol" | "name" if block_norm(rest).is_empty() => Err(format!("A {kind} needs at least one letter or digit.")),
+        "symbol" | "name" if rest.chars().count() > BLOCK_TEXT_MAX => {
+            Err(format!("A {kind} has at most {BLOCK_TEXT_MAX} characters."))
+        }
+        "symbol" | "name" => Ok((kind.clone(), rest.into())),
+        _ => Err("Use a mint, creator:<wallet>, symbol:<SYMBOL> or name:<text>.".into()),
+    }
+}
+
+/// The line an entry is written as.
+fn block_line(kind: &str, value: &str) -> String {
+    if kind == "mint" {
+        value.to_string()
+    } else {
+        format!("{kind}:{value}")
+    }
+}
+
+/// Two entries block the same coins (symbols and names after block_norm).
+fn block_same(a: &(String, String), b: &(String, String)) -> bool {
+    a.0 == b.0
+        && match a.0.as_str() {
+            "symbol" | "name" => block_norm(&a.1) == block_norm(&b.1),
+            _ => a.1 == b.1,
+        }
+}
+
+/// The entries of the file in order and the lines the bot ignores; an empty list without the file.
+fn blocked_view(root: &std::path::Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(blocked_path(root)).unwrap_or_default();
+    let (mut entries, mut ignored): (Vec<serde_json::Value>, Vec<serde_json::Value>) = (Vec::new(), Vec::new());
+    for line in text.lines() {
+        let v = line.split('#').next().unwrap_or("").trim();
+        if v.is_empty() {
+            continue;
+        }
+        match block_entry(v) {
+            Ok((kind, value)) => {
+                let entry = block_line(&kind, &value);
+                if !entries.iter().any(|e| e["entry"] == entry.as_str()) {
+                    entries.push(serde_json::json!({"entry": entry, "kind": kind, "value": value}));
+                }
+            }
+            Err(_) => ignored.push(serde_json::Value::from(line.trim())),
+        }
+    }
+    serde_json::json!({"path": "pumpfun_rt/blocked-mints.txt", "entries": entries, "ignored": ignored})
+}
+
+/// `POST /api/pumpfun/live/blocked`: `{"add": "symbol:SHEKEL"}` or `{"remove": "..."}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockPatch {
+    add: Option<String>,
+    remove: Option<String>,
+}
+
+/// Add or remove one entry; every other line (comments included) stays as it is. The file is
+/// written to a temporary file next to it and renamed over it, so the bot never reads half of it.
+fn write_blocked(root: &std::path::Path, patch: BlockPatch) -> Result<(String, serde_json::Value), String> {
+    let (add, raw) = match (&patch.add, &patch.remove) {
+        (Some(a), None) => (true, a.as_str()),
+        (None, Some(r)) => (false, r.as_str()),
+        _ => return Err("Send either add or remove.".into()),
+    };
+    if raw.chars().any(|c| c == '#' || c.is_control()) {
+        return Err("An entry has no # and no line break.".into());
+    }
+    let e = block_entry(raw)?;
+    let path = blocked_path(root);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("Block list not read: {err}")),
+    };
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let is_it = |line: &str| {
+        let v = line.split('#').next().unwrap_or("").trim();
+        block_entry(v).is_ok_and(|x| block_same(&x, &e))
+    };
+    let had = lines.iter().any(|l| is_it(l.as_str()));
+    if add && !had {
+        lines.push(block_line(&e.0, &e.1));
+    } else if !add {
+        if !had {
+            return Err("That entry is not on the list.".into());
+        }
+        lines.retain(|l| !is_it(l.as_str()));
+    }
+    if add != had {
+        let dir = path.parent().ok_or("No folder for the block list.")?;
+        std::fs::create_dir_all(dir).map_err(|err| format!("Block list not written: {err}"))?;
+        let tmp = dir.join("blocked-mints.txt.tmp");
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(&tmp, body).map_err(|err| format!("Block list not written: {err}"))?;
+        std::fs::rename(&tmp, &path).map_err(|err| format!("Block list not written: {err}"))?;
+    }
+    let what = format!("{} {}", if add { "added" } else { "removed" }, block_line(&e.0, &e.1));
+    Ok((what, blocked_view(root)))
 }
 
 // ── the on-chain wallet on the Real money page (docs/ONCHAIN-STAGE2.md) ──────
