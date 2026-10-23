@@ -304,6 +304,19 @@ class Service:
             print(f"live service: final status not written ({type(e).__name__}: {e})", flush=True)
 
 
+def feed_links(urls: list[str]) -> list[tuple[str, str, int]]:
+    """(url, program, link) per stream link, spread over the feeds like collector.run: link k of each program
+    on urls[k % len(urls)], so link 0 of both programs goes to the first provider."""
+    return [(urls[k % len(urls)], p, k) for p in (E.PUMP, E.PUMP_AMM)
+            for k in range(LINKS if p == E.PUMP else AMM_LINKS)]
+
+
+def feeds_line(urls: list[str]) -> str:
+    """The start line naming the feeds: scheme and host only, never a path, query or key."""
+    from .latency import safe_url
+    return "live service: feeds " + ", ".join(safe_url(u) for u in urls)
+
+
 async def run(seconds: float | None = None, once: bool = False) -> int:
     svc = Service()
     svc.start()
@@ -314,8 +327,8 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
                          indent=1), flush=True)
         return 0
     import aiohttp
-    from .collector import Collector
-    url = os.environ.get("PYTHIA_SOLANA_WS") or "wss://api.mainnet-beta.solana.com"
+    from .collector import Collector, feed_urls
+    urls = feed_urls()                                       # the owner's providers first, the public one as fallback
     col = Collector(None, svc.on_row, amm=True, meta=False)
     try:                                                     # pools the collector saw migrate (read only)
         for k, v in json.loads((store.base() / "pools.json").read_text(encoding="utf-8")).items():
@@ -335,8 +348,8 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
     async with aiohttp.ClientSession() as session:
         tasks = []
         if svc.book is not None:                             # nothing to stream for a book that is not there
-            tasks = [asyncio.create_task(col.stream(session, url, p, k, stop)) for p in (E.PUMP, E.PUMP_AMM)
-                     for k in range(LINKS if p == E.PUMP else AMM_LINKS)]
+            tasks = [asyncio.create_task(col.stream(session, u, p, k, stop)) for u, p, k in feed_links(urls)]
+            print(feeds_line(urls), flush=True)
         print(f"live service: {'streaming' if tasks else 'status only'}", flush=True)
         try:
             while not stop.is_set():

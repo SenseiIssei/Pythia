@@ -547,7 +547,7 @@ PYTHIA_SOLANA_COMMITMENT=processed
 
 Der Schlüssel steht nur in dieser Datei, nie im Repo; Logs zeigen nur
 Schema und Host. Der öffentliche Endpunkt läuft als Rückfallebene weiter
-(`PYTHIA_PF_PUBLIC_FALLBACK=0` schaltet ihn ab). Ob es wirkt, zeigt die
+(`PYTHIA_PF_PUBLIC_FALLBACK=0` schaltet ihn ab). Der echte Bot liest dieselben Variablen (`PYTHIA_SOLANA_WS_URLS`, `PYTHIA_SOLANA_TOKEN` in seiner Env-Datei): Verbindung 0 von pump.fun und von PumpSwap geht zum Anbieter, beim Start steht `live service: feeds ...` mit Schema und Host im Log. Ob es wirkt, zeigt die
 tägliche Telegram-Karte ("Unser Datenstrom sah neue Token ... nach ihrem
 Block") und der Vergleich der Anbieter:
 
