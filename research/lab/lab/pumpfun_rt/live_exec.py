@@ -56,6 +56,21 @@ A total budget (test: max_total_sol) stops every buy once the losses since the
 first live trade reach it. A buy also needs the wallet to keep a fee reserve. The
 executor checks all of it itself, independently of the pipeline.
 
+With limits=wallet in a test ack (the owner's decision 2026-10-23) the money limits follow the wallet:
+no total budget, no daily loss limit and no fixed stake caps (max_total_sol, max_daily_loss_sol,
+max_trade_sol, TEST_MAX_*, pipeline.HARD_STAKE_SOL, HARD_MAX_EXPOSURE_SOL and the sizing's proof cap do
+not apply); the stake is the ack's stake_share (default sizing.SHARE, at most sizing.ACK_MAX_SHARE) of the
+base, at least sizing.MIN_STAKE_SOL, braked in a drawdown and never more than the wallet can pay with the
+fee reserve; the exposure is at most the base minus the reserve, at most HARD_MAX_OPEN open. The app's
+settings and the environment variables the owner set can still lower all of it. The owner accepts that
+the wallet can be lost completely.
+
+The owner's master controls (reports/pumpfun_rt/control.json, written by the engine from the app, read
+every CONTROL_S): a share of the base for the stake (with limits=wallet from 1 % to
+sizing.WALLET_MAX_SHARE, overriding the ack's stake_share; without it only lower than sizing.SHARE) and
+a pause: no new buys from that moment while open positions keep their exits. It is not the kill switch
+and changes none of the gates, check_own or the kill switch.
+
 Only the programs' public buy and sell, and txbuild.check_own refuses anything
 else before signing: no transfers out, no withdrawals, no bundles, no private
 relays, nothing that front-runs other users or moves a price on purpose. The only
@@ -162,6 +177,8 @@ TEST_MAX_TRADE_SOL = 0.25                 # 0.05, 0.1 on 2026-10-22, 0.25 on 202
 SIMULATE_MAX_AGE_MS = 24 * 3_600_000
 DEFAULT_TEST_RULE = "P_pool60"            # the least-bad post-migration pool rule until a report says otherwise
 RESERVE_SOL = 0.01                        # left in the wallet so every open position can still be sold
+NO_LIMIT = math.inf                       # limits=wallet: no such limit beyond the wallet (shown as null)
+CONTROL_S = 2.0                           # how often the owner's control file (control.json) is looked at
 
 # Speed (docs/LATENCY.md): each one off unless the owner sets it; PYTHIA_PUMPFUN_FAST=1 turns all on, a single
 # switch set to 0 turns that one off again. None of them changes what is decided or what check_own accepts.
@@ -293,10 +310,17 @@ class Ack:
     max_total_sol: float | None = None
     max_trade_sol: float | None = None
     problems: tuple = ()
+    limits: str = "fixed"                    # "wallet": the money limits follow the wallet (test mode only)
+    stake_share: float | None = None         # with limits=wallet: the stake's share of the base (sizing.SHARE)
 
     def view(self) -> dict:
         return {"mode": self.mode, "strategy": self.rule, "max_daily_loss_sol": self.max_daily_loss_sol,
-                "max_total_sol": self.max_total_sol, "max_trade_sol": self.max_trade_sol}
+                "max_total_sol": self.max_total_sol, "max_trade_sol": self.max_trade_sol, "limits": self.limits,
+                "stake_share": self.stake_share}
+
+    @property
+    def wallet(self) -> bool:
+        return self.mode == "test" and self.limits == "wallet"
 
 
 def _positive(vals: dict, k: str, path: Path, cap: float | None, problems: list, refuse_above: bool) -> float | None:
@@ -313,6 +337,18 @@ def _positive(vals: dict, k: str, path: Path, cap: float | None, problems: list,
             problems.append(f"{path}: {k}={v:g} is above the hard maximum {cap:g} SOL")
             return None
         return cap
+    return v
+
+
+def _share(vals: dict, path: Path, problems: list) -> float | None:
+    try:
+        v = float(vals.get("stake_share", ""))
+    except ValueError:
+        problems.append(f"{path}: stake_share must be a number (0.10 is 10 %)")
+        return None
+    if not (math.isfinite(v) and 0 < v <= Z.ACK_MAX_SHARE):
+        problems.append(f"{path}: stake_share={v:g} must be above 0 and at most {Z.ACK_MAX_SHARE:g}")
+        return None
     return v
 
 
@@ -342,11 +378,27 @@ def read_ack(path: Path) -> Ack:
     rule = vals.get("strategy") or vals.get("rule")
     if mode not in ("test", "full"):
         return Ack(problems=(f"{path}: mode must be test or full, not {mode!r}",))
+    limits = (vals.get("limits") or "fixed").lower()
+    if limits not in ("fixed", "wallet"):
+        problems.append(f"{path}: limits must be wallet or fixed, not {limits!r}")
+    elif limits == "wallet" and mode != "test":
+        problems.append(f"{path}: limits=wallet is for mode=test only")
+    share = None
+    if "stake_share" in vals:
+        if limits != "wallet":
+            problems.append(f"{path}: stake_share needs limits=wallet")
+        else:
+            share = _share(vals, path, problems)
     if mode == "test":
         if not rule:
             problems.append(f"{path} names no strategy (strategy=P_pool60, or strategy=auto)")
         elif rule != "auto" and rule not in P.BY_NAME:
             problems.append(f"{path} names {rule!r}, which is not a pipeline strategy")
+        if limits == "wallet":
+            # The wallet is the limit: max_total_sol, max_daily_loss_sol and max_trade_sol do not apply.
+            if not accepted:
+                problems.append(f"{path} lacks the line \"{ACCEPT_LINE}\"")
+            return Ack("test", rule, problems=tuple(problems), limits="wallet", stake_share=share)
         total = _positive(vals, "max_total_sol", path, TEST_MAX_TOTAL_SOL, problems, True)
         loss = _positive(vals, "max_daily_loss_sol", path, TEST_MAX_DAILY_LOSS_SOL, problems, True)
         trade = _positive(vals, "max_trade_sol", path, TEST_MAX_TRADE_SOL, problems, True)
@@ -403,12 +455,38 @@ def _low(*xs) -> float:
     return min(x for x in xs if x is not None)
 
 
+def wallet_capped(lim: P.Limits) -> P.Limits:
+    """limits=wallet: never negative and at most pipeline.HARD_MAX_OPEN open; the money limits follow the wallet
+    (LiveExecutor.sized), so the fixed caps of Limits.capped do not apply."""
+    return P.Limits(max(lim.stake_sol, 0.0), min(max(int(lim.max_open), 0), P.HARD_MAX_OPEN),
+                    max(lim.max_exposure_sol, 0.0), max(lim.max_daily_loss_sol, 0.0))
+
+
+def _given(env, name: str) -> float | None:
+    """An environment ceiling the owner really set (Limits' defaults are the fixed caps, which limits=wallet drops)."""
+    try:
+        v = float(env[name])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) and v > 0 else None
+
+
 def effective(ack: Ack, settings: dict, env=None) -> tuple[P.Limits, float | None]:
     """The limits the live book trades with, and the total budget (None in full mode without one):
-    the lowest of the code's caps, the ack, the app's settings and the environment."""
+    the lowest of the code's caps, the ack, the app's settings and the environment. With limits=wallet
+    (test mode) only the app's settings and the environment variables the owner set can lower them; the
+    stake and the exposure follow the wallet (LiveExecutor.sized), and there is no daily loss limit or
+    total budget beyond the wallet unless the app sets one."""
     e = P.env_limits() if env is None else _env_limits(env)
     s = settings
     max_open = int(min(e.max_open, s.get("max_open", P.HARD_MAX_OPEN)))
+    if ack.wallet:
+        env = os.environ if env is None else env
+        total = s.get("max_total_sol")
+        lim = P.Limits(_low(NO_LIMIT, s.get("max_trade_sol"), _given(env, "PYTHIA_PUMPFUN_STAKE_SOL")), max_open,
+                       _low(NO_LIMIT, total, _given(env, "PYTHIA_PUMPFUN_MAX_EXPOSURE_SOL")),
+                       _low(NO_LIMIT, s.get("max_daily_loss_sol"), _given(env, "PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL")))
+        return wallet_capped(lim), total
     if ack.mode == "test":
         total = _low(TEST_MAX_TOTAL_SOL, ack.max_total_sol, s.get("max_total_sol"))
         lim = P.Limits(_low(TEST_MAX_TRADE_SOL, ack.max_trade_sol, s.get("max_trade_sol"), e.stake_sol), max_open,
@@ -432,6 +510,188 @@ def _env_limits(env) -> P.Limits:
     return P.Limits(f("PYTHIA_PUMPFUN_STAKE_SOL", P.HARD_STAKE_SOL), int(f("PYTHIA_PUMPFUN_MAX_OPEN", P.HARD_MAX_OPEN)),
                     f("PYTHIA_PUMPFUN_MAX_EXPOSURE_SOL", P.HARD_MAX_EXPOSURE_SOL),
                     f("PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL", P.HARD_MAX_DAILY_LOSS_SOL)).capped()
+
+
+# ---------------------------------------------------------------- the owner's master controls from the app
+
+SHARE_MIN, SHARE_MAX = 0.01, 1.0
+
+
+def control_path() -> Path:
+    return reports_dir() / "control.json"
+
+
+def parse_control(d) -> dict | None:
+    """The owner's control file as the engine writes it ({share, paused, set_at, share_set_at, paused_at}),
+    checked; None when it is malformed (a share outside SHARE_MIN..SHARE_MAX, a paused that is no bool)."""
+    if not isinstance(d, dict):
+        return None
+    share = d.get("share")
+    if share is not None and not (isinstance(share, (int, float)) and not isinstance(share, bool)
+                                  and math.isfinite(share) and SHARE_MIN <= share <= SHARE_MAX):
+        return None
+    paused = d.get("paused", False)
+    if not isinstance(paused, bool):
+        return None
+    ms = lambda k: int(d[k]) if isinstance(d.get(k), (int, float)) and not isinstance(d.get(k), bool) \
+        and math.isfinite(d[k]) else None
+    return {"share": None if share is None else float(share), "paused": paused, "set_at": ms("set_at"),
+            "share_set_at": ms("share_set_at") if share is not None else None,
+            "paused_at": ms("paused_at") if paused else None}
+
+
+class Control:
+    """The owner's master controls (the app writes control.json through the engine): a share of the wallet for
+    trading and a pause. Read every CONTROL_S; a malformed file is ignored with a warning
+    and the last good values stay; no file is no share and no pause. Above everything in the ack except the
+    guard, check_own, the gates and the kill switch, which nothing here touches."""
+
+    def __init__(self, path: Path | None = None, clock=time.monotonic, every_s: float = CONTROL_S, name: str = "live"):
+        self.path = path
+        self.clock, self.every_s, self.name = clock, every_s, name
+        self.good = {"share": None, "paused": False, "set_at": None, "share_set_at": None, "paused_at": None}
+        self.ok = True
+        self.bad = None                                      # the malformed text last warned about
+        self.last = -1e18
+
+    def _path(self) -> Path:
+        return self.path if self.path is not None else control_path()
+
+    def poll(self, force: bool = False) -> list[str]:
+        """The changes since the last good read: "paused", "resumed", "share". The file is tiny: it is read
+        every CONTROL_S (a time stamp can miss two writes in one tick)."""
+        if not force and self.clock() - self.last < self.every_s:
+            return []
+        self.last = self.clock()
+        p = self._path()
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            text = None
+        if text is None:
+            new = {"share": None, "paused": False, "set_at": None, "share_set_at": None, "paused_at": None}
+        else:
+            try:
+                new = parse_control(json.loads(text))
+            except ValueError:
+                new = None
+            if new is None:
+                if self.ok or text != self.bad:
+                    print(f"{self.name}: the owner's control file {p.name} is malformed; the last good values stay "
+                          f"(share {self.good['share']}, paused {self.good['paused']})", flush=True)
+                self.ok, self.bad = False, text
+                return []
+        self.ok, self.bad = True, None
+        out = []
+        if new["paused"] != self.good["paused"]:
+            out.append("paused" if new["paused"] else "resumed")
+        if new["share"] != self.good["share"]:
+            out.append("share")
+        self.good = new
+        return out
+
+    @property
+    def share(self) -> float | None:
+        return self.good["share"]
+
+    @property
+    def paused(self) -> bool:
+        return bool(self.good["paused"])
+
+    def paused_since(self) -> int | None:
+        return self.good["paused_at"] or self.good["set_at"] if self.paused else None
+
+
+def share_of(wallet: bool, ack_share: float | None, owner: float | None, owner_t: int | None = None) -> dict:
+    """The stake's share of the base in force and where it comes from: the owner's share from the app (with
+    limits=wallet any from SHARE_MIN to sizing.WALLET_MAX_SHARE, without it only below sizing.SHARE), else the
+    ack's stake_share (limits=wallet only), else sizing.SHARE."""
+    base, src = (ack_share, "ack") if wallet and ack_share else (Z.SHARE, "default")
+    note = None
+    if owner is not None:
+        owner = min(max(owner, SHARE_MIN), Z.WALLET_MAX_SHARE)
+        if wallet or owner < base:
+            return {"share": owner, "source": "owner", "since": owner_t, "ack_share": base, "note": None}
+        note = (f"the owner's share {owner * 100:g} % is not below {base * 100:g} %: without limits=wallet in the "
+                "confirmation file it can only lower")
+    return {"share": base, "source": src, "since": None, "ack_share": base, "note": note}
+
+
+def control_view(wallet: bool, sh: dict, ctl: Control, extra: dict | None = None) -> dict:
+    """The status's control block (the app's Master panel): the share in force and its source, the pause."""
+    return {"limits": "wallet" if wallet else "fixed", "share": sh["share"], "share_source": sh["source"],
+            "share_since": sh["since"], "ack_share": sh["ack_share"], "requested_share": ctl.share,
+            "paused": ctl.paused, "paused_since": ctl.paused_since(), "note": sh["note"], "control_ok": ctl.ok,
+            **(extra or {})}
+
+
+def hhmm(ms: int | None) -> str:
+    import datetime as dt
+    if not ms:
+        return "?"
+    return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime("%H:%M UTC")
+
+
+def paused_text(since_ms: int | None) -> str:
+    return f"paused by the owner since {hhmm(since_ms)}"
+
+
+CONTROL_WORDS = {
+    "de": {"paused": "{bot}: angehalten", "resumed": "{bot}: läuft wieder", "share": "{bot}: Anteil geändert",
+           "paused_pumpfun": "Du hast den Bot um {t} angehalten: keine neuen Käufe. Offene Positionen werden weiter "
+                             "über ihre Ausstiege verkauft. Der Notschalter ist davon unabhängig.",
+           "paused_onchain": "Du hast die Wallet um {t} angehalten: keine Buch-Trades mehr. Was sie hält, bleibt "
+                             "liegen (außer du tauschst selbst um). Der Notschalter ist davon unabhängig.",
+           "resumed_text": "Du hast {bot} wieder gestartet: er handelt wieder nach seinen Regeln.",
+           "share_text": "Anteil der Wallet für den Handel jetzt {share} ({src}). Grenzen: {limits}.",
+           "owner": "deine Vorgabe", "ack": "Freigabedatei", "default": "Standard",
+           "wallet": "nach Wallet", "fixed": "fest"},
+    "en": {"paused": "{bot}: paused", "resumed": "{bot}: running again", "share": "{bot}: share changed",
+           "paused_pumpfun": "You paused the bot at {t}: no new buys. Open positions are still sold by their exits. "
+                             "The kill switch is separate.",
+           "paused_onchain": "You paused the wallet at {t}: no more book trades. What it holds stays (unless you "
+                             "convert). The kill switch is separate.",
+           "resumed_text": "You started {bot} again: it trades by its rules again.",
+           "share_text": "Share of the wallet for trading now {share} ({src}). Limits: {limits}.",
+           "owner": "your setting", "ack": "confirmation file", "default": "default",
+           "wallet": "wallet", "fixed": "fixed"},
+}
+BOT_NAMES = {"pumpfun": "pump.fun bot", "onchain": "On-chain wallet"}
+
+
+def control_cards(bot: str, changes: list[str], ctl: dict, lang: str) -> list:
+    """The cards of the owner's changes (`ctl`: the status's control block): a pause, a start, a new share."""
+    from ..ops import notify
+    w = CONTROL_WORDS.get(lang, CONTROL_WORDS["en"])
+    name = BOT_NAMES.get(bot, bot)
+    out = []
+    for c in changes:
+        if c == "paused":
+            text = w[f"paused_{bot}"].format(t=hhmm(ctl.get("paused_since")))
+        elif c == "resumed":
+            text = w["resumed_text"].format(bot=name)
+        else:
+            sh = ctl.get("share")
+            text = w["share_text"].format(share="n/a" if sh is None else f"{sh * 100:g} %",
+                                          src=w.get(ctl.get("share_source") or "", "?"),
+                                          limits=w.get(ctl.get("limits") or "fixed", "?"))
+            if ctl.get("note"):
+                text += f" {ctl['note']}"
+        out.append(notify.text_card("trades", w[c].format(bot=name), text,
+                                    emoji={"paused": "⏸️", "resumed": "▶️"}.get(c, "⚙️")))
+    return out
+
+
+def post_control(bot: str, changes: list[str], ctl: dict, send=None) -> None:
+    """The owner's changes to Telegram (urgent, like every real-money card). Never raises."""
+    if not changes:
+        return
+    try:
+        from ..ops import notify
+        cards = control_cards(bot, changes, ctl, notify.alert_lang())
+        (send or notify.send)("trades", cards, urgent=True, discord="trades")
+    except Exception as e:                                   # an alert never stops the book
+        print(f"live: control card not sent ({type(e).__name__}: {e})", flush=True)
 
 
 # ---------------------------------------------------------------- the simulation record
@@ -1227,11 +1487,13 @@ class LiveExecutor:
 
     def __init__(self, gate: LiveGate, signer, builder, limits: P.Limits, clock=None, start: bool = True,
                  mode: str = "full", max_total_sol: float | None = None, rule: str | None = None,
-                 totals: dict | None = None, on_stop=None, on_leftover=None, speed: Speed | None = None):
+                 totals: dict | None = None, on_stop=None, on_leftover=None, speed: Speed | None = None,
+                 wallet: bool = False):
         self.gate = gate
         self.signer = signer
         self.builder = builder
-        self.limits = limits.capped()
+        self.wallet = wallet                          # limits=wallet: the money limits follow the wallet
+        self.limits = self._cap(limits)
         self.max_total_l = None if max_total_sol is None else int(max_total_sol * C.LAMPORTS)
         self.mode = mode
         self.rule = rule
@@ -1272,6 +1534,9 @@ class LiveExecutor:
         self.wins_today = 0
         self.stake: dict | None = None                # {"sol", "why"}: the stake the wallet allows (sizing.py)
         self.stake_bal_l: int | None = None           # the balance that stake was sized with
+        self.owner_share: float | None = None         # the owner's share from the app (control.json)
+        self.owner_share_t: int | None = None         # when the owner set it
+        self.paused_ms: int | None = None             # the owner's pause from the app: since when (no buys)
         self.speed = speed or Speed()
         if hasattr(builder, "speed"):
             builder.speed = self.speed
@@ -1299,8 +1564,15 @@ class LiveExecutor:
     def attach(self, pipe) -> None:
         self.pipe = pipe
 
+    def _cap(self, limits: P.Limits) -> P.Limits:
+        return wallet_capped(limits) if self.wallet else limits.capped()
+
+    def share(self) -> dict:
+        return share_of(self.wallet, getattr(getattr(self.gate, "ack", None), "stake_share", None),
+                        self.owner_share, self.owner_share_t)
+
     def set_limits(self, limits: P.Limits, max_total_sol: float | None) -> None:
-        self.limits = limits.capped()
+        self.limits = self._cap(limits)
         self.max_total_l = None if max_total_sol is None else int(max_total_sol * C.LAMPORTS)
         if self.pipe is not None:
             for r in self.pipe.risk.values():
@@ -1314,6 +1586,9 @@ class LiveExecutor:
             why = self.gate.check()
             if self.rule is not None and not why and (self.gate.rule != self.rule or self.gate.mode != self.mode):
                 why = ["the confirmation file now names another strategy or mode; restart the live service"]
+            elif self.rule is not None and not why and bool(getattr(getattr(self.gate, "ack", None), "wallet", False)) \
+                    != self.wallet:
+                why = ["the confirmation file now sets other limits (limits=wallet or not); restart the live service"]
             was = self.closed_why
             self.closed_why = "; ".join(why) if why else None
             if why:
@@ -1322,6 +1597,8 @@ class LiveExecutor:
                 self.on_gate(self.closed_why)              # shut, or open again: the owner hears of it
         if self.closed_why:
             return f"live gate shut: {self.closed_why}"
+        if self.paused_ms is not None:
+            return paused_text(self.paused_ms)
         if self.limits.stake_sol <= 0:
             return (self.stake or {}).get("why") or "stake paused"
         return None
@@ -1336,8 +1613,20 @@ class LiveExecutor:
             return dataclasses.replace(lim, stake_sol=0.0)
         bal = self.balance_l / C.LAMPORTS
         open_l = sum(self.exposure.values()) + sum(int(v.get("cost_l") or 0) for v in self.leftovers.values())
+        sh = self.share()
+        if self.wallet:
+            # limits=wallet: the share of the base, never more than the wallet can pay with the fee reserve and
+            # the 30 % slippage room of the buy's cost limit; the exposure at most the base minus the reserve;
+            # no daily loss rule beyond the wallet.
+            base = bal + open_l / C.LAMPORTS
+            room = max(0.0, bal - RESERVE_SOL) / (1 + C.SLIP_TOL)
+            sol, why = Z.sized(balance_sol=bal, open_cost_sol=open_l / C.LAMPORTS, ceiling_sol=lim.stake_sol,
+                               share=sh["share"], wallet=True, room_sol=room, **Z.from_ledger(self.rule))
+            self.stake = {"sol": sol, "why": why, "share": sh["share"]}
+            return dataclasses.replace(lim, stake_sol=sol,
+                                       max_exposure_sol=min(lim.max_exposure_sol, max(0.0, base - RESERVE_SOL)))
         sol, why = Z.sized(balance_sol=bal, open_cost_sol=open_l / C.LAMPORTS, ceiling_sol=lim.stake_sol,
-                           **Z.from_ledger(self.rule))
+                           share=sh["share"], **Z.from_ledger(self.rule))
         self.stake = {"sol": sol, "why": why}
         day = self.clock() // P.DAY_MS
         db = self.totals.get("day_base")
@@ -2279,22 +2568,46 @@ def hard_view() -> dict:
     return {"test": {"max_total_sol": TEST_MAX_TOTAL_SOL, "max_daily_loss_sol": TEST_MAX_DAILY_LOSS_SOL,
                      "max_trade_sol": TEST_MAX_TRADE_SOL},
             "full": {"max_daily_loss_sol": P.HARD_MAX_DAILY_LOSS_SOL, "max_trade_sol": P.HARD_STAKE_SOL},
-            "max_open": P.HARD_MAX_OPEN, "max_exposure_sol": P.HARD_MAX_EXPOSURE_SOL, "reserve_sol": RESERVE_SOL}
+            "max_open": P.HARD_MAX_OPEN, "max_exposure_sol": P.HARD_MAX_EXPOSURE_SOL, "reserve_sol": RESERVE_SOL,
+            "wallet": {"share": Z.SHARE, "ack_max_share": Z.ACK_MAX_SHARE, "max_share": Z.WALLET_MAX_SHARE,
+                       "min_stake_sol": Z.MIN_STAKE_SOL, "pause_below_sol": Z.PAUSE_BELOW_SOL}}
 
 
-def limits_view(lim: P.Limits, total: float | None) -> dict:
-    return {"max_trade_sol": lim.stake_sol, "max_open": lim.max_open, "max_exposure_sol": lim.max_exposure_sol,
-            "max_daily_loss_sol": lim.max_daily_loss_sol, "max_total_sol": total}
+def limits_view(lim: P.Limits, total: float | None, wallet: bool = False) -> dict:
+    """The limits in force; with limits=wallet a limit the wallet alone sets (NO_LIMIT) is null."""
+    v = lambda x: None if x is None or math.isinf(x) else x
+    return {"max_trade_sol": v(lim.stake_sol), "max_open": lim.max_open, "max_exposure_sol": v(lim.max_exposure_sol),
+            "max_daily_loss_sol": v(lim.max_daily_loss_sol), "max_total_sol": total,
+            "kind": "wallet" if wallet else "fixed"}
+
+
+def wallet_need_sol() -> float:
+    """limits=wallet: the least base one trade needs (the pause under sizing.PAUSE_BELOW_SOL, the minimum stake
+    with its slippage room and the fee reserve)."""
+    return max(Z.PAUSE_BELOW_SOL, Z.MIN_STAKE_SOL * (1 + C.SLIP_TOL) + RESERVE_SOL)
+
+
+def low_view(wallet: bool, base_sol: float | None, stake_sol: float | None) -> dict | None:
+    """limits=wallet: the wallet is below what one trade needs (for the app and the watcher), else None."""
+    if not wallet or base_sol is None:
+        return None
+    need = wallet_need_sol()
+    if base_sol < need or stake_sol == 0.0:
+        return {"have": round(base_sol, 6), "need": round(need, 6), "unit": "SOL"}
+    return None
 
 
 def base_status(gate: LiveGate, why: list[str], address: str | None, balance_l: int | None, balance_t: int | None,
-                holdings: dict | None = None) -> dict:
+                holdings: dict | None = None, control: Control | None = None) -> dict:
     """What the app shows whether the book is on or not."""
     totals = load_totals()
     ack = gate.ack
     lim = total = None
     if ack.mode:
         lim, total = effective(ack, read_settings(), gate.env)
+    ctl = control or Control()
+    if control is None:
+        ctl.poll(force=True)
     sim = read_json(simulate_path())
     return {"t": int(time.time() * 1000), "running": True, "on": False, "mode": ack.mode, "rule": gate.rule,
             "address": address, "balance_sol": None if balance_l is None else balance_l / C.LAMPORTS,
@@ -2302,19 +2615,23 @@ def base_status(gate: LiveGate, why: list[str], address: str | None, balance_l: 
             "positions": [], "leftovers": [], "pnl_today_sol": 0.0, "trades_today": 0, "wins_today": 0,
             "pnl_total_sol": totals["pnl_l"] / C.LAMPORTS, "trades_total": totals["trades"],
             "since_ms": totals["since_ms"], "gate": list(why), "refusing": "; ".join(why) or None,
-            "ack": ack.view(), "settings": read_settings(), "limits": limits_view(lim, total) if lim else None,
+            "ack": ack.view(), "settings": read_settings(),
+            "limits": limits_view(lim, total, ack.wallet) if lim else None,
             "hard": hard_view(), "stops": {"daily": False, "total": bool(totals.get("total_alerted"))},
             "kill": live_killed(),
             "simulate": {"t": sim.get("t"), "ok": sim.get("ok"), "venue": sim.get("venue"), "mint": sim.get("mint")}
             if isinstance(sim, dict) else None,
-            "exposure_sol": 0.0, "skipped": {}, "stake": None}
+            "exposure_sol": 0.0, "skipped": {}, "stake": None,
+            "control": control_view(ack.wallet, share_of(ack.wallet, ack.stake_share, ctl.share,
+                                                         ctl.good["share_set_at"] or ctl.good["set_at"]), ctl),
+            "low": low_view(ack.wallet, None if balance_l is None else balance_l / C.LAMPORTS, None)}
 
 
 class LiveBook:
     """The live pipeline: one strategy, the LiveExecutor, its files, limits and alerts."""
 
     def __init__(self, pipe: P.Pipeline | None, executor: LiveExecutor, rule: str, alerts: bool = True,
-                 poster=None):
+                 poster=None, control: Control | None = None):
         self.pipe, self.exec, self.rule = pipe, executor, rule
         self.alerts = alerts
         self.poster = poster or post_cards
@@ -2329,6 +2646,30 @@ class LiveBook:
         executor.on_leftover = self.on_leftover
         executor.on_chain = self.on_chain
         executor.on_gate = self.on_gate
+        self.control = control or Control()
+        self.control.poll(force=True)                       # what the owner set before this start: no card
+        self.apply_control()
+
+    # ------------------------------------------------------------ the owner's master controls
+    def apply_control(self) -> None:
+        ex, c = self.exec, self.control
+        ex.owner_share, ex.owner_share_t = c.share, c.good["share_set_at"] or c.good["set_at"]
+        ex.paused_ms = c.paused_since() if c.paused else None
+
+    def poll_control(self) -> list[str]:
+        """control.json every CONTROL_S: a pause stops new buys at once (open positions keep their exits), a new
+        share sizes the stake again; each change posts its card."""
+        changes = self.control.poll()
+        if not changes:
+            return []
+        self.apply_control()
+        self.refresh_limits()
+        sh = self.exec.share()
+        print(f"live: the owner's control: {', '.join(changes)} (share {sh['share']:g} from {sh['source']}, "
+              f"{'paused' if self.control.paused else 'not paused'})", flush=True)
+        ctl = control_view(self.exec.wallet, sh, self.control)
+        self._post(lambda lang: control_cards("pumpfun", changes, ctl, lang))
+        return changes
 
     # ------------------------------------------------------------ the pipeline's hooks
     def on_chain(self) -> None:
@@ -2398,6 +2739,7 @@ class LiveBook:
     # ------------------------------------------------------------ the service's clock
     def tick(self, now_ms: int, wall_ms: int | None = None) -> None:
         wall_ms = wall_ms or int(time.time() * 1000)
+        self.poll_control()
         if time.monotonic() - self.last_limits >= RECHECK_S or self.exec.balance_l != self.exec.stake_bal_l:
             self.last_limits = time.monotonic()            # every minute, and with every new balance read
             self.refresh_limits()
@@ -2447,11 +2789,14 @@ class LiveBook:
 
     def status(self, address: str | None, balance_t: int | None, holdings: dict | None, why: list[str]) -> dict:
         ex = self.exec
-        st = base_status(ex.gate, why, address or ex.signer.pubkey, ex.balance_l, balance_t, holdings)
+        st = base_status(ex.gate, why, address or ex.signer.pubkey, ex.balance_l, balance_t, holdings,
+                         control=self.control)
         ex._roll()
         day = int(time.time() * 1000) // P.DAY_MS
         self.closed_today = [r for r in self.closed_today if r["exit_ms"] // P.DAY_MS == day]
         paused = ((ex.stake or {}).get("why") or "stake paused") if ex.limits.stake_sol <= 0 else None
+        if ex.paused_ms is not None:
+            paused = paused_text(ex.paused_ms)                # the owner's Stop: no buys, the exits go on
         st.update(on=ex.closed_why is None and not st["kill"] and ex.stop_day != ex.day and not paused
                   and not (ex.max_total_l is not None and -ex.totals["pnl_l"] >= ex.max_total_l),
                   mode=ex.mode, rule=self.rule, positions=self.positions(),
@@ -2460,12 +2805,16 @@ class LiveBook:
                   wins_today=ex.wins_today,
                   pnl_total_sol=ex.totals["pnl_l"] / C.LAMPORTS, trades_total=ex.totals["trades"],
                   since_ms=ex.totals.get("since_ms"), limits=limits_view(ex.limits, None if ex.max_total_l is None
-                                                                         else ex.max_total_l / C.LAMPORTS),
+                                                                         else ex.max_total_l / C.LAMPORTS, ex.wallet),
                   stops={"daily": ex.stop_day == ex.day,
                          "total": ex.max_total_l is not None and -ex.totals["pnl_l"] >= ex.max_total_l},
                   exposure_sol=sum(ex.exposure.values()) / C.LAMPORTS,
                   stake=ex.stake, refusing=ex.closed_why or paused,
-                  gate=[ex.closed_why] if ex.closed_why else [paused] if paused else list(why))
+                  gate=[ex.closed_why] if ex.closed_why else [paused] if paused else list(why),
+                  control=control_view(ex.wallet, ex.share(), self.control),
+                  low=low_view(ex.wallet, None if ex.balance_l is None else
+                               (ex.balance_l + sum(ex.exposure.values())) / C.LAMPORTS,
+                               (ex.stake or {}).get("sol")))
         if self.pipe is not None:
             sk = {k[1]: v for k, v in self.pipe.eng.skipped.items() if k[0] == self.rule}
             st["skipped"] = dict(sorted(sk.items(), key=lambda kv: -kv[1])[:8])
@@ -2673,25 +3022,32 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
               + (f", fee at most {speed.fee_cap_sol} SOL" if speed.dynamic_fee else "")
               + ("" if speed.ws_url or not speed.ws_confirm else "; no wss:// endpoint for the signature websocket"),
               flush=True)
+    wallet = gate.ack.wallet
     ex = LiveExecutor(gate, signer, builder, lim, mode=gate.ack.mode, max_total_sol=total,
-                      rule=gate.rule, start=start, speed=speed)
+                      rule=gate.rule, start=start, speed=speed, wallet=wallet)
     try:
         ex.balance_l = rpc.balance(signer.pubkey)
     except Exception as e:                                   # no buys until the service reads it
         print(f"live: balance not read ({type(e).__name__}: {e})", flush=True)
+    book = LiveBook(None, ex, gate.rule, alerts=alerts)    # the owner's share and pause before the first sizing
     lim = ex.sized(lim)
     ex.set_limits(lim, total)
-    # The paper strategy stakes 0.1 SOL; live, the stake is the sized one in the Risk limits (at most the cap).
-    s = dataclasses.replace(P.BY_NAME[gate.rule], stake_sol=P.HARD_STAKE_SOL)
-    book = LiveBook(None, ex, gate.rule, alerts=alerts)
+    # The paper strategy stakes 0.1 SOL; live, the stake is the sized one in the Risk limits (at most the cap;
+    # with limits=wallet the wallet's, which the fixed cap does not hold).
+    s = dataclasses.replace(P.BY_NAME[gate.rule], stake_sol=NO_LIMIT if wallet else P.HARD_STAKE_SOL)
     pipe = P.Pipeline(engine, [s], ex, limits=lim, name="live", record=False, on_close=book.on_close,
                       on_event=book.on_event, kill=P.KillSwitch(live_kill_paths()))
     book.pipe = pipe
     engine.add_pipe(pipe)
-    print(f"live: ON ({gate.ack.mode}) for {gate.rule}, wallet {signer.pubkey[:4]}..., stake {lim.stake_sol} SOL "
-          f"({ex.stake['why']}), "
-          f"at most {lim.max_open} open, {lim.max_exposure_sol} SOL exposure, daily loss stop "
-          f"{lim.max_daily_loss_sol} SOL" + (f", total budget {total} SOL" if total is not None else ""), flush=True)
+    if wallet:
+        ex.set_limits(lim, total)                          # the pipeline's Risk takes them uncapped too
+    lv = limits_view(ex.limits, total, wallet)
+    print(f"live: ON ({gate.ack.mode}{', limits: wallet' if wallet else ''}) for {gate.rule}, wallet "
+          f"{signer.pubkey[:4]}..., stake {lim.stake_sol} SOL ({ex.stake['why']}), at most {lim.max_open} open, "
+          f"{lv['max_exposure_sol']} SOL exposure, daily loss stop {lv['max_daily_loss_sol'] or 'none'}"
+          + (f" SOL" if lv["max_daily_loss_sol"] else "")
+          + (f", total budget {total} SOL" if total is not None else "")
+          + (f"; {paused_text(ex.paused_ms)}" if ex.paused_ms is not None else ""), flush=True)
     return book
 
 

@@ -90,3 +90,21 @@ def test_on_but_every_buy_refused_by_the_daily_limit_is_a_problem():
     held = status(pnl_today_sol=-0.1276, stake={"sol": 0.05}, limits={"max_daily_loss_sol": 0.1854},
                   positions=[{"state": "open"}])
     assert "daylimit" not in W.problems(held, True, NOW), "with a position open it is only waiting"
+
+
+def test_with_limits_wallet_no_alarm_about_limits_that_do_not_exist_but_a_too_small_wallet_is_said():
+    wl = {"kind": "wallet", "max_trade_sol": 0.45, "max_daily_loss_sol": None, "max_total_sol": None}
+    s = status(pnl_today_sol=-3.0, stake={"sol": 0.45}, limits=wl, control={"limits": "wallet", "paused": False})
+    assert W.problems(s, True, NOW) == {}                   # a big day's loss: no daily limit, no alarm
+    low = status(on=False, refusing="stake paused: wallet under 0.25 SOL", limits=wl,
+                 low={"have": 0.2, "need": 0.25, "unit": "SOL"})
+    p = W.problems(low, True, NOW)
+    assert set(p) == {"low"} and "0.200 SOL" in p["low"] and "0.250 SOL" in p["low"]
+
+
+def test_the_owners_pause_is_no_alarm_but_the_kill_switch_still_is():
+    paused = status(on=False, refusing="paused by the owner since 14:05 UTC", control={"paused": True})
+    assert W.problems(paused, True, NOW) == {}
+    assert "off" in W.problems(status(on=False, refusing="paused by the owner since 14:05 UTC",
+                                      control={"paused": False}), True, NOW)
+    assert "down" in W.problems(paused, False, NOW)          # a stopped container is still said

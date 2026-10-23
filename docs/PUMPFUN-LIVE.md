@@ -83,6 +83,53 @@ Beides gilt immer nur unter deiner Bestätigungsdatei: steht dort
 Einsatz und den Grund zeigt `live_status.json` unter `stake`. Die
 Paper-Bücher und Studien kaufen weiter mit festen 0,1 SOL.
 
+### Limits nach Wallet
+
+Deine Entscheidung vom 2026-10-23: die Geldgrenzen wachsen mit dem Geld, und im Alpha-Test gibt es keine
+festen Geldgrenzen mehr. Die Wallet selbst ist die Grenze. Zwei Zeilen in `/etc/pythia/pumpfun-live-ack`
+(nur mit `mode=test`), danach den Dienst neu starten (Abschnitt 8):
+
+```
+limits=wallet
+stake_share=0.5
+```
+
+Ohne `limits=wallet` bleibt alles genau wie oben. Mit der Zeile gilt:
+
+- Kein Gesamtbudget und keine Tagesverlustgrenze mehr. `max_total_sol`, `max_daily_loss_sol` und
+  `max_trade_sol` werden nicht gebraucht (stehen sie noch in der Datei, gelten sie nicht). Auch die
+  0,25 SOL pro Kauf und die 0,10 SOL bis zum Nachweis gelten nicht mehr.
+- Einsatz: `stake_share` mal Basis (SOL der Wallet plus Kosten der offenen Positionen), abgerundet auf
+  0,01 SOL, mindestens 0,05 SOL. Ohne `stake_share` sind es 10 %, höchstens 0,5 in der Datei.
+  Beispiele: 0,9 SOL Basis: 0,09 SOL (10 %) oder 0,45 SOL (50 %); 3 SOL Basis: 0,30 SOL (10 %).
+- Mit 50 % passt bei kleiner Wallet nur eine Position gleichzeitig; das ist so gewollt.
+
+Was dich weiter schützt: der Notschalter, `txbuild.check_own` (nur Kauf und Verkauf für die eigene Wallet,
+keine Überweisung), die Simulation innerhalb von 24 Stunden, die Gebührenreserve von 0,01 SOL, die
+Drawdown-Bremse (über 15 % halber Einsatz, über 30 % 0,05 SOL), die Pause unter 0,25 SOL Basis, höchstens
+5 offene Positionen und eine Gesamtposition von höchstens Basis minus Reserve. Der Bot kann kein SOL
+ausgeben, das er nicht hat. Grenzen, die du selbst in der App setzt, oder `PYTHIA_PUMPFUN_STAKE_SOL` und
+`PYTHIA_PUMPFUN_MAX_*` in `/etc/pythia/pumpfun-live.env` senken weiter; nimm sie heraus, wenn die Wallet allein
+gelten soll. Der Watcher warnt, wenn die Wallet nicht mehr für einen Trade reicht; über Grenzen, die es
+nicht mehr gibt, schweigt er. App und `live_status.json` zeigen "limits: wallet".
+
+**Du kannst damit die ganze Wallet verlieren.** Lade nur auf, was du komplett verlieren kannst.
+
+### Master-Steuerung in der App
+
+Auf der Seite "pump.fun wallet" und auf der Seite "Wallet" gibt es das Feld "Master". Es wirkt innerhalb
+von Sekunden (der Dienst liest `reports/pumpfun_rt/control.json` alle 2 s), ohne Neustart:
+
+- **Anteil der Wallet pro Trade:** 5, 10, 25, 50, 75, 100 % oder ein eigener Wert von 1 bis 100 %. Er
+  ersetzt `stake_share` aus der Datei. Nur mit `limits=wallet`; ohne die Zeile kann er nur senken. Bei
+  100 % passt nur eine Position, die Gebührenreserve bleibt immer. Über 50 % fragt die App nach.
+- **Stop / Start:** Stop heißt ab sofort keine neuen Käufe; offene Positionen werden weiter über ihre
+  Ausstiege verkauft. Start fragt nach und lässt den Bot wieder kaufen. Das ist nicht der Notschalter:
+  der bleibt, wie er ist (verkauft alles, nur der Server kann ihn löschen).
+
+Jede Änderung schickt eine Karte an Telegram und Discord; der Status zeigt "paused by the owner since
+hh:mm" (UTC). Eine kaputte `control.json` wird ignoriert, die letzten guten Werte bleiben.
+
 ## 1. Wallet erzeugen
 
 Einmalig nach dem Deploy das Lab-Image neu bauen (es braucht jetzt `solders`):

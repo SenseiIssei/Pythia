@@ -118,6 +118,13 @@ describe("stateLine", () => {
     expect(stateLine(view()).label).toBe("Trading real money (Alpha phase)");
     expect(stateLine(view({}, { on: false, gate: ["no successful simulation yet"] })).detail).toBe("no successful simulation yet");
   });
+
+  it("says the owner paused it, from the control file or the status, below the kill switch", () => {
+    const paused = { share: null, paused: true, setAt: 1, shareSetAt: null, pausedAt: 1 };
+    expect(stateLine(view({ control: paused }, { on: false })).label).toBe("Paused by you");
+    expect(stateLine(view({}, { on: false, control: { paused: true } as never })).detail).toContain("still sold by their exits");
+    expect(stateLine(view({ control: paused, killFile: true })).level).toBe("bad");
+  });
 });
 
 describe("limits", () => {

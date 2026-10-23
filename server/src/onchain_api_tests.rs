@@ -173,3 +173,52 @@ async fn there_is_no_withdraw_or_transfer_route() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[tokio::test]
+async fn the_owners_controls_round_trip_and_bad_input_is_refused() {
+    let d = root("control");
+    let (code, v) = call(&d, "GET", "/api/onchain/live/control", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(v, serde_json::json!({"share": null, "paused": false, "setAt": null, "shareSetAt": null, "pausedAt": null, "effective": null}));
+    // No 10 % rule here: the trader keeps its own caps.
+    write_status(&d);
+    let (code, v) = call(&d, "POST", "/api/onchain/live/control", Some(serde_json::json!({"share": 0.5, "paused": true}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!((v["share"].clone(), v["paused"].clone()), (serde_json::json!(0.5), serde_json::json!(true)));
+    assert!(v["pausedAt"].is_i64() && v["effective"].is_null());
+    let disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("reports/onchain_live/control.json")).unwrap()).unwrap();
+    assert_eq!((disk["share"].clone(), disk["paused"].clone()), (serde_json::json!(0.5), serde_json::json!(true)));
+    assert!(disk["paused_at"].is_i64());
+    let (_, v) = call(&d, "GET", "/api/onchain/live", None).await;
+    assert_eq!((v["control"]["share"].clone(), v["control"]["paused"].clone()), (serde_json::json!(0.5), serde_json::json!(true)));
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"share": 0.0099}),
+        serde_json::json!({"share": 1.01}),
+        serde_json::json!({"share": 0.5, "resetShare": true}),
+    ] {
+        let (code, v) = call(&d, "POST", "/api/onchain/live/control", Some(body.clone())).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body} {v}");
+        assert!(v["error"].is_string(), "{body} {v}");
+    }
+    for body in [serde_json::json!({"paused": false, "kill": false}), serde_json::json!({"bookUsd": 500})] {
+        let (code, _) = call(&d, "POST", "/api/onchain/live/control", Some(body.clone())).await;
+        assert!(code.is_client_error(), "{body}");
+    }
+    // The status's control is served as `effective`.
+    let mut s: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("reports/onchain_live/status.json")).unwrap()).unwrap();
+    s["control"] = serde_json::json!({"limits": "wallet", "share": 0.5, "share_source": "owner", "share_since": 1,
+                                      "ack_share": null, "requested_share": 0.5, "paused": true, "paused_since": 2,
+                                      "note": null, "control_ok": true, "book_usd": 15.0, "ack_book_usd": 10.0});
+    std::fs::write(d.join("reports/onchain_live/status.json"), s.to_string()).unwrap();
+    let (code, v) = call(&d, "POST", "/api/onchain/live/control", Some(serde_json::json!({"paused": false}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!((v["paused"].clone(), v["pausedAt"].clone(), v["share"].clone()), (serde_json::json!(false), serde_json::Value::Null, serde_json::json!(0.5)));
+    assert_eq!(v["effective"]["bookUsd"], 15.0);
+    assert_eq!(v["effective"]["ackBookUsd"], 10.0);
+    assert_eq!(v["effective"]["pausedSince"], 2);
+    assert!(!d.join("reports/onchain_live/KILL").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

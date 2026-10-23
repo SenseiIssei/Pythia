@@ -612,14 +612,45 @@ fn lab_pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
 /// The pump.fun wallet page's routes over the lab's data folder `root`
 /// (`PYTHIA_DATA`). Reads: what the owner's live service writes (status,
 /// trades, measured execution) and the wallet tool's public address. Writes:
-/// lower limits (only ever below the confirmation file and the code's maxima)
-/// and the kill file. Nothing reads a key, signs, sends or moves money, and
-/// nothing here removes the kill file: that is done on the server by hand.
+/// lower limits (only ever below the confirmation file and the code's maxima),
+/// the owner's controls (Stop and the stake's share, set and cleared from the
+/// app; the share only down to 10 % without limits=wallet in the confirmation
+/// file) and the kill file. Nothing reads a key, signs, sends or moves money,
+/// and nothing here removes the kill file: that is done on the server by hand.
 fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
     use pythia_core::pumpfun_live as pf;
     let (r1, r2, r3, r4, r5, r6) = (root.clone(), root.clone(), root.clone(), root.clone(), root.clone(), root.clone());
-    let r7 = root;
+    let (r7, r8, r9) = (root.clone(), root.clone(), root);
     Router::new()
+        .route(
+            // The owner's controls: Stop (paused) and the stake's share, with what the service applies.
+            "/api/pumpfun/live/control",
+            get(move || {
+                let root = r8.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    Json(pf::control_in(&r)).into_response()
+                }
+            })
+            .post(move |Json(patch): Json<pf::ControlPatch>| {
+                let root = r9.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    let what = patch.what();
+                    match pf::write_control_in(&r, patch, now_ms()) {
+                        Ok(c) => {
+                            tracing::warn!("pump.fun live control set from the app: {what}");
+                            Json(c).into_response()
+                        }
+                        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+                    }
+                }
+            }),
+        )
         .route(
             // The Trends page (read only): what the paper engine sees hot right now, and DexScreener's list.
             "/api/pumpfun/trends",
@@ -708,14 +739,45 @@ fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
 /// (`PYTHIA_DATA`). Reads: what the owner's locked on-chain trader writes
 /// (status, trades, its proposals and results for conversions) and the wallet
 /// tool's public address. Writes: a conversion request, the confirm of a fresh
-/// proposal, and the kill file. Nothing here reads a key, signs, sends or moves
-/// money: the trader on the server quotes, guards and signs, and only what the
-/// owner confirmed. Nothing here removes the kill file: that is done on the
-/// server by hand.
+/// proposal, the owner's controls (Stop and the share of the wallet the books
+/// may use, set and cleared from the app) and the kill file. Nothing here reads
+/// a key, signs, sends or moves money: the trader on the server quotes, guards
+/// and signs, and only what the owner confirmed. Nothing here removes the kill
+/// file: that is done on the server by hand.
 fn onchain_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
     use pythia_core::onchain_live as oc;
-    let (r1, r2, r3, r4) = (root.clone(), root.clone(), root.clone(), root);
+    let (r1, r2, r3, r4) = (root.clone(), root.clone(), root.clone(), root.clone());
+    let (r5, r6) = (root.clone(), root);
     Router::new()
+        .route(
+            // The owner's controls: Stop (paused) and the books' share, with what the trader applies.
+            "/api/onchain/live/control",
+            get(move || {
+                let root = r5.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    Json(oc::control_in(&r)).into_response()
+                }
+            })
+            .post(move |Json(patch): Json<pythia_core::pumpfun_live::ControlPatch>| {
+                let root = r6.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    let what = patch.what();
+                    match oc::write_control_in(&r, patch, now_ms()) {
+                        Ok(c) => {
+                            tracing::warn!("on-chain control set from the app: {what}");
+                            Json(c).into_response()
+                        }
+                        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+                    }
+                }
+            }),
+        )
         .route(
             "/api/onchain/live",
             get(move || {

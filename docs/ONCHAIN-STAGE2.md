@@ -707,6 +707,40 @@ JTO und POPCAT behalten ihre eigene Swap-Grenze). Beide Bücher zugleich: `books
 `book_usd` gilt dann je Buch, `max_total_usd` (Alpha höchstens 100 USD) für die ganze Wallet. Danach den Dienst
 neu starten; die Wallet-Seite zeigt je Buch, ob es handeln darf und warum nicht.
 
+### Limits nach Wallet
+
+Deine Entscheidung vom 2026-10-23: im Alpha-Test keine festen Geldgrenzen mehr, die Wallet selbst ist die
+Grenze. Eine Zeile in `/etc/pythia/onchain-live-ack` (mit `mode=alpha` oder `mode=test`); `max_total_usd`,
+`max_trade_usd`, `max_daily_loss_usd` und `max_convert_usd` braucht es dann nicht mehr, `book_usd` hat keinen
+festen Höchstwert. Wirkt mit der nächsten Prüfung des Tors (spätestens nach einer Minute); sicherer ist ein
+Neustart des Dienstes:
+
+```
+limits=wallet
+book_usd=500
+```
+
+Ohne `limits=wallet` bleibt alles wie oben. Mit der Zeile gilt:
+
+- höchstens der Wert der Wallet insgesamt, höchstens 25 % davon pro Swap (`live_gate.WALLET_MAX_SWAP_SHARE`;
+  eine größere Order eines Buchs wird wie bisher in mehrere Swaps geteilt),
+- keine Tagesverlustgrenze über die Wallet hinaus,
+- deine Umtausche bis zum Wert der Wallet am Tag.
+
+Was dich weiter schützt: Guard (keine Überweisung, nur der geplante Swap), Simulation innerhalb von 24 Stunden,
+Notschalter, SOL-Reserve für Gebühren, Kosten- und Preisprüfung gegen Jupiter und Kraken, Liste der Coins,
+Ledger gegen Chain, der Watcher (er warnt, wenn das SOL nicht mehr für einen Swap reicht) und die eigenen
+Grenzen der `[meme]`-Sektion. App und `status.json` zeigen "limits: wallet" und die Grenzen in Dollar.
+
+**Du kannst damit die ganze Wallet verlieren.** Lade nur auf, was du komplett verlieren kannst.
+
+Auf der Seite "Wallet" gibt es das Feld "Master" (wirkt innerhalb von Sekunden, `reports/onchain_live/control.json`):
+der **Anteil der Wallet**, den die Bücher nutzen dürfen (5 bis 100 % oder ein eigener Wert ab 1 %; ersetzt
+`book_usd`, auf die Bücher der Datei gleich verteilt; ohne `limits=wallet` nur nach unten), und **Stop / Start**:
+Stop heißt ab sofort keine Buch-Trades und keine Meme-Käufe; was die Wallet hält, bleibt liegen (Meme-Ausstiege
+folgen weiter ihrem Paper-Buch, deine Umtausche gehen weiter). Start fragt nach. Der Notschalter bleibt davon
+unabhängig. Jede Änderung schickt eine Karte.
+
 ### Die Messung jedes Swaps
 
 Für jeden gesendeten Swap schreibt der Händler eine Zeile nach `live/onchain/execution.jsonl`: Signal bis Senden

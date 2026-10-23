@@ -76,3 +76,11 @@ def test_posted_once_then_hourly_and_the_all_clear():
     assert len(W.decide(found, st, NOW + 3_600)[0]) == 1
     posts, _ = W.decide({}, st, NOW + 120)
     assert posts == [("On-Chain-Wallet: wieder in Ordnung", "Der On-Chain-Händler läuft wieder normal.")]
+
+
+def test_with_limits_wallet_a_too_small_wallet_is_said_and_the_owners_pause_is_quiet():
+    wl = {"kind": "wallet", "max_total_usd": 700.0, "max_trade_usd": 175.0, "max_daily_loss_usd": None}
+    assert W.problems(status(limits=wl, control={"paused": True, "limits": "wallet"}), "running", [], NOW) == {}
+    p = W.problems(status(limits=wl, low={"have": 0.01, "need": 0.0302, "unit": "SOL"}), "running", [], NOW)
+    assert set(p) == {"low"} and "0.010 SOL" in p["low"]
+    assert "low" not in W.problems(status(t=NOW * 1000 - 600_000, low={"have": 0.0, "need": 1.0}), "running", [], NOW)

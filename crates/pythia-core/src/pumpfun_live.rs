@@ -16,14 +16,19 @@
 //! service ever ran. Nothing here reads a key or moves money; there is no
 //! withdraw or transfer anywhere in Pythia.
 //!
-//! Two writes, both of which can only make the live book safer:
+//! Three writes, none of which can raise a cap of the confirmation file or the code:
 //!
 //! - `live_settings.json`: limits the owner sets in the app. Each must be a
 //!   positive number at or below what the confirmation file allows (and the
 //!   hard maxima in code); the lab takes the lowest of them again.
+//! - `control.json`: the owner's master controls (the same file for the on-chain
+//!   trader): Stop (`paused`, no new buys, open positions still sold by their
+//!   exits) and the stake as a share of the wallet. The app may set and clear
+//!   both. Without `limits=wallet` in the confirmation file the share can only
+//!   go down to the default (at most 10 %); the lab checks it again.
 //! - `KILL`: the kill switch. The live book stops buying and sells what is open.
-//!   Nothing here deletes it: allowing buys again means deleting the file on the
-//!   server by hand.
+//!   Nothing here deletes it (Stop is separate and leaves it alone): allowing
+//!   buys again means deleting the file on the server by hand.
 
 use std::path::{Path, PathBuf};
 
@@ -66,16 +71,31 @@ pub struct AckView {
     pub max_total_sol: Option<f64>,
     pub max_daily_loss_sol: Option<f64>,
     pub max_trade_sol: Option<f64>,
+    /// "wallet" (limits follow the wallet) or "fixed".
+    pub limits: Option<String>,
+    /// The stake per trade as a share of the base, as the confirmation file sets it.
+    pub stake_share: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 pub struct Limits {
+    /// "wallet" or "fixed". With wallet limits the daily loss and total are null (no such limit).
+    pub kind: Option<String>,
     pub max_trade_sol: Option<f64>,
     pub max_open: Option<u32>,
     pub max_exposure_sol: Option<f64>,
     pub max_daily_loss_sol: Option<f64>,
     pub max_total_sol: Option<f64>,
+}
+
+/// The stake per trade the service uses now, and why.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub struct Stake {
+    pub sol: Option<f64>,
+    pub why: Option<String>,
+    pub share: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -148,6 +168,11 @@ pub struct LiveStatus {
     pub simulate: Option<Simulation>,
     pub exposure_sol: f64,
     pub skipped: std::collections::BTreeMap<String, u64>,
+    pub stake: Option<Stake>,
+    /// The owner's controls as the service applies them.
+    pub control: Option<StatusControl>,
+    /// The wallet is below what one trade needs; null when it is not.
+    pub low: Option<Low>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -265,6 +290,8 @@ pub struct LiveView {
     /// One euro in US dollars (Kraken's EURUSD, same shape), for the Real money
     /// page's euro totals of the dollar autopilots; none when it could not be read.
     pub eur_usd: Option<SolEur>,
+    /// The owner's `control.json` as written, shown while the service is down too.
+    pub control: ControlFile,
 }
 
 /// The price of one SOL in euro from Kraken's public ticker (pair SOLEUR, no key).
@@ -354,6 +381,7 @@ pub fn view_in(root: &Path, now_ms: i64) -> LiveView {
         now_ms,
         sol_eur: None,
         eur_usd: None,
+        control: read_control(&d),
     }
 }
 
@@ -382,7 +410,7 @@ pub fn trends_in(root: &Path) -> serde_json::Value {
 pub fn stamps_in(root: &Path) -> (Vec<Option<std::time::SystemTime>>, Option<std::time::SystemTime>) {
     let d = dir_in(root);
     let m = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    let view = ["live_status.json", "live_trades.json", "execution.json", "live_settings.json", "KILL"]
+    let view = ["live_status.json", "live_trades.json", "execution.json", "live_settings.json", "KILL", "control.json"]
         .into_iter()
         .map(|f| m(d.join(f)))
         .collect();
@@ -406,6 +434,7 @@ pub fn view() -> LiveView {
             now_ms: now,
             sol_eur: None,
             eur_usd: None,
+            control: ControlFile::default(),
         },
     }
 }
@@ -541,6 +570,190 @@ pub fn write_settings_in(root: &Path, patch: SettingsPatch, now_ms: i64) -> Resu
 pub fn write_settings(patch: SettingsPatch) -> Result<LiveSettings, String> {
     let root = data_dir().ok_or_else(|| "No lab data folder is set (PYTHIA_DATA).".to_string())?;
     write_settings_in(&root, patch, chrono::Utc::now().timestamp_millis())
+}
+
+// ── the owner's master controls (control.json, both live bots) ──
+
+/// The share a control may set, inclusive.
+pub const CONTROL_MIN_SHARE: f64 = 0.01;
+pub const CONTROL_MAX_SHARE: f64 = 1.0;
+/// pump.fun without `limits=wallet` in the confirmation file: the share can only go this high.
+pub const FIXED_MAX_SHARE: f64 = 0.10;
+
+/// The owner's `control.json` (snake_case on disk, camelCase to the app). Missing or
+/// malformed reads as no override and not paused.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub struct ControlFile {
+    /// 0.01 to 1.0, or null: the confirmation file's value applies.
+    pub share: Option<f64>,
+    /// Stop: no new buys or book trades; open positions are still managed.
+    pub paused: bool,
+    pub set_at: Option<i64>,
+    pub share_set_at: Option<i64>,
+    pub paused_at: Option<i64>,
+}
+
+/// The same file as written to disk.
+#[derive(Serialize)]
+struct ControlDisk {
+    share: Option<f64>,
+    paused: bool,
+    set_at: Option<i64>,
+    share_set_at: Option<i64>,
+    paused_at: Option<i64>,
+}
+
+/// What the app posts. A missing field keeps the current value; `resetShare` sets the share
+/// back to null (the confirmation file's value).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlPatch {
+    pub share: Option<f64>,
+    pub reset_share: Option<bool>,
+    pub paused: Option<bool>,
+}
+
+impl ControlPatch {
+    /// What the patch changes, in words for the log.
+    pub fn what(&self) -> String {
+        let mut out = Vec::new();
+        if let Some(p) = self.paused {
+            out.push(if p { "paused".to_string() } else { "resumed".to_string() });
+        }
+        if let Some(s) = self.share {
+            out.push(format!("share {:.0} %", s * 100.0));
+        }
+        if self.reset_share == Some(true) {
+            out.push("share back to the confirmation file".to_string());
+        }
+        out.join(", ")
+    }
+}
+
+/// The status's `control` object: the owner's controls as the bot applies them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub struct StatusControl {
+    /// "wallet" or "fixed".
+    pub limits: Option<String>,
+    /// The share in force (on-chain: null when the confirmation file's book_usd rules).
+    pub share: Option<f64>,
+    /// "default", "ack" or "owner".
+    pub share_source: Option<String>,
+    pub share_since: Option<i64>,
+    pub ack_share: Option<f64>,
+    /// The owner's value from control.json, even when it could only lower.
+    pub requested_share: Option<f64>,
+    pub paused: bool,
+    pub paused_since: Option<i64>,
+    pub note: Option<String>,
+    /// False when control.json was malformed (the last good values stay).
+    pub control_ok: Option<bool>,
+    /// On-chain only: the USD per book in force, and the confirmation file's.
+    pub book_usd: Option<f64>,
+    pub ack_book_usd: Option<f64>,
+}
+
+/// The wallet is below what one trade needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub struct Low {
+    pub have: Option<f64>,
+    pub need: Option<f64>,
+    /// "SOL" or "USD".
+    pub unit: Option<String>,
+}
+
+/// The control routes' answer: the file, and what the bot last reported it applies.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlView {
+    #[serde(flatten)]
+    pub file: ControlFile,
+    /// The status file's `control`; null without a status.
+    pub effective: Option<StatusControl>,
+}
+
+/// `control.json` in a bot's report folder `dir`; missing or malformed is the default.
+pub fn read_control(dir: &Path) -> ControlFile {
+    read(&dir.join("control.json")).unwrap_or_default()
+}
+
+/// The bounds every bot shares: something to change, not share and reset at once, a share
+/// from 1 % to 100 %.
+pub fn check_control(patch: &ControlPatch) -> Result<(), String> {
+    let reset = patch.reset_share == Some(true);
+    if patch.share.is_none() && !reset && patch.paused.is_none() {
+        return Err("Nothing to change: send share, resetShare or paused.".into());
+    }
+    if reset && patch.share.is_some() {
+        return Err("Send a share or resetShare, not both.".into());
+    }
+    if let Some(s) = patch.share {
+        if !s.is_finite() || !(CONTROL_MIN_SHARE..=CONTROL_MAX_SHARE).contains(&s) {
+            return Err("The share must be a number from 0.01 to 1.0 (1 % to 100 %).".into());
+        }
+    }
+    Ok(())
+}
+
+/// Check `patch`, then write it over `control.json` in `dir` (temp file, then rename). Missing
+/// fields keep their value; `share_set_at` moves when the share changes (null after a reset),
+/// `paused_at` when Stop turns on (kept while it stays on, null when it is off).
+pub fn write_control(dir: &Path, patch: &ControlPatch, now_ms: i64) -> Result<ControlFile, String> {
+    check_control(patch)?;
+    let old = read_control(dir);
+    let mut c = old.clone();
+    if patch.reset_share == Some(true) {
+        c.share = None;
+        c.share_set_at = None;
+    } else if let Some(s) = patch.share {
+        c.share = Some(s);
+        c.share_set_at = if old.share == Some(s) { old.share_set_at.or(Some(now_ms)) } else { Some(now_ms) };
+    }
+    match patch.paused {
+        Some(true) => c.paused_at = if old.paused { old.paused_at.or(Some(now_ms)) } else { Some(now_ms) },
+        Some(false) => c.paused_at = None,
+        None => {}
+    }
+    if let Some(p) = patch.paused {
+        c.paused = p;
+    }
+    c.set_at = Some(now_ms);
+    let disk = ControlDisk { share: c.share, paused: c.paused, set_at: c.set_at, share_set_at: c.share_set_at, paused_at: c.paused_at };
+    let body = serde_json::to_vec_pretty(&disk).map_err(|e| e.to_string())?;
+    let p = dir.join("control.json");
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join("control.json.tmp");
+        std::fs::write(&tmp, &body)?;
+        std::fs::rename(&tmp, &p)
+    };
+    write().map_err(|e| format!("The controls could not be saved: {e}"))?;
+    Ok(c)
+}
+
+/// The pump.fun bot's controls and what its last status says it applies.
+pub fn control_in(root: &Path) -> ControlView {
+    let d = dir_in(root);
+    ControlView { file: read_control(&d), effective: read::<LiveStatus>(&d.join("live_status.json")).and_then(|s| s.control) }
+}
+
+/// Save the pump.fun bot's controls. While a status exists whose confirmation file does not say
+/// `limits=wallet`, the share can only go down to 10 % at most (an unreadable status counts as not).
+pub fn write_control_in(root: &Path, patch: ControlPatch, now_ms: i64) -> Result<ControlView, String> {
+    check_control(&patch)?;
+    let d = dir_in(root);
+    let status = d.join("live_status.json");
+    if patch.share.is_some_and(|s| s > FIXED_MAX_SHARE + 1e-12) && status.exists() {
+        let wallet = read::<LiveStatus>(&status).is_some_and(|s| s.ack.limits.as_deref() == Some("wallet"));
+        if !wallet {
+            return Err("Without limits=wallet in the confirmation file the share can only be lowered, at most 10 %.".into());
+        }
+    }
+    write_control(&d, &patch, now_ms)?;
+    Ok(control_in(root))
 }
 
 // ── the kill switch ──

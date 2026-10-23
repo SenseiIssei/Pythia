@@ -11,6 +11,9 @@ container runs. Problems, each posted once when it starts and once an hour while
   - the service is running but not trading, with its reason (the gate, a stop, the kill switch)
   - the last dry run (the 24 h test gate) failed or is older than SIM_WARN_H
   - positions from before a restart wait to be sold, or one is stuck
+  - with limits=wallet: the wallet is below what one trade needs (the status's "low"); there is no daily
+    loss limit or total budget then, so nothing is said about them
+The owner's own pause from the app (the status's control.paused) is not a problem: it is not reported.
 It never restarts, stops or changes anything; its only file is its own state.
 
     python3 pumpfun_live_watch.py [--data /srv/pythia-data] [--dry-run]
@@ -57,7 +60,13 @@ def problems(status: dict | None, running: bool | None, now: float) -> dict[str,
     age = now - (status.get("t") or 0) / 1000
     if running is not False and age > STALE_S:
         out["stale"] = f"Der Live-Bot hat seit {age / 60:.0f} Minuten keinen Status geschrieben (hängt er?)."
-    if running is not False and age <= STALE_S and status.get("running") and not status.get("on"):
+    low = status.get("low") if running is not False and age <= STALE_S and status.get("running") else None
+    if low:
+        out["low"] = (f"Die Wallet reicht nicht mehr für einen Trade: {low.get('have') or 0:.3f} SOL, nötig sind "
+                      f"{low.get('need') or 0:.3f} SOL. Bitte SOL nachladen; bis dahin kauft der Bot nichts.")
+    paused = bool((status.get("control") or {}).get("paused"))   # the owner's Stop: what he wanted, no alarm
+    if running is not False and age <= STALE_S and status.get("running") and not status.get("on") \
+            and not paused and not low:
         why = status.get("refusing") or "; ".join(status.get("gate") or []) or "unbekannt"
         stops = status.get("stops") or {}
         if status.get("kill"):

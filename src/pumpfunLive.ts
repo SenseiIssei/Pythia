@@ -15,6 +15,67 @@ export interface PumpfunAck {
   maxTotalSol: number | null;
   maxDailyLossSol: number | null;
   maxTradeSol: number | null;
+  /** "wallet": the limits follow the wallet (stake as a share of it); "fixed" or missing: the SOL amounts above. */
+  limits?: LimitsKind | null;
+  /** The stake per trade as a share of the base the file sets; null: the code default (10 %). */
+  stakeShare?: number | null;
+}
+
+/** Where a bot's limits come from: the wallet (a share of it, no daily loss or total budget) or fixed amounts. */
+export type LimitsKind = "wallet" | "fixed";
+
+/** Where the share in force comes from: the code default, the confirmation file, or the owner's override in the app. */
+export type ShareSource = "default" | "ack" | "owner";
+
+/** The owner's master controls as the bot applies them (its status file's `control`, both bots). */
+export interface StatusControl {
+  limits: LimitsKind | null;
+  /** The share in force (on-chain: null while the file's book size rules). */
+  share: number | null;
+  shareSource: ShareSource | null;
+  /** When the owner set it (only for shareSource "owner"). */
+  shareSince: number | null;
+  /** The file's share or the default (pump.fun); null on-chain. */
+  ackShare: number | null;
+  /** The owner's value from control.json, even when it could only lower. */
+  requestedShare: number | null;
+  paused: boolean;
+  pausedSince: number | null;
+  /** Plain words, e.g. why a requested share was lowered. */
+  note: string | null;
+  /** False when control.json was malformed (the last good values stay). */
+  controlOk: boolean;
+  /** On-chain: the USD per book in force and the file's. */
+  bookUsd?: number | null;
+  ackBookUsd?: number | null;
+}
+
+/** The wallet is below what one trade needs. */
+export interface LowFunds {
+  have: number | null;
+  need: number | null;
+  unit: string | null;
+}
+
+/** The owner's control file as the engine wrote it (shown while the service is down). */
+export interface ControlFile {
+  share: number | null;
+  paused: boolean;
+  setAt: number | null;
+  shareSetAt: number | null;
+  pausedAt: number | null;
+}
+
+/** What the Master panel posts; a missing field keeps the current value. */
+export interface ControlPatch {
+  share?: number;
+  resetShare?: boolean;
+  paused?: boolean;
+}
+
+/** The engine's answer to reading or writing the control file. */
+export interface ControlAnswer extends ControlFile {
+  effective: StatusControl | null;
 }
 
 export interface PumpfunLimits {
@@ -23,6 +84,7 @@ export interface PumpfunLimits {
   maxExposureSol: number | null;
   maxDailyLossSol: number | null;
   maxTotalSol: number | null;
+  kind?: LimitsKind | null;
 }
 
 export interface PumpfunPosition {
@@ -66,6 +128,10 @@ export interface PumpfunStatus {
   simulate: { t: number | null; ok: boolean | null; venue: string | null; mint: string | null } | null;
   exposureSol: number;
   skipped: Record<string, number>;
+  /** The stake per trade now and why ("50 % of 0.90 SOL (limits: wallet)"). */
+  stake?: { sol: number | null; why: string | null; share?: number | null } | null;
+  control?: StatusControl | null;
+  low?: LowFunds | null;
 }
 
 export interface PumpfunTrade {
@@ -138,6 +204,8 @@ export interface PumpfunView {
   solEur?: SolEur | null;
   /** One euro in US dollars (Kraken's EURUSD, same shape) for the Real money page; null when it could not be read. */
   eurUsd?: SolEur | null;
+  /** The owner's control file (share, Stop), read even while the service is down. */
+  control?: ControlFile | null;
 }
 
 export interface SolEur {
@@ -197,6 +265,18 @@ export async function pumpfunKill(): Promise<{ killFile: boolean; path: string; 
   return asJson(await fetch(`${serverUrl()}/api/pumpfun/live/kill`, { method: "POST" }));
 }
 
+/** The owner's master controls: the share of the wallet per trade and Stop / Start (not the kill switch). */
+export async function pumpfunControl(patch: ControlPatch): Promise<ControlAnswer> {
+  if (!canControl()) throw new Error("The master controls work through the connected backend on the server.");
+  return asJson<ControlAnswer>(
+    await fetch(`${serverUrl()}/api/pumpfun/live/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  );
+}
+
 // ── what the page says ──
 
 export function sol(v: number | null | undefined, signed = false, dp = 4): string {
@@ -246,6 +326,9 @@ export function stateLine(v: PumpfunView): StateLine {
   }
   if (!s || !v.running) {
     return { label: "Live service not running", level: "off", detail: "Nothing trades. The owner starts the live service by hand on the server (docs/PUMPFUN-LIVE.md)." };
+  }
+  if (v.control?.paused || s.control?.paused) {
+    return { label: "Paused by you", level: "warn", detail: "No new buys; open positions are still sold by their exits. Start again in the Master panel." };
   }
   if (s.stops.total) return { label: "Total budget used up", level: "bad", detail: "The total budget stop fired; no more buys. Only a new confirmation file changes that." };
   if (s.stops.daily) return { label: "Daily loss stop", level: "warn", detail: "No more buys until tomorrow (UTC)." };

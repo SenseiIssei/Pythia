@@ -183,7 +183,7 @@ class MemeTrader(LX.Trader):
             total = v.total_usd()
             if total is None:
                 return "the wallet's USD value is not known (a price is missing)"
-            if total > ack.cap("total"):
+            if total > ack.cap("total", total):
                 return f"the wallet is worth {total:.2f} USD, above max_total_usd: no buys"
         if LX.realised(LX.day_of(v.t))["meme_swaps"] >= LG.MEME_MAX_SWAPS_DAY:
             return f"already {LG.MEME_MAX_SWAPS_DAY} meme swaps today"

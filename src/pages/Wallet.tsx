@@ -1,14 +1,15 @@
 // The Wallet tab: everything about our own wallets in one place, laid out like
 // a wallet app. The on-chain wallet first (its worth in dollars and euro, the
 // value over time, the coins with their 24 h change, the deposit address with QR
-// code, the gate's state in plain words: locked, alpha or test), then swap (the
-// conversion flow with its quote preview and 60 s confirm), the history read
-// from the chain, the kill switch, and the pump.fun bot's wallet as a second,
-// read-only card. There is no send-out button: Pythia never moves money out of
-// a wallet; the page says how to withdraw. Opens on its own with
+// code, the gate's state in plain words: locked, alpha or test, the Master panel
+// with the share of the wallet, Stop and Start), then swap (the conversion flow
+// with its quote preview and 60 s confirm), the history read from the chain, the
+// kill switch, and the pump.fun bot's wallet as a second card (read only) with
+// its own Master panel. There is no send-out button: Pythia never moves money
+// out of a wallet; the page says how to withdraw. Opens on its own with
 // `?page=wallet&embed=1` (the owner's DevPanel).
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownLeft, ArrowRightLeft, ExternalLink, History as HistoryIcon, QrCode } from "lucide-react";
 import { AreaChart, BigNumber, Card, Change, Notice, Page } from "../design";
 import { LoadingRows, More, Row, Section } from "../pagekit";
@@ -20,6 +21,7 @@ import { canControl, pumpfunLive, short, sol, type PumpfunView } from "../pumpfu
 import { canControlOnchain, solscanAccount, totalChange24h, totalMoney, usdText, valueLine, walletState, type OnchainView } from "../onchainLive";
 import { Assets, GateState, History, KillSwitch, Ledger, ModeBadge, Receive, Swap, useOnchainLive, when } from "./OnchainWallet";
 import { CopyAddress } from "./PumpfunWallet";
+import { OnchainMaster, PumpfunMaster } from "../components/MasterPanel";
 
 const PF_POLL_MS = 30_000;
 
@@ -27,20 +29,23 @@ const PF_POLL_MS = 30_000;
 function usePumpfunWallet(active: boolean) {
   const [v, setV] = useState<PumpfunView | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    if (!active || !canControl()) return;
-    const load = () =>
+  const load = useCallback(
+    () =>
       pumpfunLive()
         .then((nv) => {
           setV(nv);
           setErr(null);
         })
-        .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+        .catch((e) => setErr(e instanceof Error ? e.message : String(e))),
+    [],
+  );
+  useEffect(() => {
+    if (!active || !canControl()) return;
     void load();
     const id = window.setInterval(() => void load(), PF_POLL_MS);
     return () => window.clearInterval(id);
-  }, [active]);
-  return { v, err };
+  }, [active, load]);
+  return { v, err, load };
 }
 
 /** The worth, its change over 24 hours, the value over time, and the shortcuts. */
@@ -145,6 +150,7 @@ export function WalletBody({
   pf,
   pfErr,
   embedded,
+  onPfChanged,
 }: {
   v: OnchainView;
   offset: number;
@@ -152,6 +158,7 @@ export function WalletBody({
   pf: PumpfunView | null;
   pfErr: string | null;
   embedded: boolean;
+  onPfChanged?: () => void;
 }) {
   const st = walletState(v);
   return (
@@ -163,6 +170,7 @@ export function WalletBody({
       )}
       <Overview v={v} />
       <GateState v={v} />
+      <OnchainMaster v={v} onDone={onChanged} />
       <Assets v={v} />
       <div id="wallet-receive-section">
         <Receive v={v} />
@@ -174,6 +182,7 @@ export function WalletBody({
         <History v={v} />
       </div>
       <PumpfunCard v={pf} err={pfErr} embedded={embedded} />
+      {pf && <PumpfunMaster v={pf} onDone={() => onPfChanged?.()} />}
       <KillSwitch v={v} onDone={onChanged} />
       <Section title="How to withdraw">
         <div className="space-y-2 text-sm leading-relaxed text-muted">
@@ -219,7 +228,7 @@ export function Wallet() {
         ) : !v ? (
           <LoadingRows rows={4} label="Reading the on-chain wallet" />
         ) : (
-          <WalletBody v={v} offset={offset} onChanged={() => void load()} pf={pf.v} pfErr={pf.err} embedded={embedded} />
+          <WalletBody v={v} offset={offset} onChanged={() => void load()} pf={pf.v} pfErr={pf.err} embedded={embedded} onPfChanged={() => void pf.load()} />
         )}
       </Page>
     </div>

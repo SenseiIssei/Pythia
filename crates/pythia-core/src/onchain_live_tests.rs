@@ -436,3 +436,74 @@ fn a_proposal_carries_its_price_impact_fee_and_slippage_to_the_app() {
     assert_eq!(json["feeSol"], 0.000355);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+fn share(s: f64) -> ControlPatch {
+    ControlPatch { share: Some(s), ..ControlPatch::default() }
+}
+
+#[test]
+fn the_controls_take_a_share_from_one_to_a_hundred_percent_and_stop_both_ways() {
+    let d = temp("control");
+    assert_eq!(control_in(&d), ControlView::default());
+    // The trader's status does not limit the share here (no 10 % rule; the trader keeps its caps).
+    status(&d);
+    for ok in [0.01, 0.5, 1.0] {
+        assert_eq!(write_control_in(&d, share(ok), NOW).unwrap().file.share, Some(ok), "{ok}");
+    }
+    for bad in [0.0099, 1.01, f64::NAN] {
+        assert!(write_control_in(&d, share(bad), NOW + 1).unwrap_err().contains("0.01 to 1.0"), "{bad}");
+    }
+    assert!(write_control_in(&d, ControlPatch::default(), NOW).is_err());
+    let both = ControlPatch { share: Some(0.5), reset_share: Some(true), paused: None };
+    assert!(write_control_in(&d, both, NOW).is_err());
+    let stop = |p: bool| ControlPatch { paused: Some(p), ..ControlPatch::default() };
+    let v = write_control_in(&d, stop(true), NOW + 10).unwrap();
+    assert_eq!((v.file.share, v.file.share_set_at, v.file.paused, v.file.paused_at), (Some(1.0), Some(NOW), true, Some(NOW + 10)));
+    assert_eq!(write_control_in(&d, stop(true), NOW + 20).unwrap().file.paused_at, Some(NOW + 10));
+    let v = write_control_in(&d, stop(false), NOW + 30).unwrap();
+    assert_eq!((v.file.paused, v.file.paused_at, v.file.set_at), (false, None, Some(NOW + 30)));
+    let v = write_control_in(&d, ControlPatch { reset_share: Some(true), ..ControlPatch::default() }, NOW + 40).unwrap();
+    assert_eq!((v.file.share, v.file.share_set_at), (None, None));
+    let disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir_in(&d).join("control.json")).unwrap()).unwrap();
+    assert_eq!(disk, serde_json::json!({"share": null, "paused": false, "set_at": NOW + 40, "share_set_at": null, "paused_at": null}));
+    assert!(!kill_path_in(&d).exists(), "Stop never touches the kill file");
+    // A malformed file reads as none, in the view too.
+    std::fs::write(dir_in(&d).join("control.json"), "[1, 2").unwrap();
+    assert_eq!(control_in(&d).file, ControlFile::default());
+    assert_eq!(view_in(&d, NOW).control, ControlFile::default());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_status_carries_the_wallet_limits_and_the_controls() {
+    let d = temp("control-status");
+    status(&d);
+    let mut s: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir_in(&d).join("status.json")).unwrap()).unwrap();
+    s["ack"]["limits"] = serde_json::json!("wallet");
+    s["limits"] = serde_json::json!({"kind": "wallet", "max_total_usd": 245.0, "max_trade_usd": 61.25,
+                                     "max_daily_loss_usd": null, "max_convert_usd": 245.0});
+    s["control"] = serde_json::json!({"limits": "wallet", "share": 0.5, "share_source": "owner", "share_since": NOW - 5,
+                                      "ack_share": null, "requested_share": 0.5, "paused": true, "paused_since": NOW - 3,
+                                      "note": null, "control_ok": false, "book_usd": 122.5, "ack_book_usd": 150.0});
+    s["low"] = serde_json::json!({"have": 0.01, "need": 0.03, "unit": "SOL"});
+    std::fs::write(dir_in(&d).join("status.json"), s.to_string()).unwrap();
+    let v = view_in(&d, NOW);
+    let st = v.status.as_ref().unwrap();
+    assert_eq!(st.ack.as_ref().unwrap().limits.as_deref(), Some("wallet"));
+    assert_eq!(st.limits.as_ref().unwrap().kind.as_deref(), Some("wallet"));
+    let c = st.control.as_ref().unwrap();
+    assert_eq!((c.book_usd, c.ack_book_usd, c.paused, c.control_ok), (Some(122.5), Some(150.0), true, Some(false)));
+    let json = serde_json::to_value(&v).unwrap();
+    assert_eq!(json["status"]["ack"]["limits"], "wallet");
+    assert!(json["status"]["limits"]["maxDailyLossUsd"].is_null());
+    assert_eq!(json["status"]["control"]["bookUsd"], 122.5);
+    assert_eq!(json["status"]["control"]["ackBookUsd"], 150.0);
+    assert_eq!(json["status"]["control"]["pausedSince"], NOW - 3);
+    assert_eq!(json["status"]["control"]["controlOk"], false);
+    assert_eq!(json["status"]["low"]["need"], 0.03);
+    assert_eq!(json["control"], serde_json::json!({"share": null, "paused": false, "setAt": null, "shareSetAt": null, "pausedAt": null}));
+    let cv = serde_json::to_value(control_in(&d)).unwrap();
+    assert_eq!(cv["effective"]["bookUsd"], 122.5);
+    assert_eq!(cv["paused"], false);
+    let _ = std::fs::remove_dir_all(&d);
+}

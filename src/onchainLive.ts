@@ -9,7 +9,7 @@
 import { liveMode } from "./live";
 import { serverUrl } from "./engine/serverEngine";
 import { usdToEur } from "./realMoney";
-import type { SolEur } from "./pumpfunLive";
+import type { ControlAnswer, ControlFile, ControlPatch, LimitsKind, LowFunds, ShareSource, SolEur, StatusControl } from "./pumpfunLive";
 
 export interface OnchainBalance {
   coin: string;
@@ -39,6 +39,8 @@ export interface OnchainAck {
   maxConvertUsd: number | null;
   expires: string | null;
   onKill: string | null;
+  /** "wallet": the caps follow the wallet's value; "fixed" or missing: the file's amounts. */
+  limits?: LimitsKind | null;
 }
 
 export interface OnchainHard {
@@ -56,6 +58,7 @@ export interface OnchainLimits {
   maxTradeUsd: number | null;
   maxDailyLossUsd: number | null;
   maxConvertUsd: number | null;
+  kind?: LimitsKind | null;
 }
 
 export interface OnchainCoin {
@@ -87,6 +90,10 @@ export interface OnchainStatus {
   books: { book: string; allowed: boolean; why: string | null }[];
   reconcile: { t: number | null; ok: boolean | null; diffs: string[] } | null;
   stops: { daily: boolean; total: boolean };
+  /** The owner's master controls as the trader applies them. */
+  control?: StatusControl | null;
+  /** The wallet is below what one trade needs. */
+  low?: LowFunds | null;
 }
 
 export interface OnchainTrade {
@@ -192,6 +199,8 @@ export interface OnchainView {
   history: OnchainHistoryEntry[];
   /** When the history job last read the chain. */
   historyMs: number | null;
+  /** The owner's control file (share, Stop), read even while the trader is down. */
+  control?: ControlFile | null;
 }
 
 // ── reading the view: anything malformed becomes null or empty, never a throw ──
@@ -214,6 +223,42 @@ function coin(o: Obj): OnchainCoin | null {
   const c = str(o.coin);
   if (!c) return null;
   return { coin: c, symbol: str(o.symbol), mint: str(o.mint), decimals: num(o.decimals), allowed: bool(o.allowed) };
+}
+
+const kindOf = (x: unknown): LimitsKind | null => (x === "wallet" || x === "fixed" ? x : null);
+const SOURCES: readonly ShareSource[] = ["default", "ack", "owner"];
+
+/** The status file's `control` (camelCase), or null. */
+export function parseStatusControl(x: unknown): StatusControl | null {
+  const o = obj(x);
+  if (!o) return null;
+  const src = str(o.shareSource) as ShareSource | null;
+  return {
+    limits: kindOf(o.limits),
+    share: num(o.share),
+    shareSource: src && SOURCES.includes(src) ? src : null,
+    shareSince: num(o.shareSince),
+    ackShare: num(o.ackShare),
+    requestedShare: num(o.requestedShare),
+    paused: bool(o.paused),
+    pausedSince: num(o.pausedSince),
+    note: str(o.note),
+    controlOk: o.controlOk !== false,
+    bookUsd: num(o.bookUsd),
+    ackBookUsd: num(o.ackBookUsd),
+  };
+}
+
+/** The control file as the engine serves it, or null. */
+export function parseControlFile(x: unknown): ControlFile | null {
+  const o = obj(x);
+  if (!o) return null;
+  return { share: num(o.share), paused: bool(o.paused), setAt: num(o.setAt), shareSetAt: num(o.shareSetAt), pausedAt: num(o.pausedAt) };
+}
+
+function lowFunds(x: unknown): LowFunds | null {
+  const o = obj(x);
+  return o ? { have: num(o.have), need: num(o.need), unit: str(o.unit) } : null;
 }
 
 function status(x: unknown): OnchainStatus | null {
@@ -250,6 +295,7 @@ function status(x: unknown): OnchainStatus | null {
           maxConvertUsd: num(ack.maxConvertUsd),
           expires: str(ack.expires),
           onKill: str(ack.onKill),
+          limits: kindOf(ack.limits),
         }
       : null,
     hard: hard
@@ -264,7 +310,7 @@ function status(x: unknown): OnchainStatus | null {
         }
       : null,
     limits: limits
-      ? { maxTotalUsd: num(limits.maxTotalUsd), maxTradeUsd: num(limits.maxTradeUsd), maxDailyLossUsd: num(limits.maxDailyLossUsd), maxConvertUsd: num(limits.maxConvertUsd) }
+      ? { maxTotalUsd: num(limits.maxTotalUsd), maxTradeUsd: num(limits.maxTradeUsd), maxDailyLossUsd: num(limits.maxDailyLossUsd), maxConvertUsd: num(limits.maxConvertUsd), kind: kindOf(limits.kind) }
       : null,
     coins: list(o.coins, coin),
     kill: bool(o.kill),
@@ -272,6 +318,8 @@ function status(x: unknown): OnchainStatus | null {
     books: list(o.books, (b) => (str(b.book) ? { book: str(b.book) as string, allowed: bool(b.allowed), why: str(b.why) } : null)),
     reconcile: rec ? { t: num(rec.t), ok: typeof rec.ok === "boolean" ? rec.ok : null, diffs: strs(rec.diffs) } : null,
     stops: { daily: bool(stops?.daily), total: bool(stops?.total) },
+    control: parseStatusControl(o.control),
+    low: lowFunds(o.low),
   };
 }
 
@@ -372,6 +420,7 @@ export function parseOnchainView(x: unknown): OnchainView {
     values: list(o.values, valuePoint).sort((a, b) => a.t - b.t),
     history: list(o.history, historyEntry).sort((a, b) => (b.t ?? 0) - (a.t ?? 0)),
     historyMs: num(o.historyMs),
+    control: parseControlFile(o.control),
   };
 }
 
@@ -433,6 +482,14 @@ export async function onchainConfirm(id: string): Promise<{ id: string; confirme
 export async function onchainKill(): Promise<{ killFile: boolean; path: string; already: boolean }> {
   if (!canControlOnchain()) throw new Error(NO_SERVER);
   return post("/api/onchain/live/kill");
+}
+
+/** The owner's master controls: the share of the wallet the books may use and Stop / Start (not the kill switch). */
+export async function onchainControl(patch: ControlPatch): Promise<ControlAnswer> {
+  if (!canControlOnchain()) throw new Error(NO_SERVER);
+  const r = await post<Record<string, unknown>>("/api/onchain/live/control", patch);
+  const f = parseControlFile(r) ?? { share: null, paused: false, setAt: null, shareSetAt: null, pausedAt: null };
+  return { ...f, effective: parseStatusControl(r?.effective) };
 }
 
 // ── what the section says ──
@@ -547,9 +604,11 @@ export function gateReasons(v: Pick<OnchainView, "status" | "running" | "killFil
     out.push("The trader is not running. It stays locked until the owner arms it on the server (docs/ONCHAIN-STAGE2.md).");
     return out;
   }
-  if (s.on && v.running && !v.killFile && !s.kill) return s.gate.filter(Boolean);
+  const paused = s.control?.paused ? ["Paused by you: no book trades; your conversions still work."] : [];
+  if (s.on && v.running && !v.killFile && !s.kill) return [...paused, ...s.gate.filter(Boolean)];
   if (!v.running) out.push(s.running ? "The trader's status is more than two minutes old." : "The trader says it has stopped.");
   if (s.kill && !v.killFile) out.push("The trader reports a kill file.");
+  out.push(...paused);
   if (s.stops.total) out.push("The total loss stop has fired.");
   if (s.stops.daily) out.push("The daily loss stop has fired; trading resumes tomorrow (UTC).");
   for (const g of s.gate) if (g && !out.includes(g)) out.push(g);
@@ -585,8 +644,11 @@ export function walletState(v: Pick<OnchainView, "status" | "running" | "killFil
   const s = v.status;
   const alpha = (s?.mode ?? s?.ack?.mode) === "alpha";
   const lim = s?.limits;
+  const wallet = (lim?.kind ?? s?.control?.limits ?? s?.ack?.limits) === "wallet";
   const caps = lim?.maxTradeUsd != null && lim.maxTotalUsd != null
-    ? ` At most ${usdText(lim.maxTradeUsd)} a swap, ${usdText(lim.maxTotalUsd)} in the wallet${lim.maxDailyLossUsd != null ? `, ${usdText(lim.maxDailyLossUsd)} loss a day` : ""}.`
+    ? wallet
+      ? ` Limits: wallet. At most ${usdText(lim.maxTradeUsd)} a swap (a quarter of the wallet), ${usdText(lim.maxTotalUsd)} in all (the wallet's value), no daily loss limit (the wallet is the limit).`
+      : ` At most ${usdText(lim.maxTradeUsd)} a swap, ${usdText(lim.maxTotalUsd)} in the wallet${lim.maxDailyLossUsd != null ? `, ${usdText(lim.maxDailyLossUsd)} loss a day` : ""}.`
     : "";
   if (v.killFile || s?.kill) {
     return { mode: "locked", alpha, label: "Locked: kill switch", words: "The kill switch is on: nothing is swapped until the kill file is deleted on the server.", tone: "bad" };

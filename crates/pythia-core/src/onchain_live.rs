@@ -24,15 +24,20 @@
 //! key, signs, sends or moves money; there is no withdraw or transfer anywhere
 //! in Pythia.
 //!
-//! Three writes, none of which can move money by itself:
+//! Four writes, none of which can move money by itself:
 //!
 //! - `convert/<id>.request.json`: the owner asks for a quote. The trader answers
 //!   with a proposal (or refuses), checked again by its own guard.
 //! - `convert/<id>.confirm.json`: the owner accepts that proposal, only while it
 //!   is fresh. It names the proposal and its minimum out, so the trader can only
 //!   carry out exactly what was shown.
-//! - `KILL`: the kill switch. Nothing here deletes it: allowing trades again
-//!   means deleting the file on the server by hand.
+//! - `control.json`: the owner's master controls (the same file as the pump.fun
+//!   bot's): Stop (`paused`, no new book trades, the owner's conversions still
+//!   work) and the share of the wallet's USD value the books may use. The app may
+//!   set and clear both; the trader keeps its own caps.
+//! - `KILL`: the kill switch. Nothing here deletes it (Stop is separate and
+//!   leaves it alone): allowing trades again means deleting the file on the
+//!   server by hand.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +45,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::labview::data_dir;
-use crate::pumpfun_live::{is_address, KillState, SolEur};
+use crate::pumpfun_live::{
+    check_control, is_address, read_control, write_control, ControlFile, ControlPatch, ControlView, KillState, Low, SolEur,
+    StatusControl,
+};
 
 /// The trader writes its status every 30 s; older than this, it is not running.
 pub const STALE_MS: i64 = 120_000;
@@ -108,6 +116,8 @@ pub struct Ack {
     pub max_convert_usd: Option<f64>,
     pub expires: Option<String>,
     pub on_kill: Option<String>,
+    /// "wallet" (limits follow the wallet's value) or "fixed".
+    pub limits: Option<String>,
 }
 
 /// The caps in the trader's code.
@@ -126,6 +136,8 @@ pub struct Hard {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 pub struct Limits {
+    /// "wallet" or "fixed".
+    pub kind: Option<String>,
     pub max_total_usd: Option<f64>,
     pub max_trade_usd: Option<f64>,
     pub max_daily_loss_usd: Option<f64>,
@@ -195,6 +207,10 @@ pub struct Status {
     pub books: Vec<BookState>,
     pub reconcile: Option<Reconcile>,
     pub stops: Stops,
+    /// The owner's controls as the trader applies them.
+    pub control: Option<StatusControl>,
+    /// The wallet is below what one trade needs; null when it is not.
+    pub low: Option<Low>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -514,6 +530,8 @@ pub struct OnchainView {
     pub history: Vec<HistoryEntry>,
     /// When the history job last read the chain.
     pub history_ms: Option<i64>,
+    /// The owner's `control.json` as written, shown while the trader is down too.
+    pub control: ControlFile,
 }
 
 /// The value chart's points from `values.json`, oldest first; odd points are passed over.
@@ -577,6 +595,7 @@ pub fn view_in(root: &Path, now_ms: i64) -> OnchainView {
         values: values_in(root),
         history,
         history_ms,
+        control: read_control(&d),
     }
 }
 
@@ -693,6 +712,21 @@ pub fn confirm_in(root: &Path, id: &str, now_ms: i64) -> Result<(), String> {
     let c = Confirm { id: id.into(), proposal_t, min_out_raw, t: now_ms };
     let body = serde_json::to_vec_pretty(&c).map_err(|e| e.to_string())?;
     write_atomic(&dir.join(format!("{id}.confirm.json")), &body).map_err(|e| format!("The confirmation could not be written: {e}"))
+}
+
+// ── the owner's master controls ──
+
+/// The trader's controls and what its last status says it applies.
+pub fn control_in(root: &Path) -> ControlView {
+    let d = dir_in(root);
+    ControlView { file: read_control(&d), effective: read::<Status>(&d.join("status.json")).and_then(|s| s.control) }
+}
+
+/// Save the trader's controls (the shared bounds; the trader keeps its own caps).
+pub fn write_control_in(root: &Path, patch: ControlPatch, now_ms: i64) -> Result<ControlView, String> {
+    check_control(&patch)?;
+    write_control(&dir_in(root), &patch, now_ms)?;
+    Ok(control_in(root))
 }
 
 // ── the kill switch ──

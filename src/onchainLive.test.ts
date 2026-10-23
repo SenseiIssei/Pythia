@@ -218,6 +218,28 @@ describe("gateReasons and onOff", () => {
   });
 });
 
+describe("the owner's master controls in the view", () => {
+  it("reads control, low and the limits' kind, and old files without them", () => {
+    const v = view(
+      { control: { share: 0.5, paused: true, setAt: T, shareSetAt: T, pausedAt: T } },
+      { on: true, gate: [], ack: { mode: "test", limits: "wallet" }, limits: { kind: "wallet", maxTotalUsd: 245, maxTradeUsd: 61.25, maxDailyLossUsd: null, maxConvertUsd: 245 },
+        control: { limits: "wallet", share: 0.5, shareSource: "owner", shareSince: T, ackShare: null, requestedShare: 0.5, paused: true, pausedSince: T, note: null, controlOk: true, bookUsd: 122.5, ackBookUsd: 150 },
+        low: { have: 0.01, need: 0.03, unit: "SOL" } },
+    );
+    expect(v.control).toEqual({ share: 0.5, paused: true, setAt: T, shareSetAt: T, pausedAt: T });
+    expect(v.status?.control).toMatchObject({ shareSource: "owner", bookUsd: 122.5, paused: true });
+    expect(v.status?.low).toEqual({ have: 0.01, need: 0.03, unit: "SOL" });
+    expect(v.status?.ack?.limits).toBe("wallet");
+    expect(gateReasons(v)).toEqual(["Paused by you: no book trades; your conversions still work."]);
+    const old = view();
+    expect(old.control).toBeNull();
+    expect(old.status?.control).toBeNull();
+    expect(old.status?.low).toBeNull();
+    expect(old.status?.limits?.kind).toBeNull();
+    expect(parseOnchainView(raw({}, { control: { shareSource: "someone", controlOk: "x" } })).status?.control).toMatchObject({ shareSource: null, controlOk: true, paused: false });
+  });
+});
+
 describe("the engine's routes", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

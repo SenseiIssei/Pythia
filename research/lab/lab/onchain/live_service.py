@@ -25,6 +25,11 @@ What it does while on:
     when the paper book closed the position
   - on the kill switch with on_kill=usdc in the ack: every coin but SOL sold into USDC
   - the ledger reconciled against the wallet every 30 s (live_exec.reconcile)
+  - the owner's master controls from the app (reports/onchain_live/control.json, written by the engine, read
+    every 2 s, pumpfun_rt.live_exec.Control): the share of the wallet's value the books may use (over the
+    ack's book_usd; without limits=wallet only lower) and a pause (Stop): no book trades and no meme buys from
+    that moment, what the wallet holds stays (meme exits still follow their paper book, the owner's converts
+    and the kill switch work as before); each change posts its card
 
 Every STATUS_S it writes, for the engine and the app (snake_case):
   reports/onchain_live/status.json   on or off and why, address, balances in USD, the day,
@@ -42,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import signal
 import sys
@@ -60,6 +66,7 @@ STATUS_S = 30.0
 GATE_S = 60.0
 CONVERT_S = 2.0
 BOOK_S = 60.0
+CONTROL_S = PX.CONTROL_S
 REQUEST_MAX_MS = 600_000                 # a request nobody could propose for in 10 min expires
 CONFIRM_GRACE_MS = 15_000                # a confirm written inside the 60 s is taken this long after
 KEEP_MS = 7 * 86_400_000
@@ -157,8 +164,10 @@ class Service:
         self.books: list[dict] = []
         self.memes: list[dict] = []
         self.meme_trader = None
-        self.last = {"status": -1e18, "gate": -1e18, "convert": -1e18, "book": -1e18}
+        self.last = {"status": -1e18, "gate": -1e18, "convert": -1e18, "book": -1e18, "control": -1e18}
         self.stopped = False
+        self.control = PX.Control(LG.reports_dir() / "control.json", name="onchain live")
+        self.control.poll(force=True)                    # what the owner set before this start: no card
 
     # ------------------------------------------------ start and gate
 
@@ -194,10 +203,14 @@ class Service:
                 LX.baseline(self.view)                  # every start: what the wallet holds now is the base
                 self.trader.reconciled = {"t": self.view.t, "ok": True, "diffs": []}
             mode = self.gate.ack.mode
-            print(f"onchain live: ON ({mode}) for {self.gate.address}", flush=True)
+            lim = ", limits: wallet" if self.gate.ack.wallet else ""
+            print(f"onchain live: ON ({mode}{lim}) for {self.gate.address}", flush=True)
             if self.alerts:
                 _post("On-chain wallet: live" + (" (Alpha phase)" if mode == "alpha" else ""),
-                      f"The on-chain trader is on ({mode} mode) for {self.gate.address}.")
+                      f"The on-chain trader is on ({mode} mode{lim}) for {self.gate.address}."
+                      + (" The wallet's value is the limit: a swap at most a quarter of it, no daily loss cap; "
+                         "the wallet can be lost completely." if self.gate.ack.wallet else "")
+                      + (f" {PX.paused_text(self.control.paused_since())}." if self.control.paused else ""))
         else:
             print("onchain live: nothing swaps. Why:\n  - " + "\n  - ".join(self.why or ["see above"])
                   + "\nFix it and restart the service.", flush=True)
@@ -221,6 +234,52 @@ class Service:
         """Called while a swap waits for its landing: the status stays fresh."""
         if self.clock() - self.last["status"] >= STATUS_S:
             self.write_status()
+
+    # ------------------------------------------------ the owner's master controls
+
+    def books_money(self) -> dict:
+        """The share of the wallet's value the books may use, in force, and the USD per book it gives: the owner's
+        share from the app (split evenly over the ack's books; without limits=wallet only when it is lower than
+        the ack's book_usd), else the ack's book_usd."""
+        ack, c = self.gate.ack, self.control
+        total = self.view.total_usd() if self.view is not None else None
+        n = max(1, len(ack.books))
+        out = {"share": None, "source": "ack", "since": None, "book_usd": ack.book_usd if ack.books else None,
+               "note": None}
+        if c.share is None:
+            return out
+        if not ack.books:
+            return {**out, "note": "the confirmation file names no books"}
+        own = None if total is None else c.share * total / n
+        if ack.wallet or (own is not None and own < ack.book_usd):
+            return {"share": c.share, "source": "owner", "since": c.good["share_set_at"] or c.good["set_at"],
+                    "book_usd": own, "note": None if own is not None else "the wallet's USD value is not known"}
+        if own is None:
+            return {**out, "note": "the wallet's USD value is not known"}
+        return {**out, "note": f"the owner's share {c.share * 100:g} % ({own:.2f} USD a book) is not below book_usd "
+                               f"{ack.book_usd:g}: without limits=wallet in the confirmation file it can only lower"}
+
+    def control_view(self) -> dict:
+        m, ack = self.books_money(), self.gate.ack
+        return PX.control_view(ack.wallet, {"share": m["share"], "source": m["source"], "since": m["since"],
+                                            "ack_share": None, "note": m["note"]}, self.control,
+                               {"book_usd": m["book_usd"], "ack_book_usd": ack.book_usd if ack.books else None})
+
+    def poll_control(self) -> list[str]:
+        """control.json, every CONTROL_S from step(): each change posts its card and the status is written at once."""
+        changes = self.control.poll(force=True)
+        if not changes:
+            return []
+        ctl = self.control_view()
+        print(f"onchain live: the owner's control: {', '.join(changes)} (share {ctl['share']}, "
+              f"{'paused' if ctl['paused'] else 'not paused'})", flush=True)
+        if self.alerts:
+            PX.post_control("onchain", changes, ctl)
+        self.write_status()                              # the app sees it at once
+        return changes
+
+    def paused_why(self) -> str | None:
+        return PX.paused_text(self.control.paused_since()) if self.control.paused else None
 
     # ------------------------------------------------ the wallet
 
@@ -267,10 +326,12 @@ class Service:
                    "convert_usd": r["convert_usd"]}
         lim = None
         if ack.mode:
-            lim = {"max_total_usd": ack.cap("total"), "max_trade_usd": ack.cap("trade"),
-                   "max_daily_loss_usd": ack.cap("daily_loss"), "max_convert_usd": ack.cap("convert"),
+            fin = lambda x: None if x is None or math.isinf(x) else x   # no such limit beyond the wallet: null
+            lim = {"max_total_usd": ack.cap("total", total), "max_trade_usd": ack.cap("trade", total),
+                   "max_daily_loss_usd": fin(ack.cap("daily_loss", total)),
+                   "max_convert_usd": ack.cap("convert", total),
                    "meme_max_total_usd": ack.meme_cap("total"), "meme_max_trade_usd": ack.meme_cap("trade"),
-                   "meme_max_daily_loss_usd": ack.meme_cap("daily_loss")}
+                   "meme_max_daily_loss_usd": ack.meme_cap("daily_loss"), "kind": "wallet" if ack.wallet else "fixed"}
         loss = -(day["pnl_usd"]) if day["pnl_usd"] is not None else None
         sim = _read(LG.simulate_path())
         rec = self.trader.reconciled if self.trader is not None else None
@@ -283,9 +344,20 @@ class Service:
                            "allowed": c in ack.mints} for c, m in LG.CODES.items()],
                 "kill": LG.killed(), "simulate": {"t": sim.get("t"), "ok": sim.get("ok")} if isinstance(sim, dict) else None,
                 "books": self.books, "memes": self.memes, "reconcile": rec,
-                "stops": {"daily": bool(lim and loss is not None and loss >= lim["max_daily_loss_usd"]),
+                "stops": {"daily": bool(lim and loss is not None and lim["max_daily_loss_usd"] is not None
+                                        and loss >= lim["max_daily_loss_usd"]),
                           "total": bool(lim and total is not None and total > lim["max_total_usd"])},
-                "frozen": list(v.frozen) if v is not None else []}
+                "frozen": list(v.frozen) if v is not None else [],
+                "control": self.control_view(), "low": self.low()}
+
+    def low(self) -> dict | None:
+        """limits=wallet: the wallet is below what one swap needs (the SOL for its fees and the reserve), else None."""
+        if not self.gate.ack.wallet or self.view is None:
+            return None
+        need = LG.RESERVE_L + G.MAX_PRIORITY_L + G.BASE_FEE_L + PX.X.HELIUS_MAX_TIP_LAMPORTS + G.ATA_RENT_L
+        if self.view.sol_l < need:
+            return {"have": self.view.sol_l / 1e9, "need": need / 1e9, "unit": "SOL"}
+        return None
 
     def write_status(self) -> None:
         self.last["status"] = self.clock()
@@ -454,8 +526,13 @@ class Service:
         proof = _read(LG.proof_path())
         now = LX.now_ms()
         out = []
+        money = self.books_money()
         for name in ack.books:
             why = LG.book_problems(name, ack, proof, now)
+            if not why and self.control.paused:
+                why = [self.paused_why()]                # the owner's Stop: no book trades, the holdings stay
+            if not why and money["book_usd"] is None:
+                why = ["the book's money is not known (the wallet's USD value is missing)"]
             strategy = B.BOOKS.get(name, {}).get("signal", "")        # the signal the book's paper twin follows
             sig, sig_why = B.read_signal(ROOT, now, strategy) if not why else (None, "")
             if not why and sig is None:
@@ -472,7 +549,7 @@ class Service:
                 signal_ms = now
             state[name] = sid                            # once per signal, whatever happens to its swaps
             PX.write_json(LG.data_dir() / "books.json", state)
-            for s in LX.book_swaps(name, ack, self.view, sig.get("weights") or {}):
+            for s in LX.book_swaps(name, ack, self.view, sig.get("weights") or {}, money["book_usd"]):
                 s.signal_ms = signal_ms
                 r = self.trader.execute(s, self.view, gate_why=self.gate_why)
                 self._after(r, s)
@@ -518,7 +595,7 @@ class Service:
                     continue
                 for s in mt.sales(rule, mint, pos["raw"], self.view):
                     self._after_meme(mt.execute(s, self.view, gate_why=self.gate_why), s)
-            if why:
+            if why or self.control.paused:              # the owner's Stop: no meme buys, the exits above go on
                 continue
             for pid, p in opens.items():
                 if pid in done or not 0 <= now - int(p.get("opened_ms") or 0) <= ML.SIGNAL_MAX_MS:
@@ -550,7 +627,7 @@ class Service:
         for code in self.gate.ack.mints:
             if code in ("SOL", "USDC") or self.view.held(code) <= 0:
                 continue
-            lim = self.gate.ack.cap("trade")
+            lim = self.gate.ack.cap("trade", self.view.total_usd())
             usd = self.view.usd(code)
             raw = self.view.held(code)
             if usd and usd > lim:
@@ -567,6 +644,9 @@ class Service:
         if now - self.last["gate"] >= GATE_S:
             self.last["gate"] = now
             self.recheck()
+        if now - self.last["control"] >= CONTROL_S:
+            self.last["control"] = now
+            self.poll_control()
         if now - self.last["status"] >= STATUS_S:
             self.refresh_view()
             self.reconcile()

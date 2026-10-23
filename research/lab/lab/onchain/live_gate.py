@@ -29,6 +29,14 @@ test mode): there the books the ack names trade without the proof, so the owner 
 measure our own models with small real money, under the lower ALPHA_MAX_* below; every other
 gate, the guard, the caps, the kill switch and the watcher stay exactly as in test mode.
 
+With limits=wallet in the ack (test or alpha, the owner's decision 2026-10-23) the money limits follow the
+wallet instead of the fixed ones (Ack.cap): at most the wallet's value in all, WALLET_MAX_SWAP_SHARE of it a
+swap (a book order above it is split as before), the owner's converts up to the wallet's value a day, no daily
+loss cap beyond the wallet; max_total_usd, max_trade_usd, max_daily_loss_usd and max_convert_usd are not needed
+and do not apply, book_usd has no fixed maximum. Everything else stays: the guard, the simulation within 24 h,
+the kill switch, the SOL reserve, the cost and price checks, the allowlist, the ledger against the chain, the
+watcher, and the meme section's own MEME_MAX_* caps. The owner accepts that the wallet can be lost completely.
+
 A meme rule (lab.onchain.meme, docs/ONCHAIN-MEME.md) buys real money only when, on top of every gate
 above, the ack names it in its own [meme] section (rules=, max_total_usd, max_trade_usd,
 max_daily_loss_usd, each at most MEME_MAX_* below), its pre-registered paper proof passed
@@ -75,6 +83,7 @@ ALPHA_MAX_TRADE_USD = 25.0
 ALPHA_MAX_DAILY_LOSS_USD = 25.0
 ALPHA_MAX_CONVERT_USD = 100.0
 MODES = ("test", "alpha")
+WALLET_MAX_SWAP_SHARE = 0.25             # limits=wallet: a swap at most this share of the wallet's value
 HARD = {"test": {"total": TEST_MAX_TOTAL_USD, "trade": TEST_MAX_TRADE_USD, "daily_loss": TEST_MAX_DAILY_LOSS_USD,
                  "convert": TEST_MAX_CONVERT_USD},
         "alpha": {"total": ALPHA_MAX_TOTAL_USD, "trade": ALPHA_MAX_TRADE_USD, "daily_loss": ALPHA_MAX_DAILY_LOSS_USD,
@@ -186,9 +195,15 @@ class Ack:
     meme_max_trade_usd: float | None = None
     meme_max_daily_loss_usd: float | None = None
     meme_problems: tuple = ()            # a bad [meme] section shuts the meme rules only
+    limits: str = "fixed"                # "wallet": the money limits follow the wallet's value
+
+    @property
+    def wallet(self) -> bool:
+        return self.mode in MODES and self.limits == "wallet"
 
     def view(self) -> dict:
-        return {"mode": self.mode, "books": list(self.books), "mints": list(self.mints), "book_usd": self.book_usd,
+        return {"mode": self.mode, "limits": self.limits, "books": list(self.books), "mints": list(self.mints),
+                "book_usd": self.book_usd,
                 "max_total_usd": self.max_total_usd, "max_trade_usd": self.max_trade_usd,
                 "max_daily_loss_usd": self.max_daily_loss_usd, "max_convert_usd": self.max_convert_usd,
                 "expires": self.expires, "on_kill": self.on_kill,
@@ -207,11 +222,19 @@ class Ack:
     def allowed_mints(self) -> frozenset:
         return frozenset(CODES[c].mint for c in self.mints if c in CODES)
 
-    def cap(self, k: str) -> float:
-        """The limit in force: the ack's value, never above its mode's hard maximum (0 without a valid mode)."""
+    def cap(self, k: str, wallet_usd: float | None = None) -> float:
+        """The limit in force: the ack's value, never above its mode's hard maximum (0 without a valid mode).
+        With limits=wallet it follows `wallet_usd`, the wallet's value now: the value in all and for the day's
+        converts, WALLET_MAX_SWAP_SHARE of it a swap, no daily loss cap (inf); 0 while the value is not known."""
         hard = HARD.get(self.mode or "")
         if hard is None:
             return 0.0
+        if self.wallet:
+            if k == "daily_loss":
+                return math.inf
+            if wallet_usd is None or not math.isfinite(wallet_usd) or wallet_usd <= 0:
+                return 0.0
+            return wallet_usd * (WALLET_MAX_SWAP_SHARE if k == "trade" else 1.0)
         v = {"total": self.max_total_usd, "trade": self.max_trade_usd, "daily_loss": self.max_daily_loss_usd,
              "convert": self.max_convert_usd}[k]
         return min(v or 0.0, hard[k])
@@ -263,6 +286,10 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
     if mode not in MODES:
         return Ack(problems=(f"{path}: mode must be test or alpha, not {mode or 'missing'!r}",))
     hard = HARD[mode]
+    limits = (vals.get("limits") or "fixed").lower()
+    if limits not in ("fixed", "wallet"):
+        problems.append(f"{path}: limits must be wallet or fixed, not {limits!r}")
+        limits = "fixed"
     split = lambda s: tuple(x.strip() for x in (s or "").replace(";", ",").split(",") if x.strip())
     mints = tuple(c.upper() for c in split(vals.get("mints")))
     if not mints:
@@ -271,15 +298,20 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
         if c not in CODES:
             problems.append(f"{path}: {c} is not on the stage-2 list ({', '.join(CODES)})")
     books = split(vals.get("books"))
-    total = _usd(vals, "max_total_usd", path, hard["total"], problems)
-    trade = _usd(vals, "max_trade_usd", path, hard["trade"], problems)
-    loss = _usd(vals, "max_daily_loss_usd", path, hard["daily_loss"], problems)
-    conv = _usd(vals, "max_convert_usd", path, hard["convert"], problems)
-    book_usd = 0.0
-    if books:
-        book_usd = _usd(vals, "book_usd", path, hard["total"], problems) or 0.0
-        if total is not None and book_usd > total:
-            problems.append(f"{path}: book_usd is above max_total_usd")
+    total = trade = loss = conv = None
+    if limits == "wallet":
+        # The wallet is the limit: the four money caps do not apply (Ack.cap), book_usd has no fixed maximum.
+        book_usd = (_usd(vals, "book_usd", path, math.inf, problems) or 0.0) if books else 0.0
+    else:
+        total = _usd(vals, "max_total_usd", path, hard["total"], problems)
+        trade = _usd(vals, "max_trade_usd", path, hard["trade"], problems)
+        loss = _usd(vals, "max_daily_loss_usd", path, hard["daily_loss"], problems)
+        conv = _usd(vals, "max_convert_usd", path, hard["convert"], problems)
+        book_usd = 0.0
+        if books:
+            book_usd = _usd(vals, "book_usd", path, hard["total"], problems) or 0.0
+            if total is not None and book_usd > total:
+                problems.append(f"{path}: book_usd is above max_total_usd")
     on_kill = (vals.get("on_kill") or "hold").lower()
     if on_kill not in ("hold", "usdc"):
         problems.append(f"{path}: on_kill must be hold or usdc")
@@ -312,7 +344,7 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
             m_problems.append(f"{path}: {k} does not belong here")
         m_problems = [f"[meme] {w}" for w in m_problems]
     return Ack(mode, books, mints, book_usd, total, trade, loss, conv, expires, on_kill, tuple(problems),
-               m_rules, m_total, m_trade, m_loss, tuple(m_problems))
+               m_rules, m_total, m_trade, m_loss, tuple(m_problems), limits)
 
 
 def hard_view(mode: str | None = None) -> dict:
@@ -323,6 +355,7 @@ def hard_view(mode: str | None = None) -> dict:
             "small_max_trade_usd": min(SMALL_MAX_TRADE_USD, hard["trade"]), "reserve_sol": RESERVE_L / 1e9,
             "max_converts": MAX_CONVERTS_DAY, "max_book_swaps": MAX_BOOK_SWAPS_DAY, "confirm_s": CONFIRM_S,
             "max_cost_bps": MAX_COST_BPS, "max_eth_share": MAX_ETH_SHARE,
+            "wallet_max_swap_share": WALLET_MAX_SWAP_SHARE,
             "meme_max_total_usd": MEME_MAX_TOTAL_USD, "meme_max_trade_usd": MEME_MAX_TRADE_USD,
             "meme_max_daily_loss_usd": MEME_MAX_DAILY_LOSS_USD}
 

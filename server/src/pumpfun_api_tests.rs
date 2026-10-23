@@ -149,3 +149,73 @@ async fn the_trends_are_read_only() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[tokio::test]
+async fn the_owners_controls_round_trip_and_bad_input_is_refused() {
+    let d = root("control");
+    let (code, v) = call(&d, "GET", "/api/pumpfun/live/control", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(v, serde_json::json!({"share": null, "paused": false, "setAt": null, "shareSetAt": null, "pausedAt": null, "effective": null}));
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"paused": true, "share": 0.05}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!((v["paused"].clone(), v["share"].clone()), (serde_json::json!(true), serde_json::json!(0.05)));
+    assert!(v["pausedAt"].is_i64() && v["shareSetAt"].is_i64() && v["setAt"].is_i64());
+    let disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("reports/pumpfun_rt/control.json")).unwrap()).unwrap();
+    assert_eq!((disk["paused"].clone(), disk["share"].clone()), (serde_json::json!(true), serde_json::json!(0.05)));
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live", None).await;
+    assert_eq!((v["control"]["paused"].clone(), v["control"]["share"].clone()), (serde_json::json!(true), serde_json::json!(0.05)));
+    // The app clears Stop itself; the share stays.
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"paused": false}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!((v["paused"].clone(), v["pausedAt"].clone(), v["share"].clone()), (serde_json::json!(false), serde_json::Value::Null, serde_json::json!(0.05)));
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"share": 0.0099}),
+        serde_json::json!({"share": 1.01}),
+        serde_json::json!({"share": 0.5, "resetShare": true}),
+    ] {
+        let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(body.clone())).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body} {v}");
+        assert!(v["error"].is_string(), "{body} {v}");
+    }
+    for body in [serde_json::json!({"paused": true, "kill": false}), serde_json::json!({"share": "all"})] {
+        let (code, _) = call(&d, "POST", "/api/pumpfun/live/control", Some(body.clone())).await;
+        assert!(code.is_client_error(), "{body}");
+    }
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/control", None).await;
+    assert_eq!((v["share"].clone(), v["paused"].clone()), (serde_json::json!(0.05), serde_json::json!(false))); // nothing refused was kept
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"resetShare": true}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(v["share"].is_null() && v["shareSetAt"].is_null());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn the_share_goes_above_ten_percent_only_with_wallet_limits_and_effective_is_the_status() {
+    let d = root("control-ten");
+    write_status(&d);
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"share": 0.5}))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("limits=wallet"), "{v}");
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/control", None).await;
+    assert!(v["share"].is_null() && v["effective"].is_null());
+    let s = serde_json::json!({
+        "t": now_ms(), "running": true, "on": true, "mode": "test",
+        "ack": {"mode": "test", "limits": "wallet", "stake_share": 0.1},
+        "control": {"limits": "wallet", "share": 0.1, "share_source": "ack", "share_since": null, "ack_share": 0.1,
+                    "requested_share": null, "paused": false, "paused_since": null, "note": null, "control_ok": true}
+    });
+    std::fs::write(d.join("reports/pumpfun_rt/live_status.json"), s.to_string()).unwrap();
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/control", Some(serde_json::json!({"share": 0.5}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["share"], 0.5);
+    assert_eq!(v["effective"]["shareSource"], "ack");
+    assert_eq!(v["effective"]["ackShare"], 0.1);
+    assert_eq!(v["effective"]["controlOk"], true);
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live", None).await;
+    assert_eq!(v["status"]["ack"]["limits"], "wallet");
+    assert_eq!(v["status"]["control"]["shareSource"], "ack");
+    assert_eq!(v["control"]["share"], 0.5);
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -115,7 +115,15 @@ fn limits_can_only_be_set_below_the_confirmation_file() {
 
 #[test]
 fn ceilings_never_exceed_the_hard_maxima() {
-    let ack = AckView { mode: Some("test".into()), strategy: None, max_total_sol: Some(9.0), max_daily_loss_sol: Some(9.0), max_trade_sol: Some(9.0) };
+    let ack = AckView {
+        mode: Some("test".into()),
+        strategy: None,
+        max_total_sol: Some(9.0),
+        max_daily_loss_sol: Some(9.0),
+        max_trade_sol: Some(9.0),
+        limits: None,
+        stake_share: None,
+    };
     let c = ceilings(&ack).unwrap();
     assert_eq!((c.max_total_sol, c.max_daily_loss_sol, c.max_trade_sol), (Some(2.0), 0.5, 0.25));
     let small = AckView { max_trade_sol: Some(0.1), ..ack.clone() };
@@ -190,6 +198,8 @@ fn the_feed_is_passed_on_and_every_file_moves_its_stamp() {
     assert!(view1[0].is_some() && feed1.is_some());
     std::fs::write(kill_path_in(&d), "x").unwrap();
     assert!(stamps_in(&d).0[4].is_some(), "the kill file changes the view");
+    write_control_in(&d, ControlPatch { paused: Some(true), ..ControlPatch::default() }, NOW).unwrap();
+    assert!(stamps_in(&d).0[5].is_some(), "the owner's controls change the view");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -212,5 +222,153 @@ fn the_trends_file_and_the_dexscreener_list_are_passed_on() {
     assert_eq!(trends_in(&d)["dexscreener"]["items"], serde_json::json!([]));
     std::fs::write(dir_in(&d).join("trends.json"), "{not json").unwrap();
     assert!(trends_in(&d)["trends"].is_null());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+fn share(s: f64) -> ControlPatch {
+    ControlPatch { share: Some(s), ..ControlPatch::default() }
+}
+
+fn paused(p: bool) -> ControlPatch {
+    ControlPatch { paused: Some(p), ..ControlPatch::default() }
+}
+
+#[test]
+fn the_share_is_taken_from_one_to_a_hundred_percent_only() {
+    let d = temp("control-bounds");
+    for ok in [0.01, 0.05, 0.1, 1.0] {
+        assert_eq!(write_control_in(&d, share(ok), NOW).unwrap().file.share, Some(ok), "{ok}");
+    }
+    for bad in [0.0099, 1.01, 0.0, -0.5, f64::NAN, f64::INFINITY] {
+        let e = write_control_in(&d, share(bad), NOW + 1).unwrap_err();
+        assert!(e.contains("0.01 to 1.0"), "{bad}: {e}");
+    }
+    assert_eq!(control_in(&d).file.share, Some(1.0)); // a refused write changes nothing
+    let both = ControlPatch { share: Some(0.5), reset_share: Some(true), paused: None };
+    assert!(write_control_in(&d, both, NOW).unwrap_err().contains("not both"));
+    assert!(write_control_in(&d, ControlPatch::default(), NOW).unwrap_err().contains("Nothing to change"));
+    let no_reset = ControlPatch { reset_share: Some(false), ..ControlPatch::default() };
+    assert!(write_control_in(&d, no_reset, NOW).unwrap_err().contains("Nothing to change"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn missing_fields_keep_their_value_and_the_times_follow_the_changes() {
+    let d = temp("control-keep");
+    let v = write_control_in(&d, share(0.05), NOW).unwrap();
+    assert_eq!((v.file.share, v.file.paused, v.file.set_at, v.file.share_set_at, v.file.paused_at), (Some(0.05), false, Some(NOW), Some(NOW), None));
+    // Stop keeps the share and its time; stopping again keeps the time Stop began.
+    let v = write_control_in(&d, paused(true), NOW + 10).unwrap();
+    assert_eq!((v.file.share, v.file.share_set_at, v.file.paused, v.file.paused_at, v.file.set_at), (Some(0.05), Some(NOW), true, Some(NOW + 10), Some(NOW + 10)));
+    let v = write_control_in(&d, paused(true), NOW + 20).unwrap();
+    assert_eq!((v.file.paused_at, v.file.set_at), (Some(NOW + 10), Some(NOW + 20)));
+    // The same share again keeps its time; another one moves it; the pause stays.
+    assert_eq!(write_control_in(&d, share(0.05), NOW + 30).unwrap().file.share_set_at, Some(NOW));
+    let v = write_control_in(&d, share(0.08), NOW + 40).unwrap();
+    assert_eq!((v.file.share_set_at, v.file.paused, v.file.paused_at), (Some(NOW + 40), true, Some(NOW + 10)));
+    // The app may clear Stop (unlike the kill file); the reset goes back to the confirmation file.
+    let v = write_control_in(&d, paused(false), NOW + 50).unwrap();
+    assert_eq!((v.file.paused, v.file.paused_at, v.file.share), (false, None, Some(0.08)));
+    let v = write_control_in(&d, ControlPatch { reset_share: Some(true), ..ControlPatch::default() }, NOW + 60).unwrap();
+    assert_eq!((v.file.share, v.file.share_set_at, v.file.set_at), (None, None, Some(NOW + 60)));
+    // On disk in the lab's spelling, nothing left behind.
+    let text = std::fs::read_to_string(dir_in(&d).join("control.json")).unwrap();
+    let disk: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(disk, serde_json::json!({"share": null, "paused": false, "set_at": NOW + 60, "share_set_at": null, "paused_at": null}));
+    assert!(!dir_in(&d).join("control.json.tmp").exists());
+    assert!(!kill_path_in(&d).exists(), "Stop never touches the kill file");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_missing_or_malformed_control_file_reads_as_no_override() {
+    let d = temp("control-bad");
+    assert_eq!(control_in(&d), ControlView::default());
+    std::fs::write(dir_in(&d).join("control.json"), "{not json").unwrap();
+    assert_eq!(control_in(&d).file, ControlFile::default());
+    assert_eq!(view_in(&d, NOW).control, ControlFile::default());
+    // A write over a malformed file starts from none.
+    let v = write_control_in(&d, paused(true), NOW).unwrap();
+    assert_eq!((v.file.share, v.file.paused, v.file.paused_at), (None, true, Some(NOW)));
+    let json = serde_json::to_value(&view_in(&d, NOW)).unwrap();
+    assert_eq!(json["control"], serde_json::json!({"share": null, "paused": true, "setAt": NOW, "shareSetAt": null, "pausedAt": NOW}));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn without_wallet_limits_the_share_only_goes_down_to_ten_percent() {
+    let d = temp("control-ten");
+    // No status yet: the bounds alone (the lab checks the confirmation file again).
+    assert!(write_control_in(&d, share(0.5), NOW).is_ok());
+    status(&d, "test", NOW);
+    let e = write_control_in(&d, share(0.11), NOW).unwrap_err();
+    assert!(e.contains("limits=wallet") && e.contains("10 %"), "{e}");
+    assert_eq!(write_control_in(&d, share(0.1), NOW).unwrap().file.share, Some(0.1));
+    // Stop and the reset need no wallet limits.
+    assert!(write_control_in(&d, paused(true), NOW).is_ok());
+    // A status that cannot be read counts as without.
+    std::fs::write(dir_in(&d).join("live_status.json"), "{broken").unwrap();
+    assert!(write_control_in(&d, share(0.2), NOW).is_err());
+    let mut s: serde_json::Value = serde_json::json!({"t": NOW, "running": true, "ack": {"mode": "test", "limits": "fixed"}});
+    std::fs::write(dir_in(&d).join("live_status.json"), s.to_string()).unwrap();
+    assert!(write_control_in(&d, share(0.2), NOW).is_err());
+    s["ack"]["limits"] = serde_json::json!("wallet");
+    std::fs::write(dir_in(&d).join("live_status.json"), s.to_string()).unwrap();
+    assert_eq!(write_control_in(&d, share(0.75), NOW).unwrap().file.share, Some(0.75));
+    assert!(write_control_in(&d, share(1.01), NOW).is_err()); // wallet limits keep the bounds
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn unknown_control_fields_are_refused() {
+    assert!(serde_json::from_str::<ControlPatch>(r#"{"paused": true, "kill": false}"#).is_err());
+    assert!(serde_json::from_str::<ControlPatch>(r#"{"share": 0.5, "maxShare": 2}"#).is_err());
+    let p: ControlPatch = serde_json::from_str(r#"{"resetShare": true}"#).unwrap();
+    assert_eq!((p.share, p.reset_share, p.paused), (None, Some(true), None));
+}
+
+#[test]
+fn the_status_carries_the_wallet_limits_the_stake_and_the_controls() {
+    let d = temp("control-status");
+    let s = serde_json::json!({
+        "t": NOW, "running": true, "on": false, "mode": "test", "refusing": "paused by the owner since 14:05 UTC",
+        "ack": {"mode": "test", "limits": "wallet", "stake_share": 0.1},
+        "limits": {"kind": "wallet", "max_trade_sol": 0.45, "max_open": 5, "max_exposure_sol": 0.8,
+                   "max_daily_loss_sol": null, "max_total_sol": null},
+        "stake": {"sol": 0.45, "why": "50 % of 0.90 SOL (limits: wallet)", "share": 0.5},
+        "control": {"limits": "wallet", "share": 0.5, "share_source": "owner", "share_since": NOW - 5,
+                    "ack_share": 0.1, "requested_share": 0.5, "paused": true, "paused_since": NOW - 3,
+                    "note": null, "control_ok": true},
+        "low": {"have": 0.2, "need": 0.25, "unit": "SOL"}
+    });
+    std::fs::write(dir_in(&d).join("live_status.json"), s.to_string()).unwrap();
+    let v = view_in(&d, NOW);
+    let st = v.status.as_ref().unwrap();
+    assert_eq!((st.ack.limits.as_deref(), st.ack.stake_share), (Some("wallet"), Some(0.1)));
+    assert_eq!(st.limits.as_ref().unwrap().kind.as_deref(), Some("wallet"));
+    assert_eq!(st.stake.as_ref().unwrap().share, Some(0.5));
+    let c = st.control.as_ref().unwrap();
+    assert_eq!((c.share_source.as_deref(), c.paused, c.paused_since, c.control_ok), (Some("owner"), true, Some(NOW - 3), Some(true)));
+    let json = serde_json::to_value(&v).unwrap();
+    assert_eq!(json["status"]["ack"]["stakeShare"], 0.1);
+    assert_eq!(json["status"]["limits"]["kind"], "wallet");
+    assert!(json["status"]["limits"]["maxDailyLossSol"].is_null());
+    assert_eq!(json["status"]["stake"]["why"], "50 % of 0.90 SOL (limits: wallet)");
+    assert_eq!(json["status"]["control"]["shareSource"], "owner");
+    assert_eq!(json["status"]["control"]["shareSince"], NOW - 5);
+    assert_eq!(json["status"]["control"]["ackShare"], 0.1);
+    assert_eq!(json["status"]["control"]["requestedShare"], 0.5);
+    assert_eq!(json["status"]["control"]["controlOk"], true);
+    assert_eq!(json["status"]["low"], serde_json::json!({"have": 0.2, "need": 0.25, "unit": "SOL"}));
+    // The control route answers the file and the status's control in one.
+    let cv = serde_json::to_value(write_control_in(&d, share(0.5), NOW).unwrap()).unwrap();
+    assert_eq!((cv["share"].clone(), cv["paused"].clone(), cv["setAt"].clone()), (serde_json::json!(0.5), serde_json::json!(false), serde_json::json!(NOW)));
+    assert_eq!(cv["effective"]["requestedShare"], 0.5);
+    assert_eq!(cv["effective"]["pausedSince"], NOW - 3);
+    // An older status without the new fields still reads.
+    status(&d, "test", NOW);
+    let st = view_in(&d, NOW).status.unwrap();
+    assert!(st.control.is_none() && st.low.is_none() && st.stake.is_none() && st.ack.limits.is_none());
+    assert!(control_in(&d).effective.is_none());
     let _ = std::fs::remove_dir_all(&d);
 }

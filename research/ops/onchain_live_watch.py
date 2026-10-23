@@ -14,6 +14,9 @@ category risk):
   - the last simulation (the 24 h gate) failed or is older than SIM_WARN_H
   - the ledger does not match the chain, or a token account of the wallet is frozen
   - a swap was sent and has not settled for HANG_S (a hanging order)
+  - with limits=wallet: the wallet is below what one swap needs (the status's "low"); there is no daily loss
+    cap or total beyond the wallet then, so the trader reports no such stop. The owner's pause from the app
+    (control.paused) is no problem and not reported.
 It never restarts, stops or changes anything; its only file is its own state.
 
     python3 onchain_live_watch.py [--data /srv/pythia-data] [--dry-run]
@@ -90,6 +93,11 @@ def problems(status: dict | None, state: str | None, orders: list[dict], now: fl
         out["daily"] = "Tagesverlust-Grenze erreicht: bis 00:00 UTC nur Verkäufe nach USDC."
     if fresh and (status.get("stops") or {}).get("total"):
         out["total"] = "Die Wallet ist mehr wert als max_total_usd: nur noch Verkäufe nach USDC."
+    low = status.get("low") if fresh else None
+    if low:
+        unit = low.get("unit") or "SOL"
+        out["low"] = (f"Die Wallet reicht nicht mehr für einen Swap: {low.get('have') or 0:.3f} {unit}, nötig sind "
+                      f"{low.get('need') or 0:.3f} {unit}. Bitte nachladen; bis dahin tauscht der Händler nichts.")
     sim = status.get("simulate") or {}
     if status.get("mode") in ("test", "alpha") and status.get("running"):
         sim_age_h = (now - (sim.get("t") or 0) / 1000) / 3600

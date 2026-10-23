@@ -27,7 +27,8 @@ second, when something moved, it writes
 With the owner's speed setting PYTHIA_PUMPFUN_WAKE (or PYTHIA_PUMPFUN_FAST) a result of the executor's
 threads wakes the loop at once instead of at the next second (docs/LATENCY.md).
 It reads reports/pumpfun_rt/live_settings.json (the app's lower limits) every
-minute. It never opens the wallet file itself (live_exec does, once, after
+minute and reports/pumpfun_rt/control.json (the owner's share and pause from the app, live_exec.Control)
+every 2 s; a change is in the status at once. It never opens the wallet file itself (live_exec does, once, after
 every gate holds); it never sends money anywhere.
 """
 
@@ -210,7 +211,8 @@ class Service:
             return False
         recent = self.book.recent[0] if self.book.recent else {}
         sig = (tuple(sorted((p["pid"], p.get("state"), p.get("left")) for p in self.book.pipe.pos.values())),
-               len(self.book.recent), recent.get("exit_ms"), tuple(sorted(self.book.exec.leftovers)))
+               len(self.book.recent), recent.get("exit_ms"), tuple(sorted(self.book.exec.leftovers)),
+               tuple(sorted(self.book.control.good.items())), self.book.control.ok)   # the owner's controls too
         changed, self.book_sig = sig != self.book_sig, sig
         return changed
 
@@ -228,7 +230,7 @@ class Service:
 
     def light_status(self) -> dict:
         ex = self.book.exec
-        return {"on": ex.closed_why is None, "balance_sol": None if self.balance_l is None else self.balance_l / 1e9,
+        return {"on": ex.closed_why is None and ex.paused_ms is None, "balance_sol": None if self.balance_l is None else self.balance_l / 1e9,
                 "balance_t": self.balance_t, "pnl_today_sol": ex.day_pnl_l / 1e9, "trades_today": ex.trades_today,
                 "wins_today": ex.wins_today, "pnl_total_sol": ex.totals["pnl_l"] / 1e9,
                 "trades_total": ex.totals["trades"], "exposure_sol": sum(ex.exposure.values()) / 1e9}

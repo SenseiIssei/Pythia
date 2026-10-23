@@ -26,7 +26,9 @@ in all, 25 a swap, 25 a day): a swap at most max_trade_usd (100, the small coins
 reached max_daily_loss_usd, or under the kill switch (a sale into USDC stays allowed when the
 ack says on_kill=usdc), the app's converts at most max_convert_usd and 10 a UTC day, a book
 40 swaps a day and never more than its book_usd, ETH at most a quarter of max_total_usd, 0.02
-SOL always left for fees, no buy while the ledger does not match the chain.
+SOL always left for fees, no buy while the ledger does not match the chain. With limits=wallet in the ack
+the money caps follow the wallet's value instead (live_gate.Ack.cap: a swap at most a quarter of it, the
+converts up to it a day, no daily loss cap or total beyond the wallet); every other check stays.
 
 Every swap that was sent is also measured (live/onchain/execution.jsonl, read by lab.onchain.execution
 for reports/onchain/execution.md): signal to send, send to land, the fee paid (base, priority, tip)
@@ -448,7 +450,10 @@ class Trader:
         in_usd = v.usd(s.src, s.in_raw)
         if in_usd is None:
             return f"no USD price for {s.src}"
-        lim = ack.cap("trade")
+        worth = v.total_usd() if ack.wallet else None      # limits=wallet: the caps follow the wallet's value
+        if ack.wallet and worth is None:
+            return "the wallet's USD value is not known (a price is missing)"
+        lim = ack.cap("trade", worth)
         if s.src in LG.SMALL or s.dst in LG.SMALL:
             lim = min(lim, LG.SMALL_MAX_TRADE_USD)
         if in_usd > lim + 1e-9:
@@ -460,10 +465,10 @@ class Trader:
         total = v.total_usd()
         if total is None:
             return "the wallet's USD value is not known (a price is missing)"
-        if not selling and total > ack.cap("total"):
+        if not selling and total > ack.cap("total", total):
             return f"the wallet is worth {total:.2f} USD, above max_total_usd: only sales into USDC"
         loss = day_loss_usd(v, total)
-        if not selling and loss is not None and loss >= ack.cap("daily_loss"):
+        if not selling and loss is not None and loss >= ack.cap("daily_loss", total):
             return f"the day's loss reached {loss:.2f} USD: only sales into USDC until tomorrow (UTC)"
         if not selling and self.reconciled is not None and not self.reconciled.get("ok"):
             return "the ledger does not match the chain: no buys until it is explained"
@@ -471,7 +476,7 @@ class Trader:
         if s.kind == "convert":
             if day["converts"] >= LG.MAX_CONVERTS_DAY:
                 return f"already {LG.MAX_CONVERTS_DAY} converts today"
-            if day["convert_usd"] + in_usd > ack.cap("convert") + 1e-9:
+            if day["convert_usd"] + in_usd > ack.cap("convert", total) + 1e-9:
                 return "the day's convert limit (max_convert_usd) would be passed"
         elif s.kind == "book":
             if s.book not in ack.books:
@@ -485,7 +490,7 @@ class Trader:
             return "an unknown kind of swap"
         if s.dst == "ETH":
             eth = (v.usd("ETH") or 0.0) + in_usd
-            if eth > LG.MAX_ETH_SHARE * ack.cap("total"):
+            if eth > LG.MAX_ETH_SHARE * ack.cap("total", total):
                 return "ETH (WETH, bridged) would pass a quarter of max_total_usd"
         reserve = LG.RESERVE_L + G.MAX_PRIORITY_L + G.BASE_FEE_L + X.HELIUS_MAX_TIP_LAMPORTS + G.ATA_RENT_L
         spend = s.in_raw if s.src == SOL_CODE else 0
@@ -908,11 +913,13 @@ def book_state(book: str, book_usd: float) -> dict:
     return {"usdc_raw": usdc, "units": {c: u for c, u in units.items() if u > 0}}
 
 
-def book_swaps(book: str, ack: LG.Ack, v: View, weights: dict) -> list[Swap]:
+def book_swaps(book: str, ack: LG.Ack, v: View, weights: dict, book_usd: float | None = None) -> list[Swap]:
     """The swaps that bring the book's part to the signal's weights: sales first, then buys out of the book's
-    USDC; nothing under MIN_BOOK_SWAP_USD, nothing beyond what the wallet really holds, only allowed coins."""
+    USDC; nothing under MIN_BOOK_SWAP_USD, nothing beyond what the wallet really holds, only allowed coins.
+    `book_usd`: the book's money when the owner's share from the app sets it (else the ack's book_usd)."""
     from . import book as B
-    st = book_state(book, ack.book_usd)
+    st = book_state(book, ack.book_usd if book_usd is None else book_usd)
+    worth = v.total_usd()
     tgt, _ = B.split_targets(weights)
     tgt = {c: w for c, w in tgt.items() if c in ack.mints}
     marks = {}
@@ -927,7 +934,7 @@ def book_swaps(book: str, ack: LG.Ack, v: View, weights: dict) -> list[Swap]:
 
     def pieces(c: str, raw: int, usd: float | None) -> list[int]:
         """An order above the swap cap (25 USD in the alpha mode) as several swaps, each under it with room."""
-        lim = min(ack.cap("trade"), LG.SMALL_MAX_TRADE_USD) if c in LG.SMALL else ack.cap("trade")
+        lim = min(ack.cap("trade", worth), LG.SMALL_MAX_TRADE_USD) if c in LG.SMALL else ack.cap("trade", worth)
         if not usd or lim <= 0 or usd <= lim * 0.98:
             return [raw]
         n = math.ceil(usd / (lim * 0.98))

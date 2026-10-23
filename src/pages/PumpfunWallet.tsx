@@ -1,8 +1,9 @@
 // The pump.fun wallet: the owner's real-money test of the pump.fun bot, run by
 // the live service on the server (docs/PUMPFUN-LIVE.md). The page shows where to
 // send SOL (address and QR code, made here in the browser), what the wallet
-// holds, what the bot does and measured, and two controls that can only make
-// it safer: lower limits and the kill switch. There is no withdraw or transfer:
+// holds, what the bot does and measured, the Master panel (the share of the
+// wallet per trade, Stop and Start), and two controls that can only make it
+// safer: lower limits and the kill switch. There is no withdraw or transfer:
 // the owner withdraws with his own wallet and his backup.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -11,6 +12,8 @@ import { AreaChart, Badge, Button, Field, List, ListRow, Notice, Page, inputCls 
 import { ConfirmAction, KeyStats, LoadingRows, More, Nothing, Row, Section, plural } from "../pagekit";
 import { encodeQr, qrPath } from "../qr";
 import { CoinCandles } from "../components/CoinCandles";
+import { PumpfunMaster, WALLET_LIMIT } from "../components/MasterPanel";
+import { limitsKind, limitsText } from "../masterControl";
 import {
   ALPHA_PHASE,
   LIMIT_LABEL,
@@ -111,6 +114,9 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
     maxOpen: s?.limits?.maxOpen,
   };
   const fmt = (k: LimitKey, x: number | null | undefined) => (x == null ? "n/a" : k === "maxOpen" ? String(x) : sol(x, false, 3));
+  const kind = limitsKind(s?.control?.limits, s?.limits?.kind, s?.ack.limits);
+  // With limits=wallet there is no daily loss limit and no total budget: the wallet is the limit.
+  const none = (k: LimitKey) => kind === "wallet" && (k === "maxDailyLossSol" || k === "maxTotalSol");
   const save = async () => {
     setBusy(true);
     setErr(null);
@@ -128,14 +134,16 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
   return (
     <Section
       title="Limits"
+      right={<Badge tone={kind === "wallet" ? "accent" : "neutral"}>{limitsText(kind)}</Badge>}
       hint="The confirmation file on the server sets the most the bot may risk; the code caps it again (Alpha phase: 2 SOL in all, 0.5 SOL a day, 0.25 SOL a trade). Under that the stake follows the wallet: 10 % of its SOL, 0.05 to 0.25 SOL, at most 0.1 until the strategy has proved itself live, paused under 0.25 SOL. Here you can only set lower limits. Raising one needs a new confirmation file on the server."
     >
       <div className="divide-y divide-line">
+        {s?.stake && <Row label="Stake per trade" value={sol(s.stake.sol, false, 3)} valueSub="now" sub={s.stake.why ?? undefined} />}
         {keys.map((k) => (
           <Row
             key={k}
             label={LIMIT_LABEL[k]}
-            value={fmt(k, inForce[k])}
+            value={none(k) ? WALLET_LIMIT : fmt(k, inForce[k])}
             valueSub="in force"
             sub={
               <>
@@ -409,6 +417,8 @@ export function PumpfunWallet() {
       {v && (
         <>
           <PumpfunSummary v={v} />
+
+          <PumpfunMaster v={v} onDone={() => void load()} />
 
           <PumpfunLiveChart coins={coins} now={now} rate={rate} socket={socket} />
 
