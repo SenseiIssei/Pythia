@@ -55,7 +55,7 @@ TIERS = ("S0f", "S0r", "S0b", "S1", "S2", "T1", "T2", "NOW", "LM")      # S0r: p
 FILTERS = ("all", "dev", "cmig", "clean", "wallet")
 EXITS = ("lad", "hz", "t15")
 SEND_SLOTS = 2
-STAKE_L = int(P.HARD_STAKE_SOL * C.LAMPORTS)
+STAKE_L = int(0.1 * C.LAMPORTS)                       # Y3 was registered at 0.1 SOL (pipeline.HARD_STAKE_SOL was 0.1 then)
 RUG = -0.5
 BASE_FEE = 5_000
 
