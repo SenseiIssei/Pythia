@@ -27,7 +27,7 @@ import json
 import math
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,6 +61,9 @@ SCENARIOS = ("B", "C")
 JUDGED = "B"
 SCENARIO_LABEL = {"B": "(b) measured since the Sender path", "C": "(c) 1.5 s send path"}
 MIN_HOURS = 10                                          # a band from fewer hours means nothing (study.MIN_BLOCKS)
+# After the first result, not registered (results/pumpfun_exit_runners.md says why): the peak counted only where
+# the pool still paid it 5 s later, and every book with the trades open across a gap in the record kept.
+HELD_MS = 5_000
 
 
 # ---------------------------------------------------------------- latency
@@ -122,7 +125,8 @@ class PeakPipe(P.Pipeline):
         p = self.pos.get(pid)
         if p is not None and p["state"] == "pending":
             v = self.eng.sale_value(self.eng.tokens.get(p["mint"]), tokens, self.eng.cost_of(p["rule"])) or 0
-            self.watch.setdefault(p["mint"], []).append([pid, tokens, cost_l, int(at), float(v)])
+            # [pid, tokens, cost, landing, best value, values awaiting their +5 s check, best value held 5 s]
+            self.watch.setdefault(p["mint"], []).append([pid, tokens, cost_l, int(at), float(v), deque(), 0.0])
         super().bought(pid, at, tokens, cost_l, fee_l)
 
     def on_trade(self, tok, t: float, buy: bool, user: str, tok_amt: int, venue: str) -> None:
@@ -134,8 +138,12 @@ class PeakPipe(P.Pipeline):
                     self._peak_done(w, True)
                     continue
                 v = self.eng.sale_value(tok, w[1], self.eng.costs)
-                if v is not None and v > w[4]:
-                    w[4] = float(v)
+                if v is not None:
+                    w[4] = max(w[4], float(v))
+                    pend = w[5]
+                    while pend and pend[0][0] + HELD_MS <= t:      # a value counts as held at the lower of it
+                        w[6] = max(w[6], min(pend.popleft()[1], float(v)))   # and the first one 5 s later
+                    pend.append((t, float(v)))
                 keep.append(w)
             if keep:
                 self.watch[tok.mint] = keep
@@ -145,7 +153,7 @@ class PeakPipe(P.Pipeline):
 
     def _peak_done(self, w: list, complete: bool) -> None:
         self.peaks[w[0]] = {"max_l": w[4], "cost_l": w[2], "ret": w[4] / w[2] - 1 if w[2] > 0 else math.nan,
-                            "complete": complete}
+                            "ret_held": w[6] / w[2] - 1 if w[2] > 0 else math.nan, "complete": complete}
 
     def finish(self, t_end: float) -> None:
         for ws in self.watch.values():
@@ -169,20 +177,25 @@ def books() -> tuple[list[P.Strategy], dict[str, C.Costs]]:
 
 # ---------------------------------------------------------------- numbers
 
-def entries(pipe: PeakPipe) -> list[dict]:
+def entries(pipe: PeakPipe, gaps: list | None = None) -> list[dict]:
     """Closed trades and failed buys of one book; a failed buy is an entry that lost its fee. The peak after
-    entry (best sale value over the cost, before the fixed fees) where the hour after landing was seen."""
+    entry (best sale value over the cost, before the fixed fees) where the hour after landing was seen. A closed
+    trade open across a gap in the record is marked `gapped` (the registered numbers leave it out, as the
+    engine's drop_gapped does)."""
     out = []
     for t in pipe.closed:
         pk = pipe.peaks.get(t["pid"])
+        ok = pk is not None and pk["complete"]
+        gapped = bool(t.get("gap") or any(g0 < t["exit_ms"] and t["signal_ms"] < g1 for g0, g1 in gaps or ()))
         out.append({"mint": t["mint"], "signal_ms": t["signal_ms"], "real_ms": t["exit_ms"], "ret": t["ret"],
                     "pnl_sol": t["pnl_sol"], "exit_why": t.get("exit_why"), "hold_s": t.get("hold_s"),
-                    "legs": t.get("legs"), "failed": False, "symbol": t.get("symbol"),
-                    "peak": pk["ret"] if pk is not None and pk["complete"] else None})
+                    "legs": t.get("legs"), "failed": False, "symbol": t.get("symbol"), "gapped": gapped,
+                    "peak": pk["ret"] if ok else None, "peak_held": pk["ret_held"] if ok else None})
     for f in pipe.failed:
         out.append({"mint": f["mint"], "signal_ms": f["signal_ms"], "real_ms": f["land_ms"],
                     "ret": f["pnl_sol"] / STAKE_SOL, "pnl_sol": f["pnl_sol"], "exit_why": "failed buy",
-                    "hold_s": None, "legs": 0, "failed": True, "symbol": None, "peak": None})
+                    "hold_s": None, "legs": 0, "failed": True, "symbol": None, "gapped": False, "peak": None,
+                    "peak_held": None})
     return sorted(out, key=lambda e: (e["real_ms"], e["signal_ms"]))
 
 
@@ -216,15 +229,16 @@ def stats(e: list[dict]) -> dict:
                top5_share=top / total if total > 0 else None, hold_s=float(np.median(held)) if held else None,
                exits=dict(sorted(Counter(x["exit_why"] or "?" for x in e).items())),
                peak_known=sum(1 for x in e if x["peak"] is not None))
-    out["runners"] = {}
-    for g in RUNNER_GAINS:
-        run = [x for x in e if x["peak"] is not None and x["peak"] > g]
-        rr = np.array([x["ret"] for x in run])
-        pk = np.array([x["peak"] for x in run])
-        out["runners"][f"{g:g}"] = {"n": len(run), "mean_ret": float(rr.mean()) if len(run) else None,
-                                    "mean_peak": float(pk.mean()) if len(run) else None,
-                                    "capture": float(rr.sum() / pk.sum()) if len(run) else None,
-                                    "capture_median": float(np.median(rr / pk)) if len(run) else None}
+    for key, field in (("runners", "peak"), ("runners_held", "peak_held")):
+        out[key] = {}
+        for g in RUNNER_GAINS:
+            run = [x for x in e if x.get(field) is not None and x[field] > g]
+            rr = np.array([x["ret"] for x in run])
+            pk = np.array([x[field] for x in run])
+            out[key][f"{g:g}"] = {"n": len(run), "mean_ret": float(rr.mean()) if len(run) else None,
+                                  "mean_peak": float(pk.mean()) if len(run) else None,
+                                  "capture": float(rr.sum() / pk.sum()) if len(run) else None,
+                                  "capture_median": float(np.median(rr / pk)) if len(run) else None}
     return out
 
 
@@ -241,14 +255,16 @@ def versus(e: list[dict], base: list[dict]) -> dict:
             "band": (lo, hi), "pnl_diff": float(sum(x["pnl_sol"] for x in a) - sum(x["pnl_sol"] for x in b))}
 
 
-def evaluate(res: dict) -> dict:
+def evaluate(res: dict, keep_gapped: bool = False) -> dict:
+    """The registered numbers leave out closed trades open across a gap in the record; keep_gapped (after the
+    first result, not registered) keeps them."""
     split = res["split_ms"]
     table: dict[str, dict] = {k: {} for k in SCENARIOS}
     is_table: dict[str, dict] = {k: {} for k in SCENARIOS}
     ent: dict[tuple, list] = {}
     for k in SCENARIOS:
         for x, name in VARIANTS:
-            e = res["entries"][f"{name}@{k}"]
+            e = [y for y in res["entries"][f"{name}@{k}"] if keep_gapped or not y["gapped"]]
             oos = [y for y in e if y["signal_ms"] >= split]
             ent[(k, x)] = oos
             table[k][x] = stats(oos) | {"name": name}
@@ -316,12 +332,9 @@ def run(root=None, until_ms: int = UNTIL_MS, buy_ms=SENDER_BUY_MS, sell_ms=SENDE
     sim.replay(days, eng, root, until_ms=t_hi)
     for pipe in pipes.values():
         pipe.finish(eng.now)
-        gapped = {(c["pid"]) for c in pipe.closed if c.get("gap")
-                  or any(g0 < c["exit_ms"] and c["signal_ms"] < g1 for g0, g1 in eng.gaps)}
-        pipe.closed = [c for c in pipe.closed if c["pid"] not in gapped]       # as the engine's drop_gapped
     log(f"exitlab: replay in {time.time() - t0:.0f} s, {len(eng.closed):,} closed, {len(eng.failed):,} failed buys")
     return {"days": days, "warm": warm, "span": (t_lo, t_hi), "until_ms": until_ms, "entry_until_ms": entry_until,
-            "split_ms": split, "entries": {n: entries(p) for n, p in pipes.items()},
+            "split_ms": split, "entries": {n: entries(p, eng.gaps) for n, p in pipes.items()},
             "skips": {n: p.skips for n, p in pipes.items()},
             "open_at_end": {n: len(p.pos) for n, p in pipes.items() if p.pos},
             "counts": dict(eng.counts), "gaps": list(eng.gaps)}
@@ -336,7 +349,7 @@ def _band(b) -> str:
     return f"{pct(b[0])} to {pct(b[1])}"
 
 
-def report_md(res: dict, ev: dict, lat: dict, calib: list[dict]) -> str:
+def report_md(res: dict, ev: dict, lat: dict, calib: list[dict], ev_kept: dict | None = None) -> str:
     def ms(d):
         return f"{d['p50'] / 1000:.1f} s ({d['p10'] / 1000:.1f} to {d['p90'] / 1000:.1f})"
 
@@ -380,6 +393,8 @@ def report_md(res: dict, ev: dict, lat: dict, calib: list[dict]) -> str:
     for x, _ in VARIANTS:
         b, c = ev["in_sample"]["B"][x], ev["in_sample"]["C"][x]
         md.append(f"| {x} | {b['n']} | {pct(b.get('mean'))} | {b.get('pnl_sol', 0):+.3f} | {pct(c.get('mean'))} |")
+    if ev_kept is not None:
+        md += after_md(ev, ev_kept)
     if calib:
         md += ["", "## The live P_pool0 trades in the replay", "", "| token | live return | live exit | X0 (b) | X0 (c) |",
                "|---|---|---|---|---|"]
@@ -387,6 +402,40 @@ def report_md(res: dict, ev: dict, lat: dict, calib: list[dict]) -> str:
             cells = ["not entered" if c.get(k) is None else f"{pct(c[k]['ret'])} ({c[k]['exit']})" for k in SCENARIOS]
             md.append(f"| {c['symbol']} | {pct(c['live_ret'])} | {c['live_exit']} | " + " | ".join(cells) + " |")
     return "\n".join(md) + "\n"
+
+
+def after_md(ev: dict, kept: dict) -> list[str]:
+    """After the first result, not registered: the books with the trades open across a gap kept, and the runners
+    by the peak the pool still paid 5 s later."""
+    md = ["", "## After the first result, not registered", "",
+          "Trades open across a gap in the record kept (the registered numbers leave them out). Runners by the "
+          "peak the pool still paid 5 s later; capture over that peak.", ""]
+    for k in SCENARIOS:
+        md += [f"### {SCENARIO_LABEL[k]}, gapped trades kept", "",
+               "| book | entries | mean | median | win | P&L SOL | band of mean | max DD SOL | held peak > +100 % | "
+               "capture | held peak > +500 % | capture | vs X0 (paired) | band | better |",
+               "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for x, _ in VARIANTS:
+            s = kept["table"][k][x]
+            if not s.get("n"):
+                continue
+            r1, r5 = s["runners_held"]["1"], s["runners_held"]["5"]
+            v = kept["versus"][k].get(x)
+            vs = "" if v is None else f"{pct(v['diff'])} | {_band(v['band'])} | {'yes' if v['better'] else 'no'}"
+            md.append(f"| {x} | {s['n']} | {pct(s['mean'])} | {pct(s['median'])} | {s['win'] * 100:.0f} % | "
+                      f"{s['pnl_sol']:+.3f} | {_band(s['band'])} | {s['max_dd_sol']:.3f} | {r1['n']} | {_cap(r1)} | "
+                      f"{r5['n']} | {_cap(r5)} | " + (vs or " | | ") + " |")
+        md.append("")
+    md += ["Registered set (gapped trades left out), runners by the held peak:", "",
+           "| book | (b) held peak > +100 % | capture | (b) > +500 % | capture | (c) > +100 % | capture |",
+           "|---|---|---|---|---|---|---|"]
+    for x, _ in VARIANTS:
+        b, c = ev["table"]["B"][x].get("runners_held"), ev["table"]["C"][x].get("runners_held")
+        if b is None or c is None:
+            continue
+        md.append(f"| {x} | {b['1']['n']} | {_cap(b['1'])} | {b['5']['n']} | {_cap(b['5'])} | {c['1']['n']} | "
+                  f"{_cap(c['1'])} |")
+    return md
 
 
 def _cap(r: dict) -> str:
@@ -427,13 +476,16 @@ def main(argv: list[str] | None = None) -> int:
         print("exitlab: nothing recorded")
         return 1
     ev = evaluate(res)
+    kept = evaluate(res, keep_gapped=True)
     calib = calibrate(res, RL.read_live_ledger(live_dir / "ledger.csv"))
-    md = report_md(res, ev, lat, calib)
+    md = report_md(res, ev, lat, calib, kept)
     keep = {k: v for k, v in res.items() if k not in ("entries", "skips")}
-    (out / "exitlab.json").write_text(json.dumps(keep | {"latency": lat, "eval": ev, "calibration": calib,
+    (out / "exitlab.json").write_text(json.dumps(keep | {"latency": lat, "eval": ev, "eval_gapped_kept": kept,
+                                                         "calibration": calib,
                                                          "sender_fills": {"buy": buys, "sell": sells}},
                                                  indent=1, default=str), encoding="utf-8")
     (out / "exitlab.md").write_text(md, encoding="utf-8")
+    (out / "exitlab_entries.json").write_text(json.dumps(res["entries"], default=str), encoding="utf-8")
     print(md)
     return 0
 

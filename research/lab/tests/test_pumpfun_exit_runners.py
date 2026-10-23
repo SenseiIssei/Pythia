@@ -324,6 +324,29 @@ def test_every_book_lands_the_same_migration_at_the_same_moment_and_slots_bind()
                 assert all(pk["ret"] > -0.1 for pk in p.peaks.values())
 
 
+def test_a_spike_the_pool_does_not_hold_for_5_s_is_a_peak_but_not_a_held_one_and_gaps_are_marked():
+    eng = sim.Engine([], costs=Fixed())
+    pipe = eng.add_pipe(XL.PeakPipe(eng, [P.BY_NAME["P_pool0_trail"]], P.PaperExecutor(), limits=XL.LIMITS,
+                                    name="P_pool0_trail"))
+    pool = Pool(eng)
+    pool.to(T0 + 10_000, 4.0)                                  # a spike to 4x ...
+    eng.gap(T0 + 11_000, T0 + 11_500)                          # (the stream was down for half a second)
+    pool.to(T0 + 12_000, 1.5)                                  # ... gone within 2 s; then 1.5x held
+    for k in range(1, 40):
+        pool.trade(T0 + 12_000 + k * 3_000, k % 2 == 0, sol=SOL // 100, base=10 ** 9)
+    pool.to(T0 + 3_700_000, 1.2)
+    pipe.finish(eng.now)
+    pk = next(iter(pipe.peaks.values()))
+    assert pk["complete"] and pk["ret"] > 2.5 and 0.3 < pk["ret_held"] < 0.6
+    e = XL.entries(pipe, eng.gaps)
+    assert len(e) == 1 and e[0]["exit_why"] == "trail" and e[0]["gapped"] and e[0]["peak_held"] == pk["ret_held"]
+    res = {"split_ms": 0, "entries": {f"{n}@{k}": [] for _, n in XL.VARIANTS for k in XL.SCENARIOS},
+           "skips": {f"{n}@{k}": [] for _, n in XL.VARIANTS for k in XL.SCENARIOS}}
+    res["entries"]["P_pool0_trail@B"] = e
+    assert XL.evaluate(res)["table"]["B"]["X3"]["n"] == 0                       # registered: left out
+    assert XL.evaluate(res, keep_gapped=True)["table"]["B"]["X3"]["n"] == 1
+
+
 # ---------------------------------------------------------------- numbers
 
 def e(ret, mint, h, peak=None, failed=False, real=None):
@@ -423,6 +446,8 @@ def test_the_replay_runs_end_to_end_and_reports(tmp_path, monkeypatch):
     lat = {k: RL.describe(c, n=500) for k, c in XL.scenarios().items()}
     live = [{"rule": "P_pool0", "mint": next(iter(x0)), "symbol": "SYM", "ret": "0.1", "exit_why": "take",
              "signal_ms": str(XL.SENDER_FROM_MS + 1)}]
-    md = XL.report_md(res, ev, lat, XL.calibrate(dict(res, until_ms=XL.UNTIL_MS), live))
+    kept = XL.evaluate(res, keep_gapped=True)
+    md = XL.report_md(res, ev, lat, XL.calibrate(dict(res, until_ms=XL.UNTIL_MS), live), kept)
+    assert "not registered" in md and "held peak" in md
     assert "Against X0" in md and "\u2014" not in md and "X5" in md
     json.dumps({"eval": ev, "latency": lat}, default=str)
