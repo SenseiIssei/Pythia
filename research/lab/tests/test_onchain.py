@@ -224,9 +224,19 @@ def test_the_priority_fee_comes_from_the_environment_within_bounds():
 
 def test_targets_keep_only_coins_with_a_mint():
     tgt, dropped = B.split_targets({"SOL": 0.2, "NEAR": 0.1, "BTC": "0.3", "ETH": 0, "X": "y"})
-    assert tgt == {"SOL": 0.2, "BTC": 0.3} and dropped == {"NEAR": 0.1}
+    assert set(tgt) == {"SOL", "BTC"} and dropped == {"NEAR": 0.1}
     tgt, _ = B.split_targets({"SOL": 0.9, "BTC": 0.6})
     assert sum(tgt.values()) == pytest.approx(1.0)
+
+
+def test_a_coin_without_a_mint_passes_its_weight_on_instead_of_to_cash():
+    tgt, dropped = B.split_targets({"SOL": 0.2, "NEAR": 0.1, "BTC": 0.3})
+    assert tgt == pytest.approx({"SOL": 0.24, "BTC": 0.36}) and dropped == {"NEAR": 0.1}   # 0.6 exposure kept
+    tgt, _ = B.split_targets({"SOL": 0.4, "NEAR": 0.5, "SUI": 0.3})
+    assert tgt == pytest.approx({"SOL": 1.0})                     # never more than the account
+    tgt, dropped = B.split_targets({"NEAR": 0.022361})           # the twin's only pick on 2026-10-23
+    assert tgt == {} and dropped == {"NEAR": 0.022361}           # none left: cash
+    assert B.split_targets({}) == ({}, {})
 
 
 def state(usdc, units):
@@ -320,11 +330,12 @@ def test_a_day_rebalances_journals_and_reports(lab):
     row = B.step(pools, NOW, root=lab, write_root=lab, probes=True)
     rows = journal(lab)
     assert list(rows[0]) == B.JOURNAL_COLS and len(rows) == 1
-    assert row["swaps"] == 2 and row["turnover"] == pytest.approx(0.5, abs=1e-3)
+    # NEAR has no mint: its 5 % goes to SOL and BTC (0.33 and 0.22), not to cash.
+    assert row["swaps"] == 2 and row["turnover"] == pytest.approx(0.55, abs=1e-3)
     assert float(rows[0]["equity"]) == pytest.approx(float(rows[0]["equity_usdc"]) * 10, abs=0.01)  # 10,000 basis
     assert 9_990 < float(rows[0]["equity"]) < 10_000
-    assert row["kraken_cost_bps"] == pytest.approx(0.3 * 40.5 + 0.2 * 40.01, abs=0.05)
-    assert row["model_cost_bps"] == pytest.approx(0.5 * 15, abs=0.05)
+    assert row["kraken_cost_bps"] == pytest.approx(0.33 * 40.5 + 0.22 * 40.01, abs=0.05)
+    assert row["model_cost_bps"] == pytest.approx(0.55 * 15, abs=0.05)
     assert 0 < row["paper_cost_bps"] < row["kraken_cost_bps"]
     st = json.loads((B.book_dir(lab) / "state.json").read_text())
     assert set(st["units"]) == {"SOL", "BTC"} and st["signal"]["dropped"] == {"NEAR": 0.05}
@@ -345,7 +356,7 @@ def test_a_day_rebalances_journals_and_reports(lab):
     signal(lab, {"SOL": 0.3}, valid_until=NOW + 2 * DAY)
     pools.mids = {**MIDS, "SOL": 110.0}
     row = B.step(pools, NOW + DAY, root=lab, write_root=lab, probes=False)
-    assert row["gross_ret_pct"] == pytest.approx(3.0, abs=0.1) and row["swaps"] == 2   # sell BTC, trim SOL
+    assert row["gross_ret_pct"] == pytest.approx(3.3, abs=0.1) and row["swaps"] == 2   # sell BTC, trim SOL
     st = json.loads((B.book_dir(lab) / "state.json").read_text())
     assert set(st["units"]) == {"SOL"} and len(journal(lab)) == 2
 

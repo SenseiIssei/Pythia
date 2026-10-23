@@ -127,6 +127,20 @@ jobs:
     lock: onchain
     lock_wait: 10m
 
+  # breakout_top10's rule choosing only among the coins with a Solana mint (lab.onchain.sol_book),
+  # on the panel paper-families just rebuilt into lab-cache: writes signals/onchain_breakout_sol
+  # (what the on-chain live service trades when its ack names the book), then steps its paper
+  # twin through Jupiter quotes like onchain-paper. Signs and sends nothing.
+  - name: onchain-sol-book
+    description: EXPERIMENT on-chain book onchain_breakout_sol, breakout_top10's rule among the Solana coins, targets and paper twin
+    depends_on: [paper-families, onchain-paper]
+    command: python -m lab.onchain.sol_book
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 1, memory: 3g}
+    timeout: 30m
+    lock: [heavy, onchain]
+    lock_wait: 2h
+
   - name: onchain-mark
     description: EXPERIMENT on-chain paper book, hourly mark at Jupiter prices, no trade
     schedule: "40 * * * *"

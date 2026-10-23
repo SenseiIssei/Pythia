@@ -677,6 +677,36 @@ I accept that I can lose all of it
 Die übrigen Schritte sind die aus Abschnitt 7 (Wallet, IDL, Umgebung, Simulation, Start). Das Log sagt
 `onchain live: ON (alpha)`. Zurück in den Testmodus: `mode=test` und Dienst neu starten.
 
+### Das Buch `onchain_breakout_sol`: Coins, die es auf Solana gibt
+
+`onchain_breakout_top10_live` spiegelt die Ziele des Kraken-Buchs `breakout_top10_live`. Das hält oft Coins
+ohne sichere Solana-Form (am 2026-10-23 nur NEAR), dann sitzt der Spiegel in Cash. Seit dieser Version geht das
+Gewicht eines solchen Coins anteilig auf die übrigen Ziele mit Mint (die Gesamtquote des Signals bleibt, nie mehr
+als das Konto); Cash nur, wenn keins übrig ist. Ein Coin, der nicht in `mints=` steht, bleibt wie bisher Cash.
+
+`onchain_breakout_sol` (`lab.onchain.sol_book`) wählt selbst: dieselbe Breakout-Regel wie `breakout_top10`
+(Donchian 20/10, die 10 liquidesten Coins des Tages, Größe nach 40 % Jahresvola auf 10 Plätze, kein
+Regimefilter, Positionen wie im Backtest seit dem Einstieg getrieben), auf denselben Binance-Tageskerzen, aber nur
+unter den Coins der Mint-Liste (`lab.onchain.mints`): SOL, cbBTC, WETH, BONK, WIF, RAY, PYTH, JTO, RENDER, TRUMP.
+JUP und POPCAT haben keine Binance-Historie im Panel und bleiben draußen (das Signal nennt sie in `no_history`).
+Cash ist USDC. Der Job `onchain-sol-book` schreibt jeden Morgen nach `paper-families` und `onchain-paper` die
+Ziele nach `signals/onchain_breakout_sol/latest.json` (36 Stunden gültig, für die Kraken-Engine als Experiment
+markiert, sie handelt es nie) und führt den Papier-Zwilling `paper/onchain_breakout_sol` über Jupiter-Quotes
+(Bericht `reports/onchain_sol`, Forward-Report, Lab-Seite). Der Dienst handelt das Buch wie den Spiegel: einmal
+je neuem Signal, im Alpha-Modus ohne Nachweis, im Testmodus erst mit bestandenem Nachweis.
+
+Im Alpha-Modus nur dieses Buch handeln, Ack-Zeile:
+
+```
+books=onchain_breakout_sol
+```
+
+Die übrigen Zeilen wie im Beispiel oben. Dabei `mints=` um die Coins erweitern, die das Buch halten darf, sonst
+bleibt deren Anteil Cash, zum Beispiel `mints=SOL,USDC,BTC,ETH,BONK,WIF,RAY,PYTH,JTO,RENDER,TRUMP` (PYTH, RENDER,
+JTO und POPCAT behalten ihre eigene Swap-Grenze). Beide Bücher zugleich: `books=onchain_breakout_top10_live,onchain_breakout_sol`;
+`book_usd` gilt dann je Buch, `max_total_usd` (Alpha höchstens 100 USD) für die ganze Wallet. Danach den Dienst
+neu starten; die Wallet-Seite zeigt je Buch, ob es handeln darf und warum nicht.
+
 ### Die Messung jedes Swaps
 
 Für jeden gesendeten Swap schreibt der Händler eine Zeile nach `live/onchain/execution.jsonl`: Signal bis Senden

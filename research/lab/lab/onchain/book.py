@@ -6,11 +6,16 @@ on a 1,000 USDC paper account: every daily run marks the account at Jupiter's
 prices, rebalances it to the signal's weights through real quotes (sales first,
 then buys out of the USDC they free; a change under MIN_TRADE USDC is left),
 journals the day like the other paper books and writes the cost report. A coin
-without a mint in lab.onchain.mints stays cash and is named in the report. A
-stale or missing signal changes nothing: the account holds and is marked.
+without a mint in lab.onchain.mints passes its weight on to the targets that have
+one (renormalised, the signal's exposure kept; cash only when none is left) and is
+named in the report. A stale or missing signal changes nothing: the account holds
+and is marked.
+
+The same files and rules run lab.onchain.sol_book's onchain_breakout_sol
+(breakout_top10's rule among the coins with a mint, its own signal; BOOKS below).
 
   python -m lab.onchain.book              daily: mark, rebalance, journal, probes, report
-  python -m lab.onchain.book --mark       hourly: mark only (state.json, marks.csv)
+  python -m lab.onchain.book --mark       hourly: mark only (state.json, marks.csv), every book in BOOKS
   python -m lab.onchain.book --dry-run    quotes and the plan, writes nothing
   python -m lab.onchain.book --no-probes  the daily run without the cost probes
 
@@ -64,6 +69,13 @@ PROBE_USDC = 100.0
 USDC_BAND = (0.98, 1.02)        # Jupiter's USD price of USDC outside it: no mark (a glitch or a depeg)
 VARIANT = ("EXPERIMENT, paper only · breakout_top10_live's weights in a Solana wallet, Jupiter quotes, "
            "1,000 USDC (journal equity on the 10,000 basis)")
+SOL_NAME = "onchain_breakout_sol"
+SOL_VARIANT = ("EXPERIMENT, paper only · breakout_top10's rule among the coins with a Solana mint, Jupiter "
+               "quotes, 1,000 USDC (journal equity on the 10,000 basis)")
+# Each on-chain book: the signal it follows (<data>/signals/<signal>/latest.json), its report and title, its label.
+BOOKS = {NAME: {"signal": SIGNAL, "report": REPORT, "title": "On-chain paper book", "variant": VARIANT},
+         SOL_NAME: {"signal": SOL_NAME, "report": "onchain_sol", "title": "On-chain book among Solana coins",
+                    "variant": SOL_VARIANT}}
 JOURNAL_COLS = ["date", "equity", "equity_usdc", "gross_ret_pct", "paper_cost_bps", "model_cost_bps",
                 "kraken_cost_bps", "turnover", "exposure", "held", "swaps", "fees_usdc", "signal", "weights"]
 TRADE_COLS = ["ts", "side", "coin", "usdc", "units", "fee_usdc", "cost_bps", "mid_cost_bps", "kraken_bps", "price_impact_pct",
@@ -78,12 +90,12 @@ def _day(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d")
 
 
-def book_dir(root: Path | None = None) -> Path:
-    return (WRITE_ROOT if root is None else root) / "paper" / NAME
+def book_dir(root: Path | None = None, name: str = NAME) -> Path:
+    return (WRITE_ROOT if root is None else root) / "paper" / name
 
 
-def new_state(now_ms: int) -> dict:
-    return {"variant": VARIANT, "started": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(
+def new_state(now_ms: int, variant: str = VARIANT) -> dict:
+    return {"variant": variant, "started": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(
         timespec="seconds"), "equity": INDEX, "equity_usdc": START_USDC,
         "usdc": START_USDC, "units": {}, "marks": {}, "journal_equity_usdc": START_USDC, "signal": None}
 
@@ -137,7 +149,8 @@ def read_signal(root: Path, now_ms: int, strategy: str = SIGNAL) -> tuple[dict |
 
 
 def split_targets(weights: dict) -> tuple[dict[str, float], dict[str, float]]:
-    """Signal weights to (coins with a mint, coins without): the second stay cash."""
+    """Signal weights to (coins with a mint, coins without). The second's weight goes to the first, in
+    proportion (the signal's exposure is kept, at most the whole account); cash only when no coin has a mint."""
     tgt, dropped = {}, {}
     for c, w in (weights or {}).items():
         try:
@@ -148,6 +161,10 @@ def split_targets(weights: dict) -> tuple[dict[str, float], dict[str, float]]:
             continue
         (tgt if c in M.COINS else dropped)[c] = w
     total = sum(tgt.values())
+    if dropped and total > 0:
+        k = (total + sum(dropped.values())) / total
+        tgt = {c: w * k for c, w in tgt.items()}
+        total *= k
     if total > 1:          # a long-only book never holds more than the account
         tgt = {c: w / total for c, w in tgt.items()}
     return tgt, dropped
@@ -299,12 +316,13 @@ def trade_row(f: Fill, half: dict[str, float], now_ms: int) -> dict:
 
 
 def step(client: Jupiter, now_ms: int | None = None, root: Path | None = None, write_root: Path | None = None,
-         probes: bool = True, dry_run: bool = False) -> dict:
-    """The daily run. Returns the journal row (or what it would be)."""
+         probes: bool = True, dry_run: bool = False, name: str = NAME) -> dict:
+    """The daily run of the book `name` (BOOKS). Returns the journal row (or what it would be)."""
     now_ms = _now_ms() if now_ms is None else now_ms
     root = ROOT if root is None else root
-    d = book_dir(write_root)
-    st = load_state(d) or new_state(now_ms)
+    spec = BOOKS[name]
+    d = book_dir(write_root, name)
+    st = load_state(d) or new_state(now_ms, spec["variant"])
     journal = read_csv(d / "journal.csv")
     today = _day(now_ms)
     prices = client.prices([M.USDC.mint, *(m.mint for m in M.COINS.values())])
@@ -313,12 +331,12 @@ def step(client: Jupiter, now_ms: int | None = None, root: Path | None = None, w
         raise QuoteError("no USDC price from Jupiter within its peg, nothing marked")
     before = mark(st, mid)
     if journal and journal[-1].get("date") == today:
-        print(f"onchain: {NAME} already journaled {today}; marked only", file=sys.stderr)
+        print(f"onchain: {name} already journaled {today}; marked only", file=sys.stderr)
         if not dry_run:
             st.update(equity=before * INDEX / START_USDC, equity_usdc=before, last_mark_ms=now_ms)
             save_state(d, st)
         return {}
-    sig, why = read_signal(root, now_ms)
+    sig, why = read_signal(root, now_ms, spec["signal"])
     tgt, dropped = split_targets(sig["weights"] if sig else {})
     half = kraken_half(_read_json(report.REPORTS / "costs" / "latest.json"))
     ex = PaperExecutor(client, prices)
@@ -358,19 +376,20 @@ def step(client: Jupiter, now_ms: int | None = None, root: Path | None = None, w
     _append(d / "probes.csv", list(probe_rows[0]) if probe_rows else [], probe_rows)
     st.update(equity=after * INDEX / START_USDC, equity_usdc=after, journal_equity_usdc=after, last_mark_ms=now_ms,
               signal={"as_of_ms": sig.get("as_of_ms") if sig else None, "status": why, "targets": tgt,
-                      "dropped": dropped}, errors=errors)
+                      "dropped": dropped, "no_history": (sig or {}).get("no_history") or []}, errors=errors)
     save_state(d, st)
-    write_report(d, st, half, _read_json(root / "autopilot" / "state.json"), now_ms)
+    write_report(d, st, half, _read_json(root / "autopilot" / "state.json"), now_ms, name)
     return row
 
 
-def mark_only(client: Jupiter, now_ms: int | None = None, write_root: Path | None = None) -> float | None:
+def mark_only(client: Jupiter, now_ms: int | None = None, write_root: Path | None = None,
+              name: str = NAME) -> float | None:
     """The hourly mark: equity at Jupiter's prices into state.json and marks.csv; no trade, no journal row."""
     now_ms = _now_ms() if now_ms is None else now_ms
-    d = book_dir(write_root)
+    d = book_dir(write_root, name)
     st = load_state(d)
     if st is None:
-        print(f"onchain: {NAME} has not started yet, nothing to mark", file=sys.stderr)
+        print(f"onchain: {name} has not started yet, nothing to mark", file=sys.stderr)
         return None
     mid = mids(client.prices([M.USDC.mint, *(M.COINS[c].mint for c in st["units"] if c in M.COINS)]))
     if not mid and st["units"]:
@@ -420,7 +439,8 @@ def summarize(journal: list[dict], trades: list[dict], probes: list[dict], engin
     }
 
 
-def write_report(d: Path, st: dict, half: dict[str, float], engine_state: dict | None, now_ms: int) -> dict:
+def write_report(d: Path, st: dict, half: dict[str, float], engine_state: dict | None, now_ms: int,
+                 name: str = NAME) -> dict:
     journal, trades, probes = read_csv(d / "journal.csv"), read_csv(d / "trades.csv"), read_csv(d / "probes.csv")
     s = summarize(journal, trades, probes, kraken_paper_fills(engine_state))
     eq = float(st.get("equity_usdc") or START_USDC)
@@ -439,12 +459,14 @@ def write_report(d: Path, st: dict, half: dict[str, float], engine_state: dict |
                 f"against {med_kr:.1f} at Kraken.")
     else:
         head = "No rebalance and no probe yet."
-    md = [f"# On-chain paper book ({NAME}): Solana through Jupiter against Kraken\n",
+    md = [f"# On-chain paper book ({name}): Solana through Jupiter against Kraken\n",
           f"EXPERIMENT, paper only. {head}\n",
           f"Account {eq:,.2f} USDC (started with {START_USDC:,.0f}), {len(st['units'])} coins held, "
           f"signal {sig.get('status', 'not read')}. Targets on chain: "
           f"{', '.join(f'{c} {w:.1%}' for c, w in (sig.get('targets') or {}).items()) or 'none'}. "
-          f"Without an SPL version, held as cash: {', '.join(f'{c} {w:.1%}' for c, w in dropped.items()) or 'none'}.\n",
+          f"Without an SPL version, their weight spread over the targets above (cash if there are none): "
+          f"{', '.join(f'{c} {w:.1%}' for c, w in dropped.items()) or 'none'}."
+          + (f" Left out, no price history: {', '.join(sig['no_history'])}." if sig.get("no_history") else "") + "\n",
           "## Per rebalance (bps of equity)\n",
           report.table(s["per_rebalance"], ["date", "turnover", "onchain_bps", "kraken_bps", "swaps"])
           if s["per_rebalance"] else "None yet.\n",
@@ -459,13 +481,13 @@ def write_report(d: Path, st: dict, half: dict[str, float], engine_state: dict |
                   f"bps against the mid, {e['all_in_median_bps']} bps with the taker fee.\n")
     md.append("\nHow it is measured: docs/ONCHAIN.md. Kraken's half spreads from reports/costs.\n")
     status = "watch" if st.get("errors") else "ok"
-    data = {**report.feed_header("On-chain paper book", status, head, updated_ms=now_ms, items=[
+    data = {**report.feed_header(BOOKS[name]["title"], status, head, updated_ms=now_ms, items=[
         {"label": "Account", "value": f"{eq:,.2f} USDC"},
         {"label": "On chain per unit traded", "value": None if per is None else f"{per:.1f} bps"},
         {"label": "Kraken per unit traded", "value": None if kr is None else f"{kr:.1f} bps"},
         {"label": "Probe median one way", "value": None if med_on is None else f"{med_on:.1f} bps"}]),
-        "verdict": head, "book": NAME, "equity_usdc": eq, "summary": s, "errors": st.get("errors") or []}
-    report.write(REPORT, "\n".join(md), data)
+        "verdict": head, "book": name, "equity_usdc": eq, "summary": s, "errors": st.get("errors") or []}
+    report.write(BOOKS[name]["report"], "\n".join(md), data)
     return data
 
 
@@ -478,8 +500,9 @@ def main(argv: list[str] | None = None) -> int:
     client = Jupiter(fetch=default_fetch())
     try:
         if a.mark:
-            eq = mark_only(client)
-            print(f"onchain: marked {eq:,.2f} USDC" if eq is not None else "onchain: nothing to mark")
+            for name in BOOKS:
+                eq = mark_only(client, name=name)
+                print(f"onchain: {name} marked {eq:,.2f} USDC" if eq is not None else f"onchain: {name} nothing to mark")
         else:
             row = step(client, probes=not a.no_probes, dry_run=a.dry_run)
             print(f"onchain: {json.dumps(row)} ({client.calls} API calls)")

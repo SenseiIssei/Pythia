@@ -352,7 +352,7 @@ def book_problems(book: str, ack: Ack, proof, now_ms: int) -> list[str]:
     out = []
     if book not in ack.books:
         out.append(f"the confirmation file does not name {book}")
-    if book != B.NAME:
+    if book not in B.BOOKS:
         out.append(f"{book} has no on-chain paper twin")
     if ack.mode == "alpha":
         return out

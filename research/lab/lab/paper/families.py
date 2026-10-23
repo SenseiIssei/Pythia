@@ -116,16 +116,22 @@ def targets(P: fc.Panel, member: np.ndarray | None = None) -> dict[str, np.ndarr
     10 and 20 most liquid eligible members each day instead of the whole panel's."""
     if member is not None:
         W_t = au.tsmom_weights(P, au.top_within(P, member, 20))
-        return {"tsmom_top20": W_t,
-                "breakout_top10": au.breakout_on(P, au.top_within(P, member, 10), 20, 10),
-                "tsmom_tranches": W_t}
-    top10 = P.top_liquid(10)
-    cols = np.flatnonzero(top10.any(0))
+        return {"tsmom_top20": W_t, "breakout_top10": breakout_targets(P, member), "tsmom_tranches": W_t}
     return {
         "tsmom_top20": fam_volmom.base_weights(P, 20, regime=True),
-        "breakout_top10": fam_breakout.breakout_weights(P, cols, top10, 20, 10, regime=False),
+        "breakout_top10": breakout_targets(P),
         "tsmom_tranches": tranches.targets(P),
     }
+
+
+def breakout_targets(P: fc.Panel, member: np.ndarray | None = None) -> np.ndarray:
+    """breakout_top10's weight matrix: Donchian 20/10 among the 10 most liquid eligible coins each day,
+    no regime. With `member` the same rule choosing only among it (lab.onchain.sol_book's coins)."""
+    if member is not None:
+        return au.breakout_on(P, au.top_within(P, member, 10), 20, 10)
+    top10 = P.top_liquid(10)
+    cols = np.flatnonzero(top10.any(0))
+    return fam_breakout.breakout_weights(P, cols, top10, 20, 10, regime=False)
 
 
 def factory_books() -> dict[str, dict]:

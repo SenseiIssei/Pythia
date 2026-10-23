@@ -865,7 +865,9 @@ def test_book_swaps_sell_first_buy_from_the_books_cash_and_respect_the_wallet(tm
     ack = tr.gate.ack                                       # book_usd 150, mints SOL USDC BTC ETH
     v = view(tr)
     swaps = LX.book_swaps("onchain_breakout_top10_live", ack, v, {"SOL": 0.5, "DOGE": 0.3, "JUP": 0.2})
-    assert [(s.src, s.dst, s.in_raw) for s in swaps] == [("USDC", "SOL", 75_000_000)]   # JUP not allowed, DOGE cash
+    # DOGE has no mint: its 0.3 goes to SOL and JUP (0.5 / 0.7 and 0.2 / 0.7); JUP is not in the ack: cash.
+    # SOL's 107.14 USDC is above the 100 USD swap cap, so two swaps.
+    assert [(s.src, s.dst, s.in_raw) for s in swaps] == [("USDC", "SOL", 53_571_428), ("USDC", "SOL", 53_571_429)]
     LX.write_row({"t": 1, "kind": "book", "book": "onchain_breakout_top10_live", "from": "USDC", "to": "SOL",
                   "in_raw": 75_000_000, "out_raw": 7_500_000_000, "status": "filled"})
     st = LX.book_state("onchain_breakout_top10_live", 150)

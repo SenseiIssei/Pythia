@@ -16,7 +16,8 @@ What it does while on:
     only the owner's confirm of exactly that proposal lets it swap, never below its minimum, and only
     once: the confirm is taken (live/onchain/taken/<id>) before anything is signed, so neither a
     restart nor a failed round sends it again
-  - a book's targets, only for a book the ack names and the pre-registered proof passed
+  - a book's targets (lab.onchain.book.BOOKS: onchain_breakout_top10_live, onchain_breakout_sol, each from
+    its own signal file), only for a book the ack names and the pre-registered proof passed
     (live_gate.book_problems), once per new signal: sales first, then buys
   - a meme rule's entries and exits (lab.onchain.meme_live, docs/ONCHAIN-MEME.md): a buy only for a rule
     the ack's [meme] section names, whose paper proof passed and whose coin passed the safety check within
@@ -455,7 +456,8 @@ class Service:
         out = []
         for name in ack.books:
             why = LG.book_problems(name, ack, proof, now)
-            sig, sig_why = B.read_signal(ROOT, now, B.SIGNAL) if not why else (None, "")
+            strategy = B.BOOKS.get(name, {}).get("signal", "")        # the signal the book's paper twin follows
+            sig, sig_why = B.read_signal(ROOT, now, strategy) if not why else (None, "")
             if not why and sig is None:
                 why = [f"no fresh signal ({sig_why})"]
             out.append({"book": name, "allowed": not why, "why": "; ".join(why) or None})
@@ -465,7 +467,7 @@ class Service:
             if state.get(name) == sid:
                 continue
             try:
-                signal_ms = int((ROOT / "signals" / B.SIGNAL / "latest.json").stat().st_mtime * 1000)
+                signal_ms = int((ROOT / "signals" / strategy / "latest.json").stat().st_mtime * 1000)
             except OSError:
                 signal_ms = now
             state[name] = sid                            # once per signal, whatever happens to its swaps
