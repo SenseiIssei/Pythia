@@ -278,7 +278,7 @@ export async function pumpfunControl(patch: ControlPatch): Promise<ControlAnswer
 }
 
 /** The owner's block list (<data>/pumpfun_rt/blocked-mints.txt): coins the live bot and its paper twin never buy. */
-export type BlockKind = "mint" | "creator" | "symbol" | "name";
+export type BlockKind = "mint" | "creator" | "symbol" | "name" | "match";
 
 export interface BlockEntry {
   entry: string;
@@ -289,12 +289,21 @@ export interface BlockEntry {
 export interface BlockList {
   path: string;
   entries: BlockEntry[];
-  /** Lines the bot ignores (not a mint, creator:, symbol: or name: entry). */
+  /** Lines the bot ignores (not a mint, creator:, symbol:, name: or match: entry). */
   ignored: string[];
 }
 
-export const BLOCK_KIND_LABEL: Record<BlockKind, string> = { mint: "Mint", creator: "Creator", symbol: "Symbol", name: "Name" };
+export const BLOCK_KIND_LABEL: Record<BlockKind, string> = { mint: "Mint", creator: "Creator", symbol: "Symbol", name: "Name", match: "Contains" };
+/** What each kind blocks, for the form (match: the celebrity copies, 2026-10-23). */
+export const BLOCK_KIND_HINT: Record<BlockKind, string> = {
+  mint: "This one coin.",
+  creator: "Every coin this wallet creates.",
+  symbol: "Every coin with exactly this symbol.",
+  name: "Every coin with exactly this name.",
+  match: "Every coin whose name or symbol contains this text (spacex blocks SpaceX AI and $SPACEX). At least 3 letters or digits.",
+};
 const BLOCK_TEXT_MAX = 64;
+const BLOCK_MATCH_MIN = 3;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 /** Letters and digits only, lower case, as the bot compares symbols and names ("$SHEKEL" is "shekel"). */
@@ -314,6 +323,7 @@ export function blockLine(kind: BlockKind, raw: string): { line: string } | { er
     if (!BASE58.test(v)) return { error: `Not a ${kind === "mint" ? "mint" : "wallet"} address (base58, 32 to 44 characters).` };
     return { line: kind === "mint" ? v : `creator:${v}` };
   }
+  if (kind === "match" && Array.from(blockNorm(v)).length < BLOCK_MATCH_MIN) return { error: `A match needs at least ${BLOCK_MATCH_MIN} letters or digits.` };
   if (!blockNorm(v)) return { error: `A ${kind} needs at least one letter or digit.` };
   if (Array.from(v).length > BLOCK_TEXT_MAX) return { error: `A ${kind} has at most ${BLOCK_TEXT_MAX} characters.` };
   return { line: `${kind}:${v}` };

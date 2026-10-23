@@ -57,6 +57,50 @@ def test_the_matching_rules(tmp_path, capsys):
     assert BL.parse_line("symbol:" + "A" * 65) is False
 
 
+def test_a_match_entry_blocks_every_name_or_symbol_that_contains_its_text(tmp_path, capsys):
+    """The owner's celebrity copies (2026-10-23: SpaceX AI -87 % in one candle, Tesla SpaceXSI -54 %)."""
+    f = tmp_path / "blocked-mints.txt"
+    f.write_text("symbol:SHEKEL\nmatch:spacex\nmatch:elon\nMATCH: Tesla  # and its copies\nmatch:ai\nmatch:$e-l\n"
+                 f"match:{'a' * 65}\n", encoding="utf-8")
+    w = BL.BlockWatch(paths=[f])
+    assert w(RULE, coin(name="SpaceX AI", symbol="SXAI")) == "blocked (match spacex)"
+    assert w(RULE, coin(name="Space Rocket", symbol="$SPACEX")) == "blocked (match spacex)"
+    assert w(RULE, coin(name="Elon's Dog", symbol="DOG")) == "blocked (match elon)"
+    assert w(RULE, coin(name="x", symbol="TESLA2")) == "blocked (match Tesla)"
+    assert w(RULE, coin(name="Tesla SpaceXSI", symbol="TSX")) in ("blocked (match spacex)", "blocked (match Tesla)")
+    assert w(RULE, coin(name="Telsa", symbol="TELSA")) is None                  # contained, not alike
+    assert w(RULE, coin(name="Shekel coin", symbol="SHK")) is None              # symbol: stays exact
+    assert w(RULE, coin(symbol="SHEKEL")) == "blocked (symbol SHEKEL)"          # the exact kinds first
+    assert w(RULE, coin(MINT, symbol="X")) is None
+    assert len(w.list) == 4 and set(w.list.matches) == {"spacex", "elon", "tesla"}
+    out = capsys.readouterr().out
+    assert out.count("ignored") == 3 and "'match:ai'" in out and "'match:$e-l'" in out    # under 3 letters or digits
+    assert "1 symbols, 0 names, 3 matches blocked" in out
+    assert BL.parse_line("match:abc") == ("match", "abc") and BL.parse_line("match: a b ") is False
+
+
+def test_a_match_entry_is_a_skip_of_the_live_book_and_the_paper_twin(tmp_path, monkeypatch):
+    from lab.pumpfun_rt import live
+    monkeypatch.setattr(live, "paper_dir", lambda: tmp_path)
+    f = tmp_path / "b.txt"
+    f.write_text("match:tes\n", encoding="utf-8")                               # create_vals: name Test
+    sh = live.Shadow("A_all_x1", models=None, alerts=False, now_ms=T0, strategies=[P.BY_NAME[RULE]],
+                     blocked=BL.BlockWatch(paths=[f], rules=BL.PAPER_RULES))
+    col = COL.Collector(None, on_row=sh.on_row, amm=True, meta=False)
+    svc, lcol, pipe = service()
+    pipe.blocked = BL.BlockWatch(paths=[f])
+    for c in (col, lcol):
+        c.handle(note("c", 100, CREATE), T0, PUBLIC)
+        c.handle(note("m", 101, MIGRATE), T0 + 400, PUBLIC)
+        c.handle(note("b", 102, POOL_BUY), T0 + 800, PUBLIC)
+    sh.tick(T0 + 10_000)
+    svc.tick(T0 + 10_000)
+    assert not pipe.pos and shown(pipe) == {"blocked (match tes)": 1}
+    assert sh.engine.skipped[(RULE, "blocked (match tes)")] == 1
+    rec = [json.loads(x) for x in (LX.data_dir() / "skipped.jsonl").read_text().splitlines()]
+    assert [r["why"] for r in rec] == ["blocked (match tes)"]
+
+
 def test_a_missing_file_is_an_empty_list_and_rules_limit_whom_it_holds_for(tmp_path):
     w = BL.BlockWatch(paths=[tmp_path / "none.txt"])
     assert len(w.list) == 0 and w(RULE, coin(MINT, symbol="SHEKEL")) is None

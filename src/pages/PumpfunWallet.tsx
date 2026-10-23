@@ -16,6 +16,7 @@ import { PumpfunMaster, WALLET_LIMIT } from "../components/MasterPanel";
 import { limitsKind, limitsText } from "../masterControl";
 import {
   ALPHA_PHASE,
+  BLOCK_KIND_HINT,
   BLOCK_KIND_LABEL,
   LIMIT_LABEL,
   blockLine,
@@ -217,7 +218,7 @@ function Blocked() {
   return (
     <Section
       title="Gesperrt"
-      hint="Coins the bot never buys, and its paper twin neither: a mint, every coin of a creator, or every coin whose symbol or name matches (upper and lower case, $ and spaces do not count). The bot reads the list within seconds; positions it already holds are sold by their exits as usual."
+      hint="Coins the bot never buys, and its paper twin neither: a mint, every coin of a creator, every coin whose symbol or name matches, or every coin whose name or symbol contains a text (upper and lower case, $ and spaces do not count). The bot reads the list within seconds; positions it already holds are sold by their exits as usual."
     >
       {!control ? (
         <p className="text-sm text-muted">The block list is edited through the connected backend on the server.</p>
@@ -258,9 +259,10 @@ function Blocked() {
               </select>
             </Field>
             <Field label="Value" error={checked && "error" in checked ? checked.error : undefined}>
-              <input className={inputCls} value={value} placeholder={kind === "symbol" ? "SHEKEL" : kind === "name" ? "coin name" : "address"} onChange={(e) => setValue(e.target.value)} aria-label="Value to block" />
+              <input className={inputCls} value={value} placeholder={kind === "symbol" ? "SHEKEL" : kind === "name" ? "coin name" : kind === "match" ? "spacex" : "address"} onChange={(e) => setValue(e.target.value)} aria-label="Value to block" />
             </Field>
           </div>
+          <p className="text-[13px] text-muted">{BLOCK_KIND_HINT[kind]}</p>
           {err && <Notice tone="danger">{err}</Notice>}
           <Button icon={Plus} variant="secondary" disabled={busy || !checked || "error" in checked} onClick={() => checked && "line" in checked && void change({ add: checked.line })}>
             Block

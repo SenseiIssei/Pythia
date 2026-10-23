@@ -8,10 +8,14 @@ one entry per line, "#" starts a comment:
   symbol:<SYMBOL>     every coin whose symbol matches, case-insensitively after trimming and removing every
                       character that is not a letter or digit ("$SHEKEL" and "shekel " match symbol:SHEKEL)
   name:<text>         the same on the coin's name
+  match:<text>        every coin whose name or symbol, normalized the same way, contains the text, normalized
+                      ("match:spacex" blocks "SpaceX AI", "$SPACEX"; "match:elon" "Elon's Dog"; "match:tesla"
+                      "TESLA2" but not "Telsa"); at least MATCH_MIN letters or digits, else the line is ignored
 
 Read at start and again when a file changes (mtime and size, looked at most every CHECK_S). A malformed line is
 ignored with one warning; a missing file is an empty list. Pipeline.signal asks before every buy (curve and pool);
-a blocked coin is a skip "blocked (symbol SHEKEL)" with its log line, never a buy. Held positions keep their exits.
+a blocked coin is a skip "blocked (symbol SHEKEL)" or "blocked (match elon)" with its log line, never a buy. Held
+positions keep their exits.
 The app's pump.fun live page edits the same file through the server (server/src/main.rs); trends.py and the meme
 module read it too (a mint there is one line; they pass the other kinds by).
 """
@@ -25,7 +29,8 @@ from pathlib import Path
 CHECK_S = 2.0
 PAPER_RULES = frozenset({"P_pool0_wait"})   # the paper twin of the live strategy honours the list like the live bot
 ADDRESS = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-TEXT_MAX = 64                               # a symbol or name entry, as written
+TEXT_MAX = 64                               # a symbol, name or match entry, as written
+MATCH_MIN = 3                               # a match entry's letters and digits: "ai" would block half the coins
 
 
 def norm(s) -> str:
@@ -46,21 +51,24 @@ def parse_line(line: str) -> tuple[str, str] | None | bool:
         return ("creator", rest) if ADDRESS.match(rest) else False
     if kind in ("symbol", "name"):
         return (kind, rest) if norm(rest) and len(rest) <= TEXT_MAX else False
+    if kind == "match":
+        return (kind, rest) if len(norm(rest)) >= MATCH_MIN and len(rest) <= TEXT_MAX else False
     return False
 
 
 class Blocklist:
-    """The entries of the files: mints and creators as written, symbols and names normalized (norm) to the
-    entry as written, for the reason."""
+    """The entries of the files: mints and creators as written, symbols, names and match texts normalized (norm)
+    to the entry as written, for the reason."""
 
     def __init__(self):
         self.mints: set[str] = set()
         self.creators: set[str] = set()
         self.symbols: dict[str, str] = {}
         self.names: dict[str, str] = {}
+        self.matches: dict[str, str] = {}
 
     def __len__(self) -> int:
-        return len(self.mints) + len(self.creators) + len(self.symbols) + len(self.names)
+        return len(self.mints) + len(self.creators) + len(self.symbols) + len(self.names) + len(self.matches)
 
     def add(self, kind: str, value: str) -> None:
         if kind == "mint":
@@ -68,7 +76,7 @@ class Blocklist:
         elif kind == "creator":
             self.creators.add(value)
         else:
-            (self.symbols if kind == "symbol" else self.names).setdefault(norm(value), value)
+            {"symbol": self.symbols, "name": self.names, "match": self.matches}[kind].setdefault(norm(value), value)
 
     def why(self, mint: str, creators=(), symbol: str = "", name: str = "") -> str | None:
         """The skip reason of a coin on the list, None for one that is not."""
@@ -83,6 +91,9 @@ class Blocklist:
         n = norm(name)
         if n and n in self.names:
             return f"blocked (name {self.names[n]})"
+        for k, v in self.matches.items():
+            if k in n or k in s:
+                return f"blocked (match {v})"
         return None
 
 
@@ -100,7 +111,7 @@ def read(paths, warned: set | None = None) -> Blocklist:
             if e is False:
                 if line.strip() not in warned:
                     warned.add(line.strip())
-                    print(f"blocklist: {p} line {i} ignored (not a mint, creator:, symbol: or name: entry): "
+                    print(f"blocklist: {p} line {i} ignored (not a mint, creator:, symbol:, name: or match: entry): "
                           f"{line.strip()[:80]!r}", flush=True)
             elif e:
                 bl.add(*e)
@@ -141,7 +152,7 @@ class BlockWatch:
     def summary(self) -> str:
         b = self.list
         return (f"{len(b.mints)} mints, {len(b.creators)} creators, {len(b.symbols)} symbols, "
-                f"{len(b.names)} names blocked")
+                f"{len(b.names)} names" + (f", {len(b.matches)} matches" if b.matches else "") + " blocked")
 
     def refresh(self) -> None:
         now = self.clock()

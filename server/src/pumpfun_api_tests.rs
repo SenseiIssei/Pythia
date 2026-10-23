@@ -276,3 +276,35 @@ async fn the_block_list_takes_only_valid_entries() {
     assert!(!d.join("pumpfun_rt/blocked-mints.txt").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[tokio::test]
+async fn the_block_list_takes_match_entries_of_three_letters_or_more() {
+    let d = root("blocked-match");
+    std::fs::create_dir_all(d.join("pumpfun_rt")).unwrap();
+    std::fs::write(d.join("pumpfun_rt/blocked-mints.txt"), "symbol:SHEKEL\nmatch:spacex\nmatch:ai\n").unwrap();
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/blocked", None).await;
+    assert_eq!(
+        v["entries"],
+        serde_json::json!([{"entry": "symbol:SHEKEL", "kind": "symbol", "value": "SHEKEL"},
+                           {"entry": "match:spacex", "kind": "match", "value": "spacex"}])
+    );
+    assert_eq!(v["ignored"], serde_json::json!(["match:ai"]));                // under three letters or digits
+    for add in ["match:elon", "Match: Tesla ", "match:$SPACE-X"] {
+        let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": add}))).await;
+        assert_eq!(code, StatusCode::OK, "{add} {v}");
+    }
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/blocked", None).await;
+    let entries: Vec<String> = v["entries"].as_array().unwrap().iter().map(|e| e["entry"].as_str().unwrap().to_string()).collect();
+    assert_eq!(entries, vec!["symbol:SHEKEL", "match:spacex", "match:elon", "match:Tesla"]); // $SPACE-X is spacex
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": "match:ELON"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let text = std::fs::read_to_string(d.join("pumpfun_rt/blocked-mints.txt")).unwrap();
+    assert!(!text.contains("elon") && text.contains("match:Tesla\n") && text.contains("symbol:SHEKEL"), "{text}");
+    let long = format!("match:{}", "a".repeat(65));
+    let bads: [&str; 4] = ["match:ai", "match:$-e", "match:", long.as_str()];
+    for bad in bads {
+        let (code, _) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": bad}))).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

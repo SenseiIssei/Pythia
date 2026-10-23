@@ -771,8 +771,11 @@ fn blocked_path(root: &std::path::Path) -> std::path::PathBuf {
     root.join("pumpfun_rt").join("blocked-mints.txt")
 }
 
-/// The longest symbol or name entry, as written (blocklist.TEXT_MAX).
+/// The longest symbol, name or match entry, as written (blocklist.TEXT_MAX).
 const BLOCK_TEXT_MAX: usize = 64;
+
+/// The fewest letters and digits of a match entry (blocklist.MATCH_MIN).
+const BLOCK_MATCH_MIN: usize = 3;
 
 /// Letters and digits only, lower case: "$SHEKEL", "shekel " and "SHEKEL" are one (blocklist.norm).
 fn block_norm(s: &str) -> String {
@@ -785,7 +788,8 @@ fn is_address(s: &str) -> bool {
 }
 
 /// One entry: (kind, value) as the bot reads it, or why it is not one. A mint bare,
-/// `creator:<wallet>`, `symbol:<SYMBOL>` or `name:<text>`; `#` and line breaks never.
+/// `creator:<wallet>`, `symbol:<SYMBOL>`, `name:<text>` or `match:<text>` (every coin whose
+/// name or symbol contains the text); `#` and line breaks never.
 fn block_entry(raw: &str) -> Result<(String, String), String> {
     let v = raw.trim();
     if v.is_empty() {
@@ -807,7 +811,12 @@ fn block_entry(raw: &str) -> Result<(String, String), String> {
             Err(format!("A {kind} has at most {BLOCK_TEXT_MAX} characters."))
         }
         "symbol" | "name" => Ok((kind.clone(), rest.into())),
-        _ => Err("Use a mint, creator:<wallet>, symbol:<SYMBOL> or name:<text>.".into()),
+        "match" if block_norm(rest).chars().count() < BLOCK_MATCH_MIN => {
+            Err(format!("A match needs at least {BLOCK_MATCH_MIN} letters or digits."))
+        }
+        "match" if rest.chars().count() > BLOCK_TEXT_MAX => Err(format!("A match has at most {BLOCK_TEXT_MAX} characters.")),
+        "match" => Ok((kind.clone(), rest.into())),
+        _ => Err("Use a mint, creator:<wallet>, symbol:<SYMBOL>, name:<text> or match:<text>.".into()),
     }
 }
 
@@ -820,11 +829,11 @@ fn block_line(kind: &str, value: &str) -> String {
     }
 }
 
-/// Two entries block the same coins (symbols and names after block_norm).
+/// Two entries block the same coins (symbols, names and match texts after block_norm).
 fn block_same(a: &(String, String), b: &(String, String)) -> bool {
     a.0 == b.0
         && match a.0.as_str() {
-            "symbol" | "name" => block_norm(&a.1) == block_norm(&b.1),
+            "symbol" | "name" | "match" => block_norm(&a.1) == block_norm(&b.1),
             _ => a.1 == b.1,
         }
 }
@@ -851,7 +860,7 @@ fn blocked_view(root: &std::path::Path) -> serde_json::Value {
     serde_json::json!({"path": "pumpfun_rt/blocked-mints.txt", "entries": entries, "ignored": ignored})
 }
 
-/// `POST /api/pumpfun/live/blocked`: `{"add": "symbol:SHEKEL"}` or `{"remove": "..."}`.
+/// `POST /api/pumpfun/live/blocked`: `{"add": "symbol:SHEKEL"}`, `{"add": "match:spacex"}` or `{"remove": "..."}`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BlockPatch {

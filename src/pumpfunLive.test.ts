@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ALPHA_PHASE,
+  BLOCK_KIND_HINT,
+  BLOCK_KIND_LABEL,
   blockLine,
   blockNorm,
   changePumpfunBlocked,
@@ -268,6 +270,19 @@ describe("the block list", () => {
     for (const [kind, v] of [["mint", "short"], ["mint", `Mint0${"1".repeat(35)}`], ["creator", "x"], ["symbol", "$$$"], ["symbol", "A # B"], ["name", "a".repeat(65)], ["symbol", " "]] as const) {
       expect("error" in blockLine(kind, v), `${kind} ${v}`).toBe(true);
     }
+  });
+
+  it("takes match entries of three letters or digits or more, with a hint what they do", () => {
+    expect(blockLine("match", " spacex ")).toEqual({ line: "match:spacex" });
+    expect(blockLine("match", "Elon's")).toEqual({ line: "match:Elon's" });
+    expect(blockLine("match", "$e-l-o")).toEqual({ line: "match:$e-l-o" });
+    for (const v of ["ai", "$-e", " ", "a".repeat(65), "x # y"]) {
+      expect("error" in blockLine("match", v), v).toBe(true);
+    }
+    expect(blockLine("match", "ai")).toEqual({ error: "A match needs at least 3 letters or digits." });
+    expect(BLOCK_KIND_LABEL.match).toBe("Contains");
+    expect(BLOCK_KIND_HINT.match).toContain("contains");
+    expect(Object.keys(BLOCK_KIND_HINT).sort()).toEqual(Object.keys(BLOCK_KIND_LABEL).sort());
   });
 
   it("reads and changes the list through the server only", async () => {
