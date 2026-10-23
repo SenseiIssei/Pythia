@@ -51,6 +51,12 @@ das Buch steht vorerst ganz in Cash.
 
 ## Was Stufe 2 bräuchte (eigene Aufgabe, erst nach Durchsicht von Stufe 1)
 
+Entwurf und Entscheidungen jetzt in `docs/ONCHAIN-STAGE2.md`, der Nachweis vor echtem Geld vorab
+registriert in `research/lab/results/onchain_stage2_prereg.md`. Wichtig für Stufe 1: Jupiter führt die
+Metis-API `/swap/v1`, die `jupiter.py` heute abfragt, nicht mehr weiter (ersetzt durch Swap V2); Stufe 2
+und das Paper-Buch wechseln auf `/swap/v2/build`. Die Punkte unten bleiben die Grundsätze:
+
+
 1. Eine eigene Wallet, gemacht mit dem Wallet-Tool (`python -m
    lab.pumpfun_rt.wallet new`, eigene Datei, nicht die pump.fun-Wallet), nur mit
    dem Betrag, der verloren gehen darf.
