@@ -61,6 +61,10 @@ one never), unsubscribed as the coin is dropped, sold or its wait ends. Its even
 copy counts, by signature). Above PYTHIA_PF_PROVIDER_MB_DAY (40) received in a UTC day only held coins keep theirs
 until 00:00 UTC, the status says so. Per transaction that came over both, which was first and by how many ms, and
 the bytes per day go to data/live/pumpfun_rt/provider.json (latency.md, "provider vs public, watched coins").
+Several providers (PYTHIA_SOLANA_WS_URLS, full URLs, comma separated) run side by side (Providers): one connection
+each with the same subscriptions, the first copy by signature wins, the budget per provider; one that refuses its
+first subscription (no logsSubscribe with mentions on its plan) is benched for the session, one that errors, refuses
+later or runs out until its reconnect or 00:00 UTC, and the others carry on; latency.md has a row per provider.
 """
 
 from __future__ import annotations
@@ -156,17 +160,18 @@ class LiveCollector(Collector):
     cut off or missing), and taking its signature as seen dropped the full copy with the creation or the
     migration in it, without a trace. A later copy with more log lines hands on only the events past those the
     first copy gave (under the transaction's own number); an equal or shorter one is a duplicate as before.
-    With `race` set (ProviderWatch.raced) a transaction that came over the targeted provider stream and over a
-    program link hands it the provider's lead in ms (negative: the public copy was first), once."""
+    With `race` set (Providers.raced) a transaction that came over a targeted provider stream and over a program
+    link hands it the provider's lead in ms (negative: the public copy was first) and the provider's source, once
+    per provider."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.race = None
-        self.raced: collections.OrderedDict[str, None] = collections.OrderedDict()   # signatures measured once
+        self.raced: collections.OrderedDict[str, list] = collections.OrderedDict()   # signatures of watched copies
 
     def handle_tx(self, slot: int, sig: str, failed: bool, logs: list[str], recv_ms: int, src: str = "ws") -> int:
         had = None if failed else self.sigs.get(sig)       # (log lines, tx number, feed, receive ms) of the copy taken
-        if had is not None and self.race is not None:
+        if not failed and self.race is not None:
             self._race(sig, had, src, recv_ms)
         lines = len(logs) - (1 if logs and logs[-1] == TRUNCATED else 0)
         if had is None or lines <= had[0]:
@@ -195,17 +200,37 @@ class LiveCollector(Collector):
         self.sigs[sig] = (lines, tx0, first, t0)
         return kept
 
-    def _race(self, sig: str, had: tuple, src: str, recv_ms: int) -> None:
-        w0, w1 = had[2].startswith(WATCH_SRC), src.startswith(WATCH_SRC)
-        if w0 == w1 or sig in self.raced:
+    def _race(self, sig: str, had: tuple | None, src: str, recv_ms: int) -> None:
+        """Per signature of a watched copy: the first public copy's receive ms and each provider's; every provider
+        that has both hands its lead to `race` once (several providers: each against the public copy)."""
+        w = src.startswith(WATCH_SRC)
+        rec = self.raced.get(sig)
+        if rec is None:
+            if not w:
+                return                                      # no provider's copy yet: had keeps the public one
+            rec = self.raced[sig] = [None, {}]              # public receive ms, provider source -> receive ms
+            if len(self.raced) > RACED_KEEP:
+                self.raced.popitem(last=False)
+            if had is not None and not had[2].startswith(WATCH_SRC):
+                rec[0] = had[3]
+        if w:
+            if src in rec[1]:
+                return
+            rec[1][src] = recv_ms
+        elif rec[0] is None:
+            rec[0] = recv_ms
+        else:
             return
-        self.raced[sig] = None
-        if len(self.raced) > RACED_KEEP:
-            self.raced.popitem(last=False)
-        try:
-            self.race(recv_ms - had[3] if w0 else had[3] - recv_ms)
-        except Exception as e:                              # a measurement never stops the stream
-            print(f"live service: provider race {type(e).__name__}", flush=True)
+        if rec[0] is None:
+            return
+        for s, t in rec[1].items():
+            if t is None:
+                continue
+            rec[1][s] = None                                # counted once
+            try:
+                self.race(rec[0] - t, s)
+            except Exception as e:                          # a measurement never stops the stream
+                print(f"live service: provider race {type(e).__name__}", flush=True)
 
     def keep(self, table: str, row: dict, chain_ms: int | None = None, sig: str | None = None) -> int:
         """As the collector's, and the live copy keeps its message's receive time (`recv_ms`, wall ms) next to
@@ -240,7 +265,7 @@ class Service:
         self.seen: collections.OrderedDict = collections.OrderedDict()   # migrations seen (written once)
         self.watch: collections.OrderedDict = collections.OrderedDict()  # mint -> monotonic s, until looked at
         self.errors = 0
-        self.prov: ProviderWatch | None = None              # the targeted provider stream (only with a provider)
+        self.prov: Providers | None = None                  # the targeted provider streams (only with a provider)
         self.w_since: dict[str, float] = {}                 # mint -> monotonic s since the strategy waits on it
 
     def _hold(self) -> Hold:
@@ -560,20 +585,24 @@ def utc_day(t_s: float) -> str:
 
 
 class ProviderWatch:
-    """The targeted provider stream: ONE websocket to the owner's provider with a logsSubscribe per watched or held
-    coin (`mentions` takes one address per subscription), so the paid-for data is only these coins' transactions.
-    Service.tick hands it the wanted accounts (want); the connection subscribes what is new, unsubscribes what is
-    gone, resubscribes everything after a reconnect (backoff 0.5 s to 60 s), and hands each notification to the
-    collector under the source WATCH_SRC + host (the duplicate filter by signature keeps the first copy). At most
-    max_subs at once: held coins always, then the newest watched ones. The bytes it receives count per UTC day;
-    above mb_day only held coins keep theirs until the next day. Only scheme and host are ever printed."""
+    """One targeted provider stream: ONE websocket to one of the owner's providers with a logsSubscribe per watched
+    or held coin (`mentions` takes one address per subscription), so the metered data is only these coins'
+    transactions. Providers.want hands it the wanted accounts (the same on every provider); the connection
+    subscribes what is new, unsubscribes what is gone, resubscribes everything after a reconnect (backoff 0.5 s to
+    60 s), and hands each notification to the collector under the source WATCH_SRC + label (the duplicate filter by
+    signature keeps the first copy). At most max_subs at once: held coins always, then the newest watched ones. The
+    bytes it receives count per UTC day; above mb_day only held coins keep theirs until the next day, and not even
+    those while another provider is up. Benched (its time counted per day): a refused first subscription (no
+    logsSubscribe with mentions on its plan) for the session, said once in the log; a later refusal, an error or a
+    closed link until the reconnect; the day's budget until 00:00 UTC. Only scheme and host are ever printed."""
 
     def __init__(self, url: str, col=None, max_subs: int | None = None, mb_day: float | None = None,
-                 now=time.time, commitment: str = COMMITMENT):
+                 now=time.time, commitment: str = COMMITMENT, label: str | None = None):
         from .latency import safe_url
         self.url = url
         self.host = safe_url(url)
-        self.src = WATCH_SRC + self.host
+        self.label = label or self.host                     # the host, "#2" on a second plan of the same host
+        self.src = WATCH_SRC + self.label
         self.col = col
         self.max_subs = max_subs or PROVIDER_MAX_SUBS
         self.mb_day = PROVIDER_MB_DAY if mb_day is None else mb_day
@@ -588,13 +617,18 @@ class ProviderWatch:
         self.connected = False
         self.connects = 0
         self.refused = 0
+        self.accepted = 0                                   # subscriptions it took this session
+        self.out = False                                    # benched for the session: no logsSubscribe mentions
+        self.leave: str | None = None                       # why the open link is to be left (a refusal)
+        self.down: str | None = None                        # why the link is down, until the reconnect
+        self.mark_t: float | None = None                    # the benched time counted up to here
         self.days: dict[str, dict] = self.load()
 
     # ------------------------------------------------------------ the plan
     def today(self) -> dict:
         d = utc_day(self.now())
         if d not in self.days:
-            self.days[d] = {"bytes": 0, "n": 0, "first": 0, "leads": []}
+            self.days[d] = {"bytes": 0, "n": 0, "first": 0, "leads": [], "benched_s": 0.0}
             for old in sorted(self.days)[:-PROVIDER_DAYS]:
                 del self.days[old]
         return self.days[d]
@@ -602,12 +636,34 @@ class ProviderWatch:
     def paused(self) -> bool:
         return self.today()["bytes"] > self.mb_day * 1e6
 
-    def want(self, watched: dict[str, float], held: set[str]) -> None:
+    def benched(self) -> str | None:
+        """Why this provider does not carry its share now, None while it does (or has not connected yet)."""
+        if self.out:
+            return "unsupported"
+        if self.down:
+            return self.down
+        return "budget" if self.paused() else None
+
+    def active(self) -> bool:
+        return self.connected and self.benched() is None
+
+    def mark(self) -> None:
+        """Counts the time since the last mark as benched if it is now (called before every change)."""
+        t = self.now()
+        if self.mark_t is not None and self.benched() and t > self.mark_t:
+            self.today()["benched_s"] = round(self.today().get("benched_s", 0.0) + t - self.mark_t, 1)
+        self.mark_t = t
+
+    def want(self, watched: dict[str, float], held: set[str], others: bool = False) -> None:
         """The accounts to stream now: every held one, then the newest watched ones up to max_subs (none while
-        the day's budget is used up)."""
+        the day's budget is used up, and then no held one either while another provider is up; nothing at all
+        once benched for the session)."""
+        self.mark()
         rest = sorted((a for a in watched if a not in held), key=lambda a: -watched[a])
-        room = 0 if self.paused() else max(0, self.max_subs - len(held))
-        self.target = {a: True for a in held} | {a: False for a in rest[:room]}
+        paused = self.paused()
+        keep = set() if self.out or (paused and others) else held
+        room = 0 if self.out or paused else max(0, self.max_subs - len(keep))
+        self.target = {a: True for a in keep} | {a: False for a in rest[:room]}
         self.watched, self.cut = len(rest), max(0, len(rest) - room)
 
     def plan(self) -> list[str]:
@@ -627,15 +683,19 @@ class ProviderWatch:
         return out
 
     def on_connect(self) -> None:
+        self.mark()
         self.subs.clear()
         self.pending.clear()
         self.connected = True
         self.connects += 1
+        self.leave = self.down = None
 
-    def on_down(self) -> None:
+    def on_down(self, why: str = "error") -> None:
+        self.mark()
         self.subs.clear()
         self.pending.clear()
         self.connected = False
+        self.down = None if self.out else why
 
     def on_message(self, text: str, recv_ms: int) -> None:
         self.today()["bytes"] += len(text.encode("utf-8", "replace"))
@@ -654,14 +714,25 @@ class ProviderWatch:
             return
         if isinstance(d.get("result"), int):
             self.subs[a] = d["result"]
-        else:                                               # tried again with the next plan
-            self.refused += 1
-            if self.refused <= 5:
-                err = d.get("error") if isinstance(d.get("error"), dict) else {}
-                print(f"live service: provider {self.host} refused a subscription (code {err.get('code')})",
-                      flush=True)
+            self.accepted += 1
+            return
+        self.refused += 1
+        err = d.get("error") if isinstance(d.get("error"), dict) else {}
+        code = err.get("code") if isinstance(err.get("code"), int) else None   # never its message (it can hold the URL)
+        self.mark()
+        if not self.accepted:                               # the very first refused: not on this plan
+            self.out = True
+            self.target = {}
+            self.leave = "unsupported"
+            print(f"live service: provider {self.label} refused logsSubscribe with mentions (code {code}): "
+                  "benched for this session, the others carry on", flush=True)
+            return
+        self.leave = "refused"                              # it took some before: a limit, back after the backoff
+        if self.refused <= 5:
+            print(f"live service: provider {self.label} refused a subscription (code {code}): benched until the "
+                  "reconnect", flush=True)
 
-    def raced(self, lead_ms: float) -> None:
+    def raced(self, lead_ms: float, src: str | None = None) -> None:
         """A transaction that came over this stream and over a program link: the provider's lead (ms)."""
         t = self.today()
         t["n"] += 1
@@ -675,13 +746,14 @@ class ProviderWatch:
 
         import aiohttp
         backoff = 0.5
-        while not stop.is_set():
+        while not stop.is_set() and not self.out:
             t_conn = time.monotonic()
+            why = "closed"
             try:
                 # websocket pings on: an idle targeted stream must not be closed by the provider
                 async with session.ws_connect(self.url, heartbeat=30, max_msg_size=16 << 20, compress=0) as ws:
                     self.on_connect()
-                    while not stop.is_set():
+                    while not stop.is_set() and not self.leave:
                         for m in self.plan():
                             await ws.send_str(m)
                         try:
@@ -693,11 +765,13 @@ class ProviderWatch:
                         elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                                           aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
                             break
+                    why = self.leave or why
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
                 # the message of a failed connect can carry the URL with its key: never printed
-                print(f"live service: provider {self.host} {type(e).__name__}", flush=True)
-            self.on_down()
-            if stop.is_set():
+                print(f"live service: provider {self.label} {type(e).__name__}", flush=True)
+                why = "error"
+            self.on_down(why)
+            if stop.is_set() or self.out:
                 break
             if time.monotonic() - t_conn > 60:
                 backoff = 0.5
@@ -706,44 +780,107 @@ class ProviderWatch:
 
     # ------------------------------------------------------------ status and file
     def status(self) -> dict:
+        self.mark()
         t = self.today()
         held = sum(1 for v in self.target.values() if v)
         paused = self.paused()
-        return {"host": self.host, "connected": self.connected, "subs": len(self.subs), "held": held,
+        why = {"unsupported": "refused logsSubscribe with mentions: benched for this session",
+               "budget": f"provider budget of {self.mb_day:g} MB used today: watched coins on the public feed until "
+                         "00:00 UTC, held coins keep theirs only while no other provider is up"}
+        b = self.benched()
+        return {"host": self.label, "connected": self.connected, "subs": len(self.subs), "held": held,
                 "watched": self.watched, "left_out": self.cut, "mb_today": round(t["bytes"] / 1e6, 3),
-                "mb_day": self.mb_day, "paused": paused,
-                "why": f"provider budget of {self.mb_day:g} MB used today: watched coins on the public feed until "
-                       "00:00 UTC, held coins keep theirs" if paused else None}
+                "mb_day": self.mb_day, "paused": paused, "benched": b,
+                "benched_min_today": round(t.get("benched_s", 0.0) / 60, 1),
+                "why": why.get(b, f"link {b}, back after the backoff" if b else None)}
 
     @staticmethod
     def path():
         return LX.data_dir() / "provider.json"
 
     def load(self) -> dict:
+        """This provider's days from the file (a file of one provider, as task 90 wrote it, counts for its host)."""
         try:
-            d = json.loads(self.path().read_text(encoding="utf-8")).get("days") or {}
+            f = json.loads(self.path().read_text(encoding="utf-8"))
+            provs = f.get("providers")
+            if isinstance(provs, dict):
+                d = (provs.get(self.label) or {}).get("days") or {}
+            else:
+                d = (f.get("days") or {}) if f.get("host") == self.label else {}
             return {k: {"bytes": int(v.get("bytes") or 0), "n": int(v.get("n") or 0),
-                        "first": int(v.get("first") or 0), "leads": list(v.get("leads") or [])[:LEADS_KEEP]}
+                        "first": int(v.get("first") or 0), "leads": list(v.get("leads") or [])[:LEADS_KEEP],
+                        "benched_s": float(v.get("benched_s") or 0)}
                     for k, v in d.items() if isinstance(v, dict)}
         except (OSError, ValueError, TypeError, AttributeError):
             return {}
 
     def save(self) -> None:
-        """data/live/pumpfun_rt/provider.json: per UTC day the bytes received, the transactions over both, how
-        often the provider was first and its leads (ms); the host as scheme and host only."""
+        """data/live/pumpfun_rt/provider.json, under providers -> label: per UTC day the bytes received, the
+        transactions over both, how often the provider was first, its leads (ms) and its benched seconds; the
+        label as scheme and host only."""
         try:
+            self.mark()
             self.today()
-            LX.write_json(self.path(), {"t": int(self.now() * 1000), "host": self.host, "mb_day": self.mb_day,
-                                        "days": self.days})
+            try:
+                provs = json.loads(self.path().read_text(encoding="utf-8")).get("providers")
+            except (OSError, ValueError, AttributeError):
+                provs = None
+            provs = provs if isinstance(provs, dict) else {}
+            provs[self.label] = {"host": self.label, "benched": self.benched(), "days": self.days}
+            LX.write_json(self.path(), {"t": int(self.now() * 1000), "mb_day": self.mb_day, "providers": provs})
         except OSError as e:
             print(f"live service: provider file not written ({type(e).__name__})", flush=True)
 
 
-def provider_url(urls: list[str], env=None) -> str | None:
-    """The first of the owner's providers among the feeds, None without one."""
+class Providers:
+    """Every provider of the owner side by side (PYTHIA_SOLANA_WS_URLS, several full URLs): one ProviderWatch each,
+    the same subscriptions on every one, the first copy by signature wins, each with its own day's budget
+    (PYTHIA_PF_PROVIDER_MB_DAY each) and its own bench; the others carry on while one is benched."""
+
+    def __init__(self, urls: list[str], col=None, **kw):
+        from .latency import safe_url
+        self.all: list[ProviderWatch] = []
+        for u in urls:
+            host = label = safe_url(u)
+            i = 2
+            while label in {w.label for w in self.all}:
+                label, i = f"{host}#{i}", i + 1
+            self.all.append(ProviderWatch(u, col, label=label, **kw))
+        self.max_subs = self.all[0].max_subs if self.all else PROVIDER_MAX_SUBS
+        self.mb_day = self.all[0].mb_day if self.all else PROVIDER_MB_DAY
+
+    def labels(self) -> str:
+        return ", ".join(w.label for w in self.all)
+
+    def want(self, watched: dict[str, float], held: set[str]) -> None:
+        for w in self.all:
+            w.want(watched, held, others=any(o.active() for o in self.all if o is not w))
+
+    def raced(self, lead_ms: float, src: str | None = None) -> None:
+        for w in self.all:
+            if w.src == src:
+                w.raced(lead_ms)
+
+    def status(self) -> dict:
+        ps = [w.status() for w in self.all]
+        return {"providers": ps, "up": sum(1 for w in self.all if w.active()), "of": len(ps),
+                "subs": sum(p["subs"] for p in ps), "mb_today": round(sum(p["mb_today"] for p in ps), 3),
+                "paused": bool(ps) and all(p["paused"] for p in ps),
+                "why": "; ".join(f"{p['host']}: {p['why']}" for p in ps if p["why"]) or None}
+
+    def save(self) -> None:
+        for w in self.all:
+            w.save()
+
+    def run(self, session, stop: asyncio.Event) -> list:
+        return [asyncio.create_task(w.run(session, stop)) for w in self.all]
+
+
+def provider_urls(urls: list[str], env=None) -> list[str]:
+    """The owner's providers among the feeds (all of them), empty without one."""
     env = os.environ if env is None else env
     public = (env.get("PYTHIA_SOLANA_WS") or "").strip() or DEFAULT_WS
-    return next((u for u in urls if u != public), None)
+    return [u for u in urls if u != public]
 
 
 def firehose_urls(urls: list[str], env=None) -> list[str]:
@@ -782,7 +919,7 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
     from .collector import feed_urls
     urls = feed_urls()                                       # the owner's providers first, the public one as fallback
     links = firehose_urls(urls)                              # the program-wide links: the public endpoint
-    prov = provider_url(urls)                                # the coins watched or held: the provider
+    provs = provider_urls(urls)                              # the coins watched or held: every provider
     col = LiveCollector(None, svc.on_row, amm=True, meta=False)
     if svc.book is not None and svc.book.pipe is not None:     # "no pool state" while our PumpSwap links were down
         svc.book.pipe.feed_down = lambda a, b: col.was_down(E.PUMP_AMM, a, b)
@@ -807,12 +944,12 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
         if svc.book is not None:                             # nothing to stream for a book that is not there
             tasks = [asyncio.create_task(col.stream(session, u, p, k, stop)) for u, p, k in feed_links(links)]
             print(feeds_line(links), flush=True)
-            if prov is not None:
-                svc.prov = ProviderWatch(prov, col)
+            if provs:
+                svc.prov = Providers(provs, col)
                 col.race = svc.prov.raced
-                tasks.append(asyncio.create_task(svc.prov.run(session, stop)))
-                print(f"live service: watched and held coins also from {svc.prov.host} (at most "
-                      f"{svc.prov.max_subs}, {svc.prov.mb_day:g} MB a day)", flush=True)
+                tasks += svc.prov.run(session, stop)
+                print(f"live service: watched and held coins also from {svc.prov.labels()} (at most "
+                      f"{svc.prov.max_subs}, {svc.prov.mb_day:g} MB a day each)", flush=True)
         print(f"live service: {'streaming' if tasks else 'status only'}", flush=True)
         try:
             while not stop.is_set():

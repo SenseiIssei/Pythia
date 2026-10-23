@@ -28,9 +28,10 @@ in a URL is replaced by PYTHIA_SOLANA_TOKEN, so no key is ever written into
 a file of this repository), else PYTHIA_SOLANA_WS, else the public endpoint.
 Only scheme and host are ever printed.
 
-The live service's targeted provider stream (live_service.ProviderWatch) counts, per transaction of a watched or held
-coin that came over the provider and over a public link, which was first and by how many ms, and the bytes the
-provider sent per day (data/live/pumpfun_rt/provider.json); save() adds them as "provider vs public, watched coins".
+The live service's targeted provider streams (live_service.Providers, one ProviderWatch per provider) count, per
+transaction of a watched or held coin that came over a provider and over a public link, which was first and by how
+many ms, the bytes each provider sent and the time it was benched per day (data/live/pumpfun_rt/provider.json);
+save() adds them as "provider vs public, watched coins", one row per provider.
 """
 
 from __future__ import annotations
@@ -257,26 +258,40 @@ def summary(days: list[str], root=None, now_ms: int | None = None, hours: float 
     return res
 
 
+def provider_label(label: str) -> str:
+    """A provider's label from the file as scheme and host again (and a "#2" of a second plan), whatever it holds."""
+    base, _, n = str(label).partition("#")
+    return safe_url(base) + (f"#{n}" if n.isdigit() else "")
+
+
 def provider_summary(path=None) -> list[dict] | None:
-    """Per UTC day of the live service's provider file: transactions over both, the provider's share first, its
-    median and p90 lead (ms; negative: the public copy was first) and the MB received. None without the file."""
+    """One row per provider of the live service's provider file, over the days it keeps: transactions over both,
+    the provider's share first, its median and p90 lead (ms; negative: the public copy was first), the MB received
+    per day (mean of the days), the hours benched and why it is benched now. None without the file."""
     if path is None:
         from . import live_exec as LX
         path = LX.data_dir() / "provider.json"
     try:
-        days = json.loads(path.read_text(encoding="utf-8")).get("days") or {}
+        f = json.loads(path.read_text(encoding="utf-8"))
+        provs = f.get("providers")
+        if not isinstance(provs, dict):                      # a file of one provider (task 90)
+            provs = {str(f.get("host") or "?"): {"days": f.get("days") or {}}}
     except (OSError, ValueError, AttributeError):
         return None
     out = []
-    for day, v in sorted(days.items()):
-        if not isinstance(v, dict):
-            continue
-        leads = [x for x in v.get("leads") or [] if isinstance(x, (int, float))]
-        n = int(v.get("n") or 0)
-        out.append({"day": day, "n": n, "share_first": (v.get("first") or 0) / n if n else None,
+    for label, p in sorted(provs.items()):
+        days = [v for v in ((p or {}).get("days") or {}).values() if isinstance(v, dict)] if isinstance(p, dict) else []
+        leads = [x for v in days for x in v.get("leads") or [] if isinstance(x, (int, float))]
+        n = sum(int(v.get("n") or 0) for v in days)
+        first = sum(int(v.get("first") or 0) for v in days)
+        b = p.get("benched") if isinstance(p, dict) else None
+        out.append({"provider": provider_label(label), "days": len(days), "n": n,
+                    "share_first": first / n if n else None,
                     "median_lead_ms": float(np.median(leads)) if leads else None,
                     "p90_lead_ms": float(np.percentile(leads, 90)) if leads else None,
-                    "mb": round((v.get("bytes") or 0) / 1e6, 2)})
+                    "mb_day": round(sum(v.get("bytes") or 0 for v in days) / 1e6 / len(days), 2) if days else 0.0,
+                    "benched_h": round(sum(float(v.get("benched_s") or 0) for v in days) / 3600, 2),
+                    "benched_now": b if b in ("unsupported", "budget", "refused", "error", "closed") else None})
     return out
 
 
@@ -284,17 +299,20 @@ def provider_md(rows: list[dict] | None) -> list[str]:
     if rows is None:
         return []
     md = ["", "## provider vs public, watched coins", "",
-          "Transactions of the coins the live bot watched or held that came over the provider and a public link "
-          "(lead: how much earlier the provider's copy was; negative, the public one was first).", ""]
+          "Transactions of the coins the live bot watched or held that came over a provider and a public link, one "
+          "row per provider over the days kept (lead: how much earlier the provider's copy was; negative, the public "
+          "one was first; benched: refused, errored, closed or out of its day's budget).", ""]
     if not rows:
         return md + ["Nothing measured yet."]
-    md += ["| day (UTC) | n | provider first | median lead | p90 lead | provider MB |", "|---|---|---|---|---|---|"]
+    md += ["| provider | days | n | provider first | median lead | p90 lead | MB a day | benched |",
+           "|---|---|---|---|---|---|---|---|"]
     for r in rows:
         def ms(x):
             return "n/a" if x is None else f"{x:.0f} ms"
         first = "n/a" if r["share_first"] is None else f"{r['share_first']:.0%}"
-        md.append(f"| {r['day']} | {r['n']:,} | {first} | {ms(r['median_lead_ms'])} | {ms(r['p90_lead_ms'])} "
-                  f"| {r['mb']:.1f} |")
+        bench = f"{r['benched_h']:.1f} h" + (f", now {r['benched_now']}" if r["benched_now"] else "")
+        md.append(f"| {r['provider']} | {r['days']} | {r['n']:,} | {first} | {ms(r['median_lead_ms'])} "
+                  f"| {ms(r['p90_lead_ms'])} | {r['mb_day']:.1f} | {bench} |")
     return md
 
 

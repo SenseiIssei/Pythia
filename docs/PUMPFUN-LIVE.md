@@ -573,7 +573,18 @@ ist das Tagesbudget in MB, darüber pausieren die Abos beobachteter Coins bis 00
 der Status zeigt es unter `provider`; `PYTHIA_PF_PROVIDER_FIREHOSE=1` legt wie bisher Verbindung 0 von
 pump.fun und PumpSwap auf den Anbieter (teuer). Beim Start stehen `live service: feeds ...` und `watched and
 held coins also from ...` mit Schema und Host im Log; wer zuerst lieferte und um wie viele ms, und die MB pro
-Tag, stehen in `reports/pumpfun_rt/latency.md` ("provider vs public, watched coins"). Ob es wirkt, zeigt die
+Tag, stehen in `reports/pumpfun_rt/latency.md` ("provider vs public, watched coins").
+
+Mehrere kostenlose Anbieter nebeneinander: `PYTHIA_SOLANA_WS_URLS` nimmt mehrere vollständige wss-URLs mit
+Komma getrennt, der Schlüssel steht dann direkt in der URL (oder `{token}` für `PYTHIA_SOLANA_TOKEN`), etwa
+`PYTHIA_SOLANA_WS_URLS=wss://<anbieter-a>/?api-key=<schlüssel-a>,wss://<anbieter-b>/<schlüssel-b>`. Der Bot hält
+zu jedem Anbieter eine Verbindung mit denselben Abos, die erste Kopie einer Transaktion zählt.
+`PYTHIA_PF_PROVIDER_MB_DAY` gilt für jeden Anbieter einzeln; wer sein Budget aufgebraucht hat, gibt auch die
+gehaltenen Coins ab, solange ein anderer läuft. Lehnt ein Anbieter schon das erste `logsSubscribe` mit `mentions`
+ab (manche kostenlose Tarife), ist er bis zum Neustart draußen, das Log sagt es einmal; Fehler, spätere
+Ablehnungen und Verbindungsabbrüche setzen ihn nur bis zur nächsten Verbindung aus (Backoff). Der Status zeigt
+jeden Anbieter unter `provider.providers`, `latency.md` hat je Anbieter eine Zeile (n, wie oft zuerst, Median
+und p90 des Vorsprungs, MB pro Tag, Stunden ausgesetzt), immer nur Schema und Host. Ob es wirkt, zeigt die
 tägliche Telegram-Karte ("Unser Datenstrom sah neue Token ... nach ihrem
 Block") und der Vergleich der Anbieter:
 
