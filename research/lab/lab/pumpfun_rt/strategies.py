@@ -141,9 +141,12 @@ SELECT_Y9_TRIALS = 5 * 2
 # Y10 (results/pumpfun_trends_y10_prereg.md): two top-30 % filters on the models with the trend features and three trend
 # strategies (pipeline._build_y10), each judged under the 0.25 SOL and the 1.0 SOL daily loss limit, ten more.
 TRENDS_Y10_TRIALS = 5 * 2
+# Y11 (results/pumpfun_runner_prereg.md): P_pool0_wait keeping 20 % after its time stop, two rest exits
+# (pipeline._build_y11), each judged under the 0.25 SOL and the 1.0 SOL daily loss limit, four more.
+RUNNER_Y11_TRIALS = 2 * 2
 N_TRIALS = (len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS + SPEED_TRIALS
             + REAL_LATENCY_TRIALS + POOL0_TRIALS + EXIT_RUNNER_TRIALS + EXITS_Y8_TRIALS + SELECT_Y9_TRIALS
-            + TRENDS_Y10_TRIALS)
+            + TRENDS_Y10_TRIALS + RUNNER_Y11_TRIALS)
 # The rule the shadow book runs until the study has picked one (pick.json).
 DEFAULT_PICK = "C_20in60_x1"
 # The model filter: enter only when the calibrated probability that this entry,

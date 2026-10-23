@@ -176,6 +176,8 @@ class Exits:
     time_after_step_s: float | None = None  # Y7: once a ladder step has filled, the time stop is landing + this
     press_exit: tuple | None = None       # Y8: (window s, share): sell all when the pool's net SOL outflow over the
                                           # window (trades since the landing) exceeds share x its SOL at the landing
+    runner: tuple | None = None           # Y11: (share kept, stop under the entry, fall from the high, hard stop s):
+                                          # the time stop sells all but the share; the rest exits on its own stops
 
 
 # E0, the X14 plan's exit for the early books, and the hazard strategies' fallback before the first retrain.
@@ -366,8 +368,28 @@ def _build_y10() -> list[Strategy]:
     ]
 
 
+def _build_y11() -> list[Strategy]:
+    """Y11 (results/pumpfun_runner_prereg.md): P_pool0_wait with a runner. Before the time stop exactly
+    P_pool0_wait (+30 %, stop -20 %); at the 300 s time stop 80 % is sold and 20 % kept, which exits at its stop
+    under the entry, or, once its value was above its cost since the time stop, at its fall from the highest value
+    since then, or at the hard stop after the landing; 0.1 SOL each."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    wait = {"delay_s": 0, "wait_pool_s": 5}
+    w = "PumpSwap, at the migration or up to 5 s later at the pool's first trade; +30 %, stop -20 %, at 300 s 80 % sold"
+    return [
+        _strategy("P_pool0_wait_run20", "E", "migration", wait, {},
+                  dataclasses.replace(pool0, runner=(0.20, 0.50, 0.30, 1800)),
+                  f"{w}, the rest out at -50 %, 30 % under its high once above the entry, or at 30 min",
+                  stake_sol=0.1),
+        _strategy("P_pool0_wait_run20w", "E", "migration", wait, {},
+                  dataclasses.replace(pool0, runner=(0.20, 0.70, 0.40, 3600)),
+                  f"{w}, the rest out at -70 %, 40 % under its high once above the entry, or at 60 min",
+                  stake_sol=0.1),
+    ]
+
+
 STRATEGIES: list[Strategy] = (_build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
-                              + _build_y10())
+                              + _build_y10() + _build_y11())
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -806,6 +828,15 @@ class Pipeline:
         if p is None:
             return
         tokens = min(tokens, p["left"])
+        rn = p.get("run")
+        if rn is not None:                                    # Y11: the 80 % sale, or a sale of the rest
+            if p.pop("run_part", None) is not None:
+                rn["part_tokens"] += tokens
+                rn["part_l"] += got_l
+                rn["part_fee_l"] += fee_l
+            else:
+                rn["got_l"] += got_l
+                rn["fee_l"] += fee_l
         p["left"] -= tokens
         p["proceeds_l"] += got_l
         p["fees_l"] += fee_l
@@ -831,6 +862,9 @@ class Pipeline:
         p["selling"] = False
         p["sell_fails"] = p.get("sell_fails", 0) + 1
         self._event("sell_failed", p, why=why, fee_l=fee_l)
+        part = p.pop("run_part", None)
+        if part is not None and not p.get("exiting") and "due" not in p:
+            return self._run_sell(p, at, part)                # Y11: the time stop's 80 % must go through too
         if p.get("exiting"):
             # A protective exit must go through: it is sent again at once. The live executor holds it back
             # for its backoff (1, 2, 4 ... 60 s) and gives up after a cap; the paper executor fills it.
@@ -845,7 +879,7 @@ class Pipeline:
         if due is not None:
             self._sell_all(p, at, due)
         elif p.pop("time_due", False) and not self._time_moved(p, at):
-            self._sell_all(p, at, "time")
+            self._time_exit(p, at)
         else:
             self.check(p["pid"], at)
 
@@ -903,6 +937,8 @@ class Pipeline:
         s = self.strats[p["rule"]]
         ex = s.exits
         if p["selling"]:
+            if p.get("run") is not None:
+                self._run_mark(p)
             # a trigger the strategy acts on (a dev sale or pull only where its exits have them) is acted on as
             # soon as the sale in flight is back
             if not p.get("exiting") and (trigger == "kill" or (trigger == "dev_sell" and ex.dev_sell)
@@ -926,6 +962,8 @@ class Pipeline:
         mult = v / basis if basis > 0 else 0.0
         p["mark_l"] = v
         p["peak"] = max(p["peak"], mult)
+        if p.get("run") is not None:                          # Y11: the rest has only its own exits
+            return self._run_check(p, t, mult)
         if ex.risk and tok is not None and t - p["last_risk_ms"] >= RISK_EVERY_MS:
             p["last_risk_ms"] = t
             pb = eng.prob(ex.risk[0], eng.features(tok, int(t)))
@@ -966,7 +1004,59 @@ class Pipeline:
                 return
             if self._time_moved(p, at):
                 return
-            self._sell_all(p, at, "time")
+            self._time_exit(p, at)
+
+    def _time_exit(self, p: dict, at: float) -> None:
+        """The time stop: everything, or with a runner (Y11) all but the rest."""
+        rn = self.strats[p["rule"]].exits.runner
+        keep = int(p["tokens"] * rn[0]) if rn is not None and p.get("run") is None else 0
+        amount = p["left"] - keep
+        if keep <= 0 or amount <= 0:
+            return self._sell_all(p, at, "time")
+        p["run"] = {"from_ms": int(at), "keep": keep, "high": 0.0, "part_tokens": 0, "part_l": 0, "part_fee_l": 0,
+                    "got_l": 0, "fee_l": 0}
+        self._run_mark(p)
+        self.eng.push(p["land_ms"] + rn[3] * 1000, "pipe", (self, "_run_end", p["pid"]))
+        self._run_sell(p, at, amount)
+
+    def _run_sell(self, p: dict, t: float, amount: int) -> None:
+        """Y11: the time stop's sale of all but the rest, min_out 0 as every protective exit."""
+        p["run_part"] = amount
+        self._sell(p, t, amount, 0, "time_part")
+
+    def _run_mark(self, p: dict) -> float | None:
+        """Y11: the rest's value now (its sale after the fee) over its cost; the high since the time stop follows it,
+        also while the 80 % sale is in flight."""
+        rn = p["run"]
+        v = self.eng.sale_value(self.eng.tokens.get(p["mint"]), rn["keep"], self.eng.cost_of(p["rule"]))
+        basis = p["cost_l"] * rn["keep"] / p["tokens"]
+        if v is None or basis <= 0:
+            return None
+        mult = v / basis
+        rn["high"] = max(rn["high"], mult)
+        return mult
+
+    def _run_check(self, p: dict, t: float, mult: float) -> None:
+        """Y11: the rest exits at its stop under the entry, or, once its high since the time stop was above the
+        entry, at its fall from that high (the hard stop is _run_end)."""
+        rn, (_, stop, gap, _) = p["run"], self.strats[p["rule"]].exits.runner
+        rn["high"] = max(rn["high"], mult)
+        if mult <= 1 - stop:
+            return self._sell_all(p, t, "run_stop")
+        if rn["high"] > 1 and mult <= rn["high"] * (1 - gap):
+            return self._sell_all(p, t, "run_trail")
+        return None
+
+    def _run_end(self, at: float, pid: int) -> None:
+        """Y11: the rest's hard stop, landing + the runner's last field."""
+        p = self.pos.get(pid)
+        if p is None or p["state"] != "open" or p["left"] <= 0 or p.get("run") is None:
+            return
+        if p["selling"]:
+            if not p.get("exiting"):
+                p["due"] = "run_time"
+            return
+        self._sell_all(p, at, "run_time")
 
     def _time_moved(self, p: dict, at: float) -> bool:
         """Y7's later time stop (Exits.time_after_step_s): once a ladder step has filled (a sale landed while
@@ -1047,6 +1137,13 @@ class Pipeline:
                    lat_buy_ms=self.lat.pop(p["pid"], None),
                    slip=(p["entry_price"] / p["signal_price"] - 1) if p.get("signal_price") else None,
                    book=self.name)
+        rn = p.get("run")
+        if rn is not None:                                 # Y11: the rest on its own (only for a runner's rest)
+            rest_cost = p["cost_l"] * rn["keep"] / p["tokens"]
+            pro_rata = rn["part_l"] * rn["keep"] / rn["part_tokens"] if rn["part_tokens"] else 0.0
+            rec.update(run_from_ms=rn["from_ms"], run_high=rn["high"], run_cost_sol=rest_cost / C.LAMPORTS,
+                       run_pnl_sol=(rn["got_l"] - rn["fee_l"] - rest_cost) / C.LAMPORTS,
+                       run_vs_time_sol=(rn["got_l"] - rn["fee_l"] - pro_rata) / C.LAMPORTS)
         self.closed.append(rec)
         if self.record:
             eng.closed.append(rec)

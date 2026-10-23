@@ -63,14 +63,14 @@ def test_the_y8_strategies_are_what_the_prereg_says():
         assert s.exits.sl == (0.10 if n.endswith("sl10") else 0.20) and s.tp == 0.30
         assert s.exits.press_exit == ((5.0, 0.08) if n.endswith("press") else None)
         assert dataclasses.replace(s.exits, sl=0.20, press_exit=None) == base.exits
-    for s in P.STRATEGIES:                                     # nothing before Y8 has the new exit or the wait
-        if s.name not in names[1:]:
+    for s in P.STRATEGIES:                                     # nothing else has the new exit or the wait (Y11's
+        if s.name not in names[1:] and s.exits.runner is None:  # runners are P_pool0_wait with a rest)
             assert s.exits.press_exit is None and "wait_pool_s" not in s.p
 
 
 def test_the_trials_are_counted():
     assert S.EXITS_Y8_TRIALS == 5 == len(X8.VARIANTS) - 1
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4
 
 
 # ---------------------------------------------------------------- the press exit
