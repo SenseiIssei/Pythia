@@ -260,6 +260,7 @@ class View:
     tokens: dict[str, int]                       # raw units by mint (wSOL left out)
     prices: dict[str, float]                     # USD by mint
     frozen: list[str] = field(default_factory=list)
+    memes: dict[str, int] = field(default_factory=dict)  # meme mints the ledger holds, with their decimals
 
     def held(self, code: str) -> int:
         m = LG.CODES[code]
@@ -281,10 +282,17 @@ class View:
             if v is None:
                 return None
             tot += v
+        for mint, dec in self.memes.items():          # meme coins count too (lab.onchain.meme_live)
+            raw = self.tokens.get(mint, 0)
+            if raw <= 0:
+                continue
+            if not self.prices.get(mint):
+                return None
+            tot += raw / 10 ** dec * self.prices[mint]
         return tot
 
 
-def read_view(chain: Chain, wallet: str, prices_of) -> View:
+def read_view(chain: Chain, wallet: str, prices_of, memes: dict[str, int] | None = None) -> View:
     sol = int(chain.rpc.call("getBalance", [wallet, {"commitment": "confirmed"}])["value"])
     tokens: dict[str, int] = {}
     frozen = []
@@ -296,7 +304,8 @@ def read_view(chain: Chain, wallet: str, prices_of) -> View:
             frozen.append(t.mint)
         if t.mint != WSOL:
             tokens[t.mint] = tokens.get(t.mint, 0) + t.amount
-    return View(now_ms(), sol, tokens, prices_of([m.mint for m in LG.CODES.values()]), frozen)
+    memes = dict(memes or {})
+    return View(now_ms(), sol, tokens, prices_of([m.mint for m in LG.CODES.values()] + sorted(memes)), frozen, memes)
 
 
 def kraken_mid(code: str, fetch=None) -> float | None:
@@ -349,7 +358,7 @@ class Prepared:
 
 def realised(day: int) -> dict:
     """The day's numbers, recomputed from the ledger (never counted up)."""
-    out = {"swaps": 0, "book_swaps": {}, "converts": 0, "convert_usd": 0.0, "kill": 0, "fees_l": 0}
+    out = {"swaps": 0, "book_swaps": {}, "converts": 0, "convert_usd": 0.0, "kill": 0, "fees_l": 0, "meme_swaps": 0}
     for r in read_ledger():
         if day_of(_i(r.get("t"))) != day or r.get("status") not in ("filled", "failed"):
             continue
@@ -362,6 +371,8 @@ def realised(day: int) -> dict:
             out["kill"] += 1
         elif r.get("kind") == "book":
             out["book_swaps"][r.get("book")] = out["book_swaps"].get(r.get("book"), 0) + 1
+        elif r.get("kind") == "meme":
+            out["meme_swaps"] += 1
     return out
 
 
@@ -633,20 +644,20 @@ class Trader:
 
     def _read_back(self, sig: str, s: Swap, tries: int = 10) -> dict | None:
         """What the landed transaction did to the wallet, from the chain (as chain_pnl does)."""
-        mi, mo = LG.CODES[s.src], LG.CODES[s.dst]
+        mi, mo = LG.mint_of(s.src), LG.mint_of(s.dst)
         for _ in range(tries):
             try:
                 res = self.chain.rpc.transaction(sig)
             except Exception:
                 res = None
             if res:
-                a = CP.tx_effect(res, self.wallet, None if mi.mint == WSOL else mi.mint)
-                b = CP.tx_effect(res, self.wallet, None if mo.mint == WSOL else mo.mint)
+                a = CP.tx_effect(res, self.wallet, None if mi == WSOL else mi)
+                b = CP.tx_effect(res, self.wallet, None if mo == WSOL else mo)
                 if a is not None and b is not None:
                     sol = a["delta_l"]
                     fee = a["fee_l"]
-                    in_raw = -(sol + fee) if mi.mint == WSOL else -(a["tok"] or 0)
-                    out_raw = (sol + fee) if mo.mint == WSOL else (b["tok"] or 0)
+                    in_raw = -(sol + fee) if mi == WSOL else -(a["tok"] or 0)
+                    out_raw = (sol + fee) if mo == WSOL else (b["tok"] or 0)
                     return {"sol_delta_l": sol, "fee_l": fee, "in_raw": in_raw, "out_raw": out_raw, "err": a["err"],
                             "block_ms": a.get("block_ms")}
             self.sleep(1.0)
@@ -760,7 +771,7 @@ class Trader:
             if r.get("unread") != "1" or not r.get("sig"):
                 continue
             s = Swap(r.get("kind") or "", r.get("from") or "", r.get("to") or "", _i(r.get("in_raw")))
-            if s.src not in LG.CODES or s.dst not in LG.CODES:
+            if LG.mint_of(s.src) is None or LG.mint_of(s.dst) is None:
                 continue
             back = self._read_back(r["sig"], s, tries=1)
             if back is None:
@@ -803,9 +814,9 @@ def expected_holdings() -> tuple[dict | None, bool]:
         if r.get("status") != "filled":
             continue
         for code, sign, k in ((r.get("from"), -1, "in_raw"), (r.get("to"), 1, "out_raw")):
-            m = LG.CODES.get(code or "")
-            if m is not None and m.mint != WSOL:
-                tok[m.mint] = tok.get(m.mint, 0) + sign * _i(r.get(k))
+            mint = LG.mint_of(code)                     # a coin of the list or a meme coin (meme:<mint>)
+            if mint is not None and mint != WSOL:
+                tok[mint] = tok.get(mint, 0) + sign * _i(r.get(k))
     for e in j:
         if e.get("kind") in ("deposit", "unexplained") and _i(e.get("t")) >= t0:
             if e.get("mint") == WSOL:

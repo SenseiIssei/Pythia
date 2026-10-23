@@ -22,6 +22,12 @@ Stage 2, the real-money trader, LOCKED until the owner arms it (docs/ONCHAIN-STA
   execution.py     reports/onchain/execution.md: our swaps' speed and cost against pump.fun and Kraken
   cards.py         the alpha mode's trade cards (Telegram, Discord)
 
+The meme module (docs/ONCHAIN-MEME.md), paper first, its live path LOCKED like the rest of stage 2:
+
+  meme_safety.py   the per-coin safety check before any memecoin is quoted (read only)
+  meme.py          candidates, the three pre-registered rules, a paper book each, the proof
+  meme_live.py     the meme rules' locked live path: the Trader with the [meme] gate and caps
+
 Stage 1 (mints, jupiter, paper, book) never signs or sends (docs/ONCHAIN.md); in stage 2 only
 live_exec.py signs, after every gate held, and nothing anywhere transfers out of the wallet.
 """

@@ -28,6 +28,13 @@ old) says it passed. The one exception is the alpha mode (mode=alpha, like the p
 test mode): there the books the ack names trade without the proof, so the owner can train and
 measure our own models with small real money, under the lower ALPHA_MAX_* below; every other
 gate, the guard, the caps, the kill switch and the watcher stay exactly as in test mode.
+
+A meme rule (lab.onchain.meme, docs/ONCHAIN-MEME.md) buys real money only when, on top of every gate
+above, the ack names it in its own [meme] section (rules=, max_total_usd, max_trade_usd,
+max_daily_loss_usd, each at most MEME_MAX_* below), its pre-registered paper proof passed
+(research/lab/results/onchain_meme_prereg.md; reports/onchain_meme/proof.json, at most 36 hours old;
+no alpha exception) and the per-coin safety check (meme_safety) passed for that mint within the last
+MEME_CHECK_MAX_AGE_MS (meme_problems). The meme allowlist is that verdict, never a list in the ack.
 Nothing here opens the wallet file, signs or sends.
 """
 
@@ -72,6 +79,18 @@ HARD = {"test": {"total": TEST_MAX_TOTAL_USD, "trade": TEST_MAX_TRADE_USD, "dail
                  "convert": TEST_MAX_CONVERT_USD},
         "alpha": {"total": ALPHA_MAX_TOTAL_USD, "trade": ALPHA_MAX_TRADE_USD, "daily_loss": ALPHA_MAX_DAILY_LOSS_USD,
                   "convert": ALPHA_MAX_CONVERT_USD}}
+# Meme rules (the ack's [meme] section): their own, far lower maxima, whatever the mode; the ack can only go lower.
+MEME_MAX_TOTAL_USD = 50.0                # all meme coins held, at Jupiter's prices
+MEME_MAX_TRADE_USD = 10.0
+MEME_MAX_DAILY_LOSS_USD = 10.0
+MEME_HARD = {"total": MEME_MAX_TOTAL_USD, "trade": MEME_MAX_TRADE_USD, "daily_loss": MEME_MAX_DAILY_LOSS_USD}
+MEME_CHECK_MAX_AGE_MS = 60_000           # a buy needs the mint's safety verdict from the last minute
+MEME_PREFIX = "meme:"                    # a meme coin's code in the ledger: meme:<mint>
+MEME_SLIPPAGE_BPS = 200
+MEME_MAX_COST_BPS = 150.0                # a meme buy against SOL at Kraken's mid and the coin at Jupiter's price
+MEME_MAX_SELL_COST_BPS = 500.0           # a sale may cost more (a pool losing liquidity), never above this
+MEME_MAX_PRICE_GAP_PCT = 5.0             # Jupiter's price of the coin against its best pool's (the safety check's)
+MEME_MAX_SWAPS_DAY = 20
 SMALL_MAX_TRADE_USD = 100.0              # PYTH, RENDER, JTO, POPCAT (20 to 50 bps at 1,000 USD)
 SMALL = frozenset({"PYTH", "RENDER", "JTO", "POPCAT"})
 MAX_BOOK_SWAPS_DAY = 40
@@ -119,6 +138,21 @@ def simulate_path() -> Path:
     return data_dir() / "simulate.json"
 
 
+def meme_proof_path() -> Path:
+    from .. import report as rep
+    return rep.REPORTS / "onchain_meme" / "proof.json"
+
+
+def mint_of(code: str | None) -> str | None:
+    """The mint behind a ledger code: a coin of the stage-2 list, or meme:<mint>; None for anything else."""
+    m = CODES.get(code or "")
+    if m is not None:
+        return m.mint
+    if (code or "").startswith(MEME_PREFIX) and len(code) > len(MEME_PREFIX):
+        return code[len(MEME_PREFIX):]
+    return None
+
+
 def kill_paths() -> list[Path]:
     return [ETC_KILL, data_dir() / "KILL", reports_dir() / "KILL"]
 
@@ -147,12 +181,28 @@ class Ack:
     expires: str | None = None
     on_kill: str = "hold"
     problems: tuple = ()
+    meme_rules: tuple = ()               # the [meme] section: the rules it allows and their own limits
+    meme_max_total_usd: float | None = None
+    meme_max_trade_usd: float | None = None
+    meme_max_daily_loss_usd: float | None = None
+    meme_problems: tuple = ()            # a bad [meme] section shuts the meme rules only
 
     def view(self) -> dict:
         return {"mode": self.mode, "books": list(self.books), "mints": list(self.mints), "book_usd": self.book_usd,
                 "max_total_usd": self.max_total_usd, "max_trade_usd": self.max_trade_usd,
                 "max_daily_loss_usd": self.max_daily_loss_usd, "max_convert_usd": self.max_convert_usd,
-                "expires": self.expires, "on_kill": self.on_kill}
+                "expires": self.expires, "on_kill": self.on_kill,
+                "meme": {"rules": list(self.meme_rules), "max_total_usd": self.meme_max_total_usd,
+                         "max_trade_usd": self.meme_max_trade_usd, "max_daily_loss_usd": self.meme_max_daily_loss_usd,
+                         "problems": list(self.meme_problems)}}
+
+    def meme_cap(self, k: str) -> float:
+        """A meme limit in force: the [meme] section's value, never above MEME_MAX_* (0 without a valid section)."""
+        if self.mode not in MODES or not self.meme_rules or self.meme_problems:
+            return 0.0
+        v = {"total": self.meme_max_total_usd, "trade": self.meme_max_trade_usd,
+             "daily_loss": self.meme_max_daily_loss_usd}[k]
+        return min(v or 0.0, MEME_HARD[k])
 
     def allowed_mints(self) -> frozenset:
         return frozenset(CODES[c].mint for c in self.mints if c in CODES)
@@ -189,6 +239,7 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
     except OSError:
         return Ack(problems=(f"no owner confirmation file {path}",))
     vals: dict[str, str] = {}
+    meme: dict[str, str] | None = None   # the [meme] section, when there is one
     accepted = False
     for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
@@ -197,11 +248,16 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
         if line.rstrip(".").strip().lower() == ACCEPT_LINE.lower():
             accepted = True
             continue
+        if line.startswith("[") and line.endswith("]"):
+            if line[1:-1].strip().lower() != "meme":
+                return Ack(problems=(f"{path}: unknown section {line} (only [meme])",))
+            meme = {}
+            continue
         sep = "=" if "=" in line else ":" if ":" in line else None
         if sep is None:
             continue
         k, v = line.split(sep, 1)
-        vals[k.strip().lower()] = v.strip()
+        (vals if meme is None else meme)[k.strip().lower()] = v.strip()
     problems: list[str] = []
     mode = (vals.get("mode") or "").lower()
     if mode not in MODES:
@@ -240,7 +296,23 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
         problems.append(f"{path} has no expires date (expires=YYYY-MM-DD, at most {EXPIRES_MAX_DAYS} days ahead)")
     if not accepted:
         problems.append(f"{path} lacks the line \"{ACCEPT_LINE}\"")
-    return Ack(mode, books, mints, book_usd, total, trade, loss, conv, expires, on_kill, tuple(problems))
+    m_rules, m_total, m_trade, m_loss, m_problems = (), None, None, None, []
+    if meme is not None:
+        from . import meme as ME
+        m_rules = split(meme.get("rules"))
+        if not m_rules:
+            m_problems.append(f"{path} names no meme rules (rules=...)")
+        for r in m_rules:
+            if r not in ME.RULES:
+                m_problems.append(f"{path}: {r} is not a pre-registered meme rule ({', '.join(ME.RULES)})")
+        m_total = _usd(meme, "max_total_usd", path, MEME_MAX_TOTAL_USD, m_problems)
+        m_trade = _usd(meme, "max_trade_usd", path, MEME_MAX_TRADE_USD, m_problems)
+        m_loss = _usd(meme, "max_daily_loss_usd", path, MEME_MAX_DAILY_LOSS_USD, m_problems)
+        for k in set(meme) - {"rules", "max_total_usd", "max_trade_usd", "max_daily_loss_usd"}:
+            m_problems.append(f"{path}: {k} does not belong here")
+        m_problems = [f"[meme] {w}" for w in m_problems]
+    return Ack(mode, books, mints, book_usd, total, trade, loss, conv, expires, on_kill, tuple(problems),
+               m_rules, m_total, m_trade, m_loss, tuple(m_problems))
 
 
 def hard_view(mode: str | None = None) -> dict:
@@ -250,7 +322,9 @@ def hard_view(mode: str | None = None) -> dict:
             "max_daily_loss_usd": hard["daily_loss"], "max_convert_usd": hard["convert"],
             "small_max_trade_usd": min(SMALL_MAX_TRADE_USD, hard["trade"]), "reserve_sol": RESERVE_L / 1e9,
             "max_converts": MAX_CONVERTS_DAY, "max_book_swaps": MAX_BOOK_SWAPS_DAY, "confirm_s": CONFIRM_S,
-            "max_cost_bps": MAX_COST_BPS, "max_eth_share": MAX_ETH_SHARE}
+            "max_cost_bps": MAX_COST_BPS, "max_eth_share": MAX_ETH_SHARE,
+            "meme_max_total_usd": MEME_MAX_TOTAL_USD, "meme_max_trade_usd": MEME_MAX_TRADE_USD,
+            "meme_max_daily_loss_usd": MEME_MAX_DAILY_LOSS_USD}
 
 
 # ---------------------------------------------------------------- the simulation record and the proof
@@ -290,6 +364,50 @@ def book_problems(book: str, ack: Ack, proof, now_ms: int) -> list[str]:
     if not isinstance(r, dict) or r.get("passed") is not True:
         out.append(f"{book} has not passed the pre-registered on-chain evidence")
     return out
+
+
+def meme_rule_problems(rule: str, ack: Ack, proof, now_ms: int, killed: bool = False) -> list[str]:
+    """Why a meme rule may not buy at all: the ack's [meme] section must name it (and be valid), its pre-registered
+    paper proof must have passed (reports/onchain_meme/proof.json, at most 36 h old; the alpha mode does not lift
+    it), no kill file."""
+    out = []
+    if killed:
+        out.append("the kill switch file is there")
+    if ack.mode not in MODES:
+        out.append("no valid confirmation file")
+    out += list(ack.meme_problems)
+    if rule not in ack.meme_rules:
+        out.append(f"the confirmation file's [meme] section does not name {rule}")
+    if not isinstance(proof, dict):
+        out.append("no meme proof report (reports/onchain_meme/proof.json; the pre-registered paper evidence)")
+    else:
+        if now_ms - int(proof.get("updated_ms") or 0) > PROOF_MAX_AGE_MS:
+            out.append("the meme proof report is older than 36 h")
+        r = (proof.get("rules") or {}).get(rule)
+        if not isinstance(r, dict) or r.get("passed") is not True:
+            out.append(f"{rule} has not passed its pre-registered paper proof")
+    return out
+
+
+def meme_verdict_problems(mint: str, verdict, now_ms: int) -> list[str]:
+    """Why the safety verdict (meme_safety.Verdict.record()) does not let `mint` be bought now: missing, for
+    another mint, refused, or older than MEME_CHECK_MAX_AGE_MS."""
+    if not isinstance(verdict, dict) or verdict.get("mint") != mint:
+        return [f"no safety check for {mint[:8]}"]
+    out = []
+    if verdict.get("ok") is not True:
+        out.append(f"the safety check refused {mint[:8]}: " + "; ".join(verdict.get("reasons") or ["no reason"]))
+    age = now_ms - int(verdict.get("t") or 0)
+    if not 0 <= age <= MEME_CHECK_MAX_AGE_MS:
+        out.append(f"the safety check of {mint[:8]} is {age / 1000:.0f} s old (at most "
+                   f"{MEME_CHECK_MAX_AGE_MS // 1000} s)")
+    return out
+
+
+def meme_problems(rule: str, mint: str, ack: Ack, proof, verdict, now_ms: int, killed: bool = False) -> list[str]:
+    """Why a meme rule may not BUY `mint` now (both of the above). Every gate of Gate.check holds on top of this,
+    and the meme trader's caps (meme_live.MemeTrader.caps)."""
+    return meme_rule_problems(rule, ack, proof, now_ms, killed) + meme_verdict_problems(mint, verdict, now_ms)
 
 
 # ---------------------------------------------------------------- endpoints

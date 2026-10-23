@@ -687,3 +687,12 @@ Trinkgeld) und was wirklich herauskam gegen die Quote. Der Job `onchain-executio
 halbem Spread). Landet unser Weg (Sender und RPC zugleich, Priority Fee mit Grenze im Code, dieselben Bytes alle
 2 Sekunden bis der Blockhash abläuft) schneller als der des pump.fun-Bots, sagt der Bericht das, damit der
 pump.fun-Executor dieselben Teile übernehmen kann (eine eigene Aufgabe; dieser Bericht ändert dort nichts).
+
+## 9. Memecoins: das Meme-Modul
+
+Drei vorab registrierte Meme-Regeln laufen auf Papier über Jupiter, jeder Coin nach einer Sicherheitsprüfung
+(`docs/ONCHAIN-MEME.md`). Der Händler kann sie mit echtem Geld nur handeln, wenn der Ack sie im eigenen
+Abschnitt `[meme]` nennt (Höchstwerte im Code: `live_gate.MEME_MAX_TOTAL_USD` 50, `MEME_MAX_TRADE_USD` 10,
+`MEME_MAX_DAILY_LOSS_USD` 10 USD), ihr Nachweis (`reports/onchain_meme/proof.json`) bestanden ist und die
+Prüfung des Mints in der letzten Minute bestanden hat; alles aus den Abschnitten 1 bis 8 gilt weiter. Ein Ack
+ohne `[meme]` ändert nichts an diesem Händler.

@@ -18,6 +18,10 @@ What it does while on:
     restart nor a failed round sends it again
   - a book's targets, only for a book the ack names and the pre-registered proof passed
     (live_gate.book_problems), once per new signal: sales first, then buys
+  - a meme rule's entries and exits (lab.onchain.meme_live, docs/ONCHAIN-MEME.md): a buy only for a rule
+    the ack's [meme] section names, whose paper proof passed and whose coin passed the safety check within
+    the last minute (live_gate.meme_problems), following the rule's paper book; its holding sold into SOL
+    when the paper book closed the position
   - on the kill switch with on_kill=usdc in the ack: every coin but SOL sold into USDC
   - the ledger reconciled against the wallet every 30 s (live_exec.reconcile)
 
@@ -150,6 +154,8 @@ class Service:
         self.view: LX.View | None = None
         self.view_err: str | None = None
         self.books: list[dict] = []
+        self.memes: list[dict] = []
+        self.meme_trader = None
         self.last = {"status": -1e18, "gate": -1e18, "convert": -1e18, "book": -1e18}
         self.stopped = False
 
@@ -221,7 +227,9 @@ class Service:
         if self.trader is None or not (self.trader.wallet or self.gate.address):
             return
         try:
-            self.view = LX.read_view(self.trader.chain, self.trader.wallet or self.gate.address, self.trader.prices_of)
+            from . import meme_live as ML
+            self.view = LX.read_view(self.trader.chain, self.trader.wallet or self.gate.address, self.trader.prices_of,
+                                     memes=ML.known_mints())
             self.view_err = None
         except Exception as e:
             self.view_err = f"{type(e).__name__}: {e}"[:200]
@@ -259,7 +267,9 @@ class Service:
         lim = None
         if ack.mode:
             lim = {"max_total_usd": ack.cap("total"), "max_trade_usd": ack.cap("trade"),
-                   "max_daily_loss_usd": ack.cap("daily_loss"), "max_convert_usd": ack.cap("convert")}
+                   "max_daily_loss_usd": ack.cap("daily_loss"), "max_convert_usd": ack.cap("convert"),
+                   "meme_max_total_usd": ack.meme_cap("total"), "meme_max_trade_usd": ack.meme_cap("trade"),
+                   "meme_max_daily_loss_usd": ack.meme_cap("daily_loss")}
         loss = -(day["pnl_usd"]) if day["pnl_usd"] is not None else None
         sim = _read(LG.simulate_path())
         rec = self.trader.reconciled if self.trader is not None else None
@@ -271,7 +281,7 @@ class Service:
                 "coins": [{"coin": c, "symbol": m.symbol, "mint": m.mint, "decimals": m.decimals,
                            "allowed": c in ack.mints} for c, m in LG.CODES.items()],
                 "kill": LG.killed(), "simulate": {"t": sim.get("t"), "ok": sim.get("ok")} if isinstance(sim, dict) else None,
-                "books": self.books, "reconcile": rec,
+                "books": self.books, "memes": self.memes, "reconcile": rec,
                 "stops": {"daily": bool(lim and loss is not None and loss >= lim["max_daily_loss_usd"]),
                           "total": bool(lim and total is not None and total > lim["max_total_usd"])},
                 "frozen": list(v.frozen) if v is not None else []}
@@ -466,6 +476,71 @@ class Service:
                 self._after(r, s)
         self.books = out
 
+    def run_memes(self) -> None:
+        """The meme rules the ack's [meme] section names, following their paper books (lab.onchain.meme): a new
+        paper entry (under meme_live.SIGNAL_MAX_MS old, once) is bought only when live_gate.meme_problems is empty;
+        a live holding whose paper position closed is sold into SOL. Nothing under the kill switch."""
+        from ..data import ROOT
+        from . import meme as ME
+        from . import meme_live as ML
+        from . import meme_safety as MS
+        ack = self.gate.ack
+        out = []
+        if not ack.meme_rules:
+            self.memes = out
+            return
+        proof = _read(LG.meme_proof_path())
+        now = LX.now_ms()
+        killed = LG.killed()
+        state = _read(LG.data_dir() / "memes.json")
+        state = state if isinstance(state, dict) else {}
+        done = state.setdefault("done", {})
+        mt = None
+        if self.on and self.trader is not None and self.view is not None and not killed:
+            if self.meme_trader is None:
+                from ..ops import trending as TR
+                from .jupiter import Jupiter
+                src = MS.Sources(self.trader.chain.rpc, Jupiter(), TR.http_json)
+                self.meme_trader = ML.MemeTrader.from_trader(self.trader, check=lambda m: MS.check(m, src).record())
+            mt = self.meme_trader
+            mt.signer, mt.wallet, mt.reconciled = self.trader.signer, self.trader.wallet, self.trader.reconciled
+        for rule in ack.meme_rules:
+            why = LG.meme_rule_problems(rule, ack, proof, now, killed)
+            paper = ME.load_state(rule, ROOT, now) if rule in ME.RULES else {"positions": {}}
+            opens = paper.get("positions") or {}
+            out.append({"rule": rule, "allowed": not why, "why": "; ".join(why) or None, "paper_open": len(opens)})
+            if mt is None:
+                continue
+            for mint, pos in ML.positions(rule).items():
+                if pos["raw"] <= 0 or any(p.get("mint") == mint for p in opens.values()):
+                    continue
+                for s in mt.sales(rule, mint, pos["raw"], self.view):
+                    self._after_meme(mt.execute(s, self.view, gate_why=self.gate_why), s)
+            if why:
+                continue
+            for pid, p in opens.items():
+                if pid in done or not 0 <= now - int(p.get("opened_ms") or 0) <= ML.SIGNAL_MAX_MS:
+                    continue
+                done[pid] = now                          # once per paper entry, whatever happens to its swap
+                state["done"] = {k: t for k, t in done.items() if now - int(t) < 7 * 86_400_000}
+                PX.write_json(LG.data_dir() / "memes.json", state)
+                s, r = mt.buy(rule, p["mint"], self.view, proof, gate_why=self.gate_why,
+                              signal_ms=int(p.get("opened_ms") or now))
+                if s is not None:
+                    self._after_meme(r, s)
+                elif r.get("why"):
+                    print(f"onchain live: meme {rule} {p['mint'][:8]} refused: {r['why']}"[:300], flush=True)
+        self.memes = out
+
+    def _after_meme(self, r: dict, s: LX.Swap) -> None:
+        self.refresh_view()
+        if r["status"] in ("filled", "failed"):
+            self.read_history()
+            if self.alerts:
+                _post(f"On-chain wallet: meme {s.book} {r['status']}",
+                      f"{s.src} to {s.dst}" + (f" ({r['in_usd']:.2f} USD)" if r.get("in_usd") else "")
+                      + (f". {r['why']}" if r.get("why") else ""))
+
     def liquidate(self) -> None:
         """Under the kill switch with on_kill=usdc: every coin but SOL and USDC into USDC, a swap at a time."""
         if not (self.on and LG.killed() and self.gate.ack.on_kill == "usdc" and self.view is not None):
@@ -500,6 +575,7 @@ class Service:
         if now - self.last["book"] >= BOOK_S:
             self.last["book"] = now
             self.run_books()
+            self.run_memes()
             self.liquidate()
 
     def run(self) -> None:
@@ -519,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
     svc = Service()
     svc.start(arm=not a.once)
     svc.run_books()                                      # off (--once): only why each book may or may not trade
+    svc.run_memes()
     svc.write_status()
     if a.once:
         print(json.dumps({"on": svc.on, "gate": svc.why}, indent=1))

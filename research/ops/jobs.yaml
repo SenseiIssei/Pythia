@@ -436,6 +436,28 @@ jobs:
     timeout: 5m
     alert: false
 
+  # EXPERIMENT, paper only (docs/ONCHAIN-MEME.md): three pre-registered meme rules, a paper book each
+  # through real Jupiter quotes, every coin through the per-coin safety check first. Light; signs nothing.
+  - name: onchain-meme
+    description: EXPERIMENT meme rules on paper through Jupiter quotes (candidates, safety check, entries, exits), every 2 minutes
+    schedule: "*/2 * * * *"
+    command: python -m lab.onchain.meme
+    resources: {cpus: 0.5, memory: 512m}
+    timeout: 100s
+    grace: 10m
+    lock: onchain-meme
+    alert: false
+
+  - name: onchain-meme-proof
+    description: the meme rules' pre-registered paper proof, reports/onchain_meme/proof.json (the live gate reads it)
+    schedule: "35 6 * * *"
+    command: python -m lab.onchain.meme --proof
+    resources: {cpus: 1, memory: 1g}
+    timeout: 10m
+    lock: onchain-meme
+    lock_wait: 5m
+    alert: false
+
   - name: onchain-live-watch
     description: watches the real-money on-chain trader every two minutes (container, status, gate, simulation, ledger against chain, frozen accounts, hanging swaps) and posts at once; quiet until the owner ever started it
     schedule: "*/2 * * * *"
