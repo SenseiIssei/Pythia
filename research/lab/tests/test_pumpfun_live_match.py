@@ -204,12 +204,18 @@ def test_the_daily_report_matches_the_live_book_against_the_paper_book(tmp_path)
     (d / "skipped.jsonl").write_text("\n".join(json.dumps(k) for k in [
         {"t": T0 + 5, "mint": "b", "rule": RULE, "why": "no pool state"},
         {"t": T0 + 6, "mint": "c", "rule": RULE, "why": "creation not seen"}]) + "\nnot json\n")
+    (d / "seen.jsonl").write_text(json.dumps({"t": T0 + 7, "mint": "d", "rule": RULE}) + "\n")
+    (paper / "skipped.jsonl").write_text(json.dumps({"t": T0 + 8, "mint": "x", "rule": RULE,
+                                                      "why": "no pool state (PumpSwap stream down)"}) + "\n")
     m = LX.paper_match(T0 - 1_000, T0 + 60_000, RULE, paper)
     assert m["paper"] == 5 and m["live"] == 2 and m["matched"] == 1 and m["live_only"] == 1
-    assert m["missed"] == {"no pool state": 1, "creation not seen": 1, "no record": 2}
+    assert m["missed"] == {"no pool state": 1, "creation not seen": 1, "never seen by the live service": 1,
+                           "seen, no decision": 1}
+    assert m["live_only_why"] == {"x": "no pool state (PumpSwap stream down)"}
     line = LX.match_line(m)
     assert line.startswith("Live against paper (P_pool0_wait): the paper book entered 5 coins, the live book 2; "
                            "1 matched; missed: ")
+    assert line.endswith("live only: 1 (x (paper: no pool state (PumpSwap stream down))).")
     LX.write_json(LX.reports_dir() / "live_status.json", {"rule": RULE})
     assert LX.paper_match(T0 - 1_000, T0 + 60_000, paper=paper)["matched"] == 1     # the status's rule
     assert LX.match_line({"rule": None, "missed": {}}) == "No live book has run."

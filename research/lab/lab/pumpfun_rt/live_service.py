@@ -36,7 +36,14 @@ Decisions as the paper book's on the same events: a copy of a transaction with f
 engine does not know yet waits HOLD_MS for the coin's creation (the links race: a coin made and migrated in one
 slot often has its migration first); the coins the collector wrote after the start are adopted once more after
 REWARM_S. Every coin the live strategy does not buy has its reason in the status ("skipped") and one log line
-(live_exec.LiveBook.on_skip, data/live/pumpfun_rt/skipped.jsonl).
+(live_exec.LiveBook.on_skip, data/live/pumpfun_rt/skipped.jsonl). The paper books hold the same way (live.Hold).
+
+What it saw (2026-10-23: two paper entries had no live record at all): every migration its stream hands it is
+written once to data/live/pumpfun_rt/seen.jsonl, so a paper entry the live book did not take is either "never seen
+by the live service" or has its reason; a migration of a pool strategy still without a buy or a reason NO_DECISION_S
+after it came is a skip "no decision" with its log line (a bug, made visible); a row the engine fails on is logged
+with its coin (the collector's own guard printed five and then nothing). A "no pool state" while every PumpSwap
+link of the service was down says so (Pipeline.feed_down).
 
 Its own latency (measure.py, "Per step, by day"): every row keeps its message's receive time, and an order carries
 the receive time of the row that decided it and when the engine took that row (after a wait for the creation); the
@@ -50,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json
 import os
 import signal
@@ -61,6 +69,7 @@ from . import live_exec as LX
 from . import pipeline as P
 from . import store
 from .collector import Collector
+from .live import HOLD_MS, HOLD_TABLES, Hold                # noqa: F401 - HOLD_* as before, for the tests
 from .live_feed import LiveFeed
 
 STATUS_S = 30.0
@@ -70,8 +79,9 @@ REPORT_S = 600.0
 WARM_H = 12                                             # coins created this long before a start are adopted
 LINKS = max(1, int(os.environ.get("PYTHIA_PF_LIVE_LINKS", "2")))
 AMM_LINKS = max(1, int(os.environ.get("PYTHIA_PF_LIVE_AMM_LINKS", "2")))
-HOLD_MS = 120_000                                       # rows of a coin not known yet wait this long for its creation
-HOLD_TABLES = ("trades", "amm", "other")
+NO_DECISION_S = HOLD_MS / 1000 + 30                     # a seen migration without a buy or a reason by then: a skip
+SEEN_KEEP = 5_000
+ERRORS_SHOWN = 20
 TRUNCATED = "Log truncated"                             # the runtime's last line when a transaction's logs were cut
 REWARM_S = 90.0                                         # the collector writes every 60 s: adopt once more after that
 
@@ -189,7 +199,21 @@ class Service:
         self.book_sig = None
         self.feed_err = False
         self.wake: asyncio.Event | None = None              # speed.wake: a worker result ends the wait at once
-        self.held: dict[str, list] = {}                     # mint -> [(monotonic s, table, row)] until its creation
+        self.hold: Hold | None = None                       # rows of a coin not known yet, until its creation
+        self.seen: collections.OrderedDict = collections.OrderedDict()   # migrations seen (written once)
+        self.watch: collections.OrderedDict = collections.OrderedDict()  # mint -> monotonic s, until looked at
+        self.errors = 0
+
+    def _hold(self) -> Hold:
+        if self.hold is None:
+            self.hold = Hold(self.engine, self._feed, on_lost=self._lost, clock=lambda: time.monotonic())
+        self.hold.engine = self.engine                      # set by start() when not given
+        return self.hold
+
+    @property
+    def held(self) -> dict:
+        """mint -> [(monotonic s, table, row)] until its creation (live.Hold)."""
+        return self._hold().held
 
     def arm_wake(self, loop) -> bool:
         """With the owner's speed setting `wake`: every result of the executor's threads (a send's answer, a
@@ -254,14 +278,43 @@ class Service:
         if self.book is None:
             return
         mint = row.get("mint")
-        if table == "other" and row.get("kind") == "migrate" and self.pool_rule():
-            self.book.exec.warm_pool(mint, row.get("pool"))  # with prefetch: its buy then builds without a read
-        if table in HOLD_TABLES and mint and mint not in self.engine.tokens:
-            self.held.setdefault(mint, []).append((time.monotonic(), table, row))
+        try:
+            if table == "other" and row.get("kind") == "migrate":
+                self.saw(mint)
+                if self.pool_rule():
+                    self.book.exec.warm_pool(mint, row.get("pool"))  # with prefetch: its buy builds without a read
+            if self._hold().row(table, row):
+                return
+            self._feed(table, row)
+            if table == "creates" and mint in self.held:
+                self.release([mint])
+        except Exception as e:                              # the collector's guard would hide it after five
+            self.errors += 1
+            if self.errors <= ERRORS_SHOWN or self.errors % 1000 == 0:
+                print(f"live service: a {table} row of {str(mint)[:8]} failed ({type(e).__name__}: {e}); "
+                      f"{self.errors} so far", flush=True)
+
+    def saw(self, mint: str | None) -> None:
+        """A migration on the stream: once in seen.jsonl, and watched until the live book bought it or said why."""
+        if not mint or mint in self.seen:
             return
-        self._feed(table, row)
-        if table == "creates" and mint in self.held:
-            self.release([mint])
+        self.seen[mint] = None
+        self.watch[mint] = time.monotonic()
+        while len(self.seen) > SEEN_KEEP:
+            self.seen.popitem(last=False)
+        LX.write_seen({"t": int(time.time() * 1000), "mint": mint, "rule": self.book.rule, "run": LX.RUN_ID})
+
+    def undecided(self) -> None:
+        """A seen migration of a pool strategy that has neither a buy nor a reason NO_DECISION_S later is a skip
+        "no decision" with its log line: whatever the cause, a paper entry never goes without a reason."""
+        if not self.pool_rule():
+            return
+        cut = time.monotonic() - NO_DECISION_S
+        while self.watch and next(iter(self.watch.values())) < cut:
+            m, _ = self.watch.popitem(last=False)
+            if m not in self.book.skip_seen and m not in self.book.bought:
+                self.engine.skipped[(self.book.rule, "no decision")] += 1
+                self.book.on_skip(self.book.rule, m, "no decision")
 
     def pool_rule(self) -> bool:
         """The live strategy buys pools at their migration (P_pool0, P_pool0_wait)."""
@@ -270,26 +323,18 @@ class Service:
 
     def release(self, mints) -> None:
         """The held rows of these coins, in the order they came, once the engine knows the coin."""
-        for m in mints:
-            for _, table, row in self.held.pop(m, ()):
-                self._feed(table, row)
+        self._hold().release(mints)
 
     def purge(self) -> None:
         """Held rows older than HOLD_MS are dropped (trades of coins made before the adopted hours, mostly); a
         migration among them is a skip of a migration strategy, "creation not seen", with its log line."""
-        cut = time.monotonic() - HOLD_MS / 1000
-        old = []
-        for m, rows in self.held.items():                   # in the order their first row came
-            if rows[0][0] >= cut:
-                break
-            old.append(m)
+        self._hold().purge()
+
+    def _lost(self, mint: str) -> None:
         rule = self.book.rule if self.book is not None else None
-        entry = getattr(P.BY_NAME.get(rule), "entry", None)
-        for m in old:
-            rows = self.held.pop(m)
-            if entry == "migration" and any(t == "other" and r.get("kind") == "migrate" for _, t, r in rows):
-                self.engine.skipped[(rule, "creation not seen")] += 1
-                self.book.on_skip(rule, m, "creation not seen")
+        if getattr(P.BY_NAME.get(rule), "entry", None) == "migration":
+            self.engine.skipped[(rule, "creation not seen")] += 1
+            self.book.on_skip(rule, mint, "creation not seen")
 
     def rewarm(self, rows: list[dict], now_ms: int) -> int:
         """Adopt the coins the collector wrote after the start (made in the minute before it) and feed what
@@ -325,6 +370,7 @@ class Service:
                 self.why = self.gate.check()
             return
         self.purge()
+        self.undecided()
         ex = self.book.exec
         ex.cause = (None, int(ex.clock()))                  # an order from a timer: no stream row behind it
         try:
@@ -460,6 +506,8 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
     from .collector import feed_urls
     urls = feed_urls()                                       # the owner's providers first, the public one as fallback
     col = LiveCollector(None, svc.on_row, amm=True, meta=False)
+    if svc.book is not None and svc.book.pipe is not None:     # "no pool state" while our PumpSwap links were down
+        svc.book.pipe.feed_down = lambda a, b: col.was_down(E.PUMP_AMM, a, b)
     try:                                                     # pools the collector saw migrate (read only)
         for k, v in json.loads((store.base() / "pools.json").read_text(encoding="utf-8")).items():
             col.pools[k] = (v[0], int(v[1]))

@@ -86,7 +86,7 @@ class Token:
                  "hold", "dev_buy_l", "dev_bought", "dev_sold", "dev_sell_t", "dev_dumped", "win", "peak", "last_t",
                  "complete_t", "migrate_t", "pool", "pb", "pq", "amm_fee_bps", "meta", "meta_t", "hist",
                  "irregular", "first_buyers", "first_tok", "last_slot", "amm_slot", "slot_start", "slot_moves",
-                 "breaks", "slot_ok", "slot_flow", "devs", "sold", "early", "amm_win")
+                 "breaks", "slot_ok", "slot_flow", "devs", "sold", "early", "amm_win", "migrate_bts", "amm_bts")
 
     def __init__(self, mint: str, creator: str, t: int, tx: int, vs: int, vt: int, rt: int, hist: dict,
                  name: str = "", symbol: str = "", uri: str = "", mayhem: bool = False, cashback: bool = False,
@@ -114,6 +114,7 @@ class Token:
         self.peak = self.p0
         self.last_t = t
         self.complete_t = self.migrate_t = None
+        self.migrate_bts = self.amm_bts = None           # block times (s) of the migration and the last pool trade
         self.pool = None
         self.pb = self.pq = 0
         self.amm_fee_bps = C.DEFAULT_FEE_BPS

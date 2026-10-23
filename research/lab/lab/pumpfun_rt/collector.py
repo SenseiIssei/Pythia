@@ -100,6 +100,7 @@ META_MAX_BYTES = 64_000
 META_HOSTS = ("ipfs.io", "dweb.link", "cf-ipfs.com", "nftstorage.link", "arweave.net", "gateway.pinata.cloud",
               "mypinata.cloud", "w3s.link", "4everland.io", "ipfs.dweb.link")
 RECV_TIMEOUT_S = 90.0
+DOWN_KEEP = 200            # stretches with every link of a program down, kept for was_down
 AMM_WAIT = 20_000          # PumpSwap trades of unknown pools kept while their migration may still arrive
 
 
@@ -195,6 +196,7 @@ class Collector:
         self.clock = SlotClock()
         self.amm_wait: collections.deque = collections.deque(maxlen=AMM_WAIT)
         self.down_since: dict[str, int | None] = {}
+        self.down_log: dict[str, collections.deque] = {}    # program -> its last (from, to) with every link down
         self.reconnects = 0
         self.meta_q: asyncio.Queue | None = None
         self.started_ms = now_ms()
@@ -344,6 +346,8 @@ class Collector:
     def link_up(self, program: str, link: int) -> None:
         live = self.links.setdefault(program, set())
         if not live and self.down_since.get(program) is not None:
+            self.down_log.setdefault(program, collections.deque(maxlen=DOWN_KEEP)).append(
+                (self.down_since[program], now_ms()))
             self.gap(program, self.down_since[program], now_ms())
         self.down_since[program] = None
         live.add(link)
@@ -357,6 +361,14 @@ class Collector:
             self.connected[program] = False
             if was or self.down_since.get(program) is None:
                 self.down_since[program] = self.down_since.get(program) or now_ms()
+
+    def was_down(self, program: str, t0: float, t1: float) -> bool:
+        """Every link of the program was down at some moment from t0 to t1 (ms; the stamps are receive times):
+        what the stream did not hand us then may well have happened (a pool's first trade, Pipeline.feed_down)."""
+        d = self.down_since.get(program)
+        if d is not None and d <= t1:
+            return True
+        return any(a <= t1 and b >= t0 for a, b in self.down_log.get(program, ()))
 
     async def stream(self, session, url: str, program: str, link: int, stop: asyncio.Event,
                      commitment: str = COMMITMENT) -> None:
@@ -447,6 +459,8 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
         from .live import Shadow
         shadow = Shadow.load()
     col = Collector(writer, shadow.on_row if shadow else None, amm=amm, meta=meta)
+    if shadow is not None:
+        shadow.watch_feed(col)
     hb = store.base() / "heartbeat.json"
     if writer is not None:
         try:                                              # the time the collector was not running is a gap

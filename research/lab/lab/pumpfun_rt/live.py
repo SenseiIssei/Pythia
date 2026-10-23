@@ -24,6 +24,12 @@ The engine has Y10's trend tracker (trendfeat.py): the trend features of the sel
 trend strategies' 10 s clock. And <reports>/pumpfun_rt/trends.json every trends.WRITE_S (trends.py, the Trends page): what is hot right now,
 read from the engine after it took each row, so it changes no decision.
 
+Rows of a coin the engine does not know yet wait up to HOLD_MS for its creation and follow it then (Hold; the live
+service does the same): a migration that came before its creation was dropped here and taken there. The paper twin
+of the live strategy (blocklist.PAPER_RULES) writes every coin it does not buy with its reason to
+<data>/paper/pumpfun_rt/skipped.jsonl, as the live book does to its own (live_exec.paper_match reads both); a
+"no pool state" while every PumpSwap link of the collector was down says so (Pipeline.feed_down).
+
 Alerts (category "trending", lab.ops.notify, English or German): a closed
 paper trade at +200 % or better, at most one an hour. Positions open when the
 collector stops are lost (the token state is not kept); they are written to
@@ -32,6 +38,7 @@ the ledger as "restart" with no P&L and left out of every number.
 
 from __future__ import annotations
 
+import collections
 import csv
 import json
 import threading
@@ -53,6 +60,9 @@ LEDGER_COLS = ["rule", "family", "mint", "name", "symbol", "created_ms", "signal
                "exit_ms", "exit_why", "signal_price", "entry_price", "exit_price", "proceeds_sol", "pnl_sol", "ret",
                "hold_s", "prob", "dev_dumped", "migrated", "gap", "age_s", "progress", "lat_buy_ms", "slip"]
 FAILED_COLS = ["rule", "mint", "signal_ms", "land_ms", "why", "pnl_sol"]
+HOLD_MS = 120_000                                       # rows of a coin not known yet wait this long for its creation
+HOLD_TABLES = ("trades", "amm", "other")
+SKIP_KEEP = 5_000
 
 
 def paper_dir() -> Path:
@@ -87,6 +97,44 @@ def append_csv(path: Path, cols: list[str], rows: list[dict]) -> None:
             w.writerow(r)
 
 
+class Hold:
+    """Rows of a coin the engine does not know yet (trades, pool trades, completion, migration) wait up to hold_ms
+    for its creation and are fed after it in the order they came: the links race, and a coin made and migrated in
+    one slot often has its migration first, which the engine drops for good. Older held rows are dropped (trades
+    of coins made before the engine knew them, mostly); when a migration was among them, on_lost(mint) is told.
+    The live service and the paper books both hold, so both decide on the same rows."""
+
+    def __init__(self, engine, feed, on_lost=None, hold_ms: int = HOLD_MS, clock=time.monotonic):
+        self.engine, self.feed, self.on_lost, self.hold_ms, self.clock = engine, feed, on_lost, hold_ms, clock
+        self.held: dict[str, list] = {}                     # mint -> [(clock s, table, row)] in the order they came
+
+    def row(self, table: str, row: dict) -> bool:
+        """True when the row waits for its coin's creation (the caller feeds it otherwise)."""
+        mint = row.get("mint")
+        if table in HOLD_TABLES and mint and mint not in self.engine.tokens:
+            self.held.setdefault(mint, []).append((self.clock(), table, row))
+            return True
+        return False
+
+    def release(self, mints) -> None:
+        """The held rows of these coins, in the order they came, once the engine knows the coin."""
+        for m in mints:
+            for _, table, row in self.held.pop(m, ()):
+                self.feed(table, row)
+
+    def purge(self) -> None:
+        cut = self.clock() - self.hold_ms / 1000
+        old = []
+        for m, rows in self.held.items():                   # in the order their first row came
+            if rows[0][0] >= cut:
+                break
+            old.append(m)
+        for m in old:
+            rows = self.held.pop(m)
+            if self.on_lost is not None and any(t == "other" and r.get("kind") == "migrate" for _, t, r in rows):
+                self.on_lost(m)
+
+
 class Shadow:
     def __init__(self, pick: str, models: dict | None = None, book: CreatorBook | None = None,
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
@@ -104,6 +152,10 @@ class Shadow:
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
             pipe.blocked = blocked                            # the owner's block list (blocklist.PAPER_RULES)
+            pipe.on_skip = self._skipped
+        self.hold = Hold(self.engine, self._feed, on_lost=self._lost)
+        self.skips: list[dict] = []                           # the twin's coins not bought, for skipped.jsonl
+        self.skip_seen: collections.OrderedDict = collections.OrderedDict()
         self.live = None                                      # always None here: the live book is live_service.py's
         self.cats_mtime = 0.0
         self.closed: list[dict] = []
@@ -177,6 +229,13 @@ class Shadow:
 
     # ------------------------------------------------------------ the stream
     def on_row(self, table: str, row: dict) -> None:
+        if self.hold.row(table, row):
+            return
+        self._feed(table, row)
+        if table == "creates" and row.get("mint") in self.hold.held:
+            self.hold.release([row["mint"]])
+
+    def _feed(self, table: str, row: dict) -> None:
         feed_row(self.engine, table, row)
         if self.trends is not None:                           # after the engine: it only reads what the row did
             try:
@@ -186,7 +245,31 @@ class Shadow:
                 if self.trends.errors <= 5:
                     print(f"trends: row skipped ({type(e).__name__}: {e})", flush=True)
 
+    def watch_feed(self, col) -> None:
+        """The collector's link state: a "no pool state" while every PumpSwap link was down says so."""
+        from .events import PUMP_AMM
+        for pipe in self.engine.pipes:
+            pipe.feed_down = lambda a, b: col.was_down(PUMP_AMM, a, b)
+
+    def _lost(self, mint: str) -> None:
+        """A migration whose coin's creation never came: a skip of every migration strategy, as live."""
+        for pipe in self.engine.pipes:
+            for s in pipe.strats.values():
+                if s.entry == "migration":
+                    pipe.skip(s.name, mint, "creation not seen")
+
+    def _skipped(self, name: str, mint: str, why: str) -> None:
+        """A coin the paper twin of the live strategy did not buy: its first reason, once (save writes it)."""
+        from .blocklist import PAPER_RULES
+        if name not in PAPER_RULES or not mint or (name, mint) in self.skip_seen:
+            return
+        self.skip_seen[(name, mint)] = None
+        if len(self.skip_seen) > SKIP_KEEP:
+            self.skip_seen.popitem(last=False)
+        self.skips.append({"t": int(time.time() * 1000), "mint": mint, "rule": name, "why": why})
+
     def tick(self, now_ms: int) -> None:
+        self.hold.purge()
         self.engine.advance(now_ms)
         for pipe in self.engine.pipes:                        # the live executor's results, the kill switch
             pipe.poll(now_ms)
@@ -252,6 +335,10 @@ class Shadow:
         fails = self.engine.failed[self.failed_seen:]
         self.failed_seen = len(self.engine.failed)
         append_csv(d / "failed.csv", FAILED_COLS, fails)
+        skips, self.skips = self.skips, []
+        if skips:
+            with (d / "skipped.jsonl").open("a", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(k) + "\n" for k in skips)
         if len(self.engine.failed) > 10_000:
             self.engine.failed = []
             self.failed_seen = 0

@@ -253,7 +253,7 @@ class Engine:
                 if self.sel is not None:
                     self.sel.completed(tok, t)
 
-    def migrate(self, t, mint, pool, sol, tok_amt) -> None:
+    def migrate(self, t, mint, pool, sol, tok_amt, bts=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is None:
@@ -267,18 +267,21 @@ class Engine:
             if self.sel is not None:
                 self.sel.completed(tok, t)
         tok.migrated(t, pool, sol, tok_amt)
+        tok.migrate_bts = bts
         tok.last_t = t
         if self.trend is not None:
             self.trend.migrated(tok, int(t))
         for r in self.by_entry.get("migration", ()):
             self.push(t + r.p["delay_s"] * 1000, "signal_rule", (mint, r.name))
 
-    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None, vq=None, sig=None) -> None:
+    def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None, vq=None, sig=None,
+            bts=None) -> None:
         self.advance(t)
         tok = self.tokens.get(mint)
         if tok is None:
             return
         tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb, slot, user, int(t), vq)
+        tok.amm_bts = bts
         tok.last_t = t
         self.early.trade(tok, t, buy, quote or 0, base or 0, user or "", "pool")
         if self.sel is not None:
@@ -773,13 +776,13 @@ def feed_row(eng: Engine, table: str, r) -> None:
         if k == "complete":
             eng.complete(r["t"], r["mint"])
         elif k == "migrate":
-            eng.migrate(r["t"], r["mint"], r["pool"], r["sol"], r["tok"])
+            eng.migrate(r["t"], r["mint"], r["pool"], r["sol"], r["tok"], r.get("bts"))
         elif k == "gap":                                 # either stream: whatever overlaps it is dropped
             eng.gap(r["t0"] or r["t"], r["t"], r.get("user"))
     elif table == "amm":
         if r.get("mint"):
             eng.amm(r["t"], r["mint"], r["buy"], r["base"], r["quote"], r["pb"], r["pq"], r["lpb"], r["pfb"],
-                    r["cfb"], r.get("slot"), r.get("user"), r.get("vq"), sig=r.get("sig"))
+                    r["cfb"], r.get("slot"), r.get("user"), r.get("vq"), sig=r.get("sig"), bts=r.get("bts"))
     elif table == "meta":
         eng.meta(r["t"], r["mint"], {k: r.get(k) for k in ("ok", "twitter", "telegram", "website", "desc_len",
                                                              "image")})

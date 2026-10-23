@@ -2586,6 +2586,18 @@ def write_skip(rec: dict) -> None:
         print(f"live: skip not written ({e})", flush=True)
 
 
+def write_seen(rec: dict) -> None:
+    """A migration the live service's stream handed it: data_dir()/seen.jsonl, read by paper_match ("never seen by
+    the live service" for a paper entry that is not in it)."""
+    try:
+        d = data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "seen.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except OSError as e:
+        print(f"live: seen migration not written ({e})", flush=True)
+
+
 def _jsonl(path: Path) -> list[dict]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -2607,28 +2619,33 @@ MATCH_SLACK_MS = 600_000                 # a live order or skip this long after 
 
 def paper_match(t0: int, t1: int, rule: str | None = None, paper: Path | None = None) -> dict:
     """The live book against its paper twin from t0 to t1 (ms): the coins the paper book of the live strategy
-    entered then (a closed trade or a failed buy in live.py's ledger.csv and failed.csv, by signal time), the
-    coins the live book sent a buy for (orders.jsonl), the coins both took, every paper entry the live book
-    missed by its reason (skipped.jsonl; "no record" when the service was not running or never saw the coin)
-    and the live entries the paper book did not take. The rule is the live status's unless given."""
+    entered then (a closed trade or a failed buy in live.py's ledger.csv and failed.csv, an open one in its
+    state.json, by signal time), the coins the live book sent a buy for (orders.jsonl), the coins both took, every
+    paper entry the live book missed by its reason (skipped.jsonl; else "never seen by the live service" when its
+    migration is not in seen.jsonl, "seen, no decision" when it is) and the live entries the paper book did not take
+    with the paper twin's reason (the paper's skipped.jsonl, live.Shadow; "no paper record" without one). The rule
+    is the live status's unless given."""
     if rule is None:
         rule = (read_json(status_path()) or {}).get("rule")
     if paper is None:
         from .live import paper_dir
         paper = paper_dir()
     pe: set[str] = set()
+    rows = []
     for name in ("ledger.csv", "failed.csv"):
         try:
             with (paper / name).open(newline="", encoding="utf-8") as fh:
-                for r in csv.DictReader(fh):
-                    try:
-                        t = float(r.get("signal_ms") or "nan")
-                    except ValueError:
-                        continue
-                    if r.get("rule") == rule and t0 <= t < t1 and r.get("mint"):
-                        pe.add(r["mint"])
+                rows += list(csv.DictReader(fh))
         except OSError:
             pass
+    rows += list((read_json(paper / "state.json") or {}).get("open") or [])
+    for r in rows:
+        try:
+            t = float(r.get("signal_ms") or "nan")
+        except (TypeError, ValueError):
+            continue
+        if r.get("rule") == rule and t0 <= t < t1 and r.get("mint"):
+            pe.add(r["mint"])
     le = {o["mint"] for o in _jsonl(data_dir() / "orders.jsonl")
           if o.get("what") == "sent" and o.get("side") == "buy" and o.get("mint")
           and t0 <= (o.get("t") or 0) < t1 + MATCH_SLACK_MS}
@@ -2636,9 +2653,21 @@ def paper_match(t0: int, t1: int, rule: str | None = None, paper: Path | None = 
     for k in _jsonl(data_dir() / "skipped.jsonl"):
         if k.get("rule") == rule and t0 <= (k.get("t") or 0) < t1 + MATCH_SLACK_MS:
             why.setdefault(k.get("mint"), k.get("why") or "?")
-    missed = collections.Counter(why.get(m, "no record") for m in pe - le)
+    seen = {k.get("mint") for k in _jsonl(data_dir() / "seen.jsonl")
+            if t0 - MATCH_SLACK_MS <= (k.get("t") or 0) < t1 + MATCH_SLACK_MS}
+    pwhy = {}
+    for k in _jsonl(paper / "skipped.jsonl"):
+        if k.get("rule") == rule and t0 - MATCH_SLACK_MS <= (k.get("t") or 0) < t1 + MATCH_SLACK_MS:
+            pwhy.setdefault(k.get("mint"), k.get("why") or "?")
+    missed = collections.Counter(
+        why.get(m) or ("seen, no decision" if m in seen else "never seen by the live service") for m in pe - le)
+    only = {m: pwhy.get(m, "no paper record") for m in sorted(le - pe)}
     return {"rule": rule, "from_ms": t0, "to_ms": t1, "paper": len(pe), "live": len(le),
-            "matched": len(pe & le), "missed": dict(missed.most_common()), "live_only": len(le - pe)}
+            "matched": len(pe & le), "missed": dict(missed.most_common()), "live_only": len(only),
+            "live_only_why": only}
+
+
+LIST_MAX = 10                            # live-only coins named in the report line
 
 
 def match_line(m: dict) -> str:
@@ -2648,8 +2677,12 @@ def match_line(m: dict) -> str:
     if not m.get("rule"):
         return "No live book has run."
     missed = ", ".join(f"{k} {v}" for k, v in m["missed"].items()) or "none"
+    only = list((m.get("live_only_why") or {}).items())
+    named = "; ".join(f"{k[:8]} (paper: {v})" for k, v in only[:LIST_MAX])
+    more = f"; {len(only) - LIST_MAX} more" if len(only) > LIST_MAX else ""
     return (f"Live against paper ({m['rule']}): the paper book entered {m['paper']} coins, the live book {m['live']}; "
-            f"{m['matched']} matched; missed: {missed}; live only: {m['live_only']}.")
+            f"{m['matched']} matched; missed: {missed}; live only: {m['live_only']}"
+            + (f" ({named}{more})" if named else "") + ".")
 
 
 def day_pnl_from_ledger(day: int) -> int:
@@ -2781,6 +2814,7 @@ class LiveBook:
         self.fail_posted: dict[tuple, float] = {}
         self.orphan_seen: dict[str, int] = {}          # mint -> the holdings read that first showed it unknown
         self.skip_seen: collections.OrderedDict = collections.OrderedDict()   # coins skipped (one log line each)
+        self.bought: collections.OrderedDict = collections.OrderedDict()      # coins a buy was sent for
         self.last_limits = -1e18
         executor.on_stop = self.on_stop
         executor.on_leftover = self.on_leftover
@@ -2829,6 +2863,10 @@ class LiveBook:
         self.day_stats["pnl_sol"] += rec["pnl_sol"]
 
     def on_event(self, kind: str, p: dict, kw: dict) -> None:
+        if kind == "buy_sent" and p.get("mint"):                # a decision: the service's "no decision" check
+            self.bought[p["mint"]] = None
+            while len(self.bought) > SKIP_KEEP:
+                self.bought.popitem(last=False)
         if kind not in ("bought", "sold", "closed", "buy_failed", "sell_failed"):
             return
         if kind == "buy_failed" and str(kw.get("why", "")).startswith("refused"):

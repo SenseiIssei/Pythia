@@ -596,6 +596,7 @@ class Pipeline:
         self.waiting: dict[str, dict] = {}    # Y8: mint -> {strategy: signal time + wait_pool_s} until a pool trade
         self.on_skip = None                   # (strategy, mint, why) for every signal not bought: the live book's log
         self.blocked = None                   # (strategy, token) -> reason or None: the owner's block list (blocklist.py)
+        self.feed_down = None                 # (t0, t1) -> True when every PumpSwap link of our feed was down then
 
     def strat_of(self, pid: int) -> Strategy:
         return self.strats[self.pos[pid]["rule"]]
@@ -708,7 +709,8 @@ class Pipeline:
 
     def _wait_pool(self, s: Strategy, tok, t: float) -> None:
         """Y8: no pool state at the signal: the signal is given again at the pool's first trade if that comes
-        within wait_pool_s, else it is skipped for "no pool state" then."""
+        within wait_pool_s, else it is skipped for "no pool state" then (with "PumpSwap stream down" when every
+        PumpSwap link of the feed was down meanwhile, feed_down: the trade may well have come, we did not see it)."""
         until = t + s.p["wait_pool_s"] * 1000
         self.waiting.setdefault(tok.mint, {})[s.name] = until
         self.eng.push(until, "pipe", (self, "_wait_over", (tok.mint, s.name)))
@@ -720,7 +722,16 @@ class Pipeline:
             return
         if not w:
             self.waiting.pop(mint, None)
-        self.skip(name, mint, "no pool state")
+        down = self.feed_down is not None and self.feed_down(at - self.strats[name].p["wait_pool_s"] * 1000, at)
+        self.skip(name, mint, "no pool state (PumpSwap stream down)" if down else "no pool state")
+
+    def in_wait(self, name: str, tok) -> bool:
+        """The pool's first trade counts for Y8's wait on the chain's clock too: its block time at most wait_pool_s
+        after the migration's. A feed that hands us the migration late stamps it with the time of a later slot it
+        had already seen (collector.SlotClock), so a trade 50 slots on looked 0.3 s late (2026-10-23, 9yDeBAsG):
+        the paper book took it, a feed on time would not. Without block times (older rows) the stamps decide."""
+        a, b = tok.migrate_bts, tok.amm_bts
+        return a is None or b is None or b - a <= self.strats[name].p["wait_pool_s"]
 
     def model_ok(self, spec: dict, f: dict) -> tuple[bool | None, float | None]:
         """Every model criterion of the filter: ("min", k) needs p >= k x base, ("max", k) p <= k x base.
@@ -931,7 +942,7 @@ class Pipeline:
         w = self.waiting.get(tok.mint) if self.waiting else None
         if w and venue == "pool" and tok.pq and tok.pb:
             for name, until in list(w.items()):
-                if t <= until:
+                if t <= until and self.in_wait(name, tok):
                     del w[name]
                     self.signal(self.strats[name], tok, t)
             if not w:
