@@ -74,6 +74,12 @@ a failure by itself (Sender or the node may have forwarded it); its status decid
 A failed sale is sent again after 1, 2, 4 ... 60 s and given up after
 SELL_MAX_FAILS failures in a row (the position is marked stuck and the owner told).
 
+Speed (docs/LATENCY.md, each behind its own switch, all off unless the owner sets PYTHIA_PUMPFUN_FAST=1 or
+the single one): the landing from signatureSubscribe and an early status poll, read back at once; reads on their
+own thread behind the sends; a prepared sale per open position; the blockhash and a capped fee from recent
+prioritization fees in the background; Sender and the plain RPC in parallel; kept connections. None of them
+changes a decision, and every transaction still passes check_own.
+
 The day's and the total's realised P&L, which the stops count, are not counters:
 they are recomputed from the ledger (whose rows the chain check corrects in place)
 plus a journal of the fees of failed transactions (journal.jsonl), so a restart or
@@ -89,6 +95,7 @@ and sends to a public RPC endpoint, and the owner decides with that knowledge.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import collections
 import csv
@@ -156,6 +163,21 @@ SIMULATE_MAX_AGE_MS = 24 * 3_600_000
 DEFAULT_TEST_RULE = "P_pool60"            # the least-bad post-migration pool rule until a report says otherwise
 RESERVE_SOL = 0.01                        # left in the wallet so every open position can still be sold
 
+# Speed (docs/LATENCY.md): each one off unless the owner sets it; PYTHIA_PUMPFUN_FAST=1 turns all on, a single
+# switch set to 0 turns that one off again. None of them changes what is decided or what check_own accepts.
+ENV_FAST = "PYTHIA_PUMPFUN_FAST"
+ENV_RPC_WS = "PYTHIA_PUMPFUN_RPC_WS"      # the websocket for signatureSubscribe (default: PYTHIA_PUMPFUN_RPC as wss)
+SPEED_SWITCHES = {"prepare": "PYTHIA_PUMPFUN_PREPARE_SELLS", "prefetch": "PYTHIA_PUMPFUN_PREFETCH",
+                  "dynamic_fee": "PYTHIA_PUMPFUN_DYNAMIC_FEE", "parallel": "PYTHIA_PUMPFUN_PARALLEL_SEND",
+                  "keepalive": "PYTHIA_PUMPFUN_KEEPALIVE", "ws_confirm": "PYTHIA_PUMPFUN_WS_CONFIRM",
+                  "wake": "PYTHIA_PUMPFUN_WAKE", "send_first": "PYTHIA_PUMPFUN_SEND_FIRST"}
+FAST_STATUS_MS = 2_000                    # fast: a signature's status asked 2 s after the send and every 2 s
+FAST_GRACE_MS = 0                         # fast: a landed order is read back at once, not after LANDED_GRACE_MS
+LANDED_RETRY_MS = 500                     # a landed transaction the node cannot return yet is asked again after this
+PREFETCH_BLOCKHASH_S = 10.0               # the background refresh of the blockhash (well inside its ~60 s)
+PREFETCH_EVERY_S = 0.5                    # the background loop: blockhash, fees, prepared sales
+SENDER_PING_S = 5.0                       # Sender's /ping keeps its connection warm (its docs)
+
 
 def backoff_ms(fails: int) -> int:
     """The wait before the next try of a sale that failed `fails` times in a row: 1, 2, 4 ... 60 s."""
@@ -165,6 +187,57 @@ def backoff_ms(fails: int) -> int:
 def landed(st) -> bool:
     """A signature status that says the transaction is in a confirmed block (with or without an error)."""
     return isinstance(st, dict) and st.get("confirmationStatus") in ("confirmed", "finalized")
+
+
+@dataclass(frozen=True)
+class Speed:
+    """The free latency fixes, each behind its own switch (all off by default: the executor then works exactly
+    as before)."""
+    prepare: bool = False                 # a prepared sale per open position, refreshed with the blockhash
+    prefetch: bool = False                # the blockhash (and the fee estimate) refreshed in the background
+    dynamic_fee: bool = False             # the priority fee from recent prioritization fees, capped
+    parallel: bool = False                # Sender and the plain RPC get the same signed bytes at once
+    keepalive: bool = False               # persistent HTTPS connections, Sender's /ping every 5 s
+    ws_confirm: bool = False              # signatureSubscribe tells a landing at once (the status poll stays)
+    wake: bool = False                    # the service handles a worker result at once, not at the next second
+    send_first: bool = False              # reads (status, fees, holdings) run on their own thread, never ahead of a send
+    status_ms: int = CONFIRM_MS           # when a signature's status is asked (after the send, then again)
+    grace_ms: int = LANDED_GRACE_MS       # how long a landed order waits for the stream's fill before it is read back
+    fee_cap_sol: float = C.PRIORITY_SOL   # the dynamic fee's ceiling per transaction (today's fixed fee by default)
+    ws_url: str | None = None
+
+    def on(self) -> list[str]:
+        return [k for k in SPEED_SWITCHES if getattr(self, k)]
+
+
+def speed_of(env=None) -> Speed:
+    """The owner's speed settings from the environment. The fee cap is never above fastpath's hard maximum."""
+    from .fastpath import HARD_MAX_PRIORITY_SOL
+    env = os.environ if env is None else env
+    fast = env.get(ENV_FAST) == "1"
+    flags = {}
+    for k, name in SPEED_SWITCHES.items():
+        v = (env.get(name) or "").strip()
+        flags[k] = v == "1" if v in ("0", "1") else fast
+
+    def num(name, default):
+        try:
+            v = float(env.get(name) or default)
+        except ValueError:
+            return default
+        return v if math.isfinite(v) and v >= 0 else default
+    fast_confirm = flags["ws_confirm"] or fast
+    status = int(num("PYTHIA_PUMPFUN_STATUS_MS", FAST_STATUS_MS if fast_confirm else CONFIRM_MS))
+    grace = int(num("PYTHIA_PUMPFUN_LANDED_GRACE_MS", FAST_GRACE_MS if fast_confirm else LANDED_GRACE_MS))
+    cap = min(num("PYTHIA_PUMPFUN_FEE_CAP_SOL", C.PRIORITY_SOL), HARD_MAX_PRIORITY_SOL)
+    ws = (env.get(ENV_RPC_WS) or "").strip() or ws_of(env.get(ENV_RPC) or DEFAULT_RPC)
+    return Speed(**flags, status_ms=max(500, min(status, CONFIRM_MS)), grace_ms=min(grace, LANDED_GRACE_MS),
+                 fee_cap_sol=cap, ws_url=ws if ws.startswith("wss://") else None)
+
+
+def ws_of(url: str) -> str:
+    """The websocket of an https RPC endpoint (the same host, path and query)."""
+    return "wss://" + url[len("https://"):] if url.startswith("https://") else ""
 
 
 def data_dir() -> Path:
@@ -636,17 +709,69 @@ def load_signer(path: str) -> Signer:
 # ---------------------------------------------------------------- the RPC
 
 class Rpc:
-    def __init__(self, url: str, timeout: float = 8.0, poster=None):
+    def __init__(self, url: str, timeout: float = 8.0, poster=None, keepalive: bool = False):
         if rpc_problems(url):
             raise ValueError(rpc_problems(url)[0])
         self.url, self.timeout, self.poster = url, timeout, poster
         self.n = 0
+        # keepalive: idle HTTPS connections are kept and reused (newest first), so a send does not pay a new TCP
+        # and TLS handshake (100 to 300 ms); a connection is used by one thread at a time
+        self.keepalive = keepalive
+        self.idle: list = []
+        self.lock = threading.Lock()
+
+    def _conn(self):
+        import http.client
+        with self.lock:
+            if self.idle:
+                return self.idle.pop()
+        u = urllib.parse.urlsplit(self.url)
+        return http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=self.timeout)
+
+    def request(self, method: str, path: str, body: bytes | None = None) -> tuple[int, bytes]:
+        """One request over a kept connection; a connection the server closed meanwhile is replaced once
+        (resending a signed transaction is harmless: one signature can land only once)."""
+        import http.client
+        for attempt in (0, 1):
+            c = self._conn()
+            try:
+                c.request(method, path, body=body, headers={"Content-Type": "application/json",
+                                                            "User-Agent": "pythia-lab"})
+                r = c.getresponse()
+                data = r.read()
+            except (http.client.HTTPException, ConnectionError) as e:
+                c.close()
+                if attempt:
+                    raise RuntimeError(f"{type(e).__name__}: {e}")
+                continue
+            except Exception:
+                c.close()
+                raise
+            with self.lock:
+                self.idle.append(c)
+                del self.idle[:-4]
+            return r.status, data
+        raise RuntimeError("no connection")                 # pragma: no cover
+
+    def ping(self) -> bool:
+        """Sender's GET /ping on the same host: keeps a kept connection warm. Never raises."""
+        try:
+            return self.request("GET", "/ping")[0] == 200
+        except Exception:
+            return False
 
     def call(self, method: str, params: list):
         self.n += 1
         body = {"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}
         if self.poster is not None:
             d = self.poster(method, params)
+        elif self.keepalive:
+            u = urllib.parse.urlsplit(self.url)
+            status, raw = self.request("POST", (u.path or "/") + (f"?{u.query}" if u.query else ""),
+                                       json.dumps(body).encode())
+            if status != 200:
+                raise RuntimeError(f"HTTP Error {status}")
+            d = json.loads(raw.decode())
         else:
             req = urllib.request.Request(self.url, data=json.dumps(body).encode(), method="POST",
                                          headers={"Content-Type": "application/json", "User-Agent": "pythia-lab"})
@@ -658,6 +783,10 @@ class Rpc:
 
     def blockhash(self) -> str:
         return self.call("getLatestBlockhash", [{"commitment": "confirmed"}])["value"]["blockhash"]
+
+    def recent_fees(self, accounts: list[str]) -> list:
+        """Recent prioritization fees of transactions that wrote these accounts (read only)."""
+        return self.call("getRecentPrioritizationFees", [accounts]) or []
 
     def account(self, pubkey: str) -> tuple[bytes, str]:
         v = self.call("getAccountInfo", [pubkey, {"encoding": "base64", "commitment": "confirmed"}])["value"]
@@ -731,6 +860,12 @@ class Builder:
         self.hash: tuple[float, str] | None = None
         self.sender: Rpc | None = None                # Helius Sender, when the owner switched it on
         self.sender_tip_l = 0                         # the tip each transaction then carries
+        self.speed = Speed()
+        self.fees = None                              # fastpath.FeeEstimator with the dynamic fee
+        self.fee_accounts: list[str] = []             # the accounts its estimate reads (open positions' pools)
+        self.prepared: dict[int, tuple] = {}          # pid -> (key, ixs, blockhash, message): a ready sale
+        self.last_prepared = False                    # the last build used a prepared sale
+        self.pool_x = None                            # the parallel send's two threads
 
     def _cached(self, k: str, ttl: float, fn):
         hit = self.cache.get(k)
@@ -744,6 +879,69 @@ class Builder:
         if self.hash is None or time.monotonic() - self.hash[0] > BLOCKHASH_S:
             self.hash = (time.monotonic(), self.rpc.blockhash())
         return self.hash[1]
+
+    # ------------------------------------------------------------ speed (all of it off unless self.speed says so)
+    def refresh(self) -> None:
+        """The background part: with prefetch a fresh blockhash every PREFETCH_BLOCKHASH_S, so a send never waits
+        for one; with the dynamic fee its estimate. Errors keep the last values (blockhash() fetches itself when
+        its own is too old)."""
+        if self.speed.prefetch and (self.hash is None or time.monotonic() - self.hash[0] >= PREFETCH_BLOCKHASH_S):
+            try:
+                self.hash = (time.monotonic(), self.rpc.blockhash())
+            except Exception as e:
+                print(f"live: blockhash not refreshed ({type(e).__name__}: {e})"[:200], flush=True)
+        if self.speed.dynamic_fee:
+            self.dynamic_fee()
+
+    def dynamic_fee(self) -> int:
+        """The priority fee from recent prioritization fees of the accounts pump.fun trades write (the open
+        positions' pools and curves, the listed buyback recipients): fastpath's percentile, between its floor and
+        the cap (speed.fee_cap_sol, today's fixed fee unless the owner raised it, never above fastpath's hard
+        maximum). It only sets the compute-unit price; check_own sees the same instructions as before."""
+        from . import fastpath as F
+        accts = sorted(set(self.fee_accounts) | set(X.BUYBACK_FEE_RECIPIENTS))[:128]
+        if self.fees is None:
+            self.fees = F.FeeEstimator(lambda m, p: self.rpc.recent_fees(p[0]), accts, units=X.UNITS + 100_000,
+                                       cap_sol=self.speed.fee_cap_sol)
+        self.fees.accounts = accts
+        self.fees.tick()
+        self.priority_l = int(min(self.fees.priority_lamports(), self.speed.fee_cap_sol * C.LAMPORTS))
+        return self.priority_l
+
+    def _key(self, o: P.Order, pool: str | None, close: bool) -> tuple:
+        return (o.mint, o.venue, pool, int(o.tokens), int(o.limit_l), bool(close), self.priority_l,
+                self.sender is not None, self.sender_tip_l)
+
+    def prepare(self, user: str, o: P.Order, pool: str | None, close: bool) -> bool:
+        """A ready sale for an open position: built now (the accounts read and cached, check_own passed) and
+        compiled with the current blockhash; again when the blockhash, the fee or the position changes. True
+        when it is ready."""
+        k = self._key(o, pool, close)
+        bh = self.blockhash()
+        have = self.prepared.get(o.pid)
+        if have is not None and have[0] == k:
+            if have[2] != bh:
+                self.prepared[o.pid] = (k, have[1], bh, X.compile_message(user, have[1], bh))
+            return True
+        ixs = self.ixs(user, o, pool, close)
+        self.prepared[o.pid] = (k, ixs, bh, X.compile_message(user, ixs, bh))
+        return True
+
+    def forget(self, keep) -> None:
+        for pid in [p for p in self.prepared if p not in keep]:
+            self.prepared.pop(pid, None)
+
+    def build(self, user: str, o: P.Order, pool: str | None, close: bool) -> bytes:
+        """The order's message. A prepared sale is used only when it is exactly this order (token, venue, pool,
+        amount, floor, close, fee, tip); its instructions pass check_own again before they are signed."""
+        have = self.prepared.get(o.pid) if o.side == "sell" else None
+        self.last_prepared = False
+        if have is not None and have[0] == self._key(o, pool, close):
+            X.check_own(user, have[1], sender_tip_ok=self.sender is not None)
+            bh = self.blockhash()
+            self.last_prepared = True
+            return have[3] if have[2] == bh else X.compile_message(user, have[1], bh)
+        return X.compile_message(user, self.ixs(user, o, pool, close), self.blockhash())
 
     def curve(self, mint: str) -> X.CurveInfo:
         glob = self._cached("global", 600, lambda: self.rpc.account(X.pda([b"global"], X.PUMP))[0])
@@ -804,7 +1002,9 @@ class Builder:
         Sender may have forwarded a transaction even when it answers with an error: its signature's status
         is asked first, and the same signed bytes go to the plain RPC only when the node does not know it.
         The caller keeps the transaction's own signature whatever this returns, and treats an exception as
-        "sent, outcome unknown" (the status settles it)."""
+        "sent, outcome unknown" (the status settles it). With speed.parallel both get it at once (parallel())."""
+        if self.sender is not None and self.speed.parallel:
+            return self.parallel(tx)
         if self.sender is not None:
             try:
                 return self.sender.send(tx, skip_preflight=True)
@@ -821,8 +1021,118 @@ class Builder:
                 print("live: the plain RPC sends the same transaction", flush=True)
         return self.rpc.send(tx)
 
-    def build(self, user: str, o: P.Order, pool: str | None, close: bool) -> bytes:
-        return X.compile_message(user, self.ixs(user, o, pool, close), self.blockhash())
+    def parallel(self, tx: bytes) -> str:
+        """The same signed bytes to Sender (no preflight) and to the plain RPC (with its preflight) at once; the
+        first that takes it answers. One transaction, one signature: it can land only once, however many
+        endpoints forward it (Sender's docs allow sending to other endpoints too). Raises only when both did."""
+        import concurrent.futures as cf
+        if self.pool_x is None:
+            self.pool_x = cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pumpfun-send")
+        jobs = {self.pool_x.submit(self.sender.send, tx, True): "Sender",
+                self.pool_x.submit(self.rpc.send, tx): "the plain RPC"}
+        errs = []
+        for f in cf.as_completed(jobs):
+            try:
+                return f.result()
+            except Exception as e:
+                errs.append(f"{jobs[f]}: {type(e).__name__}: {e}")
+        raise RuntimeError("; ".join(errs)[:200])
+
+
+class SigWatcher:
+    """signatureSubscribe (confirmed) on the RPC's websocket for every order sent: the node says it landed, with
+    or without an error, as soon as it is in a confirmed block, instead of the status poll's 30 s and the
+    stream's own fill, which missed 28 of the first 65 fills (docs/LATENCY.md). Read only; its own thread and
+    event loop; reconnects and subscribes again whatever is still open. The status poll stays as the fallback.
+    on_status(pid, sig, status, wall_ms) is called on this thread (the executor only queues it)."""
+
+    def __init__(self, url: str, on_status, clock=None, start: bool = True):
+        self.url, self.on_status = url, on_status
+        self.clock = clock or (lambda: int(time.time() * 1000))
+        self.want: dict[str, int] = {}               # sig -> pid, until its notification came
+        self.req: dict[int, str] = {}                 # request id -> sig
+        self.subs: dict[int, str] = {}                # subscription id -> sig
+        self.n = 0
+        self.ws = None
+        self.loop = None
+        self.up = False
+        self.notes = 0
+        if start:
+            threading.Thread(target=self._thread, name="pumpfun-sigs", daemon=True).start()
+
+    def watch(self, sig: str, pid: int) -> None:
+        self.want[sig] = pid
+        while len(self.want) > 256:                  # never more than a few open; old ones are dropped
+            self.want.pop(next(iter(self.want)))
+        if self.loop is not None and self.ws is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(self._sub(sig), self.loop)
+            except Exception:                         # the next connection subscribes it
+                pass
+
+    def forget(self, sig: str | None) -> None:
+        if sig:
+            self.want.pop(sig, None)
+
+    def message(self, sig: str) -> str:
+        self.n += 1
+        self.req[self.n] = sig
+        return json.dumps({"jsonrpc": "2.0", "id": self.n, "method": "signatureSubscribe",
+                           "params": [sig, {"commitment": "confirmed"}]})
+
+    async def _sub(self, sig: str) -> None:
+        if self.ws is not None and sig in self.want:
+            await self.ws.send_str(self.message(sig))
+
+    def handle(self, text: str) -> None:
+        """One websocket message: a subscription's id, or a signature's notification."""
+        try:
+            d = json.loads(text)
+        except ValueError:
+            return
+        if not isinstance(d, dict):
+            return
+        if d.get("id") in self.req:
+            sig = self.req.pop(d["id"])
+            if isinstance(d.get("result"), int):
+                self.subs[d["result"]] = sig
+            return
+        if d.get("method") != "signatureNotification":
+            return
+        p = d.get("params") or {}
+        sig = self.subs.pop(p.get("subscription"), None)
+        v = ((p.get("result") or {}).get("value"))
+        if sig is None or not isinstance(v, dict) or "err" not in v:
+            return
+        pid = self.want.pop(sig, None)
+        if pid is None:
+            return
+        self.notes += 1
+        self.on_status(pid, sig, {"err": v["err"], "confirmationStatus": "confirmed"}, int(self.clock()))
+
+    def _thread(self) -> None:
+        asyncio.run(self._run())
+
+    async def _run(self) -> None:
+        import aiohttp
+        self.loop = asyncio.get_running_loop()
+        wait = 1.0
+        async with aiohttp.ClientSession() as s:
+            while True:
+                try:
+                    async with s.ws_connect(self.url, heartbeat=20, max_msg_size=1 << 20) as ws:
+                        self.ws, self.req, self.subs, self.up, wait = ws, {}, {}, True, 1.0
+                        for sig in list(self.want):
+                            await ws.send_str(self.message(sig))
+                        async for msg in ws:
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                break
+                            self.handle(msg.data)
+                except Exception as e:                # the status poll covers the time it is down
+                    print(f"live: signature websocket down ({type(e).__name__})", flush=True)
+                self.ws, self.up = None, False
+                await asyncio.sleep(wait)
+                wait = min(30.0, wait * 2)
 
 
 def pool_buy_amounts(o: P.Order) -> tuple[int, int]:
@@ -917,7 +1227,7 @@ class LiveExecutor:
 
     def __init__(self, gate: LiveGate, signer, builder, limits: P.Limits, clock=None, start: bool = True,
                  mode: str = "full", max_total_sol: float | None = None, rule: str | None = None,
-                 totals: dict | None = None, on_stop=None, on_leftover=None):
+                 totals: dict | None = None, on_stop=None, on_leftover=None, speed: Speed | None = None):
         self.gate = gate
         self.signer = signer
         self.builder = builder
@@ -962,14 +1272,29 @@ class LiveExecutor:
         self.wins_today = 0
         self.stake: dict | None = None                # {"sol", "why"}: the stake the wallet allows (sizing.py)
         self.stake_bal_l: int | None = None           # the balance that stake was sized with
+        self.speed = speed or Speed()
+        if hasattr(builder, "speed"):
+            builder.speed = self.speed
+        self.rq: queue.Queue = queue.Queue()         # reads, on their own thread with send_first
+        self.on_result = None                         # () after every worker result (the service's wake-up)
+        self.watcher: SigWatcher | None = None        # signatureSubscribe, with ws_confirm
+        self.want_sales: dict[int, tuple] = {}        # pid -> (order, pool, close): the sales to keep prepared
+        self.last_ping = 0.0
+        self.prep_failed: dict[int, float] = {}       # pid -> when its sale last failed to prepare
         self._carry()
         self._roll()                                  # the day and its P&L are set before anything books
         self.worker = None
         if start:
             self.worker = threading.Thread(target=self._work, name="pumpfun-live", daemon=True)
             self.worker.start()
+            if self.speed.send_first:
+                threading.Thread(target=self._work, args=(self.rq,), name="pumpfun-live-reads", daemon=True).start()
+            if self.speed.prepare or self.speed.prefetch or self.speed.dynamic_fee or self.speed.keepalive:
+                threading.Thread(target=self._prefetch_loop, name="pumpfun-live-prefetch", daemon=True).start()
             if signer is not None:
                 threading.Thread(target=self._chain_loop, name="pumpfun-live-chain", daemon=True).start()
+                if self.speed.ws_confirm and self.speed.ws_url:
+                    self.watcher = SigWatcher(self.speed.ws_url, self._confirmed)
 
     def attach(self, pipe) -> None:
         self.pipe = pipe
@@ -1185,14 +1510,64 @@ class LiveExecutor:
             print(f"live: chain check failed ({type(e).__name__}: {e})"[:200], flush=True)
             return
         if changed:
-            self.results.put(("chain", None, adjust))
+            self._put(("chain", None, adjust))
 
-    def _work(self) -> None:
+    def _work(self, q: queue.Queue | None = None) -> None:
+        q = self.q if q is None else q
         while True:
-            item = self.q.get()
+            item = q.get()
             if item is None:
                 return
             self.step(item)
+
+    def _job(self, item) -> None:
+        """A read (status, landed, fee, holds): on the reads' own thread with send_first, so a stop's sale never
+        waits behind one; else behind the sends in the one queue, as before."""
+        (self.rq if self.speed.send_first else self.q).put(item)
+
+    def _put(self, item) -> None:
+        self.results.put(item)
+        if self.on_result is not None:
+            try:
+                self.on_result()
+            except Exception:                            # the next second's poll takes it
+                pass
+
+    def _confirmed(self, pid: int, sig: str, st: dict, wall_ms: int) -> None:
+        """The websocket's notification (its own thread): queued like a status read's answer."""
+        self._put(("status", pid, sig, st, wall_ms))
+
+    def _prefetch_loop(self) -> None:
+        while True:
+            self.prefetch_once()
+            time.sleep(PREFETCH_EVERY_S)
+
+    def prefetch_once(self) -> None:
+        """The background round: the blockhash and the fee (Builder.refresh), every wanted sale prepared, and
+        Sender's /ping. Never raises; nothing here sends a transaction."""
+        b = self.builder
+        try:
+            if hasattr(b, "refresh"):
+                b.refresh()
+            if self.speed.prepare and hasattr(b, "prepare") and self.signer is not None:
+                want = dict(self.want_sales)
+                for pid, (o, pool, close) in want.items():
+                    if time.monotonic() - self.prep_failed.get(pid, -1e18) < 10.0:
+                        continue
+                    try:
+                        b.prepare(self.signer.pubkey, o, pool, close)
+                    except Exception as e:                # the sale is then built when it is sent, as before
+                        b.prepared.pop(pid, None)
+                        if pid not in self.prep_failed:
+                            print(f"live: sale of {o.mint} not prepared ({type(e).__name__}: {e})"[:200], flush=True)
+                        self.prep_failed[pid] = time.monotonic()
+                b.forget(want)
+            sender = getattr(b, "sender", None)
+            if self.speed.keepalive and sender is not None and time.monotonic() - self.last_ping >= SENDER_PING_S:
+                self.last_ping = time.monotonic()
+                sender.ping()
+        except Exception as e:
+            print(f"live: prefetch {type(e).__name__}: {e}"[:200], flush=True)
 
     def step(self, item) -> None:
         """One queued job: build, sign and send an order; ask for a signature's status, read a landed
@@ -1205,15 +1580,19 @@ class LiveExecutor:
                     o, pool = self._recheck_venue(o, pool)    # a retry: the curve may have completed meanwhile
                 msg = self.builder.build(self.signer.pubkey, o, pool, close)
                 tx = X.transaction(msg, [self.signer.sign(msg)])
+                times = {"built_ms": int(self.clock()), "prepared": bool(getattr(self.builder, "last_prepared", False))}
                 # The signature is the transaction's id, known before it is sent, and it is the one kept
                 # whatever the endpoint answers. An exception while sending does not prove it never went out
                 # (Sender may have forwarded it): it is "sent, outcome unknown", and its status settles it.
                 local_sig = X.b58(tx[1:65])
+                if self.watcher is not None:                 # subscribed before it can land
+                    self.watcher.watch(local_sig, o.pid)
                 try:
                     answer, err = (getattr(self.builder, "send", None) or self.builder.rpc.send)(tx), None
                 except Exception as e:
                     answer, err = None, f"{type(e).__name__}: {e}"[:200]
-                self.results.put(("sent", o.pid, local_sig, answer, err, o))
+                times["sent_at_ms"] = int(self.clock())
+                self._put(("sent", o.pid, local_sig, answer, err, o, times))
             elif kind == "status":
                 _, pid, sig = item
                 try:
@@ -1222,27 +1601,27 @@ class LiveExecutor:
                     print(f"live: status of {sig[:12]}... not read ({type(e).__name__}: {e}); asked again later"[:220],
                           flush=True)
                     return
-                self.results.put(("status", pid, sig, st))
+                self._put(("status", pid, sig, st))
             elif kind == "landed":
-                _, pid, sig, mint = item
-                self.results.put(("landed", pid, sig, self._read_landed(sig, mint)))
+                _, pid, sig, mint = item[:4]
+                self._put(("landed", pid, sig, self._read_landed(sig, mint, len(item) > 4 and bool(item[4]))))
             elif kind == "fee":
                 _, pid, sig = item
-                self.results.put(("fee", pid, sig, self.builder.rpc.fee_of(sig)))
+                self._put(("fee", pid, sig, self.builder.rpc.fee_of(sig)))
             elif kind == "holds":
                 _, pid, mint = item[:3]
-                self.results.put(("holds", pid, *self._read_holds(mint, list(item[3]) if len(item) > 3 else [])))
+                self._put(("holds", pid, *self._read_holds(mint, list(item[3]) if len(item) > 3 else [])))
         except Exception as e:                               # every failure goes back to the book
             if kind == "fee":
                 return
             if kind == "holds":                              # not readable: the sale counts as failed
-                self.results.put(("holds", item[1], None, None, None))
+                self._put(("holds", item[1], None, None, None))
                 return
             if kind == "landed":
-                self.results.put(("landed", item[1], item[2], None))
+                self._put(("landed", item[1], item[2], None))
                 return
             # Building or signing failed: nothing was sent, a plain failure without a fee.
-            self.results.put(("error", item[1].pid if kind == "send" else item[1], f"{type(e).__name__}: {e}"[:200]))
+            self._put(("error", item[1].pid if kind == "send" else item[1], f"{type(e).__name__}: {e}"[:200]))
 
     def _tip(self) -> int:
         return int(getattr(self.builder, "sender_tip_l", 0) or 0)
@@ -1264,15 +1643,18 @@ class LiveExecutor:
         print(f"live: the curve of {o.mint} is complete; the sale goes to its pool", flush=True)
         return dataclasses.replace(o, venue="pool"), pool
 
-    def _read_landed(self, sig: str, mint: str) -> dict | None:
+    def _read_landed(self, sig: str, mint: str, tx_only: bool = False) -> dict | None:
         """A landed transaction read back: the wallet's SOL and token change (chain_pnl.tx_effect), else a
-        fresh read of the wallet's holding of the token; None when neither can be read now."""
+        fresh read of the wallet's holding of the token; None when neither can be read now. `tx_only` (the
+        first seconds after a fast confirmation): only the transaction itself, whose amounts are exact."""
         try:
             info = CP.tx_effect(self.builder.rpc.transaction(sig), self.signer.pubkey, mint)
             if info is not None:
                 return info
         except Exception as e:
             print(f"live: {sig[:12]}... not read back ({type(e).__name__}: {e})"[:200], flush=True)
+        if tx_only:
+            return None
         try:
             return {"held": int(self.builder.rpc.holdings(self.signer.pubkey).get(mint, 0))}
         except Exception as e:
@@ -1300,14 +1682,16 @@ class LiveExecutor:
         return amount, ok, got
 
     def drain(self) -> None:
-        """Run what is queued on this thread (a test, or an executor made with start=False)."""
-        while not self.q.empty():
-            item = self.q.get_nowait()
+        """Run what is queued on this thread (a test, or an executor made with start=False): the sends first."""
+        while not self.q.empty() or not self.rq.empty():
+            q = self.q if not self.q.empty() else self.rq
+            item = q.get_nowait()
             if item is not None:
                 self.step(item)
 
     def stop(self) -> None:
         self.q.put(None)
+        self.rq.put(None)
 
     # ------------------------------------------------------------ results (the stream's thread)
     def poll(self, now: float) -> None:
@@ -1352,19 +1736,23 @@ class LiveExecutor:
                     self._failed(pid, pend, now, f"failed on chain: {st['err']}"[:200], self._fee(failed=True))
                 elif landed(st):
                     pend["landed_at"] = wall                 # landed; its fill is read back unless the stream's comes
+                    pend.setdefault("confirmed_ms", int(r[4]) if len(r) > 4 else wall)
             elif kind == "landed":
                 if pend.get("sig") == r[2]:
                     self._landed(pid, pend, now, wall, r[3])
+        sp = self.speed
         for pid, pend in list(self.pending.items()):
             if pend.get("landed_at"):
-                if not pend.get("reading") and wall - pend["landed_at"] >= LANDED_GRACE_MS:
+                if not pend.get("reading") and wall - pend["landed_at"] >= sp.grace_ms:
                     pend["reading"] = True
-                    self.q.put(("landed", pid, pend["sig"], pend["order"].mint))
+                    # fast: the first LANDED_GRACE_MS after the confirmation only the transaction itself is booked
+                    tx_only = sp.grace_ms < LANDED_GRACE_MS and wall - pend.get("confirmed_ms", wall) < LANDED_GRACE_MS
+                    self._job(("landed", pid, pend["sig"], pend["order"].mint) + ((True,) if tx_only else ()))
                 continue
-            if pend["sig"] and wall - pend["sent_ms"] > CONFIRM_MS and not pend.get("asked"):
+            if pend["sig"] and wall - pend["sent_ms"] > sp.status_ms and not pend.get("asked"):
                 pend["asked"] = wall
-                self.q.put(("status", pid, pend["sig"]))
-            elif pend.get("asked") and wall - pend["asked"] > CONFIRM_MS:
+                self._job(("status", pid, pend["sig"]))
+            elif pend.get("asked") and wall - pend["asked"] > sp.status_ms:
                 pend["asked"] = None
         for pid, d in list(self.deferred.items()):
             if wall < self.retry_at.get(pid, 0):
@@ -1377,6 +1765,34 @@ class LiveExecutor:
             if p is None or p.get("left", 0) <= 0:
                 continue                                     # closed meanwhile (a late fill)
             self.sell(dataclasses.replace(d[1], tokens=min(d[1].tokens, p["left"])))
+        if (sp.prepare or sp.dynamic_fee) and self.pipe is not None:
+            self._want()
+
+    def _want(self) -> None:
+        """For the prefetch thread: the sale each open position would send on a protective exit (everything it
+        holds, no floor, the account closed), exactly as sell() would make it, and the accounts its fee reads."""
+        want, accts = {}, []
+        for pid, p in self.pipe.pos.items():
+            if p.get("state") != "open" or int(p.get("left") or 0) <= 0 or pid in self.stuck or pid in self.pending:
+                continue
+            venue = "pool" if self.pipe._pool(p) else "curve"
+            pool = self._pool_of(p["mint"])
+            held = self.held.get(p["mint"])
+            tokens = int(p["left"]) if not held else min(int(p["left"]), held)
+            want[pid] = (P.Order(pid, "sell", p["mint"], venue, tokens, 0, 0, "prepared", p.get("legs", 0)), pool,
+                         tokens >= (held if held else int(p["left"])))
+            accts.append(pool if venue == "pool" and pool else X.pda([b"bonding-curve", X.key(p["mint"])], X.PUMP))
+        self.want_sales = want
+        if hasattr(self.builder, "fee_accounts"):
+            self.builder.fee_accounts = accts
+
+    def next_wake_ms(self) -> int | None:
+        """The next wall time a timer of the executor is due (a sale's retry, a landed order's read), for the
+        service's wake-up; None when nothing is waiting."""
+        due = [self.retry_at.get(pid, 0) for pid in self.deferred]
+        due += [int(pend["landed_at"]) + self.speed.grace_ms for pend in self.pending.values()
+                if pend.get("landed_at") and not pend.get("reading")]
+        return min(due) if due else None
 
     def _sent(self, pid: int, pend: dict, r: tuple) -> None:
         """The worker sent it (or tried): the transaction's own signature is the order's, always."""
@@ -1385,6 +1801,8 @@ class LiveExecutor:
         err = r[4] if len(r) > 4 else None
         if len(r) > 5 and r[5] is not None:
             pend["order"] = r[5]                             # the venue may have been switched to the pool
+        times = r[6] if len(r) > 6 and isinstance(r[6], dict) else {}
+        pend.update(built_ms=times.get("built_ms"), sent_at_ms=times.get("sent_at_ms"), prepared=times.get("prepared"))
         pend["sig"] = sig
         (self.sell_sigs if pend["side"] == "sell" else self.buy_sigs).setdefault(pid, []).append(sig)
         if answer is not None and answer != sig:
@@ -1393,9 +1811,9 @@ class LiveExecutor:
         if err:
             print(f"live: sending {sig[:12]}... raised ({err}); outcome unknown, its status decides"[:220],
                   flush=True)
-            log_order(pend, "sent", mode=self.mode, error=err)
+            log_order(pend, "sent", mode=self.mode, error=err, **times)
         else:
-            log_order(pend, "sent", mode=self.mode)
+            log_order(pend, "sent", mode=self.mode, **times)
 
     def _sent_after_fill(self, pid: int, sig: str, o: P.Order) -> None:
         """A send's result that arrives after its fill was booked: the signature is still recorded (the
@@ -1413,6 +1831,8 @@ class LiveExecutor:
     def _failed(self, pid: int, pend: dict, now: float, why: str, fee: int) -> None:
         self.pending.pop(pid, None)
         o = pend["order"]
+        if self.watcher is not None:
+            self.watcher.forget(pend.get("sig"))
         log_order(pend, "failed", why=why, mode=self.mode, fee_l=fee)
         write_measure({"t": self.clock(), "what": "failed", "mode": self.mode, "side": pend["side"],
                        "venue": o.venue, "why": why, "fee_l": fee})
@@ -1426,7 +1846,7 @@ class LiveExecutor:
             # An earlier sale may have landed while the stream missed its fill (CCC, 2026-10-22: sold
             # on chain, then retried every second against an empty account). Read the holding first.
             self.verifying[pid] = (pend, why, fee)
-            self.q.put(("holds", pid, o.mint, list(self.sell_sigs.get(pid) or [])))
+            self._job(("holds", pid, o.mint, list(self.sell_sigs.get(pid) or [])))
             return
         self._settle_failure(pid, pend, now, why, fee)
 
@@ -1435,8 +1855,9 @@ class LiveExecutor:
         token change), else from a fresh holdings read; a landed transaction with an error is a failure that
         paid its fee."""
         o = pend["order"]
-        if info is None:
-            pend["landed_at"], pend["reading"] = wall, False         # not readable now: again after the grace
+        if info is None:                                             # not readable now: again after the grace
+            pend["landed_at"] = wall + max(0, LANDED_RETRY_MS - self.speed.grace_ms)   # (at least LANDED_RETRY_MS)
+            pend["reading"] = False
             return
         if info.get("err") is not None:
             fee = int(info.get("fee_l") or 0) or self._fee(failed=True)
@@ -1599,12 +2020,18 @@ class LiveExecutor:
              "venue": o.venue, "mint": o.mint, "rule": self.rule, "sig": sig,
              "signal_ms": o.signal_ms, "land_ms": int(t), "lat_ms": int(t) - o.signal_ms,
              "send_to_land_ms": int(t) - int(pend["sent_ms"]), "sol_l": int(sol_l),
-             "tokens": int(tokens), "fee_bps": fee_bps, "fee_assumed_l": fee, "slip": None, "onchain": onchain}
+             "tokens": int(tokens), "fee_bps": fee_bps, "fee_assumed_l": fee, "slip": None, "onchain": onchain,
+             # wall times of each step (measure.split): queued at buy()/sell(), built and signed, the send's
+             # answer, the node's confirmation (websocket or status), booked here
+             "queued_ms": int(pend["sent_ms"]), "built_ms": pend.get("built_ms"), "sent_at_ms": pend.get("sent_at_ms"),
+             "confirmed_ms": pend.get("confirmed_ms"), "seen_ms": int(self.clock()), "prepared": pend.get("prepared")}
+        if self.watcher is not None:
+            self.watcher.forget(sig)
         if pend.get("leftover"):
             lo = self.leftovers.pop(pid, {})
             write_measure(m)
             if sig:
-                self.q.put(("fee", pid, sig))
+                self._job(("fee", pid, sig))
             if self.on_leftover is not None:                 # the book writes its ledger row
                 self.on_leftover("sold", {**lo, "pid": pid, "got_l": int(amount_l), "sig": sig})
             return
@@ -1627,7 +2054,7 @@ class LiveExecutor:
                 self.exposure.pop(pid, None)
         write_measure(m)
         if sig:
-            self.q.put(("fee", pid, sig))
+            self._job(("fee", pid, sig))
 
     def _seen(self, mint: str, side: str, tokens: int) -> bool:
         """A fill of this token, side and amount booked in the last ten minutes (a stream fill without a
@@ -2229,17 +2656,25 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
     if gate.address and signer.pubkey != gate.address:
         print("live: the wallet file and its .pub address do not match; live trading stays OFF", flush=True)
         return None
-    rpc = rpc or Rpc(env.get(ENV_RPC) or DEFAULT_RPC)
+    speed = speed_of(env)
+    rpc = rpc or Rpc(env.get(ENV_RPC) or DEFAULT_RPC, keepalive=speed.keepalive)
     lim, total = effective(gate.ack, read_settings(), env)
     builder = Builder(rpc, gate.idls)
+    builder.speed = speed
     sender_url = (env.get(ENV_SENDER) or "").strip()
     if sender_url and not sender_problems(sender_url):
-        builder.sender = Rpc(sender_url)
+        builder.sender = Rpc(sender_url, keepalive=speed.keepalive)
         builder.sender_tip_l = sender_tip_lamports(env)
         print(f"live: sending through Helius Sender (stake-weighted, tip {builder.sender_tip_l} lamports), "
               "the plain RPC if it does not answer", flush=True)
+    if speed.on():
+        print(f"live: speed settings on: {', '.join(speed.on())}; status asked after {speed.status_ms} ms, "
+              f"landed orders read back after {speed.grace_ms} ms"
+              + (f", fee at most {speed.fee_cap_sol} SOL" if speed.dynamic_fee else "")
+              + ("" if speed.ws_url or not speed.ws_confirm else "; no wss:// endpoint for the signature websocket"),
+              flush=True)
     ex = LiveExecutor(gate, signer, builder, lim, mode=gate.ack.mode, max_total_sol=total,
-                      rule=gate.rule, start=start)
+                      rule=gate.rule, start=start, speed=speed)
     try:
         ex.balance_l = rpc.balance(signer.pubkey)
     except Exception as e:                                   # no buys until the service reads it

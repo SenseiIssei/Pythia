@@ -5,6 +5,7 @@
   jupiter.py  Jupiter's public quote and price API (no key): timeouts, retries, pacing
   paper.py    the paper executor: a swap filled at the quote's out amount minus
               Solana's base fee and a priority fee
+  fees.py     stage 2's priority fee from recent prioritization fees, capped (read only)
   book.py     the paper book that mirrors breakout_top10_live on a 1,000 USDC
               account, and the cost report reports/onchain/latest.md
 

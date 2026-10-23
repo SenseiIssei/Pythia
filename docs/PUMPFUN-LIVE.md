@@ -425,6 +425,23 @@ Trinkgeld; ist Sender an, öffnet das Tor nur mit einer Simulation, die das Trin
 Einschalten also `live_exec simulate` erneut ausführen). Ausschalten: die Zeile löschen und den
 Container wie oben neu anlegen.
 
+**Kostenlose Beschleunigung (seit 23.10.2026 eingebaut, aus, bis du sie einschaltest).** Die
+Messung in [LATENCY.md](LATENCY.md) zeigt: 28 von 65 Abschlüssen sah der Datenstrom nie, der Bot kannte sie
+erst 37 s nach der Landung, und so lange konnte ein Stop nicht feuern. Mit einer Zeile gehen Signatur per
+Websocket, sofortiges Reagieren, vorgebaute Verkäufe, Blockhash und Gebühr vorab, paralleles Senden an
+Sender und den RPC und gehaltene Verbindungen an (Einzelheiten und Einzelschalter in LATENCY.md). An den
+Grenzen, `check_own`, dem Tor und den Notschaltern ändert sich nichts; die Gebühr wird nie teurer als heute,
+außer du hebst `PYTHIA_PUMPFUN_FEE_CAP_SOL` an.
+
+```bash
+echo 'PYTHIA_PUMPFUN_FAST=1' >> /etc/pythia/pumpfun-live.env
+docker stop pythia-pumpfun-live
+docker rm -f pythia-pumpfun-live
+# dann den docker-run-Befehl aus Abschnitt 8; im Log steht "live: speed settings on: ..."
+```
+
+Nach einer Woche: `python -m lab.pumpfun_rt.measure split` (oder `execution.md`, "Where the time goes").
+
 Du wolltest "immer direkt beim Release drin" sein. Was gemessen ist
 (results/pumpfun_speed.md):
 

@@ -391,3 +391,67 @@ def test_nothing_in_the_package_signs_or_sends():
         assert "Keypair" not in src and "sendTransaction" not in src and "/swap?" not in src
         if p.name != "live_exec.py":
             assert "sign(" not in src, p.name
+
+
+# ---------------------------------------------------------------- speed (docs/LATENCY.md)
+
+class KeptConn:
+    made = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host, self.closed, self.fail, self.paths = host, False, 0, []
+        KeptConn.made.append(self)
+
+    def request(self, method, path, headers=None):
+        import http.client
+        if self.fail:
+            self.fail -= 1
+            raise http.client.RemoteDisconnected("closed")
+        self.paths.append(path)
+
+    def getresponse(self):
+        class R:
+            status = 200
+
+            def read(self):
+                return json.dumps(QUOTE).encode()
+
+            def getheaders(self):
+                return [("x-ratelimit-remaining", "5")]
+        return R()
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_kept_connection_carries_every_quote_and_a_closed_one_is_replaced_once():
+    KeptConn.made = []
+    f = J.KeptFetch(conn=KeptConn)
+    c = J.Jupiter(fetch=f, sleep=lambda s: None)
+    assert c.quote(M.USDC.mint, M.SOL.mint, 100_000_000).out_amount == 950_000_000
+    c.quote(M.USDC.mint, M.SOL.mint, 100_000_000)
+    assert len(KeptConn.made) == 1 and KeptConn.made[0].paths[0].startswith("/swap/v1/quote?")
+    KeptConn.made[0].fail = 1
+    c.quote(M.USDC.mint, M.SOL.mint, 100_000_000)
+    assert len(KeptConn.made) == 2 and KeptConn.made[0].closed
+    assert J.default_fetch({}) is J._urlopen and isinstance(J.default_fetch({"PYTHIA_ONCHAIN_KEEPALIVE": "1"}),
+                                                            J.KeptFetch)
+
+
+def test_the_stage_2_priority_fee_follows_recent_fees_under_its_cap():
+    from lab.onchain import fees as FE
+    rows = [{"slot": i, "prioritizationFee": f} for i, f in enumerate([0, 0, 2_000, 5_000, 9_000])]
+    micro, lam = FE.from_fees(rows, 400_000)
+    assert micro == 5_000 and lam == 2_000                           # the median of the non-zero ones
+    assert FE.from_fees([], 400_000) == (FE.FLOOR_MICRO, 400)       # nothing recent: the floor
+    micro, lam = FE.from_fees([{"prioritizationFee": 10 ** 12}], 400_000, cap_sol=1.0)
+    assert lam <= FE.MAX_PRIORITY_SOL * FE.LAMPORTS and lam >= FE.MAX_PRIORITY_SOL * FE.LAMPORTS - 1
+    t = [0.0]
+    reads = []
+    cache = FE.FeeCache(lambda a: reads.append(a) or rows, clock=lambda: t[0])
+    assert cache.get(["B", "A", "A"], 400_000) == (5_000, 2_000) and reads == [["A", "B"]]
+    cache.get(["A", "B"], 400_000)
+    assert len(reads) == 1                                           # cached for EVERY_S
+    t[0] += FE.EVERY_S
+    cache.read = lambda a: (_ for _ in ()).throw(RuntimeError("429"))
+    assert cache.get(["A", "B"], 400_000) == (5_000, 2_000)          # a failed read keeps the last estimate

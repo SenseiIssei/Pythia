@@ -24,6 +24,8 @@ and at once when a position opens, changes or closes (the balance read again fir
 second, when something moved, it writes
   reports/pumpfun_rt/live_feed.json     every trade on the coins the bot holds or just closed,
                                         for the app's live chart (live_feed.py)
+With the owner's speed setting PYTHIA_PUMPFUN_WAKE (or PYTHIA_PUMPFUN_FAST) a result of the executor's
+threads wakes the loop at once instead of at the next second (docs/LATENCY.md).
 It reads reports/pumpfun_rt/live_settings.json (the app's lower limits) every
 minute. It never opens the wallet file itself (live_exec does, once, after
 every gate holds); it never sends money anywhere.
@@ -118,6 +120,30 @@ class Service:
         self.feed_status: dict | None = None
         self.book_sig = None
         self.feed_err = False
+        self.wake: asyncio.Event | None = None              # speed.wake: a worker result ends the wait at once
+
+    def arm_wake(self, loop) -> bool:
+        """With the owner's speed setting `wake`: every result of the executor's threads (a send's answer, a
+        confirmation, a read) wakes the loop at once instead of at the next second. Nothing else changes."""
+        if self.book is None or not getattr(self.book.exec.speed, "wake", False):
+            return False
+        self.wake = asyncio.Event()
+        self.book.exec.on_result = lambda: loop.call_soon_threadsafe(self.wake.set)
+        return True
+
+    async def pause(self, most_s: float = 1.0) -> None:
+        """The loop's wait: a second, or until a result or the executor's next timer (a sale's retry)."""
+        if self.wake is None:
+            await asyncio.sleep(most_s)
+            return
+        nxt = self.book.exec.next_wake_ms()
+        if nxt is not None:
+            most_s = max(0.01, min(most_s, (nxt - time.time() * 1000) / 1000))
+        try:
+            await asyncio.wait_for(self.wake.wait(), most_s)
+        except asyncio.TimeoutError:
+            pass
+        self.wake.clear()
 
     def start(self) -> None:
         if self.engine is None:
@@ -302,7 +328,8 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
         except (NotImplementedError, RuntimeError):
             pass
     t_end = time.monotonic() + seconds if seconds else None
-    last = 0.0
+    last = beat = 0.0
+    woken = svc.arm_wake(loop)
     async with aiohttp.ClientSession() as session:
         tasks = []
         if svc.book is not None:                             # nothing to stream for a book that is not there
@@ -311,9 +338,12 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
         print(f"live service: {'streaming' if tasks else 'status only'}", flush=True)
         try:
             while not stop.is_set():
-                await asyncio.sleep(1.0)
+                await svc.pause(1.0)
                 svc.tick(col.clock.latest or int(time.time() * 1000))
                 mono = time.monotonic()
+                if woken and mono - beat < 0.95:
+                    continue                               # woken early: the results are handled, the rest keeps its second
+                beat = mono
                 if svc.book_changed():                     # a fill or a close: the app sees it at once
                     svc.last["balance"] = -1e18
                     last = -1e18

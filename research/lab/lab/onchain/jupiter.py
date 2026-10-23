@@ -13,6 +13,8 @@ sends a transaction: there is no call here to /swap.
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -95,6 +97,50 @@ def _urlopen(url: str, timeout: float, headers: dict | None = None) -> tuple[int
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers or {}), e.read() or b""
+
+
+class KeptFetch:
+    """The same as _urlopen over one kept HTTPS connection per host (PYTHIA_ONCHAIN_KEEPALIVE=1): a quote then
+    costs no new TCP and TLS handshake (100 to 300 ms each). A connection the server closed is replaced once;
+    any other error is the caller's (Jupiter.get retries it as before)."""
+
+    def __init__(self, conn=None):
+        import http.client
+        self.conn = conn or http.client.HTTPSConnection
+        self.open: dict[tuple, object] = {}
+        self.lock = threading.Lock()
+
+    def __call__(self, url: str, timeout: float) -> tuple[int, dict, bytes]:
+        import http.client
+        u = urllib.parse.urlsplit(url)
+        k = (u.hostname, u.port or 443)
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        with self.lock:
+            for attempt in (0, 1):
+                c = self.open.get(k) or self.conn(k[0], k[1], timeout=timeout)
+                try:
+                    c.request("GET", path, headers={"User-Agent": "pythia-lab", "Accept": "application/json"})
+                    r = c.getresponse()
+                    body = r.read()
+                except (http.client.HTTPException, ConnectionError):
+                    c.close()
+                    self.open.pop(k, None)
+                    if attempt:
+                        raise
+                    continue
+                except Exception:
+                    c.close()
+                    self.open.pop(k, None)
+                    raise
+                self.open[k] = c
+                return r.status, dict(r.getheaders()), body
+        raise OSError("no connection")                       # pragma: no cover
+
+
+def default_fetch(env=None):
+    """The fetch the book uses: a kept connection with PYTHIA_ONCHAIN_KEEPALIVE=1, else a new one per call."""
+    env = os.environ if env is None else env
+    return KeptFetch() if env.get("PYTHIA_ONCHAIN_KEEPALIVE") == "1" else _urlopen
 
 
 class Jupiter:

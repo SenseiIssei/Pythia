@@ -9,6 +9,7 @@ the priority fee, the slippage limit) and with the paper shadow's own slippage
 for the same strategy (<data>/paper/pumpfun_rt/ledger.csv).
 
     python -m lab.pumpfun_rt.measure          write the report now and print it
+    python -m lab.pumpfun_rt.measure split    every fill's latency split into its steps (docs/LATENCY.md)
 
 Output: reports/pumpfun_rt/execution.json and execution.md. The study adds the
 summary to its daily report ("Measured execution"); the live daily card shows
@@ -54,6 +55,91 @@ def read_measured(path=None) -> list[dict]:
     except OSError:
         pass
     return out
+
+
+def read_orders(path=None) -> list[dict]:
+    from .live_exec import data_dir
+    return read_measured(path or (data_dir() / "orders.jsonl"))
+
+
+STEPS = (("signal_to_queued", "signal to order (the decision; the stream's lag behind the slot's first event)"),
+         ("queued_to_built", "order to built and signed"),
+         ("built_to_sent", "built to the send's answer"),
+         ("queued_to_sent", "order to sent (older fills: to the sent line, which waited for the next second)"),
+         ("sent_to_landed", "sent to landed (the slot's time on the stream, or the block's for a read-back)"),
+         ("sent_to_confirmed", "sent to the node's confirmation (websocket or status)"),
+         ("landed_to_seen", "landed to booked by the bot"),
+         ("signal_to_seen", "signal to booked"))
+
+
+def _quart(xs: list[float]) -> dict:
+    return {"n": len(xs), "p25": _q(xs, 0.25), "median": _q(xs, 0.5), "p75": _q(xs, 0.75), "p90": _q(xs, 0.9)}
+
+
+def split(rows: list[dict], orders: list[dict] | None = None) -> dict:
+    """Every live fill's latency in its steps, per side, in ms: signal (the stream's time of the event that
+    decided it), queued (wall time at buy()/sell()), built (signed), sent (the endpoint's answer), landed (the
+    stream's slot time of our fill, or the block time of one read back from the chain), confirmed (the
+    websocket's or the status read's wall time) and seen (booked). Fills written before the executor recorded
+    each step take queued from send_to_land_ms and sent from the order log's sent line (written at the next
+    poll, so up to a second late). By how the bot learnt of the fill: from the stream, or read back from the
+    chain (the stream missed it)."""
+    sent_line = {}
+    for o in orders or []:
+        if o.get("what") == "sent" and o.get("sig"):
+            sent_line.setdefault(o["sig"], o.get("sent_at_ms") or o.get("t"))
+    out = {}
+    for side in ("buy", "sell"):
+        steps: dict[str, list[float]] = {k: [] for k, _ in STEPS}
+        via = {"stream": 0, "chain": 0}
+        seen_by: dict[str, list[float]] = {"stream": [], "chain": []}
+        for r in rows:
+            if r.get("what") != "fill" or r.get("side") != side or r.get("land_ms") is None:
+                continue
+            sig_ms, land = r.get("signal_ms"), r["land_ms"]
+            queued = r.get("queued_ms")
+            if queued is None and r.get("send_to_land_ms") is not None:
+                queued = land - r["send_to_land_ms"]
+            built, sent = r.get("built_ms"), r.get("sent_at_ms") or sent_line.get(r.get("sig"))
+            seen = r.get("seen_ms") or r.get("t")
+            conf = r.get("confirmed_ms")
+
+            def add(k, a, b):
+                if a is not None and b is not None:
+                    steps[k].append(float(a) - float(b))
+            add("signal_to_queued", queued, sig_ms)
+            add("queued_to_built", built, queued)
+            add("built_to_sent", r.get("sent_at_ms"), built)
+            add("queued_to_sent", sent, queued)
+            add("sent_to_landed", land, sent)
+            add("sent_to_confirmed", conf, sent)
+            add("landed_to_seen", seen, land)
+            add("signal_to_seen", seen, sig_ms)
+            how = "chain" if r.get("onchain") else "stream"
+            via[how] += 1
+            if seen is not None:
+                seen_by[how].append(float(seen) - float(land))
+        out[side] = {"steps": {k: _quart(v) for k, v in steps.items()}, "via": via,
+                     "landed_to_seen_by": {k: _quart(v) for k, v in seen_by.items()}}
+    return out
+
+
+def split_markdown(sp: dict) -> list[str]:
+    def s(d, k):
+        v = d.get(k)
+        return "" if v is None else f"{v / 1000:.2f}"
+    lines = ["| side | step | n | p25 s | median s | p75 s | p90 s |", "|---|---|---|---|---|---|---|"]
+    for side in ("buy", "sell"):
+        for k, label in STEPS:
+            d = sp.get(side, {}).get("steps", {}).get(k) or {}
+            if d.get("n"):
+                lines.append(f"| {side} | {label} | {d['n']} | {s(d, 'p25')} | {s(d, 'median')} | {s(d, 'p75')} | "
+                             f"{s(d, 'p90')} |")
+        for how, d in (sp.get(side, {}).get("landed_to_seen_by") or {}).items():
+            if d.get("n"):
+                lines.append(f"| {side} | landed to booked, fill from the {how} | {d['n']} | {s(d, 'p25')} | "
+                             f"{s(d, 'median')} | {s(d, 'p75')} | {s(d, 'p90')} |")
+    return lines
 
 
 def paper_slip(rule: str | None, path=None) -> dict:
@@ -164,6 +250,8 @@ def markdown(s: dict) -> str:
              f"{s['fee_sol'].get('n', 0)} | {a['tx_fee_sol']:.6f} |", "",
              f"Failed orders: {s['failed']}" + ("" if not s["failed_why"] else " (" + ", ".join(
                  f"{k} {v}" for k, v in s["failed_why"].items()) + ")"), ""]
+    if s.get("split"):
+        lines += ["## Where the time goes", ""] + split_markdown(s["split"]) + [""]
     return "\n".join(lines)
 
 
@@ -172,6 +260,7 @@ def write_report(rows: list[dict] | None = None) -> dict:
     rows = read_measured() if rows is None else rows
     rule = next((r.get("rule") for r in reversed(rows) if r.get("rule")), None)
     s = summarise(rows, paper=paper_slip(rule))
+    s["split"] = split(rows, read_orders())
     d = reports_dir()
     write_json(d / "execution.json", s)
     (d / "execution.md").write_text(markdown(s), encoding="utf-8")
@@ -179,6 +268,10 @@ def write_report(rows: list[dict] | None = None) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["split"]:
+        print("\n".join(split_markdown(split(read_measured(), read_orders()))))
+        return 0
     s = write_report()
     print(markdown(s))
     return 0

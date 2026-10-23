@@ -47,7 +47,7 @@ from pathlib import Path
 from .. import report
 from ..data import ROOT, WRITE_ROOT
 from . import mints as M
-from .jupiter import Jupiter, QuoteError
+from .jupiter import Jupiter, QuoteError, default_fetch
 from .paper import Fill, PaperExecutor
 
 SIGNAL = "breakout_top10_live"
@@ -475,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-probes", action="store_true")
     a = ap.parse_args(argv)
-    client = Jupiter()
+    client = Jupiter(fetch=default_fetch())
     try:
         if a.mark:
             eq = mark_only(client)
