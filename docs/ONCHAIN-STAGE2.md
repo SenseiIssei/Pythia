@@ -530,6 +530,16 @@ Alle Befehle auf dem Server, als root.
    (z. B. `anchor idl fetch JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`) als
    `/srv/pythia-data/onchain/idl/jupiter.json`. Das Tor prüft, dass `route_v2` und `shared_accounts_route_v2`
    die erwarteten Diskriminatoren, Konten und Beträge an festen Stellen haben; sonst bleibt es zu.
+   Danach **Jupiters Code pinnen** (liest nur, signiert nichts; verweigert, solange das IDL nicht passt):
+
+   ```bash
+   docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     pythia-lab python -m lab.onchain.live_exec pin
+   ```
+
+   Das schreibt `live/onchain/jupiter_pin.json` (ProgramData-Konto und Deploy-Slot von Jupiter v6). Ohne Pin
+   bleibt das Tor zu; jeder Swap liest beides neu von der Chain und signiert nichts, wenn Jupiter neu deployt
+   hat. Dann das IDL neu holen, prüfen und neu pinnen (Review R4).
 4. **Einzahlen:** SOL (und wenn du willst USDC) an die Adresse schicken, höchstens dein `max_total_usd` plus
    0,05 SOL für Gebühren und Kontomieten.
 5. **Ack schreiben**, `/etc/pythia/onchain-live-ack`, Rechte 600, mit einem Ablaufdatum höchstens 90 Tage
@@ -588,7 +598,10 @@ Alle Befehle auf dem Server, als root.
 
 **Umtausch in der App:** von, nach, Betrag, "Get quote". Der Dienst antwortet mit erwarteter Menge,
 Mindestmenge, Kosten und Weg; 60 Sekunden lang kannst du bestätigen. Getauscht wird nur genau dieser
-Vorschlag, nie unter seiner Mindestmenge.
+Vorschlag, nie unter seiner Mindestmenge, und nur einmal: Die Bestätigung wird vor dem Signieren als
+genommen markiert (`live/onchain/taken/<id>`); stirbt der Dienst, während der Swap auf die Landung wartet,
+sendet ihn auch ein Neustart nie wieder. Der Neustart trägt jeden gesendeten, nicht gebuchten Swap als
+ungelesene Zeile ins Ledger und liest ihn von der Chain nach (Review R1).
 
 **Stoppen:** Notschalter in der App (schreibt `reports/onchain_live/KILL`) oder
 `touch /srv/pythia-data/live/onchain/KILL`. Dann kein Swap mehr; mit `on_kill=usdc` im Ack verkauft der Dienst

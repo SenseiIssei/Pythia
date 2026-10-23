@@ -42,6 +42,7 @@ There is no transfer anywhere: the guard knows no instruction that moves funds o
 wallet. Withdrawing stays with the owner's own wallet and backup (docs/ONCHAIN-STAGE2.md).
 
     python -m lab.onchain.live_exec check        every gate, and why it is shut
+    python -m lab.onchain.live_exec pin          pin Jupiter's deployed program (after checking the IDL)
     python -m lab.onchain.live_exec simulate     SOL to USDC (and USDC to SOL when the wallet holds
                                                  USDC), 10 USD each, built for this wallet, guarded
                                                  and simulated on mainnet (nothing signed or sent)
@@ -406,6 +407,18 @@ class Trader:
 
     # ------------------------------------------------ caps
 
+    def kill_why(self, s: Swap, killed: bool | None = None) -> str | None:
+        """Under the kill switch only a kill sale into USDC with on_kill=usdc; without it no kill sale. Asked in
+        the caps and again right before every signature (a kill set while a swap is built stops it)."""
+        if killed is None:
+            killed = LG.killed() or bool(self.gate.kill())
+        if killed:
+            if not (s.kind == "kill" and s.dst == "USDC" and self.gate.ack.on_kill == "usdc"):
+                return "the kill switch file is there"
+        elif s.kind == "kill":
+            return "a kill sale without the kill switch"
+        return None
+
     def caps(self, s: Swap, v: View, killed: bool | None = None) -> str | None:
         """Why this swap may not go now (None: it may), from the ack, the code's maxima and the real balances."""
         ack = self.gate.ack
@@ -430,12 +443,9 @@ class Trader:
         if in_usd > lim + 1e-9:
             return f"{in_usd:.2f} USD is above the {lim:g} USD a swap"
         selling = s.dst == "USDC"
-        killed = LG.killed() if killed is None else killed
-        if killed:
-            if not (s.kind == "kill" and selling and ack.on_kill == "usdc"):
-                return "the kill switch file is there"
-        elif s.kind == "kill":
-            return "a kill sale without the kill switch"
+        why = self.kill_why(s, killed)
+        if why:
+            return why
         total = v.total_usd()
         if total is None:
             return "the wallet's USD value is not known (a price is missing)"
@@ -479,12 +489,21 @@ class Trader:
         pi, po = v.prices.get(mi.mint), v.prices.get(mo.mint)
         if not pi or not po:
             raise G.Refused("no Jupiter price for one side")
+        mids = []
         for code, p in ((s.src, pi), (s.dst, po)):
             k = self.kraken(code)
-            if k is None or k <= 0:
+            if k is None or not k > 0:
                 raise G.Refused(f"no Kraken price for {code} to check Jupiter's against")
             if abs(p / k - 1) * 100 > LG.MAX_PRICE_GAP_PCT:
                 raise G.Refused(f"Jupiter's {code} price is more than {LG.MAX_PRICE_GAP_PCT:g} % from Kraken's")
+            mids.append(k)
+        # The minimum out must also hold at Kraken's mids (less our slippage and MAX_COST_BPS), so Jupiter's
+        # prices, each up to 2 % off, cannot together let a quote through that is worse than that.
+        slip = LG.slippage(s.src, s.dst)
+        fair = b.in_amount / 10 ** mi.decimals * mids[0] / mids[1] * 10 ** mo.decimals
+        if G.min_out(b.out_amount, slip) < fair * (1e4 - slip - LG.MAX_COST_BPS) / 1e4:
+            raise G.Refused(f"the minimum out is below the input's worth at Kraken's mids less {slip} bps slippage "
+                            f"and {LG.MAX_COST_BPS:g} bps")
         in_usd = b.in_amount / 10 ** mi.decimals * pi
         out_usd = b.out_amount / 10 ** mo.decimals * po
         cost = (in_usd - out_usd) / in_usd * 1e4 if in_usd > 0 else 1e9
@@ -522,6 +541,13 @@ class Trader:
         effect["units"] = val.get("unitsConsumed")
         return fees, effect, val
 
+    def check_jupiter(self) -> None:
+        """Jupiter's program and ProgramData as the chain has them now, against the owner's pin (guard.check_program)."""
+        pin = self.gate.pin
+        pd = pin.get("programdata") if isinstance(pin, dict) and isinstance(pin.get("programdata"), str) else None
+        acc = self.chain.multiple([G.JUPITER] + ([pd] if pd else []), "confirmed")
+        G.check_program(pin, acc.get(G.JUPITER), acc.get(pd) if pd else None)
+
     def prepare(self, s: Swap, v: View) -> Prepared:
         """Build, guard and simulate one swap for our wallet; raises on any refusal (nothing is signed)."""
         if not self.wallet:
@@ -529,6 +555,7 @@ class Trader:
         mi, mo = LG.CODES[s.src], LG.CODES[s.dst]
         slip = LG.slippage(s.src, s.dst)
         allowed = self.gate.ack.allowed_mints() or frozenset({M.SOL.mint, M.USDC.mint})
+        self.check_jupiter()
         for code, m in ((s.src, mi), (s.dst, mo)):
             G.check_mint(m.mint, self.chain.multiple([m.mint], "confirmed").get(m.mint))
         last: Exception | None = None
@@ -646,9 +673,13 @@ class Trader:
                 why = f"{type(e).__name__}: {e}"[:300]
                 log_order({"what": "refused", "attempt": attempt, "why": why, **s.record()})
                 return {"status": "refused", "why": why}
+            why = self.kill_why(s)
+            if why:
+                log_order({"what": "refused", "attempt": attempt, "why": why, **s.record()})
+                return {"status": "refused", "why": why}
             tx = T.transaction(p.message, self.signer.sign(p.message))
             sig = b58(tx[1:65])
-            log_order({"what": "sent", "attempt": attempt, "sig": sig, "units": p.units, "fees": p.fees,
+            log_order({"what": "sent", "attempt": attempt, "sig": sig, "mode": self.gate.ack.mode, "units": p.units, "fees": p.fees,
                        "expected_out": p.build.out_amount, "min_out_raw": p.plan.min_out_raw,
                        "cost_bps": p.cost_bps, "route": p.build.labels, **s.record()})
             sent_ms = now_ms()
@@ -782,6 +813,29 @@ def expected_holdings() -> tuple[dict | None, bool]:
             elif e.get("mint"):
                 tok[e["mint"]] = tok.get(e["mint"], 0) + _i(e.get("raw"))
     return {"sol_l": sol, "tokens": tok}, complete
+
+
+def recover() -> list[str]:
+    """At a start: every swap that was sent (orders.jsonl) but has neither an end there nor a ledger row, because
+    the service stopped while it waited, gets an unread ledger row at its send time. reread() then books what the
+    chain says it did; it counts for the day's caps at once, and nothing of it is sent again. Returns the sigs."""
+    orders = _read_jsonl(orders_path())
+    ended = {o.get("sig") for o in orders if o.get("what") in ("expired", "failed", "filled") and o.get("sig")}
+    booked = {r.get("sig") for r in read_ledger() if r.get("sig")}
+    out = []
+    for o in orders:
+        sig = o.get("sig")
+        if o.get("what") != "sent" or not sig or sig in ended or sig in booked or sig in out:
+            continue
+        write_row({"t": _i(o.get("t")), "mode": o.get("mode") or "", "kind": o.get("kind"), "book": o.get("book"),
+                   "ref": o.get("ref"), "from": o.get("from"), "to": o.get("to"), "in_raw": _i(o.get("in_raw")),
+                   "out_raw": 0, "planned_out_raw": o.get("expected_out"), "min_out_raw": o.get("min_out_raw"),
+                   "sig": sig, "status": "failed", "why": "the service stopped before it was booked; read back from "
+                   "the chain", "unread": "1"})
+        out.append(sig)
+    if out:
+        journal({"kind": "recovered", "sigs": out})
+    return out
 
 
 def baseline(v: View) -> None:
@@ -935,14 +989,39 @@ def simulate(gate: LG.Gate, trader: Trader | None = None, usd: float = 10.0) -> 
     return rec
 
 
+def pin(gate: LG.Gate, rpc: LX.Rpc | None = None) -> dict:
+    """The owner's pin of Jupiter's deployed program: its ProgramData account and deploy slot, as finalized on the
+    chain, into live/onchain/jupiter_pin.json. Refused while the owner's IDL does not match what the guard reads;
+    after a new deploy of Jupiter the owner checks the IDL again and pins again. Signs and sends nothing."""
+    gate.check()
+    why = G.check_idl(gate.idl)
+    if why:
+        raise G.Refused("the IDL first: " + "; ".join(why))
+    ch = Chain(rpc or LX.Rpc(gate.env.get(LG.ENV_RPC) or LG.DEFAULT_RPC))
+    pd = G.program_data_of(ch.multiple([G.JUPITER], "finalized").get(G.JUPITER))
+    rec = {"program": G.JUPITER, "programdata": pd, "slot": G.deploy_slot(ch.multiple([pd], "finalized").get(pd)),
+           "t": now_ms()}
+    LX.write_json(LG.pin_path(), rec)
+    return rec
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="the stage-2 on-chain trader (locked until the owner arms it)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="every gate, and why it is shut")
     sm = sub.add_parser("simulate", help="build, guard and simulate two small swaps for this wallet; never sends")
     sm.add_argument("--usd", type=float, default=10.0)
+    sub.add_parser("pin", help="pin Jupiter's deployed program (after checking the IDL); never signs")
     a = ap.parse_args(argv)
     gate = LG.Gate()
+    if a.cmd == "pin":
+        try:
+            rec = pin(gate)
+        except (G.Refused, RuntimeError, ValueError, OSError) as e:
+            print(f"on-chain live: not pinned: {e}"[:400])
+            return 1
+        print(f"on-chain live: Jupiter pinned at deploy slot {rec['slot']} ({LG.pin_path()})")
+        return 0
     if a.cmd == "check":
         why = gate.check()
         print("on-chain live: " + (f"every gate holds ({gate.ack.mode} mode)" if not why else

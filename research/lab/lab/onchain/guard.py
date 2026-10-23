@@ -44,6 +44,7 @@ from . import mints as M
 from .tx import Message
 
 JUPITER = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111"
 USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 JITOSOL = "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn"
 ROUTES = ("route_v2", "shared_accounts_route_v2")
@@ -153,6 +154,47 @@ def check_idl(doc: dict | None) -> list[str]:
             if not any(c in names for c in cands):
                 out.append(f"jupiter {ix}: no {role} account in the IDL")
     return out
+
+
+# ---------------------------------------------------------------- Jupiter's code, pinned
+
+def program_data_of(a: "Account | None") -> str:
+    """The ProgramData address an upgradeable program's account points at (loader state 2, then 32 bytes)."""
+    if a is None or a.owner != UPGRADEABLE_LOADER or len(a.data) < 36 or struct.unpack_from("<I", a.data, 0)[0] != 2:
+        raise Refused("Jupiter's program account is not an upgradeable program")
+    return b58(a.data[4:36])
+
+
+def deploy_slot(a: "Account | None") -> int:
+    """The slot of the last deploy in a ProgramData account (loader state 3, then the slot as u64)."""
+    if a is None or a.owner != UPGRADEABLE_LOADER or len(a.data) < 12 or struct.unpack_from("<I", a.data, 0)[0] != 3:
+        raise Refused("Jupiter's ProgramData account is not one")
+    return struct.unpack_from("<Q", a.data, 4)[0]
+
+
+def check_pin_record(pin) -> list[str]:
+    """Why the owner's pin of Jupiter's program (live_exec pin) is missing or malformed; empty when it is fine."""
+    if not isinstance(pin, dict):
+        return ["no pin of Jupiter's deployed program (python -m lab.onchain.live_exec pin, after checking the IDL)"]
+    slot = pin.get("slot")
+    if pin.get("program") != JUPITER or not isinstance(pin.get("programdata"), str) or \
+            not isinstance(slot, int) or isinstance(slot, bool) or slot <= 0:
+        return ["the pin of Jupiter's program is malformed (run live_exec pin again)"]
+    return []
+
+
+def check_program(pin, program: "Account | None", programdata: "Account | None") -> None:
+    """Jupiter v6 is upgradeable: a new deploy changes the code, not the IDL. Refused unless the program still
+    points at the pinned ProgramData account and that was last deployed in the pinned slot."""
+    why = check_pin_record(pin)
+    if why:
+        raise Refused(why[0])
+    if program_data_of(program) != pin["programdata"]:
+        raise Refused("Jupiter's program points at another ProgramData account than the pinned one")
+    slot = deploy_slot(programdata)
+    if slot != pin["slot"]:
+        raise Refused(f"Jupiter's program was deployed again (slot {slot}, pinned {pin['slot']}): nothing is signed "
+                      "until the owner checks the IDL and pins it again")
 
 
 # ---------------------------------------------------------------- the message
@@ -373,6 +415,7 @@ def check_effect(p: Plan, pre: dict[str, Account | None], post: dict[str, Accoun
         raise Refused("the simulation did not return the wallet")
     src, dst, wsol = X.ata(w, p.in_mint), X.ata(w, p.out_mint), X.ata(w, WSOL)
     created = 0
+    returned = 0                                    # lamports of our closed wrapped-SOL account: they must come back
     tok: dict[str, int] = {}
     for k in set(pre) | set(post):
         if k == w:
@@ -393,6 +436,7 @@ def check_effect(p: Plan, pre: dict[str, Account | None], post: dict[str, Accoun
         if tb is None:                                  # closed
             if k != wsol:
                 raise Refused(f"our token account {k[:6]} was closed")
+            returned += a.lamports
             continue
         if ta is None:                                  # created
             if k not in (dst, src, wsol):
@@ -423,6 +467,7 @@ def check_effect(p: Plan, pre: dict[str, Account | None], post: dict[str, Accoun
     allow = max_fee_l + created * ATA_RENT_L
     if p.in_mint == WSOL:
         allow += p.in_raw + ATA_RENT_L               # the wrapped-SOL account's rent comes back when it closes
+    allow -= returned                                # closed to anyone but the wallet: SOL falls short of it
     if p.out_mint == WSOL:
         if sol < p.min_out_raw - allow:
             raise Refused(f"SOL rose by {sol}, less than our minimum {p.min_out_raw} after fees")

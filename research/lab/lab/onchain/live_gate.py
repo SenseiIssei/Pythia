@@ -15,7 +15,9 @@ swaps only when EVERY one holds, checked at start and again every minute:
   4. a successful `live_exec simulate` for this wallet within the last 24 hours
   5. no kill file (/etc/pythia/onchain-kill, <data>/live/onchain/KILL, or
      reports/onchain_live/KILL, the one the app's button writes)
-  6. the owner's copy of Jupiter's IDL matches what the guard reads (guard.check_idl)
+  6. the owner's copy of Jupiter's IDL matches what the guard reads (guard.check_idl), and the owner
+     pinned Jupiter's deployed program (live_exec pin: its ProgramData account and deploy slot; every
+     swap reads them from the chain again and refuses a new deploy, guard.check_program)
   7. the RPC (PYTHIA_ONCHAIN_RPC) is plain https and no bundle or relay service; Helius Sender
      (PYTHIA_ONCHAIN_SENDER) only its /fast endpoint with swqos_only=true and mev-protect=true
   8. the `cryptography` package is installed (it signs)
@@ -107,6 +109,10 @@ def idl_path() -> Path:
 def proof_path() -> Path:
     from .. import report as rep
     return rep.REPORTS / "onchain" / "proof.json"
+
+
+def pin_path() -> Path:
+    return data_dir() / "jupiter_pin.json"
 
 
 def simulate_path() -> Path:
@@ -334,9 +340,11 @@ class Gate:
     idl_file: Path | None = None
     simulate_file: Path | None = None
     pumpfun_wallet_json: Path | None = None
+    pin_file: Path | None = None
     ack: Ack = field(default_factory=Ack)
     address: str | None = None
     idl: dict | None = None
+    pin: dict | None = None
 
     def __post_init__(self):
         self.env = os.environ if self.env is None else self.env
@@ -364,6 +372,9 @@ class Gate:
         except (OSError, ValueError):
             self.idl = None
         why += G.check_idl(self.idl)
+        pin = LX.read_json(self.pin_file or pin_path())
+        self.pin = pin if isinstance(pin, dict) else None
+        why += G.check_pin_record(self.pin)
         why += send_problems(self.env)
         if not LX.crypto_ok():
             why.append("the cryptography package is not installed (it signs)")

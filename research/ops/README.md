@@ -474,7 +474,9 @@ max_daily_loss_usd at most 100, max_convert_usd at most 250, expires at most 90 
 line), its own wallet file `PYTHIA_ONCHAIN_KEYPAIR` made with `python -m lab.onchain.wallet new` (never the
 pump.fun wallet), a successful `live_exec simulate` within 24 hours, no kill file
 (`/srv/pythia-data/live/onchain/KILL`, the app's `reports/onchain_live/KILL`, `/etc/pythia/onchain-kill`), the
-owner's copy of Jupiter's IDL at `/srv/pythia-data/onchain/idl/jupiter.json`, plain https endpoints (Helius
+owner's copy of Jupiter's IDL at `/srv/pythia-data/onchain/idl/jupiter.json` and its pin of Jupiter's deployed
+program (`python -m lab.onchain.live_exec pin`, `live/onchain/jupiter_pin.json`; a new deploy of Jupiter stops
+every signature until the owner pins again), plain https endpoints (Helius
 Sender only `/fast?swqos_only=true&mev-protect=true`). A book trades only when the ack names it and
 `reports/onchain/proof.json` says it passed the pre-registered evidence.
 
@@ -488,7 +490,10 @@ confirms and the kill file; it never signs.
 It writes `reports/onchain_live/status.json` and `trades.json` (every 30 s), answers the app's converts in
 `reports/onchain_live/convert/` (request, proposal valid 60 s, the owner's confirm, result), and keeps
 `live/onchain/orders.jsonl` (every step), `ledger.csv` (every swap as the chain shows it), `journal.jsonl`
-(baselines, deposits, unexplained differences), `days.json` and `simulate.json`. The job `onchain-live-watch`
+(baselines, deposits, unexplained differences), `days.json`, `simulate.json` and `taken/` (a confirmed
+convert is marked there before it is signed, so a restart never sends it twice; a swap sent but not booked
+before a stop gets an unread ledger row at the next start and is read back from the chain). `--once` only
+checks the gate and writes the status: it never opens the wallet file. The job `onchain-live-watch`
 (`research/ops/onchain_live_watch.py`) checks it every two minutes and posts at once when it is down, hangs,
 does not trade and why, the simulation is about to expire, the ledger differs from the chain, an account is
 frozen or a swap hangs; before the container ever existed it stays quiet.

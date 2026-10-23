@@ -42,6 +42,9 @@ POOL = [A(f"pool account {i}") for i in range(6)]
 USDC, SOL, BTC = M.USDC.mint, M.SOL.mint, M.COINS["BTC"].mint
 ALLOWED = frozenset({USDC, SOL, BTC})
 NOW = 1_792_712_000_000
+JUP_DATA = A("jupiter programdata")
+JUP_SLOT = 300_000_000
+PIN = {"program": G.JUPITER, "programdata": JUP_DATA, "slot": JUP_SLOT, "t": NOW}
 
 
 # ---------------------------------------------------------------- building blocks
@@ -497,10 +500,11 @@ def armed(tmp_path, **env_over):
     (tmp_path / "jupiter.json").write_text(json.dumps(jup_idl()))
     now = int(dt.datetime(2026, 10, 23, 12, tzinfo=dt.timezone.utc).timestamp() * 1000)
     (tmp_path / "sim.json").write_text(json.dumps({"t": now - 3_600_000, "ok": True, "pubkey": W}))
+    (tmp_path / "pin.json").write_text(json.dumps(PIN))
     env = {LG.ENV_LIVE: "1", LG.ENV_KEYPAIR: str(kp), **env_over}
     return LG.Gate(ack_path=tmp_path / "ack", env=env, kill=lambda: False, now_ms=lambda: now,
                    idl_file=tmp_path / "jupiter.json", simulate_file=tmp_path / "sim.json",
-                   pumpfun_wallet_json=tmp_path / "pf_wallet.json")
+                   pumpfun_wallet_json=tmp_path / "pf_wallet.json", pin_file=tmp_path / "pin.json")
 
 
 def test_the_gate_opens_only_when_every_condition_holds(tmp_path):
@@ -591,7 +595,9 @@ class FakeChain:
         self.acc = {W: G.Account(sol, X.SYSTEM, b""), X.ata(W, USDC): tacc(USDC, W, usdc),
                     TABLE: G.Account(1, T.ALT_PROGRAM, alt_data(POOL)),
                     USDC: G.Account(1, X.TOKEN, b"\x00" * 82), SOL: G.Account(1, X.TOKEN, b"\x00" * 82),
-                    BTC: G.Account(1, X.TOKEN, b"\x00" * 82), X.ata(W, BTC): tacc(BTC, W, 1_000)}
+                    BTC: G.Account(1, X.TOKEN, b"\x00" * 82), X.ata(W, BTC): tacc(BTC, W, 1_000),
+                    G.JUPITER: G.Account(1, G.UPGRADEABLE_LOADER, struct.pack("<I", 2) + X.key(JUP_DATA)),
+                    JUP_DATA: G.Account(1, G.UPGRADEABLE_LOADER, struct.pack("<IQ", 3, JUP_SLOT) + b"\x00")}
         for k in POOL:
             self.acc[k] = G.Account(1, DEX, b"pool")
         self.out_raw, self.sim_err, self.land_after, self.drain, self.never_land = out_raw, sim_err, land_after, drain, never_land

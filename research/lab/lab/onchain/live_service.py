@@ -1,7 +1,8 @@
 """The stage-2 on-chain service: the one process that may swap real money in our own Solana wallet. Started by the owner.
 
     python -m lab.onchain.live_service             run until stopped (the container pythia-onchain-live)
-    python -m lab.onchain.live_service --once      check the gate, write the status once, exit
+    python -m lab.onchain.live_service --once      check the gate, write the status once, exit (never opens the
+                                                   wallet file, never swaps: safe next to the running service)
 
 Not a job; nothing starts it automatically (docs/ONCHAIN-STAGE2.md, the owner's steps). With
 any gate shut it still runs, swaps nothing and keeps the app's status current (the reasons, the
@@ -12,7 +13,9 @@ checked again every minute and a shut gate stops every swap at once.
 What it does while on:
   - the owner's converts from the app (reports/onchain_live/convert/): a request gets a proposal
     (a fresh quote within the caps: expected and minimum amount, cost, route), valid for 60 s;
-    only the owner's confirm of exactly that proposal lets it swap, never below its minimum
+    only the owner's confirm of exactly that proposal lets it swap, never below its minimum, and only
+    once: the confirm is taken (live/onchain/taken/<id>) before anything is signed, so neither a
+    restart nor a failed round sends it again
   - a book's targets, only for a book the ack names and the pre-registered proof passed
     (live_gate.book_problems), once per new signal: sales first, then buys
   - on the kill switch with on_kill=usdc in the ack: every coin but SOL sold into USDC
@@ -63,6 +66,24 @@ VALUE_KEEP_MS = 60 * 86_400_000
 
 def convert_dir() -> Path:
     return LG.reports_dir() / "convert"
+
+
+def taken_dir() -> Path:
+    return LG.data_dir() / "taken"
+
+
+def take(cid: str) -> bool:
+    """Take a confirmed convert, once ever: False when it was taken before (the service stopped or a round failed
+    while it was sent). Written in the trader's own folder, where the app cannot write; raises OSError when the
+    mark cannot be written, and then nothing is signed."""
+    d = taken_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        with (d / cid).open("x", encoding="utf-8") as fh:
+            fh.write(str(LX.now_ms()))
+    except FileExistsError:
+        return False
+    return True
 
 
 def _read(p: Path):
@@ -134,9 +155,12 @@ class Service:
 
     # ------------------------------------------------ start and gate
 
-    def start(self) -> None:
+    def start(self, arm: bool = True) -> None:
+        """`arm` False (--once): the gate is checked and the status written, the wallet file is never opened."""
         self.why = self.gate.check()
         signer = None
+        if not arm:
+            self.why.append("a check only (--once): the wallet file is not opened, nothing swaps")
         if not self.why:
             try:
                 signer = self.load(self.gate.env[LG.ENV_KEYPAIR])
@@ -155,6 +179,9 @@ class Service:
             self.trader.signer, self.trader.wallet = signer, signer.pubkey
         self.on = signer is not None and self.trader is not None and not self.why
         if self.on:
+            got = LX.recover()                          # swaps sent before a stop, never booked: read back, never resent
+            if got:
+                print(f"onchain live: {len(got)} swap(s) sent before the stop are read back from the chain", flush=True)
             self.refresh_view()
             if self.view is not None:
                 LX.baseline(self.view)                  # every start: what the wallet holds now is the base
@@ -309,11 +336,20 @@ class Service:
         if prop["status"] == "refused":
             self._result(cid, "refused", prop["why"])
 
+    def _taken_before(self, cid: str) -> None:
+        sig = next((o.get("sig") for o in reversed(LX._read_jsonl(LX.orders_path()))
+                    if o.get("what") == "sent" and o.get("ref") == cid), None)
+        self._result(cid, "failed", "taken before, and the service stopped while it was sent: not sent again; "
+                     "the ledger check reads what the chain did", sig=sig)
+
     def confirmed(self, cid: str, prop: dict, conf: dict) -> None:
         now = LX.now_ms()
         if conf.get("id") != cid or conf.get("proposal_t") != prop.get("t") or \
                 str(conf.get("min_out_raw")) != str(prop.get("min_out_raw")):
             self._result(cid, "refused", "the confirm does not belong to this proposal")
+            return
+        if (taken_dir() / cid).exists():
+            self._taken_before(cid)
             return
         exp = int(prop.get("expires_ms") or 0)
         if int(conf.get("t") or 0) > exp or now > exp + CONFIRM_GRACE_MS:
@@ -321,6 +357,14 @@ class Service:
             return
         if not self.on or self.trader is None:
             self._result(cid, "refused", "the trader is off")
+            return
+        try:
+            fresh = take(cid)
+        except OSError as e:
+            self._result(cid, "failed", f"the confirm could not be marked as taken ({e}); nothing was signed")
+            return
+        if not fresh:
+            self._taken_before(cid)
             return
         self.refresh_view()
         if self.view is None:
@@ -345,6 +389,7 @@ class Service:
                 if now - int(p.stat().st_mtime * 1000) > KEEP_MS:
                     for part in ("request", "proposal", "confirm", "result"):
                         (d / f"{cid}.{part}.json").unlink(missing_ok=True)
+                    (taken_dir() / cid).unlink(missing_ok=True)
                 continue
             req = _read(p)
             if not isinstance(req, dict) or req.get("id") != cid:
@@ -472,8 +517,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--once", action="store_true", help="check the gate, write the status once, exit")
     a = ap.parse_args(argv)
     svc = Service()
-    svc.start()
-    svc.run_books()
+    svc.start(arm=not a.once)
+    svc.run_books()                                      # off (--once): only why each book may or may not trade
     svc.write_status()
     if a.once:
         print(json.dumps({"on": svc.on, "gate": svc.why}, indent=1))
