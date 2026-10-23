@@ -110,7 +110,7 @@ def test_the_y7_strategies_are_what_the_prereg_says():
 
 def test_the_trials_are_counted():
     assert S.EXIT_RUNNER_TRIALS == 6 and len(XL.VARIANTS) == 6
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12
 
 
 def test_every_trail_fires_before_the_stop_once_armed():

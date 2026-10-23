@@ -178,6 +178,8 @@ class Exits:
                                           # window (trades since the landing) exceeds share x its SOL at the landing
     runner: tuple | None = None           # Y11: (share kept, stop under the entry, fall from the high, hard stop s):
                                           # the time stop sells all but the share; the rest exits on its own stops
+    lock: tuple | None = None             # Y12: ((arm gain, floor gain, cumulative share sold), ...), arms rising: once
+                                          # the peak reached 1 + arm, a mark at or under 1 + floor sells to the share
 
 
 # E0, the X14 plan's exit for the early books, and the hazard strategies' fallback before the first retrain.
@@ -388,8 +390,28 @@ def _build_y11() -> list[Strategy]:
     ]
 
 
+def _build_y12() -> list[Strategy]:
+    """Y12 (results/pumpfun_lock_prereg.md): P_pool0_wait with a ratcheting profit floor. Exactly P_pool0_wait's
+    entry, +30 % take profit, -20 % stop and 300 s time stop; once the position's mark has reached an arm, a fall
+    back to that arm's floor sells (all, or for the half variant half at the first floor); 0.1 SOL each."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    wait = {"delay_s": 0, "wait_pool_s": 5}
+    w = "PumpSwap, at the migration or up to 5 s later at the pool's first trade; +30 %, stop -20 %, 300 s"
+    return [
+        _strategy("P_pool0_wait_lock", "E", "migration", wait, {},
+                  dataclasses.replace(pool0, lock=((0.10, 0.02, 1.0), (0.20, 0.10, 1.0))),
+                  f"{w}; once +10 % out at +2 %, once +20 % out at +10 %", stake_sol=0.1),
+        _strategy("P_pool0_wait_lock_tight", "E", "migration", wait, {},
+                  dataclasses.replace(pool0, lock=((0.08, 0.03, 1.0), (0.15, 0.09, 1.0))),
+                  f"{w}; once +8 % out at +3 %, once +15 % out at +9 %", stake_sol=0.1),
+        _strategy("P_pool0_wait_lock_half", "E", "migration", wait, {},
+                  dataclasses.replace(pool0, lock=((0.10, 0.02, 0.5), (0.20, 0.10, 1.0))),
+                  f"{w}; once +10 % half out at +2 %, once +20 % the rest out at +10 %", stake_sol=0.1),
+    ]
+
+
 STRATEGIES: list[Strategy] = (_build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
-                              + _build_y10() + _build_y11())
+                              + _build_y10() + _build_y11() + _build_y12())
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -852,6 +874,7 @@ class Pipeline:
             else:
                 rn["got_l"] += got_l
                 rn["fee_l"] += fee_l
+        p.pop("lock_part", None)
         p["left"] -= tokens
         p["proceeds_l"] += got_l
         p["fees_l"] += fee_l
@@ -880,6 +903,9 @@ class Pipeline:
         part = p.pop("run_part", None)
         if part is not None and not p.get("exiting") and "due" not in p:
             return self._run_sell(p, at, part)                # Y11: the time stop's 80 % must go through too
+        part = p.pop("lock_part", None)
+        if part is not None and not p.get("exiting") and "due" not in p:
+            return self._lock_sell(p, at, part)               # Y12: a floor's partial sale goes through too
         if p.get("exiting"):
             # A protective exit must go through: it is sent again at once. The live executor holds it back
             # for its backoff (1, 2, 4 ... 60 s) and gives up after a cap; the paper executor fills it.
@@ -992,6 +1018,8 @@ class Pipeline:
                 return None                               # the models decide; no price exits (plan section 2)
         if mult <= 1 - ex.sl:
             return self._sell_all(p, t, "stop")
+        if ex.lock is not None and self._lock(p, t, mult, ex.lock):
+            return None
         if ex.trail_after is not None and p["peak"] >= 1 + ex.trail_after and mult <= p["peak"] * (1 - ex.trail_gap):
             return self._sell_all(p, t, "trail")
         if ex.press_exit is not None and tok is not None and press_trigger(tok, t, p["land_ms"], *ex.press_exit,
@@ -1009,6 +1037,29 @@ class Pipeline:
                 return self._sell(p, t, amount, int(TP_FLOOR * exp), "take")
             return self._sell(p, t, amount, int(TP_FLOOR * exp), "take_part")
         return None
+
+    def _lock(self, p: dict, t: float, mult: float, lock: tuple) -> bool:
+        """Y12's profit floor: the highest arm the peak has reached decides; a mark at or under its floor sells down
+        to its share (all with min_out 0 as the stop, or a part, min_out 0 too). False when nothing is left to sell."""
+        armed = [x for x in lock if p["peak"] >= 1 + x[0]]
+        if not armed or mult > 1 + armed[-1][1]:
+            return False
+        share = armed[-1][2]
+        amount = p["left"] - (0 if share >= 1 else int(p["tokens"] * (1 - share)))
+        if amount <= 0:
+            return False
+        p.setdefault("lock_ms", int(t))
+        p["lock_sales"] = p.get("lock_sales", 0) + 1
+        if amount >= p["left"]:
+            self._sell_all(p, t, "lock")
+        else:
+            self._lock_sell(p, t, amount)
+        return True
+
+    def _lock_sell(self, p: dict, t: float, amount: int) -> None:
+        """Y12: a floor's partial sale, min_out 0; the rest keeps every exit."""
+        p["lock_part"] = amount
+        self._sell(p, t, amount, 0, "lock_part")
 
     def _time_stop(self, at: float, pid: int) -> None:
         p = self.pos.get(pid)
@@ -1159,6 +1210,8 @@ class Pipeline:
             rec.update(run_from_ms=rn["from_ms"], run_high=rn["high"], run_cost_sol=rest_cost / C.LAMPORTS,
                        run_pnl_sol=(rn["got_l"] - rn["fee_l"] - rest_cost) / C.LAMPORTS,
                        run_vs_time_sol=(rn["got_l"] - rn["fee_l"] - pro_rata) / C.LAMPORTS)
+        if p.get("lock_ms") is not None:                  # Y12: only where a floor fired
+            rec.update(lock_ms=p["lock_ms"], lock_sales=p["lock_sales"], peak=p["peak"])
         self.closed.append(rec)
         if self.record:
             eng.closed.append(rec)
