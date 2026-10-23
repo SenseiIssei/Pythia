@@ -174,6 +174,8 @@ class Exits:
     risk: tuple | None = None             # (label, multiple of its base rate) for the risk-model exit
     hazard: bool = False                  # X14: the hazard exit HZ(k*) replaces the price exits when its models exist
     time_after_step_s: float | None = None  # Y7: once a ladder step has filled, the time stop is landing + this
+    press_exit: tuple | None = None       # Y8: (window s, share): sell all when the pool's net SOL outflow over the
+                                          # window (trades since the landing) exceeds share x its SOL at the landing
 
 
 # E0, the X14 plan's exit for the early books, and the hazard strategies' fallback before the first retrain.
@@ -202,9 +204,9 @@ class EarlyStrategy(Strategy):
         return True
 
 
-def _strategy(name, family, entry, p, flt, exits: Exits, label) -> Strategy:
+def _strategy(name, family, entry, p, flt, exits: Exits, label, stake_sol: float = S.STAKE_SOL) -> Strategy:
     return Strategy(name, family, entry, exits.ladder[-1][0] if exits.ladder else 0.0, exits.sl, exits.time_s,
-                    p, label, exits=exits, flt=flt)
+                    p, label, exits=exits, flt=flt, stake_sol=stake_sol)
 
 
 def _build() -> list[Strategy]:
@@ -287,7 +289,30 @@ def _build_y7() -> list[Strategy]:
     ]
 
 
-STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6() + _build_y7()
+def _build_y8() -> list[Strategy]:
+    """Y8 (results/pumpfun_exits_y8_prereg.md): P_pool0 with a -10 % stop, a sell-pressure exit (the pool's net
+    SOL outflow over 5 s above 8 % of its SOL at our landing), and an entry that waits up to 5 s for the pool's
+    first trade when its state is not known at the migration (p["wait_pool_s"]); 0.1 SOL each."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    sl10 = dataclasses.replace(pool0, sl=0.10)
+    press = dataclasses.replace(pool0, press_exit=(5.0, 0.08))
+    at, wait = {"delay_s": 0}, {"delay_s": 0, "wait_pool_s": 5}
+    w = "PumpSwap, at the migration or up to 5 s later at the pool's first trade"
+    return [
+        _strategy("P_pool0_sl10", "E", "migration", at, {}, sl10,
+                  "PumpSwap, at the migration (as P_pool0); +30 %, stop -10 %, 300 s", stake_sol=0.1),
+        _strategy("P_pool0_press", "E", "migration", at, {}, press,
+                  "as P_pool0; sell all on a net pool outflow over 5 s above 8 % of the pool's SOL at entry",
+                  stake_sol=0.1),
+        _strategy("P_pool0_wait", "E", "migration", wait, {}, pool0, f"{w}; +30 %, stop -20 %, 300 s", stake_sol=0.1),
+        _strategy("P_pool0_wait_press", "E", "migration", wait, {}, press, f"{w}; exits as P_pool0_press",
+                  stake_sol=0.1),
+        _strategy("P_pool0_wait_sl10", "E", "migration", wait, {}, sl10, f"{w}; +30 %, stop -10 %, 300 s",
+                  stake_sol=0.1),
+    ]
+
+
+STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6() + _build_y7() + _build_y8()
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -406,6 +431,15 @@ def dev_sell_trigger(tok, user: str, tok_amt: int) -> bool:
     return user in tok.devs and tok_amt >= DEV_SELL_FRAC * (tok.dev_hold() + tok_amt)
 
 
+def press_trigger(tok, t: float, since: float, window_s: float, share: float, ref_l: int) -> bool:
+    """Y8's sell pressure: the pool's net SOL outflow (sells minus buys) over (t - window, t], counting only
+    trades at or after `since` (our landing), above share x ref_l (the pool's SOL at our landing). The window
+    must fit the token's 10 s pool window (tokens.WINDOW_MS)."""
+    lo = t - window_s * 1000
+    out = sum(before - after for ts, after, before in tok.amm_win if lo < ts <= t and ts >= since)
+    return ref_l > 0 and out > share * ref_l
+
+
 def pull_trigger(tok, t: float, user: str, tok_amt: int, venue: str) -> bool:
     """A liquidity pull (called after the sale): a top-10 holder sold 2 % of the supply at once, or the
     curve's SOL (the pool's) fell 15 % within 2 s."""
@@ -460,6 +494,7 @@ class Pipeline:
         self.closed: list[dict] = []
         self.failed: list[dict] = []
         self.flattened = False
+        self.waiting: dict[str, dict] = {}    # Y8: mint -> {strategy: signal time + wait_pool_s} until a pool trade
 
     def strat_of(self, pid: int) -> Strategy:
         return self.strats[self.pos[pid]["rule"]]
@@ -483,6 +518,8 @@ class Pipeline:
                 eng.skipped[(s.name, "not a plain SOL pool")] += 1
                 return
             if not tok.pq or not tok.pb:
+                if s.p.get("wait_pool_s"):
+                    return self._wait_pool(s, tok, t)
                 eng.skipped[(s.name, "no pool state")] += 1
                 return
         elif not tok.tradeable() or not tok.on_curve:
@@ -545,6 +582,22 @@ class Pipeline:
         self._event("buy_sent", self.pos[pid], order=o)
         self.exec.buy(o)
 
+    def _wait_pool(self, s: Strategy, tok, t: float) -> None:
+        """Y8: no pool state at the signal: the signal is given again at the pool's first trade if that comes
+        within wait_pool_s, else it is skipped for "no pool state" then."""
+        until = t + s.p["wait_pool_s"] * 1000
+        self.waiting.setdefault(tok.mint, {})[s.name] = until
+        self.eng.push(until, "pipe", (self, "_wait_over", (tok.mint, s.name)))
+
+    def _wait_over(self, at: float, data) -> None:
+        mint, name = data
+        w = self.waiting.get(mint)
+        if w is None or w.pop(name, None) is None:
+            return
+        if not w:
+            self.waiting.pop(mint, None)
+        self.eng.skipped[(name, "no pool state")] += 1
+
     def model_ok(self, spec: dict, f: dict) -> tuple[bool | None, float | None]:
         """Every model criterion of the filter: ("min", k) needs p >= k x base, ("max", k) p <= k x base.
         (None, None) when a model it needs is missing."""
@@ -600,6 +653,8 @@ class Pipeline:
         p.update(state="open", tokens=tokens, left=tokens, cost_l=cost_l, fees_l=p["fees_l"] + fee_l,
                  land_ms=int(at), entry_price=(cost_l / C.LAMPORTS) / (tokens / C.TOKEN_UNIT))
         self.risk[s.name].hold(pid, cost_l + fee_l)
+        if s.exits.press_exit is not None:
+            p["entry_pq"] = tok.pq if tok is not None and not tok.on_curve else 0
         tracker = getattr(self.eng, "early", None)
         if tracker is not None and tracker.rows_on:             # the study: the best exit afterwards (capture)
             tracker.watch_max(self.name, pid, p["mint"], tokens, cost_l + fee_l, at)
@@ -673,7 +728,16 @@ class Pipeline:
 
     # ------------------------------------------------------------ exits
     def on_trade(self, tok, t: float, buy: bool, user: str, tok_amt: int, venue: str) -> None:
-        """Every trade of a token with open positions: the event-driven exits first, then the price ones."""
+        """Every trade of a token with open positions: the event-driven exits first, then the price ones. A
+        signal waiting for the pool's state (Y8) is given again at the first pool trade that brings it."""
+        w = self.waiting.get(tok.mint) if self.waiting else None
+        if w and venue == "pool" and tok.pq and tok.pb:
+            for name, until in list(w.items()):
+                if t <= until:
+                    del w[name]
+                    self.signal(self.strats[name], tok, t)
+            if not w:
+                self.waiting.pop(tok.mint, None)
         pids = self.by_mint.get(tok.mint)
         if not pids:
             return
@@ -754,6 +818,9 @@ class Pipeline:
             return self._sell_all(p, t, "stop")
         if ex.trail_after is not None and p["peak"] >= 1 + ex.trail_after and mult <= p["peak"] * (1 - ex.trail_gap):
             return self._sell_all(p, t, "trail")
+        if ex.press_exit is not None and tok is not None and press_trigger(tok, t, p["land_ms"], *ex.press_exit,
+                                                                            p.get("entry_pq", 0)):
+            return self._sell_all(p, t, "press")
         while p["step"] < len(ex.ladder) and mult >= 1 + ex.ladder[p["step"]][0]:
             gain, share = ex.ladder[p["step"]]
             target_left = 0 if share >= 1 else int(p["tokens"] * (1 - share))

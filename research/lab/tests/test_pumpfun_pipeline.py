@@ -56,12 +56,14 @@ def test_the_registered_strategies_are_what_the_plan_says():
                                               "P_p80_smart", "P_pool60", "P_cmig_model", "P_early10", "P_early30",
                                               "P_press10_hz", "P_pool60_hz", "P_pool0", "P_pool0_half_trail",
                                               "P_pool0_ladder3", "P_pool0_trail", "P_pool0_half_trail_guard",
-                                              "P_pool0_half_trail_ext"]
+                                              "P_pool0_half_trail_ext", "P_pool0_sl10", "P_pool0_press",
+                                              "P_pool0_wait", "P_pool0_wait_press", "P_pool0_wait_sl10"]
     assert S.N_TRIALS == (len(S.RULES) + 1 + S.PIPELINE_TRIALS + S.X14_TRIALS + S.SPEED_TRIALS
-                          + S.REAL_LATENCY_TRIALS + S.POOL0_TRIALS + S.EXIT_RUNNER_TRIALS)
+                          + S.REAL_LATENCY_TRIALS + S.POOL0_TRIALS + S.EXIT_RUNNER_TRIALS + S.EXITS_Y8_TRIALS)
     # P_pool0 copies E_d0_x1's exits exactly, without the dev-sell and pull exits; of Y7's variants on it only
-    # the guard has them
-    no_guard = {"P_pool0", "P_pool0_half_trail", "P_pool0_ladder3", "P_pool0_trail", "P_pool0_half_trail_ext"}
+    # the guard has them, and none of Y8's
+    no_guard = {"P_pool0", "P_pool0_half_trail", "P_pool0_ladder3", "P_pool0_trail", "P_pool0_half_trail_ext",
+                "P_pool0_sl10", "P_pool0_press", "P_pool0_wait", "P_pool0_wait_press", "P_pool0_wait_sl10"}
     for s in P.STRATEGIES:
         assert isinstance(s, S.Rule) and P.is_strategy(s)
         assert s.exits.ladder[-1][1] == 1.0 and 0 < s.exits.sl < 1 and s.exits.time_s > 0

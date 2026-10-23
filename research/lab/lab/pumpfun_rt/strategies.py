@@ -132,8 +132,11 @@ POOL0_TRIALS = 1
 # Y7 (results/pumpfun_exit_runners_prereg.md): five new exits on P_pool0's entry (pipeline._build_y7) and P_pool0
 # itself judged again at the latency measured since the Sender path, six books at the judged latency.
 EXIT_RUNNER_TRIALS = 6
+# Y8 (results/pumpfun_exits_y8_prereg.md): P_pool0 with a -10 % stop, a sell-pressure exit, an entry that waits up to
+# 5 s for the pool's state, and the two combinations (pipeline._build_y8), five more.
+EXITS_Y8_TRIALS = 5
 N_TRIALS = (len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS + SPEED_TRIALS
-            + REAL_LATENCY_TRIALS + POOL0_TRIALS + EXIT_RUNNER_TRIALS)
+            + REAL_LATENCY_TRIALS + POOL0_TRIALS + EXIT_RUNNER_TRIALS + EXITS_Y8_TRIALS)
 # The rule the shadow book runs until the study has picked one (pick.json).
 DEFAULT_PICK = "C_20in60_x1"
 # The model filter: enter only when the calibrated probability that this entry,

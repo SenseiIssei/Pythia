@@ -80,7 +80,9 @@ def closed(eng, name) -> dict:
 
 def test_the_y7_strategies_are_what_the_prereg_says():
     names = [n for _, n in XL.VARIANTS]
-    assert names[0] == "P_pool0" and [s.name for s in P.STRATEGIES][-5:] == names[1:]
+    all_names = [s.name for s in P.STRATEGIES]
+    i = all_names.index("P_pool0")
+    assert names[0] == "P_pool0" and all_names[i + 1:i + 6] == names[1:]
     base = P.BY_NAME["P_pool0"]
     for n in names[1:]:
         s = P.BY_NAME[n]
@@ -108,7 +110,7 @@ def test_the_y7_strategies_are_what_the_prereg_says():
 
 def test_the_trials_are_counted():
     assert S.EXIT_RUNNER_TRIALS == 6 and len(XL.VARIANTS) == 6
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5
 
 
 def test_every_trail_fires_before_the_stop_once_armed():

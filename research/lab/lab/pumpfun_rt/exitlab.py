@@ -88,8 +88,9 @@ def sender_fills(rows: list[dict], since_ms: int = SENDER_FROM_MS, until_ms: int
     return buys, sells
 
 
-def scenarios(buy_ms=SENDER_BUY_MS, sell_ms=SENDER_SELL_MS) -> dict[str, C.Costs]:
-    prio = RL.priority_for(TX_FEE_SOL + TIP_SOL)
+def scenarios(buy_ms=SENDER_BUY_MS, sell_ms=SENDER_SELL_MS,
+              fee_sol: float = TX_FEE_SOL + TIP_SOL) -> dict[str, C.Costs]:
+    prio = RL.priority_for(fee_sol)
     fast = RL.Lognormal(RL.FAST["median_ms"], RL.FAST["sigma"], RL.FAST["lo_ms"], RL.FAST["hi_ms"])
     lo, hi = RL.CLIP_MS
     return {
@@ -117,9 +118,16 @@ class PeakPipe(P.Pipeline):
         before = self.eng.next_pid
         n0 = {w: c for (n, w), c in self.eng.skipped.items() if n == s.name}
         super().signal(s, tok, t)
-        if self.eng.next_pid == before:
+        if self.eng.next_pid == before and s.name not in self.waiting.get(tok.mint, ()):
             why = next((w for (n, w), c in self.eng.skipped.items() if n == s.name and c > n0.get(w, 0)), "?")
             self.skips.append((int(t), why))
+
+    def _wait_over(self, at: float, data) -> None:
+        """Y8: a signal that waited for the pool's state in vain is a skip at the end of its wait."""
+        n = self.eng.skipped[(data[1], "no pool state")]
+        super()._wait_over(at, data)
+        if self.eng.skipped[(data[1], "no pool state")] > n:
+            self.skips.append((int(at), "no pool state"))
 
     def bought(self, pid: int, at: float, tokens: int, cost_l: int, fee_l: int) -> None:
         p = self.pos.get(pid)
@@ -300,8 +308,10 @@ def calibrate(res: dict, live: list[dict]) -> list[dict]:
 
 # ---------------------------------------------------------------- the run
 
-def run(root=None, until_ms: int = UNTIL_MS, buy_ms=SENDER_BUY_MS, sell_ms=SENDER_SELL_MS, log=print) -> dict:
-    """The six books under both scenarios in one replay of the record up to until_ms; entries stop TAIL_MS before."""
+def run(root=None, until_ms: int = UNTIL_MS, buy_ms=SENDER_BUY_MS, sell_ms=SENDER_SELL_MS, log=print,
+        books_costs=None, limits: P.Limits = LIMITS, tail_ms: int = TAIL_MS) -> dict:
+    """The six books under both scenarios in one replay of the record up to until_ms; entries stop tail_ms before.
+    books_costs (Y8): other books and their costs, `<name>@<scenario>`, at other limits."""
     from . import early as EA
     from . import sim, store
     from . import wallets as W
@@ -314,20 +324,20 @@ def run(root=None, until_ms: int = UNTIL_MS, buy_ms=SENDER_BUY_MS, sell_ms=SENDE
     warm = [d for d in all_days if d < days[0]][-WARM_DAYS:]
     t_lo, t_hi = span_of(days, root)
     t_hi = min(t_hi, until_ms)
-    entry_until = t_hi - TAIL_MS
+    entry_until = t_hi - tail_ms
     split = t_lo + (t_hi - t_lo) // 2                       # as Y5: the middle of the record's time span
     log(f"exitlab: {len(days)} day(s) {days[0]} to {days[-1]}, record to "
         f"{datetime.fromtimestamp(t_hi / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC, entries to "
         f"{datetime.fromtimestamp(entry_until / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC, split at "
         f"{datetime.fromtimestamp(split / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC, warm-up {len(warm)} day(s)")
     t0 = time.time()
-    strats, costs = books()
-    if (tuple(buy_ms), tuple(sell_ms)) != (SENDER_BUY_MS, SENDER_SELL_MS):
+    strats, costs = books_costs or books()
+    if books_costs is None and (tuple(buy_ms), tuple(sell_ms)) != (SENDER_BUY_MS, SENDER_SELL_MS):
         sc = scenarios(buy_ms, sell_ms)
         costs = {n: sc[n.split("@")[1]] for n in costs}
     eng = sim.Engine([], book=warm_book(warm, root), decisions=False, rule_costs=costs, entry_until=entry_until,
                      wallets=W.warm(warm, root), snipers=EA.warm_snipers(warm, root))
-    pipes = {s.name: eng.add_pipe(PeakPipe(eng, [s], P.PaperExecutor(), limits=LIMITS, name=s.name))
+    pipes = {s.name: eng.add_pipe(PeakPipe(eng, [s], P.PaperExecutor(), limits=limits, name=s.name))
              for s in strats}
     sim.replay(days, eng, root, until_ms=t_hi)
     for pipe in pipes.values():
