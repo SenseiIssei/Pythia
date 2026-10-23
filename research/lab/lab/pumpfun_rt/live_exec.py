@@ -142,6 +142,7 @@ ENV_KEYPAIR = "PYTHIA_PUMPFUN_KEYPAIR"
 ENV_RPC = "PYTHIA_PUMPFUN_RPC"
 CHAIN_EVERY_S = 60.0                     # how often closed trades are checked against the chain
 FAIL_CARD_EVERY_S = 60.0                 # at most one failure card a minute per position
+SKIP_KEEP = 5_000                        # coins remembered as skipped (one log line each)
 ORPHAN_AFTER_MS = 600_000                # an unknown token held this long is a late buy: sell it
 HOLDINGS_FRESH_MS = 60_000               # orphans are adopted only from a holdings read this young
 LANDED_GRACE_MS = 5_000                  # a landed order whose stream fill has not come this long is read back
@@ -2513,6 +2514,83 @@ def last_buy_order(mint: str) -> dict | None:
     return None
 
 
+def write_skip(rec: dict) -> None:
+    """One coin the live strategy did not buy and why: data_dir()/skipped.jsonl, read by paper_match."""
+    try:
+        d = data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "skipped.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except OSError as e:
+        print(f"live: skip not written ({e})", flush=True)
+
+
+def _jsonl(path: Path) -> list[dict]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(j, dict):
+            out.append(j)
+    return out
+
+
+MATCH_SLACK_MS = 600_000                 # a live order or skip this long after the window still counts for it
+
+
+def paper_match(t0: int, t1: int, rule: str | None = None, paper: Path | None = None) -> dict:
+    """The live book against its paper twin from t0 to t1 (ms): the coins the paper book of the live strategy
+    entered then (a closed trade or a failed buy in live.py's ledger.csv and failed.csv, by signal time), the
+    coins the live book sent a buy for (orders.jsonl), the coins both took, every paper entry the live book
+    missed by its reason (skipped.jsonl; "no record" when the service was not running or never saw the coin)
+    and the live entries the paper book did not take. The rule is the live status's unless given."""
+    if rule is None:
+        rule = (read_json(status_path()) or {}).get("rule")
+    if paper is None:
+        from .live import paper_dir
+        paper = paper_dir()
+    pe: set[str] = set()
+    for name in ("ledger.csv", "failed.csv"):
+        try:
+            with (paper / name).open(newline="", encoding="utf-8") as fh:
+                for r in csv.DictReader(fh):
+                    try:
+                        t = float(r.get("signal_ms") or "nan")
+                    except ValueError:
+                        continue
+                    if r.get("rule") == rule and t0 <= t < t1 and r.get("mint"):
+                        pe.add(r["mint"])
+        except OSError:
+            pass
+    le = {o["mint"] for o in _jsonl(data_dir() / "orders.jsonl")
+          if o.get("what") == "sent" and o.get("side") == "buy" and o.get("mint")
+          and t0 <= (o.get("t") or 0) < t1 + MATCH_SLACK_MS}
+    why = {}
+    for k in _jsonl(data_dir() / "skipped.jsonl"):
+        if k.get("rule") == rule and t0 <= (k.get("t") or 0) < t1 + MATCH_SLACK_MS:
+            why.setdefault(k.get("mint"), k.get("why") or "?")
+    missed = collections.Counter(why.get(m, "no record") for m in pe - le)
+    return {"rule": rule, "from_ms": t0, "to_ms": t1, "paper": len(pe), "live": len(le),
+            "matched": len(pe & le), "missed": dict(missed.most_common()), "live_only": len(le - pe)}
+
+
+def match_line(m: dict) -> str:
+    """The daily report's line for paper_match."""
+    if m.get("error"):
+        return f"Live against paper not computed ({m['error']})."
+    if not m.get("rule"):
+        return "No live book has run."
+    missed = ", ".join(f"{k} {v}" for k, v in m["missed"].items()) or "none"
+    return (f"Live against paper ({m['rule']}): the paper book entered {m['paper']} coins, the live book {m['live']}; "
+            f"{m['matched']} matched; missed: {missed}; live only: {m['live_only']}.")
+
+
 def day_pnl_from_ledger(day: int) -> int:
     """The realised P&L (lamports) of UTC day `day` (days since 1970): the trades that closed that day and
     the journal's amounts of that day (realised)."""
@@ -2641,6 +2719,7 @@ class LiveBook:
         self.day_stats = {"n": 0, "wins": 0, "pnl_sol": 0.0, "failed": 0}
         self.fail_posted: dict[tuple, float] = {}
         self.orphan_seen: dict[str, int] = {}          # mint -> the holdings read that first showed it unknown
+        self.skip_seen: collections.OrderedDict = collections.OrderedDict()   # coins skipped (one log line each)
         self.last_limits = -1e18
         executor.on_stop = self.on_stop
         executor.on_leftover = self.on_leftover
@@ -2692,7 +2771,10 @@ class LiveBook:
         if kind not in ("bought", "sold", "closed", "buy_failed", "sell_failed"):
             return
         if kind == "buy_failed" and str(kw.get("why", "")).startswith("refused"):
-            return                                         # a refusal by the caps is not a trade
+            if self.pipe is not None:                      # a refusal by the caps is not a trade, but a skip
+                self.pipe.eng.skipped[(self.rule, str(kw["why"]))] += 1
+            self.on_skip(self.rule, p.get("mint") or "", str(kw["why"]))
+            return
         if kind in ("buy_failed", "sell_failed"):
             self.day_stats["failed"] += 1
             key = (kind, p.get("pid"))
@@ -2703,6 +2785,18 @@ class LiveBook:
         meas = dict(self.exec.meas.get(p.get("pid")) or {}) if kind in ("bought", "sold") else None
         day = self.exec.day_pnl_l / C.LAMPORTS
         self._post(lambda lang: [_trade_card(kind, dict(p), dict(kw), lang, day, self.exec.mode, meas)])
+
+    def on_skip(self, name: str, mint: str, why: str) -> None:
+        """A coin the live strategy did not buy (pipeline.skip, a refusal, the service's "creation not seen"):
+        one log line and one row in skipped.jsonl per coin, its first reason, so a coin the paper book took
+        has the reason the live book did not (paper_match)."""
+        if name != self.rule or not mint or mint in self.skip_seen:
+            return
+        self.skip_seen[mint] = None
+        if len(self.skip_seen) > SKIP_KEEP:
+            self.skip_seen.popitem(last=False)
+        print(f"live: skipped {mint[:8]}: {why}", flush=True)
+        write_skip({"t": int(time.time() * 1000), "mint": mint, "rule": name, "why": why, "run": RUN_ID})
 
     def on_stop(self, kind: str, lost_sol: float) -> None:
         lim = self.exec.limits.max_daily_loss_sol if kind == "daily" else (self.exec.max_total_l or 0) / C.LAMPORTS
@@ -3038,6 +3132,7 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
     pipe = P.Pipeline(engine, [s], ex, limits=lim, name="live", record=False, on_close=book.on_close,
                       on_event=book.on_event, kill=P.KillSwitch(live_kill_paths()))
     book.pipe = pipe
+    pipe.on_skip = book.on_skip                            # every coin not bought: a reason and a log line
     engine.add_pipe(pipe)
     if wallet:
         ex.set_limits(lim, total)                          # the pipeline's Risk takes them uncapped too

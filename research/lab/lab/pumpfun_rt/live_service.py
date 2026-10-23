@@ -30,6 +30,13 @@ It reads reports/pumpfun_rt/live_settings.json (the app's lower limits) every
 minute and reports/pumpfun_rt/control.json (the owner's share and pause from the app, live_exec.Control)
 every 2 s; a change is in the status at once. It never opens the wallet file itself (live_exec does, once, after
 every gate holds); it never sends money anywhere.
+
+Decisions as the paper book's on the same events: a copy of a transaction with fewer log lines than a later one
+(a provider next to the public endpoint) does not hide the later one's events (LiveCollector); a row of a coin the
+engine does not know yet waits HOLD_MS for the coin's creation (the links race: a coin made and migrated in one
+slot often has its migration first); the coins the collector wrote after the start are adopted once more after
+REWARM_S. Every coin the live strategy does not buy has its reason in the status ("skipped") and one log line
+(live_exec.LiveBook.on_skip, data/live/pumpfun_rt/skipped.jsonl).
 """
 
 from __future__ import annotations
@@ -44,7 +51,9 @@ import time
 
 from . import events as E
 from . import live_exec as LX
+from . import pipeline as P
 from . import store
+from .collector import Collector
 from .live_feed import LiveFeed
 
 STATUS_S = 30.0
@@ -54,6 +63,10 @@ REPORT_S = 600.0
 WARM_H = 12                                             # coins created this long before a start are adopted
 LINKS = max(1, int(os.environ.get("PYTHIA_PF_LIVE_LINKS", "2")))
 AMM_LINKS = max(1, int(os.environ.get("PYTHIA_PF_LIVE_AMM_LINKS", "2")))
+HOLD_MS = 120_000                                       # rows of a coin not known yet wait this long for its creation
+HOLD_TABLES = ("trades", "amm", "other")
+TRUNCATED = "Log truncated"                             # the runtime's last line when a transaction's logs were cut
+REWARM_S = 90.0                                         # the collector writes every 60 s: adopt once more after that
 
 
 def load_engine():
@@ -86,18 +99,59 @@ def load_engine():
     return Engine([], book=book, wallets=wallets, cats=cats, models=models, decisions=False)
 
 
-def warm_tokens(engine, now_ms: int, hours: float = WARM_H, root=None) -> int:
-    """Adopt every coin the collector recorded as created in the last `hours`: the engine only knows coins
-    it saw created, so after a restart it would not see the migration of an older one (P_pool0 buys at
-    the migration, mostly of coins made hours before). Returns how many were adopted."""
+def recent_creates(now_ms: int, hours: float = WARM_H, root=None) -> list[dict]:
+    """The create rows the collector recorded in the last `hours`, oldest first."""
     import datetime as dt
     days = sorted({(dt.datetime.fromtimestamp(now_ms / 1000, dt.timezone.utc) - dt.timedelta(hours=h))
                    .strftime("%Y-%m-%d") for h in (hours, 0)})
     df = store.read("creates", days, root)
     if df.is_empty():
-        return 0
-    df = df.filter(df["t"] >= now_ms - int(hours * 3_600_000)).sort("t")
-    return sum(1 for r in df.iter_rows(named=True) if engine.adopt(r, now_ms))
+        return []
+    return list(df.filter(df["t"] >= now_ms - int(hours * 3_600_000)).sort("t").iter_rows(named=True))
+
+
+def warm_tokens(engine, now_ms: int, hours: float = WARM_H, root=None) -> int:
+    """Adopt every coin the collector recorded as created in the last `hours`: the engine only knows coins
+    it saw created, so after a restart it would not see the migration of an older one (P_pool0 buys at
+    the migration, mostly of coins made hours before). Returns how many were adopted."""
+    return sum(1 for r in recent_creates(now_ms, hours, root) if engine.adopt(r, now_ms))
+
+
+class LiveCollector(Collector):
+    """The collector's decoding with a duplicate filter by events, not by signature alone. A transaction comes
+    over every link; with a provider next to the public endpoint the first copy can be a short one (its logs
+    cut off or missing), and taking its signature as seen dropped the full copy with the creation or the
+    migration in it, without a trace. A later copy with more log lines hands on only the events past those the
+    first copy gave (under the transaction's own number); an equal or shorter one is a duplicate as before."""
+
+    def handle_tx(self, slot: int, sig: str, failed: bool, logs: list[str], recv_ms: int, src: str = "ws") -> int:
+        had = None if failed else self.sigs.get(sig)       # (log lines, tx number, feed) of the copy taken
+        lines = len(logs) - (1 if logs and logs[-1] == TRUNCATED else 0)
+        if had is None or lines <= had[0]:
+            new = not failed and sig not in self.sigs
+            tx = self.tx
+            kept = super().handle_tx(slot, sig, failed, logs, recv_ms, src)
+            if new:
+                self.sigs[sig] = (lines, self.tx if self.tx != tx else None, src)
+            return kept
+        n, tx0, first = had
+        self.counts["short_copy"] += 1
+        if self.counts["short_copy"] <= 5:
+            print(f"live service: a copy from {first} had {n} of {lines} log lines; the events it lacked "
+                  f"came from {src}", flush=True)
+        # the data lines the first copy had are left out (the invoke lines stay): only the new events decode
+        rest = [x for x in logs[:n] if not x.startswith("Program data:")] + logs[n:]
+        del self.sigs[sig]
+        tx = self.tx
+        if tx0 is not None:
+            self.tx = tx0 - 1
+        kept = super().handle_tx(slot, sig, failed, rest, recv_ms, src)
+        if tx0 is None:                                      # the first copy had no events: these got a new number
+            tx0 = self.tx if self.tx != tx else None
+        else:
+            self.tx = tx
+        self.sigs[sig] = (lines, tx0, first)
+        return kept
 
 
 class Service:
@@ -122,6 +176,7 @@ class Service:
         self.book_sig = None
         self.feed_err = False
         self.wake: asyncio.Event | None = None              # speed.wake: a worker result ends the wait at once
+        self.held: dict[str, list] = {}                     # mint -> [(monotonic s, table, row)] until its creation
 
     def arm_wake(self, loop) -> bool:
         """With the owner's speed setting `wake`: every result of the executor's threads (a send's answer, a
@@ -180,8 +235,50 @@ class Service:
 
     # ------------------------------------------------------------ the stream
     def on_row(self, table: str, row: dict) -> None:
+        """A row from the stream. A row of a coin the engine does not know yet waits up to HOLD_MS for its
+        creation and follows it then: the links race, and a migration that came before the creation (the coin
+        made and migrated in one slot, the creation late on a slow link) was dropped by the engine for good."""
         if self.book is None:
             return
+        mint = row.get("mint")
+        if table in HOLD_TABLES and mint and mint not in self.engine.tokens:
+            self.held.setdefault(mint, []).append((time.monotonic(), table, row))
+            return
+        self._feed(table, row)
+        if table == "creates" and mint in self.held:
+            self.release([mint])
+
+    def release(self, mints) -> None:
+        """The held rows of these coins, in the order they came, once the engine knows the coin."""
+        for m in mints:
+            for _, table, row in self.held.pop(m, ()):
+                self._feed(table, row)
+
+    def purge(self) -> None:
+        """Held rows older than HOLD_MS are dropped (trades of coins made before the adopted hours, mostly); a
+        migration among them is a skip of a migration strategy, "creation not seen", with its log line."""
+        cut = time.monotonic() - HOLD_MS / 1000
+        old = []
+        for m, rows in self.held.items():                   # in the order their first row came
+            if rows[0][0] >= cut:
+                break
+            old.append(m)
+        rule = self.book.rule if self.book is not None else None
+        entry = getattr(P.BY_NAME.get(rule), "entry", None)
+        for m in old:
+            rows = self.held.pop(m)
+            if entry == "migration" and any(t == "other" and r.get("kind") == "migrate" for _, t, r in rows):
+                self.engine.skipped[(rule, "creation not seen")] += 1
+                self.book.on_skip(rule, m, "creation not seen")
+
+    def rewarm(self, rows: list[dict], now_ms: int) -> int:
+        """Adopt the coins the collector wrote after the start (made in the minute before it) and feed what
+        was held for them."""
+        n = sum(1 for r in rows if self.engine.adopt(r, now_ms))
+        self.release([m for m in list(self.held) if m in self.engine.tokens])
+        return n
+
+    def _feed(self, table: str, row: dict) -> None:
         from .sim import feed_row
         feed_row(self.engine, table, row)
         try:
@@ -200,6 +297,7 @@ class Service:
                 self.last["gate"] = time.monotonic()
                 self.why = self.gate.check()
             return
+        self.purge()
         self.engine.advance(now_ms)
         for pipe in self.engine.pipes:
             pipe.poll(now_ms)
@@ -327,9 +425,9 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
                          indent=1), flush=True)
         return 0
     import aiohttp
-    from .collector import Collector, feed_urls
+    from .collector import feed_urls
     urls = feed_urls()                                       # the owner's providers first, the public one as fallback
-    col = Collector(None, svc.on_row, amm=True, meta=False)
+    col = LiveCollector(None, svc.on_row, amm=True, meta=False)
     try:                                                     # pools the collector saw migrate (read only)
         for k, v in json.loads((store.base() / "pools.json").read_text(encoding="utf-8")).items():
             col.pools[k] = (v[0], int(v[1]))
@@ -343,6 +441,7 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
         except (NotImplementedError, RuntimeError):
             pass
     t_end = time.monotonic() + seconds if seconds else None
+    t_warm = time.monotonic() + REWARM_S if svc.book is not None else None
     last = beat = 0.0
     woken = svc.arm_wake(loop)
     async with aiohttp.ClientSession() as session:
@@ -356,6 +455,14 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
                 await svc.pause(1.0)
                 svc.tick(col.clock.latest or int(time.time() * 1000))
                 mono = time.monotonic()
+                if t_warm is not None and mono >= t_warm:
+                    t_warm = None
+                    try:
+                        now = int(time.time() * 1000)
+                        n = svc.rewarm(await asyncio.to_thread(recent_creates, now), now)
+                        print(f"live service: {n:,} more coins adopted from the collector's next write", flush=True)
+                    except Exception as e:
+                        print(f"live service: second adoption failed ({type(e).__name__}: {e})", flush=True)
                 if woken and mono - beat < 0.95:
                     continue                               # woken early: the results are handled, the rest keeps its second
                 beat = mono

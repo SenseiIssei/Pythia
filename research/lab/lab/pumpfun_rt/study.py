@@ -588,6 +588,11 @@ def report(res: dict) -> tuple[dict, str]:
         md += ["", f"Buy latency median {lb['median']:.0f} ms (10 to 90 %: {lb['p10']:.0f} to {lb['p90']:.0f}) over "
                f"{lb['n']} fills, assumed {a['lat_median_ms']:.0f} ms ({a['lat_lo_ms']:.0f} to {a['lat_hi_ms']:.0f})"
                + (f"; ratio {ex['lat_ratio']:.2f}" if ex.get("lat_ratio") is not None else "") + "."]
+    lm = live_match(res["now_ms"])
+    data["live_match"] = lm
+    md += ["", "## Live against paper (the last 24 hours)", "",
+           "The coins the paper book of the live strategy entered against the live book's buys, and why the live "
+           "book missed the others (data/live/pumpfun_rt/skipped.jsonl).", "", lm["line"]]
     md += ["", "## Readiness for real money", "",
            "The owner's gate (plan addendum 2): 14+ days, 300+ trades out of sample, mean above 0 with and without "
            "broken slots, every gate g1 to g5, and 30+ days of the live paper shadow with its mean inside the "
@@ -634,6 +639,16 @@ def execution_summary() -> dict | None:
         return d if isinstance(d, dict) and "verdict" in d else None
     except (OSError, ValueError):
         return None
+
+
+def live_match(now_ms: int) -> dict:
+    """live_exec.paper_match over the last 24 hours with its report line; an empty match before any live book."""
+    from . import live_exec as LX
+    try:
+        m = LX.paper_match(now_ms - 86_400_000, now_ms)
+    except Exception as e:                                   # the report goes out without it
+        m = {"rule": None, "error": f"{type(e).__name__}: {e}"}
+    return {**m, "line": LX.match_line(m)}
 
 
 def latency_brief(lat: dict | None) -> dict | None:

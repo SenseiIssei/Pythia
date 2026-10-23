@@ -572,6 +572,7 @@ class Pipeline:
         self.failed: list[dict] = []
         self.flattened = False
         self.waiting: dict[str, dict] = {}    # Y8: mint -> {strategy: signal time + wait_pool_s} until a pool trade
+        self.on_skip = None                   # (strategy, mint, why) for every signal not bought: the live book's log
 
     def strat_of(self, pid: int) -> Strategy:
         return self.strats[self.pos[pid]["rule"]]
@@ -586,72 +587,81 @@ class Pipeline:
             except Exception as e:                           # an alert never stops a book
                 print(f"pipeline {self.name}: event hook {type(e).__name__}: {e}", flush=True)
 
+    def skip(self, name: str, mint: str, why: str) -> None:
+        """A signal that is not bought: counted by reason, and handed to on_skip (the live book logs each coin)."""
+        self.eng.skipped[(name, why)] += 1
+        if self.on_skip is not None:
+            try:
+                self.on_skip(name, mint, why)
+            except Exception as e:                           # a log line never stops a book
+                print(f"pipeline {self.name}: skip hook {type(e).__name__}: {e}", flush=True)
+
     # ------------------------------------------------------------ entry
     def signal(self, s: Strategy, tok, t: float) -> None:
         eng = self.eng
         pool = s.family == "E"
         if pool:
             if tok.quote is not None or tok.mayhem or tok.irregular:
-                eng.skipped[(s.name, "not a plain SOL pool")] += 1
+                self.skip(s.name, tok.mint, "not a plain SOL pool")
                 return
             if not tok.pq or not tok.pb:
                 if s.p.get("wait_pool_s"):
                     return self._wait_pool(s, tok, t)
-                eng.skipped[(s.name, "no pool state")] += 1
+                self.skip(s.name, tok.mint, "no pool state")
                 return
         elif not tok.tradeable() or not tok.on_curve:
-            eng.skipped[(s.name, "not a plain SOL curve")] += 1
+            self.skip(s.name, tok.mint, "not a plain SOL curve")
             return
         why = self.exec.ready()
         if why:
-            eng.skipped[(s.name, why)] += 1
+            self.skip(s.name, tok.mint, why)
             return
         f = None
         prob = None
         if s.flt.get("smart_min"):
             f = eng.features(tok, int(t))
             if (f.get("w_smart_n") or 0) < s.flt["smart_min"]:
-                eng.skipped[(s.name, "filter")] += 1
+                self.skip(s.name, tok.mint, "filter")
                 return
         if s.flt.get("model"):
             f = f or eng.features(tok, int(t))
             ok, prob = self.model_ok(s.flt["model"], f)
             if not ok:
-                eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
+                self.skip(s.name, tok.mint, "model" if ok is False else "no model")
                 return
         if s.flt.get("early"):
             ok, prob = self.early_ok(s.flt["early"], tok, t)
             if not ok:
-                eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
+                self.skip(s.name, tok.mint, "model" if ok is False else "no model")
                 return
         if s.flt.get("select"):
             ok, prob = self.select_ok(s.flt["select"], tok, t)
             if not ok:
-                eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
+                self.skip(s.name, tok.mint, "model" if ok is False else "no model")
                 return
         if s.flt.get("trend"):
             ok, prob = self.trend_ok(s.flt["trend"], tok, t)
             if not ok:
-                eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
+                self.skip(s.name, tok.mint, "model" if ok is False else "no model")
                 return
         risk = self.risk[s.name]
         stake = int(min(s.stake_sol, risk.limits.stake_sol) * C.LAMPORTS)
         depth = tok.pq if pool else tok.vs
         stake = min(stake, int(MAX_IMPACT * depth)) if depth else 0
         if stake <= 0:
-            eng.skipped[(s.name, "no depth")] += 1
+            self.skip(s.name, tok.mint, "no depth")
             return
         limit = int(stake * (1 + C.SLIP_TOL))
         why = risk.why_not(t, limit)
         if why:
-            eng.skipped[(s.name, why)] += 1
+            self.skip(s.name, tok.mint, why)
             return
         if pool:
             want = C.pool_buy(stake, tok.pb, tok.pq, tok.amm_fee_bps)
         else:
             want = C.curve_buy(stake, tok.vs, tok.vt, tok.rt, tok.fee_bps)
         if want <= 0:
-            eng.skipped[(s.name, "nothing to buy")] += 1
+            self.skip(s.name, tok.mint, "nothing to buy")
             return
         pid = eng.new_pid()
         price = C.price(tok.pq, tok.pb) if pool else tok.price()
@@ -683,7 +693,7 @@ class Pipeline:
             return
         if not w:
             self.waiting.pop(mint, None)
-        self.eng.skipped[(name, "no pool state")] += 1
+        self.skip(name, mint, "no pool state")
 
     def model_ok(self, spec: dict, f: dict) -> tuple[bool | None, float | None]:
         """Every model criterion of the filter: ("min", k) needs p >= k x base, ("max", k) p <= k x base.

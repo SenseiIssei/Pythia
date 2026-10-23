@@ -82,7 +82,7 @@ def test_an_old_close_of_the_same_coin_is_not_taken_for_the_new_position():
 
 def test_a_feed_error_never_reaches_the_live_service(capsys):
     from lab.pumpfun_rt import live_service as LS
-    svc = LS.Service(gate=NS(), engine=NS(tokens={}), alerts=False, start_worker=False)
+    svc = LS.Service(gate=NS(), engine=NS(tokens={MINT: NS()}), alerts=False, start_worker=False)
     svc.book = NS(pipe=None)
 
     def boom(*a):
