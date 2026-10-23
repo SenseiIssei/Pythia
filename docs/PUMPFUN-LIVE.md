@@ -43,13 +43,45 @@ steht (eine Bestätigungsdatei darüber wird abgelehnt):
 |---|---|---|
 | `max_total_sol` | 2,0 SOL | Gesamtbudget: Sind seit dem ersten Echtgeld-Abschluss so viel SOL verloren, kauft der Bot nichts mehr. Offene Positionen und ein neuer Kauf zählen schon vorher mit. |
 | `max_daily_loss_sol` | 0,5 SOL | Tagesverluststopp: keine Käufe mehr bis zum nächsten UTC-Tag. |
-| `max_trade_sol` | 0,1 SOL | höchstens so viel pro Kauf (plus 30 % Schlupftoleranz als Preisgrenze). |
+| `max_trade_sol` | 0,25 SOL | höchstens so viel pro Kauf (plus 30 % Schlupftoleranz als Preisgrenze). Darunter folgt der Einsatz der Wallet (nächster Abschnitt). |
 | offene Positionen | 5 | gleichzeitig offen. |
 | Reserve | 0,01 SOL | bleibt immer für Gebühren, damit offene Positionen verkauft werden können. |
 
 In der App (Seite "pump.fun wallet") kannst du jede Grenze nur **senken**.
 Anheben geht nur über eine neue Bestätigungsdatei auf dem Server, und auch
 dann nie über die Werte oben.
+
+### Einsatz skaliert mit der Wallet
+
+Seit dem 2026-10-23 kauft der Bot nicht mehr mit festem Einsatz. Basis ist
+das SOL der Wallet plus das, was die offenen Positionen gekostet haben. Der
+Einsatz wird jede Minute, nach jedem neuen Kontostand und nach jedem
+Abschluss neu berechnet (`research/lab/lab/pumpfun_rt/sizing.py`):
+
+- Basis unter 0,25 SOL: Pause, kein Kauf (die App zeigt "stake paused").
+- Basis unter 0,5 SOL: 0,05 SOL. Sonst 10 % der Basis.
+- Rückgang der realisierten Gewinnkurve von ihrem Hoch (als Anteil dessen,
+  was die Wallet am Hoch hatte) über 15 %: halber Einsatz, mindestens
+  0,05 SOL; über 30 %: 0,05 SOL.
+- Bis die Strategie 50 abgeschlossene Echtgeld-Trades mit einem Mittel von
+  mindestens 0 hat: höchstens 0,10 SOL.
+- Immer höchstens 0,25 SOL und höchstens dein `max_trade_sol` (Datei und
+  App; deine Grenze gilt auch unter 0,05 SOL), abgerundet auf 0,01 SOL.
+- Tagesverlustgrenze: höchstens 25 % der Basis zu Beginn des UTC-Tages
+  (einmal am Tag festgehalten), nie über deinem `max_daily_loss_sol`.
+
+| Basis | Einsatz (vor dem Nachweis) | Einsatz (nach 50 Trades, Mittel >= 0) |
+|---|---|---|
+| 0,20 SOL | Pause | Pause |
+| 0,40 SOL | 0,05 SOL | 0,05 SOL |
+| 0,90 SOL | 0,09 SOL | 0,09 SOL |
+| 1,50 SOL | 0,10 SOL | 0,15 SOL |
+| 3,00 SOL | 0,10 SOL | 0,25 SOL |
+
+Beides gilt immer nur unter deiner Bestätigungsdatei: steht dort
+`max_trade_sol=0.1`, kauft der Bot nie mehr als 0,1 SOL. Den aktuellen
+Einsatz und den Grund zeigt `live_status.json` unter `stake`. Die
+Paper-Bücher und Studien kaufen weiter mit festen 0,1 SOL.
 
 ## 1. Wallet erzeugen
 

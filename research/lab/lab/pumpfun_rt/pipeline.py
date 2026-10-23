@@ -42,8 +42,9 @@ from . import strategies as S
 
 # ---------------------------------------------------------------- hard caps
 
-# The code's hard caps. Paper books run at exactly these; a live owner can only lower them.
-HARD_STAKE_SOL = 0.1
+# The code's hard caps. Paper books run at exactly these (but stake S.STAKE_SOL, 0.1 SOL, whatever the stake
+# cap); a live owner can only lower them, and the live stake follows the wallet under them (sizing.py).
+HARD_STAKE_SOL = 0.25
 HARD_MAX_OPEN = 5
 HARD_MAX_EXPOSURE_SOL = 0.6
 HARD_MAX_DAILY_LOSS_SOL = 1.0
@@ -186,7 +187,7 @@ class Strategy(S.Rule):
     a stake and an exit plan. tp/sl/hold_s mirror the plan for the report."""
     exits: Exits = None
     flt: dict = field(default_factory=dict, hash=False, compare=False)
-    stake_sol: float = HARD_STAKE_SOL
+    stake_sol: float = S.STAKE_SOL            # 0.1 SOL on paper; the live book sizes its own (live_exec.attach)
 
     @property
     def pipeline(self) -> bool:

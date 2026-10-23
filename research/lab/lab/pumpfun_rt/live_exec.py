@@ -19,7 +19,7 @@ FULL (the readiness path): every one of
 TEST (the owner's small real-money test of the execution, docs/PUMPFUN-LIVE.md):
   1. env PYTHIA_PUMPFUN_LIVE=1
   2. the ack file with mode=test, strategy=<P_... or auto>, max_total_sol (at most
-     2.0), max_daily_loss_sol (at most 0.5), max_trade_sol (at most 0.1) and the
+     2.0), max_daily_loss_sol (at most 0.5), max_trade_sol (at most 0.25) and the
      line "I accept that I can lose all of it"
   3. a successful `live_exec simulate` for this wallet within the last 24 hours
   The readiness gate is skipped; every trade is tagged test, posted at once, and
@@ -45,12 +45,16 @@ other check passed, by load_signer, and the key never leaves the Signer object;
 nothing prints, logs, writes or sends it. Nothing here generates a key (only the
 owner-run wallet tool does).
 
-Caps, whatever the environment, the ack or the app say: pipeline.HARD_* (0.1 SOL a
+Caps, whatever the environment, the ack or the app say: pipeline.HARD_* (0.25 SOL a
 trade, 5 open, 0.6 SOL exposure, 1 SOL daily loss) and in test mode the test
 maxima below; the app's settings (reports/pumpfun_rt/live_settings.json) can only
-lower them. A total budget (test: max_total_sol) stops every buy once the losses
-since the first live trade reach it. A buy also needs the wallet to keep a fee
-reserve. The executor checks all of it itself, independently of the pipeline.
+lower them. Under that ceiling the stake follows the wallet (sizing.py: 10 % of the
+wallet's SOL plus the open positions' cost, 0.05 to 0.25 SOL, braked in a drawdown,
+at most 0.1 until the rule has proved itself live, paused under 0.25 SOL), and the
+daily loss limit is at most a quarter of that base at the start of the UTC day.
+A total budget (test: max_total_sol) stops every buy once the losses since the
+first live trade reach it. A buy also needs the wallet to keep a fee reserve. The
+executor checks all of it itself, independently of the pipeline.
 
 Only the programs' public buy and sell, and txbuild.check_own refuses anything
 else before signing: no transfers out, no withdrawals, no bundles, no private
@@ -107,6 +111,7 @@ from pathlib import Path
 from . import chain_pnl as CP
 from . import curve as C
 from . import pipeline as P
+from . import sizing as Z
 from . import txbuild as X
 
 ACK_PATH = Path("/etc/pythia/pumpfun-live-ack")
@@ -146,7 +151,7 @@ SENDER_HOST_SUFFIX = ".helius-rpc.com"
 ACCEPT_LINE = "I accept that I can lose all of it"
 TEST_MAX_TOTAL_SOL = 2.0
 TEST_MAX_DAILY_LOSS_SOL = 0.5
-TEST_MAX_TRADE_SOL = 0.1                  # the owner raised it from 0.05 on 2026-10-22: fixed fees are 6.7 % of 0.03
+TEST_MAX_TRADE_SOL = 0.25                 # 0.05, 0.1 on 2026-10-22, 0.25 on 2026-10-23 (the stake follows the wallet)
 SIMULATE_MAX_AGE_MS = 24 * 3_600_000
 DEFAULT_TEST_RULE = "P_pool60"            # the least-bad post-migration pool rule until a report says otherwise
 RESERVE_SOL = 0.01                        # left in the wallet so every open position can still be sold
@@ -837,7 +842,7 @@ def load_totals() -> dict:
     if not isinstance(d, dict):
         d = {}
     return {"pnl_l": int(d.get("pnl_l") or 0), "since_ms": d.get("since_ms"), "trades": int(d.get("trades") or 0),
-            "total_alerted": bool(d.get("total_alerted"))}
+            "total_alerted": bool(d.get("total_alerted")), "day_base": d.get("day_base")}
 
 
 def journal_path() -> Path:
@@ -955,6 +960,8 @@ class LiveExecutor:
         self.orphan_pid = -1000                       # leftover ids for orphans, below the restart's
         self.trades_today = 0
         self.wins_today = 0
+        self.stake: dict | None = None                # {"sol", "why"}: the stake the wallet allows (sizing.py)
+        self.stake_bal_l: int | None = None           # the balance that stake was sized with
         self._carry()
         self._roll()                                  # the day and its P&L are set before anything books
         self.worker = None
@@ -988,7 +995,35 @@ class LiveExecutor:
                 print(f"live: refusing to buy: {self.closed_why}", flush=True)
             if self.closed_why != was and self.on_gate is not None:
                 self.on_gate(self.closed_why)              # shut, or open again: the owner hears of it
-        return f"live gate shut: {self.closed_why}" if self.closed_why else None
+        if self.closed_why:
+            return f"live gate shut: {self.closed_why}"
+        if self.limits.stake_sol <= 0:
+            return (self.stake or {}).get("why") or "stake paused"
+        return None
+
+    def sized(self, lim: P.Limits) -> P.Limits:
+        """The limits with the stake the wallet allows (sizing.py) under lim's stake as the ceiling, and the
+        daily loss limit at most DAILY_LOSS_SHARE of the base at the start of the UTC day (recorded once a
+        day in totals.json). Without a balance read yet: no buys."""
+        self.stake_bal_l = self.balance_l
+        if self.balance_l is None:
+            self.stake = {"sol": 0.0, "why": "stake paused: wallet balance not read yet"}
+            return dataclasses.replace(lim, stake_sol=0.0)
+        bal = self.balance_l / C.LAMPORTS
+        open_l = sum(self.exposure.values()) + sum(int(v.get("cost_l") or 0) for v in self.leftovers.values())
+        sol, why = Z.sized(balance_sol=bal, open_cost_sol=open_l / C.LAMPORTS, ceiling_sol=lim.stake_sol,
+                           **Z.from_ledger(self.rule))
+        self.stake = {"sol": sol, "why": why}
+        day = self.clock() // P.DAY_MS
+        db = self.totals.get("day_base")
+        if not (isinstance(db, list) and len(db) == 2 and db[0] == day):
+            db = self.totals["day_base"] = [day, bal + open_l / C.LAMPORTS]
+            try:
+                write_json(totals_path(), self.totals)
+            except OSError as e:
+                print(f"live: totals not written ({e})", flush=True)
+        loss = min(lim.max_daily_loss_sol, Z.DAILY_LOSS_SHARE * float(db[1]))
+        return dataclasses.replace(lim, stake_sol=sol, max_daily_loss_sol=loss)
 
     def _roll(self) -> None:
         d = self.clock() // P.DAY_MS
@@ -1845,7 +1880,7 @@ def base_status(gate: LiveGate, why: list[str], address: str | None, balance_l: 
             "kill": live_killed(),
             "simulate": {"t": sim.get("t"), "ok": sim.get("ok"), "venue": sim.get("venue"), "mint": sim.get("mint")}
             if isinstance(sim, dict) else None,
-            "exposure_sol": 0.0, "skipped": {}}
+            "exposure_sol": 0.0, "skipped": {}, "stake": None}
 
 
 class LiveBook:
@@ -1877,6 +1912,7 @@ class LiveBook:
         rec = {**rec, "mode": self.exec.mode, "run": RUN_ID, "buy_sig": self.exec.buy_sig.pop(rec.get("pid"), None)}
         write_close(rec)
         self.exec.recompute()                              # the day's and the total's P&L from the ledger
+        self.refresh_limits()                              # and the stake with them
         self.closed_today.append(rec)
         self.recent.insert(0, {k: rec.get(k) for k in LEDGER_COLS})
         del self.recent[100:]
@@ -1919,6 +1955,7 @@ class LiveBook:
                    "buy_sig": info.get("buy_sig")}
             write_close(rec)
             self.exec.recompute()                          # booked: the totals follow the ledger
+            self.refresh_limits()                          # and the stake with them
             self.recent.insert(0, {k: rec.get(k) for k in LEDGER_COLS})
             del self.recent[100:]
         self._post(lambda lang: [_leftover_card(what, info, self.exec.mode, lang)])
@@ -1934,8 +1971,8 @@ class LiveBook:
     # ------------------------------------------------------------ the service's clock
     def tick(self, now_ms: int, wall_ms: int | None = None) -> None:
         wall_ms = wall_ms or int(time.time() * 1000)
-        if time.monotonic() - self.last_limits >= RECHECK_S:
-            self.last_limits = time.monotonic()
+        if time.monotonic() - self.last_limits >= RECHECK_S or self.exec.balance_l != self.exec.stake_bal_l:
+            self.last_limits = time.monotonic()            # every minute, and with every new balance read
             self.refresh_limits()
         day = wall_ms // P.DAY_MS
         if self.card_day is None:
@@ -1947,11 +1984,11 @@ class LiveBook:
             self.daily_card(ended, stats)
 
     def refresh_limits(self) -> None:
-        ack = self.exec.gate.ack
-        if ack.mode is None:
+        ack = getattr(self.exec.gate, "ack", None)
+        if ack is None or ack.mode is None:
             return
         lim, total = effective(ack, read_settings(), self.exec.gate.env)
-        self.exec.set_limits(lim, total)
+        self.exec.set_limits(self.exec.sized(lim), total)
 
     def daily_card(self, day: int, stats: dict) -> None:
         from . import measure
@@ -1986,7 +2023,8 @@ class LiveBook:
         ex._roll()
         day = int(time.time() * 1000) // P.DAY_MS
         self.closed_today = [r for r in self.closed_today if r["exit_ms"] // P.DAY_MS == day]
-        st.update(on=ex.closed_why is None and not st["kill"] and ex.stop_day != ex.day
+        paused = ((ex.stake or {}).get("why") or "stake paused") if ex.limits.stake_sol <= 0 else None
+        st.update(on=ex.closed_why is None and not st["kill"] and ex.stop_day != ex.day and not paused
                   and not (ex.max_total_l is not None and -ex.totals["pnl_l"] >= ex.max_total_l),
                   mode=ex.mode, rule=self.rule, positions=self.positions(),
                   leftovers=[{"pid": k, **v} for k, v in ex.leftovers.items()],
@@ -1998,7 +2036,8 @@ class LiveBook:
                   stops={"daily": ex.stop_day == ex.day,
                          "total": ex.max_total_l is not None and -ex.totals["pnl_l"] >= ex.max_total_l},
                   exposure_sol=sum(ex.exposure.values()) / C.LAMPORTS,
-                  refusing=ex.closed_why, gate=[ex.closed_why] if ex.closed_why else list(why))
+                  stake=ex.stake, refusing=ex.closed_why or paused,
+                  gate=[ex.closed_why] if ex.closed_why else [paused] if paused else list(why))
         if self.pipe is not None:
             sk = {k[1]: v for k, v in self.pipe.eng.skipped.items() if k[0] == self.rule}
             st["skipped"] = dict(sorted(sk.items(), key=lambda kv: -kv[1])[:8])
@@ -2167,13 +2206,21 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
               "the plain RPC if it does not answer", flush=True)
     ex = LiveExecutor(gate, signer, builder, lim, mode=gate.ack.mode, max_total_sol=total,
                       rule=gate.rule, start=start)
-    s = P.BY_NAME[gate.rule]
+    try:
+        ex.balance_l = rpc.balance(signer.pubkey)
+    except Exception as e:                                   # no buys until the service reads it
+        print(f"live: balance not read ({type(e).__name__}: {e})", flush=True)
+    lim = ex.sized(lim)
+    ex.set_limits(lim, total)
+    # The paper strategy stakes 0.1 SOL; live, the stake is the sized one in the Risk limits (at most the cap).
+    s = dataclasses.replace(P.BY_NAME[gate.rule], stake_sol=P.HARD_STAKE_SOL)
     book = LiveBook(None, ex, gate.rule, alerts=alerts)
     pipe = P.Pipeline(engine, [s], ex, limits=lim, name="live", record=False, on_close=book.on_close,
                       on_event=book.on_event, kill=P.KillSwitch(live_kill_paths()))
     book.pipe = pipe
     engine.add_pipe(pipe)
-    print(f"live: ON ({gate.ack.mode}) for {gate.rule}, wallet {signer.pubkey[:4]}..., stake {lim.stake_sol} SOL, "
+    print(f"live: ON ({gate.ack.mode}) for {gate.rule}, wallet {signer.pubkey[:4]}..., stake {lim.stake_sol} SOL "
+          f"({ex.stake['why']}), "
           f"at most {lim.max_open} open, {lim.max_exposure_sol} SOL exposure, daily loss stop "
           f"{lim.max_daily_loss_sol} SOL" + (f", total budget {total} SOL" if total is not None else ""), flush=True)
     return book

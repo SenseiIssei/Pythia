@@ -34,10 +34,10 @@ use crate::labview::data_dir;
 /// Hard maxima of the live test, the same numbers as the lab's `live_exec.TEST_MAX_*`.
 pub const TEST_MAX_TOTAL_SOL: f64 = 2.0;
 pub const TEST_MAX_DAILY_LOSS_SOL: f64 = 0.5;
-pub const TEST_MAX_TRADE_SOL: f64 = 0.1;
+pub const TEST_MAX_TRADE_SOL: f64 = 0.25;
 /// The full (readiness) mode's caps, the lab's `pipeline.HARD_*`.
 pub const FULL_MAX_DAILY_LOSS_SOL: f64 = 1.0;
-pub const FULL_MAX_TRADE_SOL: f64 = 0.1;
+pub const FULL_MAX_TRADE_SOL: f64 = 0.25;
 pub const MAX_OPEN: u32 = 5;
 /// The service writes its status every 30 s; older than this, it is not running.
 pub const STALE_MS: i64 = 120_000;

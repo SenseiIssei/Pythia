@@ -126,7 +126,7 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
   return (
     <Section
       title="Limits"
-      hint="The confirmation file on the server sets the most the bot may risk; the code caps it again (test: 2 SOL in all, 0.5 SOL a day, 0.1 SOL a trade). Here you can only set lower limits. Raising one needs a new confirmation file on the server."
+      hint="The confirmation file on the server sets the most the bot may risk; the code caps it again (test: 2 SOL in all, 0.5 SOL a day, 0.25 SOL a trade). Under that the stake follows the wallet: 10 % of its SOL, 0.05 to 0.25 SOL, at most 0.1 until the strategy has proved itself live, paused under 0.25 SOL. Here you can only set lower limits. Raising one needs a new confirmation file on the server."
     >
       <div className="divide-y divide-line">
         {keys.map((k) => (

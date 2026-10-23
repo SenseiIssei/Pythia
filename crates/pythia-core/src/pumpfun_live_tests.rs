@@ -117,10 +117,12 @@ fn limits_can_only_be_set_below_the_confirmation_file() {
 fn ceilings_never_exceed_the_hard_maxima() {
     let ack = AckView { mode: Some("test".into()), strategy: None, max_total_sol: Some(9.0), max_daily_loss_sol: Some(9.0), max_trade_sol: Some(9.0) };
     let c = ceilings(&ack).unwrap();
-    assert_eq!((c.max_total_sol, c.max_daily_loss_sol, c.max_trade_sol), (Some(2.0), 0.5, 0.1));
+    assert_eq!((c.max_total_sol, c.max_daily_loss_sol, c.max_trade_sol), (Some(2.0), 0.5, 0.25));
+    let small = AckView { max_trade_sol: Some(0.1), ..ack.clone() };
+    assert_eq!(ceilings(&small).unwrap().max_trade_sol, 0.1); // the ack still rules under the cap
     let full = AckView { mode: Some("full".into()), max_daily_loss_sol: Some(0.4), ..AckView::default() };
     let c = ceilings(&full).unwrap();
-    assert_eq!((c.max_total_sol, c.max_daily_loss_sol, c.max_trade_sol), (None, 0.4, 0.1));
+    assert_eq!((c.max_total_sol, c.max_daily_loss_sol, c.max_trade_sol), (None, 0.4, 0.25));
     assert!(ceilings(&AckView::default()).is_err());
 }
 

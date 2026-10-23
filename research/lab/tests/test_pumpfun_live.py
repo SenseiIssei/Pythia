@@ -371,7 +371,7 @@ def test_the_test_ack_needs_every_value_under_its_hard_maximum_and_the_line(tmp_
     assert (a.mode, a.rule, a.max_total_sol, a.max_daily_loss_sol, a.max_trade_sol, a.problems) == \
         ("test", "P_pool60", 1.0, 0.3, 0.02, ())
     for kw, words in (({"t": 2.5}, "max_total_sol=2.5 is above the hard maximum 2"),
-                      ({"d": 0.6}, "max_daily_loss_sol=0.6 is above"), ({"x": 0.11}, "max_trade_sol=0.11 is above"),
+                      ({"d": 0.6}, "max_daily_loss_sol=0.6 is above"), ({"x": 0.26}, "max_trade_sol=0.26 is above"),
                       ({"line": False}, "lacks the line"), ({"s": "P_nothing"}, "not a pipeline strategy"),
                       ({"d": 0}, "must be above 0")):
         why = " | ".join(LX.read_ack(ack_file(tmp_path, **kw)).problems)
@@ -568,6 +568,7 @@ def test_settings_lower_the_running_book(tmp_path, folders):
     book = LX.LiveBook(pipe, ex, "X", alerts=False)
     LX.settings_path().parent.mkdir(parents=True, exist_ok=True)
     LX.settings_path().write_text(json.dumps({"max_trade_sol": 0.01, "max_total_sol": 0.2}))
+    ex.balance_l = int(1.0 * SOL)                            # the stake follows the wallet, the settings cap it
     book.refresh_limits()
     assert ex.limits.stake_sol == 0.01 and ex.max_total_l == int(0.2 * SOL)
     assert pipe.risk["X"].limits.stake_sol == 0.01
@@ -700,7 +701,7 @@ def test_a_shut_service_still_shows_the_address_balance_and_every_reason(tmp_pat
     assert st["balance_sol"] == 1.25 and st["holdings"] == [{"mint": MINT, "amount": 5}]
     assert any("simulation" in w for w in st["gate"])
     assert st["ack"]["max_total_sol"] == 1.0 and st["limits"]["max_trade_sol"] == 0.02
-    assert st["hard"]["test"] == {"max_total_sol": 2.0, "max_daily_loss_sol": 0.5, "max_trade_sol": 0.1}
+    assert st["hard"]["test"] == {"max_total_sol": 2.0, "max_daily_loss_sol": 0.5, "max_trade_sol": 0.25}
     assert json.loads((LX.reports_dir() / "live_trades.json").read_text())["trades"] == []
     svc.stopped()
     assert json.loads((LX.reports_dir() / "live_status.json").read_text())["running"] is False

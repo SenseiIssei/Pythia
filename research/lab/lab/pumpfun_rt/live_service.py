@@ -15,7 +15,8 @@ missing; after fixing it, restart the service.
 Every STATUS_S it writes, for the engine's read-only endpoints and the app:
   reports/pumpfun_rt/live_status.json   mode, on or off and why, address, SOL balance (getBalance),
                                         token holdings, open positions, today's and the total P&L,
-                                        the ack's and the effective limits, the stops, the kill switch
+                                        the ack's and the effective limits, the stake the wallet allows
+                                        and why (sizing.py), the stops, the kill switch
   reports/pumpfun_rt/live_trades.json   the newest closed live trades
   reports/pumpfun_rt/execution.json     measured latency, slippage, fees against the paper model
                                         (measure.py; every ten minutes and with the daily card)

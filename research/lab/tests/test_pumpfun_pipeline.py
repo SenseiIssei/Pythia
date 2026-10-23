@@ -65,7 +65,7 @@ def test_the_registered_strategies_are_what_the_plan_says():
     for s in P.STRATEGIES:
         assert isinstance(s, S.Rule) and P.is_strategy(s)
         assert s.exits.ladder[-1][1] == 1.0 and 0 < s.exits.sl < 1 and s.exits.time_s > 0
-        assert s.exits.dev_sell == s.exits.pull == (s.name not in no_guard) and s.stake_sol == P.HARD_STAKE_SOL
+        assert s.exits.dev_sell == s.exits.pull == (s.name not in no_guard) and s.stake_sol == 0.1
         gains = [g for g, _ in s.exits.ladder]
         assert gains == sorted(gains)
     assert P.BY_NAME["P_mom_model"].exits.risk == ("sell10_10", 2.0)
@@ -719,4 +719,4 @@ def test_pool0_is_y5s_e_d0_x1_and_nothing_more():
     assert (s.family, s.entry, s.p) == (r.family, r.entry, r.p) == ("E", "migration", {"delay_s": 0})
     assert (s.exits.ladder, s.exits.sl, s.exits.time_s) == (((r.tp, 1.0),), r.sl, r.hold_s)
     assert not s.exits.dev_sell and not s.exits.pull and s.exits.trail_after is None and not s.flt
-    assert s.stake_sol == P.HARD_STAKE_SOL == 0.1
+    assert s.stake_sol == 0.1 and P.HARD_STAKE_SOL == 0.25      # paper stakes 0.1; the live stake is sized
