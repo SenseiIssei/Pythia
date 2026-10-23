@@ -687,6 +687,17 @@ jobs:
     timeout: 5m
     grace: 6h
 
+  - name: onchain-live-simulate
+    description: dry run of a swap through the guard and a simulation for the on-chain wallet (nothing signed or sent) so its 24 h gate stays current
+    schedule: "37 */6 * * *"
+    command: python -m lab.onchain.live_exec simulate
+    env_file: /etc/pythia/onchain-live.env?
+    code: false
+    volumes: [/opt/pythia-live:/app:ro, /etc/pythia/onchain-live-ack:/etc/pythia/onchain-live-ack:ro, /etc/pythia/onchain-keypair.json.pub:/etc/pythia/onchain-keypair.json.pub:ro]
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    grace: 6h
+
   # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
   # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,
   # which posts the daily card. Paper research only: nothing here can trade.
