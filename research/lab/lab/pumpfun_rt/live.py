@@ -20,6 +20,9 @@ Files under <data>/paper/pumpfun_rt/:
   wallets.json   the wallet reputation (the same)
   snipers.json   the sniper book of the X14 early features (the same)
 
+And <reports>/pumpfun_rt/trends.json every trends.WRITE_S (trends.py, the Trends page): what is hot right now,
+read from the engine after it took each row, so it changes no decision.
+
 Alerts (category "trending", lab.ops.notify, English or German): a closed
 paper trade at +200 % or better, at most one an hour. Positions open when the
 collector stops are lost (the token state is not kept); they are written to
@@ -86,7 +89,7 @@ def append_csv(path: Path, cols: list[str], rows: list[dict]) -> None:
 class Shadow:
     def __init__(self, pick: str, models: dict | None = None, book: CreatorBook | None = None,
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
-                 strategies: list | None = None, kill=None):
+                 strategies: list | None = None, kill=None, trends: bool = False):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
@@ -110,6 +113,10 @@ class Shadow:
         self.model_mtime = self._model_mtime()
         self.totals: dict[str, dict] = {}
         self.started_ms = now_ms or int(time.time() * 1000)
+        self.trends = None
+        if trends:                                            # a view only: off in the tests that do not ask for it
+            from .trends import Trends
+            self.trends = Trends(self.engine, reports_dir() / "trends.json")
 
     # ------------------------------------------------------------ loading
     @staticmethod
@@ -143,7 +150,7 @@ class Shadow:
         except (OSError, ValueError):
             pass
         sh = cls(read_pick(), load(), book, wallets=wallets,
-                 cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS))
+                 cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS), trends=True)
         sh.cats_mtime = cls._cats_mtime()
         try:                                                  # X14: the sniper book of the early features
             from .early import SniperBook
@@ -167,11 +174,20 @@ class Shadow:
     # ------------------------------------------------------------ the stream
     def on_row(self, table: str, row: dict) -> None:
         feed_row(self.engine, table, row)
+        if self.trends is not None:                           # after the engine: it only reads what the row did
+            try:
+                self.trends.observe(table, row)
+            except Exception as e:                            # noqa: BLE001 - the view never stops the books
+                self.trends.errors += 1
+                if self.trends.errors <= 5:
+                    print(f"trends: row skipped ({type(e).__name__}: {e})", flush=True)
 
     def tick(self, now_ms: int) -> None:
         self.engine.advance(now_ms)
         for pipe in self.engine.pipes:                        # the live executor's results, the kill switch
             pipe.poll(now_ms)
+        if self.trends is not None:
+            self.trends.tick(now_ms)
         mono = time.monotonic()
         if mono - self.last_reload >= RELOAD_S:
             self.last_reload = mono

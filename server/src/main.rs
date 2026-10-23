@@ -617,8 +617,19 @@ fn lab_pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
 /// nothing here removes the kill file: that is done on the server by hand.
 fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
     use pythia_core::pumpfun_live as pf;
-    let (r1, r2, r3, r4, r5, r6) = (root.clone(), root.clone(), root.clone(), root.clone(), root.clone(), root);
+    let (r1, r2, r3, r4, r5, r6) = (root.clone(), root.clone(), root.clone(), root.clone(), root.clone(), root.clone());
+    let r7 = root;
     Router::new()
+        .route(
+            // The Trends page (read only): what the paper engine sees hot right now, and DexScreener's list.
+            "/api/pumpfun/trends",
+            get(move || {
+                let root = r7.clone();
+                async move {
+                    Json(root.map(|r| pf::trends_in(&r)).unwrap_or_else(|| serde_json::json!({"trends": null, "dexscreener": null})))
+                }
+            }),
+        )
         .route(
             // The feed for a page that cannot hold the socket open (behind a proxy that passes no upgrade).
             "/api/pumpfun/live/feed",

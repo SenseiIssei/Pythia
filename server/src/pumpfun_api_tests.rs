@@ -127,3 +127,25 @@ async fn the_feed_is_there_without_the_socket_too() {
     assert!(code.is_client_error(), "{code}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[tokio::test]
+async fn the_trends_are_read_only() {
+    let d = root("trends");
+    let (code, v) = call(&d, "GET", "/api/pumpfun/trends", None).await;
+    assert_eq!((code, v), (StatusCode::OK, serde_json::json!({"trends": null, "dexscreener": null})));
+    let t = serde_json::json!({"t": 1, "lists": {"hot": [{"mint": "M", "vol_5m": 2.0}], "migrating": [], "fresh": []}});
+    std::fs::write(d.join("reports").join("pumpfun_rt").join("trends.json"), t.to_string()).unwrap();
+    std::fs::create_dir_all(d.join("reports").join("trending")).unwrap();
+    let rep = serde_json::json!({"updatedMs": 2, "status": "ok", "dex": [{"symbol": "CAT"}], "gainers": []});
+    std::fs::write(d.join("reports").join("trending").join("latest.json"), rep.to_string()).unwrap();
+    let (code, v) = call(&d, "GET", "/api/pumpfun/trends", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(v["trends"], t);
+    assert_eq!(v["dexscreener"]["items"], serde_json::json!([{"symbol": "CAT"}]));
+    assert_eq!(v["dexscreener"]["updatedMs"], 2);
+    for method in ["POST", "PUT", "DELETE"] {
+        let (code, _) = call(&d, method, "/api/pumpfun/trends", Some(serde_json::json!({}))).await;
+        assert!(code.is_client_error(), "{method}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

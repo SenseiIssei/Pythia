@@ -380,9 +380,12 @@ class Tracker:
         if tok is not None and st is not None:
             st.top10_5 = self.top10(tok)[1]
 
-    def early_features(self, tok, t: float, milestone: float = 0.0) -> dict:
+    def early_features(self, tok, t: float, milestone: float = 0.0, prune: bool = True) -> dict:
+        """prune=False (the trends view, trends.py) counts the market without dropping old entries, so a reader
+        outside the engine's own clock changes nothing a later decision sees."""
         st = self.st.get(tok.mint)
-        self._mkt(t)
+        if prune:
+            self._mkt(t)
         age = max((t - tok.t0) / 1000, 1e-3)
         prog = tok.progress()
         if st is None:
@@ -394,8 +397,20 @@ class Tracker:
                 "buyers_per_s": tok.outside_buyers() / max(age, 1.0), "curve_vel": prog / max(age, 1.0),
                 "curve_vel_10s": prog - self._prog_at(st, t - 10_000), "holders": holders, "top10_share": top10,
                 "top10_at5": st.top10_5, "snipers_2s": len(st.snipers), "w_sniper_known": st.known,
-                "mkt_trades_60s": len(self.mkt_trades), "mkt_creates_60s": len(self.mkt_creates),
-                "mkt_complete_1h": len(self.mkt_done), "milestone": milestone}
+                "mkt_trades_60s": self._mkt_n(self.mkt_trades, t, 60_000, prune),
+                "mkt_creates_60s": self._mkt_n(self.mkt_creates, t, 60_000, prune),
+                "mkt_complete_1h": self._mkt_n(self.mkt_done, t, 3_600_000, prune), "milestone": milestone}
+
+    @staticmethod
+    def _mkt_n(dq: collections.deque, t: float, span: int, pruned: bool) -> int:
+        if pruned:
+            return len(dq)
+        old = 0                                               # what _mkt would drop: the head older than the span
+        for x in dq:
+            if x >= t - span:
+                break
+            old += 1
+        return len(dq) - old
 
     def step_features(self, tok, t: float, v: float, cost: float, peak_v: float, land_ms: float,
                       peak_ms: float) -> dict:

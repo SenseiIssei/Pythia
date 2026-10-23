@@ -144,3 +144,31 @@ The section also lists the newest `results/pumpfun_*.md` write-ups with
 their titles and verdict lines, the same way the Research page reads them.
 The desktop app has no reader for the endpoint yet; it shows the studies only.
 
+
+## The Trends page
+
+`GET /api/pumpfun/trends` (read only, the same root as the other pump.fun
+endpoints; `pumpfun_live::trends_in`) answers `{"trends": ..., "dexscreener": ...}`,
+each `null` without its file:
+
+- `trends`: `reports/pumpfun_rt/trends.json` as written. The paper engine
+  (container pythia-pumpfun-rt, `lab/pumpfun_rt/trends.py`) writes it every
+  12 s of chain time from running counters per token (30 s buckets of the
+  last 15 minutes): `lists.hot` (by buy SOL over 5 minutes), `lists.migrating`
+  (curves above 70 %, by progress, then speed) and `lists.fresh` (migrated in
+  the last 30 minutes, by pool volume), at most 30 each. Every entry has the
+  volumes over 1, 5 and 15 minutes, buyers, net flow, the change over 5 and 15
+  minutes, the market cap in SOL and USD (Kraken's SOLUSD ticker), progress,
+  age, a 15 minute sparkline, P(win) and P(rug) (the Y9 selection models, once
+  the curve completed), P(3x) (the early model, on the curve), the smart early
+  buyers, the creator's earlier migrations, the dev's share sold, the flags,
+  `blocked` (a mint in `/etc/pythia/blocked-mints.txt` or
+  `<data>/pumpfun_rt/blocked-mints.txt`, one per line: never badged) and the
+  `badges` it earned (the rules are in the file's `badges`). The file is read
+  from the engine after it took each row and changes no paper decision.
+- `dexscreener`: from `reports/trending/latest.json` (`lab.ops.trending`) its
+  `updatedMs`, `status`, `caveat` and the `dex` list as `items`.
+
+The app's Trends page (`?page=trends`, `&embed=1` for the DevPanel) polls it
+every 10 s while shown. Nothing on it trades, and nothing reads pump.fun's
+site or API.

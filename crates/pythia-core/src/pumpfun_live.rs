@@ -363,6 +363,20 @@ pub fn feed_in(root: &Path) -> Option<serde_json::Value> {
     read(&dir_in(root).join("live_feed.json"))
 }
 
+/// The Trends page: `trends.json` (the lab's `trends.py`, written by the paper engine every 12 s: what is hot
+/// on pump.fun from our own chain data and models; a view, nothing trades) and the DexScreener part of the
+/// trending watcher's report (`reports/trending/latest.json`, `lab.ops.trending`), each `null` without its
+/// file. Passed on as written; the page reads their fields.
+pub fn trends_in(root: &Path) -> serde_json::Value {
+    let trends: Option<serde_json::Value> = read(&dir_in(root).join("trends.json"));
+    let dex = read::<serde_json::Value>(&root.join("reports").join("trending").join("latest.json")).map(|t| {
+        let field = |k: &str| t.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let items = t.get("dex").filter(|v| v.is_array()).cloned().unwrap_or_else(|| serde_json::json!([]));
+        serde_json::json!({ "updatedMs": field("updatedMs"), "status": field("status"), "caveat": field("caveat"), "items": items })
+    });
+    serde_json::json!({ "trends": trends, "dexscreener": dex })
+}
+
 /// When the files behind the view and behind the feed last changed: the live socket pushes a
 /// new view or a new feed when its stamp moves.
 pub fn stamps_in(root: &Path) -> (Vec<Option<std::time::SystemTime>>, Option<std::time::SystemTime>) {

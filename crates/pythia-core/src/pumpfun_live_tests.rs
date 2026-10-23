@@ -192,3 +192,25 @@ fn the_feed_is_passed_on_and_every_file_moves_its_stamp() {
     assert!(stamps_in(&d).0[4].is_some(), "the kill file changes the view");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn the_trends_file_and_the_dexscreener_list_are_passed_on() {
+    let d = temp("trends");
+    assert_eq!(trends_in(&d), serde_json::json!({"trends": null, "dexscreener": null}));
+    let t = serde_json::json!({"t": NOW, "lists": {"hot": [{"mint": "M", "vol_5m": 1.5, "badges": ["smart"]}], "migrating": [], "fresh": []}});
+    std::fs::write(dir_in(&d).join("trends.json"), t.to_string()).unwrap();
+    std::fs::create_dir_all(d.join("reports").join("trending")).unwrap();
+    let rep = serde_json::json!({"title": "Trending watcher", "updatedMs": NOW, "status": "ok", "caveat": "watch only",
+                                 "gainers": [{"name": "PEPE"}], "dex": [{"symbol": "CAT", "address": "A", "flags": ["thin liquidity"]}]});
+    std::fs::write(d.join("reports").join("trending").join("latest.json"), rep.to_string()).unwrap();
+    let v = trends_in(&d);
+    assert_eq!(v["trends"], t);
+    assert_eq!(v["dexscreener"], serde_json::json!({"updatedMs": NOW, "status": "ok", "caveat": "watch only",
+                                                     "items": [{"symbol": "CAT", "address": "A", "flags": ["thin liquidity"]}]}));
+    // A report without the DexScreener part still answers, with no items; a broken file is null.
+    std::fs::write(d.join("reports").join("trending").join("latest.json"), r#"{"updatedMs": 5}"#).unwrap();
+    assert_eq!(trends_in(&d)["dexscreener"]["items"], serde_json::json!([]));
+    std::fs::write(dir_in(&d).join("trends.json"), "{not json").unwrap();
+    assert!(trends_in(&d)["trends"].is_null());
+    let _ = std::fs::remove_dir_all(&d);
+}

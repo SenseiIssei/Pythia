@@ -40,6 +40,7 @@ import { Cards } from "./pages/Cards";
 import { Research } from "./pages/Research";
 import { Live } from "./pages/Live";
 import { PumpfunWallet } from "./pages/PumpfunWallet";
+import { Trends } from "./pages/Trends";
 import { Risk } from "./pages/Risk";
 import { Journal } from "./pages/Journal";
 import { Settings } from "./pages/Settings";
@@ -73,6 +74,7 @@ const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
   research: Research,
   live: Live,
   pumpfun: PumpfunWallet,
+  trends: Trends,
   risk: Risk,
   journal: Journal,
   settings: Settings,

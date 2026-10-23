@@ -28,6 +28,7 @@ import {
   QrCode,
   Banknote,
   WalletCards,
+  Flame,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -59,6 +60,7 @@ export type PageId =
   | "cards"
   | "live"
   | "pumpfun"
+  | "trends"
   | "risk"
   | "journal"
   | "settings"
@@ -90,6 +92,8 @@ export const NAV: NavItem[] = [
   { id: "wallets", label: "Money", icon: Coins, section: "Overview" },
   // The owner's real-money pump.fun bot: balance, P&L, every trade, limits, kill switch (docs/PUMPFUN-LIVE.md).
   { id: "pumpfun", label: "pump.fun live", icon: QrCode, section: "Overview" },
+  // What is hot on pump.fun right now, from our own chain data and models (a view; nothing trades).
+  { id: "trends", label: "Trends", icon: Flame, section: "Overview" },
   // Pokemon cards: prices and forecasts, paper only. Plain enough for simple mode.
   { id: "cards", label: "Cards", icon: Layers, section: "Overview" },
 
