@@ -99,6 +99,8 @@ card says all is quiet. The code is `pickInsights` in `src/labFeeds.ts`.
 ## Where it shows
 
 - **Home**, "Today in the lab": the three insights. Hidden without an engine.
+- **Lab** (advanced view): the paper books, forward tests and verdicts, and
+  the **pump.fun lab** (below).
 - **Research** (advanced view): the same insights, every strategy book with
   its backtest, forward test, gate 7 progress and the autopilots running it,
   the model scores and registry decisions, what the learning loop changed,
@@ -116,3 +118,29 @@ The Research page takes each study's one-line verdict from its row in the
 strategy sweep from the sweep table, and any other write-up from its first
 `**Verdict: ...**` paragraph, so start the results section with one. The
 write-up's first `# ` heading is its title.
+
+## Staying current
+
+The Lab and Research pages read their endpoints again every 30 seconds
+while the page is the one shown and the browser tab is in front, and say
+"updated hh:mm" next to Refresh. A hidden page reads nothing.
+
+## The pump.fun lab
+
+`GET /api/lab/pumpfun` (read only, the same root as `/api/lab/feeds`;
+`labview_pumpfun.rs`) serves the Lab page's pump.fun section:
+
+- from `reports/pumpfun_rt/latest.json`: `status`, `headline`, `caveat`,
+  `pick`, `readiness` (per pipeline strategy: days, trades, mean, the
+  checks and `ready`) and `shadow` (the shadow books), as written;
+- `reports/pumpfun_rt/execution.json` as written;
+- `books`: the paper books of the pipeline strategies (the names in
+  `readiness`, else every `P_` rule) from `paper/pumpfun_rt/ledger.csv`,
+  closed entries of the last 7 days: entries, wins, mean per entry, P&L in
+  SOL, one row per UTC day (newest first), a running P&L curve for the chart
+  and the ten newest entries. Only the last 16 MB of the ledger are read.
+
+The section also lists the newest `results/pumpfun_*.md` write-ups with
+their titles and verdict lines, the same way the Research page reads them.
+The desktop app has no reader for the endpoint yet; it shows the studies only.
+

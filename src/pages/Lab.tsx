@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Microscope, RefreshCw } from "lucide-react";
 import { Badge, Button, Card, List, Notice, Page, Sparkline, changeTone, money, signedPct } from "../design";
 import { KeyStats, LoadingRows, Meter, Nothing, Row, Section, Term, num, pct, plural, type Stat, type StatTone } from "../pagekit";
@@ -18,6 +18,12 @@ import {
   type PaperBook,
 } from "../lab";
 import { useAdvanced } from "../uiMode";
+import { labStudies } from "../labFeeds";
+import { labPumpfun, pumpfunStudies, type PumpfunLab as PumpfunLabData } from "../pumpfunLab";
+import { buildStudies, mergeDocs, type StudyView } from "../researchView";
+import { bundledStudies, labReadme } from "../studyFiles";
+import { updatedText, useVisiblePoll } from "../pageVisible";
+import { PumpfunLab } from "../components/PumpfunLab";
 
 /** Plain-language names for the lab's paper books and reports. */
 const BOOK_LABEL: Record<string, string> = {
@@ -383,19 +389,34 @@ export function Lab() {
   const mode = liveMode();
   const [s, setS] = useState<LabStatus | null>(null);
   const [err, setErr] = useState("");
+  const [pf, setPf] = useState<PumpfunLabData | null>(null);
+  const [pfErr, setPfErr] = useState("");
+  const [pfStudies, setPfStudies] = useState<StudyView[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+  const ref = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(async () => {
-    try {
-      setS(await labStatus());
+    if (mode === "none") return;
+    setNow(Date.now());
+    const [st, p, bundled, readme, served] = await Promise.allSettled([labStatus(), labPumpfun(), bundledStudies(), labReadme(), labStudies()]);
+    if (st.status === "fulfilled") {
+      setS(st.value);
       setErr("");
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+    } else {
+      setErr(st.reason instanceof Error ? st.reason.message : String(st.reason));
     }
-  }, []);
+    if (p.status === "fulfilled") {
+      setPf(p.value);
+      setPfErr("");
+    } else {
+      setPfErr(p.reason instanceof Error ? p.reason.message : String(p.reason));
+    }
+    const docs = mergeDocs(bundled.status === "fulfilled" ? bundled.value : {}, served.status === "fulfilled" ? served.value : []);
+    setPfStudies(pumpfunStudies(buildStudies(readme.status === "fulfilled" ? readme.value : "", docs)));
+  }, [mode]);
 
-  useEffect(() => {
-    if (mode !== "none") void refresh();
-  }, [mode, refresh]);
+  // Current without a reload: read again every 30 s while this page is in front.
+  const [updated, refreshNow] = useVisiblePoll(ref, refresh);
 
   const title = "Lab";
   const subtitle = "Paper books running on real prices with play money, and what every experiment concluded.";
@@ -444,13 +465,17 @@ export function Lab() {
   }
 
   return (
+    <div ref={ref}>
     <Page
       title={title}
       subtitle={subtitle}
       right={
-        <Button variant="secondary" size="sm" icon={RefreshCw} onClick={() => void refresh()}>
-          Refresh
-        </Button>
+        <span className="flex items-center gap-2">
+          {updated && <span className="text-[13px] text-muted">{updatedText(updated)}</span>}
+          <Button variant="secondary" size="sm" icon={RefreshCw} onClick={() => void refreshNow()}>
+            Refresh
+          </Button>
+        </span>
       }
     >
       {stats.length > 0 && <KeyStats items={stats} />}
@@ -506,6 +531,8 @@ export function Lab() {
         </Section>
       )}
 
+      <PumpfunLab lab={pf} studies={pfStudies} err={pfErr} now={now} />
+
       {s && s.reports.length > 0 && (
         <Section title="What the experiments concluded" hint="Each experiment's verdict, newest write-up date under its name.">
           <List>
@@ -528,5 +555,6 @@ export function Lab() {
         </p>
       )}
     </Page>
+    </div>
   );
 }

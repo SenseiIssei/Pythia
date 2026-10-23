@@ -3,7 +3,7 @@ import { NAV, activeTab, isVisible, navFor, resolvePage, tabsFor } from "./nav";
 
 describe("navFor", () => {
   it("keeps simple mode to the beginner destinations", () => {
-    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "activity", "notifications", "predictions", "wallets", "pumpfun", "cards", "settings", "about"]);
+    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "realmoney", "activity", "notifications", "predictions", "wallets", "pumpfun", "cards", "settings", "about"]);
   });
 
   it("shows everything in advanced mode", () => {
@@ -26,6 +26,14 @@ describe("navFor", () => {
   it("marks every simple-mode page as not advanced", () => {
     expect(navFor("simple").every((n) => !n.advanced)).toBe(true);
   });
+
+  it("puts Real money right after Autopilot in both modes", () => {
+    for (const mode of ["simple", "advanced"] as const) {
+      const ids = navFor(mode).map((n) => n.id);
+      expect(ids.indexOf("realmoney")).toBe(ids.indexOf("autopilot") + 1);
+    }
+    expect(NAV.find((n) => n.id === "realmoney")?.label).toBe("Real money");
+  });
 });
 
 describe("isVisible", () => {
@@ -36,7 +44,7 @@ describe("isVisible", () => {
   });
 
   it("shows the always-visible pages in both modes", () => {
-    for (const id of ["home", "practice", "autopilot", "activity", "notifications", "predictions", "wallets", "cards", "settings", "about"] as const) {
+    for (const id of ["home", "practice", "autopilot", "realmoney", "activity", "notifications", "predictions", "wallets", "cards", "settings", "about"] as const) {
       expect(isVisible(id, "simple")).toBe(true);
       expect(isVisible(id, "advanced")).toBe(true);
     }

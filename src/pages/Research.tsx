@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { BookOpen, ChevronDown, ExternalLink, RefreshCw } from "lucide-react";
 import { Button, Card, Chip, Notice, Page, SectionTitle, type ChipTone } from "../design";
 import { LoadingRows, Nothing } from "../pagekit";
@@ -21,6 +21,7 @@ import {
 import { studyLink } from "../markdown";
 import { bundledStudies, labReadme } from "../studyFiles";
 import { useAdvanced } from "../uiMode";
+import { updatedText, useVisiblePoll } from "../pageVisible";
 
 /**
  * Everything the research lab knows, in plain words: the strategies being
@@ -60,9 +61,9 @@ export function Research() {
     setLoading(false);
   }, [engine]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // Current without a reload: read again every 30 s while this page is in front.
+  const ref = useRef<HTMLDivElement>(null);
+  const [updated, refreshNow] = useVisiblePoll(ref, load);
 
   const studies = useMemo(() => (docs ? buildStudies(readme, docs) : []), [readme, docs]);
   const books = useMemo(() => buildBooks(status?.forward ?? null, status?.books ?? []), [status]);
@@ -87,13 +88,17 @@ export function Research() {
   const waiting = books.filter((b) => !b.forward && !b.paper);
 
   return (
+    <div ref={ref}>
     <Page
       title="Research"
       subtitle="What the lab tried, what it is testing now and what it learned. Numbers are out of sample and after fees."
       right={
-        <Button variant="secondary" icon={RefreshCw} onClick={() => void load()}>
-          Refresh
-        </Button>
+        <span className="flex items-center gap-2">
+          {updated && <span className="text-muted text-[13px]">{updatedText(updated)}</span>}
+          <Button variant="secondary" icon={RefreshCw} onClick={() => void refreshNow()}>
+            Refresh
+          </Button>
+        </span>
       }
     >
       {!engine && (
@@ -209,6 +214,7 @@ export function Research() {
         </>
       )}
     </Page>
+    </div>
   );
 }
 

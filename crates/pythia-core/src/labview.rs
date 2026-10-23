@@ -782,6 +782,14 @@ pub fn studies() -> Vec<Study> {
     results_dir().map(|d| studies_in(&d)).unwrap_or_default()
 }
 
+// ── the pump.fun lab ────────────────────────────────────────────────────────
+// The real-time study's report, its measured execution and the pipeline
+// strategies' paper books, for the Lab page (labview_pumpfun.rs).
+
+#[path = "labview_pumpfun.rs"]
+mod pumpfun_lab;
+pub use pumpfun_lab::*;
+
 pub fn status() -> LabStatus {
     let Some(root) = data_dir() else { return LabStatus::default() };
     let mut out = LabStatus { found: root.exists(), dir: root.display().to_string(), ..Default::default() };

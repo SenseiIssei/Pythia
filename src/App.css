@@ -173,3 +173,49 @@ input[type="radio"] {
 .pt-safe-bottom {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+
+/* A full-screen overlay (the first-run gate, the tour). It scrolls inside
+   itself, so its last button stays reachable on a short phone and inside the
+   DevPanel's iframe, where the page behind it must not move. 100vh first for
+   browsers without dvh; dvh follows the phone's toolbars. */
+.pt-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  height: 100vh;
+  height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  background: var(--color-bg);
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+/* A sheet over the page: never taller than the screen, its body scrolls, its
+   footer clears the home indicator. */
+.pt-sheet-wrap {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.pt-sheet {
+  max-height: 92vh;
+  max-height: 92dvh;
+}
+.pt-sheet-body {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+}
+.pt-sheet-pad {
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom, 0px));
+}
+
+/* The page host scrolls on its own; a fling at its end does not move the
+   page that holds the iframe. */
+.pt-scroll {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}

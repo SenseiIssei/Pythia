@@ -12,6 +12,7 @@ import { ConfirmAction, KeyStats, LoadingRows, More, Nothing, Row, Section, plur
 import { encodeQr, qrPath } from "../qr";
 import { CoinCandles } from "../components/CoinCandles";
 import {
+  ALPHA_PHASE,
   LIMIT_LABEL,
   canControl,
   ceilings,
@@ -31,6 +32,7 @@ import {
   tone,
   tradeStats,
   watchPumpfun,
+  type FeedCoin,
   type PumpfunFeed,
   type SocketState,
   type LimitInput,
@@ -126,7 +128,7 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
   return (
     <Section
       title="Limits"
-      hint="The confirmation file on the server sets the most the bot may risk; the code caps it again (test: 2 SOL in all, 0.5 SOL a day, 0.25 SOL a trade). Under that the stake follows the wallet: 10 % of its SOL, 0.05 to 0.25 SOL, at most 0.1 until the strategy has proved itself live, paused under 0.25 SOL. Here you can only set lower limits. Raising one needs a new confirmation file on the server."
+      hint="The confirmation file on the server sets the most the bot may risk; the code caps it again (Alpha phase: 2 SOL in all, 0.5 SOL a day, 0.25 SOL a trade). Under that the stake follows the wallet: 10 % of its SOL, 0.05 to 0.25 SOL, at most 0.1 until the strategy has proved itself live, paused under 0.25 SOL. Here you can only set lower limits. Raising one needs a new confirmation file on the server."
     >
       <div className="divide-y divide-line">
         {keys.map((k) => (
@@ -176,8 +178,8 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
 const pctText = (r: number | null | undefined) => (r == null || !Number.isFinite(r) ? "n/a" : `${r > 0 ? "+" : ""}${(r * 100).toFixed(1)} %`);
 const tradeName = (t: PumpfunTrade) => t.symbol || t.name || short(t.mint);
 
-/** How the bot did over the closed trades the service keeps: the running P&L and what it adds up to. */
-function Performance({ trades, rate }: { trades: PumpfunTrade[]; rate: SolEur | null }) {
+/** How the bot did over the closed trades the service keeps: the running P&L and what it adds up to. The Real money page shows it too. */
+export function Performance({ trades, rate }: { trades: PumpfunTrade[]; rate: SolEur | null }) {
   const s = useMemo(() => tradeStats(trades), [trades]);
   const [at, setAt] = useState<number | null>(null);
   const oldest = useMemo(() => [...trades].sort((a, b) => (a.exitMs ?? 0) - (b.exitMs ?? 0)), [trades]);
@@ -237,7 +239,7 @@ function TradeList({ trades, rate }: { trades: PumpfunTrade[]; rate: SolEur | nu
                 title={
                   <span className="flex items-center gap-2">
                     {tradeName(t)}
-                    {t.mode === "test" && <Badge tone="warn">test</Badge>}
+                    {t.mode === "test" && <Badge tone="warn">{ALPHA_PHASE}</Badge>}
                     {t.mint && (
                       <a href={solscanToken(t.mint)} target="_blank" rel="noreferrer noopener" className="fl-focus text-muted hover:text-ink" aria-label={`${tradeName(t)} on Solscan`}>
                         <ExternalLink size={14} />
@@ -269,10 +271,15 @@ function TradeList({ trades, rate }: { trades: PumpfunTrade[]; rate: SolEur | nu
   );
 }
 
-export function PumpfunWallet() {
+/**
+ * The live service's view and chart feed, kept current: on the server over the
+ * socket, without one (the desktop app) or while it is down read every
+ * REFRESH_MS. `active` false closes the socket and stops reading (the Real
+ * money page while it is not shown).
+ */
+export function usePumpfunLive(active = true) {
   const [v, setV] = useState<PumpfunView | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [killMsg, setKillMsg] = useState<string | null>(null);
   const [feed, setFeed] = useState<PumpfunFeed | null>(null);
   const [socket, setSocket] = useState<SocketState>("connecting");
   const [now, setNow] = useState(() => Date.now());
@@ -286,31 +293,98 @@ export function PumpfunWallet() {
   }, []);
   // On the server the page lives on the socket: every change the live service writes arrives at once.
   // Without one (the desktop app), or while it is down, it reads every REFRESH_MS as before.
-  useEffect(
-    () =>
-      watchPumpfun({
-        onView: (nv) => {
-          setV(nv);
-          setErr(null);
-        },
-        onFeed: setFeed,
-        onState: setSocket,
-      }),
-    [],
-  );
   useEffect(() => {
-    if (isLive(socket)) return;
+    if (!active) return;
+    return watchPumpfun({
+      onView: (nv) => {
+        setV(nv);
+        setErr(null);
+      },
+      onFeed: setFeed,
+      onState: setSocket,
+    });
+  }, [active]);
+  useEffect(() => {
+    if (!active || isLive(socket)) return;
     void load();
     const id = window.setInterval(() => void load(), REFRESH_MS);
     return () => window.clearInterval(id);
-  }, [load, socket]);
+  }, [load, socket, active]);
   const coins = feed?.coins ?? [];
   const anyOpen = coins.some((c) => !c.exit);
   useEffect(() => {
-    if (!anyOpen) return;
+    if (!active || !anyOpen) return;
     const id = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(id);
-  }, [anyOpen]);
+  }, [anyOpen, active]);
+  return { v, err, coins, socket, now, load };
+}
+
+/** The live socket's state in a page header, with Refresh while it is not live. */
+export function SocketBadge({ socket, onRefresh }: { socket: SocketState; onRefresh: () => void }) {
+  return (
+    <span className="flex items-center gap-2">
+      <span className="inline-flex items-center gap-1.5 text-[13px] text-muted" title={SOCKET_HELP[socket]}>
+        <span className={`h-2 w-2 rounded-full ${isLive(socket) ? "bg-up" : socket === "off" ? "bg-line-strong" : "bg-warn"}`} aria-hidden />
+        {SOCKET_WORDS[socket]}
+      </span>
+      {!isLive(socket) && <Button variant="ghost" size="sm" icon={RefreshCw} onClick={onRefresh}>Refresh</Button>}
+    </span>
+  );
+}
+
+/** Is it trading and why not, then the wallet, today and the total: the top of the pump.fun page and its card on the Real money page. */
+export function PumpfunSummary({ v }: { v: PumpfunView }) {
+  const s = v.status;
+  const st = stateLine(v);
+  const rate = v.solEur ?? null;
+  return (
+    <>
+      <Notice tone={st.level === "ok" ? "success" : st.level === "bad" ? "danger" : st.level === "warn" ? "warning" : "info"} title={st.label}>
+        {st.detail}
+        {s && s.gate.length > 1 && (
+          <ul className="mt-1 list-disc pl-5">
+            {s.gate.slice(1, 8).map((g) => (
+              <li key={g}>{g}</li>
+            ))}
+          </ul>
+        )}
+      </Notice>
+
+      <KeyStats
+        items={[
+          { label: "Wallet balance", value: sol(s?.balanceSol ?? null), sub: s?.balanceT ? `read ${new Date(s.balanceT).toLocaleTimeString()}` : "not read yet", help: "The SOL in the bot's wallet, read from the chain by the live service." },
+          ...(rate
+            ? [{ label: "Worth in euro", value: eur(s?.balanceSol ?? null, rate) || "n/a", sub: `1 SOL = ${eur(1, rate)} · ${pctText(solEurChange(rate))} today`, help: "The wallet's SOL at the live SOL/EUR price (Kraken, refreshed every 15 seconds). It moves with SOL even when the bot does nothing." }]
+            : []),
+          { label: "Today", value: sol(s?.pnlTodaySol ?? 0, true), tone: tone(s?.pnlTodaySol), sub: s ? `${eur(s.pnlTodaySol, rate, true) ? `${eur(s.pnlTodaySol, rate, true)} · ` : ""}${plural(s.tradesToday, "trade")}, ${s.winsToday} won` : undefined, help: "Realised profit or loss of the bot today (UTC), fees included." },
+          { label: "Since the first live trade", value: sol(s?.pnlTotalSol ?? 0, true), tone: tone(s?.pnlTotalSol), sub: s ? `${eur(s.pnlTotalSol, rate, true) ? `${eur(s.pnlTotalSol, rate, true)} · ` : ""}${plural(s.tradesTotal, "trade")}` : undefined, help: "Everything the bot has won or lost since its first live trade. The total budget stop counts this." },
+        ]}
+      />
+    </>
+  );
+}
+
+/** The candles of the coins the bot holds or just sold, as the live service sees them. */
+export function PumpfunLiveChart({ coins, now, rate, socket }: { coins: FeedCoin[]; now: number; rate: SolEur | null; socket: SocketState }) {
+  return (
+    <Section title="Live chart" hint="Every trade on the coins the bot holds or sold in the last 15 minutes, in 5 second candles, as the live service sees them. The lines are what it paid and where it takes profit or stops out.">
+      {coins.length > 0 ? (
+        <div className="space-y-6">
+          {coins.map((c) => (
+            <CoinCandles key={`${c.mint}-${c.land_ms ?? c.signal_ms}`} coin={c} nowMs={now} rate={rate} />
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-muted">{socket === "off" ? "The live chart needs the connected backend on the server." : "Nothing held right now. The next buy shows up here as it happens."}</p>
+      )}
+    </Section>
+  );
+}
+
+export function PumpfunWallet() {
+  const { v, err, coins, socket, now, load } = usePumpfunLive();
+  const [killMsg, setKillMsg] = useState<string | null>(null);
 
   const kill = async () => {
     try {
@@ -323,59 +397,20 @@ export function PumpfunWallet() {
   };
 
   const s = v?.status ?? null;
-  const st = v ? stateLine(v) : null;
   const rate = v?.solEur ?? null;
   return (
     <Page
       title="pump.fun live"
       subtitle="Real money, traded by the live service on the server under the limits you set. Paper results so far are negative; size everything as a total loss."
-      right={
-        <span className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 text-[13px] text-muted" title={SOCKET_HELP[socket]}>
-            <span className={`h-2 w-2 rounded-full ${isLive(socket) ? "bg-up" : socket === "off" ? "bg-line-strong" : "bg-warn"}`} aria-hidden />
-            {SOCKET_WORDS[socket]}
-          </span>
-          {!isLive(socket) && <Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => void load()}>Refresh</Button>}
-        </span>
-      }
+      right={<SocketBadge socket={socket} onRefresh={() => void load()} />}
     >
       {err && <Notice tone="danger" title="Could not read the live service">{err}</Notice>}
       {!v && !err && <LoadingRows rows={4} label="Reading the live service" />}
-      {v && st && (
+      {v && (
         <>
-          <Notice tone={st.level === "ok" ? "success" : st.level === "bad" ? "danger" : st.level === "warn" ? "warning" : "info"} title={st.label}>
-            {st.detail}
-            {s && s.gate.length > 1 && (
-              <ul className="mt-1 list-disc pl-5">
-                {s.gate.slice(1, 8).map((g) => (
-                  <li key={g}>{g}</li>
-                ))}
-              </ul>
-            )}
-          </Notice>
+          <PumpfunSummary v={v} />
 
-          <KeyStats
-            items={[
-              { label: "Wallet balance", value: sol(s?.balanceSol ?? null), sub: s?.balanceT ? `read ${new Date(s.balanceT).toLocaleTimeString()}` : "not read yet", help: "The SOL in the bot's wallet, read from the chain by the live service." },
-              ...(rate
-                ? [{ label: "Worth in euro", value: eur(s?.balanceSol ?? null, rate) || "n/a", sub: `1 SOL = ${eur(1, rate)} · ${pctText(solEurChange(rate))} today`, help: "The wallet's SOL at the live SOL/EUR price (Kraken, refreshed every 15 seconds). It moves with SOL even when the bot does nothing." }]
-                : []),
-              { label: "Today", value: sol(s?.pnlTodaySol ?? 0, true), tone: tone(s?.pnlTodaySol), sub: s ? `${eur(s.pnlTodaySol, rate, true) ? `${eur(s.pnlTodaySol, rate, true)} · ` : ""}${plural(s.tradesToday, "trade")}, ${s.winsToday} won` : undefined, help: "Realised profit or loss of the bot today (UTC), fees included." },
-              { label: "Since the first live trade", value: sol(s?.pnlTotalSol ?? 0, true), tone: tone(s?.pnlTotalSol), sub: s ? `${eur(s.pnlTotalSol, rate, true) ? `${eur(s.pnlTotalSol, rate, true)} · ` : ""}${plural(s.tradesTotal, "trade")}` : undefined, help: "Everything the bot has won or lost since its first live trade. The total budget stop counts this." },
-            ]}
-          />
-
-          <Section title="Live chart" hint="Every trade on the coins the bot holds or sold in the last 15 minutes, in 5 second candles, as the live service sees them. The lines are what it paid and where it takes profit or stops out.">
-            {coins.length > 0 ? (
-              <div className="space-y-6">
-                {coins.map((c) => (
-                  <CoinCandles key={`${c.mint}-${c.land_ms ?? c.signal_ms}`} coin={c} nowMs={now} rate={rate} />
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted">{socket === "off" ? "The live chart needs the connected backend on the server." : "Nothing held right now. The next buy shows up here as it happens."}</p>
-            )}
-          </Section>
+          <PumpfunLiveChart coins={coins} now={now} rate={rate} socket={socket} />
 
           <Performance trades={v.trades} rate={rate} />
 

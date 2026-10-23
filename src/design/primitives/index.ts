@@ -17,7 +17,7 @@ export {
   type Range,
   type SegOption,
 } from "./controls";
-export { Sheet, Modal, ConfirmSheet } from "./overlay";
+export { Sheet, Modal, ConfirmSheet, Screen, lockScroll, useScrollLock, type ScrollRoot } from "./overlay";
 export { Empty, Skeleton, Spinner, Notice, type NoticeTone } from "./feedback";
 export { AreaChart, Sparkline, MiniChart, LineChart, type ChartTone, type Scrub } from "./charts";
 export { TabBar, type TabItem } from "./nav";

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Check, ExternalLink, ShieldAlert } from "lucide-react";
-import { Button } from "../design";
+import { Button, Screen } from "../design";
 
 const ACK_KEY = "pythia.legal.ack.v1";
 
@@ -36,8 +36,8 @@ export function LegalGate({ onAccept }: { onAccept: () => void }) {
   }
 
   return (
-    <div className="app-window overflow-y-auto">
-      <main className="mx-auto flex w-full max-w-xl flex-1 flex-col px-4 pb-8 pt-10 sm:px-6 sm:pt-16">
+    <Screen label="Before you start">
+      <main className="mx-auto flex w-full max-w-xl flex-col px-4 pb-10 pt-10 sm:px-6 sm:pt-16">
         <span className="mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-down/10 text-down" aria-hidden>
           <ShieldAlert size={26} />
         </span>
@@ -86,6 +86,6 @@ export function LegalGate({ onAccept }: { onAccept: () => void }) {
           </a>
         </div>
       </main>
-    </div>
+    </Screen>
   );
 }

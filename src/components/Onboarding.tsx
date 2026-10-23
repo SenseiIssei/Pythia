@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ShieldCheck, Eye, Power, KeyRound, ArrowLeft } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Button } from "../design";
+import { Button, Screen } from "../design";
 
 const DONE_KEY = "pythia.onboarding.v1";
 
@@ -88,7 +88,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div className="app-window overflow-y-auto">
+    <Screen label="Welcome tour">
       <main className="mx-auto flex min-h-full w-full max-w-xl flex-col px-4 pb-6 pt-6 sm:px-6 sm:pt-12">
         <div className="flex items-center justify-between gap-3">
           {i > 0 ? (
@@ -108,7 +108,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           </button>
         </div>
 
-        <div key={i} className="flex-1 animate-slide-up pt-12 sm:pt-16">
+        <div key={i} className="flex-1 animate-slide-up pt-8 sm:pt-16">
           <span className={`mb-6 flex h-16 w-16 items-center justify-center rounded-full ${step.tint}`} aria-hidden>
             <step.icon size={28} />
           </span>
@@ -129,6 +129,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           </p>
         </div>
       </main>
-    </div>
+    </Screen>
   );
 }

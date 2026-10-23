@@ -48,7 +48,6 @@ import {
   isLiveTest,
   liveTestCap,
   planEdit,
-  realMoneyRows,
   type EditForm,
   type RealMoneyRow,
 } from "../autopilot";
@@ -58,6 +57,7 @@ import { useAdvanced } from "../uiMode";
 import { autopilotVenue, exchangeName } from "../venueNames";
 import { Autopilot as AutopilotDetails, useAutopilotApi, type AutopilotApi } from "./Autopilot";
 import { AutopilotCompare } from "../components/AutopilotCompare";
+import { RealMoneyLink } from "../components/RealMoneyLink";
 import type { AutopilotStatus, Venue } from "../types";
 
 const MODE_CHIP: Record<CardModel["mode"], { label: string; tone: ChipTone }> = {
@@ -73,7 +73,7 @@ const STATUS_TONE: Record<CardModel["status"]["tone"], ChipTone> = {
   bad: "bad",
 };
 
-function useNow(every = 30_000): number {
+export function useNow(every = 30_000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), every);
@@ -86,24 +86,26 @@ function useNow(every = 30_000): number {
  * The autopilots, one calm card each: what it is worth, plus or minus, how
  * that compares with holding Bitcoin, what it holds and which strategies run
  * it. Start, edit, pause and stop are sheets. The old Practice page lives
- * here now.
+ * here now. Practice money only: what trades real money is on the Real money
+ * page, with a link to it here.
  */
 export function Autopilots() {
   const api = useAutopilotApi();
-  const { positions, strategies, limits, live } = useStore();
+  const { positions, strategies, limits } = useStore();
   const advanced = useAdvanced();
   const now = useNow();
   const [starting, setStarting] = useState(false);
   const [details, setDetails] = useState(false);
 
   const names = useMemo(() => Object.fromEntries(strategies.map((s) => [s.id, s.name])), [strategies]);
-  const shown = practiceAutopilots(api.autopilots, now);
-  // Real money first and on its own, so what trades real money is never
-  // mixed into the practice runs; stopped runs split the same way.
+  const all = practiceAutopilots(api.autopilots, now);
+  // Real money lives on its own page; here only practice money, so the two
+  // are never mixed. The real runs only count for the link to that page.
+  const real = groupByMoney(all).real;
+  const shown = groupByMoney(all).practice;
   const running = groupByMoney(shown.filter(isActive));
   const stopped = groupByMoney(shown.filter((s) => !isActive(s)));
   const t = totals(running.practice);
-  const realRows = realMoneyRows(running.real, live);
   const btc = api.btc ? { times: api.btc.times, closes: api.btc.closes } : null;
   const card = (s: AutopilotStatus) => (
     <AutopilotCard key={s.config.id} s={s} model={cardModel(s, positions, now, btc, names)} api={api} />
@@ -112,11 +114,7 @@ export function Autopilots() {
   return (
     <Page
       title="Autopilot"
-      subtitle={
-        running.real.length > 0
-          ? "It trades an amount for you until you stop it. Real money is listed apart from practice money; each autopilot keeps its own book."
-          : "It trades an amount for you, on practice money, until you stop it. Run several side by side: each keeps its own book."
-      }
+      subtitle="It trades an amount for you, on practice money, until you stop it. Run several side by side: each keeps its own book."
       right={
         shown.length > 0 && (
           <Button onClick={() => setStarting(true)} icon={Plus}>
@@ -126,7 +124,8 @@ export function Autopilots() {
       }
     >
       {api.mocked && <Chip tone="warn">Sample data ({api.mocked})</Chip>}
-      {limits.killSwitch && running.real.length + running.practice.length > 0 && (
+      {(real.length > 0 || advanced) && <RealMoneyLink count={real.filter(isActive).length} />}
+      {limits.killSwitch && running.practice.length > 0 && (
         <Card>
           <p className="text-down text-[15px] font-semibold">Kill switch is on</p>
           <p className="text-muted text-sm">Nothing new is bought until you switch it off. Selling still works.</p>
@@ -155,20 +154,6 @@ export function Autopilots() {
         </Card>
       ) : (
         <>
-          {(running.real.length > 0 || advanced) && (
-            <section aria-label="Real money" className="space-y-3">
-              <SectionTitle>Real money</SectionTitle>
-              {running.real.length === 0 ? (
-                <p className="px-1 text-[15px] text-muted">No real-money autopilot running</p>
-              ) : (
-                <>
-                  <RealMoneySummary rows={realRows} />
-                  {running.real.map(card)}
-                </>
-              )}
-            </section>
-          )}
-
           {running.practice.length > 0 && (
             <section aria-label="Practice (paper and demo)" className="space-y-3">
               <SectionTitle>Practice (paper and demo)</SectionTitle>
@@ -186,21 +171,10 @@ export function Autopilots() {
 
           {shown.length > 1 && <AutopilotCompare list={shown} now={now} />}
 
-          {stopped.real.length + stopped.practice.length > 0 && (
+          {stopped.practice.length > 0 && (
             <section aria-label="Stopped this week" className="space-y-3">
               <SectionTitle>Stopped this week</SectionTitle>
-              {stopped.real.length > 0 && (
-                <>
-                  <h3 className="px-1 text-[13px] font-semibold text-muted">Real money</h3>
-                  {stopped.real.map(card)}
-                </>
-              )}
-              {stopped.practice.length > 0 && (
-                <>
-                  <h3 className="px-1 text-[13px] font-semibold text-muted">Practice (paper and demo)</h3>
-                  {stopped.practice.map(card)}
-                </>
-              )}
+              {stopped.practice.map(card)}
             </section>
           )}
         </>
@@ -235,7 +209,7 @@ const STATE_TONE: Record<RealMoneyRow["state"]["tone"], ChipTone> = { good: "goo
  * capped live test, and whether live trading is armed for it. Under it, the
  * venue's own cash as Pythia last read it, never the paper account's.
  */
-function RealMoneySummary({ rows }: { rows: RealMoneyRow[] }) {
+export function RealMoneySummary({ rows }: { rows: RealMoneyRow[] }) {
   const cash = rows
     .map((r) => r.venueCash)
     .filter((c): c is NonNullable<RealMoneyRow["venueCash"]> => !!c)
@@ -278,7 +252,7 @@ function RealMoneySummary({ rows }: { rows: RealMoneyRow[] }) {
 
 // ── one card ────────────────────────────────────────────────────────────────
 
-function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardModel; api: AutopilotApi }) {
+export function AutopilotCard({ s, model: m, api }: { s: AutopilotStatus; model: CardModel; api: AutopilotApi }) {
   const [editing, setEditing] = useState(false);
   const [asking, setAsking] = useState<"pause" | "stop" | null>(null);
   const [sell, setSell] = useState(s.config.flattenOnStop);

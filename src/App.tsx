@@ -15,6 +15,7 @@ import { minimizeWindow, hideWindow } from "./window";
 import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
 import { Autopilots } from "./pages/Autopilots";
+import { RealMoney } from "./pages/RealMoney";
 import { Activity } from "./pages/Activity";
 import { Notifications } from "./pages/Notifications";
 import { Dashboard } from "./pages/Dashboard";
@@ -46,6 +47,7 @@ import { About } from "./pages/About";
 const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
   home: HomePage,
   autopilot: Autopilots,
+  realmoney: RealMoney,
   activity: Activity,
   notifications: Notifications,
   dashboard: Dashboard,
@@ -394,7 +396,7 @@ function Chrome() {
         )}
 
         {/* page host: all pages mounted, inactive hidden, for instant switching */}
-        <main ref={mainRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden bg-canvas">
+        <main ref={mainRef} className="pt-scroll min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden bg-canvas" data-scroll-container="">
           {(Object.keys(PAGES) as (keyof typeof PAGES)[]).map((id) => {
             const Page = PAGES[id];
             return (

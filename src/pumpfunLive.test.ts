@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ALPHA_PHASE,
+  modeWords,
   candles,
   ceilings,
   coinReturn,
@@ -113,7 +115,7 @@ describe("stateLine", () => {
     expect(stateLine(view({ running: false })).label).toBe("Live service not running");
     expect(stateLine(view({}, { stops: { daily: false, total: true } })).label).toBe("Total budget used up");
     expect(stateLine(view({}, { stops: { daily: true, total: false } })).level).toBe("warn");
-    expect(stateLine(view()).label).toBe("Trading real money (test)");
+    expect(stateLine(view()).label).toBe("Trading real money (Alpha phase)");
     expect(stateLine(view({}, { on: false, gate: ["no successful simulation yet"] })).detail).toBe("no successful simulation yet");
   });
 });
@@ -226,5 +228,14 @@ describe("keeping the page current", () => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     vi.useRealTimers();
+  });
+});
+
+describe("modeWords", () => {
+  it("calls the live test the Alpha phase; the files keep mode test", () => {
+    expect(modeWords("test")).toBe("Alpha phase");
+    expect(ALPHA_PHASE).toBe("Alpha phase");
+    expect(modeWords("full")).toBe("Full");
+    expect(modeWords(null)).toBe("");
   });
 });

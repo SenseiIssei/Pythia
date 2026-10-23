@@ -136,6 +136,8 @@ export interface PumpfunView {
   nowMs: number;
   /** One SOL in euro from Kraken's public ticker, read by the backend; null when it could not be read. */
   solEur?: SolEur | null;
+  /** One euro in US dollars (Kraken's EURUSD, same shape) for the Real money page; null when it could not be read. */
+  eurUsd?: SolEur | null;
 }
 
 export interface SolEur {
@@ -223,6 +225,13 @@ export function tone(v: number | null | undefined): Tone {
   return v == null || v === 0 ? "flat" : v > 0 ? "up" : "down";
 }
 
+/** What the owner reads for the live test's mode: the files and the code say "test", the app says Alpha phase. */
+export const ALPHA_PHASE = "Alpha phase";
+
+export function modeWords(mode: string | null | undefined): string {
+  return mode === "test" ? ALPHA_PHASE : mode === "full" ? "Full" : (mode ?? "");
+}
+
 export interface StateLine {
   label: string;
   level: "ok" | "warn" | "bad" | "off";
@@ -241,7 +250,7 @@ export function stateLine(v: PumpfunView): StateLine {
   if (s.stops.total) return { label: "Total budget used up", level: "bad", detail: "The total budget stop fired; no more buys. Only a new confirmation file changes that." };
   if (s.stops.daily) return { label: "Daily loss stop", level: "warn", detail: "No more buys until tomorrow (UTC)." };
   if (s.on) {
-    return { label: s.mode === "test" ? "Trading real money (test)" : "Trading real money", level: "ok", detail: `${s.rule ?? "?"}, every trade is posted to Telegram.` };
+    return { label: s.mode === "test" ? `Trading real money (${ALPHA_PHASE})` : "Trading real money", level: "ok", detail: `${s.rule ?? "?"}, every trade is posted to Telegram.` };
   }
   return { label: "Not trading", level: "warn", detail: s.gate[0] ?? s.refusing ?? "The live gate is shut." };
 }

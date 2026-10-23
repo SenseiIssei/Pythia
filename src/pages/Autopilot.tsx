@@ -70,6 +70,7 @@ import {
 } from "../pagekit/autopilotView";
 import { explain } from "../glossary";
 import { ReadinessCard } from "../components/ReadinessCard";
+import { RealMoneyLink } from "../components/RealMoneyLink";
 import { useStore } from "../store";
 import { useAdvanced } from "../uiMode";
 import { autopilotVenue, demoIsApiTestOnly, exchangeName } from "../venueNames";
@@ -211,12 +212,13 @@ export function Autopilot() {
   const [another, setAnother] = useState(false);
   const analysisRef = useRef<HTMLDivElement>(null);
 
-  const active = api.autopilots.filter(isActive).sort((a, b) => b.startedMs - a.startedMs);
-  const past = api.autopilots
+  // Practice money only: the real-money runs are on the Real money page.
+  const { real, practice } = groupByMoney(api.autopilots);
+  const active = practice.filter(isActive).sort((a, b) => b.startedMs - a.startedMs);
+  const past = practice
     .filter((a) => !isActive(a))
     .sort((a, b) => (b.stoppedMs ?? b.startedMs) - (a.stoppedMs ?? a.startedMs));
-  const shown = api.autopilots.find((a) => a.config.id === selected) ?? active[0] ?? past[0];
-  const groups = groupByMoney(active);
+  const shown = practice.find((a) => a.config.id === selected) ?? active[0] ?? past[0];
   const advanced = useAdvanced();
 
   function analyseRun(id: string) {
@@ -252,26 +254,16 @@ export function Autopilot() {
         </Card>
       ) : (
         <>
-          {/* Real money first and apart: in the advanced view it is always
-              there, with one quiet line when nothing trades real money. */}
-          {(groups.real.length > 0 || advanced) && (
-            <section aria-label="Real money" className="space-y-3">
-              <SectionTitle>Real money</SectionTitle>
-              {groups.real.length === 0 ? (
-                <p className="px-1 text-[15px] text-muted">No real-money autopilot running</p>
-              ) : (
-                groups.real.map((s) => <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />)
-              )}
-            </section>
-          )}
+          {/* Real money has its own page; in the advanced view the link is always there. */}
+          {(real.length > 0 || advanced) && <RealMoneyLink count={real.filter(isActive).length} />}
           {active.length === 0 ? (
             <Setup onStart={api.start} />
           ) : (
             <>
-              {groups.practice.length > 0 && (
+              {active.length > 0 && (
                 <section aria-label="Practice (paper and demo)" className="space-y-3">
                   <SectionTitle>Practice (paper and demo)</SectionTitle>
-                  {groups.practice.map((s) => (
+                  {active.map((s) => (
                     <Running key={s.config.id} s={s} api={api} onAnalyse={() => analyseRun(s.config.id)} />
                   ))}
                 </section>

@@ -594,6 +594,19 @@ struct ReadinessPatch {
     risk_step: u8,
 }
 
+/// `GET /api/lab/pumpfun`: the pump.fun lab from the same root as `/api/lab/feeds`
+/// (the study's `latest.json`, `execution.json` and the pipeline strategies' paper
+/// books of the last seven days). Read only; `null` fields without a data folder.
+fn lab_pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
+    Router::new().route(
+        "/api/lab/pumpfun",
+        get(move || {
+            let root = root.clone();
+            async move { Json(root.map(|r| pythia_core::labview::pumpfun_lab_in(&r, now_ms())).unwrap_or_default()) }
+        }),
+    )
+}
+
 // ── the pump.fun wallet page (docs/PUMPFUN-LIVE.md) ─────────────────────────
 
 /// The pump.fun wallet page's routes over the lab's data folder `root`
@@ -631,6 +644,7 @@ fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
                         None => pf::view(),
                     };
                     v.sol_eur = pf::sol_eur(now_ms()).await;
+                    v.eur_usd = pf::eur_usd(now_ms()).await;
                     Json(v).into_response()
                 }
             }),
@@ -712,6 +726,7 @@ async fn pumpfun_live_ws(mut socket: WebSocket, root: Option<std::path::PathBuf>
                 if view_moved {
                     let mut v = pf::view_in(&root, now_ms());
                     v.sol_eur = pf::sol_eur(now_ms()).await;
+                    v.eur_usd = pf::eur_usd(now_ms()).await;
                     view_sent = std::time::Instant::now();
                     let msg = serde_json::json!({"kind": "view", "data": v}).to_string();
                     if socket.send(Message::Text(msg)).await.is_err() {
@@ -1290,6 +1305,8 @@ fn app(state: AppState, guard_cfg: Arc<guard::GuardConfig>) -> Router {
         .route("/api/pokemon", get(|| async { Json(pythia_core::labview::pokemon()) }))
         .route("/api/lab/feeds", get(|| async { Json(pythia_core::labview::feeds()) }))
         .route("/api/lab/studies", get(|| async { Json(pythia_core::labview::studies()) }))
+        // The pump.fun lab for the Lab page: the study's report, execution and paper books. Read-only.
+        .merge(lab_pumpfun_routes(pythia_core::labview::data_dir()))
         .route(
             "/api/readiness/settings",
             get(|| async { Json(pythia_core::readiness::settings()) }).post(post_readiness_settings),
@@ -2988,6 +3005,10 @@ mod ai_api_tests;
 #[cfg(test)]
 #[path = "pumpfun_api_tests.rs"]
 mod pumpfun_api_tests;
+
+#[cfg(test)]
+#[path = "lab_pumpfun_api_tests.rs"]
+mod lab_pumpfun_api_tests;
 
 #[cfg(test)]
 #[path = "guard_tests.rs"]

@@ -262,6 +262,9 @@ pub struct LiveView {
     /// SOL in euro right now, for the page's euro figures; none when the ticker
     /// could not be read (the page then shows SOL only).
     pub sol_eur: Option<SolEur>,
+    /// One euro in US dollars (Kraken's EURUSD, same shape), for the Real money
+    /// page's euro totals of the dollar autopilots; none when it could not be read.
+    pub eur_usd: Option<SolEur>,
 }
 
 /// The price of one SOL in euro from Kraken's public ticker (pair SOLEUR, no key).
@@ -294,7 +297,19 @@ pub fn parse_sol_eur(body: &serde_json::Value, now_ms: i64) -> Option<SolEur> {
 pub async fn sol_eur(now_ms: i64) -> Option<SolEur> {
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<Option<SolEur>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    ticker(SOL_EUR_URL, CACHE.get_or_init(|| Mutex::new(None)), now_ms).await
+}
+
+const EUR_USD_URL: &str = "https://api.kraken.com/0/public/Ticker?pair=EURUSD";
+
+/// One euro in US dollars, cached like `sol_eur`. Public price only, no key.
+pub async fn eur_usd(now_ms: i64) -> Option<SolEur> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<SolEur>>> = OnceLock::new();
+    ticker(EUR_USD_URL, CACHE.get_or_init(|| Mutex::new(None)), now_ms).await
+}
+
+async fn ticker(url: &str, cache: &std::sync::Mutex<Option<SolEur>>, now_ms: i64) -> Option<SolEur> {
     let last = cache.lock().ok().and_then(|c| c.clone());
     if let Some(p) = &last {
         if now_ms - p.t < SOL_EUR_TTL_MS {
@@ -302,7 +317,7 @@ pub async fn sol_eur(now_ms: i64) -> Option<SolEur> {
         }
     }
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().ok()?;
-    let fresh = match client.get(SOL_EUR_URL).send().await {
+    let fresh = match client.get(url).send().await {
         Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|b| parse_sol_eur(&b, now_ms)),
         Err(_) => None,
     };
@@ -338,6 +353,7 @@ pub fn view_in(root: &Path, now_ms: i64) -> LiveView {
         hard: Hard::default(),
         now_ms,
         sol_eur: None,
+        eur_usd: None,
     }
 }
 
@@ -375,6 +391,7 @@ pub fn view() -> LiveView {
             hard: Hard::default(),
             now_ms: now,
             sol_eur: None,
+            eur_usd: None,
         },
     }
 }

@@ -26,6 +26,7 @@ import {
   BookOpen,
   Layers,
   QrCode,
+  Banknote,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -34,6 +35,7 @@ export type PageId =
   | "home"
   | "practice"
   | "autopilot"
+  | "realmoney"
   | "activity"
   | "notifications"
   | "dashboard"
@@ -76,6 +78,8 @@ export const NAV: NavItem[] = [
   // ── always visible ──
   { id: "home", label: "Home", icon: Home, section: "Overview" },
   { id: "autopilot", label: "Autopilot", icon: Plane, section: "Overview" },
+  // Everything with real money in one place: the pump.fun bot, the live autopilots, live fills, one euro P&L.
+  { id: "realmoney", label: "Real money", icon: Banknote, section: "Overview" },
   { id: "activity", label: "Activity", icon: History, section: "Overview" },
   { id: "notifications", label: "Notifications", icon: Bell, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },

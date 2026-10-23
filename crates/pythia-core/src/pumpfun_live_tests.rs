@@ -167,6 +167,15 @@ fn reads_sol_in_euro_from_krakens_ticker() {
 }
 
 #[test]
+fn reads_the_euro_in_dollars_from_the_same_ticker_shape() {
+    // Kraken answers the EURUSD pair under its own key; the first entry is read.
+    let body = serde_json::json!({"error": [], "result": {"ZEURZUSD": {"c": ["1.0812", "10"], "o": "1.0790"}}});
+    let p = parse_sol_eur(&body, 7).unwrap();
+    assert_eq!((p.price, p.open, p.t), (1.0812, 1.079, 7));
+    assert!(view_in(&temp("eurusd"), NOW).eur_usd.is_none());
+}
+
+#[test]
 fn the_feed_is_passed_on_and_every_file_moves_its_stamp() {
     let d = temp("feed");
     assert!(feed_in(&d).is_none());
