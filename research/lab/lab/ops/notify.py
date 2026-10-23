@@ -1058,7 +1058,7 @@ DISCORD_BOT_ENV, DISCORD_GUILD_ENV, DISCORD_OWNER_ENV = ("PYTHIA_DISCORD_BOT_TOK
                                                          "PYTHIA_DISCORD_OWNER_ID")
 DISCORD_API = "https://discord.com/api/v10"
 DISCORD_UA = "DiscordBot (https://github.com/SenseiIssei/Pythia, 1.0)"
-# What goes where: kind -> (channel, also a DM to the owner). The names are the bot's layout
+# What goes where: kind -> (channel, a DM to the owner when neither channel took it). The names are the bot's layout
 # (research/discord/pythia_discord/layout.py).
 DISCORD_ROUTES: dict[str, tuple[str, bool]] = {
     "briefing": ("briefing", True),          # the 09:00 briefing
@@ -1223,7 +1223,7 @@ def send_bot(kind: str, payloads: dict, image: bytes | None = None) -> dict:
                 ok, err = bot_post_all(cid, embeds, image)
         out["channel" if lang == "de" else "channel_en"] = ok
         errs += [] if ok else [f"#{cname}{'' if lang == 'de' else ' (en)'}: {err}"]
-    if dm:
+    if dm and not (out["channel"] or out["channel_en"]):     # the owner's wish: a DM only when no channel took it
         both = [e for lang in DISCORD_LANGS if lang in payloads for e in payloads[lang]["embeds"]]
         both = [dict(e) for e in both]
         shown = False
