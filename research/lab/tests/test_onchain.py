@@ -100,8 +100,8 @@ def test_the_client_retries_rate_limits_and_timeouts_then_answers():
 def test_the_client_paces_calls_and_reads_the_reset_header():
     net = Net(ok(QUOTE), (429, {"x-ratelimit-reset": "1792000005"}, b""), ok(QUOTE))
     c = net.client(min_interval=1.1)
-    c.quote(M.USDC.mint, M.SOL.mint, 1)
-    c.quote(M.USDC.mint, M.SOL.mint, 1)
+    c.quote(M.USDC.mint, M.SOL.mint, 100_000_000)
+    c.quote(M.USDC.mint, M.SOL.mint, 100_000_000)
     # the second call waits its turn, the third until the reset the 429 named
     assert net.slept == pytest.approx([1.1, 3.9])
     assert c.calls == 3
@@ -117,6 +117,50 @@ def test_the_client_gives_up_and_never_retries_a_bad_request():
     assert len(net.urls) == 1
     with pytest.raises(J.QuoteError):
         Net().client().quote(M.USDC.mint, M.SOL.mint, 0)
+
+
+def test_a_quote_for_another_pair_amount_or_mode_is_refused():
+    # review finding 1 (docs/ONCHAIN-REVIEW.md): booked, such an answer filled the wrong coin or spent
+    # more USDC than the account asked to spend
+    for bad in ({"outputMint": M.COINS["BONK"].mint}, {"inputMint": M.SOL.mint}, {"inAmount": "900000000"},
+                {"swapMode": "ExactOut"}, {"outAmount": "0"}):
+        net = Net(ok({**QUOTE, **bad}))
+        with pytest.raises(J.QuoteError):
+            net.client().quote(M.USDC.mint, M.SOL.mint, 100_000_000)
+        assert len(net.urls) == 1                                        # refused, not retried
+    for junk in ({"inAmount": "lots"}, {"inputMint": None, "outAmount": None}):
+        with pytest.raises(J.QuoteError, match="not a quote"):          # a crash past the book's handlers before
+            J.parse_quote({**QUOTE, **junk})
+    assert Net(ok(QUOTE)).client().quote(M.USDC.mint, M.SOL.mint, 100_000_000).out_amount == 950_000_000
+
+
+def test_a_wrong_answer_leaves_the_account_alone():
+    class Liar(Pools):
+        def quote(self, in_mint, out_mint, amount, slippage_bps=50):
+            net = Net(ok({**QUOTE, "inputMint": in_mint, "outputMint": out_mint, "inAmount": str(amount * 10)}))
+            return net.client().quote(in_mint, out_mint, amount)
+    pools = Liar(MIDS)
+    st = state(100.0, {})
+    fills, errors = B.rebalance(st, {"SOL": 0.5}, P.PaperExecutor(pools, pools.prices(list(M.BY_MINT))), 100.0)
+    assert fills == [] and errors[0].startswith("buy SOL") and st["usdc"] == 100.0 and st["units"] == {}
+
+
+def test_a_usdc_price_off_its_peg_marks_nothing(lab):
+    # review finding 2: USDC's price divides every mark; a broken one wrote a false equity into the journal
+    assert B.mids({M.USDC.mint: 0.5, M.SOL.mint: 100.0}) == {}
+    assert B.mids({M.USDC.mint: 1.03, M.SOL.mint: 100.0}) == {}
+    assert B.mids({M.USDC.mint: 0.999, M.SOL.mint: 100.0}) == {"SOL": pytest.approx(100.1, abs=0.01)}
+
+    class Depeg(Pools):
+        def prices(self, mints):
+            return {**super().prices(mints), M.USDC.mint: 0.2}
+    signal(lab, {"SOL": 0.5})
+    B.step(Pools(MIDS), NOW, root=lab, write_root=lab, probes=False)
+    with pytest.raises(J.QuoteError, match="peg"):
+        B.step(Depeg(MIDS), NOW + DAY, root=lab, write_root=lab, probes=False)
+    with pytest.raises(J.QuoteError, match="peg"):
+        B.mark_only(Depeg(MIDS), NOW + DAY, write_root=lab)
+    assert len(journal(lab)) == 1 and not (B.book_dir(lab) / "marks.csv").exists()
 
 
 def test_prices():

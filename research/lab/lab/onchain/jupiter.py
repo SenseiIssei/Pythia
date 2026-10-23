@@ -60,6 +60,13 @@ def parse_quote(d: dict) -> Quote:
     the hop's percent (100 for sequential hops, the split share otherwise)."""
     if "outAmount" not in d or "inAmount" not in d:
         raise QuoteError(f"not a quote: {d.get('error') or str(d)[:200]}")
+    try:
+        return _parse(d)
+    except (KeyError, TypeError, ValueError) as e:      # a malformed answer is a failed quote, not a crash
+        raise QuoteError(f"not a quote ({type(e).__name__}: {e})") from e
+
+
+def _parse(d: dict) -> Quote:
     fee, named = 0.0, False
     labels = []
     for hop in d.get("routePlan") or []:
@@ -137,11 +144,19 @@ class Jupiter:
         raise QuoteError(f"{path}: gave up after {self.retries + 1} tries ({err})")
 
     def quote(self, in_mint: str, out_mint: str, amount: int, slippage_bps: int = SLIPPAGE_BPS) -> Quote:
+        """Refuses an answer for another pair, another amount or ExactOut: booked, it would fill
+        the wrong coin at the wrong decimals or spend more than the account asked to."""
         if amount <= 0:
             raise QuoteError("a quote needs a positive amount")
-        return parse_quote(self.get("/swap/v1/quote", {"inputMint": in_mint, "outputMint": out_mint,
-                                                       "amount": int(amount), "slippageBps": int(slippage_bps),
-                                                       "swapMode": "ExactIn"}))
+        d = self.get("/swap/v1/quote", {"inputMint": in_mint, "outputMint": out_mint, "amount": int(amount),
+                                        "slippageBps": int(slippage_bps), "swapMode": "ExactIn"})
+        q = parse_quote(d)
+        if (q.in_mint, q.out_mint, q.in_amount) != (in_mint, out_mint, int(amount)):
+            raise QuoteError(f"the quote answers {q.in_amount} {q.in_mint} -> {q.out_mint}, "
+                             f"not the {int(amount)} {in_mint} -> {out_mint} asked")
+        if d.get("swapMode", "ExactIn") != "ExactIn" or q.out_amount <= 0:
+            raise QuoteError(f"not an ExactIn quote with an out amount ({d.get('swapMode')}, {q.out_amount})")
+        return q
 
     def prices(self, mints: list[str]) -> dict[str, float]:
         """USD price per mint; a mint Jupiter has no price for is left out."""

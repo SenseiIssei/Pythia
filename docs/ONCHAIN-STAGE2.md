@@ -1,6 +1,7 @@
 # Eigene Wallet, Stufe 2: Echtgeld auf der Chain, Recherche und Entwurf
 
-**Stand 2026-10-23. Nur Entwurf.** Dieses Dokument enthält keinen Code, der signiert, sendet oder einen
+**Stand 2026-10-23. Nur Entwurf.** Nach dem Review (`docs/ONCHAIN-REVIEW.md`) ergänzt: Notschalter,
+Wiederholen und Neustart, Mindestmenge, Compute Budget, Token-2022, Code-Pin, Werte der App. Dieses Dokument enthält keinen Code, der signiert, sendet oder einen
 Schlüssel liest. Es entscheidet, wie die nächsten Aufgaben die Stufe 2 bauen, und was vorher bewiesen sein
 muss. Der Nachweis vor echtem Geld steht vorab registriert in
 `research/lab/results/onchain_stage2_prereg.md`.
@@ -113,7 +114,11 @@ Die Diskriminatoren der Jupiter-Instruktionen stimmen mit Anchor (`sha256("globa
 `shared_accounts_route_v2` waren Konto 1 die Wallet (einziger Signierer), Konto 2 ATA(Wallet, Eingabe-Mint),
 Konto 5 ATA(Wallet, Ausgabe-Mint), Konto 6 und 7 die beiden Mints, 8 und 9 ihre Token-Programme; ab Konto 12
 die Konten der Pools (39 von 67 schreibbar beim JTO-Weg). Die Stufe-2-Aufgabe legt diese Positionen gegen
-Jupiters on-chain IDL fest (wie `txbuild.check_idl` für pump.fun) und verweigert, wenn das IDL sich ändert.
+Jupiters on-chain IDL fest (wie `txbuild.check_idl` für pump.fun), je Instruktion eigene Positionen (`route_v2`
+hat eine andere Kontenfolge als `shared_accounts_route_v2`), und verweigert, wenn das IDL sich ändert. Weil ein
+Upgrade des Programms das IDL-Konto nicht anfasst, pinnt der Guard zusätzlich den Code: den Slot des letzten
+Deploys im ProgramData-Konto von Jupiter v6, vor jedem Signieren gelesen; weicht er vom gepinnten Wert ab, wird
+nichts signiert, bis der Besitzer den neuen Wert bestätigt (Review B7).
 
 ### Was der Guard zulässt (neu: `lab/onchain/guard.py`)
 
@@ -124,11 +129,11 @@ dann wird nichts signiert.
 
 | Programm | erlaubt | sonst |
 |---|---|---|
-| ComputeBudget | `SetComputeUnitLimit` (<= 1,4 Mio.), `SetComputeUnitPrice` (Preis x Limit <= harte Grenze 0,0005 SOL) | alles andere |
+| ComputeBudget | genau ein `SetComputeUnitLimit` (<= 1,4 Mio.) und genau ein `SetComputeUnitPrice` (Preis x Limit <= harte Grenze 0,0005 SOL); fehlt eines, wird abgelehnt (ohne Limit gibt es kein Produkt zu prüfen, Review B6) | alles andere, auch `RequestHeapFrame` und `SetLoadedAccountsDataSizeLimit` |
 | Associated Token Account | `Create` / `CreateIdempotent` mit Zahler = Eigentümer = Wallet, Mint auf der Allowlist, Token-Programm = klassisches Token | ATA für fremde Eigentümer, fremde Mints |
 | Token (klassisch) | `CloseAccount` nur des eigenen Wrapped-SOL-Kontos, Ziel und Autorität = Wallet; `SyncNative` des eigenen Wrapped-SOL-Kontos | jedes Transfer, Approve, SetAuthority, Burn, Close an andere |
 | System | eine Überweisung von der Wallet in ihr eigenes Wrapped-SOL-Konto (Wrap); höchstens ein Trinkgeld an ein Konto aus `txbuild.HELIUS_TIP_ACCOUNTS`, höchstens 0,0001 SOL | jede andere Überweisung, CreateAccount, Assign |
-| Jupiter v6 | nur `route_v2`, `shared_accounts_route_v2`; Signierer = Wallet; Quelle = ATA(Wallet, Eingabe), Ziel = ATA(Wallet, Ausgabe); beide Mints auf der Allowlist; Eingabebetrag = geplanter Betrag; Mindestmenge (`quoted_out_amount` abzüglich `slippage_bps`) >= unsere Grenze; kein Plattformgebühr-Konto | ExactOut, Token-Ledger, Gebühren an Dritte, ein anderes Ziel-Konto |
+| Jupiter v6 | nur `route_v2`, `shared_accounts_route_v2`; Signierer = Wallet; Quelle = ATA(Wallet, Eingabe), Ziel = ATA(Wallet, Ausgabe); beide Mints auf der Allowlist; Eingabebetrag = geplanter Betrag; Mindestmenge (`quoted_out_amount` abzüglich `slippage_bps`) >= unsere Grenze, und diese Grenze auch >= Eingabewert zum Kraken-Mittelkurs abzüglich Schlupf der Klasse und 50 bps, also unabhängig von Jupiters eigener Quote (Review B3); kein Plattformgebühr-Konto | ExactOut, Token-Ledger, Gebühren an Dritte, ein anderes Ziel-Konto |
 | alle anderen | nichts | |
 
 Dazu für die ganze Nachricht: genau ein Signierer (die Wallet), Zahler = Wallet, Version 0, höchstens eine
@@ -167,7 +172,9 @@ der dynamische jede unerwartete Bewegung innerhalb des erlaubten Jupiter-Program
   (etwa PYUSD), dann nur einzeln und nur, wenn die Mint keine dieser Erweiterungen hat [S3]: TransferHook
   (fremder Code bei jeder Überweisung), PermanentDelegate (jemand kann unsere Tokens bewegen), Pausable,
   NonTransferable, DefaultAccountState gefroren, und TransferFee nur mit 0. Der Guard liest die Erweiterungen
-  der Mint vor jedem Swap.
+  der Mint vor jedem Swap. Ob ein Zwischen-Token Token-2022 ist, entscheidet nicht der `routePlan` (Daten der
+  API), sondern die Nachricht selbst: steht die Programm-ID von Token-2022 unter ihren Konten (auch aus den
+  Lookup-Tabellen), wird abgelehnt (Review B5).
 - **Größe:** Eine v0-Transaktion ist höchstens 1.232 Byte groß. Das Sender-Trinkgeld bringt ein Konto
   außerhalb der Lookup-Tabellen mit. Darum fragen wir mit `maxAccounts` 48 an; passt es trotzdem nicht,
   mit 40, dann kein Swap.
@@ -237,7 +244,12 @@ weiter täglich (Proben bei 10, 100 und 1.000 USD statt nur 100).
   Vorschlag gebunden) lässt ihn tauschen: neue Quote, höchstens so schlecht wie die Mindestmenge des
   Vorschlags, dann Guard, Simulation, Senden. Es ist derselbe Weg wie bei einem Buch-Trade, also gibt es
   keine Überweisung: Der Guard kennt keine Transfer-Instruktion, nur Tausch innerhalb der eigenen Wallet.
-  Umtausch zählt zu den Tages-Caps (`max_convert_usd` je Tag).
+  Umtausch zählt zu den Tages-Caps (`max_convert_usd` je Tag). Der Vorschlag trägt eine zufällige ID, die der
+  Dienst vergibt; eine Bestätigung gilt nur für diese ID, und der Dienst schreibt sie als verbraucht ins Ledger,
+  bevor er signiert. Eine zweite Bestätigung derselben ID, auch nach einem Neustart, tauscht nie ein zweites
+  Mal. Den Betrag prüft der Dienst selbst (endliche Zahl > 0, höchstens `max_trade_usd` und der Tagesrest),
+  die Prüfung im Server ist nur Komfort; Server und App schreiben nur Anfrage, Bestätigung und `KILL`, nie
+  eine Transaktion oder einen Schlüssel (Review B1, B8).
 - **Buch gegen Besitzer:** Die Wallet hat zwei Konten im Ledger: den Teil des Buchs (`book_usd` im Ack) und
   deinen Rest. Ein Buch handelt nie mehr als seinen Teil; du tauschst nur in deinem Rest. Die Summe beider
   muss jeden Tag mit den Guthaben auf der Chain übereinstimmen.
@@ -278,7 +290,9 @@ I accept that I can lose all of it
 | `expires` | höchstens 90 Tage | danach kein Swap |
 
 Wie beim pump.fun-Bot: Eine Datei über den Höchstwerten wird abgelehnt, die App kann jede Grenze nur senken,
-und die letzte Zeile muss wörtlich dastehen. Preise in USD von Jupiter, gegen Krakens Mittelkurs geprüft;
+und die letzte Zeile muss wörtlich dastehen. Ein Wert der App gilt nur, wenn er eine endliche Zahl > 0 ist
+(kein NaN, kein Inf, kein bool, wie `live_exec.read_settings`), sonst der Wert des Acks: ein NaN als Grenze
+ließe jeden Vergleich `Betrag > Grenze` falsch ausgehen (Review B8). Preise in USD von Jupiter, gegen Krakens Mittelkurs geprüft;
 weichen sie um mehr als 2 % ab, kein Swap.
 
 Die übrigen Tore, alle wie beim pump.fun-Bot:
@@ -288,8 +302,11 @@ Die übrigen Tore, alle wie beim pump.fun-Bot:
 - **Simulation innerhalb von 24 Stunden:** `python -m lab.onchain.live_exec simulate` baut einen Kauf und
   einen Verkauf (USDC nach SOL und zurück, 10 USD) mit dem echten Guthaben als Zahler, mit Trinkgeld, und
   simuliert beide; geschrieben nach `live/onchain/simulate.json`. Älter als 24 Stunden: keine Käufe.
-- **Notschalter:** `reports/onchain_live/KILL` aus der App oder `/etc/pythia/onchain-kill`. Keine Käufe mehr;
-  ob der Bestand nach USDC verkauft wird, steht im Ack (`on_kill=hold` oder `on_kill=usdc`, Standard `hold`).
+- **Notschalter:** `reports/onchain_live/KILL` aus der App oder `/etc/pythia/onchain-kill`. Ab dann wird nichts
+  mehr signiert, auch kein Verkauf, kein Rebalance und kein Umtausch: der Schalter ist für den Fall gedacht,
+  dass Guard oder API verdächtig sind, und jeder Swap läuft durch denselben Weg (Review B2). Nur mit
+  `on_kill=usdc` im Ack verkauft der Dienst einmal alles nach USDC, mit allen Prüfungen; Standard `hold`.
+  Geprüft wird der Schalter im Signierpfad unmittelbar vor dem Signieren, nicht nur im Status.
   Lösen nur auf dem Server.
 - **Watcher:** Job `onchain-live-watch` alle zwei Minuten: Dienst läuft, keine hängende Order, Ledger gegen
   Chain sauber, Simulation bald abgelaufen, ein Token-Konto eingefroren, Mint-Prüfung fehlgeschlagen. Jeder
@@ -327,8 +344,13 @@ veraltete Quote senden.
   die Verbindung warm [H1]. Gleichzeitig dieselbe signierte Transaktion an den normalen RPC.
 - **Bestätigung:** `signatureSubscribe` per Websocket mit `confirmed`, dazu `getSignatureStatuses` jede
   Sekunde als Rückfall.
-- **Wiederholen:** dieselbe signierte Transaktion alle 2 s erneut senden, bis sie bestätigt ist oder die
-  Blockhöhe über `lastValidBlockHeight` liegt (60 bis 90 s [S2]). Erst danach eine neue Quote, neuer Guard,
+- **Wiederholen:** Jede Order hat eine ID; ihre Signatur, der signierte Blockhash und dessen
+  `lastValidBlockHeight` stehen im Ledger (geschrieben und synchronisiert), bevor das erste Mal gesendet wird.
+  Ein Blockhash, eine Quelle: der, den wir signiert haben. Dieselbe signierte Transaktion alle 2 s erneut
+  senden, bis sie bestätigt ist oder die Blockhöhe (`confirmed`, wie der Blockhash) über `lastValidBlockHeight`
+  liegt (60 bis 90 s [S2]). Danach einmal `getSignatureStatuses` mit `searchTransactionHistory`: erst wenn die
+  Signatur auch dort fehlt, gilt die Order als nicht gelandet (Review B4). Ein Neustart liest offene Orders
+  aus dem Ledger und klärt erst deren Signatur so, bevor er für dieselbe Order etwas Neues baut. Erst danach eine neue Quote, neuer Guard,
   neue Simulation; höchstens 3 Versuche je Order, dann Abbruch und Meldung. Nie zwei Versionen derselben
   Order gleichzeitig unterwegs.
 - **Schlupf:** fest je Klasse (Tabelle oben), nicht Jupiters RTSE: Der Guard braucht eine Mindestmenge, die
@@ -415,10 +437,10 @@ nicht kaufen, solange keine Pool-Regel nach Kosten positiv ist.
 |---|---|---|---|
 | 1 | `lab/onchain/swapapi.py` | Client für `/swap/v2/build` (Schlüssel optional aus `PYTHIA_JUPITER_API_KEY`), Antwort in Instruktionen; Stufe 1 und das Paper-Buch wechseln auf denselben Weg | aufgezeichnete Antworten (Absender erfunden), Rate-Limit, Fehler |
 | 2 | `lab/onchain/tx.py` | v0-Nachricht mit Lookup-Tabellen bauen und zurücklesen (ohne pump.fun-Code zu ändern) | Rundreise Bauen / Lesen, Größe, Vergleich mit `solders` |
-| 3 | `lab/onchain/guard.py` | statischer Guard, Effekt-Prüfung der Simulation, Jupiter-IDL-Prüfung, Mint-Prüfung (Token-2022, Erweiterungen) | jede verbotene Variante einzeln: fremdes Ziel-Konto, zweiter Signierer, Transfer, Approve, SetAuthority, Close an andere, falsche Mint, ExactOut, Gebührenkonto, zwei Trinkgelder, Trinkgeld über der Grenze, Token-2022-Zwischen-Token, Simulation mit Abfluss aus einem dritten Konto |
+| 3 | `lab/onchain/guard.py` | statischer Guard, Effekt-Prüfung der Simulation, Jupiter-IDL-Prüfung, Mint-Prüfung (Token-2022, Erweiterungen) | jede verbotene Variante einzeln: fremdes Ziel-Konto, zweiter Signierer, Transfer, Approve, SetAuthority, Close an andere, falsche Mint, ExactOut, Gebührenkonto, zwei Trinkgelder, Trinkgeld über der Grenze, Token-2022-Zwischen-Token (nur in der Nachricht, nicht im `routePlan`), Simulation mit Abfluss aus einem dritten Konto, fehlendes oder doppeltes Compute-Limit, Mindestmenge unter dem Kraken-Wert, Jupiter-Code neu deployt |
 | 4 | `lab/onchain/shadow.py`, Job `onchain-shadow` | Schatten-Ausführung: jeden geplanten Swap des Paper-Buchs bauen, prüfen, mit der öffentlichen Adresse als Zahler simulieren, nie signieren; Bericht | Plan zu Simulation, Zählung für den Nachweis |
-| 5 | `lab/onchain/live_gate.py` | Ack, Caps, Notschalter, Simulation-Datei, Mounts (wie `LiveGate`) | Ack über den Grenzen, abgelaufen, fehlende Zeile, App senkt nur |
-| 6 | `lab/onchain/live_exec.py`, `live_service.py` | Signieren (wie `load_signer`), Sender, Bestätigung, Wiederholen, Ledger; Testmodus | Fake-RPC, Kill mitten im Lauf, Ablauf des Blockhash, Caps |
+| 5 | `lab/onchain/live_gate.py` | Ack, Caps, Notschalter, Simulation-Datei, Mounts (wie `LiveGate`) | Ack über den Grenzen, abgelaufen, fehlende Zeile, App senkt nur, NaN/Inf/bool/negativ der App ignoriert, Notschalter sperrt auch Verkauf und Umtausch |
+| 6 | `lab/onchain/live_exec.py`, `live_service.py` | Signieren (wie `load_signer`), Sender, Bestätigung, Wiederholen, Ledger; Testmodus | Fake-RPC, Kill mitten im Lauf, Ablauf des Blockhash, Caps, Neustart mit offener Order sendet nie doppelt, späte Landung nach Ablauf, Umtausch-Bestätigung nur einmal |
 | 7 | `lab/onchain/chain_ledger.py`, Job `onchain-live-watch` | Ledger gegen Chain, Watcher, Telegram und Discord | Abweichung, eingefrorenes Konto |
 | 8 | App: Seite "Solana wallet" | Adresse mit QR, Guthaben, Grenzen senken, Notschalter, Umtausch mit Bestätigung | vitest |
 | 9 | `lab/onchain/proof.py` | Bericht zum Nachweis (`reports/onchain/proof.json`) | Regeln aus der Vorab-Registrierung |

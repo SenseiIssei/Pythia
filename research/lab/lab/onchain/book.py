@@ -61,6 +61,7 @@ MODEL_COST = 0.0015             # the backtest's cost per unit of turnover (lab.
 KRAKEN_TAKER_BPS = 40.0         # Kraken Pro spot, lowest tier (config/costs.json)
 KRAKEN_HALF_DEFAULT = 25.0      # config/costs.json's Kraken half spread for a coin it has not measured
 PROBE_USDC = 100.0
+USDC_BAND = (0.98, 1.02)        # Jupiter's USD price of USDC outside it: no mark (a glitch or a depeg)
 VARIANT = ("EXPERIMENT, paper only · breakout_top10_live's weights in a Solana wallet, Jupiter quotes, "
            "1,000 USDC (journal equity on the 10,000 basis)")
 JOURNAL_COLS = ["date", "equity", "equity_usdc", "gross_ret_pct", "paper_cost_bps", "model_cost_bps",
@@ -153,9 +154,10 @@ def split_targets(weights: dict) -> tuple[dict[str, float], dict[str, float]]:
 
 
 def mids(prices: dict[str, float]) -> dict[str, float]:
-    """Jupiter's USD prices to prices in USDC by coin."""
+    """Jupiter's USD prices to prices in USDC by coin; none when USDC's own price is off its peg,
+    since it divides every mark and a broken one would write a false equity into the journal."""
     u = prices.get(M.USDC.mint)
-    if not u:
+    if not u or not USDC_BAND[0] <= u <= USDC_BAND[1]:
         return {}
     return {c: prices[m.mint] / u for c, m in M.COINS.items() if prices.get(m.mint)}
 
@@ -308,7 +310,7 @@ def step(client: Jupiter, now_ms: int | None = None, root: Path | None = None, w
     prices = client.prices([M.USDC.mint, *(m.mint for m in M.COINS.values())])
     mid = mids(prices)
     if not mid:
-        raise QuoteError("no USDC price from Jupiter, nothing marked")
+        raise QuoteError("no USDC price from Jupiter within its peg, nothing marked")
     before = mark(st, mid)
     if journal and journal[-1].get("date") == today:
         print(f"onchain: {NAME} already journaled {today}; marked only", file=sys.stderr)
@@ -372,7 +374,7 @@ def mark_only(client: Jupiter, now_ms: int | None = None, write_root: Path | Non
         return None
     mid = mids(client.prices([M.USDC.mint, *(M.COINS[c].mint for c in st["units"] if c in M.COINS)]))
     if not mid and st["units"]:
-        raise QuoteError("no USDC price from Jupiter, nothing marked")
+        raise QuoteError("no USDC price from Jupiter within its peg, nothing marked")
     eq = mark(st, mid)
     st.update(equity=eq * INDEX / START_USDC, equity_usdc=eq, last_mark_ms=now_ms)
     save_state(d, st)
