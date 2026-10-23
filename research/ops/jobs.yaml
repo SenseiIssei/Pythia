@@ -415,6 +415,27 @@ jobs:
     timeout: 2m
     alert: false
 
+  # Our own wallet's history for the app's Wallet tab: getSignaturesForAddress and getTransaction
+  # for its public address, parsed into reports/onchain/history.json. Read only; quiet until the
+  # wallet tool made a wallet. The live service reads it again after every swap.
+  - name: onchain-history
+    description: our on-chain wallet's history from the chain (deposits, swaps, fees, failures) for the Wallet tab, read only
+    schedule: "*/5 * * * *"
+    command: python -m lab.onchain.history
+    resources: {cpus: 1, memory: 512m}
+    timeout: 4m
+    grace: 15m
+    alert: false
+
+  # Speed and cost of every on-chain swap against the pump.fun bot's execution and Kraken's fees.
+  - name: onchain-execution
+    description: reports/onchain/execution.md, the on-chain trader's measured send, land, fees and cost against pump.fun and Kraken
+    schedule: "25 6 * * *"
+    command: python -m lab.onchain.execution
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
+    alert: false
+
   - name: onchain-live-watch
     description: watches the real-money on-chain trader every two minutes (container, status, gate, simulation, ledger against chain, frozen accounts, hanging swaps) and posts at once; quiet until the owner ever started it
     schedule: "*/2 * * * *"

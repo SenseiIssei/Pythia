@@ -4,10 +4,10 @@ Modelled on pumpfun_rt.live_exec.LiveGate (docs/ONCHAIN-STAGE2.md, section 4). T
 swaps only when EVERY one holds, checked at start and again every minute:
 
   1. env PYTHIA_ONCHAIN_LIVE=1
-  2. /etc/pythia/onchain-live-ack, written by the owner (mode 600): mode=test, the books and
-     mints it allows, book_usd, max_total_usd, max_trade_usd, max_daily_loss_usd,
+  2. /etc/pythia/onchain-live-ack, written by the owner (mode 600): mode=test or mode=alpha, the
+     books and mints it allows, book_usd, max_total_usd, max_trade_usd, max_daily_loss_usd,
      max_convert_usd, expires (at most 90 days ahead) and the line
-     "I accept that I can lose all of it". A value above its hard maximum below is refused.
+     "I accept that I can lose all of it". A value above its mode's hard maximum below is refused.
   3. env PYTHIA_ONCHAIN_KEYPAIR: a wallet file the owner made with the wallet tool
      (python -m lab.onchain.wallet new), a regular file not readable by group or others,
      outside the code, with its public address next to it (<file>.pub), and NOT the pump.fun
@@ -22,7 +22,11 @@ swaps only when EVERY one holds, checked at start and again every minute:
 
 A book trades only when, on top of all that, the ack names it and the pre-registered proof
 (research/lab/results/onchain_stage2_prereg.md; reports/onchain/proof.json, at most 36 hours
-old) says it passed. Nothing here opens the wallet file, signs or sends.
+old) says it passed. The one exception is the alpha mode (mode=alpha, like the pump.fun bot's
+test mode): there the books the ack names trade without the proof, so the owner can train and
+measure our own models with small real money, under the lower ALPHA_MAX_* below; every other
+gate, the guard, the caps, the kill switch and the watcher stay exactly as in test mode.
+Nothing here opens the wallet file, signs or sends.
 """
 
 from __future__ import annotations
@@ -51,11 +55,21 @@ ENV_SENDER_TIP = "PYTHIA_ONCHAIN_SENDER_TIP_SOL"
 ENV_IDL = "PYTHIA_ONCHAIN_IDL"
 ACCEPT_LINE = LX.ACCEPT_LINE
 
-# Hard maxima in code (test mode, the only mode stage 2 has): whatever the ack says, never more.
+# Hard maxima in code, by the ack's mode: whatever the ack says, never more.
 TEST_MAX_TOTAL_USD = 500.0
 TEST_MAX_TRADE_USD = 100.0
 TEST_MAX_DAILY_LOSS_USD = 100.0
 TEST_MAX_CONVERT_USD = 250.0             # converts from the app, a UTC day
+# The alpha mode: books trade without the proof, so far lower maxima; the ack can only go lower.
+ALPHA_MAX_TOTAL_USD = 100.0
+ALPHA_MAX_TRADE_USD = 25.0
+ALPHA_MAX_DAILY_LOSS_USD = 25.0
+ALPHA_MAX_CONVERT_USD = 100.0
+MODES = ("test", "alpha")
+HARD = {"test": {"total": TEST_MAX_TOTAL_USD, "trade": TEST_MAX_TRADE_USD, "daily_loss": TEST_MAX_DAILY_LOSS_USD,
+                 "convert": TEST_MAX_CONVERT_USD},
+        "alpha": {"total": ALPHA_MAX_TOTAL_USD, "trade": ALPHA_MAX_TRADE_USD, "daily_loss": ALPHA_MAX_DAILY_LOSS_USD,
+                  "convert": ALPHA_MAX_CONVERT_USD}}
 SMALL_MAX_TRADE_USD = 100.0              # PYTH, RENDER, JTO, POPCAT (20 to 50 bps at 1,000 USD)
 SMALL = frozenset({"PYTH", "RENDER", "JTO", "POPCAT"})
 MAX_BOOK_SWAPS_DAY = 40
@@ -137,6 +151,15 @@ class Ack:
     def allowed_mints(self) -> frozenset:
         return frozenset(CODES[c].mint for c in self.mints if c in CODES)
 
+    def cap(self, k: str) -> float:
+        """The limit in force: the ack's value, never above its mode's hard maximum (0 without a valid mode)."""
+        hard = HARD.get(self.mode or "")
+        if hard is None:
+            return 0.0
+        v = {"total": self.max_total_usd, "trade": self.max_trade_usd, "daily_loss": self.max_daily_loss_usd,
+             "convert": self.max_convert_usd}[k]
+        return min(v or 0.0, hard[k])
+
 
 def _usd(vals: dict, k: str, path: Path, cap: float, problems: list) -> float | None:
     try:
@@ -175,8 +198,9 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
         vals[k.strip().lower()] = v.strip()
     problems: list[str] = []
     mode = (vals.get("mode") or "").lower()
-    if mode != "test":
-        return Ack(problems=(f"{path}: mode must be test (stage 2 has no other mode), not {mode or 'missing'!r}",))
+    if mode not in MODES:
+        return Ack(problems=(f"{path}: mode must be test or alpha, not {mode or 'missing'!r}",))
+    hard = HARD[mode]
     split = lambda s: tuple(x.strip() for x in (s or "").replace(";", ",").split(",") if x.strip())
     mints = tuple(c.upper() for c in split(vals.get("mints")))
     if not mints:
@@ -185,13 +209,13 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
         if c not in CODES:
             problems.append(f"{path}: {c} is not on the stage-2 list ({', '.join(CODES)})")
     books = split(vals.get("books"))
-    total = _usd(vals, "max_total_usd", path, TEST_MAX_TOTAL_USD, problems)
-    trade = _usd(vals, "max_trade_usd", path, TEST_MAX_TRADE_USD, problems)
-    loss = _usd(vals, "max_daily_loss_usd", path, TEST_MAX_DAILY_LOSS_USD, problems)
-    conv = _usd(vals, "max_convert_usd", path, TEST_MAX_CONVERT_USD, problems)
+    total = _usd(vals, "max_total_usd", path, hard["total"], problems)
+    trade = _usd(vals, "max_trade_usd", path, hard["trade"], problems)
+    loss = _usd(vals, "max_daily_loss_usd", path, hard["daily_loss"], problems)
+    conv = _usd(vals, "max_convert_usd", path, hard["convert"], problems)
     book_usd = 0.0
     if books:
-        book_usd = _usd(vals, "book_usd", path, TEST_MAX_TOTAL_USD, problems) or 0.0
+        book_usd = _usd(vals, "book_usd", path, hard["total"], problems) or 0.0
         if total is not None and book_usd > total:
             problems.append(f"{path}: book_usd is above max_total_usd")
     on_kill = (vals.get("on_kill") or "hold").lower()
@@ -210,13 +234,15 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
         problems.append(f"{path} has no expires date (expires=YYYY-MM-DD, at most {EXPIRES_MAX_DAYS} days ahead)")
     if not accepted:
         problems.append(f"{path} lacks the line \"{ACCEPT_LINE}\"")
-    return Ack("test", books, mints, book_usd, total, trade, loss, conv, expires, on_kill, tuple(problems))
+    return Ack(mode, books, mints, book_usd, total, trade, loss, conv, expires, on_kill, tuple(problems))
 
 
-def hard_view() -> dict:
-    return {"max_total_usd": TEST_MAX_TOTAL_USD, "max_trade_usd": TEST_MAX_TRADE_USD,
-            "max_daily_loss_usd": TEST_MAX_DAILY_LOSS_USD, "max_convert_usd": TEST_MAX_CONVERT_USD,
-            "small_max_trade_usd": SMALL_MAX_TRADE_USD, "reserve_sol": RESERVE_L / 1e9,
+def hard_view(mode: str | None = None) -> dict:
+    """The hard maxima of `mode` (test when there is no valid ack: the higher ones, never claimed for alpha)."""
+    hard = HARD.get(mode or "", HARD["test"])
+    return {"mode": mode if mode in HARD else None, "max_total_usd": hard["total"], "max_trade_usd": hard["trade"],
+            "max_daily_loss_usd": hard["daily_loss"], "max_convert_usd": hard["convert"],
+            "small_max_trade_usd": min(SMALL_MAX_TRADE_USD, hard["trade"]), "reserve_sol": RESERVE_L / 1e9,
             "max_converts": MAX_CONVERTS_DAY, "max_book_swaps": MAX_BOOK_SWAPS_DAY, "confirm_s": CONFIRM_S,
             "max_cost_bps": MAX_COST_BPS, "max_eth_share": MAX_ETH_SHARE}
 
@@ -240,13 +266,16 @@ def simulate_problems(rec, address: str | None, now_ms: int, sender: bool = Fals
 
 
 def book_problems(book: str, ack: Ack, proof, now_ms: int) -> list[str]:
-    """Why a book may not trade: not in the ack, or the pre-registered proof has not passed (steps A to C)."""
+    """Why a book may not trade: not in the ack, or the pre-registered proof has not passed (steps A to C).
+    In the alpha mode the proof is not asked for: the ack naming the book is enough (under the alpha maxima)."""
     from . import book as B
     out = []
     if book not in ack.books:
         out.append(f"the confirmation file does not name {book}")
     if book != B.NAME:
         out.append(f"{book} has no on-chain paper twin")
+    if ack.mode == "alpha":
+        return out
     if not isinstance(proof, dict):
         return out + ["no proof report (reports/onchain/proof.json; the pre-registered evidence)"]
     if now_ms - int(proof.get("updated_ms") or 0) > PROOF_MAX_AGE_MS:

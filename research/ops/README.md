@@ -469,7 +469,7 @@ The real-money trader for the owner's own Solana wallet (`lab.onchain.live_servi
 `pythia-onchain-live`) is built and locked; nothing arms it. The owner's runbook, in German, with every
 command, is `docs/ONCHAIN-STAGE2.md`, section 7. It swaps through Jupiter's `/swap/v2/build` only when every
 gate holds (`python -m lab.onchain.live_exec check` lists the shut ones): `PYTHIA_ONCHAIN_LIVE=1`, the ack
-`/etc/pythia/onchain-live-ack` (mode=test, mints, max_total_usd at most 500, max_trade_usd at most 100,
+`/etc/pythia/onchain-live-ack` (mode=test or mode=alpha, mints, max_total_usd at most 500, max_trade_usd at most 100,
 max_daily_loss_usd at most 100, max_convert_usd at most 250, expires at most 90 days ahead, the acceptance
 line), its own wallet file `PYTHIA_ONCHAIN_KEYPAIR` made with `python -m lab.onchain.wallet new` (never the
 pump.fun wallet), a successful `live_exec simulate` within 24 hours, no kill file
@@ -492,6 +492,17 @@ It writes `reports/onchain_live/status.json` and `trades.json` (every 30 s), ans
 (`research/ops/onchain_live_watch.py`) checks it every two minutes and posts at once when it is down, hangs,
 does not trade and why, the simulation is about to expire, the ledger differs from the chain, an account is
 frozen or a swap hangs; before the container ever existed it stays quiet.
+
+The ack may also say `mode=alpha` (docs/ONCHAIN-STAGE2.md, section 8): then the books it names trade
+without the proof, under the lower hard maxima `live_gate.ALPHA_MAX_TOTAL_USD` (100), `ALPHA_MAX_TRADE_USD`
+(25) and `ALPHA_MAX_DAILY_LOSS_USD` (25); every other gate stays, a book's order above the swap cap goes as
+several swaps, and every alpha swap posts its card to Telegram and Discord's real-money route. The service
+also writes `reports/onchain_live/values.json` (the wallet's worth every 15 min) and, for every sent swap,
+`live/onchain/execution.jsonl` (signal to send, send to land, base, priority and tip, out against the quote).
+Two read-only jobs feed the app's Wallet tab and the comparison: `onchain-history` (every 5 min,
+`getSignaturesForAddress` and `getTransaction` for the wallet's public address into
+`reports/onchain/history.json`) and `onchain-execution` (daily, `reports/onchain/execution.md` against the
+pump.fun bot's `reports/pumpfun_rt/execution.json` and Kraken's fees).
 
 ## Questions in Telegram
 

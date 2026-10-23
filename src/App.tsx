@@ -3,6 +3,8 @@ import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Menu, Minus, Moon, PanelLeft, Power, ShieldCheck, Sun, TriangleAlert, X } from "lucide-react";
 import { activeTab, navFor, isVisible, resolvePage, tabsFor, type PageId } from "./nav";
 import { onOpenPage } from "./navigate";
+import { currentDeepLink, openPythiaHref, pageQuery, startScreen } from "./deepLink";
+import { EmbedFrame } from "./components/EmbedFrame";
 import { Segmented, TabBar } from "./design";
 import { setThemePref, useTheme } from "./design/theme";
 import { setUiMode, useUiMode, type UiMode } from "./uiMode";
@@ -16,6 +18,7 @@ import { LegalGate, hasAcceptedLegal } from "./components/LegalGate";
 import { Onboarding, hasSeenOnboarding } from "./components/Onboarding";
 import { Autopilots } from "./pages/Autopilots";
 import { RealMoney } from "./pages/RealMoney";
+import { Wallet } from "./pages/Wallet";
 import { Activity } from "./pages/Activity";
 import { Notifications } from "./pages/Notifications";
 import { Dashboard } from "./pages/Dashboard";
@@ -48,6 +51,7 @@ const PAGES: Record<Exclude<PageId, "practice">, () => ReactNode> = {
   home: HomePage,
   autopilot: Autopilots,
   realmoney: RealMoney,
+  wallet: Wallet,
   activity: Activity,
   notifications: Notifications,
   dashboard: Dashboard,
@@ -212,8 +216,8 @@ function Brand() {
   );
 }
 
-function Chrome() {
-  const [page, setPage] = useState<PageId>("home");
+function Chrome({ initial }: { initial: PageId | null }) {
+  const [page, setPage] = useState<PageId>(initial ?? "home");
   const narrow = useNarrow();
   const [sidebar, setSidebar] = useState(() => !(window.matchMedia?.(NARROW).matches ?? false));
   const mode = useUiMode();
@@ -235,11 +239,13 @@ function Chrome() {
   const nav = navFor(mode);
   const sections = [...new Set(nav.map((n) => n.section))];
   // Leaving advanced mode while on an advanced page would strand the user on a
-  // screen with no way back to it in the sidebar.
-  const current = isVisible(page, mode) ? (resolvePage(page) as keyof typeof PAGES) : "home";
+  // screen with no way back to it in the sidebar. A page the URL named stays open in either mode.
+  const current = isVisible(page, mode) || page === initial ? (resolvePage(page) as keyof typeof PAGES) : "home";
 
   function go(id: PageId) {
     setPage(id);
+    // A window opened by a deep link keeps its URL on the page shown, so a reload stays there.
+    if (new URLSearchParams(window.location.search).has("page")) window.history.replaceState(null, "", `${window.location.pathname}${pageQuery(id)}`);
     if (narrow) setSidebar(false);
     mainRef.current?.scrollTo({ top: 0 });
   }
@@ -423,18 +429,39 @@ function Chrome() {
   );
 }
 
+/** One page alone in an iframe (`?page=<id>&embed=1`); a page asking for another opens it in the whole app. */
+function Embedded({ id }: { id: PageId }) {
+  useEffect(() => onOpenPage((to) => void window.open(`${window.location.pathname}${pageQuery(to)}`, "_blank", "noopener")), []);
+  const Page = PAGES[resolvePage(id) as keyof typeof PAGES];
+  return (
+    <EmbedFrame href={openPythiaHref(window.location)}>
+      <ErrorBoundary>
+        <Page />
+      </ErrorBoundary>
+    </EmbedFrame>
+  );
+}
+
 export function App() {
   const [accepted, setAccepted] = useState(hasAcceptedLegal());
   const [onboarded, setOnboarded] = useState(hasSeenOnboarding());
+  const [link] = useState(currentDeepLink);
+  const screen = startScreen({ accepted, onboarded, embed: link.embed });
   let body: ReactNode;
-  if (!accepted) {
+  if (screen === "legal") {
     body = <LegalGate onAccept={() => setAccepted(true)} />;
-  } else if (!onboarded) {
+  } else if (screen === "onboarding") {
     body = <Onboarding onDone={() => setOnboarded(true)} />;
+  } else if (screen === "embed" && link.page) {
+    body = (
+      <StoreProvider>
+        <Embedded id={link.page} />
+      </StoreProvider>
+    );
   } else {
     body = (
       <StoreProvider>
-        <Chrome />
+        <Chrome initial={link.page} />
       </StoreProvider>
     );
   }

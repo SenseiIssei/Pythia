@@ -51,6 +51,13 @@ def test_each_problem():
     assert "frozen" in W.problems(status(frozen=["x"]), "running", [], NOW)
 
 
+def test_the_alpha_mode_is_watched_like_the_test_mode():
+    assert W.problems(status(mode="alpha"), "running", [], NOW) == {}
+    assert "sim" in W.problems(status(mode="alpha", simulate={"t": NOW * 1000, "ok": False}), "running", [], NOW)
+    assert "sim" in W.problems(status(mode="alpha", simulate={"t": NOW * 1000 - 21 * 3_600_000, "ok": True}),
+                               "running", [], NOW)
+
+
 def test_a_swap_sent_long_ago_without_a_result_is_hanging():
     t = (NOW - 600) * 1000
     sent = {"t": t, "what": "sent", "sig": "s1"}

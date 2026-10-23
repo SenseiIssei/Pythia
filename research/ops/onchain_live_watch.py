@@ -91,7 +91,7 @@ def problems(status: dict | None, state: str | None, orders: list[dict], now: fl
     if fresh and (status.get("stops") or {}).get("total"):
         out["total"] = "Die Wallet ist mehr wert als max_total_usd: nur noch Verkäufe nach USDC."
     sim = status.get("simulate") or {}
-    if status.get("mode") == "test" and status.get("running"):
+    if status.get("mode") in ("test", "alpha") and status.get("running"):
         sim_age_h = (now - (sim.get("t") or 0) / 1000) / 3600
         if not sim.get("ok"):
             out["sim"] = "Die letzte Simulation ist fehlgeschlagen oder fehlt; ohne sie bleibt der Händler zu."

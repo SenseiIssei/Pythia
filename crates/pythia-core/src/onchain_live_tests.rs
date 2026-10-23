@@ -365,3 +365,74 @@ fn the_kill_file_is_written_once_and_never_removed_here() {
     assert!(view_in(&d, NOW).kill_file);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn the_value_chart_is_read_oldest_first_and_thinned() {
+    let d = temp("values");
+    let pts: Vec<serde_json::Value> = (0..1000)
+        .rev()
+        .map(|i| serde_json::json!({"t": NOW - i * 900_000, "usd": 100.0 + i as f64, "prices": {"SOL": 150.0}}))
+        .chain([serde_json::json!({"t": "odd"}), serde_json::json!({"t": 0, "usd": 1.0})])
+        .collect();
+    std::fs::write(dir_in(&d).join("values.json"), serde_json::json!({ "points": pts }).to_string()).unwrap();
+    let v = view_in(&d, NOW);
+    assert!(v.values.len() <= MAX_VALUES + 1 && v.values.len() > MAX_VALUES / 2);
+    assert!(v.values.windows(2).all(|w| w[0].t < w[1].t));
+    assert_eq!(v.values.last().unwrap().t, NOW);
+    assert_eq!(v.values[0].t, NOW - 999 * 900_000);
+    let json = serde_json::to_value(&v).unwrap();
+    assert_eq!(json["values"][0]["prices"]["SOL"], 150.0);
+    assert_eq!(thin(v.values[..3].to_vec(), MAX_VALUES).len(), 3);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_history_belongs_to_the_wallet_and_reads_in_the_apps_spelling() {
+    let d = temp("history");
+    status(&d);
+    std::fs::create_dir_all(d.join("reports").join("onchain")).unwrap();
+    let h = serde_json::json!({"updated_ms": NOW - 60_000, "address": ADDR, "entries": [
+        {"sig": "FakeDep", "t": NOW - 3_000_000, "kind": "deposit", "ok": true, "ours": false,
+         "moves": [{"coin": "SOL", "mint": "MintSo1", "amount": 0.5, "raw": 500_000_000u64}], "fee_sol": 0.0},
+        {"sig": "FakeSwap", "t": NOW - 1_000_000, "kind": "swap", "ok": true, "ours": true, "from": "USDC",
+         "from_amount": 20.0, "to": "SOL", "to_amount": 0.1, "price": 200.0, "fee_sol": 0.000045,
+         "base_sol": 0.000005, "priority_sol": 0.00004, "tip_sol": 0.000005, "rent_sol": 0.0, "slot": 7},
+        {"sig": "FakeFail", "t": NOW - 2_000_000, "kind": "failed", "ok": false, "err": "Custom 6001", "fee_sol": 0.000085},
+        {"sig": 5}
+    ]});
+    let p = d.join("reports").join("onchain").join("history.json");
+    std::fs::write(&p, h.to_string()).unwrap();
+    let v = view_in(&d, NOW);
+    assert_eq!(v.history.iter().map(|e| e.sig.clone().unwrap()).collect::<Vec<_>>(), vec!["FakeSwap", "FakeFail", "FakeDep"]);
+    assert_eq!(v.history_ms, Some(NOW - 60_000));
+    let json = serde_json::to_value(&v).unwrap();
+    assert_eq!(json["history"][0]["fromAmount"], 20.0);
+    assert_eq!(json["history"][0]["prioritySol"], 0.00004);
+    assert_eq!(json["history"][2]["moves"][0]["amount"], 0.5);
+    assert_eq!(json["historyMs"], NOW - 60_000);
+    // A file of another wallet is not shown.
+    std::fs::write(&p, h.to_string().replace(ADDR, "22222222222222222222222222222222")).unwrap();
+    assert!(view_in(&d, NOW).history.is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_proposal_carries_its_price_impact_fee_and_slippage_to_the_app() {
+    let d = temp("impact");
+    request(&d, "c1792449990000-0a0a");
+    put(
+        &d,
+        "c1792449990000-0a0a",
+        "proposal",
+        serde_json::json!({"id": "c1792449990000-0a0a", "from": "USDC", "to": "SOL", "amount": 10.0, "expected_out": 0.05,
+            "min_out": 0.0499, "min_out_raw": "49900000", "cost_bps": 4.2, "in_usd": 10.0, "route": ["Whirlpool"],
+            "price_impact_pct": 0.012, "fee_sol": 0.000355, "slippage_bps": 30,
+            "t": NOW - 4_000, "expires_ms": NOW + 50_000, "status": "proposed"}),
+    );
+    let c = &converts_in(&d, NOW)[0];
+    assert_eq!((c.price_impact_pct, c.fee_sol, c.slippage_bps), (Some(0.012), Some(0.000355), Some(30.0)));
+    let json = serde_json::to_value(c).unwrap();
+    assert_eq!(json["priceImpactPct"], 0.012);
+    assert_eq!(json["feeSol"], 0.000355);
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -21,12 +21,16 @@ endpoints) and the caps below allow the swap. Then, for each swap (docs/ONCHAIN-
   6. the landed transaction read back (getTransaction): what the wallet really gave and got goes
      into the ledger, a failure with its fee too; every step into orders.jsonl
 
-Caps, whatever the ack says (live_gate.TEST_MAX_*): a swap at most max_trade_usd (100, the small
-coins 100), no buy while the wallet is worth more than max_total_usd, after the day's loss
+Caps, whatever the ack says (live_gate.TEST_MAX_*, in the alpha mode the lower ALPHA_MAX_*: 100 USD
+in all, 25 a swap, 25 a day): a swap at most max_trade_usd (100, the small coins 100), no buy while the wallet is worth more than max_total_usd, after the day's loss
 reached max_daily_loss_usd, or under the kill switch (a sale into USDC stays allowed when the
 ack says on_kill=usdc), the app's converts at most max_convert_usd and 10 a UTC day, a book
 40 swaps a day and never more than its book_usd, ETH at most a quarter of max_total_usd, 0.02
 SOL always left for fees, no buy while the ledger does not match the chain.
+
+Every swap that was sent is also measured (live/onchain/execution.jsonl, read by lab.onchain.execution
+for reports/onchain/execution.md): signal to send, send to land, the fee paid (base, priority, tip)
+and what really came out against the quote.
 
 The ledger is reconciled against the wallet's real balances (`reconcile`): what the wallet held
 when the service started, plus every swap's change as read from the chain, plus the deposits
@@ -49,6 +53,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import math
 import random
 import sys
 import time
@@ -122,6 +127,14 @@ def journal_path() -> Path:
 
 def ledger_path() -> Path:
     return LG.data_dir() / "ledger.csv"
+
+
+def execution_path() -> Path:
+    return LG.data_dir() / "execution.jsonl"
+
+
+def read_execution() -> list[dict]:
+    return _read_jsonl(execution_path())
 
 
 def log_order(rec: dict) -> None:
@@ -312,6 +325,7 @@ class Swap:
     book: str | None = None
     ref: str | None = None                       # the convert's id
     min_out_raw: int = 0                         # a confirmed proposal's minimum: a new quote may not be worse
+    signal_ms: int | None = None                 # when it was asked for: the owner's confirm, the signal file, the kill
 
     def record(self) -> dict:
         return {"kind": self.kind, "from": self.src, "to": self.dst, "in_raw": self.in_raw, "book": self.book,
@@ -395,7 +409,7 @@ class Trader:
     def caps(self, s: Swap, v: View, killed: bool | None = None) -> str | None:
         """Why this swap may not go now (None: it may), from the ack, the code's maxima and the real balances."""
         ack = self.gate.ack
-        if ack.mode != "test":
+        if ack.mode not in LG.MODES:
             return "no valid confirmation file"
         if s.src not in LG.CODES or s.dst not in LG.CODES or s.src == s.dst:
             return "not a swap between two coins of the list"
@@ -410,7 +424,7 @@ class Trader:
         in_usd = v.usd(s.src, s.in_raw)
         if in_usd is None:
             return f"no USD price for {s.src}"
-        lim = min(ack.max_trade_usd or 0.0, LG.TEST_MAX_TRADE_USD)
+        lim = ack.cap("trade")
         if s.src in LG.SMALL or s.dst in LG.SMALL:
             lim = min(lim, LG.SMALL_MAX_TRADE_USD)
         if in_usd > lim + 1e-9:
@@ -425,10 +439,10 @@ class Trader:
         total = v.total_usd()
         if total is None:
             return "the wallet's USD value is not known (a price is missing)"
-        if not selling and total > min(ack.max_total_usd or 0.0, LG.TEST_MAX_TOTAL_USD):
+        if not selling and total > ack.cap("total"):
             return f"the wallet is worth {total:.2f} USD, above max_total_usd: only sales into USDC"
         loss = day_loss_usd(v, total)
-        if not selling and loss is not None and loss >= min(ack.max_daily_loss_usd or 0.0, LG.TEST_MAX_DAILY_LOSS_USD):
+        if not selling and loss is not None and loss >= ack.cap("daily_loss"):
             return f"the day's loss reached {loss:.2f} USD: only sales into USDC until tomorrow (UTC)"
         if not selling and self.reconciled is not None and not self.reconciled.get("ok"):
             return "the ledger does not match the chain: no buys until it is explained"
@@ -436,7 +450,7 @@ class Trader:
         if s.kind == "convert":
             if day["converts"] >= LG.MAX_CONVERTS_DAY:
                 return f"already {LG.MAX_CONVERTS_DAY} converts today"
-            if day["convert_usd"] + in_usd > min(ack.max_convert_usd or 0.0, LG.TEST_MAX_CONVERT_USD) + 1e-9:
+            if day["convert_usd"] + in_usd > ack.cap("convert") + 1e-9:
                 return "the day's convert limit (max_convert_usd) would be passed"
         elif s.kind == "book":
             if s.book not in ack.books:
@@ -450,7 +464,7 @@ class Trader:
             return "an unknown kind of swap"
         if s.dst == "ETH":
             eth = (v.usd("ETH") or 0.0) + in_usd
-            if eth > LG.MAX_ETH_SHARE * min(ack.max_total_usd or 0.0, LG.TEST_MAX_TOTAL_USD):
+            if eth > LG.MAX_ETH_SHARE * ack.cap("total"):
                 return "ETH (WETH, bridged) would pass a quarter of max_total_usd"
         reserve = LG.RESERVE_L + G.MAX_PRIORITY_L + G.BASE_FEE_L + X.HELIUS_MAX_TIP_LAMPORTS + G.ATA_RENT_L
         spend = s.in_raw if s.src == SOL_CODE else 0
@@ -606,7 +620,8 @@ class Trader:
                     fee = a["fee_l"]
                     in_raw = -(sol + fee) if mi.mint == WSOL else -(a["tok"] or 0)
                     out_raw = (sol + fee) if mo.mint == WSOL else (b["tok"] or 0)
-                    return {"sol_delta_l": sol, "fee_l": fee, "in_raw": in_raw, "out_raw": out_raw, "err": a["err"]}
+                    return {"sol_delta_l": sol, "fee_l": fee, "in_raw": in_raw, "out_raw": out_raw, "err": a["err"],
+                            "block_ms": a.get("block_ms")}
             self.sleep(1.0)
         return None
 
@@ -615,6 +630,7 @@ class Trader:
         if self.signer is None:
             return {"status": "refused", "why": "no signer (the gate was shut at start)"}
         log_order({"what": "planned", **s.record()})
+        plan_ms = now_ms()
         why = self.caps(s, v)
         if why:
             log_order({"what": "refused", "why": why, **s.record()})
@@ -635,7 +651,9 @@ class Trader:
             log_order({"what": "sent", "attempt": attempt, "sig": sig, "units": p.units, "fees": p.fees,
                        "expected_out": p.build.out_amount, "min_out_raw": p.plan.min_out_raw,
                        "cost_bps": p.cost_bps, "route": p.build.labels, **s.record()})
+            sent_ms = now_ms()
             outcome = self._land(tx, sig, p.lvbh)
+            seen_ms = now_ms()
             if outcome == "expired":
                 log_order({"what": "expired", "attempt": attempt, "sig": sig, **s.record()})
                 continue
@@ -643,11 +661,13 @@ class Trader:
                 why = "no status after the waiting time; the ledger check settles it"
                 log_order({"what": "failed", "attempt": attempt, "sig": sig, "why": why, **s.record()})
                 self._row(s, p, sig, "failed", why, None)
+                self._measure(s, p, v, sig, "failed", attempt, plan_ms, sent_ms, None, None)
                 return {"status": "failed", "why": why, "sig": sig}
             back = self._read_back(sig, s)
             status = "filled" if outcome == "landed" else "failed"
             why = None if status == "filled" else "landed with an error (its fee is paid)"
             self._row(s, p, sig, status, why, back)
+            self._measure(s, p, v, sig, status, attempt, plan_ms, sent_ms, seen_ms, back)
             log_order({"what": status, "attempt": attempt, "sig": sig, "why": why, **(back or {}), **s.record()})
             return {"status": status, "why": why, "sig": sig,
                     "out_raw": (back or {}).get("out_raw") if status == "filled" else None,
@@ -670,6 +690,34 @@ class Trader:
                    "out_usd": round(out_usd, 4) if out_usd is not None else "", "planned_out_raw": p.build.out_amount,
                    "min_out_raw": p.plan.min_out_raw, "sig": sig, "status": status, "why": why,
                    "unread": "" if back is not None else "1"})
+
+    def _measure(self, s: Swap, p: Prepared, v: View, sig: str, status: str, attempt: int, plan_ms: int,
+                 sent_ms: int, seen_ms: int | None, back: dict | None) -> None:
+        """One sent swap's timing, fee and cost against its quote (live/onchain/execution.jsonl). Never raises."""
+        try:
+            fee = (back or {}).get("fee_l")
+            tip = int(p.fees.get("tip_l") or 0)
+            base = G.BASE_FEE_L if fee is not None else None
+            out = (back or {}).get("out_raw") if status == "filled" else None
+            planned = p.build.out_amount
+            sol_usd = v.prices.get(M.SOL.mint)
+            rec = {"t": now_ms(), "mode": self.gate.ack.mode, "kind": s.kind, "book": s.book, "ref": s.ref,
+                   "from": s.src, "to": s.dst, "sig": sig, "status": status, "attempt": attempt,
+                   "via": "sender+rpc" if self.sender is not None else "rpc",
+                   "signal_ms": s.signal_ms, "plan_ms": plan_ms, "sent_ms": sent_ms, "seen_ms": seen_ms,
+                   "block_ms": (back or {}).get("block_ms"),
+                   "signal_to_send_ms": sent_ms - s.signal_ms if s.signal_ms else None,
+                   "plan_to_send_ms": sent_ms - plan_ms,
+                   "send_to_land_ms": seen_ms - sent_ms if seen_ms is not None else None,
+                   "fee_l": fee, "base_l": base, "priority_l": max(int(fee) - base, 0) if fee is not None else None,
+                   "tip_l": tip, "sol_usd": sol_usd, "in_raw": s.in_raw, "planned_out_raw": planned, "out_raw": out,
+                   "quote_slip_bps": round((planned - out) / planned * 1e4, 3) if out is not None and planned else None,
+                   "cost_bps": round(p.cost_bps, 3) if p.cost_bps is not None else None,
+                   "in_usd": round(p.in_usd, 4) if p.in_usd is not None else None,
+                   "out_usd": round(p.out_usd * out / planned, 4) if out is not None and planned and p.out_usd else None}
+            _append_jsonl(execution_path(), rec)
+        except Exception as e:                           # a measurement never stops a swap's booking
+            print(f"onchain live: execution not measured ({type(e).__name__}: {e})"[:200], flush=True)
 
     # ------------------------------------------------ the ledger against the chain
 
@@ -811,16 +859,26 @@ def book_swaps(book: str, ack: LG.Ack, v: View, weights: dict) -> list[Swap]:
              "units": {c: u / 10 ** LG.CODES[c].decimals for c, u in st["units"].items()}}
     equity = paper["usdc"] + sum(u * marks.get(c, 0.0) for c, u in paper["units"].items())
     sells, buys = B.plan(paper, tgt, equity, LG.MIN_BOOK_SWAP_USD)
+
+    def pieces(c: str, raw: int, usd: float | None) -> list[int]:
+        """An order above the swap cap (25 USD in the alpha mode) as several swaps, each under it with room."""
+        lim = min(ack.cap("trade"), LG.SMALL_MAX_TRADE_USD) if c in LG.SMALL else ack.cap("trade")
+        if not usd or lim <= 0 or usd <= lim * 0.98:
+            return [raw]
+        n = math.ceil(usd / (lim * 0.98))
+        part = raw // n
+        return [part] * (n - 1) + [raw - part * (n - 1)]
+
     out = []
     for c, units in sells:
         raw = min(int(units * 10 ** LG.CODES[c].decimals), st["units"].get(c, 0), v.held(c))
         if raw > 0:
-            out.append(Swap("book", c, "USDC", raw, book=book))
+            out += [Swap("book", c, "USDC", r, book=book) for r in pieces(c, raw, v.usd(c, raw))]
     cash = min(st["usdc_raw"], v.held("USDC"))
     for c, usdc in buys:
         raw = min(int(usdc * 1e6), cash)
         if raw >= LG.MIN_BOOK_SWAP_USD * 1e6:
-            out.append(Swap("book", "USDC", c, raw, book=book))
+            out += [Swap("book", "USDC", c, r, book=book) for r in pieces(c, raw, raw / 1e6)]
             cash -= raw
     return out
 
@@ -887,7 +945,7 @@ def main(argv: list[str] | None = None) -> int:
     gate = LG.Gate()
     if a.cmd == "check":
         why = gate.check()
-        print("on-chain live: " + ("every gate holds (test mode)" if not why else
+        print("on-chain live: " + (f"every gate holds ({gate.ack.mode} mode)" if not why else
                                     "LOCKED:\n  - " + "\n  - ".join(why)))
         return 0 if not why else 1
     rec = simulate(gate, usd=min(max(a.usd, 1.0), 25.0))

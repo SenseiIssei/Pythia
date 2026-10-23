@@ -3,7 +3,7 @@ import { NAV, activeTab, isVisible, navFor, resolvePage, tabsFor } from "./nav";
 
 describe("navFor", () => {
   it("keeps simple mode to the beginner destinations", () => {
-    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "realmoney", "activity", "notifications", "predictions", "wallets", "pumpfun", "cards", "settings", "about"]);
+    expect(navFor("simple").map((n) => n.id)).toEqual(["home", "autopilot", "realmoney", "wallet", "activity", "notifications", "predictions", "wallets", "pumpfun", "cards", "settings", "about"]);
   });
 
   it("shows everything in advanced mode", () => {
@@ -33,6 +33,14 @@ describe("navFor", () => {
       expect(ids.indexOf("realmoney")).toBe(ids.indexOf("autopilot") + 1);
     }
     expect(NAV.find((n) => n.id === "realmoney")?.label).toBe("Real money");
+  });
+
+  it("puts Wallet right after Real money in both modes", () => {
+    for (const mode of ["simple", "advanced"] as const) {
+      const ids = navFor(mode).map((n) => n.id);
+      expect(ids.indexOf("wallet")).toBe(ids.indexOf("realmoney") + 1);
+    }
+    expect(NAV.find((n) => n.id === "wallet")?.label).toBe("Wallet");
   });
 });
 

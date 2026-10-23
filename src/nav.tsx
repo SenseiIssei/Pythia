@@ -27,6 +27,7 @@ import {
   Layers,
   QrCode,
   Banknote,
+  WalletCards,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -36,6 +37,7 @@ export type PageId =
   | "practice"
   | "autopilot"
   | "realmoney"
+  | "wallet"
   | "activity"
   | "notifications"
   | "dashboard"
@@ -80,6 +82,8 @@ export const NAV: NavItem[] = [
   { id: "autopilot", label: "Autopilot", icon: Plane, section: "Overview" },
   // Everything with real money in one place: the pump.fun bot, the live autopilots, live fills, one euro P&L.
   { id: "realmoney", label: "Real money", icon: Banknote, section: "Overview" },
+  // Our own Solana wallet: value, coins, deposit address, swaps, every movement from the chain, the Alpha mode.
+  { id: "wallet", label: "Wallet", icon: WalletCards, section: "Overview" },
   { id: "activity", label: "Activity", icon: History, section: "Overview" },
   { id: "notifications", label: "Notifications", icon: Bell, section: "Overview" },
   { id: "predictions", label: "Predictions", icon: Target, section: "Overview" },
@@ -120,6 +124,13 @@ export const NAV: NavItem[] = [
 export const REDIRECTS: Partial<Record<PageId, PageId>> = {
   practice: "autopilot",
 };
+
+/** Every page id a link may name: the nav's and the old ones that redirect. */
+export const PAGE_IDS: readonly PageId[] = [...NAV.map((n) => n.id), ...(Object.keys(REDIRECTS) as PageId[])];
+
+export function isPageId(x: string): x is PageId {
+  return (PAGE_IDS as readonly string[]).includes(x);
+}
 
 /** Where a page id leads now. */
 export function resolvePage(id: PageId): PageId {

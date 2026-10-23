@@ -23,6 +23,10 @@ Every STATUS_S it writes, for the engine and the app (snake_case):
                                      the ack's and the hard limits, the coins, the books, the
                                      kill switch, the last simulation, the reconciliation
   reports/onchain_live/trades.json   the newest swaps from the ledger
+  reports/onchain_live/values.json   the wallet's USD value and its coins' prices every 15 min
+                                     (60 days), for the app's chart and the 24 h change
+After every swap it reads the wallet's history from the chain again (lab.onchain.history), and in
+the alpha mode every swap posts its card (lab.onchain.cards, Telegram and Discord).
 It never sends money anywhere: the guard has no transfer (guard.py).
 """
 
@@ -53,6 +57,8 @@ CONFIRM_GRACE_MS = 15_000                # a confirm written inside the 60 s is 
 KEEP_MS = 7 * 86_400_000
 ID = re.compile(r"^c[0-9]{13}-[0-9a-f]{4}$")
 KILL_REASON = "the kill switch file is there"
+VALUE_S = 900.0                          # a point of the value chart every 15 min
+VALUE_KEEP_MS = 60 * 86_400_000
 
 
 def convert_dir() -> Path:
@@ -69,6 +75,25 @@ def _post(title: str, text: str) -> None:
         notify.send("trades", notify.text_card("trades", title, text), urgent=True)
     except Exception as e:                               # an alert never stops the trader
         print(f"onchain live: alert not sent ({type(e).__name__}: {e})", flush=True)
+
+
+def values_path() -> Path:
+    return LG.reports_dir() / "values.json"
+
+
+def add_value(v: LX.View, total: float | None, now_ms: int) -> bool:
+    """One point of the value chart (USD total, the prices of the coins held and SOL), at most every VALUE_S."""
+    if total is None:
+        return False
+    d = _read(values_path())
+    pts = [p for p in (d.get("points") if isinstance(d, dict) else None) or [] if isinstance(p, dict)]
+    if pts and now_ms - int(pts[-1].get("t") or 0) < VALUE_S * 1000:
+        return False
+    prices = {c: v.prices.get(m.mint) for c, m in LG.CODES.items() if (c == "SOL" or v.held(c) > 0) and v.prices.get(m.mint)}
+    pts = [p for p in pts if now_ms - int(p.get("t") or 0) <= VALUE_KEEP_MS] + \
+        [{"t": now_ms, "usd": round(total, 4), "prices": prices}]
+    PX.write_json(values_path(), {"points": pts})
+    return True
 
 
 def ui(code: str, raw) -> float | None:
@@ -134,9 +159,11 @@ class Service:
             if self.view is not None:
                 LX.baseline(self.view)                  # every start: what the wallet holds now is the base
                 self.trader.reconciled = {"t": self.view.t, "ok": True, "diffs": []}
-            print(f"onchain live: ON (test) for {self.gate.address}", flush=True)
+            mode = self.gate.ack.mode
+            print(f"onchain live: ON ({mode}) for {self.gate.address}", flush=True)
             if self.alerts:
-                _post("On-chain wallet: live", f"The on-chain trader is on (test mode) for {self.gate.address}.")
+                _post("On-chain wallet: live" + (" (Alpha phase)" if mode == "alpha" else ""),
+                      f"The on-chain trader is on ({mode} mode) for {self.gate.address}.")
         else:
             print("onchain live: nothing swaps. Why:\n  - " + "\n  - ".join(self.why or ["see above"])
                   + "\nFix it and restart the service.", flush=True)
@@ -204,10 +231,8 @@ class Service:
                    "convert_usd": r["convert_usd"]}
         lim = None
         if ack.mode:
-            lim = {"max_total_usd": min(ack.max_total_usd or 0, LG.TEST_MAX_TOTAL_USD),
-                   "max_trade_usd": min(ack.max_trade_usd or 0, LG.TEST_MAX_TRADE_USD),
-                   "max_daily_loss_usd": min(ack.max_daily_loss_usd or 0, LG.TEST_MAX_DAILY_LOSS_USD),
-                   "max_convert_usd": min(ack.max_convert_usd or 0, LG.TEST_MAX_CONVERT_USD)}
+            lim = {"max_total_usd": ack.cap("total"), "max_trade_usd": ack.cap("trade"),
+                   "max_daily_loss_usd": ack.cap("daily_loss"), "max_convert_usd": ack.cap("convert")}
         loss = -(day["pnl_usd"]) if day["pnl_usd"] is not None else None
         sim = _read(LG.simulate_path())
         rec = self.trader.reconciled if self.trader is not None else None
@@ -215,7 +240,7 @@ class Service:
         return {"t": LX.now_ms(), "running": True, "on": self.on and not LG.killed(), "mode": ack.mode, "gate": why,
                 "address": (self.trader.wallet if self.trader is not None else None) or self.gate.address,
                 "sol_lamports": v.sol_l if v is not None else None, "balances": bal, "total_usd": total, "day": day,
-                "ack": ack.view(), "hard": LG.hard_view(), "limits": lim,
+                "ack": ack.view(), "hard": LG.hard_view(ack.mode), "limits": lim,
                 "coins": [{"coin": c, "symbol": m.symbol, "mint": m.mint, "decimals": m.decimals,
                            "allowed": c in ack.mints} for c, m in LG.CODES.items()],
                 "kill": LG.killed(), "simulate": {"t": sim.get("t"), "ok": sim.get("ok")} if isinstance(sim, dict) else None,
@@ -227,8 +252,11 @@ class Service:
     def write_status(self) -> None:
         self.last["status"] = self.clock()
         try:
-            PX.write_json(LG.reports_dir() / "status.json", self.status())
+            st = self.status()
+            PX.write_json(LG.reports_dir() / "status.json", st)
             PX.write_json(LG.reports_dir() / "trades.json", {"trades": trades_view()})
+            if self.view is not None:
+                add_value(self.view, st.get("total_usd"), st["t"])
         except OSError as e:
             print(f"onchain live: status not written ({e})", flush=True)
 
@@ -267,8 +295,11 @@ class Service:
                 raise G.Refused(f"the route passes through a mint not on the route list ({bad[0][:6]})")
             in_usd, _, cost = self.trader._prices_ok(s, v, b)
             mo = G.min_out(b.out_amount, slip)
+            price = min(b.cu_price or LX.DEFAULT_CU_PRICE, G.MAX_PRIORITY_L * 1_000_000 // G.MAX_UNITS)
+            fee_max = G.BASE_FEE_L + price * G.MAX_UNITS // 1_000_000 + (self.trader.tip_l or 0)
             prop.update(in_raw=str(s.in_raw), expected_out=ui(dst, b.out_amount), min_out=ui(dst, mo),
                         min_out_raw=str(mo), cost_bps=round(cost, 2), in_usd=round(in_usd, 2), route=b.labels,
+                        price_impact_pct=round(b.price_impact_pct, 4), fee_sol=fee_max / 1e9, slippage_bps=slip,
                         expires_ms=prop["t"] + LG.CONFIRM_S * 1000, status="proposed")
         except (G.Refused, QuoteError, RuntimeError, ValueError, OSError) as e:
             prop["why"] = str(e)[:300]
@@ -295,7 +326,8 @@ class Service:
         if self.view is None:
             self._result(cid, "failed", "the wallet could not be read")
             return
-        s = LX.Swap("convert", prop["from"], prop["to"], int(prop["in_raw"]), ref=cid, min_out_raw=int(prop["min_out_raw"]))
+        s = LX.Swap("convert", prop["from"], prop["to"], int(prop["in_raw"]), ref=cid, min_out_raw=int(prop["min_out_raw"]),
+                    signal_ms=int(conf.get("t") or 0) or None)
         r = self.trader.execute(s, self.view, gate_why=lambda: self.gate_why(keep_kill=False))
         self._result(cid, r["status"], r.get("why"), sig=r.get("sig"), out_amount=ui(s.dst, r.get("out_raw")))
         self._after(r, s)
@@ -335,11 +367,27 @@ class Service:
 
     def _after(self, r: dict, s: LX.Swap) -> None:
         self.refresh_view()
-        if r["status"] in ("filled", "failed") and self.alerts:
+        if r["status"] in ("filled", "failed"):
+            self.read_history()
+        if r["status"] in ("filled", "failed") and self.alerts and self.gate.ack.mode == "alpha":
+            from . import cards
+            cards.post_alpha(s, r, self.view)
+        elif r["status"] in ("filled", "failed") and self.alerts:
             _post(f"On-chain wallet: {s.src} to {s.dst} {r['status']}",
                   f"{s.kind}{' ' + s.book if s.book else ''}: {ui(s.src, s.in_raw)} {s.src}"
                   + (f" for {ui(s.dst, r.get('out_raw'))} {s.dst}" if r.get("out_raw") else "")
                   + (f". {r['why']}" if r.get("why") else ""))
+
+    def read_history(self) -> None:
+        """The wallet's history from the chain again, so a swap shows in the app at once. Never raises."""
+        addr = (self.trader.wallet if self.trader is not None else None) or self.gate.address
+        if self.trader is None or not addr:
+            return
+        try:
+            from . import history as H
+            H.update(self.trader.chain.rpc, addr)
+        except Exception as e:                           # the history job reads it again within minutes
+            print(f"onchain live: history not read ({type(e).__name__}: {e})"[:200], flush=True)
 
     def run_books(self) -> None:
         from ..data import ROOT
@@ -361,9 +409,14 @@ class Service:
             sid = str(sig.get("as_of_ms") or sig.get("valid_until_ms") or "")
             if state.get(name) == sid:
                 continue
+            try:
+                signal_ms = int((ROOT / "signals" / B.SIGNAL / "latest.json").stat().st_mtime * 1000)
+            except OSError:
+                signal_ms = now
             state[name] = sid                            # once per signal, whatever happens to its swaps
             PX.write_json(LG.data_dir() / "books.json", state)
             for s in LX.book_swaps(name, ack, self.view, sig.get("weights") or {}):
+                s.signal_ms = signal_ms
                 r = self.trader.execute(s, self.view, gate_why=self.gate_why)
                 self._after(r, s)
         self.books = out
@@ -375,12 +428,12 @@ class Service:
         for code in self.gate.ack.mints:
             if code in ("SOL", "USDC") or self.view.held(code) <= 0:
                 continue
-            lim = min(self.gate.ack.max_trade_usd or 0.0, LG.TEST_MAX_TRADE_USD)
+            lim = self.gate.ack.cap("trade")
             usd = self.view.usd(code)
             raw = self.view.held(code)
             if usd and usd > lim:
                 raw = int(raw * lim / usd * 0.98)
-            s = LX.Swap("kill", code, "USDC", raw)
+            s = LX.Swap("kill", code, "USDC", raw, signal_ms=LX.now_ms())
             r = self.trader.execute(s, self.view, gate_why=lambda: self.gate_why(keep_kill=False))
             self._after(r, s)
             return

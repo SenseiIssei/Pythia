@@ -12,6 +12,13 @@
 //! - `convert/<id>.proposal.json` and `convert/<id>.result.json`: its quote for a
 //!   conversion the owner asked for, and what became of it.
 //!
+//! - `values.json`: the wallet's USD value and its coins' prices every 15 min,
+//!   for the Wallet tab's chart and the 24 h change.
+//!
+//! The history job (the lab's `lab.onchain.history`, read only) writes
+//! `<data>/reports/onchain/history.json`: every movement of the wallet as the
+//! chain shows it (deposits, swaps, fees, failures), newest first.
+//!
 //! The wallet tool writes `wallet.json` (the public address only), so the page
 //! can show where to send SOL before the trader ever ran. Nothing here reads a
 //! key, signs, sends or moves money; there is no withdraw or transfer anywhere
@@ -42,6 +49,10 @@ pub const MAX_TRADES: usize = 100;
 pub const MAX_CONVERTS: usize = 20;
 /// Requests without a result at once; more are refused until the trader answers.
 pub const MAX_OPEN_REQUESTS: usize = 3;
+/// The value chart gets at most this many points (evenly thinned, the newest always kept).
+pub const MAX_VALUES: usize = 400;
+/// The Wallet tab shows this many history entries.
+pub const MAX_HISTORY: usize = 200;
 
 fn dir_in(root: &Path) -> PathBuf {
     root.join("reports").join("onchain_live")
@@ -206,6 +217,78 @@ pub struct Trade {
     pub why: Option<String>,
 }
 
+/// One point of the value chart: the wallet's worth in USD and the prices of its coins.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub struct ValuePoint {
+    pub t: i64,
+    pub usd: Option<f64>,
+    /// USD by coin code ("SOL", "USDC", ...).
+    pub prices: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct ValuesFile {
+    points: Vec<serde_json::Value>,
+}
+
+/// One coin moving in (amount above 0) or out (below 0) in a transaction.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub struct Move {
+    pub coin: String,
+    pub mint: Option<String>,
+    pub amount: Option<f64>,
+}
+
+/// One transaction of the wallet as the history job read it from the chain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+pub struct HistoryEntry {
+    pub sig: Option<String>,
+    pub t: Option<i64>,
+    /// deposit, swap, sent, failed or other.
+    pub kind: Option<String>,
+    pub ok: bool,
+    pub err: Option<String>,
+    /// The wallet paid the fee (its own transaction).
+    pub ours: bool,
+    pub moves: Vec<Move>,
+    pub fee_sol: Option<f64>,
+    pub base_sol: Option<f64>,
+    pub priority_sol: Option<f64>,
+    pub tip_sol: Option<f64>,
+    pub rent_sol: Option<f64>,
+    pub from: Option<String>,
+    pub from_amount: Option<f64>,
+    pub to: Option<String>,
+    pub to_amount: Option<f64>,
+    pub price: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct HistoryFile {
+    updated_ms: Option<i64>,
+    address: Option<String>,
+    entries: Vec<serde_json::Value>,
+}
+
+/// At most `max` points, evenly spread, the newest always among them.
+pub fn thin(points: Vec<ValuePoint>, max: usize) -> Vec<ValuePoint> {
+    if points.len() <= max || max < 2 {
+        return points;
+    }
+    let step = points.len().div_ceil(max - 1);
+    let last = points.len() - 1;
+    let mut out: Vec<ValuePoint> = points.iter().step_by(step).cloned().collect();
+    if out.last() != points.last() {
+        out.push(points[last].clone());
+    }
+    out
+}
+
 /// Each trade is read on its own, so one odd line does not hide the others.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -247,6 +330,11 @@ struct Proposal {
     cost_bps: Option<f64>,
     in_usd: Option<f64>,
     route: Vec<String>,
+    /// Jupiter's price impact in percent.
+    price_impact_pct: Option<f64>,
+    /// The network fee at most (base, priority at the unit cap, Sender tip), in SOL.
+    fee_sol: Option<f64>,
+    slippage_bps: Option<f64>,
     t: Option<i64>,
     expires_ms: Option<i64>,
     /// "proposed" or "refused".
@@ -300,6 +388,9 @@ pub struct Convert {
     pub cost_bps: Option<f64>,
     pub in_usd: Option<f64>,
     pub route: Vec<String>,
+    pub price_impact_pct: Option<f64>,
+    pub fee_sol: Option<f64>,
+    pub slippage_bps: Option<f64>,
     pub proposed_ms: Option<i64>,
     pub expires_ms: Option<i64>,
     pub confirmed_ms: Option<i64>,
@@ -374,6 +465,9 @@ fn merge(id: String, p: Parts, now_ms: i64) -> Convert {
         cost_bps: pr.and_then(|q| q.cost_bps),
         in_usd: pr.and_then(|q| q.in_usd),
         route: pr.map(|q| q.route.clone()).unwrap_or_default(),
+        price_impact_pct: pr.and_then(|q| q.price_impact_pct),
+        fee_sol: pr.and_then(|q| q.fee_sol),
+        slippage_bps: pr.and_then(|q| q.slippage_bps),
         proposed_ms: pr.and_then(|q| q.t),
         expires_ms: pr.and_then(|q| q.expires_ms),
         confirmed_ms: cf.map(|c| c.t),
@@ -414,6 +508,41 @@ pub struct OnchainView {
     pub now_ms: i64,
     /// One euro in US dollars (Kraken's EURUSD), filled in by the server; none when it could not be read.
     pub eur_usd: Option<SolEur>,
+    /// The wallet's worth over time, oldest first, at most `MAX_VALUES` points.
+    pub values: Vec<ValuePoint>,
+    /// Every movement of the wallet from the chain, newest first, at most `MAX_HISTORY`.
+    pub history: Vec<HistoryEntry>,
+    /// When the history job last read the chain.
+    pub history_ms: Option<i64>,
+}
+
+/// The value chart's points from `values.json`, oldest first; odd points are passed over.
+pub fn values_in(root: &Path) -> Vec<ValuePoint> {
+    let file = read::<ValuesFile>(&dir_in(root).join("values.json")).unwrap_or_default();
+    let mut pts: Vec<ValuePoint> = file
+        .points
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<ValuePoint>(v).ok())
+        .filter(|p| p.t > 0)
+        .collect();
+    pts.sort_by_key(|p| p.t);
+    thin(pts, MAX_VALUES)
+}
+
+/// The history job's entries, newest first, only when they belong to `address` (a file of an older
+/// wallet is not shown); odd entries are passed over.
+pub fn history_in(root: &Path, address: Option<&str>) -> (Vec<HistoryEntry>, Option<i64>) {
+    let Some(f) = read::<HistoryFile>(&root.join("reports").join("onchain").join("history.json")) else {
+        return (Vec::new(), None);
+    };
+    if address.is_some() && f.address.as_deref() != address {
+        return (Vec::new(), None);
+    }
+    let mut out: Vec<HistoryEntry> =
+        f.entries.into_iter().filter_map(|v| serde_json::from_value::<HistoryEntry>(v).ok()).collect();
+    out.sort_by_key(|e| std::cmp::Reverse(e.t.unwrap_or(0)));
+    out.truncate(MAX_HISTORY);
+    (out, f.updated_ms)
 }
 
 fn fresh(s: &Status, now_ms: i64) -> bool {
@@ -435,6 +564,7 @@ pub fn view_in(root: &Path, now_ms: i64) -> OnchainView {
         .unwrap_or_default();
     trades.sort_by(|a, b| b.t.unwrap_or(0.0).total_cmp(&a.t.unwrap_or(0.0)));
     trades.truncate(MAX_TRADES);
+    let (history, history_ms) = history_in(root, address.as_deref());
     OnchainView {
         running,
         status,
@@ -444,6 +574,9 @@ pub fn view_in(root: &Path, now_ms: i64) -> OnchainView {
         kill_file: kill_path_in(root).exists(),
         now_ms,
         eur_usd: None,
+        values: values_in(root),
+        history,
+        history_ms,
     }
 }
 

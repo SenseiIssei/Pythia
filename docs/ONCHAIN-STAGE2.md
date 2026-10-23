@@ -3,7 +3,9 @@
 **Stand 2026-10-23.** Abschnitte 1 bis 6 sind der Entwurf, nach dem Review (`docs/ONCHAIN-REVIEW.md`) ergänzt:
 Notschalter, Wiederholen und Neustart, Mindestmenge, Compute Budget, Token-2022, Code-Pin, Werte der App. Der Händler
 selbst ist seit dem 2026-10-23 gebaut und **gesperrt**, bis du ihn scharf schaltest (Abschnitt 7: was gebaut ist, und
-deine Schritte). Nichts davon ist scharf: kein Ack, keine Wallet, kein Start. Der Nachweis vor echtem Geld steht vorab
+deine Schritte). Abschnitt 8 beschreibt die Wallet-Seite der App, den Alpha-Modus (Bücher mit kleinem echtem Geld
+ohne den Nachweis, zum Trainieren und Messen unserer Modelle) und die Messung jedes Swaps. Nichts davon ist scharf:
+kein Ack, keine Wallet, kein Start. Der Nachweis vor echtem Geld steht vorab
 registriert in
 `research/lab/results/onchain_stage2_prereg.md`.
 
@@ -37,6 +39,11 @@ registriert in
   hard in code; allowlisted mints and books in the file; a simulate within 24 h; kill files; a watcher; the
   narrow mounts of the pump.fun service. No transfer instruction exists in the guard, so no code path moves
   funds out. Withdrawals stay with the owner's own wallet and backup.
+- **Alpha mode (section 8):** `mode=alpha` in the ack lets the books it names trade without the proof gate,
+  under lower hard maxima in code (`live_gate.ALPHA_MAX_TOTAL_USD = 100`, `ALPHA_MAX_TRADE_USD = 25`,
+  `ALPHA_MAX_DAILY_LOSS_USD = 25`; the ack can only go lower); every other gate stays as in test mode. Every
+  alpha swap posts a card (Telegram, Discord's real-money route) and lands in the ledger reconciled against
+  the chain. Every sent swap is measured (`live/onchain/execution.jsonl`, `reports/onchain/execution.md`).
 - **Proof gate:** the book passes LIVE-READINESS on paper, its on-chain paper twin has 30 days and 20
   rebalances with on-chain cost <= 15 bps median per unit traded, and 14 days of shadow execution (build,
   guard, simulate every planned swap, never send) with >= 98 % clean simulations and zero unexplained guard
@@ -490,7 +497,7 @@ nicht kaufen, solange keine Pool-Regel nach Kosten positiv ist.
 | `research/ops/onchain_live_watch.py` | der Watcher, Job `onchain-live-watch` alle zwei Minuten |
 | App, Seite "Real money" | Abschnitt "On-chain wallet": Adresse mit QR, Guthaben in USD und EUR, Umtausch mit Vorschau und Bestätigung, Trades, Gründe des Tors, Notschalter |
 
-Höchstwerte im Code (Testmodus, der einzige Modus): 500 USD Wert der Wallet, 100 USD je Swap, 100 USD
+Höchstwerte im Code (Testmodus; der Alpha-Modus hat niedrigere, Abschnitt 8): 500 USD Wert der Wallet, 100 USD je Swap, 100 USD
 Tagesverlust, 250 USD Umtausch am Tag, 10 Umtausche und 40 Swaps je Buch am Tag, ETH höchstens ein Viertel von
 `max_total_usd`, 0,02 SOL Reserve, Kosten höchstens 50 bps, Jupiter-Preis höchstens 2 % neben Kraken,
 Priority Fee höchstens 0,0005 SOL, Sender-Trinkgeld höchstens 0,0001 SOL. Ein Ack über einem Höchstwert wird
@@ -591,3 +598,79 @@ auf dem Server löschen und neu starten; die App kann das nicht.
 **Abheben** bleibt außerhalb von Pythia (Abschnitt 3): stoppen, dann das Backup in deine eigene Wallet
 importieren und von dort senden.
 
+## 8. Die Wallet-Seite, der Alpha-Modus und die Messung
+
+### Die Seite "Wallet" in der App
+
+Ein eigener Eintrag "Wallet" in der Navigation (einfache und erweiterte Ansicht, direkt nach "Real money"). Oben
+der Wert der Wallet in Euro und Dollar mit der Änderung über 24 Stunden und der Wertverlauf (ein Punkt alle 15
+Minuten, `reports/onchain_live/values.json`, vom Dienst geschrieben), darunter der Zustand des Tors in Worten
+(gesperrt, Alpha, Test) mit jedem Grund, die Coins mit Menge, Dollar, Euro und 24-h-Änderung, die Adresse mit
+QR-Code und Kopierknopf ("Send SOL here"), der Umtausch (Vorschau mit erwarteter Menge, Mindestmenge, Price
+Impact, Netzwerkgebühr höchstens, Kosten, Weg, 60 Sekunden zum Bestätigen), die Historie, die Wallet des
+pump.fun-Bots (nur lesen: Adresse, SOL, Link auf ihre Seite) und der Notschalter. Die Seite "Real money" zeigt nur
+noch Wert und Zustand mit einem Link hierher.
+
+Es gibt keinen Knopf zum Senden: Pythia bewegt nie Geld aus einer Wallet. **Abheben:** Notschalter, dann das Backup
+in Phantom (oder eine andere eigene Wallet) importieren und von dort senden.
+
+**Direkt per URL** (für dein DevPanel, das die Web-Version im iframe zeigt): `?page=wallet` öffnet die Seite,
+`?page=wallet&embed=1` zeigt nur sie über die ganze Breite, ohne Seitenleiste, Kopfzeile und Einführung, mit einem
+kleinen Link "Open Pythia". Der rechtliche Hinweis kommt nur, bis er einmal bestätigt ist. Jede andere Seite geht
+genauso (`?page=pumpfun`, `?page=realmoney`, ...).
+
+**Historie:** der Job `onchain-history` (alle 5 Minuten, nur lesend) holt für die öffentliche Adresse
+`getSignaturesForAddress` und `getTransaction` und schreibt `reports/onchain/history.json`: Einzahlungen,
+Swaps mit Mengen und Preis, Gebühren (Basis, Priority, Sender-Trinkgeld, Kontomiete), gesendete Beträge und
+fehlgeschlagene Transaktionen, jede mit Solscan-Link. Nach jedem eigenen Swap liest der Dienst sie sofort neu.
+Der Job nimmt den öffentlichen Mainnet-RPC (nur lesend, wenige Anfragen alle 5 Minuten).
+
+### Der Alpha-Modus
+
+Wie der Testmodus des pump.fun-Bots: mit `mode=alpha` im Ack handeln die Bücher, die der Ack nennt, echtes Geld
+**ohne** den Nachweis (`reports/onchain/proof.json`), damit du unsere eigenen Modelle mit kleinem echtem Geld
+trainieren und messen kannst. Dafür gelten niedrigere Höchstwerte im Code; der Ack kann sie nur senken:
+
+| Grenze | Alpha (im Code) | Test (im Code) |
+|---|---|---|
+| `max_total_usd` | 100 USD (`live_gate.ALPHA_MAX_TOTAL_USD`) | 500 USD |
+| `max_trade_usd` | 25 USD (`live_gate.ALPHA_MAX_TRADE_USD`) | 100 USD |
+| `max_daily_loss_usd` | 25 USD (`live_gate.ALPHA_MAX_DAILY_LOSS_USD`) | 100 USD |
+| `max_convert_usd` | 100 USD am Tag | 250 USD am Tag |
+
+Alles andere bleibt so streng wie im Testmodus: Guard, Simulation innerhalb von 24 Stunden, Notschalter,
+Watcher, Liste der Coins, Sperrliste, Reserve, Kosten- und Preisprüfung, Ledger gegen Chain. Eine Order eines
+Buchs über 25 USD wird in mehrere Swaps unter der Grenze geteilt. Jeder Alpha-Swap, der auf der Chain ankommt
+(gefüllt oder fehlgeschlagen), schickt eine Karte an Telegram und Discord (derselbe Weg wie die Echtgeld-Karten
+des pump.fun-Bots), mit "Alpha-Phase" im Titel und der Farbe nach Ausgang: grün gefüllt, orange gefüllt aber
+teurer als 25 bps, rot fehlgeschlagen. Die App zeigt "Alpha" deutlich im Kopf der Wallet-Seite.
+
+Beispiel, `/etc/pythia/onchain-live-ack`, Rechte 600, höchstens 90 Tage gültig:
+
+```
+mode=alpha
+books=onchain_breakout_top10_live
+mints=SOL,USDC,BTC,ETH
+book_usd=80
+max_total_usd=100
+max_trade_usd=25
+max_daily_loss_usd=25
+max_convert_usd=50
+expires=2026-12-31
+on_kill=hold
+I accept that I can lose all of it
+```
+
+Die übrigen Schritte sind die aus Abschnitt 7 (Wallet, IDL, Umgebung, Simulation, Start). Das Log sagt
+`onchain live: ON (alpha)`. Zurück in den Testmodus: `mode=test` und Dienst neu starten.
+
+### Die Messung jedes Swaps
+
+Für jeden gesendeten Swap schreibt der Händler eine Zeile nach `live/onchain/execution.jsonl`: Signal bis Senden
+(dein Bestätigen, die Signaldatei des Buchs oder der Notschalter), Senden bis Landen, die Gebühr (Basis, Priority,
+Trinkgeld) und was wirklich herauskam gegen die Quote. Der Job `onchain-execution` (täglich) macht daraus
+`reports/onchain/execution.md` und `.json`: der Vergleich mit der gemessenen Ausführung des pump.fun-Bots
+(`reports/pumpfun_rt/execution.json`) und mit Krakens Gebühren (Taker 40 bps, die Proben des Paper-Buchs mit
+halbem Spread). Landet unser Weg (Sender und RPC zugleich, Priority Fee mit Grenze im Code, dieselben Bytes alle
+2 Sekunden bis der Blockhash abläuft) schneller als der des pump.fun-Bots, sagt der Bericht das, damit der
+pump.fun-Executor dieselben Teile übernehmen kann (eine eigene Aufgabe; dieser Bericht ändert dort nichts).

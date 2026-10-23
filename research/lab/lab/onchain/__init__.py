@@ -18,6 +18,9 @@ Stage 2, the real-money trader, LOCKED until the owner arms it (docs/ONCHAIN-STA
   live_exec.py     caps, build, guard, simulate, sign, send, ledger against the chain
   live_service.py  the service pythia-onchain-live: the app's converts, the books, the status
   wallet.py        the owner's wallet tool for this wallet
+  history.py       the wallet's history from the chain (deposits, swaps, failures), read only
+  execution.py     reports/onchain/execution.md: our swaps' speed and cost against pump.fun and Kraken
+  cards.py         the alpha mode's trade cards (Telegram, Discord)
 
 Stage 1 (mints, jupiter, paper, book) never signs or sends (docs/ONCHAIN.md); in stage 2 only
 live_exec.py signs, after every gate held, and nothing anywhere transfers out of the wallet.

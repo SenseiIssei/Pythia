@@ -4,8 +4,9 @@
 // all of it. Read only, except what the reused autopilot cards already offer
 // (pause, stop, edit with the typed phrase). The pump.fun page keeps its
 // limits, kill switch and every trade. The on-chain wallet (the locked Solana
-// trader, docs/ONCHAIN-STAGE2.md) has its section here: address, balances,
-// conversions with a confirm, trades and its own kill switch.
+// trader, docs/ONCHAIN-STAGE2.md) shows here in short: its worth and its state,
+// with the way to the Wallet tab, which has the rest (assets, swap, history,
+// the deposit address and its kill switch).
 
 import { useMemo, useRef, useState } from "react";
 import { Banknote, ChevronRight, ScrollText } from "lucide-react";
@@ -22,7 +23,7 @@ import { autopilotLine, combineLines, euro, liveFills, pumpfunLine, realMoneyTot
 import { AutopilotCard, RealMoneySummary, useNow } from "./Autopilots";
 import { useAutopilotApi } from "./Autopilot";
 import { PumpfunLiveChart, PumpfunSummary, SocketBadge, usePumpfunLive } from "./PumpfunWallet";
-import { OnchainWallet } from "./OnchainWallet";
+import { OnchainSummary, useOnchainLive } from "./OnchainWallet";
 import type { AutopilotStatus } from "../types";
 
 const when = (ms: number) => new Date(ms).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -57,6 +58,7 @@ export function RealMoney() {
   // The socket and the polling only run while this page is in front; the pump.fun page has its own.
   const shownNow = usePageVisible(ref);
   const pf = usePumpfunLive(shownNow);
+  const oc = useOnchainLive(shownNow);
   const api = useAutopilotApi();
   const { positions, strategies, limits, live, journal } = useStore();
   const now = useNow();
@@ -155,7 +157,7 @@ export function RealMoney() {
         )}
 
         <SectionTitle>On-chain wallet</SectionTitle>
-        <OnchainWallet active={shownNow} />
+        <OnchainSummary v={oc.v} err={oc.err} />
 
         <SectionTitle>Live autopilots</SectionTitle>
         {api.loading ? (
