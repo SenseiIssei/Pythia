@@ -34,8 +34,13 @@ its channel (DISCORD_ROUTES): the briefing to #briefing and as a DM to
 PYTHIA_DISCORD_OWNER_ID, every real-money trade card to #pumpfun-trades and as
 a DM, Kraken and Alpaca live fills to #konten and as a DM, study, Pokemon and
 CS2 posts to theirs; lab.ops.discord_feed adds the forward report, new study
-verdicts, model decisions and news. The channel ids come from the bot's
-<data>/discord/channels.json, else by name from the guild (PYTHIA_DISCORD_GUILD_ID).
+verdicts, model decisions and news. Every post goes twice, the German card to
+the German channel and the English card to its English twin (DISCORD_EN), both
+built from the same data (a card made with bilingual() or given a Card.remake
+is built again in the other language; one without goes as it is); a DM is one
+message, the German embeds first and the English ones under them. The channel
+ids come from the bot's <data>/discord/channels.json ("de" and "en", or the
+older "channels"), else by name from the guild (PYTHIA_DISCORD_GUILD_ID).
 Without the bot token, or when the bot fails, the webhook path as before:
 PYTHIA_DISCORD_WEBHOOK (a private channel's webhook; a webhook cannot DM, so
 that channel is the owner's "DM") and optionally PYTHIA_DISCORD_WEBHOOK_TRADES
@@ -350,6 +355,8 @@ class Card:
         self.parts = list(parts or [])
         self.footer = footer
         self.image = image          # a chart (PNG) that goes with the card, when its builder drew one
+        self.lang: str | None = None                 # the language it was built in, when known
+        self.remake = None          # lang -> the same card in that language (Discord posts both)
 
     def render(self, fmt: str = "telegram", lang: str = "en") -> str:
         head = f"{self.emoji} {self.title}".strip()
@@ -461,6 +468,43 @@ def text_card(category: str, title: str, text: str, emoji: str | None = None) ->
     summary = lines[0] if lines else None
     parts = [Line(ln[2:] if ln.startswith("- ") else ln, "•" if ln.startswith("- ") else None) for ln in lines[1:]]
     return Card(emoji or CATEGORIES.get(category, ("", "🔔"))[1], title, summary, parts)
+
+
+def bilingual(make, lang: str | None = None) -> list[Card]:
+    """make(lang) -> cards, built in `lang` (None: the messages' language). Each card remembers
+    make, so Discord can post the same cards in the other language (in_lang); make runs once
+    more per language at most."""
+    lang = lang or alert_lang()
+    made = {lang: list(make(lang))}
+
+    def again(i: int):
+        def remake(other: str) -> Card:
+            if other not in made:
+                made[other] = list(make(other))
+            return made[other][i]
+        return remake
+
+    for i, c in enumerate(made[lang]):
+        c.lang, c.remake = lang, again(i)
+    return made[lang]
+
+
+def in_lang(cards: list[Card], lang: str, base: str | None = None) -> list[Card]:
+    """The cards in `lang`: a card in another language (`base` when it does not say) is built
+    again through its Card.remake; one without a remake, or whose remake fails, stays as it is."""
+    out = []
+    for c in cards:
+        if (c.lang or base) == lang or c.remake is None:
+            out.append(c)
+            continue
+        try:
+            n = c.remake(lang)
+            n.image = n.image or c.image
+            out.append(n)
+        except Exception as e:  # noqa: BLE001 - the card as it is, rather than none
+            say(f"card not built in {lang}: {type(e).__name__}", err=True)
+            out.append(c)
+    return out
 
 
 # ---------------------------------------------------------------- settings and quiet hours
@@ -858,10 +902,36 @@ def discord_url(kind: str) -> str | None:
     return url if url.lower().startswith("https://") and safe_url(url) else None
 
 
+DISCORD_FOOTER = {"de": "Pythia · Alpha", "en": "Pythia · Alpha phase"}
+DISCORD_FIELDS_MAX = 24
+DISCORD_MESSAGE_CHARS = 6000                              # Discord's limit for all embeds of one message
+
+
+def _footer_line(footer: str | None) -> str | None:
+    """The card's own footer without the prefix _send adds (" · Pythia"): the embed's footer says that."""
+    prefix = (os.environ.get("PYTHIA_ALERT_PREFIX", "Pythia") or "").strip()
+    f = (footer or "").strip()
+    if prefix and f == prefix:
+        return None
+    if prefix and f.endswith(f" · {prefix}"):
+        f = f[: -len(f" · {prefix}")]
+    return f or None
+
+
 def discord_embed(card: Card, lang: str, image_name: str | None = None, ts_ms: int | None = None) -> dict:
-    """One card as a Discord embed: the title with its emoji, the rest in Discord markdown,
-    the colour bar by outcome, the footer, the chart when one is attached."""
-    body = Card("", "", card.summary, card.parts).render("discord", lang)
+    """One card as a Discord embed, the same layout in both languages: the title with its emoji
+    (the result first, as the cards put it), the summary and the rest in Discord markdown, the
+    key numbers (a Rows without a title) as fields in their order, the card's own footer as the
+    last line, the colour bar by outcome, the footer "Pythia · Alpha" ("Pythia · Alpha phase"),
+    the time, the chart when one is attached."""
+    fields, rest = [], []
+    for p in card.parts:
+        if isinstance(p, Rows) and not p.title and p.rows and len(fields) + len(p.rows) <= DISCORD_FIELDS_MAX:
+            fields += [{"name": short(label, 250) or "-", "value": short(f"{value} {dot(sign)}".strip(), 1000) or "-",
+                        "inline": True} for label, value, sign in p.rows]
+        else:
+            rest.append(p)
+    body = Card("", "", card.summary, rest, _footer_line(card.footer)).render("discord", lang)
     if len(body) > DISCORD_DESC_LIMIT:
         cut = body[:DISCORD_DESC_LIMIT - 2]
         # Never leave a code block open.
@@ -869,8 +939,9 @@ def discord_embed(card: Card, lang: str, image_name: str | None = None, ts_ms: i
         body = body.rstrip() + "\n…"
     emb: dict = {"title": short(f"{card.emoji} {card.title}".strip(), 250), "description": body,
                  "color": DISCORD_COLORS.get(card.emoji, DISCORD_DEFAULT_COLOR)}
-    if card.footer:
-        emb["footer"] = {"text": short(card.footer, 200)}
+    if fields:
+        emb["fields"] = fields
+    emb["footer"] = {"text": DISCORD_FOOTER.get(lang, DISCORD_FOOTER["en"])}
     if ts_ms:
         emb["timestamp"] = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     if image_name:
@@ -887,6 +958,23 @@ def discord_payload(cards: list[Card], lang: str, image: bytes | None = None, ts
     if embeds and not image and image_url:
         embeds[0]["image"] = {"url": image_url}
     return {"username": "Pythia", "embeds": embeds, "allowed_mentions": {"parse": []}}
+
+
+def embed_chars(e: dict) -> int:
+    """What Discord counts against a message's 6000 characters."""
+    return (len(e.get("title") or "") + len(e.get("description") or "") + len((e.get("footer") or {}).get("text") or "")
+            + sum(len(f.get("name") or "") + len(f.get("value") or "") for f in e.get("fields") or []))
+
+
+def discord_messages(embeds: list[dict]) -> list[list[dict]]:
+    """The embeds in as few messages as Discord takes: ten at most and 6000 characters each, in order."""
+    out: list[list[dict]] = []
+    for e in embeds:
+        if out and len(out[-1]) < 10 and sum(map(embed_chars, out[-1])) + embed_chars(e) <= DISCORD_MESSAGE_CHARS:
+            out[-1].append(e)
+        else:
+            out.append([e])
+    return out
 
 
 def discord_body(payload: dict, image: bytes, boundary: str) -> bytes:
@@ -923,20 +1011,24 @@ def post_discord(url: str, payload: dict, image: bytes | None = None, timeout: f
 
 def send_discord(kind: str, cards: list[Card] | Card, image: bytes | None = None, lang: str | None = None,
                  poster=None, now: int | None = None, image_url: str | None = None) -> dict:
-    """The cards to Discord as `kind` (a key of DISCORD_ROUTES): through the bot to its channel
-    (and a DM) when PYTHIA_DISCORD_BOT_TOKEN is set, else, or when the bot could not deliver,
-    to the webhook of "briefing", "trades" or "fills". `poster(url, payload, image)` replaces
-    the webhook's network (tests), bot_request the bot's. Never raises: a failure is returned
-    as {"delivered": False, "error": ...} and said on stderr, nothing more."""
+    """The cards to Discord as `kind` (a key of DISCORD_ROUTES): through the bot to its German and
+    its English channel (and one DM with both) when PYTHIA_DISCORD_BOT_TOKEN is set, else, or when
+    the bot could not deliver, to the webhook of "briefing", "trades" or "fills" in `lang`.
+    `lang` (None: the messages' language) is the one the cards were built in; the other one comes
+    from in_lang. `poster(url, payload, image)` replaces the webhook's network (tests), bot_request
+    the bot's. Never raises: a failure is returned as {"delivered": False, "error": ...} and said
+    on stderr, nothing more."""
     res = {"delivered": False, "error": None, "reason": None}
     try:
         cards = [cards] if isinstance(cards, Card) else list(cards)
         if not cards:
             res["reason"] = "no destination"
             return res
-        payload = discord_payload(cards, lang or alert_lang(), image, now or clock_ms(), image_url)
+        lang = lang or alert_lang()
+        ts = now or clock_ms()
         if discord_bot_token() and kind in DISCORD_ROUTES:
-            res.update(send_bot(kind, payload, image))
+            payloads = {lg: discord_payload(in_lang(cards, lg, lang), lg, image, ts, image_url) for lg in DISCORD_LANGS}
+            res.update(send_bot(kind, payloads, image))
             if res["delivered"]:
                 return res
             say(f"discord bot: not delivered ({res['error']})", err=True)
@@ -945,7 +1037,7 @@ def send_discord(kind: str, cards: list[Card] | Card, image: bytes | None = None
             if res["error"] is None:
                 res["reason"] = "no destination"
             return res
-        ok, err = (poster or post_discord)(url, payload, image)
+        ok, err = (poster or post_discord)(url, discord_payload(cards, lang, image, ts, image_url), image)
         res.update(delivered=ok, error=err)
         if not ok:
             say(f"discord: not delivered ({err})", err=True)
@@ -980,6 +1072,12 @@ DISCORD_ROUTES: dict[str, tuple[str, bool]] = {
     "cs2": ("cs2-skins", False),
     "news": ("news", False),                 # new headlines (discord_feed)
 }
+# Every post goes to both language blocks of the bot's layout: the German channel above and its
+# English twin (the same position in the 🇬🇧 block).
+DISCORD_LANGS = ("de", "en")
+DISCORD_EN = {"briefing": "briefing", "status": "status", "pumpfun-trades": "pumpfun-trades", "konten": "accounts",
+              "studien": "studies", "paper-buecher": "paper-books", "modelle": "models", "pokemon": "pokemon",
+              "cs2-skins": "cs2-skins", "news": "news"}
 # A lab post's category that the bot carries to a channel without send(..., discord=...).
 DISCORD_CATEGORY_KINDS = {"studies": "studies", "models": "models", "pokemon": "pokemon", "cs2": "cs2"}
 _DISCORD_IDS: dict = {}
@@ -1034,27 +1132,34 @@ def bot_request(method: str, path: str, body: dict | None = None, image: bytes |
     return 429, None
 
 
-def discord_channels(refresh: bool = False) -> dict[str, str]:
-    """Channel name -> id (and "dm" -> the owner's DM channel when the bot wrote it): the bot's
-    channels.json, else the guild's text channels by name (PYTHIA_DISCORD_GUILD_ID). Kept for
-    the run; refresh=True asks Discord again."""
-    if _DISCORD_IDS.get("map") and not refresh:
-        return _DISCORD_IDS["map"]
+def discord_channels(refresh: bool = False, lang: str = "de") -> dict[str, str]:
+    """Channel name -> id in the `lang` block (and "dm" -> the owner's DM channel when the bot wrote
+    it): the bot's channels.json ("de" or "en"; a file from before the English block has the German
+    map as "channels"), else the guild's text channels by name, an English one only under a 🇬🇧
+    category, a German one under any other (PYTHIA_DISCORD_GUILD_ID). Kept for the run;
+    refresh=True asks Discord again."""
+    key = "map" if lang == "de" else f"map_{lang}"
+    if _DISCORD_IDS.get(key) and not refresh:
+        return _DISCORD_IDS[key]
     out: dict[str, str] = {}
     st = read_json(discord_channels_path())
     if isinstance(st, dict) and not refresh:
-        for k, v in (st.get("channels") or {}).items():
+        got = st.get(lang) if isinstance(st.get(lang), dict) else (st.get("channels") if lang == "de" else None)
+        for k, v in (got or {}).items():
             if _snowflake(v):
                 out[str(k)] = str(v)
         if _snowflake(st.get("dm")):
             out["dm"] = str(st["dm"])
     guild = _snowflake(os.environ.get(DISCORD_GUILD_ENV))
-    if not out and guild:
+    if not [k for k in out if k != "dm"] and guild:
         code, rows = bot_request("GET", f"/guilds/{guild}/channels")
-        for c in rows if code == 200 and isinstance(rows, list) else []:
-            if isinstance(c, dict) and c.get("type") == 0 and c.get("name") and _snowflake(c.get("id")):
+        rows = [c for c in rows if isinstance(c, dict)] if code == 200 and isinstance(rows, list) else []
+        en_cats = {str(c.get("id")) for c in rows if c.get("type") == 4 and str(c.get("name") or "").startswith("🇬🇧")}
+        for c in rows:
+            if c.get("type") == 0 and c.get("name") and _snowflake(c.get("id")) and \
+                    (str(c.get("parent_id")) in en_cats) == (lang == "en"):
                 out.setdefault(str(c["name"]), str(c["id"]))
-    _DISCORD_IDS["map"] = out
+    _DISCORD_IDS[key] = out
     return out
 
 
@@ -1083,25 +1188,55 @@ def bot_post(channel_id: str, payload: dict, image: bytes | None = None) -> tupl
     return (200 <= code < 300), (None if 200 <= code < 300 else f"HTTP {code}" if code else "not delivered")
 
 
-def send_bot(kind: str, payload: dict, image: bytes | None = None) -> dict:
-    """The payload to the channel of `kind` and, for the important kinds, as a DM to the owner.
-    A channel that is gone (404) is looked up by name once more. Delivered when either arrived."""
+def bot_post_all(channel_id: str, embeds: list[dict], image: bytes | None = None) -> tuple[bool, str | None]:
+    """The embeds into a channel in as few messages as Discord takes (discord_messages); the chart
+    goes with the message whose embed shows it. Ok when every message arrived."""
+    for chunk in discord_messages(embeds):
+        pic = image if any((e.get("image") or {}).get("url") == "attachment://chart.png" for e in chunk) else None
+        ok, err = bot_post(channel_id, {"embeds": chunk, "allowed_mentions": {"parse": []}}, pic)
+        if not ok:
+            return ok, err
+    return True, None
+
+
+def send_bot(kind: str, payloads: dict, image: bytes | None = None) -> dict:
+    """The German payload to the German channel of `kind`, the English one to its English twin and,
+    for the important kinds, one DM to the owner with the German embeds first and the English ones
+    under them (two messages only when Discord's limits make it, the chart once). A channel that is
+    gone (404) is looked up once more. Delivered when anything arrived. A single payload (the old
+    call) is the German one."""
+    if "embeds" in payloads:
+        payloads = {"de": payloads}
     name, dm = DISCORD_ROUTES[kind]
-    out: dict = {"delivered": False, "error": None, "channel": False, "dm": False}
-    cid = discord_channels().get(name)
-    ok, err = bot_post(cid, payload, image) if cid else (False, "no channel")
-    if not ok and err in ("HTTP 404", "no channel"):
-        cid = discord_channels(refresh=True).get(name)
-        if cid:
-            ok, err = bot_post(cid, payload, image)
-    out["channel"] = ok
-    errs = [] if ok else [f"#{name}: {err}"]
+    out: dict = {"delivered": False, "error": None, "channel": False, "channel_en": False, "dm": False}
+    errs = []
+    for lang in DISCORD_LANGS:
+        if lang not in payloads:
+            continue
+        cname = name if lang == "de" else DISCORD_EN.get(name, name)
+        embeds = payloads[lang]["embeds"]
+        cid = discord_channels(lang=lang).get(cname)
+        ok, err = bot_post_all(cid, embeds, image) if cid else (False, "no channel")
+        if not ok and err in ("HTTP 404", "no channel"):
+            cid = discord_channels(refresh=True, lang=lang).get(cname)
+            if cid:
+                ok, err = bot_post_all(cid, embeds, image)
+        out["channel" if lang == "de" else "channel_en"] = ok
+        errs += [] if ok else [f"#{cname}{'' if lang == 'de' else ' (en)'}: {err}"]
     if dm:
+        both = [e for lang in DISCORD_LANGS if lang in payloads for e in payloads[lang]["embeds"]]
+        both = [dict(e) for e in both]
+        shown = False
+        for e in both:                                       # the chart once, on the German card
+            if (e.get("image") or {}).get("url") == "attachment://chart.png":
+                if shown:
+                    e.pop("image")
+                shown = True
         dm_id = owner_dm()
-        dok, derr = bot_post(dm_id, payload, image) if dm_id else (False, "no channel")
+        dok, derr = bot_post_all(dm_id, both, image) if dm_id else (False, "no channel")
         out["dm"] = dok
         errs += [] if dok else [f"DM: {derr}"]
-    out["delivered"] = out["channel"] or out["dm"]
+    out["delivered"] = out["channel"] or out["channel_en"] or out["dm"]
     out["error"] = "; ".join(errs) or None
     return out
 
@@ -1457,8 +1592,8 @@ def live_fills(now: int | None = None, rows: list[dict] | None = None, poster=No
         if key in seen:
             continue
         if not first:
-            card = fill_card(o, lang)
-            res = send_discord("fills", [card], fill_chart(o, lang, now), lang, poster=poster, now=now)
+            cards = bilingual(lambda lg, o=o: [fill_card(o, lg)], lang)          # the English card for #accounts
+            res = send_discord("fills", cards, fill_chart(o, lang, now), lang, poster=poster, now=now)
             if not res["delivered"]:
                 continue                                     # tried again on the next run
         seen.add(key)

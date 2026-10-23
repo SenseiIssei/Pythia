@@ -36,7 +36,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds); off since the morning briefing replaced it, `jobs.py run notify --force` still sends one | `jobs.yaml`: `notify` (off) |
 | 09:00 Berlin | morning briefing to Telegram and Discord: pump.fun Alpha phase, real-money accounts, paper and autopilots, lab, Pokemon, CS2, coins, stocks and ETFs, news, one overview chart (`lab.ops.briefing`, seconds; hourly 06 to 09 UTC, sends only in the hour that is 9 in Berlin, once a day) | `jobs.yaml`: `briefing` |
 | every 2 min | real-money fills of Kraken and Alpaca autopilots to Discord (`lab.ops.notify --live-fills`, reads the engines' state; the bot's #konten and a DM, else the webhook; nothing without either) | `jobs.yaml`: `discord-live-fills` |
-| always | Pythia's own Discord bot: lays out the owner's private server, keeps the channel map, answers the read-only slash commands `/status`, `/trades`, `/konten`, `/lab` for the owner only (`research/discord`, 256 MB) | container `pythia-discord-bot`, see "Discord bot" |
+| always | Pythia's own Discord bot: lays out the owner's private server in German and English, keeps the channel map, answers the read-only slash commands `/status`, `/trades`, `/konten`, `/lab` for the owner only, in the channel's language (`research/discord`, 256 MB) | container `pythia-discord-bot`, see "Discord bot" |
 | every 10 min | forward report, new study verdicts, model decisions and new headlines to the bot's channels (`lab.ops.discord_feed`, seconds, reads files only; nothing without the bot token) | `jobs.yaml`: `discord-feed` |
 | hourly :12 | CS2 skins: Skinport snapshots and sales history, Steam prices for the watchlist, then models (refit daily), alerts, the play-money portfolio (weekly) and the board for the app (`lab.collect.cs2`, then `lab.cs2.run`; 2 Skinport requests and up to 100 Steam requests, about 6 minutes) | `/etc/cron.d/pythia-cs2` |
 | 14:40, 20:40 | CS2 Steam market: the day's Steam price snapshot from csgotrader's public file, then trends, trend alerts with Steam and Skinport links, and a summary card with a chart (`lab.collect.cs2 --steam-market`, then `lab.cs2.trends`; 2 GETs, seconds; the second run only catches a late rebuild) | `jobs.yaml` only (`cs2-trends`) |
@@ -906,18 +906,29 @@ root file system, no capabilities. It never sees a wallet, a key other than
 its own token, or anything else of `/etc/pythia`.
 
 At start and every six hours it lays out the server, creating only what is
-missing and never deleting or renaming anything: the categories 📊 Übersicht
-(#briefing, #status), 💰 Echtgeld (#pumpfun-trades, #konten), 🧪 Lab (#studien,
-#paper-buecher, #modelle), 🃏 Sammeln (#pokemon, #cs2-skins) and 📰 Markt (#news),
-each channel with a topic; the role `Pythia` for the bot; every category and
+missing and never deleting anything, in two language blocks, in this order:
+🇩🇪 Übersicht (#briefing, #status), 🇩🇪 Echtgeld (#pumpfun-trades, #konten),
+🇩🇪 Lab (#studien, #paper-buecher, #modelle), 🇩🇪 Sammeln (#pokemon, #cs2-skins),
+🇩🇪 Markt (#news), then 🇬🇧 Overview (#briefing, #status), 🇬🇧 Real money
+(#pumpfun-trades, #accounts), 🇬🇧 Lab (#studies, #paper-books, #models),
+🇬🇧 Collecting (#pokemon, #cs2-skins), 🇬🇧 Markets (#news); each channel with a
+topic in its language; the role `Pythia` for the bot; every category and
 channel private (@everyone may not view, the owner and the bot may; other
-overwrites stay); a pinned welcome post in #status that says what goes where.
-A channel of the same name the owner made is used as it is, only made
-private and given a topic when it has none. The server icon is left alone.
-The map of channel ids (and the owner's DM channel) is written to
+overwrites stay); a pinned welcome post in both #status, in their language,
+that says what goes where. The German categories of the first layout
+(📊 Übersicht, 💰 Echtgeld, 🧪 Lab, 🃏 Sammeln, 📰 Markt) are renamed in place, so
+they and their channels keep their ids; a German channel found outside its
+category is moved in. A channel of the same name the owner made is used, only
+made private and given a topic when it has none; an English channel is only
+ever one in its 🇬🇧 category. When everything is there, the categories and
+channels are put in this order (one call). The server icon is left alone.
+The map of channel ids, `{"de": {...}, "en": {...}}` (plus the German map as
+`channels`, what older code reads) and the owner's DM channel, is written to
 `/srv/pythia-data/discord/channels.json`, which the lab reads at
 `/data/discord/channels.json`. Pinning needs the newer permission Pin
 Messages on some servers; without it the post stays unpinned and the log says so.
+A restart (`discord-bot.sh`) applies a new layout by itself: it runs first,
+and the script prints its map line.
 
 What goes where (`DISCORD_ROUTES` in `lab.ops.notify`): the 09:00 briefing to
 #briefing and as a DM to the owner; every real-money pump.fun card with its
@@ -927,7 +938,17 @@ Pokemon alerts (with the card's picture) to #pokemon; CS2 alerts and the trend
 summary to #cs2-skins; and from `lab.ops.discord_feed` (job `discord-feed`) the
 forward report's summary to #paper-buecher, new study verdicts to #studien,
 model zoo decisions to #modelle, new headlines to #news. All as embeds coloured
-by outcome, charts as attachments. The jobs that post get
+by outcome, charts as attachments. Every route posts twice: the German card
+to the German channel and the English card, built from the same data, to its
+twin in the 🇬🇧 block (#konten to #accounts, #studien to #studies,
+#paper-buecher to #paper-books, #modelle to #models, the others by the same
+name); the chart goes with both. A DM is one message, the German embeds first
+and the English ones under it, the chart once. Every embed has the same
+layout in both languages: the title with the result first, the key numbers as
+fields in a fixed order, the footer "Pythia · Alpha" ("Pythia · Alpha phase"),
+the time. Cards built outside `lab/ops` and the pump.fun card module (Pokemon,
+CS2, factory, director, model zoo) carry no English build yet and go to both
+channels as built. Telegram stays in one language. The jobs that post get
 `/etc/pythia/discord.env` as an optional env file (`jobs.yaml`); with
 `PYTHIA_DISCORD_BOT_TOKEN` set they post through the bot's REST API, and when
 the bot cannot deliver, the briefing and the trade cards still go to the
@@ -940,7 +961,9 @@ open, stop, run again with the extra flag, remove the kill files). Until then it
 cards reach Discord through the webhook as before.
 
 The slash commands, only for the owner's user id (anyone else gets "nicht
-erlaubt"), answer only to the one who asked and only read: `/status`
+erlaubt"), answer only to the one who asked, only read, and in the language
+of the channel they were used in (English in a 🇬🇧 channel, German in a 🇩🇪
+channel or the DM): `/status`
 (pump.fun live on or off, mode, wallet, today's and the total P&L, stake,
 open positions, from `reports/pumpfun_rt/live_status.json`), `/trades` (the last
 10 real-money trades), `/konten` (the pump.fun wallet, live and paper

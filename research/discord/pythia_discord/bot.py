@@ -1,5 +1,9 @@
 """The long-running bot: lays out the server at start (and every six hours), answers the slash commands.
 
+A restart (research/ops/discord-bot.sh) applies a changed layout by itself: the layout runs first,
+before the gateway connects. A command answers in the language of its channel (commands.channel_lang
+with the bot's own channel map).
+
   python -m pythia_discord.bot          (the container's command; research/ops/discord-bot.sh)
   python -m pythia_discord.bot --layout lay out the server once and exit, no gateway
 
@@ -52,14 +56,26 @@ def lay_out(token: str, guild_id: str, owner_id: str) -> None:
 
 def make_callback(name: str, owner_id: str):
     async def callback(interaction: discord.Interaction) -> None:
-        out = commands.respond(name, interaction.user.id, owner_id, int(time.time() * 1000))
+        lang = commands.channel_lang(interaction.channel_id, layout.read_state(state_path()),
+                                     getattr(interaction.channel, "category_id", None))
+        out = commands.respond(name, interaction.user.id, owner_id, int(time.time() * 1000), lang=lang)
         await interaction.response.send_message(content=out["content"],
                                                 embeds=[discord.Embed.from_dict(e) for e in out["embeds"]],
                                                 ephemeral=out["ephemeral"],
                                                 allowed_mentions=discord.AllowedMentions.none())
-        log.info("/%s by %s: %s", name, "owner" if commands.allowed(interaction.user.id, owner_id) else "someone else",
-                 "answered" if out["embeds"] else out["content"])
+        log.info("/%s by %s: %s (%s)", name, "owner" if commands.allowed(interaction.user.id, owner_id)
+                 else "someone else", "answered" if out["embeds"] else out["content"], lang)
     return callback
+
+
+class Translator(app_commands.Translator):
+    """The commands' descriptions in English for an English Discord client (commands.COMMANDS_EN)."""
+
+    async def translate(self, string: app_commands.locale_str, locale: discord.Locale,
+                        context: app_commands.TranslationContext) -> str | None:
+        if str(locale).startswith("en"):
+            return string.extras.get("en")
+        return None
 
 
 class Bot(discord.Client):
@@ -71,13 +87,15 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.guild = discord.Object(id=int(guild_id))
         for name, desc in commands.COMMANDS:
-            self.tree.add_command(app_commands.Command(name=name, description=desc,
-                                                       callback=make_callback(name, owner_id)), guild=self.guild)
+            self.tree.add_command(app_commands.Command(
+                name=name, description=app_commands.locale_str(desc, en=commands.COMMANDS_EN.get(name)),
+                callback=make_callback(name, owner_id)), guild=self.guild)
 
     def __repr__(self) -> str:
         return "Bot(<token>)"
 
     async def setup_hook(self) -> None:
+        await self.tree.set_translator(Translator())
         await self.tree.sync(guild=self.guild)
         log.info("slash commands synced: %s", ", ".join("/" + n for n, _ in commands.COMMANDS))
         self.loop.create_task(self.relayout())

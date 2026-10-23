@@ -1,4 +1,5 @@
-"""The real-time pump.fun lab's Telegram cards (English or German, lab.ops.i18n).
+"""The real-time pump.fun lab's Telegram cards (English or German, lab.ops.i18n; each card can build
+itself again in the other language, Card.remake, so Discord posts both).
 
   daily_card       once a day after the retrain: yesterday's record, our measured detection
                    latency (latency.py), the paper P&L of every shadow book, the study's bar,
@@ -127,8 +128,9 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     # One thought a line: a paragraph of eight sentences does not read on a phone.
     parts += [notify.Line(ln) for ln in lines]
     parts.append(notify.Line(t("prt_caveat", lang)))
-    return notify.Card("⚡", t("prt_daily_title", lang, day=i18n.iso_day(y, lang)), summary, parts,
-                       footer=t("prt_footer", lang))
+    return _langs(notify.Card("⚡", t("prt_daily_title", lang, day=i18n.iso_day(y, lang)), summary, parts,
+                              footer=t("prt_footer", lang)), lang,
+                  lambda lg: daily_card(data, models, shadow, live, now_ms, lg))
 
 
 def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
@@ -188,6 +190,12 @@ def _caveat(mode: str | None, lang: str):
     return notify.Line(i18n.t("prl_test_caveat" if mode == "test" else "prl_caveat", lang))
 
 
+def _langs(card, lang: str, again):
+    """The card remembers how to build itself in another language (Discord posts German and English)."""
+    card.lang, card.remake = lang, again
+    return card
+
+
 def _num(v) -> float | None:
     try:
         f = float(v)
@@ -204,6 +212,7 @@ def live_trade_card(kind: str, p: dict, kw: dict, lang: str = "en", day_pnl_sol:
     latency and the short caveat. A test-mode trade is the Alpha phase."""
     from ..ops import i18n, notify
     t = i18n.t
+    given = measured
     name = str(p.get("symbol") or p.get("name") or p.get("mint", "")[:8])[:20]
     why = lambda w: t(WHY.get(w or "take", "prt_why_time"), lang)          # noqa: E731
     rows: list[tuple] = []
@@ -242,7 +251,8 @@ def live_trade_card(kind: str, p: dict, kw: dict, lang: str = "en", day_pnl_sol:
                else t("prl_fail_summary", lang, rule=p.get("rule", "?"), why=str(kw.get("why") or kind)[:120]))
     parts = ([notify.Rows(rows)] if rows else []) + [x for x in (_measured_line(measured, lang), _caveat(mode, lang))
                                                      if x is not None]
-    return notify.Card(emoji, title, summary, parts, footer=t("prl_footer", lang))
+    return _langs(notify.Card(emoji, title, summary, parts, footer=t("prl_footer", lang)), lang,
+                  lambda lg: live_trade_card(kind, p, kw, lg, day_pnl_sol, mode, given, eur))
 
 
 def live_stop_card(kind: str, lost_sol: float, limit_sol: float, mode: str | None = None, lang: str = "en"):
@@ -251,21 +261,24 @@ def live_stop_card(kind: str, lost_sol: float, limit_sol: float, mode: str | Non
     t = i18n.t
     k = "daily" if kind == "daily" else "total"
     sol = lambda v: i18n.sol(v, 4, lang)                     # noqa: E731
-    return notify.Card("🛑", _tagged(t(f"prl_stop_{k}_title", lang), mode, lang),
-                       t(f"prl_stop_{k}_summary", lang, lost=sol(lost_sol), limit=sol(limit_sol)),
-                       [_caveat(mode, lang)], footer=t("prl_footer", lang))
+    return _langs(notify.Card("🛑", _tagged(t(f"prl_stop_{k}_title", lang), mode, lang),
+                              t(f"prl_stop_{k}_summary", lang, lost=sol(lost_sol), limit=sol(limit_sol)),
+                              [_caveat(mode, lang)], footer=t("prl_footer", lang)), lang,
+                  lambda lg: live_stop_card(kind, lost_sol, limit_sol, mode, lg))
 
 
 def live_gate_card(why: str | None, mode: str | None = None, lang: str = "en"):
     """The running live book's gate shut (no more buys, with the reason) or opened again."""
     from ..ops import i18n, notify
     t = i18n.t
+    again = lambda lg: live_gate_card(why, mode, lg)        # noqa: E731
     if why:
-        return notify.Card("🟠", _tagged(t("prl_gate_shut_title", lang), mode, lang),
-                           t("prl_gate_shut_summary", lang, why=str(why)[:200]), [_caveat(mode, lang)],
-                           footer=t("prl_footer", lang))
-    return notify.Card("🟢", _tagged(t("prl_gate_open_title", lang), mode, lang), t("prl_gate_open_summary", lang),
-                       [_caveat(mode, lang)], footer=t("prl_footer", lang))
+        return _langs(notify.Card("🟠", _tagged(t("prl_gate_shut_title", lang), mode, lang),
+                                  t("prl_gate_shut_summary", lang, why=str(why)[:200]), [_caveat(mode, lang)],
+                                  footer=t("prl_footer", lang)), lang, again)
+    return _langs(notify.Card("🟢", _tagged(t("prl_gate_open_title", lang), mode, lang),
+                              t("prl_gate_open_summary", lang), [_caveat(mode, lang)], footer=t("prl_footer", lang)),
+                  lang, again)
 
 
 def live_leftover_card(what: str, info: dict, mode: str | None = None, lang: str = "en"):
@@ -286,7 +299,8 @@ def live_leftover_card(what: str, info: dict, mode: str | None = None, lang: str
         emoji = "🟠"
         title = t("prl_left_stuck_title", lang, name=name)
         summary = t("prl_left_stuck_summary", lang, why=str(info.get("why") or "?")[:120])
-    return notify.Card(emoji, _tagged(title, mode, lang), summary, [_caveat(mode, lang)], footer=t("prl_footer", lang))
+    return _langs(notify.Card(emoji, _tagged(title, mode, lang), summary, [_caveat(mode, lang)],
+                              footer=t("prl_footer", lang)), lang, lambda lg: live_leftover_card(what, info, mode, lg))
 
 
 def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: float, execution: dict | None,
@@ -312,8 +326,10 @@ def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: flo
     if stats.get("failed"):
         lines.append(notify.Line(t("prl_daily_failed", lang, n=stats["failed"])))
     emoji = "⚪" if abs(pnl) < 1e-4 else ("🟢" if pnl > 0 else "🔴")     # break-even: under 0.0001 SOL
-    return notify.Card(emoji, _tagged(t("prl_daily_title", lang, day=i18n.iso_day(d, lang)), mode, lang),
-                       summary, [notify.Rows(rows)] + lines + [_caveat(mode, lang)], footer=t("prl_footer", lang))
+    return _langs(notify.Card(emoji, _tagged(t("prl_daily_title", lang, day=i18n.iso_day(d, lang)), mode, lang),
+                              summary, [notify.Rows(rows)] + lines + [_caveat(mode, lang)],
+                              footer=t("prl_footer", lang)), lang,
+                  lambda lg: live_daily_card(day, stats, balance_l, total_sol, execution, mode, rule, lg, eur))
 
 
 # ---------------------------------------------------------------- the pictures

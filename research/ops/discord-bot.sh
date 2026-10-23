@@ -4,10 +4,13 @@
 #   sudo /opt/pythia-ops/discord-bot.sh [--no-build] [--src DIR] [--env-file FILE] [--data DIR]
 #
 # The bot (research/discord, installed to /opt/pythia-ops/discord by deploy_ops.sh) lays out
-# the owner's private server at start and every six hours (categories, channels, topics, the
-# role Pythia, everything private to the owner and the bot, a pinned welcome post in #status),
-# keeps the channel map in <data>/discord/channels.json for the lab and answers the read-only
-# slash commands /status, /trades, /konten, /lab for the owner only.
+# the owner's private server at start and every six hours: a German block (🇩🇪 Übersicht ...
+# Markt, the old German categories renamed in place, every channel id kept) and an English one
+# (🇬🇧 Overview ... Markets), topics in their language, the role Pythia, everything private to
+# the owner and the bot, a pinned welcome post in both #status. It keeps the channel map
+# ("de" and "en") in <data>/discord/channels.json for the lab and answers the read-only slash
+# commands /status, /trades, /konten, /lab for the owner only, in the channel's language. A
+# restart is all a new layout needs: the layout runs first thing, before the gateway.
 #
 # It sees: /etc/pythia/discord.env through --env-file (PYTHIA_DISCORD_BOT_TOKEN,
 # PYTHIA_DISCORD_GUILD_ID, PYTHIA_DISCORD_OWNER_ID; read by docker on the host, never mounted),
@@ -29,7 +32,7 @@ while [ $# -gt 0 ]; do
     --src) src=${2:?--src needs the research/discord folder}; shift ;;
     --env-file) env_file=${2:?--env-file needs a file}; shift ;;
     --data) data=${2:?--data needs a folder}; shift ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -72,3 +75,14 @@ docker run -d --name "$name" --restart unless-stopped --memory 256m --cpus 0.5 \
   -v "$data/reports:/data/reports:ro" -v "$data/discord:/state" \
   "$image" >/dev/null
 echo "discord-bot: $name started (docker logs -f $name)"
+
+# The layout runs at start; say how it went (the map line), or that it is still running.
+for _ in $(seq 1 30); do
+  line=$(docker logs "$name" 2>&1 | grep -E "layout: .*channels in the map|layout failed" | tail -n 1 || true)
+  if [ -n "$line" ]; then
+    echo "discord-bot: ${line#*: }"
+    exit 0
+  fi
+  sleep 2
+done
+echo "discord-bot: the layout is still running (docker logs $name | grep layout)"

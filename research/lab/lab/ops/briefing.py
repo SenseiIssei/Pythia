@@ -443,6 +443,8 @@ def run(now: int | None = None, force: bool = False, dry_run: bool = False, engi
     ledger = read_ledger()
     rate = eur() if callable(eur) else eur
     card, snap = build(now, lang, engines, ledger, rate, st.get("autopilots") or {})
+    # Discord posts the briefing in German and English: the same data, built once more in the other language.
+    card.lang, card.remake = lang, lambda lg: build(now, lg, engines, ledger, rate, st.get("autopilots") or {})[0]
     image = overview_chart(engines, ledger, now, lang) if chart and not dry_run else None
     res = notify.send("dailyPnl", [card], image=image, now=now, dry_run=dry_run, hold_in_quiet=False,
                       poster=poster, discord="briefing", discord_poster=discord_poster)

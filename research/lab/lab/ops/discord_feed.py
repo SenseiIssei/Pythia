@@ -17,6 +17,9 @@ jobs already write:
   python -m lab.ops.discord_feed news forward  only those
   python -m lab.ops.discord_feed --dry-run     print the cards, post nothing, remember nothing
 
+Each card goes in German to the channel named here and in English to its twin in the 🇬🇧 block
+(#paper-books, #studies, #models, #news): built twice from the same data (one(), notify.bilingual).
+
 Nothing without PYTHIA_DISCORD_BOT_TOKEN. The first run of each part only remembers what is
 there, so the owner's server does not fill with the past. What went out is remembered in
 <data>/notify/discord_feed.json; a post that failed is tried again on the next run. The app's
@@ -53,6 +56,14 @@ STATUS_EMOJI = {"ok": "🟢", "on_track": "🟢", "pass": "🟢", "watch": "🟠
 
 def w(key: str, lang: str):
     return WORDS.get(lang, WORDS["en"])[key]
+
+
+def one(make, lang: str) -> Card | None:
+    """make(lang) -> a card (or None), built so Discord can post it in the other language too."""
+    c = make(lang)
+    if c is None:
+        return None
+    return notify.bilingual(lambda lg: [make(lg) if lg != lang else c], lang)[0]
 
 
 def state_path() -> Path:
@@ -117,7 +128,7 @@ def forward_part(st: dict, lang: str, post) -> None:
     if not at:
         return
     if "forward_ms" in st and at > int(st["forward_ms"] or 0):
-        if not post("forward", forward_card(rep, lang)):
+        if not post("forward", one(lambda lg: forward_card(rep, lg), lang)):
             return
     st["forward_ms"] = max(at, int(st.get("forward_ms") or 0))
 
@@ -142,7 +153,7 @@ def studies_part(st: dict, lang: str, post, root: Path | None = None) -> None:
             if sent >= STUDIES_PER_RUN:
                 break                                        # the rest on the next run
             rep = notify.read_json(p)
-            card = study_card(d.name, rep, lang) if isinstance(rep, dict) else None
+            card = one(lambda lg: study_card(d.name, rep, lg), lang) if isinstance(rep, dict) else None
             if card is not None:
                 if not post("studies", card):
                     continue
@@ -154,18 +165,21 @@ def models_part(st: dict, lang: str, post) -> None:
     rep = notify.read_json(notify.reports_root() / "models" / "latest.json")
     if not isinstance(rep, dict):
         return
-    keys, labels = [], []
+    keys, decided = [], []
     for m in rep.get("models") or []:
         if not isinstance(m, dict) or not m.get("code"):
             continue
         for d in m.get("decisions") or []:
             if isinstance(d, dict) and d.get("decision") in ("promoted", "rejected", "kept"):
                 keys.append(f"{m['code']}:{d.get('date')}:{d['decision']}")
-                labels.append(f"{m['code']} {i18n.word(str(d['decision']), lang)} ({d.get('date')})")
+                decided.append((m["code"], str(d["decision"]), d.get("date")))
     first = "models" not in st
     seen = set(st.get("models") or [])
-    new = [lb for k, lb in zip(keys, labels) if k not in seen]
-    if new and not first and not post("models", models_card(new, lang)):
+
+    def new(lg: str) -> list[str]:
+        return [f"{code} {i18n.word(dec, lg)} ({day})" for k, (code, dec, day) in zip(keys, decided) if k not in seen]
+
+    if new(lang) and not first and not post("models", one(lambda lg: models_card(new(lg), lg), lang)):
         return
     st["models"] = sorted(seen | set(keys))[-NEWS_KEEP:]
 
@@ -204,7 +218,7 @@ def news_part(st: dict, lang: str, post, now: int, root: Path | None = None) -> 
         titles.add(h["title"])
         new.append(h)
     show = [] if first else new[:NEWS_PER_RUN]
-    if show and not post("news", news_card(show, lang)):
+    if show and not post("news", one(lambda lg: news_card(show, lg), lang)):
         return
     # Remember everything seen this run: an hour's twenty headlines are not posted one by one later.
     order += [str(h.get("link")) for h in new]

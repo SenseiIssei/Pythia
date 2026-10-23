@@ -1,6 +1,7 @@
 """Pythia's messages through the Discord bot (lab.ops.notify with PYTHIA_DISCORD_BOT_TOKEN, mocked
-HTTP): what goes to which channel and which also as a DM, the channel map from the bot's file or by
-name, the webhook as the fallback, and lab.ops.discord_feed (forward report, studies, models, news).
+HTTP): what goes to which channel, German and English, and which also as one DM with both, the
+channel map from the bot's file (new and old) or by name, the webhook as the fallback, and
+lab.ops.discord_feed (forward report, studies, models, news) in both languages.
 
 Run from research/lab:  python -m pytest tests/test_discord_routes.py
 """
@@ -23,6 +24,10 @@ IDS = {"briefing": "910000000000000001", "status": "910000000000000002", "pumpfu
        "konten": "910000000000000004", "studien": "910000000000000005", "paper-buecher": "910000000000000006",
        "modelle": "910000000000000007", "pokemon": "910000000000000008", "cs2-skins": "910000000000000009",
        "news": "910000000000000010"}
+EN = {"briefing": "911000000000000001", "status": "911000000000000002", "pumpfun-trades": "911000000000000003",
+      "accounts": "911000000000000004", "studies": "911000000000000005", "paper-books": "911000000000000006",
+      "models": "911000000000000007", "pokemon": "911000000000000008", "cs2-skins": "911000000000000009",
+      "news": "911000000000000010"}
 NOW = 1_792_747_281_647
 
 
@@ -72,7 +77,7 @@ class Bot:
 def bot(data, monkeypatch):
     monkeypatch.setenv(notify.DISCORD_BOT_ENV, TOKEN)
     monkeypatch.setenv(notify.DISCORD_OWNER_ENV, OWNER)
-    write(data, "discord/channels.json", {"guild_id": GUILD, "channels": IDS, "dm": DM})
+    write(data, "discord/channels.json", {"guild_id": GUILD, "de": IDS, "en": EN, "channels": IDS, "dm": DM})
     fake = Bot()
     monkeypatch.setattr(notify, "bot_request", fake)
     return fake
@@ -80,6 +85,10 @@ def bot(data, monkeypatch):
 
 def card(emoji="🟢", title="+5,0 % · X") -> notify.Card:
     return notify.Card(emoji, title, "pump.fun")
+
+
+def en_of(channel: str) -> str:
+    return EN[notify.DISCORD_EN[channel]]
 
 
 def test_the_routing_table():
@@ -96,24 +105,70 @@ def test_the_routing_table():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "discord"))
     from pythia_discord import layout
     assert {v[0] for v in r.values()} == set(layout.CHANNELS), "every route has a channel in the bot's layout"
+    assert notify.DISCORD_EN == layout.EN_NAMES, "and its English twin is the layout's"
 
 
-def test_a_trade_card_goes_to_its_channel_and_as_a_dm_with_its_chart(bot):
-    res = notify.send_discord("trades", [card()], b"\x89PNG chart", "de", now=NOW)
-    assert res["delivered"] and res["channel"] and res["dm"] and res["error"] is None
-    (c1, p1, i1), (c2, p2, i2) = bot.posts()
-    assert (c1, c2) == (IDS["pumpfun-trades"], DM) and i1 == i2 == b"\x89PNG chart"
+def card(emoji="🟢", title="+5,0 % · X") -> notify.Card:
+    return notify.Card(emoji, title, "pump.fun")
+
+
+def two(emoji="🟢") -> list[notify.Card]:
+    """One card built in German, which knows how to build itself in English."""
+    return notify.bilingual(lambda lg: [notify.Card(emoji, "+5,0 % · X" if lg == "de" else "+5.0 % · X",
+                                                    "Echtgeld" if lg == "de" else "real money",
+                                                    [notify.Rows([("Gewinn" if lg == "de" else "Profit",
+                                                                   "+1,00 $" if lg == "de" else "+$1.00", 1.0)])],
+                                                    footer="pump.fun")], "de")
+
+
+def test_a_trade_card_goes_to_both_channels_and_one_dm_with_its_chart(bot):
+    res = notify.send_discord("trades", two(), b"\x89PNG chart", "de", now=NOW)
+    assert res["delivered"] and res["channel"] and res["channel_en"] and res["dm"] and res["error"] is None
+    (c1, p1, i1), (c2, p2, i2), (c3, p3, i3) = bot.posts()
+    assert (c1, c2, c3) == (IDS["pumpfun-trades"], EN["pumpfun-trades"], DM)
+    assert i1 == i2 == i3 == b"\x89PNG chart", "the same chart with each post"
     assert "username" not in p1 and p1["allowed_mentions"] == {"parse": []}
-    assert p1["embeds"][0]["color"] == 0x2FB344 and p1["embeds"][0]["image"] == {"url": "attachment://chart.png"}
+    de, en = p1["embeds"][0], p2["embeds"][0]
+    assert de["title"] == "🟢 +5,0 % · X" and en["title"] == "🟢 +5.0 % · X"
+    assert de["color"] == en["color"] == 0x2FB344 and de["image"] == en["image"] == {"url": "attachment://chart.png"}
+    assert de["fields"] == [{"name": "Gewinn", "value": "+1,00 $ 🟢", "inline": True}]
+    assert en["fields"] == [{"name": "Profit", "value": "+$1.00 🟢", "inline": True}], "the same fields, in order"
+    assert de["footer"] == {"text": "Pythia · Alpha"} and en["footer"] == {"text": "Pythia · Alpha phase"}
+    assert de["timestamp"] == en["timestamp"] and de["description"].endswith("*pump.fun*")
+    assert [e["title"] for e in p3["embeds"]] == [de["title"], en["title"]], "one DM: German first, English under it"
+    assert "image" in p3["embeds"][0] and "image" not in p3["embeds"][1], "the chart once in the DM"
+
+
+def test_a_card_without_a_remake_goes_to_both_as_it_is(bot):
+    res = notify.send_discord("studies", [card()], lang="de", now=NOW)
+    (c1, p1, _), (c2, p2, _) = bot.posts()
+    assert res["delivered"] and (c1, c2) == (IDS["studien"], EN["studies"])
+    assert p1["embeds"][0]["title"] == p2["embeds"][0]["title"] == "🟢 +5,0 % · X"
+    assert p2["embeds"][0]["footer"] == {"text": "Pythia · Alpha phase"}
 
 
 @pytest.mark.parametrize("kind,channel,dm", [("briefing", "briefing", True), ("fills", "konten", True),
                                              ("forward", "paper-buecher", False), ("studies", "studien", False),
                                              ("pokemon", "pokemon", False), ("cs2", "cs2-skins", False),
                                              ("news", "news", False), ("models", "modelle", False)])
-def test_every_kind_reaches_its_channel(bot, kind, channel, dm):
-    assert notify.send_discord(kind, [card()], lang="de", now=NOW)["delivered"]
-    assert [c for c, _, _ in bot.posts()] == [IDS[channel]] + ([DM] if dm else [])
+def test_every_kind_reaches_both_its_channels(bot, kind, channel, dm):
+    assert notify.send_discord(kind, two(), lang="de", now=NOW)["delivered"]
+    posts = bot.posts()
+    assert [c for c, _, _ in posts] == [IDS[channel], en_of(channel)] + ([DM] if dm else [])
+    assert posts[0][1]["embeds"][0]["description"].startswith("Echtgeld")
+    assert posts[1][1]["embeds"][0]["description"].startswith("real money")
+
+
+def test_a_long_dm_is_split_german_first(bot):
+    long = notify.bilingual(lambda lg: [notify.Card("☀️", f"Briefing {lg} {i}", ("x" if lg == "de" else "y") * 1900)
+                                        for i in range(3)], "de")
+    notify.send_discord("briefing", long, b"\x89PNG", "de", now=NOW)
+    dms = [p for c, p, _ in bot.posts() if c == DM]
+    titles = [[e["title"] for e in p["embeds"]] for p in dms]
+    assert all(sum(map(notify.embed_chars, p["embeds"])) <= 6000 for p in dms) and len(dms) >= 2
+    assert sum(titles, []) == [f"☀️ Briefing de {i}" for i in range(3)] + [f"☀️ Briefing en {i}" for i in range(3)]
+    imgs = [img for c, _, img in bot.posts() if c == DM]
+    assert imgs[0] == b"\x89PNG" and not any(imgs[1:]), "the chart once"
 
 
 def test_send_routes_lab_categories_through_the_bot_only(bot):
@@ -121,17 +176,18 @@ def test_send_routes_lab_categories_through_the_bot_only(bot):
     res = notify.send("pokemon", [card("🃏", "Glurak")], poster=tg,
                       photos=[("https://images.example.org/card.png", "Glurak")])
     assert res["discord"]["delivered"]
-    (cid, payload, img), = bot.posts()
-    assert cid == IDS["pokemon"] and img is None
-    assert payload["embeds"][0]["image"] == {"url": "https://images.example.org/card.png"}, "the card's picture"
+    (cid, payload, img), (cid2, payload2, _) = bot.posts()
+    assert (cid, cid2) == (IDS["pokemon"], EN["pokemon"]) and img is None
+    assert payload["embeds"][0]["image"] == payload2["embeds"][0]["image"] == {
+        "url": "https://images.example.org/card.png"}, "the card's picture"
     notify.send("trending", [card()], poster=tg)
     notify.send("studies", [card()], poster=tg, dry_run=True)
-    assert len(bot.posts()) == 1, "trending has no channel; a dry run posts nothing"
+    assert len(bot.posts()) == 2, "trending has no channel; a dry run posts nothing"
     write(notify.data_root(), "reports/notify/settings.json", {"categories": [{"id": "cs2", "on": False}]})
     notify.send("cs2", [card()], poster=tg)
-    assert len(bot.posts()) == 1, "the app's switch holds the bot too"
+    assert len(bot.posts()) == 2, "the app's switch holds the bot too"
     notify.send("dailyPnl", [card("☀️", "Briefing")], poster=tg, discord="briefing")
-    assert [c for c, _, _ in bot.posts()[1:]] == [IDS["briefing"], DM]
+    assert [c for c, _, _ in bot.posts()[2:]] == [IDS["briefing"], EN["briefing"], DM]
 
 
 def test_without_the_token_categories_stay_off_discord(data, monkeypatch):
@@ -144,28 +200,39 @@ def test_without_the_token_categories_stay_off_discord(data, monkeypatch):
 
 def test_the_webhook_is_the_fallback_when_the_bot_fails(bot, monkeypatch):
     monkeypatch.setenv(notify.DISCORD_ENV, WEBHOOK)
-    bot.fail = {IDS["pumpfun-trades"], DM}
+    bot.fail = {IDS["pumpfun-trades"], EN["pumpfun-trades"], DM}
     hooked = []
     res = notify.send_discord("trades", [card()], poster=lambda u, p, i: hooked.append((u, p)) or (True, None))
     assert res["delivered"] and hooked and hooked[0][0] == WEBHOOK and hooked[0][1]["username"] == "Pythia"
     assert TOKEN not in json.dumps(res)
-    bot.fail.add(IDS["news"])
+    bot.fail |= {IDS["news"], EN["news"]}
     res = notify.send_discord("news", [card()], poster=lambda u, p, i: hooked.append(u) or (True, None))
     assert not res["delivered"] and res["error"] and len(hooked) == 1, "news has no webhook"
+
+
+def test_one_language_failing_still_delivers_the_other(bot):
+    bot.fail = {EN["news"]}
+    res = notify.send_discord("news", [card()], lang="de", now=NOW)
+    assert res["delivered"] and res["channel"] and not res["channel_en"] and res["error"] == "#news (en): HTTP 404"
 
 
 def test_a_missing_channel_is_looked_up_by_name_once(data, monkeypatch):
     monkeypatch.setenv(notify.DISCORD_BOT_ENV, TOKEN)
     monkeypatch.setenv(notify.DISCORD_GUILD_ENV, GUILD)
-    fake = Bot(guild_channels=[{"id": "940000000000000001", "type": 4, "name": "📰 Markt"},
-                               {"id": "940000000000000002", "type": 0, "name": "news"}])
+    fake = Bot(guild_channels=[{"id": "940000000000000001", "type": 4, "name": "🇩🇪 Markt"},
+                               {"id": "940000000000000002", "type": 0, "name": "news",
+                                "parent_id": "940000000000000001"},
+                               {"id": "940000000000000003", "type": 4, "name": "🇬🇧 Markets"},
+                               {"id": "940000000000000004", "type": 0, "name": "news",
+                                "parent_id": "940000000000000003"}])
     monkeypatch.setattr(notify, "bot_request", fake)
     res = notify.send_discord("news", [card()], now=NOW)
-    assert res["delivered"] and fake.posts()[0][0] == "940000000000000002", "no file: the guild's channels by name"
+    assert res["delivered"] and [p[0] for p in fake.posts()] == ["940000000000000002", "940000000000000004"], \
+        "no file: the guild's channels by name, the English one under 🇬🇧"
     res = notify.send_discord("briefing", [card()], now=NOW)
-    assert not res["delivered"] and res["error"] == "#briefing: no channel; DM: no channel", "no #briefing, no owner"
+    assert not res["delivered"] and res["error"] == "#briefing: no channel; #briefing (en): no channel; DM: no channel"
     gets = [c for c in fake.calls if c[0] == "GET"]
-    assert len(gets) == 2, "asked once for the map, once more for the missing channel"
+    assert len(gets) == 4, "asked once per language for the map, once more each for the missing channel"
 
 
 def test_no_owner_no_dm_and_no_token_no_call(data, monkeypatch):
@@ -174,9 +241,10 @@ def test_no_owner_no_dm_and_no_token_no_call(data, monkeypatch):
     write(data, "discord/channels.json", {"channels": {"briefing": IDS["briefing"], "news": "../../evil"}})
     fake = Bot()
     monkeypatch.setattr(notify, "bot_request", fake)
-    assert notify.discord_channels() == {"briefing": IDS["briefing"]}, "only snowflakes from the file"
+    assert notify.discord_channels() == {"briefing": IDS["briefing"]}, "only snowflakes; the old file is German"
+    assert notify.discord_channels(lang="en") == {}
     res = notify.send_discord("briefing", [card()])
-    assert res["delivered"] and res["channel"] and not res["dm"] and "DM" in res["error"]
+    assert res["delivered"] and res["channel"] and not res["channel_en"] and not res["dm"] and "DM" in res["error"]
 
 
 def test_the_bot_request_never_shows_the_token(data, monkeypatch):
@@ -207,7 +275,8 @@ def test_the_bot_request_never_shows_the_token(data, monkeypatch):
     assert TOKEN not in seen["url"]
 
 
-def test_real_money_fills_go_to_konten_through_the_bot(bot):
+def test_real_money_fills_go_to_konten_and_accounts_through_the_bot(bot, monkeypatch):
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "de")
     ap = {"config": {"name": "Kraken live", "mode": "live", "venue": "kraken",
                      "sleeves": [{"strategyId": "lab:b"}]}, "state": "running", "startCapital": 42.0}
     buy = {"id": "o1", "ts": NOW - 60_000, "strategyId": "lab:b", "marketId": "crypto:SOL/USD", "side": "buy",
@@ -216,7 +285,15 @@ def test_real_money_fills_go_to_konten_through_the_bot(bot):
     notify.live_fills(NOW, rows=rows)
     rows[0]["state"]["orders"].append(buy)
     notify.live_fills(NOW, rows=rows)
-    assert [c for c, _, _ in bot.posts()] == [IDS["konten"], DM]
+    posts = bot.posts()
+    assert [c for c, _, _ in posts] == [IDS["konten"], EN["accounts"], DM]
+    de, en = posts[0][1]["embeds"][0], posts[1][1]["embeds"][0]
+    assert de["title"] == notify.tr("lf_buy_title", "de", sym="SOL").join(["🔵 ", ""])
+    assert en["title"] == notify.tr("lf_buy_title", "en", sym="SOL").join(["🔵 ", ""])
+    assert [f["name"] for f in de["fields"]] == [notify.tr(k, "de") for k in ("lf_row_qty", "lf_row_price",
+                                                                                "lf_row_value")]
+    assert [f["name"] for f in en["fields"]] == [notify.tr(k, "en") for k in ("lf_row_qty", "lf_row_price",
+                                                                                "lf_row_value")]
 
 
 # ---------------------------------------------------------------- the feed
@@ -272,7 +349,7 @@ def test_the_feed_through_the_bot_and_its_switches(bot):
     write(root, "reports/forward/latest.json", {"generated_ms": NOW, "headline": "x", "books": []})
     write(root, "reports/notify/settings.json", {"categories": [{"id": "studies", "on": False}]})
     discord_feed.run(["studies", "forward"], now=NOW)
-    assert [c for c, _, _ in bot.posts()] == [IDS["paper-buecher"]], "studies switched off in the app"
+    assert [c for c, _, _ in bot.posts()] == [IDS["paper-buecher"], EN["paper-books"]], "studies off in the app"
     st = json.loads((root / "notify" / "discord_feed.json").read_text())
     assert "tsmom" in st["studies"] and st["forward_ms"] == NOW
 
@@ -280,3 +357,54 @@ def test_the_feed_through_the_bot_and_its_switches(bot):
 def test_the_feed_needs_the_token(data):
     assert discord_feed.run(now=NOW) == 0
     assert not (notify.data_root() / "notify" / "discord_feed.json").exists()
+
+
+def test_the_feed_posts_german_and_english(bot, monkeypatch):
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "de")
+    root = notify.data_root()
+    write(root, "notify/discord_feed.json", {"studies": {}, "forward_ms": 0, "models": [], "news": []})
+    write(root, "reports/forward/latest.json", {"generated_ms": NOW, "generated": "2026-10-24 06:15 UTC",
+                                                "headline": "21 paper books", "status": "watch",
+                                                "books": [{"name": "tsmom", "days": 18, "return_pct": -6.2,
+                                                           "status": "watch"}]})
+    write(root, "reports/models/latest.json", {"models": [{"code": "M2", "decisions": [
+        {"date": "2026-10-24", "decision": "promoted"}]}]})
+    discord_feed.run(["forward", "models"], now=NOW)
+    posts = bot.posts()
+    assert [c for c, _, _ in posts] == [IDS["paper-buecher"], EN["paper-books"], IDS["modelle"], EN["models"]]
+    titles = [p["embeds"][0]["title"] for _, p, _ in posts]
+    assert titles == ["🟠 Paper-Bücher 2026-10-24", "🟠 Paper books 2026-10-24", "🧠 Modell-Zoo", "🧠 Model zoo"]
+    assert "Rendite" in posts[0][1]["embeds"][0]["description"] and "Return" in posts[1][1]["embeds"][0]["description"]
+    assert "M2 " + notify.i18n.word("promoted", "en") in posts[3][1]["embeds"][0]["description"]
+
+
+def test_every_text_the_discord_paths_use_is_there_in_english():
+    import re
+    from pathlib import Path
+    from lab.ops import i18n
+    here = Path(notify.__file__).resolve().parent
+    srcs = [here / "notify.py", here / "briefing.py", here / "discord_feed.py", here.parent / "pumpfun_rt" / "card.py"]
+    keys = set()
+    for p in srcs:
+        keys |= set(re.findall(r"""\b(?:tr|t|i18n\.t)\(\s*["']([a-z][a-z0-9_]+)["']\s*[,)]""",
+                               p.read_text(encoding="utf-8")))
+    keys |= {f"prl_stop_{k}_{x}" for k in ("daily", "total") for x in ("title", "summary")}
+    assert len(keys) > 100
+    missing = sorted(k for k in keys if k not in i18n.CATALOG["en"] or k not in i18n.CATALOG["de"])
+    assert missing == [], missing
+    assert set(discord_feed.WORDS["en"]) == set(discord_feed.WORDS["de"])
+    assert set(notify.DISCORD_FOOTER) == set(notify.DISCORD_LANGS)
+
+
+def test_the_briefing_goes_to_both_channels_and_one_dm(bot, monkeypatch):
+    from lab.ops import briefing
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "de")
+    assert briefing.run(NOW, force=True, engines=[], eur=lambda: 150.0, chart=False,
+                        poster=lambda t: (True, None)) == 0
+    posts = bot.posts()
+    assert [c for c, _, _ in posts] == [IDS["briefing"], EN["briefing"], DM]
+    day = {lg: notify.day_label(NOW, lg) for lg in ("de", "en")}
+    de, en = posts[0][1]["embeds"][0], posts[1][1]["embeds"][0]
+    assert de["title"] == "☀️ " + notify.tr("bf_title", "de", day=day["de"])
+    assert en["title"] == "☀️ " + notify.tr("bf_title", "en", day=day["en"]) and en["title"] != de["title"]
+    assert [e["title"] for e in posts[2][1]["embeds"]] == [de["title"], en["title"]]

@@ -267,8 +267,14 @@ def test_a_trade_card_is_a_discord_embed_with_its_chart(hook):
     payload = notify.discord_payload([c], "de", img, utc(2026, 10, 23, 7))
     emb = payload["embeds"][0]
     assert emb["title"] == "🟢 +32,5 % · KIMCHINU" and emb["color"] == 0x2FB344
-    assert emb["image"] == {"url": "attachment://chart.png"} and "```" in emb["description"]
-    assert emb["footer"]["text"] == "pump.fun · Echtgeld" and payload["allowed_mentions"] == {"parse": []}
+    assert emb["image"] == {"url": "attachment://chart.png"} and "```" not in emb["description"]
+    assert [f["name"] for f in emb["fields"]][:3] == ["Einsatz", "Erlös", "Ergebnis"], "the numbers as fields, in order"
+    assert emb["description"].endswith("*pump.fun · Echtgeld*"), "the card's own footer last"
+    assert emb["footer"]["text"] == "Pythia · Alpha" and payload["allowed_mentions"] == {"parse": []}
+    en = notify.discord_payload(notify.in_lang([c], "en"), "en", img, utc(2026, 10, 23, 7))["embeds"][0]
+    assert en["title"] == "🟢 +32.5% · KIMCHINU" and en["color"] == 0x2FB344 and en["footer"]["text"] == \
+        "Pythia · Alpha phase"
+    assert len(en["fields"]) == len(emb["fields"]) and "Alpha phase" in en["description"], "the same layout in English"
     ok, err = notify.post_discord(url, payload, img)
     assert ok and err is None
     headers, raw = got[-1]
@@ -316,6 +322,7 @@ def test_send_posts_to_discord_only_when_asked_and_switched_on(data, monkeypatch
 
 
 def test_the_live_service_sends_trade_cards_to_discord_too(monkeypatch):
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "de")
     from lab.pumpfun_rt import live_exec as LX
     calls = []
     monkeypatch.setattr(notify, "send", lambda cat, cards, **kw: calls.append((cat, cards, kw)))
@@ -326,6 +333,10 @@ def test_the_live_service_sends_trade_cards_to_discord_too(monkeypatch):
     LX.post_cards(lambda lang: [LX._gate_card("x", "test", lang)])
     assert calls[0][2]["discord"] == "trades" and calls[0][2]["urgent"] and calls[1][2]["discord"] is None
     assert "€" in calls[0][1][0].render()
+    de = calls[0][1][0]
+    en = notify.in_lang([de], "en", "de")[0]
+    assert en is not de and en.lang == "en" and en.render() != de.render(), "Discord gets the card in English too"
+    assert notify.in_lang([de], de.lang)[0] is de
     LX.post_cards(lambda lang: 1 / 0)                         # a broken card never stops the book
 
 

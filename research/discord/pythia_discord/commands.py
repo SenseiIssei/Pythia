@@ -3,7 +3,9 @@
 Every answer is built from the files the lab and the live bot write (the reports folder,
 mounted read only); no command trades, arms, changes a limit or touches the kill switch,
 and there is no code here that could. respond() checks the user's id against the owner's
-first; anyone else gets "nicht erlaubt" and nothing is read.
+first; anyone else gets "nicht erlaubt" ("not allowed") and nothing is read. An answer is in
+the language of the channel it was asked in (channel_lang: English in a 🇬🇧 channel, German in a
+🇩🇪 one and in the DM), with the texts of TEXT.
 
   /status   pump.fun live: on or off, mode, wallet, today's and the total P&L, stake, open
             positions (reports/pumpfun_rt/live_status.json)
@@ -26,17 +28,80 @@ COMMANDS: list[tuple[str, str]] = [
     ("konten", "Echtgeld- und Paper-Konten"),
     ("lab", "Die neuesten Studien und der Modell-Zoo"),
 ]
+# The same in English, Discord's description for an English client (description_localizations).
+COMMANDS_EN = {"status": "pump.fun live: on/off, wallet, P&L today, stake, open positions",
+               "trades": "The last 10 real-money trades", "konten": "Real-money and paper accounts",
+               "lab": "The newest studies and the model zoo"}
 NOT_ALLOWED = "nicht erlaubt"
+NOT_ALLOWED_EN = "not allowed"
 GREEN, RED, GREY, BLUE, ORANGE = 0x2FB344, 0xE66767, 0xA3A29A, 0x3987E5, 0xE8A33D
 STALE_MS = 5 * 60_000
 STATUS_DE = {"early": "noch früh", "on_track": "im Plan", "ok": "in Ordnung", "watch": "beobachten",
              "below": "darunter", "behind": "im Rückstand", "unknown": "unbekannt", "in use": "im Einsatz",
              "shadow": "Schattenlauf", "retired": "ausgemustert", "failed its gate": "an der Schwelle gescheitert"}
+STATUS_EN = {"early": "too early", "on_track": "on track", "ok": "ok", "watch": "watch", "below": "below",
+             "behind": "behind", "unknown": "unknown", "in use": "in use", "shadow": "shadow", "retired": "retired",
+             "failed its gate": "failed its gate"}
+# Every text of an answer, German and English (test_discord_bot checks both have the same keys and placeholders).
+TEXT: dict[str, dict[str, str]] = {
+    "de": {
+        "na": "k. A.", "footer": "Pythia · Alpha", "read_only": "nur lesen", "as_of": "Stand {t} · nur lesen",
+        "unknown_command": "unbekannter Befehl",
+        "live": "pump.fun live", "no_status": "Kein Status: reports/pumpfun_rt/live_status.json fehlt.",
+        "not_running": "⚪ läuft nicht", "stale": " (Status {m} min alt)", "kill": "🛑 Notschalter an",
+        "on": "🟢 an", "off": "🟠 aus", "mode_test": "Test (Alpha-Phase)", "mode_full": "voll",
+        "f_mode": "Modus", "f_wallet": "Wallet", "f_today": "P&L heute",
+        "today": "{pnl} · {n} Trades, {wins} gewonnen", "f_total": "P&L gesamt", "total": "{pnl} · {n} Trades",
+        "f_stake": "Einsatz", "stuck": " · hängt", "f_open": "Offene Positionen ({n})", "none": "keine",
+        "f_limits": "Grenzen", "limits": "Tagesverlust {day} · Budget {total} · max. {n} offen",
+        "why": "Warum: {why}", "stops": "Stopp: {stops}", "stop_daily": "Tagesverlust", "stop_total": "Budget",
+        "trades_none_title": "Letzte Echtgeld-Trades", "trades_none": "Noch keine Trades.",
+        "trades_title": "Letzte {n} Echtgeld-Trades", "trades_footer": "Summe {pnl} · pump.fun · nur lesen",
+        "wallet": "pump.fun Wallet {a}: {bal}, gesamt {pnl}", "f_real": "💰 Echtgeld", "nothing": "keins",
+        "f_paper": "📄 Paper und Demo ({n})", "more": "+{n} weitere", "f_books": "📒 Paper-Bücher ({n})",
+        "accounts": "Konten", "accounts_desc": "Echtgeld und Paper, aus dem Live-Status und dem Forward-Bericht.",
+        "forward_footer": "Forward-Bericht {gen}", "no_verdict": "kein Urteil", "f_zoo": "🧠 Modell-Zoo ({n})",
+        "lab": "Lab", "no_studies": "Keine Studienberichte.",
+    },
+    "en": {
+        "na": "n/a", "footer": "Pythia · Alpha phase", "read_only": "read only", "as_of": "As of {t} · read only",
+        "unknown_command": "unknown command",
+        "live": "pump.fun live", "no_status": "No status: reports/pumpfun_rt/live_status.json is missing.",
+        "not_running": "⚪ not running", "stale": " (status {m} min old)", "kill": "🛑 kill switch on",
+        "on": "🟢 on", "off": "🟠 off", "mode_test": "test (Alpha phase)", "mode_full": "full",
+        "f_mode": "Mode", "f_wallet": "Wallet", "f_today": "P&L today",
+        "today": "{pnl} · {n} trades, {wins} won", "f_total": "P&L total", "total": "{pnl} · {n} trades",
+        "f_stake": "Stake", "stuck": " · stuck", "f_open": "Open positions ({n})", "none": "none",
+        "f_limits": "Limits", "limits": "daily loss {day} · budget {total} · max. {n} open",
+        "why": "Why: {why}", "stops": "Stopped: {stops}", "stop_daily": "daily loss", "stop_total": "budget",
+        "trades_none_title": "Last real-money trades", "trades_none": "No trades yet.",
+        "trades_title": "Last {n} real-money trades", "trades_footer": "Total {pnl} · pump.fun · read only",
+        "wallet": "pump.fun wallet {a}: {bal}, total {pnl}", "f_real": "💰 Real money", "nothing": "none",
+        "f_paper": "📄 Paper and demo ({n})", "more": "+{n} more", "f_books": "📒 Paper books ({n})",
+        "accounts": "Accounts", "accounts_desc": "Real money and paper, from the live status and the forward report.",
+        "forward_footer": "Forward report {gen}", "no_verdict": "no verdict", "f_zoo": "🧠 Model zoo ({n})",
+        "lab": "Lab", "no_studies": "No study reports.",
+    },
+}
 # Reports that are not studies (the same set as the briefing's, lab.ops.briefing.NOT_STUDIES).
 NOT_STUDIES = {"learn", "forward", "notify", "trending", "listings", "models", "pokemon", "cs2", "cs2_trends",
                "cs2_weekly", "readiness", "pumpfun", "pumpfun_rt", "pumpfun_activity", "polymarket", "agent",
                "exit_shadow", "factory", "paper_review", "studies", "ai", "ai_brief", "ai_news", "ai_analyst",
                "costs"}
+
+
+def tx(key: str, lang: str = "de", **kw) -> str:
+    s = TEXT["en" if lang == "en" else "de"][key]
+    return s.format(**kw) if kw else s
+
+
+def channel_lang(channel_id, state: dict | None, parent_id=None) -> str:
+    """The language of the channel a command was used in: English in a channel of the bot's English
+    map (or under one of its 🇬🇧 categories), German anywhere else, a DM included."""
+    st = state if isinstance(state, dict) else {}
+    en = {str(v) for v in (st.get("en") or {}).values()}
+    en |= {str(v) for k, v in (st.get("categories") or {}).items() if str(k).startswith("🇬🇧")}
+    return "en" if str(channel_id or "") in en or (parent_id and str(parent_id) in en) else "de"
 
 
 def reports_root() -> Path:
@@ -57,7 +122,7 @@ def allowed(user_id, owner_id) -> bool:
     return bool(owner) and str(user_id or "").strip() == owner
 
 
-# ---------------------------------------------------------------- formatting (German)
+# ---------------------------------------------------------------- formatting (German or English)
 
 def _num(v) -> float | None:
     try:
@@ -67,20 +132,28 @@ def _num(v) -> float | None:
     return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
-def de(v: float, dp: int = 2, sign: bool = False) -> str:
-    """1.234,56 with an optional sign."""
-    s = f"{abs(v):,.{dp}f}".replace(",", "_").replace(".", ",").replace("_", ".")
+def de(v: float, dp: int = 2, sign: bool = False, lang: str = "de") -> str:
+    """1.234,56 (English 1,234.56) with an optional sign."""
+    s = f"{abs(v):,.{dp}f}"
+    if lang != "en":
+        s = s.replace(",", "_").replace(".", ",").replace("_", ".")
     return ("+" if v > 0 else "-" if v < 0 else "") + s if sign else ("-" + s if v < 0 else s)
 
 
-def sol(v, dp: int = 4, sign: bool = False) -> str:
+def sol(v, dp: int = 4, sign: bool = False, lang: str = "de") -> str:
     v = _num(v)
-    return "k. A." if v is None else f"{de(v, dp, sign)} SOL"
+    return tx("na", lang) if v is None else f"{de(v, dp, sign, lang)} SOL"
 
 
-def pct(frac, dp: int = 1) -> str:
+def usd(v, lang: str = "de") -> str:
+    v = _num(v)
+    return tx("na", lang) if v is None else (f"{de(v, 2, lang=lang)} $" if lang != "en" else
+                                             ("-" if v < 0 else "") + f"${de(abs(v), 2, lang=lang)}")
+
+
+def pct(frac, dp: int = 1, lang: str = "de") -> str:
     v = _num(frac)
-    return "k. A." if v is None else f"{de(v * 100, dp, True)} %"
+    return tx("na", lang) if v is None else f"{de(v * 100, dp, True, lang)} %"
 
 
 def berlin(ms) -> datetime:
@@ -95,13 +168,19 @@ def berlin(ms) -> datetime:
     return t + timedelta(hours=2 if summer else 1)
 
 
-def when(ms) -> str:
-    return berlin(ms).strftime("%d.%m. %H:%M") if _num(ms) else "?"
+MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-def short_address(a) -> str:
+def when(ms, lang: str = "de") -> str:
+    if not _num(ms):
+        return "?"
+    b = berlin(ms)
+    return f"{b.day} {MONTHS_EN[b.month - 1]} {b:%H:%M}" if lang == "en" else b.strftime("%d.%m. %H:%M")
+
+
+def short_address(a, lang: str = "de") -> str:
     a = str(a or "")
-    return f"{a[:4]}…{a[-4:]}" if len(a) > 12 else (a or "k. A.")
+    return f"{a[:4]}…{a[-4:]}" if len(a) > 12 else (a or tx("na", lang))
 
 
 def clip(s, n: int) -> str:
@@ -110,111 +189,118 @@ def clip(s, n: int) -> str:
 
 
 def embed(title: str, description: str, color: int = BLUE, fields: list[tuple[str, str, bool]] | None = None,
-          footer: str | None = None) -> dict:
+          footer: str | None = None, lang: str = "de", now_ms: int | None = None) -> dict:
+    """One answer, laid out like every Pythia post: the title, the description, the fields in a
+    fixed order, the footer (what it is, then "Pythia · Alpha"), the time."""
     e: dict = {"title": clip(title, 250), "description": description[:4000], "color": color}
     if fields:
         e["fields"] = [{"name": clip(n, 250), "value": (v or "-")[:1024], "inline": i} for n, v, i in fields[:25]]
-    if footer:
-        e["footer"] = {"text": clip(footer, 200)}
+    e["footer"] = {"text": clip(" · ".join(x for x in (footer, tx("footer", lang)) if x), 200)}
+    if now_ms:
+        e["timestamp"] = datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     return e
 
 
 # ---------------------------------------------------------------- the answers
 
-def status_embed(st: dict | None, now_ms: int) -> dict:
+def status_embed(st: dict | None, now_ms: int, lang: str = "de") -> dict:
+    T = lambda k, **kw: tx(k, lang, **kw)                    # noqa: E731
     if not isinstance(st, dict):
-        return embed("pump.fun live", "Kein Status: reports/pumpfun_rt/live_status.json fehlt.", GREY)
+        return embed(T("live"), T("no_status"), GREY, lang=lang)
     on, running = bool(st.get("on")), bool(st.get("running"))
     age = now_ms - int(_num(st.get("t")) or 0)
     if not running or age > STALE_MS:
-        head, color = "⚪ läuft nicht" + (f" (Status {age // 60_000} min alt)" if age > STALE_MS else ""), GREY
+        head, color = T("not_running") + (T("stale", m=age // 60_000) if age > STALE_MS else ""), GREY
     elif st.get("kill"):
-        head, color = "🛑 Notschalter an", RED
+        head, color = T("kill"), RED
     elif on:
-        head, color = "🟢 an", GREEN
+        head, color = T("on"), GREEN
     else:
-        head, color = "🟠 aus", ORANGE
-    mode = {"test": "Test (Alpha-Phase)", "full": "voll"}.get(str(st.get("mode")), str(st.get("mode") or "k. A."))
+        head, color = T("off"), ORANGE
+    mode = {"test": T("mode_test"), "full": T("mode_full")}.get(str(st.get("mode")), str(st.get("mode") or T("na")))
     pnl = _num(st.get("pnl_today_sol"))
     stake = _num((st.get("stake") or {}).get("sol")) or _num((st.get("limits") or {}).get("max_trade_sol"))
     fields = [
-        ("Modus", f"{mode} · {st.get('rule') or '?'}", True),
-        ("Wallet", f"{short_address(st.get('address'))} · {sol(st.get('balance_sol'))}", True),
-        ("P&L heute", f"{sol(pnl, sign=True)} · {int(_num(st.get('trades_today')) or 0)} Trades, "
-                      f"{int(_num(st.get('wins_today')) or 0)} gewonnen", False),
-        ("P&L gesamt", f"{sol(st.get('pnl_total_sol'), sign=True)} · {int(_num(st.get('trades_total')) or 0)} Trades",
-         True),
-        ("Einsatz", sol(stake) + (f" ({clip((st.get('stake') or {}).get('why'), 80)})"
-                                  if (st.get("stake") or {}).get("why") else ""), True),
+        (T("f_mode"), f"{mode} · {st.get('rule') or '?'}", True),
+        (T("f_wallet"), f"{short_address(st.get('address'), lang)} · {sol(st.get('balance_sol'), lang=lang)}", True),
+        (T("f_today"), T("today", pnl=sol(pnl, sign=True, lang=lang), n=int(_num(st.get("trades_today")) or 0),
+                         wins=int(_num(st.get("wins_today")) or 0)), False),
+        (T("f_total"), T("total", pnl=sol(st.get("pnl_total_sol"), sign=True, lang=lang),
+                         n=int(_num(st.get("trades_total")) or 0)), True),
+        (T("f_stake"), sol(stake, lang=lang) + (f" ({clip((st.get('stake') or {}).get('why'), 80)})"
+                                                if (st.get("stake") or {}).get("why") else ""), True),
     ]
     pos = [p for p in st.get("positions") or [] if isinstance(p, dict)]
     lines = []
     for p in pos[:10]:
         cost, mark = _num(p.get("cost_sol")), _num(p.get("mark_sol"))
-        ret = f" · {pct(mark / cost - 1)}" if cost and mark is not None else ""
-        lines.append(f"{clip(p.get('symbol') or p.get('name') or '?', 16)}: {sol(cost)}{ret}"
-                     + (" · hängt" if p.get("state") == "stuck" else ""))
-    fields.append((f"Offene Positionen ({len(pos)})", "\n".join(lines) or "keine", False))
+        ret = f" · {pct(mark / cost - 1, lang=lang)}" if cost and mark is not None else ""
+        lines.append(f"{clip(p.get('symbol') or p.get('name') or '?', 16)}: {sol(cost, lang=lang)}{ret}"
+                     + (T("stuck") if p.get("state") == "stuck" else ""))
+    fields.append((T("f_open", n=len(pos)), "\n".join(lines) or T("none"), False))
     lim = st.get("limits") or {}
     if lim:
-        fields.append(("Grenzen", f"Tagesverlust {sol(lim.get('max_daily_loss_sol'))} · Budget "
-                                  f"{sol(lim.get('max_total_sol'))} · max. {int(_num(lim.get('max_open')) or 0)} offen",
-                       False))
+        fields.append((T("f_limits"), T("limits", day=sol(lim.get("max_daily_loss_sol"), lang=lang),
+                                        total=sol(lim.get("max_total_sol"), lang=lang),
+                                        n=int(_num(lim.get("max_open")) or 0)), False))
     why = "; ".join(str(g) for g in (st.get("gate") or [])[:3]) or st.get("refusing")
     stops = [k for k, v in (st.get("stops") or {}).items() if v]
     desc = f"**{head}**"
     if not on and why:
-        desc += f"\nWarum: {clip(why, 300)}"
+        desc += "\n" + T("why", why=clip(why, 300))
     if stops:
-        desc += "\nStopp: " + ", ".join({"daily": "Tagesverlust", "total": "Budget"}.get(s, s) for s in stops)
-    return embed("pump.fun live", desc, color, fields, footer=f"Stand {when(st.get('t'))} · nur lesen")
+        desc += "\n" + T("stops", stops=", ".join(T("stop_" + s) if s in ("daily", "total") else s for s in stops))
+    return embed(T("live"), desc, color, fields, footer=T("as_of", t=when(st.get("t"), lang)), lang=lang)
 
 
-def trades_embed(rows, n: int = 10) -> dict:
+def trades_embed(rows, n: int = 10, lang: str = "de") -> dict:
     trades = [t for t in (rows or []) if isinstance(t, dict) and _num(t.get("exit_ms"))]
     trades.sort(key=lambda t: _num(t["exit_ms"]), reverse=True)
     if not trades:
-        return embed("Letzte Echtgeld-Trades", "Noch keine Trades.", GREY)
+        return embed(tx("trades_none_title", lang), tx("trades_none", lang), GREY, lang=lang)
     lines = []
     for t in trades[:n]:
         p = _num(t.get("pnl_sol")) or 0.0
         dot = "🟢" if p > 0 else "🔴" if p < 0 else "⚪"
-        lines.append(f"{dot} {when(t['exit_ms'])} **{clip(t.get('symbol') or t.get('name') or '?', 14)}** "
-                     f"{pct(t.get('ret'))} · {sol(p, sign=True)} · {clip(t.get('exit_why') or '?', 12)}")
+        lines.append(f"{dot} {when(t['exit_ms'], lang)} **{clip(t.get('symbol') or t.get('name') or '?', 14)}** "
+                     f"{pct(t.get('ret'), lang=lang)} · {sol(p, sign=True, lang=lang)} · "
+                     f"{clip(t.get('exit_why') or '?', 12)}")
     total = sum(_num(t.get("pnl_sol")) or 0.0 for t in trades[:n])
-    return embed(f"Letzte {min(n, len(trades))} Echtgeld-Trades", "\n".join(lines),
+    return embed(tx("trades_title", lang, n=min(n, len(trades))), "\n".join(lines),
                  GREEN if total > 0 else RED if total < 0 else GREY,
-                 footer=f"Summe {sol(total, sign=True)} · pump.fun · nur lesen")
+                 footer=tx("trades_footer", lang, pnl=sol(total, sign=True, lang=lang)), lang=lang)
 
 
-def konten_embed(status: dict | None, forward: dict | None) -> dict:
+def konten_embed(status: dict | None, forward: dict | None, lang: str = "de") -> dict:
+    T = lambda k, **kw: tx(k, lang, **kw)                    # noqa: E731
+    words = STATUS_EN if lang == "en" else STATUS_DE
     real, paper = [], []
     if isinstance(status, dict) and status.get("address"):
-        real.append(f"pump.fun Wallet {short_address(status.get('address'))}: {sol(status.get('balance_sol'))}, "
-                    f"gesamt {sol(status.get('pnl_total_sol'), sign=True)}")
+        real.append(T("wallet", a=short_address(status.get("address"), lang),
+                      bal=sol(status.get("balance_sol"), lang=lang), pnl=sol(status.get("pnl_total_sol"), sign=True,
+                                                                             lang=lang)))
     aps = [a for a in ((forward or {}).get("autopilots") or []) if isinstance(a, dict)]
     for a in aps:
-        eq, ret = _num(a.get("equity")), _num(a.get("return_pct"))
+        ret = _num(a.get("return_pct"))
         line = (f"{clip(a.get('label') or a.get('name'), 40)} ({str(a.get('venue') or '?').replace('_', ' ')}): "
-                f"{de(eq, 2) + ' $' if eq is not None else 'k. A.'}"
-                + (f" · {de(ret, 1, True)} %" if ret is not None else ""))
+                f"{usd(a.get('equity'), lang)}" + (f" · {de(ret, 1, True, lang)} %" if ret is not None else ""))
         (real if a.get("mode") == "live" else paper).append(line)
     books = [b for b in ((forward or {}).get("books") or []) if isinstance(b, dict)]
-    fields = [("💰 Echtgeld", "\n".join(real[:10]) or "keins", False),
-              (f"📄 Paper und Demo ({len(paper)})", "\n".join(paper[:12]) + (f"\n+{len(paper) - 12} weitere"
-                                                                              if len(paper) > 12 else "") or "keins",
+    fields = [(T("f_real"), "\n".join(real[:10]) or T("nothing"), False),
+              (T("f_paper", n=len(paper)), "\n".join(paper[:12]) + ("\n" + T("more", n=len(paper) - 12)
+                                                                    if len(paper) > 12 else "") or T("nothing"),
                False)]
     if books:
         counts: dict[str, int] = {}
         for b in books:
-            counts[str(b.get("status") or "unbekannt")] = counts.get(str(b.get("status") or "unbekannt"), 0) + 1
-        fields.append((f"📒 Paper-Bücher ({len(books)})",
-                       ", ".join(f"{n} {STATUS_DE.get(k, k.replace('_', ' '))}"
+            counts[str(b.get("status") or "unknown")] = counts.get(str(b.get("status") or "unknown"), 0) + 1
+        fields.append((T("f_books", n=len(books)),
+                       ", ".join(f"{n} {words.get(k, k.replace('_', ' '))}"
                                  for k, n in sorted(counts.items(), key=lambda kv: -kv[1])),
                        False))
     gen = (forward or {}).get("generated")
-    return embed("Konten", "Echtgeld und Paper, aus dem Live-Status und dem Forward-Bericht.", BLUE, fields,
-                 footer=f"Forward-Bericht {gen}" if gen else "nur lesen")
+    return embed(T("accounts"), T("accounts_desc"), BLUE, fields,
+                 footer=T("forward_footer", gen=gen) if gen else T("read_only"), lang=lang)
 
 
 def newest_studies(root: Path, n: int = 6) -> list[tuple[str, int, dict]]:
@@ -236,37 +322,43 @@ def newest_studies(root: Path, n: int = 6) -> list[tuple[str, int, dict]]:
     return [(name, at, read_json(p) or {}) for name, at, p in out[:n]]
 
 
-def lab_embed(models: dict | None, studies: list[tuple[str, int, dict]]) -> dict:
+def lab_embed(models: dict | None, studies: list[tuple[str, int, dict]], lang: str = "de") -> dict:
+    words = STATUS_EN if lang == "en" else STATUS_DE
     lines = []
     for name, at, rep in studies:
         verdict = rep.get("verdict") or rep.get("headline") if isinstance(rep, dict) else None
-        lines.append(f"**{name}** ({when(at)}): {clip(verdict, 160) if isinstance(verdict, str) else 'kein Urteil'}")
+        lines.append(f"**{name}** ({when(at, lang)}): "
+                     f"{clip(verdict, 160) if isinstance(verdict, str) else tx('no_verdict', lang)}")
     fields = []
     ms = [m for m in ((models or {}).get("models") or []) if isinstance(m, dict) and m.get("code")]
     if ms:
         by: dict[str, list[str]] = {}
         for m in ms:
             by.setdefault(str(m.get("status") or "?"), []).append(str(m["code"]))
-        fields.append((f"🧠 Modell-Zoo ({len(ms)})",
-                       "\n".join(f"{STATUS_DE.get(k, k)}: {', '.join(v)}" for k, v in sorted(by.items())), False))
-    return embed("Lab", "\n".join(lines) or "Keine Studienberichte.", BLUE, fields, footer="nur lesen")
+        fields.append((tx("f_zoo", lang, n=len(ms)),
+                       "\n".join(f"{words.get(k, k)}: {', '.join(v)}" for k, v in sorted(by.items())), False))
+    return embed(tx("lab", lang), "\n".join(lines) or tx("no_studies", lang), BLUE, fields,
+                 footer=tx("read_only", lang), lang=lang)
 
 
-def respond(name: str, user_id, owner_id, now_ms: int, root: Path | None = None) -> dict:
-    """The answer to one command: {"content", "embeds", "ephemeral"}. The owner check first."""
+def respond(name: str, user_id, owner_id, now_ms: int, root: Path | None = None, lang: str = "de") -> dict:
+    """The answer to one command in `lang` (the channel's, channel_lang): {"content", "embeds",
+    "ephemeral"}. The owner check first."""
+    lang = "en" if lang == "en" else "de"
     if not allowed(user_id, owner_id):
-        return {"content": NOT_ALLOWED, "embeds": [], "ephemeral": True}
+        return {"content": NOT_ALLOWED_EN if lang == "en" else NOT_ALLOWED, "embeds": [], "ephemeral": True}
     root = root or reports_root()
     if name == "status":
-        e = status_embed(read_json(root / "pumpfun_rt" / "live_status.json"), now_ms)
+        e = status_embed(read_json(root / "pumpfun_rt" / "live_status.json"), now_ms, lang)
     elif name == "trades":
         d = read_json(root / "pumpfun_rt" / "live_trades.json")
-        e = trades_embed(d.get("trades") if isinstance(d, dict) else d)
+        e = trades_embed(d.get("trades") if isinstance(d, dict) else d, lang=lang)
     elif name == "konten":
         e = konten_embed(read_json(root / "pumpfun_rt" / "live_status.json"),
-                         read_json(root / "forward" / "latest.json"))
+                         read_json(root / "forward" / "latest.json"), lang)
     elif name == "lab":
-        e = lab_embed(read_json(root / "models" / "latest.json"), newest_studies(root))
+        e = lab_embed(read_json(root / "models" / "latest.json"), newest_studies(root), lang)
     else:
-        return {"content": "unbekannter Befehl", "embeds": [], "ephemeral": True}
+        return {"content": tx("unknown_command", lang), "embeds": [], "ephemeral": True}
+    e.setdefault("timestamp", datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
     return {"content": None, "embeds": [e], "ephemeral": True}
