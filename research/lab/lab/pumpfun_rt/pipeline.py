@@ -180,6 +180,10 @@ class Exits:
                                           # the time stop sells all but the share; the rest exits on its own stops
     lock: tuple | None = None             # Y12: ((arm gain, floor gain, cumulative share sold), ...), arms rising: once
                                           # the peak reached 1 + arm, a mark at or under 1 + floor sells to the share
+    free: tuple | None = None             # Y15: (window s or None, fall from the high, hard stop s): a first ladder step
+                                          # reached within the window of the landing sells only the stake and the fees
+                                          # back; the rest exits at its fall from its high, at the partial sale's price
+                                          # or at landing + the hard stop
 
 
 # E0, the X14 plan's exit for the early books, and the hazard strategies' fallback before the first retrain.
@@ -410,8 +414,31 @@ def _build_y12() -> list[Strategy]:
     ]
 
 
+def _build_y15() -> list[Strategy]:
+    """Y15 (results/pumpfun_freeride_prereg.md): P_pool0_wait with a free ride after a fast spike. Exactly
+    P_pool0_wait until the +30 %; a +30 % first reached within the window of the landing sells the share that brings
+    back the stake and the fees, the rest rides with a trail, the partial sale's price as its floor and a 30 min hard
+    stop; a later +30 % sells all as P_pool0_wait. 0.1 SOL each."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    wait = {"delay_s": 0, "wait_pool_s": 5}
+    w = "PumpSwap, at the migration or up to 5 s later at the pool's first trade; +30 %, stop -20 %, 300 s"
+    rest = "the rest out {}% under its high, at the partial sale's price or at 30 min"
+    return [
+        _strategy("P_pool0_wait_free10", "E", "migration", wait, {}, dataclasses.replace(pool0, free=(10, 0.20, 1800)),
+                  f"{w}; +30 % within 10 s: stake and fees back, " + rest.format(20), stake_sol=0.1),
+        _strategy("P_pool0_wait_free30", "E", "migration", wait, {}, dataclasses.replace(pool0, free=(30, 0.20, 1800)),
+                  f"{w}; +30 % within 30 s: stake and fees back, " + rest.format(20), stake_sol=0.1),
+        _strategy("P_pool0_wait_free_any", "E", "migration", wait, {},
+                  dataclasses.replace(pool0, free=(None, 0.20, 1800)),
+                  f"{w}; at +30 %: stake and fees back, " + rest.format(20), stake_sol=0.1),
+        _strategy("P_pool0_wait_free10_tight", "E", "migration", wait, {},
+                  dataclasses.replace(pool0, free=(10, 0.10, 1800)),
+                  f"{w}; +30 % within 10 s: stake and fees back, " + rest.format(10), stake_sol=0.1),
+    ]
+
+
 STRATEGIES: list[Strategy] = (_build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
-                              + _build_y10() + _build_y11() + _build_y12())
+                              + _build_y10() + _build_y11() + _build_y12() + _build_y15())
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -886,6 +913,11 @@ class Pipeline:
                 rn["got_l"] += got_l
                 rn["fee_l"] += fee_l
         p.pop("lock_part", None)
+        if p.pop("free_part", None) is not None:              # Y15: the stake back; the rest rides from here
+            self._free_start(p, at, tokens, got_l, fee_l)
+        elif p.get("free") is not None:
+            p["free"]["got_l"] += got_l
+            p["free"]["fee_l"] += fee_l
         p["left"] -= tokens
         p["proceeds_l"] += got_l
         p["fees_l"] += fee_l
@@ -917,6 +949,8 @@ class Pipeline:
         part = p.pop("lock_part", None)
         if part is not None and not p.get("exiting") and "due" not in p:
             return self._lock_sell(p, at, part)               # Y12: a floor's partial sale goes through too
+        p.pop("free_part", None)                              # Y15: as a take, the +30 % stays due
+        p.pop("free_high", None)
         if p.get("exiting"):
             # A protective exit must go through: it is sent again at once. The live executor holds it back
             # for its backoff (1, 2, 4 ... 60 s) and gives up after a cap; the paper executor fills it.
@@ -991,6 +1025,8 @@ class Pipeline:
         if p["selling"]:
             if p.get("run") is not None:
                 self._run_mark(p)
+            if p.get("free_part") is not None:
+                self._free_mark(p)
             # a trigger the strategy acts on (a dev sale or pull only where its exits have them) is acted on as
             # soon as the sale in flight is back
             if not p.get("exiting") and (trigger == "kill" or (trigger == "dev_sell" and ex.dev_sell)
@@ -1016,6 +1052,8 @@ class Pipeline:
         p["peak"] = max(p["peak"], mult)
         if p.get("run") is not None:                          # Y11: the rest has only its own exits
             return self._run_check(p, t, mult)
+        if p.get("free") is not None:                         # Y15: so has the free ride's
+            return self._free_check(p, t, mult)
         if ex.risk and tok is not None and t - p["last_risk_ms"] >= RISK_EVERY_MS:
             p["last_risk_ms"] = t
             pb = eng.prob(ex.risk[0], eng.features(tok, int(t)))
@@ -1036,6 +1074,8 @@ class Pipeline:
         if ex.press_exit is not None and tok is not None and press_trigger(tok, t, p["land_ms"], *ex.press_exit,
                                                                             p.get("entry_pq", 0)):
             return self._sell_all(p, t, "press")
+        if ex.free is not None and p["step"] == 0 and mult >= 1 + ex.ladder[0][0] and self._free(p, t, v, ex.free):
+            return None
         while p["step"] < len(ex.ladder) and mult >= 1 + ex.ladder[p["step"]][0]:
             gain, share = ex.ladder[p["step"]]
             target_left = 0 if share >= 1 else int(p["tokens"] * (1 - share))
@@ -1072,8 +1112,69 @@ class Pipeline:
         p["lock_part"] = amount
         self._sell(p, t, amount, 0, "lock_part")
 
+    def _free(self, p: dict, t: float, v: int, free: tuple) -> bool:
+        """Y15: the first +30 % (the first time a check sees it decides, also when its sale is tried again) within the
+        window of the landing sells the share whose expected proceeds bring back the cost, the buy's fee and this
+        sale's (min_out half the expected, as the take); False (all sold as the take) when it is later or the share is
+        all."""
+        first = p.setdefault("free_first_ms", int(t))
+        if free[0] is not None and first - p["land_ms"] > free[0] * 1000:
+            return False
+        want = p["cost_l"] + p["fees_l"] + self.eng.cost_of(p["rule"]).tx_lamports()
+        amount = min(p["left"], -(-p["left"] * want // v))
+        if amount >= p["left"]:
+            return False
+        p["step"] += 1
+        p["free_part"], p["free_high"] = amount, 0.0
+        self._sell(p, t, amount, int(TP_FLOOR * v * amount / p["left"]), "free_part")
+        return True
+
+    def _free_start(self, p: dict, at: float, tokens: int, got_l: int, fee_l: int) -> None:
+        """Y15: the partial sale landed. The rest's floor is that sale's price over the entry's (after the pool's fee,
+        as the mark); its high counts from the partial sale's signal; the time stop no longer applies, the hard stop
+        is landing + the last field."""
+        p.pop("time_due", None)
+        keep = p["left"] - tokens
+        p["free"] = {"from_ms": p["exit_signal_ms"], "keep": keep, "part_tokens": tokens, "part_l": got_l,
+                     "part_fee_l": fee_l, "floor": got_l / (p["cost_l"] * tokens / p["tokens"]),
+                     "high": p.pop("free_high", 0.0), "got_l": 0, "fee_l": 0}
+        if keep > 0:
+            self.eng.push(p["land_ms"] + self.strats[p["rule"]].exits.free[2] * 1000, "pipe",
+                          (self, "_free_end", p["pid"]))
+
+    def _free_mark(self, p: dict) -> None:
+        """Y15: the rest's high follows its mark while the partial sale is in flight."""
+        keep = p["left"] - p["free_part"]
+        v = self.eng.sale_value(self.eng.tokens.get(p["mint"]), keep, self.eng.cost_of(p["rule"]))
+        basis = p["cost_l"] * keep / p["tokens"]
+        if v is not None and basis > 0:
+            p["free_high"] = max(p["free_high"], v / basis)
+
+    def _free_check(self, p: dict, t: float, mult: float) -> None:
+        """Y15: the rest exits (all, min_out 0) at its fall from its high or back at the partial sale's price."""
+        fr, gap = p["free"], self.strats[p["rule"]].exits.free[1]
+        fr["high"] = max(fr["high"], mult)
+        if mult <= fr["floor"]:
+            return self._sell_all(p, t, "free_floor")
+        if mult <= fr["high"] * (1 - gap):
+            return self._sell_all(p, t, "free_trail")
+        return None
+
+    def _free_end(self, at: float, pid: int) -> None:
+        """Y15: the rest's hard stop."""
+        p = self.pos.get(pid)
+        if p is None or p["state"] != "open" or p["left"] <= 0 or p.get("free") is None:
+            return
+        if p["selling"]:
+            if not p.get("exiting"):
+                p["due"] = "free_time"
+            return
+        self._sell_all(p, at, "free_time")
+
     def _time_stop(self, at: float, pid: int) -> None:
         p = self.pos.get(pid)
+        if p is not None and p.get("free") is not None:
+            return                                            # Y15: the rest has its own hard stop
         if p is not None and p["state"] == "open" and p["left"] > 0:
             if p["selling"]:
                 if not p.get("exiting"):
@@ -1223,6 +1324,16 @@ class Pipeline:
                        run_vs_time_sol=(rn["got_l"] - rn["fee_l"] - pro_rata) / C.LAMPORTS)
         if p.get("lock_ms") is not None:                  # Y12: only where a floor fired
             rec.update(lock_ms=p["lock_ms"], lock_sales=p["lock_sales"], peak=p["peak"])
+        if p.get("free_first_ms") is not None:            # Y15: only where a free ride's +30 % was seen
+            rec["free_first_s"] = (p["free_first_ms"] - p["land_ms"]) / 1000
+        fr = p.get("free")
+        if fr is not None:                                # Y15: the partial sale and the rest on its own
+            rest_cost = p["cost_l"] * fr["keep"] / p["tokens"]
+            pro_rata = fr["part_l"] * fr["keep"] / fr["part_tokens"]
+            rec.update(free_ms=fr["from_ms"], free_part_sol=(fr["part_l"] - fr["part_fee_l"]) / C.LAMPORTS,
+                       free_floor=fr["floor"], free_high=fr["high"], rest_cost_sol=rest_cost / C.LAMPORTS,
+                       rest_pnl_sol=(fr["got_l"] - fr["fee_l"] - rest_cost) / C.LAMPORTS,
+                       rest_vs_take_sol=(fr["got_l"] - fr["fee_l"] - pro_rata) / C.LAMPORTS)
         self.closed.append(rec)
         if self.record:
             eng.closed.append(rec)

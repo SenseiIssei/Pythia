@@ -147,9 +147,12 @@ RUNNER_Y11_TRIALS = 2 * 2
 # Y12 (results/pumpfun_lock_prereg.md): P_pool0_wait with three profit floors (pipeline._build_y12), each judged
 # under the 0.25 SOL and the 1.0 SOL daily loss limit at the paper model's and at the measured latency, twelve more.
 LOCK_Y12_TRIALS = 3 * 2 * 2
+# Y15 (results/pumpfun_freeride_prereg.md): P_pool0_wait with four free rides after the +30 % (pipeline._build_y15),
+# each judged under the 0.25 SOL and the 1.0 SOL daily loss limit at the paper model's and at the measured latency.
+FREE_Y15_TRIALS = 4 * 2 * 2
 N_TRIALS = (len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS + SPEED_TRIALS
             + REAL_LATENCY_TRIALS + POOL0_TRIALS + EXIT_RUNNER_TRIALS + EXITS_Y8_TRIALS + SELECT_Y9_TRIALS
-            + TRENDS_Y10_TRIALS + RUNNER_Y11_TRIALS + LOCK_Y12_TRIALS)
+            + TRENDS_Y10_TRIALS + RUNNER_Y11_TRIALS + LOCK_Y12_TRIALS + FREE_Y15_TRIALS)
 # The rule the shadow book runs until the study has picked one (pick.json).
 DEFAULT_PICK = "C_20in60_x1"
 # The model filter: enter only when the calibrated probability that this entry,
