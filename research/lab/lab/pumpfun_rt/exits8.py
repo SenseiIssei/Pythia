@@ -3,6 +3,7 @@ the live executor measures since the Sender path. PAPER ONLY.
 
     python -m lab.pumpfun_rt.exits8                     replay, print the report, write exits8.{json,md}
     python -m lab.pumpfun_rt.exits8 --out DIR           the same, written into DIR
+    python -m lab.pumpfun_rt.exits8 --daily-loss-sol 1  not registered (after the first result): another loss limit
 
 Pre-registered in results/pumpfun_exits_y8_prereg.md. P_pool0 (X0) and the five Y8 strategies (pipeline._build_y8,
 X1 to X5) replayed on the record by Y7's replay (exitlab.run: one book of at most 4 positions with one shared Risk
@@ -176,7 +177,8 @@ def _table(ev: dict, k: str) -> list[str]:
     return md
 
 
-def report_md(res: dict, ev: dict, ev_dropped: dict, lat: dict, calib: list[dict], live: dict) -> str:
+def report_md(res: dict, ev: dict, ev_dropped: dict, lat: dict, calib: list[dict], live: dict,
+              limits: P.Limits = LIMITS) -> str:
     def ms(d):
         return f"{d['p50'] / 1000:.1f} s ({d['p10'] / 1000:.1f} to {d['p90'] / 1000:.1f})"
 
@@ -184,8 +186,9 @@ def report_md(res: dict, ev: dict, ev_dropped: dict, lat: dict, calib: list[dict
         return f"{datetime.fromtimestamp(x / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC"
     md = ["# P_pool0: a -10 % stop, a sell-pressure exit, waiting for the pool (Y8)", "",
           f"Record {res['days'][0]} to {utc(res['span'][1])}, entries to {utc(res['entry_until_ms'])}, split "
-          f"{utc(res['split_ms'])}. Stake {STAKE_SOL} SOL, at most {LIMITS.max_open} open per book, daily loss limit "
-          f"{LIMITS.max_daily_loss_sol} SOL. Out of sample, trades open across a gap kept.", "",
+          f"{utc(res['split_ms'])}. Stake {STAKE_SOL} SOL, at most {limits.max_open} open per book, daily loss limit "
+          f"{limits.max_daily_loss_sol} SOL" + ("" if limits == LIMITS else " (not registered)")
+          + ". Out of sample, trades open across a gap kept.", "",
           "| scenario | buy, median (10 to 90 %) | sale | fee per transaction |", "|---|---|---|---|"]
     for k in SCENARIOS:
         d = lat[k]
@@ -215,7 +218,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--until-ms", type=int, default=UNTIL_MS)
     ap.add_argument("--out", default=None, help="directory for exits8.json and exits8.md (default: the reports)")
     ap.add_argument("--live-dir", default=None, help="the live executor's folder (read only)")
+    ap.add_argument("--daily-loss-sol", type=float, default=LIMITS.max_daily_loss_sol)
     a = ap.parse_args(argv)
+    limits = dataclasses.replace(LIMITS, max_daily_loss_sol=a.daily_loss_sol)
     from .. import report as rep
     from ..data import ROOT
     out = Path(a.out) if a.out else rep.REPORTS / "pumpfun_rt"
@@ -225,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     if (tuple(buys), tuple(sells)) != (SENDER_BUY_MS, SENDER_SELL_MS):
         print(f"exits8: the measured file now gives buys {buys} and sales {sells}; the registered points are used")
     lat = {k: RL.describe(c) for k, c in scenarios().items()}
-    res = XL.run(until_ms=a.until_ms, books_costs=books(), limits=LIMITS, tail_ms=TAIL_MS)
+    res = XL.run(until_ms=a.until_ms, books_costs=books(), limits=limits, tail_ms=TAIL_MS)
     if res.get("empty"):
         print("exits8: nothing recorded")
         return 1
@@ -234,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     ledger = RL.read_live_ledger(live_dir / "ledger.csv")
     calib = XL.calibrate(res, ledger)
     live = live_stops(ledger, until_ms=a.until_ms)
-    md = report_md(res, ev, dropped, lat, calib, live)
+    md = report_md(res, ev, dropped, lat, calib, live, limits)
     keep = {k: v for k, v in res.items() if k not in ("entries", "skips")}
     (out / "exits8.json").write_text(json.dumps(keep | {"latency": lat, "eval": ev, "eval_gapped_dropped": dropped,
                                                         "calibration": calib, "live": live,
