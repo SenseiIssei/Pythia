@@ -64,6 +64,11 @@ export interface ControlFile {
   setAt: number | null;
   shareSetAt: number | null;
   pausedAt: number | null;
+  /** pump.fun with limits=wallet: the drawdown brake (the engine reads a missing one as on). */
+  brake?: boolean | null;
+  brakeSetAt?: number | null;
+  /** pump.fun with limits=wallet: no buys under this base in SOL (0.25 while unset). */
+  floorSol?: number | null;
 }
 
 /** What the Master panel posts; a missing field keeps the current value. */
@@ -71,6 +76,8 @@ export interface ControlPatch {
   share?: number;
   resetShare?: boolean;
   paused?: boolean;
+  /** pump.fun only: the drawdown brake on or off (applies with limits=wallet). */
+  brake?: boolean;
 }
 
 /** The engine's answer to reading or writing the control file. */
@@ -489,6 +496,13 @@ const EXIT: Record<string, string> = {
 
 export function exitWords(why: string | null | undefined): string {
   return why ? EXIT[why] ?? why : "";
+}
+
+/** The badge of a coin on the live chart: buying, open, sold, or not bought (the price ran away before the buy). */
+export function coinBadge(c: Pick<FeedCoin, "state" | "exit">): "buying" | "open" | "sold" | "not bought" {
+  if (c.state === "skipped") return "not bought";
+  if (!c.exit) return c.state === "pending" ? "buying" : "open";
+  return "sold";
 }
 
 export interface TradeStats {

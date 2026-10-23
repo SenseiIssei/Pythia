@@ -304,9 +304,12 @@ def test_cashback_coins_are_refused_and_never_traded_with_the_old_instructions()
 
 
 def test_a_pool_buy_spends_the_stake_and_wants_the_quote_less_the_tolerance():
+    """The live pool tolerance (0.60 since the 6040 failures) only moves the fewest tokens; the spend is the stake."""
     o = P.Order(1, "buy", MINT, "pool", 1_300_000, int(0.13 * SOL), T0, stake_l=int(0.1 * SOL))
     spend, least = LX.pool_buy_amounts(o)
-    assert spend == int(0.1 * SOL) and least == int(1_300_000 / (1 + C.SLIP_TOL))
+    assert LX.LIVE_POOL_BUY_TOL == 0.60 and C.SLIP_TOL == 0.30
+    assert spend == int(0.1 * SOL) and least == int(1_300_000 / 1.60)
+    assert LX.pool_buy_amounts(o, C.SLIP_TOL) == (int(0.1 * SOL), int(1_300_000 / 1.30))
     old = P.Order(1, "buy", MINT, "pool", 1_300_000, int(0.13 * SOL), T0)              # without the stake
     assert LX.pool_buy_amounts(old)[0] == int(0.13 * SOL / (1 + C.SLIP_TOL))
 

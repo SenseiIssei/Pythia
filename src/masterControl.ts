@@ -17,7 +17,7 @@ export const CONFIRM_ABOVE = 0.5;
 /** The most the pump.fun bot's share may be without limits=wallet in the confirmation file (the code default). */
 export const FIXED_MAX_SHARE = 0.1;
 
-export type MasterAction = { kind: "share"; share: number } | { kind: "reset" } | { kind: "stop" } | { kind: "start" };
+export type MasterAction = { kind: "share"; share: number } | { kind: "reset" } | { kind: "stop" } | { kind: "start" } | { kind: "brake"; on: boolean };
 
 /** What the panel posts for an action. */
 export function patchOf(a: MasterAction): ControlPatch {
@@ -30,12 +30,15 @@ export function patchOf(a: MasterAction): ControlPatch {
       return { paused: true };
     case "start":
       return { paused: false };
+    case "brake":
+      return { brake: a.on };
   }
 }
 
-/** Start always asks; a share asks only when it raises above 50 %. Stop and the reset never ask. */
+/** Start and the brake off always ask; a share asks only when it raises above 50 %. Stop, the reset and the brake on never ask. */
 export function needsConfirm(a: MasterAction, current: number | null | undefined): boolean {
   if (a.kind === "start") return true;
+  if (a.kind === "brake") return !a.on;
   if (a.kind !== "share") return false;
   return a.share > CONFIRM_ABOVE + 1e-9 && (current == null || a.share > current + 1e-9);
 }
@@ -91,6 +94,16 @@ export function pausedText(c: StatusControl | null | undefined, file?: ControlFi
   return since != null ? `paused by you since ${hhmm(since)}` : "paused by you";
 }
 
+/** The pump.fun drawdown brake as the control file says (the engine fills in on while unset). */
+export function brakeOn(file?: ControlFile | null): boolean {
+  return file?.brake !== false;
+}
+
+/** "Bremse: an" or "Bremse: aus". */
+export function brakeText(on: boolean): string {
+  return `Bremse: ${on ? "an" : "aus"}`;
+}
+
 /** The owner has an override set (the reset button shows). */
 export function hasOverride(c: StatusControl | null | undefined, file?: ControlFile | null): boolean {
   return file ? file.share != null : c?.shareSource === "owner";
@@ -127,6 +140,9 @@ export function confirmQuestion(a: MasterAction, bot: Bot): string {
     return bot === "pumpfun"
       ? `Each trade will stake ${shareText(a.share)} of the wallet. A few losing trades in a row can take most of it.`
       : `The books may use ${shareText(a.share)} of the wallet's value. A few losing trades can take a large part of it.`;
+  }
+  if (a.kind === "brake" && !a.on) {
+    return "Without the drawdown brake the stake stays the full share of the wallet after losses, so a losing streak takes the wallet down faster. Only with limits=wallet.";
   }
   return "";
 }

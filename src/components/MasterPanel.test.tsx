@@ -101,6 +101,25 @@ describe("the Master panel", () => {
     expect(html).not.toMatch(/kill file|remove the kill/i);
   });
 
+  it("pump.fun shows Bremse: an/aus; off asks first, on does not, both post brake", () => {
+    const file = (brake: boolean | null) => ({ share: null, paused: false, setAt: null, shareSetAt: null, pausedAt: null, brake });
+    const on = view({ file: file(true) });
+    expect(renderToStaticMarkup(on.tree)).toContain("Bremse: an");
+    expect(control(on.tree, "Bremse aus").asks).toBe(true);
+    expect(text(control(on.tree, "Bremse aus").el.props.question)).toContain("drawdown brake");
+    click(on.tree, "Bremse aus");
+    expect(on.sent).toEqual([{ brake: false }]);
+    const off = view({ file: file(false) });
+    expect(renderToStaticMarkup(off.tree)).toContain("Bremse: aus");
+    expect(control(off.tree, "Bremse an").asks).toBe(false);
+    click(off.tree, "Bremse an");
+    expect(off.sent).toEqual([{ brake: true }]);
+    // Unset reads as on (the engine's default); without limits=wallet it cannot be switched off; on-chain has none.
+    expect(renderToStaticMarkup(view({ file: null }).tree)).toContain("Bremse: an");
+    expect(control(view({ kind: "fixed", file: file(true) }).tree, "Bremse aus").el.props.disabled).toBe(true);
+    expect(renderToStaticMarkup(view({ bot: "onchain" }).tree)).not.toContain("Bremse");
+  });
+
   it("shows the share, its source, the pause, the note and a low wallet", () => {
     const at = new Date(2026, 9, 23, 14, 5).getTime();
     const html = renderToStaticMarkup(

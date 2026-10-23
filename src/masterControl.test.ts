@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   FIXED_MAX_SHARE,
   SHARE_BUTTONS,
+  brakeOn,
+  brakeText,
   confirmQuestion,
   hasOverride,
   hhmm,
@@ -59,6 +61,18 @@ describe("the share", () => {
     expect(patchOf({ kind: "reset" })).toEqual({ resetShare: true });
     expect(patchOf({ kind: "stop" })).toEqual({ paused: true });
     expect(patchOf({ kind: "start" })).toEqual({ paused: false });
+    expect(patchOf({ kind: "brake", on: false })).toEqual({ brake: false });
+    expect(patchOf({ kind: "brake", on: true })).toEqual({ brake: true });
+  });
+
+  it("reads the brake from the control file, on while unset", () => {
+    expect(brakeOn(null)).toBe(true);
+    expect(brakeOn({ share: null, paused: false, setAt: null, shareSetAt: null, pausedAt: null })).toBe(true);
+    expect(brakeOn({ share: null, paused: false, setAt: 1, shareSetAt: null, pausedAt: null, brake: false })).toBe(false);
+    expect(brakeText(true)).toBe("Bremse: an");
+    expect(brakeText(false)).toBe("Bremse: aus");
+    expect(needsConfirm({ kind: "brake", on: false }, 0.1)).toBe(true);
+    expect(needsConfirm({ kind: "brake", on: true }, 0.1)).toBe(false);
   });
 });
 

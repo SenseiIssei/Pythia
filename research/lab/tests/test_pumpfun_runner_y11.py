@@ -55,7 +55,7 @@ def pos(eng, name) -> dict:
 
 def test_the_y11_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-9:-7] == Y11_NAMES and [n for _, n in Y11.VARIANTS] == ["P_pool0_wait"] + Y11_NAMES
+    assert names[-10:-8] == Y11_NAMES and [n for _, n in Y11.VARIANTS] == ["P_pool0_wait"] + Y11_NAMES
     base = P.BY_NAME["P_pool0_wait"]
     for n, rn in zip(Y11_NAMES, ((0.20, 0.50, 0.30, 1800), (0.20, 0.70, 0.40, 3600))):
         s = P.BY_NAME[n]

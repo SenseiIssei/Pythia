@@ -147,7 +147,7 @@ def stub_models(p_rug=0.0, p_win=1.0, base=0.2, thr=0.5) -> dict:
 def test_the_y9_strategies_are_what_the_prereg_says():
     names = [n for _, n in Y9.VARIANTS]
     all_names = [s.name for s in P.STRATEGIES]
-    assert names[0] == "P_pool0" and names[1:] == Y9_NAMES and all_names[-19:-14] == Y9_NAMES   # Y10 to Y15 follow
+    assert names[0] == "P_pool0" and names[1:] == Y9_NAMES and all_names[-20:-15] == Y9_NAMES   # Y10 to Y15, tol60
     base = P.BY_NAME["P_pool0"]
     for n in Y9_NAMES:
         s = P.BY_NAME[n]

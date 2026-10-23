@@ -186,6 +186,17 @@ DEFAULT_TEST_RULE = "P_pool60"            # the least-bad post-migration pool ru
 RESERVE_SOL = 0.01                        # left in the wallet so every open position can still be sold
 NO_LIMIT = math.inf                       # limits=wallet: no such limit beyond the wallet (shown as null)
 CONTROL_S = 2.0                           # how often the owner's control file (control.json) is looked at
+# A live pool buy (buy_exact_quote_in_v2) spends exactly the stake and accepts no fewer tokens than the quote /
+# (1 + this): 0.60 since 2026-10-23 (five buys in about forty had failed with 6040 at SLIP_TOL's 0.30, the price
+# having run on in the median 9 s to the landing). The owner's PYTHIA_PUMPFUN_BUY_TOL sets it from 0.05 to 1.0.
+# Bonding-curve buys, every sale and the paper books keep curve.SLIP_TOL.
+LIVE_POOL_BUY_TOL = 0.60
+ENV_BUY_TOL = "PYTHIA_PUMPFUN_BUY_TOL"
+BUY_TOL_MIN, BUY_TOL_MAX = 0.05, 1.0
+FRESH_MS = 2_000                          # pool reserves from the stream older than this: one read before the send
+RAN_AWAY = "price ran away"               # the pre-send skip (with its +x %) and its count in the status
+RAN_AWAY_LANDING = "price ran away on landing"   # a pool buy that failed with 6040: booked quietly, no card
+SLIPPAGE_6040 = 6040                      # PumpSwap BuySlippageBelowMinBaseAmountOut
 
 # Speed (docs/LATENCY.md): each one off unless the owner sets it; PYTHIA_PUMPFUN_FAST=1 turns all on, a single
 # switch set to 0 turns that one off again. None of them changes what is decided or what check_own accepts.
@@ -206,6 +217,45 @@ SENDER_PING_S = 5.0                       # Sender's /ping keeps its connection 
 def backoff_ms(fails: int) -> int:
     """The wait before the next try of a sale that failed `fails` times in a row: 1, 2, 4 ... 60 s."""
     return int(min(SELL_BACKOFF_MAX_S, 2 ** max(0, fails - 1)) * 1000)
+
+
+def buy_tol(env=None) -> float:
+    """The live pool buy tolerance: PYTHIA_PUMPFUN_BUY_TOL within BUY_TOL_MIN..BUY_TOL_MAX, else LIVE_POOL_BUY_TOL."""
+    raw = (env if env is not None else os.environ).get(ENV_BUY_TOL)
+    if raw is None or not str(raw).strip():
+        return LIVE_POOL_BUY_TOL
+    try:
+        v = float(raw)
+    except ValueError:
+        print(f"live: {ENV_BUY_TOL}={raw!r} is no number; {LIVE_POOL_BUY_TOL} used", flush=True)
+        return LIVE_POOL_BUY_TOL
+    if not math.isfinite(v):
+        return LIVE_POOL_BUY_TOL
+    return min(BUY_TOL_MAX, max(BUY_TOL_MIN, v))
+
+
+def is_6040(err) -> bool:
+    """A transaction error that is PumpSwap's "would buy less tokens than expected" ({'InstructionError': [i,
+    {'Custom': 6040}]}): the price ran on between the send and the landing."""
+    if not isinstance(err, dict):
+        return False
+    ie = err.get("InstructionError")
+    return isinstance(ie, (list, tuple)) and len(ie) == 2 and isinstance(ie[1], dict) \
+        and ie[1].get("Custom") == SLIPPAGE_6040
+
+
+def ran_away_text(run: float) -> str:
+    """The pre-send skip's reason: "price ran away (+72 %)"."""
+    return f"{RAN_AWAY} (+{run * 100:.0f} %)"
+
+
+def chain_why(pend: dict, err) -> str:
+    """A landed transaction's error in words: a pool buy's 6040 is "price ran away on landing" (booked quietly,
+    LiveBook.on_event), anything else "failed on chain: ..." with its card."""
+    o = pend.get("order")
+    if pend.get("side") == "buy" and getattr(o, "venue", None) == "pool" and is_6040(err):
+        return RAN_AWAY_LANDING
+    return f"failed on chain: {err}"[:200]
 
 
 def landed(st) -> bool:
@@ -1106,6 +1156,11 @@ class Rpc:
             raise RuntimeError(f"no account {pubkey[:8]}")
         return base64.b64decode(v["data"][0]), v["owner"]
 
+    def accounts(self, pubkeys: list[str]) -> list[bytes | None]:
+        """Several accounts' data in one getMultipleAccounts at processed (read only); None for a missing one."""
+        vs = self.call("getMultipleAccounts", [pubkeys, {"encoding": "base64", "commitment": "processed"}])["value"]
+        return [None if v is None else base64.b64decode(v["data"][0]) for v in vs]
+
     def balance(self, pubkey: str) -> int:
         """Lamports of a public address (read only)."""
         return int(self.call("getBalance", [pubkey, {"commitment": "confirmed"}])["value"])
@@ -1178,6 +1233,7 @@ class Builder:
         self.prepared: dict[int, tuple] = {}          # pid -> (key, ixs, blockhash, message): a ready sale
         self.last_prepared = False                    # the last build used a prepared sale
         self.pool_x = None                            # the parallel send's two threads
+        self.buy_tol = LIVE_POOL_BUY_TOL              # the live pool buy tolerance (the executor sets the owner's)
 
     def _cached(self, k: str, ttl: float, fn):
         hit = self.cache.get(k)
@@ -1284,6 +1340,18 @@ class Builder:
             raise RuntimeError("the pool is not this token's")
         return info
 
+    def reserves(self, pool: str, mint: str) -> tuple[int, int]:
+        """The pool's base reserves and effective quote reserves now, in one read (the pool account and its two
+        vaults, getMultipleAccounts): the pre-send check's fallback when the stream's are older than FRESH_MS."""
+        info = self.pool(pool, mint)                     # the vaults' addresses (cached: they never change)
+        got = self.rpc.accounts([pool, info.pool_base, info.pool_quote])
+        if len(got) != 3 or any(d is None for d in got) or len(got[1]) < 72 or len(got[2]) < 72:
+            raise RuntimeError("the pool's accounts were not all read")
+        cfg = self._cached("config", 600, lambda: self.rpc.account(X.pda([b"global_config"], X.PUMP_AMM))[0])
+        now = X.pool_info(pool, got[0], cfg, info.base_token_program, self.idl_amm)
+        base, vault = int.from_bytes(got[1][64:72], "little"), int.from_bytes(got[2][64:72], "little")
+        return base, now.effective_quote(vault)
+
     def warm(self, mint: str, pool: str) -> None:
         """A migrated token's pool read into the cache ahead of a buy (prefetch, LiveExecutor.warm_pool): the
         build then reads nothing. Only what a build reads itself, and only fields that never change (accounts,
@@ -1298,7 +1366,7 @@ class Builder:
             if not info.supports_v2():
                 raise RuntimeError("the pool takes no v2 trade (a cashback coin); refused, v1 is never sent")
             if o.side == "buy":
-                spend, least = pool_buy_amounts(o)
+                spend, least = pool_buy_amounts(o, self.buy_tol)
                 ixs = X.amm_buy(user, info, spend, least, self.priority_l, self.idl_amm)
             else:
                 ixs = X.amm_sell(user, info, o.tokens, o.limit_l, self.priority_l, close, self.idl_amm)
@@ -1453,12 +1521,16 @@ class SigWatcher:
                 wait = min(30.0, wait * 2)
 
 
-def pool_buy_amounts(o: P.Order) -> tuple[int, int]:
+def pool_buy_amounts(o: P.Order, tol: float = LIVE_POOL_BUY_TOL) -> tuple[int, int]:
     """A pool buy spends exactly the stake (buy_exact_quote_in_v2) and accepts no fewer tokens than the
-    signal's quote on the effective reserves less the slippage tolerance: the same bound as the paper
-    model's, which fails a buy whose cost for those tokens is more than SLIP_TOL above the stake."""
+    signal's quote on the effective reserves / (1 + tol), the live pool tolerance (LIVE_POOL_BUY_TOL; the paper
+    books keep SLIP_TOL). After the pre-send check (LiveExecutor.fresh_buy) the order carries its bound in
+    `least`, built from the fresher quote and never under the signal's. The spend never depends on tol: the
+    order's limit_l stays stake x (1 + SLIP_TOL), so the stake cap, the exposure and the room for the stake
+    (LiveExecutor._caps, sized) count no more than they did."""
     spend = o.stake_l or int(o.limit_l / (1 + C.SLIP_TOL))
-    return spend, max(1, int(o.tokens / (1 + C.SLIP_TOL)))
+    floor = max(1, int(o.tokens / (1 + tol)))
+    return spend, max(floor, int(o.least or 0))
 
 
 def totals_path() -> Path:
@@ -1600,6 +1672,10 @@ class LiveExecutor:
         self.speed = speed or Speed()
         if hasattr(builder, "speed"):
             builder.speed = self.speed
+        self.buy_tol = buy_tol(getattr(gate, "env", None))   # the live pool buy tolerance (LIVE_POOL_BUY_TOL)
+        if builder is not None:
+            builder.buy_tol = self.buy_tol
+        self.fresh_reads = 0                          # pre-send checks that read the pool (the stream's was old)
         self.rq: queue.Queue = queue.Queue()         # reads, on their own thread with send_first
         self.on_result = None                         # () after every worker result (the service's wake-up)
         self.watcher: SigWatcher | None = None        # signatureSubscribe, with ws_confirm
@@ -1974,6 +2050,11 @@ class LiveExecutor:
                 o, pool, close = item[1], item[2], item[3]
                 if len(item) > 4 and item[4] and o.side == "sell" and o.venue == "curve":
                     o, pool = self._recheck_venue(o, pool)    # a retry: the curve may have completed meanwhile
+                if o.side == "buy" and o.venue == "pool":
+                    o, why = self.fresh_buy(o, pool)          # the price now, right before signing
+                    if why:
+                        self._put(("ran_away", o.pid, why))   # not sent: no fee, a skip
+                        return
                 msg = self.builder.build(self.signer.pubkey, o, pool, close)
                 tx = X.transaction(msg, [self.signer.sign(msg)])
                 times = {"built_ms": int(self.clock()), "prepared": bool(getattr(self.builder, "last_prepared", False))}
@@ -2021,6 +2102,40 @@ class LiveExecutor:
 
     def _tip(self) -> int:
         return int(getattr(self.builder, "sender_tip_l", 0) or 0)
+
+    def fresh_buy(self, o: P.Order, pool: str | None) -> tuple[P.Order, str | None]:
+        """The pre-send check of a pool buy (the worker, right before signing): the tokens the stake buys now on
+        the freshest reserves the service holds (the stream's; when they are older than FRESH_MS or missing, one
+        read of the pool). A price more than the tolerance above the signal's quote: not sent, the reason
+        "price ran away (+x %)". Else the order's bound from the fresher quote, never looser than the signal's
+        quote / (1 + tolerance). Nothing to compare with (no reserves, an error): the signal's bound, as before."""
+        try:
+            spend = o.stake_l or int(o.limit_l / (1 + C.SLIP_TOL))
+            tok = self.pipe.eng.tokens.get(o.mint) if self.pipe is not None else None
+            pb = pq = 0
+            fee, at = C.DEFAULT_FEE_BPS, None
+            if tok is not None:
+                pb, pq, fee = tok.pb, tok.pq, tok.amm_fee_bps or C.DEFAULT_FEE_BPS
+                at = tok.amm_win[-1][0] if tok.amm_win else None
+            if not (pb and pq and at is not None and self.clock() - at <= FRESH_MS) and pool \
+                    and hasattr(self.builder, "reserves"):
+                try:
+                    pb, pq = self.builder.reserves(pool, o.mint)
+                    self.fresh_reads += 1
+                except Exception as e:                       # the stream's older reserves, else the signal's bound
+                    print(f"live: pool of {o.mint} not read before the buy ({type(e).__name__}: {e})"[:200],
+                          flush=True)
+            now = C.pool_buy(spend, pb, pq, fee) if pb and pq else 0
+            if now <= 0 or o.tokens <= 0:
+                return o, None
+            run = o.tokens / now - 1
+            if run > self.buy_tol:
+                return o, ran_away_text(run)
+            least = max(int(now / (1 + self.buy_tol)), int(o.tokens / (1 + self.buy_tol)))
+            return dataclasses.replace(o, least=least), None
+        except Exception as e:                               # never in the way of a send
+            print(f"live: pre-send check of {o.mint} failed ({type(e).__name__}: {e})"[:200], flush=True)
+            return o, None
 
     def _recheck_venue(self, o: P.Order, pool: str | None) -> tuple[P.Order, str | None]:
         """Before a curve sale is tried again: is the curve complete (a migration the stream missed)? Then the
@@ -2121,6 +2236,8 @@ class LiveExecutor:
                 continue
             if kind == "sent":
                 self._sent(pid, pend, r)
+            elif kind == "ran_away":
+                self._ran_away(pid, pend, now, r[2])
             elif kind == "error":
                 self._failed(pid, pend, now, r[2], 0)
             elif kind == "status":
@@ -2131,7 +2248,7 @@ class LiveExecutor:
                     if wall - pend["sent_ms"] > GIVE_UP_MS:
                         self._failed(pid, pend, now, "not landed", 0)
                 elif st.get("err") is not None:
-                    self._failed(pid, pend, now, f"failed on chain: {st['err']}"[:200], self._fee(failed=True))
+                    self._failed(pid, pend, now, chain_why(pend, st["err"]), self._fee(failed=True), err=str(st["err"]))
                 elif landed(st):
                     pend["landed_at"] = wall                 # landed; its fill is read back unless the stream's comes
                     pend.setdefault("confirmed_ms", int(r[4]) if len(r) > 4 else wall)
@@ -2226,12 +2343,19 @@ class LiveExecutor:
         does not pay (its transfer is reverted with the rest)."""
         return self.builder.priority_l + C.BASE_FEE_LAMPORTS + (0 if failed else self._tip())
 
-    def _failed(self, pid: int, pend: dict, now: float, why: str, fee: int) -> None:
+    def _ran_away(self, pid: int, pend: dict, now: float, why: str) -> None:
+        """The pre-send check found the price run away: nothing was signed or sent, no fee. The buy is over and
+        the coin a skip (LiveBook.on_event: its reason, one log line, skipped.jsonl, the feed; no card)."""
+        self.pending.pop(pid, None)
+        self.exposure.pop(pid, None)
+        self.pipe.buy_failed(pid, now, why, 0)
+
+    def _failed(self, pid: int, pend: dict, now: float, why: str, fee: int, **extra) -> None:
         self.pending.pop(pid, None)
         o = pend["order"]
         if self.watcher is not None:
             self.watcher.forget(pend.get("sig"))
-        log_order(pend, "failed", why=why, mode=self.mode, fee_l=fee)
+        log_order(pend, "failed", why=why, mode=self.mode, fee_l=fee, **extra)
         write_measure({"t": self.clock(), "what": "failed", "mode": self.mode, "side": pend["side"],
                        "venue": o.venue, "why": why, "fee_l": fee})
         if fee:
@@ -2259,7 +2383,7 @@ class LiveExecutor:
             return
         if info.get("err") is not None:
             fee = int(info.get("fee_l") or 0) or self._fee(failed=True)
-            self._failed(pid, pend, now, f"failed on chain: {info['err']}"[:200], fee)
+            self._failed(pid, pend, now, chain_why(pend, info["err"]), fee, err=str(info["err"]))
             return
         if "delta_l" in info:
             fee = int(info["fee_l"]) + self._tip()
@@ -2862,6 +2986,7 @@ class LiveBook:
         self.recent: list[dict] = read_ledger(100)
         self.card_day = None
         self.day_stats = {"n": 0, "wins": 0, "pnl_sol": 0.0, "failed": 0}
+        self.ran_away: collections.deque = collections.deque(maxlen=50)   # coins the price ran away from (feed)
         self.fail_posted: dict[tuple, float] = {}
         self.orphan_seen: dict[str, int] = {}          # mint -> the holdings read that first showed it unknown
         self.skip_seen: collections.OrderedDict = collections.OrderedDict()   # coins skipped (one log line each)
@@ -2928,6 +3053,9 @@ class LiveBook:
                 self.pipe.eng.skipped[(self.rule, str(kw["why"]))] += 1
             self.on_skip(self.rule, p.get("mint") or "", str(kw["why"]))
             return
+        if kind == "buy_failed" and str(kw.get("why", "")).startswith(RAN_AWAY):
+            self.on_ran_away(p, str(kw["why"]), int(kw.get("fee_l") or 0))
+            return
         if kind in ("buy_failed", "sell_failed"):
             self.day_stats["failed"] += 1
             key = (kind, p.get("pid"))
@@ -2938,6 +3066,23 @@ class LiveBook:
         meas = dict(self.exec.meas.get(p.get("pid")) or {}) if kind in ("bought", "sold") else None
         day = self.exec.day_pnl_l / C.LAMPORTS
         self._post(lambda lang: [_trade_card(kind, dict(p), dict(kw), lang, day, self.exec.mode, meas)])
+
+    def on_ran_away(self, p: dict, why: str, fee_l: int) -> None:
+        """A pool buy the price ran away from: before the send (the pre-send check, no fee) a skip with its reason
+        (counted as "price ran away"), after it (6040 on landing, the fee paid) a quiet line in the daily card.
+        Neither posts a card; both are a quiet entry in the live feed."""
+        mint = p.get("mint") or ""
+        self.ran_away.append({"mint": mint, "symbol": p.get("symbol"), "name": p.get("name"), "rule": p.get("rule"),
+                              "venue": p.get("venue"), "signal_ms": p.get("signal_ms"), "t": int(time.time() * 1000),
+                              "why": why, "fee_sol": fee_l / C.LAMPORTS})
+        if why == RAN_AWAY_LANDING:
+            self.day_stats["ran_away"] = self.day_stats.get("ran_away", 0) + 1
+            self.day_stats["ran_away_fee_sol"] = self.day_stats.get("ran_away_fee_sol", 0.0) + fee_l / C.LAMPORTS
+            print(f"live: {mint[:8]}: {why} (6040, fee {fee_l / C.LAMPORTS:.6f} SOL); no card", flush=True)
+            return
+        if self.pipe is not None:
+            self.pipe.eng.skipped[(self.rule, RAN_AWAY)] += 1
+        self.on_skip(self.rule, mint, why)
 
     def on_skip(self, name: str, mint: str, why: str) -> None:
         """A coin the live strategy did not buy (pipeline.skip, a refusal, the service's "creation not seen"):
@@ -3383,7 +3528,8 @@ def simulate(gate: LiveGate, rpc: Rpc, pubkey: str, mint: str | None = None, poo
             eff = info.effective_quote(pq)
             rec["reserves"] = {"base": pb, "quote_vault": pq, "virtual_quote": info.virtual_quote, "effective": eff}
             quote = C.pool_buy(lam, pb, eff, C.DEFAULT_FEE_BPS)
-            spend, least = pool_buy_amounts(P.Order(0, "buy", mint, "pool", quote, limit, 0, stake_l=lam))
+            spend, least = pool_buy_amounts(P.Order(0, "buy", mint, "pool", quote, limit, 0, stake_l=lam),
+                                            buy_tol(gate.env))
             buy = X.amm_buy(pubkey, info, spend, least, b.priority_l, b.idl_amm)
             # the round trip sells the least the buy may give, so the sale never asks for more than it got
             # (the token account keeps the rest and stays open); the emptied account is closed live

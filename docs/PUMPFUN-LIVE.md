@@ -126,6 +126,8 @@ von Sekunden (der Dienst liest `reports/pumpfun_rt/control.json` alle 2 s), ohne
 - **Stop / Start:** Stop heißt ab sofort keine neuen Käufe; offene Positionen werden weiter über ihre
   Ausstiege verkauft. Start fragt nach und lässt den Bot wieder kaufen. Das ist nicht der Notschalter:
   der bleibt, wie er ist (verkauft alles, nur der Server kann ihn löschen).
+- **Bremse: an/aus:** schaltet die Drawdown-Bremse (`brake` in `control.json`). Aus fragt nach; dann bleibt
+  der Einsatz nach Verlusten der volle Anteil. Wirkt nur mit `limits=wallet`, sonst bleibt sie an.
 
 Jede Änderung schickt eine Karte an Telegram und Discord; der Status zeigt "paused by the owner since
 hh:mm" (UTC). Eine kaputte `control.json` wird ignoriert, die letzten guten Werte bleiben.
@@ -217,8 +219,8 @@ Konten:
 
 - **PumpSwap (nach der Migration, die Standardstrategie):**
   `buy_exact_quote_in_v2` und `sell_v2`. Ein Kauf gibt genau den Einsatz aus
-  und verlangt mindestens die Tokenmenge des Signals geteilt durch 1,3 (die
-  30 % Schlupftoleranz); weniger, und der Kauf scheitert. Vor dem Kauf legt
+  und verlangt mindestens die Tokenmenge des Signals geteilt durch 1,6 (seit
+  23.10. 60 % Toleranz, siehe unten); weniger, und der Kauf scheitert. Vor dem Kauf legt
   die Transaktion dein Tokenkonto an (mit dem richtigen Tokenprogramm,
   Token-2022 bei neuen Coins) und dein Wrapped-SOL-Konto, legt genau den
   Einsatz hinein und schließt das Wrapped-SOL-Konto danach wieder. Ein
@@ -226,6 +228,18 @@ Konten:
   Erlös als SOL ankommt.
 - **Bonding Curve (vor der Migration):** `buy_v3` und `sell_v3`, wie bisher
   genau die Tokenmenge zu einem Höchstpreis.
+- **Toleranz und Preisprüfung bei Pool-Käufen (seit 23.10.):** Etwa jeder achte Pool-Kauf scheiterte mit
+  6040 (der Preis lief zwischen Signal und Landung, im Median 9 s, um mehr als 30 %). Live gilt deshalb
+  60 % (`PYTHIA_PUMPFUN_BUY_TOL` in `/etc/pythia/pumpfun-live.env`, 0.05 bis 1.0); der Einsatz bleibt
+  genau der Einsatz. Direkt vor dem Signieren rechnet der Dienst mit den neuesten Pool-Reserven aus dem
+  Datenstrom (älter als 2 s: ein Lesezugriff) nach, was der Einsatz jetzt kauft. Liegt der Preis schon
+  mehr als die Toleranz über dem Signal, wird nichts gesendet: Skip "price ran away (+x %)" im Status
+  (gezählt als "price ran away"), eine Logzeile, `skipped.jsonl`, ein stiller Eintrag im Live-Chart,
+  keine Karte, keine Gebühr. Sonst gilt die Mindestmenge aus dem frischeren Kurs, nie lockerer als
+  Signal geteilt durch 1,6. Kommt trotzdem 6040 (Preis in der letzten Sekunde gelaufen), ist das kein
+  Alarm: "price ran away on landing", die Gebühr zählt, eine stille Zeile in der Tageskarte statt der
+  Karte "Auftrag gescheitert". Andere Fehler behalten ihre Karte. Kurven-Käufe, alle Verkäufe und die
+  Papierbücher bleiben bei 30 %; der Papier-Zwilling `P_pool0_wait_tol60` misst die 60 %.
 - **Cashback-Coins** unterstützen diese Befehle nicht. Solche Pools und Kurven
   lehnt der Bot ab; die alten Befehle sendet er nie.
 - Die Gebühr für den Buyback geht an eines der acht Buyback-Konten aus

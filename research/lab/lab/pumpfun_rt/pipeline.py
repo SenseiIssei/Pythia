@@ -437,8 +437,18 @@ def _build_y15() -> list[Strategy]:
     ]
 
 
+def _build_tol() -> list[Strategy]:
+    """P_pool0_wait with the live executor's wider pool buy tolerance (live_exec.LIVE_POOL_BUY_TOL, 0.60, the owner's
+    decision 2026-10-23 after the 6040 failures): exactly P_pool0_wait, the same latency draws (p["base"]), only a
+    pool buy fails below the signal's quote / 1.60 instead of / 1.30. A paper twin that measures the bound, no new
+    rule; every other paper book keeps SLIP_TOL."""
+    s = next(x for x in _build_y8() if x.name == "P_pool0_wait")
+    return [dataclasses.replace(s, name="P_pool0_wait_tol60", p={**s.p, "base": s.name, "buy_tol": 0.60},
+                                label=f"{s.label}; a pool buy accepts down to the quote / 1.60 (the live bound)")]
+
+
 STRATEGIES: list[Strategy] = (_build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
-                              + _build_y10() + _build_y11() + _build_y12() + _build_y15())
+                              + _build_y10() + _build_y11() + _build_y12() + _build_y15() + _build_tol())
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -468,6 +478,8 @@ class Order:
     why: str = ""                   # sell: the exit that sent it
     leg: int = 0                    # sell number of the position
     stake_l: int = 0                # buy: the lamports to spend (a pool buy spends exactly this)
+    least: int = 0                  # pool buy: the fewest tokens the live executor accepts after its pre-send
+                                    # check (live_exec.pool_buy_amounts); 0: the signal's quote less the tolerance
 
 
 # ---------------------------------------------------------------- paper executor
@@ -515,13 +527,14 @@ class PaperExecutor:
         if o.venue == "pool":
             # as the live pool buy (buy_exact_quote_in_v2): the stake is spent exactly, on the pool's
             # effective quote reserves, and the buy fails below the signal's quote less the tolerance
+            # (SLIP_TOL; a strategy's p["buy_tol"] models the live executor's wider one, P_pool0_wait_tol60)
             if not tok.pq or not tok.pb:
                 return pipe.buy_failed(o.pid, at, "no pool state", tx)
             stake = o.stake_l or int(o.limit_l / (1 + C.SLIP_TOL))
             got = C.pool_buy(stake, tok.pb, tok.pq, max(tok.amm_fee_bps, c.fee_bps_floor))
             if got <= 0:
                 return pipe.buy_failed(o.pid, at, "nothing filled", tx)
-            if got < o.tokens / (1 + C.SLIP_TOL):
+            if got < o.tokens / (1 + pipe.strat_of(o.pid).p.get("buy_tol", C.SLIP_TOL)):
                 return pipe.buy_failed(o.pid, at, "slippage", tx)
             return pipe.bought(o.pid, at, got, stake, tx)
         else:

@@ -303,6 +303,11 @@ def live_leftover_card(what: str, info: dict, mode: str | None = None, lang: str
                               footer=t("prl_footer", lang)), lang, lambda lg: live_leftover_card(what, info, mode, lg))
 
 
+# A pool buy that failed on landing with 6040 (the price ran on after the send; live_exec.RAN_AWAY_LANDING).
+RAN_AWAY_LINE = {"en": "Price ran away on landing: {n} (fees {fee} SOL, no alarm).",
+                 "de": "Preis bei der Landung davongelaufen: {n} (Gebühren {fee} SOL, kein Alarm)."}
+
+
 def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: float, execution: dict | None,
                     mode: str | None, rule: str | None, lang: str = "en", eur: float | None = None):
     """Once a day from the live service: the day's and the total P&L, the wallet, the trades, and the
@@ -325,6 +330,9 @@ def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: flo
     lines = [notify.Line(lat, t("prl_row_latency", lang))]
     if stats.get("failed"):
         lines.append(notify.Line(t("prl_daily_failed", lang, n=stats["failed"])))
+    if stats.get("ran_away"):                                # 6040 on landing: no alarm, a quiet line here
+        lines.append(notify.Line(RAN_AWAY_LINE["de" if lang == "de" else "en"].format(
+            n=stats["ran_away"], fee=f"{stats.get('ran_away_fee_sol') or 0.0:.6f}")))
     emoji = "⚪" if abs(pnl) < 1e-4 else ("🟢" if pnl > 0 else "🔴")     # break-even: under 0.0001 SOL
     return _langs(notify.Card(emoji, _tagged(t("prl_daily_title", lang, day=i18n.iso_day(d, lang)), mode, lang),
                               summary, [notify.Rows(rows)] + lines + [_caveat(mode, lang)],

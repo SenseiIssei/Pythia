@@ -71,7 +71,7 @@ def same(a: dict, b: dict, skip=()) -> bool:
 
 def test_the_y15_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-4:] == Y15_NAMES and [n for _, n in Y15.VARIANTS] == ["P_pool0_wait"] + Y15_NAMES
+    assert names[-5:-1] == Y15_NAMES and [n for _, n in Y15.VARIANTS] == ["P_pool0_wait"] + Y15_NAMES
     base = P.BY_NAME["P_pool0_wait"]
     for n, fr in zip(Y15_NAMES, ((10, 0.20, 1800), (30, 0.20, 1800), (None, 0.20, 1800), (10, 0.10, 1800))):
         s = P.BY_NAME[n]

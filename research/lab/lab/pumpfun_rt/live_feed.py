@@ -75,6 +75,23 @@ class LiveFeed:
                              "ret": rec.get("ret"), "pnl_sol": rec.get("pnl_sol")}
                 c["state"] = "closed"
                 self.dirty = True
+        for rec in getattr(book, "ran_away", []) or []:
+            # a pool buy the price ran away from (before the send, or 6040 on landing): a quiet entry, no exit price
+            mint = rec.get("mint") or ""
+            if not mint or mint in held or now_ms - int(rec.get("t") or 0) > self.keep_ms:
+                continue
+            c = self.coins.get(mint)
+            if c is None:
+                c = self.coins[mint] = {"mint": mint, "points": deque(maxlen=MAX_POINTS), "exit": None, "pid": None,
+                                        "rule": rec.get("rule"), "symbol": rec.get("symbol"), "name": rec.get("name"),
+                                        "venue": rec.get("venue"), "signal_ms": rec.get("signal_ms"), "land_ms": None,
+                                        "entry_price": None, "signal_price": None, "cost_sol": 0.0, "mark_sol": None,
+                                        "tp": None, "sl": None, "time_s": None}
+            if c["exit"] is None:
+                c["exit"] = {"ms": rec.get("t"), "price": None, "why": rec.get("why"), "ret": None,
+                             "pnl_sol": -(rec.get("fee_sol") or 0.0)}
+                c["state"] = "skipped"
+                self.dirty = True
         for mint in [m for m, c in self.coins.items() if m not in held]:
             c = self.coins[mint]
             end = (c["exit"] or {}).get("ms") or (c["points"][-1][0] if c["points"] else c.get("land_ms") or 0)

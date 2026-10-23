@@ -64,7 +64,8 @@ def test_the_y8_strategies_are_what_the_prereg_says():
         assert s.exits.press_exit == ((5.0, 0.08) if n.endswith("press") else None)
         assert dataclasses.replace(s.exits, sl=0.20, press_exit=None) == base.exits
     for s in P.STRATEGIES:                                     # nothing else has the new exit or the wait (Y11's
-        if s.name not in names[1:] and s.exits.runner is None and s.exits.lock is None and s.exits.free is None:
+        if s.name not in names[1:] and s.exits.runner is None and s.exits.lock is None and s.exits.free is None \
+                and "buy_tol" not in s.p:                     # P_pool0_wait_tol60: P_pool0_wait at the live bound
             assert s.exits.press_exit is None and "wait_pool_s" not in s.p      # Y11, Y12, Y15: P_pool0_wait + one exit
 
 

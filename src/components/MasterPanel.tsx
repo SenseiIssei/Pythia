@@ -1,8 +1,10 @@
 // The Master panel of a live bot (the pump.fun page and the Wallet page): the
 // share of the wallet the bot may use, Stop and Start, with "limits: wallet" or
 // "limits: fixed" said plainly. Stop takes effect at once and asks nothing;
-// Start and a share raised above 50 % ask first. The kill switch stays a
-// separate emergency stop on its own section. Logic in masterControl.ts.
+// Start and a share raised above 50 % ask first. The pump.fun bot's drawdown
+// brake ("Bremse", limits=wallet only) can be switched; off asks first. The
+// kill switch stays a separate emergency stop on its own section. Logic in
+// masterControl.ts.
 
 import { useState, type ReactNode } from "react";
 import { Pause, Play, RotateCcw } from "lucide-react";
@@ -10,6 +12,8 @@ import { Badge, Button, Field, Notice, inputCls } from "../design";
 import { ConfirmAction, Row, Section } from "../pagekit";
 import {
   SHARE_BUTTONS,
+  brakeOn,
+  brakeText,
   confirmQuestion,
   hasOverride,
   isPaused,
@@ -84,6 +88,8 @@ export function MasterView(p: MasterViewProps) {
       </Button>
     );
   const start: MasterAction = { kind: "start" };
+  const brake = brakeOn(file);
+  const brakeOff: MasterAction = { kind: "brake", on: false };
   return (
     <Section
       title="Master"
@@ -102,6 +108,14 @@ export function MasterView(p: MasterViewProps) {
           valueSub={paused ? "paused" : undefined}
           help={bot === "pumpfun" ? "The stake of each trade as a share of the wallet's SOL plus what is open." : "The share of the wallet's value the books may use."}
         />
+        {bot === "pumpfun" && (
+          <Row
+            label="Bremse"
+            value={brake ? "an" : "aus"}
+            sub={kind === "wallet" ? (brake ? "the stake shrinks in a drawdown" : "off: the stake stays the share in a drawdown") : "only with limits=wallet; the brake stays on"}
+            help="The drawdown brake: after losses the stake is lowered. Only the confirmation file's limits=wallet lets you switch it off."
+          />
+        )}
         {p.rows}
       </div>
       {pausedLine && (
@@ -142,7 +156,18 @@ export function MasterView(p: MasterViewProps) {
             Stop
           </Button>
         )}
+        {bot === "pumpfun" &&
+          (brake ? (
+            <ConfirmAction variant="secondary" disabled={off || kind !== "wallet"} title="Switch the drawdown brake off?" confirmLabel="Bremse aus" question={confirmQuestion(brakeOff, bot)} onConfirm={act(brakeOff)}>
+              Bremse aus
+            </ConfirmAction>
+          ) : (
+            <Button variant="secondary" disabled={off} onClick={act({ kind: "brake", on: true })}>
+              Bremse an
+            </Button>
+          ))}
       </div>
+      {bot === "pumpfun" && <p className="mt-2 text-[13px] text-muted">{brakeText(brake)}</p>}
       {!can && <p className="mt-3 text-sm text-muted">The master controls work through the connected backend on the server; the desktop app only shows them.</p>}
       {p.err && <Notice tone="danger" className="mt-3">{p.err}</Notice>}
       {p.msg && <p className="mt-3 text-sm text-muted">{p.msg}</p>}
@@ -168,7 +193,13 @@ export function MasterPanel({ api, onDone, ...props }: MasterProps & { api: (p: 
     setMsg(null);
     try {
       await api(patch);
-      setMsg(patch.share != null ? `Share set to ${shareText(patch.share)}. The bot reads it within a few seconds.` : DONE[patch.resetShare ? "reset" : patch.paused ? "stop" : "start"]);
+      setMsg(
+        patch.share != null
+          ? `Share set to ${shareText(patch.share)}. The bot reads it within a few seconds.`
+          : patch.brake != null
+            ? `${brakeText(patch.brake)}. The bot reads it within a few seconds.`
+            : DONE[patch.resetShare ? "reset" : patch.paused ? "stop" : "start"],
+      );
       if (patch.share != null) setCustom("");
       onDone();
     } catch (e) {

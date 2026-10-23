@@ -16,6 +16,7 @@ import {
   type FeedCoin,
   type FeedPoint,
   eur,
+  coinBadge,
   exitWords,
   holdWords,
   limitInput,
@@ -161,6 +162,10 @@ describe("words", () => {
     expect(sol(0.25, true)).toBe("+0.2500 SOL");
     expect(sol(null)).toBe("n/a");
     expect(exitWords("pull")).toBe("liquidity pulled");
+    expect(coinBadge({ state: "skipped", exit: { ms: 1, price: null, why: "price ran away (+72 %)", ret: null, pnl_sol: 0 } })).toBe("not bought");
+    expect(coinBadge({ state: "pending", exit: null })).toBe("buying");
+    expect(coinBadge({ state: "open", exit: null })).toBe("open");
+    expect(coinBadge({ state: "closed", exit: { ms: 1, price: 1, why: "take", ret: 0.3, pnl_sol: 0.03 } })).toBe("sold");
     expect(short("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU")).toBe("7xKX...gAsU");
   });
 });

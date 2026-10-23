@@ -449,7 +449,8 @@ def test_models_save_and_load(tmp_path):
 def test_the_registered_rules_are_what_the_plan_says():
     from lab.pumpfun_rt import pipeline as P
     assert len(S.RULES) == 22
-    assert len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS + 5 + 5 + 5 + 5 + 2 + 3 + 4 == 42   # Y7 to Y15
+    # Y7 to Y15, and P_pool0_wait_tol60 (the live pool bound on paper, no trial)
+    assert len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS + 5 + 5 + 5 + 5 + 2 + 3 + 4 + 1 == 43
     assert S.X14_TRIALS == 54
     # 135: Y3's speed tiers, 140: Y5's fill scenarios, 1: P_pool0, 6: Y7's exits (five new, P_pool0 judged again),
     # 5: Y8's, 10: Y9's (five filters under two daily loss limits), 10: Y10's (five books under two limits)

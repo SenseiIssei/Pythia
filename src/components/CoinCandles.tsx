@@ -7,6 +7,7 @@ import { ExternalLink } from "lucide-react";
 import { Badge } from "../design";
 import {
   candles,
+  coinBadge,
   coinReturn,
   dexscreener,
   eur,
@@ -85,7 +86,7 @@ export function CoinCandles({ coin, nowMs, rate }: { coin: FeedCoin; nowMs: numb
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[15px] font-semibold text-ink">{title}</span>
-        <Badge tone={open ? "accent" : "neutral"}>{open ? (coin.state === "pending" ? "buying" : "open") : "sold"}</Badge>
+        <Badge tone={open ? "accent" : "neutral"}>{coinBadge(coin)}</Badge>
         <span className={`text-[15px] font-semibold tabular-nums ${ret == null ? "text-muted" : ret >= 0 ? "text-up" : "text-down"}`}>{pctText(ret)}</span>
         {left != null && <span className="text-[13px] tabular-nums text-muted">time stop in {clock(left)}</span>}
         {coin.exit && <span className="text-[13px] text-muted">{exitWords(coin.exit.why)}{coin.exit.pnl_sol != null ? `, ${sol(coin.exit.pnl_sol, true)}` : ""}</span>}
@@ -113,7 +114,7 @@ export function CoinCandles({ coin, nowMs, rate }: { coin: FeedCoin; nowMs: numb
           {level(entry, "var(--color-muted)", "paid")}
           {level(slPx, "var(--color-down)", `-${Math.round((coin.sl ?? 0) * 100)} %`, "4 3")}
           {mark(coin.land_ms, "var(--color-accent)", "buy")}
-          {mark(coin.exit?.ms ?? null, "var(--color-text)", "sold")}
+          {mark(coin.exit?.ms ?? null, "var(--color-text)", coin.state === "skipped" ? "not bought" : "sold")}
           {open && mark(deadline, "var(--color-muted)", "time stop", "2 3")}
           {bars.map((b) => {
             const up = b.close >= b.open;

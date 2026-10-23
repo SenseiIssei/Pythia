@@ -64,7 +64,7 @@ def walk(eng, pool, t, *ratios):
 
 def test_the_y12_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-7:-4] == Y12_NAMES and [n for _, n in Y12.VARIANTS] == ["P_pool0_wait"] + Y12_NAMES
+    assert names[-8:-5] == Y12_NAMES and [n for _, n in Y12.VARIANTS] == ["P_pool0_wait"] + Y12_NAMES
     base = P.BY_NAME["P_pool0_wait"]
     locks = (((0.10, 0.02, 1.0), (0.20, 0.10, 1.0)), ((0.08, 0.03, 1.0), (0.15, 0.09, 1.0)),
              ((0.10, 0.02, 0.5), (0.20, 0.10, 1.0)))

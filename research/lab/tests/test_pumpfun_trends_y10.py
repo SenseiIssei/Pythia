@@ -51,7 +51,7 @@ def y10_models(p_alive=0.9, alive_base=0.5) -> dict:
 
 def test_the_y10_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-14:-9] == Y10_NAMES and [n for _, n in Y10.VARIANTS][3:] == Y10_NAMES
+    assert names[-15:-10] == Y10_NAMES and [n for _, n in Y10.VARIANTS][3:] == Y10_NAMES
     base = P.BY_NAME["P_pool0"]
     for n in Y10_NAMES:
         s = P.BY_NAME[n]
