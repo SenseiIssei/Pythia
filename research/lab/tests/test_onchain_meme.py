@@ -358,12 +358,14 @@ def test_the_proof_needs_every_check():
     assert not ME.proof_of(journal, trades, None)["passed"]                  # no pool: the deflation cannot pass
 
 
-def test_three_rules_are_registered_and_counted():
-    assert ME.TRIALS == len(ME.RULES) == 3
+def test_four_rules_are_registered_and_counted():
+    assert ME.TRIALS == len(ME.RULES) == 4
     from pathlib import Path
-    text = (Path(__file__).resolve().parents[1] / "results" / "onchain_meme_prereg.md").read_text(encoding="utf-8")
-    for r in ME.RULES:
+    res = Path(__file__).resolve().parents[1] / "results"
+    text = (res / "onchain_meme_prereg.md").read_text(encoding="utf-8")
+    for r in ("fresh_win", "momentum_trail", "organic_trend"):
         assert f"`{r}`" in text
+    assert "`trend_top`" in (res / "pumpfun_trends_y10_prereg.md").read_text(encoding="utf-8")     # Y10's
 
 
 # ---------------------------------------------------------------- the gate

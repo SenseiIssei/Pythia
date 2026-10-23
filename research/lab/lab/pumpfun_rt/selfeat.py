@@ -28,6 +28,7 @@ import numpy as np
 from . import curve as C
 from . import pipeline as P
 from .tokens import FEATURES, SUPPLY
+from .trendfeat import TREND_FEATURES
 from .wallets import WALLET_FEATURES
 
 KEEP_MS = 900_000                            # the longest window before the completion
@@ -50,7 +51,7 @@ POOL_FEATURES = ["pool_n", "pool_buys", "pool_sells", "pool_net_sol", "pool_net_
                  "pool_big_sells", "pool_ret", "pool_first_s"]
 SEL0 = list(FEATURES) + WALLET_FEATURES + MIG_FEATURES          # a decision at the migration
 SEL5 = SEL0 + POOL_FEATURES                                      # a decision in the pool's first seconds
-ROW_COLS = ["t", "entry", "ret", "win", "rug", "exit_ms"] + SEL5
+ROW_COLS = ["t", "entry", "ret", "win", "rug", "exit_ms"] + SEL5 + TREND_FEATURES     # Y10: the trend features too
 
 
 def _empty_mig() -> dict:
@@ -172,9 +173,11 @@ class Tracker:
 
 def decision_features(eng, tok, t) -> dict:
     """Everything a select decision at t may use: the engine's features (the token, its early buyers' reputation,
-    its name) and the Tracker's."""
+    its name), the Tracker's and, where the engine has the Y10 trend tracker, the trend features (trendfeat.py)."""
     f = eng.features(tok, int(t))
     f.update(eng.sel.features(tok, int(t)))
+    if getattr(eng, "trend", None) is not None:
+        f.update(eng.trend.features(tok, t))
     return f
 
 
@@ -238,7 +241,7 @@ class LabelPipe(P.Pipeline):
         if f is None or not got:
             return
         row = {"t": int(t), "entry": int(s.p["delay_s"]), "mint": tok.mint, "ret": NAN, "win": NAN, "rug": NAN,
-               "exit_ms": NAN, **{k: f.get(k, NAN) for k in SEL5}}
+               "exit_ms": NAN, **{k: f.get(k, NAN) for k in SEL5 + TREND_FEATURES}}
         self.rows.append(row)
         self.row_of[pid] = row
         price = C.price(tok.pq, tok.pb)

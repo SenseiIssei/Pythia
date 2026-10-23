@@ -20,7 +20,8 @@ Files under <data>/paper/pumpfun_rt/:
   wallets.json   the wallet reputation (the same)
   snipers.json   the sniper book of the X14 early features (the same)
 
-And <reports>/pumpfun_rt/trends.json every trends.WRITE_S (trends.py, the Trends page): what is hot right now,
+The engine has Y10's trend tracker (trendfeat.py): the trend features of the select and early models and the
+trend strategies' 10 s clock. And <reports>/pumpfun_rt/trends.json every trends.WRITE_S (trends.py, the Trends page): what is hot right now,
 read from the engine after it took each row, so it changes no decision.
 
 Alerts (category "trending", lab.ops.notify, English or German): a closed
@@ -99,7 +100,7 @@ class Shadow:
                              model=Filter(self.models) if self.models else None, on_close=self._closed,
                              strategies=P.STRATEGIES if strategies is None else strategies,
                              wallets=wallets, cats=cats, models=self.models, kill=kill or P.KillSwitch(),
-                             select=True)
+                             select=True, trend=True)
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
         self.live = None                                      # always None here: the live book is live_service.py's

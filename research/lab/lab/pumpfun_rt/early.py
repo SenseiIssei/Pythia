@@ -259,7 +259,8 @@ class Tracker:
         self.keep_frac = keep_frac
         self.features_cache: tuple | None = None
         if rows:
-            self.row_cols = ROW_META + early_feature_list() + ROW_LABELS
+            from .trendfeat import TREND_FEATURES                # Y10: the trend features (NaN without the tracker)
+            self.row_cols = ROW_META + early_feature_list() + TREND_FEATURES + ROW_LABELS
             self.rows = Packed(self.row_cols)
             self.steps = Packed(STEP_META + STEP_FEATURES)
         self.pos: dict[int, Pos] = {}
@@ -472,6 +473,8 @@ class Tracker:
             return
         f = eng.features(tok, int(t))
         f.update(self.early_features(tok, t, milestone))
+        if getattr(eng, "trend", None) is not None:
+            f.update(eng.trend.features(tok, t))
         lat = eng.costs.latency("early", tok.mint, kind, "buy")
         row = {"t": int(t), "created_ms": tok.t0, "tid": st.id, "kind": KIND_ID[kind], "filled": 0.0, "pos": -1.0,
                "lat_ms": lat, "filled2": 0.0, "dropped": 0.0, **f,

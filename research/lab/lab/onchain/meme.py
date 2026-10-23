@@ -8,7 +8,8 @@ Jupiter.
 
 Candidates, every run:
   trends       our own Trends file (reports/pumpfun_rt/trends.json, at most TRENDS_MAX_AGE_MS old):
-               its fresh pools and hot migrated coins, with the Y9 model badges
+               its fresh pools and hot migrated coins, with the Y9 model badges and their ranks (the place in the
+               hot list, ranked by buy SOL over 5 minutes among all pump.fun coins, and in the fresh list)
   dexscreener  DexScreener's token boosts and latest profiles on Solana (what lab.ops.trending reads)
   jupiter      Jupiter's public trending lists (tokens/v2/toptrending/1h, toporganicscore/1h)
 Each candidate gets its pools from DexScreener (meme_safety.best_pool). A rule that wants a coin asks
@@ -24,6 +25,10 @@ The rules (RULES; entries, then exits checked every run on a real Jupiter sell q
   organic_trend   Jupiter's organic-score list: score at least 80, up over the hour and the day, the pool a
                   day old; +30 % take profit, -10 % stop, 10 % trailing stop once +5 %, 12 h time stop,
                   out at a 40 % liquidity drop
+  trend_top       (Y10, results/pumpfun_trends_y10_prereg.md) a migrated coin ranked in the Trends file's hot top
+                  5 or fresh top 3, its migration 5 minutes ago or more, no win_low badge; +30 % take profit, -20 %
+                  stop, a 20 % trailing stop once +20 %, 1 h time stop, out when its best pool lost half its
+                  liquidity
 Every rule skips a coin the Trends file badges rug_risk, a coin it entered in the last 24 h, and holds at
 most MAX_OPEN coins. A position without a sell quote for NO_QUOTE_MS is closed at zero.
 
@@ -77,11 +82,15 @@ RULES: dict[str, dict] = {
                        "tp": None, "stop": -0.15, "trail": 0.15, "arm": 0.0, "time_ms": 24 * H, "liq_drop": 0.40},
     "organic_trend": {"label": "Jupiter organic score 80+, up over 1 h and 24 h, pool a day old",
                       "tp": 0.30, "stop": -0.10, "trail": 0.10, "arm": 0.05, "time_ms": 12 * H, "liq_drop": 0.40},
+    "trend_top": {"label": "migrated coin in the Trends hot top 5 or fresh top 3, 5 min or more after its migration",
+                  "tp": 0.30, "stop": -0.20, "trail": 0.20, "arm": 0.20, "time_ms": H, "liq_drop": 0.50},
 }
 TRIALS = len(RULES)
 FRESH_MIN_MS, FRESH_MAX_MS = 5 * 60_000, 30 * 60_000
 MOMENTUM_MIN_LIQ = 50_000.0
 MOMENTUM_H1, MOMENTUM_H24 = 5.0, 20.0
+TREND_HOT_TOP, TREND_FRESH_TOP = 5, 3
+TREND_MIN_AGE_MS = 5 * 60_000
 ORGANIC_MIN = 80.0
 DAY_AGE_MS = 24 * H
 JOURNAL_COLS = ["date", "equity", "equity_sol", "held", "bought", "closed", "wins", "turnover", "exposure",
@@ -131,11 +140,11 @@ def from_trends(doc, now: int) -> list[dict]:
     out = []
     lists = doc.get("lists") or {}
     for name in ("fresh", "hot"):
-        for e in lists.get(name) or []:
+        for i, e in enumerate(lists.get(name) or []):
             if not isinstance(e, dict) or not e.get("mint") or (name == "hot" and not e.get("migrated")):
                 continue
             out.append({"mint": e["mint"], "symbol": e.get("symbol"), "source": f"trends:{name}", "trends": e,
-                        "fresh": name == "fresh"})
+                        "fresh": name == "fresh", "ranks": {name: i + 1}})
     return out
 
 
@@ -168,13 +177,15 @@ def merge(*lists: list[dict]) -> dict[str, dict]:
             if m == WSOL:
                 continue
             have = out.setdefault(m, {"mint": m, "symbol": None, "sources": [], "trends": None, "jup": None,
-                                      "fresh": False})
+                                      "fresh": False, "ranks": {}})
             have["sources"].append(c["source"])
             have["symbol"] = have["symbol"] or c.get("symbol")
             for k in ("trends", "jup"):
                 if c.get(k) is not None and have[k] is None:
                     have[k] = c[k]
             have["fresh"] = have["fresh"] or bool(c.get("fresh"))
+            for k, r in (c.get("ranks") or {}).items():
+                have["ranks"][k] = min(r, have["ranks"].get(k, r))
     return out
 
 
@@ -207,6 +218,16 @@ def entry_why(rule: str, c: dict, now: int) -> str | None:
             return "outside 5 to 30 min after the migration"
         if "win_high" not in (t.get("badges") or []):
             return "no win_high badge"
+        return None
+    if rule == "trend_top":
+        ranks = c.get("ranks") or {}
+        if not (ranks.get("hot", TREND_HOT_TOP + 1) <= TREND_HOT_TOP
+                or ranks.get("fresh", TREND_FRESH_TOP + 1) <= TREND_FRESH_TOP):
+            return "not in the Trends hot top 5 or fresh top 3"
+        if not t.get("migrate_ms") or now - int(t["migrate_ms"]) < TREND_MIN_AGE_MS:
+            return "not 5 min past its migration"
+        if "win_low" in (t.get("badges") or []):
+            return "the win model rates it low"
         return None
     if not pool.get("born_ms") or now - pool["born_ms"] < DAY_AGE_MS:
         return "its pool is not a day old"

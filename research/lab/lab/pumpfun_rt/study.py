@@ -18,7 +18,8 @@ Steps (results/pumpfun_realtime_plan.md):
  4. Pass 1 replays the in-sample half with every rule and the model's decision rows;
     the pick is the rule with the best in-sample mean net return per trade (30+
     trades), and the models for the filters are trained on in-sample rows only (Y9's
-    select models too, from its label book's rows, selfeat.LabelPipe).
+    select models too, from its label book's rows, selfeat.LabelPipe; both passes carry Y10's trend tracker,
+    trendfeat.py, so the rows have the trend features and the trend strategies run).
  5. Pass 2 replays the whole record with every rule and every pipeline strategy
     (pipeline.STRATEGIES, plan addendum 2), each also at doubled latency and at
     tripled priority fee, and the pick with the model filter; out-of-sample numbers
@@ -276,7 +277,7 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
     keep = min(1.0, X14_KEEP_DAYS / max(1, len(days)))
     e1 = sim.Engine(S.RULES, book=warm_book(warm, root), decisions=True, entry_until=split,
                     wallets=W.warm(warm, root), cats=cats, early_rows=True, snipers=EA.warm_snipers(warm, root),
-                    select=True)
+                    select=True, trend=True)
     e1.early.keep_frac = keep
     lab1 = e1.add_pipe(SF.LabelPipe(e1, select_costs()))   # Y9: the select models' rows, at the measured latency
     sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
@@ -321,7 +322,7 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
             costs[v.name] = c
     e2 = sim.Engine(rules, book=warm_book(warm, root), decisions=True, model=M.Filter(is_models), rule_costs=costs,
                     strategies=strats, wallets=W.warm(warm, root), cats=cats, models=is_models, early_rows=True,
-                    snipers=EA.warm_snipers(warm, root), select=True)
+                    snipers=EA.warm_snipers(warm, root), select=True, trend=True)
     e2.early.keep_frac = keep
     lab2 = e2.add_pipe(SF.LabelPipe(e2, select_costs()))   # Y9: every row of the record, for the retrain
     sim.replay(days, e2, root)

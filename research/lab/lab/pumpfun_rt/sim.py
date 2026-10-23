@@ -26,6 +26,7 @@ from . import early as E
 from . import pipeline as P
 from . import selfeat as SF
 from . import strategies as S
+from . import trendfeat as TF
 from . import wallets as W
 from .categorize import CAT_FEATURES
 from .categorize import empty_features as no_cats
@@ -67,7 +68,8 @@ class Engine:
                  entry_from: int | None = None, entry_until: int | None = None,
                  rule_costs: dict[str, C.Costs] | None = None, strategies: list | None = None,
                  wallets: W.WalletBook | None = None, cats=None, models: dict | None = None, kill=None,
-                 early_rows: bool = False, snipers: E.SniperBook | None = None, select: bool = False):
+                 early_rows: bool = False, snipers: E.SniperBook | None = None, select: bool = False,
+                 trend: bool = False):
         self.rules = list(S.RULES if rules is None else rules)
         self.costs = costs or C.Costs()
         self.rule_costs = rule_costs or {}
@@ -104,6 +106,10 @@ class Engine:
         self.early = E.Tracker(self, rows=early_rows, snipers=snipers)
         # Y9: the migration features of the select filters (the paper books and the study; not the live service)
         self.sel = SF.Tracker() if select else None
+        # Y10: the trend features and the trend strategies' clock (the paper books, the study and the Y10 run; not the
+        # live service)
+        self.trend = TF.Tracker() if trend else None
+        self.trend_tick: float | None = None
 
     def _index_rules(self) -> None:
         """The rules and every pipe's strategies, by entry kind (a strategy signals once for all pipes)."""
@@ -215,6 +221,9 @@ class Engine:
         self.early.trade(tok, t, buy, sol, tok_amt, user, "curve")
         if self.sel is not None:
             self.sel.trade(tok, t, buy, sol, user)
+        if self.trend is not None:
+            self.trend.trade(tok, int(t), buy, sol, user)
+            self._trend_clock(t)
         for pipe in self.pipes:
             pipe.exec.on_trade("trades", {"t": t, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
                                           "fee_bps": tok.fee_bps, "sig": sig})
@@ -259,6 +268,8 @@ class Engine:
                 self.sel.completed(tok, t)
         tok.migrated(t, pool, sol, tok_amt)
         tok.last_t = t
+        if self.trend is not None:
+            self.trend.migrated(tok, int(t))
         for r in self.by_entry.get("migration", ()):
             self.push(t + r.p["delay_s"] * 1000, "signal_rule", (mint, r.name))
 
@@ -272,6 +283,9 @@ class Engine:
         self.early.trade(tok, t, buy, quote or 0, base or 0, user or "", "pool")
         if self.sel is not None:
             self.sel.amm(tok, int(t), buy, quote or 0)
+        if self.trend is not None:
+            self.trend.amm(tok, int(t), buy, quote or 0, user)
+            self._trend_clock(t)
         for pipe in self.pipes:
             pipe.exec.on_trade("amm", {"t": t, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
                                        "user": user, "fee_bps": tok.amm_fee_bps, "sig": sig})
@@ -295,6 +309,24 @@ class Engine:
             p["gap"] = True
         for pipe in self.pipes:
             pipe.mark_gap()
+
+    def _trend_clock(self, t: float) -> None:
+        """Y10: the trend strategies are asked at every bucket boundary once the stream has started."""
+        if self.trend_tick is None and self.by_entry.get("trend"):
+            self.trend_tick = TF.boundary(t) + TF.STEP_MS
+            self.push(self.trend_tick, "trend_tick", None)
+
+    def _a_trend_tick(self, at, _) -> None:
+        """Y10: every trend strategy (entry "trend") at the boundary `at`, on the closed buckets before it."""
+        self.trend.roll(at)
+        B = int(at)
+        for r in self.by_entry.get("trend", ()):
+            for mint in self.trend.candidates(r, self, B):
+                tok = self.tokens.get(mint)
+                if tok is not None:
+                    self.signal(r, tok, at)
+        self.trend_tick = at + TF.STEP_MS
+        self.push(self.trend_tick, "trend_tick", None)
 
     def _a_pipe(self, at, data) -> None:
         """An action of a pipeline or its paper executor (a landing, a time stop)."""
@@ -596,6 +628,8 @@ class Engine:
         self.early.evict(mint)
         if self.sel is not None:
             self.sel.evict(mint)
+        if self.trend is not None:
+            self.trend.evict(mint)
         self.entered.pop(mint, None)
         self.rows_by_mint.pop(mint, None)
 

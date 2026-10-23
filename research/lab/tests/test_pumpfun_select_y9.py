@@ -30,7 +30,7 @@ from test_pumpfun_exit_runners import BASE0, QUOTE0, Pool
 from test_pumpfun_rt import BUYERS, MINT, SOL, T0, Curve, Fixed, key
 
 Y9_NAMES = ["P_pool0_norug", "P_pool0_top30", "P_pool0_norug_top30", "P_pool5_top30", "P_pool0_smart2"]
-OLD = [s for s in P.STRATEGIES if s.name not in Y9_NAMES]
+OLD = P.STRATEGIES[:[s.name for s in P.STRATEGIES].index(Y9_NAMES[0])]    # every strategy before Y9
 
 
 @pytest.fixture(autouse=True)
@@ -147,7 +147,7 @@ def stub_models(p_rug=0.0, p_win=1.0, base=0.2, thr=0.5) -> dict:
 def test_the_y9_strategies_are_what_the_prereg_says():
     names = [n for _, n in Y9.VARIANTS]
     all_names = [s.name for s in P.STRATEGIES]
-    assert names[0] == "P_pool0" and names[1:] == Y9_NAMES and all_names[-5:] == Y9_NAMES
+    assert names[0] == "P_pool0" and names[1:] == Y9_NAMES and all_names[-10:-5] == Y9_NAMES   # Y10's five follow
     base = P.BY_NAME["P_pool0"]
     for n in Y9_NAMES:
         s = P.BY_NAME[n]
@@ -165,7 +165,7 @@ def test_the_y9_strategies_are_what_the_prereg_says():
 
 def test_the_trials_are_counted():
     assert S.SELECT_Y9_TRIALS == 10 == (len(Y9.VARIANTS) - 1) * len(Y9.LIMITS)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10
 
 
 def test_books_latency_fees_and_limits():
@@ -358,7 +358,8 @@ def test_fit_threshold_purge_and_too_few_rows(monkeypatch):
     assert (rs["entry"] == 0).all() and (rs["t"] + SM.LABEL_H_MS < tb["t"][300]).all()
     assert np.all(np.diff(rs["t"]) >= 0)
     ms = SM.train(tb)
-    assert all(ms[f"sel_{k}"].booster is not None for k in SM.LABELS)
+    assert all(ms[f"sel_{k}"].booster is not None for k in SM.Y9_LABELS)
+    assert all(ms[f"sel_{k}"].booster is None for k in SM.TREND_LABELS)    # no trend column in these rows
     m = ms["sel_win0"]
     full_rows = SM.rows_for(tb, "win0")
     cut = int(len(full_rows["t"]) * 0.8)
@@ -374,7 +375,8 @@ def test_fit_threshold_purge_and_too_few_rows(monkeypatch):
 def test_walk_forward_by_day_and_the_files_round_trip(tmp_path):
     tb = table(n=1200, days=4)
     wf = SM.walk_forward(tb)
-    for k in SM.LABELS:
+    assert set(wf) == set(SM.Y9_LABELS)                         # no trend column in these rows
+    for k in SM.Y9_LABELS:
         days = wf[k]["days"]
         assert days[0]["model"] is False                         # the first day has nothing before it
         tested = [d for d in days if d["model"]]
@@ -475,7 +477,7 @@ def test_the_daily_retrain_trains_and_saves_the_select_models(tmp_path, monkeypa
     monkeypatch.setattr(M, "model_dir", lambda: tmp_path / "models")
     monkeypatch.setattr(rep, "REPORTS", tmp_path / "reports")
     dry = RT.run_y9(T0, dry=True, log=lambda *a: None)
-    assert dry["models"] == {k: True for k in SM.LABELS} and not (tmp_path / "models").exists()
+    assert dry["models"] == {k: k in SM.Y9_LABELS for k in SM.LABELS} and not (tmp_path / "models").exists()
     summ = RT.run_y9(T0, log=lambda *a: None)
     assert set(SM.load_models(tmp_path / "models")) == {f"sel_{k}" for k in SM.LABELS} | {"sel_policy"}
     md = (tmp_path / "reports" / "pumpfun_rt" / "select.md").read_text(encoding="utf-8")

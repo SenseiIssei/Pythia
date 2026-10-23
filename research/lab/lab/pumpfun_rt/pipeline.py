@@ -336,7 +336,38 @@ def _build_y9() -> list[Strategy]:
     ]
 
 
-STRATEGIES: list[Strategy] = _build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
+def _build_y10() -> list[Strategy]:
+    """Y10 (results/pumpfun_trends_y10_prereg.md): the Trends page's measures (trendfeat.py) in use, P_pool0's exits
+    and 0.1 SOL each. (a) Y9's top-30 % filters on the models that also see the trend features (sel_win0t,
+    sel_win5t); (b) a curve in the hot-now top 5 with rising buyers and P(alive5m), from the early model with the
+    trend features, at least its base rate; a fresh pool in the top 3 of the fresh pools 2 to 10 minutes after its
+    migration; P_pool0 only while the market is hot (its buy SOL over 15 minutes at least the median of the last 6
+    hours). The trend entries are asked at every 10 s boundary (sim.Engine's trend clock)."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    at, at5 = {"delay_s": 0}, {"delay_s": 5}
+    x = "+30 %, stop -20 %, 300 s"
+    return [
+        _strategy("P_pool0_top30t", "E", "migration", at, {"select": {"win0t": ("top", 0.3)}}, pool0,
+                  f"PumpSwap at the migration where P(win), with the trend features, is in its top 30 %; {x}",
+                  stake_sol=0.1),
+        _strategy("P_pool5_top30t", "E", "migration", at5, {"select": {"win5t": ("top", 0.3)}}, pool0,
+                  f"PumpSwap 5 s after the migration where P(win), with the pool's first seconds and the trend "
+                  f"features, is in its top 30 %; {x}", stake_sol=0.1),
+        _strategy("P_hot5", "C", "trend", {"list": "hot", "top": 5, "rising": True},
+                  {"trend": {"alive": "et_alive5m"}}, pool0,
+                  f"a curve in the hot-now top 5 (buy SOL over 5 min) with more buyers in the last minute than in "
+                  f"the one before, P(alive 5 min) at least its base rate; {x}", stake_sol=0.1),
+        _strategy("P_fresh3", "E", "trend", {"list": "fresh", "top": 3, "from_s": 120, "to_s": 600}, {}, pool0,
+                  f"PumpSwap, a pool in the top 3 of the pools migrated in the last 30 min (SOL traded over 5 min), "
+                  f"2 to 10 min after its migration; {x}", stake_sol=0.1),
+        _strategy("P_pool0_heat", "E", "migration", at, {"trend": {"heat": 1.0}}, pool0,
+                  f"PumpSwap at the migration while the market's buy SOL over 15 min is at least its median of the "
+                  f"last 6 h; {x}", stake_sol=0.1),
+    ]
+
+
+STRATEGIES: list[Strategy] = (_build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
+                              + _build_y10())
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -576,6 +607,11 @@ class Pipeline:
             if not ok:
                 eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
                 return
+        if s.flt.get("trend"):
+            ok, prob = self.trend_ok(s.flt["trend"], tok, t)
+            if not ok:
+                eng.skipped[(s.name, "model" if ok is False else "no model")] += 1
+                return
         risk = self.risk[s.name]
         stake = int(min(s.stake_sol, risk.limits.stake_sol) * C.LAMPORTS)
         depth = tok.pq if pool else tok.vs
@@ -699,6 +735,36 @@ class Pipeline:
             if how == "top" and p < thr:
                 return False, first
         return True, first
+
+    def trend_ok(self, spec: dict, tok, t: float) -> tuple[bool | None, float | None]:
+        """Y10's trend filter: ("heat", k) the market's buy SOL over 15 minutes at least k x its median of the last
+        6 hours (trendfeat.Tracker.heat_ok); ("alive", model) P(alive5m) of that early model (the early features
+        and the trend features at t, as its rows) at least its base rate. (None, None) without the engine's trend
+        tracker, the heat history or the model."""
+        eng = self.eng
+        tr = getattr(eng, "trend", None)
+        if tr is None:
+            return None, None
+        prob = None
+        if "heat" in spec:
+            ok = tr.heat_ok(t, spec["heat"])
+            if not ok:
+                return ok, None
+        if "alive" in spec:
+            m = eng.models.get(spec["alive"])
+            tracker = getattr(eng, "early", None)
+            if m is None or m.booster is None or tracker is None:
+                return None, None
+            from .early import MILESTONES
+            prog = tok.progress()
+            f = eng.features(tok, int(t))
+            f.update(tracker.early_features(tok, t, max((x for x in MILESTONES if prog >= x), default=0.0),
+                                            prune=False))
+            f.update(tr.features(tok, t))
+            prob = float(m.predict(np.array([[float(f.get(c, math.nan)) for c in m.features]], dtype=float))[0])
+            if prob < m.base:
+                return False, prob
+        return True, prob
 
     # ------------------------------------------------------------ fills
     def bought(self, pid: int, at: float, tokens: int, cost_l: int, fee_l: int) -> None:

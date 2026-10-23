@@ -825,8 +825,9 @@ def hazard_eval(st: dict, step_land: np.ndarray, split_ms: float, md, mu, featur
 # ---------------------------------------------------------------- the models the pipeline uses
 
 def fit_live(data: dict, costs=None, until_ms: float | None = None, k: float | None = None, log=print) -> dict:
-    """e_<label>, hz_dump10, hz_up30 and hz_policy from every row and step whose window ends before until_ms
-    (all of them when None). k None: k* chosen on these positions by the cross-fitted in-sample selection."""
+    """e_<label>, hz_dump10, hz_up30 and hz_policy (and Y10's et_<label> where the rows have the trend features)
+    from every row and step whose window ends before until_ms (all of them when None). k None: k* chosen on these
+    positions by the cross-fitted in-sample selection."""
     costs = costs or C.Costs()
     fr = early_rows(data)
     feats = E.early_feature_list()
@@ -845,6 +846,9 @@ def fit_live(data: dict, costs=None, until_ms: float | None = None, k: float | N
         thresholds[label] = {str(q): {kind: float(np.quantile(sc[sub["kind"] == kid], 1 - q))
                                       for kid, kind in enumerate(E.KINDS) if (sub["kind"] == kid).sum() >= 20}
                              for q in TOPS}
+    if has_trend(fr):                                        # Y10: the same models with the trend features, et_<label>
+        for label in E.LABELS:
+            out["et_" + label] = fit_trend(fr, label, until_ms)
     pre = prepare(data, costs)
     st, step_land = pre["st"], pre["step_land"]
     lim = np.inf if until_ms is None else until_ms - POS_EMBARGO_MS
@@ -856,6 +860,29 @@ def fit_live(data: dict, costs=None, until_ms: float | None = None, k: float | N
     out["hz_policy"] = HzPolicy(k, loss, thresholds, {"until_ms": until_ms, "rows": int(len(fr["t"])),
                                                       "steps": int(len(st.get("pos", [])))})
     return out
+
+
+def trend_features() -> list[str]:
+    """Y10: the early models' features and the trend features (trendfeat.py)."""
+    from .trendfeat import TREND_FEATURES
+    return E.early_feature_list() + TREND_FEATURES
+
+
+def has_trend(fr: dict) -> bool:
+    """Rows written before Y10 have no trend columns: no et_ model is trained on them."""
+    from .trendfeat import TREND_FEATURES
+    return any(fr.get(k) is not None and bool(np.isfinite(fr[k]).any()) for k in TREND_FEATURES)
+
+
+def fit_trend(fr: dict, label: str, until_ms: float | None = None):
+    """Y10's et_<label>: e_<label>'s fit (the same rows, embargo and parameters) on the early features and the trend
+    features. `fr` the early rows in time order (early_rows)."""
+    feats = trend_features()
+    m = np.isfinite(fr[label])
+    if until_ms is not None:
+        m &= fr["t"] + E.LABELS[label] * 1000 + EMBARGO_MS < until_ms
+    sub = {kk: v[m] for kk, v in fr.items()}
+    return M.fit(_x(sub, feats), sub[label], feats)
 
 
 def select_k(data: dict, costs, pre: dict, until_ms: float | None, log=print) -> float:
@@ -896,7 +923,7 @@ def save_models(models: dict, d: Path) -> None:
         tmp.replace(d / f"{name}.json")
 
 
-LIVE_NAMES = [f"e_{k}" for k in E.LABELS] + ["hz_dump10", "hz_up30", "hz_policy"]
+LIVE_NAMES = [f"e_{k}" for k in E.LABELS] + ["hz_dump10", "hz_up30", "hz_policy"] + [f"et_{k}" for k in E.LABELS]
 
 
 def load_models(d: Path) -> dict:
