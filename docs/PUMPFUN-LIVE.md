@@ -420,6 +420,31 @@ Beobachten:
 In der ersten Stunde nach dem Start kommen wenige Signale: Der Dienst kennt
 nur Token, deren Erstellung er selbst gesehen hat.
 
+**Namenskategorien (seit 2026-10-23).** Der Dienst ordnet alle 30 s Name und
+Ticker jedes neuen Coins einer Kategorie zu (copycat, generic, scam,
+celebrity, ai, animal; Claude Haiku 5.5 über den abgerechneten KI-Endpunkt
+der Engine und ihr Budget, dieselbe Datei
+`pumpfun_rt/categories/cats.jsonl` wie der tägliche Job, der diese Namen dann
+überspringt). Coins der Kategorien celebrity (echte Personen: Politiker,
+Streamer, Gründer, Sportler, Musiker), copycat (bekannte Marken, Produkte,
+Apps, Spiele, KI-Produkte, andere Kryptowährungen) und scam kauft weder der
+Bot noch sein Papier-Zwilling P_pool0_wait: Grund `category celebrity` usw.
+in den übersprungenen Zählern, eine Logzeile, `skipped.jsonl`, keine Karte.
+Hat ein Coin beim Kauf noch keine Kategorie, fragt der Bot diesen einen Namen
+sofort ab (höchstens 1,5 s, so lange wartet die Schleife); ohne Antwort
+`category unknown`. Welche Kategorien gesperrt sind, stellst du in der App
+unter "Gesperrt" ein (Zeilen `category:<code>` in `blocked-mints.txt`; ohne
+eine solche Zeile gelten celebrity, copycat und scam). Kosten: etwa 0,3 USD am
+Tag, höchstens `PYTHIA_PF_CAT_USD_DAY` (1,00 USD) am UTC-Tag, im Log alle 10
+Minuten und im Status unter `categories`. Der Dienst muss die Engine unter
+`PYTHIA_AI_URL` (Standard: die Engine auf demselben Rechner, Port 8788) erreichen
+und `ANTHROPIC_API_KEY` in `alerts.env` haben. Zeigt der Status
+`categories.classifier.last_error` mit `down`, erreicht der Container die
+Engine nicht: `--network host` im docker-run ergänzen (oder `PYTHIA_AI_URL`
+auf die Engine setzen und ihre Adresse in `PYTHIA_ALERT_EVENT_FROM` der Engine
+erlauben) und den Container neu anlegen. Bis dahin kauft der Bot nur Coins,
+deren Name schon eine Kategorie hat.
+
 **Stoppen:**
 
 1. Notschalter: in der App "Stop trading now" (schreibt

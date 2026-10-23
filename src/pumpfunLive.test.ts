@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ALPHA_PHASE,
+  BLOCK_CATEGORIES,
+  BLOCK_CATEGORY_HINT,
+  BLOCK_CATEGORY_LABEL,
+  BLOCK_FORM_KINDS,
   BLOCK_KIND_HINT,
   BLOCK_KIND_LABEL,
   blockLine,
   blockNorm,
+  blockedCategories,
+  categoryToggle,
   changePumpfunBlocked,
   pumpfunBlocked,
   modeWords,
@@ -288,6 +294,25 @@ describe("the block list", () => {
     expect(BLOCK_KIND_LABEL.match).toBe("Contains");
     expect(BLOCK_KIND_HINT.match).toContain("contains");
     expect(Object.keys(BLOCK_KIND_HINT).sort()).toEqual(Object.keys(BLOCK_KIND_LABEL).sort());
+  });
+
+  it("lists the blocked name categories, the defaults while none is listed, and keeps the last one", () => {
+    const base = { path: "pumpfun_rt/blocked-mints.txt", ignored: [] };
+    expect(blockedCategories({ ...base, entries: [] })).toEqual({ blocked: ["copycat", "celebrity", "scam"], isDefault: true });
+    expect(blockedCategories(null).isDefault).toBe(true);
+    const own = { ...base, entries: [{ entry: "category:scam", kind: "category" as const, value: "scam" }, { entry: "category:animal", kind: "category" as const, value: "animal" }] };
+    expect(blockedCategories(own)).toEqual({ blocked: ["animal", "scam"], isDefault: false });
+    const served = { ...base, entries: [], categories: { blocked: ["celebrity", "scam"], default: false, codes: [...BLOCK_CATEGORIES] } };
+    expect(blockedCategories(served)).toEqual({ blocked: ["celebrity", "scam"], isDefault: false });
+    expect(categoryToggle("ai", ["scam"])).toEqual({ add: "category:ai" });
+    expect(categoryToggle("copycat", ["copycat", "scam"])).toEqual({ remove: "category:copycat" });
+    expect(categoryToggle("scam", ["scam"])).toEqual({ error: "At least one category stays blocked." });
+    expect(blockLine("category", " Celebrity ")).toEqual({ line: "category:celebrity" });
+    expect("error" in blockLine("category", "rocket")).toBe(true);
+    expect(BLOCK_FORM_KINDS).not.toContain("category");
+    expect(Object.keys(BLOCK_CATEGORY_LABEL).sort()).toEqual([...BLOCK_CATEGORIES].sort());
+    expect(Object.keys(BLOCK_CATEGORY_HINT).sort()).toEqual([...BLOCK_CATEGORIES].sort());
+    expect(BLOCK_CATEGORY_HINT.copycat).toContain("ChatGPT");
   });
 
   it("reads and changes the list through the server only", async () => {

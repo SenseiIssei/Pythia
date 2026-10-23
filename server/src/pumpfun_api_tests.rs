@@ -320,3 +320,39 @@ async fn the_block_list_takes_match_entries_of_three_letters_or_more() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[tokio::test]
+async fn the_block_list_takes_categories_with_the_defaults_written_out_at_the_first_change() {
+    let d = root("blocked-cat");
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/blocked", None).await;
+    assert_eq!(v["categories"]["blocked"], serde_json::json!(["copycat", "celebrity", "scam"]));
+    assert_eq!(v["categories"]["default"], true);
+    assert_eq!(v["categories"]["codes"].as_array().unwrap().len(), 6);
+    // removing a default one keeps the other two (they are written out first)
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": "category:copycat"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["categories"]["blocked"], serde_json::json!(["celebrity", "scam"]));
+    assert_eq!(v["categories"]["default"], false);
+    let text = std::fs::read_to_string(d.join("pumpfun_rt/blocked-mints.txt")).unwrap();
+    assert_eq!(text, "category:celebrity\ncategory:scam\n");
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": "Category: Animal"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["categories"]["blocked"], serde_json::json!(["celebrity", "animal", "scam"]));
+    for c in ["category:celebrity", "category:animal"] {
+        let (code, _) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": c}))).await;
+        assert_eq!(code, StatusCode::OK);
+    }
+    // the last one stays: none listed would mean the three defaults again
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": "category:scam"}))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(std::fs::read_to_string(d.join("pumpfun_rt/blocked-mints.txt")).unwrap(), "category:scam\n");
+    let (code, _) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": "category:rocket"}))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    // adding one with the defaults in force writes them out next to it
+    let d2 = root("blocked-cat-add");
+    let (code, v) = call(&d2, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": "category:ai"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["categories"]["blocked"], serde_json::json!(["copycat", "celebrity", "ai", "scam"]));
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&d2);
+}

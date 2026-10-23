@@ -16,10 +16,16 @@ import { PumpfunMaster, WALLET_LIMIT } from "../components/MasterPanel";
 import { limitsKind, limitsText } from "../masterControl";
 import {
   ALPHA_PHASE,
+  BLOCK_CATEGORIES,
+  BLOCK_CATEGORY_HINT,
+  BLOCK_CATEGORY_LABEL,
+  BLOCK_FORM_KINDS,
   BLOCK_KIND_HINT,
   BLOCK_KIND_LABEL,
   LIMIT_LABEL,
   blockLine,
+  blockedCategories,
+  categoryToggle,
   canControl,
   changePumpfunBlocked,
   ceilings,
@@ -190,7 +196,7 @@ function Limits({ v, onSaved }: { v: PumpfunView; onSaved: () => void }) {
   );
 }
 
-/** The owner's block list: coins (mint), creators, symbols and names the bot and its paper twin never buy. */
+/** The owner's block list: coins (mint), creators, symbols, names and name categories the bot and its paper twin never buy. */
 function Blocked() {
   const control = canControl();
   const [list, setList] = useState<BlockList | null>(null);
@@ -203,6 +209,8 @@ function Blocked() {
     pumpfunBlocked().then(setList, (e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
   }, [control]);
   const checked = value.trim() ? blockLine(kind, value) : null;
+  const cats = blockedCategories(list);
+  const entries = list ? list.entries.filter((e) => e.kind !== "category") : [];
   const change = async (c: { add: string } | { remove: string }) => {
     setBusy(true);
     setErr(null);
@@ -218,15 +226,40 @@ function Blocked() {
   return (
     <Section
       title="Gesperrt"
-      hint="Coins the bot never buys, and its paper twin neither: a mint, every coin of a creator, every coin whose symbol or name matches, or every coin whose name or symbol contains a text (upper and lower case, $ and spaces do not count). The bot reads the list within seconds; positions it already holds are sold by their exits as usual."
+      hint="Coins the bot never buys, and its paper twin neither: a mint, every coin of a creator, every coin whose symbol or name matches, every coin whose name or symbol contains a text (upper and lower case, $ and spaces do not count), or every coin of a name category (the bot classifies each new coin's name every 30 s; a coin without a category at the buy is asked at once and skipped if that fails). The bot reads the list within seconds; positions it already holds are sold by their exits as usual."
     >
       {!control ? (
         <p className="text-sm text-muted">The block list is edited through the connected backend on the server.</p>
       ) : (
         <div className="space-y-3">
-          {list && list.entries.length > 0 ? (
+          {list && (
+            <div>
+              <div className="mb-1 text-[13px] font-medium text-ink">Categories never bought{cats.isDefault ? " (default)" : ""}</div>
+              <div className="flex flex-wrap gap-2" role="group" aria-label="Blocked categories">
+                {BLOCK_CATEGORIES.map((c) => {
+                  const on = cats.blocked.includes(c);
+                  const t = categoryToggle(c, cats.blocked);
+                  return (
+                    <Button
+                      key={c}
+                      size="sm"
+                      variant={on ? "accent" : "secondary"}
+                      icon={on ? Ban : undefined}
+                      disabled={busy || "error" in t}
+                      ariaLabel={`${on ? "Unblock" : "Block"} category ${c}`}
+                      title={"error" in t ? t.error : BLOCK_CATEGORY_HINT[c]}
+                      onClick={() => !("error" in t) && void change(t)}
+                    >
+                      {BLOCK_CATEGORY_LABEL[c]}
+                    </Button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {list && entries.length > 0 ? (
             <List>
-              {list.entries.map((e) => (
+              {entries.map((e) => (
                 <ListRow
                   key={e.entry}
                   icon={Ban}
@@ -251,7 +284,7 @@ function Blocked() {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr]">
             <Field label="Kind">
               <select value={kind} aria-label="Kind" onChange={(e) => setKind(e.target.value as BlockKind)} className={inputCls}>
-                {(Object.keys(BLOCK_KIND_LABEL) as BlockKind[]).map((k) => (
+                {BLOCK_FORM_KINDS.map((k) => (
                   <option key={k} value={k}>
                     {BLOCK_KIND_LABEL[k]}
                   </option>

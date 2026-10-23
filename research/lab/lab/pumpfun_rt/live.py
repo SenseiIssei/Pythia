@@ -26,7 +26,9 @@ read from the engine after it took each row, so it changes no decision.
 
 Rows of a coin the engine does not know yet wait up to HOLD_MS for its creation and follow it then (Hold; the live
 service does the same): a migration that came before its creation was dropped here and taken there. The paper twin
-of the live strategy (blocklist.PAPER_RULES) writes every coin it does not buy with its reason to
+of the live strategy (blocklist.PAPER_RULES) has the live bot's category rule (livecat.CategoryGate: a blocked
+name category is a skip, a coin without one at the buy is asked alone at once) and writes every coin it does not buy
+with its reason to
 <data>/paper/pumpfun_rt/skipped.jsonl, as the live book does to its own (live_exec.paper_match reads both); a
 "no pool state" while every PumpSwap link of the collector was down says so (Pipeline.feed_down).
 
@@ -138,7 +140,7 @@ class Hold:
 class Shadow:
     def __init__(self, pick: str, models: dict | None = None, book: CreatorBook | None = None,
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
-                 strategies: list | None = None, kill=None, trends: bool = False, blocked=None):
+                 strategies: list | None = None, kill=None, trends: bool = False, blocked=None, category=None):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
@@ -152,6 +154,7 @@ class Shadow:
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
             pipe.blocked = blocked                            # the owner's block list (blocklist.PAPER_RULES)
+            pipe.category = category                          # the live bot's category rule (livecat.CategoryGate)
             pipe.on_skip = self._skipped
         self.hold = Hold(self.engine, self._feed, on_lost=self._lost)
         self.skips: list[dict] = []                           # the twin's coins not bought, for skipped.jsonl
@@ -204,9 +207,11 @@ class Shadow:
             wallets = W.WalletBook.from_json(json.loads((paper_dir() / "wallets.json").read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
-        sh = cls(read_pick(), load(), book, wallets=wallets,
-                 cats=CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS), trends=True,
-                 blocked=BlockWatch(rules=PAPER_RULES))
+        from .livecat import CategoryGate
+        cats = CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS)
+        blocked = BlockWatch(rules=PAPER_RULES)
+        sh = cls(read_pick(), load(), book, wallets=wallets, cats=cats, trends=True, blocked=blocked,
+                 category=CategoryGate(cats, block=blocked, rules=PAPER_RULES))
         sh.cats_mtime = cls._cats_mtime()
         try:                                                  # X14: the sniper book of the early features
             from .early import SniperBook
@@ -302,7 +307,10 @@ class Shadow:
         if ct != self.cats_mtime:
             from .categorize import BOOK_DAYS, CategoryIndex
             self.cats_mtime = ct
-            self.engine.cats = CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS)
+            if getattr(self.engine.cats, "path", None) is not None:
+                self.engine.cats.tail()                       # the live classifier appends every 30 s: the new lines
+            else:
+                self.engine.cats = CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS)
 
     def _closed(self, rec: dict) -> None:
         self.closed.append(rec)

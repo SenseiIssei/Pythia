@@ -636,6 +636,7 @@ class Pipeline:
         self.waiting: dict[str, dict] = {}    # Y8: mint -> {strategy: signal time + wait_pool_s} until a pool trade
         self.on_skip = None                   # (strategy, mint, why) for every signal not bought: the live book's log
         self.blocked = None                   # (strategy, token) -> reason or None: the owner's block list (blocklist.py)
+        self.category = None                  # (strategy, token, at_buy) -> reason or None: name categories (livecat.py)
         self.feed_down = None                 # (t0, t1) -> True when every PumpSwap link of our feed was down then
 
     def strat_of(self, pid: int) -> Strategy:
@@ -665,6 +666,8 @@ class Pipeline:
         eng = self.eng
         pool = s.family == "E"
         why = self.blocked(s.name, tok) if self.blocked is not None else None
+        if not why and self.category is not None:
+            why = self.category(s.name, tok, False)          # a known blocked category: at once
         if why:
             self.skip(s.name, tok.mint, why)
             return
@@ -731,6 +734,11 @@ class Pipeline:
         if want <= 0:
             self.skip(s.name, tok.mint, "nothing to buy")
             return
+        if self.category is not None:
+            why = self.category(s.name, tok, True)           # at the buy: no category yet is asked for at once
+            if why:
+                self.skip(s.name, tok.mint, why)
+                return
         pid = eng.new_pid()
         price = C.price(tok.pq, tok.pb) if pool else tok.price()
         self.pos[pid] = {"pid": pid, "rule": s.name, "family": s.family, "mint": tok.mint, "name": tok.name,

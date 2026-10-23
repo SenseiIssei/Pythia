@@ -65,6 +65,13 @@ Several providers (PYTHIA_SOLANA_WS_URLS, full URLs, comma separated) run side b
 each with the same subscriptions, the first copy by signature wins, the budget per provider; one that refuses its
 first subscription (no logsSubscribe with mentions on its plan) is benched for the session, one that errors, refuses
 later or runs out until its reconnect or 00:00 UTC, and the others carry on; latency.md has a row per provider.
+
+Name categories (livecat.py, the owner, 2026-10-23): every 30 s the new plain coins the stream saw created are
+classified (the daily job's prompt, chunks and checks, the engine's metered endpoint and budget) into the same
+cats.jsonl; the live strategy skips a coin of a blocked category (blocklist category: lines, celebrity, copycat and
+scam by default) with "category celebrity" etc., and one that reaches the buy without a category is asked alone at
+once (at most 1.5 s, the loop waits) or skipped "category unknown". The status's "categories" shows the classifier,
+the blocked codes and the day's cost.
 """
 
 from __future__ import annotations
@@ -267,6 +274,8 @@ class Service:
         self.errors = 0
         self.prov: Providers | None = None                  # the targeted provider streams (only with a provider)
         self.w_since: dict[str, float] = {}                 # mint -> monotonic s since the strategy waits on it
+        self.cats = None                                    # livecat.LiveClassifier (with a live book)
+        self.cat_gate = None                                # livecat.CategoryGate, the pipeline's category rule
 
     def _hold(self) -> Hold:
         if self.hold is None:
@@ -325,6 +334,7 @@ class Service:
                 self.address = self.book.exec.signer.pubkey
                 self.refresh_holdings()
                 self.book.adopt_leftovers(self.holdings)
+                self.attach_categories()
         if self.book is None:
             print("live service: nothing trades. Why:\n  - " + "\n  - ".join(self.why or ["see the log above"])
                   + "\nFix it and restart the service.", flush=True)
@@ -334,6 +344,32 @@ class Service:
             except ValueError as e:
                 print(f"live service: no RPC for the balance ({e})", flush=True)
 
+    def attach_categories(self) -> None:
+        """The live name categories (livecat.py): the classifier of the stream's new coins and the entry rule on the
+        live book's pipeline, over the engine's category index (read on, as the classifier appends)."""
+        from . import categorize as K
+        from . import livecat as LC
+        pipe = getattr(self.book, "pipe", None)
+        if pipe is None:
+            return
+        ix = getattr(self.engine, "cats", None)
+        if getattr(ix, "path", None) is None:
+            try:
+                ix = K.CategoryIndex.load(mints=False, max_age_days=K.BOOK_DAYS)
+            except Exception:                               # noqa: BLE001 - an empty index: the classifier fills it
+                ix = K.CategoryIndex()
+
+        def name_of(mint):
+            t = self.engine.tokens.get(mint)
+            return (t.name, t.symbol) if t is not None else None
+
+        self.cats = LC.LiveClassifier(ix, lookup=name_of)
+        self.cat_gate = LC.CategoryGate(ix, block=pipe.blocked, cls=self.cats)
+        pipe.category = self.cat_gate
+        print(f"live service: name categories every {LC.EVERY_S:g} s ({len(ix):,} names known); never bought: "
+              f"{', '.join(sorted(self.cat_gate.blocked()))}; a coin without one is asked at once (at most "
+              f"{LC.ONE_TIMEOUT_S:g} s), else skipped", flush=True)
+
     # ------------------------------------------------------------ the stream
     def on_row(self, table: str, row: dict) -> None:
         """A row from the stream. A row of a coin the engine does not know yet waits up to HOLD_MS for its
@@ -342,6 +378,11 @@ class Service:
         if self.book is None:
             return
         mint = row.get("mint")
+        if self.cats is not None and table in ("creates", "trades"):
+            try:
+                self.cats.observe(table, row)
+            except Exception as e:                          # the categories never stop the book
+                print(f"live service: categories {type(e).__name__}: {e}", flush=True)
         try:
             if table == "other" and row.get("kind") == "migrate":
                 self.saw(mint)
@@ -551,6 +592,8 @@ class Service:
             st = LX.base_status(self.gate, self.why, self.address, self.balance_l, self.balance_t, self.holdings)
         if self.prov is not None:
             st["provider"] = self.prov.status()
+        if self.cat_gate is not None:
+            st["categories"] = dict(self.cat_gate.status(), classifier=self.cats.status() if self.cats else None)
         return st
 
     def save(self) -> None:
@@ -906,6 +949,26 @@ def feeds_line(urls: list[str]) -> str:
     return "live service: feeds " + ", ".join(safe_url(u) for u in urls)
 
 
+async def classify_loop(svc: Service, stop: asyncio.Event, every_s: float | None = None) -> None:
+    """The live classifier (livecat.LiveClassifier): every EVERY_S the new coins, in a thread off the loop."""
+    from . import livecat as LC
+    every_s = LC.EVERY_S if every_s is None else every_s
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), every_s)
+            break
+        except asyncio.TimeoutError:
+            pass
+        job = svc.cats.take() if svc.cats is not None else None
+        if job is None:
+            continue
+        try:
+            await asyncio.to_thread(svc.cats.classify, *job)
+        except Exception as e:                              # the next run asks again
+            svc.cats.busy = False
+            print(f"live service: categories run {type(e).__name__}: {e}", flush=True)
+
+
 async def run(seconds: float | None = None, once: bool = False) -> int:
     svc = Service()
     svc.start()
@@ -944,6 +1007,8 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
         if svc.book is not None:                             # nothing to stream for a book that is not there
             tasks = [asyncio.create_task(col.stream(session, u, p, k, stop)) for u, p, k in feed_links(links)]
             print(feeds_line(links), flush=True)
+            if svc.cats is not None:
+                tasks.append(asyncio.create_task(classify_loop(svc, stop)))
             if provs:
                 svc.prov = Providers(provs, col)
                 col.race = svc.prov.raced

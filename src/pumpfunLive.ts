@@ -285,7 +285,7 @@ export async function pumpfunControl(patch: ControlPatch): Promise<ControlAnswer
 }
 
 /** The owner's block list (<data>/pumpfun_rt/blocked-mints.txt): coins the live bot and its paper twin never buy. */
-export type BlockKind = "mint" | "creator" | "symbol" | "name" | "match";
+export type BlockKind = "mint" | "creator" | "symbol" | "name" | "match" | "category";
 
 export interface BlockEntry {
   entry: string;
@@ -296,11 +296,52 @@ export interface BlockEntry {
 export interface BlockList {
   path: string;
   entries: BlockEntry[];
-  /** Lines the bot ignores (not a mint, creator:, symbol:, name: or match: entry). */
+  /** Lines the bot ignores (not a mint, creator:, symbol:, name:, match: or category: entry). */
   ignored: string[];
+  /** The name categories never bought: the category: lines, or the defaults while there is none. */
+  categories?: { blocked: string[]; default: boolean; codes: string[] };
 }
 
-export const BLOCK_KIND_LABEL: Record<BlockKind, string> = { mint: "Mint", creator: "Creator", symbol: "Symbol", name: "Name", match: "Contains" };
+/** The live classifier's name categories (categorize.CATS) and those blocked while the list has no category: line. */
+export const BLOCK_CATEGORIES = ["copycat", "celebrity", "ai", "animal", "generic", "scam"] as const;
+export type BlockCategory = (typeof BLOCK_CATEGORIES)[number];
+export const BLOCK_CATEGORIES_DEFAULT: readonly BlockCategory[] = ["copycat", "celebrity", "scam"];
+export const BLOCK_CATEGORY_LABEL: Record<BlockCategory, string> = {
+  copycat: "Brands and copies",
+  celebrity: "Celebrities",
+  ai: "AI",
+  animal: "Animals",
+  generic: "Generic",
+  scam: "Scam patterns",
+};
+export const BLOCK_CATEGORY_HINT: Record<BlockCategory, string> = {
+  copycat: "Famous brands, products, apps, games, AI products, other coins, copies of trending names (Apple, ChatGPT, GTA6).",
+  celebrity: "Real people: politicians, streamers, founders, athletes, musicians (Biden, IShowSpeed, MrBeast).",
+  ai: "AI themes without a brand.",
+  animal: "Animal memes.",
+  generic: "Everything else.",
+  scam: "Likely scams: airdrop, official, v2, presale, random characters.",
+};
+
+/** The blocked categories of a list: what the server says, else the category: entries, else the defaults. */
+export function blockedCategories(list: BlockList | null): { blocked: BlockCategory[]; isDefault: boolean } {
+  const known = (c: string): c is BlockCategory => (BLOCK_CATEGORIES as readonly string[]).includes(c);
+  const listed = list?.categories ? list.categories.blocked : (list?.entries ?? []).filter((e) => e.kind === "category").map((e) => e.value);
+  const own = BLOCK_CATEGORIES.filter((c) => listed.includes(c) && known(c));
+  const isDefault = list?.categories ? list.categories.default : own.length === 0;
+  return { blocked: isDefault && !list?.categories ? [...BLOCK_CATEGORIES_DEFAULT] : own, isDefault };
+}
+
+/** The change one click on a category makes: block it, unblock it, or why not (the last one stays). */
+export function categoryToggle(code: BlockCategory, blocked: readonly BlockCategory[]): { add: string } | { remove: string } | { error: string } {
+  if (!blocked.includes(code)) return { add: `category:${code}` };
+  if (blocked.length <= 1) return { error: "At least one category stays blocked." };
+  return { remove: `category:${code}` };
+}
+
+export const BLOCK_KIND_LABEL: Record<BlockKind, string> = { mint: "Mint", creator: "Creator", symbol: "Symbol", name: "Name", match: "Contains", category: "Category" };
+/** The kinds the form takes as text; categories are switched on and off on their own row. */
+export const BLOCK_FORM_KINDS: BlockKind[] = ["mint", "creator", "symbol", "name", "match"];
 /** What each kind blocks, for the form (match: the celebrity copies, 2026-10-23). */
 export const BLOCK_KIND_HINT: Record<BlockKind, string> = {
   mint: "This one coin.",
@@ -308,6 +349,7 @@ export const BLOCK_KIND_HINT: Record<BlockKind, string> = {
   symbol: "Every coin with exactly this symbol.",
   name: "Every coin with exactly this name.",
   match: "Every coin whose name or symbol contains this text (spacex blocks SpaceX AI and $SPACEX). At least 3 letters or digits.",
+  category: "Every coin whose name the classifier puts in this category.",
 };
 const BLOCK_TEXT_MAX = 64;
 const BLOCK_MATCH_MIN = 3;
@@ -326,6 +368,10 @@ export function blockLine(kind: BlockKind, raw: string): { line: string } | { er
   const v = raw.trim();
   if (!v) return { error: "Enter a value." };
   if (/[#\u0000-\u001f\u007f]/.test(v)) return { error: "No # and no line break." };
+  if (kind === "category") {
+    const c = v.toLowerCase();
+    return (BLOCK_CATEGORIES as readonly string[]).includes(c) ? { line: `category:${c}` } : { error: `A category is one of ${BLOCK_CATEGORIES.join(", ")}.` };
+  }
   if (kind === "mint" || kind === "creator") {
     if (!BASE58.test(v)) return { error: `Not a ${kind === "mint" ? "mint" : "wallet"} address (base58, 32 to 44 characters).` };
     return { line: kind === "mint" ? v : `creator:${v}` };
