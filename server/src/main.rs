@@ -691,6 +691,87 @@ fn pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
         )
 }
 
+// ── the on-chain wallet on the Real money page (docs/ONCHAIN-STAGE2.md) ──────
+
+/// The on-chain wallet's routes over the lab's data folder `root`
+/// (`PYTHIA_DATA`). Reads: what the owner's locked on-chain trader writes
+/// (status, trades, its proposals and results for conversions) and the wallet
+/// tool's public address. Writes: a conversion request, the confirm of a fresh
+/// proposal, and the kill file. Nothing here reads a key, signs, sends or moves
+/// money: the trader on the server quotes, guards and signs, and only what the
+/// owner confirmed. Nothing here removes the kill file: that is done on the
+/// server by hand.
+fn onchain_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
+    use pythia_core::onchain_live as oc;
+    let (r1, r2, r3, r4) = (root.clone(), root.clone(), root.clone(), root);
+    Router::new()
+        .route(
+            "/api/onchain/live",
+            get(move || {
+                let root = r1.clone();
+                async move {
+                    let mut v = match root {
+                        Some(r) => oc::view_in(&r, now_ms()),
+                        None => oc::view(),
+                    };
+                    v.eur_usd = pythia_core::pumpfun_live::eur_usd(now_ms()).await;
+                    Json(v).into_response()
+                }
+            }),
+        )
+        .route(
+            "/api/onchain/live/convert",
+            post(move |Json(ask): Json<oc::ConvertAsk>| {
+                let root = r2.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    match oc::convert_in(&r, &ask.from, &ask.to, ask.amount, now_ms()) {
+                        Ok(id) => Json(serde_json::json!({ "id": id })).into_response(),
+                        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/onchain/live/convert/confirm",
+            post(move |Json(ask): Json<oc::ConfirmAsk>| {
+                let root = r3.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    match oc::confirm_in(&r, &ask.id, now_ms()) {
+                        Ok(()) => {
+                            tracing::warn!("on-chain conversion confirmed from the app");
+                            Json(serde_json::json!({ "id": ask.id, "confirmed": true })).into_response()
+                        }
+                        Err(why) => api_error(StatusCode::BAD_REQUEST, why),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/onchain/live/kill",
+            post(move || {
+                let root = r4.clone();
+                async move {
+                    let Some(r) = root else {
+                        return api_error(StatusCode::SERVICE_UNAVAILABLE, "No lab data folder is set (PYTHIA_DATA).");
+                    };
+                    match oc::kill_in(&r, now_ms()) {
+                        Ok(k) => {
+                            tracing::warn!("on-chain kill switch set from the app");
+                            Json(k).into_response()
+                        }
+                        Err(why) => api_error(StatusCode::INTERNAL_SERVER_ERROR, why),
+                    }
+                }
+            }),
+        )
+}
+
 /// How often the live socket looks at the live service's files, and how often it sends
 /// the view anyway (the euro price and the running flag move without a file changing).
 const PUMPFUN_WS_POLL: Duration = Duration::from_millis(500);
@@ -1316,6 +1397,8 @@ fn app(state: AppState, guard_cfg: Arc<guard::GuardConfig>) -> Router {
         .merge(alert_routes())
         // The pump.fun wallet page: the live service's status, lower limits, the kill switch.
         .merge(pumpfun_routes(pythia_core::labview::data_dir()))
+        // The on-chain wallet on the Real money page: the locked trader's status, conversions, the kill switch.
+        .merge(onchain_routes(pythia_core::labview::data_dir()))
         // The dashboards run on another port in development: CORS for the
         // allowed origins only, never any web page (see guard.rs).
         .layer(guard::cors(guard_cfg.clone()))
@@ -3009,6 +3092,10 @@ mod pumpfun_api_tests;
 #[cfg(test)]
 #[path = "lab_pumpfun_api_tests.rs"]
 mod lab_pumpfun_api_tests;
+
+#[cfg(test)]
+#[path = "onchain_api_tests.rs"]
+mod onchain_api_tests;
 
 #[cfg(test)]
 #[path = "guard_tests.rs"]

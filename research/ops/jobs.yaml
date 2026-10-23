@@ -415,6 +415,14 @@ jobs:
     timeout: 2m
     alert: false
 
+  - name: onchain-live-watch
+    description: watches the real-money on-chain trader every two minutes (container, status, gate, simulation, ledger against chain, frozen accounts, hanging swaps) and posts at once; quiet until the owner ever started it
+    schedule: "*/2 * * * *"
+    kind: host
+    command: /usr/bin/python3 /opt/pythia-ops/onchain_live_watch.py
+    timeout: 2m
+    alert: false
+
   - name: health
     description: health check of every job, container, stream, book and the disk
     schedule: "7 * * * *"

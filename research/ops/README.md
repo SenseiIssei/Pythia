@@ -463,6 +463,36 @@ that mounted all of `/etc/pythia`), wait until nothing is open, then
 `rm /srv/pythia-data/reports/pumpfun_rt/KILL /srv/pythia-data/pumpfun_rt/KILL` (and
 `/etc/pythia/pumpfun-kill`) on the server; the app cannot.
 
+### On-chain live trading, stage 2 (locked)
+
+The real-money trader for the owner's own Solana wallet (`lab.onchain.live_service`, container
+`pythia-onchain-live`) is built and locked; nothing arms it. The owner's runbook, in German, with every
+command, is `docs/ONCHAIN-STAGE2.md`, section 7. It swaps through Jupiter's `/swap/v2/build` only when every
+gate holds (`python -m lab.onchain.live_exec check` lists the shut ones): `PYTHIA_ONCHAIN_LIVE=1`, the ack
+`/etc/pythia/onchain-live-ack` (mode=test, mints, max_total_usd at most 500, max_trade_usd at most 100,
+max_daily_loss_usd at most 100, max_convert_usd at most 250, expires at most 90 days ahead, the acceptance
+line), its own wallet file `PYTHIA_ONCHAIN_KEYPAIR` made with `python -m lab.onchain.wallet new` (never the
+pump.fun wallet), a successful `live_exec simulate` within 24 hours, no kill file
+(`/srv/pythia-data/live/onchain/KILL`, the app's `reports/onchain_live/KILL`, `/etc/pythia/onchain-kill`), the
+owner's copy of Jupiter's IDL at `/srv/pythia-data/onchain/idl/jupiter.json`, plain https endpoints (Helius
+Sender only `/fast?swqos_only=true&mev-protect=true`). A book trades only when the ack names it and
+`reports/onchain/proof.json` says it passed the pre-registered evidence.
+
+Before signing, `lab.onchain.guard` refuses anything but the planned swap (the whole message read back from
+its bytes, every writable account on chain, the simulation's account diff of the wallet and all its token
+accounts); there is no transfer in it. It runs from `/opt/pythia-live` with the same narrow mounts as the
+pump.fun service (the wallet file, its `.pub`, the ack, the code read only) and no automatic restart. The
+engine needs `-v /srv/pythia-data/reports/onchain_live:/data/reports/onchain_live` to write convert requests,
+confirms and the kill file; it never signs.
+
+It writes `reports/onchain_live/status.json` and `trades.json` (every 30 s), answers the app's converts in
+`reports/onchain_live/convert/` (request, proposal valid 60 s, the owner's confirm, result), and keeps
+`live/onchain/orders.jsonl` (every step), `ledger.csv` (every swap as the chain shows it), `journal.jsonl`
+(baselines, deposits, unexplained differences), `days.json` and `simulate.json`. The job `onchain-live-watch`
+(`research/ops/onchain_live_watch.py`) checks it every two minutes and posts at once when it is down, hangs,
+does not trade and why, the simulation is about to expire, the ledger differs from the chain, an account is
+frozen or a swap hangs; before the container ever existed it stays quiet.
+
 ## Questions in Telegram
 
 `lab.ai.chat` lets the owner ask Pythia questions in the same Telegram chat

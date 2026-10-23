@@ -1,9 +1,10 @@
 # Eigene Wallet, Stufe 2: Echtgeld auf der Chain, Recherche und Entwurf
 
-**Stand 2026-10-23. Nur Entwurf.** Nach dem Review (`docs/ONCHAIN-REVIEW.md`) ergänzt: Notschalter,
-Wiederholen und Neustart, Mindestmenge, Compute Budget, Token-2022, Code-Pin, Werte der App. Dieses Dokument enthält keinen Code, der signiert, sendet oder einen
-Schlüssel liest. Es entscheidet, wie die nächsten Aufgaben die Stufe 2 bauen, und was vorher bewiesen sein
-muss. Der Nachweis vor echtem Geld steht vorab registriert in
+**Stand 2026-10-23.** Abschnitte 1 bis 6 sind der Entwurf, nach dem Review (`docs/ONCHAIN-REVIEW.md`) ergänzt:
+Notschalter, Wiederholen und Neustart, Mindestmenge, Compute Budget, Token-2022, Code-Pin, Werte der App. Der Händler
+selbst ist seit dem 2026-10-23 gebaut und **gesperrt**, bis du ihn scharf schaltest (Abschnitt 7: was gebaut ist, und
+deine Schritte). Nichts davon ist scharf: kein Ack, keine Wallet, kein Start. Der Nachweis vor echtem Geld steht vorab
+registriert in
 `research/lab/results/onchain_stage2_prereg.md`.
 
 ## English summary (for code reviewers)
@@ -276,8 +277,8 @@ I accept that I can lose all of it
 
 | Grenze | Höchstwert im Code (Testmodus) | was sie tut |
 |---|---|---|
-| `max_total_usd` | 1.000 USD | Wert der Wallet (Buch und Rest) zu Jupiter-Preisen; darüber kauft nichts mehr, nur Verkäufe nach USDC |
-| `max_trade_usd` | 250 USD | je Swap; PYTH, RENDER, JTO, POPCAT höchstens 100 |
+| `max_total_usd` | 500 USD (im Entwurf 1.000; der Code nimmt den kleineren Wert) | Wert der Wallet (Buch und Rest) zu Jupiter-Preisen; darüber kauft nichts mehr, nur Verkäufe nach USDC |
+| `max_trade_usd` | 100 USD (im Entwurf 250) | je Swap; PYTH, RENDER, JTO, POPCAT ebenfalls höchstens 100 |
 | `max_daily_loss_usd` | 100 USD | Rückgang des Buchwerts seit Beginn des UTC-Tages; dann keine Käufe bis morgen, Verkäufe nach USDC weiter erlaubt |
 | `max_convert_usd` | 250 USD je Tag | Umtausch aus der App |
 | Swaps je Tag | 40 je Buch, 10 Umtausch | gegen Schleifen |
@@ -472,3 +473,121 @@ nicht kaufen, solange keine Pool-Regel nach Kosten positiv ist.
 7. **Die Strategie selbst.** Billigere Fills machen kein Buch profitabel. `breakout_top10_live` hat noch keinen
    Nachweis; der Nachweis in der Vorab-Registrierung ist die Bedingung, nicht die Kostenmessung.
 8. **Steuern:** jeder Swap ist ein steuerlich relevanter Vorgang; das Ledger hat jede Signatur.
+
+## 7. Der Händler ist gebaut: was er tut und wie du ihn scharf schaltest
+
+### Was gebaut ist (alles gesperrt, bis jeder Schritt unten erledigt ist)
+
+| Datei | was |
+|---|---|
+| `lab/onchain/swapapi.py` | `/swap/v2/build` für unsere Wallet, mit unserem Schlupf; Jupiters Compute-Budget wird verworfen, Lookup-Tabellen nur als Adressen übernommen |
+| `lab/onchain/tx.py` | v0-Nachricht mit Lookup-Tabellen bauen und aus denselben Bytes zurücklesen (gegen `solders` getestet) |
+| `lab/onchain/guard.py` | der Guard: prüft die vollständige Nachricht, jedes schreibbare Konto auf der Chain und die Kontodifferenz der Simulation (Abschnitt 1) |
+| `lab/onchain/live_gate.py` | die Tore: Umgebung, Ack, Wallet-Datei (nicht die pump.fun-Wallet), Simulation in 24 h, Notschalter, Jupiter-IDL, Endpunkte; die Höchstwerte im Code |
+| `lab/onchain/live_exec.py` | Caps, Bauen, Guard, Simulation, Signieren, Senden (Sender und RPC), Wiederholen bis zum Ablauf des Blockhash, höchstens 3 Versuche; Ledger aus der Chain, Abgleich mit den echten Guthaben; `check` und `simulate` |
+| `lab/onchain/live_service.py` | der Dienst `pythia-onchain-live`: Status für die App, Umtausch mit Bestätigung, Bücher nur nach bestandenem Nachweis, Notschalter |
+| `lab/onchain/wallet.py` | das Wallet-Werkzeug für diese Wallet (eigene Datei, eigener App-Ordner) |
+| `research/ops/onchain_live_watch.py` | der Watcher, Job `onchain-live-watch` alle zwei Minuten |
+| App, Seite "Real money" | Abschnitt "On-chain wallet": Adresse mit QR, Guthaben in USD und EUR, Umtausch mit Vorschau und Bestätigung, Trades, Gründe des Tors, Notschalter |
+
+Höchstwerte im Code (Testmodus, der einzige Modus): 500 USD Wert der Wallet, 100 USD je Swap, 100 USD
+Tagesverlust, 250 USD Umtausch am Tag, 10 Umtausche und 40 Swaps je Buch am Tag, ETH höchstens ein Viertel von
+`max_total_usd`, 0,02 SOL Reserve, Kosten höchstens 50 bps, Jupiter-Preis höchstens 2 % neben Kraken,
+Priority Fee höchstens 0,0005 SOL, Sender-Trinkgeld höchstens 0,0001 SOL. Ein Ack über einem Höchstwert wird
+abgelehnt. Ein Buch handelt nur, wenn der Ack es nennt und `reports/onchain/proof.json` (kommt mit
+`lab.onchain.proof`, einer späteren Aufgabe) sagt, dass es den Nachweis bestanden hat; bis dahin handelt
+kein Buch, nur dein Umtausch.
+
+Der Ledger (`live/onchain/ledger.csv`) bekommt jeden Swap so, wie die Chain ihn zeigt (`getTransaction`).
+Alle 30 Sekunden vergleicht der Dienst: Guthaben beim Start plus alle Swaps plus erkannte Einzahlungen muss
+gleich dem sein, was die Chain zeigt. Mehr ist eine Einzahlung (`live/onchain/journal.jsonl`), weniger ohne
+Swap stoppt jeden Kauf, bis du den Dienst neu startest, und geht sofort an Telegram und Discord.
+
+### Deine Schritte (erst nach dem Nachweis, Abschnitt 4)
+
+Alle Befehle auf dem Server, als root.
+
+1. **Code bereitstellen:** `research/ops/deploy_live.sh` (der Dienst läuft aus `/opt/pythia-live`, wie der
+   pump.fun-Bot; das Image `pythia-lab` hat `cryptography` schon).
+2. **Neue Wallet, nur für diesen Händler** (nie die pump.fun-Wallet; das Werkzeug verweigert deren Datei,
+   das Tor verweigert deren Adresse):
+
+   ```bash
+   docker run --rm -it -v /etc/pythia:/etc/pythia -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     pythia-lab python -m lab.onchain.wallet new --out /etc/pythia/onchain-keypair.json
+   ```
+
+   Das Backup-Secret wird einmal gezeigt, nach `YES`. Offline aufbewahren (wie PUMPFUN-LIVE.md, Schritt 2):
+   es ist dein einziger Weg, Geld abzuheben. Die App zeigt die Adresse danach mit QR-Code.
+3. **Jupiters IDL ablegen:** das On-Chain-IDL des Programms `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`
+   (z. B. `anchor idl fetch JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`) als
+   `/srv/pythia-data/onchain/idl/jupiter.json`. Das Tor prüft, dass `route_v2` und `shared_accounts_route_v2`
+   die erwarteten Diskriminatoren, Konten und Beträge an festen Stellen haben; sonst bleibt es zu.
+4. **Einzahlen:** SOL (und wenn du willst USDC) an die Adresse schicken, höchstens dein `max_total_usd` plus
+   0,05 SOL für Gebühren und Kontomieten.
+5. **Ack schreiben**, `/etc/pythia/onchain-live-ack`, Rechte 600, mit einem Ablaufdatum höchstens 90 Tage
+   voraus. Für den ersten Test (Nachweis Schritt D) höchstens 200 USD:
+
+   ```
+   mode=test
+   mints=SOL,USDC,BTC,ETH
+   max_total_usd=200
+   max_trade_usd=50
+   max_daily_loss_usd=30
+   max_convert_usd=100
+   expires=2026-12-31
+   on_kill=hold
+   I accept that I can lose all of it
+   ```
+
+   `books=onchain_breakout_top10_live` und `book_usd=150` erst, wenn der Nachweis bestanden ist.
+6. **Umgebung**, `/etc/pythia/onchain-live.env`, Rechte 600: `PYTHIA_ONCHAIN_LIVE=1`,
+   `PYTHIA_ONCHAIN_KEYPAIR=/etc/pythia/onchain-keypair.json`, optional `PYTHIA_ONCHAIN_RPC` (https),
+   `PYTHIA_ONCHAIN_SENDER` (Helius Sender, `/fast?swqos_only=true&mev-protect=true`),
+   `PYTHIA_ONCHAIN_SENDER_TIP_SOL` und `PYTHIA_JUPITER_API_KEY`.
+7. **Simulieren und prüfen** (nichts wird signiert oder gesendet; die Simulation braucht nur die `.pub`):
+
+   ```bash
+   docker run --rm --env-file /etc/pythia/onchain-live.env -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     -v /etc/pythia/onchain-live-ack:/etc/pythia/onchain-live-ack:ro \
+     -v /etc/pythia/onchain-keypair.json.pub:/etc/pythia/onchain-keypair.json.pub:ro \
+     pythia-lab python -m lab.onchain.live_exec simulate
+   docker run --rm --env-file /etc/pythia/onchain-live.env -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     -v /etc/pythia/onchain-live-ack:/etc/pythia/onchain-live-ack:ro \
+     -v /etc/pythia/onchain-keypair.json:/etc/pythia/onchain-keypair.json:ro \
+     -v /etc/pythia/onchain-keypair.json.pub:/etc/pythia/onchain-keypair.json.pub:ro \
+     pythia-lab python -m lab.onchain.live_exec check
+   ```
+
+   `simulate` tauscht testweise 10 USD SOL nach USDC (und USDC nach SOL, wenn USDC da ist) durch Guard und
+   Simulation. Sie muss alle 24 Stunden neu laufen, sonst schließt das Tor (der Watcher warnt nach 20 h).
+8. **Der Engine Schreibrecht für Umtausch und Notschalter geben:** im `docker run` der Engine
+   `-v /srv/pythia-data/reports/onchain_live:/data/reports/onchain_live` ergänzen und sie neu erstellen.
+9. **Starten**, von Hand, ohne automatischen Neustart (fällt er aus, meldet der Watcher es; du startest ihn
+   neu, und jeder Start nimmt die Guthaben als neuen Ausgangspunkt):
+
+   ```bash
+   docker run -d --name pythia-onchain-live --cpus 0.5 --memory 512m \
+     --env-file /etc/pythia/alerts.env --env-file /etc/pythia/onchain-live.env \
+     --log-opt max-size=20m --log-opt max-file=3 \
+     -v /srv/pythia-data:/data -v /opt/pythia-live:/app:ro \
+     -v /etc/pythia/onchain-keypair.json:/etc/pythia/onchain-keypair.json:ro \
+     -v /etc/pythia/onchain-keypair.json.pub:/etc/pythia/onchain-keypair.json.pub:ro \
+     -v /etc/pythia/onchain-live-ack:/etc/pythia/onchain-live-ack:ro \
+     pythia-lab python -m lab.onchain.live_service
+   ```
+
+   Das Log sagt `onchain live: ON (test)` oder nennt jeden Grund, warum nicht; die App zeigt dieselben Gründe.
+
+**Umtausch in der App:** von, nach, Betrag, "Get quote". Der Dienst antwortet mit erwarteter Menge,
+Mindestmenge, Kosten und Weg; 60 Sekunden lang kannst du bestätigen. Getauscht wird nur genau dieser
+Vorschlag, nie unter seiner Mindestmenge.
+
+**Stoppen:** Notschalter in der App (schreibt `reports/onchain_live/KILL`) oder
+`touch /srv/pythia-data/live/onchain/KILL`. Dann kein Swap mehr; mit `on_kill=usdc` im Ack verkauft der Dienst
+alle Coins außer SOL nach USDC. Danach `docker stop pythia-onchain-live`. Wieder erlauben: die KILL-Dateien
+auf dem Server löschen und neu starten; die App kann das nicht.
+
+**Abheben** bleibt außerhalb von Pythia (Abschnitt 3): stoppen, dann das Backup in deine eigene Wallet
+importieren und von dort senden.
+

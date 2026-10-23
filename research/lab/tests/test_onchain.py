@@ -380,7 +380,14 @@ def test_a_dry_run_writes_nothing(lab):
 
 
 def test_nothing_in_the_package_signs_or_sends():
+    """Stage 1 (the paper book) never signs or sends; stage 2's signing lives in live_exec.py alone, behind its gate."""
     import pathlib
-    src = " ".join(p.read_text() for p in pathlib.Path(B.__file__).parent.glob("*.py"))
-    for word in ("Keypair", "sign(", "sendTransaction", "/swap?", "swap/v1/swap\"", "keypair"):
-        assert word not in src
+    d = pathlib.Path(B.__file__).parent
+    stage1 = " ".join((d / n).read_text() for n in ("mints.py", "jupiter.py", "paper.py", "book.py"))
+    for word in ("Keypair", "sign(", "sendTransaction", "/swap?", "swap/v1/swap\"", "keypair", "/build"):
+        assert word not in stage1
+    for p in d.glob("*.py"):
+        src = p.read_text()
+        assert "Keypair" not in src and "sendTransaction" not in src and "/swap?" not in src
+        if p.name != "live_exec.py":
+            assert "sign(" not in src, p.name

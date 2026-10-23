@@ -5,7 +5,7 @@
 #
 # Who runs what: the jobs paper-families (writes breakout_top10, the book whose live
 # twin trades real money), paper-live-copy (writes the twin), pumpfun-live-simulate
-# and the live service pythia-pumpfun-live mount this copy read only at /app. The
+# and the live services pythia-pumpfun-live and pythia-onchain-live mount this copy read only at /app. The
 # research agent's rounds deploy /opt/pythia-lab (deploy_lab.sh) and never this
 # one; only the owner runs this script, by hand, as root. It
 #   1. refuses a source with uncommitted changes, and, unless --force, while one of

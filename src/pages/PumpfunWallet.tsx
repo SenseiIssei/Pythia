@@ -54,7 +54,7 @@ const SOCKET_HELP: Record<SocketState, string> = {
 };
 const isLive = (s: SocketState) => s === "live" || s === "polling";
 
-function AddressQr({ address }: { address: string }) {
+export function AddressQr({ address }: { address: string }) {
   const { d, n } = useMemo(() => {
     const code = encodeQr(address, "M");
     return { d: qrPath(code), n: code.size + 8 };
@@ -69,7 +69,7 @@ function AddressQr({ address }: { address: string }) {
   );
 }
 
-function CopyAddress({ address }: { address: string }) {
+export function CopyAddress({ address }: { address: string }) {
   const [done, setDone] = useState(false);
   return (
     <Button

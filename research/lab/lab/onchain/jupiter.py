@@ -87,8 +87,9 @@ def _parse(d: dict) -> Quote:
                  labels=labels, slot=d.get("contextSlot"))
 
 
-def _urlopen(url: str, timeout: float) -> tuple[int, dict, bytes]:
-    req = urllib.request.Request(url, headers={"User-Agent": "pythia-lab", "Accept": "application/json"})
+def _urlopen(url: str, timeout: float, headers: dict | None = None) -> tuple[int, dict, bytes]:
+    req = urllib.request.Request(url, headers={"User-Agent": "pythia-lab", "Accept": "application/json",
+                                               **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, dict(r.headers), r.read()
@@ -97,11 +98,14 @@ def _urlopen(url: str, timeout: float) -> tuple[int, dict, bytes]:
 
 
 class Jupiter:
-    """`fetch(url, timeout) -> (status, headers, body)` replaces the network in tests."""
+    """`fetch(url, timeout) -> (status, headers, body)` replaces the network in tests. `api_key` (stage 2's
+    optional PYTHIA_JUPITER_API_KEY) goes out as the x-api-key header and is never logged."""
 
     def __init__(self, base: str = BASE, timeout: float = TIMEOUT, retries: int = RETRIES,
-                 min_interval: float = MIN_INTERVAL, fetch=_urlopen, sleep=time.sleep, clock=time.time):
+                 min_interval: float = MIN_INTERVAL, fetch=_urlopen, sleep=time.sleep, clock=time.time,
+                 api_key: str | None = None):
         self.base, self.timeout, self.retries, self.min_interval = base.rstrip("/"), timeout, retries, min_interval
+        self.api_key = api_key or None
         self.fetch, self.sleep, self.clock = fetch, sleep, clock
         self.calls = 0
         self._last = -1e18
@@ -127,7 +131,8 @@ class Jupiter:
             self._last = self.clock()
             self.calls += 1
             try:
-                status, headers, body = self.fetch(url, self.timeout)
+                status, headers, body = (self.fetch(url, self.timeout, {"x-api-key": self.api_key}) if self.api_key
+                                         else self.fetch(url, self.timeout))
             except (OSError, TimeoutError) as e:      # URLError, timeouts, resets
                 status, headers, body, err = 0, {}, b"", f"{type(e).__name__}: {e}"
             if status == 200:

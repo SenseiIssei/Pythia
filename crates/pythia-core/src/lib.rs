@@ -22,6 +22,7 @@ pub mod llm;
 pub mod marketdata;
 pub mod ml;
 pub mod ml_picks;
+pub mod onchain_live;
 pub mod orderbook;
 pub mod persist;
 pub mod predict;
