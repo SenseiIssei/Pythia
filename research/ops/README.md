@@ -33,7 +33,9 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
-| after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds) | `/etc/cron.d/pythia-learn` |
+| after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds); off since the morning briefing replaced it, `jobs.py run notify --force` still sends one | `jobs.yaml`: `notify` (off) |
+| 09:00 Berlin | morning briefing to Telegram and Discord: pump.fun Alpha phase, real-money accounts, paper and autopilots, lab, Pokemon, CS2, coins, stocks and ETFs, news, one overview chart (`lab.ops.briefing`, seconds; hourly 06 to 09 UTC, sends only in the hour that is 9 in Berlin, once a day) | `jobs.yaml`: `briefing` |
+| every 2 min | real-money fills of Kraken and Alpaca autopilots to Discord (`lab.ops.notify --live-fills`, reads the engines' state; nothing without a Discord webhook) | `jobs.yaml`: `discord-live-fills` |
 | hourly :12 | CS2 skins: Skinport snapshots and sales history, Steam prices for the watchlist, then models (refit daily), alerts, the play-money portfolio (weekly) and the board for the app (`lab.collect.cs2`, then `lab.cs2.run`; 2 Skinport requests and up to 100 Steam requests, about 6 minutes) | `/etc/cron.d/pythia-cs2` |
 | 14:40, 20:40 | CS2 Steam market: the day's Steam price snapshot from csgotrader's public file, then trends, trend alerts with Steam and Skinport links, and a summary card with a chart (`lab.collect.cs2 --steam-market`, then `lab.cs2.trends`; 2 GETs, seconds; the second run only catches a late rebuild) | `jobs.yaml` only (`cs2-trends`) |
 | every 15 min | trending watcher: DexScreener boosted tokens, Binance gainers and volume surges, surge alerts on coins Alpaca lists, a daily on-chain hype digest from 08:00 (`lab.ops.trending`, seconds; reads only) | `/etc/cron.d/pythia-trending` |
@@ -68,7 +70,7 @@ or only the part that changed:
 
 ```bash
 research/ops/deploy_lab.sh     # the lab code in /opt/pythia-lab
-research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, i18n.py, system_health.sh in /opt/pythia-ops, then render
+research/ops/deploy_ops.sh     # jobs.py, jobs.yaml, notify.py, i18n.py, system_health.sh, discord-setup.sh in /opt/pythia-ops, then render
 ```
 
 ## The job table
@@ -855,6 +857,40 @@ The chat id: send the bot any message, then read it from the bot's
 Optional: `PYTHIA_ALERT_PREFIX` (the footer, default `Pythia`), and for the
 engine `PYTHIA_ALERT_REJECTS` (3), `PYTHIA_ALERT_DEDUP_MIN` (30),
 `PYTHIA_ALERT_MAX_PER_HOUR` (20).
+
+**Discord.** A second destination for two things only: the morning
+briefing and every real-money trade card (each pump.fun Alpha-phase buy,
+sale and close, a leftover sold, and every fill of a Kraken or Alpaca
+autopilot in live mode), as an embed coloured by outcome with its chart
+attached. A webhook cannot send a direct message, so make a private channel
+on your own server and give it a webhook; that channel is your "DM". A second
+channel for the trades is optional. Then, as root:
+
+```bash
+/opt/pythia-ops/discord-setup.sh
+```
+
+It asks for the webhook URL(s) without showing them, writes
+`PYTHIA_DISCORD_WEBHOOK` (and `PYTHIA_DISCORD_WEBHOOK_TRADES`, default the
+same channel) into `/etc/pythia/alerts.env` (mode 600) and posts a test
+message to each channel. The pump.fun live container reads the same file, so
+restart it once (`research/ops/deploy_live.sh` or `docker restart
+pythia-pumpfun-live`) for its trade cards to reach Discord. The switches in
+the app hold for Discord too (Daily P&L for the briefing, Trades for the
+trade cards); a failed post is logged and changes nothing else.
+
+**Morning briefing.** At 09:00 Europe/Berlin, summer and winter time, once a
+day (`lab.ops.briefing`, job `briefing`): yesterday's pump.fun trades with
+P&L in SOL and euro (SOL/EUR from the engine or Kraken's public ticker),
+wallet and stake; the real-money autopilots; the autopilots' table, the
+forward test and real-money readiness; the model zoo and the study reports
+new in the last two days; Pokemon, CS2, coins, stocks and ETFs, the newest
+news headlines. Only from the files the jobs write and the engines' state, no
+model is asked. A section whose data is missing or older than two days is
+left out. It replaces the old daily digest after the learning loop (the job
+`notify` is off) and moves the same snapshot, so "today" keeps counting.
+See it without posting:
+`docker run --rm --network host -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.ops.briefing --dry-run --force`.
 
 **Lab image.** The charts need matplotlib, which is in
 `research/lab/requirements.txt`: rebuild the image once after copying the lab

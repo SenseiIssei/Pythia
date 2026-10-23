@@ -5,13 +5,16 @@
                    the models, the readiness of each strategy for live, and the live
                    executor's state
   (live.winner_card: a paper winner over +200 %, at most one an hour)
-  live_trade_card  every live order's fill or failure (tagged TEST in test mode, with the
-                   measured landing time and slippage)
+  live_trade_card  every live order's fill or failure, coloured by outcome (a buy blue, a win
+                   green, a loss red, break-even grey), the result first in the title, one block
+                   of SOL and euro, the measured latency; test mode is the "Alpha phase"
+  trade_chart      the closed trade's picture: the coin's price around it from the live feed
+  day_chart        the daily card's picture: the day's cumulative P&L
   live_stop_card   the daily loss stop or the total budget stop fired
   live_leftover_card  a position from before a restart sold, or not sellable
   live_daily_card  the live service's day: balance, P&L, trades, measured latency vs assumed
 
-Paper unless a card says LIVE.
+Paper unless a card says real money or Alpha phase (the owner's small real-money test).
 """
 
 from __future__ import annotations
@@ -148,13 +151,33 @@ def _tagged(title: str, mode: str | None, lang: str) -> str:
     return f"{title} · {i18n.t('prl_test_tag', lang)}" if mode == "test" else title
 
 
+def _head(rule, mode: str | None, lang: str) -> str:
+    """The line under a trade card's title: pump.fun, the Alpha phase (or real money), the rule."""
+    from ..ops import i18n
+    return i18n.t("prl_head" if mode == "test" else "prl_head_full", lang, rule=rule or "?")
+
+
+def _money(v_sol: float, eur: float | None, lang: str, sign: bool = False) -> str:
+    """0.0525 SOL, with its euro value when the rate is known: +0.0113 SOL · +€1.98."""
+    from ..ops import i18n
+    s = i18n.sol(v_sol, 4, lang, sign)
+    return f"{s} · {i18n.eur(v_sol * eur, 2, lang, sign)}" if eur else s
+
+
+def outcome_emoji(ret: float | None) -> str:
+    """🟢 a win, 🔴 a loss, ⚪ break-even (within half a percent) or unknown."""
+    if ret is None or not math.isfinite(ret) or abs(ret) < 0.005:
+        return "⚪"
+    return "🟢" if ret > 0 else "🔴"
+
+
 def _measured_line(measured: dict | None, lang: str):
     from ..ops import i18n, notify
     if not measured or measured.get("lat_ms") is None:
         return None
     t = i18n.t
     # A fill booked from the chain has the block's whole-second time, so it can read a hair before the signal.
-    kw = {"lat": i18n.num(max(0, measured["lat_ms"]), 0, lang), "assumed": i18n.num(C.Costs().lat_median_ms, 0, lang)}
+    kw = {"lat": i18n.secs(max(0, measured["lat_ms"]), lang), "assumed": i18n.secs(C.Costs().lat_median_ms, lang)}
     if measured.get("slip") is None:
         return notify.Line(t("prl_measured_noslip", lang, **kw))
     return notify.Line(t("prl_measured", lang, slip=i18n.frac_pct(measured["slip"], 1, lang), **kw))
@@ -165,32 +188,61 @@ def _caveat(mode: str | None, lang: str):
     return notify.Line(i18n.t("prl_test_caveat" if mode == "test" else "prl_caveat", lang))
 
 
+def _num(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def live_trade_card(kind: str, p: dict, kw: dict, lang: str = "en", day_pnl_sol: float | None = None,
-                    mode: str | None = None, measured: dict | None = None):
-    """One live order's outcome: bought, sold (a leg or the close), or a failure. A test-mode trade
-    is tagged TEST and carries its measured landing time and slippage."""
+                    mode: str | None = None, measured: dict | None = None, eur: float | None = None):
+    """One live order's outcome: bought (blue), sold (a leg, blue), the position closed (green
+    a win, red a loss, grey break-even; the result first in the title) or a failure (orange).
+    One tidy block of numbers in SOL and, with `eur` (SOL in euro), in euro; then the measured
+    latency and the short caveat. A test-mode trade is the Alpha phase."""
     from ..ops import i18n, notify
     t = i18n.t
     name = str(p.get("symbol") or p.get("name") or p.get("mint", "")[:8])[:20]
-    sol = lambda lam: f"{i18n.num(lam / C.LAMPORTS, 4, lang)} SOL"          # noqa: E731
+    why = lambda w: t(WHY.get(w or "take", "prt_why_time"), lang)          # noqa: E731
+    rows: list[tuple] = []
+    emoji = "🔵"
     if kind == "bought":
         title = t("prl_buy_title", lang, name=name)
-        summary = t("prl_buy_summary", lang, rule=p["rule"], sol=sol(kw.get("cost_l", 0)),
-                    tokens=i18n.num(kw.get("tokens", 0) / C.TOKEN_UNIT, 0, lang))
+        rows = [(t("prl_row_stake", lang), _money(kw.get("cost_l", 0) / C.LAMPORTS, eur, lang)),
+                (t("prl_row_tokens", lang), i18n.num(kw.get("tokens", 0) / C.TOKEN_UNIT, 0, lang))]
     elif kind == "sold":
         title = t("prl_sell_title", lang, name=name)
-        summary = t("prl_sell_summary", lang, rule=p["rule"], sol=sol(kw.get("got_l", 0)),
-                    why=t(WHY.get(p.get("exit_why") or "take", "prt_why_time"), lang))
+        rows = [(t("prl_row_proceeds", lang), _money(kw.get("got_l", 0) / C.LAMPORTS, eur, lang)),
+                (t("prl_row_exit", lang), why(p.get("exit_why")))]
     elif kind == "closed":
         rec = kw.get("rec") or {}
-        title = t("prl_close_title", lang, name=name, ret=i18n.frac_pct(rec.get("ret", 0.0), 1, lang))
-        summary = t("prl_close_summary", lang, rule=p["rule"], pnl=f"{i18n.num(rec.get('pnl_sol', 0.0), 4, lang, True)} SOL",
-                    day=f"{i18n.num(day_pnl_sol or 0.0, 4, lang, True)} SOL")
+        ret = _num(rec.get("ret"))
+        emoji = outcome_emoji(ret)
+        title = t("prl_close_title", lang, name=name, ret=i18n.frac_pct(ret or 0.0, 1, lang))
+        stake, got, pnl = (_num(rec.get(k)) for k in ("stake_sol", "proceeds_sol", "pnl_sol"))
+        if stake is not None:
+            rows.append((t("prl_row_stake", lang), _money(stake, eur, lang)))
+        if got is not None:
+            rows.append((t("prl_row_proceeds", lang), _money(got, eur, lang)))
+        rows.append((t("prl_row_pnl", lang), _money(pnl or 0.0, eur, lang, True)))
+        hold = _num(rec.get("hold_s"))
+        if hold is not None:
+            rows.append((t("prl_row_hold", lang), i18n.duration(hold, lang)))
+        rows.append((t("prl_row_exit", lang), why(rec.get("exit_why") or p.get("exit_why"))))
+        if day_pnl_sol is not None:
+            rows.append((t("prl_row_today", lang), _money(day_pnl_sol, eur, lang, True)))
+        if measured is None and rec.get("lat_buy_ms") is not None:
+            measured = {"lat_ms": rec["lat_buy_ms"], "slip": _num(rec.get("slip"))}
     else:
+        emoji = "🟠"
         title = t("prl_fail_title", lang, name=name)
-        summary = t("prl_fail_summary", lang, rule=p.get("rule", "?"), why=str(kw.get("why") or kind)[:120])
-    parts = [x for x in (_measured_line(measured, lang), _caveat(mode, lang)) if x is not None]
-    return notify.Card("🔴", _tagged(title, mode, lang), summary, parts, footer=t("prl_footer", lang))
+    summary = (_head(p.get("rule"), mode, lang) if kind != "buy_failed" and kind != "sell_failed"
+               else t("prl_fail_summary", lang, rule=p.get("rule", "?"), why=str(kw.get("why") or kind)[:120]))
+    parts = ([notify.Rows(rows)] if rows else []) + [x for x in (_measured_line(measured, lang), _caveat(mode, lang))
+                                                     if x is not None]
+    return notify.Card(emoji, title, summary, parts, footer=t("prl_footer", lang))
 
 
 def live_stop_card(kind: str, lost_sol: float, limit_sol: float, mode: str | None = None, lang: str = "en"):
@@ -198,7 +250,7 @@ def live_stop_card(kind: str, lost_sol: float, limit_sol: float, mode: str | Non
     from ..ops import i18n, notify
     t = i18n.t
     k = "daily" if kind == "daily" else "total"
-    sol = lambda v: f"{i18n.num(v, 4, lang)} SOL"            # noqa: E731
+    sol = lambda v: i18n.sol(v, 4, lang)                     # noqa: E731
     return notify.Card("🛑", _tagged(t(f"prl_stop_{k}_title", lang), mode, lang),
                        t(f"prl_stop_{k}_summary", lang, lost=sol(lost_sol), limit=sol(limit_sol)),
                        [_caveat(mode, lang)], footer=t("prl_footer", lang))
@@ -217,47 +269,151 @@ def live_gate_card(why: str | None, mode: str | None = None, lang: str = "en"):
 
 
 def live_leftover_card(what: str, info: dict, mode: str | None = None, lang: str = "en"):
-    """A position from before a restart: sold, or not sellable (the owner sells it himself)."""
+    """A position from before a restart: sold (coloured by its result), or not sellable (the owner sells it by hand)."""
     from ..ops import i18n, notify
     t = i18n.t
     name = str(info.get("symbol") or str(info.get("mint", ""))[:8])[:20]
     if what == "sold":
+        cost = _num(info.get("cost_l"))
+        emoji = outcome_emoji((info.get("got_l", 0) - cost) / cost if cost else None)
         title = t("prl_left_sold_title", lang, name=name)
-        summary = t("prl_left_sold_summary", lang, sol=f"{i18n.num(info.get('got_l', 0) / C.LAMPORTS, 4, lang)} SOL")
+        summary = t("prl_left_sold_summary", lang, sol=i18n.sol(info.get("got_l", 0) / C.LAMPORTS, 4, lang))
     elif info.get("fails"):                                  # a running position whose sale was given up
+        emoji = "🟠"
         title = t("prl_stuck_title", lang, name=name)
         summary = t("prl_stuck_summary", lang, n=info["fails"], why=str(info.get("why") or "?")[:120])
     else:
+        emoji = "🟠"
         title = t("prl_left_stuck_title", lang, name=name)
         summary = t("prl_left_stuck_summary", lang, why=str(info.get("why") or "?")[:120])
-    return notify.Card("🔴", _tagged(title, mode, lang), summary, [_caveat(mode, lang)], footer=t("prl_footer", lang))
+    return notify.Card(emoji, _tagged(title, mode, lang), summary, [_caveat(mode, lang)], footer=t("prl_footer", lang))
 
 
 def live_daily_card(day: int, stats: dict, balance_l: int | None, total_sol: float, execution: dict | None,
-                    mode: str | None, rule: str | None, lang: str = "en"):
-    """Once a day from the live service: the wallet's balance, the day's and the total P&L, the trades,
-    and the measured landing latency against the paper model's assumption."""
+                    mode: str | None, rule: str | None, lang: str = "en", eur: float | None = None):
+    """Once a day from the live service: the day's and the total P&L, the wallet, the trades, and the
+    measured landing latency against the paper model's assumption; green, red or grey by the day."""
     from ..ops import i18n, notify
     t = i18n.t
     d = _day(day * DAY_MS)
-    sol = lambda v, sign=False: f"{i18n.num(v, 4, lang, sign)} SOL"     # noqa: E731
-    summary = t("prl_daily_summary", lang, rule=rule or "?", n=stats.get("n", 0), wins=stats.get("wins", 0),
-                pnl=sol(stats.get("pnl_sol", 0.0), True), total=sol(total_sol, True))
-    lines = [t("prl_daily_balance", lang, bal=sol(balance_l / C.LAMPORTS)) if balance_l is not None
-             else t("prl_daily_balance_unknown", lang)]
+    pnl = stats.get("pnl_sol", 0.0) or 0.0
+    summary = t("prl_daily_summary", lang, rule=rule or "?", n=stats.get("n", 0), wins=stats.get("wins", 0))
+    rows = [(t("prl_row_day", lang), _money(pnl, eur, lang, True)),
+            (t("prl_row_total", lang), _money(total_sol, eur, lang, True)),
+            (t("prl_row_wallet", lang), _money(balance_l / C.LAMPORTS, eur, lang) if balance_l is not None
+             else t("prl_daily_balance_unknown", lang))]
     lb = (execution or {}).get("lat_buy_ms") or {}
     if lb.get("n"):
-        lines.append(t("prl_daily_latency", lang, lat=i18n.num(lb["median"], 0, lang), n=lb["n"],
-                       assumed=i18n.num((execution.get("assumed") or {}).get("lat_median_ms",
-                                                                              C.Costs().lat_median_ms), 0, lang)))
+        lat = t("prl_daily_latency", lang, lat=i18n.secs(lb["median"], lang), n=lb["n"],
+                assumed=i18n.secs((execution.get("assumed") or {}).get("lat_median_ms", C.Costs().lat_median_ms), lang))
     else:
-        lines.append(t("prl_daily_latency_none", lang))
+        lat = t("prl_daily_latency_none", lang)
+    lines = [notify.Line(lat, t("prl_row_latency", lang))]
     if stats.get("failed"):
-        lines.append(t("prl_daily_failed", lang, n=stats["failed"]))
-    return notify.Card("💼", _tagged(t("prl_daily_title", lang, day=i18n.iso_day(d, lang)), mode, lang), summary,
-                       [notify.Line(ln) for ln in lines] + [_caveat(mode, lang)], footer=t("prl_footer", lang))
+        lines.append(notify.Line(t("prl_daily_failed", lang, n=stats["failed"])))
+    emoji = "⚪" if abs(pnl) < 1e-4 else ("🟢" if pnl > 0 else "🔴")     # break-even: under 0.0001 SOL
+    return notify.Card(emoji, _tagged(t("prl_daily_title", lang, day=i18n.iso_day(d, lang)), mode, lang),
+                       summary, [notify.Rows(rows)] + lines + [_caveat(mode, lang)], footer=t("prl_footer", lang))
+
+
+# ---------------------------------------------------------------- the pictures
+
+def _png(draw) -> bytes | None:
+    """Draw into a temporary file and return its bytes; None without matplotlib or on any error
+    (the card then goes without its picture)."""
+    import os
+    import tempfile
+    from ..ops import charts
+    if not charts.available():
+        return None
+    fd, name = tempfile.mkstemp(suffix=".png", prefix="pythia-chart-")
+    os.close(fd)
+    try:
+        draw(name)
+        return open(name, "rb").read()
+    except Exception as e:                                   # a chart never stops a card
+        print(f"card: chart not drawn ({type(e).__name__}: {e})", flush=True)
+        return None
+    finally:
+        os.unlink(name)
+
+
+def _plan(rule: str | None) -> tuple[float | None, float | None]:
+    """The strategy's first take-profit step and its stop, as fractions."""
+    try:
+        from . import pipeline as P
+        ex = P.BY_NAME[rule].exits
+        return (ex.ladder[0][0] if ex.ladder else None), ex.sl
+    except Exception:                                        # an unknown rule: no lines
+        return None, None
+
+
+def trade_chart_data(rec: dict, feed: dict | None) -> dict | None:
+    """What render_trade draws for a closed trade, from the live feed (reports/pumpfun_rt/
+    live_feed.json): the coin's points from a minute before the landing to half a minute after
+    the exit. None when the feed has no point of it."""
+    if not isinstance(feed, dict):
+        return None
+    land, ex = _num(rec.get("land_ms")), _num(rec.get("exit_ms"))
+    coin = next((c for c in feed.get("coins") or [] if isinstance(c, dict) and c.get("mint") == rec.get("mint")
+                 and (land is None or _num(c.get("land_ms")) in (None, land))), None)
+    if coin is None or land is None:
+        return None
+    end = (ex or land) + 30_000
+    pts = [(int(q[0]), float(q[1])) for q in coin.get("points") or []
+           if isinstance(q, (list, tuple)) and len(q) >= 2 and land - 60_000 <= q[0] <= end and (_num(q[1]) or 0) > 0]
+    entry = _num(rec.get("entry_price")) or _num(coin.get("entry_price"))
+    if not pts or not entry:
+        return None
+    tp, sl = _num(coin.get("tp")), _num(coin.get("sl"))
+    if tp is None and sl is None:
+        tp, sl = _plan(rec.get("rule"))
+    out_px = _num(rec.get("exit_price")) or _num((coin.get("exit") or {}).get("price"))
+    return {"points": pts, "entry": (int(land), entry), "exit": (int(ex), out_px) if ex and out_px else None,
+            "tp": tp, "sl": sl, "ret": _num(rec.get("ret"))}
+
+
+def trade_chart(rec: dict, lang: str = "en", feed: dict | None = None, wait_s: float = 0.0) -> bytes | None:
+    """The PNG of a closed live trade (charts.render_trade), or None. `feed` None reads the live
+    feed's file, after `wait_s` so the half minute after the exit is in it."""
+    from ..ops import charts, i18n
+    if feed is None:
+        import time
+        from .live_exec import read_json, reports_dir
+        if wait_s > 0:
+            time.sleep(wait_s)
+        feed = read_json(reports_dir() / "live_feed.json")
+    data = trade_chart_data(rec, feed)
+    if data is None:
+        return None
+    name = str(rec.get("symbol") or rec.get("name") or str(rec.get("mint", ""))[:8])[:20]
+    title = i18n.t("prl_chart_title", lang, name=name, ret=i18n.frac_pct(data["ret"] or 0.0, 1, lang))
+    return _png(lambda path: charts.render_trade(data, path, title, i18n.t("prl_chart_sub", lang), lang))
+
+
+def day_curve(day: int, ledger: list[dict]) -> list[tuple[int, float]]:
+    """The UTC day's closed trades as a running P&L in SOL, from 0 at the day's start."""
+    lo, hi = day * DAY_MS, (day + 1) * DAY_MS
+    rows = sorted((int(_num(r.get("exit_ms")) or 0), _num(r.get("pnl_sol")) or 0.0) for r in ledger
+                  if lo <= (_num(r.get("exit_ms")) or -1) < hi)
+    out, run = [(lo, 0.0)], 0.0
+    for t, v in rows:
+        run += v
+        out.append((t, run))
+    return out if len(out) > 1 else []
+
+
+def day_chart(day: int, ledger: list[dict], lang: str = "en") -> bytes | None:
+    """The daily card's picture: the day's cumulative P&L (charts.render_curve), None without a trade."""
+    from ..ops import charts, i18n
+    pts = day_curve(day, ledger)
+    if not pts:
+        return None
+    title = i18n.t("prl_chart_day_title", lang, day=i18n.iso_day(_day(day * DAY_MS), lang))
+    return _png(lambda path: charts.render_curve(pts, path, title, i18n.t("prl_chart_day_sub", lang), lang))
 
 
 WHY = {"take": "prt_why_take", "take_part": "prt_why_take", "stop": "prt_why_stop", "time": "prt_why_time",
        "stuck": "prt_why_stuck", "trail": "prt_why_trail", "dev_sell": "prt_why_dev", "pull": "prt_why_pull",
-       "risk": "prt_why_risk", "hazard": "prt_why_hazard", "kill": "prt_why_kill"}
+       "risk": "prt_why_risk", "hazard": "prt_why_hazard", "kill": "prt_why_kill", "press": "prt_why_press",
+       "leftover": "prt_why_leftover"}

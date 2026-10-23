@@ -11,6 +11,21 @@ and the lab's from the card builders in `research/lab` (`lab.ops.notify`,
 `lab.pumpfun_rt.card`) with `PYTHIA_ALERT_LANG=de`. The number in brackets is
 the post's length in characters (Telegram allows 4096).
 
+What changed on 2026-10-23, and why:
+
+- pump.fun real money: the test mode is the "Alpha-Phase" in every card, never
+  "TEST". A card's colour is its outcome (a buy blue, a win green, a loss red,
+  break-even grey) instead of red for everything; the title says the result
+  first, then one block with stake, proceeds, P&L in SOL and euro, hold time
+  and the reason for the sale in plain words, then the measured latency.
+  A closed trade carries the coin's chart around it, the day card the day's
+  cumulative P&L.
+- Every picture in one dark look (fonts, margins, title block, colours), and
+  end labels that no longer overlap.
+- The morning briefing at 9:00 Berlin replaces the daily digest after the
+  learning loop. It and every real-money trade card also go to Discord when
+  a webhook is set (research/ops/discord-setup.sh).
+
 What changed on 2026-10-21, and why:
 
 - Daily digest: "Heute" was the same as "Seit Start" for every autopilot. The
@@ -343,14 +358,111 @@ Nur Paper: keine Wallet, kein Schlüssel, keine Transaktion. Ausführungen sind 
 Nur Paper · Echtzeit-Labor
 ```
 
-### pump.fun, Tag des Echtgeld-Dienstes [381]
+### pump.fun Alpha-Phase, Kauf [281]
 
 ```
-💼 pump.fun ECHTGELD Di 20. Okt
-P_p90: 3 Abschlüsse, 1 gewonnen, -0,0120 SOL am Tag, -0,0310 SOL insgesamt.
-Guthaben der Wallet 2,1500 SOL.
-Gemessen: Käufe landeten im Median 1.650 ms nach dem Signal über 3 Ausführungen, das Papiermodell nimmt 1.000 ms an.
-1 Auftrag gescheitert.
-Echtes Geld. Die Notschalter-Datei stoppt jeden Kauf und verkauft alles Offene.
-ECHTGELD
+🔵 Kauf · KIMCHINU
+pump.fun · Alpha-Phase · P_pool0
+Einsatz  0,0525 SOL · 8,31 €
+Token             11.700.000
+⏱ 1,4 s nach dem Signal gelandet (Modell 1,0 s) · Schlupf +1,2 %
+Alpha-Phase: kleiner Echtgeld-Einsatz, Notschalter in der App.
+pump.fun · Echtgeld
 ```
+
+### pump.fun Alpha-Phase, Gewinn (mit Grafik) [430]
+
+```
+🟢 +32,5 % · KIMCHINU
+pump.fun · Alpha-Phase · P_pool0
+Einsatz       0,0525 SOL · 8,31 €
+Erlös        0,0696 SOL · 11,01 €
+Ergebnis    +0,0171 SOL · +2,71 €
+Haltedauer              3 min 7 s
+Ausstieg           Gewinnmitnahme
+Heute       +0,0213 SOL · +3,37 €
+⏱ 1,4 s nach dem Signal gelandet (Modell 1,0 s) · Schlupf +1,6 %
+Alpha-Phase: kleiner Echtgeld-Einsatz, Notschalter in der App.
+pump.fun · Echtgeld
+```
+
+### pump.fun Alpha-Phase, Verlust (mit Grafik) [433]
+
+```
+🔴 -28,1 % · DUCKY
+pump.fun · Alpha-Phase · P_pool0
+Einsatz        0,0525 SOL · 8,31 €
+Erlös          0,0378 SOL · 5,98 €
+Ergebnis     -0,0147 SOL · -2,33 €
+Haltedauer                    42 s
+Ausstieg                 Stop-Loss
+Heute       -0,1276 SOL · -20,19 €
+⏱ 15 s nach dem Signal gelandet (Modell 1,0 s) · Schlupf +11,2 %
+Alpha-Phase: kleiner Echtgeld-Einsatz, Notschalter in der App.
+pump.fun · Echtgeld
+```
+
+### pump.fun Alpha-Phase, Tag (mit Grafik) [351]
+
+```
+🔴 pump.fun Do 22. Okt · Alpha-Phase
+P_pool0: 22 Abschlüsse, 8 gewonnen.
+Tag     -0,1276 SOL · -20,19 €
+Gesamt   -0,0329 SOL · -5,20 €
+Wallet   0,7247 SOL · 114,65 €
+Latenz 2,3 s Median über 22 Käufe (Modell 1,0 s)
+1 Auftrag gescheitert.
+Alpha-Phase: kleiner Echtgeld-Einsatz, Notschalter in der App.
+pump.fun · Echtgeld
+```
+
+### Morgen-Briefing, mit Grafik, auch an Discord [1749]
+
+```
+☀️ Morgen-Briefing · Fr 23. Okt
+pump.fun -0,0500 SOL · Autopiloten heute -148,71 $ · ✅ alles grün
+🎯 pump.fun Alpha-Phase
+Gestern                        7 · 2 gewonnen
+Ergebnis                -0,0500 SOL · -7,91 €
+Bester / Schlechtester      +12,4 % / -28,1 %
+Gesamt                  -0,0329 SOL · -5,20 €
+Wallet                  0,7247 SOL · 114,65 €
+Einsatz                   0,0500 SOL · 7,91 €
+📈 Papier und Autopiloten 9 Autopiloten laufen
+Autopilot      Wert Heute Start  ±BTC
+Auto-Pick    10.079 -0,04 +0,79 -0,43
+Crypto + SPY  9.977 -0,24 -0,23 +2,90
+M4 perps     10.153 +0,23 +1,53 +4,69
+Wert in $, Heute und Start in %, ±BTC in Punkten gegenüber BTC seit Start; alle Demo
+Seit Start 261 Orders ausgeführt · 145 Positionen geschlossen · Gebühren 65,25 $
+Vorwärtstest 20 Papierbücher: 7 🌱 noch früh, 6 ✅ im Plan, 4 unbekannt, 3 👀 beobachten
+Echtgeld noch keiner bereit; am nächsten Auto-Pick: 6 von 9 Regeln, noch 46 Tage
+🧪 Labor
+Modell-Zoo im Einsatz M2; Schattenlauf M1, M8q, M8u; 4 an der Schwelle gescheitert, 4 ausgemustert
+Zuletzt entschieden M8u übernommen
+Neue Ergebnisse hedged_breakout, taker_imbalance_xs
+🃏 Pokémon
+Spielsammlung    788,45 $ · -21,1 %
+Wirken günstig                    3
+Vorne           Ho-oh (Black Star…
+🎮 CS2-Skins
+Spielportfolio   10.000 € · +0,0 %
+Hinweise 24 h                    1
+Steam          1.120 liquide Skins
+🪙 Coins
+BTC 24 h              -0,6 %
+ETH 24 h              -1,0 %
+SOL 24 h              +0,1 %
+Stärkster Anstieg  BMT +28 %
+Neue Listungen Kraken NEXO
+📰 Nachrichten
+• Bitcoin slides below $81,500 as tech stock sell-off spreads to Asian equities
+• Chainlink partners with LG CNS to drive Korean won stablecoin expansion
+Systemzustand ✅ alles grün
+aus den Dateien von Labor und Servern, ohne KI
+```
+
+Die Grafik: oben die Autopiloten seit ihrem Start gegen BTC, unten das
+Ergebnis der pump.fun Alpha-Phase der letzten 14 Tage in SOL. Abschnitte ohne
+Daten oder mit Daten älter als zwei Tage fallen weg. Auf Discord kommt
+dasselbe als Embed mit der Grafik.

@@ -1933,8 +1933,8 @@ class LiveBook:
                 return                                     # one card a minute per position, not one a try
             self.fail_posted[key] = now
         meas = dict(self.exec.meas.get(p.get("pid")) or {}) if kind in ("bought", "sold") else None
-        self._post(lambda lang: [_trade_card(kind, dict(p), dict(kw), lang, self.exec.day_pnl_l / C.LAMPORTS,
-                                             self.exec.mode, meas)])
+        day = self.exec.day_pnl_l / C.LAMPORTS
+        self._post(lambda lang: [_trade_card(kind, dict(p), dict(kw), lang, day, self.exec.mode, meas)])
 
     def on_stop(self, kind: str, lost_sol: float) -> None:
         lim = self.exec.limits.max_daily_loss_sol if kind == "daily" else (self.exec.max_total_l or 0) / C.LAMPORTS
@@ -1999,7 +1999,8 @@ class LiveBook:
             ex = None
         bal = self.exec.balance_l
         total = self.exec.totals["pnl_l"] / C.LAMPORTS
-        self._post(lambda lang: [_daily_card(day, stats, bal, total, ex, self.exec.mode, self.rule, lang)])
+        rows = list(self.recent)
+        self._post(lambda lang: [_daily_card(day, stats, bal, total, ex, self.exec.mode, self.rule, lang, rows)])
 
     # ------------------------------------------------------------ files
     def positions(self) -> list[dict]:
@@ -2145,17 +2146,42 @@ class LiveBook:
 
 # ---------------------------------------------------------------- the cards
 
+CHART_WAIT_S = 12.0          # a closed trade's chart waits this long, so the feed holds the time after the exit
+
+
 def post_cards(make) -> None:
+    """The cards to Telegram (urgent: also in quiet hours); a real-money trade card (marked by
+    _trade_card) also to Discord's trades webhook, with its chart. Never raises."""
     try:
         from ..ops import notify
-        notify.send("trades", make(notify.alert_lang()), urgent=True)
+        cards = make(notify.alert_lang())
+        trade = any(getattr(c, "discord", False) for c in cards)
+        notify.send("trades", cards, urgent=True, discord="trades" if trade else None)
     except Exception as e:                                   # an alert never stops the book
         print(f"live: alert not sent ({type(e).__name__}: {e})", flush=True)
 
 
-def _trade_card(kind, p, kw, lang, day_pnl_sol, mode, meas):
-    from .card import live_trade_card
-    return live_trade_card(kind, p, kw, lang, day_pnl_sol, mode=mode, measured=meas)
+def _eur() -> float | None:
+    """SOL in euro for the cards (notify.sol_eur: the engine's rate or Kraken's public ticker); None if unknown."""
+    try:
+        from ..ops import notify
+        return notify.sol_eur()
+    except Exception:                                        # the card shows SOL only
+        return None
+
+
+def _trade_card(kind, p, kw, lang, day_pnl_sol, mode, meas, chart_wait_s: float = CHART_WAIT_S):
+    from .card import live_trade_card, trade_chart
+    c = live_trade_card(kind, p, kw, lang, day_pnl_sol, mode=mode, measured=meas,
+                        eur=_eur() if kind in ("bought", "sold", "closed") else None)
+    if kind in ("bought", "sold", "closed"):
+        c.discord = True                                     # a real-money trade: Discord gets it too
+    if kind == "closed":
+        try:
+            c.image = trade_chart(kw.get("rec") or {}, lang, wait_s=chart_wait_s)
+        except Exception as e:                               # the card goes without its picture
+            print(f"live: trade chart not drawn ({type(e).__name__}: {e})", flush=True)
+    return c
 
 
 def _stop_card(kind, lost_sol, limit_sol, mode, lang):
@@ -2165,7 +2191,10 @@ def _stop_card(kind, lost_sol, limit_sol, mode, lang):
 
 def _leftover_card(what, info, mode, lang):
     from .card import live_leftover_card
-    return live_leftover_card(what, info, mode, lang)
+    c = live_leftover_card(what, info, mode, lang)
+    if what == "sold":
+        c.discord = True
+    return c
 
 
 def _gate_card(why, mode, lang):
@@ -2173,9 +2202,14 @@ def _gate_card(why, mode, lang):
     return live_gate_card(why, mode, lang)
 
 
-def _daily_card(day, stats, balance_l, total_sol, ex, mode, rule, lang):
-    from .card import live_daily_card
-    return live_daily_card(day, stats, balance_l, total_sol, ex, mode, rule, lang)
+def _daily_card(day, stats, balance_l, total_sol, ex, mode, rule, lang, ledger=None):
+    from .card import day_chart, live_daily_card
+    c = live_daily_card(day, stats, balance_l, total_sol, ex, mode, rule, lang, eur=_eur())
+    try:
+        c.image = day_chart(day, ledger or [], lang)
+    except Exception as e:                                   # the card goes without its picture
+        print(f"live: day chart not drawn ({type(e).__name__}: {e})", flush=True)
+    return c
 
 
 # ---------------------------------------------------------------- attaching the book

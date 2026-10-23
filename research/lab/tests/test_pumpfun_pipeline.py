@@ -696,7 +696,11 @@ def test_every_live_trade_has_a_card_in_both_languages():
                      ("closed", {"rec": {"ret": -0.42, "pnl_sol": -0.042}}), ("buy_failed", {"why": "slippage"})):
         en = CARD.live_trade_card(kind, p, kw, "en", -0.05).render("telegram", "en")
         de = CARD.live_trade_card(kind, p, kw, "de", -0.05).render("telegram", "de")
-        assert "LIVE" in en and "ECHTGELD" in de
+        assert "real money" in en and "Echtgeld" in de and "TEST" not in en + de
+        no_english(de)
+        en = CARD.live_trade_card(kind, p, kw, "en", -0.05, mode="test").render("telegram", "en")
+        de = CARD.live_trade_card(kind, p, kw, "de", -0.05, mode="test").render("telegram", "de")
+        assert "Alpha phase" in en and "Alpha-Phase" in de and "TEST" not in en + de
         no_english(de)
 
 

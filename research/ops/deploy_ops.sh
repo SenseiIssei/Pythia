@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the host side of the ops (job runner, job table, health check,
-# notify) into /opt/pythia-ops and render /etc/cron.d/pythia-jobs from the table.
+# notify, discord-setup.sh) into /opt/pythia-ops and render /etc/cron.d/pythia-jobs from the table.
 #
 #   research/ops/deploy_ops.sh [--prune-legacy] [--no-cron] [--dest DIR]
 #
@@ -42,6 +42,7 @@ install -m 644 "$here/jobs.yaml" "$dest/jobs.yaml"
 install -m 755 "$here/system_health.sh" "$dest/system_health.sh"
 install -m 755 "$here/pumpfun_live_watch.py" "$dest/pumpfun_live_watch.py"
 install -m 755 "$here/deploy_lab.sh" "$dest/deploy_lab.sh"
+install -m 755 "$here/discord-setup.sh" "$dest/discord-setup.sh"
 install -d -m 755 "$dest/agent"
 install -m 755 "$here/agent/run_agent.sh" "$dest/agent/run_agent.sh"
 install -m 644 "$here/agent/guard.py" "$here/agent/Dockerfile" "$here/agent/research.md" "$here/agent/care.md" "$dest/agent/"

@@ -591,7 +591,7 @@ def test_leftovers_from_before_a_restart_are_sold(tmp_path):
     ex.on_trade("trades", {"t": T0 + 500, "mint": MINT, "buy": False, "sol": int(0.03 * SOL), "tok": 1_000_000,
                            "user": FakeSigner.pubkey, "fee_bps": 100})
     assert not ex.leftovers and ex.totals["pnl_l"] < 0
-    assert "leftover sold" in got[-1][0].title and "TEST" in got[-1][0].title
+    assert "Leftover sold" in got[-1][0].title and "Alpha phase" in got[-1][0].title
 
 
 # ---------------------------------------------------------------- the simulation (mocked RPC, nothing sent)
@@ -763,16 +763,18 @@ def test_every_new_live_card_in_english_and_german():
     from lab.ops import i18n
     from lab.pumpfun_rt import card as CARD
     for lang in i18n.LANGS:
+        alpha = i18n.t("prl_test_tag", lang)
         c = CARD.live_trade_card("bought", {"rule": "P_pool60", "symbol": "TST", "mint": MINT},
                                  {"cost_l": SOL // 50, "tokens": 10 ** 9}, lang, 0.0, mode="test",
                                  measured={"lat_ms": 1500, "slip": 0.03})
-        assert "TEST" in c.title and "1" in c.parts[0].text
+        assert c.emoji == "🔵" and alpha in c.summary and "TEST" not in c.render("telegram", lang)
+        assert "1" in c.parts[1].text and "s" in c.parts[1].text      # landed 1.5 s after the signal
         c = CARD.live_trade_card("sold", {"rule": "P_pool0", "symbol": "TST", "mint": MINT},
                                  {"proceeds_l": SOL // 10, "why": "time"}, lang, 0.0, mode="test",
                                  measured={"lat_ms": -73, "slip": 0.045})
-        assert "-73" not in " ".join(p.text for p in c.parts)   # a chain block time a hair before the signal
+        assert "-73" not in " ".join(getattr(p, "text", "") for p in c.parts)   # a chain block time a hair before the signal
         c = CARD.live_stop_card("daily", 0.31, 0.3, "test", lang)
-        assert "TEST" in c.title and "0" in c.summary
+        assert alpha in c.title and "0" in c.summary
         c = CARD.live_stop_card("total", 1.0, 1.0, "test", lang)
         assert "2 SOL" in c.summary
         for what in ("sold", "stuck"):
@@ -782,13 +784,14 @@ def test_every_new_live_card_in_english_and_german():
                                  int(0.9 * SOL), -0.05, {"lat_buy_ms": {"n": 3, "median": 2000},
                                                          "assumed": {"lat_median_ms": 1000}}, "test", "P_pool60",
                                  lang)
-        text = " ".join(p.text for p in c.parts[:3])
-        assert "2" in text and "1" in text and "TEST" in c.title
-        assert [p.text.count(". ") for p in c.parts[:3]] == [0, 0, 0], "one sentence a line"
+        text = c.render("telegram", lang)
+        assert "3" in c.summary and "1" in c.summary and alpha in c.title and c.emoji == "🔴"
+        assert "0,9000 SOL" in text or "0.9000 SOL" in text
+        assert [p.text.count(". ") for p in c.parts if hasattr(p, "text")] == [0, 0, 0], "one sentence a line"
         c = CARD.live_daily_card(T0 // 86_400_000, {"n": 0}, None, 0.0, None, "test", "P_pool60", lang)
-        assert c.parts[0].text
+        assert c.parts[0].rows and c.emoji == "⚪"
         c = CARD.live_gate_card("the kill switch file is there", "test", lang)
-        assert "kill switch" in c.summary and "TEST" in c.title
+        assert "kill switch" in c.summary and alpha in c.title
         assert CARD.live_gate_card(None, "test", lang).title
 
 

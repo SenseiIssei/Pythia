@@ -21,6 +21,19 @@ report come with a chart (lab.ops.charts, matplotlib) sent as a photo.
   python3 notify.py --health <system.json>  the health alarm
   python3 notify.py --event <category> <title> [text]
                                             one card from a shell job
+  python -m lab.ops.notify --live-fills     every new real-money fill of a Kraken
+                                            or Alpaca autopilot to Discord (run
+                                            every two minutes)
+
+The morning briefing at 09:00 Berlin is lab.ops.briefing; it replaced the
+daily digest's schedule (daily() still sends one on demand).
+
+Discord: PYTHIA_DISCORD_WEBHOOK (a private channel's webhook; a webhook
+cannot DM, so that channel is the owner's "DM") and optionally
+PYTHIA_DISCORD_WEBHOOK_TRADES for the trades. Only two things go there, as
+embeds coloured by outcome with the chart attached: the morning briefing and
+every real-money trade card (send(..., discord="briefing" or "trades")). The
+same switches hold; a failure there never stops a bot or a job.
 
 notify.py itself is standard library only (with i18n.py next to it), so the
 host can run it without the lab image; without matplotlib a digest goes out
@@ -59,7 +72,7 @@ digest asked for on demand does not move it. The digest shows the
 autopilots as one table, one row each (value, today, since start, points
 against BTC since start), so six of them fit a phone screen.
 
-The bot token and the webhook URL are secrets: never printed, logged or
+The bot token and the webhook URLs are secrets: never printed, logged or
 written to a file.
 """
 
@@ -322,12 +335,13 @@ class Links:
 
 class Card:
     def __init__(self, emoji: str, title: str, summary: str | None = None, parts: list | None = None,
-                 footer: str | None = None):
+                 footer: str | None = None, image: bytes | None = None):
         self.emoji = emoji
         self.title = title
         self.summary = summary
         self.parts = list(parts or [])
         self.footer = footer
+        self.image = image          # a chart (PNG) that goes with the card, when its builder drew one
 
     def render(self, fmt: str = "telegram", lang: str = "en") -> str:
         head = f"{self.emoji} {self.title}".strip()
@@ -339,7 +353,8 @@ class Card:
             bold, ital, pre, e = (lambda s: f"*{s}*"), (lambda s: f"_{s}_"), (lambda s: f"```{s}```"), str
         else:
             bold, ital, pre, e = (lambda s: f"**{s}**"), (lambda s: f"*{s}*"), (lambda s: f"```\n{s}\n```"), str
-        out.append(bold(e(head)))
+        if head:
+            out.append(bold(e(head)))
         if self.summary:
             out.append(e(self.summary))
         for p in self.parts:
@@ -683,7 +698,27 @@ def hold(category: str | None, cards: list[Card], ms: int) -> None:
 
 def send(category: str | None, cards: list[Card] | Card, image: bytes | None = None, urgent: bool = False,
          now: int | None = None, dry_run: bool = False, poster=None, hold_in_quiet: bool = True,
-         photos: list[tuple[str, str]] | None = None) -> dict:
+         photos: list[tuple[str, str]] | None = None, discord: str | None = None, discord_poster=None) -> dict:
+    """Post cards in one message (a photo first when there is an image; without
+    one, the first card's own chart, Card.image, when it has one).
+
+    `discord` "briefing" or "trades" also posts the cards to that Discord
+    webhook (send_discord) as embeds with the chart attached, whenever the
+    post was not switched off, held by quiet hours or a dry run; only the
+    morning briefing and real-money trade cards pass it. The result is in
+    res["discord"]; a failure there never changes the rest.
+    """
+    cards = [cards] if isinstance(cards, Card) else list(cards)
+    image = image or next((c.image for c in cards if getattr(c, "image", None)), None)
+    res = _send(category, cards, image, urgent, now, dry_run, poster, hold_in_quiet, photos)
+    if discord and res["reason"] in (None, "no destination"):
+        res["discord"] = send_discord(discord, cards, image, poster=discord_poster)
+    return res
+
+
+def _send(category: str | None, cards: list[Card], image: bytes | None = None, urgent: bool = False,
+          now: int | None = None, dry_run: bool = False, poster=None, hold_in_quiet: bool = True,
+          photos: list[tuple[str, str]] | None = None) -> dict:
     """Post cards in one message (a photo first when there is an image).
 
     `photos` are pictures by URL with an HTML caption, (url, caption): on
@@ -696,7 +731,7 @@ def send(category: str | None, cards: list[Card] | Card, image: bytes | None = N
     the network (tests). Returns {"delivered", "error", "reason", "text",
     "html", "photo"}.
     """
-    cards = [cards] if isinstance(cards, Card) else list(cards)
+    cards = list(cards)
     now = now or clock_ms()
     url, fmt, prefix = config()
     if prefix and cards and prefix not in (cards[-1].footer or ""):
@@ -787,6 +822,159 @@ def via_engine(category: str, card: Card, image: bytes | None, urgent: bool) -> 
     req = urllib.request.Request(url, data=json.dumps(ev).encode("utf-8"), method="POST",
                                  headers={"Content-Type": "application/json"})
     return _request(req, 10)
+
+
+# ---------------------------------------------------------------- Discord
+
+# Discord is a second destination for two things only: the morning briefing and
+# every real-money trade card. A webhook posts into one channel and cannot DM, so
+# a private channel of the owner's is the "DM". PYTHIA_DISCORD_WEBHOOK is that
+# channel's webhook; PYTHIA_DISCORD_WEBHOOK_TRADES, when set, takes the trade
+# cards to a channel of their own. Both are secrets: never printed or logged.
+DISCORD_ENV, DISCORD_TRADES_ENV = "PYTHIA_DISCORD_WEBHOOK", "PYTHIA_DISCORD_WEBHOOK_TRADES"
+DISCORD_KINDS = ("briefing", "trades")
+DISCORD_DESC_LIMIT = 4000
+# An embed's colour bar by the card's leading emoji: the outcome of a trade.
+DISCORD_COLORS = {"🟢": 0x2FB344, "🔴": 0xE66767, "⚪": 0xA3A29A, "🔵": 0x3987E5, "🟠": 0xE8A33D, "🛑": 0xE66767}
+DISCORD_DEFAULT_COLOR = 0x3987E5
+
+
+def discord_url(kind: str) -> str | None:
+    """The webhook for "briefing" or "trades" (the trades one falls back to the main one);
+    None when not set or not a plain https URL."""
+    main = (os.environ.get(DISCORD_ENV) or "").strip()
+    url = ((os.environ.get(DISCORD_TRADES_ENV) or "").strip() or main) if kind == "trades" else main
+    return url if url.lower().startswith("https://") and safe_url(url) else None
+
+
+def discord_embed(card: Card, lang: str, image_name: str | None = None, ts_ms: int | None = None) -> dict:
+    """One card as a Discord embed: the title with its emoji, the rest in Discord markdown,
+    the colour bar by outcome, the footer, the chart when one is attached."""
+    body = Card("", "", card.summary, card.parts).render("discord", lang)
+    if len(body) > DISCORD_DESC_LIMIT:
+        cut = body[:DISCORD_DESC_LIMIT - 2]
+        # Never leave a code block open.
+        body = cut[:cut.rfind("\n")] if cut.count("```") % 2 == 0 else cut[:cut.rfind("```")]
+        body = body.rstrip() + "\n…"
+    emb: dict = {"title": short(f"{card.emoji} {card.title}".strip(), 250), "description": body,
+                 "color": DISCORD_COLORS.get(card.emoji, DISCORD_DEFAULT_COLOR)}
+    if card.footer:
+        emb["footer"] = {"text": short(card.footer, 200)}
+    if ts_ms:
+        emb["timestamp"] = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    if image_name:
+        emb["image"] = {"url": f"attachment://{image_name}"}
+    return emb
+
+
+def discord_payload(cards: list[Card], lang: str, image: bytes | None = None, ts_ms: int | None = None) -> dict:
+    """The webhook's JSON: up to ten embeds, the chart on the first; nobody is mentioned."""
+    name = "chart.png" if image else None
+    embeds = [discord_embed(c, lang, name if i == 0 else None, ts_ms) for i, c in enumerate(cards[:10])]
+    return {"username": "Pythia", "embeds": embeds, "allowed_mentions": {"parse": []}}
+
+
+def discord_body(payload: dict, image: bytes, boundary: str) -> bytes:
+    """multipart/form-data: payload_json and the chart as files[0]."""
+    out = (f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\n'
+           f"Content-Type: application/json\r\n\r\n").encode("utf-8")
+    out += json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\r\n"
+    out += (f'--{boundary}\r\nContent-Disposition: form-data; name="files[0]"; filename="chart.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n").encode("utf-8")
+    return out + image + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+
+def post_discord(url: str, payload: dict, image: bytes | None = None, timeout: float = 15) -> tuple[bool, str | None]:
+    """POST one message to a Discord webhook; a 429 (rate limit) is tried once more after two
+    seconds. (ok, error); the error never holds the URL."""
+    def go():
+        if image:
+            boundary = f"pythia{uuid.uuid4().hex}"
+            req = urllib.request.Request(url, data=discord_body(payload, image, boundary), method="POST",
+                                         headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                                                  "User-Agent": "pythia-notify"})
+        else:
+            req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                         method="POST", headers={"Content-Type": "application/json",
+                                                                 "User-Agent": "pythia-notify"})
+        return _request(req, timeout)
+
+    ok, err = go()
+    if not ok and err == "HTTP 429":
+        time.sleep(2)
+        ok, err = go()
+    return ok, err
+
+
+def send_discord(kind: str, cards: list[Card] | Card, image: bytes | None = None, lang: str | None = None,
+                 poster=None, now: int | None = None) -> dict:
+    """The cards to the Discord webhook of `kind` ("briefing" or "trades"). `poster(url,
+    payload, image)` replaces the network (tests). Never raises: a failure is returned
+    as {"delivered": False, "error": ...} and said on stderr, nothing more."""
+    res = {"delivered": False, "error": None, "reason": None}
+    try:
+        cards = [cards] if isinstance(cards, Card) else list(cards)
+        url = discord_url(kind) if kind in DISCORD_KINDS else None
+        if not url or not cards:
+            res["reason"] = "no destination"
+            return res
+        payload = discord_payload(cards, lang or alert_lang(), image, now or clock_ms())
+        ok, err = (poster or post_discord)(url, payload, image)
+        res.update(delivered=ok, error=err)
+        if not ok:
+            say(f"discord: not delivered ({err})", err=True)
+    except Exception as e:  # noqa: BLE001 - Discord never breaks a bot or a job
+        res.update(error=type(e).__name__)
+        say(f"discord: not delivered ({type(e).__name__})", err=True)
+    return res
+
+
+# ---------------------------------------------------------------- SOL in euro
+
+SOL_EUR_URL = "https://api.kraken.com/0/public/Ticker?pair=SOLEUR"
+SOL_EUR_TTL_S = 60
+_SOL_EUR: dict = {}
+
+
+def parse_sol_eur(body) -> float | None:
+    """The last trade of Kraken's SOLEUR ticker answer (result.<pair>.c[0])."""
+    try:
+        v = float(next(iter(body["result"].values()))["c"][0])
+    except (KeyError, TypeError, ValueError, StopIteration, IndexError):
+        return None
+    return v if v > 0 and v == v and v != float("inf") else None
+
+
+def sol_eur(fetch=None, timeout: float = 4) -> float | None:
+    """One SOL in euro, as the app shows it: the engine's GET /api/pumpfun/live (solEur.price,
+    which reads Kraken's public ticker), else that ticker directly (pair SOLEUR, no key).
+    Kept for a minute; None when neither answers (the cards then show SOL only)."""
+    now = time.time()
+    if _SOL_EUR.get("t") and now - _SOL_EUR["t"] < SOL_EUR_TTL_S:
+        return _SOL_EUR.get("v")
+
+    def get(url):
+        if fetch is not None:
+            return fetch(url)
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "pythia-notify"}),
+                                    timeout=timeout) as r:
+            return json.load(r)
+
+    v = None
+    base = os.environ.get("PYTHIA_AUTOPILOT_STATE_URL", DEFAULT_STATE_URL)
+    if base and base.lower() != "off":
+        try:
+            se = (get(base.rsplit("/api/", 1)[0] + "/api/pumpfun/live") or {}).get("solEur") or {}
+            v = _num(se.get("price"))
+        except Exception:  # noqa: BLE001 - the ticker next
+            v = None
+    if not v or v <= 0:
+        try:
+            v = parse_sol_eur(get(SOL_EUR_URL))
+        except Exception:  # noqa: BLE001
+            v = None
+    _SOL_EUR.update(t=now, v=v)
+    return v
 
 
 # ---------------------------------------------------------------- reading the engine
@@ -969,6 +1157,136 @@ def make_chart(state: dict | None, since_ms: int | None, now: int, title: str, s
         for p in olds[:-5]:
             p.unlink(missing_ok=True)
     return img
+
+
+# ---------------------------------------------------------------- real-money fills to Discord
+
+# The engine posts every autopilot fill to Telegram itself. Discord gets the real-money
+# ones (Kraken or Alpaca, mode "live") from here: every couple of minutes this reads the
+# engines' GET /api/state (read only), and each new live fill goes out once as a trade
+# card with the autopilot's P&L chart. The first run only remembers what is there.
+FILLS_KEEP = 2000
+
+
+def fills_state_path() -> Path:
+    return data_root() / "notify" / "discord_fills.json"
+
+
+def live_fill_rows(rows: list[dict]) -> list[dict]:
+    """Every filled real-money order of every engine that answered, oldest first, with its
+    autopilot (by the sleeve that names its strategy) and the account."""
+    out = []
+    for r in rows:
+        st = r.get("state") or {}
+        aps = st.get("autopilots") or []
+        for o in st.get("orders") or []:
+            if not isinstance(o, dict) or str(o.get("mode") or "").lower() != "live":
+                continue
+            if o.get("status") not in ("filled", "partial") or not (_num(o.get("filledQty")) or 0) > 0:
+                continue
+            ap = next((a for a in aps if any(sl.get("strategyId") == o.get("strategyId")
+                                             for sl in (a.get("config") or {}).get("sleeves") or [])
+                       and (a.get("config") or {}).get("mode") == "live"), None)
+            out.append({**o, "_account": r.get("account"), "_ap": ap, "_orders": st.get("orders") or []})
+    return sorted(out, key=lambda o: int(_num(o.get("ts")) or 0))
+
+
+def fill_outcome(o: dict) -> float | None:
+    """A sale's return against the average price of the same strategy's earlier live buys of
+    that market; None for a buy or when no buy is known."""
+    if str(o.get("side")).lower() != "sell":
+        return None
+    px = _num(o.get("avgFillPrice"))
+    buys = [b for b in o.get("_orders") or [] if isinstance(b, dict) and b.get("marketId") == o.get("marketId")
+            and b.get("strategyId") == o.get("strategyId") and str(b.get("side")).lower() == "buy"
+            and str(b.get("mode") or "").lower() == "live" and (_num(b.get("ts")) or 0) < (_num(o.get("ts")) or 0)
+            and (_num(b.get("filledQty")) or 0) > 0 and _num(b.get("avgFillPrice"))]
+    qty = sum(_num(b["filledQty"]) for b in buys)
+    if not px or not qty:
+        return None
+    avg = sum(_num(b["filledQty"]) * _num(b["avgFillPrice"]) for b in buys) / qty
+    return px / avg - 1 if avg > 0 else None
+
+
+def fill_card(o: dict, lang: str) -> Card:
+    """One real-money fill: a buy blue, a sale green, red or grey by its result against the buys."""
+    sym = str(o.get("marketId") or "?").split(":", 1)[-1].split("/")[0]
+    venue = str((((o.get("_ap") or {}).get("config") or {}).get("venue")) or o.get("venue") or "").capitalize()
+    qty, px = _num(o.get("filledQty")) or 0.0, _num(o.get("avgFillPrice"))
+    buy = str(o.get("side")).lower() == "buy"
+    ret = None if buy else fill_outcome(o)
+    if buy:
+        emoji, title = "🔵", tr("lf_buy_title", lang, sym=sym)
+    else:
+        emoji = "⚪" if ret is None or abs(ret) < 0.005 else ("🟢" if ret > 0 else "🔴")
+        title = (tr("lf_sell_title_ret", lang, sym=sym, ret=signed_pct(ret * 100, 1, lang)) if ret is not None
+                 else tr("lf_sell_title", lang, sym=sym))
+    name = ((o.get("_ap") or {}).get("config") or {}).get("name") or o.get("strategyId") or "?"
+    rows = [(tr("lf_row_qty", lang), i18n.plain_num(qty, lang, ".6g"))]
+    if px is not None:
+        rows.append((tr("lf_row_price", lang), money(px, 2 if px >= 1 else 6, lang)))
+        rows.append((tr("lf_row_value", lang), money(qty * px, 2, lang)))
+    slip = _num(o.get("realisedSlippageBps"))
+    if slip is not None:
+        rows.append((tr("lf_row_slip", lang), f"{i18n.num(slip, 1, lang)} bps"))
+    return Card(emoji, title, tr("lf_summary", lang, name=nodash(str(name)), venue=venue or "?"),
+                [Rows(rows)], footer=tr("lf_footer", lang))
+
+
+def fill_chart(o: dict, lang: str, now: int) -> bytes | None:
+    """The autopilot's P&L since its start in $, the curve the fill belongs to; None without one."""
+    ch, ap = _charts(), o.get("_ap") or {}
+    hist = sorted((int(t), float(e)) for t, e in (r for r in ap.get("history") or []
+                                                   if isinstance(r, (list, tuple)) and len(r) == 2))
+    start = _num(ap.get("startCapital"))
+    if ch is None or len(hist) < 2 or not start:
+        return None
+    path = notify_dir() / "charts" / f"fill-{now}.png"
+    try:
+        name = ((ap.get("config") or {}).get("name")) or "Autopilot"
+        ch.render_curve([(t, e - start) for t, e in hist], path, short(nodash(str(name)), 40),
+                        tr("lf_chart_sub", lang), lang, unit="$")
+        return path.read_bytes()
+    except Exception as e:  # noqa: BLE001 - the card goes without it
+        say(f"fill chart not drawn: {type(e).__name__}", err=True)
+        return None
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def live_fills(now: int | None = None, rows: list[dict] | None = None, poster=None) -> int:
+    """New real-money fills to Discord's trades webhook. Nothing without a webhook (no engine
+    is even asked); the "trades" switch in the app turns it off like every trade card."""
+    now = now or clock_ms()
+    if not discord_url("trades"):
+        say("no Discord webhook: nothing to do")
+        return 0
+    if not enabled(load_settings(), "trades"):
+        say("trades are switched off")
+        return 0
+    rows = rows if rows is not None else engine_states()
+    if not any(r.get("state") for r in rows):
+        say("no engine answered")
+        return 0
+    fills = live_fill_rows(rows)
+    st = read_json(fills_state_path()) or {}
+    order = [k for k in st.get("seen") or [] if isinstance(k, str)]
+    seen = set(order)
+    first = not st.get("init")
+    lang = alert_lang()
+    for o in fills:
+        key = f"{o.get('_account')}:{o.get('id')}"
+        if key in seen:
+            continue
+        if not first:
+            card = fill_card(o, lang)
+            res = send_discord("trades", [card], fill_chart(o, lang, now), lang, poster=poster, now=now)
+            if not res["delivered"]:
+                continue                                     # tried again on the next run
+        seen.add(key)
+        order.append(key)
+    write_json(fills_state_path(), {"init": True, "seen": order[-FILLS_KEEP:], "at": now})
+    return 0
 
 
 # ---------------------------------------------------------------- the daily digest
@@ -1704,6 +2022,8 @@ def main(argv: list[str] | None = None) -> int:
         return health(path)
     if "--pending" in argv:
         return pending()
+    if "--live-fills" in argv:
+        return live_fills()
     if "--weekly" in argv:
         return weekly(dry_run="--dry-run" in argv, force="--force" in argv)
     if "--event" in argv:

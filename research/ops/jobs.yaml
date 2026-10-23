@@ -324,8 +324,10 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
 
+  # The morning digest after the learning loop is replaced by the briefing at 09:00 Berlin
+  # (below); kept here, off, for `jobs.py run notify --force`.
   - name: notify
-    description: daily digest to the operator, right after the learning loop
+    description: daily digest to the operator, right after the learning loop (replaced by the briefing)
     depends_on: [learn]
     command: python -m lab.ops.notify
     network: host
@@ -333,6 +335,31 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
     replaces: pythia-learn
+    enabled: false
+
+  # The morning briefing at 09:00 Europe/Berlin (lab.ops.briefing), to Telegram and Discord.
+  # Cron runs in UTC, so it fires hourly through the morning and the job sends only in the
+  # hour that is 9 o'clock in Berlin (07 UTC in summer, 08 UTC in winter), once a day.
+  - name: briefing
+    description: morning briefing at 09:00 Berlin, pump.fun, real money, paper, lab, cards, skins, coins, stocks, news, to Telegram and Discord
+    schedule: "0 6-9 * * *"
+    command: python -m lab.ops.briefing
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+
+  # Every real-money fill of a Kraken or Alpaca autopilot to Discord's trades channel (the
+  # engine posts it to Telegram itself). Does nothing without PYTHIA_DISCORD_WEBHOOK.
+  - name: discord-live-fills
+    description: real-money autopilot fills to Discord, read from the engines' state
+    schedule: "*/2 * * * *"
+    command: python -m lab.ops.notify --live-fills
+    network: host
+    env_file: /etc/pythia/alerts.env
+    resources: {cpus: 1, memory: 512m}
+    timeout: 90s
+    alert: false
 
   - name: costs
     description: weekly cost calibration from the recorded books, report only
