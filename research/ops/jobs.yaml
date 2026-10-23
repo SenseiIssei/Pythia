@@ -367,20 +367,33 @@ jobs:
     schedule: "0 6-9 * * *"
     command: python -m lab.ops.briefing
     network: host
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
 
-  # Every real-money fill of a Kraken or Alpaca autopilot to Discord's trades channel (the
-  # engine posts it to Telegram itself). Does nothing without PYTHIA_DISCORD_WEBHOOK.
+  # Every real-money fill of a Kraken or Alpaca autopilot to Discord (the engine posts it to
+  # Telegram itself): the bot's #konten and a DM, else the trades webhook. Does nothing
+  # without PYTHIA_DISCORD_BOT_TOKEN (discord.env) or PYTHIA_DISCORD_WEBHOOK.
   - name: discord-live-fills
     description: real-money autopilot fills to Discord, read from the engines' state
     schedule: "*/2 * * * *"
     command: python -m lab.ops.notify --live-fills
     network: host
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 512m}
     timeout: 90s
+    alert: false
+
+  # What only the Discord bot carries (lab.ops.discord_feed): the forward report to
+  # #paper-buecher, new study verdicts to #studien, model decisions to #modelle, new
+  # headlines to #news. Reads files only; does nothing without PYTHIA_DISCORD_BOT_TOKEN.
+  - name: discord-feed
+    description: forward report, study verdicts, model decisions and news to the Discord bot's channels
+    schedule: "*/10 * * * *"
+    command: python -m lab.ops.discord_feed
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
+    resources: {cpus: 1, memory: 512m}
+    timeout: 5m
     alert: false
 
   - name: costs
@@ -486,7 +499,7 @@ jobs:
     description: strategy factory, daily forward shadow step on the panel paper-families cached
     schedule: "0 5 * * *"
     command: python -m lab.factory shadow --notify
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     env: {PYTHIA_AGENT_OUT: /data/lab-cache}
     resources: {cpus: 1, memory: 2g}
     timeout: 30m
@@ -496,7 +509,7 @@ jobs:
     description: strategy factory, weekly search, held-back checks and digest; every trial in the ledger
     schedule: "30 7 * * 0"
     command: python -m lab.factory --notify
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     env: {PYTHIA_AGENT_OUT: /data/lab-cache}
     resources: {cpus: 4, memory: 4g}
     timeout: 3h
@@ -535,7 +548,7 @@ jobs:
     schedule: "0 11 * * 0"
     command: python -m lab.ai.director
     network: host
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 2g}
     timeout: 90m
 
@@ -704,7 +717,7 @@ jobs:
     depends_on: [cs2-collect]
     depends_within: 2h
     command: python -m lab.cs2.run
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 4g}
     timeout: 15m
     replaces: pythia-cs2
@@ -716,7 +729,7 @@ jobs:
     description: CS2 Steam market, the daily price snapshot (csgotrader's public file), trends, trend alerts and the summary card
     schedule: "40 14,20 * * *"
     command: sh -c 'python -m lab.collect.cs2 --steam-market && python -m lab.cs2.trends'
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 3g}
     timeout: 20m
 
@@ -742,7 +755,7 @@ jobs:
     description: Pokemon cards, price snapshot (sealed products too), then studies, forecasts, the paper collection and card alerts
     schedule: "5 7 * * *"
     command: sh -c 'python -m lab.collect.pokemon --sealed && python -m lab.pokemon.daily'
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 2, memory: 6g}
     timeout: 2h
     replaces: pythia-pokemon
@@ -758,7 +771,7 @@ jobs:
     schedule: "15 5 * * *"
     command: python -m lab.polymarket.daily --forecast
     network: host
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 3g}
     timeout: 2h
     lock: polymarket

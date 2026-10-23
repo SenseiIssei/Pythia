@@ -28,12 +28,20 @@ report come with a chart (lab.ops.charts, matplotlib) sent as a photo.
 The morning briefing at 09:00 Berlin is lab.ops.briefing; it replaced the
 daily digest's schedule (daily() still sends one on demand).
 
-Discord: PYTHIA_DISCORD_WEBHOOK (a private channel's webhook; a webhook
-cannot DM, so that channel is the owner's "DM") and optionally
-PYTHIA_DISCORD_WEBHOOK_TRADES for the trades. Only two things go there, as
-embeds coloured by outcome with the chart attached: the morning briefing and
-every real-money trade card (send(..., discord="briefing" or "trades")). The
-same switches hold; a failure there never stops a bot or a job.
+Discord: with PYTHIA_DISCORD_BOT_TOKEN (the bot of research/discord, which
+lays out the owner's server) the posts go through the bot's REST API, each to
+its channel (DISCORD_ROUTES): the briefing to #briefing and as a DM to
+PYTHIA_DISCORD_OWNER_ID, every real-money trade card to #pumpfun-trades and as
+a DM, Kraken and Alpaca live fills to #konten and as a DM, study, Pokemon and
+CS2 posts to theirs; lab.ops.discord_feed adds the forward report, new study
+verdicts, model decisions and news. The channel ids come from the bot's
+<data>/discord/channels.json, else by name from the guild (PYTHIA_DISCORD_GUILD_ID).
+Without the bot token, or when the bot fails, the webhook path as before:
+PYTHIA_DISCORD_WEBHOOK (a private channel's webhook; a webhook cannot DM, so
+that channel is the owner's "DM") and optionally PYTHIA_DISCORD_WEBHOOK_TRADES
+for the trades, the briefing and the real-money trade cards only. All as
+embeds coloured by outcome with the chart attached. The same switches hold; a
+failure there never stops a bot or a job.
 
 notify.py itself is standard library only (with i18n.py next to it), so the
 host can run it without the lab image; without matplotlib a digest goes out
@@ -72,7 +80,7 @@ digest asked for on demand does not move it. The digest shows the
 autopilots as one table, one row each (value, today, since start, points
 against BTC since start), so six of them fit a phone screen.
 
-The bot token and the webhook URLs are secrets: never printed, logged or
+The bot tokens and the webhook URLs are secrets: never printed, logged or
 written to a file.
 """
 
@@ -711,8 +719,11 @@ def send(category: str | None, cards: list[Card] | Card, image: bytes | None = N
     cards = [cards] if isinstance(cards, Card) else list(cards)
     image = image or next((c.image for c in cards if getattr(c, "image", None)), None)
     res = _send(category, cards, image, urgent, now, dry_run, poster, hold_in_quiet, photos)
-    if discord and res["reason"] in (None, "no destination"):
-        res["discord"] = send_discord(discord, cards, image, poster=discord_poster)
+    # With the bot, a study, Pokemon or CS2 post goes to its channel too (the webhook never had them).
+    kind = discord or (DISCORD_CATEGORY_KINDS.get(category or "") if discord_bot_token() else None)
+    if kind and res["reason"] in (None, "no destination"):
+        pic = next((u for u in (safe_url(u) for u, _ in photos or []) if u), None)
+        res["discord"] = send_discord(kind, cards, image, poster=discord_poster, image_url=pic)
     return res
 
 
@@ -832,7 +843,7 @@ def via_engine(category: str, card: Card, image: bytes | None, urgent: bool) -> 
 # channel's webhook; PYTHIA_DISCORD_WEBHOOK_TRADES, when set, takes the trade
 # cards to a channel of their own. Both are secrets: never printed or logged.
 DISCORD_ENV, DISCORD_TRADES_ENV = "PYTHIA_DISCORD_WEBHOOK", "PYTHIA_DISCORD_WEBHOOK_TRADES"
-DISCORD_KINDS = ("briefing", "trades")
+DISCORD_KINDS = ("briefing", "trades", "fills")           # what a webhook carries; fills share the trades one
 DISCORD_DESC_LIMIT = 4000
 # An embed's colour bar by the card's leading emoji: the outcome of a trade.
 DISCORD_COLORS = {"🟢": 0x2FB344, "🔴": 0xE66767, "⚪": 0xA3A29A, "🔵": 0x3987E5, "🟠": 0xE8A33D, "🛑": 0xE66767}
@@ -843,7 +854,7 @@ def discord_url(kind: str) -> str | None:
     """The webhook for "briefing" or "trades" (the trades one falls back to the main one);
     None when not set or not a plain https URL."""
     main = (os.environ.get(DISCORD_ENV) or "").strip()
-    url = ((os.environ.get(DISCORD_TRADES_ENV) or "").strip() or main) if kind == "trades" else main
+    url = ((os.environ.get(DISCORD_TRADES_ENV) or "").strip() or main) if kind in ("trades", "fills") else main
     return url if url.lower().startswith("https://") and safe_url(url) else None
 
 
@@ -867,10 +878,14 @@ def discord_embed(card: Card, lang: str, image_name: str | None = None, ts_ms: i
     return emb
 
 
-def discord_payload(cards: list[Card], lang: str, image: bytes | None = None, ts_ms: int | None = None) -> dict:
-    """The webhook's JSON: up to ten embeds, the chart on the first; nobody is mentioned."""
+def discord_payload(cards: list[Card], lang: str, image: bytes | None = None, ts_ms: int | None = None,
+                    image_url: str | None = None) -> dict:
+    """The webhook's JSON: up to ten embeds, the chart on the first (or, without one, a picture
+    by URL such as a Pokemon card's); nobody is mentioned."""
     name = "chart.png" if image else None
     embeds = [discord_embed(c, lang, name if i == 0 else None, ts_ms) for i, c in enumerate(cards[:10])]
+    if embeds and not image and image_url:
+        embeds[0]["image"] = {"url": image_url}
     return {"username": "Pythia", "embeds": embeds, "allowed_mentions": {"parse": []}}
 
 
@@ -907,18 +922,29 @@ def post_discord(url: str, payload: dict, image: bytes | None = None, timeout: f
 
 
 def send_discord(kind: str, cards: list[Card] | Card, image: bytes | None = None, lang: str | None = None,
-                 poster=None, now: int | None = None) -> dict:
-    """The cards to the Discord webhook of `kind` ("briefing" or "trades"). `poster(url,
-    payload, image)` replaces the network (tests). Never raises: a failure is returned
+                 poster=None, now: int | None = None, image_url: str | None = None) -> dict:
+    """The cards to Discord as `kind` (a key of DISCORD_ROUTES): through the bot to its channel
+    (and a DM) when PYTHIA_DISCORD_BOT_TOKEN is set, else, or when the bot could not deliver,
+    to the webhook of "briefing", "trades" or "fills". `poster(url, payload, image)` replaces
+    the webhook's network (tests), bot_request the bot's. Never raises: a failure is returned
     as {"delivered": False, "error": ...} and said on stderr, nothing more."""
     res = {"delivered": False, "error": None, "reason": None}
     try:
         cards = [cards] if isinstance(cards, Card) else list(cards)
-        url = discord_url(kind) if kind in DISCORD_KINDS else None
-        if not url or not cards:
+        if not cards:
             res["reason"] = "no destination"
             return res
-        payload = discord_payload(cards, lang or alert_lang(), image, now or clock_ms())
+        payload = discord_payload(cards, lang or alert_lang(), image, now or clock_ms(), image_url)
+        if discord_bot_token() and kind in DISCORD_ROUTES:
+            res.update(send_bot(kind, payload, image))
+            if res["delivered"]:
+                return res
+            say(f"discord bot: not delivered ({res['error']})", err=True)
+        url = discord_url(kind) if kind in DISCORD_KINDS else None
+        if not url:
+            if res["error"] is None:
+                res["reason"] = "no destination"
+            return res
         ok, err = (poster or post_discord)(url, payload, image)
         res.update(delivered=ok, error=err)
         if not ok:
@@ -927,6 +953,157 @@ def send_discord(kind: str, cards: list[Card] | Card, image: bytes | None = None
         res.update(error=type(e).__name__)
         say(f"discord: not delivered ({type(e).__name__})", err=True)
     return res
+
+
+# ---------------------------------------------------------------- Discord through the bot
+
+# The bot of research/discord lays out the owner's private server and keeps the channel ids in
+# its state file, shared read only as <data>/discord/channels.json. With its token set
+# (PYTHIA_DISCORD_BOT_TOKEN, from /etc/pythia/discord.env; a secret, never printed) the posts
+# go through Discord's REST API to the channel of their kind, the important ones also as a DM
+# to the owner (PYTHIA_DISCORD_OWNER_ID; a DM works because the bot and the owner share the server).
+DISCORD_BOT_ENV, DISCORD_GUILD_ENV, DISCORD_OWNER_ENV = ("PYTHIA_DISCORD_BOT_TOKEN", "PYTHIA_DISCORD_GUILD_ID",
+                                                         "PYTHIA_DISCORD_OWNER_ID")
+DISCORD_API = "https://discord.com/api/v10"
+DISCORD_UA = "DiscordBot (https://github.com/SenseiIssei/Pythia, 1.0)"
+# What goes where: kind -> (channel, also a DM to the owner). The names are the bot's layout
+# (research/discord/pythia_discord/layout.py).
+DISCORD_ROUTES: dict[str, tuple[str, bool]] = {
+    "briefing": ("briefing", True),          # the 09:00 briefing
+    "trades": ("pumpfun-trades", True),      # every real-money pump.fun card, with its chart
+    "fills": ("konten", True),               # real-money fills of the Kraken and Alpaca autopilots
+    "status": ("status", False),
+    "forward": ("paper-buecher", False),     # the forward report's summary (discord_feed)
+    "studies": ("studien", False),           # study verdicts, the factory, the director
+    "models": ("modelle", False),            # the model zoo's decisions (discord_feed)
+    "pokemon": ("pokemon", False),
+    "cs2": ("cs2-skins", False),
+    "news": ("news", False),                 # new headlines (discord_feed)
+}
+# A lab post's category that the bot carries to a channel without send(..., discord=...).
+DISCORD_CATEGORY_KINDS = {"studies": "studies", "models": "models", "pokemon": "pokemon", "cs2": "cs2"}
+_DISCORD_IDS: dict = {}
+SNOWFLAKE = re.compile(r"\d{5,25}")
+
+
+def discord_bot_token() -> str | None:
+    return (os.environ.get(DISCORD_BOT_ENV) or "").strip() or None
+
+
+def discord_channels_path() -> Path:
+    return Path(os.environ.get("PYTHIA_DISCORD_CHANNELS") or data_root() / "discord" / "channels.json")
+
+
+def _snowflake(v) -> str | None:
+    v = str(v or "").strip()
+    return v if SNOWFLAKE.fullmatch(v) else None
+
+
+def bot_request(method: str, path: str, body: dict | None = None, image: bytes | None = None,
+                timeout: float = 15) -> tuple[int, object]:
+    """One call to Discord's REST API as the bot: (HTTP status, the JSON answer or None); status 0
+    when the network failed. A 429 is waited out once (at most 5 s). Neither the token nor the
+    URL ever reaches a message."""
+    token = discord_bot_token()
+    if not token:
+        return 0, None
+    headers = {"Authorization": f"Bot {token}", "User-Agent": DISCORD_UA}
+    data = None
+    if image is not None and body is not None:
+        boundary = f"pythia{uuid.uuid4().hex}"
+        data, headers["Content-Type"] = discord_body(body, image, boundary), f"multipart/form-data; boundary={boundary}"
+    elif body is not None:
+        data, headers["Content-Type"] = json.dumps(body, ensure_ascii=False).encode("utf-8"), "application/json"
+    for attempt in (0, 1):
+        req = urllib.request.Request(DISCORD_API + path, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt == 0:
+                try:
+                    wait = float(json.loads(e.read() or b"{}").get("retry_after") or 1)
+                except (ValueError, AttributeError):
+                    wait = 1.0
+                time.sleep(min(max(wait, 0.1), 5.0))
+                continue
+            return e.code, None
+        except (urllib.error.URLError, OSError, ValueError):
+            return 0, None
+    return 429, None
+
+
+def discord_channels(refresh: bool = False) -> dict[str, str]:
+    """Channel name -> id (and "dm" -> the owner's DM channel when the bot wrote it): the bot's
+    channels.json, else the guild's text channels by name (PYTHIA_DISCORD_GUILD_ID). Kept for
+    the run; refresh=True asks Discord again."""
+    if _DISCORD_IDS.get("map") and not refresh:
+        return _DISCORD_IDS["map"]
+    out: dict[str, str] = {}
+    st = read_json(discord_channels_path())
+    if isinstance(st, dict) and not refresh:
+        for k, v in (st.get("channels") or {}).items():
+            if _snowflake(v):
+                out[str(k)] = str(v)
+        if _snowflake(st.get("dm")):
+            out["dm"] = str(st["dm"])
+    guild = _snowflake(os.environ.get(DISCORD_GUILD_ENV))
+    if not out and guild:
+        code, rows = bot_request("GET", f"/guilds/{guild}/channels")
+        for c in rows if code == 200 and isinstance(rows, list) else []:
+            if isinstance(c, dict) and c.get("type") == 0 and c.get("name") and _snowflake(c.get("id")):
+                out.setdefault(str(c["name"]), str(c["id"]))
+    _DISCORD_IDS["map"] = out
+    return out
+
+
+def owner_dm() -> str | None:
+    """The owner's DM channel: from the bot's file, else opened through the API (Discord gives
+    back the same channel every time)."""
+    dm = discord_channels().get("dm")
+    if dm:
+        return dm
+    owner = _snowflake(os.environ.get(DISCORD_OWNER_ENV))
+    if not owner:
+        return None
+    code, ch = bot_request("POST", "/users/@me/channels", {"recipient_id": owner})
+    dm = _snowflake(ch.get("id")) if code == 200 and isinstance(ch, dict) else None
+    if dm:
+        _DISCORD_IDS.setdefault("map", {})["dm"] = dm
+    return dm
+
+
+def bot_post(channel_id: str, payload: dict, image: bytes | None = None) -> tuple[bool, str | None]:
+    """One message into a channel through the bot: (ok, error); the error is the HTTP status only."""
+    if not _snowflake(channel_id):
+        return False, "no channel"
+    body = {k: v for k, v in payload.items() if k != "username"}   # a webhook's field, not a bot's
+    code, _ = bot_request("POST", f"/channels/{channel_id}/messages", body, image)
+    return (200 <= code < 300), (None if 200 <= code < 300 else f"HTTP {code}" if code else "not delivered")
+
+
+def send_bot(kind: str, payload: dict, image: bytes | None = None) -> dict:
+    """The payload to the channel of `kind` and, for the important kinds, as a DM to the owner.
+    A channel that is gone (404) is looked up by name once more. Delivered when either arrived."""
+    name, dm = DISCORD_ROUTES[kind]
+    out: dict = {"delivered": False, "error": None, "channel": False, "dm": False}
+    cid = discord_channels().get(name)
+    ok, err = bot_post(cid, payload, image) if cid else (False, "no channel")
+    if not ok and err in ("HTTP 404", "no channel"):
+        cid = discord_channels(refresh=True).get(name)
+        if cid:
+            ok, err = bot_post(cid, payload, image)
+    out["channel"] = ok
+    errs = [] if ok else [f"#{name}: {err}"]
+    if dm:
+        dm_id = owner_dm()
+        dok, derr = bot_post(dm_id, payload, image) if dm_id else (False, "no channel")
+        out["dm"] = dok
+        errs += [] if dok else [f"DM: {derr}"]
+    out["delivered"] = out["channel"] or out["dm"]
+    out["error"] = "; ".join(errs) or None
+    return out
 
 
 # ---------------------------------------------------------------- SOL in euro
@@ -1255,11 +1432,12 @@ def fill_chart(o: dict, lang: str, now: int) -> bytes | None:
 
 
 def live_fills(now: int | None = None, rows: list[dict] | None = None, poster=None) -> int:
-    """New real-money fills to Discord's trades webhook. Nothing without a webhook (no engine
-    is even asked); the "trades" switch in the app turns it off like every trade card."""
+    """New real-money fills to Discord (the bot's #konten and a DM, else the trades webhook).
+    Nothing without either (no engine is even asked); the "trades" switch in the app turns it
+    off like every trade card."""
     now = now or clock_ms()
-    if not discord_url("trades"):
-        say("no Discord webhook: nothing to do")
+    if not discord_url("fills") and not discord_bot_token():
+        say("no Discord bot or webhook: nothing to do")
         return 0
     if not enabled(load_settings(), "trades"):
         say("trades are switched off")
@@ -1280,7 +1458,7 @@ def live_fills(now: int | None = None, rows: list[dict] | None = None, poster=No
             continue
         if not first:
             card = fill_card(o, lang)
-            res = send_discord("trades", [card], fill_chart(o, lang, now), lang, poster=poster, now=now)
+            res = send_discord("fills", [card], fill_chart(o, lang, now), lang, poster=poster, now=now)
             if not res["delivered"]:
                 continue                                     # tried again on the next run
         seen.add(key)
