@@ -366,9 +366,11 @@ class Service:
         self.cats = LC.LiveClassifier(ix, lookup=name_of)
         self.cat_gate = LC.CategoryGate(ix, block=pipe.blocked, cls=self.cats)
         pipe.category = self.cat_gate
-        print(f"live service: name categories every {LC.EVERY_S:g} s ({len(ix):,} names known); never bought: "
-              f"{', '.join(sorted(self.cat_gate.blocked()))}; a coin without one is asked at once (at most "
-              f"{LC.ONE_TIMEOUT_S:g} s), else skipped", flush=True)
+        blocked = self.cat_gate.blocked()
+        print(f"live service: name categories every {LC.EVERY_S:g} s ({len(ix):,} names known); " + (
+              f"never bought: {', '.join(sorted(blocked))}; a coin without one is asked at once (at most "
+              f"{LC.ONE_TIMEOUT_S:g} s), else skipped" if blocked else
+              "the gate is off (category:none), the classifier keeps classifying"), flush=True)
 
     # ------------------------------------------------------------ the stream
     def on_row(self, table: str, row: dict) -> None:

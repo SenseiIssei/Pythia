@@ -14,6 +14,9 @@ one entry per line, "#" starts a comment:
   category:<code>     every coin whose name category (categorize.CATS, the live classifier livecat.py) is this
                       one; without any category line DEFAULT_CATEGORIES (celebrity, copycat, scam). The live bot
                       and its paper twin check it (livecat.CategoryGate), not why() here
+  category:none       no category blocked: the gate is off (no "category ..." and no "category unknown" skips, no
+                      name asked at the buy), the live classifier keeps classifying; with other category lines
+                      none wins, with one warning (the owner, 2026-10-24: too few coins, the rugs come anyway)
 
 Read at start and again when a file changes (mtime and size, looked at most every CHECK_S). A malformed line is
 ignored with one warning; a missing file is an empty list. Pipeline.signal asks before every buy (curve and pool);
@@ -35,6 +38,7 @@ ADDRESS = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 TEXT_MAX = 64                               # a symbol, name or match entry, as written
 MATCH_MIN = 3                               # a match entry's letters and digits: "ai" would block half the coins
 DEFAULT_CATEGORIES = frozenset({"celebrity", "copycat", "scam"})   # with no category: line (the owner, 2026-10-23)
+CATEGORY_OFF = "none"                       # category:none, the gate off
 
 
 def norm(s) -> str:
@@ -59,7 +63,7 @@ def parse_line(line: str) -> tuple[str, str] | None | bool:
         return (kind, rest) if len(norm(rest)) >= MATCH_MIN and len(rest) <= TEXT_MAX else False
     if kind == "category":
         from .categorize import CATS
-        return (kind, rest.lower()) if rest.lower() in CATS else False
+        return (kind, rest.lower()) if rest.lower() in CATS or rest.lower() == CATEGORY_OFF else False
     return False
 
 
@@ -73,13 +77,19 @@ class Blocklist:
         self.symbols: dict[str, str] = {}
         self.names: dict[str, str] = {}
         self.matches: dict[str, str] = {}
-        self.categories: set[str] = set()       # as written; blocked_categories() has the defaults
+        self.categories: set[str] = set()       # as written (CATEGORY_OFF too); blocked_categories() has the defaults
 
     def __len__(self) -> int:
         return len(self.mints) + len(self.creators) + len(self.symbols) + len(self.names) + len(self.matches)
 
+    def categories_off(self) -> bool:
+        return CATEGORY_OFF in self.categories
+
     def blocked_categories(self) -> frozenset:
-        """The name categories never bought: the category: lines, DEFAULT_CATEGORIES without any."""
+        """The name categories never bought: the category: lines, DEFAULT_CATEGORIES without any, none with
+        category:none."""
+        if self.categories_off():
+            return frozenset()
         return frozenset(self.categories) or DEFAULT_CATEGORIES
 
     def add(self, kind: str, value: str) -> None:
@@ -129,6 +139,12 @@ def read(paths, warned: set | None = None) -> Blocklist:
                           f"{line.strip()[:80]!r}", flush=True)
             elif e:
                 bl.add(*e)
+    if bl.categories_off() and len(bl.categories) > 1:
+        both = "category:none+" + ",".join(sorted(bl.categories - {CATEGORY_OFF}))
+        if both not in warned:
+            warned.add(both)
+            print(f"blocklist: category:none and category: {', '.join(sorted(bl.categories - {CATEGORY_OFF}))} "
+                  f"listed; none wins, no category is blocked", flush=True)
     return bl
 
 
@@ -167,8 +183,8 @@ class BlockWatch:
         b = self.list
         return (f"{len(b.mints)} mints, {len(b.creators)} creators, {len(b.symbols)} symbols, "
                 f"{len(b.names)} names" + (f", {len(b.matches)} matches" if b.matches else "") + " blocked"
-                + f"; categories {', '.join(sorted(b.blocked_categories()))}"
-                + ("" if b.categories else " (default)"))
+                + ("; categories off (category:none)" if b.categories_off() else
+                   f"; categories {', '.join(sorted(b.blocked_categories()))}" + ("" if b.categories else " (default)")))
 
     def refresh(self) -> None:
         now = self.clock()

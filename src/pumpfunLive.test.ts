@@ -10,6 +10,7 @@ import {
   blockLine,
   blockNorm,
   blockedCategories,
+  categoriesSwitch,
   categoryToggle,
   changePumpfunBlocked,
   pumpfunBlocked,
@@ -296,14 +297,28 @@ describe("the block list", () => {
     expect(Object.keys(BLOCK_KIND_HINT).sort()).toEqual(Object.keys(BLOCK_KIND_LABEL).sort());
   });
 
+  it("switches the name categories off with category:none, which wins over the other lines", () => {
+    const base = { path: "pumpfun_rt/blocked-mints.txt", entries: [], ignored: [] };
+    const none = { entry: "category:none", kind: "category" as const, value: "none" };
+    const scam = { entry: "category:scam", kind: "category" as const, value: "scam" };
+    expect(blockedCategories({ ...base, entries: [scam, none] })).toEqual({ blocked: [], isDefault: false, off: true });
+    const served = { ...base, entries: [none], categories: { blocked: [], default: false, off: true, codes: [...BLOCK_CATEGORIES] } };
+    expect(blockedCategories(served)).toEqual({ blocked: [], isDefault: false, off: true });
+    expect(blockedCategories({ ...base, entries: [scam] }).off).toBe(false);
+    expect(blockedCategories(null).off).toBe(false);
+    expect(categoriesSwitch(false)).toEqual({ add: "category:none" });
+    expect(categoriesSwitch(true)).toEqual({ remove: "category:none" });
+    expect(blockLine("category", " None ")).toEqual({ line: "category:none" });
+  });
+
   it("lists the blocked name categories, the defaults while none is listed, and keeps the last one", () => {
     const base = { path: "pumpfun_rt/blocked-mints.txt", ignored: [] };
-    expect(blockedCategories({ ...base, entries: [] })).toEqual({ blocked: ["copycat", "celebrity", "scam"], isDefault: true });
+    expect(blockedCategories({ ...base, entries: [] })).toEqual({ blocked: ["copycat", "celebrity", "scam"], isDefault: true, off: false });
     expect(blockedCategories(null).isDefault).toBe(true);
     const own = { ...base, entries: [{ entry: "category:scam", kind: "category" as const, value: "scam" }, { entry: "category:animal", kind: "category" as const, value: "animal" }] };
-    expect(blockedCategories(own)).toEqual({ blocked: ["animal", "scam"], isDefault: false });
+    expect(blockedCategories(own)).toEqual({ blocked: ["animal", "scam"], isDefault: false, off: false });
     const served = { ...base, entries: [], categories: { blocked: ["celebrity", "scam"], default: false, codes: [...BLOCK_CATEGORIES] } };
-    expect(blockedCategories(served)).toEqual({ blocked: ["celebrity", "scam"], isDefault: false });
+    expect(blockedCategories(served)).toEqual({ blocked: ["celebrity", "scam"], isDefault: false, off: false });
     expect(categoryToggle("ai", ["scam"])).toEqual({ add: "category:ai" });
     expect(categoryToggle("copycat", ["copycat", "scam"])).toEqual({ remove: "category:copycat" });
     expect(categoryToggle("scam", ["scam"])).toEqual({ error: "At least one category stays blocked." });

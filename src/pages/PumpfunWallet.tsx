@@ -25,6 +25,7 @@ import {
   LIMIT_LABEL,
   blockLine,
   blockedCategories,
+  categoriesSwitch,
   categoryToggle,
   canControl,
   changePumpfunBlocked,
@@ -234,7 +235,20 @@ function Blocked() {
         <div className="space-y-3">
           {list && (
             <div>
-              <div className="mb-1 text-[13px] font-medium text-ink">Categories never bought{cats.isDefault ? " (default)" : ""}</div>
+              <div className="mb-1 flex flex-wrap items-center gap-2 text-[13px] font-medium text-ink">
+                <span>{cats.off ? "Namens-Kategorien: aus" : `Categories never bought${cats.isDefault ? " (default)" : ""}`}</span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy}
+                  ariaLabel={cats.off ? "Switch the name categories on" : "Switch the name categories off"}
+                  title={cats.off ? "Block name categories again (the defaults, or the ones listed)." : "Block no name category (category:none); the classifier keeps classifying."}
+                  onClick={() => void change(categoriesSwitch(cats.off))}
+                >
+                  {cats.off ? "Switch on" : "Switch off"}
+                </Button>
+              </div>
+              {cats.off && <p className="mb-1 text-[13px] text-muted">Every name category is bought; the bot keeps classifying the names in the background.</p>}
               <div className="flex flex-wrap gap-2" role="group" aria-label="Blocked categories">
                 {BLOCK_CATEGORIES.map((c) => {
                   const on = cats.blocked.includes(c);
@@ -245,7 +259,7 @@ function Blocked() {
                       size="sm"
                       variant={on ? "accent" : "secondary"}
                       icon={on ? Ban : undefined}
-                      disabled={busy || "error" in t}
+                      disabled={busy || cats.off || "error" in t}
                       ariaLabel={`${on ? "Unblock" : "Block"} category ${c}`}
                       title={"error" in t ? t.error : BLOCK_CATEGORY_HINT[c]}
                       onClick={() => !("error" in t) && void change(t)}

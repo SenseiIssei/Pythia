@@ -298,8 +298,8 @@ export interface BlockList {
   entries: BlockEntry[];
   /** Lines the bot ignores (not a mint, creator:, symbol:, name:, match: or category: entry). */
   ignored: string[];
-  /** The name categories never bought: the category: lines, or the defaults while there is none. */
-  categories?: { blocked: string[]; default: boolean; codes: string[] };
+  /** The name categories never bought: the category: lines, or the defaults while there is none; off with category:none. */
+  categories?: { blocked: string[]; default: boolean; off?: boolean; codes: string[] };
 }
 
 /** The live classifier's name categories (categorize.CATS) and those blocked while the list has no category: line. */
@@ -323,13 +323,24 @@ export const BLOCK_CATEGORY_HINT: Record<BlockCategory, string> = {
   scam: "Likely scams: airdrop, official, v2, presale, random characters.",
 };
 
-/** The blocked categories of a list: what the server says, else the category: entries, else the defaults. */
-export function blockedCategories(list: BlockList | null): { blocked: BlockCategory[]; isDefault: boolean } {
+/** category:none: no category blocked, the bot's category gate off (the classifier keeps classifying). */
+export const BLOCK_CATEGORY_OFF = "none";
+
+/** The blocked categories of a list: what the server says, else the category: entries, else the defaults; none with category:none. */
+export function blockedCategories(list: BlockList | null): { blocked: BlockCategory[]; isDefault: boolean; off: boolean } {
   const known = (c: string): c is BlockCategory => (BLOCK_CATEGORIES as readonly string[]).includes(c);
-  const listed = list?.categories ? list.categories.blocked : (list?.entries ?? []).filter((e) => e.kind === "category").map((e) => e.value);
+  const cats = (list?.entries ?? []).filter((e) => e.kind === "category").map((e) => e.value);
+  const off = list?.categories ? list.categories.off === true : cats.includes(BLOCK_CATEGORY_OFF);
+  if (off) return { blocked: [], isDefault: false, off };
+  const listed = list?.categories ? list.categories.blocked : cats;
   const own = BLOCK_CATEGORIES.filter((c) => listed.includes(c) && known(c));
   const isDefault = list?.categories ? list.categories.default : own.length === 0;
-  return { blocked: isDefault && !list?.categories ? [...BLOCK_CATEGORIES_DEFAULT] : own, isDefault };
+  return { blocked: isDefault && !list?.categories ? [...BLOCK_CATEGORIES_DEFAULT] : own, isDefault, off };
+}
+
+/** The change the on/off switch of the name categories makes. */
+export function categoriesSwitch(off: boolean): { add: string } | { remove: string } {
+  return off ? { remove: `category:${BLOCK_CATEGORY_OFF}` } : { add: `category:${BLOCK_CATEGORY_OFF}` };
 }
 
 /** The change one click on a category makes: block it, unblock it, or why not (the last one stays). */
@@ -370,7 +381,7 @@ export function blockLine(kind: BlockKind, raw: string): { line: string } | { er
   if (/[#\u0000-\u001f\u007f]/.test(v)) return { error: "No # and no line break." };
   if (kind === "category") {
     const c = v.toLowerCase();
-    return (BLOCK_CATEGORIES as readonly string[]).includes(c) ? { line: `category:${c}` } : { error: `A category is one of ${BLOCK_CATEGORIES.join(", ")}.` };
+    return (BLOCK_CATEGORIES as readonly string[]).includes(c) || c === BLOCK_CATEGORY_OFF ? { line: `category:${c}` } : { error: `A category is one of ${BLOCK_CATEGORIES.join(", ")} (or none: the gate off).` };
   }
   if (kind === "mint" || kind === "creator") {
     if (!BASE58.test(v)) return { error: `Not a ${kind === "mint" ? "mint" : "wallet"} address (base58, 32 to 44 characters).` };

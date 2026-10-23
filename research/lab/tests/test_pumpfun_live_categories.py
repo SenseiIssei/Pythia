@@ -109,6 +109,21 @@ def test_category_lines_default_to_celebrity_copycat_and_scam(tmp_path, capsys):
     assert BL.parse_line("category:copycat") == ("category", "copycat") and BL.parse_line("category:") is False
 
 
+def test_category_none_blocks_no_category_and_wins_over_the_others_with_one_warning(tmp_path, capsys):
+    assert BL.parse_line("Category: NONE") == ("category", "none") and BL.parse_line("category:nothing") is False
+    f = tmp_path / "b.txt"
+    f.write_text("symbol:SHEKEL\ncategory:none\n", encoding="utf-8")
+    w = BL.BlockWatch(paths=[f])
+    assert w.list.blocked_categories() == frozenset() and w.list.categories_off() and len(w.list) == 1
+    assert "categories off (category:none)" in capsys.readouterr().out
+    f.write_text("symbol:SHEKEL\ncategory:scam\ncategory:none\ncategory:celebrity\n", encoding="utf-8")
+    w = BL.BlockWatch(paths=[f])
+    assert w.list.blocked_categories() == frozenset()
+    w.list = BL.read(w.paths, w.warned)                                # read again: no second warning
+    out = capsys.readouterr().out
+    assert out.count("none wins") == 1 and "category: celebrity, scam listed" in out
+
+
 # ---------------------------------------------------------------- the prompt's guidance, today's names
 
 def test_the_guidance_puts_brands_in_copycat_and_real_people_in_celebrity():
@@ -263,6 +278,30 @@ def test_the_owners_lines_replace_the_default_categories(tmp_path):
     assert pipe.category.status()["blocked"] == ["scam"] and not pipe.category.status()["default"]
 
 
+def test_category_none_switches_the_gate_off_and_the_classifier_keeps_classifying(tmp_path, cats_folder):
+    f = tmp_path / "b.txt"
+    f.write_text("symbol:SHEKEL\ncategory:none\n", encoding="utf-8")
+    svc, col, pipe = service()
+    pipe.blocked = BL.BlockWatch(paths=[f])
+    svc.attach_categories()
+    ai = FakeAi(code="celebrity")
+    svc.cats.poster = ai
+    pipe.category = svc.cat_gate = LC.CategoryGate(svc.cats.ix, block=pipe.blocked, cls=svc.cats, poster=ai,
+                                                    d=tmp_path, submit=now_submit, log=quiet)
+    svc.cat_gate.ix.add("", "other|oth", "scam", T0)
+    assert svc.cat_gate(RULE, coin("Other", "OTH"), False) is None     # a known blocked one goes on too
+    run_coin(col)                                                      # no category at the buy: not asked
+    svc.tick(T0 + 10_000)
+    assert len(pipe.pos) == 1 and not any(k.startswith("category") for k in shown(pipe)) and not ai.calls
+    assert svc.cat_gate.one_st == {}
+    cls = svc.cats                                                     # the classifier still classifies
+    cls.observe("creates", {"mint": "m9", "name": "Biden", "symbol": "BIDEN", "quote": None})
+    cls.classify(*cls.take())
+    assert ai.calls and lines(cats_folder)[-1]["cat"] == "celebrity"
+    st = svc.cat_gate.status()
+    assert st["blocked"] == [] and st["off"] and not st["default"]
+
+
 def test_a_coin_without_a_category_is_asked_alone_at_the_buy(tmp_path, capsys):
     svc, col, pipe = service()
     ai = FakeAi(code="celebrity")
@@ -340,6 +379,25 @@ def test_the_paper_twin_skips_like_the_live_book(tmp_path, monkeypatch):
     svc.tick(T0 + 10_000)
     assert sh.engine.skipped[(RULE, "category copycat")] == 1 and shown(pipe) == {"category copycat": 1}
     assert not any(k[1].startswith("category") for k in sh.engine.skipped if k[0] == "P_pool0")
+
+
+def test_the_paper_twin_takes_category_none_like_the_live_book(tmp_path, monkeypatch):
+    from lab.pumpfun_rt import live
+    monkeypatch.setattr(live, "paper_dir", lambda: tmp_path)
+    f = tmp_path / "b.txt"
+    f.write_text("category:none\n", encoding="utf-8")
+    blocked = BL.BlockWatch(paths=[f], rules=BL.PAPER_RULES)
+    ix = CAT.CategoryIndex()
+    ix.add("", KEY, "copycat", T0)
+    ai = FakeAi(code="scam")
+    sh = live.Shadow("A_all_x1", models=None, alerts=False, now_ms=T0, strategies=[P.BY_NAME[RULE]],
+                     blocked=blocked, category=LC.CategoryGate(ix, block=blocked, rules=BL.PAPER_RULES,
+                                                               poster=ai, d=tmp_path, submit=now_submit, log=quiet))
+    col = COL.Collector(None, on_row=sh.on_row, amm=True, meta=False)
+    run_coin(col)
+    sh.tick(T0 + 10_000)
+    assert not any(k[1].startswith("category") for k in sh.engine.skipped) and not ai.calls
+    assert sh.engine.pipes[0].category(RULE, coin("New", "NEW"), True) is None   # unknown at the buy: not asked
 
 
 # ---------------------------------------------------------------- the service

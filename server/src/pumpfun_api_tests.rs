@@ -356,3 +356,46 @@ async fn the_block_list_takes_categories_with_the_defaults_written_out_at_the_fi
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&d2);
 }
+
+#[tokio::test]
+async fn the_block_list_takes_category_none_and_switches_the_gate_off() {
+    let d = root("blocked-cat-none");
+    std::fs::create_dir_all(d.join("pumpfun_rt")).unwrap();
+    std::fs::write(d.join("pumpfun_rt/blocked-mints.txt"), "# the owner's list\nsymbol:SHEKEL\ncategory:scam\n").unwrap();
+    // none takes the place of the other category lines, every other line stays
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": "Category: None"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["categories"]["blocked"], serde_json::json!([]));
+    assert_eq!(v["categories"]["off"], true);
+    assert_eq!(v["categories"]["default"], false);
+    assert_eq!(std::fs::read_to_string(d.join("pumpfun_rt/blocked-mints.txt")).unwrap(), "# the owner's list\nsymbol:SHEKEL\ncategory:none\n");
+    // no other category while it is off
+    let (code, _) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": "category:ai"}))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    // a hand-written file with none and others: none wins
+    std::fs::write(d.join("pumpfun_rt/blocked-mints.txt"), "category:scam\ncategory:none\n").unwrap();
+    let (_, v) = call(&d, "GET", "/api/pumpfun/live/blocked", None).await;
+    assert_eq!(v["categories"]["blocked"], serde_json::json!([]));
+    assert_eq!(v["categories"]["off"], true);
+    assert_eq!(v["ignored"], serde_json::json!([]));
+    // switched on again: the other line stays, or the defaults without one
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": "category:none"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["categories"]["blocked"], serde_json::json!(["scam"]));
+    assert_eq!(v["categories"]["off"], false);
+    std::fs::write(d.join("pumpfun_rt/blocked-mints.txt"), "symbol:SHEKEL\ncategory:none\n").unwrap();
+    let (code, v) = call(&d, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"remove": "category:none"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["categories"]["blocked"], serde_json::json!(["copycat", "celebrity", "scam"]));
+    assert_eq!(v["categories"]["default"], true);
+    assert_eq!(std::fs::read_to_string(d.join("pumpfun_rt/blocked-mints.txt")).unwrap(), "symbol:SHEKEL\n");
+    // off from the defaults: only the none line, no defaults written out
+    let d2 = root("blocked-cat-none-add");
+    let (code, v) = call(&d2, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": "category:none"}))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(std::fs::read_to_string(d2.join("pumpfun_rt/blocked-mints.txt")).unwrap(), "category:none\n");
+    let (code, _) = call(&d2, "POST", "/api/pumpfun/live/blocked", Some(serde_json::json!({"add": "category:nothing"}))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&d2);
+}

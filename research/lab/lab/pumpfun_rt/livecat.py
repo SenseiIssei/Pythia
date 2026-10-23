@@ -20,6 +20,8 @@ classifier lagged, a coin made and migrated within seconds) is asked at once, al
 ONE_TIMEOUT_S (1.5 s; the stream's loop waits that long at most); no answer by then, an error or the day's cap is a
 skip "category unknown". Every skip takes the pipeline's path: the status's skipped counts, one log line,
 skipped.jsonl, no card. The gate reads what was appended to cats.jsonl every CHECK_S (CategoryIndex.tail).
+With category:none in the list (no category blocked) the gate is off: every coin goes on, nothing is looked up or
+asked at the buy; the LiveClassifier keeps classifying (the data for the models).
 """
 
 from __future__ import annotations
@@ -341,6 +343,9 @@ class CategoryGate:
     def __call__(self, rule: str, tok, at_buy: bool = False) -> str | None:
         if self.rules is not None and rule not in self.rules:
             return None
+        blocked = self.blocked()
+        if not blocked:                                 # category:none: the gate is off
+            return None
         name, sym = getattr(tok, "name", "") or "", getattr(tok, "symbol", "") or ""
         key = K.name_key(name, sym)
         c = self.known(key)
@@ -348,7 +353,7 @@ class CategoryGate:
             c = self.one(tok.mint, name, sym, key)
         if c is None:
             return UNKNOWN if at_buy else None
-        return reason(c) if c in self.blocked() else None
+        return reason(c) if c in blocked else None
 
     def one(self, mint: str, name: str, sym: str, key: str) -> str | None:
         """This one name, asked at once; its code, or None (no answer within timeout_s, an error, the day's cap).
@@ -400,7 +405,8 @@ class CategoryGate:
         return c
 
     def status(self) -> dict:
-        return {"blocked": sorted(self.blocked()), "default": not getattr(getattr(self.block, "list", None),
-                                                                            "categories", None),
+        lst = getattr(self.block, "list", None)
+        return {"blocked": sorted(self.blocked()), "default": not getattr(lst, "categories", None),
+                "off": bool(lst is not None and lst.categories_off()),
                 "names": len(self.ix), "one": dict(self.one_st), "cost_today_usd": round(self.spend.usd, 5),
                 "cap_usd": self.spend.cap}

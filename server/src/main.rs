@@ -782,6 +782,9 @@ const BLOCK_MATCH_MIN: usize = 3;
 const BLOCK_CATEGORIES: [&str; 6] = ["copycat", "celebrity", "ai", "animal", "generic", "scam"];
 const BLOCK_CATEGORIES_DEFAULT: [&str; 3] = ["celebrity", "copycat", "scam"];
 
+/// `category:none`: no name category blocked, the bot's category gate off (blocklist.CATEGORY_OFF).
+const BLOCK_CATEGORY_OFF: &str = "none";
+
 /// Letters and digits only, lower case: "$SHEKEL", "shekel " and "SHEKEL" are one (blocklist.norm).
 fn block_norm(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
@@ -794,8 +797,8 @@ fn is_address(s: &str) -> bool {
 
 /// One entry: (kind, value) as the bot reads it, or why it is not one. A mint bare,
 /// `creator:<wallet>`, `symbol:<SYMBOL>`, `name:<text>`, `match:<text>` (every coin whose
-/// name or symbol contains the text) or `category:<code>` (every coin of that name category);
-/// `#` and line breaks never.
+/// name or symbol contains the text) or `category:<code>` (every coin of that name category;
+/// `category:none` switches the category gate off); `#` and line breaks never.
 fn block_entry(raw: &str) -> Result<(String, String), String> {
     let v = raw.trim();
     if v.is_empty() {
@@ -822,8 +825,10 @@ fn block_entry(raw: &str) -> Result<(String, String), String> {
         }
         "match" if rest.chars().count() > BLOCK_TEXT_MAX => Err(format!("A match has at most {BLOCK_TEXT_MAX} characters.")),
         "match" => Ok((kind.clone(), rest.into())),
-        "category" if BLOCK_CATEGORIES.contains(&rest.to_lowercase().as_str()) => Ok((kind.clone(), rest.to_lowercase())),
-        "category" => Err(format!("A category is one of {}.", BLOCK_CATEGORIES.join(", "))),
+        "category" if BLOCK_CATEGORIES.contains(&rest.to_lowercase().as_str()) || rest.eq_ignore_ascii_case(BLOCK_CATEGORY_OFF) => {
+            Ok((kind.clone(), rest.to_lowercase()))
+        }
+        "category" => Err(format!("A category is one of {} (or none: the gate off).", BLOCK_CATEGORIES.join(", "))),
         _ => Err("Use a mint, creator:<wallet>, symbol:<SYMBOL>, name:<text>, match:<text> or category:<code>.".into()),
     }
 }
@@ -870,13 +875,17 @@ fn blocked_view(root: &std::path::Path) -> serde_json::Value {
         .copied()
         .filter(|c| entries.iter().any(|e| e["kind"] == "category" && e["value"] == *c))
         .collect();
-    let blocked: Vec<&str> = if listed.is_empty() {
+    // category:none wins over the other category lines, as in the bot
+    let off = entries.iter().any(|e| e["kind"] == "category" && e["value"] == BLOCK_CATEGORY_OFF);
+    let blocked: Vec<&str> = if off {
+        Vec::new()
+    } else if listed.is_empty() {
         BLOCK_CATEGORIES.iter().copied().filter(|c| BLOCK_CATEGORIES_DEFAULT.contains(c)).collect()
     } else {
         listed.clone()
     };
     serde_json::json!({"path": "pumpfun_rt/blocked-mints.txt", "entries": entries, "ignored": ignored,
-        "categories": {"blocked": blocked, "default": listed.is_empty(), "codes": BLOCK_CATEGORIES}})
+        "categories": {"blocked": blocked, "default": !off && listed.is_empty(), "off": off, "codes": BLOCK_CATEGORIES}})
 }
 
 /// `POST /api/pumpfun/live/blocked`: `{"add": "symbol:SHEKEL"}`, `{"add": "match:spacex"}` or `{"remove": "..."}`.
@@ -891,6 +900,8 @@ struct BlockPatch {
 /// written to a temporary file next to it and renamed over it, so the bot never reads half of it.
 /// The first `category:` change writes the default categories out first (so removing one of them
 /// keeps the other two); the last category line is never removed (none listed means the defaults).
+/// `category:none` takes the place of the other category lines (the gate off); while it is there no
+/// other category is added; removing it leaves the defaults when no other category line is left.
 fn write_blocked(root: &std::path::Path, patch: BlockPatch) -> Result<(String, serde_json::Value), String> {
     let (add, raw) = match (&patch.add, &patch.remove) {
         (Some(a), None) => (true, a.as_str()),
@@ -916,10 +927,22 @@ fn write_blocked(root: &std::path::Path, patch: BlockPatch) -> Result<(String, s
         let v = line.split('#').next().unwrap_or("").trim();
         block_entry(v).is_ok_and(|x| x.0 == "category")
     };
-    let mut wrote_defaults = false;
-    if e.0 == "category" && !lines.iter().any(|l| is_cat(l.as_str())) {
+    let off = e.0 == "category" && e.1 == BLOCK_CATEGORY_OFF;
+    let is_off = |line: &str| {
+        let v = line.split('#').next().unwrap_or("").trim();
+        block_entry(v).is_ok_and(|x| x.0 == "category" && x.1 == BLOCK_CATEGORY_OFF)
+    };
+    if add && e.0 == "category" && !off && lines.iter().any(|l| is_off(l.as_str())) {
+        return Err("Name categories are off (category:none); switch them on first.".into());
+    }
+    let mut rewrote = false;
+    if off && add && lines.iter().any(|l| is_cat(l.as_str()) && !is_off(l.as_str())) {
+        lines.retain(|l| !is_cat(l.as_str()) || is_off(l.as_str()));
+        rewrote = true;
+    }
+    if e.0 == "category" && !off && !lines.iter().any(|l| is_cat(l.as_str())) {
         lines.extend(BLOCK_CATEGORIES_DEFAULT.iter().map(|c| format!("category:{c}")));
-        wrote_defaults = true;
+        rewrote = true;
     }
     let had = lines.iter().any(|l| is_it(l.as_str()));
     if add && !had {
@@ -929,11 +952,11 @@ fn write_blocked(root: &std::path::Path, patch: BlockPatch) -> Result<(String, s
             return Err("That entry is not on the list.".into());
         }
         lines.retain(|l| !is_it(l.as_str()));
-        if e.0 == "category" && !lines.iter().any(|l| is_cat(l.as_str())) {
+        if e.0 == "category" && !off && !lines.iter().any(|l| is_cat(l.as_str())) {
             return Err("At least one category stays blocked (with none listed the bot blocks celebrity, copycat and scam).".into());
         }
     }
-    if add != had || wrote_defaults {
+    if add != had || rewrote {
         let dir = path.parent().ok_or("No folder for the block list.")?;
         std::fs::create_dir_all(dir).map_err(|err| format!("Block list not written: {err}"))?;
         let tmp = dir.join("blocked-mints.txt.tmp");
