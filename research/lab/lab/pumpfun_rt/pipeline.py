@@ -438,9 +438,9 @@ def _build_y15() -> list[Strategy]:
 
 
 # Y16 (results/pumpfun_rugfilter_prereg.md): R3's single-feature rug rule, {feature: ("max" or "min", threshold)},
-# picked on the in-sample part of the Y16 replay and written here with its result; None until then (R3 skips
-# "no model").
-RUG_CUT: dict | None = None
+# picked on the in-sample part of the Y16 replay (results/pumpfun_rugfilter.md): skip when the first five outside
+# buyers hold more than 40.8 % of the supply.
+RUG_CUT: dict | None = {"first5_share": ("max", 0.4078188248772218)}
 
 
 def _build_y16() -> list[Strategy]:

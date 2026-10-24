@@ -62,7 +62,7 @@ def test_the_y16_strategies_and_trials_are_what_the_prereg_says():
         s = P.BY_NAME[n]
         assert s.flt == flt and dataclasses.replace(s, name=base.name, label=base.label) == base
         assert (s.exits, s.p, s.stake_sol) == (base.exits, {"delay_s": 0, "wait_pool_s": 5}, 0.1)
-    assert P.RUG_CUT is None and base.flt == {}
+    assert P.RUG_CUT == {"first5_share": ("max", 0.4078188248772218)} and base.flt == {}   # Y16's in-sample pick
     assert all(not s.flt.get("cut") for s in OLD)
     assert S.RUGFILTER_Y16_TRIALS == 12 == 3 * len(Y16.LIMITS) * len(Y16.LATENCIES)
     assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
@@ -70,24 +70,30 @@ def test_the_y16_strategies_and_trials_are_what_the_prereg_says():
 
 # ---------------------------------------------------------------- the filters
 
+MODEL = ("P_pool0_wait", R1, R2)
+
+
 def test_the_rug_model_at_its_base_rate_and_at_half_of_it():
-    ok = run_pool(stub_models(p_rug=0.1, base=0.2))              # 0.1: at most half the base rate, both buy
+    ok = run_pool(stub_models(p_rug=0.1, base=0.2), MODEL)              # 0.1: at most half the base rate, both buy
     x0 = [t for t in ok.closed if t["rule"] == "P_pool0_wait"][0]
     for n in (R1, R2):
         t = [t for t in ok.closed if t["rule"] == n][0]
         assert same(t, x0) and t["prob"] == 0.1
-    mid = run_pool(stub_models(p_rug=0.15, base=0.2))
+    mid = run_pool(stub_models(p_rug=0.15, base=0.2), MODEL)
     assert {t["rule"] for t in mid.closed} == {"P_pool0_wait", R1} and mid.skipped[(R2, "model")] == 1
-    high = run_pool(stub_models(p_rug=0.21, base=0.2))
+    high = run_pool(stub_models(p_rug=0.21, base=0.2), MODEL)
     assert {t["rule"] for t in high.closed} == {"P_pool0_wait"}
     assert high.skipped[(R1, "model")] == high.skipped[(R2, "model")] == 1
-    none = run_pool({})
+    none = run_pool({}, MODEL)
     assert none.skipped[(R1, "no model")] == none.skipped[(R2, "no model")] == 1
     assert [t["rule"] for t in none.closed] == ["P_pool0_wait"]
 
 
 def test_the_single_feature_rule(monkeypatch):
-    eng = run_pool({})                                          # RUG_CUT not set yet: R3 buys nothing
+    eng = run_pool({})                                          # the pick: no outside buyer here, so R3 buys
+    assert {t["rule"] for t in eng.closed} == {"P_pool0_wait", R3}
+    monkeypatch.setattr(P, "RUG_CUT", None)                     # no rule: R3 buys nothing
+    eng = run_pool({})
     assert eng.skipped[(R3, "no model")] == 1 and [t["rule"] for t in eng.closed] == ["P_pool0_wait"]
     monkeypatch.setattr(P, "RUG_CUT", {"pool_sol": ("min", 1e9)})
     eng = run_pool({})
