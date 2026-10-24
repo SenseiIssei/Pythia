@@ -513,7 +513,8 @@ jobs:
     command: /opt/pythia-ops/agent/run_agent.sh research
     timeout: 7h
     lock: agent
-    enabled: true
+    enabled: false
+    # off since 2026-10-24: the API credit is used up and not topped up again (the owner)
 
   - name: agent-care
     description: daily care by the agent, failed jobs fixed with tests, the live bot and the books checked, a short report
@@ -522,7 +523,8 @@ jobs:
     command: /opt/pythia-ops/agent/run_agent.sh care
     timeout: 2h
     lock: agent
-    enabled: true
+    enabled: false
+    # off since 2026-10-24: the API credit is used up and not topped up again (the owner)
 
   - name: backup
     description: archive of engine state, model registry, paper books and ledgers, rotated
