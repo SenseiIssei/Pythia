@@ -45,7 +45,7 @@ STALE_MS = 2 * DAY_MS
 NOT_STUDIES = {"learn", "forward", "notify", "trending", "listings", "models", "pokemon", "cs2", "cs2_trends",
                "cs2_weekly", "readiness", "pumpfun", "pumpfun_rt", "pumpfun_activity", "polymarket", "agent",
                "exit_shadow", "factory", "paper_review", "studies", "ai", "ai_brief", "ai_news", "ai_analyst",
-               "costs"}
+               "costs", "research"}
 ETFS = ("SPY", "QQQ", "GLD")
 
 
@@ -116,13 +116,15 @@ def _sol(v: float, eur: float | None, lang: str, sign: bool = False, dp: int = 4
     return f"{s} · {i18n.eur(v * eur, 2, lang, sign)}" if eur else s
 
 
-def pumpfun_section(ledger: list[dict], status: dict | None, now: int, eur: float | None, lang: str) -> tuple[list, str | None]:
-    """(parts, a few words for the summary). Yesterday is the Berlin day before today."""
+def pumpfun_section(ledger: list[dict], status: dict | None, now: int, eur: float | None,
+                    lang: str) -> tuple[list, str | None, float | None]:
+    """(parts, a few words for the summary, yesterday's P&L in SOL when it traded). Yesterday is the
+    Berlin day before today."""
     mid = local_midnight(now)
     day = [r for r in ledger if mid - DAY_MS <= r["exit_ms"] < mid]
     recent = any(now - r["exit_ms"] <= STALE_MS for r in ledger)
     if status is None and not recent:
-        return [], None
+        return [], None, None
     rows = []
     pnl = sum(r["pnl_sol"] or 0.0 for r in day)
     wins = sum(1 for r in day if (r["pnl_sol"] or 0) > 0)
@@ -142,14 +144,17 @@ def pumpfun_section(ledger: list[dict], status: dict | None, now: int, eur: floa
     stake = _num((st.get("stake") or {}).get("sol")) or _num((st.get("limits") or {}).get("max_trade_sol"))
     if stake:
         rows.append((tr("prl_row_stake", lang), _sol(stake, eur, lang)))
-    parts: list = [Rows(rows, tr("bf_pumpfun", lang))]
+    parts: list = [Rows(rows)]
     if status is not None and st.get("running") and not st.get("on"):
         why = "; ".join(str(w) for w in (st.get("gate") or [])[:2]) or str(st.get("refusing") or "?")
         parts.append(Line(short(nodash(why), 160), tr("bf_paused", lang)))
     elif status is not None and not st.get("running"):
         parts.append(Line(tr("bf_not_running", lang)))
     words = tr("bf_sum_pumpfun", lang, pnl=i18n.sol(pnl, 4, lang, True)) if day else None
-    return parts, words
+    if _num(st.get("balance_sol")) is not None and eur:
+        words = " · ".join(w for w in (words, tr("bf_sum_wallet", lang, eur=i18n.eur(st["balance_sol"] * eur, 2, lang)))
+                           if w)
+    return parts, words, (pnl if day else None)
 
 
 def real_money_section(rows: list[dict], lang: str) -> list:
@@ -166,23 +171,34 @@ def real_money_section(rows: list[dict], lang: str) -> list:
                 val += f" · {notify.signed_pct((eq / start - 1) * 100, 1, lang)}"
             venue = str(cfg.get("venue") or "").capitalize()
             out.append((notify.short_name(cfg.get("name"), 18) + (f" ({venue})" if venue else ""), val))
-    return [Rows(out, tr("bf_real", lang))] if out else []
+    return [Rows(out)] if out else []
 
 
 def paper_section(learn: dict | None, forward: dict | None, readiness: dict | None, prev: dict, now: int,
                   lang: str) -> tuple[list, dict, str | None]:
-    """The digest's table of autopilots, the forward books by status and the readiness line;
-    the snapshot for tomorrow; a few words for the summary."""
+    """One line on the autopilots (how many run, the best and the weakest since their start, today in $),
+    the forward books by status and the readiness line; the snapshot for tomorrow (the digest's, so
+    "today" keeps counting); a few words for the summary."""
     parts: list = []
     snap: dict = {}
     words = None
     if learn is not None:
         table, snap, today, n = notify.autopilot_parts(learn, prev, now, lang)
         if table:
-            parts.append(Line(tr("bf_paper_lead", lang, n=n), tr("bf_paper", lang)))
-            parts += table
+            since = []
+            for a in learn.get("autopilots") or []:
+                eq, start = _num(a.get("equity")), _num(a.get("start_capital"))
+                if a.get("state") == "running" and eq is not None and start:
+                    since.append(((eq / start - 1) * 100, notify.short_name(a.get("name"), 22)))
+            text = tr("bf_paper_lead", lang, n=n)
+            if len(since) > 1:
+                best, worst = max(since), min(since)
+                text += " · " + tr("bf_paper_ends", lang, best=f"{best[1]} {notify.signed_pct(best[0], 1, lang)}",
+                                   worst=f"{worst[1]} {notify.signed_pct(worst[0], 1, lang)}")
             if today:
+                text += " · " + tr("bf_paper_today", lang, money=notify.signed_money(sum(today), lang=lang))
                 words = tr("bf_sum_paper", lang, money=notify.signed_money(sum(today), lang=lang))
+            parts.append(Line(text, tr("bf_autopilots", lang)))
     if forward is not None:
         books = [b for b in forward.get("books") or [] if b.get("name")]
         if books:
@@ -194,7 +210,7 @@ def paper_section(learn: dict | None, forward: dict | None, readiness: dict | No
             parts.append(Line(tr("bf_books", lang, n=len(books), counts=words_fw), tr("forward_test", lang)))
     if readiness is not None:
         lead = (notify.READINESS_TEXT_DE if lang == "de" else notify.READINESS_TEXT)["lead"]
-        parts.append(Line(short(nodash(notify.readiness_text(readiness, now, lang)), 220), lead))
+        parts.append(Line(short(nodash(notify.readiness_text(readiness, now, lang)).split(";")[0], 90), lead))
     return parts, snap, words
 
 
@@ -234,62 +250,59 @@ def lab_section(models: dict | None, now: int, lang: str, root: Path | None = No
     if new:
         lines.append(Line(", ".join(new[:6]) + (f" (+{len(new) - 6})" if len(new) > 6 else ""),
                           tr("bf_studies", lang)))
-    return [Line("", tr("bf_lab", lang))] + lines if lines else []
+    return lines
 
 
 def pokemon_section(rep: dict | None, lang: str) -> list:
+    """One line: the play collection's value and return, how many cards look cheap and the first."""
     if rep is None:
         return []
-    rows = []
+    bits = []
     col = rep.get("collection") or {}
     eq, ret = _num(col.get("equity")), _num(col.get("returnPct"))
     if eq is not None:
-        rows.append((tr("bf_collection", lang), notify.money(eq, 2, lang)
-                     + (f" · {notify.signed_pct(ret, 1, lang)}" if ret is not None else "")))
+        bits.append(notify.money(eq, 2, lang) + (f" ({notify.signed_pct(ret, 1, lang)})" if ret is not None else ""))
     cheap = [i for i in rep.get("items") or [] if isinstance(i, dict) and "fair" in str(i.get("value") or "")]
     if cheap:
-        rows.append((tr("bf_cheap", lang), str(len(cheap))))
-        rows.append((tr("bf_top", lang), short(nodash(str(cheap[0].get("label"))), 30)))
-    return [Rows(rows, tr("bf_pokemon", lang))] if rows else []
+        bits.append(tr("bf_cheap_n", lang, n=len(cheap), top=short(nodash(str(cheap[0].get("label"))), 26)))
+    return [Line(" · ".join(bits), tr("bf_pokemon", lang))] if bits else []
 
 
 def cs2_section(rep: dict | None, trends: dict | None, now: int, lang: str) -> list:
-    rows = []
+    """One line: the play portfolio, the hints of the last 24 h and the first, the liquid Steam items."""
+    bits = []
     if rep is not None:
         pf = rep.get("portfolio") or {}
         eq, ret = _num(pf.get("equity")), _num(pf.get("returnPct"))
         if eq is not None:
-            rows.append((tr("bf_portfolio", lang), i18n.eur(eq, 0, lang)
-                         + (f" · {notify.signed_pct(ret, 1, lang)}" if ret is not None else "")))
+            bits.append(i18n.eur(eq, 0, lang) + (f" ({notify.signed_pct(ret, 1, lang)})" if ret is not None else ""))
         alerts = [a for a in rep.get("alerts") or [] if isinstance(a, dict) and now - (_num(a.get("tsMs")) or 0) <= DAY_MS]
-        rows.append((tr("bf_hints_24h", lang), str(len(alerts))))
         if alerts:
-            rows.append((tr("bf_top", lang), short(nodash(str(alerts[0].get("name"))), 30)))
+            bits.append(tr("bf_hints_n", lang, n=len(alerts), top=short(nodash(str(alerts[0].get("name"))), 26)))
     if trends is not None:
         liquid = _num((trends.get("summary") or {}).get("liquid"))
         if liquid is not None:
-            rows.append(("Steam", tr("bf_liquid", lang, n=i18n.num(liquid, 0, lang))))
-    return [Rows(rows, tr("bf_cs2", lang))] if rows else []
+            bits.append(tr("bf_liquid", lang, n=i18n.num(liquid, 0, lang)))
+    return [Line(" · ".join(bits), tr("bf_cs2", lang))] if bits else []
 
 
 def coins_section(trending: dict | None, listings: dict | None, now: int, lang: str) -> list:
+    """BTC, ETH and SOL over 24 h and the top gainer as fields; new listings as a line."""
     rows = []
     if trending is not None:
         al = trending.get("alpaca") or {}
         for c in ("BTC", "ETH", "SOL"):
             ch = _num((al.get(c) or {}).get("change"))
             if ch is not None:
-                rows.append((f"{c} 24 h", i18n.frac_pct(ch, 1, lang)))
+                rows.append((f"{c} 24 h", i18n.frac_pct(ch, 1, lang), ch))
         g = (trending.get("gainers") or [None])[0]
         if isinstance(g, dict) and g.get("coin") and _num(g.get("change")) is not None:
             rows.append((tr("bf_gainer", lang), f"{g['coin']} {i18n.frac_pct(g['change'], 0, lang)}"))
-    parts: list = [Rows(rows, tr("bf_coins", lang))] if rows else []
+    parts: list = [Rows(rows)] if rows else []
     if listings is not None:
         new = [i.get("label") for i in listings.get("items") or []
                if isinstance(i, dict) and now - (_num(i.get("atMs")) or 0) <= DAY_MS and i.get("label")]
         if new:
-            if not parts:
-                parts.append(Line("", tr("bf_coins", lang)))
             parts.append(Line(", ".join(str(x) for x in new[:5]), tr("bf_listings", lang)))
     return parts
 
@@ -325,7 +338,7 @@ def stocks_section(rows: list[dict], etfs: list[tuple[str, float, float]], lang:
                     held[mid.split(":", 1)[1]] = held.get(mid.split(":", 1)[1], 0.0) + v
     for sym, v in sorted(held.items(), key=lambda kv: -kv[1])[:4]:
         out.append((tr("bf_held", lang, sym=sym), notify.money(v, 0, lang)))
-    return [Rows(out, tr("bf_stocks", lang))] if out else []
+    return [Line(" · ".join(f"{a} {b}" for a, b in out), tr("bf_stocks", lang))] if out else []
 
 
 def news_section(now: int, lang: str, root: Path | None = None, n: int = 3) -> list:
@@ -359,45 +372,95 @@ def news_section(now: int, lang: str, root: Path | None = None, n: int = 3) -> l
         out.append(Links([(title, h.get("link"))], "•"))
         if len(out) == n:
             break
-    return [Line("", tr("bf_news", lang))] + out
+    return out
+
+
+def research_section(rep: dict | None, now: int, lang: str, n: int = 5) -> tuple[list, str | None]:
+    """The task lanes (reports/research/latest.json, written on the host by research-report.py): what
+    finished in the last 24 hours with its verdict, what runs, what waits, the API credit. (parts,
+    a few words for the summary)."""
+    if rep is None:
+        return [], None
+    done = [d for d in rep.get("done") or [] if isinstance(d, dict) and 0 <= now - (_num(d.get("at")) or 0) <= DAY_MS]
+    parts: list = []
+    for d in done[:n]:
+        mark = "✅" if d.get("ok") else "⚠️"
+        why = short(nodash(str(d.get("why") or "")), 150)
+        parts.append(Line("\n↳ " + (why or tr("bf_res_no_words", lang)),
+                          f"{mark} {short(nodash(str(d.get('title'))), 60)}"))
+    if len(done) > n:
+        parts.append(Line(tr("bf_res_more", lang, n=len(done) - n)))
+    running = [r for r in rep.get("running") or [] if isinstance(r, dict)]
+    if running:
+        names = ", ".join(short(nodash(str(r.get("title"))), 40) for r in running[:4])
+        parts.append(Line(names, "⏳ " + tr("bf_res_running", lang)))
+    waiting = int(_num(rep.get("queued")) or 0)
+    held = rep.get("held") or []
+    if waiting or held:
+        parts.append(Line(tr("bf_res_queue", lang, n=waiting, held=len(held)), "🗂️ " + tr("bf_res_queue_lead", lang)))
+    b = rep.get("budget") or {}
+    if _num(b.get("balance_usd")):
+        text = tr("bf_res_budget", lang, left=notify.money(_num(b.get("left_usd")) or 0.0, 2, lang),
+                  reserve=notify.money(_num(b.get("reserve_usd")) or 0.0, 0, lang))
+        if b.get("paused"):
+            text += " · " + tr("bf_res_paused", lang)
+        parts.append(Line(text, "💳 " + tr("bf_res_budget_lead", lang)))
+    ok = sum(1 for d in done if d.get("ok"))
+    words = tr("bf_sum_research", lang, n=ok) if ok else None
+    return parts, words
 
 
 # ---------------------------------------------------------------- the card and its chart
 
 def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: float | None, prev: dict,
-          read=None) -> tuple[Card, dict]:
-    """The briefing card and the autopilots' snapshot for tomorrow. `read(name, file)` gives
-    a report (fresh ones only; tests pass their own)."""
+          read=None) -> tuple[list[Card], dict]:
+    """The briefing as a few short cards (one Telegram post with a bold head per section, one
+    Discord embed per section with its own colour) and the autopilots' snapshot for tomorrow: the
+    morning's head with the summary, pump.fun, real money, research, paper, lab, markets, news.
+    A card without fresh data is left out. `read(name, file)` gives a report (fresh ones only;
+    tests pass their own)."""
     read = read or (lambda name, file="latest.json": report(name, now, file))
     status = fresh(read("pumpfun_rt", "live_status.json"), now)
-    learn = read("learn")
-    parts: list = []
+    cards: list[Card] = []
     summary: list[str] = []
-    pf, words = pumpfun_section(ledger, status, now, eur, lang)
-    parts += pf
-    if words:
-        summary.append(words)
-    parts += real_money_section(engines, lang)
-    paper, snap, words = paper_section(learn, read("forward"), read("readiness"), prev, now, lang)
-    parts += paper
-    if words:
-        summary.append(words)
-    parts += lab_section(read("models"), now, lang)
-    parts += pokemon_section(read("pokemon"), lang)
-    parts += cs2_section(read("cs2"), read("cs2_trends"), now, lang)
-    parts += coins_section(read("trending"), read("listings"), now, lang)
-    parts += stocks_section(engines, etf_closes(now), lang)
-    parts += news_section(now, lang)
+    pf, words, pnl = pumpfun_section(ledger, status, now, eur, lang)
+    if pf:
+        cards.append(Card("🔴" if (pnl or 0) < 0 else "🟢", tr("bf_pumpfun", lang), None, pf))
+    summary += [words] if words else []
+    real = real_money_section(engines, lang)
+    if real:
+        cards.append(Card("💶", tr("bf_real", lang), None, real))
+    res, words = research_section(read("research"), now, lang)
+    if res:
+        cards.append(Card("🔵", tr("bf_research", lang), None, res))
+    summary += [words] if words else []
+    paper, snap, words = paper_section(read("learn"), read("forward"), read("readiness"), prev, now, lang)
+    if paper:
+        cards.append(Card("📈", tr("bf_paper", lang), None, paper))
+    summary += [words] if words else []
+    lab = lab_section(read("models"), now, lang)
+    if lab:
+        cards.append(Card("🧪", tr("bf_lab", lang), None, lab))
+    markets = (coins_section(read("trending"), read("listings"), now, lang) + stocks_section(engines, etf_closes(now), lang)
+               + pokemon_section(read("pokemon"), lang) + cs2_section(read("cs2"), read("cs2_trends"), now, lang))
+    if markets:
+        cards.append(Card("🌍", tr("bf_markets", lang), None, markets))
+    news = news_section(now, lang)
+    if news:
+        cards.append(Card("📰", tr("bf_news", lang), None, news))
     health = notify.read_json(notify.data_root() / "_health" / "system.json")
+    head_parts: list = []
     if health:
         hl = notify.health_line(health, now, lang)
-        parts.append(hl)
+        red = any(not c.get("ok") for c in health.get("checks") or [])
         summary.append(hl.text.split(":")[0])
+        if red:
+            head_parts.append(hl)
     title = tr("bf_title", lang, day=notify.day_label(now, lang))
-    if not parts:
-        return Card("☀️", title, tr("bf_nothing", lang)), snap
-    return Card("☀️", title, " · ".join(summary) or tr("bf_summary", lang), parts,
-                footer=tr("bf_footer", lang)), snap
+    if not cards:
+        return [Card("☀️", title, tr("bf_nothing", lang))], snap
+    cards[-1].footer = tr("bf_footer", lang)
+    return [Card("☀️", title, " · ".join(summary) or tr("bf_summary", lang), head_parts)] + cards, snap
 
 
 def overview_chart(engines: list[dict], ledger: list[dict], now: int, lang: str) -> bytes | None:
@@ -442,11 +505,20 @@ def run(now: int | None = None, force: bool = False, dry_run: bool = False, engi
     engines = engines if engines is not None else notify.engine_states()
     ledger = read_ledger()
     rate = eur() if callable(eur) else eur
-    card, snap = build(now, lang, engines, ledger, rate, st.get("autopilots") or {})
-    # Discord posts the briefing in German and English: the same data, built once more in the other language.
-    card.lang, card.remake = lang, lambda lg: build(now, lg, engines, ledger, rate, st.get("autopilots") or {})[0]
+    cards, snap = build(now, lang, engines, ledger, rate, st.get("autopilots") or {})
+    # Discord posts the briefing in German and English: the same data, built once more in the other language
+    # (once per language, shared by the cards; the same sections come out in the same order).
+    other: dict[str, list[Card]] = {}
+
+    def remake(i: int, lg: str) -> Card:
+        if lg not in other:
+            other[lg] = build(now, lg, engines, ledger, rate, st.get("autopilots") or {})[0]
+        return other[lg][i] if i < len(other[lg]) else cards[i]
+
+    for i, c in enumerate(cards):
+        c.lang, c.remake = lang, (lambda lg, i=i: remake(i, lg))
     image = overview_chart(engines, ledger, now, lang) if chart and not dry_run else None
-    res = notify.send("dailyPnl", [card], image=image, now=now, dry_run=dry_run, hold_in_quiet=False,
+    res = notify.send("dailyPnl", cards, image=image, now=now, dry_run=dry_run, hold_in_quiet=False,
                       poster=poster, discord="briefing", discord_poster=discord_poster)
     if dry_run or res["reason"] in ("off", "quiet"):
         return 0

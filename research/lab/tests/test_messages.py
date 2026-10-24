@@ -204,15 +204,33 @@ def test_the_briefing_is_built_from_the_files_and_leaves_out_stale_sections(data
     now = utc(2026, 10, 23, 7, 0)
     fill_lab(data, now)
     for lang in ("de", "en"):
-        card, _ = briefing.build(now, lang, [], briefing.read_ledger(), 158.2, {})
-        text = notify.plain(notify.render_post([card], "telegram", lang=lang))
-        assert ("Morgen-Briefing" if lang == "de" else "Morning briefing") in text
-        assert ("pump.fun Alpha-Phase" if lang == "de" else "pump.fun Alpha phase") in text
+        cards, _ = briefing.build(now, lang, [], briefing.read_ledger(), 158.2, {})
+        text = notify.plain(notify.render_post(cards, "telegram", lang=lang))
+        assert ("Guten Morgen" if lang == "de" else "Good morning") in text
+        assert ("pump.fun · Echtgeld" if lang == "de" else "pump.fun · real money") in text
         assert ("+0,0080 SOL · +1,27 €" if lang == "de" else "+0.0080 SOL · +€1.27") in text
         assert "M8u" in text and "BMT" in text
         assert "Pokémon" not in text, "five days old: left out"
+        assert cards[0].emoji == "☀️" and cards[1].emoji == "🟢", "the head first, pump.fun green on a plus day"
         if lang == "de":
-            no_english(notify.render_post([card], "telegram", lang="de"))
+            no_english(notify.render_post(cards, "telegram", lang="de"))
+
+
+def test_the_briefing_shows_the_research_lanes(data):
+    now = utc(2026, 10, 23, 7, 0)
+    fill_lab(data, now)
+    write(data, "reports/research/latest.json", {
+        "updated_ms": now - 600_000,
+        "done": [{"title": "Bomber-Coins (Papier)", "ok": True, "at": now - 3_600_000, "why": "Nein, zu langsam."},
+                 {"title": "Alt", "ok": True, "at": now - 3 * 86_400_000, "why": "zu alt"}],
+        "running": [{"title": "Realistisches Papier (R1)", "since": now - 600_000}], "queued": 1, "held": ["A1"],
+        "budget": {"balance_usd": 47.0, "left_usd": 30.5, "reserve_usd": 10.0, "paused": False}})
+    cards, _ = briefing.build(now, "de", [], briefing.read_ledger(), 158.2, {})
+    text = notify.plain(notify.render_post(cards, "telegram", lang="de"))
+    assert "Forschung" in text and "Bomber-Coins" in text and "Nein, zu langsam." in text
+    assert "zu alt" not in text, "only the last 24 hours"
+    assert "Realistisches Papier (R1)" in text and "1 warten, 1 zurückgestellt" in text and "30,50" in text
+    assert "1 Aufgabe fertig" in text, "in the summary"
 
 
 def test_the_briefing_goes_out_at_nine_once_to_telegram_and_discord(data, monkeypatch):
