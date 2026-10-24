@@ -441,6 +441,8 @@ jobs:
     command: /usr/bin/python3 /opt/pythia-ops/pumpfun_live_watch.py
     timeout: 2m
     alert: false
+    enabled: false
+    # off since 2026-10-24: the owner switched the live bot off (its wallet is empty)
 
   # Our own wallet's history for the app's Wallet tab: getSignaturesForAddress and getTransaction
   # for its public address, parsed into reports/onchain/history.json. Read only; quiet until the
