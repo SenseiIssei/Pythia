@@ -2,6 +2,11 @@
 the study's pick and the pick with the model filter in front, and every pipeline
 strategy (pipeline.STRATEGIES) through the same pipeline a live executor would use.
 
+Since R1 every pipeline book is REALISTIC (realistic.py): the live bot's measured latency, fills at the first recorded
+trade after the landing, its bounds, failures, fees and sizing on a paper wallet of 0.55 SOL per book, under the
+strategy's own name; the old books (0.4 to 3 s, 0.1 SOL) run on as `<name>_ideal` until realistic.IDEAL_UNTIL_MS.
+The day's fit (reports/pumpfun_rt/realistic.json) and the live sizing settings are re-read every RELOAD_S.
+
 Nothing here trades: every fill of these books is the engine's curve
 arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The
 live book (real money) runs only in its own service, live_service.py, which the
@@ -15,7 +20,8 @@ pick's books afresh (the ledger keeps every closed trade with its rule).
 Files under <data>/paper/pumpfun_rt/:
   ledger.csv     every closed paper trade (rule, token, times, prices, return, P&L in SOL)
   failed.csv     every buy that did not fill (slippage, curve completed), with its fee
-  state.json     what is open, counts, the books' totals since start
+  state.json     what is open, counts, the books' totals since start, the realistic books' paper wallets and
+                 realistic_since (when the realistic books took over the names)
   creators.json  the creator history (written every SAVE_S, read on start)
   wallets.json   the wallet reputation (the same)
   snipers.json   the sniper book of the X14 early features (the same)
@@ -49,6 +55,7 @@ from pathlib import Path
 
 from ..data import ROOT
 from . import pipeline as P
+from . import realistic as R
 from . import strategies as S
 from . import wallets as W
 from .sim import Engine, feed_row, model_rule
@@ -60,7 +67,8 @@ BIG_WIN = 2.0
 ALERT_GAP_MS = 3_600_000
 LEDGER_COLS = ["rule", "family", "mint", "name", "symbol", "created_ms", "signal_ms", "land_ms", "exit_signal_ms",
                "exit_ms", "exit_why", "signal_price", "entry_price", "exit_price", "proceeds_sol", "pnl_sol", "ret",
-               "hold_s", "prob", "dev_dumped", "migrated", "gap", "age_s", "progress", "lat_buy_ms", "slip"]
+               "hold_s", "prob", "dev_dumped", "migrated", "gap", "age_s", "progress", "lat_buy_ms", "slip",
+               "stake_sol"]
 FAILED_COLS = ["rule", "mint", "signal_ms", "land_ms", "why", "pnl_sol"]
 HOLD_MS = 120_000                                       # rows of a coin not known yet wait this long for its creation
 HOLD_TABLES = ("trades", "amm", "other")
@@ -87,10 +95,27 @@ def read_pick() -> str:
 
 
 def append_csv(path: Path, cols: list[str], rows: list[dict]) -> None:
+    """Rows appended under the file's header; a file whose header lacks one of `cols` is rewritten once with them
+    (the old columns kept after them, the old rows with the new ones empty)."""
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()
+    if not new:
+        with path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            old = list(reader.fieldnames or [])
+            keep = list(reader) if old and any(c not in old for c in cols) else None
+        if keep is not None:
+            cols = cols + [c for c in old if c not in cols]
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(keep)
+            tmp.replace(path)
+        elif old:
+            cols = old
     with path.open("a", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
         if new:
@@ -140,17 +165,26 @@ class Hold:
 class Shadow:
     def __init__(self, pick: str, models: dict | None = None, book: CreatorBook | None = None,
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
-                 strategies: list | None = None, kill=None, trends: bool = False, blocked=None, category=None):
+                 strategies: list | None = None, kill=None, trends: bool = False, blocked=None, category=None,
+                 realistic: bool = False, real: R.Model | None = None, paper_wallets: dict | None = None):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
         rule = S.BY_NAME[pick]
         self.models = models or {}
+        strategies = P.STRATEGIES if strategies is None else strategies
+        kill = kill or P.KillSwitch()
+        now = now_ms or int(time.time() * 1000)
+        # R1: the strategies' realistic books under their names, the old paper books as <name>_ideal until the date
+        self.real = (real or R.Model()) if realistic else None
+        self.paper_wallets = paper_wallets if paper_wallets is not None else {}
+        old = ([R.ideal(s) for s in strategies] if now < R.IDEAL_UNTIL_MS else []) if realistic else strategies
         self.engine = Engine([rule, model_rule(rule)], book=self.book, decisions=False,
                              model=Filter(self.models) if self.models else None, on_close=self._closed,
-                             strategies=P.STRATEGIES if strategies is None else strategies,
-                             wallets=wallets, cats=cats, models=self.models, kill=kill or P.KillSwitch(),
+                             strategies=old, wallets=wallets, cats=cats, models=self.models, kill=kill,
                              select=True, trend=True)
+        if realistic:
+            R.books(self.engine, strategies, self.real, self.paper_wallets, kill=kill)
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
             pipe.blocked = blocked                            # the owner's block list (blocklist.PAPER_RULES)
@@ -169,7 +203,8 @@ class Shadow:
         self.last_save = time.monotonic()
         self.model_mtime = self._model_mtime()
         self.totals: dict[str, dict] = {}
-        self.started_ms = now_ms or int(time.time() * 1000)
+        self.started_ms = now
+        self.realistic_since = now if realistic else None
         self.trends = None
         if trends:                                            # a view only: off in the tests that do not ask for it
             from .trends import Trends
@@ -210,8 +245,14 @@ class Shadow:
         from .livecat import CategoryGate
         cats = CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS)
         blocked = BlockWatch(rules=PAPER_RULES)
+        try:
+            st = json.loads((paper_dir() / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            st = {}
+        pw = {k: R.PaperWallet.from_json(v) for k, v in (st.get("paper_wallets") or {}).items()}
         sh = cls(read_pick(), load(), book, wallets=wallets, cats=cats, trends=True, blocked=blocked,
-                 category=CategoryGate(cats, block=blocked, rules=PAPER_RULES))
+                 category=CategoryGate(cats, block=blocked, rules=PAPER_RULES), realistic=True, paper_wallets=pw)
+        sh.realistic_since = st.get("realistic_since") or sh.realistic_since
         sh.cats_mtime = cls._cats_mtime()
         try:                                                  # X14: the sniper book of the early features
             from .early import SniperBook
@@ -220,15 +261,18 @@ class Shadow:
         except (OSError, ValueError):
             pass
         try:
-            st = json.loads((paper_dir() / "state.json").read_text(encoding="utf-8"))
             lost = [dict(p, exit_why="restart", pnl_sol=None, ret=None) for p in st.get("open") or []]
             append_csv(paper_dir() / "ledger.csv", LEDGER_COLS, lost)
-            if st.get("pick") == sh.pick:
-                sh.totals = st.get("totals") or {}
         except (OSError, ValueError):
             pass
+        if st.get("pick") == sh.pick:
+            sh.totals = st.get("totals") or {}
+        if st and not st.get("realistic_since"):            # R1's first start: the totals so far were the old model's
+            sh.totals = {(k + R.IDEAL if k in P.BY_NAME else k): v for k, v in sh.totals.items()}
         print(f"shadow: paper books {sh.pick} and {sh.pick}+model, and the pipeline strategies "
-              + ", ".join(s.name for s in P.STRATEGIES)
+              + ", ".join(s.name for s in P.STRATEGIES) + " realistic (live latency, fills, failures, fees and "
+              f"sizing on {R.START_SOL} SOL each)" + (", with the old books as <name>_ideal"
+                                                       if any(p.name == "paper" for p in sh.engine.pipes) else "")
               + ("" if sh.models else " (no model yet: the model-filtered books skip every signal)"), flush=True)
         return sh
 
@@ -297,12 +341,20 @@ class Shadow:
             rule = S.BY_NAME[pick]
             self.engine.rules = [rule, model_rule(rule)]
             self.engine._index_rules()
-            self.totals = {k: v for k, v in self.totals.items() if k in P.BY_NAME}
+            self.totals = {k: v for k, v in self.totals.items() if k in P.BY_NAME or k.endswith(R.IDEAL)}
         if mt != self.model_mtime:
             self.model_mtime = mt
             self.models = load()
             self.engine.model = Filter(self.models) if self.models else None
             self.engine.models = self.models
+        if self.real is not None:
+            self.real.reload()                                # the day's fit and the live sizing settings
+            old = [p for p in self.engine.pipes if p.name == "paper" and not p.pos and not p.waiting]
+            if old and time.time() * 1000 >= R.IDEAL_UNTIL_MS:   # the _ideal twins go once their two weeks are over
+                for p in old:
+                    self.engine.pipes.remove(p)
+                self.engine._index_rules()
+                print("shadow: the _ideal paper books ended (realistic.IDEAL_UNTIL_MS)", flush=True)
         ct = self._cats_mtime()
         if ct != self.cats_mtime:
             from .categorize import BOOK_DAYS, CategoryIndex
@@ -354,10 +406,12 @@ class Shadow:
                 "entry_price")
         opened = [p for p in self.engine.positions.values() if p["state"] == "open"]
         for pipe in self.engine.pipes:
-            if pipe.name == "paper":
+            if pipe.name in ("paper", "realistic"):
                 opened += [p for p in pipe.pos.values() if p["state"] == "open"]
         st = {"t": int(time.time() * 1000), "pick": self.pick, "started_ms": self.started_ms, "totals": self.totals,
-              "open": [{k: p.get(k) for k in keep} for p in opened], "status": self.status()}
+              "open": [{k: p.get(k) for k in keep} for p in opened], "status": self.status(),
+              "realistic_since": self.realistic_since,
+              "paper_wallets": {k: w.to_json() for k, w in self.paper_wallets.items()}}
         tmp = d / "state.json.tmp"
         tmp.write_text(json.dumps(st, default=str), encoding="utf-8")
         tmp.replace(d / "state.json")
@@ -382,7 +436,8 @@ def winner_card(rec: dict, lang: str = "en"):
     name = rec.get("symbol") or rec.get("name") or rec["mint"][:8]
     return notify.Card(
         "🚀", t("prt_win_title", lang, name=str(name)[:20], ret=i18n.frac_pct(rec["ret"], 0, lang)),
-        t("prt_win_summary", lang, rule=rec["rule"], stake=f"{i18n.num(S.STAKE_SOL, 2, lang)} SOL",
+        t("prt_win_summary", lang, rule=rec["rule"],
+          stake=f"{i18n.num(rec.get('stake_sol') or S.STAKE_SOL, 2, lang)} SOL",
           got=f"{i18n.num(rec['proceeds_sol'], 3, lang)} SOL", secs=i18n.num(rec["hold_s"], 0, lang),
           why=t(why.get(rec.get("exit_why"), "prt_why_time"), lang)),
         [notify.Line(t("prt_caveat", lang))], footer=t("prt_footer", lang))

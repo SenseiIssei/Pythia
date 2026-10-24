@@ -18,6 +18,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:40 | pump.fun daily report, `reports/pumpfun/latest.json` and its card (`lab.paper.pumpfun --report`, seconds) | `jobs.yaml`: `pumpfun-report` |
 | always | real-time pump.fun collector, PAPER: every creation, curve trade, completion and migration from a public Solana RPC websocket into `/srv/pythia-data/pumpfun_rt/`, plus the live shadow book (`lab.pumpfun_rt.collector`; reads only, no wallet) | container `pythia-pumpfun-rt`, see "Real-time pump.fun lab" |
 | every 10 min | real-time pump.fun collector health: trades and heartbeat written in the last 10 minutes, else red and one alert (`lab.pumpfun_rt.health`, seconds) | `jobs.yaml`: `pumpfun-rt-health` |
+| 06:40 | realistic pump.fun paper: the paper books' execution model refitted from the live bot's orders of the last 7 days (latency, failures, fees; a fixed fallback under 30 orders a side) and the daily line "live vs realistic paper" for P_pool0_wait, `reports/pumpfun_rt/realistic.json`, `.md` and `realistic_calib.csv` (`lab.pumpfun_rt.realistic`, seconds; reads the live files only) | `jobs.yaml`: `pumpfun-rt-realistic` |
 | 06:50 | real-time pump.fun study: the 22 pre-registered rules and the model filter replayed with latency fills, the model retrained, `reports/pumpfun_rt/latest.json`, the shadow book's pick and the daily card (`lab.pumpfun_rt.study`; minutes per recorded day, at most the last 14) | `jobs.yaml`: `pumpfun-rt-study` |
 | 04:45 | M4 shadow paper book, market-neutral on perps (`lab.paper.m4_ls`, 2 to 3 minutes, about 3 GB; rebuilds the xs_daily panel and retrains weekly into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-m4` |
 | 05:30 | market-neutral M2 paper books (v1 and v2) | `/etc/cron.d/pythia-paper-ls` |
@@ -285,12 +286,14 @@ The jobs are in `jobs.yaml`:
 |---|---|---|
 | `pumpfun-rt-health` | every 10 min | the collector wrote trades and its heartbeat in the last 10 minutes |
 | `pumpfun-rt-categories` | 06:20 | yesterday's new token names into six categories, Claude Haiku 5.5 through the engine's `POST /api/ai/complete` (Batches; the engine's budget applies, a refusal is not a failure); names classified before are not asked again; cache `pumpfun_rt/categories/cats.jsonl`, report `reports/pumpfun_rt/categories.json`; usually well under $0.20 a day, capped at $0.40 a run |
+| `pumpfun-rt-realistic` | 06:40 | R1: the realistic paper model (`lab/pumpfun_rt/realistic.py`) refitted from the last 7 days of `live/pumpfun_rt/measured.jsonl`, the calibration line live vs realistic paper for P_pool0_wait (calibrated: median P&L difference per matched trade within 5 points over 7 days); the collector re-reads `reports/pumpfun_rt/realistic.json` every 10 minutes |
 | `pumpfun-rt-study` | 06:50 | the 22 rules and the 12 pipeline strategies replayed over the last 14 days (latency fills, doubled latency, tripled priority fee), the bar, live readiness per strategy, each strategy's capture ratio, `reports/pumpfun_rt/latest.json`, the decision rows for the retrain (`pumpfun_rt/rows/latest.parquet`) and X14's early rows, paths and step rows (`pumpfun_rt/rows/early.parquet`, `steps.parquet`, `paths.npz`; paths and steps of about two days' worth of tokens, a hash sample) |
 | `pumpfun-rt-retrain` | after the study | purged walk-forward per label and feature set (base, wallet reputation, name categories; a set only where it wins out of sample), the models for the shadow books, `reports/pumpfun_rt/models.md`; X14 (`results/pumpfun_early_exit_plan.md`): early detection and the 38 exit policies, `reports/pumpfun_rt/early_exit.md`, the early and hazard models with the in-sample k* for P_early10, P_early30, P_press10_hz and P_pool60_hz; then the daily Telegram card with its capture and precision line |
 
 The collector re-reads the models, the pick and the categories every ten
 minutes; no restart. The shadow books (every pipeline strategy and the study's
-pick) write `paper/pumpfun_rt/ledger.csv`; a paper trade at +200 % or better
+pick) write `paper/pumpfun_rt/ledger.csv` (since R1 the pipeline books realistic under their names,
+the old ones as `<name>_ideal` until 2026-11-06); a paper trade at +200 % or better
 is posted at once (at most one an hour).
 
 Try the study and the retrain by hand without posting:

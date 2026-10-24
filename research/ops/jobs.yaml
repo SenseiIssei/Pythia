@@ -762,6 +762,16 @@ jobs:
     timeout: 45m
     lock: pumpfun-rt-cat
 
+  # R1 (research/lab/lab/pumpfun_rt/realistic.py): the realistic paper books' execution model refitted from the
+  # live bot's orders of the last 7 days (read only), and the daily line "live vs realistic paper" for P_pool0_wait.
+  # The collector re-reads reports/pumpfun_rt/realistic.json every 10 minutes.
+  - name: pumpfun-rt-realistic
+    description: real-time pump.fun lab, PAPER, daily; the realistic paper model refitted from the last 7 days of live orders, the calibration line live vs realistic paper
+    schedule: "40 6 * * *"
+    command: python -m lab.pumpfun_rt.realistic
+    resources: {cpus: 1, memory: 1g}
+    timeout: 10m
+
   - name: pumpfun-rt-study
     description: real-time pump.fun lab, PAPER, daily; 22 rules and the pipeline strategies replayed, the bar, live readiness, capture, decision rows, X14 early/exit rows and Y9 select rows for the retrain
     schedule: "50 6 * * *"
