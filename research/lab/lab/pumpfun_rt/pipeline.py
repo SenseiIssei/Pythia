@@ -437,6 +437,29 @@ def _build_y15() -> list[Strategy]:
     ]
 
 
+# Y16 (results/pumpfun_rugfilter_prereg.md): R3's single-feature rug rule, {feature: ("max" or "min", threshold)},
+# picked on the in-sample part of the Y16 replay and written here with its result; None until then (R3 skips
+# "no model").
+RUG_CUT: dict | None = None
+
+
+def _build_y16() -> list[Strategy]:
+    """Y16 (results/pumpfun_rugfilter_prereg.md): P_pool0_wait that skips the entry when a rug rule fires, the same
+    entry, exits and stake. R1 P(rug0t) above its base rate, R2 above half its base rate (Y10's rug model with the
+    trend features, Y9's select filter), R3 the single-feature rule RUG_CUT ("cut")."""
+    s = next(x for x in _build_y8() if x.name == "P_pool0_wait")
+    w = "P_pool0_wait"
+    return [
+        dataclasses.replace(s, name="P_pool0_wait_norug", flt={"select": {"rug0t": ("max", 1.0)}},
+                            label=f"{w} where P(rug within 60 s), with the trend features, is at most its base rate"),
+        dataclasses.replace(s, name="P_pool0_wait_norug_half", flt={"select": {"rug0t": ("max", 0.5)}},
+                            label=f"{w} where P(rug within 60 s), with the trend features, is at most half its base "
+                                  "rate"),
+        dataclasses.replace(s, name="P_pool0_wait_rugcut", flt={"cut": "Y16"},
+                            label=f"{w} without the coins the in-sample single-feature rug rule names (RUG_CUT)"),
+    ]
+
+
 def _build_tol() -> list[Strategy]:
     """P_pool0_wait with the live executor's wider pool buy tolerance (live_exec.LIVE_POOL_BUY_TOL, 0.60, the owner's
     decision 2026-10-23 after the 6040 failures): exactly P_pool0_wait, the same latency draws (p["base"]), only a
@@ -448,7 +471,8 @@ def _build_tol() -> list[Strategy]:
 
 
 STRATEGIES: list[Strategy] = (_build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
-                              + _build_y10() + _build_y11() + _build_y12() + _build_y15() + _build_tol())
+                              + _build_y10() + _build_y11() + _build_y12() + _build_y15() + _build_tol()
+                              + _build_y16())
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -715,6 +739,11 @@ class Pipeline:
             if not ok:
                 self.skip(s.name, tok.mint, "model" if ok is False else "no model")
                 return
+        if s.flt.get("cut"):
+            ok, prob = self.cut_ok(s.flt["cut"], tok, t)
+            if not ok:
+                self.skip(s.name, tok.mint, "rug rule" if ok is False else "no model")
+                return
         risk = self.risk[s.name]
         stake = int(min(s.stake_sol, risk.limits.stake_sol) * C.LAMPORTS)
         depth = tok.pq if pool else tok.vs
@@ -883,6 +912,27 @@ class Pipeline:
             if prob < m.base:
                 return False, prob
         return True, prob
+
+    def cut_ok(self, spec, tok, t: float) -> tuple[bool | None, float | None]:
+        """Y16's single-feature rug rule: spec "Y16" is RUG_CUT, else {feature: (how, x)}; ("max", x) keeps the entry
+        only with the feature at most x, ("min", x) at least x. The features are the select filter's at t
+        (selfeat.decision_features) and pool_sol, the pool's SOL; a value not known (NaN) keeps it. (None, None)
+        without a cut or the engine's select tracker."""
+        cut = RUG_CUT if spec == "Y16" else spec
+        if not cut or getattr(self.eng, "sel", None) is None:
+            return None, None
+        from .selfeat import decision_features
+        f = decision_features(self.eng, tok, t)
+        f["pool_sol"] = tok.pq / C.LAMPORTS if tok.pq else math.nan
+        first = None
+        for name, (how, x) in cut.items():
+            v = float(f.get(name, math.nan))
+            first = v if first is None else first
+            if v != v:
+                continue
+            if (how == "max" and v > x) or (how == "min" and v < x):
+                return False, first
+        return True, first
 
     # ------------------------------------------------------------ fills
     def bought(self, pid: int, at: float, tokens: int, cost_l: int, fee_l: int) -> None:

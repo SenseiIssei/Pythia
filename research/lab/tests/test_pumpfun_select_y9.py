@@ -147,7 +147,7 @@ def stub_models(p_rug=0.0, p_win=1.0, base=0.2, thr=0.5) -> dict:
 def test_the_y9_strategies_are_what_the_prereg_says():
     names = [n for _, n in Y9.VARIANTS]
     all_names = [s.name for s in P.STRATEGIES]
-    assert names[0] == "P_pool0" and names[1:] == Y9_NAMES and all_names[-20:-15] == Y9_NAMES   # Y10 to Y15, tol60
+    assert names[0] == "P_pool0" and names[1:] == Y9_NAMES and all_names[-23:-18] == Y9_NAMES   # Y10 to Y16, tol60
     base = P.BY_NAME["P_pool0"]
     for n in Y9_NAMES:
         s = P.BY_NAME[n]
@@ -165,7 +165,7 @@ def test_the_y9_strategies_are_what_the_prereg_says():
 
 def test_the_trials_are_counted():
     assert S.SELECT_Y9_TRIALS == 10 == (len(Y9.VARIANTS) - 1) * len(Y9.LIMITS)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
 
 
 def test_books_latency_fees_and_limits():

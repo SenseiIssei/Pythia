@@ -449,13 +449,14 @@ def test_models_save_and_load(tmp_path):
 def test_the_registered_rules_are_what_the_plan_says():
     from lab.pumpfun_rt import pipeline as P
     assert len(S.RULES) == 22
-    # Y7 to Y15, and P_pool0_wait_tol60 (the live pool bound on paper, no trial)
-    assert len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS + 5 + 5 + 5 + 5 + 2 + 3 + 4 + 1 == 43
+    # Y7 to Y16, and P_pool0_wait_tol60 (the live pool bound on paper, no trial)
+    assert len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS + 5 + 5 + 5 + 5 + 2 + 3 + 4 + 1 + 3 == 46
     assert S.X14_TRIALS == 54
     # 135: Y3's speed tiers, 140: Y5's fill scenarios, 1: P_pool0, 6: Y7's exits (five new, P_pool0 judged again),
     # 5: Y8's, 10: Y9's (five filters under two daily loss limits), 10: Y10's (five books under two limits)
-    # 4: Y11's, 12: Y12's (three floors under two limits and two latencies), 16: Y15's (four free rides)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16
+    # 4: Y11's, 12: Y12's (three floors under two limits and two latencies), 16: Y15's (four free rides), 12: Y16's
+    # (three rug rules)
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
     assert len({r.name for r in S.RULES}) == 22
     assert {r.family for r in S.RULES} == set("ABCDE")
     assert S.DEFAULT_PICK in S.BY_NAME and S.STAKE_SOL == 0.1

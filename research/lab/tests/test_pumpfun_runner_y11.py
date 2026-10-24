@@ -55,7 +55,7 @@ def pos(eng, name) -> dict:
 
 def test_the_y11_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-10:-8] == Y11_NAMES and [n for _, n in Y11.VARIANTS] == ["P_pool0_wait"] + Y11_NAMES
+    assert names[-13:-11] == Y11_NAMES and [n for _, n in Y11.VARIANTS] == ["P_pool0_wait"] + Y11_NAMES
     base = P.BY_NAME["P_pool0_wait"]
     for n, rn in zip(Y11_NAMES, ((0.20, 0.50, 0.30, 1800), (0.20, 0.70, 0.40, 3600))):
         s = P.BY_NAME[n]
@@ -64,7 +64,7 @@ def test_the_y11_strategies_and_trials_are_what_the_prereg_says():
             "E", "migration", {"delay_s": 0, "wait_pool_s": 5}, {}, 0.1, 0.30, 0.20, 300)
     assert all(s.exits.runner is None for s in OLD) and P.Exits(300, 0.2).runner is None
     assert S.RUNNER_Y11_TRIALS == 4 == 2 * len(Y11.LIMITS)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
 
 
 # ---------------------------------------------------------------- before the time stop: P_pool0_wait's exits

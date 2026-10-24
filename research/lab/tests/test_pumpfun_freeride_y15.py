@@ -71,7 +71,7 @@ def same(a: dict, b: dict, skip=()) -> bool:
 
 def test_the_y15_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-5:-1] == Y15_NAMES and [n for _, n in Y15.VARIANTS] == ["P_pool0_wait"] + Y15_NAMES
+    assert names[-8:-4] == Y15_NAMES and [n for _, n in Y15.VARIANTS] == ["P_pool0_wait"] + Y15_NAMES
     base = P.BY_NAME["P_pool0_wait"]
     for n, fr in zip(Y15_NAMES, ((10, 0.20, 1800), (30, 0.20, 1800), (None, 0.20, 1800), (10, 0.10, 1800))):
         s = P.BY_NAME[n]
@@ -81,7 +81,7 @@ def test_the_y15_strategies_and_trials_are_what_the_prereg_says():
     assert all(s.exits.free is None for s in OLD) and P.Exits(300, 0.2).free is None
     assert base.exits == P.Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
     assert S.FREE_Y15_TRIALS == 16 == 4 * len(Y15.LIMITS) * len(Y15.LATENCIES)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
 
 
 # ---------------------------------------------------------------- P_pool0_wait's exits before the +30 %

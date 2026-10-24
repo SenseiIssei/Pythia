@@ -64,7 +64,7 @@ def walk(eng, pool, t, *ratios):
 
 def test_the_y12_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-8:-5] == Y12_NAMES and [n for _, n in Y12.VARIANTS] == ["P_pool0_wait"] + Y12_NAMES
+    assert names[-11:-8] == Y12_NAMES and [n for _, n in Y12.VARIANTS] == ["P_pool0_wait"] + Y12_NAMES
     base = P.BY_NAME["P_pool0_wait"]
     locks = (((0.10, 0.02, 1.0), (0.20, 0.10, 1.0)), ((0.08, 0.03, 1.0), (0.15, 0.09, 1.0)),
              ((0.10, 0.02, 0.5), (0.20, 0.10, 1.0)))
@@ -77,7 +77,7 @@ def test_the_y12_strategies_and_trials_are_what_the_prereg_says():
     assert all(s.exits.lock is None for s in OLD) and P.Exits(300, 0.2).lock is None
     assert base.exits == P.Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
     assert S.LOCK_Y12_TRIALS == 12 == 3 * len(Y12.LIMITS) * len(Y12.LATENCIES)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
 
 
 # ---------------------------------------------------------------- P_pool0_wait's exits stay
