@@ -1,0 +1,47 @@
+{
+ "taken": "2026-10-24T15:16:04+00:00",
+ "picks": {
+  "SPY": {
+   "symbol": "SPYx",
+   "name": "SP500 xStock",
+   "mint": "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W",
+   "decimals": 8,
+   "program": "token-2022",
+   "liquidity_usd": 3849775.0,
+   "holders": "80769",
+   "family": "xstocks",
+   "root": "SPY",
+   "kind": "sp500",
+   "underlying": "SPY"
+  },
+  "GOLD": {
+   "symbol": "PAXG",
+   "name": "PAX Gold",
+   "mint": "5GgRAEmv8ZxF2PR5hY72Qs5x1bnQ6UK2RbTPoqJ3wSwW",
+   "decimals": 6,
+   "program": "token-2022",
+   "liquidity_usd": 277157.0,
+   "holders": "909",
+   "family": "Paxos",
+   "root": "PAXG",
+   "kind": "gold",
+   "underlying": "GLD"
+  }
+ },
+ "issuers": {
+  "xStocks (Backed Assets)": [
+   "A base prospectus approved by the Liechtenstein FMA is passportable across the EEA. Issuer xStocks are issued by Backed Assets (JE) Limited, a Jersey-based special purpose vehicle dedicated solely to the issuance and redemption of xStocks.",
+   "Prospectus & Distribution For distribution in the EU/EEA, the products are governed by a base prospectus approved by the Liechtenstein Financial Market Authority (FMA) under the EU Prospectus Regulation.",
+   "This approval is passportable across the European Economic Area, enabling licensed third-party distributors to offer xStocks to retail clients.",
+   "Distribution Restrictions xStocks are not marketed, offered, or solicited in the United States, to U.S. Persons, or in any other prohibited jurisdiction."
+  ],
+  "Ondo Global Markets": [
+   "Launch Ondo Stocks Ondo Stocks app is not available for US-based clients.",
+   "Ondo Stocks are offered only outside the United States and only to eligible non-U.S. persons.",
+   "Onboarding confirms that you are eligible, including that you are not a U.S. person, that you are not located in or a resident of a restricted jurisdiction, and that you are not a sanctioned or otherwise prohibited person.",
+   "For the full, current eligibility criteria, including restricted jurisdictions, see our Eligibility page . Are Ondo tokenized stocks available 24/7?"
+  ],
+  "Paxos (PAXG)": [],
+  "Tether Gold (XAUt)": []
+ }
+}

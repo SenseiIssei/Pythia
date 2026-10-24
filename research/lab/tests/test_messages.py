@@ -233,6 +233,24 @@ def test_the_briefing_shows_the_research_lanes(data):
     assert "1 Aufgabe fertig" in text, "in the summary"
 
 
+def test_the_briefing_paper_line_shows_the_small_wallets_in_euro(data):
+    now = utc(2026, 10, 23, 7, 0)
+    fill_lab(data, now)
+    write(data, "reports/smallaccount/latest.json", {"updated_ms": now - 3_600_000, "books": {
+        "small50_tsmom1": {"capital_eur": 50.0, "equity_eur": 48.91},
+        "small40_spy_trend": {"capital_eur": 40.0, "equity_eur": 40.5}}})
+    for lang, want in (("de", ["Kleinkonten (Papier, EUR)", "small40_spy_trend 40,50 € (+0,50 €)",
+                                "small50_tsmom1 48,91 € (-1,09 €)"]),
+                       ("en", ["Small wallets (paper, EUR)", "small40_spy_trend €40.50 (+€0.50)"])):
+        cards, _ = briefing.build(now, lang, [], briefing.read_ledger(), 158.2, {})
+        text = notify.plain(notify.render_post(cards, "telegram", lang=lang))
+        assert all(w in text for w in want), text
+        if lang == "de":
+            no_english(notify.render_post(cards, "telegram", lang="de"))
+    assert "smallaccount" in briefing.NOT_STUDIES, "its own line, not a new study"
+    assert briefing.small_line({"books": {}}, "de") is None and briefing.small_line(None, "en") is None
+
+
 def test_the_briefing_goes_out_at_nine_once_to_telegram_and_discord(data, monkeypatch):
     now = utc(2026, 10, 23, 7, 0)
     fill_lab(data, now)

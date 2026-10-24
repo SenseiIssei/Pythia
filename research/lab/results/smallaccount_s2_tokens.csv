@@ -1,0 +1,258 @@
+symbol,name,mint,decimals,program,liquidity_usd,holders,family,root,kind,underlying
+SPYx,SP500 xStock,XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W,8,token-2022,3849775,80769,xstocks,SPY,sp500,SPY
+NVDAx,NVIDIA xStock,Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh,8,token-2022,2936569,182677,xstocks,NVDA,share,NVDA
+TTWO,Take-Two Interactive Software - Backpack Securities,TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo,6,token-2022,2889973,72490,backpack,TTWO,share,TTWO
+SPCX,SpaceX - Backpack Securities,SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb,6,token-2022,2886003,111713,backpack,SPCX,share,SPCX
+SPCXx,SpaceX xStock,Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8,8,token-2022,2284891,68913,xstocks,SPCX,share,SPCX
+CRCLx,Circle xStock,XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1,8,token-2022,2085538,19288,xstocks,CRCL,share,CRCL
+QQQx,Nasdaq xStock,Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ,8,token-2022,1707947,37877,xstocks,QQQ,ndx,QQQ
+TSLAx,Tesla xStock,XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB,8,token-2022,1676878,57674,xstocks,TSLA,share,TSLA
+ANTHROPIC,Anthropic PreStocks,Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw,9,token-2022,1606284,70112,prestocks,ANTHROPIC,pre_ipo,
+MU,Micron Technology - Backpack Securities,MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1,6,token-2022,1357287,6163,backpack,MU,share,MU
+MSTRx,MicroStrategy xStock,XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ,8,token-2022,1268895,15377,xstocks,MSTR,share,MSTR
+OPENAI,OpenAI PreStocks,PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF,9,token-2022,1155754,66422,prestocks,OPENAI,pre_ipo,
+MSFTx,Microsoft xStock,XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX,8,token-2022,794263,36766,xstocks,MSFT,share,MSFT
+tOpenAI,T-OpenAI,oPAiAikWTaFj9RYoRFD35ccfwhnMcB3ThgBZRHSkjTZ,9,token-2022,781909,15819,tessera,tOpenAI,pre_ipo,
+SKHY,SK Hynix - Backpack Securities,SKHYhSjuRWHgikq8eRKbtBbpABgJSkd7ytQV14i9EQ3,6,token-2022,738163,11110,backpack,SKHY,share,SKHY
+ANDURIL,Anduril PreStocks,PresTj4Yc2bAR197Er7wz4UUKSfqt6FryBEdAriBoQB,9,token-2022,706086,22209,prestocks,ANDURIL,pre_ipo,
+AAPLx,Apple xStock,XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp,8,token-2022,675522,43248,xstocks,AAPL,share,AAPL
+TSLA,Tesla - Backpack Securities,TSLAqBbv4CNCnzWFeB7LmydAyEiNMJtve7DYKLpdK4S,6,token-2022,642262,414,backpack,TSLA,share,TSLA
+DJT,Trump Media & Technology Group Corp. Common Stock - Backpack,DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF,6,token-2022,603632,56053,backpack,DJT,share,DJT
+GOOGLx,Alphabet xStock,XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN,8,token-2022,590428,60395,xstocks,GOOGL,share,GOOGL
+GLDx,Gold xStock,Xsv9hRk1z5ystj9MhnA7Lq4vjSsLwzL2nxrwmwtD3re,8,token-2022,549703,42414,xstocks,GLD,gold,GLD
+META,Meta Platforms - Backpack Securities,METAaH6MMZZgy2CTEJq3QdNi7AFVTV3NxHFBfFgLEDd,6,token-2022,527383,359,backpack,META,share,META
+MCDx,McDonald's xStock,XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2,8,token-2022,470369,24967,xstocks,MCD,share,MCD
+NEURALINK,Neuralink PreStocks,PrekqLJvJ3qVdXmBGDiexvwUTF4rLFDa6HWS4HJbw9S,9,token-2022,452061,14640,prestocks,NEURALINK,pre_ipo,
+METAx,Meta xStock,Xsa62P5mvPszXL1krVUnU5ar38bBSVcWAB6fmPCo5Zu,8,token-2022,442488,38570,xstocks,META,share,META
+GMEx,Gamestop xStock,Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc,8,token-2022,389890,21241,xstocks,GME,share,GME
+COINx,Coinbase xStock,Xs7ZdzSHLU9ftNJsii5fCeJhoRWSC32SQGzGQtePxNu,8,token-2022,343936,10333,xstocks,COIN,share,COIN
+SNDK,Sandisk - Backpack Securities,SNDKbwMUQvZhnLnxLduradgLHG5KrPuKwpnrkkGRhfH,6,token-2022,310808,7481,backpack,SNDK,share,SNDK
+AMZN,Amazon - Backpack Securities,AMZNw7cwU9L9c7ewZXxTws2PwQYxBGm2Rxg3FLDBJz9B,6,token-2022,294155,671,backpack,AMZN,share,AMZN
+PLTRx,Palantir xStock,XsoBhf2ufR8fTyNSjqfU71DYGaE6Z3SUGAidpzriAA4,8,token-2022,278967,10012,xstocks,PLTR,share,PLTR
+PAXG,PAX Gold,5GgRAEmv8ZxF2PR5hY72Qs5x1bnQ6UK2RbTPoqJ3wSwW,6,token-2022,277157,909,Paxos,PAXG,gold,GLD
+DKNG,DraftKings - Backpack Securities,DKNGQFNGQmoBdXSRGKJ8tTu7uPDasw5JDcfMmWniNfow,6,token-2022,264736,14891,backpack,DKNG,share,DKNG
+MRNA,Moderna - Backpack Securities,MRNAzXzhNcaEXJPibHEn8cd4vyekCDiivTyEwswLUCT,6,token-2022,254017,3808,backpack,MRNA,share,MRNA
+AMD,Advanced Micro Devices - Backpack Securities,AMD8XwJXgQ9WV45Wyj9yFLejxzf2J6VM1PJY8bJEjeES,6,token-2022,246996,4767,backpack,AMD,share,AMD
+MSTR,Strategy - Backpack Securities,MSTRdWXMeZxdE8osAQy3fA4rvTY5rgummDSMEx6U7Nz,6,token-2022,245077,260,backpack,MSTR,share,MSTR
+POLYMARKET,Polymarket PreStocks,Pre8AREmFPtoJFT8mQSXQLh56cwJmM7CFDRuoGBZiUP,9,token-2022,236676,9954,prestocks,POLYMARKET,pre_ipo,
+GOLD,GOLD,GoLDppdjB1vDTPSGxyMJFqdnj134yH6Prg9eqsGDiw6A,6,spl,233646,12799,other,GOLD,other,
+AMZNx,Amazon xStock,Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg,8,token-2022,207378,18395,xstocks,AMZN,share,AMZN
+tKalshi,T-Kalshi,TKLSidmLVt3cqGaaodG8tyRzoANfQwoh67AccjmubeZ,9,token-2022,186259,2815,tessera,tKalshi,pre_ipo,
+RACE,Ferrari - Backpack Securities,RACEyWiM2ztEZcJx2AHXU2eWjhxU57x3vXn92b39dLD,6,token-2022,182818,10774,backpack,RACE,share,RACE
+NKE,Nike - Backpack Securities,NKEda5nHhNGgjrE9nDdMvaEmkmJ96qqxzBVZEcKmjSg,6,token-2022,178410,10377,backpack,NKE,share,NKE
+KALSHI,Kalshi PreStocks,PreLWGkkeqG1s4HEfFZSy9moCrJ7btsHuUtfcCeoRua,9,token-2022,170759,4851,prestocks,KALSHI,pre_ipo,
+HOODx,Robinhood xStock,XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg,8,token-2022,164266,13277,xstocks,HOOD,share,HOOD
+XAUt0,Tether Gold,AymATz4TCL9sWNEEV9Kvyz45CHVhDZ6kUgjTJPzLpU9P,6,spl,163608,6632,Tether Gold,XAUt0,gold,GLD
+STRCx,Strategy PP Variable xStock,Xs78JED6PFZxWc2wCEPspZW9kL3Se5J7L5TChKgsidH,8,token-2022,153872,4737,xstocks,STRC,share,STRC
+NFLX,Netflix - Backpack Securities,NFLX7qV57zuVxCoHy3s1jiGZyALraLNwttbxdvmYJLJ,6,token-2022,146869,6191,backpack,NFLX,share,NFLX
+HIMS,Hims & Hers Health - Backpack Securities,HiMSSzzwkZkrXJ4PGVJRdtfLaANeAztjjcgk5Dxe7Lwx,6,token-2022,139503,19147,backpack,HIMS,share,HIMS
+DRAM,Roundhill Memory ETF - Backpack Securities,DRAMjSWR7HRfJKjRkvQWYL2bcaejaVhuxEcjf4pAY4Cw,6,token-2022,133885,2576,backpack,DRAM,etf,DRAM
+SQQQ,ProShares UltraPro Short QQQ - Backpack Securities,SQQQAa3gUxgnqcEsdjPA4RQNQBgB97TnG2hJhk2WaGE,6,token-2022,133846,3070,backpack,SQQQ,share,SQQQ
+BLK,BlackRock - Backpack Securities,BLKKYfF41c6xRPrtX1rdYbxLE1xxEdZUnxQsB5hcZ8Nf,6,token-2022,133329,2889,backpack,BLK,share,BLK
+CYPH,Cypherpunk Technologies - Backpack Securities,CYPHuMmCL1GxJWa2tsPhLKykC7GrHJTCHwbXD4g5uawK,6,token-2022,122561,2674,backpack,CYPH,share,CYPH
+USO,"United States Oil Fund, LP - Backpack Securities",USNv3NkKA27Dh4nsHJDPhW4VoEcTQmjoZyJt2dqdwFu,6,token-2022,119676,3744,backpack,USO,etf,USO
+BRK.Bx,Berkshire Hathaway xStock,Xs6B6zawENwAbWVi7w92rjazLuAr5Az59qgWKcNb45x,8,token-2022,109419,6029,xstocks,BRK.B,share,BRK.B
+FIGUREAI,Figure AI PreStocks,PreZad18qfPtbxNpMtMuAuX2zVpvkEU8DnJx56faCWd,9,token-2022,105644,1426,prestocks,FIGUREAI,pre_ipo,
+SPACEX,SpaceX PreStocks,PreANxuXjsy2pvisWWMNB6YaJNzr7681wJJr2rHsfTh,9,token-2022,103426,9618,prestocks,SPACEX,pre_ipo,
+RBLX,Roblox - Backpack Securities,RBLXDGRD64AtRamHMFVcjqne3Ar7NLWtFtYNtsrf1cE,6,token-2022,103412,5071,backpack,RBLX,share,RBLX
+LLY,Eli Lilly and Company - Backpack Securities,LLYuwZ33keFihgwoxXsBawy31AiRFLFSva32TYq5TvD,6,token-2022,97639,4233,backpack,LLY,share,LLY
+BABA,Alibaba Group Holding - Backpack Securities,BABANGA4JE7Kkam4nTrALAwAVgsNJUuFJnnkF7S16BZp,6,token-2022,96777,8507,backpack,BABA,share,BABA
+KOx,Coca-Cola xStock,XsaBXg8dU5cPM6ehmVctMkVqoiRG2ZjMo1cyBJ3AykQ,8,token-2022,93526,5124,xstocks,KO,share,KO
+IBM,International Business Machines - Backpack Securities,BMKdM4yUxX12moFqVk195k7coMbaybd4RUKCUdm7D1Sk,6,token-2022,89824,5264,backpack,IBM,share,IBM
+BOT,RoboStrategy - Backpack Securities,BoTx8y9ynfdxf5ZjWtCoBVkff52qKA82ysaLU8ZM6d8T,6,token-2022,89327,8449,backpack,BOT,share,BOT
+LMT,Lockheed Martin - Backpack Securities,LMT3i1BHgixFqPUgcyteJhnEz2dpy9i3cYy4pi9BoeV,6,token-2022,88142,2958,backpack,LMT,share,LMT
+GRND,Grindr - Backpack Securities,GRNDYDpqwpCm6jVxpbh4xT5AM4r3p391qYsKTHqgaET2,6,token-2022,87869,9053,backpack,GRND,share,GRND
+SNAP,Snap - Backpack Securities,SNAPcESrvnH8yUdgeMF6xm1hym9b6hW6s8YeqeHdZFz,6,token-2022,87570,3647,backpack,SNAP,share,SNAP
+COPX,Global X Copper Miners ETF - Backpack Securities,CzLTZppPdZtTjyq3WGpHLstoc3GLhu7zH5Zg6xUa6Gv5,6,token-2022,85784,5953,backpack,COPX,etf,COPX
+HOOD,Robinhood Markets - Backpack Securities,HooDYv5RewLRiMLnEVq3VJqdqxhuE6c5eYvqejMC3e9A,6,token-2022,80220,578,backpack,HOOD,share,HOOD
+VNXAU,VNX Gold,9TPL8droGJ7jThsq4momaoz6uhTcvX2SeMqipoPmNa8R,9,spl,76526,1688,VNX,VNXAU,gold,GLD
+AMC,AMC Entertainment - Backpack Securities,AMC1qwR9KhiyrQBRPrxnfo4JfMeMZqEBvt5tgTytNNoc,6,token-2022,74526,5562,backpack,AMC,share,AMC
+RDDT,Reddit - Backpack Securities,RDDTGbhHwVXfyCvQMXzzowKjf5qrYBZAnehoXW83ooh,6,token-2022,70115,8507,backpack,RDDT,share,RDDT
+COST,Costco Wholesale - Backpack Securities,CZEB3WNZuF2Yz1z2H81RcCk8T7fsw82KB33zqamASVsg,6,token-2022,69036,2810,backpack,COST,share,COST
+NOK,Nokia Oyj - Backpack Securities,N7Q5fYX7YRnDQksfdBKnoUb3awm92n7QNAD35X3Rq1X,6,token-2022,67999,3427,backpack,NOK,share,NOK
+OURA,Oura PreStocks,Pre9atBqkocK1QngFy7Q7zvyQictEFpXdLi6bZ2qnYy,9,token-2022,67499,1309,prestocks,OURA,pre_ipo,
+CHWY,Chewy - Backpack Securities,CHWYHz2zfKajomqPV9it26n7vu7AgZZfqGHXCWtGWuJg,6,token-2022,66292,1171,backpack,CHWY,share,CHWY
+SHOP,Shopify - Backpack Securities,SH55hfaipFAbwT42nQYhRoM5o5t61QpkmJ6p62vXB3m,6,token-2022,65053,1347,backpack,SHOP,share,SHOP
+QUBT,Quantum Computing - Backpack Securities,QUBTAD8C9bMU9LvmMNgKPhrmBGbHvxpu6vfWQtThxxw,6,token-2022,62464,4940,backpack,QUBT,share,QUBT
+WEN,The Wendy's Company - Backpack Securities,WENAZ2WyPbmgvUcKfQ8hyMDfBQP9bZ65hsZ5KTFrRGZ,6,token-2022,62151,3836,backpack,WEN,share,WEN
+BB,BlackBerry - Backpack Securities,BBosJLw8ZzoATiEyywiifx7AgmrD2Cm3XjFWbhbRhChy,6,token-2022,61738,1016,backpack,BB,share,BB
+URA,Global X Uranium ETF - Backpack Securities,URARfsinxCRw4JpvQhuT4CxavdZXZEMjv9ZwWmWpwag,6,token-2022,60276,5249,backpack,URA,etf,URA
+UVXY,ProShares Ultra VIX Short-Term Futures ETF - Backpack Securi,UVXY4ojmAMTaPwUmrRmcuxWHjMHCbz3BxX2RBMzjYKx,6,token-2022,58260,790,backpack,UVXY,etf,UVXY
+tSpaceX,T-SpaceX,TSPXcLV76s6V2zDiZQ18kBfcbnjaE2ZzNT3ga2Pd99v,9,token-2022,55121,980,tessera,tSpaceX,pre_ipo,
+BE,Bloom Energy - Backpack Securities,BEBVfXZ8uCxRBuunEbW9wcq9r7W9ySNo14oJBJkDgpZx,6,token-2022,53614,776,backpack,BE,share,BE
+HTZ,"Hertz Global Holdings, Inc Common Stock - Backpack Securitie",HTZsLG4zqaNvWMwXSLHH3GG5KyJpKwpBRsKVdMG6hvzP,6,token-2022,51564,1315,backpack,HTZ,share,HTZ
+AVGOx,Broadcom xStock,XsgSaSvNSqLTtFuyWPBhK9196Xb9Bbdyjj4fH3cPJGo,8,token-2022,51178,6777,xstocks,AVGO,share,AVGO
+IONQ,IonQ - Backpack Securities,NQ5hSuXQZrbnrwcDVk2qN73njjd3E3v3badYHnj5thF,6,token-2022,51030,2496,backpack,IONQ,share,IONQ
+PFE,Pfizer - Backpack Securities,PFER6ENqP8r8NF3CqVt4mFowxsin3V5MLidBNQFCC3x,6,token-2022,50322,2962,backpack,PFE,share,PFE
+EWZ,iShares MSCI Brazil ETF - Backpack Securities,EWZzCki1igp2y73UyUM4RCG4QUVMQAtnrQUVNaDHzDxJ,6,token-2022,45992,627,backpack,EWZ,etf,EWZ
+SLVon,iShares Silver Trust (Ondo Tokenized),iy11ytbSGcUnrjE6Lfv78TFqxKyUESfku1FugS9ondo,9,token-2022,44855,922,ondo,SLV,etf,SLV
+XAUM,Matrixdock Gold,5aLhp9VnUEKcsdtkfsf2DUgpJfomx7GmYVny24dHUZoB,9,token-2022,41507,334,Matrixdock,XAUM,gold,GLD
+EWY,iShares MSCI South Korea ETF - Backpack Securities,EWY4owSJYMpwN33qGDu5gGxpkQkpMJu8ZUsQJaNZG5dv,6,token-2022,35812,1597,backpack,EWY,etf,EWY
+SCHH,Schwab U.S. REIT ETF - Backpack Securities,SCHHJ3jRdSjeFEVAaLrnYdx3Brphn92Ys7z1qkiCtPX,6,token-2022,34971,2149,backpack,SCHH,etf,SCHH
+USOon,United States Oil Fund (Ondo Tokenized),rpydAzWdCy85HEmoQkH5PVxYtDYQWjmLxgHHadxondo,9,token-2022,31028,3932,ondo,USO,etf,USO
+SPYon,SPDR S&P 500 ETF (Ondo Tokenized),k18WJUULWheRkSpSquYGdNNmtuE2Vbw1hpuUi92ondo,9,token-2022,9829,1982,ondo,SPY,sp500,SPY
+COPXon,Global X Copper Miners ETF (Ondo Tokenized),X7j77hTmjZJbepkXXBcsEapM8qNgdfihkFj6CZ5ondo,9,token-2022,1542,163,ondo,COPX,etf,COPX
+GLDon,SPDR Gold Shares (Ondo Tokenized),hWfiw4mcxT8rnNFkk6fsCQSxoxgZ9yVhB6tyeVcondo,9,token-2022,1307,248,ondo,GLD,gold,GLD
+VTIx,Vanguard xStock,XsssYEQjzxBCFgvYFFNuhJFBeHNdLWYeUSP8F45cDr9,8,token-2022,949,102,xstocks,VTI,total,VTI
+SLVx,iShares Silver Trust xStock,XsxAd6okt8y1RRK6gNg7iJaqiWNiq5Md5EDf3ZrF2dm,8,token-2022,513,326,xstocks,SLV,etf,SLV
+QQQon,Invesco QQQ (Ondo Tokenized),HrYNm6jTQ71LoFphjVKBTdAE4uja7WsmLG8VxB8ondo,9,token-2022,267,686,ondo,QQQ,ndx,QQQ
+DRAMon,Roundhill Memory ETF (Ondo Tokenized),oXeD5ZesXfJQ3mxtuZdMaccUsWrE8r1SnpYRP2Bondo,9,token-2022,230,76,ondo,DRAM,etf,DRAM
+XOPx,SPDR S&P Oil & Gas Exploration & Production ETF xStock,XsAk6BoV4kBXUM6WXodKyM21CN92G9jArwAzFvbh3LX,8,token-2022,203,34,xstocks,XOP,etf,XOP
+IVVon,iShares Core S&P 500 ETF (Ondo Tokenized),CqW2pd6dCPG9xKZfAsTovzDsMmAGKJSDBNcwM96ondo,9,token-2022,195,123,ondo,IVV,sp500,IVV
+IJRx,S&P Small Cap xStock,XsyZcb97BzETAqi9BoP2C9D196MiMNBisGMVNje2Thz,8,token-2022,154,24,xstocks,IJR,etf,IJR
+VTx,Vanguard Total World xStock,XsEdDDTcVGJU6nvdRdVnj53eKTrsCkvtrVfXGmUK68V,8,token-2022,146,126,xstocks,VT,total,VT
+XLEx,Energy Select Sector SPDR Fund xStock,Xs54CrhmpVp6uxZXwgSTegrRH2kShh88XFPzgf4BExu,8,token-2022,110,52,xstocks,XLE,etf,XLE
+SGOVon,iShares 0-3 Month Treasury Bond ETF (Ondo Tokenized),HjrN6ChZK2QRL6hMXayjGPLFvxhgjwKEy135VRjondo,9,token-2022,63,106,ondo,SGOV,etf,SGOV
+TLTon,iShares 20+ Year Treasury Bond ETF (Ondo Tokenized),KaSLSWByKy6b9FrCYXPEJoHmLpuFZtTCJk1F1Z9ondo,9,token-2022,46,63,ondo,TLT,etf,TLT
+URAx,Global X Uranium ETF xStock,Xsq9sEQjYiUTSZ55RrbHAzVfz8HotwFGrqgxkgiv4LB,8,token-2022,29,41,xstocks,URA,etf,URA
+SYSBon,iShares Systematic Bond ETF (Ondo Tokenized),5U9o49BoQNU6bBMswvmBs3R4GZmYSyrnTN4ncX4ondo,9,token-2022,24,4,ondo,SYSB,etf,SYSB
+VUGx,Vanguard Growth ETF xStock,XsNVBwVGqtDqmA2Waoiux5mfykH8nepLK74z3ZoQWK2,8,token-2022,1,15,xstocks,VUG,etf,VUG
+BNOon,US Brent Oil Fund (Ondo Tokenized),BAU83kqEqhyiexfAMQhZZE5KnGogSqh17fJc44Sondo,9,token-2022,0,19,ondo,BNO,etf,BNO
+USOx,United States Oil Fund xStock,XsXJBom7kFSxA6hc2ArzUwe6o6zyRU1AdHTfvev1HkG,8,token-2022,0,9,xstocks,USO,etf,USO
+CIBRon,First Trust NASDAQ Cybersecurity ETF (Ondo Tokenized),BVdL3WUxtxUD4vXRWwqChJLbGxvfzZjBGPp63Wtondo,9,token-2022,0,13,ondo,CIBR,etf,CIBR
+SILon,Global X Silver Miners ETF (Ondo Tokenized),uiSLmtLdqxtbQq5gkwYBvBrZpnSNXZn8h6sjLsDondo,9,token-2022,0,7,ondo,SIL,etf,SIL
+VNQon,Vanguard Real Estate ETF (Ondo Tokenized),F3dMJ9H137YUNc9cpN3gBWDSq4MSRbTFtojH65Uondo,9,token-2022,0,21,ondo,VNQ,etf,VNQ
+SOXXon,iShares Semiconductor ETF (Ondo Tokenized),EN5pHc1LccUSojxb7kkyQi7v7iJN5RpDq6qz3DHondo,9,token-2022,0,116,ondo,SOXX,etf,SOXX
+EFAon,iShares MSCI EAFE ETF (Ondo Tokenized),AbvryMGnaba9oADMZk8Vp2Av6MtczsncGyfWaC4ondo,9,token-2022,0,17,ondo,EFA,etf,EFA
+SGOVx,iShares 0-3 Month Treasury Bond ETF xStock,XsYD72ntjj7ZwoFDZCDmN2gamTcLpnywqvG7PQN5vCN,8,token-2022,0,21,xstocks,SGOV,etf,SGOV
+QTUMon,Defiance Quantum ETF (Ondo Tokenized),iJAAwDNzJHbgKm5pksL3kXHc3zZewYm37dsZNCPondo,9,token-2022,0,4,ondo,QTUM,etf,QTUM
+EEMon,iShares MSCI Emerging Markets ETF (Ondo Tokenized),916SDKz7y5ZcEZC9CtnQ5Djs1Y8Yv3UAPb6bak8ondo,9,token-2022,0,88,ondo,EEM,etf,EEM
+ITAx,iShares U.S. Aerospace & Defense ETF xStock,XsXoAR52Q2NYFkYiNqhCq4FauvyA1tdRsrmEYNf9fuh,8,token-2022,0,16,xstocks,ITA,etf,ITA
+VXUSx,Vanguard Total International Stock ETF xStock,XsLT5v4DAd1kwViPQh3SZiT5kzJfNLxzJxJN1dySZTe,8,token-2022,0,21,xstocks,VXUS,etf,VXUS
+VDEon,Vanguard Energy ETF (Ondo Tokenized),hKVpWfYwP1VJ9BcBTPRcovcSpEkvnaN8eXwFoCMondo,9,token-2022,0,9,ondo,VDE,etf,VDE
+YEARon,AB Ultra Short Income ETF (Ondo Tokenized),wxPFbh4dVrTWPGHHbVVeTHH7GK2uQwnTm5C8X3Fondo,9,token-2022,0,2,ondo,YEAR,etf,YEAR
+IEIon,iShares 3-7 Year Treasury Bond ETF (Ondo Tokenized),wuzf2FDZTRbRY3ZnndMeQ38Wk9YTDGGXTA63nUyondo,9,token-2022,0,3,ondo,IEI,etf,IEI
+BILon,SPDR Bloomberg 1-3 Month T-Bill ETF (Ondo Tokenized),wtwpt5yJbButAhjpYhtg4uvUgCQN4LVgvLq2AxEondo,9,token-2022,0,3,ondo,BIL,etf,BIL
+XYLDon,Global X S&P 500 Covered Call ETF (Ondo Tokenized),wCr7YFeYDWyYSebsoMY75g8c9pguGeVB3rT6kYjondo,9,token-2022,0,3,ondo,XYLD,etf,XYLD
+IYWon,iShares US Technology ETF (Ondo Tokenized),vr8RQPDmYQBruiYsFSV3KZyoWFEsEejxzMCdWrBondo,9,token-2022,0,3,ondo,IYW,etf,IYW
+IJSon,iShares S&P Small-Cap 600 Value ETF (Ondo Tokenized),v34vtrbcjDswpFDixpVFThmUWeM1RTZwtWcp5FBondo,9,token-2022,0,1,ondo,IJS,etf,IJS
+EFVon,iShares MSCI EAFE Value ETF (Ondo Tokenized),uzQx2MnWr7drR5gdNXssJrFKQkLFSdw4EpfaQ5Nondo,9,token-2022,0,1,ondo,EFV,etf,EFV
+BKCHon,Global X Blockchain ETF (Ondo Tokenized),uyWDgDZqL6x2V86i7vwJTKPuyg2u79UYaBe5yt7ondo,9,token-2022,0,1,ondo,BKCH,etf,BKCH
+AIQon,Global X Artificial Intelligence & Technology ETF (Ondo Toke,uwh6Z6c2F8WZfUSK1A8VBfA9AwJKN5T2bvQwVFLondo,9,token-2022,0,3,ondo,AIQ,etf,AIQ
+QYLDon,Global X NASDAQ 100 Covered Call ETF (Ondo Tokenized),ueEYw3Djy9GVu9mrP6jum8qNpxshgcy7gMfmntWondo,9,token-2022,0,38,ondo,QYLD,etf,QYLD
+CLOIon,VanEck CLO ETF (Ondo Tokenized),ucQ3VfWAx9pkCN4Kg84zE56FtB4FJN2kQH4ArYYondo,9,token-2022,0,1,ondo,CLOI,etf,CLOI
+GGOVon,iShares Global Government Bond USD Hedged Active ETF (Ondo T,tzuC3sZnHg7spuAFhdCqivx9qtJg15qUBUpCJx1ondo,9,token-2022,0,0,ondo,GGOV,etf,GGOV
+REMXon,VanEck Rare Earth and Strategic Metals ETF (Ondo Tokenized),tiitb2Z1HtpB2DpVr6V7tdCFS3jmTinLeuGj9EVondo,9,token-2022,0,28,ondo,REMX,etf,REMX
+IDEFon,iShares Defense Industrials Active ETF (Ondo Tokenized),th3tot4SRq6jgEyJ568NEh42MM82RSJ3NkiWeNzondo,9,token-2022,0,0,ondo,IDEF,etf,IDEF
+LEMBon,iShares J.P. Morgan EM Local Currency Bond ETF (Ondo Tokeniz,teZfcA6zpP476eKzED1daqBWDtuwbk9e2Ejk2cpondo,9,token-2022,0,0,ondo,LEMB,etf,LEMB
+EUHYon,iShares Euro High Yield Corporate Bond USD Hedged ETF (Ondo ,teUYhoQUgqsFp9ZwYBUHfuUHdVvbNx9N8spESGqondo,9,token-2022,0,0,ondo,EUHY,etf,EUHY
+DBCon,Invesco DB Commodity Index Tracking Fund (Ondo Tokenized),td1aY5AvYQuwGD75qNq9aPipMexraN9mQXJwqifondo,9,token-2022,0,8,ondo,DBC,etf,DBC
+CLOAon,iShares AAA CLO Active ETF (Ondo Tokenized),t71FyTYHVkPAb5g48adDHmkVxXYbUuP2eq6jDZLondo,9,token-2022,0,17,ondo,CLOA,etf,CLOA
+ORBXon,Global X Space Tech ETF (Ondo Tokenized),t5XWftMCacS1p3xrg14ARaxgEvEM5R241kxHGqrondo,9,token-2022,0,2,ondo,ORBX,etf,ORBX
+DTCRon,Global X Data Center & Digital Infrastructure ETF (Ondo Toke,t29YBAB7g6xzgRJkzmc5NkQ7YRjE3NF8mhsLgppondo,9,token-2022,0,3,ondo,DTCR,etf,DTCR
+LITon,Global X Lithium & Battery Tech ETF (Ondo Tokenized),syb82jXkHWbcWgxoRqrvAcoCdsAb3y1fnCYo561ondo,9,token-2022,0,4,ondo,LIT,etf,LIT
+BOTZon,Global X Robotics & Artificial Intelligence ETF (Ondo Tokeni,soLM6jRVdG1PdurSAQDz5qRtwWxXPM6EBvwrkBjondo,9,token-2022,0,16,ondo,BOTZ,etf,BOTZ
+SHLDon,Global X Defense Tech ETF (Ondo Tokenized),siVse6kjZb9ihaXHaqoG3mhHyTPEnNCkvSDTheoondo,9,token-2022,0,0,ondo,SHLD,etf,SHLD
+SECUon,iShares Securitized Income Active ETF (Ondo Tokenized),sDtEN5uwUJJCFJ95x2rPjPqNx5UWUbHQ2ucceUzondo,9,token-2022,0,1,ondo,SECU,etf,SECU
+ARGTon,Global X MSCI Argentina ETF (Ondo Tokenized),rki25TZmDh94spjeoyyGWjkVEYSzcVvaAbddXGuondo,9,token-2022,0,2,ondo,ARGT,etf,ARGT
+USFRon,WisdomTree Floating Rate Treasury Fund (Ondo Tokenized),o6U1Sm6Vd7EofMyCrL28mrp2QLzgYGgjveHiEQ5ondo,9,token-2022,0,14,ondo,USFR,etf,USFR
+BINCon,iShares Flexible Income Active ETF (Ondo Tokenized),mhZ69E1vDnAsQJXAwarLYSX5tmgeMajXBJ2rXAcondo,9,token-2022,0,4,ondo,BINC,etf,BINC
+BWETon,Breakwave Tanker Shipping ETF (Ondo Tokenized),m7mWfvhyPikY3esNwTk8U1JRbcBijmzHgqiqx3xondo,9,token-2022,0,7,ondo,BWET,etf,BWET
+TIPon,iShares TIPS Bond ETF (Ondo Tokenized),k6BPp2Xmf2TYgrZiUyWfUoZBKeqaDbvPoAVgSx2ondo,9,token-2022,0,24,ondo,TIP,etf,TIP
+IGVon,iShares Expanded Tech-Software ETF (Ondo Tokenized),jYxKRFuXr6PEkzPpf1wWF7DhLL4gxGJ95Pv2NGrondo,9,token-2022,0,0,ondo,IGV,etf,IGV
+VTIon,Vanguard Total Stock Market ETF (Ondo Tokenized),jCCU4GwukjNxAXJowG2S4KCrr5g6YyUB61WHYvGondo,9,token-2022,0,84,ondo,VTI,total,VTI
+FTGCon,First Trust Global Tactical Commodity Strategy Fund (Ondo To,ivBnfPTyuHDNWmMSnbavckhJK6SHZW8h77nZKsEondo,9,token-2022,0,5,ondo,FTGC,etf,FTGC
+SOXLon,Direxion Daily Semi Bull 3X ETF (Ondo Tokenized),isRSJECP9yFPv9YejzGUdjzAGHbF2x5DpVeDqAiondo,9,token-2022,0,17,ondo,SOXL,etf,SOXL
+SOXQon,Invesco PHLX Semiconductor ETF (Ondo Tokenized),io3eLhnjT1a94JpzAUMWKqwMYHZRwvtGXjkkXsPondo,9,token-2022,0,3,ondo,SOXQ,etf,SOXQ
+CPERon,US Copper Index Fund (Ondo Tokenized),hpkpc1Xenv5oEpVefk3woWjZa9rxaJxaEaVVA4Fondo,9,token-2022,0,25,ondo,CPER,etf,CPER
+URNMon,Sprott Uranium Miners ETF (Ondo Tokenized),hieZTEZNBU67bMGULK9hWCB9h5jBPKdpRWiXpwkondo,9,token-2022,0,5,ondo,URNM,etf,URNM
+DGRWon,WisdomTree US Quality Dividend Growth Fund (Ondo Tokenized),gnoSQSNTNZHViqVfxCcPDVxcRA29mrJL7C6JqYLondo,9,token-2022,0,1,ondo,DGRW,etf,DGRW
+IALTon,iShares Systematic Alternatives Active ETF (Ondo Tokenized),gfKuBLive7Q35MYgxPgNx7qx524zQJ9RiDZJFZoondo,9,token-2022,0,0,ondo,IALT,etf,IALT
+BRTRon,iShares Total Return Active ETF (Ondo Tokenized),gPwmyo4BM4qgYYCTVgA4eJmzsnYNVMUJYBecYkCondo,9,token-2022,0,0,ondo,BRTR,etf,BRTR
+COROon,iShares International Country Rotation Active ETF (Ondo Toke,gNhrgh21pQozQoc7YtvhdKF7eJnSKwWa9dzHnaxondo,9,token-2022,0,0,ondo,CORO,etf,CORO
+BAIon,iShares A.I. Innovation and Tech Active ETF (Ondo Tokenized),gKkrSgVjRjdQX4LFErBka1izQhoW2VHXFcCS5Vbondo,9,token-2022,0,1,ondo,BAI,etf,BAI
+DYNFon,iShares US Equity Factor Rotation Active ETF (Ondo Tokenized,g7vMfs5FrR8JjieeGC3c9sJaYPp4G3jGPfF4tkyondo,9,token-2022,0,0,ondo,DYNF,etf,DYNF
+INROon,iShares US Industry Rotation Active ETF (Ondo Tokenized),g4kT9HEg7rN4e5ZaEGHmzpkdM8qMbsZSHJojKeCondo,9,token-2022,0,0,ondo,INRO,etf,INRO
+BLCRon,iShares Large Cap Core Active ETF (Ondo Tokenized),g3jQMP79SxnH1KisVw3C4SBpa8gSbPAocNJruJFondo,9,token-2022,0,0,ondo,BLCR,etf,BLCR
+BRHYon,iShares High Yield Active ETF (Ondo Tokenized),fznj92AnTcQ6mAFvt68JgLJS5pHag5uPmJ7LmSLondo,9,token-2022,0,0,ondo,BRHY,etf,BRHY
+QLTAon,iShares Aaa - A Rated Corporate Bond ETF (Ondo Tokenized),fkznXN9GALK7f9zVr2RwRHWCPhwoima4zB3JbbNondo,9,token-2022,0,1,ondo,QLTA,etf,QLTA
+IGEBon,iShares Investment Grade Systematic Bond ETF (Ondo Tokenized,feZXF2iFspS6QKE4LSXeSESRXgrtvzbE3dZSyydondo,9,token-2022,0,0,ondo,IGEB,etf,IGEB
+VCXon,Fundrise Innovation Fund (Ondo Tokenized),esgtAV7yKf7Ei3Q92VmXcEGkoqY2UqCHzZvCWhgondo,9,token-2022,0,1,ondo,VCX,etf,VCX
+IWMon,iShares Russell 2000 ETF (Ondo Tokenized),dvj2kKFSyjpnyYSYppgFdAEVfgjMEoQGi9VaV23ondo,9,token-2022,0,19,ondo,IWM,etf,IWM
+IWFon,iShares Russell 1000 Growth ETF (Ondo Tokenized),dSHPFuMMjZqt7xDYGWrexXTSkdEZAiZngqymQF2ondo,9,token-2022,0,10,ondo,IWF,etf,IWF
+IJHon,iShares Core S&P MidCap ETF (Ondo Tokenized),cfPLN9WXD2BTkbZhRZMVXPmVSiRo44hJWRtnaC8ondo,9,token-2022,0,8,ondo,IJH,etf,IJH
+IEMGon,iShares Core MSCI Emerging Markets ETF (Ondo Tokenized),cdVNL7wK8mf1UCDqM6zdrziRv4hmvqWhXeTcck2ondo,9,token-2022,0,25,ondo,IEMG,etf,IEMG
+HYGon,iBoxx $ High Yield Corporate Bond ETF (Ondo Tokenized),c5ug15fwZRfQhhVa6LHscFY33ebVDHcVCezYpj7ondo,9,token-2022,0,11,ondo,HYG,etf,HYG
+NEARon,iShares Short Duration Bond Active ETF (Ondo Tokenized),bD6TafGhPo8NaeKEyge1DrZGAPB5wxK3x4fCpqjondo,9,token-2022,0,1,ondo,NEAR,etf,NEAR
+USHYon,iShares Broad USD High Yield Corporate Bond ETF (Ondo Tokeni,aau4XCAZR6p9uC4vgdHdh4ip3oW5pr5PrNs3FJ8ondo,9,token-2022,0,2,ondo,USHY,etf,USHY
+HYGWon,iShares High Yield Corporate Bond BuyWrite Strategy ETF (Ond,ZKzkbFi4n3NQmRA9i5T7jVPSN2XERwxfHUf4p2pondo,9,token-2022,0,0,ondo,HYGW,etf,HYGW
+QYLDx,Global X NASDAQ 100 Covered Call ETF xStock,XsyGzGhqwnbfqeN6TQWK4SHnVJYgbxRdp4aH5L6RwEZ,8,token-2022,0,3,xstocks,QYLD,etf,QYLD
+SKDDx,GraniteShares 2x Short SK Hynix Daily ETF xStock,XsxtnDUJzTMjqmzajufokv9xrG868kvkp5KNuNNsU4d,8,token-2022,0,4,xstocks,SKDD,etf,SKDD
+EWYx,iShares MSCI South Korea xStock,XswenHXJtDWYMh89uRYx2tZcABxwXSn7j3jidDPS1Yo,8,token-2022,0,21,xstocks,EWY,etf,EWY
+EWZx,iShares MSCI Brazil ETF xStock,XsvsSHRUz5dAmUGH9jvVnkEZRcLkgo7uJf1VWhSuVLk,8,token-2022,0,10,xstocks,EWZ,etf,EWZ
+CPTx,Camden Property Trust xStock,XsvoRXtZZfwvkLhp4qKPR9B9mcbuWakDUWnPszYw2BT,8,token-2022,0,7,xstocks,CPT,etf,CPT
+SMHx,VanEck Semiconductor ETF xStock,XstuBvLo7soZzj3beCCPonHpR3eUfPNSeQzw35Swons,8,token-2022,0,35,xstocks,SMH,etf,SMH
+DLRx,Digital Realty Trust xStock,Xstp4CYu1181rhhi7w32Lj6wQZ2VDjFhQNKZwZARk5G,8,token-2022,0,6,xstocks,DLR,etf,DLR
+SKUUx,GraniteShares 2x Long SK Hynix Daily ETF xStock,XstZ31nh6HKMkkNgEcXqAJuF2CFmexYkM4tGaNtUVWK,8,token-2022,0,4,xstocks,SKUU,etf,SKUU
+SPCHx,Leverage Shares 2X Long SPCX Daily ETF xStock,Xst9jAZk2vxXtsttJdDh5pKvwfmDUPHAPqt3dxFi64G,8,token-2022,0,10,xstocks,SPCH,etf,SPCH
+URNMx,Sprott Uranium Miners ETF xStock,Xst3tzrmqjzvGXZz2eE2h8CWWWxy4wzp6mXvTuG5Tqt,8,token-2022,0,9,xstocks,URNM,etf,URNM
+NVDLx,GraniteShares 2x Long NVDA Daily ETF xStock,XsrH4d2jVBUbZx5YJ3CyPsiN84ugZQGKCbJAoDn9qEd,8,token-2022,0,4,xstocks,NVDL,etf,NVDL
+FGDLx,Franklin Responsibly Sourced Gold ETF xStock,XspurdrAqbRJMQfAUEfh88QxE3XbSWxQGu3GneJR6e3,8,token-2022,0,4,xstocks,FGDL,etf,FGDL
+VGKx,Vanguard FTSE Europe ETF xStock,XsosCAu1L8Ebpr4SdBDV1EboYDRTWCH8j79UnHYzvbN,8,token-2022,0,17,xstocks,VGK,etf,VGK
+MUUx,Micron 2x Long ETF xStock,XsjZG9MgLMECjzSSxq3G7rabDceoaDqhN4C4zwce4i8,8,token-2022,0,26,xstocks,MUU,etf,MUU
+HRx,Healthcare Realty Trust xStock,XsdpjC7aNEteevrzUXdvRX2Kaz67siejxWhx7Qwmatx,8,token-2022,0,3,xstocks,HR,etf,HR
+VOOx,Vanguard S&P 500 xStock,Xsd7TduTbjuYCFL7Uoujb8SbkZLmUsuYNLn7KdvX21x,8,token-2022,0,30,xstocks,VOO,sp500,VOO
+FEZx,SPDR EURO STOXX 50 xStock,XsbZDdYJKxEBQASz4KBj23NRgymXw2NK6mbNQ6PYhC7,8,token-2022,0,8,xstocks,FEZ,etf,FEZ
+EWUx,iShares MSCI United Kingdom xStock,XsbWCMXPzLdZMLpPtiiWE7M99fySmsnK5eFCWGWfDQ8,8,token-2022,0,5,xstocks,EWU,etf,EWU
+UVXYx,ProShares Ultra VIX Short-Term Futures ETF xStock,Xsb9Hu9KkxJxMNoaogz7UYsNS3VHvLCqwT9S1mRyVGE,8,token-2022,0,10,xstocks,UVXY,etf,UVXY
+EWJx,iShares MSCI Japan ETF xStock,XsaXKP7GaPDA3bLwtuFoZ2oGsaukfeS1v2U1xUeqwrp,8,token-2022,0,9,xstocks,EWJ,etf,EWJ
+ESSx,Essex Property Trust xStock,XsZsYW1U5exCzHqwsxwjTDABR2SW9MzKccXSkAgx47N,8,token-2022,0,6,xstocks,ESS,etf,ESS
+RAMx,Roundhill T-REX 2X Long DRAM Daily Target ETF xStock,XsZRN32fxqsvU9VmL254K1yLyYVkL3RXcBRJpTsRYWc,8,token-2022,0,10,xstocks,RAM,etf,RAM
+STWDx,Starwood Property Trust xStock,XsWvqdKgQpgcqg79bWxNz2m2tFzSfH65kgXRbvQajA5,8,token-2022,0,3,xstocks,STWD,etf,STWD
+COLDx,Americold Realty Trust xStock,XsVgQcixJQLJcS9aXmiFh14NfXEgVYnsMR3epVkBzwu,8,token-2022,0,4,xstocks,COLD,etf,COLD
+MVLLx,Marvell 2x Long ETF xStock,XsVEdRV17tPdXHamAi6TVFjyeSRHnCjdY5GXqAaevuk,8,token-2022,0,8,xstocks,MVLL,etf,MVLL
+SPGIx,S&P Global xStock,XsTuW2zaiPbzgrnQ7b4Z99zeULMM7gPxppE61CtpyDj,8,token-2022,0,4,xstocks,SPGI,etf,SPGI
+NTRSx,Northern Trust xStock,XsRx9hY5BQWniDRahLNtV4uyyvQcnaRgrqw5ops842R,8,token-2022,0,6,xstocks,NTRS,etf,NTRS
+TMFx,Direxion Daily 20 Year Treasury Bull 3X ETF xStock,XsNZ125wJDfhqhdSuGMeVCWgP26pYsY5ZRtiAfKtU2d,8,token-2022,0,9,xstocks,TMF,etf,TMF
+XBIx,State Street SPDR S&P Biotech ETF xStock,XsNG7S8TMR3Xqa86GHjgtM8gj6Jkt8f62EvtG29B5yc,8,token-2022,0,8,xstocks,XBI,etf,XBI
+EWTx,iShares MSCI Taiwan ETF xStock,XsM8hCeX916xAiVLCeFwxmVpTNYq14rjM8h8Ha2UiTe,8,token-2022,0,9,xstocks,EWT,etf,EWT
+EWGx,iShares MSCI Germany xStock,XsM51PKxDNQBZR65VRxRjNqcMWUBoYwHeVn2FR6WXi9,8,token-2022,0,5,xstocks,EWG,etf,EWG
+NDAQx,Nasdaq Inc. xStock,XsLSwcujLXXgCPZWPZKRsksbZrWupPMNKmg6A71g2Ba,8,token-2022,0,8,xstocks,NDAQ,etf,NDAQ
+FRx,First Industrial Realty Trust xStock,XsFBTajwjnbUML9uZYCkWZtzyRnWJRqud2N5pv2HrKX,8,token-2022,0,2,xstocks,FR,etf,FR
+SOXXx,iShares Semiconductor xStock,XsEsHeiNZf88sABxu74TPuXbQThdaQGdzPVZUBicjtQ,8,token-2022,0,11,xstocks,SOXX,etf,SOXX
+DRAMx,Storage ETF (Roundhill) xStock,XsESMQjWyDczCfiJ3QDjZEiaKwp1uXYp3TMZ6viuLcm,8,token-2022,0,8,xstocks,DRAM,etf,DRAM
+SOXSx,3x Short Semiconductor ETF xStock,XsCucuUESBi3ZjRxmjwUzGYuf6ZrtZDUvK6XhRA4RR3,8,token-2022,0,11,xstocks,SOXS,etf,SOXS
+FRTx,Federal Realty Investment Trust xStock,XsC9pEmm4AiJgrtMKpvc7WGbaeEgXnSiC2csF8zWuYh,8,token-2022,0,3,xstocks,FRT,etf,FRT
+SHLDx,Global X Defense Tech ETF xStock,XsAzGv2quxQWSUphAKcmFeFyJqTgDkcetgp3DmAFVj4,8,token-2022,0,9,xstocks,SHLD,etf,SHLD
+MPTx,Medical Properties Trust xStock,Xs8Bh2GQ564EXMxkFSGEEqFwJpQhy3PU6xfreRy865R,8,token-2022,0,4,xstocks,MPT,etf,MPT
+INTWx,INTC 2x Long ETF xStock,Xs7zs57saNfGWUn3h5d2rFxxs43uVqzAY7iQVPHFbwE,8,token-2022,0,10,xstocks,INTW,etf,INTW
+VCXx,"Fundrise Innovation Fund, LLC xStock",Xs7UsqobM3EJgMeHwdAbmDBCZH1G5WTCjatpeYcCr8x,8,token-2022,0,16,xstocks,VCX,etf,VCX
+MOOx,VanEck Agribusiness ETF xStock,Xs72K1Ta1D5ccNy3RzSyQWGgZywWvphX78pL8WBk1Bo,8,token-2022,0,15,xstocks,MOO,etf,MOO
+VNOx,Vornado Realty Trust xStock,Xs6TckdNSnYR3wD9bksu5rJFaA6VZi2LKtdE9k8WVuk,8,token-2022,0,3,xstocks,VNO,etf,VNO
+LYTEx,Roundhill Photonics & Optics ETF xStock,Xs5xCbQ7r3tJrR1huRmNrAKLyDZQM4MadU1rkmrh8hX,8,token-2022,0,8,xstocks,LYTE,etf,LYTE
+SNXXx,SNDK 2x Long ETF xStock,Xs3EFHHyP27EsAw3ftS8UFsN8kwkhFvbppji6bbkkPn,8,token-2022,0,11,xstocks,SNXX,etf,SNXX
+KORUx,Korea 3x Long ETF xStock,Xs2LakxmT2YycpcxRDCJ7crPbFf91JKdAAWnfzANFmt,8,token-2022,0,9,xstocks,KORU,etf,KORU
+EWQx,iShares MSCI France xStock,Xs1neEMHNaDDSHqE9nvDGkmuX73ZASKcLtQqwmVAQde,8,token-2022,0,7,xstocks,EWQ,etf,EWQ
+NIKLon,Sprott Nickel Miners ETF (Ondo Tokenized),V8LRV7kWjrx6Prke9oHEHNUiR122BVtyuPciTCTondo,9,token-2022,0,3,ondo,NIKL,etf,NIKL
+PALLon,abrdn Physical Palladium Shares ETF (Ondo Tokenized),P7hTXnKk2d2DyqWnefp5BSroE1qjjKpKxg9SxQqondo,9,token-2022,0,14,ondo,PALL,etf,PALL
+IAUon,iShares Gold Trust (Ondo Tokenized),M77ZvkZ8zW5udRbuJCbuwSwavRa7bGAZYMTwru8ondo,9,token-2022,0,84,ondo,IAU,gold,IAU
+PDBCon,Invesco Optimum Yld Dvsfd Cmd Str No K-1 ETF (Ondo Tokenized,M6agiXbNgy8Xon9ngiW4ZDPbMFcNCTMkMMkshZyondo,9,token-2022,0,4,ondo,PDBC,etf,PDBC
+ETHAon,iShares Ethereum Trust (Ondo Tokenized),LitNUakTges74cjDJm6HHfFNKGPdySkp3MWSYzYondo,9,token-2022,0,11,ondo,ETHA,etf,ETHA
+VTVon,Vanguard Value ETF (Ondo Tokenized),KuiYLPVq65qixD9TgvxBC576C4gG6vVTCdbh2zFondo,9,token-2022,0,13,ondo,VTV,etf,VTV
+JAAAon,Janus Henderson AAA CLO ETF (Ondo Tokenized),KZtqx9BJbpcGY7vdzhqPXM3ECKChxE5YhXaDiwRondo,9,token-2022,0,3,ondo,JAAA,etf,JAAA
+SPGIon,S&P Global (Ondo Tokenized),JrTYw7A9jihX5TwpRStYviEbsYf2X2VJpZ13719ondo,9,token-2022,0,24,ondo,SPGI,etf,SPGI
+URAon,Global X Uranium ETF (Ondo Tokenized),EvzskrQ3vUUkiMGG1DzfSDyG6H2WCMy3v9G8fzzondo,9,token-2022,0,62,ondo,URA,etf,URA
+UNGon,US Natural Gas Fund (Ondo Tokenized),Es2ipHL7qXBcLmZ4N7LP9PHBHaWaTMTAkxDwGGjondo,9,token-2022,0,12,ondo,UNG,etf,UNG
+SHYon,iShares 1-3 Year Treasury Bond ETF (Ondo Tokenized),EEy57xbaLcUrN1HXj2vz8VWxeWFK1eZQZo4aWbrondo,9,token-2022,0,7,ondo,SHY,etf,SHY
+PPLTon,abrdn Physical Platinum Shares ETF (Ondo Tokenized),DwRtkbsaQMGAS3oMeEGYh6M5vH4X9WECsQgqHjAondo,9,token-2022,0,11,ondo,PPLT,etf,PPLT
+PAVEon,Global X US Infrastructure Development ETF (Ondo Tokenized),DsLQ18ooPjiHYuiuQ5Jz8PNCpVaKe3FhAYpvMxWondo,9,token-2022,0,6,ondo,PAVE,etf,PAVE
+OIHon,VanEck Oil Services ETF (Ondo Tokenized),DnvbCqRuUYssmKVRBRNwkUnptHitH4ZZTt1KVuZondo,9,token-2022,0,4,ondo,OIH,etf,OIH
+IWNon,iShares Russell 2000 Value ETF (Ondo Tokenized),DX7g7WNjDpVzNK9CG81v7wb6ZbiNzYfkdzH2Xs5ondo,9,token-2022,0,13,ondo,IWN,etf,IWN
+KWEBon,KraneShares CSI China Internet ETF (Ondo Tokenized),DVPSYdqWPLvNa8afnEqa3B9eDfTTWpGyUZeXvdMondo,9,token-2022,0,14,ondo,KWEB,etf,KWEB
+ITAon,iShares US Aerospace and Defense ETF (Ondo Tokenized),DDcAL93Urf7KrPntvKULnZoFs4Wdee1LkkJqLpjondo,9,token-2022,0,17,ondo,ITA,etf,ITA
+INDAon,iShares MSCI India ETF (Ondo Tokenized),DBNwt3FoYCKQWdfzxKFNZ4mzuz4Jz1iRzFf7HFzondo,9,token-2022,0,5,ondo,INDA,etf,INDA
+INCEon,Franklin Income Equity Focus ETF (Ondo Tokenized),D8KT4Jd8qiKKTfkM8ejSKCpWGR1o3GFvnQGp5ERondo,9,token-2022,0,5,ondo,INCE,etf,INCE
+IEFon,iShares 7-10 Year Treasury Bond ETF (Ondo Tokenized),D4uWxzR5StYC6sTRhVts8Eboy3pmVtHeNC62dnQondo,9,token-2022,0,12,ondo,IEF,etf,IEF
+HYSon,PIMCO 0-5 Year High Yield Corporate Bond Index ETF (Ondo Tok,CsN1Tyz467bSFLPGd6MJyZhPNtwDaWZtX8ixHWyondo,9,token-2022,0,6,ondo,HYS,etf,HYS
+GLTRon,abrdn Physical Precious Metals Basket Shares ETF (Ondo Token,CgnZbDNzBfaLyJqUtd4esKLShRp7RznQuwP4uQaondo,9,token-2022,0,1,ondo,GLTR,etf,GLTR
+FXIon,iShares China Large-Cap ETF (Ondo Tokenized),CeFbGYXDmkyfo1TXXzzZ512mtnCCewNohu6V15vondo,9,token-2022,0,22,ondo,FXI,etf,FXI
+FLQLon,Franklin US Large Cap Multifactor Index ETF (Ondo Tokenized),CZ9GBn1okotqKNUUqoxk4PF2JVi59bw5GWvVo6Dondo,9,token-2022,0,1,ondo,FLQL,etf,FLQL
+ITOTon,iShares Core S&P Total US Stock Market ETF (Ondo Tokenized),CPWkMURVvcnX8hGjqCTb8i5LkzV3VSvyk7SeJi8ondo,9,token-2022,0,4,ondo,ITOT,etf,ITOT
+EWZon,iShares MSCI Brazil ETF (Ondo Tokenized),CBKcmEvVg5EgE3W5hVSPcBYWh6TFVjQwbmYod9Pondo,9,token-2022,0,23,ondo,EWZ,etf,EWZ
+IEFAon,iShares Core MSCI EAFE ETF (Ondo Tokenized),C9J9vZ8N79GzzxFoRkPWCkGtMKU8akg4FhUk4r9ondo,9,token-2022,0,29,ondo,IEFA,etf,IEFA
+EWYon,iShares MSCI South Korea ETF (Ondo Tokenized),C8pSaSgjkiTWixS3GM6Hxd6HKnKrgAbY9WDgfVeondo,9,token-2022,0,39,ondo,EWY,etf,EWY
+EWJon,iShares MSCI Japan ETF (Ondo Tokenized),C6c7VcxuUYcV5YTsky5HM4PUmfwHTwsDD5DNwwPondo,9,token-2022,0,23,ondo,EWJ,etf,EWJ
+FSOLon,Fidelity Solana Fund (Ondo Tokenized),BJhPr9SM7uZTZXHeSLYmUk7CjGQq1esFkVxPF5tondo,9,token-2022,0,7,ondo,FSOL,etf,FSOL
+HYDBon,iShares High Yield Systematic Bond ETF (Ondo Tokenized),71VH3YQkjqqGxzwYvGhsCsJNQYzkMo9Rg72aVxqondo,9,token-2022,0,0,ondo,HYDB,etf,HYDB
+IBITon,iShares Bitcoin Trust (Ondo Tokenized),6JLG8iUkAuqiBhL3j2ckDMDf5oWAa6awmyaWezKondo,9,token-2022,0,16,ondo,IBIT,etf,IBIT
+AGGon,iShares Core US Aggregate Bond ETF (Ondo Tokenized),13qTjKx53y6LKGGStiKeieGbnVx3fx1bbwopKFb3ondo,9,token-2022,0,37,ondo,AGG,etf,AGG

@@ -9,7 +9,8 @@ numbers formatted in the messages' language, one overview chart:
                          reports/pumpfun_rt/live_status.json)
   real money             every running real-money autopilot (Kraken, Alpaca; mode live)
   paper and autopilots   the digest's table of autopilots (reports/learn), the forward
-                         test's books by status (reports/forward), real money readiness
+                         test's books by status (reports/forward), real money readiness, the
+                         small-account paper books in EUR (reports/smallaccount, S1 and S2)
   lab                    the model zoo (reports/models) and the study reports that are new
   Pokemon, CS2, coins,   reports/pokemon, reports/cs2 and cs2_trends, reports/trending and
   stocks and ETFs, news  listings, the engines' US shares and the ETF closes, the news
@@ -45,7 +46,7 @@ STALE_MS = 2 * DAY_MS
 NOT_STUDIES = {"learn", "forward", "notify", "trending", "listings", "models", "pokemon", "cs2", "cs2_trends",
                "cs2_weekly", "readiness", "pumpfun", "pumpfun_rt", "pumpfun_activity", "polymarket", "agent",
                "exit_shadow", "factory", "paper_review", "studies", "ai", "ai_brief", "ai_news", "ai_analyst",
-               "costs", "research"}
+               "costs", "research", "smallaccount"}
 ETFS = ("SPY", "QQQ", "GLD")
 
 
@@ -174,11 +175,21 @@ def real_money_section(rows: list[dict], lang: str) -> list:
     return [Rows(out)] if out else []
 
 
+def small_line(small: dict | None, lang: str) -> Line | None:
+    """The small-account paper books (S1, S2) in one line: each wallet now in EUR and its result since the start."""
+    parts = []
+    for name, st in sorted(((small or {}).get("books") or {}).items()):
+        eq, cap = _num((st or {}).get("equity_eur")), _num((st or {}).get("capital_eur"))
+        if eq is not None and cap:
+            parts.append(f"{name} {i18n.eur(eq, 2, lang)} ({i18n.eur(eq - cap, 2, lang, sign=True)})")
+    return Line(" · ".join(parts), tr("bf_small", lang)) if parts else None
+
+
 def paper_section(learn: dict | None, forward: dict | None, readiness: dict | None, prev: dict, now: int,
-                  lang: str) -> tuple[list, dict, str | None]:
+                  lang: str, small: dict | None = None) -> tuple[list, dict, str | None]:
     """One line on the autopilots (how many run, the best and the weakest since their start, today in $),
-    the forward books by status and the readiness line; the snapshot for tomorrow (the digest's, so
-    "today" keeps counting); a few words for the summary."""
+    the forward books by status, the small-account books in EUR and the readiness line; the snapshot for
+    tomorrow (the digest's, so "today" keeps counting); a few words for the summary."""
     parts: list = []
     snap: dict = {}
     words = None
@@ -208,6 +219,9 @@ def paper_section(learn: dict | None, forward: dict | None, readiness: dict | No
             words_fw = ", ".join(f"{n} {tr('fw_' + k, lang) if 'fw_' + k in i18n.CATALOG['en'] else k.replace('_', ' ')}"
                                  for k, n in sorted(counts.items(), key=lambda kv: -kv[1]))
             parts.append(Line(tr("bf_books", lang, n=len(books), counts=words_fw), tr("forward_test", lang)))
+    sl = small_line(small, lang)
+    if sl is not None:
+        parts.append(sl)
     if readiness is not None:
         lead = (notify.READINESS_TEXT_DE if lang == "de" else notify.READINESS_TEXT)["lead"]
         parts.append(Line(short(nodash(notify.readiness_text(readiness, now, lang)).split(";")[0], 90), lead))
@@ -434,7 +448,8 @@ def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: flo
     if res:
         cards.append(Card("🔵", tr("bf_research", lang), None, res))
     summary += [words] if words else []
-    paper, snap, words = paper_section(read("learn"), read("forward"), read("readiness"), prev, now, lang)
+    paper, snap, words = paper_section(read("learn"), read("forward"), read("readiness"), prev, now, lang,
+                                       read("smallaccount"))
     if paper:
         cards.append(Card("📈", tr("bf_paper", lang), None, paper))
     summary += [words] if words else []
