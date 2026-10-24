@@ -31,6 +31,10 @@ realistic model, the default of every pipeline paper book since R1 (live.Shadow)
             cannot pay it. A wallet that can no longer pay one trade is topped up to START_SOL once nothing is open
             (counted), so the book keeps trading and its P&L runs on. The owner's pause stops only the live bot.
 
+R2 (results/pumpfun_smallwallet_r2.md): the small-wallet search's picks (SMALL) run as realistic books of their own,
+each on its own START_SOL paper wallet with its sizing fixed as picked (FixedSizing, not the owner's settings); the
+daily job writes their wallets in SOL and euro into realistic.md and the daily card shows them.
+
 The old books run on as `<name>_ideal` twins until IDEAL_UNTIL (two weeks), then go. The calibration line compares
 the live bot with the realistic paper twin P_pool0_wait on the same coins (entry and exit price, P&L in points);
 calibrated when the median P&L difference per matched trade is within CALIB_POINTS over 7 full days. Nothing here
@@ -84,6 +88,12 @@ CALIB_POINTS = 5.0
 CALIB_DAYS = 7
 MIN_MATCHED = 10
 MATCH_MS = 10 * 60_000                    # a live and a paper entry of the same coin within this are one trade
+# R2 (results/pumpfun_smallwallet_r2.md): the small-wallet search's picks as paper books from its deploy, each with its
+# own START_SOL paper wallet and its sizing fixed as picked (limits=wallet, floor 0), not the owner's settings:
+# (book, strategy, share of the wallet, max open, brake)
+SMALL = (("P_pool5_top30t_sw10o3n", "P_pool5_top30t", 0.10, 3, False),
+         ("P_pool5_top30t_sw10o2n", "P_pool5_top30t", 0.10, 2, False),
+         ("P_pool5_top30t_sw10o1n", "P_pool5_top30t", 0.10, 1, False))
 
 
 def u_of(key: tuple) -> float:
@@ -309,6 +319,25 @@ class Model:
 
     def reload(self) -> None:
         self.fit, self.cfg = load_fit(), LiveConfig.load()
+
+
+class FixedSizing:
+    """R2's small-wallet books: the day's fit of `model` (which the collector reloads), the sizing settings fixed."""
+
+    def __init__(self, model: Model, cfg: LiveConfig):
+        self.model, self.cfg = model, cfg
+
+    @property
+    def fit(self) -> Fit:
+        return self.model.fit
+
+    def reload(self) -> None:
+        pass
+
+
+def small_cfg(share: float, max_open: int, brake: bool) -> LiveConfig:
+    """A small-wallet book's sizing: limits=wallet, the share, the brake, floor 0, the slots, no ceiling."""
+    return LiveConfig(True, float(share), bool(brake), 0.0, int(max_open), math.inf)
 
 
 @dataclass(frozen=True)
@@ -574,6 +603,70 @@ def books(eng, strategies: list[P.Strategy], model: Model, wallets: dict | None 
     return out
 
 
+def small_books(eng, model: Model, wallets: dict | None = None, kill=None, small=None) -> list[Book]:
+    """R2: one realistic book per small-wallet pick (SMALL), on its own START_SOL paper wallet (`wallets`, filled in
+    for new ones) with its fixed sizing; it draws its latency with its strategy's key, so it gets the fills of the
+    strategy's own realistic book and differs only in its stakes and slots."""
+    wallets = wallets if wallets is not None else {}
+    out = []
+    for name, base, share, max_open, brake in (SMALL if small is None else small):
+        s = P.BY_NAME[base]
+        v = dataclasses.replace(s, name=name, p={**s.p, "base": base}, stake_sol=math.inf,
+                                label=f"{s.label}; R2 small wallet: {share * 100:g} % of the wallet, at most "
+                                      f"{max_open} open, brake {'on' if brake else 'off'}, from {START_SOL} SOL")
+        m = FixedSizing(model, small_cfg(share, max_open, brake))
+        w = wallets.setdefault(name, PaperWallet())
+        eng.rule_costs[name] = RealCosts(model=m)
+        out.append(eng.add_pipe(Book(eng, [v], RealExecutor(m, w), name="realistic", kill=kill)))
+    return out
+
+
+def sol_eur() -> float | None:
+    """One SOL in euro: notify.sol_eur (the engine's rate or Kraken's public ticker), else the owner's target file's
+    last value over its SOL; None if neither."""
+    try:
+        from ..ops import notify
+        v = notify.sol_eur()
+        if v:
+            return float(v)
+    except Exception:                                        # noqa: BLE001 - the file next
+        pass
+    d = read_json(reports_dir() / "target_eur.json") or {}
+    try:
+        return float(d["value_eur"]) / float(d["sol"]) if float(d.get("sol") or 0) > 0 else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def small_status(state: dict | None, eur: float | None, small=None) -> list[dict]:
+    """The small-wallet books' paper wallets from the collector's state.json: what each holds (its start, top-ups
+    included, and every realised result; open positions at their cost), in SOL and euro, its P&L, trades, top-ups."""
+    pw = (state or {}).get("paper_wallets") or {}
+    out = []
+    for name, base, share, max_open, brake in (SMALL if small is None else small):
+        w = PaperWallet.from_json(pw.get(name)) if name in pw else None
+        sol = (w.start_l + w.pnl_l) / C.LAMPORTS if w is not None else START_SOL
+        out.append({"book": name, "strategy": base, "share": share, "max_open": max_open, "brake": brake,
+                    "sol": sol, "eur": sol * eur if eur else None, "pnl_sol": w.pnl_l / C.LAMPORTS if w else 0.0,
+                    "trades": w.n if w else 0, "refills": w.refills if w else 0, "started": w is not None})
+    return out
+
+
+def small_md(rows: list[dict], eur: float | None) -> list[str]:
+    if not rows:
+        return []
+    md = [f"Small-wallet paper books (R2, results/pumpfun_smallwallet_r2.md): {START_SOL} SOL each from the deploy, "
+          f"sizing fixed as picked; 1 SOL = {'n/a' if not eur else format(eur, '.2f')} EUR.", "",
+          "| book | strategy | share | max open | brake | wallet SOL | wallet EUR | P&L SOL | trades | top-ups |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        eur_ = "n/a" if r["eur"] is None else f"{r['eur']:.2f}"
+        md.append(f"| {r['book']} | {r['strategy']} | {r['share'] * 100:g} % | {r['max_open']} | "
+                  f"{'on' if r['brake'] else 'off'} | {r['sol']:.3f} | {eur_} | {r['pnl_sol']:+.3f} | {r['trades']} | "
+                  f"{r['refills']} |")
+    return md + [""]
+
+
 # ---------------------------------------------------------------- calibration
 
 def _f(x) -> float | None:
@@ -665,9 +758,11 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     cal = calibrate(read_csv(data_dir() / "ledger.csv"), read_csv(paper_dir() / "ledger.csv"), start, now_ms)
     covered = (now_ms - start) / DAY_MS
     word = verdict(cal, covered)
+    eur = sol_eur()
     out = {"updated_ms": now_ms, "fit": f.to_json(), "config": LiveConfig.load().to_json(),
            "realistic_since": since, "calibration": cal | {"days": covered, "verdict": word,
-                                                           "line": calib_line(cal, word, covered)}}
+                                                           "line": calib_line(cal, word, covered)},
+           "sol_eur": eur, "small": small_status(read_json(paper_dir() / "state.json"), eur)}
     if write:
         from .live_exec import write_json
         d = reports_dir()
@@ -716,7 +811,8 @@ def markdown(d: dict) -> str:
         f"Paper wallet {START_SOL} SOL per book; sizing as live: limits {'wallet' if cfg.get('wallet') else 'fixed'}, "
         f"share {cfg.get('share', Z.SHARE) * 100:g} %, brake {'on' if cfg.get('brake', True) else 'off'}, floor "
         f"{cfg.get('floor_sol') if cfg.get('floor_sol') is not None else Z.PAUSE_BELOW_SOL} SOL, at most "
-        f"{cfg.get('max_open', P.HARD_MAX_OPEN)} open, reserve {RESERVE_SOL} SOL.", ""])
+        f"{cfg.get('max_open', P.HARD_MAX_OPEN)} open, reserve {RESERVE_SOL} SOL.", "",
+        *small_md(d.get("small") or [], d.get("sol_eur"))])
 
 
 # ---------------------------------------------------------------- R1: the headline strategies, ideal and realistic

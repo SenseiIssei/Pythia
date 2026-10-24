@@ -192,10 +192,10 @@ class Unlimited(P.Risk):
         return "kill switch" if self.kill() else None
 
 
-def label_strategies(base: str = "P_pool0") -> list[P.Strategy]:
+def label_strategies(base: str = "P_pool0", tag: str = "y9lab") -> list[P.Strategy]:
     """P_pool0 at the migration and 5 s after it, drawing its latency with P_pool0's key."""
     s = P.BY_NAME[base]
-    return [dataclasses.replace(s, name=f"{base}_e{d}@y9lab", p={**s.p, "delay_s": d, "base": base}, stake_sol=0.1)
+    return [dataclasses.replace(s, name=f"{base}_e{d}@{tag}", p={**s.p, "delay_s": d, "base": base}, stake_sol=0.1)
             for d in ENTRIES]
 
 
@@ -209,9 +209,9 @@ class LabelPipe(P.Pipeline):
 
     PID0 = 1 << 40
 
-    def __init__(self, eng, costs=None, name: str = "y9lab"):
-        strats = label_strategies()
-        super().__init__(eng, strats, P.PaperExecutor(), name=name, record=False)
+    def __init__(self, eng, costs=None, name: str = "y9lab", tag: str = "y9lab", executor=None):
+        strats = label_strategies(tag=tag)                   # R2's realistic book: its own names and executor
+        super().__init__(eng, strats, executor or P.PaperExecutor(), name=name, record=False)
         self.risk = {s.name: Unlimited(None, self.kill) for s in strats}
         if costs is not None:
             for s in strats:

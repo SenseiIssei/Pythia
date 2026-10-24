@@ -110,6 +110,8 @@ class Engine:
         # live service)
         self.trend = TF.Tracker() if trend else None
         self.trend_tick: float | None = None
+        # R2: the realistic labels of the decision and early rows (labels_r2.Labels; the study's second pass)
+        self.r2 = None
 
     def _index_rules(self) -> None:
         """The rules and every pipe's strategies, by entry kind (a strategy signals once for all pipes)."""
@@ -227,6 +229,8 @@ class Engine:
         for pipe in self.pipes:
             pipe.exec.on_trade("trades", {"t": t, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
                                           "fee_bps": tok.fee_bps, "sig": sig})
+        if self.r2 is not None:
+            self.r2.on_trade(mint, t)
         if tok.tradeable():
             for r in self.by_entry.get("momentum", ()):
                 if r.wants_momentum(tok, t):
@@ -292,6 +296,8 @@ class Engine:
         for pipe in self.pipes:
             pipe.exec.on_trade("amm", {"t": t, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
                                        "user": user, "fee_bps": tok.amm_fee_bps, "sig": sig})
+        if self.r2 is not None:
+            self.r2.on_trade(mint, t)
         for pid in tuple(self.by_mint.get(mint, ())):
             self.check_exit(pid, t)
         for pipe in self.pipes:
@@ -552,6 +558,8 @@ class Engine:
         self.push(at + 60_000, "label_dump", idx)
         last = max(max(LABEL_HORIZONS) * 1000 + self.costs.lat_hi_ms, max(UP_HORIZONS) * 1000 + self.costs.lat_hi_ms)
         self.push(at + last + 1_000, "label_pack", idx)
+        if self.r2 is not None:                              # R2: the same labels at the realistic entry and exit
+            self.r2.decide(idx, row, at)
 
     def _a_label_sell10(self, at, data) -> None:
         """The dev or a top-10 holder at t sold a quarter or more of what it held at t."""
@@ -684,9 +692,10 @@ class Engine:
         return [{c: float(v[i]) for c, v in fr.items()} for i in range(n)]
 
 
+ROW_R = [f"{k}{h}_r" for h in LABEL_HORIZONS for k in ("win", "net")] + [f"up{h}_r" for h in UP_HORIZONS]   # R2
 ROW_COLS = (["t", "created_ms", "off"] + ALL_FEATURES
             + [f"{k}{h}" for h in LABEL_HORIZONS for k in ("r", "win", "net")] + ["dump60", "mig"]
-            + [f"sell10_{h}" for h in SELL10_HORIZONS] + [f"up{h}" for h in UP_HORIZONS])
+            + [f"sell10_{h}" for h in SELL10_HORIZONS] + [f"up{h}" for h in UP_HORIZONS] + ROW_R)
 _COL = {c: i for i, c in enumerate(ROW_COLS)}
 CHUNK = 65_536
 

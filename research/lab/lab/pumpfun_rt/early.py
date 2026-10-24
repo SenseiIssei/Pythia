@@ -238,6 +238,7 @@ class Packed:
 
 
 ROW_LABELS = list(LABELS)
+ROW_R = ["filled_r", "peak3x_r", "peak10x_r"]           # R2: the peaks at the realistic entry (labels_r2.Labels)
 ROW_META = ["t", "created_ms", "tid", "kind", "filled", "pos", "tokens", "cost_l", "land_ms", "lat_ms",
             "filled2", "tokens2", "cost2_l", "land2_ms", "dropped"]
 STEP_META = ["pos", "t", "pt"]
@@ -260,7 +261,8 @@ class Tracker:
         self.features_cache: tuple | None = None
         if rows:
             from .trendfeat import TREND_FEATURES                # Y10: the trend features (NaN without the tracker)
-            self.row_cols = ROW_META + early_feature_list() + TREND_FEATURES + ROW_LABELS
+            self.row_cols = (ROW_META + early_feature_list() + TREND_FEATURES + ROW_LABELS
+                             + ROW_R)                         # R2: the peaks at the realistic entry
             self.rows = Packed(self.row_cols)
             self.steps = Packed(STEP_META + STEP_FEATURES)
         self.pos: dict[int, Pos] = {}
@@ -485,6 +487,8 @@ class Tracker:
         eng.push(t + 2 * lat, "pipe", (self, "_land", (idx, 2)))
         eng.push(t + ALIVE_H_MS, "pipe", (self, "_alive", idx))
         eng.push(t + 2 * lat + PEAK_H_MS + 2_000, "pipe", (self, "_pack", idx))
+        if getattr(eng, "r2", None) is not None:             # R2: the peaks at the realistic entry
+            eng.r2.early(self, idx, tok.mint, kind, want, t)
 
     def _cost(self, tok, want: int) -> tuple[int, int, str | None]:
         """(tokens, cost lamports, why not) of buying `want` now, as the paper executor fills it."""

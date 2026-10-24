@@ -547,6 +547,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_why_kill": "kill switch",
         "prt_all_books": "Every paper book",
         "prt_daily_books": "Paper books yesterday: {n} with closed trades, {pnl} in all.",
+        "prt_daily_small": "Small-wallet paper books (from 0.55 SOL each): {books}.",
         "prt_daily_models": ("Models: {useful} of {labels} labels beat their baselines; wallet features adopted for "
                              "{wallet}, name categories for {cat}."),
         "prt_daily_ready": ("Closest to live: {rule}, {days} of 14 days, {trades} of 300 trades out of sample, "
@@ -1102,6 +1103,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_why_kill": "Notschalter",
         "prt_all_books": "Alle Paper-Bücher",
         "prt_daily_books": "Paper-Bücher gestern: {n} mit geschlossenen Positionen, {pnl} insgesamt.",
+        "prt_daily_small": "Paper-Bücher für die kleine Wallet (je ab 0,55 SOL): {books}.",
         "prt_daily_models": ("Modelle: {useful} von {labels} Zielen schlagen ihre Vergleichsmodelle; "
                              "Wallet-Merkmale bei {wallet} übernommen, Namenskategorien bei {cat}."),
         "prt_daily_ready": ("Am nächsten an echtem Geld: {rule}, {days} von 14 Tagen, {trades} von 300 Positionen "

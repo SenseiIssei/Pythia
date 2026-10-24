@@ -6,6 +6,8 @@ Since R1 every pipeline book is REALISTIC (realistic.py): the live bot's measure
 trade after the landing, its bounds, failures, fees and sizing on a paper wallet of 0.55 SOL per book, under the
 strategy's own name; the old books (0.4 to 3 s, 0.1 SOL) run on as `<name>_ideal` until realistic.IDEAL_UNTIL_MS.
 The day's fit (reports/pumpfun_rt/realistic.json) and the live sizing settings are re-read every RELOAD_S.
+R2's small-wallet picks (realistic.SMALL) run next to them as realistic books of their own, each on its own 0.55 SOL
+paper wallet with its sizing fixed as picked (realistic.small_books).
 
 Nothing here trades: every fill of these books is the engine's curve
 arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The
@@ -166,12 +168,15 @@ class Shadow:
     def __init__(self, pick: str, models: dict | None = None, book: CreatorBook | None = None,
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
                  strategies: list | None = None, kill=None, trends: bool = False, blocked=None, category=None,
-                 realistic: bool = False, real: R.Model | None = None, paper_wallets: dict | None = None):
+                 realistic: bool = False, real: R.Model | None = None, paper_wallets: dict | None = None,
+                 small=None):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
         rule = S.BY_NAME[pick]
         self.models = models or {}
+        if small is None:                                     # R2's small-wallet books go with the full set
+            small = R.SMALL if strategies is None else ()
         strategies = P.STRATEGIES if strategies is None else strategies
         kill = kill or P.KillSwitch()
         now = now_ms or int(time.time() * 1000)
@@ -185,6 +190,7 @@ class Shadow:
                              select=True, trend=True)
         if realistic:
             R.books(self.engine, strategies, self.real, self.paper_wallets, kill=kill)
+            R.small_books(self.engine, self.real, self.paper_wallets, kill=kill, small=small)   # R2
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
             pipe.blocked = blocked                            # the owner's block list (blocklist.PAPER_RULES)
@@ -271,7 +277,9 @@ class Shadow:
             sh.totals = {(k + R.IDEAL if k in P.BY_NAME else k): v for k, v in sh.totals.items()}
         print(f"shadow: paper books {sh.pick} and {sh.pick}+model, and the pipeline strategies "
               + ", ".join(s.name for s in P.STRATEGIES) + " realistic (live latency, fills, failures, fees and "
-              f"sizing on {R.START_SOL} SOL each)" + (", with the old books as <name>_ideal"
+              f"sizing on {R.START_SOL} SOL each)"
+              + (", the small-wallet books " + ", ".join(x[0] for x in R.SMALL) if R.SMALL else "")
+              + (", with the old books as <name>_ideal"
                                                        if any(p.name == "paper" for p in sh.engine.pipes) else "")
               + ("" if sh.models else " (no model yet: the model-filtered books skip every signal)"), flush=True)
         return sh

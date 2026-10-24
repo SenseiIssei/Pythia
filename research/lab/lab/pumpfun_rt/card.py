@@ -58,9 +58,11 @@ def shadow_yesterday(now_ms: int, path=None) -> dict[str, dict]:
                 "pnl_sol": float(sum(t["pnl_sol"] for t in v))} for k, v in out.items()}
 
 
-def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None, now_ms: int, lang: str = "en"):
+def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None, now_ms: int, lang: str = "en",
+               small: list | None = None):
     """`data` the study's latest.json, `models` the retrain's summary, `shadow` the books'
-    yesterday, `live` the live executor's state (live_exec.status())."""
+    yesterday, `live` the live executor's state (live_exec.status()), `small` R2's small-wallet
+    books' paper wallets (realistic.small_status)."""
     from ..ops import i18n, notify
     t = i18n.t
     y = _day(now_ms - DAY_MS)
@@ -77,6 +79,10 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     else:
         tot = sum(s["pnl_sol"] for s in shadow.values())
         lines.append(t("prt_daily_books", lang, n=len(shadow), pnl=f"{i18n.num(tot, 3, lang, True)} SOL"))
+    if small:
+        lines.append(t("prt_daily_small", lang, books="; ".join(
+            f"{r['book']} {i18n.sol(r['sol'], 3, lang)}" + (f" ({i18n.eur(r['eur'], 2, lang)})" if r.get("eur") else "")
+            for r in small)))
     lat = data.get("latency") or {}
     if lat.get("n") and lat.get("p50_ms") is not None:
         lines.append(t("prt_daily_latency", lang, med=i18n.num(lat["p50_ms"] / 1000, 1, lang),
@@ -130,7 +136,7 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     parts.append(notify.Line(t("prt_caveat", lang)))
     return _langs(notify.Card("⚡", t("prt_daily_title", lang, day=i18n.iso_day(y, lang)), summary, parts,
                               footer=t("prt_footer", lang)), lang,
-                  lambda lg: daily_card(data, models, shadow, live, now_ms, lg))
+                  lambda lg: daily_card(data, models, shadow, live, now_ms, lg, small))
 
 
 def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
@@ -145,7 +151,15 @@ def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
         live = live_exec.status()
     except Exception:                                        # the card goes out whatever the live module says
         live = None
-    return daily_card(data, models, shadow_yesterday(now_ms), live, now_ms, lang)
+    small = None
+    try:                                                     # R2: the small-wallet books' paper wallets
+        from . import realistic as R
+        from .live import paper_dir
+        if R.SMALL:
+            small = R.small_status(R.read_json(paper_dir() / "state.json"), R.sol_eur())
+    except Exception:                                        # the card goes out without them
+        small = None
+    return daily_card(data, models, shadow_yesterday(now_ms), live, now_ms, lang, small)
 
 
 def _tagged(title: str, mode: str | None, lang: str) -> str:

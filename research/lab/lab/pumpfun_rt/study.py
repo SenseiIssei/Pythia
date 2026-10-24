@@ -31,6 +31,11 @@ Steps (results/pumpfun_realtime_plan.md):
  8. reports/pumpfun_rt/latest.{md,json} (lab feed header), pick.json, the decision
     rows (<data>/pumpfun_rt/rows/latest.parquet) and Y9's rows (rows/select.parquet)
     for retrain.py.
+
+R2 (labels_r2.py): Y9's label book is executed the way the live bot is (realistic.RealExecutor on the day's fit) in
+both passes; pass 2 also gives the decision rows and X14's early rows their labels at the realistic entry and exit
+(`<label>_r` columns) and keeps the old label book's rows as rows/select_ideal.parquet for the _ideal twins. The
+rules and strategies themselves keep their registered fills.
 """
 
 from __future__ import annotations
@@ -50,8 +55,10 @@ from .. import report as rep
 from . import curve as C
 from . import early as EA
 from . import exitpol as XP
+from . import labels_r2 as L2
 from . import model as M
 from . import pipeline as P
+from . import realistic as R
 from . import selfeat as SF
 from . import selmodel as SM
 from . import sim
@@ -279,7 +286,8 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
                     wallets=W.warm(warm, root), cats=cats, early_rows=True, snipers=EA.warm_snipers(warm, root),
                     select=True, trend=True)
     e1.early.keep_frac = keep
-    lab1 = e1.add_pipe(SF.LabelPipe(e1, select_costs()))   # Y9: the select models' rows, at the measured latency
+    real = R.Model()                                         # R2: the day's realistic fit (realistic.json)
+    lab1 = e1.add_pipe(L2.RealLabelPipe(e1, real))           # Y9: the select models' rows, executed as live (R2)
     sim.replay(days, e1, root, until_ms=split + 45 * 60_000)
     is_trades = [t for t in e1.closed if t["signal_ms"] < split]
     by_rule = defaultdict(list)
@@ -324,7 +332,9 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
                     strategies=strats, wallets=W.warm(warm, root), cats=cats, models=is_models, early_rows=True,
                     snipers=EA.warm_snipers(warm, root), select=True, trend=True)
     e2.early.keep_frac = keep
-    lab2 = e2.add_pipe(SF.LabelPipe(e2, select_costs()))   # Y9: every row of the record, for the retrain
+    lab2 = e2.add_pipe(SF.LabelPipe(e2, select_costs()))   # Y9: every row of the record, the old labels (_ideal)
+    lab2r = e2.add_pipe(L2.RealLabelPipe(e2, real))          # R2: the same rows executed as live, for the retrain
+    e2.r2 = L2.Labels(e2, real)                              # R2: the decision and early rows' realistic labels
     sim.replay(days, e2, root)
     log(f"{NAME}: pass 2 in {time.time() - t0:.0f} s, {len(e2.closed)} closed paper trades, {len(e2.rows)} model rows")
 
@@ -365,7 +375,7 @@ def _run(now_ms: int | None = None, window: int = WINDOW_DAYS, root=None, log=pr
     return {"now_ms": now_ms, "days": days, "warm": warm, "split_ms": split, "span": (t_lo, t_hi), "pick": pick,
             "picked_by": "in-sample mean" if cands else "default", "results": results, "pool": pl_,
             "table": table, "record": rec, "x14": x14, "x14_keep": keep, "latency": lat,
-            "select_rows": lab2.table(),
+            "select_rows": lab2r.table(), "select_rows_ideal": lab2.table(),
             "counts": {"pass1": dict(e1.counts), "pass2": dict(e2.counts)},
             "skipped": {f"{k[0]}: {k[1]}": v for k, v in e2.skipped.items() if "@" not in k[0]},
             "failed_why": dict(sorted(((w, sum(1 for f in e2.failed if f["why"] == w and "@" not in f["rule"]))
@@ -683,7 +693,11 @@ def save_outputs(res: dict, data: dict, md: str) -> None:
     if res.get("table") is not None and len(res["table"].get("t", [])):
         save_rows(res["table"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"]})
     if res.get("select_rows") is not None and len(res["select_rows"].get("t", [])):
-        SM.save_rows(res["select_rows"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"]})
+        SM.save_rows(res["select_rows"], {"now_ms": res["now_ms"], "days": res["days"], "split_ms": res["split_ms"],
+                                          "labels": "realistic"})
+    if res.get("select_rows_ideal") is not None and len(res["select_rows_ideal"].get("t", [])):
+        SM.save_rows(res["select_rows_ideal"], {"now_ms": res["now_ms"], "days": res["days"],
+                                                "split_ms": res["split_ms"], "labels": "ideal"}, SM.rows_path(L2.IDEAL))
     if res.get("x14") is not None:
         EA.save(res["x14"], rows_path().parent, {"now_ms": res["now_ms"], "days": res["days"],
                                                  "split_ms": res["split_ms"], "keep": res.get("x14_keep")})

@@ -23,6 +23,12 @@ Y9 (results/pumpfun_select_y9_prereg.md, run_y9): the select models on the study
 label rows (rows/select.parquet), walk-forward by day for reports/pumpfun_rt/select.md,
 then on every row for the paper books (sel_<label>.json, sel_policy.json).
 
+R2 (results/pumpfun_smallwallet_r2_prereg.md, labels_r2.py): every label with execution in it (win30, win300,
+up10, up30, up120; Y9's and Y10's select labels; X14's peak3x and peak10x) is trained at the realistic entry and
+exit under its usual name, where the paper books read it; the old labels' models as `<name>_ideal` in
+<data>/models/pumpfun_rt/ideal/ (never read by a book), side by side in the reports, until
+labels_r2.IDEAL_UNTIL_MS. Rows written before R2 have no realistic labels: then the old ones, said so.
+
 Writes reports/pumpfun_rt/models.{md,json} and posts the lab's daily card
 (card.py), which needs both the study's report and this one.
 """
@@ -39,6 +45,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import report as rep
+from . import labels_r2 as L2
 from . import model as M
 
 EVAL_MAX_ROWS = 1_000_000
@@ -75,9 +82,13 @@ def load_rows(path: Path | None = None) -> tuple[dict[str, np.ndarray], dict]:
     return table, meta
 
 
-def run(table: dict[str, np.ndarray], max_rows: int = EVAL_MAX_ROWS, log=print) -> dict:
+def run(table: dict[str, np.ndarray], max_rows: int = EVAL_MAX_ROWS, log=print, ideal: bool = False) -> dict:
+    """R2: on the realistic labels where the rows have them; with `ideal` also the old labels' twins (the realistic
+    model's adopted feature set, one evaluation each)."""
     sel = {}
     t0 = time.time()
+    old, real = table, L2.realistic_rows(table)
+    table = real if real is not None else table
     for label in M.LABELS:
         s = M.select(table, label, max_rows=max_rows)
         sel[label] = s
@@ -87,9 +98,17 @@ def run(table: dict[str, np.ndarray], max_rows: int = EVAL_MAX_ROWS, log=print) 
     sets = {k: v["features"] for k, v in sel.items()}
     final = M.train_all(table, sets=sets)
     log(f"{NAME} retrain: {sum(v['trials'] for v in sel.values())} evaluations and {len(final)} models in "
-        f"{time.time() - t0:.0f} s")
+        f"{time.time() - t0:.0f} s" + ("" if real is not None else " (no realistic labels in the rows yet: the old)"))
+    twins = {}
+    if ideal and real is not None:
+        for label in L2.REAL_ROW:
+            ev = M.evaluate(old, label, M.FOLDS, sets[label], max_rows)
+            rs = M.labelled(old, label)
+            rs = {k: v[-M.MAX_ROWS:] for k, v in rs.items()}
+            twins[label] = {"eval": ev, "model": M.fit(M.matrix(rs, sets[label]), rs[label], sets[label])}
     return {"select": sel, "models": final, "sets": {k: v["adopted"] for k, v in sel.items()},
-            "importance": {k: M.importance(m) for k, m in final.items()}, "rows": int(len(table.get("t", [])))}
+            "importance": {k: M.importance(m) for k, m in final.items()}, "rows": int(len(table.get("t", []))),
+            "realistic": real is not None, "ideal": twins}
 
 
 def summary(res: dict, now_ms: int) -> dict:
@@ -107,6 +126,13 @@ def summary(res: dict, now_ms: int) -> dict:
                                 "useful": bool(ev.get("useful")), "verdict": ev.get("verdict", ""),
                                 "notes": s["notes"]}
         out["trials"] += s["trials"]
+    out["realistic"] = bool(res.get("realistic"))
+    out["ideal"] = {}
+    for label, tw in (res.get("ideal") or {}).items():
+        pm = ((tw["eval"].get("pooled") or {}).get("model") or {})
+        out["ideal"][label] = {"auc": pm.get("auc"), "brier_skill": pm.get("brier_skill"), "rate": pm.get("rate"),
+                               "auc_realistic": out["labels"][label]["auc"],
+                               "rate_realistic": out["labels"][label]["rate"]}
     out["useful"] = sum(1 for v in out["labels"].values() if v["useful"])
     out["wallet_adopted"] = sum(1 for v in out["labels"].values() if "wallet" in v["set"])
     out["cat_adopted"] = sum(1 for v in out["labels"].values() if "cat" in v["set"])
@@ -130,6 +156,17 @@ def report_md(summ: dict, importance: dict) -> str:
         md.append(f"| {k} | {v['set']} | {v['rows']} | {v['folds']} | {_f(v['auc'])} | {_f(v['auc_base_set'])} | "
                   f"{_f(v['brier_skill'], '{:+.3f}')} | {_f(v['ece'])} | {_f(v['logistic_auc'])} | "
                   f"{_f(v['rate'])} | {v['verdict']} |")
+    md += ["", ("Labels at the realistic entry and exit (R2, labels_r2.py) where they have execution in them: "
+               + ", ".join(L2.REAL_ROW) + "." if summ.get("realistic") else
+               "The rows have no realistic labels yet (written before R2): every model on the old labels.")]
+    if summ.get("ideal"):
+        md += ["", f"Against the old labels (`<label>_ideal`, models/pumpfun_rt/ideal/, until "
+                   f"{L2.until_day()}), the same feature set, out of sample:", "",
+               "| label | rate realistic | rate old | AUC realistic | AUC old | Brier skill old |",
+               "|---|---|---|---|---|---|"]
+        for k, v in summ["ideal"].items():
+            md.append(f"| {k} | {_f(v['rate_realistic'])} | {_f(v['rate'])} | {_f(v['auc_realistic'])} | "
+                      f"{_f(v['auc'])} | {_f(v['brier_skill'], '{:+.3f}')} |")
     md += ["", "Adoption:"]
     for k, v in summ["labels"].items():
         md.append(f"- {k}: " + "; ".join(f"{n} {w}" for n, w in v["notes"].items()))
@@ -142,7 +179,11 @@ def report_md(summ: dict, importance: dict) -> str:
 def save(res: dict, summ: dict, meta_rows: dict) -> None:
     M.save(res["models"], {"trained_ms": summ["updated_ms"], "rows": res["rows"], "sets": res["sets"],
                            "days": meta_rows.get("days"), "labels": summ["labels"],
+                           "realistic": bool(res.get("realistic")),
                            "features": {k: m.features for k, m in res["models"].items()}})
+    if res.get("ideal"):                                     # R2: the old labels' twins, never read by a book
+        M.save({k: v["model"] for k, v in res["ideal"].items()},
+               {"trained_ms": summ["updated_ms"], "labels": "ideal", "until_ms": L2.IDEAL_UNTIL_MS}, L2.ideal_dir())
     d = rep.REPORTS / NAME
     d.mkdir(parents=True, exist_ok=True)
     (d / "models.json").write_text(json.dumps(summ, indent=1, default=str), encoding="utf-8")
@@ -163,15 +204,23 @@ def run_x14(now_ms: int, dry: bool = False, log=print) -> dict | None:
         log(f"{NAME} retrain: no X14 rows ({type(e).__name__}: {e})")
         return None
     t0 = time.time()
-    res = XP.run(data, split_ms=data["meta"].get("split_ms"), log=log)
+    from . import realistic as R
+    old, real = data, L2.realistic_early(data)               # R2: peak3x and peak10x at the realistic entry
+    costs = L2.costs_of(R.Model())                           # R2: the sales at the realistic latency and fees
+    data = real if real is not None else data
+    res = XP.run(data, costs=costs, split_ms=data["meta"].get("split_ms"), log=log)
     day = datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime("%Y-%m-%d")
-    md = XP.report_md(res, day)
+    twins = L2.ideal_early(old, log) if real is not None and L2.ideal_on(now_ms) else {}
+    md = XP.report_md(res, day) + L2.early_md(res, twins, real is not None)
     summ = XP.summary(res)
+    summ["realistic"] = real is not None
     if dry:
         print(md)
         return summ
-    models = XP.fit_live(data, k=(res["exit"]["judge"] or {}).get("k_star") or 1.0, log=log)
+    models = XP.fit_live(data, costs=costs, k=(res["exit"]["judge"] or {}).get("k_star") or 1.0, log=log)
     XP.save_models(models, M.model_dir())
+    if twins:
+        XP.save_models(twins["models"], L2.ideal_dir())
     d = rep.REPORTS / NAME
     d.mkdir(parents=True, exist_ok=True)
     (d / "early_exit.json").write_text(json.dumps(XP.jsonable(res), indent=1, default=str), encoding="utf-8")
@@ -195,16 +244,29 @@ def run_y9(now_ms: int, dry: bool = False, log=print) -> dict | None:
         return None
     wf = SM.walk_forward(table)
     models = SM.train(table)
+    twin = None
+    if L2.ideal_on(now_ms) and meta.get("labels") == "realistic":     # R2: the old labels' twins
+        try:
+            t_old, _ = SM.load_rows(SM.rows_path(L2.IDEAL))
+            twin = {"wf": SM.walk_forward(t_old), "models": SM.train(t_old)}
+        except Exception as e:                              # no old rows: no twins
+            log(f"{NAME} retrain: no Y9 _ideal rows ({type(e).__name__}: {e})")
     summ = {"updated_ms": now_ms, "rows": models["sel_rows"], "days": meta.get("days"),
+            "labels": meta.get("labels") or "ideal",
             "models": {k: bool(models["sel_" + k].booster is not None) for k in SM.LABELS},
             "walk_forward": {k: {x: v.get(x) for x in ("n", "rate", "model", "logistic", "ret_all", "ret_top", "n_top",
                                                        "ret_below_base", "n_below_base")}
                              for k, v in wf.items()}}
+    if twin is not None:
+        summ["ideal"] = {k: {x: v.get(x) for x in ("n", "rate", "model", "ret_all", "ret_top", "n_top")}
+                         for k, v in twin["wf"].items()}
     md = select_md(summ)
     if dry:
         print(md)
         return summ
     SM.save(models)
+    if twin is not None:
+        SM.save(twin["models"], L2.ideal_dir())
     d = rep.REPORTS / NAME
     d.mkdir(parents=True, exist_ok=True)
     (d / "select.json").write_text(json.dumps(summ | {"days_detail": {k: v["days"] for k, v in wf.items()}},
@@ -227,6 +289,17 @@ def select_md(summ: dict) -> str:
                   f"{_f(v.get('ret_all'), '{:+.3f}')} | "
                   f"{_f(v.get('ret_top'), '{:+.3f}')} ({v.get('n_top') or 0}) | "
                   f"{_f(v.get('ret_below_base'), '{:+.3f}')} ({v.get('n_below_base') or 0}) |")
+    md += ["", "Labels: " + ("at the realistic entry and exit (R2: the label book through realistic.RealExecutor, the "
+                             "rug window from the drawn landing)." if summ.get("labels") == "realistic" else
+                             "the old ones (rows written before R2).")]
+    if summ.get("ideal"):
+        md += ["", f"The old labels' twins (`sel_<label>_ideal`, models/pumpfun_rt/ideal/, until {L2.until_day()}), "
+                   "the same walk-forward:", "",
+               "| label | out of sample | rate | AUC | mean return, all | top 30 % |", "|---|---|---|---|---|---|"]
+        for k, v in summ["ideal"].items():
+            md.append(f"| {k} | {v.get('n') or 0} | {_f(v.get('rate'))} | {_f((v.get('model') or {}).get('auc'))} | "
+                      f"{_f(v.get('ret_all'), '{:+.3f}')} | "
+                      f"{_f(v.get('ret_top'), '{:+.3f}')} ({v.get('n_top') or 0}) |")
     return "\n".join(md) + "\n"
 
 
@@ -244,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{NAME} retrain: no decision rows ({type(e).__name__}: {e})")
         table, meta = None, {}
     if table is not None and len(table.get("t", [])):
-        res = run(table, a.max_rows)
+        res = run(table, a.max_rows, ideal=L2.ideal_on(now_ms))
         summ = summary(res, now_ms)
         if a.dry_run:
             print(report_md(summ, res["importance"]))

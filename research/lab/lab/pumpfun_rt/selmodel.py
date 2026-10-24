@@ -184,9 +184,10 @@ def load_models(d: Path) -> dict:
     return out
 
 
-def rows_path() -> Path:
+def rows_path(suffix: str = "") -> Path:
+    """The study's label rows (R2: realistic; suffix "_ideal" the old labels' twin)."""
     from .store import base
-    return base() / "rows" / "select.parquet"
+    return base() / "rows" / f"select{suffix}.parquet"
 
 
 def save_rows(table: dict[str, np.ndarray], meta: dict, path: Path | None = None) -> Path:
