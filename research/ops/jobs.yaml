@@ -212,6 +212,19 @@ jobs:
     lock: heavy
     lock_wait: 2h
 
+  # S1 (results/smallaccount_s1.md): the best small-account variants at 50 and 100 EUR as
+  # paper books with their own wallets, Jupiter's costs and minimums, a report in EUR.
+  # Right after paper-families, whose panel cache it reads. Paper only, no engine signal.
+  - name: paper-smallaccount
+    description: EXPERIMENT two small-account paper books (50 and 100 EUR wallets, Jupiter costs) and their EUR report
+    depends_on: [paper-families]
+    command: python -m lab.paper.smallaccount
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 1, memory: 3g}
+    timeout: 20m
+    lock: heavy
+    lock_wait: 2h
+
   # The SPY sleeve of the Crypto + SPY forward test (results/equity_sleeve_prereg.md):
   # a lab book of US shares that is always 100 % SPY. It runs every weekday and
   # publishes a new signal only on the first run in a calendar month, so the
