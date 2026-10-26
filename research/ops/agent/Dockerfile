@@ -14,6 +14,8 @@
 # API key, as an environment variable). What it needs from the network: the Claude
 # API (api.anthropic.com); github.com and raw.githubusercontent.com to read public
 # docs such as pump.fun's IDLs; nothing else (packages are baked in here).
+# graphify (code-only, offline, GRAPHIFY_BACKEND=none) gives the agent a code graph of
+# its clone: `graphify explain X` and `graphify affected X` instead of reading files.
 ARG BASE=pythia-lab
 FROM node:24-slim AS node
 FROM ${BASE}
@@ -26,7 +28,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && apt-get install -y --no-install-recommends git ca-certificates util-linux procps curl \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g --no-fund --no-audit @anthropic-ai/claude-code \
- && pip install --no-cache-dir pytest \
+ && pip install --no-cache-dir pytest graphifyy==0.9.95 \
  && useradd --uid 10001 --user-group --create-home --home-dir /home/agent --shell /bin/bash agent
 
 ENV DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 IS_SANDBOX=1 PYTHIA_DATA=/data
