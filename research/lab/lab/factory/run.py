@@ -7,6 +7,8 @@
   python -m lab.factory shadow             daily: append the new days to each shadow book, review
                                            those with 30 days (posts only when one is decided, with --notify)
   python -m lab.factory digest --dry-run   print the last run's digest
+  python -m lab.factory small              daily, F2: the small-account mode (small.py: 40 and 100 EUR
+                                           wallets on BTC, ETH, SOL, SPYx, QQQx, PAXG, own ledger and shadows)
   python -m lab.factory export-seed        write the ledger, holdout log and active shadow
                                            books to results/factory_seed (committed, so a
                                            run made elsewhere counts on the server too)
@@ -240,6 +242,11 @@ def daily_shadow(do_notify: bool, log=print) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["small"]:
+        # F2, the small-account mode: its own grammar, costs, ledger, shadows and report (small.py).
+        from . import small
+        return small.main(argv[1:])
     ap = argparse.ArgumentParser(prog="python -m lab.factory")
     ap.add_argument("command", nargs="?", default="run", choices=["run", "shadow", "digest", "export-seed"])
     ap.add_argument("--budget", type=int, default=search.BUDGET)

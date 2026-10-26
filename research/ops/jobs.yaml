@@ -618,6 +618,22 @@ jobs:
     # The owner switched it back on 2026-10-21 after the research director had
     # advised a pause: every run raises the trial pool and the noise bar.
 
+  # F2 (research/lab/lab/factory/small.py): the factory's small-account mode, daily. Genomes on BTC, ETH, SOL, SPYx,
+  # QQQx and PAXG with USDC as cash (at most 3 held), each a wallet at 40 and 100 EUR with S1's and S2's costs
+  # (Jupiter's round trip, network fee and Sender tip, 5 USDC minimum, SOL reserve, the way in); its own ledger
+  # factory/small/ledger.jsonl and bar; survivors (drawdown under 20 %, above holding SPYx held back) as 40 EUR shadow
+  # wallets, at most 4; reports/smallaccount/factory.md. Reads the panel cache paper-families wrote the day before
+  # and Yahoo's ETF closes. Resumable: a rerun the same day only evaluates what is left of the budget. Paper only.
+  - name: factory-small
+    description: strategy factory F2, small-account mode, daily; new genomes for 40 and 100 EUR wallets at Jupiter's real costs, held-back checks against holding SPYx and BTC, 40 EUR shadow wallets, reports/smallaccount/factory.md
+    schedule: "0 3 * * *"
+    command: python -m lab.factory small
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache, PYTHIA_FACTORY_SMALL_BUDGET: "60"}
+    resources: {cpus: 1, memory: 2g}
+    timeout: 30m
+    lock: heavy
+    lock_wait: 1h
+
   # ---------------------------------------------------------------- AI (Claude API, metered by the engine)
   # All of them call through the autopilot engine's POST /api/ai/complete,
   # which holds the key and the hard budget (docs/AI.md). Shadow only: nothing

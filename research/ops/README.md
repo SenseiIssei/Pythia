@@ -33,6 +33,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 11:00 | AI research director: one Opus call (effort high, batch) over every study summary and the trial ledger, 3 to 5 pre-registration drafts in `/opt/pythia-lab/proposals/` and a card, never run by anything (`lab.ai.director`, up to an hour) | jobs.yaml `ai-director` |
 | always | the owner's questions in Telegram, answered by Sonnet from the same fact sheet, at most 40 a day (`lab.ai.chat`; reads only) | container `pythia-ai-chat`, see "Questions in Telegram" |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
+| 03:00 | strategy factory F2, small-account mode: 60 new genomes for 40 and 100 EUR wallets on BTC, ETH, SOL, SPYx, QQQx, PAXG and USDC at Jupiter's real costs, four held-back checks against holding SPYx and BTC, the 40 EUR shadow wallets stepped and reviewed, `reports/smallaccount/factory.md` (`lab.factory small`, seconds; the `heavy` lock, resumable) | `jobs.yaml`: `factory-small` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds); off since the morning briefing replaced it, `jobs.py run notify --force` still sends one | `jobs.yaml`: `notify` (off) |
@@ -618,6 +619,19 @@ settings or money. With `--notify` the weekly digest (what was tried, what
 survived the held-back window and why, the shadow books) goes to the webhook or
 Telegram chat in `/etc/pythia/alerts.env`; the daily step posts only when a
 shadow book is decided.
+
+The small-account mode (`lab.factory small`, job `factory-small`, 03:00,
+F2) searches strategies for a 40 and a 100 EUR wallet with S1's and S2's
+costs in its own ledger `/srv/pythia-data/factory/small/ledger.jsonl` (its
+own bar), runs survivors as 40 EUR shadow wallets in
+`/srv/pythia-data/factory/small/shadow/` and writes
+`/srv/pythia-data/reports/smallaccount/factory.{md,json}`. It reads the
+panel cache paper-families wrote the day before and Yahoo's ETF closes (the
+lab's copy when Yahoo does not answer); a shadow steps only to the last day
+every ETF close is at most 5 days old. 60 genomes a day by default
+(`PYTHIA_FACTORY_SMALL_BUDGET`); a rerun the same day only does what is
+left. `results/factory_small_seed/` (the first run, made in the agent
+container) is merged first.
 
 The first run was made on the PC; its trials and its shadow book are in
 `research/lab/results/factory_seed/`, which every run merges into
