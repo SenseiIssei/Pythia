@@ -21,6 +21,8 @@ Stage 2, the real-money trader, LOCKED until the owner arms it (docs/ONCHAIN-STA
   history.py       the wallet's history from the chain (deposits, swaps, failures), read only
   execution.py     reports/onchain/execution.md: our swaps' speed and cost against pump.fun and Kraken
   cards.py         the alpha mode's trade cards (Telegram, Discord)
+  longterm.py      onchain_longterm (L1): S2's tsmom1 on BTC and ETH with USDC, its 0.5 SOL paper twin with the
+                   live trader's band, split and fee; its live swaps take the cheapest path (no Sender, no tip)
 
 The meme module (docs/ONCHAIN-MEME.md), paper first, its live path LOCKED like the rest of stage 2:
 

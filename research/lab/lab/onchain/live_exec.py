@@ -30,6 +30,12 @@ SOL always left for fees, no buy while the ledger does not match the chain. With
 the money caps follow the wallet's value instead (live_gate.Ack.cap: a swap at most a quarter of it, the
 converts up to it a day, no daily loss cap or total beyond the wallet); every other check stays.
 
+A book marked "cheap" in lab.onchain.book.BOOKS (onchain_longterm) goes the cheapest way: never through
+Sender and without a tip (the plain RPC alone, PYTHIA_ONCHAIN_SENDER may be unset), the priority
+fee from fees.cheap_price (a low percentile of the recent fees first, higher on each new attempt, at most
+0.00002 SOL a swap) and the slippage fitted to the swap's size (live_gate.fitted_slippage); every check above
+stays as it is.
+
 Every swap that was sent is also measured (live/onchain/execution.jsonl, read by lab.onchain.execution
 for reports/onchain/execution.md): signal to send, send to land, the fee paid (base, priority, tip)
 and what really came out against the quote.
@@ -68,6 +74,7 @@ from ..pumpfun_rt import chain_pnl as CP
 from ..pumpfun_rt import live_exec as LX
 from ..pumpfun_rt import txbuild as X
 from ..pumpfun_rt.events import WSOL, b58
+from . import fees as F
 from . import guard as G
 from . import live_gate as LG
 from . import mints as M
@@ -417,6 +424,23 @@ class Trader:
         self.wallet = signer.pubkey if signer is not None else gate.address
         self.reconciled: dict | None = None
         self.idl = G.JupIdl(gate.idl) if gate.idl else G.JupIdl(None)
+        self.last_micro: int | None = None               # the cheapest path's price on the swap's last attempt
+
+    def cheap(self, s: Swap) -> bool:
+        """A book swap of a book marked "cheap" (lab.onchain.book.BOOKS): the cheapest path."""
+        from . import book as B
+        return s.kind == "book" and bool(B.BOOKS.get(s.book or "", {}).get("cheap"))
+
+    def slip(self, s: Swap, v: View) -> int:
+        return LG.fitted_slippage(s.src, s.dst, v.usd(s.src, s.in_raw)) if self.cheap(s) else LG.slippage(s.src, s.dst)
+
+    def recent_fees(self, b: S.Build) -> list:
+        """getRecentPrioritizationFees for the accounts the swap writes; none when the RPC does not answer."""
+        try:
+            return list(self.chain.rpc.call("getRecentPrioritizationFees",
+                                            [[k for k, _, w in b.swap.accounts if w][:128]]) or [])
+        except Exception:
+            return []
 
     # ------------------------------------------------ caps
 
@@ -500,7 +524,7 @@ class Trader:
 
     # ------------------------------------------------ build, guard, simulate
 
-    def _prices_ok(self, s: Swap, v: View, b: S.Build) -> tuple[float, float, float]:
+    def _prices_ok(self, s: Swap, v: View, b: S.Build, slip: int | None = None) -> tuple[float, float, float]:
         mi, mo = LG.CODES[s.src], LG.CODES[s.dst]
         pi, po = v.prices.get(mi.mint), v.prices.get(mo.mint)
         if not pi or not po:
@@ -515,7 +539,7 @@ class Trader:
             mids.append(k)
         # The minimum out must also hold at Kraken's mids (less our slippage and MAX_COST_BPS), so Jupiter's
         # prices, each up to 2 % off, cannot together let a quote through that is worse than that.
-        slip = LG.slippage(s.src, s.dst)
+        slip = LG.slippage(s.src, s.dst) if slip is None else slip
         fair = b.in_amount / 10 ** mi.decimals * mids[0] / mids[1] * 10 ** mo.decimals
         if G.min_out(b.out_amount, slip) < fair * (1e4 - slip - LG.MAX_COST_BPS) / 1e4:
             raise G.Refused(f"the minimum out is below the input's worth at Kraken's mids less {slip} bps slippage "
@@ -527,17 +551,18 @@ class Trader:
             raise G.Refused(f"the swap costs {cost:.0f} bps against Jupiter's prices (at most {LG.MAX_COST_BPS:g})")
         return in_usd, out_usd, cost
 
-    def _compile(self, b: S.Build, units: int, price: int, blockhash: str, tables: dict) -> bytes:
+    def _compile(self, b: S.Build, units: int, price: int, blockhash: str, tables: dict, tip: bool = True) -> bytes:
         ixs = [X.compute_limit(units), X.compute_price(price)] + b.ixs()
-        if self.sender is not None and self.tip_l:
+        if tip and self.sender is not None and self.tip_l:
             ixs.append(X.tip(self.wallet, random.choice(sorted(X.HELIUS_TIP_ACCOUNTS)), self.tip_l))
         return T.compile_v0(self.wallet, ixs, blockhash, tables)
 
-    def _guarded_simulation(self, plan: G.Plan, msg_bytes: bytes, tables: dict) -> tuple[dict, dict, dict]:
+    def _guarded_simulation(self, plan: G.Plan, msg_bytes: bytes, tables: dict, tip: bool = True
+                            ) -> tuple[dict, dict, dict]:
         if 1 + 64 + len(msg_bytes) > T.MAX_TX_BYTES:
             raise OverflowError("the transaction is too large")
         msg = T.decompile(msg_bytes, tables)
-        fees = G.check_message(plan, msg, self.idl, sender_tip_ok=self.sender is not None)
+        fees = G.check_message(plan, msg, self.idl, sender_tip_ok=tip and self.sender is not None)
         writable = msg.writable_keys()
         G.check_accounts(plan, self.chain.multiple(writable))
         mine = list(self.chain.token_accounts(self.wallet))
@@ -564,12 +589,16 @@ class Trader:
         acc = self.chain.multiple([G.JUPITER] + ([pd] if pd else []), "confirmed")
         G.check_program(pin, acc.get(G.JUPITER), acc.get(pd) if pd else None)
 
-    def prepare(self, s: Swap, v: View) -> Prepared:
-        """Build, guard and simulate one swap for our wallet; raises on any refusal (nothing is signed)."""
+    def prepare(self, s: Swap, v: View, attempt: int = 1) -> Prepared:
+        """Build, guard and simulate one swap for our wallet; raises on any refusal (nothing is signed).
+        `attempt`: the cheapest path bids more on each new attempt (fees.cheap_price)."""
         if not self.wallet:
             raise G.Refused("no wallet address")
         mi, mo = LG.CODES[s.src], LG.CODES[s.dst]
-        slip = LG.slippage(s.src, s.dst)
+        cheap = self.cheap(s)
+        if attempt <= 1:
+            self.last_micro = None
+        slip = self.slip(s, v)
         allowed = self.gate.ack.allowed_mints() or frozenset({M.SOL.mint, M.USDC.mint})
         self.check_jupiter()
         for code, m in ((s.src, mi), (s.dst, mo)):
@@ -580,33 +609,40 @@ class Trader:
             bad = [m for m in b.route_mints if m not in G.ROUTE_MINTS]
             if bad:
                 raise G.Refused(f"the route passes through a mint not on the route list ({bad[0][:6]})")
-            in_usd, out_usd, cost = self._prices_ok(s, v, b)
+            in_usd, out_usd, cost = self._prices_ok(s, v, b, slip)
             ours = G.min_out(b.out_amount, slip)
             plan = G.Plan(self.wallet, mi.mint, mo.mint, s.in_raw, max(ours, s.min_out_raw), slip, allowed)
             if s.min_out_raw and ours < s.min_out_raw:
                 raise G.Refused("the new quote is worse than the confirmed minimum")
             tables = self.chain.tables(b.tables)
             blockhash, lvbh = self.chain.blockhash()
-            price = b.cu_price if b.cu_price else DEFAULT_CU_PRICE
+            rows = self.recent_fees(b) if cheap else []
+
+            def price(units: int) -> int:
+                p = (F.cheap_price(rows, units, attempt, self.last_micro)[0] if cheap else
+                     b.cu_price if b.cu_price else DEFAULT_CU_PRICE)
+                return min(p, G.MAX_PRIORITY_L * 1_000_000 // units)
             units = G.MAX_UNITS
             try:
-                msg = self._compile(b, units, min(price, G.MAX_PRIORITY_L * 1_000_000 // units), blockhash, tables)
-                fees, effect, val = self._guarded_simulation(plan, msg, tables)
+                msg = self._compile(b, units, price(units), blockhash, tables, tip=not cheap)
+                fees, effect, val = self._guarded_simulation(plan, msg, tables, tip=not cheap)
             except OverflowError as e:
                 last = e
                 continue
             used = int(val.get("unitsConsumed") or 0)
             if used > 0:
                 units = min(G.MAX_UNITS, max(100_000, int(used * 1.2) + 10_000))
-                msg = self._compile(b, units, min(price, G.MAX_PRIORITY_L * 1_000_000 // units), blockhash, tables)
-                fees, effect, val = self._guarded_simulation(plan, msg, tables)
+                msg = self._compile(b, units, price(units), blockhash, tables, tip=not cheap)
+                fees, effect, val = self._guarded_simulation(plan, msg, tables, tip=not cheap)
+            if cheap:
+                self.last_micro = price(units)
             return Prepared(plan, b, msg, lvbh, fees, effect, used or None, in_usd, out_usd, cost)
         raise G.Refused(f"the transaction does not fit even with fewer accounts ({last})")
 
     # ------------------------------------------------ send and land
 
-    def _send(self, tx: bytes) -> None:
-        for name, r in (("Sender", self.sender), ("RPC", self.chain.rpc)):
+    def _send(self, tx: bytes, sender: bool = True) -> None:
+        for name, r in (("Sender", self.sender if sender else None), ("RPC", self.chain.rpc)):
             if r is None:
                 continue
             try:
@@ -614,14 +650,15 @@ class Trader:
             except Exception as e:                       # the signature's status decides, not the answer
                 print(f"onchain live: {name} did not take it ({type(e).__name__}: {e})"[:200], flush=True)
 
-    def _land(self, tx: bytes, sig: str, lvbh: int) -> str:
-        """'landed', 'err' (landed with an error, its fee paid) or 'expired' (the blockhash passed, never landed)."""
+    def _land(self, tx: bytes, sig: str, lvbh: int, sender: bool = True) -> str:
+        """'landed', 'err' (landed with an error, its fee paid) or 'expired' (the blockhash passed, never landed).
+        `sender` False: the plain RPC only (the cheapest path)."""
         t0 = self.clock()
         last_send = -1e18
         while True:
             now = self.clock()
             if now - last_send >= RESEND_S:
-                self._send(tx)
+                self._send(tx, sender)
                 last_send = now
             try:
                 st = self.chain.rpc.statuses([sig])[0]
@@ -684,7 +721,7 @@ class Trader:
                 log_order({"what": "refused", "why": "; ".join(shut), **s.record()})
                 return {"status": "refused", "why": "; ".join(shut)}
             try:
-                p = self.prepare(s, v)
+                p = self.prepare(s, v, attempt) if self.cheap(s) else self.prepare(s, v)
             except (G.Refused, QuoteError, RuntimeError, ValueError, KeyError, TypeError, OSError) as e:
                 why = f"{type(e).__name__}: {e}"[:300]
                 log_order({"what": "refused", "attempt": attempt, "why": why, **s.record()})
@@ -699,7 +736,7 @@ class Trader:
                        "expected_out": p.build.out_amount, "min_out_raw": p.plan.min_out_raw,
                        "cost_bps": p.cost_bps, "route": p.build.labels, **s.record()})
             sent_ms = now_ms()
-            outcome = self._land(tx, sig, p.lvbh)
+            outcome = self._land(tx, sig, p.lvbh, sender=False) if self.cheap(s) else self._land(tx, sig, p.lvbh)
             seen_ms = now_ms()
             if outcome == "expired":
                 log_order({"what": "expired", "attempt": attempt, "sig": sig, **s.record()})
@@ -750,7 +787,7 @@ class Trader:
             sol_usd = v.prices.get(M.SOL.mint)
             rec = {"t": now_ms(), "mode": self.gate.ack.mode, "kind": s.kind, "book": s.book, "ref": s.ref,
                    "from": s.src, "to": s.dst, "sig": sig, "status": status, "attempt": attempt,
-                   "via": "sender+rpc" if self.sender is not None else "rpc",
+                   "via": "sender+rpc" if self.sender is not None and not self.cheap(s) else "rpc",
                    "signal_ms": s.signal_ms, "plan_ms": plan_ms, "sent_ms": sent_ms, "seen_ms": seen_ms,
                    "block_ms": (back or {}).get("block_ms"),
                    "signal_to_send_ms": sent_ms - s.signal_ms if s.signal_ms else None,
@@ -915,10 +952,15 @@ def book_state(book: str, book_usd: float) -> dict:
 
 def book_swaps(book: str, ack: LG.Ack, v: View, weights: dict, book_usd: float | None = None) -> list[Swap]:
     """The swaps that bring the book's part to the signal's weights: sales first, then buys out of the book's
-    USDC; nothing under MIN_BOOK_SWAP_USD, nothing beyond what the wallet really holds, only allowed coins.
+    USDC; nothing under MIN_BOOK_SWAP_USD (a book with a band in lab.onchain.book.BOOKS: nothing under its band,
+    book.min_trade; with wallet_cash there never more USDC than the wallet holds, so the owner's share of a wallet
+    whose coins rose does not count their gain as cash), nothing beyond what the wallet really holds, only allowed
+    coins.
     `book_usd`: the book's money when the owner's share from the app sets it (else the ack's book_usd)."""
     from . import book as B
     st = book_state(book, ack.book_usd if book_usd is None else book_usd)
+    if B.BOOKS.get(book, {}).get("wallet_cash"):         # sized on the USDC the wallet really holds, as its paper twin
+        st["usdc_raw"] = min(st["usdc_raw"], v.held("USDC"))
     worth = v.total_usd()
     tgt, _ = B.split_targets(weights)
     tgt = {c: w for c, w in tgt.items() if c in ack.mints}
@@ -930,7 +972,8 @@ def book_swaps(book: str, ack: LG.Ack, v: View, weights: dict, book_usd: float |
     paper = {"usdc": st["usdc_raw"] / 1e6, "marks": marks,
              "units": {c: u / 10 ** LG.CODES[c].decimals for c, u in st["units"].items()}}
     equity = paper["usdc"] + sum(u * marks.get(c, 0.0) for c, u in paper["units"].items())
-    sells, buys = B.plan(paper, tgt, equity, LG.MIN_BOOK_SWAP_USD)
+    least = B.min_trade(book, equity, LG.MIN_BOOK_SWAP_USD)
+    sells, buys = B.plan(paper, tgt, equity, least)
 
     def pieces(c: str, raw: int, usd: float | None) -> list[int]:
         """An order above the swap cap (25 USD in the alpha mode) as several swaps, each under it with room."""
@@ -949,7 +992,7 @@ def book_swaps(book: str, ack: LG.Ack, v: View, weights: dict, book_usd: float |
     cash = min(st["usdc_raw"], v.held("USDC"))
     for c, usdc in buys:
         raw = min(int(usdc * 1e6), cash)
-        if raw >= LG.MIN_BOOK_SWAP_USD * 1e6:
+        if raw >= least * 1e6:
             out += [Swap("book", "USDC", c, r, book=book) for r in pieces(c, raw, raw / 1e6)]
             cash -= raw
     return out

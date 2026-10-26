@@ -115,6 +115,9 @@ PROOF_MAX_AGE_MS = 36 * 3_600_000
 CONFIRM_S = 60
 SLIPPAGE_BPS = {"SOL": 30, "USDC": 30, "BTC": 30, "ETH": 30, "JUP": 30, "TRUMP": 30, "RAY": 30, "BONK": 75, "WIF": 75,
                 "PYTH": 150, "RENDER": 150, "JTO": 150, "POPCAT": 150}
+# The cheapest path's slippage by size (a book with "cheap" in lab.onchain.book.BOOKS): (up to USD, bps); a small
+# swap moves no price, so its minimum sits closer to the quote. Never above SLIPPAGE_BPS (fitted_slippage).
+FITTED_SLIPPAGE = ((25.0, 15), (100.0, 20))
 CODES: dict[str, M.Mint] = {"USDC": M.USDC, **M.COINS}          # the stage-2 list, by the coin's code
 DEFAULT_RPC = LX.DEFAULT_RPC
 
@@ -173,6 +176,18 @@ def killed(paths: list[Path] | None = None) -> bool:
 def slippage(a: str, b: str) -> int:
     """A swap's slippage: the looser class of its two sides."""
     return max(SLIPPAGE_BPS[a], SLIPPAGE_BPS[b])
+
+
+def fitted_slippage(a: str, b: str, usd: float | None) -> int:
+    """The cheapest path's slippage for a swap of `usd`: FITTED_SLIPPAGE's step for its size, never above
+    slippage(a, b) (without a USD value: slippage(a, b))."""
+    top = slippage(a, b)
+    if usd is None or not usd > 0:
+        return top
+    for upto, bps in FITTED_SLIPPAGE:
+        if usd <= upto:
+            return min(bps, top)
+    return top
 
 
 # ---------------------------------------------------------------- the owner's confirmation

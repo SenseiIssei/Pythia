@@ -7,6 +7,11 @@ getRecentPrioritizationFees and builds, signs and sends nothing. Stage 1 (paper.
 
 The percentile is the 50th (what Jupiter's /build calls "high"), at least FLOOR_MICRO, and the total priority
 fee of one transaction never above MAX_PRIORITY_SOL (0.0005 SOL, the design's cap).
+
+The cheapest path (a book with "cheap" in lab.onchain.book.BOOKS, onchain_longterm; speed does not matter
+there): cheap_price bids the CHEAP_PCTS[attempt - 1] percentile of the same fees, at least FLOOR_MICRO, each
+new attempt (a blockhash that passed without landing, live_exec.MAX_ATTEMPTS) at least CHEAP_STEP x the last,
+and the transaction's priority fee never above CHEAP_MAX_PRIORITY_L (0.00002 SOL a swap).
 """
 
 from __future__ import annotations
@@ -18,6 +23,9 @@ MAX_PRIORITY_SOL = 0.0005
 PCT = 50
 FLOOR_MICRO = 1_000                 # micro-lamports per compute unit
 EVERY_S = 10.0
+CHEAP_MAX_PRIORITY_L = 20_000       # 0.00002 SOL a swap on the cheapest path
+CHEAP_PCTS = (25, 50, 75)           # the percentile bid on the first, second and third attempt
+CHEAP_STEP = 1.5                    # a new attempt bids at least this much over the last one
 
 
 def from_fees(rows, units: int, pct: int = PCT, cap_sol: float = MAX_PRIORITY_SOL) -> tuple[int, int]:
@@ -53,3 +61,17 @@ class FeeCache:
                 hit = (self.clock(), hit[1] if hit else [])
             self.hits[k] = hit
         return from_fees(hit[1], units, cap_sol=self.cap)
+
+
+def cheap_price(rows, units: int, attempt: int = 1, prev_micro: int | None = None) -> tuple[int, int]:
+    """The cheapest path's (micro-lamports per compute unit, priority fee in lamports) for this attempt: the
+    attempt's percentile of the recent fees (the floor without any), at least CHEAP_STEP x the last attempt's
+    price, the total at most CHEAP_MAX_PRIORITY_L (and so far below MAX_PRIORITY_SOL)."""
+    pct = CHEAP_PCTS[min(max(attempt, 1), len(CHEAP_PCTS)) - 1]
+    cap = CHEAP_MAX_PRIORITY_L / LAMPORTS
+    micro, _ = from_fees(rows, units, pct, cap_sol=cap)
+    if prev_micro:
+        micro = max(micro, int(prev_micro * CHEAP_STEP))
+    units = max(1, int(units))
+    micro = min(micro, CHEAP_MAX_PRIORITY_L * 1_000_000 // units)
+    return micro, micro * units // 1_000_000

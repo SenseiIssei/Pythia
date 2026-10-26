@@ -12,7 +12,17 @@ named in the report. A stale or missing signal changes nothing: the account hold
 and is marked.
 
 The same files and rules run lab.onchain.sol_book's onchain_breakout_sol
-(breakout_top10's rule among the coins with a mint, its own signal; BOOKS below).
+(breakout_top10's rule among the coins with a mint, its own signal; BOOKS below)
+and lab.onchain.longterm's onchain_longterm, with the live trader's own rules a
+book may name in BOOKS (all off for the two above): `start_sol` a paper wallet
+that starts as that much SOL, keeps `reserve_sol` for fees (marked, never traded)
+and sells the rest into USDC on its first run; `band` (share, USD) no swap for a
+change under the larger of share x the book and USD (min_trade); `split` no swap
+above that share of the wallet's value, a larger order cut into pieces like
+live_exec.book_swaps; `priority_sol` its own priority fee a swap; `cheap` the live
+trader's cheapest path for its swaps (no Sender, no tip, fees.cheap_price, the
+slippage fitted to the size, live_exec.Trader.cheap); `wallet_cash` the live book
+never counts more USDC than the wallet holds (live_exec.book_swaps), as here.
 
   python -m lab.onchain.book              daily: mark, rebalance, journal, probes, report
   python -m lab.onchain.book --mark       hourly: mark only (state.json, marks.csv), every book in BOOKS
@@ -43,6 +53,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import statistics
 import sys
 import time
@@ -72,10 +83,18 @@ VARIANT = ("EXPERIMENT, paper only · breakout_top10_live's weights in a Solana 
 SOL_NAME = "onchain_breakout_sol"
 SOL_VARIANT = ("EXPERIMENT, paper only · breakout_top10's rule among the coins with a Solana mint, Jupiter "
                "quotes, 1,000 USDC (journal equity on the 10,000 basis)")
-# Each on-chain book: the signal it follows (<data>/signals/<signal>/latest.json), its report and title, its label.
+LT_NAME = "onchain_longterm"
+LT_VARIANT = ("EXPERIMENT, paper first · S2's tsmom1: 28d momentum on the most liquid coin (BTC, some days ETH), "
+              "regime, 40 % vol, else USDC · a 0.5 SOL wallet with the live trader's band, split and fees "
+              "(journal equity on the 10,000 basis)")
+# Each on-chain book: the signal it follows (<data>/signals/<signal>/latest.json), its report and title, its label,
+# and the live trader's rules it runs on paper too (module docstring; live_exec.book_swaps reads band as well).
 BOOKS = {NAME: {"signal": SIGNAL, "report": REPORT, "title": "On-chain paper book", "variant": VARIANT},
          SOL_NAME: {"signal": SOL_NAME, "report": "onchain_sol", "title": "On-chain book among Solana coins",
-                    "variant": SOL_VARIANT}}
+                    "variant": SOL_VARIANT},
+         LT_NAME: {"signal": LT_NAME, "report": LT_NAME, "title": "On-chain long-term book", "variant": LT_VARIANT,
+                   "start_sol": 0.5, "reserve_sol": 0.035, "band": (0.10, 3.0), "split": 0.25,
+                   "priority_sol": 0.00002, "cheap": True, "wallet_cash": True}}
 JOURNAL_COLS = ["date", "equity", "equity_usdc", "gross_ret_pct", "paper_cost_bps", "model_cost_bps",
                 "kraken_cost_bps", "turnover", "exposure", "held", "swaps", "fees_usdc", "signal", "weights"]
 TRADE_COLS = ["ts", "side", "coin", "usdc", "units", "fee_usdc", "cost_bps", "mid_cost_bps", "kraken_bps", "price_impact_pct",
@@ -94,10 +113,34 @@ def book_dir(root: Path | None = None, name: str = NAME) -> Path:
     return (WRITE_ROOT if root is None else root) / "paper" / name
 
 
-def new_state(now_ms: int, variant: str = VARIANT) -> dict:
-    return {"variant": variant, "started": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(
+def new_state(now_ms: int, variant: str = VARIANT, start_sol: float | None = None) -> dict:
+    """A 1,000 USDC account, or with start_sol a wallet of that much SOL (its USD value at the first mark is
+    the start, `funded` once all but the reserve is USDC)."""
+    st = {"variant": variant, "started": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(
         timespec="seconds"), "equity": INDEX, "equity_usdc": START_USDC,
         "usdc": START_USDC, "units": {}, "marks": {}, "journal_equity_usdc": START_USDC, "signal": None}
+    if start_sol:
+        st.update(usdc=0.0, reserve_sol=float(start_sol), start_usdc=None, journal_equity_usdc=None, funded=False)
+    return st
+
+
+def start_of(st: dict) -> float:
+    """What the account started with in USDC (the 10,000 basis divides by it)."""
+    return float(st.get("start_usdc") or START_USDC)
+
+
+def min_trade(name: str, equity: float, default: float = MIN_TRADE) -> float:
+    """The smallest change book `name` swaps: its band (the larger of share x equity and USD), else `default`."""
+    band = BOOKS.get(name, {}).get("band")
+    return max(band[0] * max(equity, 0.0), band[1]) if band else default
+
+
+def pieces(amount: float, lim: float | None) -> list[float]:
+    """An order above `lim` as equal pieces each under it with room (live_exec.book_swaps' split); else whole."""
+    if not lim or lim <= 0 or amount <= lim * 0.98:
+        return [amount]
+    n = math.ceil(amount / (lim * 0.98))
+    return [amount / n] * n
 
 
 def load_state(d: Path) -> dict | None:
@@ -180,11 +223,17 @@ def mids(prices: dict[str, float]) -> dict[str, float]:
 
 
 def mark(st: dict, mid: dict[str, float]) -> float:
-    """Equity in USDC at the mid; a held coin without a price keeps its last mark."""
-    for c in st["units"]:
+    """Equity in USDC at the mid, the SOL reserve included; a held coin without a price keeps its last mark."""
+    for c in list(st["units"]) + (["SOL"] if st.get("reserve_sol") else []):
         if c in mid:
             st["marks"][c] = mid[c]
-    return st["usdc"] + sum(u * st["marks"].get(c, 0.0) for c, u in st["units"].items())
+    return (st["usdc"] + sum(u * st["marks"].get(c, 0.0) for c, u in st["units"].items())
+            + float(st.get("reserve_sol") or 0.0) * st["marks"].get("SOL", 0.0))
+
+
+def reserve_usdc(st: dict) -> float:
+    """The SOL reserve's worth: part of the wallet, never of what the book trades."""
+    return float(st.get("reserve_sol") or 0.0) * st["marks"].get("SOL", 0.0)
 
 
 # ---------------------------------------------------------------- rebalance
@@ -210,36 +259,65 @@ def plan(st: dict, tgt: dict[str, float], equity: float, min_trade: float = MIN_
 
 
 def rebalance(st: dict, tgt: dict[str, float], ex: PaperExecutor, equity: float,
-              min_trade: float = MIN_TRADE) -> tuple[list[Fill], list[str]]:
+              min_trade: float = MIN_TRADE, max_swap: float | None = None) -> tuple[list[Fill], list[str]]:
     """Sales first, then buys out of the USDC on hand (scaled down together when short).
-    A coin whose quote fails is left as it is and named in the errors."""
+    A coin whose quote fails is left as it is and named in the errors. `max_swap` (USDC): an order above it
+    goes as pieces (pieces()), each its own swap with its own fees, like the live trader's."""
     sells, buys = plan(st, tgt, equity, min_trade)
     fills, errors = [], []
     for c, units in sells:
-        try:
-            f = ex.sell(c, units)
-        except (QuoteError, KeyError) as e:
-            errors.append(f"sell {c}: {e}")
-            continue
-        st["units"][c] = st["units"].get(c, 0.0) - f.units
-        if st["units"][c] * st["marks"].get(c, 0.0) < DUST or c not in tgt:
+        sold = False
+        for part in pieces(units, max_swap / st["marks"][c] if max_swap and st["marks"].get(c) else None):
+            try:
+                f = ex.sell(c, min(part, st["units"].get(c, 0.0)))
+            except (QuoteError, KeyError) as e:
+                errors.append(f"sell {c}: {e}")
+                break
+            st["units"][c] = st["units"].get(c, 0.0) - f.units
+            st["usdc"] += f.usdc
+            fills.append(f)
+            sold = True
+        if sold and c in st["units"] and (st["units"][c] * st["marks"].get(c, 0.0) < DUST or c not in tgt):
             st["units"].pop(c)
-        st["usdc"] += f.usdc
-        fills.append(f)
     need = sum(x for _, x in buys)
     scale = min(1.0, st["usdc"] / need) if need > 0 else 1.0
     for c, usdc in buys:
         usdc = min(usdc * scale, st["usdc"])
         if usdc < min_trade:
             continue
+        for part in pieces(usdc, max_swap):
+            try:
+                f = ex.buy(c, min(part, st["usdc"]))
+            except (QuoteError, KeyError) as e:
+                errors.append(f"buy {c}: {e}")
+                break
+            st["usdc"] -= f.usdc
+            st["units"][c] = st["units"].get(c, 0.0) + f.units
+            fills.append(f)
+    return fills, errors
+
+
+def fund(st: dict, ex: PaperExecutor, keep_sol: float, max_swap: float | None) -> tuple[list[Fill], list[str]]:
+    """A start_sol wallet's first run: all its SOL but `keep_sol` into USDC, in pieces under max_swap (what the
+    owner does with the app's converts before arming the book)."""
+    sol = float(st.get("reserve_sol") or 0.0) - keep_sol
+    px = st["marks"].get("SOL")
+    fills, errors = [], []
+    if sol <= 1e-9:                                      # all but the reserve is USDC already
+        st["funded"] = True
+        return fills, errors
+    if not px:
+        return fills, ["no SOL price to fund the book"]
+    for part in pieces(sol, max_swap / px if max_swap else None):
         try:
-            f = ex.buy(c, usdc)
+            f = ex.sell("SOL", part)
         except (QuoteError, KeyError) as e:
-            errors.append(f"buy {c}: {e}")
-            continue
-        st["usdc"] -= f.usdc
-        st["units"][c] = st["units"].get(c, 0.0) + f.units
+            errors.append(f"fund: {e}")
+            break
+        st["reserve_sol"] -= f.units
+        st["usdc"] += f.usdc
         fills.append(f)
+    st["funded"] = not errors
     return fills, errors
 
 
@@ -322,7 +400,7 @@ def step(client: Jupiter, now_ms: int | None = None, root: Path | None = None, w
     root = ROOT if root is None else root
     spec = BOOKS[name]
     d = book_dir(write_root, name)
-    st = load_state(d) or new_state(now_ms, spec["variant"])
+    st = load_state(d) or new_state(now_ms, spec["variant"], spec.get("start_sol"))
     journal = read_csv(d / "journal.csv")
     today = _day(now_ms)
     prices = client.prices([M.USDC.mint, *(m.mint for m in M.COINS.values())])
@@ -330,37 +408,47 @@ def step(client: Jupiter, now_ms: int | None = None, root: Path | None = None, w
     if not mid:
         raise QuoteError("no USDC price from Jupiter within its peg, nothing marked")
     before = mark(st, mid)
+    if st.get("start_usdc", START_USDC) is None:        # a start_sol wallet's first mark is its start
+        st.update(start_usdc=before, journal_equity_usdc=before)
+    start = start_of(st)
     if journal and journal[-1].get("date") == today:
         print(f"onchain: {name} already journaled {today}; marked only", file=sys.stderr)
         if not dry_run:
-            st.update(equity=before * INDEX / START_USDC, equity_usdc=before, last_mark_ms=now_ms)
+            st.update(equity=before * INDEX / start, equity_usdc=before, last_mark_ms=now_ms)
             save_state(d, st)
         return {}
     sig, why = read_signal(root, now_ms, spec["signal"])
     tgt, dropped = split_targets(sig["weights"] if sig else {})
     half = kraken_half(_read_json(report.REPORTS / "costs" / "latest.json"))
-    ex = PaperExecutor(client, prices)
+    ex = PaperExecutor(client, prices, priority=spec.get("priority_sol"))
     fills, errors = [], []
+    split = spec.get("split")
+    if spec.get("start_sol") and not st.get("funded") and not dry_run:
+        fills, errors = fund(st, ex, float(spec.get("reserve_sol") or 0.0), split * before if split else None)
+    wallet = mark(st, mid)
+    trade_eq = wallet - reserve_usdc(st)                 # the reserve is the wallet's, never the book's
+    mt, max_swap = min_trade(name, trade_eq), (split * wallet if split else None)
     if sig is None:
         print(f"onchain: {why}; the account holds", file=sys.stderr)
     elif dry_run:
-        sells, buys = plan(st, tgt, before)
+        sells, buys = plan(st, tgt, trade_eq, mt)
         print(json.dumps({"equity_usdc": round(before, 2), "targets": tgt, "dropped": dropped,
                           "sells": sells, "buys": buys}))
-    else:
-        fills, errors = rebalance(st, tgt, ex, before)
+    elif not spec.get("start_sol") or st.get("funded"):
+        more, errs = rebalance(st, tgt, ex, trade_eq, mt, max_swap)
+        fills, errors = fills + more, errors + errs
     after = mark(st, mid)
     traded = sum(f.usdc for f in fills)
     paid = sum(f.usdc * f.cost_bps / 1e4 if f.cost_bps is not None else f.fee_usdc for f in fills)
     kraken = sum(f.usdc * kraken_bps(f.coin, half) / 1e4 for f in fills)
-    prev = float(st.get("journal_equity_usdc") or START_USDC)
-    row = {"date": today, "equity": round(after * INDEX / START_USDC, 2), "equity_usdc": round(after, 4),
+    prev = float(st.get("journal_equity_usdc") or start)
+    row = {"date": today, "equity": round(after * INDEX / start, 2), "equity_usdc": round(after, 4),
            "gross_ret_pct": round((before / prev - 1) * 100, 4) if journal else 0,
            "paper_cost_bps": round(paid / before * 1e4, 2) if before > 0 else 0.0,
            "model_cost_bps": round(traded / before * MODEL_COST * 1e4, 2) if before > 0 else 0.0,
            "kraken_cost_bps": round(kraken / before * 1e4, 2) if before > 0 else 0.0,
            "turnover": round(traded / before, 4) if before > 0 else 0.0,
-           "exposure": round(1 - st["usdc"] / after, 4) if after > 0 else 0.0,
+           "exposure": round(1 - (st["usdc"] + reserve_usdc(st)) / after, 4) if after > 0 else 0.0,
            "held": len(st["units"]), "swaps": len(fills), "fees_usdc": round(sum(f.fee_usdc for f in fills), 5),
            "signal": _day(int(sig["as_of_ms"])) if sig and sig.get("as_of_ms") else why,
            "weights": json.dumps({c: round(u * st["marks"].get(c, 0.0) / after, 4)
@@ -374,7 +462,7 @@ def step(client: Jupiter, now_ms: int | None = None, root: Path | None = None, w
     _append(d / "trades.csv", TRADE_COLS, [trade_row(f, half, now_ms) for f in fills])
     _append(d / "journal.csv", JOURNAL_COLS, [row])
     _append(d / "probes.csv", list(probe_rows[0]) if probe_rows else [], probe_rows)
-    st.update(equity=after * INDEX / START_USDC, equity_usdc=after, journal_equity_usdc=after, last_mark_ms=now_ms,
+    st.update(equity=after * INDEX / start, equity_usdc=after, journal_equity_usdc=after, last_mark_ms=now_ms,
               signal={"as_of_ms": sig.get("as_of_ms") if sig else None, "status": why, "targets": tgt,
                       "dropped": dropped, "no_history": (sig or {}).get("no_history") or []}, errors=errors)
     save_state(d, st)
@@ -391,11 +479,12 @@ def mark_only(client: Jupiter, now_ms: int | None = None, write_root: Path | Non
     if st is None:
         print(f"onchain: {name} has not started yet, nothing to mark", file=sys.stderr)
         return None
-    mid = mids(client.prices([M.USDC.mint, *(M.COINS[c].mint for c in st["units"] if c in M.COINS)]))
-    if not mid and st["units"]:
+    held = [c for c in st["units"] if c in M.COINS] + (["SOL"] if st.get("reserve_sol") else [])
+    mid = mids(client.prices([M.USDC.mint, *dict.fromkeys(M.COINS[c].mint for c in held)]))
+    if not mid and held:
         raise QuoteError("no USDC price from Jupiter within its peg, nothing marked")
     eq = mark(st, mid)
-    st.update(equity=eq * INDEX / START_USDC, equity_usdc=eq, last_mark_ms=now_ms)
+    st.update(equity=eq * INDEX / start_of(st), equity_usdc=eq, last_mark_ms=now_ms)
     save_state(d, st)
     _append(d / "marks.csv", ["ts", "equity_usdc", "held"], [{"ts": now_ms, "equity_usdc": round(eq, 4),
                                                               "held": len(st["units"])}])
@@ -443,7 +532,7 @@ def write_report(d: Path, st: dict, half: dict[str, float], engine_state: dict |
                  name: str = NAME) -> dict:
     journal, trades, probes = read_csv(d / "journal.csv"), read_csv(d / "trades.csv"), read_csv(d / "probes.csv")
     s = summarize(journal, trades, probes, kraken_paper_fills(engine_state))
-    eq = float(st.get("equity_usdc") or START_USDC)
+    eq = float(st.get("equity_usdc") or start_of(st))
     sig = st.get("signal") or {}
     dropped = sig.get("dropped") or {}
     per = s["onchain_bps_per_turnover"]
@@ -461,7 +550,9 @@ def write_report(d: Path, st: dict, half: dict[str, float], engine_state: dict |
         head = "No rebalance and no probe yet."
     md = [f"# On-chain paper book ({name}): Solana through Jupiter against Kraken\n",
           f"EXPERIMENT, paper only. {head}\n",
-          f"Account {eq:,.2f} USDC (started with {START_USDC:,.0f}), {len(st['units'])} coins held, "
+          f"Account {eq:,.2f} USDC (started with {start_of(st):,.2f}"
+          + (f", {st['reserve_sol']:.4f} SOL kept for fees" if st.get("reserve_sol") else "")
+          + f"), {len(st['units'])} coins held, "
           f"signal {sig.get('status', 'not read')}. Targets on chain: "
           f"{', '.join(f'{c} {w:.1%}' for c, w in (sig.get('targets') or {}).items()) or 'none'}. "
           f"Without an SPL version, their weight spread over the targets above (cash if there are none): "
@@ -486,7 +577,10 @@ def write_report(d: Path, st: dict, half: dict[str, float], engine_state: dict |
         {"label": "On chain per unit traded", "value": None if per is None else f"{per:.1f} bps"},
         {"label": "Kraken per unit traded", "value": None if kr is None else f"{kr:.1f} bps"},
         {"label": "Probe median one way", "value": None if med_on is None else f"{med_on:.1f} bps"}]),
-        "verdict": head, "book": name, "equity_usdc": eq, "summary": s, "errors": st.get("errors") or []}
+        "verdict": head, "book": name, "equity_usdc": eq, "start_usdc": start_of(st),
+        "reserve_sol": st.get("reserve_sol"), "held": {c: round(u * st["marks"].get(c, 0.0) / eq, 4)
+                                                       for c, u in sorted(st["units"].items())} if eq > 0 else {},
+        "summary": s, "errors": st.get("errors") or []}
     report.write(BOOKS[name]["report"], "\n".join(md), data)
     return data
 

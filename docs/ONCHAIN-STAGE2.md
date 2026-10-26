@@ -4,7 +4,8 @@
 Notschalter, Wiederholen und Neustart, Mindestmenge, Compute Budget, Token-2022, Code-Pin, Werte der App. Der Händler
 selbst ist seit dem 2026-10-23 gebaut und **gesperrt**, bis du ihn scharf schaltest (Abschnitt 7: was gebaut ist, und
 deine Schritte). Abschnitt 8 beschreibt die Wallet-Seite der App, den Alpha-Modus (Bücher mit kleinem echtem Geld
-ohne den Nachweis, zum Trainieren und Messen unserer Modelle) und die Messung jedes Swaps. Nichts davon ist scharf:
+ohne den Nachweis, zum Trainieren und Messen unserer Modelle) und die Messung jedes Swaps. Abschnitt 10 (Stand
+2026-10-26) ist das ruhige Langfristbuch `onchain_longterm` für 0,5 SOL mit dem billigsten Sendeweg. Nichts davon ist scharf:
 kein Ack, keine Wallet, kein Start. Der Nachweis vor echtem Geld steht vorab
 registriert in
 `research/lab/results/onchain_stage2_prereg.md`.
@@ -44,6 +45,13 @@ registriert in
   `ALPHA_MAX_DAILY_LOSS_USD = 25`; the ack can only go lower); every other gate stays as in test mode. Every
   alpha swap posts a card (Telegram, Discord's real-money route) and lands in the ledger reconciled against
   the chain. Every sent swap is measured (`live/onchain/execution.jsonl`, `reports/onchain/execution.md`).
+- **Long-term book (section 10, L1):** `onchain_longterm` (`lab.onchain.longterm`) is S2's tsmom1 on cbBTC and
+  WETH with USDC as cash, a band of 10 % of the book or 3 USD (`book.min_trade`, read by `live_exec.book_swaps`
+  too), and the cheapest send path for its swaps only (`live_exec.Trader.cheap`): never Sender, no tip, the
+  priority fee from `fees.cheap_price` (25th, 50th, 75th percentile of recent fees per attempt, each attempt at
+  least 1.5x the last, at most 0.00002 SOL a swap) and `live_gate.fitted_slippage` (15 to 20 bps for small
+  swaps, never above the coin's class). The guard, the caps, the reserve, the gate and every other book are
+  unchanged; converts and the other books build, tip and send exactly as before.
 - **Proof gate:** the book passes LIVE-READINESS on paper, its on-chain paper twin has 30 days and 20
   rebalances with on-chain cost <= 15 bps median per unit traded, and 14 days of shadow execution (build,
   guard, simulate every planned swap, never send) with >= 98 % clean simulations and zero unexplained guard
@@ -760,3 +768,77 @@ Abschnitt `[meme]` nennt (Höchstwerte im Code: `live_gate.MEME_MAX_TOTAL_USD` 5
 `MEME_MAX_DAILY_LOSS_USD` 10 USD), ihr Nachweis (`reports/onchain_meme/proof.json`) bestanden ist und die
 Prüfung des Mints in der letzten Minute bestanden hat; alles aus den Abschnitten 1 bis 8 gilt weiter. Ein Ack
 ohne `[meme]` ändert nichts an diesem Händler.
+
+## 10. Das Langfristbuch `onchain_longterm` (L1): ruhig, billig, für 0,5 SOL
+
+Dein Wunsch vom 2026-10-26: 0,5 SOL (etwa 45 EUR) in die Wallet, und sie handelt allein und auf lange Sicht, etwa
+so sicher wie ein ETF, möglichst mit mehr Wachstum, so billig wie möglich, ohne bezahlten Dienst. Die Herleitung,
+die Zahlen und die Kosten je Swap stehen in `research/lab/results/onchain_longterm_l1.md`.
+
+**Die Regel.** S2 (`research/lab/results/smallaccount_s2.md`) fand genau einen Kandidaten über seiner Schwelle:
+tsmom1, die 28-Tage-Momentum-Regel aus S1 auf dem liquidesten Coin des Tages (meist BTC, manchmal ETH), gehalten,
+solange seine 28-Tage-Rendite über 0 liegt und BTC über seinem 200-Tage-Schnitt, auf 40 % Jahresvola bemessen, der
+Rest USDC, täglich. Mit den Regeln des Buchs (Band, Teilung, Gebühr, Reserve) ab 2024 auf 50 USD: 28,5 % im Jahr,
+Drawdown 19,3 %, gegen den S&P-500-Token 20,4 % und 18,1 % (S2) und BTC gehalten 25,8 % und 53 %. Nicht
+überzeugend (S2: deflationiertes p 0,65): ein Kandidat, kein Beweis.
+
+**Was es halten darf.** BTC als cbBTC, ETH als WETH (höchstens 25 % des Buchs, schon im Signal, der Rest USDC),
+USDC als sichere Seite, SOL nur für Gebühren. Ist der liquideste Coin des Tages ein anderer, bleibt das Buch in
+USDC. Kein ETF- oder Gold-Token: SPYx und PAXG hatten in S2 Routen, sind aber Token-2022, und der Guard verweigert
+jedes Token-2022-Konto.
+
+**Band und Swaps.** Kein Swap für eine Abweichung unter 10 % des Buchs oder unter 3 USD (das Größere, bei 50 USD
+also 5 USD); kein Swap über einem Viertel des Wallet-Werts (die Grenze mit `limits=wallet`), eine größere Order
+geht in mehreren Swaps. Das Buch zählt nie mehr USDC, als die Wallet hält: mit deinem Anteil aus der App rechnet es
+sonst den Kursgewinn seiner Coins als Bargeld.
+
+**Der billigste Weg, nur für dieses Buch.** Nie über Helius Sender, kein Trinkgeld, `PYTHIA_ONCHAIN_SENDER` bleibt
+leer: die Transaktion geht nur an den öffentlichen RPC. Die Priority Fee beginnt beim 25. Perzentil der jüngsten
+Gebühren der Konten des Swaps (mindestens 1.000 Micro-Lamports je Einheit, etwa 0,00000025 SOL), läuft der
+Blockhash ab, bietet der nächste Versuch das 50., dann das 75. Perzentil, jedes Mal mindestens das 1,5-Fache, nie
+mehr als 0,00002 SOL je Swap. Drei Versuche, also in wenigen Minuten gelandet oder mit dem nächsten Signal neu. Der
+Schlupf passt sich der Größe an: 15 bps bis 25 USD, 20 bis 100 USD, sonst wie bisher 30. Nur Jupiter, ohne Schlüssel.
+Auf den aufgezeichneten Quotes kostet ein Swap von 10 bis 25 USD so 0,3 bis 3,5 bps (unter einem Cent), über den
+bisherigen Weg mit Trinkgeld 4,6 bis 12 bps. Die SOL-Reserve des Händlers bleibt wie sie ist (0,02 SOL plus Platz
+für einen Swap, etwa 0,0226 SOL); mit den drei Token-Konten (USDC, cbBTC, WETH, je 0,002 SOL Miete) und einem Jahr
+Gebühren sollten 0,035 SOL in der Wallet bleiben.
+
+**Erst Papier.** Der Job `onchain-longterm` (nach `paper-families`) schreibt das Signal
+`signals/onchain_longterm/latest.json` und führt den Papier-Zwilling `paper/onchain_longterm`: eine Wallet mit
+0,5 SOL, die 0,035 SOL behält und den Rest in vier Swaps nach USDC tauscht, dann genau die Regeln oben über echte
+Jupiter-Quotes, jeder Swap mit 0,000025 SOL Gebühr (die Obergrenze, vorsichtig). Bericht `reports/onchain_longterm`,
+Forward-Report, und eine Zeile im Morgen-Briefing ("On-Chain-Langfristbuch (Papier, 0,5 SOL)"). Die Jobs
+`onchain-execution` und `onchain-live-simulate` laufen wieder (nur lesend, nichts wird signiert oder gesendet).
+
+**Scharf schalten (du, nicht der Code).** `/etc/pythia/onchain-live-ack`, Rechte 600:
+
+```
+mode=alpha
+books=onchain_longterm
+mints=SOL,USDC,BTC,ETH
+book_usd=45
+max_total_usd=100
+max_trade_usd=25
+max_daily_loss_usd=25
+max_convert_usd=100
+limits=wallet
+expires=2027-01-20
+on_kill=hold
+I accept that I can lose all of it
+```
+
+Mit `limits=wallet` gelten die vier `max_*`-Zeilen nicht; sie liegen innerhalb der Alpha-Höchstwerte, damit die
+Datei auch ohne die Zeile gültig bleibt. `/etc/pythia/onchain-live.env`, Rechte 600, ohne Sender, Trinkgeld oder
+Jupiter-Schlüssel:
+
+```
+PYTHIA_ONCHAIN_LIVE=1
+PYTHIA_ONCHAIN_KEYPAIR=/etc/pythia/onchain-keypair.json
+PYTHIA_ONCHAIN_RPC=https://api.mainnet-beta.solana.com
+```
+
+Dann: 0,5 SOL an die Wallet; auf der Seite "Wallet" etwa 0,465 SOL in USDC tauschen (vier Umtausche, jeder höchstens
+ein Viertel der Wallet; mindestens 0,035 SOL bleiben); im Feld "Master" den Anteil auf 100 % setzen und Start
+drücken (die Datei sagt seit dem 2026-10-23: 50 %, angehalten); `live_exec simulate` und `check` (Abschnitt 7,
+Schritt 7), dann den Dienst starten (Schritt 9). Das Buch handelt sein aktuelles Signal und danach einmal je neuem.
+`expires` liegt höchstens 90 Tage voraus: vor dem 2027-01-20 erneuern.

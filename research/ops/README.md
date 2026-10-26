@@ -512,6 +512,10 @@ Two read-only jobs feed the app's Wallet tab and the comparison: `onchain-histor
 `reports/onchain/history.json`) and `onchain-execution` (daily, `reports/onchain/execution.md` against the
 pump.fun bot's `reports/pumpfun_rt/execution.json` and Kraken's fees).
 
+The long-term book `onchain_longterm` (L1, `research/lab/results/onchain_longterm_l1.md`): job `onchain-longterm`
+after `paper-families` writes its signal and steps its 0.5 SOL paper twin; live, when the ack names it, its swaps
+take the cheapest path (no Sender, no tip, at most 0.00002 SOL priority a swap, `live_exec.Trader.cheap`).
+
 ## Questions in Telegram
 
 `lab.ai.chat` lets the owner ask Pythia questions in the same Telegram chat

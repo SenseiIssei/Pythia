@@ -141,6 +141,20 @@ jobs:
     lock: [heavy, onchain]
     lock_wait: 2h
 
+  # L1 (lab.onchain.longterm, research/lab/results/onchain_longterm_l1.md): S2's tsmom1 as the on-chain
+  # long-term book, on the panel paper-families just rebuilt: writes signals/onchain_longterm (what the
+  # on-chain live service trades when its ack names the book), then steps its 0.5 SOL paper twin through
+  # Jupiter quotes with the live trader's band, split and fee. Signs and sends nothing.
+  - name: onchain-longterm
+    description: EXPERIMENT on-chain book onchain_longterm, S2's tsmom1 on BTC and ETH with USDC, targets and 0.5 SOL paper twin
+    depends_on: [paper-families]
+    command: python -m lab.onchain.longterm
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 1, memory: 3g}
+    timeout: 30m
+    lock: [heavy, onchain]
+    lock_wait: 2h
+
   - name: onchain-mark
     description: EXPERIMENT on-chain paper book, hourly mark at Jupiter prices, no trade
     schedule: "40 * * * *"
@@ -464,8 +478,7 @@ jobs:
     resources: {cpus: 1, memory: 512m}
     timeout: 5m
     alert: false
-    enabled: false
-    # off since 2026-10-26: the on-chain trader is switched off; back on with the long-term book (L1)
+    # back on 2026-10-26 with the long-term book (L1); read only, signs and sends nothing
 
   # EXPERIMENT, paper only (docs/ONCHAIN-MEME.md): three pre-registered meme rules, a paper book each
   # through real Jupiter quotes, every coin through the per-coin safety check first. Light; signs nothing.
@@ -762,8 +775,7 @@ jobs:
     resources: {cpus: 1, memory: 512m}
     timeout: 5m
     grace: 6h
-    enabled: false
-    # off since 2026-10-26: the on-chain trader is switched off; back on with the long-term book (L1)
+    # back on 2026-10-26 with the long-term book (L1); read only, signs and sends nothing
 
   # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
   # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,

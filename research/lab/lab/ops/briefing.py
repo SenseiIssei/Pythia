@@ -10,7 +10,8 @@ numbers formatted in the messages' language, one overview chart:
   real money             every running real-money autopilot (Kraken, Alpaca; mode live)
   paper and autopilots   the digest's table of autopilots (reports/learn), the forward
                          test's books by status (reports/forward), real money readiness, the
-                         small-account paper books in EUR (reports/smallaccount, S1 and S2)
+                         small-account paper books in EUR (reports/smallaccount, S1 and S2), the
+                         on-chain long-term book's 0.5 SOL paper wallet (reports/onchain_longterm, L1)
   lab                    the model zoo (reports/models) and the study reports that are new
   Pokemon, CS2, coins,   reports/pokemon, reports/cs2 and cs2_trends, reports/trending and
   stocks and ETFs, news  listings, the engines' US shares and the ETF closes, the news
@@ -46,7 +47,7 @@ STALE_MS = 2 * DAY_MS
 NOT_STUDIES = {"learn", "forward", "notify", "trending", "listings", "models", "pokemon", "cs2", "cs2_trends",
                "cs2_weekly", "readiness", "pumpfun", "pumpfun_rt", "pumpfun_activity", "polymarket", "agent",
                "exit_shadow", "factory", "paper_review", "studies", "ai", "ai_brief", "ai_news", "ai_analyst",
-               "costs", "research", "smallaccount"}
+               "costs", "research", "smallaccount", "onchain_longterm"}
 ETFS = ("SPY", "QQQ", "GLD")
 
 
@@ -185,11 +186,23 @@ def small_line(small: dict | None, lang: str) -> Line | None:
     return Line(" · ".join(parts), tr("bf_small", lang)) if parts else None
 
 
+def onchain_line(rep: dict | None, lang: str) -> Line | None:
+    """The on-chain long-term book's paper wallet (L1) in one line: its value in USD, its result since the start
+    and what it holds (USDC when nothing)."""
+    eq, start = _num((rep or {}).get("equity_usdc")), _num((rep or {}).get("start_usdc"))
+    if eq is None or not start:
+        return None
+    held = ", ".join(f"{c} {_num(w) * 100:.0f} %" for c, w in sorted(((rep or {}).get("held") or {}).items())
+                     if _num(w)) or "USDC"
+    return Line(f"{i18n.money(eq, 2, lang)} ({notify.signed_money(eq - start, 2, lang)}) · {held}",
+                tr("bf_onchain_lt", lang))
+
+
 def paper_section(learn: dict | None, forward: dict | None, readiness: dict | None, prev: dict, now: int,
-                  lang: str, small: dict | None = None) -> tuple[list, dict, str | None]:
+                  lang: str, small: dict | None = None, onchain: dict | None = None) -> tuple[list, dict, str | None]:
     """One line on the autopilots (how many run, the best and the weakest since their start, today in $),
-    the forward books by status, the small-account books in EUR and the readiness line; the snapshot for
-    tomorrow (the digest's, so "today" keeps counting); a few words for the summary."""
+    the forward books by status, the small-account books in EUR, the on-chain long-term book and the readiness
+    line; the snapshot for tomorrow (the digest's, so "today" keeps counting); a few words for the summary."""
     parts: list = []
     snap: dict = {}
     words = None
@@ -222,6 +235,9 @@ def paper_section(learn: dict | None, forward: dict | None, readiness: dict | No
     sl = small_line(small, lang)
     if sl is not None:
         parts.append(sl)
+    ol = onchain_line(onchain, lang)
+    if ol is not None:
+        parts.append(ol)
     if readiness is not None:
         lead = (notify.READINESS_TEXT_DE if lang == "de" else notify.READINESS_TEXT)["lead"]
         parts.append(Line(short(nodash(notify.readiness_text(readiness, now, lang)).split(";")[0], 90), lead))
@@ -449,7 +465,7 @@ def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: flo
         cards.append(Card("🔵", tr("bf_research", lang), None, res))
     summary += [words] if words else []
     paper, snap, words = paper_section(read("learn"), read("forward"), read("readiness"), prev, now, lang,
-                                       read("smallaccount"))
+                                       read("smallaccount"), read("onchain_longterm"))
     if paper:
         cards.append(Card("📈", tr("bf_paper", lang), None, paper))
     summary += [words] if words else []
