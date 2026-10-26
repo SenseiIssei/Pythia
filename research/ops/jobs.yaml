@@ -403,24 +403,27 @@ jobs:
   # The morning briefing at 09:00 Europe/Berlin (lab.ops.briefing), to Telegram and Discord.
   # Cron runs in UTC, so it fires hourly through the morning and the job sends only in the
   # hour that is 9 o'clock in Berlin (07 UTC in summer, 08 UTC in winter), once a day.
+  # Its summary line asks the local model inline (lab.ai.local, 60 s for both languages; the
+  # owner's PC through the relay when local-llm.env has it, else the VPS model, else the template).
   - name: briefing
     description: morning briefing at 09:00 Berlin, pump.fun, real money, paper, lab, cards, skins, coins, stocks, news, to Telegram and Discord
     schedule: "0 6-9 * * *"
     command: python -m lab.ops.briefing
     network: host
-    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?', '/etc/pythia/local-llm.env?']
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
 
   # The lab card at 20:00 Europe/Berlin (lab.ops.labor): what the factories (F3, F2) and A1's zoo and allocator did
-  # today, from their reports, at most 8 lines, no model asked. Fires at 18 and 19 UTC and sends only in the hour
+  # today, from their reports, at most 8 lines; one sentence of the local model on top (60 s, the number rule, else
+  # the fixed line). Fires at 18 and 19 UTC and sends only in the hour
   # that is 20 o'clock in Berlin, once a day; the bot's #labor when it has one, else the briefing's channel.
   - name: labor
     description: lab card at 20:00 Berlin, the research factories, the model zoo and the allocator from their reports, to Telegram and Discord
     schedule: "0 18,19 * * *"
     command: python -m lab.ops.labor
     network: host
-    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?', '/etc/pythia/local-llm.env?']
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
 
@@ -523,6 +526,15 @@ jobs:
     command: /usr/bin/python3 /opt/pythia-ops/onchain_live_watch.py
     timeout: 2m
     alert: false
+
+  # B4: the local language model, llama.cpp's server with Qwen3 4B Instruct on 127.0.0.1:8090, kept up at a low
+  # CPU share (3 CPUs, 4 GB). Downloads the pinned model once; does nothing while it runs as it should.
+  - name: local-llm
+    description: keeps the local language model up (llama.cpp, Qwen3 4B, 127.0.0.1 only, 3 CPUs at a low share, 4 GB), downloads it once
+    schedule: "*/15 * * * *"
+    kind: host
+    command: /opt/pythia-ops/local-llm.sh up
+    timeout: 30m
 
   - name: health
     description: health check of every job, container, stream, book and the disk
@@ -711,6 +723,19 @@ jobs:
     schedule: "10 */4 * * *"
     command: python -m lab.ai.news --collect
     resources: {cpus: 1, memory: 512m}
+    timeout: 10m
+    alert: false
+
+  # B4: the local model tags each new headline with a topic and a relevance for the lab (1 to 5) into
+  # <data>/ai/news_tags; the briefing shows the three most relevant. No API credit: the owner's PC through the
+  # relay (local-llm.env), else the VPS model (job local-llm); without either the headlines stay untagged.
+  - name: llm-news
+    description: local model tags the new headlines with a topic and a relevance for the lab, after the news collector
+    depends_on: [news-collect]
+    command: python -m lab.ai.local --news
+    network: host
+    env_file: '/etc/pythia/local-llm.env?'
+    resources: {cpus: 0.5, memory: 512m}
     timeout: 10m
     alert: false
 

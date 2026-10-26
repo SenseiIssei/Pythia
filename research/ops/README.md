@@ -32,13 +32,15 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 09:00 | AI weekly review: one Sonnet call (batch) over every study and live result, three proposed experiments in `reports/ai/weekly.md`, never run by anything (`lab.ai.weekly`) | jobs.yaml `ai-weekly` |
 | Sun 11:00 | AI research director: one Opus call (effort high, batch) over every study summary and the trial ledger, 3 to 5 pre-registration drafts in `/opt/pythia-lab/proposals/` and a card, never run by anything (`lab.ai.director`, up to an hour) | jobs.yaml `ai-director` |
 | always | the owner's questions in Telegram, answered by Sonnet from the same fact sheet, at most 40 a day (`lab.ai.chat`; reads only) | container `pythia-ai-chat`, see "Questions in Telegram" |
+| every 15 min | local language model kept up: llama.cpp's server with Qwen3 4B Instruct (Q4_K_M) on 127.0.0.1:8090, 3 CPUs at a low share, 4 GB; downloads the pinned model once (`local-llm.sh up`, nothing while it runs as it should) | `jobs.yaml`: `local-llm` (host), see "Local language model" |
+| after each news collect | the local model tags the new headlines with a topic and a relevance for the lab, 1 to 5 (`lab.ai.local --news`, about a minute for 100 headlines on the VPS) | `jobs.yaml`: `llm-news` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 03:00 | strategy factory F2, small-account mode: 60 new genomes for 40 and 100 EUR wallets on BTC, ETH, SOL, SPYx, QQQx, PAXG and USDC at Jupiter's real costs, four held-back checks against holding SPYx and BTC, the 40 EUR shadow wallets stepped and reviewed, `reports/smallaccount/factory.md` (`lab.factory small`, seconds; the `heavy` lock, resumable) | `jobs.yaml`: `factory-small` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds); off since the morning briefing replaced it, `jobs.py run notify --force` still sends one | `jobs.yaml`: `notify` (off) |
-| 09:00 Berlin | morning briefing to Telegram and Discord: pump.fun Alpha phase, real-money accounts, paper and autopilots, lab, research factory (F3, F2 and the allocator), Pokemon, CS2, coins, stocks and ETFs, news, one overview chart (`lab.ops.briefing`, seconds; hourly 06 to 09 UTC, sends only in the hour that is 9 in Berlin, once a day) | `jobs.yaml`: `briefing` |
-| 20:00 Berlin | lab card "🧠 Labor" to Telegram and Discord: what the research factories (F3 pump.fun, F2 small wallets), the model zoo and the allocator did today, from their reports, at most 8 lines, no model asked (`lab.ops.labor`, seconds; at 18 and 19 UTC, sends only in the hour that is 20 in Berlin, once a day; the bot's #labor, else #briefing; category "lab") | `jobs.yaml`: `labor` |
+| 09:00 Berlin | morning briefing to Telegram and Discord: pump.fun Alpha phase, real-money accounts, paper and autopilots, lab, research factory (F3, F2 and the allocator), Pokemon, CS2, coins, stocks and ETFs, news, one overview chart; the summary line on top worded by the local model when every number in it is in the facts, else the template (`lab.ops.briefing`, seconds, up to 60 s more for the model; hourly 06 to 09 UTC, sends only in the hour that is 9 in Berlin, once a day) | `jobs.yaml`: `briefing` |
+| 20:00 Berlin | lab card "🧠 Labor" to Telegram and Discord: what the research factories (F3 pump.fun, F2 small wallets), the model zoo and the allocator did today, from their reports, at most 8 lines, one sentence of the local model on top under the same number rule (`lab.ops.labor`, seconds; at 18 and 19 UTC, sends only in the hour that is 20 in Berlin, once a day; the bot's #labor, else #briefing; category "lab") | `jobs.yaml`: `labor` |
 | every 2 min | real-money fills of Kraken and Alpaca autopilots to Discord (`lab.ops.notify --live-fills`, reads the engines' state; the bot's #konten and a DM, else the webhook; nothing without either) | `jobs.yaml`: `discord-live-fills` |
 | always | Pythia's own Discord bot: lays out the owner's private server in German and English, keeps the channel map, answers the read-only slash commands `/status`, `/trades`, `/konten`, `/lab` for the owner only, in the channel's language (`research/discord`, 256 MB) | container `pythia-discord-bot`, see "Discord bot" |
 | every 10 min | forward report, new study verdicts, model decisions and new headlines to the bot's channels (`lab.ops.discord_feed`, seconds, reads files only; nothing without the bot token) | `jobs.yaml`: `discord-feed` |
@@ -559,6 +561,60 @@ In the chat: `/help`; `/real ID` and `/notreal ID` score a finding of the
 strategy critic. Without a container, `python -m lab.ai.chat --once` answers
 what is waiting and exits; a `*/1` cron line of that works too, at the cost
 of a container start a minute.
+
+## Local language model
+
+The metered AI jobs (`ai-brief`, `ai-news`, `ai-critic`, `ai-weekly`) are off since the API credit ran out. What
+they gave the briefing comes from a local model now, with no credit and no key (`lab.ai.local`). It only words
+things: the briefing's summary line, the lab card's top line and the news tags. It decides nothing, never touches
+trading, never sees a key or a wallet, and a number in its text that is not in the facts it was given throws the
+text away (the template is used, the reason is logged).
+
+Where it asks, in this order:
+
+1. **The owner's PC**, through the relay on the VPS (OpenAI-compatible at the relay's `/v1`), when
+   `/etc/pythia/local-llm.env` has the relay and the client token and the relay's status route says the PC is
+   online. The owner fills the file (mode 600, root); it is never in the repo:
+
+   ```
+   PYTHIA_LOCAL_LLM_RELAY_URL=<the relay's base URL on the VPS, without /v1>
+   PYTHIA_LOCAL_LLM_TOKEN=<the relay's client token>
+   # optional: PYTHIA_LOCAL_LLM_RELAY_STATUS=/status   PYTHIA_LOCAL_LLM_RELAY_MODEL=<the model name the PC serves>
+   ```
+
+   The status route counts as online when it answers 200 and its JSON, if it has `online`, `connected`,
+   `pc_online`, `up` or `ok`, says true. The jobs `briefing`, `labor` and `llm-news` read the file (optional).
+2. **The VPS model**: llama.cpp's server, container `pythia-local-llm`, Qwen3 4B Instruct 2507 in GGUF Q4_K_M
+   (2.5 GB, a pinned file, revision and sha256 in `local-llm.sh`, the image pinned by digest), on
+   `127.0.0.1:8090` only, 3 CPUs at CPU share 256 (everything else goes first), 4 GB memory, no swap, read only,
+   no capabilities, the model folder `/srv/pythia-llm` read only (outside the data store, so no sync or backup
+   carries it). The host job `local-llm` keeps it up every 15 minutes and downloads the model the first time.
+3. **No text**: every user keeps its template. `PYTHIA_LOCAL_LLM=off` does the same on purpose.
+
+Kept up rather than started by each job: the jobs run in containers without docker, an idle server takes no CPU
+and about 0.7 GB of its own memory (the model file is mapped and the kernel may drop it under pressure), and it
+loads in about 3 seconds. Measured on the VPS with 3 threads (llama.cpp b11910, `--no-repack`): about 50 to 60
+tokens a second in and 15 to 19 out, at most 3.2 GB; with the default weight repacking it held a second copy of
+the weights (4.8 GB) at the same speed, hence `--no-repack`. A briefing summary takes 2 to 7 seconds, 100
+headlines about 75 seconds in batches of 8.
+
+Uses (every call one line in `<data>/ai/local_llm.jsonl`: when, what for, which backend, tokens, seconds, ok or
+why not; never the text or the token):
+
+- the briefing's summary line: the sections' few words and the cards' lines go in as facts, two short sentences
+  in the briefing's language come back; one 60 s budget for German and English together;
+- the lab card at 20:00: one sentence over its lines, same rule, 60 s;
+- news: each headline of `<data>/ai/news/<day>.jsonl` (today and yesterday, UTC) gets a topic (bitcoin, ethereum,
+  solana, memecoins, defi, stablecoins, etf, regulation, macro, exchanges, security, stocks, other) and a relevance
+  for the lab from 1 to 5 in `<data>/ai/news_tags/<day>.json`; a headline the model skips is asked once more, then
+  left. The briefing shows the three most relevant (untagged ones: those naming a coin, then the newest).
+
+```bash
+sudo /opt/pythia-ops/local-llm.sh up       # start it (what the job does); down, status, bench
+sudo /opt/pythia-ops/local-llm.sh bench    # tokens a second and memory now
+docker run --rm --network host -v /srv/pythia-data:/data -v /opt/pythia-lab:/app \
+  --env-file /etc/pythia/local-llm.env pythia-lab python -m lab.ai.local --probe   # which backend answers, how fast
+```
 
 ## Health check
 

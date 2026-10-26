@@ -1,7 +1,8 @@
 """The lab's evening card: one message at 20:00 Europe/Berlin to Telegram and Discord, "🧠 Labor".
 
-What the research factories and A1's model zoo did today, from their reports only (fixed templates, no model is
-asked anything), at most MAX_LINES lines:
+What the research factories and A1's model zoo did today, from their reports only (fixed templates), at most
+MAX_LINES lines. On top one sentence of the local model over those lines (lab.ai.local, 60 s), used only when every
+number in it is in the lines; else the fixed one. The model decides nothing else:
 
   per factory    its line of the morning briefing (briefing.factory_line: trials, the bar, the best new
                  candidate held back, books, model settings adopted), or that it has no fresh report
@@ -25,12 +26,14 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
+from ..ai import local
 from . import briefing, i18n, notify
 from .notify import Card, Line, _num, tr
 
 HOUR = 20
 DAY_MS = notify.DAY_MS
 MAX_LINES = 8
+LLM_BUDGET_SEC = 60
 CHANNEL = "labor"                          # the bot's German channel for the "lab" kind (DISCORD_ROUTES)
 
 
@@ -82,8 +85,9 @@ def zoo_line(zoo: dict | None, lang: str) -> Line | None:
     return Line(text, tr("lb_zoo", lang))
 
 
-def build(now: int, lang: str, eur: float | None = None, read=None) -> Card | None:
-    """The card, or None when no report of today is there. `read(name, file)` gives a report (tests pass their own)."""
+def build(now: int, lang: str, eur: float | None = None, read=None, summarize=None) -> Card | None:
+    """The card, or None when no report of today is there. `read(name, file)` gives a report (tests pass their own);
+    `summarize(facts, template, lang)` may word the top line (lab.ai.local), which falls back to the template."""
     read = read or (lambda name, file: notify.read_json(notify.reports_root() / name / file))
     reps = {code: today(read(folder, file), now) for code, folder, file in briefing.FACTORIES}
     zoo = today(read("pumpfun_rt", "zoo.json"), now)
@@ -96,8 +100,11 @@ def build(now: int, lang: str, eur: float | None = None, read=None) -> Card | No
         lines.append(ln if ln is not None else Line(tr("lb_missing", lang), tr("bf_fac_" + code, lang)))
     lines += books_line(reps, eur, lang)
     lines += [x for x in (zoo_line(zoo, lang), briefing.alloc_line(alloc, lang)) if x is not None]
-    return Card("🧠", tr("lb_title", lang, day=notify.day_label(now, lang)), tr("lb_summary", lang), lines[:MAX_LINES],
-                tr("lb_footer", lang))
+    lines = lines[:MAX_LINES]
+    top = tr("lb_summary", lang)
+    if summarize is not None:
+        top = summarize([f"{ln.lead}: {ln.text}" if ln.lead else ln.text for ln in lines], top, lang)
+    return Card("🧠", tr("lb_title", lang, day=notify.day_label(now, lang)), top, lines, tr("lb_footer", lang))
 
 
 def discord_kind() -> str:
@@ -109,7 +116,7 @@ def discord_kind() -> str:
 
 
 def run(now: int | None = None, force: bool = False, dry_run: bool = False, eur=notify.sol_eur, poster=None,
-        discord_poster=None) -> int:
+        discord_poster=None, summarize=None) -> int:
     now = now or notify.clock_ms()
     state_path = notify.data_root() / "notify" / "state.json"
     st = notify.read_json(state_path) or {}
@@ -119,11 +126,12 @@ def run(now: int | None = None, force: bool = False, dry_run: bool = False, eur=
         return 0
     lang = notify.alert_lang()
     rate = eur() if callable(eur) else eur
-    card = build(now, lang, rate)
+    summarize = summarize or local.summarizer(LLM_BUDGET_SEC, "labor", sentences=1)
+    card = build(now, lang, rate, summarize=summarize)
     if card is None:
         notify.say("no factory, zoo or allocator report of today: no lab card")
         return 0
-    card.lang, card.remake = lang, (lambda lg: build(now, lg, rate) or card)
+    card.lang, card.remake = lang, (lambda lg: build(now, lg, rate, summarize=summarize) or card)
     res = notify.send("lab", [card], now=now, dry_run=dry_run, poster=poster, discord=discord_kind(),
                       discord_poster=discord_poster)
     if dry_run or res["reason"] in ("off", "quiet"):

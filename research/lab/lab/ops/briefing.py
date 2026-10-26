@@ -18,7 +18,12 @@ numbers formatted in the messages' language, one overview chart:
                          A1's allocator (reports/pumpfun_rt/allocator.json): its pick and why, never the live bot
   Pokemon, CS2, coins,   reports/pokemon, reports/cs2 and cs2_trends, reports/trending and
   stocks and ETFs, news  listings, the engines' US shares and the ETF closes, the news
-                         collector's newest headlines (<data>/ai/news)
+                         collector's headlines (<data>/ai/news), the three most relevant when the local
+                         model tagged them (<data>/ai/news_tags, lab.ai.local), else the newest
+
+The summary line on top: the local model's two sentences over the facts the cards hold (lab.ai.local, the
+owner's PC through the relay or the VPS model, 60 s for both languages), used only when every number in them is
+in the facts; else the template (the sections' few words). The model decides nothing else.
 
 A section whose data is missing or older than two days is left out. The briefing
 replaces the old morning digest's schedule: it moves the digest's snapshot of the
@@ -40,10 +45,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..ai import local
 from . import i18n, notify
 from .notify import Card, Line, Links, Rows, _num, nodash, short, tr
 
 HOUR = 9
+LLM_BUDGET_SEC = 60                        # the local model's summary, both languages together
+MAX_FACTS = 16
 DAY_MS = notify.DAY_MS
 STALE_MS = 2 * DAY_MS
 # Reports that are not studies: the jobs of every day, shown in their own sections or nowhere.
@@ -375,8 +383,9 @@ def stocks_section(rows: list[dict], etfs: list[tuple[str, float, float]], lang:
 
 
 def news_section(now: int, lang: str, root: Path | None = None, n: int = 3) -> list:
-    """The newest headlines of the news collector (today's and yesterday's files, UTC), those
-    that name a coin first; each a link."""
+    """The news collector's headlines of today's and yesterday's files (UTC): the most relevant for the lab first
+    when the local model tagged them (<data>/ai/news_tags, 1 to 5), then those that name a coin, then the newest;
+    each a link."""
     root = root or notify.data_root() / "ai" / "news"
     items = []
     for k in (0, 1):
@@ -385,6 +394,7 @@ def news_section(now: int, lang: str, root: Path | None = None, n: int = 3) -> l
             text = (root / f"{day}.jsonl").read_text(encoding="utf-8")
         except OSError:
             continue
+        tags = local.read_tags(day, root.parent / "news_tags")
         for line in text.splitlines():
             try:
                 h = json.loads(line)
@@ -392,12 +402,13 @@ def news_section(now: int, lang: str, root: Path | None = None, n: int = 3) -> l
                 continue
             at = (_num(h.get("published_us")) or 0) / 1000 if isinstance(h, dict) else 0
             if isinstance(h, dict) and h.get("title") and 0 <= now - at <= STALE_MS:
-                items.append((bool(h.get("coins")), at, h))
+                rel = _num((tags.get(local.headline_key(h)) or {}).get("relevance")) or 0
+                items.append((rel, bool(h.get("coins")), at, h))
     if not items:
         return []
-    items.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    items.sort(key=lambda x: x[:3], reverse=True)
     seen, out = set(), []
-    for _, _, h in items:
+    for *_, h in items:
         title = short(nodash(str(h["title"])), 90)
         if title in seen:
             continue
@@ -517,13 +528,27 @@ def factory_section(reps: dict, alloc: dict | None, lang: str) -> list:
 
 # ---------------------------------------------------------------- the card and its chart
 
+def card_facts(words: list[str], cards: list[Card], n: int = MAX_FACTS) -> list[str]:
+    """What the local model may write about: the sections' few words for the summary, then each card's lines and
+    rows as "title: lead text" (not the news, a headline's numbers are not ours), at most `n`."""
+    out = [w for w in words if w]
+    for c in cards:
+        for p in c.parts:
+            if isinstance(p, Line):
+                out.append(short(f"{c.title}: {(p.lead + ' ') if p.lead else ''}{p.text}", 200))
+            elif isinstance(p, Rows):
+                out += [f"{c.title}: {label} {value}" for label, value, _ in p.rows]
+    return out[:n]
+
+
 def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: float | None, prev: dict,
-          read=None) -> tuple[list[Card], dict]:
+          read=None, summarize=None) -> tuple[list[Card], dict]:
     """The briefing as a few short cards (one Telegram post with a bold head per section, one
     Discord embed per section with its own colour) and the autopilots' snapshot for tomorrow: the
     morning's head with the summary, pump.fun, real money, research, paper, lab, research factory, markets, news.
     A card without fresh data is left out. `read(name, file)` gives a report (fresh ones only;
-    tests pass their own)."""
+    tests pass their own). `summarize(facts, template, lang)` may word the summary line (lab.ai.local), which
+    falls back to the template itself."""
     read = read or (lambda name, file="latest.json": report(name, now, file))
     status = fresh(read("pumpfun_rt", "live_status.json"), now)
     cards: list[Card] = []
@@ -570,7 +595,10 @@ def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: flo
     if not cards:
         return [Card("☀️", title, tr("bf_nothing", lang))], snap
     cards[-1].footer = tr("bf_footer", lang)
-    return [Card("☀️", title, " · ".join(summary) or tr("bf_summary", lang), head_parts)] + cards, snap
+    line = " · ".join(summary) or tr("bf_summary", lang)
+    if summarize is not None:
+        line = summarize(card_facts(summary, cards), line, lang)
+    return [Card("☀️", title, line, head_parts)] + cards, snap
 
 
 def overview_chart(engines: list[dict], ledger: list[dict], now: int, lang: str) -> bytes | None:
@@ -603,7 +631,7 @@ def overview_chart(engines: list[dict], ledger: list[dict], now: int, lang: str)
 
 
 def run(now: int | None = None, force: bool = False, dry_run: bool = False, engines: list[dict] | None = None,
-        eur=notify.sol_eur, poster=None, discord_poster=None, chart: bool = True) -> int:
+        eur=notify.sol_eur, poster=None, discord_poster=None, chart: bool = True, summarize=None) -> int:
     now = now or notify.clock_ms()
     state_path = notify.data_root() / "notify" / "state.json"
     st = notify.read_json(state_path) or {}
@@ -615,14 +643,15 @@ def run(now: int | None = None, force: bool = False, dry_run: bool = False, engi
     engines = engines if engines is not None else notify.engine_states()
     ledger = read_ledger()
     rate = eur() if callable(eur) else eur
-    cards, snap = build(now, lang, engines, ledger, rate, st.get("autopilots") or {})
+    summarize = summarize or local.summarizer(LLM_BUDGET_SEC, "briefing")
+    cards, snap = build(now, lang, engines, ledger, rate, st.get("autopilots") or {}, summarize=summarize)
     # Discord posts the briefing in German and English: the same data, built once more in the other language
     # (once per language, shared by the cards; the same sections come out in the same order).
     other: dict[str, list[Card]] = {}
 
     def remake(i: int, lg: str) -> Card:
         if lg not in other:
-            other[lg] = build(now, lg, engines, ledger, rate, st.get("autopilots") or {})[0]
+            other[lg] = build(now, lg, engines, ledger, rate, st.get("autopilots") or {}, summarize=summarize)[0]
         return other[lg][i] if i < len(other[lg]) else cards[i]
 
     for i, c in enumerate(cards):

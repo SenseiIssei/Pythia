@@ -41,6 +41,7 @@ def data(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("PYTHIA_AUTOPILOT_STATE_URL", "off")
     monkeypatch.setenv("PYTHIA_QUIET_HOURS", "off")
+    monkeypatch.setenv("PYTHIA_LOCAL_LLM", "off")          # the briefing's summary: its template, no model
     monkeypatch.setattr(notify, "_DISCORD_IDS", {})
     return tmp_path
 

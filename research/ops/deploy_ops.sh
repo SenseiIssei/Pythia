@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the host side of the ops (job runner, job table, health check,
-# notify, discord-setup.sh, discord-bot.sh with the bot's source in discord/) into /opt/pythia-ops
+# notify, discord-setup.sh, discord-bot.sh with the bot's source in discord/, local-llm.sh) into /opt/pythia-ops
 # and render /etc/cron.d/pythia-jobs from the table. The Discord bot is not (re)started here:
 # /opt/pythia-ops/discord-bot.sh does that.
 #
@@ -47,6 +47,7 @@ install -m 755 "$here/onchain_live_watch.py" "$dest/onchain_live_watch.py"
 install -m 755 "$here/deploy_lab.sh" "$dest/deploy_lab.sh"
 install -m 755 "$here/discord-setup.sh" "$dest/discord-setup.sh"
 install -m 755 "$here/discord-bot.sh" "$dest/discord-bot.sh"
+install -m 755 "$here/local-llm.sh" "$dest/local-llm.sh"
 install -d -m 755 "$dest/discord" "$dest/discord/pythia_discord"
 install -m 644 "$here/../discord/Dockerfile" "$here/../discord/requirements.txt" "$dest/discord/"
 rm -f "$dest/discord/pythia_discord/"*.py
