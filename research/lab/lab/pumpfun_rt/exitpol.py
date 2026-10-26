@@ -825,9 +825,9 @@ def hazard_eval(st: dict, step_land: np.ndarray, split_ms: float, md, mu, featur
 # ---------------------------------------------------------------- the models the pipeline uses
 
 def fit_live(data: dict, costs=None, until_ms: float | None = None, k: float | None = None, log=print) -> dict:
-    """e_<label>, hz_dump10, hz_up30 and hz_policy (and Y10's et_<label> where the rows have the trend features)
-    from every row and step whose window ends before until_ms (all of them when None). k None: k* chosen on these
-    positions by the cross-fitted in-sample selection."""
+    """e_<label>, hz_dump10, hz_up30 and hz_policy (and Y10's et_<label> where the rows have the trend features, Y14's
+    es_<label> where enough have the social link features) from every row and step whose window ends before until_ms
+    (all of them when None). k None: k* chosen on these positions by the cross-fitted in-sample selection."""
     costs = costs or C.Costs()
     fr = early_rows(data)
     feats = E.early_feature_list()
@@ -849,6 +849,9 @@ def fit_live(data: dict, costs=None, until_ms: float | None = None, k: float | N
     if has_trend(fr):                                        # Y10: the same models with the trend features, et_<label>
         for label in E.LABELS:
             out["et_" + label] = fit_trend(fr, label, until_ms)
+    if has_social(fr):                                       # Y14: and with the social link features, es_<label>
+        for label in E.LABELS:
+            out["es_" + label] = fit_social(fr, label, until_ms)
     pre = prepare(data, costs)
     st, step_land = pre["st"], pre["step_land"]
     lim = np.inf if until_ms is None else until_ms - POS_EMBARGO_MS
@@ -883,6 +886,32 @@ def fit_trend(fr: dict, label: str, until_ms: float | None = None):
         m &= fr["t"] + E.LABELS[label] * 1000 + EMBARGO_MS < until_ms
     sub = {kk: v[m] for kk, v in fr.items()}
     return M.fit(_x(sub, feats), sub[label], feats)
+
+
+def social_features() -> list[str]:
+    """Y14: Y10's features of the early models and the social link features (socialfeat.py)."""
+    from .socialfeat import SOCIAL_FEATURES
+    return trend_features() + SOCIAL_FEATURES
+
+
+def has_social(fr: dict) -> bool:
+    """Y14: es_ models only once selmodel.MIN_TRAIN rows or more have the coin's metadata (rows before Y14 have no
+    social columns)."""
+    from .selmodel import MIN_TRAIN
+    k = fr.get("soc_known")
+    return k is not None and int(np.nansum(k == 1)) >= MIN_TRAIN
+
+
+def fit_social(fr: dict, label: str, until_ms: float | None = None):
+    """Y14's es_<label>: et_<label>'s fit with the social link features, on the rows written with the social tracker
+    (soc_known not NaN) only."""
+    m = np.isfinite(fr["soc_known"])
+    sub = {kk: v[m] for kk, v in fr.items()}
+    feats = social_features()
+    m = np.isfinite(sub[label])
+    if until_ms is not None:
+        m &= sub["t"] + E.LABELS[label] * 1000 + EMBARGO_MS < until_ms
+    return M.fit(_x({kk: v[m] for kk, v in sub.items()}, feats), sub[label][m], feats)
 
 
 def select_k(data: dict, costs, pre: dict, until_ms: float | None, log=print) -> float:
@@ -923,7 +952,8 @@ def save_models(models: dict, d: Path) -> None:
         tmp.replace(d / f"{name}.json")
 
 
-LIVE_NAMES = [f"e_{k}" for k in E.LABELS] + ["hz_dump10", "hz_up30", "hz_policy"] + [f"et_{k}" for k in E.LABELS]
+LIVE_NAMES = ([f"e_{k}" for k in E.LABELS] + ["hz_dump10", "hz_up30", "hz_policy"] + [f"et_{k}" for k in E.LABELS]
+              + [f"es_{k}" for k in E.LABELS])
 
 
 def load_models(d: Path) -> dict:

@@ -170,8 +170,10 @@ def test_slot_clock_times_a_late_delivery_by_its_slot():
 
 
 def test_meta_urls_only_public_gateways():
-    assert COL.meta_url("ipfs://abc") == "https://ipfs.io/ipfs/abc"
-    assert COL.meta_url("https://ipfs.io/ipfs/abc")
+    assert COL.meta_url("ipfs://abc") == "https://gateway.pinata.cloud/ipfs/abc"   # Y14: the gateway that answers
+    assert COL.meta_url("https://ipfs.io/ipfs/abc") == "https://gateway.pinata.cloud/ipfs/abc"
+    assert COL.meta_url("https://abc.ipfs.dweb.link/x.json") == "https://gateway.pinata.cloud/ipfs/abc/x.json"
+    assert COL.meta_url("https://arweave.net/abc") == "https://arweave.net/abc"
     assert COL.meta_url("https://pump.mypinata.cloud/ipfs/abc")
     assert COL.meta_url("https://metadata.pump.fun/x") is None
     assert COL.meta_url("http://ipfs.io/ipfs/abc") is None
@@ -450,13 +452,13 @@ def test_the_registered_rules_are_what_the_plan_says():
     from lab.pumpfun_rt import pipeline as P
     assert len(S.RULES) == 22
     # Y7 to Y16, and P_pool0_wait_tol60 (the live pool bound on paper, no trial)
-    assert len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS + 5 + 5 + 5 + 5 + 2 + 3 + 4 + 1 + 3 == 46
+    assert len(P.STRATEGIES) == S.PIPELINE_TRIALS + S.POOL0_TRIALS + 5 + 5 + 5 + 5 + 2 + 3 + 4 + 1 + 3 + 2 == 48
     assert S.X14_TRIALS == 54
     # 135: Y3's speed tiers, 140: Y5's fill scenarios, 1: P_pool0, 6: Y7's exits (five new, P_pool0 judged again),
     # 5: Y8's, 10: Y9's (five filters under two daily loss limits), 10: Y10's (five books under two limits)
     # 4: Y11's, 12: Y12's (three floors under two limits and two latencies), 16: Y15's (four free rides), 12: Y16's
     # (three rug rules)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12 + 4
     assert len({r.name for r in S.RULES}) == 22
     assert {r.family for r in S.RULES} == set("ABCDE")
     assert S.DEFAULT_PICK in S.BY_NAME and S.STAKE_SOL == 0.1

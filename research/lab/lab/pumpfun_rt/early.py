@@ -260,8 +260,9 @@ class Tracker:
         self.keep_frac = keep_frac
         self.features_cache: tuple | None = None
         if rows:
+            from .socialfeat import SOCIAL_FEATURES              # Y14: the social link features (the same)
             from .trendfeat import TREND_FEATURES                # Y10: the trend features (NaN without the tracker)
-            self.row_cols = (ROW_META + early_feature_list() + TREND_FEATURES + ROW_LABELS
+            self.row_cols = (ROW_META + early_feature_list() + TREND_FEATURES + SOCIAL_FEATURES + ROW_LABELS
                              + ROW_R)                         # R2: the peaks at the realistic entry
             self.rows = Packed(self.row_cols)
             self.steps = Packed(STEP_META + STEP_FEATURES)
@@ -477,6 +478,8 @@ class Tracker:
         f.update(self.early_features(tok, t, milestone))
         if getattr(eng, "trend", None) is not None:
             f.update(eng.trend.features(tok, t))
+        if getattr(eng, "social", None) is not None:
+            f.update(eng.social.features(tok, t))
         lat = eng.costs.latency("early", tok.mint, kind, "buy")
         row = {"t": int(t), "created_ms": tok.t0, "tid": st.id, "kind": KIND_ID[kind], "filled": 0.0, "pos": -1.0,
                "lat_ms": lat, "filled2": 0.0, "dropped": 0.0, **f,

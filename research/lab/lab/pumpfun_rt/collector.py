@@ -51,14 +51,18 @@ Every 30 s the collector writes <data>/pumpfun_rt/heartbeat.json (connected
 streams, messages, events per table, the last event time, reconnects,
 dropped metadata). `lab.pumpfun_rt.health` reads it for the job table.
 
-Metadata (off by default, PYTHIA_PF_META=1 turns it on): a token's metadata uri
+Metadata (on by default, PYTHIA_PF_META=0 turns it off): a token's metadata uri
 (set at creation) is fetched once, at most META_PER_S a second, only from
 public IPFS or Arweave gateways (never pump.fun, never a host the creator
 picked otherwise), at most 64 KB, and reduced to flags (twitter, telegram,
-website, description length, image) in the table "meta" with the time it was
-known. Off because it does not work any more: on 2026-10-20 ipfs.io and
-dweb.link answered 429 to the first request and otherwise send a
-"service-worker gateway only" page, and about a third of the uris point at a
+website, description length, image) and, since Y14, the links normalised
+(meta_social: the X link's kind, its handle in lower case and tweet id, the
+telegram handle, the website's registrable domain) in the table "meta" with the
+time it was known. Nothing else from the document is kept. An IPFS uri on any
+of the gateways is fetched from gateway.pinata.cloud: ipfs.io and dweb.link
+answer 429 with a "service-worker gateway only" page since 2026-10-20 (and
+w3s.link and nftstorage.link redirect to them); on 2026-10-26 Pinata answered
+every one of a sample of recent uris. About a third of the uris point at a
 launch tool's own host, which is not fetched. The uri's host itself is a
 creation-time feature (tokens.py).
 
@@ -75,6 +79,7 @@ import collections
 import json
 import os
 import random
+import re
 import signal
 import sys
 import time
@@ -92,8 +97,7 @@ POOLS_MAX = 20_000
 MIGRATED_KEEP_H = 24
 META_QUEUE = 2_000
 META_PER_S = 1.0
-IPFS_IO = "https://ipfs.io/ipfs/"
-IPFS_GATEWAYS = ("https://ipfs.io/ipfs/", "https://dweb.link/ipfs/", "https://w3s.link/ipfs/")
+IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/"   # the one public gateway that still answers (see above)
 LINKS = max(1, int(os.environ.get("PYTHIA_PF_LINKS", "3")))            # pump.fun stream
 AMM_LINKS = max(1, int(os.environ.get("PYTHIA_PF_AMM_LINKS", "2")))    # PumpSwap stream
 META_MAX_BYTES = 64_000
@@ -109,12 +113,13 @@ def now_ms() -> int:
 
 
 def meta_url(uri: str) -> str | None:
-    """The uri if it is an https link to a public IPFS or Arweave gateway, an ipfs:// uri
-    rewritten to ipfs.io, else None (nothing else is ever fetched)."""
+    """The uri if it is an https link to a public IPFS or Arweave gateway, an IPFS one (ipfs://, a gateway's
+    /ipfs/<cid> path or a <cid>.ipfs.<gateway> host) rewritten to IPFS_GATEWAY, else None (nothing else is ever
+    fetched)."""
     if not uri:
         return None
     if uri.startswith("ipfs://"):
-        return "https://ipfs.io/ipfs/" + uri[7:].lstrip("/")
+        return IPFS_GATEWAY + uri[7:].lstrip("/")
     try:
         u = urllib.parse.urlsplit(uri)
     except ValueError:
@@ -122,27 +127,151 @@ def meta_url(uri: str) -> str | None:
     host = (u.hostname or "").lower()
     if u.scheme != "https" or not host or "pump.fun" in host:
         return None
-    if any(host == h or host.endswith("." + h) for h in META_HOSTS):
-        return uri
-    return None
+    gw = next((h for h in META_HOSTS if host == h or host.endswith("." + h)), None)
+    if gw is None:
+        return None
+    if host.endswith(".ipfs." + gw) and host != "ipfs." + gw:             # <cid>.ipfs.<gateway>/<path>
+        return IPFS_GATEWAY + host[:-len(".ipfs." + gw)] + u.path
+    if u.path.startswith("/ipfs/") and len(u.path) > 6:
+        return IPFS_GATEWAY + u.path[6:] + (("?" + u.query) if u.query else "")
+    return uri
 
 
 def meta_flags(doc) -> dict:
-    """Socials and description flags from a metadata document (any shape)."""
+    """Socials and description flags from a metadata document (any shape), and its links normalised
+    (meta_social)."""
     if not isinstance(doc, dict):
         return {"ok": False}
     ext = doc.get("extensions") if isinstance(doc.get("extensions"), dict) else {}
 
-    def has(*keys):
+    def get(*keys):
         for k in keys:
             v = doc.get(k) or ext.get(k)
             if isinstance(v, str) and v.strip():
-                return True
-        return False
+                return v.strip()
+        return None
     desc = doc.get("description")
-    return {"ok": True, "twitter": has("twitter", "x"), "telegram": has("telegram"),
-            "website": has("website"), "desc_len": len(desc) if isinstance(desc, str) else 0,
-            "image": has("image")}
+    return {"ok": True, "twitter": get("twitter", "x") is not None, "telegram": get("telegram") is not None,
+            "website": get("website") is not None, "desc_len": len(desc) if isinstance(desc, str) else 0,
+            "image": get("image") is not None,
+            **meta_social(get("twitter", "x"), get("telegram"), get("website"))}
+
+
+# ---------------------------------------------------------------- Y14: the links, normalised
+
+X_KINDS = ("none", "profile", "status", "community", "search", "other")
+X_HOSTS = ("x.com", "twitter.com")
+TG_HOSTS = ("t.me", "telegram.me", "telegram.dog")
+X_RESERVED = {"home", "explore", "intent", "share", "messages", "notifications", "settings", "compose", "login",
+              "signup", "tos", "privacy", "hashtag", "search", "i"}
+SOCIAL_HOSTS = X_HOSTS + TG_HOSTS + ("pump.fun",)           # a "website" there is no website of its own
+TWO_LEVEL = {"co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
+             "ne.jp", "or.jp", "com.br", "com.cn", "com.hk", "com.sg", "com.tr", "com.mx", "com.ar", "co.in",
+             "co.za", "co.kr", "com.tw", "com.ua", "co.id", "com.my", "com.ph", "com.vn", "com.ng", "com.pk"}
+_X_HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
+_TG_HANDLE = re.compile(r"[A-Za-z0-9_]{4,32}")
+_TWEET = re.compile(r"[0-9]{1,20}")
+_LABEL = re.compile(r"[a-z0-9-]{1,63}")
+
+
+def _url(v: str):
+    """urlsplit of a link given with or without its scheme; None when it is no http(s) link with a host."""
+    s = v.strip()
+    if "://" not in s:
+        s = "https://" + s.lstrip("/")
+    try:
+        u = urllib.parse.urlsplit(s)
+        host = (u.hostname or "").lower()
+    except ValueError:
+        return None
+    if u.scheme not in ("http", "https") or not host:
+        return None
+    return u, host[4:] if host.startswith("www.") else host
+
+
+def _on(host: str, hosts) -> bool:
+    return any(host == h or host.endswith("." + h) for h in hosts)
+
+
+def x_link(v: str | None) -> tuple[str, str | None, str | None]:
+    """(kind, handle in lower case, tweet id) of an X (Twitter) link: profile (x.com/<handle>, @handle or a bare
+    handle), status (x.com/<handle>/status/<id>, x.com/i/status/<id>), community (x.com/i/communities/<id>), search
+    (x.com/search, a hashtag), none (nothing given) or other (anything else, a link to another site too)."""
+    if not v or not v.strip():
+        return "none", None, None
+    s = v.strip()
+    if s.startswith("@") and _X_HANDLE.fullmatch(s[1:]):
+        return "profile", s[1:].lower(), None
+    if _X_HANDLE.fullmatch(s):
+        return "profile", s.lower(), None
+    got = _url(s)
+    if got is None or not _on(got[1], X_HOSTS):
+        return "other", None, None
+    parts = [p for p in got[0].path.split("/") if p]
+    if not parts:
+        return "other", None, None
+    p0 = parts[0].lower()
+    if p0 == "i":
+        rest = [p.lower() for p in parts[1:]]
+        if len(rest) >= 2 and rest[0] == "communities" and _TWEET.fullmatch(rest[1]):
+            return "community", None, None
+        for k in (1, 2):                                       # i/status/<id>, i/web/status/<id>
+            if len(rest) > k and rest[k - 1] == "status" and _TWEET.fullmatch(rest[k]):
+                return "status", None, rest[k]
+        return "other", None, None
+    if p0 in ("search", "hashtag"):
+        return "search", None, None
+    if p0 in X_RESERVED or not _X_HANDLE.fullmatch(parts[0]):
+        return "other", None, None
+    if len(parts) >= 3 and parts[1].lower() == "status" and _TWEET.fullmatch(parts[2]):
+        return "status", p0, parts[2]
+    return "profile", p0, None
+
+
+def tg_handle(v: str | None) -> str | None:
+    """The public telegram handle in lower case (t.me/<handle>, @handle or a bare handle); None for an invite link
+    (t.me/+..., t.me/joinchat/...), another site or nothing."""
+    if not v or not v.strip():
+        return None
+    s = v.strip()
+    if s.startswith("@"):
+        s = s[1:]
+    if _TG_HANDLE.fullmatch(s):
+        return s.lower()
+    got = _url(s)
+    if got is None or not _on(got[1], TG_HOSTS):
+        return None
+    parts = [p for p in got[0].path.split("/") if p]
+    if parts and parts[0].lower() == "s":
+        parts = parts[1:]
+    if not parts or parts[0].startswith("+") or parts[0].lower() == "joinchat":
+        return None
+    return parts[0].lower() if _TG_HANDLE.fullmatch(parts[0]) else None
+
+
+def web_domain(v: str | None) -> str | None:
+    """The website's registrable domain in lower case (the last two labels of its host, three under a two-level
+    suffix such as co.uk); None for no link, an IP address, X, telegram or pump.fun."""
+    if not v or not v.strip():
+        return None
+    got = _url(v)
+    if got is None:
+        return None
+    host = got[1].rstrip(".")
+    labels = host.split(".")
+    if len(labels) < 2 or host.replace(".", "").isdigit() or not all(_LABEL.fullmatch(x) for x in labels):
+        return None
+    if _on(host, SOCIAL_HOSTS):
+        return None
+    n = 3 if len(labels) >= 3 and ".".join(labels[-2:]) in TWO_LEVEL else 2
+    return ".".join(labels[-n:])
+
+
+def meta_social(twitter: str | None, telegram: str | None, website: str | None) -> dict:
+    """Y14: the only things kept of the links (store.SCHEMAS["meta"])."""
+    kind, handle, tweet = x_link(twitter)
+    return {"x_kind": kind, "x_handle": handle, "x_tweet": tweet, "tg_handle": tg_handle(telegram),
+            "web_domain": web_domain(website)}
 
 
 class SlotClock:
@@ -318,13 +447,9 @@ class Collector:
     async def meta_worker(self, session) -> None:
         import aiohttp
         gap = 1.0 / META_PER_S
-        k = 0
         while True:
             mint, url = await self.meta_q.get()
             t0 = time.monotonic()
-            if url.startswith(IPFS_IO):                  # spread the load over the public gateways
-                k += 1
-                url = IPFS_GATEWAYS[k % len(IPFS_GATEWAYS)] + url[len(IPFS_IO):]
             flags = {"ok": False}
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False,
@@ -452,7 +577,7 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     grpc_url = (os.environ.get("PYTHIA_SOLANA_GRPC_URL") or "").strip()
     grpc_token = os.environ.get("PYTHIA_SOLANA_GRPC_TOKEN") or ""
     amm = os.environ.get("PYTHIA_PF_AMM", "1") != "0"
-    meta = os.environ.get("PYTHIA_PF_META", "0") == "1" and not dry_run
+    meta = os.environ.get("PYTHIA_PF_META", "1") == "1" and not dry_run
     writer = None if dry_run else store.Writer()
     shadow = None
     if not dry_run and os.environ.get("PYTHIA_PF_SHADOW", "1") != "0":

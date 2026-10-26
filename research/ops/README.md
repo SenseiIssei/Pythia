@@ -277,7 +277,7 @@ Settings (environment, all optional; put them in an env file and add
 | `PYTHIA_PF_AMM` | 1 | 0 stops the PumpSwap stream (the post-migration rules then have no data) and halves the traffic |
 | `PYTHIA_PF_BUDGET_GB` | 40 | size budget of `pumpfun_rt/`; whole days go, oldest first |
 | `PYTHIA_PF_SHADOW` | 1 | 0 records only, without the live shadow book |
-| `PYTHIA_PF_META` | 0 | 1 fetches token metadata from public IPFS gateways (they refuse it at present) |
+| `PYTHIA_PF_META` | 1 | 0 stops fetching token metadata (IPFS uris through gateway.pinata.cloud, at most 1 a second, 64 KB; kept: the flags and, since Y14, the normalised X, telegram and website links) |
 | `PYTHIA_PF_PRIORITY_SOL`, `PYTHIA_PF_LAT_MEDIAN_MS`, `PYTHIA_PF_LAT_LO_MS`, `PYTHIA_PF_LAT_HI_MS` | 0.001, 1000, 400, 3000 | the fill model's priority fee and latency (changing them changes the study; the plan's numbers are the defaults) |
 
 Traffic: about 1 MB/s inbound (90 GB a day), most of it failed transactions

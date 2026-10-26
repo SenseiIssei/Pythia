@@ -31,7 +31,9 @@ Files under <data>/paper/pumpfun_rt/:
   snipers.json   the sniper book of the X14 early features (the same)
 
 The engine has Y10's trend tracker (trendfeat.py): the trend features of the select and early models and the
-trend strategies' 10 s clock. And <reports>/pumpfun_rt/trends.json every trends.WRITE_S (trends.py, the Trends page): what is hot right now,
+trend strategies' 10 s clock; and Y14's social tracker (socialfeat.py), warmed on start from the record's last
+socialfeat.WARM_DAYS days of metadata, so the social features count the coins before the restart too.
+And <reports>/pumpfun_rt/trends.json every trends.WRITE_S (trends.py, the Trends page): what is hot right now,
 read from the engine after it took each row, so it changes no decision.
 
 Rows of a coin the engine does not know yet wait up to HOLD_MS for its creation and follow it then (Hold; the live
@@ -192,7 +194,7 @@ class Shadow:
         self.engine = Engine([rule, model_rule(rule)], book=self.book, decisions=False,
                              model=Filter(self.models) if self.models else None, on_close=self._closed,
                              strategies=old, wallets=wallets, cats=cats, models=self.models, kill=kill,
-                             select=True, trend=True)
+                             select=True, trend=True, social=True)
         if realistic:
             R.books(self.engine, strategies, self.real, self.paper_wallets, kill=kill)
             R.small_books(self.engine, self.real, self.paper_wallets, kill=kill, small=small)   # R2
@@ -266,6 +268,12 @@ class Shadow:
         sh = cls(read_pick(), load(), book, wallets=wallets, cats=cats, trends=True, blocked=blocked,
                  category=CategoryGate(cats, block=blocked, rules=PAPER_RULES), realistic=True, paper_wallets=pw)
         sh.realistic_since = st.get("realistic_since") or sh.realistic_since
+        try:                                                  # Y14: the social features know the days before
+            from . import socialfeat as SO
+            from . import store
+            sh.engine.social = SO.warm(store.days()[-SO.WARM_DAYS:])
+        except Exception as e:                                # noqa: BLE001 - a fresh tracker then
+            print(f"shadow: social warm-up skipped ({type(e).__name__}: {e})", flush=True)
         sh.cats_mtime = cls._cats_mtime()
         try:                                                  # X14: the sniper book of the early features
             from .early import SniperBook

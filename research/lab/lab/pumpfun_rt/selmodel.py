@@ -8,6 +8,10 @@ before T (its labels known by then). Fewer than MIN_TRAIN rows, or one class onl
 "no model"). The logistic regression on the same features (model.logistic) is the baseline, judged next to it
 walk-forward by UTC day (walk_forward), never traded.
 
+Y14 (results/pumpfun_social_y14_prereg.md): the twins win0s, rug0s, win5s, rug5s are Y10's models with the social
+link features (socialfeat.py) added, trained only on the rows written with the social tracker (soc_known not NaN) and
+only once MIN_TRAIN of those have the coin's metadata (has_social); until then no model, as Y10's before its rows.
+
 The daily retrain (retrain.run_y9) trains on every row of the study's record and saves sel_<label>.json and
 sel_policy.json next to the other models (model.load reads them), where the paper books pick them up.
 """
@@ -22,13 +26,17 @@ import numpy as np
 
 from . import model as M
 from .selfeat import SEL0, SEL5, day_of
+from .socialfeat import SOCIAL_FEATURES
 from .trendfeat import TREND_FEATURES
 
 LABELS = {"win0": (0, "win"), "rug0": (0, "rug"), "win5": (5, "win"), "rug5": (5, "rug"),
           # Y10 (results/pumpfun_trends_y10_prereg.md): the same labels, the same parameters, the trend features added
-          "win0t": (0, "win"), "rug0t": (0, "rug"), "win5t": (5, "win"), "rug5t": (5, "rug")}
+          "win0t": (0, "win"), "rug0t": (0, "rug"), "win5t": (5, "win"), "rug5t": (5, "rug"),
+          # Y14 (results/pumpfun_social_y14_prereg.md): Y10's, the social link features added
+          "win0s": (0, "win"), "rug0s": (0, "rug"), "win5s": (5, "win"), "rug5s": (5, "rug")}
 Y9_LABELS = ("win0", "rug0", "win5", "rug5")
 TREND_LABELS = ("win0t", "rug0t", "win5t", "rug5t")
+SOCIAL_LABELS = ("win0s", "rug0s", "win5s", "rug5s")
 PARAMS = dict(n_estimators=200, learning_rate=0.03, num_leaves=7, min_child_samples=20, subsample=0.8,
               subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0, verbose=-1, n_jobs=2)
 MIN_TRAIN = 200
@@ -38,7 +46,10 @@ DAY_MS = 86_400_000
 
 
 def features_for(label: str) -> list[str]:
-    return (SEL0 if LABELS[label][0] == 0 else SEL5) + (TREND_FEATURES if label in TREND_LABELS else [])
+    base = SEL0 if LABELS[label][0] == 0 else SEL5
+    if label in SOCIAL_LABELS:
+        return base + TREND_FEATURES + SOCIAL_FEATURES
+    return base + (TREND_FEATURES if label in TREND_LABELS else [])
 
 
 def has_trend(table: dict) -> bool:
@@ -46,11 +57,23 @@ def has_trend(table: dict) -> bool:
     return any(k in table and bool(np.isfinite(table[k]).any()) for k in TREND_FEATURES)
 
 
+def has_social(table: dict) -> bool:
+    """Y14: MIN_TRAIN rows or more with the coin's metadata read (rows before Y14 have no social columns)."""
+    return "soc_known" in table and int(np.nansum(table["soc_known"] == 1)) >= MIN_TRAIN
+
+
+def waits(label: str, table: dict) -> bool:
+    """A Y10 or Y14 twin whose rows are not there yet."""
+    return (label in TREND_LABELS and not has_trend(table)) or (label in SOCIAL_LABELS and not has_social(table))
+
+
 def rows_for(table: dict[str, np.ndarray], label: str, until_ms: float | None = None) -> dict[str, np.ndarray]:
     """The rows of the label's entry with the label known, in time order; with until_ms only those decided
     LABEL_H_MS before it."""
     entry, col = LABELS[label]
     m = (table["entry"] == entry) & np.isfinite(table[col])
+    if label in SOCIAL_LABELS:                       # Y14: only the rows written with the social tracker
+        m &= np.isfinite(table["soc_known"])
     if until_ms is not None:
         m &= table["t"] + LABEL_H_MS < until_ms
     order = np.argsort(table["t"][m], kind="stable")
@@ -74,7 +97,7 @@ def train(table: dict[str, np.ndarray], until_ms: float | None = None) -> dict:
     """{"sel_<label>": Fitted, ..., "sel_policy": {label: {"0.3": threshold}}, "sel_rows": {label: rows}}."""
     out, pol, n = {}, {}, {}
     for label in LABELS:
-        if label in TREND_LABELS and not has_trend(table):
+        if waits(label, table):
             out["sel_" + label], n[label] = M.Fitted(None, None, None, 0.0, features_for(label)), 0
             continue
         rs = rows_for(table, label, until_ms)
@@ -100,7 +123,7 @@ def walk_forward(table: dict[str, np.ndarray]) -> dict:
     out = {}
     days = sorted({day_of(t) for t in table["t"]}) if len(table["t"]) else []
     for label, (entry, col) in LABELS.items():
-        if label in TREND_LABELS and not has_trend(table):
+        if waits(label, table):
             continue
         feats = features_for(label)
         pooled = {"model": [], "logistic": [], "base": [], "y": [], "ret": [], "top": []}

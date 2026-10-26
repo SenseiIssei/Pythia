@@ -25,6 +25,7 @@ from . import curve as C
 from . import early as E
 from . import pipeline as P
 from . import selfeat as SF
+from . import socialfeat as SO
 from . import strategies as S
 from . import trendfeat as TF
 from . import wallets as W
@@ -69,7 +70,7 @@ class Engine:
                  rule_costs: dict[str, C.Costs] | None = None, strategies: list | None = None,
                  wallets: W.WalletBook | None = None, cats=None, models: dict | None = None, kill=None,
                  early_rows: bool = False, snipers: E.SniperBook | None = None, select: bool = False,
-                 trend: bool = False):
+                 trend: bool = False, social=False):
         self.rules = list(S.RULES if rules is None else rules)
         self.costs = costs or C.Costs()
         self.rule_costs = rule_costs or {}
@@ -110,6 +111,8 @@ class Engine:
         # live service)
         self.trend = TF.Tracker() if trend else None
         self.trend_tick: float | None = None
+        # Y14: the social link features (socialfeat.py; True a fresh tracker, or a warmed one; not the live service)
+        self.social = social if isinstance(social, SO.Tracker) else (SO.Tracker() if social else None)
         # R2: the realistic labels of the decision and early rows (labels_r2.Labels; the study's second pass)
         self.r2 = None
 
@@ -275,6 +278,8 @@ class Engine:
         tok.last_t = t
         if self.trend is not None:
             self.trend.migrated(tok, int(t))
+        if self.social is not None:
+            self.social.migrated(mint, int(t))
         for r in self.by_entry.get("migration", ()):
             self.push(t + r.p["delay_s"] * 1000, "signal_rule", (mint, r.name))
 
@@ -308,6 +313,8 @@ class Engine:
         tok = self.tokens.get(mint)
         if tok is not None:
             tok.set_meta(t, flags)
+            if self.social is not None:
+                self.social.meta(mint, tok.t0, tok.creator, flags, tok.migrate_t)
 
     def gap(self, t0, t1, prog: str | None = None) -> None:
         """The stream was down from t0 to t1: everything open across it is marked."""
@@ -794,7 +801,7 @@ def feed_row(eng: Engine, table: str, r) -> None:
                     r["cfb"], r.get("slot"), r.get("user"), r.get("vq"), sig=r.get("sig"), bts=r.get("bts"))
     elif table == "meta":
         eng.meta(r["t"], r["mint"], {k: r.get(k) for k in ("ok", "twitter", "telegram", "website", "desc_len",
-                                                             "image")})
+                                                             "image") + SO.META_KEYS})
 
 
 ORDER = ("creates", "trades", "other", "amm", "meta")

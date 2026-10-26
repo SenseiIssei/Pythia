@@ -153,9 +153,13 @@ FREE_Y15_TRIALS = 4 * 2 * 2
 # Y16 (results/pumpfun_rugfilter_prereg.md): P_pool0_wait with three rug rules (pipeline._build_y16), each judged under
 # the 0.25 SOL and the 1.0 SOL daily loss limit at the paper model's and at the measured latency, twelve more.
 RUGFILTER_Y16_TRIALS = 3 * 2 * 2
+# Y14 (results/pumpfun_social_y14_prereg.md): the +5 s top-30 % filter on the model with the social link features and
+# P_pool0_wait with the social rule (pipeline._build_y14), each under the 0.25 SOL and the 1.0 SOL daily loss limit.
+SOCIAL_Y14_TRIALS = 2 * 2
 N_TRIALS = (len(RULES) + MODEL_FILTER_TRIALS + PIPELINE_TRIALS + X14_TRIALS + SPEED_TRIALS
             + REAL_LATENCY_TRIALS + POOL0_TRIALS + EXIT_RUNNER_TRIALS + EXITS_Y8_TRIALS + SELECT_Y9_TRIALS
-            + TRENDS_Y10_TRIALS + RUNNER_Y11_TRIALS + LOCK_Y12_TRIALS + FREE_Y15_TRIALS + RUGFILTER_Y16_TRIALS)
+            + TRENDS_Y10_TRIALS + RUNNER_Y11_TRIALS + LOCK_Y12_TRIALS + FREE_Y15_TRIALS + RUGFILTER_Y16_TRIALS
+            + SOCIAL_Y14_TRIALS)
 # The rule the shadow book runs until the study has picked one (pick.json).
 DEFAULT_PICK = "C_20in60_x1"
 # The model filter: enter only when the calibrated probability that this entry,

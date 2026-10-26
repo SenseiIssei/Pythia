@@ -55,7 +55,7 @@ def run_pool(models, names=("P_pool0_wait", *Y16_NAMES), ratio=1.5, select=True)
 
 def test_the_y16_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-3:] == Y16_NAMES and [n for _, n in Y16.VARIANTS] == ["P_pool0_wait"] + Y16_NAMES
+    assert names[-5:-2] == Y16_NAMES and [n for _, n in Y16.VARIANTS] == ["P_pool0_wait"] + Y16_NAMES
     base = P.BY_NAME["P_pool0_wait"]
     flts = ({"select": {"rug0t": ("max", 1.0)}}, {"select": {"rug0t": ("max", 0.5)}}, {"cut": "Y16"})
     for n, flt in zip(Y16_NAMES, flts):
@@ -65,7 +65,7 @@ def test_the_y16_strategies_and_trials_are_what_the_prereg_says():
     assert P.RUG_CUT == {"first5_share": ("max", 0.4078188248772218)} and base.flt == {}   # Y16's in-sample pick
     assert all(not s.flt.get("cut") for s in OLD)
     assert S.RUGFILTER_Y16_TRIALS == 12 == 3 * len(Y16.LIMITS) * len(Y16.LATENCIES)
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12 + 4
 
 
 # ---------------------------------------------------------------- the filters

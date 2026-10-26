@@ -72,7 +72,7 @@ def test_the_y8_strategies_are_what_the_prereg_says():
 
 def test_the_trials_are_counted():
     assert S.EXITS_Y8_TRIALS == 5 == len(X8.VARIANTS) - 1
-    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12
+    assert S.N_TRIALS == 22 + 1 + 12 + 54 + 135 + 140 + 1 + 6 + 5 + 10 + 10 + 4 + 12 + 16 + 12 + 4
 
 
 # ---------------------------------------------------------------- the press exit

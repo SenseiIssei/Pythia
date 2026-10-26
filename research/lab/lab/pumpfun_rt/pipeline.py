@@ -470,9 +470,37 @@ def _build_tol() -> list[Strategy]:
                                 label=f"{s.label}; a pool buy accepts down to the quote / 1.60 (the live bound)")]
 
 
+# Y14 (results/pumpfun_social_y14_prereg.md): the social rule, socialfeat's features at the entry; {feature: (how, x)}
+# skips the entry when the feature is at least x ("min") or exactly x ("eq"), "and" pairs needing both. Recycled
+# socials: an X handle, telegram handle or website domain of 2 or more earlier coins none of which migrated, an X
+# handle the creator used before, and a late place in a narrative race (10 or more coins on the same tweet or handle in
+# the 10 minutes before).
+SOCIAL_RULE: tuple = ((("soc_handle_prev", "min", 2), ("soc_handle_mig", "eq", 0)),
+                      (("soc_tg_prev", "min", 2), ("soc_tg_mig", "eq", 0)),
+                      (("soc_dom_prev", "min", 2), ("soc_dom_mig", "eq", 0)),
+                      (("soc_creator_handle", "min", 1),),
+                      (("soc_burst10", "min", 10),))
+
+
+def _build_y14() -> list[Strategy]:
+    """Y14 (results/pumpfun_social_y14_prereg.md): the social link features in use, P_pool0's exits and 0.1 SOL each.
+    Y10's +5 s top-30 % filter on the model that also sees the social link features (sel_win5s), and P_pool0_wait
+    that skips the coins SOCIAL_RULE names and the ones whose metadata is not known at the entry."""
+    pool0 = Exits(300, 0.20, ((0.30, 1.0),), dev_sell=False, pull=False)
+    s = next(x for x in _build_y8() if x.name == "P_pool0_wait")
+    return [
+        _strategy("P_pool5_top30s", "E", "migration", {"delay_s": 5}, {"select": {"win5s": ("top", 0.3)}}, pool0,
+                  "PumpSwap 5 s after the migration where P(win), with the pool's first seconds, the trend and the "
+                  "social link features, is in its top 30 %; +30 %, stop -20 %, 300 s", stake_sol=0.1),
+        dataclasses.replace(s, name="P_pool0_wait_social", flt={"social": "Y14"},
+                            label="P_pool0_wait on the coins with their metadata known and no recycled socials or late "
+                                  "narrative race (SOCIAL_RULE)"),
+    ]
+
+
 STRATEGIES: list[Strategy] = (_build() + _build_x14() + _build_y6() + _build_y7() + _build_y8() + _build_y9()
                               + _build_y10() + _build_y11() + _build_y12() + _build_y15() + _build_tol()
-                              + _build_y16())
+                              + _build_y16() + _build_y14())
 BY_NAME: dict[str, Strategy] = {s.name: s for s in STRATEGIES}
 
 
@@ -744,6 +772,11 @@ class Pipeline:
             if not ok:
                 self.skip(s.name, tok.mint, "rug rule" if ok is False else "no model")
                 return
+        if s.flt.get("social"):
+            ok, prob = self.social_ok(s.flt["social"], tok, t)
+            if not ok:
+                self.skip(s.name, tok.mint, "social rule" if ok is False else "no social data")
+                return
         risk = self.risk[s.name]
         stake = int(min(s.stake_sol, risk.limits.stake_sol) * C.LAMPORTS)
         depth = tok.pq if pool else tok.vs
@@ -934,6 +967,27 @@ class Pipeline:
             if v != v:
                 continue
             if (how == "max" and v > x) or (how == "min" and v < x):
+                return False, first
+        return True, first
+
+    def social_ok(self, spec, tok, t: float) -> tuple[bool | None, float | None]:
+        """Y14's social rule: spec "Y14" is SOCIAL_RULE, else a rule of the same shape; False when one of its
+        clauses holds (every condition of it), the first clause's first feature as the probability column. (None,
+        None) without the engine's social tracker or the coin's metadata at t."""
+        rule = SOCIAL_RULE if spec == "Y14" else spec
+        tr = getattr(self.eng, "social", None)
+        if tr is None:
+            return None, None
+        f = tr.features(tok, t)
+        if f["soc_known"] != 1:
+            return None, None
+        first = float(f[rule[0][0][0]]) if rule else None
+
+        def holds(name, how, x):
+            v = float(f.get(name, math.nan))
+            return v == v and ((how == "min" and v >= x) or (how == "eq" and v == x))
+        for clause in rule:
+            if all(holds(*c) for c in clause):
                 return False, first
         return True, first
 

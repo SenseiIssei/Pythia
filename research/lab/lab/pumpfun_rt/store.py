@@ -24,7 +24,8 @@ Tables:
   other    curve completions, migrations (pool, SOL and tokens moved), and "gap" rows:
            a stream (program in `user`) was not connected from t0 to t, so nothing
            between is known for it
-  meta     socials and description flags from a token's metadata file, when fetched
+  meta     socials and description flags from a token's metadata file, when fetched, and (Y14) its X link's
+           kind, X handle and tweet id, telegram handle and website domain, normalised
 
 `t` is the collector's receive time in ms (UTC), `slot` the Solana slot and
 `bts` the block time the program saw (seconds). Receive time is NOT event
@@ -74,7 +75,10 @@ SCHEMAS: dict[str, pa.Schema] = {
     "other": pa.schema([("kind", STR), ("t", I64), ("slot", I64), ("tx", I64), ("mint", STR), ("user", STR),
                         ("pool", STR), ("sol", I64), ("tok", I64), ("t0", I64), ("bts", I64)]),
     "meta": pa.schema([("t", I64), ("mint", STR), ("ok", BOOL), ("twitter", BOOL), ("telegram", BOOL),
-                       ("website", BOOL), ("desc_len", I32), ("image", BOOL)]),
+                       ("website", BOOL), ("desc_len", I32), ("image", BOOL),
+                       # Y14: the links normalised (collector.meta_social), nothing else of the document
+                       ("x_kind", STR), ("x_handle", STR), ("x_tweet", STR), ("tg_handle", STR),
+                       ("web_domain", STR)]),
 }
 I64_MAX = (1 << 63) - 1
 

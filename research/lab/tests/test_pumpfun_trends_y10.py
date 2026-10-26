@@ -51,7 +51,7 @@ def y10_models(p_alive=0.9, alive_base=0.5) -> dict:
 
 def test_the_y10_strategies_and_trials_are_what_the_prereg_says():
     names = [s.name for s in P.STRATEGIES]
-    assert names[-18:-13] == Y10_NAMES and [n for _, n in Y10.VARIANTS][3:] == Y10_NAMES
+    assert names[-20:-15] == Y10_NAMES and [n for _, n in Y10.VARIANTS][3:] == Y10_NAMES
     base = P.BY_NAME["P_pool0"]
     for n in Y10_NAMES:
         s = P.BY_NAME[n]
@@ -310,12 +310,13 @@ def test_the_trend_models_see_the_trend_features_and_wait_for_rows_that_have_the
     rng = np.random.default_rng(4)
     tb["tr_rank_5m"] = rng.integers(1, 30, len(tb["t"])).astype(float)
     ms = SM.train(tb)
-    assert all(ms[f"sel_{k}"].booster is not None for k in SM.LABELS)
+    assert all(ms[f"sel_{k}"].booster is not None for k in SM.Y9_LABELS + SM.TREND_LABELS)
+    assert all(ms[f"sel_{k}"].booster is None for k in SM.SOCIAL_LABELS)         # Y14's wait for their rows
     assert ms["sel_win0t"].features == SF.SEL0 + TF.TREND_FEATURES
     assert ms["sel_win5t"].features == SF.SEL5 + TF.TREND_FEATURES
-    assert set(ms["sel_policy"]) == set(SM.LABELS)
+    assert set(ms["sel_policy"]) == set(SM.Y9_LABELS + SM.TREND_LABELS)
     wf = SM.walk_forward(tb)
-    assert set(wf) == set(SM.LABELS)
+    assert set(wf) == set(SM.Y9_LABELS + SM.TREND_LABELS)
     mc = Y10.model_compare(wf)
     assert [(r["y9"], r["trend"]) for r in mc] == list(Y10.MODEL_PAIRS) and all(r["n"] == r["n_trend"] for r in mc)
 
