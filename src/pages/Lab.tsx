@@ -24,6 +24,8 @@ import { buildStudies, mergeDocs, type StudyView } from "../researchView";
 import { bundledStudies, labReadme } from "../studyFiles";
 import { updatedText, useVisiblePoll } from "../pageVisible";
 import { PumpfunLab } from "../components/PumpfunLab";
+import { LabFactory } from "../components/LabFactory";
+import { labFactory, type LabFactory as LabFactoryData } from "../labFactory";
 
 /** Plain-language names for the lab's paper books and reports. */
 const BOOK_LABEL: Record<string, string> = {
@@ -392,13 +394,15 @@ export function Lab() {
   const [pf, setPf] = useState<PumpfunLabData | null>(null);
   const [pfErr, setPfErr] = useState("");
   const [pfStudies, setPfStudies] = useState<StudyView[]>([]);
+  const [fac, setFac] = useState<LabFactoryData | null>(null);
+  const [facErr, setFacErr] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const ref = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(async () => {
     if (mode === "none") return;
     setNow(Date.now());
-    const [st, p, bundled, readme, served] = await Promise.allSettled([labStatus(), labPumpfun(), bundledStudies(), labReadme(), labStudies()]);
+    const [st, p, bundled, readme, served, f] = await Promise.allSettled([labStatus(), labPumpfun(), bundledStudies(), labReadme(), labStudies(), labFactory()]);
     if (st.status === "fulfilled") {
       setS(st.value);
       setErr("");
@@ -410,6 +414,12 @@ export function Lab() {
       setPfErr("");
     } else {
       setPfErr(p.reason instanceof Error ? p.reason.message : String(p.reason));
+    }
+    if (f.status === "fulfilled") {
+      setFac(f.value);
+      setFacErr("");
+    } else {
+      setFacErr(f.reason instanceof Error ? f.reason.message : String(f.reason));
     }
     const docs = mergeDocs(bundled.status === "fulfilled" ? bundled.value : {}, served.status === "fulfilled" ? served.value : []);
     setPfStudies(pumpfunStudies(buildStudies(readme.status === "fulfilled" ? readme.value : "", docs)));
@@ -532,6 +542,8 @@ export function Lab() {
       )}
 
       <PumpfunLab lab={pf} studies={pfStudies} err={pfErr} now={now} />
+
+      <LabFactory data={fac} err={facErr} now={now} />
 
       {s && s.reports.length > 0 && (
         <Section title="What the experiments concluded" hint="Each experiment's verdict, newest write-up date under its name.">

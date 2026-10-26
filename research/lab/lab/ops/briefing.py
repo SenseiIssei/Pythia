@@ -13,6 +13,9 @@ numbers formatted in the messages' language, one overview chart:
                          small-account paper books in EUR (reports/smallaccount, S1 and S2), the
                          on-chain long-term book's 0.5 SOL paper wallet (reports/onchain_longterm, L1)
   lab                    the model zoo (reports/models) and the study reports that are new
+  research factory       per factory one line (reports/pumpfun_rt/factory.json F3, reports/smallaccount/factory.json
+                         F2): trials, the bar, the best new candidate held back, books, model settings adopted;
+                         A1's allocator (reports/pumpfun_rt/allocator.json): its pick and why, never the live bot
   Pokemon, CS2, coins,   reports/pokemon, reports/cs2 and cs2_trends, reports/trending and
   stocks and ETFs, news  listings, the engines' US shares and the ETF closes, the news
                          collector's newest headlines (<data>/ai/news)
@@ -440,13 +443,85 @@ def research_section(rep: dict | None, now: int, lang: str, n: int = 5) -> tuple
     return parts, words
 
 
+# The research factories: (code, the report's folder, its file). F3 is the pump.fun factory (lab.pumpfun_rt.factory);
+# F2, the small-account factory, writes the same fields to reports/smallaccount/factory.json once it runs.
+FACTORIES = (("F3", "pumpfun_rt", "factory.json"), ("F2", "smallaccount", "factory.json"))
+
+
+def factory_line(code: str, rep: dict | None, lang: str) -> Line | None:
+    """One factory in one line: its trials last night and in all, the bar, the night's best candidate with its
+    held-back result, the paper books started and retired that night, the model settings adopted."""
+    if not isinstance(rep, dict) or _num(rep.get("trials_ever")) is None:
+        return None
+    start = _num(rep.get("start_sol")) or 0.55
+    n = int(_num(rep.get("trials_tonight")) or 0)
+    bits = [tr("bf_fac_trials", lang, n=n, ever=i18n.num(_num(rep.get("trials_ever")) or 0, 0, lang))]
+    bar = rep.get("bar") or {}
+    if _num(bar.get("sharpe")) is not None:
+        bits.append(tr("bf_fac_bar", lang, sharpe=i18n.num(bar["sharpe"], 3, lang),
+                       n=i18n.num(_num(bar.get("trials")) or 0, 0, lang)))
+    best = next((r for r in rep.get("best") or [] if isinstance(r, dict) and r.get("id")), None)
+    if best is None:
+        bits.append(tr("bf_fac_none", lang))
+    else:
+        text = tr("bf_fac_best", lang, id=best["id"], median=i18n.sol(_num(best.get("median")) or start, 3, lang))
+        held = next((h for h in rep.get("holdback") or [] if isinstance(h, dict) and h.get("id") == best["id"]), None)
+        if held is None:
+            text += ", " + tr("bf_fac_nohold", lang)
+        else:
+            text += ", " + tr("bf_fac_hold", lang, median=i18n.sol(_num(held.get("median")) or start, 3, lang),
+                              pnl=i18n.sol(_num(held.get("pnl_sol")) or 0.0, 3, lang, True))
+        bits.append(text)
+    night, at = str(rep.get("night") or ""), _num(rep.get("updated_ms")) or 0
+    books = [b for b in rep.get("books") or [] if isinstance(b, dict)]
+    started = sum(1 for b in books if night and b.get("added_day") == night)
+    retired = sum(1 for b in rep.get("retired") or [] if isinstance(b, dict) and at - (_num(b.get("retired_ms")) or 0)
+                  <= DAY_MS / 2)
+    bits.append(tr("bf_fac_books", lang, started=started, retired=retired, active=len(books)))
+    if rep.get("winners"):
+        bits.append(tr("bf_fac_winners", lang, ids=", ".join(str(w) for w in rep["winners"][:3])))
+    mods = rep.get("models") if isinstance(rep.get("models"), dict) else {}
+    took = [k for k, v in mods.items() if isinstance(v, dict) and v.get("adopted")]
+    bits.append(tr("bf_fac_models", lang, labels=", ".join(took)) if took else tr("bf_fac_models_none", lang))
+    return Line(" · ".join(bits), tr("bf_fac_" + code, lang))
+
+
+def alloc_line(rep: dict | None, lang: str) -> Line | None:
+    """A1's allocator in one line: what it would pick and why (P(best), the weight, the posterior's daily growth
+    and its days, the arms under the drawdown guard), and the live bot's own strategy, which it never changes."""
+    arms = (rep or {}).get("arms") if isinstance(rep, dict) else None
+    if not isinstance(arms, dict) or not arms:
+        return None
+    ch = rep.get("choice")
+    if not ch:
+        return Line(tr("prt_alloc_out", lang), tr("bf_alloc_lead", lang))
+    a = arms.get(ch) or {}
+    guarded = [k for k, v in arms.items() if isinstance(v, dict) and v.get("guarded")]
+    text = tr("bf_alloc", lang, pick=ch, p=i18n.frac_pct(_num(a.get("p_best")) or 0.0, 0, lang, sign=False),
+              w=i18n.frac_pct(_num(a.get("weight")) or 0.0, 0, lang, sign=False),
+              g=i18n.frac_pct(_num(a.get("posterior_mean")) or 0.0, 1, lang), days=int(_num(a.get("days")) or 0),
+              guard=tr("bf_alloc_guard", lang, arms=", ".join(guarded)) if guarded else "",
+              live=rep.get("live_rule") or ("k. A." if lang == "de" else "n/a"))
+    return Line(text, tr("bf_alloc_lead", lang))
+
+
+def factory_section(reps: dict, alloc: dict | None, lang: str) -> list:
+    """Per factory with a fresh report one line, then the allocator's line; nothing when no factory report is
+    fresh. `reps` code -> the fresh report or None."""
+    lines = [ln for code, _, _ in FACTORIES if (ln := factory_line(code, reps.get(code), lang)) is not None]
+    if not lines:
+        return []
+    al = alloc_line(alloc, lang)
+    return lines + ([al] if al is not None else [])
+
+
 # ---------------------------------------------------------------- the card and its chart
 
 def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: float | None, prev: dict,
           read=None) -> tuple[list[Card], dict]:
     """The briefing as a few short cards (one Telegram post with a bold head per section, one
     Discord embed per section with its own colour) and the autopilots' snapshot for tomorrow: the
-    morning's head with the summary, pump.fun, real money, research, paper, lab, markets, news.
+    morning's head with the summary, pump.fun, real money, research, paper, lab, research factory, markets, news.
     A card without fresh data is left out. `read(name, file)` gives a report (fresh ones only;
     tests pass their own)."""
     read = read or (lambda name, file="latest.json": report(name, now, file))
@@ -472,6 +547,10 @@ def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: flo
     lab = lab_section(read("models"), now, lang)
     if lab:
         cards.append(Card("🧪", tr("bf_lab", lang), None, lab))
+    fac = factory_section({code: read(folder, file) for code, folder, file in FACTORIES},
+                          read("pumpfun_rt", "allocator.json"), lang)
+    if fac:
+        cards.append(Card("🏭", tr("bf_factory", lang), None, fac))
     markets = (coins_section(read("trending"), read("listings"), now, lang) + stocks_section(engines, etf_closes(now), lang)
                + pokemon_section(read("pokemon"), lang) + cs2_section(read("cs2"), read("cs2_trends"), now, lang))
     if markets:

@@ -37,7 +37,8 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds); off since the morning briefing replaced it, `jobs.py run notify --force` still sends one | `jobs.yaml`: `notify` (off) |
-| 09:00 Berlin | morning briefing to Telegram and Discord: pump.fun Alpha phase, real-money accounts, paper and autopilots, lab, Pokemon, CS2, coins, stocks and ETFs, news, one overview chart (`lab.ops.briefing`, seconds; hourly 06 to 09 UTC, sends only in the hour that is 9 in Berlin, once a day) | `jobs.yaml`: `briefing` |
+| 09:00 Berlin | morning briefing to Telegram and Discord: pump.fun Alpha phase, real-money accounts, paper and autopilots, lab, research factory (F3, F2 and the allocator), Pokemon, CS2, coins, stocks and ETFs, news, one overview chart (`lab.ops.briefing`, seconds; hourly 06 to 09 UTC, sends only in the hour that is 9 in Berlin, once a day) | `jobs.yaml`: `briefing` |
+| 20:00 Berlin | lab card "🧠 Labor" to Telegram and Discord: what the research factories (F3 pump.fun, F2 small wallets), the model zoo and the allocator did today, from their reports, at most 8 lines, no model asked (`lab.ops.labor`, seconds; at 18 and 19 UTC, sends only in the hour that is 20 in Berlin, once a day; the bot's #labor, else #briefing; category "lab") | `jobs.yaml`: `labor` |
 | every 2 min | real-money fills of Kraken and Alpaca autopilots to Discord (`lab.ops.notify --live-fills`, reads the engines' state; the bot's #konten and a DM, else the webhook; nothing without either) | `jobs.yaml`: `discord-live-fills` |
 | always | Pythia's own Discord bot: lays out the owner's private server in German and English, keeps the channel map, answers the read-only slash commands `/status`, `/trades`, `/konten`, `/lab` for the owner only, in the channel's language (`research/discord`, 256 MB) | container `pythia-discord-bot`, see "Discord bot" |
 | every 10 min | forward report, new study verdicts, model decisions and new headlines to the bot's channels (`lab.ops.discord_feed`, seconds, reads files only; nothing without the bot token) | `jobs.yaml`: `discord-feed` |
@@ -1006,7 +1007,9 @@ and as a DM; the factory's, director's and Polymarket's study cards to #studien;
 Pokemon alerts (with the card's picture) to #pokemon; CS2 alerts and the trend
 summary to #cs2-skins; and from `lab.ops.discord_feed` (job `discord-feed`) the
 forward report's summary to #paper-buecher, new study verdicts to #studien,
-model zoo decisions to #modelle, new headlines to #news. All as embeds coloured
+model zoo decisions to #modelle, new headlines to #news; the 20:00 lab card
+(`lab.ops.labor`) to #labor (#lab in English) when the channel map has one
+(`DISCORD_EXTRA_ROUTES`; the layout does not make it), else as the briefing. All as embeds coloured
 by outcome, charts as attachments. Every route posts twice: the German card
 to the German channel and the English card, built from the same data, to its
 twin in the 🇬🇧 block (#konten to #accounts, #studien to #studies,

@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from lab.ops import briefing, charts, i18n, notify
+from lab.ops import briefing, charts, i18n, labor, notify
 from lab.pumpfun_rt import card as CARD
 from test_i18n import no_english
 
@@ -267,6 +267,155 @@ def test_the_briefing_goes_out_at_nine_once_to_telegram_and_discord(data, monkey
     assert briefing.run(now + 600_000, **kw) == 0 and len(tg) == 1, "once a day"
     write(data, "reports/notify/settings.json", {"categories": [{"id": "dailyPnl", "on": False}]})
     assert briefing.run(now + 86_400_000, **kw) == 0 and len(dc) == 1, "the switch holds Discord back too"
+
+
+# ---------------------------------------------------------------- the research factory and the 20:00 lab card
+
+def fill_factory(root, now: int) -> None:
+    """F3's factory.json, A1's allocator.json and zoo.json as the jobs write them (F2 has no report)."""
+    write(root, "reports/pumpfun_rt/factory.json", {
+        "updated_ms": now - 5 * 3_600_000, "night": "2026-10-26", "trials_ever": 330, "trials_tonight": 300,
+        "bar": {"sharpe": 0.1234, "p": 0.95, "min_entries": 20, "trials": 330}, "start_sol": 0.55, "sol_eur": 160.0,
+        "best": [{"id": "F3_00042", "median": 0.912, "score": 0.9, "label": "migration 5 s", "params": {}},
+                 {"id": "F3_00007", "median": 0.7, "score": 0.6}],
+        "holdback": [{"id": "F3_00042", "median": 0.48, "pnl_sol": -0.031, "entries": 40}],
+        "winners": [], "models": {"win30": {"adopted": True}, "rug0t": {"adopted": False}, "win5t": {"skipped": "time"}},
+        "books": [{"book": "F3_00011", "sol": 0.61, "eur": 97.6, "added_day": "2026-10-26"},
+                  {"book": "F3_00003", "sol": 0.5, "eur": 80.0, "added_day": "2026-10-20"}],
+        "retired": [{"book": "F3_00001", "state": "retired", "retired_ms": now - 5 * 3_600_000},
+                    {"book": "F3_00000", "state": "retired", "retired_ms": now - 9 * 86_400_000}],
+        "proposals": ["F3_00003"]})
+    write(root, "reports/pumpfun_rt/allocator.json", {
+        "updated_ms": now - 3_600_000, "choice": "P_pool5_top30t", "live_rule": "P_pool0_wait", "armed": False,
+        "arms": {"P_pool0_wait": {"days": 9, "p_best": 0.2, "weight": 0.22, "posterior_mean": -0.004, "guarded": True},
+                 "P_pool5_top30t": {"days": 9, "p_best": 0.62, "weight": 0.6, "posterior_mean": 0.0123,
+                                    "posterior_sd": 0.01, "guarded": False}}})
+    write(root, "reports/pumpfun_rt/zoo.json", {
+        "updated_ms": now - 3_600_000, "labels": {
+            "win30": {"pick": "lgb", "changes": [{"day": "2026-10-25", "from": "lgb", "to": "hgb", "why": "x"}]},
+            "rug0t": {"pick": "hgb", "changes": [{"day": "2026-10-01", "from": "lgb", "to": "hgb", "why": "x"}]},
+            "win5t": {"note": "no rows"}}})
+
+
+def test_the_briefing_has_the_research_factory_in_both_languages(data):
+    now = utc(2026, 10, 26, 8, 0)
+    fill_lab(data, now)
+    fill_factory(data, now)
+    for lang, want in (("de", ["Forschungs-Fabrik", "F3 pump.fun", "300 Versuche heute Nacht, 330 insgesamt",
+                                "Schwelle Sharpe 0,123 gegen 330 Versuche", "bester neuer F3_00042: Median 0,912 SOL",
+                                "zurückgehalten 0,480 SOL, -0,031 SOL bei 0,1 SOL",
+                                "Bücher 1 gestartet, 1 ausgemustert, 2 laufen",
+                                "Modell-Einstellungen übernommen für win30", "Strategie-Auswahl (A1, Paper)",
+                                "würde P_pool5_top30t nehmen: P(beste) 62 %, Gewicht 60 %, Tageswachstum +1,2 %",
+                                "über 9 Tage; unter der Verlustbremse P_pool0_wait; der Live-Bot bleibt bei P_pool0_wait"]),
+                       ("en", ["Research factory", "300 trials last night, 330 in all", "bar Sharpe 0.123",
+                               "held back 0.480 SOL, -0.031 SOL at 0.1 SOL", "books 1 started, 1 retired, 2 running",
+                               "would pick P_pool5_top30t: P(best) 62%", "the live bot keeps P_pool0_wait"])):
+        cards, _ = briefing.build(now, lang, [], briefing.read_ledger(), 158.2, {})
+        fac = [c for c in cards if c.emoji == "🏭"]
+        assert len(fac) == 1, [c.title for c in cards]
+        text = notify.plain(notify.render_post(cards, "telegram", lang=lang))
+        assert all(w in text for w in want), (w, text)
+        assert "F2" not in text, "no F2 report: left out"
+        if lang == "de":
+            no_english(notify.render_post(fac, "telegram", lang="de"))
+
+
+def test_the_factory_section_is_left_out_without_a_fresh_factory_report(data):
+    now = utc(2026, 10, 26, 8, 0)
+    fill_lab(data, now)
+    fill_factory(data, now)
+    write(data, "reports/pumpfun_rt/factory.json", {"updated_ms": now - 3 * 86_400_000, "trials_ever": 30})
+    cards, _ = briefing.build(now, "de", [], briefing.read_ledger(), 158.2, {})
+    assert not [c for c in cards if c.emoji == "🏭"], "a stale factory report and the allocator alone: no section"
+    assert briefing.factory_section({"F3": None, "F2": None}, {"arms": {"A": {}}, "choice": "A"}, "en") == []
+    assert briefing.factory_line("F3", {"trials_tonight": 3}, "en") is None, "not a factory report"
+    out = briefing.alloc_line({"arms": {"A": {"guarded": True}}, "choice": None}, "de")
+    assert out is not None and "Verlustbremse" in out.text
+    line = briefing.factory_line("F2", {"trials_ever": 4, "trials_tonight": 1, "best": []}, "en")
+    assert line.lead == "F2 small wallets" and "1 trial last night" in line.text and "no new candidate" in line.text
+
+
+@pytest.mark.parametrize("at, ok", [
+    ((2026, 10, 26, 19, 0), True),      # winter time: 20:00 CET is 19:00 UTC
+    ((2026, 10, 26, 18, 0), False),
+    ((2026, 10, 24, 18, 0), True),      # summer time: 20:00 CEST is 18:00 UTC
+    ((2026, 10, 24, 19, 0), False),
+])
+def test_the_lab_card_at_eight_in_the_evening_in_berlin(at, ok):
+    assert labor.due(utc(*at), None) is ok
+    assert not labor.due(utc(*at), notify.local_time(utc(*at)).date().isoformat()), "once a day"
+
+
+def test_the_lab_card_says_what_the_factories_and_the_zoo_did_today(data):
+    now = utc(2026, 10, 26, 19, 0)
+    fill_factory(data, now)
+    for lang, want in (("de", ["🧠 Labor · Mo 26. Okt", "F3 pump.fun", "300 Versuche heute Nacht",
+                                "F2 Kleinkonten kein frischer Bericht", "Fabrik-Bücher F3_00011 0,610 SOL (97,60 €)",
+                                "Vorschläge für dich F3_00003", "Modell-Zoo (A1) gewählt win30 lgb, rug0t hgb",
+                                "gewechselt win30 lgb→hgb", "würde P_pool5_top30t nehmen", "ohne KI"]),
+                       ("en", ["Lab · Mon 26 Oct", "F2 small wallets no fresh report", "Factory books F3_00011 0.610 SOL (€97.60)",
+                               "Model zoo (A1) picks win30 lgb, rug0t hgb", "changed win30 lgb→hgb"])):
+        card = labor.build(now, lang, 160.0)
+        text = notify.plain(card.render("telegram", lang))
+        assert all(w in text for w in want), (w, text)
+        assert "rug0t lgb→hgb" not in text, "a change of an earlier day is not today's"
+        assert len(card.parts) <= labor.MAX_LINES
+        if lang == "de":
+            no_english(card.render("telegram", "de"))
+    write(data, "reports/pumpfun_rt/factory.json", {"updated_ms": now - 2 * 86_400_000, "trials_ever": 30})
+    text = notify.plain(labor.build(now, "en", 160.0).render("telegram", "en"))
+    assert "F3 pump.fun no fresh report" in text, "yesterday's report is not today's"
+    for f in ("zoo.json", "allocator.json"):
+        (data / "reports" / "pumpfun_rt" / f).unlink()
+    assert labor.build(now, "en", 160.0) is None, "nothing of today: no card"
+
+
+def test_the_lab_card_keeps_to_eight_lines():
+    rep = {"updated_ms": 10 ** 13, "trials_ever": 5, "trials_tonight": 5, "proposals": ["F3_1"],
+           "books": [{"book": f"F3_{i}", "sol": 0.5} for i in range(9)]}
+    files = {("pumpfun_rt", "factory.json"): rep, ("smallaccount", "factory.json"): rep,
+             ("pumpfun_rt", "zoo.json"): {"updated_ms": 10 ** 13, "labels": {"win30": {"pick": "lgb"}}},
+             ("pumpfun_rt", "allocator.json"): {"updated_ms": 10 ** 13, "choice": "A", "arms": {"A": {"days": 3}}}}
+    card = labor.build(10 ** 13 + 1000, "en", None, read=lambda name, file: files.get((name, file)))
+    assert len(card.parts) <= 8 and card.parts[-1].lead.startswith("Allocator") and "(+13)" in card.parts[2].text
+
+
+def test_the_lab_card_goes_out_at_eight_once_to_telegram_and_discord(data, monkeypatch):
+    now = utc(2026, 10, 26, 19, 0)
+    fill_factory(data, now)
+    monkeypatch.setenv(notify.DISCORD_ENV, WEBHOOK)
+    tg, dc = [], []
+    kw = dict(eur=lambda: 150.0, poster=lambda text: tg.append(text) or (True, None),
+              discord_poster=lambda url, payload, image: dc.append((url, payload)) or (True, None))
+    assert labor.run(now - 3_600_000, **kw) == 0 and not tg, "19:00 in Berlin: not yet"
+    assert labor.run(now, **kw) == 0 and len(tg) == 1 and len(dc) == 1
+    assert dc[0][0] == WEBHOOK, "without the bot's #labor: the briefing's place"
+    assert dc[0][1]["embeds"][0]["title"].startswith("🧠")
+    assert json.loads((data / "notify" / "state.json").read_text())["last_labor"] == "2026-10-26"
+    assert labor.run(now + 600_000, **kw) == 0 and len(tg) == 1, "once a day"
+    write(data, "reports/notify/settings.json", {"categories": [{"id": "lab", "on": False}]})
+    assert labor.run(now + 86_400_000, **kw) == 0 and len(tg) == 1, "its own switch"
+
+
+def test_the_lab_card_takes_the_bots_labor_channel_when_it_has_one(data, monkeypatch):
+    monkeypatch.setattr(notify, "_DISCORD_IDS", {})
+    monkeypatch.delenv(notify.DISCORD_BOT_ENV, raising=False)
+    assert labor.discord_kind() == "briefing", "no bot"
+    monkeypatch.setenv(notify.DISCORD_BOT_ENV, "x")
+    write(data, "discord/channels.json", {"de": {"briefing": "11111111"}})
+    assert labor.discord_kind() == "briefing", "no #labor in the map"
+    monkeypatch.setattr(notify, "_DISCORD_IDS", {})
+    write(data, "discord/channels.json", {"de": {"briefing": "11111111", "labor": "22222222"}})
+    assert labor.discord_kind() == "lab" and notify.DISCORD_EXTRA_ROUTES["lab"] == ("labor", "lab", False)
+    assert "lab" not in notify.DISCORD_ROUTES, "not a channel of the bot's layout"
+    assert "lab" in notify.CATEGORIES
+    got = []
+    monkeypatch.setattr(notify, "bot_post_all", lambda cid, embeds, image=None: got.append(cid) or (True, None))
+    monkeypatch.setattr(notify, "discord_channels", lambda refresh=False, lang="de":
+                        {"labor": "22222222"} if lang == "de" else {"lab": "33333333"})
+    res = notify.send_bot("lab", {"de": {"embeds": [{}]}, "en": {"embeds": [{}]}})
+    assert res["delivered"] and got == ["22222222", "33333333"] and not res["dm"]
 
 
 # ---------------------------------------------------------------- Discord

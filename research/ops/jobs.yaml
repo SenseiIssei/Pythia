@@ -412,6 +412,18 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
 
+  # The lab card at 20:00 Europe/Berlin (lab.ops.labor): what the factories (F3, F2) and A1's zoo and allocator did
+  # today, from their reports, at most 8 lines, no model asked. Fires at 18 and 19 UTC and sends only in the hour
+  # that is 20 o'clock in Berlin, once a day; the bot's #labor when it has one, else the briefing's channel.
+  - name: labor
+    description: lab card at 20:00 Berlin, the research factories, the model zoo and the allocator from their reports, to Telegram and Discord
+    schedule: "0 18,19 * * *"
+    command: python -m lab.ops.labor
+    network: host
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+
   # Every real-money fill of a Kraken or Alpaca autopilot to Discord (the engine posts it to
   # Telegram itself): the bot's #konten and a DM, else the trades webhook. Does nothing
   # without PYTHIA_DISCORD_BOT_TOKEN (discord.env) or PYTHIA_DISCORD_WEBHOOK.

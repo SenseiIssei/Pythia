@@ -139,6 +139,7 @@ CATEGORIES: dict[str, tuple[str, str]] = {
     "cs2": ("CS2", "🎮"),
     "pokemon": ("Pokemon", "🃏"),
     "weekly": ("Weekly report", "🗓️"),
+    "lab": ("Lab card", "🧠"),                 # the 20:00 card of the factories and the zoo (lab.ops.labor)
 }
 DEFAULT_QUIET = {"enabled": True, "start": "23:00", "end": "07:00", "timezone": "Europe/Berlin"}
 WEEKDAYS = i18n.WEEKDAYS["en"]
@@ -1026,7 +1027,7 @@ def send_discord(kind: str, cards: list[Card] | Card, image: bytes | None = None
             return res
         lang = lang or alert_lang()
         ts = now or clock_ms()
-        if discord_bot_token() and kind in DISCORD_ROUTES:
+        if discord_bot_token() and (kind in DISCORD_ROUTES or kind in DISCORD_EXTRA_ROUTES):
             payloads = {lg: discord_payload(in_lang(cards, lg, lang), lg, image, ts, image_url) for lg in DISCORD_LANGS}
             res.update(send_bot(kind, payloads, image))
             if res["delivered"]:
@@ -1072,6 +1073,9 @@ DISCORD_ROUTES: dict[str, tuple[str, bool]] = {
     "cs2": ("cs2-skins", False),
     "news": ("news", False),                 # new headlines (discord_feed)
 }
+# Channels the bot's layout does not make (yet): a kind here is posted only when the owner's channel map has its
+# channel (lab.ops.labor checks, else it posts as "briefing"); (German name, English name, DM).
+DISCORD_EXTRA_ROUTES: dict[str, tuple[str, str, bool]] = {"lab": ("labor", "lab", False)}   # the 20:00 lab card
 # Every post goes to both language blocks of the bot's layout: the German channel above and its
 # English twin (the same position in the 🇬🇧 block).
 DISCORD_LANGS = ("de", "en")
@@ -1207,13 +1211,16 @@ def send_bot(kind: str, payloads: dict, image: bytes | None = None) -> dict:
     call) is the German one."""
     if "embeds" in payloads:
         payloads = {"de": payloads}
-    name, dm = DISCORD_ROUTES[kind]
+    if kind in DISCORD_EXTRA_ROUTES:
+        name, en, dm = DISCORD_EXTRA_ROUTES[kind]
+    else:
+        (name, dm), en = DISCORD_ROUTES[kind], None
     out: dict = {"delivered": False, "error": None, "channel": False, "channel_en": False, "dm": False}
     errs = []
     for lang in DISCORD_LANGS:
         if lang not in payloads:
             continue
-        cname = name if lang == "de" else DISCORD_EN.get(name, name)
+        cname = name if lang == "de" else (en or DISCORD_EN.get(name, name))
         embeds = payloads[lang]["embeds"]
         cid = discord_channels(lang=lang).get(cname)
         ok, err = bot_post_all(cid, embeds, image) if cid else (False, "no channel")
@@ -2215,7 +2222,7 @@ CATEGORY_DE = {"trades": "Trades", "rebalances": "Umschichtungen", "dailyPnl": "
                "bigMoves": "Starke Bewegungen", "autopilot": "Autopilot-Ereignisse", "risk": "Risiko",
                "venue": "Handelsplatz und Daten", "models": "Modelle", "studies": "Studien und Fabrik",
                "listings": "Neue Listungen", "trending": "Trends", "cs2": "CS2", "pokemon": "Pokémon",
-               "weekly": "Wochenbericht"}
+               "weekly": "Wochenbericht", "lab": "Labor-Karte"}
 
 
 def category_label(category: str | None, lang: str) -> str:

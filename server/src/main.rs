@@ -607,6 +607,107 @@ fn lab_pumpfun_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
     )
 }
 
+/// The Lab page's research factory panel (GET /api/lab/factory) over the lab's data folder `root`: the factories'
+/// nightly reports (F3 reports/pumpfun_rt/factory.json, F2 reports/smallaccount/factory.json), A1's model zoo
+/// (zoo.json, the pick per label) and its allocator (allocator.json, the posterior per strategy). Read only; a
+/// report that is not there is null.
+fn lab_factory_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
+    Router::new().route(
+        "/api/lab/factory",
+        get(move || {
+            let root = root.clone();
+            async move { Json(root.map(|r| lab_factory_view(&r)).unwrap_or_else(|| serde_json::json!({ "found": false }))) }
+        }),
+    )
+}
+
+/// A report under <root>/reports as JSON, Null when it is missing or not an object.
+fn lab_report(root: &std::path::Path, rel: &str) -> serde_json::Value {
+    std::fs::read_to_string(root.join("reports").join(rel))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The few fields of each report the panel shows: no trial's parameters, no reward series.
+fn lab_factory_view(root: &std::path::Path) -> serde_json::Value {
+    use serde_json::{json, Map, Value};
+    let factory = |rel: &str| -> Value {
+        let v = lab_report(root, rel);
+        if v.is_null() {
+            return v;
+        }
+        let mut out = Map::new();
+        for k in ["updated_ms", "night", "trials_ever", "trials_tonight", "bar", "winners", "books", "proposals", "sol_eur", "start_sol"] {
+            if let Some(x) = v.get(k) {
+                out.insert(k.to_string(), x.clone());
+            }
+        }
+        let best: Vec<Value> = v["best"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .take(5)
+                    .map(|r| json!({ "id": r["id"], "label": r["label"], "sizing": r["sizing"], "median": r["median"], "p_lost80": r["p_lost80"], "entries": r["entries"], "dsr": r["dsr"] }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert("best".into(), Value::Array(best));
+        let held: Vec<Value> = v["holdback"]
+            .as_array()
+            .map(|a| a.iter().map(|r| json!({ "id": r["id"], "median": r["median"], "pnl_sol": r["pnl_sol"], "entries": r["entries"] })).collect())
+            .unwrap_or_default();
+        out.insert("holdback".into(), Value::Array(held));
+        let adopted: Vec<Value> = v["models"]
+            .as_object()
+            .map(|m| m.iter().filter(|(_, x)| x["adopted"].as_bool() == Some(true)).map(|(k, _)| Value::from(k.as_str())).collect())
+            .unwrap_or_default();
+        out.insert("adopted".into(), Value::Array(adopted));
+        let retired: Vec<Value> = v["retired"]
+            .as_array()
+            .map(|a| a.iter().map(|r| json!({ "book": r["book"], "retired_ms": r["retired_ms"], "why": r["why"] })).collect())
+            .unwrap_or_default();
+        out.insert("retired".into(), Value::Array(retired));
+        Value::Object(out)
+    };
+    let zoo = lab_report(root, "pumpfun_rt/zoo.json");
+    let zoo = if zoo.is_null() {
+        zoo
+    } else {
+        let labels: Map<String, Value> = zoo["labels"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, x)| (k.clone(), json!({ "pick": x["pick"], "days": x["days"], "changes": x["changes"], "note": x["note"] })))
+                    .collect()
+            })
+            .unwrap_or_default();
+        json!({ "updated_ms": zoo["updated_ms"], "labels": labels })
+    };
+    let alloc = lab_report(root, "pumpfun_rt/allocator.json");
+    let alloc = if alloc.is_null() {
+        alloc
+    } else {
+        let arms: Map<String, Value> = alloc["arms"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, x)| {
+                        let mut a = x.as_object().cloned().unwrap_or_default();
+                        a.remove("rewards");
+                        (k.clone(), Value::Object(a))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        json!({ "updated_ms": alloc["updated_ms"], "choice": alloc["choice"], "why": alloc["why"], "live_rule": alloc["live_rule"], "armed": alloc["armed"], "arms": arms })
+    };
+    let (f3, f2) = (factory("pumpfun_rt/factory.json"), factory("smallaccount/factory.json"));
+    let found = !(f3.is_null() && f2.is_null() && zoo.is_null() && alloc.is_null());
+    json!({ "found": found, "factories": { "F3": f3, "F2": f2 }, "zoo": zoo, "allocator": alloc })
+}
+
 // ── the pump.fun wallet page (docs/PUMPFUN-LIVE.md) ─────────────────────────
 
 /// The pump.fun wallet page's routes over the lab's data folder `root`
@@ -1697,6 +1798,8 @@ fn app(state: AppState, guard_cfg: Arc<guard::GuardConfig>) -> Router {
         .route("/api/lab/studies", get(|| async { Json(pythia_core::labview::studies()) }))
         // The pump.fun lab for the Lab page: the study's report, execution and paper books. Read-only.
         .merge(lab_pumpfun_routes(pythia_core::labview::data_dir()))
+        // The research factories, the model zoo and the allocator for the Lab page. Read-only.
+        .merge(lab_factory_routes(pythia_core::labview::data_dir()))
         .route(
             "/api/readiness/settings",
             get(|| async { Json(pythia_core::readiness::settings()) }).post(post_readiness_settings),
