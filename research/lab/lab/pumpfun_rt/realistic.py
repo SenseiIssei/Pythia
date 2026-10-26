@@ -35,6 +35,10 @@ R2 (results/pumpfun_smallwallet_r2.md): the small-wallet search's picks (SMALL) 
 each on its own START_SOL paper wallet with its sizing fixed as picked (FixedSizing, not the owner's settings); the
 daily job writes their wallets in SOL and euro into realistic.md and the daily card shows them.
 
+F3 (factory.py): the factory's winners (<data>/pumpfun_rt/factory/books.json, at most five) run the same way as books
+F3_<id> (factory_books), each on its own START_SOL paper wallet with its sizing fixed as found; their wallets in SOL and
+euro, against P_pool5_top30t_sw10o3n since their start, in realistic.md and on the daily card.
+
 The old books run on as `<name>_ideal` twins until IDEAL_UNTIL (two weeks), then go. The calibration line compares
 the live bot with the realistic paper twin P_pool0_wait on the same coins (entry and exit price, P&L in points);
 calibrated when the median P&L difference per matched trade is within CALIB_POINTS over 7 full days. Nothing here
@@ -621,6 +625,31 @@ def small_books(eng, model: Model, wallets: dict | None = None, kill=None, small
     return out
 
 
+def factory_books(eng, model: Model, wallets: dict | None = None, kill=None, specs=None) -> list[Book]:
+    """F3: one realistic book per active factory book (factory.active_specs: (name, params)), on its own START_SOL
+    paper wallet with its sizing fixed as found; the owner's block list (without its mint lines) where its filter
+    names it."""
+    from . import factory as F
+    wallets = wallets if wallets is not None else {}
+    out = []
+    for name, p in (F.active_specs() if specs is None else specs):
+        s = F.strategy_of(p, name, stake_sol=math.inf)
+        m = FixedSizing(model, small_cfg(float(p["share"]), int(p["max_open"]), bool(p["brake"])))
+        w = wallets.setdefault(name, PaperWallet())
+        eng.rule_costs[name] = RealCosts(model=m)
+        b = eng.add_pipe(Book(eng, [s], RealExecutor(m, w), name="realistic", kill=kill))
+        if p.get("block"):
+            b.blocked = F.Unminted()
+        out.append(b)
+    return out
+
+
+def factory_status(state: dict | None, eur: float | None) -> list[dict]:
+    """F3's active books' paper wallets (factory.status); none when the factory has not run."""
+    from . import factory as F
+    return F.status(F.read_books(F.factory_dir()), state, eur)
+
+
 def sol_eur() -> float | None:
     """One SOL in euro: notify.sol_eur (the engine's rate or Kraken's public ticker), else the owner's target file's
     last value over its SOL; None if neither."""
@@ -763,6 +792,11 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
            "realistic_since": since, "calibration": cal | {"days": covered, "verdict": word,
                                                            "line": calib_line(cal, word, covered)},
            "sol_eur": eur, "small": small_status(read_json(paper_dir() / "state.json"), eur)}
+    try:                                                     # F3: the factory's books
+        out["factory"] = factory_status(read_json(paper_dir() / "state.json"), eur)
+    except Exception as e:                                   # noqa: BLE001 - the report goes out without them
+        print(f"realistic: no factory books ({type(e).__name__}: {e})", flush=True)
+        out["factory"] = []
     if write:
         from .live_exec import write_json
         d = reports_dir()
@@ -812,7 +846,12 @@ def markdown(d: dict) -> str:
         f"share {cfg.get('share', Z.SHARE) * 100:g} %, brake {'on' if cfg.get('brake', True) else 'off'}, floor "
         f"{cfg.get('floor_sol') if cfg.get('floor_sol') is not None else Z.PAUSE_BELOW_SOL} SOL, at most "
         f"{cfg.get('max_open', P.HARD_MAX_OPEN)} open, reserve {RESERVE_SOL} SOL.", "",
-        *small_md(d.get("small") or [], d.get("sol_eur"))])
+        *small_md(d.get("small") or [], d.get("sol_eur")), *factory_md(d.get("factory") or [], d.get("sol_eur"))])
+
+
+def factory_md(rows: list[dict], eur: float | None) -> list[str]:
+    from .factory import status_md
+    return status_md(rows, eur)
 
 
 # ---------------------------------------------------------------- R1: the headline strategies, ideal and realistic

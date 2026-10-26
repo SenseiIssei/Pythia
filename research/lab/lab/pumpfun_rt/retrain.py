@@ -23,6 +23,8 @@ Y9 (results/pumpfun_select_y9_prereg.md, run_y9): the select models on the study
 label rows (rows/select.parquet), walk-forward by day for reports/pumpfun_rt/select.md,
 then on every row for the paper books (sel_<label>.json, sel_policy.json).
 
+F3 (factory.py): a label's LightGBM settings are the factory's where it adopted some (model.params_for).
+
 R2 (results/pumpfun_smallwallet_r2_prereg.md, labels_r2.py): every label with execution in it (win30, win300,
 up10, up30, up120; Y9's and Y10's select labels; X14's peak3x and peak10x) is trained at the realistic entry and
 exit under its usual name, where the paper books read it; the old labels' models as `<name>_ideal` in
@@ -159,6 +161,9 @@ def report_md(summ: dict, importance: dict) -> str:
     md += ["", ("Labels at the realistic entry and exit (R2, labels_r2.py) where they have execution in them: "
                + ", ".join(L2.REAL_ROW) + "." if summ.get("realistic") else
                "The rows have no realistic labels yet (written before R2): every model on the old labels.")]
+    tuned = [k for k in summ["labels"] if M.params_for(k) != M.PARAMS]
+    md += ["", "LightGBM settings: " + (f"the factory's (F3, pumpfun_rt/factory/params.json) for {', '.join(tuned)}, "
+                                        "the code's for the rest." if tuned else "the code's for every label.")]
     if summ.get("ideal"):
         md += ["", f"Against the old labels (`<label>_ideal`, models/pumpfun_rt/ideal/, until "
                    f"{L2.until_day()}), the same feature set, out of sample:", "",

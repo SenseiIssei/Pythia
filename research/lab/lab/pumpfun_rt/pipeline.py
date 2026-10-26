@@ -857,8 +857,9 @@ class Pipeline:
 
     def select_ok(self, spec: dict, tok, t: float) -> tuple[bool | None, float | None]:
         """Y9's select filter on the Y9 models (selmodel.py, as sel_<label>): ("max", k) needs P(label) at most k x
-        its training base rate, ("top", q) P(label) at or above the threshold of the top q of its scores
-        (sel_policy). (None, None) without the engine's select tracker, a model or its threshold."""
+        its training base rate, ("min", k) at least k x it (F3's factory), ("top", q) P(label) at or above the
+        threshold of the top q of its scores (sel_policy). (None, None) without the engine's select tracker, a model
+        or its threshold."""
         eng = self.eng
         if getattr(eng, "sel", None) is None:
             return None, None
@@ -878,6 +879,8 @@ class Pipeline:
             p = float(m.predict(np.array([[float(f.get(c, math.nan)) for c in m.features]], dtype=float))[0])
             first = p if first is None else first
             if how == "max" and p > k * m.base:
+                return False, first
+            if how == "min" and p < k * m.base:
                 return False, first
             if how == "top" and p < thr:
                 return False, first

@@ -16,6 +16,9 @@ walk-forward over FOLDS folds of decision time (a training row's label window
 must end EMBARGO before the fold starts), against the training base rate and
 a logistic regression on six plain features. Retrained daily on every row,
 the newest MAX_ROWS at most; the files go to <data>/models/pumpfun_rt/.
+
+F3 (factory.py): a label's LightGBM settings are PARAMS unless the nightly factory adopted others for it
+(<data>/pumpfun_rt/factory/params.json, params_for); evaluate and train_all use them.
 """
 
 from __future__ import annotations
@@ -161,15 +164,28 @@ class Fitted:
         return cls(booster, kx, ky, float(d["base"]), list(d["features"]))
 
 
-def fit(X: np.ndarray, y: np.ndarray, features: list[str] = FEATURES) -> Fitted:
-    """LightGBM on the first 80 % (rows in time order), isotonic on the last 20 %."""
+def params_path() -> Path:
+    return ROOT / "pumpfun_rt" / "factory" / "params.json"
+
+
+def params_for(label: str, path: Path | None = None) -> dict:
+    """F3: PARAMS with the factory's adopted settings for this label over them (params.json), PARAMS without."""
+    try:
+        got = (json.loads((path or params_path()).read_text(encoding="utf-8")).get(label) or {}).get("params")
+    except (OSError, ValueError, AttributeError):
+        got = None
+    return {**PARAMS, **got} if isinstance(got, dict) else dict(PARAMS)
+
+
+def fit(X: np.ndarray, y: np.ndarray, features: list[str] = FEATURES, params: dict | None = None) -> Fitted:
+    """LightGBM on the first 80 % (rows in time order), isotonic on the last 20 %; `params` instead of PARAMS."""
     import lightgbm as lgb
     from sklearn.isotonic import IsotonicRegression
     base = float(y.mean()) if len(y) else 0.0
     if len(y) < MIN_TRAIN or y.min() == y.max():
         return Fitted(None, None, None, base, features)
     cut = int(len(y) * 0.8)
-    clf = lgb.LGBMClassifier(**PARAMS)
+    clf = lgb.LGBMClassifier(**(PARAMS if params is None else params))
     clf.fit(X[:cut], y[:cut])
     booster = clf.booster_
     raw = booster.predict(X[cut:])
@@ -207,9 +223,11 @@ def labelled(rows, label: str) -> dict[str, np.ndarray]:
 
 
 def evaluate(rows, label: str, folds: int = FOLDS, features: list[str] | None = None,
-             max_rows: int | None = None) -> dict:
-    """Purged walk-forward of the model and both baselines on one label (the newest max_rows rows)."""
+             max_rows: int | None = None, params: dict | None = None) -> dict:
+    """Purged walk-forward of the model and both baselines on one label (the newest max_rows rows), the model with
+    `params` (the label's params_for when None)."""
     features = list(features or FEATURES)
+    params = params_for(label) if params is None else params
     rs = labelled(rows, label)
     if max_rows:
         rs = {k: v[-max_rows:] for k, v in rs.items()}
@@ -232,7 +250,7 @@ def evaluate(rows, label: str, folds: int = FOLDS, features: list[str] | None = 
         tr = t + horizon < lo
         if tr.sum() < MIN_TRAIN or te.sum() < MIN_TEST:
             continue
-        m = fit(X[tr], y[tr], features)
+        m = fit(X[tr], y[tr], features, params)
         pm = m.predict(X[te])
         pl_ = logistic(Xs[tr], y[tr], Xs[te])
         base = float(y[tr].mean())
@@ -276,7 +294,7 @@ def importance(m: Fitted, top: int = 12) -> list[tuple[str, float]]:
 
 def train_all(rows, until_ms: int | None = None, sets: dict[str, list[str]] | None = None) -> dict[str, Fitted]:
     """One calibrated model per label on every labelled row (whose window ends before until_ms),
-    each with its adopted feature set (`sets`, the base features otherwise)."""
+    each with its adopted feature set (`sets`, the base features otherwise) and its settings (params_for)."""
     out = {}
     for label, h in LABELS.items():
         rs = labelled(rows, label)
@@ -284,7 +302,7 @@ def train_all(rows, until_ms: int | None = None, sets: dict[str, list[str]] | No
             rs = subset(rs, rs["t"] + h * 1000 + EMBARGO_MS < until_ms)
         rs = {k: v[-MAX_ROWS:] for k, v in rs.items()}
         feats = list((sets or {}).get(label) or FEATURES)
-        out[label] = fit(matrix(rs, feats), rs[label], feats)
+        out[label] = fit(matrix(rs, feats), rs[label], feats, params_for(label))
     return out
 
 

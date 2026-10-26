@@ -8,6 +8,8 @@ strategy's own name; the old books (0.4 to 3 s, 0.1 SOL) run on as `<name>_ideal
 The day's fit (reports/pumpfun_rt/realistic.json) and the live sizing settings are re-read every RELOAD_S.
 R2's small-wallet picks (realistic.SMALL) run next to them as realistic books of their own, each on its own 0.55 SOL
 paper wallet with its sizing fixed as picked (realistic.small_books).
+F3's factory books (factory.py, <data>/pumpfun_rt/factory/books.json) run the same way (realistic.factory_books); the
+file is re-read every RELOAD_S: a new book starts, a retired one goes once it holds nothing.
 
 Nothing here trades: every fill of these books is the engine's curve
 arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The
@@ -169,7 +171,7 @@ class Shadow:
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
                  strategies: list | None = None, kill=None, trends: bool = False, blocked=None, category=None,
                  realistic: bool = False, real: R.Model | None = None, paper_wallets: dict | None = None,
-                 small=None):
+                 small=None, factory=None):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
@@ -177,6 +179,9 @@ class Shadow:
         self.models = models or {}
         if small is None:                                     # R2's small-wallet books go with the full set
             small = R.SMALL if strategies is None else ()
+        self.factory_on = factory is None and strategies is None    # F3: the factory's books with the full set
+        if factory is None:
+            factory = self._factory_specs() if self.factory_on else ()
         strategies = P.STRATEGIES if strategies is None else strategies
         kill = kill or P.KillSwitch()
         now = now_ms or int(time.time() * 1000)
@@ -191,9 +196,11 @@ class Shadow:
         if realistic:
             R.books(self.engine, strategies, self.real, self.paper_wallets, kill=kill)
             R.small_books(self.engine, self.real, self.paper_wallets, kill=kill, small=small)   # R2
+            R.factory_books(self.engine, self.real, self.paper_wallets, kill=kill, specs=factory)   # F3
+        self.kill, self.blocked, self.category, self.feed_down = kill, blocked, category, None
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
-            pipe.blocked = blocked                            # the owner's block list (blocklist.PAPER_RULES)
+            pipe.blocked = pipe.blocked or blocked            # the owner's block list (blocklist.PAPER_RULES)
             pipe.category = category                          # the live bot's category rule (livecat.CategoryGate)
             pipe.on_skip = self._skipped
         self.hold = Hold(self.engine, self._feed, on_lost=self._lost)
@@ -305,8 +312,9 @@ class Shadow:
     def watch_feed(self, col) -> None:
         """The collector's link state: a "no pool state" while every PumpSwap link was down says so."""
         from .events import PUMP_AMM
+        self.feed_down = lambda a, b: col.was_down(PUMP_AMM, a, b)
         for pipe in self.engine.pipes:
-            pipe.feed_down = lambda a, b: col.was_down(PUMP_AMM, a, b)
+            pipe.feed_down = self.feed_down
 
     def _lost(self, mint: str) -> None:
         """A migration whose coin's creation never came: a skip of every migration strategy, as live."""
@@ -363,6 +371,8 @@ class Shadow:
                     self.engine.pipes.remove(p)
                 self.engine._index_rules()
                 print("shadow: the _ideal paper books ended (realistic.IDEAL_UNTIL_MS)", flush=True)
+        if self.real is not None and self.factory_on:
+            self.factory_reload()
         ct = self._cats_mtime()
         if ct != self.cats_mtime:
             from .categorize import BOOK_DAYS, CategoryIndex
@@ -371,6 +381,38 @@ class Shadow:
                 self.engine.cats.tail()                       # the live classifier appends every 30 s: the new lines
             else:
                 self.engine.cats = CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS)
+
+    @staticmethod
+    def _factory_specs() -> list:
+        try:
+            from .factory import active_specs
+            return active_specs()
+        except Exception as e:                                # noqa: BLE001 - the books run without them
+            print(f"shadow: factory books not read ({type(e).__name__}: {e})", flush=True)
+            return []
+
+    def factory_reload(self) -> None:
+        """F3: the factory's active books as books.json has them now: a new one starts on its own paper wallet, a
+        retired one goes once it holds nothing and waits for nothing."""
+        from .factory import PREFIX
+        specs = self._factory_specs()
+        want = {n for n, _ in specs}
+        mine = {n: p for p in self.engine.pipes if p.name == "realistic" for n in p.strats if n.startswith(PREFIX)}
+        new = [(n, x) for n, x in specs if n not in mine]
+        gone = [p for n, p in mine.items() if n not in want and not p.pos and not p.waiting]
+        for p in gone:
+            self.engine.pipes.remove(p)
+        if gone:
+            self.engine._index_rules()
+        for pipe in R.factory_books(self.engine, self.real, self.paper_wallets, kill=self.kill, specs=new):
+            pipe.on_close = self._closed
+            pipe.blocked = pipe.blocked or self.blocked
+            pipe.category = self.category
+            pipe.on_skip = self._skipped
+            pipe.feed_down = self.feed_down
+        if new or gone:
+            print(f"shadow: factory books started {[n for n, _ in new]}, ended "
+                  f"{[n for n, p in mine.items() if p in gone]}", flush=True)
 
     def _closed(self, rec: dict) -> None:
         self.closed.append(rec)

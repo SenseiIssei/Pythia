@@ -806,6 +806,22 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 10m
 
+  # F3 (research/lab/lab/pumpfun_rt/factory.py): the pump.fun factory, nightly, no language model. Optuna's TPE over
+  # the pipeline's building blocks, every trial a realistic book on the record (walk-forward by UTC day) and a 0.55 SOL
+  # wallet bootstrap; the ledger data/pumpfun_rt/factory/ledger.jsonl only grows and deflates the bar; the last 2 days
+  # held back for the night's top 3; the LightGBM settings of R2's labels (adopted by the daily retrain only when better
+  # in 4 of 5 folds and on the held-back days); winners as paper books F3_<id> in the collector, never live.
+  # Resumable: the Optuna journal and the ledger are on disk, a rerun the same night does the trials left.
+  - name: pumpfun-factory
+    description: pump.fun factory F3, PAPER, nightly; Optuna strategy search on realistic execution with a small wallet, LightGBM settings of the R2 labels, the factory paper books, reports/pumpfun_rt/factory.md
+    schedule: "0 1 * * *"
+    command: python -m lab.pumpfun_rt.factory
+    env: {PYTHIA_PF_FACTORY_TRIALS: "300"}
+    resources: {cpus: 3, memory: 8g}
+    timeout: 150m
+    lock: heavy
+    lock_wait: 20m
+
   - name: pumpfun-rt-study
     description: real-time pump.fun lab, PAPER, daily; 22 rules and the pipeline strategies replayed, the bar, live readiness, capture, decision rows, X14 early/exit rows and Y9 select rows for the retrain
     schedule: "50 6 * * *"

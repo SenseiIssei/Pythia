@@ -59,10 +59,10 @@ def shadow_yesterday(now_ms: int, path=None) -> dict[str, dict]:
 
 
 def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None, now_ms: int, lang: str = "en",
-               small: list | None = None):
+               small: list | None = None, factory: list | None = None):
     """`data` the study's latest.json, `models` the retrain's summary, `shadow` the books'
     yesterday, `live` the live executor's state (live_exec.status()), `small` R2's small-wallet
-    books' paper wallets (realistic.small_status)."""
+    books' paper wallets (realistic.small_status), `factory` F3's factory books' (factory.status)."""
     from ..ops import i18n, notify
     t = i18n.t
     y = _day(now_ms - DAY_MS)
@@ -83,6 +83,10 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
         lines.append(t("prt_daily_small", lang, books="; ".join(
             f"{r['book']} {i18n.sol(r['sol'], 3, lang)}" + (f" ({i18n.eur(r['eur'], 2, lang)})" if r.get("eur") else "")
             for r in small)))
+    if factory:
+        lines.append(t("prt_daily_factory", lang, books="; ".join(
+            f"{r['book']} {i18n.sol(r['sol'], 3, lang)}" + (f" ({i18n.eur(r['eur'], 2, lang)})" if r.get("eur") else "")
+            for r in factory)))
     lat = data.get("latency") or {}
     if lat.get("n") and lat.get("p50_ms") is not None:
         lines.append(t("prt_daily_latency", lang, med=i18n.num(lat["p50_ms"] / 1000, 1, lang),
@@ -136,7 +140,7 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     parts.append(notify.Line(t("prt_caveat", lang)))
     return _langs(notify.Card("⚡", t("prt_daily_title", lang, day=i18n.iso_day(y, lang)), summary, parts,
                               footer=t("prt_footer", lang)), lang,
-                  lambda lg: daily_card(data, models, shadow, live, now_ms, lg, small))
+                  lambda lg: daily_card(data, models, shadow, live, now_ms, lg, small, factory))
 
 
 def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
@@ -159,7 +163,14 @@ def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
             small = R.small_status(R.read_json(paper_dir() / "state.json"), R.sol_eur())
     except Exception:                                        # the card goes out without them
         small = None
-    return daily_card(data, models, shadow_yesterday(now_ms), live, now_ms, lang, small)
+    factory = None
+    try:                                                     # F3: the factory's paper books
+        from . import realistic as R
+        from .live import paper_dir
+        factory = R.factory_status(R.read_json(paper_dir() / "state.json"), R.sol_eur()) or None
+    except Exception:                                        # the card goes out without them
+        factory = None
+    return daily_card(data, models, shadow_yesterday(now_ms), live, now_ms, lang, small, factory)
 
 
 def _tagged(title: str, mode: str | None, lang: str) -> str:
