@@ -31,6 +31,10 @@ exit under its usual name, where the paper books read it; the old labels' models
 <data>/models/pumpfun_rt/ideal/ (never read by a book), side by side in the reports, until
 labels_r2.IDEAL_UNTIL_MS. Rows written before R2 have no realistic labels: then the old ones, said so.
 
+A1 (results/pumpfun_adaptive_a1_prereg.md, run_a1): the model zoo (zoo.py) tested on each new UTC day of the rows and
+the selector's pick per label (selector.py, reports/pumpfun_rt/zoo.{md,json}; no book reads it yet), then the
+strategy allocator (allocator.py, reports/pumpfun_rt/allocator.{md,json}, a line on the card; never the live bot).
+
 Writes reports/pumpfun_rt/models.{md,json} and posts the lab's daily card
 (card.py), which needs both the study's report and this one.
 """
@@ -281,6 +285,36 @@ def run_y9(now_ms: int, dry: bool = False, log=print) -> dict | None:
     return summ
 
 
+def run_a1(table: dict | None, now_ms: int, log=print) -> dict:
+    """A1: the zoo and the selector on the decision and select rows, then the allocator; each part on its own."""
+    from . import allocator as AL
+    from . import selector as SE
+    from . import selmodel as SM
+    out = {}
+    try:
+        sel, _ = SM.load_rows()
+    except Exception as e:                                  # no select rows yet
+        log(f"{NAME} retrain: A1 without select rows ({type(e).__name__}: {e})")
+        sel = None
+    try:
+        t0 = time.time()
+        z = SE.run(table, sel, now_ms, log=log)
+        d = rep.REPORTS / NAME
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "zoo.json").write_text(json.dumps(z, indent=1, default=str), encoding="utf-8")
+        (d / "zoo.md").write_text(SE.markdown(z), encoding="utf-8")
+        out["zoo"] = {k: v.get("pick") for k, v in z["labels"].items()}
+        log(f"{NAME} retrain: A1 zoo in {time.time() - t0:.0f} s, picks {out['zoo']}")
+    except Exception as e:                                  # the zoo never stops the card or the other models
+        log(f"{NAME} retrain: A1 zoo failed ({type(e).__name__}: {e})")
+    try:
+        a = AL.run(now_ms, log=log)
+        out["allocator"] = {"choice": a["choice"], "live_rule": a["live_rule"]}
+    except Exception as e:                                  # nor does the allocator
+        log(f"{NAME} retrain: A1 allocator failed ({type(e).__name__}: {e})")
+    return out
+
+
 def select_md(summ: dict) -> str:
     md = ["# pump.fun real-time lab: Y9 select models", "",
           "Paper research only. Walk-forward by UTC day (each day tested by a model trained on the days before), "
@@ -340,7 +374,10 @@ def main(argv: list[str] | None = None) -> int:
         y9 = None
     if y9 is not None and summ is not None:
         summ["y9"] = {"rows": y9["rows"], "models": y9["models"]}
-    if (x14 is not None or y9 is not None) and summ is not None:
+    a1 = None if a.dry_run else run_a1(table, now_ms)
+    if a1 and summ is not None:
+        summ["a1"] = a1
+    if (x14 is not None or y9 is not None or a1) and summ is not None:
         if x14 is not None:
             summ["x14"] = x14
         if not a.dry_run:

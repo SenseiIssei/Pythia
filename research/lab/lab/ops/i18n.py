@@ -549,6 +549,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_books": "Paper books yesterday: {n} with closed trades, {pnl} in all.",
         "prt_daily_small": "Small-wallet paper books (from 0.55 SOL each): {books}.",
         "prt_daily_factory": "Factory paper books (F3, from 0.55 SOL each): {books}.",
+        "prt_daily_alloc": ("Allocator (A1, paper): would pick {pick} (P(best) {p}, {days} days of realistic paper); "
+                            "the live bot keeps {live}."),
+        "prt_alloc_out": "none (every strategy under its drawdown guard)",
         "prt_daily_models": ("Models: {useful} of {labels} labels beat their baselines; wallet features adopted for "
                              "{wallet}, name categories for {cat}."),
         "prt_daily_ready": ("Closest to live: {rule}, {days} of 14 days, {trades} of 300 trades out of sample, "
@@ -1108,6 +1111,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_books": "Paper-Bücher gestern: {n} mit geschlossenen Positionen, {pnl} insgesamt.",
         "prt_daily_small": "Paper-Bücher für die kleine Wallet (je ab 0,55 SOL): {books}.",
         "prt_daily_factory": "Paper-Bücher aus der Strategiesuche (F3, je ab 0,55 SOL): {books}.",
+        "prt_daily_alloc": ("Strategie-Auswahl (A1, Paper): würde {pick} nehmen (P(beste) {p}, {days} Tage realistisches "
+                            "Paper); der Live-Bot behält {live}."),
+        "prt_alloc_out": "keine (jede Strategie unter ihrer Verlustbremse)",
         "prt_daily_models": ("Modelle: {useful} von {labels} Zielen schlagen ihre Vergleichsmodelle; "
                              "Wallet-Merkmale bei {wallet} übernommen, Namenskategorien bei {cat}."),
         "prt_daily_ready": ("Am nächsten an echtem Geld: {rule}, {days} von 14 Tagen, {trades} von 300 Positionen "

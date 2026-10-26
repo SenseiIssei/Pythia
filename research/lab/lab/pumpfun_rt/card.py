@@ -59,10 +59,11 @@ def shadow_yesterday(now_ms: int, path=None) -> dict[str, dict]:
 
 
 def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None, now_ms: int, lang: str = "en",
-               small: list | None = None, factory: list | None = None):
+               small: list | None = None, factory: list | None = None, alloc: dict | None = None):
     """`data` the study's latest.json, `models` the retrain's summary, `shadow` the books'
     yesterday, `live` the live executor's state (live_exec.status()), `small` R2's small-wallet
-    books' paper wallets (realistic.small_status), `factory` F3's factory books' (factory.status)."""
+    books' paper wallets (realistic.small_status), `factory` F3's factory books' (factory.status),
+    `alloc` A1's allocator (allocator.json: what it would pick; it never steers the live bot)."""
     from ..ops import i18n, notify
     t = i18n.t
     y = _day(now_ms - DAY_MS)
@@ -87,6 +88,12 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
         lines.append(t("prt_daily_factory", lang, books="; ".join(
             f"{r['book']} {i18n.sol(r['sol'], 3, lang)}" + (f" ({i18n.eur(r['eur'], 2, lang)})" if r.get("eur") else "")
             for r in factory)))
+    if alloc and alloc.get("arms"):
+        ch = alloc.get("choice")
+        a = (alloc["arms"].get(ch) or {}) if ch else {}
+        lines.append(t("prt_daily_alloc", lang, pick=ch or t("prt_alloc_out", lang),
+                       p=i18n.frac_pct(a.get("p_best") or 0.0, 0, lang, sign=False),
+                       days=a.get("days") or 0, live=alloc.get("live_rule") or "n/a"))
     lat = data.get("latency") or {}
     if lat.get("n") and lat.get("p50_ms") is not None:
         lines.append(t("prt_daily_latency", lang, med=i18n.num(lat["p50_ms"] / 1000, 1, lang),
@@ -140,7 +147,7 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
     parts.append(notify.Line(t("prt_caveat", lang)))
     return _langs(notify.Card("⚡", t("prt_daily_title", lang, day=i18n.iso_day(y, lang)), summary, parts,
                               footer=t("prt_footer", lang)), lang,
-                  lambda lg: daily_card(data, models, shadow, live, now_ms, lg, small, factory))
+                  lambda lg: daily_card(data, models, shadow, live, now_ms, lg, small, factory, alloc))
 
 
 def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
@@ -170,7 +177,13 @@ def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
         factory = R.factory_status(R.read_json(paper_dir() / "state.json"), R.sol_eur()) or None
     except Exception:                                        # the card goes out without them
         factory = None
-    return daily_card(data, models, shadow_yesterday(now_ms), live, now_ms, lang, small, factory)
+    alloc = None
+    try:                                                     # A1: the allocator's pick (paper, never live)
+        from . import realistic as R
+        alloc = R.read_json(R.reports_dir() / "allocator.json")
+    except Exception:                                        # the card goes out without it
+        alloc = None
+    return daily_card(data, models, shadow_yesterday(now_ms), live, now_ms, lang, small, factory, alloc)
 
 
 def _tagged(title: str, mode: str | None, lang: str) -> str:

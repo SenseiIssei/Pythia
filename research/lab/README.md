@@ -343,6 +343,17 @@ no wallet, no key, nothing that signs or sends; a test checks the package.
   F3_<id> (at most 5, retired after 14 days behind P_pool5_top30t_sw10o3n,
   a proposal for the owner after 14 days ahead), never live
   (`reports/pumpfun_rt/factory.md`).
+- **Model zoo and allocator** (A1, `zoo.py`, `selector.py`, `allocator.py`,
+  in the daily retrain): LightGBM (with F3's settings), logistic regression,
+  scikit-learn's histogram boosting, an online logistic regression and a
+  competing-risks hazard model behind one interface, walked forward by day
+  on R2's labels; per label the selector's pick (5 days ahead beyond the
+  noise band to take over, retired after 7 days behind the logistic one,
+  isotonic out of fold) and the winner per market regime
+  (`reports/pumpfun_rt/zoo.md`); no book reads it yet. A Thompson sampling
+  bandit over P_pool0_wait, P_pool0_wait_lock and P_pool5_top30t on their
+  realistic paper days (floor 5 %, drawdown guard 30 %) says which it would
+  pick (`reports/pumpfun_rt/allocator.json`, the card); never the live bot.
 - **Rules** (`strategies.py`): 22 pre-registered rules in five families
   (snipe at creation, first-seconds pressure, momentum, pre-migration,
   post-migration) plus the model filter, 23 trials in the global pool.
