@@ -2,6 +2,8 @@
 
   python -m lab.factory                    weekly: search, holdout, shadow update and review, report
   python -m lab.factory --budget 400       a different number of new genomes this run
+  python -m lab.factory --tree-share 0.5   the share of them with an expression tree (G1; default 0.30,
+                                           PYTHIA_FACTORY_TREE_SHARE, for the small mode too)
   python -m lab.factory --notify           also post the digest (PYTHIA_ALERT_WEBHOOK or Telegram)
   python -m lab.factory --fresh            rebuild the daily panel from the history files first
   python -m lab.factory shadow             daily: append the new days to each shadow book, review
@@ -92,7 +94,7 @@ def verdict(d: dict) -> str:
             f"the pool grew to {d['pool_after']['n_trials']} trials.")
 
 
-def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
+def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float | None = None) -> dict:
     t0 = time.time()
     P = history.load_long_panel(fetch=True, fresh=fresh)
     c = build.make_ctx(P)
@@ -104,8 +106,9 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
         log(f"  merged from the seed: {seeded}")
     ledger = Ledger()
     pool_before = ledger.pool()
-    elite = sorted(evaluate.current(ledger.rows), key=lambda r: r["fitness"], reverse=True)[: search.ELITE]
-    res = search.search(c, set(ledger.by_key), elite, run_id, budget, log=log)
+    share = search.tree_share() if share is None else share
+    elite = search.elite_of(evaluate.current(ledger.rows))
+    res = search.search(c, set(ledger.by_key), elite, run_id, budget, log=log, share=share)
     ledger.add([strip(r) for r in res["rows"]])
     pool = ledger.pool()
 
@@ -142,7 +145,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
             others.append((r["key"], x))
             open_slots -= 1
         row = {**h, "is_sharpe": r["is_sharpe"], "is_h1": r["is_h1"], "is_h2": r["is_h2"], "gates": gates,
-               "decision": decision, "why": why}
+               "decision": decision, "why": why, "genome": r["genome"]}
         holdout_rows.append(row)
         log(f"  holdout {r['key']} {decision}: {why}")
     # "waiting" genomes stay unseen-in-effect: they go back to the holdout queue next run.
@@ -167,7 +170,8 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
                     "oos": f"{_day(int(c.days[w['oos']][0]))} to {today}"},
         "budget": budget, "seeded": seeded, "pool_before": pool_before, "pool_after": pool,
         "search": {"evaluated": len(res["rows"]), "origin": res["origin"], "duplicates": res["duplicates"],
-                   "seconds": res["seconds"]},
+                   "seconds": res["seconds"], "trees": res["trees"], "tree_share": share},
+        "trees": tree_summary(res["rows"], ledger.rows, holdout_rows),
         "tried": [{"key": r["key"], "genome": r["genome"], "is_sharpe": r["is_sharpe"]} for r in res["rows"]],
         "top": [strip({k: v for k, v in r.items() if k != "genome"}) for r in top],
         "btc": btc, "diversity_corr": DIVERSITY_CORR,
@@ -179,6 +183,19 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
     d["verdict"] = verdict(d)
     write_json(factory_dir() / "runs" / f"{run_id}.json", d)
     return d
+
+
+def tree_summary(new: list[dict], rows: list[dict], held: list[dict]) -> dict:
+    """The expression trees (G1): how many this run and in the whole ledger (every one a trial in the
+    pool), the best of this run in sample, and those held back with their decision."""
+    mine = [r for r in new if grammar.has_tree(r["genome"])]
+    best = max(mine, key=lambda r: r["fitness"], default=None)
+    keep = ("key", "name", "expression", "is_sharpe", "is_h1", "is_h2", "tree_nodes", "complexity", "fitness")
+    return {"this_run": len(mine), "in_ledger": sum(1 for r in rows if grammar.has_tree(r["genome"])),
+            "best": {k: best.get(k) for k in keep} if best else None,
+            "held_back": [{"key": h["key"], "expression": grammar.expression(h["genome"]), "is_sharpe": h["is_sharpe"],
+                           "oos_sharpe_35bps": h["oos_sharpe_35bps"], "deflated_p": h["deflated_p"],
+                           "decision": h["decision"]} for h in held if grammar.has_tree(h["genome"])]}
 
 
 def published(d: dict) -> dict:
@@ -253,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m lab.factory")
     ap.add_argument("command", nargs="?", default="run", choices=["run", "shadow", "digest", "export-seed"])
     ap.add_argument("--budget", type=int, default=search.BUDGET)
+    ap.add_argument("--tree-share", type=float, help="share of the budget for tree genomes (default 0.30)")
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--notify", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
@@ -272,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         if a.command == "shadow":
             daily_shadow(a.notify)
             return 0
-        d = weekly(a.budget, a.fresh, a.run_id)
+        d = weekly(a.budget, a.fresh, a.run_id, share=a.tree_share)
         publish(d)
         if a.notify:
             send(writeup.digest(d, notify.alert_lang()), dry_run=False)

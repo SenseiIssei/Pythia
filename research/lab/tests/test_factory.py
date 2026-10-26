@@ -417,13 +417,14 @@ def test_seed_carries_trials_to_another_machine_once(home, tmp_path, monkeypatch
 
 
 def test_digest_goes_through_notify_post_to_telegram(home, monkeypatch):
-    from lab.ops import notify
+    from lab.ops import i18n, notify
     P = synthetic_panel()
     monkeypatch.setattr(history, "load_long_panel", lambda fetch=False, fresh=False: P)
     run.publish(run.weekly(20, False, "2026-10-17", log=lambda *_: None))
     monkeypatch.setenv("PYTHIA_TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "42")
     monkeypatch.setenv("PYTHIA_QUIET_HOURS", "off")
+    monkeypatch.setenv(i18n.ENV, "en")         # not the data folder's message language
     sent = []
     monkeypatch.setattr(notify, "post", lambda url, fmt, text: sent.append((url, fmt, text)) or (True, None))
     assert run.main(["digest"]) == 0

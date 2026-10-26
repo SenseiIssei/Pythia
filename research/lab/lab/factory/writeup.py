@@ -75,6 +75,7 @@ def markdown(d: dict) -> str:
                      for r in d["top"]],
                     ["Key", "Genome", "IS Sharpe", "IS twin", "Halves", "Turnover/yr", "Exposure", "Parts",
                      "Fitness"]))
+    md += trees_section(d)
     md.append("\n## Held back: what survived and why\n")
     md.append(f"The search sent {len(d['holdout'])} genomes (best fitness first, both in-sample halves "
               f"positive, held-back-unseen, in-sample returns correlated below "
@@ -119,6 +120,30 @@ def markdown(d: dict) -> str:
               "- Shadow books fill at the decision close plus 35 bps, as the backtest does. A promoted book "
               "trades live quotes on paper and is judged again by the forward report.\n")
     return "\n".join(md)
+
+
+def trees_section(d: dict) -> list[str]:
+    """The expression trees (G1): how many, the best in sample, the held-back ones, readable."""
+    tr = d.get("trees")
+    if not tr:
+        return []
+    s = d["search"]
+    md = ["\n## Invented building blocks (expression trees)\n",
+          f"{tr['this_run']} of this run's {s['evaluated']} genomes have an expression tree as their signal, a "
+          f"coin filter or a gate (share {s.get('tree_share', 0) * 100:.0f} % of the budget); "
+          f"{tr['in_ledger']} trees are in the ledger, every one a trial in the pool above. A tree node costs "
+          f"{evaluate.COMPLEXITY_COST + evaluate.TREE_NODE_COST:.2f} of fitness.\n"]
+    b = tr.get("best")
+    if b:
+        md.append(f"Best tree in sample: `{b['expression']}` ({b['tree_nodes']} nodes), IS Sharpe "
+                  f"{_f(b['is_sharpe'])} (halves {_f(b['is_h1'])} / {_f(b['is_h2'])}), fitness {_f(b['fitness'])}.\n")
+    if tr["held_back"]:
+        md.append(table([[h["key"], f"`{h['expression']}`", _f(h["is_sharpe"]), _f(h["oos_sharpe_35bps"]),
+                          _f(h["deflated_p"]), h["decision"]] for h in tr["held_back"]],
+                        ["Key", "Expression", "IS 35", "OOS 35", "Deflated p", "Decision"]))
+    else:
+        md.append("No tree was held back this run.\n")
+    return md
 
 
 TITLE = "Strategy factory"

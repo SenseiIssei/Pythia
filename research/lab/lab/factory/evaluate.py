@@ -1,7 +1,9 @@
 """Judging a genome: the in-sample fitness the search sees, the holdout gates, the promotion bar.
 
 Fitness is the in-sample Sharpe at 35 bps (for a fixed list the worse of the
-list and its point-in-time twin) minus COMPLEXITY_COST per moving part, and a
+list and its point-in-time twin) minus COMPLEXITY_COST per moving part (a tree
+counts its nodes), minus TREE_NODE_COST more per tree node (an invented
+building block needs more evidence than a hand-made one of the same size), and a
 penalty for a book that is almost always cash. In sample from 2018-01-01 to 2023-12-31 on the panel with
 Binance's daily bars before 2020 (lab.history; until D1 it was the hand studies' 2020-08-01, rows of that window
 still count in the pool but are not bred from or held back), split in two halves for a stability check; held back
@@ -37,6 +39,7 @@ from . import build, grammar
 from .ledger import deflated
 
 COMPLEXITY_COST = 0.03     # in-sample Sharpe given up per moving part
+TREE_NODE_COST = 0.02      # and more per node of an expression tree (G1): 0.05 a node in all
 MIN_EXPOSURE = 0.10        # a book that is almost always cash has a Sharpe made of a few days
 DEFLATED_BAR = 0.95
 BOOT_DRAWS, BOOT_BLOCK, SEED = 2000, 5, 7
@@ -95,7 +98,10 @@ def in_sample(c: build.Ctx, g: dict, run_id: str) -> dict:
         tg, tt, _ = build.run(c, g, twin=True)
         row["is_twin"] = sharpe(build.net(tg, tt, build.COSTS["35bps"])[w["is"]])
         base = min(base, row["is_twin"])
-    f = base - COMPLEXITY_COST * cx
+    row["tree_nodes"] = grammar.tree_nodes(g)
+    if row["tree_nodes"]:
+        row["expression"] = grammar.expression(g)
+    f = base - COMPLEXITY_COST * cx - TREE_NODE_COST * row["tree_nodes"]
     if row["is_exposure"] < MIN_EXPOSURE:
         f -= 1.0
     row["fitness"] = f if math.isfinite(f) else -9.0

@@ -8,10 +8,17 @@ against day t+1. Costs are per unit of one-way turnover.
 To stay fast, a Ctx keeps only the panel columns that any universe (or its
 twin) ever holds, and memoises every feature a genome asks for, so a factory
 run evaluates hundreds of genomes on one set of arrays.
+
+Expression trees (G1, grammar.py) are evaluated by tree_values on any set of
+series, here the panel's and in small.py the six assets': each operator reads
+only rows up to the one it scores (rolling windows end at row t, a rank is
+within row t). Their nodes are kept in a small LRU (TREE_CACHE nodes), not in
+the memo, so a run of hundreds of trees stays within memory.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -25,6 +32,7 @@ COSTS = {"15bps": 0.0015, "35bps": 0.0035, "70bps": 0.0070}
 BASE_COST = "35bps"       # Alpaca taker plus slippage, the hand studies' judging cost
 COIN_VOL = 0.40           # per-coin annual vol target of "invvol slots", as in the paper books
 LIST_SIZE = {"core": 20, "alpaca": 15}
+TREE_CACHE = 48           # tree nodes kept per Ctx (each a (T, n) array)
 
 
 @dataclass
@@ -42,6 +50,7 @@ class Ctx:
     btc_px: np.ndarray
     uni: dict[str, np.ndarray]
     names: list[str]
+    hl: np.ndarray | None = None          # (high - low) / close of the day, NaN without a bar
     memo: dict = field(default_factory=dict)
 
     @property
@@ -75,7 +84,13 @@ def make_ctx(P: fc.Panel) -> Ctx:
     return Ctx(P=P, cols=cols, days=P.days, px=P.px[:, cols], ret=P.ret[:, cols], alive=P.alive[:, cols],
                traded=P.traded[:, cols], sigma=P.sigma[:, cols], adv28=P.adv28[:, cols],
                qv=P.extra["qv"][:, cols], btc_px=btc_px, uni={k: v[:, cols] for k, v in full.items()},
-               names=[P.names[j] for j in cols])
+               names=[P.names[j] for j in cols], hl=_hl(P)[:, cols])
+
+
+def _hl(P: fc.Panel) -> np.ndarray:
+    with np.errstate(invalid="ignore", divide="ignore"):
+        x = (P.high - P.low) / P.close
+    return np.where(np.isfinite(x) & (x >= 0), x, np.nan)
 
 
 # ---------------------------------------------------------------- features
@@ -139,10 +154,102 @@ def donchian_on(c: Ctx, n: int, exit_frac: float) -> np.ndarray:
     return c.feat(f"don{n}_{m}", f)
 
 
-def signal(c: Ctx, s: dict) -> tuple[np.ndarray, np.ndarray]:
-    """(on, strength), both (T, n)."""
+# ---------------------------------------------------------------- expression trees
+
+def _finite(x: np.ndarray) -> np.ndarray:
+    return np.where(np.isfinite(x), x, np.nan)
+
+
+def _rank(x: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    """Within each row: rank / count in (0, 1] among the finite values the mask holds, NaN elsewhere."""
+    ok = np.isfinite(x) & (True if mask is None else mask)
+    s = np.where(ok, x, np.inf)
+    r = np.argsort(np.argsort(s, axis=1, kind="stable"), axis=1, kind="stable") + 1.0
+    n = ok.sum(1, keepdims=True)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(ok, r / np.maximum(n, 1), np.nan)
+
+
+def tree_values(t: dict, leaf, mask: np.ndarray | None = None, cache: OrderedDict | None = None,
+                tag: str = "") -> np.ndarray:
+    """The tree's value at every close. `leaf(name)` gives a series ((T, n), or (T, 1) for btc); `mask`
+    (T, n) is where a rank ranks (the universe); `cache` an LRU by `tag` and the tree's text. Every
+    operator uses rows up to t only: ret and ma and z look back, rank and the rest are within the row."""
+    k = tag + "|" + grammar.tree_text(t)
+    if cache is not None and k in cache:
+        cache.move_to_end(k)
+        return cache[k]
+    op = t["op"]
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        if op in grammar.LEAVES:
+            out = _finite(np.asarray(leaf(op), dtype=float))
+        else:
+            a = [tree_values(x, leaf, mask, cache, tag) for x in t["args"]]
+            x = a[0]
+            if op == "ret":
+                n = t["n"]
+                out = np.full_like(x, np.nan)
+                out[n:] = x[n:] / x[:-n] - 1
+            elif op == "ma":
+                out = x / fc.rolling(x, t["n"], t["n"]) - 1
+            elif op == "z":
+                m = fc.rolling(x, t["n"], t["n"])
+                sd = np.sqrt(np.maximum(fc.rolling(x * x, t["n"], t["n"]) - m * m, 0.0))
+                out = np.where(sd > 1e-12 * np.maximum(np.abs(m), 1e-12), (x - m) / sd, np.nan)
+            elif op == "rank":
+                out = _rank(np.broadcast_to(x, mask.shape if mask is not None else x.shape), mask)
+            elif op == "sign":
+                out = np.sign(x)
+            elif op == "clip":
+                out = np.clip(x, -t["c"], t["c"])
+            elif op == "diff":
+                out = x - a[1]
+            elif op == "ratio":
+                out = np.where(np.abs(a[1]) > 1e-12, x / a[1], np.nan)
+            elif op == "min":
+                out = np.minimum(x, a[1])
+            elif op == "max":
+                out = np.maximum(x, a[1])
+            else:
+                raise grammar.GenomeError(f"unknown op {op}")
+            out = _finite(out)
+    if cache is not None:
+        cache[k] = out
+        while len(cache) > TREE_CACHE:
+            cache.popitem(last=False)
+    return out
+
+
+def leaf(c: Ctx, name: str) -> np.ndarray:
+    if name == "close":
+        return c.px
+    if name == "volume":
+        return c.feat("volume", lambda: np.where(c.alive, c.qv, np.nan))
+    if name == "range":
+        return c.hl if c.hl is not None else np.full_like(c.px, np.nan)
+    if name == "vol":
+        return annvol(c)
+    if name == "btc":
+        return c.btc_px[:, None]
+    raise grammar.GenomeError(f"unknown series {name}")
+
+
+def tree_score(c: Ctx, t: dict, mask: np.ndarray | None = None, tag: str = "", market: bool = False) -> np.ndarray:
+    """(T, n) a coin tree's score (ranks within `mask`), or (T,) a market tree's (btc alone)."""
+    cache = c.memo.setdefault("_trees", OrderedDict())
+    if market:
+        return tree_values(t, lambda n: leaf(c, n), None, cache, "market")[:, 0]
+    x = tree_values(t, lambda n: leaf(c, n), mask, cache, tag)
+    return np.broadcast_to(x, c.px.shape)
+
+
+def signal(c: Ctx, s: dict, mask: np.ndarray | None = None, tag: str = "") -> tuple[np.ndarray, np.ndarray]:
+    """(on, strength), both (T, n). `mask`, `tag`: the universe a tree's rank ranks within."""
     k = s["kind"]
     with np.errstate(invalid="ignore", divide="ignore"):
+        if k == "expr":
+            x = tree_score(c, s["tree"], mask, tag)
+            return np.isfinite(x), x
         if k == "mom":
             r = past_return(c, s["lb"])
             return r > 0, r / annvol(c)
@@ -181,13 +288,18 @@ def top_k(score: np.ndarray, cand: np.ndarray, k: int) -> np.ndarray:
 def weights(c: Ctx, g: dict, twin: bool = False) -> np.ndarray:
     """(T, n) target weights decided at each close, 0 where not held. No NaN."""
     uni = universe_mask(c, g["universe"], twin)
-    on, strength = signal(c, g["signal"])
+    tag = f"{g['universe']['kind']}{g['universe'].get('n', '')}{'_twin' if twin else ''}"
+    on, strength = signal(c, g["signal"], uni, tag)
     cand = uni & on
     rows_off = np.zeros(c.T, dtype=bool)
     with np.errstate(invalid="ignore"):
         for f in g["filters"]:
             k = f["kind"]
-            if k == "regime":
+            if k == "xgate":
+                rows_off |= ~(tree_score(c, f["tree"], market=True) > f["cut"])
+            elif k == "xfilter":
+                cand &= tree_score(c, f["tree"], uni, tag) > f["cut"]
+            elif k == "regime":
                 rows_off |= ~btc_gate(c, "regime", f["ma"])
             elif k == "btcmom":
                 rows_off |= ~btc_gate(c, "btcmom", f["lb"])

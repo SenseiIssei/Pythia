@@ -4,6 +4,8 @@
     python -m lab.factory small --budget 20      a different number of new genomes (default 60,
                                                  PYTHIA_FACTORY_SMALL_BUDGET)
     python -m lab.factory small --offline        the lab's ETF copy only (no Yahoo)
+    python -m lab.factory small --tree-share 0.5 the share of the budget for tree genomes (G1; default 0.30,
+                                                 PYTHIA_FACTORY_TREE_SHARE)
     python -m lab.factory small --export-seed    the ledger and held-back log to results/factory_small_seed
 
 The weekly factory (grammar.py, build.py) searches big coin universes at a
@@ -54,6 +56,12 @@ few assets are worth holding. This mode keeps all of that:
              S2 paper books' latest.md): trials, the bar, survivors, shadows,
              wallets in EUR.
 
+Since G1 a share of the budget (search.tree_share(), PYTHIA_FACTORY_TREE_SHARE, 30 %)
+goes to genomes with an expression tree (grammar.py) over the assets' close and vol
+and BTC's close, as the signal, an asset filter or a gate; every tree is a trial in
+this ledger like any genome, and a tree node costs COMPLEXITY_COST plus
+TREE_NODE_COST of fitness.
+
 Resumable: every genome is in the ledger the moment it is evaluated, a rerun on
 the same day only does what is left of the budget, the held-back log is keyed
 by run and genome, and a shadow appends only the days after its last row.
@@ -83,7 +91,9 @@ from .. import history, report
 from ..experiments import fam_common as fc
 from ..experiments import smallaccount as s1
 from ..experiments import smallaccount_s2 as s2
+from . import build, grammar
 from . import ledger as lg
+from .search import tree_share, tree_turn
 
 NAME = "smallaccount"                       # the report folder, next to the S1 and S2 paper books
 ASSETS = ("BTC", "ETH", "SOL", "SPY", "QQQ", "GOLD")
@@ -102,6 +112,7 @@ BUDGET = 60
 HOLDOUT_PER_RUN = 4
 DIVERSITY_CORR = 0.90
 COMPLEXITY_COST = 0.03
+TREE_NODE_COST = 0.02                       # more per node of an expression tree (G1)
 MIN_EXPOSURE = 0.10
 SAFE_DD = s2.SAFE_DD                        # 20 %
 DD_PENALTY = 4.0                            # fitness lost per unit of in-sample drawdown above SAFE_DD
@@ -139,6 +150,8 @@ WEIGHT = {"scheme": ["equal", "invvol"], "fill": ["slots", "full"], "target": [0
 REBALANCE = {"every": [1, 7], "band": [0.0, 0.10, 0.25]}
 MAX_FILTERS = 2
 MAX_COMPLEXITY = 6
+MAX_COMPLEXITY_TREES = 12
+LEAVES = ("close", "vol", "btc")            # the series a tree may read here (no volume or range)
 PARTS = ("universe", "signal", "filters", "select", "weight", "rebalance")
 
 
@@ -159,6 +172,10 @@ def _repair(g: dict) -> dict:
 def canonical(g: dict) -> dict:
     g = copy.deepcopy(g)
     g["filters"] = sorted(g["filters"], key=lambda f: f["kind"])
+    for part in [g["signal"]] + g["filters"]:
+        if isinstance(part.get("tree"), dict):
+            part["tree"] = (grammar.canonical_cond(part["tree"], part["cut"]) if "cut" in part
+                            else grammar.canonical_tree(part["tree"]))
     return {k: g[k] for k in PARTS}
 
 
@@ -168,9 +185,15 @@ def key(g: dict) -> str:
 
 
 def complexity(g: dict) -> int:
+    """Moving parts; a tree counts its nodes where a family or filter counts 1."""
     w, r = g["weight"], g["rebalance"]
     return ((g["signal"]["kind"] != "hold") + len(g["filters"]) + (w["scheme"] == "invvol") + (w["target"] > 0)
-            + (r["band"] > 0) + (g["select"]["rank"] != "signal"))
+            + (r["band"] > 0) + (g["select"]["rank"] != "signal")
+            + sum(grammar.nodes(t) - 1 for _, t in grammar.trees_of(g)))
+
+
+def max_complexity(g: dict) -> int:
+    return MAX_COMPLEXITY_TREES if grammar.has_tree(g) else MAX_COMPLEXITY
 
 
 def valid(g: dict) -> tuple[bool, str]:
@@ -179,28 +202,16 @@ def valid(g: dict) -> tuple[bool, str]:
             return False, "parts missing or out of order"
         if set(g["universe"]) != {"set"} or g["universe"]["set"] not in UNIVERSES:
             return False, f"universe {g['universe']}"
-        s = g["signal"]
-        if s["kind"] not in SIGNALS or set(s) - {"kind"} != set(SIGNALS[s["kind"]]):
-            return False, f"signal {s}"
-        if any(s[k] not in v for k, v in SIGNALS[s["kind"]].items()):
-            return False, f"signal {s}"
-        if s["kind"] == "ma" and s["fast"] >= s["slow"]:
-            return False, "ma fast must be below slow"
-        kinds = [f["kind"] for f in g["filters"]]
-        if len(kinds) > MAX_FILTERS or len(set(kinds)) != len(kinds):
-            return False, "too many or repeated filters"
-        for f in g["filters"]:
-            if f["kind"] not in FILTERS or set(f) - {"kind"} != set(FILTERS[f["kind"]]):
-                return False, f"filter {f}"
-            if any(f[k] not in v for k, v in FILTERS[f["kind"]].items()):
-                return False, f"filter {f}"
+        why = grammar.valid_signal_filters(g, SIGNALS, FILTERS, MAX_FILTERS, LEAVES)
+        if why:
+            return False, why
         for part, space in (("select", SELECT), ("weight", WEIGHT), ("rebalance", REBALANCE)):
             if set(g[part]) != set(space) or any(g[part][k] not in v for k, v in space.items()):
                 return False, f"{part} {g[part]}"
         if g["select"]["k"] > len(UNIVERSES[g["universe"]["set"]]):
             return False, "K larger than the asset set"
-        if complexity(g) > MAX_COMPLEXITY:
-            return False, f"complexity {complexity(g)} above {MAX_COMPLEXITY}"
+        if complexity(g) > max_complexity(g):
+            return False, f"complexity {complexity(g)} above {max_complexity(g)}"
     except (KeyError, TypeError, AttributeError) as e:
         return False, f"malformed ({type(e).__name__})"
     return True, ""
@@ -218,18 +229,36 @@ def random_genome(rng: random.Random) -> dict:
             return g
 
 
-def mutate(g: dict, rng: random.Random, tries: int = 50) -> dict:
+def random_tree_genome(rng: random.Random) -> dict:
+    """A random genome with at least one tree (grammar.tree_move on this market's series)."""
+    while True:
+        g = random_genome(rng)
+        for _ in range(1 + (rng.random() < 1 / 3)):
+            grammar.tree_move(g, rng, True, LEAVES, MAX_FILTERS)
+        g = canonical(_repair(g))
+        if valid(g)[0] and grammar.has_tree(g):
+            return g
+
+
+def mutate(g: dict, rng: random.Random, tries: int = 50, trees: bool = False) -> dict:
+    """As grammar.mutate: with `trees` also a tree changed or put in, and the child keeps one."""
     for _ in range(tries):
         m = copy.deepcopy(g)
-        what = rng.choice(["universe", "signal_param", "signal_kind", "filter_param", "filter_add", "filter_drop",
-                           "select", "weight", "rebalance"])
-        if what == "universe":
+        moves = ["universe", "signal_param", "signal_kind", "filter_param", "filter_add", "filter_drop",
+                 "select", "weight", "rebalance"]
+        if trees:
+            moves += ["tree"] * 4 + ["tree_new"]
+        what = rng.choice(moves)
+        if what in ("tree", "tree_new"):
+            if not grammar.tree_move(m, rng, what == "tree_new", LEAVES, MAX_FILTERS):
+                continue
+        elif what == "universe":
             m["universe"] = {"set": rng.choice(list(UNIVERSES))}
         elif what == "signal_kind":
             s = rng.choice([k for k in SIGNALS if k != m["signal"]["kind"]])
             m["signal"] = {"kind": s, **_pick(rng, SIGNALS[s])}
         elif what == "signal_param":
-            space = SIGNALS[m["signal"]["kind"]]
+            space = SIGNALS.get(m["signal"]["kind"])
             if not space:
                 continue
             p = rng.choice(list(space))
@@ -238,6 +267,8 @@ def mutate(g: dict, rng: random.Random, tries: int = 50) -> dict:
             if not m["filters"]:
                 continue
             f = rng.choice(m["filters"])
+            if f["kind"] not in FILTERS:
+                continue
             p = rng.choice(list(FILTERS[f["kind"]]))
             f[p] = rng.choice(FILTERS[f["kind"]][p])
         elif what == "filter_add":
@@ -255,14 +286,17 @@ def mutate(g: dict, rng: random.Random, tries: int = 50) -> dict:
             p = rng.choice(list(space))
             m[what][p] = rng.choice(space[p])
         m = canonical(_repair(m))
-        if valid(m)[0] and key(m) != key(g):
+        if valid(m)[0] and key(m) != key(g) and (grammar.has_tree(m) or not trees):
             return m
-    return random_genome(rng)
+    return random_tree_genome(rng) if trees else random_genome(rng)
 
 
 def crossover(a: dict, b: dict, rng: random.Random) -> dict:
     for _ in range(20):
-        c = canonical(_repair({p: copy.deepcopy(rng.choice((a, b))[p]) for p in PARTS}))
+        c = {p: copy.deepcopy(rng.choice((a, b))[p]) for p in PARTS}
+        if a["signal"].get("kind") == b["signal"].get("kind") == "expr" and rng.random() < 0.5:
+            c["signal"] = {"kind": "expr", "tree": grammar.crossover_tree(a["signal"]["tree"], b["signal"]["tree"], rng)}
+        c = canonical(_repair(c))
         if valid(c)[0]:
             return c
     return copy.deepcopy(a)
@@ -273,15 +307,27 @@ def describe(g: dict) -> str:
     s = g["signal"]
     sig = {"hold": lambda: "hold", "mom": lambda: f"mom {s['lb']}d", "lowvol": lambda: "low vol",
            "donchian": lambda: f"Donchian {s['n']}/{max(2, round(s['n'] * s['exit']))}",
-           "ma": lambda: f"price > MA{s['slow']}" if s["fast"] == 1 else f"MA {s['fast']}/{s['slow']}"}[s["kind"]]()
+           "ma": lambda: f"price > MA{s['slow']}" if s["fast"] == 1 else f"MA {s['fast']}/{s['slow']}",
+           "expr": lambda: grammar.show_tree(s["tree"])}[s["kind"]]()
     fl = [{"regime": lambda: f"{f['on']} > MA{f['ma']}", "absmom": lambda: f"{f['lb']}d return > 0",
-           "vol": lambda: f"vol < {int(f['max'] * 100)} %", "trend": lambda: f"asset > MA{f['ma']}"}[f["kind"]]()
+           "vol": lambda: f"vol < {int(f['max'] * 100)} %", "trend": lambda: f"asset > MA{f['ma']}",
+           "xfilter": lambda: "asset " + grammar.show_cond(f["tree"], f["cut"]),
+           "xgate": lambda: "where " + grammar.show_cond(f["tree"], f["cut"])}[f["kind"]]()
           for f in g["filters"]]
     sel, w, r = g["select"], g["weight"], g["rebalance"]
     tgt = f" vol {int(w['target'] * 100)} %" if w["target"] else ""
     cad = {1: "daily", 7: "weekly"}[r["every"]] + (f" band {int(r['band'] * 100)} %" if r["band"] else "")
     return " · ".join([sig, ", ".join(UNIVERSES[g["universe"]["set"]])] + fl
                       + [f"best {sel['k']} by {sel['rank']}", f"{w['scheme']} {w['fill']}{tgt}", cad])
+
+
+def expression(g: dict) -> str:
+    """The genome's tree part readable, "rank(ret_90) where btc > ma_200"."""
+    s = g["signal"]
+    head = grammar.show_tree(s["tree"]) if s["kind"] == "expr" else describe(g).split(" · ")[0]
+    conds = [("where " if f["kind"] == "xgate" else "asset ") + grammar.show_cond(f["tree"], f["cut"])
+             for f in g["filters"] if f["kind"] in ("xfilter", "xgate")]
+    return " ".join([head] + [x if i == 0 else "and " + x for i, x in enumerate(conds)])
 
 
 def hold_genome(asset: str) -> dict:
@@ -438,13 +484,30 @@ def _donchian(c: Ctx, n: int, exit_frac: float) -> np.ndarray:
     return c.feat(f"don{n}_{m}", f)
 
 
+def tree_score(c: Ctx, t: dict, uni: np.ndarray | None = None, tag: str = "", market: bool = False) -> np.ndarray:
+    """(T, 6) a tree's score on the rules' prices (a rank among the set's assets), or (T,) a gate's (BTC alone)."""
+    cache = c.memo.setdefault("_trees", build.OrderedDict())
+
+    def leaf(name: str) -> np.ndarray:
+        return {"close": lambda: c.sig, "vol": lambda: annvol(c),
+                "btc": lambda: c.sig[:, [ASSETS.index("BTC")]]}[name]()
+    if market:
+        return build.tree_values(t, leaf, None, cache, "market")[:, 0]
+    mask = np.broadcast_to(uni[None, :], c.sig.shape)
+    return np.broadcast_to(build.tree_values(t, leaf, mask, cache, tag), c.sig.shape)
+
+
 def weights(c: Ctx, g: dict) -> np.ndarray:
     """(T, 6) target weights of the trading equity known at each close, the rest USDC. No NaN."""
     s = g["signal"]
     uni = np.array([a in UNIVERSES[g["universe"]["set"]] for a in ASSETS])
+    tag = g["universe"]["set"]
     vol = annvol(c)
     with np.errstate(invalid="ignore", divide="ignore"):
-        if s["kind"] == "hold":
+        if s["kind"] == "expr":
+            strength = tree_score(c, s["tree"], uni, tag)
+            on = np.isfinite(strength)
+        elif s["kind"] == "hold":
             on, strength = np.ones_like(c.sig, dtype=bool), np.zeros_like(c.sig)
         elif s["kind"] == "mom":
             r = _ret_back(c, s["lb"])
@@ -469,6 +532,10 @@ def weights(c: Ctx, g: dict) -> np.ndarray:
                 cand &= vol < f["max"]
             elif f["kind"] == "trend":
                 cand &= c.sig > _ma(c, f["ma"])
+            elif f["kind"] == "xfilter":
+                cand &= tree_score(c, f["tree"], uni, tag) > f["cut"]
+            elif f["kind"] == "xgate":
+                off |= ~(tree_score(c, f["tree"], market=True) > f["cut"])
         sel = g["select"]
         score = {"signal": strength, "mom90": _ret_back(c, 90), "lowvol": -vol}[sel["rank"]]
     score = np.where(cand & np.isfinite(score), score, -np.inf)
@@ -587,8 +654,12 @@ def in_sample(c: Ctx, g: dict, v: s1.Venue, run_id: str) -> dict:
             h = win["h1"][1] - t0 + 1
             row.update({"is_h1": sharpe(r[:h]), "is_h2": sharpe(r[h:]), "is_exposure": m["exposure"]})
     row["is_sharpe"] = min(row[f"is_sharpe_{c_:g}"] for c_ in CAPITALS)
+    row["tree_nodes"] = grammar.tree_nodes(g)
+    if row["tree_nodes"]:
+        row["expression"] = expression(g)
     dd = max(row[f"is_max_dd_{c_:g}"] for c_ in CAPITALS)
-    f = row["is_sharpe"] - COMPLEXITY_COST * row["complexity"] - DD_PENALTY * max(dd - SAFE_DD, 0.0)
+    f = (row["is_sharpe"] - COMPLEXITY_COST * row["complexity"] - TREE_NODE_COST * row["tree_nodes"]
+         - DD_PENALTY * max(dd - SAFE_DD, 0.0))
     if row["is_exposure"] < MIN_EXPOSURE:
         f -= 1.0
     row["fitness"] = f if math.isfinite(f) else -9.0
@@ -739,10 +810,14 @@ def seed_of(run_id: str, n: int) -> int:
     return int(hashlib.sha1(f"small/{run_id}/{n}".encode()).hexdigest()[:12], 16)
 
 
-def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print) -> dict:
+def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print,
+           share: float | None = None) -> dict:
     """`budget` new genomes for this run, less those the run already put in the ledger (a rerun resumes).
-    Each is appended the moment it is evaluated."""
+    Each is appended the moment it is evaluated. `share` of the slots are tree genomes (default
+    tree_share()), each kind bred from its own elite as in search.search."""
+    share = tree_share() if share is None else share
     done = [r for r in led.rows if r.get("run") == run_id]
+    n_trees = [sum(1 for r in done if grammar.has_tree(r["genome"]))]
     left = max(0, budget - len(done))
     rng = random.Random(seed_of(run_id, len(led)))
     t0 = time.time()
@@ -763,31 +838,37 @@ def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print
         led.add([r])
         rows.append(r)
         origin[how] += 1
+        n_trees[0] += grammar.has_tree(g)
         if len(rows) % 20 == 0:
             log(f"  {len(rows)}/{left} evaluated, {time.time() - t0:.0f} s")
+
+    def tree() -> bool:
+        return tree_turn(n_trees[0], len(done) + len(rows), share)
 
     attempts = 0
     while len(rows) < min(left, max(n_random, 0)) and attempts < 25 * max(left, 1):
         attempts += 1
-        new(random_genome(rng), "random")
+        new(random_tree_genome(rng) if tree() else random_genome(rng), "random")
     while len(rows) < left and attempts < 25 * max(left, 1):
         attempts += 1
-        pool = sorted(current(led.rows), key=lambda r: r["fitness"], reverse=True)[:ELITE]
+        t = tree()
+        pool = sorted((r for r in current(led.rows) if grammar.has_tree(r["genome"]) == t),
+                      key=lambda r: r["fitness"], reverse=True)[:ELITE]
         if not pool:
-            new(random_genome(rng), "random")
+            new(random_tree_genome(rng) if t else random_genome(rng), "random")
             continue
         a = max(rng.sample(pool, min(TOURNAMENT, len(pool))), key=lambda r: r["fitness"])
         if rng.random() < CROSSOVER and len(pool) > 1:
             b = max(rng.sample(pool, min(TOURNAMENT, len(pool))), key=lambda r: r["fitness"])
             child = crossover(a["genome"], b["genome"], rng)
-            if rng.random() < 0.5 or key(child) in led:
-                child = mutate(child, rng)
+            if rng.random() < 0.5 or key(child) in led or t and not grammar.has_tree(child):
+                child = mutate(child, rng, trees=t)
             new(child, "crossover")
         else:
-            new(mutate(a["genome"], rng), "mutation")
+            new(mutate(a["genome"], rng, trees=t), "mutation")
     for r in done:
         origin[r.get("origin", "random")] = origin.get(r.get("origin", "random"), 0) + 1
-    return {"rows": done + rows, "resumed": len(done), "origin": origin, "duplicates": dup,
+    return {"rows": done + rows, "resumed": len(done), "origin": origin, "trees": n_trees[0], "duplicates": dup,
             "seconds": time.time() - t0}
 
 
@@ -981,7 +1062,7 @@ def load_market(offline: bool = False) -> tuple[Ctx, s2.S2Venue]:
     return make_ctx(days, crypto, etf, v.eurusd, drifts(), premium_noise()), v
 
 
-def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print) -> dict:
+def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, share: float | None = None) -> dict:
     t_start = time.time()
     run_id = run_id or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     win = windows(c)
@@ -992,7 +1073,8 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print) 
         log(f"  merged from the seed: {seeded}")
     led = Ledger()
     pool_before = led.pool()
-    res = search(c, v, led, run_id, budget, log=log)
+    share = tree_share() if share is None else share
+    res = search(c, v, led, run_id, budget, log=log, share=share)
     pool = led.pool()
     bench_is = benchmarks(c, v, win["is"])
     bench = benchmarks(c, v, win["oos"])
@@ -1045,7 +1127,9 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print) 
          "windows": {k: [_day(c, a), _day(c, b)] for k, (a, b) in win.items()}, "fresh_to": today,
          "eurusd": c.eurusd, "drifts": c.drifts, "budget": budget, "seeded": seeded,
          "search": {"evaluated": len(res["rows"]), "resumed": res["resumed"], "origin": res["origin"],
-                    "duplicates": res["duplicates"], "seconds": res["seconds"]},
+                    "duplicates": res["duplicates"], "seconds": res["seconds"], "trees": res["trees"],
+                    "tree_share": share},
+         "trees": tree_summary(res["rows"], led, rows),
          "pool_before": pool_before, "pool_after": pool, "ledger": len(led),
          "top": [{k: x for k, x in r.items() if k != "genome"} for r in top],
          "bench_is": strip_returns(bench_is), "bench_oos": strip_returns(bench), "holdout": rows,
@@ -1053,6 +1137,22 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print) 
     d["verdict"] = verdict(d)
     lg.write_json(small_dir() / "runs" / f"{run_id}.json", d)
     return d
+
+
+def tree_summary(new: list[dict], led: Ledger, held: list[dict]) -> dict:
+    """The expression trees (G1): this run's and the ledger's count, the best in sample, the held-back ones."""
+    mine = [r for r in new if grammar.has_tree(r["genome"])]
+    best = max(mine, key=lambda r: r["fitness"], default=None)
+    keep = ("key", "expression", "is_sharpe", "is_h1", "is_h2", "tree_nodes", "fitness")
+    out = []
+    for h in held:
+        g = led.by_key.get(h["key"], {}).get("genome")
+        if g and grammar.has_tree(g):
+            out.append({"key": h["key"], "expression": expression(g), "is_sharpe": h["is_sharpe"],
+                        "oos_end_eur_40": h["oos_end_eur_40"], "spy_end_eur_40": h["spy_end_eur_40"],
+                        "oos_max_dd_40": h["oos_max_dd_40"], "deflated_p": h["deflated_p"], "decision": h["decision"]})
+    return {"this_run": len(mine), "in_ledger": sum(1 for r in led.rows if grammar.has_tree(r["genome"])),
+            "best": {k: best.get(k) for k in keep} if best else None, "held_back": out}
 
 
 def verdict(d: dict) -> str:
@@ -1104,6 +1204,21 @@ def markdown(d: dict) -> str:
           "CAGR 40": _pct(r["is_cagr_40"]), "DD 40": _pct(r["is_max_dd_40"]),
           "orders/yr": f"{r['is_orders_yr_40']:.0f}", "costs 40": f"{r['is_costs_eur_40']:.2f} EUR"} for r in d["top"]]
     md.append(report.table(t, list(t[0])) if t else "nothing evaluated\n")
+    tr = d.get("trees")
+    if tr:
+        md.append("## Invented building blocks (expression trees)\n")
+        md.append(f"{tr['this_run']} of this run's {d['search']['evaluated']} genomes have an expression tree over the "
+                  f"assets' close and vol and BTC's close (share {d['search'].get('tree_share', 0) * 100:.0f} % of the "
+                  f"budget); {tr['in_ledger']} trees in the ledger, each a trial in the pool. A node costs "
+                  f"{COMPLEXITY_COST + TREE_NODE_COST:.2f} of fitness.\n")
+        b = tr.get("best")
+        if b:
+            md.append(f"Best tree in sample: `{b['expression']}` ({b['tree_nodes']} nodes), Sharpe {b['is_sharpe']:.2f}, "
+                      f"halves {b['is_h1']:.2f} / {b['is_h2']:.2f}, fitness {b['fitness']:.2f}.\n")
+        t = [{"key": h["key"], "expression": f"`{h['expression']}`", "40 EUR end": f"{h['oos_end_eur_40']:.2f}",
+              "SPYx 40": f"{h['spy_end_eur_40']:.2f}", "DD 40": _pct(h["oos_max_dd_40"]),
+              "deflated p": f"{h['deflated_p']:.2f}", "decision": h["decision"]} for h in tr["held_back"]]
+        md.append(report.table(t, list(t[0])) if t else "No tree was held back this run.\n")
     md.append("## Held back (survivor: drawdown under 20 % and above holding SPYx after costs at 40 and 100 EUR)\n")
     t = [{"key": h["key"], "genome": h["name"], "40 EUR end / CAGR / DD": f"{h['oos_end_eur_40']:.2f} / "
           f"{_pct(h['oos_cagr_40'])} / {_pct(h['oos_max_dd_40'])}", "100 EUR end / CAGR / DD":
@@ -1143,6 +1258,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m lab.factory small")
     ap.add_argument("--budget", type=int, default=int(os.environ.get("PYTHIA_FACTORY_SMALL_BUDGET", BUDGET)))
     ap.add_argument("--run-id")
+    ap.add_argument("--tree-share", type=float, help="share of the budget for tree genomes (default 0.30)")
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--export-seed", action="store_true", help="write the ledger and held-back log as the seed")
     a = ap.parse_args(argv)
@@ -1151,7 +1267,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(export_seed()))
             return 0
         c, v = load_market(a.offline)
-        d = run(c, v, a.budget, a.run_id)
+        d = run(c, v, a.budget, a.run_id, share=a.tree_share)
         publish(d)
     print(d["verdict"])
     return 0
