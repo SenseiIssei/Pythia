@@ -464,6 +464,8 @@ jobs:
     resources: {cpus: 1, memory: 512m}
     timeout: 5m
     alert: false
+    enabled: false
+    # off since 2026-10-26: the on-chain trader is switched off; back on with the long-term book (L1)
 
   # EXPERIMENT, paper only (docs/ONCHAIN-MEME.md): three pre-registered meme rules, a paper book each
   # through real Jupiter quotes, every coin through the per-coin safety check first. Light; signs nothing.
@@ -615,6 +617,8 @@ jobs:
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 45m
+    enabled: false
+    # off since 2026-10-26: the API credit is used up and not topped up; the local model takes over (plan block 4)
 
   - name: ai-critic
     description: daily strategy critic (Haiku, batch), each autopilot's last 24 hours of orders against its rules; posts only findings of medium or high severity, every finding logged and scored
@@ -624,6 +628,8 @@ jobs:
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 45m
+    enabled: false
+    # off since 2026-10-26: the API credit is used up and not topped up; the local model takes over (plan block 4)
 
   - name: ai-director
     description: weekly research director (Opus, effort high, batch) over every study summary and the trial ledger, 3 to 5 pre-registration drafts in proposals/, never run by anything
@@ -642,6 +648,8 @@ jobs:
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 75m
+    enabled: false
+    # off since 2026-10-26: the API credit is used up and not topped up; the local model takes over (plan block 4)
 
   # X11 (results/model_upgrades.md). Added disabled; switch on (enabled: true,
   # then deploy_ops.sh) once the modules are deployed to /opt/pythia-lab.
@@ -671,6 +679,8 @@ jobs:
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 1, memory: 1g}
     timeout: 45m
+    enabled: false
+    # off since 2026-10-26: the API credit is used up and not topped up; the local model takes over (plan block 4)
 
   # ---------------------------------------------------------------- watchers and collectors
   - name: listings
@@ -750,6 +760,8 @@ jobs:
     resources: {cpus: 1, memory: 512m}
     timeout: 5m
     grace: 6h
+    enabled: false
+    # off since 2026-10-26: the on-chain trader is switched off; back on with the long-term book (L1)
 
   # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
   # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,
@@ -763,6 +775,8 @@ jobs:
     resources: {cpus: 1, memory: 2g}
     timeout: 45m
     lock: pumpfun-rt-cat
+    enabled: false
+    # off since 2026-10-26: the API credit is used up; the live category gate is off (category:none)
 
   # R1 (research/lab/lab/pumpfun_rt/realistic.py): the realistic paper books' execution model refitted from the
   # live bot's orders of the last 7 days (read only), and the daily line "live vs realistic paper" for P_pool0_wait.

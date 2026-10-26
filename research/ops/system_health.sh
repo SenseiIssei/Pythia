@@ -23,6 +23,11 @@ main() {
   }
 
   for c in pythia-recorder pythia-server pythia-autopilot pythia-pumpfun-live; do
+    # The owner's off switch for the live bot: a stopped bot is then on purpose, not a fault.
+    if [ "$c" = pythia-pumpfun-live ] && [ -f /etc/pythia/pumpfun-live.off ]; then
+      add "$c" true "switched off by the owner since $(cut -c1-16 /etc/pythia/pumpfun-live.off)"
+      continue
+    fi
     if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = "true" ]; then
       add "$c" true "running since $(docker inspect -f '{{.State.StartedAt}}' "$c" | cut -c1-16)"
     else
