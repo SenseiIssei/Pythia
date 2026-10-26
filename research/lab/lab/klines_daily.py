@@ -94,20 +94,23 @@ def list_months(symbol: str) -> list[str]:
     return sorted(set(re.findall(rf"{symbol}-1d-(\d{{4}}-\d{{2}})\.zip</Key>", raw)))
 
 
-def fetch(symbol: str, today: date | None = None, verbose: bool = False) -> pl.DataFrame:
-    """Every daily bar of `symbol` up to yesterday (UTC), finished months cached."""
+def fetch(symbol: str, today: date | None = None, verbose: bool = False, until: str | None = None,
+          months: list[str] | None = None) -> pl.DataFrame:
+    """Every daily bar of `symbol` up to yesterday (UTC), finished months cached. `until` (YYYY-MM): only the
+    months before it, no daily files (the long history before the hourly panel); `months`: the archive's
+    listing when the caller has it already."""
     today = today or datetime.now(timezone.utc).date()
     d = cache_dir(symbol)
     d.mkdir(parents=True, exist_ok=True)
     have = {p.stem for p in d.glob("*.parquet")}
     try:
-        months = list_months(symbol)
+        months = list_months(symbol) if months is None else months
     except (urllib.error.URLError, OSError) as e:
         if not have:
             raise
         print(f"  {symbol}: listing failed ({e}), using the cache", flush=True)
         months = sorted(have)
-    cur = f"{today:%Y-%m}"
+    cur = min(f"{today:%Y-%m}", until or "9999-99")
     for m in months:
         if m in have or m >= cur:
             continue
@@ -117,7 +120,9 @@ def fetch(symbol: str, today: date | None = None, verbose: bool = False) -> pl.D
         parse_zip(raw).write_parquet(d / f"{m}.parquet")
         if verbose:
             print(f"  {symbol} {m}", flush=True)
-    frames = [pl.read_parquet(p) for p in sorted(d.glob("*.parquet"))]
+    frames = [pl.read_parquet(p) for p in sorted(d.glob("*.parquet")) if until is None or p.stem < until]
+    if until is not None:
+        return pl.concat(frames, how="vertical_relaxed").unique("day", keep="last").sort("day") if frames else empty()
     # The running month (and last month, if its monthly zip is not out yet) from daily files.
     last_cached = max([p.stem for p in d.glob("*.parquet")], default="")
     start = date(today.year, today.month, 1)

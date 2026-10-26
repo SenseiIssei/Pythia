@@ -216,7 +216,12 @@ def load_panel(fresh: bool = False) -> Panel:
     global _PANEL
     if _PANEL is not None and not fresh:
         return _PANEL
-    p = build_daily_panel(fresh)
+    _PANEL = panel_from(build_daily_panel(fresh))
+    return _PANEL
+
+
+def panel_from(p: pl.DataFrame) -> Panel:
+    """The panel of a long frame like build_daily_panel's (lab.history adds the daily bars before 2020)."""
     names = sorted(p["symbol"].unique().to_list())
     days = np.arange(p["day"].min(), p["day"].max() + DAY_US, DAY_US, dtype=np.int64)
     di = {int(d): i for i, d in enumerate(days)}
@@ -267,10 +272,8 @@ def load_panel(fresh: bool = False) -> Panel:
     ma200 = rolling(bpx[:, None], 200, 200)[:, 0]
     btc_on = np.nan_to_num(bpx > ma200, nan=0.0).astype(bool)
 
-    _PANEL = Panel(days, names, bases, close, px, high, low, ret, alive, traded, age, adv28, sigma,
-                   eligible, perp_ok, funding, btc_on, btc, extra={"qv": qv, "rv": rv, "last": last,
-                                                                   "first": first})
-    return _PANEL
+    return Panel(days, names, bases, close, px, high, low, ret, alive, traded, age, adv28, sigma,
+                 eligible, perp_ok, funding, btc_on, btc, extra={"qv": qv, "rv": rv, "last": last, "first": first})
 
 
 def oi_matrix(P: Panel) -> np.ndarray:

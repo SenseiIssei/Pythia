@@ -2,9 +2,10 @@
 
 Fitness is the in-sample Sharpe at 35 bps (for a fixed list the worse of the
 list and its point-in-time twin) minus COMPLEXITY_COST per moving part, and a
-penalty for a book that is almost always cash. Windows are the hand studies' own: in sample from 2020-08-01 to 2023-12-31
-(split in two halves for a stability check), held back from 2024-01-01 to
-the last close. The search sees only the in-sample window. A genome reaches
+penalty for a book that is almost always cash. In sample from 2018-01-01 to 2023-12-31 on the panel with
+Binance's daily bars before 2020 (lab.history; until D1 it was the hand studies' 2020-08-01, rows of that window
+still count in the pool but are not bred from or held back), split in two halves for a stability check; held back
+from 2024-01-01 to the last close. The search sees only the in-sample window. A genome reaches
 the holdout only when the search sends it there, and every holdout check is
 written down.
 
@@ -30,6 +31,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from .. import history
 from ..experiments import fam_common as fc
 from . import build, grammar
 from .ledger import deflated
@@ -39,10 +41,18 @@ MIN_EXPOSURE = 0.10        # a book that is almost always cash has a Sharpe made
 DEFLATED_BAR = 0.95
 BOOT_DRAWS, BOOT_BLOCK, SEED = 2000, 5, 7
 SHADOW_GATES = ("is_stable", "oos_positive", "stress", "drawdown", "late_fill", "twin")
+IS_FROM = history.LONG_FROM
+OLD_IS_FROM = "2020-08-01"                   # fc.IS_START, the window of the rows before D1
+IS_START = int(datetime.strptime(IS_FROM, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1e6)
+
+
+def current(rows: list[dict]) -> list[dict]:
+    """The ledger rows scored on this in-sample window; older rows only count as trials."""
+    return [r for r in rows if r.get("is_from", OLD_IS_FROM) == IS_FROM]
 
 
 def windows(c: build.Ctx) -> dict[str, np.ndarray]:
-    ins = (c.days >= fc.IS_START) & (c.days < fc.SPLIT)
+    ins = (c.days >= IS_START) & (c.days < fc.SPLIT)
     idx = np.flatnonzero(ins)
     mid = idx[len(idx) // 2] if len(idx) else 0
     h1 = ins & (np.arange(c.T) < mid)
@@ -69,6 +79,7 @@ def in_sample(c: build.Ctx, g: dict, run_id: str) -> dict:
     cx = grammar.complexity(g)
     row = {
         "key": grammar.key(g), "run": run_id, "name": grammar.describe(g), "genome": g, "complexity": cx,
+        "is_from": IS_FROM,
         "is_sharpe": sharpe(n35[w["is"]]), "is_sharpe_15": sharpe(build.net(gross, tov, 0.0015)[w["is"]]),
         "is_h1": sharpe(n35[w["h1"]]), "is_h2": sharpe(n35[w["h2"]]),
         "is_cagr": p["cagr"], "is_max_dd": p["max_dd"],

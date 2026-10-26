@@ -21,12 +21,12 @@ from lab.factory import ledger as lg
 from lab.factory import run as factory_run
 from lab.factory import small
 
-START = int(datetime(2019, 1, 1, tzinfo=timezone.utc).timestamp() * 1e6)
+START = int(datetime(2017, 8, 17, tzinfo=timezone.utc).timestamp() * 1e6)   # Binance's first BTCUSDT day (D1)
 EURUSD = 1.1
 
 
-def synthetic(T: int = 2900, seed: int = 5, etf_end: int | None = None, bump: tuple[int, float] | None = None):
-    """Crypto closes every day, ETF closes on weekdays (ending at day etf_end), from 2019-01-01."""
+def synthetic(T: int = 3403, seed: int = 5, etf_end: int | None = None, bump: tuple[int, float] | None = None):
+    """Crypto closes every day, ETF closes on weekdays (ending at day etf_end), from 2017-08-17."""
     rng = np.random.default_rng(seed)
     days = START + np.arange(T, dtype=np.int64) * fc.DAY_US
     crypto = {}
@@ -120,7 +120,7 @@ def test_market_prices_in_eur_with_drift_and_premium(ctx):
 
 
 def test_fresh_stops_at_a_stale_etf_close():
-    days, crypto, etf = synthetic(etf_end=2800)
+    days, crypto, etf = synthetic(etf_end=3300)
     c = small.make_ctx(days, crypto, etf, EURUSD, {})
     last_etf = max(etf["SPY"][0])
     assert c.fresh < c.T - 1
@@ -129,7 +129,7 @@ def test_fresh_stops_at_a_stale_etf_close():
 
 def test_weights_hold_at_most_three_and_never_look_ahead(ctx):
     rng = random.Random(4)
-    days, crypto, etf = synthetic(bump=(2400, 3.0))
+    days, crypto, etf = synthetic(bump=(2900, 3.0))
     bumped = small.make_ctx(days, crypto, etf, EURUSD, {"SPY": 0.003, "QQQ": 0.0, "GOLD": 0.01},
                             {a: np.array([-20.0, -5.0, 0.0, 5.0, 20.0]) for a in small.UNDERLYING})
     for _ in range(40):
@@ -140,7 +140,7 @@ def test_weights_hold_at_most_three_and_never_look_ahead(ctx):
         assert (W.sum(1) <= 1 + 1e-9).all()
         allowed = np.array([a in small.UNIVERSES[g["universe"]["set"]] for a in small.ASSETS])
         assert not W[:, ~allowed].any()
-        assert np.allclose(small.weights(bumped, g)[:2400], W[:2400])
+        assert np.allclose(small.weights(bumped, g)[:2900], W[:2900])
 
 
 def test_regime_filter_puts_the_whole_book_in_usdc(ctx):
@@ -165,8 +165,8 @@ def test_costs_minimum_reserve_and_way_in(ctx):
     assert idle > 0 and way > 0
     assert res["costs"] > way                                      # the swap paid its fee on top of the way in
     assert res["equity"][0] < 40.0
-    # 4 EUR is under the 5 USDC minimum: nothing is ever bought
-    tiny = small.simulate(ctx, W, g, v, 4.0, t0, t1)
+    # 4 EUR after the reserve is under the 5 USDC minimum: nothing is ever bought
+    tiny = small.simulate(ctx, W, g, v, idle + 4.0, t0, t1)
     assert tiny["orders"] == 0 and tiny["skipped"] > 0
 
 
@@ -283,10 +283,10 @@ def test_run_is_resumable_and_writes_the_report(ctx, dirs):
 
 def test_shadow_wallets_start_step_forward_and_retire(dirs, monkeypatch):
     v = make_venue()
-    days, crypto, etf = synthetic(T=2900)
-    c = small.make_ctx(days[:2850], {a: x[:2850] for a, x in crypto.items()},
-                       {u: (dd[dd <= (days[2849] // fc.DAY_US).astype("datetime64[D]")],
-                            cc[dd <= (days[2849] // fc.DAY_US).astype("datetime64[D]")]) for u, (dd, cc) in etf.items()},
+    days, crypto, etf = synthetic(T=3403)
+    c = small.make_ctx(days[:3353], {a: x[:3353] for a, x in crypto.items()},
+                       {u: (dd[dd <= (days[3352] // fc.DAY_US).astype("datetime64[D]")],
+                            cc[dd <= (days[3352] // fc.DAY_US).astype("datetime64[D]")]) for u, (dd, cc) in etf.items()},
                        EURUSD, {})
     d = _run(c, v, 20, "r1", monkeypatch, force=True)
     sh = [h for h in d["holdout"] if h["decision"] == "shadow"]

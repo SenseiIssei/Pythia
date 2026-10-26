@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from lab import report
+from lab import history, report
 from lab.experiments import fam_common as fc
 from lab.factory import build, evaluate, grammar, ledger, run, search, shadow
 
@@ -251,7 +251,7 @@ def test_gates_say_why(home, ctx):
 
 def test_weekly_run_end_to_end(home, monkeypatch):
     P = synthetic_panel()
-    monkeypatch.setattr(fc, "load_panel", lambda fresh=False: P)
+    monkeypatch.setattr(history, "load_long_panel", lambda fetch=False, fresh=False: P)
     d1 = run.weekly(40, False, "2026-10-17", log=lambda *_: None)
     run.publish(d1)
     assert (report.REPORTS / "factory" / "latest.md").exists()
@@ -386,7 +386,7 @@ def test_tranche_book_is_seven_sleeves_on_their_own_days(ctx):
 
 def test_report_json_carries_the_common_header(home, monkeypatch):
     P = synthetic_panel()
-    monkeypatch.setattr(fc, "load_panel", lambda fresh=False: P)
+    monkeypatch.setattr(history, "load_long_panel", lambda fetch=False, fresh=False: P)
     d = run.weekly(20, False, "2026-10-17", log=lambda *_: None)
     run.publish(d)
     j = json.loads((report.REPORTS / "factory" / "latest.json").read_text(encoding="utf-8"))
@@ -399,7 +399,7 @@ def test_report_json_carries_the_common_header(home, monkeypatch):
 
 def test_seed_carries_trials_to_another_machine_once(home, tmp_path, monkeypatch):
     P = synthetic_panel()
-    monkeypatch.setattr(fc, "load_panel", lambda fresh=False: P)
+    monkeypatch.setattr(history, "load_long_panel", lambda fetch=False, fresh=False: P)
     run.weekly(20, False, "2026-10-15", log=lambda *_: None)
     seed = tmp_path / "seed"
     out = ledger.export_seed(seed)
@@ -419,7 +419,7 @@ def test_seed_carries_trials_to_another_machine_once(home, tmp_path, monkeypatch
 def test_digest_goes_through_notify_post_to_telegram(home, monkeypatch):
     from lab.ops import notify
     P = synthetic_panel()
-    monkeypatch.setattr(fc, "load_panel", lambda fresh=False: P)
+    monkeypatch.setattr(history, "load_long_panel", lambda fetch=False, fresh=False: P)
     run.publish(run.weekly(20, False, "2026-10-17", log=lambda *_: None))
     monkeypatch.setenv("PYTHIA_TELEGRAM_BOT_TOKEN", "test-token")
     monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "42")

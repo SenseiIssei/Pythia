@@ -12,7 +12,8 @@ cost in basis points. At 40 or 100 EUR what decides is S1's and S2's
 network fee and Sender tip a swap, the SOL reserve, the way in, and that only a
 few assets are worth holding. This mode keeps all of that:
 
-  assets     BTC, ETH, SOL (the panel's daily bars), the S&P 500 token SPYx, the
+  assets     BTC, ETH, SOL (the panel's daily bars, before 2020 Binance's daily
+             bars through lab.history: BTC and ETH from 2017-08), the S&P 500 token SPYx, the
              Nasdaq 100 token QQQx and the gold token PAXG (their underlying's
              adjusted daily close, SPY, QQQ and GLD, times S2's measured drift a
              year, and on the price the wallet trades at a draw of S2's measured
@@ -29,7 +30,9 @@ few assets are worth holding. This mode keeps all of that:
              5 USDC, dust, the SOL reserve held idle and the way in as one SOL to
              USDC swap; every genome as a wallet at 40 and at 100 EUR.
   search     a budget of new genomes a day (random, mutation, crossover of the
-             best), in sample 2020-08-01 to 2023-12-31 only; fitness the worse
+             best), in sample 2018-01-01 to 2023-12-31 only (2018, March 2020 and
+             2022 in it; until D1 it was 2020-08-01, rows of that window still
+             count in the pool but are not bred from or held back); fitness the worse
              in-sample Sharpe of the two wallets, less 0.03 a moving part, less
              a penalty for a drawdown over 20 % or a book almost always in USDC.
   ledger     <data>/factory/small/ledger.jsonl, its own namespace: one line per
@@ -76,7 +79,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import report
+from .. import history, report
 from ..experiments import fam_common as fc
 from ..experiments import smallaccount as s1
 from ..experiments import smallaccount_s2 as s2
@@ -90,7 +93,8 @@ TOKEN = {"BTC": "cbBTC", "ETH": "WETH", "SOL": "SOL", "SPY": "SPYx", "QQQ": "QQQ
 CAPITALS = (40.0, 100.0)
 MAIN = 40.0
 MAX_HELD = 3
-IS_FROM, OOS_FROM = s1.IS_FROM, s1.OOS_FROM
+IS_FROM, OOS_FROM = history.LONG_FROM, s1.OOS_FROM
+OLD_IS_FROM = s1.IS_FROM                    # the window of the rows before D1
 ETF_STALE_DAYS = 5
 VOL_WIN = 60
 PREMIUM_SEED = 11
@@ -324,10 +328,11 @@ def ffill_col(x: np.ndarray) -> np.ndarray:
 
 
 def crypto_closes(frame=None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """(days, closes in USD by asset) of BTC, ETH and SOL from the sweep's cached daily panel: the current
-    segment of each, forward-filled, on one calendar from BTC's first day. Reads three symbols, not the panel."""
+    """(days, closes in USD by asset) of BTC, ETH and SOL from the sweep's cached daily panel with the daily
+    bars before it (lab.history): the current segment of each, forward-filled, on one calendar from BTC's
+    first day (2017-08-17)."""
     import polars as pl
-    p = frame if frame is not None else fc.build_daily_panel()
+    p = frame if frame is not None else history.long_frame()
     p = p.filter(pl.col("symbol").is_in(list(CRYPTO.values())))
     days = np.arange(int(p["day"].min()), int(p["day"].max()) + fc.DAY_US, fc.DAY_US, dtype=np.int64)
     out = {}
@@ -569,7 +574,8 @@ def in_sample(c: Ctx, g: dict, v: s1.Venue, run_id: str) -> dict:
     win = windows(c)
     t0, t1 = win["is"]
     W = weights(c, g)
-    row = {"key": key(g), "run": run_id, "name": describe(g), "genome": g, "complexity": complexity(g)}
+    row = {"key": key(g), "run": run_id, "name": describe(g), "genome": g, "complexity": complexity(g),
+           "is_from": IS_FROM}
     for cap in CAPITALS:
         res = simulate(c, W, g, v, cap, t0, t1)
         m = measure(res, cap)
@@ -743,7 +749,7 @@ def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print
     rows: list[dict] = []
     origin = {"random": 0, "mutation": 0, "crossover": 0}
     dup = 0
-    first = not any(r.get("run") != run_id for r in led.rows)
+    first = not any(r.get("run") != run_id for r in current(led.rows))
     n_random = max(1, int(budget * (FIRST_RANDOM_SHARE if first else RANDOM_SHARE))) - sum(
         1 for r in done if r.get("origin") == "random")
 
@@ -766,7 +772,7 @@ def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print
         new(random_genome(rng), "random")
     while len(rows) < left and attempts < 25 * max(left, 1):
         attempts += 1
-        pool = sorted(led.rows, key=lambda r: r["fitness"], reverse=True)[:ELITE]
+        pool = sorted(current(led.rows), key=lambda r: r["fitness"], reverse=True)[:ELITE]
         if not pool:
             new(random_genome(rng), "random")
             continue
@@ -785,8 +791,13 @@ def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print
             "seconds": time.time() - t0}
 
 
+def current(rows: list[dict]) -> list[dict]:
+    """The rows scored on this in-sample window; older rows only count as trials."""
+    return [r for r in rows if r.get("is_from", OLD_IS_FROM) == IS_FROM]
+
+
 def pick_for_holdout(c: Ctx, v: s1.Venue, led: Ledger, checked: set[str], n: int = HOLDOUT_PER_RUN) -> list[dict]:
-    cands = [r for r in led.rows if r["key"] not in checked and r["is_h1"] > 0 and r["is_h2"] > 0
+    cands = [r for r in current(led.rows) if r["key"] not in checked and r["is_h1"] > 0 and r["is_h2"] > 0
              and r["is_exposure"] >= MIN_EXPOSURE and r["fitness"] > 0]
     cands.sort(key=lambda r: r["fitness"], reverse=True)
     chosen: list[tuple[dict, np.ndarray]] = []
@@ -958,6 +969,8 @@ def too_close(x: list | None, others: list[tuple[str, list | None]]) -> str | No
 
 def load_market(offline: bool = False) -> tuple[Ctx, s2.S2Venue]:
     v = venue()
+    if not offline:
+        history.fetch_long(list(CRYPTO.values()))
     days, crypto = crypto_closes()
     syms = tuple(UNDERLYING.values())
     if offline:

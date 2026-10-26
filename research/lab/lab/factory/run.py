@@ -13,6 +13,10 @@
                                            books to results/factory_seed (committed, so a
                                            run made elsewhere counts on the server too)
 
+The panel is the sweep's with Binance's daily bars of every pair before 2020 in
+front (lab.history.load_long_panel, from 2017-08); a weekly run first fetches
+what the long history does not have yet (once per pair, cached).
+
 Every run first merges results/factory_seed into <data>/factory (only what is
 missing; see ledger.import_seed), so trials counted on another machine are
 never lost from the pool.
@@ -36,8 +40,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import report
-from ..experiments import fam_common as fc
+from .. import history, report
 from ..ops import i18n, notify
 from . import build, evaluate, grammar, search, shadow, writeup
 from .ledger import Ledger, append_jsonl, export_seed, factory_dir, import_seed, lock, write_json
@@ -57,7 +60,7 @@ def strip(row: dict) -> dict:
 
 def pick_for_holdout(c: build.Ctx, ledger: Ledger, checked: set[str], n: int = HOLDOUT_PER_RUN) -> list[dict]:
     """The best unseen genomes by fitness, both halves positive, mutually different in sample."""
-    cands = [r for r in ledger.rows if r["key"] not in checked and r["is_h1"] > 0 and r["is_h2"] > 0
+    cands = [r for r in evaluate.current(ledger.rows) if r["key"] not in checked and r["is_h1"] > 0 and r["is_h2"] > 0
              and r["is_exposure"] >= evaluate.MIN_EXPOSURE and r["fitness"] > 0]
     cands.sort(key=lambda r: r["fitness"], reverse=True)
     chosen: list[tuple[dict, np.ndarray]] = []
@@ -91,7 +94,7 @@ def verdict(d: dict) -> str:
 
 def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
     t0 = time.time()
-    P = fc.load_panel(fresh=fresh)
+    P = history.load_long_panel(fetch=True, fresh=fresh)
     c = build.make_ctx(P)
     today = _day(int(P.days[-1]))
     run_id = run_id or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -101,7 +104,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print) -> dict:
         log(f"  merged from the seed: {seeded}")
     ledger = Ledger()
     pool_before = ledger.pool()
-    elite = sorted(ledger.rows, key=lambda r: r["fitness"], reverse=True)[: search.ELITE]
+    elite = sorted(evaluate.current(ledger.rows), key=lambda r: r["fitness"], reverse=True)[: search.ELITE]
     res = search.search(c, set(ledger.by_key), elite, run_id, budget, log=log)
     ledger.add([strip(r) for r in res["rows"]])
     pool = ledger.pool()
@@ -220,7 +223,7 @@ def last_run() -> dict | None:
 
 
 def daily_shadow(do_notify: bool, log=print) -> dict:
-    P = fc.load_panel()
+    P = history.load_long_panel()
     c = build.make_ctx(P)
     today = _day(int(P.days[-1]))
     import_seed()
