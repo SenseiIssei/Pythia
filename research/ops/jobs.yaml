@@ -479,6 +479,8 @@ jobs:
     timeout: 5m
     alert: false
     # back on 2026-10-26 with the long-term book (L1); read only, signs and sends nothing
+    enabled: false
+    # off since 2026-10-26: two weeks of paper for onchain_longterm first (the owner); on again when he arms it
 
   # EXPERIMENT, paper only (docs/ONCHAIN-MEME.md): three pre-registered meme rules, a paper book each
   # through real Jupiter quotes, every coin through the per-coin safety check first. Light; signs nothing.
@@ -776,6 +778,8 @@ jobs:
     timeout: 5m
     grace: 6h
     # back on 2026-10-26 with the long-term book (L1); read only, signs and sends nothing
+    enabled: false
+    # off since 2026-10-26: two weeks of paper for onchain_longterm first (the owner); on again when he arms it
 
   # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
   # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,
