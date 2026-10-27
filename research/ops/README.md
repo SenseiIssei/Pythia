@@ -38,6 +38,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 02:20 | feature store D3: caches the finished UTC days of the recorded books (five venues), Kraken trades, funding, premium, open interest and liquidations as hourly features in `/srv/pythia-data/features/`, only days that are new or whose raw files changed, then `features/coverage.json` (`lab.features build`, about a minute, 1.8 GB at most; the `heavy` lock) | `jobs.yaml`: `features` |
 | 03:00 | strategy factory F2, small-account mode: 60 new genomes for 40 and 100 EUR wallets on BTC, ETH, SOL, SPYx, QQQx, PAXG and USDC at Jupiter's real costs, four held-back checks against holding SPYx and BTC, the 40 EUR shadow wallets stepped and reviewed, `reports/smallaccount/factory.md` (`lab.factory small`, seconds; the `heavy` lock, resumable) | `jobs.yaml`: `factory-small` |
+| 12:00 on the 1st | M1, newer model techniques against the incumbents in the ML image `pythia-lab-ml`: Chronos-Bolt and TimesFM 2.5 zero shot, TabPFN v2 and CatBoost in the model factory and the pump.fun zoo's walk-forward, the small account's regime choice, conformal intervals and a sizing on them, meta-labelling of the factory survivors, `reports/models/modern_m1/` (`lab.experiments.modern_m1`, 2 to 4 hours, 3 CPUs, 6 GB, the `heavy` lock; off until the image is built, see "The ML image") | `jobs.yaml`: `modern-models` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds); off since the morning briefing replaced it, `jobs.py run notify --force` still sends one | `jobs.yaml`: `notify` (off) |
@@ -851,6 +852,28 @@ docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-la
 ```bash
 docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --status --no-notify
 ```
+
+### The ML image (M1)
+
+Newer model techniques (Chronos-Bolt and TimesFM 2.5 zero shot, TabPFN v2
+and CatBoost in the model factory `lab.models.factory`, conformal intervals,
+meta-labelling) need torch, which the lab image does not carry. They run in
+their own image, `pythia-lab-ml` (`research/lab/Dockerfile.ml`: the lab
+image plus torch's CPU wheels and every package pinned), and only the job
+`modern-models` uses it (monthly, `lab.experiments.modern_m1`, off until the
+image exists). Build it once after the lab image, then switch the job on in
+`jobs.yaml` (`enabled: false` out) and deploy the table:
+
+```bash
+docker build -t pythia-lab-ml -f research/lab/Dockerfile.ml research/lab
+docker run --rm --cpus 3 --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab-ml python -m lab.experiments.modern_m1 run --only conformal
+```
+
+The weights are pinned by revision and downloaded once into
+`models/hub` (`PYTHIA_HUB_OFFLINE=1` forbids any download), the forecasts
+cached in `models/fm_cache`; the report is `reports/models/modern_m1/`.
+Nothing a book, the engine or a live bot reads changes; the verdicts are in
+`research/lab/results/modern_models_m1.md`.
 
 ## Market data in the engine
 

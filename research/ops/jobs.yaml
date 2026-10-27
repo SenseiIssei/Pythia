@@ -672,6 +672,25 @@ jobs:
     lock: heavy
     lock_wait: 1h
 
+  # M1 (research/lab/lab/experiments/modern_m1.py, results/modern_models_m1.md): newer model techniques as candidates
+  # (Chronos-Bolt and TimesFM 2.5 zero shot, TabPFN v2 and CatBoost in the model factory, conformal intervals,
+  # meta-labelling of the factory survivors), each judged by the bar its incumbent was judged by, monthly. The only
+  # job in the ML image (research/lab/Dockerfile.ml: the lab image plus torch on CPU, pinned); the weights are pinned
+  # by revision and downloaded once into models/hub, the forecasts cached in models/fm_cache. Off until the owner has
+  # built the image:  docker build -t pythia-lab-ml -f research/lab/Dockerfile.ml research/lab
+  # Paper only: it writes reports/models/modern_m1 and nothing a book, the engine or a live bot reads.
+  - name: modern-models
+    description: M1, foundation and tabular models, conformal intervals and meta-labelling against the incumbents, monthly, reports/models/modern_m1
+    schedule: "0 12 1 * *"
+    image: pythia-lab-ml
+    command: python -m lab.experiments.modern_m1 run --budget-min 120
+    env: {PYTHIA_ML_THREADS: "3"}
+    resources: {cpus: 3, memory: 6g}
+    timeout: 6h
+    lock: heavy
+    lock_wait: 6h
+    enabled: false
+
   # ---------------------------------------------------------------- AI (Claude API, metered by the engine)
   # All of them call through the autopilot engine's POST /api/ai/complete,
   # which holds the key and the hard budget (docs/AI.md). Shadow only: nothing

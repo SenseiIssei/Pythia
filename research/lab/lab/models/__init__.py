@@ -9,4 +9,12 @@
   m11_slippage.py, m12_cross_asset.py
                one file per zoo model: data, features, fit, baseline
   train.py     the cron entry point: python -m lab.models.train --due
+
+M1 (results/modern_models_m1.md), tools the zoo's models and the studies can use, paper only:
+
+  factory.py   the model factory: the learners (base rate, logistic, LightGBM, histogram boosting, CatBoost,
+               TabPFN v2) behind one interface, the zoo's gate, a walk-forward, the loan to the pump.fun zoo
+  fm.py        Chronos-Bolt and TimesFM 2.5 zero shot, pinned weights, a forecast cache and a time budget
+  conformal.py rolling split conformal intervals and a sizing on their width
+  metalabel.py the trades of a book's weights, their after-cost labels and entry features, a paper filter
 """
