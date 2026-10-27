@@ -29,6 +29,8 @@ import {
   Banknote,
   WalletCards,
   Flame,
+  Newspaper,
+  Network,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -61,6 +63,8 @@ export type PageId =
   | "live"
   | "pumpfun"
   | "trends"
+  | "news"
+  | "lablive"
   | "risk"
   | "journal"
   | "settings"
@@ -112,6 +116,9 @@ export const NAV: NavItem[] = [
   { id: "signals", label: "AI Signals", icon: BrainCircuit, section: "AI", advanced: true },
   { id: "models", label: "Models", icon: Gauge, section: "AI", advanced: true },
   { id: "lab", label: "Lab", icon: Microscope, section: "AI", advanced: true },
+  // The lab's events as articles, and a live map of everything it runs (read only; the DevPanel embeds both).
+  { id: "news", label: "Pythia News", icon: Newspaper, section: "AI", advanced: true },
+  { id: "lablive", label: "Lab Live", icon: Network, section: "AI", advanced: true },
   { id: "live", label: "Live", icon: Radio, section: "Control", advanced: true },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control", advanced: true },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control", advanced: true },

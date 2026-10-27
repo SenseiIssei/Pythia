@@ -630,6 +630,120 @@ fn lab_report(root: &std::path::Path, rel: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// Pythia News and Lab Live over the lab's data folder `root`: the files the lab jobs `news` and `lablive` write
+/// (reports/news/articles.json, reports/lablive/latest.json). GET /api/lab/news is the list (newest first, without
+/// the bodies; `page` from 0, `per` 1 to 100, default 20; `category` and `about` (a Lab Live node id) filter),
+/// GET /api/lab/news/:id one article with its body, GET /api/lab/live the graph. Read only; a missing file is
+/// `found: false`, an unknown article 404.
+fn lab_news_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
+    let (list_root, one_root, live_root) = (root.clone(), root.clone(), root);
+    Router::new()
+        .route(
+            "/api/lab/news",
+            get(move |axum::extract::Query(q): axum::extract::Query<NewsQuery>| {
+                let root = list_root.clone();
+                async move { Json(lab_news_list(root.as_deref(), &q)) }
+            }),
+        )
+        .route(
+            "/api/lab/news/:id",
+            get(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                let root = one_root.clone();
+                async move {
+                    match root.as_deref().and_then(|r| lab_news_one(r, &id)) {
+                        Some(a) => (StatusCode::OK, Json(a)).into_response(),
+                        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "found": false }))).into_response(),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/lab/live",
+            get(move || {
+                let root = live_root.clone();
+                async move { Json(lab_live_view(root.as_deref())) }
+            }),
+        )
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NewsQuery {
+    page: Option<usize>,
+    per: Option<usize>,
+    category: Option<String>,
+    about: Option<String>,
+}
+
+/// The articles of reports/news/articles.json, empty when there is none.
+fn lab_news_articles(root: &std::path::Path) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let doc = lab_report(root, "news/articles.json");
+    let arts = doc.get("articles").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    (doc, arts)
+}
+
+fn lab_news_list(root: Option<&std::path::Path>, q: &NewsQuery) -> serde_json::Value {
+    use serde_json::{json, Value};
+    let (doc, arts) = root.map(lab_news_articles).unwrap_or((Value::Null, Vec::new()));
+    let per = q.per.unwrap_or(20).clamp(1, 100);
+    let page = q.page.unwrap_or(0);
+    let cat = q.category.as_deref().filter(|c| !c.is_empty());
+    let about = q.about.as_deref().filter(|c| !c.is_empty());
+    let hits: Vec<Value> = arts
+        .into_iter()
+        .filter(|a| a.is_object())
+        .filter(|a| cat.is_none_or(|c| a["category"].as_str() == Some(c)))
+        .filter(|a| about.is_none_or(|n| a["about"].as_array().is_some_and(|xs| xs.iter().any(|x| x.as_str() == Some(n)))))
+        .collect();
+    let total = hits.len();
+    let items: Vec<Value> = hits
+        .into_iter()
+        .skip(page.saturating_mul(per))
+        .take(per)
+        .map(|mut a| {
+            if let Some(o) = a.as_object_mut() {
+                o.remove("body");
+                o.remove("hash");
+            }
+            a
+        })
+        .collect();
+    json!({
+        "found": doc.is_object(),
+        "updated_ms": doc.get("updated_ms").cloned().unwrap_or(Value::Null),
+        "categories": doc.get("categories").cloned().unwrap_or_else(|| json!([])),
+        "total": total,
+        "page": page,
+        "per": per,
+        "articles": items,
+    })
+}
+
+/// One article by its id (letters, digits and `-_.:` only), None when there is none.
+fn lab_news_one(root: &std::path::Path, id: &str) -> Option<serde_json::Value> {
+    if id.is_empty() || id.len() > 200 || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c)) {
+        return None;
+    }
+    let (_, arts) = lab_news_articles(root);
+    arts.into_iter().find(|a| a["id"].as_str() == Some(id)).map(|mut a| {
+        if let Some(o) = a.as_object_mut() {
+            o.remove("hash");
+            o.insert("found".into(), serde_json::Value::Bool(true));
+        }
+        a
+    })
+}
+
+/// The Lab Live graph as the job wrote it, with `found`.
+fn lab_live_view(root: Option<&std::path::Path>) -> serde_json::Value {
+    let mut v = root.map(|r| lab_report(r, "lablive/latest.json")).unwrap_or(serde_json::Value::Null);
+    if v.is_object() {
+        v["found"] = serde_json::Value::Bool(true);
+        v
+    } else {
+        serde_json::json!({ "found": false, "nodes": [], "edges": [] })
+    }
+}
+
 /// The few fields of each report the panel shows: no trial's parameters, no reward series.
 fn lab_factory_view(root: &std::path::Path) -> serde_json::Value {
     use serde_json::{json, Map, Value};
@@ -1800,6 +1914,8 @@ fn app(state: AppState, guard_cfg: Arc<guard::GuardConfig>) -> Router {
         .merge(lab_pumpfun_routes(pythia_core::labview::data_dir()))
         // The research factories, the model zoo and the allocator for the Lab page. Read-only.
         .merge(lab_factory_routes(pythia_core::labview::data_dir()))
+        // Pythia News and Lab Live for their pages: the files the lab's news and lablive jobs write. Read-only.
+        .merge(lab_news_routes(pythia_core::labview::data_dir()))
         .route(
             "/api/readiness/settings",
             get(|| async { Json(pythia_core::readiness::settings()) }).post(post_readiness_settings),
@@ -3504,6 +3620,10 @@ mod pumpfun_api_tests;
 #[cfg(test)]
 #[path = "lab_pumpfun_api_tests.rs"]
 mod lab_pumpfun_api_tests;
+
+#[cfg(test)]
+#[path = "lab_news_api_tests.rs"]
+mod lab_news_api_tests;
 
 #[cfg(test)]
 #[path = "onchain_api_tests.rs"]

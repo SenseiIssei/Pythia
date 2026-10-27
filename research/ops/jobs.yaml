@@ -452,6 +452,34 @@ jobs:
     timeout: 5m
     alert: false
 
+  # N1: Pythia News (lab.ops.news), the lab's events as German articles in reports/news/articles.json for the app's
+  # News page (?page=news): research tasks, study write-ups, the factories, the zoo, the paper books, the live bots'
+  # state, the health checks, the briefing. Templates only; the local model (local-llm.env, the relay of B4) may
+  # reword a new article's teaser within 60 s, never a number. Reads files, writes reports/news, trades nothing.
+  - name: news
+    description: Pythia News, the lab's events as German articles for the app's News page, reports/news/articles.json
+    schedule: "*/30 * * * *"
+    command: python -m lab.ops.news
+    network: host
+    env_file: '/etc/pythia/local-llm.env?'
+    resources: {cpus: 0.5, memory: 512m}
+    timeout: 5m
+    grace: 30m
+    alert: false
+
+  # N1: Lab Live (lab.ops.lablive), one graph of everything that runs (sources, features, models, factories, books,
+  # the live bots, the reports) with state, last and next run, numbers, runs and log lines (the job logs mounted
+  # read only, scrubbed), into reports/lablive/latest.json; the server serves it as GET /api/lab/live.
+  - name: lablive
+    description: Lab Live, the graph of every job, model, factory, book and bot with its state for the app's Lab Live page, reports/lablive/latest.json
+    schedule: "*/5 * * * *"
+    command: python -m lab.ops.lablive
+    volumes: [/var/log/pythia:/logs:ro]
+    resources: {cpus: 0.5, memory: 512m}
+    timeout: 3m
+    grace: 15m
+    alert: false
+
   - name: costs
     description: weekly cost calibration from the recorded books, report only
     schedule: "40 5 * * 0"
