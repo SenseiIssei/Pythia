@@ -34,7 +34,9 @@ its channel (DISCORD_ROUTES): the briefing to #briefing and as a DM to
 PYTHIA_DISCORD_OWNER_ID, every real-money trade card to #pumpfun-trades and as
 a DM, Kraken and Alpaca live fills to #konten and as a DM, study, Pokemon and
 CS2 posts to theirs; lab.ops.discord_feed adds the forward report, new study
-verdicts, model decisions and news. Every post goes twice, the German card to
+verdicts, model decisions and news (the news only with the lab switch
+"discordNews" on). A post goes in the messages' language to that language's
+channel; with the lab switch "discordBoth" on it goes twice, the German card to
 the German channel and the English card to its English twin (DISCORD_EN), both
 built from the same data (a card made with bilingual() or given a Card.remake
 is built again in the other language; one without goes as it is); a DM is one
@@ -53,6 +55,11 @@ host can run it without the lab image; without matplotlib a digest goes out
 without its chart.
 
 Every post has a category with a switch in the app (Settings, Notifications).
+The lab's own switches (LAB_SWITCHES: pump.fun and Polymarket paper cards,
+Discord news, Discord in both languages) are off unless turned on in
+<data>/notify/switches.json or PYTHIA_NOTIFY_ON. Every lab post is written to
+the sent log (reports/notify/sent.jsonl); reports/notify_sent/latest.json
+holds today's counts for the app.
 The engine writes the switches and the quiet hours to
 reports/notify/settings.json; this file reads them. In quiet hours (23:00 to
 07:00 Europe/Berlin unless changed) a lab post is held back and listed in one
@@ -570,6 +577,47 @@ def enabled(settings: dict, category: str | None) -> bool:
     return category is None or settings.get("on", {}).get(category, True)
 
 
+# The lab's own switches (R9), for posts the engine's categories cannot tell apart; each is off until the owner turns
+# it on: <data>/notify/switches.json ({"on": {"pumpfunPaper": true}}), or PYTHIA_NOTIFY_ON (the ids that are on,
+# comma separated; "none" for none), which wins over the file. Paper fills are the engine's own (its "trades" and
+# "rebalances" switches); the lab sends none.
+LAB_SWITCHES: dict[str, str] = {
+    "pumpfunPaper": "pump.fun paper cards: the shadow winners, the paper book's closes and its report",
+    "polymarketPaper": "Polymarket paper cards: the daily card and the big edges",
+    "discordNews": "Discord news: new headlines every 10 minutes",
+    "discordBoth": "Discord in both languages: the English twin channels too",
+}
+# Who posts what a switch holds back: the sending module (send's caller) -> its switch.
+SWITCH_SOURCES = {"lab.pumpfun_rt.live": "pumpfunPaper", "lab.paper.pumpfun": "pumpfunPaper",
+                  "lab.polymarket.card": "polymarketPaper"}
+DISCORD_KIND_SWITCHES = {"news": "discordNews"}
+
+
+def lab_switches() -> dict[str, bool]:
+    """Every lab switch, on or off (off unless turned on)."""
+    on = {k: False for k in LAB_SWITCHES}
+    raw = read_json(data_root() / "notify" / "switches.json")
+    if isinstance(raw, dict) and isinstance(raw.get("on"), dict):
+        on.update({k: bool(v) for k, v in raw["on"].items() if k in LAB_SWITCHES})
+    env = (os.environ.get("PYTHIA_NOTIFY_ON") or "").strip()
+    if env:
+        ids = {x.strip() for x in env.split(",")}
+        on = {k: k in ids for k in LAB_SWITCHES}
+    return on
+
+
+def lab_on(switch: str | None) -> bool:
+    return switch is None or lab_switches().get(switch, True)
+
+
+def _caller_switch(depth: int = 2) -> str | None:
+    """The switch of the module that called send (SWITCH_SOURCES), None for any other."""
+    try:
+        return SWITCH_SOURCES.get(sys._getframe(depth).f_globals.get("__name__") or "")
+    except (ValueError, AttributeError):
+        return None
+
+
 def _hhmm(s: str) -> int | None:
     try:
         h, m = (int(x) for x in str(s).strip().split(":"))
@@ -749,9 +797,96 @@ def hold(category: str | None, cards: list[Card], ms: int) -> None:
     write_json(held_path(), held[-40:])
 
 
+# ---------------------------------------------------------------- the sent log
+
+# Every lab post that went out, failed, waited for quiet hours or was switched off, one JSON line each in
+# reports/notify/sent.jsonl ({"ts", "via": telegram or discord, "category", "title", "outcome": sent, failed, held
+# or off}); reports/notify_sent/latest.json counts today's (Berlin) in the lab's feed format, which the app reads
+# through GET /api/lab/feeds (items "count:<outcome>", "via:<channel>", "cat:<category>" and "switch:<id>").
+# The engine counts its own posts. Dry runs are not posts.
+SENT_KEEP = 4000
+SENT_FEED = "notify_sent"
+
+
+def sent_path() -> Path:
+    return notify_dir() / "sent.jsonl"
+
+
+def read_sent(path: Path | None = None) -> list[dict]:
+    try:
+        text = (path or sent_path()).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and _num(r.get("ts")) is not None:
+            out.append(r)
+    return out
+
+
+def sent_counts(rows: list[dict], start_ms: int, end_ms: int) -> dict:
+    """{"sent", "failed", "held", "off", "via": {channel: sent}, "category": {category: sent}} over [start, end)."""
+    out: dict = {"sent": 0, "failed": 0, "held": 0, "off": 0, "via": {}, "category": {}}
+    for r in rows:
+        if not start_ms <= (_num(r.get("ts")) or 0) < end_ms or r.get("outcome") not in ("sent", "failed", "held", "off"):
+            continue
+        out[r["outcome"]] += 1
+        if r["outcome"] == "sent":
+            via, cat = str(r.get("via") or "?"), str(r.get("category") or "other")
+            out["via"][via] = out["via"].get(via, 0) + 1
+            out["category"][cat] = out["category"].get(cat, 0) + 1
+    return out
+
+
+def day_start(ms: int) -> int:
+    """The ms of 00:00 in Berlin on the day of `ms`."""
+    t = local_time(ms)
+    return ms - int((t - t.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() * 1000)
+
+
+def sent_feed(rows: list[dict], now: int) -> dict:
+    """Today's counts (Berlin day) and the lab switches as the lab's feed report."""
+    c = sent_counts(rows, day_start(now), now + 1)
+    via = ", ".join(f"{k} {n}" for k, n in sorted(c["via"].items()))
+    head = f"today {c['sent']} sent" + (f" ({via})" if via else "")
+    head += "".join(f", {c[k]} {w}" for k, w in (("failed", "failed"), ("held", "held back"), ("off", "switched off"))
+                    if c[k])
+    items = [{"label": f"count:{k}", "value": str(c[k])} for k in ("sent", "failed", "held", "off")]
+    items += [{"label": f"via:{k}", "value": str(n)} for k, n in sorted(c["via"].items())]
+    items += [{"label": f"cat:{k}", "value": str(n)} for k, n in sorted(c["category"].items(), key=lambda kv: -kv[1])]
+    items += [{"label": f"switch:{k}", "value": "on" if v else "off", "detail": LAB_SWITCHES[k]}
+              for k, v in lab_switches().items()]
+    return {"title": "Messages sent by the lab", "status": "watch" if c["failed"] else "ok", "headline": head,
+            "updated_ms": now, "items": items[:50]}
+
+
+def log_sent(via: str, category: str | None, cards: list[Card], outcome: str, now: int | None = None) -> None:
+    """One post in the sent log and today's counts written again. Never raises."""
+    try:
+        now = now or clock_ms()
+        title = short(nodash(" ".join(str(cards[0].title if cards else "").split())), 80)
+        p = sent_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": now, "via": via, "category": category, "title": title, "outcome": outcome},
+                                ensure_ascii=False) + "\n")
+        rows = read_sent(p)
+        if len(rows) > SENT_KEEP + SENT_KEEP // 4:
+            rows = rows[-SENT_KEEP:]
+            p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        write_json(reports_root() / SENT_FEED / "latest.json", sent_feed(rows, now))
+    except Exception as e:  # noqa: BLE001 - the log never stops a post
+        say(f"sent log not written: {type(e).__name__}", err=True)
+
+
 def send(category: str | None, cards: list[Card] | Card, image: bytes | None = None, urgent: bool = False,
          now: int | None = None, dry_run: bool = False, poster=None, hold_in_quiet: bool = True,
-         photos: list[tuple[str, str]] | None = None, discord: str | None = None, discord_poster=None) -> dict:
+         photos: list[tuple[str, str]] | None = None, discord: str | None = None, discord_poster=None,
+         switch: str | None = None) -> dict:
     """Post cards in one message (a photo first when there is an image; without
     one, the first card's own chart, Card.image, when it has one).
 
@@ -760,10 +895,17 @@ def send(category: str | None, cards: list[Card] | Card, image: bytes | None = N
     post was not switched off, held by quiet hours or a dry run; only the
     morning briefing and real-money trade cards pass it. The result is in
     res["discord"]; a failure there never changes the rest.
+
+    `switch` a lab switch (LAB_SWITCHES) that must be on; None: the caller's (SWITCH_SOURCES), if any.
     """
     cards = [cards] if isinstance(cards, Card) else list(cards)
     image = image or next((c.image for c in cards if getattr(c, "image", None)), None)
-    res = _send(category, cards, image, urgent, now, dry_run, poster, hold_in_quiet, photos)
+    switch = switch or _caller_switch()
+    res = _send(category, cards, image, urgent, now, dry_run, poster, hold_in_quiet, photos, switch)
+    if not dry_run and res["reason"] in (None, "off", "quiet"):
+        via = "engine" if (os.environ.get("PYTHIA_ALERT_VIA") or "").strip().lower() == "engine" else config()[1]
+        outcome = {"off": "off", "quiet": "held"}.get(res["reason"]) or ("sent" if res["delivered"] else "failed")
+        log_sent(via, category, cards, outcome, now)
     # With the bot, a study, Pokemon or CS2 post goes to its channel too (the webhook never had them).
     kind = discord or (DISCORD_CATEGORY_KINDS.get(category or "") if discord_bot_token() else None)
     if kind and res["reason"] in (None, "no destination"):
@@ -774,7 +916,7 @@ def send(category: str | None, cards: list[Card] | Card, image: bytes | None = N
 
 def _send(category: str | None, cards: list[Card], image: bytes | None = None, urgent: bool = False,
           now: int | None = None, dry_run: bool = False, poster=None, hold_in_quiet: bool = True,
-          photos: list[tuple[str, str]] | None = None) -> dict:
+          photos: list[tuple[str, str]] | None = None, switch: str | None = None) -> dict:
     """Post cards in one message (a photo first when there is an image).
 
     `photos` are pictures by URL with an HTML caption, (url, caption): on
@@ -782,7 +924,8 @@ def _send(category: str | None, cards: list[Card], image: bytes | None = None, u
     one), then the cards as the message; a webhook gets the cards only.
 
     `category` None is always sent. A category switched off is not sent
-    (reason "off"); in quiet hours a post that is not urgent is held back
+    (reason "off"), nor is one whose lab switch (`switch`) is off; in
+    quiet hours a post that is not urgent is held back
     (reason "quiet") and listed once they are over. `poster(text)` replaces
     the network (tests). Returns {"delivered", "error", "reason", "text",
     "html", "photo"}.
@@ -795,9 +938,9 @@ def _send(category: str | None, cards: list[Card], image: bytes | None = None, u
     text = render_post(cards, fmt)
     res = {"delivered": False, "error": None, "reason": None, "text": plain(text), "html": text, "photo": False}
     settings = load_settings()
-    if not urgent and not enabled(settings, category):
+    if not urgent and (not enabled(settings, category) or not lab_on(switch)):
         res["reason"] = "off"
-        say(f"[{category} is switched off] {res['text']}")
+        say(f"[{switch or category} is switched off] {res['text']}")
         return res
     if not urgent and in_quiet(settings, now):
         res["reason"] = "quiet"
@@ -1018,28 +1161,40 @@ def send_discord(kind: str, cards: list[Card] | Card, image: bytes | None = None
     `lang` (None: the messages' language) is the one the cards were built in; the other one comes
     from in_lang. `poster(url, payload, image)` replaces the webhook's network (tests), bot_request
     the bot's. Never raises: a failure is returned as {"delivered": False, "error": ...} and said
-    on stderr, nothing more."""
+    on stderr, nothing more.
+
+    A kind with a lab switch (DISCORD_KIND_SWITCHES, the news) is not posted while it is off (reason "off"). The
+    bot posts in the cards' language only, to that language's channel, unless the switch "discordBoth" is on."""
     res = {"delivered": False, "error": None, "reason": None}
     try:
         cards = [cards] if isinstance(cards, Card) else list(cards)
         if not cards:
             res["reason"] = "no destination"
             return res
-        lang = lang or alert_lang()
         ts = now or clock_ms()
+        if not lab_on(DISCORD_KIND_SWITCHES.get(kind)):
+            res["reason"] = "off"
+            log_sent("discord", kind, cards, "off", ts)
+            return res
+        lang = lang or alert_lang()
         if discord_bot_token() and (kind in DISCORD_ROUTES or kind in DISCORD_EXTRA_ROUTES):
-            payloads = {lg: discord_payload(in_lang(cards, lg, lang), lg, image, ts, image_url) for lg in DISCORD_LANGS}
+            langs = DISCORD_LANGS if lab_on("discordBoth") else (lang,)
+            payloads = {lg: discord_payload(in_lang(cards, lg, lang), lg, image, ts, image_url) for lg in langs}
             res.update(send_bot(kind, payloads, image))
             if res["delivered"]:
+                log_sent("discord", kind, cards, "sent", ts)
                 return res
             say(f"discord bot: not delivered ({res['error']})", err=True)
         url = discord_url(kind) if kind in DISCORD_KINDS else None
         if not url:
             if res["error"] is None:
                 res["reason"] = "no destination"
+            else:
+                log_sent("discord", kind, cards, "failed", ts)
             return res
         ok, err = (poster or post_discord)(url, discord_payload(cards, lang, image, ts, image_url), image)
         res.update(delivered=ok, error=err)
+        log_sent("discord", kind, cards, "sent" if ok else "failed", ts)
         if not ok:
             say(f"discord: not delivered ({err})", err=True)
     except Exception as e:  # noqa: BLE001 - Discord never breaks a bot or a job
@@ -1942,7 +2097,7 @@ def readiness_text(rep: dict | None, now: int | None = None, lang: str = "en") -
                else str(r.get("label", "")).lower() for r in best.get("rules") or [] if not r.get("pass")]
     togo = (t["days_to_go"].format(n=best["days_to_go"]) if best.get("days_to_go")
             else t["waiting_on"].format(rules=", ".join(failing[:3])))
-    return t["best"].format(name=best.get("name"), passed=best.get("passed"), total=best.get("total"),
+    return t["best"].format(name=short(nodash(str(best.get("name"))), 40), passed=best.get("passed"), total=best.get("total"),
                             togo=togo) + stale
 
 

@@ -208,11 +208,13 @@ def test_the_briefing_is_built_from_the_files_and_leaves_out_stale_sections(data
         cards, _ = briefing.build(now, lang, [], briefing.read_ledger(), 158.2, {})
         text = notify.plain(notify.render_post(cards, "telegram", lang=lang))
         assert ("Guten Morgen" if lang == "de" else "Good morning") in text
-        assert ("pump.fun · Echtgeld" if lang == "de" else "pump.fun · real money") in text
+        assert ("🟢 Echtgeld\nDer pump.fun-Bot läuft." if lang == "de" else "🟢 Real money\nThe pump.fun bot is running.") in text
         assert ("+0,0080 SOL · +1,27 €" if lang == "de" else "+0.0080 SOL · +€1.27") in text
         assert "M8u" in text and "BMT" in text
-        assert "Pokémon" not in text, "five days old: left out"
-        assert cards[0].emoji == "☀️" and cards[1].emoji == "🟢", "the head first, pump.fun green on a plus day"
+        assert "788" not in text, "five days old: left out, named in the footer"
+        assert [c.emoji for c in cards[:3]] == ["🟢", "☀️", "🟢"], "nothing to decide, the head, real money green"
+        assert ("Fehlt heute: Pokémon (zuletzt So 18. Okt)" if lang == "de" else "Missing today: Pokémon (last Sun 18 Oct)") in text
+        assert len(text) < 2000
         if lang == "de":
             no_english(notify.render_post(cards, "telegram", lang="de"))
 
@@ -261,7 +263,7 @@ def test_the_briefing_goes_out_at_nine_once_to_telegram_and_discord(data, monkey
               discord_poster=lambda url, payload, image: dc.append((url, payload)) or (True, None))
     assert briefing.run(now - 3_600_000, **kw) == 0 and not tg, "08:00 in Berlin: not yet"
     assert briefing.run(now, **kw) == 0 and len(tg) == 1 and len(dc) == 1
-    assert dc[0][0] == WEBHOOK and dc[0][1]["embeds"][0]["title"].startswith("☀️")
+    assert dc[0][0] == WEBHOOK and dc[0][1]["embeds"][1]["title"].startswith("☀️"), "the head after the decisions"
     state = json.loads((data / "notify" / "state.json").read_text())
     assert state["last_briefing"] == "2026-10-23"
     assert json.loads((data / "reports" / "notify" / "latest.json").read_text())["delivered"]

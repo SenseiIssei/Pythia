@@ -1,0 +1,29 @@
+{
+ "updated_ms": 1793002840262,
+ "collection": {
+  "equity": 788.45,
+  "returnPct": -21.15
+ },
+ "items": [
+  {
+   "label": "Poliwrath (Expedition Base Set)",
+   "value": "+187 % to fair"
+  },
+  {
+   "label": "Pikachu V (SWSH Black Star Promos)",
+   "value": "+186 % to fair"
+  },
+  {
+   "label": "Meganium δ (Dragon Frontiers)",
+   "value": "+186 % to fair"
+  },
+  {
+   "label": "Paper collection (play money)",
+   "value": "-21.1 %"
+  },
+  {
+   "label": "Zubat (Team Rocket Returns)",
+   "value": "+10 % in 90 d"
+  }
+ ]
+}

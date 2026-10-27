@@ -1,0 +1,55 @@
+{
+ "updated_ms": 1793062803171,
+ "night": "2026-10-27",
+ "trials_ever": 300,
+ "trials_tonight": 300,
+ "bar": {
+  "sharpe": 4.977074106190066,
+  "p": 0.95,
+  "min_entries": 20,
+  "trials": 300
+ },
+ "start_sol": 0.55,
+ "best": [
+  {
+   "id": "F3_00296",
+   "median": 42.70833083034926
+  },
+  {
+   "id": "F3_00272",
+   "median": 40.227465396929276
+  }
+ ],
+ "holdback": [
+  {
+   "id": "F3_00296",
+   "median": 97.07513405038355,
+   "pnl_sol": 0.2537181
+  },
+  {
+   "id": "F3_00272",
+   "median": 0.7938819662772996,
+   "pnl_sol": 0.056241401999999996
+  }
+ ],
+ "winners": [],
+ "models": {
+  "win30": {
+   "adopted": true
+  },
+  "win300": {
+   "adopted": false
+  },
+  "up10": {
+   "adopted": true
+  },
+  "up30": {
+   "adopted": false
+  },
+  "up120": {
+   "adopted": false
+  }
+ },
+ "books": [],
+ "retired": []
+}

@@ -1,0 +1,691 @@
+{
+ "at": "2026-10-27T16:07:02Z",
+ "ok": false,
+ "checks": [
+  {
+   "name": "pythia-recorder",
+   "ok": true,
+   "detail": "running since 2026-10-07T17:55"
+  },
+  {
+   "name": "pythia-server",
+   "ok": true,
+   "detail": "running since 2026-10-27T13:46"
+  },
+  {
+   "name": "pythia-autopilot",
+   "ok": true,
+   "detail": "running since 2026-10-27T13:46"
+  },
+  {
+   "name": "pythia-pumpfun-live",
+   "ok": true,
+   "detail": "switched off by the owner since 2026-10-24T12:25"
+  },
+  {
+   "name": "autopilot",
+   "ok": true,
+   "detail": "Practice autopilot (VPS) stopped, -0.47 % since paper; Practice autopilot (auto pick) stopped, -0.68 % since paper; Practice autopilot (auto pick) stopped, -0.22 % since paper"
+  },
+  {
+   "name": "safe account",
+   "ok": true,
+   "detail": "Safe · BTC above 200-day stopped, -5.05 %"
+  },
+  {
+   "name": "recorder streams",
+   "ok": true,
+   "detail": "all streams fresh"
+  },
+  {
+   "name": "job ai-analyst",
+   "ok": true,
+   "detail": "last ok 2026-10-27T05:36:03Z"
+  },
+  {
+   "name": "job ai-director",
+   "ok": true,
+   "detail": "last ok 2026-10-25T11:00:03Z"
+  },
+  {
+   "name": "job backfill",
+   "ok": true,
+   "detail": "last ok 2026-10-27T03:40:43Z"
+  },
+  {
+   "name": "job backup",
+   "ok": true,
+   "detail": "last ok 2026-10-27T02:20:24Z"
+  },
+  {
+   "name": "job briefing",
+   "ok": true,
+   "detail": "last ok 2026-10-27T09:00:04Z"
+  },
+  {
+   "name": "job candles-compact",
+   "ok": true,
+   "detail": "not run yet"
+  },
+  {
+   "name": "job candles-health",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:05Z"
+  },
+  {
+   "name": "job candles-live",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:16Z"
+  },
+  {
+   "name": "job candles-markets",
+   "ok": true,
+   "detail": "running since 2026-10-27T16:07:01Z"
+  },
+  {
+   "name": "job costs",
+   "ok": true,
+   "detail": "last ok 2026-10-25T05:41:04Z"
+  },
+  {
+   "name": "job cs2-collect",
+   "ok": true,
+   "detail": "last ok 2026-10-27T15:12:04Z"
+  },
+  {
+   "name": "job cs2-run",
+   "ok": true,
+   "detail": "last ok 2026-10-27T15:12:06Z"
+  },
+  {
+   "name": "job cs2-trends",
+   "ok": true,
+   "detail": "last ok 2026-10-27T14:40:10Z"
+  },
+  {
+   "name": "job dexscreener-collect",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:06:10Z"
+  },
+  {
+   "name": "job dexscreener-health",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:05Z"
+  },
+  {
+   "name": "job dexscreener-study",
+   "ok": true,
+   "detail": "not run yet"
+  },
+  {
+   "name": "job discord-feed",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:04Z"
+  },
+  {
+   "name": "job discord-live-fills",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:06:02Z"
+  },
+  {
+   "name": "job exit-shadow",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:16:58Z"
+  },
+  {
+   "name": "job factory-shadow",
+   "ok": true,
+   "detail": "last ok 2026-10-27T05:00:09Z"
+  },
+  {
+   "name": "job factory-small",
+   "ok": true,
+   "detail": "last ok 2026-10-27T03:04:26Z"
+  },
+  {
+   "name": "job factory-weekly",
+   "ok": true,
+   "detail": "last ok 2026-10-25T07:30:43Z"
+  },
+  {
+   "name": "job features",
+   "ok": true,
+   "detail": "not run yet"
+  },
+  {
+   "name": "job flow-collect",
+   "ok": true,
+   "detail": "last ok 2026-10-27T00:47:43Z"
+  },
+  {
+   "name": "job forward",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:15:15Z"
+  },
+  {
+   "name": "job free-defillama",
+   "ok": true,
+   "detail": "not run yet"
+  },
+  {
+   "name": "job free-deribit",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:05:06Z"
+  },
+  {
+   "name": "job free-feargreed",
+   "ok": true,
+   "detail": "not run yet"
+  },
+  {
+   "name": "job free-hyperliquid",
+   "ok": true,
+   "detail": "last ok 2026-10-27T15:16:06Z"
+  },
+  {
+   "name": "job free-macro",
+   "ok": true,
+   "detail": "not run yet"
+  },
+  {
+   "name": "job health",
+   "ok": true,
+   "detail": "running since 2026-10-27T16:07:01Z"
+  },
+  {
+   "name": "job kraken-futures-collect",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:05:19Z"
+  },
+  {
+   "name": "job lablive",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:05:03Z"
+  },
+  {
+   "name": "job labor",
+   "ok": true,
+   "detail": "not run yet"
+  },
+  {
+   "name": "job learn",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:30:11Z"
+  },
+  {
+   "name": "job listings",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:14Z"
+  },
+  {
+   "name": "job llm-news",
+   "ok": true,
+   "detail": "last ok 2026-10-27T12:10:08Z"
+  },
+  {
+   "name": "job local-llm",
+   "ok": false,
+   "detail": "last run failed, exit 125, 74 in a row"
+  },
+  {
+   "name": "job m2-v3-shadow",
+   "ok": true,
+   "detail": "last ok 2026-10-26T08:32:01Z"
+  },
+  {
+   "name": "job models",
+   "ok": true,
+   "detail": "last ok 2026-10-27T07:15:44Z"
+  },
+  {
+   "name": "job news",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:04Z"
+  },
+  {
+   "name": "job news-collect",
+   "ok": true,
+   "detail": "last ok 2026-10-27T12:10:07Z"
+  },
+  {
+   "name": "job notify-pending",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:05:02Z"
+  },
+  {
+   "name": "job onchain-history",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:05:05Z"
+  },
+  {
+   "name": "job onchain-live-watch",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:06:01Z"
+  },
+  {
+   "name": "job onchain-longterm",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:16:53Z"
+  },
+  {
+   "name": "job onchain-mark",
+   "ok": true,
+   "detail": "last ok 2026-10-27T15:40:10Z"
+  },
+  {
+   "name": "job onchain-meme",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:06:06Z"
+  },
+  {
+   "name": "job onchain-meme-proof",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:35:04Z"
+  },
+  {
+   "name": "job onchain-paper",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:16:33Z"
+  },
+  {
+   "name": "job onchain-sol-book",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:16:49Z"
+  },
+  {
+   "name": "job paper",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:00:29Z"
+  },
+  {
+   "name": "job paper-btc-gated",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:35:17Z"
+  },
+  {
+   "name": "job paper-families",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:15:38Z"
+  },
+  {
+   "name": "job paper-funding-carry",
+   "ok": true,
+   "detail": "last ok 2026-10-27T05:45:39Z"
+  },
+  {
+   "name": "job paper-live-copy",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:15:38Z"
+  },
+  {
+   "name": "job paper-ls",
+   "ok": true,
+   "detail": "last ok 2026-10-27T05:30:11Z"
+  },
+  {
+   "name": "job paper-ls-v2",
+   "ok": true,
+   "detail": "last ok 2026-10-27T05:30:19Z"
+  },
+  {
+   "name": "job paper-m4",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:45:39Z"
+  },
+  {
+   "name": "job paper-m4-perps",
+   "ok": true,
+   "detail": "last ok 2026-10-27T05:15:40Z"
+  },
+  {
+   "name": "job paper-memes",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:31:24Z"
+  },
+  {
+   "name": "job paper-perps-neutral",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:16:06Z"
+  },
+  {
+   "name": "job paper-review",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:01:01Z"
+  },
+  {
+   "name": "job paper-smallaccount",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:17:03Z"
+  },
+  {
+   "name": "job paper-spy-hold",
+   "ok": true,
+   "detail": "last ok 2026-10-27T14:20:04Z"
+  },
+  {
+   "name": "job paper-tranches-filtered",
+   "ok": true,
+   "detail": "last ok 2026-10-27T04:25:29Z"
+  },
+  {
+   "name": "job paper-trend4h",
+   "ok": true,
+   "detail": "running since 2026-10-27T16:07:01Z"
+  },
+  {
+   "name": "job pokemon",
+   "ok": false,
+   "detail": "last run failed, exit 1, 1 in a row"
+  },
+  {
+   "name": "job polymarket-daily",
+   "ok": true,
+   "detail": "last ok 2026-10-27T05:24:06Z"
+  },
+  {
+   "name": "job polymarket-history",
+   "ok": true,
+   "detail": "last ok 2026-10-26T01:52:29Z"
+  },
+  {
+   "name": "job polymarket-study",
+   "ok": true,
+   "detail": "last ok 2026-10-26T02:08:11Z"
+  },
+  {
+   "name": "job prune",
+   "ok": true,
+   "detail": "last ok 2026-10-27T02:50:01Z"
+  },
+  {
+   "name": "job pumpfun",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:05:36Z"
+  },
+  {
+   "name": "job pumpfun-activity",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:15:30Z"
+  },
+  {
+   "name": "job pumpfun-factory",
+   "ok": true,
+   "detail": "last ok 2026-10-27T03:04:12Z"
+  },
+  {
+   "name": "job pumpfun-report",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:40:32Z"
+  },
+  {
+   "name": "job pumpfun-rt-health",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:05Z"
+  },
+  {
+   "name": "job pumpfun-rt-realistic",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:40:05Z"
+  },
+  {
+   "name": "job pumpfun-rt-retrain",
+   "ok": true,
+   "detail": "last ok 2026-10-27T10:07:14Z"
+  },
+  {
+   "name": "job pumpfun-rt-study",
+   "ok": true,
+   "detail": "last ok 2026-10-27T09:40:15Z"
+  },
+  {
+   "name": "job readiness",
+   "ok": true,
+   "detail": "last ok 2026-10-27T06:30:13Z"
+  },
+  {
+   "name": "job retrain",
+   "ok": true,
+   "detail": "last ok 2026-10-25T05:05:30Z"
+  },
+  {
+   "name": "job trending",
+   "ok": true,
+   "detail": "last ok 2026-10-27T16:00:05Z"
+  },
+  {
+   "name": "job weekly-report",
+   "ok": true,
+   "detail": "last ok 2026-10-25T21:05:02Z"
+  },
+  {
+   "name": "job wiki-collect",
+   "ok": true,
+   "detail": "last ok 2026-10-27T00:52:31Z"
+  },
+  {
+   "name": "disk",
+   "ok": true,
+   "detail": "143.0 GB free of 463.9, full in about 196 days at 0.728 GB a day"
+  },
+  {
+   "name": "data recorder-binance",
+   "ok": true,
+   "detail": "1.31 GB, +0.049 GB a day, limit 250 GB"
+  },
+  {
+   "name": "data recorder-kraken",
+   "ok": true,
+   "detail": "2.03 GB, +0.074 GB a day, limit 100 GB"
+  },
+  {
+   "name": "data recorder-bybit",
+   "ok": true,
+   "detail": "0.99 GB, +0.049 GB a day, limit 100 GB"
+  },
+  {
+   "name": "data recorder-okx",
+   "ok": true,
+   "detail": "1.26 GB, +0.061 GB a day, limit 100 GB"
+  },
+  {
+   "name": "data recorder-coinbase",
+   "ok": true,
+   "detail": "1.25 GB, +0.062 GB a day, limit 100 GB"
+  },
+  {
+   "name": "data history",
+   "ok": true,
+   "detail": "7.43 GB, +0.008 GB a day, limit 300 GB"
+  },
+  {
+   "name": "data lab-cache",
+   "ok": true,
+   "detail": "0.4 GB, +0.015 GB a day, limit 80 GB"
+  },
+  {
+   "name": "data models",
+   "ok": true,
+   "detail": "0.23 GB, +0.016 GB a day, limit 20 GB"
+  },
+  {
+   "name": "data paper",
+   "ok": true,
+   "detail": "0.05 GB, +0.006 GB a day, limit 5 GB"
+  },
+  {
+   "name": "data reports",
+   "ok": true,
+   "detail": "0.03 GB, +0.001 GB a day, limit 10 GB, kept 365 days"
+  },
+  {
+   "name": "data signals",
+   "ok": true,
+   "detail": "0.0 GB, +0.0 GB a day, limit 2 GB, kept 180 days"
+  },
+  {
+   "name": "data learn",
+   "ok": true,
+   "detail": "0.0 GB, +0.0 GB a day, limit 50 GB"
+  },
+  {
+   "name": "data readiness",
+   "ok": true,
+   "detail": "0.0 GB, +0.0 GB a day, limit 1 GB"
+  },
+  {
+   "name": "data recorder-binance-um",
+   "ok": true,
+   "detail": "0.06 GB, +0.002 GB a day, limit 100 GB"
+  },
+  {
+   "name": "data spread",
+   "ok": true,
+   "detail": "0.11 GB, +0.004 GB a day, limit 20 GB"
+  },
+  {
+   "name": "data factory",
+   "ok": true,
+   "detail": "0.0 GB, +0.0 GB a day, limit 5 GB"
+  },
+  {
+   "name": "data cs2-snapshots",
+   "ok": true,
+   "detail": "0.48 GB, +0.039 GB a day, limit 40 GB, kept 180 days"
+  },
+  {
+   "name": "data trending",
+   "ok": true,
+   "detail": "0.02 GB, +0.001 GB a day, limit 10 GB, kept 365 days"
+  },
+  {
+   "name": "data listings",
+   "ok": true,
+   "detail": "0.0 GB, +0.0 GB a day, limit 2 GB"
+  },
+  {
+   "name": "data candles",
+   "ok": true,
+   "detail": "0.05 GB, +0.006 GB a day, limit 20 GB"
+  },
+  {
+   "name": "data ai",
+   "ok": true,
+   "detail": "0.0 GB, +0.0 GB a day, limit 1 GB"
+  },
+  {
+   "name": "data flow",
+   "ok": true,
+   "detail": "0.02 GB, +0.003 GB a day, limit 5 GB"
+  },
+  {
+   "name": "data free",
+   "ok": true,
+   "detail": "0.02 GB, +0.002 GB a day, limit 5 GB"
+  },
+  {
+   "name": "data pumpfun-rt",
+   "ok": true,
+   "detail": "2.31 GB, +0.297 GB a day, limit 45 GB"
+  },
+  {
+   "name": "data polymarket",
+   "ok": true,
+   "detail": "0.25 GB, +0.032 GB a day, limit 8 GB"
+  },
+  {
+   "name": "data job-runs",
+   "ok": true,
+   "detail": "0.0 GB, +0.0 GB a day, limit 1 GB, kept 400 days"
+  },
+  {
+   "name": "feed deribit",
+   "ok": true,
+   "detail": "dvol 1 h old, 98096 rows; surface 0 h old, 20 rows"
+  },
+  {
+   "name": "feed hyperliquid",
+   "ok": true,
+   "detail": "ctx 1 h old, 297 rows; funding 1 h old, 862571 rows"
+  },
+  {
+   "name": "feed fear-greed",
+   "ok": false,
+   "detail": "no status file free/fear_greed/health.json"
+  },
+  {
+   "name": "feed macro",
+   "ok": false,
+   "detail": "no status file free/macro/health.json"
+  },
+  {
+   "name": "feed defillama",
+   "ok": false,
+   "detail": "no status file free/defillama/health.json"
+  },
+  {
+   "name": "paper tsmom",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "paper tsmom_regime",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "paper tsmom_top20",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "paper breakout_top10",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "paper tsmom_tranches",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "paper m4_ls",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "paper picks_ls",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "paper picks_ls_v2",
+   "ok": true,
+   "detail": "last row 2026-10-27"
+  },
+  {
+   "name": "pokemon cards",
+   "ok": false,
+   "detail": "last run 2026-10-26, expected 2026-10-27"
+  },
+  {
+   "name": "trending watcher",
+   "ok": true,
+   "detail": "last snapshot 16:00 UTC"
+  },
+  {
+   "name": "volatility model",
+   "ok": true,
+   "detail": "live, 9940 coin-hours scored"
+  },
+  {
+   "name": "market data",
+   "ok": true,
+   "detail": "quotes on kraken-ws, 1s old, 0 of 37 stale, 2 failovers in 24h; candles on kraken, 19s old, 0 of 37 stale, 0 failovers in 24h; books on kraken, 10s old, 0 of 37 stale, 0 failovers in 24h; stream up, 1 reconnects"
+  },
+  {
+   "name": "cs2 collector",
+   "ok": true,
+   "detail": "last run 2026-10-27T15:12 UTC, 25188 items, Steam 0 of 89, rate limited"
+  }
+ ]
+}

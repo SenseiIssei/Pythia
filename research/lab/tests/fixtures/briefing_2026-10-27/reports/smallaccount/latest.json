@@ -1,0 +1,21 @@
+{
+ "updated_ms": 1793074620331,
+ "books": {
+  "small50_tsmom1": {
+   "capital_eur": 50.0,
+   "equity_eur": 48.906492671006134
+  },
+  "small100_breakout_sol3": {
+   "capital_eur": 100.0,
+   "equity_eur": 98.70649267100613
+  },
+  "small40_spy_trend": {
+   "capital_eur": 40.0,
+   "equity_eur": 40.25145534591186
+  },
+  "small40_vol_target": {
+   "capital_eur": 40.0,
+   "equity_eur": 39.9812507740159
+  }
+ }
+}

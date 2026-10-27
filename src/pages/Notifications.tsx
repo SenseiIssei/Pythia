@@ -28,8 +28,84 @@ import {
   type AlertsView,
   type DeliveryTone,
 } from "../flows/alerts";
+import { labFeeds, type LabFeed } from "../labFeeds";
 
 const TONE: Record<DeliveryTone, ChipTone> = { good: "good", warn: "warn", bad: "bad", neutral: "neutral" };
+
+// ── the lab's sent log and its switches ──────────────────────────────────────
+// The lab posts straight to Telegram and Discord, so the engine's counts miss them. lab.ops.notify writes every
+// lab post to its sent log and today's counts to reports/notify_sent/latest.json (items "count:<outcome>",
+// "via:<channel>", "cat:<category>", "switch:<id>"), which GET /api/lab/feeds serves.
+
+export const LAB_SENT_FEED = "notify_sent";
+
+/** The lab's own switches, off unless turned on on the server. */
+export const LAB_SWITCH_LABEL: Record<string, string> = {
+  pumpfunPaper: "pump.fun paper cards",
+  polymarketPaper: "Polymarket paper cards",
+  discordNews: "Discord news",
+  discordBoth: "Discord in both languages",
+};
+
+export interface LabSwitch {
+  id: string;
+  label: string;
+  about: string;
+  on: boolean;
+}
+
+export interface LabSent {
+  /** Today's counts (0 when the log was last written on an earlier day). */
+  sent: number;
+  failed: number;
+  held: number;
+  off: number;
+  via: [string, number][];
+  categories: [string, number][];
+  switches: LabSwitch[];
+  updatedMs: number;
+}
+
+/** 00:00 local time on the day of `ms`. */
+function dayStart(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** The sent-log feed in numbers; null without one. Counts written before today are not today's. */
+export function parseLabSent(feeds: LabFeed[] | null | undefined, now: number): LabSent | null {
+  const f = (feeds ?? []).find((x) => x && x.name === LAB_SENT_FEED);
+  if (!f) return null;
+  const today = (f.updatedMs ?? 0) >= dayStart(now);
+  const out: LabSent = { sent: 0, failed: 0, held: 0, off: 0, via: [], categories: [], switches: [], updatedMs: f.updatedMs ?? 0 };
+  for (const it of f.items ?? []) {
+    const [kind, id] = [String(it.label ?? "").split(":")[0], String(it.label ?? "").split(":").slice(1).join(":")];
+    const n = Number(it.value);
+    if (kind === "switch" && id) {
+      out.switches.push({ id, label: LAB_SWITCH_LABEL[id] ?? id, about: it.detail ?? "", on: it.value === "on" });
+      continue;
+    }
+    if (!today || !Number.isFinite(n)) continue;
+    if (kind === "count" && (id === "sent" || id === "failed" || id === "held" || id === "off")) out[id] = n;
+    else if (kind === "via" && id) out.via.push([id, n]);
+    else if (kind === "cat" && id) out.categories.push([id, n]);
+  }
+  return out;
+}
+
+/** The engine's and the lab's counts together: "9 sent today (engine 3, lab 6) · 1 failed · 2 held back · 4 switched off". */
+export function realCountsLine(c: AlertsView["counts"] | null | undefined, lab: LabSent | null): string {
+  if (!lab) return countsLine(c);
+  const engine = c?.sentToday ?? 0;
+  const parts = [`${engine + lab.sent} sent today (engine ${engine}, lab ${lab.sent})`];
+  const failed = (c?.failedToday ?? 0) + lab.failed;
+  const held = (c?.suppressedToday ?? 0) + lab.held;
+  if (failed) parts.push(`${failed} failed`);
+  if (held) parts.push(`${held} held back`);
+  if (lab.off) parts.push(`${lab.off} switched off`);
+  return parts.join(" · ");
+}
 
 const REFRESH_MS = 30_000;
 
@@ -44,6 +120,7 @@ export function Notifications() {
   const [busy, setBusy] = useState(false);
   const [muting, setMuting] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [lab, setLab] = useState<LabSent | null>(null);
   const available = alertsAvailable();
 
   const read = useCallback(async () => {
@@ -53,6 +130,10 @@ export function Notifications() {
       setView(r.data);
       setErr("");
     } else setErr(r.error);
+    // The lab's counts are a bonus: without them the engine's line stays as it was.
+    await labFeeds()
+      .then((f) => setLab(parseLabSent(f, Date.now())))
+      .catch(() => setLab(null));
   }, []);
 
   useEffect(() => {
@@ -117,7 +198,7 @@ export function Notifications() {
                   {!view.enabled ? "Alerts are off" : muted ?? `Sending to ${destinationName(view.destination)}`}
                 </p>
                 <p className="text-muted text-sm">
-                  {!view.enabled ? "Set an alert destination on the server to turn them on." : countsLine(view.counts)}
+                  {!view.enabled ? "Set an alert destination on the server to turn them on." : realCountsLine(view.counts, lab)}
                 </p>
               </div>
               <Chip tone={!view.enabled ? "neutral" : muted ? "warn" : "good"}>{!view.enabled ? "Off" : muted ? "Muted" : "On"}</Chip>
@@ -155,6 +236,8 @@ export function Notifications() {
           </Card>
 
           <AlertSettings />
+
+          <LabSwitches lab={lab} />
 
           <SectionTitle>Recent</SectionTitle>
           <Card className="py-1">
@@ -195,6 +278,37 @@ export function Notifications() {
         </div>
       </Sheet>
     </Page>
+  );
+}
+
+/**
+ * What the lab sent today by category, and its own switches (pump.fun and Polymarket paper cards, Discord news,
+ * Discord in both languages): off by default and set on the server, so they are shown here, not changed.
+ */
+export function LabSwitches({ lab }: { lab: LabSent | null }) {
+  if (!lab) return null;
+  return (
+    <Card label="From the lab, off by default">
+      <p className="text-[15px] font-semibold">From the lab, off by default</p>
+      <p className="fl-muted text-sm">
+        Set on the server in data/notify/switches.json or PYTHIA_NOTIFY_ON. Paper fills come from the engine: its Trades and Rebalances
+        switches above, which also carry real-money fills to the chat.
+      </p>
+      <ul className="divide-y" style={{ borderColor: "var(--fl-line)" }}>
+        {lab.switches.map((w) => (
+          <li key={w.id} className="flex items-center gap-3 py-3">
+            <span className="min-w-0 flex-1">
+              <span className="block text-[15px] font-semibold">{w.label}</span>
+              {w.about && <span className="fl-muted block break-words text-sm">{w.about}</span>}
+            </span>
+            <Chip tone={w.on ? "good" : "neutral"}>{w.on ? "On" : "Off"}</Chip>
+          </li>
+        ))}
+      </ul>
+      {lab.categories.length > 0 && (
+        <p className="fl-muted mt-2 text-sm">{`Sent today by the lab: ${lab.categories.map(([c, n]) => `${c} ${n}`).join(", ")}`}</p>
+      )}
+    </Card>
   );
 }
 

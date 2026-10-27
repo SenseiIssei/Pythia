@@ -294,18 +294,18 @@ def test_the_briefing_summary_comes_from_the_model_only_with_its_facts(data, ser
         return "Eine Aufgabe ist fertig."
     cards, _ = briefing.build(now, "de", [], [], 158.2, {}, summarize=fake)
     facts, template, lang = seen[0]
-    assert cards[0].summary == "Eine Aufgabe ist fertig." and lang == "de"
+    assert cards[1].summary == "Eine Aufgabe ist fertig." and lang == "de", "the head after the decisions"
     assert template == "1 Aufgabe fertig", "the template is what the briefing wrote before"
     assert any("330" in f for f in facts) and any("R1" in f for f in facts) and len(facts) <= briefing.MAX_FACTS
-    assert briefing.build(now, "de", [], [], 158.2, {})[0][0].summary == template, "no model: the template"
+    assert briefing.build(now, "de", [], [], 158.2, {})[0][1].summary == template, "no model: the template"
 
     vps = servers(answer=lambda b: "Die Fabrik hat 30 Versuche gemacht. Sie hat 99 Gewinner.")
     monkeypatch.setenv("PYTHIA_LOCAL_LLM_URL", vps.url)
     cards, _ = briefing.build(now, "de", [], [], 158.2, {}, summarize=local.summarizer(60, "briefing"))
-    assert cards[0].summary == template, "99 is in no fact: the template"
+    assert cards[1].summary == template, "99 is in no fact: the template"
     vps.answer = lambda b: "Die Fabrik hat 30 Versuche gemacht. Eine Aufgabe ist fertig."
     cards, _ = briefing.build(now, "de", [], [], 158.2, {}, summarize=local.summarizer(60, "briefing"))
-    assert cards[0].summary == "Die Fabrik hat 30 Versuche gemacht. Eine Aufgabe ist fertig."
+    assert cards[1].summary == "Die Fabrik hat 30 Versuche gemacht. Eine Aufgabe ist fertig."
 
 
 def test_the_briefing_run_asks_the_model_within_its_budget(data, servers, monkeypatch):

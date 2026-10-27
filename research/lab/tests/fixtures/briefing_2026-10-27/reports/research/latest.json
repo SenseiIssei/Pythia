@@ -1,0 +1,80 @@
+{
+ "updated_ms": 1793119201854,
+ "done": [
+  {
+   "title": "Lane-Aufgaben, die beim ersten Mal passen (R8)",
+   "ok": false,
+   "at": 1793118373000,
+   "why": "Unerlaubte Dateien geändert: research/ops/agent/README.md research/ops/agent/guard.py research/ops/agent/test_guard.py research/ops/lanes/lane.md research/ops/lanes/lanes.py research/ops/lanes/replay_2026-10-27.json rese",
+   "usd": 4.66
+  },
+  {
+   "title": "pump.fun-Fabrik: Messlatte und Tage (R7)",
+   "ok": false,
+   "at": 1793117217000,
+   "why": "Unerlaubte Dateien geändert: research/lab/lab/ops/briefing.py research/lab/lab/pumpfun_rt/factory.py research/lab/tests/test_messages.py research/lab/tests/test_pumpfun_factory_f3.py.",
+   "usd": 2.1
+  },
+  {
+   "title": "Model-Fabrik (G2, nach R6)",
+   "ok": false,
+   "at": 1793116635000,
+   "why": "gitleaks hat etwas gefunden.",
+   "usd": 6.79
+  },
+  {
+   "title": "Lockbox und ehrliche Messlatte (R6)",
+   "ok": false,
+   "at": 1793113439000,
+   "why": "Unerlaubte Dateien geändert: research/lab/lab/factory/evaluate.py research/lab/lab/factory/grammar.py research/lab/lab/factory/ledger.py research/lab/lab/factory/run.py research/lab/lab/factory/small.py research/lab/resu",
+   "usd": 5.4
+  },
+  {
+   "title": "Ein Trial-Register, eine p-Wert-Richtung (R5)",
+   "ok": false,
+   "at": 1793111950000,
+   "why": "Unerlaubte Dateien geändert: research/lab/lab/experiments/director_common.py research/lab/lab/experiments/smallaccount.py research/lab/lab/experiments/smallaccount_s2.py research/lab/lab/factory/ledger.py research/lab/la",
+   "usd": 4.68
+  },
+  {
+   "title": "Datenfehler unter den Short-Ergebnissen (R4)",
+   "ok": false,
+   "at": 1793110352000,
+   "why": "Unerlaubte Dateien geändert: research/lab/lab/experiments/fam_common.py research/lab/results/data_fixes_r4.md research/lab/tests/test_fam_common_perps.py research/recorder/recorder/backfill.py research/recorder/tests/tes",
+   "usd": 3.16
+  },
+  {
+   "title": "Backups, die sich wiederherstellen lassen (R3)",
+   "ok": false,
+   "at": 1793109731000,
+   "why": "Unerlaubte Dateien geändert: research/lab/lab/ops/jobs.py research/lab/tests/test_jobs.py research/ops/jobs.yaml research/sync-to-pc.sh.",
+   "usd": 1.39
+  },
+  {
+   "title": "Keine stillen Fehler mehr (R2)",
+   "ok": false,
+   "at": 1793109347000,
+   "why": "Unerlaubte Dateien geändert: research/lab/lab/ai/local.py research/lab/lab/ops/briefing.py research/lab/lab/ops/jobs.py research/lab/lab/ops/notify.py research/lab/tests/test_ai_local.py research/lab/tests/test_jobs.py r",
+   "usd": 2.4
+  }
+ ],
+ "running": [
+  {
+   "title": "Briefing mit Entscheidungen (R9)",
+   "since": 1793118417000,
+   "waiting": false
+  }
+ ],
+ "queued": 2,
+ "held": [
+  "Adaptiver Selektor normales Trading (A2)",
+  "Forschungs-Fabrik (F1)"
+ ],
+ "budget": {
+  "balance_usd": 0.0,
+  "left_usd": -165.8,
+  "reserve_usd": 10.0,
+  "since": "2026-10-24T00:14:08",
+  "paused": true
+ }
+}

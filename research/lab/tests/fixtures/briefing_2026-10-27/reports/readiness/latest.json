@@ -1,0 +1,735 @@
+{
+ "generated": "2026-10-27 06:30 UTC",
+ "generated_ms": 1793082612181,
+ "status": "watch",
+ "autopilots": [
+  {
+   "name": "Auto-Pick (main)",
+   "kind": "autopilot",
+   "on_account": true,
+   "ready": false,
+   "passed": 6,
+   "total": 9,
+   "days_to_go": 42,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": true
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": false
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": true
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": true
+    }
+   ]
+  },
+  {
+   "name": "Lab · Donchian 20/10 · top 10 by volume each day (fails deflation, forward evidence only) (sleeve of Auto-Pick (main))",
+   "kind": "sleeve",
+   "on_account": true,
+   "ready": false,
+   "passed": 4,
+   "total": 9,
+   "days_to_go": 42,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Lab · 28d · top 20 by volume each day · regime · seven weekly tranches, band 50 % (fails deflation, forward evidence only) (sleeve of Auto-Pick (main))",
+   "kind": "sleeve",
+   "on_account": true,
+   "ready": false,
+   "passed": 7,
+   "total": 9,
+   "days_to_go": 42,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": true
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": true
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": true
+    }
+   ]
+  },
+  {
+   "name": "Lab · 28d · daily · vol 40% · regime (sleeve of Auto-Pick (main))",
+   "kind": "sleeve",
+   "on_account": true,
+   "ready": false,
+   "passed": 7,
+   "total": 9,
+   "days_to_go": 42,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": true
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": true
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": true
+    }
+   ]
+  },
+  {
+   "name": "Breakout alone (forward control)",
+   "kind": "autopilot",
+   "on_account": true,
+   "ready": false,
+   "passed": 4,
+   "total": 9,
+   "days_to_go": 33,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Crypto + SPY (forward test)",
+   "kind": "autopilot",
+   "on_account": true,
+   "ready": false,
+   "passed": 4,
+   "total": 9,
+   "days_to_go": 48,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Lab · Donchian 20/10 · top 10 by volume each day (fails deflation, forward evidence only) (sleeve of Crypto + SPY (forward test))",
+   "kind": "sleeve",
+   "on_account": true,
+   "ready": false,
+   "passed": 4,
+   "total": 9,
+   "days_to_go": 48,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Lab · SPY bought and held · back to its share once a month (sleeve of the Crypto + SPY forward test) (sleeve of Crypto + SPY (forward test))",
+   "kind": "sleeve",
+   "on_account": true,
+   "ready": false,
+   "passed": 4,
+   "total": 9,
+   "days_to_go": 48,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Test · Memecoin rotation (experiment)",
+   "kind": "autopilot",
+   "on_account": true,
+   "ready": false,
+   "passed": 3,
+   "total": 9,
+   "days_to_go": 27,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": false
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Test · BTC above 200-day (experiment)",
+   "kind": "autopilot",
+   "on_account": true,
+   "ready": false,
+   "passed": 3,
+   "total": 9,
+   "days_to_go": 27,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": false
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Test · TSMOM tranches",
+   "kind": "autopilot",
+   "on_account": true,
+   "ready": false,
+   "passed": 4,
+   "total": 9,
+   "days_to_go": 42,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": true
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "Funding carry (paper, experiment)",
+   "kind": "autopilot",
+   "on_account": false,
+   "ready": false,
+   "passed": 3,
+   "total": 9,
+   "days_to_go": null,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": false
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": false
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": false
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": false
+    }
+   ]
+  },
+  {
+   "name": "M4 perps (paper, experiment)",
+   "kind": "autopilot",
+   "on_account": false,
+   "ready": false,
+   "passed": 6,
+   "total": 9,
+   "days_to_go": null,
+   "rules": [
+    {
+     "id": "record",
+     "label": "Time and trades on the Alpaca paper account",
+     "pass": false
+    },
+    {
+     "id": "profit",
+     "label": "Net P&L above zero after fees",
+     "pass": true
+    },
+    {
+     "id": "weeks",
+     "label": "Positive weeks",
+     "pass": false
+    },
+    {
+     "id": "benchmark",
+     "label": "Ahead of its benchmark",
+     "pass": false
+    },
+    {
+     "id": "drawdown",
+     "label": "Max drawdown",
+     "pass": true
+    },
+    {
+     "id": "band",
+     "label": "Inside its backtest band",
+     "pass": true
+    },
+    {
+     "id": "reconcile",
+     "label": "Alpaca reconciliation clean",
+     "pass": true
+    },
+    {
+     "id": "inflation",
+     "label": "Beats inflation",
+     "pass": true
+    },
+    {
+     "id": "etf",
+     "label": "Beats a plain ETF",
+     "pass": true
+    }
+   ]
+  }
+ ]
+}

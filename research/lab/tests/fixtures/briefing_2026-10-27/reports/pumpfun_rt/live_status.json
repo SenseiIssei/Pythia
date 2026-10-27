@@ -1,0 +1,29 @@
+{
+ "t": 1792844728651,
+ "running": false,
+ "on": false,
+ "mode": "test",
+ "rule": "P_pool0_wait",
+ "balance_sol": 0.041501873,
+ "pnl_today_sol": -0.135970234,
+ "trades_today": 51,
+ "wins_today": 29,
+ "pnl_total_sol": -0.476552189,
+ "trades_total": 149,
+ "since_ms": 1792688957608,
+ "gate": [
+  "paused by the owner since 12:25 UTC"
+ ],
+ "refusing": "the live service stopped",
+ "limits": {
+  "max_trade_sol": 0.0,
+  "max_open": 1,
+  "max_exposure_sol": 0.031501873,
+  "max_daily_loss_sol": null,
+  "max_total_sol": null,
+  "kind": "wallet"
+ },
+ "stake": {
+  "sol": 0.0
+ }
+}

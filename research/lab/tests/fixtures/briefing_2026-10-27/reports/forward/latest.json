@@ -1,0 +1,161 @@
+{
+ "generated_ms": 1793081703316,
+ "updated_ms": 1793081703316,
+ "books": [
+  {
+   "kind": "book",
+   "name": "tsmom",
+   "status": "watch"
+  },
+  {
+   "kind": "book",
+   "name": "tsmom_regime",
+   "status": "watch"
+  },
+  {
+   "kind": "book",
+   "name": "tsmom_top20",
+   "status": "watch"
+  },
+  {
+   "kind": "book",
+   "name": "breakout_top10",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "tsmom_tranches",
+   "status": "unknown"
+  },
+  {
+   "kind": "book",
+   "name": "m4_ls",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "picks_ls",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "picks_ls_v2",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "memes_rotation",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "memes_tsmom",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "trend4h_pullback",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "btc_gated",
+   "status": "on_track"
+  },
+  {
+   "kind": "book",
+   "name": "tsmom_tranches_lowmax",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "tsmom_tranches_lowkr",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "funding_carry",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "m4_perps",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "onchain_breakout_sol",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "onchain_breakout_top10_live",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "onchain_longterm",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "onchain_meme_fresh_win",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "onchain_meme_momentum_trail",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "onchain_meme_organic_trend",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "onchain_meme_trend_top",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "perps_neutral",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "pumpfun_filtered",
+   "status": "unknown"
+  },
+  {
+   "kind": "book",
+   "name": "pumpfun_filtered_quick",
+   "status": "unknown"
+  },
+  {
+   "kind": "book",
+   "name": "pumpfun_migration",
+   "status": "unknown"
+  },
+  {
+   "kind": "book",
+   "name": "small100_breakout_sol3",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "small40_spy_trend",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "small40_vol_target",
+   "status": "early"
+  },
+  {
+   "kind": "book",
+   "name": "small50_tsmom1",
+   "status": "early"
+  }
+ ]
+}

@@ -42,6 +42,7 @@ def data(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHIA_AUTOPILOT_STATE_URL", "off")
     monkeypatch.setenv("PYTHIA_QUIET_HOURS", "off")
     monkeypatch.setenv("PYTHIA_LOCAL_LLM", "off")          # the briefing's summary: its template, no model
+    monkeypatch.setenv("PYTHIA_NOTIFY_ON", "discordBoth,discordNews")   # both languages and the news (off by default)
     monkeypatch.setattr(notify, "_DISCORD_IDS", {})
     return tmp_path
 
@@ -417,6 +418,7 @@ def test_the_briefing_goes_to_both_channels_and_no_dm(bot, monkeypatch):
     posts = bot.posts()
     assert [c for c, _, _ in posts] == [IDS["briefing"], EN["briefing"]]
     day = {lg: notify.day_label(NOW, lg) for lg in ("de", "en")}
-    de, en = posts[0][1]["embeds"][0], posts[1][1]["embeds"][0]
+    de, en = posts[0][1]["embeds"][1], posts[1][1]["embeds"][1]           # the head after "to decide"
+    assert posts[0][1]["embeds"][0]["title"].startswith("🟢 " + notify.tr("bf_decide_none", "de"))
     assert de["title"] == "☀️ " + notify.tr("bf_title", "de", day=day["de"])
     assert en["title"] == "☀️ " + notify.tr("bf_title", "en", day=day["en"]) and en["title"] != de["title"]

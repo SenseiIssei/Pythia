@@ -1,0 +1,125 @@
+{
+ "updated_ms": 1793085305273,
+ "models": [
+  {
+   "code": "M1",
+   "status": "shadow",
+   "decisions": [
+    {
+     "date": "2026-10-13",
+     "decision": "kept"
+    },
+    {
+     "date": "2026-10-25",
+     "decision": "kept"
+    }
+   ]
+  },
+  {
+   "code": "M2",
+   "status": "in use",
+   "decisions": [
+    {
+     "date": "2026-10-13",
+     "decision": "kept"
+    }
+   ]
+  },
+  {
+   "code": "M7",
+   "status": "retired",
+   "decisions": []
+  },
+  {
+   "code": "M13",
+   "status": "retired",
+   "decisions": []
+  },
+  {
+   "code": "M14",
+   "status": "retired",
+   "decisions": []
+  },
+  {
+   "code": "M15",
+   "status": "retired",
+   "decisions": []
+  },
+  {
+   "code": "M8",
+   "status": "failed its gate",
+   "decisions": [
+    {
+     "date": "2026-10-15",
+     "decision": "rejected"
+    },
+    {
+     "date": "2026-10-25",
+     "decision": "rejected"
+    }
+   ]
+  },
+  {
+   "code": "M8q",
+   "status": "shadow",
+   "decisions": [
+    {
+     "date": "2026-10-15",
+     "decision": "promoted"
+    },
+    {
+     "date": "2026-10-25",
+     "decision": "kept"
+    }
+   ]
+  },
+  {
+   "code": "M8u",
+   "status": "shadow",
+   "decisions": [
+    {
+     "date": "2026-10-21",
+     "decision": "promoted"
+    }
+   ]
+  },
+  {
+   "code": "M10",
+   "status": "failed its gate",
+   "decisions": [
+    {
+     "date": "2026-10-15",
+     "decision": "rejected"
+    },
+    {
+     "date": "2026-10-25",
+     "decision": "rejected"
+    }
+   ]
+  },
+  {
+   "code": "M11",
+   "status": "failed its gate",
+   "decisions": [
+    {
+     "date": "2026-10-15",
+     "decision": "rejected"
+    },
+    {
+     "date": "2026-10-26",
+     "decision": "rejected"
+    }
+   ]
+  },
+  {
+   "code": "M12",
+   "status": "failed its gate",
+   "decisions": [
+    {
+     "date": "2026-10-15",
+     "decision": "rejected"
+    }
+   ]
+  }
+ ]
+}
