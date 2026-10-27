@@ -15,6 +15,7 @@ numbers formatted in the messages' language, one overview chart:
   lab                    the model zoo (reports/models) and the study reports that are new
   research factory       per factory one line (reports/pumpfun_rt/factory.json F3, reports/smallaccount/factory.json
                          F2): trials, the bar, the best new candidate held back, books, model settings adopted;
+                         G2's model factory (reports/models/factory.json): specs, held back, passed, shadows;
                          A1's allocator (reports/pumpfun_rt/allocator.json): its pick and why, never the live bot
   Pokemon, CS2, coins,   reports/pokemon, reports/cs2 and cs2_trends, reports/trending and
   stocks and ETFs, news  listings, the engines' US shares and the ETF closes, the news
@@ -603,14 +604,30 @@ def alloc_line(rep: dict | None, lang: str) -> Line | None:
     return Line(text, tr("bf_alloc_lead", lang))
 
 
-def factory_section(reps: dict, alloc: dict | None, lang: str) -> list:
-    """Per factory with a fresh report one line, then the allocator's line; nothing when no factory report is
-    fresh. `reps` code -> the fresh report or None."""
+def model_factory_line(rep: dict | None, lang: str) -> Line | None:
+    """G2's model factory (reports/models/factory.json) in one line: specs tried last night and in all, held back
+    and passed, the shadows running (eligible for the allocator) and retired that night. Paper only."""
+    if not isinstance(rep, dict) or _num(rep.get("trials_ever")) is None:
+        return None
+    sh = [m for m in rep.get("shadows") or [] if isinstance(m, dict) and m.get("status") != "retired"]
+    return Line(tr("bf_mf", lang, n=int(_num(rep.get("trials_today")) or 0),
+                   ever=i18n.num(_num(rep.get("trials_ever")) or 0, 0, lang), held=int(_num(rep.get("held_today")) or 0),
+                   passed=int(_num(rep.get("passed_today")) or 0), active=len(sh),
+                   eligible=sum(1 for m in sh if m.get("status") == "eligible"),
+                   retired=len(rep.get("retired_today") or [])), tr("bf_fac_G2", lang))
+
+
+def factory_section(reps: dict, alloc: dict | None, lang: str, models: dict | None = None) -> list:
+    """Per factory with a fresh report one line, then the allocator's line, then G2's model factory when its
+    report is fresh (`models`); nothing when no factory report is fresh. `reps` code -> the fresh report or None."""
     lines = [ln for code, _, _ in FACTORIES if (ln := factory_line(code, reps.get(code), lang)) is not None]
+    mf = model_factory_line(models, lang)
+    if not lines:
+        return [mf] if mf is not None else []
     if not lines:
         return []
     al = alloc_line(alloc, lang)
-    return lines + ([al] if al is not None else [])
+    return lines + ([al] if al is not None else []) + ([mf] if mf is not None else [])
 
 
 # ---------------------------------------------------------------- what needs the owner today
@@ -703,7 +720,8 @@ def decide_card(items: list[str], lang: str) -> Card:
 SECTIONS = (("bf_sec_autopilots", "learn", "latest.json"), ("forward_test", "forward", "latest.json"),
             ("bf_sec_readiness", "readiness", "latest.json"), ("bf_research", "research", "latest.json"),
             ("bf_zoo_lead", "models", "latest.json"), ("bf_fac_F3", "pumpfun_rt", "factory.json"),
-            ("bf_fac_F2", "smallaccount", "factory.json"), ("bf_sec_coins", "trending", "latest.json"),
+            ("bf_fac_F2", "smallaccount", "factory.json"), ("bf_fac_G2", "models", "factory.json"),
+            ("bf_sec_coins", "trending", "latest.json"),
             ("bf_sec_pokemon", "pokemon", "latest.json"), ("bf_sec_cs2", "cs2", "latest.json"),
             ("bf_sec_ai_brief", "ai_brief", "latest.json"))
 
@@ -781,7 +799,7 @@ def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: flo
     lab = lab_section(read("models"), now, lang)
     if lab:
         cards.append(("bf_lab", Card("🧪", tr("bf_lab", lang), None, lab)))
-    fac = factory_section(facs, read("pumpfun_rt", "allocator.json"), lang)
+    fac = factory_section(facs, read("pumpfun_rt", "allocator.json"), lang, read("models", "factory.json"))
     if fac:
         cards.append(("bf_factory", Card("🏭", tr("bf_factory", lang), None, fac)))
     markets = (coins_section(read("trending"), read("listings"), now, lang) + stocks_section(engines, etf_closes(now), lang)

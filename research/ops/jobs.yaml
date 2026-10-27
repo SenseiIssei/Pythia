@@ -710,6 +710,22 @@ jobs:
     lock: heavy
     lock_wait: 1h
 
+  # G2 (research/lab/lab/models/factory.py, results/model_factory_g2.md): the model factory, daily. Draws specs
+  # (target of M8, M10, M12 or the strategy factory's 7-day forward return, a feature subset with G1's trees, LightGBM,
+  # ridge or logistic regression, a training window), each a trial in models/factory/ledger.jsonl, screened by a purged
+  # walk-forward 2021 to 2023 against the baseline and the zoo model it would replace; at most 2 a run held back
+  # (2024 to 2026-06, a DM p under 0.05 over all trials); passes run as shadows next to the zoo, retired after 60 days
+  # behind. Time budget PYTHIA_MODEL_FACTORY_BUDGET (seconds), resumable; reports/models/factory.md. Paper only.
+  - name: model-factory
+    description: model factory G2, daily; new model specs on the zoo's targets through a purged walk-forward against the baseline and the incumbent, held-back checks over all trials, shadows next to the zoo, reports/models/factory.md
+    schedule: "50 3 * * *"
+    command: python -m lab.models.factory
+    env: {PYTHIA_MODEL_FACTORY_BUDGET: "1500", PYTHIA_ML_THREADS: "3"}
+    resources: {cpus: 3, memory: 6g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 1h
+
   # M1 (research/lab/lab/experiments/modern_m1.py, results/modern_models_m1.md): newer model techniques as candidates
   # (Chronos-Bolt and TimesFM 2.5 zero shot, TabPFN v2 and CatBoost in the model factory, conformal intervals,
   # meta-labelling of the factory survivors), each judged by the bar its incumbent was judged by, monthly. The only

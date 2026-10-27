@@ -114,6 +114,7 @@ panel for its breadth features, so run `xs_daily` first.
 | `pumpfun_rt` factory F3 | Can a search find pump.fun strategies by itself, every night, without a language model, on realistic money (0.55 SOL)? Optuna's TPE over the pipeline's building blocks (entry at the migration with a 0 to 60 s delay and the pool wait or a fresh pool by its age; R2's win and rug models with thresholds, Y10's trend models and heat, pool SOL, distinct buyers, Y16's R3 rule, the block list; take profit, stop, time stop, Y12's lock, a partial sale; R2's sizing), every trial a realistic book on the record (walk-forward by UTC day), scored by the median 30-day end wallet of a bootstrap less the chance of losing 80 %; a ledger that only grows deflates the bar; the last 2 days held back for the night's top 3; the LightGBM settings of R2's labels adopted only when better in 4 of 5 folds and on the held-back days; winners as paper books F3_<id> (`factory.py`, job `pumpfun-factory`) | First run, 30 trials (2026-10-26): on 2 scored days the best settings compound 0.55 SOL to 6 to 44 SOL, all three lose 80 % on the 2 held-back days; nothing passed the deflated bar, no book; the LightGBM settings of all five realistic labels beat the code's (log loss -0.001 to -0.003, 4 or 5 of 5 folds and held back). `results/pumpfun_factory_f3.md` |
 | `pumpfun_rt` adaptive A1 | The owner wants the system to pick its models and strategies by itself as conditions change: (1) a model zoo behind one interface (LightGBM with F3's settings, logistic regression, scikit-learn's histogram boosting, an online logistic regression learning every closed trade, a competing-risks hazard model for a dump before +30 %; no sequence model, no torch in the image) on R2's labels, walked forward by UTC day, and a selector per label (a stacked blend fitted out of fold among the candidates, 5 days ahead beyond the noise band to take over, retirement after 7 days behind the logistic one, isotonic out of fold), winners per market regime; (2) a Thompson sampling allocator over P_pool0_wait, P_pool0_wait_lock and P_pool5_top30t on realistic results (floor 5 %, drawdown guard 30 %). Does the selector beat the best single model, does the allocator beat the best single strategy at the live latency? Pre-registered, 26 and 3 comparisons | No and no. Selector on 0 of 6 labels (3 to 4 scored days: the evidence rule could not fire, it stayed with LightGBM, its calibration cost log loss on 5 labels); the best single member is the histogram boosting on all six, the blend lower still in every regime but one (a hint). Allocator on the realistic replay 2026-10-22 to 25: +73 % log growth at 10 % a trade against +231 % for P_pool0_wait_lock, 4 of the 10 days a yes needs. Both run daily in the retrain (`reports/pumpfun_rt/zoo.md`, `allocator.json`, a line on the card); no paper book and not the live bot changes. See `results/pumpfun_adaptive_a1.md`. (2026-10-26) |
 | `modern_m1` (M1, `lab.models.factory`, `fm`, `conformal`, `metalabel`) | Can newer model techniques improve the models, each judged by its incumbent's bar? Chronos-Bolt small and TimesFM 2.5 zero shot (return quantiles, variance, volume, and as inputs to M10 and M8q), TabPFN v2 and CatBoost in the model factory and the pump.fun zoo's walk-forward, the small account's regime choice, rolling split conformal intervals with a sizing on their width, meta-labelling of the factory survivors; torch and the models only in the ML image (`Dockerfile.ml`, job `modern-models`, off until built) | No incumbent is beaten. Return quantiles worse than M8q (pinball 105.2 and 105.8 bps vs 103.9), variance worse than M10 (QLIKE 0.406 and 0.377 vs 0.326, TimesFM not significantly better than HAR), Chronos as an input 1.0 % and 0.1 % lower, not significant; TabPFN and CatBoost lowest raw log loss on most pump.fun select labels, none of 10 comparisons passes A1's deflated bar against LightGBM on 5 days, TabPFN skips the 172,000-row labels (CPU cap 3,000); no learner beats the base rate on the regime choice nor the 200-day rule's wallet; the conformal sizing lowers the Sharpe (0.25 vs 0.43); meta-labelling fails for both survivors. Passed but unused: next-day volume (both foundation models beat naive forecasts, p 1e-25) and the conformal coverage (79.9 % and 80.3 % for 80 %). Licences: Apache-2.0, TabPFN v2 under the Prior Labs License 1.1; TabPFN 2.5 to 3.5 and TimesFM 3.0 are non-commercial, the TabPFN ones excluding consumers, not used. Nothing live, no book changes. See `results/modern_models_m1.md`. (2026-10-27) |
+| `model_factory` (G2, `lab.models.factory`, job `model-factory`) | Can new prediction models appear by themselves? Specs (M8's, M10's and M12's targets and the strategy factory's 7-day forward return; the zoo's inputs and G1's trees; LightGBM, ridge, logistic; a training window), each a trial, a purged walk-forward 2021 to 2023 against the baseline and the incumbent, at most 2 a run held back at DM p < 0.05 / N, passes as zoo shadows | First run, 1,017 specs in 900 s: none passes the screen, none held back, no shadow. Best m8 0.4 % below the base rate (DM p 0.12), beating M8 (p 0.03); nothing beats HAR, the last 60 days' correlation or zero on the 7-day forward return; 54 one-year M12 specs had too few rows (minimum lowered to 200). The trials are the server's seed (`results/model_factory_seed/`), the bar starts at 4.9e-05. See `results/model_factory_g2.md`. (2026-10-27) |
 | `pumpfun_rt` bombers Y13 | The owner sees coins run +10,000 % to +59,000 %, often with big early buys: how many go 50x, 100x, 1000x from their first trade, how fast and how much is left at our speed; what the first 3 and 10 s show (the dev's buy, whales over 1, 3, 10 SOL, the creation slot's buyers, the creator's and the early buyers' history, names, Y10's trend features) in a purged walk-forward; and do paper books at 0.05 SOL with a runner exit (a third at 3x, a third at 10x, 50 % trail, -50 % stop, 24 h) pay at 1, 3, 10 s or the live latency? Pre-registered, 12 trials | No, at no latency. 174 of 39,566 coins went 100x within 6 h (62 a day, median 30 s after creation), but 84 % had their curve bought out within 3 s (bundles in the creation slot). A model sees them almost perfectly at 10 s (AUC 0.99, top 0.1 % 79 % precision against 0.42 %) because the run has already happened (curve progress alone: AUC 0.96); a 3 SOL buy in 10 s marks 10 % of coins, 2.3 % of them go 100x. Out of sample the curve books lose: the headline G3 -31.7 % per trade at 1 s to -37.5 % at the live latency (band below zero, -0.75 SOL a day), the whale rule -25.0 % to -21.5 % over 2,650 trades; one 100x trade pays for 3 to 4 losers, there are about 14 per bomber (W10: 9 and 190). Nothing changes for the live bot or any paper book. See `results/pumpfun_bombers.md`. (2026-10-23) |
 | `pumpfun_rt` rug filter Y16 | The live `P_pool0_wait` keeps buying coins that crash in one step past its -20 % stop (2026-10-23: SpaceX AI -81 %, ROOM -52 % within 2 s): does a rug rule at the entry help? Twins that skip the entry when P(rug0t), Y10's rug model with the trend features, is above its base rate (R1) or half of it (R2), or when the best single feature picked in sample says so (R3: the first five outside buyers hold more than 40.8 % of the supply); the features at the entry against the crashes (a loss beyond 35 % or one pool trade taking 30 % off the price). Rug models trained day by day in the replay; against P_pool0_wait at the paper model's latency and at Y9's measured live latency, 0.1 SOL, 4 slots, daily loss limits 0.25 and 1.0 SOL, Y8's rule. Pre-registered, 12 trials | No, at either latency. Out of sample (2026-10-22 to 2026-10-23 22:45 UTC) at the live latency under 1.0 SOL R1 -0.5 points per entry against P_pool0_wait's -2.7 % (band -3.4 to +2.1), R2 -2.6, R3 +0.5 (band -3.0 to +3.9, +0.261 SOL); under 0.25 SOL P_pool0_wait stopped after 8 entries: no band. At the paper latency R3 passes under 1.0 SOL only (+5.7 points, band +0.4 to +11.7). On P_pool0_wait's own entries R1 cut 17 of 60 crashes and 37 of 174 winners, R2 30 crashes and 71 winners, R3 24 and 36. No feature separates the crashes well (AUC at most 0.63: P(rug0t), the top ten holders' share); crashes have fewer buyers and more supply with the first five buyers; 55 % of the entries are coins created and completed in the same second. The three run on paper (R1, R2 once the retrain has written `sel_rug0t`); the live bot is unchanged. See `results/pumpfun_rugfilter.md`. (2026-10-24) |
 | `pumpfun_rt` social links Y14 | Free, no X API: the X, telegram and website links inside each coin's metadata, normalised (X link kind, X handle, tweet id, telegram handle, website domain; the fetch on again through gateway.pinata.cloud). Features before the decision: earlier coins with the same handle, tweet, telegram or domain and how many of them migrated, the creator's reuse of the handle, handle equal to the symbol, coins on the same tweet or handle in the last 10 and 60 minutes. Y10's select and early models with them as twins (`sel_win0s` ... `es_<label>`), `P_pool5_top30s` on `sel_win5s` against `P_pool5_top30t`, and `P_pool0_wait_social` (no recycled socials, no late narrative race) against `P_pool0_wait`. Pre-registered, 4 trials | Pending: the record has no metadata yet; the run needs 7 full days after the deploy (`python -m lab.pumpfun_rt.social14`). Both books run on paper from the deploy, the retrain trains the twins once 200 label rows have metadata; every earlier book replays identically (2026-10-20: 18,956 closed trades, 1,060 failed buys). See `results/pumpfun_social_y14.md`. (2026-10-26) |
@@ -594,6 +595,49 @@ weekly mode and without changing it.
   paper books. Resumable: a rerun the same day only evaluates what is left of
   the budget (60, `PYTHIA_FACTORY_SMALL_BUDGET` or `--budget`).
 
+## Model factory (G2)
+
+`python -m lab.models.factory` (daily on the server, job `model-factory`)
+makes, tests and rotates prediction models by itself (`models/factory.py`,
+next to M1's learners). Paper only.
+
+- **Specs.** A target (M8's next-day direction, M10's next-day realised
+  variance, M12's 20-day BTC and SPY correlation, or the strategy factory's
+  forward return: the next 7 days' log return over the coin's 30-day vol
+  scaled to 7 days, less
+  the day's cross-sectional mean, on the 15 Alpaca coins), a feature subset
+  of the zoo's builders (M8's and M10's inputs, M12's for M12) with up to two
+  of G1's expression trees on the coin targets (evaluated by
+  `factory.build.tree_values` on the panel pivoted to day and coin), a
+  learner (LightGBM from a small space, ridge, logistic regression; no MLP,
+  torch is not in the lab image) and a training window (1, 2, 3 years or all).
+  Random (the first run, then a third) or a mutation of a target's best.
+- **Screen.** Quarterly walk-forward 2021 to 2023, expanding, purged (a
+  training row's label ends before the test block starts: 1 day for M8 and
+  M10, 7 for the forward return, 32 calendar days for M12), against the
+  trivial baseline (base rate, HAR, the last 60 days' correlation, 0) and the
+  zoo model it would replace, fitted by its own module in the same folds.
+  Fitness is the smaller of the two gains in %.
+- **Ledger and bar.** Every spec is one trial in
+  `<data>/models/factory/ledger.jsonl`, keyed by a hash of its settings.
+  At most two screen passes a run are held back on 2024-01 to 2026-06 (R6's
+  lockbox stays untouched), each look written to `holdout.jsonl` first; a
+  pass needs a lower loss than the baseline and the incumbent with a DM p
+  under 0.05 / N, N every trial in the ledger. Losses are not Sharpes, so
+  these trials stay out of the trial registry.
+- **Shadows.** A pass joins the zoo as a shadow member (at most 2 a run, 6 at
+  a time): refitted daily, its forecast logged before the outcome and scored
+  against the baseline and the zoo's logged forecasts; after 30 scored days
+  the allocator may pick it (a Thompson draw per target over the incumbent
+  and the eligible members, `picks.json`, for paper books only); 60 days
+  behind the baseline or the incumbent retire it.
+- **Run.** A time budget (`PYTHIA_MODEL_FACTORY_BUDGET`, seconds), resumable;
+  `results/model_factory_seed/` (the first run's trials) is merged first;
+  `reports/models/factory.{md,json}`, one line in the briefing's research
+  factory card. `tests/test_model_factory_g2.py` replaces every row after a
+  day by noise and checks that no forecast, baseline, incumbent, tree input
+  or known loss before it moves. First run: `results/model_factory_g2.md`.
+
 ## Feature store (D3)
 
 `lab.features` is one point-in-time source for every feature a model or a
@@ -624,8 +668,8 @@ factory may read, the recorder's order books included.
   a day is new or its raw files changed; the nightly job `features`
   (`python -m lab.features build`) also writes `coverage.json`. Raw
   retention is unchanged, the cache keeps the days the raw books lose.
-- **Factories** (`features/adapter.py`). There is no model factory yet:
-  `model_frame(names, rows)` is the matrix one would read. The strategy
+- **Factories** (`features/adapter.py`). `model_frame(names, rows)` is the
+  matrix a model would read (G2's model factory reads the zoo's daily panels). The strategy
   factory's expression trees take any feature as a leaf `f.<name>` (a dollar
   amount like a level, a market feature like `btc`); the weekly search draws
   those defined daily whose coverage spans half of its in-sample window (today

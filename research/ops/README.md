@@ -38,6 +38,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 02:20 | feature store D3: caches the finished UTC days of the recorded books (five venues), Kraken trades, funding, premium, open interest and liquidations as hourly features in `/srv/pythia-data/features/`, only days that are new or whose raw files changed, then `features/coverage.json` (`lab.features build`, about a minute, 1.8 GB at most; the `heavy` lock) | `jobs.yaml`: `features` |
 | 03:00 | strategy factory F2, small-account mode: 60 new genomes for 40 and 100 EUR wallets on BTC, ETH, SOL, SPYx, QQQx, PAXG and USDC at Jupiter's real costs, four held-back checks against holding SPYx and BTC, the 40 EUR shadow wallets stepped and reviewed, `reports/smallaccount/factory.md` (`lab.factory small`, seconds; the `heavy` lock, resumable) | `jobs.yaml`: `factory-small` |
+| 03:50 | model factory G2: new model specs (target of M8, M10, M12 or the strategy factory's 7-day forward return, a feature subset with G1's trees, LightGBM, ridge or logistic regression, a training window), each a trial in `models/factory/ledger.jsonl`, a purged walk-forward 2021 to 2023 against the baseline and the zoo model it would replace, at most 2 held back (2024 to 2026-06, DM p under 0.05 over all trials), passes as shadows next to the zoo, `reports/models/factory.md` (`lab.models.factory`, 25 minutes of search by `PYTHIA_MODEL_FACTORY_BUDGET`, 3 CPUs, 6 GB, the `heavy` lock, resumable; paper only) | `jobs.yaml`: `model-factory` |
 | 12:00 on the 1st | M1, newer model techniques against the incumbents in the ML image `pythia-lab-ml`: Chronos-Bolt and TimesFM 2.5 zero shot, TabPFN v2 and CatBoost in the model factory and the pump.fun zoo's walk-forward, the small account's regime choice, conformal intervals and a sizing on them, meta-labelling of the factory survivors, `reports/models/modern_m1/` (`lab.experiments.modern_m1`, 2 to 4 hours, 3 CPUs, 6 GB, the `heavy` lock; off until the image is built, see "The ML image") | `jobs.yaml`: `modern-models` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
@@ -884,6 +885,31 @@ docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-la
 
 ```bash
 docker run --rm --cpus 4 --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.train --status --no-notify
+```
+
+### Model factory (G2)
+
+`lab.models.factory` (job `model-factory`, 03:50, the `heavy` lock) makes
+new models without anyone writing one. Each run, in this order:
+
+| Step | What it does | Writes |
+|---|---|---|
+| shadow | every member refitted on all known rows writes its forecast and the baseline's for the newest open day; forecasts whose outcome is known are scored against the baseline and the zoo's own logged forecasts (`models/zoo/<name>/shadow.jsonl`); 30 scored days make it eligible, 60 behind the baseline or the incumbent retire it; per target a Thompson draw over the incumbent and the eligible members | `models/factory/shadows.json`, `shadow/<id>.jsonl`, `picks.json` |
+| search | specs drawn at random (the whole first run, a third afterwards) or mutated from a target's ten best, each one trial: a quarterly purged walk-forward 2021 to 2023 (a training label ends before the test block starts) against the trivial baseline and the zoo model it would replace, fitted in the same folds | `models/factory/ledger.jsonl` |
+| held back | at most 2 a run of the screen passes see 2024-01 to 2026-06 (R6's lockbox from 2026-07 is never looked at), each look written before it is scored; a pass needs a lower loss than both with a Diebold-Mariano p under 0.05 divided by every trial in the ledger | `models/factory/holdout.jsonl` |
+| admit | passes become shadow members, at most 2 a run and 6 at a time | `models/factory/shadows.json` |
+| report | trials, passes, shadows, retirements, the allocator's picks; a line in the briefing's research factory card | `reports/models/factory.{md,json}` |
+
+The search stops when the day's budget is spent (`PYTHIA_MODEL_FACTORY_BUDGET`
+seconds, 1,500 in the table); a rerun the same day only uses what is left, and
+every trial and look is on disk the moment it is made. The first run's 1,017
+trials (`research/lab/results/model_factory_seed/`) are merged before the
+first search, so they count on the server. The allocator's picks
+are for paper books only; no book reads them yet, and nothing reaches the
+engine, a live bot or money. A run by hand:
+
+```bash
+docker run --rm --cpus 3 --memory 6g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.models.factory --budget 300
 ```
 
 ### The ML image (M1)
