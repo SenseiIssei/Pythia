@@ -6,7 +6,7 @@ the briefing comes from a small model on this machine now, or from the owner's l
   1. the owner's PC through the relay on the VPS (OpenAI-compatible at <relay>/v1), when PYTHIA_LOCAL_LLM_RELAY_URL
      and PYTHIA_LOCAL_LLM_TOKEN are set (the owner's env file, /etc/pythia/local-llm.env, never the repo) and the
      relay's status route (PYTHIA_LOCAL_LLM_RELAY_STATUS, /status) says the PC is online;
-  2. the VPS model: llama.cpp's server with Qwen3 4B Instruct Q4_K_M on 127.0.0.1:8090 (research/ops/local-llm.sh,
+  2. the VPS model: llama.cpp's server with Qwen3 4B Instruct Q4_K_M on 127.0.0.1:8091 (research/ops/local-llm.sh,
      PYTHIA_LOCAL_LLM_URL), 3 CPUs at a low CPU share, at most 4 GB;
   3. no text: every user keeps its template (also with PYTHIA_LOCAL_LLM=off).
 
@@ -42,7 +42,7 @@ from pathlib import Path
 
 from ..ops import notify
 
-VPS_URL = "http://127.0.0.1:8090"          # research/ops/local-llm.sh binds the server here, nowhere else
+VPS_URL = "http://127.0.0.1:8091"          # research/ops/local-llm.sh binds the server here, nowhere else
 VPS_MODEL = "qwen3-4b-instruct"
 STATUS_ROUTE = "/status"
 MAX_TOKENS = 160

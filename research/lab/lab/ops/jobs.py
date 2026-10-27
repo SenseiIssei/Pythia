@@ -1340,6 +1340,8 @@ def feed_check(t: Table, f: dict, now: datetime) -> tuple[str, bool, str]:
     name = f"feed {f['name']}"
     doc = _read_json(t.data / f["status"])
     if not isinstance(doc, dict):
+        if _first_period(t, f.get("job"), now):
+            return name, True, "not run yet"
         return name, False, f"no status file {f['status']}"
     at = _parse_iso(doc.get("at"))
     bad, parts = [], []
@@ -1361,6 +1363,29 @@ def feed_check(t: Table, f: dict, now: datetime) -> tuple[str, bool, str]:
     for part, err in sorted((doc.get("errors") or {}).items()):
         bad.append(f"{part} failed: {err}"[:120])
     return name, not bad, "; ".join(bad or parts)
+
+
+def _installed(t: Table, name: str) -> datetime | None:
+    """When the job came into the installed table (installed.json, else installed_at), None when unknown."""
+    live = _read_json(t.ops_dir / "installed.json") or {}
+    at = (t.ops_dir / "installed_at").read_text().strip() if (t.ops_dir / "installed_at").exists() else None
+    return _parse_iso(live.get(name)) or _parse_iso(at)
+
+
+def _first_period(t: Table, name: str | None, now: datetime) -> bool:
+    """The job has not run yet (state never) and was installed less than one schedule period plus an hour
+    ago (a chained job: one day); without an install time never."""
+    job = t.jobs.get(name) if name else None
+    installed = _installed(t, name) if job else None
+    if job is None or installed is None or job_status(t, job, now, installed)["state"] != "never":
+        return False
+    period = timedelta(days=1)
+    if job["cron"] is not None:
+        nxt = job["cron"].next_after(now)
+        after = job["cron"].next_after(nxt) if nxt else None
+        if nxt and after:
+            period = after - nxt
+    return now - installed < period + timedelta(hours=1)
 
 
 # ================================================================ retention

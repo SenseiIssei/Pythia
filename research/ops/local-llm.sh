@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The lab's local language model (B4): llama.cpp's server with Qwen3 4B Instruct (GGUF Q4_K_M), container
-# pythia-local-llm, on 127.0.0.1:8090 only. It words the briefing's summary line, the lab card's top line and tags
+# pythia-local-llm, on 127.0.0.1:8091 only. It words the briefing's summary line, the lab card's top line and tags
 # the news (lab.ai.local); it decides nothing, never touches trading and never sees a key.
 #
 #   sudo /opt/pythia-ops/local-llm.sh [up|down|status|bench] [--models DIR] [--port N]
@@ -12,7 +12,7 @@
 #   status  running or not, its memory now
 #   bench   one short call, the tokens a second it measured
 #
-# Before a start, up checks that nothing else holds the port (8090; --port only for tests) and names what does;
+# Before a start, up checks that nothing else holds the port (8091; --port only for tests) and names what does;
 # when docker run fails, its own error goes to the log and the job's exit code, never to /dev/null.
 #
 # Kept up rather than started per job: the jobs run in containers without docker, an idle server takes no CPU and
@@ -26,7 +26,7 @@ set -euo pipefail
 models=/srv/pythia-llm
 cmd=up
 name=pythia-local-llm
-port=8090
+port=8091
 image="ghcr.io/ggml-org/llama.cpp:server@sha256:5741ab30aae42af23ca57d9b98a6d4544cb09c21f372f92c5ee55312fa8b8b0c"
 repo=unsloth/Qwen3-4B-Instruct-2507-GGUF
 rev=a06e946bb6b655725eafa393f4a9745d460374c9

@@ -466,3 +466,24 @@ def test_study_targets_look_forward_only():
     assert math.isnan(t["ret"][29]) and t["ret"][30] == pytest.approx(math.log(close[31] / close[30]))
     assert t["vol"][30] == pytest.approx(1.0)
     assert math.isnan(t["ret"][-1])
+
+
+def test_feed_of_a_job_never_run_is_not_red_inside_its_first_period(tmp_path):
+    t = feeds_table(tmp_path)
+    p = tmp_path / "jobs.yaml"
+    p.write_text(p.read_text().replace('"5 * * * *"', '"20 0 * * *"'))
+    t = jobs.load_table(p)
+    row = lambda now: jobs.feed_check(t, t.feeds[0], now)  # noqa: E731
+    now = datetime(2026, 10, 27, 21, 7, tzinfo=UTC)
+    assert row(now) == ("feed src", False, "no status file free/src/health.json"), "no install time: red"
+    t.ops_dir.mkdir(parents=True, exist_ok=True)
+    (t.ops_dir / "installed_at").write_text("2026-10-27T12:00:00Z\n")
+    assert row(now) == ("feed src", True, "not run yet")
+    assert row(datetime(2026, 10, 28, 12, 59, tzinfo=UTC))[1] is False, "its 00:20 fire passed: late, red"
+    assert row(datetime(2026, 10, 28, 13, 30, tzinfo=UTC)) == ("feed src", False, "no status file free/src/health.json")
+    (t.ops_dir / "installed.json").write_text(json.dumps({"c": "2026-10-20T12:00:00Z"}))
+    assert row(now)[1] is False, "installed a week ago and never run: red"
+    (t.ops_dir / "installed.json").write_text(json.dumps({"c": "2026-10-27T12:00:00Z"}))
+    jobs.append_record(t, {"job": "c", "status": "failed", "exit_code": 1, "start": "2026-10-27T13:00:00Z",
+                           "end": "2026-10-27T13:01:00Z"})
+    assert row(now)[1] is False, "ran and failed: not 'never', red"

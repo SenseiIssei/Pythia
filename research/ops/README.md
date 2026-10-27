@@ -33,7 +33,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | Sun 09:00 | AI weekly review: one Sonnet call (batch) over every study and live result, three proposed experiments in `reports/ai/weekly.md`, never run by anything (`lab.ai.weekly`) | jobs.yaml `ai-weekly` |
 | Sun 11:00 | AI research director: one Opus call (effort high, batch) over every study summary and the trial ledger, 3 to 5 pre-registration drafts in `/opt/pythia-lab/proposals/` and a card, never run by anything (`lab.ai.director`, up to an hour) | jobs.yaml `ai-director` |
 | always | the owner's questions in Telegram, answered by Sonnet from the same fact sheet, at most 40 a day (`lab.ai.chat`; reads only) | container `pythia-ai-chat`, see "Questions in Telegram" |
-| every 15 min | local language model kept up: llama.cpp's server with Qwen3 4B Instruct (Q4_K_M) on 127.0.0.1:8090, 3 CPUs at a low share, 4 GB; downloads the pinned model once (`local-llm.sh up`, nothing while it runs as it should) | `jobs.yaml`: `local-llm` (host), see "Local language model" |
+| every 15 min | local language model kept up: llama.cpp's server with Qwen3 4B Instruct (Q4_K_M) on 127.0.0.1:8091, 3 CPUs at a low share, 4 GB; downloads the pinned model once (`local-llm.sh up`, nothing while it runs as it should) | `jobs.yaml`: `local-llm` (host), see "Local language model" |
 | after each news collect | the local model tags the new headlines with a topic and a relevance for the lab, 1 to 5 (`lab.ai.local --news`, about a minute for 100 headlines on the VPS) | `jobs.yaml`: `llm-news` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
 | 02:20 | feature store D3: caches the finished UTC days of the recorded books (five venues), Kraken trades, funding, premium, open interest and liquidations as hourly features in `/srv/pythia-data/features/`, only days that are new or whose raw files changed, then `features/coverage.json` (`lab.features build`, about a minute, 1.8 GB at most; the `heavy` lock) | `jobs.yaml`: `features` |
@@ -45,6 +45,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | after the learning loop | daily digest to the operator's webhook (`lab.ops.notify`, seconds); off since the morning briefing replaced it, `jobs.py run notify --force` still sends one | `jobs.yaml`: `notify` (off) |
 | 09:00 Berlin | morning briefing to Telegram and Discord: pump.fun Alpha phase, real-money accounts, paper and autopilots, lab, research factory (F3, F2 and the allocator), Pokemon, CS2, coins, stocks and ETFs, news, one overview chart; the summary line on top worded by the local model when every number in it is in the facts, else the template (`lab.ops.briefing`, seconds, up to 60 s more for the model; hourly 06 to 09 UTC, sends only in the hour that is 9 in Berlin, once a day) | `jobs.yaml`: `briefing` |
 | 20:00 Berlin | lab card "🧠 Labor" to Telegram and Discord: what the research factories (F3 pump.fun, F2 small wallets), the model zoo and the allocator did today, from their reports, at most 8 lines, one sentence of the local model on top under the same number rule (`lab.ops.labor`, seconds; at 18 and 19 UTC, sends only in the hour that is 20 in Berlin, once a day; the bot's #labor, else #briefing; category "lab") | `jobs.yaml`: `labor` |
+| 22:30 Mon to Fri | ETF closes: the lab's copy in `/srv/pythia-data/etf/daily` downloaded again after the US close, every symbol the ETF study, the small-account books and studies, `lab.history` and the briefing read, one at a time; a symbol that fails or returns an error page keeps its old file; exit 1 only when all fail; no study (`lab.collect.etf_daily`, under a minute) | `jobs.yaml`: `etf-daily` |
 | every 2 min | real-money fills of Kraken and Alpaca autopilots to Discord (`lab.ops.notify --live-fills`, reads the engines' state; the bot's #konten and a DM, else the webhook; nothing without either) | `jobs.yaml`: `discord-live-fills` |
 | always | Pythia's own Discord bot: lays out the owner's private server in German and English, keeps the channel map, answers the read-only slash commands `/status`, `/trades`, `/konten`, `/lab` for the owner only, in the channel's language (`research/discord`, 256 MB) | container `pythia-discord-bot`, see "Discord bot" |
 | every 10 min | forward report, new study verdicts, model decisions and new headlines to the bot's channels (`lab.ops.discord_feed`, seconds, reads files only; nothing without the bot token) | `jobs.yaml`: `discord-feed` |
@@ -179,7 +180,7 @@ and turns red when free space is under `min_free_gb`, when the disk would be
 full within 14 days at the faster fall in free space over the last 3 or 7 days
 (the whole disk, not only the tracked folders: docker images and caches count),
 when a dataset is over its `max_gb`, or when the newest file of a dataset with
-`max_age_h` is older than that many hours (`etf/daily` and `pokemon` have one
+`max_age_h` is older than that many hours (`etf/daily`, kept fresh by `etf-daily`, and `pokemon` have one
 too). The disk row also says how much is used outside the tracked folders
 (`untrackedGb` in `_ops/disk/latest.json`). A dataset with `retention_days` loses files older than that (by
 modification time, only names matching its `pattern`, never through a
@@ -619,10 +620,10 @@ Where it asks, in this order:
    `pc_online`, `up` or `ok`, says true. The jobs `briefing`, `labor` and `llm-news` read the file (optional).
 2. **The VPS model**: llama.cpp's server, container `pythia-local-llm`, Qwen3 4B Instruct 2507 in GGUF Q4_K_M
    (2.5 GB, a pinned file, revision and sha256 in `local-llm.sh`, the image pinned by digest), on
-   `127.0.0.1:8090` only, 3 CPUs at CPU share 256 (everything else goes first), 4 GB memory, no swap, read only,
+   `127.0.0.1:8091` only, 3 CPUs at CPU share 256 (everything else goes first), 4 GB memory, no swap, read only,
    no capabilities, the model folder `/srv/pythia-llm` read only (outside the data store, so no sync or backup
    carries it). The host job `local-llm` keeps it up every 15 minutes and downloads the model the first time.
-   Before a start it checks that nothing else holds 127.0.0.1:8090 (and names what does), and a failed
+   Before a start it checks that nothing else holds 127.0.0.1:8091 (and names what does), and a failed
    `docker run` leaves docker's own error in the job's log. `llm-news` exits 1 when every model call of a run
    failed, so a dead model turns the job red instead of reporting ok.
 3. **No text**: every user keeps its template. `PYTHIA_LOCAL_LLM=off` does the same on purpose.
@@ -664,7 +665,8 @@ data source of the table's `feeds` section gets a row `feed <name>`: red when
 its collector's `health.json` is missing, its last run or the newest value of
 one of its tables is older than `max_age`, more steps than `max_gaps` are
 missing in the last 7 days, a column is missing or a part of the run failed
-(no row while its job is disabled). The Lab
+(no row while its job is disabled; "not run yet", not red, while its job has never run and was
+installed less than one schedule period plus an hour ago). The Lab
 page shows it ("Is everything running?"); the PC gets it with the sync. Red
 for two runs in a row posts to Telegram (below, "Health alarm"), and again
 whenever another check is red for two runs while the first is still red.

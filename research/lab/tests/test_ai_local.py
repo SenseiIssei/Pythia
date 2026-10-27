@@ -425,6 +425,16 @@ def test_the_jobs_table_has_the_local_model_jobs():
     for name in ("briefing", "labor", "llm-news"):
         envs = t[name]["env_file"] if isinstance(t[name]["env_file"], list) else [t[name]["env_file"]]
         assert "/etc/pythia/local-llm.env?" in envs, name
-        assert t[name]["network"] == "host", "127.0.0.1:8090 and the relay"
+        assert t[name]["network"] == "host", "127.0.0.1:8091 and the relay"
     for name in ("ai-brief", "ai-news", "ai-critic", "ai-weekly"):
         assert not t[name]["enabled"], "the metered jobs stay off"
+
+
+def test_the_server_script_and_the_client_agree_on_the_port():
+    s = (OPS / "local-llm.sh").read_text()
+    assert re.search(r"^port=8091$", s, re.M), "8090 is held by another service on the host"
+    assert local.VPS_URL == "http://127.0.0.1:8091"
+    vps = [b for b in local.backends({}) if b["name"] == "vps"]
+    assert vps and vps[0]["url"] == "http://127.0.0.1:8091/v1"
+    vps = [b for b in local.backends({"PYTHIA_LOCAL_LLM_URL": "http://127.0.0.1:9999/"}) if b["name"] == "vps"]
+    assert vps[0]["url"] == "http://127.0.0.1:9999/v1"

@@ -555,7 +555,7 @@ jobs:
     timeout: 2m
     alert: false
 
-  # B4: the local language model, llama.cpp's server with Qwen3 4B Instruct on 127.0.0.1:8090, kept up at a low
+  # B4: the local language model, llama.cpp's server with Qwen3 4B Instruct on 127.0.0.1:8091, kept up at a low
   # CPU share (3 CPUs, 4 GB). Downloads the pinned model once; does nothing while it runs as it should.
   - name: local-llm
     description: keeps the local language model up (llama.cpp, Qwen3 4B, 127.0.0.1 only, 3 CPUs at a low share, 4 GB), downloads it once
@@ -1143,6 +1143,13 @@ jobs:
     schedule: "20 1 * * *"
     command: python -m lab.collect.defillama
     resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+
+  - name: etf-daily
+    description: the lab's daily ETF closes (etf/daily) downloaded again after the US close, every symbol the ETF study, the small books, history and the briefing read; a failed symbol keeps its old file, no study
+    schedule: "30 22 * * 1-5"
+    command: python -m lab.collect.etf_daily
+    resources: {cpus: 1, memory: 512m}
     timeout: 15m
 
   # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
