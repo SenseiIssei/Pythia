@@ -45,13 +45,17 @@ def daily_matrix(name: str, assets: list[str], closes: np.ndarray) -> np.ndarray
     return out[:, [pos[a] for a in assets]]
 
 
-def drawable(start_us: int, end_us: int, min_share: float = 0.5, cov: dict | None = None) -> list[str]:
-    """Features whose cached coverage (coverage.json of the nightly build) starts early enough to cover at
+def drawable(start_us: int, end_us: int, min_share: float = 0.5, cov: dict | None = None,
+             freq: str = "1d") -> list[str]:
+    """Features defined at `freq` (the factory's daily closes: not the hourly-only ones such as the last 4 hours
+    as one candle) whose cached coverage (coverage.json of the nightly build) starts early enough to cover at
     least `min_share` of [start_us, end_us); an empty list without a coverage file."""
     cov = store.read_coverage() if cov is None else cov
     out = []
     for n in R.names():
         c = cov.get("features", {}).get(n)
+        if freq not in R.get(n).freqs:
+            continue
         if not c or c.get("first_us") is None or end_us <= start_us:
             continue
         span = min(end_us, c["last_us"]) - max(start_us, c["first_us"])

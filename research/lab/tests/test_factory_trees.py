@@ -12,6 +12,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import pytest
 
 from lab import history
@@ -147,7 +148,8 @@ def test_operators_on_a_small_example():
 
 
 def _scrambled(c: build.Ctx, t: int, seed: int) -> build.Ctx:
-    """The same context with every bar after t replaced by noise (prices, volume, range, vol, BTC, universes)."""
+    """The same context with every bar after t replaced by noise (prices, volume, range, candles, vol, BTC,
+    universes)."""
     rng = np.random.default_rng(seed)
     def after(a, fn):
         a = a.copy()
@@ -156,6 +158,7 @@ def _scrambled(c: build.Ctx, t: int, seed: int) -> build.Ctx:
     pos = lambda s: np.exp(rng.normal(3, 2, s))      # noqa: E731
     return dataclasses.replace(
         c, px=after(c.px, pos), qv=after(c.qv, pos), hl=after(c.hl, lambda s: rng.uniform(0, 0.3, s)),
+        hlc=tuple(after(x, pos) for x in c.hlc),
         sigma=after(c.sigma, lambda s: rng.uniform(0.001, 0.2, s)), btc_px=after(c.btc_px, pos),
         alive=after(c.alive, lambda s: rng.random(s) < 0.7),
         uni={k: after(v, lambda s: rng.random(s) < 0.5) for k, v in c.uni.items()}, memo={})
@@ -206,6 +209,67 @@ def test_the_tree_cache_is_bounded(ctx):
     assert len(c.memo["_trees"]) <= build.TREE_CACHE
 
 
+# ---------------------------------------------------------------- C2: candle shapes as leaves
+
+def test_candle_shapes_from_high_low_close():
+    close = np.array([[10.0], [12.0], [11.0], [11.0], [np.nan], [12.0], [13.0], [14.0], [15.0], [16.0], [17.0],
+                      [18.0], [19.0]])
+    high, low = close + 1, close - 2
+    body, up, lo = (build.candle(high, low, close, n) for n in ("body", "upper", "lower"))
+    assert np.isnan(body[0, 0])                                                     # no close before: no open
+    assert body[1, 0] == pytest.approx(2 / 3) and up[1, 0] == pytest.approx(1 / 3) and lo[1, 0] == 0.0
+    assert body[2, 0] == pytest.approx(-1 / 3) and up[2, 0] == 0.0 and lo[2, 0] == pytest.approx(2 / 3)
+    assert np.isnan(body[4, 0]) and np.isnan(body[5, 0])                             # no bar, no open
+    ok = np.isfinite(body[:, 0])
+    assert np.allclose((np.abs(body) + up + lo)[ok, 0], 1.0)
+    bw, rw = build.candle(high, low, close, "body_w"), build.candle(high, low, close, "range_w")
+    assert np.isnan(bw[:12, 0]).all()                                               # the missing bar in each week
+    assert bw[12, 0] == pytest.approx((19 - 12) / (20 - 11)) and rw[12, 0] == pytest.approx((20 - 11) / 19)
+    one = np.ones((5, 1))
+    assert np.isnan(build.candle(one, one, one, "body")).all()                      # no range, no shape
+
+
+def test_candle_leaves_are_in_the_grammar_and_never_look_ahead(ctx):
+    assert set(grammar.CANDLE_LEAVES) <= set(grammar.LEAVES) and set(grammar.CANDLE_LEAVES) <= set(small.LEAVES)
+    for n in grammar.CANDLE_LEAVES:
+        assert not grammar.is_level(n) and not grammar.is_market(n)
+        t = {"op": "rank", "args": [w("ma", 5, leaf(n))]}
+        assert grammar.valid_tree(t)[0] and grammar.show_tree(t) == f"rank(ma_5({n}))"
+        x = build.leaf(dataclasses.replace(ctx, memo={}), n)
+        assert x.shape == ctx.px.shape and np.isfinite(x[300:][ctx.alive[300:]]).mean() > 0.95
+        assert np.isnan(x[~ctx.alive]).all()
+    rng = random.Random(21)
+    drawn = set()
+    for _ in range(200):
+        drawn |= grammar.leaves_of(grammar.random_tree(rng))
+    assert set(grammar.CANDLE_LEAVES) <= drawn
+    t_cut = 800
+    b, a = _scrambled(ctx, t_cut, 5), dataclasses.replace(ctx, memo={})
+    for n in grammar.CANDLE_LEAVES:
+        t = {"op": "rank", "args": [w("z", 20, leaf(n))]}
+        x = build.tree_score(a, t, a.uni["top20"], "top20")
+        y = build.tree_score(b, t, b.uni["top20"], "top20")
+        assert np.array_equal(x[: t_cut + 1], y[: t_cut + 1], equal_nan=True), n
+        assert not np.array_equal(x[t_cut + 8:], y[t_cut + 8:], equal_nan=True), n
+
+
+def test_small_candle_trees_score_the_coins_only(sctx):
+    g = dict(small.hold_genome("SPY"), signal={"kind": "expr", "tree": {"op": "rank", "args": [w("ma", 5, leaf("body_w"))]}})
+    g = small.canonical(g)
+    assert small.valid(g)[0]
+    s = small.tree_score(dataclasses.replace(sctx, memo={}), g["signal"]["tree"], np.ones(len(small.ASSETS), bool))
+    coins = [small.ASSETS.index(a) for a in small.CRYPTO]
+    etfs = [j for j in range(len(small.ASSETS)) if j not in coins]
+    assert np.isnan(s[:, etfs]).all() and np.isfinite(s[1000:, coins]).all()
+    none = small.make_ctx(*synthetic(), EURUSD, {})
+    assert np.isnan(small.tree_score(none, g["signal"]["tree"], np.ones(len(small.ASSETS), bool))).all()
+    days = synthetic()[0]
+    fr = pl.DataFrame({"day": days[:5], "symbol": ["BTCUSDT"] * 5, "high": [2.0] * 5, "low": [1.0] * 5,
+                       "close": [1.5] * 5})
+    hb = small.crypto_bars(days, fr)
+    assert hb["BTC"][0][:5].tolist() == [2.0] * 5 and np.isnan(hb["BTC"][0][5:]).all() and np.isnan(hb["ETH"][2]).all()
+
+
 # ---------------------------------------------------------------- counting, penalty, budget
 
 def test_a_tree_node_costs_more_than_a_part(ctx):
@@ -251,10 +315,15 @@ def test_every_tree_is_a_trial_and_the_report_shows_it(home, monkeypatch):  # no
 
 # ---------------------------------------------------------------- the small-account mode
 
+def bars_of(crypto: dict) -> dict:
+    """Daily (high, low, close) around the synthetic closes, a wick each way."""
+    return {a: (p * 1.03, p * 0.98, p) for a, p in crypto.items()}
+
+
 @pytest.fixture(scope="module")
 def sctx():
     days, crypto, etf = synthetic()
-    return small.make_ctx(days, crypto, etf, EURUSD, {"SPY": 0.003, "QQQ": 0.0, "GOLD": 0.01})
+    return small.make_ctx(days, crypto, etf, EURUSD, {"SPY": 0.003, "QQQ": 0.0, "GOLD": 0.01}, bars=bars_of(crypto))
 
 
 def test_small_tree_genomes_stay_in_its_grammar():
@@ -274,7 +343,7 @@ def test_small_tree_genomes_stay_in_its_grammar():
 def test_small_tree_weights_never_look_ahead(sctx):
     rng = random.Random(13)
     days, crypto, etf = synthetic(bump=(2400, 2.5))
-    b = small.make_ctx(days, crypto, etf, EURUSD, {"SPY": 0.003, "QQQ": 0.0, "GOLD": 0.01})
+    b = small.make_ctx(days, crypto, etf, EURUSD, {"SPY": 0.003, "QQQ": 0.0, "GOLD": 0.01}, bars=bars_of(crypto))
     for _ in range(40):
         g = small.random_tree_genome(rng)
         W1, W2 = small.weights(sctx, g), small.weights(b, g)

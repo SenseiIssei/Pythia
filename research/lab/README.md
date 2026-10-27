@@ -491,7 +491,12 @@ invents long-only daily strategies and holds them to the hand studies' bar.
   / close), annualised vol and BTC's close; operators return over n, moving
   average ratio and z-score over n (n from 3, 5, 10, 20, 50, 100, 200),
   cross-sectional rank within the universe, sign, clip, difference, ratio,
-  min and max; depth at most 3, at most 9 nodes; close, volume and BTC only
+  min and max; since C2 also candle shapes (`build.candle`, the open is the
+  close before since the panel has none): body, upper and lower wick as
+  shares of the day's range, the same for the last 7 days as one candle and
+  that candle's range over the close (`body_w`, `upper_w`, `lower_w`,
+  `range_w`; a range ratio is `ma_n(range)`);
+  depth at most 3, at most 9 nodes; close, volume and BTC only
   inside a window operator; a gate is made of BTC alone. Mutation (a window,
   an operator, a leaf, a new or hoisted subtree, a wrap) and subtree
   crossover; a canonical form, so equal trees are one key and one trial. A
@@ -551,7 +556,9 @@ weekly mode and without changing it.
   whole book, a vol target of 10 or 20 %, daily or weekly, a rebalance band
   of 0, 10 or 25 % of the book. At most 6 moving parts. Since G1 also the
   weekly mode's expression trees on the assets' close and vol and BTC's close
-  (30 % of the budget, at most 12 parts, 0.05 a node).
+  (30 % of the budget, at most 12 parts, 0.05 a node); since C2 also the
+  candle shapes of BTC, ETH and SOL from their daily bars (the ETF copies
+  have closes only, so a tree reading a shape scores the coins alone).
 - **Costs.** S1's wallet with S2's venue: Jupiter's recorded round trip at
   the order's size, the network fee and Sender tip a swap, the 5 USDC
   minimum, dust, the SOL reserve held idle, the way in as one SOL to USDC
@@ -607,7 +614,7 @@ factory may read, the recorder's order books included.
   `model_frame(names, rows)` is the matrix one would read. The strategy
   factory's expression trees take any feature as a leaf `f.<name>` (a dollar
   amount like a level, a market feature like `btc`); the weekly search draws
-  those whose coverage spans half of its in-sample window (today
+  those defined daily whose coverage spans half of its in-sample window (today
   `funding_8h`, `stables_chg7`, `coinbase_prem_bps`), the books' features
   start when the recorder did and wait until they do.
 - **Checks.** `tests/test_features.py` computes every feature by hand on a
@@ -655,6 +662,12 @@ closed by `as_of` (default now); a bar still forming is never complete.
   (ln high/low), `cdl_taker`, `cdl_vwap_dist`, `cdl_ret`, `cdl_ret_4h`,
   `cdl_ret_1d`, `cdl_ret_1w`, known at the bar's close
   (`lab/features/candles.py`); `lab.candles.store.measures()` gives the same
-  for any market.
+  for any market. C2 (the review of 2026-10-27 dropped the learned shapes,
+  the analog search and the sequence model, as likely hype on daily bars):
+  the last 4 hours, 24 hours or 7 days as one candle, `cdl_body_<tf>`,
+  `cdl_upper_<tf>`, `cdl_lower_<tf>`, `cdl_range_<tf>` (4h and 1d hourly
+  only, 1w hourly and daily), and `cdl_range_rel` (the bar's range over its
+  20-bar mean); the strategy factory's trees read the same shapes from the
+  panel itself (see "Expression trees").
 
 Tests: `python -m pytest tests` from `research/lab`.

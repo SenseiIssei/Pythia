@@ -509,6 +509,12 @@ def test_drawable_needs_coverage_over_half_the_window():
     assert adapter.drawable(us("2018-01-01"), us("2024-01-01"), 0.5, cov) == ["funding_8h"]
     assert adapter.drawable(us("2018-01-01"), us("2024-01-01"), 0.3, cov) == ["funding_8h", "oi_chg"]
     assert adapter.drawable(us("2018-01-01"), us("2024-01-01"), 0.5, {}) == []
+    # C2: a candle window known only hourly is never a daily leaf, the weekly one is
+    full = {"first_us": us("2017-08-17"), "last_us": us("2026-10-25")}
+    cdl = {"features": {"cdl_body_4h": full, "cdl_body_1d": full, "cdl_body_1w": full, "cdl_range_rel": full}}
+    assert adapter.drawable(us("2018-01-01"), us("2024-01-01"), 0.5, cdl) == ["cdl_range_rel", "cdl_body_1w"]
+    assert adapter.drawable(us("2018-01-01"), us("2024-01-01"), 0.5, cdl, "1h") == [
+        "cdl_range_rel", "cdl_body_4h", "cdl_body_1d", "cdl_body_1w"]
 
 
 # ---------------------------------------------------------------- the strategy factory's feature leaves

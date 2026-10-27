@@ -349,6 +349,11 @@ def describe_signal(s: dict) -> str:
 #
 #   leaves     close, volume (quote volume), range ((high - low) / close), vol
 #              (annualised vol), btc (BTC's close, the same for every coin)
+#              C2's candle shapes (build.candle), shares of the day's range: body ((close -
+#              open) / range, signed), upper and lower (the wicks); body_w, upper_w,
+#              lower_w the last 7 days as one candle and range_w its (high - low) / close.
+#              The open is the close before (the daily panels have none). A range ratio
+#              is ma_n(range) or ma_n(range_w): the range over its n-day average - 1.
 #   windowed   ret n     x[t] / x[t-n] - 1           (on a leaf)
 #              ma n      x / its n-day average - 1   (on a leaf; "x > ma_n" when above 0)
 #              z n       (x - n-day mean) / n-day sd
@@ -357,7 +362,7 @@ def describe_signal(s: dict) -> str:
 #   binary     diff, ratio, min, max
 #
 # close, volume and btc are levels (a price, a dollar amount): they appear only inside
-# ret, ma or z, which make them scale-free; range and vol are scale-free already and may
+# ret, ma or z, which make them scale-free; range, vol and the candle shapes are scale-free already and may
 # stand anywhere but at the root. Depth is the number of operator levels (a leaf is 0),
 # at most MAX_DEPTH; at most MAX_NODES nodes. A coin tree (a score or a filter) needs a coin series; a market tree
 # (a gate) is made of btc alone and has no rank. A genome uses a tree as its signal
@@ -366,7 +371,8 @@ def describe_signal(s: dict) -> str:
 # gate ({"kind": "xgate", "tree", "cut"}: the whole book in cash unless above cut).
 # complexity() counts a tree's nodes where a hand-made family counts 1.
 
-LEAVES = ("close", "volume", "range", "vol", "btc")
+CANDLE_LEAVES = ("body", "upper", "lower", "body_w", "upper_w", "lower_w", "range_w")
+LEAVES = ("close", "volume", "range", "vol", "btc") + CANDLE_LEAVES
 MARKET_LEAVES = ("btc",)
 LEVELS = ("close", "volume", "btc")          # only inside ret, ma or z
 # D3: every registered feature (lab.features) as a leaf "f.<name>". A level feature (a dollar amount) is

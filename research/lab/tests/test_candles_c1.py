@@ -483,7 +483,8 @@ def flake(tmp_path, monkeypatch):
 def test_candle_features_are_registered_and_computed_from_the_bars(flake):
     names = [n for n in features.names() if n.startswith("cdl_")]
     assert {"cdl_body", "cdl_upper", "cdl_lower", "cdl_range", "cdl_taker", "cdl_vwap_dist", "cdl_ret",
-            "cdl_ret_4h", "cdl_ret_1d", "cdl_ret_1w"} == set(names)
+            "cdl_ret_4h", "cdl_ret_1d", "cdl_ret_1w", "cdl_range_rel"} | {
+        f"cdl_{s}_{w}" for s in ("body", "upper", "lower", "range") for w in ("4h", "1d", "1w")} == set(names)
     t = T0 + DAY + 5 * HOUR
     f = features.frame(names, ["BTC", "ETH"], [t], "1h").filter(pl.col("asset") == "BTC").row(0, named=True)
     b = S.measures(S.candles("BTC", "1h", T0 - 7 * DAY, t, as_of=t, root=flake))
@@ -513,3 +514,41 @@ def test_candle_features_do_not_leak(flake):
     assert before.equals(after)
     assert not features.frame(names, ["BTC"], [t + 2 * HOUR], "1h").equals(
         before.with_columns(ts_us=pl.lit(t + 2 * HOUR)))
+
+
+def test_window_candles_are_the_last_bars_as_one(flake):
+    t = T0 + DAY + 5 * HOUR
+    names = [f"cdl_{s}_{w}" for s in ("body", "upper", "lower", "range") for w in ("4h", "1d", "1w")] + ["cdl_range_rel"]
+    f = features.frame(names, ["BTC"], [t], "1h").row(0, named=True)
+    b = S.candles("BTC", "1h", T0 - 7 * DAY, t, as_of=t, root=flake)
+    for w, k in (("4h", 4), ("1d", 24), ("1w", 168)):
+        x = b.tail(k)
+        o, h, lo, c = x["open"][0], x["high"].max(), x["low"].min(), x["close"][-1]
+        assert f[f"cdl_body_{w}"] == pytest.approx((c - o) / (h - lo)), w
+        assert f[f"cdl_upper_{w}"] == pytest.approx((h - max(o, c)) / (h - lo)), w
+        assert f[f"cdl_lower_{w}"] == pytest.approx((min(o, c) - lo) / (h - lo)), w
+        assert f[f"cdl_range_{w}"] == pytest.approx(np.log(h / lo)), w
+        assert f[f"cdl_upper_{w}"] + f[f"cdl_lower_{w}"] + abs(f[f"cdl_body_{w}"]) == pytest.approx(1.0)
+    r = np.log(b["high"] / b["low"]).to_numpy()
+    assert f["cdl_range_rel"] == pytest.approx(r[-1] / r[-20:].mean())
+    d = features.frame(["cdl_body_1w", "cdl_range_1w", "cdl_body_4h"], ["BTC"], [T0 + DAY], "1d").row(0, named=True)
+    days = S.candles("BTC", "1d", T0 - 7 * DAY, T0 + DAY, as_of=T0 + DAY, root=flake).tail(7)
+    h, lo = days["high"].max(), days["low"].min()
+    assert d["cdl_body_1w"] == pytest.approx((days["close"][-1] - days["open"][0]) / (h - lo))
+    assert d["cdl_range_1w"] == pytest.approx(np.log(h / lo)) and d["cdl_body_4h"] is None
+    # fewer bars than the window: no window candle, the single-bar measures still there
+    g = features.frame(["cdl_body_1w", "cdl_body"], ["BTC"], [T0 - 7 * DAY + 100 * HOUR], "1h").row(0, named=True)
+    assert g["cdl_body_1w"] is None and g["cdl_body"] is not None
+
+
+def test_window_candles_do_not_leak_daily(flake):
+    names = ["cdl_body_1w", "cdl_upper_1w", "cdl_lower_1w", "cdl_range_1w", "cdl_range_rel", "cdl_body"]
+    t = T0 + DAY
+    before = features.frame(names, ["BTC"], [t - DAY, t], "1d")
+    f = next((flake / "hist" / "binance_spot" / "klines_1m" / "symbol=BTCUSDT").glob("*.parquet"))
+    m = pl.read_parquet(f)
+    late = pl.col("open_time_us") >= t
+    m.with_columns(*[pl.when(late).then(pl.col(c) * 3).otherwise(pl.col(c)).alias(c)
+                     for c in ("open", "high", "low", "close")]).write_parquet(f)
+    R.clear()
+    assert before.equals(features.frame(names, ["BTC"], [t - DAY, t], "1d"))

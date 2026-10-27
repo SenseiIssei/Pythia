@@ -19,6 +19,10 @@ A tree leaf "f.<name>" (D3) is a feature of the feature store (lab.features), th
 daily value known at each close (adapter.daily_matrix), NaN where the coin is not
 alive; feature_leaves() lists the features whose cached coverage spans at least
 FEATURE_MIN_SHARE of the in-sample window, the ones a weekly search may draw.
+
+C2's candle shapes (body, wicks, the 7-day candle; candle()) are leaves of every column of
+the panel, from its high, low and close, so they reach the whole universe and not only the
+lab's coins the store's cdl_ features cover.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ class Ctx:
     uni: dict[str, np.ndarray]
     names: list[str]
     hl: np.ndarray | None = None          # (high - low) / close of the day, NaN without a bar
+    hlc: tuple | None = None              # raw (high, low, close) of the day, NaN without a bar (C2's candles)
     memo: dict = field(default_factory=dict)
 
     @property
@@ -93,13 +98,39 @@ def make_ctx(P: fc.Panel) -> Ctx:
     return Ctx(P=P, cols=cols, days=P.days, px=P.px[:, cols], ret=P.ret[:, cols], alive=P.alive[:, cols],
                traded=P.traded[:, cols], sigma=P.sigma[:, cols], adv28=P.adv28[:, cols],
                qv=P.extra["qv"][:, cols], btc_px=btc_px, uni={k: v[:, cols] for k, v in full.items()},
-               names=[P.names[j] for j in cols], hl=_hl(P)[:, cols])
+               names=[P.names[j] for j in cols], hl=_hl(P)[:, cols],
+               hlc=(P.high[:, cols], P.low[:, cols], P.close[:, cols]))
 
 
 def _hl(P: fc.Panel) -> np.ndarray:
     with np.errstate(invalid="ignore", divide="ignore"):
         x = (P.high - P.low) / P.close
     return np.where(np.isfinite(x) & (x >= 0), x, np.nan)
+
+
+def candle(high: np.ndarray, low: np.ndarray, close: np.ndarray, name: str) -> np.ndarray:
+    """C2: a candle shape of each day (grammar.CANDLE_LEAVES) from the rows up to it. The open is the close
+    the day before (the daily panels have no open; a coin trading round the clock opens there), the high and
+    low stretched to hold it. body (close - open) / range, signed; upper and lower the wicks / range; with
+    "_w" the last 7 days as one candle (open the close 7 days before, their highest high and lowest low),
+    range_w that range / close. NaN unless every bar is there, or without a range."""
+    k = 7 if name.endswith("_w") else 1
+    op = np.full_like(close, np.nan)
+    op[k:] = close[:-k]
+    hi, lo = high, low
+    if k > 1:
+        hi, lo = np.full_like(high, np.nan), np.full_like(low, np.nan)
+        if len(high) >= k:
+            hi[k - 1:] = np.lib.stride_tricks.sliding_window_view(high, k, axis=0).max(-1)
+            lo[k - 1:] = np.lib.stride_tricks.sliding_window_view(low, k, axis=0).min(-1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        hi, lo = np.maximum(np.maximum(hi, op), close), np.minimum(np.minimum(lo, op), close)
+        rng = hi - lo
+        part = name.removesuffix("_w")
+        x = {"body": close - op, "upper": hi - np.maximum(op, close), "lower": np.minimum(op, close) - lo,
+             "range": rng}[part]
+        den = close if part == "range" else rng
+        return np.where(den > 0, x / den, np.nan)
 
 
 # ---------------------------------------------------------------- features
@@ -240,6 +271,9 @@ def leaf(c: Ctx, name: str) -> np.ndarray:
         return annvol(c)
     if name == "btc":
         return c.btc_px[:, None]
+    if name in grammar.CANDLE_LEAVES:
+        return c.feat(name, lambda: np.where(c.alive, candle(*c.hlc, name), np.nan) if c.hlc is not None
+                      else np.full_like(c.px, np.nan))
     if name in grammar.FEATURE_LEAVES:
         return c.feat(name, lambda: feature_leaf(c, name.removeprefix(grammar.FEATURE)))
     raise grammar.GenomeError(f"unknown series {name}")

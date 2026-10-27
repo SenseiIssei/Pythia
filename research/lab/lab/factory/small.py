@@ -58,7 +58,10 @@ few assets are worth holding. This mode keeps all of that:
 
 Since G1 a share of the budget (search.tree_share(), PYTHIA_FACTORY_TREE_SHARE, 30 %)
 goes to genomes with an expression tree (grammar.py) over the assets' close and vol
-and BTC's close, as the signal, an asset filter or a gate; every tree is a trial in
+and BTC's close, as the signal, an asset filter or a gate; since C2 also over the
+candle shapes (body, wicks, the 7-day candle, build.candle) of BTC, ETH and SOL from
+their daily high, low and close (the ETF copies have closes only: no shape, so a
+tree that reads one scores the coins alone); every tree is a trial in
 this ledger like any genome, and a tree node costs COMPLEXITY_COST plus
 TREE_NODE_COST of fitness.
 
@@ -151,7 +154,7 @@ REBALANCE = {"every": [1, 7], "band": [0.0, 0.10, 0.25]}
 MAX_FILTERS = 2
 MAX_COMPLEXITY = 6
 MAX_COMPLEXITY_TREES = 12
-LEAVES = ("close", "vol", "btc")            # the series a tree may read here (no volume or range)
+LEAVES = ("close", "vol", "btc") + grammar.CANDLE_LEAVES   # what a tree may read here (no volume, no daily range)
 PARTS = ("universe", "signal", "filters", "select", "weight", "rebalance")
 
 
@@ -352,6 +355,7 @@ class Ctx:
     eurusd: float
     drifts: dict = field(default_factory=dict)
     memo: dict = field(default_factory=dict)
+    hlc: tuple | None = None    # raw (high, low, close) in USD, (T, 6), NaN for the ETFs and days without a bar
 
     @property
     def T(self) -> int:
@@ -390,6 +394,24 @@ def crypto_closes(frame=None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     return days, out
 
 
+def crypto_bars(days: np.ndarray, frame=None) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Raw (high, low, close) of BTC, ETH and SOL on `days` (crypto_closes' calendar), NaN without a bar."""
+    import polars as pl
+    p = frame if frame is not None else history.long_frame()
+    out = {}
+    for a, sym in CRYPTO.items():
+        q = p.filter(pl.col("symbol") == sym)
+        i = (q["day"].to_numpy() - days[0]) // fc.DAY_US
+        ok = (i >= 0) & (i < len(days))
+        cols = []
+        for k in ("high", "low", "close"):
+            x = np.full(len(days), np.nan)
+            x[i[ok].astype(int)] = q[k].to_numpy().astype(float)[ok]
+            cols.append(x)
+        out[a] = tuple(cols)
+    return out
+
+
 def premium_noise(path: Path = s2.PREMIUMS_CSV) -> dict[str, np.ndarray]:
     """S2's measured premiums of SPYx, QQQx and PAXG at the US close, around their mean, in bps."""
     by: dict[str, list] = {}
@@ -409,7 +431,7 @@ def drifts(tr: dict[str, dict] | None = None) -> dict[str, float]:
 
 def make_ctx(days: np.ndarray, crypto: dict[str, np.ndarray], etf: dict[str, tuple[np.ndarray, np.ndarray]],
              eurusd: float, drift: dict[str, float], noise: dict[str, np.ndarray] | None = None,
-             seed: int = PREMIUM_SEED) -> Ctx:
+             seed: int = PREMIUM_SEED, bars: dict | None = None) -> Ctx:
     years = (days - days[0]) / (365.25 * fc.DAY_US)
     T = len(days)
     px, sig = np.full((T, len(ASSETS)), np.nan), np.full((T, len(ASSETS)), np.nan)
@@ -431,7 +453,13 @@ def make_ctx(days: np.ndarray, crypto: dict[str, np.ndarray], etf: dict[str, tup
     sol = ffill_col(px[:, ASSETS.index("SOL")])
     first = np.flatnonzero(np.isfinite(sol))
     sol = np.where(np.isfinite(sol), sol, sol[first[0]] if len(first) else 100.0 / eurusd)
-    return Ctx(days=days, px=px, sig=sig, sol_eur=sol, fresh=fresh, eurusd=eurusd, drifts=dict(drift))
+    hlc = None
+    if bars:
+        hlc = tuple(np.full((T, len(ASSETS)), np.nan) for _ in range(3))
+        for a, cols in bars.items():
+            for x, col in zip(hlc, cols):
+                x[:, ASSETS.index(a)] = col
+    return Ctx(days=days, px=px, sig=sig, sol_eur=sol, fresh=fresh, eurusd=eurusd, drifts=dict(drift), hlc=hlc)
 
 
 def venue(v: s2.S2Venue | None = None) -> s2.S2Venue:
@@ -489,6 +517,9 @@ def tree_score(c: Ctx, t: dict, uni: np.ndarray | None = None, tag: str = "", ma
     cache = c.memo.setdefault("_trees", build.OrderedDict())
 
     def leaf(name: str) -> np.ndarray:
+        if name in grammar.CANDLE_LEAVES:
+            return c.feat(f"candle_{name}", lambda: build.candle(*c.hlc, name) if c.hlc is not None
+                          else np.full_like(c.sig, np.nan))
         return {"close": lambda: c.sig, "vol": lambda: annvol(c),
                 "btc": lambda: c.sig[:, [ASSETS.index("BTC")]]}[name]()
     if market:
@@ -1059,7 +1090,7 @@ def load_market(offline: bool = False) -> tuple[Ctx, s2.S2Venue]:
     else:
         from ..paper.smallaccount import live_etf
         etf = live_etf(syms)
-    return make_ctx(days, crypto, etf, v.eurusd, drifts(), premium_noise()), v
+    return make_ctx(days, crypto, etf, v.eurusd, drifts(), premium_noise(), bars=crypto_bars(days)), v
 
 
 def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, share: float | None = None) -> dict:
