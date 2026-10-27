@@ -157,9 +157,74 @@ def test_the_bar_rises_with_every_trial_counted():
     rng = np.random.default_rng(1)
     few, many = list(rng.normal(0, 0.05, 10)), list(rng.normal(0, 0.05, 1000))
     assert 0 < F.bar(few) < F.bar(many) and F.bar([0.1]) == 0.0
-    r = {"entries": 400, "sharpe": 0.12, "skew": 0.0, "kurt": 3.0, "median": 0.7}
+    r = {"entries": 400, "sharpe": 0.12, "skew": 0.0, "kurt": 3.0, "median": 0.7, "days": [f"d{i}" for i in range(10)]}
     assert F.deflated(r, few) > F.deflated(r, many)
     assert F.passes(r, 0.99) and not F.passes(r | {"median": 0.5}, 0.99) and not F.passes(r | {"entries": 5}, 0.99)
+    assert not F.passes(r | {"days": r["days"][:9]}, 0.99)   # under MIN_DAYS scored days: no winner
+
+
+def planted(rng, clean: int = 200, empty: int = 60, few: int = 40) -> tuple[list[dict], list[dict]]:
+    """Trials of no skill with MIN_ENTRIES (Sharpe per entry about N(0, 0.05)), then the junk: trials with no entries
+    (Sharpe 0) and with a handful (wild Sharpes)."""
+    ok = [{"kind": "trial", "entries": 200, "sharpe": float(x)} for x in rng.normal(0, 0.05, clean)]
+    junk = [{"kind": "trial", "entries": 0, "sharpe": 0.0} for _ in range(empty)]
+    junk += [{"kind": "trial", "entries": 3, "sharpe": float(x)} for x in rng.choice([-4.0, 3.0, 6.0], few)]
+    return ok, junk
+
+
+def test_trials_without_min_entries_count_but_do_not_move_the_bars_noise():
+    ok, junk = planted(np.random.default_rng(7))
+    sh, n = F.pool(ok + junk)
+    assert n == len(ok) + len(junk) and sorted(sh) == sorted(r["sharpe"] for r in ok)
+    clean = F.bar(*F.pool(ok))
+    assert F.bar(sh, n) == pytest.approx(F.bar([r["sharpe"] for r in ok], n))   # only the count changes
+    assert clean < F.bar(sh, n) < clean * 1.1                    # 300 trials instead of 200: a little higher
+    old = F.bar([r["sharpe"] for r in ok + junk])                # the variance over every trial, as before R7
+    assert old > 5 * F.bar(sh, n)
+    edge = {"entries": 600, "n_eff": 400.0, "sharpe": 0.3, "skew": 0.0, "kurt": 3.0, "median": 0.7,
+            "days": [f"d{i}" for i in range(12)]}
+    assert F.passes(edge, F.deflated(edge, sh, n)) and F.deflated(edge, sh, n) > 0.99   # a real edge passes now
+    assert F.deflated(edge, [r["sharpe"] for r in ok + junk]) < 0.5                     # and could not before
+    noise = edge | {"sharpe": 0.05}
+    assert not F.passes(noise, F.deflated(noise, sh, n))
+
+
+def test_a_trial_is_scored_per_day_with_a_standard_error_by_day():
+    days = [f"2026-10-{d:02d}" for d in range(10, 22)]
+    rng = np.random.default_rng(3)
+    iid = [e | {"pnl": float(rng.normal(0.002, 0.01))} for e in entries(days, n=20)]
+    # the same mean, but every entry of a day wins or loses with its day: 240 entries hold 12 days' evidence
+    sign = rng.choice([-1.0, 1.0], len(days))
+    clus = [e | {"pnl": 0.002 + 0.01 * sign[k // 20] + float(rng.normal(0, 0.001))} for k, e in enumerate(iid)]
+    a, b = F.score(iid, PLAIN, days, F.draws(len(days), paths=20)), F.score(clus, PLAIN, days, F.draws(12, paths=20))
+    assert a["entries"] == b["entries"] == 240 and a["days_traded"] == b["days_traded"] == 12
+    assert a["n_eff"] > 100 and b["n_eff"] < 20                  # the deflation counts the days, not the entries
+    assert b["hi"] - b["lo"] > 2 * (a["hi"] - a["lo"]) and a["lo"] < a["mean"] < a["hi"]
+    assert len(b["day_pnl"]) == 12 and sum(b["day_pnl"]) == pytest.approx(b["mean"] * 240)
+    sh = list(np.random.default_rng(1).normal(0, 0.05, 100))
+    assert F.deflated(b, sh) < F.deflated(b | {"n_eff": 240.0}, sh)
+    one = F.score(entries(days[:1], n=30), PLAIN, days, F.draws(12, paths=20))
+    assert one["days_traded"] == 1 and one["n_eff"] == 0.0 and F.deflated(one, sh) == 0.0   # one day: no evidence
+    big = iid[:49] + [iid[49] | {"pnl": 0.5}]                    # one +500 % entry among 50
+    tb = F.score(big, PLAIN, days, F.draws(12, paths=20))
+    assert tb["mean"] > 0.1 and tb["trimmed"] < 0.06             # the trimmed mean leaves it out
+
+
+def test_the_days_held_back_the_night_before_stay_out_of_the_search(monkeypatch):
+    from lab.pumpfun_rt import store
+    rec = [f"2026-10-{d:02d}" for d in range(1, 21)]
+    monkeypatch.setattr(store, "days", lambda root=None: rec)
+    now = SW.day_start("2026-10-20") + DAY // 2
+    led = [{"kind": "holdback", "id": "F3_00001", "night": "2026-10-18", "days": ["2026-10-16", "2026-10-17"]},
+           {"kind": "holdback", "id": "F3_00002", "night": "2026-10-19", "days": ["2026-10-17", "2026-10-18"]},
+           {"kind": "holdback", "id": "F3_00003", "night": "2026-10-20", "days": ["2026-10-18", "2026-10-19"]}]
+    assert F.held_before(led, "2026-10-20") == ["2026-10-17", "2026-10-18"]   # the last night before, not tonight
+    assert F.held_before([], "2026-10-20") == []
+    d = F.Days(now, held=F.held_before(led, "2026-10-20"))
+    assert d.days == rec[-16:-1] and d.hold == ["2026-10-18", "2026-10-19"] and len(d.days) == F.WINDOW_DAYS
+    assert d.replay == d.days[:-2] and d.held == ["2026-10-17"]  # 2026-10-18 is tonight's held-back day anyway
+    assert d.search == d.days[:-3] and not set(d.search) & {"2026-10-17", "2026-10-18", "2026-10-19"}
+    assert len(d.search) - 2 >= F.MIN_DAYS                       # less the two first days without every model
 
 
 # ---------------------------------------------------------------- the night: ledger, resume, held back
@@ -168,6 +233,7 @@ class FakeDays:
     def __init__(self):
         self.days, self.warm, self.search, self.hold = DAYS + ["2026-10-24", "2026-10-25"], [], DAYS, \
             ["2026-10-24", "2026-10-25"]
+        self.replay, self.held = DAYS, []
 
 
 class FakeRp:
@@ -211,13 +277,15 @@ def test_the_ledger_only_grows_and_a_night_resumes_where_it_stopped(tmp_path, mo
 
 
 def test_a_winner_needs_the_bar_and_the_held_back_days(monkeypatch):
-    r = {"id": "F3_00001", "entries": 400, "sharpe": 0.3, "skew": 0.0, "kurt": 3.0, "median": 0.8, "score": 0.8}
-    led = [{"kind": "trial", "sharpe": s} for s in (0.0, 0.01, -0.01, 0.02)] + [r | {"kind": "trial"}]
+    r = {"id": "F3_00001", "entries": 400, "sharpe": 0.3, "skew": 0.0, "kurt": 3.0, "median": 0.8, "score": 0.8,
+         "days": [f"d{i}" for i in range(10)]}
+    led = [{"kind": "trial", "sharpe": s, "entries": 50} for s in (0.0, 0.01, -0.01, 0.02)] + [r | {"kind": "trial"}]
     good = {"id": "F3_00001", "median": 0.6, "pnl_sol": 0.05}
     assert [x["id"] for x in F.winners([r], [good], led)] == ["F3_00001"]
     assert F.winners([r], [good | {"pnl_sol": -0.01}], led) == []
     assert F.winners([r], [], led) == []
     assert F.winners([r | {"sharpe": 0.001}], [good], led) == []
+    assert F.winners([r | {"days": r["days"][:9]}], [good], led) == []    # nine scored days are not enough
 
 
 # ---------------------------------------------------------------- the paper books
@@ -349,7 +417,8 @@ def test_the_retrain_trains_with_the_adopted_settings(tmp_path, monkeypatch):
 def test_a_night_writes_the_report_with_the_bar_the_books_and_the_models(tmp_path, monkeypatch):
     from lab.pumpfun_rt import live
     monkeypatch.setattr(F, "PATHS", 50)
-    monkeypatch.setattr(F, "Days", lambda now_ms, root=None: FakeDays())
+    asked = []
+    monkeypatch.setattr(F, "Days", lambda now_ms, root=None, held=(): asked.append(list(held)) or FakeDays())
     monkeypatch.setattr(F, "Replayer", lambda days, model, root=None, log=print: FakeRp())
     monkeypatch.setattr(R, "_measured", lambda: [])
     monkeypatch.setattr(R, "sol_eur", lambda: 90.0)
@@ -359,7 +428,11 @@ def test_a_night_writes_the_report_with_the_bar_the_books_and_the_models(tmp_pat
     md = (tmp_path / "out" / "factory.md").read_text()
     assert "The bar" in md and "Held back" in md and EM not in md and "Paper only" in md
     js = json.loads((tmp_path / "out" / "factory.json").read_text())
-    assert js["bar"]["trials"] == 8 and js["hold_days"] == FakeDays().hold
+    assert js["bar"]["trials"] == 8 and js["hold_days"] == FakeDays().hold and js["bar"]["min_days"] == F.MIN_DAYS
+    assert all("lo" in r and "trimmed" in r and "n_eff" in r for r in js["best"]) and "band by day" in md
+    assert "EUR" not in md.split("Factory paper books")[0]       # no euro medians
+    F.run(now_ms=T0 + DAY, trials=2, model_trials=0, d=tmp_path / "f", out=tmp_path / "out", log=lambda *a: None)
+    assert asked == [[], FakeDays().hold]                        # the next night leaves last night's out
     assert (tmp_path / "f" / "books.json").exists()
 
 
@@ -370,7 +443,7 @@ def test_the_replayer_runs_trials_on_a_synthetic_record(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "base", lambda: tmp_path)
     rec = store.days(tmp_path)
     days = F.Days(SW.day_start(rec[-1]) + DAY, tmp_path)
-    assert days.days == rec and days.hold == [] and days.search == rec   # too few days to hold any back
+    assert days.days == rec and days.hold == [] and days.search == rec == days.replay   # too few days to hold back
     assert F.Days(SW.day_start(rec[-1]), tmp_path).days == rec[:-1]     # today's day is not full yet
     rp = F.Replayer(days, R.Model(fixed_fit(), R.LiveConfig()), tmp_path, log=lambda *a: None)
     specs = [(F.book_id(i), p) for i, p in enumerate(sampled(4, seed=3) + [PLAIN, {**PLAIN, "block": True}])]

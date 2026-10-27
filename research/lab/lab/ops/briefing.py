@@ -459,12 +459,29 @@ def research_section(rep: dict | None, now: int, lang: str, n: int = 5) -> tuple
 FACTORIES = (("F3", "pumpfun_rt", "factory.json"), ("F2", "smallaccount", "factory.json"))
 
 
+def per_entry(r: dict, lang: str) -> str | None:
+    """A trial's mean per entry at 0.1 SOL with its 95 % band by day and its trimmed mean (F3's fields), None
+    without a mean. No 30-day wallet medians: a bootstrap of a few days is no forecast."""
+    m = _num(r.get("mean"))
+    if m is None:
+        return None
+    de, pc = lang == "de", (lambda x: i18n.frac_pct(x, 1, lang))
+    lo, hi, tm = _num(r.get("lo")), _num(r.get("hi")), _num(r.get("trimmed"))
+    out = f"{pc(m)} {'je Einstieg' if de else 'per entry'}"
+    if lo is not None and hi is not None:
+        out += f" ({'Band' if de else 'band'} {pc(lo)} {'bis' if de else 'to'} {pc(hi)})"
+    if tm is not None:
+        out += f", {'getrimmt' if de else 'trimmed'} {pc(tm)}"
+    return out
+
+
 def factory_line(code: str, rep: dict | None, lang: str) -> Line | None:
-    """One factory in one line: its trials last night and in all, the bar, the night's best candidate with its
-    held-back result, the paper books started and retired that night, the model settings adopted."""
+    """One factory in one line: its trials last night and in all, the bar, the night's best candidate (its mean per
+    entry with the band and the trimmed mean, its scored days) with its held-back result, the paper books started and
+    retired that night, the model settings adopted."""
     if not isinstance(rep, dict) or _num(rep.get("trials_ever")) is None:
         return None
-    start = _num(rep.get("start_sol")) or 0.55
+    de = lang == "de"
     n = int(_num(rep.get("trials_tonight")) or 0)
     bits = [tr("bf_fac_trials", lang, n=n, ever=i18n.num(_num(rep.get("trials_ever")) or 0, 0, lang))]
     bar = rep.get("bar") or {}
@@ -475,13 +492,19 @@ def factory_line(code: str, rep: dict | None, lang: str) -> Line | None:
     if best is None:
         bits.append(tr("bf_fac_none", lang))
     else:
-        text = tr("bf_fac_best", lang, id=best["id"], median=i18n.sol(_num(best.get("median")) or start, 3, lang))
+        text = f"{'bester neuer' if de else 'best new'} {best['id']}"
+        mean = per_entry(best, lang)
+        if mean is not None:
+            nd = len(best.get("days") or ()) if isinstance(best.get("days"), list) else 0
+            text += f": {mean}" + (f", {nd} {'Tage' if de else 'days'}" if nd else "")
         held = next((h for h in rep.get("holdback") or [] if isinstance(h, dict) and h.get("id") == best["id"]), None)
         if held is None:
             text += ", " + tr("bf_fac_nohold", lang)
         else:
-            text += ", " + tr("bf_fac_hold", lang, median=i18n.sol(_num(held.get("median")) or start, 3, lang),
-                              pnl=i18n.sol(_num(held.get("pnl_sol")) or 0.0, 3, lang, True))
+            hm = per_entry(held, lang)
+            text += f", {'zurückgehalten' if de else 'held back'} {(hm + ', ') if hm else ''}" \
+                    f"{i18n.sol(_num(held.get('pnl_sol')) or 0.0, 3, lang, True)} {'bei' if de else 'at'} " \
+                    f"{i18n.sol(0.1, 1, lang)}"
         bits.append(text)
     night, at = str(rep.get("night") or ""), _num(rep.get("updated_ms")) or 0
     books = [b for b in rep.get("books") or [] if isinstance(b, dict)]

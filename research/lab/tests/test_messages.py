@@ -277,9 +277,11 @@ def fill_factory(root, now: int) -> None:
     write(root, "reports/pumpfun_rt/factory.json", {
         "updated_ms": now - 5 * 3_600_000, "night": "2026-10-26", "trials_ever": 330, "trials_tonight": 300,
         "bar": {"sharpe": 0.1234, "p": 0.95, "min_entries": 20, "trials": 330}, "start_sol": 0.55, "sol_eur": 160.0,
-        "best": [{"id": "F3_00042", "median": 0.912, "score": 0.9, "label": "migration 5 s", "params": {}},
+        "best": [{"id": "F3_00042", "median": 42.7, "score": 0.9, "label": "migration 5 s", "params": {},
+                  "mean": 0.031, "lo": -0.012, "hi": 0.074, "trimmed": 0.008, "days": ["d"] * 11},
                  {"id": "F3_00007", "median": 0.7, "score": 0.6}],
-        "holdback": [{"id": "F3_00042", "median": 0.48, "pnl_sol": -0.031, "entries": 40}],
+        "holdback": [{"id": "F3_00042", "median": 97.1, "pnl_sol": -0.031, "entries": 40, "mean": -0.008,
+                      "lo": -0.05, "hi": 0.034, "trimmed": -0.011}],
         "winners": [], "models": {"win30": {"adopted": True}, "rug0t": {"adopted": False}, "win5t": {"skipped": "time"}},
         "books": [{"book": "F3_00011", "sol": 0.61, "eur": 97.6, "added_day": "2026-10-26"},
                   {"book": "F3_00003", "sol": 0.5, "eur": 80.0, "added_day": "2026-10-20"}],
@@ -303,14 +305,17 @@ def test_the_briefing_has_the_research_factory_in_both_languages(data):
     fill_lab(data, now)
     fill_factory(data, now)
     for lang, want in (("de", ["Forschungs-Fabrik", "F3 pump.fun", "300 Versuche heute Nacht, 330 insgesamt",
-                                "Schwelle Sharpe 0,123 gegen 330 Versuche", "bester neuer F3_00042: Median 0,912 SOL",
-                                "zurückgehalten 0,480 SOL, -0,031 SOL bei 0,1 SOL",
+                                "Schwelle Sharpe 0,123 gegen 330 Versuche", "bester neuer F3_00042: +3,1 % je Einstieg (Band -1,2 % bis +7,4 %), getrimmt +0,8 %, 11 Tage",
+                                "zurückgehalten -0,8 % je Einstieg (Band -5,0 % bis +3,4 %), getrimmt -1,1 %, "
+                                "-0,031 SOL bei 0,1 SOL",
                                 "Bücher 1 gestartet, 1 ausgemustert, 2 laufen",
                                 "Modell-Einstellungen übernommen für win30", "Strategie-Auswahl (A1, Paper)",
                                 "würde P_pool5_top30t nehmen: P(beste) 62 %, Gewicht 60 %, Tageswachstum +1,2 %",
                                 "über 9 Tage; unter der Verlustbremse P_pool0_wait; der Live-Bot bleibt bei P_pool0_wait"]),
                        ("en", ["Research factory", "300 trials last night, 330 in all", "bar Sharpe 0.123",
-                               "held back 0.480 SOL, -0.031 SOL at 0.1 SOL", "books 1 started, 1 retired, 2 running",
+                               "best new F3_00042: +3.1% per entry (band -1.2% to +7.4%), trimmed +0.8%, 11 days",
+                               "held back -0.8% per entry (band -5.0% to +3.4%), trimmed -1.1%, -0.031 SOL at 0.1 SOL",
+                               "books 1 started, 1 retired, 2 running",
                                "would pick P_pool5_top30t: P(best) 62%", "the live bot keeps P_pool0_wait"])):
         cards, _ = briefing.build(now, lang, [], briefing.read_ledger(), 158.2, {})
         fac = [c for c in cards if c.emoji == "🏭"]
@@ -318,6 +323,7 @@ def test_the_briefing_has_the_research_factory_in_both_languages(data):
         text = notify.plain(notify.render_post(cards, "telegram", lang=lang))
         assert all(w in text for w in want), (w, text)
         assert "F2" not in text, "no F2 report: left out"
+        assert not any(x in text for x in ("42,7", "42.7", "97,1", "97.1", "Median", "median")), "no 30-day medians"
         if lang == "de":
             no_english(notify.render_post(fac, "telegram", lang="de"))
 
@@ -335,6 +341,8 @@ def test_the_factory_section_is_left_out_without_a_fresh_factory_report(data):
     assert out is not None and "Verlustbremse" in out.text
     line = briefing.factory_line("F2", {"trials_ever": 4, "trials_tonight": 1, "best": []}, "en")
     assert line.lead == "F2 small wallets" and "1 trial last night" in line.text and "no new candidate" in line.text
+    old = briefing.factory_line("F3", {"trials_ever": 4, "best": [{"id": "F3_00009", "median": 42.7}]}, "de")
+    assert "bester neuer F3_00009, nicht" in old.text and "42" not in old.text, "a report without the mean: no median"
 
 
 @pytest.mark.parametrize("at, ok", [

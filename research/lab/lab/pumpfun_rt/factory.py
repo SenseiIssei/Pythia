@@ -18,16 +18,22 @@ Every trial is a realistic book (realistic.RealExecutor: the live bot's measured
 "F3" for every trial, so trials differ by their rules and not their draws, fills at landing, failures, fees) at 0.1 SOL
 without a slot limit (smallwallet.Rec) in one replay of the record per batch of trials; the select models and
 et_alive5m are trained at the end of each UTC day for the next (trends10.day_models), once a night, and every batch
-reads them (walk-forward: a day is traded with models of the days before it). Scored days: the full days on which
-every select model exists. The wallet: smallwallet.simulate with the trial's sizing on a START_SOL wallet, PATHS
+reads them (walk-forward: a day is traded with models of the days before it). Scored days: the search's full days on
+which every select model exists. The wallet: smallwallet.simulate with the trial's sizing on a START_SOL wallet, PATHS
 paths of HORIZON days drawn from the scored days. Objective: the median end wallet less RUIN_PENALTY x START_SOL x the
 chance of losing 80 % (the wallet at or under 20 % of its start).
 
 The bar: every trial ever run is a line in <data>/pumpfun_rt/factory/ledger.jsonl, which only grows. A trial's Sharpe
 per entry (P&L of each entry at 0.1 SOL, failed buys included) is deflated (metrics.deflated_sharpe) by the number of
-trials in the ledger and the variance of their Sharpes; it passes at BAR_P with a median above the start. The last
-HOLD_DAYS full recorded days are never in the search; the TOP_HOLD best of a night are scored on them once (a line
-"holdback" in the ledger). A winner passed the bar and made money on the held-back days too.
+trials in the ledger and the variance of the Sharpes of those with MIN_ENTRIES (one with no entries has a Sharpe of 0,
+one with a handful a wild one: neither is a strategy's noise). The entries of one day share its market, so a trial is
+scored per day: its mean per entry gets a standard error clustered by UTC day, and the deflation counts the effective
+entries that error implies, not the entries. It passes at BAR_P with MIN_ENTRIES, at least MIN_DAYS scored days and a
+median above the start. The last HOLD_DAYS full recorded days are never in the search, and neither are the days the
+night before held back (replayed for the walk-forward, not scored); the TOP_HOLD best of a night are scored on them
+once (a line "holdback" in the ledger). A winner passed the bar and made money on the held-back days too. Reports give
+the mean per entry with its band and the mean without the best and worst TRIM, not only the bootstrap's medians (30
+days drawn from a dozen days are no forecast).
 
 Paper books (books): a winner becomes the realistic paper book F3_<id> in the collector (live.Shadow,
 realistic.factory_books) on its own START_SOL paper wallet with its sizing fixed; at most MAX_BOOKS at a time. Each
@@ -66,7 +72,8 @@ BUDGET_S = 8_400                           # the night's run stops asking for tr
 MODEL_TRIALS = 12                          # per label and night, PYTHIA_PF_FACTORY_MODEL_TRIALS
 MODEL_BUDGET_S = 1_500
 BATCH = 75                                 # trials per replay (300 a night: four replays of the search days)
-WINDOW_DAYS = 7                            # the full days replayed: the search's and the held-back ones
+WINDOW_DAYS = 15                           # the full days replayed: the search's and the held-back ones (MIN_DAYS
+                                           # scored: less the first two without every model and three held back)
 HOLD_DAYS = 2
 TOP_HOLD = 3
 START_SOL = R.START_SOL                    # 0.55 SOL, about 50 EUR
@@ -77,6 +84,8 @@ LOST = SW.LOST                             # the wallet at 20 % of its start: lo
 RUIN_PENALTY = 1.0
 BAR_P = 0.95
 MIN_ENTRIES = 20
+MIN_DAYS = 10                              # scored days before a winner
+TRIM = 0.02                                # the trimmed mean leaves out this share at each end (one at least)
 STAKE_SOL = SW.STAKE_SOL
 TAIL_MS = 35 * 60_000                      # no entry this close to the replay's end: the 1800 s time stops close
 KEY = "F3"                                 # every trial's latency draws
@@ -261,9 +270,10 @@ class Unminted:
 
 class Days:
     """The night's days: the replayed window (the last WINDOW_DAYS full UTC days before now), the warm-up before it,
-    the held-back days at its end and the search's before them."""
+    the held-back days at its end, the replay's days before them and the search's: the replay's without the days
+    `held` back on the night before (held_before)."""
 
-    def __init__(self, now_ms: int, root=None, window: int = WINDOW_DAYS, hold: int = HOLD_DAYS):
+    def __init__(self, now_ms: int, root=None, window: int = WINDOW_DAYS, hold: int = HOLD_DAYS, held=()):
         from . import store
         from .study import WARM_DAYS
         today = day_of(now_ms)
@@ -271,7 +281,16 @@ class Days:
         self.days = full[-window:]
         self.warm = [d for d in full if self.days and d < self.days[0]][-WARM_DAYS:]
         self.hold = self.days[-hold:] if len(self.days) > hold else []
-        self.search = self.days[:len(self.days) - len(self.hold)]
+        self.replay = self.days[:len(self.days) - len(self.hold)]
+        self.held = [x for x in self.replay if x in set(held)]
+        self.search = [x for x in self.replay if x not in self.held]
+
+
+def held_before(ledger: list[dict], night: str) -> list[str]:
+    """The days the last night before `night` with held-back lines scored them on."""
+    hb = [r for r in ledger if r.get("kind") == "holdback" and str(r.get("night") or "") < night]
+    last = max((str(r.get("night")) for r in hb), default=None)
+    return sorted({x for r in hb if r.get("night") == last for x in r.get("days") or ()})
 
 
 class Replayer:
@@ -344,17 +363,45 @@ def draws(n_days: int, paths: int = PATHS, horizon: int = HORIZON, seed: int = S
     return np.random.default_rng(seed).integers(0, max(1, n_days), size=(paths, horizon))
 
 
+def by_day(pnl: np.ndarray, day: np.ndarray, n_days: int) -> dict:
+    """The mean per entry of `pnl` (a fraction of the stake) by day: its standard error clustered by `day` (the
+    sandwich with G/(G-1), G the days with entries), the 95 % band (t with G-1 degrees of freedom), the effective
+    entries that error implies (at most the entries; 0 under two days), the mean without the TRIM best and worst
+    entries, and the P&L per day."""
+    from scipy import stats
+    n = len(pnl)
+    m = float(pnl.mean()) if n else 0.0
+    per = np.bincount(day, weights=pnl, minlength=n_days) if n else np.zeros(n_days)
+    g = int(len(np.unique(day))) if n else 0
+    se, n_eff, lo, hi = 0.0, 0.0, m, m
+    if g >= 2 and n >= 2:
+        res = np.bincount(day, weights=pnl - m, minlength=n_days)
+        se = float(math.sqrt(g / (g - 1) * float((res ** 2).sum())) / n)
+        sd = float(pnl.std(ddof=1))
+        n_eff = float(n) if se <= 0 else float(min(n, (sd / se) ** 2))
+        w = float(stats.t.ppf(0.975, g - 1)) * se
+        lo, hi = m - w, m + w
+    k = max(1, int(TRIM * n))
+    xs = np.sort(pnl)
+    trimmed = float(xs[k:n - k].mean()) if n > 2 * k else m
+    return {"days_traded": g, "se_day": se, "n_eff": n_eff, "lo": lo, "hi": hi, "trimmed": trimmed,
+            "day_pnl": [float(x) for x in per]}
+
+
 def score(es: list[dict], p: dict, days: list[str], dr: np.ndarray | None = None) -> dict:
     """A trial on `days`: the wallet bootstrap with its sizing (median, 10 and 90 %, the chances to lose 80 %, to be
-    ruined, to double), the objective, and the entries' Sharpe at 0.1 SOL."""
-    es = [e for e in es if any(SW.day_start(d) <= e["signal_ms"] < SW.day_start(d) + DAY_MS for d in days)]
+    ruined, to double), the objective, the entries' Sharpe at 0.1 SOL and their mean per day (by_day)."""
+    starts = [SW.day_start(d) for d in days]
+    es = [e for e in es if any(t <= e["signal_ms"] < t + DAY_MS for t in starts)]
     pnl = np.array([e["pnl"] / STAKE_SOL for e in es], dtype=float)
+    day = np.array([next(i for i, t in enumerate(starts) if t <= e["signal_ms"] < t + DAY_MS) for e in es], dtype=int)
     sd = float(pnl.std(ddof=1)) if len(pnl) > 1 else 0.0
     out = {"days": list(days), "entries": len(es), "trades": sum(1 for e in es if not e["failed"]),
            "mean": float(pnl.mean()) if len(pnl) else 0.0, "sharpe": float(pnl.mean() / sd) if sd > 0 else 0.0,
            "pnl_sol": float(sum(e["pnl"] for e in es)),
            "skew": float(((pnl - pnl.mean()) ** 3).mean() / sd ** 3) if sd > 0 else 0.0,
            "kurt": float(((pnl - pnl.mean()) ** 4).mean() / sd ** 4) if sd > 0 else 3.0}
+    out |= by_day(pnl, day, len(days))
     if not days:
         return out | {"median": START_SOL, "p10": START_SOL, "p90": START_SOL, "p_lost80": 0.0, "p_ruin": 0.0,
                       "p_double": 0.0, "score": START_SOL}
@@ -367,33 +414,43 @@ def score(es: list[dict], p: dict, days: list[str], dr: np.ndarray | None = None
     return out
 
 
-def bar(sharpes: list[float]) -> float:
-    """The Sharpe per entry the best of len(sharpes) trials of no skill reaches (metrics.deflated_sharpe's SR0)."""
+def pool(ledger: list[dict]) -> tuple[list[float], int]:
+    """The bar's trials: the Sharpes its variance comes from (the trials with MIN_ENTRIES) and how many count (all)."""
+    tr = trials_of(ledger)
+    return [float(r.get("sharpe", 0.0)) for r in tr if r.get("entries", 0) >= MIN_ENTRIES], len(tr)
+
+
+def bar(sharpes: list[float], n: int | None = None) -> float:
+    """The Sharpe per entry the best of n trials of no skill reaches (metrics.deflated_sharpe's SR0), the noise's
+    variance from `sharpes` (n: len(sharpes))."""
     from scipy import stats
     xs = [x for x in sharpes if math.isfinite(x)]
-    n = len(xs)
-    if n <= 1:
+    n = len(xs) if n is None else n
+    if n <= 1 or len(xs) < 2:
         return 0.0
     g = 0.5772156649
     return float(math.sqrt(float(np.var(xs, ddof=1))) * ((1 - g) * stats.norm.ppf(1 - 1 / n)
                                                           + g * stats.norm.ppf(1 - 1 / (n * math.e))))
 
 
-def deflated(r: dict, sharpes: list[float]) -> float:
-    """The trial's deflated Sharpe probability against every trial in the ledger."""
+def deflated(r: dict, sharpes: list[float], n: int | None = None) -> float:
+    """The trial's deflated Sharpe probability against n trials (pool), on its effective entries by day."""
     from ..metrics import deflated_sharpe
     xs = [x for x in sharpes if math.isfinite(x)]
-    if r.get("entries", 0) < 2 or len(xs) < 1:
+    n = len(xs) if n is None else n
+    n_obs = float(r.get("n_eff", r.get("entries", 0)))
+    if r.get("entries", 0) < 2 or n_obs < 2 or n < 1:
         return 0.0
     var = float(np.var(xs, ddof=1)) if len(xs) > 1 else 0.0
     try:
-        return deflated_sharpe(r["sharpe"], r["entries"], len(xs), var, r.get("skew", 0.0), r.get("kurt", 3.0))
+        return deflated_sharpe(r["sharpe"], n_obs, n, var, r.get("skew", 0.0), r.get("kurt", 3.0))
     except ValueError:
         return 0.0
 
 
 def passes(r: dict, dsr: float) -> bool:
-    return r.get("entries", 0) >= MIN_ENTRIES and dsr >= BAR_P and r.get("median", 0.0) > START_SOL
+    return r.get("entries", 0) >= MIN_ENTRIES and len(r.get("days") or ()) >= MIN_DAYS and dsr >= BAR_P \
+        and r.get("median", 0.0) > START_SOL
 
 
 # ---------------------------------------------------------------- the ledger
@@ -470,7 +527,7 @@ def search(rp: Replayer, d: Path, night: str, budget: int, deadline: float, log=
         n0 = len(trials_of(read_ledger(path)))
         specs = [(book_id(n0 + j), space(t)) for j, t in enumerate(trials)]
         t0 = time.time()
-        ent = rp.run(specs, rp.d.search)
+        ent = rp.run(specs, rp.d.replay)
         per_s = time.time() - t0
         days = rp.scored()
         dr = draws(len(days))
@@ -515,12 +572,12 @@ def holdback(rp: Replayer, d: Path, night: str, mine: list[dict], log=print) -> 
 
 def winners(mine: list[dict], held: list[dict], ledger: list[dict]) -> list[dict]:
     """The night's trials that passed the bar in the search and made money on the held-back days."""
-    sh = [r.get("sharpe", 0.0) for r in trials_of(ledger)]
+    sh, n = pool(ledger)
     hb = {r["id"]: r for r in held}
     out = []
     for r in mine:
         h = hb.get(r["id"])
-        dsr = deflated(r, sh)
+        dsr = deflated(r, sh, n)
         if h is not None and passes(r, dsr) and h.get("median", 0.0) > START_SOL and h.get("pnl_sol", 0.0) > 0:
             out.append(r | {"dsr": dsr, "holdback": h})
     return sorted(out, key=lambda r: -r["score"])
@@ -769,13 +826,14 @@ def active_specs(d: Path | None = None) -> list[tuple[str, dict]]:
 def summary(night: str, now_ms: int, days: Days, scored: list[str], ledger: list[dict], mine: list[dict],
             held: list[dict], won: list[dict], models: dict, adopted: dict, books: dict, state: dict | None,
             eur: float | None) -> dict:
-    tr = trials_of(ledger)
-    sh = [r.get("sharpe", 0.0) for r in tr]
+    sh, n = pool(ledger)
     best = sorted(mine, key=lambda r: -r["score"])[:10]
-    return {"updated_ms": now_ms, "night": night, "trials_ever": len(tr), "trials_tonight": len(mine),
-            "bar": {"sharpe": bar(sh), "p": BAR_P, "min_entries": MIN_ENTRIES, "trials": len(tr)},
+    return {"updated_ms": now_ms, "night": night, "trials_ever": n, "trials_tonight": len(mine),
+            "bar": {"sharpe": bar(sh, n), "p": BAR_P, "min_entries": MIN_ENTRIES, "min_days": MIN_DAYS, "trials": n,
+                    "variance_trials": len(sh)},
             "days": days.days, "search_days": days.search, "scored_days": scored, "hold_days": days.hold,
-            "best": [r | {"dsr": deflated(r, sh), "label": strategy_of(r["params"], r["id"]).label,
+            "held_before": getattr(days, "held", []),
+            "best": [r | {"dsr": deflated(r, sh, n), "label": strategy_of(r["params"], r["id"]).label,
                           "sizing": book_label(r["params"])} for r in best],
             "holdback": held, "winners": [r["id"] for r in won], "models": models, "adopted": adopted,
             "books": status(books, state, eur),
@@ -786,30 +844,38 @@ def summary(night: str, now_ms: int, days: Days, scored: list[str], ledger: list
 
 def markdown(s: dict) -> str:
     eur = s.get("sol_eur")
-
-    def money(x):
-        return f"{x:.3f} SOL" + (f" ({x * eur:.2f} EUR)" if eur else "")
+    pct = lambda x: "n/a" if x is None else f"{x * 100:+.1f} %"
     b = s["bar"]
+    before = f" (out of the search: {', '.join(s['held_before'])}, held back the night before)" \
+        if s.get("held_before") else ""
     md = ["# pump.fun factory (F3)", "",
           f"Night {s['night']}: {s['trials_tonight']} strategy trials tonight, {s['trials_ever']} in the ledger. "
           f"Search days {', '.join(s['search_days']) or 'none'} (scored: {', '.join(s['scored_days']) or 'none'}), "
-          f"held back {', '.join(s['hold_days']) or 'none'}. Every trial realistic (the live bot's latency, fills, "
+          f"held back {', '.join(s['hold_days']) or 'none'}"
+          f"{before}. Every trial realistic (the live bot's latency, fills, "
           f"failures, fees) on a {START_SOL} SOL wallet, {PATHS:,} paths of {HORIZON} days.", "",
-          f"The bar: a deflated Sharpe per entry with p at least {b['p']:.2f} against {b['trials']} trials "
-          f"(the best of that many with no skill reaches {b['sharpe']:.3f}), at least {b['min_entries']} entries and "
-          f"a median wallet above the start.", "",
-          "The night's best by the objective (median end wallet less the ruin penalty):", "",
-          "| trial | median after 30 days | 10 to 90 % | lost 80 % | entries | Sharpe | deflated p | strategy | sizing |",
-          "|---|---|---|---|---|---|---|---|---|"]
+          f"The bar: a deflated Sharpe per entry with p at least {b['p']:.2f} against {b['trials']} trials, the noise "
+          f"from the {b.get('variance_trials', b['trials'])} with at least {b['min_entries']} entries (the best of "
+          f"that many with no skill reaches {b['sharpe']:.3f}), on the effective entries of a standard error by day; "
+          f"at least {b['min_entries']} entries, {b.get('min_days', MIN_DAYS)} scored days and a median wallet above "
+          f"the start.", "",
+          "The night's best by the objective (median end wallet less the ruin penalty). Mean per entry at 0.1 SOL "
+          f"with its 95 % band by day, and without the best and worst {TRIM * 100:.0f} % of entries; the medians are "
+          f"the bootstrap's {HORIZON} days drawn from the scored days, no forecast:", "",
+          "| trial | mean per entry | band by day | trimmed | days | entries | Sharpe | deflated p | median SOL | "
+          "lost 80 % | strategy | sizing |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in s["best"]:
-        md.append(f"| {r['id']} | {money(r['median'])} | {r['p10']:.3f} to {r['p90']:.3f} | "
-                  f"{r['p_lost80'] * 100:.0f} % | {r['entries']} | {r['sharpe']:+.3f} | {r['dsr']:.2f} | "
-                  f"{r['label']} | {r['sizing']} |")
+        md.append(f"| {r['id']} | {pct(r.get('mean'))} | {pct(r.get('lo'))} to {pct(r.get('hi'))} | "
+                  f"{pct(r.get('trimmed'))} | {r.get('days_traded', 0)} of {len(r.get('days') or ())} | "
+                  f"{r['entries']} | {r['sharpe']:+.3f} | {r['dsr']:.2f} | {r['median']:.3f} | "
+                  f"{r['p_lost80'] * 100:.0f} % | {r['label']} | {r['sizing']} |")
     md += ["", "Held back (scored once):", ""]
     if s["holdback"]:
-        md += ["| trial | median after 30 days | lost 80 % | entries | P&L at 0.1 SOL |", "|---|---|---|---|---|"]
-        md += [f"| {r['id']} | {money(r['median'])} | {r['p_lost80'] * 100:.0f} % | {r['entries']} | "
-               f"{r['pnl_sol']:+.3f} SOL |" for r in s["holdback"]]
+        md += ["| trial | mean per entry | band by day | trimmed | entries | P&L at 0.1 SOL |",
+               "|---|---|---|---|---|---|"]
+        md += [f"| {r['id']} | {pct(r.get('mean'))} | {pct(r.get('lo'))} to {pct(r.get('hi'))} | "
+               f"{pct(r.get('trimmed'))} | {r['entries']} | {r['pnl_sol']:+.3f} SOL |" for r in s["holdback"]]
     else:
         md.append("none tonight.")
     md += ["", "Winners tonight: " + (", ".join(s["winners"]) if s["winners"] else "none (nothing passed the bar "
@@ -853,12 +919,13 @@ def run(now_ms: int | None = None, trials: int | None = None, model_trials: int 
     trials = _env_int("PYTHIA_PF_FACTORY_TRIALS", TRIALS) if trials is None else trials
     model_trials = _env_int("PYTHIA_PF_FACTORY_MODEL_TRIALS", MODEL_TRIALS) if model_trials is None else model_trials
     night = day_of(now_ms)
-    days = Days(now_ms, root)
+    days = Days(now_ms, root, held=held_before(read_ledger(d / "ledger.jsonl"), night))
     if len(days.search) < 2:
         log(f"f3: too few recorded days ({len(days.days)})")
         return {"empty": True}
     hold_ms = SW.day_start(days.hold[0]) if days.hold else now_ms
-    log(f"f3: night {night}, search {days.search[0]} to {days.search[-1]}, held back {days.hold}")
+    log(f"f3: night {night}, search {days.search[0]} to {days.search[-1]}, held back {days.hold}"
+        f"{f', out of the search {days.held}' if days.held else ''}")
     models = tune_models(d, night, hold_ms, model_trials, min(deadline, t0 + MODEL_BUDGET_S), log=log,
                          params_file=d / "params.json") if model_trials else {"error": "no trials asked"}
     fit_ = R.fit(R._measured(), hold_ms)                      # the live orders up to the held-back days
