@@ -104,6 +104,7 @@ another image, or on the host), resources, timeout, lock, dependencies,
 | `jobs.py disk [--now]` | size and growth per dataset, the fall in free space over 3 and 7 days, the untracked use |
 | `jobs.py prune [--dry-run]` | the retention rules |
 | `jobs.py backup [--dry-run]` | archive the important state, rotate |
+| `jobs.py restore-test` | unpack the newest archive into a temporary folder, compare every file's checksum |
 
 Every cron line runs `jobs.py run <job>`, which wraps the job the same way
 each time:
@@ -187,17 +188,40 @@ it first: `python3 /opt/pythia-ops/jobs.py prune --dry-run`.
 ## Backup
 
 The nightly `backup` job archives the state that cannot be rebuilt from
-market data (both engines' state files, the model registry and published
-models, the paper books and the CS2 play-money portfolio, engine signals,
-the learning loop's ledgers, the learned costs, the factory's trial ledger,
-the forward evidence) into `/srv/pythia-backup/pythia-state-<UTC time>.tar.gz`,
-mode 600, with a `.sha256` and a `.json` manifest. Each archive is read back
-before it is kept. It keeps the newest of each of the last 7 days and of each
-of the last 4 weeks (`keep_daily`, `keep_weekly`). The list is `backup.include`
-in the table.
+market data (the engine and the safe account (`engine`, `autopilot-safe`), the
+autopilot, the model registry and published models, the paper books and the
+CS2 play-money portfolio, engine signals, the learning loop's ledgers, the
+factory's trial ledgers including the pump.fun F3 ledger (`pumpfun_rt/factory`),
+the live bot's `reports/pumpfun_rt/live_settings.json`, the Discord channel map
+`discord/channels.json`, the forward evidence) into
+`/srv/pythia-backup/pythia-state-<UTC time>.tar.gz`, mode 600, with a `.sha256`
+and a `.json` manifest that holds the sha256 of every file. The engines'
+rolling `state.json.bak-*` copies stay out. Each archive is read back before it
+is kept. It keeps the newest of each of the last 7 days and of each of the last
+4 weeks (`keep_daily`, `keep_weekly`). The list is `backup.include` in the
+table; `<data>/_ops/backup/latest.json` lists what was missing.
 
-The archives are on the same disk as the data: copy them off the server too,
-for example by adding `/srv/pythia-backup` to the PC sync. Restore one:
+Off the server: `research/sync-to-pc.sh` copies the newest archive to
+`<PYTHIA_LOCAL>/_backup` on the PC after the data pull, by checksum (a local
+copy counts only if its sha256 is the server's; a fresh copy is checked before
+it is kept; the newest 7 stay, `PYTHIA_BACKUP_KEEP`), then leaves a receipt in
+`/srv/pythia-backup/offsite.json`. A copy that arrives with another checksum is
+dropped and the sync exits non-zero.
+
+Restore test: the monthly `restore-test` job (the 1st, 03:40 UTC, under the
+backup's lock) unpacks the newest archive into a temporary folder under
+`/srv/pythia-backup`, compares every file's sha256 with the manifest and the
+archive's with its `.sha256`, deletes the folder and writes
+`<data>/_ops/backup/restore.json`. Run it by hand with
+`python3 /opt/pythia-ops/jobs.py run restore-test --force`.
+
+The health check has three lines while the backup job is on: `backup` (red if
+an included entry was missing), `backup off-server` (red without a receipt, if
+the receipt's checksum is not the server's, or once the PC copy is behind the
+newest archive for more than `backup.offsite_max_age`, 1 day) and
+`backup restore` (red until the first test and after a failed one).
+
+Restore one (on the PC the archive is under `_backup`; copy it to the server first):
 
 ```bash
 sha256sum -c /srv/pythia-backup/pythia-state-<time>.tar.gz.sha256

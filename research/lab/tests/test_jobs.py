@@ -835,6 +835,146 @@ def test_backup_refuses_absolute_or_empty(tmp_path):
         jobs.backup(t)
 
 
+def _backup_table(tmp_path, extra=""):
+    t = table(tmp_path, """
+  - name: backup
+    schedule: "20 2 * * *"
+    command: x
+""", f"""
+backup:
+  dest: {tmp_path}/backup
+  include: [engine, autopilot-safe, discord/channels.json]
+  exclude: ["*.tmp", "*.bak-*"]
+{extra}""")
+    data = tmp_path / "data"
+    for d in ("engine", "autopilot-safe", "discord"):
+        (data / d).mkdir(parents=True, exist_ok=True)
+    (data / "engine" / "state.json").write_text('{"equity": 1}')
+    (data / "engine" / "state.json.bak-202610201646").write_text("old")
+    (data / "autopilot-safe" / "state.json").write_text('{"equity": 2}')
+    (data / "discord" / "channels.json").write_text('{"de": {}}')
+    return t
+
+
+def test_repo_table_backs_up_the_engines_and_the_real_account():
+    t = jobs.load_table(REPO_TABLE)
+    inc = jobs._backup_conf(t)["include"]
+    for p in ("engine", "autopilot-safe", "pumpfun_rt/factory", "reports/pumpfun_rt/live_settings.json",
+              "discord/channels.json"):
+        assert p in inc
+    assert not {"server", "costs", "trials"} & set(inc)
+    rt = t.job("restore-test")
+    assert rt["enabled"] and rt["kind"] == "host" and "restore-test" in rt["command"] and rt["locks"] == ["backup"]
+
+
+def test_restore_test_unpacks_and_compares_checksums(tmp_path):
+    t = _backup_table(tmp_path)
+    out = jobs.backup(t, now=datetime(2026, 10, 27, 2, 20, tzinfo=UTC))
+    assert out["missing"] == [] and out["files"] == 3  # the rolling .bak copy stays out
+    assert "checksums" not in json.loads((t.ops_dir / "backup" / "latest.json").read_text())
+    man = json.loads(Path(out["archive"] + ".json").read_text())
+    assert set(man["checksums"]) == {"engine/state.json", "autopilot-safe/state.json", "discord/channels.json"}
+    r = jobs.restore_test(t, now=datetime(2026, 11, 1, 3, 40, tzinfo=UTC))
+    assert r["ok"] and r["files"] == 3 and not r["problems"]
+    assert not list((tmp_path / "backup").glob(".restore-*"))  # the temporary folder is gone
+    assert json.loads((t.ops_dir / "backup" / "restore.json").read_text())["ok"]
+    # a manifest that disagrees with the archive's content fails
+    man["checksums"]["engine/state.json"] = "0" * 64
+    Path(out["archive"] + ".json").write_text(json.dumps(man))
+    r = jobs.restore_test(t)
+    assert not r["ok"] and r["differ"] == ["engine/state.json"]
+    # a damaged archive fails on its sha256 before it is unpacked
+    with open(out["archive"], "ab") as f:
+        f.write(b"x")
+    r = jobs.restore_test(t)
+    assert not r["ok"] and "differs from its .sha256" in r["problems"][0]
+    assert jobs.main(["--table", t.path, "restore-test"]) == 1
+
+
+def test_restore_test_without_an_archive_fails(tmp_path):
+    t = _backup_table(tmp_path)
+    r = jobs.restore_test(t)
+    assert not r["ok"] and "no archive" in r["problems"][0]
+
+
+def test_health_checks_the_backup_the_off_server_copy_and_the_restore(tmp_path):
+    t = _backup_table(tmp_path, "  offsite_max_age: 1d")
+    day1 = datetime(2026, 10, 26, 2, 20, tzinfo=UTC)
+    now = day1 + timedelta(hours=3)
+
+    def checks(at):
+        return {n: (ok, d) for n, ok, d in jobs.backup_checks(t, at)}
+
+    c = checks(now)
+    assert c["backup"][0] is False and c["backup off-server"][0] is False and c["backup restore"][0] is False
+    a1 = jobs.backup(t, now=day1)
+    (tmp_path / "backup" / "offsite.json").write_text(json.dumps(
+        {"at": "2026-10-26T05:00:00Z", "archive": Path(a1["archive"]).name, "sha256": a1["sha256"]}))
+    jobs.restore_test(t, now=now)
+    c = checks(now)
+    assert all(ok for ok, _d in c.values()), c
+    # the next archive appears; the copy is behind it, red after a day
+    jobs.backup(t, now=day1 + timedelta(days=1))
+    assert checks(day1 + timedelta(days=1, hours=20))["backup off-server"][0] is True
+    late = checks(day1 + timedelta(days=2, hours=1))["backup off-server"]
+    assert late[0] is False and "25 h behind" in late[1]
+    # a receipt whose checksum is not the server's is red
+    (tmp_path / "backup" / "offsite.json").write_text(json.dumps(
+        {"at": "2026-10-26T05:00:00Z", "archive": Path(a1["archive"]).name, "sha256": "f" * 64}))
+    assert checks(now)["backup off-server"][0] is False
+    # an entry missing from the backup is red
+    shutil.rmtree(tmp_path / "data" / "discord")
+    jobs.backup(t, now=day1 + timedelta(days=1, hours=1))
+    assert checks(now)["backup"] == (False, "missing: discord/channels.json")
+    names = {n for n, _ok, _d in jobs.health_checks(t, now)}
+    assert {"backup", "backup off-server", "backup restore"} <= names
+
+
+@pytest.mark.skipif(not shutil.which("sha256sum"), reason="sha256sum not installed")
+def test_sync_to_pc_copies_the_newest_archive_by_checksum(tmp_path):
+    t = _backup_table(tmp_path)
+    a1 = jobs.backup(t, now=datetime(2026, 10, 26, 2, 20, tzinfo=UTC))
+    a2 = jobs.backup(t, now=datetime(2026, 10, 27, 2, 20, tzinfo=UTC))
+    # ssh that runs the remote command here
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "ssh").write_text('#!/usr/bin/env bash\nwhile [ "$1" = -o ]; do shift 2; done\nshift\nexec bash -c "$*"\n')
+    (bin_ / "ssh").chmod(0o755)
+    pc = tmp_path / "pc"
+    env = dict(os.environ, PATH=f"{bin_}:{os.environ.get('PATH', '')}", PYTHIA_VPS="vps",
+               PYTHIA_VPS_DATA=str(tmp_path / "data"), PYTHIA_VPS_BACKUP=str(tmp_path / "backup"),
+               PYTHIA_LOCAL=str(pc), PYTHIA_BACKUP_KEEP="1")
+    script = REPO_TABLE.parents[1] / "sync-to-pc.sh"
+
+    def sync():
+        return subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=120)
+
+    local = pc / "_backup"
+    (local).mkdir(parents=True)
+    old = Path(a1["archive"]).name
+    shutil.copy(a1["archive"], local / old)
+    new = Path(a2["archive"]).name
+    (local / new).write_bytes(b"same size?")  # a stale copy under the newest name is fetched again
+    r = sync()
+    assert r.returncode == 0, r.stderr
+    assert (pc / "engine" / "state.json").exists()
+    assert (local / new).read_bytes() == Path(a2["archive"]).read_bytes()
+    assert (local / f"{new}.sha256").read_text().split()[0] == a2["sha256"]
+    assert not (local / old).exists()  # only the newest PYTHIA_BACKUP_KEEP stay
+    rec = json.loads((tmp_path / "backup" / "offsite.json").read_text())
+    assert rec["archive"] == new and rec["sha256"] == a2["sha256"]
+    assert {n: ok for n, ok, _d in jobs.backup_checks(t, datetime(2026, 10, 27, 5, 0, tzinfo=UTC))}[
+        "backup off-server"]
+    # an archive that does not match its .sha256 on the way is not kept and no receipt is written
+    (tmp_path / "backup" / "offsite.json").unlink()
+    a3 = jobs.backup(t, now=datetime(2026, 10, 28, 2, 20, tzinfo=UTC))
+    (Path(a3["archive"] + ".sha256")).write_text(f"{'0' * 64}  {Path(a3['archive']).name}\n")
+    r = sync()
+    assert r.returncode != 0
+    assert not (local / Path(a3["archive"]).name).exists() and not (tmp_path / "backup" / "offsite.json").exists()
+    assert "different checksum" in (pc / "sync.log").read_text()
+
+
 # ---------------------------------------------------------------- command line
 
 def test_cli(tmp_path, capsys):

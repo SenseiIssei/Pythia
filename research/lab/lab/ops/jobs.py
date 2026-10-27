@@ -15,6 +15,7 @@ and does the rest:
   python3 jobs.py disk                     data growth per dataset (JSON)
   python3 jobs.py prune [--dry-run]        apply the retention rules
   python3 jobs.py backup [--dry-run]       archive the important state, rotate
+  python3 jobs.py restore-test             unpack the newest archive, compare checksums
 
 Every run is wrapped the same way: an exclusive flock on
 <locks>/<lock>.lock (the same kernel lock `flock(1)` takes), a hard timeout
@@ -47,6 +48,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1273,7 +1275,8 @@ def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600,
 
 
 def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool, str]]:
-    """(name, ok, detail) for every enabled job, the disk, every dataset and every feed of an enabled job."""
+    """(name, ok, detail) for every enabled job, the disk, every dataset, every feed of an enabled job
+    and, while the backup job is on, the backup (its contents, the copy off the server, the restore test)."""
     now = now or _now()
     disk = measure_disk(t, now)
     status = write_status(t, now)
@@ -1310,6 +1313,8 @@ def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool
         if f.get("job") and not t.jobs[f["job"]]["enabled"]:
             continue
         out.append(feed_check(t, f, now))
+    if "backup" in t.jobs and t.jobs["backup"]["enabled"]:
+        out.extend(backup_checks(t, now))
     return out
 
 
@@ -1464,25 +1469,136 @@ def backup(t: Table, dry_run: bool = False, now: datetime | None = None) -> dict
                 tar.add(str(t.data / inc), arcname=inc, filter=keep)
     finally:
         os.umask(old_umask)
-    h = hashlib.sha256()
-    with open(tmp, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    with tarfile.open(tmp, "r:gz") as tar:  # it reads back
-        members = sum(1 for m in tar.getmembers() if m.isfile())
-    if members != files:
+    sha = _sha256_file(tmp)
+    sums: dict[str, str] = {}
+    with tarfile.open(tmp, "r:gz") as tar:  # it reads back; the sha256 of every file goes in the manifest
+        for m in tar:
+            if m.isfile():
+                sums[m.name] = _sha256_file(tar.extractfile(m))
+    if len(sums) != files:
         tmp.unlink()
-        raise RuntimeError(f"backup: archive has {members} files, expected {files}")
+        raise RuntimeError(f"backup: archive has {len(sums)} files, expected {files}")
     os.replace(tmp, c["dest"] / name)
-    (c["dest"] / f"{name}.sha256").write_text(f"{h.hexdigest()}  {name}\n")
-    out.update(files=files, bytes=(c["dest"] / name).stat().st_size, sha256=h.hexdigest())
-    _write_json(c["dest"] / f"{name}.json", out)
+    (c["dest"] / f"{name}.sha256").write_text(f"{sha}  {name}\n")
+    out.update(files=files, bytes=(c["dest"] / name).stat().st_size, sha256=sha)
+    _write_json(c["dest"] / f"{name}.json", dict(out, checksums=sums))
     out["deleted"] = [str(p) for p in rotate_backups(c["dest"], c["keep_daily"], c["keep_weekly"])]
     _write_json(t.ops_dir / "backup" / "latest.json", out)
     return out
 
 
 _ARCH = re.compile(r"^pythia-state-(\d{8}T\d{6}Z)\.tar\.gz$")
+
+
+def _sha256_file(f) -> str:
+    """sha256 of a path or of an open binary file."""
+    h = hashlib.sha256()
+    fh = open(f, "rb") if isinstance(f, (str, os.PathLike)) else f
+    try:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    finally:
+        fh.close()
+    return h.hexdigest()
+
+
+def _archives(dest: Path) -> list[tuple[datetime, str]]:
+    """(stamp, name) of every archive under dest, oldest first."""
+    names = [p.name for p in dest.glob("pythia-state-*.tar.gz")] if dest.exists() else []
+    return sorted((datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc), n)
+                  for n in names if (m := _ARCH.match(n)))
+
+
+def restore_test(t: Table, now: datetime | None = None) -> dict:
+    """Unpack the newest archive into a temporary folder under <dest> and compare
+    every file's sha256 with the archive's manifest (and the archive's with its
+    .sha256). Writes <data>/_ops/backup/restore.json; ok false on any difference."""
+    now = now or _now()
+    c = _backup_conf(t)
+    arch = _archives(c["dest"])
+    out: dict = {"at": _iso(now), "ok": False, "problems": []}
+    bad = out["problems"]
+    if not arch:
+        bad.append(f"no archive under {c['dest']}")
+    else:
+        name = arch[-1][1]
+        path = c["dest"] / name
+        out["archive"] = str(path)
+        side = c["dest"] / f"{name}.sha256"
+        want = side.read_text().split()[0] if side.exists() else None
+        if want is None:
+            bad.append(f"{name}.sha256 missing")
+        elif _sha256_file(path) != want:
+            bad.append("archive sha256 differs from its .sha256")
+        man = _read_json(c["dest"] / f"{name}.json")
+        sums = man.get("checksums") if isinstance(man, dict) else None
+        if not isinstance(sums, dict) or not sums:
+            bad.append(f"{name}.json has no checksums")
+        if not bad:
+            tmp = Path(tempfile.mkdtemp(prefix=".restore-", dir=c["dest"]))
+            try:
+                with tarfile.open(path, "r:gz") as tar:
+                    for m in tar:
+                        parts = Path(m.name).parts
+                        if not m.isfile() or Path(m.name).is_absolute() or ".." in parts:
+                            continue
+                        target = tmp.joinpath(*parts)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with tar.extractfile(m) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst, 1 << 20)
+                got = {p.relative_to(tmp).as_posix(): _sha256_file(p) for p in tmp.rglob("*") if p.is_file()}
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            lost = sorted(set(sums) - set(got))
+            differ = sorted(k for k in sums if k in got and got[k] != sums[k])
+            extra = sorted(set(got) - set(sums))
+            out.update(files=len(got), lost=lost[:20], differ=differ[:20], extra=extra[:20])
+            if lost or differ or extra:
+                bad.append(f"{len(lost)} files lost, {len(differ)} differ, {len(extra)} not in the manifest")
+    out["ok"] = not bad
+    _write_json(t.ops_dir / "backup" / "restore.json", out)
+    return out
+
+
+def backup_checks(t: Table, now: datetime) -> list[tuple[str, bool, str]]:
+    """The last backup has every included entry; its copy off the server (the receipt
+    research/sync-to-pc.sh leaves in <dest>/offsite.json) is behind the newest archive
+    for at most backup.offsite_max_age; the last restore test passed."""
+    c = _backup_conf(t)
+    out = []
+    last = _read_json(t.ops_dir / "backup" / "latest.json")
+    if not isinstance(last, dict):
+        out.append(("backup", False, "no backup report yet"))
+    else:
+        miss = last.get("missing") or []
+        out.append(("backup", not miss, (f"missing: {', '.join(miss)}" if miss else
+                    f"{Path(str(last.get('archive'))).name}, {last.get('files')} files, "
+                    f"{(last.get('bytes') or 0) / 1e6:.0f} MB")))
+    max_age = parse_duration(t.backup.get("offsite_max_age", "1d"), "backup offsite_max_age")
+    rec = _read_json(c["dest"] / "offsite.json")
+    m = _ARCH.match(str(rec.get("archive", ""))) if isinstance(rec, dict) else None
+    if not m:
+        out.append(("backup off-server", False, "no copy off the server yet (research/sync-to-pc.sh)"))
+    else:
+        stamp = datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        newer = [s for s, _n in _archives(c["dest"]) if s > stamp]
+        behind_h = (now - newer[0]).total_seconds() / 3600 if newer else 0.0
+        side = c["dest"] / f"{rec['archive']}.sha256"
+        sha_ok = not side.exists() or side.read_text().split()[0] == rec.get("sha256")
+        detail = f"{rec['archive']} checked {rec.get('at') or 'unknown'}"
+        if newer:
+            detail += f", {behind_h:.0f} h behind the newest archive"
+        if not sha_ok:
+            detail += ", checksum differs from the server's"
+        out.append(("backup off-server", sha_ok and behind_h * 3600 <= max_age, detail))
+    r = _read_json(t.ops_dir / "backup" / "restore.json")
+    if not isinstance(r, dict):
+        out.append(("backup restore", False, "never tested: python3 /opt/pythia-ops/jobs.py run restore-test --force"))
+    else:
+        what = f"{Path(str(r.get('archive'))).name}, {r.get('files')} files" if r.get("archive") else ""
+        out.append(("backup restore", bool(r.get("ok")),
+                    f"tested {r.get('at')}: " + ("; ".join(r.get("problems") or []) or what)))
+    return out
 
 
 def rotate_backups(dest: Path, keep_daily: int, keep_weekly: int, dry_run: bool = False,
@@ -1571,6 +1687,10 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "backup":
             print(json.dumps(backup(t, dry_run="--dry-run" in flags), indent=2))
             return 0
+        if cmd == "restore-test":
+            r = restore_test(t)
+            print(json.dumps(r, indent=2))
+            return 0 if r["ok"] else 1
     except TableError as e:
         print(f"jobs table: {e}", file=sys.stderr)
         return 2

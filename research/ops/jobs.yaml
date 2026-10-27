@@ -617,6 +617,16 @@ jobs:
     command: python3 /opt/pythia-ops/jobs.py backup
     timeout: 1h
 
+  # R3: once a month, after the night's backup, the newest archive is unpacked into a temporary folder under
+  # /srv/pythia-backup and every file compared with the sha256 in its manifest (<data>/_ops/backup/restore.json).
+  - name: restore-test
+    description: unpacks the newest backup archive into a temporary folder and compares every file's checksum with its manifest
+    schedule: "40 3 1 * *"
+    kind: host
+    command: python3 /opt/pythia-ops/jobs.py restore-test
+    lock: backup
+    timeout: 1h
+
   - name: prune
     description: retention rules of the datasets below
     schedule: "50 2 * * *"
@@ -1361,21 +1371,25 @@ backup:
   dest: /srv/pythia-backup
   keep_daily: 7
   keep_weekly: 4
+  # The off-server copy (research/sync-to-pc.sh, its receipt <dest>/offsite.json) may lag the newest archive this long
+  offsite_max_age: 1d
   include:
     - autopilot
-    - server
+    - engine
+    - autopilot-safe
     - models
     - paper
     - cs2/paper
     - signals
     - learn
     - readiness
-    - costs
-    - trials
     - factory
     - ai
     - live
     - pumpfun_rt/categories
+    - pumpfun_rt/factory
+    - reports/pumpfun_rt/live_settings.json
+    - discord/channels.json
     - polymarket/forecasts
     - polymarket/paper
     - polymarket/model
@@ -1385,5 +1399,5 @@ backup:
     - free/deribit/surface.parquet
     - free/hyperliquid/ctx.parquet
   # By file or folder name: caches the jobs rebuild (the zoo's panels, the
-  # learning loop's sweep run caches) stay out of the archive.
-  exclude: ["*.tmp", "*.lock", "*.part", "_data", "sweep"]
+  # learning loop's sweep run caches) and the engines' own rolling state.json.bak-* copies stay out of the archive.
+  exclude: ["*.tmp", "*.lock", "*.part", "_data", "sweep", "*.bak-*"]
