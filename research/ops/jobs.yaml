@@ -616,7 +616,7 @@ jobs:
     description: feature store D3, caches the finished days of the recorded books, trades, funding, open interest and liquidations as hourly features, then their coverage
     schedule: "20 2 * * *"
     command: python -m lab.features build
-    resources: {cpus: 1, memory: 3g}
+    resources: {cpus: 1, memory: 4g}
     timeout: 1h
     lock: heavy
     lock_wait: 1h
@@ -828,6 +828,43 @@ jobs:
     schedule: "50 6 * * *"
     command: python -m lab.experiments.dexscreener_d4
     resources: {cpus: 1, memory: 4g}
+    timeout: 30m
+    lock: heavy
+    lock_wait: 1h
+
+  # Candles (C1, research/lab/lab/candles): one candle API over every market Pythia looks at
+  # (lab.candles.store.candles). Writes <data>/candles (Parquet per source, asset and month, a manifest);
+  # the Binance archive under hist/ is read in place. About 0.5 GB a year, kept.
+  - name: candles-live
+    description: candles, the last day of Binance spot 1m from the public REST endpoint and 1m candles from the recorded Kraken trades, read only
+    schedule: "*/10 * * * *"
+    command: python -m lab.candles.live live
+    resources: {cpus: 1, memory: 1g}
+    timeout: 5m
+    grace: 20m
+    alert: false
+
+  - name: candles-markets
+    description: candles, GeckoTerminal 1h and 1d of the xStocks tokens, PAXG and the on-chain coins' Solana pools with liquidity, Yahoo of their underlyings, read only
+    schedule: "7 * * * *"
+    command: python -m lab.candles.live markets
+    resources: {cpus: 1, memory: 512m}
+    timeout: 8m
+    grace: 1h
+    alert: false
+
+  - name: candles-health
+    description: candles, the Binance REST fill and the Kraken candles under 30 minutes old, the Solana pools under 3 hours
+    schedule: "*/10 * * * *"
+    command: python -m lab.candles.store health
+    resources: {cpus: 1, memory: 256m}
+    timeout: 2m
+
+  - name: candles-compact
+    description: candles, merges each month's parts into its file, finished months final, then the gap report reports/candle_coverage_c1
+    schedule: "40 1 * * *"
+    command: sh -c 'python -m lab.candles.store compact && python -m lab.candles.store report'
+    resources: {cpus: 1, memory: 2g}
     timeout: 30m
     lock: heavy
     lock_wait: 1h
@@ -1197,6 +1234,10 @@ datasets:
   - name: listings
     path: listings
     max_gb: 2
+  - name: candles
+    description: C1's candle store (Binance REST fill, Kraken 1m, GeckoTerminal, Yahoo); kept forever
+    path: candles
+    max_gb: 20
   - name: ai
     description: the Claude API ledger, caps and the AI brief's predictions; never deleted
     path: ai

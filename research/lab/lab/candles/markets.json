@@ -1,0 +1,16 @@
+{
+ "binance_extra": ["PAXG"],
+ "rest_max_days": 3,
+ "rest_base": "https://api.binance.com",
+ "tokens": ["SPYx", "QQQx", "GLDx", "NVDAx", "PAXG"],
+ "coins": ["SOL", "BTC", "ETH", "JUP", "BONK", "WIF", "POPCAT", "RAY", "PYTH", "JTO", "RENDER", "TRUMP"],
+ "yahoo": ["SPY", "QQQ", "GLD", "NVDA"],
+ "yahoo_from": "2000-01-01",
+ "yahoo_1h_days": 729,
+ "yahoo_every_h": 6,
+ "gecko_gap_s": 6.0,
+ "gecko_calls_per_run": 40,
+ "gecko_hour_days": 180,
+ "pool_refresh_days": 7,
+ "stale_min": {"binance_rest": 30, "kraken": 30, "gecko": 180}
+}

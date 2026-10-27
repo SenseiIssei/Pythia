@@ -1,5 +1,6 @@
 """Candlestick patterns for the lab: definitions (`patterns`), derived signals
-(`derived`). Pure numpy; no TA-Lib, no data access.
+(`derived`). Pure numpy; no TA-Lib, no data access. C1's candle histories are
+apart: `store` (the candles() API, storage, gap report) and `live` (collectors).
 
     from lab.candles import detect, signals, PATTERNS
 """

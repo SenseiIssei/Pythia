@@ -617,4 +617,44 @@ factory may read, the recorder's order books included.
   and rank IC against the next hour and the next day with the tests counted
   (`results/feature_store_d3.md`).
 
+## Candles (C1)
+
+`lab.candles.store.candles(asset, timeframe, start, end)` is one call for
+bars of every market Pythia looks at, at 1m, 5m, 15m, 1h, 4h, 1d and 1w
+(UTC buckets, weeks from Monday): open, high, low, close, volume, quote
+volume, trades, taker buy share, VWAP, the source and `complete`. A bar is
+built from the finest layer there is for its span and only from sub-bars
+closed by `as_of` (default now); a bar still forming is never complete.
+
+- **Binance spot** (default for the lab's coins and PAXG): the recorder's
+  1m archive from 2020, then the 5m, 1h and 1d archives where it has no 1m
+  (daily from 2017). The archive lags about a day, so job `candles-live`
+  (every 10 minutes, `python -m lab.candles.live live`) fills the newest
+  days from the public klines REST endpoint (no key).
+- **Kraken**, a second source: 1m candles from the recorded trades (buy and
+  sell volume by the taker's side, VWAP), built by the same job; each
+  minute's close against Binance's is `ref_dev_bps`, above 0.5 % it is
+  flagged (`disagreements()`). The candles stay when the raw trades go.
+- **Solana**: the xStocks tokens S2 and F2 paper (SPYx, QQQx, GLDx, NVDAx),
+  PAXG and the on-chain coins' deepest USDC or SOL pool on GeckoTerminal's
+  free API, 1h and 1d in USD with the pool's liquidity; Yahoo 1d (from 2000)
+  and 1h (two years) of the underlyings SPY, QQQ, GLD, NVDA. Job
+  `candles-markets` (hourly; one call per 6 s, at most 40 a run, a 429
+  backs it off from 2 up to 30 minutes, then the 1h history is walked back
+  half a year). Markets and limits: `lab/candles/markets.json`.
+- **Storage** under `<data>/candles/source=<s>/asset=<a>/tf=<tf>/`: a
+  month's parts, merged into `<YYYY-MM>.parquet` by job `candles-compact`
+  (01:40 UTC, finished months final), `manifest.json` (per market and
+  timeframe: first and last bar, rows, months), `state.json`. The same job
+  writes the gap report (`python -m lab.candles.store report`,
+  `results/candle_coverage_c1.md`). Job `candles-health` is red, and so is
+  the briefing's health line, when the REST fill or the Kraken candles are
+  more than 30 minutes old or the pools more than 3 hours.
+- **Features**: `lab.features` reads the coins' 1h and 1d bars as
+  `cdl_body`, `cdl_upper`, `cdl_lower` (shares of the range), `cdl_range`
+  (ln high/low), `cdl_taker`, `cdl_vwap_dist`, `cdl_ret`, `cdl_ret_4h`,
+  `cdl_ret_1d`, `cdl_ret_1w`, known at the bar's close
+  (`lab/features/candles.py`); `lab.candles.store.measures()` gives the same
+  for any market.
+
 Tests: `python -m pytest tests` from `research/lab`.
