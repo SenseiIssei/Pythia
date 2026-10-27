@@ -41,10 +41,12 @@ done
 
 die() { echo "deploy_lab: $*" >&2; exit 1; }
 
+# The arguments first, then the tools: a wrong folder is the same answer wherever the script runs
+# (the lab image that runs the tests has no rsync).
+[ -n "$src" ] && [ -f "$src/lab/__init__.py" ] || die "no lab code in ${src:-?} (expected lab/__init__.py)"
 for tool in rsync sha256sum find sort; do
   command -v "$tool" >/dev/null || die "$tool is not installed"
 done
-[ -n "$src" ] && [ -f "$src/lab/__init__.py" ] || die "no lab code in ${src:-?} (expected lab/__init__.py)"
 src=$(cd "$src" && pwd)
 case "$dest" in /|"") die "refusing destination '$dest'" ;; esac
 [ "$src" != "$(cd "$dest" 2>/dev/null && pwd || echo "$dest")" ] || die "source and destination are the same folder"
