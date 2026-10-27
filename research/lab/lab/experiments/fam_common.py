@@ -14,7 +14,8 @@ of day t is charged against the return of day t+1.
 Costs: every family reports net at 15 bps (Binance taker plus half-spread)
 and at 41 bps (Kraken taker plus half-spread) per unit of one-way turnover.
 Short legs are USD-M perpetuals: a coin can be shorted on day t only if its
-perpetual traded that day, and a short receives (or pays) the real funding.
+perpetual traded that day (a bar with volume: a dead perp keeps printing flat
+zero-volume bars), and a short receives (or pays) the real funding.
 The short leg is priced off spot closes (basis ignored).
 
 Delisted coins: a position in a coin whose series ends is closed at its last
@@ -115,6 +116,27 @@ def _perp_daily(fresh: bool = False) -> pl.DataFrame:
     cache.parent.mkdir(parents=True, exist_ok=True)
     out.write_parquet(cache)
     return out
+
+
+def _perp_archive_newer() -> bool:
+    """The perp archive (daily bars, funding) got a file after perp_daily.parquet was written."""
+    cache = OUT / "cache" / "perp_daily.parquet"
+    if not cache.exists():
+        return True
+    um = ROOT / "hist" / "binance_um"
+    # A new file changes its symbol folder's mtime: one stat per folder, not per file.
+    newest = max((d.stat().st_mtime for k in ("klines_1d", "funding") if (um / k).is_dir()
+                  for d in (um / k).iterdir()), default=0.0)
+    return newest > cache.stat().st_mtime
+
+
+def perp_daily_for(last_day: int) -> pl.DataFrame:
+    """_perp_daily, rebuilt when it ends before `last_day` and the archive has news since
+    (otherwise a cache built once froze every later panel without shortable perps)."""
+    perp = _perp_daily()
+    if (perp.is_empty() or perp["day"].max() < last_day) and _perp_archive_newer():
+        perp = _perp_daily(fresh=True)
+    return perp
 
 
 def _oi_daily(fresh: bool = False) -> pl.DataFrame:
@@ -253,8 +275,9 @@ def panel_from(p: pl.DataFrame) -> Panel:
     eligible = alive & traded & (age >= MIN_AGE_D) & (np.nan_to_num(adv28) >= MIN_ADV_USD)
 
     bases = [base_of(n) for n in names]
-    perp = _perp_daily()
-    perp = perp.filter(pl.col("day").is_in(days.tolist()))
+    perp = perp_daily_for(int(days[-1]))
+    # A perp bar without volume is not tradable: delisted perps keep flat zero-volume bars.
+    perp = perp.filter(pl.col("day").is_in(days.tolist()) & (pl.col("perp_qv") > 0))
     pbase = {}
     for j, b in enumerate(bases):
         pbase.setdefault(b, []).append(j)

@@ -223,3 +223,64 @@ def test_unpublished_last_month_keeps_its_rest_days(tmp_path):
     assert day.exists()
     assert not (tmp_path / f"{prev.strftime('%Y-%m')}.absent").exists()
     assert len(f.urls) == 1 and "/monthly/" in f.urls[0]
+
+
+def metrics_csv(day: date) -> bytes:
+    """A daily metrics archive: one snapshot every 5 minutes from 00:00 to 23:55."""
+    lines = ["create_time,symbol,sum_open_interest,sum_open_interest_value"]
+    lines += [f"{day} {h:02d}:{mi:02d}:00,XRPUSDT,1.0,{h * 60 + mi}.0" for h in range(24) for mi in range(0, 60, 5)]
+    return ("\n".join(lines) + "\n").encode()
+
+
+def metrics_job(f, out_dir: Path, since: date):
+    return bf.monthly_then_daily(
+        f, out_dir, since, lambda l: "",
+        lambda l: f"{bf.BASE}/futures/um/daily/metrics/XRPUSDT/XRPUSDT-metrics-{l}.zip",
+        None, bf.norm_metrics, "ts_us", daily_only=True)
+
+
+def test_a_month_glued_before_its_last_day_was_published_is_refetched_until_complete(tmp_path):
+    this_month = date.today().replace(day=1)
+    prev = (this_month - timedelta(days=1)).replace(day=1)
+    last = bf.month_end(prev)
+    url = lambda d: f"{bf.BASE}/futures/um/daily/metrics/XRPUSDT/XRPUSDT-metrics-{d}.zip"
+    # The night the month ended: every daily archive but the last one is out.
+    f = FakeFetcher({url(d): metrics_csv(d) for d in bf.days(prev, last - timedelta(days=1))})
+    asyncio.run(metrics_job(f, tmp_path, prev))
+    month = tmp_path / f"{prev.strftime('%Y-%m')}.parquet"
+    assert bf.missing_tail(month, prev, "ts_us", date.today()) == last
+    # Next night: still unpublished, only the missing day is asked for and nothing changes.
+    f.urls.clear()
+    asyncio.run(metrics_job(f, tmp_path, prev))
+    assert [u for u in f.urls if prev.strftime("%Y-%m-") in u] == [url(last)]   # the running month aside
+    assert bf.missing_tail(month, prev, "ts_us", date.today()) == last
+    # Then it appears: appended once, and the complete month is never asked for again.
+    f.archives[url(last)] = metrics_csv(last)
+    f.urls.clear()
+    asyncio.run(metrics_job(f, tmp_path, prev))
+    t = pq.read_table(month)
+    assert t.num_rows == 288 * last.day and len(set(t["ts_us"].to_pylist())) == t.num_rows
+    assert t["ts_us"].to_pylist() == sorted(t["ts_us"].to_pylist())
+    assert bf.missing_tail(month, prev, "ts_us", date.today()) is None
+    f.urls.clear()
+    asyncio.run(metrics_job(f, tmp_path, prev))
+    assert not [u for u in f.urls if prev.strftime("%Y-%m-") in u]
+
+
+def test_an_old_short_month_is_left_alone(tmp_path):
+    m = date(2024, 3, 1)
+    month = tmp_path / "2024-03.parquet"
+    pq.write_table(bf.norm_metrics(bf.read_csv(metrics_csv(date(2024, 3, 10)), None)), month)
+    assert bf.missing_tail(month, m, "ts_us", date(2024, 4, 5)) == date(2024, 3, 11)
+    assert bf.missing_tail(month, m, "ts_us", date(2024, 5, 15)) is None   # delisted mid-month: give up
+
+
+def test_funding_top_up_takes_every_perpetual_contract_type():
+    info = {"symbols": [
+        {"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+        {"symbol": "XAUUSDT", "status": "TRADING", "contractType": "TRADIFI_PERPETUAL"},
+        {"symbol": "BTCUSDT_261225", "status": "TRADING", "contractType": "CURRENT_QUARTER"},
+        {"symbol": "OLDUSDT", "status": "SETTLING", "contractType": "PERPETUAL"},
+        {"symbol": "ODDUSDT", "status": "TRADING"},
+    ]}
+    assert bf.perpetuals(info) == {"BTCUSDT", "XAUUSDT"}

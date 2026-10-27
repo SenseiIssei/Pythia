@@ -11,7 +11,9 @@ Output:
   hist/binance_um/funding/symbol=X/YYYY-MM.parquet
   hist/binance_um/metrics/symbol=X/YYYY-MM.parquet
 The running month is stored per day (YYYY-MM-DD.parquet) and folded into the
-month file once the month is complete.
+month file once the month is complete; a month file that stops before its last
+day (a daily archive published after the night it was glued) is topped up on the
+following nights, for 40 days.
 
 Funding is the exception: data.binance.vision publishes it only as monthly
 archives, a few days after the month ends. The finished days the archive does
@@ -158,8 +160,25 @@ async def monthly_then_daily(f: Fetcher, out_dir: Path, since: date, url_month, 
         # A finished month with no archive at all (usually: before the listing)
         # is remembered, or every nightly run asks for ~30 files that cannot exist.
         absent = out_dir / f"{label}.absent"
-        if month_file.exists() or absent.exists():
+        # A month glued the night it ended lacks the days whose archive came later:
+        # fetched again (the monthly archive, else the missing days) until it covers its last day.
+        tail = missing_tail(month_file, m, sort_col, today) if month_file.exists() and url_day else None
+        if absent.exists() or (month_file.exists() and tail is None):
             f.stats["skipped"] += 1
+            continue
+        if tail is not None:
+            raw = None if daily_only else await f.zip_csv(url_month(label))
+            if raw is not None:
+                write(norm(read_csv(raw, names)), month_file)
+                f.stats["ok"] += 1
+                continue
+            raws = await asyncio.gather(*(f.zip_csv(url_day(d.isoformat())) for d in days(tail, month_end(m))))
+            parts = [norm(read_csv(r, names)) for r in raws if r is not None]
+            if parts:
+                old = pq.read_table(month_file)
+                write(pa.concat_tables([old] + [t.select(old.column_names) for t in parts]).sort_by(sort_col),
+                      month_file)
+                f.stats["refetched"] = f.stats.get("refetched", 0) + 1
             continue
         if m < this_month:
             raw = None if daily_only else await f.zip_csv(url_month(label))
@@ -199,6 +218,20 @@ async def monthly_then_daily(f: Fetcher, out_dir: Path, since: date, url_month, 
                 if raw is not None:
                     write(norm(read_csv(raw, names)), p)
                     f.stats["ok"] += 1
+
+
+def missing_tail(month_file: Path, m: date, sort_col: str, today: date) -> date | None:
+    """The first day after a month file's last row when the file stops before the month's
+    last day, else None. Asked for 40 days after the month ends, no longer: a pair delisted
+    in the middle of a month never fills it."""
+    last = month_end(m)
+    if (today - last).days > 40:
+        return None
+    ts = pq.read_table(month_file, columns=[sort_col])[sort_col]
+    if len(ts) == 0:
+        return m
+    end = datetime.fromtimestamp(pc.max(ts).as_py() / 1e6, timezone.utc).date()
+    return end + timedelta(days=1) if end < last else None
 
 
 # --- Recent funding from REST ------------------------------------------------
@@ -354,8 +387,14 @@ async def trading_perps(http) -> set[str]:
     async with http.get(f"{config.BINANCE_UM_REST}/exchangeInfo") as r:
         r.raise_for_status()
         info = await r.json()
+    return perpetuals(info)
+
+
+def perpetuals(info: dict) -> set[str]:
+    """Trading perpetuals of every contract type (PERPETUAL, TRADIFI_PERPETUAL for gold and
+    the stock perps, ...); dated futures are left out."""
     return {s["symbol"] for s in info["symbols"]
-            if s["status"] == "TRADING" and s.get("contractType") == "PERPETUAL"}
+            if s["status"] == "TRADING" and str(s.get("contractType") or "").endswith("PERPETUAL")}
 
 
 async def funding_job(f: Fetcher, rest: FundingRest | None, out_dir: Path, symbol: str, since: date) -> None:
