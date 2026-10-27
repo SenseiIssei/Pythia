@@ -264,6 +264,18 @@ def test_job_rules(repo, job, words):
     assert has(check(repo, head, []), words)
 
 
+def test_job_rules_with_another_list(repo):
+    """The task lanes pass their own list of what a job may run (`may_run`); the other job rules stay."""
+    write(repo, "research/ops/jobs.yaml", TABLE + "  - name: x\n    schedule: \"0 1 * * *\"\n"
+                                                 "    command: python -m lab.experiments.study\n")
+    head = commit(repo)
+    old, new = guard.table_at(str(repo), BASE[repo]), guard.table_at(str(repo), head)
+    existing = set(guard.lab_modules(str(repo), head).values())
+    assert guard.table_problems(old, new, {}, existing) == []
+    assert has(guard.table_problems(old, new, {}, existing, may_run=lambda p: False), "not a module")
+    assert guard.table_problems(old, new, {}, existing, may_run=lambda p: p.endswith("study.py")) == []
+
+
 def test_jobs_with_reach_cannot_change(repo):
     write(repo, "research/ops/jobs.yaml", TABLE.replace('"0 7 * * *"', '"0 9 * * *"')
           .replace("command: python -m lab.paper.live_copy", "command: python -m lab.paper.live_copy --dry-run"))

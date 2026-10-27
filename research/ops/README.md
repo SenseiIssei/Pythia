@@ -1671,3 +1671,113 @@ agent-care --force`. Switch it on or off: `enabled` on both jobs and `deploy_ops
 
 The owner's own commits are checked by the pre-commit hook: install it once per clone
 with `git config core.hooksPath scripts/hooks` (or `npm run hooks:install`).
+
+## Task lanes
+
+A lane task is one paid Claude Code run on one brief, landed only when the host's checks pass.
+The runner, its rules and its tests are in `research/ops/lanes/` (R8, from the review
+`research/lab/results/review_2026-10-27.md`): `run_lane.sh` (the shell: queue, run, report),
+`lanes.py` (every rule, standard library, uses `agent/guard.py`), `lane.md` (the run's standing
+rules), `task_template.md` (the task file) and `test_lanes.py`.
+
+**The task file.** A header between two `---` lines, then the brief: `id`, `title`, `model`
+(`claude-opus-5-5`, `claude-sonnet-5-5` or `claude-haiku-5-5`), `max_usd` (at most 30),
+`allowed:` (globs of the files the run may change: `**` any folders, `*` inside a name, `{a,b}`),
+`docs:` (read first, must exist on main), `tests:` (commands from the repository root, plain
+chains of cd, python, pytest, npx, npm, cargo, bash), optionally `retry: no`. `run_lane.sh queue
+FILE` checks it against main before it is queued, and the runner checks it again before it spends
+anything: missing keys, a model outside the three, a glob without its folder (`*.py`, `**`), a
+path outside the repository, an `allowed` entry that names only never-list paths, and every path
+of the brief's `Files:` line that `allowed` does not cover (relative to `research/lab/` unless it
+starts with a top folder or is a root file; "tests" needs a test file in the list). A refused task
+costs nothing and the notice says why.
+
+**The never list** (`lanes.NEVER`, fixed in code, no task list or retry can open it): the code
+that signs, sends or limits real money (`pumpfun_rt/live*.py`, `txbuild.py`, `wallet.py`,
+`fastpath.py`, `onchain/live_*.py`, `meme_live.py`, `wallet.py`, `tx.py`, `swapapi.py`,
+`jupiter.py`, `guard.py`, `paper/live_copy.py`, `paper/families.py`, the engine's
+`pumpfun_live*.rs`, `onchain_live*.rs`, `vault.rs`, `connectors/`, `execution/`, the server's
+`guard*.rs`), their tests, `deploy_live.sh` and the live watchers, SAFETY.md, and the rules
+themselves (`research/ops/lanes/`, the agent's `guard.py`, `run_agent.sh`, `audit_cases.sh`,
+`Dockerfile`, `deploy_ops.sh`, `deploy_lab.sh`, gitleaks files, `.github/`, the hooks). A brief
+that asks for one of them is refused at the queue (R1 would have been: the owner does those by
+hand); a broad glob such as `research/lab/tests/**` is fine, the never list wins inside it.
+
+**In the container.** The prompt is `lane.md`, the allowed list, the docs, the tests, the never
+list and the brief (`lanes.py prompt`). `/lane` holds main's copy of `lanes.py`, `guard.py` and
+`jobs.py` and the task, read only; before a commit the run calls `python3
+/lane/research/ops/lanes/lanes.py check --task /lane/task.md --repo /work --tests`, which judges
+the working tree against the base exactly as the host will: HOLD lines (fatal), DROPPED lines
+(off the list) and WARN lines (a commit subject over 200 characters). `claude` runs with
+`--max-budget-usd` set to the task's `max_usd`.
+
+**On the host.** The commits as one mbox (a container without network), applied in the trusted
+clone; then `lanes.py verdict`. Files outside the list or on the never list are **dropped**: the
+commits are made again on the base, each limited to the kept files (`lanes.py prune`, a commit
+left empty goes), judged again, and the notice and `reports/lanes/<id>.json` (`dropped`) name
+them. What holds the whole run: the guard's private lines and file kinds (symlinks, binaries, over
+1 MB, live-data names), an em dash, an allow marker, an attribution or a foreign author, a kept
+lab module that newly imports a never-list module, a job table change against the guard's job
+rules (with the task's list for the modules a job may run), nothing left, main moved, the task's
+tests red (in the agent image, from the result, network `PYTHIA_LANE_TEST_NET`, default the
+agent's), gitleaks. Then push, `/opt/pythia-src`, `deploy_lab.sh`, `deploy_ops.sh` when the job
+table changed, as for the research agent.
+
+**One retry.** A held run is queued once more as `<id>-retry` on the next cheaper model (Opus to
+Sonnet, Sonnet to Haiku, Haiku none), half the `max_usd` (at least 1), the host's reasons at the
+top of the brief, starting from the held commits (applied in the new clone without network), and
+`retry: no`.
+
+**The budget gate.** `/root/pythia-lanes/budget.json` is the owner's: `{"balance_usd": 40,
+"reserve_usd": 10, "since": "2026-10-28T00:00:00"}`; every run adds its cost from Claude's JSON
+(`total_cost_usd`, the cap when unreadable) to `spent.jsonl`. A run starts only if the balance
+less what was spent since `since` exceeds the reserve plus its `max_usd`; with every run capped at
+its `max_usd`, the balance cannot fall below the reserve (from 2026-10-24 to 27 it ended 78 USD
+past it). `"paused": true` stops every start. `run_lane.sh report` writes
+`reports/research/latest.json` (the briefing's lane card) from the records, the queue (a `HOLD`
+file in a task's folder holds it) and the budget.
+
+**Replay of 2026-10-26 and 27** (`replay_2026-10-27.json`, `lanes.py replay`, checked by the
+tests). The review's 12 rejections: 7 paid (49.93 USD) and 5 unpaid. The task files are rebuilt
+from the template (allowed from what the run changed, since those briefs are not in the
+repository); for the 8 after the review the brief's own `Files:` line was used.
+
+| Run | USD | Rejected for | Under the new rules |
+|---|---|---|---|
+| M1 modern models | 11.23 | `modern_m1.py`, ops README | accepted, ops README dropped |
+| D3 feature store | 8.20 | binary Parquet fixtures | held (binary; the check says so before the commit), retry on Sonnet |
+| D2 free data | 6.43 | `data_free_d2.py`, `lab/ops/jobs.py`, ops README | accepted, ops README dropped |
+| 116 mini agent | | no task.md | refused at the queue |
+| G2 model factory | 6.44 | ops README | accepted, ops README dropped |
+| Y14 X links | 6.06 | ops README | accepted, ops README dropped |
+| 001, 002, 003, 006 paper books | | nothing committed (local model) | refused at the queue (not a lane model: make it a job) |
+| D1 history from 2017 | 6.84 | an em dash | held (the check says so before the commit), retry on Sonnet |
+| F2 small factory | 4.73 | seed files | accepted (the seeds in the list) |
+| H1 lean agent | 1.09 | agent README | accepted, agent README dropped |
+| R1 real-money caps | 2.26 | the files its brief asked for | refused at the queue (never list), nothing spent |
+| R2 to R7 | 17.03 and R7 | the files their briefs asked for | accepted, all six |
+| G2 after R6 | 6.79 | gitleaks | held, retry on Sonnet |
+
+Of the 15 paid runs that would start, 12 are accepted the first time (80 %), none is held for
+or loses a file its brief asked for, and the 3 held ones fail on what the in-container check reports
+before the commit. The four local-model tasks stay failures under any lane rule; recurring report
+tasks belong in jobs.
+
+**Setup once, on the server as root** (after `deploy_ops.sh`, which installs the `guard.py` the
+lanes need):
+
+```bash
+install -d -m 755 /opt/pythia-ops/lanes
+install -m 755 /opt/pythia-src/research/ops/lanes/run_lane.sh /opt/pythia-ops/lanes/
+install -m 644 /opt/pythia-src/research/ops/lanes/{lanes.py,lane.md,task_template.md} /opt/pythia-ops/lanes/
+install -d -m 700 /root/pythia-lanes
+echo '{"balance_usd": 40, "reserve_usd": 10, "since": "2026-10-28T00:00:00"}' > /root/pythia-lanes/budget.json
+bash /opt/pythia-ops/lanes/run_lane.sh queue /path/to/task.md   # each task, from the template
+bash /opt/pythia-ops/lanes/run_lane.sh run                      # one task; call it from the old runner's timer
+```
+
+It uses the research agent's secrets (`/root/pythia-agent-secrets`: `agent.env`, the deploy
+key, `private-patterns.txt`), image and network; `PYTHIA_LANE_TURNS` (400), `PYTHIA_LANE_LIMIT`
+(6h) and `PYTHIA_LANE_TEST_NET` may be set in `agent.env`. It replaces the runner outside the
+repository (`/root/pythia-task.sh` and the script that wrote `latest.json`): stop those first,
+so only one writes the lane records. Tests: `python -m pytest -q research/ops/lanes/test_lanes.py`.

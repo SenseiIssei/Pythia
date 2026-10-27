@@ -1,7 +1,9 @@
 # The agent folder
 
 `run_agent.sh`, `Dockerfile`, `guard.py`, `research.md` and `care.md`: the research agent
-on the server, see research/ops/README.md, "Research agent".
+on the server, see research/ops/README.md, "Research agent". The task lanes (research/ops/lanes,
+"Task lanes") use this image, `guard.py`'s checks and its job rules (`table_problems(..., may_run=)`
+with the task's list).
 
 ## mini_agent.py: a small coding agent for the local model (lane 5)
 

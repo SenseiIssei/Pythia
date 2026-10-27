@@ -1,0 +1,487 @@
+{
+ "about": "The lane rejections of 2026-10-26 and 27 (reports/research/latest.json, reports/lanes/*.json) against the rules of lanes.py. after_review false: the 12 the review R0 counted; true: the 8 after it. The task files are rebuilt from the template: for the 12, allowed from the files the run changed and the title (their briefs are not in the repository); after the review, from the brief's Files line in results/review_2026-10-27.md. EMDASH in an added line stands for the character.",
+ "cases": [
+  {
+   "name": "119-modern-models",
+   "title": "Moderne Modelle im Test (M1)",
+   "usd": 11.23,
+   "old_reason": "Unerlaubte Dateien: lab/experiments/modern_m1.py, research/ops/README.md",
+   "after_review": false,
+   "task": "---\nid: 119-modern-models\ntitle: M1\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/experiments/modern_m1*.py\n  - research/lab/tests/test_modern_m1*.py\n  - research/lab/results/modern_m1*.md\n  - research/lab/README.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# M1\n\nThe brief.\n\nFiles: `lab/experiments/modern_m1.py`, results/modern_m1.md, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/experiments/modern_m1.py"
+    },
+    {
+     "path": "research/lab/tests/test_modern_m1.py"
+    },
+    {
+     "path": "research/lab/results/modern_m1.md"
+    },
+    {
+     "path": "research/ops/README.md"
+    }
+   ],
+   "expect": "accepted, files dropped"
+  },
+  {
+   "name": "118-feature-store",
+   "title": "Feature-Store mit Orderbuechern (D3)",
+   "usd": 8.2,
+   "old_reason": "Unerlaubte Dateien: binäre Parquet-Fixtures unter tests/fixtures/features_d3/",
+   "after_review": false,
+   "task": "---\nid: 118-feature-store\ntitle: D3\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/features/**\n  - research/lab/tests/test_features*.py\n  - research/lab/tests/fixtures/features_d3/**\n  - research/lab/results/feature_store_d3.md\n  - research/lab/README.md\n  - research/ops/jobs.yaml\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# D3\n\nThe brief.\n\nFiles: `lab/features/*`, results/feature_store_d3.md, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/features/store.py"
+    },
+    {
+     "path": "research/lab/tests/test_features.py"
+    },
+    {
+     "path": "research/lab/tests/fixtures/features_d3/binance/book20/date=2026-10-26/day.parquet",
+     "binary": true
+    }
+   ],
+   "expect": "held, one retry on claude-sonnet-5-5"
+  },
+  {
+   "name": "117-data-free",
+   "title": "Gratis-Daten 24/7 (D2)",
+   "usd": 6.43,
+   "old_reason": "Unerlaubte Dateien: lab/experiments/data_free_d2.py, lab/ops/jobs.py, research/ops/README.md",
+   "after_review": false,
+   "task": "---\nid: 117-data-free\ntitle: D2\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/experiments/data_free_d2*.py\n  - research/lab/lab/ops/jobs.py\n  - research/ops/jobs.yaml\n  - research/lab/tests/test_data_free_d2*.py\n  - research/lab/tests/test_jobs.py\n  - research/lab/README.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# D2\n\nThe brief.\n\nFiles: `lab/experiments/data_free_d2.py`, `lab/ops/jobs.py`, `research/ops/jobs.yaml`, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/experiments/data_free_d2.py"
+    },
+    {
+     "path": "research/lab/lab/ops/jobs.py"
+    },
+    {
+     "path": "research/lab/tests/test_data_free_d2.py"
+    },
+    {
+     "path": "research/ops/README.md"
+    }
+   ],
+   "expect": "accepted, files dropped"
+  },
+  {
+   "name": "116-mini-agent",
+   "title": "116-mini-agent",
+   "usd": null,
+   "old_reason": "Datei fehlt: task.md",
+   "after_review": false,
+   "task": "",
+   "changes": [],
+   "expect": "refused at the queue"
+  },
+  {
+   "name": "115-model-factory",
+   "title": "Model-Fabrik (G2)",
+   "usd": 6.44,
+   "old_reason": "Unerlaubte Dateien: research/ops/README.md",
+   "after_review": false,
+   "task": "---\nid: 115-model-factory\ntitle: G2\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/models/factory*.py\n  - research/lab/tests/test_model_factory*.py\n  - research/lab/results/model_factory_g2*.md\n  - research/lab/README.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# G2\n\nThe brief.\n\nFiles: `lab/models/factory.py`, results/model_factory_g2.md, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/models/factory.py"
+    },
+    {
+     "path": "research/lab/tests/test_model_factory_g2.py"
+    },
+    {
+     "path": "research/lab/results/model_factory_g2.md"
+    },
+    {
+     "path": "research/ops/README.md"
+    }
+   ],
+   "expect": "accepted, files dropped"
+  },
+  {
+   "name": "113-social-paper",
+   "title": "X-Links als Merkmale (Papier)",
+   "usd": 6.06,
+   "old_reason": "Unerlaubte Dateien: research/ops/README.md",
+   "after_review": false,
+   "task": "---\nid: 113-social-paper\ntitle: Y14\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/pumpfun_rt/social14.py\n  - research/lab/lab/pumpfun_rt/socialfeat.py\n  - research/lab/tests/test_pumpfun_social14*.py\n  - research/lab/results/pumpfun_social_y14*.md\n  - research/lab/README.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# Y14\n\nThe brief.\n\nFiles: `lab/pumpfun_rt/social14.py`, `lab/pumpfun_rt/socialfeat.py`, results/pumpfun_social_y14.md, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/pumpfun_rt/social14.py"
+    },
+    {
+     "path": "research/lab/tests/test_pumpfun_social14.py"
+    },
+    {
+     "path": "research/lab/results/pumpfun_social_y14.md"
+    },
+    {
+     "path": "research/ops/README.md"
+    }
+   ],
+   "expect": "accepted, files dropped"
+  },
+  {
+   "name": "001-paper-books",
+   "title": "001-paper-books",
+   "usd": null,
+   "old_reason": "Der Agent hat nichts committet (Exit 1), lokales Modell",
+   "after_review": false,
+   "task": "---\nid: 001-paper-books\ntitle: Uebersicht der Papier-Buecher\nmodel: qwen-local\nmax_usd: 1\nallowed:\n  - research/lab/results/paper_books*.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# Uebersicht der Papier-Buecher\n\nThe brief.\n\nFiles: results/paper_books.md.\n",
+   "changes": [],
+   "expect": "refused at the queue"
+  },
+  {
+   "name": "002-paper-books",
+   "title": "002-paper-books",
+   "usd": null,
+   "old_reason": "Der Agent hat nichts committet (Exit 1), lokales Modell",
+   "after_review": false,
+   "task": "---\nid: 002-paper-books\ntitle: Uebersicht der Papier-Buecher\nmodel: qwen-local\nmax_usd: 1\nallowed:\n  - research/lab/results/paper_books*.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# Uebersicht der Papier-Buecher\n\nThe brief.\n\nFiles: results/paper_books.md.\n",
+   "changes": [],
+   "expect": "refused at the queue"
+  },
+  {
+   "name": "003-paper-books",
+   "title": "003-paper-books",
+   "usd": null,
+   "old_reason": "Der Agent hat nichts committet (Exit 1), lokales Modell",
+   "after_review": false,
+   "task": "---\nid: 003-paper-books\ntitle: Uebersicht der Papier-Buecher\nmodel: qwen-local\nmax_usd: 1\nallowed:\n  - research/lab/results/paper_books*.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# Uebersicht der Papier-Buecher\n\nThe brief.\n\nFiles: results/paper_books.md.\n",
+   "changes": [],
+   "expect": "refused at the queue"
+  },
+  {
+   "name": "006-paper-books",
+   "title": "Lokaler Agent: Übersicht der Papier-Bücher",
+   "usd": null,
+   "old_reason": "Der Agent hat nichts committet (Exit 1), lokales Modell",
+   "after_review": false,
+   "task": "---\nid: 006-paper-books\ntitle: Uebersicht der Papier-Buecher\nmodel: qwen-local\nmax_usd: 1\nallowed:\n  - research/lab/results/paper_books*.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# Uebersicht der Papier-Buecher\n\nThe brief.\n\nFiles: results/paper_books.md.\n",
+   "changes": [],
+   "expect": "refused at the queue"
+  },
+  {
+   "name": "111-history-2017",
+   "title": "Kursgeschichte ab 2017 (D1)",
+   "usd": 6.84,
+   "old_reason": "Gedankenstrich (em dash) im Code",
+   "after_review": false,
+   "task": "---\nid: 111-history-2017\ntitle: D1\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/experiments/history_d1*.py\n  - research/lab/tests/test_history_d1*.py\n  - research/lab/results/history_d1*.md\n  - research/lab/README.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# D1\n\nThe brief.\n\nFiles: `lab/experiments/history_d1.py`, results/history_d1.md, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/experiments/history_d1.py",
+     "added": [
+      "# 2017 to 2024 EMDASH every day"
+     ]
+    },
+    {
+     "path": "research/lab/tests/test_history_d1.py"
+    }
+   ],
+   "expect": "held, one retry on claude-sonnet-5-5"
+  },
+  {
+   "name": "108-small-factory",
+   "title": "Fabrik fürs kleine Konto (F2)",
+   "usd": 4.73,
+   "old_reason": "Unerlaubte Dateien: results/factory_small_seed/holdout.jsonl, ledger.jsonl",
+   "after_review": false,
+   "task": "---\nid: 108-small-factory\ntitle: F2\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/factory/small*.py\n  - research/lab/tests/test_factory_small*.py\n  - research/lab/results/factory_small*.md\n  - research/lab/results/factory_small_seed/**\n  - research/lab/README.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# F2\n\nThe brief.\n\nFiles: `lab/factory/small.py`, `results/factory_small_seed/*`, results/factory_small_f2.md, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/factory/small.py"
+    },
+    {
+     "path": "research/lab/tests/test_factory_small.py"
+    },
+    {
+     "path": "research/lab/results/factory_small_seed/holdout.jsonl"
+    },
+    {
+     "path": "research/lab/results/factory_small_seed/ledger.jsonl"
+    }
+   ],
+   "expect": "accepted"
+  },
+  {
+   "name": "1135-mini-agent",
+   "title": "Eigener schlanker Agent fuer Qwen (H1)",
+   "usd": 1.09,
+   "old_reason": "Unerlaubte Dateien: research/ops/agent/README.md",
+   "after_review": true,
+   "task": "---\nid: 1135-mini-agent\ntitle: H1\nmodel: claude-opus-5-5\nmax_usd: 4\nallowed:\n  - research/ops/agent/mini_agent.py\n  - research/ops/agent/test_mini_agent.py\ndocs:\n  - research/lab/README.md\ntests:\n  - python -m pytest -q research/ops/agent/test_mini_agent.py\n---\n# H1\n\nThe brief.\n\nFiles: `research/ops/agent/mini_agent.py`, tests.\n",
+   "changes": [
+    {
+     "path": "research/ops/agent/mini_agent.py"
+    },
+    {
+     "path": "research/ops/agent/test_mini_agent.py"
+    },
+    {
+     "path": "research/ops/agent/README.md"
+    }
+   ],
+   "expect": "accepted, files dropped"
+  },
+  {
+   "name": "11760-r01-caps",
+   "title": "Echtgeld-Grenzen fest im Code (R1)",
+   "usd": 2.26,
+   "old_reason": "Unerlaubte Dateien: SAFETY.md, docs/*, live_gate.py, live_exec.py, ...",
+   "after_review": true,
+   "task": "---\nid: 11760-r01-caps\ntitle: R1\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/pumpfun_rt/live_exec.py\n  - research/lab/lab/onchain/live_gate.py\n  - research/lab/tests/test_*wallet_limits.py\n  - SAFETY.md\n  - docs/PUMPFUN-LIVE.md\n  - docs/ONCHAIN-STAGE2.md\n  - research/ops/README.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# R1\n\nThe brief.\n\nFiles: `lab/pumpfun_rt/live_exec.py`, `lab/onchain/live_gate.py`, their tests, SAFETY.md, docs/PUMPFUN-LIVE.md, docs/ONCHAIN-STAGE2.md, research/ops/README.md.\n",
+   "changes": [],
+   "expect": "refused at the queue"
+  },
+  {
+   "name": "11761-r02-silent",
+   "title": "Keine stillen Fehler mehr (R2)",
+   "usd": 2.4,
+   "old_reason": "Unerlaubte Dateien: lab/ai/local.py, lab/ops/*, ...",
+   "after_review": true,
+   "task": "---\nid: 11761-r02-silent\ntitle: R2\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/ops/{jobs,notify,briefing}.py\n  - research/lab/lab/ai/*.py\n  - research/ops/local-llm.sh\n  - research/ops/jobs.yaml\n  - research/ops/README.md\n  - research/lab/tests/test_*.py\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# R2\n\nThe brief.\n\nFiles: `lab/ops/jobs.py`, `lab/ops/notify.py`, `lab/ops/briefing.py`, `lab/ai/*` news job, `research/ops/local-llm.sh`, `research/ops/jobs.yaml`, research/ops/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/ai/local.py"
+    },
+    {
+     "path": "research/lab/lab/ops/briefing.py"
+    },
+    {
+     "path": "research/lab/lab/ops/jobs.py"
+    },
+    {
+     "path": "research/lab/lab/ops/notify.py"
+    },
+    {
+     "path": "research/lab/tests/test_ai_local.py"
+    },
+    {
+     "path": "research/lab/tests/test_jobs.py"
+    },
+    {
+     "path": "research/lab/tests/test_messages.py"
+    },
+    {
+     "path": "research/lab/tests/test_notify.py"
+    },
+    {
+     "path": "research/ops/README.md"
+    },
+    {
+     "path": "research/ops/jobs.yaml"
+    },
+    {
+     "path": "research/ops/local-llm.sh"
+    }
+   ],
+   "expect": "accepted"
+  },
+  {
+   "name": "11762-r03-backups",
+   "title": "Backups, die sich wiederherstellen lassen (R3)",
+   "usd": 1.39,
+   "old_reason": "Unerlaubte Dateien: lab/ops/jobs.py, jobs.yaml, sync-to-pc.sh (alle im Brief verlangt)",
+   "after_review": true,
+   "task": "---\nid: 11762-r03-backups\ntitle: R3\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/ops/jobs.yaml\n  - research/lab/lab/ops/jobs.py\n  - research/sync-to-pc.sh\n  - research/ops/README.md\n  - research/lab/tests/test_jobs*.py\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# R3\n\nThe brief.\n\nFiles: `research/ops/jobs.yaml`, `lab/ops/jobs.py`, `research/sync-to-pc.sh`, research/ops/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/ops/jobs.py"
+    },
+    {
+     "path": "research/lab/tests/test_jobs.py"
+    },
+    {
+     "path": "research/ops/README.md"
+    },
+    {
+     "path": "research/ops/jobs.yaml"
+    },
+    {
+     "path": "research/sync-to-pc.sh"
+    }
+   ],
+   "expect": "accepted"
+  },
+  {
+   "name": "11763-r04-datafix",
+   "title": "Datenfehler unter den Short-Ergebnissen (R4)",
+   "usd": 3.16,
+   "old_reason": "Unerlaubte Dateien: fam_common.py, backfill.py, ... (im Brief verlangt)",
+   "after_review": true,
+   "task": "---\nid: 11763-r04-datafix\ntitle: R4\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/experiments/fam_common.py\n  - research/recorder/recorder/backfill.py\n  - research/lab/tests/test_fam_common*.py\n  - research/recorder/tests/test_backfill*.py\n  - research/lab/results/data_fixes_r4*.md\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# R4\n\nThe brief.\n\nFiles: `lab/experiments/fam_common.py`, `research/recorder/recorder/backfill.py`, their tests, the new result file.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/experiments/fam_common.py"
+    },
+    {
+     "path": "research/lab/results/data_fixes_r4.md"
+    },
+    {
+     "path": "research/lab/tests/test_fam_common_perps.py"
+    },
+    {
+     "path": "research/recorder/recorder/backfill.py"
+    },
+    {
+     "path": "research/recorder/tests/test_backfill.py"
+    }
+   ],
+   "expect": "accepted"
+  },
+  {
+   "name": "11764-r05-trials",
+   "title": "Ein Trial-Register, eine p-Wert-Richtung (R5)",
+   "usd": 4.68,
+   "old_reason": "Unerlaubte Dateien: director_common.py, smallaccount*.py, ledger.py, ... (im Brief verlangt)",
+   "after_review": true,
+   "task": "---\nid: 11764-r05-trials\ntitle: R5\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/metrics.py\n  - research/lab/lab/factory/{ledger,small}.py\n  - research/lab/lab/experiments/smallaccount*.py\n  - research/lab/lab/experiments/director_common.py\n  - research/lab/README.md\n  - research/lab/tests/*.py\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# R5\n\nThe brief.\n\nFiles: `lab/metrics.py`, `lab/factory/ledger.py`, `lab/factory/small.py`, `lab/experiments/smallaccount*.py`, `lab/experiments/director_common.py`, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/README.md"
+    },
+    {
+     "path": "research/lab/lab/experiments/director_common.py"
+    },
+    {
+     "path": "research/lab/lab/experiments/smallaccount.py"
+    },
+    {
+     "path": "research/lab/lab/experiments/smallaccount_s2.py"
+    },
+    {
+     "path": "research/lab/lab/factory/ledger.py"
+    },
+    {
+     "path": "research/lab/lab/factory/small.py"
+    },
+    {
+     "path": "research/lab/lab/metrics.py"
+    },
+    {
+     "path": "research/lab/tests/conftest.py"
+    },
+    {
+     "path": "research/lab/tests/test_cv_labels.py"
+    },
+    {
+     "path": "research/lab/tests/test_director_studies.py"
+    },
+    {
+     "path": "research/lab/tests/test_factory.py"
+    },
+    {
+     "path": "research/lab/tests/test_factory_small.py"
+    },
+    {
+     "path": "research/lab/tests/test_factory_trees.py"
+    },
+    {
+     "path": "research/lab/tests/test_metrics.py"
+    },
+    {
+     "path": "research/lab/tests/test_smallaccount_s2.py"
+    }
+   ],
+   "expect": "accepted"
+  },
+  {
+   "name": "11765-r06-lockbox",
+   "title": "Lockbox und ehrliche Messlatte (R6)",
+   "usd": 5.4,
+   "old_reason": "Unerlaubte Dateien: factory/*.py, ... (im Brief verlangt)",
+   "after_review": true,
+   "task": "---\nid: 11765-r06-lockbox\ntitle: R6\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/factory/{evaluate,ledger,run,small,grammar}.py\n  - research/lab/results/factory_lockbox_r6.md\n  - research/lab/tests/test_factory*.py\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# R6\n\nThe brief.\n\nFiles: `lab/factory/{evaluate,ledger,run,small,grammar}.py`, results/factory_lockbox_r6.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/factory/evaluate.py"
+    },
+    {
+     "path": "research/lab/lab/factory/grammar.py"
+    },
+    {
+     "path": "research/lab/lab/factory/ledger.py"
+    },
+    {
+     "path": "research/lab/lab/factory/run.py"
+    },
+    {
+     "path": "research/lab/lab/factory/small.py"
+    },
+    {
+     "path": "research/lab/results/factory_lockbox_r6.md"
+    },
+    {
+     "path": "research/lab/tests/test_factory.py"
+    },
+    {
+     "path": "research/lab/tests/test_factory_lockbox_r6.py"
+    },
+    {
+     "path": "research/lab/tests/test_factory_small.py"
+    }
+   ],
+   "expect": "accepted"
+  },
+  {
+   "name": "11766-r07-f3bar",
+   "title": "pump.fun-Fabrik: Messlatte und Tage (R7)",
+   "usd": null,
+   "old_reason": "Unerlaubte Dateien: briefing.py, pumpfun_rt/factory.py, ... (im Brief verlangt)",
+   "after_review": true,
+   "task": "---\nid: 11766-r07-f3bar\ntitle: R7\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/pumpfun_rt/factory.py\n  - research/lab/lab/ops/briefing.py\n  - research/lab/tests/test_messages.py\n  - research/lab/tests/test_pumpfun_factory_f3.py\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# R7\n\nThe brief.\n\nFiles: `lab/pumpfun_rt/factory.py`, `lab/ops/briefing.py`, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/ops/briefing.py"
+    },
+    {
+     "path": "research/lab/lab/pumpfun_rt/factory.py"
+    },
+    {
+     "path": "research/lab/tests/test_messages.py"
+    },
+    {
+     "path": "research/lab/tests/test_pumpfun_factory_f3.py"
+    }
+   ],
+   "expect": "accepted"
+  },
+  {
+   "name": "11765b-g2-model-factory",
+   "title": "Model-Fabrik (G2, nach R6)",
+   "usd": 6.79,
+   "old_reason": "gitleaks hat etwas gefunden",
+   "after_review": true,
+   "task": "---\nid: 11765b-g2-model-factory\ntitle: G2\nmodel: claude-opus-5-5\nmax_usd: 8\nallowed:\n  - research/lab/lab/models/factory.py\n  - research/lab/results/model_factory_g2*\n  - research/lab/tests/test_model_factory_g2.py\n  - research/lab/README.md\n  - research/ops/jobs.yaml\ndocs:\n  - research/lab/README.md\ntests:\n  - cd research/lab && python -m pytest -q tests\n---\n# G2\n\nThe brief.\n\nFiles: `lab/models/factory.py`, results/model_factory_g2.md, `research/ops/jobs.yaml`, research/lab/README.md, tests.\n",
+   "changes": [
+    {
+     "path": "research/lab/lab/models/factory.py"
+    },
+    {
+     "path": "research/lab/lab/ops/briefing.py"
+    },
+    {
+     "path": "research/lab/lab/ops/i18n.py"
+    },
+    {
+     "path": "research/lab/results/model_factory_g2.md"
+    },
+    {
+     "path": "research/lab/results/model_factory_g2_seed/ledger.jsonl"
+    },
+    {
+     "path": "research/lab/tests/test_model_factory_g2.py"
+    },
+    {
+     "path": "research/ops/README.md"
+    }
+   ],
+   "expect": "held, one retry on claude-sonnet-5-5",
+   "gitleaks": true
+  }
+ ]
+}

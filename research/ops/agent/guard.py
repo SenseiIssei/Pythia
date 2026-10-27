@@ -377,7 +377,10 @@ def table_at(repo: str, rev: str) -> jobs.Table:
     return jobs.Table(jobs.parse_yaml(git(repo, "show", f"{rev}:{TABLE}")), f"{rev}:{TABLE}")
 
 
-def table_problems(old: jobs.Table, new: jobs.Table, held: dict[str, str], existing: set[str]) -> list[str]:
+def table_problems(old: jobs.Table, new: jobs.Table, held: dict[str, str], existing: set[str],
+                   may_run=None) -> list[str]:
+    """`may_run(path)`: may a job run this module; the guard's own lists when None (the lanes pass theirs)."""
+    ok = may_run or (lambda c: allowed(c) and not excluded(c, held))
     out = []
     for section in sorted((set(old.raw) | set(new.raw)) - {"jobs"}):
         if old.raw.get(section) != new.raw.get(section):
@@ -405,7 +408,7 @@ def table_problems(old: jobs.Table, new: jobs.Table, held: dict[str, str], exist
             else:
                 path = f"research/lab/{m.group(1).replace('.', '/')}"
                 cands = [f"{path}.py", f"{path}/__main__.py", f"{path}/__init__.py"]
-                if not any(c in existing and allowed(c) and not excluded(c, held) for c in cands):
+                if not any(c in existing and ok(c) for c in cands):
                     out.append(f"job {name}: {m.group(1)} is not a module the agent may run as a job")
         for k in (job["env"] or {}):
             if not ENV_KEY.fullmatch(k):
