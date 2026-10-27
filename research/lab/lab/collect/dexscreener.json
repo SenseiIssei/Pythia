@@ -1,0 +1,15 @@
+{
+  "_doc": "lab.collect.dexscreener settings. chains: DexScreener chain ids, Solana only by default; add base, ethereum, bsc to collect them too (or set PYTHIA_DEXSCREENER_CHAINS=solana,base). search: per chain, words whose search results (30 pairs a query) add pairs younger than new_pair_max_age_h; four a run, in turn. retention_days 0 keeps the snapshots forever; budget_gb deletes whole snapshot days, oldest first, over it.",
+  "chains": ["solana"],
+  "search": {
+    "solana": ["pumpswap", "raydium", "meteora", "orca", "launchlab", "bonk", "believe", "moonshot", "heaven", "boop"],
+    "base": ["aerodrome", "uniswap", "zora", "clanker", "virtuals"],
+    "ethereum": ["uniswap", "pancakeswap", "sushiswap"],
+    "bsc": ["pancakeswap", "fourmeme", "uniswap"]
+  },
+  "liq_floor_usd": 1000,
+  "dead_drop_days": 30,
+  "new_pair_max_age_h": 24,
+  "retention_days": 0,
+  "budget_gb": 20
+}

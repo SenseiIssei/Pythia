@@ -1,0 +1,106 @@
+[
+ {
+  "url": "https://dexscreener.com/solana/example",
+  "chainId": "base",
+  "tokenAddress": "Pair0111111111111111111111111111111111111111",
+  "icon": "https://cdn.example.com/img.png",
+  "header": "https://cdn.example.com/img.png",
+  "openGraph": "https://cdn.example.com/img.png",
+  "description": "sample",
+  "links": [
+   {
+    "label": "Website",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Docs",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "GenesisL1 explorer",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Network Desk",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Roadmap",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Source Code",
+    "url": "https://example.com/url"
+   },
+   {
+    "type": "twitter",
+    "url": "https://example.com/url"
+   },
+   {
+    "type": "telegram",
+    "url": "https://example.com/url"
+   }
+  ],
+  "cto": false
+ },
+ {
+  "url": "https://dexscreener.com/solana/example",
+  "chainId": "bsc",
+  "tokenAddress": "Pair0211111111111111111111111111111111111111",
+  "icon": "https://cdn.example.com/img.png",
+  "header": "https://cdn.example.com/img.png",
+  "openGraph": "https://cdn.example.com/img.png",
+  "description": "sample",
+  "links": [
+   {
+    "type": "twitter",
+    "url": "https://example.com/url"
+   }
+  ],
+  "cto": false
+ },
+ {
+  "url": "https://dexscreener.com/solana/example",
+  "chainId": "solana",
+  "tokenAddress": "Tok0411111111111111111111111111111111111pump",
+  "icon": "https://cdn.example.com/img.png",
+  "header": "https://cdn.example.com/img.png",
+  "openGraph": "https://cdn.example.com/img.png",
+  "description": "sample",
+  "links": [
+   {
+    "label": "Website",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Docs",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "GenesisL1 explorer",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Network Desk",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Roadmap",
+    "url": "https://example.com/url"
+   },
+   {
+    "label": "Source Code",
+    "url": "https://example.com/url"
+   },
+   {
+    "type": "twitter",
+    "url": "https://example.com/url"
+   },
+   {
+    "type": "telegram",
+    "url": "https://example.com/url"
+   }
+  ],
+  "cto": false
+ }
+]

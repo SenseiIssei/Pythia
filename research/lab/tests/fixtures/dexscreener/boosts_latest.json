@@ -1,0 +1,43 @@
+[
+ {
+  "url": "https://dexscreener.com/solana/example",
+  "chainId": "solana",
+  "tokenAddress": "Tok0311111111111111111111111111111111111pump",
+  "description": "sample",
+  "icon": "https://cdn.example.com/img.png",
+  "header": "https://cdn.example.com/img.png",
+  "openGraph": "https://cdn.example.com/img.png",
+  "links": [
+   {
+    "type": "twitter",
+    "url": "https://example.com/url"
+   },
+   {
+    "type": "tiktok",
+    "url": "https://example.com/url"
+   }
+  ],
+  "totalAmount": 10,
+  "amount": 10
+ },
+ {
+  "url": "https://dexscreener.com/solana/example",
+  "chainId": "solana",
+  "tokenAddress": "Tok0411111111111111111111111111111111111pump",
+  "description": "sample",
+  "icon": "https://cdn.example.com/img.png",
+  "header": "https://cdn.example.com/img.png",
+  "openGraph": "https://cdn.example.com/img.png",
+  "links": [
+   {
+    "url": "https://example.com/url"
+   },
+   {
+    "type": "twitter",
+    "url": "https://example.com/url"
+   }
+  ],
+  "totalAmount": 10,
+  "amount": 10
+ }
+]

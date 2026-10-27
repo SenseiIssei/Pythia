@@ -805,6 +805,33 @@ jobs:
     grace: 20m
     replaces: pythia-trending
 
+  # DexScreener archive (D4): its API keeps no history, so whatever is not snapshotted is lost.
+  # Writes <data>/dexscreener; it prunes itself (retention_days, budget_gb in lab/collect/dexscreener.json).
+  - name: dexscreener-collect
+    description: DexScreener archive, discovery and a snapshot of every DEX pair found on an age schedule, read only
+    schedule: "*/2 * * * *"
+    command: python -m lab.collect.dexscreener
+    resources: {cpus: 1, memory: 1g}
+    timeout: 115s
+    grace: 10m
+    alert: false
+
+  - name: dexscreener-health
+    description: DexScreener archive ran and wrote snapshots in the last 12 minutes
+    schedule: "*/10 * * * *"
+    command: python -m lab.collect.dexscreener --health
+    resources: {cpus: 1, memory: 256m}
+    timeout: 2m
+
+  - name: dexscreener-study
+    description: DexScreener archive derived tables (survival, paid signs, migration) and the D4 report, reports/dexscreener
+    schedule: "50 6 * * *"
+    command: python -m lab.experiments.dexscreener_d4
+    resources: {cpus: 1, memory: 4g}
+    timeout: 30m
+    lock: heavy
+    lock_wait: 1h
+
   - name: pumpfun
     description: pump.fun PAPER watcher, graduations via GeckoTerminal, marks via DexScreener, read only, no wallet
     schedule: "*/5 * * * *"

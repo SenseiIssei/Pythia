@@ -1,0 +1,18 @@
+[
+ {
+  "url": "https://dexscreener.com/solana/example",
+  "chainId": "solana",
+  "tokenAddress": "Tok0511111111111111111111111111111111111pump",
+  "description": "sample",
+  "icon": "https://cdn.example.com/img.png",
+  "header": "https://cdn.example.com/img.png",
+  "openGraph": "https://cdn.example.com/img.png",
+  "links": [
+   {
+    "type": "twitter",
+    "url": "https://example.com/url"
+   }
+  ],
+  "totalAmount": 500
+ }
+]

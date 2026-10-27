@@ -431,6 +431,48 @@ Steam and Skinport links, and a daily summary card with a chart (job
 `cs2-trends`, see `research/ops/README.md`; results in `results/cs2.md`).
 Information only.
 
+## DexScreener archive (D4)
+
+DexScreener's API has no history, so `lab.collect.dexscreener` keeps it
+(job `dexscreener-collect`, every 2 minutes; read only, no wallet). Discovery:
+the latest token profiles, latest and top boosts, community takeovers and
+ads, four search words a run (PumpSwap, Raydium, Meteora, Orca, LaunchLab,
+Bonk and other launchpads' pools younger than a day) and the pump.fun
+migrations the real-time collector saw. Tracking: every pair found is
+snapshotted through `/tokens/v1` (30 tokens a call) every 2 minutes in its
+first hour, every 15 minutes up to a day, hourly up to a week, then daily
+while its liquidity is above 1,000 USD; dropped after 30 days dead. Rows carry
+price, liquidity, FDV, market cap, volume, buys and sells over 5m/1h/6h/24h,
+price change, pair created at, active boosts, the paid profile flag, socials
+and websites (links only, in a links table when they change), dex and quote
+token, and `collected_at`. Paid orders and boosts with their payment time
+come from `/orders/v1` once a token. Budget: 30 calls a minute to the
+60-a-minute endpoints, 150 to the 300 ones, no call after 95 s of a run; a
+429 stops the group and backs it off for 2 up to 30 minutes.
+
+Layout under `<data>/dexscreener/`: `snapshots|discovery|orders|links/
+chain=<c>/date=<d>/` (run parts, merged into `day.parquet` once the day is
+over), `pairs.parquet` (first seen, last seen, status, most liquidity,
+rugged), `tokens.parquet`, `state.json`. Chains, search words, the liquidity
+floor and retention are in `lab/collect/dexscreener.json` (Solana only; add
+`base`, `ethereum`, `bsc`, or set `PYTHIA_DEXSCREENER_CHAINS`). Size: 75 to
+160 bytes a snapshot row once merged (400 in the day's run parts) and about
+270 rows a pair in its first week; at the 40 new pairs an hour measured on
+the first day (about 1,000 a day) that is 20 to 45 MB a day, 7 to 16 GB a
+year. `retention_days` (0: forever) and `budget_gb` (20,
+whole days oldest first) bound it; the other tables are kept.
+
+`lab.collect.dexscreener_derived` builds `derived/`: pair outcomes (point in
+time: features from the snapshot nearest 1 h, trading at 1 h, 1 d, 7 d,
+rugs as liquidity pulled by more than 90 %), a survival table per day and
+dex, token survival by launchpad, survival and returns by paid status at
+1 h, and pump.fun coins after migration across dexes. There is no
+`lab.features` yet; these files are what it would read. Job
+`dexscreener-study` (06:50 UTC) rebuilds them and writes
+`reports/dexscreener/latest.md` with `lab.experiments.dexscreener_d4`; job
+`dexscreener-health` turns red when no run wrote snapshots for 12 minutes.
+First study, honest about its few hours of data: `results/dexscreener_d4.md`.
+
 ## Strategy factory (W10)
 
 `python -m lab.factory` (weekly on the server, see `research/ops/README.md`)
