@@ -201,6 +201,9 @@ class Venue:
         k = self.kraken[coin]
         return eur * (KRAKEN_TAKER + (k["ask"] - k["bid"]) / (k["ask"] + k["bid"]))
 
+    def at(self, day_us: int) -> None:
+        """The panel day the next orders go out on; a venue whose costs follow the day keeps it (R10)."""
+
     def setup(self, capital: float, slots: int, sol_eur: float) -> tuple[float, float]:
         """(EUR held idle, EUR paid once) before the first trade."""
         if self.ideal is not None or self.name != "jupiter":
@@ -347,11 +350,13 @@ def simulate(P: fc.Panel, W: np.ndarray, venue: Venue, capital: float, t0: int, 
     # A reused ticker's old segment is another asset: no venue lists it today.
     tradable = lambda n: "~" not in n
     w = Wallet(cash=capital)
+    venue.at(P.days[t0])
     idle, once = venue.setup(capital, slots, sol_eur(t0) or 100.0 / venue.eurusd)
     w.cash -= idle + once
     w.idle, w.costs = idle, once
     eq = np.zeros(t1 - t0 + 1)
     for i, t in enumerate(range(t0, t1 + 1)):
+        venue.at(P.days[t])
         prices = {n: float(px[t, j]) for j, n in enumerate(names) if np.isfinite(px[t, j])}
         # A coin whose series ends here is sold at its last close, minimum or not.
         for j, n in enumerate(names):
@@ -367,7 +372,17 @@ def simulate(P: fc.Panel, W: np.ndarray, venue: Venue, capital: float, t0: int, 
             rebalance(w, tg, prices, venue, sol_eur(t), coin_of=coins.get,
                       can_trade=lambda n: bool(P.traded[t, cols[names.index(n)]]))
         eq[i] = w.value(prices)
-    return {"equity": eq, "costs": w.costs, "orders": w.orders, "skipped": w.skipped, "dust": w.dust}
+    return {"equity": eq, "costs": w.costs, "orders": w.orders, "skipped": w.skipped, "dust": w.dust,
+            "end_held": held_at_end(w, prices, coins.get)}
+
+
+def held_at_end(w: Wallet, prices: dict, coin_of=lambda k: k) -> dict:
+    """What the wallet holds at its last close, by coin, in its currency (what the way back has to sell)."""
+    out: dict = {}
+    for k, u in w.units.items():
+        if prices.get(k, 0.0) > 0:
+            out[coin_of(k)] = out.get(coin_of(k), 0.0) + u * prices[k]
+    return out
 
 
 def measure(res: dict, capital: float) -> dict:

@@ -424,14 +424,16 @@ def crypto_bars(days: np.ndarray, frame=None) -> dict[str, tuple[np.ndarray, np.
 
 
 def premium_noise(path: Path = s2.PREMIUMS_CSV) -> dict[str, np.ndarray]:
-    """S2's measured premiums of SPYx, QQQx and PAXG at the US close, around their mean, in bps."""
+    """S2's measured premiums of SPYx, QQQx and PAXG at the US close, cleaned of bad prints (s2.clean, R10: SPYx's
+    -1094 bps day), around their mean, in bps."""
     by: dict[str, list] = {}
     if path.exists():
         rev = {TOKEN[a]: a for a in UNDERLYING}
         for r in s1.read_csv(path):
             if r["symbol"] in rev:
                 by.setdefault(rev[r["symbol"]], []).append(float(r["premium_bps"]))
-    return {a: np.array(v) - np.mean(v) for a, v in by.items() if len(v) > 1}
+    by = {a: s2.clean(v) for a, v in by.items()}
+    return {a: v - np.mean(v) for a, v in by.items() if len(v) > 1}
 
 
 def drifts(tr: dict[str, dict] | None = None) -> dict[str, float]:
@@ -633,12 +635,14 @@ def simulate(c: Ctx, W: np.ndarray, g: dict, v: s1.Venue, capital: float, t0: in
     the closes of due days (and t0). `once`: buy at t0 and never trade again (the benchmarks)."""
     due = due_days(c, g["rebalance"]["every"])
     w = s1.Wallet(cash=capital)
+    v.at(c.days[t0])
     idle, way = v.setup(capital, MAX_HELD, float(c.sol_eur[t0]))
     w.cash -= idle + way
     w.idle, w.costs = idle, way
     n = t1 - t0 + 1
     eq, expo = np.zeros(n), np.zeros(n)
     for i, t in enumerate(range(t0, t1 + 1)):
+        v.at(c.days[t])
         prices = prices_at(c, t)
         if t == t0 or (due[t] and not once):
             trade(w, W[t], prices, v, float(c.sol_eur[t]), g["rebalance"]["band"])
@@ -646,7 +650,7 @@ def simulate(c: Ctx, W: np.ndarray, g: dict, v: s1.Venue, capital: float, t0: in
         te = w.trade_equity(prices)
         expo[i] = (te - w.cash) / te if te > 0 else 0.0
     return {"equity": eq, "exposure": expo, "costs": w.costs, "orders": w.orders, "skipped": w.skipped,
-            "dust": w.dust}
+            "dust": w.dust, "end_held": s1.held_at_end(w, prices)}
 
 
 def measure(res: dict, capital: float) -> dict:

@@ -606,16 +606,21 @@ def coin_prices(key: str, keys: list[str], m: Market, P: fc.Panel | None, eurusd
 # ---------------------------------------------------------------- the wallet over a window
 
 def simulate(px: np.ndarray, keys: list[str], W: np.ndarray, due: np.ndarray, reweigh: np.ndarray, sol_eur: np.ndarray,
-             venue: S2Venue, capital: float, t0: int, t1: int, slots: int) -> dict:
+             venue: S2Venue, capital: float, t0: int, t1: int, slots: int, days: np.ndarray | None = None) -> dict:
     """S1's wallet from the close of t0 (all USDC, the way there paid) to the close of t1; trades at the closes
     on due days (and at t0), every asset back to its target on reweigh days (an order there under the minimum
-    is not tried again before the next re-weight or a new target)."""
+    is not tried again before the next re-weight or a new target). days: the panel's, for a venue whose costs
+    follow the day (R10)."""
     w = s1.Wallet(cash=capital)
+    if days is not None:
+        venue.at(days[t0])
     idle, once = venue.setup(capital, slots, sol_eur[t0] or 100.0)
     w.cash -= idle + once
     w.idle, w.costs = idle, once
     eq = np.zeros(t1 - t0 + 1)
     for i, t in enumerate(range(t0, t1 + 1)):
+        if days is not None:
+            venue.at(days[t])
         prices = {k: float(px[t, j]) for j, k in enumerate(keys) if np.isfinite(px[t, j]) and px[t, j] > 0}
         if (due[t] or t == t0) and np.isfinite(W[t]).all():
             tg = {k: float(W[t, j]) for j, k in enumerate(keys)}
@@ -625,7 +630,8 @@ def simulate(px: np.ndarray, keys: list[str], W: np.ndarray, due: np.ndarray, re
             if reweigh[t]:
                 w.last.update(tg)               # a re-weight under the minimum waits for the next month
         eq[i] = w.value(prices)
-    return {"equity": eq, "costs": w.costs, "orders": w.orders, "skipped": w.skipped, "dust": w.dust}
+    return {"equity": eq, "costs": w.costs, "orders": w.orders, "skipped": w.skipped, "dust": w.dust,
+            "end_held": s1.held_at_end(w, prices)}
 
 
 def months(days_us: np.ndarray, eq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -896,7 +902,24 @@ def write(out: dict, path: Path = RESULTS / "smallaccount_s2.md") -> None:
     path.write_text(head + MARKER + "\n\n" + markdown(out), encoding="utf-8")
 
 
+CLEAN_Z = 10.0                              # a premium this many robust sd from the token's median is a bad print (R10)
+
+
+def clean(bps, z: float = CLEAN_Z) -> np.ndarray:
+    """The measured premiums without bad prints: every point more than z robust standard deviations (1.4826 x
+    the median absolute deviation) from the median goes (SPYx's -1094 bps of 2026-08-10). Kept whole when the
+    spread cannot be measured."""
+    x = np.asarray(bps, dtype=float)
+    x = x[np.isfinite(x)]
+    if len(x) < 3:
+        return x
+    med = float(np.median(x))
+    mad = 1.4826 * float(np.median(np.abs(x - med)))
+    return x[np.abs(x - med) <= z * mad] if mad > 0 else x
+
+
 def premiums(path: Path = PREMIUMS_CSV, snap: dict | None = None) -> dict[str, np.ndarray]:
+    """The picks' measured premiums at the US close in bps, cleaned of bad prints (R10)."""
     snap = snap or load_snapshot()
     alias = {(p or {}).get("symbol"): k for k, p in snap["picks"].items() if p}
     out: dict[str, list] = {}
@@ -904,7 +927,7 @@ def premiums(path: Path = PREMIUMS_CSV, snap: dict | None = None) -> dict[str, n
         for r in s1.read_csv(path):
             if r["symbol"] in alias:
                 out.setdefault(alias[r["symbol"]], []).append(float(r["premium_bps"]))
-    return {k: np.array(v) for k, v in out.items()}
+    return {k: clean(v) for k, v in out.items()}
 
 
 def drifts_from(snap: dict, tr: dict[str, dict]) -> dict[str, float]:

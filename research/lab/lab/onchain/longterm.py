@@ -172,11 +172,13 @@ def cost_rows(quotes: Path = QUOTES_CSV, sol_usd: float = 100.0, coins=HOLD, uni
 # ---------------------------------------------------------------- the book's own rules over the history
 
 def simulate(P, t0: int, t1: int, usd: float = 50.0, band: bool = True, fee_l: int = BASE_FEE_L + F.CHEAP_MAX_PRIORITY_L,
-             W: np.ndarray | None = None, venue=None) -> dict:
+             W: np.ndarray | None = None, venue=None, swap_cost=None) -> dict:
     """The book from the close of t0 (all USDC, the SOL reserve bought) to the close of t1 with its own rules:
     the targets above, book.plan with the band (band False: S1's 5 USDC minimum instead), every order cut by
     book.pieces at the split share of the wallet, each piece paying S1's recorded half round trip at its size
-    plus `fee_l` lamports at the day's SOL price; the reserve is marked at SOL's close, never traded."""
+    plus `fee_l` lamports at the day's SOL price; the reserve is marked at SOL's close, never traded.
+    swap_cost: (coin, USD, SOL price, t) -> USD, a swap's cost instead (R10's costs of their era); W: the targets
+    (R10 passes them a close late)."""
     from ..experiments import smallaccount as s1
     spec = B.BOOKS[NAME]
     W = rule(P) if W is None else W
@@ -188,6 +190,8 @@ def simulate(P, t0: int, t1: int, usd: float = 50.0, band: bool = True, fee_l: i
     costs, orders, eq = usd - st["usdc"] - reserve * (px("SOL", t0) or 0.0), 0, []
 
     def swap(c: str, amount: float, sol: float) -> float:
+        if swap_cost is not None:
+            return swap_cost(c, amount, sol, t)
         return amount * max(venue.half_rt_bps(c, amount), 0.0) / 1e4 + fee_l / LAMPORTS * sol
 
     for t in range(t0, t1 + 1):
@@ -219,7 +223,8 @@ def simulate(P, t0: int, t1: int, usd: float = 50.0, band: bool = True, fee_l: i
                 st["units"][c] = st["units"].get(c, 0.0) + (part - cost) / st["marks"][c]
                 costs, orders = costs + cost, orders + 1
         eq.append(st["usdc"] + sum(u * st["marks"].get(c, 0.0) for c, u in st["units"].items()) + reserve * sol)
-    return {"equity": np.array(eq), "costs": costs, "orders": orders}
+    return {"equity": np.array(eq), "costs": costs, "orders": orders,
+            "end_held": {c: u * st["marks"][c] for c, u in st["units"].items() if st["marks"].get(c)}}
 
 
 def backtest(P, usd: float = 50.0) -> list[dict]:
