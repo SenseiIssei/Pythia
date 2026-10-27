@@ -16,6 +16,10 @@ two kinds take turns slot by slot and each breeds from its own elite (a tree slo
 from the best tree genomes, a family slot from the best family genomes, with the
 families' moves only), so the trees do not crowd the families out. Both
 modes (this weekly one and small.py) read the same share.
+
+Since D3 a tree may read the feature store's features (lab.features): `leaves` are the
+series a new or mutated tree may draw, the panel's own by default; the weekly run adds
+the features with data over enough of the in-sample window (build.feature_leaves).
 """
 
 from __future__ import annotations
@@ -56,9 +60,10 @@ def seed_of(run_id: str, n_ledger: int) -> int:
 
 
 def search(c: build.Ctx, tried: set[str], elite_rows: list[dict], run_id: str, budget: int = BUDGET,
-           seed: int | None = None, log=print, share: float | None = None) -> dict:
+           seed: int | None = None, log=print, share: float | None = None, leaves: tuple = grammar.LEAVES) -> dict:
     """Evaluate `budget` new genomes. `tried`: keys already in the ledger; `elite_rows`: their best rows
-    (the best of both kinds); `share`: of the budget for tree genomes (default tree_share()).
+    (the best of both kinds); `share`: of the budget for tree genomes (default tree_share()); `leaves`: the
+    series a tree may draw.
 
     Returns {"rows": in-sample rows of the new genomes, "origin": counts by how each was made,
     "trees": how many of them have a tree, "duplicates": proposals skipped because they had been
@@ -96,24 +101,24 @@ def search(c: build.Ctx, tried: set[str], elite_rows: list[dict], run_id: str, b
     while len(rows) < n_random and attempts < budget * MAX_ATTEMPTS_PER_SLOT:
         attempts += 1
         tree = tree_turn(n_trees[0], len(rows), share)
-        evaluate_new(grammar.random_tree_genome(rng) if tree else grammar.random_genome(rng), "random")
+        evaluate_new(grammar.random_tree_genome(rng, leaves) if tree else grammar.random_genome(rng), "random")
     while len(rows) < budget and attempts < budget * MAX_ATTEMPTS_PER_SLOT:
         attempts += 1
         tree = tree_turn(n_trees[0], len(rows), share)
         pool = sorted((r for r in elite_rows + rows if grammar.has_tree(r["genome"]) == tree),
                       key=lambda r: r["fitness"], reverse=True)[:ELITE]
         if not pool:
-            evaluate_new(grammar.random_tree_genome(rng) if tree else grammar.random_genome(rng), "random")
+            evaluate_new(grammar.random_tree_genome(rng, leaves) if tree else grammar.random_genome(rng), "random")
             continue
         a = _tournament(pool, rng)
         if rng.random() < CROSSOVER and len(pool) > 1:
             b = _tournament(pool, rng)
             child = grammar.crossover(a["genome"], b["genome"], rng)
             if rng.random() < 0.5 or grammar.key(child) in seen or tree and not grammar.has_tree(child):
-                child = grammar.mutate(child, rng, trees=tree)
+                child = grammar.mutate(child, rng, trees=tree, leaves=leaves)
             evaluate_new(child, "crossover")
         else:
-            evaluate_new(grammar.mutate(a["genome"], rng, trees=tree), "mutation")
+            evaluate_new(grammar.mutate(a["genome"], rng, trees=tree, leaves=leaves), "mutation")
     return {"rows": rows, "origin": origin, "trees": n_trees[0], "duplicates": dup, "seconds": time.time() - t0}
 
 

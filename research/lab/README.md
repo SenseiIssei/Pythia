@@ -457,7 +457,9 @@ invents long-only daily strategies and holds them to the hand studies' bar.
   (`tests/test_factory_trees.py` replaces every bar after t and checks that
   no score at or before t moves). Reports write a tree readably, e.g.
   `rank(ret_20) where btc > ma_100`. Genomes without a tree keep their keys,
-  so the ledger's old rows stay the same trials.
+  so the ledger's old rows stay the same trials. Since D3 a leaf may also be
+  a feature of the feature store (`f.funding_8h`, see "Feature store"); the
+  weekly search draws those with data over half of its in-sample window.
 - **Search** (`factory/search.py`). A fixed budget of new genomes per run
   (300 by default), half random on the first run and a third afterwards, the
   rest mutation and crossover of the best ever tried. 30 % of the slots are
@@ -526,5 +528,49 @@ weekly mode and without changing it.
 - **Report.** `reports/smallaccount/factory.{md,json}`, next to the S1 and S2
   paper books. Resumable: a rerun the same day only evaluates what is left of
   the budget (60, `PYTHIA_FACTORY_SMALL_BUDGET` or `--budget`).
+
+## Feature store (D3)
+
+`lab.features` is one point-in-time source for every feature a model or a
+factory may read, the recorder's order books included.
+
+- **Registry** (`features/registry.py`). A feature has a name, the raw
+  sources it reads, their native frequency, the delay after which a live
+  system knows it, and a function on its group's hourly or daily table.
+  `features.frame(names, assets, times, "1h" | "1d")` gives at each time the
+  newest value known by then (end of its bucket by `ts_recv_us`, plus the
+  delay) and not older than one bucket (or the feature's own max age), so
+  nothing later than "known at" reaches a model.
+- **Microstructure** (`features/micro.py`), hourly and daily: Binance spot's
+  and Kraken's quoted spread, notional within 10 and 50 bp of the mid (within
+  the 20 recorded levels), the 50 bp book imbalance and its change; the
+  dispersion of the five venues' minute mids (USDT books in USD at Kraken's
+  USDT/USD); Kraken's taker flow imbalance, notional and realised vol from
+  1-minute trade prices; Binance USD-M funding as published, the mark's
+  premium, open interest change (the 5-minute archive from 2022, the
+  recorder after it), liquidations by side (a quiet hour is 0).
+- **Other series** (`features/external.py`): settled funding of every perp
+  from 2020, Deribit's BTC DVOL and 25-delta skew, DefiLlama's stablecoin
+  supply, the Coinbase premium; the D2 files (Fear and Greed, Hyperliquid
+  funding, macro closes, an event calendar) when they exist, empty columns
+  until then.
+- **Cache** (`features/store.py`). The hourly tables of every finished UTC
+  day as `<data>/features/<group>/date=*/hourly.parquet`, rebuilt only when
+  a day is new or its raw files changed; the nightly job `features`
+  (`python -m lab.features build`) also writes `coverage.json`. Raw
+  retention is unchanged, the cache keeps the days the raw books lose.
+- **Factories** (`features/adapter.py`). There is no model factory yet:
+  `model_frame(names, rows)` is the matrix one would read. The strategy
+  factory's expression trees take any feature as a leaf `f.<name>` (a dollar
+  amount like a level, a market feature like `btc`); the weekly search draws
+  those whose coverage spans half of its in-sample window (today
+  `funding_8h`, `stables_chg7`, `coinbase_prem_bps`), the books' features
+  start when the recorder did and wait until they do.
+- **Checks.** `tests/test_features.py` computes every feature by hand on a
+  tiny recorded sample (two hours of the recorder's BTC and ETH rows),
+  changes every raw row after t and checks that nothing at or before t
+  moves, hourly and daily. `python -m lab.features report` writes coverage
+  and rank IC against the next hour and the next day with the tests counted
+  (`results/feature_store_d3.md`).
 
 Tests: `python -m pytest tests` from `research/lab`.

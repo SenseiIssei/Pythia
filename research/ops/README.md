@@ -36,6 +36,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | every 15 min | local language model kept up: llama.cpp's server with Qwen3 4B Instruct (Q4_K_M) on 127.0.0.1:8090, 3 CPUs at a low share, 4 GB; downloads the pinned model once (`local-llm.sh up`, nothing while it runs as it should) | `jobs.yaml`: `local-llm` (host), see "Local language model" |
 | after each news collect | the local model tags the new headlines with a topic and a relevance for the lab, 1 to 5 (`lab.ai.local --news`, about a minute for 100 headlines on the VPS) | `jobs.yaml`: `llm-news` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
+| 02:20 | feature store D3: caches the finished UTC days of the recorded books (five venues), Kraken trades, funding, premium, open interest and liquidations as hourly features in `/srv/pythia-data/features/`, only days that are new or whose raw files changed, then `features/coverage.json` (`lab.features build`, about a minute, 1.8 GB at most; the `heavy` lock) | `jobs.yaml`: `features` |
 | 03:00 | strategy factory F2, small-account mode: 60 new genomes for 40 and 100 EUR wallets on BTC, ETH, SOL, SPYx, QQQx, PAXG and USDC at Jupiter's real costs, four held-back checks against holding SPYx and BTC, the 40 EUR shadow wallets stepped and reviewed, `reports/smallaccount/factory.md` (`lab.factory small`, seconds; the `heavy` lock, resumable) | `jobs.yaml`: `factory-small` |
 | 05:00 | strategy factory, forward shadow step: appends the new days to each shadow book, decides those with 30 days (`lab.factory shadow`, seconds) | `/etc/cron.d/pythia-factory` |
 | Sun 07:30 | strategy factory, weekly run: 300 new genomes in sample, six held-back checks, shadow review, report and digest (`lab.factory`, about a minute) | `/etc/cron.d/pythia-factory` |
@@ -696,6 +697,10 @@ every ETF close is at most 5 days old. 60 genomes a day by default
 left. `results/factory_small_seed/` (the first run, made in the agent
 container) is merged first.
 
+Since D3 the weekly search may also put features of the feature store
+into its trees (`f.<name>`), only those whose coverage in
+`/srv/pythia-data/features/coverage.json` spans half of its in-sample window.
+
 The first run was made on the PC; its trials and its shadow book are in
 `research/lab/results/factory_seed/`, which every run merges into
 `/srv/pythia-data/factory/` first (only what is missing). `/opt/pythia-lab`
@@ -714,6 +719,20 @@ A larger or smaller week: `--budget N`. See the last digest without posting:
 ```bash
 docker run --rm -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.factory digest --dry-run
 ```
+
+## Feature store
+
+`lab.features` (D3, see "Feature store (D3)" in `research/lab/README.md`) is
+the lab's point-in-time feature source. The job `features` (02:20) writes
+the hourly tables of every finished day of the recorded tables to
+`/srv/pythia-data/features/<group>/date=YYYY-MM-DD/hourly.parquet` (book,
+trades, perp, liq; about 150 KB a day) and rebuilds a day only when it is
+new or its raw files changed (`_built.json` keeps their signature). It reads
+the recorder's folders and never deletes them: raw retention stays as it is,
+and a day the retention removed keeps its partition. Today is computed from
+the raw rows when a study asks. `python -m lab.features report` writes
+`reports/feature_store_d3/` (coverage and rank IC of every feature); nothing
+it writes reaches an engine or money.
 
 ## Learning loop
 

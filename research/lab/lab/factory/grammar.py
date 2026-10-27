@@ -34,7 +34,9 @@ MAX_COMPLEXITY and costs fitness. Since G1 the signal, a coin filter or a gate m
 also be an expression tree over the panel's series (see "expression trees" below),
 which counts its nodes instead of 1 and is bounded by MAX_COMPLEXITY_TREES; a genome
 without a tree has the same key and complexity as before, so old ledger rows stay the
-same trials. Everything here is pure: no data, no I/O.
+same trials. Since D3 a tree may also read any feature of the feature store
+(lab.features) as a leaf "f.<name>"; the weekly search draws only those whose data
+covers enough of its in-sample window. Everything here is pure: no data, no I/O.
 """
 
 from __future__ import annotations
@@ -43,6 +45,8 @@ import copy
 import hashlib
 import json
 import random
+
+from .. import features
 
 UNIVERSES = {"top": {"n": [10, 20, 30, 50]}, "core": {}, "alpaca": {}}
 SIGNALS = {
@@ -148,7 +152,7 @@ def valid(g: dict) -> tuple[bool, str]:
             return False, f"universe {u}"
         if any(u[k] not in v for k, v in UNIVERSES[u["kind"]].items()):
             return False, f"universe {u}"
-        why = valid_signal_filters(g, SIGNALS, FILTERS, MAX_FILTERS, LEAVES)
+        why = valid_signal_filters(g, SIGNALS, FILTERS, MAX_FILTERS, LEAVES + FEATURE_LEAVES)
         if why:
             return False, why
         for part, space in (("select", SELECT), ("weight", WEIGHT), ("rebalance", REBALANCE)):
@@ -199,10 +203,11 @@ def valid_signal_filters(g: dict, signals: dict, filters: dict, max_filters: int
     return ""
 
 
-def mutate(g: dict, rng: random.Random, tries: int = 50, trees: bool = False) -> dict:
+def mutate(g: dict, rng: random.Random, tries: int = 50, trees: bool = False, leaves: tuple | None = None) -> dict:
     """One small change: a parameter, the signal kind, or a filter added or removed. With `trees` (a tree
-    slot of the search) also a tree changed or a new one put in, and the child keeps at least one tree;
-    without, exactly the families' moves as before G1."""
+    slot of the search) also a tree changed or a new one put in (its leaves from `leaves`), and the child
+    keeps at least one tree; without, exactly the families' moves as before G1."""
+    leaves = leaves or LEAVES
     for _ in range(tries):
         m = copy.deepcopy(g)
         moves = ["universe", "signal_param", "signal_kind", "filter_param", "filter_add",
@@ -211,7 +216,7 @@ def mutate(g: dict, rng: random.Random, tries: int = 50, trees: bool = False) ->
             moves += ["tree"] * 4 + ["tree_new"]
         what = rng.choice(moves)
         if what in ("tree", "tree_new"):
-            if not tree_move(m, rng, what == "tree_new", LEAVES, MAX_FILTERS):
+            if not tree_move(m, rng, what == "tree_new", leaves, MAX_FILTERS):
                 continue
         elif what == "universe":
             u = rng.choice(list(UNIVERSES))
@@ -250,7 +255,7 @@ def mutate(g: dict, rng: random.Random, tries: int = 50, trees: bool = False) ->
         m = canonical(_repair(m))
         if valid(m)[0] and key(m) != key(g) and (has_tree(m) or not trees):
             return m
-    return random_tree_genome(rng) if trees else random_genome(rng)
+    return random_tree_genome(rng, leaves) if trees else random_genome(rng)
 
 
 def tree_move(m: dict, rng: random.Random, new: bool, leaves: tuple, max_filters: int) -> bool:
@@ -281,12 +286,13 @@ def tree_move(m: dict, rng: random.Random, new: bool, leaves: tuple, max_filters
     return True
 
 
-def random_tree_genome(rng: random.Random) -> dict:
+def random_tree_genome(rng: random.Random, leaves: tuple | None = None) -> dict:
     """A random genome with at least one tree: a family genome with a tree put in (twice, a third of the time)."""
+    leaves = leaves or LEAVES
     while True:
         g = random_genome(rng)
         for _ in range(1 + (rng.random() < 1 / 3)):
-            tree_move(g, rng, True, LEAVES, MAX_FILTERS)
+            tree_move(g, rng, True, leaves, MAX_FILTERS)
         g = canonical(_repair(g))
         if valid(g)[0] and has_tree(g):
             return g
@@ -363,6 +369,11 @@ def describe_signal(s: dict) -> str:
 LEAVES = ("close", "volume", "range", "vol", "btc")
 MARKET_LEAVES = ("btc",)
 LEVELS = ("close", "volume", "btc")          # only inside ret, ma or z
+# D3: every registered feature (lab.features) as a leaf "f.<name>". A level feature (a dollar amount) is
+# treated like close or volume, a market feature (one value for all coins) like btc. valid() accepts them
+# all; which ones a search draws is its `leaves` (build.feature_leaves: the features with data in sample).
+FEATURE = "f."
+FEATURE_LEAVES = tuple(FEATURE + n for n in features.names())
 WINDOWED = ("ret", "ma", "z")
 UNARY = ("rank", "sign", "clip")
 BINARY = ("diff", "ratio", "min", "max")
@@ -376,8 +387,24 @@ MAX_COMPLEXITY_TREES = 14
 TREE_KINDS = ("expr", "xfilter", "xgate")
 
 
+def is_leaf(op: str) -> bool:
+    return op in LEAVES or op in FEATURE_LEAVES
+
+
+def is_level(op: str) -> bool:
+    return op in LEVELS or op in FEATURE_LEAVES and features.get(op[len(FEATURE):]).level
+
+
+def is_market(op: str) -> bool:
+    return op in MARKET_LEAVES or op in FEATURE_LEAVES and features.get(op[len(FEATURE):]).market
+
+
+def market_leaves(leaves: tuple) -> tuple:
+    return tuple(x for x in leaves if is_market(x)) or MARKET_LEAVES
+
+
 def _arity(op: str) -> int:
-    return 0 if op in LEAVES else 2 if op in BINARY else 1
+    return 0 if is_leaf(op) else 2 if op in BINARY else 1
 
 
 def nodes(t: dict) -> int:
@@ -400,7 +427,7 @@ def canonical_tree(t: dict) -> dict:
     """One form for equal trees: min and max with their arguments sorted, rank(rank x) and sign(sign x)
     as one, nested clips as the tighter one, a clip that cannot bite on a sign or a rank dropped."""
     op = t["op"]
-    if op in LEAVES:
+    if is_leaf(op):
         return {"op": op}
     args = [canonical_tree(a) for a in t["args"]]
     if op in COMMUTATIVE:
@@ -424,7 +451,7 @@ def canonical_cond(t: dict, cut: float) -> dict:
     """A tree used as a condition (tree > cut): z_n(x) > 0 is x above its n-day average, so it is written
     as ma_n(x) > 0, one trial."""
     t = canonical_tree(t)
-    if cut == 0 and t["op"] == "z" and t["args"][0]["op"] in LEAVES:
+    if cut == 0 and t["op"] == "z" and is_leaf(t["args"][0]["op"]):
         return {"op": "ma", "args": t["args"], "n": t["n"]}
     return t
 
@@ -434,15 +461,15 @@ def valid_tree(t, market: bool = False) -> tuple[bool, str]:
     try:
         def check(x: dict) -> str:
             op = x["op"]
-            if op not in LEAVES + WINDOWED + UNARY + BINARY:
+            if not is_leaf(op) and op not in WINDOWED + UNARY + BINARY:
                 return f"unknown op {op}"
             want = {"op"} | ({"args"} if _arity(op) else set()) | ({"n"} if op in WINDOWED else set()) \
                 | ({"c"} if op == "clip" else set())
             if set(x) != want:
                 return f"{op}: fields {sorted(x)}"
-            if op in LEAVES:
-                return "" if not market or op in MARKET_LEAVES else f"leaf {op} in a market tree"
-            if op not in WINDOWED and any(a["op"] in LEVELS for a in x["args"]):
+            if is_leaf(op):
+                return "" if not market or is_market(op) else f"leaf {op} in a market tree"
+            if op not in WINDOWED and any(is_level(a["op"]) for a in x["args"]):
                 return f"{op} of a level (close, volume, btc need ret, ma or z first)"
             if op == "sign" and x["args"][0]["op"] == "rank":
                 return "sign of a rank is 1"
@@ -452,7 +479,7 @@ def valid_tree(t, market: bool = False) -> tuple[bool, str]:
                 return f"{op}: window {x['n']}"
             if op == "clip" and x["c"] not in CLIPS:
                 return f"clip {x['c']}"
-            if op in ("ret", "ma") and x["args"][0]["op"] not in LEAVES:
+            if op in ("ret", "ma") and not is_leaf(x["args"][0]["op"]):
                 return f"{op} only on a series"
             if op == "rank" and market:
                 return "rank in a market tree"
@@ -462,11 +489,11 @@ def valid_tree(t, market: bool = False) -> tuple[bool, str]:
         why = check(t)
         if why:
             return False, why
-        if t["op"] in LEAVES:
+        if is_leaf(t["op"]):
             return False, "a bare series is not a signal"
         if depth(t) > MAX_DEPTH or nodes(t) > MAX_NODES:
             return False, f"depth {depth(t)} or {nodes(t)} nodes too big"
-        if not market and leaves_of(t) <= set(MARKET_LEAVES):
+        if not market and all(is_market(x) for x in leaves_of(t)):
             return False, "a coin score needs a coin series"
         if tree_text(canonical_tree(t)) != tree_text(t):
             return False, "not in canonical form"
@@ -477,7 +504,7 @@ def valid_tree(t, market: bool = False) -> tuple[bool, str]:
 
 def _term(rng: random.Random, room: int, leaves: tuple) -> dict:
     """A scale-free end of a tree: a window op on a series, or range or vol themselves."""
-    free = [x for x in leaves if x not in LEVELS]
+    free = [x for x in leaves if not is_level(x)]
     if room < 1 or (free and rng.random() < 0.2):
         return {"op": rng.choice(free or list(leaves))}
     return {"op": rng.choice(WINDOWED), "n": rng.choice(WINDOWS), "args": [{"op": rng.choice(leaves)}]}
@@ -500,7 +527,7 @@ def _grow(rng: random.Random, room: int, leaves: tuple, market: bool, root: bool
 
 def random_tree(rng: random.Random, leaves: tuple = LEAVES, market: bool = False) -> dict:
     """A random valid tree (grown, redrawn until it fits)."""
-    leaves = MARKET_LEAVES if market else leaves
+    leaves = market_leaves(leaves) if market else leaves
     while True:
         t = canonical_tree(_grow(rng, rng.choice(range(1, MAX_DEPTH + 1)), leaves, market, root=True))
         if valid_tree(t, market)[0]:
@@ -529,7 +556,7 @@ def _put(t: dict, p: tuple, sub: dict) -> dict:
 def mutate_tree(t: dict, rng: random.Random, leaves: tuple = LEAVES, market: bool = False, tries: int = 50) -> dict:
     """One change: a window or bound, an operator for another of its kind, a leaf, a new subtree,
     a subtree hoisted up (smaller), or a node wrapped in rank, sign, clip or z."""
-    leaves = MARKET_LEAVES if market else leaves
+    leaves = market_leaves(leaves) if market else leaves
     for _ in range(tries):
         p = rng.choice(_paths(t))
         node = copy.deepcopy(_get(t, p))
@@ -546,7 +573,7 @@ def mutate_tree(t: dict, rng: random.Random, leaves: tuple = LEAVES, market: boo
         elif what == "op" and op in UNARY:
             new = rng.choice([u for u in UNARY if not (market and u == "rank")])
             node = {"op": new, "args": node["args"], **({"c": rng.choice(CLIPS)} if new == "clip" else {})}
-        elif what == "leaf" and op in LEAVES:
+        elif what == "leaf" and is_leaf(op):
             node = {"op": rng.choice(leaves)}
         elif what == "subtree":
             node = _grow(rng, MAX_DEPTH - len(p), leaves, market, root=not p)
@@ -576,8 +603,8 @@ def crossover_tree(a: dict, b: dict, rng: random.Random, market: bool = False, t
 def show_tree(t: dict) -> str:
     """rank(ret_20), z_50(volume), min(ma_100, ret_5(btc)); a window op on close names no series."""
     op = t["op"]
-    if op in LEAVES:
-        return op
+    if is_leaf(op):
+        return op.removeprefix(FEATURE)
     args = [show_tree(a) for a in t["args"]]
     if op in ("ret", "ma"):
         return f"{op}_{t['n']}" + ("" if args[0] == "close" else f"({args[0]})")
@@ -591,7 +618,7 @@ def show_tree(t: dict) -> str:
 def show_cond(t: dict, cut: float) -> str:
     """A tree compared with its cut, ma n above 0 written as "x > ma_n": "btc > ma_100"."""
     if t["op"] == "ma" and cut == 0:
-        x = t["args"][0]["op"]
+        x = t["args"][0]["op"].removeprefix(FEATURE)
         return f"{'price' if x == 'close' else x} > ma_{t['n']}"
     return f"{show_tree(t)} > {cut:g}"
 

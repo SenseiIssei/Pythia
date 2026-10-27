@@ -14,16 +14,24 @@ series, here the panel's and in small.py the six assets': each operator reads
 only rows up to the one it scores (rolling windows end at row t, a rank is
 within row t). Their nodes are kept in a small LRU (TREE_CACHE nodes), not in
 the memo, so a run of hundreds of trees stays within memory.
+
+A tree leaf "f.<name>" (D3) is a feature of the feature store (lab.features), the
+daily value known at each close (adapter.daily_matrix), NaN where the coin is not
+alive; feature_leaves() lists the features whose cached coverage spans at least
+FEATURE_MIN_SHARE of the in-sample window, the ones a weekly search may draw.
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import numpy as np
 
+from .. import history
 from ..data import UNIVERSE
+from ..features import adapter as feature_adapter
 from ..experiments import fam_common as fc
 from ..experiments.alpaca_universe import ALPACA, annual_lists
 from . import grammar
@@ -33,6 +41,7 @@ BASE_COST = "35bps"       # Alpaca taker plus slippage, the hand studies' judgin
 COIN_VOL = 0.40           # per-coin annual vol target of "invvol slots", as in the paper books
 LIST_SIZE = {"core": 20, "alpaca": 15}
 TREE_CACHE = 48           # tree nodes kept per Ctx (each a (T, n) array)
+FEATURE_MIN_SHARE = 0.5   # a feature leaf is drawn only with data over half of the in-sample window
 
 
 @dataclass
@@ -181,7 +190,7 @@ def tree_values(t: dict, leaf, mask: np.ndarray | None = None, cache: OrderedDic
         return cache[k]
     op = t["op"]
     with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-        if op in grammar.LEAVES:
+        if grammar.is_leaf(op):
             out = _finite(np.asarray(leaf(op), dtype=float))
         else:
             a = [tree_values(x, leaf, mask, cache, tag) for x in t["args"]]
@@ -231,7 +240,30 @@ def leaf(c: Ctx, name: str) -> np.ndarray:
         return annvol(c)
     if name == "btc":
         return c.btc_px[:, None]
+    if name in grammar.FEATURE_LEAVES:
+        return c.feat(name, lambda: feature_leaf(c, name.removeprefix(grammar.FEATURE)))
     raise grammar.GenomeError(f"unknown series {name}")
+
+
+def feature_leaf(c: Ctx, name: str) -> np.ndarray:
+    """(T, n) a store feature at each close, NaN where the coin is not alive; (T, 1) a market feature."""
+    closes = c.days + fc.DAY_US
+    if feature_adapter.R.get(name).market:
+        return feature_adapter.daily_matrix(name, [], closes)
+    x = feature_adapter.daily_matrix(name, [c.P.bases[j] for j in c.cols], closes)
+    return np.where(c.alive, x, np.nan)
+
+
+def feature_leaves(c: Ctx, cov: dict | None = None) -> tuple:
+    """The feature leaves a search may draw: data over FEATURE_MIN_SHARE of the in-sample window (from
+    history.LONG_FROM to fc.SPLIT, within the panel) by the store's coverage.json; none without it."""
+    start = max(int(c.days[0]), _us(history.LONG_FROM))
+    end = min(int(c.days[-1]) + fc.DAY_US, fc.SPLIT)
+    return tuple(grammar.FEATURE + n for n in feature_adapter.drawable(start, end, FEATURE_MIN_SHARE, cov))
+
+
+def _us(day: str) -> int:
+    return int(datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1e6)
 
 
 def tree_score(c: Ctx, t: dict, mask: np.ndarray | None = None, tag: str = "", market: bool = False) -> np.ndarray:

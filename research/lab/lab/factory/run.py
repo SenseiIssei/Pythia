@@ -108,7 +108,11 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
     pool_before = ledger.pool()
     share = search.tree_share() if share is None else share
     elite = search.elite_of(evaluate.current(ledger.rows))
-    res = search.search(c, set(ledger.by_key), elite, run_id, budget, log=log, share=share)
+    feats = build.feature_leaves(c)
+    if feats:
+        log(f"  feature store leaves in sample: {', '.join(feats)}")
+    res = search.search(c, set(ledger.by_key), elite, run_id, budget, log=log, share=share,
+                        leaves=grammar.LEAVES + feats)
     ledger.add([strip(r) for r in res["rows"]])
     pool = ledger.pool()
 
@@ -170,7 +174,8 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
                     "oos": f"{_day(int(c.days[w['oos']][0]))} to {today}"},
         "budget": budget, "seeded": seeded, "pool_before": pool_before, "pool_after": pool,
         "search": {"evaluated": len(res["rows"]), "origin": res["origin"], "duplicates": res["duplicates"],
-                   "seconds": res["seconds"], "trees": res["trees"], "tree_share": share},
+                   "seconds": res["seconds"], "trees": res["trees"], "tree_share": share,
+                   "feature_leaves": list(feats)},
         "trees": tree_summary(res["rows"], ledger.rows, holdout_rows),
         "tried": [{"key": r["key"], "genome": r["genome"], "is_sharpe": r["is_sharpe"]} for r in res["rows"]],
         "top": [strip({k: v for k, v in r.items() if k != "genome"}) for r in top],

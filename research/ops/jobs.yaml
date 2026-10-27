@@ -607,6 +607,20 @@ jobs:
     replaces: pythia-weekly
 
   # ---------------------------------------------------------------- models and the strategy factory
+  # D3 (research/lab/lab/features): the point-in-time feature store. Caches the hourly microstructure tables of
+  # every finished UTC day the recorder kept (books of five venues, Kraken trades, funding, premium, open
+  # interest, liquidations) as data/features/<group>/date=*/hourly.parquet, only days that are new or whose
+  # raw files changed, then data/features/coverage.json (the weekly factory draws tree leaves from it). Raw
+  # retention is not touched: the cache outlives the raw books. About a minute a night, 1.8 GB at most.
+  - name: features
+    description: feature store D3, caches the finished days of the recorded books, trades, funding, open interest and liquidations as hourly features, then their coverage
+    schedule: "20 2 * * *"
+    command: python -m lab.features build
+    resources: {cpus: 1, memory: 3g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 1h
+
   - name: models
     description: model zoo, retrains what is due, shadow forecasts, drift, the Models page report
     schedule: "15 7 * * *"
