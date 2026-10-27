@@ -38,8 +38,10 @@ few assets are worth holding. This mode keeps all of that:
              in-sample Sharpe of the two wallets, less 0.03 a moving part, less
              a penalty for a drawdown over 20 % or a book almost always in USDC.
   ledger     <data>/factory/small/ledger.jsonl, its own namespace: one line per
-             genome ever tried, only grows; the deflation pool is S1's and S2's
-             16 trials plus every line, so the bar rises with every run;
+             genome ever tried, only grows, each line a trial of the "small" family
+             in the trial registry (metrics.trial_pool, R5) next to S1's, S2's and
+             L1's; the DSR is over the registry's pool of all, the small family's
+             shown next to it, so the bar rises with every run anywhere;
              results/factory_small_seed (the first run's trials) is merged first.
   held back  HOLDOUT_PER_RUN genomes a run (best fitness, both halves positive,
              mutually different) see 2024-01-01 to the last fresh ETF close; a
@@ -119,7 +121,6 @@ TREE_NODE_COST = 0.02                       # more per node of an expression tre
 MIN_EXPOSURE = 0.10
 SAFE_DD = s2.SAFE_DD                        # 20 %
 DD_PENALTY = 4.0                            # fitness lost per unit of in-sample drawdown above SAFE_DD
-PRIOR_TRIALS = s1.TRIALS + s2.TRIALS        # S1's and S2's candidates were trials on the same question
 SHADOW_CAPITAL = 40.0
 SHADOW_DAYS = 30
 MAX_ACTIVE = 4
@@ -737,7 +738,8 @@ def holdout(c: Ctx, g: dict, v: s1.Venue, pool: dict, bench: dict) -> dict:
             x40 = returns(res, cap)
     late = np.vstack([np.zeros((1, W.shape[1])), W[:-1]])
     h["oos_late_cagr"] = measure(simulate(c, late, g, v, MAIN, t0, t1), MAIN)["cagr"]
-    h.update({"deflated_p": lg.deflated(x40, pool), "pool_trials": pool["n_trials"], "pool_sr0": pool["sr0_annual"],
+    h.update({"deflated_p": lg.deflated(x40, pool), "dsr_family": lg.deflated_family(x40, pool),
+              "pool_trials": pool["n_trials"], "pool_sr0": pool["sr0_annual"], "family_trials": pool["family_trials"],
               "oos_returns_40": [round(float(r), 7) for r in x40]})
     return h
 
@@ -765,7 +767,7 @@ def failed(gs: dict[str, dict]) -> list[str]:
 # ---------------------------------------------------------------- the ledger (its own namespace)
 
 def small_dir() -> Path:
-    return Path(os.environ.get("PYTHIA_FACTORY_SMALL_DIR", str(lg.factory_dir() / "small")))
+    return lg.small_dir()
 
 
 def seed_dir() -> Path:
@@ -804,23 +806,12 @@ def export_seed(dest: Path | None = None) -> dict:
 
 
 class Ledger(lg.Ledger):
-    """The weekly factory's ledger class on small/ledger.jsonl, with its own pool: S1's and S2's trials plus
-    every small genome, the variance of trial Sharpes from the small genomes alone."""
+    """The weekly factory's ledger class on small/ledger.jsonl; its genomes are the registry's "small" family
+    (with S1's, S2's and L1's trials), the pool the registry's of all with that family next to it."""
+    FAMILY = "small"
 
     def __init__(self, path: Path | None = None):
         super().__init__(path or small_dir() / "ledger.jsonl")
-
-    def n_trials(self) -> int:
-        return PRIOR_TRIALS + len(self.rows)
-
-    def pool(self) -> dict:
-        x = np.array([r["is_sharpe"] for r in self.rows if r.get("is_sharpe") is not None
-                      and math.isfinite(r["is_sharpe"])])
-        x = np.clip(x, -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(365)
-        v = float(np.var(x)) if len(x) > 1 else 0.0
-        n = PRIOR_TRIALS + len(x)
-        return {"prior_trials": PRIOR_TRIALS, "factory_trials": len(x), "n_trials": n, "var": v,
-                "sr0_annual": lg.sr0(v, n) * math.sqrt(365)}
 
 
 @contextmanager
@@ -1136,7 +1127,7 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
             decision, why = "waiting", f"passes, but all {MAX_ACTIVE} shadow slots are taken"
         else:
             decision = "shadow"
-            why = f"passes every held-back gate; deflated p {h['deflated_p']:.2f} over {h['pool_trials']} trials"
+            why = f"passes every held-back gate; DSR {h['deflated_p']:.2f} over {h['pool_trials']} trials"
             start_shadow(c, v, r, h, gs, run_id)
             others.append((r["key"], h["oos_returns_40"]))
             slots -= 1
@@ -1181,7 +1172,8 @@ def tree_summary(new: list[dict], led: Ledger, held: list[dict]) -> dict:
         if g and grammar.has_tree(g):
             out.append({"key": h["key"], "expression": expression(g), "is_sharpe": h["is_sharpe"],
                         "oos_end_eur_40": h["oos_end_eur_40"], "spy_end_eur_40": h["spy_end_eur_40"],
-                        "oos_max_dd_40": h["oos_max_dd_40"], "deflated_p": h["deflated_p"], "decision": h["decision"]})
+                        "oos_max_dd_40": h["oos_max_dd_40"], "deflated_p": h["deflated_p"],
+                        "dsr_family": h.get("dsr_family"), "decision": h["decision"]})
     return {"this_run": len(mine), "in_ledger": sum(1 for r in led.rows if grammar.has_tree(r["genome"])),
             "best": {k: best.get(k) for k in keep} if best else None, "held_back": out}
 
@@ -1202,6 +1194,14 @@ def _pct(x) -> str:
     return "n/a" if x is None else f"{x * 100:.1f} %"
 
 
+DSR_COL = "DSR, pass at 0.95 or more (all / family)"
+
+
+def _dsr(h: dict) -> str:
+    fam = h.get("dsr_family")
+    return f"{h['deflated_p']:.2f}" + (f" ({fam:.2f})" if fam is not None else "")
+
+
 def markdown(d: dict) -> str:
     w, p = d["windows"], d["pool_after"]
     md = ["# Strategy factory, small-account mode (F2), in EUR\n",
@@ -1217,8 +1217,12 @@ def markdown(d: dict) -> str:
           + ", ".join(f"{k} {x}" for k, x in d["search"]["origin"].items())
           + (f"; {d['search']['resumed']} from an earlier attempt today" if d["search"]["resumed"] else "")
           + f"), {d['search']['duplicates']} proposal(s) already tried",
-          f"- ledger: {d['ledger']} small-account genomes plus {p['prior_trials']} S1/S2 trials = {p['n_trials']} "
-          f"trials; noise bar (the best of that many noise strategies) Sharpe {p['sr0_annual']:.2f}\n",
+          f"- ledger: {d['ledger']} small-account genomes plus {p['prior_trials']} other trials in the registry = "
+          f"{p['n_trials']} trials; noise bar (the best of that many noise strategies) Sharpe {p['sr0_annual']:.2f}",
+          f"- the small-account family alone (S1, S2, L1 and these genomes): {p.get('family_trials', 0)} trials, "
+          f"noise bar Sharpe {p.get('family_sr0_annual', 0.0):.2f}",
+          "- DSR (deflated Sharpe ratio, pass at 0.95 or more): the probability that the 40 EUR wallet's held-back "
+          "Sharpe beats the best of that many noise strategies; over all, the family's in brackets\n",
           "## The benchmarks (bought once and held, same wallet and costs)\n"]
     t = []
     for k in d["bench_oos"]:
@@ -1248,7 +1252,7 @@ def markdown(d: dict) -> str:
                       f"halves {b['is_h1']:.2f} / {b['is_h2']:.2f}, fitness {b['fitness']:.2f}.\n")
         t = [{"key": h["key"], "expression": f"`{h['expression']}`", "40 EUR end": f"{h['oos_end_eur_40']:.2f}",
               "SPYx 40": f"{h['spy_end_eur_40']:.2f}", "DD 40": _pct(h["oos_max_dd_40"]),
-              "deflated p": f"{h['deflated_p']:.2f}", "decision": h["decision"]} for h in tr["held_back"]]
+              DSR_COL: _dsr(h), "decision": h["decision"]} for h in tr["held_back"]]
         md.append(report.table(t, list(t[0])) if t else "No tree was held back this run.\n")
     md.append("## Held back (survivor: drawdown under 20 % and above holding SPYx after costs at 40 and 100 EUR)\n")
     t = [{"key": h["key"], "genome": h["name"], "40 EUR end / CAGR / DD": f"{h['oos_end_eur_40']:.2f} / "
@@ -1257,7 +1261,7 @@ def markdown(d: dict) -> str:
           "SPYx 40 / 100": f"{h['spy_end_eur_40']:.2f} / {h['spy_end_eur_100']:.2f}",
           "BTC 40 / 100": f"{h['btc_end_eur_40']:.2f} / {h['btc_end_eur_100']:.2f}",
           "Sharpe vs SPYx (40)": f"{h['oos_sharpe_40']:.2f} vs {h['spy_sharpe_40']:.2f}",
-          "deflated p": f"{h['deflated_p']:.2f}", "decision": h["decision"], "why": h["why"]} for h in d["holdout"]]
+          DSR_COL: _dsr(h), "decision": h["decision"], "why": h["why"]} for h in d["holdout"]]
     md.append(report.table(t, list(t[0])) if t else "nothing in sample good enough to check\n")
     md.append("## Shadow wallets (40 EUR each, the same costs; at most 4, retired after 30 days unless they beat "
               "holding SPYx risk-adjusted)\n")

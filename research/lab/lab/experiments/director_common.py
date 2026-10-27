@@ -2,10 +2,12 @@
 owner registered together (gated_btc, genome_gates, m4_residual): the pool they
 count into, the bootstrap, a panel cut at a fixed day, and the results-file writer.
 
-The pool: 1,115 hand trials after X15 and X16 (results/candles.md) at the variance
-backed out of the published bar (377 trials at 2.43, as every hand study since C16),
-the factory ledger's in-sample Sharpes, and the 9 trials registered together today
-(gated_btc 4, genome_gates 4, m4_residual 1), each study's own at its own variance.
+The pool: since R5 the trial registry's of all (metrics.trial_pool): every hand trial
+(1,377 by the results files, the 9 registered here on 2026-10-20 among them, at the
+variance backed out of the published bar, 377 trials at 2.43, as every hand study since
+C16), every small-account trial and every factory genome at its in-sample Sharpe; the
+factory ledgers are read as they are, so a hand study never needs to write the registry.
+Before R5 it was 1,115 hand trials, the factory ledger and the 9 at their own variance.
 """
 
 from __future__ import annotations
@@ -18,11 +20,11 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
-from ..metrics import deflated_sharpe
+from ..metrics import deflated_sharpe, trial_pool
 from . import fam_common as fc
 
-HAND_TRIALS = 1115
-TODAY_TRIALS = 9          # gated_btc 4 + genome_gates 4 + m4_residual 1
+HAND_TRIALS = 1115        # the hand count these three studies were registered with (before R5)
+TODAY_TRIALS = 9          # gated_btc 4 + genome_gates 4 + m4_residual 1, in the registry's hand family
 PRIOR_TRIALS, PRIOR_SR0 = 377, 2.43
 BOOT_DRAWS, BOOT_BLOCK, BOOT_SEED = 4000, 20, 20261020
 YEAR = 365
@@ -114,19 +116,24 @@ def factory_sharpes() -> np.ndarray:
     return fs()
 
 
+def ledger_trials() -> list[dict]:
+    """The factory ledgers' genomes as registry trials (the weekly seed and ledger, F2's ledger), read only."""
+    from ..factory import ledger as lg
+    rows = {r["key"]: r for r in lg.read_jsonl(lg.seed_dir() / "ledger.jsonl")}
+    rows.update({r["key"]: r for r in lg.read_jsonl(lg.ledger_path())})
+    return (lg.trial_rows(list(rows.values()), lg.Ledger.FAMILY)
+            + lg.trial_rows(lg.read_jsonl(lg.small_dir() / "ledger.jsonl"), "small"))
+
+
 def pool(mine_annual: list[float]) -> dict:
-    """The pooled per-day variance of trial Sharpes and the trial count (1,724 with today's 9).
-    mine_annual: this study's trial Sharpes (annual); they stand for all 9 of today's trials."""
-    v1, n1 = prior_var(), HAND_TRIALS
-    fx = np.clip(factory_sharpes(), -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(YEAR)
-    n2, v2 = len(fx), float(np.var(fx)) if len(fx) > 1 else 0.0
-    x = np.clip(np.array(mine_annual, dtype=float), -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(YEAR)
-    v3 = float(np.var(x)) if len(x) > 1 else v1
-    n3 = TODAY_TRIALS
-    n = n1 + n2 + n3
-    v = (n1 * v1 + n2 * v2 + n3 * v3) / n
-    return {"hand_trials": n1, "factory_trials": n2, "today_trials": n3, "mine": len(x), "n_total": n,
-            "var": v, "sr0_annual": fc._sr0(v, n) * math.sqrt(YEAR)}
+    """The trial registry's pool of all, the factory ledgers counted with it (each genome once, by id).
+    mine_annual: this study's trial Sharpes (annual), already counted in the registry's hand family."""
+    p = trial_pool(extra=ledger_trials())
+    f = p["families"]
+    hand = f.get("hand", {}).get("n_trials", 0)
+    return {"hand_trials": hand, "factory_trials": p["n_trials"] - hand, "today_trials": TODAY_TRIALS,
+            "mine": len(mine_annual), "n_total": p["n_trials"], "var": p["var"], "sr0_annual": p["sr0_annual"],
+            "families": {k: x["n_trials"] for k, x in f.items()}}
 
 
 def deflated(x: np.ndarray, pl_: dict) -> float:

@@ -56,6 +56,7 @@ BOOT_DRAWS, BOOT_BLOCK = 2_000, 20
 NOISE_SEEDS = 20
 VOL_TARGET, VOL_WIN = 0.10, 60
 TRIALS = 8
+DSR_PASS = 0.95                             # the DSR a convincing candidate reaches over the registry's pool of all
 KEYS = ("SPY", "BTC", "GOLD")               # what the rules hold besides USDC; tsmom1 adds the panel's coins
 FAMILIES = ("xstocks", "ondo", "backpack", "prestocks", "tessera")
 RWA_TAGS = set(FAMILIES) | {"stocks", "rwa", "commodities"}
@@ -674,22 +675,40 @@ def bootstrap(x: np.ndarray, y: np.ndarray, draws: int = BOOT_DRAWS, block: int 
             "diff_above_0": float((cd > 0).mean())}
 
 
-def deflated_p(diffs: dict[str, np.ndarray], n_trials: int = TRIALS) -> dict[str, float]:
-    """One minus the deflated Sharpe probability of each candidate's daily return difference to the benchmark,
-    over n_trials, the trial variance from the differences' Sharpes (clipped at +-3 a year as fc.deflate does)."""
+def diff_var(diffs: dict[str, np.ndarray]) -> float:
+    """The variance of the candidates' daily Sharpes of their difference to the benchmark (clipped at +-3 a year
+    as fc.deflate does): the pool S2 registered, its 8 trials at their own variance."""
+    sr = [d.mean() / d.std() if d.std() > 0 else 0.0 for d in diffs.values()]
+    return float(np.var(np.clip(np.array(sr) * math.sqrt(365), -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(365)))
+
+
+def dsr(diffs: dict[str, np.ndarray], pool: dict | None = None) -> dict[str, float]:
+    """The DSR (higher is better, pass at 0.95 or more) of each candidate's daily return difference to the
+    benchmark: the probability that its Sharpe beats the best of pool's n_trials noise trials. pool: the trial
+    registry's of all by default (metrics.trial_pool); {"n_trials": TRIALS, "var": diff_var(diffs)} is the
+    pool as registered. Unmeasurable (no spread, or the skew and kurtosis leave no variance): 0."""
+    from ..metrics import deflated_sharpe, trial_pool
     from scipy import stats
-    from ..metrics import deflated_sharpe
-    sr = {k: (d.mean() / d.std() if d.std() > 0 else 0.0) for k, d in diffs.items()}
-    var = float(np.var(np.clip(np.array(list(sr.values())) * math.sqrt(365), -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(365)))
+    pool = pool or trial_pool()
     out = {}
     for k, d in diffs.items():
-        sk = float(stats.skew(d)) if d.std() > 0 else 0.0
-        ku = float(stats.kurtosis(d, fisher=False)) if d.std() > 0 else 3.0
-        if 1 - sk * sr[k] + (ku - 1) / 4 * sr[k] ** 2 <= 0:
-            out[k] = 1.0
+        if d.std() == 0:
+            out[k] = 0.0
             continue
-        out[k] = 1 - deflated_sharpe(sr[k], len(d), n_trials, var, sk, ku)
+        sr = d.mean() / d.std()
+        sk, ku = float(stats.skew(d)), float(stats.kurtosis(d, fisher=False))
+        if 1 - sk * sr + (ku - 1) / 4 * sr ** 2 <= 0:
+            out[k] = 0.0
+            continue
+        out[k] = deflated_sharpe(sr, len(d), pool["n_trials"], pool["var"], sk, ku)
     return out
+
+
+def dsr_pools(diffs: dict[str, np.ndarray]) -> dict[str, dict]:
+    """The three pools S2 reports: the registry's of all (the one the bar uses), its small-account family, and
+    the 8 trials as registered."""
+    from ..metrics import trial_pool
+    return {"all": trial_pool(), "small": trial_pool("small"), "registered": {"n_trials": TRIALS, "var": diff_var(diffs)}}
 
 
 def verdict(rows: dict[str, dict], bench: str = "spy_hold") -> dict[str, dict]:
@@ -700,7 +719,7 @@ def verdict(rows: dict[str, dict], bench: str = "spy_hold") -> dict[str, dict]:
         o = r["oos"]
         safe = o["max_dd"] < SAFE_DD
         match = o["cagr"] >= b - MATCH_SLACK
-        conv = safe and match and r.get("boot", {}).get("diff_p05", -1) > 0 and r.get("deflated_p", 1) < 0.05
+        conv = safe and match and r.get("boot", {}).get("diff_p05", -1) > 0 and r.get("dsr", 0.0) >= DSR_PASS
         ok = k not in REFERENCES
         out[k] = {"safe": safe, "matches": match, "passes": ok and safe and match, "convincing": ok and conv}
     return out
@@ -751,11 +770,16 @@ def run(P: fc.Panel, etf: dict, v: S2Venue, drifts: dict[str, float], noise: dic
         if cap == MAIN:
             t0, t1 = win["oos"]
             ret = {k: daily_returns(eqs[(k, "oos")], cap) for k in CANDIDATES}
-            dp = deflated_p({k: ret[k] - ret["spy_hold"] for k in CANDIDATES if k != "spy_hold"})
+            diffs = {k: ret[k] - ret["spy_hold"] for k in CANDIDATES if k != "spy_hold"}
+            pools = dsr_pools(diffs)
+            by = {name: dsr(diffs, pl_) for name, pl_ in pools.items()}
             for k in CANDIDATES:
                 if k != "spy_hold":
                     res[f"{k}@{cap:g}"]["boot"] = bootstrap(ret[k], ret["spy_hold"])
-                    res[f"{k}@{cap:g}"]["deflated_p"] = dp[k]
+                    res[f"{k}@{cap:g}"]["dsr"] = by["all"][k]
+                    res[f"{k}@{cap:g}"]["dsr_small"] = by["small"][k]
+                    res[f"{k}@{cap:g}"]["dsr_registered"] = by["registered"][k]
+            res["_pools"] = {name: {"n_trials": pl_["n_trials"], "var": pl_["var"]} for name, pl_ in pools.items()}
             res["_curves"] = {k: [round(float(x), 4) for x in eqs[(k, "oos")]] for k in CANDIDATES}
     if noise:
         sens: dict[str, list] = {k: [] for k in CANDIDATES}
@@ -835,14 +859,21 @@ def markdown(out: dict) -> str:
                   "CAGR minus ETF": f"{_pct(r['oos']['cagr'] - res[f'spy_hold@{MAIN:g}']['oos']['cagr'])}" if b else "",
                   "band": f"{_pct(b.get('diff_p05'))} to {_pct(b.get('diff_p95'))}" if b else "",
                   "draws above": _pct(b.get("diff_above_0"), 0) if b else "",
-                  "deflated p": f"{r['deflated_p']:.3f}" if "deflated_p" in r else "",
+                  "DSR, pass at 0.95 or more (all / small / registered)": (
+                      f"{r['dsr']:.3f} / {r['dsr_small']:.3f} / {r['dsr_registered']:.3f}" if "dsr" in r else ""),
                   "safe": v["safe"], "matches": v["matches"], "bar": v["passes"], "convincing": v["convincing"],
                   "with premium noise": (f"{_pct(out['res']['_noise'][k]['cagr'])} / {_pct(out['res']['_noise'][k]['max_dd'])}"
                                          if out["res"].get("_noise") else "")})
     md.append(fc.table(t, list(t[0])))
+    pools = res.get("_pools") or {}
+    n = {k: f"{int(pools[k]['n_trials']):,}" if k in pools else "?" for k in ("all", "small", "registered")}
     md.append("Bar: out-of-sample drawdown under 20 % and CAGR at least the ETF token's minus 1 point. Convincing: also "
-              "the 5 % band of the difference above 0 and deflated p under 0.05 (8 trials). With premium noise: "
-              "CAGR / drawdown, median of 20 draws of the measured premium at the close.\n")
+              "the 5 % band of the difference above 0 and a DSR of 0.95 or more over the trial registry's pool of "
+              f"all ({n['all']} trials). DSR: the deflated Sharpe ratio of the daily difference to the ETF token, the "
+              "probability that it beats the best of that many noise trials; higher is better. Next to it the "
+              f"registry's small-account family ({n['small']} trials) and the {n['registered']} trials as registered "
+              "(their own variance). With premium noise: CAGR / drawdown, median of 20 draws of the measured premium "
+              "at the close.\n")
     md.append("## 6. Paper books (picked in sample)\n")
     md.append(", ".join(f"`{k}`" for k in out["paper"]) + "\n")
     return "\n".join(md) + "\n"

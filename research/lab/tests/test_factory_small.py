@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from lab import report
+from lab import metrics, report
 from lab.experiments import fam_common as fc
 from lab.experiments import smallaccount_s2 as s2
 from lab.factory import ledger as lg
@@ -234,10 +234,12 @@ def test_gates_need_a_small_drawdown_and_spyx_beaten_at_both_capitals():
 def test_own_ledger_namespace_and_bar(dirs):
     led = small.Ledger()
     assert led.path == dirs / "factory" / "small" / "ledger.jsonl"
-    assert led.pool()["n_trials"] == small.PRIOR_TRIALS
+    p0 = led.pool()
+    assert p0["n_trials"] == metrics.trial_pool()["n_trials"] and p0["family_trials"] == 61 + 8 + 1   # S1, S2, L1
     led.add([{"key": f"k{i}", "is_sharpe": s, "fitness": s} for i, s in enumerate([0.5, 1.5, -0.3, 2.0])])
     p = small.Ledger().pool()
-    assert p["n_trials"] == small.PRIOR_TRIALS + 4 and p["sr0_annual"] > 0
+    assert p["n_trials"] == p0["n_trials"] + 4 and p["family_trials"] == 70 + 4 and p["sr0_annual"] > 0
+    assert p["family"] == "small" and {r["id"] for r in metrics.read_registry()} >= {f"small:k{i}" for i in range(4)}
     assert not lg.ledger_path().exists()                     # the weekly factory's ledger is not touched
     led.add([{"key": "k0", "is_sharpe": 9.0, "fitness": 9.0}])
     assert len(small.Ledger()) == 4                          # a genome is one trial, forever
@@ -267,7 +269,8 @@ def test_run_is_resumable_and_writes_the_report(ctx, dirs):
     d = _run(ctx, v, 12, "2026-10-26")
     led = small.Ledger()
     assert len(led) == 12 and d["search"]["evaluated"] == 12
-    assert d["pool_after"]["n_trials"] == small.PRIOR_TRIALS + 12
+    assert d["pool_after"]["n_trials"] == d["pool_before"]["n_trials"] + 12
+    assert all(0.0 <= h["deflated_p"] <= 1.0 and 0.0 <= h["dsr_family"] <= 1.0 for h in d["holdout"])
     again = _run(ctx, v, 12, "2026-10-26")
     assert len(small.Ledger()) == 12 and again["search"]["resumed"] == 12
     assert [h["key"] for h in again["holdout"]] == [h["key"] for h in d["holdout"]]

@@ -269,32 +269,39 @@ def test_months_and_the_share_that_beat_the_etf():
     assert m["months_beat"] == 1.0 and m["worst_month"] > 0
 
 
-def test_the_bootstrap_and_the_deflated_p():
+def test_the_bootstrap_and_the_dsr():
     rng = np.random.default_rng(0)
     y = rng.normal(0.0005, 0.01, 1000)
     b = s2.bootstrap(y.copy(), y, draws=200)
     assert b["diff_p05"] == pytest.approx(0.0, abs=1e-12) and b["diff_above_0"] == 0.0
     good = s2.bootstrap(y + 0.002, y, draws=200)
     assert good["diff_p05"] > 0 and good["diff_above_0"] == 1.0
-    p = s2.deflated_p({"edge": rng.normal(0.003, 0.01, 1000), "noise": rng.normal(0.0, 0.01, 1000),
-                       "worse": rng.normal(-0.001, 0.01, 1000)})
-    assert p["edge"] < 0.05 < p["noise"] and p["worse"] > p["noise"]
+    diffs = {"edge": rng.normal(0.003, 0.01, 1000), "noise": rng.normal(0.0, 0.01, 1000),
+             "worse": rng.normal(-0.001, 0.01, 1000)}
+    reg = {"n_trials": s2.TRIALS, "var": s2.diff_var(diffs)}
+    p = s2.dsr(diffs, reg)                                 # the DSR: higher is better, pass at 0.95
+    assert p["edge"] > s2.DSR_PASS > p["noise"] and p["worse"] < p["noise"]
+    pools = s2.dsr_pools(diffs)
+    assert pools["all"]["n_trials"] > pools["small"]["n_trials"] >= 70 and pools["registered"] == reg
+    assert all(0.0 <= x <= 1.0 for x in s2.dsr(diffs).values())   # the registry's pool of all by default
+    assert s2.dsr({"flat": np.zeros(50)}, reg) == {"flat": 0.0}
 
 
-def row(cagr, dd, sharpe=1.0, is_dd=0.1, is_sharpe=1.0, diff_p05=-0.1, dp=0.5):
+def row(cagr, dd, sharpe=1.0, is_dd=0.1, is_sharpe=1.0, diff_p05=-0.1, dsr=0.5):
     return {"oos": {"cagr": cagr, "max_dd": dd, "sharpe": sharpe}, "is": {"max_dd": is_dd, "sharpe": is_sharpe},
-            "boot": {"diff_p05": diff_p05}, "deflated_p": dp}
+            "boot": {"diff_p05": diff_p05}, "dsr": dsr}
 
 
 def test_the_bar_and_the_paper_picks_as_registered():
     rows = {"spy_hold": row(0.15, 0.19), "btc_hold": row(0.40, 0.50, is_sharpe=3.0),
             "spy_trend": row(0.145, 0.12, is_sharpe=0.9), "dual_mom": row(0.30, 0.35, is_sharpe=2.0, is_dd=0.4),
             "mix_6040": row(0.20, 0.19, is_sharpe=1.2, is_dd=0.25), "trend_mix": row(0.17, 0.10, is_sharpe=0.8,
-                                                                                  diff_p05=0.01, dp=0.01),
+                                                                                  diff_p05=0.01, dsr=0.99),
             "tsmom1": row(0.3, 0.1, is_sharpe=5.0), "vol_target": row(0.08, 0.05, is_sharpe=0.7)}
     v = s2.verdict(rows)
     assert v["spy_trend"]["passes"] and not v["spy_trend"]["convincing"], "within a point of the ETF, safe"
     assert not v["dual_mom"]["passes"] and not v["vol_target"]["passes"] and v["mix_6040"]["passes"]
+    assert not s2.verdict({**rows, "trend_mix": row(0.17, 0.10, diff_p05=0.01, dsr=0.94)})["trend_mix"]["convincing"]
     assert v["trend_mix"]["convincing"] and not v["btc_hold"]["passes"] and not v["spy_hold"]["passes"]
     assert s2.paper_picks(rows) == ["spy_trend", "trend_mix"], "safe in sample first; never tsmom1 or a reference"
 

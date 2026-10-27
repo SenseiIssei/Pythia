@@ -5,11 +5,12 @@ run that first tried it, its in-sample numbers). It only grows. A genome tried
 again in a later run is the same trial, not a new one, so it is not appended
 twice.
 
-The deflation pool is the lab's hand-study pool (PRIOR_TRIALS, whose variance
-of trial Sharpes is backed out of the published bar, as the hand studies do)
-plus every ledger line. So each factory run raises the bar for everything that
-comes after it, its own candidates included: the more the factory tries, the
-better a survivor has to be.
+The deflation pool is the trial registry's (metrics.trial_pool, R5): every
+hand-study trial (variance backed out of the published bar, as the hand
+studies do), every small-account trial and every line of this ledger and of
+F2's, each registered as one trial the moment it is evaluated. The bar is the
+pool of all; the factory family's own is reported next to it. So each run,
+here or in any study, raises the bar for everything that comes after it.
 
 The trial Sharpes of the factory's own trials are their in-sample Sharpes at
 the judging cost, winsorised at +-3 like fam_common.deflate; the out-of-sample
@@ -20,17 +21,14 @@ are judged against the whole pool.
 from __future__ import annotations
 
 import json
-import math
 import os
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
-from scipy import stats
 
 from ..data import ROOT
-from ..experiments import fam_common as fc
-from ..metrics import deflated_sharpe
+from .. import metrics
 
 try:
     import fcntl
@@ -39,9 +37,10 @@ except ImportError:          # Windows, where the first real run was made
     import msvcrt
 
 # Every trial the hand studies counted up to alpaca_universe (C16), and the
-# bar it published: the best of 377 noise trials at an annual Sharpe of 2.43.
-PRIOR_TRIALS, PRIOR_SR0 = 377, 2.43
-G = 0.5772156649
+# bar it published: the best of 377 noise trials at an annual Sharpe of 2.43
+# (the registry's first block; the variance of every hand block is backed out of it).
+PRIOR_TRIALS, PRIOR_SR0 = metrics.PRIOR_TRIALS, metrics.PRIOR_SR0
+G = metrics.G_EULER
 
 
 def factory_dir() -> Path:
@@ -50,6 +49,27 @@ def factory_dir() -> Path:
 
 def ledger_path() -> Path:
     return factory_dir() / "ledger.jsonl"
+
+
+def small_dir() -> Path:
+    """F2's folder (lab.factory.small)."""
+    return Path(os.environ.get("PYTHIA_FACTORY_SMALL_DIR", str(factory_dir() / "small")))
+
+
+def trial_rows(rows: list[dict], family: str) -> list[dict]:
+    """Ledger lines as registry trials: one per genome, id family:key, its in-sample Sharpe."""
+    return [{"id": f"{family}:{r['key']}", "family": family, "source": f"{family} ledger", "run": r.get("run"),
+             "sharpe": r.get("is_sharpe")} for r in rows if r.get("key")]
+
+
+def sync_registry(extra: "Ledger | None" = None) -> int:
+    """Every line of the weekly ledger and of F2's (and of `extra`) in the trial registry; idempotent."""
+    n = 0
+    for path, fam in ((ledger_path(), Ledger.FAMILY), (small_dir() / "ledger.jsonl", "small")):
+        n += len(metrics.register(trial_rows(read_jsonl(path), fam)))
+    if extra is not None and extra.path not in (ledger_path(), small_dir() / "ledger.jsonl"):
+        n += len(metrics.register(trial_rows(extra.rows, extra.FAMILY)))
+    return n
 
 
 def seed_dir() -> Path:
@@ -174,6 +194,8 @@ def lock():
 
 
 class Ledger:
+    FAMILY = "factory"         # the registry's family of this ledger's genomes
+
     def __init__(self, path: Path | None = None):
         self.path = path or ledger_path()
         self.rows = read_jsonl(self.path)
@@ -186,51 +208,49 @@ class Ledger:
         return len(self.rows)
 
     def add(self, rows: list[dict]) -> list[dict]:
-        """Append the genomes not yet in the ledger; returns what was appended."""
+        """Append the genomes not yet in the ledger, each a trial in the registry; returns what was appended."""
         new = []
         for r in rows:
             if r["key"] not in self.by_key:
                 self.by_key[r["key"]] = r
                 new.append(r)
         append_jsonl(self.path, new)
+        metrics.register(trial_rows(new, self.FAMILY))
         self.rows += new
         return new
 
     def n_trials(self) -> int:
-        return PRIOR_TRIALS + len(self.rows)
+        return self.pool()["n_trials"]
 
     def pool(self) -> dict:
-        """Size, pooled variance of daily trial Sharpes, and the noise bar it implies."""
-        v1, n1 = prior_var(), PRIOR_TRIALS
-        x = np.array([r["is_sharpe"] for r in self.rows if r.get("is_sharpe") is not None
-                      and math.isfinite(r["is_sharpe"])])
-        x = np.clip(x, -fc.SR_CLIP, fc.SR_CLIP) / math.sqrt(365)
-        n2, v2 = len(x), float(np.var(x)) if len(x) > 1 else 0.0
-        n = n1 + n2
-        v = (n1 * v1 + n2 * v2) / n
-        return {"prior_trials": n1, "prior_var": v1, "factory_trials": n2, "factory_var": v2,
-                "n_trials": n, "var": v, "sr0_annual": sr0(v, n) * math.sqrt(365)}
+        """The registry's pool of all (size, pooled variance of daily trial Sharpes, the noise bar it implies),
+        with this ledger's family next to it; the ledgers are synced into the registry first."""
+        sync_registry(self)
+        p = metrics.trial_pool()
+        fam = p["families"].get(self.FAMILY, {"n_trials": 0, "var": 0.0, "sr0_annual": 0.0})
+        return {"prior_trials": p["n_trials"] - len(self.rows), "factory_trials": len(self.rows),
+                "family": self.FAMILY, "family_trials": fam["n_trials"], "family_var": fam["var"],
+                "family_sr0_annual": fam["sr0_annual"], "families": p["families"],
+                "n_trials": p["n_trials"], "var": p["var"], "sr0_annual": p["sr0_annual"]}
 
 
 def sr0(var: float, n: int) -> float:
     """Expected best daily Sharpe of n noise trials with this variance of trial Sharpes."""
-    if n <= 1:
-        return 0.0
-    return math.sqrt(var) * ((1 - G) * stats.norm.ppf(1 - 1 / n) + G * stats.norm.ppf(1 - 1 / (n * math.e)))
+    return metrics.expected_max_sharpe(var, n)
 
 
 def prior_var() -> float:
-    z = (1 - G) * stats.norm.ppf(1 - 1 / PRIOR_TRIALS) + G * stats.norm.ppf(1 - 1 / (PRIOR_TRIALS * math.e))
-    return (PRIOR_SR0 / math.sqrt(365) / z) ** 2
+    return metrics.prior_var()
 
 
 def deflated(x: np.ndarray, pool: dict) -> float:
-    """Deflated Sharpe p of a daily net return series against the whole pool."""
+    """DSR (higher is better, pass at 0.95 or more) of a daily net return series against the whole pool."""
     x = x[np.isfinite(x)]
     if len(x) < 30 or x.std() == 0:
         return 0.0
-    s = float(x.mean() / x.std())
-    sk, ku = float(stats.skew(x)), float(stats.kurtosis(x, fisher=False))
-    if 1 - sk * s + (ku - 1) / 4 * s ** 2 <= 0:
-        return 0.0
-    return deflated_sharpe(s, len(x), pool["n_trials"], pool["var"], sk, ku)
+    return metrics.dsr(x, pool)
+
+
+def deflated_family(x: np.ndarray, pool: dict) -> float:
+    """The same against the pool's family alone (shown next to the decision, which is over all)."""
+    return deflated(x, {"n_trials": pool["family_trials"], "var": pool["family_var"]})

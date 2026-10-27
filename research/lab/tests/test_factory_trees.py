@@ -306,7 +306,7 @@ def test_every_tree_is_a_trial_and_the_report_shows_it(home, monkeypatch):  # no
     L = ledger.Ledger()
     n_tree = sum(grammar.has_tree(r["genome"]) for r in L.rows)
     assert n_tree == d["search"]["trees"] == d["trees"]["this_run"] == 12
-    assert d["pool_after"]["n_trials"] == ledger.PRIOR_TRIALS + 40          # trees and families alike
+    assert d["pool_after"]["n_trials"] == d["pool_before"]["n_trials"] + 40   # trees and families alike
     md = run.writeup.markdown(d)
     assert "## Invented building blocks (expression trees)" in md and "Best tree in sample: `" in md
     assert "\u2014" not in md

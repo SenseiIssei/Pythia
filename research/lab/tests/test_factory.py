@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import random
 from datetime import datetime, timezone
 
 import numpy as np
 import pytest
 
-from lab import history, report
+from lab import history, metrics, report
 from lab.experiments import fam_common as fc
 from lab.factory import build, evaluate, grammar, ledger, run, search, shadow
 
@@ -177,31 +178,38 @@ def test_holdings_match_the_simulation(ctx):
 
 def test_ledger_counts_each_genome_once_and_survives_a_torn_line(home):
     L = ledger.Ledger()
-    assert L.n_trials() == ledger.PRIOR_TRIALS
+    base = metrics.trial_pool()["n_trials"]                # the registry's seed: hand and small-account trials
+    assert L.n_trials() == base
     rows = [{"key": f"k{i}", "is_sharpe": float(i % 5 - 2), "fitness": 0.0} for i in range(10)]
     assert len(L.add(rows)) == 10
     assert len(L.add(rows[:3] + [{"key": "new", "is_sharpe": 0.5, "fitness": 0.0}])) == 1
     with ledger.ledger_path().open("a") as fh:
         fh.write('{"key": "torn"')
     L2 = ledger.Ledger()
-    assert len(L2) == 11 and L2.n_trials() == ledger.PRIOR_TRIALS + 11
+    assert len(L2) == 11 and L2.n_trials() == base + 11
+    reg = metrics.read_registry()
+    assert sum(r["family"] == "factory" for r in reg) == 11 and len({r["id"] for r in reg}) == len(reg)
 
 
 def test_prior_pool_reproduces_the_published_bar(home):
-    p = ledger.Ledger().pool()
-    assert p["sr0_annual"] == pytest.approx(ledger.PRIOR_SR0, abs=1e-6)
+    assert metrics.expected_max_sharpe(ledger.prior_var(), ledger.PRIOR_TRIALS) * math.sqrt(365) == pytest.approx(
+        ledger.PRIOR_SR0, abs=1e-6)
+    p = ledger.Ledger().pool()                             # the hand family at the prior's variance, more trials
+    assert p["families"]["hand"]["var"] == pytest.approx(ledger.prior_var())
+    assert p["n_trials"] == metrics.trial_pool()["n_trials"] and p["sr0_annual"] > ledger.PRIOR_SR0
 
 
 def test_bar_rises_as_trials_accumulate(home):
     L = ledger.Ledger()
     rng = np.random.default_rng(0)
-    before = L.pool()["sr0_annual"]
+    pool0 = L.pool()
     L.add([{"key": f"k{i}", "is_sharpe": float(x), "fitness": 0.0} for i, x in enumerate(rng.normal(0, 1.5, 2000))])
     after = L.pool()
-    assert after["n_trials"] == ledger.PRIOR_TRIALS + 2000
-    assert after["sr0_annual"] > before
+    assert after["n_trials"] == pool0["n_trials"] + 2000 and after["family_trials"] == 2000
+    assert after["sr0_annual"] > pool0["sr0_annual"]
     x = rng.normal(0.002, 0.03, 900)
-    assert ledger.deflated(x, after) < ledger.deflated(x, ledger.Ledger(ledger.ledger_path().with_name("none.jsonl")).pool())
+    assert ledger.deflated(x, after) < ledger.deflated(x, pool0)
+    assert 0.0 <= ledger.deflated_family(x, after) <= 1.0
 
 
 def test_lock_refuses_a_second_process(home):
@@ -256,7 +264,7 @@ def test_weekly_run_end_to_end(home, monkeypatch):
     run.publish(d1)
     assert (report.REPORTS / "factory" / "latest.md").exists()
     L = ledger.Ledger()
-    assert len(L) == 40 and d1["pool_after"]["n_trials"] == ledger.PRIOR_TRIALS + 40
+    assert len(L) == 40 and d1["pool_after"]["n_trials"] == d1["pool_before"]["n_trials"] + 40
     d2 = run.weekly(40, False, "2026-10-24", log=lambda *_: None)
     assert len(ledger.Ledger()) == 80
     assert d2["pool_after"]["sr0_annual"] != d1["pool_after"]["sr0_annual"]
@@ -407,13 +415,14 @@ def test_seed_carries_trials_to_another_machine_once(home, tmp_path, monkeypatch
     # A fresh machine: an empty factory folder that imports the seed.
     monkeypatch.setenv("PYTHIA_FACTORY_DIR", str(tmp_path / "server"))
     monkeypatch.setenv("PYTHIA_FACTORY_SEED", str(seed))
-    assert ledger.Ledger().n_trials() == ledger.PRIOR_TRIALS
+    base = metrics.trial_pool()["n_trials"]               # the registry already holds the first machine's 20
+    assert ledger.Ledger().n_trials() == base
     first = ledger.import_seed()
     assert first["ledger"] == 20 and first["shadow"] == out["shadow"]
     assert ledger.import_seed() == {"ledger": 0, "holdout": 0, "shadow": 0}
     d = run.weekly(20, False, "2026-10-17", log=lambda *_: None)
-    assert d["pool_before"]["n_trials"] == ledger.PRIOR_TRIALS + 20
-    assert d["pool_after"]["n_trials"] == ledger.PRIOR_TRIALS + 40
+    assert d["pool_before"]["n_trials"] == base             # the seed's genomes are the same trials, not new ones
+    assert d["pool_after"]["n_trials"] == base + 20
 
 
 def test_digest_goes_through_notify_post_to_telegram(home, monkeypatch):

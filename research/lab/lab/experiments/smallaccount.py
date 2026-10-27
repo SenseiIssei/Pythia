@@ -67,7 +67,7 @@ SOL_FEE_RESERVE, RENT_SOL = 0.01, 0.00204
 ONRAMP_FEE, ONRAMP_WITHDRAW_USD = KRAKEN_TAKER, 1.0
 DOMINATE = 0.5                      # costs at or above this share of the return before costs dominate
 CAGR_SLACK = 0.02                   # capital needed: within 2 percentage points of the 10,000 EUR run
-TRIALS = 8
+TRIALS = 8                          # the candidates; the trial registry counts the 61 configurations (R5)
 
 
 # ---------------------------------------------------------------- the snapshot

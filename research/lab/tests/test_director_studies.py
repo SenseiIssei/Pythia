@@ -6,10 +6,13 @@ Run from research/lab:  python -m pytest tests/test_director_studies.py
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import polars as pl
 import pytest
 
+from lab import metrics
 from lab.experiments import director_common as dc
 from lab.experiments import gated_btc as gb
 from lab.experiments import genome_gates as gg
@@ -55,11 +58,18 @@ def test_net_charges_turnover_on_the_next_day():
 
 # ---------------------------------------------------------------- common pieces
 
-def test_pool_counts_1724_trials():
+def test_pool_is_the_trial_registry_with_the_factory_ledgers(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHIA_FACTORY_DIR", str(tmp_path / "factory"))
+    monkeypatch.setenv("PYTHIA_FACTORY_SEED", str(tmp_path / "no_seed"))
     p = dc.pool([0.1, -0.2, 0.3, 0.0])
-    assert p["n_total"] == dc.HAND_TRIALS + p["factory_trials"] + dc.TODAY_TRIALS
-    assert dc.HAND_TRIALS == 1115 and dc.TODAY_TRIALS == 9
-    assert 1.5 < p["sr0_annual"] < 4.0
+    assert p["hand_trials"] == 1377 and p["n_total"] == 1377 + 70 and p["factory_trials"] == 70   # S1, S2, L1
+    led = tmp_path / "factory" / "ledger.jsonl"
+    led.parent.mkdir(parents=True)
+    led.write_text("".join(json.dumps({"key": f"g{i}", "is_sharpe": 0.5 * i}) + "\n" for i in range(5)))
+    q = dc.pool([])
+    assert q["n_total"] == p["n_total"] + 5 and q["families"]["factory"] == 5
+    assert not metrics.registry_path().exists()               # read only: a hand study does not write the registry
+    assert dc.TODAY_TRIALS == 9 and 1.5 < p["sr0_annual"] < 4.0
 
 
 def test_bootstrap_band_is_ordered_and_reproducible():
