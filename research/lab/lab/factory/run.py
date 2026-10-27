@@ -19,6 +19,13 @@ The panel is the sweep's with Binance's daily bars of every pair before 2020 in
 front (lab.history.load_long_panel, from 2017-08); a weekly run first fetches
 what the long history does not have yet (once per pair, cached).
 
+R6 (results/factory_lockbox_r6.md): "held back" is the validation window 2024-01-01
+to 2026-06-30. The lockbox, 2026-07-01 on, is looked at only here, in the weekly
+run (lockbox_step): every genome of this factory and of F2 that passes its gates and
+the deflated excess bar gets one look per behaviour, each written to
+<data>/factory/lockbox.jsonl before it is used. Each run reports its genomes'
+effective N and PBO.
+
 Every run first merges results/factory_seed into <data>/factory (only what is
 missing; see ledger.import_seed), so trials counted on another machine are
 never lost from the pool.
@@ -45,7 +52,8 @@ import numpy as np
 from .. import history, report
 from ..ops import i18n, notify
 from . import build, evaluate, grammar, search, shadow, writeup
-from .ledger import Ledger, append_jsonl, export_seed, factory_dir, import_seed, lock, write_json
+from .ledger import (Ledger, append_jsonl, export_seed, factory_dir, import_seed, lock, lockbox_looks, log_look,
+                     write_json)
 
 NAME = "factory"
 HOLDOUT_PER_RUN = 6
@@ -57,12 +65,15 @@ def _day(us: int) -> str:
 
 
 def strip(row: dict) -> dict:
+    """The row without its in-memory return series."""
     return {k: v for k, v in row.items() if k != "is_returns"}
 
 
 def pick_for_holdout(c: build.Ctx, ledger: Ledger, checked: set[str], n: int = HOLDOUT_PER_RUN) -> list[dict]:
-    """The best unseen genomes by fitness, both halves positive, mutually different in sample."""
-    cands = [r for r in evaluate.current(ledger.rows) if r["key"] not in checked and r["is_h1"] > 0 and r["is_h2"] > 0
+    """The best unseen genomes by fitness, both halves positive, mutually different in sample. `checked`: keys and
+    behaviours held back before; a genome that does what another does is never picked (R6)."""
+    cands = [r for r in evaluate.current(ledger.rows) if r["key"] not in checked and r.get("behaviour") not in checked
+             and not r.get("same_as") and r["is_h1"] > 0 and r["is_h2"] > 0
              and r["is_exposure"] >= evaluate.MIN_EXPOSURE and r["fitness"] > 0]
     cands.sort(key=lambda r: r["fitness"], reverse=True)
     chosen: list[tuple[dict, np.ndarray]] = []
@@ -114,10 +125,13 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
     res = search.search(c, set(ledger.by_key), elite, run_id, budget, log=log, share=share,
                         leaves=grammar.LEAVES + feats)
     ledger.add([strip(r) for r in res["rows"]])
+    for r in res["rows"]:                     # the ledger marks a repeated behaviour on its own copy
+        if ledger.by_key[r["key"]].get("same_as"):
+            r["same_as"] = ledger.by_key[r["key"]]["same_as"]
     pool = ledger.pool()
 
     hold_log = shadow.holdout_log()
-    checked = {h["key"] for h in hold_log}
+    checked = {h["key"] for h in hold_log} | {h["behaviour"] for h in hold_log if h.get("behaviour")}
     picks = pick_for_holdout(c, ledger, checked)
     btc = evaluate.btc_benchmark(c)
     w = evaluate.windows(c)
@@ -143,8 +157,8 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
             decision, why = "waiting", "passes, but every shadow slot this run is taken"
         else:
             decision = "shadow"
-            why = (f"passes every held-back gate; deflated p {h['deflated_p']:.2f} (needs "
-                   f"{evaluate.DEFLATED_BAR} by the end of its forward month)")
+            why = (f"passes every held-back gate; DSR of the excess over BTC {h['deflated_p']:.2f} (needs "
+                   f"{evaluate.DEFLATED_BAR} and a lockbox look by the end of its forward month)")
             shadow.start(r, h, gates, x, run_id, today)
             others.append((r["key"], x))
             open_slots -= 1
@@ -157,6 +171,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
                  [{"run": run_id, "date": today, **{k: v for k, v in h.items() if k != "band30"}}
                   for h in holdout_rows if h["decision"] != "waiting"])
 
+    looks = lockbox_step(c, pool, btc, holdout_rows, run_id, today, log)
     upd = shadow.update(c)
     decisions = shadow.review(c, pool, btc, today)
     shadows = []
@@ -171,7 +186,8 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
         "panel": {"segments": P.N, "columns_in_play": int(len(c.cols)), "first": _day(int(P.days[0])),
                   "last": today},
         "windows": {"is": f"{_day(int(c.days[w['is']][0]))} to {_day(int(c.days[w['is']][-1]))}",
-                    "oos": f"{_day(int(c.days[w['oos']][0]))} to {today}"},
+                    "oos": f"{_day(int(c.days[w['oos']][0]))} to {_day(int(c.days[w['oos']][-1]))} (validation)",
+                    "lockbox": f"{evaluate.LOCKBOX_FROM} to {today}" if w["lockbox"].any() else None},
         "budget": budget, "seeded": seeded, "pool_before": pool_before, "pool_after": pool,
         "search": {"evaluated": len(res["rows"]), "origin": res["origin"], "duplicates": res["duplicates"],
                    "seconds": res["seconds"], "trees": res["trees"], "tree_share": share,
@@ -180,7 +196,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
         "tried": [{"key": r["key"], "genome": r["genome"], "is_sharpe": r["is_sharpe"]} for r in res["rows"]],
         "top": [strip({k: v for k, v in r.items() if k != "genome"}) for r in top],
         "btc": btc, "diversity_corr": DIVERSITY_CORR,
-        "holdout": holdout_rows,
+        "holdout": holdout_rows, "night": night(res["rows"]), "lockbox": looks,
         "shadow_update": upd, "decisions": decisions, "shadows": shadows,
         "promoted": shadow.promoted()["books"], "seconds": time.time() - t0,
         "grammar": {"max_filters": grammar.MAX_FILTERS, "max_complexity": grammar.MAX_COMPLEXITY},
@@ -188,6 +204,77 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
     d["verdict"] = verdict(d)
     write_json(factory_dir() / "runs" / f"{run_id}.json", d)
     return d
+
+
+def night(rows: list[dict]) -> dict:
+    """Effective N and PBO of this run's genomes, one per behaviour (R6)."""
+    xs = [r.get("is_returns") for r in rows if not r.get("same_as")]
+    return {"effective_n": evaluate.effective_n(xs), "pbo": evaluate.pbo(xs),
+            "same_behaviour": sum(1 for r in rows if r.get("same_as"))}
+
+
+def lockbox_step(c: build.Ctx, pool: dict, btc: dict, held: list[dict], run_id: str, today: str, log=print) -> dict:
+    """The only place the lockbox is looked at. Candidates: this run's held-back genomes and the active shadows
+    that pass every shadow gate and the deflated excess bar, then F2's survivors (small.lockbox_step); each
+    behaviour once ever, each look logged before it is used. F2's market failing does not stop the run."""
+    looked = {x.get(k) for x in lockbox_looks() for k in ("key", "behaviour") if x.get(k)}
+    cands = [(h, h["genome"]) for h in held if not evaluate.failed(h["gates"]) and evaluate.excess_bar(h)]
+    have = {h["key"] for h, _ in cands}
+    for m in shadow.active():
+        if m["key"] in have:
+            continue
+        h = evaluate.holdout(c, m["genome"], pool, btc)
+        if not evaluate.failed(evaluate.shadow_gates(m["in_sample"], h)) and evaluate.excess_bar(h):
+            cands.append((h, m["genome"]))
+    out: list[dict] = []
+    for h, g in cands:
+        if h["key"] in looked or h.get("behaviour") in looked:
+            continue
+        res = evaluate.lockbox(c, g, pool)
+        if res is None:
+            log(f"  lockbox shorter than {evaluate.LOCKBOX_MIN_DAYS} days: no look")
+            break
+        x = log_look({"factory": NAME, "run": run_id, "date": today, "key": h["key"], "behaviour": h.get("behaviour"),
+                      "name": h["name"], "validation_dsr": h["deflated_p"], **res})
+        looked |= {h["key"], h.get("behaviour")}
+        log(f"  lockbox look {x['look']} {h['key']}: excess Sharpe {x['lockbox_excess_sharpe']:.2f}, "
+            f"DSR {x['dsr']:.2f} over {x['looks']} looks")
+        out.append(x)
+    err = None
+    try:
+        from . import small
+        out += small.lockbox_step(run_id, log=log)
+    except Exception as e:      # noqa: BLE001 (the F2 market is fetched; the weekly run must still finish)
+        err = f"F2 lockbox step failed: {type(e).__name__}: {e}"
+        log("  " + err)
+    return {"this_run": out, "all": len(lockbox_looks()), "error": err}
+
+
+def r6_markdown(d: dict) -> str:
+    """The R6 part of the report: the validation and lockbox windows, PBO and effective N, the lockbox looks."""
+    from .small import night_lines
+    p = d["pool_after"]
+    lb = d.get("lockbox") or {}
+    md = ["## The bar after R6\n",
+          f"Held back is validation now ({d['windows']['oos']}): every study since the families sweep has seen it. "
+          f"The lockbox ({d['windows'].get('lockbox') or 'from ' + evaluate.LOCKBOX_FROM + ', no day yet'}) is looked "
+          f"at only by this weekly run, once per behaviour; {lb.get('all', 0)} look(s) so far across the factories.",
+          f"The deflated gate is on the held-back daily excess over BTC: N {p['n_trials']} (the trial registry, one "
+          f"trial per behaviour; {p.get('same_behaviour', 0)} genome(s) of this ledger repeat an earlier one), the "
+          f"noise variance from {p.get('excess_trials', 0)} in-sample excess Sharpes ({p.get('excess_from', 'raw')}), "
+          f"noise bar excess Sharpe {p.get('excess_sr0_annual', p['sr0_annual']):.2f} (the raw Sharpe's was "
+          f"{p['sr0_annual']:.2f}). Promotion also needs the lockbox look's DSR over every look at "
+          f"{evaluate.LOCKBOX_BAR} or more.\n"]
+    md += night_lines(d.get("night"), "this run's genomes")
+    md.append("## Lockbox looks this run\n")
+    rows = lb.get("this_run") or []
+    md.append(writeup.table([[x["look"], x["factory"], x["key"], x["lockbox_days"],
+                              f"{x['lockbox_excess_sharpe']:.2f}", f"{x['dsr']:.2f}", x["looks"]] for x in rows],
+                            ["look", "factory", "key", "days", "excess Sharpe", "DSR over the looks", "looks then"])
+              if rows else "none\n")
+    if lb.get("error"):
+        md.append(lb["error"] + "\n")
+    return "\n".join(md) + "\n"
 
 
 def tree_summary(new: list[dict], rows: list[dict], held: list[dict]) -> dict:
@@ -210,7 +297,7 @@ def published(d: dict) -> dict:
 
 
 def publish(d: dict) -> None:
-    report.write(NAME, writeup.markdown(d), published(d))
+    report.write(NAME, writeup.markdown(d) + "\n" + r6_markdown(d), published(d))
     results = os.environ.get("PYTHIA_RESULTS")
     if results:
         Path(results, f"{NAME}.json").write_text(json.dumps(_compact(d), indent=1, default=float),

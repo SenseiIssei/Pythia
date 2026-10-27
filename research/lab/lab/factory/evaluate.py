@@ -24,10 +24,23 @@ Promotion bar (the hand studies' bar, plus the forward test):
   every shadow gate, deflated p above 0.95 against the whole pool (hand studies
   plus every factory trial so far), and after 30 shadow days a forward return
   not below the 5 % quantile of the backtest's own 30-day returns.
+
+R6 (pre-registered in results/factory_lockbox_r6.md): 2024-01-01 to 2026-06-30 is
+validation, spent by every study since the families sweep; "held back" and "oos"
+mean that window now. 2026-07-01 on is the lockbox, which only the weekly run looks
+at (run.lockbox_step, every look logged in ledger.lockbox_path() across the
+factories), once per behaviour. The deflated gate is now on the held-back excess
+over BTC (ledger.deflated_excess: N the registry's pool of all, the variance the
+family's in-sample excess Sharpes); the raw Sharpe's DSR is kept as dsr_raw. The
+lockbox gate: a look was made and its excess over BTC beats the best of that many
+looks' noise at LOCKBOX_BAR. Each run also reports the effective N of its genomes
+(clusters of the in-sample return matrix) and their PBO by CSCV; neither moves the
+bar (the registry's N is the larger and decides).
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from datetime import datetime, timezone
 
@@ -36,7 +49,7 @@ import numpy as np
 from .. import history
 from ..experiments import fam_common as fc
 from . import build, grammar
-from .ledger import deflated
+from .ledger import deflated, deflated_excess, lockbox_looks
 
 COMPLEXITY_COST = 0.03     # in-sample Sharpe given up per moving part
 TREE_NODE_COST = 0.02      # and more per node of an expression tree (G1): 0.05 a node in all
@@ -47,6 +60,12 @@ SHADOW_GATES = ("is_stable", "oos_positive", "stress", "drawdown", "late_fill", 
 IS_FROM = history.LONG_FROM
 OLD_IS_FROM = "2020-08-01"                   # fc.IS_START, the window of the rows before D1
 IS_START = int(datetime.strptime(IS_FROM, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1e6)
+LOCKBOX_FROM = "2026-07-01"                  # validation ends the day before (R6)
+LOCKBOX_START = int(datetime.strptime(LOCKBOX_FROM, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1e6)
+LOCKBOX_MIN_DAYS = 60                        # no look before the lockbox holds this many days
+LOCKBOX_BAR = 0.5                            # the look's DSR over every look so far must reach this
+EFF_CORR = 0.5                               # genomes in one cluster of the effective N correlate above this
+CSCV_BLOCKS = 16
 
 
 def current(rows: list[dict]) -> list[dict]:
@@ -59,7 +78,12 @@ def windows(c: build.Ctx) -> dict[str, np.ndarray]:
     idx = np.flatnonzero(ins)
     mid = idx[len(idx) // 2] if len(idx) else 0
     h1 = ins & (np.arange(c.T) < mid)
-    return {"is": ins, "h1": h1, "h2": ins & ~h1, "oos": c.days >= fc.SPLIT}
+    return {"is": ins, "h1": h1, "h2": ins & ~h1, "oos": (c.days >= fc.SPLIT) & (c.days < LOCKBOX_START),
+            "lockbox": c.days >= LOCKBOX_START}
+
+
+def btc_returns(c: build.Ctx) -> np.ndarray:
+    return np.nan_to_num(c.P.ret[:, c.P.btc])
 
 
 def sharpe(x: np.ndarray) -> float:
@@ -105,7 +129,9 @@ def in_sample(c: build.Ctx, g: dict, run_id: str) -> dict:
     if row["is_exposure"] < MIN_EXPOSURE:
         f -= 1.0
     row["fitness"] = f if math.isfinite(f) else -9.0
-    row["is_returns"] = None   # filled only for genomes kept in memory for the diversity check
+    row["is_excess_sharpe"] = sharpe(n35[w["is"]] - btc_returns(c)[w["is"]])
+    row["behaviour"] = grammar.behaviour(n35[w["is"]])
+    row["is_returns"] = n35[w["is"]]   # in memory only (PBO, effective N); run.strip drops it before the ledger
     return row
 
 
@@ -143,6 +169,7 @@ def holdout(c: build.Ctx, g: dict, pool: dict, btc: dict) -> dict:
         twin35 = sharpe(build.net(tg, tt, build.COSTS["35bps"])[oos])
     years = oos.sum() / 365
     x35 = nets["35bps"][oos]
+    ex = x35 - btc_returns(c)[oos]
     res = {
         "key": grammar.key(g), "name": grammar.describe(g),
         "oos_from": _day(int(c.days[oos][0])) if oos.any() else None,
@@ -154,10 +181,38 @@ def holdout(c: build.Ctx, g: dict, pool: dict, btc: dict) -> dict:
         "oos_exposure": float(expo[oos].mean()) if oos.any() else 0.0,
         "oos_late_sharpe": late35, "oos_twin_sharpe": twin35,
         "btc_sharpe": btc["sharpe"], "btc_max_dd": btc["max_dd"],
-        "deflated_p": deflated(x35, pool), "pool_trials": pool["n_trials"], "pool_sr0": pool["sr0_annual"],
+        "oos_excess_sharpe": sharpe(ex), "behaviour": grammar.behaviour(nets["35bps"][w["is"]]),
+        "deflated_p": deflated_excess(ex, pool), "dsr_raw": deflated(x35, pool), "pool_trials": pool["n_trials"],
+        "pool_sr0": pool.get("excess_sr0_annual", pool["sr0_annual"]), "raw_sr0": pool["sr0_annual"],
         "band30": boot_quantiles(x35, 30),
     }
     return res
+
+
+def lockbox(c: build.Ctx, g: dict, pool: dict) -> dict | None:
+    """The numbers of one look at the lockbox (None while it is shorter than LOCKBOX_MIN_DAYS). Only
+    run.lockbox_step calls this, and it logs the look before it uses it."""
+    lb = windows(c)["lockbox"]
+    if lb.sum() < LOCKBOX_MIN_DAYS:
+        return None
+    gross, tov, _ = build.run(c, g)
+    x35 = build.net(gross, tov, build.COSTS["35bps"])[lb]
+    ex = x35 - btc_returns(c)[lb]
+    n = len(lockbox_looks()) + 1                 # this look counts too
+    return {"lockbox_from": _day(int(c.days[lb][0])), "lockbox_to": _day(int(c.days[lb][-1])),
+            "lockbox_days": int(lb.sum()), "lockbox_sharpe": sharpe(x35), "lockbox_excess_sharpe": sharpe(ex),
+            "btc_sharpe": sharpe(btc_returns(c)[lb]), "looks": n, "dsr": deflated_excess(ex, pool, n=n)}
+
+
+def lockbox_gate(key: str, behaviour: str | None = None) -> dict:
+    """Passed when the genome (or one that does the same) was looked at and its look reached LOCKBOX_BAR."""
+    mine = [x for x in lockbox_looks() if x.get("key") == key or behaviour and x.get("behaviour") == behaviour]
+    if not mine:
+        return {"passed": False, "why": "never looked at in the lockbox"}
+    x = mine[0]
+    return {"passed": bool(x["dsr"] >= LOCKBOX_BAR),
+            "why": f"lockbox look {x['look']}: excess over BTC Sharpe {x['lockbox_excess_sharpe']:.2f} over "
+                   f"{x['lockbox_days']} days, DSR {x['dsr']:.2f} over {x['looks']} looks (needs {LOCKBOX_BAR})"}
 
 
 def shadow_gates(is_row: dict, h: dict) -> dict[str, dict]:
@@ -179,9 +234,73 @@ def bar_gates(is_row: dict, h: dict) -> dict[str, dict]:
     """The promotion bar on the backtest: every shadow gate plus deflation over the whole pool."""
     g = shadow_gates(is_row, h)
     g["deflated"] = {"passed": h["deflated_p"] > DEFLATED_BAR,
-                     "why": f"deflated p {h['deflated_p']:.2f} over {h['pool_trials']} trials "
-                            f"(noise bar Sharpe {h['pool_sr0']:.2f})"}
+                     "why": f"DSR of the excess over BTC {h['deflated_p']:.2f} over {h['pool_trials']} trials "
+                            f"(noise bar excess Sharpe {h['pool_sr0']:.2f})"}
+    g["lockbox"] = lockbox_gate(h["key"], h.get("behaviour"))
     return g
+
+
+def excess_bar(h: dict) -> bool:
+    """The held-back excess passes the deflated bar (what earns a lockbox look)."""
+    return h["deflated_p"] > DEFLATED_BAR
+
+
+def _matrix(series: list[np.ndarray]) -> np.ndarray:
+    """Equal-length series (the last days in common) as columns, those that never move dropped."""
+    xs = [np.nan_to_num(np.asarray(x, dtype=float)) for x in series if x is not None and len(x)]
+    if not xs:
+        return np.zeros((0, 0))
+    n = min(len(x) for x in xs)
+    R = np.column_stack([x[-n:] for x in xs])
+    return R[:, R.std(0) > 0]
+
+
+def effective_n(series: list[np.ndarray], corr: float = EFF_CORR) -> dict:
+    """Clusters of the genomes' in-sample returns (average linkage on 1 - correlation, cut at 1 - corr): the
+    number of independent bets among them. Books that never move are one more cluster if there are any."""
+    from scipy.cluster.hierarchy import fcluster, linkage
+    R = _matrix(series)
+    flat = sum(1 for x in series if x is not None and len(x)) - R.shape[1]
+    m = R.shape[1]
+    if m < 2:
+        return {"genomes": m + flat, "effective_n": m + (flat > 0), "corr": corr}
+    C = np.clip(np.corrcoef(R, rowvar=False), -1, 1)
+    D = 1 - C[np.triu_indices(m, 1)]
+    k = int(fcluster(linkage(np.clip(D, 0, 2), "average"), t=1 - corr, criterion="distance").max())
+    return {"genomes": m + flat, "effective_n": k + (flat > 0), "corr": corr}
+
+
+def pbo(series: list[np.ndarray], blocks: int = CSCV_BLOCKS) -> dict | None:
+    """Probability of backtest overfitting by CSCV (Bailey, Borwein, Lopez de Prado, Zhu): the days cut into
+    `blocks` blocks, every half of them in sample and the rest out; how often the in-sample best by Sharpe
+    ranks in the lower half out of sample. None with fewer than 2 moving genomes or too few days."""
+    R = _matrix(series)
+    T, m = R.shape
+    L = T // blocks
+    if m < 2 or L < 5:
+        return None
+    B = R[: L * blocks].reshape(blocks, L, m)
+    bs, bq = B.sum(1), (B ** 2).sum(1)
+    combos = np.array([[i in cmb for i in range(blocks)] for cmb in itertools.combinations(range(blocks), blocks // 2)],
+                      dtype=float)
+    n = L * blocks // 2
+
+    def sr(Cm):
+        mu = Cm @ bs / n
+        sd = np.sqrt(np.maximum(Cm @ bq / n - mu ** 2, 1e-18))
+        return mu / sd
+
+    logits = []
+    for i in range(0, len(combos), 2000):
+        Cm = combos[i:i + 2000]
+        ins, out = sr(Cm), sr(1 - Cm)
+        best = ins.argmax(1)
+        ob = out[np.arange(len(Cm)), best]
+        w = ((out < ob[:, None]).sum(1) + 1) / (m + 1)
+        logits.append(np.log(w / (1 - w)))
+    lam = np.concatenate(logits)
+    return {"pbo": float((lam <= 0).mean()), "combos": len(lam), "genomes": m, "blocks": blocks,
+            "median_logit": float(np.median(lam))}
 
 
 def failed(gates: dict[str, dict]) -> list[str]:

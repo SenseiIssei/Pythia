@@ -16,6 +16,20 @@ The trial Sharpes of the factory's own trials are their in-sample Sharpes at
 the judging cost, winsorised at +-3 like fam_common.deflate; the out-of-sample
 window is only ever seen by the few the search sends to the holdout, and those
 are judged against the whole pool.
+
+R6 (results/factory_lockbox_r6.md), on top of the registry, with no second count:
+  behaviour  a genome whose in-sample returns equal an earlier one's (grammar.behaviour)
+             is written to the ledger with "same_as" the first key and is not a new
+             trial: the registry gets one trial per behaviour.
+  excess     every registered genome carries its in-sample excess Sharpe (over BTC in
+             the weekly factory, over the 40 EUR SPYx wallet in F2). The bar deflates
+             the held-back excess: N is the registry's pool of all, the variance the
+             family's in-sample excess Sharpes read back from the registry (the raw
+             pool's until EXCESS_MIN of them are there), so bull-market beta no longer
+             sets the bar.
+  lockbox    <data>/factory/lockbox.jsonl: every look at the lockbox (2026-07-01 on)
+             by any factory, one line a look, never rewritten; its length is the N
+             the lockbox deflates against.
 """
 
 from __future__ import annotations
@@ -56,10 +70,24 @@ def small_dir() -> Path:
     return Path(os.environ.get("PYTHIA_FACTORY_SMALL_DIR", str(factory_dir() / "small")))
 
 
+EXCESS_MIN = 30            # in-sample excess Sharpes the family needs before its excess variance is used
+
+
 def trial_rows(rows: list[dict], family: str) -> list[dict]:
-    """Ledger lines as registry trials: one per genome, id family:key, its in-sample Sharpe."""
+    """Ledger lines as registry trials: one per behaviour (a line "same_as" an earlier genome is not one), id
+    family:key, its in-sample Sharpe and excess Sharpe."""
     return [{"id": f"{family}:{r['key']}", "family": family, "source": f"{family} ledger", "run": r.get("run"),
-             "sharpe": r.get("is_sharpe")} for r in rows if r.get("key")]
+             "sharpe": r.get("is_sharpe"), "excess_sharpe": r.get("is_excess_sharpe"), "behaviour": r.get("behaviour")}
+            for r in rows if r.get("key") and not r.get("same_as")]
+
+
+def excess_var(family: str) -> tuple[float, int]:
+    """(per-day variance, count) of the family's in-sample excess Sharpes in the registry, clipped at +-3 a year
+    like the raw ones."""
+    x = np.array([float(r["excess_sharpe"]) for r in metrics.read_registry() if r.get("family") == family
+                  and r.get("excess_sharpe") is not None and np.isfinite(float(r["excess_sharpe"]))])
+    x = np.clip(x, -metrics.SR_CLIP, metrics.SR_CLIP) / np.sqrt(365)
+    return (float(np.var(x)) if len(x) > 1 else 0.0), len(x)
 
 
 def sync_registry(extra: "Ledger | None" = None) -> int:
@@ -200,6 +228,7 @@ class Ledger:
         self.path = path or ledger_path()
         self.rows = read_jsonl(self.path)
         self.by_key = {r["key"]: r for r in self.rows}
+        self.by_behaviour = {r["behaviour"]: r["key"] for r in self.rows if r.get("behaviour") and not r.get("same_as")}
 
     def __contains__(self, key: str) -> bool:
         return key in self.by_key
@@ -208,10 +237,17 @@ class Ledger:
         return len(self.rows)
 
     def add(self, rows: list[dict]) -> list[dict]:
-        """Append the genomes not yet in the ledger, each a trial in the registry; returns what was appended."""
+        """Append the genomes not yet in the ledger, each behaviour a trial in the registry (a genome that does
+        what an earlier one does gets "same_as" its key); returns what was appended."""
         new = []
         for r in rows:
             if r["key"] not in self.by_key:
+                b = r.get("behaviour")
+                if b and not r.get("same_as"):
+                    if b in self.by_behaviour:
+                        r["same_as"] = self.by_behaviour[b]
+                    else:
+                        self.by_behaviour[b] = r["key"]
                 self.by_key[r["key"]] = r
                 new.append(r)
         append_jsonl(self.path, new)
@@ -222,16 +258,28 @@ class Ledger:
     def n_trials(self) -> int:
         return self.pool()["n_trials"]
 
+    def trials(self) -> int:
+        """This ledger's trials: its genomes less those that do what an earlier one does."""
+        return sum(1 for r in self.rows if not r.get("same_as"))
+
     def pool(self) -> dict:
         """The registry's pool of all (size, pooled variance of daily trial Sharpes, the noise bar it implies),
-        with this ledger's family next to it; the ledgers are synced into the registry first."""
+        with this ledger's family next to it and the excess variance the bar deflates with (R6); the ledgers
+        are synced into the registry first."""
         sync_registry(self)
         p = metrics.trial_pool()
         fam = p["families"].get(self.FAMILY, {"n_trials": 0, "var": 0.0, "sr0_annual": 0.0})
-        return {"prior_trials": p["n_trials"] - len(self.rows), "factory_trials": len(self.rows),
+        ev, en = excess_var(self.FAMILY)
+        if en < EXCESS_MIN:
+            ev = p["var"]
+        mine = self.trials()
+        return {"prior_trials": p["n_trials"] - mine, "factory_trials": mine,
+                "same_behaviour": len(self.rows) - mine,
                 "family": self.FAMILY, "family_trials": fam["n_trials"], "family_var": fam["var"],
                 "family_sr0_annual": fam["sr0_annual"], "families": p["families"],
-                "n_trials": p["n_trials"], "var": p["var"], "sr0_annual": p["sr0_annual"]}
+                "n_trials": p["n_trials"], "var": p["var"], "sr0_annual": p["sr0_annual"],
+                "excess_trials": en, "excess_var": ev, "excess_from": "excess" if en >= EXCESS_MIN else "raw",
+                "excess_sr0_annual": metrics.expected_max_sharpe(ev, p["n_trials"]) * np.sqrt(365)}
 
 
 def sr0(var: float, n: int) -> float:
@@ -254,3 +302,26 @@ def deflated(x: np.ndarray, pool: dict) -> float:
 def deflated_family(x: np.ndarray, pool: dict) -> float:
     """The same against the pool's family alone (shown next to the decision, which is over all)."""
     return deflated(x, {"n_trials": pool["family_trials"], "var": pool["family_var"]})
+
+
+def deflated_excess(x: np.ndarray, pool: dict, n: int | None = None) -> float:
+    """DSR (higher is better, pass at 0.95 or more) of a daily excess return series (the genome less its
+    benchmark) against N = the pool of all (or n) and the family's in-sample excess variance (R6's bar)."""
+    return deflated(x, {"n_trials": pool["n_trials"] if n is None else n,
+                        "var": pool.get("excess_var", pool["var"])})
+
+
+def lockbox_path() -> Path:
+    return factory_dir() / "lockbox.jsonl"
+
+
+def lockbox_looks() -> list[dict]:
+    """Every look at the lockbox by any factory, oldest first."""
+    return read_jsonl(lockbox_path())
+
+
+def log_look(row: dict) -> dict:
+    """Write one look down before its result is used; "look" is its number across all factories."""
+    row = {"look": len(lockbox_looks()) + 1, **row}
+    append_jsonl(lockbox_path(), [row])
+    return row

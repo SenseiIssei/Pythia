@@ -269,7 +269,8 @@ def test_run_is_resumable_and_writes_the_report(ctx, dirs):
     d = _run(ctx, v, 12, "2026-10-26")
     led = small.Ledger()
     assert len(led) == 12 and d["search"]["evaluated"] == 12
-    assert d["pool_after"]["n_trials"] == d["pool_before"]["n_trials"] + 12
+    assert d["pool_after"]["n_trials"] == d["pool_before"]["n_trials"] + led.trials()   # one trial per behaviour
+    assert led.trials() == len({r["behaviour"] for r in led.rows}) and d["night"]["same_behaviour"] == 12 - led.trials()
     assert all(0.0 <= h["deflated_p"] <= 1.0 and 0.0 <= h["dsr_family"] <= 1.0 for h in d["holdout"])
     again = _run(ctx, v, 12, "2026-10-26")
     assert len(small.Ledger()) == 12 and again["search"]["resumed"] == 12

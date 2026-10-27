@@ -36,7 +36,10 @@ which counts its nodes instead of 1 and is bounded by MAX_COMPLEXITY_TREES; a ge
 without a tree has the same key and complexity as before, so old ledger rows stay the
 same trials. Since D3 a tree may also read any feature of the feature store
 (lab.features) as a leaf "f.<name>"; the weekly search draws only those whose data
-covers enough of its in-sample window. Everything here is pure: no data, no I/O.
+covers enough of its in-sample window. Since R6 two genomes whose in-sample returns are
+equal are one behaviour (behaviour(), a hash of the rounded returns): equivalent trees under
+different keys are one trial, and one behaviour reaches the held-back windows once.
+Everything here is pure: no data, no I/O.
 """
 
 from __future__ import annotations
@@ -45,6 +48,8 @@ import copy
 import hashlib
 import json
 import random
+
+import numpy as np
 
 from .. import features
 
@@ -128,6 +133,16 @@ def key(g: dict) -> str:
     """Stable 12-character id of a genome."""
     text = json.dumps(canonical(g), sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def behaviour(*series) -> str:
+    """Stable 16-character id of what a genome does: its in-sample daily returns rounded to 1e-9 (NaN as 0), so
+    equal books under different keys (btc > ma_100 and z_100(btc) > 0) share it."""
+    h = hashlib.sha1()
+    for x in series:
+        x = np.round(np.nan_to_num(np.asarray(x, dtype=float)), 9) + 0.0     # + 0.0: -0 and 0 hash alike
+        h.update(x.tobytes())
+    return h.hexdigest()[:16]
 
 
 def complexity(g: dict) -> int:

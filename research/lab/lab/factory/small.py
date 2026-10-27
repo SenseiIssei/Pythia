@@ -44,10 +44,18 @@ few assets are worth holding. This mode keeps all of that:
              shown next to it, so the bar rises with every run anywhere;
              results/factory_small_seed (the first run's trials) is merged first.
   held back  HOLDOUT_PER_RUN genomes a run (best fitness, both halves positive,
-             mutually different) see 2024-01-01 to the last fresh ETF close; a
+             mutually different, one per behaviour) see the validation window,
+             2024-01-01 to 2026-06-30 (R6; until R6 to the last fresh ETF close); a
              survivor has a drawdown under 20 % and ends above holding SPYx after
              costs, both at 40 and at 100 EUR, and is still positive filled a
-             close late. Holding SPYx and holding BTC are shown everywhere.
+             close late. Holding SPYx and holding BTC are shown everywhere. The DSR
+             is that of the 40 EUR wallet's daily excess over the 40 EUR SPYx
+             wallet, N the registry's pool, the variance the family's in-sample
+             excess Sharpes (ledger.deflated_excess, R6).
+  lockbox    2026-07-01 on (R6, results/factory_lockbox_r6.md). This daily mode
+             never looks at it: a survivor whose excess DSR passes is looked at
+             once per behaviour by the weekly run (lockbox_step, called from
+             run.weekly), each look in the factories' common lockbox log.
   shadows    a survivor runs forward as a 40 EUR paper wallet with the same
              costs (at most MAX_ACTIVE, MAX_NEW_PER_RUN new a run); every recorded
              day is frozen. After SHADOW_DAYS days (and every SHADOW_DAYS after)
@@ -96,7 +104,7 @@ from .. import history, report
 from ..experiments import fam_common as fc
 from ..experiments import smallaccount as s1
 from ..experiments import smallaccount_s2 as s2
-from . import build, grammar
+from . import build, evaluate, grammar
 from . import ledger as lg
 from .search import tree_share, tree_turn
 
@@ -126,6 +134,7 @@ SHADOW_DAYS = 30
 MAX_ACTIVE = 4
 MAX_NEW_PER_RUN = 2
 DUPLICATE_CORR = 0.90
+DEFLATED_BAR = 0.95                         # the excess DSR a survivor needs for its lockbox look
 RANDOM_SHARE, FIRST_RANDOM_SHARE, ELITE, TOURNAMENT, CROSSOVER = 0.35, 0.5, 15, 3, 0.3
 
 
@@ -155,6 +164,7 @@ REBALANCE = {"every": [1, 7], "band": [0.0, 0.10, 0.25]}
 MAX_FILTERS = 2
 MAX_COMPLEXITY = 6
 MAX_COMPLEXITY_TREES = 12
+BENCH = f"SPY@{MAIN:g}"                     # the benchmark wallet the excess is taken over (R6)
 LEAVES = ("close", "vol", "btc") + grammar.CANDLE_LEAVES   # what a tree may read here (no volume, no daily range)
 PARTS = ("universe", "signal", "filters", "select", "weight", "rebalance")
 
@@ -660,31 +670,45 @@ def sharpe(x: np.ndarray) -> float:
 def windows(c: Ctx) -> dict[str, tuple[int, int]]:
     oos = c.t_of(OOS_FROM)
     t0 = c.t_of(IS_FROM)
+    lb = c.t_of(evaluate.LOCKBOX_FROM)
     mid = (t0 + oos - 1) // 2
-    return {"is": (t0, oos - 1), "h1": (t0, mid), "h2": (mid + 1, oos - 1), "oos": (oos, c.fresh)}
+    return {"is": (t0, oos - 1), "h1": (t0, mid), "h2": (mid + 1, oos - 1), "oos": (oos, min(c.fresh, lb - 1)),
+            "lockbox": (lb, c.fresh)}
+
+
+def excess(x: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """The wallet's daily returns less the benchmark wallet's over the same days."""
+    n = min(len(x), len(b))
+    return np.asarray(x[-n:]) - np.asarray(b[-n:]) if n else np.zeros(0)
 
 
 def _day(c: Ctx, t: int) -> str:
     return str((c.days[t] // fc.DAY_US).astype("datetime64[D]"))
 
 
-def in_sample(c: Ctx, g: dict, v: s1.Venue, run_id: str) -> dict:
-    """The only numbers the search sees: both wallets over the in-sample window."""
+def in_sample(c: Ctx, g: dict, v: s1.Venue, run_id: str, bench: dict | None = None) -> dict:
+    """The only numbers the search sees: both wallets over the in-sample window. With `bench` (benchmarks over
+    the in-sample window) also the excess Sharpe over the SPYx wallet."""
     win = windows(c)
     t0, t1 = win["is"]
     W = weights(c, g)
     row = {"key": key(g), "run": run_id, "name": describe(g), "genome": g, "complexity": complexity(g),
            "is_from": IS_FROM}
+    rs = []
     for cap in CAPITALS:
         res = simulate(c, W, g, v, cap, t0, t1)
         m = measure(res, cap)
         tag = f"{cap:g}"
+        rs.append(returns(res, cap))
         row.update({f"is_sharpe_{tag}": m["sharpe"], f"is_cagr_{tag}": m["cagr"], f"is_max_dd_{tag}": m["max_dd"],
                     f"is_costs_eur_{tag}": m["costs_eur"], f"is_orders_yr_{tag}": m["orders_yr"]})
         if cap == MAIN:
             r = returns(res, cap)
             h = win["h1"][1] - t0 + 1
             row.update({"is_h1": sharpe(r[:h]), "is_h2": sharpe(r[h:]), "is_exposure": m["exposure"]})
+            row["is_returns"] = r    # in memory only (PBO, effective N); search drops it before the ledger
+            row["is_excess_sharpe"] = sharpe(excess(r, bench[BENCH]["returns"])) if bench else None
+    row["behaviour"] = grammar.behaviour(*rs)
     row["is_sharpe"] = min(row[f"is_sharpe_{c_:g}"] for c_ in CAPITALS)
     row["tree_nodes"] = grammar.tree_nodes(g)
     if row["tree_nodes"]:
@@ -738,9 +762,13 @@ def holdout(c: Ctx, g: dict, v: s1.Venue, pool: dict, bench: dict) -> dict:
             x40 = returns(res, cap)
     late = np.vstack([np.zeros((1, W.shape[1])), W[:-1]])
     h["oos_late_cagr"] = measure(simulate(c, late, g, v, MAIN, t0, t1), MAIN)["cagr"]
-    h.update({"deflated_p": lg.deflated(x40, pool), "dsr_family": lg.deflated_family(x40, pool),
-              "pool_trials": pool["n_trials"], "pool_sr0": pool["sr0_annual"], "family_trials": pool["family_trials"],
+    ex = excess(x40, bench[BENCH]["returns"])
+    h.update({"oos_excess_sharpe": sharpe(ex), "deflated_p": lg.deflated_excess(ex, pool),
+              "dsr_family": lg.deflated_excess(ex, pool, n=pool["family_trials"]),
+              "dsr_raw": lg.deflated(x40, pool), "pool_trials": pool["n_trials"],
+              "pool_sr0": pool.get("excess_sr0_annual", pool["sr0_annual"]), "family_trials": pool["family_trials"],
               "oos_returns_40": [round(float(r), 7) for r in x40]})
+    h["excess_passed"] = bool(h["deflated_p"] > DEFLATED_BAR)
     return h
 
 
@@ -833,7 +861,7 @@ def seed_of(run_id: str, n: int) -> int:
 
 
 def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print,
-           share: float | None = None) -> dict:
+           share: float | None = None, bench: dict | None = None) -> dict:
     """`budget` new genomes for this run, less those the run already put in the ledger (a rerun resumes).
     Each is appended the moment it is evaluated. `share` of the slots are tree genomes (default
     tree_share()), each kind bred from its own elite as in search.search."""
@@ -855,10 +883,11 @@ def search(c: Ctx, v: s1.Venue, led: Ledger, run_id: str, budget: int, log=print
         if key(g) in led:
             dup += 1
             return
-        r = in_sample(c, g, v, run_id)
+        r = in_sample(c, g, v, run_id, bench)
         r["origin"] = how
+        x = r.pop("is_returns", None)
         led.add([r])
-        rows.append(r)
+        rows.append({**r, "is_returns": x})
         origin[how] += 1
         n_trees[0] += grammar.has_tree(g)
         if len(rows) % 20 == 0:
@@ -900,7 +929,9 @@ def current(rows: list[dict]) -> list[dict]:
 
 
 def pick_for_holdout(c: Ctx, v: s1.Venue, led: Ledger, checked: set[str], n: int = HOLDOUT_PER_RUN) -> list[dict]:
-    cands = [r for r in current(led.rows) if r["key"] not in checked and r["is_h1"] > 0 and r["is_h2"] > 0
+    """`checked`: keys and behaviours already held back; a genome that does what another does is never picked."""
+    cands = [r for r in current(led.rows) if r["key"] not in checked and r.get("behaviour") not in checked
+             and not r.get("same_as") and r["is_h1"] > 0 and r["is_h2"] > 0
              and r["is_exposure"] >= MIN_EXPOSURE and r["fitness"] > 0]
     cands.sort(key=lambda r: r["fitness"], reverse=True)
     chosen: list[tuple[dict, np.ndarray]] = []
@@ -1068,6 +1099,56 @@ def too_close(x: list | None, others: list[tuple[str, list | None]]) -> str | No
     return None
 
 
+# ---------------------------------------------------------------- the lockbox (looked at by the weekly run only)
+
+def lockbox(c: Ctx, v: s1.Venue, g: dict, pool: dict) -> dict | None:
+    """One look: the 40 EUR wallet's excess over the 40 EUR SPYx wallet from 2026-07-01 to the last fresh close,
+    deflated over every look so far. None while the lockbox is shorter than evaluate.LOCKBOX_MIN_DAYS."""
+    t0, t1 = windows(c)["lockbox"]
+    if t1 - t0 + 1 < evaluate.LOCKBOX_MIN_DAYS:
+        return None
+    x = returns(simulate(c, weights(c, g), g, v, MAIN, t0, t1), MAIN)
+    b = benchmarks(c, v, (t0, t1))[BENCH]["returns"]
+    ex = excess(x, b)
+    n = len(lg.lockbox_looks()) + 1
+    return {"lockbox_from": _day(c, t0), "lockbox_to": _day(c, t1), "lockbox_days": t1 - t0 + 1,
+            "lockbox_sharpe": sharpe(x), "lockbox_excess_sharpe": sharpe(ex), "spy_sharpe": sharpe(b), "looks": n,
+            "dsr": lg.deflated_excess(ex, pool, n=n)}
+
+
+def lockbox_step(run_id: str, log=print, market: tuple[Ctx, s1.Venue] | None = None) -> list[dict]:
+    """For the weekly run: every held-back survivor whose excess DSR passed and whose behaviour was never looked
+    at gets its one look, logged before anything uses it. The market is loaded only when there is one."""
+    looked = {x.get(k) for x in lg.lockbox_looks() for k in ("key", "behaviour") if x.get(k)}
+    cands, seen = [], set()
+    for h in lg.read_jsonl(small_dir() / "holdout.jsonl"):
+        b = h.get("behaviour")
+        if (h.get("excess_passed") and not failed(h.get("gates") or {}) and h["key"] not in looked | seen
+                and (b is None or b not in looked | seen)):
+            cands.append(h)
+            seen |= {h["key"], b} - {None}
+    if not cands:
+        return []
+    c, v = market or load_market()
+    led = Ledger()
+    pool = led.pool()
+    out = []
+    for h in cands:
+        g = led.by_key.get(h["key"], {}).get("genome")
+        if not g:
+            continue
+        res = lockbox(c, v, g, pool)
+        if res is None:
+            break
+        x = lg.log_look({"factory": "small", "run": run_id, "date": _day(c, c.fresh), "key": h["key"],
+                         "behaviour": h.get("behaviour"), "name": h.get("name"), "validation_dsr": h["deflated_p"],
+                         **res})
+        log(f"  lockbox look {x['look']} (F2) {h['key']}: excess Sharpe {x['lockbox_excess_sharpe']:.2f}, "
+            f"DSR {x['dsr']:.2f} over {x['looks']} looks")
+        out.append(x)
+    return out
+
+
 # ---------------------------------------------------------------- the run
 
 def load_market(offline: bool = False) -> tuple[Ctx, s2.S2Venue]:
@@ -1096,14 +1177,15 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
     led = Ledger()
     pool_before = led.pool()
     share = tree_share() if share is None else share
-    res = search(c, v, led, run_id, budget, log=log, share=share)
-    pool = led.pool()
     bench_is = benchmarks(c, v, win["is"])
+    res = search(c, v, led, run_id, budget, log=log, share=share, bench=bench_is)
+    pool = led.pool()
     bench = benchmarks(c, v, win["oos"])
     hp = small_dir() / "holdout.jsonl"
     hold_log = lg.read_jsonl(hp)
     this_run = {h["key"]: h for h in hold_log if h.get("run") == run_id}
     checked = {h["key"] for h in hold_log if h.get("run") != run_id}
+    checked |= {h["behaviour"] for h in hold_log if h.get("run") != run_id and h.get("behaviour")}
     picks = [led.by_key[k] for k in this_run if k in led] or pick_for_holdout(c, v, led, checked)
     act = active()
     ever = {m["key"] for m in all_shadows()}
@@ -1115,6 +1197,7 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
             rows.append(this_run[r["key"]])
             continue
         h = holdout(c, r["genome"], v, pool, bench)
+        h["behaviour"] = r.get("behaviour")
         gs = gates(r, h)
         bad = failed(gs)
         if bad:
@@ -1127,7 +1210,8 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
             decision, why = "waiting", f"passes, but all {MAX_ACTIVE} shadow slots are taken"
         else:
             decision = "shadow"
-            why = f"passes every held-back gate; DSR {h['deflated_p']:.2f} over {h['pool_trials']} trials"
+            why = (f"passes every held-back gate; DSR of the excess over SPYx {h['deflated_p']:.2f} over "
+                   f"{h['pool_trials']} trials" + ("; queued for the weekly lockbox look" if h["excess_passed"] else ""))
             start_shadow(c, v, r, h, gs, run_id)
             others.append((r["key"], h["oos_returns_40"]))
             slots -= 1
@@ -1145,15 +1229,19 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
         shadows.append({"key": m["key"], "name": m["name"], "status": m["status"], "entry_day": m["entry_day"],
                         **fw, "reason": m.get("reason")})
     top = sorted(res["rows"], key=lambda r: r["fitness"], reverse=True)[:8]
+    night = [r.get("is_returns") for r in res["rows"] if not r.get("same_as")]
     d = {"run_id": run_id, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-         "windows": {k: [_day(c, a), _day(c, b)] for k, (a, b) in win.items()}, "fresh_to": today,
+         "windows": {k: [_day(c, a), _day(c, b)] for k, (a, b) in win.items() if a <= b}, "fresh_to": today,
          "eurusd": c.eurusd, "drifts": c.drifts, "budget": budget, "seeded": seeded,
          "search": {"evaluated": len(res["rows"]), "resumed": res["resumed"], "origin": res["origin"],
                     "duplicates": res["duplicates"], "seconds": res["seconds"], "trees": res["trees"],
                     "tree_share": share},
          "trees": tree_summary(res["rows"], led, rows),
          "pool_before": pool_before, "pool_after": pool, "ledger": len(led),
-         "top": [{k: x for k, x in r.items() if k != "genome"} for r in top],
+         "top": [{k: x for k, x in r.items() if k not in ("genome", "is_returns")} for r in top],
+         "night": {"effective_n": evaluate.effective_n(night), "pbo": evaluate.pbo(night),
+                   "same_behaviour": sum(1 for r in res["rows"] if r.get("same_as"))},
+         "lockbox": [x for x in lg.lockbox_looks() if x.get("factory") == "small"],
          "bench_is": strip_returns(bench_is), "bench_oos": strip_returns(bench), "holdout": rows,
          "shadow_update": upd, "decisions": decisions, "shadows": shadows, "seconds": time.time() - t_start}
     d["verdict"] = verdict(d)
@@ -1209,7 +1297,8 @@ def markdown(d: dict) -> str:
           "with USDC as cash, at most 3 held, with S1's and S2's costs (Jupiter's recorded round trip, network fee "
           "and Sender tip a swap, 5 USDC minimum, the SOL reserve, the way in from SOL). No real money.\n",
           f"Run {d['run_id']}, generated {d['generated']}. In sample {w['is'][0]} to {w['is'][1]}, held back "
-          f"{w['oos'][0]} to {w['oos'][1]}. EUR/USD {d['eurusd']:.4f}. Token drift a year: "
+          f"(validation, R6) {w['oos'][0]} to {w['oos'][1]}; the lockbox from {evaluate.LOCKBOX_FROM} is looked at "
+          f"only by the weekly run. EUR/USD {d['eurusd']:.4f}. Token drift a year: "
           + ", ".join(f"{TOKEN[a]} {x * 100:+.2f} %" for a, x in d["drifts"].items()) + ".\n",
           f"**{d['verdict']}**\n",
           "## Trials and the bar\n",
@@ -1221,8 +1310,12 @@ def markdown(d: dict) -> str:
           f"{p['n_trials']} trials; noise bar (the best of that many noise strategies) Sharpe {p['sr0_annual']:.2f}",
           f"- the small-account family alone (S1, S2, L1 and these genomes): {p.get('family_trials', 0)} trials, "
           f"noise bar Sharpe {p.get('family_sr0_annual', 0.0):.2f}",
+          f"- {p.get('same_behaviour', 0)} ledger genome(s) do what an earlier one does and are not trials of their "
+          f"own (one trial per behaviour, R6)",
           "- DSR (deflated Sharpe ratio, pass at 0.95 or more): the probability that the 40 EUR wallet's held-back "
-          "Sharpe beats the best of that many noise strategies; over all, the family's in brackets\n",
+          "daily excess over the 40 EUR SPYx wallet beats the best of that many noise strategies, the noise variance "
+          f"from {p.get('excess_trials', 0)} in-sample excess Sharpes ({p.get('excess_from', 'raw')}; noise bar "
+          f"excess Sharpe {p.get('excess_sr0_annual', p['sr0_annual']):.2f}); over all, the family's N in brackets\n",
           "## The benchmarks (bought once and held, same wallet and costs)\n"]
     t = []
     for k in d["bench_oos"]:
@@ -1270,8 +1363,29 @@ def markdown(d: dict) -> str:
           "BTC wallet": f"{s['btc_eur']:.2f} EUR", "Sharpe vs SPYx": f"{s['sharpe']:.2f} vs {s['spy_sharpe']:.2f}",
           "note": s.get("reason") or ""} for s in d["shadows"]]
     md.append(report.table(t, list(t[0])) if t else "none yet\n")
+    md += night_lines(d.get("night"), "this run's genomes")
+    md.append("## Lockbox looks (made by the weekly run, one per behaviour)\n")
+    t = [{"look": x["look"], "date": x["date"], "key": x["key"], "days": x["lockbox_days"],
+          "excess Sharpe vs SPYx": f"{x['lockbox_excess_sharpe']:.2f}", "DSR over the looks": f"{x['dsr']:.2f}",
+          "looks then": x["looks"]} for x in d.get("lockbox") or []]
+    md.append(report.table(t, list(t[0])) if t else "none yet\n")
     md.append("Nothing here trades: a shadow that keeps beating is a candidate for a hand study, not a book.\n")
     return "\n".join(md) + "\n"
+
+
+def night_lines(n: dict | None, what: str) -> list[str]:
+    """PBO and effective N of a run's genomes (R6), for both reports."""
+    if not n:
+        return []
+    e, p = n["effective_n"], n["pbo"]
+    pb = (f"PBO {p['pbo']:.2f} ({p['combos']} CSCV splits of {p['blocks']} blocks over {p['genomes']} moving "
+          f"genomes; the share of splits where the in-sample best ranks in the lower half out of sample)"
+          if p else "PBO n/a (fewer than 2 moving genomes)")
+    return ["## Overfitting of the search (R6)\n",
+            f"- effective N: {e['effective_n']} clusters among {e['genomes']} of {what} (correlation above "
+            f"{e['corr']:.1f} in sample is one cluster); {n.get('same_behaviour', 0)} genome(s) repeat an earlier "
+            f"behaviour",
+            f"- {pb}\n"]
 
 
 def publish(d: dict) -> None:

@@ -249,7 +249,7 @@ def test_gates_say_why(home, ctx):
     h = evaluate.holdout(ctx, g, p, evaluate.btc_benchmark(ctx))
     r = evaluate.in_sample(ctx, g, "x")
     gates = evaluate.bar_gates(r, h)
-    assert set(gates) == set(evaluate.SHADOW_GATES) | {"deflated"}
+    assert set(gates) == set(evaluate.SHADOW_GATES) | {"deflated", "lockbox"}
     assert all(v["why"] for v in gates.values())
     lo, mid, hi = h["band30"]
     assert lo <= mid <= hi
@@ -264,7 +264,9 @@ def test_weekly_run_end_to_end(home, monkeypatch):
     run.publish(d1)
     assert (report.REPORTS / "factory" / "latest.md").exists()
     L = ledger.Ledger()
-    assert len(L) == 40 and d1["pool_after"]["n_trials"] == d1["pool_before"]["n_trials"] + 40
+    assert len(L) == 40 and d1["pool_after"]["n_trials"] == d1["pool_before"]["n_trials"] + L.trials()
+    assert L.trials() == len({r["behaviour"] for r in L.rows})            # one trial per behaviour (R6)
+    assert d1["night"]["same_behaviour"] == 40 - L.trials() and d1["night"]["effective_n"]["effective_n"] >= 1
     d2 = run.weekly(40, False, "2026-10-24", log=lambda *_: None)
     assert len(ledger.Ledger()) == 80
     assert d2["pool_after"]["sr0_annual"] != d1["pool_after"]["sr0_annual"]
@@ -308,7 +310,7 @@ def test_a_shadow_that_clears_every_gate_is_promoted_to_paper_only(home, ctx, mo
     entry = datetime.fromtimestamp(ctx.days[-35] / 1e6, timezone.utc).strftime("%Y-%m-%d")
     shadow.start(r, h, {}, np.full(400, 0.001), "run", entry)
     shadow.update(ctx)
-    passing = {k: {"passed": True, "why": "ok"} for k in evaluate.SHADOW_GATES + ("deflated",)}
+    passing = {k: {"passed": True, "why": "ok"} for k in evaluate.SHADOW_GATES + ("deflated", "lockbox")}
     monkeypatch.setattr(evaluate, "bar_gates", lambda *_: dict(passing))
     monkeypatch.setattr(shadow, "forward_stats",
                         lambda m: {"days": 34, "return": 0.05, "band": [-0.1, 0.0, 0.1], "below_band": False})
@@ -422,7 +424,8 @@ def test_seed_carries_trials_to_another_machine_once(home, tmp_path, monkeypatch
     assert ledger.import_seed() == {"ledger": 0, "holdout": 0, "shadow": 0}
     d = run.weekly(20, False, "2026-10-17", log=lambda *_: None)
     assert d["pool_before"]["n_trials"] == base             # the seed's genomes are the same trials, not new ones
-    assert d["pool_after"]["n_trials"] == base + 20
+    new = [r for r in ledger.Ledger().rows if r["run"] == "2026-10-17" and not r.get("same_as")]
+    assert d["pool_after"]["n_trials"] == base + len(new)       # one trial per new behaviour
 
 
 def test_digest_goes_through_notify_post_to_telegram(home, monkeypatch):
