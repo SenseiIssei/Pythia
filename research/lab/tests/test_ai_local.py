@@ -252,7 +252,26 @@ def test_news_without_a_model_leaves_the_headlines_untagged(data, monkeypatch):
     write_news(data, "2026-10-26", ["A", "B"], now)
     monkeypatch.setenv("PYTHIA_LOCAL_LLM_URL", dead_url())
     assert local.tag_news(now) == 0 and local.read_tags("2026-10-26") == {}
-    assert local.main(["--news"]) == 0
+    monkeypatch.setattr(notify, "clock_ms", lambda: now)
+    assert local.main(["--news"]) == 1, "every call failed: the job turns red"
+    monkeypatch.setenv("PYTHIA_LOCAL_LLM", "off")
+    assert local.main(["--news"]) == 0, "the model switched off is no failure"
+
+
+def test_llm_news_fails_when_every_call_gets_an_error(data, servers, monkeypatch):
+    now = utc(2026, 10, 26, 12, 0)
+    monkeypatch.setattr(notify, "clock_ms", lambda: now)
+    assert local.main(["--news"]) == 0, "no headlines, no call, no failure"
+    write_news(data, "2026-10-26", ["A", "B"], now)
+    vps = servers(answer=lambda body: 405)
+    monkeypatch.setenv("PYTHIA_LOCAL_LLM_URL", vps.url)
+    stats: dict = {}
+    assert local.tag_news(now, stats=stats) == 0 and stats == {"calls": 1, "answered": 0}
+    assert local.main(["--news"]) == 1
+    rows = [json.loads(x) for x in (data / "ai" / "local_llm.jsonl").read_text().splitlines()]
+    assert rows[-1]["ok"] is False and rows[-1]["why"] == "HTTPError 405"
+    vps.answer = lambda body: "1|solana|4\n2|macro|2"
+    assert local.main(["--news"]) == 0 and len(local.read_tags("2026-10-26")) == 2
 
 
 def test_the_briefing_shows_the_three_most_relevant_headlines(data):
@@ -349,6 +368,53 @@ def test_the_server_script_pins_the_model_and_binds_localhost_only():
     assert "TOKEN" not in s and "/etc/pythia" not in s, "the server never sees a key or the owner's env files"
     assert '"$here/local-llm.sh"' in (OPS / "deploy_ops.sh").read_text()
     assert "\u2014" not in s
+
+
+def _fake_bin(tmp_path, docker_run: str) -> dict:
+    """PATH with a fake docker (container not running; `run` does `docker_run`), id (root) and curl (answers ok)."""
+    b = tmp_path / "bin"
+    b.mkdir(parents=True)
+    for name, body in (("docker", 'case "$1 $2" in\n  "container inspect") echo false ;;\n'
+                                  f'  run*) {docker_run} ;;\n  *) : ;;\nesac\n'),
+                       ("id", "echo 0\n"), ("curl", "echo '{\"status\":\"ok\"}'\n")):
+        (b / name).write_text("#!/usr/bin/env bash\n" + body)
+        (b / name).chmod(0o755)
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "Qwen3-4B-Instruct-2507-Q4_K_M.gguf").write_text("x")
+    return {"PATH": f"{b}:/usr/bin:/bin", "models": str(models)}
+
+
+def _up(fake: dict, port: int):
+    import subprocess
+    return subprocess.run(["bash", str(OPS / "local-llm.sh"), "up", "--models", fake["models"], "--port", str(port)],
+                          capture_output=True, text=True, timeout=60, env={"PATH": fake["PATH"]})
+
+
+def _free_port() -> int:
+    import socket
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        return so.getsockname()[1]
+
+
+def test_the_server_script_keeps_dockers_error_and_checks_the_port(tmp_path):
+    import socket
+    err = 'echo "docker: Error response from daemon: driver failed programming external connectivity" >&2; exit 125'
+    fake = _fake_bin(tmp_path, err)
+    port = _free_port()
+    r = _up(fake, port)
+    assert r.returncode == 125, r.stderr
+    assert "docker run failed (exit 125): docker: Error response from daemon" in r.stderr
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        so.listen(1)
+        taken = so.getsockname()[1]
+        r = _up(fake, taken)
+    assert r.returncode == 1 and f"port {taken} on 127.0.0.1 is taken by another program" in r.stderr, r.stderr
+    ok = _fake_bin(tmp_path / "ok", "echo abc123")
+    r = _up(ok, _free_port())
+    assert r.returncode == 0 and "pythia-local-llm up" in r.stdout, r.stderr
 
 
 def test_the_jobs_table_has_the_local_model_jobs():

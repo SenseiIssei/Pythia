@@ -101,7 +101,7 @@ another image, or on the host), resources, timeout, lock, dependencies,
 | `jobs.py run <job> [--force]` | runs one job the way cron does (`--force` runs a disabled one and skips the dependency check) |
 | `jobs.py status [--write]` | last run, next run, failures of every job, as JSON |
 | `jobs.py checks` | the health check's rows: every job, the disk, every dataset |
-| `jobs.py disk [--now]` | size and growth per dataset |
+| `jobs.py disk [--now]` | size and growth per dataset, the fall in free space over 3 and 7 days, the untracked use |
 | `jobs.py prune [--dry-run]` | the retention rules |
 | `jobs.py backup [--dry-run]` | archive the important state, rotate |
 
@@ -174,8 +174,12 @@ deployed yet are in the table with `enabled: false`.
 The `datasets` section of the table names each folder of the data lake. The
 health check measures them (at most every 6 hours, `_ops/disk/history.jsonl`)
 and turns red when free space is under `min_free_gb`, when the disk would be
-full within 14 days at the last week's growth, or when a dataset is over its
-`max_gb`. A dataset with `retention_days` loses files older than that (by
+full within 14 days at the faster fall in free space over the last 3 or 7 days
+(the whole disk, not only the tracked folders: docker images and caches count),
+when a dataset is over its `max_gb`, or when the newest file of a dataset with
+`max_age_h` is older than that many hours (`etf/daily` and `pokemon` have one
+too). The disk row also says how much is used outside the tracked folders
+(`untrackedGb` in `_ops/disk/latest.json`). A dataset with `retention_days` loses files older than that (by
 modification time, only names matching its `pattern`, never through a
 symlink) in the nightly `prune` job; the others are never deleted from. See
 it first: `python3 /opt/pythia-ops/jobs.py prune --dry-run`.
@@ -593,6 +597,9 @@ Where it asks, in this order:
    `127.0.0.1:8090` only, 3 CPUs at CPU share 256 (everything else goes first), 4 GB memory, no swap, read only,
    no capabilities, the model folder `/srv/pythia-llm` read only (outside the data store, so no sync or backup
    carries it). The host job `local-llm` keeps it up every 15 minutes and downloads the model the first time.
+   Before a start it checks that nothing else holds 127.0.0.1:8090 (and names what does), and a failed
+   `docker run` leaves docker's own error in the job's log. `llm-news` exits 1 when every model call of a run
+   failed, so a dead model turns the job red instead of reporting ok.
 3. **No text**: every user keeps its template. `PYTHIA_LOCAL_LLM=off` does the same on purpose.
 
 Kept up rather than started by each job: the jobs run in containers without docker, an idle server takes no CPU
@@ -634,7 +641,8 @@ one of its tables is older than `max_age`, more steps than `max_gaps` are
 missing in the last 7 days, a column is missing or a part of the run failed
 (no row while its job is disabled). The Lab
 page shows it ("Is everything running?"); the PC gets it with the sync. Red
-for two runs in a row posts once to Telegram (below, "Health alarm").
+for two runs in a row posts to Telegram (below, "Health alarm"), and again
+whenever another check is red for two runs while the first is still red.
 
 It runs as the job `health` of the table. Install or update with
 `research/ops/deploy_ops.sh` on the server.
@@ -1010,7 +1018,7 @@ and red circles); the full list, the look and the API are in `docs/ALERTS.md`:
   equity against BTC, P&L per sleeve and positions
 - the weekly report on Sunday at 18:00 Europe/Berlin, with the week's chart
 - the health alarm: `system.json` not ok for two runs in a row, posted once,
-  and once when green again
+  again for each check that turns red later in the episode, and once when green again
 
 Each category has a switch in the app (Notifications, "What is sent"), and
 quiet hours (23:00 to 07:00 Europe/Berlin unless changed there) hold back all

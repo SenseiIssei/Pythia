@@ -2445,7 +2445,9 @@ def pending(now_ms: int | None = None) -> int:
 
 def health_step(system: dict | None, st: dict, lang: str | None = None) -> tuple[Card | None, dict]:
     """(card to post or None, new state). Counts runs, not calls: the same
-    system.json (same `at`) is counted once."""
+    system.json (same `at`) is counted once. Posts after two bad runs, then
+    again whenever another check is red for two runs in a row while the
+    system stays red (a check that recovers can post again later)."""
     st = dict(st)
     if not system:
         return None, st
@@ -2457,18 +2459,26 @@ def health_step(system: dict | None, st: dict, lang: str | None = None) -> tuple
     when = i18n.when_iso(at, lang, local_time)
     if system.get("ok"):
         was = st.get("posted")
-        st.update(bad_runs=0, posted=False)
+        st.update(bad_runs=0, posted=False, red=[], posted_red=[])
         if was:
             return Card("✅", tr("health_green", lang), tr("since_check", lang, at=when)), st
         return None, st
     st["bad_runs"] = int(st.get("bad_runs") or 0) + 1
-    if st["bad_runs"] >= 2 and not st.get("posted"):
+    red = [c for c in system.get("checks") or [] if not c.get("ok")]
+    names = [str(c.get("name")) for c in red]
+    prev, posted = set(st.get("red") or []), set(st.get("posted_red") or [])
+    st["red"] = names
+    # new: red now and in the run before, not yet said in this episode
+    fresh = [n for n in names if n in prev and n not in posted]
+    if st["bad_runs"] >= 2 and (not st.get("posted") or fresh):
         st["posted"] = True
-        red = [c for c in system.get("checks") or [] if not c.get("ok")]
+        st["posted_red"] = names
+        red.sort(key=lambda c: str(c.get("name")) not in fresh)  # the new ones first
         parts = ([Line(short(c.get("detail") or "", 160), str(c.get("name"))) for c in red]
                  or [Line(tr("no_check_named", lang))])
         card = Card("🩺", tr("health_red", lang, n=st["bad_runs"]), tr("checks_not_ok", lang, n=len(red), at=when), parts)
         return card, st
+    st["posted_red"] = [n for n in names if n in posted]  # a recovered check may post again
     return None, st
 
 

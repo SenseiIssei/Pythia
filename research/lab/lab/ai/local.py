@@ -23,7 +23,8 @@ What it writes (the model decides nothing, never touches trading and never sees 
 Every call is a line in <data>/ai/local_llm.jsonl (when, what for, which backend, tokens, seconds, ok or why not;
 never the text).
 
-  python -m lab.ai.local --news      tag the new headlines (job llm-news, after news-collect)
+  python -m lab.ai.local --news      tag the new headlines (job llm-news, after news-collect); exits 1 when every
+                                     model call failed
   python -m lab.ai.local --probe     which backend answers now, and how fast
 """
 
@@ -285,11 +286,14 @@ def read_tags(day: str, root: Path | None = None) -> dict:
     return {k: v for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
 
 
-def tag_news(now: int | None = None, budget_sec: float = NEWS_BUDGET_SEC, env: dict | None = None) -> int:
+def tag_news(now: int | None = None, budget_sec: float = NEWS_BUDGET_SEC, env: dict | None = None,
+             stats: dict | None = None) -> int:
     """Tag the headlines of today and yesterday (UTC) that have no tag yet, NEWS_BATCH a call, until the budget is
     spent. The number tagged; a headline the model left out is kept as {"asked": n} and asked again next run, at most
-    NEWS_ASKS times."""
+    NEWS_ASKS times. `stats` gets the calls made and those a model answered (none made while the model is off)."""
     now = now or notify.clock_ms()
+    stats = {} if stats is None else stats
+    stats.update(calls=0, answered=0)
     deadline = time.monotonic() + budget_sec
     bks = None
     done = 0
@@ -317,13 +321,18 @@ def tag_news(now: int | None = None, budget_sec: float = NEWS_BUDGET_SEC, env: d
                 return done
             if bks is None:
                 bks = backends(env)
+            if not bks:
+                notify.say("local-llm: news: the model is off, the headlines stay untagged")
+                return done
             batch = todo[i:i + NEWS_BATCH]
             user = "\n".join(f"{j + 1}. {notify.short(notify.nodash(str(h['title'])), 160)}" for j, h in enumerate(batch))
             ans = chat([{"role": "system", "content": NEWS_SYSTEM}, {"role": "user", "content": user}], "news",
                        12 * len(batch) + 20, deadline, env=env, bks=bks)
+            stats["calls"] += 1
             if ans is None:
                 notify.say("local-llm: news: no model answered, the headlines stay untagged")
                 return done
+            stats["answered"] += 1
             got = parse_tags(ans["text"], len(batch))
             for j, h in enumerate(batch):
                 key = headline_key(h)
@@ -351,7 +360,11 @@ def main(argv: list[str] | None = None) -> int:
     if "--probe" in argv:
         return probe()
     if "--news" in argv:
-        tag_news()
+        stats: dict = {}
+        tag_news(stats=stats)
+        if stats["calls"] and not stats["answered"]:
+            notify.say(f"local-llm: news: every model call failed ({stats['calls']}), see ai/local_llm.jsonl", err=True)
+            return 1  # the job turns red instead of reporting ok
         return 0
     notify.say(__doc__.strip().splitlines()[0])
     return 2

@@ -659,6 +659,92 @@ datasets:
     assert out["daysLeft"] is not None and out["daysLeft"] > 14
 
 
+# the server's recorded disk history 2026-10-20 to 27 (free GB, tracked GB; 463.9 GB disk): free
+# space fell 108 GB while the tracked folders grew 5 GB
+DISK_HISTORY = [
+    ("10-20T01:07", 255.8, 12.6), ("10-20T07:07", 254.9, 12.8), ("10-20T13:07", 254.2, 12.9),
+    ("10-20T20:07", 247.9, 13.1), ("10-21T02:07", 236.9, 13.2), ("10-21T08:07", 235.0, 13.5),
+    ("10-21T14:07", 232.0, 13.7), ("10-21T20:07", 220.0, 13.9), ("10-22T02:07", 215.9, 14.0),
+    ("10-22T08:07", 215.1, 14.2), ("10-22T14:07", 214.6, 14.4), ("10-22T20:07", 203.3, 14.6),
+    ("10-23T02:07", 190.9, 14.7), ("10-23T08:07", 189.0, 14.9), ("10-23T15:07", 177.4, 15.2),
+    ("10-23T22:07", 167.5, 15.5), ("10-24T04:07", 164.7, 15.6), ("10-24T10:07", 164.5, 15.7),
+    ("10-24T17:07", 162.9, 16.0), ("10-24T23:07", 162.0, 16.2), ("10-25T05:07", 161.5, 16.3),
+    ("10-25T11:07", 160.9, 16.5), ("10-25T17:07", 159.8, 16.7), ("10-25T23:07", 158.7, 16.9),
+    ("10-26T06:07", 157.9, 17.3), ("10-26T13:07", 157.0, 17.5), ("10-26T19:07", 164.5, 17.7),
+    ("10-27T01:07", 154.1, 17.8), ("10-27T07:07", 147.1, 18.0)]
+
+
+def test_disk_days_left_from_the_fall_in_free_space(tmp_path):
+    t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x', """
+datasets:
+  - name: d
+    path: d
+""")
+    gb = 1024 ** 3
+    hist = tmp_path / "data" / "_ops" / "disk" / "history.jsonl"
+    hist.parent.mkdir(parents=True)
+    # old entries carry no "used": total minus free stands in
+    hist.write_text("".join(json.dumps({"at": f"2026-{at}:01Z", "free": int(free * gb), "total": int(463.9 * gb),
+                                        "sizes": {"d": int(tr * gb)}}) + "\n" for at, free, tr in DISK_HISTORY))
+    out = jobs.measure_disk(t, datetime(2026, 10, 27, 8, 0, tzinfo=UTC))
+    assert out["at"] == "2026-10-27T07:07:01Z", "cached: the recorded entry is the latest"
+    assert out["growthGbPerDay"] == pytest.approx(0.75, abs=0.05), "the tracked folders alone looked harmless"
+    assert out["freeFallGbPerDay"]["7d"] == pytest.approx(15.0, abs=0.1)
+    assert out["freeFallGbPerDay"]["3d"] == pytest.approx(5.8, abs=0.3)
+    assert out["daysLeft"] == pytest.approx(9.8, abs=0.1) and out["ok"] is False
+    assert out["trackedGb"] == 18.0 and out["untrackedGb"] == pytest.approx(298.8, abs=0.1)
+    assert out["untrackedGrowthGbPerDay"] == pytest.approx(14.25, abs=0.1)
+    checks = {n: (ok, d) for n, ok, d in jobs.health_checks(t, datetime(2026, 10, 27, 8, 0, tzinfo=UTC))}
+    assert checks["disk"][0] is False
+    assert "full in about 10 days at 14.99 GB a day" in checks["disk"][1]
+    assert "298.8 GB used outside the tracked folders" in checks["disk"][1]
+    # every day of the record from 10-23 on is red; a rise in free space (a cleanup) is no fall
+    lines = hist.read_text().splitlines()
+    for n in range(14, len(lines) + 1):
+        hist.write_text("\n".join(lines[:n]) + "\n")
+        at = jobs._parse_iso(json.loads(lines[n - 1])["at"])
+        assert jobs.measure_disk(t, at)["ok"] is False, lines[n - 1]
+    rising = [{"at": "2026-10-15T15:07:01Z", "free": 87 * gb, "total": 464 * gb, "sizes": {"d": 0}},
+              {"at": "2026-10-17T15:07:01Z", "free": 270 * gb, "total": 464 * gb, "sizes": {"d": 0}}]
+    hist.write_text("".join(json.dumps(h) + "\n" for h in rising))
+    out = jobs.measure_disk(t, datetime(2026, 10, 17, 16, 0, tzinfo=UTC))
+    assert out["freeFallGbPerDay"]["3d"] < 0 and out["daysLeft"] is None and out["ok"] is True
+
+
+def test_a_stale_dataset_turns_red(tmp_path):
+    t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x', """
+datasets:
+  - name: etf
+    path: etf/daily
+    max_age_h: 96
+  - name: empty
+    path: empty
+    max_age_h: 3
+  - name: ageless
+    path: ageless
+""")
+    now = datetime(2026, 10, 27, 13, 0, tzinfo=UTC)
+    d = tmp_path / "data" / "etf" / "daily"
+    d.mkdir(parents=True)
+    (d / "SPY.parquet").write_text("x")
+    (tmp_path / "data" / "ageless").mkdir()
+    (tmp_path / "data" / "ageless" / "f").write_text("x")
+    old = datetime(2026, 10, 13, tzinfo=UTC).timestamp()
+    os.utime(d / "SPY.parquet", (old, old))
+    os.utime(tmp_path / "data" / "ageless" / "f", (old, old))
+    checks = {n: (ok, d) for n, ok, d in jobs.health_checks(t, now)}
+    assert checks["data etf"][0] is False and "newest file 349 h old (may be 96 h)" in checks["data etf"][1]
+    assert checks["data empty"][0] is False and "no file" in checks["data empty"][1]
+    assert checks["data ageless"][0] is True, "no max_age_h, no age check"
+    fresh = now.timestamp() - 3600
+    os.utime(d / "SPY.parquet", (fresh, fresh))
+    checks = {n: (ok, d) for n, ok, d in jobs.health_checks(t, now)}
+    assert checks["data etf"][0] is True and "newest file 1 h old" in checks["data etf"][1]
+    with pytest.raises(jobs.TableError, match="max_age_h"):
+        table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x',
+              "datasets:\n  - name: d\n    path: d\n    max_age_h: 0")
+
+
 # ---------------------------------------------------------------- retention
 
 def test_prune_deletes_only_old_matching_files(tmp_path):

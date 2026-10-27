@@ -1189,25 +1189,32 @@ jobs:
 # Size and growth per dataset (paths under the data root). max_gb turns the
 # dataset red in the health check; retention_days lets the prune job delete
 # files older than that (by modification time, only those matching pattern).
-# Datasets without retention_days are never deleted from.
+# Datasets without retention_days are never deleted from. max_age_h turns it red
+# when its newest file (by modification time) is older than that many hours.
 datasets:
   - name: recorder-binance
     path: binance
+    max_age_h: 3
     max_gb: 250
   - name: recorder-kraken
     path: kraken
+    max_age_h: 3
     max_gb: 100
   - name: recorder-bybit
     path: bybit
+    max_age_h: 3
     max_gb: 100
   - name: recorder-okx
     path: okx
+    max_age_h: 3
     max_gb: 100
   - name: recorder-coinbase
     path: coinbase
+    max_age_h: 3
     max_gb: 100
   - name: history
     path: hist
+    max_age_h: 36
     max_gb: 300
   - name: lab-cache
     description: run caches and panels, rebuilt by the nightly jobs
@@ -1215,33 +1222,41 @@ datasets:
     max_gb: 80
   - name: models
     path: models
+    max_age_h: 36
     max_gb: 20
   - name: paper
     path: paper
+    max_age_h: 26
     max_gb: 5
   - name: reports
     description: dated report copies older than a year go; latest.* stay
     path: reports
+    max_age_h: 6
     max_gb: 10
     retention_days: 365
     pattern: ["20??-??-??*.json", "20??-??-??*.md"]
   - name: signals
     path: signals
+    max_age_h: 36
     max_gb: 2
     retention_days: 180
     pattern: ["20??-??-??.json"]
   - name: learn
     path: learn
+    max_age_h: 36
     max_gb: 50
   - name: readiness
     description: the real money readiness record (one line a day) and the inflation cache; never deleted
     path: readiness
+    max_age_h: 36
     max_gb: 1
   - name: recorder-binance-um
     path: binance_um
+    max_age_h: 3
     max_gb: 100
   - name: spread
     path: spread
+    max_age_h: 3
     max_gb: 20
   - name: factory
     description: the trial ledger and shadow books; never deleted
@@ -1250,21 +1265,25 @@ datasets:
   - name: cs2-snapshots
     description: hourly Skinport and Steam snapshots; the models read only cs2/daily, kept forever
     path: cs2
+    max_age_h: 6
     max_gb: 40
     retention_days: 180
     pattern: ["[0-2][0-9][0-5][0-9].parquet"]
   - name: trending
     description: a snapshot every 15 minutes
     path: trending/snapshots
+    max_age_h: 3
     max_gb: 10
     retention_days: 365
     pattern: ["*.parquet"]
   - name: listings
     path: listings
+    max_age_h: 3
     max_gb: 2
   - name: candles
     description: C1's candle store (Binance REST fill, Kraken 1m, GeckoTerminal, Yahoo); kept forever
     path: candles
+    max_age_h: 3
     max_gb: 20
   - name: ai
     description: the Claude API ledger, caps and the AI brief's predictions; never deleted
@@ -1273,6 +1292,7 @@ datasets:
   - name: flow
     description: daily flow data and the Deribit option snapshots; kept forever
     path: flow
+    max_age_h: 36
     max_gb: 5
   - name: free
     description: the free data collectors of D2 (Deribit, Hyperliquid, DefiLlama, Fear and Greed, macro); kept forever
@@ -1281,10 +1301,12 @@ datasets:
   - name: pumpfun-rt
     description: the real-time pump.fun record; the collector deletes whole days, oldest first, over PYTHIA_PF_BUDGET_GB (40)
     path: pumpfun_rt
+    max_age_h: 3
     max_gb: 45
   - name: polymarket
     description: Polymarket resolved set, daily snapshots and books (the collector deletes book and snapshot days, oldest first, over PYTHIA_PM_BUDGET_GB, 6), the forecast ledgers and paper books (never deleted)
     path: polymarket
+    max_age_h: 36
     max_gb: 8
   - name: job-runs
     description: the runner's own run records, by month
@@ -1292,6 +1314,15 @@ datasets:
     max_gb: 1
     retention_days: 400
     pattern: ["*.jsonl"]
+  - name: etf
+    description: daily ETF closes the briefing and the small books read
+    path: etf/daily
+    max_gb: 1
+    max_age_h: 96
+  - name: pokemon
+    path: pokemon
+    max_gb: 10
+    max_age_h: 36
 
 # Free data sources the health check watches (jobs.py checks, one "feed <name>" row each): the
 # status file the collector writes after every run, how old its last run and the newest value

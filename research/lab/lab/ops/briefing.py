@@ -506,7 +506,8 @@ def research_section(rep: dict | None, now: int, lang: str, n: int = 5) -> tuple
     if waiting or held:
         parts.append(Line(tr("bf_res_queue", lang, n=waiting, held=len(held)), "🗂️ " + tr("bf_res_queue_lead", lang)))
     b = rep.get("budget") or {}
-    if _num(b.get("balance_usd")):
+    # also at balance 0: an overspent, paused budget is exactly what the owner must see
+    if isinstance(b, dict) and any(_num(b.get(k)) is not None for k in ("balance_usd", "left_usd")):
         text = tr("bf_res_budget", lang, left=notify.money(_num(b.get("left_usd")) or 0.0, 2, lang),
                   reserve=notify.money(_num(b.get("reserve_usd")) or 0.0, 0, lang))
         if b.get("paused"):

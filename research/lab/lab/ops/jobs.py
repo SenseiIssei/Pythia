@@ -43,6 +43,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -489,6 +490,9 @@ class Table:
             r = ds.get("retention_days")
             if r is not None and (not isinstance(r, int) or isinstance(r, bool) or r < 1):
                 raise TableError(f"dataset {ds['name']}: retention_days must be a whole number of days, at least 1")
+            a = ds.get("max_age_h")
+            if a is not None and (not isinstance(a, (int, float)) or isinstance(a, bool) or a <= 0):
+                raise TableError(f"dataset {ds['name']}: max_age_h must be a number of hours above 0")
 
     def _check_feeds(self) -> None:
         seen = set()
@@ -1179,8 +1183,29 @@ def _du_bytes(p: Path) -> int:
     return total
 
 
+def _free_fall(hist: list[dict], cur: dict, span_days: float) -> float | None:
+    """Bytes a day the free space fell over about `span_days` (the oldest entry at least a day and at
+    most span plus half a day back); negative when it grew, None without such an entry."""
+    cur_at = _parse_iso(cur["at"])
+    for h in hist:
+        at = _parse_iso(h.get("at"))
+        if at and h.get("free") is not None and cur.get("free") is not None \
+                and timedelta(days=1) <= cur_at - at <= timedelta(days=span_days + 0.5):
+            return (h["free"] - cur["free"]) / ((cur_at - at).total_seconds() / 86400)
+    return None
+
+
+def _used(h: dict) -> int | None:
+    if h.get("used") is not None:
+        return h["used"]
+    return None if h.get("free") is None or h.get("total") is None else h["total"] - h["free"]
+
+
 def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600, force: bool = False) -> dict:
-    """Size per dataset and free space; measured at most every `every_s`, kept as history."""
+    """Size per dataset and free space; measured at most every `every_s`, kept as history.
+    Days left come from the fall in free space over 3 and 7 days (the faster one), not from the
+    tracked folders alone: what fills the disk outside them (docker, caches) counts too and is
+    reported as the untracked use (used minus the tracked folders)."""
     now = now or _now()
     d = t.ops_dir / "disk"
     hist_path = d / "history.jsonl"
@@ -1195,6 +1220,7 @@ def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600,
     if force or last_at is None or (now - last_at).total_seconds() >= every_s:
         du = shutil.disk_usage(t.data) if t.data.exists() else None
         entry = {"at": _iso(now), "free": du.free if du else None, "total": du.total if du else None,
+                 "used": du.used if du else None,
                  "sizes": {ds["name"]: _du_bytes(t.data / ds["path"]) for ds in t.datasets}}
         hist.append(entry)
         d.mkdir(parents=True, exist_ok=True)
@@ -1224,12 +1250,24 @@ def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600,
                      "maxGb": max_gb, "retentionDays": ds.get("retention_days"), "ok": ok,
                      "description": ds.get("description") or ""})
     free = cur.get("free")
-    days_left = (free / total_growth) if free is not None and total_growth > 0 else None
+    falls = {k: _free_fall(hist, cur, n) for k, n in (("3d", 3), ("7d", 7))}
+    fall = max((v for v in falls.values() if v is not None), default=None)
+    days_left = (free / fall) if free is not None and fall is not None and fall > 0 else None
     disk_ok = free is not None and free / gb >= t.min_free_gb and (days_left is None or days_left >= 14)
+    tracked = sum(cur["sizes"].values())
+    used = _used(cur)
+    untracked = None if used is None else max(used - tracked, 0)
+    base_used = _used(base) if base else None
+    untracked_growth = (untracked - max(base_used - sum(base["sizes"].values()), 0)) / days \
+        if untracked is not None and base_used is not None and days else None
     out = {"at": cur["at"], "freeGb": None if free is None else round(free / gb, 1),
            "totalGb": None if cur.get("total") is None else round(cur["total"] / gb, 1),
            "minFreeGb": t.min_free_gb, "growthGbPerDay": round(total_growth / gb, 3) if base else None,
-           "daysLeft": None if days_left is None else round(days_left, 1), "ok": disk_ok, "datasets": rows}
+           "freeFallGbPerDay": {k: None if v is None else round(v / gb, 2) for k, v in falls.items()},
+           "daysLeft": None if days_left is None else round(days_left, 1), "ok": disk_ok,
+           "trackedGb": round(tracked / gb, 1), "untrackedGb": None if untracked is None else round(untracked / gb, 1),
+           "untrackedGrowthGbPerDay": None if untracked_growth is None else round(untracked_growth / gb, 2),
+           "datasets": rows}
     _write_json(d / "latest.json", out)
     return out
 
@@ -1247,19 +1285,48 @@ def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool
     if disk["freeGb"] is None:
         out.append(("disk", False, f"data root {t.data} not found"))
     else:
-        left = f", full in about {disk['daysLeft']:.0f} days at {disk['growthGbPerDay']} GB a day" \
+        fall = max((v for v in (disk.get("freeFallGbPerDay") or {}).values() if v is not None), default=None)
+        left = f", full in about {disk['daysLeft']:.0f} days at {fall} GB a day" \
             if disk.get("daysLeft") is not None else ""
-        out.append(("disk", disk["ok"], f"{disk['freeGb']} GB free of {disk['totalGb']}{left}"))
+        other = f", {disk['untrackedGb']} GB used outside the tracked folders" \
+            if disk.get("untrackedGb") is not None else ""
+        out.append(("disk", disk["ok"], f"{disk['freeGb']} GB free of {disk['totalGb']}{left}{other}"))
+    ages = {ds["name"]: ds["max_age_h"] for ds in t.datasets if ds.get("max_age_h") is not None}
     for ds in disk["datasets"]:
         g = "" if ds["growthGbPerDay"] is None else f", {ds['growthGbPerDay']:+} GB a day"
         cap = "" if ds["maxGb"] is None else f", limit {ds['maxGb']} GB"
         keep = "" if not ds["retentionDays"] else f", kept {ds['retentionDays']} days"
-        out.append((f"data {ds['name']}", ds["ok"], f"{ds['gb']} GB{g}{cap}{keep}"))
+        ok, age = ds["ok"], ""
+        if ds["name"] in ages:
+            newest = newest_mtime(t.data / ds["path"])
+            if newest is None:
+                ok, age = False, f", no file (may be {ages[ds['name']]} h old)"
+            else:
+                h = (now.timestamp() - newest) / 3600
+                ok = ok and h <= ages[ds["name"]]
+                age = f", newest file {h:.0f} h old" + ("" if h <= ages[ds["name"]] else f" (may be {ages[ds['name']]} h)")
+        out.append((f"data {ds['name']}", ok, f"{ds['gb']} GB{g}{cap}{keep}{age}"))
     for f in t.feeds:
         if f.get("job") and not t.jobs[f["job"]]["enabled"]:
             continue
         out.append(feed_check(t, f, now))
     return out
+
+
+def newest_mtime(p: Path) -> float | None:
+    """Modification time of the newest regular file under `p` (symlinks not followed), None without one."""
+    if p.is_file():
+        return p.lstat().st_mtime
+    newest = None
+    for root, _dirs, files in os.walk(p):
+        for f in files:
+            try:
+                st = os.lstat(os.path.join(root, f))
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and (newest is None or st.st_mtime > newest):
+                newest = st.st_mtime
+    return newest
 
 
 def feed_check(t: Table, f: dict, now: datetime) -> tuple[str, bool, str]:

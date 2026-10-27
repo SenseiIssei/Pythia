@@ -236,6 +236,18 @@ def test_the_briefing_shows_the_research_lanes(data):
     assert "1 Aufgabe fertig" in text, "in the summary"
 
 
+def test_the_briefing_shows_the_budget_line_at_balance_0(data):
+    now = utc(2026, 10, 27, 7, 0)
+    rep = {"updated_ms": now - 600_000, "done": [], "running": [], "queued": 0,
+           "budget": {"balance_usd": 0.0, "left_usd": -68.09, "reserve_usd": 10.0, "paused": True}}
+    for lang, want in (("de", "noch -68,09 $, Reserve 10 $ · Forschung pausiert"),
+                       ("en", "-$68.09 left, reserve $10 · research paused")):
+        parts, _ = briefing.research_section(rep, now, lang)
+        text = notify.plain(notify.render_post([notify.Card("x", "x", None, parts)], "telegram", lang=lang))
+        assert want in text, text
+    assert briefing.research_section(dict(rep, budget={}), now, "en")[0] == [], "no budget known, no line"
+
+
 def test_the_briefing_paper_line_shows_the_small_wallets_in_euro(data):
     now = utc(2026, 10, 23, 7, 0)
     fill_lab(data, now)

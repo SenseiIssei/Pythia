@@ -637,6 +637,38 @@ def test_health_posts_once_after_two_bad_runs_and_once_when_green(telegram, data
     assert len(got) == 2, "a single bad run and its recovery stay quiet"
 
 
+def test_health_posts_again_when_another_check_turns_red(telegram, data):
+    _, got, _ = telegram
+    sysj = data / "_health" / "system.json"
+    llm = {"name": "job local-llm", "ok": False, "detail": "exit 125"}
+
+    def run(at, *extra):
+        d = health_bad(at)
+        d["checks"] = [llm] + list(extra)
+        write(data, "_health/system.json", d)
+        assert notify.main(["--health", str(sysj)]) == 0
+
+    run("2026-10-20T07:07:00Z")
+    run("2026-10-20T08:07:00Z")
+    assert len(got) == 1 and "job local-llm" in texts(got)[0]
+    run("2026-10-20T09:07:00Z")
+    assert len(got) == 1, "the same red check is said once"
+    disk = {"name": "disk", "ok": False, "detail": "147 GB free, full in about 10 days"}
+    run("2026-10-20T10:07:00Z", disk)
+    assert len(got) == 1, "a new red check waits for a second run"
+    run("2026-10-20T11:07:00Z", disk)
+    assert len(got) == 2, "a second failing check posts while the first is still red"
+    text = texts(got)[1]
+    assert "2 checks not ok" in text and text.index("<b>disk</b>") < text.index("<b>job local-llm</b>"), text
+    run("2026-10-20T12:07:00Z", disk)
+    run("2026-10-20T13:07:00Z")
+    run("2026-10-20T14:07:00Z")
+    assert len(got) == 2, "a check that recovers says nothing while the rest stays red"
+    run("2026-10-20T15:07:00Z", disk)
+    run("2026-10-20T16:07:00Z", disk)
+    assert len(got) == 3, "and posts again when it turns red again"
+
+
 def test_health_retries_when_the_post_fails(telegram, data):
     _, got, state = telegram
     sysj = data / "_health" / "system.json"

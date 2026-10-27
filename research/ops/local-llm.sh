@@ -3,7 +3,7 @@
 # pythia-local-llm, on 127.0.0.1:8090 only. It words the briefing's summary line, the lab card's top line and tags
 # the news (lab.ai.local); it decides nothing, never touches trading and never sees a key.
 #
-#   sudo /opt/pythia-ops/local-llm.sh [up|down|status|bench] [--models DIR]
+#   sudo /opt/pythia-ops/local-llm.sh [up|down|status|bench] [--models DIR] [--port N]
 #
 #   up      (the default; job local-llm every 15 minutes) download the model once if it is missing (pinned file
 #           and sha256, into --models, /srv/pythia-llm, outside the data store so no sync or backup carries it),
@@ -11,6 +11,9 @@
 #   down    stop and remove the container (the jobs fall back to the owner's PC or to their templates)
 #   status  running or not, its memory now
 #   bench   one short call, the tokens a second it measured
+#
+# Before a start, up checks that nothing else holds the port (8090; --port only for tests) and names what does;
+# when docker run fails, its own error goes to the log and the job's exit code, never to /dev/null.
 #
 # Kept up rather than started per job: the jobs run in containers without docker, an idle server takes no CPU and
 # about 0.7 GB of its own memory (the 2.4 GB model file is mapped and the kernel may drop it), a cold start takes
@@ -33,7 +36,8 @@ while [ $# -gt 0 ]; do
   case $1 in
     up|down|status|bench) cmd=$1 ;;
     --models) models=${2:?--models needs a folder}; shift ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --port) port=${2:?--port needs a number}; shift ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -84,14 +88,22 @@ if running && [ "$(docker container inspect -f '{{index .Config.Labels "pythia.l
   exit 0
 fi
 docker rm -f "$name" >/dev/null 2>&1 || true
-docker run -d --name "$name" --restart unless-stopped --label "pythia.llm=$want" \
+# Something else on the port makes docker run fail with 125 (and answers the jobs' calls with its own errors).
+if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+  holder=$(command -v ss >/dev/null && ss -Hltnp "sport = :$port" 2>/dev/null | tr -s ' ' | head -n 3 || true)
+  die "port $port on 127.0.0.1 is taken by another program, $name not started${holder:+: $holder}"
+fi
+rc=0
+err=$(docker run -d --name "$name" --restart unless-stopped --label "pythia.llm=$want" \
   --cpus 3 --cpu-shares 256 --memory 4g --memory-swap 4g \
   -p "127.0.0.1:$port:8080" -v "$models:/models:ro" \
   --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
   --log-opt max-size=10m --log-opt max-file=3 \
-  "$image" "${args[@]}" >/dev/null
+  "$image" "${args[@]}" 2>&1 >/dev/null) || rc=$?
+[ "$rc" -eq 0 ] || { echo "local-llm: docker run failed (exit $rc): $err" >&2; exit "$rc"; }
 for _ in $(seq 1 60); do
   curl -s -m 2 "http://127.0.0.1:$port/health" | grep -q '"ok"' && { echo "local-llm: $name up on 127.0.0.1:$port"; exit 0; }
   sleep 2
 done
+docker logs --tail 20 "$name" >&2 || true
 die "$name started but does not answer on 127.0.0.1:$port (docker logs $name)"
