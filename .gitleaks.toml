@@ -42,3 +42,11 @@ regexes = ['''^\{"key":"[0-9a-f]{12}","run":''']
 description = "UI localStorage key names"
 regexTarget = "secret"
 regexes = ['''^pythia\.[a-z0-9.]+$''']
+
+# The research ledgers (strategy factory, model factory) key each tried spec by a hash of its settings
+# ({"key":"<hex>",...}); the generic rule reads that as an API key. Content hashes, no credential.
+[[allowlists]]
+description = "spec hashes in the research ledgers"
+paths = ['''research/lab/results/[A-Za-z0-9_./-]*ledger[A-Za-z0-9_.-]*\.jsonl''']
+regexTarget = "line"
+regexes = ['''^\{"key":"[0-9a-f]{8,64}",''']
