@@ -9,6 +9,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | always | a second engine for autopilots, kept apart so they never touch the lab book's markets or evidence; state in `/srv/pythia-data/autopilot` | container `pythia-autopilot` on 127.0.0.1:8788 only |
 | 00:40 | flow data: Coinbase BTC-USD 1h and Upbit KRW-BTC 1d (the exchange premiums), USD/KRW, DefiLlama stablecoin supply, Deribit BTC and ETH DVOL, a Deribit option snapshot with the 25-delta skew at 30 days (`lab.collect.flow`, under a minute daily; the first run fetches the history back to 2019 in about 4 minutes). Into `/srv/pythia-data/flow/`, read by the X6 study (`results/flow_overlays.md`) | `jobs.yaml` only |
 | 00:50 | Wikipedia page views: daily user views of each mapped coin's English article and its redirects from the Wikimedia REST API (`lab.collect.wiki`, keyless, about 360 small requests at most 4 a second, a minute or two; the first run fetched the history back to 2015-07-01). Into `/srv/pythia-data/flow/wiki_pageviews.parquet` and `wiki_titles.parquet`, read by `attention_wiki` | `jobs.yaml`: `wiki-collect` |
+| hourly :05, :15 and daily 00:20, 00:40, 01:20 | D2 free data, point in time (`lab.collect.pit`: every row with the time it describes, collected_us, known_us and backfilled): Deribit BTC and ETH DVOL hourly, ATM IV and 25-delta skew at 7, 30 and 90 days and put/call open interest (`lab.collect.deribit_vol`, :05); Hyperliquid funding, open interest and mark/oracle premium of the universe's coins and their funding history (`lab.collect.hyperliquid`, :15, one request every 1.5 s, the history shared over the first runs); Fear and Greed (`lab.collect.fear_greed`, 00:20); US 2y and 10y yields and VIX from FRED, dollar index, gold and VIX from Yahoo (`lab.collect.macro`, 00:40); DefiLlama stablecoin supply and its daily change, DEX volume in total and on Solana, Solana TVL (`lab.collect.defillama`, 01:20). Keyless, seconds to minutes; each first run is its backfill. Into `/srv/pythia-data/free/<source>/`, each with a `health.json` the health check reads (`feed <source>` rows) | `jobs.yaml`: `free-deribit`, `free-hyperliquid`, `free-feargreed`, `free-macro`, `free-defillama` |
 | 03:30 | history backfill: 20 lab coins, every USDT pair, every USDT perp | `/etc/cron.d/pythia-backfill` |
 | 04:00 | momentum paper books, engine signals, paper vs backtest review | `/etc/cron.d/pythia-paper` |
 | 04:15 | sweep candidates as paper books: survivorship-free momentum (daily, and in seven weekly tranches), Donchian breakout (about 10 minutes, rebuilds the daily panel into `/srv/pythia-data/lab-cache`) | `/etc/cron.d/pythia-paper-families` |
@@ -623,7 +624,12 @@ of the table (late, failing, blocked or stuck jobs go red, through
 `jobs.py checks`), the disk and every dataset's size and growth, each paper
 book's last row, the model service and the engine's market data
 (`dataHealth` in `/api/state`), and writes
-`/srv/pythia-data/_health/system.json`. It never restarts anything. The Lab
+`/srv/pythia-data/_health/system.json`. It never restarts anything. Each free
+data source of the table's `feeds` section gets a row `feed <name>`: red when
+its collector's `health.json` is missing, its last run or the newest value of
+one of its tables is older than `max_age`, more steps than `max_gaps` are
+missing in the last 7 days, a column is missing or a part of the run failed
+(no row while its job is disabled). The Lab
 page shows it ("Is everything running?"); the PC gets it with the sync. Red
 for two runs in a row posts once to Telegram (below, "Health alarm").
 

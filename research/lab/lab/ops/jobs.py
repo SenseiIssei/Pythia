@@ -386,6 +386,7 @@ class Table:
         self.defaults = raw.get("defaults") or {}
         self.datasets = raw.get("datasets") or []
         self.backup = raw.get("backup") or {}
+        self.feeds = raw.get("feeds") or []
         self.jobs: dict[str, dict] = {}
         for j in raw.get("jobs") or []:
             job = self._job(j)
@@ -396,6 +397,7 @@ class Table:
             raise TableError("no jobs in the table")
         self._check_graph()
         self._check_datasets()
+        self._check_feeds()
 
     def _job(self, j) -> dict:
         if not isinstance(j, dict) or not j.get("name"):
@@ -487,6 +489,22 @@ class Table:
             r = ds.get("retention_days")
             if r is not None and (not isinstance(r, int) or isinstance(r, bool) or r < 1):
                 raise TableError(f"dataset {ds['name']}: retention_days must be a whole number of days, at least 1")
+
+    def _check_feeds(self) -> None:
+        seen = set()
+        for f in self.feeds:
+            if not isinstance(f, dict) or not f.get("name") or not f.get("status") or not f.get("max_age"):
+                raise TableError(f"every feed needs a name, a status file and a max_age: {f!r}")
+            if f["name"] in seen:
+                raise TableError(f"feed {f['name']!r} listed twice")
+            seen.add(f["name"])
+            rel = Path(str(f["status"]))
+            if rel.is_absolute() or ".." in rel.parts:
+                raise TableError(f"feed {f['name']}: status must be relative to the data root")
+            if f.get("job") and f["job"] not in self.jobs:
+                raise TableError(f"feed {f['name']}: unknown job {f['job']!r}")
+            f["max_age_s"] = parse_duration(f["max_age"], f"feed {f['name']} max_age")
+            f["max_gaps"] = int(f.get("max_gaps") or 0)
 
     def chained_after(self, name: str) -> list[dict]:
         """Jobs without a schedule that run right after `name` succeeds."""
@@ -1217,7 +1235,7 @@ def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600,
 
 
 def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool, str]]:
-    """(name, ok, detail) for every enabled job, the disk and every dataset."""
+    """(name, ok, detail) for every enabled job, the disk, every dataset and every feed of an enabled job."""
     now = now or _now()
     disk = measure_disk(t, now)
     status = write_status(t, now)
@@ -1237,7 +1255,40 @@ def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool
         cap = "" if ds["maxGb"] is None else f", limit {ds['maxGb']} GB"
         keep = "" if not ds["retentionDays"] else f", kept {ds['retentionDays']} days"
         out.append((f"data {ds['name']}", ds["ok"], f"{ds['gb']} GB{g}{cap}{keep}"))
+    for f in t.feeds:
+        if f.get("job") and not t.jobs[f["job"]]["enabled"]:
+            continue
+        out.append(feed_check(t, f, now))
     return out
+
+
+def feed_check(t: Table, f: dict, now: datetime) -> tuple[str, bool, str]:
+    """One free data source (lab.collect.pit's health.json): its last run, the newest value of
+    each table no older than max_age, gaps in the last 7 days at most max_gaps, schema and errors."""
+    name = f"feed {f['name']}"
+    doc = _read_json(t.data / f["status"])
+    if not isinstance(doc, dict):
+        return name, False, f"no status file {f['status']}"
+    at = _parse_iso(doc.get("at"))
+    bad, parts = [], []
+    if at is None or (now - at).total_seconds() > f["max_age_s"]:
+        bad.append(f"last run {doc.get('at') or 'unknown'}")
+    for tname, h in sorted((doc.get("tables") or {}).items()):
+        last = h.get("last_ts_us")
+        age_h = None if last is None else (now.timestamp() - last / 1e6) / 3600
+        if age_h is None:
+            bad.append(f"{tname} empty")
+        elif age_h * 3600 > f["max_age_s"]:
+            bad.append(f"{tname} {age_h:.0f} h old")
+        if not h.get("schema_ok", True):
+            bad.append(f"{tname} lacks {', '.join(h.get('missing') or [])}")
+        if (h.get("gaps") or 0) > f["max_gaps"]:
+            bad.append(f"{tname} {h['gaps']} gaps in 7 days")
+        if age_h is not None:
+            parts.append(f"{tname} {age_h:.0f} h old, {h.get('rows')} rows")
+    for part, err in sorted((doc.get("errors") or {}).items()):
+        bad.append(f"{part} failed: {err}"[:120])
+    return name, not bad, "; ".join(bad or parts)
 
 
 # ================================================================ retention

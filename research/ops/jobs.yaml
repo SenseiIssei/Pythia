@@ -953,6 +953,47 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 30m
 
+  # D2: free data, collected around the clock, point in time (lab.collect.pit: every row with the
+  # time it describes, when it was collected, when it became known, and whether it came from a
+  # backfill). Keyless public APIs at polite rates; each first run is the backfill. Each writes
+  # free/<source>/health.json, which the health check turns into a row per source (feeds, below).
+  - name: free-deribit
+    description: Deribit BTC and ETH DVOL hourly, ATM IV and 25-delta skew at 7, 30 and 90 days, put/call open interest
+    schedule: "5 * * * *"
+    command: python -m lab.collect.deribit_vol
+    resources: {cpus: 1, memory: 1g}
+    timeout: 20m
+    alert: false
+
+  - name: free-hyperliquid
+    description: Hyperliquid funding, open interest and mark/oracle premium of the universe's coins, hourly, funding history continued
+    schedule: "15 * * * *"
+    command: python -m lab.collect.hyperliquid
+    resources: {cpus: 1, memory: 1g}
+    timeout: 30m
+    alert: false
+
+  - name: free-feargreed
+    description: Crypto Fear and Greed index (alternative.me), daily, its whole history on the first run
+    schedule: "20 0 * * *"
+    command: python -m lab.collect.fear_greed
+    resources: {cpus: 1, memory: 512m}
+    timeout: 10m
+
+  - name: free-macro
+    description: US 2y and 10y yields and VIX (FRED), dollar index, gold and VIX (Yahoo), daily from 2017
+    schedule: "40 0 * * *"
+    command: python -m lab.collect.macro
+    resources: {cpus: 1, memory: 512m}
+    timeout: 15m
+
+  - name: free-defillama
+    description: DefiLlama stablecoin supply (all, USDT, USDC) and its daily change, DEX volume in total and on Solana, Solana TVL
+    schedule: "20 1 * * *"
+    command: python -m lab.collect.defillama
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+
   # Added disabled; switch on (enabled: true, then deploy_ops.sh) once the
   # module is deployed to /opt/pythia-lab and its command is confirmed.
   - name: pokemon
@@ -1104,6 +1145,10 @@ datasets:
     description: daily flow data and the Deribit option snapshots; kept forever
     path: flow
     max_gb: 5
+  - name: free
+    description: the free data collectors of D2 (Deribit, Hyperliquid, DefiLlama, Fear and Greed, macro); kept forever
+    path: free
+    max_gb: 5
   - name: pumpfun-rt
     description: the real-time pump.fun record; the collector deletes whole days, oldest first, over PYTHIA_PF_BUDGET_GB (40)
     path: pumpfun_rt
@@ -1118,6 +1163,36 @@ datasets:
     max_gb: 1
     retention_days: 400
     pattern: ["*.jsonl"]
+
+# Free data sources the health check watches (jobs.py checks, one "feed <name>" row each): the
+# status file the collector writes after every run, how old its last run and the newest value
+# of each of its tables may be (max_age), how many missing steps in the last 7 days are
+# tolerated (max_gaps), and the job (no row while that job is disabled).
+feeds:
+  - name: deribit
+    job: free-deribit
+    status: free/deribit/health.json
+    max_age: 4h
+    max_gaps: 2
+  - name: hyperliquid
+    job: free-hyperliquid
+    status: free/hyperliquid/health.json
+    max_age: 3h
+    max_gaps: 2
+  - name: fear-greed
+    job: free-feargreed
+    status: free/fear_greed/health.json
+    max_age: 2d
+  - name: macro
+    job: free-macro
+    status: free/macro/health.json
+    max_age: 6d
+    max_gaps: 2
+  - name: defillama
+    job: free-defillama
+    status: free/defillama/health.json
+    max_age: 3d
+    max_gaps: 1
 
 # The state that cannot be rebuilt from market data. Paths are under the
 # data root. Archives go to dest (outside the data root) as
@@ -1146,6 +1221,9 @@ backup:
     - polymarket/model
     - reports/forward/evidence.json
     - reports/forward/backtest
+    # D2's snapshots without a source history (the option surface, Hyperliquid's contexts)
+    - free/deribit/surface.parquet
+    - free/hyperliquid/ctx.parquet
   # By file or folder name: caches the jobs rebuild (the zoo's panels, the
   # learning loop's sweep run caches) stay out of the archive.
   exclude: ["*.tmp", "*.lock", "*.part", "_data", "sweep"]

@@ -1,0 +1,153 @@
+[
+{
+"universe": [
+{
+"szDecimals": 5,
+"name": "BTC",
+"maxLeverage": 40,
+"marginTableId": 56
+},
+{
+"szDecimals": 4,
+"name": "ETH",
+"maxLeverage": 25,
+"marginTableId": 55
+},
+{
+"szDecimals": 1,
+"name": "MATIC",
+"maxLeverage": 20,
+"marginTableId": 20,
+"isDelisted": true
+},
+{
+"szDecimals": 2,
+"name": "SOL",
+"maxLeverage": 20,
+"marginTableId": 54
+},
+{
+"szDecimals": 0,
+"name": "kPEPE",
+"maxLeverage": 10,
+"marginTableId": 52
+},
+{
+"szDecimals": 0,
+"name": "kLUNC",
+"maxLeverage": 3,
+"marginTableId": 3
+},
+{
+"szDecimals": 2,
+"name": "HYPE",
+"maxLeverage": 10,
+"marginTableId": 52
+}
+]
+},
+[
+{
+"funding": "0.0000125",
+"openInterest": "42459.30352",
+"prevDayPx": "80031.0",
+"dayNtlVlm": "2698596723.8635759354",
+"premium": "-0.0004997002",
+"oraclePx": "80048.0",
+"markPx": "80018.0",
+"midPx": "80007.5",
+"impactPxs": [
+"80007.0",
+"80008.0"
+],
+"dayBaseVlm": "33709.3767"
+},
+{
+"funding": "0.0000036619",
+"openInterest": "1122218.6910000001",
+"prevDayPx": "2326.2",
+"dayNtlVlm": "938564236.0422899723",
+"premium": "-0.0005609009",
+"oraclePx": "2317.7",
+"markPx": "2316.4",
+"midPx": "2316.35",
+"impactPxs": [
+"2316.3",
+"2316.4"
+],
+"dayBaseVlm": "404597.1064000003"
+},
+{
+"funding": "0.0",
+"openInterest": "0.0",
+"prevDayPx": "0.37621",
+"dayNtlVlm": "0.0",
+"premium": null,
+"oraclePx": "0.3754",
+"markPx": "0.37621",
+"midPx": null,
+"impactPxs": null,
+"dayBaseVlm": "0.0"
+},
+{
+"funding": "0.0000125",
+"openInterest": "5565592.9000000022",
+"prevDayPx": "101.12",
+"dayNtlVlm": "155749411.3840999603",
+"premium": "-0.000496771",
+"oraclePx": "100.65",
+"markPx": "100.61",
+"midPx": "100.595",
+"impactPxs": [
+"100.59",
+"100.6"
+],
+"dayBaseVlm": "1541044.6200000001"
+},
+{
+"funding": "0.0000125",
+"openInterest": "8599087516.0",
+"prevDayPx": "0.00427",
+"dayNtlVlm": "10054574.8991560042",
+"premium": "-0.0004662005",
+"oraclePx": "0.00429",
+"markPx": "0.004288",
+"midPx": "0.004287",
+"impactPxs": [
+"0.004286",
+"0.004288"
+],
+"dayBaseVlm": "2322659528.0"
+},
+{
+"funding": "0.0000125",
+"openInterest": "5535990.0",
+"prevDayPx": "0.044338",
+"dayNtlVlm": "39663.311451",
+"premium": "0.0",
+"oraclePx": "0.04482",
+"markPx": "0.04478",
+"midPx": "0.044776",
+"impactPxs": [
+"0.04474",
+"0.044846"
+],
+"dayBaseVlm": "893602.0"
+},
+{
+"funding": "0.0000125",
+"openInterest": "20566062.2399999909",
+"prevDayPx": "76.318",
+"dayNtlVlm": "533256811.8469599485",
+"premium": "-0.0001345697",
+"oraclePx": "78.0265",
+"markPx": "78.017",
+"midPx": "78.014",
+"impactPxs": [
+"78.0058",
+"78.016"
+],
+"dayBaseVlm": "6874810.9699999997"
+}
+]
+]

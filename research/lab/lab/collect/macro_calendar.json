@@ -1,0 +1,983 @@
+{
+ "about": "US monetary policy and inflation release dates for event features, 2017 to 2027. fomc: the day the statement is released (the second day of a two-day meeting), at 14:00 New York time; kind scheduled (on the Federal Reserve's published calendar), unscheduled (2020-03-03 and 2020-03-15, known only when they happened) or cancelled (2020-03-17/18, replaced by 2020-03-15); projections marks the meetings with a Summary of Economic Projections. Source: federalreserve.gov FOMC calendars and historical pages. cpi: the day the BLS releases the CPI for reference month ref, at 08:30 New York time. Past dates: ALFRED's release dates of the Consumer Price Index (release 10; the February seasonal factor revisions left out); 2025-10 has none (the October 2025 CPI was not published, September's came on 2025-10-24); from 2026-11 the BLS published schedule. Checked 2026-10-26.",
+ "fomc_time_ny": "14:00",
+ "cpi_time_ny": "08:30",
+ "fomc": [
+  {
+   "date": "2017-02-01",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2017-03-15",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2017-05-03",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2017-06-14",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2017-07-26",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2017-09-20",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2017-11-01",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2017-12-13",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2018-01-31",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2018-03-21",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2018-05-02",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2018-06-13",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2018-08-01",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2018-09-26",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2018-11-08",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2018-12-19",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2019-01-30",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2019-03-20",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2019-05-01",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2019-06-19",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2019-07-31",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2019-09-18",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2019-10-30",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2019-12-11",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2020-01-29",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2020-03-03",
+   "kind": "unscheduled",
+   "projections": false
+  },
+  {
+   "date": "2020-03-15",
+   "kind": "unscheduled",
+   "projections": false
+  },
+  {
+   "date": "2020-03-18",
+   "kind": "cancelled",
+   "projections": true
+  },
+  {
+   "date": "2020-04-29",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2020-06-10",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2020-07-29",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2020-09-16",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2020-11-05",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2020-12-16",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2021-01-27",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2021-03-17",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2021-04-28",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2021-06-16",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2021-07-28",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2021-09-22",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2021-11-03",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2021-12-15",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2022-01-26",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2022-03-16",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2022-05-04",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2022-06-15",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2022-07-27",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2022-09-21",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2022-11-02",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2022-12-14",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2023-02-01",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2023-03-22",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2023-05-03",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2023-06-14",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2023-07-26",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2023-09-20",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2023-11-01",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2023-12-13",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2024-01-31",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2024-03-20",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2024-05-01",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2024-06-12",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2024-07-31",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2024-09-18",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2024-11-07",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2024-12-18",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2025-01-29",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2025-03-19",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2025-05-07",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2025-06-18",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2025-07-30",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2025-09-17",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2025-10-29",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2025-12-10",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2026-01-28",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2026-03-18",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2026-04-29",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2026-06-17",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2026-07-29",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2026-09-16",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2026-10-28",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2026-12-09",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2027-01-27",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2027-03-17",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2027-04-28",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2027-06-09",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2027-07-28",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2027-09-15",
+   "kind": "scheduled",
+   "projections": true
+  },
+  {
+   "date": "2027-10-27",
+   "kind": "scheduled",
+   "projections": false
+  },
+  {
+   "date": "2027-12-08",
+   "kind": "scheduled",
+   "projections": true
+  }
+ ],
+ "cpi": [
+  {
+   "date": "2017-01-18",
+   "ref": "2016-12"
+  },
+  {
+   "date": "2017-02-15",
+   "ref": "2017-01"
+  },
+  {
+   "date": "2017-03-15",
+   "ref": "2017-02"
+  },
+  {
+   "date": "2017-04-14",
+   "ref": "2017-03"
+  },
+  {
+   "date": "2017-05-12",
+   "ref": "2017-04"
+  },
+  {
+   "date": "2017-06-14",
+   "ref": "2017-05"
+  },
+  {
+   "date": "2017-07-14",
+   "ref": "2017-06"
+  },
+  {
+   "date": "2017-08-11",
+   "ref": "2017-07"
+  },
+  {
+   "date": "2017-09-14",
+   "ref": "2017-08"
+  },
+  {
+   "date": "2017-10-13",
+   "ref": "2017-09"
+  },
+  {
+   "date": "2017-11-15",
+   "ref": "2017-10"
+  },
+  {
+   "date": "2017-12-13",
+   "ref": "2017-11"
+  },
+  {
+   "date": "2018-01-12",
+   "ref": "2017-12"
+  },
+  {
+   "date": "2018-02-14",
+   "ref": "2018-01"
+  },
+  {
+   "date": "2018-03-13",
+   "ref": "2018-02"
+  },
+  {
+   "date": "2018-04-11",
+   "ref": "2018-03"
+  },
+  {
+   "date": "2018-05-10",
+   "ref": "2018-04"
+  },
+  {
+   "date": "2018-06-12",
+   "ref": "2018-05"
+  },
+  {
+   "date": "2018-07-12",
+   "ref": "2018-06"
+  },
+  {
+   "date": "2018-08-10",
+   "ref": "2018-07"
+  },
+  {
+   "date": "2018-09-13",
+   "ref": "2018-08"
+  },
+  {
+   "date": "2018-10-11",
+   "ref": "2018-09"
+  },
+  {
+   "date": "2018-11-14",
+   "ref": "2018-10"
+  },
+  {
+   "date": "2018-12-12",
+   "ref": "2018-11"
+  },
+  {
+   "date": "2019-01-11",
+   "ref": "2018-12"
+  },
+  {
+   "date": "2019-02-13",
+   "ref": "2019-01"
+  },
+  {
+   "date": "2019-03-12",
+   "ref": "2019-02"
+  },
+  {
+   "date": "2019-04-10",
+   "ref": "2019-03"
+  },
+  {
+   "date": "2019-05-10",
+   "ref": "2019-04"
+  },
+  {
+   "date": "2019-06-12",
+   "ref": "2019-05"
+  },
+  {
+   "date": "2019-07-11",
+   "ref": "2019-06"
+  },
+  {
+   "date": "2019-08-13",
+   "ref": "2019-07"
+  },
+  {
+   "date": "2019-09-12",
+   "ref": "2019-08"
+  },
+  {
+   "date": "2019-10-10",
+   "ref": "2019-09"
+  },
+  {
+   "date": "2019-11-13",
+   "ref": "2019-10"
+  },
+  {
+   "date": "2019-12-11",
+   "ref": "2019-11"
+  },
+  {
+   "date": "2020-01-14",
+   "ref": "2019-12"
+  },
+  {
+   "date": "2020-02-13",
+   "ref": "2020-01"
+  },
+  {
+   "date": "2020-03-11",
+   "ref": "2020-02"
+  },
+  {
+   "date": "2020-04-10",
+   "ref": "2020-03"
+  },
+  {
+   "date": "2020-05-12",
+   "ref": "2020-04"
+  },
+  {
+   "date": "2020-06-10",
+   "ref": "2020-05"
+  },
+  {
+   "date": "2020-07-14",
+   "ref": "2020-06"
+  },
+  {
+   "date": "2020-08-12",
+   "ref": "2020-07"
+  },
+  {
+   "date": "2020-09-11",
+   "ref": "2020-08"
+  },
+  {
+   "date": "2020-10-13",
+   "ref": "2020-09"
+  },
+  {
+   "date": "2020-11-12",
+   "ref": "2020-10"
+  },
+  {
+   "date": "2020-12-10",
+   "ref": "2020-11"
+  },
+  {
+   "date": "2021-01-13",
+   "ref": "2020-12"
+  },
+  {
+   "date": "2021-02-10",
+   "ref": "2021-01"
+  },
+  {
+   "date": "2021-03-10",
+   "ref": "2021-02"
+  },
+  {
+   "date": "2021-04-13",
+   "ref": "2021-03"
+  },
+  {
+   "date": "2021-05-12",
+   "ref": "2021-04"
+  },
+  {
+   "date": "2021-06-10",
+   "ref": "2021-05"
+  },
+  {
+   "date": "2021-07-13",
+   "ref": "2021-06"
+  },
+  {
+   "date": "2021-08-11",
+   "ref": "2021-07"
+  },
+  {
+   "date": "2021-09-14",
+   "ref": "2021-08"
+  },
+  {
+   "date": "2021-10-13",
+   "ref": "2021-09"
+  },
+  {
+   "date": "2021-11-10",
+   "ref": "2021-10"
+  },
+  {
+   "date": "2021-12-10",
+   "ref": "2021-11"
+  },
+  {
+   "date": "2022-01-12",
+   "ref": "2021-12"
+  },
+  {
+   "date": "2022-02-10",
+   "ref": "2022-01"
+  },
+  {
+   "date": "2022-03-10",
+   "ref": "2022-02"
+  },
+  {
+   "date": "2022-04-12",
+   "ref": "2022-03"
+  },
+  {
+   "date": "2022-05-11",
+   "ref": "2022-04"
+  },
+  {
+   "date": "2022-06-10",
+   "ref": "2022-05"
+  },
+  {
+   "date": "2022-07-13",
+   "ref": "2022-06"
+  },
+  {
+   "date": "2022-08-10",
+   "ref": "2022-07"
+  },
+  {
+   "date": "2022-09-13",
+   "ref": "2022-08"
+  },
+  {
+   "date": "2022-10-13",
+   "ref": "2022-09"
+  },
+  {
+   "date": "2022-11-10",
+   "ref": "2022-10"
+  },
+  {
+   "date": "2022-12-13",
+   "ref": "2022-11"
+  },
+  {
+   "date": "2023-01-12",
+   "ref": "2022-12"
+  },
+  {
+   "date": "2023-02-14",
+   "ref": "2023-01"
+  },
+  {
+   "date": "2023-03-14",
+   "ref": "2023-02"
+  },
+  {
+   "date": "2023-04-12",
+   "ref": "2023-03"
+  },
+  {
+   "date": "2023-05-10",
+   "ref": "2023-04"
+  },
+  {
+   "date": "2023-06-13",
+   "ref": "2023-05"
+  },
+  {
+   "date": "2023-07-12",
+   "ref": "2023-06"
+  },
+  {
+   "date": "2023-08-10",
+   "ref": "2023-07"
+  },
+  {
+   "date": "2023-09-13",
+   "ref": "2023-08"
+  },
+  {
+   "date": "2023-10-12",
+   "ref": "2023-09"
+  },
+  {
+   "date": "2023-11-14",
+   "ref": "2023-10"
+  },
+  {
+   "date": "2023-12-12",
+   "ref": "2023-11"
+  },
+  {
+   "date": "2024-01-11",
+   "ref": "2023-12"
+  },
+  {
+   "date": "2024-02-13",
+   "ref": "2024-01"
+  },
+  {
+   "date": "2024-03-12",
+   "ref": "2024-02"
+  },
+  {
+   "date": "2024-04-10",
+   "ref": "2024-03"
+  },
+  {
+   "date": "2024-05-15",
+   "ref": "2024-04"
+  },
+  {
+   "date": "2024-06-12",
+   "ref": "2024-05"
+  },
+  {
+   "date": "2024-07-11",
+   "ref": "2024-06"
+  },
+  {
+   "date": "2024-08-14",
+   "ref": "2024-07"
+  },
+  {
+   "date": "2024-09-11",
+   "ref": "2024-08"
+  },
+  {
+   "date": "2024-10-10",
+   "ref": "2024-09"
+  },
+  {
+   "date": "2024-11-13",
+   "ref": "2024-10"
+  },
+  {
+   "date": "2024-12-11",
+   "ref": "2024-11"
+  },
+  {
+   "date": "2025-01-15",
+   "ref": "2024-12"
+  },
+  {
+   "date": "2025-02-12",
+   "ref": "2025-01"
+  },
+  {
+   "date": "2025-03-12",
+   "ref": "2025-02"
+  },
+  {
+   "date": "2025-04-10",
+   "ref": "2025-03"
+  },
+  {
+   "date": "2025-05-13",
+   "ref": "2025-04"
+  },
+  {
+   "date": "2025-06-11",
+   "ref": "2025-05"
+  },
+  {
+   "date": "2025-07-15",
+   "ref": "2025-06"
+  },
+  {
+   "date": "2025-08-12",
+   "ref": "2025-07"
+  },
+  {
+   "date": "2025-09-11",
+   "ref": "2025-08"
+  },
+  {
+   "date": "2025-10-24",
+   "ref": "2025-09"
+  },
+  {
+   "date": "2025-12-18",
+   "ref": "2025-11"
+  },
+  {
+   "date": "2026-01-13",
+   "ref": "2025-12"
+  },
+  {
+   "date": "2026-02-13",
+   "ref": "2026-01"
+  },
+  {
+   "date": "2026-03-11",
+   "ref": "2026-02"
+  },
+  {
+   "date": "2026-04-10",
+   "ref": "2026-03"
+  },
+  {
+   "date": "2026-05-12",
+   "ref": "2026-04"
+  },
+  {
+   "date": "2026-06-10",
+   "ref": "2026-05"
+  },
+  {
+   "date": "2026-07-14",
+   "ref": "2026-06"
+  },
+  {
+   "date": "2026-08-12",
+   "ref": "2026-07"
+  },
+  {
+   "date": "2026-09-11",
+   "ref": "2026-08"
+  },
+  {
+   "date": "2026-10-14",
+   "ref": "2026-09"
+  },
+  {
+   "date": "2026-11-10",
+   "ref": "2026-10"
+  },
+  {
+   "date": "2026-12-10",
+   "ref": "2026-11"
+  },
+  {
+   "date": "2027-01-13",
+   "ref": "2026-12"
+  },
+  {
+   "date": "2027-02-11",
+   "ref": "2027-01"
+  },
+  {
+   "date": "2027-03-10",
+   "ref": "2027-02"
+  },
+  {
+   "date": "2027-04-13",
+   "ref": "2027-03"
+  },
+  {
+   "date": "2027-05-12",
+   "ref": "2027-04"
+  },
+  {
+   "date": "2027-06-10",
+   "ref": "2027-05"
+  },
+  {
+   "date": "2027-07-14",
+   "ref": "2027-06"
+  },
+  {
+   "date": "2027-08-11",
+   "ref": "2027-07"
+  },
+  {
+   "date": "2027-09-14",
+   "ref": "2027-08"
+  },
+  {
+   "date": "2027-10-14",
+   "ref": "2027-09"
+  },
+  {
+   "date": "2027-11-10",
+   "ref": "2027-10"
+  },
+  {
+   "date": "2027-12-10",
+   "ref": "2027-11"
+  }
+ ]
+}
