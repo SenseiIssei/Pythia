@@ -36,8 +36,10 @@ share of the supply and the creator's at the end of the second, the curve's prog
 
 - `mig`: the curve completes within 1 h of the creation (rows whose curve completed before H are left out).
 - `rug`: within 10 minutes after H the price (curve or pool) falls to half the price at H or below.
-- `peak`: log of the highest price within 1 h after H over the price at H (0 without a later trade).
-- `exit_s`: the second after H (0 to 600) of the highest price within 10 minutes.
+- `peak`: log of the highest price within 1 h after H over the price at H, the price at H included (so at least
+  0; 0 without a later trade).
+- `exit_s`: the second after H (0 to 600) of the highest price within 10 minutes (0 when none is above the price
+  at H). Both clarified before the first run, with the code.
 
 ## 3. The models, walk-forward by UTC day
 
