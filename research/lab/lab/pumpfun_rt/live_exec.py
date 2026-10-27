@@ -56,14 +56,15 @@ A total budget (test: max_total_sol) stops every buy once the losses since the
 first live trade reach it. A buy also needs the wallet to keep a fee reserve. The
 executor checks all of it itself, independently of the pipeline.
 
-With limits=wallet in a test ack (the owner's decision 2026-10-23) the money limits follow the wallet:
-no total budget, no daily loss limit and no fixed stake caps (max_total_sol, max_daily_loss_sol,
-max_trade_sol, TEST_MAX_*, pipeline.HARD_STAKE_SOL, HARD_MAX_EXPOSURE_SOL and the sizing's proof cap do
-not apply); the stake is the ack's stake_share (default sizing.SHARE, at most sizing.ACK_MAX_SHARE) of the
-base, at least sizing.MIN_STAKE_SOL, braked in a drawdown and never more than the wallet can pay with the
-fee reserve; the exposure is at most the base minus the reserve, at most HARD_MAX_OPEN open. The app's
-settings and the environment variables the owner set can still lower all of it. The owner accepts that
-the wallet can be lost completely.
+With limits=wallet in a test ack (the owner's decision 2026-10-23) the stake follows the wallet, under the
+same ceilings (review R1 2026-10-27: no file lifts them): TEST_MAX_* and pipeline.HARD_* still hold, the
+ack's max_total_sol, max_daily_loss_sol and max_trade_sol are optional and only lower them (the sizing's
+proof cap and its daily loss share do not apply); the stake is the ack's stake_share (default sizing.SHARE,
+at most sizing.ACK_MAX_SHARE) of the base, at least sizing.MIN_STAKE_SOL, braked in a drawdown, at most
+TEST_MAX_TRADE_SOL and never more than the wallet can pay with the fee reserve; the exposure is at most the
+base minus the reserve and HARD_MAX_EXPOSURE_SOL, at most HARD_MAX_OPEN open. The app's settings and the
+environment variables the owner set can still lower all of it. The owner accepts that the capped money can
+be lost completely.
 
 The owner's master controls (reports/pumpfun_rt/control.json, written by the engine from the app, read
 every CONTROL_S): a share of the base for the stake (with limits=wallet from 1 % to
@@ -184,7 +185,6 @@ TEST_MAX_TRADE_SOL = 0.25                 # 0.05, 0.1 on 2026-10-22, 0.25 on 202
 SIMULATE_MAX_AGE_MS = 24 * 3_600_000
 DEFAULT_TEST_RULE = "P_pool60"            # the least-bad post-migration pool rule until a report says otherwise
 RESERVE_SOL = 0.01                        # left in the wallet so every open position can still be sold
-NO_LIMIT = math.inf                       # limits=wallet: no such limit beyond the wallet (shown as null)
 CONTROL_S = 2.0                           # how often the owner's control file (control.json) is looked at
 # A live pool buy (buy_exact_quote_in_v2) spends exactly the stake and accepts no fewer tokens than the quote /
 # (1 + this): 0.60 since 2026-10-23 (five buys in about forty had failed with 6040 at SLIP_TOL's 0.30, the price
@@ -368,7 +368,7 @@ class Ack:
     max_total_sol: float | None = None
     max_trade_sol: float | None = None
     problems: tuple = ()
-    limits: str = "fixed"                    # "wallet": the money limits follow the wallet (test mode only)
+    limits: str = "fixed"                    # "wallet": the stake follows the wallet (test mode only), capped
     stake_share: float | None = None         # with limits=wallet: the stake's share of the base (sizing.SHARE)
 
     def view(self) -> dict:
@@ -453,10 +453,15 @@ def read_ack(path: Path) -> Ack:
         elif rule != "auto" and rule not in P.BY_NAME:
             problems.append(f"{path} names {rule!r}, which is not a pipeline strategy")
         if limits == "wallet":
-            # The wallet is the limit: max_total_sol, max_daily_loss_sol and max_trade_sol do not apply.
+            # The stake follows the wallet under TEST_MAX_* (effective): the three money lines are optional and
+            # only lower them, refused above them as without the key.
+            total, loss, trade = (_positive(vals, k, path, cap, problems, True) if k in vals else None
+                                  for k, cap in (("max_total_sol", TEST_MAX_TOTAL_SOL),
+                                                 ("max_daily_loss_sol", TEST_MAX_DAILY_LOSS_SOL),
+                                                 ("max_trade_sol", TEST_MAX_TRADE_SOL)))
             if not accepted:
                 problems.append(f"{path} lacks the line \"{ACCEPT_LINE}\"")
-            return Ack("test", rule, problems=tuple(problems), limits="wallet", stake_share=share)
+            return Ack("test", rule, loss, total, trade, tuple(problems), limits="wallet", stake_share=share)
         total = _positive(vals, "max_total_sol", path, TEST_MAX_TOTAL_SOL, problems, True)
         loss = _positive(vals, "max_daily_loss_sol", path, TEST_MAX_DAILY_LOSS_SOL, problems, True)
         trade = _positive(vals, "max_trade_sol", path, TEST_MAX_TRADE_SOL, problems, True)
@@ -514,14 +519,15 @@ def _low(*xs) -> float:
 
 
 def wallet_capped(lim: P.Limits) -> P.Limits:
-    """limits=wallet: never negative and at most pipeline.HARD_MAX_OPEN open; the money limits follow the wallet
-    (LiveExecutor.sized), so the fixed caps of Limits.capped do not apply."""
-    return P.Limits(max(lim.stake_sol, 0.0), min(max(int(lim.max_open), 0), P.HARD_MAX_OPEN),
-                    max(lim.max_exposure_sol, 0.0), max(lim.max_daily_loss_sol, 0.0))
+    """limits=wallet: Limits.capped (pipeline.HARD_*) and the test maxima; the stake under them follows the wallet
+    (LiveExecutor.sized)."""
+    c = lim.capped()
+    return dataclasses.replace(c, stake_sol=min(c.stake_sol, TEST_MAX_TRADE_SOL),
+                               max_daily_loss_sol=min(c.max_daily_loss_sol, TEST_MAX_DAILY_LOSS_SOL))
 
 
 def _given(env, name: str) -> float | None:
-    """An environment ceiling the owner really set (Limits' defaults are the fixed caps, which limits=wallet drops)."""
+    """An environment ceiling the owner really set (Limits' defaults are the fixed caps, not the owner's)."""
     try:
         v = float(env[name])
     except (KeyError, TypeError, ValueError):
@@ -532,18 +538,20 @@ def _given(env, name: str) -> float | None:
 def effective(ack: Ack, settings: dict, env=None) -> tuple[P.Limits, float | None]:
     """The limits the live book trades with, and the total budget (None in full mode without one):
     the lowest of the code's caps, the ack, the app's settings and the environment. With limits=wallet
-    (test mode) only the app's settings and the environment variables the owner set can lower them; the
-    stake and the exposure follow the wallet (LiveExecutor.sized), and there is no daily loss limit or
-    total budget beyond the wallet unless the app sets one."""
+    (test mode) the same TEST_MAX_* and pipeline.HARD_* ceilings, lowered by the ack's optional lines, the
+    app's settings and the environment variables the owner set; under them the stake and the exposure
+    follow the wallet (LiveExecutor.sized)."""
     e = P.env_limits() if env is None else _env_limits(env)
     s = settings
     max_open = int(min(e.max_open, s.get("max_open", P.HARD_MAX_OPEN)))
     if ack.wallet:
         env = os.environ if env is None else env
-        total = s.get("max_total_sol")
-        lim = P.Limits(_low(NO_LIMIT, s.get("max_trade_sol"), _given(env, "PYTHIA_PUMPFUN_STAKE_SOL")), max_open,
-                       _low(NO_LIMIT, total, _given(env, "PYTHIA_PUMPFUN_MAX_EXPOSURE_SOL")),
-                       _low(NO_LIMIT, s.get("max_daily_loss_sol"), _given(env, "PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL")))
+        total = _low(TEST_MAX_TOTAL_SOL, ack.max_total_sol, s.get("max_total_sol"))
+        lim = P.Limits(_low(TEST_MAX_TRADE_SOL, ack.max_trade_sol, s.get("max_trade_sol"),
+                            _given(env, "PYTHIA_PUMPFUN_STAKE_SOL")), max_open,
+                       _low(P.HARD_MAX_EXPOSURE_SOL, total, _given(env, "PYTHIA_PUMPFUN_MAX_EXPOSURE_SOL")),
+                       _low(TEST_MAX_DAILY_LOSS_SOL, ack.max_daily_loss_sol, s.get("max_daily_loss_sol"),
+                            _given(env, "PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL")))
         return wallet_capped(lim), total
     if ack.mode == "test":
         total = _low(TEST_MAX_TOTAL_SOL, ack.max_total_sol, s.get("max_total_sol"))
@@ -1767,7 +1775,7 @@ class LiveExecutor:
         if self.wallet:
             # limits=wallet: the share of the base, never more than the wallet can pay with the fee reserve and
             # the 30 % slippage room of the buy's cost limit; the exposure at most the base minus the reserve;
-            # no daily loss rule beyond the wallet.
+            # the daily loss limit is lim's (at most TEST_MAX_DAILY_LOSS_SOL, wallet_capped), no share of the base.
             base = bal + open_l / C.LAMPORTS
             room = max(0.0, bal - RESERVE_SOL) / (1 + C.SLIP_TOL)
             sol, why = Z.sized(balance_sol=bal, open_cost_sol=open_l / C.LAMPORTS, ceiling_sol=lim.stake_sol,
@@ -2919,7 +2927,7 @@ def hard_view() -> dict:
 
 
 def limits_view(lim: P.Limits, total: float | None, wallet: bool = False) -> dict:
-    """The limits in force; with limits=wallet a limit the wallet alone sets (NO_LIMIT) is null."""
+    """The limits in force (an infinite one is null)."""
     v = lambda x: None if x is None or math.isinf(x) else x
     return {"max_trade_sol": v(lim.stake_sol), "max_open": lim.max_open, "max_exposure_sol": v(lim.max_exposure_sol),
             "max_daily_loss_sol": v(lim.max_daily_loss_sol), "max_total_sol": total,
@@ -3425,9 +3433,9 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
     book = LiveBook(None, ex, gate.rule, alerts=alerts)    # the owner's share and pause before the first sizing
     lim = ex.sized(lim)
     ex.set_limits(lim, total)
-    # The paper strategy stakes 0.1 SOL; live, the stake is the sized one in the Risk limits (at most the cap;
-    # with limits=wallet the wallet's, which the fixed cap does not hold).
-    s = dataclasses.replace(P.BY_NAME[gate.rule], stake_sol=NO_LIMIT if wallet else P.HARD_STAKE_SOL)
+    # The paper strategy stakes 0.1 SOL; live, the stake is the sized one in the Risk limits (at most the cap,
+    # with limits=wallet too).
+    s = dataclasses.replace(P.BY_NAME[gate.rule], stake_sol=P.HARD_STAKE_SOL)
     pipe = P.Pipeline(engine, [s], ex, limits=lim, name="live", record=False, on_close=book.on_close,
                       on_event=book.on_event, kill=P.KillSwitch(live_kill_paths()))
     book.pipe = pipe
@@ -3435,7 +3443,7 @@ def attach(engine, gate: LiveGate | None = None, rpc: Rpc | None = None, load=lo
     pipe.blocked = blocked or BL.BlockWatch()              # the owner's block list, before every buy
     engine.add_pipe(pipe)
     if wallet:
-        ex.set_limits(lim, total)                          # the pipeline's Risk takes them uncapped too
+        ex.set_limits(lim, total)                          # the pipeline's Risk takes the executor's caps too
     lv = limits_view(ex.limits, total, wallet)
     print(f"live: ON ({gate.ack.mode}{', limits: wallet' if wallet else ''}) for {gate.rule}, wallet "
           f"{signer.pubkey[:4]}..., stake {lim.stake_sol} SOL ({ex.stake['why']}), at most {lim.max_open} open, "

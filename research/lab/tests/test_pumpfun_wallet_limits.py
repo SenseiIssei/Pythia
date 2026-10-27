@@ -1,6 +1,7 @@
 """limits=wallet for the pump.fun bot and the owner's master controls (the owner's decision 2026-10-23): the ack
-key, the stake and the limits that follow the wallet, the old caps that no longer bind, the control file (bounds,
-malformed, the override order), the pause (no buys, the exits go on) and its cards; without the key nothing changes.
+key, the stake that follows the wallet under the test maxima that still bind (review R1 2026-10-27: no ack, app
+setting or environment variable lifts them), the control file (bounds, malformed, the override order), the pause
+(no buys, the exits go on) and its cards; without the key nothing changes.
 
 Temp folders only, fake signers: no network, no real key, nothing sent.
 
@@ -40,16 +41,19 @@ def wstake(balance, share=Z.SHARE, open_cost=0.0, peak=0.0, pnl=0.0, ceiling=mat
 
 # ---------------------------------------------------------------- the ack
 
-def test_limits_wallet_needs_no_money_caps_and_takes_a_stake_share_up_to_half(tmp_path):
+def test_limits_wallet_needs_no_money_lines_and_takes_a_stake_share_up_to_half(tmp_path):
     a = LX.read_ack(wallet_ack(tmp_path))
     assert (a.mode, a.limits, a.stake_share, a.problems, a.wallet) == ("test", "wallet", None, (), True)
     assert (a.max_total_sol, a.max_daily_loss_sol, a.max_trade_sol) == (None, None, None)
     assert a.view()["limits"] == "wallet" and a.view()["stake_share"] is None
     a = LX.read_ack(wallet_ack(tmp_path, "stake_share=0.5\n"))
     assert a.stake_share == 0.5 and not a.problems
-    # the old lines may stay in the file: they do not apply
-    a = LX.read_ack(wallet_ack(tmp_path, "max_total_sol=2.0\nmax_trade_sol=0.25\nmax_daily_loss_sol=0.5\n"))
-    assert not a.problems and a.max_total_sol is None and a.max_trade_sol is None
+    # the money lines may stay in the file: they only lower the test maxima, and above them are refused
+    a = LX.read_ack(wallet_ack(tmp_path, "max_total_sol=1.0\nmax_trade_sol=0.1\nmax_daily_loss_sol=0.2\n"))
+    assert not a.problems and (a.max_total_sol, a.max_trade_sol, a.max_daily_loss_sol) == (1.0, 0.1, 0.2)
+    for extra in ("max_total_sol=2.1\n", "max_trade_sol=0.26\n", "max_daily_loss_sol=0.51\n", "max_trade_sol=inf\n"):
+        a = LX.read_ack(wallet_ack(tmp_path, extra))
+        assert a.problems and (a.max_total_sol, a.max_trade_sol, a.max_daily_loss_sol) == (None, None, None), extra
     for extra, words in (("stake_share=0.51\n", "at most 0.5"), ("stake_share=0\n", "above 0"),
                          ("stake_share=half\n", "must be a number")):
         assert any(words in w for w in LX.read_ack(wallet_ack(tmp_path, extra)).problems), extra
@@ -147,19 +151,55 @@ def test_the_share_in_force_owner_then_ack_then_default():
 
 # ---------------------------------------------------------------- the limits
 
-def test_effective_with_limits_wallet_has_no_fixed_money_caps_but_the_owners_lower_ones():
+def test_effective_with_limits_wallet_keeps_the_test_maxima_and_the_owners_lower_ones():
     ack = LX.Ack("test", "P_pool60", limits="wallet")
     lim, total = LX.effective(ack, {}, {})
-    assert total is None and lim.max_open == P.HARD_MAX_OPEN
-    assert math.isinf(lim.stake_sol) and math.isinf(lim.max_exposure_sol) and math.isinf(lim.max_daily_loss_sol)
-    lim, total = LX.effective(ack, {"max_trade_sol": 0.2, "max_total_sol": 1.5, "max_open": 2}, {})
-    assert (lim.stake_sol, total, lim.max_exposure_sol, lim.max_open) == (0.2, 1.5, 1.5, 2)
-    lim, _ = LX.effective(ack, {}, {"PYTHIA_PUMPFUN_STAKE_SOL": "0.3", "PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL": "2"})
-    assert lim.stake_sol == 0.3 and lim.max_daily_loss_sol == 2.0     # the owner's own environment lowers
+    assert total == LX.TEST_MAX_TOTAL_SOL and lim.max_open == P.HARD_MAX_OPEN
+    assert (lim.stake_sol, lim.max_exposure_sol, lim.max_daily_loss_sol) == \
+        (LX.TEST_MAX_TRADE_SOL, P.HARD_MAX_EXPOSURE_SOL, LX.TEST_MAX_DAILY_LOSS_SOL)
+    lim, total = LX.effective(ack, {"max_trade_sol": 0.2, "max_total_sol": 0.5, "max_open": 2}, {})
+    assert (lim.stake_sol, total, lim.max_exposure_sol, lim.max_open) == (0.2, 0.5, 0.5, 2)
+    lim, _ = LX.effective(ack, {}, {"PYTHIA_PUMPFUN_STAKE_SOL": "0.1", "PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL": "0.2"})
+    assert lim.stake_sol == 0.1 and lim.max_daily_loss_sol == 0.2     # the owner's own environment lowers
+    lim, total = LX.effective(LX.Ack("test", "P_pool60", 0.2, 1.0, 0.1, limits="wallet"), {}, {})
+    assert (lim.stake_sol, lim.max_daily_loss_sol, total, lim.max_exposure_sol) == (0.1, 0.2, 1.0, 0.6)   # the ack
     lim, _ = LX.effective(ack, {}, {"PYTHIA_PUMPFUN_MAX_OPEN": "9"})
     assert lim.max_open == P.HARD_MAX_OPEN                            # open positions stay bounded
     full = LX.Ack("full", "P_pool60", 0.5, limits="wallet")           # never outside test mode
     assert not full.wallet and LX.effective(full, {}, {})[0] == LX.effective(LX.Ack("full", "P_pool60", 0.5), {}, {})[0]
+
+
+def test_no_ack_setting_or_environment_lifts_a_maximum_with_limits_wallet():
+    big = {"max_trade_sol": 50.0, "max_total_sol": 500.0, "max_daily_loss_sol": 90.0, "max_open": 99}
+    env = {"PYTHIA_PUMPFUN_STAKE_SOL": "40", "PYTHIA_PUMPFUN_MAX_EXPOSURE_SOL": "80",
+           "PYTHIA_PUMPFUN_MAX_DAILY_LOSS_SOL": "70", "PYTHIA_PUMPFUN_MAX_OPEN": "50"}
+    for ack in (LX.Ack("test", "P_pool60", limits="wallet"), LX.Ack("test", "P_pool60", limits="wallet", stake_share=0.5),
+                LX.Ack("test", "P_pool60", 9.0, 90.0, 9.0, limits="wallet")):   # an Ack made past read_ack
+        for s, e in (({}, {}), (big, {}), ({}, env), (big, env)):
+            lim, total = LX.effective(ack, s, e)
+            assert total is not None and total <= LX.TEST_MAX_TOTAL_SOL
+            assert lim.stake_sol <= min(LX.TEST_MAX_TRADE_SOL, P.HARD_STAKE_SOL)
+            assert lim.max_daily_loss_sol <= LX.TEST_MAX_DAILY_LOSS_SOL
+            assert lim.max_exposure_sol <= P.HARD_MAX_EXPOSURE_SOL and lim.max_open <= P.HARD_MAX_OPEN
+    # the executor caps itself too, whatever limits it is handed
+    got = LX.wallet_capped(P.Limits(math.inf, 99, math.inf, math.inf))
+    assert got == P.Limits(LX.TEST_MAX_TRADE_SOL, P.HARD_MAX_OPEN, P.HARD_MAX_EXPOSURE_SOL, LX.TEST_MAX_DAILY_LOSS_SOL)
+    assert (LX.TEST_MAX_TOTAL_SOL, LX.TEST_MAX_DAILY_LOSS_SOL, LX.TEST_MAX_TRADE_SOL) == (2.0, 0.5, 0.25)
+
+
+def test_a_rich_wallet_with_the_largest_share_stakes_at_most_the_test_maximum(tmp_path, folders):
+    eng, pipe, book, ex = live(tmp_path, 100.0, "stake_share=0.5\n")
+    write_control(share=1.0, share_set_at=T0, brake=False, floor_sol=0)
+    book.control.last = -1e18
+    book.poll_control()
+    book.refresh_limits()
+    assert ex.limits.stake_sol == LX.TEST_MAX_TRADE_SOL and pipe.risk["X"].limits.stake_sol == LX.TEST_MAX_TRADE_SOL
+    assert ex.limits.max_exposure_sol == P.HARD_MAX_EXPOSURE_SOL
+    assert ex.limits.max_daily_loss_sol == LX.TEST_MAX_DAILY_LOSS_SOL
+    assert ex.max_total_l == int(LX.TEST_MAX_TOTAL_SOL * SOL)
+    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(1.0 * 1.3 * SOL), T0)) == "above the stake cap"
+    ex.set_limits(P.Limits(5.0, 9, 50.0, 50.0), None)                # handed more: the executor caps itself
+    assert ex.limits.stake_sol == LX.TEST_MAX_TRADE_SOL and ex.limits.max_daily_loss_sol == LX.TEST_MAX_DAILY_LOSS_SOL
 
 
 def test_effective_without_the_key_is_todays():
@@ -180,35 +220,38 @@ def live(tmp_path, balance=0.9, extra="", clock=None):
                          totals={"pnl_l": 0, "since_ms": None, "trades": 0, "total_alerted": False})
     ex.balance_l = None if balance is None else int(balance * SOL)
     eng = sim.Engine([], costs=Fixed())
-    s = dataclasses.replace(strat(sl=0.99, ladder=((0.3, 1.0),), time_s=600), stake_sol=LX.NO_LIMIT)
+    s = dataclasses.replace(strat(sl=0.99, ladder=((0.3, 1.0),), time_s=600), stake_sol=P.HARD_STAKE_SOL)
     pipe = eng.add_pipe(P.Pipeline(eng, [s], ex, name="live", record=False))
     book = LX.LiveBook(pipe, ex, "X", alerts=False)
     pipe.on_close = book.on_close
     return eng, pipe, book, ex
 
 
-def test_the_live_book_stakes_the_wallets_share_and_the_old_caps_do_not_bind(tmp_path, folders):
-    for balance, extra, want in ((0.9, "", 0.09), (0.9, "stake_share=0.5\n", 0.45), (3.0, "", 0.30)):
+def test_the_live_book_stakes_the_wallets_share_under_the_test_maxima(tmp_path, folders):
+    for balance, extra, want in ((0.9, "", 0.09), (0.4, "stake_share=0.5\n", 0.20), (0.9, "stake_share=0.5\n", 0.25),
+                                 (3.0, "", 0.25)):
         eng, pipe, book, ex = live(tmp_path, balance, extra)
         book.refresh_limits()
         assert ex.limits.stake_sol == want and pipe.risk["X"].limits.stake_sol == want, (balance, extra)
-        assert ex.limits.max_exposure_sol == pytest.approx(balance - LX.RESERVE_SOL)
-        assert ex.max_total_l is None and math.isinf(ex.limits.max_daily_loss_sol)
+        assert ex.limits.max_exposure_sol == pytest.approx(min(balance - LX.RESERVE_SOL, P.HARD_MAX_EXPOSURE_SOL))
+        assert ex.max_total_l == int(LX.TEST_MAX_TOTAL_SOL * SOL)
+        assert ex.limits.max_daily_loss_sol == LX.TEST_MAX_DAILY_LOSS_SOL
     eng, pipe, book, ex = live(tmp_path, 0.9, "stake_share=0.5\n")
     book.refresh_limits()
-    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.45 * 1.3 * SOL), T0)) is None   # above 0.25
-    ex.day_pnl_l = -int(5 * SOL)                                      # no daily loss limit beyond the wallet
-    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.45 * 1.3 * SOL), T0)) is None
-    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.46 * 1.3 * SOL), T0)) == "above the stake cap"
-    ex.exposure[1] = int(0.45 * 1.3 * SOL)                            # the second one does not fit the base
-    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.45 * 1.3 * SOL), T0)) == "max exposure"
+    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.25 * 1.3 * SOL), T0)) is None
+    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.26 * 1.3 * SOL), T0)) == "above the stake cap"
+    ex.day_pnl_l = -int(0.3 * SOL)                                    # the daily loss limit binds as without the key
+    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.25 * 1.3 * SOL), T0)) == "daily loss limit"
+    ex.day_pnl_l = 0
+    ex.exposure[1] = int(0.25 * 1.3 * SOL)                            # the second one does not fit the 0.6 SOL
+    assert ex._caps(P.Order(9, "buy", MINT, "curve", 10, int(0.25 * 1.3 * SOL), T0)) == "max exposure"
     Curve(eng)
     del ex.exposure[1]
     eng.advance(T0 + 1)
-    assert ex.pending[0]["order"].stake_l == int(0.45 * SOL)          # the pipeline's own stake is not capped
+    assert ex.pending[0]["order"].stake_l == int(0.25 * SOL)
     st = book.status(None, None, None, [])
-    assert st["limits"]["kind"] == "wallet" and st["limits"]["max_daily_loss_sol"] is None
-    assert st["limits"]["max_total_sol"] is None and st["limits"]["max_trade_sol"] == 0.45
+    assert st["limits"]["kind"] == "wallet" and st["limits"]["max_daily_loss_sol"] == LX.TEST_MAX_DAILY_LOSS_SOL
+    assert st["limits"]["max_total_sol"] == LX.TEST_MAX_TOTAL_SOL and st["limits"]["max_trade_sol"] == 0.25
     assert st["stake"]["share"] == 0.5 and "limits: wallet" in st["stake"]["why"]
     assert st["control"]["limits"] == "wallet" and st["control"]["share_source"] == "ack" and st["low"] is None
     assert st["ack"]["limits"] == "wallet"
@@ -233,7 +276,7 @@ def test_without_the_key_the_status_reads_fixed_and_has_no_low(tmp_path, folders
     assert st["stake"] == {"sol": 0.0, "why": "stake paused: wallet under 0.25 SOL"}
 
 
-def test_attach_with_limits_wallet_gives_the_pipeline_the_uncapped_stake(tmp_path, folders):
+def test_attach_with_limits_wallet_gives_the_pipeline_the_capped_stake(tmp_path, folders):
     class Rpc3:
         def balance(self, pubkey):
             return int(3.0 * SOL)
@@ -243,8 +286,9 @@ def test_attach_with_limits_wallet_gives_the_pipeline_the_uncapped_stake(tmp_pat
 
     g = make_gate(tmp_path, ack=wallet_ack(tmp_path, "stake_share=0.5\n"))
     book = LX.attach(sim.Engine([]), g, rpc=Rpc3(), load=lambda p: FakeSigner(), alerts=False, start=False)
-    assert book.exec.wallet and book.exec.limits.stake_sol == 1.5
-    assert book.pipe.risk["P_pool60"].limits.stake_sol == 1.5 and math.isinf(book.pipe.strats["P_pool60"].stake_sol)
+    assert book.exec.wallet and book.exec.limits.stake_sol == LX.TEST_MAX_TRADE_SOL      # not 1.5 of the 3 SOL
+    assert book.pipe.risk["P_pool60"].limits.stake_sol == LX.TEST_MAX_TRADE_SOL
+    assert book.pipe.strats["P_pool60"].stake_sol == P.HARD_STAKE_SOL
     g = make_gate(tmp_path, ack=ack_file(tmp_path, x=0.1))            # without the key: as today
     book = LX.attach(sim.Engine([]), g, rpc=Rpc3(), load=lambda p: FakeSigner(), alerts=False, start=False)
     assert not book.exec.wallet and book.exec.limits.stake_sol == 0.1
@@ -335,13 +379,13 @@ def write_control(**kw):
 
 
 def test_the_owners_share_overrides_the_ack_with_limits_wallet_within_seconds(tmp_path, folders):
-    eng, pipe, book, ex = live(tmp_path, 0.9, "stake_share=0.5\n")
+    eng, pipe, book, ex = live(tmp_path, 0.4, "stake_share=0.25\n")
     book.refresh_limits()
-    assert ex.limits.stake_sol == 0.45
+    assert ex.limits.stake_sol == 0.10
     write_control(share=1.0, share_set_at=T0)
     book.control.last = -1e18
     assert book.poll_control() == ["share"]
-    assert ex.limits.stake_sol == 0.68                                # all of it the wallet can pay: one position
+    assert ex.limits.stake_sol == LX.TEST_MAX_TRADE_SOL               # all of it, but never above the test maximum
     st = book.status(None, None, None, [])
     assert (st["control"]["share"], st["control"]["share_source"], st["control"]["share_since"]) == (1.0, "owner", T0)
     write_control(share=0.05, share_set_at=T0)

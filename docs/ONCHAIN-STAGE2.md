@@ -717,30 +717,35 @@ neu starten; die Wallet-Seite zeigt je Buch, ob es handeln darf und warum nicht.
 
 ### Limits nach Wallet
 
-Deine Entscheidung vom 2026-10-23: im Alpha-Test keine festen Geldgrenzen mehr, die Wallet selbst ist die
-Grenze. Eine Zeile in `/etc/pythia/onchain-live-ack` (mit `mode=alpha` oder `mode=test`); `max_total_usd`,
-`max_trade_usd`, `max_daily_loss_usd` und `max_convert_usd` braucht es dann nicht mehr, `book_usd` hat keinen
-festen Höchstwert. Wirkt mit der nächsten Prüfung des Tors (spätestens nach einer Minute); sicherer ist ein
+Deine Entscheidung vom 2026-10-23: die Geldgrenzen folgen dem Wert der Wallet. Seit dem Review vom 2026-10-27
+(R1) nie über den Höchstwerten des Modus im Code (Test: 500 USD insgesamt, 100 USD pro Swap, 250 USD Umtausch am
+Tag; Alpha: 100, 25 und 100 USD) und mit einer Tagesverlustgrenze von höchstens 25 USD
+(`live_gate.WALLET_MAX_DAILY_LOSS_USD`, der Alpha-Höchstwert) in beiden Modi; keine Datei hebt sie an. Eine Zeile
+in `/etc/pythia/onchain-live-ack` (mit `mode=alpha` oder `mode=test`); `max_total_usd`, `max_trade_usd`,
+`max_daily_loss_usd` und `max_convert_usd` braucht es dann nicht, stehen sie da, senken sie die Grenzen (über
+einem Höchstwert wird die Datei abgelehnt); `book_usd` höchstens der Gesamt-Höchstwert des Modus. Wirkt mit der nächsten Prüfung des Tors (spätestens nach einer Minute); sicherer ist ein
 Neustart des Dienstes:
 
 ```
 limits=wallet
-book_usd=500
+book_usd=50
 ```
 
 Ohne `limits=wallet` bleibt alles wie oben. Mit der Zeile gilt:
 
 - höchstens der Wert der Wallet insgesamt, höchstens 25 % davon pro Swap (`live_gate.WALLET_MAX_SWAP_SHARE`;
-  eine größere Order eines Buchs wird wie bisher in mehrere Swaps geteilt),
-- keine Tagesverlustgrenze über die Wallet hinaus,
-- deine Umtausche bis zum Wert der Wallet am Tag.
+  eine größere Order eines Buchs wird wie bisher in mehrere Swaps geteilt), jeweils nie über dem Höchstwert,
+- eine Tagesverlustgrenze von höchstens 25 USD (oder dein niedrigeres `max_daily_loss_usd`),
+- deine Umtausche bis zum Wert der Wallet am Tag, nie über dem Höchstwert.
+- Ist die Wallet mehr wert als der Gesamt-Höchstwert, gehen nur noch Verkäufe nach USDC.
 
 Was dich weiter schützt: Guard (keine Überweisung, nur der geplante Swap), Simulation innerhalb von 24 Stunden,
 Notschalter, SOL-Reserve für Gebühren, Kosten- und Preisprüfung gegen Jupiter und Kraken, Liste der Coins,
 Ledger gegen Chain, der Watcher (er warnt, wenn das SOL nicht mehr für einen Swap reicht) und die eigenen
 Grenzen der `[meme]`-Sektion. App und `status.json` zeigen "limits: wallet" und die Grenzen in Dollar.
 
-**Du kannst damit die ganze Wallet verlieren.** Lade nur auf, was du komplett verlieren kannst.
+**Du kannst damit verlieren, was auf der Wallet liegt** (höchstens 25 USD am Tag durch Käufe). Lade nur auf, was
+du komplett verlieren kannst.
 
 Auf der Seite "Wallet" gibt es das Feld "Master" (wirkt innerhalb von Sekunden, `reports/onchain_live/control.json`):
 der **Anteil der Wallet**, den die Bücher nutzen dürfen (5 bis 100 % oder ein eigener Wert ab 1 %; ersetzt
@@ -827,8 +832,9 @@ on_kill=hold
 I accept that I can lose all of it
 ```
 
-Mit `limits=wallet` gelten die vier `max_*`-Zeilen nicht; sie liegen innerhalb der Alpha-Höchstwerte, damit die
-Datei auch ohne die Zeile gültig bleibt. `/etc/pythia/onchain-live.env`, Rechte 600, ohne Sender, Trinkgeld oder
+Mit `limits=wallet` folgen die Grenzen dem Wert der Wallet, nie über den vier `max_*`-Zeilen (sie sind die
+Alpha-Höchstwerte und senken nichts darunter; die Tagesverlustgrenze bleibt 25 USD). Die Datei bleibt auch ohne
+die Zeile gültig. `/etc/pythia/onchain-live.env`, Rechte 600, ohne Sender, Trinkgeld oder
 Jupiter-Schlüssel:
 
 ```

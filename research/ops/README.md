@@ -325,8 +325,9 @@ server allows live buys again.
 Nothing below is done, and nothing in the code does it. The live executor
 refuses unless every step holds; `live_exec.py check` says which do not. The
 owner's step-by-step runbook, in German, for the small real-money TEST
-(mode=test: a budget of at most 2 SOL, 0.5 SOL a day, 0.05 SOL a trade, a
-simulation within 24 hours instead of the readiness report) is
+(mode=test: a budget of at most 2 SOL, 0.5 SOL a day, 0.25 SOL a trade, 0.6 SOL
+open, hard in code with or without `limits=wallet`, a simulation within 24 hours
+instead of the readiness report) is
 `docs/PUMPFUN-LIVE.md`. Below is the reference for both modes.
 
 Read this first. pump.fun's own terms forbid bots and automatic access on

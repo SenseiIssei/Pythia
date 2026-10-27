@@ -30,12 +30,14 @@ measure our own models with small real money, under the lower ALPHA_MAX_* below;
 gate, the guard, the caps, the kill switch and the watcher stay exactly as in test mode.
 
 With limits=wallet in the ack (test or alpha, the owner's decision 2026-10-23) the money limits follow the
-wallet instead of the fixed ones (Ack.cap): at most the wallet's value in all, WALLET_MAX_SWAP_SHARE of it a
-swap (a book order above it is split as before), the owner's converts up to the wallet's value a day, no daily
-loss cap beyond the wallet; max_total_usd, max_trade_usd, max_daily_loss_usd and max_convert_usd are not needed
-and do not apply, book_usd has no fixed maximum. Everything else stays: the guard, the simulation within 24 h,
-the kill switch, the SOL reserve, the cost and price checks, the allowlist, the ledger against the chain, the
-watcher, and the meme section's own MEME_MAX_* caps. The owner accepts that the wallet can be lost completely.
+wallet under the mode's hard maxima (Ack.cap, review R1 2026-10-27: no file lifts them): the wallet's value in
+all and for the day's converts, WALLET_MAX_SWAP_SHARE of it a swap, each at most its TEST_MAX_* or ALPHA_MAX_*,
+and a daily loss cap of at most WALLET_MAX_DAILY_LOSS_USD (the alpha maximum) in both modes; max_total_usd,
+max_trade_usd, max_daily_loss_usd and max_convert_usd are not needed, but when given they lower it (never above
+the maxima, as without the key), book_usd at most the mode's total maximum. Everything else stays: the guard,
+the simulation within 24 h, the kill switch, the SOL reserve, the cost and price checks, the allowlist, the
+ledger against the chain, the watcher, and the meme section's own MEME_MAX_* caps. The owner accepts that the
+capped money in the wallet can be lost completely.
 
 A meme rule (lab.onchain.meme, docs/ONCHAIN-MEME.md) buys real money only when, on top of every gate
 above, the ack names it in its own [meme] section (rules=, max_total_usd, max_trade_usd,
@@ -84,6 +86,7 @@ ALPHA_MAX_DAILY_LOSS_USD = 25.0
 ALPHA_MAX_CONVERT_USD = 100.0
 MODES = ("test", "alpha")
 WALLET_MAX_SWAP_SHARE = 0.25             # limits=wallet: a swap at most this share of the wallet's value
+WALLET_MAX_DAILY_LOSS_USD = ALPHA_MAX_DAILY_LOSS_USD   # limits=wallet, test or alpha: the daily loss cap at most this
 HARD = {"test": {"total": TEST_MAX_TOTAL_USD, "trade": TEST_MAX_TRADE_USD, "daily_loss": TEST_MAX_DAILY_LOSS_USD,
                  "convert": TEST_MAX_CONVERT_USD},
         "alpha": {"total": ALPHA_MAX_TOTAL_USD, "trade": ALPHA_MAX_TRADE_USD, "daily_loss": ALPHA_MAX_DAILY_LOSS_USD,
@@ -240,18 +243,20 @@ class Ack:
     def cap(self, k: str, wallet_usd: float | None = None) -> float:
         """The limit in force: the ack's value, never above its mode's hard maximum (0 without a valid mode).
         With limits=wallet it follows `wallet_usd`, the wallet's value now: the value in all and for the day's
-        converts, WALLET_MAX_SWAP_SHARE of it a swap, no daily loss cap (inf); 0 while the value is not known."""
+        converts, WALLET_MAX_SWAP_SHARE of it a swap, 0 while the value is not known; never above the mode's
+        hard maximum or the ack's own lower value, and the daily loss at most WALLET_MAX_DAILY_LOSS_USD."""
         hard = HARD.get(self.mode or "")
         if hard is None:
             return 0.0
-        if self.wallet:
-            if k == "daily_loss":
-                return math.inf
-            if wallet_usd is None or not math.isfinite(wallet_usd) or wallet_usd <= 0:
-                return 0.0
-            return wallet_usd * (WALLET_MAX_SWAP_SHARE if k == "trade" else 1.0)
         v = {"total": self.max_total_usd, "trade": self.max_trade_usd, "daily_loss": self.max_daily_loss_usd,
              "convert": self.max_convert_usd}[k]
+        if self.wallet:
+            own = math.inf if v is None else v
+            if k == "daily_loss":
+                return min(own, hard[k], WALLET_MAX_DAILY_LOSS_USD)
+            if wallet_usd is None or not math.isfinite(wallet_usd) or wallet_usd <= 0:
+                return 0.0
+            return min(wallet_usd * (WALLET_MAX_SWAP_SHARE if k == "trade" else 1.0), own, hard[k])
         return min(v or 0.0, hard[k])
 
 
@@ -313,10 +318,16 @@ def read_ack(path: Path = ACK_PATH, today: dt.date | None = None) -> Ack:
         if c not in CODES:
             problems.append(f"{path}: {c} is not on the stage-2 list ({', '.join(CODES)})")
     books = split(vals.get("books"))
-    total = trade = loss = conv = None
     if limits == "wallet":
-        # The wallet is the limit: the four money caps do not apply (Ack.cap), book_usd has no fixed maximum.
-        book_usd = (_usd(vals, "book_usd", path, math.inf, problems) or 0.0) if books else 0.0
+        # The wallet is the limit under the hard maxima (Ack.cap): the four money lines are optional and only
+        # lower it, book_usd at most the mode's total maximum.
+        total, trade, loss, conv = (_usd(vals, k, path, hard[h], problems) if k in vals else None
+                                    for k, h in (("max_total_usd", "total"), ("max_trade_usd", "trade"),
+                                                 ("max_daily_loss_usd", "daily_loss"),
+                                                 ("max_convert_usd", "convert")))
+        book_usd = (_usd(vals, "book_usd", path, hard["total"], problems) or 0.0) if books else 0.0
+        if total is not None and book_usd > total:
+            problems.append(f"{path}: book_usd is above max_total_usd")
     else:
         total = _usd(vals, "max_total_usd", path, hard["total"], problems)
         trade = _usd(vals, "max_trade_usd", path, hard["trade"], problems)
@@ -370,7 +381,7 @@ def hard_view(mode: str | None = None) -> dict:
             "small_max_trade_usd": min(SMALL_MAX_TRADE_USD, hard["trade"]), "reserve_sol": RESERVE_L / 1e9,
             "max_converts": MAX_CONVERTS_DAY, "max_book_swaps": MAX_BOOK_SWAPS_DAY, "confirm_s": CONFIRM_S,
             "max_cost_bps": MAX_COST_BPS, "max_eth_share": MAX_ETH_SHARE,
-            "wallet_max_swap_share": WALLET_MAX_SWAP_SHARE,
+            "wallet_max_swap_share": WALLET_MAX_SWAP_SHARE, "wallet_max_daily_loss_usd": WALLET_MAX_DAILY_LOSS_USD,
             "meme_max_total_usd": MEME_MAX_TOTAL_USD, "meme_max_trade_usd": MEME_MAX_TRADE_USD,
             "meme_max_daily_loss_usd": MEME_MAX_DAILY_LOSS_USD}
 

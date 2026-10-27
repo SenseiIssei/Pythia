@@ -84,8 +84,10 @@ At the owner's explicit request there is exactly one such wallet, with these lin
   wallet or exchange. Nothing in Pythia withdraws or transfers; before signing, the executor refuses
   any instruction that is not a plain pump.fun buy or sale for the wallet itself. He withdraws by
   importing his backup into his own wallet.
-- **It is a small, capped test.** At most 2 SOL in all, 0.5 SOL a day, 0.05 SOL a trade (hard in
-  code), the owner's written confirmation, a passed mainnet simulation, a kill switch in the app
+- **It is a small, capped test.** At most 2 SOL in all, 0.5 SOL a day, 0.25 SOL a trade, 0.6 SOL
+  open and 5 positions (hard in code; `limits=wallet` in the confirmation only sizes the stake from
+  the wallet under them, and no file, app setting or environment variable lifts them), the owner's
+  written confirmation, a passed mainnet simulation, a kill switch in the app
   that only the server can undo, and a service he starts by hand. Expect to lose all of it.
 - **One faster path, the owner's switch.** With `PYTHIA_PUMPFUN_SENDER` set, our own single
   transaction goes out through Helius Sender's stake-weighted path (`swqos_only=true`, never a
