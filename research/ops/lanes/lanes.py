@@ -11,6 +11,7 @@ starts, in its container before it commits and on the host before anything lands
     python3 lanes.py budget --state FILE --spent FILE --max-usd X     may a run start
     python3 lanes.py record ... / report ...                          the lane's JSON for the briefing and the app
     python3 lanes.py replay FILE                                      past rejections against these rules
+    python3 lanes.py trials --copy FILE --registry FILE              the run's new trials into the server's registry
 
 The task file (task_template.md): a header between two `---` lines with `id`, `title`, `model`,
 `max_usd`, `allowed:` (globs of the files the run may change), `docs:` (what it reads first) and
@@ -34,6 +35,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -569,6 +571,68 @@ def run_cost(claude_json: str, max_usd: float) -> float:
     return float(max_usd)
 
 
+# ---------------------------------------------------------------- the trials a run registered
+
+TRIALS_MAX = 64 * 1024 * 1024   # bytes of a run's registry copy read at most
+
+
+def _registry_ids(path: str) -> tuple[set[str], bool]:
+    """The ids of a registry file and whether it ends without a newline (a torn last line)."""
+    ids, torn = set(), False
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return ids, False
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            r = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue
+        if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"]:
+            ids.add(r["id"])
+    return ids, bool(data) and not data.endswith(b"\n")
+
+
+def merge_trials(copy: str, registry: str) -> int:
+    """Append the lines of a run's registry copy whose id the server's registry lacks, unchanged and in order
+    (lab.metrics.register's rule: append only, the first line of an id wins); returns how many. The run writes
+    its trials into the copy because the data folder is read only to it, and every run counts, held or landed:
+    a stopped study looked at the data too. A missing copy adds nothing; the copy is read without following a
+    symlink (the agent can write its folder) and capped; lines that are not a JSON object with an id are skipped."""
+    try:
+        fd = os.open(copy, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
+    except OSError:
+        return 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return 0
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(TRIALS_MAX + 1)
+    finally:
+        os.close(fd)
+    lines = data.decode("utf-8", "replace").splitlines()
+    if len(data) > TRIALS_MAX:
+        lines = lines[:-1]                                   # the cut last line
+    have, torn = _registry_ids(registry)
+    new = []
+    for line in lines:
+        try:
+            r = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue                                         # a torn line of a killed run
+        if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"] and r["id"] not in have:
+            have.add(r["id"])
+            new.append(line.strip())
+    if new:
+        Path(registry).parent.mkdir(parents=True, exist_ok=True)
+        with open(registry, "a", encoding="utf-8") as fh:
+            fh.write(("\n" if torn else "") + "\n".join(new) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    return len(new)
+
+
 def prompt_text(task: Task, rules: str) -> str:
     """What the run gets: the lane's rules, its list, what to read, its tests, the never list, the brief."""
     parts = [rules.strip(), "## Allowed (everything else is dropped)", "\n".join(f"- {g}" for g in task.allowed),
@@ -710,6 +774,9 @@ def main(argv: list[str]) -> int:
     co.add_argument("--max-usd", type=float, required=True)
     rl = sub.add_parser("replay")
     rl.add_argument("file")
+    tr = sub.add_parser("trials")
+    tr.add_argument("--copy", required=True)
+    tr.add_argument("--registry", required=True)
     a = ap.parse_args(argv)
 
     if a.cmd == "queue-check":
@@ -833,6 +900,10 @@ def main(argv: list[str]) -> int:
         except OSError:
             text = ""
         print(f"{run_cost(text, a.max_usd):g}")
+        return 0
+
+    if a.cmd == "trials":
+        print(f"trials: {merge_trials(a.copy, a.registry)} new into {a.registry}")
         return 0
 
     if a.cmd == "replay":

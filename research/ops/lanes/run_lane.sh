@@ -24,6 +24,8 @@
 #             job table changed; held: the round root-only in /root/pythia-lanes/done/<id>/ and
 #             one retry queued on the next cheaper model with the reasons (lanes.py retry);
 #          7. the record reports/lanes/<id>.json, latest.json, a notice with what was dropped.
+#   Every run, held or landed, carries its trials into <data>/trials/registry.jsonl: the agent writes them
+#   into its copy /out/trials/registry.jsonl (seeded from the server's), lanes.py trials appends the new ids.
 #
 # Every file this script writes as root lies outside the folders the agent can write; what it
 # reads from them (the report) it reads without following a symlink and capped in size.
@@ -152,6 +154,9 @@ rm -rf "$run" "$work" && install -d -m 700 "$run" || fail "cannot make $run"
 install -d -m 700 -o "$uid" -g "$uid" "$out" || fail "cannot make $out"
 [ ! -L "$out" ] && [ "$(stat -c %u "$out")" = "$uid" ] || fail "$out is not the agent's folder"
 rm -f "$out/report.md"
+# the run's copy of the trial registry (/data is read only to it): the server's lines, so its bar counts them
+rm -rf "$out/trials" && install -d -m 700 -o "$uid" -g "$uid" "$out/trials" || fail "cannot make $out/trials"
+install -m 600 -o "$uid" -g "$uid" "$data/trials/registry.jsonl" "$out/trials/registry.jsonl" 2>/dev/null || true
 tgit config user.name "$git_name"; tgit config user.email "$git_email"
 git clone -q --no-hardlinks "$trusted" "$work" || fail "cannot copy the clone for the agent"
 git -C "$work" config user.name "$git_name"; git -C "$work" config user.email "$git_email"
@@ -189,7 +194,7 @@ timeout --kill-after=2m "$limit" docker run --rm --name "pythia-lane" \
   --cpus 3 --memory 7g --network "$net" \
   --env-file "$run/claude.env" -e AGENT_BASE="$base" -e LANE_TASK=/lane/task.md -e HOME=/home/agent \
   -e PYTHIA_DATA=/data -e PYTHIA_WRITE_ROOT=/out/data -e PYTHIA_REPORTS=/out/reports \
-  -e PYTHIA_AGENT_OUT=/out/agent -e PYTHIA_CACHE=/out/cache \
+  -e PYTHIA_AGENT_OUT=/out/agent -e PYTHIA_CACHE=/out/cache -e PYTHIA_TRIALS_REGISTRY=/out/trials/registry.jsonl \
   --tmpfs "/home/agent:rw,exec,nosuid,size=2g,uid=$uid,gid=$uid,mode=700" \
   -v "$work:/work" -v "$data:/data:ro" -v "$out:/out" -v /run/lock/pythia:/run/lock/pythia:ro \
   -v "$run/lane:/lane:ro" -v "$run/managed-settings.json:/etc/claude-code/managed-settings.json:ro" \
@@ -200,6 +205,8 @@ usd=$(L cost --file "$runlog" --max-usd "$max_usd")
 printf '{"at": "%s", "task": "%s", "usd": %s}\n' "$(date -u +%FT%T)" "$id" "$usd" >> "$spent"
 log "$id: the agent ended with $rc, $usd USD"
 read_capped "$out/report.md" 20000 > "$keep/report.md" 2>/dev/null || : > "$keep/report.md"
+# every run's trials go into the server's registry, held or landed (a stopped study looked at the data too)
+log "$id: $(L trials --copy "$out/trials/registry.jsonl" --registry "$data/trials/registry.jsonl" 2>&1 | tail -1)"
 
 # 5. the commits, the verdict, the drop, the tests, the scan
 docker run --rm --network none --user "$uid:$uid" --cap-drop ALL --security-opt no-new-privileges \

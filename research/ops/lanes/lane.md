@@ -4,6 +4,11 @@ clone on main: commit your work on main there (you cannot push; the host checks 
 lands them only when its checks pass). /data is the lab's data folder, READ ONLY. Write scratch
 output under /out. Your home folder is empty and gone after the run. For anything that loads big
 panels: `flock /run/lock/pythia/heavy.lock ...` and stay under 6 GB memory.
+Trials go into R5's registry through `lab.metrics.register` as usual: in this container it
+writes into a copy, /out/trials/registry.jsonl (PYTHIA_TRIALS_REGISTRY, seeded with the server's
+lines), because /data is read only. The host appends the copy's new ids to the server's registry
+after every run, held or landed (a stopped study looked at the data too): leave that file in place
+and never edit or remove its lines.
 
 The files you may change are listed below under "Allowed". The host DROPS every file outside that
 list (and says so to the owner); do not edit a README, a doc or a job table the list does not name,

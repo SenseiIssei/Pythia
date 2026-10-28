@@ -466,6 +466,57 @@ def test_the_runner_gates_caps_and_checks_before_it_pushes():
     assert "/lane/research/ops/lanes/lanes.py" in (HERE / "lane.md").read_text(encoding="utf-8")
 
 
+# ---------------------------------------------------------------- the trials a run registered (T14)
+
+def _line(id_, sharpe=None):
+    return json.dumps({"id": id_, "family": "hand", "source": "results/x.md", "n": 1, "sharpe": sharpe, "var": None,
+                       "added": "2026-10-28T00:00:00+00:00"}, separators=(",", ":"))
+
+
+def test_trials_new_ids_appended_once_existing_untouched(tmp_path):
+    reg, copy = tmp_path / "data" / "trials" / "registry.jsonl", tmp_path / "out" / "trials" / "registry.jsonl"
+    reg.parent.mkdir(parents=True)
+    copy.parent.mkdir(parents=True)
+    reg.write_text(_line("hand:a", 0.5) + "\n" + _line("hand:b") + "\n", encoding="utf-8")
+    before = reg.read_text(encoding="utf-8")
+    # the copy: the server's lines (one changed, which must not win), new ids, a repeat, a torn line, no id
+    copy.write_text("\n".join([_line("hand:a", 9.9), _line("hand:b"), _line("hand:t5:x", 1.2), _line("hand:t5:y"),
+                               _line("hand:t5:x", 3.3), "{not json", json.dumps({"n": 1}), ""]), encoding="utf-8")
+    assert lanes.merge_trials(str(copy), str(reg)) == 2
+    text = reg.read_text(encoding="utf-8")
+    assert text.startswith(before)                                    # append only
+    assert text[len(before):] == _line("hand:t5:x", 1.2) + "\n" + _line("hand:t5:y") + "\n"   # unchanged, in order
+    assert lanes.merge_trials(str(copy), str(reg)) == 0               # a second call adds nothing
+    assert reg.read_text(encoding="utf-8") == text
+
+
+def test_trials_missing_copy_is_no_error(tmp_path):
+    reg = tmp_path / "registry.jsonl"
+    reg.write_text(_line("hand:a") + "\n", encoding="utf-8")
+    assert lanes.merge_trials(str(tmp_path / "nope.jsonl"), str(reg)) == 0
+    assert reg.read_text(encoding="utf-8") == _line("hand:a") + "\n"
+    assert lanes.main(["trials", "--copy", str(tmp_path / "nope.jsonl"), "--registry", str(reg)]) == 0
+
+
+def test_trials_torn_registry_line_and_symlinked_copy(tmp_path):
+    reg, copy = tmp_path / "registry.jsonl", tmp_path / "copy.jsonl"
+    reg.write_text(_line("hand:a") + "\n" + '{"id":"hand:to', encoding="utf-8")      # a killed writer's last line
+    copy.write_text(_line("hand:new") + "\n", encoding="utf-8")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(copy)
+    assert lanes.merge_trials(str(link), str(reg)) == 0               # never through a symlink
+    assert lanes.merge_trials(str(copy), str(reg)) == 1
+    assert reg.read_text(encoding="utf-8").splitlines()[-1] == _line("hand:new")
+
+
+def test_the_runner_merges_trials_after_every_run():
+    sh_text = (HERE / "run_lane.sh").read_text(encoding="utf-8")
+    i = sh_text.index
+    assert "PYTHIA_TRIALS_REGISTRY=/out/trials/registry.jsonl" in sh_text
+    # right after the agent, before the verdict can hold or land the run
+    assert i('docker run --rm --name "pythia-lane"') < i("L trials --copy") < i("L verdict") < i("tgit push")
+
+
 # ---------------------------------------------------------------- the replay of 2026-10-26 and 27
 
 def replay() -> list[tuple[dict, dict]]:

@@ -1789,6 +1789,14 @@ tests red (in the agent image, from the result, network `PYTHIA_LANE_TEST_NET`, 
 agent's), gitleaks. Then push, `/opt/pythia-src`, `deploy_lab.sh`, `deploy_ops.sh` when the job
 table changed, as for the research agent.
 
+**Trials (T14).** The run's container mounts the data folder read only, so `lab.metrics.register`
+writes a study's trials into a copy, `/out/trials/registry.jsonl` (`PYTHIA_TRIALS_REGISTRY`, seeded
+with the server's registry so the run's bar counts every trial). Right after the agent ends, held
+or landed, `lanes.py trials` appends the copy's lines whose id `<data>/trials/registry.jsonl` lacks,
+unchanged (register's rule: append only, the first id wins), and the log names the count: a held
+or stopped study looked at the data too, and without this its trials were lost (67 of T5, T6, T7
+and T10 merged by hand on 2026-10-28). A missing copy adds nothing.
+
 **One retry.** A held run is queued once more as `<id>-retry` on the next cheaper model (Opus to
 Sonnet, Sonnet to Haiku, Haiku none), half the `max_usd` (at least 1), the host's reasons at the
 top of the brief, starting from the held commits (applied in the new clone without network), and
