@@ -12,6 +12,8 @@ P3's 10 EUR books (realistic.TEN) run the same way, each on its own 0.109 SOL pa
 holds a token account's rent while a position is open (realistic.ten_books).
 F3's factory books (factory.py, <data>/pumpfun_rt/factory/books.json) run the same way (realistic.factory_books); the
 file is re-read every RELOAD_S: a new book starts, a retired one goes once it holds nothing.
+E1's bound books (slippage_e1.shadow_books, results/slippage_e1_prereg.md) run the live rules with each bound pair of
+its grid as `<rule>@e1_<pair>`, realistic with the live sizing on their own 0.55 SOL paper wallets.
 
 Nothing here trades: every fill of these books is the engine's curve
 arithmetic (sim.py, pipeline.PaperExecutor), written to a paper ledger. The
@@ -188,6 +190,7 @@ class Shadow:
         self.factory_on = factory is None and strategies is None    # F3: the factory's books with the full set
         if factory is None:
             factory = self._factory_specs() if self.factory_on else ()
+        e1 = strategies is None
         strategies = P.STRATEGIES if strategies is None else strategies
         kill = kill or P.KillSwitch()
         now = now_ms or int(time.time() * 1000)
@@ -204,6 +207,9 @@ class Shadow:
             R.small_books(self.engine, self.real, self.paper_wallets, kill=kill, small=small)   # R2
             R.ten_books(self.engine, self.real, self.paper_wallets, kill=kill, ten=ten, now_ms=now)   # P3
             R.factory_books(self.engine, self.real, self.paper_wallets, kill=kill, specs=factory)   # F3
+            if e1:                                            # E1: the bound grid's forward books, the full set only
+                from .slippage_e1 import shadow_books
+                shadow_books(self.engine, self.real, self.paper_wallets, kill=kill)
         self.kill, self.blocked, self.category, self.feed_down = kill, blocked, category, None
         for pipe in self.engine.pipes:
             pipe.on_close = self._closed
@@ -300,6 +306,7 @@ class Shadow:
               + ", ".join(s.name for s in P.STRATEGIES) + " realistic (live latency, fills, failures, fees and "
               f"sizing on {R.START_SOL} SOL each)"
               + (", the small-wallet books " + ", ".join(x[0] for x in R.SMALL) if R.SMALL else "")
+              + ", E1's bound books <rule>@e1_<pair>"
               + (", with the old books as <name>_ideal"
                                                        if any(p.name == "paper" for p in sh.engine.pipes) else "")
               + ("" if sh.models else " (no model yet: the model-filtered books skip every signal)"), flush=True)
@@ -436,8 +443,8 @@ class Shadow:
             tot["wins"] += int(rec["ret"] > 0)
             tot["pnl_sol"] += rec["pnl_sol"]
             tot["ret_sum"] += rec["ret"]
-        if self.alerts and rec["ret"] >= BIG_WIN and not rec.get("gap") \
-                and rec["exit_ms"] - self.last_alert_ms >= ALERT_GAP_MS:
+        if self.alerts and rec["ret"] >= BIG_WIN and not rec.get("gap") and "@e1_" not in str(rec["rule"]) \
+                and rec["exit_ms"] - self.last_alert_ms >= ALERT_GAP_MS:   # E1's bound books post no winners
             self.last_alert_ms = rec["exit_ms"]
             threading.Thread(target=post_winner, args=(rec,), daemon=True).start()
 

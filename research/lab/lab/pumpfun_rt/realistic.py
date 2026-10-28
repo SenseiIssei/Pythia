@@ -478,6 +478,7 @@ class RealExecutor(P.PaperExecutor):
     trade at or after the landing, the live bounds, failures and fees. With a wallet the stake follows it."""
 
     kind = "realistic"
+    buy_tol = POOL_BUY_TOL                        # the pool buy bound (E1's books, slippage_e1, set their own)
 
     def __init__(self, model: Model, wallet: PaperWallet | None = None):
         super().__init__()
@@ -537,12 +538,12 @@ class RealExecutor(P.PaperExecutor):
             if tok is not None and tok.pb and tok.pq else 0
         if now > 0 and o.tokens > 0:
             run = o.tokens / now - 1
-            if run > POOL_BUY_TOL:
+            if run > self.buy_tol:
                 name = pipe.strat_of(o.pid).name
                 pipe.buy_failed(o.pid, at, f"{RAN_AWAY} (+{run * 100:.0f} %)", 0)
                 pipe.skip(name, o.mint, RAN_AWAY)
                 return
-            o = dataclasses.replace(o, least=max(int(now / (1 + POOL_BUY_TOL)), int(o.tokens / (1 + POOL_BUY_TOL))))
+            o = dataclasses.replace(o, least=max(int(now / (1 + self.buy_tol)), int(o.tokens / (1 + self.buy_tol))))
         pipe.eng.push(land, "pipe", (self, "_landed", ("buy", o)))
 
     def _landed(self, at: float, data) -> None:
@@ -584,7 +585,7 @@ class RealExecutor(P.PaperExecutor):
                 return pipe.sold(o.pid, at, o.tokens, 0, f.tx_l(), stuck=True)
             if v < o.limit_l:
                 return pipe.sell_failed(o.pid, at, "under the floor", f.failed_l())
-            return pipe.sold(o.pid, at, o.tokens, v, f.tx_l())
+            return pipe.sold(o.pid, at, o.tokens, self.squeeze_sell(o, tok, v, c), f.tx_l())
         if tok is None:
             return pipe.buy_failed(o.pid, at, "token gone", f.failed_l())
         if o.venue == "pool":
@@ -594,18 +595,34 @@ class RealExecutor(P.PaperExecutor):
             got = C.pool_buy(spend, tok.pb, tok.pq, max(tok.amm_fee_bps, c.fee_bps_floor))
             if got <= 0:
                 return pipe.buy_failed(o.pid, at, "nothing filled", f.failed_l())
-            if got < (o.least or max(1, int(o.tokens / (1 + POOL_BUY_TOL)))):
+            least = o.least or max(1, int(o.tokens / (1 + self.buy_tol)))
+            if got < least:
                 return pipe.buy_failed(o.pid, at, RAN_AWAY_LANDING, f.failed_l("6040"))
-            return pipe.bought(o.pid, at, got, spend, f.tx_l())
+            return pipe.bought(o.pid, at, self.squeeze_pool_buy(o, tok, spend, got, least, c), spend, f.tx_l())
         if not tok.on_curve:
             return pipe.buy_failed(o.pid, at, "curve completed before the buy landed", f.failed_l())
         want = min(o.tokens, tok.rt)
         if want <= 0:
             return pipe.buy_failed(o.pid, at, "nothing filled", f.failed_l())
         cost = P.curve_cost(want, tok.vs, tok.vt, max(tok.fee_bps, c.fee_bps_floor))
-        if cost > o.limit_l:
+        cap = self.curve_cap(o)
+        if cost > cap:
             return pipe.buy_failed(o.pid, at, "slippage", f.failed_l())
-        pipe.bought(o.pid, at, want, cost, f.tx_l())
+        pipe.bought(o.pid, at, want, self.squeeze_curve_buy(o, tok, want, cost, cap, c), f.tx_l())
+
+    # E1's hooks (slippage_e1.BoundExecutor): the curve buy's cost cap and what a sandwich leaves of a fill; here
+    # the live cap and no sandwich.
+    def curve_cap(self, o: P.Order) -> int:
+        return o.limit_l
+
+    def squeeze_pool_buy(self, o: P.Order, tok, spend: int, got: int, least: int, c) -> int:
+        return got
+
+    def squeeze_curve_buy(self, o: P.Order, tok, want: int, cost: int, cap: int, c) -> int:
+        return cost
+
+    def squeeze_sell(self, o: P.Order, tok, v: int, c) -> int:
+        return v
 
 
 class Book(P.Pipeline):
@@ -1061,6 +1078,12 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     except Exception as e:                                   # noqa: BLE001 - the report goes out without them
         print(f"realistic: no 10 EUR books ({type(e).__name__}: {e})", flush=True)
         out["ten"] = []
+    try:                                                     # E1: the bound grid's forward books
+        from .slippage_e1 import forward
+        out["slippage"] = forward(paper, read_csv(paper_dir() / "failed.csv"))
+    except Exception as e:                                   # noqa: BLE001 - the report goes out without them
+        print(f"realistic: no E1 books ({type(e).__name__}: {e})", flush=True)
+        out["slippage"] = None
     try:                                                     # F3: the factory's books
         out["factory"] = factory_status(read_json(paper_dir() / "state.json"), eur, taint)
     except Exception as e:                                   # noqa: BLE001 - the report goes out without them
@@ -1119,7 +1142,13 @@ def markdown(d: dict) -> str:
         f"{cfg.get('floor_sol') if cfg.get('floor_sol') is not None else Z.PAUSE_BELOW_SOL} SOL, at most "
         f"{cfg.get('max_open', P.HARD_MAX_OPEN)} open, reserve {RESERVE_SOL} SOL.", "",
         *ten_md(d.get("ten") or [], d.get("sol_eur")),
-        *small_md(d.get("small") or [], d.get("sol_eur")), *factory_md(d.get("factory") or [], d.get("sol_eur"))])
+        *small_md(d.get("small") or [], d.get("sol_eur")), *factory_md(d.get("factory") or [], d.get("sol_eur")),
+        *(slippage_md(d["slippage"]) if "slippage" in d else [])])
+
+
+def slippage_md(fw: dict | None) -> list[str]:
+    from .slippage_e1 import forward_md
+    return forward_md(fw)
 
 
 def factory_md(rows: list[dict], eur: float | None) -> list[str]:
