@@ -1161,6 +1161,13 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
 
+  - name: book-depth
+    description: T4 Binance USD-M bookDepth (30 s depth within 0.2 and 1 to 5 % of mid) of the lab's perps from 2023, checksummed, the new days first then the backfill (at most 60,000 files a run, resumable), and Binance's delisting and monitoring-tag announcements; refuses the backfill when the whole history would pass 40 GB
+    schedule: "30 10 * * *"
+    command: python -m lab.collect.book_depth
+    resources: {cpus: 2, memory: 2g}
+    timeout: 5h
+
   - name: etf-daily
     description: the lab's daily ETF closes (etf/daily) downloaded again after the US close, every symbol the ETF study, the small books, history and the briefing read; a failed symbol keeps its old file, no study
     schedule: "30 22 * * 1-5"
@@ -1372,6 +1379,11 @@ datasets:
     path: pokemon
     max_gb: 10
     max_age_h: 36
+  - name: book-depth
+    description: T4 Binance bookDepth snapshots and hours of the lab's perps from 2023 and the delisting table; about 35 GB once backfilled, about 15 GB a year after
+    path: book_depth
+    max_gb: 45
+    max_age_h: 48
 
 # Free data sources the health check watches (jobs.py checks, one "feed <name>" row each): the
 # status file the collector writes after every run, how old its last run and the newest value
@@ -1402,6 +1414,11 @@ feeds:
     status: free/defillama/health.json
     max_age: 3d
     max_gaps: 1
+  - name: book-depth
+    job: book-depth
+    status: book_depth/health.json
+    max_age: 3d
+    max_gaps: 30
 
 # The state that cannot be rebuilt from market data. Paths are under the
 # data root. Archives go to dest (outside the data root) as

@@ -20,6 +20,11 @@ PEPEUSDT). Renamed coins are not bridged: POL starts in 2024 (MATIC before),
 RENDER in 2024 (RNDR before), so their history is short. A coin without a
 Binance USDT pair (HYPE, ONDO, SKY when this was written) is simply absent
 from the panel; `coverage` names it.
+
+`tradable(P, coins, drop_delisting=True)` also removes a coin from the UTC
+day its delisting (spot or USD-M perp) was announced, point in time from
+lab.collect.book_depth's table (T4): the decision at that day's close knows
+an announcement made during it. Off unless asked for.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ PRESETS = {"LAB20": LAB20, "ALPACA15": ALPACA15, "ALPACA": ALPACA, "ALPACA32": A
 # Short history: fewer eligible days than this before the out-of-sample split.
 SHORT_HISTORY_DAYS = 365
 SPLIT_DAY = "2024-01-01"
+DAY_US = 86_400_000_000
 
 
 def parse(text: str) -> tuple[str, ...]:
@@ -120,6 +126,45 @@ def mask(P, coins) -> np.ndarray:
     reused ticker's dead segments, `NAME~0`, are another asset)."""
     want = set(coins)
     return np.array([b in want and "~" not in n for b, n in zip(P.bases, P.names)], dtype=bool)
+
+
+def delisting_days(P, table=None, kinds=("spot", "perp")) -> np.ndarray:
+    """(N,) per panel column the first day index from which its coin's delisting was known (T when
+    never): the day of the earliest known_us of an announcement (or, without one, the archive's
+    stop) of one of `kinds`. Announcements before the column's first bar belong to an older asset
+    of a reused ticker and are ignored."""
+    if table is None:
+        from .collect import book_depth
+        table = book_depth.read_delistings()
+    out = np.full(len(P.bases), P.T, dtype=np.int64)
+    if table is None or not len(table):
+        return out
+    t = table.filter(table["kind"].is_in(list(kinds)))
+    first = {}
+    for b, k in zip(t["base"].to_list(), t["known_us"].to_list()):
+        if k is not None:
+            first.setdefault(b, []).append(int(k))
+    alive = np.asarray(P.alive, dtype=bool)
+    for j, b in enumerate(P.bases):
+        if b not in first:
+            continue
+        live = np.flatnonzero(alive[:, j])
+        start = int(P.days[live[0]]) if len(live) else 0
+        ks = [k for k in first[b] if k >= start]
+        if ks and min(ks) < int(P.days[-1]) + DAY_US:
+            # the day whose span [day, day + 1) holds the earliest announcement
+            out[j] = max(0, int(np.searchsorted(P.days, min(ks), side="right")) - 1)
+    return out
+
+
+def tradable(P, coins, drop_delisting: bool = True, table=None, kinds=("spot", "perp")) -> np.ndarray:
+    """(T, N) mask(P, coins) on every day, without a coin from the day its delisting was announced
+    when drop_delisting (the flag of T4)."""
+    m = np.broadcast_to(mask(P, coins), (P.T, len(P.bases))).copy()
+    if drop_delisting:
+        d = delisting_days(P, table, kinds)
+        m &= np.arange(P.T)[:, None] < d[None, :]
+    return m
 
 
 def _day(P, day: str) -> int:

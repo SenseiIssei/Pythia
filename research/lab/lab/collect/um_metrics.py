@@ -1,6 +1,7 @@
 """Binance USD-M futures daily metrics for the liquid perpetuals, keyless, from data.binance.vision.
 
     python -m lab.collect.um_metrics [--panel PATH] [--since 2021-12-01] [--top 120] [--dry-run]
+    python -m lab.collect.um_metrics --check-shift BTCUSDT,ETHUSDT,SOLUSDT [--around 2026-06-25] [--days 14]
 
 Registered for `positioning_xs` (results/positioning_xs_prereg.md). Binance publishes one
 zip a day per perpetual with a row every five minutes (open interest, the top traders'
@@ -21,6 +22,12 @@ stamped 00:00 belongs to the day it opens, as in `xs_daily.perp_daily`):
   all_acct     mean log of the all-accounts long/short ratio
   taker        mean log of the taker buy/sell volume ratio
   n            snapshots that day (0: Binance has no file for the day)
+
+`create_time` is the open of the row's 5-minute period: its taker ratio is the 5-minute kline's
+opening then, before and after 2026-06-25 (T4, `--check-shift`, results/book_depth_t4.md; the
+review had a reported change of meaning on that day), and its open interest is the snapshot at
+the period's end (the recorder's 60 s open interest matches it 5 minutes after the stamp). The
+day's last row, stamped 23:55, is the open interest at the day's close.
 
 Written to <data>/flow/um_metrics/<SYMBOL>.parquet; a run fetches only the days a
 symbol's file does not have yet. Polite: one GET a file (the zip's own CRC is checked),
@@ -219,6 +226,64 @@ def load(symbols: list[str] | None = None) -> pl.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# create_time check (T4)
+# ---------------------------------------------------------------------------
+
+KLINES = "https://data.binance.vision/data/futures/um/daily/klines/{s}/5m/{s}-5m-{d}.zip"
+LAGS = (-2, -1, 0, 1, 2)
+
+
+def stamp_lags(metrics: bytes, klines: bytes, lags=LAGS) -> dict[int, float]:
+    """{lag: correlation of log taker buy/sell ratios}: each metrics row against the 5-minute kline
+    opening `lag` periods after its create_time (taker buy volume over the rest). The best lag is
+    where create_time sits in the period: 0 when it is the period's open."""
+    m = pl.read_csv(io.BytesIO(metrics), infer_schema_length=0)
+    m = m.select(t=pl.col("create_time").str.strptime(pl.Datetime("us"), "%Y-%m-%d %H:%M:%S", strict=False)
+                 .dt.epoch("us"), r=pl.col("sum_taker_long_short_vol_ratio").cast(pl.Float64, strict=False))
+    k = pl.read_csv(io.BytesIO(klines), has_header=False, infer_schema_length=0)
+    if not k.is_empty() and not str(k[0, 0]).isdigit():
+        k = k.slice(1)
+    k = k.select(t=pl.col(k.columns[0]).cast(pl.Int64) * 1000, v=pl.col(k.columns[5]).cast(pl.Float64),
+                 b=pl.col(k.columns[9]).cast(pl.Float64)).filter(pl.col("v") > pl.col("b"))
+    k = k.select("t", kr=(pl.col("b") / (pl.col("v") - pl.col("b"))).log())
+    m = m.filter(pl.col("r") > 0).select("t", mr=pl.col("r").log())
+    out = {}
+    for lag in lags:
+        j = m.with_columns(t=pl.col("t") + lag * 300_000_000).join(k, on="t")
+        out[lag] = float(np.corrcoef(j["mr"], j["kr"])[0, 1]) if j.height > 10 else math.nan
+    return out
+
+
+def check_shift(symbols: list[str], around: date, days: int, fetch=get_zip) -> list[dict]:
+    """Per symbol and day from `days` before `around` to `days` after: the lag correlations and the best
+    lag. A one-period shift at `around` shows as a best lag that differs before and after."""
+    pacer = Pacer(4.0)
+    rows = []
+    for s in symbols:
+        for i in range(-days, days):
+            d = (around + timedelta(days=i)).isoformat()
+            m = fetch(BASE.format(s=s, d=d), pacer)
+            k = fetch(KLINES.format(s=s, d=d), pacer)
+            if not m or not k:
+                continue
+            c = stamp_lags(m, k)
+            ok = {g: v for g, v in c.items() if math.isfinite(v)}
+            rows.append({"symbol": s, "day": d, "after": i >= 0, **{f"lag{g:+d}": v for g, v in c.items()},
+                         "best": max(ok, key=ok.get) if ok else None})
+    return rows
+
+
+def shift_verdict(rows: list[dict]) -> dict:
+    """Per symbol the best lags before and after; shifted when they differ."""
+    out = {}
+    for s in dict.fromkeys(r["symbol"] for r in rows):
+        b = sorted({r["best"] for r in rows if r["symbol"] == s and not r["after"]} - {None})
+        a = sorted({r["best"] for r in rows if r["symbol"] == s and r["after"]} - {None})
+        out[s] = {"before": b, "after": a, "shifted": b != a}
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
@@ -274,7 +339,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--since", type=date.fromisoformat, default=FIRST_DAY)
     ap.add_argument("--top", type=int, default=120)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--check-shift", default="", help="symbols: check create_time against the 5-minute klines")
+    ap.add_argument("--around", type=date.fromisoformat, default=date(2026, 6, 25))
+    ap.add_argument("--days", type=int, default=14)
     a = ap.parse_args(argv)
+    if a.check_shift:
+        rows = check_shift([s for s in a.check_shift.split(",") if s], a.around, a.days)
+        for r in rows:
+            print(r["symbol"], r["day"], " ".join(f"{k} {v:.3f}" for k, v in r.items() if k.startswith("lag")),
+                  "best", r["best"])
+        v = shift_verdict(rows)
+        for s, x in v.items():
+            print(f"{s}: best lag before {x['before']}, after {x['after']}: {'SHIFTED' if x['shifted'] else 'no shift'}")
+        return 1 if any(x["shifted"] for x in v.values()) else 0
     run(a.panel, a.since, a.top, a.dry_run)
     return 0
 
