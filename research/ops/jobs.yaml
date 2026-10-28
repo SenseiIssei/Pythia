@@ -239,6 +239,16 @@ jobs:
     lock: heavy
     lock_wait: 2h
 
+  # L1 (research/lab/results/exec_dryrun_l1_prereg.md): the orders a 50 EUR Kraken spot account
+  # would place for the S1, S2, tsmom and onchain_longterm books, from Kraken's public AssetPairs,
+  # Ticker and daily closes (cached in exec/). DRY RUN: no key, no account, no order sent.
+  - name: exec-dryrun
+    description: EXPERIMENT dry run of a 50 EUR Kraken spot account per paper book (minimums, rounding, fees), after the books
+    depends_on: [paper, paper-tranches-filtered, paper-smallaccount, onchain-longterm]
+    command: python -m lab.exec.dryrun
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+
   # The SPY sleeve of the Crypto + SPY forward test (results/equity_sleeve_prereg.md):
   # a lab book of US shares that is always 100 % SPY. It runs every weekday and
   # publishes a new signal only on the first run in a calendar month, so the
