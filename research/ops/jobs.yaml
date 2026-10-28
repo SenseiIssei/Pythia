@@ -812,14 +812,17 @@ jobs:
   # X11 (results/model_upgrades.md). Added disabled; switch on (enabled: true,
   # then deploy_ops.sh) once the modules are deployed to /opt/pythia-lab.
   # Shadow only: nothing they write sizes, places or vetoes an order.
+  # T15 (results/analyst_local_prereg.md, e1b): no API credit since 2026-10-28; the local chain (lab.ai.local) answers,
+  # the owner's PC through the relay (local-llm.env) else the VPS model at a few tokens a second (20 min a call, one
+  # retry, 50 min for both). No heavy lock: it loads 32 coins' daily bars, no panel. Exits 1 when no backend answered.
   - name: ai-analyst
-    description: weekly Claude analyst (Sonnet, batch), ranks the Alpaca coins on the M2 v2 book's rebalance day, scored by rank IC like M2
+    description: weekly analyst on the local model (the owner's PC through the relay, else the VPS model), ranks the Alpaca coins on the M2 v2 book's rebalance day, scored by rank IC like M2 per model
     depends_on: [paper-ls-v2]
     command: python -m lab.ai.analyst
     network: host
-    env_file: /etc/pythia/alerts.env
+    env_file: [/etc/pythia/alerts.env, '/etc/pythia/local-llm.env?']
     resources: {cpus: 1, memory: 2g}
-    timeout: 75m
+    timeout: 60m
 
   - name: news-collect
     description: crypto headlines from publisher RSS feeds (titles only), kept per UTC day for the news sentiment

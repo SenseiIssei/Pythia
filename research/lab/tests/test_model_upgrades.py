@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import math
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
 
+from lab import metrics
 from lab.ai import analyst, engine, news
 from lab.experiments import m1_flow, m2_v3, m8_trim
 from lab.models import core, daily, m8_direction, m8_upper
@@ -220,20 +222,61 @@ def bars(n=400, last="2026-10-19", drift=0.001, vol=0.03, seed=0):
 COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA"]
 
 
-def analyst_answer(cs, cost=0.02):
-    return {"json": {"ranking": [{"coin": c, "expectedRank": i + 1, "pUp7d": 0.52, "reason": f"{c} — calm"}
-                                 for i, c in enumerate(cs)], "market": "flat"},
-            "model": engine.REVIEW, "servedBy": engine.REVIEW, "costUsd": cost, "batchId": "b1"}
+def analyst_text(cs, ranks=None, drop=(), fence=False):
+    """A local model's answer: every coin of `cs` (minus `drop`) with its rank (by default 1..n in order)."""
+    ranks = ranks or list(range(1, len(cs) + 1))
+    t = json.dumps({"ranking": [{"coin": c, "expectedRank": r, "pUp7d": 0.52, "reason": f"{c} \u2014 calm"}
+                                for c, r in zip(cs, ranks) if c not in drop], "market": "flat"})
+    return f"```json\n{t}\n```" if fence else t
 
 
-def test_analyst_answer_is_checked_and_renumbered():
-    obj = {"ranking": [{"coin": "eth", "expectedRank": 5, "pUp7d": 0.5, "reason": "x"},
-                       {"coin": "BTC", "expectedRank": 5, "pUp7d": 0.6, "reason": "y"},
-                       {"coin": "XYZ", "expectedRank": 1, "pUp7d": 0.6, "reason": "z"},
-                       {"coin": "SOL", "expectedRank": 2, "pUp7d": 1.4, "reason": "z"}]}
-    got, problems = analyst.parse_answer(obj, ["BTC", "ETH", "SOL"])
-    assert got["BTC"]["rank"] == 1 and got["ETH"]["rank"] == 2      # ties by listing order
-    assert "SOL" not in got and any("XYZ" in p for p in problems) and any("no rank for SOL" in p for p in problems)
+class FakeChat:
+    """lab.ai.local.chat with a fake backend: the answers in turn (a text, or None: no backend answered)."""
+
+    def __init__(self, *answers, backend="vps"):
+        self.answers = list(answers)
+        self.backend = backend
+        self.calls = []
+
+    def __call__(self, messages, use, max_tokens=160, deadline=None, timeout=45.0, env=None, bks=None):
+        self.calls.append({"messages": messages, "use": use, "max_tokens": max_tokens, "bks": bks})
+        a = self.answers.pop(0) if self.answers else None
+        return None if a is None else {"text": a, "backend": self.backend, "tokens": 900, "seconds": 240.0}
+
+
+EM = "\u2014"  # the em dash, which the lab never writes
+VPS_ENV = {"PYTHIA_LOCAL_LLM_URL": "http://127.0.0.1:9"}
+
+
+def run_analyst(lab, monkeypatch, chat, now=NOW, env=None):
+    monkeypatch.setattr(analyst, "coins", lambda: COINS)
+    data = {c: bars(seed=i) for i, c in enumerate(COINS)}
+    return analyst.run(now, loader=lambda c: data[c], chat=chat, env=VPS_ENV if env is None else env)
+
+
+def skips(lab):
+    p = lab / "data" / "ai" / "analyst_skips.jsonl"
+    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_the_strict_parser_names_the_first_problem_and_repairs_nothing():
+    cs = ["BTC", "ETH", "SOL"]
+    got, why = analyst.parse_strict(analyst_text(cs, fence=True), cs)
+    assert why == "" and [got[c]["rank"] for c in cs] == [1, 2, 3] and EM not in got["BTC"]["reason"]
+    assert analyst.parse_strict(analyst_text(cs, drop=("SOL",)), cs) == (None, "no entry for SOL")
+    assert analyst.parse_strict(analyst_text(cs, ranks=[1, 1, 2]), cs)[1] == "rank 1 is given twice (BTC and ETH)"
+    assert analyst.parse_strict(analyst_text(cs, ranks=[1, 2, 4]), cs)[1].startswith("SOL: expectedRank 4")
+    assert analyst.parse_strict(analyst_text(cs, ranks=[1, 2, 2.5]), cs)[0] is None
+    assert analyst.parse_strict(analyst_text(cs + ["XYZ"]), cs)[1] == "XYZ was not asked for"
+    twice = json.loads(analyst_text(cs))
+    twice["ranking"].append(dict(twice["ranking"][0]))
+    assert analyst.parse_strict(json.dumps(twice), cs)[1] == "BTC is listed twice"
+    bad_p = json.loads(analyst_text(cs))
+    bad_p["ranking"][1]["pUp7d"] = 1.4
+    assert analyst.parse_strict(json.dumps(bad_p), cs)[1].startswith("ETH: pUp7d 1.4")
+    assert analyst.parse_strict('{"ranking": [', cs)[1].startswith("not valid JSON")
+    assert analyst.parse_strict("Here is my ranking: BTC first", cs)[0] is None
+    assert analyst.parse_strict('{"market": "x"}', cs)[1] == 'no "ranking" list in the JSON object'
 
 
 def test_the_fact_sheet_reads_the_past_only():
@@ -244,20 +287,132 @@ def test_the_fact_sheet_reads_the_past_only():
     assert analyst.features(b[:50]) is None
 
 
-def test_the_analyst_calls_once_records_and_scores(lab, monkeypatch):
+def test_the_prompt_fits_the_vps_models_context_with_its_answer():
+    from lab import universe
+    cs = list(universe.ALPACA)
+    feats = {c: analyst.features(bars(seed=i)) for i, c in enumerate(cs)}
+    feats[cs[0]] = {**feats[cs[0]], "ref_day": "2026-10-18"}
+    p = analyst.build_prompt("2026-10-20", feats, {c: 0.0003 for c in cs}, ["BTC DVOL 50"])
+    assert f"{cs[1]} | " in p and "| reference 2026-10-18" in p and p.count("reference 2026-10-") == 1
+    assert analyst.est_tokens(analyst.SYSTEM + p) + analyst.max_out(len(cs)) < analyst.VPS_CONTEXT
+    assert EM not in analyst.SYSTEM + p
+
+
+def test_a_good_answer_is_recorded_with_its_backend_and_model_and_one_trial(lab, monkeypatch):
+    chat = FakeChat(analyst_text(COINS))
+    assert run_analyst(lab, monkeypatch, chat) == 0
+    assert len(chat.calls) == 1 and chat.calls[0]["use"] == "analyst"
+    assert chat.calls[0]["max_tokens"] == analyst.max_out(len(COINS)) and chat.calls[0]["bks"][0]["name"] == "vps"
+    rows = analyst.read_rows()
+    assert len(rows) == len(COINS) and [r["rank"] for r in rows] == list(range(1, 7))
+    assert {(r["backend"], r["model"]) for r in rows} == {("vps", "qwen3-4b-instruct")}
+    assert all(EM not in r["reason"] for r in rows)
+    ids = [r["id"] for r in metrics.read_registry()]
+    assert "hand:t15:analyst_e1b_vps_qwen3-4b-instruct" in ids and skips(lab) == []
+    rep = json.loads((lab / "data" / "reports" / analyst.NAME / "latest.json").read_text())
+    assert rep["last_model"] == "qwen3-4b-instruct" and rep["last_backend"] == "vps" and rep["scored"] == 0
+    assert rep["current_series"] == "vps:qwen3-4b-instruct" and "qwen3-4b-instruct (vps)" in rep["headline"]
+    # Not due again the next day.
+    assert run_analyst(lab, monkeypatch, chat, NOW + 86_400_000) == 0 and len(chat.calls) == 1
+
+
+def test_a_missing_coin_twice_skips_the_week_and_fills_nothing(lab, monkeypatch):
+    chat = FakeChat(analyst_text(COINS, drop=("SOL",)), analyst_text(COINS, drop=("SOL",)))
+    assert run_analyst(lab, monkeypatch, chat) == 1
+    assert len(chat.calls) == 2 and "no entry for SOL" in chat.calls[1]["messages"][1]["content"]
+    assert chat.calls[1]["bks"][0]["name"] == "vps", "the retry asks the same backend"
+    assert analyst.read_rows() == []
+    sk = skips(lab)
+    assert len(sk) == 1 and sk[0]["backend"] == "vps" and "on the retry no entry for SOL" in sk[0]["why"]
+    assert not [r for r in metrics.read_registry() if r["id"].startswith(analyst.TRIAL_PREFIX)]
+    # The week stays skipped: no call the next day.
+    assert run_analyst(lab, monkeypatch, FakeChat(analyst_text(COINS)), NOW + 86_400_000) == 0
+    assert analyst.read_rows() == []
+
+
+def test_a_duplicate_rank_is_asked_again_with_the_problem_named(lab, monkeypatch):
+    chat = FakeChat(analyst_text(COINS, ranks=[1, 1, 2, 3, 4, 5]), analyst_text(COINS))
+    assert run_analyst(lab, monkeypatch, chat) == 0
+    retry = chat.calls[1]
+    assert retry["use"] == "analyst:retry" and "rank 1 is given twice (BTC and ETH)" in retry["messages"][1]["content"]
+    assert retry["messages"][0]["content"] == analyst.SYSTEM and len(retry["messages"]) == 2
+    assert [r["rank"] for r in analyst.read_rows()] == list(range(1, 7)) and skips(lab) == []
+
+
+def test_broken_json_then_a_good_retry_is_recorded(lab, monkeypatch):
+    chat = FakeChat('{"ranking": [{"coin": "BTC", "expectedRank": 1,', analyst_text(COINS, fence=True))
+    assert run_analyst(lab, monkeypatch, chat) == 0
+    assert "not valid JSON" in chat.calls[1]["messages"][1]["content"]
+    assert len(analyst.read_rows()) == len(COINS)
+
+
+def test_no_backend_answering_is_a_red_job_and_a_skipped_week(lab, monkeypatch):
+    chat = FakeChat(None)
+    assert run_analyst(lab, monkeypatch, chat) == 1
+    assert len(chat.calls) == 1 and analyst.read_rows() == []
+    assert skips(lab)[0]["why"] == "no backend answered" and skips(lab)[0]["backend"] is None
+    bad_then_none = FakeChat(analyst_text(COINS, ranks=[2] * 6), None)
+    assert run_analyst(lab, monkeypatch, bad_then_none, NOW + 9 * 86_400_000) == 1, "a bad answer, no answer on the retry"
+    assert "no answer on the retry" in skips(lab)[1]["why"] and analyst.read_rows() == []
+    rep = json.loads((lab / "data" / "reports" / analyst.NAME / "latest.json").read_text())
+    assert rep["last_skip"]["why"] == skips(lab)[1]["why"]
+    # The model switched off: nothing is asked, the week is skipped.
+    off = FakeChat(analyst_text(COINS))
+    assert run_analyst(lab, monkeypatch, off, NOW + 20 * 86_400_000, env={"PYTHIA_LOCAL_LLM": "off"}) == 1
+    assert off.calls == [] and "off" in skips(lab)[2]["why"]
+
+
+def test_each_backend_and_model_is_its_own_series_and_claude_stays_apart(lab, monkeypatch):
+    claude = [{"date": "2026-10-01", "made_ms": NOW - 30 * 86_400_000, "coin": c, "ref_day": "2026-09-30",
+               "ref_close": 100.0, "rank": i + 1, "p_up": 0.5, "p_base": 0.5, "vol30": 0.5, "r28": 0.0,
+               "model": "claude-sonnet-5-5", "cost_usd_call": 0.02} for i, c in enumerate(COINS)]
+    from lab.ai import score
+    score.append_predictions(claude, analyst.path())
+    env = {**VPS_ENV, "PYTHIA_LOCAL_LLM_RELAY_URL": "http://127.0.0.1:9", "PYTHIA_LOCAL_LLM_TOKEN": "t",
+           "PYTHIA_LOCAL_LLM_RELAY_MODEL": "big-model"}
+    monkeypatch.setattr(analyst.local, "relay_online", lambda e=None: (bool((e or {}).get("PYTHIA_LOCAL_LLM_RELAY_URL")), ""))
+    assert run_analyst(lab, monkeypatch, FakeChat(analyst_text(COINS), backend="relay"), env=env) == 0
+    assert run_analyst(lab, monkeypatch, FakeChat(analyst_text(COINS)), NOW + 9 * 86_400_000) == 0
+    rows = analyst.read_rows()
+    assert {analyst.series(r) for r in rows} == {"claude", "relay:big-model", "vps:qwen3-4b-instruct"}
+    rep = json.loads((lab / "data" / "reports" / analyst.NAME / "latest.json").read_text())
+    assert set(rep["series"]) == {"claude", "relay:big-model", "vps:qwen3-4b-instruct"}
+    assert all(s["recorded_weeks"] == 1 for s in rep["series"].values()) and rep["current_series"] == "vps:qwen3-4b-instruct"
+    assert rep["cost_usd_total"] == pytest.approx(0.02)
+    ids = {r["id"] for r in metrics.read_registry() if r["id"].startswith(analyst.TRIAL_PREFIX)}
+    assert ids == {"hand:t15:analyst_e1b_relay_big-model", "hand:t15:analyst_e1b_vps_qwen3-4b-instruct"}
+
+
+def test_the_dry_run_prints_the_prompt_size_and_asks_nothing(lab, monkeypatch, capsys):
     monkeypatch.setattr(analyst, "coins", lambda: COINS)
     data = {c: bars(seed=i) for i, c in enumerate(COINS)}
-    fake = Fake(analyst_answer(COINS))
-    assert analyst.run(NOW, loader=lambda c: data[c], poster=fake) == 0
-    assert len(fake.calls) == 1 and fake.calls[0]["model"] == engine.REVIEW and fake.calls[0]["batch"]
-    rows = analyst.read_rows()
-    assert len(rows) == len(COINS) and {r["rank"] for r in rows} == set(range(1, 7))
-    assert "—" not in rows[0]["reason"]
-    # Not due again the next day.
-    assert analyst.run(NOW + 86_400_000, loader=lambda c: data[c], poster=fake) == 0
-    assert len(fake.calls) == 1
-    rep = json.loads((lab / "data" / "reports" / analyst.NAME / "latest.json").read_text())
-    assert rep["cost_usd_total"] == pytest.approx(0.02) and rep["scored"] == 0
+    chat = FakeChat(analyst_text(COINS))
+    assert analyst.run(NOW, dry_run=True, loader=lambda c: data[c], chat=chat, env=VPS_ENV) == 0
+    out = capsys.readouterr().out
+    assert chat.calls == [] and "[dry run]" in out and "input tokens" in out and "context is 4,096" in out
+    assert analyst.read_rows() == [] and skips(lab) == []
+
+
+def test_the_analyst_job_runs_on_the_local_chain():
+    from lab.ops import jobs
+    j = jobs.load_table(Path(__file__).resolve().parents[2] / "ops" / "jobs.yaml").jobs["ai-analyst"]
+    assert "/etc/pythia/local-llm.env?" in j["env_file"] and j["network"] == "host"
+    assert not j.get("lock") and j["command"] == "python -m lab.ai.analyst" and j["depends_on"] == ["paper-ls-v2"]
+    assert j["timeout"] in ("60m", 3600) and "Claude" not in j["description"]
+
+
+def test_the_briefing_names_the_model_that_answered():
+    from lab.ops import briefing
+    rep = {"last_model": "qwen3-4b-instruct", "last_backend": "vps", "last_ref_day": "2026-10-27",
+           "last_made_ms": NOW, "scored": 3, "min_weeks": 26}
+    line = briefing.analyst_line(rep, "de")
+    assert line.text == "qwen3-4b-instruct (VPS) hat für 2026-10-27 geantwortet, 3 von 26 Wochen bewertet"
+    assert "big-model (PC)" in briefing.analyst_line({**rep, "last_model": "big-model", "last_backend": "relay"}, "en").text
+    skipped = {**rep, "last_skip": {"made_ms": NOW + 1, "ref_day": "2026-11-03", "backend": "vps", "why": "no entry for SOL"}}
+    assert briefing.analyst_line(skipped, "en").text == "2026-11-03 skipped (VPS): no entry for SOL"
+    assert briefing.analyst_line(None, "en") is None and briefing.analyst_line({"scored": 0}, "en") is None
+    lines = briefing.lab_section(None, NOW, "en", root=Path("/nonexistent"), analyst=rep)
+    assert [x.text for x in lines] == ["qwen3-4b-instruct (VPS) answered for 2026-10-27, 3 of 26 weeks scored"]
 
 
 def test_analyst_weeks_are_scored_like_m2():

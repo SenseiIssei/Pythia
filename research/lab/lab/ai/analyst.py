@@ -1,25 +1,29 @@
-"""The weekly Claude analyst (X11 e1): one Sonnet call through the engine's
-metered endpoint (Batches API) ranks every Alpaca coin by its expected 7-day
+"""The weekly analyst (X11 e1, since T15 e1b): one call a week ranks every Alpaca coin by its expected 7-day
 return, scored exactly like M2 (rank IC) in shadow.
 
-Pre-registered in results/model_upgrades_prereg.md (e1). The model sees a
-compact fact sheet per coin (7, 30 and 90-day returns, 30-day vol, distance
-to the 52-week high and the 200-day mean, 28-day volume trend, 7-day funding
-where a perp exists) and a few market lines (BTC, the Coinbase and Korean
-premiums, stablecoin growth, DVOL). No forecast of ours is shown. It answers
-per coin pUp7d (probability the close 7 days after the reference close is
-higher) and expectedRank (1 = the best 7-day return of the listed coins).
+e1 (results/model_upgrades_prereg.md) asked Claude Sonnet through the engine's metered endpoint until the API
+credit ran out (2026-10-28). e1b (results/analyst_local_prereg.md) asks through lab.ai.local, the chain the
+briefing and the news use: the owner's large model on his PC through the relay when it is online, else the VPS
+model (llama.cpp, Qwen3 4B Instruct). No API credit, no key. Each backend and model is its own series, scored on
+its own; the Claude weeks stay as they are and are never mixed in.
 
-Every answer is appended to <data>/ai/analyst.jsonl before its week starts,
-with the references at the same moment (minus the 30-day vol, the 28-day
-return, the base rate). After the week: rank IC of minus expectedRank
-against the realised 7-day log return, next to the low-vol rank, 28-day
-momentum and, where the M2 shadow recorded the same reference day, M2's rank;
-Brier of pUp7d against the base rate. Pass (after at least 26 scored weeks):
-mean weekly IC above 0 with t above 2 and above the low-vol rank's with a
+The model sees a compact fact sheet per coin (7, 30 and 90-day returns, 30-day vol, distance to the 52-week high
+and the 200-day mean, 28-day volume trend, 7-day funding where a perp exists) and a few market lines (BTC, the
+Coinbase and Korean premiums, stablecoin growth, DVOL). No forecast of ours is shown. It answers per coin pUp7d
+(probability the close 7 days after the reference close is higher) and expectedRank (1 = the best 7-day return
+of the listed coins), one JSON object (SCHEMA). The answer is checked strictly (valid JSON, every coin once,
+ranks 1 to n each once, pUp7d from 0 to 1); a bad one is asked again once on the same backend with the problem
+named, then the week is skipped and logged in <data>/ai/analyst_skips.jsonl, never filled in.
+
+Every answer is appended to <data>/ai/analyst.jsonl before its week starts, with its backend and model and the
+references at the same moment (the 30-day vol, the 28-day return, the base rate). After the week: rank IC of
+minus expectedRank against the realised 7-day log return, next to the low-vol rank, 28-day momentum and, where
+the M2 shadow recorded the same reference day, M2's rank; Brier of pUp7d against the base rate. Pass (after at
+least 26 scored weeks of one series): mean weekly IC above 0 with t above 2 and above the low-vol rank's with a
 paired t above 2. Shadow only: nothing reads it to trade.
 
-  python -m lab.ai.analyst             weekly, after the M2 v2 paper book (jobs.yaml: ai-analyst)
+  python -m lab.ai.analyst             weekly, after the M2 v2 paper book (jobs.yaml: ai-analyst); exits 1 when
+                                       no backend answered or the answer was bad twice
   python -m lab.ai.analyst --dry-run   print the prompt and its size, call nothing
   python -m lab.ai.analyst --force     another call this week
   python -m lab.ai.analyst --score     rescore only, no call
@@ -29,18 +33,24 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ..ops import notify
-from . import engine, score
+from . import local, score
 
 NAME = "ai_analyst"
 HORIZON = 7
 MIN_CLOSES = 120
-MAX_TOKENS = 6000
-BATCH_WAIT_SEC = 50 * 60
+OUT_PER_COIN = 40       # answer tokens a coin (the JSON entry and a short reason), plus OUT_BASE
+OUT_BASE = 120
+CALL_TIMEOUT = 20 * 60  # one call: the VPS model writes 2 to 9 tokens a second (ai/local_llm.jsonl)
+BUDGET_SEC = 50 * 60    # every call of a run together (jobs.yaml: timeout 60m)
+TRIAL_PREFIX = "hand:t15:analyst_e1b"
+VPS_CONTEXT = 4096      # research/ops/local-llm.sh: -c 4096, prompt and answer together
 MIN_WEEKS = 26
 PASS_T = 2.0
 EVERY_DAYS = 6          # at most one call in this many days unless --force
@@ -61,12 +71,14 @@ each used once. Only the order is scored (rank correlation with the realised ret
 - pUp7d: the probability that the coin's close 7 days after the reference close is ABOVE it. Scored with the \
 Brier score against the coin's base rate of up weeks; without a clear reason stay between 0.45 and 0.55, never \
 beyond 0.25 to 0.75. Coins move together: a market-wide view moves every coin's number the same way.
-- reason: one plain sentence, at most 20 words, naming the facts behind the rank.
+- reason: at most 8 plain words naming the facts behind the rank.
 
 Known facts about coin returns over a week, from the lab's own studies: relative ranks are somewhat \
 predictable, absolute direction barely; low-volatility coins have tended to beat high-volatility ones; \
 coins that rose most over the last few weeks have not reliably kept rising. Use your judgment on the facts \
-given. Do not use em dashes. Answer with the JSON object only, in the schema given."""
+given. Do not use em dashes. Answer with one JSON object only, no other text, every coin under RANK once:
+{"ranking": [{"coin": "BTC", "expectedRank": 1, "pUp7d": 0.52, "reason": "..."}, ...], "market": "one short \
+sentence"}"""
 
 SCHEMA = {
     "type": "object",
@@ -190,62 +202,154 @@ def funding7(coin: str) -> float | None:
         return None
 
 
-def pct(v, nd=1) -> str:
-    return "n/a" if v is None else f"{100 * v:+.{nd}f} %"
+def num(v, scale=100.0, nd=1) -> str:
+    return "n/a" if v is None else f"{scale * v:+.{nd}f}"
 
 
 def build_prompt(day: str, feats: dict[str, dict], fund: dict[str, float | None], market: list[str]) -> str:
-    lines = [f"DATE: {day} (UTC). Horizon: 7 days from each coin's reference close.", "",
-             "COINS (r = return to the reference close; vol30 annualised; volume trend = 28-day over 180-day "
-             "mean volume, log; funding = sum over the last 7 days, perpetual, a long pays when positive):"]
+    """The fact sheet as one table, a row per coin (e1 wrote a sentence per coin with its close: the VPS model's
+    4,096 tokens of context hold the prompt and the answer only this way; the close itself is left out, it says
+    nothing about a 7-day rank, and the reference day is named once unless a coin's differs)."""
+    ref = max(f["ref_day"] for f in feats.values())
+    lines = [f"DATE: {day} (UTC). Horizon: 7 days from each coin's reference close ({ref} unless a row names "
+             "another).", "",
+             "COINS, one row each: coin | r7 | r30 | r90 (returns to the reference close, %) | vol30 (annualised, %) | "
+             "vs 52w high (%) | vs 200d mean (%) | volume trend (28-day over 180-day mean volume, log) | funding 7d "
+             "(%, perpetual, sum over the last 7 days, a long pays when positive)"]
     for c, f in feats.items():
-        lines.append(f"- {c}: close {f['ref_close']:,.6g} on {f['ref_day']}, r7 {pct(f['r7'])}, r30 {pct(f['r30'])}, "
-                     f"r90 {pct(f['r90'])}, vol30 {100 * f['vol30']:.0f} %, vs 52w high {pct(f['vs_hi52'])}, "
-                     f"vs 200d mean {pct(f['vs_ma200'])}, volume trend "
-                     f"{'n/a' if f['volume_trend'] is None else format(f['volume_trend'], '+.2f')}, funding 7d "
-                     f"{'n/a' if fund.get(c) is None else format(100 * fund[c], '+.3f') + ' %'}")
+        lines.append(f"{c} | {num(f['r7'])} | {num(f['r30'])} | {num(f['r90'])} | {100 * f['vol30']:.0f} | "
+                     f"{num(f['vs_hi52'])} | {num(f['vs_ma200'])} | {num(f['volume_trend'], 1, 2)} | "
+                     f"{num(fund.get(c), 100, 3)}" + ("" if f["ref_day"] == ref else f" | reference {f['ref_day']}"))
     if market:
         lines += ["", "MARKET:"] + ["- " + m for m in market]
     lines += ["", f"RANK ({len(feats)} coins): " + ", ".join(feats)]
     return "\n".join(lines)
 
 
-def parse_answer(obj, cs: list[str]) -> tuple[dict[str, dict], list[str]]:
-    """{coin: {rank, p, reason}} and problems. Unknown or duplicate coins and bad numbers are
-    dropped and named; ranks are re-numbered 1..n by the given order (ties by listing order)."""
-    problems: list[str] = []
+def est_tokens(text: str) -> int:
+    """Input tokens, roughly: Qwen's tokenizer writes every digit as one token, the rest about four characters."""
+    d = sum(ch.isdigit() for ch in text)
+    return int(d + (len(text) - d) / 4)
+
+
+FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
+
+
+def parse_strict(text: str, cs: list[str]) -> tuple[dict[str, dict] | None, str]:
+    """({coin: {rank, p, reason}}, "") when the answer is one JSON object (a ```json fence around it is fine) whose
+    ranking holds every asked coin once with an integer expectedRank from 1 to n, each rank once, and pUp7d from 0
+    to 1; else (None, the first problem in plain words, named to the model on the retry). Nothing is repaired."""
+    t = (text or "").strip()
+    m = FENCE.match(t)
+    t = m.group(1) if m else t
+    try:
+        obj = json.loads(t)
+    except ValueError as e:
+        return None, f"not valid JSON ({getattr(e, 'msg', 'unreadable')} at character {getattr(e, 'pos', '?')})"
     if not isinstance(obj, dict) or not isinstance(obj.get("ranking"), list):
-        return {}, ["no ranking list"]
-    asked, got = set(cs), {}
+        return None, 'no "ranking" list in the JSON object'
+    n, asked, got, by_rank = len(cs), set(cs), {}, {}
     for it in obj["ranking"]:
         if not isinstance(it, dict):
-            continue
+            return None, "an entry of ranking is not an object"
         c = str(it.get("coin") or "").strip().upper()
-        if c not in asked or c in got:
-            problems.append(f"{c or '?'} {'twice' if c in got else 'was not asked for'}")
-            continue
-        try:
-            r, p = float(it.get("expectedRank")), float(it.get("pUp7d"))
-        except (TypeError, ValueError):
-            problems.append(f"{c}: not a number")
-            continue
-        if not (math.isfinite(r) and math.isfinite(p) and 0 <= p <= 1):
-            problems.append(f"{c}: rank {r} or pUp7d {p} out of range")
-            continue
-        got[c] = {"raw_rank": r, "p": p, "reason": notify.nodash(" ".join(str(it.get("reason") or "").split()))[:200]}
-    order = sorted(got, key=lambda c: (got[c]["raw_rank"], cs.index(c)))
-    for i, c in enumerate(order):
-        got[c]["rank"] = i + 1
+        if c not in asked:
+            return None, f"{c or 'an entry without a coin'} was not asked for"
+        if c in got:
+            return None, f"{c} is listed twice"
+        r, p = it.get("expectedRank"), it.get("pUp7d")
+        if isinstance(r, bool) or not isinstance(r, (int, float)) or not math.isfinite(r) or r != int(r) \
+                or not 1 <= r <= n:
+            return None, f"{c}: expectedRank {r!r} is not an integer from 1 to {n}"
+        if isinstance(p, bool) or not isinstance(p, (int, float)) or not math.isfinite(p) or not 0 <= p <= 1:
+            return None, f"{c}: pUp7d {p!r} is not a number from 0 to 1"
+        if int(r) in by_rank:
+            return None, f"rank {int(r)} is given twice ({by_rank[int(r)]} and {c})"
+        by_rank[int(r)] = c
+        got[c] = {"rank": int(r), "p": float(p),
+                  "reason": notify.nodash(" ".join(str(it.get("reason") or "").split()))[:200]}
     missing = [c for c in cs if c not in got]
     if missing:
-        problems.append("no rank for " + ", ".join(missing))
-    return got, problems
+        return None, "no entry for " + ", ".join(missing)
+    return got, ""
+
+
+def max_out(n: int) -> int:
+    return OUT_BASE + OUT_PER_COIN * n
+
+
+def ask(prompt: str, cs: list[str], bks: list[dict], chat=None, deadline: float | None = None
+        ) -> tuple[dict[str, dict] | None, dict | None, str]:
+    """(answer checked by parse_strict, {"backend", "model", ...} of the call it came from, why not) through the
+    local chain (lab.ai.local.chat: the relay first when online, else the VPS model). A bad answer is asked again
+    once on the same backend with the problem named (the first answer is not sent back: the VPS model's context
+    holds the prompt and one answer, not two); then (None, the call, why)."""
+    chat = chat or local.chat
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]
+    ans = chat(msgs, "analyst", max_out(len(cs)), deadline, timeout=CALL_TIMEOUT, bks=bks)
+    if ans is None:
+        return None, None, "no backend answered"
+    used = [b for b in bks if b["name"] == ans["backend"]]
+    ans = {**ans, "model": used[0]["model"] if used else ans["backend"]}
+    got, why = parse_strict(ans["text"], cs)
+    if got is not None:
+        return got, ans, ""
+    notify.say(f"analyst: {ans['backend']} answered badly ({why}), asked once more")
+    again = prompt + (f"\n\nYOUR LAST ANSWER COULD NOT BE USED: {why}. Answer again with the JSON object only: "
+                      f"every coin under RANK once, expectedRank 1 to {len(cs)} each used once, pUp7d from 0 to 1.")
+    ans2 = chat([msgs[0], {"role": "user", "content": again}], "analyst:retry", max_out(len(cs)), deadline,
+                timeout=CALL_TIMEOUT, bks=used or bks)
+    if ans2 is None:
+        return None, ans, f"{why}; no answer on the retry"
+    ans2 = {**ans2, "model": ans["model"]}
+    got, why2 = parse_strict(ans2["text"], cs)
+    return (got, ans2, "") if got is not None else (None, ans2, f"{why}; on the retry {why2}")
+
+
+def series(r: dict) -> str:
+    """A record's series: e1's Claude weeks (no backend) are "claude", e1b's each backend and model its own."""
+    return f"{r['backend']}:{r.get('model') or '?'}" if r.get("backend") else "claude"
+
+
+def trial(backend: str, model: str) -> dict:
+    """The series' one trial in R5's registry (counted only), registered before its first record."""
+    slug = re.sub(r"[^a-z0-9.]+", "-", str(model).lower()).strip("-")
+    return {"id": f"{TRIAL_PREFIX}_{backend}_{slug}", "family": "hand", "n": 1, "sharpe": None, "var": None,
+            "source": "results/analyst_local_prereg.md (T15 e1b, weekly rank IC, counted only)"}
+
+
+def register_trial(backend: str, model: str) -> None:
+    from .. import metrics
+    try:
+        metrics.register([trial(backend, model)])
+    except OSError as e:
+        notify.say(f"analyst: the registry could not be written ({e}); the trial counts when it can", err=True)
 
 
 # ---------------------------------------------------------------- record and score
 
 def path() -> Path:
     return score.ai_dir() / "analyst.jsonl"
+
+
+def skips_path() -> Path:
+    return score.ai_dir() / "analyst_skips.jsonl"
+
+
+def read_skips() -> list[dict]:
+    try:
+        text = skips_path().read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("made_ms"):
+            out.append(r)
+    return out
 
 
 def read_rows() -> list[dict]:
@@ -376,15 +480,17 @@ def due(now_ms: int, rows: list[dict], force: bool) -> tuple[bool, str]:
 
 
 def run(now_ms: int | None = None, dry_run: bool = False, force: bool = False, only_score: bool = False,
-        loader=lake_bars, poster=None) -> int:
+        loader=lake_bars, chat=None, env: dict | None = None) -> int:
     now = now_ms or notify.clock_ms()
     day = datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d")
     rows = read_rows()
+    skips = read_skips()
     cs = coins()
     bars = bars_for(sorted(set(cs) | {r["coin"] for r in rows}), loader)
     rep = notify.reports_root() / NAME
+    code = 0
     if not only_score:
-        ok, why = due(now, rows, force or dry_run)
+        ok, why = due(now, rows + skips, force or dry_run)
         if not ok:
             notify.say(f"analyst: not due ({why})")
         else:
@@ -396,46 +502,60 @@ def run(now_ms: int | None = None, dry_run: bool = False, force: bool = False, o
             prompt = build_prompt(day, feats, fund, market_lines())
             if dry_run:
                 notify.say(SYSTEM + "\n\n" + prompt)
-                notify.say(f"\n[dry run] about {(len(SYSTEM) + len(prompt)) // 4:,} input tokens, at most {MAX_TOKENS} out")
+                notify.say(f"\n[dry run] {len(SYSTEM) + len(prompt):,} characters, about {est_tokens(SYSTEM + prompt):,} "
+                           f"input tokens (a digit counted as one), at most {max_out(len(feats)):,} out; the VPS "
+                           f"model's context is {VPS_CONTEXT:,}")
                 return 0
-            try:
-                ans = engine.complete("analyst", SYSTEM, prompt, MAX_TOKENS,
-                                      model=engine.model_for("analyst", engine.REVIEW), schema=SCHEMA,
-                                      effort=engine.effort_for("analyst", "medium"), batch=True,
-                                      batch_wait_sec=BATCH_WAIT_SEC, poster=poster)
-            except engine.AiError as e:
-                notify.say(f"no analyst call: {e}", err=e.kind not in ("budget", "nokey"))
-                return 0 if e.kind in ("budget", "nokey") else 1
-            got, problems = parse_answer(ans.get("json"), list(feats))
-            for p in problems:
-                notify.say(f"analyst: {p}", err=True)
-            cost = float(ans.get("costUsd") or 0.0)
-            new = []
-            for c, g in got.items():
-                f = feats[c]
-                comp = score.comparators([(x["day"], x["close"]) for x in bars[c]])
-                new.append({"date": day, "made_ms": now, "coin": c, "ref_day": f["ref_day"], "ref_close": f["ref_close"],
-                            "rank": g["rank"], "n": len(got), "p_up": g["p"], "reason": g["reason"],
-                            "vol30": f["vol30"], "r28": f["r28"], "p_base": comp["base"],
-                            "model": ans.get("servedBy") or ans.get("model") or engine.REVIEW,
-                            "cost_usd_call": cost})
-            score.append_predictions(new, path())
-            rows += new
-            notify.say(f"analyst {day}: {len(new)} coins ranked, ${cost:.4f}"
-                       f"{' (batch)' if ans.get('batchId') else ''}")
-    sc = score_rows(rows, bars, m2_ranks())
+            bks = local.backends(env)
+            got, ans, why = (ask(prompt, list(feats), bks, chat, time.monotonic() + BUDGET_SEC) if bks else
+                             (None, None, "the local model is off (PYTHIA_LOCAL_LLM)"))
+            if got is None:
+                skip = {"date": day, "made_ms": now, "ref_day": max(f["ref_day"] for f in feats.values()),
+                        "backend": ans and ans["backend"], "model": ans and ans["model"], "why": why}
+                score.append_predictions([skip], skips_path())
+                skips.append(skip)
+                notify.say(f"analyst {day}: week skipped, {why}", err=True)
+                code = 1  # the job turns red; the week stays empty
+            else:
+                register_trial(ans["backend"], ans["model"])     # before the series' first record
+                new = []
+                for c, g in got.items():
+                    f = feats[c]
+                    comp = score.comparators([(x["day"], x["close"]) for x in bars[c]])
+                    new.append({"date": day, "made_ms": now, "coin": c, "ref_day": f["ref_day"],
+                                "ref_close": f["ref_close"], "rank": g["rank"], "n": len(got), "p_up": g["p"],
+                                "reason": g["reason"], "vol30": f["vol30"], "r28": f["r28"], "p_base": comp["base"],
+                                "backend": ans["backend"], "model": ans["model"],
+                                "seconds": round(float(ans.get("seconds") or 0), 1), "tokens": ans.get("tokens"),
+                                "cost_usd_call": 0.0})
+                score.append_predictions(new, path())
+                rows += new
+                notify.say(f"analyst {day}: {len(new)} coins ranked by {ans['model']} ({ans['backend']}, "
+                           f"{float(ans.get('seconds') or 0):.0f} s)")
+    by = {}
+    for r in rows:
+        by.setdefault(series(r), []).append(r)
+    m2 = m2_ranks()
+    per = {k: score_rows(v, bars, m2) for k, v in by.items()}
+    last = max(rows, key=lambda r: int(r.get("made_ms") or 0), default=None)
+    key = series(last) if last else None
+    sc = dict(per.get(key) or score_rows([], bars, m2))
     calls = {}
     for r in rows:
         calls[r["made_ms"]] = float(r.get("cost_usd_call") or 0.0)
-    sc.update(cost_usd_total=sum(calls.values()), calls=len(calls),
+    who = (f"{last.get('model')} ({last.get('backend') or 'claude'})" if last else "no model yet")
+    sk = max(skips, key=lambda r: int(r["made_ms"]), default=None)
+    sc.update(cost_usd_total=sum(calls.values()), calls=len(calls), series=per, current_series=key,
+              last_model=last and last.get("model"), last_backend=last and (last.get("backend") or "claude"),
+              last_ref_day=last and last.get("ref_day"), last_made_ms=last and last.get("made_ms"), last_skip=sk, min_weeks=MIN_WEEKS,
               title="AI analyst (shadow)", status="ok", updated_ms=now,
-              headline=f"Weekly Claude ranking of the Alpaca coins, {sc['scored']} weeks scored. {sc['verdict']}",
+              headline=f"Weekly ranking of the Alpaca coins by {who}, {sc['scored']} weeks scored. {sc['verdict']}",
               items=[{"label": "mean rank IC, analyst", "value": _r(sc.get("mean_ic_analyst"))},
                      {"label": "mean rank IC, low vol", "value": _r(sc.get("mean_ic_lowvol"))},
                      {"label": "mean rank IC, M2 (same days)", "value": _r(sc.get("mean_ic_m2"))}])
     notify.write_json(rep / "latest.json", sc)
-    notify.say(sc["verdict"])
-    return 0
+    notify.say(f"{key or 'no series'}: {sc['verdict']}")
+    return code
 
 
 def _r(v) -> str:

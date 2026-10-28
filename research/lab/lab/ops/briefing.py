@@ -14,7 +14,8 @@ numbers formatted in the messages' language, one overview chart:
                          on-chain long-term book's 0.5 SOL paper wallet (reports/onchain_longterm, L1)
   Stufenleiter           T3's readiness ladder (reports/ladder, lab.ops.ladder): the top 5 candidates by step and
                          what each misses next; it only proposes
-  lab                    the model zoo (reports/models) and the study reports that are new
+  lab                    the model zoo (reports/models), the weekly analyst's model and weeks (reports/ai_analyst)
+                         and the study reports that are new
   research factory       per factory one line (reports/pumpfun_rt/factory.json F3, reports/smallaccount/factory.json
                          F2): trials, the bar, the best new candidate held back, books, model settings adopted;
                          G2's model factory (reports/models/factory.json): specs, held back, passed, shadows;
@@ -321,9 +322,27 @@ def paper_section(learn: dict | None, forward: dict | None, readiness: dict | No
     return parts, snap, words
 
 
-def lab_section(models: dict | None, now: int, lang: str, root: Path | None = None) -> list:
-    """The model zoo by status and its decisions of the last two days, and the study reports
-    that are new since the day before yesterday."""
+BACKENDS = {"relay": "PC", "vps": "VPS", "claude": "API"}
+
+
+def analyst_line(rep: dict | None, lang: str) -> Line | None:
+    """The weekly analyst (lab.ai.analyst, reports/ai_analyst): which model and backend answered its newest week and
+    how many weeks of that series are scored, or the newer skipped week and why."""
+    if not rep or not rep.get("last_model") and not rep.get("last_skip"):
+        return None
+    sk = rep.get("last_skip") if isinstance(rep.get("last_skip"), dict) else None
+    lead = tr("bf_analyst_lead", lang)
+    if sk and int(_num(sk.get("made_ms")) or 0) > int(_num(rep.get("last_made_ms")) or 0):
+        return Line(short(nodash(tr("bf_analyst_skip", lang, day=sk.get("ref_day"), why=sk.get("why") or "?",
+                                    backend=BACKENDS.get(str(sk.get("backend")), sk.get("backend") or "-"))), 160), lead)
+    return Line(tr("bf_analyst", lang, model=rep.get("last_model"), day=rep.get("last_ref_day") or "?",
+                   backend=BACKENDS.get(str(rep.get("last_backend")), rep.get("last_backend") or "?"),
+                   scored=int(_num(rep.get("scored")) or 0), need=int(_num(rep.get("min_weeks")) or 26)), lead)
+
+
+def lab_section(models: dict | None, now: int, lang: str, root: Path | None = None, analyst: dict | None = None) -> list:
+    """The model zoo by status and its decisions of the last two days, the weekly analyst's model (analyst_line),
+    and the study reports that are new since the day before yesterday."""
     lines = []
     if models is not None:
         ms = [m for m in models.get("models") or [] if isinstance(m, dict) and m.get("code")]
@@ -342,6 +361,8 @@ def lab_section(models: dict | None, now: int, lang: str, root: Path | None = No
                         news.append(f"{m['code']} {i18n.word(str(d['decision']), lang)}")
             if news:
                 lines.append(Line(", ".join(news[:6]), tr("bf_zoo_news", lang)))
+    if (a := analyst_line(analyst, lang)) is not None:
+        lines.append(a)
     root = root or notify.reports_root()
     new = []
     try:
@@ -818,7 +839,7 @@ def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: flo
     ladder = ladder_section(read("ladder"), lang)
     if ladder:
         cards.append(("bf_ladder", Card("🪜", tr("bf_ladder", lang), None, ladder)))
-    lab = lab_section(read("models"), now, lang)
+    lab = lab_section(read("models"), now, lang, analyst=read("ai_analyst"))
     if lab:
         cards.append(("bf_lab", Card("🧪", tr("bf_lab", lang), None, lab)))
     fac = factory_section(facs, read("pumpfun_rt", "allocator.json"), lang, read("models", "factory.json"))
