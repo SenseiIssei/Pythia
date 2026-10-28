@@ -1,7 +1,8 @@
 """Every paper book the lab runs, in one table, from the reports that exist.
 
   pumpfun_rt/realistic.json   R2's small pump.fun wallets (`small`) and F3's
-                              factory books (`factory`), in SOL
+                              factory books (`factory`), in SOL, less the trades
+                              the late-row bug made (P1, `tainted` of each)
   smallaccount/latest.json    S1's and S2's small-account wallets, in EUR
   onchain_longterm/latest.json  L1's on-chain long-term book, in USDC
   forward/latest.json         the forward books, their return since the start
@@ -35,7 +36,8 @@ def _num(v) -> float | None:
 
 
 def books(data_root) -> list[dict]:
-    """One dict per paper book: name, study, trades, start, value, currency, report."""
+    """One dict per paper book: name, study, trades, start, value, currency, report; a pump.fun book also
+    `tainted`, the late-row bug's trades (P1) its value leaves out."""
     root = Path(data_root) / "reports"
     out: list[dict] = []
 
@@ -48,7 +50,8 @@ def books(data_root) -> list[dict]:
                     out.append({"name": b["book"], "study": study,
                                 "trades": f"pump.fun coins, {b.get('strategy') or b['book']}",
                                 "start": _date(d.get("realistic_since")),
-                                "value": _num(b.get("sol")), "currency": "SOL", "report": rel})
+                                "value": _num(b.get("sol")), "currency": "SOL", "report": rel,
+                                "tainted": int(_num(b.get("tainted")) or 0)})
 
     rel = "smallaccount/latest.json"
     d = notify.read_json(root / rel)
@@ -105,7 +108,10 @@ def main(data_root=None) -> int:
     p = root / "reports" / "paper_books" / "latest.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    p.write_text(f"# Paper books\n\n{len(rows)} paper books, {now}.\n\n" + table(rows),
+    bad = sum(r.get("tainted") or 0 for r in rows)
+    note = (f"\n{bad} pump.fun paper trades the late-row bug made are left out of the wallets above (P1, "
+            "results/pumpfun_ledger_taint_p1.md).\n") if bad else ""
+    p.write_text(f"# Paper books\n\n{len(rows)} paper books, {now}.\n\n" + table(rows) + note,
                  encoding="utf-8")
     return 0
 

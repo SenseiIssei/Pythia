@@ -828,6 +828,7 @@ def summary(night: str, now_ms: int, days: Days, scored: list[str], ledger: list
             eur: float | None) -> dict:
     sh, n = pool(ledger)
     best = sorted(mine, key=lambda r: -r["score"])[:10]
+    taint = R.ledger_taint() if books.get("books") else {}  # P1: the books' wallets less the late-row bug's trades
     return {"updated_ms": now_ms, "night": night, "trials_ever": n, "trials_tonight": len(mine),
             "bar": {"sharpe": bar(sh, n), "p": BAR_P, "min_entries": MIN_ENTRIES, "min_days": MIN_DAYS, "trials": n,
                     "variance_trials": len(sh)},
@@ -836,7 +837,7 @@ def summary(night: str, now_ms: int, days: Days, scored: list[str], ledger: list
             "best": [r | {"dsr": deflated(r, sh, n), "label": strategy_of(r["params"], r["id"]).label,
                           "sizing": book_label(r["params"])} for r in best],
             "holdback": held, "winners": [r["id"] for r in won], "models": models, "adopted": adopted,
-            "books": status(books, state, eur),
+            "books": [R.less_taint(r, taint, eur) for r in status(books, state, eur)],
             "retired": [x for x in books.get("books") or [] if x.get("state") == "retired"][-10:],
             "proposals": [x["book"] for x in books.get("books") or [] if x.get("proposed_ms")],
             "sol_eur": eur, "start_sol": START_SOL}
@@ -899,7 +900,8 @@ def markdown(s: dict) -> str:
     ad = s.get("adopted") or {}
     md += ["", "Adopted settings in use: " + ("; ".join(f"{k} since {v.get('night')}" for k, v in ad.items())
                                               if ad else "none (the code's PARAMS)") + "."]
-    md += ["", *(status_md(s["books"], eur) or ["Factory paper books: none yet."])]
+    md += ["", *(status_md(s["books"], eur)[:-1] + R.taint_note(s["books"]) + [""] if s["books"]
+                 else ["Factory paper books: none yet."])]
     if s.get("proposals"):
         md += ["", "Proposals for the owner (factory/proposals/): " + ", ".join(s["proposals"]) + "."]
     md += ["", "Paper only: nothing here trades real money."]

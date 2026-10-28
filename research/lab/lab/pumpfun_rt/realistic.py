@@ -644,10 +644,11 @@ def factory_books(eng, model: Model, wallets: dict | None = None, kill=None, spe
     return out
 
 
-def factory_status(state: dict | None, eur: float | None) -> list[dict]:
-    """F3's active books' paper wallets (factory.status); none when the factory has not run."""
+def factory_status(state: dict | None, eur: float | None, taint: dict | None = None) -> list[dict]:
+    """F3's active books' paper wallets (factory.status) less their tainted trades (P1, taint_by_book); none when the
+    factory has not run."""
     from . import factory as F
-    return F.status(F.read_books(F.factory_dir()), state, eur)
+    return [less_taint(r, taint, eur) for r in F.status(F.read_books(F.factory_dir()), state, eur)]
 
 
 def sol_eur() -> float | None:
@@ -667,9 +668,10 @@ def sol_eur() -> float | None:
         return None
 
 
-def small_status(state: dict | None, eur: float | None, small=None) -> list[dict]:
+def small_status(state: dict | None, eur: float | None, small=None, taint: dict | None = None) -> list[dict]:
     """The small-wallet books' paper wallets from the collector's state.json: what each holds (its start, top-ups
-    included, and every realised result; open positions at their cost), in SOL and euro, its P&L, trades, top-ups."""
+    included, and every realised result; open positions at their cost), in SOL and euro, its P&L, trades, top-ups;
+    less the book's tainted trades (P1, taint_by_book), whose count is `tainted`."""
     pw = (state or {}).get("paper_wallets") or {}
     out = []
     for name, base, share, max_open, brake in (SMALL if small is None else small):
@@ -678,7 +680,7 @@ def small_status(state: dict | None, eur: float | None, small=None) -> list[dict
         out.append({"book": name, "strategy": base, "share": share, "max_open": max_open, "brake": brake,
                     "sol": sol, "eur": sol * eur if eur else None, "pnl_sol": w.pnl_l / C.LAMPORTS if w else 0.0,
                     "trades": w.n if w else 0, "refills": w.refills if w else 0, "started": w is not None})
-    return out
+    return [less_taint(r, taint, eur) for r in out]
 
 
 def small_md(rows: list[dict], eur: float | None) -> list[str]:
@@ -693,7 +695,73 @@ def small_md(rows: list[dict], eur: float | None) -> list[str]:
         md.append(f"| {r['book']} | {r['strategy']} | {r['share'] * 100:g} % | {r['max_open']} | "
                   f"{'on' if r['brake'] else 'off'} | {r['sol']:.3f} | {eur_} | {r['pnl_sol']:+.3f} | {r['trades']} | "
                   f"{r['refills']} |")
-    return md + [""]
+    return md + taint_note(rows) + [""]
+
+
+def taint_note(rows: list[dict]) -> list[str]:
+    """The line under a wallet table: the tainted trades (P1) left out of it, if any."""
+    n, s = sum(r.get("tainted") or 0 for r in rows), sum(r.get("tainted_sol") or 0.0 for r in rows)
+    return ["", f"Left out: {n} trades the late-row bug made before {FIX_DAY} ({s:+.3f} SOL; P1, "
+                f"results/pumpfun_ledger_taint_p1.md)."] if n else []
+
+
+# ---------------------------------------------------------------- P1: rows the late-row bug made
+
+FIX_MS = int(datetime(2026, 10, 28, 19, 40, tzinfo=timezone.utc).timestamp() * 1000)   # d84b252's deploy
+FIX_DAY = "2026-10-28 19:40 UTC"
+
+
+def tainted(r: dict) -> bool:
+    """P1 (results/pumpfun_ledger_taint_p1_prereg.md): a paper ledger row the late-row bug made. Until d84b252
+    (deployed FIX_MS) the engine took a pool trade the collector handed over late at its old slot time, so a pending
+    buy could fill before it landed and a book could sell on a spike from before its entry. Tainted when it closed
+    before the deploy with hold_s < 0, or its exit was decided before the landing (exit_signal_ms < land_ms), or it
+    landed before its signal (land_ms < signal_ms); an empty field leaves its condition false. A row closed at or
+    after the deploy is never tainted by the date condition. Fills on a late row before the landing (a fill at a
+    pool state older than the landing, a negative slip far below the signal price) cannot all be told apart from
+    the ledger alone, since a real dump between signal and landing gives the same row, and are left in: on
+    2026-10-28 this rule took 12,592 of 113,087 rows, the stricter one (also closed before the deploy with
+    slip < -0.5, reported only) 453 more (results/pumpfun_ledger_taint_p1.md). The rule was fixed before counting.
+    Nothing rewrites the ledger; every reader skips these rows and counts them."""
+    sig, land, xsig, ex, hold = (_f(r.get(k)) for k in ("signal_ms", "land_ms", "exit_signal_ms", "exit_ms",
+                                                         "hold_s"))
+    return bool((ex is not None and ex < FIX_MS and hold is not None and hold < 0)
+                or (xsig is not None and land is not None and xsig < land)
+                or (land is not None and sig is not None and land < sig))
+
+
+def untainted(rows) -> tuple[list[dict], int]:
+    """(the rows tainted() keeps, how many it skipped)."""
+    rows = list(rows)
+    out = [r for r in rows if not tainted(r)]
+    return out, len(rows) - len(out)
+
+
+def taint_by_book(rows) -> dict[str, tuple[int, float]]:
+    """{book: (tainted closed trades, their P&L in SOL)} of a paper ledger."""
+    out: dict[str, tuple[int, float]] = {}
+    for r in rows:
+        if tainted(r):
+            n, s = out.get(r.get("rule") or "?", (0, 0.0))
+            out[r.get("rule") or "?"] = (n + 1, s + (_f(r.get("pnl_sol")) or 0.0))
+    return out
+
+
+def ledger_taint() -> dict[str, tuple[int, float]]:
+    """taint_by_book of the collector's paper ledger ({} when it cannot be read)."""
+    from .live import paper_dir
+    return taint_by_book(read_csv(paper_dir() / "ledger.csv"))
+
+
+def less_taint(row: dict, taint: dict | None, eur: float | None) -> dict:
+    """A paper wallet's status row less its book's tainted trades: wallet and P&L without their P&L, trades without
+    them, and `tainted` (the count left out) and `tainted_sol` (their P&L)."""
+    n, s = (taint or {}).get(row["book"], (0, 0.0))
+    out = {**row, "tainted": n, "tainted_sol": s}
+    if n:
+        out.update(sol=row["sol"] - s, pnl_sol=row["pnl_sol"] - s, trades=max(0, row["trades"] - n))
+        out["eur"] = out["sol"] * eur if eur else None
+    return out
 
 
 # ---------------------------------------------------------------- calibration
@@ -710,7 +778,10 @@ def calibrate(live_rows: list[dict], paper_rows: list[dict], since_ms: int, unti
     """The live bot against the realistic paper twin on the same coins (each side's first closed entry of a coin from
     since_ms to until_ms, entered within MATCH_MS of each other): the paper's entry and exit price over the live's
     less 1, and the P&L difference in points (paper return less live return, x 100)."""
+    skipped = 0
+
     def first(rows, live):
+        nonlocal skipped
         out = {}
         for r in rows:
             sig, ret = _f(r.get("signal_ms")), _f(r.get("ret"))
@@ -719,6 +790,9 @@ def calibrate(live_rows: list[dict], paper_rows: list[dict], since_ms: int, unti
             if live and r.get("mode") not in ("test", "full"):
                 continue
             if not live and r.get("exit_why") == "restart":
+                continue
+            if not live and tainted(r):                      # P1: made by the late-row bug, skipped and counted
+                skipped += 1
                 continue
             if r.get("mint") and (r["mint"] not in out or sig < _f(out[r["mint"]]["signal_ms"])):
                 out[r["mint"]] = r
@@ -741,6 +815,7 @@ def calibrate(live_rows: list[dict], paper_rows: list[dict], since_ms: int, unti
         return float(np.median(xs)) if xs else None
     d = [p["d_pts"] for p in pairs]
     return {"rule": rule, "from_ms": since_ms, "to_ms": until_ms, "live": len(lv), "paper": len(pp), "n": len(pairs),
+            "tainted": skipped,
             "d_entry": med("d_entry"), "d_exit": med("d_exit"), "d_pts": med("d_pts"),
             "d_pts_mean": float(np.mean(d)) if d else None,
             "live_mean": float(np.mean([p["live_ret"] for p in pairs])) if pairs else None,
@@ -769,7 +844,8 @@ def calib_line(cal: dict, word: str, days_covered: float) -> str:
     pts = "n/a" if cal["d_pts"] is None else f"{cal['d_pts']:+.1f} points"
     return (f"live vs realistic paper ({cal['rule']}, {days_covered:.1f} of {CALIB_DAYS} days): {cal['n']} matched "
             f"trades of {cal['live']} live and {cal['paper']} paper; entry price {pc(cal['d_entry'])}, exit price "
-            f"{pc(cal['d_exit'])}, P&L median {pts} per trade (paper less live): {word}")
+            f"{pc(cal['d_exit'])}, P&L median {pts} per trade (paper less live): {word}"
+            + (f" ({cal['tainted']} paper trades of the late-row bug skipped)" if cal.get("tainted") else ""))
 
 
 def daily(now_ms: int | None = None, write: bool = True) -> dict:
@@ -784,16 +860,19 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     since = (read_json(paper_dir() / "state.json") or {}).get("realistic_since")
     lo = now_ms - CALIB_DAYS * DAY_MS
     start = max(lo, int(since)) if since else now_ms
-    cal = calibrate(read_csv(data_dir() / "ledger.csv"), read_csv(paper_dir() / "ledger.csv"), start, now_ms)
+    paper = read_csv(paper_dir() / "ledger.csv")
+    taint = taint_by_book(paper)
+    cal = calibrate(read_csv(data_dir() / "ledger.csv"), paper, start, now_ms)
     covered = (now_ms - start) / DAY_MS
     word = verdict(cal, covered)
     eur = sol_eur()
     out = {"updated_ms": now_ms, "fit": f.to_json(), "config": LiveConfig.load().to_json(),
            "realistic_since": since, "calibration": cal | {"days": covered, "verdict": word,
                                                            "line": calib_line(cal, word, covered)},
-           "sol_eur": eur, "small": small_status(read_json(paper_dir() / "state.json"), eur)}
+           "sol_eur": eur, "small": small_status(read_json(paper_dir() / "state.json"), eur, taint=taint),
+           "tainted": sum(n for n, _ in taint.values())}
     try:                                                     # F3: the factory's books
-        out["factory"] = factory_status(read_json(paper_dir() / "state.json"), eur)
+        out["factory"] = factory_status(read_json(paper_dir() / "state.json"), eur, taint)
     except Exception as e:                                   # noqa: BLE001 - the report goes out without them
         print(f"realistic: no factory books ({type(e).__name__}: {e})", flush=True)
         out["factory"] = []
@@ -829,6 +908,8 @@ def markdown(d: dict) -> str:
     return "\n".join([
         "# pump.fun realistic paper", "",
         d["calibration"]["line"], "",
+        *([f"The paper ledger holds {d['tainted']} trades the late-row bug made before {FIX_DAY}; every reader "
+           "skips them (P1, results/pumpfun_ledger_taint_p1.md).", ""] if d.get("tainted") else []),
         f"The model every pipeline paper book trades by (lab/pumpfun_rt/realistic.py), fitted "
         f"{datetime.fromtimestamp(d['updated_ms'] / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC from the live bot's "
         f"orders of the last {FIT_DAYS} days ({(f.live or {}).get('buys', 0)} buys, {(f.live or {}).get('sells', 0)} "
@@ -851,7 +932,7 @@ def markdown(d: dict) -> str:
 
 def factory_md(rows: list[dict], eur: float | None) -> list[str]:
     from .factory import status_md
-    return status_md(rows, eur)
+    return status_md(rows, eur)[:-1] + taint_note(rows) + [""] if rows else []
 
 
 # ---------------------------------------------------------------- R1: the headline strategies, ideal and realistic

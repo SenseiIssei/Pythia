@@ -110,13 +110,15 @@ def verdict(h: dict) -> bool:
     return bool(h["enough_days"] and r["dsr_all"] >= PASS and r["band"][0] > 0)
 
 
-def paper_history(paper: Path | None = None, until_ms: int = UNTIL_MS) -> tuple[dict, dict, list[str]]:
+def paper_history(paper: Path | None = None, until_ms: int = UNTIL_MS,
+                  taint: dict | None = None) -> tuple[dict, dict, list[str]]:
+    """The arms' realistic paper rewards and shares; the late-row bug's trades (P1) skipped, counted in `taint`."""
     from . import realistic as R
     from .live import paper_dir
     paper = paper or paper_dir()
     since = float((R.read_json(paper / "state.json") or {}).get("realistic_since") or 0)
     days = A.full_days(since, until_ms) if since else []
-    tr = A.paper_trades(paper, since)
+    tr = A.paper_trades(paper, since, taint=taint)
     return A.day_rewards(tr, days), A.day_shares(tr, days), days
 
 
@@ -180,6 +182,7 @@ def markdown(res: dict, run: str) -> str:
                       f"{r['dsr_all']:.3f} | {r['dsr']:.3f} |")
         md += ["", f"Weighted beats drawn: **{'yes' if h['verdict'] else 'no'}** (enough days: "
                    f"{'yes' if h['enough_days'] else 'no'}, {len(h['days'])} of {MIN_DAYS}).", ""]
+    md += A.taint_line(res.get("tainted"))[1:]
     return "\n".join(md)
 
 
@@ -191,7 +194,9 @@ def run(out: Path, replay: Path | None = None, log=print) -> dict:
         rep = SW.replay(until_ms=UNTIL_MS, log=log)
         out.mkdir(parents=True, exist_ok=True)
         (out / "replay.json").write_text(json.dumps(rep, default=str), encoding="utf-8")
-    res = study({"replay": replay_history(rep), "paper": paper_history()}, log=log)
+    bad: dict[str, int] = {}
+    res = study({"replay": replay_history(rep), "paper": paper_history(taint=bad)}, log=log)
+    res["tainted"] = bad
     run_day = A.day_of(time.time() * 1000)
     out.mkdir(parents=True, exist_ok=True)
     (out / "allocator_t9.json").write_text(json.dumps(AA.jsonable(res), indent=1, default=str), encoding="utf-8")

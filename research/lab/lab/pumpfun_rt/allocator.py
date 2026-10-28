@@ -71,9 +71,12 @@ def _float(x) -> float | None:
     return v if math.isfinite(v) else None
 
 
-def paper_trades(paper: Path, since_ms: float, arms=ARMS) -> dict[str, list[tuple[float, float, str]]]:
+def paper_trades(paper: Path, since_ms: float, arms=ARMS,
+                 taint: dict | None = None) -> dict[str, list[tuple[float, float, str]]]:
     """{arm: [(close ms, return over the stake, mint)]} of the arms' realistic paper books: closed trades from
-    ledger.csv, failed buys from failed.csv at their fee over FAIL_STAKE_SOL."""
+    ledger.csv, failed buys from failed.csv at their fee over FAIL_STAKE_SOL. A closed trade the late-row bug made
+    (P1, realistic.tainted) is skipped and counted per arm in `taint` when given."""
+    from .realistic import tainted
     out: dict[str, list] = {a: [] for a in arms}
     for fn, t_col, ret_of in (("ledger.csv", "exit_ms", lambda r: _float(r.get("ret"))),
                               ("failed.csv", "land_ms", lambda r: (_float(r.get("pnl_sol")) or 0.0) / FAIL_STAKE_SOL)):
@@ -83,6 +86,10 @@ def paper_trades(paper: Path, since_ms: float, arms=ARMS) -> dict[str, list[tupl
                     a = r.get("rule")
                     t = _float(r.get(t_col))
                     if a in out and t is not None and t >= since_ms:
+                        if fn == "ledger.csv" and tainted(r):
+                            if taint is not None:
+                                taint[a] = taint.get(a, 0) + 1
+                            continue
                         v = ret_of(r)
                         if v is not None:
                             out[a].append((t, v, r.get("mint") or ""))
@@ -265,14 +272,15 @@ def run(now_ms: int | None = None, paper: Path | None = None, out: Path | None =
     st = R.read_json(paper / "state.json") or {}
     since = float(st.get("realistic_since") or 0)
     days = full_days(since, now_ms) if since else []
-    tr = paper_trades(paper, since)
+    bad: dict[str, int] = {}
+    tr = paper_trades(paper, since, taint=bad)
     rw = day_rewards(tr, days)
     res = decide(rw, days, day_of(now_ms), shares=day_shares(tr, days))
     lr = live_rule()
     doc = {"updated_ms": now_ms, "day": day_of(now_ms), "since_ms": since, "share": SHARE, "floor": FLOOR,
            "mode": res["mode"],
            "guard_dd": GUARD_DD, "half_life_days": HALF_LIFE_DAYS, "armed": ARMED, "live_rule": lr,
-           "choice": res["choice"], "why": why(res, lr),
+           "choice": res["choice"], "why": why(res, lr), "tainted": bad,
            "arms": {a: {"days": v["days"], "mean": v["post"]["mean"], "posterior_mean": v["post"]["mu"],
                         "posterior_sd": v["post"]["sd_mean"], "p_best": v["p_best"], "weight": v["weight"],
                         "drawdown": v["drawdown"], "guarded": v["guarded"], "wallet_x": v["wallet"],
@@ -301,7 +309,16 @@ def markdown(doc: dict) -> str:
         md.append(f"| {a} | {v['days']} | {v['mean'] * 100:+.2f} % | {v['posterior_mean'] * 100:+.2f} % | "
                   f"{v['posterior_sd'] * 100:.2f} % | {v['p_best'] * 100:.0f} % | {v['weight'] * 100:.0f} % | "
                   f"{v['wallet_x']:.2f} | {v['drawdown'] * 100:.0f} % | {'yes' if v['guarded'] else 'no'} |")
+    md += taint_line(doc.get("tainted"))
     return "\n".join(md) + "\n"
+
+
+def taint_line(bad: dict | None) -> list[str]:
+    """The trades paper_trades skipped as the late-row bug's (P1), per arm; nothing when none."""
+    if not bad or not sum(bad.values()):
+        return []
+    return ["", f"Skipped: {sum(bad.values())} paper trades the late-row bug made before d84b252's deploy ("
+            + ", ".join(f"{a} {n}" for a, n in sorted(bad.items())) + "; P1, results/pumpfun_ledger_taint_p1.md)."]
 
 
 def main(argv: list[str] | None = None) -> int:

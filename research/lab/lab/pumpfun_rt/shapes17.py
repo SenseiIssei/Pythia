@@ -724,10 +724,12 @@ def references(data: dict, wf: dict, days=TEST_DAYS) -> list[dict]:
 
 # ---------------------------------------------------------------- the twins
 
-def ledger_entries(paper=None, books=BASES, days=TWIN_DAYS) -> dict[str, list[dict]]:
+def ledger_entries(paper=None, books=BASES, days=TWIN_DAYS, taint: dict | None = None) -> dict[str, list[dict]]:
     """The base books' realistic paper trades signalled on `days`: closed trades from the ledger (the return at the
-    book's own stake, at STAKE_SOL) and failed buys (their fee) from failed.csv."""
+    book's own stake, at STAKE_SOL) and failed buys (their fee) from failed.csv. A closed trade the late-row bug made
+    (P1, realistic.tainted) is skipped and counted per book in `taint` when given."""
     from .. import data as D
+    from .realistic import tainted
     d = Path(paper) if paper else D.ROOT / "paper" / "pumpfun_rt"
     lo, hi = day_start(days[0]), day_start(days[-1]) + DAY_MS
     out = {b: [] for b in books}
@@ -742,6 +744,10 @@ def ledger_entries(paper=None, books=BASES, days=TWIN_DAYS) -> dict[str, list[di
             for r in csv.DictReader(fh):
                 s = num(r.get("signal_ms"))
                 if r.get("rule") in out and lo <= s < hi and r.get("stake_sol"):
+                    if tainted(r):
+                        if taint is not None:
+                            taint[r["rule"]] = taint.get(r["rule"], 0) + 1
+                        continue
                     ret = num(r.get("ret"))
                     out[r["rule"]].append({"mint": r["mint"], "created_ms": num(r.get("created_ms")), "signal_ms": s,
                                            "exit_ms": num(r.get("exit_ms")), "failed": False, "ret": ret,
@@ -950,7 +956,9 @@ def run(out: Path, root=None, log=print) -> dict:
     if not f.exists():
         build(out, root, log)
     data = load(f)
-    entries = ledger_entries()
+    bad: dict[str, int] = {}
+    entries = ledger_entries(taint=bad)
+    log(f"shapes17: {sum(bad.values())} ledger trades of the late-row bug skipped (P1)")
     t1 = time.time()
     Xe = early_matrix(data, root)
     log(f"shapes17: {len(data['mint']):,} coins, early rows in {time.time() - t1:.0f} s")

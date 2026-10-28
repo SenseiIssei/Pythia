@@ -193,14 +193,19 @@ def phases_markdown(ph: dict) -> list[str]:
 
 
 def paper_slip(rule: str | None, path=None) -> dict:
-    """The paper shadow's modelled slippage of the same strategy (its ledger's `slip`)."""
+    """The paper shadow's modelled slippage of the same strategy (its ledger's `slip`); the late-row bug's trades (P1,
+    realistic.tainted) skipped and counted in `tainted`."""
     from .live import paper_dir
+    from .realistic import tainted
     p = path or (paper_dir() / "ledger.csv")
-    xs = []
+    xs, bad = [], 0
     try:
         with open(p, newline="", encoding="utf-8") as fh:
             for r in csv.DictReader(fh):
                 if rule and r.get("rule") != rule:
+                    continue
+                if tainted(r):
+                    bad += 1
                     continue
                 try:
                     xs.append(float(r["slip"]))
@@ -208,7 +213,7 @@ def paper_slip(rule: str | None, path=None) -> dict:
                     continue
     except OSError:
         pass
-    return _dist(xs)
+    return _dist(xs) | {"tainted": bad}
 
 
 def summarise(rows: list[dict], costs: C.Costs | None = None, paper: dict | None = None) -> dict:
@@ -264,8 +269,9 @@ def verdict(s: dict) -> str:
     if sb["n"]:
         ps = s["paper_slip"]
         out += f" Buy slippage median {sb['median'] * 100:+.1f} %"
-        out += (f" against {ps['median'] * 100:+.1f} % on paper for the same strategy." if ps.get("median") is not None
-                else ".")
+        out += (f" against {ps['median'] * 100:+.1f} % on paper for the same strategy" if ps.get("median") is not None
+                else "")
+        out += (f" ({ps['tainted']} paper trades of the late-row bug skipped)." if ps.get("tainted") else ".")
     f = s["fee_sol"]
     if f.get("n"):
         out += f" Network fee median {f['median']:.6f} SOL against {a['tx_fee_sol']:.6f} assumed."

@@ -407,6 +407,7 @@ def judge(c: dict, ctx: dict, now: int) -> dict:
             "next_de": "kein getesteter Bericht" if missing and all(x["value"] == NO_RECORD for x in missing)
             else "; ".join(COND[x["id"]][1] for x in missing),
             "missing": [x["id"] for x in missing], "open": [x["id"] for x in opened], "evidence": ev,
+            "tainted": c.get("tainted") or 0,
             "steps": {str(k): v for k, v in steps.items()}}
 
 
@@ -442,7 +443,8 @@ def candidates(root: Path, now: int) -> list[dict]:
         out[f"book:{n}"] = {"id": f"book:{n}", "name": n, "kind": "book", "study": b["study"], "source": "book",
                             "bench": bench, "prereg": pre, "family": fam, "r10": r10, "first_day": b.get("start"),
                             "leak_name": f"smallaccount {n}" if b["study"] in ("S1", "S2") else LEAK_NAMES.get(n),
-                            "days_logged": logged, "days_path": f"paper/{n}/journal.csv" if j.exists() else b["report"]}
+                            "days_logged": logged, "days_path": f"paper/{n}/journal.csv" if j.exists() else b["report"],
+                            "tainted": b.get("tainted") or 0}
     fac = root / "factory"
     for source, d, hp in (("weekly", fac, "factory/holdout.jsonl"), ("F2", fac / "small", "factory/small/holdout.jsonl")):
         rows = _jsonl(d / "holdout.jsonl")
@@ -544,6 +546,7 @@ def build(root: Path | None = None, now: int | None = None, results: Path = RESU
               "status": "ok" if r["step"] >= 4 else "watch"} for r in rows[:10]]
     return {"title": "Readiness ladder", "status": "watch", "headline": headline, "updated_ms": now, "items": items,
             "generated": _day(now), "steps": STEPS, "counts": counts, "registry": pool,
+            "tainted": sum(r["tainted"] for r in rows),
             "constants": {"dsr_pass": DSR_PASS, "pbo_max": PBO_MAX, "shadow_days": SHADOW_DAYS,
                           "lockbox_bar": LOCKBOX_BAR, "exec_cap_eur": EXEC_CAP_EUR, "exec_days": EXEC_DAYS},
             "rows": rows}
@@ -563,6 +566,9 @@ def markdown(d: dict) -> str:
         cells = [r["name"], r["kind"], f"{r['step']} {r['step_name']}", r["next"] or "-",
                  ", ".join(r["open"]) or "-", r["evidence"] or "-"]
         md.append("| " + " | ".join(notify.nodash(str(x)).replace("|", "/") for x in cells) + " |")
+    if d.get("tainted"):
+        md.append(f"\nThe pump.fun books' evidence leaves out {d['tainted']} paper trades the late-row bug made (P1, "
+                  "results/pumpfun_ledger_taint_p1.md).")
     return "\n".join(md) + "\n"
 
 

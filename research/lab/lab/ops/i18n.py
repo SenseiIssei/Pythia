@@ -549,6 +549,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_books": "Paper books yesterday: {n} with closed trades, {pnl} in all.",
         "prt_daily_small": "Small-wallet paper books (from 0.55 SOL each): {books}.",
         "prt_daily_factory": "Factory paper books (F3, from 0.55 SOL each): {books}.",
+        "prt_daily_tainted": "Left out of these numbers: {n} paper trades the late-row bug made (P1).",
         "prt_daily_alloc": ("Allocator (A1, paper): would pick {pick} (P(best) {p}, {days} days of realistic paper); "
                             "the live bot keeps {live}."),
         "prt_alloc_out": "none (every strategy under its drawdown guard)",
@@ -1171,6 +1172,7 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "prt_daily_books": "Paper-Bücher gestern: {n} mit geschlossenen Positionen, {pnl} insgesamt.",
         "prt_daily_small": "Paper-Bücher für die kleine Wallet (je ab 0,55 SOL): {books}.",
         "prt_daily_factory": "Paper-Bücher aus der Strategiesuche (F3, je ab 0,55 SOL): {books}.",
+        "prt_daily_tainted": "Nicht in diesen Zahlen: {n} Paper-Trades aus dem Fehler mit späten Zeilen (P1).",
         "prt_daily_alloc": ("Strategie-Auswahl (A1, Paper): würde {pick} nehmen (P(beste) {p}, {days} Tage realistisches "
                             "Paper); der Live-Bot behält {live}."),
         "prt_alloc_out": "keine (jede Strategie unter ihrer Verlustbremse)",

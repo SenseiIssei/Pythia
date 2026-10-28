@@ -39,10 +39,13 @@ def _day(ms: int) -> str:
 
 
 def shadow_yesterday(now_ms: int, path=None) -> dict[str, dict]:
-    """The live paper books' trades closed yesterday (UTC), from the paper ledger."""
+    """The live paper books' trades closed yesterday (UTC), from the paper ledger; the late-row bug's trades (P1,
+    realistic.tainted) skipped and counted in each book's `tainted`."""
     from .live import paper_dir
+    from .realistic import tainted
     y = _day(now_ms - DAY_MS)
     out: dict[str, list] = defaultdict(list)
+    bad: dict[str, int] = defaultdict(int)
     p = path or (paper_dir() / "ledger.csv")
     if p.exists():
         with p.open(newline="", encoding="utf-8") as fh:
@@ -50,12 +53,14 @@ def shadow_yesterday(now_ms: int, path=None) -> dict[str, dict]:
                 if not r.get("exit_ms") or r.get("exit_why") == "restart" or r.get("gap") == "True" or not r.get("ret"):
                     continue
                 try:
-                    if _day(int(float(r["exit_ms"]))) == y:
+                    if _day(int(float(r["exit_ms"]))) == y and tainted(r):
+                        bad[r["rule"]] += 1
+                    elif _day(int(float(r["exit_ms"]))) == y:
                         out[r["rule"]].append({"ret": float(r["ret"]), "pnl_sol": float(r["pnl_sol"])})
                 except ValueError:
                     continue
     return {k: {"n": len(v), "wins": sum(t["ret"] > 0 for t in v), "mean": float(np.mean([t["ret"] for t in v])),
-                "pnl_sol": float(sum(t["pnl_sol"] for t in v))} for k, v in out.items()}
+                "pnl_sol": float(sum(t["pnl_sol"] for t in v)), "tainted": bad.get(k, 0)} for k, v in out.items()}
 
 
 def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None, now_ms: int, lang: str = "en",
@@ -88,6 +93,10 @@ def daily_card(data: dict, models: dict | None, shadow: dict, live: dict | None,
         lines.append(t("prt_daily_factory", lang, books="; ".join(
             f"{r['book']} {i18n.sol(r['sol'], 3, lang)}" + (f" ({i18n.eur(r['eur'], 2, lang)})" if r.get("eur") else "")
             for r in factory)))
+    bad = sum(s.get("tainted") or 0 for s in shadow.values()) + sum(
+        r.get("tainted") or 0 for r in (small or []) + (factory or []))
+    if bad:
+        lines.append(t("prt_daily_tainted", lang, n=bad))
     if alloc and alloc.get("arms"):
         ch = alloc.get("choice")
         a = (alloc["arms"].get(ch) or {}) if ch else {}
@@ -167,14 +176,14 @@ def daily_card_now(now_ms: int, models: dict | None, lang: str = "en"):
         from . import realistic as R
         from .live import paper_dir
         if R.SMALL:
-            small = R.small_status(R.read_json(paper_dir() / "state.json"), R.sol_eur())
+            small = R.small_status(R.read_json(paper_dir() / "state.json"), R.sol_eur(), taint=R.ledger_taint())
     except Exception:                                        # the card goes out without them
         small = None
     factory = None
     try:                                                     # F3: the factory's paper books
         from . import realistic as R
         from .live import paper_dir
-        factory = R.factory_status(R.read_json(paper_dir() / "state.json"), R.sol_eur()) or None
+        factory = R.factory_status(R.read_json(paper_dir() / "state.json"), R.sol_eur(), R.ledger_taint()) or None
     except Exception:                                        # the card goes out without them
         factory = None
     alloc = None

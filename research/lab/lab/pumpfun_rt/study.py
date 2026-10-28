@@ -396,16 +396,22 @@ def _exit_mix(trades: list[dict]) -> dict:
 
 def shadow_stats(now_ms: int, path=None) -> dict[str, dict]:
     """Per book in the live paper ledger (gaps and restarts left out): closed trades, mean return,
-    P&L, and the distinct UTC days with a closed trade."""
+    P&L, and the distinct UTC days with a closed trade; the late-row bug's trades (P1, realistic.tainted) are
+    skipped and counted in `tainted`."""
     import csv
     from .live import paper_dir
+    from .realistic import tainted
     p = path or (paper_dir() / "ledger.csv")
     by: dict[str, list] = defaultdict(list)
+    bad: dict[str, int] = defaultdict(int)
     if p.exists():
         with p.open(newline="", encoding="utf-8") as fh:
             for r in csv.DictReader(fh):
                 if not r.get("exit_ms") or r.get("exit_why") == "restart" or r.get("gap") == "True" \
                         or not r.get("ret"):
+                    continue
+                if tainted(r):
+                    bad[r["rule"]] += 1
                     continue
                 try:
                     by[r["rule"]].append((int(float(r["exit_ms"])), float(r["ret"]), float(r["pnl_sol"])))
@@ -415,7 +421,7 @@ def shadow_stats(now_ms: int, path=None) -> dict[str, dict]:
     for k, v in by.items():
         days = {_day(t) for t, _, _ in v}
         out[k] = {"n": len(v), "mean": float(np.mean([x[1] for x in v])), "pnl_sol": float(sum(x[2] for x in v)),
-                  "days": len(days), "first": min(days), "last": max(days)}
+                  "days": len(days), "first": min(days), "last": max(days), "tainted": bad.get(k, 0)}
     return out
 
 
@@ -438,6 +444,7 @@ def readiness(results: list[dict], n_days: int, shadow: dict[str, dict]) -> dict
              "positive_ok": bool(mean is not None and mean > 0 and clean is not None and clean > 0),
              "gates_ok": bool(core and all(core)),
              "shadow_days": sh["days"], "shadow_trades": sh["n"], "shadow_mean": sh["mean"],
+             "shadow_tainted": sh.get("tainted", 0),
              "shadow_ok": bool(sh["days"] >= SHADOW_DAYS and sh["mean"] is not None and sh["mean"] > 0 and in_band)}
         c["ready"] = all(c[k] for k in ("days_ok", "trades_ok", "positive_ok", "gates_ok", "shadow_ok"))
         out[r["rule"]] = c
@@ -616,6 +623,10 @@ def report(res: dict) -> tuple[dict, str]:
         md.append(f"| {k} | {v['days']} | {v['trades']} | {pct(v['mean'])} | {pct(v['mean_clean'])} | "
                   f"{'pass' if v['gates_ok'] else 'fail'} | {v['shadow_days']} | {v['shadow_trades']} | "
                   f"{pct(v['shadow_mean'])} | {'yes' if v['ready'] else 'no'} |")
+    bad = sum(v.get("shadow_tainted") or 0 for v in ready.values())
+    if bad:
+        md += ["", f"Shadow trades the late-row bug made before d84b252's deploy and skipped: {bad} (P1, "
+               "results/pumpfun_ledger_taint_p1.md)."]
     md += ["", "## Model", "", "The daily retrain (reports/pumpfun_rt/models.md) runs after this study on its decision "
            "rows; what it said last:", ""]
     if msum:

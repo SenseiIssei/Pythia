@@ -177,8 +177,10 @@ def forward(now_ms: int, log=print) -> dict:
     st = R.read_json(paper_dir() / "state.json") or {}
     since = float(st.get("realistic_since") or 0)
     days = A.full_days(since, now_ms) if since else []
-    rw = A.day_rewards(A.paper_trades(paper_dir(), since), days)
-    return {"since_ms": since, "days": days, "rewards": rw, "test": alloc_test(rw, days) if days else None}
+    bad: dict[str, int] = {}
+    rw = A.day_rewards(A.paper_trades(paper_dir(), since, taint=bad), days)
+    return {"since_ms": since, "days": days, "rewards": rw, "test": alloc_test(rw, days) if days else None,
+            "tainted": bad}
 
 
 # ---------------------------------------------------------------- the report
@@ -238,6 +240,7 @@ def markdown(res: dict) -> str:
                + "; ".join(f"{x['day']} pick {x['pick'] or 'out'} {x['reward'] * 100:+.1f} %"
                            for x in fw["test"]["per_day"])
                + "; arms " + ", ".join(f"{k} {v * 100:+.1f} %" for k, v in fw["test"]["total"].items()) + "."]
+    md += A.taint_line(fw.get("tainted"))
     return "\n".join(md) + "\n"
 
 
