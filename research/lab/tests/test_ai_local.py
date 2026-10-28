@@ -131,6 +131,7 @@ def test_the_owners_pc_first_when_the_relay_says_online(data, servers, monkeypat
     st, ch = relay.seen[0], relay.chats()[0]
     assert st["path"] == "/status" and ch["path"] == "/v1/chat/completions"
     assert ch["auth"] == f"Bearer {TOKEN}" and ch["body"]["max_tokens"] == 33
+    assert ch["body"]["reasoning_effort"] == "none", "the PC's model answers without thinking"
     assert TOKEN not in (data / "ai" / "local_llm.jsonl").read_text(), "the token is never logged"
 
     relay.status = {"online": False}
@@ -139,9 +140,17 @@ def test_the_owners_pc_first_when_the_relay_says_online(data, servers, monkeypat
         "the VPS model never gets the token"
     relay.status = 503
     assert local.chat([{"role": "user", "content": "hi"}], "t", env=env)["backend"] == "vps"
-    relay.status, relay.answer = {"pc": "x"}, (lambda b: 502)
+    relay.status, relay.answer = {"pc": "online", "queued": 0, "running": 1}, (lambda b: 502)
     assert local.chat([{"role": "user", "content": "hi"}], "t", env=env)["backend"] == "vps", \
         "online but its answer failed: the VPS model"
+    n = len(relay.chats())
+    relay.status, relay.answer = {"pc": "offline", "queued": 0, "running": 0}, (lambda b: "Vom PC.")
+    assert local.chat([{"role": "user", "content": "hi"}], "t", env=env)["backend"] == "vps"
+    assert len(relay.chats()) == n, "the llm relay's own status: an offline PC is not asked"
+    assert "reasoning_effort" not in vps.chats()[-1]["body"], "the VPS model's request is unchanged"
+    relay.status = {"pc": "online"}
+    local.chat([{"role": "user", "content": "hi"}], "t", env={**env, "PYTHIA_LOCAL_LLM_RELAY_REASONING": "default"})
+    assert "reasoning_effort" not in relay.chats()[-1]["body"], "\"default\" leaves thinking to the model"
     assert [b["name"] for b in local.backends({"PYTHIA_LOCAL_LLM_RELAY_URL": relay.url})] == ["vps"], "no token"
 
 

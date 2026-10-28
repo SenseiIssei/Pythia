@@ -66,3 +66,12 @@ week on top; the briefing's lab card names the model and backend that answered.
 One trial per series in R5's registry, family hand, counted only (no Sharpe): `hand:t15:analyst_e1b_<backend>_<model>`
 (for example `hand:t15:analyst_e1b_vps_qwen3-4b-instruct`), registered when the series' first week is recorded,
 before any of its weeks is scored. The PC model and the VPS model are one trial each; a later model is another.
+
+## Addendum 2026-10-28, before the relay's first week
+
+The first local week (2026-10-28, reference day 2026-10-27) went to the VPS model, because the relay was not
+configured on the server yet; it answered GRT twice, then on the retry a coin not asked for, so that week is skipped
+and stays skipped. From the next rebalance on the relay is configured. The PC's model (`sensei-qwen38`) is asked
+with thinking off (`reasoning_effort` "none", `lab.ai.local`): with thinking on it wrote four times the tokens for
+the same answer. That is part of the series: asking it with thinking on is a different forecaster and needs another
+model name (an alias in Ollama), so it becomes a series and a trial of its own. Nothing else changes.

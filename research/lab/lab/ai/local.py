@@ -5,7 +5,9 @@ the briefing comes from a small model on this machine now, or from the owner's l
 
   1. the owner's PC through the relay on the VPS (OpenAI-compatible at <relay>/v1), when PYTHIA_LOCAL_LLM_RELAY_URL
      and PYTHIA_LOCAL_LLM_TOKEN are set (the owner's env file, /etc/pythia/local-llm.env, never the repo) and the
-     relay's status route (PYTHIA_LOCAL_LLM_RELAY_STATUS, /status) says the PC is online;
+     relay's status route (PYTHIA_LOCAL_LLM_RELAY_STATUS, /status) says the PC is online; asked with
+     reasoning_effort "none" (PYTHIA_LOCAL_LLM_RELAY_REASONING, "default" leaves it to the model): with thinking on
+     the PC's model wrote four times the tokens for the same answer, past the 45 s every short call has;
   2. the VPS model: llama.cpp's server with Qwen3 4B Instruct Q4_K_M on 127.0.0.1:8091 (research/ops/local-llm.sh,
      PYTHIA_LOCAL_LLM_URL), 3 CPUs at a low CPU share, at most 4 GB;
   3. no text: every user keeps its template (also with PYTHIA_LOCAL_LLM=off).
@@ -85,6 +87,8 @@ def relay_online(env: dict | None = None) -> tuple[bool, str]:
     except (OSError, ValueError) as ex:
         return False, f"relay status: {type(ex).__name__}"
     if isinstance(st, dict):
+        if "pc" in st:   # the llm relay: {"pc": "online" | "offline", "queued": n, "running": n}
+            return (True, "") if str(st["pc"]).lower() == "online" else (False, f"relay says pc={st['pc']}")
         for k in ("online", "connected", "pc_online", "up", "ok"):
             if k in st:
                 return (True, "") if st[k] else (False, f"relay says {k}=false")
@@ -101,7 +105,8 @@ def backends(env: dict | None = None) -> list[dict]:
     ok, why = relay_online(e)
     if ok:
         out.append({"name": "relay", "url": e["PYTHIA_LOCAL_LLM_RELAY_URL"].rstrip("/") + "/v1",
-                    "token": e["PYTHIA_LOCAL_LLM_TOKEN"], "model": e.get("PYTHIA_LOCAL_LLM_RELAY_MODEL") or "default"})
+                    "token": e["PYTHIA_LOCAL_LLM_TOKEN"], "model": e.get("PYTHIA_LOCAL_LLM_RELAY_MODEL") or "default",
+                    "reasoning": e.get("PYTHIA_LOCAL_LLM_RELAY_REASONING") or "none"})
     elif why != "relay not configured":
         notify.say(f"local-llm: {why}, the VPS model instead")
     out.append({"name": "vps", "url": (e.get("PYTHIA_LOCAL_LLM_URL") or VPS_URL).rstrip("/") + "/v1", "token": None,
@@ -132,6 +137,8 @@ def chat(messages: list[dict], use: str, max_tokens: int = MAX_TOKENS, deadline:
         t0 = time.monotonic()
         body = {"model": b["model"], "messages": messages, "max_tokens": int(max_tokens), "temperature": 0.2,
                 "stream": False}
+        if b.get("reasoning", "default") != "default":
+            body["reasoning_effort"] = b["reasoning"]
         headers = {"Content-Type": "application/json"}
         if b["token"]:
             headers["Authorization"] = f"Bearer {b['token']}"
