@@ -1249,9 +1249,11 @@ jobs:
   # about $0.30 a day at 300 markets); a refusal or an engine that is down only skips the
   # forecasts, the books still run.
   - name: polymarket-daily
-    description: Polymarket PAPER books, snapshot of the open markets and books, Claude forecasts (Sonnet, batch), settle, step, score, report and card
+    description: Polymarket PAPER books, snapshot of the open markets and books, settle, step, score, report and card (the Claude forecasts paused)
     schedule: "15 5 * * *"
-    command: python -m lab.polymarket.daily --forecast
+    # without --forecast since 2026-10-29: the metered API has no credit (39 refused calls a day in the engine's
+    # log); the Claude series is pre-registered and pauses, it is not replaced by another model
+    command: python -m lab.polymarket.daily
     network: host
     env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 3g}
