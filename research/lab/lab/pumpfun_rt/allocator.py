@@ -2,7 +2,7 @@
 
     python -m lab.pumpfun_rt.allocator            reports/pumpfun_rt/allocator.{json,md} (the daily retrain runs it too)
 
-A Thompson sampling bandit over the pre-registered candidates (ARMS): the live bot's P_pool0_wait and R2's two
+A bandit over the pre-registered candidates (ARMS): the live bot's P_pool0_wait and R2's two
 winners, P_pool0_wait_lock and P_pool5_top30t. Y16 found no rug filter that held out of sample (pumpfun_rugfilter.md),
 so there is no rug-filtered arm; a new arm is one line in ARMS and a new registration.
 
@@ -10,12 +10,18 @@ The reward of an arm on a UTC day: its realistic paper trades closed that day (p
 of that name since the collector's realistic_since; failed buys from failed.csv at their fee) as the log growth of a
 wallet that puts SHARE of itself into each trade, sum(log(1 + SHARE x return)); a day without a trade is 0. Days are
 full UTC days before today. The posterior per arm: normal with unknown mean and variance (normal-inverse-gamma), the
-days weighted by HALF_LIFE_DAYS so that the posterior follows changing conditions; P(best) from DRAWS joint draws.
+days weighted by HALF_LIFE_DAYS so that the posterior follows changing conditions.
 
+  shared    T9 (results/allocator_t9_prereg.md): the arms share entries (P_pool0_wait and its lock the same coins),
+            so an entry held by k arms on a day counts 1 / k in each; a day's weight is multiplied by the mean of
+            1 / k over the arm's entries that day (1 on a day without one). The arms' posteriors stay independent.
+  P(best)   by quadrature over the posteriors' Student t marginals of the mean (deterministic: arms with the same
+            posterior get the same P(best)); MODE "drawn" is A1 as it ran (DRAWS Monte Carlo draws, no sharing)
   floor     every arm not guarded keeps at least FLOOR of the weight (exploration)
   guard     an arm whose wallet over the last GUARD_DAYS days is GUARD_DD or more under its peak there gets no
             weight; with every arm guarded the choice is to stay out
-  choice    one draw from the weights, seeded by the day (Thompson sampling with the floor)
+  choice    weighted (T9, the default): the paper wallet is split by the weights, every arm's reward is seen anyway;
+            "choice" is the arm with the largest weight. drawn (A1): one draw from the weights, seeded by the day
 
 It never changes the live bot: the live bot keeps the strategy the owner set (live_status.json's rule); the report
 says which one the allocator would pick and why. Arming it for the live bot would need the owner's ack in the live
@@ -44,6 +50,8 @@ GUARD_DAYS = 14
 GUARD_DD = 0.30
 DRAWS = 10_000
 PRIOR_KAPPA, PRIOR_ALPHA, PRIOR_VAR = 1.0, 2.0, 0.01
+MODE = "weighted"                              # T9; "drawn" is A1's Thompson draw
+GRID = 4001                                    # quadrature points of P(best)
 ARMED = False                                  # the live bot is never steered from here
 DAY_MS = 86_400_000
 NAME = "pumpfun_rt"
@@ -63,9 +71,9 @@ def _float(x) -> float | None:
     return v if math.isfinite(v) else None
 
 
-def paper_trades(paper: Path, since_ms: float, arms=ARMS) -> dict[str, list[tuple[float, float]]]:
-    """{arm: [(close ms, return over the stake)]} of the arms' realistic paper books: closed trades from ledger.csv,
-    failed buys from failed.csv at their fee over FAIL_STAKE_SOL."""
+def paper_trades(paper: Path, since_ms: float, arms=ARMS) -> dict[str, list[tuple[float, float, str]]]:
+    """{arm: [(close ms, return over the stake, mint)]} of the arms' realistic paper books: closed trades from
+    ledger.csv, failed buys from failed.csv at their fee over FAIL_STAKE_SOL."""
     out: dict[str, list] = {a: [] for a in arms}
     for fn, t_col, ret_of in (("ledger.csv", "exit_ms", lambda r: _float(r.get("ret"))),
                               ("failed.csv", "land_ms", lambda r: (_float(r.get("pnl_sol")) or 0.0) / FAIL_STAKE_SOL)):
@@ -77,23 +85,42 @@ def paper_trades(paper: Path, since_ms: float, arms=ARMS) -> dict[str, list[tupl
                     if a in out and t is not None and t >= since_ms:
                         v = ret_of(r)
                         if v is not None:
-                            out[a].append((t, v))
+                            out[a].append((t, v, r.get("mint") or ""))
         except OSError:
             continue
     return out
 
 
-def day_rewards(trades: dict[str, list[tuple[float, float]]], days: list[str],
+def day_rewards(trades: dict[str, list[tuple]], days: list[str],
                 share: float = SHARE) -> dict[str, dict[str, float]]:
     """{arm: {day: sum(log(1 + share x return))}} on the given days, 0 on a day without a trade."""
     out = {}
     for a, xs in trades.items():
         r = {d: 0.0 for d in days}
-        for t, v in xs:
+        for t, v, *_ in xs:
             d = day_of(t)
             if d in r:
                 r[d] += math.log(max(1e-9, 1 + share * v))
         out[a] = r
+    return out
+
+
+def day_shares(trades: dict[str, list[tuple]], days: list[str]) -> dict[str, dict[str, float]]:
+    """{arm: {day: mean of 1 / k over the arm's entries that day}}, k the number of arms with an entry on the same
+    mint that day (1 on a day without an entry; an entry without a mint is its own)."""
+    held: dict[tuple[str, str], set] = {}
+    for a, xs in trades.items():
+        for t, _, *m in xs:
+            if m and m[0]:
+                held.setdefault((day_of(t), m[0]), set()).add(a)
+    out = {}
+    for a, xs in trades.items():
+        acc = {d: [] for d in days}
+        for t, _, *m in xs:
+            d = day_of(t)
+            if d in acc:
+                acc[d].append(1.0 / len(held[(d, m[0])]) if m and m[0] else 1.0)
+        out[a] = {d: (sum(v) / len(v) if v else 1.0) for d, v in acc.items()}
     return out
 
 
@@ -105,9 +132,13 @@ def full_days(since_ms: float, now_ms: float) -> list[str]:
 
 # ---------------------------------------------------------------- the posterior
 
-def posterior(r: np.ndarray, age: np.ndarray, prior_var: float, half_life: float = HALF_LIFE_DAYS) -> dict:
-    """Normal-inverse-gamma posterior of the mean daily reward, the days weighted 0.5 ** (age / half_life)."""
+def posterior(r: np.ndarray, age: np.ndarray, prior_var: float, half_life: float = HALF_LIFE_DAYS,
+              share: np.ndarray | None = None) -> dict:
+    """Normal-inverse-gamma posterior of the mean daily reward, the days weighted 0.5 ** (age / half_life), times
+    `share` (day_shares) when given."""
     w = 0.5 ** (age / half_life) if half_life and half_life > 0 else np.ones(len(r))
+    if share is not None:
+        w = w * np.asarray(share, dtype=float)
     n = float(w.sum())
     m = float((w * r).sum() / n) if n > 0 else 0.0
     s = float((w * (r - m) ** 2).sum()) if n > 0 else 0.0
@@ -124,6 +155,23 @@ def draw_means(post: dict, rng: np.random.Generator, n: int = DRAWS) -> np.ndarr
     return rng.normal(post["mu"], np.sqrt(var / post["kappa"]))
 
 
+def p_best(posts: list[dict], grid: int = GRID) -> np.ndarray:
+    """P(each arm's mean is the largest), integrated on the union of a grid per arm over the Student t marginals of the means
+    (2 alpha degrees of freedom, scale sqrt(beta / (alpha kappa))); sums to 1."""
+    if not posts:
+        return np.zeros(0)
+    from scipy import stats
+    loc = np.array([p["mu"] for p in posts])
+    sc = np.array([math.sqrt(p["beta"] / (p["alpha"] * p["kappa"])) for p in posts])
+    df = np.array([2 * p["alpha"] for p in posts])
+    x = np.unique(np.concatenate([np.linspace(l - 30 * c, l + 30 * c, grid) for l, c in zip(loc, sc)]))
+    lcdf = np.array([stats.t.logcdf(x, d, l, s) for d, l, s in zip(df, loc, sc)])
+    pdf = np.array([stats.t.pdf(x, d, l, s) for d, l, s in zip(df, loc, sc)])
+    tot = lcdf.sum(axis=0)
+    out = np.array([np.trapezoid(pdf[i] * np.exp(tot - lcdf[i]), x) for i in range(len(posts))])
+    return out / out.sum() if out.sum() > 0 else np.full(len(posts), 1.0 / len(posts))
+
+
 def drawdown(r: list[float]) -> float:
     """How far the wallet (exp of the cumulated rewards, start 1) ends under its peak, as a share of the peak."""
     w = np.exp(np.cumsum(np.r_[0.0, r]))
@@ -131,9 +179,12 @@ def drawdown(r: list[float]) -> float:
 
 
 def decide(rewards: dict[str, dict[str, float]], days: list[str], seed_day: str, floor: float = FLOOR,
-           guard_dd: float = GUARD_DD, guard_days: int = GUARD_DAYS, half_life: float = HALF_LIFE_DAYS) -> dict:
+           guard_dd: float = GUARD_DD, guard_days: int = GUARD_DAYS, half_life: float = HALF_LIFE_DAYS,
+           shares: dict[str, dict[str, float]] | None = None, mode: str = MODE) -> dict:
     """The allocator on `days` (the days before seed_day): per arm the posterior, P(best), the drawdown and the guard,
-    the weights with the floor, and the choice (one draw seeded by seed_day); None when every arm is guarded."""
+    the weights with the floor, and the choice; None when every arm is guarded. mode "weighted": P(best) by
+    quadrature on the posteriors with `shares` (day_shares; none: every day 1), the choice the largest weight.
+    mode "drawn" (A1): P(best) from DRAWS draws, no shares, the choice one draw seeded by seed_day."""
     arms = list(rewards)
     seed = int(seed_day.replace("-", "")) if seed_day else 0
     rng = np.random.default_rng(seed)
@@ -145,14 +196,17 @@ def decide(rewards: dict[str, dict[str, float]], days: list[str], seed_day: str,
         ds = [d for d in days if d in rewards[a]]
         r = np.array([rewards[a][d] for d in ds], dtype=float)
         age = np.arange(len(ds))[::-1].astype(float)
-        p = posterior(r, age, pv, half_life)
+        sh = np.array([shares[a].get(d, 1.0) for d in ds]) if shares and mode != "drawn" and a in shares else None
+        p = posterior(r, age, pv, half_life, sh)
         dd = drawdown([rewards[a][d] for d in ds[-guard_days:]])
         out[a] = {"days": len(ds), "post": p, "drawdown": dd, "guarded": bool(len(ds) and dd >= guard_dd),
                   "wallet": float(math.exp(sum(r))) if len(r) else 1.0}
     live = [a for a in arms if not out[a]["guarded"]]
-    if live:
+    if live and mode == "drawn":
         dr = np.column_stack([draw_means(out[a]["post"], rng) for a in live])
         best = np.bincount(dr.argmax(axis=1), minlength=len(live)) / len(dr)
+    elif live:
+        best = p_best([out[a]["post"] for a in live])
     for a in arms:
         out[a]["p_best"] = float(best[live.index(a)]) if a in live else 0.0
     k = len(live)
@@ -160,10 +214,20 @@ def decide(rewards: dict[str, dict[str, float]], days: list[str], seed_day: str,
     for a in arms:
         out[a]["weight"] = (fl + (1 - k * fl) * out[a]["p_best"]) if a in live else 0.0
     choice = None
-    if live:
+    if live and mode == "drawn":
         w = np.array([out[a]["weight"] for a in live])
         choice = live[int(rng.choice(len(live), p=w / w.sum()))]
-    return {"arms": out, "choice": choice, "days": list(days)}
+    elif live:
+        choice = max(live, key=lambda a: out[a]["weight"])
+    return {"arms": out, "choice": choice, "days": list(days), "mode": mode}
+
+
+def split_reward(res: dict, rewards: dict[str, dict[str, float]], day: str) -> float:
+    """The day's log growth of a wallet split by the weights, each part trading its arm at SHARE a trade:
+    log(sum w exp(reward)); 0 when every arm is guarded (out)."""
+    w = {a: v["weight"] for a, v in res["arms"].items() if v["weight"] > 0}
+    s = sum(w.values())
+    return float(math.log(sum(x / s * math.exp(rewards[a][day]) for a, x in w.items()))) if s > 0 else 0.0
 
 
 def why(res: dict, live_rule: str | None) -> str:
@@ -172,7 +236,8 @@ def why(res: dict, live_rule: str | None) -> str:
         return "every candidate is under its drawdown guard: stay out"
     a = res["arms"][c]
     g = [k for k, v in res["arms"].items() if v["guarded"]]
-    s = (f"{c}: P(best) {a['p_best'] * 100:.0f} %, weight {a['weight'] * 100:.0f} %, mean daily growth at "
+    s = "split by weight, the largest " if res.get("mode", MODE) != "drawn" else ""
+    s += (f"{c}: P(best) {a['p_best'] * 100:.0f} %, weight {a['weight'] * 100:.0f} %, mean daily growth at "
          f"{SHARE * 100:g} % a trade {a['post']['mean'] * 100:+.1f} % over {a['days']} days, the 10 % wallet "
          f"x{a['wallet']:.2f}")
     if g:
@@ -200,10 +265,12 @@ def run(now_ms: int | None = None, paper: Path | None = None, out: Path | None =
     st = R.read_json(paper / "state.json") or {}
     since = float(st.get("realistic_since") or 0)
     days = full_days(since, now_ms) if since else []
-    rw = day_rewards(paper_trades(paper, since), days)
-    res = decide(rw, days, day_of(now_ms))
+    tr = paper_trades(paper, since)
+    rw = day_rewards(tr, days)
+    res = decide(rw, days, day_of(now_ms), shares=day_shares(tr, days))
     lr = live_rule()
     doc = {"updated_ms": now_ms, "day": day_of(now_ms), "since_ms": since, "share": SHARE, "floor": FLOOR,
+           "mode": res["mode"],
            "guard_dd": GUARD_DD, "half_life_days": HALF_LIFE_DAYS, "armed": ARMED, "live_rule": lr,
            "choice": res["choice"], "why": why(res, lr),
            "arms": {a: {"days": v["days"], "mean": v["post"]["mean"], "posterior_mean": v["post"]["mu"],
@@ -221,11 +288,13 @@ def run(now_ms: int | None = None, paper: Path | None = None, out: Path | None =
 
 def markdown(doc: dict) -> str:
     md = ["# pump.fun real-time lab: A1 strategy allocator", "",
-          f"Paper only, never steers the live bot. Thompson sampling over {', '.join(doc['arms'])} on their realistic "
+          f"Paper only, never steers the live bot. A split of the paper wallet by each strategy's posterior "
+          f"probability of being best (T9) over {', '.join(doc['arms'])} on their realistic "
           f"paper trades since the realistic books started, a day's reward the log growth of a wallet at "
-          f"{doc['share'] * 100:g} % a trade, days weighted with a half-life of {doc['half_life_days']:g} days; "
-          f"floor {doc['floor'] * 100:g} %, drawdown guard {doc['guard_dd'] * 100:g} % in 14 days.", "",
-          f"Would pick: **{doc['choice'] or 'none (stay out)'}**. Why: {doc['why']}.", "",
+          f"{doc['share'] * 100:g} % a trade, days weighted with a half-life of {doc['half_life_days']:g} days, an "
+          f"entry shared by k strategies counted 1 / k in each; floor {doc['floor'] * 100:g} %, drawdown guard "
+          f"{doc['guard_dd'] * 100:g} % in 14 days.", "",
+          f"Would pick: **{doc['choice'] or 'none (stay out)'}** (the largest weight). Why: {doc['why']}.", "",
           "| strategy | days | mean daily growth | posterior mean | posterior sd | P(best) | weight | wallet x | "
           "drawdown | guarded |", "|---|---|---|---|---|---|---|---|---|---|"]
     for a, v in doc["arms"].items():

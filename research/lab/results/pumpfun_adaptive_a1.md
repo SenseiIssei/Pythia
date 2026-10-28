@@ -13,7 +13,8 @@ takes about 25 minutes; `--replay FILE` reads a saved one).
   than raw LightGBM on 4 of 6 labels. The best single member is scikit-learn's histogram boosting (`hgb`) on all six.
 - **Does the allocator beat the best single strategy on realistic paper at the live latency? No**: 4 test days
   (10 needed for a yes), the allocator's 10 % wallet +73 % in log growth against +231 % for the best single
-  strategy, `P_pool0_wait_lock` (deflated p of the allocator being better 0.97, i.e. no sign of it).
+  strategy, `P_pool0_wait_lock` (DSR of the allocator being better 0.03 in R5's convention, higher is better, pass
+  at 0.95: no sign of it; first published inverted as "deflated p 0.97", corrected by T9).
 - **A hint, not a result:** the stacked blend (weights fitted on the days before) had the lowest log loss on all six
   labels and in every market regime but one. It is a candidate of the selector, so it takes over by itself once it
   stays ahead beyond the band for 5 days; nothing a paper book reads changes before the study says yes.
@@ -24,14 +25,14 @@ Rows as written by the study of 2026-10-26: 133,704 decision rows with a realist
 and 909 select rows (entries 0 and 5) on 3. Log loss, lower is better; "best less selector" the per-hour mean of the
 per-row difference (negative: the selector is worse).
 
-| label | rate | selector | lgb | logit | hgb | online | hazard | blend | best | best less selector | deflated p | beats |
+| label | rate | selector | lgb | logit | hgb | online | hazard | blend | best | best less selector | DSR | beats |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| win30 | 0.054 | 0.1601 | 0.1593 | 0.1601 | 0.1564 | 0.1743 | | 0.1557 | hgb | -0.0040 | 1.000 | no |
-| win300 | 0.044 | 0.1566 | 0.1555 | 0.1558 | 0.1532 | 0.1735 | | 0.1509 | hgb | -0.0042 | 1.000 | no |
-| win0t | 0.562 | 0.6972 | 0.6674 | 0.7182 | 0.6611 | 0.6893 | 0.7262 | 0.6506 | hgb | -0.0302 | 1.000 | no |
-| rug0t | 0.070 | 0.2422 | 0.2383 | 0.2404 | 0.2321 | 0.2791 | | 0.2232 | hgb | -0.0093 | 1.000 | no |
-| win5t | 0.554 | 0.6567 | 0.6647 | 0.6919 | 0.6555 | 0.6959 | 0.7066 | 0.6456 | hgb | +0.0013 | 1.000 | no |
-| rug5t | 0.063 | 0.2213 | 0.2204 | 0.2553 | 0.2179 | 0.2529 | | 0.2114 | hgb | -0.0012 | 1.000 | no |
+| win30 | 0.054 | 0.1601 | 0.1593 | 0.1601 | 0.1564 | 0.1743 | | 0.1557 | hgb | -0.0040 | 0.000 | no |
+| win300 | 0.044 | 0.1566 | 0.1555 | 0.1558 | 0.1532 | 0.1735 | | 0.1509 | hgb | -0.0042 | 0.000 | no |
+| win0t | 0.562 | 0.6972 | 0.6674 | 0.7182 | 0.6611 | 0.6893 | 0.7262 | 0.6506 | hgb | -0.0302 | 0.000 | no |
+| rug0t | 0.070 | 0.2422 | 0.2383 | 0.2404 | 0.2321 | 0.2791 | | 0.2232 | hgb | -0.0093 | 0.000 | no |
+| win5t | 0.554 | 0.6567 | 0.6647 | 0.6919 | 0.6555 | 0.6959 | 0.7066 | 0.6456 | hgb | +0.0013 | 0.000 | no |
+| rug5t | 0.063 | 0.2213 | 0.2204 | 0.2553 | 0.2179 | 0.2529 | | 0.2114 | hgb | -0.0012 | 0.000 | no |
 
 - The selector picked `lgb` (the incumbent) on every test day of every label: with 4 or 5 test days no challenger
   can have the 5 days ahead the rule asks for, and no member was 7 days behind the logistic baseline.
@@ -64,8 +65,9 @@ slots would do).
 | 2026-10-25 | P_pool0_wait_lock | +32.4 % | -11.6 % | -29.7 % | -11.6 % |
 | total | | +15.3 % | +230.7 % | +48.5 % | +72.7 % |
 
-The allocator less the best single strategy: -39.5 points a day, deflated p 0.97 for "the allocator is better" (3
-trials). The ranking of the arms changes every day; the allocator had the day's best arm on 2 of the 4 days. Spreading by the weights instead of one draw would have made +112 % (not tested).
+The allocator less the best single strategy: -39.5 points a day, DSR 0.03 for "the allocator is better" (3
+trials; R5's convention, higher is better, pass at 0.95; first published inverted as "deflated p 0.97"). The ranking of the arms changes every day; the allocator had the day's best arm on 2 of the 4 days. Spreading by the weights instead of one draw would have made +112 % (not tested; T9 tests it,
+`results/allocator_t9.md`).
 
 Forward, on the collector's realistic paper books (since 2026-10-24 01:43 UTC, one full day, not tested): on
 2026-10-25 P_pool0_wait made +170 % in log growth at 10 % a trade, its lock +50 %, P_pool5_top30t +16 %. The paper

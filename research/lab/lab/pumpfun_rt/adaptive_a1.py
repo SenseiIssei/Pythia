@@ -128,9 +128,10 @@ def model_test(rows: dict | None, sel: dict | None, until: str = UNTIL, log=prin
 
 # ---------------------------------------------------------------- test 2: the allocator
 
-def entry_trades(entries: dict[str, list[dict]], arms=A.ARMS) -> dict[str, list[tuple[float, float]]]:
-    """{arm: [(close ms, return over the 0.1 SOL stake)]}: closed trades and failed buys (their fee) alike."""
-    return {a: [(float(e["exit_ms"]), float(e["pnl"]) / STAKE_SOL) for e in entries.get(a, [])] for a in arms}
+def entry_trades(entries: dict[str, list[dict]], arms=A.ARMS) -> dict[str, list[tuple[float, float, str]]]:
+    """{arm: [(close ms, return over the 0.1 SOL stake, mint)]}: closed trades and failed buys (their fee) alike."""
+    return {a: [(float(e["exit_ms"]), float(e["pnl"]) / STAKE_SOL, e.get("mint") or "") for e in entries.get(a, [])]
+            for a in arms}
 
 
 def alloc_test(rewards: dict[str, dict[str, float]], days: list[str]) -> dict:
@@ -192,7 +193,7 @@ def markdown(res: dict) -> str:
           f"Run {res['run']}. Pre-registration `results/pumpfun_adaptive_a1_prereg.md`.", "",
           f"## Test 1: selector against the best single model ({m['trials']} comparisons in the deflation)", "",
           "| label | scored days | rows | rate | selector | " + " | ".join(Z.MEMBERS) + " | blend | best | "
-          "best less selector, per hour | deflated p | beats |", "|---|---|---|---|---|" + "---|" * len(Z.MEMBERS)
+          "best less selector, per hour | DSR | beats |", "|---|---|---|---|---|" + "---|" * len(Z.MEMBERS)
           + "---|---|---|---|---|"]
     for label, v in m["labels"].items():
         if "loss" not in v:
@@ -202,7 +203,7 @@ def markdown(res: dict) -> str:
         md.append(f"| {label} | {len(v['scored_days'])} | {v['rows']:,} | {v['rate']:.3f} | "
                   f"{_f(v['loss']['selector'])} | " + " | ".join(_f(v["loss"].get(c)) for c in Z.MEMBERS)
                   + f" | {_f(v['loss'].get(S.BLEND))} | {v['best']} | {_f(vb['mean'], '{:+.5f}')} | "
-                  f"{_f(vb['p'], '{:.3f}')} | {'yes' if v['beats'] else 'no'} |")
+                  f"{_f(vb['dsr'], '{:.3f}')} | {'yes' if v['beats'] else 'no'} |")
     md += ["", f"Selector beats the best model on {m['beats_labels']} of {len(m['labels'])} labels: "
                f"**{'yes' if m['verdict'] else 'no'}** (needs {PASS_LABELS}).", "",
            "Picks per test day: " + "; ".join(f"{k}: " + ", ".join(f"{d[5:]} {p}" for d, p in v["picks"].items())
@@ -227,7 +228,8 @@ def markdown(res: dict) -> str:
         md += ["", f"Totals: " + ", ".join(f"{k} {v * 100:+.1f} %" for k, v in a["total"].items())
                + f"; allocator {a['allocator'] * 100:+.1f} % (weighted {a['weighted'] * 100:+.1f} %). Best single "
                f"{a['best']}; allocator less best {_f(vb.get('mean', math.nan) * 100, '{:+.2f}')} points a day, "
-               f"deflated p {_f(vb.get('p'), '{:.3f}')} (3 trials). Enough days: "
+               f"DSR {_f(vb.get('dsr'), '{:.3f}')} (3 trials; R5's convention: higher is better, pass at 0.95). "
+               f"Enough days: "
                f"{'yes' if a['enough_days'] else 'no'} ({len(a['days'])} of {MIN_ALLOC_DAYS}). "
                f"**{'yes' if a['verdict'] else 'no'}**."]
     fw = res.get("forward") or {}
