@@ -161,3 +161,21 @@ def test_yahoo_answer_becomes_a_stooq_shaped_csv_without_gaps_or_nulls():
     assert list(c) == [90.9, 88.1]
     with pytest.raises(et.DataUnavailable):
         et.yahoo_csv({"chart": {"result": None}})
+
+
+def test_an_unreachable_stooq_is_asked_once_a_run(monkeypatch):
+    import urllib.request
+    asked = {"stooq": 0, "yahoo": 0}
+
+    def urlopen(req, timeout=None):
+        if "stooq" in req.full_url:
+            asked["stooq"] += 1
+            raise TimeoutError("timed out")
+        raise AssertionError("Yahoo goes through download_yahoo")
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(et, "STOOQ_DOWN", {"down": False})
+    monkeypatch.setattr(et, "download_yahoo", lambda sym, timeout=30.0: (asked.__setitem__("yahoo", asked["yahoo"] + 1)
+                                                                          or "Date,Close\n2026-10-27,1.0"))
+    for s in ("SPY", "QQQ", "TLT"):
+        assert et.download(s).startswith("Date,Close")
+    assert asked == {"stooq": 1, "yahoo": 3}

@@ -134,12 +134,19 @@ def parse_stooq(text: str) -> tuple[np.ndarray, np.ndarray]:
     return np.array(d, dtype="datetime64[D]")[order], np.array(c)[order]
 
 
+STOOQ_DOWN = {"down": False}   # set by a network failure: the rest of the run goes to Yahoo at once
+
+
 def download_stooq(sym: str, timeout: float = 30.0) -> str:
+    if STOOQ_DOWN["down"]:
+        raise DataUnavailable(f"{sym}: Stooq unreachable earlier in this run")
     req = urllib.request.Request(STOOQ.format(sym.lower()), headers={"User-Agent": "pythia-lab"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
     except OSError as e:
+        # 2026-10-28: Stooq stopped answering; 30 s per symbol on Stooq then Yahoo ran etf-daily into its 15 min
+        STOOQ_DOWN["down"] = True
         raise DataUnavailable(f"{sym}: {e}") from e
 
 
