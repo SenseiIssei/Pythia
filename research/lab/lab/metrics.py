@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -211,3 +212,153 @@ def dsr(x: np.ndarray, pool: dict | None = None, family: str | None = None) -> f
         return 0.0
     pool = pool or trial_pool(family)
     return deflated_sharpe(s, len(x), pool["n_trials"], pool["var"], sk, ku)
+
+
+# ---------------------------------------------------------------------------
+# T2: overfitting yardsticks (results/overfit_yardsticks_prereg.md)
+# ---------------------------------------------------------------------------
+#
+# cscv: PBO by combinatorially symmetric CV (Bailey, Borwein, Lopez de Prado, Zhu) on a matrix of per-period
+# performance, the rank logits' distribution with it. spa and mcs: Hansen's superior predictive ability test and the
+# model confidence set (Hansen, Lunde, Nason), with arch as the reference, on the stationary bootstrap of Politis and
+# Romano. Losses are lower-is-better throughout; SPA's p is the probability of a statistic this large when no model
+# beats the benchmark.
+
+CSCV_BLOCKS = 16
+LOGIT_BINS = (-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0)    # the histogram's inner edges (open at both ends)
+BOOT_DRAWS, BOOT_BLOCK, BOOT_SEED = 1000, 10, 7
+SPA_P, MCS_ALPHA = 0.05, 0.10
+
+
+def cscv(M: np.ndarray, blocks: int = CSCV_BLOCKS, stat: str = "sharpe") -> dict | None:
+    """PBO of picking the best column of M (periods x strategies, higher is better) by CSCV: the periods cut into
+    `blocks` blocks, every half of them in sample and the rest out; per split the in-sample best (by Sharpe, or by
+    mean with stat "mean") and its relative rank w out of sample; PBO is the share of logits log(w / (1 - w)) at or
+    below 0. None with fewer than 2 columns or blocks shorter than 5 periods."""
+    M = np.asarray(M, dtype=float)
+    T, m = M.shape if M.ndim == 2 else (0, 0)
+    L = T // blocks
+    if m < 2 or L < 5:
+        return None
+    B = M[: L * blocks].reshape(blocks, L, m)
+    bs, bq = B.sum(1), (B ** 2).sum(1)
+    combos = np.array([[i in cmb for i in range(blocks)] for cmb in itertools.combinations(range(blocks), blocks // 2)],
+                      dtype=float)
+    n = L * blocks // 2
+
+    def perf(Cm):
+        mu = Cm @ bs / n
+        if stat == "mean":
+            return mu
+        return mu / np.sqrt(np.maximum(Cm @ bq / n - mu ** 2, 1e-18))
+
+    logits = []
+    for i in range(0, len(combos), 2000):
+        Cm = combos[i:i + 2000]
+        ins, out = perf(Cm), perf(1 - Cm)
+        best = ins.argmax(1)
+        ob = out[np.arange(len(Cm)), best]
+        w = ((out < ob[:, None]).sum(1) + 1) / (m + 1)
+        logits.append(np.log(w / (1 - w)))
+    lam = np.concatenate(logits)
+    hist = np.bincount(np.searchsorted(LOGIT_BINS, lam, side="right"), minlength=len(LOGIT_BINS) + 1)
+    return {"pbo": float((lam <= 0).mean()), "combos": len(lam), "genomes": m, "blocks": blocks,
+            "median_logit": float(np.median(lam)),
+            "logit_q": {str(q): float(np.percentile(lam, q)) for q in (5, 25, 50, 75, 95)},
+            "logit_hist": {"edges": list(LOGIT_BINS), "counts": [int(x) for x in hist]}}
+
+
+def logit_text(p: dict) -> str:
+    """The rank logits of a cscv result in words: the quantiles and the histogram."""
+    q, h = p["logit_q"], p["logit_hist"]
+    e = h["edges"]
+    labels = [f"<{e[0]:g}"] + [f"{a:g}..{b:g}" for a, b in zip(e[:-1], e[1:])] + [f">{e[-1]:g}"]
+    return (f"rank logits 5/25/50/75/95 %: {q['5']:.2f} / {q['25']:.2f} / {q['50']:.2f} / {q['75']:.2f} / "
+            f"{q['95']:.2f}; histogram " + ", ".join(f"{a} {c}" for a, c in zip(labels, h["counts"])))
+
+
+def stationary_bootstrap(n: int, draws: int = BOOT_DRAWS, block: float = BOOT_BLOCK, seed: int = BOOT_SEED) -> np.ndarray:
+    """(draws, n) indices of Politis and Romano's stationary bootstrap: blocks of geometric length with mean
+    `block`, wrapping around the end."""
+    rng = np.random.default_rng(seed)
+    idx = np.empty((draws, n), dtype=np.int64)
+    idx[:, 0] = rng.integers(0, n, draws)
+    fresh = rng.random((draws, n)) < 1.0 / max(block, 1.0)
+    starts = rng.integers(0, n, (draws, n))
+    for t in range(1, n):
+        idx[:, t] = np.where(fresh[:, t], starts[:, t], (idx[:, t - 1] + 1) % n)
+    return idx
+
+
+def sb_variance(X: np.ndarray, block: float = BOOT_BLOCK) -> np.ndarray:
+    """Hansen's (2005) kernel estimate of n times the variance of each column's mean under the stationary
+    bootstrap: the autocovariances weighted by kappa(i) = (n - i) / n (1 - q)^i + i / n (1 - q)^(n - i), q = 1/block."""
+    X = np.asarray(X, dtype=float).reshape(len(X), -1)
+    n = len(X)
+    Xc = X - X.mean(0)
+    q = 1.0 / max(block, 1.0)
+    f = np.fft.rfft(Xc, 2 * n, axis=0)
+    g = np.fft.irfft(f * np.conj(f), axis=0)[:n] / n            # autocovariances at lags 0 .. n-1
+    i = np.arange(n)[:, None]
+    k = (n - i) / n * (1 - q) ** i + i / n * (1 - q) ** (n - i)
+    return g[0] + 2 * (k[1:] * g[1:]).sum(0)
+
+
+def _boot_means(X: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """(draws, columns): each column's mean over every bootstrap draw."""
+    return np.stack([X[i].mean(0) for i in idx])
+
+
+def spa(bench: np.ndarray, models: np.ndarray, draws: int = BOOT_DRAWS, block: float = BOOT_BLOCK,
+        seed: int = BOOT_SEED) -> dict:
+    """Hansen's SPA test: is any model's loss lower than the benchmark's? bench (periods,), models (periods,) or
+    (periods, k), losses per period, lower is better. Returns the consistent p-value ("p", the test) with the lower
+    and upper ones, the statistic and the best model's column. Periods with a missing loss are dropped."""
+    b = np.asarray(bench, dtype=float)
+    X = np.asarray(models, dtype=float).reshape(len(b), -1)
+    ok = np.isfinite(b) & np.isfinite(X).all(1)
+    d = b[ok, None] - X[ok]                       # positive: the model's loss is lower
+    n, k = d.shape
+    if n < 10:
+        return {"p": 1.0, "p_lower": 1.0, "p_upper": 1.0, "stat": 0.0, "best": None, "n": n,
+                "why": f"only {n} periods"}
+    dbar = d.mean(0)
+    mu_b = _boot_means(d, stationary_bootstrap(n, draws, block, seed))
+    omega = np.sqrt(np.maximum(sb_variance(d, block), 1e-18))
+    t = math.sqrt(n) * dbar / omega
+    stat = max(float(t.max()), 0.0)
+    thr = -np.sqrt(omega ** 2 / n * 2 * math.log(max(math.log(n), 1.0 + 1e-9)))
+    out = {"stat": stat, "best": int(t.argmax()), "n": n, "mean_gain": [float(x) for x in dbar]}
+    for name, g in (("p_lower", np.maximum(dbar, 0)), ("p", dbar * (dbar >= thr)), ("p_upper", dbar)):
+        z = math.sqrt(n) * (mu_b - g) / omega
+        out[name] = float((np.maximum(z.max(1), 0.0) >= stat).mean()) if stat > 0 else 1.0
+    return out
+
+
+def mcs(losses: np.ndarray, names: list[str] | None = None, alpha: float = MCS_ALPHA, draws: int = BOOT_DRAWS,
+        block: float = BOOT_BLOCK, seed: int = BOOT_SEED) -> dict:
+    """The model confidence set (Hansen, Lunde, Nason) with the T-max statistic: while the set's models are not
+    equally good at alpha, drop the one with the largest standardised mean loss over the set's average. losses
+    (periods, models), lower is better. Returns MCS p-values per model (the running maximum) and the set at alpha."""
+    L = np.asarray(losses, dtype=float)
+    L = L[np.isfinite(L).all(1)]
+    n, m = L.shape
+    names = list(names) if names is not None else [str(i) for i in range(m)]
+    if n < 10 or m < 2:
+        return {"pvalues": {x: 1.0 for x in names}, "included": names, "alpha": alpha, "n": n}
+    lbar = L.mean(0)
+    lb = _boot_means(L, stationary_bootstrap(n, draws, block, seed))
+    live, pv, run = list(range(m)), {}, 0.0
+    while len(live) > 1:
+        a = np.array(live)
+        d = lbar[a] - lbar[a].mean()
+        db = lb[:, a] - lb[:, a].mean(1, keepdims=True)
+        sd = np.sqrt(np.maximum(((db - d) ** 2).mean(0), 1e-18))
+        t = d / sd
+        p = float((((db - d) / sd).max(1) >= t.max()).mean())
+        run = max(run, p)
+        worst = int(a[t.argmax()])
+        pv[names[worst]] = run
+        live.remove(worst)
+    pv[names[live[0]]] = 1.0
+    return {"pvalues": pv, "included": [x for x in names if pv[x] >= alpha], "alpha": alpha, "n": n}

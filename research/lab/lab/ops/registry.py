@@ -19,6 +19,14 @@ Those walk-forward models were trained on older data than a recent champion,
 which tilts the comparison toward keeping the champion, on purpose. Promotion
 needs a margin (MODELS) and a minimum window; anything less keeps the champion.
 Without a champion, a challenger that passes its gate is promoted.
+
+T2 (results/overfit_yardsticks_prereg.md): for the zoo's models (registered with
+a per-row loss) the margin no longer decides. The challenger replaces the
+champion only when Hansen's SPA test, the champion as the benchmark, rejects "no
+better than the champion" at metrics.SPA_P on the per-period mean losses of the
+window (stationary bootstrap, consistent p); the record also holds the model
+confidence set of challenger, champion and baseline. vol_1h and picks_7d, which
+the engine loads, keep the margin.
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from typing import Callable
 import numpy as np
 import polars as pl
 
+from .. import metrics
 from ..data import ROOT
 from . import guard
 
@@ -58,9 +67,11 @@ HOOKS: dict[str, dict] = {}
 
 def register(name: str, cfg: dict, gate_fn: Callable[[Path, dict], tuple[bool, str]],
              score_fn: Callable[[pl.DataFrame, np.ndarray], float],
-             predictor_fn: Callable[[Path], Callable[[pl.DataFrame], np.ndarray]]) -> None:
+             predictor_fn: Callable[[Path], Callable[[pl.DataFrame], np.ndarray]],
+             loss_fn: Callable[[pl.DataFrame, np.ndarray], np.ndarray] | None = None) -> None:
+    """loss_fn: per-row loss (lower is better); with it the champion is replaced only on the SPA test (T2)."""
     MODELS[name] = cfg
-    HOOKS[name] = {"gate": gate_fn, "score": score_fn, "predictor": predictor_fn}
+    HOOKS[name] = {"gate": gate_fn, "score": score_fn, "predictor": predictor_fn, "loss": loss_fn}
 
 
 def published_dir(name: str) -> Path:
@@ -172,6 +183,36 @@ def better(name: str, challenger: float, champ: float) -> bool:
     return challenger > champ + m if cfg["higher_better"] else challenger < champ - m
 
 
+def per_period(ts: np.ndarray, loss: np.ndarray) -> np.ndarray:
+    """Mean loss per timestamp in time order (a panel day counts once), NaN rows left out."""
+    ts, loss = np.asarray(ts), np.asarray(loss, float)
+    if loss.ndim > 1:
+        loss = loss.mean(1)
+    u, inv = np.unique(ts, return_inverse=True)
+    ok = np.isfinite(loss)
+    n = np.bincount(inv[ok], minlength=len(u))
+    s = np.bincount(inv[ok], loss[ok], minlength=len(u))
+    return np.where(n > 0, s / np.maximum(n, 1), np.nan)
+
+
+def spa_judge(name: str, win: pl.DataFrame, champ_pred: np.ndarray) -> dict:
+    """T2: Hansen's SPA test of the challenger against the champion (the benchmark) on the window's per-period
+    losses, and the model confidence set of challenger, champion and baseline. passed: SPA rejects "no better than
+    the champion" at metrics.SPA_P and the challenger's mean loss is lower."""
+    fn = HOOKS[name]["loss"]
+    ts = win["ts_us"].to_numpy()
+    lc = per_period(ts, fn(win, win["challenger"].to_numpy()))
+    lp = per_period(ts, fn(win, champ_pred))
+    t = metrics.spa(lp, lc)
+    out = {"p": t["p"], "p_lower": t["p_lower"], "p_upper": t["p_upper"], "periods": t["n"],
+           "passed": bool(t["p"] < metrics.SPA_P and (t.get("mean_gain") or [0.0])[0] > 0)}
+    if "baseline_pred" in win.columns:
+        lb = per_period(ts, fn(win, win["baseline_pred"].to_numpy()))
+        m = metrics.mcs(np.column_stack([lc, lp, lb]), ["challenger", "champion", "baseline"])
+        out["mcs"] = {"included": m["included"], "alpha": m["alpha"], "pvalues": m["pvalues"]}
+    return out
+
+
 # ---------------------------------------------------------------- the decision
 
 def _record(name: str, rec: dict) -> dict:
@@ -245,6 +286,17 @@ def decide(name: str, cand: Path, now_ms: int, champion_predict: Callable | None
     s_cp = score(name, win, champ_pred)
     base["challenger_score"], base["champion_score"] = s_ch, s_cp
     word = "lower" if not cfg["higher_better"] else "higher"
+    if HOOKS.get(name, {}).get("loss"):
+        t = spa_judge(name, win, champ_pred)
+        base["spa"] = t
+        what = (f"{cfg['metric']} {s_ch:.4f} vs champion {s_cp:.4f} on {win.height} rows over {days} days the "
+                f"champion never saw ({word} is better); Hansen's SPA p {t['p']:.3f} over {t['periods']} periods")
+        if t["passed"]:
+            why = f"{what}, under {metrics.SPA_P}"
+            v = _promote(name, cand, now_ms, why)
+            return _record(name, {**base, "decision": "promoted", "published": v, "why": why})
+        return _record(name, {**base, "decision": "rejected",
+                              "why": f"{what}: not shown better than the champion (needs p < {metrics.SPA_P})"})
     if better(name, s_ch, s_cp):
         why = (f"{cfg['metric']} {s_ch:.4f} vs champion {s_cp:.4f} on {win.height} rows over {days} days "
                f"the champion never saw ({word} is better, margin {cfg['margin']:g})")

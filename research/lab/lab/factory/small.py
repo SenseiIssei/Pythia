@@ -56,6 +56,10 @@ few assets are worth holding. This mode keeps all of that:
              never looks at it: a survivor whose excess DSR passes is looked at
              once per behaviour by the weekly run (lockbox_step, called from
              run.weekly), each look in the factories' common lockbox log.
+  T2         the PBO of the whole family (every genome of the window, one per
+             behaviour) with its rank logits, and a combinatorial purged CV of
+             every held-back genome's in-sample days; one line per candidate in
+             the report (results/overfit_yardsticks_prereg.md).
   shadows    a survivor runs forward as a 40 EUR paper wallet with the same
              costs (at most MAX_ACTIVE, MAX_NEW_PER_RUN new a run); every recorded
              day is frozen. After SHADOW_DAYS days (and every SHADOW_DAYS after)
@@ -100,7 +104,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import history, report
+from .. import history, metrics, report
 from ..experiments import fam_common as fc
 from ..experiments import smallaccount as s1
 from ..experiments import smallaccount_s2 as s2
@@ -932,6 +936,15 @@ def current(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r.get("is_from", OLD_IS_FROM) == IS_FROM]
 
 
+def family_series(c: Ctx, v: s1.Venue, rows: list[dict], fresh: list[dict]) -> dict[str, np.ndarray]:
+    """T2: the 40 EUR wallet's in-sample returns of the family, every genome of the window one per behaviour, at
+    most evaluate.FAMILY_MAX (the best by fitness); this run's from memory, the others rebuilt."""
+    have = {r["key"]: r["is_returns"] for r in fresh if r.get("is_returns") is not None}
+    cur = sorted((r for r in current(rows) if not r.get("same_as")), key=lambda r: -r.get("fitness", -9.0))
+    return {r["key"]: have[r["key"]] if r["key"] in have else is_series(c, r["genome"], v)
+            for r in cur[: evaluate.FAMILY_MAX]}
+
+
 def pick_for_holdout(c: Ctx, v: s1.Venue, led: Ledger, checked: set[str], n: int = HOLDOUT_PER_RUN) -> list[dict]:
     """`checked`: keys and behaviours already held back; a genome that does what another does is never picked."""
     cands = [r for r in current(led.rows) if r["key"] not in checked and r.get("behaviour") not in checked
@@ -1184,6 +1197,7 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
     bench_is = benchmarks(c, v, win["is"])
     res = search(c, v, led, run_id, budget, log=log, share=share, bench=bench_is)
     pool = led.pool()
+    fam = family_series(c, v, led.rows, res["rows"])
     bench = benchmarks(c, v, win["oos"])
     hp = small_dir() / "holdout.jsonl"
     hold_log = lg.read_jsonl(hp)
@@ -1207,6 +1221,7 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
             continue
         h = holdout(c, r["genome"], v, pool, bench)
         h["behaviour"] = r.get("behaviour")
+        h["cpcv"] = evaluate.cpcv(fam[r["key"]] if r["key"] in fam else is_series(c, r["genome"], v), fam, r["key"])
         gs = gates(r, h)
         bad = failed(gs)
         if bad:
@@ -1249,6 +1264,7 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
          "pool_before": pool_before, "pool_after": pool, "ledger": len(led),
          "top": [{k: x for k, x in r.items() if k not in ("genome", "is_returns")} for r in top],
          "night": {"effective_n": evaluate.effective_n(night), "pbo": evaluate.pbo(night),
+                   "family": evaluate.family_pbo(fam) if fam else None,
                    "same_behaviour": sum(1 for r in res["rows"] if r.get("same_as"))},
          "lockbox": [x for x in lg.lockbox_looks() if x.get("factory") == "small"],
          "bench_is": strip_returns(bench_is), "bench_oos": strip_returns(bench), "holdout": rows,
@@ -1373,6 +1389,7 @@ def markdown(d: dict) -> str:
           "note": s.get("reason") or ""} for s in d["shadows"]]
     md.append(report.table(t, list(t[0])) if t else "none yet\n")
     md += night_lines(d.get("night"), "this run's genomes")
+    md += candidate_lines(d["holdout"], (d.get("night") or {}).get("family"), "the excess over SPYx (40 EUR)")
     md.append("## Lockbox looks (made by the weekly run, one per behaviour)\n")
     t = [{"look": x["look"], "date": x["date"], "key": x["key"], "days": x["lockbox_days"],
           "excess Sharpe vs SPYx": f"{x['lockbox_excess_sharpe']:.2f}", "DSR over the looks": f"{x['dsr']:.2f}",
@@ -1383,18 +1400,34 @@ def markdown(d: dict) -> str:
 
 
 def night_lines(n: dict | None, what: str) -> list[str]:
-    """PBO and effective N of a run's genomes (R6), for both reports."""
+    """PBO and effective N of a run's genomes (R6) and the family's PBO with its rank logits (T2), for both
+    reports."""
     if not n:
         return []
-    e, p = n["effective_n"], n["pbo"]
+    e, p, f = n["effective_n"], n["pbo"], n.get("family")
     pb = (f"PBO {p['pbo']:.2f} ({p['combos']} CSCV splits of {p['blocks']} blocks over {p['genomes']} moving "
           f"genomes; the share of splits where the in-sample best ranks in the lower half out of sample)"
           if p else "PBO n/a (fewer than 2 moving genomes)")
-    return ["## Overfitting of the search (R6)\n",
+    fp = (f"PBO of the family {f['pbo']:.2f} over {f['genomes']} moving genomes of the window (one per behaviour, "
+          f"{f['combos']} splits of {f['blocks']} blocks); {metrics.logit_text(f)}" if f
+          else "PBO of the family n/a (fewer than 2 moving genomes)")
+    return ["## Overfitting of the search (R6, T2)\n",
             f"- effective N: {e['effective_n']} clusters among {e['genomes']} of {what} (correlation above "
             f"{e['corr']:.1f} in sample is one cluster); {n.get('same_behaviour', 0)} genome(s) repeat an earlier "
             f"behaviour",
-            f"- {pb}\n"]
+            f"- {pb}",
+            f"- {fp}\n"]
+
+
+def candidate_lines(held: list[dict], fam: dict | None, what: str) -> list[str]:
+    """T2: one line per genome held back this run (evaluate.candidate_line), for both reports."""
+    rows = [h for h in held if h.get("decision") != "waiting" or h.get("cpcv")]
+    if not rows:
+        return []
+    return (["## Each candidate held back (T2)\n",
+             "CPCV: combinatorial purged CV of the in-sample days (12 groups, 3 tested, purge 1 day, embargo 1 %), "
+             "each split picking the best of the candidate and its near variants by training Sharpe.\n"]
+            + [evaluate.candidate_line(h, fam, what) for h in rows] + [""])
 
 
 def publish(d: dict) -> None:

@@ -22,7 +22,10 @@ label horizon, or time blocks for small samples), scores model and baseline on
 the same rows, tests the difference with Diebold-Mariano on per-period mean
 losses, and applies the gate: lower mean loss than the baseline with a DM p
 below GATE_P. A model that fails its gate is still kept as a candidate and
-scored in shadow, but it is never promoted and nothing may use it.
+scored in shadow, but it is never promoted and nothing may use it. Since T2 the
+card also holds Hansen's SPA p of the model against its baseline on the same
+per-period losses (metrics.spa, consistent p, lower is better); the gate itself
+is unchanged.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ import numpy as np
 import polars as pl
 
 from ..cv import walk_forward
-from ..metrics import diebold_mariano
+from ..metrics import diebold_mariano, spa
 
 HOUR_US = 3_600_000_000
 DAY_US = 24 * HOUR_US
@@ -205,21 +208,22 @@ def evaluate(mod, panel: pl.DataFrame) -> dict:
     ev_mask = known & finite_rows(pred) & finite_rows(base)
     out = {"folds": fold_rows, "rows_oos": int(ev_mask.sum())}
     if ev_mask.sum() == 0:
-        out.update(model_score=None, baseline_score=None, gain_pct=None, dm_stat=None, dm_p=None,
+        out.update(model_score=None, baseline_score=None, gain_pct=None, dm_stat=None, dm_p=None, spa_p=None,
                    gate={"passed": False, "why": "no out-of-sample rows: too little history for one fold"})
     else:
         y = panel["target"].to_numpy().astype(float)[ev_mask]
         lm, lb = mod.loss(y, pred[ev_mask]), mod.loss(y, base[ev_mask])
         sm, sb = float(np.nanmean(lm)), float(np.nanmean(lb))
-        dm_s, dm_p = diebold_mariano(per_period(ts[ev_mask], lm), per_period(ts[ev_mask], lb),
-                                     lag=max(spec.horizon_days, 1))
+        pm, pb = per_period(ts[ev_mask], lm), per_period(ts[ev_mask], lb)
+        dm_s, dm_p = diebold_mariano(pm, pb, lag=max(spec.horizon_days, 1))
+        spa_p = spa(pb, pm)["p"]
         gain = (sb - sm) / abs(sb) * 100 if sb else None
         passed = bool(sm < sb and np.isfinite(dm_p) and dm_p < GATE_P)
         why = (f"{spec.metric} {sm:.4f} vs {sb:.4f} for the baseline ({spec.baseline}), "
                f"{'lower' if sm < sb else 'not lower'}, DM p {dm_p:.3g}"
                + ("" if passed else f"; the gate needs lower and p < {GATE_P}"))
         wins = sum(r["model"] < r["baseline"] for r in fold_rows)
-        out.update(model_score=sm, baseline_score=sb, gain_pct=gain, dm_stat=dm_s, dm_p=dm_p,
+        out.update(model_score=sm, baseline_score=sb, gain_pct=gain, dm_stat=dm_s, dm_p=dm_p, spa_p=spa_p,
                    folds_won=wins, gate={"passed": passed, "why": why})
     hold = panel.with_columns(challenger=pl.Series(pred), baseline_pred=pl.Series(base),
                               **{f"x_{k}": pl.Series(v) for k, v in side.items()}).filter(pl.Series(ev_mask))
@@ -250,7 +254,7 @@ def card(spec: Spec, ev: dict, version: str, now_ms: int) -> dict:
         "train_rows": ev.get("train_rows"), "rows_oos": ev.get("rows_oos"),
         "model_score": ev.get("model_score"), "baseline_score": ev.get("baseline_score"),
         "gain_pct": ev.get("gain_pct"), "dm_stat": ev.get("dm_stat"), "dm_p": ev.get("dm_p"),
-        "folds_won": ev.get("folds_won"), "folds": ev.get("folds"), "gate": ev.get("gate"),
+        "spa_p": ev.get("spa_p"), "folds_won": ev.get("folds_won"), "folds": ev.get("folds"), "gate": ev.get("gate"),
         "extra": ev.get("extra") or {}, "feature_bins": ev.get("feature_bins") or {},
     })
 

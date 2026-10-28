@@ -26,6 +26,11 @@ the deflated excess bar gets one look per behaviour, each written to
 <data>/factory/lockbox.jsonl before it is used. Each run reports its genomes'
 effective N and PBO.
 
+T2 (results/overfit_yardsticks_prereg.md): the PBO also over the whole family (family_series: every
+genome of the window, one per behaviour, the evaluate.FAMILY_MAX best by fitness) with its rank logits,
+and every genome held back gets a combinatorial purged CV of its in-sample days (evaluate.cpcv); the
+report has one line per candidate (DSR, PBO, CPCV median and 10th percentile).
+
 T1 (results/leak_harness_prereg.md): before its held-back look every pick goes through the leak harness
 (lab.leak, leak_screen); one whose weights at or before t move when the bars after t change is rejected,
 written to <data>/factory/leaks.jsonl with the reason and never picked again.
@@ -133,6 +138,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
         if ledger.by_key[r["key"]].get("same_as"):
             r["same_as"] = ledger.by_key[r["key"]]["same_as"]
     pool = ledger.pool()
+    fam = family_series(c, ledger.rows, res["rows"])
 
     hold_log = shadow.holdout_log()
     checked = {h["key"] for h in hold_log} | {h["behaviour"] for h in hold_log if h.get("behaviour")}
@@ -149,6 +155,8 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
     holdout_rows = []
     for r in picks:
         h = evaluate.holdout(c, r["genome"], pool, btc)
+        h["cpcv"] = evaluate.cpcv(fam[r["key"]] if r["key"] in fam else evaluate.is_series(c, r["genome"]), fam,
+                                  r["key"])
         gates = evaluate.shadow_gates(r, h)
         bad = evaluate.failed(gates)
         gross, tov, _ = build.run(c, r["genome"])
@@ -203,7 +211,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
         "tried": [{"key": r["key"], "genome": r["genome"], "is_sharpe": r["is_sharpe"]} for r in res["rows"]],
         "top": [strip({k: v for k, v in r.items() if k != "genome"}) for r in top],
         "btc": btc, "diversity_corr": DIVERSITY_CORR,
-        "holdout": holdout_rows, "leaks": leaks, "night": night(res["rows"]), "lockbox": looks,
+        "holdout": holdout_rows, "leaks": leaks, "night": night(res["rows"], fam), "lockbox": looks,
         "shadow_update": upd, "decisions": decisions, "shadows": shadows,
         "promoted": shadow.promoted()["books"], "seconds": time.time() - t0,
         "grammar": {"max_filters": grammar.MAX_FILTERS, "max_complexity": grammar.MAX_COMPLEXITY},
@@ -233,11 +241,21 @@ def leak_screen(c, picks: list[dict], path: Path, run_id: str, today: str, log=p
     return out
 
 
-def night(rows: list[dict]) -> dict:
-    """Effective N and PBO of this run's genomes, one per behaviour (R6)."""
+def night(rows: list[dict], fam: dict[str, np.ndarray] | None = None) -> dict:
+    """Effective N and PBO of this run's genomes, one per behaviour (R6), and the PBO of the whole family (T2)."""
     xs = [r.get("is_returns") for r in rows if not r.get("same_as")]
     return {"effective_n": evaluate.effective_n(xs), "pbo": evaluate.pbo(xs),
+            "family": evaluate.family_pbo(fam) if fam else None,
             "same_behaviour": sum(1 for r in rows if r.get("same_as"))}
+
+
+def family_series(c: build.Ctx, rows: list[dict], fresh: list[dict]) -> dict[str, np.ndarray]:
+    """T2: the in-sample returns of the family, every genome of the window one per behaviour, at most
+    evaluate.FAMILY_MAX (the best by fitness); this run's from memory, the others rebuilt."""
+    have = {r["key"]: r["is_returns"] for r in fresh if r.get("is_returns") is not None}
+    cur = sorted((r for r in evaluate.current(rows) if not r.get("same_as")), key=lambda r: -r.get("fitness", -9.0))
+    return {r["key"]: have[r["key"]] if r["key"] in have else evaluate.is_series(c, r["genome"])
+            for r in cur[: evaluate.FAMILY_MAX]}
 
 
 def lockbox_step(c: build.Ctx, pool: dict, btc: dict, held: list[dict], run_id: str, today: str, log=print) -> dict:
@@ -279,7 +297,7 @@ def lockbox_step(c: build.Ctx, pool: dict, btc: dict, held: list[dict], run_id: 
 
 def r6_markdown(d: dict) -> str:
     """The R6 part of the report: the validation and lockbox windows, PBO and effective N, the lockbox looks."""
-    from .small import night_lines
+    from .small import candidate_lines, night_lines
     p = d["pool_after"]
     lb = d.get("lockbox") or {}
     md = ["## The bar after R6\n",
@@ -293,6 +311,7 @@ def r6_markdown(d: dict) -> str:
           f"{p['sr0_annual']:.2f}). Promotion also needs the lockbox look's DSR over every look at "
           f"{evaluate.LOCKBOX_BAR} or more.\n"]
     md += night_lines(d.get("night"), "this run's genomes")
+    md += candidate_lines(d["holdout"], (d.get("night") or {}).get("family"), "the excess over BTC")
     md.append("## Lockbox looks this run\n")
     rows = lb.get("this_run") or []
     md.append(writeup.table([[x["look"], x["factory"], x["key"], x["lockbox_days"],

@@ -35,7 +35,8 @@ panel for its breadth features, so run `xs_daily` first.
 ## The rules every experiment follows
 
 - **Out of sample or it did not happen.** Walk-forward by quarter with an
-  embargo (`cv.py`); labels that span a split are purged.
+  embargo (`cv.py`); labels that span a split are purged (`walk_forward`'s
+  `horizon_h` or `label_end_us`, since T2; before it the embargo alone did it).
 - **Costs are in every number.** A backtest without costs is not reported.
 - **Count the tries.** Every variant tried goes into the deflated Sharpe
   (`metrics.py`); picking the best of many is how noise becomes a strategy.
@@ -59,6 +60,19 @@ panel for its breadth features, so run `xs_daily` first.
   every feature, the zoo's feature builders, the G2 shadows and the paper
   books' weight functions (`reports/leak/latest.md`, a red line in the health
   check per failure).
+- **Measure the overfitting, not only the count.** Since T2
+  (`results/overfit_yardsticks_prereg.md`, `results/overfit_yardsticks.md`):
+  PBO by CSCV (`metrics.cscv`, 16 blocks, every split) over each factory's
+  whole family with the rank logits' distribution (weekly factory and F2 on
+  their ledgers, G2 per target); a combinatorial purged CV (`cv.cpcv`) of every
+  candidate that reaches validation, the median and 10th percentile of its
+  paths; one line per candidate in the reports (DSR with its direction, PBO,
+  CPCV). Hansen's SPA test and the model confidence set (`metrics.spa`,
+  `metrics.mcs`, stationary bootstrap) for the zoo and M4 against their
+  baselines. The zoo replaces a champion only when SPA rejects "no better than
+  the champion" at 5 %, and a model that failed its gate is not retrained
+  until a book reads it (`python -m lab.models.train --replay 30` replays the
+  last days under both rules).
 - **Beat a baseline, not zero.** Naive and HAR for volatility, the coin
   basket and BTC for strategies, random entries for signals.
 - **Write down failures.** A dead idea with a number is a result.

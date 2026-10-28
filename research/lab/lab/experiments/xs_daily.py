@@ -62,6 +62,14 @@ paying heavy funding in 2025-26 while the label ignored it):
 
 Costs: every book at 15 bps and at 41 bps (Kraken taker) per unit of one-way
 turnover. Variant choice uses 2022-2023 only; 2024 on is the holdout.
+
+T2 (results/overfit_yardsticks_prereg.md): Hansen's SPA test per family on R6's
+validation window only (2024-01-01 to 2026-06-30, never the lockbox), loss minus
+the daily net return at 15 bps: the long-only model books against the
+equal-weight 100 most liquid coins, the long/short and funding-aware model books
+against the low 28-day vol book (10/10 of 100 liquid perps, buffer 50 %); the
+model confidence set over every book. One trial in the registry
+(hand:t2_m4_spa) when it first runs.
 """
 
 from __future__ import annotations
@@ -80,6 +88,7 @@ import polars as pl
 from .. import report
 from ..cv import walk_forward
 from ..data import HOUR_US, ROOT
+from .. import metrics
 from ..metrics import deflated_sharpe
 from .picks import hourly_segments
 from .picks_ls import perp_base
@@ -94,6 +103,10 @@ EXTEND_D = 10  # calendar days a dead segment is carried at its last close
 FIRST_TEST = int(datetime(2022, 1, 1, tzinfo=timezone.utc).timestamp() * 1e6)
 HOLDOUT = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1e6)
 COSTS = {"15bps": 0.0015, "41bps": 0.0041}
+LOCKBOX = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp() * 1e6)   # R6: validation ends the day before
+LOWVOL_BENCH = "low 28-day vol 10/10 of 100 liquid perps, buffer 50 %"
+SPA_TRIAL = {"id": "hand:t2_m4_spa", "family": "hand", "n": 1,
+             "source": "results/overfit_yardsticks_prereg.md (M4's SPA and MCS on the validation window)"}
 CACHE = Path(os.environ.get("PYTHIA_CACHE", report.REPORTS / "_cache"))
 
 RANKED = ["r1", "r2", "r3", "r5", "r7", "r14", "r28", "r56", "r112", "r28_7", "r112_28",
@@ -579,6 +592,39 @@ def btc_regime(days: np.ndarray) -> np.ndarray:
     return np.array([bool(on.get(int(d))) for d in days])
 
 
+def spa_tests(nets: dict[str, np.ndarray], fams: dict[str, str], bench: dict[str, tuple[str, np.ndarray]]) -> dict:
+    """T2: per benchmark, Hansen's SPA of the model books of its families against it, and the MCS over every book.
+    nets: each book's daily net returns on the validation window; fams: each book's family; bench: {label:
+    (comma list of families, the benchmark's returns on the same days)}. Losses are minus the returns."""
+    out = {"spa": [], "mcs": None}
+    for label, (fl, b) in bench.items():
+        names = [n for n in nets if fams[n] in fl.split(",")]
+        if not names:
+            continue
+        t = metrics.spa(-b, -np.column_stack([nets[n] for n in names]))
+        best = names[t["best"]] if t.get("best") is not None else None
+        out["spa"].append({"benchmark": label, "books": len(names), "p": t["p"], "p_lower": t["p_lower"],
+                           "p_upper": t["p_upper"], "best": best, "rejects": bool(t["p"] < metrics.SPA_P)})
+    names = list(nets)
+    if len(names) > 1:
+        m = metrics.mcs(-np.column_stack([nets[n] for n in names]), names)
+        out["mcs"] = {"included": m["included"], "alpha": m["alpha"], "books": len(names)}
+    return out
+
+
+def spa_markdown(t: dict) -> str:
+    md = ["## T2: SPA and the model confidence set on validation (2024-01-01 to 2026-06-30, 15 bps)\n"]
+    for x in t["spa"]:
+        md.append(f"- {x['books']} model books against {x['benchmark']}: SPA p {x['p']:.3f} (lower {x['p_lower']:.3f}, "
+                  f"upper {x['p_upper']:.3f}); " + (f"rejects \"no book beats it\" at 5 %, best {x['best']}"
+                                                    if x["rejects"] else "no book is shown better at 5 %"))
+    if t["mcs"]:
+        inc = t["mcs"]["included"]
+        md.append(f"- model confidence set at {t['mcs']['alpha']:.0%} over all {t['mcs']['books']} books: "
+                  f"{len(inc)} remain ({', '.join(inc[:8])}{', ...' if len(inc) > 8 else ''})")
+    return "\n".join(md) + "\n\n"
+
+
 def main() -> None:
     t0 = time.time()
     P = build_panel(refresh="--refresh" in __import__("sys").argv)
@@ -748,6 +794,14 @@ def main() -> None:
     ew = np.array([R[t, liq_mask[t]].mean() if liq_mask[t].any() else 0.0 for t in range(len(M["days"]))])
     bi = list(M["syms"]).index("BTCUSDT")
     btc = R[:, bi]
+    val = (M["days"] >= HOLDOUT) & (M["days"] < LOCKBOX)
+    nets = {name: (g + fu - tu * COSTS["15bps"])[val] for _, name, g, tu, fu, _ in variants}
+    lowvol = nets.get(LOWVOL_BENCH)
+    spa_res = spa_tests(nets, {v[1]: v[0] for v in variants},
+                        {"the equal-weight 100 most liquid coins": ("long-only", ew[val]),
+                         **({f"the {LOWVOL_BENCH} book": (f"long/short,{NET_FAMILY}", lowvol)} if lowvol is not None
+                            else {})})
+    metrics.register([SPA_TRIAL])
     base_rows = []
     for name, r in (("equal-weight 100 most liquid (daily rebalance, no costs)", ew), ("BTC buy and hold", btc),
                     ("BTC with 200-day regime switch (no costs)", btc * reg)):
@@ -834,7 +888,8 @@ def main() -> None:
         f"from 2024 ({n_obs} days). Costs 15 and 41 bps per unit of one-way turnover. Took {(time.time() - t0) / 60:.0f} min.\n\n"
         f"Best signal: {ic_best['score']} on {ic_best['horizon_d']}-day returns, Rank-IC {ic_best['rank_ic']:.3f} "
         f"(t {ic_best['t_stat']:.1f}).\n\n" + "\n".join(lines) + "\n\n"
-        "## Signal quality out of sample (Rank-IC per day, averaged)\n\n"
+        + spa_markdown(spa_res)
+        + "## Signal quality out of sample (Rank-IC per day, averaged)\n\n"
         + report.table(ic_rows, ["score", "horizon_d", "rank_ic", "t_stat", "rank_ic_top100_liquid"])
         + "\n## Round three: gross and funding-net labels (Rank-IC per day, net labels end "
         f"{datetime.fromtimestamp(fund_end / 1e6, timezone.utc):%Y-%m-%d})\n\n"
@@ -866,7 +921,7 @@ def main() -> None:
     )
     report.write("xs_daily", md, {"ic": ic_rows, "net_ic": net_ic_rows, "rows": rows, "picks": picks,
                                   "slow_pick": slow_pick, "twins": twin_rows, "baselines": base_rows,
-                                  "folds": folds, "n_variants": len(rows),
+                                  "folds": folds, "n_variants": len(rows), "t2": spa_res,
                                   "fund_end": datetime.fromtimestamp(fund_end / 1e6, timezone.utc).strftime("%Y-%m-%d")})
 
 

@@ -5,8 +5,9 @@ retrains them as challengers and the engine scores them live, so the zoo only
 reports on them. M7 failed as a gate and is kept here as a record, and so are
 X16's M13, M14 and M15, which failed their gates (RECORDS). M8, M8q,
 M10, M11 and M12 are the zoo's own: lab.models.train retrains them when due,
-judges every challenger against the champion, scores the champion in shadow
-every day and watches its inputs for drift.
+judges every challenger against the champion (since T2 by Hansen's SPA test on
+the per-period losses, lab.ops.registry), scores the champion in shadow every
+day and watches its inputs for drift.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ def by_key(key: str):
 
 def register_all() -> None:
     """Every zoo model into the champion/challenger registry, with its own gate,
-    score (mean loss, lower is better) and champion predictor."""
+    score (mean loss, lower is better), per-row loss (the SPA test) and champion predictor."""
     for mod in zoo_modules():
         s = mod.SPEC
         assert s.name in guard.ZOO_MODELS, f"{s.name} is not in guard.ZOO_MODELS"
@@ -101,4 +102,8 @@ def register_all() -> None:
             fitted = mod.restore(folder)
             return lambda frame: mod.predict(fitted, frame)
 
-        registry.register(s.name, cfg, gate_fn, score_fn, predictor_fn)
+        def loss_fn(frame, pred, mod=mod):
+            y = frame["target"].to_numpy().astype(float)
+            return np.asarray(mod.loss(y, np.asarray(pred, float)), float)
+
+        registry.register(s.name, cfg, gate_fn, score_fn, predictor_fn, loss_fn)

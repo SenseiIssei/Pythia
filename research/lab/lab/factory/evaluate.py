@@ -36,17 +36,22 @@ lockbox gate: a look was made and its excess over BTC beats the best of that man
 looks' noise at LOCKBOX_BAR. Each run also reports the effective N of its genomes
 (clusters of the in-sample return matrix) and their PBO by CSCV; neither moves the
 bar (the registry's N is the larger and decides).
+
+T2 (results/overfit_yardsticks_prereg.md): the PBO also over the whole family (every
+genome of the window, one per behaviour, at most FAMILY_MAX) with the rank logits'
+distribution, and each candidate that reaches validation gets a combinatorial purged
+CV of its in-sample days (cpcv) and one line in the report (candidate_line). Neither
+moves the bar.
 """
 
 from __future__ import annotations
 
-import itertools
 import math
 from datetime import datetime, timezone
 
 import numpy as np
 
-from .. import history
+from .. import cv, history, metrics
 from ..experiments import fam_common as fc
 from . import build, grammar
 from .ledger import deflated, deflated_excess, lockbox_looks
@@ -65,7 +70,12 @@ LOCKBOX_START = int(datetime.strptime(LOCKBOX_FROM, "%Y-%m-%d").replace(tzinfo=t
 LOCKBOX_MIN_DAYS = 60                        # no look before the lockbox holds this many days
 LOCKBOX_BAR = 0.5                            # the look's DSR over every look so far must reach this
 EFF_CORR = 0.5                               # genomes in one cluster of the effective N correlate above this
-CSCV_BLOCKS = 16
+CSCV_BLOCKS = metrics.CSCV_BLOCKS
+CPCV_GROUPS, CPCV_TEST = 12, 3               # T2: 220 splits, 55 paths
+CPCV_PURGE, CPCV_EMBARGO = 1, 0.01           # a day's return is the label; embargo 1 % of the days
+CPCV_CORR = 0.90                             # a near variant: in-sample correlation above this (run.DIVERSITY_CORR;
+                                             # at EFF_CORR every long book is everyone's variant, results/overfit_yardsticks.md)
+FAMILY_MAX = 2000                            # the family's PBO over at most this many genomes, the best by fitness
 
 
 def current(rows: list[dict]) -> list[dict]:
@@ -273,34 +283,61 @@ def effective_n(series: list[np.ndarray], corr: float = EFF_CORR) -> dict:
 def pbo(series: list[np.ndarray], blocks: int = CSCV_BLOCKS) -> dict | None:
     """Probability of backtest overfitting by CSCV (Bailey, Borwein, Lopez de Prado, Zhu): the days cut into
     `blocks` blocks, every half of them in sample and the rest out; how often the in-sample best by Sharpe
-    ranks in the lower half out of sample. None with fewer than 2 moving genomes or too few days."""
-    R = _matrix(series)
-    T, m = R.shape
-    L = T // blocks
-    if m < 2 or L < 5:
+    ranks in the lower half out of sample, with the rank logits' quantiles and histogram (metrics.cscv). None
+    with fewer than 2 moving genomes or too few days."""
+    return metrics.cscv(_matrix(series), blocks)
+
+
+def family_pbo(series: dict[str, np.ndarray], blocks: int = CSCV_BLOCKS) -> dict | None:
+    """T2: PBO over a whole family (every genome of the ledger's window, one per behaviour), not one run's."""
+    p = pbo(list(series.values()), blocks)
+    return {**p, "family_genomes": len(series)} if p else None
+
+
+def _sharpe_cols(R: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    x = R[mask]
+    sd = x.std(0)
+    return np.where(sd > 0, x.mean(0) / np.where(sd > 0, sd, 1), -np.inf)
+
+
+def cpcv(x: np.ndarray, family: dict[str, np.ndarray] | None = None, key: str | None = None,
+         n_groups: int = CPCV_GROUPS, k_test: int = CPCV_TEST, corr: float = CPCV_CORR) -> dict | None:
+    """T2: combinatorial purged CV of a candidate on its in-sample returns x (cv.cpcv: n_groups groups of days,
+    k_test of them tested, purge CPCV_PURGE days, embargo CPCV_EMBARGO of the days). A rule has nothing to fit, so
+    each split picks, among the candidate and its near variants (family series correlating above `corr`), the one
+    with the best training Sharpe, and its test days fill the paths: picking in this region of the search the way
+    the search picks. Returns the paths' annual Sharpes (median, 10th percentile). None with too few days."""
+    x = np.nan_to_num(np.asarray(x, dtype=float))
+    T = len(x)
+    if T < n_groups * 10:
         return None
-    B = R[: L * blocks].reshape(blocks, L, m)
-    bs, bq = B.sum(1), (B ** 2).sum(1)
-    combos = np.array([[i in cmb for i in range(blocks)] for cmb in itertools.combinations(range(blocks), blocks // 2)],
-                      dtype=float)
-    n = L * blocks // 2
+    cols = [x]
+    for k, y in (family or {}).items():
+        if k == key or y is None or len(y) < T:
+            continue
+        y = np.nan_to_num(np.asarray(y, dtype=float))[-T:]
+        if y.std() > 0 and x.std() > 0 and np.corrcoef(x, y)[0, 1] > corr and not np.array_equal(x, y):
+            cols.append(y)
+    R = np.column_stack(cols)
+    t = np.arange(T)
+    splits = cv.cpcv(t, n_groups, k_test, purge=CPCV_PURGE, embargo=math.ceil(CPCV_EMBARGO * T))
+    picks = [int(np.argmax(_sharpe_cols(R, sp.train))) for sp in splits]
+    paths = cv.assemble(splits, [R[:, j] for j in picks], n_groups, k_test, t)
+    srs = np.array([sharpe(p) for p in paths])
+    return {"paths": len(srs), "splits": len(splits), "groups": n_groups, "test_groups": k_test,
+            "variants": len(cols) - 1, "median": float(np.median(srs)), "p10": float(np.percentile(srs, 10)),
+            "picked_self": float(np.mean([j == 0 for j in picks]))}
 
-    def sr(Cm):
-        mu = Cm @ bs / n
-        sd = np.sqrt(np.maximum(Cm @ bq / n - mu ** 2, 1e-18))
-        return mu / sd
 
-    logits = []
-    for i in range(0, len(combos), 2000):
-        Cm = combos[i:i + 2000]
-        ins, out = sr(Cm), sr(1 - Cm)
-        best = ins.argmax(1)
-        ob = out[np.arange(len(Cm)), best]
-        w = ((out < ob[:, None]).sum(1) + 1) / (m + 1)
-        logits.append(np.log(w / (1 - w)))
-    lam = np.concatenate(logits)
-    return {"pbo": float((lam <= 0).mean()), "combos": len(lam), "genomes": m, "blocks": blocks,
-            "median_logit": float(np.median(lam))}
+def candidate_line(h: dict, fam: dict | None, what: str = "the excess over BTC") -> str:
+    """T2: one line per candidate that reached validation: DSR (its direction), the family's PBO, CPCV."""
+    c = h.get("cpcv")
+    cp = (f"CPCV in sample median Sharpe {c['median']:.2f}, 10th percentile {c['p10']:.2f} over {c['paths']} paths "
+          f"({c['variants']} near variant(s)" + ("; none, so every path is the candidate itself)" if not c["variants"]
+                                                   else ")") if c else "CPCV n/a (too few days)")
+    pb = f"PBO of the family {fam['pbo']:.2f}" if fam else "PBO of the family n/a"
+    return (f"- {h['key']} {h.get('name', '')}: DSR of {what} {h['deflated_p']:.2f} (higher is better, pass at "
+            f"{DEFLATED_BAR}) · {pb} · {cp}")
 
 
 def failed(gates: dict[str, dict]) -> list[str]:

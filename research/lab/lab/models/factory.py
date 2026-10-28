@@ -384,6 +384,12 @@ def members(names=("catboost", "tabpfn")):
 #            holdout.jsonl as status "leak" with the reason and never held back.
 #   allocator  per target a Thompson draw over the incumbent and the eligible shadows (Beta posteriors of the days
 #            each had the lowest loss), written to picks.json for paper books only. Nothing live reads any of it.
+#   T2       (results/overfit_yardsticks_prereg.md) per target the PBO by CSCV of the specs screened in the run
+#            (minus their per-day mean loss in the screen window, metrics.cscv) with its rank logits, and for each
+#            look a combinatorial purged CV of the screen window (cv.cpcv: CPCV_GROUPS groups, CPCV_TEST tested,
+#            purge the target's purge days, embargo 1 % of the days, the spec and the baseline refitted on every
+#            split, the spec's training window ignored): the paths' loss gain over the baseline in %, median and
+#            10th percentile, one line per look in the report.
 #
 # Model losses are not daily Sharpes, so these trials stay out of the trial registry (metrics.trial_pool).
 
@@ -397,6 +403,7 @@ RANDOM_SHARE = 1 / 3
 TREE_SHARE = 0.3
 MIN_TRAIN = 200                  # training rows a fold needs (M12 has about 250 a year)
 EPS = 1e-12
+CPCV_GROUPS, CPCV_TEST, CPCV_EMBARGO = 6, 2, 0.01     # T2: 15 splits, 5 paths
 
 # target: kind (clf: a probability, logloss; var: a variance, QLIKE, fitted on its log; reg: a number, squared
 # error, fitted as the change from `anchor` when there is one), the zoo model it would replace, the purge in days,
@@ -810,6 +817,86 @@ def beats(j: dict, p_max: float) -> bool:
                and g["dm_p"] < p_max for g in (j.get("base"), j.get("inc")) if g is not None)
 
 
+# ---------------------------------------------------------------- T2: PBO per target and CPCV of a look
+
+def daily_loss(P: Panels, t: str, pred: np.ndarray, start: str, end: str) -> tuple[np.ndarray, np.ndarray]:
+    """(days, mean loss per day) of a forecast over the window's scored rows."""
+    panel = P.get(t)
+    ts, y = panel["ts_us"].to_numpy(), panel["target"].fill_null(np.nan).to_numpy().astype(float)
+    ok = (ts >= core.us(start)) & (ts < core.us(end)) & np.isfinite(y) & np.isfinite(pred)
+    if not ok.any():
+        return np.zeros(0, dtype=np.int64), np.zeros(0)
+    u, inv = np.unique(ts[ok], return_inverse=True)
+    lo = loss_of(t, y[ok], pred[ok])
+    return u, np.bincount(inv, lo) / np.bincount(inv)
+
+
+def target_pbo(series: dict[str, tuple]) -> dict | None:
+    """PBO by CSCV of one target's specs on minus their per-day mean loss, over the days every spec scored."""
+    from ..metrics import cscv
+    xs = [v for v in series.values() if len(v[0])]
+    if len(xs) < 2:
+        return None
+    days = xs[0][0]
+    for d, _ in xs[1:]:
+        days = np.intersect1d(days, d)
+    M = np.column_stack([-v[np.searchsorted(d, days)] for d, v in xs]) if len(days) else np.zeros((0, len(xs)))
+    return cscv(M, stat="mean")
+
+
+def cpcv_spec(P: Panels, t: str, spec: dict, start: str = SCREEN_FROM, end: str = HOLD_FROM,
+              n_groups: int = CPCV_GROUPS, k_test: int = CPCV_TEST) -> dict | None:
+    """Combinatorial purged CV of a spec over a window: the window's scored rows in n_groups groups of days, every
+    choice of k_test tested, training rows purged by the target's purge days and embargoed CPCV_EMBARGO of the days
+    after each test group; the spec and the baseline refitted on each split. Returns the paths' loss gain over the
+    baseline in % (median, 10th percentile). None when a split has too few training rows."""
+    from .. import cv
+    panel = P.get(t)
+    ts, y = panel["ts_us"].to_numpy(), panel["target"].fill_null(np.nan).to_numpy().astype(float)
+    rows = np.flatnonzero((ts >= core.us(start)) & (ts < core.us(end)) & np.isfinite(y))
+    if not len(rows):
+        return None
+    tw, X, a = ts[rows], matrix(P, t, spec)[rows], anchor(t, panel)[rows]
+    sub = panel[rows]
+    ndays = len(np.unique(tw))
+    splits = cv.cpcv(tw, n_groups, k_test, purge=TARGETS[t]["purge"] * DAY_US,
+                     embargo=int(np.ceil(CPCV_EMBARGO * ndays)) * DAY_US)
+    lm, lb = [], []
+    for sp in splits:
+        if sp.train.sum() < MIN_TRAIN:
+            return None
+        m, b = np.full(len(rows), np.nan), np.full(len(rows), np.nan)
+        pr = fit_predict(t, spec, X[sp.train], y[rows][sp.train], a[sp.train], X[sp.test], a[sp.test])
+        bs = baseline_fit_predict(t, sub.filter(pl.Series(sp.train)), sub.filter(pl.Series(sp.test)))
+        m[sp.test], b[sp.test] = loss_of(t, y[rows][sp.test], pr), loss_of(t, y[rows][sp.test], bs)
+        lm.append(m)
+        lb.append(b)
+    pm, pb = cv.assemble(splits, lm, n_groups, k_test, tw), cv.assemble(splits, lb, n_groups, k_test, tw)
+    gains = []
+    for x, z in zip(pm, pb):
+        ok = np.isfinite(x) & np.isfinite(z)
+        mb = float(z[ok].mean()) if ok.any() else float("nan")
+        gains.append((mb - float(x[ok].mean())) / abs(mb) * 100 if ok.any() and mb else float("nan"))
+    g = np.array(gains)
+    g = g[np.isfinite(g)]
+    if not len(g):
+        return None
+    return {"paths": len(g), "splits": len(splits), "groups": n_groups, "test_groups": k_test,
+            "median": float(np.median(g)), "p10": float(np.percentile(g, 10))}
+
+
+def look_line(h: dict, pbo: dict | None) -> str:
+    """One line per look: the DM p against the baseline (lower is better), the target's PBO today, CPCV."""
+    base = (h.get("held") or {}).get("base") or {}
+    c = h.get("cpcv")
+    dm = base.get("dm_p")
+    cp = (f"CPCV of the screen median gain {c['median']:.2f} %, 10th percentile {c['p10']:.2f} % over {c['paths']} "
+          f"paths" if c else "CPCV n/a")
+    return (f"- {h['key']} ({h['target']}): DM p against the baseline {'n/a' if dm is None else f'{dm:.3g}'} (lower is "
+            f"better, the bar p < {h['bar_p']:.2g}) · PBO of the target's specs today "
+            f"{'n/a' if not pbo else format(pbo['pbo'], '.2f')} · {cp}")
+
+
 # ---------------------------------------------------------------- ledger, search, held back
 
 def ledger_path() -> Path:
@@ -853,14 +940,17 @@ def import_seed(src: Path | None = None) -> int:
     return len(new)
 
 
-def trial(P: Panels, spec: dict, run: str) -> dict:
-    """One spec through the screen: a ledger row (an error is a trial too)."""
+def trial(P: Panels, spec: dict, run: str, keep: dict | None = None) -> dict:
+    """One spec through the screen: a ledger row (an error is a trial too). keep: gets the spec's per-day mean loss
+    in the screen window under its key (T2's PBO; in memory only)."""
     t, t0 = spec["target"], time.time()
     row = {"key": spec_key(spec), "run": run, "target": t, "spec": spec, "what": describe_spec(spec)}
     try:
         pred, base = walk_spec(P, t, spec, SCREEN_FROM, HOLD_FROM)
         j = judge(P, t, pred, base, walk_incumbent(P, t, SCREEN_FROM, HOLD_FROM), SCREEN_FROM, HOLD_FROM)
         row.update(screen=j, fitness=j["fitness"], screen_pass=beats(j, core.GATE_P))
+        if keep is not None:
+            keep[row["key"]] = daily_loss(P, t, pred, SCREEN_FROM, HOLD_FROM)
     except Exception as e:                       # a broken spec is a failed trial, never a crashed run
         row.update(error=f"{type(e).__name__}: {e}"[:300], fitness=None, screen_pass=False)
     row["seconds"] = round(time.time() - t0, 2)
@@ -1128,6 +1218,7 @@ def _run(now_ms, day, budget_s, P, targets, max_trials, log) -> dict:
     rng = random.Random(f"{day}:{len(rows)}")
     share = RANDOM_SHARE if rows else 1.0
     new: list[dict] = []
+    series: dict[str, tuple] = {}
     avg = 10.0
     while True:
         spent = used + time.time() - t_start
@@ -1136,7 +1227,7 @@ def _run(now_ms, day, budget_s, P, targets, max_trials, log) -> dict:
         s = draw(rng, P, targets, rows, have, share)
         if s is None:
             break
-        r = trial(P, s, run_id)
+        r = trial(P, s, run_id, series)
         _append(ledger_path(), [r])
         rows.append(r)
         have.add(r["key"])
@@ -1156,6 +1247,10 @@ def _run(now_ms, day, budget_s, P, targets, max_trials, log) -> dict:
             log(f"model factory: {r['key']} ({r['target']}) rejected before its held-back look: {why}")
             continue
         h = look(P, r, n_trials, run_id)
+        try:
+            h["cpcv"] = cpcv_spec(P, r["target"], r["spec"])
+        except Exception as e:                   # noqa: BLE001 (a yardstick must not stop the run)
+            h["cpcv"], h["cpcv_error"] = None, f"{type(e).__name__}: {e}"[:200]
         looks_done.append(h)
         log(f"model factory: held back {r['key']} ({r['target']}): {'PASSED' if h['passed'] else 'failed'} "
             f"at p < {h['bar_p']:.2g}")
@@ -1164,12 +1259,14 @@ def _run(now_ms, day, budget_s, P, targets, max_trials, log) -> dict:
     admitted = admit(passed, {r["key"]: r for r in rows}, day)
     if admitted:
         sh["members"] = _read_json(shadows_path(), {"members": []})["members"]
-    doc = summary(now_ms, rows, new, _jl(holdout_path()), looks_done, sh, admitted, n_trials)
+    pbo = {t: target_pbo({r["key"]: series[r["key"]] for r in new if r.get("target") == t and r["key"] in series})
+           for t in targets}
+    doc = summary(now_ms, rows, new, _jl(holdout_path()), looks_done, sh, admitted, n_trials, pbo)
     write_report(doc)
     return doc
 
 
-def summary(now_ms, rows, new, looks, looks_done, sh, admitted, n_trials) -> dict:
+def summary(now_ms, rows, new, looks, looks_done, sh, admitted, n_trials, pbo=None) -> dict:
     members = sh["members"]
     done = [x for x in looks if x.get("status") == "done"]
     best = sorted((r for r in new if r.get("fitness") is not None), key=lambda r: -r["fitness"])[:5]
@@ -1185,7 +1282,9 @@ def summary(now_ms, rows, new, looks, looks_done, sh, admitted, n_trials) -> dic
                         "screen_pass": r["screen_pass"]} for r in best],
         "looks_today": [{"key": h["key"], "target": h["target"], "passed": h["passed"], "bar_p": h["bar_p"],
                          "base": (h["held"].get("base") or {}).get("why"),
-                         "inc": (h["held"].get("inc") or {}).get("why")} for h in looks_done],
+                         "inc": (h["held"].get("inc") or {}).get("why"), "cpcv": h.get("cpcv"),
+                         "line": look_line(h, (pbo or {}).get(h["target"]))} for h in looks_done],
+        "pbo": pbo or {},
         "admitted_today": admitted, "retired_today": sh.get("retired_today") or [],
         "shadows": [{k: m.get(k) for k in ("key", "target", "what", "status", "added_day", "scored_days",
                                             "model_loss", "baseline_loss", "incumbent_loss", "retired_day", "why")}
@@ -1214,6 +1313,13 @@ def markdown(d: dict) -> str:
     for h in d["looks_today"]:
         out += ["", f"Held back {h['key']} ({h['target']}): {'passed' if h['passed'] else 'failed'}; baseline: "
                 f"{h['base']}" + (f"; incumbent: {h['inc']}" if h["inc"] else "")]
+    pbo = {t: p for t, p in (d.get("pbo") or {}).items() if p}
+    if pbo or d["looks_today"]:
+        from ..metrics import logit_text
+        out += ["", "Overfitting (T2): PBO by CSCV of each target's specs screened today (16 blocks, every split, "
+                "minus the per-day mean loss), and one line per look:", ""]
+        out += [f"- {t}: PBO {p['pbo']:.2f} over {p['genomes']} specs; {logit_text(p)}" for t, p in pbo.items()]
+        out += [h["line"] for h in d["looks_today"] if h.get("line")]
     if sh:
         out += ["", "| shadow | target | status | since | scored days | loss | baseline | incumbent |",
                 "|---|---|---|---|---|---|---|---|"]
