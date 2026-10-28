@@ -50,6 +50,15 @@ panel for its breadth features, so run `xs_daily` first.
   convention everywhere: the DSR, higher is better, pass at 0.95 or more,
   over the pool of all (the family's shown next to it). pump.fun's per-entry
   Sharpes do not pool with daily ones and stay outside.
+- **Nothing from the future, checked by a machine.** Since T1 `lab.leak` runs a
+  function on its data and on copies where every value after t is shuffled,
+  shifted, missing or cut, for a sample of t; anything at or before t that
+  moves is a leak (`results/leak_harness_prereg.md`). The factories reject a
+  genome (`factory/leaks.jsonl`) or spec (G2 `holdout.jsonl`, status `leak`)
+  that fails before its held-back look; the weekly job `leak-check` covers
+  every feature, the zoo's feature builders, the G2 shadows and the paper
+  books' weight functions (`reports/leak/latest.md`, a red line in the health
+  check per failure).
 - **Beat a baseline, not zero.** Naive and HAR for volatility, the coin
   basket and BTC for strategies, random entries for signals.
 - **Write down failures.** A dead idea with a number is a result.

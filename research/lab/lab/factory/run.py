@@ -26,11 +26,15 @@ the deflated excess bar gets one look per behaviour, each written to
 <data>/factory/lockbox.jsonl before it is used. Each run reports its genomes'
 effective N and PBO.
 
+T1 (results/leak_harness_prereg.md): before its held-back look every pick goes through the leak harness
+(lab.leak, leak_screen); one whose weights at or before t move when the bars after t change is rejected,
+written to <data>/factory/leaks.jsonl with the reason and never picked again.
+
 Every run first merges results/factory_seed into <data>/factory (only what is
 missing; see ledger.import_seed), so trials counted on another machine are
 never lost from the pool.
 
-Writes <data>/factory/ (ledger.jsonl, holdout.jsonl, shadow/, promoted.json,
+Writes <data>/factory/ (ledger.jsonl, holdout.jsonl, leaks.jsonl, shadow/, promoted.json,
 runs/<run>.json) and reports/factory/ (dated and latest markdown and JSON;
 with PYTHIA_RESULTS also <results>/factory.md). Nothing else: no engine call,
 no live setting, no paper journal (a promoted book is stepped by
@@ -53,7 +57,7 @@ from .. import history, report
 from ..ops import i18n, notify
 from . import build, evaluate, grammar, search, shadow, writeup
 from .ledger import (Ledger, append_jsonl, export_seed, factory_dir, import_seed, lock, lockbox_looks, log_look,
-                     write_json)
+                     read_jsonl, write_json)
 
 NAME = "factory"
 HOLDOUT_PER_RUN = 6
@@ -132,7 +136,10 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
 
     hold_log = shadow.holdout_log()
     checked = {h["key"] for h in hold_log} | {h["behaviour"] for h in hold_log if h.get("behaviour")}
+    checked |= {x["key"] for x in read_jsonl(factory_dir() / "leaks.jsonl")}
     picks = pick_for_holdout(c, ledger, checked)
+    leaks = leak_screen(c, picks, factory_dir() / "leaks.jsonl", run_id, today, log)
+    picks = [r for r in picks if r["key"] not in {x["key"] for x in leaks}]
     btc = evaluate.btc_benchmark(c)
     w = evaluate.windows(c)
     act = shadow.active()
@@ -196,7 +203,7 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
         "tried": [{"key": r["key"], "genome": r["genome"], "is_sharpe": r["is_sharpe"]} for r in res["rows"]],
         "top": [strip({k: v for k, v in r.items() if k != "genome"}) for r in top],
         "btc": btc, "diversity_corr": DIVERSITY_CORR,
-        "holdout": holdout_rows, "night": night(res["rows"]), "lockbox": looks,
+        "holdout": holdout_rows, "leaks": leaks, "night": night(res["rows"]), "lockbox": looks,
         "shadow_update": upd, "decisions": decisions, "shadows": shadows,
         "promoted": shadow.promoted()["books"], "seconds": time.time() - t0,
         "grammar": {"max_filters": grammar.MAX_FILTERS, "max_complexity": grammar.MAX_COMPLEXITY},
@@ -204,6 +211,26 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
     d["verdict"] = verdict(d)
     write_json(factory_dir() / "runs" / f"{run_id}.json", d)
     return d
+
+
+def leak_screen(c, picks: list[dict], path: Path, run_id: str, today: str, log=print, small: bool = False) -> list[dict]:
+    """T1: every genome bound for the held-back window through the leak harness first (lab.leak: its weights at or
+    before t must not move when every bar after t is shuffled, shifted, missing or cut). A failing one is rejected
+    before its look, written to `path` with the reason and never picked again; returns those rows."""
+    from .. import leak
+    from ..leak import checks
+    out = []
+    for r in picks:
+        res = checks.genome(c, r["genome"], small=small)
+        if res["ok"]:
+            continue
+        x = {"run": run_id, "date": today, "key": r["key"], "behaviour": r.get("behaviour"),
+             "name": grammar.describe(r["genome"]), "genome": r["genome"], "reason": leak.reason(res),
+             "first": res["first"]}
+        append_jsonl(path, [x])
+        out.append(x)
+        log(f"  leak check {r['key']} rejected: {x['reason']}")
+    return out
 
 
 def night(rows: list[dict]) -> dict:

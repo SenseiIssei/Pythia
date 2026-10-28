@@ -1190,7 +1190,12 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
     this_run = {h["key"]: h for h in hold_log if h.get("run") == run_id}
     checked = {h["key"] for h in hold_log if h.get("run") != run_id}
     checked |= {h["behaviour"] for h in hold_log if h.get("run") != run_id and h.get("behaviour")}
+    checked |= {x["key"] for x in lg.read_jsonl(small_dir() / "leaks.jsonl")}
     picks = [led.by_key[k] for k in this_run if k in led] or pick_for_holdout(c, v, led, checked)
+    from .run import leak_screen                # T1: the leak harness before any held-back look
+    leaks = leak_screen(c, [r for r in picks if r["key"] not in this_run], small_dir() / "leaks.jsonl", run_id, today,
+                        log, small=True)
+    picks = [r for r in picks if r["key"] not in {x["key"] for x in leaks}]
     act = active()
     ever = {m["key"] for m in all_shadows()}
     others = [(m["key"], m.get("oos_returns_40")) for m in all_shadows() if m.get("status") == "active"]
@@ -1236,7 +1241,7 @@ def run(c: Ctx, v: s1.Venue, budget: int, run_id: str | None = None, log=print, 
     night = [r.get("is_returns") for r in res["rows"] if not r.get("same_as")]
     d = {"run_id": run_id, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
          "windows": {k: [_day(c, a), _day(c, b)] for k, (a, b) in win.items() if a <= b}, "fresh_to": today,
-         "eurusd": c.eurusd, "drifts": c.drifts, "budget": budget, "seeded": seeded,
+         "eurusd": c.eurusd, "drifts": c.drifts, "budget": budget, "seeded": seeded, "leaks": leaks,
          "search": {"evaluated": len(res["rows"]), "resumed": res["resumed"], "origin": res["origin"],
                     "duplicates": res["duplicates"], "seconds": res["seconds"], "trees": res["trees"],
                     "tree_share": share},

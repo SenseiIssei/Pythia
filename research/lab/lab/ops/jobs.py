@@ -1275,8 +1275,9 @@ def measure_disk(t: Table, now: datetime | None = None, every_s: int = 6 * 3600,
 
 
 def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool, str]]:
-    """(name, ok, detail) for every enabled job, the disk, every dataset, every feed of an enabled job
-    and, while the backup job is on, the backup (its contents, the copy off the server, the restore test)."""
+    """(name, ok, detail) for every enabled job, the disk, every dataset, every feed of an enabled job,
+    while the backup job is on, the backup (its contents, the copy off the server, the restore test), and
+    a red line per leak the weekly leak check found (leak_lines)."""
     now = now or _now()
     disk = measure_disk(t, now)
     status = write_status(t, now)
@@ -1315,7 +1316,21 @@ def health_checks(t: Table, now: datetime | None = None) -> list[tuple[str, bool
         out.append(feed_check(t, f, now))
     if "backup" in t.jobs and t.jobs["backup"]["enabled"]:
         out.extend(backup_checks(t, now))
+    out.extend(leak_lines(t))
     return out
+
+
+LEAK_RED = ("feature", "candles", "zoo", "book")
+
+
+def leak_lines(t: Table) -> list[tuple[str, bool, str]]:
+    """T1: a red line per feature, zoo builder or paper book the weekly leak check (lab.leak, job leak-check) found
+    leaking or could not check, from reports/leak/latest.json; nothing before its first report."""
+    doc = _read_json(t.data / "reports" / "leak" / "latest.json")
+    if not isinstance(doc, dict):
+        return []
+    return [(f"leak {r.get('kind')} {r.get('name')}", False, str(r.get("why") or r.get("error") or "leak")[:200])
+            for r in doc.get("results") or [] if isinstance(r, dict) and not r.get("ok") and r.get("kind") in LEAK_RED]
 
 
 def newest_mtime(p: Path) -> float | None:

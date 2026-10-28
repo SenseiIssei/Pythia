@@ -726,6 +726,22 @@ jobs:
     lock: heavy
     lock_wait: 1h
 
+  # T1 (research/lab/lab/leak, results/leak_harness_prereg.md): the leak harness, weekly. Every feature of the store,
+  # C1/C2's candle windows, the zoo's feature builders (M8, M10, M12), the active G2 shadows' specs, the paper books'
+  # weight functions and their panel builder run on the full data and on copies with every value after t shuffled,
+  # shifted or missing, and cut at t; anything at or before t that moves is a leak. A failing feature, builder or book
+  # is a red line `leak ...` in the health check; reports/leak/latest.md. The factories (G1 weekly and F2, G2) check
+  # their genomes and specs themselves before each held-back look. No trial, no number. Paper only.
+  - name: leak-check
+    description: leak harness T1, weekly; every feature, zoo builder, G2 shadow spec and paper book run on data with everything after t shuffled, shifted, missing or cut, a leak is a red line in the health check, reports/leak/latest.md
+    schedule: "0 6 * * 0"
+    command: python -m lab.leak
+    env: {PYTHIA_AGENT_OUT: /data/lab-cache}
+    resources: {cpus: 2, memory: 6g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 2h
+
   # M1 (research/lab/lab/experiments/modern_m1.py, results/modern_models_m1.md): newer model techniques as candidates
   # (Chronos-Bolt and TimesFM 2.5 zero shot, TabPFN v2 and CatBoost in the model factory, conformal intervals,
   # meta-labelling of the factory survivors), each judged by the bar its incumbent was judged by, monthly. The only

@@ -379,6 +379,9 @@ def members(names=("catboost", "tabpfn")):
 #            are logged before the outcome and scored against the baseline and the zoo's own logged forecasts
 #            (models/zoo/<name>/shadow.jsonl). After ELIGIBLE_DAYS scored days the allocator may pick it; a member
 #            worse than the baseline or the incumbent over its last RETIRE_DAYS scored days is retired.
+#   leaks    before its look every spec goes through the leak harness (T1, lab.leak: its trees on the panel with the
+#            rows after t changed or cut, no input the weekly leak check found leaking); a failing one is written to
+#            holdout.jsonl as status "leak" with the reason and never held back.
 #   allocator  per target a Thompson draw over the incumbent and the eligible shadows (Beta posteriors of the days
 #            each had the lowest loss), written to picks.json for paper books only. Nothing live reads any of it.
 #
@@ -902,9 +905,20 @@ def look(P: Panels, row: dict, n_trials: int, run: str) -> dict:
     return out
 
 
+def leak_reason(P: Panels, row: dict, bad_inputs: set | None = None) -> str | None:
+    """T1: the spec through the leak harness before its held-back look (lab.leak.checks.spec: its G1 trees on the
+    target's panel with every row after t changed or cut, and no input the weekly check found leaking); None
+    when it passes, else the reason."""
+    from .. import leak
+    from ..leak import checks
+    res = checks.spec(P.get(row["target"]), row["spec"], checks.bad_inputs() if bad_inputs is None else bad_inputs)
+    return None if res["ok"] else leak.reason(res)
+
+
 def to_hold(rows: list[dict], looks: list[dict], n: int = HOLD_PER_RUN) -> list[dict]:
-    """The best screen passes never held back (a look begun and not finished is taken again)."""
-    done = {x["key"] for x in looks if x.get("status") == "done"}
+    """The best screen passes never held back (a look begun and not finished is taken again; one rejected by the
+    leak harness is never taken)."""
+    done = {x["key"] for x in looks if x.get("status") in ("done", "leak")}
     return sorted((r for r in rows if r.get("screen_pass") and r["key"] not in done),
                   key=lambda r: -(r.get("fitness") or 0))[:n]
 
@@ -1135,6 +1149,11 @@ def _run(now_ms, day, budget_s, P, targets, max_trials, log) -> dict:
     looks_done = []
     for r in to_hold(rows, _jl(holdout_path())):
         if r["target"] not in targets:
+            continue
+        if why := leak_reason(P, r):
+            _append(holdout_path(), [{"key": r["key"], "run": run_id, "status": "leak", "target": r["target"],
+                                      "why": why}])
+            log(f"model factory: {r['key']} ({r['target']}) rejected before its held-back look: {why}")
             continue
         h = look(P, r, n_trials, run_id)
         looks_done.append(h)
