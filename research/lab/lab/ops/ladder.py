@@ -10,7 +10,9 @@ Each step requires the one before:
                better, pass at 0.95) over R5's whole registry and over its family, PBO of its family below 0.2
   3 shadow     SHADOW_DAYS days logged before the outcome (T8 checks the "before"; until then that part is open)
   4 lockbox    R6's one look made, against the right benchmark (BENCH), and passed
-  5 execution  at most 50 EUR under the review's rules, judged on execution after 90 days (reports/execution)
+  5 execution  at most 50 EUR under the review's rules, judged on execution after 90 days (reports/execution); for
+               P3's 10 EUR pump.fun books the gate for real money instead (results/ten_eur_p3_prereg.md: 30 days,
+               mean and band above 0 after all costs, P2's gap under 2 points, P1's taint out), shown on its own too
   6 larger     only by the owner; the ladder never sets it
 
 A condition passes, fails or is open (its tool is not there yet for this candidate: T1, T2, T8); open never blocks,
@@ -67,6 +69,7 @@ PREREG = {
     "S1": ("smallaccount_s1_prereg.md", "smallaccount_s1.md"),
     "S2": ("smallaccount_s2_prereg.md", "smallaccount_s2.md"),
     "R2": ("pumpfun_smallwallet_r2_prereg.md", "pumpfun_smallwallet_r2.md"),
+    "P3": ("ten_eur_p3_prereg.md", None),
     "weekly": ("factory_lockbox_r6.md", None),
     "F2": ("factory_lockbox_r6.md", None),
     "funding_carry": ("funding_carry_prereg.md", "funding_carry.md"),
@@ -106,6 +109,11 @@ COND = {
               f"höchstens {EXEC_DRIFT_PCT:g} % Abweichung vom Papier-Zwilling"),
     "exec_days": (f"{EXEC_DAYS} days judged on execution", f"{EXEC_DAYS} Tage nach Ausführung beurteilt"),
     "owner": ("only the owner decides", "nur der Besitzer entscheidet"),
+    "p3_days": ("30 days of the 10 EUR paper book", "30 Tage des 10-EUR-Papierbuchs"),
+    "p3_mean": ("mean per trade above 0 after all costs", "Mittel je Trade nach allen Kosten über 0"),
+    "p3_band": ("the band's lower end above 0", "untere Bandgrenze über 0"),
+    "p3_gap": ("P2's paper minus live under 2 points", "P2: Papier minus live unter 2 Punkten"),
+    "p3_taint": ("P1's taint excluded", "P1-Fehlzeilen ausgeschlossen"),
 }
 
 
@@ -333,9 +341,28 @@ def lockbox(c: dict, ctx: dict) -> list[dict]:
                  "factory/lockbox.jsonl")]
 
 
+def p3_gate(c: dict) -> list[dict]:
+    """Step 5 of a P3 book: the gate for real money from realistic.json's `ten` row (realistic.ten_status)."""
+    b, p = c.get("p3") or {}, "reports/pumpfun_rt/realistic.json"
+    g = b.get("gate") or {}
+
+    def pc(x):
+        return "n/a" if _num(x) is None else f"{x * 100:+.1f} %"
+    band = b.get("band") if isinstance(b.get("band"), list) and len(b["band"]) == 2 else None
+    pts = _num(b.get("gap_pts"))
+    return [cond("p3_days", bool(g.get("days")), f"{_num(b.get('days')) or 0:.1f} of 30 days", p),
+            cond("p3_mean", bool(g.get("mean")), f"{pc(b.get('mean'))} over {b.get('trades') or 0} trades", p),
+            cond("p3_band", bool(g.get("band")), "no band (under 10 trades)" if band is None
+                 else f"{pc(band[0])} to {pc(band[1])}", p),
+            cond("p3_gap", bool(g.get("gap")), "not measured" if pts is None else f"{pts:+.1f} points", p),
+            cond("p3_taint", bool(g.get("taint")), f"{b.get('tainted') or 0} tainted trades left out", p)]
+
+
 def execution(c: dict, ctx: dict, now: int) -> list[dict]:
     """Step 5 from an execution record: {"start": day, "cap_eur", "topups": [day], "swaps": [{"ok", "cost_bps",
-    "model_bps"}], "reconcile_mismatches", "drift_pct"}."""
+    "model_bps"}], "reconcile_mismatches", "drift_pct"}. A P3 book: its gate (p3_gate)."""
+    if c.get("study") == "P3":
+        return p3_gate(c)
     r = ctx["execution"].get(c["name"]) or ctx["execution"].get(c["id"])
     p = "reports/execution/latest.json"
     if not isinstance(r, dict):
@@ -407,8 +434,14 @@ def judge(c: dict, ctx: dict, now: int) -> dict:
             "next_de": "kein getesteter Bericht" if missing and all(x["value"] == NO_RECORD for x in missing)
             else "; ".join(COND[x["id"]][1] for x in missing),
             "missing": [x["id"] for x in missing], "open": [x["id"] for x in opened], "evidence": ev,
-            "tainted": c.get("tainted") or 0,
+            "tainted": c.get("tainted") or 0, **({"p3": p3_row(c["p3"])} if c.get("p3") else {}),
             "steps": {str(k): v for k, v in steps.items()}}
+
+
+def p3_row(b: dict) -> dict:
+    """What the ladder shows of a P3 book: its wallet in EUR, trades, mean and median per trade after all costs, the
+    band, days, the gate."""
+    return {k: b.get(k) for k in ("eur", "sol", "trades", "mean", "median", "band", "days", "pass", "can_pay")}
 
 
 # ---------------------------------------------------------------- the candidates
@@ -421,7 +454,7 @@ def _book_kind(b: dict) -> tuple[str, str | None, str, str | None]:
         return ("small" if s == "S2" else "crypto"), s, "small", f"{s} {rule}"
     if s == "L1":
         return "crypto", None, "small", f"L1 {n}"
-    if s in ("R2", "F3"):
+    if s in ("R2", "F3", "P3"):
         return "crypto", s, "pumpfun", None
     pre = n if n in PREREG else ("onchain_meme" if n.startswith("onchain_meme_") else None)
     return ("neutral" if n in NEUTRAL_BOOKS else "crypto"), pre, "hand", None
@@ -444,7 +477,7 @@ def candidates(root: Path, now: int) -> list[dict]:
                             "bench": bench, "prereg": pre, "family": fam, "r10": r10, "first_day": b.get("start"),
                             "leak_name": f"smallaccount {n}" if b["study"] in ("S1", "S2") else LEAK_NAMES.get(n),
                             "days_logged": logged, "days_path": f"paper/{n}/journal.csv" if j.exists() else b["report"],
-                            "tainted": b.get("tainted") or 0}
+                            "tainted": b.get("tainted") or 0, "p3": b.get("p3")}
     fac = root / "factory"
     for source, d, hp in (("weekly", fac, "factory/holdout.jsonl"), ("F2", fac / "small", "factory/small/holdout.jsonl")):
         rows = _jsonl(d / "holdout.jsonl")
@@ -566,6 +599,24 @@ def markdown(d: dict) -> str:
         cells = [r["name"], r["kind"], f"{r['step']} {r['step_name']}", r["next"] or "-",
                  ", ".join(r["open"]) or "-", r["evidence"] or "-"]
         md.append("| " + " | ".join(notify.nodash(str(x)).replace("|", "/") for x in cells) + " |")
+    ten = [r for r in d["rows"] if r.get("p3")]
+    if ten:
+        def pc(x):
+            return "n/a" if _num(x) is None else f"{x * 100:+.1f} %"
+        md += ["", "10 EUR pump.fun paper books (P3, results/ten_eur_p3_prereg.md): the gate for real money (step 5; "
+               "30 days, mean and the band's lower end above 0 after all costs, P2's gap under 2 points, P1's taint "
+               "out). Passing proposes; only the owner decides.", "",
+               "| book | wallet EUR | trades | mean | median | 95 % band | days | gate |",
+               "|---|---|---|---|---|---|---|---|"]
+        for r in ten:
+            x = r["p3"]
+            band = x.get("band") if isinstance(x.get("band"), list) and len(x["band"]) == 2 else None
+            gate = "passes" if x.get("pass") else "fails: " + ", ".join(
+                COND[c["id"]][0] for c in r["steps"]["5"] if c["ok"] is False)
+            cells = [r["name"], "n/a" if _num(x.get("eur")) is None else f"{x['eur']:.2f}", x.get("trades") or 0,
+                     pc(x.get("mean")), pc(x.get("median")), "n/a" if band is None else f"{pc(band[0])} to "
+                     f"{pc(band[1])}", f"{_num(x.get('days')) or 0:.1f}", gate]
+            md.append("| " + " | ".join(notify.nodash(str(v)).replace("|", "/") for v in cells) + " |")
     if d.get("tainted"):
         md.append(f"\nThe pump.fun books' evidence leaves out {d['tainted']} paper trades the late-row bug made (P1, "
                   "results/pumpfun_ledger_taint_p1.md).")

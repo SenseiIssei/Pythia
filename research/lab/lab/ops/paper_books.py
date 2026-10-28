@@ -2,7 +2,9 @@
 
   pumpfun_rt/realistic.json   R2's small pump.fun wallets (`small`) and F3's
                               factory books (`factory`), in SOL, less the trades
-                              the late-row bug made (P1, `tainted` of each)
+                              the late-row bug made (P1, `tainted` of each);
+                              P3's 10 EUR books (`ten`) with their numbers and
+                              gate (`p3`)
   smallaccount/latest.json    S1's and S2's small-account wallets, in EUR
   onchain_longterm/latest.json  L1's on-chain long-term book, in USDC
   forward/latest.json         the forward books, their return since the start
@@ -52,6 +54,12 @@ def books(data_root) -> list[dict]:
                                 "start": _date(d.get("realistic_since")),
                                 "value": _num(b.get("sol")), "currency": "SOL", "report": rel,
                                 "tainted": int(_num(b.get("tainted")) or 0)})
+        for b in d.get("ten") or []:
+            if isinstance(b, dict) and b.get("book"):
+                out.append({"name": b["book"], "study": "P3",
+                            "trades": f"pump.fun coins, {b.get('strategy') or b['book']}, 10 EUR",
+                            "start": _date(b.get("since_ms")), "value": _num(b.get("sol")), "currency": "SOL",
+                            "report": rel, "tainted": int(_num(b.get("tainted")) or 0), "p3": b})
 
     rel = "smallaccount/latest.json"
     d = notify.read_json(root / rel)

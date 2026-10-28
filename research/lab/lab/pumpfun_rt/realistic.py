@@ -39,6 +39,13 @@ F3 (factory.py): the factory's winners (<data>/pumpfun_rt/factory/books.json, at
 F3_<id> (factory_books), each on its own START_SOL paper wallet with its sizing fixed as found; their wallets in SOL and
 euro, against P_pool5_top30t_sw10o3n since their start, in realistic.md and on the daily card.
 
+P3 (results/ten_eur_p3_prereg.md): 10 EUR on pump.fun. The rules the live bot has run (TEN) as books <rule>_10eur
+(ten_books), each on its own TEN_SOL paper wallet (TenWallet: never topped up; a token account's rent RENT_L leaves
+the wallet when a buy lands and comes back only when the last sale sells everything, a stuck exit loses it; a buy is
+refused when the wallet cannot pay stake, reserve and rent) with the live sizing (share 0.5, one open, the brake).
+The daily job writes their wallets in EUR, trades, mean and median per trade after all costs, the bootstrap band,
+days and the gate for real money into realistic.md (`ten`); the readiness ladder shows them.
+
 The old books run on as `<name>_ideal` twins until IDEAL_UNTIL (two weeks), then go. The calibration line compares
 the live bot with the realistic paper twin P_pool0_wait on the same coins (entry and exit price, P&L in points);
 calibrated when the median P&L difference per matched trade is within CALIB_POINTS over 7 full days. Nothing here
@@ -98,6 +105,15 @@ MATCH_MS = 10 * 60_000                    # a live and a paper entry of the same
 SMALL = (("P_pool5_top30t_sw10o3n", "P_pool5_top30t", 0.10, 3, False),
          ("P_pool5_top30t_sw10o2n", "P_pool5_top30t", 0.10, 2, False),
          ("P_pool5_top30t_sw10o1n", "P_pool5_top30t", 0.10, 1, False))
+# P3 (results/ten_eur_p3_prereg.md): 10 EUR, one realistic book per rule the live bot has run, each on its own TEN_SOL
+# paper wallet (TenWallet: no top-up, the token account's rent) with the live sizing fixed: (book, strategy)
+TEN = (("P_pool0_wait_10eur", "P_pool0_wait"), ("P_pool0_10eur", "P_pool0"), ("P_cmig_model_10eur", "P_cmig_model"))
+TEN_SOL = 0.109                           # 10 EUR at 91.68 EUR a SOL
+TEN_SHARE, TEN_OPEN, TEN_BRAKE = 0.5, 1, True     # the live ack's share, the live settings' one slot, the brake on
+RENT_L = 2_039_280                        # a token account's rent (165 bytes, rent-exempt), about 0.002 SOL
+TEN_PREREG = "results/ten_eur_p3_prereg.md"
+TEN_DAYS, TEN_MIN_TRADES, TEN_GAP_PTS = 30, 10, 2.0   # the gate; TEN_GAP_PTS is selection_p2.GATE_PTS
+TEN_DRAWS, TEN_SEED = 2_000, 0
 
 
 def u_of(key: tuple) -> float:
@@ -372,6 +388,7 @@ class PaperWallet:
     ret_sum: float = 0.0
     refills: int = 0
     topped_l: int = 0
+    NEED_L = 0                                # what a buy needs beyond its stake and the reserve (P3: the rent)
 
     def top_up(self) -> bool:
         """Back to START_SOL when the wallet (nothing open) holds less; True when it did."""
@@ -399,7 +416,7 @@ class PaperWallet:
         reason when the stake is 0."""
         bal, held = self.cash_l(open_l) / C.LAMPORTS, open_l / C.LAMPORTS
         base = bal + held
-        room = max(0.0, bal - RESERVE_SOL) / (1 + C.SLIP_TOL) if cfg.wallet else None
+        room = max(0.0, bal - RESERVE_SOL - self.NEED_L / C.LAMPORTS) / (1 + C.SLIP_TOL) if cfg.wallet else None
         sol, why = Z.sized(balance_sol=bal, open_cost_sol=held, peak_pnl_sol=self.peak_l / C.LAMPORTS,
                            pnl_sol=self.pnl_l / C.LAMPORTS, live_trades=self.n,
                            live_mean=self.ret_sum / self.n if self.n else None, ceiling_sol=cfg.ceiling_sol,
@@ -420,6 +437,38 @@ class PaperWallet:
         if isinstance((d or {}).get("ret_sum"), (int, float)):
             w.ret_sum = float(d["ret_sum"])
         return w
+
+
+@dataclass
+class TenWallet(PaperWallet):
+    """P3's paper wallet: TEN_SOL, never topped up (a wallet that cannot pay a trade stops buying); the rent of every
+    open position's token account held (rent_l, out of the cash), one more needed by every buy (NEED_L); the accounts
+    a stuck exit left open counted (rent_lost, their rent booked into the trade); since_ms its start. rent_l is not
+    read back: a restart drops the open positions and gives their stake and rent back."""
+    start_l: int = int(TEN_SOL * C.LAMPORTS)
+    rent_l: int = 0
+    rent_lost: int = 0
+    since_ms: int = 0
+    NEED_L = RENT_L
+
+    def top_up(self) -> bool:
+        return False
+
+    def cash_l(self, open_l: int) -> int:
+        return super().cash_l(open_l) - self.rent_l
+
+    @classmethod
+    def from_json(cls, d: dict | None) -> "TenWallet":
+        w = super().from_json(d)
+        for k in ("rent_lost", "since_ms"):
+            if isinstance((d or {}).get(k), (int, float)):
+                setattr(w, k, int(d[k]))
+        return w
+
+
+def wallet_of(name: str, d: dict | None) -> PaperWallet:
+    """A paper wallet from state.json: P3's books' as TenWallet, every other as PaperWallet."""
+    return (TenWallet if name in {x[0] for x in TEN} else PaperWallet).from_json(d)
 
 
 # ---------------------------------------------------------------- the executor and the book
@@ -453,7 +502,8 @@ class RealExecutor(P.PaperExecutor):
     def buy(self, o: P.Order) -> None:
         pipe, eng, f = self.pipe, self.pipe.eng, self.model.fit
         if self.wallet is not None and \
-                self.wallet.cash_l(self.open_l() - o.limit_l) < o.limit_l + int(RESERVE_SOL * C.LAMPORTS):
+                self.wallet.cash_l(self.open_l() - o.limit_l) < o.limit_l + int(RESERVE_SOL * C.LAMPORTS) \
+                + self.wallet.NEED_L:
             return pipe.buy_failed(o.pid, o.signal_ms, "refused: wallet balance too low", 0)
         key = (P.base_name(pipe.strat_of(o.pid)), o.mint, "buy")
         lat = f.buy.quantile(u_of(key))
@@ -566,7 +616,20 @@ class Book(P.Pipeline):
             self.exec.wallet.book(-int(fee_l))
         super().buy_failed(pid, at, why, fee_l)
 
+    def bought(self, pid: int, at: float, tokens: int, cost_l: int, fee_l: int) -> None:
+        p, w = self.pos.get(pid), self.exec.wallet
+        if isinstance(w, TenWallet) and p is not None and p["state"] == "pending":   # P3: the buy made its account
+            p["rent_l"] = RENT_L
+            w.rent_l += RENT_L
+        super().bought(pid, at, tokens, cost_l, fee_l)
+
     def _close(self, p: dict, at: float) -> None:
+        rent, w = p.pop("rent_l", 0), self.exec.wallet
+        if rent and isinstance(w, TenWallet):
+            w.rent_l -= rent                                  # the last sale closes the account: the rent is back
+            if p.get("exit_why") == "stuck":                  # given up, tokens still in it: never closed, lost
+                p["fees_l"] += rent
+                w.rent_lost += 1
         super()._close(p, at)
         if self.exec.wallet is not None:
             pnl = p["proceeds_l"] - p["cost_l"] - p["fees_l"]
@@ -577,7 +640,8 @@ class Book(P.Pipeline):
         w = self.exec.wallet
         if w is not None:
             open_l = self.exec.open_l()
-            out["wallet"] = {"sol": (w.cash_l(open_l) + open_l) / C.LAMPORTS, "pnl_sol": w.pnl_l / C.LAMPORTS,
+            out["wallet"] = {"sol": (w.cash_l(open_l) + open_l + getattr(w, "rent_l", 0)) / C.LAMPORTS,
+                             "pnl_sol": w.pnl_l / C.LAMPORTS,
                              "trades": w.n, "refills": w.refills}
         return out
 
@@ -620,6 +684,29 @@ def small_books(eng, model: Model, wallets: dict | None = None, kill=None, small
                                       f"{max_open} open, brake {'on' if brake else 'off'}, from {START_SOL} SOL")
         m = FixedSizing(model, small_cfg(share, max_open, brake))
         w = wallets.setdefault(name, PaperWallet())
+        eng.rule_costs[name] = RealCosts(model=m)
+        out.append(eng.add_pipe(Book(eng, [v], RealExecutor(m, w), name="realistic", kill=kill)))
+    return out
+
+
+def ten_books(eng, model: Model, wallets: dict | None = None, kill=None, ten=None,
+              now_ms: int | None = None) -> list[Book]:
+    """P3: one realistic book per pre-registered rule (TEN), on its own TenWallet (`wallets`, filled in for new ones,
+    started at now_ms) with the live sizing fixed (small_cfg: TEN_SHARE, TEN_OPEN, the brake, floor 0); it draws its
+    latency with its strategy's key, as R2's books."""
+    wallets = wallets if wallets is not None else {}
+    now = now_ms or int(time.time() * 1000)
+    out = []
+    for name, base in (TEN if ten is None else ten):
+        s = P.BY_NAME[base]
+        v = dataclasses.replace(s, name=name, p={**s.p, "base": base}, stake_sol=math.inf,
+                                label=f"{s.label}; P3 10 EUR: {TEN_SOL} SOL, {TEN_SHARE * 100:g} % of the wallet, "
+                                      f"{TEN_OPEN} open, no top-up")
+        m = FixedSizing(model, small_cfg(TEN_SHARE, TEN_OPEN, TEN_BRAKE))
+        w = wallets.get(name)
+        if not isinstance(w, TenWallet):
+            w = wallets[name] = TenWallet.from_json(w.to_json() if w is not None else None)
+        w.since_ms = w.since_ms or now
         eng.rule_costs[name] = RealCosts(model=m)
         out.append(eng.add_pipe(Book(eng, [v], RealExecutor(m, w), name="realistic", kill=kill)))
     return out
@@ -695,6 +782,95 @@ def small_md(rows: list[dict], eur: float | None) -> list[str]:
         md.append(f"| {r['book']} | {r['strategy']} | {r['share'] * 100:g} % | {r['max_open']} | "
                   f"{'on' if r['brake'] else 'off'} | {r['sol']:.3f} | {eur_} | {r['pnl_sol']:+.3f} | {r['trades']} | "
                   f"{r['refills']} |")
+    return md + taint_note(rows) + [""]
+
+
+def ten_trials(ten=None) -> list[dict]:
+    return [{"id": f"hand:p3:ten_eur:{name}", "family": "hand", "n": 1, "sharpe": None, "source": TEN_PREREG}
+            for name, _ in (TEN if ten is None else ten)]
+
+
+def ten_stats(rows: list[dict], fails: list[dict]) -> dict:
+    """P3's numbers of one book's closed trades (restart and tainted rows already out) and failed buys: a trade's
+    return after all costs is its ret (fees and lost rent in its P&L) less the failed buys' fees over the trades'
+    stakes; their mean, median and the mean's 95 % percentile bootstrap band (TEN_DRAWS, TEN_SEED; none under
+    TEN_MIN_TRADES)."""
+    rets, stakes = [], 0.0
+    for r in rows:
+        ret = _f(r.get("ret"))
+        if ret is not None:
+            rets.append(ret)
+            stakes += _f(r.get("stake_sol")) or 0.0
+    fee = -sum(_f(x.get("pnl_sol")) or 0.0 for x in fails)
+    x = np.asarray(rets, dtype=float) - (fee / stakes if stakes > 0 else 0.0)
+    band = None
+    if len(x) >= TEN_MIN_TRADES:
+        rng = np.random.default_rng(TEN_SEED)
+        m = x[rng.integers(0, len(x), (TEN_DRAWS, len(x)))].mean(axis=1)
+        band = [float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))]
+    return {"trades": len(x), "mean": float(x.mean()) if len(x) else None,
+            "median": float(np.median(x)) if len(x) else None, "band": band, "failed": len(fails),
+            "failed_fee_sol": fee}
+
+
+def ten_status(state: dict | None, ledger: list[dict], failed: list[dict], eur: float | None, gap: dict | None,
+               now_ms: int, ten=None) -> list[dict]:
+    """P3's books: the wallet from state.json (start and every realised result, open positions at cost and held rent
+    counted as the wallet's, less tainted trades) in SOL and euro, ten_stats on the ledger without restart and
+    tainted rows (P1), the days since the start, whether it can still pay a trade, and the gate for real money
+    (TEN_DAYS days, mean and band's lower end above 0, P2's `gap` passing, P1 out)."""
+    pw = (state or {}).get("paper_wallets") or {}
+    need = int(Z.MIN_STAKE_SOL * (1 + C.SLIP_TOL) * C.LAMPORTS) + int(RESERVE_SOL * C.LAMPORTS) + RENT_L
+    out = []
+    for name, base in (TEN if ten is None else ten):
+        w = TenWallet.from_json(pw.get(name)) if name in pw else None
+        mine = [r for r in ledger if r.get("rule") == name and r.get("exit_why") != "restart"]
+        n_t, s_t = taint_by_book(mine).get(name, (0, 0.0))
+        st = ten_stats([r for r in mine if not tainted(r)], [x for x in failed if x.get("rule") == name])
+        sol = ((w.start_l + w.pnl_l) / C.LAMPORTS if w is not None else TEN_SOL) - s_t
+        days = (now_ms - w.since_ms) / DAY_MS if w is not None and w.since_ms else 0.0
+        gate = {"days": days >= TEN_DAYS, "mean": st["mean"] is not None and st["mean"] > 0,
+                "band": st["band"] is not None and st["band"][0] > 0, "gap": (gap or {}).get("pass") is True,
+                "taint": True}
+        out.append({"book": name, "strategy": base, "start_sol": TEN_SOL, "sol": sol, "eur": sol * eur if eur else None,
+                    "pnl_sol": (w.pnl_l / C.LAMPORTS if w is not None else 0.0) - s_t, **st, "days": days,
+                    "since_ms": w.since_ms if w is not None else None, "rent_lost": w.rent_lost if w else 0,
+                    "can_pay": sol * C.LAMPORTS >= need, "tainted": n_t, "tainted_sol": s_t,
+                    "gap_pts": (gap or {}).get("pts"), "gate": gate, "pass": all(gate.values()),
+                    "started": w is not None})
+    return out
+
+
+TEN_GATE = {"days": f"{TEN_DAYS} days", "mean": "mean above 0", "band": "band above 0",
+            "gap": f"P2 gap under {TEN_GAP_PTS:g} points", "taint": "P1 out"}
+
+
+def ten_gate_text(r: dict) -> str:
+    """"passes", or "fails: <the conditions not met>"."""
+    bad = [TEN_GATE[k] for k, ok in (r.get("gate") or {}).items() if not ok]
+    return "passes (the owner decides)" if r.get("pass") else "fails: " + ", ".join(bad)
+
+
+def ten_md(rows: list[dict], eur: float | None) -> list[str]:
+    if not rows:
+        return []
+
+    def pc(x):
+        return "n/a" if x is None else f"{x * 100:+.1f} %"
+    md = [f"10 EUR paper books (P3, {TEN_PREREG}): {TEN_SOL} SOL each from its start, no top-up, the live sizing "
+          f"({TEN_SHARE * 100:g} % of the wallet, {TEN_OPEN} open, brake on), every fee of the fit, the token "
+          f"account's rent ({RENT_L / C.LAMPORTS:.4f} SOL) held while open; per trade after all costs; 1 SOL = "
+          f"{'n/a' if not eur else format(eur, '.2f')} EUR. The gate for real money (the owner decides): "
+          f"{TEN_DAYS} days, mean and the band's lower end above 0, P2's gap under {TEN_GAP_PTS:g} points, P1's "
+          "taint out.", "",
+          "| book | wallet SOL | wallet EUR | trades | mean | median | 95 % band | days | gate |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        eur_ = "n/a" if r["eur"] is None else f"{r['eur']:.2f}"
+        band = "n/a" if not r["band"] else f"{pc(r['band'][0])} to {pc(r['band'][1])}"
+        md.append(f"| {r['book']} | {r['sol']:.4f}{'' if r['can_pay'] else ' (cannot pay a trade)'} | {eur_} | "
+                  f"{r['trades']} | {pc(r['mean'])} | {pc(r['median'])} | {band} | {r['days']:.1f} | "
+                  f"{ten_gate_text(r)} |")
     return md + taint_note(rows) + [""]
 
 
@@ -877,6 +1053,14 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
     except Exception as e:                                   # noqa: BLE001 - the report goes out without it
         print(f"realistic: no selection gap ({type(e).__name__}: {e})", flush=True)
         out["selection"] = None
+    try:                                                     # P3: the 10 EUR books, their trials first
+        from .. import metrics
+        metrics.register(ten_trials())
+        out["ten"] = ten_status(read_json(paper_dir() / "state.json"), paper, read_csv(paper_dir() / "failed.csv"),
+                                eur, out["selection"], now_ms)
+    except Exception as e:                                   # noqa: BLE001 - the report goes out without them
+        print(f"realistic: no 10 EUR books ({type(e).__name__}: {e})", flush=True)
+        out["ten"] = []
     try:                                                     # F3: the factory's books
         out["factory"] = factory_status(read_json(paper_dir() / "state.json"), eur, taint)
     except Exception as e:                                   # noqa: BLE001 - the report goes out without them
@@ -934,6 +1118,7 @@ def markdown(d: dict) -> str:
         f"share {cfg.get('share', Z.SHARE) * 100:g} %, brake {'on' if cfg.get('brake', True) else 'off'}, floor "
         f"{cfg.get('floor_sol') if cfg.get('floor_sol') is not None else Z.PAUSE_BELOW_SOL} SOL, at most "
         f"{cfg.get('max_open', P.HARD_MAX_OPEN)} open, reserve {RESERVE_SOL} SOL.", "",
+        *ten_md(d.get("ten") or [], d.get("sol_eur")),
         *small_md(d.get("small") or [], d.get("sol_eur")), *factory_md(d.get("factory") or [], d.get("sol_eur"))])
 
 

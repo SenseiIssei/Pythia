@@ -8,6 +8,8 @@ strategy's own name; the old books (0.4 to 3 s, 0.1 SOL) run on as `<name>_ideal
 The day's fit (reports/pumpfun_rt/realistic.json) and the live sizing settings are re-read every RELOAD_S.
 R2's small-wallet picks (realistic.SMALL) run next to them as realistic books of their own, each on its own 0.55 SOL
 paper wallet with its sizing fixed as picked (realistic.small_books).
+P3's 10 EUR books (realistic.TEN) run the same way, each on its own 0.109 SOL paper wallet that is never topped up and
+holds a token account's rent while a position is open (realistic.ten_books).
 F3's factory books (factory.py, <data>/pumpfun_rt/factory/books.json) run the same way (realistic.factory_books); the
 file is re-read every RELOAD_S: a new book starts, a retired one goes once it holds nothing.
 
@@ -173,7 +175,7 @@ class Shadow:
                  alerts: bool = True, now_ms: int | None = None, wallets: W.WalletBook | None = None, cats=None,
                  strategies: list | None = None, kill=None, trends: bool = False, blocked=None, category=None,
                  realistic: bool = False, real: R.Model | None = None, paper_wallets: dict | None = None,
-                 small=None, factory=None):
+                 small=None, factory=None, ten=None):
         from .model import Filter
         self.pick = pick
         self.book = book or CreatorBook()
@@ -181,6 +183,8 @@ class Shadow:
         self.models = models or {}
         if small is None:                                     # R2's small-wallet books go with the full set
             small = R.SMALL if strategies is None else ()
+        if ten is None:                                       # P3's 10 EUR books too
+            ten = R.TEN if strategies is None else ()
         self.factory_on = factory is None and strategies is None    # F3: the factory's books with the full set
         if factory is None:
             factory = self._factory_specs() if self.factory_on else ()
@@ -198,6 +202,7 @@ class Shadow:
         if realistic:
             R.books(self.engine, strategies, self.real, self.paper_wallets, kill=kill)
             R.small_books(self.engine, self.real, self.paper_wallets, kill=kill, small=small)   # R2
+            R.ten_books(self.engine, self.real, self.paper_wallets, kill=kill, ten=ten, now_ms=now)   # P3
             R.factory_books(self.engine, self.real, self.paper_wallets, kill=kill, specs=factory)   # F3
         self.kill, self.blocked, self.category, self.feed_down = kill, blocked, category, None
         for pipe in self.engine.pipes:
@@ -259,14 +264,15 @@ class Shadow:
             pass
         from .livecat import CategoryGate
         cats = CategoryIndex.load(mints=False, max_age_days=BOOK_DAYS)
-        blocked = BlockWatch(rules=PAPER_RULES)
+        rules = PAPER_RULES | {n for n, b in R.TEN if b in PAPER_RULES}   # P3's twin of the live rule too
+        blocked = BlockWatch(rules=rules)
         try:
             st = json.loads((paper_dir() / "state.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             st = {}
-        pw = {k: R.PaperWallet.from_json(v) for k, v in (st.get("paper_wallets") or {}).items()}
+        pw = {k: R.wallet_of(k, v) for k, v in (st.get("paper_wallets") or {}).items()}
         sh = cls(read_pick(), load(), book, wallets=wallets, cats=cats, trends=True, blocked=blocked,
-                 category=CategoryGate(cats, block=blocked, rules=PAPER_RULES), realistic=True, paper_wallets=pw)
+                 category=CategoryGate(cats, block=blocked, rules=rules), realistic=True, paper_wallets=pw)
         sh.realistic_since = st.get("realistic_since") or sh.realistic_since
         try:                                                  # Y14: the social features know the days before
             from . import socialfeat as SO
