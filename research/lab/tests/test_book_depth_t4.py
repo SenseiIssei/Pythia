@@ -30,6 +30,7 @@ from lab.features import registry as R
 from lab.leak import checks
 
 FIX = Path(__file__).parent / "fixtures" / "book_depth_t4"
+KEEPS_RAW = bd.keeps_raw                                      # the store fixture replaces it
 UTC = timezone.utc
 H, D = pit.HOUR_US, pit.DAY_US
 
@@ -54,6 +55,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHIA_BOOK_DEPTH", str(tmp_path / "book_depth"))
     monkeypatch.setattr(um_metrics, "out_dir", lambda: tmp_path / "um_metrics")
     monkeypatch.setattr(bd.um_metrics.Pacer, "wait", lambda self: None)
+    monkeypatch.setattr(bd, "keeps_raw", lambda month: True)   # the raw rule has its own test
 
     def no_net(*a, **k):
         raise AssertionError("no network in tests")
@@ -191,6 +193,29 @@ def test_health_ignores_new_archive_days_outside_the_window(store, tmp_path):
     assert res["fetched"] == 2 and bd.manifest("AAAUSDT") == {"2023-12-01": "ok", "2023-12-02": "ok"}
     doc = json.loads((store / "health.json").read_text())
     assert doc["tables"]["hourly"]["last_ts_us"] is None, "a perp the lab no longer follows is not a stale feed"
+
+
+def test_a_closed_month_keeps_its_hours_merges_late_days_and_loses_its_raw(store, tmp_path, monkeypatch):
+    days = {date(2023, 3, d): _day_csv(date(2023, 3, d), k=d) for d in (1, 2, 3)}
+    fetch, _ = _archive(days)
+    _um(tmp_path, "AAAUSDT", date(2023, 3, 1), date(2023, 3, 3))
+    listed = {d: (100, 0) for d in days}
+    bd.collect_symbol("AAAUSDT", [date(2023, 3, 1), date(2023, 3, 2)], listed, None, fetch)
+    raw, hours = bd.month_path("raw", "AAAUSDT", "2023-03"), bd.month_path("hourly", "AAAUSDT", "2023-03")
+    whole = pl.read_parquet(hours)                            # built from raw while raw was kept
+    assert raw.exists() and whole.height == 4
+    monkeypatch.setattr(bd, "keeps_raw", lambda month: month >= "2026-10")
+    assert bd.prune_raw() > 0 and not raw.exists() and hours.exists()
+    bd.collect_symbol("AAAUSDT", [date(2023, 3, 3)], listed, None, fetch)   # a late day of the closed month
+    merged = pl.read_parquet(hours)
+    assert not raw.exists() and merged.height == 6
+    assert merged.head(4).equals(whole), "the stored hours stay as they were"
+    assert bd.prune_raw() == 0
+
+
+def test_the_open_month_keeps_its_raw():
+    today = datetime.now(UTC).date()
+    assert KEEPS_RAW(today.strftime("%Y-%m")) and not KEEPS_RAW("2023-01")
 
 
 def test_over_the_budget_nothing_is_fetched(store, tmp_path, monkeypatch):

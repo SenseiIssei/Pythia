@@ -18,7 +18,9 @@ Stored under <data>/book_depth (PYTHIA_BOOK_DEPTH):
                                        ask_1 .. ask_5 (notional USD, float32; 0.2 null before the
                                        file has it), published_us (the file's time in the archive),
                                        collected_us, known_us (= ts_us: the book was public when
-                                       stamped, as D2 keeps market data), backfilled (true)
+                                       stamped, as D2 keeps market data), backfilled (true);
+                                       the open month only (keeps_raw), a closed month's is deleted
+                                       once its hours are written
   hourly/symbol=<S>/<YYYY-MM>.parquet  ts_us (hour), bid02, ask02, bid1, ask1 (mean USD), cost10k,
                                        cost100k (mean bps, buy and sell averaged), n, n_fine
                                        (snapshots, with the 0.2 % level), published_us
@@ -303,14 +305,44 @@ def todo(symbol: str, window: tuple[date, date], listed: dict[date, tuple[int, i
     return fetch, gaps
 
 
+def keeps_raw(month: str) -> bool:
+    """The 30 s snapshots are kept for the open month only (T13: raw was 25 GB against 0.2 GB of hours, and every
+    study and the feature store read the hours). A closed month keeps its hours; a late day is merged into them."""
+    return month >= (datetime.now(UTC).date() - timedelta(days=1)).strftime("%Y-%m")
+
+
 def save_month(symbol: str, month: str, frames: list[pl.DataFrame]) -> int:
-    """Merge new snapshots into the month (the first value of a snapshot wins), rebuild its hours."""
-    p = month_path("raw", symbol, month)
-    old = pl.read_parquet(p) if p.exists() else pl.DataFrame(schema=RAW_SCHEMA)
-    new = pl.concat([old, *frames], how="vertical_relaxed").unique("ts_us", keep="first").sort("ts_us")
-    _write(p, new)
-    _write(month_path("hourly", symbol, month), hourly(new))
+    """Merge new snapshots into the month (the first value of a snapshot wins), rebuild its hours. Without the
+    month's raw file (a closed month, keeps_raw) the new days' hours are merged into the stored ones: an hour lies
+    inside one day, so it never mixes old and new snapshots (the stored hour wins)."""
+    p, ph = month_path("raw", symbol, month), month_path("hourly", symbol, month)
+    keep = keeps_raw(month)
+    if keep or p.exists():
+        old = pl.read_parquet(p) if p.exists() else pl.DataFrame(schema=RAW_SCHEMA)
+        new = pl.concat([old, *frames], how="vertical_relaxed").unique("ts_us", keep="first").sort("ts_us")
+        if keep:
+            _write(p, new)
+        _write(ph, hourly(new))
+        if not keep:
+            p.unlink()                                    # after its hours are written
+        return new.height
+    new = pl.concat(frames, how="vertical_relaxed").unique("ts_us", keep="first").sort("ts_us")
+    hours = hourly(new)
+    if ph.exists():
+        hours = pl.concat([pl.read_parquet(ph), hours], how="vertical_relaxed").unique("ts_us", keep="first") \
+            .sort("ts_us")
+    _write(ph, hours)
     return new.height
+
+
+def prune_raw() -> float:
+    """Delete the raw file of every closed month whose hours are stored (keeps_raw); GB freed."""
+    freed = 0
+    for p in sorted((out_dir() / "raw").glob("symbol=*/*.parquet")):
+        if not keeps_raw(p.stem) and month_path("hourly", p.parent.name[len("symbol="):], p.stem).exists():
+            freed += p.stat().st_size
+            p.unlink()
+    return freed / 1e9
 
 
 def collect_symbol(symbol: str, days: list[date], listed: dict[date, tuple[int, int]], pacer: um_metrics.Pacer,
@@ -630,6 +662,8 @@ def run(until: date | None = None, symbols: list[str] | None = None, max_files: 
         pit.step(errors, "delistings", lambda: update_delistings({s: j["listed"] for s, j in jobs.items()}, until,
                                                                  fetch_json or pit.paced(3.0)))
     health({s: j["window_days"] for s, j in jobs.items()}, errors, pit.now_us(), False)
+    pit.step(errors, "prune", lambda: print(f"book_depth: {prune_raw():.2f} GB of closed months' raw deleted",
+                                             flush=True))
     print(f"book_depth: {done['ok']:,} files stored, {done['bad']} failed their checksum, "
           f"{done['missing']} gone, {time.time() - t0:.0f}s", flush=True)
     return {**est, "fetched": done["ok"], "bad": done["bad"], "errors": errors}
