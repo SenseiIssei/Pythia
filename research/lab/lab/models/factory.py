@@ -391,7 +391,8 @@ def members(names=("catboost", "tabpfn")):
 #            split, the spec's training window ignored): the paths' loss gain over the baseline in %, median and
 #            10th percentile, one line per look in the report.
 #
-# Model losses are not daily Sharpes, so these trials stay out of the trial registry (metrics.trial_pool).
+# Model losses are not daily Sharpes, so these trials stay out of the trial registry (metrics.trial_pool). T7's
+# net target (below the shadows) trades its forecasts and is judged by the net Sharpe, so its specs are trials there.
 
 DAY_US = core.DAY_US
 SCREEN_FROM, HOLD_FROM, HOLD_TO = "2021-01-01", "2024-01-01", "2026-07-01"
@@ -425,6 +426,7 @@ LEARNER_SPACE = {
             "min_leaf": [50, 200, 800], "reg_lambda": [1.0, 10.0, 50.0]},
     "ridge": {"alpha": [0.1, 1.0, 10.0, 100.0]},
     "logit": {"C": [0.01, 0.1, 1.0]},
+    "ridge_net": {"alpha": [0.01, 0.1, 1.0], "kappa": [0.0, 1.0, 4.0, 16.0]},     # T7, the net target only
 }
 WINDOWS = [None, 365, 730, 1095]          # training window in days, None: everything before
 
@@ -486,7 +488,8 @@ def fwd_panel(p: pl.DataFrame, h: int = 7, min_coins: int = 5) -> pl.DataFrame:
 
 def _load(t: str) -> pl.DataFrame:
     from . import m8_direction as m8, m10_vol_regime as m10, m12_cross_asset as m12
-    return {"m8": m8.load, "m10": m10.load, "m12": m12.load, "fwd7": lambda: fwd_panel(m8.coins_panel())}[t]()
+    return {"m8": m8.load, "m10": m10.load, "m12": m12.load, "fwd7": lambda: fwd_panel(m8.coins_panel()),
+            "net1": lambda: net_panel(m8.coins_panel())}[t]()
 
 
 def feature_pool(t: str, panel: pl.DataFrame) -> list[str]:
@@ -584,8 +587,12 @@ def canonical_spec(s: dict) -> dict:
             "params": dict(sorted(s["params"].items())), "window": s.get("window")}
 
 
+def kind_of(t: str) -> str:
+    return (TARGETS.get(t) or NET_TARGETS[t])["kind"]
+
+
 def learners_for(kind: str) -> tuple[str, ...]:
-    return ("lgb", "logit") if kind == "clf" else ("lgb", "ridge")
+    return ("ridge_net",) if kind == "net" else ("lgb", "logit") if kind == "clf" else ("lgb", "ridge")
 
 
 def _params(rng: random.Random, learner: str) -> dict:
@@ -597,7 +604,7 @@ def random_spec(rng: random.Random, t: str, pool: list[str], trees: bool) -> dic
     k = rng.randint(min(3, len(pool)), min(12, len(pool)))
     tr = [grammar.random_tree(rng, tree_leaves()) for _ in range(rng.choice([1, 1, 2]))] \
         if trees and rng.random() < TREE_SHARE else []
-    lr = rng.choice(learners_for(TARGETS[t]["kind"]))
+    lr = rng.choice(learners_for(kind_of(t)))
     return canonical_spec({"target": t, "features": rng.sample(pool, k), "trees": tr, "learner": lr,
                            "params": _params(rng, lr), "window": rng.choice(WINDOWS)})
 
@@ -621,7 +628,7 @@ def mutate(spec: dict, rng: random.Random, pool: list[str], trees: bool) -> dict
             k = rng.choice(list(LEARNER_SPACE[s["learner"]]))
             s["params"][k] = rng.choice(LEARNER_SPACE[s["learner"]][k])
         elif m == "learner":
-            s["learner"] = rng.choice(learners_for(TARGETS[s["target"]]["kind"]))
+            s["learner"] = rng.choice(learners_for(kind_of(s["target"])))
             s["params"] = _params(rng, s["learner"])
         elif m == "window":
             s["window"] = rng.choice(WINDOWS)
@@ -1136,6 +1143,12 @@ def shadow_step(P: Panels, now_ms: int, log=print) -> dict:
             continue
         t = m["target"]
         try:
+            if t in NET_TARGETS:                 # T7: logged positions, scored by the day's net result
+                m["logged_today"] = net_shadow_forecast(P, m, now_ms)
+                review(m, net_daily(_jl(shadow_log(m["key"])), P.get(t)), day)
+                if m["status"] == "retired":
+                    retired.append(m["key"])
+                continue
             m["logged_today"] = shadow_forecast(P, m, now_ms)
             inc = TARGETS[t]["incumbent"]
             d = daily_losses(t, _jl(shadow_log(m["key"])), P.get(t), _jl(zoo_log(inc)) if inc else [])
@@ -1180,6 +1193,334 @@ def admit(passed: list[dict], rows_by_key: dict, day: str) -> list[str]:
         new.append(h["key"])
     _write_json(shadows_path(), sh)
     return new
+
+
+# ---------------------------------------------------------------- T7: the net target (results/cost_aware_t7_prereg.md)
+#
+# A target on what pays, not on a hit rate. net1: the coin panel (the 15 Alpaca coins), each row's target the next
+# UTC day's simple return. A forecast f becomes a position by its sign and a capped size, pos = clip(f / s, -1, 1),
+# s the training rows' forecast std; the day's book holds pos / N of each coin (N the coins with a position that
+# day, so the gross is at most 1) and earns sum(w r) less sum(c |w - w the day before|), c the coin's one-way cost
+# of its era (the USD-M taker plus T5's half-spread tier of its 30-day median dollar volume, known at t; in and out
+# is one round trip). Fitness: the annual Sharpe of that net in the purged quarterly walk-forward 2021-23 (the
+# screen). Baseline: the plain signal, the sign of the 30-day return in the same book at the same costs.
+#
+# ridge_net is a ridge on the net objective, in closed form: with f = a + Z b on the standardised inputs,
+# maximising sum(f y) - sum(f^2) / 2 - kappa sum(c / (2 sd(y)) df^2) (the cost c |df| by its quadratic bound at a
+# change of one sd of y; df a coin's change of f from one day to the next) less a ridge on b is minimising
+# sum((y - f)^2) + kappa sum(c / sd(y) df^2) + alpha n |b|^2, one linear system. kappa 0 is the plain ridge on the
+# return (the gross twin); the net Sharpe is always measured with the true c |dw|.
+#
+# Daily Sharpes, so every net spec is a trial of R5's registry (factory family, at its screen Sharpe). Its own
+# ledger (net_ledger.jsonl) and looks (net_holdout.jsonl) next to G2's: the daily run never draws a net spec. A look
+# (2024-01-01 to 2026-06-30) passes with a net Sharpe above the plain signal's and a DSR over the registry's pool
+# of all of 0.95 or more; a pass joins G2's shadows (positions logged before the outcome, scored and retired by the
+# day's net), nothing else.
+
+NET_TARGETS = {
+    "net1": dict(kind="net", purge=1, trees=False, incumbent=None,
+                 what="next UTC day's simple return, traded by sign and a capped size at the costs of its era",
+                 baseline="the plain signal: the sign of the 30-day return, same book and costs"),
+}
+NET_SIGNAL, NET_CAP, NET_COST_DAYS = "ret30", 1.0, 30
+NET_DSR_PASS = 0.95
+YEAR = 365
+
+
+def net_panel(p: pl.DataFrame) -> pl.DataFrame:
+    """The coin panel with net1's target (the next day's simple return, null while open) and each row's one-way cost
+    of its era (cost)."""
+    from ..experiments import pit_universe_t5 as t5
+    p = p.sort(["symbol", "ts_us"]).with_columns(
+        med_qv=pl.col("qv").rolling_median(NET_COST_DAYS, min_samples=NET_COST_DAYS // 2).over("symbol"),
+        target=pl.col("ret_next").exp() - 1)
+    cost = t5.era_cost(p["med_qv"].fill_null(np.nan).to_numpy().astype(float), True)
+    return (p.with_columns(cost=pl.Series(cost)).drop("med_qv")
+            .filter(pl.col("sigma").is_not_null() & (pl.col("sigma") > 0)).sort(["ts_us", "symbol"]))
+
+
+def grid(panel: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, int, int, int]:
+    """(day index, coin index, days, coins, first day in us) of every panel row."""
+    ts = panel["ts_us"].to_numpy().astype(np.int64)
+    t0 = int(ts.min()) if len(ts) else 0
+    di = ((ts - t0) // DAY_US).astype(int)
+    _, sj = np.unique(panel["symbol"].to_numpy().astype(str), return_inverse=True)
+    return di, sj.astype(int), int(di.max()) + 1 if len(di) else 0, int(sj.max()) + 1 if len(sj) else 0, t0
+
+
+def positions(f: np.ndarray, s: float, cap: float = NET_CAP) -> np.ndarray:
+    """A forecast's position: its sign and a size capped at cap (f / s)."""
+    return np.clip(f / s, -cap, cap) if s > EPS else cap * np.sign(f)
+
+
+def net_book(di, sj, T: int, n: int, pos: np.ndarray, r: np.ndarray, c: np.ndarray) -> dict:
+    """The daily book of per-row positions (NaN: none): weight pos / N a day, N the rows with a position; earns
+    sum(w r) less sum(c |w - w the day before|) (a coin without a row that day trades out at the highest tier)."""
+    from ..experiments import pit_universe_t5 as t5
+    has = np.isfinite(pos)
+    N = np.bincount(di[has], minlength=T)
+    W = np.zeros((T, n))
+    W[di[has], sj[has]] = pos[has]
+    W /= np.maximum(N, 1)[:, None]
+    R, C = np.zeros((T, n)), np.full((T, n), t5.PERP_FEE + t5.SPREAD_BELOW)
+    ok = has & np.isfinite(r)
+    R[di[ok], sj[ok]] = r[ok]
+    C[di, sj] = np.where(np.isfinite(c), c, t5.PERP_FEE + t5.SPREAD_BELOW)
+    dW = np.abs(np.diff(W, axis=0, prepend=np.zeros((1, n))))
+    gross, cost = (W * R).sum(1), (C * dW).sum(1)
+    return {"gross": gross, "cost": cost, "net": gross - cost, "turnover": dW.sum(1), "on": (N > 0) | (cost > 0)}
+
+
+def _sharpe(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    sd = x.std() if len(x) > 1 else 0.0
+    return float(x.mean() / sd * np.sqrt(YEAR)) if sd > 0 else 0.0
+
+
+def prev_rows(di: np.ndarray, sj: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """For each row in mask (in order), the index within mask of the same coin's row the day before, -1 if none."""
+    idx = np.flatnonzero(mask)
+    if not len(idx):
+        return np.zeros(0, dtype=int)
+    nc = int(sj.max()) + 1
+    code = di[idx].astype(np.int64) * nc + sj[idx]
+    order = np.argsort(code, kind="stable")
+    sc = code[order]
+    k = np.minimum(np.searchsorted(sc, code - nc), len(sc) - 1)
+    return np.where(sc[k] == code - nc, order[k], -1)
+
+
+class RidgeNet:
+    """ridge_net: the net objective's ridge (above) on standardised inputs, the intercept not penalised."""
+
+    def __init__(self, alpha: float, kappa: float):
+        self.alpha, self.kappa = float(alpha), float(kappa)
+
+    def _z(self, X: np.ndarray) -> np.ndarray:
+        return np.column_stack([np.ones(len(X)), self.prep(X)])
+
+    def fit(self, X: np.ndarray, y: np.ndarray, prev: np.ndarray, c: np.ndarray) -> "RidgeNet":
+        self.prep = Prep().fit(X)
+        Z = self._z(X)
+        A = Z.T @ Z
+        k = np.flatnonzero(prev >= 0)
+        sd = float(np.std(y))
+        if self.kappa > 0 and len(k) and sd > 0:
+            D = Z[k] - Z[prev[k]]
+            A = A + self.kappa * (D.T * (c[k] / sd)) @ D
+        R = np.eye(Z.shape[1]) * self.alpha * len(y)
+        R[0, 0] = 0.0
+        self.b = np.linalg.solve(A + R + EPS * np.eye(Z.shape[1]), Z.T @ y)
+        self.s = float(np.std(Z @ self.b))
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self._z(X) @ self.b
+
+
+def _net_arrays(panel: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ts = panel["ts_us"].to_numpy()
+    y = panel["target"].fill_null(np.nan).to_numpy().astype(float)
+    c = panel["cost"].fill_null(np.nan).to_numpy().astype(float)
+    sig = panel[NET_SIGNAL].fill_null(np.nan).to_numpy().astype(float)
+    return ts, y, c, sig
+
+
+def net_fit(spec: dict, X: np.ndarray, y: np.ndarray, c: np.ndarray, di: np.ndarray, sj: np.ndarray,
+            tr: np.ndarray) -> RidgeNet:
+    return RidgeNet(spec["params"]["alpha"], spec["params"]["kappa"]).fit(X[tr], y[tr], prev_rows(di, sj, tr), c[tr])
+
+
+def plain_positions(sig: np.ndarray) -> np.ndarray:
+    return NET_CAP * np.sign(np.nan_to_num(sig))
+
+
+def walk_net(P: Panels, t: str, spec: dict, start: str, end: str, X: np.ndarray | None = None) -> tuple:
+    """(positions, the plain signal's) on every row of the quarterly blocks from start to end, NaN elsewhere; each
+    block trained on the rows whose next-day return is known before it starts (purged), within the window."""
+    panel = P.get(t)
+    ts, y, c, sig = _net_arrays(panel)
+    di, sj, _, _, _ = grid(panel)
+    X = matrix(P, t, spec) if X is None else X
+    X = np.where(np.isinf(X), np.nan, X)
+    pos, base = np.full(panel.height, np.nan), np.full(panel.height, np.nan)
+    for lo, hi in blocks(start, end):
+        tr, te = split(ts, NET_TARGETS[t]["purge"], lo, hi, spec.get("window"))
+        tr &= np.isfinite(y)
+        if tr.sum() < MIN_TRAIN or not te.any():
+            continue
+        m = net_fit(spec, X, y, c, di, sj, tr)
+        pos[te] = positions(m.predict(X[te]), m.s)
+        base[te] = plain_positions(sig[te])
+    return pos, base
+
+
+def judge_net(P: Panels, t: str, pos: np.ndarray, base: np.ndarray, start: str, end: str) -> tuple[dict, dict]:
+    """The spec's and the plain signal's books on the window's days: ({sharpe, base_sharpe, excess, gross_sharpe,
+    turnover and cost a year, days}, {"days", "net", "base"} the daily series)."""
+    panel = P.get(t)
+    _, y, c, _ = _net_arrays(panel)
+    di, sj, T, n, t0 = grid(panel)
+    days = t0 + np.arange(T, dtype=np.int64) * DAY_US
+    bm, bb = net_book(di, sj, T, n, pos, y, c), net_book(di, sj, T, n, base, y, c)
+    on = (days >= core.us(start)) & (days < core.us(end)) & (bm["on"] | bb["on"])
+    j = {"days": int(on.sum()), "sharpe": _sharpe(bm["net"][on]), "base_sharpe": _sharpe(bb["net"][on]),
+         "gross_sharpe": _sharpe(bm["gross"][on]), "turnover_pa": float(bm["turnover"][on].mean() * YEAR) if on.any()
+         else None, "cost_pa": float(bm["cost"][on].mean() * YEAR) if on.any() else None,
+         "base_turnover_pa": float(bb["turnover"][on].mean() * YEAR) if on.any() else None}
+    j["excess"] = j["sharpe"] - j["base_sharpe"]
+    return j, {"days": days[on], "net": bm["net"][on], "base": bb["net"][on]}
+
+
+def net_ledger_path() -> Path:
+    return mf_dir() / "net_ledger.jsonl"
+
+
+def net_holdout_path() -> Path:
+    return mf_dir() / "net_holdout.jsonl"
+
+
+def net_trial(P: Panels, spec: dict, run: str, keep: dict | None = None) -> dict:
+    """One net spec through the screen: a ledger row (an error is a trial too). keep: its daily net in the screen
+    under its key (PBO; in memory only)."""
+    t, t0 = spec["target"], time.time()
+    row = {"key": spec_key(spec), "run": run, "target": t, "spec": spec, "what": describe_spec(spec)}
+    try:
+        pos, base = walk_net(P, t, spec, SCREEN_FROM, HOLD_FROM)
+        j, ser = judge_net(P, t, pos, base, SCREEN_FROM, HOLD_FROM)
+        row.update(screen=j, fitness=j["sharpe"], screen_pass=bool(j["days"] > 0 and j["sharpe"] > 0
+                                                                   and j["sharpe"] > j["base_sharpe"]))
+        if keep is not None:
+            keep[row["key"]] = ser
+    except Exception as e:                       # a broken spec is a failed trial, never a crashed run
+        row.update(error=f"{type(e).__name__}: {e}"[:300], fitness=None, screen_pass=False)
+    row["seconds"] = round(time.time() - t0, 2)
+    return row
+
+
+def net_registry_row(row: dict, source: str = "results/cost_aware_t7_prereg.md") -> dict:
+    """A net spec as a trial of R5's registry (the factory family, at its screen Sharpe; an error only counts)."""
+    return {"id": f"factory:t7_net:{row['key']}", "family": "factory", "n": 1, "sharpe": row.get("fitness"),
+            "source": source}
+
+
+def net_draw(rng: random.Random, P: Panels, t: str, rows: list[dict], have: set,
+             share: float = RANDOM_SHARE) -> dict | None:
+    """A new net spec: random (a `share` of them) or a mutation of one of the five best so far."""
+    pool = feature_pool(t, P.get(t))
+    best = sorted((r for r in rows if r.get("target") == t and r.get("fitness") is not None),
+                  key=lambda r: -r["fitness"])[:5]
+    for _ in range(50):
+        s = mutate(rng.choice(best)["spec"], rng, pool, False) if best and rng.random() >= share \
+            else random_spec(rng, t, pool, False)
+        if spec_key(s) not in have:
+            return s
+    return None
+
+
+def net_cpcv(P: Panels, t: str, spec: dict, start: str = SCREEN_FROM, end: str = HOLD_FROM,
+             n_groups: int = CPCV_GROUPS, k_test: int = CPCV_TEST) -> dict | None:
+    """T2's combinatorial purged CV of a net spec over a window: refitted on every split, each path's net Sharpe
+    less the plain signal's on the same days (median, 10th percentile). None when a split is too small."""
+    from .. import cv
+    panel = P.get(t)
+    ts, y, c, sig = _net_arrays(panel)
+    rows = np.flatnonzero((ts >= core.us(start)) & (ts < core.us(end)) & np.isfinite(y))
+    if not len(rows):
+        return None
+    sub = panel[rows]
+    di, sj, T, n, _ = grid(sub)
+    X = matrix(P, t, spec)[rows]
+    tw, X = ts[rows], np.where(np.isinf(X), np.nan, X)
+    yw, cw = y[rows], c[rows]
+    ndays = len(np.unique(tw))
+    splits = cv.cpcv(tw, n_groups, k_test, purge=NET_TARGETS[t]["purge"] * DAY_US,
+                     embargo=int(np.ceil(CPCV_EMBARGO * ndays)) * DAY_US)
+    vals = []
+    for sp in splits:
+        if sp.train.sum() < MIN_TRAIN:
+            return None
+        v = np.full(len(rows), np.nan)
+        m = net_fit(spec, X, yw, cw, di, sj, sp.train)
+        v[sp.test] = positions(m.predict(X[sp.test]), m.s)
+        vals.append(v)
+    base = net_book(di, sj, T, n, plain_positions(sig[rows]), yw, cw)
+    ex = []
+    for p in cv.assemble(splits, vals, n_groups, k_test, tw):
+        b = net_book(di, sj, T, n, p, yw, cw)
+        on = b["on"]
+        ex.append(_sharpe(b["net"][on]) - _sharpe(base["net"][on]))
+    g = np.array(ex)
+    return {"paths": len(g), "splits": len(splits), "median": float(np.median(g)), "p10": float(np.percentile(g, 10))}
+
+
+def net_look(P: Panels, row: dict, pool: dict, run: str) -> dict:
+    """One net spec's validation look, written down before it is scored; passes with a net Sharpe above the plain
+    signal's and a DSR over `pool` (the registry's of all) of NET_DSR_PASS or more."""
+    from .. import metrics
+    looks = _jl(net_holdout_path())
+    _append(net_holdout_path(), [{"key": row["key"], "run": run, "status": "looking", "n_trials": pool["n_trials"],
+                                  "look": sum(1 for x in looks if x.get("status") == "looking") + 1}])
+    t = row["target"]
+    pos, base = walk_net(P, t, row["spec"], HOLD_FROM, HOLD_TO)
+    j, ser = judge_net(P, t, pos, base, HOLD_FROM, HOLD_TO)
+    d = metrics.dsr(ser["net"], pool)
+    out = {"key": row["key"], "run": run, "status": "done", "target": t, "n_trials": pool["n_trials"],
+           "sr0_annual": pool.get("sr0_annual"), "held": j, "dsr": d,
+           "passed": bool(j["sharpe"] > j["base_sharpe"] and d >= NET_DSR_PASS)}
+    _append(net_holdout_path(), [out])
+    out["series"] = ser
+    return out
+
+
+def net_shadow_forecast(P: Panels, m: dict, now_ms: int) -> int:
+    """A net member refitted on every known row (its window), its position and the plain signal's for the newest
+    rows whose next day is still open, logged before the outcome; rows logged before are skipped."""
+    t, spec = m["target"], m["spec"]
+    panel = P.get(t)
+    ts, y, c, sig = _net_arrays(panel)
+    open_ = ~np.isfinite(y)
+    if not open_.any():
+        return 0
+    te = open_ & (ts == ts[open_].max())
+    tr, _ = split(ts, NET_TARGETS[t]["purge"], int(ts[te].max()) + DAY_US, 0, spec.get("window"))
+    tr &= np.isfinite(y)
+    if tr.sum() < MIN_TRAIN:
+        return 0
+    di, sj, _, _, _ = grid(panel)
+    X = matrix(P, t, spec)
+    X = np.where(np.isinf(X), np.nan, X)
+    fm = net_fit(spec, X, y, c, di, sj, tr)
+    p, b = positions(fm.predict(X[te]), fm.s), plain_positions(sig[te])
+    have = {(int(r["ts_us"]), str(r["symbol"])) for r in _jl(shadow_log(m["key"]))}
+    new = [{"ts_us": int(tt), "symbol": str(s), "pos": float(pp), "baseline": float(bb), "recorded_ms": now_ms}
+           for tt, s, pp, bb in zip(ts[te], panel["symbol"].to_numpy()[te], p, b)
+           if (int(tt), str(s)) not in have and np.isfinite(pp)]
+    _append(shadow_log(m["key"]), new)
+    return len(new)
+
+
+def net_daily(logged: list[dict], panel: pl.DataFrame) -> pl.DataFrame:
+    """Per scored day a net member's and the plain signal's loss: minus the day's net of their logged books."""
+    empty = pl.DataFrame(schema={"ts_us": pl.Int64, "model": pl.Float64, "baseline": pl.Float64,
+                                 "incumbent": pl.Float64})
+    if not logged:
+        return empty
+    rec = pl.DataFrame([{k: r[k] for k in ("ts_us", "symbol", "pos", "baseline")} for r in logged]).with_columns(
+        pl.col("ts_us").cast(pl.Int64), pl.col("symbol").cast(pl.Utf8)).unique(["ts_us", "symbol"], keep="first")
+    tgt = panel.select("ts_us", "symbol", "target", "cost").drop_nulls("target").with_columns(
+        pl.col("ts_us").cast(pl.Int64), pl.col("symbol").cast(pl.Utf8))
+    j = rec.join(tgt, on=["ts_us", "symbol"], how="inner").sort(["ts_us", "symbol"])
+    if not j.height:
+        return empty
+    di, sj, T, n, t0 = grid(j)
+    y, c = j["target"].to_numpy().astype(float), j["cost"].to_numpy().astype(float)
+    bm = net_book(di, sj, T, n, j["pos"].to_numpy().astype(float), y, c)
+    bb = net_book(di, sj, T, n, j["baseline"].to_numpy().astype(float), y, c)
+    on = np.bincount(di, minlength=T) > 0
+    return pl.DataFrame({"ts_us": (t0 + np.arange(T, dtype=np.int64) * DAY_US)[on], "model": -bm["net"][on],
+                         "baseline": -bb["net"][on]}).with_columns(incumbent=pl.lit(None, pl.Float64))
 
 
 # ---------------------------------------------------------------- the run

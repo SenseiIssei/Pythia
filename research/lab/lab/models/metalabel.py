@@ -13,6 +13,11 @@ that day, the trade's weight, and the days since the asset's last trade closed. 
 whose probability is under the cut: the asset is not bought, its weight is 0 from t_in until t_out, the rest of the
 book is unchanged (the slot stays cash). Nothing here reaches an order: the study runs the filtered book through
 the same simulator and costs as the unfiltered one and judges it by the same bar.
+
+T7 (results/cost_aware_t7_prereg.md): the probability as a size instead of a cut (sized): every weight of a trade
+times its probability, clipped to 0 to 1, so the meta book never holds more of a coin than the rule. For a rule
+filled a close late the label is the late trade's (lag 1: from the close after t_in to the close after t_out,
+known then), its cost the round trip of its era (a (T, n) matrix of one-way costs, entry plus exit).
 """
 
 from __future__ import annotations
@@ -44,13 +49,17 @@ def trades(W: np.ndarray) -> list[tuple[int, int, int]]:
     return sorted(out, key=lambda x: (x[1], x[0]))
 
 
-def labels(px: np.ndarray, tr: list[tuple[int, int, int]], cost: float) -> np.ndarray:
-    """1 / 0 per trade (NaN while open): log(px[t_out] / px[t_in]) less the round trip `cost` above 0."""
+def labels(px: np.ndarray, tr: list[tuple[int, int, int]], cost, lag: int = 0) -> np.ndarray:
+    """1 / 0 per trade (NaN while open): log(px[t_out + lag] / px[t_in + lag]) less the round trip above 0; cost a
+    round trip (float) or a (T, n) matrix of one-way costs (entry at t_in + lag plus exit at t_out + lag)."""
     y = np.full(len(tr), np.nan)
+    T = len(px)
     for k, (j, a, b) in enumerate(tr):
-        if b < 0 or not (np.isfinite(px[a, j]) and np.isfinite(px[b, j]) and px[a, j] > 0):
+        a, b = a + lag, b + lag if b >= 0 else -1
+        if b < 0 or b >= T or not (np.isfinite(px[a, j]) and np.isfinite(px[b, j]) and px[a, j] > 0):
             continue
-        y[k] = float(np.log(px[b, j] / px[a, j]) - cost > 0)
+        c = cost[a, j] + cost[b, j] if isinstance(cost, np.ndarray) else cost
+        y[k] = float(np.log(px[b, j] / px[a, j]) - c > 0)
     return y
 
 
@@ -94,9 +103,9 @@ def features(px: np.ndarray, W: np.ndarray, tr: list[tuple[int, int, int]], btc:
     return X
 
 
-def known_at(tr: list[tuple[int, int, int]], T: int) -> np.ndarray:
+def known_at(tr: list[tuple[int, int, int]], T: int, lag: int = 0) -> np.ndarray:
     """The row index at whose close each trade's label is known (T for one still open: never inside the data)."""
-    return np.array([b if b >= 0 else T for _, _, b in tr], dtype=float)
+    return np.array([min(b + lag, T) if b >= 0 else T for _, _, b in tr], dtype=float)
 
 
 def filtered(W: np.ndarray, tr: list[tuple[int, int, int]], p: np.ndarray, cut: float = CUT) -> np.ndarray:
@@ -106,4 +115,14 @@ def filtered(W: np.ndarray, tr: list[tuple[int, int, int]], p: np.ndarray, cut: 
     for (j, a, b), pk in zip(tr, p):
         if np.isfinite(pk) and pk < cut:
             W2[a: (b if b >= 0 else len(W)), j] = 0.0
+    return W2
+
+
+def sized(W: np.ndarray, tr: list[tuple[int, int, int]], p: np.ndarray) -> np.ndarray:
+    """W with every trade's weights from t_in to its close times its probability, clipped to 0 to 1 (never above
+    the rule's weight). A trade without a probability (no model yet) keeps its weight."""
+    W2 = W.copy()
+    for (j, a, b), pk in zip(tr, p):
+        if np.isfinite(pk):
+            W2[a: (b if b >= 0 else len(W)), j] *= min(max(float(pk), 0.0), 1.0)
     return W2
