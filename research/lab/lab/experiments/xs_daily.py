@@ -476,9 +476,10 @@ def short_ok(M: dict, t: int, i: int, no_paying_shorts: bool) -> bool:
 
 
 def book(M: dict, score: np.ndarray, k: int, hold: int, n_liquid: int, long_short: bool,
-         regime: np.ndarray | None = None, no_paying_shorts: bool = False):
+         regime: np.ndarray | None = None, no_paying_shorts: bool = False, C: np.ndarray | None = None):
     """Overlapping tranches: each day 1/hold of the book is re-picked and held hold days.
-    Returns gross daily return, turnover, funding, exposure."""
+    Returns gross daily return, turnover, funding, exposure. C (T, N): each coin's cost per unit of
+    one-way turnover that day; with it the turnover returned is the cost charged (T6)."""
     R = np.nan_to_num(M["R"])
     T, N = R.shape
     liq = M["perp_adv28"] if long_short else M["adv28_raw"]
@@ -505,7 +506,7 @@ def book(M: dict, score: np.ndarray, k: int, hold: int, n_liquid: int, long_shor
                 tl[order[:k]] = 1.0 / k
         tranches_l[t % hold], tranches_s[t % hold] = tl, ts
         tgt = (sum(tranches_l) + sum(tranches_s)) / hold
-        turn[t] = np.abs(tgt - w).sum()
+        turn[t] = np.abs(tgt - w).sum() if C is None else float(np.abs(tgt - w) @ np.nan_to_num(C[t]))
         w = tgt
         g = float(np.dot(w, R[t]))
         fund[t] = -float(np.dot(w, M["fund"][t])) if long_short else 0.0
@@ -521,12 +522,12 @@ def book(M: dict, score: np.ndarray, k: int, hold: int, n_liquid: int, long_shor
 
 
 def book_buffer(M: dict, score: np.ndarray, k: int, exit_frac: float, n_liquid: int,
-                no_paying_shorts: bool = False):
+                no_paying_shorts: bool = False, C: np.ndarray | None = None):
     """Long/short with a rank buffer (round two): a name enters a side when it ranks in
     that side's best k and leaves only when it drops out of that side's best exit_frac
     of the liquid perp set (or out of the set). Held names drift with their price and are not re-equalised;
     an entering name gets 0.5 / k, a held one is capped at twice that.
-    Returns gross, turnover, funding, exposure."""
+    Returns gross, turnover, funding, exposure (C as in book)."""
     R = np.nan_to_num(M["R"])
     T, N = R.shape
     liq = M["perp_adv28"]
@@ -558,7 +559,7 @@ def book_buffer(M: dict, score: np.ndarray, k: int, exit_frac: float, n_liquid: 
                 if i not in shorts and i not in longs and short_ok(M, t, i, no_paying_shorts):
                     shorts.append(i)
                     tgt[i] = -0.5 / k
-        turn[t] = np.abs(tgt - w).sum()
+        turn[t] = np.abs(tgt - w).sum() if C is None else float(np.abs(tgt - w) @ np.nan_to_num(C[t]))
         w = tgt
         g = float(np.dot(w, R[t]))
         fund[t] = -float(np.dot(w, M["fund"][t]))
