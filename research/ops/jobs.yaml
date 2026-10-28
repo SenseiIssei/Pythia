@@ -812,6 +812,9 @@ jobs:
     env_file: [/etc/pythia/alerts.env, '/etc/pythia/discord.env?']
     resources: {cpus: 1, memory: 2g}
     timeout: 90m
+    # off since 2026-10-28: the metered API has no credit; the host's autopilot director (weekly, on the owner's
+    # subscription) drafts the lane tasks instead
+    enabled: false
 
   - name: ai-weekly
     description: weekly AI review (Sonnet, batch) of every study and live result, three proposed experiments in reports/ai/weekly.md, never run by anything
