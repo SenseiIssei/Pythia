@@ -742,6 +742,21 @@ jobs:
     lock: heavy
     lock_wait: 2h
 
+  # T13 (research/lab/lab/ops/recordings.py, results/recordings_t13_prereg.md): what the lab records, what it costs
+  # on disk and who reads it, weekly. Every dataset below and every other folder of the data root with its parts:
+  # size, growth over 7 and 30 days (_ops/disk/history.jsonl), the jobs and services whose code writes and reads it
+  # (a static scan of the lab code at /app and the ops folder, mounted read only for this table), the last study;
+  # read by a book or job, by a study only or by nobody, keep, thin out or stop for the last. Reads only, writes
+  # reports/recordings/latest.md and .json, stops nothing. No trial.
+  - name: recordings
+    description: recordings inventory T13, weekly; size, growth a month and readers of every dataset and data folder from a static scan of the code, read by a book or job, a study only or nobody, reports/recordings/latest.md
+    schedule: "30 7 * * 1"
+    command: python -m lab.ops.recordings
+    env: {PYTHIA_JOBS_TABLE: /ops/jobs.yaml}
+    volumes: [/opt/pythia-ops:/ops:ro]
+    resources: {cpus: 1, memory: 1g}
+    timeout: 30m
+
   # M1 (research/lab/lab/experiments/modern_m1.py, results/modern_models_m1.md): newer model techniques as candidates
   # (Chronos-Bolt and TimesFM 2.5 zero shot, TabPFN v2 and CatBoost in the model factory, conformal intervals,
   # meta-labelling of the factory survivors), each judged by the bar its incumbent was judged by, monthly. The only
