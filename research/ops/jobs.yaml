@@ -963,7 +963,9 @@ jobs:
 
   - name: candles-compact
     description: candles, merges each month's parts into its file, finished months final, then the gap report reports/candle_coverage_c1
-    schedule: "40 1 * * *"
+    # 12:40, not 01:40: pumpfun-factory (01:00) holds the heavy lock about 1 h 45 min and the hour's wait ran
+    # out first, so it never ran (2026-10-28)
+    schedule: "40 12 * * *"
     command: sh -c 'python -m lab.candles.store compact && python -m lab.candles.store report'
     resources: {cpus: 1, memory: 2g}
     timeout: 30m
