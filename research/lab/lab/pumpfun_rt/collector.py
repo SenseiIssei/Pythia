@@ -68,6 +68,14 @@ creation-time feature (tokens.py).
 
 The live shadow book (live.py) gets every event as it is decoded; it is paper
 arithmetic and cannot trade.
+
+Two hand-overs since 2026-10-28 (the live bot lost about 170 decisions to missing data, P2):
+  F1  each migration's pool is read from the chain (poolread.py, PYTHIA_PF_POOL_READ=0 turns it off) and kept as
+      an "other" row of kind pool_state, so a pool strategy need not wait for the stream to bring a pool trade;
+      the live service's collector does the same read, so paper and live see the same.
+  F2  every create row is appended at once to <data>/pumpfun_rt/tap/creates.jsonl (Tap; PYTHIA_PF_TAP=0 turns
+      it off); the live service reads it every second (TapReader) and adopts a coin its own links missed,
+      instead of skipping its migration for "creation not seen" (67 of 114 times this collector had the coin).
 """
 
 from __future__ import annotations
@@ -106,10 +114,81 @@ META_HOSTS = ("ipfs.io", "dweb.link", "cf-ipfs.com", "nftstorage.link", "arweave
 RECV_TIMEOUT_S = 90.0
 DOWN_KEEP = 200            # stretches with every link of a program down, kept for was_down
 AMM_WAIT = 20_000          # PumpSwap trades of unknown pools kept while their migration may still arrive
+POOL_QUEUE = 500           # F1: migrations waiting for their pool read (more are left to the stream, and counted)
+POOL_RETRY_S = 1.0         # F1: a pool or vault not there yet is read once more after this
+TAP_MAX_BYTES = 32_000_000  # F2: the tap file is rotated to creates.jsonl.1 past this (about four days)
 
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def tap_path():
+    return store.base() / "tap" / "creates.jsonl"
+
+
+class Tap:
+    """F2: every create row appended at once (one JSON line, flushed), rotated past TAP_MAX_BYTES."""
+
+    def __init__(self, path=None, max_bytes: int = TAP_MAX_BYTES):
+        self.path = path or tap_path()
+        self.max_bytes = max_bytes
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = open(self.path, "a", encoding="utf-8")
+
+    def add(self, row: dict) -> None:
+        try:
+            self.fh.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
+            self.fh.flush()
+            if self.fh.tell() > self.max_bytes:
+                self.fh.close()
+                os.replace(self.path, self.path.with_name(self.path.name + ".1"))
+                self.fh = open(self.path, "a", encoding="utf-8")
+        except (OSError, ValueError) as e:                # the live service then waits for the store as before
+            print(f"collector: tap not written ({type(e).__name__}: {e})", file=sys.stderr)
+
+    def close(self) -> None:
+        try:
+            self.fh.close()
+        except OSError:
+            pass
+
+
+class TapReader:
+    """F2, the live service's side: the rows appended since the last poll. Starts at the file's end (the coins
+    before are adopted from the store at start); a rotated or truncated file is read from its start."""
+
+    def __init__(self, path=None):
+        self.path = path or tap_path()
+        self.ino, self.pos = self._stat()
+
+    def _stat(self) -> tuple[int | None, int]:
+        try:
+            st = os.stat(self.path)
+            return st.st_ino, st.st_size
+        except OSError:
+            return None, 0
+
+    def poll(self) -> list[dict]:
+        ino, size = self._stat()
+        if ino is None:
+            return []
+        if ino != self.ino or size < self.pos:
+            self.ino, self.pos = ino, 0
+        if size == self.pos:
+            return []
+        out = []
+        with open(self.path, "rb") as fh:
+            fh.seek(self.pos)
+            chunk = fh.read(size - self.pos)
+        end = chunk.rfind(b"\n") + 1                      # a line still being written waits for the next poll
+        self.pos += end
+        for line in chunk[:end].splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+        return out
 
 
 def meta_url(uri: str) -> str | None:
@@ -330,6 +409,43 @@ class Collector:
         self.meta_q: asyncio.Queue | None = None
         self.started_ms = now_ms()
         self.first_by: collections.Counter = collections.Counter()
+        self.pool_q: asyncio.Queue | None = None          # F1: migrations whose pool is read (pool_worker)
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.tap: Tap | None = None                       # F2: every create row at once, for the live service
+
+    # ------------------------------------------------------------ F1 and F2
+    def want_pool(self, row: dict) -> None:
+        """A migration: its pool's reserves are read on the pool worker (poolread.py)."""
+        if self.pool_q is None or self.loop is None or not row.get("pool"):
+            return
+        try:
+            self.loop.call_soon_threadsafe(self.pool_q.put_nowait, (row["mint"], row["pool"]))
+        except (RuntimeError, asyncio.QueueFull):         # a closed loop, or too many waiting: the stream decides
+            self.counts["pool_read_dropped"] += 1
+
+    async def pool_worker(self, read=None) -> None:
+        """Reads each queued pool once (and once more after POOL_RETRY_S when the pool or a vault is not there
+        yet) and keeps the pool_state row, which reaches the store and the book like any row."""
+        from . import poolread
+        read = read or poolread.read
+        while True:
+            mint, pool = await self.pool_q.get()
+            row = None
+            for k in range(2):
+                try:
+                    row = await asyncio.to_thread(read, mint, pool)
+                except Exception as e:                    # the stream's trades still bring the state
+                    self.counts["pool_read_error"] += 1
+                    if self.counts["pool_read_error"] <= 5:
+                        print(f"collector: pool of {mint[:8]} not read ({type(e).__name__}: {e})"[:200], flush=True)
+                if row is not None or k:
+                    break
+                await asyncio.sleep(POOL_RETRY_S)
+            if row is None:
+                self.counts["pool_read_empty"] += 1
+                continue
+            self.counts["pool_read"] += 1
+            self.keep("other", row)
 
     # ------------------------------------------------------------ decoding
     def handle(self, text: str, recv_ms: int, src: str = "ws") -> int:
@@ -386,6 +502,7 @@ class Collector:
             elif table == "other" and row["kind"] == "migrate":
                 self.remember_pool(row["pool"], row["mint"], recv_ms)
                 kept += self.keep(table, row, ct)
+                self.want_pool(row)
                 for early in [r for r in self.amm_wait if r["pool"] == row["pool"]]:
                     early["mint"] = row["mint"]
                     kept += self.keep("amm", early, self.clock.stamp(early["slot"], early["t"]))
@@ -404,6 +521,8 @@ class Collector:
         self.counts[table] += 1
         if self.writer is not None:
             self.writer.add(table, row)
+        if table == "creates" and self.tap is not None:
+            self.tap.add(row)
         if self.on_row is not None:
             try:
                 out = row if chain_ms is None else {**row, "t": chain_ms}
@@ -586,6 +705,9 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     col = Collector(writer, shadow.on_row if shadow else None, amm=amm, meta=meta)
     if shadow is not None:
         shadow.watch_feed(col)
+    from . import poolread
+    if writer is not None and os.environ.get("PYTHIA_PF_TAP", "1") != "0":
+        col.tap = Tap()
     hb = store.base() / "heartbeat.json"
     if writer is not None:
         try:                                              # the time the collector was not running is a gap
@@ -610,12 +732,17 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
             pass
     if meta:
         col.meta_q = asyncio.Queue(maxsize=META_QUEUE)
+    pool_read = amm and not dry_run and poolread.enabled()
+    if pool_read:
+        col.loop, col.pool_q = loop, asyncio.Queue(maxsize=POOL_QUEUE)
     t_end = time.monotonic() + seconds if seconds else None
     last_hb = last_prune = 0.0
     async with aiohttp.ClientSession() as session:
         programs = [E.PUMP] + ([E.PUMP_AMM] if amm else [])
         tasks = [asyncio.create_task(col.stream(session, urls[k % len(urls)], p, k, stop, commitment))
                  for p in programs for k in range(LINKS if p == E.PUMP else AMM_LINKS)]
+        if pool_read:
+            tasks.append(asyncio.create_task(col.pool_worker()))
         if grpc_url:
             if geyser.available():
                 for j, p in enumerate(programs):
@@ -674,6 +801,8 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
                 store.write_json(hb, col.heartbeat())
             if shadow is not None:
                 shadow.save()
+            if col.tap is not None:
+                col.tap.close()
     return col.heartbeat()
 
 

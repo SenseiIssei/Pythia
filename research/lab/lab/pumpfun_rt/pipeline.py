@@ -1098,6 +1098,19 @@ class Pipeline:
             self.check(p["pid"], at)
 
     # ------------------------------------------------------------ exits
+    def pool_known(self, tok, t: float) -> None:
+        """F1: the pool's state read from the chain (sim.Engine.pool_state): a signal waiting for it (Y8) is given
+        again now, within its wait. No block time of a trade to check: the read is the state, no trade's."""
+        w = self.waiting.get(tok.mint) if self.waiting else None
+        if not w or not tok.pq or not tok.pb:
+            return
+        for name, until in list(w.items()):
+            if t <= until:
+                del w[name]
+                self.signal(self.strats[name], tok, t)
+        if not w:
+            self.waiting.pop(tok.mint, None)
+
     def on_trade(self, tok, t: float, buy: bool, user: str, tok_amt: int, venue: str) -> None:
         """Every trade of a token with open positions: the event-driven exits first, then the price ones. A
         signal waiting for the pool's state (Y8) is given again at the first pool trade that brings it."""

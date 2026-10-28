@@ -52,6 +52,11 @@ as the migration comes in (LiveExecutor.warm_pool), so the pool buy builds witho
 nearly all the time (a recorded day's rows cost about 0.04 % of it); what is left of signal to order is the
 stream delivering the deciding event late, and the wait for a coin's creation.
 
+Missing data (P2, 2026-10-28: about 170 decisions lost): each migration's pool is read from the chain as the
+collector does (F1, poolread.py), so "no pool state" no longer waits on the stream for a pool trade; and every
+second the coins the collector's own links saw created are adopted from its tap file (F2, collector.TapReader),
+so a migration whose creation our links missed is not skipped for "creation not seen" while the collector has it.
+
 The owner's provider (PYTHIA_SOLANA_WS_URLS, metered by data volume: the PumpSwap firehose alone burned its free
 month in about 11 hours) is used only for the coins that matter (ProviderWatch): the program-wide links stream from
 the public endpoint (PYTHIA_PF_PROVIDER_FIREHOSE=1 puts link 0 of each program on the provider again), and one
@@ -272,6 +277,7 @@ class Service:
         self.seen: collections.OrderedDict = collections.OrderedDict()   # migrations seen (written once)
         self.watch: collections.OrderedDict = collections.OrderedDict()  # mint -> monotonic s, until looked at
         self.errors = 0
+        self.tapped = 0                                     # F2: coins adopted from the collector's tap
         self.prov: Providers | None = None                  # the targeted provider streams (only with a provider)
         self.w_since: dict[str, float] = {}                 # mint -> monotonic s since the strategy waits on it
         self.cats = None                                    # livecat.LiveClassifier (with a live book)
@@ -1004,11 +1010,22 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
     t_warm = time.monotonic() + REWARM_S if svc.book is not None else None
     last = beat = 0.0
     woken = svc.arm_wake(loop)
+    from . import poolread
+    from .collector import POOL_QUEUE, TapReader
+    pool_read = svc.book is not None and svc.pool_rule() and poolread.enabled()
+    if pool_read:                                            # F1: the pool read at its migration, as the collector
+        col.loop, col.pool_q = loop, asyncio.Queue(maxsize=POOL_QUEUE)
+    tap = TapReader() if svc.book is not None and os.environ.get("PYTHIA_PF_TAP", "1") != "0" else None
     async with aiohttp.ClientSession() as session:
         tasks = []
         if svc.book is not None:                             # nothing to stream for a book that is not there
             tasks = [asyncio.create_task(col.stream(session, u, p, k, stop)) for u, p, k in feed_links(links)]
             print(feeds_line(links), flush=True)
+            if pool_read:
+                tasks.append(asyncio.create_task(col.pool_worker()))
+                print("live service: each migration's pool is read from the chain (F1)", flush=True)
+            if tap is not None:
+                print("live service: the collector's new coins are adopted every second (F2)", flush=True)
             if svc.cats is not None:
                 tasks.append(asyncio.create_task(classify_loop(svc, stop)))
             if provs:
@@ -1021,6 +1038,13 @@ async def run(seconds: float | None = None, once: bool = False) -> int:
         try:
             while not stop.is_set():
                 await svc.pause(1.0)
+                if tap is not None:                        # F2: a coin our links missed, from the collector at once
+                    try:
+                        rows = await asyncio.to_thread(tap.poll)
+                        if rows:
+                            svc.tapped += svc.rewarm(rows, int(time.time() * 1000))
+                    except Exception as e:                 # the store's adoption at start still holds
+                        print(f"live service: tap {type(e).__name__}: {e}", flush=True)
                 svc.tick(col.clock.latest or int(time.time() * 1000))
                 mono = time.monotonic()
                 if t_warm is not None and mono >= t_warm:

@@ -73,7 +73,9 @@ SCHEMAS: dict[str, pa.Schema] = {
                       ("base", I64), ("quote", I64), ("user", STR), ("pb", I64), ("pq", I64), ("lpb", I32),
                       ("pfb", I32), ("cfb", I32), ("bts", I64), ("vq", I64)]),
     "other": pa.schema([("kind", STR), ("t", I64), ("slot", I64), ("tx", I64), ("mint", STR), ("user", STR),
-                        ("pool", STR), ("sol", I64), ("tok", I64), ("t0", I64), ("bts", I64)]),
+                        ("pool", STR), ("sol", I64), ("tok", I64), ("t0", I64), ("bts", I64),
+                        # F1's pool_state (poolread.py): the pool's reserves read from the chain at its migration
+                        ("pb", I64), ("pq", I64), ("vq", I64)]),
     "meta": pa.schema([("t", I64), ("mint", STR), ("ok", BOOL), ("twitter", BOOL), ("telegram", BOOL),
                        ("website", BOOL), ("desc_len", I32), ("image", BOOL),
                        # Y14: the links normalised (collector.meta_social), nothing else of the document

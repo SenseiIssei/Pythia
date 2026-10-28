@@ -284,6 +284,22 @@ class Engine:
         for r in self.by_entry.get("migration", ()):
             self.push(t + r.p["delay_s"] * 1000, "signal_rule", (mint, r.name))
 
+    def pool_state(self, t, mint, pool, pb, pq, vq=None, slot=None) -> None:
+        """F1 (poolread.py): the pool's reserves read from the chain at its migration. They count only while the
+        stream has given no pool trade yet (a trade's state is as fresh or fresher); a strategy waiting for the
+        state goes on (Pipeline.pool_known). Not a trade: nothing fills, exits or counts as one on it."""
+        self.advance(t)
+        t = self.now
+        tok = self.tokens.get(mint)
+        if tok is None or not pb or not pq or (tok.pool and pool and tok.pool != pool) or (tok.pb and tok.pq):
+            return
+        tok.pb, tok.pq = int(pb), C.effective_quote(int(pq), vq)
+        if slot:
+            tok.amm_slot = max(tok.amm_slot, int(slot))
+        for pipe in self.pipes:
+            if hasattr(pipe, "pool_known"):
+                pipe.pool_known(tok, t)
+
     def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None, vq=None, sig=None,
             bts=None) -> None:
         self.advance(t)
@@ -799,6 +815,8 @@ def feed_row(eng: Engine, table: str, r) -> None:
             eng.complete(r["t"], r["mint"])
         elif k == "migrate":
             eng.migrate(r["t"], r["mint"], r["pool"], r["sol"], r["tok"], r.get("bts"))
+        elif k == "pool_state":
+            eng.pool_state(r["t"], r["mint"], r.get("pool"), r.get("pb"), r.get("pq"), r.get("vq"), r.get("slot"))
         elif k == "gap":                                 # either stream: whatever overlaps it is dropped
             eng.gap(r["t0"] or r["t"], r["t"], r.get("user"))
     elif table == "amm":
