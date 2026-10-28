@@ -1105,7 +1105,9 @@ jobs:
     command: python -m lab.pumpfun_rt.study
     env_file: /etc/pythia/alerts.env
     resources: {cpus: 2, memory: 8g}
-    timeout: 4h
+    # 8h, not 4h, until the replay is incremental (2026-10-29: its runtime grew 2,676 to 12,943 s in a week, about
+    # 40 min a day, as it replays the whole growing record; the next run would have hit 4h)
+    timeout: 8h
     lock: pumpfun-rt
     lock_wait: 10m
 
