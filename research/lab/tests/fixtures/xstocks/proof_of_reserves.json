@@ -1,0 +1,13 @@
+{
+ "symbol": "SPYx",
+ "timestamp": "2026-10-28T05:08:34.603Z",
+ "sharesHeld": "89778.99856414",
+ "circulatingSupply": "88888.349881338910343",
+ "holdings": [
+  {
+   "provider": "Alpaca",
+   "quantity": "89778.99856414",
+   "symbol": "SPY"
+  }
+ ]
+}

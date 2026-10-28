@@ -1,0 +1,10 @@
+{
+ "symbol": "SPYx",
+ "isMarketTradingHalted": false,
+ "isAtomicTradingHalted": false,
+ "allowedOperations": [
+  "Issuance",
+  "Redemption",
+  "Bridge"
+ ]
+}

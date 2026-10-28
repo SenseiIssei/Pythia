@@ -1,0 +1,54 @@
+{
+ "page": {
+  "currentPage": 1,
+  "pageSize": 100,
+  "totalPages": 1,
+  "totalNodes": 2,
+  "hasNextPage": false,
+  "hasPreviousPage": false
+ },
+ "nodes": [
+  {
+   "eventId": "9f076793-e29e-4d37-a7cb-63493569beef",
+   "version": 2,
+   "xstockSymbol": "APHx",
+   "spvSymbol": "APH",
+   "caType": "ForwardSplit",
+   "effectiveTimeUtc": "2026-09-03T08:45:00.000Z",
+   "multiplierOld": "1",
+   "multiplierNew": "2",
+   "grossCashflowUsd": null,
+   "netCashflowUsd": null,
+   "withholdingTaxRate": null,
+   "fromUnits": "1",
+   "toUnits": "2",
+   "redemptionPriceUsd": null,
+   "notes": null,
+   "createdTimeUtc": "2026-09-03T08:09:43.581Z",
+   "status": "Initial",
+   "xstockIsin": "CH1564487499",
+   "spvIsin": "US0320951017"
+  },
+  {
+   "eventId": "ccb423a2-6045-4d1c-9a94-1f37f0ab8d63",
+   "version": 2,
+   "xstockSymbol": "HONx",
+   "spvSymbol": "HON",
+   "caType": "ReverseSplit",
+   "effectiveTimeUtc": "2026-06-29T15:30:00.000Z",
+   "multiplierOld": "1.024094713306789",
+   "multiplierNew": "0.5120473566533945",
+   "grossCashflowUsd": null,
+   "netCashflowUsd": null,
+   "withholdingTaxRate": null,
+   "fromUnits": "2",
+   "toUnits": "1",
+   "redemptionPriceUsd": null,
+   "notes": null,
+   "createdTimeUtc": "2026-06-29T15:09:01.930Z",
+   "status": "Initial",
+   "xstockIsin": "CH1436219583",
+   "spvIsin": "US4385161066"
+  }
+ ]
+}

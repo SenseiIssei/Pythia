@@ -1,0 +1,53 @@
+{
+ "nodes": [
+  {
+   "id": "9e14781b-5654-44f7-94cf-37c17c0fbe06",
+   "createdAt": "2026-04-23T00:00:01.173Z",
+   "address": null,
+   "feedType": "PullBased",
+   "metadata": {
+    "name": "SPYXUSD",
+    "asset": "SPYx",
+    "exponent": -8,
+    "hermesId": "2817b78438c769357182c04346fddaad1178c82f4048828fe0997c3c64624e14",
+    "quoteAsset": "USD",
+    "pythLazerId": 1843,
+    "minPublishers": 3
+   },
+   "network": "Solana",
+   "name": "SP500 xStock",
+   "symbol": "SPYx",
+   "managedBy": "Pyth",
+   "collateral": {
+    "symbol": "SPY",
+    "priceCurrency": "USD"
+   }
+  },
+  {
+   "id": "1f0747b5-fc72-4917-a81c-6e7dcbae7aaa",
+   "createdAt": "2026-04-23T00:00:00.508Z",
+   "address": null,
+   "feedType": "PullBased",
+   "metadata": {
+    "name": "S&P 500 xStock",
+    "asset": "SPYx",
+    "feedId": "0x000ac6ba1b453a15c1fe9dcd82265ca47bcd04e7b3667de1623617c45cef2a77",
+    "decimals": 18,
+    "quoteAsset": "USD",
+    "reportSchema": "v10"
+   },
+   "network": "Solana",
+   "name": "SP500 xStock",
+   "symbol": "SPYx",
+   "managedBy": "Chainlink",
+   "collateral": {
+    "symbol": "SPY",
+    "priceCurrency": "USD"
+   }
+  }
+ ],
+ "page": {
+  "currentPage": 0,
+  "hasNextPage": false
+ }
+}

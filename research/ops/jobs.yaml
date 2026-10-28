@@ -1154,6 +1154,16 @@ jobs:
     resources: {cpus: 1, memory: 512m}
     timeout: 15m
 
+  # T10: the xStocks tokens the small books use (SPYx), the issuer's quote, multiplier, halt flag, proof of
+  # reserves, oracle feeds and corporate actions (keyless public API, about 7 requests a token), point in time,
+  # at the small books' 00:00 UTC decision and once more at noon; the premium report next to R10's series.
+  - name: xstocks-collect
+    description: T10 xStocks record of the small books' tokens (SPYx), quote, multiplier, proof of reserves, oracle feeds and corporate actions, point in time, and the premium to the underlying's last close (reports/xstocks)
+    schedule: "0 0,12 * * *"
+    command: python -m lab.collect.xstocks
+    resources: {cpus: 1, memory: 1g}
+    timeout: 10m
+
   - name: free-defillama
     description: DefiLlama stablecoin supply (all, USDT, USDC) and its daily change, DEX volume in total and on Solana, Solana TVL
     schedule: "20 1 * * *"
@@ -1354,6 +1364,10 @@ datasets:
     description: the free data collectors of D2 (Deribit, Hyperliquid, DefiLlama, Fear and Greed, macro); kept forever
     path: free
     max_gb: 5
+  - name: xstocks
+    description: T10's xStocks record (free/xstocks, inside free), written at 00:00 and 12:00 UTC; kept forever
+    path: free/xstocks
+    max_age_h: 14
   - name: pumpfun-rt
     description: the real-time pump.fun record; the collector deletes whole days, oldest first, over PYTHIA_PF_BUDGET_GB (40)
     path: pumpfun_rt
@@ -1413,6 +1427,11 @@ feeds:
     job: free-defillama
     status: free/defillama/health.json
     max_age: 3d
+    max_gaps: 1
+  - name: xstocks
+    job: xstocks-collect
+    status: free/xstocks/health.json
+    max_age: 14h
     max_gaps: 1
   - name: book-depth
     job: book-depth

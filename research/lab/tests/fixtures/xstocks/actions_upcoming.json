@@ -1,0 +1,54 @@
+{
+ "page": {
+  "currentPage": 1,
+  "pageSize": 100,
+  "totalPages": 1,
+  "totalNodes": 2,
+  "hasNextPage": false,
+  "hasPreviousPage": false
+ },
+ "nodes": [
+  {
+   "eventId": "aeb368f9-101e-44ae-b77a-305d11b5237e",
+   "version": 1,
+   "xstockSymbol": "SPYx",
+   "spvSymbol": "SPY",
+   "caType": "CashDividend",
+   "effectiveTimeUtc": "2026-06-18T03:45:00.000Z",
+   "multiplierOld": null,
+   "multiplierNew": null,
+   "grossCashflowUsd": "1.903516",
+   "netCashflowUsd": "1.3324612",
+   "withholdingTaxRate": "0.3",
+   "fromUnits": null,
+   "toUnits": null,
+   "redemptionPriceUsd": null,
+   "notes": null,
+   "createdTimeUtc": "2026-06-18T03:30:41.004Z",
+   "status": "Scheduled",
+   "xstockIsin": "CH1436219716",
+   "spvIsin": "US78462F1030"
+  },
+  {
+   "eventId": "83999b87-53f0-4468-8d07-01fdd938929b",
+   "version": 1,
+   "xstockSymbol": "SPYx",
+   "spvSymbol": "SPY",
+   "caType": "CashDividend",
+   "effectiveTimeUtc": "2026-05-01T00:30:00.000Z",
+   "multiplierOld": null,
+   "multiplierNew": null,
+   "grossCashflowUsd": "1.796999",
+   "netCashflowUsd": null,
+   "withholdingTaxRate": null,
+   "fromUnits": null,
+   "toUnits": null,
+   "redemptionPriceUsd": null,
+   "notes": null,
+   "createdTimeUtc": "2026-04-30T23:48:19.817Z",
+   "status": "Scheduled",
+   "xstockIsin": "CH1436219716",
+   "spvIsin": "US78462F1030"
+  }
+ ]
+}
