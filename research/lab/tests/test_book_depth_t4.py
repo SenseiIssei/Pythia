@@ -182,6 +182,17 @@ def test_run_fetches_the_window_resumes_and_writes_health(store, tmp_path):
     assert res["fetched"] == 0 and not [c for c in calls if c.endswith(".zip")]
 
 
+def test_health_ignores_new_archive_days_outside_the_window(store, tmp_path):
+    old = [date(2023, 12, d) for d in (1, 2)]
+    days = {d: _day_csv(d) for d in old + [date(2026, 10, 21), date(2026, 10, 22)]}
+    fetch, _ = _archive(days)
+    _um(tmp_path, "AAAUSDT", old[0], old[-1])                 # the lab followed it until 2023-12-02
+    res = bd.run(until=date(2026, 10, 23), symbols=["AAAUSDT"], fetch=fetch, delistings=False)
+    assert res["fetched"] == 2 and bd.manifest("AAAUSDT") == {"2023-12-01": "ok", "2023-12-02": "ok"}
+    doc = json.loads((store / "health.json").read_text())
+    assert doc["tables"]["hourly"]["last_ts_us"] is None, "a perp the lab no longer follows is not a stale feed"
+
+
 def test_over_the_budget_nothing_is_fetched(store, tmp_path, monkeypatch):
     days = {date(2026, 1, d): _day_csv(date(2026, 1, d)) for d in range(1, 21)}
     fetch, calls = _archive(days)

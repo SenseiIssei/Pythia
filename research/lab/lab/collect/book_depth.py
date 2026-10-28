@@ -528,8 +528,10 @@ def read_delistings() -> pl.DataFrame:
 # ---------------------------------------------------------------------------
 
 def health(listings: dict[str, dict], errors: dict[str, str], now: int, dry: bool) -> dict:
-    """Newest stored hour of the perps still in the archive (the oldest of them), gaps in their last
-    7 days, the delisting table; the format of pit.write_health."""
+    """Newest stored hour of the perps whose window still reaches the last 7 days (the oldest of them),
+    gaps in their last 7 days, the delisting table; the format of pit.write_health. `listings` holds each
+    perp's days inside its window, not the archive's: the archive can list new days of a symbol the lab
+    stopped following (BNTUSDT ended 2023-12-10 and is listed again), which made the feed look 25,000 h old."""
     live = [s for s, lst in listings.items() if lst and max(lst) >= pit.day_of(now) - timedelta(days=RECENT_DAYS)]
     lasts, gaps, rows = [], 0, 0
     for s in live:
@@ -594,7 +596,7 @@ def run(until: date | None = None, symbols: list[str] | None = None, max_files: 
     if est["gb_full"] > MAX_GB and backfill:
         print(f"book_depth: over the {MAX_GB:.0f} GB budget; nothing fetched, see estimate.json", flush=True)
         errors["budget"] = f"the whole history would take {est['gb_full']:.1f} GB (over {MAX_GB:.0f} GB)"
-        health({s: j["listed"] for s, j in jobs.items()}, errors, pit.now_us(), dry)
+        health({s: j["window_days"] for s, j in jobs.items()}, errors, pit.now_us(), dry)
         return {**est, "fetched": 0, "errors": errors}
     if only_estimate or dry:
         return {**est, "fetched": 0, "errors": errors}
@@ -627,7 +629,7 @@ def run(until: date | None = None, symbols: list[str] | None = None, max_files: 
     if delistings:
         pit.step(errors, "delistings", lambda: update_delistings({s: j["listed"] for s, j in jobs.items()}, until,
                                                                  fetch_json or pit.paced(3.0)))
-    health({s: j["listed"] for s, j in jobs.items()}, errors, pit.now_us(), False)
+    health({s: j["window_days"] for s, j in jobs.items()}, errors, pit.now_us(), False)
     print(f"book_depth: {done['ok']:,} files stored, {done['bad']} failed their checksum, "
           f"{done['missing']} gone, {time.time() - t0:.0f}s", flush=True)
     return {**est, "fetched": done["ok"], "bad": done["bad"], "errors": errors}
