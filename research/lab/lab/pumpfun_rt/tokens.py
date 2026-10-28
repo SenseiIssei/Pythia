@@ -41,7 +41,9 @@ class CreatorBook:
             self.recent.popleft()
         if r is None:
             return {"n": 0, "migrated": 0, "dumped": 0, "since_s": None, "market_10m": len(self.recent)}
-        return {"n": r[0], "migrated": r[1], "dumped": r[2], "since_s": (t - r[3]) / 1000 if r[3] else None,
+        # a creator's newer coin can come first on the live links (never in a replay's chain order): 0, not a
+        # negative time, which made the features' log1p fail and dropped the row (2026-10-28: 4,192 rows a day)
+        return {"n": r[0], "migrated": r[1], "dumped": r[2], "since_s": max(0.0, (t - r[3]) / 1000) if r[3] else None,
                 "market_10m": len(self.recent)}
 
     def _row(self, creator: str) -> list:

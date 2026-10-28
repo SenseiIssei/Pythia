@@ -179,6 +179,16 @@ def test_a_reader_starts_at_the_end_and_without_a_file_reads_nothing(tmp_path):
     assert [x["mint"] for x in r.poll()] == ["new"]
 
 
+def test_a_creators_newer_coin_arriving_first_is_no_negative_time():
+    import math
+    from lab.pumpfun_rt.tokens import CreatorBook
+    book = CreatorBook()
+    book.created("C", T0 + 5_000)                              # the newer coin came first on the links
+    snap = book.snapshot("C", T0)
+    assert snap["since_s"] == 0.0 and math.log1p(snap["since_s"]) == 0.0
+    assert book.snapshot("C", T0 + 8_000)["since_s"] == 3.0 and book.snapshot("D", T0)["since_s"] is None
+
+
 def test_the_collector_taps_create_rows_only(tmp_path):
     col = CL.Collector(None, None)
     col.tap = CL.Tap(tmp_path / "c.jsonl")
