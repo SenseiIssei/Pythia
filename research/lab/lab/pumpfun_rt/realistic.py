@@ -871,6 +871,12 @@ def daily(now_ms: int | None = None, write: bool = True) -> dict:
                                                            "line": calib_line(cal, word, covered)},
            "sol_eur": eur, "small": small_status(read_json(paper_dir() / "state.json"), eur, taint=taint),
            "tainted": sum(n for n, _ in taint.values())}
+    try:                                                     # P2: paper minus live on all live signals
+        from .selection_p2 import gate
+        out["selection"] = gate(data_dir(), paper_dir(), paper)
+    except Exception as e:                                   # noqa: BLE001 - the report goes out without it
+        print(f"realistic: no selection gap ({type(e).__name__}: {e})", flush=True)
+        out["selection"] = None
     try:                                                     # F3: the factory's books
         out["factory"] = factory_status(read_json(paper_dir() / "state.json"), eur, taint)
     except Exception as e:                                   # noqa: BLE001 - the report goes out without them
@@ -908,6 +914,7 @@ def markdown(d: dict) -> str:
     return "\n".join([
         "# pump.fun realistic paper", "",
         d["calibration"]["line"], "",
+        *([d["selection"]["line"], ""] if (d.get("selection") or {}).get("line") else []),
         *([f"The paper ledger holds {d['tainted']} trades the late-row bug made before {FIX_DAY}; every reader "
            "skips them (P1, results/pumpfun_ledger_taint_p1.md).", ""] if d.get("tainted") else []),
         f"The model every pipeline paper book trades by (lab/pumpfun_rt/realistic.py), fitted "
