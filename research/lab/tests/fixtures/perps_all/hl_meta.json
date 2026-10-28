@@ -1,0 +1,25 @@
+{
+"universe": [
+{
+"szDecimals": 5,
+"name": "BTC",
+"maxLeverage": 40,
+"marginTableId": 56
+},
+{
+"szDecimals": 1,
+"name": "MATIC",
+"maxLeverage": 20,
+"marginTableId": 20,
+"isDelisted": true
+},
+{
+"szDecimals": 0,
+"name": "XTEN",
+"maxLeverage": 3,
+"marginTableId": 3,
+"onlyIsolated": true,
+"marginMode": "strictIsolated"
+}
+]
+}

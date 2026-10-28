@@ -1158,6 +1158,19 @@ jobs:
     timeout: 30m
     alert: false
 
+  # T12b: the listing and whole hourly funding history of every perp on Hyperliquid (about 230, live and
+  # delisted) and Kraken Futures (every PF_ perpetual), for T12 (results/reachable_venues_t12_prereg.md).
+  # Resumable: at most 500 Hyperliquid requests (one every 3 s, under its weight limit, at :35 so it never
+  # meets free-hyperliquid's) and 120 Kraken requests (one a second) a run; the backfill takes about a day
+  # of runs, then a run only appends. Data only, public endpoints, no key.
+  - name: free-perps-all
+    description: every perp's listing and hourly funding history on Hyperliquid and Kraken Futures, resumable backfill then appends
+    schedule: "35 * * * *"
+    command: python -m lab.collect.perps_all
+    resources: {cpus: 1, memory: 1g}
+    timeout: 45m
+    alert: false
+
   - name: free-feargreed
     description: Crypto Fear and Greed index (alternative.me), daily, its whole history on the first run
     schedule: "20 0 * * *"
@@ -1382,6 +1395,11 @@ datasets:
     description: the free data collectors of D2 (Deribit, Hyperliquid, DefiLlama, Fear and Greed, macro); kept forever
     path: free
     max_gb: 5
+  - name: perps-all
+    description: T12b's listing and hourly funding of every perp on Hyperliquid and Kraken Futures (free/perps_all, inside free; about 1 GB once backfilled, a few MB a month after); kept forever
+    path: free/perps_all
+    max_age_h: 3
+    max_gb: 3
   - name: xstocks
     description: T10's xStocks record (free/xstocks, inside free), written at 00:00 and 12:00 UTC; kept forever
     path: free/xstocks
@@ -1432,6 +1450,11 @@ feeds:
     status: free/hyperliquid/health.json
     max_age: 3h
     max_gaps: 2
+  - name: perps-all
+    job: free-perps-all
+    status: free/perps_all/health.json
+    max_age: 1d
+    max_gaps: 3
   - name: fear-greed
     job: free-feargreed
     status: free/fear_greed/health.json

@@ -1,0 +1,881 @@
+{
+"result": "success",
+"serverTime": "2026-10-28T18:52:42.917Z",
+"rates": [
+{
+"timestamp": "2026-10-21T12:00:00Z",
+"fundingRate": 0.0,
+"relativeFundingRate": 0
+},
+{
+"timestamp": "2026-10-21T13:00:00Z",
+"fundingRate": 0.0,
+"relativeFundingRate": 0
+},
+{
+"timestamp": "2026-10-21T14:00:00Z",
+"fundingRate": 0.0032701106728125,
+"relativeFundingRate": 7.6414453125e-05
+},
+{
+"timestamp": "2026-10-21T15:00:00Z",
+"fundingRate": -0.007573107098115,
+"relativeFundingRate": -0.00017734725
+},
+{
+"timestamp": "2026-10-21T16:00:00Z",
+"fundingRate": -0.002938854955178736,
+"relativeFundingRate": -6.8872208333333e-05
+},
+{
+"timestamp": "2026-10-21T17:00:00Z",
+"fundingRate": 0.001890332941226653,
+"relativeFundingRate": 4.4520533333333e-05
+},
+{
+"timestamp": "2026-10-21T18:00:00Z",
+"fundingRate": 0.003068124368369194,
+"relativeFundingRate": 7.2268820833333e-05
+},
+{
+"timestamp": "2026-10-21T19:00:00Z",
+"fundingRate": 0.003105992908499722,
+"relativeFundingRate": 7.3222929166667e-05
+},
+{
+"timestamp": "2026-10-21T20:00:00Z",
+"fundingRate": 0.003381351044754778,
+"relativeFundingRate": 7.9568895833333e-05
+},
+{
+"timestamp": "2026-10-21T21:00:00Z",
+"fundingRate": -0.002420996501894773,
+"relativeFundingRate": -5.7002540322581e-05
+},
+{
+"timestamp": "2026-10-21T22:00:00Z",
+"fundingRate": 0.010057459661778618,
+"relativeFundingRate": 0.000237792830645161
+},
+{
+"timestamp": "2026-10-21T23:00:00Z",
+"fundingRate": 0.002300505494100001,
+"relativeFundingRate": 5.4250935483871e-05
+},
+{
+"timestamp": "2026-10-22T00:00:00Z",
+"fundingRate": 0.005147017101636347,
+"relativeFundingRate": 0.000121291904166667
+},
+{
+"timestamp": "2026-10-22T01:00:00Z",
+"fundingRate": 0.000537237895625,
+"relativeFundingRate": 1.26260375e-05
+},
+{
+"timestamp": "2026-10-22T02:00:00Z",
+"fundingRate": -0.000541666464166681,
+"relativeFundingRate": -1.2730116666667e-05
+},
+{
+"timestamp": "2026-10-22T03:00:00Z",
+"fundingRate": 0.000560344482413795,
+"relativeFundingRate": 1.3175275862069e-05
+},
+{
+"timestamp": "2026-10-22T04:00:00Z",
+"fundingRate": -0.002812500394,
+"relativeFundingRate": -6.61298e-05
+},
+{
+"timestamp": "2026-10-22T05:00:00Z",
+"fundingRate": -0.004252668696759277,
+"relativeFundingRate": -0.000100086342592593
+},
+{
+"timestamp": "2026-10-22T06:00:00Z",
+"fundingRate": 0.00197094015,
+"relativeFundingRate": 4.64844375e-05
+},
+{
+"timestamp": "2026-10-22T07:00:00Z",
+"fundingRate": 0.005235340893387102,
+"relativeFundingRate": 0.000123591616935484
+},
+{
+"timestamp": "2026-10-22T08:00:00Z",
+"fundingRate": 0.00465279977304,
+"relativeFundingRate": 0.000109818
+},
+{
+"timestamp": "2026-10-22T09:00:00Z",
+"fundingRate": 0.009658964577923985,
+"relativeFundingRate": 0.000229249608333333
+},
+{
+"timestamp": "2026-10-22T10:00:00Z",
+"fundingRate": 0.007404013246005264,
+"relativeFundingRate": 0.000175616929166667
+},
+{
+"timestamp": "2026-10-22T11:00:00Z",
+"fundingRate": 0.010701686615110848,
+"relativeFundingRate": 0.000254105691666667
+},
+{
+"timestamp": "2026-10-22T12:00:00Z",
+"fundingRate": 0.003983263811241681,
+"relativeFundingRate": 9.5051216666667e-05
+},
+{
+"timestamp": "2026-10-22T13:00:00Z",
+"fundingRate": 0.003003453590499764,
+"relativeFundingRate": 7.1533741666667e-05
+},
+{
+"timestamp": "2026-10-22T14:00:00Z",
+"fundingRate": 0.000136625575783319,
+"relativeFundingRate": 3.251983333333e-06
+},
+{
+"timestamp": "2026-10-22T15:00:00Z",
+"fundingRate": 0.001933079514351,
+"relativeFundingRate": 4.63736375e-05
+},
+{
+"timestamp": "2026-10-22T16:00:00Z",
+"fundingRate": 0.002161470005967778,
+"relativeFundingRate": 5.1966620833333e-05
+},
+{
+"timestamp": "2026-10-22T17:00:00Z",
+"fundingRate": 0.001412918851812,
+"relativeFundingRate": 3.38572e-05
+},
+{
+"timestamp": "2026-10-22T18:00:00Z",
+"fundingRate": 0.001423702188810431,
+"relativeFundingRate": 3.4036654166667e-05
+},
+{
+"timestamp": "2026-10-22T19:00:00Z",
+"fundingRate": 0.002373588047835347,
+"relativeFundingRate": 5.6719216666667e-05
+},
+{
+"timestamp": "2026-10-22T20:00:00Z",
+"fundingRate": 0.002933620263193332,
+"relativeFundingRate": 7.0168084677419e-05
+},
+{
+"timestamp": "2026-10-22T21:00:00Z",
+"fundingRate": 0.004583095186783565,
+"relativeFundingRate": 0.000109650350806452
+},
+{
+"timestamp": "2026-10-22T22:00:00Z",
+"fundingRate": 0.005582144350371444,
+"relativeFundingRate": 0.000134212520833333
+},
+{
+"timestamp": "2026-10-22T23:00:00Z",
+"fundingRate": -0.000473919796716953,
+"relativeFundingRate": -1.1302661290323e-05
+},
+{
+"timestamp": "2026-10-23T00:00:00Z",
+"fundingRate": -0.000649037767774617,
+"relativeFundingRate": -1.5482782258065e-05
+},
+{
+"timestamp": "2026-10-23T01:00:00Z",
+"fundingRate": -0.001810077248304,
+"relativeFundingRate": -4.32666e-05
+},
+{
+"timestamp": "2026-10-23T02:00:00Z",
+"fundingRate": 0.004014117871844778,
+"relativeFundingRate": 9.5734270833333e-05
+},
+{
+"timestamp": "2026-10-23T03:00:00Z",
+"fundingRate": 0.001820424441424486,
+"relativeFundingRate": 4.3487008333333e-05
+},
+{
+"timestamp": "2026-10-23T04:00:00Z",
+"fundingRate": 0.01024406939005332,
+"relativeFundingRate": 0.000244712333333333
+},
+{
+"timestamp": "2026-10-23T05:00:00Z",
+"fundingRate": -0.001619355475003764,
+"relativeFundingRate": -3.8618479166667e-05
+},
+{
+"timestamp": "2026-10-23T06:00:00Z",
+"fundingRate": 0.007567270879268046,
+"relativeFundingRate": 0.000180469903225806
+},
+{
+"timestamp": "2026-10-23T07:00:00Z",
+"fundingRate": 0.002142049711129053,
+"relativeFundingRate": 5.0952657258065e-05
+},
+{
+"timestamp": "2026-10-23T08:00:00Z",
+"fundingRate": 0.0020879421949325,
+"relativeFundingRate": 5.0144125e-05
+},
+{
+"timestamp": "2026-10-23T09:00:00Z",
+"fundingRate": 0.01138507828798725,
+"relativeFundingRate": 0.0002729392875
+},
+{
+"timestamp": "2026-10-23T10:00:00Z",
+"fundingRate": 0.000319400578238347,
+"relativeFundingRate": 7.648966666667e-06
+},
+{
+"timestamp": "2026-10-23T11:00:00Z",
+"fundingRate": 0.0030078349092705,
+"relativeFundingRate": 7.221715e-05
+},
+{
+"timestamp": "2026-10-23T12:00:00Z",
+"fundingRate": 0.00412657284345375,
+"relativeFundingRate": 9.88725125e-05
+},
+{
+"timestamp": "2026-10-23T13:00:00Z",
+"fundingRate": 0.00166562271881775,
+"relativeFundingRate": 3.9773225e-05
+},
+{
+"timestamp": "2026-10-23T14:00:00Z",
+"fundingRate": 0.0036139955316465,
+"relativeFundingRate": 8.614615e-05
+},
+{
+"timestamp": "2026-10-23T15:00:00Z",
+"fundingRate": 0.002047717707485625,
+"relativeFundingRate": 4.90224375e-05
+},
+{
+"timestamp": "2026-10-23T16:00:00Z",
+"fundingRate": 0.001739352442159028,
+"relativeFundingRate": 4.1577095833333e-05
+},
+{
+"timestamp": "2026-10-23T17:00:00Z",
+"fundingRate": 0.000715322401097347,
+"relativeFundingRate": 1.7091566666667e-05
+},
+{
+"timestamp": "2026-10-23T18:00:00Z",
+"fundingRate": 0.003929474014795889,
+"relativeFundingRate": 9.2911379166667e-05
+},
+{
+"timestamp": "2026-10-23T19:00:00Z",
+"fundingRate": 0.0038059724159485,
+"relativeFundingRate": 8.972285e-05
+},
+{
+"timestamp": "2026-10-23T20:00:00Z",
+"fundingRate": 0.00080232960115125,
+"relativeFundingRate": 1.8841525e-05
+},
+{
+"timestamp": "2026-10-23T21:00:00Z",
+"fundingRate": 0.00387006634840375,
+"relativeFundingRate": 9.06599875e-05
+},
+{
+"timestamp": "2026-10-23T22:00:00Z",
+"fundingRate": 0.002404151203454723,
+"relativeFundingRate": 5.6264554166667e-05
+},
+{
+"timestamp": "2026-10-23T23:00:00Z",
+"fundingRate": 0.001518548853156413,
+"relativeFundingRate": 3.5572810483871e-05
+},
+{
+"timestamp": "2026-10-24T00:00:00Z",
+"fundingRate": 0.007097430788587514,
+"relativeFundingRate": 0.000166245416666667
+},
+{
+"timestamp": "2026-10-24T01:00:00Z",
+"fundingRate": -0.003805668415805931,
+"relativeFundingRate": -8.7500429166667e-05
+},
+{
+"timestamp": "2026-10-24T02:00:00Z",
+"fundingRate": -0.004879700870178765,
+"relativeFundingRate": -0.000110211541666667
+},
+{
+"timestamp": "2026-10-24T03:00:00Z",
+"fundingRate": -0.004792054319051985,
+"relativeFundingRate": -0.000108675783333333
+},
+{
+"timestamp": "2026-10-24T04:00:00Z",
+"fundingRate": 0.002745684876326181,
+"relativeFundingRate": 6.2093816666667e-05
+},
+{
+"timestamp": "2026-10-24T05:00:00Z",
+"fundingRate": 0.000986935640913265,
+"relativeFundingRate": 2.2266991666667e-05
+},
+{
+"timestamp": "2026-10-24T06:00:00Z",
+"fundingRate": -0.002285438626395,
+"relativeFundingRate": -5.1541125e-05
+},
+{
+"timestamp": "2026-10-24T07:00:00Z",
+"fundingRate": -0.000889215631714098,
+"relativeFundingRate": -2.0114091666667e-05
+},
+{
+"timestamp": "2026-10-24T08:00:00Z",
+"fundingRate": -0.00251866292115,
+"relativeFundingRate": -5.6900625e-05
+},
+{
+"timestamp": "2026-10-24T09:00:00Z",
+"fundingRate": 0.000485038607462306,
+"relativeFundingRate": 1.0982229166667e-05
+},
+{
+"timestamp": "2026-10-24T10:00:00Z",
+"fundingRate": -0.002226522950295569,
+"relativeFundingRate": -5.1283808333333e-05
+},
+{
+"timestamp": "2026-10-24T11:00:00Z",
+"fundingRate": -0.00583100422097875,
+"relativeFundingRate": -0.0001334536625
+},
+{
+"timestamp": "2026-10-24T12:00:00Z",
+"fundingRate": -0.005046322228108806,
+"relativeFundingRate": -0.000115399029166667
+},
+{
+"timestamp": "2026-10-24T13:00:00Z",
+"fundingRate": -0.002041178437762848,
+"relativeFundingRate": -4.6240316666667e-05
+},
+{
+"timestamp": "2026-10-24T14:00:00Z",
+"fundingRate": -0.004601613942435431,
+"relativeFundingRate": -0.000104167241666667
+},
+{
+"timestamp": "2026-10-24T15:00:00Z",
+"fundingRate": -0.005792782418537598,
+"relativeFundingRate": -0.000130734429166667
+},
+{
+"timestamp": "2026-10-24T16:00:00Z",
+"fundingRate": -0.002185536822388265,
+"relativeFundingRate": -4.9517191666667e-05
+},
+{
+"timestamp": "2026-10-24T17:00:00Z",
+"fundingRate": -4.3951850246777e-05,
+"relativeFundingRate": -9.91695833333e-07
+},
+{
+"timestamp": "2026-10-24T18:00:00Z",
+"fundingRate": -0.005942846147526069,
+"relativeFundingRate": -0.000134378195833333
+},
+{
+"timestamp": "2026-10-24T19:00:00Z",
+"fundingRate": -0.006377103783288319,
+"relativeFundingRate": -0.000144082583333333
+},
+{
+"timestamp": "2026-10-24T20:00:00Z",
+"fundingRate": -0.003589491328265625,
+"relativeFundingRate": -8.06849375e-05
+},
+{
+"timestamp": "2026-10-24T21:00:00Z",
+"fundingRate": -0.00341776447206425,
+"relativeFundingRate": -7.58671375e-05
+},
+{
+"timestamp": "2026-10-24T22:00:00Z",
+"fundingRate": -0.00158203335405375,
+"relativeFundingRate": -3.51583125e-05
+},
+{
+"timestamp": "2026-10-24T23:00:00Z",
+"fundingRate": 0.000486530998722068,
+"relativeFundingRate": 1.0801895833333e-05
+},
+{
+"timestamp": "2026-10-25T00:00:00Z",
+"fundingRate": -0.002450637620962015,
+"relativeFundingRate": -5.4139766666667e-05
+},
+{
+"timestamp": "2026-10-25T01:00:00Z",
+"fundingRate": 0.00466271687009,
+"relativeFundingRate": 0.0001033918
+},
+{
+"timestamp": "2026-10-25T02:00:00Z",
+"fundingRate": -0.0002670055960285,
+"relativeFundingRate": -5.900225e-06
+},
+{
+"timestamp": "2026-10-25T03:00:00Z",
+"fundingRate": 0.001284085927311,
+"relativeFundingRate": 2.88079e-05
+},
+{
+"timestamp": "2026-10-25T04:00:00Z",
+"fundingRate": -0.0008075915246175,
+"relativeFundingRate": -1.8045375e-05
+},
+{
+"timestamp": "2026-10-25T05:00:00Z",
+"fundingRate": -0.001356893852822682,
+"relativeFundingRate": -3.0083616666667e-05
+},
+{
+"timestamp": "2026-10-25T06:00:00Z",
+"fundingRate": -4.7037323415848e-05,
+"relativeFundingRate": -1.048204166667e-06
+},
+{
+"timestamp": "2026-10-25T07:00:00Z",
+"fundingRate": -0.000789529367603348,
+"relativeFundingRate": -1.7685666666667e-05
+},
+{
+"timestamp": "2026-10-25T08:00:00Z",
+"fundingRate": -1.6110081365443e-05,
+"relativeFundingRate": -3.60970833333e-07
+},
+{
+"timestamp": "2026-10-25T09:00:00Z",
+"fundingRate": -0.001076447069603348,
+"relativeFundingRate": -2.4147279166667e-05
+},
+{
+"timestamp": "2026-10-25T10:00:00Z",
+"fundingRate": -0.000414387705480848,
+"relativeFundingRate": -9.291079166667e-06
+},
+{
+"timestamp": "2026-10-25T11:00:00Z",
+"fundingRate": 3.6964646651485e-05,
+"relativeFundingRate": 8.28820833333e-07
+},
+{
+"timestamp": "2026-10-25T12:00:00Z",
+"fundingRate": -0.0039638499268995,
+"relativeFundingRate": -8.8436825e-05
+},
+{
+"timestamp": "2026-10-25T13:00:00Z",
+"fundingRate": -0.006098330436297,
+"relativeFundingRate": -0.000135833225
+},
+{
+"timestamp": "2026-10-25T14:00:00Z",
+"fundingRate": -0.002736202518555,
+"relativeFundingRate": -6.07283875e-05
+},
+{
+"timestamp": "2026-10-25T15:00:00Z",
+"fundingRate": -0.00787121461030989,
+"relativeFundingRate": -0.000174457754166667
+},
+{
+"timestamp": "2026-10-25T16:00:00Z",
+"fundingRate": -0.001808117827104182,
+"relativeFundingRate": -3.9951041666667e-05
+},
+{
+"timestamp": "2026-10-25T17:00:00Z",
+"fundingRate": -2.9478616001818e-05,
+"relativeFundingRate": -6.51870833333e-07
+},
+{
+"timestamp": "2026-10-25T18:00:00Z",
+"fundingRate": -0.006074183836518277,
+"relativeFundingRate": -0.000134331370833333
+},
+{
+"timestamp": "2026-10-25T19:00:00Z",
+"fundingRate": 0.001008291105755224,
+"relativeFundingRate": 2.2096504166667e-05
+},
+{
+"timestamp": "2026-10-25T20:00:00Z",
+"fundingRate": -0.0007670172739205,
+"relativeFundingRate": -1.690445e-05
+},
+{
+"timestamp": "2026-10-25T21:00:00Z",
+"fundingRate": 0.002248506903260431,
+"relativeFundingRate": 5.0683541666667e-05
+},
+{
+"timestamp": "2026-10-25T22:00:00Z",
+"fundingRate": 0.004151303851060682,
+"relativeFundingRate": 9.2433516666667e-05
+},
+{
+"timestamp": "2026-10-25T23:00:00Z",
+"fundingRate": -0.05165904406638735,
+"relativeFundingRate": -0.001231778862903226
+},
+{
+"timestamp": "2026-10-26T00:00:00Z",
+"fundingRate": -0.0840835608685795,
+"relativeFundingRate": -0.0022048319875
+},
+{
+"timestamp": "2026-10-26T01:00:00Z",
+"fundingRate": 0.008837381253391072,
+"relativeFundingRate": 0.000253458445833333
+},
+{
+"timestamp": "2026-10-26T02:00:00Z",
+"fundingRate": 0.003083095046789345,
+"relativeFundingRate": 8.7701141666667e-05
+},
+{
+"timestamp": "2026-10-26T03:00:00Z",
+"fundingRate": 0.00279413447373375,
+"relativeFundingRate": 8.14060625e-05
+},
+{
+"timestamp": "2026-10-26T04:00:00Z",
+"fundingRate": 0.003466031924614261,
+"relativeFundingRate": 0.000101238241666667
+},
+{
+"timestamp": "2026-10-26T05:00:00Z",
+"fundingRate": 0.005855219925746875,
+"relativeFundingRate": 0.0001709635625
+},
+{
+"timestamp": "2026-10-26T06:00:00Z",
+"fundingRate": 0.005455017994276655,
+"relativeFundingRate": 0.000159336333333333
+},
+{
+"timestamp": "2026-10-26T07:00:00Z",
+"fundingRate": 0.007915271170235012,
+"relativeFundingRate": 0.000231230541666667
+},
+{
+"timestamp": "2026-10-26T08:00:00Z",
+"fundingRate": -0.0023504974941555,
+"relativeFundingRate": -6.864885e-05
+},
+{
+"timestamp": "2026-10-26T09:00:00Z",
+"fundingRate": 0.00628452910023899,
+"relativeFundingRate": 0.000203222608333333
+},
+{
+"timestamp": "2026-10-26T10:00:00Z",
+"fundingRate": 0.006846895936881,
+"relativeFundingRate": 0.0002209320375
+},
+{
+"timestamp": "2026-10-26T11:00:00Z",
+"fundingRate": 0.004686750137673375,
+"relativeFundingRate": 0.0001483861125
+},
+{
+"timestamp": "2026-10-26T12:00:00Z",
+"fundingRate": 0.002685404874390375,
+"relativeFundingRate": 8.42096625e-05
+},
+{
+"timestamp": "2026-10-26T13:00:00Z",
+"fundingRate": 0.004471909242048,
+"relativeFundingRate": 0.0001445904
+},
+{
+"timestamp": "2026-10-26T14:00:00Z",
+"fundingRate": 0.003932376953112,
+"relativeFundingRate": 0.0001202436
+},
+{
+"timestamp": "2026-10-26T15:00:00Z",
+"fundingRate": 0.00023036003839275,
+"relativeFundingRate": 6.9828375e-06
+},
+{
+"timestamp": "2026-10-26T16:00:00Z",
+"fundingRate": 0.003510963386613155,
+"relativeFundingRate": 0.000104318720833333
+},
+{
+"timestamp": "2026-10-26T17:00:00Z",
+"fundingRate": 0.0006791285546325,
+"relativeFundingRate": 2.02757625e-05
+},
+{
+"timestamp": "2026-10-26T18:00:00Z",
+"fundingRate": 0.003600982009974178,
+"relativeFundingRate": 0.000106692791666667
+},
+{
+"timestamp": "2026-10-26T19:00:00Z",
+"fundingRate": 0.002381156213850614,
+"relativeFundingRate": 7.0404020833333e-05
+},
+{
+"timestamp": "2026-10-26T20:00:00Z",
+"fundingRate": 0.002844465757272,
+"relativeFundingRate": 8.33063625e-05
+},
+{
+"timestamp": "2026-10-26T21:00:00Z",
+"fundingRate": 0.002872689219803655,
+"relativeFundingRate": 8.4185908333333e-05
+},
+{
+"timestamp": "2026-10-26T22:00:00Z",
+"fundingRate": 0.00139455531555525,
+"relativeFundingRate": 4.06608375e-05
+},
+{
+"timestamp": "2026-10-26T23:00:00Z",
+"fundingRate": 0.001239327660265636,
+"relativeFundingRate": 3.6289379166667e-05
+},
+{
+"timestamp": "2026-10-27T00:00:00Z",
+"fundingRate": 0.000423537311202261,
+"relativeFundingRate": 1.2397029166667e-05
+},
+{
+"timestamp": "2026-10-27T01:00:00Z",
+"fundingRate": 0.00184441278357075,
+"relativeFundingRate": 5.4773925e-05
+},
+{
+"timestamp": "2026-10-27T02:00:00Z",
+"fundingRate": 0.001674013409786261,
+"relativeFundingRate": 4.9384291666667e-05
+},
+{
+"timestamp": "2026-10-27T03:00:00Z",
+"fundingRate": 0.000373638622154989,
+"relativeFundingRate": 1.1053383333333e-05
+},
+{
+"timestamp": "2026-10-27T04:00:00Z",
+"fundingRate": 9.6002681762011e-05,
+"relativeFundingRate": 2.826866666667e-06
+},
+{
+"timestamp": "2026-10-27T05:00:00Z",
+"fundingRate": 0.001080422919611905,
+"relativeFundingRate": 3.1807558333333e-05
+},
+{
+"timestamp": "2026-10-27T06:00:00Z",
+"fundingRate": 0.001225083514834947,
+"relativeFundingRate": 3.6115070833333e-05
+},
+{
+"timestamp": "2026-10-27T07:00:00Z",
+"fundingRate": 0.000675305617250511,
+"relativeFundingRate": 1.9970516666667e-05
+},
+{
+"timestamp": "2026-10-27T08:00:00Z",
+"fundingRate": -0.000516647716606595,
+"relativeFundingRate": -1.5243641666667e-05
+},
+{
+"timestamp": "2026-10-27T09:00:00Z",
+"fundingRate": 0.005222273889385625,
+"relativeFundingRate": 0.0001517108375
+},
+{
+"timestamp": "2026-10-27T10:00:00Z",
+"fundingRate": 0.004116649947092739,
+"relativeFundingRate": 0.000120297808333333
+},
+{
+"timestamp": "2026-10-27T11:00:00Z",
+"fundingRate": 0.001001141166701947,
+"relativeFundingRate": 2.9162970833333e-05
+},
+{
+"timestamp": "2026-10-27T12:00:00Z",
+"fundingRate": 0.002612192883596178,
+"relativeFundingRate": 7.6123404166667e-05
+},
+{
+"timestamp": "2026-10-27T13:00:00Z",
+"fundingRate": 0.003130767353112678,
+"relativeFundingRate": 9.0040466666667e-05
+},
+{
+"timestamp": "2026-10-27T14:00:00Z",
+"fundingRate": 0.001709954968917,
+"relativeFundingRate": 4.92463375e-05
+},
+{
+"timestamp": "2026-10-27T15:00:00Z",
+"fundingRate": 0.00296298508752,
+"relativeFundingRate": 8.57662875e-05
+},
+{
+"timestamp": "2026-10-27T16:00:00Z",
+"fundingRate": 0.002661530497646875,
+"relativeFundingRate": 7.67605625e-05
+},
+{
+"timestamp": "2026-10-27T17:00:00Z",
+"fundingRate": 0.001175157863780989,
+"relativeFundingRate": 3.4170883333333e-05
+},
+{
+"timestamp": "2026-10-27T18:00:00Z",
+"fundingRate": 0.002392143038275988,
+"relativeFundingRate": 6.9281933333333e-05
+},
+{
+"timestamp": "2026-10-27T19:00:00Z",
+"fundingRate": 0.001339651869552447,
+"relativeFundingRate": 3.8993095833333e-05
+},
+{
+"timestamp": "2026-10-27T20:00:00Z",
+"fundingRate": 0.001943168043719803,
+"relativeFundingRate": 5.6592979166667e-05
+},
+{
+"timestamp": "2026-10-27T21:00:00Z",
+"fundingRate": 0.000140233249066489,
+"relativeFundingRate": 4.073683333333e-06
+},
+{
+"timestamp": "2026-10-27T22:00:00Z",
+"fundingRate": 0.00107540967869653,
+"relativeFundingRate": 3.1392745833333e-05
+},
+{
+"timestamp": "2026-10-27T23:00:00Z",
+"fundingRate": 0.001764478092671875,
+"relativeFundingRate": 5.15921875e-05
+},
+{
+"timestamp": "2026-10-28T00:00:00Z",
+"fundingRate": 0.002140112435063625,
+"relativeFundingRate": 6.26583375e-05
+},
+{
+"timestamp": "2026-10-28T01:00:00Z",
+"fundingRate": 0.002594270771225364,
+"relativeFundingRate": 7.5697370833333e-05
+},
+{
+"timestamp": "2026-10-28T02:00:00Z",
+"fundingRate": 0.000498927766828989,
+"relativeFundingRate": 1.4717945833333e-05
+},
+{
+"timestamp": "2026-10-28T03:00:00Z",
+"fundingRate": -0.00029284923837225,
+"relativeFundingRate": -8.6647375e-06
+},
+{
+"timestamp": "2026-10-28T04:00:00Z",
+"fundingRate": -0.00043449529173575,
+"relativeFundingRate": -1.2824525e-05
+},
+{
+"timestamp": "2026-10-28T05:00:00Z",
+"fundingRate": -0.000411748021927345,
+"relativeFundingRate": -1.2198004166667e-05
+},
+{
+"timestamp": "2026-10-28T06:00:00Z",
+"fundingRate": 0.000434264049379197,
+"relativeFundingRate": 1.2960045833333e-05
+},
+{
+"timestamp": "2026-10-28T07:00:00Z",
+"fundingRate": -0.001005382747926822,
+"relativeFundingRate": -2.9781670833333e-05
+},
+{
+"timestamp": "2026-10-28T08:00:00Z",
+"fundingRate": 0.00546778714108275,
+"relativeFundingRate": 0.000158580675
+},
+{
+"timestamp": "2026-10-28T09:00:00Z",
+"fundingRate": 0.003751919519292,
+"relativeFundingRate": 0.0001090019
+},
+{
+"timestamp": "2026-10-28T10:00:00Z",
+"fundingRate": 0.003703320381379989,
+"relativeFundingRate": 0.000107630883333333
+},
+{
+"timestamp": "2026-10-28T11:00:00Z",
+"fundingRate": 0.00323085151624625,
+"relativeFundingRate": 9.40158125e-05
+},
+{
+"timestamp": "2026-10-28T12:00:00Z",
+"fundingRate": 0.002980763222823,
+"relativeFundingRate": 8.67201e-05
+},
+{
+"timestamp": "2026-10-28T13:00:00Z",
+"fundingRate": 0.002757931660479375,
+"relativeFundingRate": 8.01118125e-05
+},
+{
+"timestamp": "2026-10-28T14:00:00Z",
+"fundingRate": 0.001556808298184053,
+"relativeFundingRate": 4.5976754166667e-05
+},
+{
+"timestamp": "2026-10-28T15:00:00Z",
+"fundingRate": 0.002864477949532822,
+"relativeFundingRate": 8.5590683333333e-05
+},
+{
+"timestamp": "2026-10-28T16:00:00Z",
+"fundingRate": 0.003717863814889156,
+"relativeFundingRate": 0.000111222045833333
+},
+{
+"timestamp": "2026-10-28T17:00:00Z",
+"fundingRate": 0.003175506832679989,
+"relativeFundingRate": 9.4792833333333e-05
+},
+{
+"timestamp": "2026-10-28T18:00:00Z",
+"fundingRate": 0.002466453390140533,
+"relativeFundingRate": 7.3846108870968e-05
+}
+]
+}

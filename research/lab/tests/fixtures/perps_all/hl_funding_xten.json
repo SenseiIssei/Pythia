@@ -1,0 +1,218 @@
+[
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0001347489",
+"time": 1793084400061
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0004568187",
+"time": 1793088000050
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000261019",
+"premium": "0.0007088154",
+"time": 1793091600036
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.000589619",
+"time": 1793095200052
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000857747",
+"premium": "0.0011861972",
+"time": 1793098800055
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0005071893",
+"time": 1793102400044
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0002240772",
+"time": 1793106000049
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000865069",
+"time": 1793109600050
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0002357914",
+"time": 1793113200016
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000519549",
+"time": 1793116800083
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000300507",
+"time": 1793120400007
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000065841",
+"time": 1793124000071
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0001572667",
+"time": 1793127600050
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000216334",
+"time": 1793131200123
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0001322493",
+"time": 1793134800001
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000700848",
+"time": 1793138400060
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000005588",
+"time": 1793142000047
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000232671",
+"time": 1793145600061
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000006516",
+"time": 1793149200007
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000000366",
+"time": 1793152800029
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000000845",
+"time": 1793156400095
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0",
+"time": 1793160000016
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000000224",
+"time": 1793163600046
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0000004421",
+"time": 1793167200068
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0001942447",
+"time": 1793170800063
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.000202467",
+"time": 1793174400085
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0001300473",
+"time": 1793178000041
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0002037398",
+"time": 1793181600042
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "-0.0001340469",
+"time": 1793185200075
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0",
+"time": 1793188800086
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0",
+"time": 1793192400043
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000304864",
+"time": 1793196000014
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000210858",
+"time": 1793199600016
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000130984",
+"time": 1793203200004
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000284939",
+"time": 1793206800030
+},
+{
+"coin": "XTEN",
+"fundingRate": "0.0000125",
+"premium": "0.0000037172",
+"time": 1793210400005
+}
+]

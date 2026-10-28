@@ -1,0 +1,428 @@
+[
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0005041622",
+"time": 1725652800012
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0005237269",
+"time": 1725656400144
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0003426855",
+"time": 1725660000146
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001378837",
+"premium": "0.0016030693",
+"time": 1725663600157
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001107306",
+"premium": "0.0013858452",
+"time": 1725667200057
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001345689",
+"premium": "0.0015765512",
+"time": 1725670800057
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001545616",
+"premium": "0.0017364928",
+"time": 1725674400147
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000934677",
+"premium": "0.0012477418",
+"time": 1725678000036
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001392944",
+"premium": "0.0016143551",
+"time": 1725681600026
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001433077",
+"premium": "0.001646462",
+"time": 1725685200134
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001292682",
+"premium": "0.0015341455",
+"time": 1725688800129
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001684289",
+"premium": "0.0018474315",
+"time": 1725692400013
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001700089",
+"premium": "0.0018600711",
+"time": 1725696000138
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.00013376",
+"premium": "0.0015700802",
+"time": 1725699600041
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001368208",
+"premium": "0.0015945661",
+"time": 1725703200130
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001262012",
+"premium": "0.0015096093",
+"time": 1725706800126
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001599757",
+"premium": "0.0017798058",
+"time": 1725710400020
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001808907",
+"premium": "0.0019471254",
+"time": 1725714000028
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001357586",
+"premium": "0.0015860687",
+"time": 1725717600056
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001171979",
+"premium": "0.0014375836",
+"time": 1725721200026
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0005596378",
+"time": 1725724800115
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.000472944",
+"time": 1725728400021
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.000269114",
+"time": 1725732000111
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0003062094",
+"time": 1725735600005
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0003793522",
+"time": 1725739200028
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0005253875",
+"time": 1725742800016
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0004462961",
+"time": 1725746400124
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0005874425",
+"time": 1725750000176
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000141546",
+"premium": "0.0006132368",
+"time": 1725753600075
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0004748085",
+"time": 1725757200120
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0005375821",
+"time": 1725760800006
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.0005329736",
+"time": 1725764400018
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000154111",
+"premium": "0.0006232886",
+"time": 1725768000121
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000125",
+"premium": "0.000558753",
+"time": 1725771600025
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000221232",
+"premium": "0.0006769859",
+"time": 1725775200008
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000229757",
+"premium": "0.0006838053",
+"time": 1725778800022
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000314507",
+"premium": "0.0007516053",
+"time": 1725782400074
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000261736",
+"premium": "0.0007093885",
+"time": 1725786000001
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000189335",
+"premium": "0.0006514681",
+"time": 1725789600019
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000170338",
+"premium": "0.0006362704",
+"time": 1725793200045
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000198415",
+"premium": "0.0006587322",
+"time": 1725796800069
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000257211",
+"premium": "0.000705769",
+"time": 1725800400021
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000442662",
+"premium": "0.0008541298",
+"time": 1725804000039
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000576778",
+"premium": "0.0009614222",
+"time": 1725807600100
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000736468",
+"premium": "0.0010891742",
+"time": 1725811200062
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000582671",
+"premium": "0.0009661369",
+"time": 1725814800056
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000267962",
+"premium": "0.0007143694",
+"time": 1725818400074
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000803541",
+"premium": "0.0011428332",
+"time": 1725822000078
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000661125",
+"premium": "0.0010289001",
+"time": 1725825600050
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000777751",
+"premium": "0.0011222006",
+"time": 1725829200115
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0000753062",
+"premium": "0.0011024496",
+"time": 1725832800011
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.000080244",
+"premium": "0.0011419521",
+"time": 1725836400085
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001070029",
+"premium": "0.0013560228",
+"time": 1725840000115
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001149063",
+"premium": "0.0014192501",
+"time": 1725843600054
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001040215",
+"premium": "0.001332172",
+"time": 1725847200088
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.000126814",
+"premium": "0.0015145119",
+"time": 1725850800105
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001227536",
+"premium": "0.001482029",
+"time": 1725854400063
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001322097",
+"premium": "0.0015576779",
+"time": 1725858000062
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001403081",
+"premium": "0.001622465",
+"time": 1725861600006
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001397278",
+"premium": "0.0016178224",
+"time": 1725865200115
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0001182362",
+"premium": "0.0014458896",
+"time": 1725868800001
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1725872400091
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1725876000000
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1725879600006
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1725883200067
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1725886800077
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1725890400113
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1727406000037
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1727409600085
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1727413200006
+},
+{
+"coin": "MATIC",
+"fundingRate": "0.0",
+"premium": "0.0",
+"time": 1727416800120
+}
+]

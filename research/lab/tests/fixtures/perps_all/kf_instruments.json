@@ -1,0 +1,35 @@
+{
+"result": "success",
+"instruments": [
+{
+"symbol": "PI_XBTUSD",
+"type": "futures_inverse",
+"tradeable": true,
+"suspended": false,
+"openingDate": "2018-08-31T00:00:00Z",
+"base": "BTC",
+"quote": "USD",
+"pair": "BTC:USD"
+},
+{
+"symbol": "PF_XBTUSD",
+"type": "flexible_futures",
+"tradeable": true,
+"suspended": false,
+"openingDate": "2022-03-22T13:15:36Z",
+"base": "BTC",
+"quote": "USD",
+"pair": "BTC:USD"
+},
+{
+"symbol": "PF_EWZUSD",
+"type": "flexible_futures",
+"tradeable": true,
+"suspended": false,
+"openingDate": "2026-10-21T11:26:05Z",
+"base": "EWZ",
+"quote": "USD",
+"pair": "EWZ:USD"
+}
+]
+}
