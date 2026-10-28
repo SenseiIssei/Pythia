@@ -33,7 +33,8 @@ Where the band comes from, best first:
       plus evidence.json: per book and autopilot its days, return, band and
       one status word (early, ok, watch, below, none). The engine reads it for
       the autopilot's auto pick, which lets a book's forward result count
-      only from EVIDENCE_MIN_DAYS days on.
+      only from EVIDENCE_MIN_DAYS days on. Then lab.paper.power (T8): what
+      each record can prove and when, power.{md,json} and a section here.
   python -m lab.paper.forward_report --export-backtests [--source DIR]
       write the backtest series from whatever this machine has: the momentum
       books from the history files, the sweep candidates from the sweep's run
@@ -790,6 +791,9 @@ def markdown(data: dict) -> str:
                                    "enough"]))
     if engine.get("orders_kept"):
         lines.append(f"Per-autopilot slippage comes from the last {engine['orders_kept']} orders the engine keeps.\n")
+    if data.get("power"):
+        from .power import section
+        lines += section(data["power"])
     return "\n".join(lines) + "\n"
 
 
@@ -1021,6 +1025,11 @@ def main() -> int:
         export_backtests(src)
         return 0
     data = build()
+    try:  # T8: what each record can prove (reports/forward/power.md); evidence.json does not carry it
+        from . import power
+        data["power"] = power.summary(power.run())
+    except Exception as e:  # noqa: BLE001 - the forward report itself must not fail on it
+        print("power skipped:", type(e).__name__, e, file=sys.stderr)
     report.write(NAME, markdown(data), data)
     write_evidence(data)
     return 0
