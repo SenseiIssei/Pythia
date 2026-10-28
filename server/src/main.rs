@@ -633,10 +633,11 @@ fn lab_report(root: &std::path::Path, rel: &str) -> serde_json::Value {
 /// Pythia News and Lab Live over the lab's data folder `root`: the files the lab jobs `news` and `lablive` write
 /// (reports/news/articles.json, reports/lablive/latest.json). GET /api/lab/news is the list (newest first, without
 /// the bodies; `page` from 0, `per` 1 to 100, default 20; `category` and `about` (a Lab Live node id) filter),
-/// GET /api/lab/news/:id one article with its body, GET /api/lab/live the graph. Read only; a missing file is
-/// `found: false`, an unknown article 404.
+/// GET /api/lab/news/:id one article with its body, GET /api/lab/live the graph, GET /api/lab/progress the progress
+/// page (U1, reports/progress/latest.json from the lab job `progress`, served as written). Read only; a missing file
+/// is `found: false`, an unknown article 404.
 fn lab_news_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
-    let (list_root, one_root, live_root) = (root.clone(), root.clone(), root);
+    let (list_root, one_root, live_root, progress_root) = (root.clone(), root.clone(), root.clone(), root);
     Router::new()
         .route(
             "/api/lab/news",
@@ -662,6 +663,13 @@ fn lab_news_routes(root: Option<std::path::PathBuf>) -> Router<AppState> {
             get(move || {
                 let root = live_root.clone();
                 async move { Json(lab_live_view(root.as_deref())) }
+            }),
+        )
+        .route(
+            "/api/lab/progress",
+            get(move || {
+                let root = progress_root.clone();
+                async move { Json(lab_progress_view(root.as_deref())) }
             }),
         )
 }
@@ -741,6 +749,17 @@ fn lab_live_view(root: Option<&std::path::Path>) -> serde_json::Value {
         v
     } else {
         serde_json::json!({ "found": false, "nodes": [], "edges": [] })
+    }
+}
+
+/// The progress page as the job wrote it, with `found`; no computation here (the ages are the page's).
+fn lab_progress_view(root: Option<&std::path::Path>) -> serde_json::Value {
+    let mut v = root.map(|r| lab_report(r, "progress/latest.json")).unwrap_or(serde_json::Value::Null);
+    if v.is_object() {
+        v["found"] = serde_json::Value::Bool(true);
+        v
+    } else {
+        serde_json::json!({ "found": false })
     }
 }
 
@@ -1914,7 +1933,7 @@ fn app(state: AppState, guard_cfg: Arc<guard::GuardConfig>) -> Router {
         .merge(lab_pumpfun_routes(pythia_core::labview::data_dir()))
         // The research factories, the model zoo and the allocator for the Lab page. Read-only.
         .merge(lab_factory_routes(pythia_core::labview::data_dir()))
-        // Pythia News and Lab Live for their pages: the files the lab's news and lablive jobs write. Read-only.
+        // News, Lab Live and the progress page: the files the lab's news, lablive and progress jobs write. Read-only.
         .merge(lab_news_routes(pythia_core::labview::data_dir()))
         .route(
             "/api/readiness/settings",

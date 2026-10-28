@@ -1,4 +1,4 @@
-//! Pythia News and Lab Live: read only, from the files the lab's news and lablive jobs write.
+//! Pythia News, Lab Live and the progress page: read only, from the files the lab's news, lablive and progress jobs write.
 
 use super::*;
 use axum::body::{to_bytes, Body};
@@ -128,5 +128,38 @@ async fn lab_live_serves_the_graph_file() {
     assert_eq!(v["found"], false);
     let (code, _) = call(Some(d.clone()), "POST", "/api/lab/live").await;
     assert_eq!(code, StatusCode::METHOD_NOT_ALLOWED);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn the_progress_page_serves_its_file_as_written() {
+    let d = dir("lab-progress-api");
+    let (code, v) = call(Some(d.clone()), "GET", "/api/lab/progress").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(v["found"], false);
+    std::fs::create_dir_all(d.join("reports/progress")).unwrap();
+    std::fs::write(
+        d.join("reports/progress/latest.json"),
+        r#"{"updated_ms":9,"ladder":{"found":true,"at_ms":7,"stale_ms":7200000,"top_step":1,"rows":[{"name":"tsmom","step":1}]},"ten":{"found":true,"started":false,"books":[]},"weekly":{"found":false,"lines":[]}}"#,
+    )
+    .unwrap();
+    let (code, v) = call(Some(d.clone()), "GET", "/api/lab/progress").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(v["found"], true);
+    assert_eq!(v["updated_ms"], 9);
+    assert_eq!(v["ladder"]["at_ms"], 7, "the section's time comes through unchanged");
+    assert_eq!(v["ladder"]["rows"][0]["name"], "tsmom");
+    assert_eq!(v["ten"]["started"], false);
+    // A file that is not a JSON object is no page.
+    std::fs::write(d.join("reports/progress/latest.json"), "[1,2]").unwrap();
+    let (_, v) = call(Some(d.clone()), "GET", "/api/lab/progress").await;
+    assert_eq!(v["found"], false);
+    let (_, v) = call(None, "GET", "/api/lab/progress").await;
+    assert_eq!(v["found"], false);
+    // Read only: nothing but GET.
+    for m in ["POST", "PUT", "DELETE"] {
+        let (code, _) = call(Some(d.clone()), m, "/api/lab/progress").await;
+        assert_eq!(code, StatusCode::METHOD_NOT_ALLOWED);
+    }
     let _ = std::fs::remove_dir_all(&d);
 }

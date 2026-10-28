@@ -31,6 +31,7 @@ import {
   Flame,
   Newspaper,
   Network,
+  Milestone,
   type LucideIcon,
 } from "lucide-react";
 import type { UiMode } from "./uiMode";
@@ -65,6 +66,7 @@ export type PageId =
   | "trends"
   | "news"
   | "lablive"
+  | "progress"
   | "risk"
   | "journal"
   | "settings"
@@ -119,6 +121,8 @@ export const NAV: NavItem[] = [
   // The lab's events as articles, and a live map of everything it runs (read only; the DevPanel embeds both).
   { id: "news", label: "Pythia News", icon: Newspaper, section: "AI", advanced: true },
   { id: "lablive", label: "Lab Live", icon: Network, section: "AI", advanced: true },
+  // How far from real money: the ladder, P3, paper minus live, gate 7, the weekly page (one column for the phone).
+  { id: "progress", label: "Progress", icon: Milestone, section: "AI", advanced: true },
   { id: "live", label: "Live", icon: Radio, section: "Control", advanced: true },
   { id: "risk", label: "Risk", icon: ShieldAlert, section: "Control", advanced: true },
   { id: "journal", label: "Journal", icon: ScrollText, section: "Control", advanced: true },

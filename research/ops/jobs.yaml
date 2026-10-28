@@ -490,6 +490,19 @@ jobs:
     grace: 15m
     alert: false
 
+  # U1 (research/lab/results/progress_page_u1_prereg.md): how far Pythia is from real money, for the app's page
+  # progress: the ladder, P3's 10 EUR books, paper minus live, the tsmom books' gate 7, the newest weekly page, each
+  # with its file's time and the age it is stale after; reports only, no trial, into reports/progress/latest.json;
+  # the server serves it as GET /api/lab/progress.
+  - name: progress
+    description: U1 progress page, how far Pythia is from real money (ladder, P3, paper minus live, gate 7, weekly page), reports/progress/latest.json
+    schedule: "*/15 * * * *"
+    command: python -m lab.ops.progress
+    resources: {cpus: 0.5, memory: 512m}
+    timeout: 3m
+    grace: 30m
+    alert: false
+
   - name: costs
     description: weekly cost calibration from the recorded books, report only
     schedule: "40 5 * * 0"
