@@ -37,6 +37,7 @@ RENT_TOKEN_L = 2_039_280                 # a token account's rent (165 bytes)
 MAX_ENTRIES = 1000
 PAGE = 100
 MAX_PAGES = 10
+RPC_TIMEOUT = 60.0                      # the public node took 26 s for one signature page on 2026-10-28 (8 s failed)
 SOL_DUST_L = 10_000                      # SOL changes this small next to a token swap are rounding of rent
 
 
@@ -233,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     if not addr:
         print("onchain history: no wallet yet (python -m lab.onchain.wallet new); nothing to read")
         return 0
-    rpc = PX.Rpc(os.environ.get(LG.ENV_RPC) or LG.DEFAULT_RPC)
+    rpc = PX.Rpc(os.environ.get(LG.ENV_RPC) or LG.DEFAULT_RPC, timeout=RPC_TIMEOUT)
     out = update(rpc, addr)
     print(f"onchain history: {len(out['entries'])} entries, {len(out['pending'])} pending")
     return 0
