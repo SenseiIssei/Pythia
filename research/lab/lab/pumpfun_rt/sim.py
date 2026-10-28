@@ -213,6 +213,7 @@ class Engine:
 
     def trade(self, t, tx, mint, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, slot=None, sig=None) -> None:
         self.advance(t)
+        t = self.now                                      # a row handed over late is seen now (see amm)
         tok = self.tokens.get(mint)
         if tok is None:
             return
@@ -286,6 +287,11 @@ class Engine:
     def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None, vq=None, sig=None,
             bts=None) -> None:
         self.advance(t)
+        # The live collector holds pool trades that arrive before their pool's migration and hands them over once
+        # it is known, timed by their slot: older than the clock. Taken at their own time they filled a pending buy
+        # before it landed and took profits on a spike from before the entry (2026-10-28: 19 of 713 P_pool0_wait
+        # paper trades, +109 % mean, 3.3 points of its +9 %). A row is seen when it arrives.
+        t = self.now
         tok = self.tokens.get(mint)
         if tok is None:
             return

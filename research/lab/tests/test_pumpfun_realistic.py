@@ -151,6 +151,21 @@ def test_the_buy_fills_at_the_first_trade_after_the_landing_not_at_a_spike_befor
     assert p["fees_l"] == 205_000                             # fee and tip
 
 
+def test_a_pool_trade_handed_over_late_neither_fills_nor_sells_before_the_landing():
+    eng, book = engine_with(fixed_fit(), ideal=False)
+    pool = Pool(eng)
+    eng.advance(T0 + 1)
+    eng.advance(T0 + 7_000)                                   # landed at T0 + 5 s, waiting for a trade
+    p = next(iter(book.pos.values()))
+    assert p["state"] == "pending"
+    pool.trade(T0 + 2_000, True, SOL // 100)                  # the collector's held row, timed by its old slot
+    assert p["state"] == "open" and p["land_ms"] == T0 + 7_000, "filled when the row arrived, not before"
+    pool.to(T0 + 3_000, 3.0)                                  # a late spike: seen now, after the landing
+    eng.advance(T0 + 400_000)
+    real = closed(eng, "P_pool0")
+    assert real["exit_signal_ms"] >= real["land_ms"] and real["hold_s"] >= 0
+
+
 def test_a_spike_sold_into_by_the_ideal_book_is_gone_when_the_realistic_sale_lands():
     eng, book = engine_with(fixed_fit())
     pool = Pool(eng)
