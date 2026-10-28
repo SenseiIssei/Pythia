@@ -236,6 +236,25 @@ def max_drawdown_pct(points: list[tuple[int, float]]) -> float:
     return worst
 
 
+def flow_adjusted(rows: list[tuple[int, dict]]) -> list[tuple[int, float]]:
+    """This job's daily equity records of one run with every amount change taken out (T3): the flow between two
+    records is the change in equity less the change in P&L, and every earlier record is scaled by (equity before +
+    flow) / equity before, which keeps the returns on either side, as the engine rescales its own curve. Without
+    this, 10,000 USD moved out of Auto-Pick read as a 49.97 % drawdown (results/review_2026-10-27.md, section 4)."""
+    pts = [[t, float(r["equity"]), _num(r.get("pnl"))] for t, r in rows if _num(r.get("equity")) is not None]
+    for k in range(1, len(pts)):
+        e0, p0, e1, p1 = pts[k - 1][1], pts[k - 1][2], pts[k][1], pts[k][2]
+        if p0 is None or p1 is None or e0 <= 0:
+            continue
+        flow = (e1 - e0) - (p1 - p0)
+        if abs(flow) < 0.01 or e0 + flow <= 0:
+            continue
+        f = (e0 + flow) / e0
+        for p in pts[:k]:
+            p[1] *= f
+    return [(t, v) for t, v, _ in pts]
+
+
 def annualised_pct(ret_pct: float, days: float) -> float | None:
     """A return over `days` as a yearly rate, compounded. Noisy below a few months."""
     if days < 1:
@@ -519,10 +538,9 @@ def autopilot_unit(ap: dict, live: dict, forward: dict | None, history: list[dic
             continue
         if t >= started:
             pts.append((t, v))
-    pts += [(t, r["equity"]) for t, r in run_rows(history, history_key(account, ap_id), started)
-            if r.get("equity") is not None]
-    if equity is not None:
-        pts.append((end, equity))
+    # today's numbers last, so that a move made since the last record is taken out too
+    now_row = [(end, {"equity": equity, "pnl": pnl})] if equity is not None else []
+    pts += flow_adjusted(run_rows(history, history_key(account, ap_id), started) + now_row)
     pts.sort(key=lambda p: p[0])
 
     b = ap.get("benchmark") or None

@@ -73,6 +73,15 @@ panel for its breadth features, so run `xs_daily` first.
   the champion" at 5 %, and a model that failed its gate is not retrained
   until a book reads it (`python -m lab.models.train --replay 30` replays the
   last days under both rules).
+- **One ladder to real money.** Since T3 `lab.ops.ladder`
+  (`results/readiness_ladder_prereg.md`) puts every paper book, factory
+  survivor and shadow on a step: 1 idea (pre-registered before its first
+  number), 2 tested (leak check, one close late, costs of their era, DSR over
+  the registry and the family, PBO), 3 shadow (30 days), 4 lockbox (R6's look
+  against the right benchmark), 5 execution (50 EUR under the review's rules),
+  6 larger (only the owner). `reports/ladder/latest.md`, written by the Lab Live
+  job; the briefing's "Stufenleiter" card and each book's node show the step.
+  It only proposes. The readiness drawdown is on cash-flow-adjusted equity.
 - **Beat a baseline, not zero.** Naive and HAR for volatility, the coin
   basket and BTC for strategies, random entries for signals.
 - **Write down failures.** A dead idea with a number is a result.

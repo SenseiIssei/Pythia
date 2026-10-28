@@ -7,7 +7,8 @@ server serves that file as GET /api/lab/live and adds nothing. Nodes:
   features   the feature store and the jobs that tag or cache inputs
   models     every model of the zoo (reports/models), the pump.fun zoo's labels, the allocator, the model jobs
   factories  the strategy factory, F2 (small accounts), F3 (pump.fun), the studies
-  books      every paper book of the forward report and the paper jobs
+  books      every paper book of the forward report and the paper jobs, with its step on the readiness ladder
+             (lab.ops.ladder, T3), which this job also writes to reports/ladder every run
   money      the real-money bots (pump.fun, the on-chain trader)
   outputs    the briefing, the lab card, the alerts, Discord, News, health, backup
 
@@ -33,7 +34,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import notify
+from . import ladder as ladder_mod, notify
 
 COLUMNS = ("data", "features", "models", "factories", "books", "money", "outputs")
 STATES = ("running", "ok", "late", "failed", "off")
@@ -455,10 +456,12 @@ def factory_nodes(rep: Path, now: int) -> list[dict]:
     return out
 
 
-def book_nodes(root: Path, rep: Path, now: int) -> list[dict]:
+def book_nodes(root: Path, rep: Path, now: int, steps: dict[str, dict] | None = None) -> list[dict]:
+    """Every forward book and autopilot; `steps` (lab.ops.ladder.by_book) adds its step on the readiness ladder."""
     fw = notify.read_json(rep / "forward" / "latest.json")
     if not isinstance(fw, dict):
         return []
+    steps = steps or {}
     at = stamp(fw)
     out = []
     for b in (fw.get("books") or []) + (fw.get("autopilots") or []):
@@ -477,6 +480,11 @@ def book_nodes(root: Path, rep: Path, now: int) -> list[dict]:
         held = _num(last.get("held")) if last else None
         if held is not None:
             nums.append({"label": "Offene Positionen", "value": de(held, 0)})
+        lad = steps.get(name)
+        if lad is not None:
+            nums.append({"label": "Stufe", "value": f"{lad['step']} {ladder_mod.STEPS_DE[lad['step']]}"})
+            if lad.get("next_de"):
+                nums.append({"label": "Es fehlt", "value": notify.short(lad["next_de"], 90)})
         status = str(b.get("status") or b.get("state") or "")
         st = "off" if status in ("stopped", "retired", "off") else "late" if status in ("behind", "stale") else "ok"
         st = fresh_state(at, now, 30 * HOUR, st)
@@ -488,7 +496,9 @@ def book_nodes(root: Path, rep: Path, now: int) -> list[dict]:
                         detail=notify.nodash(str(b.get("sentence") or "")), state=st,
                         now=f"Status {status or '-'}, {de(b.get('days'), 0)} Tage seit {b.get('since') or '-'}",
                         last_run=ms_iso(at), numbers=nums, spark=spark, spark_label="Kapital je Tag",
-                        job="paper", aliases=[name]))
+                        job="paper", aliases=[name],
+                        ladder=None if lad is None else {"step": lad["step"], "next": lad.get("next_de") or "",
+                                                         "evidence": lad.get("evidence") or ""}))
     return out
 
 
@@ -557,17 +567,24 @@ def link(nodes: dict[str, dict]) -> list[dict]:
     return edges
 
 
-def build(root: Path | None = None, now: int | None = None, logs: Path | None = None) -> dict:
+def build(root: Path | None = None, now: int | None = None, logs: Path | None = None, ladder: dict | None = None) -> dict:
+    """`ladder`: the readiness ladder (lab.ops.ladder.build), built here when not given."""
     rep = notify.reports_root() if root is None else root / "reports"
     root = root or notify.data_root()
     now = now or notify.clock_ms()
+    if ladder is None:
+        try:
+            ladder = ladder_mod.build(root, now)
+        except Exception as e:  # noqa: BLE001 - the map goes on without the steps
+            notify.say(f"lablive: the ladder failed ({type(e).__name__}: {e})", err=True)
+    steps = ladder_mod.by_book(ladder)
     hj = notify.read_json(root / "_health" / "jobs.json")
     jobs = [j for j in (hj or {}).get("jobs") or [] if isinstance(j, dict)] if isinstance(hj, dict) else []
     runs = read_runs(root, now)
     found: list[dict] = []
     for part in (lambda: [recorder_node(root, now), pumpfun_record_node(rep, now)],
                  lambda: job_nodes(jobs, runs, logs, now), lambda: model_nodes(rep, now),
-                 lambda: factory_nodes(rep, now), lambda: book_nodes(root, rep, now),
+                 lambda: factory_nodes(rep, now), lambda: book_nodes(root, rep, now, steps),
                  lambda: bot_nodes(rep, root, now)):
         try:
             found += [n for n in part() if n]
@@ -616,11 +633,18 @@ def logs_dir() -> Path | None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    g = build(logs=logs_dir())
+    lad = None
+    try:
+        lad = ladder_mod.build()
+    except Exception as e:  # noqa: BLE001 - the map goes on without the steps
+        notify.say(f"lablive: the ladder failed ({type(e).__name__}: {e})", err=True)
+    g = build(logs=logs_dir(), ladder=lad or {})
     if "--print" in argv:
         notify.say(json.dumps(g, indent=1, ensure_ascii=False)[:20000])
         return 0
     notify.write_json(out_path(), g)
+    if lad:
+        ladder_mod.publish(lad)                 # T3: reports/ladder, every run (it only reads small files)
     notify.say(f"lablive: {len(g['nodes'])} nodes, {len(g['edges'])} edges, {g['counts']}")
     return 0
 

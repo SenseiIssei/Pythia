@@ -681,6 +681,10 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "bf_sum_research": ("{n} task done", "{n} tasks done"),
         # the research factories (F3 pump.fun, F2 small wallets) and A1's allocator, in the briefing and the 20:00 lab card
         "bf_factory": "Research factory",
+        # T3's readiness ladder card (lab.ops.ladder)
+        "bf_ladder": "Readiness ladder",
+        "bf_ladder_step": "Step {n} {name}",
+        "bf_ladder_owner": "only the owner decides",
         "bf_fac_F3": "F3 pump.fun",
         "bf_fac_F2": "F2 small wallets",
         "bf_fac_G2": "G2 models",
@@ -1295,6 +1299,9 @@ CATALOG: dict[str, dict[str, str | tuple[str, str]]] = {
         "bf_res_paused": "Forschung pausiert",
         "bf_sum_research": ("{n} Aufgabe fertig", "{n} Aufgaben fertig"),
         "bf_factory": "Forschungs-Fabrik",
+        "bf_ladder": "Stufenleiter",
+        "bf_ladder_step": "Stufe {n} {name}",
+        "bf_ladder_owner": "nur der Besitzer entscheidet",
         "bf_fac_F3": "F3 pump.fun",
         "bf_fac_F2": "F2 Kleinkonten",
         "bf_fac_G2": "G2 Modelle",

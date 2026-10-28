@@ -296,6 +296,33 @@ def test_drawdown_exactly_at_the_limit_passes_and_just_over_fails(root):
     assert not rules(first(run(root, ap, forward=forward_for(ap, dd_p95=None))))["drawdown"]["pass"]
 
 
+def test_capital_moved_out_is_not_a_drawdown(root):
+    # Auto-Pick, 2026-10-21 to 22: 10,000 USD moved out of 20,000; the engine rescales its own curve, this job's
+    # daily records still held the old amount (20,083 then 10,080) and the drawdown read 49.9 %.
+    ap = autopilot(days=40)
+    ap["startCapital"], ap["equity"], ap["pnl"], ap["history"] = 10_000.0, 10_078.0, 78.0, []
+    ap["maxDrawdownPct"] = 0.4
+    recs = [{"date": readiness._date(NOW - k * DAY_MS), "ts_ms": NOW - k * DAY_MS,
+             "autopilots": {"ap-1": {"started_ms": ap["startedMs"], "equity": eq, "pnl": pnl, "sleeves": {}}},
+             "reconcile": {"fresh": True, "mismatches": 0}}
+            for k, eq, pnl in ((3, 20_083.0, 83.0), (2, 10_080.0, 80.0), (1, 10_079.0, 79.0))]
+    settle(root)
+    write_history(clean_history(8)[:-3] + recs)
+    item = first(readiness.run(NOW, state=state_of(ap), forward=forward_for(ap), macro=MACRO,
+                               sender=lambda t: (True, None)))
+    assert item["max_dd_pct"] < 1, item["max_dd_pct"]
+    assert rules(item)["drawdown"]["pass"]
+    # The adjustment itself: earlier records scaled by the move, the returns on either side kept.
+    pts = readiness.flow_adjusted([(1, {"equity": 20_083.0, "pnl": 83.0}), (2, {"equity": 10_080.0, "pnl": 80.0})])
+    assert pts[1] == (2, 10_080.0) and pts[0][1] == pytest.approx(20_083.0 * 10_083.0 / 20_083.0)
+    assert readiness.max_drawdown_pct(pts) == pytest.approx(3 / 10_083 * 100)
+    # A real loss with no move still counts in full; a record without P&L is left as it is.
+    assert readiness.flow_adjusted([(1, {"equity": 100.0, "pnl": 0.0}), (2, {"equity": 50.0, "pnl": -50.0})]) == \
+        [(1, 100.0), (2, 50.0)]
+    assert readiness.flow_adjusted([(1, {"equity": 100.0}), (2, {"equity": 50.0, "pnl": 0.0})]) == \
+        [(1, 100.0), (2, 50.0)]
+
+
 def test_the_backtest_band_can_make_the_drawdown_limit_tighter(root):
     ap = autopilot()
     ap["maxDrawdownPct"] = 6.0

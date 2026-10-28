@@ -12,6 +12,8 @@ numbers formatted in the messages' language, one overview chart:
                          test's books by status (reports/forward), real money readiness, the
                          small-account paper books in EUR (reports/smallaccount, S1 and S2), the
                          on-chain long-term book's 0.5 SOL paper wallet (reports/onchain_longterm, L1)
+  Stufenleiter           T3's readiness ladder (reports/ladder, lab.ops.ladder): the top 5 candidates by step and
+                         what each misses next; it only proposes
   lab                    the model zoo (reports/models) and the study reports that are new
   research factory       per factory one line (reports/pumpfun_rt/factory.json F3, reports/smallaccount/factory.json
                          F2): trials, the bar, the best new candidate held back, books, model settings adopted;
@@ -630,6 +632,22 @@ def factory_section(reps: dict, alloc: dict | None, lang: str, models: dict | No
     return lines + ([al] if al is not None else []) + ([mf] if mf is not None else [])
 
 
+def ladder_section(rep: dict | None, lang: str, n: int = 5) -> list:
+    """T3's readiness ladder (reports/ladder, lab.ops.ladder): the top n candidates by step, each with what it
+    misses next. The ladder only proposes; nothing in it arms anything."""
+    from .ladder import STEPS, STEPS_DE
+    rows = [r for r in (rep or {}).get("rows") or [] if isinstance(r, dict) and isinstance(r.get("step"), int)]
+    if not rows:
+        return []
+    out = []
+    for r in sorted(rows, key=lambda r: (-r["step"], len(r.get("missing") or [])))[:n]:
+        name = (STEPS_DE if lang == "de" else STEPS).get(r["step"], "?")
+        nxt = r.get("next_de") if lang == "de" else r.get("next")
+        out.append(Line(short(nodash(f"{r.get('short') or r.get('name')}: {nxt or tr('bf_ladder_owner', lang)}"), 120),
+                        tr("bf_ladder_step", lang, n=r["step"], name=name)))
+    return out
+
+
 # ---------------------------------------------------------------- what needs the owner today
 
 # Health checks whose red needs a decision: they touch real money, or the briefing itself (the job that sends it,
@@ -718,7 +736,8 @@ def decide_card(items: list[str], lang: str) -> Card:
 # The sections whose report can go stale, for the "missing today" footer: (the words' key, folder, file). Only a
 # report that is there but older than two days is named; one that never was is not missing.
 SECTIONS = (("bf_sec_autopilots", "learn", "latest.json"), ("forward_test", "forward", "latest.json"),
-            ("bf_sec_readiness", "readiness", "latest.json"), ("bf_research", "research", "latest.json"),
+            ("bf_sec_readiness", "readiness", "latest.json"), ("bf_ladder", "ladder", "latest.json"),
+            ("bf_research", "research", "latest.json"),
             ("bf_zoo_lead", "models", "latest.json"), ("bf_fac_F3", "pumpfun_rt", "factory.json"),
             ("bf_fac_F2", "smallaccount", "factory.json"), ("bf_fac_G2", "models", "factory.json"),
             ("bf_sec_coins", "trending", "latest.json"),
@@ -746,7 +765,7 @@ def text_of(cards: list[Card], lang: str) -> str:
 
 
 BRIEF_CHARS = 1900                     # the whole briefing as plain text, under 2,000 with the footer's prefix
-CUT_ORDER = ("bf_news", "bf_markets", "bf_factory", "bf_lab", "bf_research", "bf_paper")
+CUT_ORDER = ("bf_news", "bf_markets", "bf_factory", "bf_lab", "bf_ladder", "bf_research", "bf_paper")
 
 
 # ---------------------------------------------------------------- the card and its chart
@@ -796,6 +815,9 @@ def build(now: int, lang: str, engines: list[dict], ledger: list[dict], eur: flo
     if paper:
         cards.append(("bf_paper", Card("📈", tr("bf_paper", lang), None, paper)))
     summary += [words] if words else []
+    ladder = ladder_section(read("ladder"), lang)
+    if ladder:
+        cards.append(("bf_ladder", Card("🪜", tr("bf_ladder", lang), None, ladder)))
     lab = lab_section(read("models"), now, lang)
     if lab:
         cards.append(("bf_lab", Card("🧪", tr("bf_lab", lang), None, lab)))
