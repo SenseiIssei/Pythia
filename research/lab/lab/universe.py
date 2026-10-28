@@ -25,6 +25,12 @@ from the panel; `coverage` names it.
 day its delisting (spot or USD-M perp) was announced, point in time from
 lab.collect.book_depth's table (T4): the decision at that day's close knows
 an announcement made during it. Off unless asked for.
+
+`pit(P, n)` is the point-in-time universe of T5 (results/pit_universe_t5_prereg.md):
+on each UTC day the n coins with the highest 30-day median dollar volume on
+Binance spot among those with a bar that day, delisted segments included,
+stablecoins, gold and wrapped coins out, T4's delisting flag when its table is
+there. A coin is never in it before its first or after its last bar.
 """
 
 from __future__ import annotations
@@ -33,7 +39,10 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import warnings
+
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 from .data import UNIVERSE as LAB20_LIST
 
@@ -48,6 +57,13 @@ CORE = tuple(c for c in ALPACA if c not in MEMES)
 ENGINE = ALPACA + tuple(c for c in LAB20 if c not in ALPACA)
 # What the Alpaca paper account lists besides: pegs and gold, never traded.
 NOT_TRADED = ("USDC", "USDG", "USDT", "PAXG", "USD", "DAI", "USDS", "PYUSD", "FDUSD", "TUSD", "XAUT")
+
+# Never in the point-in-time universe (pit): pegs, gold, wrapped or staked duplicates (fam_common.EXCLUDE's
+# and more, by base; the panel holds no tokenised stocks).
+NOT_COINS = frozenset(NOT_TRADED) | {
+    "BUSD", "PAX", "USDP", "UST", "USTC", "AEUR", "EURI", "EUR", "GBP", "AUD", "USDSB", "USDSOLD", "FRAX", "KGST",
+    "WBTC", "WBETH", "BETH", "BNSOL", "STETH"}
+PIT_WINDOW, PIT_MIN_BARS = 30, 20
 
 PRESETS = {"LAB20": LAB20, "ALPACA15": ALPACA15, "ALPACA": ALPACA, "ALPACA32": ALPACA, "MEMES": MEMES,
            "CORE": CORE, "DEFAULT": ENGINE, "ALL": ENGINE, "ENGINE": ENGINE}
@@ -165,6 +181,36 @@ def tradable(P, coins, drop_delisting: bool = True, table=None, kinds=("spot", "
         d = delisting_days(P, table, kinds)
         m &= np.arange(P.T)[:, None] < d[None, :]
     return m
+
+
+def median_volume(P, window: int = PIT_WINDOW, min_bars: int = PIT_MIN_BARS, rows: int = 256) -> np.ndarray:
+    """(T, N) per column the median dollar volume (the day's quote volume in USDT) over its bars among days
+    t - window + 1 to t; NaN with fewer than min_bars bars. Days without a bar do not count."""
+    qv = np.where(P.traded, P.extra["qv"], np.nan).astype(float)
+    pad = np.vstack([np.full((window - 1, qv.shape[1]), np.nan), qv])
+    out = np.full(qv.shape, np.nan)
+    for a in range(0, len(qv), rows):
+        v = sliding_window_view(pad[a:a + rows + window - 1], window, axis=0)    # (rows, N, window), a view
+        n = np.isfinite(v).sum(-1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)                     # all-NaN windows
+            m = np.nanmedian(v, axis=-1)
+        out[a:a + len(m)] = np.where(n >= min_bars, m, np.nan)
+    return out
+
+
+def pit(P, n: int, drop_delisting: bool = True, table=None, kinds=("spot", "perp"), vol=None) -> np.ndarray:
+    """(T, N) the point-in-time universe: on day t the n columns with the highest median_volume among those with
+    a bar on day t, not in NOT_COINS and (drop_delisting) not after their delisting was known. Decided at the
+    close of day t; ties go to the column order. vol: median_volume(P) when already computed."""
+    v = median_volume(P) if vol is None else vol
+    coin = np.array([b not in NOT_COINS for b in P.bases], dtype=bool)
+    ok = np.asarray(P.traded, dtype=bool) & np.isfinite(v) & coin[None, :]
+    if drop_delisting:
+        ok &= np.arange(P.T)[:, None] < delisting_days(P, table, kinds)[None, :]
+    score = np.where(ok, v, -np.inf)
+    rank = np.argsort(np.argsort(-score, axis=1, kind="stable"), axis=1, kind="stable")
+    return ok & (rank < n)
 
 
 def _day(P, day: str) -> int:

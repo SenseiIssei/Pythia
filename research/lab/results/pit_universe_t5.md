@@ -1,0 +1,77 @@
+# T5: a point-in-time universe
+
+Pre-registered in `results/pit_universe_t5_prereg.md` (committed first). Code: `lab.universe.pit`,
+`lab.experiments.pit_universe_t5`. 18 trials in R5's registry (`hand:t5_pit:<rule>:<universe>`). In sample and
+validation only; the lockbox was not read. Paper only: no book, engine setting or wallet changes.
+
+## What it says
+
+- **Rules quoted on today's 20 are flattered.** tsmom (tsmom.py's pick, the README's "OOS Sharpe 0.72") makes 0.40
+  late at the costs of its era on today's 20 and -0.04 on the 20 coins that were really the most traded each day
+  (gap +0.45 in validation, +0.39 in sample; band -0.15 to +0.99, so not material by the registered rule, but its
+  edge on the coins of the day is about zero). F2's Donchian 100/50 run on coins: 0.98 on today's 20, 0.10 point in
+  time (+0.88, band from -0.24). breakout_top10 is the one material premium: 1.00 against 0.64 in validation (+0.36,
+  band +0.01 to +0.69), although in sample the point-in-time universe was better (-0.14).
+- **tsmom1 has no premium.** Its 1 most liquid coin is BTC (some days ETH) in every universe; the three runs are
+  identical.
+- **The short legs go the other way.** perps_neutral's low-vol and carry legs look much worse on today's 20
+  (validation Sharpe gap -2.02 and -1.73): shorting the most volatile or most crowded of the survivors means
+  shorting the coins that won. Their books as published already rank every coin of the panel by volume, and PIT50
+  is close to them (low-vol 1.19 late with era costs, carry 0.70).
+- **Nothing passes deflation.** The best validation DSR is 0.054 (low-vol on PIT20), the noise bar 2.80 a year.
+- **What this means for the published numbers.** breakout_top10's headline 1.17 already picks from every coin of the
+  panel by 28-day volume, so it is not the LAB20 number (on the point-in-time universes, late and at the costs of
+  its era, it makes 0.64 and 0.71 in validation); the premium applies to everything restricted to today's
+  lists: tsmom's study, F2's six assets, and the books that keep coins outside today's Alpaca list in cash (C16's
+  "cash-left is better" may in part be this premium).
+- T4's delisting table was not on the data folder at this run, so coins leave with their last bar, not on their
+  announcement day; the next run picks the table up by itself.
+
+<!-- generated below by lab.experiments.pit_universe_t5; edit above this line only -->
+
+Generated 2026-10-28T02:59:16+00:00. In sample 2020-08-01 to 2023-12-31, validation 2024-01-01 to 2026-06-30; the panel cut at 2026-06-30, the lockbox not read. Every rule filled one close late at the costs of its era (taker 10 bps spot, 5 bps perps, plus a half spread of 1 to 50 bps from the coin's own 30-day median dollar volume that day).
+
+## 1. The survivorship premium (LAB20 minus the point-in-time universe)
+
+| rule | Sharpe gap vs PIT20, in sample / validation | CAGR gap vs PIT20, in sample / validation | Sharpe gap vs PIT50, in sample / validation | CAGR gap vs PIT50, in sample / validation | 90 % band, validation Sharpe gap vs PIT20 | material |
+|---|---|---|---|---|---|---|
+| tsmom | +0.39 / +0.45 | +13.0 / +8.2 pts | +0.44 / +0.48 | +16.7 / +8.4 pts | -0.15 to +0.99 | no |
+| tsmom1 | +0.00 / +0.00 | +0.0 / +0.0 pts | +0.00 / +0.00 | +0.0 / +0.0 pts | +0.00 to +0.00 | no |
+| breakout_top10 | -0.14 / +0.36 | -3.3 / +9.8 pts | -0.13 / +0.29 | -3.0 / +8.3 pts | +0.01 to +0.69 | yes |
+| donchian_100_50 | +0.60 / +0.88 | +9.9 / +18.3 pts | +0.83 / +1.06 | +14.7 / +21.5 pts | -0.24 to +1.99 | no |
+| lowvol | -1.13 / -2.02 | -51.6 / -72.5 pts | -0.56 / -1.35 | -22.3 / -38.1 pts | -3.16 to -0.95 | no |
+| carry | +0.50 / -1.73 | +23.2 / -72.7 pts | +0.28 / -1.11 | +9.6 / -34.5 pts | -3.08 to -0.27 | no |
+
+Positive: today's 20 make the rule look better than the coins that were really there. Material: the validation Sharpe gap against PIT20 above 0.20 and the band's lower end above 0 (stationary bootstrap, 4000 draws, mean block 20 days).
+
+## 2. Per rule and universe
+
+| rule | universe | in sample Sharpe / CAGR / DD | validation Sharpe / CAGR / DD | validation DSR, pass at 0.95 or more |
+|---|---|---|---|---|
+| tsmom | LAB20 | 1.65 / 38.4 % / 26.2 % | 0.40 / 6.0 % / 26.5 % | 0.000 |
+| tsmom | PIT20 | 1.26 / 25.4 % / 24.9 % | -0.04 / -2.2 % / 22.4 % | 0.000 |
+| tsmom | PIT50 | 1.20 / 21.7 % / 24.9 % | -0.08 / -2.4 % / 25.2 % | 0.000 |
+| tsmom1 | LAB20 | 1.51 / 43.2 % / 25.3 % | 0.89 / 23.1 % / 23.1 % | 0.001 |
+| tsmom1 | PIT20 | 1.51 / 43.2 % / 25.3 % | 0.89 / 23.1 % / 23.1 % | 0.001 |
+| tsmom1 | PIT50 | 1.51 / 43.2 % / 25.3 % | 0.89 / 23.1 % / 23.1 % | 0.001 |
+| breakout_top10 | LAB20 | 1.20 / 35.2 % / 33.3 % | 1.00 / 21.2 % / 21.2 % | 0.002 |
+| breakout_top10 | PIT20 | 1.34 / 38.5 % / 24.6 % | 0.64 / 11.3 % / 21.9 % | 0.000 |
+| breakout_top10 | PIT50 | 1.33 / 38.2 % / 24.7 % | 0.71 / 12.9 % / 21.9 % | 0.000 |
+| donchian_100_50 | LAB20 | 0.21 / 2.3 % / 30.6 % | 0.98 / 18.5 % / 22.7 % | 0.002 |
+| donchian_100_50 | PIT20 | -0.39 / -7.6 % / 37.7 % | 0.10 / 0.2 % / 28.2 % | 0.000 |
+| donchian_100_50 | PIT50 | -0.62 / -12.4 % / 45.8 % | -0.08 / -3.0 % / 29.4 % | 0.000 |
+| lowvol | LAB20 | -0.19 / -15.5 % / 75.6 % | -0.15 / -7.0 % / 40.3 % | 0.000 |
+| lowvol | PIT20 | 0.94 / 36.1 % / 34.2 % | 1.87 / 65.5 % / 18.0 % | 0.054 |
+| lowvol | PIT50 | 0.37 / 6.9 % / 57.4 % | 1.19 / 31.1 % / 18.8 % | 0.005 |
+| carry | LAB20 | 0.36 / 6.8 % / 50.8 % | -0.41 / -16.2 % / 60.8 % | 0.000 |
+| carry | PIT20 | -0.13 / -16.4 % / 81.3 % | 1.32 / 56.6 % / 34.4 % | 0.009 |
+| carry | PIT50 | 0.08 / -2.8 % / 66.8 % | 0.70 / 18.4 % / 33.9 % | 0.000 |
+
+DSR over R5's registry, the pool of all with the factory ledgers and these 18 trials (2,785 trials, noise bar 2.80 a year); higher is better. Trials: `hand:t5_pit:<rule>:<universe>`.
+
+## 3. The universe
+
+- Coins ever in PIT20 over both windows: 210, of them 37 with a last bar before 2026-06-30 (delisted) or an older asset of a reused ticker; in PIT50 404 and 95.
+- Share of PIT20's coin-days that are LAB20 coins: 54.5 %.
+- PIT20's ended coins: AGIXUSDT, ANCUSDT, BLZUSDT, BONDUSDT, BTTUSDT, DARUSDT, DENTUSDT, EOSUSDT, ERDUSDT, FRONTUSDT, FTMUSDT, FTTUSDT~0, GALUSDT, HIFIUSDT, HOOKUSDT, LENDUSDT, LEVERUSDT, LINAUSDT, LOOMUSDT, LRCUSDT, LUNAUSDT~0, MATICUSDT, MKRUSDT, OMGUSDT, OMUSDT, REEFUSDT, RNDRUSDT, SRMUSDT, STMXUSDT, SXPUSDT, TONUSDT, TRUUSDT, UNFIUSDT, WAVESUSDT, XEMUSDT, XMRUSDT, YFIIUSDT.
+- T4's delisting table: not present on this run, nothing dropped early; ended coins leave with their last bar.
