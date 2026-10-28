@@ -654,6 +654,17 @@ jobs:
     timeout: 15m
     replaces: pythia-weekly
 
+  # W1 (research/lab/results/weekly_page_w1_prereg.md): one page of what matters, from the reports that exist
+  # only, every line with its file, reports/weekly/<date>.md and latest.md; the short version through
+  # lab.ops.notify (category studies). A plain lab job has no alert env, so it posts only once the owner
+  # gives it one (until then the card is printed into the log).
+  - name: weekly-page
+    description: W1 weekly page in German, the 180 EUR goal, ladder moves, books, paper minus live, lanes, red jobs, disk and registry, reports/weekly/latest.md
+    schedule: "0 18 * * 0"
+    command: python -m lab.ops.weekly
+    resources: {cpus: 1, memory: 1g}
+    timeout: 10m
+
   # ---------------------------------------------------------------- models and the strategy factory
   # D3 (research/lab/lab/features): the point-in-time feature store. Caches the hourly microstructure tables of
   # every finished UTC day the recorder kept (books of five venues, Kraken trades, funding, premium, open
