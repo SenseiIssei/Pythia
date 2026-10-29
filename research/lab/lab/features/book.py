@@ -6,6 +6,9 @@
                the levels), snapshots per hour. Daily: the hours weighted by snapshots, at least 12 hours.
                Known at the bucket's end (the book was public at its stamp; the archive publishes a day
                about 7 to 10 h after it, published_us in the rows, for a live use).
+
+O1 (results/depth_signal_o1_prereg.md) adds two daily features against the coin's own 30 days before: the
+imbalance within 1 % and the log cost of 100k.
 """
 
 from __future__ import annotations
@@ -80,3 +83,16 @@ R.register(R.Feature("bd_depth1_chg_24h", "book_depth", SRC, "30s", 0, _chg("bid
 for _k, _usd in (("cost10k", "10k"), ("cost100k", "100k")):
     R.register(R.Feature(f"bd_{_k}_bps", "book_depth", SRC, "30s", 0, lambda p, c=_k: pl.col(c),
                          about=f"T4: Binance perp book, mean slippage from mid of a {_usd} USD market order, bps"))
+
+
+def _dev30(x: pl.Expr):
+    """O1: the day's value minus its mean over the 30 daily rows before (at least 20), per coin."""
+    return lambda p: x - x.shift(1).rolling_mean(30, min_samples=20).over("asset")
+
+
+R.register(R.Feature("bd_imb1_dev30", "book_depth", SRC, "30s", 0, _dev30(_imb("bid1", "ask1")), freqs=("1d",),
+                     about="O1: Binance perp book imbalance within 1 %, the day's minus its mean over the 30 days before"))
+R.register(R.Feature("bd_cost100k_dev30", "book_depth", SRC, "30s", 0,
+                     _dev30(pl.when(pl.col("cost100k") > 0).then(pl.col("cost100k").log())), freqs=("1d",),
+                     about="O1: Binance perp book, log cost of a 100k USD market order minus its mean over the 30 days "
+                           "before"))

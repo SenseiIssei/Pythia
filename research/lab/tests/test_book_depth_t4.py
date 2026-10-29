@@ -302,7 +302,7 @@ def test_hourly_and_daily_features(store):
 
 def test_every_book_feature_passes_the_leak_check():
     names = [n for n in R.names() if n.startswith("bd_")]
-    assert len(names) == 9
+    assert len(names) == 11
     for n in names:
         for fq in R.get(n).freqs:
             res = checks.feature(n, fq)
