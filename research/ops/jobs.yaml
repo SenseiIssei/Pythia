@@ -1060,20 +1060,35 @@ jobs:
     enabled: false
     # off since 2026-10-26: two weeks of paper for onchain_longterm first (the owner); on again when he arms it
 
-  # Name categories first (Claude Haiku 5.5 through the engine's metered POST /api/ai/complete,
-  # Batches, budget enforced there; a refusal is not a failure), then the study, then the retrain,
-  # which posts the daily card. Paper research only: nothing here can trade.
+  # Name categories first, then the study, then the retrain, which posts the daily card. Paper research only:
+  # nothing here can trade. AI2 (results/categories_local_ai2_prereg.md): on the local models since 2026-10-29
+  # (lab.ai.local: the owner's PC through the relay when it is online, else the VPS model, job local-llm), 25 names a
+  # call, one at a time, most frequent first, within 4.5 hours (00:40 to at most 05:10 UTC, before the briefing asks
+  # the same model at 06:00); names left stay unknown. Exits 1 only when no model answered at all.
   - name: pumpfun-rt-categories
-    description: real-time pump.fun lab, yesterday's new token names into categories (Haiku, batch), cached per mint, model features only
-    schedule: "20 6 * * *"
+    description: real-time pump.fun lab, yesterday's new token names into categories on the local model (the owner's PC through the relay, else the VPS model), every row names its model, model features only
+    schedule: "40 0 * * *"
     command: python -m lab.pumpfun_rt.categorize
     network: host
-    env_file: /etc/pythia/alerts.env
+    env_file: '/etc/pythia/local-llm.env?'
     resources: {cpus: 1, memory: 2g}
-    timeout: 45m
+    timeout: 5h
+    grace: 30m
     lock: pumpfun-rt-cat
-    enabled: false
-    # off since 2026-10-26: the API credit is used up; the live category gate is off (category:none)
+
+  # AI2: the live classifier's one-at-the-buy call (livecat.ONE_TIMEOUT_S, 1.5 s) timed on 200 names of the last
+  # day through the local chain, the share in time per model; reports/pumpfun_rt/livecat_timing.json. The lock of
+  # the categories job, so they never run together. Measures only; nothing reads it but the owner.
+  - name: pumpfun-rt-cat-timing
+    description: real-time pump.fun lab, weekly, how often the local model names one coin's category within the live gate's 1.5 s, on 200 names of a day
+    schedule: "30 11 * * 0"
+    command: python -m lab.pumpfun_rt.livecat --timing
+    network: host
+    env_file: '/etc/pythia/local-llm.env?'
+    resources: {cpus: 0.5, memory: 2g}
+    timeout: 1h
+    lock: pumpfun-rt-cat
+    alert: false
 
   # R1 (research/lab/lab/pumpfun_rt/realistic.py): the realistic paper books' execution model refitted from the
   # live bot's orders of the last 7 days (read only), and the daily line "live vs realistic paper" for P_pool0_wait.

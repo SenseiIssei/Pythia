@@ -3,7 +3,9 @@ IShowSpeed, DuckDuckGo, GTA6, TRUMP, MrBeast and SpaceX AI that day): the classi
 30 s (the daily job's prompt, chunks and checks, the same cats.jsonl with avail_ms, the daily job skipping its names),
 the entry rule of the live book and its paper twin (a blocked category is a skip with its reason, a coin without one
 is asked alone at the buy, "category unknown" when that fails), the owner's category: lines, the prompt's guidance on
-today's names (a fixture of the answer, no network) and the evaluation's offline rule.
+today's names (a fixture of the answer, no network) and the evaluation's offline rule. AI2: everything through a fake
+of the local chain (lab.ai.local.chat), every row names its model, the API's rows are not known to the local
+classifiers, a timeout is unknown, the one-at-the-buy call timed.
 
 Run from research/lab:  python -m pytest tests/test_pumpfun_live_categories.py
 """
@@ -40,28 +42,36 @@ TODAY = [("MAJOR BIDEN", "BIDEN", "celebrity"), ("Apple", "APPLE", "copycat"), (
 @pytest.fixture(autouse=True)
 def cats_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(CAT, "cat_dir", lambda: tmp_path / "categories")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
     return tmp_path / "categories"
 
 
+MODEL = "vps:qwen3-4b-instruct"
+
+
 class FakeAi:
-    """The engine's endpoint: every id gets `code` (or the code of its name in `by_name`)."""
+    """The local chain (lab.ai.local.chat): every id gets `code` (or the code of its name in `by_name`); status other
+    than 200 is no answer (None), text a fixed answer text."""
 
-    def __init__(self, code="generic", status=200, cost=0.0001, by_name=None, sleep=0.0):
-        self.calls, self.code, self.status, self.cost, self.by_name, self.sleep = [], code, status, cost, by_name, sleep
+    def __init__(self, code="generic", status=200, by_name=None, sleep=0.0, backend="vps", model="qwen3-4b-instruct",
+                 text=None):
+        self.calls, self.code, self.status, self.by_name, self.sleep = [], code, status, by_name, sleep
+        self.backend, self.model, self.text = backend, model, text
 
-    def __call__(self, url, body, tok, timeout):
-        self.calls.append(dict(body, timeout=timeout))
+    def __call__(self, messages, use, max_tokens, deadline=None, timeout=None, env=None, bks=None, schema=None):
+        sys_, user = messages[0]["content"], messages[1]["content"]
+        self.calls.append({"system": sys_, "user": user, "use": use, "max_tokens": max_tokens, "timeout": timeout,
+                           "schema": schema})
         if self.sleep:
             time.sleep(self.sleep)
         if self.status != 200:
-            return self.status, {"error": "no"}
+            return None
         items = []
-        for line in body["user"].split("TOKENS (id|name|ticker):", 1)[1].splitlines():
+        for line in user.split("TOKENS (id|name|ticker):", 1)[1].splitlines():
             if line[:1].isdigit():
                 i, name, _ = line.split("|", 2)
                 items.append({"i": int(i), "c": (self.by_name or {}).get(name, self.code)})
-        return 200, {"json": {"items": items}, "costUsd": self.cost}
+        text = self.text if self.text is not None else "```json\n" + json.dumps({"items": items}) + "\n```"
+        return {"text": text, "backend": self.backend, "model": self.model, "tokens": 9, "seconds": 0.1}
 
 
 def now_submit(f, *a):
@@ -138,11 +148,11 @@ def test_the_guidance_puts_brands_in_copycat_and_real_people_in_celebrity():
 
 def test_todays_names_are_classified_and_skipped_with_their_category(tmp_path):
     ai = FakeAi(by_name={n: c for n, _, c in TODAY})
-    got, cost = LC.ask([(n, s) for n, s, _ in TODAY], ["Apple (APPLE)"], "2026-10-23", ai)
-    assert {TODAY[i][0]: c for i, c in got.items()} == {n: c for n, _, c in TODAY} and cost == ai.cost
+    got, model = LC.ask([(n, s) for n, s, _ in TODAY], ["Apple (APPLE)"], "2026-10-23", ai)
+    assert {TODAY[i][0]: c for i, c in got.items()} == {n: c for n, _, c in TODAY} and model == MODEL
     body = ai.calls[0]
-    assert body["model"] == "claude-haiku-5-5" and body["job"] == LC.JOB and not body["batch"]
-    assert body["system"] == CAT.SYSTEM and body["schema"] == CAT.SCHEMA
+    assert body["use"] == LC.JOB and body["max_tokens"] == LC.max_tokens(len(TODAY))
+    assert body["system"].startswith(CAT.SYSTEM) and body["schema"] == CAT.SCHEMA
     assert "0|MAJOR BIDEN|BIDEN" in body["user"] and "- Apple (APPLE)" in body["user"]
     gate = LC.CategoryGate(CAT.CategoryIndex(), poster=ai, d=tmp_path, submit=now_submit, log=quiet)
     for n, s, c in TODAY:
@@ -166,21 +176,22 @@ def test_the_classifier_asks_each_new_name_once_and_writes_the_cache_point_in_ti
     assert cls.take() is None                                          # a run is going
     clock[0] = T0 + 5_000
     res = cls.classify(batch, trending)
-    assert res["asked"] == 1 and res["classified"] == 1 and len(ai.calls) == 1 and not ai.calls[0]["batch"]
+    assert res["asked"] == 1 and res["classified"] == 1 and len(ai.calls) == 1
     assert "0|Rug Coin|RUG" in ai.calls[0]["user"] and "DAY: " in ai.calls[0]["user"]
     rows = lines(cats_folder)
     assert {r["mint"] for r in rows} == {"m1", "m2"} and {r["cat"] for r in rows} == {"scam"}
     assert {r["avail_ms"] for r in rows} == {T0 + 5_000} and {r["key"] for r in rows} == {"rugcoin|rug"}
+    assert {r["model"] for r in rows} == {MODEL}
     # a later coin of the same name: its line at once, the name's first answer time, no call
     cls.observe("creates", {"mint": "m5", "name": "RUG COIN", "symbol": "rug", "quote": None, "mayhem": False})
     clock[0] = T0 + 40_000
     res = cls.classify(*cls.take())
     assert res["reused"] == 1 and res["asked"] == 0 and len(ai.calls) == 1
     assert lines(cats_folder)[-1] == {"mint": "m5", "key": "rugcoin|rug", "cat": "scam", "day": LC.utc_day(T0 + 40_000),
-                                      "avail_ms": T0 + 5_000}
+                                      "avail_ms": T0 + 5_000, "model": MODEL}
     ix = CAT.CategoryIndex.load()
     assert ix.at("Rug Coin", "RUG", T0 + 5_000) == "scam" and ix.at("Rug Coin", "RUG", T0 + 4_999) is None
-    assert cls.status()["classified"] == 1 and cls.status()["cost_today_usd"] == pytest.approx(ai.cost)
+    assert cls.status()["classified"] == 1 and cls.status()["cost_today_usd"] == 0 and cls.status()["models"] == [MODEL]
 
 
 def test_a_failed_run_is_asked_again_and_the_day_cap_stops_the_calls(cats_folder):
@@ -189,7 +200,7 @@ def test_a_failed_run_is_asked_again_and_the_day_cap_stops_the_calls(cats_folder
     cls = LC.LiveClassifier(CAT.CategoryIndex(), poster=ai, log=lambda *a, **k: log.append(a[0]))
     cls.observe("creates", {"mint": "m1", "name": "A", "symbol": "A", "quote": None})
     res = cls.classify(*cls.take())
-    assert res["classified"] == 0 and res["errors"][0].startswith("failed") and set(cls.retry) == {"m1"}
+    assert res["classified"] == 0 and res["errors"][0].startswith("down") and set(cls.retry) == {"m1"}
     assert "a run failed" in log[0] and not lines(cats_folder)
     ai.status = 200
     res = cls.classify(*cls.take())
@@ -440,3 +451,174 @@ def test_the_offline_rule_uses_a_names_category_and_keeps_coins_without_one():
     rule = CE.OfflineRule(ix)
     assert rule("X", coin("Apple", "APPLE"), False) == "category copycat"
     assert rule("X", coin("Nobody", "NB"), True) is None and rule.unknown == 1
+
+
+# ---------------------------------------------------------------- AI2: the local models
+
+class SlowServer:
+    """An OpenAI-compatible server that answers after `sleep` seconds (the VPS model at the buy)."""
+
+    def __init__(self, sleep: float, code="generic"):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        srv = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                srv.bodies.append(body)
+                time.sleep(srv.sleep)
+                b = json.dumps({"choices": [{"message": {"content": json.dumps({"items": [{"i": 0, "c": code}]})}}],
+                                "usage": {"completion_tokens": 15}}).encode()
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(b)))
+                    self.end_headers()
+                    self.wfile.write(b)
+                except OSError:
+                    pass
+
+        self.sleep, self.bodies = sleep, []
+        self.http = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.http.server_address[1]}"
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+
+
+@pytest.fixture()
+def vps(monkeypatch, tmp_path):
+    """The real local chain against a SlowServer as the VPS model (no relay)."""
+    monkeypatch.setenv("PYTHIA_DATA", str(tmp_path / "data"))
+    for k in ("PYTHIA_LOCAL_LLM", "PYTHIA_LOCAL_LLM_RELAY_URL", "PYTHIA_LOCAL_LLM_TOKEN", "PYTHIA_LOCAL_LLM_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    CAT._BKS.clear()
+
+    def start(sleep):
+        s = SlowServer(sleep)
+        monkeypatch.setenv("PYTHIA_LOCAL_LLM_URL", s.url)
+        CAT._BKS.clear()
+        return s
+    yield start
+    CAT._BKS.clear()
+
+
+def test_a_timeout_at_the_buy_is_category_unknown_through_the_real_local_chain(tmp_path, vps):
+    srv = vps(1.6)                                                     # lab.ai.local refuses a call under 1 s
+    gate = LC.CategoryGate(CAT.CategoryIndex(), d=tmp_path / "cats", timeout_s=1.0, log=quiet)
+    t = time.monotonic()
+    assert gate(RULE, coin("Slow Dog", "SDOG"), True) == LC.UNKNOWN
+    assert time.monotonic() - t < 1.4 and gate.one_st["timeout"] + gate.one_st["failed"] == 1
+    body = srv.bodies[0]
+    assert body["response_format"]["json_schema"]["schema"] == CAT.SCHEMA and body["model"] == "qwen3-4b-instruct"
+    assert body["messages"][0]["content"] == CAT.LOCAL_SYSTEM and "0|Slow Dog|SDOG" in body["messages"][1]["content"]
+    time.sleep(1.0)                                                    # the local chain gave up: nothing written
+    assert not lines(tmp_path / "cats") and CAT.name_key("Slow Dog", "SDOG") not in gate.mem
+    # in time: the category, the row with its model
+    vps(0.0)
+    assert gate(RULE, coin("Fast Dog", "FDOG"), True) is None             # generic is not blocked
+    assert lines(tmp_path / "cats")[0]["model"] == MODEL and lines(tmp_path / "cats")[0]["cat"] == "generic"
+
+
+def test_an_unreadable_answer_or_none_leaves_the_name_unknown():
+    for ai in (FakeAi(text="Sure! Here are the categories: generic"), FakeAi(status=504)):
+        with pytest.raises(CAT.NoAnswer) as e:
+            LC.ask([("A", "A")], [], "2026-10-29", ai)
+        assert e.value.kind == ("unreadable" if ai.text else "down")
+    got, model = LC.ask([("A", "A"), ("B", "B")], [], "2026-10-29",
+                        FakeAi(text='{"items": [{"i": 0, "c": "rocket"}, {"i": 1, "c": "animal"}, {"i": 7, "c": "ai"}]}'))
+    assert got == {1: "animal"} and model == MODEL                     # the checks are categorize.parse's
+
+
+def test_a_category_row_names_its_model_and_the_apis_rows_are_another_classifier(tmp_path, cats_folder):
+    from test_pumpfun_pipeline import write_day
+    day = write_day(tmp_path, [("Doge Cat", "DCAT"), ("Doge Cat", "DCAT"), ("Robot AI", "RAI")])
+    d = tmp_path / "categories"
+    CAT.append([{"mint": "old", "key": CAT.name_key("Doge Cat", "DCAT"), "cat": "animal", "day": "2026-10-20",
+                 "avail_ms": T0 - 10 ** 9}], d)                         # the API's row: no model
+    ai = FakeAi(code="generic", backend="relay", model="sensei-qwen38")
+    res = CAT.run(day, now_ms=T0 + 86_400_000, root=tmp_path, poster=ai, log=quiet, clock=lambda: T0 + 90_000_000)
+    assert res["keys"] == 2 and res["classified"] == 2 and res["models"] == {"relay:sensei-qwen38": 2}
+    assert "0|Doge Cat|DCAT" in ai.calls[0]["user"]                    # most frequent first, asked again
+    new = [r for r in lines(d) if r["mint"] != "old"]
+    assert len(new) == 3 and {r["model"] for r in new} == {"relay:sensei-qwen38"}
+    api = CAT.CategoryIndex.load(d, model=CAT.API_MODEL)
+    loc = CAT.CategoryIndex.load(d, model="relay:sensei-qwen38")
+    t = T0 + 10 ** 9
+    assert api.at("Doge Cat", "DCAT", t) == "animal" and api.at("Robot AI", "RAI", t) is None
+    assert loc.at("Doge Cat", "DCAT", t) == "generic" and loc.at("Robot AI", "RAI", t) == "generic"
+    both = CAT.CategoryIndex.load(d)                                   # the books: a name's first category
+    assert both.at("Doge Cat", "DCAT", t) == "animal" and both.local[CAT.name_key("Doge Cat", "DCAT")][2] == \
+        "relay:sensei-qwen38"
+    assert CAT.json.loads((d / "runs.json").read_text())[day]["models"] == {"relay:sensei-qwen38": 2}
+    from lab import metrics
+    assert "hand:ai2:categories_relay_sensei-qwen38" in {r["id"] for r in metrics.read_registry()}
+    # the live classifier: the API's row is not known, its own answer is
+    cls = LC.LiveClassifier(CAT.CategoryIndex.load(d), poster=FakeAi(code="scam"), log=quiet)
+    assert cls.known(CAT.name_key("Doge Cat", "DCAT"))[2] == "relay:sensei-qwen38"
+    ix = CAT.CategoryIndex()
+    ix.add("m", CAT.name_key("Old", "OLD"), "animal", T0)
+    cls = LC.LiveClassifier(ix, poster=FakeAi(code="scam"), log=quiet)
+    cls.observe("creates", {"mint": "m9", "name": "Old", "symbol": "OLD", "quote": None})
+    assert cls.classify(*cls.take())["asked"] == 1
+
+
+def test_the_daily_job_stops_at_its_time_budget_and_the_rest_stays_unknown(tmp_path, cats_folder, monkeypatch):
+    from test_pumpfun_pipeline import write_day
+    monkeypatch.setattr(CAT, "CHUNK", 2)
+    day = write_day(tmp_path, [("A", "A"), ("A", "A"), ("B", "B"), ("C", "C"), ("D", "D"), ("E", "E")])
+    now = [0.0]
+
+    class Slow(FakeAi):
+        def __call__(self, *a, **k):
+            now[0] += 100.0
+            return super().__call__(*a, **k)
+    ai = Slow()
+    res = CAT.run(day, root=tmp_path, poster=ai, log=quiet, budget_sec=120, mono=lambda: now[0])
+    assert len(ai.calls) == 1 and res["classified"] == 2 and res["left"] == 3 and "0|A|A" in ai.calls[0]["user"]
+    assert res["errors"][0].startswith("time budget") and CAT.main  # not a failure (main's soft errors)
+    assert {r["key"] for r in lines(tmp_path / "categories")} == {"a|a", "b|b"}
+
+
+def test_the_job_is_red_only_when_no_model_answered(tmp_path, monkeypatch):
+    for res, code in (({"chunks": 3, "classified": 0, "errors": ["down: no local model answered in time"]}, 1),
+                      ({"chunks": 3, "classified": 0, "errors": ["off: the local model is off"]}, 0),
+                      ({"chunks": 3, "classified": 1, "errors": ["time budget: 9 names left unknown"]}, 0)):
+        monkeypatch.setattr(CAT, "run", lambda *a, **k: res)
+        monkeypatch.setattr(CAT, "write_report", lambda r: None)
+        assert CAT.main([]) == code
+
+
+def test_the_one_call_is_timed_on_a_day_of_names(tmp_path, cats_folder, monkeypatch):
+    from test_pumpfun_pipeline import write_day
+    day = write_day(tmp_path, [(f"N{i}", f"S{i}") for i in range(10)])
+    now = [0.0]
+    secs = iter([0.5, 2.0, 1.2, 9.0, 0.9, 3.0, 0.4, 1.6, 1.0, 5.0])
+
+    class Timed(FakeAi):
+        def __call__(self, *a, **k):
+            now[0] += next(secs)
+            return super().__call__(*a, **k)
+    log_p = tmp_path / "local_llm.jsonl"
+    log_p.write_text("\n".join(json.dumps(r) for r in (
+        {"ts_ms": 1, "backend": "vps", "ok": True, "tokens": 7, "seconds": 1.38},
+        {"ts_ms": 2, "backend": "vps", "ok": True, "tokens": 15, "seconds": 1.71},
+        {"ts_ms": 3, "backend": "vps", "ok": False, "seconds": 45.0},
+        {"ts_ms": 4, "backend": "relay", "ok": True, "tokens": 30, "seconds": 1.0})) + "\n")
+    ai = Timed()
+    res = LC.timing(day, n=8, chat=ai, root=tmp_path, log=quiet, mono=lambda: now[0], log_path=log_p)
+    assert res["n"] == 8 and res["names"] == 10 and len(ai.calls) == 8
+    assert all(c["timeout"] == LC.TIMING_LIMIT_S and c["max_tokens"] == LC.max_tokens(1) for c in ai.calls)
+    v = res["by_model"][MODEL]
+    assert v["n"] == 8 and v["in_time"] == 4 and v["answered"] == 8 and res["all"]["share"] == 0.5
+    assert 0.2 < v["ci95"][0] < 0.5 < v["ci95"][1] < 0.8 and v["median_s"] == 1.4
+    assert res["log"]["calls"] == {"n": 2, "in_time": 1, "share": 0.5, "ci95": res["log"]["calls"]["ci95"]}
+    assert res["log"]["calls_12_tokens_or_more"]["in_time"] == 0
+    from lab import metrics
+    assert "hand:ai2:livecat_timing_vps_qwen3-4b-instruct" in {r["id"] for r in metrics.read_registry()}
+    ai2 = FakeAi()
+    again = LC.timing(day, n=8, chat=ai2, root=tmp_path, log=quiet, mono=lambda: 0.0, log_path=log_p)
+    assert [c["user"] for c in ai2.calls] == [c["user"] for c in ai.calls] and again["all"]["share"] == 1.0
+    assert LC.timing(day, n=8, chat=FakeAi(status=504), root=tmp_path, log=quiet, log_path=log_p)["all"]["in_time"] == 0

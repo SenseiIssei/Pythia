@@ -1,5 +1,8 @@
-"""Questions to Pythia in the owner's Telegram chat, answered by Claude
-(Sonnet 5.5) from the same fact sheet the daily brief reads.
+"""Questions to Pythia in the owner's Telegram chat, answered by the local
+models (lab.ai.local: the owner's PC through the relay when it is online, else
+the VPS model; AI2) from the same fact sheet the daily brief reads. Until
+2026-10-28 Claude Sonnet 5.5 answered through the engine's metered endpoint;
+its credit is gone.
 
 A long-running service (a container, research/ops/README.md "Questions in
 Telegram"): it long-polls the bot's getUpdates, takes messages from the
@@ -15,21 +18,26 @@ autopilot, to change a setting or to reveal a key, token, password or server
 detail is refused, first by a plain check here (nothing is called) and again
 by the model's instructions. Nothing in this module can place an order or
 write a setting: it reads the engine's state, the lab's reports and the
-Claude answer, and sends text to the chat.
+model's answer, and sends text to the chat.
+
+The sheet (rebuilt every FACTS_TTL_S) is about 11,000 tokens; each backend gets
+what fits its context (the VPS model 4,096 tokens, the relay
+PYTHIA_LOCAL_LLM_RELAY_CTX, default 8,192): the date, then the sections that
+share the most words with the question. A question the facts it got do not
+answer is said so (kind no_facts), and an answer with a number that is in
+neither those facts nor the question is not sent (lab.ai.local's number rule):
+the owner gets the same "not in my facts" line. Every answer names the model
+that wrote it.
 
 At most PYTHIA_AI_ASK_PER_DAY questions (default 40) a UTC day. Every
-question is written to <data>/ai/chat.jsonl with its answer, the model and
-its cost. The fixed instructions and the fact sheet form the cached prefix
-(rebuilt every FACTS_TTL_S), so questions asked close together read it from
-the prompt cache at a tenth of the price.
+question is written to <data>/ai/chat.jsonl with its answer and the model.
 
   python -m lab.ai.chat            run until stopped
   python -m lab.ai.chat --once     one poll, then exit (a cron alternative)
 
 Environment: PYTHIA_TELEGRAM_BOT_TOKEN, PYTHIA_TELEGRAM_CHAT_ID,
-ANTHROPIC_API_KEY (only its hash goes to the engine), PYTHIA_AI_ASK_PER_DAY,
-PYTHIA_AI_MODEL_ASK, PYTHIA_AI_EFFORT_ASK. The bot token is a secret: never
-printed, logged or written.
+PYTHIA_AI_ASK_PER_DAY, the local chain's (/etc/pythia/local-llm.env,
+lab.ai.local). The bot token is a secret: never printed, logged or written.
 """
 
 from __future__ import annotations
@@ -45,11 +53,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..ops import i18n, notify
-from . import brief, critic, engine, facts, score
+from . import brief, critic, facts, local, score
+from .analyst import est_tokens
 
-DEFAULT_MODEL = engine.REVIEW
-DEFAULT_EFFORT = "medium"
-MAX_TOKENS = 6000
+MAX_TOKENS = 600                       # about 200 words and the JSON around them
+CALL_TIMEOUT_S = 300.0                 # the VPS model: a 3,000-token prompt and the answer at a few tokens a second
+ANSWER_BUDGET_S = 420.0                # every backend of one question together
+VPS_CTX = 4096                         # research/ops/local-llm.sh -c 4096
+RELAY_CTX = 8192                       # PYTHIA_LOCAL_LLM_RELAY_CTX overrides
+CTX_MARGIN = 200
 PER_DAY = 40
 FACTS_TTL_S = 15 * 60
 POLL_S = 50
@@ -59,10 +71,10 @@ TELEGRAM_LIMIT = 4000
 
 SYSTEM = """You are Pythia's assistant in the owner's Telegram chat. Pythia is a paper-first trading research \
 system run by one person: autopilots that trade paper or demo money, a research lab with studies, models, a \
-strategy factory and watchers. You answer the owner's questions from the FACTS below, which are today's \
-state of the system and the market as Pythia sees it. That is everything you know: no news feed, no internet. \
-If the facts do not answer a question, say so plainly and say where in the app the owner could look. Never \
-invent numbers, trades, prices or results.
+strategy factory and watchers. You answer the owner's questions from the FACTS below, which are the part of \
+today's state of the system and the market that fits here. That is everything you know: no news feed, no \
+internet. If the facts do not answer a question, set kind to no_facts. Never invent numbers, trades, prices or \
+results: every number you write must appear exactly so in the facts; do no arithmetic.
 
 Answer in the language of the question (German or English). Plain text for a phone: no markdown headings, no \
 tables, no em dashes, short paragraphs or a few lines starting with "- ". At most about 200 words unless the \
@@ -75,11 +87,13 @@ the server or anything else that looks like a secret or credential; if the messa
 kind to refuse_secret. Do not give personal investment advice or tell the owner to buy or sell anything: \
 explain what the facts and the lab say instead. Otherwise kind is answer.
 
-Answer with the JSON object only: {"kind": "answer" | "refuse_trade" | "refuse_secret", "answer": "..."}."""
+Answer with the JSON object only: {"kind": "answer" | "no_facts" | "refuse_trade" | "refuse_secret", \
+"answer": "..."}."""
 
+KINDS = ("answer", "no_facts", "refuse_trade", "refuse_secret")
 SCHEMA = {
     "type": "object",
-    "properties": {"kind": {"type": "string", "enum": ["answer", "refuse_trade", "refuse_secret"]},
+    "properties": {"kind": {"type": "string", "enum": list(KINDS)},
                    "answer": {"type": "string"}},
     "required": ["kind", "answer"],
     "additionalProperties": False,
@@ -102,6 +116,16 @@ GERMAN = re.compile(r"[äöüß]|\b(?:ich|ist|und|nicht|wie|warum|wieso|weshalb|
                     r"meine|wird|wurde|gibt|kannst|bitte|danke|lief|welche|welcher|haben|sind|alles|sofort|"
                     r"zeig|zeige|mir|mit|noch|schon|jetzt|gerade|seit|wieviel|kaufe|verkaufe|stoppe|starte|"
                     r"setze|ändere|aendere|erhöhe|erhoehe|senke)\b", re.IGNORECASE)
+
+
+# The chat's own fixed lines (the rest are i18n's ask_* lines).
+NO_FACTS = {"de": "Das kann ich aus den Fakten, die ich habe, nicht beantworten. Mehr steht in der App (Labor, "
+                  "Papier-Bücher, pump.fun, Autopiloten).",
+            "en": "I cannot answer that from the facts I have. The app has more (Lab, paper books, pump.fun, "
+                  "autopilots)."}
+NO_MODEL = {"de": "kein lokales Modell hat geantwortet", "en": "no local model answered"}
+LOCAL_COST = {"de": "lokal, ohne Kosten", "en": "local, no cost"}
+WHERE = {"relay": "PC", "vps": "VPS"}
 
 
 def ai_dir() -> Path:
@@ -149,7 +173,7 @@ def asked_today(now_ms: int) -> int:
 
 def recent_exchanges(n: int = HISTORY) -> list[dict]:
     rows = [r for r in critic.read_jsonl(log_path()) if r.get("kind") == "answer" and r.get("answer")]
-    return rows[-n:]
+    return rows[-n:] if n > 0 else []
 
 
 # ---------------------------------------------------------------- the facts
@@ -253,9 +277,52 @@ def scrub(text: str) -> str:
     return notify.nodash(text).strip()
 
 
+def ctx_of(b: dict) -> int:
+    """The context a backend holds, prompt and answer together."""
+    if b.get("name") == "relay":
+        try:
+            return max(2048, int(os.environ.get("PYTHIA_LOCAL_LLM_RELAY_CTX") or RELAY_CTX))
+        except ValueError:
+            return RELAY_CTX
+    return VPS_CTX
+
+
+WORD = re.compile(r"[a-zäöüß0-9][a-zäöüß0-9.]{2,}")
+
+
+def fit(sheet: str, question: str, budget: int) -> str:
+    """The sheet within `budget` tokens (est_tokens): the date, then the sections that share the most words with the
+    question (the sheet's order among equals), the last one cut after the rows that fit; in the sheet's order."""
+    if est_tokens(sheet) <= budget:
+        return sheet
+    head, *secs = sheet.split("\n\n")
+    words = set(WORD.findall(question.lower()))
+    left = budget - est_tokens(head)
+    keep: dict[int, str] = {}
+    for i in sorted(range(len(secs)), key=lambda i: -sum(w in secs[i].lower() for w in words)):
+        if left <= 0:
+            break
+        rows = secs[i].split("\n")
+        take = rows[:1]
+        for r in rows[1:]:
+            if est_tokens("\n".join(take + [r])) > left:
+                break
+            take.append(r)
+        if len(take) > 1:
+            keep[i] = "\n".join(take)
+            left -= est_tokens(keep[i]) + 1
+    return "\n\n".join([head] + [keep[i] for i in sorted(keep)])
+
+
+def footer(ans: dict, lang: str, n: int, limit: int) -> str:
+    """Which model answered (and where it runs), the cost, the day's count."""
+    who = f"{ans.get('model') or '?'} ({WHERE.get(ans['backend'], ans['backend'])})"
+    return i18n.t("ask_footer", lang, model=who, cost=LOCAL_COST[lang], n=n, limit=limit)
+
+
 def answer(question: str, now_ms: int, sheet: Sheet, poster=None) -> dict:
     """One question to the end: the record that goes to the log, with `reply`
-    the text for the chat."""
+    the text for the chat. `poster`: a fake of lab.ai.local.chat (tests)."""
     q = " ".join(str(question or "").split())[:MAX_QUESTION]
     lang = lang_of(q)
     rec = {"ts": now_ms, "date": day_of(now_ms), "lang": lang, "question": q, "called": False}
@@ -268,29 +335,49 @@ def answer(question: str, now_ms: int, sheet: Sheet, poster=None) -> dict:
     if used >= limit:
         rec.update(kind="limit", reply=i18n.t("ask_limit", lang, n=limit))
         return rec
-    model, effort = engine.model_for("ask", DEFAULT_MODEL), engine.effort_for("ask", DEFAULT_EFFORT)
-    system = SYSTEM + "\n\nFACTS:\n" + sheet.get(now_ms)
-    rec["called"] = True
-    try:
-        a = engine.complete("ask", system, user_prompt(q, recent_exchanges()), MAX_TOKENS, model=model,
-                            schema=SCHEMA, effort=effort, batch=False, timeout=280, poster=poster)
-    except engine.AiError as e:
-        rec.update(kind="error", error=f"{e.kind}: {e}"[:300], costUsd=e.cost_usd,
-                   reply=i18n.t("ask_failed", lang, why=e.kind if e.kind != "budget" else str(e)[:200]))
+    bks = local.backends()
+    if not bks:
+        rec.update(kind="error", error="the local model is off", reply=i18n.t("ask_failed", lang, why=NO_MODEL[lang]))
         return rec
-    obj = a.get("json") or {}
-    kind = obj.get("kind") if obj.get("kind") in ("answer", "refuse_trade", "refuse_secret") else "answer"
+    rec["called"] = True
+    text_all = sheet.get(now_ms)
+    call = poster or local.chat
+    deadline = time.monotonic() + ANSWER_BUDGET_S
+    ans, given = None, ""
+    for b in bks:                       # each backend gets the facts that fit its context
+        history = recent_exchanges(HISTORY if ctx_of(b) > VPS_CTX else 1)
+        user = user_prompt(q, history)
+        given = fit(text_all, q, ctx_of(b) - est_tokens(SYSTEM + user) - MAX_TOKENS - CTX_MARGIN)
+        msgs = [{"role": "system", "content": SYSTEM + "\n\nFACTS:\n" + given}, {"role": "user", "content": user}]
+        ans = call(msgs, "ask", MAX_TOKENS, deadline, timeout=CALL_TIMEOUT_S, bks=[b], schema=SCHEMA)
+        if ans is not None:
+            break
+    if ans is None:
+        rec.update(kind="error", error="no local model answered",
+                   reply=i18n.t("ask_failed", lang, why=NO_MODEL[lang]))
+        return rec
+    obj = local.json_object(ans["text"]) or {"kind": "answer", "answer": ans["text"]}
+    kind = obj.get("kind") if obj.get("kind") in KINDS else "answer"
     text = scrub(str(obj.get("answer") or ""))
-    cost = float(a.get("costUsd") or 0.0)
-    served = a.get("servedBy") or a.get("model") or model
-    if kind != "answer":
-        reply = i18n.t("ask_" + kind, lang)
+    why = None
+    if kind == "answer" and not text:
+        kind, why = "no_facts", "empty answer"
+    elif kind == "answer" and (bad := local.foreign_numbers(text, [given, q])):
+        kind, why = "no_facts", "numbers not in the facts: " + ", ".join(bad[:5])
+    foot = footer(ans, lang, used + 1, limit)
+    if kind == "answer":
+        reply = text[: TELEGRAM_LIMIT - len(foot) - 4] + "\n\n" + foot
+    elif kind == "no_facts":
+        reply = NO_FACTS[lang] + "\n\n" + foot
     else:
-        foot = i18n.t("ask_footer", lang, model=str(served).replace("claude-", ""), cost=i18n.money(cost, 4, lang),
-                      n=used + 1, limit=limit)
-        reply = (text or "?")[: TELEGRAM_LIMIT - len(foot) - 4] + "\n\n" + foot
-    rec.update(kind=kind, answer=text, reply=reply, model=served, costUsd=cost, usage=a.get("usage") or {},
-               latencyMs=a.get("latencyMs"))
+        reply = i18n.t("ask_" + kind, lang)
+    rec.update(kind=kind, answer=text if kind == "answer" else "", reply=reply,
+               model=f"{ans['backend']}:{ans.get('model') or '?'}", costUsd=0.0, tokens=ans.get("tokens"),
+               latencyMs=int(1000 * float(ans.get("seconds") or 0)), facts_tokens=est_tokens(given))
+    if why:
+        rec["why"] = why
+        if kind == "no_facts" and text:
+            rec["withheld"] = text[:600]
     return rec
 
 
@@ -372,7 +459,7 @@ def step(sheet: Sheet, updates: list[dict], now_ms: int | None = None, send=repl
         delivered = send(str(msg["chat"]["id"]), rec.pop("reply"), msg.get("message_id"))
         rec["delivered"] = delivered
         critic.append_jsonl(log_path(), [rec])
-        notify.say(f"ask: {rec.get('kind')}, ${float(rec.get('costUsd') or 0):.4f}, "
+        notify.say(f"ask: {rec.get('kind')}, {rec.get('model') or 'no model'}, "
                    f"{'delivered' if delivered else 'NOT delivered'}")
     return nxt
 

@@ -582,15 +582,19 @@ def test_exit_model_labels_in_the_decision_rows():
 # ---------------------------------------------------------------- name categories
 
 class FakeAi:
-    def __init__(self, code="animal", status=200, cost=0.001):
-        self.calls, self.code, self.status, self.cost = [], code, status, cost
+    """The local chain (lab.ai.local.chat, AI2): every id gets `code`; status other than 200 is no answer."""
 
-    def __call__(self, url, body, tok, timeout):
+    def __init__(self, code="animal", status=200):
+        self.calls, self.code, self.status = [], code, status
+
+    def __call__(self, messages, use, max_tokens, deadline=None, timeout=None, env=None, bks=None, schema=None):
+        body = {"system": messages[0]["content"], "user": messages[1]["content"], "use": use, "schema": schema}
         self.calls.append(body)
         n = sum(1 for line in body["user"].splitlines() if line[:1].isdigit())
         if self.status != 200:
-            return self.status, {"error": "no"}
-        return 200, {"json": {"items": [{"i": i, "c": self.code} for i in range(n)]}, "costUsd": self.cost}
+            return None
+        return {"text": json.dumps({"items": [{"i": i, "c": self.code} for i in range(n)]}), "backend": "vps",
+                "model": "qwen3-4b-instruct", "tokens": 9, "seconds": 0.1}
 
 
 def write_day(root, rows):
@@ -607,13 +611,12 @@ def write_day(root, rows):
 
 
 def test_categories_are_asked_once_per_name_and_usable_from_their_answer(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
     day = write_day(tmp_path, [("Doge Cat", "DCAT"), ("doge cat", "dcat"), ("Robot AI", "RAI")])
     ai = FakeAi()
     res = CAT.run(day, now_ms=T0 + 86_400_000, root=tmp_path, poster=ai, log=lambda *a: None,
                   clock=lambda: T0 + 90_000_000)
     assert res["keys"] == 2 and res["classified"] == 2 and len(ai.calls) == 1
-    assert ai.calls[0]["model"] == "claude-haiku-5-5" and ai.calls[0]["job"] == CAT.JOB and ai.calls[0]["batch"]
+    assert ai.calls[0]["use"] == CAT.JOB and ai.calls[0]["schema"] == CAT.SCHEMA
     ix = CAT.CategoryIndex.load(tmp_path / "categories")
     assert ix.at("DOGE CAT", "DCAT", T0 + 90_000_001) == "animal"
     assert ix.at("DOGE CAT", "DCAT", T0 + 80_000_000) is None           # before its answer: unknown
@@ -623,11 +626,10 @@ def test_categories_are_asked_once_per_name_and_usable_from_their_answer(tmp_pat
     assert again.get("skipped") and len(ai.calls) == 1                     # once a day
 
 
-def test_a_budget_refusal_stops_the_batch_and_bad_answers_are_dropped(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+def test_no_answer_leaves_the_names_unknown_and_bad_answers_are_dropped(tmp_path, monkeypatch):
     day = write_day(tmp_path, [("A", "A"), ("B", "B")])
-    res = CAT.run(day, root=tmp_path, poster=FakeAi(status=402), log=lambda *a: None)
-    assert res["classified"] == 0 and res["errors"][0].startswith("budget")
+    res = CAT.run(day, root=tmp_path, poster=FakeAi(status=504), log=lambda *a: None)
+    assert res["classified"] == 0 and res["errors"][0].startswith("down") and res["unanswered"] == 2
     got, bad = CAT.parse({"items": [{"i": 0, "c": "animal"}, {"i": 5, "c": "animal"}, {"i": 1, "c": "rocket"},
                                     {"i": 0, "c": "ai"}]}, 2)
     assert got == {0: "animal"} and bad == 3

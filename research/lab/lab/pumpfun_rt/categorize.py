@@ -1,17 +1,27 @@
-"""Name categories of pump.fun tokens, from Claude Haiku 5.5 through the engine's
-metered AI endpoint (lab/ai/engine.py; the engine checks the budget and keeps the
-ledger). PAPER research data only: a category is a model feature, adopted for a
-label only when it improves the out-of-sample AUC (retrain.py, plan addendum 2).
+"""Name categories of pump.fun tokens, from the local models (lab.ai.local: the owner's
+PC through the relay when it is online, else the VPS model; AI2, results/categories_local_ai2_prereg.md). Until
+2026-10-24 they came from Claude Haiku 5.5 through the engine's metered endpoint; its credit is gone. PAPER
+research data only: a category is a model feature, adopted for a label only when it improves the out-of-sample
+AUC (retrain.py, plan addendum 2).
 
     python -m lab.pumpfun_rt.categorize              yesterday's tokens (UTC), once a day
     python -m lab.pumpfun_rt.categorize --dry-run    the batches and their size, nothing called
     python -m lab.pumpfun_rt.categorize --day D      another day (e.g. to fill a missed one)
 
 Every plain token of the day (SOL curve, no mayhem mode) is reduced to its
-normalised name and ticker; names classified before are not asked again. The
-rest go in chunks of CHUNK, the 30 most traded names of that day as the trending
-list, into one of CATS. The answer is a JSON schema of (id, code) pairs, checked
-here: an id not asked for or a code not in the list is dropped and counted.
+normalised name and ticker; names a local model classified before are not asked
+again. The rest go in chunks of CHUNK, most frequent first, one call at a time
+(the VPS model has one slot) until BUDGET_SEC is spent, the 30 most traded names
+of that day as the trending list, into one of CATS. The answer is a JSON schema of
+(id, code) pairs, checked here: an id not asked for or a code not in the list is
+dropped and counted; a name without a usable answer stays unknown.
+
+A different model is a different classifier: every row a local model wrote names
+it (model: backend:model name, e.g. vps:qwen3-4b-instruct); a row without one is
+the API's (API_MODEL). The local classifiers count only local rows as known, so
+a name the API sorted is asked again; a study takes one series
+(CategoryIndex.load(model=...)) and never pools the API's with the local ones.
+The books and the live gate read every row (a name's first category), as before.
 
 Point in time: a name's category is usable from the moment its answer was
 written (avail_ms), by any token with the same normalised name and ticker
@@ -24,8 +34,8 @@ and its strategy and the paper twin skip a blocked category; the daily job then 
 known and asks only what the live classifier missed. CategoryIndex.tail reads what was appended.
 
 Files under <data>/pumpfun_rt/categories/:
-  cats.jsonl   one line per mint: mint, key, cat, day, avail_ms (the cache)
-  runs.json    which days are done, with their counts and cost
+  cats.jsonl   one line per mint: mint, key, cat, day, avail_ms, model (the cache)
+  runs.json    which days are done, with their counts, the models and the names left
 Report: reports/pumpfun_rt/categories.json.
 
 Names are untrusted text: they are cut to 40 characters, stripped of line
@@ -41,7 +51,6 @@ import re
 import sys
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,13 +64,15 @@ CATS = {
             "official, migration, v2, presale, test, or is random characters",
 }
 CAT_FEATURES = ["cat_known"] + [f"cat_{c}" for c in CATS]
-CHUNK = 800
-THREADS = 4
+CHUNK = 25                             # 800 for the API; an 800-name answer is past the VPS model's 4,096 tokens
 MAX_KEYS = 60_000
-MAX_USD_PER_RUN = 0.40
 MAX_TOKENS = 12_000
-BATCH_WAIT_SEC = 1800
+CALL_TIMEOUT_S = 180.0                 # one chunk on the VPS model: about 15 tokens a name at 0.08 to 0.12 s a token
+BUDGET_SEC = 4.5 * 3600                # the daily job, 00:40 to at most 05:10 UTC: the briefing asks the model at 06:00
+BKS_TTL_S = 60.0                       # the backends (the relay's status) are checked at most this often
 JOB = "pumpfun-categories"
+API_MODEL = "claude-haiku-5-5"         # the rows without a model field: the metered API until 2026-10-24
+TRIAL_PREFIX = "hand:ai2:categories"
 BOOK_DAYS = 60                         # the books and the study load the names of the last 60 days
 TRENDING_N = 30
 
@@ -98,6 +109,8 @@ SCHEMA = {
     "required": ["items"],
     "additionalProperties": False,
 }
+# The local chain gets the schema as response_format and, written out, here (the API had it as a parameter only).
+LOCAL_SYSTEM = SYSTEM + "\n\nThe schema: " + json.dumps(SCHEMA, separators=(",", ":"))
 
 
 def cat_dir() -> Path:
@@ -122,19 +135,27 @@ def clean(s: str, n: int = 40) -> str:
 # ---------------------------------------------------------------- the index the engine reads
 
 class CategoryIndex:
-    """key -> (first avail_ms, cat); mint -> cat."""
+    """key -> (first avail_ms, cat) of any classifier; mint -> cat; local: key -> (first avail_ms, cat, model) of
+    the local models' rows only (what the local classifiers count as known)."""
 
     def __init__(self):
         self.keys: dict[str, tuple[int, str]] = {}
         self.mints: dict[str, str] = {}
+        self.local: dict[str, tuple[int, str, str]] = {}
+        self.local_mints: set[str] = set()
 
-    def add(self, mint: str, key: str, cat: str, avail_ms: int) -> None:
+    def add(self, mint: str, key: str, cat: str, avail_ms: int, model: str | None = None) -> None:
         if cat not in CATS:
             return
         self.mints[mint] = cat
         old = self.keys.get(key)
         if old is None or avail_ms < old[0]:
             self.keys[key] = (int(avail_ms), cat)
+        if model and model != API_MODEL:
+            self.local_mints.add(mint)
+            old = self.local.get(key)
+            if old is None or avail_ms < old[0]:
+                self.local[key] = (int(avail_ms), cat, sys.intern(model))   # one string per model, not per row
 
     def at(self, name: str, symbol: str, t: int) -> str | None:
         hit = self.keys.get(name_key(name, symbol))
@@ -151,13 +172,16 @@ class CategoryIndex:
         return len(self.keys)
 
     @classmethod
-    def load(cls, d: Path | None = None, mints: bool = True, max_age_days: float | None = None) -> "CategoryIndex":
+    def load(cls, d: Path | None = None, mints: bool = True, max_age_days: float | None = None,
+             model: str | None = None) -> "CategoryIndex":
         """The cache. The books need only the names of the last weeks (mints=False, max_age_days)
-        to stay small in memory; the daily job reads everything. tail() reads what was appended since."""
+        to stay small in memory; the daily job reads everything. tail() reads what was appended since.
+        model: one classifier's rows only (API_MODEL for the API's, else e.g. vps:qwen3-4b-instruct), for a study."""
         ix = cls()
         ix.path = (d or cat_dir()) / "cats.jsonl"
         ix.with_mints = mints
         ix.since = int(time.time() * 1000 - max_age_days * 86_400_000) if max_age_days else None
+        ix.model = model
         ix.tail()
         return ix
 
@@ -165,6 +189,7 @@ class CategoryIndex:
     pos = 0                                             # bytes of the file read so far (whole lines only)
     with_mints = True
     since: int | None = None
+    model: str | None = None
 
     def tail(self) -> int:
         """The lines appended to the file since the last read (the live classifier writes every 30 s): only
@@ -187,11 +212,14 @@ class CategoryIndex:
                 r = json.loads(line)
                 if self.since is not None and int(r["avail_ms"]) < self.since:
                     continue
-                self.add(r["mint"] if self.with_mints else "", r["key"], r["cat"], int(r["avail_ms"]))
+                if self.model is not None and (r.get("model") or API_MODEL) != self.model:
+                    continue
+                self.add(r["mint"] if self.with_mints else "", r["key"], r["cat"], int(r["avail_ms"]), r.get("model"))
                 n += 1
             except (ValueError, KeyError, TypeError):
                 continue
         self.mints.pop("", None)
+        self.local_mints.discard("")
         return n
 
 
@@ -264,11 +292,87 @@ def append(entries: list[dict], d: Path | None = None) -> None:
         fh.write("".join(json.dumps(e, separators=(",", ":")) + "\n" for e in entries))
 
 
+# ---------------------------------------------------------------- the local chain
+
+class NoAnswer(Exception):
+    """No usable answer. kind: off (PYTHIA_LOCAL_LLM off, no backend), down (no model answered in time),
+    unreadable (not one JSON object)."""
+
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
+        self.cost_usd = 0.0
+
+
+_BKS: dict = {}
+
+
+def backends() -> list[dict]:
+    """lab.ai.local's chain, the relay's status asked at most every BKS_TTL_S (the call at the buy has 1.5 s)."""
+    from ..ai import local
+    if "v" not in _BKS or time.monotonic() - _BKS["t"] >= BKS_TTL_S:
+        _BKS.update(v=local.backends(), t=time.monotonic())
+    return _BKS["v"]
+
+
+def out_tokens(n: int) -> int:
+    """The answer's room: about 15 tokens an item."""
+    return min(MAX_TOKENS, 200 + 15 * n)
+
+
+def model_of(ans: dict) -> str:
+    """The classifier of an answer: backend:model name (vps:qwen3-4b-instruct)."""
+    return f"{ans['backend']}:{ans.get('model') or '?'}"
+
+
+def ask(day: str, trending: list[str], names: list[tuple[str, str]], chat=None, use: str = JOB,
+        timeout: float = CALL_TIMEOUT_S, deadline: float | None = None) -> tuple[dict[int, str], str]:
+    """One call for these (name, ticker) pairs, ids 0..n-1, with the prompt, schema and checks above (prompt, SCHEMA,
+    parse), through the local chain (`chat`: lab.ai.local.chat, or a fake of its signature in the tests):
+    ({id: code}, the model). NoAnswer when there was none."""
+    from ..ai import local
+    items = [(i, n, s) for i, (n, s) in enumerate(names)]
+    msgs = [{"role": "system", "content": LOCAL_SYSTEM}, {"role": "user", "content": prompt(day, trending, items)}]
+    if chat is None:
+        bks = backends()
+        if not bks:
+            raise NoAnswer("off", "the local model is off")
+        ans = local.chat(msgs, use, out_tokens(len(items)), deadline, timeout=timeout, bks=bks, schema=SCHEMA)
+    else:
+        ans = chat(msgs, use, out_tokens(len(items)), deadline, timeout=timeout, schema=SCHEMA)
+    if ans is None:
+        raise NoAnswer("down", "no local model answered in time")
+    obj = local.json_object(ans["text"])
+    if obj is None:
+        raise NoAnswer("unreadable", f"{ans['backend']} did not answer with one JSON object")
+    got, _bad = parse(obj, len(items))
+    return got, model_of(ans)
+
+
+def trial(model: str, prefix: str = TRIAL_PREFIX) -> dict:
+    """A classifier series' one trial in R5's registry (counted only), registered with its first classified chunk."""
+    backend, _, name = model.partition(":")
+    slug = re.sub(r"[^a-z0-9.]+", "-", name.lower()).strip("-")
+    return {"id": f"{prefix}_{backend}_{slug}", "family": "hand", "n": 1, "sharpe": None, "var": None,
+            "source": "results/categories_local_ai2_prereg.md (AI2, counted only)"}
+
+
+def register_trial(model: str, log=print, prefix: str = TRIAL_PREFIX) -> None:
+    from .. import metrics
+    try:
+        metrics.register([trial(model, prefix)])
+    except OSError as e:
+        log(f"categorize: the trial registry could not be written ({type(e).__name__}); it counts when it can")
+
+
+# ---------------------------------------------------------------- the daily job
+
 def run(day: str | None = None, now_ms: int | None = None, root=None, poster=None, dry_run: bool = False,
-        force: bool = False, log=print, clock=None) -> dict:
-    from ..ai import engine
+        force: bool = False, log=print, clock=None, budget_sec: float = BUDGET_SEC, mono=time.monotonic) -> dict:
+    """`poster`: a fake of lab.ai.local.chat (tests); None asks the local chain."""
     clock = clock or (lambda: int(time.time() * 1000))
     now_ms = now_ms or clock()
+    deadline = mono() + budget_sec
     day = day or (datetime.fromtimestamp(now_ms / 1000, timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     d = cat_dir() if root is None else Path(root) / "categories"
     runs_p = d / "runs.json"
@@ -281,68 +385,68 @@ def run(day: str | None = None, now_ms: int | None = None, root=None, poster=Non
         return {"day": day, "skipped": True}
     rows, trending = day_tokens(day, root)
     ix = CategoryIndex.load(d)
-    known = [r for r in rows if r["key"] in ix.keys]
+    known = [r for r in rows if r["key"] in ix.local]
     new_keys: dict[str, list[dict]] = {}
     for r in rows:
-        if r["key"] not in ix.keys and r["key"] != "|":
+        if r["key"] not in ix.local and r["key"] != "|":
             new_keys.setdefault(r["key"], []).append(r)
     order = sorted(new_keys, key=lambda k: -len(new_keys[k]))[:MAX_KEYS]
     chunks = [order[i:i + CHUNK] for i in range(0, len(order), CHUNK)]
-    res = {"day": day, "tokens": len(rows), "reused": len(known), "keys": len(new_keys), "asked": len(order),
-           "chunks": len(chunks), "classified": 0, "dropped": 0, "cost_usd": 0.0, "errors": [], "by_cat": {}}
-    log(f"categorize: {day}: {len(rows):,} plain tokens, {len(known):,} with a known name, {len(new_keys):,} new "
-        f"names in {len(chunks)} chunk(s)")
-    # known names: cached per mint at once (their category was usable since the name's first answer)
-    append([{"mint": r["mint"], "key": r["key"], "cat": ix.keys[r["key"]][1], "day": day,
-             "avail_ms": ix.keys[r["key"]][0]} for r in known if r["mint"] not in ix.mints], None if root is None
-           else d)
+    res = {"day": day, "tokens": len(rows), "reused": len(known), "keys": len(new_keys), "asked": 0,
+           "chunks": len(chunks), "classified": 0, "dropped": 0, "unanswered": 0, "left": 0, "models": {},
+           "errors": [], "by_cat": {}}
+    log(f"categorize: {day}: {len(rows):,} plain tokens, {len(known):,} with a name a local model knows, "
+        f"{len(new_keys):,} new names in {len(chunks)} chunk(s)")
+    # known names: cached per mint at once (their category was usable since the name's first local answer)
+    append([{"mint": r["mint"], "key": r["key"], "cat": ix.local[r["key"]][1], "day": day,
+             "avail_ms": ix.local[r["key"]][0], "model": ix.local[r["key"]][2]} for r in known
+            if r["mint"] not in ix.local_mints], None if root is None else d)
     if dry_run:
         if chunks:
             p = prompt(day, trending, [(i, new_keys[k][0]["name"], new_keys[k][0]["symbol"])
                                        for i, k in enumerate(chunks[0])])
             log(f"categorize: dry run, first chunk {len(p):,} characters; nothing called")
         return res
-    spent = [0.0]
-    stop = [None]
-
-    def one(keys: list[str]) -> tuple[list[str], dict | None, str | None]:
-        if stop[0] or spent[0] >= MAX_USD_PER_RUN:
-            return keys, None, stop[0] or "run cost cap"
-        items = [(i, new_keys[k][0]["name"], new_keys[k][0]["symbol"]) for i, k in enumerate(keys)]
+    registered: set = set()
+    for n, keys in enumerate(chunks):
+        if deadline - mono() < 30:
+            res["left"] = sum(len(c) for c in chunks[n:])
+            res["errors"].append(f"time budget: {res['left']:,} names left unknown")
+            break
+        res["asked"] += len(keys)
         try:
-            ans = engine.complete(JOB, SYSTEM, prompt(day, trending, items), MAX_TOKENS, model=engine.ROUTINE,
-                                  schema=SCHEMA, effort="low", batch=True, batch_wait_sec=BATCH_WAIT_SEC,
-                                  poster=poster)
-        except engine.AiError as e:
-            spent[0] += e.cost_usd
-            if e.kind in ("budget", "nokey"):
-                stop[0] = e.kind
-            return keys, None, f"{e.kind}: {e}"
-        spent[0] += float(ans.get("costUsd") or 0.0)
-        return keys, ans, None
-
-    with ThreadPoolExecutor(max_workers=THREADS) as pool:
-        for keys, ans, err in pool.map(one, chunks):
-            if err:
-                res["errors"].append(err[:200])
-                continue
-            got, _bad = parse(ans.get("json"), len(keys))
-            res["dropped"] += len(keys) - len(got)            # names without a usable answer
-            avail = clock()
-            entries = []
-            for i, c in got.items():
-                for r in new_keys[keys[i]]:
-                    entries.append({"mint": r["mint"], "key": keys[i], "cat": c, "day": day, "avail_ms": avail})
-                res["by_cat"][c] = res["by_cat"].get(c, 0) + 1
-                res["classified"] += 1
-            append(entries, None if root is None else d)
-    res["cost_usd"] = round(spent[0], 5)
+            got, model = ask(day, trending, [(new_keys[k][0]["name"], new_keys[k][0]["symbol"]) for k in keys],
+                             chat=poster, deadline=deadline)
+        except NoAnswer as e:
+            res["errors"].append(f"{e.kind}: {e}"[:200])
+            res["unanswered"] += len(keys)                 # unknown; --force asks them again
+            if e.kind == "off":
+                res["left"] = sum(len(c) for c in chunks[n + 1:])
+                break
+            continue
+        res["dropped"] += len(keys) - len(got)            # names without a usable answer stay unknown
+        if got and model not in registered:
+            registered.add(model)
+            register_trial(model, log)
+        avail = clock()
+        entries = []
+        for i, c in got.items():
+            for r in new_keys[keys[i]]:
+                entries.append({"mint": r["mint"], "key": keys[i], "cat": c, "day": day, "avail_ms": avail,
+                                "model": model})
+            res["by_cat"][c] = res["by_cat"].get(c, 0) + 1
+            res["models"][model] = res["models"].get(model, 0) + 1
+            res["classified"] += 1
+        append(entries, None if root is None else d)
     if res["classified"] or not chunks:
-        runs[day] = {k: res[k] for k in ("tokens", "reused", "keys", "asked", "classified", "dropped", "cost_usd")}
+        runs[day] = {k: res[k] for k in ("tokens", "reused", "keys", "asked", "classified", "dropped", "unanswered",
+                                         "left", "models")}
         d.mkdir(parents=True, exist_ok=True)
         runs_p.write_text(json.dumps(runs, indent=1), encoding="utf-8")
-    log(f"categorize: {res['classified']:,} names classified, {res['dropped']} dropped, ${res['cost_usd']:.4f}"
-        + (f"; {len(res['errors'])} chunk(s) failed: {res['errors'][0]}" if res["errors"] else ""))
+    log(f"categorize: {res['classified']:,} names classified ("
+        + (", ".join(f"{m} {n:,}" for m, n in res["models"].items()) or "no model")
+        + f"), {res['dropped']} dropped, {res['unanswered']:,} unanswered, {res['left']:,} left"
+        + (f"; {len(res['errors'])} problem(s), the first: {res['errors'][0]}" if res["errors"] else ""))
     return res
 
 
@@ -362,9 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     res = run(a.day, dry_run=a.dry_run, force=a.force)
     if not a.dry_run and not res.get("skipped"):
         write_report(res)
-    # A budget refusal or no key is not a failure (the engine said so already); every chunk failing otherwise is.
+    # The local model switched off or the time budget is not a failure (the log says so); no answer at all is.
     errs = res.get("errors") or []
-    hard = [e for e in errs if not e.startswith(("budget", "nokey", "run cost cap"))]
+    hard = [e for e in errs if not e.startswith(("off", "time budget"))]
     return 1 if res.get("chunks") and not res.get("classified") and hard else 0
 
 

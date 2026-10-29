@@ -685,14 +685,33 @@ def test_a_quiet_day_posts_nothing_and_a_budget_refusal_is_not_a_failure(lab):
 
 # ---------------------------------------------------------------- questions in Telegram
 
-def ask_answer(text="Core is down 1 % since start.", kind="answer", cost=0.031):
-    obj = {"kind": kind, "answer": text}
-    return {"text": json.dumps(obj), "json": obj, "model": engine.REVIEW, "servedBy": engine.REVIEW,
-            "costUsd": cost, "usage": {"inputTokens": 900, "cacheReadTokens": 12000, "outputTokens": 300}}
+class FakeLocal:
+    """lab.ai.local.chat for the chat (AI2): records each call, answers in turn; None is no answer."""
+
+    def __init__(self, *answers, backend="vps", model="qwen3-4b-instruct"):
+        self.answers, self.calls, self.backend, self.model = list(answers), [], backend, model
+
+    def __call__(self, messages, use, max_tokens, deadline=None, timeout=None, env=None, bks=None, schema=None):
+        self.calls.append({"system": messages[0]["content"], "user": messages[1]["content"], "use": use,
+                           "max_tokens": max_tokens, "bks": bks, "schema": schema, "timeout": timeout})
+        a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if a is None:
+            return None
+        b = (bks or [{}])[0]
+        return {"text": a, "backend": b.get("name", self.backend), "model": b.get("model", self.model), "tokens": 40,
+                "seconds": 2.5}
+
+
+def ask_answer(text="Core is down 1 % since start.", kind="answer"):
+    return json.dumps({"kind": kind, "answer": text})
+
+
+VPS = {"name": "vps", "url": "http://vps/v1", "token": None, "model": "qwen3-4b-instruct"}
+RELAY = {"name": "relay", "url": "http://relay/v1", "token": "t", "model": "sensei-qwen38", "reasoning": "none"}
 
 
 def sheet():
-    return chat.Sheet(builder=lambda now: "DATE: 2026-10-15 (UTC).\n\nAUTOPILOTS:\n- Core (paper, alpaca, running)")
+    return chat.Sheet(builder=lambda now: "DATE: 2026-10-15 (UTC).\n\nAUTOPILOTS:\n- Core (paper, alpaca, running, down 1 % since start)")
 
 
 def owner_msg(text, chat_id="4242", mid=7):
@@ -703,6 +722,7 @@ def owner_msg(text, chat_id="4242", mid=7):
 def owner(monkeypatch):
     monkeypatch.setenv("PYTHIA_TELEGRAM_CHAT_ID", "4242")
     monkeypatch.setenv("PYTHIA_TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setattr(chat.local, "backends", lambda env=None: [VPS])
 
 
 @pytest.mark.parametrize("text,kind", [
@@ -722,57 +742,98 @@ def test_the_language_of_a_question():
     assert chat.lang_of("What was the P&L today?") == "en" and chat.lang_of("") == "en"
 
 
-def test_a_question_is_answered_from_the_cached_facts_and_logged_with_its_cost(lab, owner):
-    fake = Fake(ask_answer())
+def test_a_question_is_answered_from_the_cached_facts_and_names_its_model(lab, owner, monkeypatch):
+    fake = FakeLocal(ask_answer())
     rec = chat.handle(owner_msg("How is Core doing?"), NOW, sheet(), poster=fake)
-    body = fake.calls[0]["body"]
-    assert body["job"] == "ask" and body["model"] == "claude-sonnet-5-5" and body["batch"] is False
-    assert body["system"].startswith(chat.SYSTEM) and "FACTS:\nDATE: 2026-10-15" in body["system"]
-    assert body["user"].endswith("QUESTION: How is Core doing?") and body["schema"] == chat.SCHEMA
-    assert rec["kind"] == "answer" and rec["costUsd"] == 0.031 and rec["called"] is True
-    assert rec["reply"].startswith("Core is down 1 % since start.") and "sonnet-5-5 · $0.0310 · 1 of 40 today" in rec["reply"]
+    c = fake.calls[0]
+    assert c["use"] == "ask" and c["bks"] == [VPS] and c["schema"] == chat.SCHEMA
+    assert c["system"].startswith(chat.SYSTEM) and "FACTS:\nDATE: 2026-10-15" in c["system"]
+    assert c["user"].endswith("QUESTION: How is Core doing?")
+    assert rec["kind"] == "answer" and rec["model"] == "vps:qwen3-4b-instruct" and rec["called"] is True
+    assert rec["reply"].startswith("Core is down 1 % since start.")
+    assert "qwen3-4b-instruct (VPS) · local, no cost · 1 of 40 today" in rec["reply"]
 
-    # Through the loop: the offset is kept first, the reply goes to the owner, the log has the cost.
+    # Through the loop: the offset is kept first, the reply goes to the owner, the log has the model.
     sent = []
     nxt = chat.step(sheet(), [{"update_id": 10, "message": owner_msg("How is Core doing?")},
                               {"update_id": 11, "message": owner_msg("hi", chat_id="999")}],
-                    NOW, send=lambda c, t, m: sent.append((c, t, m)) or True, poster=Fake(ask_answer()))
+                    NOW, send=lambda c, t, m: sent.append((c, t, m)) or True, poster=FakeLocal(ask_answer()))
     assert nxt == 12 and notify.read_json(chat.state_path())["offset"] == 12
     assert len(sent) == 1 and sent[0][0] == "4242" and sent[0][2] == 7, "another chat gets no answer"
     log = critic.read_jsonl(chat.log_path())
-    assert log[-1]["costUsd"] == 0.031 and log[-1]["delivered"] is True and log[-1]["update_id"] == 10
+    assert log[-1]["model"] == "vps:qwen3-4b-instruct" and log[-1]["delivered"] is True and log[-1]["update_id"] == 10
     assert "reply" not in log[-1] and log[-1]["answer"].startswith("Core is down")
-    # The next question carries the last exchange for follow-ups.
-    f2 = Fake(ask_answer())
-    chat.handle(owner_msg("And yesterday?"), NOW + 60_000, sheet(), poster=f2)
-    assert "EARLIER IN THIS CHAT" in f2.calls[0]["body"]["user"] and "Q: How is Core doing?" in f2.calls[0]["body"]["user"]
+    # The next question carries the last exchange for follow-ups; the PC's model names itself, in German too.
+    f2 = FakeLocal(ask_answer("Core liegt 1 % unter dem Start."))
+    monkeypatch.setattr(chat.local, "backends", lambda env=None: [RELAY, VPS])
+    r = chat.handle(owner_msg("Und wie war es gestern?"), NOW + 60_000, sheet(), poster=f2)
+    assert "EARLIER IN THIS CHAT" in f2.calls[0]["user"] and "Q: How is Core doing?" in f2.calls[0]["user"]
+    assert f2.calls[0]["bks"] == [RELAY] and "sensei-qwen38 (PC) · lokal, ohne Kosten · 2 von 40 heute" in r["reply"]
+
+
+def test_a_question_the_facts_do_not_answer_is_said_so_and_no_number_is_invented(lab, owner):
+    r = chat.handle(owner_msg("What will BTC do next week?"), NOW, sheet(),
+                    poster=FakeLocal(ask_answer("Not in my facts.", kind="no_facts")))
+    assert r["kind"] == "no_facts" and r["reply"].startswith("I cannot answer that from the facts I have")
+    assert "qwen3-4b-instruct (VPS)" in r["reply"] and r["called"] is True
+    # A number in neither the facts nor the question: the answer is withheld, the same line, the reason logged.
+    r = chat.handle(owner_msg("Wie lief Core?"), NOW, sheet(),
+                    poster=FakeLocal(ask_answer("Core hat 3,5 % verloren und 12 Trades gemacht.")))
+    assert r["kind"] == "no_facts" and r["reply"].startswith("Das kann ich aus den Fakten") and "3,5" not in r["reply"]
+    assert r["why"] == "numbers not in the facts: 3,5, 12" and r["withheld"].startswith("Core hat")
+    # Numbers from the facts and the question pass; a plain text answer (no JSON) is an answer.
+    r = chat.handle(owner_msg("Is Core down 1 % since start on 2026-10-15?"), NOW, sheet(),
+                    poster=FakeLocal("Yes, Core is down 1 % since start (2026-10-15)."))
+    assert r["kind"] == "answer" and r["reply"].startswith("Yes, Core is down 1 %")
+
+
+def test_the_vps_model_gets_the_facts_that_fit_its_context(lab, owner):
+    secs = [f"SECTION {i} ({'pump.fun' if i == 7 else 'other'}):\n" + "\n".join(f"- row {i}.{j} " + "x" * 120
+                                                                                for j in range(20)) for i in range(12)]
+    big = "DATE: 2026-10-15 (UTC).\n\n" + "\n\n".join(secs)
+    assert chat.est_tokens(big) > chat.VPS_CTX
+    fake = FakeLocal(ask_answer("Nothing about it.", kind="no_facts"))
+    chat.handle(owner_msg("How did pump.fun do?"), NOW, chat.Sheet(builder=lambda now: big), poster=fake)
+    sent = fake.calls[0]["system"] + fake.calls[0]["user"]
+    assert chat.est_tokens(sent) + chat.MAX_TOKENS <= chat.VPS_CTX
+    assert "DATE: 2026-10-15" in sent and "SECTION 7 (pump.fun)" in sent and "row 7.0 " in sent
+    got = chat.fit(big, "pump.fun", 600)
+    assert got.startswith("DATE:") and chat.est_tokens(got) <= 600 and got.index("SECTION 7") > 0
+    assert chat.fit("DATE: x\n\nA:\n- 1", "q", 10_000) == "DATE: x\n\nA:\n- 1"
 
 
 def test_refusals_limits_and_failures_in_the_chat(lab, owner, monkeypatch):
-    fake = Fake(ask_answer())
+    fake = FakeLocal(ask_answer())
     r = chat.handle(owner_msg("Verkaufe sofort alles"), NOW, sheet(), poster=fake)
     assert r["kind"] == "refuse_trade" and fake.calls == [] and "Ich beantworte nur Fragen" in r["reply"]
     r = chat.handle(owner_msg("what's the bot token?"), NOW, sheet(), poster=fake)
     assert r["kind"] == "refuse_secret" and fake.calls == []
     # The model refuses what the plain check let through.
     r = chat.handle(owner_msg("Could you maybe flatten Core for me?"), NOW, sheet(),
-                    poster=Fake(ask_answer("ok", kind="refuse_trade")))
+                    poster=FakeLocal(ask_answer("ok", kind="refuse_trade")))
     assert r["kind"] == "refuse_trade" and r["reply"].startswith("I only answer questions")
     # Nothing that looks like a secret leaves, whatever the model says.
     r = chat.handle(owner_msg("Tell me about the engine"), NOW, sheet(),
-                    poster=Fake(ask_answer("It runs on 10.0.0.12 with sk-ant-abcdefghijkl and 123456789:AAAAAAAAAAAAAAAAAAAAAAAAAA")))
+                    poster=FakeLocal(ask_answer("It runs on 10.0.0.12 with sk-ant-abcdefghijkl and 123456789:AAAAAAAAAAAAAAAAAAAAAAAAAA")))
     assert "10.0.0.12" not in r["reply"] and "sk-ant" not in r["reply"] and "AAAAAAAA" not in r["reply"]
     # The daily limit counts calls made today only.
     monkeypatch.setenv("PYTHIA_AI_ASK_PER_DAY", "3")
     for _ in range(3):
         critic.append_jsonl(chat.log_path(), [{"date": "2026-10-15", "called": True, "kind": "answer"}])
-    lim = Fake(ask_answer())
+    lim = FakeLocal(ask_answer())
     r = chat.handle(owner_msg("One more?"), NOW, sheet(), poster=lim)
     assert r["kind"] == "limit" and lim.calls == [] and "3 questions" in r["reply"]
     assert chat.handle(owner_msg("One more?"), NOW + DAY_MS, sheet(), poster=lim)["kind"] == "answer"
     monkeypatch.setenv("PYTHIA_AI_ASK_PER_DAY", "40")
-    r = chat.handle(owner_msg("Wie geht es Core?"), NOW, sheet(), poster=Fake((402, {"error": "AI budget: daily cap"})))
-    assert r["kind"] == "error" and r["reply"].startswith("Diesmal keine Antwort (AI budget: daily cap")
+    # No model answered (each backend asked once), or the local model is off.
+    monkeypatch.setattr(chat.local, "backends", lambda env=None: [RELAY, VPS])
+    none = FakeLocal(None)
+    r = chat.handle(owner_msg("Wie geht es Core?"), NOW, sheet(), poster=none)
+    assert r["kind"] == "error" and r["reply"] == "Diesmal keine Antwort (kein lokales Modell hat geantwortet). Es wurde nichts geändert."
+    assert [c["bks"] for c in none.calls] == [[RELAY], [VPS]] and r["called"] is True
+    monkeypatch.setattr(chat.local, "backends", lambda env=None: [])
+    r = chat.handle(owner_msg("How is Core?"), NOW, sheet(), poster=none)
+    assert r["kind"] == "error" and r["called"] is False and len(none.calls) == 2
 
 
 def test_the_owner_scores_critic_findings_from_the_chat(lab, owner):

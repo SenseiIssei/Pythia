@@ -125,10 +125,12 @@ def log_call(row: dict) -> None:
 
 
 def chat(messages: list[dict], use: str, max_tokens: int = MAX_TOKENS, deadline: float | None = None,
-         timeout: float = CALL_TIMEOUT, env: dict | None = None, bks: list[dict] | None = None) -> dict | None:
+         timeout: float = CALL_TIMEOUT, env: dict | None = None, bks: list[dict] | None = None,
+         schema: dict | None = None) -> dict | None:
     """One OpenAI-compatible chat call on the first backend that answers, within `deadline` (time.monotonic()):
-    {"text", "backend", "tokens", "seconds"}, or None when none answered in time. At most `max_tokens` out,
-    temperature 0.2; a <think> block is dropped."""
+    {"text", "backend", "model", "tokens", "seconds"}, or None when none answered in time. At most `max_tokens`
+    out, temperature 0.2; a <think> block is dropped. `schema`: a JSON schema the answer must follow, sent as
+    response_format (llama.cpp and the relay's server constrain the answer to it); the caller still checks it."""
     for b in bks if bks is not None else backends(env):
         left = timeout if deadline is None else min(timeout, deadline - time.monotonic())
         if left < 1:
@@ -137,6 +139,8 @@ def chat(messages: list[dict], use: str, max_tokens: int = MAX_TOKENS, deadline:
         t0 = time.monotonic()
         body = {"model": b["model"], "messages": messages, "max_tokens": int(max_tokens), "temperature": 0.2,
                 "stream": False}
+        if schema is not None:
+            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
         if b.get("reasoning", "default") != "default":
             body["reasoning_effort"] = b["reasoning"]
         headers = {"Content-Type": "application/json"}
@@ -157,8 +161,22 @@ def chat(messages: list[dict], use: str, max_tokens: int = MAX_TOKENS, deadline:
         tokens = (d.get("usage") or {}).get("completion_tokens")
         log_call({**row, "ok": True, "tokens": tokens, "seconds": round(sec, 2),
                   "tokens_per_s": round(tokens / sec, 1) if tokens and sec > 0 else None})
-        return {"text": text, "backend": b["name"], "tokens": tokens, "seconds": sec}
+        return {"text": text, "backend": b["name"], "model": b["model"], "tokens": tokens, "seconds": sec}
     return None
+
+
+FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
+
+
+def json_object(text: str) -> dict | None:
+    """The answer as one JSON object (a ```json fence around it is fine), else None. Nothing is repaired."""
+    t = (text or "").strip()
+    m = FENCE.match(t)
+    try:
+        obj = json.loads(m.group(1) if m else t)
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 # ---------------------------------------------------------------- the number rule

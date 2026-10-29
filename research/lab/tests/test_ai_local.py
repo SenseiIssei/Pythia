@@ -108,6 +108,19 @@ def calls(root: Path) -> list[dict]:
     return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
 
+def test_a_schema_goes_as_response_format_and_the_answer_names_its_model(data, servers):
+    vps = servers(answer=lambda b: '```json\n{"items": []}\n```')
+    env = {"PYTHIA_LOCAL_LLM_URL": vps.url}
+    schema = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
+    ans = local.chat([{"role": "user", "content": "hi"}], "t", env=env, schema=schema)
+    assert ans["model"] == "qwen3-4b-instruct" and local.json_object(ans["text"]) == {"items": []}
+    assert vps.chats()[0]["body"]["response_format"] == {"type": "json_schema",
+                                                         "json_schema": {"name": "answer", "schema": schema}}
+    local.chat([{"role": "user", "content": "hi"}], "t", env=env)
+    assert "response_format" not in vps.chats()[1]["body"], "only when a schema is asked for"
+    assert local.json_object("Here: {}") is None and local.json_object("[1, 2]") is None
+
+
 # ---------------------------------------------------------------- the number rule
 
 def test_numbers_must_come_from_the_facts_in_either_notation():

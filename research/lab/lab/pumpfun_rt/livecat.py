@@ -5,34 +5,41 @@ a coin is not bought; it never buys, signs or sends anything.
 
 LiveClassifier, in the live service (live_service.run, every EVERY_S): the normalised name and ticker of every new
 plain coin (SOL curve, no mayhem mode) the stream saw created since the last run, with the same chunks, prompt,
-schema and checks as the daily job (categorize.py) and through the same metered endpoint and budget (the engine's,
-lab/ai/engine.py), as plain calls (a batch takes minutes); a name classified before (the cache, this session) is
-not asked again, its coin gets the name's category at once. Its answers go to the same cats.jsonl, a line per
-mint with avail_ms (when the answer was written), so a replay stays point in time and the daily job skips these
-names. A run that failed (the engine down, a refusal) is asked again with the next one. The cost is logged every
-LOG_S and is in the status ("categories"); above PYTHIA_PF_CAT_USD_DAY (USD_DAY, 1.00 USD) in a UTC day nothing
-more is asked until 00:00 UTC (the daily volume, about 7,400 new names, costs about 0.3 USD this way).
+schema and checks as the daily job (categorize.py) and through the same local chain (lab.ai.local: the owner's PC
+through the relay when it is online, else the VPS model; AI2, results/categories_local_ai2_prereg.md; until
+2026-10-24 the engine's metered endpoint); a name a local model classified before (the cache, this session) is not
+asked again, its coin gets the name's category at once. Its answers go to the same cats.jsonl, a line per mint with
+avail_ms (when the answer was written) and the model that answered, so a replay stays point in time and the daily
+job skips these names. A run that failed (no model answered, an unreadable answer) is asked again with the next
+one. The calls are logged every LOG_S and are in the status ("categories"); the day's cap PYTHIA_PF_CAT_USD_DAY
+(USD_DAY, 1.00 USD) stays, a local call costs nothing.
 
 CategoryGate (Pipeline.category; the live book's strategy, and in the collector the paper twin blocklist.PAPER_RULES):
 a coin whose name's category is blocked (blocklist category: lines; celebrity, copycat and scam without any) is a
 skip "category celebrity" etc. as soon as its signal comes; one that reaches the buy without a category (the
 classifier lagged, a coin made and migrated within seconds) is asked at once, alone, and waited for at most
 ONE_TIMEOUT_S (1.5 s; the stream's loop waits that long at most); no answer by then, an error or the day's cap is a
-skip "category unknown". Every skip takes the pipeline's path: the status's skipped counts, one log line,
-skipped.jsonl, no card. The gate reads what was appended to cats.jsonl every CHECK_S (CategoryIndex.tail).
-With category:none in the list (no category blocked) the gate is off: every coin goes on, nothing is looked up or
-asked at the buy; the LiveClassifier keeps classifying (the data for the models).
+skip "category unknown". The VPS model writes a token in 0.08 to 0.12 s and a one-name answer is about 15 tokens, so
+it rarely answers in time: `python -m lab.pumpfun_rt.livecat --timing` measures it on a day of names (job
+pumpfun-rt-cat-timing, results/categories_local_ai2.md). Every skip takes the pipeline's path: the status's skipped
+counts, one log line, skipped.jsonl, no card. The gate reads what was appended to cats.jsonl every CHECK_S
+(CategoryIndex.tail). With category:none in the list (no category blocked) the gate is off: every coin goes on,
+nothing is looked up or asked at the buy; the LiveClassifier keeps classifying (the data for the models).
 """
 
 from __future__ import annotations
 
 import collections
+import json
 import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timezone
+
+import numpy as np
 
 from . import categorize as K
 from .blocklist import DEFAULT_CATEGORIES
@@ -63,12 +70,12 @@ def reason(cat: str) -> str:
 
 
 def max_tokens(n: int) -> int:
-    """The answer's room: about 15 tokens an item, as the daily job's MAX_TOKENS for its CHUNK."""
-    return min(K.MAX_TOKENS, 200 + 15 * n)
+    """The answer's room: about 15 tokens an item, as the daily job's."""
+    return K.out_tokens(n)
 
 
 class Spend:
-    """The day's cost of the live calls (both kinds), in USD, and the cap (USD_DAY)."""
+    """The day's cost of the live calls (both kinds), in USD, and the cap (USD_DAY); the local calls cost 0."""
 
     def __init__(self, cap: float | None = None, clock=wall_ms):
         self.cap = USD_DAY if cap is None else cap
@@ -96,15 +103,11 @@ class Spend:
 
 
 def ask(names: list[tuple[str, str]], trending: list[str], day: str, poster=None, timeout: float | None = None,
-        job: str = JOB) -> tuple[dict[int, str], float]:
-    """One call for these (name, ticker) pairs, ids 0..n-1: the daily job's prompt, schema and checks (categorize.
-    prompt, SCHEMA, parse). ({id: code}, cost in USD); engine.AiError when there was no answer."""
-    from ..ai import engine
-    items = [(i, n, s) for i, (n, s) in enumerate(names)]
-    ans = engine.complete(job, K.SYSTEM, K.prompt(day, trending, items), max_tokens(len(items)), model=engine.ROUTINE,
-                          schema=K.SCHEMA, effort="low", timeout=timeout, poster=poster)
-    got, _bad = K.parse(ans.get("json"), len(items))
-    return got, float(ans.get("costUsd") or 0.0)
+        job: str = JOB) -> tuple[dict[int, str], str]:
+    """One call for these (name, ticker) pairs, ids 0..n-1: the daily job's prompt, schema and checks through the
+    local chain (categorize.ask; `poster` a fake of lab.ai.local.chat in the tests). ({id: code}, the model);
+    categorize.NoAnswer when there was none."""
+    return K.ask(day, trending, names, chat=poster, use=job, timeout=K.CALL_TIMEOUT_S if timeout is None else timeout)
 
 
 class LiveClassifier:
@@ -125,7 +128,8 @@ class LiveClassifier:
         self.names: collections.OrderedDict = collections.OrderedDict()
         self.trades: dict[str, collections.Counter] = {}   # UTC day -> trades per mint (today and yesterday)
         self.trending: list[str] = []                   # as of the last take, for the single calls too
-        self.mem: dict[str, tuple[int, str]] = {}       # key -> (avail_ms, code) answered in this session
+        self.mem: dict[str, tuple[int, str, str]] = {}  # key -> (avail_ms, code, model) answered in this session
+        self.models: set[str] = set()                   # the models that answered (their trial registered)
         self.busy = False
         self.st = {"runs": 0, "coins": 0, "asked": 0, "classified": 0, "reused": 0, "dropped": 0, "errors": 0,
                    "last_ms": None, "last_error": None}
@@ -193,8 +197,9 @@ class LiveClassifier:
         self.busy = True
         return batch, self.trending
 
-    def known(self, key: str) -> tuple[int, str] | None:
-        return self.ix.keys.get(key) or self.mem.get(key)
+    def known(self, key: str) -> tuple[int, str, str] | None:
+        """(avail_ms, code, model) of a name a local model classified (the API's rows do not count, AI2)."""
+        return self.ix.local.get(key) or self.mem.get(key)
 
     # ------------------------------------------------------------ in a thread
     def classify(self, batch: dict[str, tuple[str, str]], trending: list[str]) -> dict:
@@ -216,7 +221,8 @@ class LiveClassifier:
                 continue
             hit = self.known(k)
             if hit is not None:
-                entries.append({"mint": mint, "key": k, "cat": hit[1], "day": day, "avail_ms": hit[0]})
+                entries.append({"mint": mint, "key": k, "cat": hit[1], "day": day, "avail_ms": hit[0],
+                                "model": hit[2]})
                 res["reused"] += 1
             else:
                 by_key.setdefault(k, []).append((mint, name, sym))
@@ -229,24 +235,25 @@ class LiveClassifier:
                 break                                   # asked again tomorrow, or alone at the buy (also capped)
             res["asked"] += len(keys)
             try:
-                got, cost = ask([by_key[k][0][1:] for k in keys], trending, day, self.poster)
-            except Exception as e:                      # engine.AiError and anything else: the next run asks again
-                cost = getattr(e, "cost_usd", 0.0)
-                self.spend.add(cost)
-                res["cost_usd"] += cost
+                got, model = ask([by_key[k][0][1:] for k in keys], trending, day, self.poster)
+            except Exception as e:                      # NoAnswer and anything else: the next run asks again
+                self.spend.add(0.0)
                 res["errors"].append(f"{getattr(e, 'kind', type(e).__name__)}: {str(e)[:160]}")
                 for k in keys:
                     for mint, name, sym in by_key[k]:
                         failed[mint] = (name, sym)
                 continue
-            self.spend.add(cost)
-            res["cost_usd"] += cost
+            self.spend.add(0.0)
+            if got and model not in self.models:
+                self.models.add(model)
+                K.register_trial(model, lambda m: self.log(m, flush=True))
             avail = self.clock()
             res["dropped"] += len(keys) - len(got)      # the next coin of that name asks again
             for j, c in got.items():
-                self.mem[keys[j]] = (avail, c)
+                self.mem[keys[j]] = (avail, c, model)
                 for mint, _, _ in by_key[keys[j]]:
-                    entries.append({"mint": mint, "key": keys[j], "cat": c, "day": day, "avail_ms": avail})
+                    entries.append({"mint": mint, "key": keys[j], "cat": c, "day": day, "avail_ms": avail,
+                                    "model": model})
                 res["classified"] += 1
         while len(self.mem) > MEM_KEEP:
             self.mem.pop(next(iter(self.mem)))
@@ -287,7 +294,7 @@ class LiveClassifier:
 
     def status(self) -> dict:
         return dict(self.st, pending=len(self.new) + len(self.retry), cost_today_usd=round(self.spend.usd, 5),
-                    cap_usd=self.spend.cap, every_s=EVERY_S)
+                    cap_usd=self.spend.cap, every_s=EVERY_S, models=sorted(self.models))
 
 
 TOP_SCAN = 400                                          # the most traded mints looked at for the trending names
@@ -323,7 +330,7 @@ class CategoryGate:
         self.log = log
         self.submit = submit or (lambda f, *a: pool().submit(f, *a))
         self.checked = -1e18
-        self.mem: dict[str, tuple[int, str]] = {}       # the single answers, until the index has them
+        self.mem: dict[str, tuple[int, str, str]] = {}  # the single answers, until the index has them
         self.one_st = collections.Counter()             # asked, ok, timeout, failed, cap
 
     def blocked(self) -> frozenset:
@@ -372,7 +379,7 @@ class CategoryGate:
             self.log(f"live categories: {K.clean(sym, 16)!r} asked alone, no answer within {self.timeout_s:g} s",
                      flush=True)
             return None
-        except Exception as e:                          # noqa: BLE001 - engine.AiError and the rest: unknown
+        except Exception as e:                          # noqa: BLE001 - NoAnswer and the rest: unknown
             self.one_st["failed"] += 1
             if self.one_st["failed"] <= ERRORS_SHOWN or self.one_st["failed"] % 100 == 0:
                 self.log(f"live categories: {K.clean(sym, 16)!r} asked alone, failed "
@@ -389,17 +396,18 @@ class CategoryGate:
     def _ask_one(self, mint: str, name: str, sym: str, key: str, trending: list[str]) -> str | None:
         now = self.clock()
         try:
-            got, cost = ask([(name, sym)], trending, utc_day(now), self.poster, timeout=self.timeout_s)
-        except Exception as e:
-            self.spend.add(getattr(e, "cost_usd", 0.0))
+            got, model = ask([(name, sym)], trending, utc_day(now), self.poster, timeout=self.timeout_s)
+        except Exception:
+            self.spend.add(0.0)
             raise
-        self.spend.add(cost)
+        self.spend.add(0.0)
         c = got.get(0)
         if c is not None:
             avail = self.clock()
-            self.mem[key] = (avail, c)
+            self.mem[key] = (avail, c, model)
             try:
-                K.append([{"mint": mint, "key": key, "cat": c, "day": utc_day(avail), "avail_ms": avail}], self.d)
+                K.append([{"mint": mint, "key": key, "cat": c, "day": utc_day(avail), "avail_ms": avail,
+                           "model": model}], self.d)
             except OSError:
                 pass
         return c
@@ -410,3 +418,127 @@ class CategoryGate:
                 "off": bool(lst is not None and lst.categories_off()),
                 "names": len(self.ix), "one": dict(self.one_st), "cost_today_usd": round(self.spend.usd, 5),
                 "cap_usd": self.spend.cap}
+
+
+# ---------------------------------------------------------------- the one-at-the-buy call, timed (AI2)
+
+TIMING_N = 200
+TIMING_SEED = 20261029
+TIMING_LIMIT_S = 45.0                                   # each name may take this long, so its time is seen
+TIMING_TRIAL = "hand:ai2:livecat_timing"
+LOG_MIN_TOKENS = 12                                     # a one-name answer is about 15 tokens
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n <= 0:
+        return 0.0, 1.0
+    p = k / n
+    c = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return float(max(0.0, (p + z * z / (2 * n) - c) / (1 + z * z / n))), \
+        float(min(1.0, (p + z * z / (2 * n) + c) / (1 + z * z / n)))
+
+
+def share(ok: list[bool]) -> dict:
+    k, n = sum(ok), len(ok)
+    lo, hi = wilson(k, n)
+    return {"n": n, "in_time": k, "share": round(k / n, 4) if n else None, "ci95": [round(lo, 4), round(hi, 4)]}
+
+
+def log_timing(path=None) -> dict:
+    """Way 1 of the pre-registration: the successful VPS calls in <data>/ai/local_llm.jsonl (other uses), the share
+    within ONE_TIMEOUT_S, of all and of those that wrote at least LOG_MIN_TOKENS."""
+    from ..ops import notify
+    rows = []
+    try:
+        for line in (path or notify.data_root() / "ai" / "local_llm.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("backend") == "vps" and r.get("ok") and r.get("seconds") is not None:
+                rows.append(r)
+    except OSError:
+        pass
+    fast = [float(r["seconds"]) <= ONE_TIMEOUT_S for r in rows]
+    big = [float(r["seconds"]) <= ONE_TIMEOUT_S for r in rows if int(r.get("tokens") or 0) >= LOG_MIN_TOKENS]
+    return {"calls": share(fast), f"calls_{LOG_MIN_TOKENS}_tokens_or_more": share(big),
+            "from_ms": min((int(r["ts_ms"]) for r in rows if r.get("ts_ms")), default=None),
+            "to_ms": max((int(r["ts_ms"]) for r in rows if r.get("ts_ms")), default=None)}
+
+
+def timing(day: str | None = None, n: int = TIMING_N, chat=None, root=None, log=print, mono=time.monotonic,
+           log_path=None) -> dict:
+    """Way 2: n distinct names of a UTC day (the last complete one in the store), drawn with TIMING_SEED, each asked
+    alone as the gate asks, one after another, each allowed TIMING_LIMIT_S. Per model: the share answered with a
+    valid code within ONE_TIMEOUT_S (Wilson 95 %), the median and 90th percentile seconds of the answers."""
+    from . import store
+    if day is None:
+        done = [x for x in store.days(None if root is None else root) if x < utc_day(wall_ms())]
+        day = done[-1] if done else utc_day(wall_ms() - 86_400_000)
+    rows, trending = K.day_tokens(day, root)
+    names: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        if r["key"] != "|":
+            names.setdefault(r["key"], (r["name"], r["symbol"]))
+    order = sorted(names)
+    pick = sorted(np.random.default_rng(TIMING_SEED).choice(len(order), size=min(n, len(order)), replace=False)) \
+        if order else []
+    calls = []
+    for i in pick:
+        t0 = mono()
+        try:
+            got, model = ask([names[order[i]]], trending, day, chat, timeout=TIMING_LIMIT_S, job=JOB + ":timing")
+            c, why = got.get(0), None if got.get(0) else "dropped"
+        except K.NoAnswer as e:
+            c, model, why = None, None, e.kind
+        calls.append({"seconds": round(mono() - t0, 3), "ok": c is not None, "model": model, "why": why})
+    by: dict[str, dict] = {}
+    for m in sorted({c["model"] or "none" for c in calls}):
+        cs = [c for c in calls if (c["model"] or "none") == m]
+        sec = [c["seconds"] for c in cs if c["ok"]]
+        by[m] = dict(share([c["ok"] and c["seconds"] <= ONE_TIMEOUT_S for c in cs]),
+                     answered=len(sec), median_s=round(float(np.median(sec)), 2) if sec else None,
+                     p90_s=round(float(np.percentile(sec, 90)), 2) if sec else None,
+                     why={w: sum(1 for c in cs if c["why"] == w) for w in sorted({c["why"] for c in cs if c["why"]})})
+    res = {"day": day, "names": len(order), "n": len(calls), "seed": TIMING_SEED, "limit_s": ONE_TIMEOUT_S,
+           "all": share([c["ok"] and c["seconds"] <= ONE_TIMEOUT_S for c in calls]), "by_model": by,
+           "log": log_timing(log_path), "at_ms": wall_ms()}
+    for m in by:
+        if m != "none" and by[m]["answered"]:
+            K.register_trial(m, log, TIMING_TRIAL)
+    if res["log"]["calls"]["n"]:
+        K.register_trial(f"vps:{os.environ.get('PYTHIA_LOCAL_LLM_MODEL') or 'qwen3-4b-instruct'}", log, TIMING_TRIAL)
+    for m, v in by.items():
+        log(f"livecat timing: {m}: {v['in_time']} of {v['n']} names in {ONE_TIMEOUT_S:g} s "
+            f"({100 * (v['share'] or 0):.1f} %, 95 % {100 * v['ci95'][0]:.1f} to {100 * v['ci95'][1]:.1f} %), "
+            f"median {v['median_s']} s, p90 {v['p90_s']} s")
+    lg = res["log"][f"calls_{LOG_MIN_TOKENS}_tokens_or_more"]
+    log(f"livecat timing: the call log: {lg['in_time']} of {lg['n']} VPS calls with {LOG_MIN_TOKENS} tokens or more "
+        f"within {ONE_TIMEOUT_S:g} s")
+    return res
+
+
+def write_timing(res: dict, d=None) -> None:
+    from .. import report as rep
+    out = rep.REPORTS / "pumpfun_rt"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "livecat_timing.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
+    d = d or K.cat_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    with (d / "timing.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(res, separators=(",", ":")) + "\n")
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if "--timing" not in argv:
+        print(__doc__.strip().splitlines()[0])
+        return 2
+    day = argv[argv.index("--day") + 1] if "--day" in argv else None
+    res = timing(day)
+    write_timing(res)
+    return 0 if any(v["answered"] for v in res["by_model"].values()) or not res["n"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -32,7 +32,7 @@ Everything Pythia runs on the lab machine, and when. All times UTC.
 | 06:40 | AI strategy critic: one Haiku call per autopilot (batch), its last 24 hours of orders against its rules; a card only for findings of medium or high severity, every finding logged and scored (`lab.ai.critic`, minutes) | jobs.yaml `ai-critic` |
 | Sun 09:00 | AI weekly review: one Sonnet call (batch) over every study and live result, three proposed experiments in `reports/ai/weekly.md`, never run by anything (`lab.ai.weekly`) | jobs.yaml `ai-weekly` |
 | Sun 11:00 | AI research director: one Opus call (effort high, batch) over every study summary and the trial ledger, 3 to 5 pre-registration drafts in `/opt/pythia-lab/proposals/` and a card, never run by anything (`lab.ai.director`, up to an hour) | jobs.yaml `ai-director` |
-| always | the owner's questions in Telegram, answered by Sonnet from the same fact sheet, at most 40 a day (`lab.ai.chat`; reads only) | container `pythia-ai-chat`, see "Questions in Telegram" |
+| always | the owner's questions in Telegram, answered by the local model (the owner's PC through the relay, else the VPS model) from the same fact sheet, every answer names its model, at most 40 a day (`lab.ai.chat`; reads only) | container `pythia-ai-chat`, see "Questions in Telegram" |
 | every 15 min | local language model kept up: llama.cpp's server with Qwen3 4B Instruct (Q4_K_M) on 127.0.0.1:8091, 3 CPUs at a low share, 4 GB; downloads the pinned model once (`local-llm.sh up`, nothing while it runs as it should) | `jobs.yaml`: `local-llm` (host), see "Local language model" |
 | after each news collect | the local model tags the new headlines with a topic and a relevance for the lab, 1 to 5 (`lab.ai.local --news`, about a minute for 100 headlines on the VPS) | `jobs.yaml`: `llm-news` |
 | Sun 05:40 | cost calibration from the recorded books, report only | `/etc/cron.d/pythia-costs` |
@@ -280,7 +280,7 @@ The live executor (`live_exec.py`) runs only in its own service
 owner does every step under "Live trading (locked)" below. The collector never
 holds a wallet, reads a key, signs or sends anything; its only network is a
 public Solana RPC websocket (`logsSubscribe`, read only), Telegram for the
-cards and the engine's metered AI endpoint for the name categories.
+cards. The live classifier of the name categories asks the local model (`lab.ai.local`, AI2).
 
 The collector is a long-running container, not a job. The image needs
 `aiohttp` (in `research/lab/requirements.txt` since this lab), so rebuild it
@@ -328,7 +328,8 @@ The jobs are in `jobs.yaml`:
 | Job | When | What |
 |---|---|---|
 | `pumpfun-rt-health` | every 10 min | the collector wrote trades and its heartbeat in the last 10 minutes |
-| `pumpfun-rt-categories` | 06:20 | yesterday's new token names into six categories, Claude Haiku 5.5 through the engine's `POST /api/ai/complete` (Batches; the engine's budget applies, a refusal is not a failure); names classified before are not asked again; cache `pumpfun_rt/categories/cats.jsonl`, report `reports/pumpfun_rt/categories.json`; usually well under $0.20 a day, capped at $0.40 a run |
+| `pumpfun-rt-categories` | 00:40 | yesterday's new token names into six categories on the local model (AI2, `results/categories_local_ai2.md`: the owner's PC through the relay, else the VPS model; until 2026-10-24 Claude Haiku 5.5 through the engine), 25 names a call, one at a time, most frequent first, within 4.5 hours; names a local model classified before are not asked again, the rest left at the budget stay unknown; every row names its `model` (no field: the API's), a study never pools two models; cache `pumpfun_rt/categories/cats.jsonl`, report `reports/pumpfun_rt/categories.json`; red only when no model answered |
+| `pumpfun-rt-cat-timing` | Sun 11:30 | how often the local model names one coin's category within the live gate's 1.5 s (`livecat.ONE_TIMEOUT_S`), 200 names of the last day, per model; `reports/pumpfun_rt/livecat_timing.json` | |
 | `pumpfun-factory` | 01:00 | F3 (`lab/pumpfun_rt/factory.py`): Optuna's TPE over entries (migration with a 0 to 60 s delay and the pool wait, a fresh pool by its age), filters (R2's win and rug models with thresholds, Y10's trend models and market heat, pool SOL, distinct buyers, Y16's R3 rule, the block list without its mint lines), exits (take profit, stop, time stop, Y12's lock, a partial sale) and R2's sizing (5 to 25 %, 1 to 3 open, brake on/off); each trial a realistic book in one replay per batch, walk-forward by UTC day, scored by the median 30-day end wallet from 0.55 SOL less the chance of losing 80 %; every trial in `pumpfun_rt/factory/ledger.jsonl` (only grows), the bar deflated by all trials ever, the last 2 full days held back for the night's top 3; the LightGBM settings of R2's labels, adopted into `pumpfun_rt/factory/params.json` (the daily retrain reads it) only when better in 4 of 5 purged folds and on the held-back days; winners as paper books F3_<id> (at most 5, 0.55 SOL each, the weakest retired after 14 days without beating P_pool5_top30t_sw10o3n, 14 days ahead written to `factory/proposals/`, never live); `reports/pumpfun_rt/factory.{md,json}`; 300 trials (`PYTHIA_PF_FACTORY_TRIALS`), at most 2.5 h, 3 CPUs, the `heavy` lock, the Optuna journal on disk (a rerun the same night does the trials left) |
 | `pumpfun-rt-realistic` | 06:40 | R1: the realistic paper model (`lab/pumpfun_rt/realistic.py`) refitted from the last 7 days of `live/pumpfun_rt/measured.jsonl`, the calibration line live vs realistic paper for P_pool0_wait (calibrated: median P&L difference per matched trade within 5 points over 7 days); R2: the small-wallet paper books' wallets in SOL and EUR; F3: the factory books' wallets; the collector re-reads `reports/pumpfun_rt/realistic.json` every 10 minutes |
 | `pumpfun-rt-study` | 06:50 | the 22 rules and the 12 pipeline strategies replayed over the last 14 days (latency fills, doubled latency, tripled priority fee), the bar, live readiness per strategy, each strategy's capture ratio, `reports/pumpfun_rt/latest.json`, the decision rows for the retrain (`pumpfun_rt/rows/latest.parquet`) and X14's early rows, paths and step rows (`pumpfun_rt/rows/early.parquet`, `steps.parquet`, `paths.npz`; paths and steps of about two days' worth of tokens, a hash sample) |
@@ -345,7 +346,7 @@ Try the study and the retrain by hand without posting:
 ```bash
 docker run --rm --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.study --dry-run
 docker run --rm --memory 8g -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.retrain --dry-run
-docker run --rm --network host --env-file /etc/pythia/alerts.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.categorize --dry-run
+docker run --rm --network host --env-file /etc/pythia/local-llm.env -v /srv/pythia-data:/data -v /opt/pythia-lab:/app pythia-lab python -m lab.pumpfun_rt.categorize --dry-run
 ```
 
 Kill switch (paper and live): `touch /srv/pythia-data/pumpfun_rt/KILL` (or
@@ -565,9 +566,18 @@ take the cheapest path (no Sender, no tip, at most 0.00002 SOL priority a swap, 
 
 `lab.ai.chat` lets the owner ask Pythia questions in the same Telegram chat
 the alerts go to. It reads only: the engine's `/api/state`, the lab's reports
-and the AI jobs' files, and it answers through the engine's metered
-`POST /api/ai/complete` (Sonnet 5.5, `job` "ask" in the ledger), so every
-answer is under the same budget caps as everything else. It cannot place,
+and the AI jobs' files, and it answers through the local model (`lab.ai.local`,
+"Local language model" below; since 2026-10-29, AI2: the metered API has no
+credit): the owner's PC through the relay when it is online, else the VPS
+model. Every answer ends with the model that wrote it and where it runs
+(`qwen3-4b-instruct (VPS)`, the PC's model `(PC)`). The fact sheet is about
+11,000 tokens; each model gets what fits its context (the VPS model 4,096
+tokens, the relay `PYTHIA_LOCAL_LLM_RELAY_CTX`, default 8,192): the date and
+the sections that share the most words with the question. A question those
+facts do not answer gets "I cannot answer that from the facts I have", and so
+does an answer with a number that is in neither the facts nor the question
+(the local number rule; the withheld text and the reason are in the log). The
+VPS model takes one to three minutes for an answer. It cannot place,
 change or cancel an order, touch an autopilot or change a setting; a message
 asking for that, or for a key, token, password or server detail, is refused
 (`docs/AI.md`, "Questions in Telegram").
@@ -576,11 +586,14 @@ It is a long-running container, not a job: it long-polls the bot's
 `getUpdates` and takes messages from `PYTHIA_TELEGRAM_CHAT_ID` only. Nothing
 else may consume the bot's updates (no webhook set on the bot, no second
 poller), or the two take each other's messages. It needs the engine on
-`127.0.0.1:8788`, hence the host network:
+`127.0.0.1:8788` and the VPS model on `127.0.0.1:8091`, hence the host network,
+and `/etc/pythia/local-llm.env` for the relay (since AI2; recreate the
+container once with this command):
 
 ```bash
+docker rm -f pythia-ai-chat
 docker run -d --name pythia-ai-chat --restart unless-stopped --network host --cpus 0.5 --memory 768m \
-  --env-file /etc/pythia/alerts.env \
+  --env-file /etc/pythia/alerts.env --env-file /etc/pythia/local-llm.env \
   --log-opt max-size=10m --log-opt max-file=3 \
   -v /srv/pythia-data:/data -v /opt/pythia-lab:/app \
   pythia-lab python -m lab.ai.chat
@@ -588,14 +601,14 @@ docker run -d --name pythia-ai-chat --restart unless-stopped --network host --cp
 
 After `research/ops/deploy_lab.sh`, `docker restart pythia-ai-chat` loads the
 new code. Logs: `docker logs --tail 50 pythia-ai-chat` (one line per answer
-with its cost, never the question text or the token). Files under
-`/srv/pythia-data/ai/`: `chat.jsonl` (every question, its answer, model and
-cost), `chat_state.json` (the update offset, saved before answering, so a
+with its model, never the question text or the token). Files under
+`/srv/pythia-data/ai/`: `chat.jsonl` (every question, its answer and model),
+`chat_state.json` (the update offset, saved before answering, so a
 restart never answers twice), `chat_heartbeat.json` (every 5 minutes).
 
 Settings (in `/etc/pythia/alerts.env` or with `-e`): `PYTHIA_AI_ASK_PER_DAY`
-(40 questions a UTC day; refusals, /help and /real do not count),
-`PYTHIA_AI_MODEL_ASK` (haiku, sonnet, opus), `PYTHIA_AI_EFFORT_ASK` (medium).
+(40 questions a UTC day; refusals, /help and /real do not count); the model
+is the local chain's (`local-llm.env`).
 In the chat: `/help`; `/real ID` and `/notreal ID` score a finding of the
 strategy critic. Without a container, `python -m lab.ai.chat --once` answers
 what is waiting and exits; a `*/1` cron line of that works too, at the cost
@@ -608,6 +621,15 @@ they gave the briefing comes from a local model now, with no credit and no key (
 things: the briefing's summary line, the lab card's top line and the news tags. It decides nothing, never touches
 trading, never sees a key or a wallet, and a number in its text that is not in the facts it was given throws the
 text away (the template is used, the reason is logged).
+
+Which model each user asks, since 2026-10-29 (AI2):
+
+| User | Model |
+|---|---|
+| `briefing`, `labor`, `news` (teasers), `llm-news`, `ai-analyst` (T15) | the local chain: the owner's PC through the relay when it is online, else the VPS model, else the template (the analyst skips the week) |
+| `pythia-ai-chat` (questions in Telegram) | the local chain; each answer names its model; no model: "no answer this time" |
+| `pumpfun-rt-categories`, the live classifier (`livecat.py`), `pumpfun-rt-cat-timing` | the local chain; each row in `cats.jsonl` names its model; no answer: the name stays unknown |
+| `ai-brief`, `ai-critic`, `ai-weekly`, `ai-director`, `ai-news`, `notify-pending` | the metered API through the engine (Claude); off while it has no credit |
 
 Where it asks, in this order:
 
@@ -622,7 +644,9 @@ Where it asks, in this order:
    ```
 
    The status route counts as online when it answers 200 and its JSON, if it has `online`, `connected`,
-   `pc_online`, `up` or `ok`, says true. The jobs `briefing`, `labor` and `llm-news` read the file (optional).
+   `pc_online`, `up` or `ok`, says true. The jobs `briefing`, `labor`, `news`, `llm-news`, `ai-analyst`,
+   `pumpfun-rt-categories` and `pumpfun-rt-cat-timing` and the container `pythia-ai-chat` read the file (optional).
+   `PYTHIA_LOCAL_LLM_RELAY_CTX` (default 8192) is the context of the PC's model for the chat's facts.
 2. **The VPS model**: llama.cpp's server, container `pythia-local-llm`, Qwen3 4B Instruct 2507 in GGUF Q4_K_M
    (2.5 GB, a pinned file, revision and sha256 in `local-llm.sh`, the image pinned by digest), on
    `127.0.0.1:8091` only, 3 CPUs at CPU share 256 (everything else goes first), 4 GB memory, no swap, read only,
