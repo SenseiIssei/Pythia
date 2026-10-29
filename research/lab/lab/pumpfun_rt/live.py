@@ -144,6 +144,7 @@ class Hold:
     def __init__(self, engine, feed, on_lost=None, hold_ms: int = HOLD_MS, clock=time.monotonic):
         self.engine, self.feed, self.on_lost, self.hold_ms, self.clock = engine, feed, on_lost, hold_ms, clock
         self.held: dict[str, list] = {}                     # mint -> [(clock s, table, row)] in the order they came
+        self.errors = 0                                     # held rows the engine failed on (each alone, see release)
 
     def row(self, table: str, row: dict) -> bool:
         """True when the row waits for its coin's creation (the caller feeds it otherwise)."""
@@ -154,10 +155,18 @@ class Hold:
         return False
 
     def release(self, mints) -> None:
-        """The held rows of these coins, in the order they came, once the engine knows the coin."""
+        """The held rows of these coins, in the order they came, once the engine knows the coin. A row the engine
+        fails on is skipped alone and counted: before 2026-10-29 one failing row dropped every row after it of that
+        coin, since they were already taken out of the hold."""
         for m in mints:
             for _, table, row in self.held.pop(m, ()):
-                self.feed(table, row)
+                try:
+                    self.feed(table, row)
+                except Exception as e:                      # noqa: BLE001 - the next row of the coin still counts
+                    self.errors += 1
+                    if self.errors <= 5 or self.errors % 1000 == 0:
+                        print(f"hold: a held {table} row of {str(m)[:8]} failed ({type(e).__name__}: {e}); "
+                              f"{self.errors} so far", flush=True)
 
     def purge(self) -> None:
         cut = self.clock() - self.hold_ms / 1000
