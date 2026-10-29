@@ -616,6 +616,24 @@ def test_a_new_job_after_others_is_not_late_for_their_earlier_runs(tmp_path, mon
     assert s["b"]["state"] == "never" and s["b"]["ok"], "not late for a run of a from before it existed"
 
 
+def test_a_job_moved_to_an_earlier_hour_is_not_late_for_the_fire_before_the_move(tmp_path, monkeypatch):
+    t = table(tmp_path, '  - name: a\n    schedule: "50 3 * * *"\n    command: x\n')
+    t.ops_dir.mkdir(parents=True)
+    monkeypatch.setenv("PYTHIA_JOBS_NOW", "2026-10-01T00:00:00Z")
+    jobs.write_cron(t)
+    jobs.append_record(t, {"job": "a", "start": "2026-10-15T03:50:00Z", "end": "2026-10-15T04:15:00Z",
+                           "status": "ok", "exit_code": 0})
+    monkeypatch.setenv("PYTHIA_JOBS_NOW", "2026-10-15T11:12:00Z")           # moved to 10:00 after 10:00
+    t = table(tmp_path, '  - name: a\n    schedule: "0 10 * * *"\n    command: x\n')
+    jobs.write_cron(t)
+    assert json.loads((t.ops_dir / "installed.json").read_text())["a"] == "2026-10-15T11:12:00Z"
+    s = jobs.build_status(t, datetime(2026, 10, 15, 13, 0, tzinfo=UTC))["jobs"][0]
+    assert s["state"] != "late" and s["ok"], s
+    monkeypatch.setenv("PYTHIA_JOBS_NOW", "2026-10-15T12:00:00Z")           # a deploy that changes nothing
+    jobs.write_cron(t)
+    assert json.loads((t.ops_dir / "installed.json").read_text())["a"] == "2026-10-15T11:12:00Z"
+
+
 def test_running_and_stuck(tmp_path):
     t = table(tmp_path, '  - name: a\n    schedule: "0 4 * * *"\n    command: x\n    timeout: 1h')
     jobs._write_json(jobs._running_path(t, "a"), {"pid": os.getpid(), "start": "2026-10-15T04:00:00Z"})

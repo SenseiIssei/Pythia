@@ -625,15 +625,24 @@ def write_cron(t: Table, dry_run: bool = False, prune_legacy: bool = False) -> l
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(now + "\n")
     live = _read_json(t.ops_dir / "installed.json") or {}
+    # the schedule each job went live with: a new one counts from now, else a job moved to an earlier hour
+    # looked late for today's fire that came before the move (model-factory 03:50 to 10:00, 2026-10-29)
+    when = _read_json(t.ops_dir / "installed_schedule.json") or {}
     for job in t.jobs.values():
         # a job that runs after others counts from its own install too, else a new one looked late for its
         # dependencies' earlier runs (exec-dryrun, 2026-10-28)
         active = job["enabled"] and (job["cron"] is not None or job["depends_on"]) and held(t, job) is None
+        name, sched = job["name"], [str(job["schedule"] or ""), sorted(job["depends_on"])]
         if active:
-            live.setdefault(job["name"], now)
+            if when.get(name) not in (None, sched):
+                live[name] = now
+            live.setdefault(name, now)
+            when[name] = sched
         else:
-            live.pop(job["name"], None)
+            live.pop(name, None)
+            when.pop(name, None)
     _write_json(t.ops_dir / "installed.json", live)
+    _write_json(t.ops_dir / "installed_schedule.json", when)
     for old, names in sorted(legacy_present(t).items()):
         did.append(f"held until {t.cron_dir / old} is gone (render --prune-legacy): {', '.join(sorted(names))}")
     return did
