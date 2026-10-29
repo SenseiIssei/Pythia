@@ -15,6 +15,12 @@ candidates, both with the study's own wallet and costs:
                           Solana mint (BTC, ETH, SOL), 3 slots; daily, a 100 EUR
                           wallet.
 
+Beside three of them, their weekly variant from S1w (results/smallaccount_weekly_prereg.md,
+results/smallaccount_weekly.md; the books whose variant passed the pre-registered rule: lower trading costs, the
+signal kept, no leak), with the same wallet: small50_tsmom1_wk, small40_spy_trend_wk and small40_vol_target_wk
+trade only at Wednesday's close, and an asset less than 10 points of the trading equity from its target waits for
+the next week (an exit always trades).
+
 Picked by the S2 study (results/smallaccount_s2_prereg.md, results/smallaccount_s2.md):
 the two best in-sample candidates at 40 EUR with an in-sample drawdown under 20 %
 (S2_BOOKS), on the S&P 500 token, BTC (cbBTC), the gold token and USDC, with S2's
@@ -55,6 +61,7 @@ from ..data import WRITE_ROOT
 from ..experiments import fam_common as fc
 from ..experiments import smallaccount as s1
 from ..experiments import smallaccount_s2 as s2
+from ..experiments import smallaccount_weekly as wk
 
 REPORT = "smallaccount"
 INDEX = 10_000.0
@@ -68,7 +75,12 @@ BOOKS = {
 S2_PICKS = ("spy_trend", "vol_target")
 S2_BOOKS = {f"small40_{k}": {"study": "S2", "key": k, "n": s2.SLOTS[k], "cadence": s2.CADENCE[k], "venue": "jupiter",
                              "capital": 40.0, "label": s2.CANDIDATES[k]} for k in S2_PICKS}
-ALL_BOOKS = {**BOOKS, **S2_BOOKS}
+# S1w: the weekly variant with the band beside the book it comes from, same wallet; `path` says whose rule it runs.
+S1W_BOOKS = {f"{n}_wk": {**b, "study": "S1w", "path": path, "cadence": "weekly", "band": wk.BAND,
+                         "label": f"{b['label']}; Wednesday's close, a 10-point band"}
+             for path, books in (("S1", BOOKS), ("S2", S2_BOOKS))
+             for n, b in books.items() if n in ("small50_tsmom1", "small40_spy_trend", "small40_vol_target")}
+ALL_BOOKS = {**BOOKS, **S2_BOOKS, **S1W_BOOKS}
 ETF_STALE_DAYS = 5
 JOURNAL_COLS = ["date", "equity", "equity_eur", "gross_ret_pct", "paper_cost_bps", "model_cost_bps", "turnover",
                 "exposure", "held", "orders", "not_sent", "dust", "rebalanced", "signal", "weights"]
@@ -137,7 +149,7 @@ def new_state(name: str, venue: s1.Venue, sol_eur: float, now_ms: int) -> dict:
 def targets(P: fc.Panel, name: str, t: int) -> dict[str, float]:
     """The book's target weights at the decision close t, by coin (the sweep's segments summed, a reused
     ticker's old segment as 0)."""
-    b = BOOKS[name]
+    b = ALL_BOOKS[name]
     W = s1.ffill(s1.candidate(P, b["key"], b["n"]))
     out: dict[str, float] = {}
     for j in np.flatnonzero(np.nan_to_num(W[t]) > 0):
@@ -173,10 +185,11 @@ def etf_fresh(etf: dict[str, tuple[np.ndarray, np.ndarray]], decision_day: str) 
 
 def step(name: str, st: dict, tgt: dict[str, float] | None, prices: dict[str, float], venue: s1.Venue,
          sol_eur: float, now_ms: int, decision_day: str | None, rebalance: bool,
-         reweigh: bool = False) -> tuple[dict, dict, list[dict]]:
+         reweigh: bool = False, band: float = 0.0) -> tuple[dict, dict, list[dict]]:
     """One daily run of one book: mark, rebalance when due and the targets are fresh, journal row.
     Returns (state, journal row, fills). `prices` are EUR per coin; a coin without one keeps its last mark.
-    `reweigh` trades every asset back to its target (S2's monthly days), not only the changed ones."""
+    `reweigh` trades every asset back to its target (S2's monthly days), not only the changed ones; `band` (S1w)
+    leaves out an asset less than it from its target, an exit always trades."""
     marks = {**st.get("marks", {}), **{c: p for c, p in prices.items() if p > 0}}
     last = {} if reweigh and rebalance and tgt is not None else dict(st["last"])
     w = s1.Wallet(cash=st["cash"], units=dict(st["units"]), last=last, idle=st["idle"],
@@ -187,7 +200,7 @@ def step(name: str, st: dict, tgt: dict[str, float] | None, prices: dict[str, fl
     if rebalance and tgt is not None:
         held = set(w.units) | set(w.last)
         full = {c: tgt.get(c, 0.0) for c in held | set(tgt)}
-        fills = s1.rebalance(w, full, marks, venue, sol_eur, can_trade=lambda c: c in prices)
+        fills = s1.rebalance(w, wk.banded(w, full, marks, band), marks, venue, sol_eur, can_trade=lambda c: c in prices)
         if reweigh:
             w.last.update({c: x for c, x in full.items() if c in prices})
     eq = w.value(marks)
@@ -246,7 +259,9 @@ def write_report(books: dict[str, dict], now_ms: int) -> dict:
     md = ["# Small-account paper books (S1 and S2), in EUR\n",
           "EXPERIMENT, paper only. Picked by results/smallaccount_s1.md (the best in-sample variant at 50 EUR and "
           "at 100 EUR) and results/smallaccount_s2.md (the two best in-sample candidates at 40 EUR on the S&P 500 "
-          "token, BTC, gold and USDC), with Jupiter's real costs and minimums. No real money.\n"]
+          "token, BTC, gold and USDC), with Jupiter's real costs and minimums. The S1w books (`_wk`, "
+          "results/smallaccount_weekly.md) run the same rule and wallet traded only at Wednesday's close with a "
+          "10-point no-trade band. No real money.\n"]
     items, rows = [], []
     for name, st in books.items():
         b = ALL_BOOKS[name]
@@ -286,11 +301,14 @@ def main() -> int:
         print(f"history ends {decision}, yesterday is missing; marking only", file=sys.stderr)
     venue = vs["jupiter"]
     venue.eurusd = eurusd_live(venue.eurusd)
-    tg = {name: targets(P, name, t) for name in BOOKS}
-    plan = {name: (tg[name], s1.rebalance_day(P.days[t], s1.CADENCES[b["cadence"]]), False) for name, b in BOOKS.items()}
-    venues = {name: venue for name in BOOKS}
+    s1_books = {**BOOKS, **{n: b for n, b in S1W_BOOKS.items() if b["path"] == "S1"}}
+    s2_books = {**S2_BOOKS, **{n: b for n, b in S1W_BOOKS.items() if b["path"] == "S2"}}
+    tg = {name: targets(P, name, t) for name in s1_books}
+    plan = {name: (tg[name], s1.rebalance_day(P.days[t], s1.CADENCES[b["cadence"]]), False)
+            for name, b in s1_books.items()}
+    venues = {name: venue for name in s1_books}
     extra: dict[str, str] = {}
-    if S2_BOOKS:
+    if s2_books:
         snap = s2.load_snapshot()
         v2 = s2.venue(snap=snap)
         v2.eurusd = venue.eurusd
@@ -300,8 +318,10 @@ def main() -> int:
         etf_ok = etf_fresh(etf, decision)
         if not etf_ok:
             print(f"ETF closes end {[str(x[0][-1]) for x in etf.values()]}; the S2 books only mark", file=sys.stderr)
-        for name in S2_BOOKS:
+        for name in s2_books:
             tgt, due, rw = s2_plan(P, name, t, m)
+            if name in S1W_BOOKS:
+                due = s1.rebalance_day(P.days[t], wk.EVERY)
             plan[name] = (tgt if etf_ok else None, due and etf_ok, rw)
             venues[name] = v2
     states = {name: load_state(book_dir(name)) for name in ALL_BOOKS}
@@ -329,7 +349,8 @@ def main() -> int:
         tgt, due, rw = plan[name]
         due = fresh and not done and due and tgt is not None
         st, row, fills = step(name, st, tgt if fresh else None, prices, venues[name], sol_eur, now_ms,
-                              decision if fresh and tgt is not None else None, due, reweigh=rw)
+                              decision if fresh and tgt is not None else None, due, reweigh=rw,
+                              band=ALL_BOOKS[name].get("band", 0.0))
         if not done:
             _append(d / "journal.csv", JOURNAL_COLS, [row])
         _append(d / "trades.csv", TRADE_COLS, fills)
