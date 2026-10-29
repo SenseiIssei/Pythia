@@ -1,0 +1,1147 @@
+{
+ "study": "EQ2",
+ "prereg": "results/daytrade_eq2_prereg.md",
+ "judged": "cash",
+ "pbo": 0.1961926961926962,
+ "pool_all": {
+  "n_trials": 3155,
+  "sr0_annual": 2.83510208698157
+ },
+ "pool_small": {
+  "n_trials": 369,
+  "sr0_annual": 2.039959748825865
+ },
+ "passed": [],
+ "bench": {
+  "is": {
+   "spy": {
+    "cagr": 0.13221375528206836,
+    "max_dd": 0.33842652795838757,
+    "sharpe": 0.7626912614829208,
+    "total": 1.6958093466158801,
+    "end_eur": 131.61029606372014
+   },
+   "nothing": {
+    "cagr": 0.0,
+    "max_dd": 0.0,
+    "sharpe": 0.0,
+    "total": 0.0,
+    "end_eur": 48.8203278280543
+   }
+  },
+  "val": {
+   "spy": {
+    "cagr": 0.21521913573574625,
+    "max_dd": 0.18708614780554356,
+    "sharpe": 1.336694220016815,
+    "total": 0.6260877731643355,
+    "end_eur": 77.39910852993526
+   },
+   "nothing": {
+    "cagr": 0.0,
+    "max_dd": 0.0,
+    "sharpe": 0.0,
+    "total": 0.0,
+    "end_eur": 47.59835834649815
+   }
+  }
+ },
+ "leaks": {
+  "logit:5": {
+   "name": "eq2:logit:5",
+   "ok": true,
+   "runs": 8,
+   "cuts": [
+    "2018-01-03",
+    "2019-06-27"
+   ],
+   "first": null,
+   "error": null
+  },
+  "logit:29": {
+   "name": "eq2:logit:29",
+   "ok": true,
+   "runs": 8,
+   "cuts": [
+    "2018-01-03",
+    "2019-06-27"
+   ],
+   "first": null,
+   "error": null
+  },
+  "gbm:5": {
+   "name": "eq2:gbm:5",
+   "ok": true,
+   "runs": 8,
+   "cuts": [
+    "2018-01-03",
+    "2019-06-27"
+   ],
+   "first": null,
+   "error": null
+  },
+  "gbm:29": {
+   "name": "eq2:gbm:29",
+   "ok": true,
+   "runs": 8,
+   "cuts": [
+    "2018-01-03",
+    "2019-06-27"
+   ],
+   "first": null,
+   "error": null
+  }
+ },
+ "rows": [
+  {
+   "rule": "rvol_orb_m5_r1.5",
+   "account": "cash",
+   "trial": "small:eq2:rvol_orb_m5_r1.5:cash",
+   "is_sharpe": -0.3783092815539185,
+   "dsr_all": 1.9040770205027164e-05,
+   "dsr_small": 0.002162871448886927,
+   "excess_sharpe": -0.741789394452216,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 1.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 0.0,
+    ">= 100 trades": true,
+    "PBO < 0.2": true
+   },
+   "val_late": {
+    "cagr": 0.029348671260728487,
+    "max_dd": 0.298302435123755,
+    "sharpe": 0.2470416943691875,
+    "total": 0.07481367352193646,
+    "end_eur": 51.15936638801322,
+    "trades": 332,
+    "win": 0.45481927710843373,
+    "per_trade": 0.00034911599759009814,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": -0.013137983186882862,
+    "max_dd": 0.32283320158465056,
+    "sharpe": 0.034477586923486264,
+    "total": -0.0324475874211424,
+    "end_eur": 46.053906452947295,
+    "trades": 332,
+    "win": 0.4578313253012048,
+    "per_trade": 5.221600345035598e-05,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.0989843693373923,
+    "max_dd": 0.377498178529013,
+    "sharpe": -0.4610049697396375,
+    "total": -0.22892934183805724,
+    "end_eur": 36.70169749766233,
+    "trades": 332,
+    "win": 0.4307228915662651,
+    "per_trade": -0.0006510928141962804,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.09971113998540027,
+    "max_dd": 0.6373476113270631,
+    "sharpe": -0.3783092815539185,
+    "total": -0.5678052485291106,
+    "end_eur": 21.099889452373272,
+    "trades": 1037,
+    "win": 0.437801350048216,
+    "per_trade": -0.0006297135454458589,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "rvol_orb_m5_r1.5",
+   "account": "margin",
+   "trial": "small:eq2:rvol_orb_m5_r1.5:margin",
+   "is_sharpe": -0.4199659794402456,
+   "dsr_all": 1.0861227092077707e-05,
+   "dsr_small": 0.0014210625522656055,
+   "excess_sharpe": -0.8596367262411075,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": 0.012937498991907992,
+    "max_dd": 0.326374176161247,
+    "sharpe": 0.15978229308184375,
+    "total": 0.03258103221893771,
+    "end_eur": 49.14916199335396,
+    "trades": 273,
+    "win": 0.45787545787545786,
+    "per_trade": 0.00024077344840947864,
+    "skipped_pdt": 59
+   },
+   "val_next": {
+    "cagr": -0.02287114208779828,
+    "max_dd": 0.33916301648015157,
+    "sharpe": -0.03910817406385587,
+    "total": -0.05607376098666084,
+    "end_eur": 44.929339377219186,
+    "trades": 273,
+    "win": 0.46153846153846156,
+    "per_trade": -6.432627696655224e-05,
+    "skipped_pdt": 59
+   },
+   "val_stress": {
+    "cagr": -0.09208183942736292,
+    "max_dd": 0.38203050597445354,
+    "sharpe": -0.503807080031147,
+    "total": -0.21411167089741623,
+    "end_eur": 37.406994308955454,
+    "trades": 273,
+    "win": 0.42857142857142855,
+    "per_trade": -0.0007589750876683003,
+    "skipped_pdt": 59
+   },
+   "is_late": {
+    "cagr": -0.09782939739970387,
+    "max_dd": 0.6083912360888799,
+    "sharpe": -0.4199659794402456,
+    "total": -0.560537890451053,
+    "end_eur": 21.45468425618791,
+    "trades": 856,
+    "win": 0.4427570093457944,
+    "per_trade": -0.0007770356960762213,
+    "skipped_pdt": 181
+   }
+  },
+  {
+   "rule": "rvol_orb_m5_r3",
+   "account": "cash",
+   "trial": "small:eq2:rvol_orb_m5_r3:cash",
+   "is_sharpe": -0.5118659181079861,
+   "dsr_all": 2.028456255670326e-08,
+   "dsr_small": 1.0694931290966285e-05,
+   "excess_sharpe": -1.54779599415683,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 0.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 0.0,
+    ">= 100 trades": true,
+    "PBO < 0.2": true
+   },
+   "val_late": {
+    "cagr": -0.08240524040754282,
+    "max_dd": 0.3303484198758172,
+    "sharpe": -0.6885621138897966,
+    "total": -0.19305375316426343,
+    "end_eur": 38.40931662324914,
+    "trades": 121,
+    "win": 0.4049586776859504,
+    "per_trade": -0.0016359249165783245,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": -0.0898608754039446,
+    "max_dd": 0.35018567457684335,
+    "sharpe": -0.6726186455570933,
+    "total": -0.20930795736939634,
+    "end_eur": 37.635643186856065,
+    "trades": 121,
+    "win": 0.4132231404958678,
+    "per_trade": -0.0017724563530924441,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.12585794550520013,
+    "max_dd": 0.37311853783954063,
+    "sharpe": -1.1022339569243287,
+    "total": -0.2850183299760266,
+    "end_eur": 34.031953740978786,
+    "trades": 121,
+    "win": 0.3884297520661157,
+    "per_trade": -0.0026337912240953928,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.08438293021785515,
+    "max_dd": 0.5912803450146574,
+    "sharpe": -0.5118659181079861,
+    "total": -0.5054215909531973,
+    "end_eur": 24.145480066342447,
+    "trades": 369,
+    "win": 0.44173441734417346,
+    "per_trade": -0.001662295944616726,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "rvol_orb_m5_r3",
+   "account": "margin",
+   "trial": "small:eq2:rvol_orb_m5_r3:margin",
+   "is_sharpe": -0.4819864728564617,
+   "dsr_all": 2.743585702101704e-08,
+   "dsr_small": 1.3715500032796275e-05,
+   "excess_sharpe": -1.514700562099805,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": -0.07585093122761044,
+    "max_dd": 0.3274028144393284,
+    "sharpe": -0.6472414882435589,
+    "total": -0.17860059081117718,
+    "end_eur": 39.09726342417146,
+    "trades": 116,
+    "win": 0.41379310344827586,
+    "per_trade": -0.0015609433807399677,
+    "skipped_pdt": 5
+   },
+   "val_next": {
+    "cagr": -0.08001479157734037,
+    "max_dd": 0.3464175727005997,
+    "sharpe": -0.6067926634913988,
+    "total": -0.18780028532283777,
+    "end_eur": 38.659373068127124,
+    "trades": 116,
+    "win": 0.4224137931034483,
+    "per_trade": -0.001626199009788323,
+    "skipped_pdt": 5
+   },
+   "val_stress": {
+    "cagr": -0.11784736460865708,
+    "max_dd": 0.36783746391622685,
+    "sharpe": -1.0550959706079128,
+    "total": -0.2685642848197878,
+    "end_eur": 34.815139278574904,
+    "trades": 116,
+    "win": 0.39655172413793105,
+    "per_trade": -0.002558884643892361,
+    "skipped_pdt": 5
+   },
+   "is_late": {
+    "cagr": -0.07978961408424867,
+    "max_dd": 0.5813608426319421,
+    "sharpe": -0.4819864728564617,
+    "total": -0.4852558696229473,
+    "end_eur": 25.129977192574433,
+    "trades": 356,
+    "win": 0.4410112359550562,
+    "per_trade": -0.0016135383106118909,
+    "skipped_pdt": 13
+   }
+  },
+  {
+   "rule": "rvol_orb_m15_r1.5",
+   "account": "cash",
+   "trial": "small:eq2:rvol_orb_m15_r1.5:cash",
+   "is_sharpe": -0.9016744422340341,
+   "dsr_all": 1.2501954548608699e-05,
+   "dsr_small": 0.001563974251171692,
+   "excess_sharpe": -0.7754317646865786,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 1.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 0.0,
+    ">= 100 trades": true,
+    "PBO < 0.2": true
+   },
+   "val_late": {
+    "cagr": 0.015487816410917565,
+    "max_dd": 0.32805221473778945,
+    "sharpe": 0.17507492085521048,
+    "total": 0.03907754586989598,
+    "end_eur": 49.45838537811518,
+    "trades": 319,
+    "win": 0.47962382445141066,
+    "per_trade": 0.0002527103949170652,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": -0.03288052897238258,
+    "max_dd": 0.32975552915527595,
+    "sharpe": -0.074382768657843,
+    "total": -0.08000642738060215,
+    "end_eur": 43.79018374601317,
+    "trades": 319,
+    "win": 0.4608150470219436,
+    "per_trade": -0.00011339800125757225,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.10646929671588223,
+    "max_dd": 0.4269445237070295,
+    "sharpe": -0.5179632502389294,
+    "total": -0.2448066756156052,
+    "end_eur": 35.94596247493165,
+    "trades": 319,
+    "win": 0.4231974921630094,
+    "per_trade": -0.0007473891485038392,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.18194999924277044,
+    "max_dd": 0.840003442241729,
+    "sharpe": -0.9016744422340341,
+    "total": -0.7988904131438748,
+    "end_eur": 9.818235959680594,
+    "trades": 1035,
+    "win": 0.43381642512077295,
+    "per_trade": -0.0013948839034249355,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "rvol_orb_m15_r1.5",
+   "account": "margin",
+   "trial": "small:eq2:rvol_orb_m15_r1.5:margin",
+   "is_sharpe": -0.9437092874169754,
+   "dsr_all": 1.534936766714229e-05,
+   "dsr_small": 0.001823507623266758,
+   "excess_sharpe": -0.8218755286446776,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": 0.020785973122235513,
+    "max_dd": 0.28263569949893264,
+    "sharpe": 0.20684933628779648,
+    "total": 0.05265183706861154,
+    "end_eur": 50.10449935489136,
+    "trades": 264,
+    "win": 0.49242424242424243,
+    "per_trade": 0.0003218607338538173,
+    "skipped_pdt": 55
+   },
+   "val_next": {
+    "cagr": -0.013712195932516935,
+    "max_dd": 0.27799721327935867,
+    "sharpe": 0.0068828407760448225,
+    "total": -0.03385114500785591,
+    "end_eur": 45.98709941597496,
+    "trades": 264,
+    "win": 0.4583333333333333,
+    "per_trade": 1.1288335096257851e-05,
+    "skipped_pdt": 55
+   },
+   "val_stress": {
+    "cagr": -0.08173895626386074,
+    "max_dd": 0.3708399185852025,
+    "sharpe": -0.43592442824047306,
+    "total": -0.1915915191870231,
+    "end_eur": 38.47891656008426,
+    "trades": 264,
+    "win": 0.42803030303030304,
+    "per_trade": -0.0006779624282640702,
+    "skipped_pdt": 55
+   },
+   "is_late": {
+    "cagr": -0.1694380941928565,
+    "max_dd": 0.8188784272795855,
+    "sharpe": -0.9437092874169754,
+    "total": -0.7729718022188763,
+    "end_eur": 11.083591041886809,
+    "trades": 855,
+    "win": 0.43508771929824563,
+    "per_trade": -0.0015834223563277008,
+    "skipped_pdt": 180
+   }
+  },
+  {
+   "rule": "rvol_orb_m15_r3",
+   "account": "cash",
+   "trial": "small:eq2:rvol_orb_m15_r3:cash",
+   "is_sharpe": -0.42972320744331965,
+   "dsr_all": 3.439542019976865e-05,
+   "dsr_small": 0.0032904676005270396,
+   "excess_sharpe": -0.8626760486194617,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 1.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 0.0,
+    ">= 100 trades": true,
+    "PBO < 0.2": true
+   },
+   "val_late": {
+    "cagr": 0.033575468761548155,
+    "max_dd": 0.21393884618786074,
+    "sharpe": 0.3293390313858573,
+    "total": 0.08585551332294727,
+    "end_eur": 51.68493983566634,
+    "trades": 117,
+    "win": 0.48717948717948717,
+    "per_trade": 0.0008653701791808508,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": -0.006027064197042131,
+    "max_dd": 0.23531931135273176,
+    "sharpe": 0.013867928794291915,
+    "total": -0.01496497443719158,
+    "end_eur": 46.886050130590526,
+    "trades": 117,
+    "win": 0.4700854700854701,
+    "per_trade": 3.690731505629357e-05,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.01378916004032038,
+    "max_dd": 0.2568760020365387,
+    "sharpe": -0.05147843361011143,
+    "total": -0.03403917687260816,
+    "end_eur": 45.97814940789592,
+    "trades": 117,
+    "win": 0.4358974358974359,
+    "per_trade": -0.0001349963722464381,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.06760268683299986,
+    "max_dd": 0.5590424400895768,
+    "sharpe": -0.42972320744331965,
+    "total": -0.42822620617459695,
+    "end_eur": 27.91418405804651,
+    "trades": 372,
+    "win": 0.4435483870967742,
+    "per_trade": -0.00129242868012937,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "rvol_orb_m15_r3",
+   "account": "margin",
+   "trial": "small:eq2:rvol_orb_m15_r3:margin",
+   "is_sharpe": -0.422489026529355,
+   "dsr_all": 3.6550021824393794e-05,
+   "dsr_small": 0.0034388909886483416,
+   "excess_sharpe": -0.8570656128911399,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": 0.03477505313268292,
+    "max_dd": 0.21393884618786074,
+    "sharpe": 0.3387763444151044,
+    "total": 0.089001560843877,
+    "end_eur": 51.834686532942676,
+    "trades": 116,
+    "win": 0.49137931034482757,
+    "per_trade": 0.0008977348219794611,
+    "skipped_pdt": 1
+   },
+   "val_next": {
+    "cagr": -0.0020193630035916232,
+    "max_dd": 0.23531931135273176,
+    "sharpe": 0.04599798907198213,
+    "total": -0.0050290629732567815,
+    "end_eur": 47.35898320494998,
+    "trades": 116,
+    "win": 0.47413793103448276,
+    "per_trade": 0.0001233128294308697,
+    "skipped_pdt": 1
+   },
+   "val_stress": {
+    "cagr": -0.012248604492192006,
+    "max_dd": 0.2568760020365387,
+    "sharpe": -0.03882219834092709,
+    "total": -0.03027125469576697,
+    "end_eur": 46.157496317890924,
+    "trades": 116,
+    "win": 0.4396551724137931,
+    "per_trade": -0.00010266407872182447,
+    "skipped_pdt": 1
+   },
+   "is_late": {
+    "cagr": -0.06652538236035721,
+    "max_dd": 0.5562793600846752,
+    "sharpe": -0.422489026529355,
+    "total": -0.4229288248889217,
+    "end_eur": 28.172803949043374,
+    "trades": 362,
+    "win": 0.44751381215469616,
+    "per_trade": -0.001303430264935166,
+    "skipped_pdt": 10
+   }
+  },
+  {
+   "rule": "pattern_clf_logit_1000",
+   "account": "cash",
+   "trial": "small:eq2:pattern_clf_logit_1000:cash",
+   "is_sharpe": -0.06339715875503604,
+   "dsr_all": 4.710559622691505e-05,
+   "dsr_small": 0.0077357421497940785,
+   "excess_sharpe": -1.0019906989979404,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 1.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 1.0,
+    ">= 100 trades": false,
+    "PBO < 0.2": true,
+    "leak harness clean": true
+   },
+   "val_late": {
+    "cagr": 0.04125021406995555,
+    "max_dd": 0.043178310278958576,
+    "sharpe": 0.7425833462580873,
+    "total": 0.10607767040179361,
+    "end_eur": 52.64748131484444,
+    "trades": 8,
+    "win": 0.625,
+    "per_trade": 0.013092501983792706,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": 0.048654340177757494,
+    "max_dd": 0.04516027370061437,
+    "sharpe": 0.7675531488690722,
+    "total": 0.12579900100061203,
+    "end_eur": 53.58618427575676,
+    "trades": 8,
+    "win": 0.625,
+    "per_trade": 0.01544693534741752,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": 0.03791578810475982,
+    "max_dd": 0.04509004287258134,
+    "sharpe": 0.6945976672679144,
+    "total": 0.09726434028408737,
+    "end_eur": 52.22798126967589,
+    "trades": 8,
+    "win": 0.625,
+    "per_trade": 0.012079914817010956,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.00213668796563804,
+    "max_dd": 0.12647070026243512,
+    "sharpe": -0.054919157242612204,
+    "total": -0.01693743175884943,
+    "end_eur": 47.993436857021976,
+    "trades": 32,
+    "win": 0.46875,
+    "per_trade": -0.00041807423727191484,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "pattern_clf_logit_1000",
+   "account": "margin",
+   "trial": "small:eq2:pattern_clf_logit_1000:margin",
+   "is_sharpe": -0.014509108493055534,
+   "dsr_all": 4.710559622691505e-05,
+   "dsr_small": 0.0077357421497940785,
+   "excess_sharpe": -1.0019906989979404,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": 0.04125021406995555,
+    "max_dd": 0.043178310278958576,
+    "sharpe": 0.7425833462580873,
+    "total": 0.10607767040179361,
+    "end_eur": 52.64748131484444,
+    "trades": 8,
+    "win": 0.625,
+    "per_trade": 0.013092501983792706,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": 0.048654340177757494,
+    "max_dd": 0.04516027370061437,
+    "sharpe": 0.7675531488690722,
+    "total": 0.12579900100061203,
+    "end_eur": 53.58618427575676,
+    "trades": 8,
+    "win": 0.625,
+    "per_trade": 0.01544693534741752,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": 0.03791578810475982,
+    "max_dd": 0.04509004287258134,
+    "sharpe": 0.6945976672679144,
+    "total": 0.09726434028408737,
+    "end_eur": 52.22798126967589,
+    "trades": 8,
+    "win": 0.625,
+    "per_trade": 0.012079914817010956,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.0008373327189190594,
+    "max_dd": 0.11734520199265408,
+    "sharpe": -0.01256884478711298,
+    "total": -0.006667672326319485,
+    "end_eur": 48.49480987923334,
+    "trades": 31,
+    "win": 0.4838709677419355,
+    "per_trade": -9.805423010430274e-05,
+    "skipped_pdt": 1
+   }
+  },
+  {
+   "rule": "pattern_clf_logit_1200",
+   "account": "cash",
+   "trial": "small:eq2:pattern_clf_logit_1200:cash",
+   "is_sharpe": 0.24540445223584292,
+   "dsr_all": 1.7982735885381888e-06,
+   "dsr_small": 0.00034715040284500297,
+   "excess_sharpe": -1.3515428584562168,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 0.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 0.0,
+    ">= 100 trades": false,
+    "PBO < 0.2": true,
+    "leak harness clean": true
+   },
+   "val_late": {
+    "cagr": -0.0025647916539159876,
+    "max_dd": 0.019840339150944297,
+    "sharpe": -0.13220143563699333,
+    "total": -0.00638480491768878,
+    "end_eur": 47.29445211405352,
+    "trades": 4,
+    "win": 0.25,
+    "per_trade": -0.001498504178766874,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": 0.0007327498132980725,
+    "max_dd": 0.01492462684433471,
+    "sharpe": 0.05595557249580993,
+    "total": 0.0018286120555572882,
+    "end_eur": 47.68539727839529,
+    "trades": 4,
+    "win": 0.25,
+    "per_trade": 0.0005274367497368204,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.0041631300480408084,
+    "max_dd": 0.021798701110210983,
+    "sharpe": -0.21836660309841863,
+    "total": -0.01035133099637453,
+    "end_eur": 47.10565198436951,
+    "trades": 4,
+    "win": 0.25,
+    "per_trade": -0.002496507506311113,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": 0.007192347155355883,
+    "max_dd": 0.11467827968338307,
+    "sharpe": 0.21258281924348615,
+    "total": 0.0589043475460338,
+    "end_eur": 51.69605738574931,
+    "trades": 31,
+    "win": 0.4838709677419355,
+    "per_trade": 0.002015887369993374,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "pattern_clf_logit_1200",
+   "account": "margin",
+   "trial": "small:eq2:pattern_clf_logit_1200:margin",
+   "is_sharpe": 0.3385291168171989,
+   "dsr_all": 1.7982735885381888e-06,
+   "dsr_small": 0.00034715040284500297,
+   "excess_sharpe": -1.3515428584562168,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": -0.0025647916539159876,
+    "max_dd": 0.019840339150944297,
+    "sharpe": -0.13220143563699333,
+    "total": -0.00638480491768878,
+    "end_eur": 47.29445211405352,
+    "trades": 4,
+    "win": 0.25,
+    "per_trade": -0.001498504178766874,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": 0.0007327498132980725,
+    "max_dd": 0.01492462684433471,
+    "sharpe": 0.05595557249580993,
+    "total": 0.0018286120555572882,
+    "end_eur": 47.68539727839529,
+    "trades": 4,
+    "win": 0.25,
+    "per_trade": 0.0005274367497368204,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.0041631300480408084,
+    "max_dd": 0.021798701110210983,
+    "sharpe": -0.21836660309841863,
+    "total": -0.01035133099637453,
+    "end_eur": 47.10565198436951,
+    "trades": 4,
+    "win": 0.25,
+    "per_trade": -0.002496507506311113,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": 0.009975086651664578,
+    "max_dd": 0.09495397245615333,
+    "sharpe": 0.29324706859762184,
+    "total": 0.08249594616599931,
+    "end_eur": 52.84780696436391,
+    "trades": 30,
+    "win": 0.5,
+    "per_trade": 0.002809540489194336,
+    "skipped_pdt": 1
+   }
+  },
+  {
+   "rule": "pattern_clf_gbm_1000",
+   "account": "cash",
+   "trial": "small:eq2:pattern_clf_gbm_1000:cash",
+   "is_sharpe": 0.16794996112318392,
+   "dsr_all": 4.658974080989665e-05,
+   "dsr_small": 0.004644724803912204,
+   "excess_sharpe": -1.014725758669068,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 1.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 1.0,
+    ">= 100 trades": false,
+    "PBO < 0.2": true,
+    "leak harness clean": true
+   },
+   "val_late": {
+    "cagr": 0.033739336092364125,
+    "max_dd": 0.07294283238614507,
+    "sharpe": 0.4568293728056629,
+    "total": 0.08628495265522296,
+    "end_eur": 51.705380442892086,
+    "trades": 67,
+    "win": 0.5223880597014925,
+    "per_trade": 0.0013516397368481487,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": 0.05267471725897965,
+    "max_dd": 0.06758990040271184,
+    "sharpe": 0.6153310336699033,
+    "total": 0.13659508775103912,
+    "end_eur": 54.10006028164348,
+    "trades": 67,
+    "win": 0.5223880597014925,
+    "per_trade": 0.0020568069061246553,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": 0.006340122152313388,
+    "max_dd": 0.08079800108594903,
+    "sharpe": 0.11907890742110343,
+    "total": 0.015888399746301074,
+    "end_eur": 48.354620091175,
+    "trades": 67,
+    "win": 0.4925373134328358,
+    "per_trade": 0.00035078749947649253,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": 0.009193096473105289,
+    "max_dd": 0.19715085797591192,
+    "sharpe": 0.14548907604464645,
+    "total": 0.07582037024374522,
+    "end_eur": 52.5219031593984,
+    "trades": 258,
+    "win": 0.5116279069767442,
+    "per_trade": 0.00041057149992042156,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "pattern_clf_gbm_1000",
+   "account": "margin",
+   "trial": "small:eq2:pattern_clf_gbm_1000:margin",
+   "is_sharpe": 0.172415263117092,
+   "dsr_all": 3.560353947566711e-05,
+   "dsr_small": 0.0037974384018889095,
+   "excess_sharpe": -1.038363987287185,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": 0.02986043665964533,
+    "max_dd": 0.0739881480381348,
+    "sharpe": 0.41044223713043054,
+    "total": 0.07614698323020996,
+    "end_eur": 51.22282974129447,
+    "trades": 66,
+    "win": 0.5151515151515151,
+    "per_trade": 0.0012293824934758134,
+    "skipped_pdt": 1
+   },
+   "val_next": {
+    "cagr": 0.04940710369092516,
+    "max_dd": 0.07060673326010769,
+    "sharpe": 0.5814163462235257,
+    "total": 0.1278157325204552,
+    "end_eur": 53.68217738532694,
+    "trades": 66,
+    "win": 0.5151515151515151,
+    "per_trade": 0.001970025374719807,
+    "skipped_pdt": 1
+   },
+   "val_stress": {
+    "cagr": 0.00296607470568655,
+    "max_dd": 0.08079800108594903,
+    "sharpe": 0.0766332763775841,
+    "total": 0.007414331626818704,
+    "end_eur": 47.95126836017125,
+    "trades": 66,
+    "win": 0.48484848484848486,
+    "per_trade": 0.00022865244675826765,
+    "skipped_pdt": 1
+   },
+   "is_late": {
+    "cagr": 0.009522900552861646,
+    "max_dd": 0.20149026799808367,
+    "sharpe": 0.14935713069245035,
+    "total": 0.07863138765076516,
+    "end_eur": 52.65913795073948,
+    "trades": 250,
+    "win": 0.516,
+    "per_trade": 0.0004328634504024502,
+    "skipped_pdt": 8
+   }
+  },
+  {
+   "rule": "pattern_clf_gbm_1200",
+   "account": "cash",
+   "trial": "small:eq2:pattern_clf_gbm_1200:cash",
+   "is_sharpe": -0.44688683616469477,
+   "dsr_all": 6.089301407345853e-15,
+   "dsr_small": 2.261656903004643e-10,
+   "excess_sharpe": -1.5924073866046593,
+   "pass": false,
+   "conditions": {
+    "beats nothing (end EUR)": 0.0,
+    "DSR all >= 0.95": false,
+    "DSR small >= 0.95": false,
+    "CAGR > SPY held": 0.0,
+    "costs doubled > 0": 0.0,
+    ">= 100 trades": false,
+    "PBO < 0.2": true,
+    "leak harness clean": true
+   },
+   "val_late": {
+    "cagr": -0.04302994168578633,
+    "max_dd": 0.10389890797822154,
+    "sharpe": -1.3112216670638253,
+    "total": -0.10389890797822154,
+    "end_eur": 42.65294089274093,
+    "trades": 36,
+    "win": 0.3611111111111111,
+    "per_trade": -0.0030088867227557694,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": -0.042708584314801734,
+    "max_dd": 0.10314817754372951,
+    "sharpe": -1.350762510680812,
+    "total": -0.10314817754372951,
+    "end_eur": 42.688674428983504,
+    "trades": 36,
+    "win": 0.4166666666666667,
+    "per_trade": -0.0029883232979833535,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.05675312995269777,
+    "max_dd": 0.13560736112576977,
+    "sharpe": -1.6745724162925308,
+    "total": -0.13560736112576977,
+    "end_eur": 41.143670577210784,
+    "trades": 36,
+    "win": 0.3333333333333333,
+    "per_trade": -0.0040060957316570955,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.026417862711933693,
+    "max_dd": 0.21616280528374154,
+    "sharpe": -0.38709947147708357,
+    "total": -0.19250480378406154,
+    "end_eur": 39.422180198841154,
+    "trades": 188,
+    "win": 0.4521276595744681,
+    "per_trade": -0.0010502782338377631,
+    "skipped_pdt": 0
+   }
+  },
+  {
+   "rule": "pattern_clf_gbm_1200",
+   "account": "margin",
+   "trial": "small:eq2:pattern_clf_gbm_1200:margin",
+   "is_sharpe": -0.31483176356159903,
+   "dsr_all": 6.089301407345853e-15,
+   "dsr_small": 2.261656903004643e-10,
+   "excess_sharpe": -1.5924073866046593,
+   "pass": null,
+   "conditions": null,
+   "val_late": {
+    "cagr": -0.04302994168578633,
+    "max_dd": 0.10389890797822154,
+    "sharpe": -1.3112216670638253,
+    "total": -0.10389890797822154,
+    "end_eur": 42.65294089274093,
+    "trades": 36,
+    "win": 0.3611111111111111,
+    "per_trade": -0.0030088867227557694,
+    "skipped_pdt": 0
+   },
+   "val_next": {
+    "cagr": -0.042708584314801734,
+    "max_dd": 0.10314817754372951,
+    "sharpe": -1.350762510680812,
+    "total": -0.10314817754372951,
+    "end_eur": 42.688674428983504,
+    "trades": 36,
+    "win": 0.4166666666666667,
+    "per_trade": -0.0029883232979833535,
+    "skipped_pdt": 0
+   },
+   "val_stress": {
+    "cagr": -0.05675312995269777,
+    "max_dd": 0.13560736112576977,
+    "sharpe": -1.6745724162925308,
+    "total": -0.13560736112576977,
+    "end_eur": 41.143670577210784,
+    "trades": 36,
+    "win": 0.3333333333333333,
+    "per_trade": -0.0040060957316570955,
+    "skipped_pdt": 0
+   },
+   "is_late": {
+    "cagr": -0.01895629846850644,
+    "max_dd": 0.18579852387856532,
+    "sharpe": -0.27272094434231575,
+    "total": -0.14173656349055674,
+    "end_eur": 41.90070233322349,
+    "trades": 184,
+    "win": 0.46195652173913043,
+    "per_trade": -0.0007444666512886382,
+    "skipped_pdt": 4
+   }
+  }
+ ],
+ "window": [
+  "2024-01-01",
+  "2026-06-30"
+ ],
+ "trials": [
+  {
+   "id": "small:eq2:rvol_orb_m5_r1.5:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.3783092815539185
+  },
+  {
+   "id": "small:eq2:rvol_orb_m5_r1.5:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.4199659794402456
+  },
+  {
+   "id": "small:eq2:rvol_orb_m5_r3:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.5118659181079861
+  },
+  {
+   "id": "small:eq2:rvol_orb_m5_r3:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.4819864728564617
+  },
+  {
+   "id": "small:eq2:rvol_orb_m15_r1.5:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.9016744422340341
+  },
+  {
+   "id": "small:eq2:rvol_orb_m15_r1.5:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.9437092874169754
+  },
+  {
+   "id": "small:eq2:rvol_orb_m15_r3:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.42972320744331965
+  },
+  {
+   "id": "small:eq2:rvol_orb_m15_r3:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.422489026529355
+  },
+  {
+   "id": "small:eq2:pattern_clf_logit_1000:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.06339715875503604
+  },
+  {
+   "id": "small:eq2:pattern_clf_logit_1000:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.014509108493055534
+  },
+  {
+   "id": "small:eq2:pattern_clf_logit_1200:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": 0.24540445223584292
+  },
+  {
+   "id": "small:eq2:pattern_clf_logit_1200:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": 0.3385291168171989
+  },
+  {
+   "id": "small:eq2:pattern_clf_gbm_1000:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": 0.16794996112318392
+  },
+  {
+   "id": "small:eq2:pattern_clf_gbm_1000:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": 0.172415263117092
+  },
+  {
+   "id": "small:eq2:pattern_clf_gbm_1200:cash",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.44688683616469477
+  },
+  {
+   "id": "small:eq2:pattern_clf_gbm_1200:margin",
+   "family": "small",
+   "source": "results/daytrade_eq2_prereg.md",
+   "sharpe": -0.31483176356159903
+  }
+ ]
+}
