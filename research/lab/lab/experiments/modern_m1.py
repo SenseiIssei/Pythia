@@ -28,6 +28,11 @@ those parts are skipped with the reason and the rest runs. Writes modern_m1.json
              factory's shadow) that says whether a trade pays after costs, walked forward by year; the filtered
              book through the same simulator and costs, judged by that factory's bar against the unfiltered one.
 
+R6 (results/factory_lockbox_r6.md): everything is judged on validation only, EVAL_FROM to EVAL_TO; the zoo's
+holdout rows stop before EVAL_TO (a row's next-day target ends on it at the latest), the regime and meta-labelling
+learners see no label known in the lockbox. Every judged book is a trial in R5's registry (register_trials), written
+before its number; the deflation's N is the registry's.
+
 Runtime and peak memory per part are measured in the run (on the VPS when it runs there). Nothing here trades,
 signs, holds a key or writes anywhere a book, the engine or the live bots read.
 """
@@ -55,6 +60,9 @@ from ..models import metalabel as ML
 
 PARTS = ("fm", "features", "tabular", "regime", "conformal", "meta")
 EVAL_FROM = "2024-01-01"
+EVAL_TO = "2026-06-30"            # R6: validation ends here; LOCKBOX_FROM on is never read
+LOCKBOX_FROM = "2026-07-01"       # factory.evaluate.LOCKBOX_FROM
+TRIAL_SOURCE = "lab/experiments/modern_m1.py (M1)"
 FEAT_FROM = "2021-03-01"
 FEAT_TEST = "2023-01-01"
 CONF_ALPHA = 0.2
@@ -82,15 +90,33 @@ def us(day: str) -> int:
     return core.us(day)
 
 
+def held(ts: np.ndarray) -> np.ndarray:
+    """Validation (R6): EVAL_FROM up to and including EVAL_TO."""
+    return (ts >= us(EVAL_FROM)) & (ts < us(LOCKBOX_FROM))
+
+
+def lockbox_t(days: np.ndarray) -> int:
+    """The first row of the lockbox in a daily index (len(days) when it has none)."""
+    return int(np.searchsorted(days, us(LOCKBOX_FROM)))
+
+
+def register_trials(family: str, names: list[str]) -> None:
+    """R5: the judged books as trials (id <family>:m1:<name>), before their numbers; a rerun counts them once."""
+    from .. import metrics
+    metrics.register([{"id": f"{family}:m1:{n}", "family": family, "n": 1, "sharpe": None, "source": TRIAL_SOURCE}
+                      for n in names])
+
+
 def holdout(name: str) -> tuple[pl.DataFrame, str]:
     """The newest walk-forward holdout of a zoo model in the registry: its out-of-sample rows with the challenger's
-    and the baseline's forecasts."""
+    and the baseline's forecasts, those before EVAL_TO only (R6: the next-day target of the last ends on EVAL_TO)."""
     from ..data import ROOT
     d = ROOT / "models" / "registry" / name / "candidates"
     vs = sorted(p.name for p in d.iterdir() if (p / "holdout.parquet").exists()) if d.is_dir() else []
     if not vs:
         raise core.DataUnavailable(f"no holdout of {name} in {d}")
-    return pl.read_parquet(d / vs[-1] / "holdout.parquet").sort(["ts_us", "symbol"]), vs[-1]
+    return (pl.read_parquet(d / vs[-1] / "holdout.parquet").filter(pl.col("ts_us") < us(EVAL_TO))
+            .sort(["ts_us", "symbol"]), vs[-1])
 
 
 def _f(x, fmt="{:.4f}") -> str:
@@ -156,7 +182,7 @@ def fm_part(models: list[str], budget_s: float, log=print) -> dict:
     v, vv = holdout("m10_vol_regime")
     v = next_log_volume(v)
     start = us(EVAL_FROM)
-    out = {"eval_from": EVAL_FROM, "m8q_version": qv, "m10_version": vv, "models": {}}
+    out = {"eval_from": EVAL_FROM, "eval_to": EVAL_TO, "m8q_version": qv, "m10_version": vv, "models": {}}
     for name in models:
         t0 = time.time()
         try:
@@ -388,7 +414,7 @@ def regime_part(log=print) -> dict:
     t0 = time.time()
     c, v = small.load_market(offline=True)
     R = regime_rows(c)
-    ok = R["ok"] & np.isfinite(R["y"])
+    ok = R["ok"] & np.isfinite(R["y"]) & (R["known"] < lockbox_t(c.days))     # R6: no label known in the lockbox
     blocks = yearly_blocks(c)
     names = [n for n in CLASSIFIERS]
     sub = {k: (x[ok] if isinstance(x, np.ndarray) and len(x) == c.T else x) for k, x in R.items()}
@@ -415,13 +441,13 @@ def regime_part(log=print) -> dict:
     return res
 
 
-def _f2_pool(extra_trials: int) -> dict:
+def _f2_pool(trials: list[str]) -> dict:
+    """F2's pool with these trials registered first (register_trials, the small family)."""
     from ..factory import small
+    register_trials("small", trials)
     led = small.Ledger(small.seed_dir() / "ledger.jsonl") if not (small.small_dir() / "ledger.jsonl").exists() \
         else small.Ledger()
-    pool = led.pool()
-    pool["n_trials"] += extra_trials
-    return pool
+    return led.pool()
 
 
 def _f2_book(c, v, W: np.ndarray, g: dict, pool: dict, bench: dict) -> dict:
@@ -457,7 +483,7 @@ def regime_books(c, v, p: dict, rule: np.ndarray, log=print) -> dict:
     g = small.hold_genome("BTC")
     W0 = small.weights(c, g)
     bench = small.benchmarks(c, v, small.windows(c)["oos"])
-    pool = _f2_pool(len(p))
+    pool = _f2_pool([f"regime:{n}" for n in p])
     out = {"window": [small._day(c, x) for x in small.windows(c)["oos"]], "pool_trials": pool["n_trials"],
            "spy": {k: small.strip_returns(bench)[k] for k in ("SPY@40", "SPY@100")},
            "btc": {k: small.strip_returns(bench)[k] for k in ("BTC@40", "BTC@100")}, "books": {}}
@@ -503,13 +529,13 @@ def boot_sharpe_diff(a: np.ndarray, b: np.ndarray, draws: int = BOOT_DRAWS, bloc
 
 def conformal_part(log=print) -> dict:
     t0 = time.time()
-    out = {"alpha": CONF_ALPHA, "window_days": CF.WINDOW_DAYS, "eval_from": EVAL_FROM}
+    out = {"alpha": CONF_ALPHA, "window_days": CF.WINDOW_DAYS, "eval_from": EVAL_FROM, "eval_to": EVAL_TO}
     q, _ = holdout("m8_quantiles")
     ts = q["ts_us"].to_numpy()
     y = q["target"].to_numpy().astype(float)
     Q = core.as_array(q["challenger"])
     cq = CF.rolling(ts, y, Q[:, 0], Q[:, 2], CONF_ALPHA, embargo_days=1)
-    ev = ts >= us(EVAL_FROM)
+    ev = held(ts)
     out["m8q"] = {"raw": CF.coverage(y[ev], Q[ev, 0], Q[ev, 2]), "conformal": CF.coverage(y[ev], cq["lo"][ev], cq["hi"][ev]),
                   "by_symbol": per_symbol_coverage(q["symbol"].to_numpy()[ev], y[ev], cq["lo"][ev], cq["hi"][ev])}
     v, _ = holdout("m10_vol_regime")
@@ -517,7 +543,7 @@ def conformal_part(log=print) -> dict:
     ly = np.log(v["target"].to_numpy().astype(float))
     lf = np.log(v["challenger"].to_numpy().astype(float))
     cv = CF.rolling(tv, ly, lf, lf, CONF_ALPHA, embargo_days=1)
-    evv = tv >= us(EVAL_FROM)
+    evv = held(tv)
     out["m10"] = {"conformal": CF.coverage(ly[evv], cv["lo"][evv], cv["hi"][evv]),
                   "note": "M10 is a point forecast: the interval is on the log variance, |log y - log f| as the score"}
     out["sizing"] = sizing_book(q, cq)
@@ -554,20 +580,20 @@ def sizing_book(q: pl.DataFrame, cq: dict) -> dict:
     scale = np.ones_like(width)
     for j in range(n):
         scale[:, j] = CF.width_scale(days, width[:, j])
-    out = {"coins": n, "from": BOOK_FROM, "held_back_from": EVAL_FROM}
+    out = {"coins": n, "from": BOOK_FROM, "held_back_from": EVAL_FROM, "held_back_to": EVAL_TO}
     series = {}
     for name, W in (("unscaled", on / n), ("scaled", on / n * scale)):
         gross = (W * ret).sum(1)
         tov = np.abs(np.diff(np.vstack([np.zeros((1, n)), W]), axis=0)).sum(1)
         r = gross - COST * tov
-        hb = days >= us(EVAL_FROM)
+        hb = held(days)
         from .fam_common import perf
         series[name] = r[hb]
         out[name] = {**perf(r[hb]), "turnover_yr": float(tov[hb].sum() / max(hb.sum() / 365, 1e-9)),
                      "exposure": float(W[hb].sum(1).mean())}
     from ..factory import ledger as lg
+    register_trials("hand", ["sizing:scaled", "sizing:unscaled"])
     pool = lg.Ledger().pool()
-    pool["n_trials"] += 2
     out["scaled"]["deflated_p"] = lg.deflated(series["scaled"], pool)
     out["unscaled"]["deflated_p"] = lg.deflated(series["unscaled"], pool)
     out["pool_trials"] = pool["n_trials"]
@@ -605,7 +631,7 @@ def meta_walk(px, W, btc: int, days: np.ndarray, blocks, hurdle: float, log=prin
     X = ML.features(px, W, tr, btc)
     t = np.array([a for _, a, _ in tr], dtype=float)
     known = ML.known_at(tr, len(W))
-    lab = np.isfinite(y)
+    lab = np.isfinite(y) & (known < lockbox_t(days))      # R6: no label known in the lockbox is learned or scored
     w = F.walk(X[lab], y[lab], t[lab], known[lab], blocks, list(META_LEARNERS), min_train=40, log=log)
     p = {n: np.full(len(tr), np.nan) for n in META_LEARNERS}
     for n in META_LEARNERS:
@@ -650,7 +676,7 @@ def meta_part(log=print) -> dict:
         from ..factory import small
         c, v = small.load_market(offline=True)
         bench = small.benchmarks(c, v, small.windows(c)["oos"])
-        pool = _f2_pool(len(META_LEARNERS) * len(surv["small"]))
+        pool = _f2_pool([f"meta:{s['key']}:{n}" for s in surv["small"] for n in META_LEARNERS])
         for s in surv["small"]:
             g = s["genome"]
             W = small.weights(c, g)
@@ -679,8 +705,8 @@ def meta_weekly(surv: list[dict], log=print) -> list[dict]:
     c = build.make_ctx(fc.load_panel())
     oos = E.windows(c)["oos"]
     btc = E.btc_benchmark(c)
+    register_trials("factory", [f"meta:{s['key']}:{n}" for s in surv for n in META_LEARNERS])
     pool = lg.Ledger().pool()
-    pool["n_trials"] += len(META_LEARNERS) * len(surv)
     btc_col = c.names.index("BTCUSDT") if "BTCUSDT" in c.names else int(np.argmax(c.qv[-1]))
     yrs = sorted({int(str((d // fc.DAY_US).astype("datetime64[D]"))[:4]) for d in c.days})
     blocks = []

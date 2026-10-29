@@ -1,22 +1,24 @@
 """The readiness ladder (T3): on which step every candidate stands, what it misses next and where the evidence is.
 
-Pre-registered in results/readiness_ladder_prereg.md. One row per candidate: every paper book (lab.ops.paper_books),
+The rules: results/readiness_ladder_prereg.md (written 2026-10-29, after this code, from its audit). One row per candidate: every paper book (lab.ops.paper_books),
 every survivor of the weekly factory and F2 (<data>/factory/holdout.jsonl, factory/small/holdout.jsonl, a decision
 other than stopped), every active shadow (the weekly factory's <data>/factory/shadow/*.json, F2's and G2's report).
 Each step requires the one before:
 
   1 idea       a pre-registration (PREREG) committed on or before the candidate's first number
-  2 tested     T1's leak check passed, filled one close late still positive, costs of their era, DSR (higher is
-               better, pass at 0.95) over R5's whole registry and over its family, PBO of its family below 0.2
-  3 shadow     SHADOW_DAYS days logged before the outcome (T8 checks the "before"; until then that part is open)
+  2 tested     T1's leak check passed (a positive record), filled one close late still positive, costs of their era,
+               DSR (higher is better, pass at 0.95) over R5's whole registry and over its family as of today (dsr_now),
+               PBO of its family below 0.2
+  3 shadow     SHADOW_DAYS dates logged before the outcome (T8 checks the "before")
   4 lockbox    R6's one look made, against the right benchmark (BENCH), and passed
   5 execution  at most 50 EUR under the review's rules, judged on execution after 90 days (reports/execution); for
                P3's 10 EUR pump.fun books the gate for real money instead (results/ten_eur_p3_prereg.md: 30 days,
                mean and band above 0 after all costs, P2's gap under 2 points, P1's taint out), shown on its own too
   6 larger     only by the owner; the ladder never sets it
 
-A condition passes, fails or is open (its tool is not there yet for this candidate: T1, T2, T8); open never blocks,
-missing evidence fails. The ladder computes no performance number (no trial), reads only, and writes nothing but
+A condition passes, fails or is open. Open is allowed on step 1 only (the commit date without git); from step 2 on
+everything fails closed: missing evidence (no leak record, no PBO, no T8 report, a DSR deflated over far fewer trials
+than today's and no series to recompute it) fails, and climb() treats an open condition there as a fail too. The ladder computes no performance number (no trial), reads only, and writes nothing but
 reports/ladder/latest.json and .md. It proposes; it never arms, changes or sends anything.
 
   python -m lab.ops.ladder            write the report (the Lab Live job also writes it every run)
@@ -33,6 +35,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 from . import notify, paper_books
 
 NAME = "ladder"
@@ -48,6 +52,8 @@ PBO_MAX = 0.2
 SHADOW_DAYS = 30                # the review: 30 clean paper days
 LOCKBOX_BAR = 0.5               # factory.evaluate.LOCKBOX_BAR: the look's DSR over every look so far
 T1_FROM = "2026-10-28"          # genomes held back from this day on went through the leak harness first
+FAIL_CLOSED_FROM = 2            # from this step on an open condition blocks like a fail
+DSR_STALE = 0.9                 # a row's DSR over fewer than 90 % of today's trials is stale (DSR only falls as N grows)
 EXEC_CAP_EUR = 50.0
 EXEC_NO_TOPUP_DAYS = 90
 EXEC_FAILED_IN_A_ROW = 2
@@ -149,10 +155,15 @@ def _jsonl(p: Path) -> list[dict]:
     return out
 
 
-def _rows_in(p: Path) -> int:
+def _days_in(p: Path) -> int:
+    """Logged days of a journal or shadow CSV: its unique dates (the date column, else the first; the first 10
+    characters), so a rerun's second row of a day is not a second day."""
     try:
         with p.open(encoding="utf-8", newline="") as f:
-            return sum(1 for _ in csv.DictReader(f))
+            rd = csv.reader(f)
+            head = next(rd, [])
+            i = head.index("date") if "date" in head else 0
+            return len({r[i].strip()[:10] for r in rd if len(r) > i and r[i].strip()})
     except (OSError, csv.Error):
         return 0
 
@@ -249,21 +260,24 @@ def r10_rows(root: Path, results: Path) -> dict[str, dict]:
 
 
 def leak_cond(c: dict, ctx: dict) -> dict:
+    """Passes only on a positive record: a genome's clean check in leak_passed.jsonl (run.leak_screen), a book's
+    passing row in T1's weekly report. A rejection, no record or no report fails."""
     if c["kind"] in ("genome", "shadow"):
-        bad = ctx["leaks"].get(c["source"], set())
-        if c["key"] in bad:
+        if c["key"] in ctx["leaks"].get(c["source"], set()):
             return cond("leak", False, "rejected by the leak harness", c["leak_path"])
+        ok = ctx["leak_ok"].get(c["source"], {}).get(c["key"])
+        if ok:
+            return cond("leak", True, f"no leak, checked on {ok}", c["leak_ok_path"])
         held = c.get("held_day")
-        if held and held >= T1_FROM:
-            return cond("leak", True, f"checked before its look on {held}", c["leak_path"])
-        return cond("leak", None, "not checked (held back before T1)")
+        return cond("leak", False, "no clean leak record" + (" (held back before T1)" if held and held < T1_FROM
+                                                             else ""), c["leak_ok_path"])
     rep = ctx["leak_report"]
     if rep is None:
-        return cond("leak", None, "not checked (no T1 report yet)")
+        return cond("leak", False, "not checked (no T1 report)", "reports/leak/latest.json")
     want = c.get("leak_name") or c["name"]
     hit = [r for r in rep if r.get("kind") == "book" and r.get("name") == want]
     if not hit:
-        return cond("leak", None, f"not checked ({want} is not in T1's book list)")
+        return cond("leak", False, f"not checked ({want} is not in T1's book list)", "reports/leak/latest.json")
     ok = all(r.get("ok") for r in hit)
     return cond("leak", ok, "pass" if ok else str(hit[0].get("why") or "leak"), "reports/leak/latest.json")
 
@@ -295,21 +309,52 @@ def tested(c: dict, ctx: dict) -> list[dict]:
             out.append(cond("late", late is not None and late > 0,
                             "n/a" if late is None else f"late CAGR {late * 100:.1f} % a year", p))
             out.append(cond("era", False, "today's Jupiter quotes back to 2018; R10 has no row for it", p))
-        dsr, fam = _num(h.get("deflated_p")), _num(h.get("dsr_family"))
-        out.append(cond("dsr_all", dsr is not None and dsr >= DSR_PASS,
-                        "n/a" if dsr is None else f"{dsr:.3f} (higher is better)", p))
-        out.append(cond("dsr_family", fam is not None and fam >= DSR_PASS,
-                        "not reported" if fam is None else f"{fam:.3f} (higher is better)", p))
+        (dsr, dv), (fam, fv) = dsr_now(h, c["family"], ctx)
+        out.append(cond("dsr_all", dsr is not None and dsr >= DSR_PASS, dv, p))
+        out.append(cond("dsr_family", fam is not None and fam >= DSR_PASS, fv, p))
     else:
         why = NO_RECORD
         out += [cond("late", False, why), cond("era", False, why), cond("dsr_all", False, why),
                 cond("dsr_family", False, why)]
     pbo = ctx["pbo"].get((c["source"], c.get("run"))) if c.get("run") else None
     if pbo is None:
-        out.append(cond("pbo", None, "not measured (T2 not run for it)"))
+        out.append(cond("pbo", False, "not measured (T2 not run for it)", c.get("run_path") or ""))
     else:
         out.append(cond("pbo", pbo < PBO_MAX, f"{pbo:.2f} over its run's family", c.get("run_path") or ""))
     return out
+
+
+def dsr_now(h: dict, family: str, ctx: dict) -> tuple[tuple[float | None, str], tuple[float | None, str]]:
+    """(value, text) of the DSR over all and over the family of a held-back row, as of today's registry (R5). With
+    its excess series stored (oos_excess_returns) both are recomputed: N today's of all and of the family, the
+    variance the family's in-sample excess one (ledger.pool and ledger.deflated_excess). Without it the row's own
+    numbers count only while its trial counts are at least DSR_STALE of today's; else None (fails) with why."""
+    pool = ctx.get("pool")
+    if pool is None:
+        why = "R5's registry not readable"
+        return (None, why), (None, why)
+    n_all, n_fam = pool["n_trials"], pool["families"].get(family, 0)
+    x = h.get("oos_excess_returns")
+    if isinstance(x, list) and x:
+        from ..factory import ledger
+        a = np.array([v for v in map(_num, x) if v is not None], dtype=float)
+        var = pool["excess_var"].get(family, pool["var"])
+        d_all = ledger.deflated(a, {"n_trials": n_all, "var": var})
+        d_fam = ledger.deflated(a, {"n_trials": n_fam, "var": var})
+        return ((d_all, f"{d_all:.3f} recomputed over today's {n_all:,} trials (higher is better)"),
+                (d_fam, f"{d_fam:.3f} recomputed over today's {n_fam:,} {family} trials (higher is better)"))
+    out = []
+    for v, n, now, what in ((h.get("deflated_p"), h.get("pool_trials"), n_all, "trials"),
+                            (h.get("dsr_family"), h.get("family_trials"), n_fam, f"{family} trials")):
+        v, n = _num(v), _num(n)
+        if v is None:
+            out.append((None, "not reported"))
+        elif n is None or n < DSR_STALE * now:
+            out.append((None, f"stale: {v:.3f} over {'?' if n is None else f'{n:,.0f}'} {what}, today {now:,}, "
+                              "no stored series to recompute"))
+        else:
+            out.append((v, f"{v:.3f} over {n:,.0f} {what}, today {now:,} (higher is better)"))
+    return out[0], out[1]
 
 
 # ---------------------------------------------------------------- steps 3 to 6
@@ -319,7 +364,7 @@ def shadow(c: dict, ctx: dict) -> list[dict]:
     days = cond("days", n is not None and n >= SHADOW_DAYS,
                 "no daily record" if n is None else f"{n} of {SHADOW_DAYS} days", p)
     t8 = ctx["t8"].get(c["id"])
-    before = cond("before", None, "not checked (T8 not there yet)") if t8 is None else \
+    before = cond("before", False, "not checked (no T8 report for it)", "reports/shadow/latest.json") if t8 is None else \
         cond("before", bool(t8.get("ok")), str(t8.get("why") or ""), "reports/shadow/latest.json")
     return [days, before]
 
@@ -400,16 +445,18 @@ def execution(c: dict, ctx: dict, now: int) -> list[dict]:
 
 
 def climb(steps: dict[int, list[dict]]) -> tuple[int, list[dict], list[dict]]:
-    """The highest step whose conditions and those of every step before have no fail; the next step's fails; the
-    open conditions up to that next step."""
+    """The highest step whose conditions and those of every step before have no fail (from FAIL_CLOSED_FROM on an
+    open condition is a fail); the next step's fails; the open conditions up to that next step that do not block."""
+    def blocks(k: int, x: dict) -> bool:
+        return x["ok"] is False or (x["ok"] is None and k >= FAIL_CLOSED_FROM)
     step = 0
     for k in sorted(steps):
-        if any(x["ok"] is False for x in steps[k]):
+        if any(blocks(k, x) for x in steps[k]):
             break
         step = k
     nxt = steps.get(step + 1, [])
-    missing = [x for x in nxt if x["ok"] is False]
-    opened = [x for k in sorted(steps) if k <= step + 1 for x in steps[k] if x["ok"] is None]
+    missing = [x for x in nxt if blocks(step + 1, x)]
+    opened = [x for k in sorted(steps) if k <= step + 1 for x in steps[k] if x["ok"] is None and not blocks(k, x)]
     return step, missing, opened
 
 
@@ -470,7 +517,7 @@ def candidates(root: Path, now: int) -> list[dict]:
         bench, pre, fam, r10 = _book_kind(b)
         n = b["name"]
         j = root / "paper" / n / "journal.csv"
-        logged = _rows_in(j) if j.exists() else None
+        logged = _days_in(j) if j.exists() else None
         if logged is None and _num((fdays.get(n) or {}).get("days")) is not None:
             logged = int(fdays[n]["days"])
         out[f"book:{n}"] = {"id": f"book:{n}", "name": n, "kind": "book", "study": b["study"], "source": "book",
@@ -497,7 +544,7 @@ def candidates(root: Path, now: int) -> list[dict]:
              "date": m.get("entry_day")}
         c = out.get(f"weekly:{m['key']}") or genome("weekly", h, "factory/holdout.jsonl", "shadow")
         csv_p = fac / "shadow" / f"{m['key']}.csv"
-        c.update({"kind": "shadow", "days_logged": _rows_in(csv_p), "days_path": f"factory/shadow/{m['key']}.csv"})
+        c.update({"kind": "shadow", "days_logged": _days_in(csv_p), "days_path": f"factory/shadow/{m['key']}.csv"})
         out[c["id"]] = c
     f2 = notify.read_json(rep / "smallaccount" / "factory.json")
     f2_held = {h["key"]: h for h in _jsonl(fac / "small" / "holdout.jsonl") if h.get("key")}
@@ -531,7 +578,8 @@ def genome(source: str, h: dict, path: str, kind: str) -> dict:
             "r10": f"F2 f2 {k}" if small else None, "holdout": h, "holdout_path": path, "run": h.get("run"),
             "run_path": f"factory/{'small/' if small else ''}runs/{h.get('run')}.json", "held_day": h.get("date"),
             "first_day": h.get("date") or h.get("run"),
-            "leak_path": "factory/small/leaks.jsonl" if small else "factory/leaks.jsonl"}
+            "leak_path": "factory/small/leaks.jsonl" if small else "factory/leaks.jsonl",
+            "leak_ok_path": "factory/small/leak_passed.jsonl" if small else "factory/leak_passed.jsonl"}
 
 
 # ---------------------------------------------------------------- what the steps read, once
@@ -549,14 +597,35 @@ def context(root: Path, results: Path = RESULTS, added=None) -> dict:
     t8 = notify.read_json(root / "reports" / "shadow" / "latest.json")
     ex = notify.read_json(root / "reports" / "execution" / "latest.json")
     r10 = r10_rows(root, results)
-    return {"results": results, "added": added or git_added, "r10": r10, "pbo": pbo,
+    return {"results": results, "added": added or git_added, "r10": r10, "pbo": pbo, "pool": today_pool(),
             "leaks": {"weekly": {x.get("key") for x in _jsonl(fac / "leaks.jsonl")},
                       "F2": {x.get("key") for x in _jsonl(fac / "small" / "leaks.jsonl")}},
+            "leak_ok": {s: {x["key"]: str(x.get("date") or "") for x in _jsonl(d / "leak_passed.jsonl")
+                            if x.get("key") and x.get("ok") is True}
+                        for s, d in (("weekly", fac), ("F2", fac / "small"))},
             "leak_report": [r for r in lk.get("results") or [] if isinstance(r, dict)] if isinstance(lk, dict) else None,
             "looks": _jsonl(fac / "lockbox.jsonl"),
             "t8": {str(r.get("id")): r for r in (t8 or {}).get("rows") or [] if isinstance(r, dict)}
             if isinstance(t8, dict) else {},
             "execution": (ex or {}).get("books") or {} if isinstance(ex, dict) else {}}
+
+
+def today_pool() -> dict | None:
+    """Today's R5 pool for dsr_now: N of all and of each family, the variance of all and each factory family's
+    in-sample excess variance (the variance of all below ledger.EXCESS_MIN excess Sharpes, as ledger.pool); None
+    when the registry cannot be read (every DSR then fails)."""
+    try:
+        from .. import metrics
+        from ..factory import ledger
+        p = metrics.trial_pool()
+        ev = {}
+        for f in ("factory", "small"):
+            v, n = ledger.excess_var(f)
+            ev[f] = v if n >= ledger.EXCESS_MIN else p["var"]
+        return {"n_trials": p["n_trials"], "var": p["var"], "excess_var": ev,
+                "families": {f: x["n_trials"] for f, x in p["families"].items()}}
+    except Exception:  # noqa: BLE001 - fails closed: no pool, no DSR passes
+        return None
 
 
 def build(root: Path | None = None, now: int | None = None, results: Path = RESULTS, added=None) -> dict:
@@ -590,9 +659,11 @@ def markdown(d: dict) -> str:
     md = [f"# Readiness ladder, {d['generated']}\n",
           "Each step requires the one before: 1 idea (pre-registered), 2 tested (leak check, one close late, costs of "
           "their era, DSR over the registry and the family, PBO), 3 shadow, 4 lockbox, 5 execution (50 EUR), 6 larger "
-          "(only the owner). `results/readiness_ladder_prereg.md`. DSR: higher is better, pass at 0.95"
+          "(only the owner). `results/readiness_ladder_prereg.md`. DSR: higher is better, pass at 0.95, as of today's "
+          "registry"
           + (f"; R5's registry holds {reg['n_trials']:,} trials" if reg.get("n_trials") else "") + ". "
-          "Open (not blocking): a tool that is not there yet for the candidate. Nothing here arms anything.\n",
+          "Open (not blocking, step 1 only): the commit date without git. From step 2 on missing evidence fails. "
+          "Nothing here arms anything.\n",
           f"**{d['headline']}**\n",
           "| candidate | kind | step | next missing | open | evidence |", "|---|---|---|---|---|---|"]
     for r in d["rows"]:

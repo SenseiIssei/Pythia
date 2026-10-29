@@ -215,6 +215,9 @@ def test_a_genome_on_tomorrows_return_is_rejected_logged_and_never_picked(ctx, t
     assert [x["key"] for x in out] == ["bad"]
     row = json.loads(path.read_text().splitlines()[0])
     assert row["key"] == "bad" and row["reason"].startswith("leak:") and row["first"]["column"] and row["behaviour"] == "b1"
+    clean = [json.loads(x) for x in (tmp_path / "leak_passed.jsonl").read_text().splitlines()]   # the positive record
+    assert [x["key"] for x in clean] == ["good"] and clean[0]["ok"] is True and clean[0]["reason"].startswith("no leak")
+    assert len(path.read_text().splitlines()) == 1                  # the rejections' file holds rejections only
 
 
 def test_f2_genomes_pass():

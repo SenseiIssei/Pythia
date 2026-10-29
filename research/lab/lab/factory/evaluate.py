@@ -193,8 +193,11 @@ def holdout(c: build.Ctx, g: dict, pool: dict, btc: dict) -> dict:
         "btc_sharpe": btc["sharpe"], "btc_max_dd": btc["max_dd"],
         "oos_excess_sharpe": sharpe(ex), "behaviour": grammar.behaviour(nets["35bps"][w["is"]]),
         "deflated_p": deflated_excess(ex, pool), "dsr_raw": deflated(x35, pool), "pool_trials": pool["n_trials"],
+        "dsr_family": deflated_excess(ex, pool, n=pool["family_trials"]) if "family_trials" in pool else None,
+        "family_trials": pool.get("family_trials"),
         "pool_sr0": pool.get("excess_sr0_annual", pool["sr0_annual"]), "raw_sr0": pool["sr0_annual"],
         "band30": boot_quantiles(x35, 30),
+        "oos_excess_returns": [round(float(r), 7) if np.isfinite(r) else None for r in ex],  # the ladder's dsr_now
     }
     return res
 

@@ -33,13 +33,14 @@ report has one line per candidate (DSR, PBO, CPCV median and 10th percentile).
 
 T1 (results/leak_harness_prereg.md): before its held-back look every pick goes through the leak harness
 (lab.leak, leak_screen); one whose weights at or before t move when the bars after t change is rejected,
-written to <data>/factory/leaks.jsonl with the reason and never picked again.
+written to <data>/factory/leaks.jsonl with the reason and never picked again; a clean check is logged to
+<data>/factory/leak_passed.jsonl (the readiness ladder's positive record).
 
 Every run first merges results/factory_seed into <data>/factory (only what is
 missing; see ledger.import_seed), so trials counted on another machine are
 never lost from the pool.
 
-Writes <data>/factory/ (ledger.jsonl, holdout.jsonl, leaks.jsonl, shadow/, promoted.json,
+Writes <data>/factory/ (ledger.jsonl, holdout.jsonl, leaks.jsonl, leak_passed.jsonl, shadow/, promoted.json,
 runs/<run>.json) and reports/factory/ (dated and latest markdown and JSON;
 with PYTHIA_RESULTS also <results>/factory.md). Nothing else: no engine call,
 no live setting, no paper journal (a promoted book is stepped by
@@ -224,16 +225,24 @@ def weekly(budget: int, fresh: bool, run_id: str | None, log=print, share: float
 def leak_screen(c, picks: list[dict], path: Path, run_id: str, today: str, log=print, small: bool = False) -> list[dict]:
     """T1: every genome bound for the held-back window through the leak harness first (lab.leak: its weights at or
     before t must not move when every bar after t is shuffled, shifted, missing or cut). A failing one is rejected
-    before its look, written to `path` with the reason and never picked again; returns those rows."""
+    before its look, written to `path` with the reason and never picked again; returns those rows. A clean one is
+    written to leak_passed.jsonl next to `path` (ok true, the ladder's positive record; not read by the picks)."""
     from .. import leak
     from ..leak import checks
+    if small:
+        from .small import describe
+    else:
+        describe = grammar.describe
     out = []
     for r in picks:
         res = checks.genome(c, r["genome"], small=small)
         if res["ok"]:
+            append_jsonl(path.with_name("leak_passed.jsonl"),
+                         [{"run": run_id, "date": today, "key": r["key"], "behaviour": r.get("behaviour"),
+                           "name": describe(r["genome"]), "ok": True, "reason": leak.reason(res)}])
             continue
         x = {"run": run_id, "date": today, "key": r["key"], "behaviour": r.get("behaviour"),
-             "name": grammar.describe(r["genome"]), "genome": r["genome"], "reason": leak.reason(res),
+             "name": describe(r["genome"]), "genome": r["genome"], "reason": leak.reason(res),
              "first": res["first"]}
         append_jsonl(path, [x])
         out.append(x)

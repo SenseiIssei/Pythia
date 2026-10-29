@@ -158,6 +158,10 @@ def test_holdout_deflates_the_excess_over_btc(home, long_ctx):
     assert h["deflated_p"] == pytest.approx(metrics.dsr(ex, {"n_trials": pool["n_trials"], "var": pool["excess_var"]}))
     assert h["dsr_raw"] == pytest.approx(ledger.deflated(x, pool)) and h["pool_sr0"] == pool["excess_sr0_annual"]
     assert "excess over BTC" in evaluate.bar_gates(evaluate.in_sample(long_ctx, g, "x"), h)["deflated"]["why"]
+    # the audit (2026-10-29): the row carries the family's DSR and the excess series the ladder recomputes from
+    assert h["family_trials"] == pool["family_trials"] > 0
+    assert h["dsr_family"] == pytest.approx(metrics.dsr(ex, {"n_trials": pool["family_trials"], "var": pool["excess_var"]}))
+    assert len(h["oos_excess_returns"]) == len(ex) and h["oos_excess_returns"][-1] == pytest.approx(ex[-1], abs=1e-7)
 
 
 # ---------------------------------------------------------------- effective N and PBO

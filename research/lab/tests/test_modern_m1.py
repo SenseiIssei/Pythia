@@ -312,6 +312,67 @@ def test_rule_probability_is_fitted_before_each_block():
     assert np.isnan(p[:200]).all() and np.allclose(p[200:], 1.0)    # the rule was on in up weeks before 200
 
 
+# ---------------------------------------------------------------- R6: never past 2026-06-30, every trial registered
+
+def test_the_window_stops_before_the_lockbox(tmp_path, monkeypatch):
+    from lab import data as D
+    from lab.factory import evaluate
+    assert M1.LOCKBOX_FROM == evaluate.LOCKBOX_FROM and M1.EVAL_TO == "2026-06-30"
+    days = np.array([M1.us(d) for d in ("2023-12-31", "2024-01-01", "2026-06-30", "2026-07-01")])
+    assert list(M1.held(days)) == [False, True, True, False] and M1.lockbox_t(days) == 3
+    d = tmp_path / "models" / "registry" / "m8_quantiles" / "candidates" / "v1"
+    d.mkdir(parents=True)
+    pl.DataFrame({"ts_us": [M1.us("2026-06-20") + i * DAY_US for i in range(20)], "symbol": ["A"] * 20,
+                  "target": np.zeros(20)}).write_parquet(d / "holdout.parquet")
+    monkeypatch.setattr(D, "ROOT", tmp_path)
+    h, v = M1.holdout("m8_quantiles")                              # the zoo's rows to 2026-07-09
+    assert v == "v1" and h.height == 10 and h["ts_us"].max() < M1.us(M1.EVAL_TO)
+
+
+def test_the_sizing_book_judges_validation_only_and_registers_its_two_trials(tmp_path, monkeypatch):
+    from lab import metrics
+    from lab.experiments import fam_common
+    monkeypatch.setenv("PYTHIA_TRIALS_REGISTRY", str(tmp_path / "registry.jsonl"))
+    monkeypatch.setenv("PYTHIA_FACTORY_DIR", str(tmp_path / "factory"))
+    monkeypatch.setenv("PYTHIA_FACTORY_SEED", str(tmp_path / "no_seed"))
+    monkeypatch.delenv("PYTHIA_FACTORY_SMALL_DIR", raising=False)
+    seen, real = [], fam_common.perf
+    monkeypatch.setattr(fam_common, "perf", lambda r: seen.append(len(r)) or real(r))
+    rng = np.random.default_rng(6)
+    days = [M1.us("2022-01-01") + i * DAY_US for i in range(1800)]            # to 2026-12-05
+    rows = [{"ts_us": t, "symbol": s, "ret30": rng.normal(), "ma200_gap": rng.normal(), "ret_next": rng.normal(0, 0.02)}
+            for t in days for s in ("A", "B", "C")]
+    q = pl.DataFrame(rows)
+    cq = {"lo": rng.normal(-1, 0.1, q.height), "hi": rng.normal(1, 0.1, q.height)}
+    before = metrics.trial_pool()["n_trials"]
+    out = M1.sizing_book(q, cq)
+    n_val = (M1.us("2026-07-01") - M1.us("2024-01-01")) // DAY_US                 # 912 days of validation
+    assert seen == [n_val, n_val] and out["held_back_to"] == "2026-06-30"
+    ids = {r["id"] for r in metrics.read_registry()}
+    assert {"hand:m1:sizing:scaled", "hand:m1:sizing:unscaled"} <= ids
+    assert out["pool_trials"] == metrics.trial_pool()["n_trials"] == before + 2
+    assert M1.sizing_book(q, cq)["pool_trials"] == before + 2                   # a rerun counts them once
+
+
+def test_meta_labels_known_in_the_lockbox_are_never_learned_or_scored(monkeypatch):
+    rng = np.random.default_rng(7)
+    T, n = 1000, 3                                                               # 2024-01-01 to 2026-09-26
+    px = np.exp(np.cumsum(rng.standard_normal((T, n)) * 0.02, axis=0))
+    W = (rng.random((T, n)) > 0.7).astype(float) * 0.3
+    days = np.array([M1.us("2024-01-01") + i * DAY_US for i in range(T)])
+    seen, real = {}, F.walk
+
+    def walk(X, y, t, known, blocks, names, **kw):
+        seen["known"] = known
+        return real(X, y, t, known, blocks, names, **kw)
+    monkeypatch.setattr(F, "walk", walk)
+    mw = M1.meta_walk(px, W, 0, days, [(300, 600), (600, T)], 0.01, log=lambda *_: None)
+    end = M1.lockbox_t(days)
+    assert end == 912 and seen["known"].max() < end
+    late = [k for k, (_, a, b) in enumerate(mw["trades"]) if b >= end or b < 0]
+    assert late and mw["info"]["labelled"] == len(mw["trades"]) - len(late)
+
+
 def test_markdown_of_a_small_run_has_no_em_dash():
     res = {"run": "2026-10-27", "timing": {"conformal": {"seconds": 1.0, "peak_mb": 100.0}},
            "parts": {"tabular": {"labels": {"win0t": {"note": "no rows"}}, "comparisons": [], "skipped":
