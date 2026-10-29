@@ -50,9 +50,11 @@ MATERIAL_GAP = 0.20
 
 # ---------------------------------------------------------------- universes and costs
 
-def universes(P: fc.Panel, vol: np.ndarray, table=None) -> dict[str, np.ndarray]:
-    """(T, N) masks: LAB20's current segments on every day, PIT20 and PIT50."""
-    lab = np.broadcast_to(U.mask(P, U.LAB20), (P.T, P.N)).copy()
+def universes(P: fc.Panel, vol: np.ndarray, table=None, lab_delist: bool = False) -> dict[str, np.ndarray]:
+    """(T, N) masks: LAB20's current segments on every day (lab_delist: until its delisting was announced,
+    lab.universe.tradable, T6b), PIT20 and PIT50."""
+    lab = (U.tradable(P, U.LAB20, True, table) if lab_delist
+           else np.broadcast_to(U.mask(P, U.LAB20), (P.T, P.N)).copy())
     return {"LAB20": lab, "PIT20": U.pit(P, 20, table=table, vol=vol), "PIT50": U.pit(P, 50, table=table, vol=vol)}
 
 
@@ -229,9 +231,9 @@ def stats_of(x: np.ndarray) -> dict:
     return {"sharpe": p["sharpe"], "cagr": p["cagr"], "max_dd": p["max_dd"], "days": p["days"]}
 
 
-def trial(rule: str, uni: str, is_sharpe: float) -> dict:
-    return {"id": f"hand:t5_pit:{rule}:{uni}", "family": "hand", "n": 1, "sharpe": float(is_sharpe),
-            "source": "results/pit_universe_t5_prereg.md"}
+def trial(rule: str, uni: str, is_sharpe: float, tag: str = "t5_pit",
+          source: str = "results/pit_universe_t5_prereg.md") -> dict:
+    return {"id": f"hand:{tag}:{rule}:{uni}", "family": "hand", "n": 1, "sharpe": float(is_sharpe), "source": source}
 
 
 def about(P: fc.Panel, unis: dict[str, np.ndarray], ins: np.ndarray, val: np.ndarray, table) -> dict:
@@ -249,7 +251,7 @@ def about(P: fc.Panel, unis: dict[str, np.ndarray], ins: np.ndarray, val: np.nda
 
 
 def evaluate(P: fc.Panel, unis: dict[str, np.ndarray], vol: np.ndarray, register: bool = True,
-             log=print) -> dict:
+             log=print, tag: str = "t5_pit", source: str = "results/pit_universe_t5_prereg.md") -> dict:
     ins, val = window(P, IS_FROM, IS_TO), window(P, VAL_FROM, VAL_TO)
     C = {False: era_cost(vol, False), True: era_cost(vol, True)}
     series, rows, trials = {}, [], []
@@ -258,7 +260,7 @@ def evaluate(P: fc.Panel, unis: dict[str, np.ndarray], vol: np.ndarray, register
             x = run_rule(P, rule, unis[u], SIZE[u], C[rule in PERP_BOTH])
             series[(rule, u)] = x
             si = stats_of(x[ins])
-            trials.append(trial(rule, u, si["sharpe"]))
+            trials.append(trial(rule, u, si["sharpe"], tag, source))
             rows.append({"rule": rule, "universe": u, "is": si})
             log(f"  {rule} {u}: in sample {si['sharpe']:.2f}")
     if register:
