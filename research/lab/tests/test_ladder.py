@@ -357,6 +357,65 @@ def test_the_climb_stops_at_the_first_fail_and_open_blocks_from_step_2():
     assert step == 1 and [x["id"] for x in missing] == ["leak"] and [x["id"] for x in opened] == ["prereg_date"]
 
 
+# ---------------------------------------------------------------- EQ1's ETF books
+
+def eq1_book(data: Path, results: Path, book: str = "dual_mom", **kw) -> None:
+    """An EQ1 paper book, its pre-registration, its study row at Trade Republic and (optionally) T1's leak record."""
+    for f in ("etf_books_eq1_prereg.md", "etf_books_eq1.md"):
+        (results / f).write_text("# x\n", encoding="utf-8")
+    write(data, "reports/etf_books/latest.json", {"books": {f"eq1_{book}_plus50": {
+        "variant": "EXPERIMENT, paper only · EQ1 ETF book · 50 EUR and 50 EUR a month · x", "started": "2026-10-29",
+        "book": book, "topup": "plus50", "equity_eur": 101.0, "paid_eur": 100.0}}})
+    n_all = metrics.trial_pool()["n_trials"]
+    val = {"cagr": kw.get("cagr", 0.21), "max_dd": 0.18, "under_water_months": 7.0, "vs_bench_cagr": 0.02,
+           "months_beat": 0.55}
+    (results / "etf_books_eq1.json").write_text(json.dumps({
+        "judged": "tr", "pbo": kw.get("pbo", 0.1), "pool_all": {"n_trials": kw.get("n", n_all)},
+        "pool_small": {"n_trials": metrics.trial_pool("small")["n_trials"]},
+        "rows": [{"book": book, "variant": "plus50", "broker": br, "dsr_all": kw.get("dsr", 0.97),
+                  "dsr_small": 0.98, "val": {**val, "cagr": val["cagr"] - (br != "tr")}} for br in ("tr", "ibkr")]}))
+    if kw.get("leak", True):
+        write(data, "reports/leak/latest.json", {"results": [{"kind": "book", "name": f"eq1_{book}_plus50", "ok": True}]})
+
+
+EQ1_COMMITS = {**COMMITS, "etf_books_eq1_prereg.md": (ts("2026-10-29"), "e1"), "etf_books_eq1.md": (ts("2026-10-29") + 60, "e2")}
+
+
+def test_an_eq1_book_climbs_on_its_study_row_at_trade_republic(env):
+    data, results = env
+    eq1_book(data, results)
+    r = run(env, EQ1_COMMITS)["book:eq1_dual_mom_plus50"]
+    assert r["study"] == "EQ1" and r["step"] == 2 and set(r["missing"]) == {"days", "before"}
+    assert r["benchmark"] == "a UCITS S&P 500 fund in EUR"
+    st = {x["id"]: x for x in r["steps"]["2"]}
+    assert "21.0 %" in st["late"]["value"] and "tr" in st["late"]["value"] and "0.10" in st["pbo"]["value"]
+    assert r["eq1"]["cagr"] == 0.21 and r["eq1"]["under_water_months"] == 7.0 and r["eq1"]["equity_eur"] == 101.0
+
+
+@pytest.mark.parametrize("kw, miss", [({"dsr": 0.5}, {"dsr_all"}), ({"cagr": -0.01}, {"late"}),
+                                      ({"pbo": 0.3}, {"pbo"}), ({"leak": False}, {"leak"}),
+                                      ({"n": 100}, {"dsr_all"})])
+def test_each_eq1_condition_holds_it_at_step_1(env, kw, miss):
+    data, results = env
+    eq1_book(data, results, **kw)
+    r = run(env, EQ1_COMMITS)["book:eq1_dual_mom_plus50"]
+    assert r["step"] == 1 and set(r["missing"]) == miss
+    if "n" in kw:
+        assert "stale" in r["next"]
+
+
+def test_the_eq1_benchmark_book_has_no_excess_and_without_its_study_nothing_passes(env):
+    data, results = env
+    eq1_book(data, results, book="hold_sp500")
+    r = run(env, EQ1_COMMITS)["book:eq1_hold_sp500_plus50"]
+    assert r["step"] == 1 and set(r["missing"]) == {"dsr_all", "dsr_family"} and "benchmark itself" in r["next"]
+    md = ladder.markdown(ladder.build(data, NOW, results=results, added=added(EQ1_COMMITS)))
+    assert "EQ1's ETF books" in md and "| eq1_hold_sp500_plus50 | tr | 21.0 % | 18.0 % | 7 | benchmark |" in md
+    (results / "etf_books_eq1.json").unlink()
+    r = run(env, EQ1_COMMITS)["book:eq1_hold_sp500_plus50"]
+    assert r["step"] == 1 and set(r["missing"]) == {"late", "era", "dsr_all", "dsr_family", "pbo"}
+
+
 # ---------------------------------------------------------------- the report, the briefing, Lab Live
 
 def test_the_report_is_written_sorted_by_step(env, monkeypatch):

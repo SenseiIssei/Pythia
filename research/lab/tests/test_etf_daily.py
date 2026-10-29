@@ -64,3 +64,15 @@ def test_the_job_runs_after_the_us_close_on_weekdays():
     assert j["schedule"] == "30 22 * * 1-5" and 0 < j["timeout_s"] <= 3600
     assert jobs.plain_lab_job(j), "no env file, network or volume"
     assert any(d["name"] == "etf" and d["path"] == "etf/daily" and d["max_age_h"] == 96 for d in t.datasets)
+
+
+def test_eq1s_ucits_funds_come_from_yahoo_only(cache, monkeypatch):
+    from lab.experiments import etf_books_eq1 as eq1
+    assert set(eq1.SYMBOLS) | set(eq1.TWIN.values()) <= set(etf_daily.SYMBOLS)
+    asked = []
+    monkeypatch.setattr(et, "download_yahoo", lambda s: asked.append(s) or NEW)
+    monkeypatch.setattr(et, "download_stooq", lambda s, timeout=30.0: (_ for _ in ()).throw(AssertionError(s)) if
+                        s.endswith(".DE") else NEW)
+    res = etf_daily.refresh(pause_s=0)
+    assert all(res[s] == "ok" for s in eq1.SYMBOLS) and set(eq1.SYMBOLS) <= set(asked)
+    assert all((cache / f"{s}.csv").read_text() == NEW for s in eq1.SYMBOLS)

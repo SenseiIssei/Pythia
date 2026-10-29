@@ -7,6 +7,8 @@
                               gate (`p3`)
   smallaccount/latest.json    S1's and S2's small-account wallets, in EUR
   onchain_longterm/latest.json  L1's on-chain long-term book, in USDC
+  etf_books/latest.json       EQ1's UCITS ETF books, in EUR (the Trade
+                              Republic wallet, `eq1` the book's report row)
   forward/latest.json         the forward books, their return since the start
                               (a book listed above is not repeated)
 
@@ -82,6 +84,17 @@ def books(data_root) -> list[dict]:
                     "trades": "long-term rebalancing on chain (Jupiter)",
                     "start": _date(d.get("started") or d.get("since")),
                     "value": _num(d.get("equity_usdc")), "currency": "USDC", "report": rel})
+
+    rel = "etf_books/latest.json"
+    d = notify.read_json(root / rel)
+    if isinstance(d, dict) and isinstance(d.get("books"), dict):
+        for name, b in d["books"].items():
+            if not isinstance(b, dict):
+                continue
+            parts = [p.strip() for p in str(b.get("variant") or "").split("·")]
+            out.append({"name": name, "study": "EQ1", "trades": parts[3] if len(parts) > 3 else "",
+                        "start": _date(b.get("started")), "value": _num(b.get("equity_eur")), "currency": "EUR",
+                        "report": rel, "eq1": b})
 
     rel = "forward/latest.json"
     d = notify.read_json(root / rel)

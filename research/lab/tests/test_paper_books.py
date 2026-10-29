@@ -51,3 +51,13 @@ def test_table_has_one_row_per_book(tmp_path):
     rows = [line for line in md.splitlines() if line.startswith("| ") and not line.startswith("| Book")]
     assert len(rows) == 4
     assert "48.90 EUR" in md and "0.54 SOL" in md
+
+
+def test_eq1s_etf_books_are_read_with_their_trade_republic_wallet(tmp_path):
+    _write(tmp_path, "etf_books/latest.json", {"books": {"eq1_dual_mom_plus50": {
+        "variant": "EXPERIMENT, paper only · EQ1 ETF book · 50 EUR and 50 EUR a month · dual momentum · one close late",
+        "started": "2026-10-29", "book": "dual_mom", "topup": "plus50", "equity_eur": 99.5, "paid_eur": 100.0}}})
+    (b,) = paper_books.books(tmp_path)
+    assert b["name"] == "eq1_dual_mom_plus50" and b["study"] == "EQ1" and b["currency"] == "EUR"
+    assert b["value"] == 99.5 and b["start"] == "2026-10-29" and b["trades"] == "dual momentum"
+    assert b["eq1"]["book"] == "dual_mom" and b["report"] == "etf_books/latest.json"

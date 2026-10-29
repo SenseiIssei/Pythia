@@ -82,7 +82,9 @@ PREREG = {
     "perps_neutral": ("perps_neutral_portfolio_prereg.md", "perps_neutral_portfolio.md"),
     "btc_gated": ("gated_btc_prereg.md", "gated_btc.md"),
     "onchain_meme": ("onchain_meme_prereg.md", "onchain_meme.md"),
+    "EQ1": ("etf_books_eq1_prereg.md", "etf_books_eq1.md"),
 }
+EQ1_JSON = "etf_books_eq1.json"     # EQ1's study numbers per book, variant and broker (lab.experiments.etf_books_eq1)
 # A paper book's name in T1's weekly leak check (lab.leak.checks.book_functions).
 LEAK_NAMES = {"tsmom": "families", "tsmom_regime": "families", "tsmom_top20": "families",
               "breakout_top10": "families", "memes_rotation": "memes", "memes_tsmom": "memes",
@@ -282,9 +284,53 @@ def leak_cond(c: dict, ctx: dict) -> dict:
     return cond("leak", ok, "pass" if ok else str(hit[0].get("why") or "leak"), "reports/leak/latest.json")
 
 
+def eq1_tested(c: dict, ctx: dict) -> list[dict]:
+    """Step 2 of an EQ1 ETF book from its study row at the judged broker (results/etf_books_eq1.json): late CAGR over
+    validation, the brokers' stated costs, the DSRs of its excess over the benchmark book (stale against today's
+    registry as dsr_now) and the study's PBO."""
+    d = ctx.get("eq1") or {}
+    p = f"research/lab/results/{EQ1_JSON}"
+    r = (d.get("rows") or {}).get((c.get("eq1_book"), c.get("eq1_topup"), d.get("judged")))
+    if not r:
+        return [cond(x, False, NO_RECORD) for x in ("late", "era", "dsr_all", "dsr_family", "pbo")]
+    v = r.get("val") or {}
+    cagr = _num(v.get("cagr"))
+    out = [cond("late", cagr is not None and cagr > 0, "n/a" if cagr is None else
+                f"late CAGR {cagr * 100:.1f} % a year (EQ1, {d.get('judged')}, validation)", p),
+           cond("era", True, "the brokers' stated fees, minimums and whole units (EQ1's pre-registration)", p)]
+    if c.get("eq1_book") == "hold_sp500":
+        why = "the benchmark itself: no excess to deflate"
+        out += [cond("dsr_all", False, why, p), cond("dsr_family", False, why, p)]
+    else:
+        h = {"deflated_p": r.get("dsr_all"), "pool_trials": (d.get("pool_all") or {}).get("n_trials"),
+             "dsr_family": r.get("dsr_small"), "family_trials": (d.get("pool_small") or {}).get("n_trials")}
+        (dsr, dv), (fam, fv) = dsr_now(h, "small", ctx)
+        out += [cond("dsr_all", dsr is not None and dsr >= DSR_PASS, dv, p),
+                cond("dsr_family", fam is not None and fam >= DSR_PASS, fv, p)]
+    pbo = _num(d.get("pbo"))
+    out.append(cond("pbo", pbo is not None and pbo < PBO_MAX, "not measured" if pbo is None else
+                    f"{pbo:.2f} over EQ1's eight Trade Republic configurations", p))
+    return out
+
+
+def eq1_row(c: dict, ctx: dict) -> dict | None:
+    """What the ladder shows of an EQ1 book: the study's validation CAGR, drawdown, months under water and the
+    difference to the benchmark book at the judged broker, and the paper wallet now."""
+    d = ctx.get("eq1") or {}
+    r = (d.get("rows") or {}).get((c.get("eq1_book"), c.get("eq1_topup"), d.get("judged"))) or {}
+    v, b = r.get("val") or {}, c.get("eq1") or {}
+    return {"broker": d.get("judged"), **{k: v.get(k) for k in ("cagr", "max_dd", "under_water_months",
+                                                               "vs_bench_cagr", "months_beat")},
+            "benchmark": c.get("eq1_book") == "hold_sp500", "equity_eur": b.get("equity_eur"),
+            "paid_eur": b.get("paid_eur")}
+
+
 def tested(c: dict, ctx: dict) -> list[dict]:
-    """Step 2. The evidence, in order: R10's row (on-chain rules), else the factory's held-back row."""
+    """Step 2. The evidence, in order: R10's row (on-chain rules), else the factory's held-back row (EQ1's books:
+    their study, eq1_tested)."""
     out = [leak_cond(c, ctx)]
+    if c.get("study") == "EQ1":
+        return out + eq1_tested(c, ctx)
     r10 = ctx["r10"].get(c.get("r10") or "")
     h = c.get("holdout")
     if r10:
@@ -482,6 +528,7 @@ def judge(c: dict, ctx: dict, now: int) -> dict:
             else "; ".join(COND[x["id"]][1] for x in missing),
             "missing": [x["id"] for x in missing], "open": [x["id"] for x in opened], "evidence": ev,
             "tainted": c.get("tainted") or 0, **({"p3": p3_row(c["p3"])} if c.get("p3") else {}),
+            **({"eq1": eq1_row(c, ctx)} if c.get("study") == "EQ1" else {}),
             "steps": {str(k): v for k, v in steps.items()}}
 
 
@@ -503,6 +550,8 @@ def _book_kind(b: dict) -> tuple[str, str | None, str, str | None]:
         return "crypto", None, "small", f"L1 {n}"
     if s in ("R2", "F3", "P3"):
         return "crypto", s, "pumpfun", None
+    if s == "EQ1":
+        return "small", "EQ1", "small", None
     pre = n if n in PREREG else ("onchain_meme" if n.startswith("onchain_meme_") else None)
     return ("neutral" if n in NEUTRAL_BOOKS else "crypto"), pre, "hand", None
 
@@ -524,7 +573,9 @@ def candidates(root: Path, now: int) -> list[dict]:
                             "bench": bench, "prereg": pre, "family": fam, "r10": r10, "first_day": b.get("start"),
                             "leak_name": f"smallaccount {n}" if b["study"] in ("S1", "S2") else LEAK_NAMES.get(n),
                             "days_logged": logged, "days_path": f"paper/{n}/journal.csv" if j.exists() else b["report"],
-                            "tainted": b.get("tainted") or 0, "p3": b.get("p3")}
+                            "tainted": b.get("tainted") or 0, "p3": b.get("p3"),
+                            **({"eq1": b["eq1"], "eq1_book": b["eq1"].get("book"), "eq1_topup": b["eq1"].get("topup")}
+                               if isinstance(b.get("eq1"), dict) else {})}
     fac = root / "factory"
     for source, d, hp in (("weekly", fac, "factory/holdout.jsonl"), ("F2", fac / "small", "factory/small/holdout.jsonl")):
         rows = _jsonl(d / "holdout.jsonl")
@@ -597,7 +648,10 @@ def context(root: Path, results: Path = RESULTS, added=None) -> dict:
     t8 = notify.read_json(root / "reports" / "shadow" / "latest.json")
     ex = notify.read_json(root / "reports" / "execution" / "latest.json")
     r10 = r10_rows(root, results)
-    return {"results": results, "added": added or git_added, "r10": r10, "pbo": pbo, "pool": today_pool(),
+    eq = notify.read_json(results / EQ1_JSON)
+    eq = {**eq, "rows": {(r.get("book"), r.get("variant"), r.get("broker")): r for r in eq.get("rows") or []
+                         if isinstance(r, dict)}} if isinstance(eq, dict) else {}
+    return {"results": results, "eq1": eq, "added": added or git_added, "r10": r10, "pbo": pbo, "pool": today_pool(),
             "leaks": {"weekly": {x.get("key") for x in _jsonl(fac / "leaks.jsonl")},
                       "F2": {x.get("key") for x in _jsonl(fac / "small" / "leaks.jsonl")}},
             "leak_ok": {s: {x["key"]: str(x.get("date") or "") for x in _jsonl(d / "leak_passed.jsonl")
@@ -687,6 +741,23 @@ def markdown(d: dict) -> str:
             cells = [r["name"], "n/a" if _num(x.get("eur")) is None else f"{x['eur']:.2f}", x.get("trades") or 0,
                      pc(x.get("mean")), pc(x.get("median")), "n/a" if band is None else f"{pc(band[0])} to "
                      f"{pc(band[1])}", f"{_num(x.get('days')) or 0:.1f}", gate]
+            md.append("| " + " | ".join(notify.nodash(str(v)).replace("|", "/") for v in cells) + " |")
+    eq = [r for r in d["rows"] if r.get("eq1")]
+    if eq:
+        def pc(x, sign=""):
+            return "n/a" if _num(x) is None else f"{x * 100:{sign}.1f} %"
+        md += ["", "EQ1's ETF books (results/etf_books_eq1.md): the study's validation window at the judged broker, "
+               "time-weighted, one close late, against holding SXR8 (the benchmark book); the paper wallet now.", "",
+               "| book | broker | CAGR | max DD | longest months under water | CAGR minus benchmark | months beat | "
+               "paper wallet EUR (paid in) |", "|---|---|---|---|---|---|---|---|"]
+        for r in eq:
+            x = r["eq1"]
+            cells = [r["name"], x.get("broker") or "n/a", pc(x.get("cagr")), pc(x.get("max_dd")),
+                     "n/a" if _num(x.get("under_water_months")) is None else f"{x['under_water_months']:.0f}",
+                     "benchmark" if x.get("benchmark") else pc(x.get("vs_bench_cagr"), "+"),
+                     "" if x.get("benchmark") else pc(x.get("months_beat")),
+                     "n/a" if _num(x.get("equity_eur")) is None else
+                     f"{x['equity_eur']:.2f} ({_num(x.get('paid_eur')) or 0:.0f})"]
             md.append("| " + " | ".join(notify.nodash(str(v)).replace("|", "/") for v in cells) + " |")
     if d.get("tainted"):
         md.append(f"\nThe pump.fun books' evidence leaves out {d['tainted']} paper trades the late-row bug made (P1, "
