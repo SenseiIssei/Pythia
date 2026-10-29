@@ -279,8 +279,9 @@ The live executor (`live_exec.py`) runs only in its own service
 (`live_service.py`), which the owner starts by hand; it is LOCKED unless the
 owner does every step under "Live trading (locked)" below. The collector never
 holds a wallet, reads a key, signs or sends anything; its only network is a
-public Solana RPC websocket (`logsSubscribe`, read only), Telegram for the
-cards. The live classifier of the name categories asks the local model (`lab.ai.local`, AI2).
+public Solana RPC websocket (`logsSubscribe`, read only), read-only HTTP RPC
+calls (a pool's accounts at its migration, `getTransaction` for the transfer
+watch), Telegram for the cards. The live classifier of the name categories asks the local model (`lab.ai.local`, AI2).
 
 The collector is a long-running container, not a job. The image needs
 `aiohttp` (in `research/lab/requirements.txt` since this lab), so rebuild it
@@ -300,7 +301,30 @@ The lab code is bind-mounted, so after `research/ops/deploy_lab.sh` a
 the record, which is written down and left out of every number). Logs:
 `docker logs --tail 50 pythia-pumpfun-rt`; state:
 `/srv/pythia-data/pumpfun_rt/heartbeat.json` (streams connected, messages,
-rows per table, reconnects, gaps, the shadow book's totals).
+rows per table, reconnects, gaps, the transfer watch under `transfers` and the
+`xfer_` counts, the shadow book's totals).
+
+Token transfers (since 2026-10-29, `lab/pumpfun_rt/transfers.py`): every coin
+that migrates to its PumpSwap pool is watched for 30 minutes on one more
+websocket connection (one `logsSubscribe` with `mentions` <mint> per coin, at
+confirmed, on the first feed; open only while a coin is watched, at most 30
+coins). A transaction whose logs show a token program's Transfer or
+TransferChecked and no pump.fun or PumpSwap call (or one next to a top-level
+token transfer) is fetched with `getTransaction` (three workers, at most 2
+calls a second together, a queue of 500, more dropped and counted) and every
+transfer of the coin goes to the table
+`pumpfun_rt/transfers/`: the source and destination owners, the raw amount, the
+instruction, the program an inner transfer ran in, whether the transaction also
+traded; `ix` "gap" rows mark the times the connection was down. Not covered: a
+plain Transfer whose transaction names the mint nowhere else (the `mentions`
+filter cannot see it; `xfer_plain` against `xfer_checked` shows how many plain
+ones still arrive). The SPL Token program logs no instruction names on mainnet
+(seen 2026-10-29), so for a coin of that program (one `getAccountInfo` per coin
+tells) every SPL Token call outside a trade or an account creation is fetched,
+and one next to a trade is not seen; pump.fun's current coins are Token-2022,
+whose program still logs. A restart watches the last half hour's migrations
+again (from `pools.json`). Same day folders, budget and deletion as the other
+tables.
 
 Settings (environment, all optional; put them in an env file and add
 `--env-file` to the run line):
@@ -316,10 +340,20 @@ Settings (environment, all optional; put them in an env file and add
 | `PYTHIA_PF_BUDGET_GB` | 40 | size budget of `pumpfun_rt/`; whole days go, oldest first |
 | `PYTHIA_PF_SHADOW` | 1 | 0 records only, without the live shadow book |
 | `PYTHIA_PF_META` | 1 | 0 stops fetching token metadata (IPFS uris through gateway.pinata.cloud, at most 1 a second, 64 KB; kept: the flags and, since Y14, the normalised X, telegram and website links) |
+| `PYTHIA_PF_TRANSFERS` | 1 | 0 stops the transfer watch of migrated coins (one websocket connection less, no `getTransaction` calls, no `transfers` rows) |
+| `PYTHIA_PF_TRANSFER_RPC` | `PYTHIA_PF_POOL_RPC`, else the public endpoint | the HTTP RPC for the transfer watch's `getTransaction` and `getAccountInfo` calls; a provider's URL with its key lives only in the env file |
 | `PYTHIA_PF_PRIORITY_SOL`, `PYTHIA_PF_LAT_MEDIAN_MS`, `PYTHIA_PF_LAT_LO_MS`, `PYTHIA_PF_LAT_HI_MS` | 0.001, 1000, 400, 3000 | the fill model's priority fee and latency (changing them changes the study; the plan's numbers are the defaults) |
 
 Traffic: about 1 MB/s inbound (90 GB a day), most of it failed transactions
 the endpoint sends along and PumpSwap trades of old pools that are dropped.
+The transfer watch adds one connection (six in all), a request per coin
+watched and per coin ended (all of them again after a reconnect), every
+transaction that mentions a watched coin (mostly its PumpSwap trades again; an
+estimated 1 to 3 MB per 30 s at 5 to 20 coins, not measured yet) and at most
+20 HTTP calls per 10 s (`getTransaction`, one `getAccountInfo` per coin), under
+the public endpoint's 40 per method. A coin sprayed to many new wallets brings
+more transfer transactions than that (about 1.4 a second for one coin on
+2026-10-29): the queue then drops, and `xfer_dropped` counts it.
 Disk: a day of record is a few hundred MB of parquet; the study merges a
 finished day's part files into one file per table.
 

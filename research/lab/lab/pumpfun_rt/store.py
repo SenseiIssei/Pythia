@@ -26,6 +26,10 @@ Tables:
            between is known for it
   meta     socials and description flags from a token's metadata file, when fetched, and (Y14) its X link's
            kind, X handle and tweet id, telegram handle and website domain, normalised
+  transfers  token transfers of a coin for TRANSFER_WATCH_MS after its migration (transfers.py): time,
+           slot, block time, signature, mint, the source and destination owners, the raw amount, the
+           instruction, the program an inner transfer ran in, whether the transaction also traded on
+           pump.fun or PumpSwap; ix "gap" rows: the transfer connection was down from t0 to t
 
 `t` is the collector's receive time in ms (UTC), `slot` the Solana slot and
 `bts` the block time the program saw (seconds). Receive time is NOT event
@@ -81,6 +85,10 @@ SCHEMAS: dict[str, pa.Schema] = {
                        # Y14: the links normalised (collector.meta_social), nothing else of the document
                        ("x_kind", STR), ("x_handle", STR), ("x_tweet", STR), ("tg_handle", STR),
                        ("web_domain", STR)]),
+    # token transfers of migrated coins (transfers.py); ix "gap": the transfer connection was down from t0 to t
+    "transfers": pa.schema([("t", I64), ("slot", I64), ("bts", I64), ("sig", STR), ("mint", STR), ("src", STR),
+                            ("dst", STR), ("amount", I64), ("ix", STR), ("outer", STR), ("swap", BOOL),
+                            ("t0", I64)]),
 }
 I64_MAX = (1 << 63) - 1
 

@@ -11,9 +11,10 @@ pump.fun program and, on a second connection, on the PumpSwap program
 touches both programs arrives on both streams) and PumpSwap trades of pools
 it did not see a token migrate into. The endpoint is PYTHIA_SOLANA_WS
 (default: the public mainnet endpoint, which documents 40 connections, 100
-requests per 10 s and 100 MB per 30 s per IP; this uses five connections, one
-request per connect and about 30 to 40 MB per 30 s, roughly 1 MB/s or 90 GB a
-day inbound, most of it failed transactions the endpoint sends along and
+requests per 10 s and 100 MB per 30 s per IP; this uses five connections (six
+with the transfer watch below), one request per connect and about 30 to 40 MB
+per 30 s, roughly 1 MB/s or 90 GB a day inbound, most of it failed
+transactions the endpoint sends along and
 PumpSwap trades of old pools that are dropped; PYTHIA_PF_AMM=0 halves it).
 
 A low-latency provider, when the owner pays for one (docs/PUMPFUN-LIVE.md; the
@@ -76,6 +77,11 @@ Two hand-overs since 2026-10-28 (the live bot lost about 170 decisions to missin
   F2  every create row is appended at once to <data>/pumpfun_rt/tap/creates.jsonl (Tap; PYTHIA_PF_TAP=0 turns
       it off); the live service reads it every second (TapReader) and adopts a coin its own links missed,
       instead of skipping its migration for "creation not seen" (67 of 114 times this collector had the coin).
+
+Token transfers (2026-10-29, transfers.py, PYTHIA_PF_TRANSFERS=0 turns it off): every migrated coin's mint is
+watched for 30 minutes on one more connection (`logsSubscribe` mentions <mint>, one subscription per coin), and
+the transactions whose logs show a token transfer and no trade are fetched (`getTransaction`, at most 2 a second)
+into the table "transfers": who sent how many tokens to whom, for the early exit signal of coordinated dumps.
 """
 
 from __future__ import annotations
@@ -95,6 +101,7 @@ import urllib.parse
 
 from . import events as E
 from . import store
+from . import transfers as TR
 from .latency import safe_url, ws_urls
 
 DEFAULT_WS = "wss://api.mainnet-beta.solana.com"
@@ -430,6 +437,7 @@ class Collector:
         self.pool_q: asyncio.Queue | None = None          # F1: migrations whose pool is read (pool_worker)
         self.loop: asyncio.AbstractEventLoop | None = None
         self.tap: Tap | None = None                       # F2: every create row at once, for the live service
+        self.xfer: TR.TransferWatch | None = None         # token transfers of migrated coins (transfers.py)
 
     # ------------------------------------------------------------ F1 and F2
     def want_pool(self, row: dict) -> None:
@@ -521,6 +529,8 @@ class Collector:
                 self.remember_pool(row["pool"], row["mint"], recv_ms)
                 kept += self.keep(table, row, ct)
                 self.want_pool(row)
+                if self.xfer is not None:
+                    self.xfer.watch(row["mint"], recv_ms)
                 early = [w for w in self.amm_wait if w[0]["pool"] == row["pool"]]
                 if early:                                   # handed over once, with the signature the book matches
                     self.amm_wait = collections.deque((w for w in self.amm_wait if w[0]["pool"] != row["pool"]),
@@ -689,7 +699,8 @@ class Collector:
                 "pools": len(self.pools), "rows_written": self.writer.rows_written if self.writer else 0,
                 "last_write_ms": self.writer.last_write_ms if self.writer else 0,
                 "meta_queue": self.meta_q.qsize() if self.meta_q is not None else None,
-                "first_by_source": dict(self.first_by)}
+                "first_by_source": dict(self.first_by),
+                "transfers": self.xfer.status() if self.xfer is not None else None}
 
 
 def feed_urls(env=None) -> list[str]:
@@ -734,8 +745,11 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
     from . import poolread
     if writer is not None and os.environ.get("PYTHIA_PF_TAP", "1") != "0":
         col.tap = Tap()
+    if TR.enabled():
+        col.xfer = TR.TransferWatch(col.keep, col.counts)
     hb = store.base() / "heartbeat.json"
     if writer is not None:
+        last = 0
         try:                                              # the time the collector was not running is a gap
             last = json.loads(hb.read_text(encoding="utf-8")).get("last_event_ms") or 0
             if last:
@@ -749,6 +763,11 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
                 col.pools[k] = (v[0], int(v[1]))
         except (OSError, ValueError, TypeError, IndexError):
             pass
+        if col.xfer is not None:                          # the last half hour's migrations are watched on
+            for mint, ms in list(col.pools.values()):
+                col.xfer.watch(mint, ms)
+            if col.xfer.until and last:
+                col.xfer.down_since = last                # their transfers while the collector was down: a gap
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for s in (signal.SIGINT, signal.SIGTERM):
@@ -783,8 +802,13 @@ async def run(seconds: float | None = None, dry_run: bool = False) -> dict:
                       flush=True)
         if meta:
             tasks.append(asyncio.create_task(col.meta_worker(session)))
+        if col.xfer is not None:                          # one more connection, on the first feed
+            tasks.append(asyncio.create_task(col.xfer.stream(session, urls[0], stop)))
+            tasks += [asyncio.create_task(col.xfer.worker(TR.fetcher(TR.rpc_url()), TR.owner_of(TR.rpc_url())))
+                      for _ in range(TR.TRANSFER_WORKERS)]
         print(f"collector: streaming pump.fun logs over {LINKS} connection(s)"
               + (f", PumpSwap over {AMM_LINKS}" if amm else "")
+              + (", migrated coins' transfers over 1" if col.xfer is not None else "")
               + f" from {', '.join(safe_url(u) for u in urls)} at {commitment}"
               + (" plus a gRPC feed" if grpc_url and geyser.available() else "")
               + f", {'dry run' if dry_run else 'writing to ' + str(store.base())}", flush=True)
