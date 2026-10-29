@@ -249,6 +249,19 @@ jobs:
     resources: {cpus: 1, memory: 1g}
     timeout: 15m
 
+  # EQ3 (research/lab/results/exec_alpaca_eq3_prereg.md): the S2 equity books' orders (SPY, GLD) on Alpaca's PAPER
+  # account, a virtual 50 EUR wallet per book, in regular hours (15:00 UTC is 10:00 or 11:00 New York); every fill
+  # against EQ2's spread model, the ladder line at 1.5x. The module refuses any base URL but the paper endpoint; no
+  # money, no transfer, no account setting. Nothing is sent when the clock says the market is closed.
+  - name: exec-alpaca
+    description: EXPERIMENT the S2 equity books' orders on Alpaca's paper account, fills against the model (reports/exec_alpaca)
+    schedule: "0 15 * * 1-5"
+    command: python -m lab.exec.alpaca_paper
+    env_file: '/etc/pythia/alpaca-paper.env?'
+    resources: {cpus: 1, memory: 1g}
+    timeout: 15m
+    grace: 30m
+
   # The SPY sleeve of the Crypto + SPY forward test (results/equity_sleeve_prereg.md):
   # a lab book of US shares that is always 100 % SPY. It runs every weekday and
   # publishes a new signal only on the first run in a calendar month, so the
