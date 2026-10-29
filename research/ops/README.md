@@ -350,10 +350,13 @@ The transfer watch adds one connection (six in all), a request per coin
 watched and per coin ended (all of them again after a reconnect), every
 transaction that mentions a watched coin (mostly its PumpSwap trades again; an
 estimated 1 to 3 MB per 30 s at 5 to 20 coins, not measured yet) and at most
-20 HTTP calls per 10 s (`getTransaction`, one `getAccountInfo` per coin), under
-the public endpoint's 40 per method. A coin sprayed to many new wallets brings
-more transfer transactions than that (about 1.4 a second for one coin on
-2026-10-29): the queue then drops, and `xfer_dropped` counts it.
+15 HTTP calls per 10 s (`getTransaction`, one `getAccountInfo` per coin; 20
+drew 165 HTTP 429 in the first 25 minutes). A coin sprayed to many new wallets
+brings more transfer transactions than that (about 1.4 a second for one coin on
+2026-10-29): the queue then drops, and `xfer_dropped` counts it. The silent
+calls of SPL Token coins (no transfer in their logs, mostly nothing of the
+coin) wait behind the logged transfers: one is queued only while fewer than
+20 wait, else `xfer_spl_skipped` counts it.
 Disk: a day of record is a few hundred MB of parquet; the study merges a
 finished day's part files into one file per table.
 

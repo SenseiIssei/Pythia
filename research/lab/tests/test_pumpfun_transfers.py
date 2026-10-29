@@ -216,6 +216,17 @@ def test_failed_trades_and_quiet_transactions_are_skipped_and_counted():
     assert w.q.get_nowait() == ("s4", MINT, 1, T0)
 
 
+def test_silent_spl_calls_wait_behind_logged_transfers(monkeypatch):
+    monkeypatch.setattr(TR, "SPL_SILENT_QUEUE", 2)
+    counts = collections.Counter()
+    w = TR.TransferWatch(lambda t, r: None, counts, queue=5, clock=lambda: T0)
+    w.spl[MINT] = True
+    got = [w.note(MINT, 1, f"s{i}", False, silent_lines(), T0) for i in range(3)]
+    assert got == ["queued", "queued", "skipped"]                          # the guesses stop at two waiting
+    assert w.note(MINT, 1, "t1", False, token_lines(), T0) == "queued"    # a logged transfer still gets in
+    assert (counts["xfer_spl_silent"], counts["xfer_spl_skipped"], counts["xfer_dropped"]) == (2, 1, 0)
+
+
 def test_a_full_queue_drops_and_counts_and_never_waits():
     counts = collections.Counter()
     w = TR.TransferWatch(lambda t, r: None, counts, queue=2, clock=lambda: T0)

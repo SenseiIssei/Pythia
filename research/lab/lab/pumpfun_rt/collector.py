@@ -80,7 +80,7 @@ Two hand-overs since 2026-10-28 (the live bot lost about 170 decisions to missin
 
 Token transfers (2026-10-29, transfers.py, PYTHIA_PF_TRANSFERS=0 turns it off): every migrated coin's mint is
 watched for 30 minutes on one more connection (`logsSubscribe` mentions <mint>, one subscription per coin), and
-the transactions whose logs show a token transfer and no trade are fetched (`getTransaction`, at most 2 a second)
+the transactions whose logs show a token transfer and no trade are fetched (`getTransaction`, at most 1.5 a second)
 into the table "transfers": who sent how many tokens to whom, for the early exit signal of coordinated dumps.
 """
 

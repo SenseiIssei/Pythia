@@ -99,7 +99,10 @@ TRANSFER_LOGS = {"Program log: Instruction: Transfer", "Program log: Instruction
 TRANSFER_WATCH_MS = 30 * 60_000   # a coin's transfers are recorded this long after its migration
 WATCH_MAX = 30                    # coins watched at once (5 to 20 expected); a reconnect resubscribes them all
 TRANSFER_QUEUE = 500              # transactions waiting for their fetch (more are dropped, and counted)
-TRANSFER_PER_S = 2.0              # RPC calls a second, at most, over all workers
+SPL_SILENT_QUEUE = 20             # a silent SPL Token call (no transfer seen in its logs) is queued only below this:
+                                  # on 2026-10-29 they were 1,071 of 1,124 queued, 595 of 629 fetched held no
+                                  # transfer, and the queue they filled dropped 776, logged transfers among them
+TRANSFER_PER_S = 1.5              # RPC calls a second, at most, over all workers (2.0 drew 165 HTTP 429 in 25 min)
 TRANSFER_WORKERS = 3              # a call can take a second on the public endpoint; one worker fell far behind
 RETRY_S = 2.0                     # a transaction the node has not got yet is asked once more after this
 BACKOFF_429_S = 10.0
@@ -369,6 +372,9 @@ class TransferWatch:
             return "failed"
         kind = log_kind(logs) or "none"
         if kind == "silent" and self.spl.get(mint):              # an SPL Token coin's call: maybe its transfer
+            if self.q.qsize() >= SPL_SILENT_QUEUE:               # behind every logged transfer, never in its way
+                self.counts["xfer_spl_skipped"] += 1
+                return "skipped"
             self.counts["xfer_spl_silent"] += 1
             kind = "transfer"
         if kind in ("pump", "none", "silent"):
