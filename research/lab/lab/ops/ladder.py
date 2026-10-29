@@ -46,6 +46,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..exec import kraken_fee as kf
 from . import notify, paper_books
 
 NAME = "ladder"
@@ -265,15 +266,8 @@ def r10_rows(root: Path, results: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
     d = notify.read_json(root / "reports" / "smallaccount_r10" / "latest.json")
     if isinstance(d, dict) and isinstance(d.get("rows"), list):
-        for r in d["rows"]:
-            sizes = [r.get(k) for k in ("late@40", "late@100") if isinstance(r.get(k), dict)]
-            if not sizes:
-                continue
-            out[f"{r.get('study')} {r.get('name')}"] = {
-                "late_cagr": min(_num(s.get("cagr")) or 0.0 for s in sizes) * 100,
-                "dsr_all": min(_num(s.get("dsr")) or 0.0 for s in sizes),
-                "dsr_family": min(_num(s.get("dsr_small")) or 0.0 for s in sizes),
-                "crypto": bool(r.get("crypto")), "path": "reports/smallaccount_r10/latest.json"}
+        _r10_json(out, d["rows"], "reports/smallaccount_r10/latest.json")
+        _r10_fee(out, root)
         return out
     try:
         text = (results / "smallaccount_r10.md").read_text(encoding="utf-8")
@@ -292,7 +286,28 @@ def r10_rows(root: Path, results: Path) -> dict[str, dict]:
         old = out.get(cells[0])
         out[cells[0]] = x if old is None else {**old, **{k: min(old[k], x[k]) for k in ("late_cagr", "dsr_all",
                                                                                          "dsr_family")}}
+    _r10_fee(out, root)
     return out
+
+
+def _r10_json(out: dict, rows: list, path: str) -> None:
+    for r in rows:
+        sizes = [r.get(k) for k in ("late@40", "late@100") if isinstance(r, dict) and isinstance(r.get(k), dict)]
+        if not sizes:
+            continue
+        out[f"{r.get('study')} {r.get('name')}"] = {
+            "late_cagr": min(_num(s.get("cagr")) or 0.0 for s in sizes) * 100,
+            "dsr_all": min(_num(s.get("dsr")) or 0.0 for s in sizes),
+            "dsr_family": min(_num(s.get("dsr_small")) or 0.0 for s in sizes),
+            "crypto": bool(r.get("crypto")), "path": path}
+
+
+def _r10_fee(out: dict, root: Path) -> None:
+    """S1's rows rerun at Kraken's new-account fee (results/kraken_fee_s1.md) replace R10's when the report exists."""
+    d = notify.read_json(root / "reports" / "kraken_fee_s1" / "latest.json")
+    if isinstance(d, dict) and isinstance(d.get("rows"), list):
+        _r10_json(out, [r for r in d["rows"] if isinstance(r, dict) and r.get("study") == "S1"],
+                  "reports/kraken_fee_s1/latest.json")
 
 
 def leak_cond(c: dict, ctx: dict) -> dict:
@@ -371,7 +386,8 @@ def tested(c: dict, ctx: dict) -> list[dict]:
         p = r10["path"]
         out.append(cond("late", r10["late_cagr"] > 0, f"late CAGR {r10['late_cagr']:.1f} % a year (R10, the worse "
                                                       "of 40 and 100 EUR)", p))
-        out.append(cond("era", True, "R10: the costs of their era", p))
+        out.append(cond("era", True, "R10: the costs of their era" + (
+            f", Kraken {kf.kraken_fee() * 100:.2f} % taker ({kf.source()})" if c.get("study") == "S1" else ""), p))
         out.append(cond("dsr_all", r10["dsr_all"] >= DSR_PASS, f"{r10['dsr_all']:.3f} (higher is better)", p))
         out.append(cond("dsr_family", r10["dsr_family"] >= DSR_PASS,
                         f"{r10['dsr_family']:.3f} over the small family (higher is better)", p))

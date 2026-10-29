@@ -6,6 +6,8 @@ Pre-registered in results/smallaccount_r10_prereg.md; results in results/smallac
                                                             closes (Yahoo) and SPYx, QQQx and PAXG at 00:00 UTC
                                                             (CoinGecko) against Yahoo's last close, into results/
     python -m lab.experiments.smallaccount_r10              the study (run it under the heavy lock)
+    python -m lab.experiments.smallaccount_r10 --kraken-fee the S1 rows again at Kraken's new-account fee,
+                                                            validation only (results/kraken_fee_s1_prereg.md)
 
 No new rule and nothing tuned: S1's two paper picks (S1's wallet), S2's five
 candidates that are neither references nor tsmom1 (S2's wallet), L1's book with
@@ -16,11 +18,12 @@ window 2024-01-01 to 2026-06-30 (the lockbox from 2026-07-01 is never read).
 
 What changes against the studies (EraVenue and the way in and back below):
   every wallet runs in USD (USDC) and is worth its USD value at the day's ECB
-  EUR/USD; the way in is EUR to USDC at Kraken (taker fee, half spread, 1 USDC
-  to withdraw on chain), the way back at the last close sells every position at
-  its era's cost and USDC to EUR at the same fee plus a SEPA fee; a swap costs
+  EUR/USD; the way in is EUR to USDC at Kraken (stablecoin fee, half spread, 1
+  USDC to withdraw on chain), the way back at the last close sells every position
+  at its era's cost and USDC to EUR at the same fee plus a SEPA fee; a swap costs
   today's recorded Jupiter quote only from the day the asset could be swapped
-  on chain (ONCHAIN_FROM), before that Kraken's taker fee and half spread;
+  on chain (ONCHAIN_FROM), before that Kraken's spot taker fee and half spread
+  (the fees: lab.exec.kraken_fee, a new account's tier, results/kraken_fee_s1_prereg.md);
   the ETF tokens are their underlying's last close before 00:00 UTC (with S2's
   drift) times a draw of the token's measured deviation at 00:00 UTC, days
   without a US close drawing from the weekend's; crypto rules are judged
@@ -43,6 +46,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..exec import kraken_fee as kf
 from . import fam_common as fc
 from . import smallaccount as s1
 from . import smallaccount_s2 as s2
@@ -61,6 +65,7 @@ CBBTC_FROM = "2024-11-07"                   # cbBTC live on Solana
 XSTOCKS_FROM = "2025-06-30"                 # xStocks on Solana: SPYx, QQQx (and the gold token, assumed the same)
 ONCHAIN_FROM = {"BTC": CBBTC_FROM, "SPY": XSTOCKS_FROM, "QQQ": XSTOCKS_FROM, "GOLD": XSTOCKS_FROM}
 CEX_HALF_SPREAD = 0.0010                    # where Kraken has no EUR pair (assumed)
+CEX_TAKER = kf.kraken_fee()                 # a new account's spot taker (lab.exec.kraken_fee, results/kraken_fee_s1_prereg.md)
 ONCHAIN_WITHDRAW_USD = s1.ONRAMP_WITHDRAW_USD
 SEPA_EUR = 0.09                             # Kraken's SEPA withdrawal (assumed)
 UCITS, WORLD = "SXR8.DE", "EUNL.DE"         # iShares Core S&P 500 UCITS Acc, iShares Core MSCI World UCITS Acc (Xetra)
@@ -216,13 +221,14 @@ def token_price(base: np.ndarray, us_day: np.ndarray, dev: dict | None, seed: in
     return base * (1 + np.where(us_day, a, b) / 1e4)
 
 
-def kraken_costs(path: Path = s1.KRAKEN_CSV) -> tuple[dict[str, float], float]:
-    """(coin -> Kraken taker fee plus the half spread of its EUR pair, the rate USDC to EUR and back costs)."""
-    out = {}
+def kraken_costs(path: Path = s1.KRAKEN_CSV, vol_usd: float = 0.0) -> tuple[dict[str, float], float]:
+    """(coin -> Kraken's spot taker fee plus the half spread of its EUR pair, the rate USDC to EUR and back costs:
+    the stablecoin fee plus USDC/EUR's half spread). The fees from lab.exec.kraken_fee at the 30-day volume."""
+    out, stable = {}, kf.kraken_fee(vol_usd, stable=True)
     for r in s1.read_csv(path):
         bid, ask = float(r["bid"]), float(r["ask"])
-        out[r["coin"]] = s1.KRAKEN_TAKER + (ask - bid) / (ask + bid)
-    return out, out.get("USDC", s1.KRAKEN_TAKER)
+        out[r["coin"]] = (stable if r["coin"] == "USDC" else kf.kraken_fee(vol_usd)) + (ask - bid) / (ask + bid)
+    return out, out.get("USDC", stable)
 
 
 # ---------------------------------------------------------------- the venue of its era
@@ -250,7 +256,7 @@ class EraVenue(s2.S2Venue):
     def cost(self, coin: str, eur: float, sol_eur: float) -> float:
         if self.on_chain(coin) and coin in self.ladder:
             return eur * max(self.half_rt_bps(coin, eur), 0.0) / 1e4 + self.fee_sol * sol_eur
-        return eur * self.cex.get(coin, s1.KRAKEN_TAKER + CEX_HALF_SPREAD)
+        return eur * self.cex.get(coin, CEX_TAKER + CEX_HALF_SPREAD)
 
     def setup(self, capital: float, slots: int, sol_eur: float) -> tuple[float, float]:
         if not self.on_chain("SOL"):
@@ -394,7 +400,7 @@ def run_l1(mk: Market, cap: float, is_late: bool, t0: int, t1: int, today: bool 
         v.at(P.days[t])
         if v.on_chain(c) and c in v.ladder:
             return usd * max(v.half_rt_bps(c, usd), 0.0) / 1e4 + fee_l / L.LAMPORTS * sol
-        return usd * v.cex.get(c, s1.KRAKEN_TAKER + CEX_HALF_SPREAD)
+        return usd * v.cex.get(c, CEX_TAKER + CEX_HALF_SPREAD)
     usd = way_in(cap, float(mk.fx[t0]), mk.rate, sol_on_chain(v, P.days[t0]))
     res = L.simulate(P, t0, t1, usd, W=late(W) if is_late else W, venue=v, swap_cost=cost)
     return in_eur(res, cap, mk.fx, t0, t1, v, P.days, float(mk.m.sol_eur[t1]), mk.rate)
@@ -527,12 +533,15 @@ def verdict(row: dict) -> dict:
     return out
 
 
-def evaluate(mk: Market, pools: dict, log=print) -> list[dict]:
+def evaluate(mk: Market, pools: dict, log=print, only: list[dict] | None = None, val_only: bool = False) -> list[dict]:
+    """Every rule's rows; `only` these rules, `val_only` without the in-sample Sharpes and the token draws."""
     from ..metrics import dsr
     rows = []
-    bench = {(cap, ctx): benchmarks(mk, cap, "val", ctx) for cap in CAPITALS for ctx in (False, True)}
+    todo = rules(mk) if only is None else only
+    bench = {(cap, ctx): benchmarks(mk, cap, "val", ctx) for cap in CAPITALS
+             for ctx in sorted({r["study"] == "F2" for r in todo})}
     memo: dict = {}
-    for rule in rules(mk):
+    for rule in todo:
         key = "btc_eth" if rule["crypto"] else UCITS
         ctx = rule["study"] == "F2"
         row = {k: rule[k] for k in ("name", "study", "crypto")}
@@ -548,6 +557,10 @@ def evaluate(mk: Market, pools: dict, log=print) -> list[dict]:
                 m.update({"excess_sharpe": float(ex.mean() / ex.std() * math.sqrt(365)) if ex.std() > 0 else 0.0,
                           "dsr": dsr(ex, pools["all"]), "dsr_small": dsr(ex, pools["small"])})
                 row[f"{fill}@{cap:g}"] = m
+        if val_only:
+            row["verdict"] = verdict(row)
+            rows.append(row)
+            continue
         ins = {}
         for name, lt, today in (("today_on_time", False, True), ("era_on_time", False, False), ("era_late", True, False)):
             ins[name] = measure(run_rule(mk, rule, MAIN, lt, "is", today, memo=memo), MAIN)["sharpe"]
@@ -575,7 +588,7 @@ def bench_rows(mk: Market) -> list[dict]:
 
 # ---------------------------------------------------------------- loading
 
-def load(offline: bool = True) -> Market:
+def load(offline: bool = True, f2_ctx: bool = True) -> Market:
     from ..factory import small as f2
     P = fc.load_panel()
     etf = s2.load_etf(("SPY", "QQQ", "GLD"))
@@ -588,6 +601,8 @@ def load(offline: bool = True) -> Market:
     mk = Market(P=P, m=m, fx=eurusd_on(P.days), v1=era_venue(v1.ladder, s1.SWAP_FEE_SOL, cex),
                 v2=era_venue(v2.ladder, s2.SWAP_FEE_SOL, cex), v1_today=era_venue(v1.ladder, s1.SWAP_FEE_SOL, cex, True),
                 v2_today=era_venue(v2.ladder, s2.SWAP_FEE_SOL, cex, True), rate=rate, devs=deviations())
+    if not f2_ctx:
+        return mk                                               # S1's rows only (the Kraken fee rerun)
     days, crypto = f2.crypto_closes()
     c = f2.make_ctx(days, crypto, etf, 1.0, f2.drifts(), None, bars=f2.crypto_bars(days))
     mk.c, mk.c_fx = c, eurusd_on(days)
@@ -663,7 +678,7 @@ def markdown(out: dict) -> str:
     md.append("Costs of their era: on chain (today's recorded quotes and network fee) from " + ", ".join(
         f"{c} {d}" for c, d in ONCHAIN_FROM.items()) + f", everything else from {JUPITER_FROM}; before that Kraken's "
         "taker fee and half spread (" + ", ".join(f"{c} {out['cex'][c] * 1e4:.1f} bps" for c in ("BTC", "ETH", "SOL")
-                                                  if c in out["cex"]) + f", {(s1.KRAKEN_TAKER + CEX_HALF_SPREAD) * 1e4:.0f} "
+                                                  if c in out["cex"]) + f", {(CEX_TAKER + CEX_HALF_SPREAD) * 1e4:.0f} "
         "bps without a Kraken pair). S2's premiums at the US close cleaned of " + (
         ", ".join(f"{k} {v}" for k, v in out["cleaned"].items()) or "nothing") + ".\n")
     return "\n".join(md) + "\n"
@@ -693,11 +708,75 @@ def cleaned(path: Path = s2.PREMIUMS_CSV) -> dict[str, str]:
     return out
 
 
+# ---------------------------------------------------------------- the Kraken fee rerun (results/kraken_fee_s1_prereg.md)
+
+KF_NAME, KF_PREREG = "kraken_fee_s1", "results/kraken_fee_s1_prereg.md"
+KF_MARKER = "<!-- generated below by lab.experiments.smallaccount_r10 --kraken-fee; edit above this line only -->"
+
+
+def kraken_fee_trials() -> list[dict]:
+    """R10's S1 rows at the corrected fee: rule x size x fill, counted, family small."""
+    return [{"id": f"small:kraken_fee_s1:{r}@{cap:g}:{fill}", "family": "small", "n": 1, "sharpe": None,
+             "source": KF_PREREG} for r in S1_RULES for cap in CAPITALS for fill in ("on_time", "late")]
+
+
+def kraken_fee_markdown(out: dict) -> str:
+    md = [f"Generated {out['generated']}. Validation {VAL_FROM} to {out['val_to']} only (no in-sample number, the "
+          f"lockbox shut). Fees: spot taker {out['taker'] * 100:.2f} % ({out['source']}); the way in and back "
+          f"{out['rate'] * 1e4:.1f} bps (the stablecoin fee {out['stable'] * 100:.2f} % plus USDC/EUR's half "
+          f"spread). Kraken before the asset was on chain: " + ", ".join(
+              f"{c} {out['cex'][c] * 1e4:.1f} bps" for c in ("BTC", "ETH", "SOL") if c in out["cex"]) + ".\n"]
+    t = []
+    for r in out["rows"]:
+        for cap in CAPITALS:
+            o, l, b = r[f"on_time@{cap:g}"], r[f"late@{cap:g}"], r[f"bench@{cap:g}"]
+            t.append({"rule": f"{r['study']} {r['name']}", "EUR": f"{cap:g}", "on time CAGR / DD / Sharpe / end": _cell(o),
+                      "late CAGR / DD / Sharpe / end": _cell(l), "benchmark CAGR / DD / Sharpe / end": _cell(b),
+                      "late DSR, pass at 0.95 or more (all / small)": f"{l['dsr']:.3f} / {l['dsr_small']:.3f}",
+                      "passes late": "yes" if r["verdict"]["late"]["passes"] else "no"})
+    md.append(fc.table(t, list(t[0])))
+    pools = out["pools"]
+    md.append(f"Benchmark: half BTC and half ETH held, the wallet's costs. DSR over R5's registry with this rerun's "
+              f"{out['trials']} trials: all {pools['all']['n_trials']:,} trials (noise bar "
+              f"{pools['all']['sr0_annual']:.2f} a year), small {pools['small']['n_trials']:,} "
+              f"({pools['small']['sr0_annual']:.2f}); higher is better.\n")
+    return "\n".join(md) + "\n"
+
+
+def kraken_fee_main() -> int:
+    from .. import metrics, report
+    metrics.register(kraken_fee_trials())                       # before any number exists
+    t0 = time.time()
+    mk = load(f2_ctx=False)
+    pools = dsr_pools()
+    rows = evaluate(mk, pools, only=[r for r in rules(mk) if r["study"] == "S1"], val_only=True)
+    cex, rate = kraken_costs()
+    out = {"generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "val_to": str((mk.P.days[window(mk.P.days, "val")[1]] // fc.DAY_US).astype("datetime64[D]")),
+           "taker": kf.kraken_fee(), "stable": kf.kraken_fee(stable=True), "source": kf.source(), "rate": rate,
+           "cex": cex, "trials": len(kraken_fee_trials()),
+           "pools": {k: {"n_trials": p["n_trials"], "var": p["var"], "sr0_annual": p["sr0_annual"]} for k, p in pools.items()},
+           "rows": rows, "seconds": round(time.time() - t0)}
+    d = report.REPORTS / KF_NAME
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "latest.json").write_text(json.dumps(out, indent=1, default=float), encoding="utf-8")
+    path = RESULTS / f"{KF_NAME}.md"
+    head = "# Kraken's new-account fee in R10's S1 rows\n\n"
+    if path.exists() and KF_MARKER in path.read_text(encoding="utf-8"):
+        head = path.read_text(encoding="utf-8").split(KF_MARKER)[0]
+    path.write_text(head + KF_MARKER + "\n\n" + kraken_fee_markdown(out), encoding="utf-8")
+    print(f"done in {out['seconds']} s; passes late: "
+          f"{[r['name'] for r in rows if r['verdict']['late']['passes']] or 'nothing'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if "--snapshot" in argv:
         snapshot()
         return 0
+    if "--kraken-fee" in argv:
+        return kraken_fee_main()
     t0 = time.time()
     mk = load()
     pools = dsr_pools()

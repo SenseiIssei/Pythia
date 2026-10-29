@@ -157,6 +157,7 @@ class Venue:
     ladder: dict = field(default_factory=dict)      # coin -> [(usd, half round trip bps)]
     maker: bool = False
     ideal: float | None = None                      # a flat cost per unit traded, no minimum, no lot
+    onramp: float = ONRAMP_FEE                      # the way there, EUR to USDC (the S1 books: lab.exec.kraken_fee)
 
     def tradable(self, coin: str) -> bool:
         if self.ideal is not None:
@@ -209,7 +210,7 @@ class Venue:
         if self.ideal is not None or self.name != "jupiter":
             return 0.0, 0.0
         reserve = (SOL_FEE_RESERVE + RENT_SOL * (slots + 1)) * sol_eur
-        return reserve, capital * ONRAMP_FEE + ONRAMP_WITHDRAW_USD / self.eurusd
+        return reserve, capital * self.onramp + ONRAMP_WITHDRAW_USD / self.eurusd
 
 
 def venues(kraken_csv: Path = KRAKEN_CSV, jupiter_csv: Path = JUPITER_CSV) -> dict[str, Venue]:

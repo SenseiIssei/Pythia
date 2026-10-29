@@ -71,7 +71,7 @@ def test_the_venue_charges_kraken_before_the_asset_was_on_chain_and_the_quote_af
     v.at(day("2021-06-01"))
     assert not v.on_chain("SOL") and v.tradable("DOGE")
     assert v.cost("BTC", 100.0, 150.0) == pytest.approx(0.41)
-    assert v.cost("PEPE", 100.0, 150.0) == pytest.approx(100 * (s1.KRAKEN_TAKER + r10.CEX_HALF_SPREAD))
+    assert v.cost("PEPE", 100.0, 150.0) == pytest.approx(100 * (0.0080 + r10.CEX_HALF_SPREAD))
     assert v.setup(40.0, 1, 150.0) == (0.0, 0.0)
     v.at(day("2023-01-01"))                       # SOL on chain, BTC not yet (cbBTC 2024-11-07)
     assert v.on_chain("SOL") and not v.on_chain("BTC") and not v.tradable("DOGE")
@@ -82,7 +82,7 @@ def test_the_venue_charges_kraken_before_the_asset_was_on_chain_and_the_quote_af
     v.at(day("2024-11-07"))
     assert v.cost("BTC", 100.0, 150.0) == pytest.approx(100 * 2.0 / 1e4 + s2.SWAP_FEE_SOL * 150)
     v.at(day("2025-06-29"))
-    assert v.cost("SPY", 50.0, 150.0) == pytest.approx(50 * 0.0050)
+    assert v.cost("SPY", 50.0, 150.0) == pytest.approx(50 * (0.0080 + r10.CEX_HALF_SPREAD))
     v.at(day("2025-06-30"))
     assert v.cost("SPY", 50.0, 150.0) == pytest.approx(50 * 6.0 / 1e4 + s2.SWAP_FEE_SOL * 150)
     today = r10.era_venue(LADDER, s2.SWAP_FEE_SOL, CEX, today=True)
@@ -259,3 +259,25 @@ def test_the_report_says_late_against_on_time_and_the_dsr_direction():
     md = r10.markdown(out)
     assert "late DSR, pass at 0.95 or more (all / small)" in md and "higher is" in md
     assert "**For real money: nothing.**" in md and chr(0x2014) not in md
+
+
+def test_the_kraken_fee_rerun_is_s1_on_the_validation_window_only(monkeypatch):
+    mk = market()
+    days = mk.P.days
+    monkeypatch.setattr(r10, "VAL_FROM", str((days[400] // fc.DAY_US).astype("datetime64[D]")))
+    monkeypatch.setattr(r10, "VAL_TO", str((days[-1] // fc.DAY_US).astype("datetime64[D]")))
+    pools = {"all": {"n_trials": 100, "var": 1e-4}, "small": {"n_trials": 10, "var": 1e-4}}
+    seen = []
+    run = r10.run_rule
+    monkeypatch.setattr(r10, "run_rule", lambda *a, **k: seen.append(a[4]) or run(*a, **k))
+    rows = r10.evaluate(mk, pools, log=lambda *_: None, only=[r for r in r10.rules(mk) if r["study"] == "S1"],
+                        val_only=True)
+    assert [r["name"] for r in rows] == list(r10.S1_RULES) and set(seen) == {"val"}       # no in-sample number
+    assert all("is_sharpe" not in r and "verdict" in r and "late@100" in r for r in rows)
+    t = r10.kraken_fee_trials()
+    assert len(t) == 8 == len({x["id"] for x in t}) and {x["family"] for x in t} == {"small"}
+    out = {"generated": "now", "val_to": "2026-06-30", "taker": 0.008, "stable": 0.002, "source": "Kraken", "rate": 0.0021,
+           "cex": CEX, "trials": 8, "pools": {"all": {"n_trials": 9, "sr0_annual": 1.0},
+                                              "small": {"n_trials": 8, "sr0_annual": 1.0}}, "rows": rows}
+    md = r10.kraken_fee_markdown(out)
+    assert "spot taker 0.80 %" in md and "S1 tsmom1" in md and "higher is better" in md and chr(0x2014) not in md

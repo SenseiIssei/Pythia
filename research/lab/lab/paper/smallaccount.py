@@ -34,8 +34,9 @@ Targets come from the sweep's daily panel (the cache paper-families rebuilds at
 close only marks. The wallet is lab.experiments.smallaccount's: cash and coin
 units in EUR, the Jupiter venue's costs (half the recorded round trip at the
 order's size plus 0.000105 SOL a swap), MIN_TRADE 5 USDC, a SOL reserve held idle
-and the way there paid once at the start (Kraken's taker fee to buy USDC, 1 USDC
-to withdraw). Prices are Jupiter's live USD prices (price/v3) in EUR at Kraken's
+and the way there paid once at the start (Kraken's stablecoin fee to buy USDC, 1 USDC
+to withdraw; the fee from lab.exec.kraken_fee, a book started at the old 0.40 % restated once).
+Prices are Jupiter's live USD prices (price/v3) in EUR at Kraken's
 live EUR/USD mid (the study's snapshot rate when Kraken does not answer). A
 missing price keeps the last mark and trades nothing in that coin.
 
@@ -56,10 +57,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import report
+from .. import metrics, report
 from ..data import WRITE_ROOT
+from ..exec import kraken_fee as kf
 from ..experiments import fam_common as fc
 from ..experiments import smallaccount as s1
+from ..experiments import smallaccount_r10 as r10
 from ..experiments import smallaccount_s2 as s2
 from ..experiments import smallaccount_weekly as wk
 
@@ -137,13 +140,42 @@ def _read_csv(path: Path) -> list[dict]:
         return []
 
 
+def from_eur(name: str) -> bool:
+    """The book goes there from EUR at Kraken (S1's wallet, its weekly variant too); S2's by a SOL swap."""
+    b = ALL_BOOKS[name]
+    return b.get("path", b.get("study", "S1")) == "S1"
+
+
+def s1_venue(vs: dict[str, s1.Venue], vol_usd: float = 0.0) -> s1.Venue:
+    """S1's Jupiter venue, the way there (EUR to USDC, a stablecoin pair) at Kraken's fee for the 30-day volume
+    (lab.exec.kraken_fee, results/kraken_fee_s1_prereg.md); a small book stays in the first tier."""
+    v = vs["jupiter"]
+    v.onramp = kf.kraken_fee(vol_usd, stable=True)
+    return v
+
+
 def new_state(name: str, venue: s1.Venue, sol_eur: float, now_ms: int) -> dict:
     b = ALL_BOOKS[name]
     idle, once = venue.setup(b["capital"], b["n"], sol_eur)
     return {"variant": variant(name), "started": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(
         timespec="seconds"), "capital_eur": b["capital"], "cash": b["capital"] - idle - once, "idle": idle,
         "setup_eur": once, "units": {}, "last": {}, "marks": {}, "costs_eur": once, "orders": 0, "not_sent": 0,
-        "dust": 0, "equity_eur": b["capital"], "signal": None}
+        "dust": 0, "equity_eur": b["capital"], "signal": None,
+        **({"onramp_fee": venue.onramp} if from_eur(name) else {})}
+
+
+def restate(name: str, st: dict, fee: float, now_ms: int) -> dict:
+    """A book that went there from EUR at another fee (S1's 0.40 % before results/kraken_fee_s1_prereg.md) pays
+    the difference on its wallet once: out of its cash, into its costs; the date and both fees stay in `restated`."""
+    if not from_eur(name):
+        return st
+    old = float(st.get("onramp_fee", s1.ONRAMP_FEE))
+    if abs(old - fee) < 1e-12:
+        return {**st, "onramp_fee": fee}
+    d = st["capital_eur"] * (fee - old)
+    return {**st, "cash": st["cash"] - d, "costs_eur": st["costs_eur"] + d, "setup_eur": st["setup_eur"] + d,
+            "equity_eur": st["equity_eur"] - d, "onramp_fee": fee,
+            "restated": {"date": _day(now_ms), "eur": d, "from": old, "to": fee}}
 
 
 def targets(P: fc.Panel, name: str, t: int) -> dict[str, float]:
@@ -275,7 +307,15 @@ def write_report(books: dict[str, dict], now_ms: int) -> dict:
                       "status": "ok" if eq >= cap else "watch"})
     md.append(report.table(rows, ["book", "study", "wallet", "now", "result", "return", "costs paid", "orders", "not sent",
                                   "held", "since"]))
-    md.append("Costs paid include the way there: S1 from EUR (Kraken's taker fee to USDC, 1 USDC to withdraw), S2 "
+    fee = next((st["onramp_fee"] for n, st in books.items() if from_eur(n) and "onramp_fee" in st), None)
+    fee_line = {"onramp_pct": fee * 100 if fee is not None else None, "source": kf.source(stable=True)}
+    rs = [f"{n} {st['restated']['eur']:+.2f} EUR on {st['restated']['date']}" for n, st in books.items()
+          if st.get("restated")]
+    md.append("Kraken fee used: S1's way there, EUR to USDC, "
+              + (f"{fee * 100:.2f} %" if fee is not None else "n/a") + f"; source: {fee_line['source']}. A new "
+              f"account's spot taker is {kf.kraken_fee() * 100:.2f} %. Books started at the old 0.40 % were restated once: "
+              + (", ".join(rs) or "none") + ".\n")
+    md.append("Costs paid include the way there: S1 from EUR (Kraken's stablecoin fee to USDC, 1 USDC to withdraw), S2 "
               "from SOL (one SOL to USDC swap). The SOL reserve for network fees is part of the wallet and earns "
               "nothing. S2 holds the S&P 500 token and the gold token the study picked (tokenized tracker "
               "certificates or gold, not for US persons, see results/smallaccount_s2.md).\n")
@@ -283,7 +323,7 @@ def write_report(books: dict[str, dict], now_ms: int) -> dict:
     start = sum(st["capital_eur"] for st in books.values())
     data = {**report.feed_header("Small-account paper books", "ok" if total >= start else "watch",
                                  f"{total:,.2f} EUR from {start:,.0f} EUR ({total - start:+.2f} EUR)", items=items,
-                                 updated_ms=now_ms), "books": books}
+                                 updated_ms=now_ms), "kraken_fee": fee_line, "books": books}
     report.write(REPORT, "\n".join(md), data)
     return data
 
@@ -299,7 +339,7 @@ def main() -> int:
     decision = _day(int(P.days[t]) // 1000)
     if not fresh:
         print(f"history ends {decision}, yesterday is missing; marking only", file=sys.stderr)
-    venue = vs["jupiter"]
+    venue = s1_venue(vs)
     venue.eurusd = eurusd_live(venue.eurusd)
     s1_books = {**BOOKS, **{n: b for n, b in S1W_BOOKS.items() if b["path"] == "S1"}}
     s2_books = {**S2_BOOKS, **{n: b for n, b in S1W_BOOKS.items() if b["path"] == "S2"}}
@@ -340,10 +380,11 @@ def main() -> int:
     if not sol_eur:
         print("no SOL price from Jupiter; nothing marked or traded today", file=sys.stderr)
         return 1
+    metrics.register(r10.kraken_fee_trials())          # the fee rerun's trials, ids written once (its prereg)
     out = {}
     for name in ALL_BOOKS:
         d = book_dir(name)
-        st = states[name] or new_state(name, venues[name], sol_eur, now_ms)
+        st = restate(name, states[name] or new_state(name, venues[name], sol_eur, now_ms), venue.onramp, now_ms)
         journal = _read_csv(d / "journal.csv")
         done = bool(journal) and journal[-1].get("date") == _day(now_ms)
         tgt, due, rw = plan[name]

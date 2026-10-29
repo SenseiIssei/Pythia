@@ -37,6 +37,7 @@ import numpy as np
 
 from .. import metrics, report
 from ..data import ROOT, WRITE_ROOT
+from . import kraken_fee as kf
 
 NAME = "exec_dryrun"
 PREREG = "results/exec_dryrun_l1_prereg.md"
@@ -44,15 +45,13 @@ API = "https://api.kraken.com/0/public"
 WALLET_EUR = 50.0
 WINDOW_DAYS = 30
 CACHE_H = 20
-FX_FEE = 0.0020                     # Kraken's published stablecoin and FX pairs, 0 USD tier
+FX_FEE = kf.kraken_fee(stable=True)  # Kraken's published stablecoin and FX pairs, 0 USD tier
 EPS = 1e-9
 BASES = {"XBT": "BTC", "XDG": "DOGE"}
 ALIAS = {"GOLD": "PAXG", "SPY": "SPYx"}
-# Kraken's published spot schedule (kraken.com/features/fee-schedule, read 2026-10-28): 30-day USD volume, maker %,
-# taker %. Used while AssetPairs' own `fees` lists are empty.
-FEE_SCHEDULE = ((0, 0.40, 0.80), (2_500, 0.30, 0.60), (10_000, 0.22, 0.38), (25_000, 0.20, 0.35),
-                (50_000, 0.15, 0.30), (100_000, 0.12, 0.25), (250_000, 0.10, 0.22), (500_000, 0.08, 0.20),
-                (1_000_000, 0.06, 0.18), (2_500_000, 0.04, 0.15), (5_000_000, 0.02, 0.12), (10_000_000, 0.0, 0.10))
+# Kraken's published spot schedule (lab.exec.kraken_fee, the lab's one source). Used while AssetPairs' own `fees`
+# lists are empty.
+FEE_SCHEDULE = kf.FEE_SCHEDULE
 BOOKS = {"small50_tsmom1": "S1", "small100_breakout_sol3": "S1", "small40_spy_trend": "S2",
          "small40_vol_target": "S2", "tsmom": "tsmom", "tsmom_regime": "tsmom", "tsmom_top20": "tsmom",
          "tsmom_tranches": "tsmom", "tsmom_tranches_lowkr": "tsmom", "tsmom_tranches_lowmax": "tsmom",
@@ -151,14 +150,10 @@ def eurusd(mk: dict, ticker: dict) -> float:
 
 def fee_rate(rule: dict, vol_usd: float = 0.0, maker: bool = False) -> float:
     """The fee as a share of the order: the pair's tiers from AssetPairs when Kraken fills them, else the published
-    schedule; the last tier whose 30-day USD volume the account reached; plus FX_FEE on a USD pair."""
-    tiers = rule.get("fees_maker" if maker else "fees") or [(v, m if maker else t) for v, m, t in FEE_SCHEDULE]
-    tiers = sorted((float(v), float(p)) for v, p in tiers)
-    pct = tiers[0][1]
-    for v, p in tiers:
-        if vol_usd >= v:
-            pct = p
-    return pct / 100 + (FX_FEE if rule["quote"] == "USD" else 0.0)
+    schedule (lab.exec.kraken_fee); the last tier whose 30-day USD volume the account reached; plus the FX fee on
+    a USD pair."""
+    fx = kf.kraken_fee(vol_usd, maker, stable=True) if rule["quote"] == "USD" else 0.0
+    return kf.kraken_fee(vol_usd, maker, tiers=rule.get("fees_maker" if maker else "fees")) + fx
 
 
 # ---------------------------------------------------------------- one order
@@ -401,7 +396,7 @@ def run(root: Path = ROOT, write_root: Path = WRITE_ROOT, now_s: float | None = 
     t0 = {"quote": "EUR", "fees": [], "fees_maker": []}
     some = next((r for r in mk.values() if r["quote"] == "EUR"), t0)
     fee_source = ("AssetPairs' fee tiers" if some["fees"] else
-                  "Kraken's published spot schedule (AssetPairs' fee lists are empty)")
+                  f"{kf.source()} (AssetPairs' fee lists are empty)")
     return {"date": datetime.fromtimestamp(now_s, timezone.utc).strftime("%Y-%m-%d"), "wallet": wallet,
             "venue": {"fetched": v.get("fetched"), "stale": v["stale"], "eurusd": usd_now, "fee_source": fee_source,
                       "taker_pct": fee_rate({**some, "quote": "EUR"}) * 100,

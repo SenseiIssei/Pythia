@@ -174,6 +174,21 @@ def test_r10s_results_table_when_its_report_is_missing(env):
     assert r["step"] == 1 and set(r["missing"]) == {"leak", "dsr_all", "dsr_family", "pbo"}
 
 
+def test_s1s_era_line_names_kraken_s_fee_and_the_rerun_replaces_r10s_s1_rows(env):
+    from lab.exec import kraken_fee as kf
+    data, results = env
+    s1_book(data, 2)
+    late = {"cagr": -0.05, "dsr": 0.01, "dsr_small": 0.02}
+    write(data, "reports/kraken_fee_s1/latest.json",
+          {"rows": [{"study": "S1", "name": "tsmom1", "crypto": True, "late@40": late, "late@100": late},
+                    {"study": "S2", "name": "spy_trend", "late@40": late, "late@100": late}]})
+    rows = ladder.r10_rows(data, results)
+    assert rows["S1 tsmom1"]["late_cagr"] == pytest.approx(-5.0) and "S2 spy_trend" not in rows
+    assert rows["S1 tsmom1"]["path"] == "reports/kraken_fee_s1/latest.json"
+    era = {x["id"]: x for x in run(env)["book:small50_tsmom1"]["steps"]["2"]}["era"]
+    assert era["ok"] and f"Kraken {kf.kraken_fee() * 100:.2f} % taker" in era["value"] and kf.URL in era["value"]
+
+
 # ---------------------------------------------------------------- a weekly factory genome up to step 6
 
 def today() -> tuple[int, int]:
