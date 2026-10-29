@@ -32,6 +32,10 @@ def root(tmp_path, monkeypatch):
     for mod in (fills, guard, registry, train):
         monkeypatch.setattr(mod, "ROOT", data)
     monkeypatch.setattr(report, "REPORTS", data / "reports")
+    # The alerts go through notify, which reads its settings (the Message language among them) from PYTHIA_DATA.
+    monkeypatch.setenv("PYTHIA_DATA", str(data))
+    monkeypatch.delenv("PYTHIA_REPORTS", raising=False)
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "en")
     monkeypatch.delenv("PYTHIA_RESULTS", raising=False)
     monkeypatch.delenv("PYTHIA_ALERT_WEBHOOK", raising=False)
     monkeypatch.delenv("PYTHIA_TELEGRAM_BOT_TOKEN", raising=False)

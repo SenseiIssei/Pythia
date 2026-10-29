@@ -314,6 +314,8 @@ def tol_executor(model, tol: float):
     from ..pumpfun_rt import realistic as R
 
     class TolExecutor(R.RealExecutor):
+        buy_tol = tol                       # RealExecutor reads its own buy_tol since E1's bounds (slippage_e1)
+
         def _presend(self, at, data):
             with pool_tol(tol):
                 return super()._presend(at, data)

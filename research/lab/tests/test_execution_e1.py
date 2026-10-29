@@ -145,7 +145,7 @@ def test_the_replay_executor_applies_its_limit_before_the_send():
 
     def ex(tol):
         calls = []
-        x = e1.tol_executor(realistic.Model(realistic.Fit()), tol)
+        x = e1.tol_executor(realistic.Model(realistic.Fit(), realistic.LiveConfig()), tol)  # not the live bot's files
         x.pipe = SimpleNamespace(eng=SimpleNamespace(tokens={"m": tok}, push=lambda *a: calls.append(("push", a))),
                                  buy_failed=lambda pid, at, why, fee: calls.append(("failed", why, fee)),
                                  skip=lambda *a: calls.append(("skip",) + a),
@@ -160,6 +160,15 @@ def test_the_replay_executor_applies_its_limit_before_the_send():
     o = b[0][1][2][2][1]
     assert o.least == max(int(C.pool_buy(stake, tok.pb, tok.pq, 100) / 1.6), int(want / 1.6))
     assert realistic.POOL_BUY_TOL == e1.LIVE_LIMIT
+
+
+def test_each_limit_executor_carries_its_own_bound():
+    """RealExecutor reads its class's buy_tol, so a limit executor sets its own there (patching the module's
+    POOL_BUY_TOL alone ran every limit at the live 0.60); the plain executor keeps the live bound."""
+    m = realistic.Model(realistic.Fit(), realistic.LiveConfig())
+    a, b = e1.tol_executor(m, 0.05), e1.tol_executor(m, 1.00)
+    assert (a.buy_tol, b.buy_tol) == (0.05, 1.00)
+    assert realistic.RealExecutor(m).buy_tol == realistic.POOL_BUY_TOL == e1.LIVE_LIMIT
 
 
 def test_replay_rows_count_missed_winners():

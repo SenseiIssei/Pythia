@@ -20,8 +20,10 @@ START = fr.START_EQUITY
 
 @pytest.fixture()
 def reports(tmp_path, monkeypatch):
-    """Reports (and the exported backtest series) in a temp folder."""
+    """Reports (and the exported backtest series) in a temp folder, and the data root there too (fr.ROOT is
+    bound from lab.data at import, so without this report_stats reads the lab's real reports)."""
     monkeypatch.setattr(report, "REPORTS", tmp_path / "reports")
+    monkeypatch.setattr(fr, "ROOT", tmp_path)
     return tmp_path
 
 

@@ -26,6 +26,13 @@ def utc(*a) -> int:
     return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1000)
 
 
+@pytest.fixture(autouse=True)
+def _english(monkeypatch):
+    """English unless a test sets German: alert_lang would else follow the lab's own settings.json (the owner's
+    Message language) wherever a test does not give the data folder a temp root."""
+    monkeypatch.setenv("PYTHIA_ALERT_LANG", "en")
+
+
 @pytest.fixture()
 def hook():
     """A webhook on 127.0.0.1 that records each post as (path, JSON body or

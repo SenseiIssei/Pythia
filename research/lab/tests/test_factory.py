@@ -14,9 +14,11 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
+from lab import data as labdata
 from lab import history, metrics, report
 from lab.experiments import fam_common as fc
 from lab.factory import build, evaluate, grammar, ledger, run, search, shadow
+from lab.features import store as fstore
 
 DAY_US = fc.DAY_US
 START = int(datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp() * 1e6)
@@ -68,6 +70,10 @@ def home(tmp_path, monkeypatch):
     monkeypatch.delenv("PYTHIA_RESULTS", raising=False)
     for k in ("PYTHIA_ALERT_WEBHOOK", "PYTHIA_TELEGRAM_BOT_TOKEN", "PYTHIA_TELEGRAM_CHAT_ID"):
         monkeypatch.delenv(k, raising=False)
+    # No feature or candle lake: the lab's coverage.json would add feature leaves the synthetic panel has not got.
+    for mod, k, v in ((labdata, "ROOT", tmp_path / "data"), (labdata, "WRITE_ROOT", tmp_path / "data"),
+                      (fstore, "ROOT", tmp_path / "data"), (fstore, "OUT", tmp_path / "data" / "features")):
+        monkeypatch.setattr(mod, k, v)
     return tmp_path
 
 
