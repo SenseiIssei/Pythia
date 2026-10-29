@@ -10,6 +10,12 @@ a label read) is scheduled at a time T and runs after every event received at
 or before T and before any event received after T. So an action at T sees the
 whole batch received at T, and a trade received exactly at our landing time
 counts as before it, which errs against us.
+
+The clock (`now`) never runs backwards. A row the live collector or live.Hold hands
+over late (older than the clock) is handled after every action due before the clock;
+its fills, exits and the actions it schedules are on the clock, while the token's
+state and the features keep the row's own chain time, as a replay in chain order
+(the models' training rows) sees them (audit of 2026-10-29).
 """
 
 from __future__ import annotations
@@ -162,7 +168,9 @@ class Engine:
 
     # ------------------------------------------------------------ scheduling
     def push(self, t: float, kind: str, data) -> None:
-        heapq.heappush(self.heap, (t, self.seq, kind, data))
+        """An action at t, never before the clock: a creation or migration released late (live.Hold) scheduled
+        its entry in the past, which then ran and set the clock back (audit of 2026-10-29)."""
+        heapq.heappush(self.heap, (max(t, self.now), self.seq, kind, data))
         self.seq += 1
 
     def advance(self, t: float) -> None:
@@ -170,14 +178,14 @@ class Engine:
         h = self.heap
         while h and h[0][0] < t:
             at, _, kind, data = heapq.heappop(h)
-            self.now = at
+            at = self.now = max(self.now, at)
             getattr(self, "_a_" + kind)(at, data)
         self.now = max(self.now, t)
 
     # ------------------------------------------------------------ events
     def create(self, t, tx, mint, creator, vs, vt, rt, name="", symbol="", uri="", mayhem=False, cashback=False,
                quote=None, user=None) -> None:
-        self.advance(t)
+        self.advance(max(t, self.now))                   # the token's t0 is its chain time, its actions on the clock
         if mint in self.tokens:
             return
         hist = self.book.snapshot(creator, t)
@@ -212,11 +220,12 @@ class Engine:
         return True
 
     def trade(self, t, tx, mint, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, slot=None, sig=None) -> None:
-        self.advance(t)
-        t = self.now                                      # a row handed over late is seen now (see amm)
+        self.advance(max(t, self.now))
+        now = self.now                                    # a row handed over late fills and exits now (see amm)
         tok = self.tokens.get(mint)
         if tok is None:
             return
+        self.early.due(tok, t)
         tok.trade(t, tx, buy, sol, tok_amt, user, vs, vt, rs, rt, fb, cfb, self.book, slot)
         if tok.early is not None and user not in tok.devs:
             if buy:
@@ -229,26 +238,26 @@ class Engine:
             self.sel.trade(tok, t, buy, sol, user)
         if self.trend is not None:
             self.trend.trade(tok, int(t), buy, sol, user)
-            self._trend_clock(t)
+            self._trend_clock(now)
         for pipe in self.pipes:
-            pipe.exec.on_trade("trades", {"t": t, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
+            pipe.exec.on_trade("trades", {"t": now, "mint": mint, "buy": buy, "sol": sol, "tok": tok_amt, "user": user,
                                           "fee_bps": tok.fee_bps, "sig": sig})
         if self.r2 is not None:
-            self.r2.on_trade(mint, t)
+            self.r2.on_trade(mint, now)
         if tok.tradeable():
             for r in self.by_entry.get("momentum", ()):
                 if r.wants_momentum(tok, t):
-                    self.signal(r, tok, t)
+                    self.signal(r, tok, now)
             for r in self.by_entry.get("progress", ()):
                 if r.wants_progress(tok, t):
-                    self.signal(r, tok, t)
+                    self.signal(r, tok, now)
         for pid in tuple(self.by_mint.get(mint, ())):
-            self.check_exit(pid, t)
+            self.check_exit(pid, now)
         for pipe in self.pipes:
-            pipe.on_trade(tok, t, buy, user, tok_amt, "curve")
+            pipe.on_trade(tok, now, buy, user, tok_amt, "curve")
 
     def complete(self, t, mint) -> None:
-        self.advance(t)
+        self.advance(max(t, self.now))
         tok = self.tokens.get(mint)
         if tok is not None:
             if tok.complete_t is None and tok.early is not None:
@@ -262,7 +271,7 @@ class Engine:
                     self.sel.completed(tok, t)
 
     def migrate(self, t, mint, pool, sol, tok_amt, bts=None) -> None:
-        self.advance(t)
+        self.advance(max(t, self.now))                   # migrate_t is its chain time, the signals on the clock
         tok = self.tokens.get(mint)
         if tok is None:
             return
@@ -276,7 +285,7 @@ class Engine:
                 self.sel.completed(tok, t)
         tok.migrated(t, pool, sol, tok_amt)
         tok.migrate_bts = bts
-        tok.last_t = t
+        tok.last_t = max(tok.last_t, t)
         if self.trend is not None:
             self.trend.migrated(tok, int(t))
         if self.social is not None:
@@ -288,7 +297,7 @@ class Engine:
         """F1 (poolread.py): the pool's reserves read from the chain at its migration. They count only while the
         stream has given no pool trade yet (a trade's state is as fresh or fresher); a strategy waiting for the
         state goes on (Pipeline.pool_known). Not a trade: nothing fills, exits or counts as one on it."""
-        self.advance(t)
+        self.advance(max(t, self.now))
         t = self.now
         tok = self.tokens.get(mint)
         if tok is None or not pb or not pq or (tok.pool and pool and tok.pool != pool) or (tok.pb and tok.pq):
@@ -302,36 +311,38 @@ class Engine:
 
     def amm(self, t, mint, buy, base, quote, pb, pq, lpb, pfb, cfb, slot=None, user=None, vq=None, sig=None,
             bts=None) -> None:
-        self.advance(t)
         # The live collector holds pool trades that arrive before their pool's migration and hands them over once
         # it is known, timed by their slot: older than the clock. Taken at their own time they filled a pending buy
         # before it landed and took profits on a spike from before the entry (2026-10-28: 19 of 713 P_pool0_wait
-        # paper trades, +109 % mean, 3.3 points of its +9 %). A row is seen when it arrives.
-        t = self.now
+        # paper trades, +109 % mean, 3.3 points of its +9 %). A row fills and exits when it arrives, after every
+        # action due before it (2026-10-29); the token's state and the features keep its chain time t.
+        self.advance(max(t, self.now))
+        now = self.now
         tok = self.tokens.get(mint)
         if tok is None:
             return
+        self.early.due(tok, t)
         tok.amm(buy, base or 0, quote or 0, pb, pq, lpb, pfb, cfb, slot, user, int(t), vq)
         tok.amm_bts = bts
-        tok.last_t = t
+        tok.last_t = max(tok.last_t, t)
         self.early.trade(tok, t, buy, quote or 0, base or 0, user or "", "pool")
         if self.sel is not None:
             self.sel.amm(tok, int(t), buy, quote or 0)
         if self.trend is not None:
             self.trend.amm(tok, int(t), buy, quote or 0, user)
-            self._trend_clock(t)
+            self._trend_clock(now)
         for pipe in self.pipes:
-            pipe.exec.on_trade("amm", {"t": t, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
+            pipe.exec.on_trade("amm", {"t": now, "mint": mint, "buy": buy, "sol": quote or 0, "tok": base or 0,
                                        "user": user, "fee_bps": tok.amm_fee_bps, "sig": sig})
         if self.r2 is not None:
-            self.r2.on_trade(mint, t)
+            self.r2.on_trade(mint, now)
         for pid in tuple(self.by_mint.get(mint, ())):
-            self.check_exit(pid, t)
+            self.check_exit(pid, now)
         for pipe in self.pipes:
-            pipe.on_trade(tok, t, buy, user or "", base or 0, "pool")
+            pipe.on_trade(tok, now, buy, user or "", base or 0, "pool")
 
     def meta(self, t, mint, flags: dict) -> None:
-        self.advance(t)
+        self.advance(max(t, self.now))
         tok = self.tokens.get(mint)
         if tok is not None:
             tok.set_meta(t, flags)
@@ -339,8 +350,9 @@ class Engine:
                 self.social.meta(mint, tok.t0, tok.creator, flags, tok.migrate_t)
 
     def gap(self, t0, t1, prog: str | None = None) -> None:
-        """The stream was down from t0 to t1: everything open across it is marked."""
-        self.advance(t1)
+        """The stream was down from t0 to t1: everything open across it is marked. The row is timed by the
+        collector's wall clock (its links' state, up to RECV_TIMEOUT_S after the last row): it marks what is open
+        when it comes and moves no clock (it set the clock ahead of the rows to come; audit of 2026-10-29)."""
         self.gaps.append((t0, t1))
         self.early.gap(t0, t1, prog)
         for p in self.positions.values():
@@ -836,7 +848,8 @@ def day_events(day: str, root=None, chunk: int = 200_000):
     slot (store.slot_times: the earliest receive time of that slot or a later one), then
     receive time, the collector's transaction number, creation before trades before the
     rest. A row's "t" is that slot time; its receive time is kept as "recv_t". Rows
-    without a slot (gaps, metadata) keep their receive time."""
+    without a slot (gaps, metadata) keep their receive time, and a pool read (pool_state)
+    is never timed before its answer came."""
     import polars as pl
     from . import store
     frames = {tb: store.read(tb, [day], root) for tb in ORDER}
@@ -855,9 +868,15 @@ def day_events(day: str, root=None, chunk: int = 200_000):
             continue
         slot = pl.col("slot").cast(pl.Int64) if "slot" in df.columns else pl.lit(None, dtype=pl.Int64)
         tx = pl.col("tx").fill_null(0).cast(pl.Int64) if "tx" in df.columns else pl.lit(0, dtype=pl.Int64)
+        ps = (pl.col("kind") == "pool_state").fill_null(False) if "kind" in df.columns else pl.lit(False)
         k = df.select(pl.col("t").fill_null(0).alias("rt"), slot.alias("slot"), tx.alias("tx"),
-                      pl.lit(o, dtype=pl.Int32).alias("o"), pl.int_range(df.height, dtype=pl.Int64).alias("i"))
+                      pl.lit(o, dtype=pl.Int32).alias("o"), pl.int_range(df.height, dtype=pl.Int64).alias("i"),
+                      ps.alias("ps"))
         k = k.join(first, on="slot", how="left").with_columns(pl.coalesce("ct", "rt").alias("ct"))
+        # a pool read (poolread.py) carries the slot it read at, which the stream may have seen well before the
+        # answer came: never timed before its receive time
+        k = k.with_columns(pl.when(pl.col("ps")).then(pl.max_horizontal("ct", "rt")).otherwise(pl.col("ct"))
+                           .alias("ct")).drop("ps")
         keys.append(k)
         frames[tb] = df.with_columns(pl.col("t").alias("recv_t"))
     if not keys:

@@ -59,7 +59,7 @@ class CreatorBook:
     def created(self, creator: str, t: int) -> None:
         r = self._row(creator)
         r[0] += 1
-        r[3] = t
+        r[3] = max(r[3], t)                     # a creator's older coin can come second on the live links
         self.recent.append(t)
 
     def migrated(self, creator: str) -> None:
@@ -168,7 +168,7 @@ class Token:
         self._move(slot, buy, sol, vs, vt, rs, rt)
         if fb is not None:
             self.fee_bps = int(fb) + int(cfb or 0)
-        self.last_t = t
+        self.last_t = max(self.last_t, t)                  # a row released late (live.Hold) never moves it back
         self.traders.add(user)
         h = self.hold.get(user, 0)
         if buy:

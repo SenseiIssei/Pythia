@@ -142,8 +142,10 @@ class Tap:
             self.fh.flush()
             if self.fh.tell() > self.max_bytes:
                 self.fh.close()
-                os.replace(self.path, self.path.with_name(self.path.name + ".1"))
-                self.fh = open(self.path, "a", encoding="utf-8")
+                try:
+                    os.replace(self.path, self.path.with_name(self.path.name + ".1"))
+                finally:                                  # a failed rotation keeps appending to the same file
+                    self.fh = open(self.path, "a", encoding="utf-8")
         except (OSError, ValueError) as e:                # the live service then waits for the store as before
             print(f"collector: tap not written ({type(e).__name__}: {e})", file=sys.stderr)
 
@@ -156,7 +158,8 @@ class Tap:
 
 class TapReader:
     """F2, the live service's side: the rows appended since the last poll. Starts at the file's end (the coins
-    before are adopted from the store at start); a rotated or truncated file is read from its start."""
+    before are adopted from the store at start); on a rotation the old file (now creates.jsonl.1) is read to its
+    end from where the last poll stopped, then the new one from its start; a truncated file from its start."""
 
     def __init__(self, path=None):
         self.path = path or tap_path()
@@ -173,22 +176,37 @@ class TapReader:
         ino, size = self._stat()
         if ino is None:
             return []
-        if ino != self.ino or size < self.pos:
-            self.ino, self.pos = ino, 0
-        if size == self.pos:
-            return []
         out = []
-        with open(self.path, "rb") as fh:
-            fh.seek(self.pos)
-            chunk = fh.read(size - self.pos)
-        end = chunk.rfind(b"\n") + 1                      # a line still being written waits for the next poll
+        if ino != self.ino:
+            old = self.path.with_name(self.path.name + ".1")
+            try:                                          # the rows appended to the old file since the last poll
+                if self.ino is not None and os.stat(old).st_ino == self.ino:
+                    out = self._read(old, self.pos, os.stat(old).st_size)[0]
+            except OSError:
+                pass
+            self.ino, self.pos = ino, 0
+        elif size < self.pos:
+            self.pos = 0
+        if size == self.pos:
+            return out
+        rows, end = self._read(self.path, self.pos, size)
         self.pos += end
+        return out + rows
+
+    @staticmethod
+    def _read(path, pos: int, size: int) -> tuple[list[dict], int]:
+        """The whole lines in [pos, size) and how many bytes they took."""
+        with open(path, "rb") as fh:
+            fh.seek(pos)
+            chunk = fh.read(size - pos)
+        end = chunk.rfind(b"\n") + 1                      # a line still being written waits for the next poll
+        out = []
         for line in chunk[:end].splitlines():
             try:
                 out.append(json.loads(line))
             except ValueError:
                 pass
-        return out
+        return out, end
 
 
 def meta_url(uri: str) -> str | None:
@@ -494,7 +512,7 @@ class Collector:
             if table == "amm":
                 hit = self.pools.get(row["pool"])
                 if hit is None:
-                    self.amm_wait.append(row)               # its migration may still be on the way
+                    self.amm_wait.append((row, sig))        # its migration may still be on the way
                     continue
                 if recv_ms - hit[1] > MIGRATED_KEEP_H * 3_600_000:
                     continue
@@ -503,9 +521,13 @@ class Collector:
                 self.remember_pool(row["pool"], row["mint"], recv_ms)
                 kept += self.keep(table, row, ct)
                 self.want_pool(row)
-                for early in [r for r in self.amm_wait if r["pool"] == row["pool"]]:
-                    early["mint"] = row["mint"]
-                    kept += self.keep("amm", early, self.clock.stamp(early["slot"], early["t"]))
+                early = [w for w in self.amm_wait if w[0]["pool"] == row["pool"]]
+                if early:                                   # handed over once, with the signature the book matches
+                    self.amm_wait = collections.deque((w for w in self.amm_wait if w[0]["pool"] != row["pool"]),
+                                                      maxlen=AMM_WAIT)
+                for r, s in early:
+                    r["mint"] = row["mint"]
+                    kept += self.keep("amm", r, self.clock.stamp(r["slot"], r["t"]), s)
                 continue
             kept += self.keep(table, row, ct, sig if table in ("trades", "amm") else None)
             if table == "creates" and self.meta:
@@ -517,7 +539,11 @@ class Collector:
     def keep(self, table: str, row: dict, chain_ms: int | None = None, sig: str | None = None) -> int:
         """Store the row (receive time as is) and hand the shadow book a copy timed by its slot. A trade's
         copy also carries its transaction's signature (the live book matches its own fills by it); the
-        stored row does not."""
+        stored row does not. A row timed by the wall clock (metadata, the pool read) is handed over on the
+        chain clock (SlotClock.latest): at wall time it moved the paper engine about once a second ahead of
+        the rows to come, and the live service's (no metadata) did not (audit of 2026-10-29)."""
+        if chain_ms is None and (table == "meta" or (table == "other" and row.get("kind") == "pool_state")):
+            chain_ms = self.clock.latest or None
         self.counts[table] += 1
         if self.writer is not None:
             self.writer.add(table, row)

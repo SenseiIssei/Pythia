@@ -381,7 +381,14 @@ class Tracker:
 
     def _snap5(self, at: float, mint: str) -> None:
         tok, st = self.eng.tokens.get(mint), self.st.get(mint)
-        if tok is not None and st is not None:
+        if tok is not None and st is not None and st.top10_5 != st.top10_5:      # once (see due)
+            st.top10_5 = self.top10(tok)[1]
+
+    def due(self, tok, t: float) -> None:
+        """The 5 s snapshot before a row of the coin past it (called before the token takes the row): a coin whose
+        rows came late (live.Hold) has its snapshot due at the clock, after them; in chain order it ran first."""
+        st = self.st.get(tok.mint)
+        if st is not None and t > tok.t0 + 5_000 and st.top10_5 != st.top10_5:
             st.top10_5 = self.top10(tok)[1]
 
     def early_features(self, tok, t: float, milestone: float = 0.0, prune: bool = True) -> dict:
