@@ -64,8 +64,10 @@ fi
 # 2. what goes live
 deployed=$(sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p' "$dest/.deploy-info" 2>/dev/null || true)
 if [ -n "$deployed" ] && git -C "$src" cat-file -e "$deployed^{commit}" 2>/dev/null; then
-  echo "deploy_live: commits since the live copy ($deployed) that touch research/lab:"
-  git -C "$src" log --format='  %h %an %s' "$deployed..$commit" -- . | head -60
+  n=$(git -C "$src" rev-list --count "$deployed..$commit" -- .)
+  echo "deploy_live: $n commits since the live copy ($deployed) that touch research/lab (newest 60):"
+  # -n, not | head: under pipefail head's early exit made git die of SIGPIPE and the deploy fail (2026-10-29)
+  git -C "$src" log -n 60 --format='  %h %an %s' "$deployed..$commit" -- .
 else
   echo "deploy_live: no earlier live deploy known; deploying $commit"
 fi
