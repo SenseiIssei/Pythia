@@ -6,7 +6,8 @@ the ladder, the books' week, paper minus live, the lanes' results, what is red a
 registry's count and noise bar. German, plain, at most about 40 lines; every line names the file it comes from, a
 missing report is said as missing ("fehlt").
 
-  reports/ladder/latest.json            steps, the registry's count and noise bar (else metrics.trial_pool())
+  reports/ladder/latest.json            steps, the registry's count and noise bar (else metrics.trial_pool()), A4's
+                                        promotions (promotions/live_ready.json)
   reports/pumpfun_rt/realistic.json     the calibration line, P2's gap, R2's and P3's books, sol_eur
   reports/pumpfun_rt/live_status.json   the live bot's total P&L (live_trades.json: its newest closed trades)
   reports/paper_review/latest.json      paper against backtest
@@ -270,6 +271,16 @@ def build(root: Path, now: int) -> dict:
                 lines.append(f"Neu auf der Leiter: {new}{src(LADDER)}")
         short.append(f"Leiter: höchste Stufe {top}, nach oben {len(up)}, zurück {len(down)}" if prev
                      else f"Leiter: höchste Stufe {top}")
+        pr = lad.get("promotions")
+        if isinstance(pr, dict):
+            sh = [x for x in pr.get("shadows") or [] if isinstance(x, dict)]
+            n = {k: sum(1 for x in sh if x.get("status") == k) for k in ("active", "missing_tool", "passed", "failed")}
+            lr = [str(c.get("name")) for c in pr.get("live_ready") or [] if isinstance(c, dict)]
+            lines.append(f"Beförderungen (A4): {n['active']} Schatten laufen, {n['missing_tool']} ohne Werkzeug, "
+                         f"Lockbox {n['passed']} bestanden, {n['failed']} endgültig gescheitert; bereit für Stufe 5: "
+                         + (", ".join(lr) if lr else "keiner") + src(LADDER, "promotions/live_ready.json"))
+            if lr:
+                short.append(f"Bereit für Stufe 5: {', '.join(lr)}")
 
     # ---- the books' week
     lines += ["", "## Bücher"]

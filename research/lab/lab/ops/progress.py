@@ -5,7 +5,8 @@ server serves it unchanged as GET /api/lab/progress. Five sections, each with th
 that file (its own updated_ms or generated_ms, else its modification time) and the age after which it is stale, so
 the page never shows an old number as current. A missing report is `found: false`.
 
-  reports/ladder/latest.json            the readiness ladder: each candidate's step and what is missing next
+  reports/ladder/latest.json            the readiness ladder: each candidate's step and what is missing next, and A4's
+                                        promotions (its shadows and live_ready.json's candidates)
   reports/pumpfun_rt/realistic.json     P3's 10 EUR books (`ten`), the calibration line and P2's gap (`selection`)
   reports/paper_review/latest.json      the tsmom books' gate 7 (30 days and 30 rebalances)
   reports/weekly/latest.md              the newest weekly page (W1), its first lines
@@ -79,7 +80,24 @@ def ladder(root: Path, now: int) -> dict:
     return out | {"top_step": top, "top_name": STEP_DE.get(top) if top is not None else None,
                   "steps": {str(k): v for k, v in STEP_DE.items()},
                   "counts": {str(k): int(_n(v) or 0) for k, v in ((d or {}).get("counts") or {}).items()},
-                  "n_trials": _n(reg.get("n_trials")), "sr0_annual": _n(reg.get("sr0_annual")), "rows": rows}
+                  "n_trials": _n(reg.get("n_trials")), "sr0_annual": _n(reg.get("sr0_annual")), "rows": rows,
+                  "promotions": promotions((d or {}).get("promotions"))}
+
+
+def promotions(p) -> dict | None:
+    """A4's promotions as the ladder wrote them: each shadow's status, days, trades and look, and live_ready.json's
+    candidates (results/ladder_promotion_a4_prereg.md); None before the ladder has the section."""
+    if not isinstance(p, dict):
+        return None
+    sh = [{"id": str(x.get("id") or ""), "name": scrub(x.get("name") or "", 120), "kind": x.get("kind"),
+           "status": x.get("status"), "since": x.get("start_day"), "days": int(_n(x.get("days")) or 0),
+           "trades": int(_n(x.get("trades")) or 0), "look": scrub(x.get("look") or "", 240)}
+          for x in p.get("shadows") or [] if isinstance(x, dict)]
+    lr = [{"id": str(c.get("id") or ""), "name": scrub(c.get("name") or "", 120), "venue": c.get("venue"),
+           "instrument": c.get("instrument"), "share_eur": _n(c.get("share_eur")), "date": c.get("date")}
+          for c in p.get("live_ready") or [] if isinstance(c, dict)]
+    return {"need_days": int(_n(p.get("need_days")) or 0), "need_trades": int(_n(p.get("need_trades")) or 0),
+            "shadows": sh, "live_ready": lr}
 
 
 def ten(real: dict | None, head: dict) -> dict:

@@ -516,6 +516,22 @@ jobs:
     grace: 30m
     alert: false
 
+  # A4 (research/lab/results/ladder_promotion_a4_prereg.md): the ladder promotes on its own from step 2 to step 4. A
+  # candidate on step 2 gets one forward shadow (<data>/promotions/shadows.json) from its own record, stepped here
+  # daily; after 30 days and 30 trades or rebalances one lockbox look (claimed, registered in R5, written, then read;
+  # a second refused, a fail final); the passes in <data>/promotions/live_ready.json with one line through notify
+  # (studies; a plain lab job has no alert env, so the line goes to the log until the owner gives it one). Paper
+  # only: nothing trades or reads a key, nothing reads live_ready.json yet. A weekly genome without the factory's
+  # shadow loads the long panel, hence the heavy lock.
+  - name: promote
+    description: A4 ladder promotions, one forward shadow per step-2 candidate, one lockbox look after 30 days and 30 trades, promotions/live_ready.json
+    schedule: "50 8 * * *"
+    command: python -m lab.ops.promote
+    resources: {cpus: 1, memory: 3g}
+    timeout: 1h
+    lock: heavy
+    lock_wait: 3h
+
   - name: costs
     description: weekly cost calibration from the recorded books, report only
     schedule: "40 5 * * 0"

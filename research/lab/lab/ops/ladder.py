@@ -23,6 +23,11 @@ the late fill, realistic execution only, P1's tainted rows out; step 3 T8's e-pr
 step 4 the same on the days after the pre-registration only; step 5 P2's selection gap and P3's 10 EUR book, absent
 open (and blocking). Each rule shows its days of record, entries and the days still needed at its current mean.
 
+A4 (results/ladder_promotion_a4_prereg.md, lab.ops.promote) acts on these rows: a candidate in its registry
+(<data>/promotions/shadows.json) is judged on step 3 by its forward shadow (SHADOW_DAYS dates and 30 trades after its
+start, logged day by day and never rewritten; a kind that cannot run is a missing tool) and on step 4 by its one look
+in <data>/promotions/lockbox.jsonl only; the report shows the promotions and live_ready.json.
+
 A condition passes, fails or is open. Open is allowed on step 1 only (the commit date without git); from step 2 on
 everything fails closed: missing evidence (no leak record, no PBO, no T8 report, a DSR deflated over far fewer trials
 than today's and no series to recompute it) fails, and climb() treats an open condition there as a fail too. The ladder computes no performance number except the pump.fun rules' (five trials, pf_trials, counted in their
@@ -157,6 +162,10 @@ COND = {
                   f"{PF_MIN_ENTRIES} Einstiege an {PF_MIN_DAYS} gewerteten Tagen"),
     "pf_edge": ("edge shown per trade (T8's e-process)", "Vorteil je Trade gezeigt (T8-E-Prozess)"),
     "pf_fresh": (f"edge shown from {PF_FRESH_FROM} on, against 0", f"Vorteil ab {PF_FRESH_FROM} gezeigt, gegen 0"),
+    "tool": ("missing tool", "Werkzeug fehlt"),
+    "trades": ("30 trades or rebalances in its shadow", "30 Trades oder Umschichtungen im Schatten"),
+    "logged": ("logged day by day after its start, never rewritten",
+               "Tag für Tag nach dem Start aufgezeichnet, nie umgeschrieben"),
 }
 
 
@@ -540,6 +549,34 @@ def execution(c: dict, ctx: dict, now: int) -> list[dict]:
             cond("exec_days", days >= EXEC_DAYS, f"{days:.0f} of {EXEC_DAYS} days", p)]
 
 
+def promoted_shadow(c: dict, pr: dict, ctx: dict) -> list[dict]:
+    """Step 3 of a candidate in A4's registry: its shadow's days, trades and the registry's "before" check, or the
+    missing tool."""
+    from . import promote
+    if pr.get("status") == "missing_tool":
+        return [cond("tool", False, f"missing tool: {pr.get('why') or ''}", "promotions/shadows.json")]
+    r = ctx["promo"]["records"].get(c["id"]) or {}
+    p, since = r.get("path") or "", pr.get("start_day")
+    return [cond("days", r.get("days", 0) >= SHADOW_DAYS, f"{r.get('days', 0)} of {SHADOW_DAYS} days since {since}", p),
+            cond("trades", r.get("trades", 0) >= promote.SHADOW_TRADES,
+                 f"{r.get('trades', 0)} of {promote.SHADOW_TRADES} since {since}", p),
+            cond("logged", bool(r.get("before")), str(r.get("why") or ""), p)]
+
+
+def promoted_lockbox(c: dict, pr: dict, ctx: dict) -> list[dict]:
+    """Step 4 of a candidate in A4's registry: its one look as written, nothing else."""
+    from . import promote
+    p = "promotions/lockbox.jsonl"
+    x = ctx["promo"]["looks"].get(c["id"])
+    if x is None:
+        why = promote.look_missing(c["id"])
+        return [cond("tool", False, f"missing tool: {why}", p) if why else
+                cond("look", False, pr.get("look") or "not looked yet (the run after step 3 passes)", p)]
+    if x["done"] is None or not x["done"].get("conditions"):
+        return [cond("look", False, promote.look_text(x), p)]
+    return [{**k, "path": k.get("path") or p} for k in x["done"]["conditions"] if isinstance(k, dict)]
+
+
 def climb(steps: dict[int, list[dict]]) -> tuple[int, list[dict], list[dict]]:
     """The highest step whose conditions and those of every step before have no fail (from FAIL_CLOSED_FROM on an
     open condition is a fail); the next step's fails; the open conditions up to that next step that do not block."""
@@ -571,12 +608,17 @@ def judge(c: dict, ctx: dict, now: int) -> dict:
                  5: pf_execution(c, ctx)}
     else:
         steps = {1: idea(c, ctx), 2: tested(c, ctx), 3: shadow(c, ctx), 4: lockbox(c, ctx), 5: execution(c, ctx, now)}
+    pr = ((ctx.get("promo") or {}).get("shadows") or {}).get(c["id"])
+    if pr:
+        steps[3] = (steps[3] if c["kind"] == "rule" else []) + promoted_shadow(c, pr, ctx)
+        steps[4] = promoted_lockbox(c, pr, ctx)
     steps[6] = [cond("owner", False, "the ladder never sets this step")]
     step, missing, opened = climb(steps)
     ev = next((x["path"] for x in missing if x["path"]), "") or next(
         (x["path"] for x in reversed(steps.get(step, [])) if x["path"]), "")
     return {"id": c["id"], "name": c["name"], "short": c.get("short") or c["name"], "kind": c["kind"],
-            "study": c.get("study") or "",
+            "study": c.get("study") or "", "family": c.get("family") or "hand",
+            **({"promotion": pr.get("status")} if pr else {}),
             "benchmark": BENCH_TEXT[BENCH[c["bench"]]], "step": step, "step_name": STEPS[step],
             "next": next_text(missing),
             "next_de": "kein getesteter Bericht" if missing and all(x["value"] == NO_RECORD for x in missing)
@@ -946,7 +988,8 @@ def context(root: Path, results: Path = RESULTS, added=None, now: int | None = N
                          if isinstance(r, dict)}} if isinstance(eq, dict) else {}
     pf = pf_context(root, now or notify.clock_ms()) if (root / PF_LEDGER).exists() or (root / PF_REPORT).exists() \
         else None
-    return {"results": results, "eq1": eq, "added": added or git_added, "r10": r10, "pbo": pbo, "pool": today_pool(),
+    from . import promote
+    return {"results": results, "eq1": eq, "added": added or git_added, "promo": promote.state(root), "r10": r10, "pbo": pbo, "pool": today_pool(),
             "pf": pf,
             "leaks": {"weekly": {x.get("key") for x in _jsonl(fac / "leaks.jsonl")},
                       "F2": {x.get("key") for x in _jsonl(fac / "small" / "leaks.jsonl")}},
@@ -1001,7 +1044,12 @@ def build(root: Path | None = None, now: int | None = None, results: Path = RESU
             "tainted": sum(r["tainted"] for r in rows),
             "constants": {"dsr_pass": DSR_PASS, "pbo_max": PBO_MAX, "shadow_days": SHADOW_DAYS,
                           "lockbox_bar": LOCKBOX_BAR, "exec_cap_eur": EXEC_CAP_EUR, "exec_days": EXEC_DAYS},
-            "rows": rows}
+            "promotions": promote_summary(ctx), "rows": rows}
+
+
+def promote_summary(ctx: dict) -> dict:
+    from . import promote
+    return promote.summary(ctx["promo"])
 
 
 def markdown(d: dict) -> str:
@@ -1056,10 +1104,31 @@ def markdown(d: dict) -> str:
                      f"{x['equity_eur']:.2f} ({_num(x.get('paid_eur')) or 0:.0f})"]
             md.append("| " + " | ".join(notify.nodash(str(v)).replace("|", "/") for v in cells) + " |")
     md += pf_md([r for r in d["rows"] if r.get("pumpfun")])
+    md += promotions_md(d.get("promotions"))
     if d.get("tainted"):
         md.append(f"\nThe pump.fun books' evidence leaves out {d['tainted']} paper trades the late-row bug made (P1, "
                   "results/pumpfun_ledger_taint_p1.md).")
     return "\n".join(md) + "\n"
+
+
+def promotions_md(p: dict | None) -> list[str]:
+    """A4's section: each promoted shadow with its days, trades and look, and the hand-over."""
+    if not p:
+        return []
+    md = ["", f"Promotions (A4, {p['prereg']}): a candidate on step 2 gets one forward shadow; after "
+          f"{p['need_days']} days and {p['need_trades']} trades or rebalances, logged day by day, one lockbox look, a "
+          "second refused, a fail final; the passes go to promotions/live_ready.json (nothing reads it yet).", ""]
+    if not p["shadows"]:
+        return md + ["No candidate promoted yet."]
+    md += ["| candidate | kind | status | since | days | trades | lockbox |", "|---|---|---|---|---|---|---|"]
+    for x in p["shadows"]:
+        st = x["status"] + (f": {x['why']}" if x.get("why") else "")
+        cells = [x["name"], x["kind"], st, x["start_day"], x["days"], x["trades"], x["look"]]
+        md.append("| " + " | ".join(notify.nodash(str(v)).replace("|", "/") for v in cells) + " |")
+    lr = p.get("live_ready") or []
+    md.append("\nlive_ready.json: " + ("; ".join(f"{c['name']} ({c['venue']}, {c['instrument']}, {c['share_eur']:.2f} "
+                                                 f"EUR of {EXEC_CAP_EUR:g})" for c in lr) if lr else "empty"))
+    return md
 
 
 def out_dir() -> Path:
